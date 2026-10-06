@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 /// definition, which a review that does not select it never needs.
 const CONFIG: &str = "[review.subagents.design]\npaths = [\"change.txt\", \"docs/**\"]\n\
                       [review.subagents.unused]\npaths = [\"nothing/**\"]\n";
-const DEFINITION: &str = ".dagq/review-agents/design.md";
+const DEFINITION: &str = ".dagq/agents/design/AGENT.md";
 const MAIN_DEFINITION: &str = "---\ndescription: main's design checks\n---\nCheck the design.\n";
 
 /// A verdict of `decision` with its agents' results `agents`.
@@ -47,7 +47,7 @@ fn commit_on_main(repo: &Path, config: &str, definition: Option<&str>) -> String
     fs::write(repo.join("dagq.toml"), config).unwrap();
     git(repo, &["add", "dagq.toml"]);
     if let Some(definition) = definition {
-        fs::create_dir_all(repo.join(".dagq/review-agents")).unwrap();
+        fs::create_dir_all(repo.join(".dagq/agents/design")).unwrap();
         fs::write(repo.join(DEFINITION), definition).unwrap();
         git(repo, &["add", DEFINITION]);
     }
@@ -127,13 +127,13 @@ fn the_worker_cannot_change_or_drop_its_required_review() {
     for tamper in [
         // Narrow the agent's paths away and rewrite its definition.
         "printf '[review.subagents.design]\\npaths = [\"nothing/**\"]\\n' > dagq.toml; \
-         printf 'the worker s checks\\n' > .dagq/review-agents/design.md; \
+         printf 'the worker s checks\\n' > .dagq/agents/design/AGENT.md; \
          git commit -q -am tamper",
         // Delete the table and the definition.
-        "printf '[run.env]\\n' > dagq.toml; git rm -q .dagq/review-agents/design.md; \
+        "printf '[run.env]\\n' > dagq.toml; git rm -q .dagq/agents/design/AGENT.md; \
          git commit -q -am tamper",
         // Delete dagq.toml itself and the definition.
-        "git rm -q dagq.toml .dagq/review-agents/design.md; git commit -q -m tamper",
+        "git rm -q dagq.toml .dagq/agents/design/AGENT.md; git commit -q -m tamper",
     ] {
         let (_dir, repo, db) = fixture();
         let main = commit_on_main(&repo, CONFIG, Some(MAIN_DEFINITION));
@@ -259,7 +259,9 @@ fn the_old_path_of_a_rename_and_a_deleted_path_select_an_agent() {
 /// The wiring of a review that cannot start to `review_failed` and the
 /// ask; why it cannot (an unparsable config, a missing definition, no
 /// provider that runs the agents) is `application::review::tests` and
-/// `supervise::landing::tests`.
+/// `supervise::landing::tests`. `dagq doctor`'s `agents` reports the
+/// same configuration's agents without a definition in `errors`
+/// (ADR-t1728-1; the judgment is `domain::review_subagents::tests`).
 #[test]
 fn a_selected_agent_without_its_definition_fails_the_review() {
     let (_dir, repo, db) = fixture();
@@ -276,7 +278,7 @@ fn a_selected_agent_without_its_definition_fails_the_review() {
     let failed = payloads(&detail, "review_failed");
     assert_eq!(failed.len(), 1);
     let why = format!(
-        "the review's required subagents could not be read: the review subagent design that dagq.toml names has no definition {DEFINITION} in the landing branch's commit {main}"
+        "the review's required subagents could not be read: the review subagent design that dagq.toml names has no definition {DEFINITION} (nor .dagq/review-agents/design.md) in the landing branch's commit {main}"
     );
     assert!(
         failed[0]["error"].as_str().unwrap().contains(&why),
@@ -288,6 +290,19 @@ fn a_selected_agent_without_its_definition_fails_the_review() {
         .unwrap();
     assert_eq!(asks.len(), 1, "{asks:?}");
     assert!(asks[0].question.contains(&why), "{}", asks[0].question);
+    // `doctor` reports the agent without a definition as a mistake of the
+    // configuration (ADR-t1728-1); its judgment is
+    // `domain::review_subagents::tests`.
+    let doctor = crate::common::cli::ok(&db, &["doctor"]);
+    assert_eq!(doctor["agents"]["commit"], main.as_str(), "{doctor}");
+    assert_eq!(
+        doctor["agents"]["errors"],
+        json!([
+            "[review.subagents.design] names an agent without a definition: neither .dagq/agents/design/AGENT.md nor .dagq/review-agents/design.md is committed",
+            "[review.subagents.unused] names an agent without a definition: neither .dagq/agents/unused/AGENT.md nor .dagq/review-agents/unused.md is committed",
+        ]),
+        "{doctor}"
+    );
 }
 
 /// (d) With `[review.subagents]` but a diff it does not select, the
@@ -443,8 +458,11 @@ fn undefined_agents(root: &Path, commit: &str) -> Vec<String> {
         .review_subagents
         .iter()
         .filter(|agent| {
-            let path = dagq::domain::review_subagents::definition_path(&agent.name);
-            repository.file_in(commit, &path).unwrap().is_none()
+            dagq::domain::review_subagents::find_definition(&agent.name, |path| {
+                repository.file_in(commit, path)
+            })
+            .unwrap()
+            .is_none()
         })
         .map(|agent| agent.name.clone())
         .collect()
@@ -456,7 +474,7 @@ fn undefined_agents(root: &Path, commit: &str) -> Vec<String> {
 fn a_definition_in_the_index_only_is_not_in_the_tree() {
     let (_dir, repo, _db) = fixture();
     let main = commit_on_main(&repo, CONFIG, None);
-    fs::create_dir_all(repo.join(".dagq/review-agents")).unwrap();
+    fs::create_dir_all(repo.join(".dagq/agents/design")).unwrap();
     fs::write(repo.join(DEFINITION), MAIN_DEFINITION).unwrap();
     git(&repo, &["add", DEFINITION]);
     assert_eq!(undefined_agents(&repo, "HEAD"), ["design", "unused"]);
@@ -489,9 +507,9 @@ const TESTS_DEFINITION: &str = "---\ndescription: main's test checks\n---\nCheck
 
 /// Main with [`TWO_AGENTS`] and both definitions.
 fn two_agents_on_main(repo: &Path, config: &str) {
-    fs::create_dir_all(repo.join(".dagq/review-agents")).unwrap();
-    fs::write(repo.join(".dagq/review-agents/tests.md"), TESTS_DEFINITION).unwrap();
-    git(repo, &["add", ".dagq/review-agents/tests.md"]);
+    fs::create_dir_all(repo.join(".dagq/agents/tests")).unwrap();
+    fs::write(repo.join(".dagq/agents/tests/AGENT.md"), TESTS_DEFINITION).unwrap();
+    git(repo, &["add", ".dagq/agents/tests/AGENT.md"]);
     commit_on_main(repo, config, Some(MAIN_DEFINITION));
 }
 

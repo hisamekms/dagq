@@ -14,9 +14,26 @@ use super::concern::{
 use super::scope::glob_matches;
 use super::{AskConfidence, ReviewDecision, review_reason};
 
-/// Where an agent's definition is, relative to the repository root
-/// (ADR-t1453-1 decision 2).
-pub const DEFINITION_DIR: &str = ".dagq/review-agents";
+/// Where the agents' definitions are, relative to the repository root:
+/// one directory per agent (ADR-t1728-1, which amends ADR-t1453-1
+/// decision 2).
+pub const DEFINITION_DIR: &str = ".dagq/agents";
+
+/// The definition's file in an agent's directory.
+pub const DEFINITION_FILE: &str = "AGENT.md";
+
+/// Where the definitions were before ADR-t1728-1, one `<agent>.md` each;
+/// read while the definitions move, when an agent has none at
+/// [`definition_path`].
+pub const LEGACY_DEFINITION_DIR: &str = ".dagq/review-agents";
+
+/// The configuration's section of the review's subagents.
+pub const REVIEW_SECTION: &str = "review.subagents";
+
+/// Every section of the configuration that gives an agent a role, each
+/// `[<section>.<agent>]`: an agent has one role (ADR-t1728-1), so one
+/// agent named in two of them is a mistake ([`config_problems`]).
+pub const ROLE_SECTIONS: &[&str] = &[REVIEW_SECTION];
 
 /// One `[review.subagents.<agent>]`: the agent's name and the globs that
 /// make it required, each once, in the order written.
@@ -48,7 +65,92 @@ pub fn valid_agent_name(name: &str) -> bool {
 
 /// The repository-relative path of `agent`'s definition.
 pub fn definition_path(agent: &str) -> String {
-    format!("{DEFINITION_DIR}/{agent}.md")
+    format!("{DEFINITION_DIR}/{agent}/{DEFINITION_FILE}")
+}
+
+/// The repository-relative path of `agent`'s definition before
+/// ADR-t1728-1.
+pub fn legacy_definition_path(agent: &str) -> String {
+    format!("{LEGACY_DEFINITION_DIR}/{agent}.md")
+}
+
+/// The paths `agent`'s definition is read from, in order: the first that
+/// a commit's tree has is the definition, and none means it has none.
+pub fn definition_paths(agent: &str) -> [String; 2] {
+    [definition_path(agent), legacy_definition_path(agent)]
+}
+
+/// `agent`'s definition as `read` finds it at [`definition_paths`]: the
+/// first path it has and that path's text, `None` when it has neither.
+pub fn find_definition<E>(
+    agent: &str,
+    mut read: impl FnMut(&str) -> Result<Option<String>, E>,
+) -> Result<Option<(String, String)>, E> {
+    for path in definition_paths(agent) {
+        if let Some(text) = read(&path)? {
+            return Ok(Some((path, text)));
+        }
+    }
+    Ok(None)
+}
+
+/// One agent a role's section of the configuration names: the section
+/// (one of [`ROLE_SECTIONS`]) and the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedAgent {
+    pub section: &'static str,
+    pub agent: String,
+}
+
+/// The agents the review's sections name, as [`config_problems`] reads them.
+pub fn named_for_review(configured: &[ReviewSubagent]) -> Vec<NamedAgent> {
+    configured
+        .iter()
+        .map(|agent| NamedAgent {
+            section: REVIEW_SECTION,
+            agent: agent.name.clone(),
+        })
+        .collect()
+}
+
+/// The mistakes of the role sections' `named` agents (ADR-t1728-1): an
+/// agent whose definition is not there (`defined` says whether it is) and
+/// an agent named in more than one role's section, each once, in the order
+/// named. None when there is none.
+pub fn config_problems(named: &[NamedAgent], defined: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for entry in named {
+        if seen.contains(&entry.agent.as_str()) {
+            continue;
+        }
+        seen.push(&entry.agent);
+        let mut sections: Vec<&str> = Vec::new();
+        for other in named.iter().filter(|other| other.agent == entry.agent) {
+            if !sections.contains(&other.section) {
+                sections.push(other.section);
+            }
+        }
+        if sections.len() > 1 {
+            problems.push(format!(
+                "the agent {} is named in more than one role's section: {}; an agent has one role",
+                entry.agent,
+                sections
+                    .iter()
+                    .map(|section| format!("[{section}.{}]", entry.agent))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !defined(&entry.agent) {
+            let [path, legacy] = definition_paths(&entry.agent);
+            problems.push(format!(
+                "[{}.{}] names an agent without a definition: neither {path} nor {legacy} is committed",
+                entry.section, entry.agent
+            ));
+        }
+    }
+    problems
 }
 
 /// The agents of `configured` one of whose globs matches a path of
@@ -350,7 +452,7 @@ pub struct AgentDefinition {
 }
 
 impl AgentDefinition {
-    /// Read `text`, the committed `<agent>.md`: a `---` frontmatter with
+    /// Read `text`, the committed definition: a `---` frontmatter with
     /// `description`, then the body. Without a frontmatter or a
     /// description, the description names the agent and the whole text is
     /// the prompt.
@@ -469,7 +571,83 @@ mod tests {
         for name in ["", "Design", "-a", "a-", "a--b", "a_b", "a.b", "a/b"] {
             assert!(!valid_agent_name(name), "{name}");
         }
-        assert_eq!(definition_path("design"), ".dagq/review-agents/design.md");
+    }
+
+    /// The definition is read from `.dagq/agents/<agent>/AGENT.md`, else
+    /// from the path before ADR-t1728-1, else there is none.
+    #[test]
+    fn a_definition_is_read_from_the_new_path_then_the_old_one() {
+        assert_eq!(definition_path("design"), ".dagq/agents/design/AGENT.md");
+        assert_eq!(
+            legacy_definition_path("design"),
+            ".dagq/review-agents/design.md"
+        );
+        let found = |files: &[(&str, &str)]| {
+            find_definition("design", |path| {
+                Ok::<_, ()>(
+                    files
+                        .iter()
+                        .find(|(p, _)| *p == path)
+                        .map(|(_, text)| (*text).to_owned()),
+                )
+            })
+            .unwrap()
+        };
+        let both = [
+            (".dagq/review-agents/design.md", "old"),
+            (".dagq/agents/design/AGENT.md", "new"),
+        ];
+        assert_eq!(
+            found(&both),
+            Some((".dagq/agents/design/AGENT.md".to_owned(), "new".to_owned()))
+        );
+        assert_eq!(
+            found(&both[..1]),
+            Some((".dagq/review-agents/design.md".to_owned(), "old".to_owned()))
+        );
+        assert_eq!(found(&[(".dagq/agents/other/AGENT.md", "x")]), None);
+        assert_eq!(
+            find_definition("design", |_| Err::<Option<String>, _>("unreadable")),
+            Err("unreadable")
+        );
+    }
+
+    /// An agent a role's section names without a definition, and one agent
+    /// named in two roles' sections, are mistakes (ADR-t1728-1); the role
+    /// sections are [`ROLE_SECTIONS`], so a role added there is checked
+    /// alike.
+    #[test]
+    fn an_undefined_agent_and_an_agent_of_two_roles_are_mistakes() {
+        assert_eq!(ROLE_SECTIONS, ["review.subagents"]);
+        let review =
+            named_for_review(&[agent("design", &["src/**"]), agent("tests", &["tests/**"])]);
+        assert_eq!(
+            review[0],
+            NamedAgent {
+                section: "review.subagents",
+                agent: "design".into()
+            }
+        );
+        assert!(config_problems(&review, &|_| true).is_empty());
+        assert!(config_problems(&[], &|_| false).is_empty());
+        assert_eq!(
+            config_problems(&review, &|agent| agent == "design"),
+            [
+                "[review.subagents.tests] names an agent without a definition: neither .dagq/agents/tests/AGENT.md nor .dagq/review-agents/tests.md is committed"
+            ]
+        );
+        let mut two_roles = review.clone();
+        two_roles.push(NamedAgent {
+            section: "eval.subagents",
+            agent: "design".into(),
+        });
+        assert_eq!(
+            config_problems(&two_roles, &|agent| agent != "design"),
+            [
+                "the agent design is named in more than one role's section: [review.subagents.design], [eval.subagents.design]; an agent has one role",
+                "[review.subagents.design] names an agent without a definition: neither .dagq/agents/design/AGENT.md nor .dagq/review-agents/design.md is committed",
+            ]
+        );
     }
 
     fn verdict(json: serde_json::Value) -> super::super::ReviewVerdict {

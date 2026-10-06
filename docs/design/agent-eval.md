@@ -4,8 +4,8 @@ type: design
 title: agentのeval（定義とケースの置き場・ケースの欄・patchの共有・CLI・event・費用の上限と既定値・evalの枠・採用の判定・productionのケースと見張り・道具の宣言とproviderごとの変換・本番と共有する起動経路・programのreviewの当て方）
 status: draft
 created: 2026-10-06
-updated: 2026-10-06 # task 1728: the plan of ADR-t1728-1 and ADR-t1728-2
-last_verified: 2026-10-06 # task 1728: nothing is implemented yet
+updated: 2026-10-06 # task 1866: the definition path and the configuration check are implemented; task 1728: the plan of ADR-t1728-1 and ADR-t1728-2
+last_verified: 2026-10-06 # task 1866: the definition path and the configuration check are implemented, the rest is not; task 1728
 scope: runtime
 related:
   - adr-t1728-1
@@ -24,7 +24,7 @@ related:
 
 # agentのeval
 
-> **まだ実装が無い（2026-10-06）**: この文書はagentの定義とeval（goal 125）の今の予定で、`src/`にはまだ何も入っていない。今動いているreviewのagent（定義は`.dagq/review-agents/<agent>.md`、親のreview jobの中のsubagent）は[Review](supervisor-lifecycle/review.md#reviewのsubagent)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、この文書はそれらを変えない。後続のtask（1866〜1874）が実装したら、この注記と各節を今の姿に直す。
+> **一部だけ実装（2026-10-06）**: この文書はagentの定義とeval（goal 125）の今の予定で、実装したのは定義のpath（`.dagq/agents/<name>/AGENT.md`、移行の間は旧の`.dagq/review-agents/<agent>.md`にも戻る）と、名指すagentの定義の有無と複数の役割の検査（`dagq doctor`の`agents`。task 1866）だけ。今動いているreviewのagent（親のreview jobの中のsubagent）は[Review](supervisor-lifecycle/review.md#reviewのsubagent)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、この文書はそれらを変えない。後続のtask（1867〜1874）が実装したら、この注記と各節を今の姿に直す。
 
 決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。ここはpath・欄・コマンド・event・数値・設定のkeyの予定を持つ。名前と数値は実装のtaskが確かめて決め、変えたらここを直す。
 
@@ -33,8 +33,8 @@ related:
 - 定義: `.dagq/agents/<name>/AGENT.md`。形は今の`.dagq/review-agents/<agent>.md`と同じ（frontmatterの`description`と本文の検査項目と参照先の文書）に、道具の宣言の`tools`（下の「道具の宣言」）を足したもの。`<name>`は今と同じkebab-case。
 - ケース: `.dagq/agents/<name>/evals/`の`dev.json`・`holdout.json`・`production.json`（Spikeの`evals.json`は`dev.json`）。splitはこのファイルで区分し、ケースの欄に持たない。
 - patchの共有の置き場: `.dagq/agent-cases/patches/<sha256>.patch`（patchの内容のSHA-256。agentの名前と衝突しないよう`.dagq/agents/`の外に置く）。同じ内容のpatchは1つだけ置き、ケースはhashで参照する。どのケースからも参照されないpatchと、ケースが参照するhashのpatchが無いことは、下の設定の検査が誤りにする。
-- どこで走るか: `dagq.toml`の`[review.subagents.<name>] paths`のまま（形は変えない）。定義のpathだけが`.dagq/agents/<name>/AGENT.md`に変わる。
-- 設定の検査（`dagq.toml`を読むときと、`review_subagents::this_repository_names_only_agents_it_defines`の後継のtest）: `[review.subagents.<name>]`が名指す`<name>`に`.dagq/agents/<name>/AGENT.md`が無いこと、同じ`<name>`を複数の役割の表が名指すこと（今の役割の表は`[review.subagents]`だけ。役割の表が増えたら同じ検査に足す）を誤りにする。あわせて、ケースのファイルの形と、patchの置き場の参照の過不足（上）を検査する。
+- どこで走るか: `dagq.toml`の`[review.subagents.<name>] paths`のまま（形は変えない）。定義のpathだけが`.dagq/agents/<name>/AGENT.md`に変わった（task 1866。移行の間は旧の`.dagq/review-agents/<name>.md`にも戻る。[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
+- 設定の検査（`dagq.toml`を読むときと、`review_subagents::this_repository_names_only_agents_it_defines`の後継のtest）: `[review.subagents.<name>]`が名指す`<name>`に`.dagq/agents/<name>/AGENT.md`が無いこと、同じ`<name>`を複数の役割の表が名指すこと（今の役割の表は`[review.subagents]`だけ。役割の表が増えたら同じ検査に足す）を誤りにする。この2つは実装済みで、`dagq doctor`の`agents`の`errors`が出す（役割の表の集合は`domain::review_subagents::ROLE_SECTIONS`、移行の間は旧の`.dagq/review-agents/<name>.md`も定義と数える。[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。あわせて、ケースのファイルの形と、patchの置き場の参照の過不足（上）を検査する。
 
 ## ケースの欄
 

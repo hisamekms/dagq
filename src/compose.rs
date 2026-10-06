@@ -1486,6 +1486,11 @@ impl OneShot {
                     report["repository"] = repository;
                 }
                 report["roles"] = doctor_roles(&queue);
+                // The agents the landing branch's dagq.toml names and
+                // their definitions (ADR-t1728-1).
+                if let Some(agents) = doctor_agents(&queue)? {
+                    report["agents"] = agents;
+                }
                 // Whether the recorded inbox refuses raw cmux (ADR-t1228-2
                 // decision 4).
                 report["inbox_guardrail"] = inbox_guardrail(&queue)?;
@@ -2614,6 +2619,27 @@ fn doctor_roles(queue: &SqliteQueue) -> serde_json::Value {
         roles.insert("error".to_owned(), error.into());
     }
     serde_json::Value::Object(roles)
+}
+
+/// `doctor`'s `agents`: see [`crate::application::review::check_agents`],
+/// read from the landing branch of the checkout `queue` is bound to; none
+/// for a queue bound to none or a landing branch without agents, and
+/// `error` when the checkout or the file cannot be read.
+fn doctor_agents(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
+    let Some(checkout) = bound_main_checkout(queue)? else {
+        return Ok(None);
+    };
+    let checked = checkout
+        .and_then(|checkout| GitRepository::inspect(&checkout))
+        .and_then(|repository| {
+            crate::application::review::check_agents(&repository, &|text| {
+                Ok(crate::infrastructure::run_env::parse_config(text)?.review_subagents)
+            })
+        });
+    Ok(match checked {
+        Ok(value) => value,
+        Err(error) => Some(serde_json::json!({"error": format!("{error:#}")})),
+    })
 }
 
 /// The landing branch and push of the repository the queue is bound to,

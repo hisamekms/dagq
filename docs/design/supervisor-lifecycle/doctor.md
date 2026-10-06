@@ -4,8 +4,8 @@ type: design
 title: "`doctor`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06 # task 1920: planned CI watch; task 1225: recovery among the Codex roles; task 1223: the observer on Codex
-last_verified: 2026-10-05 # task 1225; task 1223
+updated: 2026-10-06 # task 1866: agents (ADR-t1728-1); task 1920: planned CI watch; task 1225: recovery among the Codex roles; task 1223: the observer on Codex
+last_verified: 2026-10-06 # task 1866; task 1225; task 1223
 scope: runtime
 related:
   - adr-t1228-2
@@ -33,6 +33,7 @@ related:
 - `d2`（既定の出力にも出す）: `graph --format svg`が使う`d2`と`d2plugin-tala`を、`doctor`を打ったプロセスのPATHで解決した結果（`d2` / `tala`のそれぞれに`path`と、linkならその先の`resolved`。見つからなければnull）と、見つからないものを名指す`error`（揃っていれば出さない）。queueの状態に関わらず出す（[当面の依存図](dependency-diagram.md#描画infrastructured2)、ADR-0077の決定4）。
 - `providers`（既定の出力にも出す）: workerのprovider（`claude` / `codex`）を、`doctor`を打ったプロセスのPATHで解決した結果（`provider`・`executable`（見つからなければ名前のまま）・`found`・見つからない理由`error`・このbinaryが動かせる経路`modes`）。supervisorが実際に使うのは登録の`supervisors[].providers`（`up`が固定したpath）で、こちらはその場のPATHの目安。queueの状態に関わらず出す（[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)、ADR-t813-2）。
 - `roles`（既定の出力にも出す）: worker以外の役割ごとに設定されたproviderと出どころ（ADR-t1063-1の決定1・6、task 1065）。queueが束縛されたmain checkoutの`dagq.toml`の`[roles.<role>]`を読み、役割（`plan_review`・`review`・`recovery`・`goal_review`・`observer`・`throughput_review`・`runtime_planner`・`planner`）ごとに`{"provider", "source", "model", "effort"}`（`source`は`provider`の出どころで`dagq.toml`か`default`、`model` / `effort`は起動に渡す値で、渡さなければnull）を出す（`compose::doctor_roles`）。読めない（`provider = "codex"`を`CODEX_ROLES`（`goal_review`・`review`・`plan_review`・`throughput_review`・`observer`・`recovery`）以外の役割に書いたなど）ときは`error`に理由を足し、役割は既定（Claude）で出す。queueがcheckoutに束縛されていなければ全て既定。読めるqueueのときだけ出す（[Actor model](actor-model.md#provider)）。
+- `agents`（既定の出力にも出す）: queueが束縛されたcheckoutのlanding branchの今のcommit（`commit`）の`dagq.toml`で役割の節（`domain::review_subagents::ROLE_SECTIONS`。今は`[review.subagents.<agent>]`だけ）が名指すagentごとの`agent`・`section`・読んだ定義のpath`definition`（`.dagq/agents/<agent>/AGENT.md`、移行の間は旧の`.dagq/review-agents/<agent>.md`、無ければnull）と、設定の誤りの`errors`（定義の無いagent、同じagentを複数の役割の節で名指すこと。無ければ空の配列）（`application::review::check_agents`、`compose::doctor_agents`、[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。checkoutかlanding branchか`dagq.toml`が読めない・解釈できなければ`error`だけ。queueがcheckoutに束縛されていないとき、landing branchのcommitに`dagq.toml`が無いかagentを名指していないときは出さない。読めるqueueのときだけ出す。定義の読み方とreviewでの扱いは[Review](review.md#reviewのsubagent)の「設定」。
 - `inbox_watcher`（既定の出力にも出す）: inboxのwatcherの有無（`state`（`alive` / `absent`）・`watching`・`last_seen_at`・`absent_secs`・`grace_secs`）。`status`の`inbox_watcher`と同じ判定（`application::inbox_watcher::judge`。heartbeatの新しさで決まり、pidのprocessが居ない・開始時刻が合わない記録は数えない。閾値と猶予と開始時刻の許容の幅は[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）で、queueのディレクトリのファイルだけを読むので、queueの状態（schemaが拒むときも）に関わらず出す（[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)）。
 - `inbox_guardrail`（既定の出力にも出す）: 記録したinboxがcmuxを拒むsettingsで開かれたか。`status`の`inbox_guardrail`と同じ判定（`application::inbox_guardrail::judge`、[ADR-t1228-2](../../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)決定4）で、queueが読めるときだけ出す。
 - `queue_service`（既定の出力にも出す）: queue serviceの状態。`status`の`queue_service`と同じ（`state`・`socket`・`pid`・`build`・`api_version`・`min_api_version`・`build_matches`・`started_at`・`client_api_version`・`attention`。queueが読めなければ`attention`はnull）。queueのディレクトリのファイルとsocketだけを見るので、queueの状態に関わらず出す（[Queue service](../queue-service.md#statusとdoctor)）。

@@ -265,16 +265,18 @@ pub fn snapshot_subagents(
     let changed = repository.changed_paths(&from, &range.head)?;
     let mut agents = Vec::new();
     for selected in review_subagents::select(&configured, &changed) {
-        let definition_path = review_subagents::definition_path(&selected.name);
-        let definition = repository
-            .file_in(&commit, &definition_path)
-            .with_context(|| format!("read {definition_path} in the landing branch's commit {commit}"))?
-            .with_context(|| {
-                format!(
-                    "the review subagent {} that {CONFIG_FILE} names has no definition {definition_path} in the landing branch's commit {commit}",
-                    selected.name
-                )
-            })?;
+        let (definition_path, definition) = review_subagents::find_definition(&selected.name, |path| {
+            repository
+                .file_in(&commit, path)
+                .with_context(|| format!("read {path} in the landing branch's commit {commit}"))
+        })?
+        .with_context(|| {
+            let [path, legacy] = review_subagents::definition_paths(&selected.name);
+            format!(
+                "the review subagent {} that {CONFIG_FILE} names has no definition {path} (nor {legacy}) in the landing branch's commit {commit}",
+                selected.name
+            )
+        })?;
         agents.push(SnapshotAgent {
             digest: format!("{:x}", Sha256::digest(definition.as_bytes())),
             name: selected.name,
@@ -288,6 +290,54 @@ pub fn snapshot_subagents(
         range,
         agents,
     }))
+}
+
+/// `doctor`'s check of the agents the role sections of the landing
+/// branch's `dagq.toml` name (ADR-t1728-1): each agent with its section
+/// and the definition read ([`review_subagents::find_definition`], `null`
+/// without one), and `errors`, an agent without a definition or named in
+/// more than one role's section. `Ok(None)` without `dagq.toml` or without
+/// an agent named; `Err` when the file cannot be read or parsed. A review
+/// does not pass in either case meanwhile (ADR-t1453-1 decision 6).
+pub fn check_agents(
+    repository: &dyn Repository,
+    parse: &dyn Fn(&str) -> Result<Vec<ReviewSubagent>>,
+) -> Result<Option<Value>> {
+    let commit = repository.main_head()?.into_string();
+    let Some(text) = repository
+        .file_in(&commit, CONFIG_FILE)
+        .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
+    else {
+        return Ok(None);
+    };
+    let configured = parse(&text)
+        .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))?;
+    let named = review_subagents::named_for_review(&configured);
+    if named.is_empty() {
+        return Ok(None);
+    }
+    let mut agents = Vec::new();
+    let mut defined = Vec::new();
+    for entry in &named {
+        let found = review_subagents::find_definition(&entry.agent, |path| {
+            repository
+                .file_in(&commit, path)
+                .with_context(|| format!("read {path} in the landing branch's commit {commit}"))
+        })?;
+        if found.is_some() {
+            defined.push(entry.agent.clone());
+        }
+        agents.push(json!({
+            "agent": entry.agent,
+            "section": entry.section,
+            "definition": found.map(|(path, _)| path),
+        }));
+    }
+    let errors =
+        review_subagents::config_problems(&named, &|agent| defined.iter().any(|d| d == agent));
+    Ok(Some(
+        json!({"commit": commit, "agents": agents, "errors": errors}),
+    ))
 }
 
 /// What the review's prompt adds when its range requires agents: the
@@ -721,6 +771,96 @@ mod tests {
         snapshot_subagents(&repository, &parse, &range)
     }
 
+    /// The definition is read from `.dagq/agents/<agent>/AGENT.md`, else
+    /// from the old `.dagq/review-agents/<agent>.md` while the definitions
+    /// move (ADR-t1728-1), and `review_started` records the path read;
+    /// with neither the review does not pass
+    /// ([`an_unreadable_config_or_a_missing_definition_is_an_error`]).
+    #[test]
+    fn the_definition_is_read_from_the_new_path_else_the_old_one() {
+        const NEW: &str = "---\ndescription: new\n---\nCheck it anew.\n";
+        let read = |files| {
+            let found = snapshot(files, &["change.txt"]).unwrap().unwrap();
+            let agent = &found.agents[0];
+            (
+                found.event_value()["agents"][0]["definition"].clone(),
+                agent.definition.clone(),
+                agent.digest.clone(),
+            )
+        };
+        assert_eq!(
+            read(vec![
+                (CONFIG_FILE, CONFIG),
+                (".dagq/review-agents/design.md", DEFINITION),
+                (".dagq/agents/design/AGENT.md", NEW),
+            ]),
+            (
+                json!(".dagq/agents/design/AGENT.md"),
+                NEW.to_owned(),
+                format!("{:x}", Sha256::digest(NEW.as_bytes()))
+            )
+        );
+        assert_eq!(
+            read(vec![
+                (CONFIG_FILE, CONFIG),
+                (".dagq/review-agents/design.md", DEFINITION),
+            ]),
+            (
+                json!(".dagq/review-agents/design.md"),
+                DEFINITION.to_owned(),
+                format!("{:x}", Sha256::digest(DEFINITION.as_bytes()))
+            )
+        );
+    }
+
+    /// `doctor`'s check of the landing branch's agents (ADR-t1728-1): each
+    /// named agent with the definition read, and an agent without one as
+    /// an error; nothing to report without `dagq.toml` or agents.
+    #[test]
+    fn doctor_checks_that_every_named_agent_has_a_definition() {
+        let check = |files: Vec<(&'static str, &'static str)>| {
+            check_agents(
+                &Committed {
+                    files,
+                    changed: Vec::new(),
+                },
+                &parse,
+            )
+        };
+        assert_eq!(check(Vec::new()).unwrap(), None);
+        assert_eq!(check(vec![(CONFIG_FILE, "[run.env]")]).unwrap(), None);
+        assert!(
+            format!("{:#}", check(vec![(CONFIG_FILE, "bad")]).unwrap_err())
+                .contains("[review.subagents.design] has no paths")
+        );
+        assert_eq!(
+            check(vec![
+                (CONFIG_FILE, CONFIG),
+                (".dagq/agents/design/AGENT.md", DEFINITION),
+            ])
+            .unwrap(),
+            Some(json!({"commit": SHA, "agents": [
+                {"agent": "design", "section": "review.subagents", "definition": ".dagq/agents/design/AGENT.md"},
+                {"agent": "unused", "section": "review.subagents", "definition": null},
+            ], "errors": [
+                "[review.subagents.unused] names an agent without a definition: neither .dagq/agents/unused/AGENT.md nor .dagq/review-agents/unused.md is committed",
+            ]}))
+        );
+        // A definition at the old path counts while the definitions move.
+        let old = check(vec![
+            (CONFIG_FILE, CONFIG),
+            (".dagq/review-agents/design.md", DEFINITION),
+            (".dagq/review-agents/unused.md", DEFINITION),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            old["agents"][0]["definition"],
+            ".dagq/review-agents/design.md"
+        );
+        assert_eq!(old["errors"], json!([]));
+    }
+
     /// The review's subagents as the landing branch's commit has them
     /// (ADR-t1453-1 decisions 3 and 4): those the range's paths select,
     /// with the committed definition and its digest; the snapshot the
@@ -808,7 +948,7 @@ mod tests {
         );
         assert!(
             error.contains(&format!(
-                "the review subagent design that dagq.toml names has no definition .dagq/review-agents/design.md in the landing branch's commit {SHA}"
+                "the review subagent design that dagq.toml names has no definition .dagq/agents/design/AGENT.md (nor .dagq/review-agents/design.md) in the landing branch's commit {SHA}"
             )),
             "{error}"
         );

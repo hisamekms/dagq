@@ -45,7 +45,7 @@ runtime の plan review の prompt が名指す「plan review の部分」。[ta
 
 ### review
 
-run の review は差分の変更の範囲の規則で判定する。この repository の review の subagent は `.dagq/review-agents/` に定義し、`dagq.toml` の `[review.subagents.<agent>]` が path ごとに有効にする（仕組みは [review](docs/design/supervisor-lifecycle/review.md) の「reviewのsubagent」）。
+run の review は差分の変更の範囲の規則で判定する。この repository の review の subagent は `.dagq/agents/` に定義し、`dagq.toml` の `[review.subagents.<agent>]` が path ごとに有効にする（仕組みは [review](docs/design/supervisor-lifecycle/review.md) の「reviewのsubagent」）。
 
 ### inbox と人
 
