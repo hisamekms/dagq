@@ -8,7 +8,10 @@
 //! ([`SwitchPhase`]). A run switches at most [`MAX_PROVIDER_SWITCHES`]
 //! times, so it cannot go back and forth. Claude's hold is the queue's
 //! `queue_hold` ask; Codex's is a [`ProviderHold`] on the queue's events,
-//! which no ask shows and which ends on its own after a while.
+//! which no ask shows and which ends on its own after a while. A person
+//! may turn the move off (`fallback` false, ADR-t1857-1): a worker whose
+//! provider cannot be used then waits for its hold to end and goes on
+//! there; `--no-claude` still sends a Claude task to Codex.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -61,6 +64,21 @@ impl SwitchReason {
         }
     }
 
+    /// Whether this says the provider cannot be used (missing, not
+    /// started, a login, a usage limit): the moves a fallback turned off
+    /// stops (ADR-t1857-1). `--no-claude` (a person's ban, ADR-t1204-1) and
+    /// a review's need of subagents (a choice by ability, ADR-t1453-1
+    /// decision 8) still move.
+    pub const fn unusable(self) -> bool {
+        match self {
+            Self::ExecutableMissing
+            | Self::LaunchFailed
+            | Self::Authentication
+            | Self::UsageLimit => true,
+            Self::Disabled | Self::SubagentsUnsupported => false,
+        }
+    }
+
     /// How long a provider held for this stays held before its next call
     /// checks it again (ADR-t813-2 decision 6): a usage limit's window is
     /// long, a login may be fixed sooner, and an agent that did not start
@@ -99,6 +117,24 @@ impl SwitchPhase {
             (_, "nudge") => Self::Nudge,
             _ => Self::Resume,
         }
+    }
+}
+
+/// `[provider_fallback]` of `dagq.toml` (ADR-t1857-1): whether a worker
+/// moves off a provider it cannot use (`workers`, by default it does).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderFallback {
+    pub workers: bool,
+}
+
+impl ProviderFallback {
+    /// The keys of `[provider_fallback]`.
+    pub const KEYS: [&str; 1] = ["workers"];
+}
+
+impl Default for ProviderFallback {
+    fn default() -> Self {
+        Self { workers: true }
     }
 }
 
@@ -259,10 +295,14 @@ impl WorkerRoute {
 /// task may ask for, while `held` says why a provider is held: headless
 /// on the requested provider when it is usable; otherwise
 /// headless on the other provider when that one is (ADR-t813-2 decisions
-/// 2 and 6); otherwise not at all (no route: the task waits).
+/// 2 and 6); otherwise not at all (no route: the task waits). With the
+/// fallback off (`fallback` false, ADR-t1857-1) a provider that cannot be
+/// used ([`SwitchReason::unusable`]) leaves its tasks no route, so they
+/// wait for its hold to end; `--no-claude` (`Disabled`) still moves them.
 pub fn routes(
     supported: &[Worker],
     held: impl Fn(Provider) -> Option<SwitchReason>,
+    fallback: bool,
 ) -> Vec<WorkerRoute> {
     let usable = |worker: &Worker| supported.contains(worker) && held(worker.provider).is_none();
     Worker::ALL
@@ -279,17 +319,33 @@ pub fn routes(
                     switch: None,
                 });
             }
+            let reason = held(requested.provider).unwrap_or(SwitchReason::ExecutableMissing);
+            if !fallback && reason.unusable() {
+                return None;
+            }
             let actual = Worker {
                 provider: requested.provider.other(),
                 mode: WorkerMode::Headless,
             };
-            usable(&actual).then(|| WorkerRoute {
+            usable(&actual).then_some(WorkerRoute {
                 requested,
                 actual,
-                switch: Some(held(requested.provider).unwrap_or(SwitchReason::ExecutableMissing)),
+                switch: Some(reason),
             })
         })
         .collect()
+}
+
+/// Whether `worker` has no route only because the fallback is off
+/// (ADR-t1857-1): with it on, [`routes`] would run it on the other
+/// provider. Its claim is deferred with that said.
+pub fn stopped_by_fallback(
+    supported: &[Worker],
+    held: impl Fn(Provider) -> Option<SwitchReason>,
+    worker: Worker,
+) -> bool {
+    route_of(&routes(supported, &held, true), worker).is_some()
+        && route_of(&routes(supported, &held, false), worker).is_none()
 }
 
 /// Why `provider` is held for the workers now, if it is, given
@@ -355,20 +411,23 @@ pub enum WallMove {
     Wait { record: bool },
 }
 
-/// What a run at its provider's wall does: it moves when it has switches
-/// left (`may_switch`) and the other provider can be used
-/// (`other_usable`); else, on a later look (`first_look` false), the call
-/// is made again on its own provider once that one is not held
-/// (`own_held`) and no hold ask holds the run for a person's `done`
-/// (`hold_unclosed`); else it waits, recorded once on the first look.
+/// What a run at its provider's wall does: it moves when the fallback is
+/// on (`fallback`, ADR-t1857-1), it has switches left (`may_switch`) and
+/// the other provider can be used (`other_usable`); else, on a later look
+/// (`first_look` false), the call is made again on its own provider once
+/// that one is not held (`own_held`) and no hold ask holds the run for a
+/// person's `done` (`hold_unclosed`); else it waits, recorded once on the
+/// first look. A wall is always a provider that cannot be used, so the
+/// fallback off never lets it move.
 pub fn wall_move(
+    fallback: bool,
     may_switch: bool,
     other_usable: bool,
     first_look: bool,
     own_held: bool,
     hold_unclosed: bool,
 ) -> WallMove {
-    if may_switch && other_usable {
+    if fallback && may_switch && other_usable {
         WallMove::Switch
     } else if !first_look && !own_held && !hold_unclosed {
         WallMove::Retry
@@ -602,7 +661,7 @@ mod tests {
     fn a_worker_runs_as_asked_or_on_the_other_provider() {
         let all = Worker::ALL.to_vec();
         let none = |_: Provider| None;
-        let normalized = routes(&all, none);
+        let normalized = routes(&all, none, true);
         for requested in Worker::ALL {
             let route = route_of(&normalized, requested).unwrap();
             assert_eq!(route.actual.provider, requested.provider);
@@ -611,7 +670,7 @@ mod tests {
         }
         // No Codex: its tasks run on headless Claude.
         let claude_only = [CLAUDE, CLAUDE_HEADLESS];
-        let routes_now = routes(&claude_only, none);
+        let routes_now = routes(&claude_only, none, true);
         let codex = route_of(&routes_now, CODEX).unwrap();
         assert_eq!(codex.actual, CLAUDE_HEADLESS);
         assert_eq!(codex.switch, Some(SwitchReason::ExecutableMissing));
@@ -621,7 +680,7 @@ mod tests {
         );
         // Claude held: every task runs on Codex.
         let claude_held = |p: Provider| (p == Provider::Claude).then_some(SwitchReason::UsageLimit);
-        let routes_now = routes(&all, claude_held);
+        let routes_now = routes(&all, claude_held, true);
         for worker in Worker::ALL {
             let route = route_of(&routes_now, worker).unwrap();
             assert_eq!(route.actual, CODEX, "{worker:?}");
@@ -632,14 +691,152 @@ mod tests {
         );
         assert_eq!(route_of(&routes_now, CODEX).unwrap().switch, None);
         // Claude held and no Codex: nothing runs.
-        assert!(routes(&claude_only, claude_held).is_empty());
+        assert!(routes(&claude_only, claude_held, true).is_empty());
         // Codex held: its tasks run on Claude.
         let codex_held =
             |p: Provider| (p == Provider::Codex).then_some(SwitchReason::Authentication);
-        let routes_now = routes(&all, codex_held);
+        let routes_now = routes(&all, codex_held, true);
         let codex = route_of(&routes_now, CODEX).unwrap();
         assert_eq!(codex.actual, CLAUDE_HEADLESS);
         assert_eq!(codex.switch, Some(SwitchReason::Authentication));
+    }
+
+    /// The adapters of every worker but `provider`'s (its executable is
+    /// missing) when `reason` is `ExecutableMissing`, and every one with
+    /// `provider` held for `reason` otherwise.
+    fn cannot_use(
+        provider: Provider,
+        reason: SwitchReason,
+    ) -> (Vec<Worker>, impl Fn(Provider) -> Option<SwitchReason>) {
+        let missing = reason == SwitchReason::ExecutableMissing;
+        let supported = Worker::ALL
+            .into_iter()
+            .filter(|worker| !missing || worker.provider != provider)
+            .collect();
+        (supported, move |p: Provider| {
+            (p == provider && !missing).then_some(reason)
+        })
+    }
+
+    #[test]
+    fn with_the_fallback_off_a_task_whose_provider_cannot_be_used_has_no_route() {
+        use SwitchReason::{Authentication, ExecutableMissing, LaunchFailed, UsageLimit};
+        for requested in [CLAUDE_HEADLESS, CODEX] {
+            let other = Worker {
+                provider: requested.provider.other(),
+                mode: WorkerMode::Headless,
+            };
+            for reason in [ExecutableMissing, LaunchFailed, Authentication, UsageLimit] {
+                assert!(reason.unusable(), "{reason:?}");
+                let (supported, held) = cannot_use(requested.provider, reason);
+                // On: it moves to the other provider, why said.
+                let on = routes(&supported, &held, true);
+                let route = route_of(&on, requested).unwrap();
+                assert_eq!(route.actual, other, "{requested:?} {reason:?}");
+                assert_eq!(route.switch, Some(reason));
+                // Off: no route, so the task waits for its provider.
+                let off = routes(&supported, &held, false);
+                assert!(
+                    route_of(&off, requested).is_none(),
+                    "{requested:?} {reason:?}"
+                );
+                assert!(stopped_by_fallback(&supported, &held, requested));
+                // The other provider's tasks run there as before.
+                let direct = route_of(&off, other).unwrap();
+                assert_eq!(direct.actual, other);
+                assert_eq!(direct.switch, None);
+                assert!(!stopped_by_fallback(&supported, &held, other));
+            }
+        }
+        // Neither provider usable: no route either way, and not for the
+        // fallback.
+        let both = |_: Provider| Some(UsageLimit);
+        assert!(routes(&Worker::ALL, both, true).is_empty());
+        assert!(!stopped_by_fallback(&Worker::ALL, both, CODEX));
+        // Nothing held: the fallback changes nothing.
+        let none = |_: Provider| None;
+        assert_eq!(
+            routes(&Worker::ALL, none, false),
+            routes(&Worker::ALL, none, true)
+        );
+        // A ban and a need of subagents are not a provider that cannot be
+        // used.
+        assert!(!SwitchReason::Disabled.unusable());
+        assert!(!SwitchReason::SubagentsUnsupported.unusable());
+    }
+
+    /// `--no-claude` (a person's ban) sends a Claude task to Codex whether
+    /// the fallback is on or off.
+    fn no_claude_sends_claude_to_codex(fallback: bool) {
+        let no_claude = |p: Provider| held_by(p, true, None, &[]);
+        let now = routes(&Worker::ALL, no_claude, fallback);
+        for worker in [CLAUDE, CLAUDE_HEADLESS] {
+            let route = route_of(&now, worker).unwrap();
+            assert_eq!(route.actual, CODEX, "{worker:?}");
+            assert_eq!(route.switch, Some(SwitchReason::Disabled));
+        }
+        assert!(!stopped_by_fallback(
+            &Worker::ALL,
+            no_claude,
+            CLAUDE_HEADLESS
+        ));
+        // Codex unusable too: no route, as before.
+        let codex_held = [hold(Provider::Codex, SwitchReason::UsageLimit)];
+        let neither = |p: Provider| held_by(p, true, None, &codex_held);
+        assert!(routes(&Worker::ALL, neither, fallback).is_empty());
+    }
+
+    #[test]
+    fn no_claude_sends_a_claude_task_to_codex_with_the_fallback_on() {
+        no_claude_sends_claude_to_codex(true);
+    }
+
+    #[test]
+    fn no_claude_sends_a_claude_task_to_codex_with_the_fallback_off() {
+        no_claude_sends_claude_to_codex(false);
+    }
+
+    #[test]
+    fn with_the_fallback_off_a_run_at_a_wall_waits_and_retries_its_own_provider() {
+        // Never a switch, whatever is left and usable.
+        for (may_switch, other_usable, first_look, own_held, hold_unclosed) in [
+            (true, true, true, true, false),
+            (true, true, false, false, true),
+            (true, true, false, false, false),
+        ] {
+            assert_ne!(
+                wall_move(
+                    false,
+                    may_switch,
+                    other_usable,
+                    first_look,
+                    own_held,
+                    hold_unclosed
+                ),
+                WallMove::Switch
+            );
+        }
+        // The first look records the wait, even with the other provider
+        // usable.
+        assert_eq!(
+            wall_move(false, true, true, true, true, false),
+            WallMove::Wait { record: true }
+        );
+        // Its own provider still held, or a hold ask open: it waits.
+        assert_eq!(
+            wall_move(false, true, true, false, true, false),
+            WallMove::Wait { record: false }
+        );
+        assert_eq!(
+            wall_move(false, true, true, false, false, true),
+            WallMove::Wait { record: false }
+        );
+        // Its hold ended (`retry_at` or `done`): the call goes again to the
+        // same provider.
+        assert_eq!(
+            wall_move(false, true, true, false, false, false),
+            WallMove::Retry
+        );
     }
 
     #[test]
@@ -776,9 +973,9 @@ mod tests {
         assert_eq!(held_by(Provider::Codex, true, None, &[]), None);
         // Claude disabled and no Codex: no worker can be claimed.
         let no_claude = |p: Provider| held_by(p, true, None, &[]);
-        assert!(routes(&[CLAUDE, CLAUDE_HEADLESS], no_claude).is_empty());
+        assert!(routes(&[CLAUDE, CLAUDE_HEADLESS], no_claude, true).is_empty());
         // Claude disabled with Codex: its tasks run on Codex, why said.
-        let routes_now = routes(&Worker::ALL, no_claude);
+        let routes_now = routes(&Worker::ALL, no_claude, true);
         let claude = route_of(&routes_now, CLAUDE_HEADLESS).unwrap();
         assert_eq!(claude.actual, CODEX);
         assert_eq!(claude.switch, Some(SwitchReason::Disabled));
@@ -825,36 +1022,48 @@ mod tests {
     fn a_run_at_a_wall_moves_retries_or_waits_recorded_once() {
         // Switches left and the other provider usable: it moves, whether
         // or not this is the first look.
-        assert_eq!(wall_move(true, true, true, true, false), WallMove::Switch);
-        assert_eq!(wall_move(true, true, false, false, true), WallMove::Switch);
+        assert_eq!(
+            wall_move(true, true, true, true, true, false),
+            WallMove::Switch
+        );
+        assert_eq!(
+            wall_move(true, true, true, false, false, true),
+            WallMove::Switch
+        );
         // The other provider held (Claude's hold ask open), or switches used
         // up: the first look records the wait.
         assert_eq!(
-            wall_move(true, false, true, true, false),
+            wall_move(true, true, false, true, true, false),
             WallMove::Wait { record: true }
         );
         assert_eq!(
-            wall_move(false, true, true, true, false),
+            wall_move(true, false, true, true, true, false),
             WallMove::Wait { record: true }
         );
         // A later look: its own provider still held, or a hold ask holds
         // the run for a person's `done`: it waits, not recorded again.
         assert_eq!(
-            wall_move(false, true, false, true, false),
+            wall_move(true, false, true, false, true, false),
             WallMove::Wait { record: false }
         );
         assert_eq!(
-            wall_move(true, false, false, false, true),
+            wall_move(true, true, false, false, false, true),
             WallMove::Wait { record: false }
         );
         // Its own hold ended (at the reset its text said, or by `done`)
         // and no ask holds it: the call is made again there.
-        assert_eq!(wall_move(false, true, false, false, false), WallMove::Retry);
-        assert_eq!(wall_move(true, false, false, false, false), WallMove::Retry);
+        assert_eq!(
+            wall_move(true, false, true, false, false, false),
+            WallMove::Retry
+        );
+        assert_eq!(
+            wall_move(true, true, false, false, false, false),
+            WallMove::Retry
+        );
         // Never on the first look, even with its own provider free (a
         // Claude wall records no hold of its own).
         assert_eq!(
-            wall_move(false, false, true, false, false),
+            wall_move(true, false, false, true, false, false),
             WallMove::Wait { record: true }
         );
     }

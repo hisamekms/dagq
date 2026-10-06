@@ -32,7 +32,7 @@ use crate::domain::{
         ConflictConfig, ConflictConfigReport,
         conflicts::{CONFLICTS_CONFIG_CHANGED, conflicts_at_start, conflicts_change},
     },
-    worker::{PROVIDER_UNAVAILABLE, Worker, unavailable},
+    worker::{FALLBACK_OFF, PROVIDER_UNAVAILABLE, Worker, unavailable},
 };
 
 /// How long the hotspots (and the expected files of the tasks) are reused.
@@ -288,8 +288,13 @@ impl Supervisor<'_> {
             let reason = workers.get(&id).and_then(|&worker| {
                 route_of(&routes, worker).is_none().then(|| {
                     // Held rather than missing, it is its provider that
-                    // cannot be used.
-                    let why = unavailable(worker, &self.workers).unwrap_or(PROVIDER_UNAVAILABLE);
+                    // cannot be used; with the other one usable, it is the
+                    // fallback turned off that keeps it here (ADR-t1857-1).
+                    let why = if self.stopped_by_fallback(worker) {
+                        FALLBACK_OFF
+                    } else {
+                        unavailable(worker, &self.workers).unwrap_or(PROVIDER_UNAVAILABLE)
+                    };
                     (worker, why)
                 })
             });

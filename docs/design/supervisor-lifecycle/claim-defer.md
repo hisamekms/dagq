@@ -4,8 +4,8 @@ type: design
 title: "claimを控える（衝突の多いファイル）"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1634; task 1632
-last_verified: 2026-10-05 # task 1634; task 1632
+updated: 2026-10-06 # task 1857; task 1634; task 1632
+last_verified: 2026-10-06 # task 1857; task 1634; task 1632
 scope: runtime
 related:
   - adr-0080
@@ -13,6 +13,7 @@ related:
   - adr-t1634-1
   - adr-t1632-1
   - adr-t813-2
+  - adr-t1857-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-claim-hold
@@ -65,9 +66,9 @@ supervisorは控えの状態（taskごとの始まりと上限を過ぎたか）
 
 ## workerを動かせないtask
 
-supervisorは、どのproviderでも動かせないworker（providerと経路の組）のtaskをclaimせずに飛ばす（ADR-t813-2。task 814・818）。hotspotの判定より先に、`Queue::candidates`のtaskの`worker`にこのpassの経路（`Supervisor::routes`、`domain::provider_switch::routes`: 自分のadapterの表と2つのproviderの控えから決める。[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）があるかを見る（全workerに経路があるときは読まない）。そのproviderが使えなくても、もう一方の非対話で動かせるtaskは控えずにそちらでclaimする。
+supervisorは、どのproviderでも動かせないworker（providerと経路の組）のtaskをclaimせずに飛ばす（ADR-t813-2。task 814・818）。hotspotの判定より先に、`Queue::candidates`のtaskの`worker`にこのpassの経路（`Supervisor::routes`、`domain::provider_switch::routes`: 自分のadapterの表と2つのproviderの控えから決める。[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）があるかを見る（全workerに経路があるときは読まない）。そのproviderが使えなくても、もう一方の非対話で動かせるtaskは控えずにそちらでclaimする。ただし`dagq.toml`の`[provider_fallback] workers = false`のときは、頼んだproviderが使えない（実行ファイルが無い・起動できない・認証・利用上限）taskはもう一方で動かせても経路が無く、控えて頼んだproviderの控えが解けるのを待つ（実行ファイルが無いときは解ける控えが無く、その実行ファイルを持つsupervisorが動くまで控えたまま。[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。例外は`--no-claude`で、Claudeを頼んだtaskはoffでもCodexでclaimする（[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」）。
 
-- 理由は`provider_unavailable`（そのproviderが使えず、もう一方でも動かせない）か`mode_unavailable`（providerの組はあるがその経路の組が無い）。最初に飛ばしたときだけ`claim_deferred`（`domain::claim_defer::worker_deferred`）を書く
+- 理由は`provider_unavailable`（そのproviderが使えず、もう一方でも動かせない）か`mode_unavailable`（providerの組はあるがその経路の組が無い）か`provider_fallback_off`（そのproviderが使えず、もう一方では動かせるが`[provider_fallback] workers`がfalse）。最初に飛ばしたときだけ`claim_deferred`（`domain::claim_defer::worker_deferred`）を書く
 - 両方のproviderが使えない（Claudeの控えのaskが開き、Codexが無いか控えられている）passは、控えのaskが新しいclaimを止める（`claim_held`）が、その前に候補をこの判定にかけ、`provider_unavailable`の控えを記録する（`status`の`claim_deferrals`に出る）
 - 上限は無く、hotspotの控えと違って`defer_max_secs`で期限切れにならない。表にそのworkerが入ったsupervisorは`claim_deferral_ended`（`why: cleared`）を書いてclaimし、候補から外れたtaskは`why: not_candidate`で終える
 - 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`worker_deferrals_in_place`）。hotspotの控え（`deferrals_in_place`）は`reason`が`hot_files`のもの（`reason`の無い古いeventを含む）だけを読む
@@ -89,7 +90,7 @@ supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[
 
 ## 記録
 
-- `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る。workerを動かせないtaskの`claim_deferred`は`reason`（`provider_unavailable` / `mode_unavailable`）、`provider`、`worker_mode`、`message`、`supervisor`。buildを待つtaskの`claim_deferred`は`reason: not_in_build`、`build`（そのsupervisorのbuild識別子）、`missing`（`[{task_id, commit}]`、含まない依存先の着地）、`message`、`supervisor`
+- `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る。workerを動かせないtaskの`claim_deferred`は`reason`（`provider_unavailable` / `mode_unavailable` / `provider_fallback_off`）、`provider`、`worker_mode`、`message`、`supervisor`。`provider_fallback_off`の`message`は、頼んだproviderが今使えず`[provider_fallback] workers`がfalseなのでもう一方のproviderで始めず、そのproviderが使えるようになるまでclaimしないと言う。buildを待つtaskの`claim_deferred`は`reason: not_in_build`、`build`（そのsupervisorのbuild識別子）、`missing`（`[{task_id, commit}]`、含まない依存先の着地）、`message`、`supervisor`
 - `claim_deferral_ended`（taskのevent）: `reason`、`why`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`。`owner_waiting` / `no_commit` / `expired`はhotspotの控えだけ、workerとbuildの控えは`cleared` / `not_candidate`だけ）、`deferred_secs`、`supervisor`。logにinfoで出る
 
 ## `status`と`stats`

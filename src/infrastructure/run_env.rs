@@ -27,6 +27,8 @@
 //! mode and the limits of its server (ADR-t827-4 decision 4).
 //! `[headless] wrapper` chooses where a headless session's wrapper runs:
 //! in a cmux workspace or as a background process (ADR-t1404-1).
+//! `[provider_fallback] workers` turns off a worker's move off a provider
+//! it cannot use (ADR-t1857-1).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -52,6 +54,7 @@ use crate::{
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
         light_slots::LightChanges,
+        provider_switch::ProviderFallback,
         resume::ResumeConfig,
         review_subagents::{self, ReviewSubagent},
         run_env::{RunEnvCheck, RunEnvProgram},
@@ -132,7 +135,10 @@ const REVIEW_SUBAGENT_PATHS: &str = "paths";
 const HEADLESS_TABLE: &str = "headless";
 /// The one key of `[headless]`.
 const HEADLESS_WRAPPER: &str = "wrapper";
-const TABLES: [&str; 18] = [
+/// `[provider_fallback]`: whether a worker moves off a provider it
+/// cannot use (ADR-t1857-1).
+const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
+const TABLES: [&str; 19] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -151,6 +157,7 @@ const TABLES: [&str; 18] = [
     BROKER_TABLE,
     BROKER_PACKAGE_TABLE,
     HEADLESS_TABLE,
+    PROVIDER_FALLBACK_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -229,6 +236,9 @@ pub struct Config {
     /// `[headless] wrapper` (ADR-t1404-1 decision 7); `None` without it,
     /// which is the default, a workspace.
     pub headless_wrapper: Option<HeadlessWrapper>,
+    /// `[provider_fallback]` (ADR-t1857-1), the default (on) for the keys
+    /// it does not set.
+    pub provider_fallback: ProviderFallback,
 }
 
 /// Parse the whole file.
@@ -247,6 +257,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // changes` once the file is read whole (ADR-t1591-1).
     let mut light_changes: Option<(Vec<TaskChange>, usize)> = None;
     let mut broker_keys: Vec<String> = Vec::new();
+    let mut fallback_keys: Vec<String> = Vec::new();
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
@@ -329,7 +340,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -538,6 +549,20 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     })
                     .with_context(with)?;
                 config.headless_wrapper = Some(wrapper);
+            }
+            Some(PROVIDER_FALLBACK_TABLE) => {
+                ensure!(
+                    ProviderFallback::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{PROVIDER_FALLBACK_TABLE}]; the keys are {}",
+                    ProviderFallback::KEYS.join(", ")
+                );
+                ensure!(
+                    !fallback_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                config.provider_fallback.workers = parse_bool(rest.trim())
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                fallback_keys.push(key.to_owned());
             }
             Some(RECHECK_TABLE) => {
                 ensure!(
@@ -788,7 +813,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -1060,6 +1085,20 @@ pub fn load_supervisor_config(root: &Path) -> Result<Option<SupervisorConfig>> {
         parse_config(&text)
             .with_context(|| format!("parse {}", path.display()))?
             .supervisor,
+    ))
+}
+
+/// `[provider_fallback]` of the `dagq.toml` in `root` (ADR-t1857-1),
+/// `None` when there is no file; no table or no key is the default (on).
+pub fn load_provider_fallback(root: &Path) -> Result<Option<ProviderFallback>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .provider_fallback,
     ))
 }
 
@@ -2472,6 +2511,59 @@ LITERAL = 'no \n escapes # here'
         );
     }
 
+    /// `[provider_fallback] workers` is a bool, on without it; the table
+    /// knows no other key (ADR-t1857-1).
+    #[test]
+    fn parses_the_workers_of_the_provider_fallback_table() {
+        assert!(parse_config("").unwrap().provider_fallback.workers);
+        assert!(
+            parse_config("[provider_fallback]\n")
+                .unwrap()
+                .provider_fallback
+                .workers
+        );
+        assert!(
+            !parse_config("[provider_fallback]\nworkers = false # wait\n")
+                .unwrap()
+                .provider_fallback
+                .workers
+        );
+        assert!(
+            parse_config("[provider_fallback]\nworkers = true\n")
+                .unwrap()
+                .provider_fallback
+                .workers
+        );
+        for (text, expected) in [
+            (
+                "[provider_fallback]\njobs = false\n",
+                "dagq.toml:2: unknown key jobs in [provider_fallback]; the keys are workers",
+            ),
+            (
+                "[provider_fallback]\nworkers = \"no\"\n",
+                "dagq.toml:2: value of workers: expected true or false",
+            ),
+            (
+                "[provider_fallback]\nworkers = false\nworkers = true\n",
+                "dagq.toml:3: workers is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_provider_fallback(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[provider_fallback]\nworkers = false\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_provider_fallback(dir.path()).unwrap(),
+            Some(ProviderFallback { workers: false })
+        );
+    }
+
     /// `[supervisor] light_changes` names changes of `[tasks] changes`,
     /// wherever `[tasks]` is, each once (ADR-t1591-1).
     #[test]
@@ -2664,7 +2756,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [broker], [broker.package], [headless] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [broker], [broker.package], [headless], [provider_fallback] and [kpi]"
             ),
             "{error}"
         );

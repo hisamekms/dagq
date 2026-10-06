@@ -67,7 +67,7 @@ use crate::{
         process::LocalSpawner,
         run_env::{
             ShellVerifier, load_conflict_config, load_disk_config, load_kpi_settings,
-            load_resume_config, load_stall_config, load_supervisor_config,
+            load_provider_fallback, load_resume_config, load_stall_config, load_supervisor_config,
         },
         run_files::LocalRunFiles,
         runtime_store::SqliteOpener,
@@ -613,6 +613,7 @@ impl SuperviseOptions {
             retry_unreadable_review: self.retry_unreadable_review,
             limits,
             light_changes: Default::default(),
+            provider_fallback: Default::default(),
             slot_flags: self.slot_flags(),
             once: self.once,
             stop: self.stop.clone(),
@@ -762,6 +763,20 @@ pub fn supervise_with_reviewer(
         let checkout = main_checkout.clone();
         Arc::new(move || load_supervisor_config(&checkout))
             as crate::application::supervise::SupervisorFile
+    });
+    // `[provider_fallback]` (ADR-t1857-1): a table that cannot be read at
+    // the start leaves the default (on); later reads keep the value in
+    // use. Read again each pass.
+    let provider_fallback = load_provider_fallback(&main_checkout)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %format_args!("{error:#}"), "[provider_fallback] of dagq.toml not read: {error:#}; using the default");
+            None
+        })
+        .unwrap_or_default();
+    let provider_fallback_file = Some({
+        let checkout = main_checkout.clone();
+        Arc::new(move || load_provider_fallback(&checkout))
+            as crate::application::supervise::ProviderFallbackFile
     });
     let pid = std::process::id();
     let generators = options.generators.clone();
@@ -1142,6 +1157,7 @@ pub fn supervise_with_reviewer(
         max_improvement_proposals,
         conflicts_file,
         supervisor_file,
+        provider_fallback_file,
         forecasts,
         release: Some(release),
         host_metrics,
@@ -1180,6 +1196,7 @@ pub fn supervise_with_reviewer(
     let settings = LoopSettings {
         conflicts_error,
         light_changes,
+        provider_fallback,
         ..options.settings(stall, conflicts, disk, resume, limits)
     };
     supervisor::supervise(&ports, &settings)

@@ -730,3 +730,67 @@ esac"#
     );
     assert_eq!(stub_calls(&detail.runs[0]).len(), 2);
 }
+
+/// With `[provider_fallback] workers = false` (ADR-t1857-1) a Codex turn
+/// at Codex's usage limit does not move to Claude, though Claude could
+/// take it: the run waits (`provider_waiting`, its `blocked` naming the
+/// fallback) with no ask, and once Codex's hold ends at the reset its text
+/// said, the call is made again on Codex in the same thread
+/// (`provider retry`) and the run lands there.
+#[test]
+fn with_the_fallback_off_a_codex_limit_waits_and_retries_codex() {
+    let (dir, repo, db, backend, codex) = switch_fixture(Provider::Codex, true);
+    fs::write(
+        repo.join("dagq.toml"),
+        "[provider_fallback]\nworkers = false\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-m", "turn the workers' fallback off"]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"case "$TURN" in
+1) error "unexpected status 429 Too Many Requests: You have hit your usage limit. Try again in 2 seconds."; sleep 30 ;;
+*) {FINISH} ;;
+esac"#
+        ),
+    );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(backend);
+    let supervisor = supervise_thread(
+        &db,
+        &repo,
+        backend.clone(),
+        codex.as_deref(),
+        &[verdict("pass", &[], "fine")],
+    );
+    finished(&db, &backend, supervisor);
+    let detail = detail(&db, TASK);
+    let run = &detail.runs[0];
+    assert_landed_run(run, &repo, &base);
+    assert_eq!(run.actual_provider(), Provider::Codex);
+    assert!(switches(&detail).is_empty());
+    let waiting = payloads(&detail, "provider_waiting");
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0]["provider"], "codex");
+    assert!(
+        waiting[0]["blocked"]
+            .as_str()
+            .unwrap()
+            .contains("[provider_fallback] workers is false"),
+        "{waiting:?}"
+    );
+    let requested: Vec<&Value> = payloads(&detail, "turn_requested")
+        .into_iter()
+        .map(|p| &p["what"])
+        .collect();
+    assert_eq!(requested, [&json!("provider retry")]);
+    let calls = stub_calls(run);
+    assert!(calls[1].starts_with("resume codex-thread-1 "), "{calls:?}");
+    assert!(
+        queue_events(&db, "ask_opened")
+            .iter()
+            .all(|p| p["kind"] != "queue_hold")
+    );
+}

@@ -46,7 +46,55 @@ impl Supervisor<'_> {
 
     /// How this pass's claims run each worker a task may ask for.
     pub(super) fn routes(&self) -> Vec<WorkerRoute> {
-        provider_switch::routes(&self.workers, |provider| self.provider_held(provider))
+        provider_switch::routes(
+            &self.workers,
+            |provider| self.provider_held(provider),
+            self.fallback.workers,
+        )
+    }
+
+    /// Whether `worker` has no route only because `[provider_fallback]
+    /// workers` is off (ADR-t1857-1).
+    pub(super) fn stopped_by_fallback(&self, worker: Worker) -> bool {
+        !self.fallback.workers
+            && provider_switch::stopped_by_fallback(
+                &self.workers,
+                |provider| self.provider_held(provider),
+                worker,
+            )
+    }
+
+    /// Read `[provider_fallback]` again (ADR-t1857-1): a change takes
+    /// effect from this pass on. A file that cannot be read or holds an
+    /// invalid value keeps the value in use, warned of once per error; so
+    /// does a missing file, which may only be a checkout rewriting it.
+    pub(super) fn reread_provider_fallback(&mut self) {
+        let Some(read) = self.fallback_file.clone() else {
+            return;
+        };
+        let to = match read() {
+            Ok(Some(to)) => to,
+            Ok(None) => {
+                self.fallback_error = None;
+                return;
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                if self.fallback_error.as_ref() != Some(&message) {
+                    warn!(error = %message, "[provider_fallback] of dagq.toml not read: {message}; keeping workers = {}", self.fallback.workers);
+                    self.fallback_error = Some(message);
+                }
+                return;
+            }
+        };
+        self.fallback_error = None;
+        if to != self.fallback {
+            info!(
+                "[provider_fallback] of dagq.toml changed: workers {} -> {}",
+                self.fallback.workers, to.workers
+            );
+            self.fallback = to;
+        }
     }
 
     /// Whether a headless worker of `provider` can take a run now: this
@@ -206,14 +254,18 @@ impl Supervisor<'_> {
         let request = started["request"].as_u64();
         // The call the failed turn made, to make again.
         let undelivered = request.and_then(|seq| self.taken_request(run, seq));
+        let fallback = self.fallback.workers;
         let may_switch = provider_switch::may_switch(&events);
         let other_usable = may_switch && self.headless_usable(to);
         let own_held = self.provider_held(from).is_some();
         // The hold ask is read only when the run does not move and its own
         // provider is free again.
-        let hold_unclosed =
-            !other_usable && !first_look && !own_held && self.queue.hold_unclosed(run.id())?;
+        let hold_unclosed = !(fallback && other_usable)
+            && !first_look
+            && !own_held
+            && self.queue.hold_unclosed(run.id())?;
         let next = provider_switch::wall_move(
+            fallback,
             may_switch,
             other_usable,
             first_look,
@@ -248,7 +300,7 @@ impl Supervisor<'_> {
             return Ok(WallStep::Switched(self.files.now()));
         }
         if next == (WallMove::Wait { record: true }) {
-            let blocked = switch_blocked(&events, self.provider_held(to));
+            let blocked = switch_blocked(fallback, &events, self.provider_held(to));
             self.queue.record_runtime_event(
                 run.id(),
                 EventKind::ProviderWaiting,
@@ -505,10 +557,13 @@ pub(super) fn retry_text(
     }
 }
 
-/// Why a run did not move to the other provider: its switches are used
+/// Why a run did not move to the other provider: `[provider_fallback]
+/// workers` is off (`fallback` false, ADR-t1857-1), its switches are used
 /// up, or that provider is held (`held`) or has no headless worker here.
-fn switch_blocked(events: &[RunEvent], held: Option<SwitchReason>) -> String {
-    if !provider_switch::may_switch(events) {
+fn switch_blocked(fallback: bool, events: &[RunEvent], held: Option<SwitchReason>) -> String {
+    if !fallback {
+        "[provider_fallback] workers is false: the run waits for its own provider".to_owned()
+    } else if !provider_switch::may_switch(events) {
         format!("its {MAX_PROVIDER_SWITCHES} switches are used up")
     } else if let Some(reason) = held {
         format!("the other provider is held ({})", reason.as_str())
@@ -825,20 +880,25 @@ mod tests {
     #[test]
     fn a_waiting_run_says_why_it_did_not_move() {
         assert_eq!(
-            switch_blocked(&[switched(), switched()], None),
+            switch_blocked(true, &[switched(), switched()], None),
             "its 2 switches are used up"
         );
         assert_eq!(
-            switch_blocked(&[switched()], Some(SwitchReason::UsageLimit)),
+            switch_blocked(true, &[switched()], Some(SwitchReason::UsageLimit)),
             "the other provider is held (usage_limit)"
         );
         assert_eq!(
-            switch_blocked(&[], Some(SwitchReason::Disabled)),
+            switch_blocked(true, &[], Some(SwitchReason::Disabled)),
             "the other provider is held (provider_disabled)"
         );
         assert_eq!(
-            switch_blocked(&[], None),
+            switch_blocked(true, &[], None),
             "this supervisor has no headless worker of the other provider"
+        );
+        // The fallback off says so before anything else (ADR-t1857-1).
+        assert_eq!(
+            switch_blocked(false, &[], None),
+            "[provider_fallback] workers is false: the run waits for its own provider"
         );
     }
 

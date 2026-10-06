@@ -103,6 +103,10 @@ impl Worker {
 /// run the worker or the task leaves the candidates.
 pub const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 pub const MODE_UNAVAILABLE: &str = "mode_unavailable";
+/// Why a candidate's claim is deferred when its provider cannot be used
+/// and `[provider_fallback] workers` is off, so it does not start on the
+/// other one (ADR-t1857-1): it waits for its provider's hold to end.
+pub const FALLBACK_OFF: &str = "provider_fallback_off";
 
 /// Why `worker` cannot be claimed by a supervisor that runs `supported`:
 /// `None` when it can.

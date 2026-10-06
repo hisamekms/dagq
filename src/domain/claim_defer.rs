@@ -410,11 +410,21 @@ pub fn worker_deferred(
     worker: super::worker::Worker,
     token: &LeaseToken,
 ) -> (EventKind, Value) {
-    let message = format!(
-        "this supervisor cannot run a {} {} worker ({reason}): not claimed until one can",
-        worker.provider.as_str(),
-        worker.mode.as_str()
-    );
+    let message = if reason == super::worker::FALLBACK_OFF {
+        format!(
+            "{} cannot be used now and [provider_fallback] workers is false, so the {} {} worker does not start on the other provider ({reason}): not claimed until {} can be used again",
+            worker.provider.as_str(),
+            worker.provider.as_str(),
+            worker.mode.as_str(),
+            worker.provider.as_str()
+        )
+    } else {
+        format!(
+            "this supervisor cannot run a {} {} worker ({reason}): not claimed until one can",
+            worker.provider.as_str(),
+            worker.mode.as_str()
+        )
+    };
     (
         EventKind::ClaimDeferred,
         json!({
@@ -1192,6 +1202,28 @@ mod tests {
         let stats = claim_deferrals(&again, EventId::new(0), EventId::new(2), end, |_| true);
         assert_eq!(stats.by_end["superseded"].count, 1);
         assert_eq!(stats.deferred.len(), 1);
+    }
+
+    /// A claim the fallback turned off keeps here says so (ADR-t1857-1),
+    /// and is a deferral for the worker like any other.
+    #[test]
+    fn a_deferral_for_the_fallback_off_says_its_provider_waits() {
+        let token = LeaseToken::new("s");
+        let worker = super::super::worker::Worker::ALL[1];
+        let (_, payload) = worker_deferred(super::super::worker::FALLBACK_OFF, worker, &token);
+        assert_eq!(payload["reason"], "provider_fallback_off");
+        assert_eq!(payload["provider"], "claude");
+        let message = payload["message"].as_str().unwrap();
+        assert!(
+            message.contains("claude cannot be used now")
+                && message.contains("[provider_fallback] workers is false"),
+            "{message}"
+        );
+        let latest = [event(1, 1, CLAIM_DEFERRED, payload, "00:00")];
+        assert_eq!(
+            worker_deferrals_in_place(&latest)[&TaskId::new(1)].0,
+            "provider_fallback_off"
+        );
     }
 
     #[test]

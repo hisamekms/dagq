@@ -1,6 +1,6 @@
 # A worker's provider and route, and falling back
 
-Read this to choose which agent runs a task's worker and how, to read which one actually ran, or to tell a person what to do when a provider cannot be used. The decisions are ADR-t813-1 (the headless route), ADR-t1340-1 (headless is Claude's default), ADR-t813-2 (provider per task, mutual fallback) and ADR-t813-3 (Codex's permissions).
+Read this to choose which agent runs a task's worker and how, to read which one actually ran, or to tell a person what to do when a provider cannot be used. The decisions are ADR-t813-1 (the headless route), ADR-t1340-1 (headless is Claude's default), ADR-t813-2 (provider per task, mutual fallback), ADR-t813-3 (Codex's permissions) and ADR-t1857-1 (turning the fallback off).
 
 ## Provider and route
 
@@ -30,7 +30,7 @@ A task's worker has a **provider** (`claude` or `codex`) and a **route** (`worke
 - Events (`events --run RUN --full`): `run_claimed` has `provider`, `requested_provider`, `worker_mode`, `provider_version` and, when the supervisor runs Codex workers, `codex_version`. A headless run records each turn: `turn_requested` (`what`: `answer of ask N`, `revise request`, `nudge`, `provider switch`, `provider retry`, ...), `turn_started` (`turn`, `provider`, `session_id`), `turn_session_identified` (the thread id Codex named), and `turn_finished` (`outcome`, `failure`: `authentication` / `usage_limit` / `model` / `sandbox` / `launch` / `other`, `provider`, `usage`, `tokens`; Codex's `tokens_total` is the thread's running total). The turns' own output is under the run dir's `turns/`.
 - A switch is `provider_switched`: `from`, `to`, `worker_mode`, `reason` (`executable_missing`, `launch_failed`, `authentication`, `usage_limit`), `phase` (`start` at the claim, or `answer` / `revise` / `resume` / `nudge` mid-run), `turn`, `count` (two at most: away, and back once), `message`. A run that could not switch records `provider_waiting` (`provider`, `reason`, `other`, `blocked`, `retry_at`) and waits; it is not failed.
 - `stats`: `runs[]` `provider` (requested), `actual_provider`, `provider_switches`, `route`, `turns` (with `by_provider`); the window's `provider_switches` (`count`, `runs`, `by_reason`, `by_direction`, `by_phase`, `holds_by_reason`). `kpi --by provider|route|codex` (`reference/kpi.md`).
-- `status` / `doctor`: `supervisors[].providers` (each provider's resolved `executable`, `found`, `error`, `modes`) and `supervisors[].provider_hold` (a provider held now, with `reason` and `retry_at`); `claim_deferrals` with `provider_unavailable` (neither provider can take the task) or `mode_unavailable`.
+- `status` / `doctor`: `supervisors[].providers` (each provider's resolved `executable`, `found`, `error`, `modes`) and `supervisors[].provider_hold` (a provider held now, with `reason` and `retry_at`); `claim_deferrals` with `provider_unavailable` (neither provider can take the task), `mode_unavailable`, or `provider_fallback_off` (its provider cannot be used and the fallback is off, below).
 
 ## When a provider cannot be used
 
@@ -44,6 +44,15 @@ What reaches the person (the inbox shows it):
 
 - **The `queue_hold` ask** (`authentication`, or `cost` with `subject: usage_limit`): Claude's login ran out or it hit its limit, or both providers are unusable. Claude-only jobs and runs that could not move wait in its `affected`. The person logs Claude (or Codex) in again or waits for the limit to reset, then answers `done` (the supervisor releases every hold, sends `continue` to the waiting runs and restarts the failed jobs) or `cancel_affected`. A Codex task already moved to Claude, or the other way, needs nothing.
 - **Nothing opens** when both providers merely fail to start, or when a run used up its switches and waits for Codex's hold to end while Claude works: the runtime tries again at each hold's `retry_at`. If `status` keeps showing `provider_hold` or `provider_unavailable`, report it: the person checks the executable (`doctor`'s `providers`) and, for a missing or moved `codex`, restarts the supervisor with `--codex` (`skills/dagq-recover/reference/up-down.md`).
+
+### Turning the fallback off
+
+A person can stop the workers' move to the other provider with `[provider_fallback] workers = false` in the repository's `dagq.toml` (the default, or no table, is `true`: the moves above). The supervisor reads it again every pass, so it takes effect without a restart. Only a provider that cannot be used stops moving (missing, does not start, a login, a usage limit); `--no-claude` still sends a Claude task to Codex, and holds and asks are the same:
+
+- **At the claim**: a task whose provider cannot be used is not claimed on the other one; it is deferred (`claim_deferred` and `status`'s `claim_deferrals` with `provider_fallback_off`) until its provider's hold ends.
+- **Mid-run**: the run does not switch. It records `provider_waiting` whose `blocked` says the fallback is off, and once its own provider's hold ends (`retry_at`, or `done` on Claude's `queue_hold` ask, which still opens for Claude's login or limit) the call goes again to the same session (`provider retry`, or the hold's `continue`). Codex's wall opens no ask even with Claude usable.
+
+Whether to turn it off is the person's call; do not edit `dagq.toml` to route around a wall. Jobs are not covered by `workers`.
 
 ## A headless run by hand
 

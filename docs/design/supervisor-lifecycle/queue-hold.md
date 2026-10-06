@@ -4,8 +4,8 @@ type: design
 title: "認証と利用上限のaskの待ちとanswer"
 status: current
 created: 2026-09-27
-updated: 2026-10-06 # task 1225: the recovery job on Codex; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1223: the observer on Codex; task 1711: the headless planner's hold is a unit test with one test kept on the boundary; task 1437
-last_verified: 2026-10-06 # task 1225; task 1850; task 1223; task 1711; task 1437
+updated: 2026-10-06 # task 1857: a Claude task waits for Claude with the fallback off; task 1225: the recovery job on Codex; task 1850: resumes, recovery jobs and claims share one line by effective priority; task 1223: the observer on Codex; task 1711: the headless planner's hold is a unit test with one test kept on the boundary; task 1437
+last_verified: 2026-10-06 # task 1857; task 1225; task 1850; task 1223; task 1711; task 1437
 scope: runtime
 related:
   - adr-0047
@@ -42,7 +42,7 @@ Claude Codeのログインが切れるか利用上限に達すると、新しい
 
 [ADR-t813-2](../../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定6（ADR-0047決定42をamends、task 818）で、控えの単位はproviderごとになった。このページの`queue_hold`のaskはClaudeの控えで、Codexの控えはaskを開かないqueueイベント（`provider_held` / `provider_released`、[provider-lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）。
 
-- **workerのclaimとturn**: 使えるproviderがあれば止めない。askが開いていても（Claudeが控えられていても）Codexのworkerが動かせれば、新しいclaimは控えず（`claim_held`を書かない）、taskは非対話のCodexで始まる。Codexが控えられていればCodexのtaskは非対話のClaudeで始まる。両方が使えない（Claudeのaskが開き、Codexが無いか控えられている）ときだけ、下の「控え」のとおりaskが新しいclaimを止め、候補は`claim_deferred`（`provider_unavailable`）で控える
+- **workerのclaimとturn**: 使えるproviderがあれば止めない。askが開いていても（Claudeが控えられていても）Codexのworkerが動かせれば、新しいclaimは控えず（`claim_held`を書かない）、taskは非対話のCodexで始まる。Codexが控えられていればCodexのtaskは非対話のClaudeで始まる。両方が使えない（Claudeのaskが開き、Codexが無いか控えられている）ときだけ、下の「控え」のとおりaskが新しいclaimを止め、候補は`claim_deferred`（`provider_unavailable`）で控える。`[provider_fallback] workers = false`のときは、Claudeのtaskはもう一方へ移らずClaudeの控えが解けるのを待ち（`provider_fallback_off`で控え、`--no-claude`の下を除く）、Codexのtaskは今どおり動くのでaskは新しいclaimを止めない（[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」、[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）
 - **askを開くとき**: Claudeが止まったとき（headlessのjobの出力、Claudeの非対話のturn、非対話のruntimeのplannerのturn）は、Codexが使えても開く（Claudeで動く役割のjob（`provider`を書かない復旧・review・goal review・plan review・observer）は人を待つ）。Claudeの非対話のturnからCodexへ移ったrunはaskの`affected`に入れず、runに`auth_required` / `usage_limited`（`switched_to: codex`）を書く。非対話のruntimeのplannerのturnがClaudeのログイン切れ・利用上限で止まったときは、runもjobも名指さないaskを開くか開いているaskに加わり（`affected`に入らない）、queueのevent `provider_waiting`（`planner_id`・`turn`・`reason`・`ask_id`）を残す。plannerは終わらずに待ち、答えで控えが解けた後のpassで、失敗したturnの依頼を載せた`provider retry`のturnで続ける（`tend_planner_walls`、[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)の「使えないとき」、ADR-t1394-2決定5）。Codexだけが止まったときは開かない。止まったrunがもう一方へも移れないときはrunを失敗にせず待たせ（`provider_waiting`）、Claudeの認証と利用上限か、両方使えないときは、providerに関わらずrunが`raise_wall`でaskに入る（壁は開いている控えのaskの理由か、認証・利用上限の側の理由）。切り替えの上限でCodexから移れずClaudeが使えるときはaskを開かず、Codexの控えが解けた後に同じthreadへもう一度送る
 - **`done`**: 下の適用に加え、askを閉じるsupervisorがCodexの控えも解く（`provider_released`の`why: done`。どのsupervisorも毎passでqueueの控えを読み直す）。控えのaskに入って待つrunへの「続けて」は、runの今のproviderに行く
 - **Claudeで動く役割**: `[roles.recovery]`に`provider`を書かない復旧と、`[roles.observer]`に`provider`を書かないobserver、`[roles.review]`に`provider`を書かないrunのreview、`[roles.goal_review]`に`provider`を書かないgoal review、`[roles.plan_review]`に`provider`を書かないplan review、`[roles.throughput_review]`に`provider`を書かないスループットの見直し（askのあいだ始めない）の控えは今までどおりaskに従う。`provider = "codex"`のobserverはClaudeの控えを待たずCodexで動き、Codexの失敗はaskに入れない（task 1223、[Observer](observer.md#codexで動かす)）。`provider = "codex"`の復旧jobも同じくClaudeの控えの間もCodexで始まり、Codexの失敗はaskに入れない。Codexが使えずに止まったjobはCodexを控えて次のjobをもう一方で始め、それ以外の失敗はjobの今の失敗の経路（終わったrunは`triage_failed`、生きているrunはalertのask）に入る（task 1225、[Triage](triage.md#codexで動かす)）

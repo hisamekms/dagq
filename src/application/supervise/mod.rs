@@ -254,6 +254,9 @@ pub struct LoopSettings {
     /// `[supervisor] light_changes` at the start (ADR-t1591-1), read again
     /// each pass.
     pub light_changes: crate::domain::light_slots::LightChanges,
+    /// `[provider_fallback]` at the start (ADR-t1857-1), read again each
+    /// pass.
+    pub provider_fallback: crate::domain::provider_switch::ProviderFallback,
     /// Exit when no run is active and no task can be claimed, instead of
     /// polling for new work.
     pub once: bool,
@@ -439,6 +442,10 @@ pub struct Ports<'a> {
     /// file), read again each pass for the values the flags did not give
     /// (task 698); `None` reads nothing.
     pub supervisor_file: Option<SupervisorFile>,
+    /// `[provider_fallback]` of the main checkout's `dagq.toml` (`None`
+    /// for no file), read again each pass (ADR-t1857-1); `None` reads
+    /// nothing.
+    pub provider_fallback_file: Option<ProviderFallbackFile>,
     /// Records the forecast snapshots (ADR-0070 decision 3); `None`
     /// records none.
     pub forecasts: Option<ForecastPort>,
@@ -477,6 +484,11 @@ pub type ConflictsFile =
 
 /// Reads `[supervisor]` of the main checkout's `dagq.toml` (task 698).
 pub type SupervisorFile = Arc<dyn Fn() -> Result<Option<SupervisorConfig>> + Send + Sync>;
+
+/// Reads `[provider_fallback]` of the main checkout's `dagq.toml`
+/// (ADR-t1857-1).
+pub type ProviderFallbackFile =
+    Arc<dyn Fn() -> Result<Option<crate::domain::provider_switch::ProviderFallback>> + Send + Sync>;
 
 /// Spawn a thread that reports its `tracing` events to the subscriber of
 /// the spawning thread, so a supervisor run under a scoped subscriber (the
@@ -867,6 +879,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         supervisor_file: ports.supervisor_file.clone(),
         supervisor_error: None,
         light_changes: settings.light_changes.clone(),
+        fallback: settings.provider_fallback,
+        fallback_file: ports.provider_fallback_file.clone(),
+        fallback_error: None,
         finished: Vec::new(),
         errors: Vec::new(),
         claiming: true,
@@ -1014,6 +1029,15 @@ struct Supervisor<'a> {
     /// `[supervisor] light_changes` as last read (ADR-t1591-1): the tasks
     /// claimed in the room the landing queue leaves.
     light_changes: crate::domain::light_slots::LightChanges,
+    /// `[provider_fallback]` as last read (ADR-t1857-1): whether a worker
+    /// moves off a provider it cannot use.
+    fallback: crate::domain::provider_switch::ProviderFallback,
+    /// Reads `[provider_fallback]` again each pass; `None` keeps
+    /// `fallback`.
+    fallback_file: Option<ProviderFallbackFile>,
+    /// The error the last read of `[provider_fallback]` failed with,
+    /// warned of once until it changes or a read succeeds.
+    fallback_error: Option<String>,
     finished: Vec<TaskRun>,
     errors: Vec<RunError>,
     /// Cleared after a provisioning failure so an unavailable cmux or Git
@@ -1507,6 +1531,9 @@ impl Supervisor<'_> {
             // `runtime_planners` takes effect without a restart (task 698,
             // task 941).
             self.reread_slot_limits()?;
+            // And `[provider_fallback]`: turning the workers' fallback on
+            // or off takes effect without a restart (ADR-t1857-1).
+            self.reread_provider_fallback();
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             self.check_disk(options.disk_cleanup_interval)?;
