@@ -362,7 +362,7 @@ impl Supervisor<'_> {
         for workspace in left {
             if self.run_session_open(&workspace.workspace_id)? {
                 info!(run_id = %run.id(), "run {}: stopping the resume wrapper {} left by an earlier attempt; its session has ended", run.id(), workspace.workspace_id);
-                self.cmux.close(&workspace.workspace_id)?;
+                stop_session(self.cmux, &workspace.workspace_id, StopRoute::Resume)?;
                 self.queue.record_workspace_closed(
                     run.id(),
                     &workspace.workspace_id,
@@ -455,7 +455,7 @@ impl Supervisor<'_> {
             EventKind::WorkspaceCreated,
             json!({"workspace_id": workspace, "resume_attempt": attempt}),
         ) {
-            return Err(match self.cmux.close(&workspace) {
+            return Err(match stop_session(self.cmux, &workspace, StopRoute::Resume) {
                 Ok(()) => error.context(format!(
                     "the resume's background wrapper {workspace} of run {} could not be recorded and was stopped",
                     run.id()
@@ -660,7 +660,7 @@ impl Supervisor<'_> {
         let closed = verdict.closed
             || !verdict.exit_timed_out
                 && !reviewed
-                && match stop_run_session(self.cmux, workspace) {
+                && match stop_run_session(self.cmux, workspace, StopRoute::Resume) {
                     Ok(()) => true,
                     Err(error) => {
                         warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: the resume's wrapper {workspace} could not be stopped: {error:#}", slot.run.id());

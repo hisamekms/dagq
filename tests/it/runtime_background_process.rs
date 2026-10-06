@@ -12,7 +12,10 @@ use crate::runtime_support;
 
 use dagq::application::ProcessControl;
 use dagq::application::naming::shell_join;
-use dagq::domain::{EventKind, LeaseToken, background_wrapper::BackgroundHandle};
+use dagq::domain::{
+    EventKind, LeaseToken,
+    background_wrapper::{BackgroundHandle, StopSignal, WrapperStop},
+};
 use dagq::infrastructure::{
     adapters::{Cmux, SystemProcesses},
     background::BackgroundWrappers,
@@ -353,6 +356,12 @@ fn a_canceled_landing_leaves_nothing_of_the_background_session() {
     let closes = payloads(&detail, "workspace_closed");
     assert_eq!(closes.len(), 1, "{closes:?}");
     assert_eq!(closes[0]["workspace_id"], json!(wrapper.to_string()));
+    // The stop of the handle after the review is recorded with its route.
+    let stops = payloads(&detail, "wrapper_stopped");
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0]["route"], "after_review");
+    assert_eq!(stops[0]["workspace_id"], json!(wrapper.to_string()));
+    assert_eq!(stops[0]["pid"], json!(wrapper.pid));
     nothing_left(&db);
 }
 
@@ -519,7 +528,202 @@ fn the_sweep_stops_an_ended_background_session_while_cmux_cannot_list() {
         closes,
         [&json!({"workspace_id": handle, "by": "supervisor", "reason": "superseded"})]
     );
+    // The wrapper ran when the sweep stopped it: by SIGTERM, or SIGKILL
+    // after the grace, never `gone` (task 1657).
+    let stops = payloads(&detail, "wrapper_stopped");
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0]["route"], "sweep");
+    assert_eq!(stops[0]["workspace_id"], json!(handle));
+    assert_eq!(stops[0]["pid"], json!(wrapper.pid));
+    assert!(
+        ["sigterm", "sigkill"].contains(&stops[0]["signal"].as_str().unwrap()),
+        "{stops:?}"
+    );
+    assert!(stops[0]["children_killed"].is_u64(), "{stops:?}");
     let calls = fs::read_to_string(cmux_stub(&db).with_file_name("calls")).unwrap();
     assert!(!calls.contains("list-windows"), "{calls}");
     assert!(!calls.contains("WS-EARLIER"), "{calls}");
+}
+
+/// Stops, when a test ends (a failing one included), the wrapper and the
+/// turn of [`wrapper_with_turn`] while they show the start they had.
+struct StopsWrapper(BackgroundHandle, u32, Option<String>);
+
+impl Drop for StopsWrapper {
+    fn drop(&mut self) {
+        let _ = BackgroundWrappers {
+            processes: &SystemProcesses,
+        }
+        .stop(&self.0);
+        if self.2.is_some() && SystemProcesses.start_identity(self.1) == self.2 {
+            let _ = SystemProcesses.kill_group(self.1);
+            let _ = SystemProcesses.kill(self.1);
+        }
+    }
+}
+
+/// A wrapper started as the runtime starts one, in `dir`, that runs
+/// `script` (`$TURN` names the file it writes the pid of its turn to);
+/// its handle and the turn's pid, once it started, and the guard that
+/// stops both.
+fn wrapper_with_turn(
+    dir: &Path,
+    script: &str,
+) -> (
+    BackgroundWrappers<'static>,
+    BackgroundHandle,
+    u32,
+    StopsWrapper,
+) {
+    let turn = dir.join("turn.pid");
+    let script = script.replace("$TURN", &shell_join(&[turn.to_str().unwrap().to_owned()]));
+    let wrappers = BackgroundWrappers {
+        processes: &SystemProcesses,
+    };
+    let handle = wrappers
+        .launch(
+            dir,
+            &shell_join(&["sh".into(), "-c".into(), script]),
+            &[],
+            &dir.join("session.log"),
+        )
+        .unwrap();
+    let handle = BackgroundHandle::parse(&handle).unwrap();
+    let started = Instant::now();
+    let pid = loop {
+        if let Some(pid) = fs::read_to_string(&turn)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+        {
+            break pid;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the turn did not start"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let guard = StopsWrapper(handle.clone(), pid, SystemProcesses.start_identity(pid));
+    (wrappers, handle, pid, guard)
+}
+
+/// Acceptance (task 1657): a wrapper that takes SIGTERM (stopping its
+/// turn, as the session wrapper does) ends by it, and its stop says so;
+/// a second stop finds it gone. Nothing is left. (Its turn may still be
+/// dying when the stop looks, so the SIGKILLs sent to it are not fixed.)
+#[test]
+fn a_wrapper_that_takes_sigterm_is_stopped_by_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wrappers, handle, turn, _guard) = wrapper_with_turn(
+        dir.path(),
+        "trap 'kill $!; exit 0' TERM; sleep 30 & echo $! > $TURN.tmp; mv $TURN.tmp $TURN; wait",
+    );
+    let stop = wrappers.stop(&handle).unwrap();
+    assert_eq!(stop.signal, StopSignal::Term, "{stop:?}");
+    assert!(!running(&handle));
+    let started = Instant::now();
+    while pid_alive(turn) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the turn is left"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        wrappers.stop(&handle).unwrap(),
+        WrapperStop {
+            signal: StopSignal::Gone,
+            children_killed: 0
+        }
+    );
+}
+
+/// Acceptance (task 1657): a wrapper that ignores SIGTERM is killed after
+/// the grace, and its turn, in a process group of its own, is sent SIGKILL
+/// too; the stop says `sigkill` and counts the turn. Nothing is left.
+#[test]
+fn a_wrapper_that_ignores_sigterm_is_killed_with_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wrappers, handle, turn, _guard) = wrapper_with_turn(
+        dir.path(),
+        "trap '' TERM; perl -e 'use POSIX; setsid(); exec qw(sleep 30)' & echo $! > $TURN.tmp; mv $TURN.tmp $TURN; sleep 30; wait",
+    );
+    let stop = wrappers.stop(&handle).unwrap();
+    assert_eq!(stop.signal, StopSignal::Kill, "{stop:?}");
+    assert!(stop.children_killed >= 1, "{stop:?}");
+    assert!(!running(&handle));
+    let started = Instant::now();
+    while pid_alive(turn) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the turn is left"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Acceptance (task 1657): the stop of a background wrapper no run
+/// records (a planner's, one whose start was never recorded) goes through
+/// the supervisor's recording backend like a run's, and is recorded as the
+/// queue's own `wrapper_stopped`, on no run, with its handle, pid, signal
+/// and route.
+#[test]
+fn the_stop_of_a_wrapper_no_run_records_is_the_queues_event() {
+    use dagq::{
+        application::{WorkspaceBackend, recording::RecordingBackend},
+        domain::background_wrapper::StopRoute,
+        infrastructure::runtime_store::SqliteOpener,
+    };
+    let (dir, _repo, db) = fixture();
+    let (_, handle, _, _guard) = wrapper_with_turn(
+        dir.path(),
+        "trap 'kill $!; exit 0' TERM; sleep 30 & echo $! > $TURN.tmp; mv $TURN.tmp $TURN; wait",
+    );
+    let cmux = Cmux {
+        executable: dir.path().join("no-cmux"),
+    };
+    let recording = RecordingBackend::over(
+        &cmux,
+        Arc::new(SqliteOpener {
+            db: db.clone(),
+            generators: clock::system(),
+            actor: None,
+        }),
+        None,
+        || None,
+    )
+    .stopping_left_turns(Arc::new(SystemProcesses));
+    let stop = recording
+        .stop_background(&handle.to_string(), StopRoute::Planner)
+        .unwrap()
+        .expect("the cmux adapter tells how the stop ended");
+    assert_ne!(stop.signal, StopSignal::Gone, "{stop:?}");
+    assert!(!running(&handle));
+    let recorded: Vec<(Option<String>, Value)> = Connection::open(&db)
+        .unwrap()
+        .prepare("SELECT run_id, payload FROM run_events WHERE kind = 'wrapper_stopped'")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                serde_json::from_str(&row.get::<_, String>(1)?).unwrap(),
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        recorded,
+        [(
+            None,
+            json!({
+                "workspace_id": handle.to_string(),
+                "pid": handle.pid,
+                "signal": stop.signal.as_str(),
+                "children_killed": stop.children_killed,
+                "left_turn_killed": false,
+                "route": "planner",
+            })
+        )]
+    );
 }

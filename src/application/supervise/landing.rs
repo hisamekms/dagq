@@ -1078,7 +1078,7 @@ impl Supervisor<'_> {
             }
             None => Ok(run.clone()),
             Some(attempt) => {
-                match stop_run_session(self.cmux, &session.workspace) {
+                match stop_run_session(self.cmux, &session.workspace, StopRoute::AfterReview) {
                     Ok(()) => self.queue.record_runtime_event(
                         run.id(),
                         EventKind::WorkspaceClosed,

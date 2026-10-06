@@ -27,6 +27,7 @@
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::Priority;
+use crate::domain::background_wrapper::StopRoute;
 use crate::domain::language::with_instruction;
 use crate::domain::light_slots::{self, ClaimRoom};
 use crate::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
@@ -148,7 +149,9 @@ mod triage;
 mod update;
 mod waiting;
 
-pub(crate) use self::background::{left_planner_turn, left_turn, stop_left_turn, stop_run_session};
+pub(crate) use self::background::{
+    left_planner_turn, left_turn, stop_left_turn, stop_run_session, stop_session,
+};
 use self::broker::broker_refused;
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub use self::claim_defer::read_conflicts_at_start;
@@ -2844,7 +2847,7 @@ impl Supervisor<'_> {
         if let Some(workspace) = workspace {
             if session_may_live {
                 info!(run_id = %run.id(), "run {}: resume workspace {workspace} is kept; its session may still run", run.id());
-            } else if let Err(error) = stop_run_session(self.cmux, &workspace) {
+            } else if let Err(error) = stop_run_session(self.cmux, &workspace, StopRoute::Resume) {
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the resume's session {workspace} could not be stopped: {error:#}", run.id());
             }
         }
@@ -3639,7 +3642,7 @@ fn close_workspace(
     run: &TaskRun,
 ) -> Result<TaskRun> {
     let workspace = run.workspace_id().context("missing workspace")?;
-    match stop_run_session(cmux, workspace) {
+    match stop_run_session(cmux, workspace, StopRoute::AfterReview) {
         Ok(()) => queue.workspace_closed(run.id(), token),
         Err(error) => {
             let message = format!("session {workspace} could not be stopped: {error:#}");

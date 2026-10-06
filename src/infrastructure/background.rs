@@ -18,7 +18,10 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::{application::ProcessControl, domain::background_wrapper::BackgroundHandle};
+use crate::{
+    application::ProcessControl,
+    domain::background_wrapper::{BackgroundHandle, WrapperStop, wrapper_stop},
+};
 
 /// How long a wrapper sent SIGTERM is given to stop its turns and exit
 /// before its groups are killed.
@@ -125,10 +128,12 @@ impl BackgroundWrappers<'_> {
     /// Stop the wrapper `handle` names and what it started; nothing for a
     /// wrapper that is gone. The processes it started are listed first,
     /// since they are init's once it dies, and each is killed only while
-    /// its pid shows the start it was listed with.
-    pub fn stop(&self, handle: &BackgroundHandle) -> Result<()> {
+    /// its pid shows the start it was listed with. Says how the wrapper
+    /// ended and how many of those processes were sent SIGKILL
+    /// ([`wrapper_stop`], task 1657).
+    pub fn stop(&self, handle: &BackgroundHandle) -> Result<WrapperStop> {
         if !self.alive(handle) {
-            return Ok(());
+            return Ok(wrapper_stop(false, false, 0));
         }
         let started: Vec<(u32, Option<String>)> = self
             .processes
@@ -137,7 +142,8 @@ impl BackgroundWrappers<'_> {
             .map(|pid| (pid, self.processes.start_identity(pid)))
             .collect();
         signal(handle.pid as i32, libc::SIGTERM)?;
-        if !self.gone_within(handle, TERM_GRACE) {
+        let exited = self.gone_within(handle, TERM_GRACE);
+        if !exited {
             // The wrapper leads its group (it calls setsid(2) as it starts),
             // or it is in the group of the shell that started it.
             let _ = signal(-(handle.pid as i32), libc::SIGKILL);
@@ -145,11 +151,13 @@ impl BackgroundWrappers<'_> {
                 signal(handle.pid as i32, libc::SIGKILL)?;
             }
         }
+        let mut killed = 0;
         for (pid, start) in &started {
             if start.is_some() && self.processes.start_identity(*pid) == *start {
                 // A turn leads a group of its own; another process may not.
                 let _ = signal(-(*pid as i32), libc::SIGKILL);
                 let _ = signal(*pid as i32, libc::SIGKILL);
+                killed += 1;
             }
         }
         if !self.gone_within(handle, KILL_WAIT) {
@@ -158,7 +166,7 @@ impl BackgroundWrappers<'_> {
                 handle.pid
             );
         }
-        Ok(())
+        Ok(wrapper_stop(true, exited, killed))
     }
 
     fn gone_within(&self, handle: &BackgroundHandle, limit: Duration) -> bool {

@@ -4,8 +4,8 @@ type: design
 title: "Run workspaces（runのsessionの記録と停止）"
 status: current
 created: 2026-09-26
-updated: 2026-10-05 # task 1440: a run's session is a background wrapper; the sweep stops leftover wrappers without cmux; run close-workspaces is refused
-last_verified: 2026-10-05 # task 1440
+updated: 2026-10-06 # task 1657: each stop of a wrapper is also recorded as wrapper_stopped; task 1440: a run's session is a background wrapper; the sweep stops leftover wrappers without cmux; run close-workspaces is refused
+last_verified: 2026-10-06 # task 1657; task 1440
 scope: runtime
 related:
   - adr-t1433-3
@@ -23,7 +23,7 @@ runが開いたsessionは、最初のsession（`task_runs.workspace_id`と`works
 
 **記録の無いsession**（task 806の読み替え）: 起動したwrapperのhandleを記録できなければ（最初のsessionは`TaskRun::workspace_id`、resumeはrun_eventの`workspace_created`、その後の`wrapper_launched`）、supervisorはそのwrapperを止めてからerrorを返す。wrapperは自分の`wrapper_launched`を見つけるまで登録しない（45秒で`wrapper_refused`をlogに書いて終わる）ので、記録の無いwrapperが依頼を取ることは無い。backgroundのwrapperには閉じる自分のworkspaceが無い。`WorkspaceBackend::workspaces_described`でdescriptionから探して閉じる経路は、runには無く、workspaceで開くruntimeのplannerにだけ残る（task 1441まで。[`plan` / `planners`](plan-planners.md)）。wrapperを起動できない失敗は、envの`DAGQ_RUN_ID`が名指すrunの`backend_call_failed`（op `launch_background`）になる。
 
-runが終わる経路ごとの停止（task 180）。止めるのはhandleの`close`（wrapperとそれが起動したturnを止める。cmuxに聞かない）で、止めたら`workspace_closed`（`workspace_id`はhandle）、失敗は`cleanup_failed`を記録する。生きているかは`run_session_open`（handleのpidが記録した起動時刻のまま居るか、残ったturnが居るか）で見る。ADR-t1433-3より前のworkspaceのIDは閉じない（人が自分のterminalで閉じる）が、扱いは経路で分かれる: `close_session`・`finish_resume`・`give_up_resume`は`stop_run_session`を通り、supervisor logに人に任せたことを書いて止めたものとして扱う（`close_session`は`workspace_closed`を、`finish_resume`は`resume_finished`の`workspace_closed: true`を記録し、`give_up_resume`は何も記録しない）。`close_open_workspaces`・掃除・`close_left_resume_workspaces`・`close_lost_workspace`は`run_session_open`で動いていないとみなして黙って飛ばし、何も記録しない。
+runが終わる経路ごとの停止（task 180）。止めるのはhandleの`stop_background`（wrapperとそれが起動したturnを止める。cmuxに聞かない）で、止めたら`workspace_closed`（`workspace_id`はhandle）、失敗は`cleanup_failed`を記録する。止めるたびに、どう終わったか（SIGTERM・SIGKILL・既に居なかった）と止めた経路を`wrapper_stopped`にも記録する（task 1657。[非対話のworker](headless-worker.md)の「停止の記録」）。生きているかは`run_session_open`（handleのpidが記録した起動時刻のまま居るか、残ったturnが居るか）で見る。ADR-t1433-3より前のworkspaceのIDは閉じない（人が自分のterminalで閉じる）が、扱いは経路で分かれる: `close_session`・`finish_resume`・`give_up_resume`は`stop_run_session`を通り、supervisor logに人に任せたことを書いて止めたものとして扱う（`close_session`は`workspace_closed`を、`finish_resume`は`resume_finished`の`workspace_closed: true`を記録し、`give_up_resume`は何も記録しない）。`close_open_workspaces`・掃除・`close_left_resume_workspaces`・`close_lost_workspace`は`run_session_open`で動いていないとみなして黙って飛ばし、何も記録しない。
 
 - **着地**: supervisorのslotが`integrated`（か`succeeded`）で終わったら、止めた記録の無いsessionのうちまだ動いているwrapperを止める（`close_open_workspaces`、`workspace_closed`、`by: supervisor`、`reason: ended`）。sessionのwrapperはその前に終了の依頼と停止で終わっているので、残るのは時間切れで手放したresumeのwrapperなど
 - **failed / interrupted**: triageが止める（[Triage](triage.md#triage-supervisor)の7）。`exhaust_resumes`で人に渡すときも同じ

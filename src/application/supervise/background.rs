@@ -5,8 +5,8 @@
 
 use super::*;
 use crate::domain::background_wrapper::{
-    BACKGROUND_FLAG, BackgroundHandle, HeadlessWrapper, is_background, launch_of, session_log_name,
-    wrapper_is_recorded,
+    BACKGROUND_FLAG, BackgroundHandle, HeadlessWrapper, StopRoute, is_background, launch_of,
+    session_log_name, wrapper_is_recorded,
 };
 
 impl Supervisor<'_> {
@@ -95,7 +95,7 @@ impl Supervisor<'_> {
             }),
         );
         if let Err(error) = recorded {
-            return Err(match self.cmux.close(handle) {
+            return Err(match stop_session(self.cmux, handle, StopRoute::Unrecorded) {
                 Ok(()) => error.context(format!(
                     "the start of the background wrapper {handle} of run {} could not be recorded, and it was stopped",
                     run.id()
@@ -239,19 +239,39 @@ pub(crate) fn run_session_gone(sessions: &dyn WorkspaceBackend, id: &str) -> Res
 }
 
 /// Stop the session `id` a run recorded: its background wrapper and what
-/// it started (`close` on the handle, which asks no cmux, ADR-t1404-1
-/// decision 3). A workspace ID, a session opened in a workspace before
+/// it started (`stop_background` on the handle, which asks no cmux,
+/// ADR-t1404-1 decision 3), recorded as `wrapper_stopped` with `route`
+/// (task 1657). A workspace ID, a session opened in a workspace before
 /// ADR-t1433-3, is not closed: cmux is not called for a run's session any
 /// more, and a person closes the workspace in their own terminal
 /// (decision 3); it counts as stopped.
-pub(crate) fn stop_run_session(sessions: &dyn WorkspaceBackend, id: &str) -> Result<()> {
+pub(crate) fn stop_run_session(
+    sessions: &dyn WorkspaceBackend,
+    id: &str,
+    route: StopRoute,
+) -> Result<()> {
     if !is_background(id) {
         info!(
             "the workspace {id} of a session opened before ADR-t1433-3 is left to a person to close"
         );
         return Ok(());
     }
-    sessions.close(id)
+    sessions.stop_background(id, route).map(drop)
+}
+
+/// Stop the session `id`: a background wrapper's handle by
+/// `stop_background`, recorded as `wrapper_stopped` with `route` (task
+/// 1657), a workspace by its `close`.
+pub(crate) fn stop_session(
+    sessions: &dyn WorkspaceBackend,
+    id: &str,
+    route: StopRoute,
+) -> Result<()> {
+    if is_background(id) {
+        sessions.stop_background(id, route).map(drop)
+    } else {
+        sessions.close(id)
+    }
 }
 
 #[cfg(test)]
@@ -295,6 +315,17 @@ mod tests {
             self.calls.lock().unwrap().push(format!("close {id}"));
             Ok(())
         }
+        fn stop_background(
+            &self,
+            id: &str,
+            route: StopRoute,
+        ) -> Result<Option<crate::domain::background_wrapper::WrapperStop>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("stop {id} {}", route.as_str()));
+            Ok(None)
+        }
         fn set_color(&self, _: &str, _: &str) -> Result<()> {
             unimplemented!()
         }
@@ -326,7 +357,8 @@ mod tests {
     }
 
     /// A run's background handle is judged and stopped through the
-    /// backend's `exists` and `close` on the handle (which ask no cmux);
+    /// backend's `exists` and `stop_background` on the handle (which ask
+    /// no cmux), with the route the stop is recorded with (task 1657);
     /// a workspace ID from before ADR-t1433-3 is never asked of the
     /// backend: it counts as not open, and as stopped, left to a person
     /// (decision 3).
@@ -335,15 +367,18 @@ mod tests {
         let sessions = Sessions::default();
         let handle = "background:4242:Mon_Oct__5_10:00:00_2026";
         assert!(run_session_open(&sessions, handle).unwrap());
-        stop_run_session(&sessions, handle).unwrap();
+        stop_run_session(&sessions, handle, StopRoute::AfterReview).unwrap();
         assert_eq!(
             sessions.calls(),
-            [format!("exists {handle}"), format!("close {handle}")]
+            [
+                format!("exists {handle}"),
+                format!("stop {handle} after_review")
+            ]
         );
         let sessions = Sessions::default();
         let workspace = "01234567-89AB-4DEF-8123-000000000000";
         assert!(!run_session_open(&sessions, workspace).unwrap());
-        stop_run_session(&sessions, workspace).unwrap();
+        stop_run_session(&sessions, workspace, StopRoute::AfterReview).unwrap();
         assert!(sessions.calls().is_empty(), "{:?}", sessions.calls());
     }
 
@@ -366,6 +401,20 @@ mod tests {
         let workspace = "01234567-89AB-4DEF-8123-000000000000";
         assert!(!run_session_gone(&ended, workspace).unwrap());
         assert_eq!(ended.calls(), [format!("exists {handle}")]);
+    }
+
+    /// `stop_session` stops a background handle by `stop_background` with
+    /// its route, and closes a workspace (a planner's) as before.
+    #[test]
+    fn a_session_is_stopped_by_its_kind() {
+        let sessions = Sessions::default();
+        let handle = "background:4242:Mon_Oct__5_10:00:00_2026";
+        stop_session(&sessions, handle, StopRoute::Sweep).unwrap();
+        stop_session(&sessions, "WS-1", StopRoute::Planner).unwrap();
+        assert_eq!(
+            sessions.calls(),
+            [format!("stop {handle} sweep"), "close WS-1".to_owned()]
+        );
     }
 
     /// Only `"workspace"` is warned of, and only once: a supervisor that

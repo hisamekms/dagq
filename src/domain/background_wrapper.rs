@@ -338,6 +338,102 @@ pub fn current_background_session(events: &[super::RunEvent]) -> Option<Backgrou
     last_background_session(events)
 }
 
+/// How the stop of a background wrapper ended (task 1657): the `signal`
+/// of `wrapper_stopped`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopSignal {
+    /// It exited within the grace after SIGTERM.
+    Term,
+    /// It was still running after the grace and was sent SIGKILL.
+    Kill,
+    /// It was not running when the stop began: nothing was signaled.
+    Gone,
+}
+
+impl StopSignal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Term => "sigterm",
+            Self::Kill => "sigkill",
+            Self::Gone => "gone",
+        }
+    }
+}
+
+/// What the stop of a background wrapper did: how the wrapper ended and to
+/// how many of the processes it had started SIGKILL was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrapperStop {
+    pub signal: StopSignal,
+    pub children_killed: usize,
+}
+
+/// The stop of a wrapper that was `running` when the stop began, that
+/// `exited_after_term` within the grace after SIGTERM, and whose started
+/// processes were sent SIGKILL `children_killed` times. A wrapper that
+/// was not running was sent nothing, its children neither.
+pub fn wrapper_stop(running: bool, exited_after_term: bool, children_killed: usize) -> WrapperStop {
+    match (running, exited_after_term) {
+        (false, _) => WrapperStop {
+            signal: StopSignal::Gone,
+            children_killed: 0,
+        },
+        (true, true) => WrapperStop {
+            signal: StopSignal::Term,
+            children_killed,
+        },
+        (true, false) => WrapperStop {
+            signal: StopSignal::Kill,
+            children_killed,
+        },
+    }
+}
+
+/// Which path of the runtime stopped a background wrapper: the `route` of
+/// `wrapper_stopped` (task 1657).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopRoute {
+    /// The session ended after its review (or its rebase or revise) and
+    /// its handle is stopped before the run lands or asks.
+    AfterReview,
+    /// A landed (or succeeded) run's sessions still running.
+    Landed,
+    /// A failed run's sessions, stopped by its triage: a `stop` answer to
+    /// `stalled`, a cancel answered on a recovery ask, a recovery job that
+    /// gave up. A cancel answered on a landing ask finds the session
+    /// stopped after the review, and a run ended outside the supervisor is
+    /// stopped by the sweep.
+    Triage,
+    /// The sweep of ended runs the triage never takes.
+    Sweep,
+    /// A resume's session: the end of the resume, or one given up on.
+    Resume,
+    /// The session lost while the run waited, before it is opened again.
+    Reopen,
+    /// A wrapper whose start could not be recorded.
+    Unrecorded,
+    /// A headless planner's wrapper.
+    Planner,
+    /// Any other close of a background handle.
+    Close,
+}
+
+impl StopRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AfterReview => "after_review",
+            Self::Landed => "landed",
+            Self::Triage => "triage",
+            Self::Sweep => "sweep",
+            Self::Resume => "resume",
+            Self::Reopen => "reopen",
+            Self::Unrecorded => "unrecorded",
+            Self::Planner => "planner",
+            Self::Close => "close",
+        }
+    }
+}
+
 /// The log in the run dir the background wrapper of a session writes its
 /// output to: `session.log` for the worker's session, one per resume and
 /// per reopening (`resume` is the attempt).
@@ -352,6 +448,47 @@ pub fn session_log_name(resume: Option<usize>, reopen: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wrapper that exits after SIGTERM is `sigterm`, one still running
+    /// after the grace `sigkill`, each with the SIGKILLs sent to what it
+    /// started; one that was not running is `gone`, nothing sent.
+    #[test]
+    fn a_stop_is_told_by_the_wait_after_sigterm_and_the_kills_sent() {
+        assert_eq!(
+            wrapper_stop(true, true, 0),
+            WrapperStop {
+                signal: StopSignal::Term,
+                children_killed: 0
+            }
+        );
+        assert_eq!(
+            wrapper_stop(true, true, 2),
+            WrapperStop {
+                signal: StopSignal::Term,
+                children_killed: 2
+            }
+        );
+        assert_eq!(
+            wrapper_stop(true, false, 1),
+            WrapperStop {
+                signal: StopSignal::Kill,
+                children_killed: 1
+            }
+        );
+        for exited in [true, false] {
+            assert_eq!(
+                wrapper_stop(false, exited, 3),
+                WrapperStop {
+                    signal: StopSignal::Gone,
+                    children_killed: 0
+                }
+            );
+        }
+        assert_eq!(
+            [StopSignal::Term, StopSignal::Kill, StopSignal::Gone].map(StopSignal::as_str),
+            ["sigterm", "sigkill", "gone"]
+        );
+    }
 
     #[test]
     fn a_handle_names_the_pid_and_start_and_reads_back() {

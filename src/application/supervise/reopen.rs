@@ -288,7 +288,7 @@ impl Supervisor<'_> {
         attempt: Option<usize>,
     ) -> bool {
         match self.run_session_open(workspace) {
-            Ok(true) => match self.cmux.close(workspace) {
+            Ok(true) => match stop_session(self.cmux, workspace, StopRoute::Reopen) {
                 Ok(()) => {
                     if let Err(error) = self.queue.record_workspace_closed(
                         run.id(),
@@ -390,7 +390,7 @@ impl Supervisor<'_> {
                 .session_reopened(run.id(), &self.token, &workspace, attempt_no, repaired)
         {
             // Unrecorded, nothing would find the wrapper to stop it.
-            return Err(match self.cmux.close(&workspace) {
+            return Err(match stop_session(self.cmux, &workspace, StopRoute::Reopen) {
                 Ok(()) => error.context(format!(
                     "the reopened background wrapper {workspace} of run {} could not be recorded and was stopped",
                     run.id()

@@ -244,7 +244,7 @@ impl Supervisor<'_> {
         if let Err(error) = self.queue.workspace_created(run.id(), &self.token, &handle) {
             // Unrecorded, the wrapper would run on with nothing to find it
             // by, and its registration is refused (task 806).
-            return Err(match self.cmux.close(&handle) {
+            return Err(match stop_session(self.cmux, &handle, StopRoute::Unrecorded) {
                 Ok(()) => error.context(format!(
                     "the background wrapper {handle} of run {} could not be recorded and was stopped",
                     run.id()

@@ -529,6 +529,16 @@ esac"#,
     assert!(recording.exists(&lost_id).unwrap(), "the turn it left runs");
     recording.close(&lost_id).unwrap();
     assert!(!SystemProcesses.alive(turn) || zombie(turn));
+    // The close names no route of its own; the wrapper was gone and the
+    // turn it left was killed (task 1657).
+    let stops = payloads(&detail(&db), "wrapper_stopped")
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0]["route"], "close");
+    assert_eq!(stops[0]["signal"], "gone");
+    assert_eq!(stops[0]["left_turn_killed"], true);
     assert!(!recording.exists(&lost_id).unwrap());
     // The lost session opened again in the background.
     queue

@@ -44,7 +44,7 @@ pub use crate::application::{
     },
     path_text,
 };
-use crate::domain::background_wrapper::{BackgroundHandle, is_background};
+use crate::domain::background_wrapper::{BackgroundHandle, StopRoute, WrapperStop, is_background};
 use crate::domain::turn::TurnSession;
 use crate::infrastructure::claude_turns::{ClaudeTurnReader, HEADLESS_PERMISSION_MODE};
 use crate::infrastructure::run_env::load_repository_config;
@@ -2627,7 +2627,7 @@ impl WorkspaceBackend for Cmux {
     /// error is the one reported.
     fn close(&self, workspace_id: &str) -> Result<()> {
         if let Some(handle) = BackgroundHandle::parse(workspace_id) {
-            return background_wrappers().stop(&handle);
+            return background_wrappers().stop(&handle).map(drop);
         }
         let _ = self.workspace_action(workspace_id, &["unpin"]);
         let raw = output(
@@ -2637,6 +2637,13 @@ impl WorkspaceBackend for Cmux {
         )?;
         workspace_handle(&raw).context("cmux did not confirm the workspace close")?;
         Ok(())
+    }
+
+    /// The route is the recording's, not read here.
+    fn stop_background(&self, handle: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
+        let parsed = BackgroundHandle::parse(handle)
+            .with_context(|| format!("{handle} is not a background wrapper's handle"))?;
+        background_wrappers().stop(&parsed).map(Some)
     }
 
     fn set_color(&self, workspace_id: &str, color: &str) -> Result<()> {

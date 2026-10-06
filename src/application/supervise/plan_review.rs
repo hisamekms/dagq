@@ -1314,7 +1314,7 @@ impl Supervisor<'_> {
                 if let Some(workspace) = &workspace
                     && self.cmux.exists(workspace)?
                 {
-                    self.cmux.close(workspace)?;
+                    stop_session(self.cmux, workspace, StopRoute::Planner)?;
                     workspace_closed = true;
                 }
                 let (code, reason) = if overdue {

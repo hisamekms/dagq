@@ -1163,6 +1163,21 @@ pub trait WorkspaceBackend {
     /// pinned workspace is unpinned first, since cmux refuses to close one
     /// (ADR-0031); every close dagq makes goes through here.
     fn close(&self, workspace_id: &str) -> Result<()>;
+    /// Stop the background wrapper `handle` names and what it started, as
+    /// [`close`](Self::close) does, and say how it ended: SIGTERM, SIGKILL
+    /// or already gone, and the SIGKILLs sent to what it started (task
+    /// 1657). `route` is the path of the runtime that stops it, which the
+    /// recording backend records with the stop as `wrapper_stopped`; the
+    /// adapter does not read it. A backend that does not tell how a stop
+    /// ended closes the handle and says `None`, and nothing is recorded.
+    fn stop_background(
+        &self,
+        handle: &str,
+        route: crate::domain::background_wrapper::StopRoute,
+    ) -> Result<Option<crate::domain::background_wrapper::WrapperStop>> {
+        let _ = route;
+        self.close(handle).map(|()| None)
+    }
     /// Give the workspace a sidebar color: a cmux color name or `#RRGGBB`.
     fn set_color(&self, workspace_id: &str, color: &str) -> Result<()>;
     /// Show the status pill `key` with `value` and `icon` on the

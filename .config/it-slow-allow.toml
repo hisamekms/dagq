@@ -210,6 +210,12 @@ name = "runtime_adopt::independent_tasks_run_concurrently_and_a_dependent_starts
 reason = "B 境界（守る境界）: concurrent runs, git integrate, supervisor loop"
 task = 1707
 
+# 3.5s alone, 5.4-5.7s beside the module's other tests (task 1657), class B
+[[test]]
+name = "runtime_background_process::a_canceled_landing_leaves_nothing_of_the_background_session"
+reason = "B 境界（守る境界）: real background wrapper through review, landing ask and cancel; supervisor wiring of the after_review wrapper_stopped"
+task = 1657
+
 # 5.397s, class B
 [[test]]
 name = "runtime_background_process::a_detached_wrapper_and_its_turn_outlive_a_killed_supervisor"

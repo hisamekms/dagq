@@ -35,6 +35,14 @@ impl WorkspaceCloser {
             Self::Supervisor => "supervisor",
         }
     }
+    /// The path a session stopped by this closer is recorded with: the
+    /// triage's, or the supervisor's of a landed run.
+    const fn route(self) -> StopRoute {
+        match self {
+            Self::Triage => StopRoute::Triage,
+            Self::Supervisor => StopRoute::Landed,
+        }
+    }
     const fn answer(self) -> &'static str {
         match self {
             Self::Triage => "the run was triaged; closed by the runtime",
@@ -82,7 +90,7 @@ impl Supervisor<'_> {
             let id = workspace.workspace_id;
             let result = self.run_session_open(&id).and_then(|open| {
                 if open {
-                    self.cmux.close(&id)?;
+                    stop_session(self.cmux, &id, closer.route())?;
                 }
                 Ok(open)
             });
@@ -215,7 +223,7 @@ impl Supervisor<'_> {
                 continue;
             }
             let workspace = &candidate.workspace_id;
-            match self.cmux.close(workspace) {
+            match stop_session(self.cmux, workspace, StopRoute::Sweep) {
                 Ok(()) => {
                     info!(run_id = %candidate.run_id, "run {} is {}; stopped its background wrapper {workspace} that still ran", candidate.run_id, candidate.status.as_str());
                     self.queue.record_workspace_closed(

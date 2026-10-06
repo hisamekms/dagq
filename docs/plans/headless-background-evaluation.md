@@ -4,7 +4,7 @@ type: plan
 title: 非対話の worker の workspace のコスト（cmux の呼び出しの失敗・時間切れ・残った workspace・startup・待ちの間の workspace）の基準値と、background の wrapper に切り替えた後の評価のコマンドと戻す基準の案
 status: active
 created: 2026-10-03
-updated: 2026-10-04
+updated: 2026-10-06 # task 1657: wrapper_stopped as recorded (signal, children_killed, left_turn_killed, route) and the start of its instrumentation
 owners:
   - hisamekms
 tags:
@@ -152,7 +152,7 @@ F=<印の時刻>; T=<F + 7 日以上>
 for k in run_claimed provider_switched backend_call_failed workspace_created workspace_closed resume_finished \
          turn_started turn_finished wrapper_started agent_started run_waiting_started run_waiting_ended \
          run_adopted session_reopen_failed wrapper_heartbeat_expired recovery_requested auto_repaired \
-         wrapper_launched wrapper_stopped; do      # wrapper_stopped は task 1405 に無く 0 件（止めた記録は handle の workspace_closed）
+         wrapper_launched wrapper_stopped update_installed; do   # wrapper_stopped は task 1657 から。その計装の開始 I と、それより前の未計装の停止は下の「wrapper_stopped の計装の開始」
   dagq events --all --full --kind $k --since $F --until $T --limit 20000
 done | jq -s '[.[].events[]]' > ev.json
 jq -c 'group_by(.kind) | map({(.[0].kind): length}) | add' ev.json   # どの kind も --limit に届いていないことを確かめる
@@ -270,7 +270,8 @@ jq -c 'map(select(.g | test("headless|codex"))) | group_by(.g) | map({g: .[0].g,
   reopen_failed: (map(select(.kind == "session_reopen_failed")) | length),
   recovery: (map(select(.kind == "recovery_requested")) | map(.payload.alert) | group_by(.) | map({(.[0]): length}) | add),
   repaired: (map(select(.kind == "auto_repaired")) | map(.payload.repair) | group_by(.) | map({(.[0]): length}) | add),
-  stopped_by_signal: (map(select(.kind == "wrapper_stopped")) | map(.payload.signal) | group_by(.) | map({(.[0]): length}) | add)})[]' tagged.json
+  stopped_by_signal: (map(select(.kind == "wrapper_stopped" and .created_at >= $i)) | map("\(.payload.route)/\(.payload.signal)\(if .payload.left_turn_killed then "+left_turn" else "" end)\(if .payload.children_killed > 0 then "+children" else "" end)") | group_by(.) | map({(.[0]): length}) | add),
+  unmeasured_stops: (map(select(.kind == "workspace_closed" and .created_at < $i and (.payload.workspace_id // "" | startswith("background:")))) | length)})[]' --arg i "$I" tagged.json
 # 引き継ぎをまたいだ turn と、その結末
 jq -c --slurpfile ho ho.json 'map(select(.g | test("headless|codex")) | select(.kind | IN("turn_started", "turn_finished")))
   | group_by(.run_id) | map(sort_by(.id) | . as $r | [range(0; length) as $i
@@ -284,7 +285,7 @@ jq -c 'map(select(.g | test("-bg$")) | select(.kind == "wrapper_heartbeat_expire
        | .[] | {at: .created_at, kind, task: .task_id, run: .run_id[0:8], p: (.payload | tostring | .[0:160])}' tagged.json
 ```
 
-process の残りは、終わった run（読んだ時点で `integrated`・`failed`・`cancelled` など）の wrapper か turn の process が生きているかで数える。runtime が残りを止めた記録（`wrapper_stopped` の強制の signal（`SIGKILL`）。綴りは仮）と、掃除が見つけて止めた記録を数え、加えて人か inbox が host で確かめる（worker は host を見ない）:
+process の残りは、終わった run（読んだ時点で `integrated`・`failed`・`cancelled` など）の wrapper か turn の process が生きているかで数える。runtime が wrapper を止めるたびに残す `wrapper_stopped`（task 1657。[非対話のworker](../design/supervisor-lifecycle/headless-worker.md) の「停止の記録」）で、強制の停止を数える: `payload.signal` が `sigkill`（SIGTERM の後の 3 秒で終わらず SIGKILL を送った）か、`payload.left_turn_killed` が真（先に死んだ wrapper が残した turn を止めた）。`sigterm`（SIGTERM で終わった）と `gone`（止め始めに wrapper が居なかった）は強制でない。`payload.children_killed`（wrapper が起動した process のうち、wrapper が終わった直後にまだ見えたものに SIGKILL を送った数）は、wrapper が SIGTERM で turn を止めて終わった直後の、まだ終わりきらない turn も数えうるので強制の判定に入れず、参考に並べる（`sigterm` で多く出るなら wrapper の turn の止め方を疑う）。止めた経路は `payload.route`（`after_review`・`landed`・`triage`・`sweep`・`resume`・`reopen`・`unrecorded`・`planner`・`close`）で、上の `stopped_by_signal` は `route/signal` ごと（残った turn を止めたら `+left_turn`、子に SIGKILL を送ったら `+children`）に数える。`sweep` の停止は終わった run に残った wrapper を掃除が見つけて止めた記録でもある。数えるのは計装の開始 I より後の `wrapper_stopped` だけで、それより前の background の wrapper の停止（`workspace_closed` の `workspace_id` が `background:` で始まるもの）は `unmeasured_stops` として「未計装（停止結果は未知）」に別に数える。加えて人か inbox が host で確かめる（worker は host を見ない）:
 
 ```sh
 # 走っている run の ID を dagq status から作り、command line に run dir（runs/<run ID>）を持つ process のうち、
@@ -295,6 +296,24 @@ ps -axo pid,ppid,lstart,command | grep -E 'runs/[0-9a-f-]{36}' | grep -v grep \
 ```
 
 この確認は wrapper 以外も拾う。この文書を書いた時点（2026-10-02T15:50Z、切り替えの前）に流すと、`dagq status` の `runs` に無い 10 run の run dir を持つ process が約 20 個出たが、全て test や検証が残した process（親が 1 の `worktree/target/{debug,llvm-cov-target/debug}/dagq --db <一時の DB>`、test の `dagq broker start`・`dagq supervise --once`、test の stub の `claude-headless`）か、終わった直後の run の process（数分後に消えた）か、`dagq status` の `runs` に載らない工程（e2e など）の run の process で、session の wrapper は無かった。読むときは、数分空けて 2 回流して両方に出るものだけを、command line が session の wrapper（`dagq ... session`）か turn（`claude -p`・`codex exec`）のものに絞って数える。test が残した process は切り替えと関係しない既存の残りなので、基準として件数だけ並べる。
+
+### wrapper_stopped の計装の開始
+
+`wrapper_stopped` は task 1657 の着地では記録され始めない。稼働中の固定バイナリと supervisor がその commit を含む build に更新されてから記録される。そこで計装の開始 I を、task 1657 の着地 commit C を含む build が稼働した時刻とし、次の 2 つの遅い方で特定する:
+
+1. `update_installed`（plugin だけの更新 `plugin_only: true` を除く）のうち `payload.commit`（無ければ `payload.version` の `+` の後の commit）が C を祖先に持つ最初のものの時刻（固定バイナリが C を含む build になった）
+2. その version への `supervisor_handed_off`（`payload.version`）の最初の時刻（supervisor が exec でその build に入れ替わった）。lease を持つ run が無いまま入れ替わって `supervisor_handed_off` が無ければ、1 の後の最初の `wrapper_stopped` の時刻を使う（未計装の build は `wrapper_stopped` を書かない）
+
+```sh
+C=$(git log --format=%H --grep='^Dagq-Task: 1657$' main | tail -1)     # task 1657 の着地 commit
+jq -r 'map(select(.kind == "update_installed" and .payload.plugin_only != true)) | sort_by(.id)[] | "\(.created_at) \(.payload.commit // ((.payload.version // "") | split("+")[1] // ""))"' ev.json \
+  | while read at commit; do git merge-base --is-ancestor "$C" "$commit" 2>/dev/null && { echo "$at $commit"; break; }; done   # 1 の時刻と commit
+dagq events --all --full --kind supervisor_handed_off --since $F --until $T --limit 20000 \
+  | jq -r --arg c <1 の commit> '[.events[] | select(.payload.version // "" | endswith($c))] | min_by(.id) | .created_at'   # 2 の時刻
+I=<1 と 2 の遅い方>
+```
+
+`git merge-base --is-ancestor` は C が祖先なら 0 で終わる（commit が手元に無ければ `git fetch` してから）。I より前の background の wrapper の停止は「未計装（停止結果は未知）」として別に数え（上の `unmeasured_stops`）、process の残りの 5% の分母と、min_samples の「止める経路ごと」の回数には I より後の `wrapper_stopped` だけを数える。窓の始まり F が I より前なら、F から I までの停止は未計装として並べるだけで、率を読むのは I からにする。
 
 ### kpi の前後比較
 
@@ -318,7 +337,7 @@ jq -c '.compare.confounders[] | select(.kind == "mark_recorded") | {at, label, p
 | `-bg` の turn | 70 turn | 基準の 74 turn と同じ程度。turn の失敗の率（基準 3/74）を比べるため |
 | 引き継ぎをまたいだ `-bg` の turn | 20 turn | 基準は 28 turn。切り離した wrapper が supervisor の exec をまたいで生きることが (a) の中心なので、自動更新の着地（日に数回）で自然に集まる |
 | `needs_session` の resume の `-bg` の session | 5 回 | resume は別の wrapper を起動する経路。基準の Claude 非対話は resume の workspace が 13 個 |
-| 止める経路ごと（review の後の終了、`stalled` の `stop`、cancel、復旧 job の `stop_processes`、後始末の掃除） | review の後 20 回、ほかは 1 回以上（無ければ planner が task を選んで印を付けるか、使い捨ての queue のスモークで人が確かめる） | process の残りは止める経路ごとに起きうる。review の後の終了は毎 run 通る |
+| 止める経路ごと（review の後の終了 `route: after_review`、`stalled` の `stop`（失敗した run の triage が止める `route: triage`。run の `stall_resolved` の `answered_stop` で分ける）、cancel（着地の ask への cancel は review の後に既に止めた `after_review`、復旧の ask への cancel は `triage`、supervisor の外で終わった run は `sweep` に出るので、run の ask の答えで分ける）、後始末の掃除 `route: sweep`。復旧 job の `stop_processes` は wrapper でなく pid を止めるので `wrapper_stopped` は無く、`auto_repaired` の `processes` の `killed` で数え、その run の wrapper はその後の `after_review` か `triage` で止まる） | review の後 20 回、ほかは 1 回以上（無ければ planner が task を選んで印を付けるか、使い捨ての queue のスモークで人が確かめる）。数えるのは計装の開始 I より後の `wrapper_stopped` だけで、未計装の停止は回数に入れない | process の残りは止める経路ごとに起きうる。review の後の終了は毎 run 通る |
 | 待ち（`run_waiting_started`）の `-bg` の run | 3 回（無くても評価は進め、標本が無いと書く） | 基準の Claude 非対話は 0 回で、待ちの間の資源（C4）は標本が集まってから読む |
 
 ## 3. 戻す基準の案
@@ -328,7 +347,7 @@ jq -c '.compare.confounders[] | select(.kind == "mark_recorded") | {at, label, p
 | 項目 | 戻す（戻すかを人が決める）基準の案 | 基準値 | 理由 |
 |---|---|---|---|
 | turn の失敗 | min_samples を満たした `-bg` の turn で、`succeeded` 以外（`usage_limit`・`authentication` の provider の止まりを除く）の率が 8% を超え、かつ 4 件以上。または `failure: launch`（wrapper が turn を起動できない）が 2 件以上 | Claude 非対話 3/74（4%、全て heartbeat の途絶えの後の `stopped`）、`launch` 0 | 基準の 2 倍を超える幅。本数が少ない間の 1〜2 件で動かないよう件数の下限を置く。`launch` は切り離した起動そのもの（env・cwd・process group）の不具合を示すので低い件数で見る |
-| process の残り | 1 件で: 終わった run の wrapper か turn の process が生きていた（掃除が強制の signal で止めた記録か、host の確認で見つかった）。または `wrapper_stopped` の強制の signal が、終了の依頼と SIGTERM で終わるはずの経路（review の後の終了）の 5% を超える | workspace の run は close（hangup）で止まり、残りは記録の上で 0（`idle_process` の 1 件は test が残した `dagq service serve` で wrapper ではない） | 残った process は CPU と worktree の lock を抱え、名前で止められない（AGENTS.md の signal の規則）。workspace の close が暗に止めていたものを signal で止め損ねていないかを最初に見る |
+| process の残り | 1 件で: 終わった run の wrapper か turn の process が生きていた（掃除が止めた `wrapper_stopped`（`route: sweep`）の `signal` が `gone` 以外か、host の確認で見つかった）。または計装の開始 I より後の `route: after_review` の `wrapper_stopped` のうち強制の停止（`signal: sigkill` か `left_turn_killed` が真）が 5% を超える（分母は I より後の `after_review` の `wrapper_stopped` の数で、未計装の停止を入れない） | workspace の run は close（hangup）で止まり、残りは記録の上で 0（`idle_process` の 1 件は test が残した `dagq service serve` で wrapper ではない） | 残った process は CPU と worktree の lock を抱え、名前で止められない（AGENTS.md の signal の規則）。workspace の close が暗に止めていたものを signal で止め損ねていないかを最初に見る |
 | adopt の失敗 | 1 件で: 引き継ぎ（`supervisor_handed_off`）か stale な lease の引き継ぎ（`run_adopted`）の後に、生きている `-bg` の wrapper を見失って run が `interrupted`・`failed` になった、または同じ run に 2 つの wrapper が登録された。加えて、引き継ぎをまたいだ `-bg` の turn のうち `succeeded` 以外が 10% を超えた | 引き継ぎをまたいだ Claude 非対話の turn 28 のうち `succeeded` 26、`stopped` 2（引き継ぎでなく heartbeat の途絶え）。`run_adopted` 0、`session_reopen_failed` 0 | 切り離した wrapper は pid と起動時刻で識別し直すので、識別を誤ると turn を失うか二重に走らせる。二重の wrapper は同じ worktree に 2 つの agent を走らせるので 1 件で見る |
 | heartbeat の途絶え | `-bg` の `wrapper_heartbeat_expired` が 100 run あたり 7 件を超える（基準 3/44 ≒ 6.8 件）。cmux の時間切れと同じ時刻に起きたものは数えない | 3（2 run。うち 2 件は cmux の 4 分の詰まりと同じ時刻） | background の wrapper は cmux の terminal に書かないので、cmux の詰まりと同じ時刻の途絶えは消えるはず。消えずに別の時刻で増えるなら、切り離した process の heartbeat の書き方を疑う |
 | startup | `-bg` の claim→最初の turn の p90 が 30 秒を超える | 3 / 4 / 15（中央値 / p90 / 最大） | workspace の作成を省くので延びないはず。延びたら起動の待ち（`wrapper_launched` の記録と登録の待ち）を疑う |
@@ -351,4 +370,4 @@ jq -c '.compare.confounders[] | select(.kind == "mark_recorded") | {at, label, p
 | 非対話の run が cmux に打った呼び出しの数（成功を含む） | `backend_call_failed` は失敗だけを残し、成功した `create`・`close`・`exists` は数えられない。cmux の負荷のうち非対話の run の分が分からない | supervisor が op ごとの呼び出しの数（成功を含む）を一定の間隔で数えて残す（host metrics か `stats` の `backend_calls`） |
 | C1 の間接の影響（cmux の詰まりで wrapper の heartbeat が止まったか） | `wrapper_heartbeat_expired` に止まった原因が無く、時刻の一致で推定するしかない | wrapper が heartbeat を書けなかった区間と、そのとき terminal への書き込みで止まっていたか（wrapper の log） |
 | C2 の閉じた記録の無い workspace が cmux に残ったか | 記録の無い close と実際の残りを event から分けられない（zero-based-headless-readiness の「取れない項目」と同じ） | 後始末と掃除が閉じた・閉じられなかった全ての経路で `workspace_closed`（理由つき）を残す |
-| background の process の残り | 切り替えの前は workspace の close が止めていたので記録が無い。切り替えの後も、runtime が見つけなかった残りは event に出ない | 掃除が終わった run の wrapper と turn の process を pid と起動時刻で確かめた結果（見つけた・止めた）を残す（task 1405 の実装の範囲） |
+| background の process の残り | 切り替えの前は workspace の close が止めていたので記録が無い。task 1657 の計装の開始 I までの background の wrapper の停止は停止結果が無い（未計装）。I の後も、runtime が見つけなかった残りは event に出ない | runtime が止めた停止は `wrapper_stopped`（I から）。runtime が見つけなかった残りは host の確認で数える |

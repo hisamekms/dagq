@@ -9,7 +9,8 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
 use super::{QueueOpener, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags};
-use crate::domain::{Reason, ReasonCode, RunId};
+use crate::domain::background_wrapper::{StopRoute, WrapperStop};
+use crate::domain::{EventKind, Reason, ReasonCode, RunId};
 
 /// `backend_call_failed` keeps this many leading characters of the error.
 pub const BACKEND_ERROR_CHARS: usize = 300;
@@ -177,6 +178,27 @@ fn timed_out(error: &anyhow::Error) -> bool {
     ReasonCode::of_backend_error(&format!("{error:#}")) == ReasonCode::BackendTimeout
 }
 
+/// The payload of `wrapper_stopped` (task 1657): the stopped wrapper's
+/// `handle` (`workspace_id`) and `pid`, how it ended (`signal`), the
+/// SIGKILLs sent to what it started (`children_killed`), whether a turn
+/// it left after it died was killed (`left_turn_killed`), and the path of
+/// the runtime that stopped it (`route`).
+pub fn wrapper_stopped_payload(
+    handle: &str,
+    stop: WrapperStop,
+    route: StopRoute,
+    left_turn_killed: bool,
+) -> Value {
+    json!({
+        "workspace_id": handle,
+        "pid": crate::domain::background_wrapper::BackgroundHandle::parse(handle).map(|h| h.pid),
+        "signal": stop.signal.as_str(),
+        "children_killed": stop.children_killed,
+        "left_turn_killed": left_turn_killed,
+        "route": route.as_str(),
+    })
+}
+
 /// A [`WorkspaceBackend`] that records every failed or timed-out call as
 /// `backend_call_failed` before handing the error back unchanged, so the
 /// queue keeps how often cmux fails and under what load (task 109). The
@@ -316,6 +338,18 @@ impl<'a> RecordingBackend<'a> {
         }
     }
 
+    /// Record `wrapper_stopped` with `payload` on the run whose session
+    /// `handle` is, else as the queue's own event.
+    fn record_stop(&self, payload: Value, handle: &str) -> Result<()> {
+        let queue = self.queues.open()?;
+        match queue.run_in_workspace(handle)? {
+            Some(run) => queue.record_runtime_event(&run, EventKind::WrapperStopped, payload),
+            None => queue
+                .record_queue_event(EventKind::WrapperStopped, payload)
+                .map(drop),
+        }
+    }
+
     fn record(
         &self,
         op: &str,
@@ -408,16 +442,45 @@ impl WorkspaceBackend for RecordingBackend<'_> {
             || true,
         )
     }
+    /// A background handle is stopped as [`Self::stop_background`] stops
+    /// it, named by no path of its own (`close`), so that no stop of a
+    /// wrapper goes unrecorded.
     fn close(&self, workspace_id: &str) -> Result<()> {
-        let result = self.inner.close(workspace_id);
-        self.recorded("close", Some(workspace_id), None, result)?;
-        match self.left_turn(workspace_id) {
-            Some((processes, turn)) => {
-                let result = super::supervise::stop_left_turn(processes, &turn);
-                self.recorded("close", Some(workspace_id), None, result)
-            }
-            None => Ok(()),
+        if crate::domain::background_wrapper::is_background(workspace_id) {
+            return self
+                .stop_background(workspace_id, StopRoute::Close)
+                .map(drop);
         }
+        let result = self.inner.close(workspace_id);
+        self.recorded("close", Some(workspace_id), None, result)
+    }
+    /// The wrapper is stopped, then the turn a wrapper that died left
+    /// running, and the stop is recorded as `wrapper_stopped` with `route`
+    /// on the run whose session it is, or as the queue's own event for a
+    /// planner's ([`wrapper_stopped_payload`], task 1657). A failed stop
+    /// of the wrapper is a failed `close` and records no `wrapper_stopped`;
+    /// a left turn that cannot be stopped fails the `close` after the
+    /// wrapper's stop is recorded. A record that cannot be written is
+    /// dropped.
+    fn stop_background(&self, handle: &str, route: StopRoute) -> Result<Option<WrapperStop>> {
+        let result = self.inner.stop_background(handle, route);
+        let stop = self.recorded("close", Some(handle), None, result)?;
+        let left_turn = self.left_turn(handle);
+        let left_turn_killed = left_turn.is_some();
+        let left = match left_turn {
+            Some((processes, turn)) => super::supervise::stop_left_turn(processes, &turn),
+            None => Ok(()),
+        };
+        // The wrapper's stop is recorded even when the turn it left could
+        // not be stopped, whose failure is then the close's.
+        if let Some(stop) = stop {
+            let _ = self.record_stop(
+                wrapper_stopped_payload(handle, stop, route, left_turn_killed),
+                handle,
+            );
+        }
+        self.recorded("close", Some(handle), None, left)?;
+        Ok(stop)
     }
     fn set_color(&self, workspace_id: &str, color: &str) -> Result<()> {
         let result = self.inner.set_color(workspace_id, color);
@@ -688,6 +751,37 @@ mod tests {
             ReasonCode::BackendTimeout
         );
         assert!(timed_out_maybe_sent(&error));
+    }
+
+    /// `wrapper_stopped` names the handle, its pid, how the wrapper ended,
+    /// the SIGKILLs sent to what it started, a left turn killed and the
+    /// route (task 1657).
+    #[test]
+    fn a_wrapper_stop_is_recorded_with_its_signal_kills_and_route() {
+        use crate::domain::background_wrapper::{StopSignal, WrapperStop};
+        let stop = WrapperStop {
+            signal: StopSignal::Kill,
+            children_killed: 2,
+        };
+        assert_eq!(
+            wrapper_stopped_payload("background:7:start", stop, StopRoute::AfterReview, true),
+            json!({
+                "workspace_id": "background:7:start",
+                "pid": 7,
+                "signal": "sigkill",
+                "children_killed": 2,
+                "left_turn_killed": true,
+                "route": "after_review",
+            })
+        );
+        let gone = WrapperStop {
+            signal: StopSignal::Gone,
+            children_killed: 0,
+        };
+        let payload = wrapper_stopped_payload("WS-1", gone, StopRoute::Close, false);
+        assert_eq!(payload["pid"], Value::Null);
+        assert_eq!(payload["signal"], "gone");
+        assert_eq!(payload["route"], "close");
     }
 
     /// A run's wrapper that cannot be started is handed back as a failed

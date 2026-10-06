@@ -310,6 +310,7 @@ event_kinds! {
     WrapperHeartbeatExpired => "wrapper_heartbeat_expired",
     WrapperLaunched => "wrapper_launched",
     WrapperStarted => "wrapper_started",
+    WrapperStopped => "wrapper_stopped",
 }
 
 impl EventKind {
@@ -400,6 +401,10 @@ impl EventKind {
                 // A planner the runtime closed, a person's or its own
                 // (ADR-t1300-1).
                 | PlannerClosed
+                // The stop of a background wrapper no run records (a
+                // planner's, one whose start was never recorded); a run's
+                // is on the run (task 1657).
+                | WrapperStopped
                 // A planning request and its planners (ADR-t1394-1), on the
                 // queue.
                 | RequestRecorded
@@ -852,6 +857,12 @@ pub const WRAPPER_HEARTBEAT_EXPIRED: &str = EventKind::WrapperHeartbeatExpired.a
 /// workspace (ADR-t1404-1): its `pid`, `start`, `handle` and `log`.
 pub const WRAPPER_LAUNCHED: &str = EventKind::WrapperLaunched.as_str();
 pub const WRAPPER_STARTED: &str = EventKind::WrapperStarted.as_str();
+/// The runtime stopped a session's background wrapper (task 1657): its
+/// `workspace_id` and `pid`, how it ended (`signal`: `sigterm`, `sigkill`
+/// or `gone`), the SIGKILLs sent to what it started (`children_killed`),
+/// whether a turn it left was killed (`left_turn_killed`) and the path that
+/// stopped it (`route`).
+pub const WRAPPER_STOPPED: &str = EventKind::WrapperStopped.as_str();
 
 #[cfg(test)]
 mod tests {
@@ -1190,6 +1201,7 @@ mod tests {
             ),
             (EventKind::WrapperLaunched, "wrapper_launched"),
             (EventKind::WrapperStarted, "wrapper_started"),
+            (EventKind::WrapperStopped, "wrapper_stopped"),
         ];
         assert_eq!(table.len(), EventKind::ALL.len());
         for (kind, text) in table {

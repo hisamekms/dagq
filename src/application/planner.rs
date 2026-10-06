@@ -288,7 +288,11 @@ fn launch_planner(
     if let Err(error) = queue.planner_workspace_created(planner.id, &workspace_id) {
         // Unrecorded, the workspace would be left open with nothing to
         // find it by, and its wrapper is refused (task 806).
-        let error = match launch.cmux.close(&workspace_id) {
+        let error = match super::supervise::stop_session(
+            launch.cmux,
+            &workspace_id,
+            crate::domain::background_wrapper::StopRoute::Planner,
+        ) {
             Ok(()) => error.context(format!(
                 "the planner workspace {workspace_id} could not be recorded and was closed"
             )),
