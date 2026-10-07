@@ -32,7 +32,9 @@ pub struct RunPrediction {
     pub effort: Option<String>,
     /// Where `expected_output_tokens` fell (0 to 100) among the last
     /// prediction of each other task, at most [`PREDICTION_WINDOW`] of the
-    /// latest, recorded before the run started; null with none.
+    /// latest, recorded before the run started; null with none. The
+    /// predicted values run two to three times off, so read this rank
+    /// rather than the value.
     pub percentile: Option<f64>,
     /// How many predictions `percentile` compared it with.
     pub percentile_of: usize,

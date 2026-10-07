@@ -415,12 +415,6 @@ line = 1384
 tasks = 13
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/stats.md"
-size = 147066
-line = 4547
-tasks = 154
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/status.md"
 size = 34852
 line = 8752

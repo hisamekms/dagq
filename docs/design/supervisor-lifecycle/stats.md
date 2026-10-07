@@ -36,336 +36,339 @@ related:
 
 # `stats`
 
-対話のworkerの記録（`prompt_waiting`・`answer_prompt`・`stuck_exit`・`send_unconfirmed`・`submit_*`・`long_background`・`stall_preempted`など）はtask 1437で新しく書かれなくなり（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、下の集計はそれらを過去の記録として読む。
+`dagq stats`がqueueの記録（run_events）からrunの時間・着地の内訳・閾値を超えたもの・期間の集計を導いて返す仕組みの概念と地図。
+出力の欄・既定値・閾値の意味は`src/domain/stats.rs`と`src/domain/stats/`の定義のそばのdoc commentが持ち、決定の理由はリンクしたADRが持つ。
+同じ集計を期間ごとの窓で読む指標は[kpi](kpi.md)、記録を書く側は[provider-lifecycle](../provider-lifecycle.md)と各工程の文書が持つ。
 
-`dagq stats [--since <cursor>] [--until <cursor>] [--goal ID] [--full] [--cmux PATH]`は、run_eventsから時間と閾値超えを導出して返す読むだけのコマンド（[ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定5）。走っているrunのalert（ADR-0043の決定5）と、閾値ごとの検知の結果（決定6）も返す。新しい表は持たず、集計は`domain::stats::stats`（events、task→goalの対応、今の時刻、supervisorの空きslotのsnapshot、走っているrunのsnapshot`LiveSnapshot`を受ける純粋関数）が行い、application層の`application::stats::stats`が`Queue`（`RunLog`の`all_events`・`active_runs`・`all_runs`、`QueueRecords`の`task_goals`・`task_titles`（集計の後にrunの`title`を埋める）、`RunCoordination`の`supervisors`、`SessionRegistry`の`session_workspace`と`TaskStore`の`list`・`list_goals`・`candidates`）、supervisorの生死を見る`ProcessControl`、`StatsSources`（run directoryを読む`RunFiles`、idle markerを読む`AgentSignals`、cmuxのworkspaceを並べる`WorkspaceListing`、queueのhash、`[stall]`と`[conflicts]`を読む関数、mainの履歴を読む関数）越しに読んで渡すだけ。`src/compose.rs`の`OneShot::stats_of(queue, db, query, workspaces)`が、開いてあるqueueに対して注入された`Clock`で今の時刻を1回読んで呼ぶ入口。CLIは`src/main.rs`が開いて束縛を確かめたqueueを渡し、queueを1回だけ開く（task 403）。observerは自分のqueueと、そのqueueの`Generators`で作った`OneShot`から、PATHのcmuxを渡して呼ぶ。`OneShot::stats(db, query, workspaces)`はqueueをpathから開いて`stats_of`に渡し、systemの`Generators`でcmuxを渡さずに呼ぶ自由関数`stats`を`runtime::stats`として再公開する。
+## 目的
 
-- **対象のrun**: 終わったrun。終わりのイベントは`run_integrated`か、payloadの`status`が`failed` / `interrupted`になった最初のイベントで、そのidが`finished_event_id`。既定は終わった順の直近50件、`--full`で全件。`--since`はそのidがcursorより大きいrunだけにし、50件を超えるときは古い方から50件を返して`next_cursor`をその最後の`finished_event_id`にする（続きは同じ`--since next_cursor`で読める）。それ以外の`next_cursor`は読んだ時点のrun_eventsの最新id（`status`の`cursor`と同じ値）。`--until`はそのidがcursor以下のrunだけにし、`next_cursor`もそれを超えない。cursorはevent id（数字）、`@<unix秒>`、RFC 3339の時刻（`2026-09-26T08:52:00+09:00`、`...Z`）のどれかで（`domain::stats::Cursor`）、時刻はその時刻以前に記録された最後のイベントのid（無ければ0）として扱う（task 466）。数字だけのものはevent idなので、unix秒には`@`を付ける。`--goal`はそのgoalのtaskのrunだけに絞る（alertsも同じ）。
-- **期間集計の窓**（task 1379）: runのpageに従うのは`runs`と、pageのrunから求める欄（`goals`・`overall`・`changes`・`areas`・`e2e`・`versions`・`load_bands`・`trial_groups`・`escalations`と、終わったrunのalert）と`next_cursor`だけ。それ以外の期間集計（`backend_failures`・`reason_codes`・`duplicate_cancels`・`review_reasons`・`landing_rechecks`・`landing_waits`・`asks`・`auto_repairs`・`provider_switches`・`jobs`・`updates`・`draft_flow`・`follow_up_categories`・`worker_question_topics`・`recommendations`・`claim_holds`・`landing_holds`・`claim_deferrals`・`verification_commands`・`verification_failures`・`failed_tests`・`waiting`・`worker_routes`・`stall_thresholds`・`conflict_hotspots`・`sessions`と、`host`・`landing_utilization`の時間の窓）は、1つのwindowを始まりから窓の終わり（`--until`、無ければ最新のevent）まで数える。始まりは`--since`があればcursorより後、無ければ対象のrunの最初のイベントのうち最も古いもの以降（`--full`か対象のrunが無ければ全件）。`--since`の後に終わったrunが50件を超えても`next_cursor`（最初のpageの最後のrun）で切らないので、`--full`なしでも`--full`と同じ値になる（task 1370が`waiting`を、task 1379が残りを直した。それまでは`next_cursor`で切れ、1日の窓でも50件を超えると途中で止まっていた）。pageに依らないので、`--since next_cursor`で続きのpageを読むと同じ期間の分を重ねて数える。pageごとの期間集計は足し合わせず、1回の読みの値を窓の全体の値として読む
-- **`runs`**: runごとに`run_id`、`task_id`、`goal_id`、`status`（`integrated` / `failed` / `interrupted`）、`finished_event_id`と、秒の区間と回数。区間は端のイベントが無ければnull。
-  - `work`: `run_claimed`→最初の`receipt_observed`
-  - `validate`: 最初の`receipt_observed`→最初の`validation_finished`
-  - `wait_to_land`: 最初の`validation_finished`→`run_integrated`
-  - `startup`: `agent_started`→`first_commit_observed`（[最初のcommitの観測](first-commit.md#最初のcommitの観測)。記録の無いrunはnull）
-  - `work_breakdown`: runのsession（`worker` / `resume` / `revise`）が何に時間を使ったか（task 514。下の[作業の内訳](#作業の内訳)）。記録した区間が無ければnull
-  - `tokens`: runのsession（jobを含む）が使ったトークン数（task 199。下の[トークン数](#トークン数)）。記録した区間が無ければnull
-  - `resumes`: `resume_started`（ADR-0019の自動resume。記録されるまでは0）の数、`review_verdict`: 最後の`review_finished`の`verdict`（goal 11のreview工程が記録するまではnull）、`needs_session` / `failed`: payloadの`status`がその値のイベントの数。`integration_error`は試行前のstatusに戻すだけなので`needs_session`に数えない
-  - `land_phases`: `wait_to_land`の工程別の内訳（下の[着地待ちの内訳](#着地待ちの内訳)）。`run_integrated`の無いrunはnull。`verify_commands`に`verify`の検証コマンドごとの内訳（下の[verifyのコマンド別の内訳](#verifyのコマンド別の内訳)）
-  - `title`: taskのtitle。`change`: taskが宣言した変更の種類（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)、task 982。labelのまま。無いtaskはnull。`Queue::task_changes`から`domain::stats::with_changes`が付ける）。`areas`: 着地したcommitの差分を`dagq.toml`の`[areas]`に通して求めた変更の対象の名前の並び（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。当たった全ての名前と、どれにも当たらないファイルがあれば`other`を名前の順に。着地していないrunと、着地commitがgitに無いrunは`[]`。`[areas]`が無ければ欄ごと出さない。求め方は[kpi](kpi.md#area)）。`claimed_at` / `validated_at` / `landed_at`: 最初の`run_claimed`・最初の`validation_finished`・`run_integrated`の記録時刻（queueの`created_at`のまま。無ければnull）
-  - `e2e`: runの`validation_finished`のうち`e2e_requirement`を記録した最後のもの（差分を読む前に拒んだvalidatingは記録しないので、前の判定が残る）から、validatingが`e2e`を求めたかとその出どころ（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2、task 965）: `task`（taskの`--evidence e2e`）、`paths`（差分が`dagq.toml`の`[e2e] paths`に触れた）、`not_required`（求めなかった）。記録の無いrun（task 965より前にvalidatingしたrun、validatingしていないrun）はnull
-  - `integrate_attempts` / `deferrals` / `conflict_files` / `broken_by` / `rebased_onto` / `broke_runs` / `resume_attempts`: 着地の延期の中身と、崩した着地、resumeの効き目（下の[着地の延期とresume](#着地の延期とresume)）
-  - `dagq_version` / `claude_version` / `rustc_release` / `rustc_host` / `claim_parallel` / `claim_slots` / `claim_load_avg`: 最初の`run_claimed`が記録したclaimの属性（goal 21、task 197。[`supervise`](supervise.md)の5）の`dagq_version` / `claude_version` / `rustc_release` / `rustc_host` / `parallel` / `slots` / `load_avg`。記録の無いrun（手の`claim`、task 197より前）はnull。`rustc_release` / `rustc_host`はcargo専用の計測で、queueのrepositoryがdagqのソースでなければ欄ごと出さない（下の[cargo専用の計測](#cargo専用の計測)）。Codexで作業したrun（下の`worker_model`の「Codexのrun」）の`claude_version`は、hostのClaude Codeだけで動いたrunではないのでnull（task 892。`versions.claude`でも`version: null`に入る）
-  - `provider` / `route` / `codex_version` / `provider_version`: 最初の`run_claimed`の`requested_provider`（無ければ`provider`。taskが求めたprovider＝requested） / `worker_mode`（`interactive` / `headless`） / `codex_version` / `provider_version`（claimで始めたproviderのversion）（ADR-t813-2の決定7。[provider-lifecycle](../provider-lifecycle.md#workerのproviderと経路)）。記録の無いrunはnull、Codexを動かさないsupervisorのclaimの`codex_version`はnull。`route`はclaimの値のままで、途中の切り替えで変えない
-  - `actual_provider` / `provider_switches`: runの作業を最後にしたprovider（actual）と、providerを切り替えた回数（task 898）。`actual_provider`はrunの最後の`provider_switched`の`to`、無ければ最初の`run_claimed`の`provider`（claimで使ったprovider）で、切り替えの無いrunは`provider`と同じ値（claimの記録の無いrunはnull）。`provider_switches`はrunの`provider_switched`の数で、claimの時点の切り替え（`phase: start`。`run_claimed`より前に記録される）も数える（[使えないproviderからの切り替え](../provider-lifecycle.md#使えないproviderからの切り替え)）
-  - `turns`: 非対話のrunのturn（`turn_finished`）の`{count, failed, secs, by_provider}`。`failed`は`outcome`が`succeeded`でないturnの数、`secs`は`turn_started`から`turn_finished`までの合計。`by_provider`は同じものをturnごとの`turn_finished`の`provider`（そのturnを実際に動かしたprovider。記録の無いturnはその時点のrunのprovider）で分けた`{<provider>: {count, failed, secs, tokens}}`で、`tokens`はそのturnの`turn_finished`の`tokens`の合計（[トークン数](#トークン数)の`TokenTotals`と同じ形。`sessions`は`tokens`を持つturnの数。どのturnも持たなければnull）。turnの無いrun（task 1437より前の対話の経路の記録）はnull。区間ごとのトークン数は区間の`tokens`（下の[トークン数](#トークン数)）に入り、providerを分けない
-  - `worker_model` / `worker_effort` / `trial_group`: 最初の`run_claimed`の`model` / `effort` / `group`（workerのsessionを起動したmodelとeffortと試しの群。[Worker model](worker-model.md)、ADR-0079の決定3・4）。記録の無いrun（task 576より前）はnull、試しの外のrunの`trial_group`はnull。Codexで作業したrun（Codexのrun: claimの`provider`が`codex`（claimの時点の切り替えを含む）、runに`to`が`codex`の`provider_switched`がある（ADR-t813-2のフォールバックで途中からCodexに移った）、またはCodexで動いたturnがある）は、Codexのrunとして数える（task 892）: `worker_model`はそのrunのCodexのturnの`turn_finished`のうち`model`を持つ最初のもの（Codexのrolloutから読んだ、実際に使ったmodel）、無ければnull。claimの`model`（Codexのclaimでは段のClaudeのmodelは書かれず`ladder_model`にある。[Worker model](worker-model.md#codexのruntask-892)。途中で移ったrunは始めたClaudeのmodel、task 892より前のCodexのclaimはClaudeのmodel）も`group`も読まず、`trial_group`は常にnull（試しの集計に入らない）。一度もCodexで作業しなかったrunは今までどおりclaimの値で、turnのmodelでは変えない
-  - `load`: 区間ごとの`{mean, max, band}`（`band`は`mean`の帯）。`work`は最初の`receipt_observed`、`validate`は最初の`validation_finished`の`load_avg_mean` / `load_avg_max`、`verify`は`integrate`の`verification_command`（`phase: integration`、全試行）の`load_avg_mean`を`duration_secs`で重み付けした平均（`duration_secs`の無いものは1秒）と`load_avg_max`の最大。記録の無い区間はnull
-  - `review_reasons`: そのrunのreviewのうちreviseかconcernだったものを記録順に`{attempt, verdict, primary_code, reason_codes, outcome}`（ADR-t947-1。下の[差し戻しの分類コードごとの集計](#差し戻しの分類コードごとの集計)）。`outcome`はそのverdictの`review_outcome`（無ければnull）
-  - `prediction` / `actual`: そのtaskの重さの予測と、runの実績を並べたもの（ADR-0079の決定2。下の[重さの予測と実績](#重さの予測と実績)）。予測の無いrunは`prediction`がnull
-  - `load_band`: `load.work.band`、無ければ`claim_load_avg`の帯（どちらも無ければnull）。帯は`0-4` / `4-8` / `8-16` / `16-32` / `32-64` / `64+`（下限を含む。`domain::measure::load_band`）。集計は`domain::stats::measures`
-  - `verify_failures`: そのrunの`integrate`の`verification_command`（`phase: integration`、全試行）のうち`failure`を持つもの（失敗したもの）を記録順に`{attempt, index, command, class, evidence, retry}`（task 467。分類は[`integrate`](integrate.md)の5）。`retry`はhostの分類の失敗のやり直し（payloadの`retry: true`。task 639）の失敗ならtrue。`failure`を記録する前の失敗は含めない。無ければ空の配列
-  - `sessions`: そのrunのClaude sessionの区間のkindごとの`{count, open, active}`（下の[Claude session](#claude-session)）
-- **`goals`と`overall`**の`land_phases`: 着地したrun（`land_phases`と`wait_to_land`のあるrun）についての`{runs, tail_threshold, tail_runs, <工程>..., push}`。`tail_threshold`はそれらのrunの`wait_to_land`の90パーセンタイル（nearest-rank: 昇順でceil(0.9×n)番目。runが無ければnull）、`tail_runs`は`wait_to_land`がそれ以上のrun（長い裾）の数。工程ごとと`push`は`{count, total, median, p90, max, tail_total}`で、`count` / `total` / `median`は他の区間と同じ規則（工程は着地したrun全部を0も含めて数え、`push`は記録のあるrunだけ）、`p90`は上と同じ規則、`tail_total`は長い裾のrunだけの合計。どの工程が裾を作ったかは工程ごとの`tail_total`を比べて読む。`verify_commands`は`verify`の検証コマンドごとの内訳（下の[verifyのコマンド別の内訳](#verifyのコマンド別の内訳)）
-- **`goals`と`overall`**の`resume_outcomes`: それらのrunの`resume_attempts`全部の`{attempts, resolved, unresolved, resolved_percent, secs}`と、理由ごとの同じ形の`by_reason`（下の[着地の延期とresume](#着地の延期とresume)）
-- **`changes`**: taskの`change`ごと（名前の昇順、changeの無いtaskのrunは`change: null`で最後）に、`goals`と同じ形（`runs`と区間ごとの`{count, total, median}`、`land_phases`、`resume_outcomes`）。`runs`のchangeで`domain::stats::with_changes`が組み、observerの入力の`stats`にも出る（ADR-t980-1、task 982）
-- **`areas`**: `runs`の`areas`のareaごと（名前の昇順、areaの無いrunは`area: null`で最後）に`changes`と同じ形。1つのrunは持つ全てのareaに数える（areaの`runs`の合計は`runs`の数を超えうる）。`domain::stats::with_areas`が組む。`[areas]`が無ければ出さない。areaは保存せず、`stats`を読むたびに、出すrunの着地commitだけをgitからまとめて読む（`application::stats::stats`）
-- **`e2e`**: `runs`の`e2e`ごと（`not_required` / `paths` / `task`の名前の昇順、記録の無いrunは`e2e: null`で最後）に`changes`と同じ形（`runs`の数と`work`などの区間の`{count, total, median}`、`work_breakdown`など）。e2eを求めたrunと求めなかったrunの数と時間を並べ、workerのe2eを差分で狭めた前後を比べる（ADR-t963-1、task 965。`domain::stats::e2e_groups`）
-- **`goals`と`overall`**: goalごと（goal昇順、goalの無いrunは`goal_id: null`で最後）と全体で、`runs`（件数）と区間ごとの`{count, total, median}`。区間の無いrunは数えない。中央値は偶数個なら中央2つの平均の切り捨て。
-- **`goals`と`overall`**の`sessions`: それらのrunのClaude sessionの区間のkindごとの`{count, open, active}`で、`open`と`active`は区間ごとの秒の`{count, total, median}`（下の[Claude session](#claude-session)）
-- **`alerts`**: `[{kind, task_id, run_id, value, threshold, path?, ask_id?}]`（`value`と`threshold`は秒か回数）。対象のrunに加えて、まだ終わっていないrunも見る。
-  - `awaiting_integration`: `wait_to_land`が15分（900秒）を超えたrun。まだ`awaiting_integration`にいるrunは最初に`awaiting_integration`になってからの経過で判定する（着地の失敗で戻っても起点は変えない）。着地待ちの内訳で最も長い工程を`phase`に添える（まだ待っているrunは今の時刻までの内訳。どの工程も0秒なら付けない）。他のalertは`phase`を持たない
-  - `needs_session`: `needs_session`が3回目に達したrun
-  - `ask_unanswered`: `ask_opened`から60分答えられていないask（ADR-0022。`ask_answered`とはpayloadの`ask_id`（無ければ`id`）とrun・taskで対にする）。そのaskの`ask_id`（無ければ`id`）を文字列で`ask_id`に添える（記録が無ければ付けない。observerのskipの判定がaskを見分けるため。task 649）。その後に`run_integrated`になったrunのask、runを名指さない`blocked`のaskでそのtaskのrunが`run_integrated`になったものは数えない（task 329。runtimeが閉じる前に開いたaskも含む）
-  - `task_failed`: 同じtaskのrunの`failed`が合わせて2回。回数はpageに関係なく全runで数え、`run_id`はその最後に失敗したrunで、そのrunが対象に入るときに出す（`--since`で2回目だけが新しくても出る）
-  - `work_over_median`: `work`がそのgoal（goalの無いrunはgoalの無いrun同士）の中央値の2倍を超えたrun
-  - `idle_slots`: staleでないsupervisorの`parallel`の合計から実行中（`integrating`以外の未完了のrunと、登録されたsupervisorのtokenのleaseを持つrun（`integrating`、reviewや着地の順番を待つ`awaiting_integration`、resume中の`needs_session`などstatusを問わない）の和から、人の答えを待つ・slotへ戻るのを待つrunを除いたもの。登録の無いtokenのlease（人が手で打った`integrate`など）で着地中のrunは数えない。登録されたsupervisorについてはその`used_slots()`と同じ集合。[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)の決定13、[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）runを引いた空きslotがあるのに、candidatesがゼロで`ready`のtaskが残っている（依存で詰まっている）。`value`は空きslot数で、`task_id` / `run_id`はnull。着地の順番を待つだけのrunも今までどおり埋まったslotに数えるので、空きは重いtaskも使える枠で、着地待ちが空けた軽い枠（`status`の`slots.landing_queue`、[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)、ADR-t1591-1）は数えない。readyのtaskが無い空のqueueは詰まりではないので出さない。draftのgoalに属するreadyのtaskは`goal ready`を待っているだけなので数えない。`stats`を読んだ時点のsnapshotで判定し、時間帯の履歴は持たない
-  - `claim_held`: supervisorがclaimを控えている（`claim_holds.held`がある。load averageでも空き容量の不足でも）間に空きslotがある。`value`は空きslot数（`idle_slots`と同じ数え方）で、`task_id` / `run_id`はnull。これが出るときは`idle_slots`を出さない（[claimを控える](claim-hold.md)。task 327）
-  - `claim_deferred`: `claim_held`が出ていないときに、空きslotがあり、claimを控えているtask（`claim_deferrals.deferred`。衝突の多いファイル、動かせないworker、依存先の着地を含まないbuild（`not_in_build`、ADR-t1632-1）のどの理由も数える）がある。`value`は控えているtaskの数、`task_id` / `run_id`はnull。これが出るときは`idle_slots`を出さない（空きslotが全て自動更新の引き継ぎを待つ`not_in_build`のtaskのためでも同じ。[claimを控える（衝突の多いファイル）](claim-defer.md)。ADR-0080）
-  - `backend_failures`: 同じwindowの`backend_call_failed`が2件以上。`value`は件数、`task_id` / `run_id`はnull
-  - `conflict_hotspot`: `conflict_hotspots`の`alert`が立ったファイルごとに1件。`value`はそのファイルの衝突の回数、`threshold`は`[conflicts].hotspot_conflicts`、`path`にファイル（このalertだけが持つ）、`task_id` / `run_id`はnull
-- **`claim_holds`**: `{count, secs, by_reason, held}`。windowの中で始まったclaimの控え（`claim_held`）の件数と合計秒、理由ごとの`{count, secs}`、今の控え`held`（無ければnull）。理由は`load_average`と`disk_space`（空き容量の不足。[空き容量を確かめる](disk-space.md)）。集計は`domain::claim_hold::claim_holds`（[claimを控える](claim-hold.md)）。loadの保留が有効なときのclaimの間隔のための待ち（ADR-t1479-1）は控えではないので数えない。間隔のために待った秒は`run_claimed`のpayloadの`claim_spacing_wait_secs`が持つ（[claimを控える](claim-hold.md#claimの間隔)）
-- **`landing_holds`**: `claim_holds`と同じ形で、空き容量の不足による着地の検証の控え（`landing_held` / `landing_resumed`）。集計は`domain::claim_hold::holds_of`（[空き容量を確かめる](disk-space.md)、task 377）
-- **`claim_deferrals`**: `{count, secs, by_end, by_file, deferred}`。windowの中で始まった、衝突の多いファイルでのtaskのclaimの控え（`claim_deferred`）の件数と合計秒、終わり方ごとの`{count, secs}`（`cleared` / `owner_waiting`（邪魔なrunが全て数えないrunで、人の答えだけを待って猶予を過ぎたものを含む。ADR-t1484-1） / `no_commit`（邪魔なrunが全て自分のcommitを持たないfailedのrun。ADR-t1634-1） / `expired` / `not_candidate` / `claimed` / `superseded` / `open`）、hotspotごとの控えた回数、今控えているtaskの`[{task_id, reason, since, files, runs, supervisor}]`（`not_in_build`の要素は`build`と`missing`を足す）。理由を問わず`claim_deferred`を数え、workerの控えと依存先の着地を含むbuildの待ち（ADR-t1632-1）も件数と秒に入る（`by_file`に足すのはhotspotの控えだけ）。`--goal`はそのgoalのtaskの控えだけを数えるが、`deferred`はqueueの今を出す。集計は`domain::claim_defer::claim_deferrals`（[claimを控える（衝突の多いファイル）](claim-defer.md)）
-- **`backend_failures`**: `{count, by_op, retried, exhausted, retried_by_op, exhausted_by_op, max_load_avg, max_slots, by_load_band}`。`backend_call_failed`の件数、`op`ごとの件数、そのうちretryした試行（`retry_after_ms`が非null）の`retried`と使い切った失敗（`retry_after_ms`がnullか無い。task 326より前のイベントも最後の失敗として数える）の`exhausted`とそれぞれの`op`ごとの件数（`retried + exhausted = count`。task 397。alertは今までどおり`count`で判定する）、記録された`load_avg`の最大（無ければnull）、`slots`の最大（無ければnull）、`load_avg`の帯ごとの件数`[{band, count}]`（軽い帯から。`load_avg`の無い失敗は数えない。task 197）。windowは上の期間集計の窓。`--goal`はそのgoalのrunの失敗だけを数える（runの無い失敗は数えない）
-- **`running_alerts`**: まだ終わっていない（`integrated` / `succeeded` / `failed` / `interrupted`以外の）runの、今の状態から導くalert（ADR-0043の決定5、task 290）。`--since`に関係なく毎回出し、`--goal`はそのgoalのtaskのものだけにする。run_events・askに加えて、run directoryの`idle.json`（idle marker。`background_tasks`の`running`の処理）、`prompt-submit.json`（sessionが入力を受けた印。Claude adapterの`UserPromptSubmit` hookが書く。task 409。無ければ見ない）、`receipt_path`のmtimeと、全windowの`workspace list`（[Naming](naming.md#naming)）を読む。新しい表は持たない。各要素は`{kind, task_id, run_id, …}`で、`value`と`threshold`は秒。
-  - 見ているsession（`phase`）: `running`のrunは`session`（最新の`agent_started`から。無ければ`run_claimed`）、`needs_session`で最後のresumeのeventが`resume_started`なら`resume`（その時刻から）、`validating` / `awaiting_integration`でreviewの流れの最後のeventが`revise_requested`なら`revise`（その時刻から。送れずに`revise_unsent`で取り消したものは除く）。それ以外は見ているsessionが無い。
-  - `idle_without_receipt`: 見ているsessionがあり、idle markerがその開始より新しく、開始より新しいreceiptが無く、markerより新しい`prompt-submit.json`が無く、そのrunに閉じていない`worker_question` / `answer_prompt`のaskも、開始以降の解消していない`prompt_waiting`も無いまま、markerのmtimeから`idle_without_receipt_secs`を超えた。`phase`、`nudged`（開始以降の`stall_nudged`の有無）、`asked`（開いている`stalled`のaskの有無）、`background_tasks`（`id` / `description` / `command`）を添える。`nudged`も`asked`もfalseならsupervisorの検知の漏れ（task 182の型）。
-  - `long_background`: idle markerに`running`の処理があり、markerのmtimeから`background_alert_secs`を超えた。receiptの前後を問わない（ここは観測だけ。task 1437より前のruntimeは同じ条件を対話のworkerの復旧jobにかけていたが（task 918）、今は起動しない。[生きているsessionの復旧job](background-recovery-job.md)）。markerより後に`workspace_closed`、`session_live: true`でない`supervision_finished`、`validating`以外への`resume_finished`があれば、sessionは終わっているので出さない（sessionを生かしたままvalidationに渡したrunは、ADR-0027のとおりsessionが続いているので出す）。経過は、その処理が`running`として最初に載ったmarkerから測る（task 331）。Claude Codeはmarkerを上書きし処理の開始時刻を書かないので、`Stop` hookはmarkerを置き換える前に同じ内容を`<unix秒>\t<marker>`の1行として隣の`idle.log`に追記する（`domain::stall::IDLE_LOG`。追記に失敗してもmarkerは置き換える）。`running`の処理を1つも載せないmarkerは全ての連なりを切るので、hookはそのときlogをそのmarkerの1行だけに置き換え（一時ファイル + rename。`infrastructure::adapters::IDLE_LOG_APPEND`）、logは今の連なりの分だけを持つ（task 422。各markerは最後のassistant messageを含みうるので、上限の無い追記では長いsessionでlogが肥大した）。hookはJSONを解釈しないので、markerに`"status": "running"`の組（前後の空白は問わず、markerの改行を除いた1行で探す）が見つからないことで「載せない」と判断する。JSONは文字列の中の`"`をescapeするので、messageの文面がこの組になることは無く、`background_tasks`の外に組がある誤りはlogを切らない側に倒れるだけなので、切り詰めても最初の時刻は切り詰めない場合と変わらない。`stats`はそのlogの行と今のmarkerを順に並べ、今のmarkerが`running`で載せる処理ごとに、それを途切れずに載せ続けた連なりの最初の時刻を取り（`background_first_seen`。載せないmarkerを挟めば連なりは切れるので、後のsessionが同じIDを使い直しても別に測る）、そのうち最も早いものから数える。sessionがturnを重ねても数え直さない。logが無いかその処理を示さないとき（hookがlogを書く前に始まったsession）は、従来どおりmarkerのmtimeから数える（下限）。
-  - `running_outlier`: `running`のrunのclaimからの経過が、そのgoal（goalの無いrunはgoalの無いrun同士）の終わったrun全体（pageに関係なく）の`work`の中央値の2倍を超えた。`threshold`は中央値の2倍。
-  - `workspace_mismatch`: `reason`が`run_without_workspace`なら、見ているsessionのあるrunのworkspace（runの`workspace_id`、runが最後に開いたsessionの`workspace_created`の`workspace_id`、`resume_finished`の`workspace_id`、descriptionがそのrunを指すworkspaceのどれか）がlistに無い（`workspace_id`は最後に開いたsessionのもの）。最後に開いたsessionがbackgroundのwrapperのhandle（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）なら、cmuxのlistでなくwrapperの生死で判定する（ADR-t1404-1決定10）: `stats`がhandleのpidの今の起動時刻を読み（`background_alive`。pidに何も居ないか、起動時刻が違えば（pidを別のprocessが継いだ）死んでいる）、死んでいてそのsessionの終わり（`session_exited`か`workspace_closed`）が記録されていなければ、`reason`を`run_without_wrapper`、`workspace_id`をhandleにして出す。cmuxにlistを聞けないときもこの判定はする。`workspace_without_run`なら、このqueueのworkerのworkspace（descriptionが`dagq role=worker queue=<このqueueのhash> run=<id> …`か、queueのrunを指す`run <id> resume`）が、終わっていないrunに対応しない（`workspace_id`を添える）。`session_workspaces`のworkspaceは数えない。cmuxのworkspace groupはlistに出ないので、groupではなくdescriptionで判定する。
-- **`workspace_check`**: `{status: "checked", workspaces}`か`{status: "unavailable", reason}`。`dagq stats`は`--cmux`（既定`cmux`をPATHで探す）で、observerはPATHの`cmux`でlistし、cmuxが無いかlistが失敗したときは`workspace_mismatch`だけを判定せず、他のalertは返す。`stats`自体は失敗しない。
-- **`stall_config`**: 判定に使った閾値（`idle_process_secs`を含む4つ）と`source`（[Stall thresholds](stall-thresholds.md#stall-thresholds)）。
-- **`stall_thresholds`**: `[stall]`の設定名ごとの、検知の件数・結末の内訳・検知までの時間と、検知の前に人が手を入れた件数（ADR-0043の決定3・6、task 297）。4つの設定名（`idle_process_secs`はtask 645から）は常に出る。`backend_failures`と同じwindow（`--since`・`--goal`）で、検知したイベントのidとそのtaskで絞る（結末はwindowの外のイベントからも決める）。集計は`domain::stats::thresholds`がrun_eventsから再導出し、新しいイベントは書かない。observerは`stats`を入力に読むので、そのまま載る。
-  - 各要素は`{threshold_secs（今の値）, detections, by_detection: {<検知>: {count, outcomes}}, outcomes, detected_after_secs: {count, median, max}, resolved_after_secs: {…}, preempted: {count, by_via}, by_threshold_secs: {<検知に使った値 | unrecorded>: {count, outcomes}}, running_alerts}`。結末の記録がまだ無い検知の`outcome`は`pending`。
-  - `idle_without_receipt_secs`（[receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)）: `stall_nudged`（`nudge`）、`reason: idle_without_receipt`の`stalled`の`recovery_requested`（`recovery`。task 442）と`stalled`のaskの`ask_opened`（`ask`）。結末・秒・値はsupervisorが記録した`stall_resolved`（`nudge`は同じ`phase`の次のもの、`recovery`は同じ`attempt`の`detection: recovery`のもの、`ask`は同じ`ask_id`のもの）から取る（`resolved_by_nudge` / `resolved_by_recovery` / `escalated` / `answered_wait`（早すぎた疑い） / `answered_intervene`（askの後に人が手を入れた） / `resolved_by_itself` / `run_ended`）。`running_alerts`は今の`idle_without_receipt`の数。
-  - `send_confirm_secs`（task 1437で撤去した対話のworkerの送信の確認の過去の記録。[Session send](session-send.md)。判定の時間は`[stall].send_confirm_secs`。task 409）: 文面の`submit_retried`（`enter_retry`。`submitted`がtrueなら`resolved_by_enter`、falseなら`escalated`。秒は記録が無い）、`submit_resent`（`resend`。値と検知までの秒は`waited_secs`。送り直しから`waited_secs`の2倍までの、次の`submit_resent`より前のイベントを見て、同じ`what`の`resent: true`の`submit_not_started`か文面の`submit_unconfirmed`（送り直しが入力欄に残った）があれば`escalated`、`waited_secs`の前にsessionが終われば`run_ended`、送り直しから`waited_secs`の2倍経ってどれも無ければ`resolved_by_resend`、`waited_secs`の記録が無ければ`pending`のまま）、`reason: send_unconfirmed`の`stalled`の`recovery_requested`（`recovery`。task 442。値と検知までの秒は`threshold_secs`と`waited_secs`、結末は同じ`attempt`の`detection: recovery`の`stall_resolved`）とそれがinboxに上げた`stalled`のask（`ask`。結末は`threshold: send_confirm_secs`の`stall_resolved`）、task 442より前の、文面の`submit_unconfirmed`か`submit_not_started`の直後に開いた`answer_prompt`のask（`ask`。値と検知までの秒は`submit_not_started`の`waited_secs`。人の答えなら`answered_intervene`、runtimeが閉じたならその前にsessionが終わっていれば`run_ended`、そうでなければ`resolved_by_itself`、未回答のままsessionが終われば`run_ended`）。`/exit`の送信は数えない（`stuck_exit`の経路）。既にopenな`answer_prompt`があってaskが開かなかったものも数えない。sessionの終わりは、`session_live: true`でない`supervision_finished`、`workspace_closed`、`run_recovered`、`run_integrated`、payloadの`status`が`failed` / `interrupted`のイベント。
-  - `background_alert_secs`: task 1437より前の`long_background`の復旧jobがinboxに上げた`stalled`のaskの`ask_opened`（`ask`）。結末は`threshold: background_alert_secs`の`stall_resolved`から取る。復旧jobが直したもの（`auto_repaired`）はここでは数えない。`running_alerts`は今の`long_background`の数。
-  - `idle_process_secs`（task 645）: `background_alert_secs`と同じ考え方で、[`idle_process`の復旧job](background-recovery-job.md#cpu時間が伸びないプロセスidle_process)が人か段に回したものを数える。receiptの前にinboxに上げた`stalled`のaskの`ask_opened`（`ask`。結末は`threshold: idle_process_secs`の`stall_resolved`から取る。その記録がまだ無いaskは、同じ`ask_id`を名指す`alert: idle_process`の`recovery_finished`でこの設定のものと見分け、`pending`）と、receiptの後・判定の後の終了の待ち・resumeでaskを開かずにその段の時間切れに任せた`outcome: left_to_phase`の`recovery_finished`（`left_to_phase`。それ自体が終わりなので結末は`left_to_phase`で、終わりまでの秒は無い）。`stall_resolved`が無いものの値と検知までの秒は、同じ`attempt`の`alert: idle_process`の`recovery_requested`の`threshold_secs`と、`idle_processes`の`idle_secs`の最大から取る（jobを使い切った後のescalationはjobを起動せず最後の`attempt`を名指すので、そのjobの`recovery_finished`が先にあれば取らず、記録なし）。復旧jobが直したもの（`auto_repaired`）と`wait`は数えない。`running_alerts`は今の`idle_process`の数（CPU時間の記録はsupervisorのメモリにしか無く、`stats`は今このalertを`running_alerts`に出さないので0）。
-  - **`preempted`**（見逃しの疑い）: task 1437より前のsupervisorが記録した`stall_preempted`（`via: input`。[receiptの無いidleの検知](idle-without-receipt.md)の見逃しの疑い。task 409）と、人の`recover`（`by: supervisor`でない`run_recovered`、`via: recover`）のうち、その`previous_status`で見ていたsession（`running`なら最新の`agent_started`から）の中に`receipt_observed`も`stall_nudged`も`stalled`のaskも無く、未回答の`worker_question` / `answer_prompt`のask（closeはイベントを書かないので回答で見る）も解消していない`prompt_waiting`も無かったもの。idle markerの履歴はイベントに無いので、recoverの時点でsessionがidleだったかと、経過が閾値の手前だったかは確かめない（疑いとして数える）。対話のworkerの画面に人が直接打った入力は、最初のsessionのreceiptの無いidleの段で閾値の手前に打たれたものだけを`stall_preempted`として数えていた（非対話のworkerには人が打てない）。
-- **`reason_codes`**: `{count, by_code, by_kind}`（ADR-0034の決定1、task 195）。`backend_failures`と同じwindowと`--goal`の絞り込みで、payloadに`code`を持つイベントの件数、コードごとの件数、kindごと・コードごとの件数。`validation_finished`に添える`evidence_missing` / `scope_violation`のイベントと、失敗した工程のイベントに添える`backend_call_failed`（`backend_failures`が数える）は同じ失敗を2回数えないよう除く。コードの無い古いイベントは数えない（[domain-model](../domain-model.md#理由の分類コードcode)）
-- **`review_reasons`**: reviewとplan reviewのverdictの分類コードごとの集計（ADR-t947-1。下の[差し戻しの分類コードごとの集計](#差し戻しの分類コードごとの集計)）。
-- **`duplicate_cancels`**: `{count, tasks: [{task_id, duplicate_of}]}`（[ADR-0063](../../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定5）。`backend_failures`と同じwindowと`--goal`の絞り込みで、`duplicate_of`を持つ`task_status_changed`（`cancel --duplicate-of`）の件数と、イベント順のtaskと重複先
-- **`landing_rechecks`**: `{rechecks, runs_checked, conflicts, check_failures, resumed, runs: [{task_id, run_id, code, action, landed_task_id}]}`（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定6、[Landing recheck](landing-recheck.md)）。`backend_failures`と同じwindowと`--goal`の絞り込み（`landing_recheck_finished`は着地したrunのtask、`landing_recheck_failed`は見つかったrunのtaskで絞る）で、`rechecks`は`landing_recheck_finished`の数、`runs_checked`はその`checked`の和、`conflicts` / `check_failures`は`landing_recheck_failed`のcodeが`rebase_conflict` / それ以外の数（`repeat: true`は数えない）、`resumed`は`action: resumed`の数（`repeat`も数える）。
-- **`landing_waits`**: `{waited: {landed, conflicted, conflicted_ratio, recheck_conflicts, rebase_conflicts, wait_secs: {count, median, p90, max}, by_wait: {<待ち>: 件数}, runs: [{task_id, run_id, waits, wait_secs, recheck_conflicts, rebase_conflicts}]}, not_waited: {landed, conflicted, conflicted_ratio, recheck_conflicts, rebase_conflicts}}`（goal 39、task 1312）。reviewの後に人かrecoverを待った着地と待たなかった着地で、着地までの衝突を比べる（待つ間にmainが動いて着地のrebaseが衝突することが減ったか、landing recheckが着地の前に見つけたかを読む）。`backend_failures`と同じwindowと`--goal`の絞り込みで、`run_integrated`がwindowにあるrunを数える（windowの外の着地と、着地していないrunは数えない）。待ちと衝突はそのrunの着地より前の全てのイベントから読む（windowの前に待ったrunも、着地がwindowにあれば数える）。集計は`domain::stats::landing_waits`。
-  - 境目: runの最初のreviewのverdict（`review_finished`か`review_failed`）。無ければ最初の`validation_finished`。それも無ければ境目は無く、着地の前の全てのイベントを見る。
-  - 待った（`waited`）: 着地の前に次のどれかがあるrun。`by_wait`と`runs[].waits`はその種類ごと（1つのrunが複数に入る）。
-    - `kind`が`approve_landing`の`ask_opened`（verdictの後にしか開かず、落ちたreviewと同じtransactionで開くことがあるので、境目に依らず数える）と、境目の後の`kind`が`stuck_exit`の`ask_opened`（task 1437より前の対話のworkerの最初のsessionの`/exit`のものは数えない）。待ちはそこから同じ`ask_id`の最初の`ask_answered`か`ask_closed`（askのeventはrunに記録される）まで、無ければ着地まで。
-    - 境目の後の`lease_released: true`の`runtime_error`（leaseを手放してrecoverを待つ）と`integration_held`（hostで検証が再び落ちて人を待つ）。待ちはそこからrunの次の`run_recovered`・`integration_started`・`resume_started`まで、無ければ着地まで。`lease_released`の無い`runtime_error`は待ちではない。
-    - それ以外の着地は`not_waited`。
-  - `wait_secs`は待ったrunごとの待ちの秒（runの待ちの区間の和集合。重なりは1回）の`{count, median, p90, max}`（`p90`は最近順位法）。`by_wait`・`runs`（着地の古い順）と合わせて`waited`だけが持つ。
-  - 衝突: 境目の後・着地の前の、`landing_recheck_failed`のcode `rebase_conflict`（landing recheckが着地の前に見つけた。`repeat: true`は数えない）と、`integration_deferred`のcode `rebase_conflict`（着地のrebaseの衝突。`status`が`needs_session`か、記録の無い古いもの）。`recheck_conflicts` / `rebase_conflicts`はそれぞれが1回でもあったrunの数（両方に入るrunがある）、`conflicted`はどちらかがあったrunの数、`conflicted_ratio`は`conflicted / landed`（小数3桁、`landed`が0ならnull）。`runs[]`の`recheck_conflicts` / `rebase_conflicts`はそのrunの回数。検証の失敗（`verification_failed`）と境目の前の衝突は数えない。
-- **`waiting`**: `{started: {<ask_kind>: 件数}, waited: {<ask_kind>: {count, total_secs, median_secs, max_secs}}, waited_by_topic: {<topic>: {count, total_secs, median_secs, max_secs}}, by_route: {<route>: {started, waited: {count, total_secs, median_secs, max_secs}}}, slot_wait: {count, total_secs, median_secs, max_secs}, over_parallel, deferred}`（[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定13、[人の答えを待つrun](waiting.md)）。`--goal`の絞り込みは`backend_failures`と同じで、windowは`backend_failures`と同じ期間集計の窓（task 1370でこの欄から先に窓の終わりまで数えるようにした。それまでは数週間の窓で`started`と`waited`が空になっていた）。`started`は`run_waiting_started`の数を始めたaskのkindごとに、`waited`は`run_waiting_ended`の`waited_secs`をそのrunの待ちを始めたaskのkindごとに（windowの前に始まった待ちもそのkindで）、`by_route`は`started`と`waited`（全てのkindを合わせたもの）を、待ちを始めた時点のrunの経路（`interactive` / `headless`。そのrunの最新の`run_claimed`か`provider_switched`の`worker_mode`。`worker_mode`を記録する前にclaimしたrunは`unknown`）ごとに（windowの前に始まった待ちの終わりも、始めた時点の経路で）、`waited_by_topic`は`waited`のうち`worker_question`が始めた待ちを、その問いの主の分類コード（[worker_questionの分類コードごとの集計](#worker_questionの分類コードごとの集計)。無ければ`unlabeled`）ごとに、`slot_wait`は`run_slot_regained`の`slot_wait_secs`、`over_parallel`はその`over_parallel`が真の数、`deferred`は`run_waiting_deferred`の数（上限に当たった回数）。`waited`の`total_secs`は、待ちがslotを塞いでいたら失われていたslotの時間。
-- **`worker_routes`**: workerの経路ごとの健全性（task 1371。task 1340でClaudeのworkerの既定が非対話になった後の様子を日々読むため）。`{<route>: {turns, turn_outcomes: {<outcome>: 件数}, turn_failures: {<failure>: 件数}, stall_nudged, stalled: {<reason>: 件数}, provider_switches: {<reason>: 件数}, claude_cost_usd: {turns, total, median, max}, waiting: {started, waited}}}`。経路はそのeventの時点のrunの経路（`waiting`の`by_route`と同じく最新の`run_claimed`か`provider_switched`の`worker_mode`、無ければ`unknown`）。windowと`--goal`の絞り込みは`waiting`と同じ（窓の終わりまで、runのpageに依らない）。`turns`は`turn_finished`の数で、`turn_outcomes`はその`outcome`ごと、`turn_failures`は`failure`のあるものの`failure`ごと。`stall_nudged`は`stall_nudged`の数。`stalled`は`alert: stalled`の`recovery_requested`の`reason`ごと（非対話の`turn_without_receipt`・`permission_denied`と、対話の`idle_without_receipt`・`send_unconfirmed`）。`provider_switches`は`provider_switched`の`reason`ごとで、切り替える前の経路に数える。`claude_cost_usd`は`provider`が`claude`の`turn_finished`の`cost_usd`（turnごとの値。[非対話のworker](headless-worker.md)）の数・合計・中央値・最大（米ドル、小数4桁）で、Codexのturnは数えない。`waiting`は`waiting.by_route`のその経路の値。実装は`domain::stats::routes`。`kpi`の各期間の`health.routes`（[kpi](kpi.md#期間の健全性)）と、日次・週次のレポートとスループットの見直しの入力がこれを読む
-- **`planner_routes`**: runtimeのplannerの経路ごとの様子（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4、task 1398。`worker_routes`のplanner版で、非対話に切り替えた後の1週間の評価で対話の期間と同じ物差しで比べるため）。`{<route>: {opened: {<revise|draft|finding|request>: 件数}, revise_to_review, draft_settle, finding_settle, request_settle, planner_questions, turns, turn_outcomes: {<outcome>: 件数}, turn_failures: {<failure>: 件数}, tokens}}`（`domain::stats::planner_routes`）。経路はplannerごとに、runの無い`turn_*`がそのplannerを名指していれば`headless`、hookの`runtime_planner`の区間（`route`の無い`session_opened`）があれば`interactive`、どちらも無ければ`unknown`（agentが一度も起動しなかった非対話のplannerを含む）。windowと`--goal`の絞り込みは`worker_routes`と同じで、taskの無いqueueのevent（plannerのturn・findingと依頼のplanner・`planner_question`）は`--goal`では数えない。`opened`は`plan_revise_sent`の`opened: true`（reviseのために開いたplanner）・`draft_planner_opened`（束ごとに1つ）・`finding_planner_opened`・`request_planner_opened`の数。時間は`{count, total, median, p90, max}`の秒で、終わりのeventが窓にあるものを始まりがいつでも数える: `revise_to_review`は`plan_revise_sent`から同じproposalの次の`plan_review_started`まで（出し直したproposalがreviewに入るまで）、`draft_settle`は`draft_planner_opened`から同じplannerとtaskの`draft_planner_settled`まで、`finding_settle`は`finding_planner_opened`から同じfindingの次の`finding_status_changed`まで、`request_settle`は`request_planner_opened`から同じ依頼の`request_proposed` / `request_declined`まで。`planner_questions`は`kind: planner_question`の`ask_opened`をeventのactor（`planner:<id>`、無ければ`asked_by`）のplannerの経路に数える。`turns` / `turn_outcomes` / `turn_failures`はrunの無い`turn_finished`（非対話のplannerのturn）を`worker_routes`と同じ形で。`tokens`は`sessions.by_route.runtime_planner`のその経路の`tokens`（窓の中で閉じた区間の合計。`sessions`も上の「期間集計の窓」（task 1379）で窓の終わりまで数えるので、他の欄と窓がずれない）。何も無ければ`{}`。
-- **`conflict_hotspots`**: `{count, history, config, files}`（goal 31、[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定21）。`backend_failures`と同じwindowと`--goal`の絞り込みで、payloadに衝突したファイルの一覧`conflicts`を持つ`integration_deferred`（rebaseの衝突。`integrate`が`conflicted_files`で集めて記録し、`reason`の文章とは別に持つ）と`conflict_precheck`（着地前の`git merge-tree`）をファイルごとに数える。同じrunが同じ`main`に対して同じファイルで記録した2件目（precheckの後に同じmainへのrebaseが衝突した）は数えない。`count`は数えたイベントの件数。集計は`domain::stats::conflicts`。
-  - `files`: 衝突の多い順（同数ならtask数の多い順、path順）に`{path, conflicts, tasks, task_ids, landings, ratio, last_conflict_at, state, renamed_to?, alert}`。`landings`はwindowの最初のイベントから最後のイベントまでの間にmainのfirst-parentのcommit（1着地1 squash commit）のうちそのpathを変えた（renameの旧名・新名を含む）数、`ratio`は`conflicts / landings`（1を超えうる。`landings`が0ならnull）。`state`はmainに今そのpathがあれば`present`、無くて、最初の衝突以降のrenameを辿った名前がmainにあれば`renamed`（`renamed_to`にその名前）、どちらでもなければ`deleted`（例: 分割した`src/runtime.rs`）。
-  - `history`: mainの履歴を読めたら`{status: "checked", landings}`（windowの間のmainのcommit数）、読めなければ`{status: "unavailable", reason}`で、各ファイルの`landings` / `ratio`はnull、`state`は`unknown`。履歴は`StatsSources.history`（`Repository::main_history`＝`GitRepository::main_history`: `git log -z --first-parent --reverse --diff-merges=first-parent -M --name-status --max-age=<最も古いイベントの1秒前のUNIX秒> refs/heads/<branch>`（windowの最初の衝突より前の着地も数えるため、windowに関わらずqueueの最も古いイベントから読む）と`git ls-tree -r --name-only refs/heads/<branch>`）越しに、衝突のイベントがあるときだけ読む。main checkoutはqueueが束縛されたcommon directoryから`[stall]`と同じく決める。
-  - `alert`: `state`が`deleted`でなく、`conflicts`が`[conflicts].hotspot_conflicts`（既定3）以上で、`ratio`が`[conflicts].hotspot_ratio_percent`（既定20）% 以上（`ratio`がnullなら回数だけで判定）。`config`は`[conflicts]`の値（判定に使う2つと、claimの控えの`defer_max_secs`・`waiting_owner_grace_secs`）と`source`（main checkoutの`dagq.toml`の`[conflicts]`なら`file`、無ければ`default`）。
-  - observerは`stats`を入力に読むのでそのまま載り、plan reviewのpromptにも載る（[Plan review](plan-review.md#plan-review-supervisor)の4）。
-- **`asks`**: `{opened: {count, by_kind, by_asked_by, by_reason_category}, answered: {count, by_kind, by_answered_by, choices: {<kind>: {by_option, free, unknown}}}, by_reason_category: {<reason>: {opened, answered, open}}, times: {by_kind, by_asked_by, by_topic}}`（task 325、task 439、task 468）。`backend_failures`と同じwindowと`--goal`の絞り込み（taskの無い`blocked` / `queue_hold`のaskは`--goal`があれば数えない）で、`ask_opened`をaskのkindと`asked_by`ごとに、`ask_answered`をkindと`answered_by`（`person` / `inbox`などのrole / `runtime`。記録の無い古い回答は`unknown`）ごとに数える。`choices`はkindごとの回答の内訳で、`by_option`は選んだ選択肢の文字列ごとの件数、`free`は選択肢と一致しなかった回答、`unknown`は選択の記録が無い古い回答。集計は`domain::stats::asks`がrun_eventsから再導出する。
-  - `opened.by_reason_category`は`ask_opened`の`reason_category`（人が要る理由。ADR-0047の決定41）ごとの件数で、理由を記録する前に開いたaskは`unknown`。
-  - `by_reason_category`は同じwindowのaskを`reason_category`（`authentication` / `cost` / `scope` / `discard` / `recovery_failed`、記録の無い古いaskは`unknown`）ごとに数え、`auto_repairs`と並べてinboxに届く件数を理由ごとに読む（ADR-0047の決定45、task 439）。`opened`はwindowの`ask_opened`、`answered`はwindowの`ask_answered`（window より前に開いたaskの回答も含む）、`open`は`opened`のうちwindowの終わりまでに`ask_answered`の無いもの。`ask_answered`のpayloadに`reason_category`が無い回答（runtimeが閉じたaskなど）は、`ask_id`で対になる`ask_opened`の理由で数える。taskもrunも持たない`queue_hold`（認証・コスト）と`blocked`のaskも数えるが、他の`asks`と同じく`--goal`があれば数えない。新しい表は持たず、run_eventsから再導出する。
-  - `times`は人の回答待ちの時間（task 468）。`by_kind`はaskのkind（`approve_landing` / `decide` / `stuck_exit` / `planner_question` / `blocked`など）、`by_asked_by`は`ask_opened`の`asked_by`ごと、`by_topic`は`worker_question`だけをその主の分類コード（ADR-t947-2。無ければ`unlabeled`）ごとに`{to_answer, to_apply, answer_to_apply, answer_to_apply_without_slot_wait, open}`を出し、それぞれ`{count, median, p90, max}`（秒、`p90`は最近順位法、無ければnull）。`to_answer`は`ask_answered`がwindowにあるaskの`ask_opened`から最初の`ask_answered`まで、`to_apply`は回答の適用がwindowにあるaskの`ask_opened`から適用まで、`answer_to_apply`は同じaskの回答から適用まで。`answer_to_apply_without_slot_wait`（task 949）は`answer_to_apply`から、そのaskのrunが回答から適用までの間にslotの空きを待った時間（その間の同じrunの`run_slot_regained`の`slot_wait_secs`の合計。[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)決定8の設計どおりの待ち）を引いたもの（0未満にしない）で、答えの適用の遅れのうちslotの空き待ちとそれ以外を分けて見る。runの無いaskは`answer_to_apply`と同じ。`approve_landing`は答えをその場で適用するので`answer_to_apply`は秒になり、着地までの待ちは`land_phases`の`landing_queue`（`via: approve`）に出る。適用は、回答の後でそのaskの`ask_id`をpayloadに持つ最初のイベント（`ask_closed`（`ask close`・supervisorが答えを適用して閉じたとき）、`ask_delivered`、`integration_approved` / `triage_decided` / `stall_resolved` / `planner_answer_closed`などruntimeが適用したイベント。`ask_updated` / `ask_delivery_failed` / `planner_answer_claimed`と、回答が届いた時点で終わるrunの待ちの`run_waiting_*` / `run_slot_regained`は適用ではない。runtimeが回答済みのaskを閉じるときも、適用せずに閉じるとき（`approve_plan`の回答が当たらなくなった`decide_plan`、proposalの取り下げの`close_plan_asks`、goalが先に閉じた`decide_goal`。task 568）も`ask_closed`を書く）で、runtimeが自分で閉じた回答（`runtime_closed: true`）は回答そのもの。`open`はwindowの終わりまでに`ask_answered`の無いask（windowより前に開いたものも含む）の、windowの終わり（`--until`などで止まらなければ今）までの経過時間。`ask_opened`の時刻が読めないaskは数えない。`--goal`の絞り込みは他の`asks`と同じ。`ask_closed`を記録する前に閉じたaskは、他の適用のイベントが無ければ`to_apply`に入らない。
-- **`auto_repairs`**: `{count, by_layer: {<layer>: {count, by_repair}}, recovery_jobs: {count, applied, escalated, by_verdict, by_confidence, by_outcome, by_alert: {<alert>: {count, applied, escalated, by_verdict}}}, by_day: {<YYYY-MM-DD>: {auto_repaired, by_repair, asks_opened, asks_by_reason, recovery_jobs, recovery_applied, recovery_escalated}}}`（ADR-0047の決定45、task 362、task 557）。`asks`と同じwindowと`--goal`の絞り込みで、runtimeと復旧jobが人を待たずに直した（記録の失敗はlogに書くだけでrunの進行を止めない）`auto_repaired`を`layer`（`runtime` / `recovery`）と`repair`ごとに数え、`by_day`はイベントの`created_at`のUTCの日ごとに、その日の`auto_repaired`（`repair`ごと）と`ask_opened`（`reason_category`ごと）を並べる。自動で直した件数とinboxに届いたaskの件数を日ごとに並べて、inboxに来る件数が減ったかを読む。集計は`domain::stats::auto_repairs`がrun_eventsから再導出する。記録している`repair`: `dialog_answered`（task 1437より前の記録。既知のダイアログ、[Prompt waiting](prompt-waiting.md)）、`submit_enter_retry`（task 1437より前の記録。入力欄に残った文や`/exit`がEnterの送り直しで入力欄を離れたことを画面で確かめたとき。`conditions`に`input`・`retries`。残ったまま・ダイアログ・画面が読めないときは記録しない）、`receipt_rewrite_requested`（古いreceiptの書き直しの促しを次のturnの依頼として書いたとき。task 1437より前は入力欄を離れたとき。`conditions`に`receipt_commit`・`head`）、`conflict_resume_uncounted`（衝突だけの`needs_session`のresumeを上限に数えずに始めたとき。`resume_started`と同じトランザクション。`conditions`に数えなかった根拠の`review_passed`・`landing_approved`・`rechecked`）、`kill_resume_uncounted`（外からのkill（`session_killed`）の後に復旧jobか人が決めたresumeを上限に数えずに始めたとき。`resume_started`と同じトランザクション。`conditions`に`parked`・`counted_resumes`・`kill_only_resumes`。ADR-t946-1）、`resume_adopted`（入れ替え後のsupervisorが`handoff.json`から、またはstaleなleaseの`needs_session`のrunをadoptしてrun_eventsから、resumeしたsessionの監視を引き継いだとき。`conditions`に`handoff`・`attempt`・`request_sent`。task 356）、`inherit_retry`（[Needs session](needs-session.md)）、復旧jobの`stop_processes` / `send_instruction`など（`layer: recovery`）。`exit_forced_close`（task 1437より前の記録。今のsupervisorは書かない。着地するrunのreceiptがcleanなworktreeのHEADに対して成り立つので、workspaceを閉じて着地へ進めたとき。cmuxの時間切れで`/exit`がどの試行でもsessionに届かなかった`exit_unsent`の`action: close_and_land`（task 354、`cause: backend_timeout`）と、決定25の`/exit`の再試行を使い切ったとき（task 555、`cause: exit_timeout`か`backend_timeout`）。resumeのsessionで再試行を使い切り、reviewがpassなどの条件がそろってworkspaceを閉じてresumeの判定へ進めたときも（task 936、`then: resume_verdict`）。`conditions`に`cause`・`attempts`）、`exit_retry`（task 1437より前の記録。`exit_request_timed_out`か届かなかった`exit_unsent`の後に間隔を空けて`/exit`（かEnter）を送り直し、その再試行の間にsessionが終わったとき。`conditions`に`attempts`・`cause`・`screen`。[Receipt and session exit](receipt-and-session-exit.md#exitの再試行)、task 555）、`disk_cleanup`（[空き容量を確かめる](disk-space.md)）、`landing_released`（持ち主の死んだ`integrating`のrunの着地スロットを解放したとき。[supervise](supervise.md#supervise)の12、task 1118）、`landing_found_on_main`（着地をやり直すrunの着地commitがmainに既にあったので、二重に着地させずに完了を記録したとき。[integrate](integrate.md#integrate)の1、task 1118）、`landing_processes_stopped`（持ち主の死んだ`integrating`のrunのworktreeに残ったプロセスを、猶予の後にpidで止めたとき。`conditions`に`pids`・`waited_secs`・`grace_secs`。[supervise](supervise.md#supervise)の12、task 1129）。`/exit`のcmuxの呼び出しの再試行そのもの（1回の送信の中の試行）は数えない。
-  - `recovery_jobs`は同じwindowと`--goal`の絞り込みで、復旧jobの`recovery_finished`を1件ずつ数える（ADR-0047の決定45、task 557）。`by_verdict`は`verdict`（`repair` / `escalate`）ごと、`by_confidence`は`confidence`（`high` / `low`）ごと、`by_outcome`は`outcome`（`already_asked`・`job_failed`・止めたjobの理由の`dialog_cleared` / `session_ended`、`left_to_phase`など）ごと、`by_alert`は`alert`（`failed` / `interrupted` / `resume_exhausted` / `stuck_exit` / `prompt_waiting` / `long_background`など、記録の無い古いeventは`unknown`）ごとの件数。payloadに無い（または`null`の）`verdict`・`confidence`・`outcome`は`none`に数えるので、jobが失敗した・人が見ているaskがすでにある・止めたなどverdictの無い`recovery_finished`も数え落とさない（`outcome`が`none`は、verdictを適用したかaskに上げた回と、`outcome`を記録する前の古いevent）。`applied`は`applied`が空でない件数（runtimeが適用した。`wait`も含む）、`escalated`は`escalated: true`（inboxのaskに上げた。開いてあった同じaskを使ったものも含む）件数。`by_day`の`recovery_jobs` / `recovery_applied` / `recovery_escalated`は日ごとの同じ件数で、`auto_repaired`・`asks_opened`と並べて読む。`recovery_finished`は`auto_repaired`とは別に数え、`count`には入らない。新しい表は持たず、run_eventsから再導出する。
-- **`draft_flow`**: `{landings, registered, adopted, canceled, kept_draft, backlog, oldest_backlog_secs, oldest_backlog_task_id, drafts_per_landing, inflow_per_outflow, by_origin: {<origin>: {registered, adopted, canceled, kept_draft, backlog, oldest_backlog_secs, oldest_backlog_task_id}}}`（task 470）。`asks`と同じwindowと`--goal`の絞り込みで、着地の数とruntimeやjobが登録したdraftの流入・流出・滞留を並べる（下の[draftの流入と流出](#draftの流入と流出)）
-- **`landing_utilization`**: `{window_secs, busy_secs, utilization, peak_hour: {start, utilization}, attempts, landed, attempt_secs: {count, min, median, p90, max}, queue: {mean, max, runs}}`（goal 72、task 991）。`host`と同じ時間の窓（下の[着地の直列処理の使用率](#着地の直列処理の使用率)）で、`integrate`の試行が1本だけの着地slotを占めた割合と、試行の時間、slotの順番待ちのrunの数
-- **`sessions`**: `{window: {after, upto}, by_kind: {<kind>: {count, open, active, active_ratio, open_now, inferred, active_unavailable, tokens, models}}, by_route: {<kind>: {<route>: <by_kindと同じ形>}}}`。`backend_failures`と同じwindowと重なるClaude sessionの区間をkindごとに数え、`by_route`は経路のある区間を経路ごとにも数える（task 1398。下の[Claude session](#claude-session)）
-- **`updates`**: 自動更新の`update_*`の集計（形と数え方は[Auto-update](auto-update.md)の`stats`の項）。`e2e.tests`はe2eの関門のtestの名前ごとに、関門で落ちた回数`failed`・流し直しで通った`passed_on_rerun`・印で通した`quarantined`・関門を落とした`failed_gate`・windowの終わりの続けての失敗`failures_in_a_row`・根拠の関門のevent`event_ids`（新しい順に5件まで）・windowの最後の関門が読んだ印の有無`marked`と印の`mark_task`を出す（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定4、task 1166。`domain::stats::updates::E2eTestStats`）。observerはこれを`flaky_test`のfindingにする（[Observer](observer.md)）
+- runがどこで時間を使い、何に詰まり、どの閾値を超えたかを、新しい表を持たずに記録から毎回同じ規則で導く（[ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)決定5）。
+- 走っているrunの止まりの疑い（running alert）と閾値ごとの検知の結果を同じ出力で返し、observer・plan review・人・KPIが同じ値を読む（[ADR-0043](../../adr/0043-detect-stalled-worker-sessions-nudge-once-then-ask.md)決定5・6）。
+- 版・設定・試しの群などの変更の前後を、runを属性で分けた群で比べられるようにする。
+
+## 全体の流れ
+
+```text
+CLI（src/main.rs） / observer
+  └─▶ compose::OneShot::stats_of        今の時刻を1回読む
+        └─▶ application::stats::stats   queue・run directory・cmux・mainの履歴・host/ を読む
+              └─▶ domain::stats::stats  純粋関数: events → runs・群・alerts・期間の集計
+                    └─▶ with_changes / with_areas / without_cargo_measures → JSON
+```
+
+1回の読みは4つの範囲を持つ。
+
+```text
+runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定は直近の一定件数、--fullで全件）
+            → runs と、runsから求める群（goals・overall・changes・areas・e2e・versions・load_bands・trial_groups・escalations）
+期間の窓:   --since（無ければpageのrunの最初のevent、--fullなら最初）の後 〜 --until（無ければ最新のevent）
+            → backend_failures・asks・waiting・sessions・jobs など残りの期間の集計
+時間の窓:   期間の窓の両端の時刻（今を超えない）→ host・landing_utilization
+今:         → running_alerts・slotのalert・控えの今（held / deferred）
+```
+
+## 責務と境界
+
+- domain（`src/domain/stats.rs`と、集計ごとのmoduleを置く`src/domain/stats/`）が全ての数え方を持ち、I/Oを持たない。
+  この地図は集計のmoduleを名前だけで指す。
+  入力はeventの全件、task→goalの対応、今の時刻、supervisorの空きslotの観測（`SlotSnapshot`）、走っているrunの観測（`LiveSnapshot`）。
+- application（`src/application/stats.rs`）はqueueと外の情報源（`StatsSources`: run directory、idle marker、cmuxのworkspace、`[stall]`・`[conflicts]`、mainの履歴）を読んで渡すだけで、判断を足さない。
+- `stats`は何も書かない。
+  hostの負荷はqueueのディレクトリの`host/`を、衝突の多いファイルの着地数はmainのgitの履歴を読むだけ。
+- 記録を書くのは各工程（supervisor・`integrate`・hook・job）で、記録の欄の意味は書く側の型と文書が持つ。
+- [kpi](kpi.md)・[完了見込み](#完了見込み)・plan reviewの衝突の多いファイルはdomainの関数を直接呼び、同じ規則を読む。
+
+## 不変条件
+
+- 新しい表もeventも持たず、出力は記録からいつでも再導出できる。
+  集計を足すときも、記録を足してそれを再導出する形にする。
+- 既存の欄は変えず、足すだけにする（observer・KPI・レポート・plan reviewのpromptが欄を読むため）。
+- runのpageに従うのはrunsとrunsから求める群と`next_cursor`だけで、期間の集計はpageで切らない。
+- 同じevent・同じ今の時刻・同じ観測からは同じ出力になる。
+- 記録の無い古いeventは書き換えず、null・`unknown`・`unlabeled`として数える。
+
+## 読み方の約束と落とし穴
+
+- cursorは数字ならevent id、`@`付きならunix秒、RFC 3339ならその時刻以前に記録された最後のevent（`Cursor`）。
+  数字だけのものはevent idなので、unix秒には`@`を付ける。
+- `--since next_cursor`で続きのpageを読むと、期間の集計は同じ窓を重ねて数える。
+  pageごとの期間の集計は足し合わせず、1回の読みの値を窓の全体の値として読む（`Stats`のdoc comment）。
+- `--goal`で絞ると、taskを持たないevent（observerの観察、taskの無いask、plannerのturn、自動更新など）は0か数えない。
+  goalで絞った値と絞らない値は、その種類の欄では比べられない。
+- 期間の集計の多くは窓の中で起きたものを数え、その後の結末は窓の外のeventからも読む（どちらで切るかは集計の型のdoc comment）。
+- 対話のworkerの記録（入力の待ち・送信の確認・`/exit`まわり）は過去の記録として読む（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。
+
+## runの行と群
+
+| 知りたいこと | コードの入口 |
+| --- | --- |
+| runの区間（work・validate・wait_to_land・startup）と回数 | `RunStats`、`runs` |
+| goal・全体・change・area・e2eの群 | `GoalStats`・`Intervals`、`with_changes`・`with_areas`・`e2e_groups` |
+| claimの属性（版・負荷・provider・model・試しの群） | `RunStats`の欄、`measures` |
+
+- changeはtaskが宣言した変更の種類、areaは着地したcommitの差分を`dagq.toml`の`[areas]`に通した変更の対象（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)、[kpi](kpi.md#area)）。
+  areaは保存せず読むたびにgitから求め、1つのrunを持つ全てのareaに数える。
+- e2eの群は、validatingがe2eを求めたかとその出どころでrunを分け、差分でe2eを狭めた前後を比べる（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定2）。
+- providerはtaskが求めたもの（requested）と最後に作業したもの（actual）を分け、claimの時点の切り替えも数える（[ADR-t813-2](../../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)、[provider-lifecycle](../provider-lifecycle.md)）。
+  経路（`route`）はclaimの値のままで、途中の切り替えで変えない。
+- Codexで作業したrunは、claimの`model`でなくCodexのturnが記録した実際のmodelで数え、試しの群に入れない（[Worker model](worker-model.md)）。
+
+## alerts
+
+- 入口: `Alert`と閾値の定数（`src/domain/stats.rs`の先頭）で、まだ終わっていないrunも見る。
+- `awaiting_integration`の起点は最初に`awaiting_integration`になった時刻で、着地の失敗で戻っても変えない。
+- `ask_unanswered`は、その後にrun（かそのtaskのrun）が着地したaskを数えない。
+- `task_failed`はpageに関係なく全runで数え、最後に失敗したrunが対象に入るときに出す。
+- slotのalertは`claim_held`・`claim_deferred`・`idle_slots`の順に1つだけ出し、`stats`を読んだ時点の観測で判定して時間帯の履歴を持たない（`SlotSnapshot`のdoc comment）。
+  着地の順番を待つrunは埋まったslotに数え、人の答えを待つrunは数えない（[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)決定13、[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）。
+  着地待ちが空けた軽い枠（[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)）と、draftのgoalのreadyのtaskは数えない。
+- `claim_deferred`は控えの理由を問わず数える（[claimを控える（衝突の多いファイル）](claim-defer.md)、[ADR-t1632-1](../../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
+
+## running alerts
+
+- 入口: `RunningAlert`と`running_alerts`、markerとcmuxを読むのは`application::stats::stats`。
+- `--since`に関係なく毎回出す。
+- 見ているsessionは、workerのsession・resume中のsession・送ったreviseのsessionのどれかで、それ以外のrunは見ない。
+- `idle_without_receipt`で`nudged`も`asked`もfalseなら、supervisorの検知の漏れを示す（[receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)）。
+- `long_background`は観測だけで、復旧jobを起動しない。
+  経過は、その処理が途切れずにmarkerに載り続けた最初の時刻から測る（markerは上書きされ開始時刻を持たないので、hookが追記するlogから読む。`domain::stall::IDLE_LOG`と`background_first_seen`）。
+  logが無いときはmarkerのmtimeからの下限になる。
+- `workspace_mismatch`のworkspaceの対応はcmuxのgroupでなくdescriptionで見る（groupはlistに出ない）。
+  backgroundのwrapperはcmuxのlistでなくpidの起動時刻で生死を見る（pidを別のprocessが継げば死んでいる。[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定10）。
+- cmuxに聞けなければ`workspace_mismatch`だけを判定せず、`stats`自体は失敗しない（`workspace_check`）。
+
+## 閾値ごとの検知
+
+- 入口: `thresholds`と`ThresholdStats`、判定に使った閾値は`stall_config`、閾値の決め方は[Stall thresholds](stall-thresholds.md)。
+- `[stall]`の設定名は検知が0でも全て出す。
+- 検知は窓の中のものを数え、結末は窓の外のeventからも決める。
+  結末の記録がまだ無い検知は`pending`。
+- `preempted`（見逃しの疑い）は、idle markerの履歴がeventに無いので確かめずに疑いとして数える。
+- CPU時間が伸びないプロセスの記録はsupervisorのメモリにしか無いので、その設定名の`running_alerts`は常に0（[復旧job](background-recovery-job.md)）。
+
+## claimと着地の控え
+
+- claimの控え（load averageと空き容量）は`domain::claim_hold::claim_holds`（[claimを控える](claim-hold.md)）、着地の検証の控えは`domain::claim_hold::holds_of`（[空き容量を確かめる](disk-space.md)）。
+- 衝突の多いファイルなどでのclaimの控えは`domain::claim_defer::claim_deferrals`（[claimを控える（衝突の多いファイル）](claim-defer.md)、[ADR-0069](../../adr/0069-do-not-claim-tasks-overlapping-hot-files.md)）。
+- loadの保留中のclaimの間隔の待ちは控えに数えない（[ADR-t1479-1](../../adr/2026-10-04-t1479-1-space-new-claims-while-the-load-hold-is-on.md)、[claimの間隔](claim-hold.md#claimの間隔)）。
+- `--goal`でも、今控えているtaskの一覧はqueueの今を出す。
 
 ## 着地待ちの内訳
 
-`wait_to_land`（最初の`validation_finished`→`run_integrated`）を、runのイベントで工程に切り分ける（ADR-0049の決定5、goal 36）。集計は`domain::stats::landing`（`LandClock`）が行い、新しい表は持たない。最初の`validation_finished`から時計を始め、下の表のイベントが来るたびに、それまでの時間を今の工程に足して次の工程に移る。表に無いイベント（`resume_started`、`revise_finished`、`receipt_observed`、`verification_command`など）は工程を変えない。区切りは`run_integrated`で、工程の合計は`wait_to_land`に等しい（工程ごとにミリ秒を秒に切り捨てるので数秒ずれうる）。
+`wait_to_land`をrunのeventで着地の工程に切り分ける（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定5）。
 
-| 工程 | 始まるイベント | 中身 |
-| --- | --- | --- |
-| `exit` | 最初の工程、`validation_finished`、`review_finished`、`requested`がtrueでない`conflict_precheck`、`revise_unsent` | 工程の間の受け渡しとsessionの終了・closeの待ち |
-| `review` | `review_started`、`review_retried` | headlessのreview |
-| `revise` | `revise_requested` | reviseを送ってから、書き直したreceiptのvalidationまで |
-| `conflict` | `requested: true`の`conflict_precheck` | merge-treeの事前判定が見つけた衝突を、生きているsessionが解消する間 |
-| `ask` | `ask_opened`（そのrunのask。observerの`blocked`と`planner_question`はrunを止めないので除く。timelineの`holds_the_run`と同じ）、`review_failed`、`integration_error`、`integration_held` | 人の答えを待つ間（`approve_landing`、`worker_question`、`stalled`など）。`integration_error`と`integration_held`（検証のhostの失敗がやり直しでも落ちた。task 639）の後のrunはleaseを外されて`awaiting_integration`に戻り、人の`review and integrate`を待つ |
-| `resume` | payloadの`status`が`needs_session`のイベント（`integration_deferred`、`landing_decided`の`send_back`、evidenceの不足など） | `needs_session`で待つ間とresumeしたsessionの作業 |
-| `landing_queue` | `landing_queued`、runtimeが適用する`approve_landing`の`ask_answered`、`run_e2e_finished` | 着地slotの順番待ち（他のrunの`integrate`が終わるのを待つ。`land`の答えで承認されたrunは空きslotも待つ）。e2eが流せず（`outcome: unavailable`）流し直しを待つ間もここ |
-| `e2e_wait` | `run_e2e_waiting` | 着地の前のe2e（[Review](review.md#着地の前のe2e)、ADR-t1233-2）を、同じsupervisorの他のrunのe2eが終わるまで待つ間 |
-| `e2e` | `run_e2e_started` | 着地の前のe2eをhostで流す間（hostのlockを待つ秒も含む。それだけの秒は`run_e2e_finished`の`lock_wait_secs`）。落ちた`run_e2e_failed`は`status: needs_session`なので`resume`に移る |
-| `rebase` | `integration_started` | `integrate`のreceiptの照合とrebase |
-| `verify` | `integration_rebased` | `integrate`の範囲の検査、`verification_commands`、mainへのcommit |
-
-- **`needs_session`は他の規則より先**に見る（`integration_deferred`は`resume`になる）。時計を始める最初の`validation_finished`にも同じ規則を当てるので、最初のvalidationが`evidence_missing` / `scope_violation`でrunを止めたときは`resume`から始まる。
-- **askの後**: `approve_landing`の`ask_answered`（payloadの`kind`、無ければ対の`ask_opened`の`kind`）は`landing_queue`に移る（`land`はslotを待ち、`send_back` / `cancel`はすぐ次のイベントでstatusを記録する）。`runtime_delivers: false`（`LandingAnswer::parse`が読まない答え（`land: x`など。`send_back: <理由>`は読む）で、inboxが読む）なら`ask`のまま。それ以外のaskは、そのrunで開いているaskがすべて答えられたら、askの前の工程に戻る（reviseの途中の`worker_question`は`revise`に戻る）。askは`ask_id`（無ければ`id`）で対にする。askの間に他の工程のイベントが来たら、開いているaskは忘れる（closeはイベントを書かないので）。
-- **`landing_queued`**（`via`: `exit`か`resume`）は、supervisorが着地slotを待つ`Phase::AwaitingSlot`に入るときに記録する（[Review](review.md#review-supervisor)の5のpass、[`needs_session`](needs-session.md#needs_session)の5）。`land`の答えを適用したときは`via: approve`（と`ask_id`）で記録する（[Review](review.md#review-supervisor)の6。task 949）。持ち主の死んだ`integrating`のrunをsupervisorが解放して着地の列に並べたときは`via: recover`で記録する（[supervise](supervise.md#supervise)の12。task 1118）。このイベントが入る前のrunでは、slotの待ちは`exit`に入る。人の`integrate`はslotが空いていなければ拒否されるので待ちが無い。
-- **`landing_queue`の`via`別の内訳**（task 949）: `land_phases`の`landing_queue_via`に、`landing_queue`の工程を何がrunを列に入れたかで分けて`{via, secs}`の配列で載せる（runごと。集計の`land_phases`では`via`ごとの`{via, count, total, median, p90, max, tail_total}`で、`verify_commands`と同じ形）。`via`は`landing_queued`の`via`（`exit` / `resume` / `approve` / `recover`、無ければ`unknown`）で、runtimeが適用する`approve_landing`の`ask_answered`から入った`landing_queue`は`approve`（`landing_queued`を記録する前のruntimeのrunも含む）。承認から`integration_started`までの待ちは`approve`に入る。`via`ごとにミリ秒を秒に切り捨てるので、合計は`landing_queue`を超えない。
-- **`push`**: `run_integrated`から最初の`push_finished` / `push_failed` / `push_skipped`まで（`push_main`は着地の後に走るので`wait_to_land`の外）。記録が無ければnull。
-- 時計は`run_integrated`で止まる。まだ着地していないrunの内訳は`awaiting_integration`のalertの`phase`にだけ使い、今の時刻まで今の工程を伸ばして測る。
+- 入口: `LandClock`と`PHASES`（工程を始めるeventと中身は`PHASES`のコメント）。
+- 工程の合計は`wait_to_land`に等しい（工程ごとに秒へ切り捨てるので数秒ずれうる）。
+  pushは着地の後なので合計の外で別に測る。
+- `needs_session`のstatusを持つeventは他の規則より先に`resume`に移す。
+- askは全て答えられたら前の工程に戻り、closeはeventを書かないので、間に他の工程のeventが来たら開いているaskを忘れる。
+  runtimeが適用する`approve_landing`の答えは着地slotの順番待ちに移り、inboxが読む答えはaskのまま。
+- まだ着地していないrunの内訳は`awaiting_integration`のalertの`phase`にだけ使う。
+- 長い裾を作った工程は、工程ごとの`tail_total`を比べて読む。
 
 ### verifyのコマンド別の内訳
 
-`verify`のどの検証コマンド（fmt・clippy・llvm-covなど）が着地待ちを占めるかを見るため、`land_phases`の`verify_commands`に`verify`をコマンド文字列ごとに分けて載せる（task 509）。`LandClock`が`verify`の工程にいる間の`verification_command`（`phase`が`integration`か、`phase`の無い古いイベント）をコマンドごとに足す。
-
-- **1本の秒**: `duration_secs`（task 197）。無い古いイベントでは、`verify`に入ってから（`integration_rebased`）か、同じ`verify`の前の`verification_command`からの間隔。`duration_secs`もその間隔で頭打ちにするので、コマンドの合計は`verify`を超えない（ミリ秒で足してから秒に切り捨てる）。`verify`の外（`integration_rebased`の無い試行など）の`verification_command`と、`command`の無いものは数えない。
-- **試行**: runの`integrate`の試行（`attempt`）をすべて足し、失敗したコマンドも数える（延期された試行の`verify`も工程の`verify`に入るため）。
-- **runの行**: `verify_commands: [{command, count, secs}]`（コマンド文字列の昇順）。`count`はそのコマンドが流れた回数（試行と、hostの失敗の再試行（task 639）を含む）、`secs`はその合計。
-- **`goals` / `overall`（と`changes` / `versions`）**: `verify_commands: [{command, count, total, median, p90, max, tail_total}]`（コマンド文字列の昇順）。工程と同じ形で、値はrunごとの`secs`、`count`はそのコマンドを流した着地したrunの数（流していないrunは0として数えない）、`tail_total`は`wait_to_land`の長い裾のrunだけの合計。
-- トップレベルの`verification_commands`（task 197）は着地待ちと切り離したwindowのコマンドごとの所要時間で、こちらは着地したrunの`verify`の内訳として同じ時間を位置づけたもの。
+- 入口: `CommandSecs`・`CommandSummary`。
+- 延期された試行と失敗したコマンドも数え、1本の秒を工程の間隔で頭打ちにするので、コマンドの合計は`verify`を超えない。
 
 ## 着地の直列処理の使用率
 
-着地（`integrate`）はqueueで1本ずつ直列に流れるので、その使用率が1に近づくと着地数が頭打ちになる（goal 72、task 991）。集計は`domain::stats::landing_utilization`がrun_eventsから再導出し、新しい表もeventも持たない。[`kpi`](kpi.md)も期間ごとの窓で同じ関数を呼ぶ。
+着地（`integrate`）はqueueで1本ずつ流れるので、その使用率が1に近づくと着地数が頭打ちになる。
 
-- **試行**: `integration_started`から、同じrunの試行の終わり（`run_integrated`・`integration_deferred`・`integration_error`・`integration_held`・`integration_failed`・`runtime_error`・`run_adopted`・`run_recovered`・`resume_started`か、payloadの`status`が`needs_session` / `failed` / `interrupted` / `canceled`のevent。timelineの`integrating`の区間と同じ終わり）まで。着地しなかった試行も数える。終わりの記録が無い試行は、次の（どのrunの）`integration_started`で終わり、それも無ければ今まで開いている。次の試行は前の試行の終わりより前には始めない（時刻が前後しても）ので、試行は重ならず、窓の中の合計は窓の長さを超えない。
-- **窓**: `host`と同じ時間の窓（`--since`の時刻か窓の最初のeventの時刻から、`--until`の時刻か窓の終わりまで。今を超えない）。`window_secs`はその長さ、`busy_secs`は試行が窓に重なった時間の合計、`utilization`は`busy_secs ÷ window_secs`（窓が0ならnull。小数3桁）。
-- **`peak_hour`**: 窓の始まりから1時間ずつ切った丸ごとの1時間（窓が1時間より短ければ窓全体）のうち、占めた割合が最も大きいもの（同じなら早いもの）の始まり（UTC）とその割合。窓が0ならnull。
-- **`attempts`**: 窓に重なった試行の数、`landed`はそのうち窓の中で`run_integrated`で終わったもの。`attempt_secs`は窓の中で終わった（開いたままでない）試行の長さの`count`・`min`・`median`・`p90`（最近順位法）・`max`。
-- **`queue`**: 着地slotの順番待ちのrunの数。runは`landing_queued`から、次の`integration_started`・`run_integrated`・`resume_started`・`revise_requested`・`run_adopted`・`run_recovered`か、`status`が`needs_session` / `failed` / `interrupted` / `canceled`のeventまで待つ（`land_phases`の`landing_queue`と同じ始まり）。`mean`は待っていたrunの数の時間平均（待ちの時間の合計 ÷ `window_secs`）、`max`は同時に待っていた数の最大、`runs`は窓に待ちが重なったrunの数（同じrunが2度待っても1つ）。
-- `--goal`はそのgoalのtaskの試行と待ちだけを数える（終わりの記録の無い試行を切る次の`integration_started`はqueue全体から読む）。storeは`integrating`のrunを同時に1つしか許さないので、次の`integration_started`で切るのは終わりの記録が欠けたときだけ。
+- 入口: `landing_utilization`と試行の終わりの`ENDS`。
+  [kpi](kpi.md)は期間の窓で同じ関数を呼ぶ。
+- 着地しなかった試行も数え、試行は重ならないので窓の中の合計は窓の長さを超えない。
+  終わりの記録の無い試行は、次の（どのrunの）試行の開始で切る。
+- `--goal`はそのgoalのtaskの試行と待ちだけを数えるが、試行を切る次の開始はqueue全体から読む。
 
 ## 着地の延期とresume
 
-衝突と着地待ちの改善（task 461・462・463・358）を測るため、runの行に着地の延期の中身、崩した着地、resumeの効き目を載せる（task 466）。集計は`domain::stats::retries`がrun_eventsから再導出し、新しい表もイベントも持たない（ADR-0040の決定5）。runの行の他の項目と同じく、対象のrun（`--since` / `--until` / `--goal`）に出す。
-
-- **`integrate_attempts`**: `integration_started`の数。**`deferrals`**: `integration_deferred`のpayloadの`code`ごとの数（コードの無い古いイベントは`unknown`）。**`conflict_files`**: `integration_deferred`の`conflicts`（rebaseが衝突したファイル）の和集合を昇順で。
-- **`broken_by`**: `code`が`rebase_conflict` / `verification_failed` / `rebase_empty`（mainが動いたことで起きうる延期）の`integration_deferred`ごとに、rebase先のmain（payloadの`main`、無ければその試行の`integration_started`の`main`）を、`run_integrated`の`result_commit`（無ければ`commit`）がそのcommitの着地に結び付け、`{task_id, run_id, landed_at, main, code}`を載せる。同じ着地は1回だけ（最初に名指した延期の`code`）。自分の着地と、runtimeの外で動いたmain（どの着地の`result_commit`でもない）は結び付けない。着地は全イベントから探すので、windowの外の着地にも結び付く。ただし`verification_failed`の延期で`failure.class: flaky`なら、過去のeventも含め、コマンドの有無やrebase先の検証結果に依らず名指さず、`rebased_onto`に残す（task 1039）。不安定なtestをrebase先の責任にはしない。それ以外の`verification_failed`の延期は、rebase先の着地が自分の着地で同じ検証コマンドを通していれば名指さない（task 974）。その着地のtreeでは落ちたtestが通っていたので、落ちたのはrun自身の変更かrunとmainの組み合わせで、rebase先の着地だけの責任ではないため。「通していた」は、延期のpayloadの`command`と同じ文字列の`command`で`phase: integration`・`exit_code: 0`の`verification_command`が、その着地の`run_integrated`に至った試行（最後の`integration_started`の後）にあること（nextestの再実行で通った`retry`の行も含む）。着地の前の試行で通したものは数えない。mainを動かした後に`run_integrated`を残す前に止まり、次の試行が検証をせずに着地を記録したもの（`landed_before`）も、その試行に通した記録が無いので名指す。延期に`command`が無い古いイベント、`verification_skipped`の着地や関門を持たない着地（docsのtaskなど）、別のコマンドだけを通した着地は、同じコマンドを自分で通していないので今までどおり名指す（その着地より前に同じコマンドを通した着地があっても、その間の差分はその着地の変更なので辿らない）。
-- **`rebased_onto`**: 上の理由で`broken_by`に名指さなかったrebase先の着地を、`{task_id, run_id, landed_at, main, code, failed_tests}`で載せる（`code`は`verification_failed`、`failed_tests`はその延期のpayloadが名指した落ちたtest。名指さなければ空）。同じ着地は1回だけ（最初の延期）。後の延期（同じmainへの`rebase_conflict`など）が同じ着地を名指したら、`broken_by`だけに移す。observerと人が「rebase先は何だったか」を読むための欄で、`broke_runs`には数えない。
-- **`broke_runs`**: そのrunの着地を`broken_by`に持つ他のrunの数（`rebased_onto`だけに持つrunは数えない）。
-- **`resume_attempts`**: `resume_started`ごとの`{attempt, reason, started_at, secs, resolved}`。`reason`はその前に最後にrunを止めたイベント（`integration_deferred`・`integration_error`・`evidence_missing`・`scope_violation`・`landing_decided`・`triage_finished`・`triage_decided`。supervisorの`resume_reason`と同じ）の`code`（`rebase_conflict`・`verification_failed`・`evidence_missing`・`triage_resume`など。無ければ`unknown`）。`secs`は`resume_started`→`resume_finished`（無ければnull）。`resolved`は1回で解けたか: `resume_finished`の`outcome`が`resolved`で、その後に（次の`resume_started`まで）payloadの`status`が`needs_session`のイベント（`integration_error`と`resume_finished`を除く。`needs_session`の数え方と同じ）が来なければtrue、`outcome`が`resolved`でないか、来ればfalse、`resume_finished`が無ければnull。`escalated_from` / `escalated_to`は、そのresumeがtaskに由来する失敗の後にworkerのsessionを1段上げたとき（`resume_started`の`escalated_from`。[Worker model](worker-model.md#段上げ決定5)）の前と後の`model/effort`で、上げなかったresumeはどちらもnull。Codexのrunの段上げは`model`がnullなので段（`ladder_model`）で名指す（段上げの件数を落とさないため。Codexが使ったmodelではなく段の名。task 892）。
-- **`revise_escalations`**: reviewの`revise`でsessionを上げた、または上げようとした`revise_requested`ごとの`{attempt, from, to, switched}`（`from` / `to`は`model/effort`）。`switched`は切り替えたらtrue、切り替えられず直前のまま差し戻した（`escalation_skipped`）ならfalse。上限（Opus xhigh）で上げなかったもの、同じattemptの`revise_unsent`で取り下げたもの、task 578より前のものは載らない。
-- **`resume_outcomes`**（`goals`と`overall`）: `attempts`（数）、`resolved` / `unresolved`（`resolved`がtrue / falseの数）、`resolved_percent`（`resolved / (resolved + unresolved)`の百分率の切り捨て。どちらも0ならnull）、`secs`（`{count, total, median, p90, max}`。`p90`は`land_phases`と同じnearest-rank）と、`reason`ごとの同じ形の`by_reason`。
+- 入口: `retries`と`BrokenBy`・`RebasedOnto`・`ResumeAttempt`。
+- `broken_by`は延期のrebase先のmainのcommitを、そのcommitを`result_commit`に持つ着地に結び付ける。
+  自分の着地と、runtimeの外で動いたmainは結び付けない。
+  着地は全eventから探すので、窓の外の着地にも結び付く。
+- 不安定なtestによる失敗と、rebase先の着地が自分の着地で同じ検証コマンドを通していた失敗は、rebase先の責任にせず`rebased_onto`に残す。
+  後者は、その着地のtreeでは落ちたtestが通っていたので、落ちたのはrun自身の変更かmainとの組み合わせであるため。
+- `broke_runs`は`rebased_onto`だけに持つrunを数えない。
+- resumeが1回で解けた（`resolved`）とは、`resolved`で終わり、次のresumeまで`needs_session`に戻らなかったこと。
+- Codexのrunの段上げはmodelを持たないので段の名で名指す。
 
 ## 版と負荷と検証コマンド
 
-goal 21（task 197）で足した集計。runごとの値は上の`runs`の`dagq_version`〜`load_band`。
-
-- **`versions`**: `{dagq, claude, rustc, provider, route, codex}`。対象のrunを`dagq_version`・`claude_version`・`rustc`（`<rustc_release> <rustc_host>`。片方だけ無ければ`unknown`）・`provider`・`route`・`codex_version`ごとに分け（`provider`はrunの`actual_provider`（actual）で分け、途中で切り替えたrunは最後のproviderの群に入る。`route`と`codex`はclaimの値。task 898）、それぞれ名前の昇順（記録の無いrunは`version: null`で最後）に`{version, runs, work, validate, wait_to_land, startup, land_phases, resume_outcomes}`（`goals`と同じ形）。バイナリの入替やtoolchainの変更の前後を比べるためのもの。`rustc`はcargo専用の計測で、dagqのソースでないrepositoryでは欄ごと出さない
-- **`load_bands`**: 対象のrunを`load_band`ごと（軽い帯から、帯の無いrunは`band: null`で最後）に分けた`{band, runs, ...}`（`goals`と同じ形）
-- **`verification_commands`**: `backend_failures`と同じwindowと`--goal`の絞り込みで、`integrate`の`verification_command`（`phase: integration`）のうち`duration_secs`を持つものをコマンドごと（コマンド文字列の昇順）に`{command, count, failed, total_secs, median_secs}`。`failed`は`exit_code`が0でないものの数、`median_secs`は偶数個なら中央2つの平均（小数3桁）
-- **`verification_failures`**: `verification_commands`と同じwindowと`--goal`の絞り込みで、`integrate`の`verification_command`（`phase: integration`）のうち`failure`を持つものを`failure.class`ごとに`{class, count, runs, retried, retry_passed, retry_failed}`（task 467）。`count`はコマンドの数（やり直しの失敗も含む。`verification_commands`の`count` / `failed`もやり直しを1回の実行として数える）、`runs`はそれが属するrunの数。`retried`はhostの分類（`disk_full`・`killed`・`timeout`）で落ちてやり直した数（`retry: true`の`verification_command`を、`retry_of.failure.class`のclassに数える。task 639）、`retry_passed`はそのうち通った（`exit_code`が0）数、`retry_failed`はなお落ちた数（hostの分類でもコードの分類でも）。`flaky`（落ちたtestが全てnextestの流し直しで通った。task 768・1039）の`retried`は試行ごとに1回までの着地のやり直し（`integration_retried`を、payloadの`failure.class`に数える）の数で、`retry_passed`はそのrunがその後`run_integrated`になった数、`retry_failed`はその後`integration_deferred`・`integration_held`・`integration_failed`・`integration_error`で着地を離れた数（まだ着地中のものはどちらにも数えない）。他のコードの分類とやり直しの無いclassは0。やり直しの無い既存のeventは`retried`に数えない。`count`の多い順、同数なら`class`の昇順。`duration_secs`の有無は問わない。集計は`domain::stats::measures::verification_failures`
-- **`failed_tests`**: `verification_commands`と同じwindowと`--goal`の絞り込みで、落ちたtestを名前ごとに数えたもの（task 515）。`{flaky_runs, tests, flaky_candidates}`。数えるのは`integrate`の`verification_command`（`phase: integration`）の`failed_tests`（[`integrate`](integrate.md)の5）と、runのsessionの`session_closed`の`work.failed_tests`（workerのコマンドの出力から。[provider-lifecycle](../provider-lifecycle.md#作業の内訳)）で、成功したやり直しのFLAKYも`failed_tests`と`flaky_tests`に残るので、exit codeに依らず数える（task 1039）。名前を出したeventごとに1回（`integrate`はコマンドごと、sessionは区間ごと。同じ中身の`session_exited` / `resume_finished`の`work_breakdown`は読まない）。`tests`はtestごとの`{name, failures, integrate, worker, runs, integrate_runs, flaky, last_failed_at, integrate_event_ids}`（`failures`は`integrate`と`worker`の合計、`runs`は落ちたrunの数、`integrate_runs`はそのうち`integrate`の検証で落ちたrunの数、`flaky`は`integrate`の`verification_command`のうち同じ名前を`flaky_tests`にも持つ（nextestが流し直して通った。FLAKYの印。task 768）ものの数、`last_failed_at`は最後に名前を出したeventの時刻、`integrate_event_ids`はそのtestの名前を出した`integrate`の`verification_command`のevent IDを新しい順に最大10件（`MAX_INTEGRATE_EVENT_IDS`。workerの`session_closed`だけで落ちたtestは空。task 642）で、`integrate_runs`・`runs`・`failures`の多い順、名前の昇順。`flaky_candidates`は`tests`のうち`integrate_runs`が`flaky_runs`（2）以上のものか、`flaky`が1以上のもの（別々のrunの`integrate`で落ちたtestと、1回目でも流し直しで通ったtest。observerがkind `flaky_test`のfindingにする材料で、根拠は`integrate_event_ids`。[Observer](observer.md)のpromptの読み方）。workerの失敗は多くが作業中の（まだ通していない）testなので、数えて並べるが候補の判定には入れない。名前を記録する前の失敗は数えない。集計は`domain::stats::failed_tests`
-- job（review・triage・observer・plan review）のsessionの区間の時間はここでは数えない（ADR-0048のsessionの記録が持つ）。jobの件数・失敗・所要時間・verdictのproviderごとの集計は下の[headlessのjob](#headlessのjob)
+- 版と負荷の群は`measures`（`RunMeasures`・`Versions`・`LoadBandStats`）、負荷の帯は`domain::measure::load_band`。
+- providerの群はactual（最後のprovider）で分け、途中で切り替えたrunは最後のproviderの群に入る。
+- 検証の失敗の分類ごとは`measures::verification_failures`、落ちたtestごとは`failed_tests`（分類は[`integrate`](integrate.md)）。
+- hostの分類で落ちた検証のやり直しと、不安定なtestの着地のやり直しは数え方が違う（`FailureClassStats`のdoc comment）。
+- workerのsessionで落ちたtestは多くが作業中のtestなので、並べるが不安定なtestの候補の判定には入れない。
+  候補はobserverが`flaky_test`のfindingにする材料になる（[Observer](observer.md)）。
 
 ## Claude session
 
-runtimeが記録したClaude sessionの区間（`session_opened` / `session_closed`。書き方は[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）を、kindごとに数える（[ADR-0048](../../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定3・11・12）。集計は`domain::stats::sessions`がrun_eventsから再導出し、transcriptは読まない。既存の項目は変えず、足すだけにする。
-
-- **区間**: `session_opened`と、その`opened_event_id`を持つ最初の`session_closed`の対。開いている時間はその`created_at`の差（ミリ秒を秒に切り捨て）。閉じていない区間は、runの行では`stats`を読んだ時刻まで、`sessions`ではwindowの終わりまでの長さにする。どの`session_opened`も指さない`session_closed`と、2回目の`session_closed`は数えない。
-- **稼働時間**（`active`）: 区間のtranscriptのturn（`session_turns`。書き方は[provider-lifecycle](../provider-lifecycle.md#transcriptと稼働時間)）の長さの合計。閉じた区間は`session_closed`が`active: "recorded"`（`active_secs`）のものだけ、閉じていない区間はそれまでに記録したturnがあるものだけを数える。hookで閉じたinbox・plannerの区間は、`session_closed`が`active: "unavailable"`・`active_unavailable: "hook_intake_pending"`で、計測（`active`・`active_secs`・`tokens`・`model` / `effort`）はsupervisorの取り込みが閉じた後に書く最終の`session_turns`（`final: true`）から読み、`session_closed`のものと同じ欄に置く（[ADR-t655-1](../../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)。閉じる前の`final`は読まない）。runの行は閉じた区間の`active_secs`（閉じていなければ記録済みのturnの合計）で、どれも無ければnull。`active: "unavailable"`で閉じた区間は`active_unavailable`に数える。取り込み前のhookの区間（最大で取り込みの間隔の10分、supervisorが居なければその間ずっと）もここに数える。`active_ratio`は稼働時間の合計を、稼働時間を数えた区間の開いている時間の合計で割った値（小数3桁、そのような区間が無ければnull）。
-- **`sessions`**: kindは`worker` / `resume` / `revise` / `review` / `triage` / `observer` / `plan_review` / `goal_review`（task 1062） / `throughput_review`（スループットの見直しのjob。task 1086、[スループットの見直し](throughput-review.md#sessionの区間task-1086)） / `runtime_planner` / `inbox` / `planner`の12個で、記録が0でも必ず出す。`window`の`after` / `upto`は`backend_failures`と同じwindowのevent id。`upto`以前に開き、`after`より後に閉じたか閉じていない区間を数え、長さはwindowで切る: 始まりは`after`のeventの時刻（0なら切らない）、終わりは`--until`があれば`upto`のeventの時刻、無ければ今の時刻（`upto`はpageの`next_cursor`ではなく窓の終わり。task 1379）。`open`と`active`は`{count, total, median, p90, max}`（`median`と`p90`は他と同じ規則）。`active`は区間ごとに、turnとwindowの重なりの秒を数える。`open_now`はwindowの終わりまでに閉じていない区間、`inferred`はwindowの中で`reason: inferred`で閉じた区間の数。`--goal`があれば、runの区間はそのgoalのtaskのものだけ、`plan_review`と`runtime_planner`は`goal_ids`にそのgoalを含むものだけにし、`observer` / `throughput_review` / `inbox` / `planner`などrunもproposalも持たない区間は0にする。`inbox` / `planner` / `runtime_planner`はrunを持たないので、`runs`・`goals`・`overall`の`sessions`には出ず、この期間集計にだけ出る（pluginのhookが記録する。[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)、task 387。非対話の`runtime_planner`はhookが走らないのでturnから記録する。task 1398）。
-- **`sessions.by_route`**: `{<kind>: {<route>: <by_kindと同じ形>}}`（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4、task 1398）。`by_kind`と同じwindow・`--goal`・数え方で、区間を経路ごとにも数える。経路は`session_opened`の`route`（runのsessionの区間はrunの`worker_mode`、非対話の`runtime_planner`は`headless`）で、`route`の無い区間はhookが記録するkind（`inbox` / `planner` / `runtime_planner`）なら`interactive`、ほかのkind（jobや`route`を記録する前のrunの区間）は経路に数えない。区間の無いkindと経路は出さない。対話と非対話のruntimeのplannerの`open` / `active` / `active_ratio` / `tokens` / `models`を並べて比べるための読み口。
-- **`runs`の`sessions`**: `{<kind>: {count, open, active}}`で、`open` / `active`はそのrunの区間の秒の合計（`active`は記録が無ければnull）。windowで切らない。区間の無いkindは出さない（区間の無い過去のrunは`{}`）。
-- **`goals`と`overall`の`sessions`**: `{<kind>: {count, open, active, active_ratio}}`で、`open` / `active`は区間ごとの秒の`{count, total, median}`。対象のrunの区間を数え、区間の無いkindは出さない。
-- observerは`stats`を入力に読むので、そのまま載る。
+- 入口: `sessions`と`Sessions`、区間の記録の書き方は[provider-lifecycle](../provider-lifecycle.md)（[ADR-0048](../../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)決定3・11・12）。
+- 区間は`session_opened`とそれを指す最初の`session_closed`の対で、transcriptは読まない。
+  閉じていない区間は、runの行では読んだ時刻まで、期間の集計では窓の終わりまでの長さにする。
+- 稼働時間はtranscriptのturnの長さの合計で、記録したものだけを数える。
+  hookで閉じたinbox・plannerの区間は、supervisorの取り込みが後で書く最後のturnの記録から読む（[ADR-t655-1](../../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)）。
+  取り込みの前の区間は稼働時間を読めないものとして数える。
+- kindは記録が0でも全て出す。
+  inbox・planner・runtimeのplannerはrunを持たないので、runの行と群には出ず期間の集計にだけ出る。
+- 経路ごとの内訳は、対話と非対話のruntimeのplannerを同じ物差しで並べるため（ADR-t1394-2決定4）。
 
 ## 作業の内訳
 
-task 514で足した集計。runのsessionの区間（`worker` / `resume` / `revise`）が閉じるとき、runtimeがtranscriptから区間の時間を分類して`session_closed`の`work`に記録する（書き方は[provider-lifecycle](../provider-lifecycle.md#作業の内訳)）。Codexの非対話の区間はtranscriptの代わりにwrapperが書いたturnのコマンドのfileから同じ形の`work`を記録するので、同じように集計に入る（task 1354。コマンドの時刻はwrapperが出力を読んだ時刻で、約1秒の精度。作れなかった区間は`work: null`と`work_unavailable`で、内訳の無い区間として数えない。task 1354より前に閉じたCodexの区間は内訳を持たないので、それを含む期間の`work_breakdown`はCodexの分が欠けた下限）。集計は`domain::stats::work`がその`work`から再導出し、transcriptもrun directoryの`worktime.jsonl`も読まない。既存の項目は変えず、足すだけにする。
+- 入口: `work`と`RunWork`・`WorkShares`、分類を記録する側は[provider-lifecycle](../provider-lifecycle.md)。
+- runのsessionが閉じるときに記録した内訳から再導出し、transcriptは読まない。
+- Codexの区間はwrapperが書いたturnのコマンドから同じ形で作り、時刻の精度は約1秒。
+  内訳を作れなかった区間は数えないので、それを含む期間の値は下限。
+- 検証の重複は、`integrate`がもう一度流す検証と同じ種類のコマンドをworkerが流した数で、文字列でなく種類で見る。
 
-- **分類**（`secs`のkey）: `model`（Claudeの思考・生成。Codexの区間はturnの中でコマンドの無い時間）、`chain`（重いコマンドを2種類以上つないだもの）、`e2e`、`llvm_cov`、`test`、`build`（build / clippy / check / run）、`fmt`、`wait`（sleepなどの待ちと、ScheduleWakeup / Monitor / TaskOutput / BashOutputのtool）、`dagq`、`git`、`other_command`、`tool`（ファイルを読む・書く・探すtool。Codexの区間は`mcp_tool_call`）、`subagent`、`idle`。秒の無い分類は出さない
-- **`runs`の`work_breakdown`**: `{sessions, total_secs, secs: {<分類>: 秒}, commands: {<分類>: {runs, failed}}, verification_repeats, test_with_llvm_cov}`。区間の`work`を足したもの。`commands`は重いコマンド（`chain` / `e2e` / `llvm_cov` / `test` / `build`）の起動回数と失敗回数（foregroundは`is_error`か`Exit code`が0でない、backgroundは通知の`status: failed`か`exit code`が0でない、Codexの区間は`exit_code`が0でないか`status: failed`）
-- **検証の重複**: `verification_repeats`は、workerがtaskの`verification_commands`のうち`integrate`がもう一度流す検証（llvm-cov、全体の`cargo test`、e2e。fmt・clippyは数えない）と同じ種類のものを流したコマンドの数。一致はコマンドの文字列ではなく種類で見る（`cargo llvm-cov`を含むもの、targetを選ぶ・絞るflagや引数の無い`cargo test` / `cargo nextest run`（targetを選ぶflagが`--test it`（`--test=it`）だけで`--`の前にfilterの語が無いものも、integration testのほぼ全部を流すので全体として数える。`--test it runtime_claim::`のようにfilterが付くもの、`--test e2e`・`--test plugin`・`--lib`など他のtargetを選ぶもの、`--test it`と他のtargetを並べたものは絞った実行。`--`の後の引数は見ない。task 558）、`--test e2e`）。`test_with_llvm_cov`は、llvm-covも流したrunでの全体の`cargo test`の回数（同じtestを2回流した回数。llvm-covを流していないrunは0）
-- <a id="cargo専用の計測"></a>**cargo専用の計測**（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)の(d)、[Source repository](source-repository.md)）: `runs`の`work_breakdown`の`verification_repeats`・`test_with_llvm_cov`、下の群の`work_breakdown`の`verification_repeats`・`runs_with_repeats`・`test_with_llvm_cov`、`runs`の`rustc_release`・`rustc_host`、`versions`の`rustc`は、dagqの検証の形（llvm-covの関門・全体の`cargo test`・`--test e2e`）とhostの`rustc`を前提にした値で、他のprojectでは0やnullが事実として読まれてしまう。`stats`はqueueが束縛されたrepositoryのmain checkoutがdagqのソースのときだけこれらを出し、ソースでない・束縛の無いqueueでは欄ごと出さない（0やnullにしない）。判定は`stats`を出すたびに行う（`compose`の`stats_of`が`StatsSources::dagq_source`を渡し、`application::stats`が最後に`domain::stats::without_cargo_measures`を当てる）。値は`domain::stats::cargo::CargoOnly`で持ち、隠したものはserializeしない。observerの入力の`stats`も同じ`stats_of`を通るので同じ。分類の`e2e`・`llvm_cov`・`test`（`secs`と`commands`）は、記録の側（[作業の内訳](../provider-lifecycle.md#作業の内訳)）がソースでないrepositoryで付けないので、出力では隠さない。domainの`stats::stats`を直接使うもの（KPIの窓、plan reviewの衝突の多いファイル、forecast）は隠さない
-- **`goals`と`overall`の`work_breakdown`**（`changes`・`versions`・`load_bands`も同じ形）: `{runs, total_secs, categories: {<分類>: {total, median, share}}, commands, verification_repeats, runs_with_repeats, test_with_llvm_cov}`。`runs`は内訳のあるrunの数で、内訳の無いrunは数えない。`median`はそれらのrunの秒の中央値（その分類の無いrunは0として数える）、`share`は`total`を`total_secs`で割った値（小数3桁）。`runs_with_repeats`は`verification_repeats`が1以上のrunの数
+### cargo専用の計測
+
+- 入口: `CargoOnly`と`without_cargo_measures`、判定は`StatsSources::dagq_source`（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。
+- dagqの検証の形とhostの`rustc`を前提にした値は、queueのrepositoryがdagqのソースのときだけ出し、他では欄ごと出さない（0やnullにすると事実として読まれるため）。
+- domainの`stats::stats`を直接使うもの（KPIの窓、plan reviewの衝突の多いファイル、完了見込み）は隠さない。
+- 作業の内訳の分類（e2e・llvm-cov・test）は、記録の側が付けないので出力では隠さない。
 
 ## トークン数
 
-task 199で足した集計。Claude sessionの区間が閉じるとき、runtimeがtranscriptから区間で使ったトークン数を`session_closed`の`tokens`に記録する（書き方は[provider-lifecycle](../provider-lifecycle.md#トークン数とコスト)）。非対話のworkerの区間（Claude・Codex）はtranscriptではなく、そのturnの`turn_finished`の`tokens`の合計を同じ形で記録する（ADR-t813-2の決定7。[非対話のworkerの区間](../provider-lifecycle.md#非対話のworkerの区間)）ので、下の集計はproviderを分けずに同じく数える。集計は`domain::stats::tokens`がその`tokens`から再導出し、transcriptは読まない。既存の項目は変えず、足すだけにする。`total`は4種類（`input` / `output` / `cache_read` / `cache_creation`）の合計。`cost_usd`はClaude Codeがコストを出した区間の分だけの合計（小数6桁）で、無ければnull。`cost_sessions`はそれを持つ区間の数。
-
-- **`runs`の`tokens`**: `{sessions, input, output, cache_read, cache_creation, total, cost_usd, cost_sessions, by_kind: {<kind>: {sessions, input, output, cache_read, cache_creation, total, cost_usd, cost_sessions}}}`。そのrunの区間（`worker` / `resume` / `revise` / `review` / `triage`）の`tokens`を足したもの。windowで切らない
-- **`goals`と`overall`の`tokens`**（`changes`も同じ形）: `{runs, input, output, cache_read, cache_creation, total, cost_usd}`で、`input`などはrunごとの値の`{count, total, median}`、`cost_usd`はコストのあるrunの`{count, total, median}`。`runs`はトークン数のあるrunの数で、無いrunは数えない
-- **`sessions.by_kind`の`tokens`**: kindごとに、windowの中で閉じた区間の`tokens`の合計（`runs`の`tokens`から`by_kind`を除いた形）。runを持たない`observer`と`plan_review`のトークン数はここで読む
-- **今の数え方の穴と後続の置き換え**（[ADR-t1486-1](../../adr/2026-10-04-t1486-1-supervisor-records-token-usage-per-execution.md)）: 上の`tokens`は区間が閉じたときの記録を足すので、`sessions.by_kind`の`tokens`は区間を閉じた日の窓にまとめて入る。長く開いた区間（常駐のinbox）は数日分が閉じた日に載り（2026-10-02のinboxは241M）、日ごと・actorごとには比べられない。ほかに、Claudeの非対話のturnはsubagentの分が抜け、Codexのjobの区間は`tokens`を持たず（0に見える）、Codexのworkerはmulti-agentの子のthreadの分が入らない可能性がある（数える元と穴の表は[provider-lifecycle](../provider-lifecycle.md#今の数える元と穴adr-t1486-1)）。goal 95の後続のtaskが、supervisorがExecution（非対話のturnとheadlessのjobの1回、対話は毎時と閉じたときの区切り）ごとに記録したトークン数を、日・週×actor（kind）×provider×modelと着地1件あたりで、Executionの終わった時刻（対話は区切りの時刻）の日に振り分けて読む項目に替える。そのtaskがこの節と`sessions.by_kind`の`tokens`の説明を直す
-- **`sessions.by_kind`の`models`**（task 579）: kindごとに、windowの中で閉じた区間を、`session_closed`の`model`と`effort`（[provider-lifecycle](../provider-lifecycle.md#modelとeffort)）を空白でつないだ`"<model> <effort>"`（effortの無い記録は`unknown`）ごとに数えたもの。modelを記録しなかった区間は数えない。worker以外のアクターの基準値はここで読む。計画の品質（proposalごと）は[kpi](kpi.md#計画の品質)
+- 入口: `tokens`と`RunTokens`・`TokenSummary`、記録の書き方は[provider-lifecycle](../provider-lifecycle.md)。
+- 区間が閉じたときの記録を足すので、長く開いた区間（常駐のinbox）は閉じた日の窓にまとめて入り、日ごと・actorごとには比べられない。
+  ほかの数えない分（subagent、Codexのjob、Codexの子のthread）と、実行ごとの記録への置き換えは[ADR-t1486-1](../../adr/2026-10-04-t1486-1-supervisor-records-token-usage-per-execution.md)と[provider-lifecycle](../provider-lifecycle.md)が持つ。
+- runを持たないobserverとplan reviewのトークン数は期間の集計のsessionのkindごとで読む。
 
 ## 重さの予測と実績
 
-[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定2（task 575）。plan reviewのjobがtaskごとに記録した`task_weight_predicted`（[plan review](plan-review.md)の6）を、`runs`の各runの実績と並べる。集計は`domain::stats::predictions`がrun_eventsから再導出し、新しい表は持たない。予測の精度（Spearman、下位3分の1の当たり）はこの行から計算し、runtimeは集計しない。
-
-- **`runs`の`prediction`**: `{size, nature, uncertainty, expected_output_tokens, rework_probability, reason, proposal_id, plan_review_id, model, effort, percentile, percentile_of}`。そのrunの最初のイベントより前に記録された、そのtaskの最後の`task_weight_predicted`（出し直しや`reopen`で予測が追記されていれば最後のもの。runの後に記録された予測は次のrunのもの）。`model` / `effort`は予測したplan reviewのsessionのもの（transcriptから読めなければnull）。予測の無いrun（`ready --bypass-review`、予測の失敗、task 575より前）はnull
-- **`percentile` / `percentile_of`**: `expected_output_tokens`が、そのrunの最初のイベントより前に記録された予測のうち、他のtaskの最後の予測を新しい順に最大60件（`domain::prediction::PREDICTION_WINDOW`、ADR-0079の決定4のN）並べた中のどこに入るか（0〜100。下にあるものの割合で、同じ値は半分に数え、小数1桁。`domain::prediction::percentile`）と、比べた件数。比べるものが無ければ`percentile`はnull。予測の値は2〜3倍に偏るので、値ではなくこの百分位で読む（下位3分の1は33.3以下）。試しの対象の判定（ADR-0079の決定4）も同じ関数を使う
-- **`runs`の`actual`**: `{output_tokens, model_secs, resumes, resume_reasons, review_verdict, task_rework}`。`output_tokens`はrunのsession（`worker` / `resume` / `revise`。reviewとtriageのjobは除く）の`tokens.output`の合計（記録が無ければnull）、`model_secs`は`work_breakdown`の`model`の秒（内訳が無ければnull）、`resume_reasons`は`resume_attempts`の`reason`ごとの回数、`task_rework`はtaskに由来する手戻り（ADR-0079の決定1: `integration_deferred`の`verification_failed`、`review_finished`の`concern`、`revise_requested`のどれかがrunにある。衝突とkillは数えない。`domain::plan_quality::rework`）
+- 入口: `predictions`と`RunPrediction`・`RunActual`、百分位は`domain::prediction::percentile`（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)決定2・4）。
+- runには、そのrunの前に記録されたそのtaskの最後の予測を当てる（runの後の予測は次のrunのもの）。
+- 予測の値は2〜3倍に偏るので、値でなく百分位で読む。
+- 予測の精度はruntimeが集計せず、読む側がこの行から計算する。
+- taskに由来する手戻りは衝突とkillを数えない（`domain::plan_quality::rework`）。
 
 ## workerのmodelと試しの群
 
-[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4・6（task 576）。**`trial_groups`**は、`runs`と同じページのrunのうち試しの群（`trial_group`）を持つものを群ごとに（名前の昇順。群の無いrunは出さない）並べる。集計は`domain::stats::trial`。
-
-- 各群は`{group, sessions, runs, tasks, lead_time, work, model_secs, output_tokens, task_rework, task_rework_rate}`。`sessions`はrunの`worker_model/worker_effort`ごとの件数、`runs` / `tasks`は件数、`lead_time`はclaim→着地（`claimed_at`→`landed_at`）の秒、`work`は`work`、`model_secs`と`output_tokens`は`actual`の同名の値で、どれも`{count, total, median}`（値の無いrunは数えない）。`task_rework`は`actual.task_rework`（ADR-0079の決定1の数え方）がtrueのrunの数、`task_rework_rate`はその`runs`に対する百分率（小数1桁）
-- 判定（1群45件前後、`task_rework_rate`の差（treatment − control）が+5ポイント以内か）は人とplannerが`stats --full`（か`--since`で試しを有効にした時点から）で読む。期間ごとの推移と前後比較は`kpi --by group`（`model` / `effort` / `nature`も。[kpi](kpi.md#kpiと層)、task 740）のrunの層で、`landings`・`lead_time`・`phase.*`・`revise_rate`・`verification_failed_rate`・`resumes_per_run`などを群ごとに読む
+- 入口: `trial`（ADR-0079決定4・6、[Worker model](worker-model.md)）。
+- runのpageのrunだけを数えるので、試しの判定は`stats --full`か試しを始めた時点からの`--since`で、推移は`kpi --by group`で読む（[kpi](kpi.md)）。
 
 ## workerのsessionの段上げ
 
-[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定5（task 578）。**`escalations`**は、`runs`と同じページのrunの`resume_attempts`と`revise_escalations`から、taskに由来する失敗の後にworkerのsessionを1段上げた件数と、上げたresumeがその1回で解けたかをまとめる（[Worker model](worker-model.md#段上げ決定5)）。集計は`domain::stats::escalations`。
-
-- `{count, by_reason, by_step, resumes, revises, revises_not_switched}`。`count`は上げたresumeと切り替えたreviseの数、`by_reason`はその理由（resumeは`reason`のcode: `verification_failed` / `sent_back`、reviseは`revise`）ごと、`by_step`は`<前のmodel/effort> -> <後のmodel/effort>`ごとの件数。`resumes`は上げたresumeだけの`resume_outcomes`と同じ形（`attempts`・`resolved`・`unresolved`・`resolved_percent`・`secs`。`by_reason`は無い）で、`resolved`は`resume_attempts`の`resolved`（その1回で解けたか）。`revises`は切り替えたrevise、`revises_not_switched`は切り替えられなかったreviseの数
-- retryのclaimで引き継いだ段（`run_claimed`の`escalation_inherited`）は数えない。runの層の`--by effort`（[kpi](kpi.md#kpiと層)）はclaimの値なので、引き継いだ段はそこに出る
+- 入口: `escalations`（ADR-0079決定5、[Worker model](worker-model.md)）。
+- taskに由来する失敗の後に上げたresumeと切り替えたreviseを数え、上げたresumeがその1回で解けたかを並べる。
+- retryのclaimで引き継いだ段は数えず、`kpi --by effort`の層に出る。
 
 ## draftの流入と流出
 
-`draft_flow`（task 470）は、着地1件あたりにruntimeやjobが登録するdraftの数と、それが決着する速さを同じwindowで読むためのもの。集計は`domain::stats::drafts`がrun_eventsと既存の`draft_origins`（draftの出どころ）から再導出し、新しい表もeventも持たない。
+着地1件あたりにruntimeやjobが登録するdraftの数と、それが決着する速さを同じ窓で読む。
 
-- **対象のdraft**: `draft_origins`に出どころ（`follow_up` / `goal_gap`）のあるtaskと、`follow_up_registered`の`task_id`が指すtask（出どころの記録が無ければ`follow_up`）。人が`add`で登録したdraftと、reopenされてwithdrawで戻ったtask（出どころ`reopened`、`draft_reopens`）は数えない。`by_origin`は出どころごと、トップレベルは全部の合計
-- **`landings`**: windowの`run_integrated`の数（KPIの`landings`と同じ規則。ADR-0051の決定1）
-- **`registered`**: windowにそのtaskの`task_created`があるdraft
-- **`adopted` / `canceled`**: そのtaskの最初の`from: draft`の`task_status_changed`がwindowにあるもの。`to`が`canceled`なら`canceled`、それ以外（`submitted`、`ready --bypass-review`の`ready`）なら`adopted`。reviseで`draft`に戻って出し直したものは数え直さない
-- **`kept_draft`**: windowの`ask_answered`のうち、選んだoption（payloadの`option`）が`keep_draft`で、taskが対象のdraft（runtimeやjobが登録したもの）であるもの（回答の数。今のtaskの状態は問わない。optionに無い自由記述の`keep_draft`は数えない）
-- **`backlog`**: windowの終わり（`--until`、無ければ最新のevent）の時点で`draft`のもの。windowより前に登録したものも含む。`oldest_backlog_secs`はそのうち最も古い`task_created`からwindowの終わりの時刻までの秒、`oldest_backlog_task_id`はそのtask
-- **`drafts_per_landing`**: `registered` ÷ `landings`（小数2桁。着地が0ならnull）
-- **`inflow_per_outflow`**: `registered` ÷ （`adopted` + `canceled`）（小数2桁。出ていったものが0ならnull）。1を超えればdraftは決着より速く増えている
-
-KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`drafts_per_landing`（出どころごとの内訳は`OriginFlow::per_landing`の同じ規則）と`draft_backlog`（`backlog`と`oldest_backlog_secs`）として期間ごとの窓で読む（task 611。ADR-0051の決定1の、規則を変えずにKPIを足す実装）。規則はこの節のものだけで、`kpi`は同じ関数の結果を読む。
+- 入口: `drafts`と`DraftFlow`。
+- 数えるのはruntimeやjobが登録した（出どころのある）draftだけで、人が登録したdraftと、reopenで戻ったtaskは数えない。
+- draftから初めて出たときだけ数え、reviseでdraftに戻して出し直したものは数え直さない。
+- [kpi](kpi.md)の着地あたりのdraftと滞留のKPIは同じ関数の結果を読み、規則はこの集計だけが持つ（[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)決定1）。
 
 ## 完了見込み
 
-[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定（task 473）。見込みの計算と`dagq forecast`はtask 474で、snapshotの記録はtask 475で、答え合わせはtask 476で、observerの`forecast`のfindingはtask 477で実装した（[Observer](observer.md#完了見込みの誤差)）。
+open なtaskとgoalの完了の時刻を、今の計画がそのまま流れたときのsimulationのp50 / p90で見込み、記録して後で答え合わせする（[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)）。
 
-- **見込み**（実装済み、`method` 2。1はtaskの種類（kind）ごとの分布で、kindと一緒に消した。2はtaskが宣言したchangeごとの分布。ADR-t980-1、task 982）: `domain::forecast::forecast`（純粋関数）が、open なtask（`ready` / `in_progress`。`draft`のgoalのtaskを除く）とopen なgoal（`draft`でなく閉じていない）の完了のp50 / p90をsimulationで出す。`application::forecast`がqueueを読んで入力を組み立てる。
-  - **入力**: 依存は`graph`の`ready_after`（未完了の前のtaskと、achievedで閉じていないgoal）。見込みに入らないtask（`draft` / `submitted`）やgoal（`draft`、abandonedで閉じた）を待つtaskは終わらない。claimの順は`graph`と同じ`ClaimRank`（効く優先度、`unblocks`、ID。`domain`に移した）を今の時点で固定して使う。slotは生きているsupervisorの`parallel`の合計（`stats`の空きslotと同じ判定。`--parallel N`で置き換えられる）。
-  - **分布**: `domain::forecast::history`が`stats`（`full`）の着地したrun（`integrated`で`work` / `validate` / `wait_to_land`がそろったもの）を1件の標本にし、3つの区間を同じrunから一緒に引く。resumeと着地の延期はその区間に含まれるので、別の確率として足さない（二重に数えないため）。taskが宣言したchange（nullは`unknown`）ごとに分け、そのchangeの標本が`[kpi]`の`min_samples`に満たなければ全体（`all`）を使い、出力の`assumptions.substituted`と各taskの`distribution`に書く。goalを閉じるまでの遅れは、achievedの`goal_closed`とそのgoalの最後の`run_integrated`の差。人の答えの待ちは`stats::asks::human_waits`（`ask_opened` → 最初の`ask_answered`）。遅れと待ちの標本が無ければ0とする。経過が0のときは0秒の標本も引く。
-  - **走っているrun**: `in_progress`のtaskの最新のrun（`latest_runs_in_progress`）のうち、processが実行か着地をしているもの（`claimed`〜`validating`・`integrating`）と、その間のもの（review・e2e・exit・着地待ちの`awaiting_integration`、reviewの差し戻し（revise）やe2eの失敗で戻されてresumeを待つ・resume中の`needs_session`）を走っているrunとする（`domain::forecast::in_flight`、task 1519。共通の`active_runs`は使わない）。最新のrunが`failed` / `interrupted`のtaskはretryがslotを待つものとして扱い、過去のretryのrunは見ない。`dagq forecast`とsnapshotは同じ`application::forecast`の組み立てを使う。そのrunのeventから`stats`と同じ段（最初の`validation_finished`の後は`wait_to_land`、最初の`receipt_observed`の後は`validate`、それより前は`work`）と段の経過秒を出し、その段が経過より長かった標本だけから残りを引く（無ければ段を丸ごと引き直す）。後の段は同じ標本の値を足す。`run_waiting_started`の後で終わっていない待ちのrunはslotを持たず、経過より長い`ask_wait`の残りを足す（標本の区間も待ちを含むので遅い側に寄りうる。ADR-0070の決定1どおり）。
-  - **計算**: 1回の試行で、時刻0からslotの空きにclaimの順で放たれたtaskを入れて標本の合計の後に終え、goalはそのopen なtaskがすべて終わった時刻に閉じるまでの遅れを足して閉じる（open なtaskが無いgoalは最後の着地からの経過より長い遅れの残り）。見込みに入らない`draft` / `submitted`のtaskを持つgoalと、taskを1つも持たないgoalは閉じない。goalに依存するtaskはそのgoalが閉じるまで待つ。これを試行の回数（既定1,000、`--trials`）繰り返し、各taskとgoalの完了の秒の最近順位のp50 / p90を出す。乱数は`SplitMix64`で、種は今の時刻とqueueの最新のevent IDから決める（`domain::forecast::seed`）ので、同じ時点の同じqueueからは同じ見込みになる。流入（新しいtask、follow_up、plan reviewの差し戻し）と失敗したrunのretryは含めない。
-  - **終わらないもの**: どれかの試行で終わらなかったtask / goalはp50 / p90がnullで、`reason`が`no_samples`（着地したrunが1件も無い）、`no_slots`（`parallel`が0）、`blocked`（見込みに入らないtaskかgoal、閉じないgoalを直接か他を通して待つ）のどれかになる。理由はtask / goalごとに決め、`blocked`は`no_slots`より先に出す。
-- **`dagq forecast [--task ID] [--goal ID] [--parallel N] [--trials N]`**: read-onlyの接続で読み、何も記録しない。queue全体をsimulationしてから、`--task`はそのtaskとそのgoalに、`--goal`はそのgoalとそのtaskに出力を絞る。observerにも許す読み取りのコマンド。出力（JSON）:
-  - `method`、`at`（計算の時刻）、`seed`、`trials`
-  - `assumptions`: `parallel`、`min_samples`、`samples`（`all`、changeごとの`changes`の`{runs, distribution}`、`close_delay`、`ask_wait`の標本数）、`substituted`（全体の分布に代えたchange）、`left_out`（含めないもの）
-  - `tasks[]`: `id`、`goal_id`、`change`、`phase`（走っているrunの段。slotを待つtaskはnull）、`waiting`、`distribution`、`p50` / `p90`（時刻）、`p50_secs` / `p90_secs`（今からの秒）、終わらないときの`reason`
-  - `goals[]`: `id`、`open_tasks`、`unplanned_tasks`（見込みに入らない`draft` / `submitted`のtaskの数）、`p50` / `p90`、`p50_secs` / `p90_secs`、`reason`
-- **snapshot**（実装済み）: supervisorが、決まったきっかけでopen なtaskとgoalすべての見込み（`dagq forecast`を絞らずに出したもの、試行1,000回）を1件の`forecast_recorded`（queueのevent）に記録する。LLMもrun slotも使わない。`application::supervise::forecast`・`application::forecast::{pending, record_snapshot}`・`domain::forecast::snapshot`。
-  - **きっかけ**（`domain::forecast::snapshot::trigger`）: (a) `plan_review`: `decision: pass`の`plan_review_finished`と、concernに`ready`と答えた（`status: accepted`の）`plan_decided`。(b) `mark`: [変更の印](marks.md)の記録する印（`supervisor_started` / `supervisor_stopped` / `run_env_changed` / `mark_recorded` / `mark_retracted`。`parallel`の変化は起動・引き継ぎの`supervisor_started`で拾う）と、`task_priority_changed` / `dependency_added` / `dependency_removed` / `goal_dependency_added` / `goal_dependency_removed`（そのtaskが見込みに入っている（`ready` / `in_progress`）ときだけ。draftの登録で依存を足しても記録しない）。(c) `landing`: `run_integrated`。前のsnapshotからp50が閾値以上動いたtaskかgoalがあるときだけ残す（下の判定）。(d) `daily`: その日（hostのlocal timezoneの日）のsnapshotがまだ無いとき（前のsnapshotの`at_secs`の日が今日より前か、snapshotが1件も無い）。`day`（`YYYY-MM-DD`）を持つ。
-  - **見る時機**: claimしているsupervisorの周回で、前に見てから60秒（`FORECAST_CHECK`。ライブラリの`SuperviseOptions::forecast_check`でtestが縮める）が経っていてjobが走っていなければ、最新の`forecast_recorded`の`triggers_through`（と、このprocessが前に見て何も記録しなかったときの位置）より後、今のqueueの最新のevent IDまでのきっかけのeventを読む（1回に最大1,000件）。最初のsnapshotの前は過去のeventをきっかけにせず、`daily`だけにする。きっかけがあればjob threadで見込みを計算し、重なったきっかけは1件にまとめてすべて`triggers`に載せる。
-  - **着地の判定**（`domain::forecast::snapshot::{moved, decide}`）: 今の見込みのtask / goalごとに、前のsnapshotの同じ対象と比べる。両方にp50があれば、2つのp50の時刻の差（`shift_secs`）が30分（`MOVE_MIN_SECS`）以上、かつ前のsnapshotの残り時間（その`p50_secs`）の20%（`MOVE_RATIO`）以上なら動いたとする。p50が時刻からnullへ、nullから時刻へ変わったものと、前のsnapshotに無い対象も動いたとする。前のsnapshotにあって今は無い対象（完了した）と、両方nullのものは動いていない。動いたものが無く、他のきっかけも残らなければ記録しない（そこまで見たことはprocessが覚え、同じきっかけを数え直さない）。
-  - **payload**: `forecast`の出力（`method`・`at`・`seed`・`trials`・`assumptions`・`tasks[]`・`goals[]`）に、`supervisor`、`at_secs`（計算した時刻のunix秒）、`triggers`（`{trigger: plan_review, event_id, proposal_id}` / `{trigger: mark, event_id, kind, task_id?}` / `{trigger: landing, event_id, task_id, run_id}` / `{trigger: daily, day}`）、`triggers_through`（きっかけを読んだ最後のevent ID）、`events_through`（分布を読んだ最後のevent ID。種もこれから決まる）、`moved`（着地で動いたもの`{target, id, previous_p50_secs, p50_secs, shift_secs}`。空なら出さない）を足したもの。
-  - **1つだけ記録する**: `SqliteQueue::record_forecast`が、きっかけを見た時点の最新の`forecast_recorded`がまだ最新であるときだけ、1つのIMMEDIATEのtransactionで書く。同時に見た2つのsupervisorのうち1つだけが記録する。
-  - **drainと失敗**: 見るのはclaimしているsupervisorだけで、停止・引き継ぎ・claimを止めたdrainの周回では新しく見ない（走っているjobは回収する）。きっかけはqueueのeventに残るので、次のprocessか他のsupervisorが拾う。引き継ぎのexecと`--once`の終わりは走っているjobを待つ。読み取りか計算が失敗したら（`[kpi]`の設定が読めないなど）ログに書き、10分後にもう一度見る。claimと着地は止めない。
-  - **設定**: `supervise --forecast-snapshots`（既定true。ライブラリの`SuperviseOptions::forecast_snapshots`は既定false）。`min_samples`は`dagq forecast`と同じ`[kpi]`を記録のたびに読み直す。KPIの記帳のevent（[Observer](observer.md)の`BOOKKEEPING_KINDS`）なのでobserverを起こさない。
-- **答え合わせ**（実装済み、task 476）: taskの`completed`とgoalの`achieved`の時点で、その対象のsnapshotすべてに実績を当てる。p50の誤差（秒と、見込みの残り時間に対する比）の中央値と偏りの向き（遅れ・早いの割合）、p90の的中率、残り時間の帯ごと・taskのchangeごと・`method`ごとの誤差、snapshotから完了までの変更の印の数（`marks=0`の標本だけの誤差も）を`domain::forecast::score`がeventから導き、[`kpi`](kpi.md#完了見込みの答え合わせ)の`forecast.*`のKPIとして完了の時刻で期間に入れる。`stats`の出力には足さない。日次レポートに見込みの誤差の欄がある（[レポート](report.md)）。
+```text
+history（着地したrunの標本） ─┐
+graphの依存とclaimの順 ───────┼─▶ forecast（simulation）─▶ dagq forecast（記録しない）
+走っているrunの段と経過 ──────┘                        └─▶ snapshot（forecast_recorded）─▶ score（完了の時点で答え合わせ）─▶ kpi
+```
 
-初めの値（ADR-0070。調整はADRを置き換えずにここを直す）:
-
-| 値 | 初めの値 |
-| --- | --- |
-| simulationの試行の回数 | 1,000 |
-| 種類の分布を全体に代える標本数 | `[kpi]`の`min_samples`（既定5） |
-| 着地で記録する閾値 | 前のsnapshotの残り時間の20%以上、かつ30分以上p50が動いた |
-| 答え合わせのKPIの目標の案（runtimeに埋め込まず、plannerが`dagq.toml`の`[kpi.targets]`に書く） | p50の誤差の比の中央値が±25%以内、p90の的中率が75%以上 |
+- 入口: `domain::forecast`（`forecast`・`history`・`in_flight`・`snapshot`・`score`）、入力の組み立ては`application::forecast`、snapshotの周回は`application::supervise::forecast`。
+  答え合わせは[kpi](kpi.md#完了見込みの答え合わせ)、observerのfindingは[Observer](observer.md#完了見込みの誤差)。
+- 1つの標本は着地した1つのrunで、work・validate・wait_to_landを同じrunから一緒に引く。
+  resumeと着地の延期はその区間に含まれるので、別の確率として足さない。
+- 流入（新しいtask・follow_up・差し戻し）と失敗したrunのretryは含めないので、見込みは早い側に寄る。
+- 見込みに入らないtaskやgoal（draft・submitted、abandonedで閉じたgoal）を待つものは終わらず、p50 / p90の代わりに理由を出す。
+- 乱数の種は今の時刻とqueueの最新のevent IDから決まり、同じ時点の同じqueueからは同じ見込みになる。
+- snapshotはclaimしているsupervisorだけが周回で見て、きっかけ（`domain::forecast::snapshot::trigger`）があれば記録し、着地のきっかけはp50が動いた対象があるときだけ残す。
+  最新の`forecast_recorded`がまだ最新のときだけ書くので、2つのsupervisorが同時に見ても1件になる。
+  失敗はclaimと着地を止めず、KPIの記帳のeventなのでobserverを起こさない。
+- 値の調整（試行の回数、動いたとみなす値）は、ADR-0070を置き換えずに定数を直す。
+  答え合わせのKPIの目標（p50の誤差の比とp90の的中率）はruntimeに埋め込まず、plannerが`dagq.toml`の`[kpi.targets]`に書く。
+- 答え合わせは`stats`の出力に足さず、[レポート](report.md)が誤差を載せる。
 
 ## hostの負荷
 
-- **`host`**: supervisorが記録するhostの負荷（[hostの負荷の連続の記録](host-metrics.md)、task 516）の窓の要約。窓は`--since`の時刻（eventのIDならそのeventの時刻。無ければ`asks`と同じwindowの最初のeventの時刻、それも無ければ窓の終わり）から`--until`の時刻（無ければ`asks`と同じwindowの終わり）まで。`{from, until, samples, first, last, metrics}`で、`from` / `until` / `first` / `last`はunix秒、`samples`は窓の中の行数、`metrics`は列ごと（`time`・`unix`と累計の`pageouts`を除き、`pageouts`は10分以内に並ぶ2行の差から求めた`pageouts_per_min`にする。累計が戻った（再起動）組は数えない）の`{samples, min, mean, median, max, p90}`（中央値とp90はnearest rank、小数2桁。`min`はtask 1371で足した）か、値が1つも無ければnull。列`disk_free_bytes`・`disk_free_pct`の`min`と`median`が、runのworktreeを置くファイルシステムの空きの最小値と中央値（[host-metrics](host-metrics.md#ディスクの空き)）。`cpu_secs`は窓のCPU秒（[host-metrics](host-metrics.md#読み口)の規則。`cpu_total`のある行が無ければnull）。ファイルが読めなければ`samples: 0`と`error`。`--goal`では絞らない。`stats`はqueueのディレクトリの`host/`を読み取るだけで書かない
+- 入口: `HostSummary`（`domain::host_metrics`）、記録は[hostの負荷の連続の記録](host-metrics.md)。
+- 時間の窓の要約で、`--goal`では絞らず、累計の値は近い2行の差から率にする（累計が戻った組は数えない）。
+- ファイルが読めなければ標本0と理由を出し、`stats`は失敗しない。
 
 ## 差し戻しの分類コードごとの集計
 
-[ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)の決定5（task 948で実装。`domain::stats::review_reasons`）。`review_reasons`は`{review, plan_review}`で、それぞれ`backend_failures`と同じwindowと`--goal`の絞り込みで、windowの中で記録されたverdict（`review_finished` / `plan_review_finished`）を数える。verdictの後の時間と答えはwindowの終わりより後のeventも読む。コードの一覧と記録の欄は[Review](review.md#差し戻しの分類コード)と[Plan review](plan-review.md#差し戻しの分類コード)。
-
-- **表**: `{verdicts, reviewed, sent_back, rate, by_code, codes, by_change}`。`verdicts`はpassを含む全てのverdict、`reviewed`はverdictのあったrun（`review`）かproposal（`plan_review`）の数、`sent_back`はそのうちreviseかconcern（plan reviewは適用した`decision`。無い古い記録は`verdict`）を1回でも受けた数、`rate`は`sent_back ÷ reviewed`（小数3桁）。
-- **`by_code`**: 差し戻したverdictの主のコード（`primary_code`。無い古い記録は`reason_codes`の最初、それも無ければ`unlabeled`）ごとに`{verdicts, revise, concern, subjects, rate, revise_secs, concern_wait_secs, send_back_resume_secs, outcomes}`。`subjects`はそのコードのverdictを受けたrunかproposalの数、`rate`は`subjects ÷ reviewed`。時間は`{count, total, median}`（秒）で主のコードにだけ付ける: `revise_secs`はreviewなら次のreviewまでの`revise_requested`から同じ`attempt`の`revise_finished`まで、plan reviewならreviseのverdictからproposalの次の`plan_review_started`まで。`concern_wait_secs`は`review_outcome` / `plan_review_outcome`のあるverdict（concernと、askになったrevise）のaskの`ask_opened`から最初の`ask_answered`まで（askの記録が無ければverdictからoutcomeまで）。`send_back_resume_secs`は`deviation_rejected`の後、reviewなら次のreviewまでの最初の`resume_started`から`resume_finished`まで、plan reviewならoutcomeからproposalの次の`plan_review_started`まで。`outcomes`は`deviation_accepted` / `deviation_rejected` / `canceled`の件数（無いものも0で出す）。
-- **`codes`**: 差し戻したverdictの全ての項目のコードの集合で、コードごとにそれを持つverdictの数（1つのverdictで同じコードは1回）。コードより前の記録は理由ごとに`unlabeled`（理由が無ければ1つ）。一覧に無い値はその値の行になる。
-- **`by_change`**: taskのchange（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。plan reviewはeventの付いたproposalのanchorのtask）ごとに`{change, reviewed, sent_back, rate, by_code}`（`by_code`は主のコードごとの差し戻されたrunかproposalの数。task 1013）。changeの順は`changes`と同じで、changeの無いtaskが最後でnull（`with_changes`が埋める。`application::stats`と`kpi`が呼ぶ）。taskのkindごとの`by_kind`はkindと一緒に消した（task 984、ADR-t980-1の決定1）。
+- 入口: `review_reasons`（[ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)決定5）、コードの一覧と記録の欄は[Review](review.md)と[Plan review](plan-review.md#差し戻しの分類コード)。
+- 窓の中で記録されたverdictを数え、verdictの後の時間と答えは窓の後のeventも読む。
+- plan reviewはjobのverdictでなく適用した判断で数える。
+- 時間は主のコードにだけ付ける。
 
 ## 分類コードごとの集計（未実装）
 
-ADR-t947-1の分は上の[差し戻しの分類コードごとの集計](#差し戻しの分類コードごとの集計)、ADR-t947-2の分は下の[worker_questionの分類コードごとの集計](#worker_questionの分類コードごとの集計)、ADR-t947-3の分は下の[follow_upの種類ごとの集計](#follow_upの種類ごとの集計)。[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。コードの一覧と記録の欄は各文書が持ち、ここは`stats`の出力の予定の形を書く。どれも窓の中のeventだけから数え、コードの無い過去の記録は書き換えずに`unlabeled`（cancelは`unrecorded`）として数える。一覧に無い値はその値の行として出す。
+[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)のcancelの理由の集計は、まだ実装していない（[Domain model](../domain-model.md#cancelの理由の分類コード未実装)）。
+ADR-t947-1・t947-2・t947-3の分はこの文書の各節にある。
 
-- `worker_question_topics`（ADR-t947-2）: 実装済み。下の[worker_questionの分類コードごとの集計](#worker_questionの分類コードごとの集計)。
-- `follow_up_categories`（ADR-t947-3）: 実装済み。下の[follow_upの種類ごとの集計](#follow_upの種類ごとの集計)。
-- `cancel_reasons`（ADR-t947-4、[Domain model](../domain-model.md#cancelの理由の分類コード未実装)）: 理由ごとに件数、actor、登録からcancelまでの秒、`ready`以降のcancelの件数、cancelまでに使ったrun・plan review・runtimeのplannerの数、follow_upのdraftなら`category`ごとの内訳。
+- 予定の形: 理由ごとの件数・actor・cancelまでの秒と、cancelまでに使ったrun・plan review・plannerの数。
+- 分類コードの集計に共通の約束: 窓の中のeventだけから数え、コードの無い過去の記録は書き換えずに`unlabeled`（cancelは`unrecorded`）として数え、一覧に無い値はその値の行として出す。
 
 ## worker_questionの分類コードごとの集計
 
-[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)の決定4（task 953で実装。`domain::stats::worker_question_topics`）。コードの一覧と記録の欄は[ask](ask.md#worker_questionの分類コード)。`asks`と同じwindowと`--goal`の絞り込みで、windowの中で開いた`worker_question`（`ask_opened`の`kind`）を数える。答えとその後の経過はwindowの終わりより後のeventも読む。新しい表もeventも持たない。
-
-- `worker_question_topics`: `{asks, runs, by_topic, codes}`。`asks`はwindowの中で開いた`worker_question`の数、`runs`はwindowの中の`run_claimed`の数（率の分母）。
-- **`by_topic`**: 主のコード（`ask_opened`の`topics`の先頭。無ければ`unlabeled`）ごとに`{asks, runs, rate, by_reason_category, to_answer, night, day, open, outcomes}`。`runs`はaskのあった別々のrunの数、`rate`は`asks ÷ runs`（windowの`runs`。小数3桁、runが無ければnull）、`by_reason_category`は一緒に付いた`reason_category`ごとの件数。`to_answer`は`ask_opened`から最初の`ask_answered`までの秒の`{count, total, median}`で、runtimeが自分で閉じた答え（`runtime_closed`）は数えない。`night`と`day`は同じ秒をaskを開いた時刻で分けたもので、hostのlocal timeの22時から7時（`NIGHT_HOURS`、task 950の分析と同じ）が夜。`open`はまだ答えの無いaskの数。`outcomes`は答えの後に同じrunに起きたことの`{landed, failed, concern}`（`run_integrated`、runの終わりの状態が`failed`であること、verdict `concern`の`review_finished`。1件のaskが複数に数えられることもある）。`failed`は`runs`の`status`と同じく、runの最後の状態（payloadの`status`と`run_integrated`の`integrated`で追う）が`failed`で、そこへ移ったeventが答えの後のときだけ数える。sessionが一度`failed`で終わってからresumeされて着地したrunは`landed`だけに数え、同じ`failed`を繰り返すevent（triage・askの答えなど）は数を増やさない（task 1042）。
-- **`codes`**: 主と副を合わせた全てのコードごとに、それを持つaskの数。
-- **待ちの時間の内訳**: `asks.times.by_topic`は`asks.times`の`by_kind`と同じ形（答えまで、適用まで、openの待ち）を`worker_question`の主のコードごとに出し、`waiting.waited_by_topic`は`waiting.waited`のうち`worker_question`が始めた待ち（slotを空けていた秒）を、その問いの主のコードごとに出す。
-- 夜と昼はhostの時刻（`clock::local_utc_offset`）で分け、`LiveSnapshot.utc_offset_secs`で渡す。`kpi`は`KpiInput`の`utc_offset_secs`を渡す。`src/domain/stats/worker_question_topics.rs`のunit test（`counts_the_worker_questions_by_their_primary_topic`）が主のコード・副・率・夜と昼・経過・窓と`--goal`を、`counts_failed_only_when_the_run_ends_failed_after_the_answer`が`failed`をrunの終わりの状態で数えることを、`tests/it/cli_kpi.rs`の`the_worker_question_topics_reach_stats_and_kpi`がCLIの`ask --topic`から`stats`と`kpi`までを確かめる。
+- 入口: `worker_question_topics`（[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)決定4）、コードの一覧と記録の欄は[ask](ask.md#worker_questionの分類コード)。
+- 率の分母は窓の中でclaimしたrunの数。
+- 夜と昼はhostのlocal timeで分ける（`NIGHT_HOURS`）。
+- runtimeが自分で閉じた答えは答えまでの時間に数えない。
+- 答えの後の`failed`は、runの最後の状態が`failed`で、そこへ移ったのが答えの後のときだけ数える。
+  一度`failed`で終わってからresumeされて着地したrunは着地だけに数える。
 
 ## follow_upの種類ごとの集計
 
-[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定4（task 954で実装。`domain::stats::follow_up_categories`）。コードの一覧と記録の欄は[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード)、runtimeのplannerの判断との突き合わせは[Draft planners](draft-planners.md#follow_upの種類と判断の集計)。`draft_flow`と同じwindowと`--goal`の絞り込みで、新しい表もeventも持たない。
-
-- `follow_up_categories`: `follow_up_registered`の`category`ごと（無ければ`unlabeled`）のmapで、窓の中に何も起きなかった種類は出さない。欄は`registered`（窓の中の`task_created`）、draftから初めて出たものの`adopted`（`canceled`以外へ）・`canceled`（`duplicate_of`なし）・`duplicate`（`duplicate_of`あり）と、その合計に対する`adoption_rate`・`duplicate_rate`（小数2桁、出たものが無ければnull）、runtimeのplannerの判断（[Draft planners](draft-planners.md#follow_upの種類と判断の集計)）の`planner_outcomes`（draftごとの窓の中の最後の`draft_planner_settled`の`outcome`の件数）・`exhausted`（`draft_planner_exhausted`）・`planner_questions`（`planner_question`の`ask_opened`）・`answers`（その`ask_answered`の`option`ごと、選ばない答えは`free`、runtimeが自分で閉じた（`runtime_closed`）ものは数えない）、`landed`（draftのrunの`run_integrated`）、`draft_secs`（窓の中でdraftから出たものの`task_created`からの秒の`{count, total, median}`）、`backlog`と`oldest_backlog_secs`（窓の終わりにまだdraftのもの）。`src/domain/stats/follow_up_categories.rs`のunit test（`counts_the_follow_up_drafts_by_category`）が種類ごとの件数・率・判断・時間と窓・`--goal`の絞り込みを確かめる。
+- 入口: `follow_up_categories`（[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)決定4）。
+  コードの一覧と記録の欄は[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード)、runtimeのplannerの判断との突き合わせは[Draft planners](draft-planners.md#follow_upの種類と判断の集計)。
+- 窓と`--goal`の絞り込みは[draftの流入と流出](#draftの流入と流出)と同じ。
+- 窓の中に何も起きなかった種類は出さない。
+- 重複としてのcancelは、採用率と分けて重複率に数える。
+- runtimeが自分で閉じた答えは数えない。
 
 ## headlessのjob
 
-goal 73（task 1066、スループットの見直しはtask 1173）。**`jobs`**は、worker以外のheadlessのjobを種類ごとに数え、起動したproviderと実際のmodelでも分ける。Claudeで動いたjobとCodexで動いたjob（goal reviewから）を並べて比べるための集計で、集計は`domain::stats::jobs`がrun_eventsから再導出し、新しい表もeventも持たない。`asks`と同じwindow（`backend_failures`と同じevent idの範囲）で、windowの中に終わりのeventが記録されたjobを数える。`--goal`では、run（review・復旧）とproposal（plan review）はそのgoalのtaskのeventのものだけ、goal reviewはそのgoalのevent（taskを持たない）のものだけにし、observerとthroughput_review（queueのevent）は0にする。
+worker以外のheadlessのjobを種類・provider・実際のmodelごとに数え、ClaudeとCodexで動いたjobを比べる。
 
-- **種類と対応**: `review`（`review_started`→同じrunの`review_finished` / `review_failed`）、`recovery`（`triage_started`か`recovery_requested`→同じrunの`recovery_finished`。開始の無い`recovery_finished`（上限まで使い切ってjobを起動しなかった段上げ）はjobに数えないので、`auto_repairs.recovery_jobs`より少なく出うる）、`plan_review`（`plan_review_started`→同じ`plan_review_id`の`plan_review_finished` / `plan_review_failed` / `plan_review_discarded`）、`goal_review`（`goal_review_started`→同じ`goal_review_id`の`goal_review_finished` / `goal_review_failed`）、`observer`（`observe_started`→次の`observe_finished`。agentを起動しなかった`outcome: skipped`と、`--no-claude`でCodexも使えずに理由だけを記録した`unavailable: true`（`outcome: error`。task 1223、[Observer](observer.md#codexで動かす)）はjobに数えない）、`throughput_review`（スループットの見直しのjob。[スループットの見直し](throughput-review.md)。`throughput_review_started`→同じ`mode`・`period`・`session_id`の`throughput_review_finished`。規則に当たらずagentを起動しなかった毎時の`outcome: skipped`はjobに数えない）の6つで、記録が0でも必ず出す。終わりのeventは直前の同じ対応の開始と組にする。`review_retried`は開始に数えず、やり直した1回目のreviewは終わりを持たないので数えない。
-- **失敗**: `*_failed`、`recovery_finished`の`outcome: job_failed`、`observe_finished`と`throughput_review_finished`の`outcome`が`succeeded`でないもの（見直しは`failed` / `error`。observerの`unavailable: true`はjobに数えないので失敗にも数えない）。
-- **欄**: `jobs.<kind>`は`{count, failed, failed_rate, secs, verdicts, by_provider, by_model}`。`count`は終わったjob（失敗を含む）、`failed_rate`は`failed ÷ count`（小数3桁、jobが無ければnull）、`secs`は終わりのeventの`duration_secs`（無ければ開始から終わりまでの秒）の`{count, total, median}`、`verdicts`はverdictを返したjobの`verdict`ごとの件数（review・plan review・goal reviewの終わりで`verdict`の無い記録は`unknown`。plan reviewはjobの`verdict`で、適用した`decision`ではない）。失敗したjob、observer、スループットの見直し、verdictの前に止めた復旧のjob（`outcome`が`session_ended` / `dialog_cleared`など）、捨てたplan review（`plan_review_discarded`）は失敗でもなくverdictも持たない。
-- **`by_provider`**: 同じ形（`by_provider` / `by_model`を除く）を、開始のeventの`launch.provider`（[Actor model](actor-model.md)）ごとに分けたもの。`launch`か`provider`の無い開始（task 1062より前の記録）と、開始の見つからない終わりは`claude`に数える（それより前はClaudeでしか動かなかった）。workerのrunの`turns.by_provider`と同じくproviderの値をkeyにする。
-- **`by_mode`**: `throughput_review`だけが持ち、同じ形（`by_provider` / `by_model` / `by_mode`を除く）を`throughput_review_*`のeventの`mode`（`hourly` / `daily` / `weekly`）ごとに分けたもの。3つのmodeを記録が0でも必ず出す。毎時と日次・週次では所要時間の桁が違い、費用を見たいのは毎時なので分ける。ほかの種類の`jobs.<kind>`には出ない。
-- **`by_model`**: 同じ形を、開始のeventの`session_id`の区間の`session_closed`の`model`（transcriptから読んだ実際のmodel。[provider-lifecycle](../provider-lifecycle.md#modelとeffort)）ごとに分けたもの。modelの記録の無いjob（transcriptが読めない、区間を持たない生きているrunのClaudeの復旧のjob）は`unknown`。Claudeのjobは実際のmodelをjobの終わりのeventに写さない（[Actor model](actor-model.md)）ので、`session_id`で結ぶ。Codexのjob（開始の`session_id`がnull）は終わりのeventの`model`（rolloutから読んだもの。task 1065）を読む。Codexの復旧のjob（task 1225）は終わったrunのものも区間を持たない生きているrunのものも、`recovery_finished`の`model`で数える。
-- `src/domain/stats/jobs.rs`のunit test（`goal_reviews_are_split_by_provider_and_model`はClaudeとCodexのgoal reviewが混ざった記録で件数・失敗率・所要時間・verdictの分布をproviderとmodelごとに、`every_kind_pairs_its_ends_with_its_starts`は種類ごとの開始と終わりの対応を確かめる）、`a_codex_job_takes_the_model_its_end_records`（Codexのjobの終わりの`model`）、`throughput_reviews_are_counted_per_mode_without_the_skipped_hours`（見直しの開始と終わりの組、skippedを数えないこと、`failed` / `error`の失敗、modeごとの件数・失敗率・所要時間）と、`tests/it/goal_review.rs`の`a_goal_review_records_its_launch_and_session`・`tests/it/goal_review_codex.rs`の`a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model`（`stats --full`の`jobs.goal_review`）、`tests/it/cli_kpi.rs`の`the_throughput_review_jobs_reach_stats_and_kpi_per_mode`（`stats --full`の`jobs.throughput_review`と`--goal`での0、`kpi`と`kpi --compare`の`mode=`の層）、`tests/it/recovery_codex.rs`（task 1225。`jobs.recovery`の`by_provider`・`by_model`と`kpi`の`job.count.recovery`の`provider=codex`、Codexの失敗とClaudeへの切り替えの後の`codex` / `claude`の並び）。
+- 入口: `jobs`と`JobStats`（providerの記録は[Actor model](actor-model.md)）。
+- 窓の中に終わりのeventが記録されたjobを数え、終わりは直前の同じ対応の開始と組にする。
+- agentを起動しなかったもの（規則に当たらなかった周回、Codexも使えなかったobserver）はjobに数えない。
+  開始の無い復旧の終わり（上限まで使い切って起動しなかった段上げ）も数えないので、`auto_repairs`の復旧jobより少なく出うる。
+- providerの記録の無い開始は`claude`に数え、goal reviewは`--goal`でもそのgoalに数える。
+- Claudeのjobは実際のmodelを終わりのeventに写さないので、開始の`session_id`で区間の閉じた記録に結び付ける。
+  Codexのjobは終わりのeventのmodelを読む。
+- スループットの見直しだけがmodeごとにも分ける（毎時と日次・週次では所要時間の桁が違い、費用を見たいのは毎時なので）。
 
 ## AIの推奨と確信度の集計
 
-[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1（task 1318で実装。`domain::stats::recommendations`）。askの欄と表示は[ask](ask.md#aiの推奨と確信度未実装)。`asks`と同じwindowと`--goal`の絞り込みで数え、askの推奨はwindowより前の`ask_opened`からも読む。新しい表もeventも持たない。
+- 入口: `recommendations`と`DECIDED_WITHOUT_ASK`（[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)決定1・2）、askの欄と表示は[ask](ask.md)。
+- askの推奨は窓より前に開いたaskからも読み、runtimeが自分で書いた答えは誰の選択でもないので除く。
+- 選んだoptionは選択肢との完全一致で見て、`<option>: <理由>`の形で答える種類（plan と着地の承認）は`:`の前で見る。
+- AIがaskにせず決めた判断のうち、適用した差し戻しが結局人へのaskになったものは人に届いた判断なので数えない（照合は窓に依らない）。
+- `--goal`で絞ると、observerがaskにしなかった件数は0になり、`blocked`のaskとは比べられない。
 
-- `recommendations`: `{by_kind, decided_without_ask, observer}`。
-- **`by_kind`**: askのkindごとに`{answered, matched, rate}`。`answered`はwindowの中の`ask_answered`のうち、そのaskの`ask_opened`が`recommendation`を持つものの数。runtimeが自分で書いた答え（`answered_by: runtime`か`runtime_closed`）は誰の選択でもないので除く。`matched`はそのうち答えが選んだoptionが推奨と（前後の空白を除いて）一致した数。選んだoptionは`ask_answered`の`option`（選択肢との完全一致）で、それが無い`approve_plan`と`approve_landing`の答えでは`reasoned_option`（`<option>: <理由>`の形の答えの`:`の前。`send_back: split it`なら`send_back`。[ask](ask.md)）を読む（task 1389）。ほかのkindの自由文の答えは`<推奨>: 理由`の形でも一致に数えない。`rate`は`matched ÷ answered`（小数3桁）。推奨を持つ答えが無いkindは出さない。
-- **`decided_without_ask`**: AIが自分で決めてaskにしなかった判断の、それが代わったaskのkindごとの件数。数える記録の一覧は`DECIDED_WITHOUT_ASK`（eventのkind、askのkind、payloadの条件）が持つ。今は`follow_up_adopted`のうち`by: planner`で`ask_id`がnull（runtimeのplannerが`planner_question`を経ずに採用したfollow_up）を`planner_question`に、plan reviewの`plan_concern_decided`のうち`applied: true`（runtimeが`concern`の推奨を適用したもの。[Plan review](plan-review.md#aiが決めるconcern未実装)）を`approve_plan`に、reviewの`concern_decided`のうち`applied: true`（jobの推奨を適用したconcern。[Review](review.md#aiが決めるconcern未実装)）を`approve_landing`に数える。ただし適用した`send_back`をsessionが直さずに結局`approve_landing`のaskになったもの（同じrunで同じreviewの`attempt`の`concern_send_back_escalated`があるもの。`DECIDED_WITHOUT_ASK`の`escalated_by`）は人に届いた判断なので数えない（task 1392）。この照合はwindowに依らず渡されたeventの全体で行うので、windowの後でaskに至った`send_back`も数えない。適用した`land`とaskに至らなかった`send_back`は今までどおり数える。observerの`observe_finished`の`findings_without_ask`（askにせずfindingだけにした件数。[Observer](observer.md#人が要る見立てだけをblockedにする未実装)）を`blocked`に足す（1件のeventが件数ぶん数える。`DECIDED_WITHOUT_ASK`の`decisions`。件数の無い古い`observe_finished`は0）。記録の無いkindは出さない。
-- **`observer`**: `{findings_without_ask, blocked_asks}`。windowのobservationがaskにせずfindingだけにした件数（`findings_without_ask`の合計）と、windowに開いた`blocked`のask（`ask_opened`）の件数を並べる（ADR-t451-1決定2、task 1319）。observationはtaskの無いeventなので、`--goal`で絞ると`findings_without_ask`は0になり、`blocked_asks`はgoalのtaskに紐づくaskだけを数える（taskの無い`blocked`のaskは数えない）ので、goalで絞った2つは比べられない。
-- `src/domain/stats/recommendations.rs`のunit testが一致の数え方（`send_back: <理由>`の答えを含む）・windowより前のask・runtimeの答えの除外・`decided_without_ask`の条件（askに至った`send_back`の除外を含む）と`observer`の件数（`the_observers_findings_without_an_ask_stand_next_to_the_blocked_asks`）を、`tests/it/cli_dialogue.rs`の`a_recommendation_reaches_the_ask_status_and_stats`がCLIの`ask --recommend`から`stats`までを、`a_send_back_with_a_reason_matches_the_recommendation_in_stats`が`send_back: <理由>`の答えから`ask_answered`の`reasoned_option`を経て`stats`までを確かめる。
+## そのほかの期間の集計
+
+| 知りたいこと | コードの入口 | 約束と文書 |
+| --- | --- | --- |
+| eventの分類コードの件数 | `reason_codes` | 同じ失敗を2回数えない。[domain-model](../domain-model.md#理由の分類コードcode) |
+| cmuxの呼び出しの失敗 | `backend_failures` | retryした試行と使い切った失敗の和が件数で、alertは件数で判定する |
+| 重複としてのcancel | `duplicate_cancels` | ADR-0063決定5 |
+| 着地の後の待ちrunの再確認 | `landing_rechecks` | [Landing recheck](landing-recheck.md) |
+| reviewの後に人を待った着地の衝突 | `landing_waits` | 着地が窓にあるrunを数え、待ちと衝突は着地より前の全てのeventから読む |
+| 人の答えを待ってslotを空けたrun | `domain::waiting::WaitingStats` | 待ちの合計は、塞いでいたら失われたslotの時間。[人の答えを待つrun](waiting.md)、[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)決定13 |
+| workerの経路ごとの健全性 | `routes` | 経路はそのeventの時点のrunの経路。[kpi](kpi.md#期間の健全性)と日次・週次のレポートが読む |
+| runtimeのplannerの経路ごとの様子 | `planner_routes` | ADR-t1394-2決定4 |
+| 衝突の多いファイル | `conflicts` | 着地の数とファイルの今の状態はmainの履歴から読み、読めなければ分からないものとする。alertは消えたファイルを除く（[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定21、[衝突の閾値](conflict-thresholds.md)） |
+| askの件数・答え・待ちの時間 | `asks`と`AskTimes` | 答えの適用はその後にaskを名指す最初のeventで、slotの空き待ちを除いた時間も並べる（ADR-0071決定8） |
+| 人を待たずに直したもの | `auto_repairs` | 日はUTCの日で、復旧jobの終わりは直したものと別に数える（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定45） |
+| providerの切り替え | `providers` | [provider-lifecycle](../provider-lifecycle.md) |
+| 自動更新とe2eの関門 | `updates` | [Auto-update](auto-update.md)。testごとの関門の結果はobserverが`flaky_test`のfindingにする |
 
 ## KPIからの読み口
 
-[`kpi`](kpi.md)（ADR-0051）は期間ごとの窓でこの`stats`を`full`に呼び、同じ区間・`land_phases`・`retries`・sessionを使う。KPIのために、同じ走査を共有する読み口を2つ足した: `stats::asks::human_waits`（`asks`と同じ`ask_opened` / `ask_answered` / 適用のeventの対応から、人が答えたaskの答えまでと適用までの秒を並べる。`runtime_closed`で閉じたaskは除く）と`stats::measures::verification_durations`（`verification_commands`と同じeventの選び方で、`integrate`の検証コマンドごとの秒を並べる）。`landing_utilization`は`stats`の時間の窓の代わりにKPIの期間の`(start, end]`で同じ`stats::landing_utilization::landing_utilization`を呼ぶ。`stats`の出力は変わらない。
+[kpi](kpi.md)（ADR-0051）は期間ごとの窓でこの`stats`を全件で呼び、同じ区間・着地の内訳・延期・sessionを使う。
 
-cargoとdagqの検証の形に依る計測（worktimeの`e2e`・`llvm_cov`・`test`の分類と`full_tests`・`llvm_cov_runs`・`verification_repeats`、`work_breakdown`の`test_with_llvm_cov`、claimの`rustc_release`・`rustc_host`と`versions.rustc`）は、queueのrepositoryがdagqのソースのときだけ記録して出す（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。判定はまだ実装していない。
+- 同じ走査を共有する読み口: 人が答えたaskの答えまでと適用までの秒は`stats::asks::human_waits`、検証コマンドごとの秒は`stats::measures::verification_durations`。
+- 着地の直列処理の使用率は、`stats`の時間の窓の代わりにKPIの期間で同じ関数を呼ぶ。

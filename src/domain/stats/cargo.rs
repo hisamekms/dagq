@@ -2,7 +2,10 @@
 //! checks (`cargo test`, llvm-cov, the e2e test) and the host's `rustc`
 //! give. They are shown for dagq's source repository and left out of the
 //! output for any other ([`super::without_cargo_measures`]), where a 0 or
-//! an `unknown` would read as a fact about that project.
+//! an `unknown` would read as a fact about that project. The decision is
+//! made each time `stats` is shown; the callers of
+//! [`super::stats`] itself (the KPI windows, plan review's conflict
+//! hotspots, the forecast) see every measure.
 
 use serde::{Serialize, Serializer};
 

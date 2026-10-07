@@ -3,6 +3,13 @@
 //! ([`crate::domain::tokens`]), per run (and per kind of session in it),
 //! as totals and medians per goal, kind of task and overall, and per kind
 //! of session over the window.
+//!
+//! A session's tokens count when it closes, so a session open for long
+//! (the inbox that stays) lands days of tokens in the window of the day it
+//! closed: these totals do not compare per day or per actor. What they
+//! leave out (subagents of headless turns, Codex's jobs, the threads a
+//! Codex worker spawns) and the record per execution that replaces them
+//! are ADR-t1486-1's.
 
 use std::collections::BTreeMap;
 

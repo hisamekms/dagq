@@ -10,6 +10,8 @@
 //! without one), so that the providers' jobs can be read side by side. The
 //! throughput review's are also split by its mode (hourly, daily, weekly),
 //! whose times differ by an order (task 1173).
+//! With `--goal`, a goal review counts for its goal though it has no task,
+//! and the jobs of queue events (observer, throughput review) are none.
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;

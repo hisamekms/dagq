@@ -194,6 +194,14 @@ pub struct StatsQuery {
 
 /// The supervisors as they are now: execution slots nobody uses, the
 /// dependency-ready tasks and the ready tasks that are still blocked.
+///
+/// A run waiting its turn to land fills its slot (ADR-0071 decision 13,
+/// ADR-t610-1), so a free slot is one a heavy task could use too; a run
+/// waiting for a person does not. The light room a landing queue leaves
+/// (ADR-t1591-1) is not free here, and the ready tasks of a draft goal
+/// wait for `goal ready`, not for a predecessor, so they are left out of
+/// `ready`. It is read once per `stats`: the slot alerts keep no history
+/// of the hours slots stood free.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SlotSnapshot {
     pub free_slots: i64,
@@ -350,6 +358,11 @@ pub struct AreaStats {
     pub intervals: Intervals,
 }
 
+/// A threshold a run or the queue crossed, as `alerts` lists it: `value`
+/// and `threshold` are seconds or counts. Of the slot alerts at most one
+/// is listed, the first of `claim_held`, `claim_deferred` and `idle_slots`
+/// that holds: free slots while claims are held, or while tasks are
+/// deferred for any reason, are that hold's and not idle ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Alert {
     pub kind: &'static str,
@@ -453,6 +466,16 @@ pub struct DuplicateCancel {
     pub duplicate_of: TaskId,
 }
 
+/// What `dagq stats` returns. Only `runs`, the groups computed from them
+/// (`goals`, `overall`, `changes`, `areas`, `e2e`, `versions`,
+/// `load_bands`, `trial_groups`, `escalations`, the finished runs' alerts)
+/// and `next_cursor` follow the page of runs; every other period aggregate
+/// counts the whole window, from `--since` (else the first event of the
+/// page's runs, or the first event with `--full`) to `--until` (else the
+/// latest event). Reading the next page with `--since next_cursor` so
+/// counts the same window again: the period
+/// aggregates of pages are not summed, the value of one read is that of
+/// the whole window.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Stats {
     /// Finished runs, oldest finish first.
@@ -613,7 +636,10 @@ pub struct Stats {
     /// that reads the files ([`Stats::window_ms`]); absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<super::host_metrics::HostSummary>,
-    /// Pass it to `--since` to read only runs that finish later.
+    /// Pass it to `--since` to read only runs that finish later: the last
+    /// run's `finished_event_id` when `--since` left more than a page of
+    /// runs, else the latest event read (`status`'s `cursor`), never past
+    /// `--until`.
     pub next_cursor: EventId,
     /// The window of `host` in unix milliseconds: from `--since`'s time
     /// (else the first event of the window of `asks`, else its end) to

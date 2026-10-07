@@ -6,7 +6,9 @@
 //! recorded as its `result_commit`, which ties the two runs. A
 //! `verification_failed` deferral onto a landing that passed the same
 //! command at its own landing does not name it (task 974): the failed tests
-//! passed on that main, so it is kept in `rebased_onto` instead.
+//! passed on that main, so it is kept in `rebased_onto` instead. A
+//! deferral whose failure is `flaky` never names a landing either: an
+//! unstable test is not the fault of the main the run was rebased onto.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;

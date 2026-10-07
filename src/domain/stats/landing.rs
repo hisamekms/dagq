@@ -5,6 +5,8 @@
 //! starts a phase closes the one before; an event that starts none leaves
 //! the time with the current phase. The push, which follows
 //! `run_integrated`, is measured on its own and is not part of the sum.
+//! Each phase is cut to whole seconds, so the sum may fall a few seconds
+//! short of `wait_to_land`.
 //! The `verify` phase is also split by verification command (task 509),
 //! and the `landing_queue` phase by what queued the run (`via`, task 949).
 use std::collections::{BTreeMap, HashMap};
