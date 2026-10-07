@@ -2,10 +2,12 @@
 id: adr-0076
 type: adr
 title: integrateのcoverageの関門のtestをcargo-nextestでbinaryをまたいで並列に流し（cargo llvm-cov nextest）、cargo-nextestは人がhostに入れる
-status: accepted
+status: superseded
 created: 2026-09-26
 updated: 2026-09-26
 accepted_on: 2026-09-26
+superseded_by: adr-t1925-1
+superseded_on: 2026-10-07
 amended_by:
   - adr-t768-1
 owners:
@@ -22,6 +24,8 @@ related:
 ---
 
 # ADR-0076: integrateのcoverageの関門のtestをcargo-nextestでbinaryをまたいで並列に流し（cargo llvm-cov nextest）、cargo-nextestは人がhostに入れる
+
+> **置き換え済み（2026-10-07）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t1925-1](2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)を読む。
 
 ## Context
 

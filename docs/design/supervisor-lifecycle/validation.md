@@ -12,6 +12,7 @@ related:
   - adr-t963-1
   - adr-t1165-1
   - adr-t1233-2
+  - adr-t1925-1
 ---
 
 # Validation
@@ -30,6 +31,30 @@ related:
 結果は`validation_finished`イベント（`status`、`result_commit`、`reason`、receiptの内容、7で外れたときだけ`scope_violation`と`allowed_paths`、8で欠けたときだけ`evidence_missing`、e2eの要否が分かったときは`e2e_requirement`、`receipt_observed`からこの検証までのload averageの`load_avg_mean` / `load_avg_max`（task 197。[`supervise`](supervise.md)の7））と`task_runs.result_commit`/`last_error`に保存する。4以降で拒否した場合もcommitは確認済みなので`result_commit`を残す。成功しても`awaiting_integration`はTaskを`in_progress`のまま保持し、着地まで依存taskを解放しない。
 
 その後: `awaiting_integration`のrunは[Review](review.md#review-supervisor)に進む（leaseとsessionはそのまま）。`integration_approved`のあるrun（`integrate`が呼ばれた後にresumeしたrun）はreviewを待たずに終了の依頼→close→着地する（ADR-0027の決定3）。`needs_session`（宣言外のパス、evidenceの欠落）は終了の依頼→closeしてleaseを外す。`failed`は終了を依頼し、workspaceは調査のため閉じずにleaseを外す。
+
+## 着地の検証（予定）
+
+[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)で、着地の検証を軽くし、最終関門をCIにする。
+runtimeの仕組みはまだ無く、この節は予定の姿である。
+validatingは今と同じく検証のコマンドを流さず、置き換えも`integrate`のrebase後の1回の検証の中で起きる（[`integrate`](integrate.md)の手順5）。
+
+- **置き換えの流れ**: repositoryの設定が着地の検証を持つときだけ、runtimeはtaskの検証のコマンドのうちcoverageの関門に当たるものを、設定の着地の検証のコマンドに置き換えて流す。
+  他のコマンドは登録のまま流し、coverageの関門を持たないtaskでは何も置き換わらない。
+  登録済みのtaskの検証のコマンドは書き換えず、設定を外せば登録のコマンドに戻る。
+- **分担**: 置き換えと、着地の検証のコマンドに渡す材料（base commit、既に落ちているtestの一覧、CIの修正taskのrunか）はruntimeの汎用の仕組みである。
+  何を置き換えるか、ITの選び方、対応表の取り方、閾値・共通のファイル・古さの上限の値は、repositoryの設定とscriptが持つ。
+  runtimeはrepositoryのtestの構成と対応表の形を知らない。
+  設定の書式と渡すenvの意味は定義のそばのdoc commentが持つ。
+- **中身**: このrepositoryの着地の検証は、fmt・clippy・レイヤーの依存の検査・taskに固有の軽い検査・unit test全件・影響範囲で絞ったITで、行カバレッジの関門はCIだけが見る。
+- **絞ったITに必ず含めるもの**: 差分で足した・変えたtestのファイルが定めるITと、対応表に無いIT（表の生成の後に他の着地が足したか名前が変わったtest）。
+  表は差分の前のmainから作られているので、足したtestと他の着地が足したtestを知らない。
+- **ITを全部流す条件**: 絞ったITの見込みの時間が上限を超えるとき、共通のファイルに触れたとき、表が取れないか古すぎるとき。
+  値と根拠は[着地のITの絞り込みの測定](../../plans/landing-it-selection.md)の「決めたこと」にある。
+- **既に落ちているtest**: [CI watch](ci-watch.md)の一覧のtestは着地の検証から外す。
+  CIの修正taskのrunでは、そのfindingのtestを外さない（他のfindingのtestは外す）。
+- **最終関門**: 着地の検証が見逃した壊れはmainのCIが拾い、CIの見張りが修正taskにする。
+  mainの前でCIを通す仕組みと着地のrevertは無く、自動更新にもCIの確かめや全testを足さない。
+  全部のe2eの関門（下の節と[Auto-update](auto-update.md)）と固定バイナリを前のものに戻す手順は変わらない。
 
 ## runtimeが流すe2e
 
