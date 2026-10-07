@@ -1,5 +1,6 @@
 ---
 description: このrepositoryのruntimeのレイヤーとコンテキストの境界を検査する
+tools: [read, grep, glob]
 ---
 
 - 分担: L1・L2・L3・L4・L6と許可の一覧の書式は`scripts/check-layer-deps.sh`に任せて見ず、scriptが見ない意味の境界だけを見る — [docs/design/architecture.md「検査の範囲」](../../../docs/design/architecture.md#検査の範囲)。

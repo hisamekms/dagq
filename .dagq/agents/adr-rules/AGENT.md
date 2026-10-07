@@ -1,5 +1,6 @@
 ---
 description: このrepositoryのADRと文書の形式を検査する
+tools: [read, grep, glob]
 ---
 
 - A-150・A-151・A-152・A-162・A-163: ADRの適合性 — [docs/development/documents.md「ADR」](../../../docs/development/documents.md#adr)。

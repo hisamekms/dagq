@@ -1,5 +1,6 @@
 ---
 description: このrepositoryのtestの構成と書き方を検査する
+tools: [read, grep, glob]
 ---
 
 - A-092・A-117: testの書き方の適合性 — [docs/development/testing.md「testの書き方」](../../../docs/development/testing.md#testの書き方)。

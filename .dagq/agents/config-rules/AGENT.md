@@ -1,5 +1,6 @@
 ---
 description: このrepositoryの設定と開発環境の境界を検査する
+tools: [read, grep, glob]
 ---
 
 - A-028・A-029・A-030・A-034・A-036・A-039: `[run.env]`とtestの並列度の置き場の適合性 — [docs/development/operations.md「`[run.env]`とtestの並列度の置き場」](../../../docs/development/operations.md#runenvとtestの並列度の置き場)。

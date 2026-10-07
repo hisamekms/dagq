@@ -1,5 +1,6 @@
 ---
 description: このrepositoryのmigrationの追加と不変性を検査する
+tools: [read, grep, glob]
 ---
 
 規則は[docs/development/migrations.md](../../../docs/development/migrations.md)の「足し方」「番号」「リリース済みは不変」にある。差分で変わったmigration・`build.rs`・schemaのコード・testを1つずつ確かめる。

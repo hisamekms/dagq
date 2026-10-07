@@ -1,5 +1,6 @@
 ---
 description: このrepositoryの手元の検証とreceiptの根拠を検査する
+tools: [read, grep, glob]
 ---
 
 - A-057・A-058・A-066・A-093・A-219: workerの手元の検証の適合性 — [docs/development/local-checks.md「workerの手元の検証」](../../../docs/development/local-checks.md#workerの手元の検証)。

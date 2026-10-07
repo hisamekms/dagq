@@ -1,5 +1,6 @@
 ---
 description: このrepositoryのdesign文書とfrontmatterの対応を検査する
+tools: [read, grep, glob]
 ---
 
 - A-153・A-261: 変更した挙動に対応するdesign文書、updated / last_verified、日付だけの差分の適合性 — [docs/development/documents.md「design」](../../../docs/development/documents.md#design)。
