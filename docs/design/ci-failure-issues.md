@@ -8,6 +8,7 @@ scope: operations
 tags:
   - ci
 related:
+  - adr-t2034-1
   - adr-t1920-1
   - design-supervisor-lifecycle-ci-watch
   - design-stress-ci
@@ -28,6 +29,11 @@ main への push ごとの CI（`.github/workflows/ci.yml`）が落ちたら、G
 
 - 実行の `event` が `push` のときだけ。`pull_request` の実行（head の branch が main でも）は issue を開きも閉じもしない
 - 実行の結論（workflow 全体の `conclusion`）が `failure` なら開くか追記し、`success` なら閉じる。`cancelled`・`skipped` などでは何もしない（main の実行は concurrency で待っている古い実行が `cancelled` になる）
+- **予定（未実装）**（[ADR-t2034-1](../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）: `success` でも、実行の job（`gh run view <run> --json jobs`）に `conclusion` が `skipped` の job があれば、`cancelled` と同じく何もせず、「より新しい実行」の代わりにも選ばない。
+  docs だけの push は Rust の job を job の `if` で飛ばし（[Linux CI](linux-ci.md) の「docsだけの差分」）、その実行は Rust の成否を示さないため。
+  job の名前の一覧は持たない（`ci.yml` で `if` を持つ job は Rust の job だけ）。
+  doc の検査だけが落ちて開いた issue も、Rust を流して通る実行まで残る。
+  supervisor の見張りも飛ばした success を緑と読まないが、`skipped` の job があるかではなく `[ci_watch]` で名指した job で決める（runtime は他の repository で普段から飛ぶ job を巻き込まないため。[CI watch](supervisor-lifecycle/ci-watch.md) の「実行の扱い」）
 
 workflow 全体の結論で決めるので、`ci.yml` のどの job が落ちても（`checks` に限らず）開く。job 単位の `continue-on-error: true` の job が落ちても workflow の結論は `success` のままなので、その失敗だけでは開かない。`linux` job（[Linux CI](linux-ci.md)）は task 1238 で `continue-on-error` を外したので、その失敗で workflow の結論が `failure` になって開く。
 

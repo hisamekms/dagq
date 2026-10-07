@@ -6,6 +6,7 @@ status: current
 created: 2026-10-06
 scope: runtime
 related:
+  - adr-t2034-1
   - adr-t1920-1
   - adr-0047
   - adr-0049
@@ -43,6 +44,17 @@ related:
 ## 実行の扱い
 
 - `conclusion`が`success`なら緑、`failure`か`timed_out`なら赤、それ以外（`cancelled`・`skipped`・`neutral`・`action_required`・`startup_failure`・`stale`）は飛ばす。飛ばした実行は次の`ci_checked`の`skipped_runs`に数え、範囲は次に成否の決まった実行が引き受ける（`ci.yml`の`concurrency`は変えない）。
+- **名指したjobが飛んだsuccess**（**予定（未実装）**、[ADR-t2034-1](../../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）: `[ci_watch] required_jobs`（jobの`name`の配列）があれば、`success`の実行ごとに上の3と同じ`gh run view <id> --json jobs`を読み、名指したjobが全部`success`で終わった実行だけを緑とする。
+  どれかが`skipped`などで終わった実行（docsだけのpushでRustのjobを飛ばした実行）は上の飛ばす実行と同じに扱い、`ci_turned_green`も一覧の`removed`も書かない。
+  `required_jobs`が無ければjobを読まない。
+  - 名指したjobが実行のjobsに無い: 飛ばす実行に数え、設定と`ci.yml`のずれを見張りのeventで知らせ、inbox宛てのattentionにする。
+    同じずれは、間に名指したjobが揃った緑が無い限り繰り返し記録しない。
+    直すのは`dagq.toml`か`ci.yml`のtaskで、`doctor`は実行を読まないので出さない。
+  - jobsを読めない（`gh`の非0・時間切れ・形の読めない出力）: その実行も後の実行も処理せず、`ci_checked`を書かずに次の間隔で読み直す。
+    下の`ci_check_failed`の数え方の一時の失敗で、claimも着地も止めない。
+    同じ実行で一時の失敗の上限まで続いたら、緑と読まずに飛ばす実行に数えて先へ進み、そのことをeventに残す。
+  - 飛ばした実行は記録しないので、次に成否の決まった実行まで間隔ごとにjobsを読み直す。
+    docsだけのpushでdocの検査が落ちた赤の項目（jobとstep）は、docsだけの修正では外れず、Rustのjobも流して通る実行で外れる。
 - **testの名前**: JUnitの`testcase`の`classname`（nextestではbinary id。例`dagq::it`）と`name`（例`runtime_claim::claims_in_order`）を空白1つでつないだ`dagq::it runtime_claim::claims_in_order`（nextestの表示と同じ）。`failure`か`error`の子を持てば落ちた、`skipped`の子を持てば流していない、どちらも無ければ通った。同じ名前が複数のファイルにあれば（macOSとLinuxのjob）、どれかで落ちれば落ちた、どれでも落ちずどれかで通れば通った。
 - **testの名前が取れない失敗**: 赤の実行で、JUnitが`missing`か`not_configured`か、JUnitが落ちたtestを1つも名指さないときは、落ちたjobの落ちたstepごとに`job:<job名>/step:<step名>`（落ちたstepの無い落ちたjobは`job:<job名>`）を一覧の項目にする。JUnitのファイルとjobを結びつけられないので、jobごとではなく実行ごとに決める。
 

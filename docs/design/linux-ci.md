@@ -9,6 +9,7 @@ tags:
   - testing
   - ci
 related:
+  - adr-t2034-1
   - design-stress-ci
   - design-slow-tests
   - adr-0076
@@ -32,6 +33,23 @@ related:
 | Failed tests | 前の step が落ちても（`!cancelled()`）走り、job の summary（`$GITHUB_STEP_SUMMARY`）に落ちた test を書く |
 
 runner は `ubuntu-24.04`（x86_64）。`rust-toolchain.toml` の `targets` は `aarch64-apple-darwin` だけを挙げるが、rustup は挙げた target に加えて host（`x86_64-unknown-linux-gnu`）の std を必ず入れるので、Linux の job のために `rust-toolchain.toml` は変えない。rusqlite は `bundled` で、C compiler は runner に入っている。
+
+## docsだけの差分
+
+**予定（未実装）**（[ADR-t2034-1](../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）。
+`ci.yml` は差分を判定する小さな job と、Rust の要らない doc と script の検査を常に流す macOS の job を持ち、`linux` と macOS の Rust の job（fmt・clippy・`cargo llvm-cov nextest`・JUnit・Slow tests・IT test time gate）は判定の job を `needs` に持って、docs だけのとき job の `if` で飛ぶ。
+2 つの Rust の job は今の `name:` を保つ。
+
+- 判定: base（pull request の base か push の `before`）から実行の commit までの `git diff --name-only` が全部 `docs/**` か root の `*.md` なら docs だけ。
+  base が無い・0 だけ・履歴に無い、差分が空、判定の job が落ちたときは全部流す。
+  外部の action は使わない。
+  判定の job と常に流す検査の job は `fetch-depth: 0`（base と release の tag が要る）
+- Rust の job の `if` は `!cancelled()` と判定の output が docs だけでないことで書く（`needs` の既定の `success()` のままだと、判定の job が落ちたとき飛んでしまう）
+- `on.paths-ignore` にしないのは、実行が起きないと必須の status check が pending で残り、doc の検査も流れないため。
+  `if` で飛んだ job は status check では success と報告される（job の API の `conclusion` は `skipped`）
+- 飛ばした実行を緑と読まない側: [CI failure issues](ci-failure-issues.md) の「きっかけ」と [CI watch](supervisor-lifecycle/ci-watch.md) の「実行の扱い」。
+  Rust の job の `name:` を変えるときは `dagq.toml` の `[ci_watch]` で名指した job の名前も同じ変更で直す。
+  Rust の job 以外に job の `if` を足すときは、同じ変更で `ci-failure.yml` も直す（`skipped` の job で閉じないため）
 
 ## 失敗を通さない
 
