@@ -158,3 +158,5 @@ python3 docs/plans/landing-it-selection/analyze.py "$DATA" "$DATA/maps/374132674
 
 - `landing-it-selection/collect.sh`: 着地の event（`--after` でページング）・CI の run（`--limit` に達したら日ごと）・落ちたテスト・job ごとのテストの step の結論・ci-failure の issue・保持中の対応表を DATA に集める（dagq の読み取りのコマンド・git・認証済みの gh）。13 MB の表などの材料は repository に置かない。
 - `landing-it-selection/analyze.py`: 選択の規則・値の式・見逃し・古さの材料を計算し、`landings.csv`・`ci-new-failures.csv`・`staleness.csv`・`summary.txt` を書く（既定ではこの dir）。2026-10-06 の値は CI の artifact の保持（30 日）が切れると同じ表で作り直せないので、CSV を正として残す。
+
+区分: CSV は queue の event・git・CI の履歴・artifact から上のコマンドで作り直せるビューで、DATA に集めたものは消えてよい材料。対応表の artifact の保持が切れた後は同じ表では作り直せないので、上のとおり CSV を正として残す。

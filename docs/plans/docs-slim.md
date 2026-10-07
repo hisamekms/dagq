@@ -165,3 +165,6 @@ request 46 の値との差（件数と種類の違い）と理由（分類の規
 
 週次の見直しは script の JSON の出力を `~/.local/share/dagq-hostmetrics/docs-slim/<since>_<until>.json`（UTC の日付）に、M5 の入力の events の JSON を同じ dir の `events-<since>_<until>-<頁>.json` に保存し、前週と基準値はそこから読む。
 Claude Code は既定で30日より古い会話記録を消すので、基準の期間の M4 は 2026-10-28 より前に流して保存する。
+
+区分: 保存する JSON は入力から `scripts/docs-metrics.py` で作り直せるビュー。
+入力の main の git の履歴は SSOT、`dagq stats --since` と衝突の event の `dagq events --full` の JSON は EventStore から作り直せるビュー、Claude Code の会話記録は材料で、会話記録が消えた期間は作り直せない。

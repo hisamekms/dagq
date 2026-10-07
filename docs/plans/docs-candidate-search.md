@@ -392,3 +392,5 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s docs/plans/docs-candid
 events の CLI 呼出し（空ページを含む）は **1053ページ**、非空 **518ページ**、返却 **46500件**（重複込み）、snapshot の ID 重複除去後 **25689件**。取得記録は [pages.json](docs-candidate-search/out/pages.json)。候補は177 run、177 task、162着地 commit。前後選択は各40件。
 
 検証は13本の unit fixture（concern/route優先、legacy concernの次のstartedでの区切り、secondary docs_drift、unsent/再送/別attempt、未送信/未完了/失敗、durationと時刻の片側欠測、待ちの重なり/開いた待ち、summary欠測の分母、初回 receipt と後の最終 receipt の区別）と、同じ snapshot での再集計の全出力一致、cargo fmt --all --check と cargo clippy --locked --all-targets -- -D warnings。Rust の変更は無く、Rust unit test・stress・e2e は追加実行していない。e2e は必要なら runtime が review 通過後に host で実行する。
+
+区分: `out/` の run・層の CSV、選択 event の ID、ページ取得記録・定義/並行変更の一覧は、queue service の読み取り CLI（EventStore と StateStore の読み取り）と git から上のコマンドで作り直せるビュー。TMPDIR の原文 snapshot は消えてよい材料で、計測の層の台帳と統計はどれも読まない。

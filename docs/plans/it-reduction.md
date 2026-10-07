@@ -173,6 +173,8 @@ python3 docs/plans/it-reduction/measure_goal119.py \
 
 選んだ log は [goal-119/logs.csv](it-reduction/goal-119/logs.csv)（相対 path・mtime・区間・並列数・本数・Summary の秒・test の時間の合計・dagq::it と対象の module の秒・load1 の平均と最大）、除いた log は [goal-119/excluded.csv](it-reduction/goal-119/excluded.csv)。
 
+区分: 2 つの CSV は関門の log・host の load1 の CSV・git の履歴から上のコマンドで作り直せるビュー（queue は開かない）。関門の log と host の CSV は材料で、それらが消えた期間は作り直せない。
+
 ### 区間
 
 | 区間 | log の本数 | mtime（JST） | 含む goal 119 の着地 | 並列数 |

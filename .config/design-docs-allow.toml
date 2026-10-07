@@ -51,7 +51,6 @@ tasks = 72
 
 [[doc]]
 path = "docs/design/measurement.md"
-line = 1148
 tasks = 5
 
 [[doc]]

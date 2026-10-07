@@ -114,3 +114,5 @@ python3 docs/plans/broker-e2e-image-cache/measure.py docs/plans/broker-e2e-image
 ```
 
 出力は `docs/plans/broker-e2e-image-cache/` の `runs.csv`（着地前の e2e の回ごと）・`summary.csv`（期間と部分集合ごとの要約）・`update-gates.csv`（関門の e2e の回ごと）・`update-gates-summary.csv`。この文書の値は 2026-10-07T12:09Z に固定バイナリ `~/.local/bin/dagq` で実行したもの。event は queue に残るが、run dir と `logs/` の e2e の log（材料）が消えると log 由来の列は同じ表では作り直せない。
+
+区分: CSV はビュー。正本は着地前の e2e の `run_e2e_finished` と、自動更新の関門の e2e の `update_e2e_passed`・`stage` が `e2e` の `update_failed` の event（EventStore）で、log は材料。

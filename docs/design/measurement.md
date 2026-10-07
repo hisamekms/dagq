@@ -30,6 +30,7 @@ related:
 # 計測
 
 > **まだ実装が無い（2026-10-04）**: この文書は計測の作り直し（goal 71、request 13）の今の予定で、`src/`にはまだ何も入っていない。今動いている計測は[`stats`](supervisor-lifecycle/stats.md)（着地待ちの内訳・作業の内訳）・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)・[hostの負荷](supervisor-lifecycle/host-metrics.md)が持ち、この文書はそれらを変えない。後続のtaskが実装したら、この注記と各節を今の姿に直す。
+> 「SSOTとビュー」の表に足すものの範囲は[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)が持つ。
 
 決めた理由はADR-t1662-1（計測のモデル）・ADR-t1662-2（ストアの抽象化）・ADR-t1662-3（実行する側と送る口とコマンドの分類）が持つ。ここはeventの欄・列とJSONの形・数値・関数の名前の予定を持つ。
 
@@ -45,17 +46,13 @@ related:
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | 未実装（queue.dbの新しい表の予定）。今はsupervisorが`host/metrics-YYYYMMDD.csv`に書くだけ |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | 未実装（queue.dbの新しい表の予定） |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
-| follow-up所属判断の基準値 | 登録cohortの時間・verdict・reviseとplanner sessionの集計、event ID付きCSV | ビュー | `scripts/follow-up-membership.py`がCLIのeventsとgoalのsnapshotから作る`docs/plans/follow-up-membership-evidence/`。現状の旧データのgoal残件はStateStoreのCLI snapshotをeventで巻き戻す暫定の分析（台帳の読み取り経路には入れない）。入力snapshotと`stats`・`kpi`・暫定tokenの出力はrun dirの`membership-evidence/`に置く採取材料。定義と再計算は[評価](../plans/follow-up-membership.md) |
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`。台帳と統計は読まない（取り込んだ値はEventStoreかSessionStepStoreに入る） |
-| 文書候補探索の比較出力 | `docs/plans/docs-candidate-search/out/` の run・層の CSV、選択 event の ID、ページ取得記録・定義/並行変更の一覧 | ビュー | `docs/plans/docs-candidate-search/` の Python script。既存 acceptance-check fetch を介して queue service の読み取り CLI（events/show/stats 等）と git を読み、初回 review 前の validation receipt を既存 compute と共有して集計。原文 snapshot は一時的な材料として TMPDIR のみ（台帳は読まない） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`。毎日・`workflow_dispatch`・jobかscriptを変えるmainへのpush）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`（`it-coverage-map.json`の1ファイル）、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`（JSONの形・テストの名前・置き場はscriptの冒頭のcomment）。着地の検証は下の「着地の検証の対応表のcache」から読む |
 | 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | `scripts/landing-it.sh`がGitHub Actionsのartifact `it-coverage-map`から取り、新しいrunが無ければ取り直さない。置き場はqueueの外の`${XDG_CACHE_HOME:-$HOME/.cache}/dagq/landing-it/<run id>/`（`it-coverage-map.json`と`fetched.json`）で、消えてもartifactから取り直せる。台帳と統計は読まない |
-| 着地のITの絞り込みの測定 | 着地ごとの絞ったIT（本数・直列の和・見込みの壁時計・全部流したかと理由）・CIで新たに赤くなったテストと範囲の着地と見逃し・前N日の足されたテストと変わったsrcのファイル（古さの材料）のCSV | ビュー | queueのevent・git・CIの履歴・artifactから`docs/plans/landing-it-selection/`のscript（`collect.sh`が読むCLIは`dagq events`・`git`・`gh`、`analyze.py`が集計）で作り直せる。CSVは`docs/plans/landing-it-selection/`に置く。対応表のartifactの保持（30日）が切れると同じ表では作り直せない。定義は[測定](../plans/landing-it-selection.md) |
-| brokerのe2eのimageのキャッシュの測定 | 着地前のe2eと自動更新の関門のe2eの回ごとの表（eventの時刻・run・attempt・secs・lock_wait_secs・timeoutか、logのtest resultのfinished in・流れたbrokerのe2e・最後に終わったtest・60秒超の警告）と期間ごとの要約のCSV | ビュー | 着地前のe2eは本番queueの`run_e2e_finished`のevent（secs・lock_wait_secs・attempt。正本）とrun dirのe2eのlog（`runs/<run>/e2e-<attempt>.log`）、自動更新の関門のe2eは`update_e2e_passed`と`stage`が`e2e`の`update_failed`のevent（secs。正本）とqueueのdirの関門のlog（`logs/update-*.e2e.log`）から、`docs/plans/broker-e2e-image-cache/`のscript（`measure.py`。読むCLIは`dagq events`）で作り直せる。どちらのlog（test resultのfinished in・流れたbrokerのe2e・最後に終わったtest・60秒超の警告）も材料で、消えると同じ表では作り直せない。CSVは`docs/plans/broker-e2e-image-cache/`に置く。定義と再計算の手順は[測定](../plans/broker-e2e-image-cache.md) |
-| goal 119の前後の関門のlogの比較 | 本番のintegrateのcoverageの関門のlogの区間ごとの選んだlog（相対path・mtime・並列数・Summaryとtestの時間の秒・load1）と除いたlogと理由のCSV | ビュー | `docs/plans/it-reduction/measure_goal119.py`がrun dirの関門のlog（材料）・hostのload1のCSV（材料）・gitの履歴から作り直せる（queueは開かない）。CSVは`docs/plans/it-reduction/goal-119/`。関門のlogとhostのCSVが消えた期間は作り直せない。定義は[測定](../plans/it-reduction.md)の「goal 119の前後」 |
-| docsの4指標とM5 | docs/designの総量と伸び・docs/designを変えた着地の割合・docsの衝突とclaimの控え・道具の結果に占めるdocs・docsだけの衝突の種類の週ごとの値と基準値 | ビュー | `scripts/docs-metrics.py`が入力から作り直せる。入力はmainのgitの履歴（SSOT。git）・`dagq stats --since`のJSONと衝突のeventの`dagq events --full`のJSON（ビュー。EventStoreから作り直せる）・Claude Codeの会話記録（材料。`~/.claude/projects`、30日で消える）。出力は[基準値](../plans/docs-slim.md)と週次の見直しが`~/.local/share/dagq-hostmetrics/docs-slim/`に置くJSON。会話記録が消えた期間は作り直せない |
 
-**新しいストアやビューを足すときはこの節に区分を書く。** 新しい表・ファイル・外の記録を計測が読む・書くようにするtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（ADR-t1662-2決定9、[文書の規則](../development/documents.md)の「design」）。
+**計測の層のストアと共有の記録を足すときはこの節に区分を書く。**
+計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。
+`docs/plans/`の1回きりや週次の見直しの測定の出力（scriptとCSV）はこの表に足さず、そのplansの文書が区分（SSOT・ビュー・材料）と作り直せる範囲を持つ。
 
 ## 区間とタグ
 
@@ -219,7 +216,13 @@ program = "cargo"
 sub = ["nextest"]
 ```
 
-`cargo test --locked --test it`は3つ目の規則で`full_test`、`cargo test --locked --test plugin`は`plugin`が`["it"]`に無いので3つ目と4つ目（`--test`が在る）に一致せず5つ目で`test`になる。`positional`が除くのは規則の`sub`が一致した語だけなので、`cargo test runtime`（`runtime`はサブコマンドの位置に平文で残る）は3つ目と4つ目に一致せず`test`になる。台帳は部分ごとの分類も持ち、`integrate`と重なる検証の数（`full_tests`・`llvm_cov_runs`）は部分の分類から数える（`cargo llvm-cov … && cargo test --locked`は両方に数える）。今の`domain::worktime`と分け方が違う形: `--test`に別々の値を並べたもの（`--test e2e --test it`は今はe2e、この規則では`flag_values`の「全ての値」に当たらず`test`）と、`nextest run --test it`の`full_test`（同じ形の規則を足せば表せる）。差は段2の並走比較で説明する。落ちたtestの名前とpathは設定で有効にし、test runnerの読み方のアダプタを選ぶ。雛形を配り、`dagq init`が提案する。
+`cargo test --locked --test it`は3つ目の規則で`full_test`、`cargo test --locked --test plugin`は`plugin`が`["it"]`に無いので3つ目と4つ目（`--test`が在る）に一致せず5つ目で`test`になる。
+`positional`が除くのは規則の`sub`が一致した語だけなので、`cargo test runtime`（`runtime`はサブコマンドの位置に平文で残る）は3つ目と4つ目に一致せず`test`になる。
+台帳は部分ごとの分類も持ち、`integrate`と重なる検証の数（`full_tests`・`llvm_cov_runs`）は部分の分類から数える（`cargo llvm-cov … && cargo test --locked`は両方に数える）。
+今の`domain::worktime`と分け方が違う形: `--test`に別々の値を並べたもの（`--test e2e --test it`は今はe2e、この規則では`flag_values`の「全ての値」に当たらず`test`）と、`nextest run --test it`の`full_test`（同じ形の規則を足せば表せる）。
+差は段2の並走比較で説明する。
+落ちたtestの名前とpathは設定で有効にし、test runnerの読み方のアダプタを選ぶ。
+雛形を配り、`dagq init`が提案する。
 
 ## 段と後続のtask
 

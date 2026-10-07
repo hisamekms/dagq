@@ -111,6 +111,8 @@ python3 scripts/token-usage.py --since 2026-09-22 --until 2026-10-03 --format js
 
 採取は2026-10-05T10:23:09.679Z〜10:23:17.910Z。全event 104,090件、最終cursor 104090。入力SHA-256は`6e00ef92ee71faff839995586664f104d95a339826ef71808588576a93de4386`。保存した材料はqueue dirの`runs/b92c1830-ac22-492c-8f43-1920ccc876c8/membership-evidence/inputs.json`、補助出力は同directoryの`stats.json`・`kpi.json`・`tokens.json`。source task 107のtimelineは`timeline-source-107.json`。これは再生成可能な採取材料で、queueの状態の正本ではない。run資産の掃除で消える場合も、残るeventから再採取し、CSVのevent IDで比較できる。snapshotのハッシュは採取時刻が違えば変わる。
 
+区分: 正本はEventStore（events）、証拠のCSVとJSONはeventsとgoalのsnapshotから作り直せるビュー、run dirの`membership-evidence/`は消えてよい採取材料。旧データのgoal残件をStateStoreのCLI snapshotからeventで巻き戻すのはこの評価だけの暫定の分析で、台帳の読み取り経路には入れない。
+
 ## 導入後の本評価
 
 固定バイナリで所属判断・submit関門・review資料が有効になった時刻をeventsのbuild/handoffと実装の着地から確認し、ADR承認時刻やworkerのcommit時刻だけを切替点にしない。切替後の最初のUTC日から12日間の登録cohortを同じ式で数え、未承認数・欠測を併記する。30日後に(8)を確定する。分類の判断が必要ない元goal無し・abandonedの例外は(1)から除き、件数を別掲する。
