@@ -1190,6 +1190,9 @@ pub trait WorkspaceBackend {
     /// recording backend records with the stop as `wrapper_stopped`; the
     /// adapter does not read it. A backend that does not tell how a stop
     /// ended closes the handle and says `None`, and nothing is recorded.
+    /// It is a method of its own, not a new return of `close`, because
+    /// `close` also closes the inbox's and the supervisor's workspaces, and
+    /// its callers and test backends have no stop to tell.
     fn stop_background(
         &self,
         handle: &str,

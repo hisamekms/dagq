@@ -246,7 +246,11 @@ fn observed_stop(
 /// its own (Codex does: its pgid is the command's pid), which a signal to
 /// the turn's group does not reach; the descendants are listed before the
 /// group is killed, as a descendant whose parent was killed has 1 for a
-/// parent and is no longer found (task 1085).
+/// parent and is no longer found (task 1085). Claude Code starts the shell
+/// of each Bash tool call in a group of its own too, so the turn's group
+/// holds `claude` alone. SIGKILL, not SIGINT: the descendants are killed by
+/// pid, so nothing is left for the provider to tidy, and a provider that
+/// does not answer is not waited for.
 fn stop_turn(processes: &dyn ProcessControl, child: &mut dyn Spawned) -> Result<()> {
     let descendants = processes.descendants(child.id());
     child.kill_group()?;
@@ -1252,8 +1256,13 @@ impl<'a> Turns<'a> {
             {
                 // What the turn left running in its group ends with it,
                 // as the worker is told. What it left outside its group is
-                // no longer found as its descendant (its parent is 1 now)
-                // and is left running (headless-worker.md).
+                // left running, on purpose: its parent is 1 now, so it is
+                // not told from another process by kinship; pids listed
+                // earlier in the turn may belong to another process by now;
+                // and before a turn ends Codex waits for its commands and
+                // Claude stops its background tasks, so only what the agent
+                // detached (`nohup … &`) is left. The recovery job's `stop_processes` stops it by the
+                // run's worktree.
                 let _ = child.kill_group();
                 return Ok((Some(exit), None, tail));
             }

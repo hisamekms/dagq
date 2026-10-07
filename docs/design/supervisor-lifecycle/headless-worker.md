@@ -9,6 +9,10 @@ related:
   - design-supervisor-lifecycle-task-replanning
   - adr-t1594-1
   - adr-t1433-2
+  - adr-t1433-1
+  - adr-t1394-2
+  - adr-t1533-1
+  - adr-0054
   - adr-t1433-3
   - adr-t1340-1
   - adr-t1404-1
@@ -26,166 +30,290 @@ related:
 
 # 非対話のworker
 
-> **goal 92・111**: worker の対話の経路は task 1437 で廃止し、task 1438 で `add` / `edit` の `--interactive` を拒み、workerへの文面から対話の分岐を消した（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。非対話のsession wrapperをbackgroundの形だけにすることは [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md) が決める。workerのsession wrapperは task 1440 からbackgroundだけで動き、runtimeはrunのworkspaceを作らない（下の「workspaceなしのbackgroundのwrapper」）。runtime の planner の対話とworkspaceは task 1441 で撤去した（下の「非対話のruntimeのplanner」）。inbox の促しは task 1442 が実装する予定であり、その節は現在の挙動を残す。
+## 概念
 
-[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)の実装（task 815）。worker の run はすべて、workerの1 turnを1回の非対話の呼び出しにする。動くのはClaude（`claude -p --output-format stream-json --verbose`）とCodex（`codex exec --json`と`codex exec resume --json`、task 816。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。providerの違いは`AgentProvider`の`turn_command`（呼び出しのargv）と`turn_reader`（出力を読む`TurnReader`）と`turn_permission_mode`に閉じ込め、supervisorとsession wrapperの流れはproviderを知らない。
+### 目的
+
+workerのrunを、1 turnを1回の非対話のagentの呼び出しにする経路だけで動かす（[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)）。
+人は打ち込まず、supervisorは画面を読まない。
+対話の経路は廃止し（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、session wrapperはworkspaceを持たないbackgroundのprocessとしてだけ動く（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+runtimeのplannerも同じturnの駆動で動く（下の「非対話のruntimeのplanner」）。
+
+### 全体の流れ
+
+```text
+supervisor（provision / start_resume / reopen）
+  → prepare_turns: limits.json を書き、前のsessionの exit と取られていない依頼を捨てる
+  → launch_background: session wrapper（--background）を切り離して起動、handle を記録
+session wrapper（Turns）
+  → 最初のturn: prompt.txt で session を始める
+  → turnごと: provider の CLI を起動し、出力を TurnReader で読み、止める条件を見張る
+  → turn_finished を記録し、idle marker を書き、次の依頼を待つ（heartbeat は続く）
+supervisor
+  → idle marker・receipt・ask を読み、次の文（answer・revise・resume・催促）を turns/ の依頼に書く
+  → 終わりは turns/exit、wrapper が残れば handle で止める（wrapper_stopped を記録）
+```
+
+### 責務と境界
+
+- providerの違いは`AgentProvider`の`turn_command`・`turn_reader`・`turn_permission_mode`に閉じ、supervisorとwrapperの流れはproviderを知らない。
+  動くのはClaudeとCodex（Codexの固有の点は[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。
+- supervisorは依頼と終了の依頼を書くだけで、turnを起動しない。
+  turnを起動し、記録するのはwrapperだけ。
+  wrapperが死んで残したturnと、turnの外に切り離されたprocessは、supervisorの停止と復旧jobが止める。
+- wrapperは誰のturnかを`TurnOwner`（runかplanner）で持ち、違いはそこに閉じる。
+- e2eはworkerのturnで流さず、要るrunにはreviewのpassの後にruntimeがhostで流す（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[Review](review.md#着地の前のe2e)）。
+  落ちれば同じsessionの次のturnとしてresumeを依頼する。
+- 人への質問は`dagq ask`だけで、turnの設定はagentの質問の道具を拒む。
+- runtimeはrunのためにcmuxのworkspaceもgroupも作らない（inboxは対象外、[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
+
+### 不変条件
+
+- 1つのsessionの依頼は1つのwrapperだけが取り、1つずつturnにする（順は下の「run dirの`turns/`」）。
+- 依頼は一時fileからrenameで置き、その後で`turn_requested`を記録する。
+  記録の失敗は依頼を取り消さない。
+- turnの終わりの印はidle markerで、Claudeの`Stop` hookは使わない。
+  wrapperは`turn_finished`の記録の後に書き、wrapperを失ったturnのmarkerだけはsupervisorが書く（下の「待ちの最中に失ったsessionの開き直し」）。
+- wrapperは識別の組（pidと起動時刻）で名指し、起動時刻が合わないpidにsignalを送らない。
+- run dirはworkerが書けるので、runtimeはrun dirの中のlinkを辿らず、通常のfileだけを上限付きで読む。
+- 黙っただけのwrapperはkillしない（[wrapperが黙ったsession](silent-wrapper.md)）。
+
+## 入口の地図
+
+| 知りたいこと | コードの入口 |
+| --- | --- |
+| wrapperのturnの駆動・止める判断・記録 | `src/application/headless_session.rs`の`Turns` |
+| supervisorから見たsession・依頼の書き込み | `src/application/supervise/headless.rs`（`request_turn`・`prepare_turns`・`send_to_planner`） |
+| `turns/`のfileの名前・依頼・idle marker・turnのcost | `src/domain/turn.rs`（`TurnRequest`・`idle_marker`・`turn_own_cost`・`request_to_take`・`request_read`） |
+| Claudeの呼び出しと出力の読み | `ClaudeCode::turn_command`、`src/infrastructure/claude_turns.rs` |
+| Codexの呼び出しと出力の読み | `src/infrastructure/codex_turns.rs` |
+| turnの設定（拒否の規則） | `src/infrastructure/adapters.rs`の`headless_worker_settings`・`headless_required_settings`・`HEADLESS_DENIED_TOOLS` |
+| run dirのfileの境界 | `src/infrastructure/agent_dir.rs`（`in_run_dir`）、`LocalRunFiles` |
+| receiptの無いturnの扱い | `src/application/supervise/stall.rs`の`StallWatch::observe_turn` |
+| sessionの終わりとrunの状態 | `domain::run::session_end_status` |
+| 待ちの最中の開き直し | `src/application/supervise/reopen.rs` |
+| backgroundの起動・停止・生死 | `src/infrastructure/background.rs`の`BackgroundWrappers`、`src/domain/background_wrapper.rs`、`src/application/supervise/background.rs` |
+| 停止の記録・残ったturnの停止 | `application::recording`の`RecordingBackend::stop_background`・`stopping_left_turns` |
+| logを読むCLI | `src/application/session_log.rs` |
+| wrapperの入口と登録 | `compose::wrapper_entry`、`application::session`の`register`・`WrapperStart` |
+| runtimeのplannerのturn | `src/application/supervise/planner_turns.rs`、`application::planner::launch_planner` |
 
 ## 経路の全体
 
-- **e2eはworkerのturnで流さない**（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)）。ClaudeでもCodexでも、e2eが要るrunにはreviewのpassの後にruntimeがhostで流し（[Review](review.md#着地の前のe2e)）、落ちれば同じsessionの次のturnとしてresumeの依頼（`ResumeKind::E2e`）を送る。Codexのworkspace-writeのsandboxで走らないe2eを名前で除外する規則と、その除外を書くreceiptの`e2e`の書式（task 1206）は無い。
-- **session wrapperがturnを動かす**（決定3）。runのsession wrapper（`session`、[session wrapper](session-wrapper.md)。supervisorから切り離したbackgroundのprocess）は、runの`worker_mode`が`headless`なら`src/application/headless_session.rs`の`Turns`でturnを1つずつ起動する。最初のturnは`prompt.txt`をpromptにし、sessionを始める（Claudeはsessionのidをrunのidにする`--session-id <run id>`、Codexは出力の`thread.started`でthreadのidを名乗り、wrapperがそれを`turn_session_identified`としてrunに記録する）。後のturnはsupervisorの依頼を1つずつ取り、同じsessionをresumeする（Claudeは`--resume <run id>`、Codexは`codex exec resume <記録したthreadのid>`）。依頼を待つ間もheartbeatを続け、agentのprocessは無い。
-- **supervisorは打ち込まずに依頼を書く**。すべての worker の依頼・answer・revise・resume は `deliver::submit` が `request_turn` を通して `turns/` に書き、wrapper が次の turn として届ける。終了は終了依頼ファイルへ書く。run の画面の読み取り、入力欄・送信後の確認、Enter の送り直し、ダイアログ応答は撤去した。
-- **turnの終わりがidleの印**。wrapperはturnのprocessが終わり`turn_finished`を記録した後に、runのidle marker（`idle.json`）を`Stop`の形で書く（`hook_event_name: Stop`、background taskは無し、`dagq_turn`に`turn`・`outcome`・`failure`・`permission_denials`）。Claudeの`Stop` hookは使わない（turnのsettingsに`Stop` hookは無い。brokerの道具を渡したworkerのrunだけ、組み込みの道具を数える`PreToolUse`のhookが付く。[Broker](../broker.md#組み込みの道具の数)）。これで最初のsession・reviewのrevise・`needs_session`のresume・待ち（[waiting](waiting.md)）の既存の見張りが、idle markerとreceiptとaskをそのまま読む。
-- **終了**: 終了の依頼を見たwrapperは、turnを走らせていれば止め（`outcome: stopped`）、exit code 0で終わる。reviewのpassの後の終了、resumeの試行の終わり、wrapperが黙ったときの終了、`stalled`のaskへの`stop`の答え（下の「turnの後の扱い」）は、どれもこの依頼になる。wrapperが終わったことは識別の組で確かめ、残っていれば止める（決定5のbackgroundの読み替え。下の「workspaceなしのbackgroundのwrapper」の「停止」）。
+- 最初のturnは`prompt.txt`をpromptにしてsessionを始め、後のturnはsupervisorの依頼を1つずつ取って同じsessionをresumeする。
+  Claudeはsessionの名前をrunのidにし、Codexは出力で名乗ったthreadのidを`turn_session_identified`として記録して、それをresumeする。
+- 依頼を待つ間、agentのprocessは無く、wrapperはheartbeatを続ける。
+- 答え・revise・resume・催促のどれも`deliver::submit`が`request_turn`で`turns/`に書く。
+  画面の読み取り、入力欄の確認、Enterの送り直し、ダイアログの応答は無い。
+- idle markerは`Stop`の形で書くので、最初のsession・revise・resume・[待ち](waiting.md)の見張りはidle markerとreceiptとaskをそのまま読む。
+  brokerの道具を渡したrunのturnだけ、組み込みの道具を数える`PreToolUse`のhookが付く（[Broker](../broker.md#組み込みの道具の数)）。
+- 終了はどれも終了の依頼になる（reviewのpassの後、resumeの終わり、黙ったwrapper、`stalled`のaskへの`stop`）。
+  wrapperは走っているturnを止めてexit code 0で終わり、残っていれば下の「停止」で止める。
 
 ## run dirの`turns/`
 
-`src/domain/turn.rs`が名前を決める。supervisorとwrapperはrun dirと`turns/`をlinkを辿らずに開いた記述子でfileを扱う（task 1184）。通常のfileだけを上限付きで読み、書き込みは新規の一時fileからrenameし、turnの出力は新しいinodeの記述子へ渡す。link・FIFOの指す先を読み書きせず、FIFOのopenで待たない。idle markerとreceiptも同じ境界で扱う（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)の「run dirのfile」）。
+- 名前は`src/domain/turn.rs`が決める。
+  supervisorが書くのは依頼・終了の依頼・`limits.json`、wrapperが書くのは取った印・turnの出力・Codexのturnのコマンドのfile。
+  runtimeのplannerには`planner request`のCLIも依頼を書く。
+- wrapperは取られていない依頼を`seq`の順に1つずつ取り、renameで取った印を付ける。
+- 依頼の番号は取られたものと捨てたものを含めて数え、使い回さない。
+- 前のsessionが取らずに終わった依頼は、新しいsessionの前に`prepare_turns`が捨てる。
+  新しいsessionはsupervisorが今書く依頼から始まる。
+- `limits.json`は[Stall thresholds](stall-thresholds.md)の値で、wrapperがturnのたびに読む。
+- runtimeのplannerのwrapperは、壁（ログイン切れ・利用上限・起動の失敗）で終わったturnの後は`provider retry`を先に取り、待っていた依頼をその後に取る（`request_to_take`）。
+  workerのwrapperは順番を変えない。
+- turnの設定（`claude-headless-settings.json`）は`turn_command`がturnのたびに書く。
+  `[broker] mode = "required"`のrunは別の組の設定になる（[Broker](../broker.md#required)）。
+  plannerのturnも同じ設定を使い、拒否はactorのroleのもの。
 
-| file | 書く側 | 中身 |
-| --- | --- | --- |
-| `request-NNNNNN.json` | supervisor | `TurnRequest`（`seq`・`what`・`prompt`）。一時fileからrenameで置く。`seq`は`turns/`の依頼（取られたものを含む）の最大の次 |
-| `request-NNNNNN.taken.json` | wrapper | 取った依頼（renameで印を付ける）。wrapperは取られていない依頼を`seq`の順に1つずつ取る。非対話のruntimeのplannerのwrapperは、前のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わった後は`what`が`provider retry`の依頼を先に取り、それより前の依頼はその後に取る（`request_to_take`、task 1596。workerのwrapperは変えない） |
-| `request-NNNNNN.dropped` | supervisor | 前のsessionが取らずに終わった依頼。新しいsessionの前に捨てる（下の`prepare_turns`）。番号は取られた依頼と同じく数え、使い回さない |
-| `exit` | supervisor | 終了の依頼 |
-| `limits.json` | supervisor | turnの上限（`silence_secs`・`limit_secs`。testが秒未満で入れたときは`silence_ms`・`limit_ms`も持ち、秒の代わりに使う。[Stall thresholds](stall-thresholds.md)）。`[stall]`から |
-| `turn-NNNNNN.jsonl` / `.err` | agent | turnのstdout（providerのJSONL）とstderr |
-| `turn-NNNNNN.commands.jsonl` | wrapper | runのCodexのturnのコマンドとtool（`TurnCommand`。1行1つ、始まりと終わりを読んだ時刻つき）。`turn_finished`の前に一時fileからrenameで置く。区間の作業の内訳の元（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)の「Codexの作業の内訳」、task 1354） |
+run dirのI/Oの約束と落とし穴:
 
-supervisorは最初のsessionのwrapperを起動する前（`provision`）とresumeのwrapperを起動する前（`start_resume`）に`prepare_turns`を行い、`limits.json`を書き、前のsessionの終了の依頼と取られていない依頼を捨てる。turnの設定は`claude-headless-settings.json`（`permissions.deny`だけ。`SIGNAL_BY_NAME_DENIED`、`HEADLESS_DENIED_TOOLS`（`AskUserQuestion`）、actorのroleの拒否の順。それと`autoMode`。brokerの道具を渡したworkerのrunだけ、組み込みの道具を数える`PreToolUse`のhookも足す。[Broker](../broker.md#組み込みの道具の数)）で、`turn_command`がturnのたびに書く（`[broker] mode = "required"`のrunのturnは`headless_required_settings`で、組み込みのファイルの道具の拒否と`permissions.allow`を足す。[Broker](../broker.md#required)）。`AskUserQuestion`を拒むのは保険で、非対話のsessionの質問は誰にも届かずturnが止まるため。Claude Code 2.1.286の`-p`はこのtoolを出さないが、後の版で出てきても拒否の規則でmodelから外れ、呼ばれれば拒否として`turn_finished`の`denied_tools`に残る。人への質問は`dagq ask`だけ（goal 85の決定）。plannerのturnも同じ設定を使う。
-
-task 1184でrun dirのI/Oを洗い出し、次の呼び出しを`agent_dir`の記述子に対する操作へ寄せた。通常のfileが読めない・書けない場合のrunの失敗の扱いは既存の経路を使う（不正な依頼ならwrapperはerrorで終了し、復旧へ渡る）。
-
-| 呼び出し | 対象と扱い |
-| --- | --- |
-| `supervise/headless.rs`・`headless_session.rs` → `LocalRunFiles` | 依頼・終了依頼・limits・prompt・idle markerと一時file。終了依頼は通常のfileだけを認める |
-| supervisorのsession・resume・revise・validation・review → `LocalRunFiles` | receipt、idle marker、設定・review material。全文は64MiBまで。非通常のidle markerはwarnして印なしとする |
-| `LocalSpawner`・`adapters::run_shell_to_log`・`diff_to_file` | turnのstdout/stderr・検証log・差分。新しいfileの記述子を子processに渡す |
-| `background::BackgroundWrappers::launch` | backgroundのwrapperの`session.log`（resume・開き直しの試行ごとのlog）。`agent_dir::create_file`で新しいinodeを作り、その記述子をwrapperのstdout/stderrに渡す（[下](#workspaceなしのbackgroundのwrapper)） |
-| `session_log::print`（`run log`）→ `LocalRunFiles` | backgroundのwrapperのlogを、全体と`--follow`の追記は`read_range`で1MiBずつ（1回の読みは64MiBまで）、`--lines`は`size`と`read_tail`で末尾から読む。linkを辿らず通常のfileだけを読む |
-| `adapters::write_settings`・`turn_command` | Claudeの設定（Codexからの切り替え後も）。安全な一時fileからrename（runのworkspaceの作成結果のfileはtask 1440で無くなった） |
-| `runtime_store::Refusals`・`sessions::work_breakdown` | 診断logへの追加。通常のfileを上限付きで読み、新しいinodeで置き換える。読めなければlogだけを欠く |
-| `headless_session.rs`の`write_commands` → `LocalRunFiles` | runのCodexのturnのコマンドのfile（`turns/turn-NNNNNN.commands.jsonl`、task 1354）。一時fileに書いてrenameで置く。書けなければwarnのlogだけで、turnは続く |
-| `sessions::codex_breakdown` → `agent_dir::read_file`・`read_bounded` | 区間を閉じるときのturnのコマンドのfile。linkを辿らず通常のfileだけを、4 MiB（`TURN_COMMANDS_BYTES`）まで読む（書き込みのトランザクションの中でも読むため、64MiBより小さくした）。無ければ`turn_commands_missing`、linkや上限超え・形の違いは`turn_commands_unparsable`で、区間の`work`をnullにして理由を書く |
-| `broker_token`・`LocalRunFiles`のtree操作 | runのbroker設定と後始末、終わったrunの`broker-direct-tools.log`の読み取り（`QueueRunTokens::usage`。`agent_dir::read_file`と`read_bounded`で通常のfileだけを上限付きで読み、link・FIFOはerrorにしてsweepはwarnだけ。task 839）。dirの列挙・子dirのopen・削除・大きさの集計も記述子に対して行い、linkを辿らない |
-
-queueのdirなどworkerが書けない場所と、workerが書くrun dir（直下の`turns/`・`broker/`など）を区別する。pathにqueueの`runs/`の下の部分（run dirとその中）があるときだけ（`agent_dir::in_run_dir`）、`LocalRunFiles`と`agent_dir`の`create_file`・`append`は記述子の操作を使う: ディレクトリの初回openが指定したdirとその親の2段をlinkとして拒み、最後の要素のfileもlinkを辿らず（`O_NOFOLLOW`と`AT_SYMLINK_NOFOLLOW`）、通常のfileだけを64MiBまで読み、書きはlinkを置き換える。それ以外のpath（queueのdirとDB、installしたバイナリやbrokerのclient、macOSの`/tmp`、linkにしたdata dir、scratchpad）はhostのもので、`std::fs`と同じくlinkを辿り、上限も当てない。`in_run_dir`はpathだけで決め、最初の`runs`という名前の要素の下を run dir とみなすので、queueより上に`runs`というdirがあるhostのpath（`/Users/x/runs/project/...`）もrun dirの扱い（linkを拒むだけで、辿る範囲は広がらない）になる。任意の深さのpathを安全にするAPIではない。`LocalRunFiles::copy`の元（runtimeのバイナリ）はruntimeのもので、linkを辿って読み、64MiBの上限を当てない。Claudeのdebug logのhookの失敗は`RunFiles::read_tail`で末尾だけを読むので、64MiBを超えるlogでも見つかる。treeの走査は開いたdirから`openat`で子へ進む。
+- run dirの中は記述子に対する操作で扱い、linkとFIFOを辿らず、FIFOのopenで待たない。
+  書き込みは新しい一時fileからrenameし、turnの出力は新しいinodeの記述子へ渡す。
+- run dirかどうかはpathだけで決める（`agent_dir::in_run_dir`）。
+  hostのpath（queueのdirとDB、installしたバイナリ、`/tmp`、linkにしたdata dir）は`std::fs`と同じくlinkを辿る。
+  任意の深さのpathを安全にするAPIではない。
+- 読めない・書けないrun dirのfileは既存の失敗の経路に乗る（不正な依頼ならwrapperはerrorで終わり、復旧へ渡る）。
+  診断のlogとturnのコマンドのfileが書けないときはwarnだけで、turnは続く。
+- Codexのturnのコマンドのfileは区間の作業の内訳の元で、読めないときは区間の`work`をnullにして理由を書く（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)）。
 
 ## turnの記録
 
-- `turn_requested`（supervisor）: 送った文として数える（引き継ぎ・adoptの後の`StallWatch`もこのeventを最後の入力に数えるので、走っているturnを促さない）。`seq`・`what`（`answer of ask N`・`revise request`・`resolution request`・`nudge`・`recovery instruction`・`continue`など、対話の`submit`の`what`と同じ）・`workspace_id`。
-- `turn_started`（wrapper）: `turn`（runの通し番号）・`resume`（sessionを続けるか）・`request`（依頼の`seq`、最初のturnは`null`）・`what`・`pid`・`session_id`・`silence_secs`・`limit_secs`。wrapperはそのsessionの最初のturnのprocessを`agent`として登録する（`agent_started`、runが`running`になる）。後のturn（answer・revise・resume・催促・providerの切り替えの後）は1つずつ別のprocessなので、wrapperは起動のたびに`run_processes`の同じ`agent`の行の`pid`をそのturnのprocessに差し替え、`heartbeat_at`を今にする（`RunCoordination::register_turn_agent`。task 862）。`run_processes`の主キーは`(run_id, role)`でagentの行は1つなので、行を足さずに差し替え、migrationは要らない。`agent_started`とrunの状態遷移は最初のturnだけで、`turn_started`の`pid`は今までどおりturnごとに載る。agentのpidを読む箇所（`idle_process`の見張りの`own_of`と`without_session_helpers`、`stop_processes`の対象など）はその1行を読むので、走っているturnのprocessとその子のhelper（MCP serverなど）をsessionのものとして扱い、終わったturnのpidを見ない。turnの間（次の依頼を待つ間）は、行は終わったturnのpidのまま残る。
-- `turn_session_identified`（wrapper）: 出力でsessionを名乗るprovider（Codex）のturnが名乗ったとき、`turn`・`session_id`・`provider`。後のturnは最後に記録したものをresumeする。
-- `turn_finished`（wrapper）: `turn`・`outcome`・`failure`・`stopped`（wrapperが止めた理由の文）・`exit_code`・`message`・`session_id`・`session_created`・`num_turns`・`duration_ms`・`cost_usd`（そのturnの分。Claudeの`total_cost_usd`はsessionの累計なので、下の読み手の項のとおりwrapperがturnの分にする）・`session_cost_usd`（costがsessionの累計のprovider（Claude）だけ、そのturnの終わりの累計。task 1199より前の記録には無い）・`usage`（providerの出力のまま）・`provider`・`tokens`（そのturnのruntimeの種類のトークン数`{input, output, cache_read, cache_creation, messages}`と、あれば`cost_usd`。読めなければnull）・`tokens_total`（usageがsessionの累計のprovider（Codex）だけ、その累計。他はnull。ADR-t813-2の決定7、[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)）・`permission_denials`（件数）・`denied_tools`。runのsessionの区間（`route: headless`）の稼働時間とトークン数はこのturnから取る。
-
-`outcome`は`succeeded`・`failed`・`silent`・`timed_out`・`launch_mismatch`・`stopped`、`failure`は`authentication`・`usage_limit`・`model`・`sandbox`（Codexのsandboxの拒否で失敗したturn）・`launch`（agentを起動できない、または出力に1行も出さずに非0で終わった。起動できなかったturnも`turn_started`（`pid: null`）と`turn_finished`を持つ）・`other`。`turn_started`には`provider`も載る。`session_created`は、providerのmodelが一度でも答えたturnで`true`になる。Codexはsessionを名乗ったか（`turn_session_identified`があるか）だけで決め、あればそのthreadをresumeし、無ければtaskのpromptから始め直す。以下はClaudeの決め方。次のturnは、それまでにsessionが作られたか、providerがそのsessionを持っている（`AgentProvider::turn_session_exists`。Claudeは`$CLAUDE_CONFIG_DIR`か`~/.claude`の`projects/`にtranscriptがある。答える前に失敗したturnが残しうる。Claude Codeは使われている`--session-id`を拒む）ならresumeし、どちらでもなければ`--session-id`でtaskのpromptから始め直す（依頼の文はtaskのpromptの後に付ける）。
-
-wrapperはturnの要約（turnの開始、agentの文、tool、turnの結果）を`[dagq]`の行でrun dirの`session.log`に書き、人は`dagq run log`で読む（下の「出力」）。人は打ち込まない（決定4）。
+- eventは`turn_requested`（supervisor）・`turn_started`・`turn_session_identified`・`turn_finished`（wrapper）。
+  欄の意味は`EventKind`と書き手（`headless_session.rs`）のそばにある。
+- `turn_requested`は送った文として数えるので、引き継ぎやadoptの後の見張りは走っているturnを促さない。
+- wrapperはsessionの最初のturnのprocessをrunの`agent`として登録し、後のturnは同じ行のpidを差し替える（`register_turn_agent`）。
+  runの状態遷移は最初のturnだけで、turnの間は行が終わったturnのpidのまま残る。
+- runのsessionの区間の稼働時間とトークン数は`turn_finished`から取る（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)）。
+- Claudeの`total_cost_usd`はsessionの累計なので、wrapperは前の累計を引いてturnの分にする（`domain::turn::turn_own_cost`）。
+  `result`の前に止められたturnの分は次のresumeのturnに入り、過去の記録は補正しない。
+- 次のturnをresumeするか始め直すかは、sessionが作られたか、providerがsessionを持っているか（`turn_session_exists`）で決める。
+  Claude Codeは使われている名前のsessionを拒むので、答える前に失敗したturnが残したsessionもresumeする。
+  Codexは名乗ったthreadがあるかだけで決める。
+- wrapperはturnの要約を`[dagq]`の行でrunのlogに書き、人は`dagq run log`で読む（下の「出力」）。
 
 ## Claudeの呼び出しと出力（`ClaudeCode`・`ClaudeTurnReader`）
 
-- 呼び出し: `claude -p --output-format stream-json --verbose (--session-id|--resume) <run id> --permission-mode auto --debug-file <runのlog> --add-dir <run dir> --settings <run dir>/claude-headless-settings.json [--model M --effort E] -- <prompt>`、cwdはworktree、stdinは閉じ、process groupを分ける（`CommandSpec::new_session`）。`[broker] mode = "required"`のrun（`TurnTarget::broker_required`）のturnは、`--permission-mode dontAsk`にし、`--settings`の後に`--mcp-config <run dir>/broker/mcp.json --strict-mcp-config --setting-sources ""`を足す（[Broker](../broker.md#required)）。
-- 読み手（`src/infrastructure/claude_turns.rs`）: `system/init`から`session_id`・model・`permissionMode`、`assistant`の文とtool、`result`の`is_error`・`num_turns`・`duration_ms`・`total_cost_usd`・`usage`・`permission_denials`を読む。`usage`・`num_turns`・`duration_ms`はそのturnの分だが、`total_cost_usd`と`modelUsage`はsessionの累計（resumeした前のturnを含む。run 2d1f5abdの2 turn目の`total_cost_usd`は1 turn目の4.7212を含む6.0195で、`modelUsage`の`outputTokens`も55270から73069へ足されていた。task 1199）。読み手は`TurnResult::cost_cumulative`を立て、wrapperはturnの`cost_usd`と`tokens`の`cost_usd`を、今の累計から同じ`session_id`の前の`turn_finished`の累計（`session_cost_usd`。それが無いtask 1199より前の記録では当時累計だった`cost_usd`。値がnullのturnは飛ばしてさらに前を見る）を引いた分（小数6桁に丸める）にし、累計を`session_cost_usd`に書く（`domain::turn::turn_own_cost`）。引くのは`turn_started`の`resume`が真のturnだけで、sessionを始めたturn・`session_id`の無いturn・前の累計が見つからないturnは累計をそのままturnの分にする。前の累計より今の累計が小さい（差が負。同じidで別のsessionが始まったなど前提が崩れた）ときも、記録を捨てずに今の累計をそのままturnの分にする。providerの切り替えの後にClaudeへ戻ったturnは、切り替えの回数から決まる新しい名前のsessionを始める（`resume`が偽）ので、累計をそのままturnの分にする。`result`の前に止められたturnの分は記録されず、次のresumeしたturnの分に入る（runのturnの合計は最後の累計に等しいまま。Codexのトークン数と同じ）。Codexのturnはcostを持たないので変えない。過去の記録は補正しない（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)）。失敗の分類は、`system/api_retry`の401か`authentication_failed`、`assistant.error`の`authentication_failed`が`authentication`、`rate_limit_event`の`status: rejected`（`isUsingOverage`か`overageInUse`が真なら overage で賄っているので止まりとみなさない。Claude Code 2.1.285 の CLI 自身の条件に合わせた）・`assistant.error`の`rate_limit` / `billing_error`・`api_error_status` 429が`usage_limit`、404かmodelが見つからない旨の文が`model`、ほかは`other`。resultが無いか非0の終了は失敗。Claudeの出力はtoolの実行中も30秒ごとにheartbeatがあるので、出力の途絶えを止まりとみなせる（`heartbeats`）。
+- 呼び出しの組み立ては`ClaudeCode::turn_command`、出力の形と読みは`src/infrastructure/claude_turns.rs`のmodule docが持つ。
+- turnのprocessは端末を持たず、自分のprocess groupで走る（`CommandSpec::new_session`）。
+- 失敗の分類（`authentication`・`usage_limit`・`model`・`other`）は読み手が出力から決める。
+  overageで賄っている利用上限は止まりとみなさない（`usage_limit_hit`）。
+- Claudeはtoolの実行中も出力にheartbeatがあるので、出力の途絶えを止まりとみなせる。
+  Codexは無いので途絶えでは止めない。
 
 ## wrapperがturnを止めるとき
 
-wrapperはturnの出力を`turn_*.jsonl`から読みながら（wait interval、既定1秒ごと）、次のどれかでturnを止める。止めるときは、先にturnのprocessの子孫をpidで集め（`ProcessControl::descendants`）、turnのprocess groupにSIGKILLを送り（`Spawned::kill_group`）、集めた子孫にも1つずつpidでSIGKILLを送る（`headless_session.rs`の`stop_turn`、task 1085）。Codexは実行するコマンドをcodexと別のprocess group（pgidがコマンド自身のpid）で走らせるので、groupへのsignalだけではコマンド（`cargo test`など）が親1のまま残る（task 1061の測定、[codex-headless-jobs-spike](../../plans/codex-headless-jobs-spike.md)の4.）。Claude Code（2.1.285）もBash toolの1回ごとにshellを別のprocess group（pgidがそのshellのpid）で起動し、turnのgroupには`claude`自身しか居ないので、groupへのSIGKILLだけではtoolのshellとその子が親1のまま残る（task 864の測定、[manual-smoke](../manual-smoke.md#非対話の-claude-の前提の確認)の1.）。子孫はgroupを止める前に集める（止めた後は親が1になって辿れない）。signalはSIGINTでなくSIGKILLにする: 子孫をpidで直接止めるのでproviderに片付けを任せる必要がなく、応答しないproviderを待たない。Claudeの非対話のturnにも同じ経路を使う。groupが無い（`ESRCH`）か、turnのprocessが終わって刈り取られる前で、groupにzombieしか居ないためにmacOSが拒んだ（`EPERM`）ときは、止めるものが無いとして失敗にしない（turnが壁を言った直後に自分で終わっていると、wrapperが止める時点でzombieになっている。task 1397）。
-
-| 理由 | `outcome` | 条件 |
-| --- | --- | --- |
-| 出力の途絶え | `silent` | heartbeatのあるprovider（Claude）で、`[stall].turn_silence_secs`（既定900秒）のあいだ出力の行が無い |
-| 時間の上限 | `timed_out` | turnが`[stall].turn_limit_secs`（既定14400秒）を超えた |
-| 頼んだ設定で始まらない | `launch_mismatch` | 最初の`system/init`の`permissionMode`が`auto`（`[broker] mode = "required"`のrunは`dontAsk`。[Broker](../broker.md#required)）でない（haikuは黙って`default`になる。決定8） |
-| providerが使えない | `failed`（`authentication` / `usage_limit`） | 読み手が認証切れか利用上限を言った（401の再試行を待たない） |
-| 終了の依頼 | `stopped` | `turns/exit`がある |
-
-閾値は[Stall thresholds](stall-thresholds.md)の`turn_silence_secs`と`turn_limit_secs`で、supervisorが`limits.json`に書いてwrapperがturnのたびに読む。
-
-turnが自分で終わったときも、wrapperはそのprocess groupに残ったものを止める。ただしClaudeもCodexもtoolのコマンドをturnと別のgroupで走らせるので、`nohup … &`のように切り離したものはturnのgroupに居らず、これでは止まらない（task 864の測定）。groupの外に残った子孫（turnのprocessが別のgroupで起動し、turnの終わりより長く生きるもの）は止めない。理由: (a) turnのprocessが終わった時点でその子は親が1になっていて、親子関係ではturnのものと見分けられない。(b) turnの途中で集めたpidを後で止めると、その間に終わったpidを別のprocessが使っていれば無関係のprocessを止めうる（見張りのたびに`ps`を打つ負荷もかかる）。(c) Codexはturnを終える前に実行したコマンドの終わりを待つので、自分で終わったturnがgroupの外に残すのは、agentがわざと切り離したものに限られる（Claudeも終わる前に`run_in_background`のtaskを止める。task 864の測定）。残ったものはrunのworktreeで動くprocessとして、復旧jobの`stop_processes`がpidで止められる（`run_processes`はworktreeで動くprocessを含む）。この振る舞いはtest（`runtime_headless::a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group`）が確かめる。
-
-wrapper自身がturnの途中で終わるとき（エラー）は、上と同じく子孫とturnのgroupを止めてから終わる。hangup・terminate・interruptのsignal（wrapperの停止のSIGTERM、`stop_processes`）で終わるときは、`stop_groups_on_exit_signals`（`src/infrastructure/process.rs`。実のwrapperの入口`compose::session`だけが入れる）が、このprocessが`new_session`で起動してまだ止めていないgroupだけを止める。signal handlerの中では子孫を集める`ps`を呼べず（async-signal-safeでない）、wrapperは子孫のpidを見張りのたびに記録してもいない（上の(b)）ので、groupの外のコマンドはhandlerでは止めない。`stop_processes`は自分でrunのprocess（wrapperの子孫とworktreeで動くもの）をpidで止めるのでそのコマンドも止まり、wrapperの停止で残ったものは上と同じくworktreeで動くprocessとして`stop_processes`が止められる。turnは端末を持たないので、止めなければwrapperより長く生きる。別のgroupのコマンドを復旧jobがpidで止める経路は、`runtime_headless::recovery_stops_a_headless_turns_descendant_outside_its_group`（turnとwrapperの子孫のまま）と`runtime_headless::recovery_stops_a_headless_turns_orphan_outside_its_group_by_worktree`（親が1になりworktreeのcwdだけで所属を判じる）が、実際のprocessの停止と`auto_repaired`・`recovery_finished.applied`の`stop_processes`を確かめる。このfixtureはwrapperをtestのprocessの中で動かし、`run_processes`はsupervisorを兼ねるwrapperを子孫をたどる起点にしないので、どちらの場合もコマンドはworktreeのcwdで選ばれる。cwdがworktreeの外のwrapperの子孫を選ぶことはunit test（`domain::recovery::tests::only_the_runs_own_processes_may_be_stopped`）が確かめる。これらはsignal handler自体を起動するtestではない。
+- 止める条件は、出力の途絶え（heartbeatのあるproviderだけ）、時間の上限、頼んだpermission modeで始まらない、providerが使えない、終了の依頼の5つ。
+  出力から読む条件は`observed_stop`、時間と終了の依頼は`stop_decision`が決める。
+  閾値は[Stall thresholds](stall-thresholds.md)。
+- 頼んだmodeで始まらないのを止めるのは、modelによっては黙って別のmodeになるため（ADR-t813-1決定8）。
+- 止め方は`headless_session.rs`の`stop_turn`が持つ。
+  ClaudeもCodexもtoolのコマンドを別のprocess groupで走らせるので、groupへのsignalだけでは届かず、子孫をgroupを止める前にpidで集めて止める。
+- turnが自分で終わったときは、turnのgroupに残ったものだけを止め、groupの外に切り離されたものは止めない。
+  理由はその判断のそばのコメントにあり、残ったものは復旧jobの`stop_processes`がworktreeで判じて止める。
+- wrapperがsignal（停止のSIGTERMなど）で終わるときは`stop_groups_on_exit_signals`がturnのgroupだけを止める。
+  signal handlerは子孫を集められないので、groupの外のコマンドは`stop_processes`に任せる。
 
 ## turnの後の扱い
 
-- **Codexのworkerのask**: turnのagentは（Claudeのturnと同じく）queue serviceのsocketとtokenのfileを持ち、queue DBのpathは持たないので、sandboxの中の`dagq ask`はクライアントモードでserviceに送られ、その場で開く（ADR-t1233-5決定4・5、[Queue service](../queue-service.md#クライアントモード)）。開いたaskは下のaskと同じに扱う。
-- **成功**（receiptかaskが残ったturnを含む）: wrapperは次の依頼を待つ。supervisorはidle markerを読み、receiptがあれば今のvalidatingへ（[receipt and session exit](receipt-and-session-exit.md)）、`worker_question`が開いていれば答えを待つ（runはslotを空けて待ちになる。ADR-0071の読み替え、決定6）。答えは`answer to ask N: ...`を依頼にして送る（[workerの質問への回答の送信](worker-question-answer.md)）。
-- **receiptもaskも無いturnの終わり**（`StallWatch::observe_turn`）: 廃止した対話のworkerの`idle_without_receipt_secs`は待たず（閾値0）、決まった文の促し（`stall_nudged`）を依頼で送る。促しは1 phaseに`HEADLESS_NUDGES`（2）回まで（廃止した対話のworkerは1回。ADR-0047決定30の読み替え）。前の促しの`stall_resolved`は`nudged_again`になる。使い切った後のturnも同じなら復旧jobの`stalled`（理由`turn_without_receipt`）にする。receiptが無いことは、idle markerを読んだ後にもう一度確かめる（`StallWatch::observe`）。passの初めにreceiptを探した後で、turnがreceiptを書いて終わると、そのturnは促されず次のpassでreceiptが読まれる。促しのturnが同じ受け入れの作業をもう一度すると、最初のreceiptのvalidationの最中にcommitが進み（`receipt commit … is not the head`・`worktree is not clean`）、runが失敗するため（task 1328。testは`runtime_headless::a_receipt_written_as_its_turn_ends_is_not_nudged`）。
-- **permissionの拒否が続いて進まない**: receiptもaskも無く終わったturnの`permission_denials`が`PERMISSION_DENIAL_LIMIT`（3）件以上なら、促さずにすぐ復旧jobの`stalled`（理由`permission_denied`）にする。
-- **providerが使えない**（`failure`が`authentication` / `usage_limit` / `launch`）: wrapperはsessionを終えずに次の依頼を待ち、supervisorは促しも復旧jobもせず、失敗したturnの呼び出しをもう一方のproviderの新しいsessionへの依頼にする（ADR-t813-2。[provider-lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）。切り替えられない（もう一方も使えない、切り替えの上限）ときと、`[provider_fallback] workers = false`で切り替えを止めたとき（`provider_waiting`の`blocked`がfallbackのoffを言う。[provider-lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」）はrunを失敗にせず待たせ（`provider_waiting`）、自分のproviderの控えが解ければ同じsessionへもう一度送る（`provider retry`）。Claudeの認証と利用上限、および両方使えないときは、`authentication`ならqueueの認証のholdに、`usage_limit`なら利用上限のhold（`reason_category: cost`、subject `usage_limit`）に`raise_wall`で加わる（`auth_required` / `usage_limited`を記録する。task 438）。人が`done`と答えると、supervisorが「続けて」（`continue`）を次のturnの依頼で送る（[queue hold](queue-hold.md)）。reviseとresumeの段でも同じ（`SessionWatch::provider_wall`）。
-- **turnの失敗と、wrapperが止めたturn**（`other`・`model`の失敗、`silent`・`timed_out`・`launch_mismatch`）: wrapperはsessionを終える（exit code 1）。supervisorはそのturnを促さず、wrapperの終了を待つ。wrapperの終了を見たsupervisorは、その時点でrunのreceiptの有無を読んでから決める（`domain::run::session_end_status`。receiptとwrapperの終了をどの順で見ても同じ結果になる。[ADR-t1594-1](../../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)）。turnがreceiptを書いた後に失敗した（「commit; receipt; 非0の終了」）runは`failed`にせずvalidatingに進み、receiptを今のvalidationにかける（commitがbranchのHEAD・worktreeがclean・evidenceとscopeの検査はそのまま）。turnの失敗は`turn_finished`（`outcome: failed`・`exit_code`）に残り、`supervision_finished`はwrapperの`exit_code`と`receipt: true`を持ち失敗の理由のcodeを付けず、`last_error`は書かない。validationがreceiptを拒めば今のとおり`failed`（または`needs_session`）になる。idle markerを先に見たときは上の「成功」と同じくsessionを開いたままvalidatingに進む（`session_live: true`）。receiptの無いまま終わったrunは`failed`（`last_error`は`session exited with code 1`）になり、今の[triage](triage.md)の復旧job（alert `failed`）にかかる（runが`worker_question`か`stalled`のaskの答えを待つ最中にwrapperが終わったときは、下の「待ちの最中に失ったsessionの開き直し」が先に開き直す）。復旧jobの材料（`ended_run_material`）には、最後の5つの`turn_finished`（`outcome`と`stopped`）が載る。testは、判定の組が`domain::run`の`a_receipt_takes_a_session_that_exited_in_failure_to_validation`、記録が`domain::run::recorded`の`a_session_end_records_its_exit`、wrapperの終了だけを見たsupervisorの経路が`runtime_headless::a_receipt_written_before_its_turn_failed_goes_to_validation`。
-- **答えずに閉じた`worker_question`**（task 1372）: 答えがworkerに届かないまま閉じた`worker_question`（`ask_delivered`の無い`ask_closed`か、runtimeが答えを書いて閉じた`ask_answered`の`runtime_closed`）があり、sessionがそのcloseより後にturnを終えていない（idle markerがcloseのミリ秒より後でない）なら、`stall_nudged`の促しか復旧jobの代わりに、閉じたことを伝える文（`prompt::closed_question_notice`）を次のturnの依頼として1回だけ送る。中身と記録は[receiptの無いidleの検知](idle-without-receipt.md)の「答えずに閉じた`worker_question`」。
+- 成功（receiptかaskが残った）: wrapperは次の依頼を待つ。
+  supervisorはreceiptがあれば[validating](receipt-and-session-exit.md)へ、`worker_question`が開いていれば答えを待つ（slotを空け、ADR-0071の読み替え）。
+  答えは次のturnの依頼になる（[workerの質問への回答の送信](worker-question-answer.md)）。
+- Codexのworkerの`dagq ask`はsandboxの中からqueue serviceに送られ、その場で開く（[Queue service](../queue-service.md#クライアントモード)）。
+- receiptもaskも無いturnの終わり: 待たずに決まった文で促し、上限を使い切れば復旧jobの`stalled`にする（`StallWatch::observe_turn`、ADR-0047決定30の読み替え）。
+  拒否が続いたturnは促さずに`stalled`にする。
+  落とし穴: receiptが無いことはidle markerを読んだ後にもう一度確かめる。
+  turnの終わり際に書かれたreceiptを促すと、同じ作業がやり直されてvalidationの最中にcommitが進み、runが失敗するため。
+- providerが使えない（`authentication`・`usage_limit`・`launch`）: wrapperはsessionを終えず、supervisorは促さずにもう一方のproviderへ切り替える（[ADR-t813-2](../../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)、[provider-lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）。
+  切り替えられないときはrunを失敗にせず待たせ、控えが解ければ同じsessionへ`provider retry`を送る。
+  ログイン切れと利用上限はqueueの控えに加わり、人の`done`で`continue`を送る（[queue hold](queue-hold.md)）。
+  reviseとresumeの段でも同じ。
+- turnの失敗とwrapperが止めたturn: wrapperはexit code 1で終わり、supervisorは促さずに終わりを待つ。
+  runの状態はreceiptの有無で決まり、receiptとwrapperの終わりをどの順で見ても同じになる（[ADR-t1594-1](../../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)、`session_end_status`）。
+  receiptを書いた後に失敗したturnのrunはvalidatingへ進み、無ければ`failed`で[triage](triage.md)の復旧jobにかかる。
+- 答えずに閉じた`worker_question`: 促しの代わりに閉じたことを伝える文を1回だけ送る（[receiptの無いidleの検知](idle-without-receipt.md)）。
 
 ## 待ちの最中に失ったsessionの開き直し
 
-task 1372（goal 86の暫定の対応）。2026-09-30T08:42にtask 681・695の非対話のCodexのwrapperのheartbeatが同時に切れた（orphaned）。非対話のrunは待ちのあいだagentのprocessを持たず、sessionのid・transcript・worktree・開いたaskはwrapperが死んでも残るので、[待ち](waiting.md)の最中にwrapperを失ったrunはruntimeが開き直して待ちを続ける（ADR-0047の第1層、`auto_repaired`に記録）。use caseは`src/application/supervise/reopen.rs`。
+非対話のrunは待ちのあいだagentのprocessを持たず、session・worktree・開いたaskはwrapperが死んでも残る。
+そこで[待ち](waiting.md)の最中にwrapperを失ったrunは、runtimeが開き直して待ちを続ける（ADR-0047の第1層、`auto_repaired`に記録）。
+use caseは`src/application/supervise/reopen.rs`で、条件・上限・数え方はそのmodule docと定数が持つ。
 
-- **待ちの最中にsessionを失ったときの今までの扱い**（変更前の実装を確かめた結果）: 待ちの見張り（[waiting](waiting.md)の見張りの2）はwrapperが終了を記録したか、heartbeatが切れてpidも死んでいれば、`answer_prompt`・`stuck_exit`・（`Session`なら）`stalled`のaskを閉じて`session_exited`で待ちを終える。`worker_question`のaskは閉じない（開いたまま残る）。slotに戻った`SessionWatch`は、終了を記録したwrapperならreceiptの無いまま`finish_supervision`でvalidatingに渡して`failed`（`receipt_missing`）にし、復旧job（alert `failed`）にかける。終了を記録せずに死んだwrapperなら`wrapper_pulse`がerrorを返し、runは`runtime_error`で手放される（`recover`の後に`interrupted`として復旧jobへ）。どちらも開いた`worker_question`は残り、後で答えても`runtime_delivers`は`false`でinboxの手の配送になり、復旧jobの`resume`で開いた解消依頼のsession（`ResumeWatch`の`live`）が答えを配送しうる。
-- **条件**: 待ちの見張りがwrapperを失ったと見たとき（終了を記録した、heartbeatが切れてpidも死んだ、または前の試みでprocessの行を消した後に新しいwrapperがまだ居ない）、runが`headless`で、待ちが最初のsession（`Session`のphase。revise・resumeの待ちは対象外）にあり、receiptが無く、閉じていない`worker_question`か`stalled`のaskがある。wrapperの終わり方（exit code）は問わない。最後のturnのprocess（`agent`の行のpid）が生きていれば（turnの途中でwrapperを失った。2026-09-30の2本は最初のturnの途中だった）、そのturnの横に2つ目のsessionを開かず、待ちを続けてturnが終わるのを待ち、終わってから開き直す。待つのはturnの上限（`[stall]`の`turn_limit_secs`。wrapperが生きていれば止めていた時間）までで、それを過ぎても生きていれば開き直さずに今の経路（復旧jobが`stop_processes`で止められる）に渡す。
-- **開き直し**: 失ったsessionのbackgroundのwrapperがまだ動いていれば（`run_session_open`。cmuxに聞かずprocessの識別で見る）止めて`workspace_closed`（`by: supervisor`、`reopen`。`workspace_id`はhandle）を記録する。ADR-t1433-3より前にworkspaceで開いたsessionのIDは開いていないものとして扱い、閉じない（人が自分のterminalで閉じる）。止められない（生死が分からない・停止が失敗する）ときは、生きているかもしれないwrapperの横に新しいwrapperを起動せず、`session_reopen_failed`（`cause: close_failed`）を記録して次の試みを待つ。閉じたら`clear_lost_session`でrunのprocessの行を消す（runは`running`のまま）。最後の`turn_started`に`turn_finished`が無ければ（wrapperがturnの終わりを見ずに失われた）、supervisorがそのturnのidle marker（`outcome: succeeded`）を書き、開き直したsessionが次のturnの間にある（`between_turns`）とみなされて答えを次のturnで受けられるようにし、`auto_repaired`の`conditions`の`lost_turn`にそのturnの番号を残す。消すのは見て失ったwrapperの行（かwrapperの行が無いとき）だけで、終了を記録していない別のpidのwrapperがその間に登録していれば拒み、その試みは`open_failed`になる。続けてruntimeの写しを取り直して`turns/`の残った依頼と終了の依頼を片付け（`prepare_turns`）、resumeと同じ`session ... --resume --background`のwrapperを、workerのenvと`[run.env]`をprocessのenvにしてbackgroundで起動する（logは`session-reopen-<attempt>.log`）。wrapperは依頼を待ち、最初の依頼で同じsessionをresumeする（`register_resume_wrapper`は`needs_session`に加えて`running`のrunも受ける）。起動したwrapperのhandleは`session_reopened`がrunのsessionにし（`workspace_closed_at`を空に戻す）、`workspace_created`（`reopened`: 試みの番号）と`auto_repaired`（`layer: runtime`、`repair: headless_session_reopened`、`conditions`: `worker_mode`・`waiting`・`receipt`・`open_asks`・`lost_turn`・`attempt`・`attempts`、`detail`: `workspace_id`・`previous_workspace`・`cause`（`exited` / `died` / `not_registered`）・`exit_code`）を1つのtransactionで記録する。待ちは終えない（`run_waiting_ended`を書かない）ので、答えが来ればslotに戻って今のとおり次のturnで配送する。
-- **上限と間隔**: 試みはsessionの最後の`turn_started`から数え（`reopen::attempts_in_a_row`。`auto_repaired`の`headless_session_reopened`と、`cause`が`registration_timeout`でない`session_reopen_failed`（`open_failed` / `close_failed`）が1回ずつ）、続けて`REOPEN_ATTEMPTS`（3）回まで。起動したwrapperが`registration_timeout`のうちに登録しなければ`session_reopen_failed`（`cause: registration_timeout`）を記録し、次の試みはそのwrapperを先に止める（同じrunの依頼を2つのwrapperが取らない）。起動そのものが続けて失敗しうるので、次の試みは前の試みから`WorkspaceBackend::reopen_interval`（60秒）を空ける（最初の試みはすぐ）。試みの状態（起動したwrapperの登録待ち、前の試みの時刻、失ったwrapperのexit code）はsupervisorのprocessの中（`Supervisor::reopens`、runごと）だけにあり、slotに戻ったrunのwrapperが生きているのを見たら消す。引き継ぎやadoptの後に、wrapperの行が無く自分の状態も無いrunを見たprocessは、前のprocessの試みのwrapperがまだ起動中かもしれないので、`registration_timeout`を待ってから次の試みに進む。登録の待ち・turnの上限・試みの間隔は注入した`Clock`の単調時計（`monotonic`）で測り、時刻を値で受ける`reopen::awaits_registration`・`turn_outlived`・`attempt_waits`が決める（ちょうど上限で過ぎたとみなす。task 1557）。
-- **上限を超えたとき**: 今の経路に渡す。wrapperの行が残っていれば（開き直したwrapperが登録した後にまた失われた）今のとおり`failed`か`runtime_error`になる。上限を超えたとき、登録しなかった試みのwrapperが残っていれば止める（後から登録しないように）。試みが行を消した後なら、待ちを`session_exited`で終え、slotの`SessionWatch`が失ったwrapperのexit code（死んでいたら1）で`finish_lost_session`を呼び、終了したsessionと同じ後始末（画面の保存だけは無い）の後に、終了したsessionと同じ判定（ADR-t1594-1）でreceiptが無ければrunを`failed`にして復旧job（alert `failed`）にかけ、receiptがあればvalidatingに進める。
-- **test**: `tests/it/runtime_headless_reopen.rs`の`a_session_lost_during_its_wait_is_opened_again_and_takes_the_answer`（wrapperが待ちの最中に終わり、開き直したsessionが答えをresumeで受けて着地する。`failed`にも復旧jobにもならない）と`a_session_that_cannot_be_opened_again_goes_to_its_recovery_job`（wrapperが登録しない試みが3回続くと`failed`になり復旧jobにかかる）、`a_session_lost_in_the_middle_of_a_turn_is_opened_again_once_the_turn_ended`（turnが生きているあいだは開かずに待ち、終わってから開き直して`lost_turn`のidle markerを書き、答えを配送して着地する）、`a_turn_outliving_its_lost_wrapper_past_its_limit_goes_to_recovery`（turnが上限を過ぎても生きていれば開かずに復旧jobへ）、`the_queue_forgets_only_the_lost_wrapper_and_takes_the_reopened_one`（queueの`clear_lost_session`・`register_resume_wrapper`・`session_reopened`・`finish_lost_session`）、`reopen`のunit test（試みの数え方）、`domain::run`の`only_a_running_run_reopens_its_session_in_a_new_workspace`（名前は当時のまま。新しいsessionはbackgroundのhandle）。
+- 対象は最初のsessionの待ちで、receiptが無く、閉じていない`worker_question`か`stalled`のaskがあるrunだけ。
+  revise・resumeの待ちは対象外。
+- 最後のturnのprocessが生きていれば、その横に2つ目のsessionを開かず、turnの上限まで終わるのを待つ。
+- 失ったwrapperが動いていれば先に止め、止められなければ新しいwrapperを起動しない（同じ依頼を2つのwrapperが取らない）。
+- wrapperがturnの終わりを見ずに失われたら、supervisorがそのturnのidle markerを書き、開き直したsessionが答えを次のturnで受けられるようにする。
+- 試みの状態はsupervisorのprocessの中だけにある。
+  引き継ぎの後に状態の無いrunを見たprocessは、前の試みのwrapperが起動中かもしれないので、登録の待ちの時間を待ってから次へ進む。
+- 時間の判断は注入した`Clock`の単調時計で測り、時刻を値で受ける関数が決める。
+- 上限を超えたら今の経路に渡し、終了したsessionと同じ判定（ADR-t1594-1）でrunを進める。
 
 ## 復旧jobのalertと操作（決定9）
 
-worker の生きている run の復旧は `stalled`（`turn_without_receipt` / `permission_denied`）と、CPU 時間が伸びないプロセスの `idle_process` を扱う。非対話の `idle_process` の検知・復旧と共通の test は残す（ask 394 の回答）。操作は `send_instruction`・`stop_processes`・`resume`（最初の session だけ）・`wait` で、適用時に次の依頼が無く turn が終わっていることや run 所有のプロセスであることを確認する。終わった run の `failed` の復旧は従来どおり。
-
-画面由来の `prompt_waiting`・`stuck_exit` と、対話の背景表示の `long_background` は撤去した（task 1437、[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。`answer_known_dialog`・`close_and_proceed` の操作も適用しない。過去の alert・verdict・event は履歴として読める。新しい ask の選択肢は `wait` / `stop` と job の操作から `intervene` を除いたものになる。
-
-過去の `intervene` の ask に答えた記録は捨てない。非対話の worker に人が打鍵できないため、その答えは ask を開き直し、答えの選択を求める。新しい答えの指示は次の turn として届ける。
-
+- workerの生きているrunの復旧が扱うのは`stalled`と`idle_process`。
+  操作は`send_instruction`・`stop_processes`・`resume`（最初のsessionだけ）・`wait`で、適用の時に次の依頼が無くturnが終わっていること、runのprocessであることを確かめる。
+- 画面に由来するalertと、画面に打つ操作は無い。
+  過去のalert・verdict・eventは履歴として読める。
+- 人が打鍵できないので、過去の`intervene`の答えはaskを開き直して答えを求める（`stall.rs`の`INTERVENE_OPTION`）。
 
 ## workerへの文面
 
-workerに送るprompt・依頼・答え・復旧jobの指示は、どのrunでも非対話の文面で（`interactive`と記録されたrunにも同じ。対話の分岐はtask 1438で消した）、`/exit`・画面への打ち込み・backgroundの処理に頼る指示を持たず、「このturnで終え、receiptかaskでturnを終える」「答えは次のturnのpromptで届く」「AGENTS.mdを読む」「`pkill` / `killall`を使わない」を書く。Codexはsubagent reviewをせず、taskの要る`subagent_review`はCodexのrunには要らない。どれも[Prompt](prompt.md#経路とproviderごとの文面)にまとめる（task 817）。
+workerへのprompt・依頼・答え・復旧jobの指示は、どのrunでも非対話の文面で、`/exit`・画面への打ち込み・backgroundの処理に頼らない。
+Codexはsubagent reviewをしない。
+文面は[Prompt](prompt.md#経路とproviderごとの文面)が持つ。
 
 ## 対話と記録されたtaskのclaimとresume
 
-worker の対話の経路は [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md) で廃止した（task 1437。runtime の planner の対話は task 1441 で廃止した）。新しく `interactive` を選ぶ経路は無く、`add` / `edit` の `--interactive` は、対話の経路を廃止したことと代わり（`dagq run log RUN --follow` で turn を読み、ask に `answer` で答える）を示す理由で拒む（task 1438。[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)）。下は task 1438 より前に `interactive` で記録された task と run の扱い。
-
-task の `worker_mode: interactive` は保存されたまま読めるが、claim は実際の run の `worker_mode` を `headless` にし、resume は過去の interactive run の mode を同じトランザクションで `headless` に更新する。どちらも worker は非対話の turn の経路で始まる。
-
-変換時だけ `worker_mode_converted` を記録する。欄は `phase`（`claim` / `resume`）、`from: interactive`、`to: headless`、`reason: interactive_worker_removed`。claim の `run_claimed` と resume が返す run は実際の `headless` を持つ。既に headless の run は変換の event を増やさない。provider の切り替えは従来の `provider_switched` で別に記録する。
-
-`run screen` は過去の interactive run を含むすべての run に拒否を返し（task 1440、ADR-t1433-3 決定4）、画面を読まない。run の turn は `dagq run log` で読む（下の「workspaceなしのbackgroundのwrapper」の「画面と片付けのCLIの拒否」）。
-
+- 新しく対話を選ぶ経路は無く、`add` / `edit`の`--interactive`は代わり（`dagq run log RUN --follow`と`answer`）を示して拒む（[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)）。
+- `interactive`と記録されたtaskとrunは読めるが、claimとresumeが実際のrunを`headless`にし、変えたときだけ`worker_mode_converted`を記録する。
+- `run screen`はどのrunにも拒否を返す（下の「画面と片付けのCLIの拒否」）。
 
 ## workspaceなしのbackgroundのwrapper
 
-[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)（goal 89）と[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)（goal 92、task 1440）。workerのsession wrapperは、cmuxのworkspaceでなく、supervisorから切り離したprocessとしてだけ動く。turnの駆動（`turns/`の依頼・idle marker・`Turns`）は上のとおり。runtimeはrunのためにworkspaceもcmuxのworkspace groupも作らない。inbox・廃止前に人が開いたplanner（`dagq plan`はADR-t1394-1で拒む）は対象外。非対話のruntimeのplannerはtask 1441まで`[headless] wrapper`で置き場所を選ぶ（下の[非対話のruntimeのplanner](#非対話のruntimeのplanner)）。
+workerのsession wrapperは、supervisorから切り離したprocessとしてだけ動く（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+inboxと、廃止の前に人が開いたplannerは対象外。
 
-- **設定**（ADR-t1433-3決定2）: `dagq.toml`の`[headless] wrapper = "workspace" | "background"`（`domain::background_wrapper::HeadlessWrapper`）は今までどおり読んで検査し（誤りは同じ行番号付きのエラー）、workerには効かない。最初のsessionの`provision`・`needs_session`のresumeの`start_resume`・[開き直し](#待ちの最中に失ったsessionの開き直し)は、値に関わらずwrapperをbackgroundで起動する。書かれた値が`"workspace"`なら、supervisorはprocessごとに1回だけ`[headless] wrapper = "workspace" of dagq.toml is ignored for workers: a worker's session wrapper always starts in the background (ADR-t1433-3)`を警告する（`Supervisor::warn_ignored_wrapper_setting`。書かれたままの値を`Verifier::headless_wrapper_setting` / `load_headless_wrapper_setting`で読む）。欄を拒まないのは、走っている本番のsupervisorと固定バイナリの入れ替えの順で`dagq.toml`が読めなくならないため。runtimeのplannerはtask 1441がそのworkspaceの経路を消すまで、この欄（`load_headless_wrapper`、既定`workspace`）に従う。この repositoryの`dagq.toml`は`background`のまま（task 1408）で、欄を消すのは古い固定バイナリが欄の無い`dagq.toml`を読めることを確かめた後のtask。ライブラリの呼び手やtestがworkspaceを選ぶ口（以前の`SuperviseOptions::worker_wrapper`と`tests/it/runtime_support`の`in_workspaces`）は無い。reviseは生きているsessionへの依頼なので関係しない。
-- **起動**: supervisorはworkspaceもcmuxのgroupも作らず（runのためのgroupの作成は無い）、`ActorProgram::RunSession`（`run`・`wrapper`・`run_env`・`log`）で、wrapperのcommand（`session`、resumeと開き直しは`--resume`、最後に必ず`--background`。`background::wrapper_command`）を`WorkspaceBackend::launch_background`に渡す。logのpathは`Supervisor::session_log`が決める（`session.log`、`session-resume-<n>.log`、`session-reopen-<n>.log`）。runのworkspaceを作る`WorkspaceBackend`の操作は無い（inboxなどの`create_named`は残る）。cmuxのadapterは`infrastructure::background::BackgroundWrappers`で、`setsid`した`/bin/sh`にcommandを`exec … </dev/null >&2 &`で起動させてそのpid（`$!`）を受け取る。logはworkerが書けるrun dirの中なので、shellにpathを開かせない: supervisorが`agent_dir::create_file`で固定したrun dirの記述子から新しいinodeとして作り（その名前に置かれたlinkは辿らずに置き換え、FIFOは開かず、linkにしたrun dirは拒む）、開いた記述子をshellのstderrとして渡し、wrapperのstdoutとstderrはその複製になる（shellのstdoutはpidだけを運ぶ）。作れなければ起動の失敗になる。shはすぐ終わるのでwrapperの親は1になり、supervisorはwaitしない。cwdはrunのworktree。wrapperは`--background`を見ると自分で`setsid`し、自分のsessionとprocess groupを持つ。起動の直後に`ps -o lstart=`で起動時刻を読み、読めなければ（すぐ終わった）起動の失敗としてprovisioningの失敗になる（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)決定9の読み替え）。起動の失敗は、envの`DAGQ_RUN_ID`が名指すrunに`backend_call_failed`（op `launch_background`）として記録され（`RecordingBackend`）、最初のsessionならrunは`starting`のままsupervisorはclaimを止め、resumeなら`resume_finished`の`outcome: error`になる。launchd modeのjobのprocess groupとin-cmux modeのsupervisorのworkspace（hangup）からは、別のsessionとgroupなので切り離される。
-- **handleと記録**: 起動したwrapperの識別は`background:<pid>:<起動時刻>`（`BackgroundHandle`。起動時刻は`lstart`の空白を`_`にしたもの）で、runはこれをworkspaceのIDの代わりに記録する（最初のsessionは`workspace_created`、resumeは`resume_attempt`付きの`workspace_created`、開き直しは`session_reopened`）。その後でsupervisorは`wrapper_launched`（`pid`・`start`・`workspace_id`（handle）・`log`）を記録し、記録できなければwrapperを止めてエラーにする。workspaceのIDを読む処理（adopt・引き継ぎ・後始末・掃除・`turn_requested`の`workspace_id`など）はhandleをそのまま使い、`WorkspaceBackend`の呼び出しをcmuxのadapterがhandleで振り分ける: `exists`はそのpidが記録した起動時刻のまま居るか、`close`は下の停止、`set_color`・`set_status`・`pin`は何もしない、`capture`・`send_*`は拒む（非対話のrunは画面を読まず、入力は`turns/`の依頼）。`task_runs.workspace_id`は新しいrunでは常にhandleで、runの経路はsessionが開いているかを`run_session_open`（handleなら`exists`。cmuxに聞かない。ADR-t1433-3より前にworkspaceで開いたsessionのIDは開いていないとする）で、止めるのを`stop_run_session`（下の停止）で行う。終わったrunの掃除（`sweep_ended_sessions`、[Run workspaces](run-workspaces.md)）はcmuxの一覧を取らず、handleだけをprocessで判じ、過去のworkspaceのIDは飛ばす。`stats`の`running_alerts`の`workspace_mismatch`は、runが最後に開いたsession（最後の`workspace_created`。無ければrunの`workspace_id`）がhandleなら、cmuxのlistでなくwrapperの生死（handleのpidが記録した起動時刻のまま居るか）で判定し、終わりを記録せずに居なくなったwrapperを`run_without_wrapper`として出す（[Stats](stats.md)）。ADR-t1433-3より前にworkspaceで始めたrunも、resumeと開き直しはbackgroundになる（逆は無い）。sessionの終わりの`terminal-final.txt`などの画面の保存はしない。
-- **wrapperの入口と登録**: wrapperの入口（`compose::session`が呼ぶ`wrapper_entry`）は、`--background`なら端末（stdinとstdoutがterminal）を確かめず、`CMUX_WORKSPACE_ID`から自分のworkspaceを取らない（拒まれても閉じるworkspaceは無く、`wrapper_refused`はlogに残して終わる）。`--background`でない入口（端末が要り、無ければ「interactive Claude wrapper requires a terminal」で拒む。workspaceのIDの記録を待つ）はコードに残るが、runtimeはworkerのwrapperをそれで起動しない。通るのは`dagq session`を`--background`なしで打ったとき（端末が無ければ拒む）と、task 1441までのruntimeのplannerのwrapperだけで、workerのwrapperをそれで動かすtestとcomposeの入口（`session_with_provider(s)`・`session_with_sccache`・`resume_session_with_provider`・`session_in_workspace`）は消した（入口そのものを消すのは後続のtask）。登録（`application::session`の`register`と`WrapperStart`）は、runの最後の`wrapper_launched`の`pid`が自分のpidで、その`start`がsystemの示す自分の起動時刻と一致するまで（`launched_as`。同じpidで別の起動時刻の記録は、死んだwrapperのpidを継いだ別のprocessのものなので自分のものとみなさない）45秒まで待ってから`register_wrapper` / `register_resume_wrapper`を打つ（handleはそれより先に記録されている）。非対話のplannerのwrapper（`planner-session --headless`）は`--background`のとき`wrapper_entry`で同じく端末を確かめずに`setsid`する。plannerの登録は`register_planner_wrapper`で、workspaceのIDも`wrapper_launched`も待たない（下の[非対話のruntimeのplanner](#非対話のruntimeのplanner)）。
-- **env**: 以前workspaceの`--env`で渡していた`DAGQ_ROLE`などのworkerのactorの変数と`[run.env]`（[Run environment](run-environment.md)）を、wrapperのprocessのenvで渡す。supervisorのenvから`CMUX_*`（supervisorを起動したworkspaceを指す）と`DAGQ_*`を外してから足す。agentのenvの組み立て（queue serviceのsocketとtoken、`DAGQ_QUEUE`を外す。[session wrapper](session-wrapper.md)）は変えない。
-- **識別と生死**: 生きているとは、handleのpidのprocessが記録した起動時刻のまま居ること。起動時刻が合わないpidは別のprocessとみなし、signalを送らない。supervisorがwrapperの生死をpidで見ていた判定（adoptの`wrapper_alive`と`resume_adoptable`、`resume_candidates`の続いているsessionの判定、`wrapper_dead`、`wrapper_pulse`、reviseの`died without recording its exit`）は、`Supervisor::wrapper_lives`で、runが最後に開いたsession（最後の`workspace_created`から。登録されたwrapperとagentはそのsessionのもの）にそのpidの`wrapper_launched`があれば起動時刻も比べる（`launch_of`、`wrapper_is_recorded`）。`wrapper_launched`の無いwrapper（ADR-t1433-3より前のworkspaceのsessionのもの、testのprocessの中のもの）はpidだけで見る。heartbeatは今の[wrapperが黙ったsession](silent-wrapper.md)の判定に使い、黙っただけではkillしない。adopt（[superviseのadopt](supervise.md#supervise)）・execの引き継ぎ（[Handoff](handoff.md)）・開き直しは記録したhandleで今までどおり行う（supervisorが止まってもwrapperとturnは動き続け、次のsupervisorがleaseとheartbeatで引き継ぐ）。
-- **停止**: runのsessionはhandleの`stop_background(handle, route)`（下の停止の記録）でwrapperを止める（ADR-t1404-1決定3。cmuxに聞かない）。経路は2通り: (1) reviewの後と着地の後始末の`close_session`（`close_workspace`）、resumeの終わりの`finish_resume`と`give_up_resume`は`stop_run_session`を通り、ADR-t1433-3より前にworkspaceで開いたsessionのIDは閉じず、人に任せたことをsupervisor logに書いて止めたものとして扱う（`close_session`は`workspace_closed`を、`finish_resume`は`resume_finished`の`workspace_closed: true`を記録し、`give_up_resume`は何も記録しない）。(2) triageと着地の後の`close_open_workspaces`、掃除の`sweep_ended_sessions`、次のresumeの前の`close_left_resume_workspaces`、開き直しの前の`close_lost_workspace`は、先に`run_session_open`で動いているかを見て、動いているhandleだけを止める（`stop_session`。handleは`stop_background`、workspaceのIDは`close`）。ADR-t1433-3より前のworkspaceのIDは動いていないとみなして黙って飛ばし、何も記録しない（どちらの経路でも人が自分のterminalで閉じる）。`stalled`の`stop`は終了の依頼（`turns/exit`）を書くだけで、その後の止め方は上の経路、復旧jobの`stop_processes`はprocessをpidで止める。runtimeはまず今までどおり`turns/exit`の終了の依頼で終わらせ、closeでは`BackgroundWrappers::stop`がwrapperの子孫（turnと、turnが別のgroupで起動したもの）を起動時刻と一緒に控えてから、wrapperのpidにSIGTERMを送る（wrapperは`stop_groups_on_exit_signals`で自分が起動したturnのgroupを止めて終わる）。3秒のうちに終わらなければwrapperのprocess groupとpidにSIGKILLを送り、最後に控えた子孫のうち起動時刻の変わらないものにgroupごとSIGKILLを送る。すでに終わったwrapperには何もしない。wrapperが先に死んだ（SIGKILLされたなど）ときに残ったturnは、wrapperの子孫として見つからないので、記録から止める: wrapperは`turn_started`にturnの`pid`と起動時刻（`start`）を記録し、supervisorのbackend（`RecordingBackend::stopping_left_turns`）はhandleのsessionの最後の`turn_started`（`last_turn_of`。sessionはその`wrapper_launched`から次のsessionの`workspace_created`まで。workspaceのsessionは`wrapper_launched`を記録しないので、その`workspace_created`で区切る）がその起動時刻のまま居れば、sessionを`exists`とみなし（`run_session_open`が真になり、後始末と掃除が停止に進む）、`close`ではwrapperの停止の後にそのturnの子孫とprocess groupにSIGKILLを送る（`left_turn`、`stop_left_turn`）。handleからrunを引く`run_in_workspace`は、runの今のworkspaceに無ければ`workspace_created`の記録（resumeのworkspaceとhandle）からも探す。経路ごとの記録は`workspace_closed`（`workspace_id`がhandle）、失敗は`cleanup_failed`のままで、それとは別に停止そのものを下の`wrapper_stopped`に記録する。過去のworkspaceのsessionの`workspace_created` / `workspace_closed`のeventもそのまま読める。ADR-t813-1決定5の「最後のturnの終わりにworkspaceをcloseする」は、wrapperが終了の依頼で終わったことを`exists`で確かめ、残っていれば止めることになる。
-- **停止の記録**（task 1657）: 停止がSIGTERMで終わったかSIGKILLまで要ったかを[評価](../../plans/headless-background-evaluation.md)の「processの残り」が数えられるように、止めるたびに`wrapper_stopped`を記録する。portは`WorkspaceBackend::close`の戻り値を変えず、backgroundのwrapperの停止の専用の`stop_background(handle, route) -> Result<Option<WrapperStop>>`にした。`close`はinbox・planner・supervisorのworkspaceにも使い、戻り値を変えると停止の結果を持たない呼び手とtestのbackendのすべてが変わるため。既定の実装は`close`を呼んで`None`を返す（停止の結果を言わないbackend。testのbackendはこれで、何も記録しない）。cmuxのadapterは`BackgroundWrappers::stop`の結果を返し、`route`は読まない。`BackgroundWrappers::stop`は、SIGTERMの後に3秒のうちに終わったかと、控えた子孫にSIGKILLを送った数を、副作用の無い`domain::background_wrapper::wrapper_stop(running, exited_after_term, children_killed)`に渡して`WrapperStop`（`signal`は`sigterm`・`sigkill`・`gone`（止め始めに居なかった。何も送らない）、と`children_killed`）にする。記録はapplicationの`RecordingBackend::stop_background`が行う: wrapperを止め、wrapperが先に死んで残したturnを止め（上の`stop_left_turn`）、`run_in_workspace`でhandleのrunを引いてそのrunに`wrapper_stopped`（`workspace_id`（handle）・`pid`・`signal`・`children_killed`・`left_turn_killed`（残ったturnにSIGKILLを送ったか）・`route`。`recording::wrapper_stopped_payload`）を記録する。runが無ければ（plannerのwrapper、記録できなかったhandle）queueのeventとして記録する（`wrapper_stopped`は`EventKind::is_queue`に入り、task・goal・runの無い記録を許される）。wrapperを止められなければ`close`の失敗（`backend_call_failed`）で、`wrapper_stopped`は無い。残ったturnを止められないときは、wrapperの停止を記録してから`close`の失敗にする。記録できなければ捨て、停止の結果は変えない。`route`は止めた経路（`domain::background_wrapper::StopRoute`）: `after_review`（reviewの後の終了。`close_session`・`close_workspace`）、`landed`（着地の後の`close_open_workspaces`）、`triage`（失敗したrunのtriageの`close_open_workspaces`。`stalled`の`stop`、復旧のaskへのcancel、復旧jobの後のrunはここを通る。着地のaskへのcancelはreviewの後に止めた`after_review`、supervisorの外で終わったrunは`sweep`に出る）、`sweep`（`sweep_ended_sessions`）、`resume`（`finish_resume`・`give_up_resume`・`close_left_resume_workspaces`・記録できなかったresumeのwrapper）、`reopen`（`close_lost_workspace`・記録できなかった開き直しのwrapper）、`unrecorded`（起動を記録できなかった最初のsessionのwrapper）、`planner`（runtimeのplannerの終わりと、記録できなかったplannerのwrapper）、`close`（経路を名乗らない`close`でhandleを止めたとき。`RecordingBackend::close`はhandleを`stop_background(handle, Close)`に回すので、どの経路の停止も記録から漏れない）。復旧jobの`stop_processes`はwrapperでなくpidを止める（wrapperは止めない）ので`wrapper_stopped`を記録せず、`auto_repaired`の`processes`の`killed`に残る。過去の`workspace_closed`のeventは変えずに読める。testは分類が`domain::background_wrapper::tests::a_stop_is_told_by_the_wait_after_sigterm_and_the_kills_sent`、payloadが`application::recording::tests::a_wrapper_stop_is_recorded_with_its_signal_kills_and_route`、経路のrouteが`application::supervise::background::tests::a_session_is_stopped_by_its_kind`と`a_pre_adr_workspace_of_a_run_is_never_asked_of_the_backend`、実のsignalが`tests/it/runtime_background_process.rs`の`a_wrapper_that_takes_sigterm_is_stopped_by_it`・`a_wrapper_that_ignores_sigterm_is_killed_with_its_turn`、runの無い停止がqueueのeventになることが同じfileの`the_stop_of_a_wrapper_no_run_records_is_the_queues_event`（`planner`）、経路を名乗らない`close`と残ったturnが`tests/it/runtime_background.rs`の`a_turn_left_by_a_killed_background_wrapper_is_stopped_and_a_resumed_wrapper_registers`（`close`・`gone`・`left_turn_killed`）、runへの記録の配線が`tests/it/runtime_background_process.rs`の`a_canceled_landing_leaves_nothing_of_the_background_session`（`after_review`）と`the_sweep_stops_an_ended_background_session_while_cmux_cannot_list`（`sweep`）。
-- **出力**（決定6、task 1406）: wrapperがterminalに出していた`[dagq]`の要約（turnの開始、agentの文、tool、turnの結果。`headless_session.rs`の`say`）とwrapperのlogは、run dirの`session.log`（resumeは`session-resume-<attempt>.log`、開き直しは`session-reopen-<attempt>.log`）に追記される。`say`はstdoutが端末のときに加え、`Turns`の`background`（runのwrapperは`--background`、plannerのwrapperは行の`workspace_id`がhandle）なら端末でないstdout（log）にも書く。書けなければ（logの置き場のdiskが一杯など）その行を捨て、sessionは止めない。turnの生の出力は今の`turns/`、時間の流れは`dagq timeline RUN`。runtimeは見るためのworkspaceを開かない。
-- **logを読むCLI**（`application::session_log`）: `dagq run log RUN [--lines N] [--follow]`はrun ID（数字ならtaskの最新のrun。`RunTarget`）から、runの最後の`wrapper_launched`の`log`（`last_background_session`。終わったrunのものも）を引いて出す。`dagq planner log ID [--lines N] [--follow]`は、plannerの行の`workspace_id`がhandleなら`<planner dir>/session.log`を出す（閉じたplannerも）。人がpathを組み立てる必要はない。既定はlogの全体、`--lines N`は末尾のN行（logの末尾から64KiBの窓を倍にしながら読み、大きなlogも全体を読まない）で、JSONでなくlogの文をそのままstdoutに出す。全体と追記は1MiBずつ（`CHUNK`。`RunFiles::read_range`）読んでは出し、短い読みで終わりとするので、run dirの1回の読みの上限（64MiB）を超えるlogも大きさの上限なく順に出す（task 1649）。読みのエラーはlogのpathを名指す。`--follow`（`-f`）は出した後も0.5秒ごと（`FOLLOW_INTERVAL`）に追記を読んで出し（1回のあいだに1回の読みの上限を超えて追記されても同じく分けて読む）、wrapper（handleのpidが記録した起動時刻のまま居るか）が終わったら残りを読んで終わる。resumeで次のwrapperが起動したら、そのlogはコマンドを打ち直して読む。知らないrun・task・plannerはqueueの読み取りのエラー、runの無いtaskは`task N has no run`。ADR-t1433-3より前にsessionをworkspaceで開いただけのrunはlogを持たないので拒み、`turns/`の場所を示す。workspaceのplannerは`planner screen`を指して拒む（task 1441まで）。run dirのlogはworkerが書けるので`RunFiles`（linkを辿らない）で読む。権限は`screen.read`（[Authorization](../authorization.md)）。
-- **画面と片付けのCLIの拒否**（ADR-t1433-3決定3・4、task 1440）: `dagq run screen RUN`はすべてのrunに拒否（非0の終了とJSONのerror。``run screen is refused: a run's session runs in the background without a screen (ADR-t1433-3; the interactive worker was retired, task 1437); read the turns of run <id> with `dagq run log <id>` (`--follow` to keep reading); its turns are in <run dir>/turns``）を返す。先にrunを引き（知らないrun・taskはqueueのエラー）、権限は今までどおり`screen.read`を要り、何も読まず記録せず、cmuxを呼ばない。`dagq run close-workspaces [RUN | --task ID] [--apply] [--cmux]`は引数を受けて無視し、権限（`workspace.cleanup`、userとinbox。ほかのroleは先に`authorization_denied`）の後に拒否（`run close-workspaces is refused: the runtime opens no workspace for a run any more and stops a run's background wrapper itself (ADR-t1433-3); close a workspace a run opened before in your own terminal`）を返す。testは`tests/it/cli_screen.rs`の`runs_refuse_their_screen_and_typing_without_cmux`。`[headless] wrapper = "workspace"`を無視して警告し、workspaceなしで着地することは`tests/it/runtime_background.rs`の`a_background_headless_run_lands_without_a_workspace`。`planner screen`はtask 1441・1442まで変えない。
-- **pidとlogの場所**: `status`の`runs`の各要素と`show`の`runs[0]`は、runが最後に開いたsessionがbackgroundのとき（最後の`wrapper_launched`の後に`workspace_created`が無い。`current_background_session`。新しいrunでは常に）`background`（`handle`・`pid`・`start`・`log`）を持つ。`planners`の各要素は、handleを記録したplannerなら同じ形の`background`（`log`は`<planner dir>/session.log`）を持つ。ADR-t1433-3より前のworkspaceのsessionには無い。
-- **test**: `tests/it/background_logs.rs`（`a_background_runs_log_is_followed_and_read_after_it_ended`: 実processのbackgroundのwrapperのrunで、`status`と`show`の`background`、`run log RUN --follow`がwrapperの終わりで終わりlogの全体を出すこと、着地の後にrun IDとtask IDで読めること、`--lines`、知らないrun・taskとrunの無いtaskのエラー。`a_closed_background_planners_log_is_read_by_its_id`: 閉じたbackgroundのplannerの`planner log`と`--follow`、`planners --all`の`background`、知らないplannerのエラー）、`domain::background_wrapper::tests::a_runs_background_session_is_its_last_wrapper_launched`、`application::session_log::tests::the_last_lines_are_cut_at_line_ends`・`the_last_lines_of_a_large_log_are_read_from_its_end`・`a_log_larger_than_one_read_is_printed_whole_in_chunks`・`follow_keeps_up_when_more_than_one_read_is_appended_between_polls`・`a_failed_read_names_the_log`（1回の読みを小さく限ったfakeの`RunFiles`）。
-- **評価**: 切り替えの前後で、cmuxの呼び出しの失敗（`backend_call_failed`・captureの時間切れ）、閉じた記録の無いworkspace（[zero-based-headless-readiness](../../plans/zero-based-headless-readiness.md)のE1・E3）、startupを比べる。ADR-t1433-3決定5により、goal 89のtask 1409の判定はworkspaceに戻すかの判断でなく、backgroundの経路の退行（残ったprocess・startup・wrapperを起動できない失敗・識別の誤り）の確認として読み、退行が見つかればbackgroundの経路を直すtaskにする。
+- **設定**（ADR-t1433-3決定2）: `[headless] wrapper`は読んで検査するが、workerにもruntimeのplannerにも効かない。
+  `"workspace"`ならsupervisorはprocessごとに1回だけ警告する（`warn_ignored_wrapper_setting`）。
+  拒まないのは、本番のsupervisorと固定バイナリの入れ替えの順で`dagq.toml`が読めなくならないため。
+- **起動**: `ActorProgram::RunSession`のwrapperのcommandを`WorkspaceBackend::launch_background`に渡す（`background::wrapper_command`、logのpathは`Supervisor::session_log`）。
+  logはworkerが書けるrun dirの中なので、shellにpathを開かせず、supervisorが新しいinodeで作った記述子を渡す。
+  起動の直後に起動時刻を読めなければ起動の失敗で、`backend_call_failed`に残る（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)決定9の読み替え）。
+- **handleと記録**: 識別は`BackgroundHandle`（pidと起動時刻）で、runはこれをworkspaceのIDの代わりに記録し、続けて`wrapper_launched`を記録する。
+  記録できなければwrapperを止めてエラーにする。
+  workspaceのIDを読む処理はhandleをそのまま使い、cmuxのadapterがhandleの呼び出しをprocessの操作に振り分ける（画面と入力は拒む）。
+  sessionが開いているかは`run_session_open`がprocessで判じ、cmuxに聞かない。
+  ADR-t1433-3より前にworkspaceで開いたsessionのIDは開いていないとみなし、閉じない（人が自分のterminalで閉じる）。
+- **wrapperの入口と登録**: `--background`の入口は端末を確かめず、自分で新しいsessionとprocess groupを持つ（`compose::wrapper_entry`）。
+  wrapperは自分の起動が記録されるのを待ってから登録する（`launched_as`）。
+  同じpidで別の起動時刻の記録は、死んだwrapperのpidを継いだ別のprocessのものなので自分とみなさない。
+- **env**: workerのactorの変数と`[run.env]`（[Run environment](run-environment.md)）はwrapperのprocessのenvで渡す。
+  supervisorのenvの`CMUX_*`と`DAGQ_*`は外してから足す。
+  agentのenvの組み立ては[session wrapper](session-wrapper.md)が持つ。
+- **識別と生死**: 生きているとは、handleのpidが記録した起動時刻のまま居ること（`Supervisor::wrapper_lives`）。
+  adopt・引き継ぎ（[Handoff](handoff.md)）・開き直しは記録したhandleで行うので、supervisorが止まってもwrapperとturnは動き続ける。
+- **停止**: runtimeはまず終了の依頼で終わらせ、残っていればhandleの`stop_background`で止める（ADR-t1404-1決定3）。
+  wrapperにSIGTERMを送り、猶予の後にgroupと控えた子孫にSIGKILLを送る（`BackgroundWrappers::stop`）。
+  wrapperが先に死んで残したturnは子孫として見つからないので、最後の`turn_started`の記録から止める（`stopping_left_turns`）。
+  そのturnが生きている間、sessionは開いているとみなされ、後始末と掃除が停止に進む。
+  ADR-t813-1決定5の「最後のturnの終わりにworkspaceをcloseする」は、wrapperの終わりを確かめて残りを止めることと読む。
+- **停止の記録**: 止めるたびに、止めた経路（`StopRoute`）とsignalを`wrapper_stopped`に記録する（`RecordingBackend::stop_background`）。
+  SIGTERMで終わったかSIGKILLまで要ったかを[評価](../../plans/headless-background-evaluation.md)の「processの残り」が数えるため。
+  runの無いwrapper（planner）の停止はqueueのeventになる。
+  記録できなくても停止の結果は変えない。
+  復旧jobの`stop_processes`はwrapperでなくpidを止めるので`wrapper_stopped`を記録しない。
+- **出力**（ADR-t1404-1決定6）: wrapperの`[dagq]`の要約とlogはrun dir（plannerはplannerのdir）の`session.log`に追記される（resume・開き直しは試みごとのlog）。
+  書けない行は捨て、sessionは止めない。
+  turnの生の出力は`turns/`、時間の流れは`dagq timeline RUN`。
+- **logを読むCLI**（`application::session_log`）: `dagq run log RUN`はrunの最後の`wrapper_launched`のlogを、`dagq planner log ID`はplannerの`session.log`を出し、人がpathを組み立てない。
+  大きなlogも1回の読みの上限に関わらず分けて全体を出し、`--follow`はwrapperが終わるまで追う。
+  resumeで次のwrapperが起動したら、コマンドを打ち直して読む。
+  run dirのlogはworkerが書けるので、linkを辿らずに読む。
+  権限は`screen.read`（[Authorization](../authorization.md)）。
+- **画面と片付けのCLIの拒否**（ADR-t1433-3決定3・4）: `dagq run screen`はどのrunにも拒否を返し、代わりに`run log`と`turns/`の場所を示す。
+  `dagq run close-workspaces`は権限の検査の後に拒む。
+  どちらもcmuxを呼ばない。
+- **pidとlogの場所**: `status`の`runs`と`show`の`runs[0]`は、runの今のsessionがbackgroundなら`background`（handle・pid・起動時刻・log）を持つ（`current_background_session`）。
+  `planners`の各要素も、handleを記録したplannerなら同じ形を持つ。
+- **評価**: 切り替えの前後の比較は、workspaceに戻すかの判断でなく、backgroundの経路の退行（残ったprocess・startup・起動の失敗・識別の誤り）の確認として読む（ADR-t1433-3決定5、[zero-based-headless-readiness](../../plans/zero-based-headless-readiness.md)）。
 
 ## 非対話のruntimeのplanner<a id="非対話のruntimeのplanner"></a>
 
-[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定2（task 1396）と[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3（task 1441）。runtimeのplannerは経路の選択なしに非対話で立ち（`planners.route`は`headless`。旧keyの`[roles.runtime_planner] route`は値に関わらず受け付けて無視する。[Actor model](actor-model.md#runtimeのplannerの経路)）、この文書のturnの駆動をplannerのディレクトリで使う。別の仕組みは作らず、`Turns`が誰のturnかを`TurnOwner`（`Run`か`Planner`）で持ち、違いはそこに閉じる。
+runtimeのplannerは経路の選択なしに非対話で立ち、この文書のturnの駆動をplannerのディレクトリで使う（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)決定2、[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3）。
+旧keyの`[roles.runtime_planner] route`は値に関わらず無視する（[Actor model](actor-model.md#runtimeのplannerの経路)）。
+仕組みの全体は[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)が持つ。
 
-- **持ち主ごとの違い**（`TurnOwner`）: 依頼と`turns/`と`prompt.txt`とidle markerはplannerのディレクトリ（`<queue dir>/planners/<id>/`）、turnの作業ディレクトリはrepositoryのcheckout、turnのeventはrunでなくqueueのevent（`turn_requested` / `turn_started` / `turn_finished` / `turn_session_identified`をqueueの種類に足し、payloadの`planner_id`で名指す。読むのは`planner_turn_events`）、heartbeatは`heartbeat_planner`、turnのagentは`register_planner_agent`で毎turn登録する。providerはClaudeだけで切り替えない（ADR-t1394-2決定5）。sessionの名前は`planner_session_name`（plannerのディレクトリと開いた時刻から作るUUID。同じIDのplannerを作り直したqueueと共有しない）。modelとeffortは開く側が決めたもの（wrapperのargvの`--model` / `--effort`）。sccacheの扱いとqueue serviceのtokenは無い（plannerの`dagq`はqueueを自分で開く）。
-- **turnのcommand**: `AgentProvider::turn_command`は`TurnTarget`（actorのrole・ディレクトリ・作業ディレクトリ・debug log・plugin dir・`required`のrunのbrokerのMCPの設定`broker_required`）を取り、runのturnは`TurnTarget::of_run`、plannerのturnは`SessionAgent::PlannerTurn`（roleは`planner`、debug logは`claude.log`、`--plugin-dir`を足す）。providerにplanner固有の分岐は無い（決定6）。Claudeのsettings（`claude-headless-settings.json`）の`permissions.deny`はplannerのroleのもの。
-- **初期promptが最初のturn**。reviseの指摘（`plan_revise_sent`の配送。生きている持ち主のplannerへのもの）・`planner_question`のanswer（draft・finding・依頼のplanner）・Claudeが使えなかったturnの続き（`provider retry`）・`end_runtime_planners`と`release_runtime_planner`の終了は、`Supervisor::send_to_planner`が`turns/`への依頼（`what`は`revise` / `answer of ask <id>` / `provider retry`）と終了の依頼（`turns/exit`）にする。runtimeのplannerには打ち込まない（古いバイナリがworkspaceで開いたruntimeのplannerの行への送信はエラーにして何も打たない）。依頼の前に`supervisor-input.json`の印を書くので（`provider retry`も同じ）、それより古いidle markerは使われない。壁で失敗したturnの後に印だけが新しくなったとき（壁の前のviewから置いたanswerやreviseの印が失敗の後に届いた、`provider retry`の印を書いた後に依頼の書き込みが失敗した）は、`provider retry`が待っていなければ、wrapperが壁で失敗したturnのidle markerを書き直してidleに戻す（`renew_wall_marker`。wrapperは`provider retry`より先に依頼を取らないので、そのままでは`working`に見えたまま誰も壁を見ない。task 1596）。
-- **状態**（`planner_view`）: 非対話のplannerには画面を読まない。wrapperがturnの終わりに書くidle markerが最後の入力より新しく、`turns/`に取られていない依頼が無ければ`idle`、markerが無いか古いか依頼が待っていれば`working`。ただしmarkerのturnがClaudeのログイン切れ・利用上限・起動の失敗で終わっていれば、依頼が待っていても`idle`（wrapperはその依頼を`provider retry`の後まで取らないので、`tend_planner_walls`が見る。task 1596）。wrapperはplannerの依頼を取るたびに、`turns/`から取り出す前に入力の印を書く（turnの途中に置かれた依頼のturnのあいだ、前のturnのmarkerでidleに見えないように）。生死はbackgroundのhandle（`exists`。handleのpidが記録した起動時刻のまま居るか）とwrapperのpidとheartbeatだけで判じ（`PlannerSession::state`）、cmuxに聞かない。古いバイナリがworkspaceで開いたruntimeのplannerの行（`retired_workspace`）はcmuxに聞かずに`closed`と読む。届けたanswerを読み終えたかは、そのanswerの依頼（`turn_requested`の`what`が`answer of ask <id>`）を取ったturnが終わり、そのturnがClaudeのログイン切れ・利用上限・起動の失敗（`failure`が`authentication` / `usage_limit` / `launch`）で失敗していなければ読み終えたとし、壁で失敗したturnだけでは読み終えたとせず、wrapperが次に取る`provider retry`のturn（そのanswerを載せる）が壁で失敗せずに終わるまで追う（`headless_answer_taken`、判断は`src/domain/turn.rs`の`request_read`。壁で失敗したturnの後にplannerを`/exit`すると、answerが読まれずに失われるため。task 1596）。画面とmarkerから見たplannerの時間切れ（task 805の`tell_of_silent_planners`）はtask 1441で消し、wrapperがturnを`[stall]`の上限で止めたとき（markerの`outcome`が`silent` / `timed_out`）にplannerごとに1回`planner_unresponsive`（`subject: "planner"`）を出す（`tell_of_stopped_planner_turns`。掃除が先に行を閉じたときも出す。ADR-t1394-2決定3）。`--planner-timeout`は、plannerに送ったreviseの時間切れ（`planner_unresponsive`）とplannerを待つrevise、場所を占めるidleのplannerの解放（`release_runtime_planner`、task 884）にだけ使う。
-- **使えないとき**（ADR-t1394-2決定5、`tend_planner_walls`）: 最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わったidleのplannerは、終わらせず（`busy`の`provider_wall`）決めずに終わった回数にも数えない。最初に見たときqueueの控えのask（ログイン切れと利用上限）かClaudeの`provider_held`（起動の失敗）を開き、queueのevent `provider_waiting`（`planner_id`付き。`planner_turn_events`が読む）を残す。控えが解けたら、失敗したturnが取った依頼を載せた続き（workerと同じ`retry_text`。続きもまた失敗したときは最初に壁で失敗した依頼）を`provider retry`の依頼として置く。壁の前に置かれた依頼は、wrapperが`provider retry`の後まで取らない（[run dirの`turns/`](#run-dirのturns)の表。task 1596）。待つあいだはreviseとanswerも置かない。詳しくは[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)の「使えないとき」。
-- **起動の前**: `prepare_planner_turns`が`turns/limits.json`（`[stall]`のturnの上限）を書き、前のDBの同じIDのplannerが残した取られていない依頼と終了の依頼を捨てる。
-- **wrapperの置き場所**（ADR-t1433-3）: runtimeのplannerはworkspaceの経路を持たず、wrapperを常にbackgroundで立てる（`[headless] wrapper`はplannerには読まない）。`launch_planner`がwrapperのcommand（`<runner> --db <db> planner-session --planner <id> --claude <claude> [--plugin-dir P] [--model M --effort E] --headless --background`）を`ActorProgram::PlannerSession`（cwdはrepositoryのcheckout、logは`<planner dir>/session.log`、envはplannerの`actor_env`の`DAGQ_ROLE=planner`・`DAGQ_QUEUE`・`DAGQ_ACTOR_ID=planner:<id>`・`DAGQ_SESSION_KIND=runtime_planner`・`DAGQ_PLANNER_ORIGIN=runtime`・`DAGQ_PLANNER_ID`・`DAGQ_LAUNCH`）で`WorkspaceBackend::launch_background`に渡し、handle（`background:<pid>:<起動時刻>`）を`planners.workspace_id`に記録する（`planner_workspace_created`）。cmuxのworkspace・色・pill・group・説明・pinは作らない。起動できなければ行をそのエラーで閉じ、handleを記録できなければwrapperを止めて（`stop_session`が`stop_background(handle, planner)`で止め、`wrapper_stopped`を記録する。上の「停止の記録」）行を閉じる。turnの`[dagq]`の要約はその`session.log`に書かれ、`dagq planner log ID`で読み・追う（上の「logを読むCLI」）。plannerはcmuxのworkspaceを持たないので、`dagq submit`はplannerの記録（`DAGQ_PLANNER_ID`）からhandleを読んでproposalの持ち主にする。wrapperは最初のturnの前に、行に`workspace_id`（handle）が記録されるまで45秒まで待つ（`WrapperStart::Workspace`の待ち。最初のturnのsubmitが持ち主の無いproposalにならないように）。
-- **終わり**: 終了の依頼でwrapperはexit code 0で終わり、`planner_exited`を記録して`runner`を消す。turnが失敗か止められて終わったsessionはexit code 1で終わる。backgroundのwrapperが終わればhandleはもう無いので、agentの終了が記録された行は、supervisorの`end_runtime_planners`と掃除の`close_abandoned_planners`のどちらが閉じても`runtime_exited`になる。掃除はbackgroundのhandleをcmuxの一覧でなくprocessの識別（`exists`）で判じ、生きているwrapperの行はheartbeatが遅れても閉じない。
-- **wrapperが死んだときのturn**（ADR-t1404-1決定3・8）: turnは自分のprocess groupで走るので、wrapperが殺されても残る。`RecordingBackend`の`left_turn`は、runの無いhandleなら`left_planner_turn`でplannerの最後の`turn_started`（`last_planner_turn`。`pid`と`start`）を読み、そのpidが記録した起動時刻のまま居れば、handleを`exists`とし、`close`でwrapperの後にそのturnを止める（`stop_left_turn`）。plannerは`lost`になり、`end_runtime_planners`がhandleを閉じてturnを止めてから行を閉じる（`runtime_lost`）。
-- **区間と経路ごとの集計**（決定4、task 1398）: 最初の`turn_started`がkind `runtime_planner`・`route: headless`の区間を開き、`planner_closed`（または行の`close_planner`）が閉じる。稼働時間とtokenはturnから取る（[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。wrapperはplannerのturnの`turn_started`に起動の`launch`（`{model, effort}`）を書く。`stats`の`sessions.by_route`と`planner_routes`、`kpi`の`session_*`の`route=`の層と`health.planner_routes`で経路ごとに読む（[stats](stats.md)、[kpi](kpi.md)）。workerの経路の集計（`domain::stats::routes`）はrunの無い`turn_finished`を数えず、plannerのturnは`planner_routes`が数える。
-- **ADR-t1228-1のCLI**（task 1533、[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)、task 1441）: `planner screen`はどのplannerにも画面を読まず、cmuxを呼ばずに`screen: null`・`reason`・`turns/`の場所を返し、`planner send`は`--key`も`--answer`もどのplannerにも理由と代わりを示して拒む（[Session send](session-send.md#人とinboxの画面の読み取りと送信)）。続きの依頼の`planner request`は次のturnの依頼として置く（Claudeを待つidleのplannerには拒む）。plannerを閉じるCLIは作らない（[`plan` / `planners`](plan-planners.md#続きの依頼と非対話のplannerのcli)）。
-- **test**: `tests/it/planner_headless.rs`（stubの`claude`で、reviseで開いたbackgroundの非対話のplannerが初期promptを最初のturnにして`turns/`に出力を残しturnの記録に`planner_id`を持ち、終了の依頼で終わること、draftのplannerの`planner_question`のanswerが次のturnの依頼として届くこと、wrapperを殺したplannerのturnがplannerの閉じで止まること（`the_turn_a_killed_background_planner_wrapper_left_is_stopped_as_the_planner_closes`）、掃除が生きているbackgroundのplannerをheartbeatの遅れで閉じず終わったものを`runtime_exited`で閉じること（`the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited`）、`route = "interactive"`の`dagq.toml`でもreviseに開いたplannerが`headless`でworkspaceなしにbackgroundのwrapper（`--headless --background`）で立ち、次のreviseが打ち込みでなく`turn_requested`の依頼になり、`doctor`が`route: headless`を示して`route_source`を持たないこと（`the_old_route_key_is_ignored_and_the_runtimes_planner_runs_headless`））と`tests/it/planner_headless_stats.rs`（区間がturnから開いてtokenとmodelを持って閉じ、`stats`の`sessions.by_route`・`planner_routes`と`kpi`の`route=headless`の層に出ること）、`tests/it/planner_headless_turns.rs`（利用上限で控えを待って`provider retry`でanswerを載せた同じ依頼を続け、その後に続きの依頼を取ること、上限で止めたturnの`planner_unresponsive`、生きているplannerへの次のreviseが次のturnの依頼になること、依頼のplannerの`proposed`。判断のunit testと名前は[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)の「test」）。
+- **持ち主ごとの違い**（`TurnOwner::Planner`）: `turns/`とidle markerはplannerのディレクトリ、作業ディレクトリはrepositoryのcheckout、turnのeventはqueueのeventで`planner_id`で名指す。
+  providerはClaudeだけで切り替えない（ADR-t1394-2決定5）。
+  sessionの名前は同じIDのplannerを作り直したqueueと共有しない（`planner_session_name`）。
+  providerにplanner固有の分岐は無い（`TurnTarget`）。
+- **依頼**: revise・`planner_question`の答え・`provider retry`・終了は`Supervisor::send_to_planner`が`turns/`の依頼と終了の依頼にし、plannerには打ち込まない。
+  落とし穴: 依頼の前に入力の印を書くので、壁で失敗したturnの後に印だけが新しくなると、plannerは`working`に見えたまま誰も壁を見ない。
+  wrapperはそのとき壁のturnのidle markerを書き直す（`renew_wall_marker`）。
+- **状態**（`planner_view`）: 画面を読まず、idle markerと待っている依頼から`idle` / `working`を決める。
+  壁で終わったturnのplannerは依頼が待っていても`idle`。
+  生死はhandleとwrapperのpidとheartbeatで判じ、cmuxに聞かない。
+  答えを読み終えたかは、その依頼を取ったturnが壁でなく終わるまで追う（`request_read`）。
+  壁で失敗した直後に終わらせると答えが読まれずに失われるため。
+- **時間切れ**: wrapperがturnを`[stall]`の上限で止めたとき、plannerごとに1回`planner_unresponsive`を出す（`tell_of_stopped_planner_turns`、ADR-t1394-2決定3）。
+- **使えないとき**（`tend_planner_walls`）: 壁のplannerは終わらせず、控えのaskを開き、控えが解けたら`provider retry`を置く。
+  待つあいだはreviseと答えも置かない。
+- **起動**: `launch_planner`が`ActorProgram::PlannerSession`のwrapperをbackgroundで立て、handleをplannerの行に記録する。
+  cmuxのworkspace・色・pill・groupは作らない。
+  `dagq submit`はplannerの記録からhandleを読んでproposalの持ち主にするので、wrapperは最初のturnの前にhandleが記録されるのを待つ。
+- **終わり**: 終了の依頼でwrapperはexit code 0で終わる。
+  掃除はhandleをprocessの識別で判じ、生きているwrapperの行はheartbeatが遅れても閉じない。
+  wrapperが殺されて残ったturnは、plannerの最後の`turn_started`から止める（ADR-t1404-1決定3・8）。
+- **区間と集計**: 最初の`turn_started`が区間を開き、plannerの閉じが閉じる（[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。
+  経路ごとの集計は[stats](stats.md)と[kpi](kpi.md)、workerの経路の集計はrunの無い`turn_finished`を数えない。
+- **CLI**（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）: `planner screen`は画面を読まずに`turns/`の場所を返し、`planner send`は拒む（[Session send](session-send.md#人とinboxの画面の読み取りと送信)）。
+  続きの依頼は次のturnの依頼として置く（[`plan` / `planners`](plan-planners.md#続きの依頼と非対話のplannerのcli)）。
 
 ## taskの再計画（予定・未実装）
 
-再計画による保留は次turnの配送を封鎖し、background wrapperと書き手の終了を確認してsnapshotを保存する。遅れたreceiptと旧generationの終了は通常のvalidation/着地へ進めない。Claude/Codexは同じ停止・復元の契約を使う。 詳細は[taskの再計画](task-replanning.md)が持つ。現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。
+再計画による保留は次turnの配送を封鎖し、background wrapperと書き手の終了を確認してsnapshotを保存する。
+遅れたreceiptと旧generationの終了は通常のvalidation/着地へ進めない。
+Claude/Codexは同じ停止・復元の契約を使う。
+詳細は[taskの再計画](task-replanning.md)が持つ。
+現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。

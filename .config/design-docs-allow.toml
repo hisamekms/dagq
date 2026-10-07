@@ -206,12 +206,6 @@ line = 1125
 tasks = 10
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/headless-worker.md"
-size = 84644
-line = 4722
-tasks = 63
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/host-metrics.md"
 tasks = 7
 
