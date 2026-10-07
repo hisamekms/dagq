@@ -259,8 +259,9 @@ paths = ["src/infrastructure/adapters.rs", "src/infrastructure/process.rs", "src
 # 固定バイナリが task 1455 を含むことを着手時に確認し、着地の verify でも検査する。
 
 [review.subagents.design-consistency]
-# 挙動の名前を変えうる差分にも探した名前の確認を当てる（ADR-t1942-2 決定1・3）。
-paths = ["src/**", "crates/**", "migrations/**", "docs/design/**", "docs/development/**", "plugins/**", "tests/**", "scripts/**", "AGENTS.md", "dagq.toml", ".dagq/**"]
+# runtime の挙動を変える差分と design の文書を変える差分にだけ当てる。当たる path は repository の設定に任されている（ADR-t1942-2 決定4）。
+# migrations・docs/development・plugins・tests・dagq.toml はそれぞれの agent が、残りは receipt-evidence と worker の照合が見る。
+paths = ["src/**", "crates/**", "docs/design/**"]
 
 [review.subagents.test-rules]
 paths = ["tests/**", "src/**", "crates/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml"]
