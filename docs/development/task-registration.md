@@ -1,7 +1,7 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、固定バイナリを待つ宣言、負荷の下で落ちるtestを直すtask、ADRを書くtask、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、固定バイナリを待つ宣言、依存の付け方、負荷の下で落ちるtestを直すtask、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
 owners:
@@ -10,6 +10,7 @@ tags:
   - planning
   - conventions
 related:
+  - adr-t1985-1
   - adr-t1971-1
   - adr-t1639-1
   - adr-t1639-2
@@ -129,6 +130,12 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 
 受け皿は元の goal ごとの積み残しではなく、同じラベルのテーマごとにまとめ、優先度を `low` にする（[ADR-t1639-2](../adr/2026-10-04-t1639-2-defer-improvements-outside-acceptance-to-a-low-goal-per-tag.md)）。goal・task の優先度の付け方と継承、後回しの判定・所属の記録・受け皿の選択と移動の汎用の手順は plugin の `dagq` の `reference/register.md` が持つ。
 
+## 依存の付け方
+
+- taskの依存（`--depends-on`）は中身の前提（先に着地しないと作業が成り立たない）に限る。同じファイルの衝突を避けるためだけの依存は付けず、askにもしない。同じファイルの衝突は、衝突の多いファイルならruntimeのclaimの控え（[claimを控える](../design/supervisor-lifecycle/claim-defer.md)。上限の時間まで、`interrupt`のtaskは控えない）が扱い、残りはrebaseか着地の衝突として解く（[ADR-t1985-1](../adr/2026-10-07-t1985-1-dependencies-only-for-content-prerequisites-and-conflicts-left-to-claim-deferral.md)決定1）。
+- 依存を付けるときは、noteかtaskのcontextに種類（中身の前提か衝突回避か）と理由を書く（決定2）。
+- 人に聞く（`planner_question`、`--because scope`）のは、(a) 中身の前提の依存で、(b) その依存で低い優先度のgoalのtaskが効く優先度を継いで上がり、(c) 順番の変更・taskのgoalへの取り込み・分割などplannerの手で解けない、の全部を満たすときだけにする。問いは「低いgoalのtaskを（優先度ごと）前に出すか、高いgoalが待つか」にする。どれかを満たさなければ自分で決めて進め、理由をnoteかcontextに残す（決定3）。
+
 ## 負荷の下で落ちるtestを直すtask
 
 - 負荷の下で落ちるtestを直すtaskのacceptanceとdescriptionに、高い負荷の下での再現を求めない（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。求めないもの: loadの値の指定（「load average 20以上で」など）、`-j` / `--test-threads`の`[run.env]`の並列度を超える引き上げ（`-j 16`など）、同時の複数のstressかtestのprocess、負荷をかける処理（`yes`・busy loop・stressの道具、「他のrunか負荷をかける処理」）。workerはそれらをhostで起動しないため（[手元の検証](local-checks.md)の「負荷の下で落ちるtestの再現」）。
@@ -157,4 +164,5 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 - 負荷の下で落ちるtestのtaskが上の「負荷の下で落ちるtestを直すtask」を満たすこと。acceptanceかdescriptionが高い負荷の下での再現を求めるtaskは`revise`にする（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。ただし人がapprove_planのaskにreadyと答えて認めたtask（ask 323のtask 1360・1361、ask 304のtask 1344）は例外として保ち、`revise`にしない。plan reviewは自分で新しい例外を作らない（決定(e)）。
 - 優先度と所属はproposalの由来で分けて見る（[ADR-t1971-1](../adr/2026-10-07-t1971-1-plan-review-keeps-human-origin-priority-and-membership-and-ai-tasks-inherit-goal-priority.md)）。人間由来（requestに結ばれたproposal、持ち主が人のproposal）のtaskとgoalの優先度と所属は自分で変えず（`lower_priority`を付けない）、疑いがあれば`concern`にする。人の言葉に優先度の無い新しいgoalにplannerが付けた段は下のAI由来のgoalと同じ目安で見てよいが、外れていれば`revise`にする。
 - AI由来のproposalでは次を見る。taskには個別の優先度を置かずgoalから継がせる（`lower_priority`は値を置かず個別の指定を外す形で効き、passでruntimeも外す）。継いだ優先度が高すぎると見えるときは、下の所属かgoalの優先度の問題として扱う。新しいgoalの優先度が上の「goal の優先度とラベル」の段の目安から外れていれば`revise`にする（goalの優先度は自分で変えない）。既存のgoalに入れたtask（元goalのあるfollow_upは下の行による）は、そのgoalの受け入れ条件の達成に関係するかを見て、関係なければ`revise`にし、新しいgoalかgoalの無い単独のtaskにさせる（後回しの受け皿は上と同じ）。
+- 依存は上の「依存の付け方」のとおり中身の前提に限る。優先度が下がる向き（高いgoalのtask → 低いgoalのtask）の依存は理由を見て、同じファイルの衝突を避けるためだけなら`revise`にし、種類と理由がnoteにもcontextにも無いときも`revise`にする。同じファイルやhotspotを触ることだけを理由に`add_dependency`を足さない（[ADR-t1985-1](../adr/2026-10-07-t1985-1-dependencies-only-for-content-prerequisites-and-conflicts-left-to-claim-deferral.md)決定4・6）。
 - 元goalのあるfollow_upのdraftは、plannerの所属の判断（分類・acceptanceの項目・理由・証拠・所属先・判定時の版）を起点に検査する。手順と判定の基準はpluginの`dagq`の`reference/register.md`の「A follow_up's membership」、決定は[ADR-t1504-1](../adr/2026-10-04-t1504-1-follow-ups-belong-to-the-goal-whose-acceptance-needs-them.md)と[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)が持つ。疑わしいときにこのrepositoryで読む周辺の証拠は、元のrunのreceipt（`dagq events --full --run R --kind integration_receipt`）、元のtaskの差分（commit）、元goalのacceptanceの他の項目とdoc、名指されたADRと`docs/design/`の節。直せる対応づけの誤りは`revise`、follow_upを外すためにacceptanceを弱めたものは`concern`にする。

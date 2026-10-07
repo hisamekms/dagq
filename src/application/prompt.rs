@@ -4327,7 +4327,7 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
          - a task whose change has already landed (read the source; a completed candidate or a landed commit is where to look);\n\
          - a contradiction with a decision the repository records (in its instructions or the decision records they name) or with the goal's constraints;\n\
          - an acceptance criterion that contradicts the task's own description or a sibling task's acceptance (for example a change of a type whose acceptance says a test file that uses the type is not changed);\n\
-         - tasks that change the same files without a dependency between them, above all a file listed as conflicting often: for each hotspot whose proposal_tasks and queued_tasks are both non-empty, add a dependency (add_dependency, the task of the proposal waiting for the queued one) or say in summary why none is needed; you may read the source to see which files a task of the proposal really touches;\n\
+         - dependencies: a task depends on another only when its work needs the other's landing first (a prerequisite of its content). Sharing a file or a hotspot alone is no reason for a dependency: the runtime defers for a while the claim of a task that overlaps a run in progress on a file that conflicts often, and a rebase or the landing settles any other overlap, so add none for it (the hotspots above are for finding repeats and partial overlaps). A missing prerequisite is a revise, or add_dependency when it is plain; you may read the source to see which files and code a task of the proposal really needs. A dependency of a task of a higher-priority goal on a task of a lower-priority goal makes the lower one inherit the higher priority: read its reason in the tasks' notes or context, and revise when it only avoids a conflict on the same files or gives no reason;\n\
          - a task that partly repeats a ready or in-progress task (the overlap goes once the scope of one is cut): not pass but revise, saying in the reason which part to cut and which of the two keeps it;\n\
          - a contradiction with another proposal: with one submitted before this one, send this one back; with one submitted after, pass this one (the later one is checked against it);\n\
          - a ready task that has to change for this proposal to hold: name it in reopen, and the runtime takes it out of the claim for a planner to fix; an in-progress task is never changed: send this proposal back asking for a task that fixes it after it lands and depends on it;\n\
@@ -4335,7 +4335,7 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
          - every finding of `dagq lint` is one to fix.\n\n\
          Decide one verdict:\n\
          - pass: the tasks may run as written, after the actions below.\n\
-         - revise: findings the planner can fix without a person's judgment (wording, acceptance, verification, paths, a split, a scope that partly overlaps another task, a missing task or dependency). Each reason says what to change.\n\
+         - revise: findings the planner can fix without a person's judgment (wording, acceptance, verification, paths, a split, a scope that partly overlaps another task, a missing task, a missing dependency on a prerequisite of a task's content, a dependency of a higher-priority goal's task on a lower-priority goal's task that only avoids a conflict on the same files). Each reason says what to change.\n\
          - concern: findings that need a judgment beyond a planner's fix: a doubtful duplicate, a change that looks already done, a contradiction with a decision the repository records or with the goal's constraints, a change of the plan's intent. A concern is not only for a person: you judge it too, with a recommendation and a confidence, and the runtime applies what you are sure of.\n\
          With a concern, give what you recommend and how sure you are; the runtime applies a sure recommendation itself and asks a person only what the record cannot settle. \
          recommendation is ready (the tasks may run as written, after the actions below), send_back (the planner fixes it, as a revise; it counts toward the revises above) or cancel. \
@@ -4343,7 +4343,7 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
          reason_category is scope when your recommendation would let a task through against a decision the repository records, the goal's constraints or a person's precedent; discard when you recommend cancel; null otherwise. \
          A high ready or send_back with reason_category null is applied without a person (a ready as a pass, its actions included); a low confidence, scope, discard, or a send_back past the revises above goes to a person with your recommendation.\n\
          When a finding is of the same kind as an answered ask above, put that ask's id in precedents and say in the reason how the person answered then.\n\n\
-         actions are the only changes you make yourself, and only with pass (or a concern whose high ready is applied): add_dependency (a task of the proposal waits for another task), lower_priority (never raise one), cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern). Everything else is the planner's. A proposal that remedies a finding (an improvement) keeps its tasks at normal or low: lower a high or urgent one to normal with lower_priority and pass, never revise for it (a pass lowers any you miss).\n\n\
+         actions are the only changes you make yourself, and only with pass (or a concern whose high ready is applied): add_dependency (a task of the proposal waits for another task whose landing its work needs; never only for a shared file or hotspot), lower_priority (never raise one), cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern). Everything else is the planner's. A proposal that remedies a finding (an improvement) keeps its tasks at normal or low: lower a high or urgent one to normal with lower_priority and pass, never revise for it (a pass lowers any you miss).\n\n\
          Whatever the verdict, also estimate the weight of each submitted task of the proposal (tasks {predicted}), one entry per task in predictions, from what you read: \
          a worker (one Claude Opus session in its own Git worktree) implements the task, runs the checks the repository's instructions ask of a worker (formatting, lint, the tests of the change, ...), commits and writes a receipt; \
          then a headless review (pass / revise / concern) and `integrate`'s verification after the rebase onto main follow, and a failure, a conflict or missing evidence resumes the run. \
@@ -5211,7 +5211,22 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.contains("not pass but revise, saying in the reason which part to cut"));
-        assert!(prompt.contains("for each hotspot whose proposal_tasks and queued_tasks are both non-empty, add a dependency"));
+        assert!(prompt.contains("Sharing a file or a hotspot alone is no reason for a dependency"));
+        assert!(prompt.contains("only when its work needs the other's landing first"));
+        assert!(prompt.contains(
+            "A dependency of a task of a higher-priority goal on a task of a lower-priority goal"
+        ));
+        assert!(prompt.contains(
+            "revise when it only avoids a conflict on the same files or gives no reason"
+        ));
+        assert!(!prompt.contains(
+            "add a dependency (add_dependency, the task of the proposal waiting for the queued one)"
+        ));
+        assert!(
+            !prompt.contains(
+                "for each hotspot whose proposal_tasks and queued_tasks are both non-empty"
+            )
+        );
         let (prompt, _) = plan_prompt(4, 0);
         assert!(!prompt.contains("are left out of this list"), "{prompt}");
     }
