@@ -103,6 +103,7 @@ runtimeの外からの起動までは防げず、下の検知が扱う。
 ### 外部serverと失敗の偏り
 
 起動の記録と現在のidentityが一致しなければ、serverの出どころは不明として扱う。
+起動の記録が起動時刻を持たないときは、pidとportが一致し、processの起動時刻が記録の`at`と合えばその記録のsupervisorを起動者とする（照合は`application::sccache::owner`、時刻の幅は`domain::sccache::started_near`）。
 親processは付け替わるため、sandboxの印が読めないことはsandboxの外で起動した証拠にならない。
 既存の失敗率だけで壊れたserverとは決めず、同じidentityの新しい失敗の偏りか、確かめられたsandboxの印で判断する。
 成功なしの新しい失敗の差分が累計3以上なら壊れた印とし、成功・identityの変更・統計のリセットで取り直す。

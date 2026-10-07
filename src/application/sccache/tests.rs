@@ -218,8 +218,11 @@ fn observed_process(pid: u32, sandboxed: bool) -> crate::domain::sccache::Server
         parent_pid: 1,
         command: "sccache --internal-start-server".into(),
         sandboxed: sandboxed.then_some(true),
+        started_unix: Some(STARTED_UNIX),
     }
 }
+/// The Unix start of [`observed_process`].
+const STARTED_UNIX: i64 = 1_791_000_000;
 fn observed_server(sandboxed: bool) -> ObservedSccache {
     ObservedSccache {
         process: std::cell::RefCell::new(Some(observed_process(42, sandboxed))),
@@ -283,6 +286,101 @@ fn ownership_requires_pid_port_start_and_a_recorded_supervisor() {
     assert_eq!(owner(&queue, &changed, 4226).unwrap(), "unknown");
     queue.events.borrow_mut().last_mut().unwrap().payload["supervisor"] = Value::Null;
     assert_eq!(owner(&queue, &process, 4226).unwrap(), "unknown");
+}
+
+/// A start record from before `started_at` was recorded, or whose process
+/// could not be read just after the start: no `started_at`, only `at`.
+fn started_without_start_time(queue: &MemoryLog, pid: Value, port: u16, at: i64) {
+    queue
+        .record_queue_event(
+            EventKind::SccacheServerStarted,
+            json!({"pid": pid, "port": port, "at": at, "supervisor": "owner"}),
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_record_without_a_start_time_owns_a_server_started_near_its_at() {
+    let process = observed_process(42, false);
+    let window = crate::domain::sccache::START_RECORD_WINDOW_SECS;
+    for at in [STARTED_UNIX, STARTED_UNIX - window, STARTED_UNIX + window] {
+        let queue = MemoryLog::default();
+        started_without_start_time(&queue, json!(42), 4226, at);
+        assert_eq!(owner(&queue, &process, 4226).unwrap(), "owner", "{at}");
+    }
+    let queue = MemoryLog::default();
+    started_without_start_time(&queue, json!(42), 4226, STARTED_UNIX);
+    queue.events.borrow_mut().last_mut().unwrap().payload["started_at"] = Value::Null;
+    assert_eq!(owner(&queue, &process, 4226).unwrap(), "owner");
+}
+
+#[test]
+fn a_record_without_a_start_time_stays_unknown_off_its_at_pid_or_port() {
+    let process = observed_process(42, false);
+    let window = crate::domain::sccache::START_RECORD_WINDOW_SECS;
+    for at in [STARTED_UNIX - window - 1, STARTED_UNIX + window + 1] {
+        let queue = MemoryLog::default();
+        started_without_start_time(&queue, json!(42), 4226, at);
+        assert_eq!(owner(&queue, &process, 4226).unwrap(), "unknown", "{at}");
+    }
+    let queue = MemoryLog::default();
+    started_without_start_time(&queue, json!(43), 4226, STARTED_UNIX);
+    assert_eq!(owner(&queue, &process, 4226).unwrap(), "unknown");
+    let queue = MemoryLog::default();
+    started_without_start_time(&queue, json!(42), 4227, STARTED_UNIX);
+    assert_eq!(owner(&queue, &process, 4226).unwrap(), "unknown");
+    // A start whose pid could not be read (`pid_error`) owns nothing.
+    let queue = MemoryLog::default();
+    started_without_start_time(&queue, Value::Null, 4226, STARTED_UNIX);
+    queue.events.borrow_mut().last_mut().unwrap().payload["pid_error"] = json!("no pid");
+    assert_eq!(owner(&queue, &process, 4226).unwrap(), "unknown");
+    // Without the process's start time, nothing is compared.
+    let queue = MemoryLog::default();
+    started_without_start_time(&queue, json!(42), 4226, STARTED_UNIX);
+    let mut unread = process.clone();
+    unread.started_unix = None;
+    assert_eq!(owner(&queue, &unread, 4226).unwrap(), "unknown");
+    // A record without `at` cannot be compared either.
+    queue.events.borrow_mut().last_mut().unwrap().payload["at"] = Value::Null;
+    assert_eq!(owner(&queue, &process, 4226).unwrap(), "unknown");
+}
+
+#[test]
+fn doctor_status_and_detection_follow_a_record_without_a_start_time() {
+    let queue = MemoryLog::default();
+    let server = observed_server(false);
+    started_without_start_time(&queue, json!(42), 4226, STARTED_UNIX + 3);
+    let read = |stats| {
+        report(
+            &queue,
+            &server,
+            &target(),
+            Path::new("sccache"),
+            &env(),
+            stats,
+        )
+        .unwrap()
+    };
+    assert_eq!(read(false)["health"], "running");
+    assert_eq!(read(true)["started_by"], "owner");
+    assert!(observe_once(&queue, &server, &mut FailureWatch::default()).is_none());
+    assert!(queue.payloads(DETECTED).is_empty());
+    // Off the window, the same server is of unknown origin and detected.
+    let queue = MemoryLog::default();
+    started_without_start_time(&queue, json!(42), 4226, STARTED_UNIX + 3600);
+    let status = report(
+        &queue,
+        &server,
+        &target(),
+        Path::new("sccache"),
+        &env(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(status["health"], "unknown_origin");
+    assert_eq!(status["started_by"], "unknown");
+    observe_once(&queue, &server, &mut FailureWatch::default());
+    assert_eq!(queue.payloads(DETECTED).len(), 1);
 }
 
 #[test]

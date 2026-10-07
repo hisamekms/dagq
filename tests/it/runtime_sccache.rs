@@ -73,7 +73,7 @@ fn process_tools(dir: &Path) -> (PathBuf, PathBuf) {
     common::template::script(&lsof, "#!/bin/sh\necho 4242\n");
     common::template::script(
         &ps,
-        "#!/bin/sh\ncase \"$*\" in *ppid=*) echo '1 Mon Oct 5 12:00:00 2026 sccache --server';; *) echo init;; esac\n",
+        "#!/bin/sh\ncase \"$*\" in *ppid=*) echo '1 00:05 Mon Oct 5 12:00:00 2026 sccache --server';; *) echo init;; esac\n",
     );
     (lsof, ps)
 }
@@ -449,7 +449,7 @@ esac
     );
     common::template::script(
         &ps,
-        "#!/bin/sh\ncase \"$*\" in\n*ppid=*) if [ \"$2\" = 4242 ]; then echo '99 Mon Oct 5 12:00:00 2026 sccache --server'; else echo '1 Mon Oct 5 12:01:00 2026 sccache --server'; fi;;\n*) if [ \"$2\" = 99 ]; then echo '/usr/bin/sandbox-exec -p fixture'; else echo init; fi;;\nesac\n",
+        "#!/bin/sh\ncase \"$*\" in\n*ppid=*) if [ \"$2\" = 4242 ]; then echo '99 00:05 Mon Oct 5 12:00:00 2026 sccache --server'; else echo '1 00:05 Mon Oct 5 12:01:00 2026 sccache --server'; fi;;\n*) if [ \"$2\" = 99 ]; then echo '/usr/bin/sandbox-exec -p fixture'; else echo init; fi;;\nesac\n",
     );
     let old_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = old_listener.local_addr().unwrap().port();
@@ -608,7 +608,7 @@ esac
     let (lsof, ps) = process_tools(bin);
     common::template::script(
         &ps,
-        "#!/bin/sh\ncase \"$*\" in *ppid=*) echo '99 Mon Oct 5 12:00:00 2026 sccache --server';; *) echo '/usr/bin/sandbox-exec -p fixture';; esac\n",
+        "#!/bin/sh\ncase \"$*\" in *ppid=*) echo '99 00:05 Mon Oct 5 12:00:00 2026 sccache --server';; *) echo '/usr/bin/sandbox-exec -p fixture';; esac\n",
     );
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -729,7 +729,7 @@ fn the_supervisor_restarts_a_sandboxed_server_and_carries_a_failed_replacement_f
     );
     common::template::script(
         &ps,
-        "#!/bin/sh\ncase \"$*\" in\n*ppid=*) if [ \"$2\" = 4242 ]; then echo '99 Mon Oct 5 12:00:00 2026 sccache --server'; else echo '1 Mon Oct 5 12:01:00 2026 sccache --server'; fi;;\n*) if [ \"$2\" = 99 ]; then echo '/usr/bin/sandbox-exec -p fixture'; else echo init; fi;;\nesac\n",
+        "#!/bin/sh\ncase \"$*\" in\n*ppid=*) if [ \"$2\" = 4242 ]; then echo '99 00:05 Mon Oct 5 12:00:00 2026 sccache --server'; else echo '1 00:05 Mon Oct 5 12:01:00 2026 sccache --server'; fi;;\n*) if [ \"$2\" = 99 ]; then echo '/usr/bin/sandbox-exec -p fixture'; else echo init; fi;;\nesac\n",
     );
     fs::write(bin.join("old-server"), "").unwrap();
     fs::write(bin.join("fail-start"), "").unwrap();

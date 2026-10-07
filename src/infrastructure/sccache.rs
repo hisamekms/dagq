@@ -137,15 +137,23 @@ fn process_with(
         "-p",
         &pid.to_string(),
         "-o",
-        "ppid=,lstart=,command=",
+        "ppid=,etime=,lstart=,command=",
     ]))?;
     let text = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<_> = text.split_whitespace().collect();
-    if parts.len() < 7 {
+    if parts.len() < 8 {
         bail!("ps did not describe pid {pid}");
     }
     let parent_pid: u32 = parts[0].parse()?;
-    let command = parts[6..].join(" ");
+    let started_unix = crate::infrastructure::adapters::parse_etime(parts[1])
+        .and_then(|age| i64::try_from(age).ok())
+        .and_then(|age| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?;
+            Some(i64::try_from(now.as_secs()).ok()? - age)
+        });
+    let command = parts[7..].join(" ");
     // An observed sandbox-exec ancestor is positive evidence. Absence is
     // unknown: a daemon can have been reparented after inheriting a sandbox.
     let parent =
@@ -161,9 +169,10 @@ fn process_with(
     Ok(Some(ServerProcess {
         pid,
         parent_pid,
-        started_at: parts[1..6].join(" "),
+        started_at: parts[2..7].join(" "),
         command,
         sandboxed,
+        started_unix,
     }))
 }
 
@@ -457,7 +466,7 @@ printf '%s\n' '{"stats":{"compile_requests":7,"compile_fails":7,"compilations":0
             &ps,
             r#"#!/bin/sh
 case "$*" in
-*ppid*) printf '%s\n' '12 Mon Oct 5 10:11:12 2026 /bin/sccache --internal-start-server' ;;
+*ppid*) printf '%s\n' '12 1-00:01:05 Mon Oct 5 10:11:12 2026 /bin/sccache --internal-start-server' ;;
 *) printf '%s\n' '/usr/bin/sandbox-exec -p profile /bin/sccache' ;;
 esac
 "#,
@@ -472,6 +481,12 @@ esac
         assert_eq!(process.started_at, "Mon Oct 5 10:11:12 2026");
         assert_eq!(process.command, "/bin/sccache --internal-start-server");
         assert_eq!(process.sandboxed, Some(true));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let age = now - process.started_unix.unwrap();
+        assert!((86_465..=86_475).contains(&age), "{age}");
         fs::write(&lsof, "#!/bin/sh\nexit 1\n").unwrap();
         assert!(process_with(free_port(), &lsof, &ps).unwrap().is_none());
     }

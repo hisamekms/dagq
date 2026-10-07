@@ -409,7 +409,7 @@ fn parse_ps(listing: &[u8]) -> Vec<ProcessInfo> {
 }
 
 /// `ps`'s `etime`, `[[dd-]hh:]mm:ss`, in seconds.
-fn parse_etime(text: &str) -> Option<u64> {
+pub(crate) fn parse_etime(text: &str) -> Option<u64> {
     let (days, clock) = match text.split_once('-') {
         Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
         None => (0, text),

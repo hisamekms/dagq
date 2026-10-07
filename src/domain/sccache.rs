@@ -37,6 +37,32 @@ pub struct ServerProcess {
     /// True only when the observed parent command establishes confinement.
     /// Unknown when it does not: a reparented daemon may keep its sandbox.
     pub sandboxed: Option<bool>,
+    /// The start in Unix seconds, read from the process's elapsed time, to
+    /// compare with a start record's `at` when the record has no
+    /// `started_at` ([`started_near`]). Not part of the identity, and not
+    /// written to events: `started_at` stays the identity's start.
+    #[serde(skip)]
+    pub started_unix: Option<i64>,
+}
+
+/// How far, in seconds either way, a server's start may be from a start
+/// record's `at` and still be that record's start. The supervisor stamps
+/// `at` just after `--start-server` returns (a fresh start: the server
+/// started up to the host adapter's 30 s start timeout plus about 2 s of
+/// reading the listener's pid before), or just before it stops the old
+/// server (a restart: the new one starts up to the stop's 5 s query plus
+/// its 30 s wait for the port after), and `ps etime` is whole seconds.
+/// 120 s covers those 35 s with room for a slow host, while a PID reused
+/// by another server on the same port within two minutes of the record is
+/// too unlikely to tell apart.
+pub const START_RECORD_WINDOW_SECS: i64 = 120;
+
+/// Whether `process` started within [`START_RECORD_WINDOW_SECS`] of `at`
+/// (Unix seconds). An unknown start time never matches.
+pub fn started_near(process: &ServerProcess, at: i64) -> bool {
+    process
+        .started_unix
+        .is_some_and(|start| (start - at).abs() <= START_RECORD_WINDOW_SECS)
 }
 
 /// Lifetime compile counters returned by sccache, not per-observation deltas.
@@ -265,6 +291,7 @@ mod tests {
             parent_pid: 0,
             command: "sccache".into(),
             sandboxed: None,
+            started_unix: None,
         };
         let stats = |requests, failures, compilations| ServerStats {
             requests,

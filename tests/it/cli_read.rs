@@ -1038,7 +1038,7 @@ printf '%s\n' '{"stats":{"compile_requests":7,"compile_fails":7,"compilations":0
         &bin.join("ps"),
         r#"#!/bin/sh
 case "$*" in
-*ppid*) echo '1 Mon Oct 5 10:11:12 2026 /bin/sccache --internal-start-server' ;;
+*ppid*) echo '1 00:05 Mon Oct 5 10:11:12 2026 /bin/sccache --internal-start-server' ;;
 *) echo '/sbin/launchd' ;;
 esac
 "#,

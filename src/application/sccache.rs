@@ -57,16 +57,24 @@ fn configured_report(
     .map(Some)
 }
 
-/// The latest recorded start's supervisor token only when PID, start time
-/// and port all match; otherwise `"unknown"`, including old starts without
-/// a start time. A manually started replacement does not establish ownership.
+/// The latest recorded start's supervisor token only when its PID and port
+/// match and so does its start: `started_at` when the record has one (a
+/// reused PID differs there), else the process's start against the record's
+/// `at` ([`started_near`]). Otherwise `"unknown"`, including a record
+/// without a PID. A manually started replacement does not establish ownership.
 pub fn owner(queue: &dyn RunLog, process: &ServerProcess, port: u16) -> Result<Value> {
     let started = queue.latest_queue_event(&[SCCACHE_SERVER_STARTED])?;
     Ok(started
         .filter(|event| {
-            event.payload["pid"] == process.pid
-                && event.payload["port"] == port
-                && event.payload["started_at"] == process.started_at
+            let record = &event.payload;
+            record["pid"] == process.pid
+                && record["port"] == port
+                && match record["started_at"].as_str() {
+                    Some(_) => record["started_at"] == process.started_at,
+                    None => record["at"]
+                        .as_i64()
+                        .is_some_and(|at| started_near(process, at)),
+                }
         })
         .and_then(|event| {
             event.payload["supervisor"]
