@@ -6,6 +6,7 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - adr-t1479-1
   - adr-t1591-1
   - design-supervisor-lifecycle
@@ -81,3 +82,10 @@ supervisorのlogにも`claim_held`はwarn、`claim_resumed`はinfoで出る。
 - `status`: 最新の`claim_held` / `claim_resumed`が`claim_held`なら、その`supervisor`の登録の項目に`claim_hold`（`claim_held`のpayloadと`since`（記録の時刻））を付ける（[`status`](status.md)）。着地の検証の控えは同じ形の`landing_hold`
 - `stats`: `claim_holds`に、windowの中で始まった控えの`count`と`secs`（合計秒）、理由ごとの`by_reason: {<reason>: {count, secs}}`、今の控え`held`（`{reason, supervisor, since, value, threshold}`、無ければnull）を出す。控えは次の`claim_held` / `claim_resumed`か、同じsupervisorの`supervisor_stopped`で終わり、まだ終わっていない控えとwindowの後に終わった控えはwindowの終わりまでを数える。`--goal`では件数を数えない（taskを持たないため）が、`held`は出す。着地の検証の控えは同じ形の`landing_holds`。控えている間に空きslotがあれば、`idle_slots`の代わりにalert `claim_held`（`value`は空きslotの数）を出すので、控えによる空きと依存の詰まりによる空きを区別できる（[`stats`](stats.md)）
 - observerは`stats --since <cursor>`を入力に読むので、`claim_holds`とalert `claim_held`もそのまま載る
+
+## taskのhold（予定・未実装）
+
+taskを1つずつ待たせるhold（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)）は、この控えと別の層で、まだ実装していない。
+holdの開いたreadyのtaskはclaimの候補の列から外れ、claimの確定の中でも確かめ直すので、holdの前に集めた候補もclaimしない。
+queue全体の控えではないので`claim_held` / `claim_resumed`を書かず、`stats`の`claim_holds`にも数えない。
+詳細は[taskのhold](task-hold.md)が持つ。

@@ -6,6 +6,7 @@ status: current
 created: 2026-09-21
 scope: domain
 related:
+  - adr-t1879-1
   - adr-t1704-1
   - adr-t1811-1
   - adr-t1639-1
@@ -172,7 +173,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 ### goal
 
-- close: `goal::close`が所属taskのstatusをverdictが許すかを決め、`goal::check_follow_ups`が`achieved`の前に元goalのfollow_upの所属の判断を求める（[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)決定8）。
+- close: `goal::close`が所属taskのstatusをverdictが許すかを決め、`goal::check_follow_ups`が`achieved`の前に元goalのfollow_upの所属の判断を求める（ADR-t1504-2決定8）。
   `goal close`・goal reviewの`achieved`・`approve_goal`の答えは同じトランザクションの検査を通る。
 - 開き直し: `achieved`で閉じたgoalだけを、`correct_goal`のaskへの人の`reopen`で開き直す（`goal::reopen`、ADR-t1504-2決定9）。
   開き直したgoalを待つtaskのうちまだclaimされていないものは再び待ち、走っているrunは止めない。
@@ -188,6 +189,12 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
   依存を外すか、cancelするか、取り直すかは計画の判断で、決まった規則では選べないため。
 - 同じ待ちの集合は重ねて知らせず、鎖になっているときは根のtaskだけを知らせる。
 
+### 予定: taskのhold
+
+- holdはdraftと別の印で、taskのstatusを変えず、plan reviewを通った扱いを失わせない（ADR-t1879-1、まだ実装していない）。
+- 印はdraft・editでは外れず、終端で効きを失う。
+  状態ごとの効果・解除・権限は[taskのhold](supervisor-lifecycle/task-hold.md)が持つ。
+
 ### attentionと読む口
 
 - attentionの判定は`event_attention`・`run_attention`・`supervisor_attention`、次の一手は`AttentionNext`（`src/domain/mod.rs`）。
@@ -198,13 +205,13 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 ### 役割の柵
 
-- observerの環境（`DAGQ_ROLE=observer`）は読み取りとfinding・`blocked`のaskだけを許し、一覧に無いコマンドは後から足したものも拒む（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定4）。
+- observerの環境（`DAGQ_ROLE=observer`）は読み取りとfinding・`blocked`のaskだけを許し、一覧に無いコマンドは後から足したものも拒む（ADR-0044決定4）。
   表は[Authorization](authorization.md)の「Policy」が持つ。
 - この判定は`DAGQ_ROLE`の申告に依る柵で、悪意ある実行は防がない。
 
 ## IDとcommitのnewtype
 
-- 入口は`src/domain/ids.rs`で、task IDとgoal IDのように意味の違う値を型で分ける（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)決定4）。
+- 入口は`src/domain/ids.rs`で、task IDとgoal IDのように意味の違う値を型で分ける（ADR-0013決定4）。
 - serdeは素の値で出すので、CLIのJSONは変わらない。
   `RunId`と`CommitSha`の読み込みは生成と同じ検証を通し、空のrun IDや不正なcommitの行は変換のエラーになる。
 - 落とし穴: receiptの`run_id`と`commit`は文字列のまま持つ。
@@ -286,7 +293,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 ## Draft planners
 
-runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1つplannerを立てる（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定16、[ADR-t807-1](../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)）。
+runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1つplannerを立てる（ADR-0044決定16、[ADR-t807-1](../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)）。
 規則と型は`src/domain/follow_up.rs`、storeは`src/infrastructure/draft_planners.rs`、流れは[Draft planners](supervisor-lifecycle/draft-planners.md#draft-planners-supervisor)。
 
 - 出どころ（`DraftOrigin`）と材料はdraftごとに1回記録する。
@@ -333,7 +340,7 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 
 ## 理由の分類コード（`code`）
 
-- 失敗・保留・中断を記録するeventは、payloadに`code`（`domain::ReasonCode`）を持ち、自由文の`reason` / `message` / `error`はそのまま残す（[ADR-0034](../adr/0034-domain-events-carry-reason-codes-actor-and-configuration-changes.md)決定1）。
+- 失敗・保留・中断を記録するeventは、payloadに`code`（`domain::ReasonCode`）を持ち、自由文の`reason` / `message` / `error`はそのまま残す（ADR-0034決定1）。
 - コードの一覧と意味は`ReasonCode::ALL`と`meaning()`が正で、名前を変えるにはADRが要る。
 - コードは「なぜ」、eventのkindは「どの工程で」を言うので、同じコードが別のkindに付く。
 - コードに添える値にpath・workspace ID・pidなどマシンに依る値を入れない（[ADR-0032](../adr/0032-classify-records-into-domain-events-diagnostics-coordination-and-bodies.md)）。

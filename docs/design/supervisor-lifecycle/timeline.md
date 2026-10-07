@@ -6,6 +6,7 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - design-supervisor-lifecycle
 ---
 
@@ -28,3 +29,8 @@ related:
 
 `commands`は、runのsession（`worker` / `resume` / `revise`）が流した重いコマンド（`chain` / `e2e` / `llvm_cov` / `test` / `build`。分類は[stats の作業の内訳](stats.md#作業の内訳)）を始まった順に並べたもの（task 514）。各行は`{session, event, category, from, until, secs, background, finished, failed}`で、`session`は区間のkind、`event`はそれを記録した`session_closed`のid、`finished: false`は終わりが見えず区間の終わりで切ったもの（Codexの区間では、終わりを読めなかったコマンドをturnの終わりで切ったもの。明細の`time_source: turn_end`）、`failed`は結果が分からなければnull。`session_closed`の`work.heavy`から導き、コマンドの全文は持たない（全文はrun directoryの`worktime.jsonl`にある）。Codexの非対話の区間の行もClaudeの区間と同じ形で、時刻はwrapperが出力を読んだ時刻（約1秒の精度。[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)の「Codexの作業の内訳」、task 1354）。内訳を記録していない区間（transcriptが読めなかった、task 514より前、Codexの区間で`work_unavailable`のもの、task 1354より前のCodexの区間）は行を出さない。
 
+## taskのholdの空白（予定・未実装）
+
+runがholdの安全な待ちに入ってから（工程`held`の`run_phase_changed`）解除（`task_released`）までの空白は、理由`held`にする。
+`no_supervisor`の次、`waiting_ask`より前に判定し、holdをかけてから待ちに入るまでの空白は元の工程の理由のまま。
+詳細は[taskのhold](task-hold.md)の「計測とtimeline」が持つ。

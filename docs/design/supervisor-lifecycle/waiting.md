@@ -6,6 +6,7 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-status
@@ -70,3 +71,10 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 ## test
 
 `tests/it/runtime_headless_reopen.rs` は wrapper の開き直し、`runtime_waiting` と `runtime_waiting_stages` は非対話の質問・slot・上限・adopt の待ちを確かめる。対話だけの画面と終了待ちの test は撤去した。`domain::waiting` と stats の unit test は過去を含む待ちの記録と集計を確かめる。
+
+## taskのholdの待ち（予定・未実装）
+
+holdの開いたtaskのrunは、走っていた工程が終わると、次の工程を始めずにslotの外の待ち（工程`held`）に入る。
+待ちに入る前にwrapperの終了を確かめ、人の答えの待ちと同じくworkerの枠を放すが、`--max-waiting`と`waiting.count`には数えず（processを持たない）、答えが来ても次のturnに届けない。
+holdの待ちはstall・idleの検知と段の計時の対象にせず、解除で止めていた工程から戻る。
+決定は[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)、詳細は[taskのhold](task-hold.md)の「状態ごとの効果」と「安全な待ちと解除の順序」が持つ。

@@ -6,6 +6,7 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - design-supervisor-lifecycle
   - adr-0054
   - adr-0047
@@ -21,3 +22,8 @@ related:
 4. `integrating`から`awaiting_integration`に戻したrunは、人の`integrate`を待たない（task 1118）。承認されたかreviewがpass済みのrun（`RunHistory::landable`）は、`RunHistory::recovered_landing`（最新の`previous_status: integrating`の`run_recovered`の後に着地・review・resumeの開始、`landing_decided`、`approve_landing`の`ask_opened`が無い）で着地の列に並び、`status`は`queued to land (runtime)`になり、supervisorの`start_approved_landings`がreviewし直さずに着地させる（[Review](review.md#review-supervisor)の6）。どちらでもないrunは`reviewing (runtime)`になり、supervisorがreviewにかける。supervisorが同じことを自分で行うのは[supervise](supervise.md#supervise)の12（持ち主の居ない`integrating`のrunの解放）。
 
 同じtransactionで、そのrunのcloseされていない`stalled`のaskを閉じ、結末の無い受領の無いidleの検知に`stall_resolved`（`outcome: run_ended`）を1回ずつ記録する（[receiptの無いidleの検知](idle-without-receipt.md)の「閉じる」、task 379）。他のrun、そのlease・process、`run_processes`、worktree、branch、workspace、run directoryは触らない。Taskは`in_progress`のまま残る。`recover`はTaskを`ready`に戻さない: 復旧と再実行は別の判断であり、`failed`で止まったrunと同じく、supervisorの復旧jobが`interrupted`のrunの次の一手（retry / retry_inherit / resume / waitか、inboxの`decide`のask）を決める（[Triage (supervisor)](triage.md#triage-supervisor)）。supervisorは、leaseが無くprocessの止まったrunをこの手順で自分でrecoverする（`run_recovered`に`by: "supervisor"`）。人が`recover`を打つのは、supervisorが居ないとき（または死んだsupervisorのstaleなleaseが残っているとき）だけ。再試行を人が決めるなら`ready ID`（編集するなら`draft ID`）で行い、動いているsupervisor（または次のsupervisor）が新しいTaskRunと新しいworktreeを作る。
+
+## taskのhold（予定・未実装）
+
+`recover`の拒否と手順はholdで変わらず、holdを外さない。
+holdの開いたtaskのrunを`recover`で`interrupted`にしても、supervisorは復旧jobを起動せず、解除の後に続け方を決める（[taskのhold](task-hold.md)の「解除の分岐」）。

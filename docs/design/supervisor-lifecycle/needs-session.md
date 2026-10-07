@@ -6,6 +6,7 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - design-supervisor-lifecycle-task-replanning
   - adr-t639-1
   - adr-t946-1
@@ -66,3 +67,10 @@ resumeのwrapperを起動するのはsupervisorだけ。`status`のattentionは�
 ## taskの再計画（予定・未実装）
 
 再計画の保留guardがあるrunは通常の自動resume・resolved_head・継承retryの対象から外す。継続や案の撤回は成果を保持した専用の解除からbackground wrapperを再開し、既存のresume/reviseの回数を引き継ぐ。 詳細は[taskの再計画](task-replanning.md)が持つ。現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。
+
+## taskのhold（予定・未実装）
+
+holdの開いたtaskの`needs_session`のrunはresumeしない。
+再開の候補の列から外し、`resume_started`の確定の中でもholdを確かめ直す。
+解除は、同じproviderなら今のresumeの経路で続け、providerを変えれば成果を引き継ぐ新しいrunにする。
+決定は[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)、詳細は[taskのhold](task-hold.md)の「解除の分岐」が持つ。

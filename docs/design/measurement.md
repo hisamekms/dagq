@@ -6,6 +6,7 @@ status: draft
 created: 2026-10-04
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - adr-t1662-1
   - adr-t1662-2
   - adr-t1662-3
@@ -76,6 +77,7 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 | verify（`integrate`の検証） | compute | landing_slot |
 | push | external | none |
 | push_pending（`push_failed`の後） | human | none |
+| held（taskのholdで走っていた工程が終わり待ちに入った後。予定・未実装） | human | none |
 
 ### 終端
 
@@ -88,6 +90,8 @@ taskの台帳は`task_created`から始まる。claimの前の待ちの理由は
 - 区間のevent: `slots_full_started` / `slots_full_ended`、`claim_held` / `claim_resumed`、`claim_deferred` / `deferral_ended`（queueのevent。台帳のqueueの行に畳む）。
 - `run_claimed`に足す欄: `ready_at`（taskがclaimできるようになった時刻）・`candidate_rank`（claimの時の候補の中の順位、1から）・`candidates`（候補数）。
 - 着地slotの待ちの区間には`blocked_by`（その間に着地slotを握っていたrunのid）を持つ。
+- 予定・未実装: readyのtaskのhold（[taskのhold](supervisor-lifecycle/task-hold.md)）は、`task_held`から`task_released`までをtaskの区間に重ねて読む。
+  runを持つtaskでは、holdをかけた時刻ではなく、走っていた工程が終わって待ちに入った時刻（工程`held`）から解除までを分析から除く。
 
 ## 台帳の形
 

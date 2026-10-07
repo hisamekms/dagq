@@ -6,6 +6,7 @@ status: current
 created: 2026-09-27
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-run-environment
   - design-supervisor-lifecycle-stats
@@ -82,6 +83,14 @@ window = 60      # 既定 60（domain::prediction::PREDICTION_WINDOW）
   - 他のtaskの予測が`window`件ある（足りない間は誰も対象にしない）
 - **割り当て**: 対象になったtaskは、最後に群を持ったtask（各taskの最初の群付きの`run_claimed`の順で最後）と反対の群になり、最初の1件は`control`。`control`は`claude-opus-5-5`・`medium`、`treatment`は`claude-sonnet-5`・`medium`（`WorkerSession::of_group`）。
 - **対象外**: 予測の無いtask（`ready --bypass-review`・予測の失敗）、`mechanical`でないtask、下位3分の1より上のtaskは既定のまま（群はnull）。`rework_probability`は選択に使わない。
+
+## 予定: taskのholdの解除でのmodelの指定
+
+taskのholdの解除（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)、まだ実装していない）は`--model`でmodelを選べる。
+同じproviderのsessionで続けるときは次のturnからそのmodelで開き、新しいrunかclaimではそのsessionのmodelにする。
+選んだmodelが段の値の1つならその後の段上げはそこから続け、段に無い値なら上げない。
+Codexで続くrunには`--model`を渡せない。
+詳細は[taskのhold](task-hold.md)の「解除の分岐」が持つ。
 
 ## 判定
 

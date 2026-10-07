@@ -6,6 +6,7 @@ status: draft
 created: 2026-10-05
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - adr-t1521-1
   - adr-t1521-2
   - adr-t1487-1
@@ -64,6 +65,9 @@ related:
 5. Git操作（rebase/cherry-pick等）が途中なら、conflict状態・index・作業treeと操作metadataを保存できるまで保存の失敗として保持する。HEADだけをcleanな成果とみなさない。復元は専用のscratch worktreeで行い、元worktreeを上書きしない。
 
 遅延receiptは受け取ったbytesと時刻・旧generation・拒否理由を診断材料として保存する。pauseの柵より前に受理しても、その後のvalidation/review/landingが柵を再検査する。柵より後のreceiptやworker終了はcompletedへの遷移を起こさない。applied後の旧workerの終了もreplacedをfailed/completedに変えない。書き手不在の後にHEADや保存対象が変わったらsnapshotは無効で、封鎖したまま原因を調べる。
+
+この柵は保留の理由を複数持てるようにし、[taskのhold](task-hold.md)（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)決定7）もここに理由を1つ足す。
+holdが共有するのは、次の工程（turn・回答の配送・revise・resume・着地など）を始める前の「次の工程を始めてよいか」の判定だけで、上の2のturnの上限や緊急停止でのprocessの停止、3のjobの停止、receiptの受理の柵は再計画だけのもので、holdは引き継がない（holdは走っている工程を止めない）。
 
 ## snapshotと保存の順
 

@@ -6,6 +6,7 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - design-supervisor-lifecycle-task-replanning
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-background-recovery-job
@@ -46,3 +47,10 @@ related:
 ## taskの再計画（予定・未実装）
 
 長期化の候補には原因別の読み取り診断を足し、継続か再計画を推奨する。jobは実行中taskを編集せず、trusted runtimeが安全な保留を担当する。保留guardのあるrunを通常のretry/recover/readyへ戻さない。 詳細は[taskの再計画](task-replanning.md)が持つ。現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。
+
+## taskのhold（予定・未実装）
+
+holdの開いたtaskの止まったrunには復旧jobを起動せず、開始の確定の中でもholdを確かめ直す。
+holdの前に起動したjobのverdictと`decide`のaskへの回答は、hold中のtaskに進行として適用せず記録として残し、解除の後に版が変わっていなければ適用し、変わっていれば捨てる。
+決定は[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)、詳細は[taskのhold](task-hold.md)の「列の外の結果と回答の適用」が持つ。
+現行の挙動は上の各節のとおり。

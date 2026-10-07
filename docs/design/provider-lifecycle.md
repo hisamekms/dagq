@@ -6,6 +6,7 @@ status: current
 created: 2026-09-21
 scope: provider
 related:
+  - design-supervisor-lifecycle-task-hold
   - adr-t1857-1
   - adr-t1486-1
   - adr-t1570-1
@@ -241,6 +242,7 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - workerのsettingsはClaude Codeの入力欄のサジェストを止める（`runtime_session_settings`）。
   誰も打たないsessionで、サジェストが打ちかけの文と見分けにくかったため。
 - `subagent_review`を要るtaskをCodexで動かしたときは、要るevidenceから外し、receiptの`not_applicable`を理由つきで受ける（`domain::required_of`）。
+- 予定: holdの解除でproviderを変えると、成果を引き継ぐ新しいrunにする（[taskのhold](supervisor-lifecycle/task-hold.md)）。
 
 ### Codexの非対話のworker
 

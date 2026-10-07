@@ -6,6 +6,7 @@ status: current
 created: 2026-09-27
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - adr-0047
   - adr-t813-2
   - adr-t1063-1
@@ -20,6 +21,8 @@ related:
 # 認証と利用上限のaskの待ちとanswer
 
 Claude Codeのログインが切れるか利用上限に達すると、新しいrunもheadlessのjobも同じ理由で止まる。runtimeはそれをqueueで1件の`queue_hold`のask（`authentication`、または`cost`で`subject: usage_limit`）にまとめ（task 361・438、下の「検知」と[ask](ask.md)）、openな間は新しいclaimとheadless jobの起動を控え、人のanswerを自分で適用する（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定42の「待ち」と「answer」、task 437）。ディスクの`cost`のask（`subject: disk`、options `done` / `wait`）は[空き容量を確かめる](disk-space.md)（task 377）が扱い、ここの控えとanswerの適用には入らない。
+
+taskを1つずつ待たせるtaskのhold（予定・未実装）は、この控えと別の層で[taskのhold](task-hold.md)が持つ。
 
 ## 検知（task 438）
 

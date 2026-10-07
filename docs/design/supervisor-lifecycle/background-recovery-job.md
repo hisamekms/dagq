@@ -6,6 +6,7 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
+  - design-supervisor-lifecycle-task-hold
   - adr-t1566-1
   - design-supervisor-lifecycle-prompt
   - design-supervisor-lifecycle
@@ -95,3 +96,10 @@ receiptの形式は`src/domain/views.rs`の`Receipt`で、promptとREADMEに同�
 ## 非対話のrun
 
 workerのrunはすべて非対話で（[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)、task 815。task 1437から対話のrunは無い）、画面・ダイアログ・`/exit`に由来するalert（`prompt_waiting`・`stuck_exit`）と`answer_known_dialog`・`close_and_proceed`はどのrunにも出ない。その代わりの`stalled`（理由`turn_without_receipt` / `permission_denied`、操作は`send_instruction`・`stop_processes`・`resume`・`wait`）と、turnの失敗・停止で終わったrunの`failed`（`retry`・`retry_inherit`・`resume`・`wait`）の扱いは[非対話のworker](headless-worker.md#復旧jobのalertと操作決定9)にある。復旧jobは画面の代わりに最後のturnの要約を読む。
+
+## taskのhold（予定・未実装）
+
+holdの開いたtaskの生きているrunには、holdの待ちに入った後は新しいalertのjobを起動しない（holdの待ちはstall・idleの検知の対象にしない）。
+holdの前に起動したjobのverdictは、hold中は適用せず記録として残し、解除の後に版が変わっていなければ適用し、変わっていれば捨てる。
+決定は[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)、詳細は[taskのhold](task-hold.md)の「列の外の結果と回答の適用」が持つ。
+現行の挙動は上の各節のとおり。
