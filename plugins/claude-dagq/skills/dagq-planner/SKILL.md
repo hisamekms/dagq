@@ -7,19 +7,19 @@ description: Be a dagq planner the runtime opened, with no person at the termina
 
 Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill. Read `${CLAUDE_PLUGIN_ROOT}/skills/dagq/SKILL.md` first: it holds every command used here. Use the CLI only, never the database.
 
-Roles (ADR-0044): the supervisor lands runs and runs the **plan review** job; the inbox relays every ask and attention to the person and records their plans as **requests**. Only the runtime opens a planner: for a request, a proposal sent back, a draft, or a finding. Only plan review (or a person's bypass) makes tasks `ready`. After compaction or `/clear` the SessionStart hook prints `status --role planner`; re-read your work with `"$DAGQ" proposal list` and `goal show ID`. Write goals, tasks, asks and replies in the language the `dagq` skill's section 5 names.
+Roles (ADR-0044): the supervisor lands runs and runs the **plan review** job; the inbox relays every ask and attention to the person and records their plans as **requests**. Only the runtime opens a planner: for a request, a proposal sent back, a draft, or a finding. After compaction or `/clear` the SessionStart hook prints `status --role planner`; re-read your work with `"$DAGQ" proposal list` and `goal show ID`. Write goals, tasks, asks and replies in the language the `dagq` skill's section 5 names.
 
 Your initial prompt says what you were opened for; no person watches this session. Each answer, revise or follow-up is your next turn (`dagq: a request for you is in the file ...`: read it and work on it). Work only on what you were opened for, report briefly and stop; the runtime ends it.
 
 ## Basic policy (ADR-t451-1)
 
-Decide what you can recommend and go on, asking no one: adopting or dropping a follow_up draft, writing to the existing code and ADRs, merging duplicates, fixing what a revise names, planning or declining a request. Leave why in a `note` or the task's `context`. Raise only what a person is needed for (`scope`: acceptance, scope or a goal's decision changed by their intent; `discard`) and the queue, the repository, the ADRs and the person's precedents cannot settle, or a call you are not confident of: `planner_question` with your recommendation and `--confidence`, then report and stop. It goes to the inbox; the answer comes back as `answer to ask <id>: ...` (to you, or to the next planner). A follow_up draft past ADR-t808-1's limit still waits for the person's adopt, even after a move; a move is never adoption (section 3).
+Decide what you can recommend and go on, asking no one: adopting or dropping a follow_up draft, writing to the existing code and ADRs, merging duplicates, fixing what a revise names, planning or declining a request. Leave why in a `note` or the task's `context`. Raise only what a person is needed for (`scope`: acceptance, scope or a goal's decision changed by their intent; `discard`) and the queue, the repository, the ADRs and the person's precedents cannot settle, or a call you are not confident of: `planner_question` with your recommendation and `--confidence`, then report and stop. The answer comes back as `answer to ask <id>: ...` (to you or the next planner). A follow_up draft past ADR-t808-1's limit still waits for the person's adopt, even after a move; a move is never adoption (section 3).
 
 ## 1. A request: plan it or decline it
 
 Your prompt holds the person's words. Look for work that covers it first (`search`, `related`, `goal list`, the source). Then one of:
 
-- **Plan it**: the `dagq` skill's section 2 and `skills/dagq/reference/register.md`, "For a planner" (the goal with its `--priority` and `--tag`, the task fields, `related` after each `add`, `graph --goal ID`). No blanket `--evidence e2e`, no throwaway-queue hand steps in a worker's acceptance. Then:
+- **Plan it**: the `dagq` skill's section 2 and `skills/dagq/reference/register.md`, "For a planner". Then:
 
 ```sh
 "$DAGQ" lint TASK...            # or --proposal ID; fix every violation first
@@ -30,7 +30,7 @@ Your prompt holds the person's words. Look for work that covers it first (`searc
 - **Decline** (done already, a duplicate in flight, or not plannable as asked; say why): `"$DAGQ" request decline N --reason '<why>'`. The inbox tells the person.
 - **Ask**: `"$DAGQ" ask --request N --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '...' --option plan --option decline`.
 
-The worker's provider: no flag unless the person's words ask for Codex, never to dodge a login or usage limit (`skills/dagq/reference/provider.md`). Traffic control is plan review's; it changes no priority or goal of a request's plan. Give each goal you add tags from the repository's vocabulary and a priority from the person's words, else by the repository's guide (say so in its description); a task's own priority only when the person's words say it goes first or can wait (else it inherits the goal's).
+The worker's provider: no flag unless the person's words ask for Codex, never to dodge a login or usage limit (`skills/dagq/reference/provider.md`). Depend only on a content prerequisite (it must land first); leave a same-file conflict to the runtime's claim deferral, never a dependency or an ask. Record each dependency's kind and reason (`note` or `context`). Ask (`planner_question`) only when a content prerequisite lifts a lower-priority goal's task by inheritance and no reorder, move or split of yours solves it: bring that task forward with its priority, or does the higher goal wait? A goal you add: tags from the repository's vocabulary, priority from the person's words, else the repository's guide (say so in its description). A task's own priority only when the person's words say it goes first or can wait.
 
 ## 2. When plan review sends it back (revise)
 
@@ -38,7 +38,7 @@ The worker's provider: no flag unless the person's words ask for Codex, never to
 
 ## 3. A draft or a finding you were opened for
 
-Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel`, `--duplicate-of X`), or, per the Basic policy only, ask (`planner_question`; a finding: `submit --finding N`, `finding dismiss N` or `ask --finding N`). A request naming one (`--ref task:N`, `finding:N`) is decided the same way, but as the person's (section 1). Details (`revisit`, a `ci_failure` finding): `skills/dagq/reference/register.md`, "A runtime planner".
+Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel`, `--duplicate-of X`), or, per the Basic policy only, ask (`planner_question`; a finding: `submit --finding N`, `finding dismiss N` or `ask --finding N`). A request naming one (`--ref task:N`, `finding:N`) the same, as the person's (section 1). Details (`revisit`, a `ci_failure` finding): `skills/dagq/reference/register.md`, "A runtime planner".
 
 **Otherwise what you add here is AI-made:** no task priority of its own (it inherits its goal's); an existing goal only when its acceptance needs it (a follow_up: below), else a new goal (priority by the repository's guide) or no goal. Plan review checks both (`register.md`, "Priority").
 
