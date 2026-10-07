@@ -158,10 +158,12 @@ fn a_claim_writes_the_worker_of_its_task_on_the_run() {
     assert!(runs_of(&db, codex).is_empty());
 }
 
-/// A supervisor with the adapters of Claude only (interactive and headless,
-/// ADR-t813-2: its `codex` is not found) while Claude is held (its hold ask
-/// is open) can run no worker: it claims neither the Codex task nor the
-/// headless Claude one (`provider_unavailable`): each deferral is
+/// A supervisor with the adapters of Claude only (headless, ADR-t813-2:
+/// its `codex` is not found) while Claude is held (its hold ask is open)
+/// can run no worker: it claims neither the Codex task nor the headless
+/// Claude one, nor one recorded on the interactive Claude worker, which
+/// runs headless (`provider_unavailable`, not `mode_unavailable`, for
+/// it too): each deferral is
 /// recorded once, with the worker, and shown by `status`. A task that
 /// leaves the candidates ends its deferral. (A mode the binary lacks for a
 /// provider it has, `mode_unavailable`, is judged the same way:
@@ -170,9 +172,17 @@ fn a_claim_writes_the_worker_of_its_task_on_the_run() {
 #[test]
 fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
     let (_dir, repo, db) = fixture();
-    let codex = {
+    let (codex, interactive) = {
         let mut queue = SqliteQueue::open(&db).unwrap();
-        add_task(&mut queue, "codex", Some(Provider::Codex), None)
+        (
+            add_task(&mut queue, "codex", Some(Provider::Codex), None),
+            add_task(
+                &mut queue,
+                "interactive",
+                Some(Provider::Claude),
+                Some(WorkerMode::Interactive),
+            ),
+        )
     };
     open_hold_ask(&db, dagq::domain::AskReason::Authentication, None);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
@@ -181,8 +191,9 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(runs_of(&db, TaskId::new(1)).is_empty());
     assert!(runs_of(&db, codex).is_empty());
+    assert!(runs_of(&db, interactive).is_empty());
     let deferred = events(&db, "claim_deferred");
-    assert_eq!(deferred.len(), 2, "{deferred:?}");
+    assert_eq!(deferred.len(), 3, "{deferred:?}");
     let (task, payload) = &deferred[1];
     assert_eq!(*task, Some(codex));
     assert_eq!(payload["reason"], "provider_unavailable");
@@ -191,6 +202,9 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
     assert!(payload["message"].as_str().unwrap().contains("codex"));
     assert_eq!(deferred[0].0, Some(TaskId::new(1)));
     assert_eq!(deferred[0].1["reason"], "provider_unavailable");
+    assert_eq!(deferred[2].0, Some(interactive));
+    assert_eq!(deferred[2].1["reason"], "provider_unavailable");
+    assert_eq!(deferred[2].1["worker_mode"], "interactive");
     let status = runtime::status(&db).unwrap();
     let reasons: Vec<(Value, Value)> = status["claim_deferrals"]
         .as_array()
@@ -202,7 +216,8 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
         reasons,
         [
             (json!(1), json!("provider_unavailable")),
-            (json!(codex), json!("provider_unavailable"))
+            (json!(codex), json!("provider_unavailable")),
+            (json!(interactive), json!("provider_unavailable"))
         ]
     );
 
@@ -211,7 +226,7 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
     let outcome = supervise_with(&db, &repo, &backend, &supervise_options(3, true)).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(events(&db, "claim_deferred").len(), 2);
+    assert_eq!(events(&db, "claim_deferred").len(), 3);
     SqliteQueue::open(&db)
         .unwrap()
         .transition(codex, TaskAction::Cancel)
@@ -264,7 +279,7 @@ fn the_providers_are_recorded_on_the_registration() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(providers[0]["provider"], "claude", "{providers}");
     assert_eq!(providers[0]["found"], true);
-    assert_eq!(providers[0]["modes"], json!(["interactive", "headless"]));
+    assert_eq!(providers[0]["modes"], json!(["headless"]));
     assert_eq!(providers[1]["provider"], "codex");
     assert_eq!(providers[1]["executable"], json!(codex));
     assert_eq!(providers[1]["found"], true);

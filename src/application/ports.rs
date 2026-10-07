@@ -562,11 +562,6 @@ pub trait AgentProvider {
         let _ = (cwd, name);
         anyhow::bail!("this provider has no plugins")
     }
-    fn command(&self, run: &crate::domain::TaskRun, prompt: &str) -> Result<CommandSpec>;
-    /// The same session reopened for a `needs_session` run (ADR-0019): the
-    /// run's own settings and idle marker, without a prompt; the supervisor
-    /// sends the resolution request to the terminal once it is up.
-    fn resume_command(&self, run: &crate::domain::TaskRun) -> Result<CommandSpec>;
     /// A headless run of the agent for a job without a workspace (ADR-0024
     /// decision 2): `prompt` in `cwd`, allowed what `access` says and
     /// nothing else that needs permission (ADR-t1063-1 decision 2). The
@@ -697,9 +692,10 @@ pub trait AgentProvider {
         let _ = queue_dir;
         None
     }
-    /// Start the worker session `command` (from [`AgentProvider::command`]
-    /// or [`AgentProvider::resume_command`]) with `model` at `effort`
-    /// (ADR-0079 decision 3): given explicitly, so neither the provider's
+    /// Start the agent of `command` (a turn from
+    /// [`AgentProvider::turn_command`], or another role's through
+    /// [`AgentProvider::apply_launch`]) with `model` at `effort` (ADR-0079
+    /// decision 3): given explicitly, so neither the provider's
     /// default nor the user's settings decide them. A provider without
     /// models leaves it as it is.
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
@@ -734,12 +730,12 @@ pub trait AgentProvider {
     fn without_mcp(&self, command: &mut CommandSpec) {
         let _ = command;
     }
-    /// Give a worker's agent (`command`, from [`AgentProvider::command`],
-    /// [`AgentProvider::resume_command`] or [`AgentProvider::turn_command`])
-    /// the resource broker's tools: the MCP configuration at `config`
-    /// (`<run dir>/broker/mcp.json`) and the permission to use its server
-    /// (ADR-t827-4 decision 1). Whether it did: a provider whose MCP the
-    /// runtime does not pass yet (Codex) leaves the command as it is.
+    /// Give a worker's turn (`command`, from
+    /// [`AgentProvider::turn_command`]) the resource broker's tools: the
+    /// MCP configuration at `config` (`<run dir>/broker/mcp.json`) and the
+    /// permission to use its server (ADR-t827-4 decision 1). Whether it
+    /// did: a provider whose MCP the runtime does not pass yet (Codex)
+    /// leaves the command as it is.
     fn broker_tools(&self, command: &mut CommandSpec, config: &std::path::Path) -> bool {
         let _ = (command, config);
         false

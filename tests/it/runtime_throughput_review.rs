@@ -40,12 +40,6 @@ impl AgentProvider for ReviewProvider {
     fn preflight(&self) -> Result<()> {
         Ok(())
     }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-        bail!("the throughput review has no run")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-        bail!("the throughput review has no run")
-    }
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         assert!(
             prompt.contains("You are the throughput review job"),

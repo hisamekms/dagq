@@ -207,12 +207,6 @@ impl AgentProvider for StubReviewer {
     fn preflight(&self) -> Result<()> {
         Ok(())
     }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-        unreachable!("no run starts in these tests")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-        unreachable!("no run starts in these tests")
-    }
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         // The run of an in-progress task is left by a supervisor that is
         // gone: its recovery job cannot start, and it waits (task 635).

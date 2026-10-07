@@ -2929,11 +2929,13 @@ fn bound_main_checkout(queue: &SqliteQueue) -> Result<Option<Result<PathBuf>>> {
 }
 
 /// The adapters of each worker this binary runs (ADR-t813-2), by provider
-/// and mode: Claude Code's interactive session and its headless turns
-/// (`claude -p`, ADR-t813-1), and Codex's headless turns (`codex exec`,
-/// ADR-t813-3) when `codex` is given. A headless run has no screen, so
-/// Codex's signals are never read; its spans are looked for as Claude's
-/// and are not found (no active time or tokens are recorded for them).
+/// and mode: Claude Code's headless turns (`claude -p`, ADR-t813-1), and
+/// Codex's headless turns (`codex exec`, ADR-t813-3) when `codex` is
+/// given. A headless run has no screen, so Codex's signals are never
+/// read; its spans are looked for as Claude's and are not found (no active
+/// time or tokens are recorded for them). A run recorded on Claude's
+/// interactive worker is resumed headless (ADR-t1433-2), so it has no
+/// adapters of its own.
 pub fn worker_adapters<'a>(
     claude: &'a ClaudeCode,
     transcripts: &'a ClaudeTranscripts,
@@ -2944,15 +2946,7 @@ pub fn worker_adapters<'a>(
         signals: claude,
         transcripts,
     };
-    let workers = WorkerAdapters::default()
-        .with(Worker::CLAUDE_INTERACTIVE, adapter)
-        .with(
-            Worker {
-                provider: Provider::Claude,
-                mode: WorkerMode::Headless,
-            },
-            adapter,
-        );
+    let workers = WorkerAdapters::default().with(Worker::CLAUDE_HEADLESS, adapter);
     match codex {
         Some(codex) => workers.with(
             Worker {
@@ -3062,10 +3056,12 @@ pub fn session(
     let transcripts = ClaudeTranscripts::from_env();
     let codex = Codex::new(codex.into());
     let workers = worker_adapters(&provider, &transcripts, Some(&codex));
-    // The run's worker picks the adapters (ADR-t813-2); the supervisor
-    // claims no task whose worker this binary has none for.
+    // The run's provider picks the adapters (ADR-t813-2). Every wrapper
+    // runs headless turns: a run still recorded on the interactive worker
+    // (reopened before a resume converted it) takes its provider's
+    // headless adapters (ADR-t1433-2).
     let run = SqliteQueue::open(db)?.run(id)?;
-    let worker = Worker::new(run.actual_provider(), run.worker_mode())?;
+    let worker = Worker::new(run.actual_provider(), WorkerMode::Headless)?;
     let adapter = workers.get(worker).with_context(|| {
         format!(
             "run {id}: this binary has no adapters for a {} {} worker",

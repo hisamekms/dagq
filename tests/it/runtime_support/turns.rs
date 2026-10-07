@@ -1,8 +1,6 @@
 //! The fixture's worker mode (goal 92): the fixture's tasks are headless,
 //! and [`TestWorkspace`] runs each one's agent script as the turns of a stub
-//! `claude` of the run's own, so that the runtime tests that check nothing
-//! of an interactive session go through the headless worker without
-//! changing their scripts. Planner and inbox screen fixtures are separate.
+//! `claude` of the run's own.
 use super::*;
 
 /// A headless turn has no session to go idle in or to be asked to exit:
@@ -22,8 +20,8 @@ await_exit() { :; }
 /// The prelude of a fake agent's script run as a headless turn (goal 92):
 /// the stub `claude` of [`headless_claude`] sources it after its own
 /// helpers, so the script's `receipt` and `commit` are the
-/// [`worker_helpers`] of an interactive session, and `idle` and
-/// `await_exit` return at once ([`turn_session_helpers`]).
+/// [`worker_helpers`], and `idle` and `await_exit` return at once
+/// ([`turn_session_helpers`]).
 pub const TURN_PRELUDE: &str = concat!(worker_helpers!(), turn_session_helpers!());
 
 /// The prelude of a resumed session's script run as a headless resume turn

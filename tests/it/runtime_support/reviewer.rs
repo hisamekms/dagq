@@ -70,12 +70,6 @@ impl AgentProvider for TestReviewer {
     fn preflight(&self) -> Result<()> {
         Ok(())
     }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-        unreachable!("the reviewer starts no session")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-        unreachable!("the reviewer starts no session")
-    }
     // A run that fails under these tests is recovered by this provider too:
     // with no script left, a live session's recovery job escalates, and one
     // for a run that ended cannot start (it waits to be recovered by hand).

@@ -3527,56 +3527,6 @@ impl AgentProvider for ClaudeCode {
         plugin_state(&listed, name)
     }
 
-    fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
-        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
-        let settings = run_dir.join("claude-settings.json");
-        write_settings(
-            &settings,
-            ActorRole::Worker,
-            &run.idle_marker_path()?,
-            direct_tools_log(run_dir).as_deref(),
-        )?;
-        let mut command = CommandSpec::new(&self.executable);
-        command
-            .current_dir(run.worktree_path().context("missing worktree")?)
-            .arg("--session-id")
-            .arg(run.id().as_str())
-            .arg("--debug-file")
-            .arg(run.log_path().context("missing log path")?)
-            .arg("--add-dir")
-            .arg(run_dir)
-            .arg("--settings")
-            .arg(&settings)
-            .arg("--")
-            .arg(prompt);
-        Ok(command)
-    }
-
-    /// `claude --resume <run-id>` in the worktree with the run's settings
-    /// (its `Stop` hook), so the resumed session opens like the worker did.
-    fn resume_command(&self, run: &TaskRun) -> Result<CommandSpec> {
-        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
-        let settings = run_dir.join("claude-settings.json");
-        write_settings(
-            &settings,
-            ActorRole::Worker,
-            &run.idle_marker_path()?,
-            direct_tools_log(run_dir).as_deref(),
-        )?;
-        let mut command = CommandSpec::new(&self.executable);
-        command
-            .current_dir(run.worktree_path().context("missing worktree")?)
-            .arg("--resume")
-            .arg(run.id().as_str())
-            .arg("--debug-file")
-            .arg(run_dir.join(crate::application::screen_idle::RESUME_DEBUG_LOG))
-            .arg("--add-dir")
-            .arg(run_dir)
-            .arg("--settings")
-            .arg(&settings);
-        Ok(command)
-    }
-
     /// `claude` in the checkout with the planner directory's settings (its
     /// `Stop` hook writes the idle marker there), its debug file, the
     /// directory added, and the plugin directory when one was given. Only a
@@ -3585,7 +3535,7 @@ impl AgentProvider for ClaudeCode {
     /// ([`Self::turn_command`], ADR-t1433-2 decision 3).
     fn planner_command(&self, planner: &PlannerCommand<'_>) -> Result<CommandSpec> {
         let settings = planner.dir.join("claude-settings.json");
-        write_settings(&settings, ActorRole::Planner, &planner.idle_marker(), None)?;
+        write_settings(&settings, ActorRole::Planner, &planner.idle_marker())?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(planner.cwd)
@@ -3660,7 +3610,6 @@ impl AgentProvider for ClaudeCode {
             ActorRole::ReviewJob,
             // The review has no hook to write a marker with.
             run_dir,
-            None,
         )?;
         let mut command = CommandSpec::new(&self.executable);
         command
@@ -3890,8 +3839,8 @@ pub const HEADLESS_SETTINGS: &str = "claude-headless-settings.json";
 /// Settings of a headless worker's turns (ADR-t813-1): no hook, the
 /// worker's `permissions.deny` ([`SIGNAL_BY_NAME_DENIED`], then
 /// [`HEADLESS_DENIED_TOOLS`] and [`PRINT_MODE_DENIED_TOOLS`], then `deny`,
-/// as in [`stop_hook_settings`])
-/// and the same `autoMode` environment as an interactive run session.
+/// as in [`stop_hook_settings`]) and the same `autoMode` environment as
+/// [`stop_hook_settings`].
 pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "permissions": {
@@ -3977,20 +3926,19 @@ pub enum AgentSettings {
     /// The review's: no hooks, so it never writes the live worker session's
     /// idle marker.
     Review,
-    /// A session's: the `Stop` hook writing the idle marker, the
-    /// `UserPromptSubmit` hook, and `permissions.deny` of signals by name;
-    /// with the prompt suggestions off in a session nobody types in.
-    Session { suggestions: bool },
+    /// A session's in a terminal ([`stop_hook_settings`]): the `Stop` hook
+    /// writing the idle marker, the `UserPromptSubmit` hook, and
+    /// `permissions.deny` of signals by name.
+    Session,
 }
 
-/// The settings of the agent of `role`: a worker's session is without
-/// suggestions, the session of a planner in a terminal (only a person's,
-/// ADR-t1433-2 decision 3) keeps them, the review has its own, and the
-/// rest none.
+/// The settings of the agent of `role`: the session of a planner in a
+/// terminal (only a person's, ADR-t1433-2 decision 3), the review's, and
+/// none for the rest. A worker and a planner of the runtime's run headless
+/// turns, whose settings [`AgentProvider::turn_command`] writes.
 pub fn agent_settings(role: ActorRole) -> AgentSettings {
     match role {
-        ActorRole::Worker => AgentSettings::Session { suggestions: false },
-        ActorRole::Planner => AgentSettings::Session { suggestions: true },
+        ActorRole::Planner => AgentSettings::Session,
         ActorRole::ReviewJob => AgentSettings::Review,
         _ => AgentSettings::None,
     }
@@ -4096,27 +4044,18 @@ fn review_disallowed_tools(access: JobAccess) -> Vec<&'static str> {
     tools
 }
 
-/// Write the settings of the agent of `role` whose idle marker is `idle_marker` to `path`: the one place
-/// the role's settings ([`agent_settings`]) and the `permissions.deny` of
-/// its policy ([`permission_deny`]) become Claude Code's, with the hooks
-/// counting the built-in tools to `direct_tools` when it is given
-/// ([`with_direct_tool_hooks`]). Settings of none write nothing.
-fn write_settings(
-    path: &Path,
-    role: ActorRole,
-    idle_marker: &Path,
-    direct_tools: Option<&Path>,
-) -> Result<()> {
+/// Write the settings of the agent of `role` whose idle marker is
+/// `idle_marker` to `path`: the one place the role's settings
+/// ([`agent_settings`]) and the `permissions.deny` of its policy
+/// ([`permission_deny`]) become Claude Code's. Settings of none write
+/// nothing.
+fn write_settings(path: &Path, role: ActorRole, idle_marker: &Path) -> Result<()> {
     let deny = permission_deny(role);
     let text = match agent_settings(role) {
         AgentSettings::None => return Ok(()),
         AgentSettings::Review => review_settings(&deny)?,
-        AgentSettings::Session { suggestions: true } => stop_hook_settings(idle_marker, &deny)?,
-        AgentSettings::Session { suggestions: false } => {
-            runtime_session_settings(idle_marker, &deny)?
-        }
+        AgentSettings::Session => stop_hook_settings(idle_marker, &deny)?,
     };
-    let text = with_direct_tool_hooks(text, direct_tools)?;
     crate::application::RunFiles::write(&super::run_files::LocalRunFiles, path, text.as_bytes())
         .with_context(|| format!("write {}", path.display()))
 }
@@ -4322,20 +4261,6 @@ pub fn stop_hook_settings(idle_marker: &Path, deny: &[String]) -> Result<String>
             "environment": ["$defaults"]
         }
     }))?)
-}
-
-/// The settings of a session the runtime starts (a worker and its resume):
-/// [`stop_hook_settings`] with Claude Code's prompt suggestions off
-/// (`promptSuggestionEnabled: false`). A suggestion fills the input box
-/// with grey text that reads on the screen like a half-typed message, and
-/// nobody types in these sessions (goal 48). The sessions a person works
-/// in (the inbox, a person's planner) keep them; a planner of the
-/// runtime's has no screen (ADR-t1433-2).
-pub fn runtime_session_settings(idle_marker: &Path, deny: &[String]) -> Result<String> {
-    let mut settings: serde_json::Value =
-        serde_json::from_str(&stop_hook_settings(idle_marker, deny)?)?;
-    settings["promptSuggestionEnabled"] = serde_json::Value::Bool(false);
-    Ok(serde_json::to_string_pretty(&settings)?)
 }
 
 /// The Bash permission rules a session's settings deny: commands that
@@ -6027,10 +5952,10 @@ mod tests {
     }
 
     /// A worker given the broker's tools (its `<run dir>/broker/mcp.json`)
-    /// gets a `PreToolUse` hook per built-in file or command tool, in its
-    /// session's, its resume's and its headless turns' settings; one
-    /// without them (`disabled`) and a planner get none. The hook appends
-    /// the tool's name alone, reads its input away and exits 0.
+    /// gets a `PreToolUse` hook per built-in file or command tool in its
+    /// headless turns' settings; one without them (`disabled`) and a
+    /// planner get none. The hook appends the tool's name alone, reads its
+    /// input away and exits 0.
     #[test]
     fn only_a_worker_with_the_brokers_tools_counts_its_built_in_tools() {
         use crate::domain::broker_usage::{DIRECT_TOOLS, DIRECT_TOOLS_LOG};
@@ -6049,10 +5974,6 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(run_dir.join(name)).unwrap()).unwrap()
         };
         let all = || -> Vec<Value> {
-            claude.command(&run, "go").unwrap();
-            let session = read("claude-settings.json");
-            claude.resume_command(&run).unwrap();
-            let resume = read("claude-settings.json");
             claude
                 .turn_command(
                     &TurnTarget::of_run(&run).unwrap(),
@@ -6060,7 +5981,7 @@ mod tests {
                     crate::domain::turn::TurnSession::New("s"),
                 )
                 .unwrap();
-            vec![session, resume, read(HEADLESS_SETTINGS)]
+            vec![read(HEADLESS_SETTINGS)]
         };
         for settings in all() {
             assert!(settings["hooks"].get("PreToolUse").is_none(), "{settings}");
@@ -6077,11 +5998,6 @@ mod tests {
                 .map(|hook| hook["matcher"].as_str().unwrap())
                 .collect();
             assert_eq!(matchers, DIRECT_TOOLS);
-            // The session's own hooks stay.
-            assert_eq!(
-                settings["hooks"].get("Stop").is_some(),
-                settings["hooks"].get("UserPromptSubmit").is_some()
-            );
             for hook in hooks {
                 let command = hook["hooks"][0]["command"].as_str().unwrap();
                 let mut child = Command::new("sh")
@@ -6099,7 +6015,6 @@ mod tests {
             }
         }
         let expected: String = DIRECT_TOOLS
-            .repeat(3)
             .iter()
             .map(|tool| format!("{tool}\n"))
             .collect();
@@ -6130,12 +6045,53 @@ mod tests {
         assert!(planner.get("hooks").is_none(), "{planner}");
     }
 
+    /// A worker's turn, new or resumed, takes its model and effort
+    /// (ADR-0079 decision 3) among the options, before the `--` that ends
+    /// them and the prompt.
+    #[test]
+    fn a_turn_takes_its_model_and_effort_before_its_prompt() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let mut record = record(None);
+        record.worktree_path = Some(dir.path().join("worktree").to_string_lossy().into_owned());
+        record.run_dir = Some(run_dir.to_string_lossy().into_owned());
+        record.log_path = Some(run_dir.join("log").to_string_lossy().into_owned());
+        let run = TaskRun::restore(record).unwrap();
+        for session in [
+            crate::domain::turn::TurnSession::New("s"),
+            crate::domain::turn::TurnSession::Resume("s"),
+        ] {
+            let mut command = claude
+                .turn_command(&TurnTarget::of_run(&run).unwrap(), "go", session)
+                .unwrap();
+            claude.select_model(&mut command, "claude-sonnet-5", "medium");
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                args[args.len() - 6..],
+                [
+                    "--model",
+                    "claude-sonnet-5",
+                    "--effort",
+                    "medium",
+                    "--",
+                    "go"
+                ]
+            );
+        }
+    }
+
     #[test]
     fn every_role_gets_its_settings_from_one_table() {
         for role in ActorRole::ALL {
             let expected = match role {
-                ActorRole::Worker => AgentSettings::Session { suggestions: false },
-                ActorRole::Planner => AgentSettings::Session { suggestions: true },
+                ActorRole::Planner => AgentSettings::Session,
                 ActorRole::ReviewJob => AgentSettings::Review,
                 _ => AgentSettings::None,
             };

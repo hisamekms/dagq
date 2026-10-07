@@ -404,9 +404,9 @@ pub struct Ports<'a> {
     pub cmux: &'a dyn WorkspaceBackend,
     /// The adapters of each worker (provider and mode) this binary runs
     /// (ADR-t813-2): every agent is checked before anything is claimed, the
-    /// signals of Claude's interactive adapter read the planner and inbox
-    /// screens and every idle marker (no worker screen is read since task
-    /// 1437), and a task whose worker has none is not claimed.
+    /// signals of Claude's headless adapter read every idle marker and the
+    /// jobs' failures, and a task whose provider has no headless worker
+    /// here is not claimed on it.
     pub workers: WorkerAdapters<'a>,
     /// Starts the headless review and triage (ADR-0027, ADR-0024).
     pub reviewer: &'a dyn AgentProvider,
@@ -740,11 +740,12 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     );
     // No cmux is pinged: the supervisor calls none (ADR-t1433-1); the
     // backend it holds starts and stops the background wrappers. The idle
-    // markers are read with the interactive Claude adapter's signals.
-    let interactive = ports
+    // markers and the jobs' failures are read with the headless Claude
+    // adapter's signals.
+    let claude = ports
         .workers
-        .get(Worker::CLAUDE_INTERACTIVE)
-        .context("no adapters for the interactive Claude worker")?;
+        .get(Worker::CLAUDE_HEADLESS)
+        .context("no adapters for the headless Claude worker")?;
     for worker in ports.workers.workers() {
         if settings.no_claude && worker.provider == crate::domain::Provider::Claude {
             continue;
@@ -875,7 +876,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         cmux: &cmux,
         reviewer: ports.reviewer,
         codex_jobs: ports.codex_jobs,
-        signals: interactive.signals,
+        signals: claude.signals,
         workers: ports
             .workers
             .workers()

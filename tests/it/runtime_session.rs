@@ -410,10 +410,10 @@ fn the_first_commit_is_observed_once_while_the_session_works() {
 fn claude_stop_hook_settings_publish_the_idle_marker() {
     use dagq::application::execution::permission_deny;
     use dagq::domain::ActorRole;
-    use dagq::infrastructure::adapters::{
-        ClaudeCode, runtime_session_settings, stop_hook_settings,
-    };
-    let deny = permission_deny(ActorRole::Worker);
+    use dagq::infrastructure::adapters::stop_hook_settings;
+    // The settings of a session in a terminal: only a person's planner
+    // runs one; the runs' sessions run headless turns.
+    let deny = permission_deny(ActorRole::Planner);
     let dir = tempfile::tempdir().unwrap();
     let run_dir = dir.path().join("run's dir");
     fs::create_dir(&run_dir).unwrap();
@@ -423,7 +423,7 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
         status: RunStatus::Starting,
         requested_provider: dagq::domain::Provider::Claude,
         actual_provider: dagq::domain::Provider::Claude,
-        worker_mode: dagq::domain::worker::WorkerMode::Interactive,
+        worker_mode: dagq::domain::worker::WorkerMode::Headless,
         base_commit: sha("0123456789abcdef0123456789abcdef01234567"),
         branch: Some("dagq/x".into()),
         worktree_path: Some(dir.path().to_str().unwrap().into()),
@@ -438,39 +438,12 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
         created_at: String::new(),
     })
     .unwrap();
-    let command = ClaudeCode {
-        executable: "claude".into(),
-    }
-    .command(&run, "prompt")
-    .unwrap();
-    let args: Vec<String> = command
-        .get_args()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-    let settings = run_dir.join("claude-settings.json");
-    assert!(args.contains(&"--settings".to_string()));
-    assert!(args.contains(&settings.to_str().unwrap().to_string()));
-    let text = fs::read_to_string(&settings).unwrap();
-    assert_eq!(
-        text,
-        runtime_session_settings(&run.idle_marker_path().unwrap(), &deny).unwrap()
-    );
+    let text = stop_hook_settings(&run.idle_marker_path().unwrap(), &deny).unwrap();
     let parsed: Value = serde_json::from_str(&text).unwrap();
-    // Nobody types in a worker's session: Claude Code's prompt suggestions,
-    // grey text in the input box that reads like a half-typed message, are
-    // off (goal 48). Otherwise the settings are the Stop hook's.
-    assert_eq!(parsed["promptSuggestionEnabled"], json!(false));
-    let mut hooks_only = parsed.clone();
-    hooks_only
-        .as_object_mut()
-        .unwrap()
-        .remove("promptSuggestionEnabled");
-    let expected: Value =
-        serde_json::from_str(&stop_hook_settings(&run.idle_marker_path().unwrap(), &deny).unwrap())
-            .unwrap();
-    assert_eq!(hooks_only, expected);
-    // The worker's policy becomes its `permissions.deny`, after the signals
-    // by name: no landing, answering, readying or rewriting its role.
+    // A person types in the session: its prompt suggestions stay.
+    assert_eq!(parsed.get("promptSuggestionEnabled"), None);
+    // The role's policy becomes its `permissions.deny`, after the signals
+    // by name: no landing, answering or rewriting its role.
     let denied = parsed["permissions"]["deny"].as_array().unwrap();
     assert_eq!(
         denied[..2],
@@ -479,52 +452,17 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
     for rule in [
         "Bash(dagq integrate:*)",
         "Bash(dagq answer:*)",
-        "Bash(dagq ready:*)",
         "Bash(DAGQ_ROLE=*)",
     ] {
         assert!(denied.contains(&json!(rule)), "{rule}: {denied:?}");
     }
-    assert!(!denied.contains(&json!("Bash(dagq ask:*)")));
-    // The model and effort go among the options (ADR-0079 decision 3).
-    let claude = ClaudeCode {
-        executable: "claude".into(),
-    };
-    let mut chosen = claude.command(&run, "prompt").unwrap();
-    claude.select_model(&mut chosen, "claude-sonnet-5", "medium");
-    let chosen: Vec<String> = chosen
-        .get_args()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(
-        chosen[chosen.len() - 6..],
-        [
-            "--model",
-            "claude-sonnet-5",
-            "--effort",
-            "medium",
-            "--",
-            "prompt"
-        ]
-    );
-    // The resumed session writes the same settings.
-    fs::remove_file(&settings).unwrap();
-    let mut resumed = claude.resume_command(&run).unwrap();
-    assert_eq!(fs::read_to_string(&settings).unwrap(), text);
-    claude.select_model(&mut resumed, "claude-opus-5-5", "medium");
-    let resumed: Vec<String> = resumed
-        .get_args()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(
-        resumed[resumed.len() - 4..],
-        ["--model", "claude-opus-5-5", "--effort", "medium"]
-    );
+    assert!(!denied.contains(&json!("Bash(dagq submit:*)")));
     // A non-empty auto mode environment from flag settings keeps the
     // "Teach auto mode" dialog away; `$defaults` keeps the built-in entries.
     assert_eq!(parsed["autoMode"]["environment"], json!(["$defaults"]));
     // The session never signals processes by name or pattern: other runs'
     // sessions carry their prompts, and so the checks' names, in their
-    // command lines (task 359). The worker's policy follows.
+    // command lines (task 359). The role's policy follows.
     assert_eq!(
         parsed["permissions"]["deny"],
         json!(

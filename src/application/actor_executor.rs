@@ -86,10 +86,6 @@ pub struct ResourceLimits {
 
 /// The agent a session wrapper starts in its workspace.
 pub enum SessionAgent<'a> {
-    /// A run's worker with its prompt.
-    Worker { run: &'a TaskRun, prompt: &'a str },
-    /// The same session reopened for a `needs_session` run (ADR-0019).
-    Resume { run: &'a TaskRun },
     /// One turn of a headless worker (ADR-t813-1): `prompt` starting a
     /// session or going on with one, as `session` says, its output to
     /// `stdout` and `stderr` rather than the wrapper's terminal, without
@@ -224,9 +220,7 @@ impl ActorProgram<'_> {
         match self {
             Self::RunSession { run, .. } => run.actual_provider(),
             Self::SessionAgent { agent, .. } => match agent {
-                SessionAgent::Worker { run, .. }
-                | SessionAgent::Resume { run }
-                | SessionAgent::Turn { run, .. } => run.actual_provider(),
+                SessionAgent::Turn { run, .. } => run.actual_provider(),
                 SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. } => Provider::Claude,
             },
             Self::NamedWorkspace { launch, .. }
@@ -242,10 +236,7 @@ impl ActorProgram<'_> {
         match self {
             Self::RunSession { .. }
             | Self::SessionAgent {
-                agent:
-                    SessionAgent::Worker { .. }
-                    | SessionAgent::Resume { .. }
-                    | SessionAgent::Turn { .. },
+                agent: SessionAgent::Turn { .. },
                 ..
             } => &[ActorRole::Worker],
             Self::SessionAgent {
@@ -275,10 +266,7 @@ impl ActorProgram<'_> {
         match self {
             Self::RunSession { run, .. }
             | Self::SessionAgent {
-                agent:
-                    SessionAgent::Worker { run, .. }
-                    | SessionAgent::Resume { run }
-                    | SessionAgent::Turn { run, .. },
+                agent: SessionAgent::Turn { run, .. },
                 ..
             }
             | Self::Headless {
@@ -767,28 +755,12 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 // `required` run without them is refused here, before any
                 // command of the agent is made.
                 let broker = match &agent {
-                    SessionAgent::Worker { run, .. }
-                    | SessionAgent::Resume { run }
-                    | SessionAgent::Turn { run, .. } => super::broker_run::worker_broker(run)?,
+                    SessionAgent::Turn { run, .. } => super::broker_run::worker_broker(run)?,
                     SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. } => {
                         super::broker_run::WorkerBroker::None
                     }
                 };
                 let (mut command, worker) = match agent {
-                    SessionAgent::Worker { run, .. } | SessionAgent::Resume { run }
-                        if matches!(broker, super::broker_run::WorkerBroker::Required(_)) =>
-                    {
-                        return Err(super::broker_run::BrokerRequiredRefused(format!(
-                            "[broker] mode = \"required\" runs run {}'s worker in headless turns \
-only; an interactive session has no settings that refuse the built-in tools",
-                            run.id()
-                        ))
-                        .into());
-                    }
-                    SessionAgent::Worker { run, prompt } => {
-                        (provider.command(run, prompt)?, Some(run))
-                    }
-                    SessionAgent::Resume { run } => (provider.resume_command(run)?, Some(run)),
                     SessionAgent::Turn {
                         run,
                         prompt,
@@ -1025,16 +997,6 @@ mod tests {
         fn preflight(&self) -> Result<()> {
             Ok(())
         }
-        fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
-            let mut command = CommandSpec::new("agent");
-            command.arg(run.id().as_str()).arg(prompt);
-            Ok(command)
-        }
-        fn resume_command(&self, run: &TaskRun) -> Result<CommandSpec> {
-            let mut command = CommandSpec::new("agent");
-            command.arg("--resume").arg(run.id().as_str());
-            Ok(command)
-        }
         fn review_command(
             &self,
             run: &TaskRun,
@@ -1232,6 +1194,39 @@ mod tests {
             .collect()
     }
 
+    /// Run `r1` provisioned in `run_dir`, which a worker's turn needs.
+    fn provisioned_run(run_dir: &Path) -> TaskRun {
+        let text = |name: &str| run_dir.join(name).to_string_lossy().into_owned();
+        crate::domain::run::start_provisioning(
+            claimed_run("r1"),
+            &crate::domain::RunPlan {
+                repo_path: "/repo".into(),
+                run_dir: text(""),
+                branch: "dagq/r1".into(),
+                worktree_path: text("worktree"),
+                receipt_path: text("receipt.json"),
+                log_path: text("log"),
+            },
+        )
+        .unwrap()
+    }
+
+    /// A worker's turn of `run` in `session`, its output to fixed files.
+    fn turn<'a>(
+        run: &'a TaskRun,
+        session: crate::domain::turn::TurnSession<'a>,
+    ) -> SessionAgent<'a> {
+        SessionAgent::Turn {
+            run,
+            prompt: "work",
+            session,
+            stdout: Path::new("/r/turn.out"),
+            stderr: Path::new("/r/turn.err"),
+            without_env: &[],
+            with_env: &[],
+        }
+    }
+
     fn job(cwd: &Path) -> ActorProgram<'_> {
         ActorProgram::Headless {
             program: HeadlessProgram::Job {
@@ -1401,7 +1396,7 @@ mod tests {
                 ActorContext::worker(&RunId::new("r1").unwrap(), TaskId::new(3)),
                 WorkspaceAccess::Write("/w".into()),
                 ActorProgram::SessionAgent {
-                    agent: SessionAgent::Resume { run: &run },
+                    agent: turn(&run, crate::domain::turn::TurnSession::Resume("s")),
                     model: None,
                 },
             ))
@@ -1418,7 +1413,8 @@ mod tests {
     /// it, and never given the queue's path instead (goal 82's stage (3)).
     #[test]
     fn a_worker_or_a_job_without_the_queue_service_is_not_started() {
-        let run = claimed_run("r1");
+        let run_dir = tempfile::tempdir().unwrap();
+        let run = provisioned_run(run_dir.path());
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_workspaces(&fake)
@@ -1441,7 +1437,7 @@ mod tests {
                 worker(),
                 WorkspaceAccess::Write("/w".into()),
                 ActorProgram::SessionAgent {
-                    agent: SessionAgent::Resume { run: &run },
+                    agent: turn(&run, crate::domain::turn::TurnSession::Resume("s")),
                     model: None,
                 },
             ),
@@ -1822,18 +1818,16 @@ mod tests {
 
     #[test]
     fn the_session_agent_is_its_actor_with_its_model() {
-        let run = claimed_run("r1");
+        let run_dir = tempfile::tempdir().unwrap();
+        let run = provisioned_run(run_dir.path());
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
             .with_spawner(&fake)
             .with_queue_service(&fake);
         for agent in [
-            SessionAgent::Worker {
-                run: &run,
-                prompt: "work",
-            },
-            SessionAgent::Resume { run: &run },
+            turn(&run, crate::domain::turn::TurnSession::New("s")),
+            turn(&run, crate::domain::turn::TurnSession::Resume("s")),
         ] {
             executor
                 .spawn(ActorExecutionSpec::new(
@@ -1870,34 +1864,21 @@ mod tests {
             );
             assert_eq!(removed_of(command), ["DAGQ_QUEUE"]);
         }
-        // The wrapper of a run the claim issued no token for issues one,
-        // once; the resume takes the one there is.
+        // The turn of a run the claim issued no token for issues one,
+        // once; the next turn takes the one there is.
         assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1"]);
         assert!(fake.revoked.lock().unwrap().is_empty());
     }
 
-    /// The broker's tools (`preferred`) reach a worker, its resume and its
+    /// The broker's tools (`preferred`) reach a worker's new and resumed
     /// turns only through the MCP configuration the supervisor wrote in the
     /// run's dir; without it (`disabled`) the command and the environment
     /// are the provider's own, as before.
     #[test]
     fn a_worker_gets_the_brokers_tools_only_with_its_mcp_configuration() {
         let dir = tempfile::tempdir().unwrap();
-        let run = claimed_run("r1");
         let run_dir = dir.path().join("r1");
-        let text = |name: &str| run_dir.join(name).to_string_lossy().into_owned();
-        let run = crate::domain::run::start_provisioning(
-            run,
-            &crate::domain::RunPlan {
-                repo_path: "/repo".into(),
-                run_dir: text(""),
-                branch: "dagq/r1".into(),
-                worktree_path: text("worktree"),
-                receipt_path: text("receipt.json"),
-                log_path: text("log"),
-            },
-        )
-        .unwrap();
+        let run = provisioned_run(&run_dir);
         let spawn = || {
             let fake = Fake::default();
             let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
@@ -1905,11 +1886,8 @@ mod tests {
                 .with_spawner(&fake)
                 .with_queue_service(&fake);
             for agent in [
-                SessionAgent::Worker {
-                    run: &run,
-                    prompt: "work",
-                },
-                SessionAgent::Resume { run: &run },
+                turn(&run, crate::domain::turn::TurnSession::New("s")),
+                turn(&run, crate::domain::turn::TurnSession::Resume("s")),
             ] {
                 executor
                     .spawn(ActorExecutionSpec::new(
@@ -1933,18 +1911,15 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let without = spawn();
-        assert_eq!(without[0].0, ["r1", "work"]);
-        assert_eq!(without[1].0, ["--resume", "r1"]);
+        assert_eq!(without[0].0, ["s"]);
+        assert_eq!(without[1].0, ["s"]);
         let config = super::super::broker_run::mcp_config_path(&run_dir);
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "{}").unwrap();
         let with = spawn();
         let config = config.to_string_lossy().into_owned();
-        assert_eq!(with[0].0, ["r1", "work", "--mcp-config", config.as_str()]);
-        assert_eq!(
-            with[1].0,
-            ["--resume", "r1", "--mcp-config", config.as_str()]
-        );
+        assert_eq!(with[0].0, ["s", "--mcp-config", config.as_str()]);
+        assert_eq!(with[1].0, ["s", "--mcp-config", config.as_str()]);
         // The environment is the same either way: no token, no URL.
         assert_eq!(with[0].1, without[0].1);
         assert_eq!(with[1].1, without[1].1);
@@ -1955,8 +1930,7 @@ mod tests {
     /// agent is made, so nothing starts with the built-in tools; with the
     /// configuration, its turns (new and resumed) are made for the broker
     /// (`TurnTarget::broker_required`) and not given `preferred`'s
-    /// `--mcp-config` beside the built-in tools. An interactive worker or
-    /// resume of a `required` run is refused. Without the mark nothing
+    /// `--mcp-config` beside the built-in tools. Without the mark nothing
     /// changes.
     #[test]
     fn a_required_run_starts_only_with_the_brokers_tools() {
@@ -1965,21 +1939,8 @@ mod tests {
         };
         use crate::domain::turn::TurnSession;
         let dir = tempfile::tempdir().unwrap();
-        let run = claimed_run("r1");
         let run_dir = dir.path().join("r1");
-        let text = |name: &str| run_dir.join(name).to_string_lossy().into_owned();
-        let run = crate::domain::run::start_provisioning(
-            run,
-            &crate::domain::RunPlan {
-                repo_path: "/repo".into(),
-                run_dir: text(""),
-                branch: "dagq/r1".into(),
-                worktree_path: text("worktree"),
-                receipt_path: text("receipt.json"),
-                log_path: text("log"),
-            },
-        )
-        .unwrap();
+        let run = provisioned_run(&run_dir);
         let (stdout, stderr) = (run_dir.join("out"), run_dir.join("err"));
         // Each agent's spawn: the arguments started, or the refusal.
         let spawn = || {
@@ -2007,11 +1968,6 @@ mod tests {
                     without_env: &[],
                     with_env: &[],
                 },
-                SessionAgent::Worker {
-                    run: &run,
-                    prompt: "work",
-                },
-                SessionAgent::Resume { run: &run },
             ];
             let outcomes: Vec<std::result::Result<(), bool>> = agents
                 .into_iter()
@@ -2042,23 +1998,23 @@ mod tests {
         };
         std::fs::create_dir_all(&run_dir).unwrap();
         let (outcomes, before) = spawn();
-        assert_eq!(outcomes, [Ok(()), Ok(()), Ok(()), Ok(())]);
+        assert_eq!(outcomes, [Ok(()), Ok(())]);
         assert_eq!(before[0], ["turn", "s"]);
 
         // Marked, without the configuration: nothing is made or started.
         std::fs::write(required_path(&run_dir), "").unwrap();
         let (outcomes, spawned) = spawn();
-        assert_eq!(outcomes, [Err(true), Err(true), Err(true), Err(true)]);
+        assert_eq!(outcomes, [Err(true), Err(true)]);
         assert!(spawned.is_empty(), "{spawned:?}");
 
-        // With it: the turns are the broker's, the sessions refused.
+        // With it: the turns are the broker's.
         let config = mcp_config_path(&run_dir);
         let config_dir = config.parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(&config, "{}").unwrap();
         let config = config.to_string_lossy().into_owned();
         let (outcomes, spawned) = spawn();
-        assert_eq!(outcomes, [Ok(()), Ok(()), Err(true), Err(true)]);
+        assert_eq!(outcomes, [Ok(()), Ok(())]);
         assert_eq!(
             spawned,
             [
@@ -2071,12 +2027,9 @@ mod tests {
         // built-in tools, as before.
         std::fs::remove_file(required_path(&run_dir)).unwrap();
         let (outcomes, spawned) = spawn();
-        assert_eq!(outcomes, [Ok(()), Ok(()), Ok(()), Ok(())]);
+        assert_eq!(outcomes, [Ok(()), Ok(())]);
         assert_eq!(spawned[0], ["turn", "s", "--mcp-config", config.as_str()]);
-        assert_eq!(
-            spawned[3],
-            ["agent", "--resume", "r1", "--mcp-config", config.as_str()]
-        );
+        assert_eq!(spawned[1], ["turn", "s", "--mcp-config", config.as_str()]);
 
         // Whatever is at the mark's path marks the run (a mark the
         // supervisor could not write as a file): without the configuration
@@ -2084,7 +2037,7 @@ mod tests {
         std::fs::create_dir(required_path(&run_dir)).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();
         let (outcomes, spawned) = spawn();
-        assert_eq!(outcomes, [Err(true), Err(true), Err(true), Err(true)]);
+        assert_eq!(outcomes, [Err(true), Err(true)]);
         assert!(spawned.is_empty(), "{spawned:?}");
     }
 
@@ -2105,7 +2058,7 @@ mod tests {
                 ActorContext::worker(run.id(), run.task_id()),
                 WorkspaceAccess::Write("/w".into()),
                 ActorProgram::SessionAgent {
-                    agent: SessionAgent::Resume { run: &run },
+                    agent: turn(&run, crate::domain::turn::TurnSession::Resume("s")),
                     model: None,
                 },
             ))
@@ -2171,12 +2124,6 @@ mod tests {
         }
         fn relocated_executable(&self) -> Option<PathBuf> {
             self.found.clone()
-        }
-        fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-            unreachable!()
-        }
-        fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-            unreachable!()
         }
         fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
             unreachable!()

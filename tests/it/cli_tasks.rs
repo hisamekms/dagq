@@ -166,7 +166,7 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             assert_eq!(
                 named,
                 [
-                    ("claude", &serde_json::json!(["interactive", "headless"])),
+                    ("claude", &serde_json::json!(["headless"])),
                     ("codex", &serde_json::json!(["headless"]))
                 ]
             );

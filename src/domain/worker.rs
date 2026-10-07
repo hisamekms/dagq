@@ -124,8 +124,14 @@ pub const MODE_UNAVAILABLE: &str = "mode_unavailable";
 pub const FALLBACK_OFF: &str = "provider_fallback_off";
 
 /// Why `worker` cannot be claimed by a supervisor that runs `supported`:
-/// `None` when it can.
+/// `None` when it can. A worker recorded on the interactive route runs
+/// headless (ADR-t1433-2), so its provider's headless worker is the one
+/// looked for.
 pub fn unavailable(worker: Worker, supported: &[Worker]) -> Option<&'static str> {
+    let worker = Worker {
+        mode: WorkerMode::Headless,
+        ..worker
+    };
     if supported.contains(&worker) {
         None
     } else if supported.iter().any(|w| w.provider == worker.provider) {
@@ -215,15 +221,22 @@ mod tests {
 
     #[test]
     fn a_worker_is_unavailable_by_provider_or_by_mode() {
-        let supported = [Worker::CLAUDE_INTERACTIVE];
-        assert_eq!(unavailable(Worker::CLAUDE_INTERACTIVE, &supported), None);
+        let headless = [Worker::CLAUDE_HEADLESS];
+        assert_eq!(unavailable(Worker::CLAUDE_HEADLESS, &headless), None);
+        // A worker recorded on the interactive route runs headless.
+        assert_eq!(unavailable(Worker::CLAUDE_INTERACTIVE, &headless), None);
         assert_eq!(
-            unavailable(Worker::ALL[1], &supported),
+            unavailable(Worker::ALL[2], &headless),
+            Some(PROVIDER_UNAVAILABLE)
+        );
+        let interactive = [Worker::CLAUDE_INTERACTIVE];
+        assert_eq!(
+            unavailable(Worker::CLAUDE_HEADLESS, &interactive),
             Some(MODE_UNAVAILABLE)
         );
         assert_eq!(
-            unavailable(Worker::ALL[2], &supported),
-            Some(PROVIDER_UNAVAILABLE)
+            unavailable(Worker::CLAUDE_INTERACTIVE, &interactive),
+            Some(MODE_UNAVAILABLE)
         );
     }
 

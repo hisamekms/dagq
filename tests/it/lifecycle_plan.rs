@@ -573,12 +573,6 @@ impl dagq::application::AgentProvider for PlannerAgent {
     fn preflight(&self) -> Result<()> {
         Ok(())
     }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<dagq::application::CommandSpec> {
-        bail!("not a run")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<dagq::application::CommandSpec> {
-        bail!("not a run")
-    }
     fn review_command(
         &self,
         _: &TaskRun,
@@ -622,12 +616,6 @@ struct NoPlanner;
 impl dagq::application::AgentProvider for NoPlanner {
     fn preflight(&self) -> Result<()> {
         Ok(())
-    }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<dagq::application::CommandSpec> {
-        bail!("not a run")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<dagq::application::CommandSpec> {
-        bail!("not a run")
     }
     fn review_command(
         &self,

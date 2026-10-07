@@ -659,12 +659,6 @@ mod tests {
         fn preflight(&self) -> Result<()> {
             Ok(())
         }
-        fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-            unreachable!()
-        }
-        fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-            unreachable!()
-        }
         fn review_command(
             &self,
             _: &TaskRun,
@@ -689,12 +683,6 @@ mod tests {
     impl AgentProvider for Plain {
         fn preflight(&self) -> Result<()> {
             Ok(())
-        }
-        fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-            unreachable!()
-        }
-        fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-            unreachable!()
         }
         fn review_command(
             &self,

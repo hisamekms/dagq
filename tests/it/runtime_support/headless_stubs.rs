@@ -4,7 +4,7 @@
 use super::*;
 
 /// The first lines of a stub headless `claude` or `codex` after its
-/// arguments, as [`watchdog`] is an interactive stub's: a turn whose test
+/// arguments, as [`watchdog`] is a [`StubSpawner`] stub's: a turn whose test
 /// process is gone (it ended on a timeout's `process::exit`, or was killed,
 /// while the turn ran), or whose stub's directory (the test's) is, kills
 /// its own process group, the one [`StubSpawner`] or a wrapper made, with

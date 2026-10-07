@@ -18,9 +18,6 @@ use super::{RunFiles, unix_seconds};
 /// types a text into the session: an input the agent's own hook may have
 /// failed to record.
 pub const SUPERVISOR_INPUT_FILE: &str = "supervisor-input.json";
-/// The debug log of a run's resumed session, next to its idle marker
-/// (the first session's is the run's log path).
-pub const RESUME_DEBUG_LOG: &str = "claude-resume.log";
 
 /// Why the idle marker could not tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

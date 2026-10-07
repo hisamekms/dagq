@@ -434,12 +434,6 @@ impl AgentProvider for Codex {
     fn relocated_executable(&self) -> Option<PathBuf> {
         relocated(&self.executable, CODEX_NAME, executable)
     }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-        bail!("Codex runs headless only: it has no interactive session")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-        bail!("Codex runs headless only: it has no interactive session")
-    }
     /// Codex's sub-agents are not known to run in `exec`, to keep its
     /// sandbox or to ignore the worktree's `.codex` (ADR-t1453-1 decision
     /// 8): a review that requires subagents is not started on Codex, and
@@ -1201,8 +1195,6 @@ mod tests {
                 .unwrap()
                 .contains(RULES_PATH)
         );
-        assert!(codex.command(&run, "p").is_err());
-        assert!(codex.resume_command(&run).is_err());
         let review = codex
             .review_command(&run, "p", JobAccess::ReadFiles)
             .unwrap();

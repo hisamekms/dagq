@@ -356,8 +356,8 @@ pub fn add_ready_task(queue: &mut SqliteQueue, title: &str, dependencies: &[Task
     task.id()
 }
 
-/// The fake worker's own helpers, the same in an interactive session and in
-/// a headless turn ([`TURN_PRELUDE`], goal 92): `receipt COMMIT [RUN_ID]`
+/// The fake worker's own helpers in a headless turn ([`TURN_PRELUDE`],
+/// goal 92): `receipt COMMIT [RUN_ID]`
 /// writes an atomically renamed receipt claiming success with evidence on
 /// every check, and `commit MESSAGE` rewrites `change.txt` and commits it.
 macro_rules! worker_helpers {
@@ -373,8 +373,8 @@ commit() { printf 'change by %s\n' "$RUN_ID" > change.txt && git add change.txt 
     };
 }
 
-/// The resumed worker's `receipt COMMIT [RESULT] [SUMMARY]`, the same in an
-/// interactive resumed session and a headless resume turn.
+/// The resumed worker's `receipt COMMIT [RESULT] [SUMMARY]` in a headless
+/// resume turn ([`RESUME_TURN_PRELUDE`]).
 macro_rules! resume_receipt {
     () => {
         r#"
@@ -387,7 +387,7 @@ receipt() {
 }
 
 /// The resumed worker's `resolve`, which rebases onto `$MAIN` (see
-/// [`RESUME_PRELUDE`]).
+/// [`RESUME_TURN_PRELUDE`]).
 macro_rules! resolve_helpers {
     () => {
         r#"
@@ -427,33 +427,6 @@ resolve() {
     };
 }
 
-/// Shell prelude for the fake agent: the [`worker_helpers`] (`receipt`,
-/// `commit`), `idle` mimics Claude's Stop hook (`idle_bg` with background
-/// work still running, `idle_bg_done` once it ended, as Claude Code
-/// 2.1.281 writes `background_tasks`), and `await_exit` blocks until the
-/// test workspace delivers the supervisor's exit request.
-pub const AGENT_PRELUDE: &str = concat!(
-    watchdog!(),
-    crate::await_file_fn!(),
-    worker_helpers!(),
-    r#"
-printf 'fixture log\n' > "$LOG"
-idle() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-idle_bg() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test","command":"cargo test"}]}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-idle_bg_done() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[]}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-await_exit() { await_file "$EXIT"; }
-"#
-);
-
 pub const VALID_AGENT: &str = "commit work; receipt \"$(git rev-parse HEAD)\"";
 
 /// The handle of the background wrapper the run recorded as its first
@@ -468,36 +441,6 @@ pub fn background_session(run: &TaskRun) -> String {
     session
 }
 
-/// Shell prelude for a resumed session: `await_message` blocks until the
-/// supervisor's resolution request arrived (the test backend writes it to
-/// `$MESSAGE`) and sets `$MAIN` to the main it names; `receipt` / `idle` /
-/// `await_exit` are the worker's.
-pub const RESUME_PRELUDE: &str = concat!(
-    watchdog!(),
-    crate::await_file_fn!(),
-    resume_receipt!(),
-    r#"
-idle() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-idle_bg() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test","command":"cargo test"}]}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-idle_bg_done() {
-  printf '{"session_id":"%s","hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[]}' "$RUN_ID" > "$IDLE.tmp"
-  mv "$IDLE.tmp" "$IDLE"
-}
-await_exit() { await_file "$EXIT"; }
-await_message() {
-  await_file "$MESSAGE"
-  MAIN=$(sed -n 's/.*main is now \([0-9a-f]*\) .*/\1/p' "$MESSAGE" | head -n 1)
-}
-"#,
-    resolve_helpers!()
-);
-
 mod turns;
 pub use turns::*;
 mod headless_stubs;
@@ -508,31 +451,10 @@ pub mod planner_prompt_bytes;
 pub mod planner_turns;
 mod session_handles;
 
-pub struct TestProvider {
-    pub script: String,
-    /// The queue, which a script reads as `$DB` (the test's own look at
-    /// it); its `$DAGQ ...` goes to the queue service, as a worker's does.
-    pub db: PathBuf,
-}
+/// A run's provider that starts no headless job.
+pub struct TestProvider;
 
 impl AgentProvider for TestProvider {
-    fn resume_command(&self, run: &TaskRun) -> Result<CommandSpec> {
-        let run_dir = run.run_dir().unwrap();
-        let mut command = CommandSpec::new("/bin/sh");
-        command
-            .current_dir(run.worktree_path().unwrap())
-            .env("RUN_ID", run.id().as_str())
-            .env("RECEIPT", run.receipt_path().unwrap())
-            .env("IDLE", run.idle_marker_path().unwrap())
-            .env("EXIT", exit_request_path(run_dir))
-            .env("MESSAGE", resume_message_path(run_dir))
-            .env("DAGQ", env!("CARGO_BIN_EXE_dagq"))
-            .env("DB", &self.db)
-            .arg("-c")
-            .arg(format!("{RESUME_PRELUDE}\n{}", self.script));
-        worker_env(&mut command, run);
-        Ok(command)
-    }
     fn preflight(&self) -> Result<()> {
         Ok(())
     }
@@ -544,54 +466,6 @@ impl AgentProvider for TestProvider {
     }
     // `headless_command` keeps the default refusal: a run's provider has no
     // headless job, which the observer test relies on.
-    fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
-        assert!(prompt.contains("Acceptance criteria:"));
-        assert!(
-            prompt.contains(
-                "Verification commands (integrate runs them once after rebasing onto main;"
-            )
-        );
-        // Every context section is present whether or not it has entries.
-        assert!(prompt.contains("Goal"));
-        assert!(prompt.contains("Context"));
-        assert!(prompt.contains("Predecessor tasks"));
-        assert!(prompt.contains("Sibling tasks in progress"));
-        // A question goes to the queue as an ask, not to the terminal.
-        assert!(prompt.contains(&format!(
-            "`dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'`",
-            run.id()
-        )));
-        // Processes the session started are stopped before its turn ends.
-        assert!(
-            prompt.contains(dagq::application::prompt::HEADLESS_STOP),
-            "{prompt}"
-        );
-        let mut command = CommandSpec::new("/bin/sh");
-        command
-            .current_dir(run.worktree_path().unwrap())
-            .env("RUN_ID", run.id().as_str())
-            .env("RECEIPT", run.receipt_path().unwrap())
-            .env("LOG", run.log_path().unwrap())
-            .env("BASE", run.base_commit().as_str())
-            .env("IDLE", run.idle_marker_path().unwrap())
-            .env("EXIT", exit_request_path(run.run_dir().unwrap()))
-            .env("MESSAGE", resume_message_path(run.run_dir().unwrap()))
-            .env("DAGQ", env!("CARGO_BIN_EXE_dagq"))
-            .env("DB", &self.db)
-            .arg("-c")
-            .arg(format!("{AGENT_PRELUDE}\n{}", self.script));
-        worker_env(&mut command, run);
-        Ok(command)
-    }
-}
-
-/// The fake agent runs as the run's worker, as a real session does, rather
-/// than as whatever actor runs the tests: its `$DAGQ ask --run` is its own
-/// run's (task 733).
-fn worker_env(command: &mut CommandSpec, run: &TaskRun) {
-    for (name, value) in dagq::domain::ActorContext::worker(run.id(), run.task_id()).env() {
-        command.env(name, value);
-    }
 }
 
 /// The test backend delivers an exit request as a file the fake agent polls for.
@@ -1068,12 +942,6 @@ pub struct HeadlessProvider {
 impl AgentProvider for HeadlessProvider {
     fn preflight(&self) -> Result<()> {
         Ok(())
-    }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-        bail!("a headless worker starts no interactive session")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-        bail!("a headless worker starts no interactive session")
     }
     fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
         unreachable!("sessions do not review")

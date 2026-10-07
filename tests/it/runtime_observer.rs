@@ -16,12 +16,6 @@ impl AgentProvider for ObserverProvider {
     fn preflight(&self) -> Result<()> {
         Ok(())
     }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-        bail!("the observer has no run")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-        bail!("the observer has no run")
-    }
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         assert!(prompt.contains("You are the observer"), "{prompt}");
         assert_eq!(access, JobAccess::QueueCli);
@@ -358,15 +352,7 @@ echo 'observer diagnostic' >&2
     );
 
     // An agent that cannot start is an error outcome, not a failed observe.
-    let broken = observe(
-        &db,
-        &TestProvider {
-            script: String::new(),
-            db: db.clone(),
-        },
-        &observe_options(ObserveMode::Daily),
-    )
-    .unwrap();
+    let broken = observe(&db, &TestProvider, &observe_options(ObserveMode::Daily)).unwrap();
     assert_eq!(broken["outcome"], "error");
     assert!(
         broken["error"]
@@ -930,12 +916,6 @@ struct BreachRecorder;
 impl AgentProvider for BreachRecorder {
     fn preflight(&self) -> Result<()> {
         Ok(())
-    }
-    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
-        bail!("the observer has no run")
-    }
-    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
-        bail!("the observer has no run")
     }
     fn headless_command(&self, cwd: &Path, prompt: &str, _: JobAccess) -> Result<CommandSpec> {
         // The whole input is beside the prompt, which carries each breach.

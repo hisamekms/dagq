@@ -240,8 +240,6 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - Codexが見つからなくても`up`とsupervisorは止まらず、Codexのtaskを非対話のClaudeで始める。
 - Claudeのsettingsの`permissions.deny`は名前やパターンでsignalを送るコマンドを拒む（`SIGNAL_BY_NAME_DENIED`）。
   拒めるのはコマンドの先頭だけなので、pidで止める規則をpromptでも伝える。
-- workerのsettingsはClaude Codeの入力欄のサジェストを止める（`runtime_session_settings`）。
-  誰も打たないsessionで、サジェストが打ちかけの文と見分けにくかったため。
 - `subagent_review`を要るtaskをCodexで動かしたときは、要るevidenceから外し、receiptの`not_applicable`を理由つきで受ける（`domain::required_of`）。
 - 予定: holdの解除でproviderを変えると、成果を引き継ぐ新しいrunにする（[taskのhold](supervisor-lifecycle/task-hold.md)）。
 
