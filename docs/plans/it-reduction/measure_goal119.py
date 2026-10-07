@@ -14,9 +14,12 @@ The first ends on 2026-10-03, so the queue's files are needed for the later logs
     --runs-dir ~/.local/share/dagq/77067154921b9014/runs \
     --metrics ~/.local/share/dagq-hostmetrics/metrics.csv \
               ~/.local/share/dagq/77067154921b9014/host/metrics-2026*.csv \
-    --until 2026-10-07T11:19:00+09:00 --out-dir docs/plans/it-reduction/goal-119
+    --until 2026-10-08T06:30:00+09:00 --out-dir docs/plans/it-reduction/goal-119
 
 --until (optional) leaves out logs written after it, so a later run reads the same logs.
+A log of [landing_verification] (dagq.toml from ec310498, ADR-t1925-1; its header line or the
+`landing-it:` lines of scripts/landing-it.sh) is left out: it runs `cargo nextest run` without
+the coverage instrumentation, so its seconds are not the coverage gate's.
 """
 import argparse
 import csv
@@ -52,6 +55,7 @@ TARGETS = ['cli_stats', 'installed_plugin', 'runtime_claim', 'runtime_heartbeat'
 ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 LINE = re.compile(r'^\s*(PASS|FLKY-FL \d+/\d+|FLAKY \d+/\d+|(?:TRY \d+ )?(?:FAIL|SIGSEGV|SIGABRT|SIGKILL|SIGTERM|TIMEOUT|ABORT|LEAK-FAIL))'
                   r'\s*\[\s*([0-9.]+)s\]\s*(?:\([^)]*\)\s*)?(\S+)\s+(\S+)\s*$')
+LANDING_VERIFICATION = re.compile(r'^(# dagq: \[landing_verification\]|landing-it: )', re.M)
 SUMMARY = re.compile(r'^\s*Summary\s*\[\s*([0-9.]+)s\]\s*(\S+) tests? run: (\d+) passed(?: \(([^)]*)\))?(?:, (\d+) failed)?')
 
 
@@ -205,6 +209,9 @@ def main():
         if 'Summary [' not in text:
             continue
         rel = str(path.relative_to(a.runs_dir))
+        if LANDING_VERIFICATION.search(text):
+            excluded.append(dict(log=rel, end=end, reason='landing_verification (not the coverage gate)'))
+            continue
         got = parse(text)
         if isinstance(got, str):
             excluded.append(dict(log=rel, end=end, reason=got))
