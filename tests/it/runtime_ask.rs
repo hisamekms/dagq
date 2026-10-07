@@ -789,7 +789,8 @@ fn an_abandoned_run_is_recovered_and_triaged_by_the_supervisor() {
     // A run nobody leases whose session may still live is not recovered:
     // it waits for `recover`.
     add_ready_task(&mut queue, "abandoned", &[]);
-    let pid = std::process::id();
+    let abandoned_wrapper = Stand::start().unwrap();
+    let pid = abandoned_wrapper.pid;
     let abandoned = orphan_run(&repo, &db, "owner", pid, pid);
     Connection::open(&db)
         .unwrap()
@@ -811,7 +812,8 @@ fn an_abandoned_run_is_recovered_and_triaged_by_the_supervisor() {
 
     // A runtime error recorded on a leased run is not an attention.
     add_ready_task(&mut queue, "noted", &[]);
-    let pid = std::process::id();
+    let noted_wrapper = Stand::start().unwrap();
+    let pid = noted_wrapper.pid;
     let noted = orphan_run(&repo, &db, "owner", pid, pid);
     let cursor = queue.latest_event_id().unwrap().as_i64();
     queue

@@ -64,8 +64,8 @@ fn reopens(detail: &dagq::domain::TaskDetail) -> Vec<Value> {
 }
 
 /// Acceptance (1): the wrapper of a headless run that waits for the answer
-/// of its `worker_question` ends; the supervisor closes its workspace,
-/// opens a new one whose wrapper resumes the same session, records
+/// of its `worker_question` ends; the supervisor stops nothing of it (its
+/// process is gone), starts a new wrapper that resumes the same session, records
 /// `auto_repaired`, and the wait goes on: the run neither fails nor goes
 /// to a recovery job. The answer is the reopened session's next turn, and
 /// the run lands.
@@ -116,7 +116,7 @@ fn a_session_lost_during_its_wait_is_opened_again_and_takes_the_answer() {
     let created = payloads(&detail, "workspace_created");
     assert_eq!(created[1]["reopened"], 1, "{created:?}");
     assert_eq!(payloads(&detail, "wrapper_started").len(), 2);
-    assert!(backend.closed().contains(&first));
+    assert!(!backend.closed().contains(&first));
     let ended = payloads(&detail, "run_waiting_ended");
     assert_eq!(ended.len(), 1, "{ended:?}");
     assert_eq!(ended[0]["cause"], "answered");

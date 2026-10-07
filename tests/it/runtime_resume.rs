@@ -1957,7 +1957,8 @@ fn exit_requests_of_attempt(detail: &dagq::domain::TaskDetail, attempt: i64) -> 
 /// after the exit timeout: the resume ends `unresolved` with
 /// `exit_timed_out`, its lease is given back but its workspace stays open,
 /// and no pass resumes the run next to the session while it runs; once it
-/// ended, the next attempt closes that workspace and lands the run. The
+/// ended, the next attempt, with that wrapper's process gone and nothing
+/// of it to stop, lands the run. The
 /// session's wrapper is held in the start of its turn, so it neither works
 /// nor reads the exit request the resume timeout made the supervisor write.
 /// Moved from the interactive `a_resumed_session_that_ignores_exit_is_let_go`
@@ -2014,7 +2015,7 @@ fn a_resumed_session_that_ignores_its_exit_request_is_let_go_after_the_exit_time
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert!(backend.closed().contains(&kept));
+    assert!(!backend.closed().contains(&kept));
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
     assert_eq!(payloads(&detail, "resume_started").len(), 2);

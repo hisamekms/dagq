@@ -384,7 +384,7 @@ impl Stand {
         Self::start_with(&SystemProcesses)
     }
 
-    fn start_with(processes: &dyn ProcessControl) -> Result<Self> {
+    pub fn start_with(processes: &dyn ProcessControl) -> Result<Self> {
         let child = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(format!(

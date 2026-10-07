@@ -21,6 +21,11 @@ pub struct TestReviewer {
     /// The subagents each review that required them was handed, by name
     /// and description, in order.
     pub handed: Mutex<Vec<Vec<(String, String)>>>,
+    /// The queue and the backend's stands: as each recovery job starts, the
+    /// run it recovers gets a session still running (a process standing for
+    /// a wrapper that did not end with its agent), which the backend stops
+    /// on its close, so the round's end has a wrapper to stop.
+    pub leave_running: Option<(PathBuf, Stands)>,
 }
 
 impl TestReviewer {
@@ -34,7 +39,13 @@ impl TestReviewer {
             models: Mutex::new(Vec::new()),
             runs_subagents: true,
             handed: Mutex::new(Vec::new()),
+            leave_running: None,
         }
+    }
+    /// See `leave_running`.
+    pub fn leaving_sessions_running(mut self, db: &Path, backend: &TestWorkspace) -> Self {
+        self.leave_running = Some((db.to_owned(), backend.stands.clone()));
+        self
     }
     /// The subagents each review was handed (see `handed`).
     pub fn handed(&self) -> Vec<Vec<(String, String)>> {
@@ -85,6 +96,15 @@ impl AgentProvider for TestReviewer {
             !triages.is_empty(),
             "the test reviewer has no recovery job left"
         );
+        if let Some((db, stands)) = &self.leave_running {
+            let stand = Stand::start()?;
+            let updated = Connection::open(db)?.execute(
+                "UPDATE task_runs SET workspace_id=?2, workspace_closed_at=NULL WHERE run_dir=?1",
+                [cwd.to_str().unwrap(), &stand.handle],
+            )?;
+            assert_eq!(updated, 1, "the run of {}", cwd.display());
+            stands.lock().unwrap().push((stand.handle.clone(), stand));
+        }
         self.triage_prompts
             .lock()
             .unwrap()

@@ -25,6 +25,20 @@ fn closes_of(queue: &SqliteQueue, run: &TaskRun) -> Vec<Value> {
         .collect()
 }
 
+/// Record a background session still running as the session of `run` (a
+/// process standing for a wrapper nobody stopped), and return its handle.
+fn leave_running(db: &Path, backend: &TestWorkspace, run: &TaskRun) -> String {
+    let handle = backend.stand_in();
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET workspace_id=?2, workspace_closed_at=NULL WHERE id=?1",
+            [run.id().as_str(), &handle],
+        )
+        .unwrap();
+    handle
+}
+
 /// Task 180: the supervisor's sweep stops the background wrapper of a
 /// failed run the triage never takes while it still runs: its task was
 /// canceled, or made ready and run again, or a newer run of the
@@ -53,7 +67,20 @@ fn the_sweep_stops_the_wrappers_of_failed_runs_the_triage_does_not_take() {
         assert!(run.workspace_closed_at().is_none());
     }
     assert!(backend.closed().is_empty());
-    let workspace = |run: &TaskRun| background_session(run);
+    // Each wrapper ended with its agent: its handle is not open, though
+    // nobody stopped it, as the production backend tells it by its process.
+    for run in &first {
+        assert!(!backend.exists(&background_session(run)).unwrap());
+    }
+    // The wrappers of tasks 1 and 3 still run, as wrappers a supervisor
+    // that died before their stop leaves; task 2's does not, for now.
+    let mut left = [
+        leave_running(&db, &backend, &first[0]),
+        background_session(&first[1]),
+        leave_running(&db, &backend, &first[2]),
+    ];
+    let workspace =
+        |run: &TaskRun| left[first.iter().position(|r| r.id() == run.id()).unwrap()].clone();
 
     // A person cancels task 1 and runs task 2 again; task 3 waits. While
     // task 2's first wrapper does not run, nothing is recorded of it.
@@ -61,7 +88,6 @@ fn the_sweep_stops_the_wrappers_of_failed_runs_the_triage_does_not_take() {
         .transition(TaskId::new(1), TaskAction::Cancel)
         .unwrap();
     queue.transition(TaskId::new(2), TaskAction::Ready).unwrap();
-    backend.hidden.lock().unwrap().push(workspace(&first[1]));
     supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
     backend.join();
     let closed = closes_of(&queue, &first[0]);
@@ -84,7 +110,9 @@ fn the_sweep_stops_the_wrappers_of_failed_runs_the_triage_does_not_take() {
 
     // Running again, the first run of task 2 is no longer its task's
     // latest: the next sweep stops it; the other runs are left alone.
-    backend.hidden.lock().unwrap().clear();
+    left[1] = leave_running(&db, &backend, &first[1]);
+    let workspace =
+        |run: &TaskRun| left[first.iter().position(|r| r.id() == run.id()).unwrap()].clone();
     supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
     backend.join();
     assert_eq!(
@@ -97,7 +125,7 @@ fn the_sweep_stops_the_wrappers_of_failed_runs_the_triage_does_not_take() {
     assert!(!backend.closed().contains(&workspace(&first[2])));
     let latest = queue.show(TaskId::new(2)).unwrap().runs[1].clone();
     assert_eq!(latest.status(), RunStatus::Failed);
-    assert!(!backend.closed().contains(&workspace(&latest)));
+    assert!(!backend.closed().contains(&background_session(&latest)));
     // The run of the task that was readied keeps its worktree and branch;
     // the canceled task's go (task 376).
     let run = &first[1];
@@ -129,13 +157,8 @@ fn the_sweep_stops_every_wrapper_left_running_by_a_landed_run() {
     // A resume's wrapper left running, one that has ended, a workspace of
     // a session from before ADR-t1433-3 that cmux still lists, and the
     // worker's wrapper nobody stopped, as when a person integrated the run.
-    let (resume, gone, legacy, hand) = (
-        "background:4001:resume",
-        "background:4002:gone",
-        "legacy-ws",
-        "background:4003:hand",
-    );
-    for (workspace, attempt) in [(resume, 1), (gone, 2), (legacy, 3)] {
+    let (resume, gone, legacy) = (backend.stand_in(), "background:4002:gone", "legacy-ws");
+    for (workspace, attempt) in [(resume.as_str(), 1), (gone, 2), (legacy, 3)] {
         queue
             .record_runtime_event(
                 run.id(),
@@ -144,16 +167,8 @@ fn the_sweep_stops_every_wrapper_left_running_by_a_landed_run() {
             )
             .unwrap();
     }
-    backend.list(resume);
     backend.list(legacy);
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE task_runs SET workspace_id=?2, workspace_closed_at=NULL WHERE id=?1",
-            [run.id().as_str(), hand],
-        )
-        .unwrap();
-    backend.list(hand);
+    let hand = leave_running(&db, &backend, &run);
     let before = closes_of(&queue, &run).len();
 
     backend.close_fail = true;
@@ -439,13 +454,8 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     assert_eq!(run.status(), RunStatus::Integrated);
+    let left = leave_running(&db, &backend, &run);
     let raw = Connection::open(&db).unwrap();
-    raw.execute(
-        "UPDATE task_runs SET workspace_id='background:4004:left', workspace_closed_at=NULL WHERE id=?1",
-        [run.id()],
-    )
-    .unwrap();
-    backend.list("background:4004:left");
     // A live supervisor's lease: its process is alive and its heartbeat
     // is not old.
     raw.execute(
@@ -488,11 +498,7 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     );
     supervise_with(&db, &repo, &backend, &sweeping).unwrap();
     assert_eq!(closes_of(&queue, &run).len(), before);
-    assert!(
-        !backend
-            .closed()
-            .contains(&"background:4004:left".to_owned())
-    );
+    assert!(!backend.closed().contains(&left));
     assert!(scratchpad.join("session/scratchpad/notes").is_file());
     assert!(payloads_of(&queue, &run, "scratchpad_removed").is_empty());
     assert!(tmp.join("target/debug/big").is_file());
@@ -524,13 +530,9 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     let closed = closes_of(&queue, &run);
     assert_eq!(
         closed[before..],
-        [json!({"workspace_id": "background:4004:left", "by": "supervisor", "reason": "ended"})]
+        [json!({"workspace_id": left, "by": "supervisor", "reason": "ended"})]
     );
-    assert!(
-        backend
-            .closed()
-            .contains(&"background:4004:left".to_owned())
-    );
+    assert!(backend.closed().contains(&left));
 
     // A heartbeat older than the limit is stale too.
     raw.execute(

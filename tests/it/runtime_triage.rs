@@ -31,17 +31,20 @@ fn run_payloads(detail: &dagq::domain::TaskDetail, run: &TaskRun, kind: &str) ->
 /// (`recovery_requested` with `alert: failed`); its `retry` of a run whose
 /// branch holds no commit of its own is applied, recorded as
 /// `auto_repaired` (`layer: recovery`), `triage_finished` and
-/// `recovery_finished`, the workspace is closed, and the next run lands.
+/// `recovery_finished`, the wrapper still running at the round's end is
+/// stopped by the triage (the one that ended with its agent is not), and
+/// the next run lands.
 #[test]
 fn a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands() {
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, &fails_once(db.parent().unwrap()));
-    let reviewer =
-        TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]).with_triages(&[repair(
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
+        .with_triages(&[repair(
             json!({"action": "retry"}),
             "the session died on its own",
-        )]);
+        )])
+        .leaving_sessions_running(&db, &backend);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -77,7 +80,13 @@ fn a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands() {
     assert_eq!(recovered["escalated"], false);
     let closed = &events[position(&kinds, "workspace_closed")].payload;
     assert_eq!(closed["by"], "triage");
+    assert_eq!(closed["workspace_id"], background_session(first));
     assert!(position(&kinds, "triage_finished") < position(&kinds, "workspace_closed"));
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "workspace_closed").count(),
+        1
+    );
+    assert!(!backend.exists(&background_session(first)).unwrap());
     assert!(other_asks(&mut queue, true).is_empty());
 
     // The job read the run, the rules and the verdict schema. The turn
@@ -432,9 +441,10 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
 }
 
 /// `resume`: the run becomes `needs_session` with the job's instruction,
-/// its workspace is closed, and the supervisor resumes its session with a
-/// request naming the instruction; the resumed run is validated, reviewed
-/// and landed like any other.
+/// and the supervisor resumes its session with a request naming the
+/// instruction; the resumed run is validated, reviewed and landed like any
+/// other. The first session's wrapper ended with its agent, so nothing
+/// stops it; the accepted resumed session is the one closed.
 #[test]
 fn a_failed_run_the_recovery_job_resumes_is_resumed_in_its_session_and_lands() {
     let (_dir, repo, db) = fixture();
@@ -467,8 +477,8 @@ fn a_failed_run_the_recovery_job_resumes_is_resumed_in_its_session_and_lands() {
     assert_eq!(repaired[0]["repair"], "resume");
     assert_eq!(repaired[0]["layer"], "recovery");
     let kinds = event_kinds(&detail);
-    assert!(position(&kinds, "triage_finished") < position(&kinds, "workspace_closed"));
-    assert!(position(&kinds, "workspace_closed") < position(&kinds, "resume_started"));
+    assert!(position(&kinds, "triage_finished") < position(&kinds, "resume_started"));
+    assert!(position(&kinds, "resume_started") < position(&kinds, "workspace_closed"));
     assert_eq!(
         payloads(&detail, "resume_started")[0]["reason"],
         "write the receipt for your commit"
@@ -487,7 +497,13 @@ fn a_failed_run_the_recovery_job_resumes_is_resumed_in_its_session_and_lands() {
             json!({"run_id": detail.runs[0].id(), "resume": true, "model": "claude-opus-5-5", "effort": "medium"}),
         ]
     );
-    assert_eq!(backend.closed()[0], background_session(&detail.runs[0]));
+    let first = background_session(&detail.runs[0]);
+    assert!(!backend.closed().contains(&first));
+    assert!(
+        !payloads(&detail, "workspace_closed")
+            .iter()
+            .any(|closed| closed["workspace_id"] == first)
+    );
     let text = &session_texts(&detail.runs[0])[0];
     for expected in [
         "the supervisor's triage sent it back to this session to finish",
@@ -498,21 +514,24 @@ fn a_failed_run_the_recovery_job_resumes_is_resumed_in_its_session_and_lands() {
     }
 }
 
-/// `escalate`: a `decide` ask for the inbox, the run stays `failed`; a cmux
-/// failure closing the workspace is recorded and the round goes on. The
-/// supervisor applies the answer (`cancel` here) and closes the ask.
+/// `escalate`: a `decide` ask for the inbox, the run stays `failed`; a
+/// failure stopping a wrapper still running at the round's end is
+/// recorded and the round goes on, and the wrapper that ended with its
+/// agent is not stopped. The supervisor applies the answer (`cancel` here)
+/// and closes the ask.
 #[test]
 fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, "commit work; exit 7");
     backend.close_fail = true;
-    let reviewer =
-        TestReviewer::new(&[verdict("pass", &[], "unused")]).with_triages(&[recovery(json!({
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")])
+        .with_triages(&[recovery(json!({
             "verdict": "escalate",
             "confidence": "high",
             "diagnosis": "the acceptance cannot be met",
             "question": "Is task 1 still wanted?",
-        }))]);
+        }))])
+        .leaving_sessions_running(&db, &backend);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -540,16 +559,24 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
     }
     // The supervisor notifies nobody: the inbox's watch tells of the ask.
     assert!(backend.notifications.lock().unwrap().is_empty());
-    // The close failed: recorded, the session kept, the ask still made.
+    // The stop of the wrapper left running failed: recorded, the session
+    // kept, the ask still made. The wrapper that ended with its agent was
+    // not stopped (its process is gone, as production tells it).
     let cleanup = payloads(&detail, "cleanup_failed");
-    assert_eq!(cleanup.len(), 1);
-    assert_eq!(cleanup[0]["workspace_id"], background_session(&run));
+    assert_eq!(cleanup.len(), 1, "{cleanup:?}");
+    let left = background_session(&run);
+    assert_eq!(cleanup[0]["workspace_id"], left);
     assert!(
         cleanup[0]["message"]
             .as_str()
             .unwrap()
             .contains("injected session stop failure")
     );
+    assert!(backend.exists(&left).unwrap());
+    let ended = payloads(&detail, "workspace_created")[0]["workspace_id"].clone();
+    assert_ne!(ended, json!(left));
+    assert!(!backend.exists(ended.as_str().unwrap()).unwrap());
+    assert!(backend.closed().is_empty());
     assert!(run.workspace_closed_at().is_none());
     assert!(!event_kinds(&detail).contains(&"workspace_closed"));
     assert_eq!(run.last_error(), Some("session exited with code 1"));

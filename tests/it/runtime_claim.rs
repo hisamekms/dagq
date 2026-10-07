@@ -1360,7 +1360,8 @@ fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
 
     // A run owned without a registration (an `integrate` process, or a
     // supervisor from before the registry) is still attributed to its lease.
-    let orphan = orphan_run(&repo, &db, "owner", std::process::id(), std::process::id());
+    let wrapper = Stand::start().unwrap();
+    let orphan = orphan_run(&repo, &db, "owner", wrapper.pid, wrapper.pid);
     let status = runtime::status(&db).unwrap();
     let supervisors = status["supervisors"].as_array().unwrap();
     assert_eq!(supervisors.len(), 3);
@@ -1387,9 +1388,7 @@ fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
 
     // Recovery of the run and a later supervisor's own registration and
     // deregistration leave the stale rows alone.
-    queue
-        .wrapper_exited(orphan.id(), std::process::id(), 0)
-        .unwrap();
+    queue.wrapper_exited(orphan.id(), wrapper.pid, 0).unwrap();
     Connection::open(&db)
         .unwrap()
         .execute("DELETE FROM run_leases", [])
@@ -1531,8 +1530,9 @@ fn recover_requires_dead_processes_and_stale_lease_then_allows_a_new_run() {
 fn recover_ignores_exited_processes_and_tolerates_a_missing_lease() {
     let (_dir, repo, db) = fixture();
     // The wrapper reported its exit before the supervisor died; its live PID
-    // (this test process) must not block recovery.
-    let pid = std::process::id();
+    // (a process standing for it) must not block recovery.
+    let wrapper = Stand::start().unwrap();
+    let pid = wrapper.pid;
     let run = orphan_run(&repo, &db, "owner", pid, pid);
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.wrapper_exited(run.id(), pid, 0).unwrap();

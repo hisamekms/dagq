@@ -7,14 +7,15 @@ use dagq::infrastructure::git_binary::git_executable;
 pub mod background_wrappers;
 pub mod headless;
 mod reviewer;
-pub use headless::{CODEX_HOME, set_codex_model};
+pub use headless::{CODEX_HOME, Stand, set_codex_model};
 pub use reviewer::*;
 mod thread_stacks;
 pub use crate::common::{Bounded, WithoutActor, shell_path};
 pub use anyhow::{Result, bail, ensure};
 use dagq::domain::LeaseToken;
-use dagq::domain::background_wrapper::HeadlessWrapper;
+use dagq::domain::background_wrapper::{BackgroundHandle, HeadlessWrapper};
 pub use dagq::domain::headless_job::JobAccess;
+use dagq::infrastructure::background::BackgroundWrappers;
 pub use dagq::{
     VERSION,
     application::{
@@ -505,6 +506,7 @@ mod lost_lease;
 pub use lost_lease::*;
 pub mod planner_prompt_bytes;
 pub mod planner_turns;
+mod session_handles;
 
 pub struct TestProvider {
     pub script: String,
@@ -602,6 +604,11 @@ pub fn resume_message_path(run_dir: &str) -> PathBuf {
     Path::new(run_dir).join("resume-message")
 }
 
+/// The processes standing for background wrappers, by handle, that a
+/// [`TestWorkspace`] stops on their close (shared, so that a
+/// [`TestReviewer`] can leave one running for it).
+pub type Stands = Arc<Mutex<Vec<(String, headless::Stand)>>>;
+
 /// One session the test backend started, keyed by its background handle.
 pub struct TestSession {
     pub run_id: RunId,
@@ -612,8 +619,10 @@ pub struct TestSession {
 /// Starts each run's session wrapper on a thread as a background session
 /// with a process of its own ([`headless::launch_background`]; a run opens
 /// no workspace, ADR-t1433-3), with the agent script chosen per task, and
-/// records the stops per handle. Planner and inbox workspaces are only
-/// listed and closed.
+/// records the stops per handle. A background session is open while the
+/// process its handle names lives with the start recorded in it, as the
+/// production backend tells it, whether or not it was stopped. Planner and
+/// inbox workspaces are only listed and closed.
 pub struct TestWorkspace {
     pub db: PathBuf,
     pub fail: bool,
@@ -649,10 +658,11 @@ pub struct TestWorkspace {
     /// `launch_background` calls (ADR-t1404-1): the directory, the command
     /// and the environment of each ([`headless::launch_background`]).
     pub launched: Mutex<Vec<headless::Launch>>,
-    /// The processes of the background sessions `no_session` or
-    /// `resume_no_session` started without a wrapper, by handle, until
-    /// their close stops them as it stops a background wrapper.
-    pub stands: Mutex<Vec<(String, headless::Stand)>>,
+    /// The processes of the background sessions started without a wrapper
+    /// (`no_session`, `resume_no_session` and [`Self::stand_in`]), by
+    /// handle, until their close stops them as it stops a background
+    /// wrapper.
+    pub stands: Stands,
     /// `send_text` calls: the session and the text.
     pub texts: Mutex<Vec<(String, String)>>,
     /// `exists` (and the listing) fails, as asking about a session can.
@@ -662,12 +672,11 @@ pub struct TestWorkspace {
     /// tell what the supervisor looked up.
     pub asked: Mutex<Vec<String>>,
     pub listings: AtomicUsize,
-    /// Sessions the backend reports open although it did not start them (a
-    /// run's wrapper from an earlier supervisor, a workspace from before
-    /// ADR-t1433-3, a planner's workspace), until they are stopped.
+    /// Workspaces cmux lists although this backend did not open them (a
+    /// workspace from before ADR-t1433-3, a planner's), until they are
+    /// closed. A background handle is never listed: it is open while its
+    /// process lives ([`Self::stand_in`]).
     pub listed: Mutex<Vec<String>>,
-    /// Sessions the backend reports gone for now although they run.
-    pub hidden: Mutex<Vec<String>>,
     /// `close` ends the session, as stopping a background wrapper does,
     /// instead of requiring it gone.
     pub close_ends_session: bool,
@@ -714,13 +723,12 @@ impl TestWorkspace {
             groups: Mutex::new(Vec::new()),
             resume_scripts: Mutex::new(HashMap::new()),
             launched: Mutex::new(Vec::new()),
-            stands: Mutex::new(Vec::new()),
+            stands: Stands::default(),
             texts: Mutex::new(Vec::new()),
             exists_fails: false,
             asked: Mutex::new(Vec::new()),
             listings: AtomicUsize::new(0),
             listed: Mutex::new(Vec::new()),
-            hidden: Mutex::new(Vec::new()),
             close_ends_session: false,
             close_times_out: false,
             headless: None,
@@ -731,27 +739,41 @@ impl TestWorkspace {
             wrapper_processes: None,
         }
     }
-    /// The sessions open: those it started and those `list` named, less
-    /// those closed or hidden.
-    fn open_sessions(&self) -> Result<Vec<String>> {
+    /// The workspaces cmux lists: those `list` named, less those closed.
+    fn listed_workspaces(&self) -> Result<Vec<String>> {
         ensure!(!self.exists_fails, "injected session list failure");
         let closed = self.closed();
-        let mut listed: Vec<String> = self
-            .sessions
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
-        listed.extend(self.listed.lock().unwrap().iter().cloned());
-        let hidden = self.hidden.lock().unwrap();
-        listed.retain(|id| !closed.contains(id) && !hidden.contains(id));
+        let mut listed = self.listed.lock().unwrap().clone();
+        listed.retain(|id| !closed.contains(id));
         Ok(listed)
     }
 
-    /// Report `session` open as if an earlier supervisor started it.
-    pub fn list(&self, session: &str) {
-        self.listed.lock().unwrap().push(session.into());
+    /// The process identity the wrappers of this backend are told by.
+    fn processes(&self) -> &dyn ProcessControl {
+        self.wrapper_processes
+            .as_deref()
+            .map_or(&SystemProcesses as &dyn ProcessControl, |p| p as _)
+    }
+
+    /// Report the workspace `id` open as if cmux listed it. A background
+    /// handle is open by its process alone, as the production backend
+    /// tells it: start one with [`Self::stand_in`].
+    pub fn list(&self, id: &str) {
+        assert!(
+            !dagq::domain::background_wrapper::is_background(id),
+            "{id} is a background handle: its process tells whether it is open"
+        );
+        self.listed.lock().unwrap().push(id.into());
+    }
+
+    /// The handle of a background session this backend did not start (a
+    /// run's wrapper from an earlier supervisor): a process that lives until
+    /// its close stops it, as stopping a background wrapper does.
+    pub fn stand_in(&self) -> String {
+        let stand = headless::Stand::start_with(self.processes()).unwrap();
+        let handle = stand.handle.clone();
+        self.stands.lock().unwrap().push((handle.clone(), stand));
+        handle
     }
     /// Resumed-session script for one task.
     pub fn resume_script_for(&self, task_id: i64, script: &str) {
@@ -938,19 +960,27 @@ impl WorkspaceBackend for TestWorkspace {
     fn reopen_interval(&self) -> Duration {
         self.reopen_interval
     }
-    // A session is open from its start until it is stopped, as a background
-    // wrapper runs until its stop; one this backend never started is not,
-    // unless `list` names it.
+    // A background session is open while the process its handle names
+    // shows the start recorded in it, judged as the production backend
+    // judges it (`BackgroundWrappers::alive`): a wrapper that ended is not
+    // open, closed or not. A workspace is open while it is listed.
     fn exists(&self, workspace_id: &str) -> Result<bool> {
         self.asked.lock().unwrap().push(workspace_id.to_owned());
+        ensure!(!self.exists_fails, "injected session list failure");
+        if let Some(handle) = BackgroundHandle::parse(workspace_id) {
+            return Ok(BackgroundWrappers {
+                processes: self.processes(),
+            }
+            .alive(&handle));
+        }
         Ok(self
-            .open_sessions()?
+            .listed_workspaces()?
             .iter()
-            .any(|listed| listed == workspace_id))
+            .any(|id| id == workspace_id))
     }
     fn listed_workspace_ids(&self) -> Result<Vec<String>> {
         self.listings.fetch_add(1, Ordering::SeqCst);
-        self.open_sessions()
+        self.listed_workspaces()
     }
     fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
         bail!("not used by the supervisor")
@@ -1629,9 +1659,7 @@ fn run_agent_with_review_retry(
     );
     assert_eq!(launched[0].cwd, Path::new(run.worktree_path().unwrap()));
     assert_eq!(launched[0].log, run_dir.join("session.log"));
-    let pid = dagq::domain::background_wrapper::BackgroundHandle::parse(&session)
-        .unwrap()
-        .pid;
+    let pid = BackgroundHandle::parse(&session).unwrap().pid;
     let launches = payloads(&detail, "wrapper_launched");
     assert_eq!(launches.len(), 1, "{launches:?}");
     assert_eq!(launches[0]["pid"], json!(pid));
@@ -1777,13 +1805,14 @@ pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32)
         .unwrap();
     let run = queue.run(run.id()).unwrap();
     repository.create_worktree(&run).unwrap();
-    // Its session is a background wrapper's (task 1439): the handle names
-    // the wrapper pid with its start, which a dead pid has none of.
+    // Its session is a background wrapper's: the handle names the wrapper
+    // pid with its start. A dead pid has none, so it gets one of its run's
+    // own, which no process shows: each run has a handle of its own.
     let start = SystemProcesses
         .start_identity(wrapper)
-        .unwrap_or_else(|| "Thu Jan  1 00:00:00 1970".to_owned());
-    let handle = dagq::domain::background_wrapper::BackgroundHandle::new(wrapper, &start);
-    record_background_start(&mut queue, &run, token, &handle.to_string());
+        .unwrap_or_else(|| format!("gone {}", run.id()));
+    let handle = BackgroundHandle::new(wrapper, &start);
+    record_background_start(db, &mut queue, &run, token, &handle.to_string());
     queue
         .register_wrapper(run.id(), &LeaseToken::new(token), wrapper)
         .unwrap();
@@ -2071,7 +2100,7 @@ pub fn start_run_under_dead_supervisor(
             &Path::new(run.run_dir().unwrap()).join("session.log"),
         )
         .unwrap();
-    record_background_start(&mut queue, &run, token, &handle);
+    record_background_start(db, &mut queue, &run, token, &handle);
     wait_until(db, Duration::from_secs(10), |queue| {
         queue.run(run.id()).unwrap().status() == RunStatus::Running
     });
@@ -2081,9 +2110,33 @@ pub fn start_run_under_dead_supervisor(
 /// Record the background wrapper `handle` as the session of `run` under
 /// `token`, and its start, as the supervisor records them
 /// (`workspace_created`, then `wrapper_launched`): the wrapper registers
-/// once it finds its start.
-pub fn record_background_start(queue: &mut SqliteQueue, run: &TaskRun, token: &str, handle: &str) {
-    let parsed = dagq::domain::background_wrapper::BackgroundHandle::parse(handle).unwrap();
+/// once it finds its start. A handle another run of the queue `db`
+/// recorded stops the test: the backend's stops and its liveness would not
+/// tell the two runs apart (give each run a process of its own).
+pub fn record_background_start(
+    db: &Path,
+    queue: &mut SqliteQueue,
+    run: &TaskRun,
+    token: &str,
+    handle: &str,
+) {
+    let parsed = BackgroundHandle::parse(handle).unwrap();
+    let others: Vec<String> = Connection::open(db)
+        .unwrap()
+        .prepare(
+            "SELECT DISTINCT run_id FROM run_events WHERE kind='workspace_created'
+             AND json_extract(payload,'$.workspace_id')=?1 AND run_id<>?2",
+        )
+        .unwrap()
+        .query_map([handle, run.id().as_str()], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        others.is_empty(),
+        "the handle {handle} of run {} is already the session of run(s) {others:?}",
+        run.id()
+    );
     queue
         .workspace_created(run.id(), &LeaseToken::new(token), handle)
         .unwrap();

@@ -664,7 +664,8 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
     // one against a fresh lease, takes nothing.
     add_ready_task(&mut queue, "second", &[]);
     add_ready_task(&mut queue, "early", &[]);
-    let second = orphan_run(&repo, &db, "fresh", std::process::id(), std::process::id());
+    let wrapper = Stand::start().unwrap();
+    let second = orphan_run(&repo, &db, "fresh", wrapper.pid, wrapper.pid);
     assert!(
         queue
             .adopt_run(
