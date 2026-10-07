@@ -401,20 +401,6 @@ impl WorkspaceBackend for FakeCmux {
             .map(|(_, _, id, _)| id.clone())
             .collect())
     }
-    fn workspaces_described(&self, description: &str) -> Result<Vec<String>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        anyhow::ensure!(!self.list_fails, "workspace list failed");
-        let tags = self.tags.lock().unwrap();
-        Ok(self
-            .workspaces
-            .lock()
-            .unwrap()
-            .iter()
-            .zip(tags.iter())
-            .filter(|(_, tags)| tags.description.as_deref() == Some(description))
-            .map(|((_, _, id, _), _)| id.clone())
-            .collect())
-    }
     fn ensure_group(&self, external_id: &str, name: &str) -> Result<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.groups

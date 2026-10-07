@@ -837,15 +837,13 @@ impl Sessions<'_> {
 /// it never replaces another tool's pill (Claude Code's `claude_code`).
 pub const ROLE_STATUS_KEY: &str = "dagq_role";
 
-/// How the sidebar tells the inbox and the planners apart at a glance
-/// (ADR-0031): the workspace's cmux color and the SF Symbol of its role
-/// pill (cmux workspaces have no icon of their own). Amber for the inbox,
-/// where things wait for a person, Blue for a planner. Other roles keep
-/// cmux's defaults.
+/// How the sidebar tells the inbox apart at a glance (ADR-0031): the
+/// workspace's cmux color and the SF Symbol of its role pill (cmux
+/// workspaces have no icon of their own). Amber for the inbox, where
+/// things wait for a person. Other roles keep cmux's defaults.
 pub fn session_look(role: SessionRole) -> Option<(&'static str, &'static str)> {
     match role {
         SessionRole::Inbox => Some(("Amber", "tray")),
-        SessionRole::Planner => Some(("Blue", "map")),
         _ => None,
     }
 }
