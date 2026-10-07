@@ -32,19 +32,25 @@ related:
 
 その後: `awaiting_integration`のrunは[Review](review.md#review-supervisor)に進む（leaseとsessionはそのまま）。`integration_approved`のあるrun（`integrate`が呼ばれた後にresumeしたrun）はreviewを待たずに終了の依頼→close→着地する（ADR-0027の決定3）。`needs_session`（宣言外のパス、evidenceの欠落）は終了の依頼→closeしてleaseを外す。`failed`は終了を依頼し、workspaceは調査のため閉じずにleaseを外す。
 
-## 着地の検証（予定）
+## 着地の検証
 
 [ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)で、着地の検証を軽くし、最終関門をCIにする。
-runtimeの仕組みはまだ無く、この節は予定の姿である。
+置き換えと材料の受け渡しはruntimeにあり、repositoryの`dagq.toml`が設定を持つときだけ働く。
+このrepositoryの設定とscriptはまだ無く、下の「中身」から先はそれらが入ったときの姿である。
 validatingは今と同じく検証のコマンドを流さず、置き換えも`integrate`のrebase後の1回の検証の中で起きる（[`integrate`](integrate.md)の手順5）。
 
-- **置き換えの流れ**: repositoryの設定が着地の検証を持つときだけ、runtimeはtaskの検証のコマンドのうちcoverageの関門に当たるものを、設定の着地の検証のコマンドに置き換えて流す。
-  他のコマンドは登録のまま流し、coverageの関門を持たないtaskでは何も置き換わらない。
-  登録済みのtaskの検証のコマンドは書き換えず、設定を外せば登録のコマンドに戻る。
+- **置き換えの流れ**: 設定があるときだけ、runtimeはtaskの検証のコマンドのうち設定が名指すもの（coverageの関門）を、設定の着地の検証のコマンドに置き換えて流す。
+  当たるコマンドがいくつあっても置き換えたコマンドは1回だけ流し、他のコマンドは登録の順のまま流す。
+  当たるコマンドを持たないtaskでは何も置き換わらない。
+  登録済みのtaskの検証のコマンドは書き換えず、着地のたびにmain checkoutの設定から決め直すので、設定を外せば登録のコマンドに戻る。
+  置き換えたコマンドの`verification_command`のeventと検証のlogの先頭に、元のコマンドが残る。
+  hostの失敗のやり直しと不安定なtestの着地のやり直し（[`integrate`](integrate.md)）は、置き換えたコマンドにも同じく効く。
 - **分担**: 置き換えと、着地の検証のコマンドに渡す材料（base commit、既に落ちているtestの一覧、CIの修正taskのrunか）はruntimeの汎用の仕組みである。
   何を置き換えるか、ITの選び方、対応表の取り方、閾値・共通のファイル・古さの上限の値は、repositoryの設定とscriptが持つ。
   runtimeはrepositoryのtestの構成と対応表の形を知らない。
-  設定の書式と渡すenvの意味は定義のそばのdoc commentが持つ。
+  材料は置き換えたコマンドにだけenvで渡し、登録のまま流すコマンドには渡さない。
+- **コードの入口**: 設定の型・置き換えの判断（`plan`）・envとファイルの名前は`domain::landing_verification`にあり、設定の書式と渡すenvの意味はそこのdoc commentが持つ。
+  設定は`infrastructure::run_env`が読み（`Verifier::landing_verification`）、材料は`application::integrate`の`landing_env`が用意する。
 - **中身**: このrepositoryの着地の検証は、fmt・clippy・レイヤーの依存の検査・taskに固有の軽い検査・unit test全件・影響範囲で絞ったITで、行カバレッジの関門はCIだけが見る。
 - **絞ったITに必ず含めるもの**: 差分で足した・変えたtestのファイルが定めるITと、対応表に無いIT（表の生成の後に他の着地が足したか名前が変わったtest）。
   表は差分の前のmainから作られているので、足したtestと他の着地が足したtestを知らない。
@@ -52,6 +58,7 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
   値と根拠は[着地のITの絞り込みの測定](../../plans/landing-it-selection.md)の「決めたこと」にある。
 - **既に落ちているtest**: [CI watch](ci-watch.md)の一覧のtestは着地の検証から外す。
   CIの修正taskのrunでは、そのfindingのtestを外さない（他のfindingのtestは外す）。
+  runtimeはrunのtaskについて読んだ一覧（修正taskのrunではそのfindingの項目を外す対象から除いたもの）を渡し、外す適用は設定のコマンドとscriptが受け持つ。
 - **最終関門**: 着地の検証が見逃した壊れはmainのCIが拾い、CIの見張りが修正taskにする。
   mainの前でCIを通す仕組みと着地のrevertは無く、自動更新にもCIの確かめや全testを足さない。
   全部のe2eの関門（下の節と[Auto-update](auto-update.md)）と固定バイナリを前のものに戻す手順は変わらない。

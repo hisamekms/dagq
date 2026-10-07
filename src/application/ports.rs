@@ -3454,6 +3454,21 @@ pub trait Verifier {
     fn recheck_config(&self) -> Result<crate::domain::recheck::RecheckConfig> {
         Ok(crate::domain::recheck::RecheckConfig::default())
     }
+    /// The command the landing runs in place of some of a task's
+    /// verification commands (`[landing_verification]` of `dagq.toml`,
+    /// ADR-t1925-1 decision 4); none by default, which runs them as
+    /// registered.
+    fn landing_verification(
+        &self,
+    ) -> Result<Option<crate::domain::landing_verification::LandingVerification>> {
+        Ok(None)
+    }
+    /// `[ci_watch]` of `dagq.toml` (ADR-t1920-1), whose branch the known
+    /// failures handed to the landing's command are read for; none by
+    /// default.
+    fn ci_watch_config(&self) -> Result<Option<crate::domain::ci_watch::CiWatchConfig>> {
+        Ok(None)
+    }
     /// The limited trial of the worker's model (`[worker.trial]` of
     /// `dagq.toml`, ADR-0079 decision 4); off by default.
     fn worker_trial(&self) -> Result<crate::domain::worker_model::WorkerTrial> {

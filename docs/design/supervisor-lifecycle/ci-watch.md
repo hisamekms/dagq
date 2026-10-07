@@ -19,7 +19,8 @@ related:
 
 # CI watch
 
-> [ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)の見張り・event・finding・一覧・`dagq ci failures`・`finding dismiss --covered-by`はtask 1921が実装した。着地の検証に一覧を渡すこと（`DAGQ_CI_KNOWN_FAILURES`と`ci-known-failures.json`、goal 157の段3b）と、workerのpromptとrunのreviewの材料に一覧を載せること（段5）は**予定（未実装）**で、下の「一覧の読み方」の「runtimeの中の読み手」と「修正taskのrun」に印を付けた。
+> [ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)の見張り・event・finding・一覧・`dagq ci failures`・`finding dismiss --covered-by`はtask 1921が実装した。
+> 着地の検証に一覧を渡すこと（goal 157の段3b）も実装済みで、workerのpromptとrunのreviewの材料に一覧を載せること（段5）だけが**予定（未実装）**である（下の「一覧の読み方」の「runtimeの中の読み手」と「修正taskのrun」に印を付けた）。
 
 設定（[Run environment](run-environment.md)の`[ci_watch]`）を書いたrepositoryで、supervisorが着地先のbranchへのpushのCIの結果をhostの`gh`で定期的に読み、queueのeventに記録し、赤になったら`ci_failure`のfindingを記録してruntimeのfindingのplanner（[Finding planners](finding-planners.md)）に修正taskを作らせ、既に落ちているtestの一覧（以下「一覧」）を持つ。CIの結果をqueueに届ける経路で、GitHubのissue（[CI failure issues](../ci-failure-issues.md)）とは別に動く。
 
@@ -131,11 +132,16 @@ related:
 
   `workflow`は`[ci_watch]`のもので、表が無ければ最新の`ci_checked`のもの。`branch`は`[ci_watch] branch`、書かなければ最新の`ci_checked`のもの（見張りが着地先のbranchで記録した名前）で、どちらも無い（`branch`を書かず、まだ何も記録していない）ときはnull。`state`は`green` / `red` / `unknown`（記録が無い）、`watch`は`available` / `unavailable` / `disabled`。`kind`は`test`か`job_step`。`--task ID`を付けると、そのtaskのproposalに紐づいたか、そのtaskを`covered_by_task`に持つ`ci_failure`のfinding（`ci_failure_findings_of`）の項目を`failures`から除き`kept_for_task`に移す（下の「修正taskのrun」）。`[ci_watch]`が無く記録も無ければ`{"enabled": false, "state": "unknown", "watch": "disabled", "failures": []}`。
 - **`status`**: 最上位の`ci`の欄に`{state, watch, failures: <件数>, checked_at, latest_run_url}`（どのroleの`status`にも出す）。見張りの記録が無ければnull。
-- **runtimeの中の読み手**（予定、未実装。CLIと同じ`application::ci_watch::known_failures(queue, config, branch, task)`を使う）: 着地の検証（goal 157の段3b）は、runのrun dirに`ci-known-failures.json`（上のCLIの出力と同じ形）を書き、検証コマンドのenvに`DAGQ_CI_KNOWN_FAILURES=<そのpath>`を足す（`DAGQ_`はruntimeの予約なので`[run.env]`と衝突しない）。どのtestを外すかの適用は`dagq.toml`の検証コマンドとrepositoryのscriptが受け持つ。workerのprompt（claimとresume）とrunのreviewの材料（段5）は`failures`の名前と`added.url`を載せる。
+- **runtimeの中の読み手**（CLIと同じ`application::ci_watch::known_failures(queue, config, branch, task)`を使う）: 着地の検証は、`integrate`がtaskの検証のコマンドを着地の検証のコマンドに置き換えるとき（[Validation](validation.md#着地の検証)）、runのtaskについて読んだ一覧（上のCLIの`--task`の出力と同じ形）をrunのrun dirに書き、そのpathと修正taskのrunかを置き換えたコマンドのenvに足す（`application::integrate`の`landing_env`。envとファイルの名前と意味は`domain::landing_verification`のdoc comment）。
+  どのtestを外すかの適用は`dagq.toml`の着地の検証のコマンドとrepositoryのscriptが受け持つ。
+  workerのprompt（claimとresume）とrunのreviewの材料（段5）に`failures`の名前と`added.url`を載せることは予定（未実装）。
 
 ## 修正taskのrun
 
-runのtaskが属するproposal（`tasks.proposal_id`）を`findings.proposal_id`に持つか、そのtaskを`covered_by_task`に持つ`kind = ci_failure`のfindingがあれば、そのrunは修正taskのrunで、そのfindingの項目を一覧から除いて渡す（他のfindingの項目は外す対象のまま）。taskに印や欄は足さない。今はこの判定（`ci_failure_findings_of`）を`ci failures --task`だけが使い、runに渡すのは上の段3b・段5の予定。
+runのtaskが属するproposal（`tasks.proposal_id`）を`findings.proposal_id`に持つか、そのtaskを`covered_by_task`に持つ`kind = ci_failure`のfindingがあれば、そのrunは修正taskのrunで、そのfindingの項目を一覧から除いて渡す（他のfindingの項目は外す対象のまま）。
+taskに印や欄は足さない。
+この判定（`ci_failure_findings_of`）は`ci failures --task`と着地の検証（上の「runtimeの中の読み手」）が使い、着地の検証の一覧ではそのfindingの項目が`failures`から`kept_for_task`に移る。
+workerのpromptとreviewの材料に渡すこと（段5）は予定。
 
 ## 保存（findingsの列）
 
@@ -158,7 +164,7 @@ eventの種類にはmigrationが要らないが（上の「eventの種類と欄�
 | `doctor`の`ci_watch` | [`doctor`](doctor.md)、pluginの`dagq-recover`の`reference/doctor.md` |
 | `up`のpreflightの`gh` | [`up` / `down`](up-down.md)、pluginの`dagq-recover`の`reference/up-down.md` |
 | eventの種類（`ci_checked`ほか） | `domain::event_kind`（`is_queue`）だけ（migrationは要らない） |
-| `DAGQ_CI_KNOWN_FAILURES`（予定、段3b） | 実装のtaskが[integrate](integrate.md)の検証コマンドのenvと[Run environment](run-environment.md)の`DAGQ_`の予約の記述を直す |
+| 着地の検証のコマンドに渡す一覧のenv（段3b。名前は`domain::landing_verification`） | [integrate](integrate.md)の着地の検証の置き換え、[Validation](validation.md#着地の検証)、[Run environment](run-environment.md)の`[landing_verification]`の項 |
 
 ## 既存の仕組みとの関係
 

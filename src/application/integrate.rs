@@ -26,7 +26,7 @@ use tracing::{info, warn};
 
 use super::{
     AskStore, Clock, FollowUpRegistration, IdGenerator, Landing, MainRemote, ProcessControl, Queue,
-    Repository, RunFiles, RunLog, Verifier, path_text, reason_of_error, tail,
+    QueueRecords, Repository, RunFiles, RunLog, Verifier, path_text, reason_of_error, tail,
 };
 use crate::domain::{
     ActorContext, ActorRole, AuthorizationError, Authorizer, Capability, Resource, StaticPolicy,
@@ -40,6 +40,7 @@ use crate::domain::{
     landing_branch::{
         DEFAULT_REMOTE, LandingBranch, RemoteSource, RepositoryConfig, missing_remote,
     },
+    landing_verification,
     measure::{LoadSummary, LoadWindow},
     required_of,
     scope::{out_of_scope, scope_violation_reason},
@@ -1245,7 +1246,20 @@ fn land(
     }
     // The task's verification commands run here, once per commit, on the
     // rebased tree: validation only checks the receipt (ADR-0023 decision 1).
-    let commands = task.verification_commands();
+    // The repository's landing verification runs in place of those its
+    // `dagq.toml` names; the registered commands stay (ADR-t1925-1).
+    // Read like `[run.env]`, only for a task that has commands to run.
+    let config = if task.verification_commands().is_empty() {
+        None
+    } else {
+        verifier.landing_verification()?
+    };
+    let commands = landing_verification::plan(config.as_ref(), task.verification_commands());
+    let landing_env = if commands.iter().any(landing_verification::Planned::replaced) {
+        landing_env(&*queue, verifier, files, task, run_dir, main)?
+    } else {
+        Vec::new()
+    };
     let mut run_env = if commands.is_empty() {
         Vec::new()
     } else {
@@ -1265,21 +1279,27 @@ fn land(
         // Each attempt keeps its own logs, so a second integrate of the run does
         // not overwrite why the first one failed.
         let attempt = next_integrate_attempt(files, run_dir);
-        let step = VerifyStep {
-            verifier,
-            load_average,
-            files,
-            run,
-            worktree,
-            run_env: &run_env,
-            attempt,
-        };
-        for (index, command) in commands.iter().enumerate() {
+        for (index, planned) in commands.iter().enumerate() {
             let index = index + 1;
+            let command = &planned.command;
+            let step = VerifyStep {
+                verifier,
+                load_average,
+                files,
+                run,
+                worktree,
+                run_env: &run_env,
+                planned,
+                extra_env: if planned.replaced() {
+                    &landing_env
+                } else {
+                    &[]
+                },
+                attempt,
+            };
             let first = step.run(
                 queue,
                 index,
-                command,
                 &integrate_verify_log(run_dir, attempt, index),
                 None,
             )?;
@@ -1312,7 +1332,6 @@ fn land(
                 let retried = step.run(
                     queue,
                     index,
-                    command,
                     &integrate_retry_log(run_dir, attempt, index),
                     Some(&last),
                 )?;
@@ -1450,6 +1469,35 @@ fn landed_before(
     ))
 }
 
+/// The variables the landing's own command gets (ADR-t1925-1 decision
+/// 4): the main `main` the run was rebased onto, the tests that fail
+/// already on the watched branch, written to the run's directory as `dagq
+/// ci failures --task` shows them for `task` (the items of the CI
+/// failures it fixes kept apart), and whether `task` fixes one.
+fn landing_env<Q: RunLog + QueueRecords + ?Sized>(
+    queue: &Q,
+    verifier: &dyn Verifier,
+    files: &dyn RunFiles,
+    task: &Task,
+    run_dir: &Path,
+    main: &CommitSha,
+) -> Result<Vec<(String, String)>> {
+    let watch = verifier.ci_watch_config()?;
+    let branch = watch.as_ref().and_then(|watch| watch.branch.clone());
+    let failures =
+        super::ci_watch::known_failures(queue, watch.as_ref(), branch.as_deref(), Some(task.id()))?;
+    let fix_run = !queue.ci_failure_findings_of(task.id())?.is_empty();
+    let path = run_dir.join(landing_verification::KNOWN_FAILURES_FILE);
+    files
+        .write(&path, serde_json::to_string_pretty(&failures)?.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(landing_verification::env(
+        main.as_str(),
+        &path_text(&path)?,
+        fix_run,
+    ))
+}
+
 /// How integrate runs one verification command of an attempt and records
 /// it as `verification_command`.
 struct VerifyStep<'a> {
@@ -1459,6 +1507,11 @@ struct VerifyStep<'a> {
     run: &'a TaskRun,
     worktree: &'a Path,
     run_env: &'a [(String, String)],
+    /// The command to run, and the task's it runs in place of.
+    planned: &'a landing_verification::Planned,
+    /// What the command gets on top of `run_env`: [`landing_env`] for the
+    /// landing's own command, nothing for a task's.
+    extra_env: &'a [(String, String)],
     attempt: u32,
 }
 
@@ -1486,22 +1539,25 @@ impl Checked {
 }
 
 impl VerifyStep<'_> {
-    /// Run `command`, the `index`th, with its output in `log`, and record
-    /// it; `retry_of` is the run it retries (task 639), whose failure and
-    /// log the event names. A command the verifier killed at its limit for
-    /// the whole command is a `timeout` failure, not an error.
+    /// Run the planned command, the `index`th, with its output in `log`,
+    /// and record it; `retry_of` is the run it retries (task 639), whose
+    /// failure and log the event names. A command the verifier killed at
+    /// its limit for the whole command is a `timeout` failure, not an
+    /// error. A command run in place of the task's names them in the event
+    /// (`replaces`) and atop its log.
     fn run(
         &self,
         queue: &mut dyn Queue,
         index: usize,
-        command: &str,
         log: &Path,
         retry_of: Option<&Checked>,
     ) -> Result<Checked> {
+        let command = self.planned.command.as_str();
+        let env: Vec<(String, String)> =
+            self.run_env.iter().chain(self.extra_env).cloned().collect();
         let started = Instant::now();
         let (status, load) = sampled(self.load_average, LOAD_SAMPLE_INTERVAL, || {
-            self.verifier
-                .run_to_log(command, self.worktree, self.run_env, log)
+            self.verifier.run_to_log(command, self.worktree, &env, log)
         });
         let duration_secs = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
         let (code, signal, timed_out) = match status {
@@ -1514,11 +1570,25 @@ impl VerifyStep<'_> {
         };
         // Lossy: a log cut off by a kill or a full disk may end mid-character,
         // and its marks still count.
-        let output = self
-            .files
-            .read(log)
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        let read = self.files.read(log);
+        let output = read
+            .as_ref()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
             .unwrap_or_default();
+        // The header is best effort: the disk that failed the command may
+        // not take it either, and the failure is still to be judged.
+        if let (Some(header), Ok(bytes)) = (self.planned.log_header(), &read) {
+            let mut text = header.into_bytes();
+            text.extend_from_slice(bytes);
+            if let Err(error) = self.files.write(log, &text) {
+                warn!(
+                    op = "integrate",
+                    "run {}: could not put the replaced commands atop {}: {error}",
+                    self.run.id(),
+                    log.display()
+                );
+            }
+        }
         let checked = judge_command(command, code, signal, timed_out, &output, log);
         let exit_code = checked.exit_code;
         let mut payload = json!({
@@ -1526,6 +1596,7 @@ impl VerifyStep<'_> {
             "attempt": self.attempt,
             "index": index,
             "command": command,
+            "replaces": self.planned.replaces_json(),
             "exit_code": exit_code,
             "signal": signal,
             "failure": checked.failure.as_ref().map(|failure| failure.to_json()),

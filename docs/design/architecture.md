@@ -142,7 +142,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
   検証コマンドの実行は内部。
 - `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
 - 着地先のbranchの解決（`Repository::landing_branch`）を観測と分析のCIの見張りに公開する。
-  解決できなければ見張りは確かめを始めず、着地先の保留に任せる。
+  解決できなければ見張りは確かめず、着地先の保留に任せる。
 - `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`のleaseとprocessの部分は内部。
 
 **許す依存の向き**
@@ -174,8 +174,8 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **公開するport**
 
-- `QueueRecords`の読み取り（findingとreportとKPIの目標割れ、CIの見張りのeventと`ci_failure`のfinding）を全てのcontextに公開する。
-  `QueueRecords`のうち計画管理の表を読むmethodは、portをcontextごとに分けるときに計画管理へ移す（[混在しているmodule](#混在しているmodule)）。
+- `QueueRecords`の読み取り（findingとreportとKPIの目標割れ、CIの見張りのeventと`ci_failure`のfinding）を全てのcontextに、`ci_watch::known_failures`を着地の検証に公開する。
+  `QueueRecords`のうち計画管理の表を読むmethodは、portを分けるときに計画管理へ移す（[混在しているmodule](#混在しているmodule)）。
   書き込み（`record_*`）は内部。
 - findingのIDと`finding_*`のeventを値として公開する（計画管理のfindingのplannerが読む）。
 - CIの見張りの保留（`Supervisor::ci_watch_held`・`ci_watch_unreadable`）を実行と着地に読み取りとして公開し、状態を変えるのは`supervise::ci_watch`だけ。
@@ -185,7 +185,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **許す依存の向き**
 
-- 他のcontextの状態とeventを読むだけで、他のcontextのtableを書かず、他のcontextの操作（claim・遷移・answerの適用）を呼ばない（ADR-t1545-1決定2）。
+- 他のcontextの状態とeventを読むだけで、そのtableを書かず、操作（claim・遷移・answerの適用）を呼ばない（ADR-t1545-1決定2）。
 - 書くのは自分の種類のeventと`findings`と、findingに紐づく`blocked`のask（共有の部品）だけ。
 
 **境界をまたぐtransaction**: 無い（T6はこのcontextの`findings`を計画管理が書くもの）。

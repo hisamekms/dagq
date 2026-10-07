@@ -56,6 +56,7 @@ use crate::{
         exit::ExitConfig,
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
+        landing_verification::{self, LandingVerification},
         light_slots::LightChanges,
         provider_switch::ProviderFallback,
         recheck::RecheckConfig,
@@ -145,7 +146,10 @@ const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
 /// `[ci_watch]`: the landing branch's CI the supervisor watches
 /// (ADR-t1920-1).
 const CI_WATCH_TABLE: &str = "ci_watch";
-const TABLES: [&str; 20] = [
+/// `[landing_verification]`: the command `integrate` runs in place of
+/// some of a task's (ADR-t1925-1 decision 4).
+const LANDING_VERIFICATION_TABLE: &str = landing_verification::TABLE;
+const TABLES: [&str; 21] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -166,6 +170,7 @@ const TABLES: [&str; 20] = [
     HEADLESS_TABLE,
     PROVIDER_FALLBACK_TABLE,
     CI_WATCH_TABLE,
+    LANDING_VERIFICATION_TABLE,
 ];
 /// The keys of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -252,6 +257,9 @@ pub struct Config {
     /// `[ci_watch]` (ADR-t1920-1); `None` without the table, which watches
     /// nothing.
     pub ci_watch: Option<CiWatchConfig>,
+    /// `[landing_verification]` (ADR-t1925-1 decision 4); `None` without
+    /// the table, which runs a task's commands as registered.
+    pub landing_verification: Option<LandingVerification>,
 }
 
 /// Parse the whole file.
@@ -275,6 +283,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // the file is read whole (its `workflow` is required).
     let mut ci_watch: Option<(usize, CiWatchConfig)> = None;
     let mut ci_watch_keys: Vec<String> = Vec::new();
+    // `[landing_verification]`'s header line and its keys as read; both
+    // are required, which is checked once the file is read whole.
+    let mut landing: Option<(usize, Option<Vec<String>>, Option<String>)> = None;
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
@@ -358,7 +369,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -380,6 +391,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             if *known == AREAS_TABLE {
                 areas.get_or_insert_with(Vec::new);
+            }
+            if *known == LANDING_VERIFICATION_TABLE {
+                landing = Some((number, None, None));
             }
             continue;
         }
@@ -652,6 +666,51 @@ pub fn parse_config(text: &str) -> Result<Config> {
                             config.branch = Some(value);
                         }
                     }
+                }
+            }
+            Some(LANDING_VERIFICATION_TABLE) => {
+                let (_, replaces, command) =
+                    landing.as_mut().expect("[landing_verification] was opened");
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                match key {
+                    landing_verification::REPLACES => {
+                        ensure!(
+                            replaces.is_none(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                        );
+                        let texts = parse_string_array(rest.trim()).with_context(with)?;
+                        ensure!(
+                            !texts.is_empty(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} is empty; leave the table out to run the task's commands as registered"
+                        );
+                        for (index, text) in texts.iter().enumerate() {
+                            ensure!(
+                                !text.trim().is_empty(),
+                                "{CONFIG_FILE_NAME}:{number}: {key} has a blank text"
+                            );
+                            ensure!(
+                                !texts[..index].contains(text),
+                                "{CONFIG_FILE_NAME}:{number}: {key} names {text:?} twice"
+                            );
+                        }
+                        *replaces = Some(texts);
+                    }
+                    landing_verification::COMMAND => {
+                        ensure!(
+                            command.is_none(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                        );
+                        let text = parse_string(rest.trim()).with_context(with)?;
+                        ensure!(
+                            !text.trim().is_empty(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} is blank"
+                        );
+                        *command = Some(text);
+                    }
+                    _ => bail!(
+                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{LANDING_VERIFICATION_TABLE}]; the keys are {}",
+                        landing_verification::KEYS.join(", ")
+                    ),
                 }
             }
             Some(RECHECK_TABLE) => {
@@ -929,7 +988,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -945,6 +1004,15 @@ pub fn parse_config(text: &str) -> Result<Config> {
             "{CONFIG_FILE_NAME}:{line}: [{CI_WATCH_TABLE}] has no workflow"
         );
         config.ci_watch = Some(watch);
+    }
+    if let Some((line, replaces, command)) = landing {
+        let missing = |key: &str| {
+            format!("{CONFIG_FILE_NAME}:{line}: [{LANDING_VERIFICATION_TABLE}] has no {key}")
+        };
+        config.landing_verification = Some(LandingVerification {
+            replaces: replaces.with_context(|| missing(landing_verification::REPLACES))?,
+            command: command.with_context(|| missing(landing_verification::COMMAND))?,
+        });
     }
     config.kpi = kpi.finish().with_context(|| CONFIG_FILE_NAME.to_owned())?;
     // A provider is checked against its role once the table is read whole
@@ -1235,6 +1303,19 @@ pub fn load_ci_watch(root: &Path) -> Result<Option<CiWatchConfig>> {
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
         .ci_watch)
+}
+
+/// `[landing_verification]` of the `dagq.toml` in `root` (ADR-t1925-1
+/// decision 4); no file or no table is none, which runs a task's
+/// verification commands as registered.
+pub fn load_landing_verification(root: &Path) -> Result<Option<LandingVerification>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .landing_verification)
 }
 
 /// `[broker]` of the `dagq.toml` in `root` (ADR-t827-4 decision 4); no
@@ -1618,6 +1699,12 @@ impl Verifier for ShellVerifier {
 
     fn worker_trial(&self) -> Result<WorkerTrial> {
         load_worker_trial(&self.checkout)
+    }
+    fn landing_verification(&self) -> Result<Option<LandingVerification>> {
+        load_landing_verification(&self.checkout)
+    }
+    fn ci_watch_config(&self) -> Result<Option<CiWatchConfig>> {
+        load_ci_watch(&self.checkout)
     }
     fn e2e_paths(&self) -> Result<Vec<String>> {
         load_e2e_paths(&self.checkout)
@@ -2738,6 +2825,91 @@ LITERAL = 'no \n escapes # here'
         );
     }
 
+    /// `[landing_verification]` needs both `replaces` and `command`; the
+    /// file without it runs a task's commands as registered (ADR-t1925-1).
+    #[test]
+    fn parses_the_landing_verification_table() {
+        assert_eq!(parse_config("").unwrap().landing_verification, None);
+        assert_eq!(
+            parse_config(
+                "[landing_verification]\nreplaces = ['cargo llvm-cov nextest'] # the gate\ncommand = \"sh scripts/landing.sh\"\n"
+            )
+            .unwrap()
+            .landing_verification,
+            Some(LandingVerification {
+                replaces: vec!["cargo llvm-cov nextest".into()],
+                command: "sh scripts/landing.sh".into(),
+            })
+        );
+        for (text, expected) in [
+            (
+                "[landing_verification]\ncommand = 'x'\n",
+                "dagq.toml:1: [landing_verification] has no replaces",
+            ),
+            (
+                "[landing_verification]\nreplaces = ['a']\n",
+                "dagq.toml:1: [landing_verification] has no command",
+            ),
+            (
+                "[landing_verification]\nreplaces = []\ncommand = 'x'\n",
+                "dagq.toml:2: replaces is empty",
+            ),
+            (
+                "[landing_verification]\nreplaces = [' ']\ncommand = 'x'\n",
+                "dagq.toml:2: replaces has a blank text",
+            ),
+            (
+                "[landing_verification]\nreplaces = ['a', 'a']\ncommand = 'x'\n",
+                "dagq.toml:2: replaces names \"a\" twice",
+            ),
+            (
+                "[landing_verification]\nreplaces = 'a'\ncommand = 'x'\n",
+                "dagq.toml:2: value of replaces",
+            ),
+            (
+                "[landing_verification]\nreplaces = ['a']\ncommand = ' '\n",
+                "dagq.toml:3: command is blank",
+            ),
+            (
+                "[landing_verification]\nreplaces = ['a']\ncommand = 'x'\ncommand = 'y'\n",
+                "dagq.toml:4: command is defined twice",
+            ),
+            (
+                "[landing_verification]\nreplaces = ['a']\nreplaces = ['b']\n",
+                "dagq.toml:3: replaces is defined twice",
+            ),
+            (
+                "[landing_verification]\nreplaces = ['a']\ncommand = 'x'\nmode = 'y'\n",
+                "dagq.toml:4: unknown key mode in [landing_verification]; the keys are replaces, command",
+            ),
+            (
+                "[landing_verification]\nreplaces = ['a']\ncommand = 'x'\n[landing_verification]\n",
+                "dagq.toml:4: [landing_verification] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_landing_verification(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[landing_verification]\nreplaces = ['gate']\ncommand = 'landing'\n",
+        )
+        .unwrap();
+        let verifier = ShellVerifier {
+            checkout: dir.path().to_path_buf(),
+            db: dir.path().join("queue.db"),
+            user_config: None,
+            verification_timeout: Duration::from_secs(1),
+        };
+        assert_eq!(
+            verifier.landing_verification().unwrap().unwrap().command,
+            "landing"
+        );
+        assert_eq!(verifier.ci_watch_config().unwrap(), None);
+    }
+
     /// `[provider_fallback] workers` and `jobs` are bools, each on without
     /// it; the table knows no other key (ADR-t1857-1).
     #[test]
@@ -3000,7 +3172,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [broker], [broker.package], [headless], [provider_fallback], [ci_watch] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [broker], [broker.package], [headless], [provider_fallback], [ci_watch], [landing_verification] and [kpi]"
             ),
             "{error}"
         );
