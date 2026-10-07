@@ -21,6 +21,10 @@ worker はすべて非対話の turn で動く（task 1437、[ADR-t1433-2](../..
 - **答えずに閉じた質問**: `closed_undelivered` の質問は `closed_question_notice` を次の turn として一度届ける。`stall_nudged.closed_ask` に記録し、引き継ぎ後の二重配達を防ぐ。依頼を書くのに失敗した場合は記録せず、NOTICE_ATTEMPTS まで再試行する。runtime_headless_reopen の `a_question_closed_without_its_answer_is_told_as_the_next_turn` と domain::worker_question の unit test が確認する。
 - **復旧と回答**: `stalled` の復旧 job は turn の記録を受け取る。高い確信の repair は前提を再確認して適用し、失敗・低い確信・上限超えは ask にする。`wait` は待ちを再開し、`stop` は終了を依頼する。ほかの指示は次の turn として届ける。過去の `intervene` の答えは保持状態にせず、非対話の選択肢で ask を開き直す。
 - **閉じる・記録**: receipt、質問、次の turn、run の終了などで検知を終える。`stall_resolved` は促し・job・ask の各検知に一度書く。引き継ぎでは run_events の記録を使う。recover・abandon・triage・sweep が終える検知も同じ共通処理で記録する。
+- **判断と境界**（[ADR-t1410-1](../../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)、[Architecture](../architecture.md)のC6）: 見張りの次の一手と引き継いだ見張りの組み立て直しは、`src/application/supervise/stall.rs`の副作用のない関数が決める。
+  eventのpayloadは`domain::run::payload`の型で読み、欄の欠けと型の違う値は欄が無いものとして読む。
+  時刻とidle markerの時刻、receipt・質問・holdの有無は値で受け、queue・file・sessionの読み書きは結果を実行する薄い処理だけが行う。
+  判断はunit testが、askの開き方・復旧jobの起動・引き継ぎの配線は`tests/it`の代表のcaseが確かめる。
 
 ## 過去の記録
 

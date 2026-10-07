@@ -148,7 +148,6 @@ mod runtime_session;
 mod runtime_slot_limits;
 mod runtime_slot_order;
 mod runtime_stale_receipt;
-mod runtime_stall;
 mod runtime_stall_end;
 mod runtime_sweep;
 mod runtime_throughput_review;

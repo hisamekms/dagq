@@ -364,12 +364,12 @@ reviewで見る規則の行は、行き先をこの表の言葉で書く。
 
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
-| L5 | `src/application`の`Instant::now`（`lifecycle.rs`・`supervise/adopt.rs`・`stall.rs`ほか） | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
+| L5 | `src/application`の`Instant::now`（`lifecycle.rs`・`supervise/mod.rs`・`supervise/recovery.rs`・`supervise/jobs.rs`・`supervise/triage.rs`ほか） | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | 許可の一覧の項目 |
 | C3 | `Supervisor`と、`impl Supervisor`を持つ`supervise/`のsubmodule | submoduleが他のcontextの欄を変える | `Supervisor`の分割 |
 | C4 | `Box<dyn Queue>`などを取るuse case（`application::lifecycle`・`health`・`supervise`ほか） | 要るportだけを取っていない | portの分割 |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | portの分割 |
-| C6 | `src/application/supervise/stall.rs`・`supervise/adopt.rs`ほか | 判断に使うeventのpayloadを文字列のkeyで読む | 型付きの復元の値（`domain::run::payload`の形）へ |
+| C6 | `src/application/supervise/resume.rs`・`supervise/recheck.rs`・`supervise/recovery.rs`ほか | 判断に使うeventのpayloadを文字列のkeyで読む | 型付きの復元の値（`domain::run::payload`の形）へ |
 | X3・C1 | T1: `src/infrastructure/sqlite.rs`の`claim_task`（計画管理のstore）が`INSERT INTO task_runs`を書く | 計画管理のstoreが実行と着地の表をSQLで直接書く | 未登録（follow_up） |
 | X3・C1 | T2: `src/infrastructure/runtime_store/transitions.rs`の`finish_integration`が`UPDATE tasks SET status='completed'`を書く | 実行と着地のstoreが計画管理の表を`transition_task`を通さず書く | 未登録（follow_up） |
 | X3・C1 | T6: `src/infrastructure/finding_planners.rs`（`settle_findings`ほか）が`UPDATE findings`を書く | 計画管理のstoreが観測と分析の表を`infrastructure::findings`を通さず書く | 未登録（follow_up） |

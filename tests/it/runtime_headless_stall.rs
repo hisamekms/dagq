@@ -46,14 +46,15 @@ fn requested(run: &TaskRun, text: &str) -> bool {
     })
 }
 
-/// Acceptance (1) and (2): the headless run's `stalled` ask offers `wait`,
-/// `stop` and `propose`, no `intervene`, and its question has a person read
-/// the turns before answering. `intervene` answered anyway closes it with
-/// one `answered_intervene` and opens a second ask at once with the same
-/// options, sending nothing to the session; `stop` to that one is applied
-/// as before.
+/// The headless run's `stalled` ask offers `wait`, `stop` and `propose`, no
+/// `intervene`, and its question has a person read the turns before
+/// answering. `intervene` typed as text closes it with one
+/// `answered_intervene` marked `reopened` and opens a second ask at once
+/// with the same options and reason, sending nothing; that ask takes an
+/// instruction, sent as the session's next turn, and the run lands. Which
+/// answer does what is `stall::tests::the_answers_of_a_stalled_ask_are_applied_by_kind`'s.
 #[test]
-fn an_intervene_answer_closes_the_headless_stalled_ask_and_opens_another() {
+fn an_intervene_text_is_not_sent_and_the_next_ask_takes_an_instruction() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(dir.path(), &refused_until_answered());
     let backend = Arc::new(backend);
@@ -64,7 +65,6 @@ fn an_intervene_answer_closes_the_headless_stalled_ask_and_opens_another() {
     });
     let first = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
     assert_eq!(first.options, ["wait", "stop", "propose"]);
-    assert!(!first.question.contains("intervene"), "{}", first.question);
     assert!(
         first
             .question
@@ -74,15 +74,20 @@ fn an_intervene_answer_closes_the_headless_stalled_ask_and_opens_another() {
     );
     SqliteQueue::open(&db)
         .unwrap()
-        .answer(first.id, "intervene")
+        .answer(first.id, "intervene: I will look at it")
         .unwrap();
     wait_until(&db, common::STEP_LIMIT, |queue| {
         stalled_asks(queue).len() == 2
     });
     let queue = SqliteQueue::open(&db).unwrap();
+    // The live supervisor closed the ask answered `intervene`, and the one
+    // it opened again is open.
     let closed = queue.read_ask(first.id).unwrap();
     assert!(closed.closed_at.is_some(), "{closed:?}");
-    assert_eq!(closed.answer.as_deref(), Some("intervene"));
+    assert_eq!(
+        closed.answer.as_deref(),
+        Some("intervene: I will look at it")
+    );
     let second = stalled_asks(&queue).remove(1);
     assert!(second.is_open(), "{second:?}");
     assert_eq!(second.options, ["wait", "stop", "propose"]);
@@ -95,56 +100,10 @@ fn an_intervene_answer_closes_the_headless_stalled_ask_and_opens_another() {
         "{}",
         second.question
     );
-    // Not asked a third time.
+    // Not asked a third time, and nothing sent.
     await_passes(&passes, SOME_PASSES);
-    assert_eq!(stalled_asks(&queue).len(), 2);
-    let asked = detail(&db);
-    let ends = resolved_of(&asked, first.id);
-    assert_eq!(ends.len(), 1, "{ends:?}");
-    assert_eq!(ends[0]["outcome"], "answered_intervene");
-    assert_eq!(ends[0]["reopened"], true);
-    assert!(!requested(&asked.runs[0], "intervene"));
-    assert!(payloads(&asked, "turn_requested").is_empty());
-
-    SqliteQueue::open(&db)
-        .unwrap()
-        .answer(second.id, "stop")
-        .unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = detail(&db);
-    let run = &detail.runs[0];
-    assert_eq!(run.status(), RunStatus::Failed);
-    assert_eq!(stub_calls(run).len(), 1, "{:?}", stub_calls(run));
-    let ends = resolved_of(&detail, second.id);
-    assert_eq!(ends.len(), 1, "{ends:?}");
-    assert_eq!(ends[0]["outcome"], "answered_stop");
-    assert_eq!(resolved_of(&detail, first.id).len(), 1);
-}
-
-/// Acceptance (2): `intervene` typed as text is no instruction either; the
-/// ask opened again takes an instruction, sent as the session's next turn,
-/// and the run lands.
-#[test]
-fn an_intervene_text_is_not_sent_and_the_next_ask_takes_an_instruction() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
-    set_turns(dir.path(), &refused_until_answered());
-    let backend = Arc::new(backend);
-    let (_reviewer, supervisor) =
-        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        !stalled_asks(queue).is_empty()
-    });
-    let first = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
-    SqliteQueue::open(&db)
-        .unwrap()
-        .answer(first.id, "intervene: I will look at it")
-        .unwrap();
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        stalled_asks(queue).len() == 2
-    });
-    let second = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(1);
+    assert_eq!(stalled_asks(&SqliteQueue::open(&db).unwrap()).len(), 2);
+    assert!(payloads(&detail(&db), "turn_requested").is_empty());
     SqliteQueue::open(&db)
         .unwrap()
         .answer(second.id, "go on and finish")
@@ -163,6 +122,7 @@ fn an_intervene_text_is_not_sent_and_the_next_ask_takes_an_instruction() {
         "{calls:?}"
     );
     assert!(!calls.iter().any(|call| call.contains("I will look")));
+    assert!(!requested(run, "I will look"));
     let outcomes: Vec<&Value> = resolved_of(&detail, first.id)
         .into_iter()
         .chain(resolved_of(&detail, second.id))
@@ -172,6 +132,7 @@ fn an_intervene_text_is_not_sent_and_the_next_ask_takes_an_instruction() {
         outcomes,
         [&json!("answered_intervene"), &json!("answered_instruction")]
     );
+    assert_eq!(resolved_of(&detail, first.id)[0]["reopened"], true);
 }
 
 /// What an `idle_process` ask opened before task 1179 said of the session.
@@ -184,10 +145,6 @@ const IDLE_PROCESS_QUESTION: &str = "The session of run r (task 2) has processes
 /// answered `intervene` had got to.
 #[derive(Clone, Copy)]
 enum Died {
-    /// A supervisor before task 1179 applied it as a person stepping in
-    /// (`answered_intervene`, the ask left open): or one after it, which
-    /// stopped between recording the outcome and closing the ask.
-    Held,
     /// It recorded the outcome and closed the ask, and stopped before the
     /// next ask opened.
     Closed,
@@ -198,7 +155,11 @@ enum Died {
 
 /// Acceptance (3): the supervisor that adopts the run opens the next ask
 /// once, records the answered ask's outcome no second time, and does not
-/// hold the run as a person's: the next ask's instruction lands it.
+/// hold the run as a person's: the next ask's instruction lands it. The ask
+/// left open answered `intervene` (its outcome recorded) is
+/// `stall::tests::an_adopter_opens_again_an_ask_answered_intervene_wherever_its_supervisor_stopped`'s;
+/// its close and reopening is the `intervene` answer of
+/// [`an_intervene_text_is_not_sent_and_the_next_ask_takes_an_instruction`].
 fn adopted_intervene(died: Died) {
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(
@@ -257,9 +218,7 @@ esac"#
             .record_runtime_event(run.id(), EventKind::StallResolved, end)
             .unwrap();
     }
-    if !matches!(died, Died::Held) {
-        queue.close_ask(ask.id).unwrap();
-    }
+    queue.close_ask(ask.id).unwrap();
     age_lease(&db, &run, 31);
     let base = git_out(&repo, &["rev-parse", "main"]);
     let (_reviewer, supervisor, passes) =
@@ -321,13 +280,6 @@ esac"#
     let ends = resolved_of(&detail, next.id);
     assert_eq!(ends.len(), 1, "{ends:?}");
     assert_eq!(ends[0]["outcome"], "answered_instruction");
-}
-
-/// Task 1179 (3): an `intervene` applied and left open (by a supervisor
-/// before task 1179, or one that stopped before closing it).
-#[test]
-fn an_adopter_reopens_a_headless_stalled_ask_left_answered_intervene() {
-    adopted_intervene(Died::Held);
 }
 
 /// Task 1179 (3): the ask closed and the next one not opened yet.

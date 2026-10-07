@@ -19,10 +19,15 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::RunEvent;
 use crate::domain::recovery::{
     IDLE_WITHOUT_RECEIPT, PERMISSION_DENIED, SEND_UNCONFIRMED, TURN_WITHOUT_RECEIPT,
 };
-use crate::domain::turn::HEADLESS_NUDGES;
+use crate::domain::run::{
+    AttemptOf, AutoRepaired, NewStallNudged, NewStallResolved, RecoveryRecord, StallNudged,
+    StallResolved, restore_payload as restore,
+};
+use crate::domain::turn::{HEADLESS_NUDGES, TurnFailure};
 
 /// The reasons of the `stalled` alert of a session idle without a receipt:
 /// a headless session's turn that ended so after its nudges, or refused too
@@ -57,6 +62,7 @@ pub(super) struct NoticeFailure {
 }
 
 /// What the watch does with a notice due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NoticeStep {
     Send,
     /// Its last send failed a moment ago: nothing is sent this time.
@@ -65,18 +71,114 @@ enum NoticeStep {
     GaveUp,
 }
 
-fn notice_step(sv: &Supervisor<'_>, run: &TaskRun, ask_id: i64) -> NoticeStep {
-    match sv.notice_failures.get(run.id()) {
+/// The step of the notice of the closed question `ask_id`, given its last
+/// failed send (`failed`), the backend's retry backoff and the monotonic
+/// time `now`.
+fn notice_step(
+    failed: Option<&NoticeFailure>,
+    ask_id: i64,
+    backoff: Duration,
+    now: Instant,
+) -> NoticeStep {
+    match failed {
         Some(failed) if failed.ask_id == ask_id && failed.failures >= NOTICE_ATTEMPTS => {
             NoticeStep::GaveUp
         }
         Some(failed)
-            if failed.ask_id == ask_id && failed.at.elapsed() < sv.cmux.retry_backoff() =>
+            if failed.ask_id == ask_id && now.saturating_duration_since(failed.at) < backoff =>
         {
             NoticeStep::Wait
         }
         _ => NoticeStep::Send,
     }
+}
+
+/// What one look at a session idle without a receipt found, read before
+/// the watch decides ([`StallWatch::idle_step`]).
+#[derive(Debug, Clone, Copy)]
+struct IdleSeen {
+    /// When the wrapper's idle marker, newer than the last request, was
+    /// written.
+    modified: SystemTime,
+    /// The receipt is on disk: a turn that wrote it and ended after the
+    /// caller looked for it is no stall (task 1328).
+    receipt_written: bool,
+    /// A `worker_question` of the run is open: the session waits on it.
+    question_open: bool,
+    /// A login hold (ADR-0047 decision 42), or an answered hold whose text
+    /// to go on is not typed yet, holds the session.
+    held: bool,
+}
+
+/// What the watch does with an idle session ([`StallWatch::idle_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleStep {
+    Nothing,
+    /// Open the `stalled` ask (after a person's `wait`).
+    Ask,
+    /// Judge the turn that ended ([`StallWatch::turn_step`]).
+    Turn,
+}
+
+/// What the last turn of an idle headless session says, read before the
+/// watch decides ([`StallWatch::turn_step`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct TurnSeen {
+    /// The turn failed or was stopped: the session ends.
+    ended: bool,
+    /// Its provider could not be used ([`provider_failure`]).
+    wall: Option<TurnFailure>,
+    /// Why it goes to its recovery job at once ([`alert_at_once`]).
+    at_once: Option<&'static str>,
+    /// The step of a notice of a closed question due, if one is.
+    notice: Option<NoticeStep>,
+}
+
+/// What the watch does with a turn that ended ([`StallWatch::turn_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnStep {
+    Nothing,
+    /// The next call goes to the other provider, or the run waits in the
+    /// hold ask (ADR-t813-2).
+    Wall(TurnFailure),
+    /// Open the `stalled` ask (after a person's `wait`).
+    Ask,
+    /// Send the notice of a closed question in place of the nudge.
+    Notice,
+    Nudge,
+    /// Hand it to its recovery job, with the alert's reason.
+    Recover(&'static str),
+}
+
+/// What the watch found of its `stalled` ask ([`StallWatch::ask_step`]).
+#[derive(Debug, Clone, Copy)]
+enum AskSeen<'a> {
+    /// Still open, with its answer if it has one.
+    Open(Option<&'a str>),
+    /// Someone closed it, with the answer it had.
+    Closed(Option<&'a str>),
+}
+
+/// What the watch does with its `stalled` ask ([`StallWatch::ask_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AskStep {
+    Nothing,
+    /// Someone closed it answered `intervene`: it is opened again.
+    ClosedIntervene,
+    /// Someone closed it answered `wait`: the count starts again.
+    ClosedWait,
+    /// Someone closed it otherwise: a person took the session over.
+    ClosedTaken,
+    /// The session moved on: it is closed, resolved by itself.
+    Moved,
+    /// Answered `wait`: closed, and the count starts again.
+    Wait,
+    /// Answered `intervene`: closed, and opened again.
+    Intervene,
+    /// Answered `stop`: the session's exit request.
+    Stop,
+    /// Answered an instruction: the session's next turn.
+    Instruction,
 }
 
 /// The latest `worker_question` of the run closed without its answer
@@ -343,12 +445,57 @@ fn stalled_ask(
 
 /// Whether the end of the `stalled` ask `id` of the run is recorded.
 fn ask_resolved(queue: &dyn Queue, run: &TaskRun, id: AskId) -> Result<bool> {
-    Ok(queue.run_events(run.id())?.iter().any(|e| {
-        e.kind == event_kind::STALL_RESOLVED
-            && e.payload["phase"] == PHASE
-            && e.payload["detection"] == "ask"
-            && e.payload["ask_id"] == json!(id)
-    }))
+    Ok(ask_resolved_in(&queue.run_events(run.id())?, id))
+}
+
+/// Whether `events` record the end of the `stalled` ask `id`.
+fn ask_resolved_in(events: &[RunEvent], id: AskId) -> bool {
+    events
+        .iter()
+        .filter_map(resolved_of)
+        .any(|r| r.detection == Some("ask") && r.ask_id == Some(id.as_i64()))
+}
+
+/// The `stall_resolved` of this watch's phase that `event` is, if it is one.
+fn resolved_of(event: &RunEvent) -> Option<StallResolved<'_>> {
+    (event.kind == event_kind::STALL_RESOLVED)
+        .then(|| restore::<StallResolved>(&event.payload))
+        .filter(|r| r.phase == Some(PHASE))
+}
+
+/// The `stall_nudged` of this watch's phase that `event` is, if it is one.
+fn nudged_of(event: &RunEvent) -> Option<StallNudged<'_>> {
+    (event.kind == event_kind::STALL_NUDGED)
+        .then(|| restore::<StallNudged>(&event.payload))
+        .filter(|n| n.phase == Some(PHASE))
+}
+
+/// The recovery record of the idle that `event` is (any kind), if it is
+/// one: its alert is `stalled` and its reason one of [`IDLE_REASONS`].
+fn idle_job(event: &RunEvent) -> Option<RecoveryRecord<'_>> {
+    let record = restore::<RecoveryRecord>(&event.payload);
+    (record.alert == Some(RecoveryAlert::Stalled.as_str())
+        && IDLE_REASONS
+            .iter()
+            .any(|reason| record.reason == Some(*reason)))
+    .then_some(record)
+}
+
+/// The setting the alert escalated to the `stalled` ask `id` was judged
+/// by: a recovery job's escalation names its ask (ADR-0047), and its alert
+/// the setting; [`IDLE_THRESHOLD`] for the watch's own ask.
+fn threshold_of(events: &[RunEvent], id: AskId) -> &'static str {
+    let recovery = events
+        .iter()
+        .filter(|e| e.kind == event_kind::RECOVERY_FINISHED)
+        .map(|e| restore::<RecoveryRecord>(&e.payload))
+        .find(|r| r.ask_id == Some(id.as_i64()));
+    match recovery {
+        Some(r) if r.alert == Some(RecoveryAlert::IdleProcess.as_str()) => IDLE_PROCESS_THRESHOLD,
+        Some(r) if r.alert == Some(RecoveryAlert::LongBackground.as_str()) => BACKGROUND_THRESHOLD,
+        Some(r) if r.reason == Some(SEND_UNCONFIRMED) => SEND_THRESHOLD,
+        _ => IDLE_THRESHOLD,
+    }
 }
 
 /// Open a `stalled` ask of the run to the inbox.
@@ -481,35 +628,45 @@ use super::file_time::{event_time as at_event, written_after};
 
 impl StallWatch {
     /// Rebuild the watch of an adopted run from its events and its
-    /// `stalled` ask, so a nudge or an ask is never repeated.
+    /// `stalled` asks ([`Self::adopted`]).
     pub(super) fn adopt(queue: &dyn Queue, run: &TaskRun) -> Result<Self> {
         let events = queue.run_events(run.id())?;
+        let latest = stalled_ask(queue, run.id(), None)?;
+        let unclosed = queue.unclosed_stalled_ask(run.id())?;
+        Ok(Self::adopted(&events, latest.as_ref(), unclosed.as_ref()))
+    }
+
+    /// The watch of an adopted run, from its `events` (oldest first), its
+    /// latest `stalled` ask (`latest`, closed or not) and the one nobody
+    /// closed (`unclosed`), so a nudge or an ask is never repeated.
+    pub(super) fn adopted(
+        events: &[RunEvent],
+        latest: Option<&crate::domain::Ask>,
+        unclosed: Option<&crate::domain::Ask>,
+    ) -> Self {
         let resolved = |detection: &str, ask: Option<AskId>| {
-            events.iter().any(|e| {
-                e.kind == event_kind::STALL_RESOLVED
-                    && e.payload["phase"] == PHASE
-                    && e.payload["detection"] == detection
-                    && ask.is_none_or(|id| e.payload["ask_id"] == json!(id))
+            events.iter().filter_map(resolved_of).any(|r| {
+                r.detection == Some(detection) && ask.is_none_or(|id| r.ask_id == Some(id.as_i64()))
             })
         };
         let mut watch = Self {
             nudges: events
                 .iter()
-                .filter(|e| e.kind == event_kind::STALL_NUDGED && e.payload["phase"] == PHASE)
+                .filter_map(nudged_of)
                 .count()
                 .try_into()
                 .unwrap_or(u8::MAX),
             ..Self::default()
         };
-        if let Some(event) = events
+        if let Some((event, nudged)) = events
             .iter()
             .rev()
-            .find(|e| e.kind == event_kind::STALL_NUDGED && e.payload["phase"] == PHASE)
+            .find_map(|e| nudged_of(e).map(|n| (e, n)))
         {
             let at = at_event(event).unwrap_or(UNIX_EPOCH);
             watch.nudge = Some(Nudge {
                 at,
-                detected_after_secs: event.payload["idle_secs"].as_i64().unwrap_or(0),
+                detected_after_secs: nudged.idle_secs.unwrap_or(0),
                 settled: resolved("nudge", None),
             });
             watch.input_sent(at, None);
@@ -527,95 +684,65 @@ impl StallWatch {
             events
                 .iter()
                 .rev()
-                .find(|e| {
-                    e.kind == event_kind::STALL_RESOLVED
-                        && e.payload["phase"] == PHASE
-                        && e.payload["outcome"] == outcome
-                })
+                .find(|e| resolved_of(e).is_some_and(|r| r.outcome == Some(outcome)))
                 .and_then(at_event)
         };
         // A person stepped in, or had the session stopped, on an ask closed
         // since. A headless session's `intervene` is no step in: its ask
         // is opened again instead (task 1179).
         watch.held = latest_outcome("answered_stop");
-        // A recovery job's escalation names its ask (ADR-0047), and its
-        // alert the setting it was judged by.
-        let threshold_of = |id: AskId| {
-            let recovery = events.iter().find(|e| {
-                e.kind == event_kind::RECOVERY_FINISHED && e.payload["ask_id"] == json!(id)
-            });
-            match recovery {
-                Some(e) if e.payload["alert"] == RecoveryAlert::IdleProcess.as_str() => {
-                    IDLE_PROCESS_THRESHOLD
-                }
-                Some(e) if e.payload["alert"] == RecoveryAlert::LongBackground.as_str() => {
-                    BACKGROUND_THRESHOLD
-                }
-                Some(e) if e.payload["reason"] == SEND_UNCONFIRMED => SEND_THRESHOLD,
-                _ => IDLE_THRESHOLD,
-            }
-        };
         watch.wait_from = latest_outcome("answered_wait");
         // An instruction a recovery job had typed is an input too, and its
         // repair restarted the count.
-        let idle_job = |e: &&crate::domain::RunEvent| {
-            e.payload["alert"] == RecoveryAlert::Stalled.as_str()
-                && IDLE_REASONS
-                    .iter()
-                    .any(|reason| e.payload["reason"] == *reason)
-        };
         for at in events
             .iter()
-            .filter(|e| e.kind == "auto_repaired" && e.payload["repair"] == "send_instruction")
+            .filter(|e| {
+                e.kind == event_kind::AUTO_REPAIRED
+                    && restore::<AutoRepaired>(&e.payload).repair == Some("send_instruction")
+            })
             .filter_map(at_event)
         {
             watch.input_sent(at, None);
         }
-        let repaired = |e: &crate::domain::RunEvent| {
-            e.payload["applied"]
-                .as_array()
-                .is_some_and(|applied| applied.iter().any(|a| a != "wait"))
+        let idle_jobs = || {
+            events
+                .iter()
+                .filter_map(|e| idle_job(e).map(|record| (e, record)))
         };
-        watch.recovered_from = events
-            .iter()
-            .filter(idle_job)
-            .rfind(|e| e.kind == "recovery_finished" && repaired(e))
-            .and_then(at_event);
+        watch.recovered_from = idle_jobs()
+            .rfind(|(e, record)| e.kind == event_kind::RECOVERY_FINISHED && record.repaired())
+            .and_then(|(e, _)| at_event(e));
         // The idle's recovery job the previous supervisor requested and
         // whose end is not recorded: a job it left running is gone (the
         // adopter starts another, counted as one more), and the session
         // moving on ends it as this watch's own would.
-        if let Some(requested) = events
-            .iter()
-            .filter(idle_job)
-            .rfind(|e| e.kind == "recovery_requested")
+        if let Some((requested, record)) =
+            idle_jobs().rfind(|(e, _)| e.kind == event_kind::RECOVERY_REQUESTED)
         {
-            let attempt = requested.payload["attempt"].as_u64().unwrap_or(0) as usize;
-            let of_attempt = |e: &&crate::domain::RunEvent| {
-                e.payload["attempt"].as_u64() == Some(attempt as u64)
-            };
-            let ended = events.iter().filter(of_attempt).any(|e| {
-                e.kind == "stall_resolved"
-                    && e.payload["phase"] == PHASE
-                    && e.payload["detection"] == "recovery"
-            });
+            let attempt = record.attempt.unwrap_or(0) as usize;
+            let of_attempt =
+                |e: &RunEvent| restore::<AttemptOf>(&e.payload).attempt == Some(attempt as u64);
+            let ended = events
+                .iter()
+                .filter(|e| of_attempt(e))
+                .filter_map(resolved_of)
+                .any(|r| r.detection == Some("recovery"));
             if !ended {
-                let applied = events.iter().filter(idle_job).filter(of_attempt).find(|e| {
-                    e.kind == "recovery_finished"
-                        && e.payload["applied"]
-                            .as_array()
-                            .is_some_and(|a| a.iter().any(|a| a != "wait"))
-                });
+                let applied = idle_jobs()
+                    .filter(|(e, _)| of_attempt(e))
+                    .find(|(e, record)| {
+                        e.kind == event_kind::RECOVERY_FINISHED && record.repaired()
+                    });
                 let reason = IDLE_REASONS
                     .into_iter()
-                    .find(|reason| requested.payload["reason"] == *reason)
+                    .find(|reason| record.reason == Some(*reason))
                     .unwrap_or(IDLE_WITHOUT_RECEIPT);
                 watch.recovering = Some(Box::new(Recovering {
                     attempt,
                     reason,
                     at: at_event(requested).unwrap_or(UNIX_EPOCH),
-                    detected_after_secs: requested.payload["idle_secs"].as_i64().unwrap_or(0),
-                    repaired_at: applied.and_then(at_event),
+                    detected_after_secs: record.idle_secs.unwrap_or(0),
+                    repaired_at: applied.and_then(|(e, _)| at_event(e)),
                 }));
             }
             if let Some(nudge) = &mut watch.nudge {
@@ -626,7 +753,7 @@ impl StallWatch {
         // is taken as older. The latest ask closed without its outcome
         // recorded was closed while no supervisor watched: its `wait`
         // counts again from its close, anything else holds.
-        if let Some(ask) = stalled_ask(queue, run.id(), None)?
+        if let Some(ask) = latest
             && let Some(closed) = ask.closed_at
             && !resolved("ask", Some(ask.id))
         {
@@ -639,7 +766,7 @@ impl StallWatch {
                     previous: ask.id,
                     at: at_unix(ask.created_at + 1),
                     detected_after_secs: 0,
-                    threshold: threshold_of(ask.id),
+                    threshold: threshold_of(events, ask.id),
                 });
             } else {
                 watch.held = watch.held.max(Some(at_unix(closed + 1)));
@@ -648,7 +775,7 @@ impl StallWatch {
                 nudge.settled = true;
             }
         }
-        if let Some(ask) = queue.unclosed_stalled_ask(run.id())? {
+        if let Some(ask) = unclosed {
             // A headless session's `intervene` is never applied: its watch
             // closes the ask and opens it again, recording its outcome only
             // if the previous supervisor did not (task 1179).
@@ -659,7 +786,7 @@ impl StallWatch {
                 at: at_unix(ask.created_at + 1),
                 detected_after_secs: 0,
                 applied,
-                threshold: threshold_of(ask.id),
+                threshold: threshold_of(events, ask.id),
             });
             if applied {
                 watch.held = watch.held.max(ask.answered_at.map(|at| at_unix(at + 1)));
@@ -669,12 +796,10 @@ impl StallWatch {
                 nudge.settled = true;
             }
         } else if let Some(at) = events.iter().rposition(|e| {
-                e.kind == event_kind::STALL_RESOLVED
-                    && e.payload["phase"] == PHASE
-                    && e.payload["detection"] == "ask"
-                    && e.payload["reopened"] == true
-            })
-            && let event = &events[at]
+            resolved_of(e)
+                .is_some_and(|r| r.detection == Some("ask") && r.reopened == Some(true))
+        }) && let event = &events[at]
+            && let Some(reopened) = resolved_of(event)
             // Nothing was sent to the session since: an ask opened again
             // then settled by a receipt or a question is not opened again.
             && !events[at..].iter().any(|e| {
@@ -682,23 +807,22 @@ impl StallWatch {
                     || e.kind == event_kind::ASK_DELIVERED
                     || e.kind == event_kind::STALL_NUDGED
             })
-            && let Some(previous) = event.payload["ask_id"].as_i64().map(AskId::new)
-            && stalled_ask(queue, run.id(), None)?
-                .is_some_and(|ask| ask.id == previous && ask.closed_at.is_some())
+            && let Some(previous) = reopened.ask_id.map(AskId::new)
+            && latest.is_some_and(|ask| ask.id == previous && ask.closed_at.is_some())
         {
             // The previous supervisor closed an ask answered `intervene`
             // and stopped before it opened the next one.
             watch.reopen = Some(Reopen {
                 previous,
                 at: at_event(event).unwrap_or(UNIX_EPOCH),
-                detected_after_secs: event.payload["detected_after_secs"].as_i64().unwrap_or(0),
-                threshold: threshold_of(previous),
+                detected_after_secs: reopened.detected_after_secs.unwrap_or(0),
+                threshold: threshold_of(events, previous),
             });
             if let Some(nudge) = &mut watch.nudge {
                 nudge.settled = true;
             }
         }
-        Ok(watch)
+        watch
     }
 
     /// The supervisor typed `text` (when known) into the session at `at`.
@@ -764,28 +888,32 @@ impl StallWatch {
     }
 
     /// The payload of a `stall_resolved`.
-    pub(super) fn resolved_payload(
+    pub(super) fn resolved_payload<'a>(
         sv: &Supervisor<'_>,
-        detection: &str,
+        detection: &'a str,
         threshold: &'static str,
         detected_after_secs: i64,
         detected_at: SystemTime,
-        outcome: &str,
-    ) -> Value {
-        json!({
-            "phase": PHASE,
-            "detection": detection,
-            "threshold": threshold,
-            "threshold_secs": match threshold {
+        outcome: &'a str,
+    ) -> NewStallResolved<'a> {
+        NewStallResolved {
+            phase: PHASE,
+            detection,
+            threshold,
+            threshold_secs: match threshold {
                 BACKGROUND_THRESHOLD => sv.stall.background_alert_secs,
                 IDLE_PROCESS_THRESHOLD => sv.stall.idle_process_secs,
                 SEND_THRESHOLD => sv.stall.send_confirm_secs,
                 _ => sv.stall.idle_without_receipt_secs,
             },
-            "detected_after_secs": detected_after_secs,
-            "outcome": outcome,
-            "resolved_after_secs": secs_between(detected_at, sv.files.now()),
-        })
+            detected_after_secs,
+            outcome,
+            resolved_after_secs: secs_between(detected_at, sv.files.now()),
+            ask_id: None,
+            attempt: None,
+            reason: None,
+            reopened: None,
+        }
     }
 
     /// Record `payload` as `stall_resolved`, naming the ask when there is
@@ -793,16 +921,20 @@ impl StallWatch {
     pub(super) fn record_resolved(
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
-        mut payload: Value,
+        payload: NewStallResolved<'_>,
         ask: Option<AskId>,
         detection: &str,
         outcome: &str,
     ) -> Result<()> {
-        if let Some(id) = ask {
-            payload["ask_id"] = json!(id);
-        }
-        sv.queue
-            .record_runtime_event(run.id(), EventKind::StallResolved, payload)?;
+        let payload = NewStallResolved {
+            ask_id: ask.map(AskId::as_i64),
+            ..payload
+        };
+        sv.queue.record_runtime_event(
+            run.id(),
+            EventKind::StallResolved,
+            serde_json::to_value(payload)?,
+        )?;
         info!(run_id = %run.id(), "stall of {} ({detection}) ended: {outcome}", run.id());
         Ok(())
     }
@@ -889,16 +1021,18 @@ impl StallWatch {
         let Some(recovering) = self.recovering.take() else {
             return Ok(());
         };
-        let mut payload = Self::resolved_payload(
-            sv,
-            "recovery",
-            IDLE_THRESHOLD,
-            recovering.detected_after_secs,
-            recovering.at,
-            outcome,
-        );
-        payload["attempt"] = json!(recovering.attempt);
-        payload["reason"] = json!(recovering.reason);
+        let payload = NewStallResolved {
+            attempt: Some(recovering.attempt),
+            reason: Some(recovering.reason),
+            ..Self::resolved_payload(
+                sv,
+                "recovery",
+                IDLE_THRESHOLD,
+                recovering.detected_after_secs,
+                recovering.at,
+                outcome,
+            )
+        };
         Self::record_resolved(sv, run, payload, None, "recovery", outcome)
     }
 
@@ -1069,55 +1203,33 @@ impl StallWatch {
         let Some(idle) = idle else {
             return Ok(None);
         };
-        // The caller looked for the receipt before the idle was read: a
-        // turn that wrote its receipt and ended in between is not a stall,
-        // and a nudge would start another turn under the receipt's
-        // validation (task 1328). The next pass sees the receipt.
-        if let Some(receipt) = run.receipt_path()
-            && sv.files.is_file(Path::new(receipt))
-        {
-            return Ok(None);
-        }
-        let modified = idle.modified();
-        // The session has not ended a turn since the last text it was sent,
-        // or since a person stepped in.
-        if !self.ended_after_inputs(modified) {
-            return Ok(None);
-        }
-        let start = modified;
-        // A question the session waits on is not a stall.
-        if sv.queue.has_unclosed_worker_question(run.id())? {
-            return Ok(None);
-        }
-        // A session stopped at a login that ran out waits for a person to
-        // log in, in the queue's one authentication ask (ADR-0047 decision
-        // 42), not for a nudge or a stalled ask of its own. An answered
-        // hold not applied yet, or a `done` whose text to go on is not
-        // typed yet, still holds it: the text follows, not a nudge.
-        if sv.queue.hold_unclosed(run.id())? || sv.hold_continue.contains_key(run.id()) {
-            return Ok(None);
-        }
-        let idle_secs = secs_between(start, now);
-        let Some(recovery) = recovery else {
-            // Nothing is typed and no job starts: a stall before its
-            // nudge, or one for a recovery job, waits for the slot. After a
-            // person's `wait` the ask follows straight away.
-            let Some(nudge) = self.nudge else {
-                return Ok(None);
-            };
-            if self.wait_from.is_none() {
-                return Ok(None);
-            }
-            // A headless session takes no turn by itself: after `wait` the
-            // ask follows its next turn.
-            if self.after_wait(idle.modified()) == Some(false) {
-                return Ok(None);
-            }
-            self.open_ask(sv, run, workspace, &idle, idle_secs, Some(nudge), now, None)?;
-            return Ok(None);
+        let mut seen = IdleSeen {
+            modified: idle.modified(),
+            // The caller looked for the receipt before the idle was read.
+            receipt_written: run
+                .receipt_path()
+                .is_some_and(|receipt| sv.files.is_file(Path::new(receipt))),
+            question_open: false,
+            held: false,
         };
-        {
-            self.observe_turn(
+        // The question and the hold are read only when they could stop the
+        // step: they only ever make it nothing.
+        let mut step = self.idle_step(&seen, recovery.is_some());
+        if step != IdleStep::Nothing {
+            seen.question_open = sv.queue.has_unclosed_worker_question(run.id())?;
+            if !seen.question_open {
+                seen.held =
+                    sv.queue.hold_unclosed(run.id())? || sv.hold_continue.contains_key(run.id());
+            }
+            step = self.idle_step(&seen, recovery.is_some());
+        }
+        let idle_secs = secs_between(seen.modified, now);
+        match (step, recovery) {
+            (IdleStep::Ask, _) => {
+                self.open_ask(sv, run, workspace, &idle, idle_secs, self.nudge, now, None)?;
+                Ok(None)
+            }
+            (IdleStep::Turn, Some(recovery)) => self.observe_turn(
                 sv,
                 run,
                 workspace,
@@ -1126,7 +1238,124 @@ impl StallWatch {
                 idle_secs,
                 now,
                 recovery,
-            )
+            ),
+            (IdleStep::Nothing | IdleStep::Turn, _) => Ok(None),
+        }
+    }
+
+    /// What the watch does with a session idle without a receipt, as
+    /// `seen`, when no `stalled` ask is followed: nothing while the
+    /// receipt is written, the session has not ended a turn since the last
+    /// text it was sent or since a person stepped in, it waits on its
+    /// question or a hold holds it. Out of its slot (`in_slot` false)
+    /// nothing is typed and no job starts: a stall before its nudge, or
+    /// one for a recovery job, waits for the slot, and after a person's
+    /// `wait` the ask follows the session's next turn. In its slot the
+    /// turn is judged.
+    fn idle_step(&self, seen: &IdleSeen, in_slot: bool) -> IdleStep {
+        if seen.receipt_written
+            || !self.ended_after_inputs(seen.modified)
+            || seen.question_open
+            || seen.held
+        {
+            return IdleStep::Nothing;
+        }
+        if in_slot {
+            return IdleStep::Turn;
+        }
+        if self.nudge.is_none()
+            || self.wait_from.is_none()
+            || self.after_wait(seen.modified) == Some(false)
+        {
+            return IdleStep::Nothing;
+        }
+        IdleStep::Ask
+    }
+
+    /// What the watch does with a headless session's turn that ended, at
+    /// `modified`, with neither a receipt nor an open question (ADR-t813-1
+    /// decision 9), as `seen`: nothing for a turn that failed or was
+    /// stopped (the session ends); a provider that cannot be used goes to
+    /// its wall; after a person's `wait` the ask follows the next turn; a
+    /// question closed without its answer is told in place of the nudge
+    /// (task 1372) unless a recovery job looks at the idle; a turn refused
+    /// too many permissions goes to its recovery job at once; otherwise it
+    /// is nudged up to [`HEADLESS_NUDGES`] times, and then goes to its
+    /// recovery job (`turn_without_receipt`).
+    fn turn_step(&self, modified: SystemTime, seen: &TurnSeen) -> TurnStep {
+        if seen.ended {
+            return TurnStep::Nothing;
+        }
+        if let Some(failure) = seen.wall {
+            return TurnStep::Wall(failure);
+        }
+        if let Some(after) = self.after_wait(modified) {
+            return if after {
+                TurnStep::Ask
+            } else {
+                TurnStep::Nothing
+            };
+        }
+        if self.recovering.is_none() {
+            match seen.notice {
+                Some(NoticeStep::Send) => return TurnStep::Notice,
+                Some(NoticeStep::Wait) => return TurnStep::Nothing,
+                Some(NoticeStep::GaveUp) | None => {}
+            }
+        }
+        if let Some(reason) = seen.at_once {
+            return TurnStep::Recover(reason);
+        }
+        if usize::from(self.nudges) < HEADLESS_NUDGES && self.recovering.is_none() {
+            return TurnStep::Nudge;
+        }
+        TurnStep::Recover(TURN_WITHOUT_RECEIPT)
+    }
+
+    /// What the watch does with its `stalled` ask `asked`, as `seen`, the
+    /// idle marker written at `marker` and the run in its slot or not
+    /// (`send`). An ask someone closed: its `intervene` opens it again, its
+    /// `wait` counts again, anything else (or none) is a person who took
+    /// the session over. An open ask: closed once the session ended a turn
+    /// since it opened (or since a person stepped in, for an answer
+    /// applied); `wait` restarts the count; `intervene`, which a headless
+    /// session cannot take, opens it again (task 1179); `stop` and an
+    /// instruction are sent only from the run's slot.
+    fn ask_step(
+        &self,
+        asked: Asked,
+        seen: AskSeen<'_>,
+        marker: Option<SystemTime>,
+        send: bool,
+    ) -> AskStep {
+        let moved = |since: SystemTime| marker_moved(marker, since);
+        let answer = match seen {
+            AskSeen::Closed(answer) => {
+                return if answer.is_some_and(answered_intervene) {
+                    AskStep::ClosedIntervene
+                } else if answered_wait(answer) {
+                    AskStep::ClosedWait
+                } else {
+                    AskStep::ClosedTaken
+                };
+            }
+            AskSeen::Open(answer) => answer.map(str::trim),
+        };
+        match answer {
+            None if moved(asked.at) => AskStep::Moved,
+            None => AskStep::Nothing,
+            Some(_) if asked.applied => {
+                if self.held.is_none_or(moved) {
+                    AskStep::Moved
+                } else {
+                    AskStep::Nothing
+                }
+            }
+            Some(answer) if answered_wait(Some(answer)) => AskStep::Wait,
+            Some(answer) if answered_intervene(answer) => AskStep::Intervene,
+            Some(_) if !send => AskStep::Nothing,
+            Some(STOP_OPTION) => AskStep::Stop,
+            Some(_) => AskStep::Instruction,
         }
     }
 
@@ -1150,57 +1379,47 @@ impl StallWatch {
         recovery: StallRecovery<'_, '_>,
     ) -> Result<Option<SystemTime>> {
         let mark = last_turn(sv, idle_marker);
-        // A turn that failed or was stopped ends the session: its run goes
-        // to its recovery job once the wrapper exited, and nothing is sent.
-        if mark.is_some_and(|mark| !mark.outcome.goes_on(mark.failure)) {
-            return Ok(None);
+        let mut seen = TurnSeen {
+            ended: mark.is_some_and(|mark| !mark.outcome.goes_on(mark.failure)),
+            wall: provider_failure(mark),
+            at_once: alert_at_once(mark),
+            notice: None,
+        };
+        let mut step = self.turn_step(idle.modified(), &seen);
+        // A question closed without its answer is read only when its notice
+        // could take the place of the nudge or the recovery job.
+        let mut closed = None;
+        if self.recovering.is_none() && matches!(step, TurnStep::Nudge | TurnStep::Recover(_)) {
+            closed = closed_notice(sv, run, idle)?;
+            seen.notice = closed.as_ref().map(|closed| {
+                notice_step(
+                    sv.notice_failures.get(run.id()),
+                    closed.ask_id,
+                    sv.cmux.retry_backoff(),
+                    sv.generators.clock.monotonic(),
+                )
+            });
+            step = self.turn_step(idle.modified(), &seen);
         }
-        // Its provider cannot be used: the next call goes to the other one,
-        // or the run waits in the hold ask (ADR-t813-2).
-        if let Some(failure) = provider_failure(mark) {
-            sv.turn_at_wall(run, workspace, failure)?;
-            return Ok(None);
-        }
-        // After a person's `wait` the ask follows the next turn: a headless
-        // session takes none by itself.
-        if let Some(after) = self.after_wait(idle.modified()) {
-            if after {
+        match step {
+            TurnStep::Nothing => Ok(None),
+            TurnStep::Wall(failure) => {
+                sv.turn_at_wall(run, workspace, failure)?;
+                Ok(None)
+            }
+            TurnStep::Ask => {
                 self.open_ask(sv, run, workspace, idle, idle_secs, self.nudge, now, None)?;
+                Ok(None)
             }
-            return Ok(None);
-        }
-        // A question closed without its answer is told as the next turn,
-        // in place of the nudge or the recovery job (task 1372).
-        if self.recovering.is_none()
-            && let Some(closed) = closed_notice(sv, run, idle)?
-        {
-            match notice_step(sv, run, closed.ask_id) {
-                NoticeStep::Send => {
-                    return self.send_notice(sv, run, workspace, idle, idle_secs, now, closed);
-                }
-                NoticeStep::Wait => return Ok(None),
-                NoticeStep::GaveUp => {}
-            }
-        }
-        if let Some(reason) = alert_at_once(mark) {
-            return self.recover(
+            TurnStep::Notice => match closed {
+                Some(closed) => self.send_notice(sv, run, workspace, idle, idle_secs, now, closed),
+                None => Ok(None),
+            },
+            TurnStep::Nudge => self.send_nudge(sv, run, workspace, idle, idle_secs, now),
+            TurnStep::Recover(reason) => self.recover(
                 sv, run, workspace, idle, idle_secs, self.nudge, now, recovery, reason,
-            );
+            ),
         }
-        if usize::from(self.nudges) < HEADLESS_NUDGES && self.recovering.is_none() {
-            return self.send_nudge(sv, run, workspace, idle, idle_secs, now);
-        }
-        self.recover(
-            sv,
-            run,
-            workspace,
-            idle,
-            idle_secs,
-            self.nudge,
-            now,
-            recovery,
-            TURN_WITHOUT_RECEIPT,
-        )
     }
 
     /// The session stays idle without a receipt after its nudge: its
@@ -1236,7 +1455,7 @@ impl StallWatch {
                 .run_events(run.id())?
                 .iter()
                 .rev()
-                .find(|e| e.kind == "stall_nudged" && e.payload["phase"] == PHASE)
+                .find(|e| nudged_of(e).is_some())
                 .map(|e| e.id)
                 .into_iter()
                 .collect()
@@ -1397,7 +1616,7 @@ impl StallWatch {
                     NoticeFailure {
                         ask_id: closed.ask_id,
                         failures,
-                        at: Instant::now(),
+                        at: sv.generators.clock.monotonic(),
                     },
                 );
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the notice of closed question {} could not be sent to {} in workspace {workspace} (failure {failures} of {NOTICE_ATTEMPTS}): {error:#}", closed.ask_id, run.id());
@@ -1419,19 +1638,20 @@ impl StallWatch {
         now: SystemTime,
         closed_ask: Option<i64>,
     ) -> Result<()> {
-        let mut payload = json!({
-            "phase": PHASE,
-            "idle_secs": idle_secs,
-            "threshold_secs": sv.stall.idle_without_receipt_secs,
-            "background_running": idle.background_running_evidence(),
-            "background_tasks": idle.background_tasks(),
-            "workspace_id": workspace,
-        });
-        if let Some(ask) = closed_ask {
-            payload["closed_ask"] = json!(ask);
-        }
-        sv.queue
-            .record_runtime_event(run.id(), EventKind::StallNudged, payload)?;
+        let payload = NewStallNudged {
+            phase: PHASE,
+            idle_secs,
+            threshold_secs: sv.stall.idle_without_receipt_secs,
+            background_running: idle.background_running(),
+            background_tasks: idle.background_tasks(),
+            workspace_id: workspace,
+            closed_ask,
+        };
+        sv.queue.record_runtime_event(
+            run.id(),
+            EventKind::StallNudged,
+            serde_json::to_value(payload)?,
+        )?;
         // A headless session's next nudge follows one that did not move
         // it on.
         if let Some(nudge) = &mut self.nudge
@@ -1528,15 +1748,17 @@ impl StallWatch {
         // An ask closed by someone before the watch applied its answer
         // has no outcome yet.
         if !ask_resolved(&*sv.queue, run, reopen.previous)? {
-            let mut payload = Self::resolved_payload(
-                sv,
-                "ask",
-                reopen.threshold,
-                reopen.detected_after_secs,
-                reopen.at,
-                "answered_intervene",
-            );
-            payload["reopened"] = json!(true);
+            let payload = NewStallResolved {
+                reopened: Some(true),
+                ..Self::resolved_payload(
+                    sv,
+                    "ask",
+                    reopen.threshold,
+                    reopen.detected_after_secs,
+                    reopen.at,
+                    "answered_intervene",
+                )
+            };
             Self::record_resolved(
                 sv,
                 run,
@@ -1614,72 +1836,71 @@ impl StallWatch {
         let Some(asked) = self.asked else {
             return Ok(());
         };
-        let Some(ask) = sv.queue.unclosed_stalled_ask(run.id())? else {
-            // Someone closed it: its answer `wait` counts again, anything
-            // else (or none) is a person who took the session over.
+        let open = sv.queue.unclosed_stalled_ask(run.id())?;
+        // Someone closed it: it is no longer followed, whatever comes next.
+        if open.is_none() {
             self.asked = None;
-            let answer =
-                stalled_ask(&*sv.queue, run.id(), Some(asked.id))?.and_then(|ask| ask.answer);
-            let wait = answered_wait(answer.as_deref());
-            // A headless session's `intervene` holds nothing: its ask is
-            // opened again (task 1179).
-            if answer.as_deref().is_some_and(answered_intervene) {
-                let reopen = Reopen {
-                    previous: asked.id,
-                    at: asked.at,
-                    detected_after_secs: asked.detected_after_secs,
-                    threshold: asked.threshold,
-                };
-                self.reopen = Some(reopen);
-                self.reopen_ask(sv, run, reopen, now)?;
-                self.reopen = None;
-                return Ok(());
-            }
-            if wait {
-                // A `wait` on a send not taken does not stand for the idle.
-                if asked.threshold != SEND_THRESHOLD {
-                    self.wait_from = Some(now);
-                }
-            } else {
-                self.held = Some(now);
-            }
-            if !asked.applied {
-                Self::resolved(
-                    sv,
-                    run,
-                    "ask",
-                    Some((asked.id, asked.threshold)),
-                    asked.detected_after_secs,
-                    asked.at,
-                    if wait {
-                        "answered_wait"
-                    } else {
-                        "answered_intervene"
-                    },
-                )?;
-            }
-            return Ok(());
+        }
+        let closed = match &open {
+            Some(_) => None,
+            None => stalled_ask(&*sv.queue, run.id(), Some(asked.id))?,
         };
-        let moved = |since: SystemTime| marker_moved(marker, since);
-        match ask.answer.as_deref().map(str::trim) {
-            None if moved(asked.at) => {
+        let seen = match &open {
+            Some(ask) => AskSeen::Open(ask.answer.as_deref()),
+            None => AskSeen::Closed(closed.as_ref().and_then(|ask| ask.answer.as_deref())),
+        };
+        let step = self.ask_step(asked, seen, marker, send);
+        let answer = seen_answer(seen);
+        let id = open.as_ref().map_or(asked.id, |ask| ask.id);
+        match step {
+            AskStep::Nothing => {}
+            // Someone closed it: its answer `wait` counts again, anything
+            // else (or none) is a person who took the session over. A
+            // headless session's `intervene` holds nothing: its ask is
+            // opened again (task 1179).
+            AskStep::ClosedIntervene => {
+                self.asked = None;
+                self.reopen_after(sv, run, asked, asked.id, now)?;
+            }
+            AskStep::ClosedWait | AskStep::ClosedTaken => {
+                self.asked = None;
+                let wait = step == AskStep::ClosedWait;
+                if wait {
+                    // A `wait` on a send not taken does not stand for the idle.
+                    if asked.threshold != SEND_THRESHOLD {
+                        self.wait_from = Some(now);
+                    }
+                } else {
+                    self.held = Some(now);
+                }
+                if !asked.applied {
+                    Self::resolved(
+                        sv,
+                        run,
+                        "ask",
+                        Some((asked.id, asked.threshold)),
+                        asked.detected_after_secs,
+                        asked.at,
+                        if wait {
+                            "answered_wait"
+                        } else {
+                            "answered_intervene"
+                        },
+                    )?;
+                }
+            }
+            AskStep::Moved => {
                 self.close(sv, run, STALL_MOVED_CLOSED, "resolved_by_itself")?;
             }
-            None => (),
-            Some(_) if asked.applied => {
-                if self.held.is_none_or(moved) {
-                    self.close(sv, run, STALL_MOVED_CLOSED, "resolved_by_itself")?;
-                }
-            }
-            Some(answer) if answered_wait(Some(answer)) => {
+            AskStep::Wait => {
                 // Closed first: a supervisor that stops in between leaves
                 // a closed `wait` its adopter reads as one.
-                sv.queue.close_ask(ask.id)?;
+                sv.queue.close_ask(id)?;
                 Self::resolved(
                     sv,
                     run,
                     "ask",
-                    Some((ask.id, asked.threshold)),
+                    Some((id, asked.threshold)),
                     asked.detected_after_secs,
                     asked.at,
                     "answered_wait",
@@ -1688,7 +1909,7 @@ impl StallWatch {
                 if asked.threshold != SEND_THRESHOLD {
                     self.wait_from = Some(now);
                 }
-                info!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered wait; counting its idle again", ask.id, run.id());
+                info!(ask_id = %id, run_id = %run.id(), "stalled ask {id} of {} answered wait; counting its idle again", run.id());
             }
             // A headless session takes no keys, so a person has no way in:
             // `intervene` (answered to an ask opened before it was taken
@@ -1698,124 +1919,115 @@ impl StallWatch {
             // closed, and marked `reopened`: an adopter of a supervisor
             // that stopped in between opens the ask, once, without
             // recording it again.
-            Some(answer) if answered_intervene(answer) => {
-                if !ask_resolved(&*sv.queue, run, ask.id)? {
-                    let mut payload = Self::resolved_payload(
-                        sv,
-                        "ask",
-                        asked.threshold,
-                        asked.detected_after_secs,
-                        asked.at,
-                        "answered_intervene",
-                    );
-                    payload["reopened"] = json!(true);
-                    Self::record_resolved(
-                        sv,
-                        run,
-                        payload,
-                        Some(ask.id),
-                        "ask",
-                        "answered_intervene",
-                    )?;
+            AskStep::Intervene => {
+                if !ask_resolved(&*sv.queue, run, id)? {
+                    let payload = NewStallResolved {
+                        reopened: Some(true),
+                        ..Self::resolved_payload(
+                            sv,
+                            "ask",
+                            asked.threshold,
+                            asked.detected_after_secs,
+                            asked.at,
+                            "answered_intervene",
+                        )
+                    };
+                    Self::record_resolved(sv, run, payload, Some(id), "ask", "answered_intervene")?;
                 }
-                sv.queue.close_ask(ask.id)?;
+                sv.queue.close_ask(id)?;
                 self.asked = None;
-                let reopen = Reopen {
-                    previous: ask.id,
-                    at: asked.at,
-                    detected_after_secs: asked.detected_after_secs,
-                    threshold: asked.threshold,
-                };
-                self.reopen = Some(reopen);
-                self.reopen_ask(sv, run, reopen, now)?;
-                self.reopen = None;
+                self.reopen_after(sv, run, asked, id, now)?;
             }
             // `stop` has a headless session end: its exit request, sent
             // once (the wrapper stops a running turn and exits), never as
             // a turn. The run then ends without a receipt: validating fails
             // it and its recovery job takes it (task 1104).
-            Some(answer) if answer == STOP_OPTION => {
-                // Sent once the run is back in its slot.
-                if !send {
-                    return Ok(());
-                }
+            AskStep::Stop => {
                 // Written before the ask is closed: an adopter of a
                 // supervisor that stopped in between finds it and closes
                 // the ask without writing it again.
                 if exit_requested(sv, run) {
-                    info!(ask_id = %ask.id, run_id = %run.id(), "the exit of {} was already requested; stalled ask {} not sent again", run.id(), ask.id);
+                    info!(ask_id = %id, run_id = %run.id(), "the exit of {} was already requested; stalled ask {id} not sent again", run.id());
                 } else {
                     let workspace = run.workspace_id().unwrap_or_default().to_owned();
                     submit(sv, run, &workspace, Input::Exit, "/exit")?;
                 }
-                sv.queue.close_ask(ask.id)?;
+                sv.queue.close_ask(id)?;
                 Self::resolved(
                     sv,
                     run,
                     "ask",
-                    Some((ask.id, asked.threshold)),
+                    Some((id, asked.threshold)),
                     asked.detected_after_secs,
                     asked.at,
                     "answered_stop",
                 )?;
                 self.asked = None;
                 self.held = Some(now);
-                warn!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered stop; the headless session is asked to exit, and the run goes to its recovery job without a receipt", ask.id, run.id());
+                warn!(ask_id = %id, run_id = %run.id(), "stalled ask {id} of {} answered stop; the headless session is asked to exit, and the run goes to its recovery job without a receipt", run.id());
             }
             // A headless session takes no keys: a person's answer other
             // than `intervene` is its next turn's prompt (ADR-t813-1
             // decision 6).
-            Some(answer) if headless_delivers(answer) => {
-                // Sent once the run is back in its slot.
-                if !send {
-                    return Ok(());
-                }
+            AskStep::Instruction => {
                 // The request names the ask and is written before the ask
                 // is closed: a supervisor that stopped in between left it,
                 // and its adopter closes the ask without writing another
                 // (task 863).
-                let what = stalled_answer_what(ask.id);
+                let what = stalled_answer_what(id);
                 if let Some(seq) = requested(sv, run, &what)? {
-                    info!(ask_id = %ask.id, run_id = %run.id(), "the answer of stalled ask {} of {} was already requested (request {seq}); not sent again", ask.id, run.id());
+                    info!(ask_id = %id, run_id = %run.id(), "the answer of stalled ask {id} of {} was already requested (request {seq}); not sent again", run.id());
                 } else {
-                    let text = answer_text(run, ask.id, answer);
+                    let text = answer_text(run, id, answer.unwrap_or_default().trim());
                     let workspace = run.workspace_id().unwrap_or_default().to_owned();
                     let sent_at = sv.files.now();
                     submit(sv, run, &workspace, Input::Text(&text), &what)?;
                     self.input_sent(sent_at, Some(&text));
                 }
-                sv.queue.close_ask(ask.id)?;
+                sv.queue.close_ask(id)?;
                 Self::resolved(
                     sv,
                     run,
                     "ask",
-                    Some((ask.id, asked.threshold)),
+                    Some((id, asked.threshold)),
                     asked.detected_after_secs,
                     asked.at,
                     "answered_instruction",
                 )?;
                 self.asked = None;
-                info!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered; its answer is the headless session's next turn", ask.id, run.id());
-            }
-            Some(_) => {
-                Self::resolved(
-                    sv,
-                    run,
-                    "ask",
-                    Some((ask.id, asked.threshold)),
-                    asked.detected_after_secs,
-                    asked.at,
-                    "answered_intervene",
-                )?;
-                self.asked = Some(Asked {
-                    applied: true,
-                    ..asked
-                });
-                self.held = Some(now);
-                info!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered for a person to step in; no ask until the session moves", ask.id, run.id());
+                info!(ask_id = %id, run_id = %run.id(), "stalled ask {id} of {} answered; its answer is the headless session's next turn", run.id());
             }
         }
         Ok(())
+    }
+
+    /// Open again the ask `previous`, of the detection of `asked`, answered
+    /// `intervene` and closed.
+    fn reopen_after(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        asked: Asked,
+        previous: AskId,
+        now: SystemTime,
+    ) -> Result<()> {
+        let reopen = Reopen {
+            previous,
+            at: asked.at,
+            detected_after_secs: asked.detected_after_secs,
+            threshold: asked.threshold,
+        };
+        self.reopen = Some(reopen);
+        self.reopen_ask(sv, run, reopen, now)?;
+        self.reopen = None;
+        Ok(())
+    }
+}
+
+/// The answer of the ask as seen.
+fn seen_answer(seen: AskSeen<'_>) -> Option<&str> {
+    match seen {
+        AskSeen::Open(answer) | AskSeen::Closed(answer) => answer,
     }
 }
 
@@ -1858,6 +2070,673 @@ mod tests {
     }
 
     use super::super::file_time::at_ns;
+
+    /// A recorded event `id` of `kind` with `payload`, recorded at second
+    /// `secs` and millisecond `ms` of a fixed minute.
+    fn event(id: i64, kind: &str, payload: Value, secs: u32, ms: u32) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: format!("2026-09-30T00:00:{secs:02}.{ms:03}Z"),
+            actor: None,
+        }
+    }
+
+    /// The time [`event`] records at `secs` and `ms`.
+    fn event_at(secs: u32, ms: u32) -> SystemTime {
+        at_event(&event(0, "x", json!({}), secs, ms)).unwrap()
+    }
+
+    /// A `stalled` ask `id` of the run, answered `answer`, closed at
+    /// `closed`, opened at unix second 1000.
+    fn stalled(id: i64, answer: Option<&str>, closed: Option<i64>) -> crate::domain::Ask {
+        serde_json::from_value(json!({
+            "id": id, "kind": "stalled", "task_id": 1, "run_id": "r", "question": "q",
+            "options": ["wait", "stop"], "answer": answer, "asked_by": "supervisor",
+            "reason_category": "recovery_failed", "created_at": 1000,
+            "answered_at": answer.map(|_| 1001), "closed_at": closed,
+        }))
+        .unwrap()
+    }
+
+    /// The `stall_resolved` of the ask `id` with `outcome`.
+    fn ask_end(id: i64, ask: i64, outcome: &str, extra: Value) -> RunEvent {
+        let mut payload =
+            json!({"phase": PHASE, "detection": "ask", "outcome": outcome, "ask_id": ask});
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            payload[key] = value.clone();
+        }
+        event(id, event_kind::STALL_RESOLVED, payload, 10, 0)
+    }
+
+    /// Task 1558: an adopter counts the phase's nudges and takes the last
+    /// one's time and idle from `stall_nudged`; a nudge of another phase,
+    /// or without its phase (a payload not of this watch), does not count,
+    /// and a missing or mistyped `idle_secs` reads as 0.
+    #[test]
+    fn an_adopter_reads_the_nudges_of_the_phase_and_tolerates_missing_fields() {
+        let nudged = |id, payload| event(id, event_kind::STALL_NUDGED, payload, 5, id as u32);
+        let events = [
+            nudged(1, json!({"phase": PHASE, "idle_secs": 40})),
+            nudged(2, json!({"phase": "revise", "idle_secs": 50})),
+            nudged(3, json!({"idle_secs": 60})),
+            nudged(4, json!({"phase": PHASE, "idle_secs": "70"})),
+            event(
+                5,
+                event_kind::STALL_RESOLVED,
+                json!({"phase": PHASE, "detection": "nudge"}),
+                6,
+                0,
+            ),
+        ];
+        let watch = StallWatch::adopted(&events, None, None);
+        assert_eq!(watch.nudges, 2);
+        let nudge = watch.nudge.unwrap();
+        assert_eq!(nudge.at, event_at(5, 4));
+        assert_eq!(nudge.detected_after_secs, 0);
+        assert!(nudge.settled);
+        assert_eq!(watch.last_input, Some(event_at(5, 4)));
+        // Nothing recorded: nothing rebuilt.
+        let empty = StallWatch::adopted(&[], None, None);
+        assert!(empty.nudge.is_none() && empty.asked.is_none() && empty.recovering.is_none());
+        // A payload that is no object reads as one with no fields.
+        let broken = [event(1, event_kind::STALL_NUDGED, json!("session"), 5, 0)];
+        assert_eq!(StallWatch::adopted(&broken, None, None).nudges, 0);
+    }
+
+    /// Task 1558: the idle's recovery job an adopter takes over is the last
+    /// one requested whose end was not recorded, with its attempt, reason
+    /// and idle; a `recovery_finished` that applied a repair other than
+    /// `wait` restarts the count and marks the repair. A job of another
+    /// alert or reason is not the idle's, and a missing attempt reads as 0.
+    #[test]
+    fn an_adopter_takes_over_the_idles_recovery_job_whose_end_is_not_recorded() {
+        let job = |id, kind, payload| event(id, kind, payload, 20, id as u32);
+        let requested = json!({"alert": "stalled", "reason": TURN_WITHOUT_RECEIPT, "attempt": 2, "idle_secs": 90});
+        let mut events = vec![
+            job(
+                1,
+                event_kind::RECOVERY_REQUESTED,
+                json!({"alert": "idle_process", "reason": TURN_WITHOUT_RECEIPT, "attempt": 1}),
+            ),
+            job(2, event_kind::RECOVERY_REQUESTED, requested.clone()),
+        ];
+        let watch = StallWatch::adopted(&events, None, None);
+        let recovering = watch.recovering.as_deref().unwrap();
+        assert_eq!(recovering.attempt, 2);
+        assert_eq!(recovering.reason, TURN_WITHOUT_RECEIPT);
+        assert_eq!(recovering.detected_after_secs, 90);
+        assert_eq!(recovering.at, event_at(20, 2));
+        assert!(recovering.repaired_at.is_none() && watch.recovered_from.is_none());
+        // `wait` repairs nothing; a non-text item is no `wait`.
+        let finished = |id, applied: Value| {
+            job(
+                id,
+                event_kind::RECOVERY_FINISHED,
+                json!({"alert": "stalled", "reason": TURN_WITHOUT_RECEIPT, "attempt": 2, "applied": applied}),
+            )
+        };
+        events.push(finished(3, json!(["wait"])));
+        assert!(
+            StallWatch::adopted(&events, None, None)
+                .recovered_from
+                .is_none()
+        );
+        events.push(finished(4, json!([7])));
+        let watch = StallWatch::adopted(&events, None, None);
+        assert_eq!(watch.recovered_from, Some(event_at(20, 4)));
+        assert_eq!(
+            watch.recovering.as_deref().unwrap().repaired_at,
+            Some(event_at(20, 4))
+        );
+        // Its end recorded: nothing to take over.
+        events.push(job(
+            5,
+            event_kind::STALL_RESOLVED,
+            json!({"phase": PHASE, "detection": "recovery", "attempt": 2}),
+        ));
+        assert!(
+            StallWatch::adopted(&events, None, None)
+                .recovering
+                .is_none()
+        );
+        // A request recorded before the attempt was: attempt 0.
+        let old = [job(
+            1,
+            event_kind::RECOVERY_REQUESTED,
+            json!({"alert": "stalled", "reason": IDLE_WITHOUT_RECEIPT}),
+        )];
+        let watch = StallWatch::adopted(&old, None, None);
+        assert_eq!(watch.recovering.as_deref().unwrap().attempt, 0);
+        assert_eq!(watch.recovering.as_deref().unwrap().detected_after_secs, 0);
+    }
+
+    /// Task 1558, moved from
+    /// `runtime_headless_stall::an_adopter_reopens_a_headless_stalled_ask_left_answered_intervene`
+    /// (the cases `::an_adopter_opens_the_next_ask_of_an_intervene_a_person_closed` and
+    /// `::an_adopter_opens_the_next_ask_of_a_closed_intervene_once` run end to end):
+    /// an ask left open answered `intervene` is followed (to be opened
+    /// again, never applied), and one a person closed answered `intervene`
+    /// with no outcome recorded is opened again; one the previous
+    /// supervisor closed and marked `reopened` is opened again once, not
+    /// after a turn was sent since.
+    #[test]
+    fn an_adopter_opens_again_an_ask_answered_intervene_wherever_its_supervisor_stopped() {
+        // Held: the outcome recorded and the ask left open.
+        let held = stalled(7, Some("intervene"), None);
+        let events = [ask_end(1, 7, "answered_intervene", json!({}))];
+        let watch = StallWatch::adopted(&events, Some(&held), Some(&held));
+        let asked = watch.asked.unwrap();
+        assert_eq!(asked.id, AskId::new(7));
+        assert!(!asked.applied);
+        assert_eq!(asked.at, at_unix(1001));
+        assert_eq!(asked.threshold, IDLE_THRESHOLD);
+        assert!(watch.held.is_none() && watch.reopen.is_none());
+        // Closed by a person while no supervisor watched.
+        let closed = stalled(7, Some("intervene"), Some(1005));
+        let watch = StallWatch::adopted(&[], Some(&closed), None);
+        let reopen = watch.reopen.unwrap();
+        assert_eq!(reopen.previous, AskId::new(7));
+        assert_eq!(reopen.at, at_unix(1001));
+        assert!(watch.held.is_none() && watch.asked.is_none());
+        // Closed and marked by the previous supervisor, the next not open.
+        let marked = [ask_end(
+            1,
+            7,
+            "answered_intervene",
+            json!({"reopened": true, "detected_after_secs": 12}),
+        )];
+        let watch = StallWatch::adopted(&marked, Some(&closed), None);
+        let reopen = watch.reopen.unwrap();
+        assert_eq!(reopen.previous, AskId::new(7));
+        assert_eq!(reopen.detected_after_secs, 12);
+        // A `reopened` of another type, or a turn sent since: not again.
+        let mistyped = [ask_end(
+            1,
+            7,
+            "answered_intervene",
+            json!({"reopened": "true"}),
+        )];
+        assert!(
+            StallWatch::adopted(&mistyped, Some(&closed), None)
+                .reopen
+                .is_none()
+        );
+        let sent = [
+            marked[0].clone(),
+            event(2, event_kind::TURN_REQUESTED, json!({"seq": 3}), 11, 0),
+        ];
+        assert!(
+            StallWatch::adopted(&sent, Some(&closed), None)
+                .reopen
+                .is_none()
+        );
+        // An `ask_id` of another type names no ask: the closed ask has no
+        // outcome recorded, and is opened again from the ask itself.
+        let other = [ask_end(
+            1,
+            7,
+            "answered_intervene",
+            json!({"reopened": true, "ask_id": "7", "detected_after_secs": 12}),
+        )];
+        let reopen = StallWatch::adopted(&other, Some(&closed), None)
+            .reopen
+            .unwrap();
+        assert_eq!((reopen.at, reopen.detected_after_secs), (at_unix(1001), 0));
+    }
+
+    /// Task 1558: a closed ask with no outcome recorded: its `wait` counts
+    /// again from its close, anything else holds from the next second; an
+    /// open ask answered and applied holds from the next second after its
+    /// answer. The outcomes recorded give `wait_from` and `held`.
+    #[test]
+    fn an_adopter_reads_waits_and_holds_from_closed_asks_and_outcomes() {
+        let waited = stalled(3, Some("wait"), Some(1010));
+        let watch = StallWatch::adopted(&[], Some(&waited), None);
+        assert_eq!(watch.wait_from, Some(at_unix(1010)));
+        let taken = stalled(3, Some("I'll look"), Some(1010));
+        assert_eq!(
+            StallWatch::adopted(&[], Some(&taken), None).held,
+            Some(at_unix(1011))
+        );
+        // Its outcome recorded: read from the events instead.
+        let events = [ask_end(1, 3, "answered_wait", json!({}))];
+        let watch = StallWatch::adopted(&events, Some(&taken), None);
+        assert_eq!(watch.wait_from, Some(event_at(10, 0)));
+        assert!(watch.held.is_none());
+        let stopped = [ask_end(1, 3, "answered_stop", json!({}))];
+        assert_eq!(
+            StallWatch::adopted(&stopped, None, None).held,
+            Some(event_at(10, 0))
+        );
+        // Open, answered and applied.
+        let open = stalled(4, Some("go on"), None);
+        let applied = [ask_end(1, 4, "answered_intervene", json!({}))];
+        let watch = StallWatch::adopted(&applied, Some(&open), Some(&open));
+        assert!(watch.asked.unwrap().applied);
+        assert_eq!(watch.held, Some(at_unix(1002)));
+    }
+
+    /// Task 1558: the setting an escalated ask was judged by comes from the
+    /// `recovery_finished` that names it; one that names no ask, or an
+    /// `ask_id` of another type, leaves the idle's own.
+    #[test]
+    fn the_threshold_of_an_ask_is_its_escalations() {
+        let finished = |payload| [event(1, event_kind::RECOVERY_FINISHED, payload, 0, 0)];
+        let of = |payload| threshold_of(&finished(payload), AskId::new(5));
+        assert_eq!(
+            of(json!({"alert": "idle_process", "ask_id": 5})),
+            IDLE_PROCESS_THRESHOLD
+        );
+        assert_eq!(
+            of(json!({"alert": "long_background", "ask_id": 5})),
+            BACKGROUND_THRESHOLD
+        );
+        assert_eq!(
+            of(json!({"alert": "stalled", "reason": SEND_UNCONFIRMED, "ask_id": 5})),
+            SEND_THRESHOLD
+        );
+        assert_eq!(
+            of(json!({"alert": "idle_process", "ask_id": "5"})),
+            IDLE_THRESHOLD
+        );
+        assert_eq!(of(json!({"alert": "idle_process"})), IDLE_THRESHOLD);
+        assert_eq!(threshold_of(&[], AskId::new(5)), IDLE_THRESHOLD);
+    }
+
+    /// Task 1558: the end of an ask is recorded only by a `stall_resolved`
+    /// of the phase's `ask` detection that names it as an integer.
+    #[test]
+    fn an_asks_end_is_its_own_ask_detection() {
+        let end = |payload| [event(1, event_kind::STALL_RESOLVED, payload, 0, 0)];
+        let id = AskId::new(9);
+        assert!(ask_resolved_in(
+            &end(json!({"phase": PHASE, "detection": "ask", "ask_id": 9})),
+            id
+        ));
+        assert!(!ask_resolved_in(
+            &end(json!({"phase": PHASE, "detection": "ask", "ask_id": 8})),
+            id
+        ));
+        assert!(!ask_resolved_in(
+            &end(json!({"phase": PHASE, "detection": "nudge", "ask_id": 9})),
+            id
+        ));
+        assert!(!ask_resolved_in(
+            &end(json!({"detection": "ask", "ask_id": 9})),
+            id
+        ));
+        assert!(!ask_resolved_in(
+            &end(json!({"phase": PHASE, "detection": "ask", "ask_id": 9.0})),
+            id
+        ));
+    }
+
+    /// Task 1558: the records the watch writes keep the keys it wrote
+    /// before they were typed, and an ask's id, a job's attempt and reason
+    /// and an ask opened again only when they are there.
+    #[test]
+    fn the_records_of_the_watch_keep_their_keys() {
+        let resolved = NewStallResolved {
+            phase: PHASE,
+            detection: "recovery",
+            threshold: IDLE_THRESHOLD,
+            threshold_secs: 1200,
+            detected_after_secs: 30,
+            outcome: "escalated",
+            resolved_after_secs: 4,
+            ask_id: None,
+            attempt: Some(2),
+            reason: Some(TURN_WITHOUT_RECEIPT),
+            reopened: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&resolved).unwrap(),
+            json!({"phase": "session", "detection": "recovery", "threshold": IDLE_THRESHOLD,
+                "threshold_secs": 1200, "detected_after_secs": 30, "outcome": "escalated",
+                "resolved_after_secs": 4, "attempt": 2, "reason": TURN_WITHOUT_RECEIPT})
+        );
+        let asked = NewStallResolved {
+            detection: "ask",
+            ask_id: Some(7),
+            attempt: None,
+            reason: None,
+            reopened: Some(true),
+            ..resolved
+        };
+        let value = serde_json::to_value(&asked).unwrap();
+        assert_eq!(value["ask_id"], 7);
+        assert_eq!(value["reopened"], true);
+        assert!(value.get("attempt").is_none() && value.get("reason").is_none());
+        let nudged = NewStallNudged {
+            phase: PHASE,
+            idle_secs: 30,
+            threshold_secs: 1200,
+            background_running: false,
+            background_tasks: Vec::<crate::domain::stall::BackgroundTask>::new(),
+            workspace_id: "w",
+            closed_ask: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&nudged).unwrap(),
+            json!({"phase": "session", "idle_secs": 30, "threshold_secs": 1200,
+                "background_running": false, "background_tasks": [], "workspace_id": "w"})
+        );
+        let notice = NewStallNudged {
+            closed_ask: Some(4),
+            ..nudged
+        };
+        assert_eq!(serde_json::to_value(&notice).unwrap()["closed_ask"], 4);
+    }
+
+    fn seen(modified: SystemTime) -> IdleSeen {
+        IdleSeen {
+            modified,
+            receipt_written: false,
+            question_open: false,
+            held: false,
+        }
+    }
+
+    /// Task 1558, moved from `runtime_stall::a_worker_idle_at_its_question_is_not_nudged`:
+    /// a session idle at its own question, with its receipt written, held
+    /// by a hold, or not idle since the last text it was sent (a marker
+    /// of the same millisecond) is left alone; in its slot its turn is
+    /// judged.
+    #[test]
+    fn an_idle_session_is_judged_only_past_its_inputs_question_receipt_and_hold() {
+        let watch = StallWatch::default();
+        let idle = seen(at_ns(300, 0));
+        assert_eq!(watch.idle_step(&idle, true), IdleStep::Turn);
+        for waiting in [
+            IdleSeen {
+                question_open: true,
+                ..idle
+            },
+            IdleSeen {
+                receipt_written: true,
+                ..idle
+            },
+            IdleSeen { held: true, ..idle },
+        ] {
+            assert_eq!(watch.idle_step(&waiting, true), IdleStep::Nothing);
+            assert_eq!(watch.idle_step(&waiting, false), IdleStep::Nothing);
+        }
+        let mut sent = StallWatch::default();
+        sent.input_sent(at_ns(300, 0), None);
+        assert_eq!(
+            sent.idle_step(&seen(at_ns(300, 900_000)), true),
+            IdleStep::Nothing
+        );
+        assert_eq!(sent.idle_step(&seen(at_ns(301, 0)), true), IdleStep::Turn);
+    }
+
+    /// Task 1558: out of its slot nothing is sent: only after a nudge and a
+    /// person's `wait` is the ask opened, and only for a turn after the
+    /// `wait` (the millisecond of the `wait` is before it).
+    #[test]
+    fn out_of_its_slot_only_a_wait_followed_by_a_turn_asks() {
+        let nudge = Nudge {
+            at: at_ns(100, 0),
+            detected_after_secs: 0,
+            settled: true,
+        };
+        let waited = StallWatch {
+            nudge: Some(nudge),
+            wait_from: Some(at_ns(200, 0)),
+            ..StallWatch::default()
+        };
+        assert_eq!(waited.idle_step(&seen(at_ns(201, 0)), false), IdleStep::Ask);
+        assert_eq!(
+            waited.idle_step(&seen(at_ns(200, 500_000)), false),
+            IdleStep::Nothing
+        );
+        let unwaited = StallWatch {
+            wait_from: None,
+            ..waited.clone()
+        };
+        assert_eq!(
+            unwaited.idle_step(&seen(at_ns(201, 0)), false),
+            IdleStep::Nothing
+        );
+        let unnudged = StallWatch {
+            nudge: None,
+            ..waited
+        };
+        assert_eq!(
+            unnudged.idle_step(&seen(at_ns(201, 0)), false),
+            IdleStep::Nothing
+        );
+    }
+
+    /// Task 1558: a turn that failed ends the session; a provider that
+    /// cannot be used goes to its wall; after `wait` only a later turn
+    /// asks; a closed question's notice comes before the nudge unless its
+    /// send waits or gave up; a turn refused too often goes to its job at
+    /// once; [`HEADLESS_NUDGES`] nudges, then the job.
+    #[test]
+    fn a_turn_is_nudged_up_to_its_limit_and_then_recovered() {
+        let at = at_ns(500, 0);
+        let fresh = StallWatch::default();
+        let turn = TurnSeen::default();
+        assert_eq!(fresh.turn_step(at, &turn), TurnStep::Nudge);
+        let ended = TurnSeen {
+            ended: true,
+            wall: Some(TurnFailure::UsageLimit),
+            ..turn
+        };
+        assert_eq!(fresh.turn_step(at, &ended), TurnStep::Nothing);
+        let wall = TurnSeen {
+            wall: Some(TurnFailure::UsageLimit),
+            ..turn
+        };
+        assert_eq!(
+            fresh.turn_step(at, &wall),
+            TurnStep::Wall(TurnFailure::UsageLimit)
+        );
+        let waited = StallWatch {
+            wait_from: Some(at),
+            ..StallWatch::default()
+        };
+        assert_eq!(waited.turn_step(at, &turn), TurnStep::Nothing);
+        assert_eq!(waited.turn_step(at_ns(501, 0), &turn), TurnStep::Ask);
+        for (notice, step) in [
+            (NoticeStep::Send, TurnStep::Notice),
+            (NoticeStep::Wait, TurnStep::Nothing),
+            (NoticeStep::GaveUp, TurnStep::Nudge),
+        ] {
+            let seen = TurnSeen {
+                notice: Some(notice),
+                ..turn
+            };
+            assert_eq!(fresh.turn_step(at, &seen), step, "{notice:?}");
+        }
+        let denied = TurnSeen {
+            at_once: Some(PERMISSION_DENIED),
+            ..turn
+        };
+        assert_eq!(
+            fresh.turn_step(at, &denied),
+            TurnStep::Recover(PERMISSION_DENIED)
+        );
+        let nudged = StallWatch {
+            nudges: u8::try_from(HEADLESS_NUDGES).unwrap(),
+            ..StallWatch::default()
+        };
+        assert_eq!(
+            nudged.turn_step(at, &turn),
+            TurnStep::Recover(TURN_WITHOUT_RECEIPT)
+        );
+        let below = StallWatch {
+            nudges: u8::try_from(HEADLESS_NUDGES - 1).unwrap(),
+            ..StallWatch::default()
+        };
+        assert_eq!(below.turn_step(at, &turn), TurnStep::Nudge);
+        // A job that looks at the idle: no notice, no nudge.
+        let recovering = StallWatch {
+            recovering: Some(Box::new(Recovering {
+                attempt: 1,
+                reason: TURN_WITHOUT_RECEIPT,
+                at,
+                detected_after_secs: 0,
+                repaired_at: None,
+            })),
+            ..StallWatch::default()
+        };
+        let notice = TurnSeen {
+            notice: Some(NoticeStep::Send),
+            ..turn
+        };
+        assert_eq!(
+            recovering.turn_step(at, &notice),
+            TurnStep::Recover(TURN_WITHOUT_RECEIPT)
+        );
+    }
+
+    /// Task 1558: a notice whose send failed waits out the backoff (not at
+    /// its end) and gives up after [`NOTICE_ATTEMPTS`]; a failure of
+    /// another question's notice does not hold it.
+    #[test]
+    fn a_failed_notice_waits_its_backoff_and_gives_up() {
+        let at = Instant::now();
+        let backoff = Duration::from_secs(2);
+        let failed = |failures| NoticeFailure {
+            ask_id: 3,
+            failures,
+            at,
+        };
+        assert_eq!(notice_step(None, 3, backoff, at), NoticeStep::Send);
+        assert_eq!(
+            notice_step(Some(&failed(1)), 3, backoff, at),
+            NoticeStep::Wait
+        );
+        let just_before = at + backoff - Duration::from_millis(1);
+        assert_eq!(
+            notice_step(Some(&failed(1)), 3, backoff, just_before),
+            NoticeStep::Wait
+        );
+        assert_eq!(
+            notice_step(Some(&failed(1)), 3, backoff, at + backoff),
+            NoticeStep::Send
+        );
+        assert_eq!(
+            notice_step(Some(&failed(NOTICE_ATTEMPTS)), 3, backoff, at),
+            NoticeStep::GaveUp
+        );
+        assert_eq!(
+            notice_step(Some(&failed(NOTICE_ATTEMPTS)), 4, backoff, at),
+            NoticeStep::Send
+        );
+    }
+
+    /// Task 1558, moved from
+    /// `runtime_headless_stall::an_intervene_answer_closes_the_headless_stalled_ask_and_opens_another`
+    /// (the ask closed by the one who answered `wait` runs end to end in
+    /// `::a_headless_stalled_ask_closed_after_wait_is_asked_again_after_the_next_turn`):
+    /// the answers of a `stalled` ask, open or closed by someone, and the
+    /// session moving on.
+    #[test]
+    fn the_answers_of_a_stalled_ask_are_applied_by_kind() {
+        let asked = Asked {
+            id: AskId::new(1),
+            at: at_ns(400, 0),
+            detected_after_secs: 0,
+            applied: false,
+            threshold: IDLE_THRESHOLD,
+        };
+        let watch = StallWatch::default();
+        let step = |seen, marker, send| watch.ask_step(asked, seen, marker, send);
+        // Closed by someone.
+        assert_eq!(
+            step(AskSeen::Closed(Some("intervene")), None, true),
+            AskStep::ClosedIntervene
+        );
+        assert_eq!(
+            step(AskSeen::Closed(Some("wait")), None, true),
+            AskStep::ClosedWait
+        );
+        assert_eq!(
+            step(AskSeen::Closed(Some("go on")), None, false),
+            AskStep::ClosedTaken
+        );
+        assert_eq!(
+            step(AskSeen::Closed(None), None, true),
+            AskStep::ClosedTaken
+        );
+        // Open and unanswered: closed once the session took a turn since
+        // it opened (not one of its millisecond).
+        assert_eq!(
+            step(AskSeen::Open(None), Some(at_ns(400, 900_000)), true),
+            AskStep::Nothing
+        );
+        assert_eq!(
+            step(AskSeen::Open(None), Some(at_ns(401, 0)), true),
+            AskStep::Moved
+        );
+        assert_eq!(step(AskSeen::Open(None), None, true), AskStep::Nothing);
+        // Answered.
+        assert_eq!(
+            step(AskSeen::Open(Some(" wait ")), None, false),
+            AskStep::Wait
+        );
+        assert_eq!(
+            step(AskSeen::Open(Some("propose: why")), None, false),
+            AskStep::Wait
+        );
+        assert_eq!(
+            step(AskSeen::Open(Some("intervene")), None, false),
+            AskStep::Intervene
+        );
+        assert_eq!(
+            step(AskSeen::Open(Some("intervene: I look")), None, true),
+            AskStep::Intervene
+        );
+        assert_eq!(step(AskSeen::Open(Some("stop")), None, true), AskStep::Stop);
+        assert_eq!(
+            step(AskSeen::Open(Some("stop")), None, false),
+            AskStep::Nothing
+        );
+        assert_eq!(
+            step(AskSeen::Open(Some("go on")), None, true),
+            AskStep::Instruction
+        );
+        assert_eq!(
+            step(AskSeen::Open(Some("go on")), None, false),
+            AskStep::Nothing
+        );
+        // An answer applied (a person stepped in): closed once the session
+        // took a turn after the step in.
+        let applied = Asked {
+            applied: true,
+            ..asked
+        };
+        let held = StallWatch {
+            held: Some(at_ns(450, 0)),
+            ..StallWatch::default()
+        };
+        let marker = |ms| Some(at_ns(ms, 0));
+        assert_eq!(
+            held.ask_step(applied, AskSeen::Open(Some("x")), marker(450), true),
+            AskStep::Nothing
+        );
+        assert_eq!(
+            held.ask_step(applied, AskSeen::Open(Some("x")), marker(451), true),
+            AskStep::Moved
+        );
+        assert_eq!(
+            watch.ask_step(applied, AskSeen::Open(Some("x")), None, true),
+            AskStep::Moved
+        );
+        // The headless options: no `intervene`, `stop` after `wait`.
+        assert_eq!(
+            headless_options(vec!["wait".into(), "intervene".into(), "go on".into()]),
+            ["wait", "stop", "go on"]
+        );
+    }
 
     /// Task 1050: a marker of the same millisecond as the event of the last
     /// text typed, a person's step in, a `wait` or a recovery job's request

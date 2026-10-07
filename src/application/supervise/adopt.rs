@@ -6,6 +6,10 @@ use super::*;
 use crate::domain::EventKind;
 use crate::domain::RunEvent;
 use crate::domain::concern::{ConcernDecision, EscalatedBecause};
+use crate::domain::run::{
+    AskOpened, AttemptOf, ConcernDecided, ConflictPrecheck, ReviewFinished, ReviseRequested,
+    ReviseUnsent, TurnRequested, restore_payload as restore, review_verdict,
+};
 use crate::domain::turn;
 
 impl Supervisor<'_> {
@@ -107,19 +111,26 @@ impl Supervisor<'_> {
         wrapper: Option<&RunProcess>,
         now: i64,
     ) -> Result<bool> {
-        if run.status() == RunStatus::NeedsSession {
-            return self.resume_adoptable(run, wrapper);
-        }
-        if !matches!(
+        // Only these read the run's events and the wrapper's process.
+        let reads = matches!(
             run.status(),
-            RunStatus::Running | RunStatus::Validating | RunStatus::AwaitingIntegration
-        ) {
-            return Ok(false);
-        }
-        if run.status() == RunStatus::AwaitingIntegration || self.skipped_resume(run.id())? {
-            return Ok(true);
-        }
-        Ok(wrapper.is_some() && self.wrapper_alive(wrapper, now) != Some(false))
+            RunStatus::NeedsSession | RunStatus::Running | RunStatus::Validating
+        );
+        let events = if reads {
+            self.queue.run_events(run.id())?
+        } else {
+            Vec::new()
+        };
+        Ok(adoptable(&AdoptionSeen {
+            status: run.status(),
+            wrapper: if reads {
+                self.wrapper_seen(wrapper, now)
+            } else {
+                None
+            },
+            skipped_resume: RunHistory::from_events(&events).last_resume_skipped(),
+            resume_in_progress: resume_in_progress(&events).is_some(),
+        }))
     }
     /// Whether a `needs_session` run whose lease went stale is in a resume
     /// whose session lives on (task 356): its last resume event is
@@ -137,10 +148,8 @@ impl Supervisor<'_> {
         run: &TaskRun,
         wrapper: Option<&RunProcess>,
     ) -> Result<bool> {
-        Ok(
-            wrapper.is_some_and(|w| w.exited_at.is_none() && self.wrapper_lives(w))
-                && resume_in_progress(&self.queue.run_events(run.id())?).is_some(),
-        )
+        let lives = wrapper.is_some_and(|w| w.exited_at.is_none() && self.wrapper_lives(w));
+        Ok(lives && resume_in_progress(&self.queue.run_events(run.id())?).is_some())
     }
     /// Record that a resumed session is watched on by this process instead
     /// of being resumed again: `auto_repaired` (`repair: resume_adopted`,
@@ -177,14 +186,18 @@ impl Supervisor<'_> {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "auto_repaired of {} could not be recorded: {error:#}", run.id());
         }
     }
-    /// Whether the wrapper that has not reported its exit is alive (its
-    /// process lives and its heartbeat is within the lease TTL); `None`
-    /// when there is no wrapper or it reported its exit.
+    /// Whether the wrapper that has not reported its exit is alive
+    /// ([`wrapper_alive`]).
     fn wrapper_alive(&self, wrapper: Option<&RunProcess>, now: i64) -> Option<bool> {
-        wrapper.and_then(|wrapper| {
-            wrapper.exited_at.is_none().then(|| {
-                self.wrapper_lives(wrapper) && now - wrapper.heartbeat_at <= HEARTBEAT_TIMEOUT_SECS
-            })
+        wrapper_alive(self.wrapper_seen(wrapper, now))
+    }
+    /// What the adopter sees of `wrapper` at unix second `now`: whether its
+    /// process lives is read only while it has not reported its exit.
+    fn wrapper_seen(&self, wrapper: Option<&RunProcess>, now: i64) -> Option<WrapperSeen> {
+        wrapper.map(|wrapper| WrapperSeen {
+            exited: wrapper.exited_at.is_some(),
+            lives: wrapper.exited_at.is_none() && self.wrapper_lives(wrapper),
+            heartbeat_age_secs: now - wrapper.heartbeat_at,
         })
     }
     pub(super) fn resume(&self, run: &TaskRun) -> Result<Phase> {
@@ -235,11 +248,6 @@ impl Supervisor<'_> {
                 })
             }
         })
-    }
-    /// Whether the run's last resume event is `resume_skipped`: it was moved
-    /// on without a session, and no resume opened one since.
-    pub(super) fn skipped_resume(&self, id: &RunId) -> Result<bool> {
-        Ok(RunHistory::from_events(&self.queue.run_events(id)?).last_resume_skipped())
     }
     /// The session an accepted run keeps open (ADR-0027): the workspace of
     /// the resume that handed its live session to validation
@@ -303,218 +311,110 @@ impl Supervisor<'_> {
         let Some(anchor) = crate::domain::review_anchor(&events) else {
             return self.start_review(run, session);
         };
-        let then = match anchor.kind.as_str() {
-            event_kind::REVISE_REQUESTED => {
-                if let Some(live) = session.clone()
-                    && session_alive(self, run.id())?
-                {
-                    let attempt = anchor.payload["attempt"].as_u64().unwrap_or(1) as usize;
-                    let sent_at = adopted_sent_at(&anchor.payload);
-                    let start = self
-                        .adopted_start(
-                            run,
-                            &events,
-                            anchor.id,
-                            &live.workspace,
-                            "revise request",
-                            &format!("revise-{attempt}.txt"),
-                        )
-                        .then_some(sent_at);
-                    let mut watch = ReviseWatch::new(
+        let live = session.is_some() && session_alive(self, run.id())?;
+        let landing_ask_open = self
+            .queue
+            .has_unclosed_ask(run.id(), AskKind::ApproveLanding)?;
+        match review_resumption(run, &history, anchor, live, landing_ask_open) {
+            ReviewResumption::Review => self.start_review(run, session),
+            ReviewResumption::Revise {
+                attempt,
+                sent_at,
+                reasons,
+                concern,
+            } => {
+                let Some(live) = session else {
+                    return self.start_review(run, None);
+                };
+                let start = self
+                    .adopted_start(
                         run,
-                        live,
-                        attempt,
-                        Fix::Revise {
-                            reasons: serde_json::from_value(anchor.payload["reasons"].clone())
-                                .unwrap_or_default(),
-                            concern: sent_back_concern(&history, anchor),
-                        },
-                        sent_at,
-                        start,
-                        self.generators.clock.monotonic(),
-                    )?;
-                    watch.live.adopt(&*self.queue, run, anchor.id)?;
-                    return Ok(Phase::Revise(watch));
-                }
-                None
+                        &events,
+                        anchor.id,
+                        &live.workspace,
+                        "revise request",
+                        &format!("revise-{attempt}.txt"),
+                    )
+                    .then_some(sent_at);
+                let mut watch = ReviseWatch::new(
+                    run,
+                    live,
+                    attempt,
+                    Fix::Revise { reasons, concern },
+                    sent_at,
+                    start,
+                    self.generators.clock.monotonic(),
+                )?;
+                watch.live.adopt(&*self.queue, run, anchor.id)?;
+                Ok(Phase::Revise(watch))
             }
             // A conflict request with nothing after it waits for the live
             // session again, with the passed verdict before it.
-            event_kind::CONFLICT_PRECHECK if anchor.payload["requested"] == true => {
-                let passed = passed_before(&history, anchor.id);
-                if let Some(live) = session.clone()
-                    && let Some(verdict) = passed
-                    && session_alive(self, run.id())?
-                {
-                    let attempt = anchor.payload["attempt"].as_u64().unwrap_or(1) as usize;
-                    let sent_at = adopted_sent_at(&anchor.payload);
-                    let start = self
-                        .adopted_start(
-                            run,
-                            &events,
-                            anchor.id,
-                            &live.workspace,
-                            "conflict request",
-                            &format!("conflict-{attempt}.txt"),
-                        )
-                        .then_some(sent_at);
-                    let mut watch = ReviseWatch::new(
+            ReviewResumption::Conflict {
+                attempt,
+                sent_at,
+                verdict,
+            } => {
+                let Some(live) = session else {
+                    return self.start_review(run, None);
+                };
+                let start = self
+                    .adopted_start(
                         run,
-                        live,
-                        attempt,
-                        Fix::Conflict(verdict),
-                        sent_at,
-                        start,
-                        self.generators.clock.monotonic(),
-                    )?;
-                    watch.live.adopt(&*self.queue, run, anchor.id)?;
-                    return Ok(Phase::Revise(watch));
-                }
-                None
+                        &events,
+                        anchor.id,
+                        &live.workspace,
+                        "conflict request",
+                        &format!("conflict-{attempt}.txt"),
+                    )
+                    .then_some(sent_at);
+                let mut watch = ReviseWatch::new(
+                    run,
+                    live,
+                    attempt,
+                    Fix::Conflict(verdict),
+                    sent_at,
+                    start,
+                    self.generators.clock.monotonic(),
+                )?;
+                watch.live.adopt(&*self.queue, run, anchor.id)?;
+                Ok(Phase::Revise(watch))
             }
-            // A revise request recorded but not sent asks a person, as it
-            // did before the supervisor was replaced.
-            event_kind::REVISE_UNSENT => {
-                // A revise the review's subagents decided (ADR-t1453-1
-                // decision 7) is asked with their reasons, as the
-                // supervisor that could not send it asked.
-                let review = history.last_before(anchor.id, event_kind::REVIEW_FINISHED);
-                if let Some(review) = review.filter(|r| agents_decided(&r.payload))
-                    && let Ok(verdict) = verdict_of(review)
-                {
-                    let why = anchor.payload["error"]
-                        .as_str()
-                        .unwrap_or("the revise request could not be sent");
-                    // The request was recorded, so the round had a revise
-                    // left when the review was decided.
-                    Some(agents_ask(run, review, verdict, true, why.to_owned()))
-                } else {
-                    passed_before(&history, anchor.id).map(|verdict| AfterExit::Ask {
-                        why: anchor.payload["error"].as_str().map(str::to_owned),
-                        decision: verdict.verdict,
-                        recommendation: verdict.recommendation,
-                        confidence: verdict.confidence,
-                        reason_category: verdict.reason_category,
-                        reasons: verdict.reasons,
-                        summary: verdict.summary,
-                        requested_by: review_job_before(run, &history, anchor.id),
-                        sent_back: None,
-                    })
+            // A concern is decided again from its verdict (ADR-t451-1
+            // decision 3).
+            ReviewResumption::Concern(verdict) => {
+                match self.adopted_concern(run, session.clone(), &history, anchor, verdict)? {
+                    Ok(phase) => Ok(phase),
+                    Err(then) => self.exit_after(run, session, &events, anchor, then),
                 }
             }
-            event_kind::REVIEW_FINISHED => {
-                match verdict_of(anchor) {
-                    // A review whose subagents sent the run further than
-                    // its verdict, or carried reasons of their own
-                    // (ADR-t1453-1 decision 7), asks a person: an adopter
-                    // does not apply the verdict alone.
-                    Ok(verdict) if agents_decided(&anchor.payload) => {
-                        let revise_left = decide_revise(&history) != ReviseDecision::Ask;
-                        let why = format!(
-                            "the review's subagents sent the run to {} and the supervisor was replaced before it was applied",
-                            anchor.payload["route"]["destination"]
-                                .as_str()
-                                .unwrap_or("a person")
-                        );
-                        Some(agents_ask(run, anchor, verdict, revise_left, why))
-                    }
-                    // A concern is decided again from its verdict
-                    // (ADR-t451-1 decision 3).
-                    Ok(verdict) if verdict.verdict == ReviewDecision::Concern => {
-                        match self.adopted_concern(
-                            run,
-                            session.clone(),
-                            &history,
-                            anchor,
-                            verdict,
-                        )? {
-                            Ok(phase) => return Ok(phase),
-                            Err(then) => Some(then),
-                        }
-                    }
-                    // A pass not yet followed by its /exit is prechecked
-                    // (again): main may have moved.
-                    Ok(verdict)
-                        if verdict.verdict == ReviewDecision::Pass
-                            && !history.has_after(anchor.id, event_kind::EXIT_REQUESTED) =>
-                    {
-                        return self.adopted_precheck(
-                            run,
-                            session,
-                            verdict,
-                            review_job(run, anchor),
-                        );
-                    }
-                    Ok(verdict) if verdict.verdict == ReviewDecision::Pass => Some(AfterExit::Land),
-                    Ok(verdict) => Some(AfterExit::Ask {
-                        why: (verdict.verdict == ReviewDecision::Revise).then(|| {
-                            "the revise could not go on when the supervisor was replaced".to_owned()
-                        }),
-                        decision: verdict.verdict,
-                        recommendation: None,
-                        confidence: None,
-                        reason_category: None,
-                        reasons: verdict.reasons,
-                        summary: verdict.summary,
-                        requested_by: review_job(run, anchor),
-                        sent_back: None,
-                    }),
-                    Err(_) => None,
-                }
+            ReviewResumption::Precheck { verdict, job } => {
+                self.adopted_precheck(run, session, verdict, job)
             }
-            // A precheck that sent nothing decided to land (no session to
-            // ask) or to ask a person (past the limit); before its /exit it
-            // is prechecked again, as main may have moved.
-            event_kind::CONFLICT_PRECHECK => match passed_before(&history, anchor.id) {
-                Some(verdict) if !history.has_after(anchor.id, event_kind::EXIT_REQUESTED) => {
-                    let job = review_job_before(run, &history, anchor.id);
-                    return self.adopted_precheck(run, session, verdict, job);
-                }
-                Some(verdict) => Some(match anchor.payload["asked"].as_str() {
-                    Some(why) => Fix::Conflict(verdict).ask(
-                        String::new(),
-                        why.to_owned(),
-                        review_job_before(run, &history, anchor.id),
-                    ),
-                    None => AfterExit::Land,
-                }),
-                None => None,
-            },
-            event_kind::VALIDATION_FINISHED
-                if events
-                    .iter()
-                    .any(|e| e.kind == event_kind::INTEGRATION_APPROVED) =>
-            {
-                Some(AfterExit::Land)
-            }
-            // A rebased run a landing recheck resumed waits for the answer
-            // to its approve_landing ask, not a review (ADR-0068 decision 4).
-            event_kind::VALIDATION_FINISHED
-                if crate::domain::resume::parked_by_recheck(&events)
-                    && self
-                        .queue
-                        .has_unclosed_ask(run.id(), AskKind::ApproveLanding)? =>
-            {
-                Some(AfterExit::Rest { close: true })
-            }
-            _ => None,
-        };
-        let Some(mut then) = then else {
-            return self.start_review(run, session);
-        };
+            ReviewResumption::Exit(then) => self.exit_after(run, session, &events, anchor, then),
+        }
+    }
+    /// The exit of an adopted run under review, then `then`.
+    fn exit_after(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        events: &[RunEvent],
+        anchor: &RunEvent,
+        mut then: AfterExit,
+    ) -> Result<Phase> {
         // The ask was opened before the supervisor died, after this anchor:
         // the run waits for it (open or answered) rather than asking again,
         // which would close it as stale and notify the inbox twice (task 425).
         if matches!(then, AfterExit::Ask { .. })
-            && let Some(ask) = self.unclosed_landing_ask_after(&events, anchor)?
+            && let Some(ask) = self.unclosed_landing_ask_after(events, anchor)?
         {
             info!(run_id = %run.id(), ask_id = %ask.id, "run {} waits for a person in ask {}, opened before the supervisor stopped; it is not asked again", run.id(), ask.id);
             then = AfterExit::Rest { close: true };
         }
-        let after = |kind: &str| events.iter().any(|e| e.id > anchor.id && e.kind == kind);
         let mut watch = ExitWatch::new(session, then);
         // Never a second exit request after the anchor (task 959).
-        watch.requested = after(event_kind::EXIT_REQUESTED);
+        watch.requested = exit_requested_after(events, anchor.id);
         Ok(Phase::Exiting(watch))
     }
     /// The failed review whose `approve_landing` ask was opened before the
@@ -538,7 +438,7 @@ impl Supervisor<'_> {
         };
         let after = |kind: &str| events.iter().any(|e| e.id > started.id && e.kind == kind);
         if !after(event_kind::REVIEW_FAILED) {
-            let attempt = started.payload["attempt"].as_u64().unwrap_or(1);
+            let attempt = restore::<AttemptOf>(&started.payload).attempt.unwrap_or(1);
             // The failure is in the ask's first line (`open_failed_review_ask`),
             // and a `send_back` names it to the resumed session.
             let error = ask
@@ -578,16 +478,10 @@ impl Supervisor<'_> {
         events: &[crate::domain::RunEvent],
         anchor: &crate::domain::RunEvent,
     ) -> Result<Option<crate::domain::Ask>> {
-        let opened = events.iter().rev().find(|e| {
-            e.id > anchor.id
-                && e.kind == event_kind::ASK_OPENED
-                && e.payload["kind"] == AskKind::ApproveLanding.as_str()
-                && e.payload["asked_by"] == "supervisor"
-        });
-        let Some(ask_id) = opened.and_then(|e| e.payload["ask_id"].as_i64()) else {
+        let Some(ask_id) = landing_ask_after(events, anchor.id) else {
             return Ok(None);
         };
-        let ask = self.queue.read_ask(AskId::new(ask_id))?;
+        let ask = self.queue.read_ask(ask_id)?;
         Ok(ask.closed_at.is_none().then_some(ask))
     }
     /// Whether a lease no longer has a working process behind it: its pid
@@ -662,11 +556,7 @@ impl Supervisor<'_> {
                 return false;
             }
         };
-        let after = events
-            .iter()
-            .filter(|e| e.id < anchor && e.kind == event_kind::TURN_REQUESTED)
-            .filter_map(|e| e.payload["seq"].as_u64())
-            .next_back();
+        let after = last_request_before(events, anchor);
         let requests = match listed_requests(&*self.files, run_dir) {
             Ok(requests) => requests,
             Err(error) => {
@@ -720,15 +610,15 @@ impl Supervisor<'_> {
         // A send-back one of the review's subagents decided while the
         // verdict's own concern went lighter was no decision of that
         // concern (ADR-t1453-1 decision 7): nothing to record.
-        if review.payload["verdict"] != ReviewDecision::Concern.as_str()
-            || (agents_decided(&review.payload) && !parent_decided(&review.payload))
+        let finished: ReviewFinished = restore(&review.payload);
+        if finished.verdict != Some(ReviewDecision::Concern.as_str())
+            || (finished.agents_decided() && !finished.parent_decided())
             || history.has_after(review.id, event_kind::CONCERN_DECIDED)
             || !history.has_after(review.id, event_kind::REVISE_REQUESTED)
         {
             return Ok(false);
         }
-        let (Ok(verdict), Some(attempt)) = (verdict_of(review), review.payload["attempt"].as_u64())
-        else {
+        let (Ok(verdict), Some(attempt)) = (verdict_of(review), finished.attempt) else {
             return Ok(false);
         };
         let escalated = history
@@ -756,7 +646,7 @@ impl Supervisor<'_> {
             ConcernDecision::Ask(why) => Some(why),
         };
         if !history.has_after(anchor.id, event_kind::CONCERN_DECIDED)
-            && let Some(attempt) = anchor.payload["attempt"].as_u64()
+            && let Some(attempt) = restore::<AttemptOf>(&anchor.payload).attempt
         {
             let attempt = attempt as usize;
             self.for_job(&ActorContext::review_job(run.id(), attempt as u64), |sv| {
@@ -809,8 +699,8 @@ impl Supervisor<'_> {
 /// when the payload has no attempt, so no job is named rather than a
 /// wrong one.
 fn review_job(run: &TaskRun, event: &RunEvent) -> Option<ActorContext> {
-    event.payload["attempt"]
-        .as_u64()
+    restore::<AttemptOf>(&event.payload)
+        .attempt
         .map(|attempt| ActorContext::review_job(run.id(), attempt))
 }
 
@@ -837,21 +727,7 @@ pub(super) fn passed_before(history: &RunHistory<'_>, before: EventId) -> Option
 /// 7) was decided by one of its subagents: one went further than landing,
 /// to where the review went.
 fn agents_decided(payload: &Value) -> bool {
-    let route = &payload["route"];
-    let Some(destination) = route["destination"].as_str() else {
-        return false;
-    };
-    destination != "land"
-        && route["agents"]
-            .as_array()
-            .is_some_and(|agents| agents.iter().any(|a| a["destination"] == destination))
-}
-
-/// Whether the verdict's own judgment went where the route a
-/// `review_finished` recorded went (ADR-t1453-1 decision 7).
-fn parent_decided(payload: &Value) -> bool {
-    let route = &payload["route"];
-    route["parent"].is_string() && route["parent"] == route["destination"]
+    restore::<ReviewFinished>(payload).agents_decided()
 }
 
 /// The `approve_landing` ask an adopter opens for `review`, a
@@ -888,12 +764,12 @@ fn agents_ask(
 /// the request, or backfilled) says it was applied (task 1392).
 fn sent_back_concern(history: &RunHistory<'_>, anchor: &RunEvent) -> Option<SentBackConcern> {
     let review = history.last_before(anchor.id, event_kind::REVIEW_FINISHED)?;
-    let attempt = review.payload["attempt"].as_u64()?;
+    let attempt = restore::<AttemptOf>(&review.payload).attempt?;
     let applied = history.events().iter().any(|event| {
-        event.id > review.id
-            && event.kind == event_kind::CONCERN_DECIDED
-            && event.payload["attempt"].as_u64() == Some(attempt)
-            && event.payload["applied"].as_bool() == Some(true)
+        event.id > review.id && event.kind == event_kind::CONCERN_DECIDED && {
+            let decided: ConcernDecided = restore(&event.payload);
+            decided.attempt == Some(attempt) && decided.applied == Some(true)
+        }
     });
     if !applied {
         return None;
@@ -904,20 +780,284 @@ fn sent_back_concern(history: &RunHistory<'_>, anchor: &RunEvent) -> Option<Sent
 /// The verdict a `review_finished` recorded, with a concern's
 /// recommendation, confidence and reason when it gave them.
 fn verdict_of(event: &RunEvent) -> serde_json::Result<ReviewVerdict> {
-    let mut verdict = json!({
-        "verdict": event.payload["verdict"],
-        "reasons": event.payload["reasons"],
-        "summary": event.payload["summary"],
-        "recommendation": event.payload["recommendation"],
-        "confidence": event.payload["confidence"],
-        "reason_category": event.payload["reason_category"],
-    });
-    // The required subagents' results, recorded only when the review had
-    // them (ADR-t1453-1).
-    if let Some(agents) = event.payload.get("agents").filter(|a| a.is_array()) {
-        verdict["agents"] = agents.clone();
+    review_verdict(&event.payload)
+}
+
+/// What an adopter saw of a run's wrapper process.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WrapperSeen {
+    /// It reported its exit.
+    exited: bool,
+    /// Its process lives ([`Supervisor::wrapper_lives`]); false once it
+    /// reported its exit.
+    lives: bool,
+    heartbeat_age_secs: i64,
+}
+
+/// Whether the wrapper that has not reported its exit is alive: its
+/// process lives and its heartbeat is within the lease TTL
+/// ([`HEARTBEAT_TIMEOUT_SECS`]). `None` when there is no wrapper or it
+/// reported its exit.
+fn wrapper_alive(wrapper: Option<WrapperSeen>) -> Option<bool> {
+    wrapper.and_then(|wrapper| {
+        (!wrapper.exited)
+            .then_some(wrapper.lives && wrapper.heartbeat_age_secs <= HEARTBEAT_TIMEOUT_SECS)
+    })
+}
+
+/// What decides whether a run whose lease went stale is adopted
+/// ([`adoptable`]).
+#[derive(Debug, Clone, Copy)]
+struct AdoptionSeen {
+    status: RunStatus,
+    wrapper: Option<WrapperSeen>,
+    /// Its last resume event is `resume_skipped`: it was moved on without
+    /// a session, and no resume opened one since.
+    skipped_resume: bool,
+    /// Its last resume event is `resume_started` with the workspace of its
+    /// attempt recorded ([`resume_in_progress`]).
+    resume_in_progress: bool,
+}
+
+/// [`Supervisor::adoptable`] of what the adopter saw.
+fn adoptable(seen: &AdoptionSeen) -> bool {
+    match seen.status {
+        RunStatus::NeedsSession => {
+            seen.wrapper.is_some_and(|w| !w.exited && w.lives) && seen.resume_in_progress
+        }
+        RunStatus::AwaitingIntegration => true,
+        RunStatus::Running | RunStatus::Validating => {
+            seen.skipped_resume
+                || (seen.wrapper.is_some() && wrapper_alive(seen.wrapper) != Some(false))
+        }
+        _ => false,
     }
-    serde_json::from_value(verdict)
+}
+
+/// How an adopted `awaiting_integration` run under review goes on, from
+/// its history alone ([`review_resumption`]).
+enum ReviewResumption {
+    /// Reviewed from the start, the review being a function of the
+    /// receipt and the commit.
+    Review,
+    /// The revise request `anchor` with nothing after it waits for the live
+    /// session again.
+    Revise {
+        attempt: usize,
+        sent_at: SystemTime,
+        reasons: Vec<String>,
+        concern: Option<SentBackConcern>,
+    },
+    /// The conflict request `anchor` with nothing after it waits for the
+    /// live session again, with the passed verdict before it.
+    Conflict {
+        attempt: usize,
+        sent_at: SystemTime,
+        verdict: ReviewVerdict,
+    },
+    /// A `concern` decided again from its verdict.
+    Concern(ReviewVerdict),
+    /// A pass not yet followed by its exit request is prechecked again:
+    /// main may have moved. At the request of the review job that passed
+    /// it, when its attempt is recorded.
+    Precheck {
+        verdict: ReviewVerdict,
+        job: Option<ActorContext>,
+    },
+    /// The session's exit, then this.
+    Exit(AfterExit),
+}
+
+/// [`Supervisor::adopt_review`]'s choice for `anchor`, the run's last
+/// review event ([`crate::domain::review_anchor`]), given whether its
+/// session lives (`live`) and whether an `approve_landing` ask of the run
+/// is open (`landing_ask_open`): a revise or conflict request waits for the
+/// live session again, and is reviewed again without one; a `revise_unsent`
+/// asks a person; a verdict a review's subagents decided asks a person; a
+/// concern is decided again; a pass is prechecked again before its exit
+/// request and lands after it; a precheck that sent nothing lands or asks;
+/// an approved run lands; a run a landing recheck resumed waits for its
+/// ask; anything else is reviewed from the start.
+fn review_resumption(
+    run: &TaskRun,
+    history: &RunHistory<'_>,
+    anchor: &RunEvent,
+    live: bool,
+    landing_ask_open: bool,
+) -> ReviewResumption {
+    let exited = history.has_after(anchor.id, event_kind::EXIT_REQUESTED);
+    let then = match anchor.kind.as_str() {
+        event_kind::REVISE_REQUESTED => {
+            if !live {
+                return ReviewResumption::Review;
+            }
+            let request: ReviseRequested = restore(&anchor.payload);
+            return ReviewResumption::Revise {
+                attempt: request.attempt.unwrap_or(1) as usize,
+                sent_at: adopted_sent_at(&anchor.payload),
+                reasons: request.reasons.unwrap_or_default(),
+                concern: sent_back_concern(history, anchor),
+            };
+        }
+        event_kind::CONFLICT_PRECHECK
+            if restore::<ConflictPrecheck>(&anchor.payload).requested == Some(true) =>
+        {
+            return match passed_before(history, anchor.id) {
+                Some(verdict) if live => ReviewResumption::Conflict {
+                    attempt: restore::<ConflictPrecheck>(&anchor.payload)
+                        .attempt
+                        .unwrap_or(1) as usize,
+                    sent_at: adopted_sent_at(&anchor.payload),
+                    verdict,
+                },
+                _ => ReviewResumption::Review,
+            };
+        }
+        // A revise request recorded but not sent asks a person, as it
+        // did before the supervisor was replaced.
+        event_kind::REVISE_UNSENT => {
+            let unsent: ReviseUnsent = restore(&anchor.payload);
+            // A revise the review's subagents decided (ADR-t1453-1
+            // decision 7) is asked with their reasons, as the
+            // supervisor that could not send it asked.
+            let review = history.last_before(anchor.id, event_kind::REVIEW_FINISHED);
+            if let Some(review) = review.filter(|r| agents_decided(&r.payload))
+                && let Ok(verdict) = verdict_of(review)
+            {
+                let why = unsent
+                    .error
+                    .unwrap_or("the revise request could not be sent");
+                // The request was recorded, so the round had a revise
+                // left when the review was decided.
+                Some(agents_ask(run, review, verdict, true, why.to_owned()))
+            } else {
+                passed_before(history, anchor.id).map(|verdict| AfterExit::Ask {
+                    why: unsent.error.map(str::to_owned),
+                    decision: verdict.verdict,
+                    recommendation: verdict.recommendation,
+                    confidence: verdict.confidence,
+                    reason_category: verdict.reason_category,
+                    reasons: verdict.reasons,
+                    summary: verdict.summary,
+                    requested_by: review_job_before(run, history, anchor.id),
+                    sent_back: None,
+                })
+            }
+        }
+        event_kind::REVIEW_FINISHED => {
+            let finished: ReviewFinished = restore(&anchor.payload);
+            match verdict_of(anchor) {
+                // A review whose subagents sent the run further than
+                // its verdict, or carried reasons of their own
+                // (ADR-t1453-1 decision 7), asks a person: an adopter
+                // does not apply the verdict alone.
+                Ok(verdict) if finished.agents_decided() => {
+                    let revise_left = decide_revise(history) != ReviseDecision::Ask;
+                    let why = format!(
+                        "the review's subagents sent the run to {} and the supervisor was replaced before it was applied",
+                        finished.destination().unwrap_or("a person")
+                    );
+                    Some(agents_ask(run, anchor, verdict, revise_left, why))
+                }
+                Ok(verdict) if verdict.verdict == ReviewDecision::Concern => {
+                    return ReviewResumption::Concern(verdict);
+                }
+                // A pass not yet followed by its exit request is
+                // prechecked (again): main may have moved.
+                Ok(verdict) if verdict.verdict == ReviewDecision::Pass && !exited => {
+                    return ReviewResumption::Precheck {
+                        verdict,
+                        job: review_job(run, anchor),
+                    };
+                }
+                Ok(verdict) if verdict.verdict == ReviewDecision::Pass => Some(AfterExit::Land),
+                Ok(verdict) => Some(AfterExit::Ask {
+                    why: (verdict.verdict == ReviewDecision::Revise).then(|| {
+                        "the revise could not go on when the supervisor was replaced".to_owned()
+                    }),
+                    decision: verdict.verdict,
+                    recommendation: None,
+                    confidence: None,
+                    reason_category: None,
+                    reasons: verdict.reasons,
+                    summary: verdict.summary,
+                    requested_by: review_job(run, anchor),
+                    sent_back: None,
+                }),
+                Err(_) => None,
+            }
+        }
+        // A precheck that sent nothing decided to land (no session to
+        // ask) or to ask a person (past the limit); before its exit request
+        // it is prechecked again, as main may have moved.
+        event_kind::CONFLICT_PRECHECK => match passed_before(history, anchor.id) {
+            Some(verdict) if !exited => {
+                return ReviewResumption::Precheck {
+                    verdict,
+                    job: review_job_before(run, history, anchor.id),
+                };
+            }
+            Some(verdict) => Some(match restore::<ConflictPrecheck>(&anchor.payload).asked {
+                Some(why) => Fix::Conflict(verdict).ask(
+                    String::new(),
+                    why.to_owned(),
+                    review_job_before(run, history, anchor.id),
+                ),
+                None => AfterExit::Land,
+            }),
+            None => None,
+        },
+        event_kind::VALIDATION_FINISHED
+            if history
+                .events()
+                .iter()
+                .any(|e| e.kind == event_kind::INTEGRATION_APPROVED) =>
+        {
+            Some(AfterExit::Land)
+        }
+        // A rebased run a landing recheck resumed waits for the answer
+        // to its approve_landing ask, not a review (ADR-0068 decision 4).
+        event_kind::VALIDATION_FINISHED
+            if crate::domain::resume::parked_by_recheck(history.events()) && landing_ask_open =>
+        {
+            Some(AfterExit::Rest { close: true })
+        }
+        _ => None,
+    };
+    then.map_or(ReviewResumption::Review, ReviewResumption::Exit)
+}
+
+/// Whether an exit request was recorded after event `anchor`: an adopter
+/// never sends a second one (task 959).
+fn exit_requested_after(events: &[RunEvent], anchor: EventId) -> bool {
+    events
+        .iter()
+        .any(|e| e.id > anchor && e.kind == event_kind::EXIT_REQUESTED)
+}
+
+/// The last `approve_landing` ask the supervisor opened after event
+/// `anchor`.
+fn landing_ask_after(events: &[RunEvent], anchor: EventId) -> Option<AskId> {
+    events
+        .iter()
+        .rev()
+        .filter(|e| e.id > anchor && e.kind == event_kind::ASK_OPENED)
+        .map(|e| restore::<AskOpened>(&e.payload))
+        .find(|opened| {
+            opened.kind == Some(AskKind::ApproveLanding.as_str())
+                && opened.asked_by == Some(SessionRole::Supervisor.as_str())
+        })
+        .and_then(|opened| opened.ask_id)
+        .map(AskId::new)
+}
+
+/// The number of the last turn request recorded before event `anchor`.
+fn last_request_before(events: &[RunEvent], anchor: EventId) -> Option<u64> {
+    events
+        .iter()
+        .filter(|e| e.id < anchor && e.kind == event_kind::TURN_REQUESTED)
+        .filter_map(|e| restore::<TurnRequested>(&e.payload).seq)
+        .next_back()
 }
 
 #[cfg(test)]
@@ -966,5 +1106,364 @@ mod tests {
         let route = with.route(true);
         let combined = landing::combined_verdict(&with, &route, false);
         assert_eq!(combined.reasons, ["tests: add a test"]);
+    }
+
+    fn wrapper(exited: bool, lives: bool, heartbeat_age_secs: i64) -> Option<WrapperSeen> {
+        Some(WrapperSeen {
+            exited,
+            lives,
+            heartbeat_age_secs,
+        })
+    }
+
+    fn seen(status: RunStatus, wrapper: Option<WrapperSeen>) -> AdoptionSeen {
+        AdoptionSeen {
+            status,
+            wrapper,
+            skipped_resume: false,
+            resume_in_progress: false,
+        }
+    }
+
+    /// Task 1558, with the cases of
+    /// `runtime_adopt::fresh_leases_dead_wrappers_early_runs_leaseless_and_integrating_runs_are_not_adopted`:
+    /// a `running` or `validating` run is adopted while its wrapper lives
+    /// with a heartbeat within the TTL (not past it) or has reported its
+    /// exit, or when it was moved on by `resume_skipped`; an
+    /// `awaiting_integration` run always; a `needs_session` run only in a
+    /// resume whose wrapper lives; `claimed`, `starting` and `integrating`
+    /// never.
+    #[test]
+    fn which_runs_with_a_stale_lease_are_adopted() {
+        let at_ttl = HEARTBEAT_TIMEOUT_SECS;
+        for status in [RunStatus::Running, RunStatus::Validating] {
+            assert!(adoptable(&seen(status, wrapper(false, true, at_ttl))));
+            assert!(!adoptable(&seen(status, wrapper(false, true, at_ttl + 1))));
+            assert!(!adoptable(&seen(status, wrapper(false, false, 0))));
+            assert!(adoptable(&seen(status, wrapper(true, false, at_ttl + 100))));
+            assert!(!adoptable(&seen(status, None)));
+            assert!(adoptable(&AdoptionSeen {
+                skipped_resume: true,
+                ..seen(status, None)
+            }));
+        }
+        assert!(adoptable(&seen(RunStatus::AwaitingIntegration, None)));
+        let resumed = AdoptionSeen {
+            resume_in_progress: true,
+            ..seen(RunStatus::NeedsSession, wrapper(false, true, at_ttl + 100))
+        };
+        assert!(adoptable(&resumed));
+        assert!(!adoptable(&AdoptionSeen {
+            resume_in_progress: false,
+            ..resumed
+        }));
+        assert!(!adoptable(&AdoptionSeen {
+            wrapper: wrapper(true, false, 0),
+            ..resumed
+        }));
+        for status in [
+            RunStatus::Claimed,
+            RunStatus::Starting,
+            RunStatus::Integrating,
+        ] {
+            assert!(!adoptable(&AdoptionSeen {
+                skipped_resume: true,
+                resume_in_progress: true,
+                ..seen(status, wrapper(false, true, 0))
+            }));
+        }
+        assert_eq!(wrapper_alive(None), None);
+        assert_eq!(wrapper_alive(wrapper(true, false, 0)), None);
+        assert_eq!(wrapper_alive(wrapper(false, true, at_ttl)), Some(true));
+    }
+
+    /// Task 1558 (the rule `runtime_adopt::dead_supervisor_pid_with_a_fresh_heartbeat_is_adopted`
+    /// checks through a real process): a lease whose supervisor's pid is dead is stale however fresh its
+    /// heartbeat; a live one only past the TTL.
+    #[test]
+    fn a_lease_is_stale_by_its_dead_pid_or_past_its_heartbeat_ttl() {
+        assert!(heartbeat_stale(false, 0));
+        assert!(!heartbeat_stale(true, HEARTBEAT_TIMEOUT_SECS));
+        assert!(heartbeat_stale(true, HEARTBEAT_TIMEOUT_SECS + 1));
+    }
+
+    fn event(id: i64, kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: "2026-09-30T00:00:00.000Z".to_owned(),
+            actor: None,
+        }
+    }
+
+    fn pass(id: i64) -> RunEvent {
+        event(
+            id,
+            event_kind::REVIEW_FINISHED,
+            json!({"verdict": "pass", "reasons": [], "summary": "ok", "attempt": 1}),
+        )
+    }
+
+    /// The resumption of `events`, whose last is the anchor.
+    fn resumption(events: &[RunEvent], live: bool, landing_ask_open: bool) -> ReviewResumption {
+        let run = super::super::recovery::test_run(RunStatus::AwaitingIntegration, None);
+        let history = RunHistory::from_events(events);
+        let anchor = crate::domain::review_anchor(events).unwrap();
+        review_resumption(&run, &history, anchor, live, landing_ask_open)
+    }
+
+    /// Task 1558, moved from
+    /// `runtime_adopt::an_adopter_does_not_repeat_the_exit_request_recorded_after_a_passed_review`:
+    /// a pass not followed by its exit request is prechecked again at the
+    /// review job's request; one followed by it lands, with the exit
+    /// request taken as sent. A pass recorded without its attempt names no
+    /// job; one without its reasons (not a verdict) is reviewed again.
+    #[test]
+    fn an_adopted_pass_is_prechecked_before_its_exit_request_and_lands_after() {
+        let events = [
+            event(1, event_kind::REVIEW_STARTED, json!({"attempt": 1})),
+            pass(2),
+        ];
+        assert!(matches!(
+            resumption(&events, true, false),
+            ReviewResumption::Precheck { job: Some(_), .. }
+        ));
+        let exited = [
+            events[0].clone(),
+            events[1].clone(),
+            event(3, event_kind::EXIT_REQUESTED, json!({})),
+        ];
+        assert!(matches!(
+            resumption(&exited, false, false),
+            ReviewResumption::Exit(AfterExit::Land)
+        ));
+        assert!(exit_requested_after(&exited, EventId::new(2)));
+        assert!(!exit_requested_after(&exited, EventId::new(3)));
+        let unnumbered = [event(
+            1,
+            event_kind::REVIEW_FINISHED,
+            json!({"verdict": "pass", "reasons": [], "summary": "ok", "attempt": "1"}),
+        )];
+        assert!(matches!(
+            resumption(&unnumbered, true, false),
+            ReviewResumption::Precheck { job: None, .. }
+        ));
+        let broken = [event(
+            1,
+            event_kind::REVIEW_FINISHED,
+            json!({"verdict": "pass"}),
+        )];
+        assert!(matches!(
+            resumption(&broken, true, false),
+            ReviewResumption::Review
+        ));
+        let concern = [event(
+            1,
+            event_kind::REVIEW_FINISHED,
+            json!({"verdict": "concern", "reasons": ["r"], "summary": "s", "attempt": 1}),
+        )];
+        assert!(matches!(
+            resumption(&concern, true, false),
+            ReviewResumption::Concern(_)
+        ));
+        let revise = [event(
+            1,
+            event_kind::REVIEW_FINISHED,
+            json!({"verdict": "revise", "reasons": ["r"], "summary": "s", "attempt": 1}),
+        )];
+        assert!(matches!(
+            resumption(&revise, true, false),
+            ReviewResumption::Exit(AfterExit::Ask { why: Some(_), .. })
+        ));
+        // A route one of its subagents decided asks a person.
+        let routed = [event(
+            1,
+            event_kind::REVIEW_FINISHED,
+            json!({"verdict": "pass", "reasons": [], "summary": "s", "attempt": 1,
+                "route": {"destination": "send_back", "agents": [{"destination": "send_back"}]}}),
+        )];
+        assert!(matches!(
+            resumption(&routed, true, false),
+            ReviewResumption::Exit(AfterExit::Ask { .. })
+        ));
+    }
+
+    /// Task 1558: a revise or conflict request with nothing after it waits
+    /// for the live session again (its attempt 1 when it is not recorded,
+    /// its reasons none when they are not texts), and is reviewed again
+    /// without one; a precheck that sent nothing lands or asks after its
+    /// exit request.
+    #[test]
+    fn an_adopted_request_waits_for_its_live_session() {
+        let revise = [event(
+            1,
+            event_kind::REVISE_REQUESTED,
+            json!({"attempt": 2, "reasons": ["fix it"], "sent_at": 1000.25}),
+        )];
+        match resumption(&revise, true, false) {
+            ReviewResumption::Revise {
+                attempt, reasons, ..
+            } => {
+                assert_eq!(attempt, 2);
+                assert_eq!(reasons, ["fix it"]);
+            }
+            _ => panic!("not a revise"),
+        }
+        assert!(matches!(
+            resumption(&revise, false, false),
+            ReviewResumption::Review
+        ));
+        let old = [event(
+            1,
+            event_kind::REVISE_REQUESTED,
+            json!({"reasons": [1]}),
+        )];
+        match resumption(&old, true, false) {
+            ReviewResumption::Revise {
+                attempt, reasons, ..
+            } => {
+                assert_eq!(attempt, 1);
+                assert!(reasons.is_empty());
+            }
+            _ => panic!("not a revise"),
+        }
+        let conflict = [
+            pass(1),
+            event(
+                2,
+                event_kind::CONFLICT_PRECHECK,
+                json!({"requested": true, "attempt": 3}),
+            ),
+        ];
+        assert!(matches!(
+            resumption(&conflict, true, false),
+            ReviewResumption::Conflict { attempt: 3, .. }
+        ));
+        assert!(matches!(
+            resumption(&conflict, false, false),
+            ReviewResumption::Review
+        ));
+        // `requested` of another type is a precheck that sent nothing.
+        let unsent = [
+            pass(1),
+            event(
+                2,
+                event_kind::CONFLICT_PRECHECK,
+                json!({"requested": "true"}),
+            ),
+        ];
+        assert!(matches!(
+            resumption(&unsent, true, false),
+            ReviewResumption::Precheck { .. }
+        ));
+        let asked = [
+            pass(1),
+            event(
+                2,
+                event_kind::CONFLICT_PRECHECK,
+                json!({"asked": "past the limit"}),
+            ),
+            event(3, event_kind::EXIT_REQUESTED, json!({})),
+        ];
+        assert!(matches!(
+            resumption(&asked[..2], true, false),
+            ReviewResumption::Precheck { .. }
+        ));
+        assert!(matches!(
+            resumption(&asked, true, false),
+            ReviewResumption::Exit(AfterExit::Ask { .. })
+        ));
+        let landed = [
+            pass(1),
+            event(2, event_kind::CONFLICT_PRECHECK, json!({})),
+            event(3, event_kind::EXIT_REQUESTED, json!({})),
+        ];
+        assert!(matches!(
+            resumption(&landed, true, false),
+            ReviewResumption::Exit(AfterExit::Land)
+        ));
+        // A revise recorded but not sent asks, with its error when it is a
+        // text.
+        let unsent = [
+            pass(1),
+            event(2, event_kind::REVISE_UNSENT, json!({"error": "no session"})),
+        ];
+        match resumption(&unsent, true, false) {
+            ReviewResumption::Exit(AfterExit::Ask { why, .. }) => {
+                assert_eq!(why.as_deref(), Some("no session"));
+            }
+            _ => panic!("not an ask"),
+        }
+        let mistyped = [
+            pass(1),
+            event(2, event_kind::REVISE_UNSENT, json!({"error": 3})),
+        ];
+        assert!(matches!(
+            resumption(&mistyped, true, false),
+            ReviewResumption::Exit(AfterExit::Ask { why: None, .. })
+        ));
+    }
+
+    /// Task 1558: the `approve_landing` ask an adopter waits for is the
+    /// last one the supervisor opened after the anchor, named by an
+    /// integer `ask_id`; the turn request it looks after is the last one
+    /// numbered before the anchor.
+    #[test]
+    fn an_adopter_finds_the_landing_ask_and_the_request_of_its_anchor() {
+        let opened = |id, kind: &str, by: &str, ask: Value| {
+            event(
+                id,
+                event_kind::ASK_OPENED,
+                json!({"kind": kind, "asked_by": by, "ask_id": ask}),
+            )
+        };
+        let events = [
+            opened(1, "approve_landing", "supervisor", json!(4)),
+            opened(3, "approve_landing", "supervisor", json!(5)),
+            opened(4, "approve_landing", "worker", json!(6)),
+            opened(5, "stalled", "supervisor", json!(7)),
+        ];
+        assert_eq!(
+            landing_ask_after(&events, EventId::new(2)),
+            Some(AskId::new(5))
+        );
+        assert_eq!(landing_ask_after(&events, EventId::new(3)), None);
+        let mistyped = [opened(3, "approve_landing", "supervisor", json!("5"))];
+        assert_eq!(landing_ask_after(&mistyped, EventId::new(2)), None);
+        let requests = [
+            event(1, event_kind::TURN_REQUESTED, json!({"seq": 2})),
+            event(2, event_kind::TURN_REQUESTED, json!({"seq": "3"})),
+            event(4, event_kind::TURN_REQUESTED, json!({"seq": 5})),
+        ];
+        assert_eq!(last_request_before(&requests, EventId::new(3)), Some(2));
+        assert_eq!(last_request_before(&requests, EventId::new(1)), None);
+    }
+
+    /// Task 1558: the verdict an adopter reads back is the domain's
+    /// [`review_verdict`]; the route's parent decided only when it is a
+    /// text and the route went there.
+    #[test]
+    fn the_route_of_a_recorded_review_is_read_leniently() {
+        let finished =
+            |route: Value| restore::<ReviewFinished>(&json!({"route": route})).parent_decided();
+        assert!(finished(json!({"destination": "ask", "parent": "ask"})));
+        assert!(!finished(json!({"destination": "ask", "parent": "land"})));
+        assert!(!finished(json!({"parent": "ask"})));
+        assert!(!finished(json!({"destination": 1, "parent": 1})));
+        assert!(!finished(json!("ask")));
+        assert!(!agents_decided(
+            &json!({"route": {"destination": "ask", "agents": ["ask", 3]}})
+        ));
+        // Arrays are no objects.
+        assert!(!agents_decided(
+            &json!({"route": ["send_back", null, [["send_back"]]]})
+        ));
+        assert!(!agents_decided(
+            &json!({"route": {"destination": "ask", "agents": [["ask"]]}})
+        ));
     }
 }

@@ -1052,15 +1052,13 @@ fn an_adopter_does_not_repeat_an_exit_request_recorded_while_the_session_worked(
 }
 
 /// A headless run its dead supervisor took to review: `awaiting_integration`
-/// with its validation and `review_started` recorded, then a passing
-/// `review_finished` (or, with `failed_ask`, the `approve_landing` ask of
-/// a review that gave no verdict), then `exit_requested` whose request the
-/// supervisor died before writing.
+/// with its validation and `review_started` recorded, then the
+/// `approve_landing` ask of a review that gave no verdict, then
+/// `exit_requested` whose request the supervisor died before writing.
 fn reviewed_run_whose_exit_was_recorded(
     repo: &Path,
     db: &Path,
     backend: &TestWorkspace,
-    failed_ask: bool,
 ) -> TaskRun {
     use dagq::domain::{AskReason, EventKind};
     let run = receipt_turn_under_dead_supervisor(repo, db, backend, "dead-supervisor");
@@ -1086,32 +1084,22 @@ fn reviewed_run_whose_exit_was_recorded(
     queue
         .record_runtime_event(run.id(), EventKind::ReviewStarted, json!({"attempt": 1}))
         .unwrap();
-    if failed_ask {
-        queue
-            .ask(NewAsk {
-                recommendation: None,
-                confidence: None,
-                topics: Vec::new(),
-                kind: AskKind::ApproveLanding,
-                task_id: None,
-                run_id: Some(run.id().clone()),
-                question: "The supervisor's headless review of run r (task 1) failed and gave no verdict (review 1): exit status 3".into(),
-                options: vec!["land".into(), "send_back".into(), "cancel".into()],
-                asked_by: "supervisor".into(),
-                reason_category: AskReason::Scope,
-                finding_id: None,
-                request_id: None,
-            })
-            .unwrap();
-    } else {
-        queue
-            .record_runtime_event(
-                run.id(),
-                EventKind::ReviewFinished,
-                json!({"verdict": "pass", "reasons": [], "summary": "meets the acceptance", "attempt": 1}),
-            )
-            .unwrap();
-    }
+    queue
+        .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            kind: AskKind::ApproveLanding,
+            task_id: None,
+            run_id: Some(run.id().clone()),
+            question: "The supervisor's headless review of run r (task 1) failed and gave no verdict (review 1): exit status 3".into(),
+            options: vec!["land".into(), "send_back".into(), "cancel".into()],
+            asked_by: "supervisor".into(),
+            reason_category: AskReason::Scope,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap();
     queue
         .record_runtime_event(
             run.id(),
@@ -1123,31 +1111,18 @@ fn reviewed_run_whose_exit_was_recorded(
     run
 }
 
-/// The exit request a passed run's supervisor recorded after its review,
-/// before it died, is never sent a second time by its adopter, which waits
-/// for the headless session to end and lands the run without reviewing it
-/// again. Moved from the interactive `runtime_review_adopt` test of the
-/// same judgment when the interactive worker went (task 1437).
-#[test]
-fn an_adopter_does_not_repeat_the_exit_request_recorded_after_a_passed_review() {
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
-    let run = reviewed_run_whose_exit_was_recorded(&repo, &db, &backend, false);
-    let (outcome, detail) = adopter_sends_no_second_exit(&db, &repo, &backend, &run);
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    assert_eq!(payloads(&detail, "review_started").len(), 1);
-}
-
-/// The same for the exit request of a review that failed and whose
-/// `approve_landing` ask was opened before the supervisor died: the run
-/// waits for the ask and is not reviewed again. Moved from the interactive
+/// The exit request of a review that failed and whose `approve_landing`
+/// ask was opened before the supervisor died is never sent a second time
+/// by its adopter: the run waits for the ask and is not reviewed again.
+/// The same choice after a passed review is
+/// `adopt::tests::an_adopted_pass_is_prechecked_before_its_exit_request_and_lands_after`'s. Moved from the interactive
 /// `runtime_review_adopt` test of the same judgment when the interactive
 /// worker went (task 1437).
 #[test]
 fn an_adopter_does_not_repeat_the_exit_request_recorded_before_a_failed_review_ask() {
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
-    let run = reviewed_run_whose_exit_was_recorded(&repo, &db, &backend, true);
+    let run = reviewed_run_whose_exit_was_recorded(&repo, &db, &backend);
     let (outcome, detail) = adopter_sends_no_second_exit(&db, &repo, &backend, &run);
     assert_eq!(
         outcome["runs"][0]["status"], "awaiting_integration",
