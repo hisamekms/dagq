@@ -82,8 +82,12 @@ workers = false
 # gh が無いか login していなければ up の preflight が拒み、走っている supervisor は claim と着地を止めて inbox に知らせる（worker は host にツールを入れない）。
 # supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
 # [ci_watch] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1921 を含んでから足した。
+# required_jobs は ci.yml の Rust の job の name: で、docs だけの差分で job の if により飛ぶ。これが success でない success の実行は
+# 緑と読まない（ADR-t2034-1）。ci.yml で name: を変えたら同じ変更でここも直す（ずれは ci_jobs_missing の attention が知らせる）。
+# required_jobs を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 2035 を含んでから足した。
 workflow = "ci.yml"
 junit_artifacts = ["nextest-junit-*"]
+required_jobs = ["fmt / test / clippy / coverage", "linux build / test"]
 
 [landing_verification]
 # 着地の検証で、task の coverage の関門のコマンドを unit test 全件と影響範囲で絞った IT に置き換える（ADR-t1925-1、task 1927、goal 157 の段 3b）。

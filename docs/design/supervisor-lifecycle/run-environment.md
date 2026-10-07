@@ -70,7 +70,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 - `[repository]`は着地先のbranch（`branch`、既定は推定）、pushのremote（`remote`、既定`"origin"`）、pushするか（`push`、既定`true`）を持つ（[Landing branch](landing-branch.md)、[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。3つのkeyはどれも読み（`load_repository_config`）、ほかのkeyは未知のkeyとして拒む。`[repository]`を知らない旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。dagq自身のrepositoryは既定で今までどおり`main`と`origin`になるので足さない。
 
-- `[ci_watch]`はsupervisorが着地先のbranchのCIの結果を`gh`で読む見張りの設定で（[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)、task 1921。振る舞いは[CI watch](ci-watch.md)）、表があるときだけ有効になる（表が無ければ無効で、何も読まず何も記録しない）。`parse_config`が読み、`load_ci_watch`が返す。旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す（この repositoryの`dagq.toml`には、後続のconfigのtaskが`--wait-for-build`で足す）。
+- `[ci_watch]`はsupervisorが着地先のbranchのCIの結果を`gh`で読む見張りの設定で（[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)、task 1921。振る舞いは[CI watch](ci-watch.md)）、表があるときだけ有効になる（表が無ければ無効で、何も読まず何も記録しない）。`parse_config`が読み、`load_ci_watch`が返す。旧バイナリは未知の表やkeyを拒むので、固定バイナリが対応してから足す。
 
   | key | 型 | 既定 | 意味 |
   | --- | --- | --- | --- |
@@ -79,7 +79,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   | `interval_secs` | 60以上の整数 | 600 | 確かめる間隔の秒。推奨は600（CIの1回の実行より短くしても、終わった実行が増えないので読むだけ無駄になる） |
   | `junit_artifacts` | 文字列の配列 | `[]` | JUnitのXMLを持つ成果物の名前のglob（`gh run download --pattern`に渡す）。空ならtestの名前を取らず、落ちたjobとstepだけを使う |
 
-  `workflow`の無い表、範囲外や整数でない`interval_secs`、空の文字列、配列でない`junit_artifacts`・空の要素・重複、keyの重複、知らないkeyは行番号付きのエラーにする（`load_ci_watch`、`domain::ci_watch::CiWatchConfig`）。supervisorが各passで読み直し（[CI watch](ci-watch.md)の「いつ確かめるか」）、ファイルが無いときは黙って無効、読めない・値が誤っているときはerrorごとに1回logにwarnを出して使っている値のまま続ける。`up`は表があればpreflightで`gh`を確かめる（[CI watch](ci-watch.md)の「読む手段が無いとき」）。`[run.env]`は`gh`の呼び出しに渡さない（supervisorのenvのまま）。この repositoryで置く予定の値は`workflow = "ci.yml"`・`junit_artifacts = ["nextest-junit-*"]`（成果物はCIの変更のtaskが足し、名前を変えたらこのglobも合わせる）、`branch`と`interval_secs`は既定のまま。
+  `workflow`の無い表、範囲外や整数でない`interval_secs`、空の文字列、配列でない`junit_artifacts`・空の要素・重複、keyの重複、知らないkeyは行番号付きのエラーにする（`load_ci_watch`、`domain::ci_watch::CiWatchConfig`）。supervisorが各passで読み直し（[CI watch](ci-watch.md)の「いつ確かめるか」）、ファイルが無いときは黙って無効、読めない・値が誤っているときはerrorごとに1回logにwarnを出して使っている値のまま続ける。`up`は表があればpreflightで`gh`を確かめる（[CI watch](ci-watch.md)の「読む手段が無いとき」）。`[run.env]`は`gh`の呼び出しに渡さない（supervisorのenvのまま）。この repositoryの値は`dagq.toml`の`[ci_watch]`が持ち、`ci.yml`で成果物やRustのjobの名前（`required_jobs`、[CI watch](ci-watch.md)の「実行の扱い」）を変えたら同じ変更で合わせる。
 - `[landing_verification]`は`integrate`がtaskの検証のコマンドの一部をrepositoryの着地の検証のコマンドに置き換える設定で（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)。流れと境界は[Validation](validation.md#着地の検証)）、表があるときだけ働く。
   `parse_config`が読み、`integrate`が着地のたびにmain checkoutから`Verifier::landing_verification`で読む（読めなければ`[run.env]`と同じく着地処理のエラー）。
   書式（key・型・既定値・検査）と、置き換えたコマンドにだけ`[run.env]`の後ろに足すenvの意味は`domain::landing_verification`のdoc commentが持つ。

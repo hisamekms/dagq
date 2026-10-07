@@ -18,13 +18,13 @@ related:
 
 # Linux build and test job in CI
 
-この repository を Linux で build と test を通すため（goal 83。先に Linux で通し、その後にコンテナで動かす）、`.github/workflows/ci.yml` に ubuntu の job `linux`（表示名 `linux build / test`）を置く。macOS の job `checks`（fmt・各 `scripts/` の検査・clippy・coverage の関門の `cargo llvm-cov nextest` と slow tests）は変えない。
+この repository を Linux で build と test を通すため（goal 83。先に Linux で通し、その後にコンテナで動かす）、`.github/workflows/ci.yml` に ubuntu の job `linux`（表示名 `linux build / test`）を置く。macOS の job `checks`（fmt・clippy・coverage の関門の `cargo llvm-cov nextest` と slow tests）と、`scripts/` の検査を流す macOS の job `docs` は変えない。
 
 ## 流すもの
 
 | step | 中身 |
 | --- | --- |
-| `actions/checkout@v4` | checkout（履歴は既定の浅いもの。`scripts/` の検査は macOS の job が流す） |
+| `actions/checkout@v4` | checkout（履歴は既定の浅いもの。`scripts/` の検査は job `docs` が流す） |
 | Install Rust | `rustup toolchain install --no-self-update`。`rust-toolchain.toml` の channel と components を入れる |
 | Install cargo-nextest | `taiki-e/install-action@cargo-nextest` |
 | `Swatinem/rust-cache@v2` | 依存の build の cache |
@@ -36,14 +36,15 @@ runner は `ubuntu-24.04`（x86_64）。`rust-toolchain.toml` の `targets` は 
 
 ## docsだけの差分
 
-**予定（未実装）**（[ADR-t2034-1](../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）。
-`ci.yml` は差分を判定する小さな job と、Rust の要らない doc と script の検査を常に流す macOS の job を持ち、`linux` と macOS の Rust の job（fmt・clippy・`cargo llvm-cov nextest`・JUnit・Slow tests・IT test time gate）は判定の job を `needs` に持って、docs だけのとき job の `if` で飛ぶ。
-2 つの Rust の job は今の `name:` を保つ。
+[ADR-t2034-1](../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)。
+`ci.yml` は差分を判定する小さな job `changes`（`docs-only diff`）と、Rust の要らない doc と script の検査を常に流す macOS の job `docs`（`docs / scripts checks`）を持ち、`linux` と macOS の Rust の job `checks`（fmt・clippy・`cargo llvm-cov nextest`・JUnit・Slow tests・IT test time gate）は `changes` を `needs` に持って、docs だけのとき job の `if` で飛ぶ。
 
-- 判定: base（pull request の base か push の `before`）から実行の commit までの `git diff --name-only` が全部 `docs/**` か root の `*.md` なら docs だけ。
+- 判定: base（pull request の base か push の `before`）から実行の commit までの `git diff --no-renames --name-only` が全部 `docs/**` か root の `*.md` なら docs だけ（output `docs_only` が `true`）。
+  `--no-renames` は名前を変えた file の元の path も並べ、`src/` から `docs/` へ移した変更を docs だけと読まないため。
   base が無い・0 だけ・履歴に無い、差分が空、判定の job が落ちたときは全部流す。
   外部の action は使わない。
-  判定の job と常に流す検査の job は `fetch-depth: 0`（base と release の tag が要る）
+  `changes` と `docs` は `fetch-depth: 0`（base と release の tag が要る）。
+  `checks` も IT test time gate が base と比べるので同じ
 - Rust の job の `if` は `!cancelled()` と判定の output が docs だけでないことで書く（`needs` の既定の `success()` のままだと、判定の job が落ちたとき飛んでしまう）
 - `on.paths-ignore` にしないのは、実行が起きないと必須の status check が pending で残り、doc の検査も流れないため。
   `if` で飛んだ job は status check では success と報告される（job の API の `conclusion` は `skipped`）

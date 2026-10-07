@@ -4,7 +4,9 @@ name: CI failure issue
 # ci.yml on main concludes failure, and closes it with a comment when a later
 # push run on main succeeds. The trigger is the conclusion of the whole CI
 # workflow, so a job with continue-on-error does not open the issue by itself
-# (the linux job has none since task 1238).
+# (the linux job has none since task 1238). A success run with a skipped job
+# (the Rust jobs skipped on a docs-only change, ADR-t2034-1) changes nothing,
+# like a cancelled one.
 # How it works: docs/design/ci-failure-issues.md.
 on:
   workflow_run:
@@ -52,16 +54,41 @@ jobs:
           set -euo pipefail
           subject=$(printf '%s\n' "$MESSAGE" | head -n 1)
 
+          # Whether a CI run has a skipped job: in ci.yml only the Rust jobs
+          # have an if, which skips them on a docs-only change (ADR-t2034-1).
+          # A success run with one does not show that the Rust jobs pass, so
+          # it neither closes the issue nor stands in as the newer run below.
+          # A failed gh fails this job: in an if, set -e would not stop it,
+          # and an empty count would read as a skipped job.
+          skips_a_job() {
+            local n
+            n=$(gh run view "$1" --json jobs \
+              --jq '[.jobs[] | select(.conclusion == "skipped")] | length') ||
+              { echo "gh run view $1 failed" >&2; exit 1; }
+            [ "$n" != 0 ]
+          }
+
           # A newer push run on main that already concluded success or
           # failure decides the issue instead of this older one. Its own
           # report may have been cancelled while pending (the concurrency
           # group keeps one pending run), so this report acts on it.
-          newer=$(gh run list --workflow ci.yml --branch main --event push \
+          candidates=$(gh run list --workflow ci.yml --branch main --event push \
             --status completed --limit 100 \
             --json databaseId,conclusion,createdAt,headSha,displayTitle,url \
             --jq "[.[] | select(.createdAt > \"$RUN_CREATED\")
                        | select(.conclusion == \"success\" or .conclusion == \"failure\")]
-                  | sort_by(.createdAt) | last // empty")
+                  | sort_by(.createdAt) | reverse | .[] | @json")
+          newer=""
+          while IFS= read -r run; do
+            [ -n "$run" ] || continue
+            if [ "$(jq -r .conclusion <<<"$run")" = "success" ] &&
+              skips_a_job "$(jq -r .databaseId <<<"$run")"; then
+              echo "passing over the newer CI run $(jq -r .databaseId <<<"$run"): success with a skipped job"
+              continue
+            fi
+            newer=$run
+            break
+          done <<<"$candidates"
           if [ -n "$newer" ]; then
             RUN_ID=$(jq -r .databaseId <<<"$newer")
             RUN_URL=$(jq -r .url <<<"$newer")
@@ -69,6 +96,11 @@ jobs:
             SHA=$(jq -r .headSha <<<"$newer")
             subject=$(jq -r .displayTitle <<<"$newer")
             echo "acting on the newer completed CI run $RUN_ID ($CONCLUSION)"
+          fi
+
+          if [ "$CONCLUSION" = "success" ] && skips_a_job "$RUN_ID"; then
+            echo "CI run $RUN_ID passed with a skipped job (a docs-only change): it changes nothing"
+            exit 0
           fi
 
           number=$(gh issue list --label ci-failure --state open --limit 1 \

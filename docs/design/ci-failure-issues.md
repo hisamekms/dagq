@@ -29,7 +29,7 @@ main への push ごとの CI（`.github/workflows/ci.yml`）が落ちたら、G
 
 - 実行の `event` が `push` のときだけ。`pull_request` の実行（head の branch が main でも）は issue を開きも閉じもしない
 - 実行の結論（workflow 全体の `conclusion`）が `failure` なら開くか追記し、`success` なら閉じる。`cancelled`・`skipped` などでは何もしない（main の実行は concurrency で待っている古い実行が `cancelled` になる）
-- **予定（未実装）**（[ADR-t2034-1](../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）: `success` でも、実行の job（`gh run view <run> --json jobs`）に `conclusion` が `skipped` の job があれば、`cancelled` と同じく何もせず、「より新しい実行」の代わりにも選ばない。
+- `success` でも、実行の job（`gh run view <run> --json jobs`）に `conclusion` が `skipped` の job があれば、`cancelled` と同じく何もせず、「より新しい実行」の代わりにも選ばない（[ADR-t2034-1](../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)決定6）。
   docs だけの push は Rust の job を job の `if` で飛ばし（[Linux CI](linux-ci.md) の「docsだけの差分」）、その実行は Rust の成否を示さないため。
   job の名前の一覧は持たない（`ci.yml` で `if` を持つ job は Rust の job だけ）。
   doc の検査だけが落ちて開いた issue も、Rust を流して通る実行まで残る。
@@ -39,7 +39,8 @@ workflow 全体の結論で決めるので、`ci.yml` のどの job が落ちて
 
 通知の job を `ci.yml` の中に置いて全ての job を `needs` に持たせる作りは採らなかった。job 単位の `continue-on-error` の job の失敗が `needs.<job>.result` にどう出るか（`failure` か `success` か）に依って、`continue-on-error` を外す前後の振る舞いが変わりうるうえ、job を足すたびに `needs` を直す必要がある。`workflow_run` の結論は GitHub が workflow の成否として決めた値そのものなので、この扱いに依らない。
 
-実行が終わった順と、この workflow の起動の順は揃うとは限らない。古い実行の結果で新しい実行の結果を上書きしないよう、起動した実行より後に作られ `success` か `failure` で終わった main の push の実行（`gh run list --workflow ci.yml --branch main --event push --status completed`）が既にあれば、起動した実行の代わりにその中で最も新しい実行の結論・commit・URL で決める。この workflow は concurrency の group で 1 本ずつ流し、group は待ちを 1 本しか持たないので、新しい実行の起動が待ちのまま cancel されることがあり、そのときは後から来た古い実行の起動がこの規則で新しい実行の結果を当てる。代わりに、新しい実行の起動も流れたときは同じ失敗を 2 回コメントすることがある（閉じるのは 2 回目には open な issue が無いので 1 回）。
+実行が終わった順と、この workflow の起動の順は揃うとは限らない。古い実行の結果で新しい実行の結果を上書きしないよう、起動した実行より後に作られ `success` か `failure` で終わった main の push の実行（`gh run list --workflow ci.yml --branch main --event push --status completed`）が既にあれば、起動した実行の代わりにその中で最も新しい実行の結論・commit・URL で決める（`skipped` の job がある `success` の実行は読み飛ばす）。
+この workflow は concurrency の group で 1 本ずつ流し、group は待ちを 1 本しか持たないので、新しい実行の起動が待ちのまま cancel されることがあり、そのときは後から来た古い実行の起動がこの規則で新しい実行の結果を当てる。代わりに、新しい実行の起動も流れたときは同じ失敗を 2 回コメントすることがある（閉じるのは 2 回目には open な issue が無いので 1 回）。
 
 ## 開く・追記する・閉じる
 
@@ -49,7 +50,7 @@ workflow 全体の結論で決めるので、`ci.yml` のどの job が落ちて
 
 ## 権限
 
-workflow の `permissions` は空（`{}`）で、job `report` だけが `actions: read`（実行の一覧と job・step を読む）と `issues: write` を持つ。`ci.yml` の `checks` と `linux` の権限は変えない（`ci.yml` は `permissions` を書かず、repository の既定のまま）。commit の message は自由な文字列なので、`run` の script に式で埋め込まず env で渡す。
+workflow の `permissions` は空（`{}`）で、job `report` だけが `actions: read`（実行の一覧と job・step を読む）と `issues: write` を持つ。`ci.yml` の job の権限は変えない（`ci.yml` は `permissions` を書かず、repository の既定のまま）。commit の message は自由な文字列なので、`run` の script に式で埋め込まず env で渡す。
 
 ## 確かめ方
 
@@ -60,6 +61,6 @@ workflow の `permissions` は空（`{}`）で、job `report` だけが `actions
 [ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定8（見張りはtask 1921が実装した）。`dagq.toml`に`[ci_watch]`を書いたrepositoryでは、supervisorが同じmainのpushの実行を`gh`で読み、eventと既に落ちているtestの一覧と`ci_failure`のfindingをqueueに残し、修正taskはruntimeのfindingのplannerがplan reviewを通して作る（[CI watch](supervisor-lifecycle/ci-watch.md)）。
 
 - このworkflowとissueは変えずに残す。supervisorが止まっている間も、見張りの無いrepositoryでも、GitHubの上で人に届く知らせだから。2つは別々に動き、互いを読まない。
-- `[ci_watch]`を書いたrepositoryでは（`dagq ci failures`の`watch`が`available`でも`unavailable`でも）、plannerとinboxはissueから修正taskを登録しない。見張りが止まっている間はclaimと着地も止まり、戻れば見張りが同じ失敗を`ci_failure`のfindingにするので、issueから登録すると重なる。issueは人が読む知らせで、閉じるのは今までどおり次に通った実行。
+- `[ci_watch]`を書いたrepositoryでは（`dagq ci failures`の`watch`が`available`でも`unavailable`でも）、plannerとinboxはissueから修正taskを登録しない。見張りが止まっている間はclaimと着地も止まり、戻れば見張りが同じ失敗を`ci_failure`のfindingにするので、issueから登録すると重なる。issueは人が読む知らせで、閉じるのは次に通った実行（`skipped` の job がある `success` は除く）。
 - `[ci_watch]`の無いrepository（`disabled`）では、今までどおりplannerがissueから直すtaskを登録する。
-- 判定の違い: issueはworkflow全体の`failure`だけで開くが、見張りは`timed_out`も赤とし、落ちたtestの組ごとにfindingを分ける。cancelされた実行を飛ばすのはどちらも同じ。
+- 判定の違い: issueはworkflow全体の`failure`だけで開くが、見張りは`timed_out`も赤とし、落ちたtestの組ごとにfindingを分ける。cancelされた実行と、Rustのjobを飛ばした`success`を緑と読まないのはどちらも同じ（見分け方は上の「きっかけ」）。
