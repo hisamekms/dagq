@@ -202,7 +202,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 - table: `supervisors`・`queue_repository`・`schema_floor`・`binary_updates`・`headless_jobs`。
 - ファイル: queueのdirの`service/`・`broker/`・`logs/`、launchdのplist、sccacheのserver。
-- eventの種類: `supervisor_*`・`update_*`・`release_check*`・`broker_*`・`queue_service_*`・`sccache_*`・後始末の`build_outputs_removed`・`scratchpad_removed`・`run_tmp_removed`・`inbox_*`・`backend_call_failed`・`headless_job_stopped`。
+- eventの種類: `supervisor_*`・`update_*`・`release_check*`・`broker_*`・`queue_service_*`・`sccache_*`・後始末の`build_outputs_removed`・`scratchpad_removed`・`run_tmp_removed`・`inbox_*`・`backend_call_failed`・`headless_job_stopped`・`provider_executable_relocated`。
 
 **判断**（domain）: `domain::broker`・`disk`・`sccache`・`release_update`・`queue_service`・`host_metrics`ほか。
 
@@ -216,7 +216,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 - `RunCoordination`のsupervisorの登録と引き継ぎを実行と着地のループに公開する。
 - `HeadlessJobStore`（jobのprocessの台帳）を、jobを起動する各contextに公開する。
-- `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、AIのactorの起動（`application::actor_executor`）を他のcontextに公開する。
+- `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、actorの起動（`actor_executor`）を他のcontextに公開する。
 - `AuditFiles`とCIの見張りのpreflightは内部。
 
 **hostの操作のport**

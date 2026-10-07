@@ -63,6 +63,132 @@ pub fn executable(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("resolve executable {}", candidate.display()))
 }
 
+/// The name a provider's executable is found again by (ADR-t2079-1).
+pub const CLAUDE_NAME: &str = "claude";
+
+/// `path` as the path a provider (Claude Code, Codex) is started by
+/// (ADR-t2079-1): a bare name is looked for on `search` (PATH) in the
+/// directories `skip` does not refuse, a path is taken as it is (a
+/// relative one made absolute), and either must be a file this user may
+/// execute. A symbolic link is kept, never resolved to what it points at:
+/// a provider's update removes the version it pointed to, and the link
+/// then points to the new one.
+pub fn provider_executable_on(
+    path: &Path,
+    search: &std::ffi::OsStr,
+    skip: impl Fn(&Path) -> bool,
+) -> Result<PathBuf> {
+    let candidate = if path.components().count() > 1 || path.is_absolute() {
+        std::path::absolute(path)
+            .with_context(|| format!("resolve executable {}", path.display()))?
+    } else {
+        env::split_paths(search)
+            .filter(|dir| !skip(dir))
+            .map(|dir| dir.join(path))
+            .find(|candidate| is_runnable(candidate))
+            .with_context(|| format!("{} was not found on PATH", path.display()))?
+    };
+    fs::metadata(&candidate)
+        .with_context(|| format!("resolve executable {}", candidate.display()))?;
+    ensure!(
+        is_runnable(&candidate),
+        "resolve executable {}: not an executable file",
+        candidate.display()
+    );
+    Ok(candidate)
+}
+
+/// Whether `path` (followed through links) is a file with an execute bit.
+fn is_runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+/// [`provider_executable_on`] this process's PATH, for Claude Code.
+pub fn provider_executable(path: &Path) -> Result<PathBuf> {
+    provider_executable_on(path, &env::var_os("PATH").unwrap_or_default(), |_| false)
+}
+
+/// Whether `found`, what a provider's name finds now, is another version
+/// of the installation the path `gone` was in (ADR-t2079-1): what it
+/// points at is under the nearest directory of `gone` that is still there
+/// (the provider's update replaced the version in place), and that
+/// directory is neither the root nor the home directory. A provider found
+/// elsewhere (another installation, or a path that never was one, as a
+/// test's stub) is not taken for the one that is gone.
+fn replaces(gone: &Path, found: &Path) -> bool {
+    let Ok(real) = found.canonicalize() else {
+        return false;
+    };
+    let gone = std::path::absolute(gone).unwrap_or_else(|_| gone.to_owned());
+    let Some(kept) = gone
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.is_dir())
+        .and_then(|dir| dir.canonicalize().ok())
+    else {
+        return false;
+    };
+    let home = env::var_os("HOME").and_then(|home| Path::new(&home).canonicalize().ok());
+    kept.parent().is_some() && Some(&kept) != home.as_ref() && real.starts_with(&kept)
+}
+
+/// The provider at `given`, or, when `given` is a path that is not there
+/// (a version a provider's update removed, named by an argv a binary
+/// before ADR-t2079-1 registered), the one `find` finds by the provider's
+/// name `name` if it [`replaces`] it, with a warning that says so. A bare
+/// name and a path that is there are resolved by `find` alone, and its
+/// error is kept when nothing that replaces it is found by the name.
+pub fn provider_at_entry(
+    given: &Path,
+    name: &str,
+    find: impl Fn(&Path) -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    let error = match find(given) {
+        Ok(found) => return Ok(found),
+        Err(error) => error,
+    };
+    let a_path = given.components().count() > 1 || given.is_absolute();
+    if !a_path || given.exists() {
+        return Err(error);
+    }
+    let Some(found) = find(Path::new(name))
+        .ok()
+        .filter(|found| replaces(given, found))
+    else {
+        return Err(error);
+    };
+    tracing::warn!(
+        from = %given.display(),
+        to = %found.display(),
+        "{} is gone; {name} found again on PATH at {}",
+        given.display(),
+        found.display()
+    );
+    Ok(found)
+}
+
+/// Claude Code at `path` as [`provider_at_entry`] resolves it.
+pub fn claude_at_entry(path: &Path) -> Result<PathBuf> {
+    provider_at_entry(path, CLAUDE_NAME, provider_executable)
+}
+
+/// What [`AgentProvider::relocated_executable`] answers for a provider at
+/// `executable`, found again by `find` under `name` when it [`replaces`]
+/// it.
+pub(crate) fn relocated(
+    executable: &Path,
+    name: &str,
+    find: impl Fn(&Path) -> Result<PathBuf>,
+) -> Option<PathBuf> {
+    if executable.exists() {
+        return None;
+    }
+    find(Path::new(name))
+        .ok()
+        .filter(|found| found != executable && replaces(executable, found))
+}
+
 /// `kill -0` semantics: a process we may not signal (EPERM) still exists.
 /// Run `command`, an outer shell that backgrounds a process printing
 /// `pid=N` as its first stdout line and exits at once, and return what that
@@ -3383,6 +3509,10 @@ impl AgentProvider for ClaudeCode {
         Ok(())
     }
 
+    fn relocated_executable(&self) -> Option<PathBuf> {
+        relocated(&self.executable, CLAUDE_NAME, provider_executable)
+    }
+
     /// `claude plugin list --json` in `cwd` (a project's plugins count
     /// where its sessions start): `name` is enabled when an entry
     /// `<name>@<marketplace>` has `enabled: true`.
@@ -6228,6 +6358,101 @@ esac
         );
         assert_eq!(claude_global_config(None, Some("")), None);
         assert_eq!(claude_global_config(None, None), None);
+    }
+
+    /// An executable stub at `path`.
+    fn runnable_stub(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// ADR-t2079-1: Claude Code is started by its link (`~/.local/bin/
+    /// claude` to `versions/<v>`), whether the link is given or found on
+    /// PATH, never by the version it points at, whose version is still
+    /// read through it. A file that is not there or cannot be executed is
+    /// refused.
+    #[test]
+    fn a_provider_is_started_by_its_link_not_by_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = dir.path().join("share/claude/versions/2.1.289");
+        runnable_stub(&version);
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let link = bin.join("claude");
+        std::os::unix::fs::symlink(&version, &link).unwrap();
+        let search = std::env::join_paths([&bin]).unwrap();
+        for given in [Path::new("claude"), link.as_path()] {
+            let found = provider_executable_on(given, &search, |_| false).unwrap();
+            assert_eq!(found, link, "{}", given.display());
+            assert!(
+                !found.starts_with(dir.path().join("share")),
+                "{}",
+                found.display()
+            );
+        }
+        assert_eq!(claude_version(&link).as_deref(), Some("2.1.289"));
+        // `skip` keeps a directory out of the search.
+        assert!(provider_executable_on(Path::new("claude"), &search, |d| d == bin).is_err());
+        // Neither a file that is gone nor one without an execute bit.
+        assert!(provider_executable_on(&bin.join("gone"), &search, |_| false).is_err());
+        fs::write(bin.join("plain"), "").unwrap();
+        assert!(provider_executable_on(&bin.join("plain"), &search, |_| false).is_err());
+    }
+
+    /// ADR-t2079-1: a provider whose path is gone is found again by its
+    /// name when what the name finds is another version of the same
+    /// installation (under the nearest directory of the gone path that is
+    /// still there), at the entry (with the error of the path kept
+    /// otherwise) and at a start ([`relocated`], none while the path is
+    /// there).
+    #[test]
+    fn a_provider_whose_path_is_gone_is_found_again_by_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let versions = dir.path().join("share/claude/versions");
+        runnable_stub(&versions.join("2.1.300"));
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(versions.join("2.1.300"), bin.join("claude")).unwrap();
+        let search = std::env::join_paths([&bin]).unwrap();
+        let find = |path: &Path| provider_executable_on(path, &search, |_| false);
+        let gone = versions.join("2.1.289");
+        assert_eq!(
+            provider_at_entry(&gone, CLAUDE_NAME, find).unwrap(),
+            bin.join("claude")
+        );
+        assert_eq!(
+            relocated(&gone, CLAUDE_NAME, find),
+            Some(bin.join("claude"))
+        );
+        // There: as given, nothing to relocate.
+        let there = bin.join("claude");
+        assert_eq!(provider_at_entry(&there, CLAUDE_NAME, find).unwrap(), there);
+        assert_eq!(relocated(&there, CLAUDE_NAME, find), None);
+        // Nothing by the name either: the path's own error, nothing found.
+        let empty = std::env::join_paths([dir.path().join("empty")]).unwrap();
+        let none = |path: &Path| provider_executable_on(path, &empty, |_| false);
+        let error = provider_at_entry(&gone, CLAUDE_NAME, none).unwrap_err();
+        assert!(format!("{error:#}").contains("2.1.289"), "{error:#}");
+        assert_eq!(relocated(&gone, CLAUDE_NAME, none), None);
+        // Found, but of another installation: a path that never was one
+        // of its versions is not replaced by it.
+        let other = dir.path().join("other/versions");
+        fs::create_dir_all(&other).unwrap();
+        for elsewhere in [
+            other.join("2.1.289"),
+            other.join("missing/claude"),
+            PathBuf::from("/nonexistent/claude"),
+        ] {
+            assert!(provider_at_entry(&elsewhere, CLAUDE_NAME, find).is_err());
+            assert_eq!(relocated(&elsewhere, CLAUDE_NAME, find), None);
+        }
+        // A bare name that is not found is not looked for again.
+        assert!(provider_at_entry(Path::new("claude-x"), CLAUDE_NAME, find).is_err());
+        // A path that is there but cannot run is not replaced.
+        fs::write(bin.join("plain"), "").unwrap();
+        assert!(provider_at_entry(&bin.join("plain"), CLAUDE_NAME, find).is_err());
     }
 
     /// Claude Code's version is the name of the versioned file `claude`

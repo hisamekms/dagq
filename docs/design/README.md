@@ -25,6 +25,7 @@ tags:
 - [Resource broker](broker.md)（fs・process・git・packageを仲介するdagq-broker。crateと配布・transport・runごとのtoken・mountと閉じ込め・containerとPodman machine・workerのMCPの道具・audit・mode・`required`・Phase 3に進む前提。goal 58と59が実装）
 - [Supervisor lifecycle](supervisor-lifecycle.md)（目次。各節は[`supervisor-lifecycle/`](supervisor-lifecycle/)の下の別のファイルにある）
 - [Provider lifecycle](provider-lifecycle.md)
+- [Provider executables](provider-executables.md)（providerを起動するpathをsymlinkのまま持つこと、pathが無いときの名前での解決し直し）
 - [Plugin integration](plugin-integration.md)
 - [Manual smoke](manual-smoke.md)
 - [Stress CI](stress-ci.md)（mainで直近に足した・変えたtestをGitHub Actionsの定時実行で繰り返し、落ちたらflaky-testのissueで知らせる）

@@ -135,10 +135,17 @@ pub fn run_agent(
     let path = path
         .into_string()
         .map_err(|_| anyhow::anyhow!("PATH is not UTF-8"))?;
-    let mut child = HostActorExecutor::new(db)
+    // Where an agent found again by its provider's name is recorded
+    // (ADR-t2079-1); a queue that does not open leaves it to the log.
+    let events = crate::infrastructure::sqlite::SqliteQueue::open(db).ok();
+    let mut executor = HostActorExecutor::new(db)
         .with_provider(provider)
         .with_spawner(&LocalSpawner)
-        .with_queue_service(&crate::infrastructure::queue_service::SystemServiceAccess)
+        .with_queue_service(&crate::infrastructure::queue_service::SystemServiceAccess);
+    if let Some(events) = &events {
+        executor = executor.with_events(events);
+    }
+    let mut child = executor
         .spawn(
             ActorExecutionSpec::new(
                 agent.actor.clone(),

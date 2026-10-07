@@ -1717,3 +1717,49 @@ fn no_claude_up_refuses_to_reuse_a_supervisor_with_another_policy() {
     assert!(error.contains("different --no-claude policy"), "{error}");
     assert_eq!(launchd.installs.lock().unwrap().len(), 1);
 }
+
+/// ADR-t2079-1: `up` given Claude Code and Codex as their links (to the
+/// versions their updates install) registers the supervisor with the
+/// links, never the versions they point at, which an update removes.
+#[test]
+fn up_registers_the_supervisor_with_the_provider_links_not_their_versions() {
+    let mut fixture = fixture();
+    let versions = fixture._dir.path().join("share/claude/versions");
+    fs::create_dir_all(&versions).unwrap();
+    fs::copy(&fixture.options.claude, versions.join("2.2.0")).unwrap();
+    let codex_version = fixture._dir.path().join("codex/releases/0.2.0/bin/codex");
+    fs::create_dir_all(codex_version.parent().unwrap()).unwrap();
+    common::template::script(&codex_version, "#!/bin/sh\nprintf 'codex-cli 0.2.0\\n'\n");
+    let bin = fixture._dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(versions.join("2.2.0"), bin.join("claude")).unwrap();
+    std::os::unix::fs::symlink(&codex_version, bin.join("codex")).unwrap();
+    // As the command resolves what it is given (`src/main.rs`).
+    fixture.options.claude =
+        dagq::infrastructure::adapters::claude_at_entry(&bin.join("claude")).unwrap();
+    fixture.options.codex =
+        dagq::infrastructure::codex::codex_at_entry(&bin.join("codex")).unwrap();
+    assert_eq!(fixture.options.claude, bin.join("claude"));
+    assert_eq!(fixture.options.codex, bin.join("codex"));
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
+    let installs = launchd.installs.lock().unwrap();
+    let contents = &installs[0].2;
+    for (flag, link) in [
+        ("--claude", bin.join("claude")),
+        ("--codex", bin.join("codex")),
+    ] {
+        assert!(
+            contents.contains(&format!(
+                "<string>{flag}</string>\n\t\t<string>{}</string>",
+                link.display()
+            )),
+            "{contents}"
+        );
+    }
+    assert!(!contents.contains("versions/"), "{contents}");
+    assert!(!contents.contains("releases/"), "{contents}");
+}

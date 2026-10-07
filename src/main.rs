@@ -3010,17 +3010,12 @@ fn execute(cli: Cli) -> Result<Value> {
             }
         };
         let cmux = executable(&cmux).unwrap_or(cmux);
-        let mut restart = vec!["--cmux".to_owned(), path_text(&cmux)?];
-        if let Some(claude) = claude {
-            restart.extend(["--claude".to_owned(), path_text(&executable(&claude)?)?]);
-        }
-        if let Some(codex) = codex {
-            let codex = dagq::infrastructure::codex::executable(&codex).unwrap_or(codex);
-            restart.extend(["--codex".to_owned(), path_text(&codex)?]);
-        }
-        if let Some(plugin_dir) = plugin_dir {
-            restart.extend(["--plugin-dir".to_owned(), path_text(&plugin_dir)?]);
-        }
+        let restart = dagq::compose::install_restart_arguments(
+            &cmux,
+            claude.as_deref(),
+            codex.as_deref(),
+            plugin_dir.as_deref(),
+        )?;
         // A checkout of dagq's source passes its e2e before it is put in
         // place, unless a person skips it (ADR-t963-1 decision 1).
         let e2e = match &source {
@@ -3902,7 +3897,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 &if no_claude {
                     claude
                 } else {
-                    executable(&claude)?
+                    dagq::infrastructure::adapters::claude_at_entry(&claude)?
                 },
                 &env::current_exe()?,
                 &options,
@@ -3961,9 +3956,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 claude: if no_claude {
                     claude
                 } else {
-                    executable(&claude)?
+                    dagq::infrastructure::adapters::claude_at_entry(&claude)?
                 },
-                codex: dagq::infrastructure::codex::executable(&codex).unwrap_or(codex),
+                codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
                 startup_timeout: Duration::from_secs(30),
                 handoff_timeout: Duration::from_secs(handoff_timeout),
                 auto_update,
@@ -4013,8 +4008,9 @@ fn execute(cli: Cli) -> Result<Value> {
                     e2e_command,
                     e2e_timeout: Duration::from_secs(e2e_timeout),
                     cmux: executable(&cmux).unwrap_or(cmux),
-                    claude: executable(&claude).unwrap_or(claude),
-                    codex: dagq::infrastructure::codex::executable(&codex).unwrap_or(codex),
+                    claude: dagq::infrastructure::adapters::claude_at_entry(&claude)
+                        .unwrap_or(claude),
+                    codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
                     plugin_dir,
                     handoff_timeout: Duration::from_secs(handoff_timeout),
                     watch_timeout: Duration::from_secs(watch_timeout),
@@ -4047,8 +4043,9 @@ fn execute(cli: Cli) -> Result<Value> {
                     log,
                     cargo: executable(&cargo).unwrap_or(cargo),
                     cmux: executable(&cmux).unwrap_or(cmux),
-                    claude: executable(&claude).unwrap_or(claude),
-                    codex: dagq::infrastructure::codex::executable(&codex).unwrap_or(codex),
+                    claude: dagq::infrastructure::adapters::claude_at_entry(&claude)
+                        .unwrap_or(claude),
+                    codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
                     plugin_dir,
                     handoff_timeout: Duration::from_secs(handoff_timeout),
                     watch_timeout: Duration::from_secs(watch_timeout),
@@ -4217,10 +4214,7 @@ fn execute(cli: Cli) -> Result<Value> {
         } => {
             use dagq::application::observer::{ObserveMode, ObserveOptions};
             use dagq::domain::{Provider, actor_model::ActorLaunch};
-            use dagq::infrastructure::{
-                adapters::{ClaudeCode, executable},
-                codex::Codex,
-            };
+            use dagq::infrastructure::{adapters::ClaudeCode, codex::Codex};
             let launch: ActorLaunch = match launch {
                 Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
                 None => dagq::compose::observer_launch(&db)?,
@@ -4238,12 +4232,12 @@ fn execute(cli: Cli) -> Result<Value> {
             // (ADR-t1857-1).
             let claude = if resolve && launch.provider == Provider::Claude {
                 if switchable && no_provider_fallback {
-                    executable(&claude).unwrap_or_else(|error| {
+                    dagq::infrastructure::adapters::claude_at_entry(&claude).unwrap_or_else(|error| {
                         tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", claude.display());
                         claude
                     })
                 } else {
-                    executable(&claude)?
+                    dagq::infrastructure::adapters::claude_at_entry(&claude)?
                 }
             } else {
                 claude
@@ -4251,7 +4245,7 @@ fn execute(cli: Cli) -> Result<Value> {
             let claude = ClaudeCode { executable: claude };
             let codex = Codex {
                 executable: if resolve && launch.provider == Provider::Codex {
-                    dagq::infrastructure::codex::executable(&codex).unwrap_or_else(|error| {
+                    dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or_else(|error| {
                         tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", codex.display());
                         codex
                     })
@@ -4305,10 +4299,7 @@ fn execute(cli: Cli) -> Result<Value> {
             unavailable,
         } => {
             use dagq::domain::{Provider, actor_model::ActorLaunch};
-            use dagq::infrastructure::{
-                adapters::{ClaudeCode, executable},
-                codex::Codex,
-            };
+            use dagq::infrastructure::{adapters::ClaudeCode, codex::Codex};
             let launch: ActorLaunch = match launch {
                 Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
                 None => dagq::compose::throughput_review_launch(&db)?,
@@ -4331,10 +4322,10 @@ fn execute(cli: Cli) -> Result<Value> {
             };
             let provider: Box<dyn dagq::application::AgentProvider> = match launch.provider {
                 Provider::Claude => Box::new(ClaudeCode {
-                    executable: resolved(claude, executable),
+                    executable: resolved(claude, dagq::infrastructure::adapters::claude_at_entry),
                 }),
                 Provider::Codex => Box::new(Codex {
-                    executable: resolved(codex, dagq::infrastructure::codex::executable),
+                    executable: resolved(codex, dagq::infrastructure::codex::codex_at_entry),
                     home: codex_home,
                 }),
             };

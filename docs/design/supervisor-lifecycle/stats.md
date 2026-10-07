@@ -133,10 +133,10 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 - `long_background`は観測だけで、復旧jobを起動しない。
   経過は、その処理が途切れずにmarkerに載り続けた最初の時刻から測る（markerは上書きされ開始時刻を持たないので、hookが追記するlogから読む。`domain::stall::IDLE_LOG`と`background_first_seen`）。
   logが無いときはmarkerのmtimeからの下限になる。
-- `workspace_mismatch`はcmuxに聞かず、runの最後のsessionのbackgroundのwrapperをpidと記録した起動時刻だけで見る（pidを別のprocessが継げば死んでいる。[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定2・10、[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
+- `workspace_mismatch`はcmuxに聞かず、runの最後のsessionのbackgroundのwrapperをpidと記録した起動時刻で見る（pidを別のprocessが継げば死んでいる。[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定2・10、[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
   heartbeatの古さは生死に使わない（[wrapperが黙ったsession](silent-wrapper.md)の側）。
   古いバイナリのworkspaceのsessionは判定せず、`workspace_check`が数を出す。
-  `stats --cmux`は受け付けて無視する。
+  `stats --cmux`は受けて無視する。
 
 ## 閾値ごとの検知
 

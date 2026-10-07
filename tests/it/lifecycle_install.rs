@@ -2899,3 +2899,57 @@ fn no_claude_policy_survives_install_drain_and_restart_arguments() {
         );
     }
 }
+
+/// ADR-t2079-1: the `up` with which `install` starts a drained supervisor
+/// again is given Claude Code and Codex as the links `install` was given
+/// (`compose::install_restart_arguments`, as the command makes them),
+/// never the versions they point at, which an update removes.
+#[test]
+fn install_starts_a_drained_supervisor_again_with_the_provider_links() {
+    use dagq::application::install::Source;
+    let fixture = fixture();
+    let _queue = handoff_supervisor(&fixture, "live", SupervisorMode::InCmux);
+    let processes = FakeProcesses::default();
+    let down = || -> Result<Value> { Ok(json!({"outcome": "stopped"})) };
+    let claude_version = fixture._dir.path().join("share/claude/versions/2.2.0");
+    let codex_version = fixture._dir.path().join("codex/releases/0.2.0/bin/codex");
+    for version in [&claude_version, &codex_version] {
+        fs::create_dir_all(version.parent().unwrap()).unwrap();
+        common::template::script(version, "#!/bin/sh\nprintf '0.2.0\\n'\n");
+    }
+    let bin = fixture._dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&claude_version, bin.join("claude")).unwrap();
+    std::os::unix::fs::symlink(&codex_version, bin.join("codex")).unwrap();
+    let mut options = install_options(Source::Binary("/built/dagq".into()));
+    options.allow_breaking = true;
+    options.restart = dagq::compose::install_restart_arguments(
+        Path::new("/opt/cmux"),
+        Some(&bin.join("claude")),
+        Some(&bin.join("codex")),
+        None,
+    )
+    .unwrap();
+    let binaries = FakeBinaries::new(&[(27, true), (28, false)], false);
+    install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+    let up = binaries.up.lock().unwrap()[0].clone();
+    let after = |flag: &str| {
+        let at = up.iter().position(|arg| arg == flag).unwrap();
+        up[at + 1].clone()
+    };
+    assert_eq!(
+        after("--claude"),
+        bin.join("claude").to_str().unwrap(),
+        "{up:?}"
+    );
+    assert_eq!(
+        after("--codex"),
+        bin.join("codex").to_str().unwrap(),
+        "{up:?}"
+    );
+    assert!(
+        up.iter()
+            .all(|arg| !arg.contains("versions/") && !arg.contains("releases/")),
+        "{up:?}"
+    );
+}

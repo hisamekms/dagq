@@ -265,6 +265,13 @@ impl CommandSpec {
         &self.program
     }
 
+    /// Start `program` instead: the agent's executable found again by its
+    /// provider's name (ADR-t2079-1).
+    pub fn set_program(&mut self, program: impl AsRef<OsStr>) -> &mut Self {
+        self.program = program.as_ref().to_owned();
+        self
+    }
+
     pub fn get_args(&self) -> impl Iterator<Item = &OsStr> {
         self.args.iter().map(OsString::as_os_str)
     }
@@ -540,6 +547,14 @@ pub trait InstalledPlugin: Send + Sync {
 /// Provider-specific CLI construction is kept outside supervisor orchestration.
 pub trait AgentProvider {
     fn preflight(&self) -> Result<()>;
+    /// The agent's executable found again by the provider's name on PATH
+    /// when the path it was given is not there (a version the provider's
+    /// update removed, ADR-t2079-1); `None` when that path is there or
+    /// nothing is found by the name. The executor starts an agent whose
+    /// start found no executable once more with it.
+    fn relocated_executable(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     /// Whether the agent's sessions started in `cwd` load the plugin
     /// `name` without a `--plugin-dir` (ADR-t617-2 decision 4); an error
     /// when it cannot tell. A provider without plugins cannot tell.

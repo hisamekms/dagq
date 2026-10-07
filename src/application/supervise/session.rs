@@ -63,6 +63,7 @@ impl Supervisor<'_> {
             .with_provider(agent)
             .with_spawner(self.spawner)
             .with_queue_service(self.service_access)
+            .with_events(&*self.queue)
     }
     /// What `run` inherits from an earlier run of its task that was retried
     /// with its branch carried over (ADR-0047 decision 24): the latest such

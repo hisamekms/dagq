@@ -796,9 +796,11 @@ impl<'a> Turns<'a> {
                 },
             ),
         };
+        let events: &dyn super::RunLog = &*self.queue;
         let mut executor = HostActorExecutor::new(self.db)
             .with_provider(agent)
-            .with_spawner(self.spawner);
+            .with_spawner(self.spawner)
+            .with_events(events);
         if let Some(service) = self.queue_service {
             executor = executor.with_queue_service(service);
         }

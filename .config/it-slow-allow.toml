@@ -732,3 +732,27 @@ task = 1441
 name = "finding_planner::a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies"
 reason = "B 境界（守る境界）: supervisor passes open a background planner for a marked finding, the plan review job readies its proposal and the planner is asked to exit through its turns/ (task 1441 moved it off cmux)"
 task = 1441
+
+# 6.8s
+[[test]]
+name = "provider_executables::a_runner_whose_claude_version_is_gone_starts_its_next_turn_with_the_claude_on_path"
+reason = "B 境界（プロセス・supervisor の配線）: 実の background wrapper の process が、消えた version の --claude を PATH の claude に解決し直して次の turn を起動し、run に記録することを supervisor の revise を通して確かめる。解決と 1 回だけの起動し直しの判断は adapters・actor_executor の unit test"
+task = 2079
+
+# 6.6s
+[[test]]
+name = "provider_executables::a_planner_whose_claude_is_gone_starts_with_the_claude_on_path"
+reason = "B 境界（プロセス・supervisor の配線）: 実の planner-session の process が、消えた version の --claude を PATH の claude に解決し直して turn を起動し、queue に記録することを supervisor が開く planner で確かめる。判断は adapters・actor_executor の unit test"
+task = 2079
+
+# 7.9s
+[[test]]
+name = "provider_executables::a_planner_whose_claude_is_gone_and_not_on_path_fails_to_start_as_before"
+reason = "B 境界（プロセス・supervisor の配線）: 実の planner-session の process が、消えた version の --claude を PATH にも見つけられないとき、今までどおり起動の失敗（launch）を queue に記録し、解決し直しを記録しないことを supervisor が開く planner で確かめる。判断は actor_executor の unit test"
+task = 2079
+
+# 7.3s
+[[test]]
+name = "provider_executables::the_supervisors_entry_keeps_a_link_and_finds_a_gone_claude_again_on_path"
+reason = "B 境界（プロセス・supervisor の配線）: 実の dagq supervise の process の入口が link を保ち、それが observer の job の argv と agent の起動まで届くこと、消えた path を PATH で解決し直して起動すること、PATH に無ければ入口で落ち --no-claude では解決しないことを、4 つの supervisor の起動で確かめる。解決の判断は adapters の unit test"
+task = 2079

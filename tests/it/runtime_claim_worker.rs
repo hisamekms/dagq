@@ -227,8 +227,9 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
     assert_eq!(ended[0].1["why"], "not_candidate");
 }
 
-/// The supervisor resolves `claude` and `codex` to their executables and
-/// records them on its registration with whether each was found and the
+/// The supervisor resolves `claude` and `codex` to their executables (as
+/// given, a link not followed, ADR-t2079-1) and records them on its
+/// registration with whether each was found and the
 /// modes it runs it in (ADR-t813-2); `status` and `doctor` show them.
 #[test]
 fn the_providers_are_recorded_on_the_registration() {
@@ -265,10 +266,7 @@ fn the_providers_are_recorded_on_the_registration() {
     assert_eq!(providers[0]["found"], true);
     assert_eq!(providers[0]["modes"], json!(["interactive", "headless"]));
     assert_eq!(providers[1]["provider"], "codex");
-    assert_eq!(
-        providers[1]["executable"],
-        json!(codex.canonicalize().unwrap())
-    );
+    assert_eq!(providers[1]["executable"], json!(codex));
     assert_eq!(providers[1]["found"], true);
     // Found, it runs the headless Codex worker (ADR-t813-3).
     assert_eq!(providers[1]["modes"], json!(["headless"]));

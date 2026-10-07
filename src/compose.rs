@@ -824,7 +824,7 @@ pub fn supervise_with_reviewer(
     // A Codex that is not found, or does not run, runs no worker: its
     // tasks are deferred, and the supervisor starts all the same
     // (ADR-t813-2).
-    let found_codex = crate::infrastructure::codex::executable(&options.codex).ok();
+    let found_codex = crate::infrastructure::codex::codex_at_entry(&options.codex).ok();
     let codex = found_codex.clone().unwrap_or_else(|| options.codex.clone());
     let codex_agent = found_codex
         .map(|executable| Codex {
@@ -2959,6 +2959,34 @@ pub fn worker_adapters<'a>(
     }
 }
 
+/// The arguments `install` gives the `up` that starts a drained supervisor
+/// again (`--cmux`, and `--claude`, `--codex`, `--plugin-dir` when given):
+/// a provider's path as given, a link kept and a gone one found again by
+/// its name (ADR-t2079-1); a Codex not found is passed as given.
+pub fn install_restart_arguments(
+    cmux: &Path,
+    claude: Option<&Path>,
+    codex: Option<&Path>,
+    plugin_dir: Option<&Path>,
+) -> Result<Vec<String>> {
+    let mut restart = vec!["--cmux".to_owned(), path_text(cmux)?];
+    if let Some(claude) = claude {
+        restart.extend([
+            "--claude".to_owned(),
+            path_text(&crate::infrastructure::adapters::claude_at_entry(claude)?)?,
+        ]);
+    }
+    if let Some(codex) = codex {
+        let codex = crate::infrastructure::codex::codex_at_entry(codex)
+            .unwrap_or_else(|_| codex.to_owned());
+        restart.extend(["--codex".to_owned(), path_text(&codex)?]);
+    }
+    if let Some(plugin_dir) = plugin_dir {
+        restart.extend(["--plugin-dir".to_owned(), path_text(plugin_dir)?]);
+    }
+    Ok(restart)
+}
+
 /// Each provider's executable as `claude` and `codex` resolve, with the
 /// modes `workers` runs it in: what a supervisor records on its
 /// registration and `doctor` shows.
@@ -2972,7 +3000,7 @@ pub fn provider_checks(
         .map(|(provider, path)| {
             let resolved = match provider {
                 Provider::Codex => crate::infrastructure::codex::executable(path),
-                Provider::Claude => executable(path),
+                Provider::Claude => crate::infrastructure::adapters::provider_executable(path),
             };
             ProviderCheck {
                 provider,

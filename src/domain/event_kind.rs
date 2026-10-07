@@ -44,7 +44,10 @@
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
 //!   `broker_*`, `queue_service_*`, `sccache_*`, `inbox_*`, the cleanup's
 //!   `build_outputs_removed`, `scratchpad_removed` and `run_tmp_removed`,
-//!   `backend_call_failed` and `headless_job_stopped`.
+//!   `backend_call_failed`, `headless_job_stopped` and
+//!   `provider_executable_relocated` (named in full: the start of an AI
+//!   actor, `application::actor_executor`, writes it, though `provider_*`
+//!   is execution's).
 
 macro_rules! event_kinds {
     ($($variant:ident => $name:literal,)*) => {
@@ -219,6 +222,7 @@ event_kinds! {
     PlannerUnresponsive => "planner_unresponsive",
     PromptCleared => "prompt_cleared",
     PromptWaiting => "prompt_waiting",
+    ProviderExecutableRelocated => "provider_executable_relocated",
     ProviderHeld => "provider_held",
     ProviderReleased => "provider_released",
     ProviderSwitched => "provider_switched",
@@ -437,6 +441,10 @@ impl EventKind {
                 | TurnStarted
                 | TurnFinished
                 | TurnSessionIdentified
+                // An agent of an actor without a run (a planner, a job)
+                // started by the executable found again by its provider's
+                // name (ADR-t2079-1); a run's is on the run.
+                | ProviderExecutableRelocated
                 // A person's read of and send to a planner's session
                 // (ADR-t1228-1 decisions 4 and 5).
                 | ScreenRead
@@ -1116,6 +1124,10 @@ mod tests {
             (EventKind::PlannerUnresponsive, "planner_unresponsive"),
             (EventKind::PromptCleared, "prompt_cleared"),
             (EventKind::PromptWaiting, "prompt_waiting"),
+            (
+                EventKind::ProviderExecutableRelocated,
+                "provider_executable_relocated",
+            ),
             (EventKind::ProviderHeld, "provider_held"),
             (EventKind::ProviderReleased, "provider_released"),
             (EventKind::ProviderSwitched, "provider_switched"),

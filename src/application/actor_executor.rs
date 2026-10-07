@@ -33,14 +33,15 @@ use anyhow::{Context, Result, bail, ensure};
 
 use super::queue_service::ServiceAccess;
 use super::{
-    AgentProvider, CommandSpec, PlannerCommand, Spawned, Spawner, Streams, TurnTarget,
+    AgentProvider, CommandSpec, PlannerCommand, RunLog, Spawned, Spawner, Streams, TurnTarget,
     WorkspaceBackend, WorkspaceTags,
     lifecycle::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, QUEUE_ENV, SESSION_KIND_ENV},
     naming::shell_join,
     path_text,
 };
 use crate::domain::{
-    ActorContext, ActorRole, PlannerId, PlannerOrigin, RunId, TaskId, TaskRun, TrustLevel,
+    ActorContext, ActorRole, EventKind, PlannerId, PlannerOrigin, RunId, TaskId, TaskRun,
+    TrustLevel,
     actor::{ACTOR_ENV, ACTOR_ID_ENV, ROLE_ENV, RUN_ID_ENV, TASK_ID_ENV},
     actor_model::ActorLaunch,
     authorization::{Capability, grants},
@@ -462,6 +463,7 @@ pub struct HostActorExecutor<'a> {
     provider: Option<&'a dyn AgentProvider>,
     spawner: Option<&'a dyn Spawner>,
     service: Option<&'a dyn ServiceAccess>,
+    events: Option<&'a dyn RunLog>,
     config: ExecutionConfig,
     no_claude: bool,
 }
@@ -476,9 +478,18 @@ impl<'a> HostActorExecutor<'a> {
             provider: None,
             spawner: None,
             service: None,
+            events: None,
             config: ExecutionConfig::default(),
             no_claude: false,
         }
+    }
+
+    /// An agent whose executable was found again at its start
+    /// ([`AgentProvider::relocated_executable`]) is recorded on `events`,
+    /// on its run when it has one (ADR-t2079-1); without it, only logged.
+    pub fn with_events(mut self, events: &'a dyn RunLog) -> Self {
+        self.events = Some(events);
+        self
     }
 
     /// Refuse Claude before opening a workspace or constructing an agent command.
@@ -543,6 +554,75 @@ impl<'a> HostActorExecutor<'a> {
 
     fn spawner(&self) -> Result<&'a dyn Spawner> {
         self.spawner.context("this executor starts no process")
+    }
+
+    /// Spawn `command`, an agent of `provider` for `actor`; when nothing
+    /// was found to execute and the provider finds its executable again by
+    /// its name (the path it was given is gone, ADR-t2079-1), once more
+    /// with that one, which is recorded. Any other failure, and one the
+    /// name does not mend, is the spawn's as before.
+    fn spawn_agent(
+        &self,
+        provider: &dyn AgentProvider,
+        actor: &ActorContext,
+        command: &mut CommandSpec,
+        streams: Streams<'_>,
+    ) -> Result<Box<dyn Spawned>> {
+        let error = match self.spawner()?.spawn(command, streams) {
+            Ok(child) => return Ok(child),
+            Err(error) => error,
+        };
+        let not_found = error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        });
+        let from = PathBuf::from(command.get_program());
+        let Some(to) = not_found
+            .then(|| provider.relocated_executable())
+            .flatten()
+            .filter(|to| *to != from)
+        else {
+            return Err(error);
+        };
+        command.set_program(&to);
+        let child = self.spawner()?.spawn(command, streams)?;
+        self.record_relocation(actor, &from, &to);
+        Ok(child)
+    }
+
+    /// Log and record that `actor`'s agent was started by `to`, found
+    /// again by its provider's name, as `from` was gone (ADR-t2079-1).
+    fn record_relocation(&self, actor: &ActorContext, from: &Path, to: &Path) {
+        tracing::warn!(
+            actor_id = actor.actor_id(),
+            from = %from.display(),
+            to = %to.display(),
+            "{} is gone; the agent of {} starts with {}, found again by its provider's name",
+            from.display(),
+            actor.actor_id(),
+            to.display()
+        );
+        let Some(events) = self.events else {
+            return;
+        };
+        let payload = serde_json::json!({
+            "from": from.to_string_lossy(),
+            "to": to.to_string_lossy(),
+            "actor_id": actor.actor_id(),
+            "role": actor.role().as_str(),
+        });
+        let recorded = match actor.run_id() {
+            Some(run) => {
+                events.record_runtime_event(run, EventKind::ProviderExecutableRelocated, payload)
+            }
+            None => events
+                .record_queue_event(EventKind::ProviderExecutableRelocated, payload)
+                .map(|_| ()),
+        };
+        if let Err(error) = recorded {
+            tracing::warn!(error = %format_args!("{error:#}"), "provider_executable_relocated could not be recorded: {error:#}");
+        }
     }
 
     fn service(&self) -> Result<&'a dyn ServiceAccess> {
@@ -772,8 +852,7 @@ only; an interactive session has no settings that refuse the built-in tools",
                     command.env_remove(name);
                 }
                 let child = self
-                    .spawner()?
-                    .spawn(&command, streams)
+                    .spawn_agent(provider, &actor, &mut command, streams)
                     .context("launch agent")?;
                 Ok(ActorHandle::Process(child))
             }
@@ -787,7 +866,7 @@ only; an interactive session has no settings that refuse the built-in tools",
                 streams,
             } => {
                 let provider = self.provider()?;
-                let spawner = self.spawner()?;
+                self.spawner()?;
                 let mut command = match program {
                     HeadlessProgram::Review {
                         run,
@@ -840,7 +919,7 @@ only; an interactive session has no settings that refuse the built-in tools",
                 for name in without_env {
                     command.env_remove(name);
                 }
-                let child = spawner.spawn(&command, streams)?;
+                let child = self.spawn_agent(provider, &actor, &mut command, streams)?;
                 let child = if client {
                     self.service()?
                         .revoke_on_exit(self.queue, actor.actor_id(), child)
@@ -2077,5 +2156,135 @@ mod tests {
         let silent = |_: &Path| Err::<String, _>("exited with 1".to_owned());
         let error = executor.broker_client(&dagq, &silent).unwrap_err();
         assert_eq!(error.code, FailureCode::VersionMismatch);
+    }
+
+    /// A provider whose executable `/gone/claude` is not there, and which
+    /// finds `found` by its name; the spawner finds nothing at
+    /// `/gone/claude` and records every program it was asked to start.
+    struct Moved {
+        found: Option<PathBuf>,
+        started: Mutex<Vec<PathBuf>>,
+    }
+
+    impl AgentProvider for Moved {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn relocated_executable(&self) -> Option<PathBuf> {
+            self.found.clone()
+        }
+        fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn headless_command(&self, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
+            Ok(CommandSpec::new("/gone/claude"))
+        }
+        fn turn_command(
+            &self,
+            _: &TurnTarget<'_>,
+            _: &str,
+            _: crate::domain::turn::TurnSession<'_>,
+        ) -> Result<CommandSpec> {
+            Ok(CommandSpec::new("/gone/claude"))
+        }
+    }
+
+    impl Spawner for Moved {
+        fn spawn(&self, command: &CommandSpec, _: Streams<'_>) -> Result<Box<dyn Spawned>> {
+            let program = PathBuf::from(command.get_program());
+            self.started.lock().unwrap().push(program.clone());
+            if program == Path::new("/gone/claude") {
+                return Err(anyhow::Error::new(std::io::Error::from(
+                    std::io::ErrorKind::NotFound,
+                )));
+            }
+            Ok(Box::new(Child))
+        }
+    }
+
+    /// ADR-t2079-1: an agent whose executable is gone at its start (a
+    /// planner's turn, a job) starts once more with the one its provider
+    /// finds by its name; with none found, the start fails with the error
+    /// it met, as before, after one attempt.
+    #[test]
+    fn an_agent_whose_executable_is_gone_starts_with_the_one_found_by_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Fake::default();
+        let moved = Moved {
+            found: Some("/bin/claude-new".into()),
+            started: Mutex::default(),
+        };
+        let executor = HostActorExecutor::new(dir.path())
+            .with_provider(&moved)
+            .with_spawner(&moved)
+            .with_queue_service(&service);
+        let turn = |executor: &HostActorExecutor<'_>| {
+            executor.spawn(ActorExecutionSpec::new(
+                ActorContext::instance(ActorRole::Planner, 4),
+                WorkspaceAccess::Write(dir.path().to_path_buf()),
+                ActorProgram::SessionAgent {
+                    agent: SessionAgent::PlannerTurn {
+                        target: TurnTarget {
+                            role: ActorRole::Planner,
+                            dir: dir.path(),
+                            cwd: dir.path(),
+                            debug_log: None,
+                            plugin_dir: None,
+                            broker_required: None,
+                        },
+                        prompt: "p",
+                        session: crate::domain::turn::TurnSession::New("s"),
+                        stdout: dir.path(),
+                        stderr: dir.path(),
+                    },
+                    model: None,
+                },
+            ))
+        };
+        turn(&executor).unwrap();
+        let job = executor
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::instance(ActorRole::ThroughputReviewJob, "daily:1"),
+                WorkspaceAccess::Scratch(dir.path().to_path_buf()),
+                job(dir.path()),
+            ))
+            .unwrap();
+        drop(job);
+        assert_eq!(
+            *moved.started.lock().unwrap(),
+            [
+                "/gone/claude",
+                "/bin/claude-new",
+                "/gone/claude",
+                "/bin/claude-new"
+            ]
+            .map(PathBuf::from)
+        );
+
+        let lost = Moved {
+            found: None,
+            started: Mutex::default(),
+        };
+        let executor = HostActorExecutor::new(dir.path())
+            .with_provider(&lost)
+            .with_spawner(&lost);
+        let error = turn(&executor).err().unwrap();
+        assert!(
+            error.chain().any(|cause| cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)),
+            "{error:#}"
+        );
+        assert_eq!(format!("{error}"), "launch agent");
+        assert_eq!(
+            *lost.started.lock().unwrap(),
+            [PathBuf::from("/gone/claude")]
+        );
     }
 }

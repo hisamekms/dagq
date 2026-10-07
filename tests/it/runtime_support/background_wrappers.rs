@@ -30,6 +30,11 @@ pub struct BackgroundWrappers {
     /// is real, and the test registers the planner and writes its marker
     /// and turns itself.
     parked: Option<u32>,
+    /// The `PATH` each wrapper is started with instead of this process's.
+    pub path: Option<String>,
+    /// A file removed just before each wrapper starts: the version of
+    /// Claude Code an update removes after the supervisor started.
+    pub remove_before_launch: Option<PathBuf>,
 }
 
 impl BackgroundWrappers {
@@ -49,6 +54,8 @@ impl BackgroundWrappers {
             launched: Mutex::default(),
             children: Mutex::default(),
             parked: Some(pid),
+            path: None,
+            remove_before_launch: None,
         }
     }
 
@@ -75,6 +82,12 @@ impl BackgroundWrappers {
             if name.starts_with("DAGQ_") || name.starts_with("CMUX_") {
                 process.env_remove(name);
             }
+        }
+        if let Some(path) = &self.path {
+            process.env("PATH", path);
+        }
+        if let Some(gone) = &self.remove_before_launch {
+            let _ = fs::remove_file(gone);
         }
         let output = fs::File::create(log)?;
         let child = process

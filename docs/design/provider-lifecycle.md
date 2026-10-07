@@ -230,7 +230,7 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 | turnのコマンド | `AgentProvider::turn_command`・`turn_session_exists`（`adapters.rs`・`codex.rs`） |
 | turnの出力の読み手 | `TurnReader`、`claude_turns::ClaudeTurnReader`・`codex_turns::CodexTurnReader` |
 | providerごとの文面 | [Prompt](supervisor-lifecycle/prompt.md#経路とproviderごとの文面) |
-| 実行ファイルの解決 | `adapters::executable`・`codex::executable`、`up`での固定は[運用](../development/operations.md)の「`up`のコマンド」 |
+| 実行ファイルの解決 | [Provider executables](provider-executables.md)、`up`での固定は[運用](../development/operations.md)の「`up`のコマンド」 |
 
 約束と落とし穴:
 

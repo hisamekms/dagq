@@ -29,7 +29,10 @@ use crate::domain::{
     turn::{TurnFailure, TurnSession},
 };
 
-use super::{adapters::output, codex_turns::CodexTurnReader};
+use super::{
+    adapters::{output, provider_executable_on, relocated},
+    codex_turns::CodexTurnReader,
+};
 
 /// Codex CLI (`codex`, resolved to its executable by [`executable`]:
 /// cmux's shim would add hooks and trust flags of its own).
@@ -74,32 +77,38 @@ impl Codex {
 /// its surface.
 const CMUX_SHIMS: &str = "cmux-cli-shims";
 
-/// `path` resolved to the Codex executable (ADR-t813-3 decision 6): a
-/// bare name is looked for on `search` (PATH) past cmux's shims, and the
-/// result is canonicalized.
+/// The name Codex is found again by (ADR-t2079-1).
+pub const CODEX_NAME: &str = "codex";
+
+/// `path` resolved to the Codex executable (ADR-t813-3 decision 6,
+/// ADR-t2079-1): a bare name is looked for on `search` (PATH) past cmux's
+/// shims, a path is taken as it is, and a symbolic link is kept, as
+/// [`provider_executable_on`] does for every provider.
 pub fn executable_on(path: &Path, search: &std::ffi::OsStr) -> Result<PathBuf> {
-    let candidate = if path.components().count() > 1 || path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::split_paths(search)
-            .filter(|dir| !dir.to_string_lossy().contains(CMUX_SHIMS))
-            .map(|dir| dir.join(path))
-            .find(|candidate| candidate.is_file())
-            .with_context(|| {
-                format!(
-                    "{} was not found on PATH (outside cmux's shims)",
-                    path.display()
-                )
-            })?
-    };
-    candidate
-        .canonicalize()
-        .with_context(|| format!("resolve executable {}", candidate.display()))
+    provider_executable_on(path, search, |dir| {
+        dir.to_string_lossy().contains(CMUX_SHIMS)
+    })
+    .map_err(|error| {
+        if path.components().count() > 1 || path.is_absolute() {
+            error
+        } else {
+            anyhow::anyhow!(
+                "{} was not found on PATH (outside cmux's shims)",
+                path.display()
+            )
+        }
+    })
 }
 
 /// [`executable_on`] this process's PATH.
 pub fn executable(path: &Path) -> Result<PathBuf> {
     executable_on(path, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// Codex at `path` as [`provider_at_entry`](super::adapters::provider_at_entry)
+/// resolves it.
+pub fn codex_at_entry(path: &Path) -> Result<PathBuf> {
+    super::adapters::provider_at_entry(path, CODEX_NAME, executable)
 }
 
 /// The project rules the runtime puts in a Codex run's worktree (ADR-t813-3
@@ -422,6 +431,9 @@ impl AgentProvider for Codex {
         output(Command::new(&self.executable).arg("--version"))?;
         Ok(())
     }
+    fn relocated_executable(&self) -> Option<PathBuf> {
+        relocated(&self.executable, CODEX_NAME, executable)
+    }
     fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
         bail!("Codex runs headless only: it has no interactive session")
     }
@@ -691,26 +703,75 @@ mod tests {
         assert!(writable_roots(dir.path(), Path::new("/r"), Path::new("/c")).is_err());
     }
 
+    /// An executable stub at `path`.
+    fn stub(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[test]
     fn codex_is_resolved_past_cmux_shims() {
         let dir = tempfile::tempdir().unwrap();
         let shim = dir.path().join("cmux-cli-shims/s1");
         let bin = dir.path().join("bin");
         for d in [&shim, &bin] {
-            fs::create_dir_all(d).unwrap();
-            fs::write(d.join("codex"), "#!/bin/sh\n").unwrap();
+            stub(&d.join("codex"));
         }
         let search = std::env::join_paths([&shim, &bin]).unwrap();
         assert_eq!(
             executable_on(Path::new("codex"), &search).unwrap(),
-            bin.join("codex").canonicalize().unwrap()
+            bin.join("codex")
         );
         let only_shim = std::env::join_paths([&shim]).unwrap();
-        assert!(executable_on(Path::new("codex"), &only_shim).is_err());
+        let error = executable_on(Path::new("codex"), &only_shim).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("outside cmux's shims"),
+            "{error:#}"
+        );
         // A path is taken as it is.
         assert_eq!(
             executable_on(&shim.join("codex"), &search).unwrap(),
-            shim.join("codex").canonicalize().unwrap()
+            shim.join("codex")
+        );
+        // A file that cannot be executed is no executable.
+        fs::write(bin.join("plain"), "").unwrap();
+        assert!(executable_on(&bin.join("plain"), &search).is_err());
+    }
+
+    /// ADR-t2079-1: Codex is started by its link, found on PATH or given,
+    /// never by the version it points at, past cmux's shims as before.
+    #[test]
+    fn a_linked_codex_is_kept_as_its_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = dir.path().join("versions/0.155.1");
+        stub(&version);
+        let shim = dir.path().join("cmux-cli-shims/s1");
+        stub(&shim.join("codex"));
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(&version, bin.join("codex")).unwrap();
+        let search = std::env::join_paths([&shim, &bin]).unwrap();
+        for given in [Path::new("codex"), &bin.join("codex")] {
+            let found = executable_on(given, &search).unwrap();
+            assert_eq!(found, bin.join("codex"), "{}", given.display());
+            assert!(!found.starts_with(dir.path().join("versions")));
+        }
+        // The version given is gone: the name finds the link again, which
+        // points to a new version of the same installation.
+        let codex = Codex::new(dir.path().join("versions/0.154.0"));
+        assert_eq!(
+            relocated(&codex.executable, CODEX_NAME, |path| executable_on(
+                path, &search
+            )),
+            Some(bin.join("codex"))
+        );
+        assert_eq!(
+            relocated(&bin.join("codex"), CODEX_NAME, |path| executable_on(
+                path, &search
+            )),
+            None
         );
     }
 
