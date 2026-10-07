@@ -41,11 +41,11 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
 - `cargo fmt --all --check`と`cargo clippy --locked --all-targets -- -D warnings`
 - `src/`を変えたら`sh scripts/check-layer-deps.sh`（レイヤーの禁止依存。規則と許可の一覧は[Architecture](../design/architecture.md)の「検査の範囲」）
 - 変更に関係するtestだけの`cargo test`（次の「testの範囲」と「全体を比べるtest」）
-- taskのverifyのうちcoverageの関門（`cargo llvm-cov nextest`。ADR-0076より前に登録されたtaskの`cargo llvm-cov`も同じ）と全体の`cargo test --locked`以外（`cargo test --locked --test plugin`など）
+- taskのverifyのうちcoverageの関門（`cargo llvm-cov nextest`と旧い形の`cargo llvm-cov`）と全体の`cargo test --locked`以外（`cargo test --locked --test plugin`など）
 - 足した・変えたtestのstress（下の「stress」）
 - `tests/it`のtestを足した・変えたら、そのstressのnextestの出力に時間の関門のscript（下の「itのtestの時間の関門」）
 
-全部のtestは`integrate`の検証（runtimeのtaskでは`cargo llvm-cov nextest`（coverageの関門）、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`）がrebase後に1回だけ流す（仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md)）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md#workerのprompt)の「workerのprompt」のverification commandsの項が持つ。例外は「resumeでの再現」の1つだけ。
+着地の関門は`integrate`の検証がrebase後に1回だけ流す。runtimeのtaskではverifyのcoverageの関門を`dagq.toml`の`[landing_verification]`がunit test全件と影響範囲で絞ったIT（既に落ちているtestを除く）に置き換え、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`を流す（[testの制約](testing.md)の「test binary」、仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md#着地の検証)）。全部のtestとcoverageの80%はmainのCIが最終関門として見る。着地の検証が軽くなっても、workerの手元の検証は上のとおりで変わらない（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)決定6）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md#workerのprompt)の「workerのprompt」のverification commandsの項が持つ。例外は「resumeでの再現」の1つだけ。
 
 subagent reviewは該当するときに実行し、しないときは理由をreceiptに書く。
 
@@ -54,13 +54,13 @@ subagent reviewは該当するときに実行し、しないときは理由をre
 - 変えた・関係するmoduleを1つずつ`<module>::`で名指しして流す。例: `cargo test --locked --test it <変えた・関係するtestファイルの名前>::`（`tests/it/runtime_claim.rs`なら`cargo test --locked --test it runtime_claim::`。e2eとplugin以外のintegration testは1つのtest binary `it`のmoduleで、ファイル名がmodule名になる。[ADR-0078](../adr/0078-one-integration-test-binary.md)）、`cargo test --locked --lib <module>`。
 - 選び方の目安: 変えた`src/`のmoduleのunit test（`--lib <moduleのパス>`）と、その機能の`tests/it`のmodule（例: `tests/it/runtime_claim.rs`を変えたら`runtime_claim::`、`tests/it/lifecycle_replace.rs`なら`lifecycle_replace::`）。
 - filterはtestの名前（`<module>::<test>`）の部分一致なので、`runtime_`・`lifecycle_`のような接頭辞だけのfilterは多くのmoduleを選ぶ。`--test it`をfilterなしで流さない、接頭辞だけのfilterや多数のmoduleの列挙で`it`の大半を流さない、`--test it --test plugin`を合わせて全体を流さない。
-- `tests/common`や`tests/it/runtime_support`のhelperを変えたら、それを使っているmoduleを流す。使うmoduleが多いときは代表のmodule（数個）に絞り、残りは`integrate`の関門に任せたことをreceiptの`tests`のevidenceに書く。
+- `tests/common`や`tests/it/runtime_support`のhelperを変えたら、それを使っているmoduleを流す。使うmoduleが多いときは代表のmodule（数個）に絞り、残りは着地の検証（絞ったITは`tests/common`に触れれば全部のITを流す）とCIに任せたことをreceiptの`tests`のevidenceに書く。
 - `crates/`のbrokerのcrate（[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)）を変えたら、そのcrateのtestを`cargo test --locked -p <crate>`（`-p dagq-broker-protocol`など。そのcrateの`src/`のunit testと`crates/<crate>/tests/`を流す）で流す。workspaceの`default-members`が全てのcrateを含むので、`-p`を付けない`--test it`と`--lib`も通る（`--lib`は全てのcrateのunit testからfilterに合うものを選ぶ）。
 - これは流す範囲の選び方の手がかりで、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則は変わらない。receiptの`tests`のevidenceには流したtestの範囲（コマンドと件数）を書く。
 
 ## 全体を比べるtest
 
-変えた機能のmoduleに加えて、queueや出力の全体を比べる既存のtestも流す（変えた機能と関係すると気づきにくく、`integrate`の関門で初めて落ちやすいため）。
+変えた機能のmoduleに加えて、queueや出力の全体を比べる既存のtestも流す（変えた機能と関係すると気づきにくく、着地の検証の絞ったITが選ばなければCIで初めて落ちやすいため）。
 
 - migrationを足す・変える → `--test it`の`queue_migration::`・`queue_schema::`・`lifecycle_replace::`・`cli_version::`（migrationの前後で行とindexとtriggerを保つこと、別のschemaのqueueを開くこと、互換のmigrationの適用と非互換の拒否、`migrate --check`と`doctor`のschemaを比べる）
 - `doctor` / `status`の出力に欄を足す・変える → `--test it`の`cli_tasks::`（`reads_do_not_create_a_queue_and_unknown_tasks_fail`が出力を丸ごとのobjectと比べる）と`cli_read::`
@@ -68,7 +68,7 @@ subagent reviewは該当するときに実行し、しないときは理由をre
 
 ## resumeでの再現
 
-- 手元で`cargo llvm-cov`（`cargo llvm-cov nextest`を含む）や全体のtestを流してよいのは、`integrate`の検証（coverageの関門など）が落ちてresumeされたrunが、その落ちたコマンドを手元で流して再現するときだけ。
+- 手元で`cargo llvm-cov`（`cargo llvm-cov nextest`を含む）や全体のtestを流してよいのは、`integrate`の検証が落ちてresumeされたrunが、その落ちたコマンドを手元で流して再現するときだけ。coverageの関門が置き換わったtaskで再現するのは、置き換えの後の着地の検証のコマンド（`sh scripts/landing-it.sh`。`DAGQ_LANDING_BASE`にrebase先のmainのcommitを渡さなければITを全部流し、`DAGQ_CI_KNOWN_FAILURES`を渡さなければ既に落ちているtestも流れて落ちる）で、llvm-covではない（ADR-t1925-1決定6）。
 - rebaseの衝突・migrationの番号・receiptの催促など、検証の失敗以外の理由のresumeと、reviewの差し戻し（revise）はこの例外に当たらず、上の関係するtestだけを流す。
 
 ## e2eを流さない
@@ -88,12 +88,12 @@ subagent reviewは該当するときに実行し、しないときは理由をre
 - 1回でも落ちたら、流し直して通ったことで済ませず、原因（固定の時間の待ち、他のtestとの状態の共有、順序への依存など）を直してからもう一度同じstressを通し、receiptを書く。
 - receiptの`tests`のevidenceに、繰り返したtestの名前・周回数か時間・結果（例: `stress 5 周 × 3 本、15/15 passed`）を書く。
 - 変えたtestが無いrun（docsだけ、testに触らない`src/`の変更など）はstressをせず、しないことと理由（変えたtestが無い）をevidenceに書く。
-- cargo-nextestはhostに入っている前提（[ADR-0076](../adr/0076-run-the-coverage-gate-tests-with-nextest.md)決定3。入れ方は[運用](operations.md)の「hostのツール」）で、無ければworkerは入れず、stressをしなかったことと理由（cargo-nextestが無い）をreceiptに書く。
+- cargo-nextestはhostに入っている前提（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)決定8。入れ方は[運用](operations.md)の「hostのツール」）で、無ければworkerは入れず、stressをしなかったことと理由（cargo-nextestが無い）をreceiptに書く。
 - これは足した・変えたtestだけをworkerの手元で流すもので、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則はそのまま。
 
 ## 負荷の下で落ちるtestの再現
 
-負荷の下で落ちるtestを直すとき（resumeでの検証の失敗、flaky_testのtaskなど）、workerは再現のためにhostに負荷を足さない（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)）。hostはworker・`integrate`の検証（coverageの関門）・supervisorの見張りが共有していて、1本のrunが作った負荷が他のrunの検証と見張りを壊すため。
+負荷の下で落ちるtestを直すとき（resumeでの検証の失敗、flaky_testのtaskなど）、workerは再現のためにhostに負荷を足さない（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)）。hostはworker・`integrate`の検証・supervisorの見張りが共有していて、1本のrunが作った負荷が他のrunの検証と見張りを壊すため。
 
 - 起動しないもの: testと別に負荷だけを作るprocess（`yes`・busy loop・stressの道具など）、同時に2本以上の`cargo test` / `cargo nextest`のprocess（backgroundに置いたものも数える）、`[run.env]`が渡すtestの並列度（`NEXTEST_TEST_THREADS`・`RUST_TEST_THREADS`。今の値は`dagq.toml`）より大きい`-j` / `--test-threads`。
 - 再現と原因の確かめ方: 記録（eventのdump・log）を読む、待っている条件と上限を確かめる、testの中で遅れを決定的に作る（stubの遅延、上限を縮めるなど）、1本のprocessでの上限つきの繰り返し。
@@ -119,7 +119,7 @@ subagent reviewは該当するときに実行し、しないときは理由をre
 
 ## hostに触らない
 
-- resumeされたrunで`cargo llvm-cov nextest`がcargo-nextestが見つからずに落ちていたら（`no such command: nextest`など）、workerはhostにツールを入れられないので直そうとせず、`failed`のreceiptに「cargo-nextestが無い」と理由を書いて返す（ADR-0076決定3）。`dagq ask`にはしない（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定41の人が要る理由に当たらず、`failed`のreceiptは復旧jobを経て人に届く）。
+- resumeされたrunで着地の検証（`cargo llvm-cov nextest`か、それを置き換えた`sh scripts/landing-it.sh`）がcargo-nextestが見つからずに落ちていたら（`no such command: nextest`など）、workerはhostにツールを入れられないので直そうとせず、`failed`のreceiptに「cargo-nextestが無い」と理由を書いて返す（ADR-t1925-1決定8）。`dagq ask`にはしない（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定41の人が要る理由に当たらず、`failed`のreceiptは復旧jobを経て人に届く）。
 
 ## 受け入れ条件の対応づけ
 
