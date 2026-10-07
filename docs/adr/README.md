@@ -4,8 +4,6 @@ type: design
 title: Architecture decision records
 status: current
 created: 2026-09-21
-updated: 2026-10-07
-last_verified: 2026-09-30
 tags:
   - architecture
   - documentation

@@ -4,8 +4,6 @@ type: design
 title: Current design documents
 status: current
 created: 2026-09-21
-updated: 2026-10-06
-last_verified: 2026-10-06
 tags:
   - architecture
 ---

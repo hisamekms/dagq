@@ -4,7 +4,6 @@ type: plan
 title: docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）の定義と基準値
 status: active
 created: 2026-10-07
-updated: 2026-10-07
 owners:
   - hisamekms
 tags:

@@ -4,7 +4,6 @@ type: plan
 title: 夜の人の答え待ちが着地を遅らせた量
 status: completed
 created: 2026-09-28
-updated: 2026-09-28
 owners:
   - hisamekms
 tags:

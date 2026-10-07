@@ -4,8 +4,6 @@ type: design
 title: Domain model
 status: current
 created: 2026-09-21
-updated: 2026-10-07
-last_verified: 2026-10-06
 scope: domain
 related:
   - adr-t1704-1

@@ -4,8 +4,6 @@ type: design
 title: "workerの質問への回答の送信"
 status: current
 created: 2026-09-26
-updated: 2026-10-04
-last_verified: 2026-10-04
 scope: runtime
 related:
   - design-supervisor-lifecycle

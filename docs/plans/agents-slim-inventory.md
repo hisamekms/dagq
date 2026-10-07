@@ -4,7 +4,6 @@ type: plan
 title: AGENTS.mdとpluginのdagq repository固有の記述の棚卸しの表と、整理の前後の照合と役割ごとの読む量
 status: active
 created: 2026-10-03
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

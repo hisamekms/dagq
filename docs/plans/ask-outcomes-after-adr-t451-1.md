@@ -4,7 +4,6 @@ type: plan
 title: ADR-t451-1の実装の着地の前後の、askのkindごとの件数・人の答え待ち・AIが決めた件数と、AIが決めたlandの後の手直し
 status: completed
 created: 2026-10-05
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

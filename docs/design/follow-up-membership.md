@@ -4,8 +4,6 @@ type: design
 title: Follow-up membership judgements
 status: current
 created: 2026-10-04
-updated: 2026-10-05
-last_verified: 2026-10-05
 scope: runtime
 related:
   - adr-t1504-2

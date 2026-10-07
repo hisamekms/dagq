@@ -4,7 +4,6 @@ type: plan
 title: 2026-09-27 04:00〜06:30 JSTのloadの山とcmuxのcaptureの時間切れの出どころ
 status: completed
 created: 2026-09-29
-updated: 2026-09-30
 owners:
   - hisamekms
 tags:

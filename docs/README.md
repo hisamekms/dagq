@@ -4,8 +4,6 @@ type: design
 title: Documentation guide
 status: current
 created: 2026-09-21
-updated: 2026-10-07
-last_verified: 2026-10-03
 tags:
   - documentation
 ---
@@ -29,4 +27,4 @@ frontmatterの欄は[frontmatter仕様](frontmatter.md)が持つ（従う規則�
 
 ## 更新ルール
 
-ADRを実装より先に作る決定、designの内容と`updated` / `last_verified`の更新、計画の依存関係・完了条件・状態の更新の規則は[文書の規則](development/documents.md)の「ADR」「design」「plans」が持つ。
+ADRを実装より先に作る決定、designの内容の更新、計画の依存関係・完了条件・状態の更新の規則は[文書の規則](development/documents.md)の「ADR」「design」「plans」が持つ。

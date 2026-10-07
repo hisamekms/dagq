@@ -4,7 +4,6 @@ type: plan
 title: claim の間隔の導入前後の load と保留の比較
 status: completed
 created: 2026-10-05
-updated: 2026-10-05
 related:
   - adr-t1479-1
   - adr-0049

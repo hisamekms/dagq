@@ -4,7 +4,6 @@ type: development
 title: このrepositoryの本番queueの運用（固定バイナリ・使い捨てのqueue・hostのツール・dagq.toml・upのコマンド・KPIの印・secret・人への報告）
 status: current
 created: 2026-10-03
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

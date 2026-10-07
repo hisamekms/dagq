@@ -4,8 +4,6 @@ type: design
 title: "`rebind`"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle

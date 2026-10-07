@@ -4,7 +4,6 @@ type: plan
 title: 2026-09-26以降の本番のaskのkindごとの件数と、answerが推奨・見立てどおりだった割合
 status: completed
 created: 2026-10-02
-updated: 2026-10-02
 owners:
   - hisamekms
 tags:

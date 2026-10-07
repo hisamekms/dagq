@@ -4,7 +4,6 @@ type: plan
 title: 新しいrunのworktreeに温まったtargetをAPFSのcloneで入れたときのbuildの短縮の見積もり（sccacheとの重なりを含めて）
 status: completed
 created: 2026-10-02
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

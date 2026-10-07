@@ -4,7 +4,6 @@ type: plan
 title: 着地をまとめて検証する（batching）効果の、着地の枠を分ける案と合わせた見積もりと方式の候補
 status: completed
 created: 2026-10-02
-updated: 2026-10-02
 owners:
   - hisamekms
 tags:

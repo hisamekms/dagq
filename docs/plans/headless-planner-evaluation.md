@@ -4,7 +4,6 @@ type: plan
 title: runtime の planner の対話の期間の基準値と、非対話に切り替えた後の評価のコマンドと、対話に戻す基準の案
 status: active
 created: 2026-10-03
-updated: 2026-10-04
 owners:
   - hisamekms
 tags:

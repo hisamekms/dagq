@@ -4,7 +4,6 @@ type: plan
 title: tests/it の全 1,192 本の分類（境界・判断・代表あり・goal 92 で消える）と、it でないと担保できない test の見積もり
 status: active
 created: 2026-10-04
-updated: 2026-10-07
 owners:
   - hisamekms
 tags:

@@ -4,7 +4,6 @@ type: plan
 title: worker の問い（worker_question）の中身の分類と、ラベルの定義案
 status: completed
 created: 2026-09-28
-updated: 2026-09-28
 owners:
   - hisamekms
 tags:

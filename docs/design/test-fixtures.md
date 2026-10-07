@@ -4,8 +4,6 @@ type: design
 title: Test fixture templates
 status: current
 created: 2026-10-06
-updated: 2026-10-06
-last_verified: 2026-10-06
 scope: operations
 tags:
   - testing

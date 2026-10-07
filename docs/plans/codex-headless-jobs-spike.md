@@ -4,7 +4,6 @@ type: plan
 title: スパイク：goal review job を Codex（codex exec）の読み取りだけの sandbox で動かせるか
 status: completed
 created: 2026-09-29
-updated: 2026-09-30
 owners:
   - hisamekms
 tags:

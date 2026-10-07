@@ -4,8 +4,6 @@ type: design
 title: Claude Code and Codex plugin integration
 status: current
 created: 2026-09-21
-updated: 2026-10-07
-last_verified: 2026-10-07
 scope: distribution
 related:
   - adr-t655-1

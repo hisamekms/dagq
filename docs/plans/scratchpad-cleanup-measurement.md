@@ -4,7 +4,6 @@ type: plan
 title: "task 1100: 本番 scratchpad 掃除後の容量と disk の閾値"
 status: completed
 created: 2026-09-30
-updated: 2026-09-30
 ---
 
 # 本番 scratchpad 掃除後の測定（task 1117 / goal 54）

@@ -4,7 +4,6 @@ type: development
 title: このrepositoryのmigrationの規則（足し方・番号・リリース済みのmigrationの不変）
 status: current
 created: 2026-10-03
-updated: 2026-10-07
 owners:
   - hisamekms
 tags:

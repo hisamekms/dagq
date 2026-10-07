@@ -4,7 +4,6 @@ type: plan
 title: follow-up の所属判断の評価指標と導入前の基準値
 status: active
 created: 2026-10-05
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

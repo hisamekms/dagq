@@ -4,8 +4,6 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-10-05
-last_verified: 2026-10-05
 scope: operations
 related:
   - adr-0036

@@ -4,7 +4,6 @@ type: plan
 title: 非対話の worker の workspace のコスト（cmux の呼び出しの失敗・時間切れ・残った workspace・startup・待ちの間の workspace）の基準値と、background の wrapper に切り替えた後の評価のコマンドと戻す基準の案
 status: active
 created: 2026-10-03
-updated: 2026-10-06
 owners:
   - hisamekms
 tags:

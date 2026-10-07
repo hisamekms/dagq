@@ -4,8 +4,6 @@ type: design
 title: "Roles"
 status: current
 created: 2026-09-26
-updated: 2026-10-07
-last_verified: 2026-10-07
 scope: runtime
 related:
   - adr-t1228-2

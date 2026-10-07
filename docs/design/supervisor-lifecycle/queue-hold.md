@@ -4,8 +4,6 @@ type: design
 title: "認証と利用上限のaskの待ちとanswer"
 status: current
 created: 2026-09-27
-updated: 2026-10-07
-last_verified: 2026-10-07
 scope: runtime
 related:
   - adr-0047

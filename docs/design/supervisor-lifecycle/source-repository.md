@@ -4,8 +4,6 @@ type: design
 title: "Source repository"
 status: current
 created: 2026-09-27
-updated: 2026-10-03
-last_verified: 2026-10-03
 scope: runtime
 related:
   - design-supervisor-lifecycle

@@ -4,7 +4,6 @@ type: plan
 title: スパイク：run の review job の中で review の subagent を Claude と Codex の非対話の呼び出しで動かせるか
 status: completed
 created: 2026-10-03
-updated: 2026-10-06
 owners:
   - hisamekms
 tags:

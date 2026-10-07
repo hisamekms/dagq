@@ -4,8 +4,6 @@ type: design
 title: Issue for failing CI on main
 status: current
 created: 2026-10-02
-updated: 2026-10-06
-last_verified: 2026-10-06
 scope: operations
 tags:
   - ci

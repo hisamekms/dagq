@@ -4,7 +4,6 @@ type: plan
 title: 本番の queue での Claude の非対話の worker と対話の worker の比較と、既定を切り替えるかの推奨
 status: active
 created: 2026-09-30
-updated: 2026-10-02
 owners:
   - hisamekms
 tags:

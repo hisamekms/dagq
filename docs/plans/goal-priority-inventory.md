@@ -4,7 +4,6 @@ type: plan
 title: 既存の open・draft の goal のラベルと優先度の初期値の案と、high 以上の goal に残る task の後回しの判定の案
 status: active
 created: 2026-10-05
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

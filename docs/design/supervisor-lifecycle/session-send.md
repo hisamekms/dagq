@@ -4,8 +4,6 @@ type: design
 title: "sessionへの送信と確認"
 status: current
 created: 2026-09-26
-updated: 2026-10-07
-last_verified: 2026-10-07
 scope: runtime
 related:
   - design-supervisor-lifecycle

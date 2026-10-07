@@ -4,7 +4,6 @@ type: plan
 title: スパイク：Claude（claude -p）と Codex（codex exec）の非対話の worker の測定
 status: completed
 created: 2026-09-28
-updated: 2026-09-28
 owners:
   - hisamekms
 tags:

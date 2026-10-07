@@ -4,7 +4,6 @@ type: plan
 title: 非対話の worker の ask と待ちをゼロベースの形へ移す時期（境目のリファクタを始める時期と、新しい実装を広げる範囲）を判断する計測の項目・基準値・条件の案
 status: active
 created: 2026-10-02
-updated: 2026-10-02
 owners:
   - hisamekms
 tags:

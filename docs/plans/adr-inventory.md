@@ -4,7 +4,6 @@ type: plan
 title: ADR 0001〜0034の決定・後継ADR・designの対応表
 status: completed
 created: 2026-09-25
-updated: 2026-10-07
 owners:
   - hisamekms
 tags:

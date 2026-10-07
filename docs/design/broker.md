@@ -4,8 +4,6 @@ type: design
 title: Resource broker
 status: current
 created: 2026-09-28
-updated: 2026-10-06
-last_verified: 2026-10-06
 scope: runtime
 tags:
   - security

@@ -4,7 +4,6 @@ type: development
 title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、固定バイナリを待つ宣言、負荷の下で落ちるtestを直すtask、ADRを書くtask、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
-updated: 2026-10-07
 owners:
   - hisamekms
 tags:

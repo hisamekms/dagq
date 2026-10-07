@@ -4,8 +4,6 @@ type: design
 title: "1 runの異常（abandon）"
 status: current
 created: 2026-09-26
-updated: 2026-10-05
-last_verified: 2026-10-05
 scope: runtime
 related:
   - design-supervisor-lifecycle

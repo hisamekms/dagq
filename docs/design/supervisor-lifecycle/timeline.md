@@ -4,8 +4,6 @@ type: design
 title: "`timeline`"
 status: current
 created: 2026-09-26
-updated: 2026-10-04
-last_verified: 2026-10-04
 scope: runtime
 related:
   - design-supervisor-lifecycle

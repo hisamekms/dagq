@@ -4,8 +4,6 @@ type: design
 title: "当面の依存図（`graph --format d2|svg`）"
 status: current
 created: 2026-09-27
-updated: 2026-10-07
-last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle

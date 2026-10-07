@@ -4,7 +4,6 @@ type: plan
 title: receipt の follow_up の種類と runtime の planner の判断の分類と、ラベルの定義案
 status: completed
 created: 2026-09-28
-updated: 2026-09-28
 owners:
   - hisamekms
 tags:

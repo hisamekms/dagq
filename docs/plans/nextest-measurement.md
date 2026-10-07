@@ -4,7 +4,6 @@ type: plan
 title: cargo llvm-cov nextestへの切り替え前後のintegrateのverifyの所要時間と遅いtest
 status: completed
 created: 2026-09-26
-updated: 2026-09-28
 owners:
   - hisamekms
 tags:

@@ -4,7 +4,6 @@ type: plan
 title: 着地中にworkerのrunのCPUの優先度を下げたときの着地の検証の時間・workerの遅れ・loadの測定と、着地の枠を分ける効果の見積もり直し
 status: completed
 created: 2026-10-02
-updated: 2026-10-02
 owners:
   - hisamekms
 tags:

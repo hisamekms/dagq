@@ -4,8 +4,6 @@ type: design
 title: "Logs"
 status: current
 created: 2026-09-26
-updated: 2026-09-29
-last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle

@@ -4,7 +4,6 @@ type: development
 title: このrepositoryの文書の規則（判断の記録・ADR・design・plans・frontmatter・workerの文書の照合・AGENTS.md・commit）
 status: current
 created: 2026-10-03
-updated: 2026-10-07
 owners:
   - hisamekms
 tags:
@@ -74,7 +73,7 @@ related:
 - 名前・欄・既定値の意味が要るなら、定義のそばのdoc commentに書く。
 - designを書き直すのは、流れ・境界・不変条件・コードから読めない約束が変わったときと、記述が今のコードかacceptedのADRと食い違うときだけ。
   変えた名前がdesignに無いことはずれではない（[ADR-t1942-2](../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)、下の「workerの文書の照合」）。
-- 内容を変えたら`updated`（確かめたなら`last_verified`も）を直し、内容を変える必要がない文書には日付だけの差分を作らない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
+- designは`updated`・`last_verified`を持たず（下の「frontmatter」）、内容を変える必要がない文書に差分を作らない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
 - 計測が読む・書くストアやビュー（表・ファイル・外の記録）を足すtaskは、同じ変更で[計測](../design/measurement.md)の「SSOTとビュー」の節に区分（SSOT・ビュー・材料）と今のアダプタを書く（[ADR-t1662-2](../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定9）。
 
 ### 形と予算
@@ -143,9 +142,11 @@ related:
 
 frontmatterは[frontmatter仕様](../frontmatter.md)に従う。
 
-`created`・`updated`・`last_verified`の行は`YYYY-MM-DD`の日付だけを書き、行末にどのtaskが何を変えたかのコメント（`# task N`など）を書かない。どのtaskが変えたかはgitの履歴（着地のcommitの`Dagq-Task` trailer）が持つ。既存の文書（ADRも含む。決定と本文に触れないのでappend-onlyに当たらない）の日付の行にコメントがあれば、日付の値を変えずにコメントだけを消してよい。同じ文書を変える2つのtaskが日付の行で衝突しないためで、経緯は[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)。`scripts/check-frontmatter-dates.sh`はfrontmatterの日付の行（frontmatter仕様が持たせるもの）にコメントがあれば、ファイルと行を出して落ちる検査で、CIが実行する（docsを変えるtaskのverifyへの足し方は[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
+ADR以外の文書（design・development・plans、`docs/README.md`・`docs/frontmatter.md`・`docs/adr/README.md`も）のfrontmatterは`updated`と`last_verified`を持たない。文書を変えるtaskがこの行を書き換えると、同じ文書を変える2つのtaskが内容が重ならなくてもこの行で衝突するためで、経緯は[ADR-t1964-1](../adr/2026-10-07-t1964-1-non-adr-docs-drop-updated-and-last-verified.md)。いつ・どのtaskが変えたかは`git log -- <path>`で辿る。
 
-`scripts/check-doc-frontmatter.sh`はADR以外の`docs/`の文書のfrontmatter（必須のkey、designの`last_verified`、typeとstatusの値、idの形と重複）を、`scripts/check-doc-links.sh`は`docs/`とrootの`.md`の相対リンクが実在のファイルかdirectoryを指すことを検査し、違反のファイルと理由を出して落ちる。どちらもCIが実行し、`docs/`を変えるtaskのverifyに付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。検査の範囲と例外（ADRのfrontmatterを見ないこと、append-onlyのADRから削除済みの`docs/journal/`へのリンク）はscriptの冒頭のcommentが持つ。
+`created`とADRの`updated`の行は`YYYY-MM-DD`の日付だけを書き、行末にどのtaskが何を変えたかのコメント（`# task N`など）を書かない。どのtaskが変えたかはgitの履歴（着地のcommitの`Dagq-Task` trailer）が持つ。既存の文書（ADRも含む。決定と本文に触れないのでappend-onlyに当たらない）の日付の行にコメントがあれば、日付の値を変えずにコメントだけを消してよい。経緯は[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)。`scripts/check-frontmatter-dates.sh`はfrontmatterの日付の行（frontmatter仕様が持たせるもの）にコメントがあれば、ファイルと行を出して落ちる検査で、CIが実行する（docsを変えるtaskのverifyへの足し方は[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
+
+`scripts/check-doc-frontmatter.sh`はADR以外の`docs/`の文書のfrontmatter（必須のkey、typeとstatusの値、idの形と重複）を、`scripts/check-doc-links.sh`は`docs/`とrootの`.md`の相対リンクが実在のファイルかdirectoryを指すことを検査し、違反のファイルと理由を出して落ちる。どちらもCIが実行し、`docs/`を変えるtaskのverifyに付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。検査の範囲と例外（ADRのfrontmatterを見ないこと、append-onlyのADRから削除済みの`docs/journal/`へのリンク）はscriptの冒頭のcommentが持つ。
 
 ## 権限の表を写す文書
 

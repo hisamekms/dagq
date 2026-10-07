@@ -4,8 +4,6 @@ type: design
 title: agentのeval（定義とケースの置き場・ケースの欄・patchの共有・CLI・event・費用の上限と既定値・evalの枠・採用の判定・productionのケースと見張り・道具の宣言とproviderごとの変換・本番と共有する起動経路・programのreviewの当て方）
 status: draft
 created: 2026-10-06
-updated: 2026-10-06
-last_verified: 2026-10-06
 scope: runtime
 related:
   - adr-t1728-1

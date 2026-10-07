@@ -4,7 +4,6 @@ type: plan
 title: スパイク：reviewのagentをevalで測って改善する（外のrepository dagq-agent-evalのSpike〜MVPの結果・決めたこと・所見の行き先）
 status: completed
 created: 2026-10-06
-updated: 2026-10-06
 owners:
   - hisamekms
 tags:

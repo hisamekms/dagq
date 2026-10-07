@@ -4,7 +4,6 @@ type: plan
 title: 既存の open の goal に残る follow_up 由来の task と draft の所属の分類案
 status: active
 created: 2026-10-05
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

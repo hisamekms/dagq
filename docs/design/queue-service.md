@@ -4,8 +4,6 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-07
-last_verified: 2026-10-06
 scope: runtime
 tags:
   - security

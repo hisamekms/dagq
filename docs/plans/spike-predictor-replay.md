@@ -4,7 +4,6 @@ type: plan
 title: スパイク：過去の run の再現で task の重さと手戻りの予測の担い手を比べる
 status: completed
 created: 2026-09-26
-updated: 2026-09-26
 owners:
   - hisamekms
 tags:

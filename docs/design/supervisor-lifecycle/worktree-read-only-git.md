@@ -4,8 +4,6 @@ type: design
 title: "worktreeへの読み取り専用のgit"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
 scope: runtime
 related:
   - design-supervisor-lifecycle

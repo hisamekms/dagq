@@ -4,8 +4,6 @@ type: design
 title: "`recover RUN_ID`"
 status: current
 created: 2026-09-26
-updated: 2026-09-30
-last_verified: 2026-09-30
 scope: runtime
 related:
   - design-supervisor-lifecycle

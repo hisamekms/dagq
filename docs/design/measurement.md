@@ -4,8 +4,6 @@ type: design
 title: 計測（SSOTとビュー・区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類）
 status: draft
 created: 2026-10-04
-updated: 2026-10-07
-last_verified: 2026-10-05
 scope: runtime
 related:
   - adr-t1662-1

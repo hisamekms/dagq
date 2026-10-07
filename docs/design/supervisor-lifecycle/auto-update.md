@@ -4,8 +4,6 @@ type: design
 title: "Auto-update"
 status: current
 created: 2026-09-26
-updated: 2026-10-06
-last_verified: 2026-10-06
 scope: runtime
 related:
   - design-supervisor-lifecycle

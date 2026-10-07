@@ -36,7 +36,6 @@ type: plan
 title: 変えた名前で文書の候補を探す指示の前後測定
 status: completed
 created: 2026-10-05
-updated: 2026-10-05
 related:
   - plan-acceptance-check
   - adr-t1688-1

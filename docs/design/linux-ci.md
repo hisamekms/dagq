@@ -4,8 +4,6 @@ type: design
 title: Linux build and test job in CI
 status: current
 created: 2026-10-02
-updated: 2026-10-05
-last_verified: 2026-10-05
 scope: operations
 tags:
   - testing

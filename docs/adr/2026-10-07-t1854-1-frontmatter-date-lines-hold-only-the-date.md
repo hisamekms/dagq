@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-07
 updated: 2026-10-07
 accepted_on: 2026-10-07
+amended_by:
+  - adr-t1964-1
 owners:
   - hisamekms
 tags:
@@ -19,6 +21,8 @@ related:
 ---
 
 # ADR-t1854-1: frontmatterの日付の行は日付だけを持ち、変えたtaskはgitの履歴に任せる
+
+> **一部変更（2026-10-07）**: 決定1のうちADR以外の文書が`updated`・`last_verified`を持つ部分は[ADR-t1964-1](2026-10-07-t1964-1-non-adr-docs-drop-updated-and-last-verified.md)がamendsした（ADR以外の文書はこの2つの欄を持たない。ADRの`updated`とどのtypeの`created`は日付だけのまま）。
 
 ## Context
 

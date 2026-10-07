@@ -4,7 +4,6 @@ type: plan
 title: build scriptのrerun-if-changedをworktreeに依らない形にしたときの、cloneしたtargetでのdagqのcrateのbuildの短縮の測定
 status: completed
 created: 2026-10-05
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

@@ -4,7 +4,6 @@ type: plan
 title: 遅いintegration testの時間が使われている待ちの内訳と、修正の候補の見積もり
 status: active
 created: 2026-09-29
-updated: 2026-10-03
 owners:
   - hisamekms
 tags:

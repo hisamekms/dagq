@@ -4,8 +4,6 @@ type: design
 title: Documentation frontmatter specification
 status: current
 created: 2026-09-21
-updated: 2026-10-07
-last_verified: 2026-10-03
 tags:
   - documentation
   - conventions
@@ -32,18 +30,18 @@ related:
 ---
 ```
 
-`id`, `type`, `title`, `status`, `created`, and `updated` are required. `owners`, `tags`, and `related` are optional lists of strings. Dates use ISO 8601 calendar dates (`YYYY-MM-DD`). IDs are stable and use lowercase kebab-case, except ADR IDs. ADR IDs (`adr-NNNN` and `adr-t<task ID>-<N>`), their filenames and how they are referenced follow [the documentation rules](development/documents.md) (「ADRのID」).
+`id`, `type`, `title`, `status`, and `created` are required, and ADRs also require `updated`. `owners`, `tags`, and `related` are optional lists of strings. Dates use ISO 8601 calendar dates (`YYYY-MM-DD`). IDs are stable and use lowercase kebab-case, except ADR IDs. ADR IDs (`adr-NNNN` and `adr-t<task ID>-<N>`), their filenames and how they are referenced follow [the documentation rules](development/documents.md) (「ADRのID」).
 
-`updated` is the last content change. Design documents also use `last_verified` for the date on which the document was checked against the implementation. The `created`, `updated` and `last_verified` lines hold only the date, with no trailing comment such as `# task N` naming the task or the change; which task changed a document is in the Git history (the `Dagq-Task` trailer of the landing commit), per [ADR-t1854-1](adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md).
+In an ADR, `updated` is the last content change. Documents other than ADRs (types `design`, `development` and `plan`) have no `updated` or `last_verified`; when a document changed and which task changed it are in the Git history, per [ADR-t1964-1](adr/2026-10-07-t1964-1-non-adr-docs-drop-updated-and-last-verified.md). The `created` line and the `updated` line of an ADR hold only the date, with no trailing comment such as `# task N` naming the task or the change; which task changed a document is in the Git history (the `Dagq-Task` trailer of the landing commit), per [ADR-t1854-1](adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md) decision 1.
 
 ## Type-specific fields
 
 | Type | Allowed status | Additional fields |
 | --- | --- | --- |
 | `adr` | `proposed`, `accepted`, `rejected`, `superseded`, `deprecated` | `accepted_on`, `superseded_by`, `superseded_on`, `deprecated_on`, `supersedes`, `amends`, `amended_by` (see [ADR fields](#adr-fields)) |
-| `design` | `draft`, `current`, `deprecated`, `superseded` | `last_verified`, optional `scope` |
+| `design` | `draft`, `current`, `deprecated`, `superseded` | optional `scope` |
 | `plan` | `proposed`, `active`, `blocked`, `completed`, `archived` | optional `milestone`, `target`, `depends_on` |
-| `development` | `current`, `deprecated` | optional `last_verified` |
+| `development` | `current`, `deprecated` | — |
 
 Design documents describe the current state and may be edited. Development documents (`docs/development/`) hold this repository's current development rules (how a planner chooses verify, paths, evidence and change, what tests a worker runs, the test and documentation rules) and may be edited, with IDs `development-<slug>`; the reasons and history stay in ADRs and plans ([ADR-t1453-2](adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)). Plans describe intended work and may be edited while active. The progress and state of individual tasks live in the dagq queue, not in documents.
 

@@ -4,8 +4,6 @@ type: design
 title: Scheduled stress of recently changed tests in GitHub Actions
 status: current
 created: 2026-09-28
-updated: 2026-10-03
-last_verified: 2026-10-02
 scope: operations
 tags:
   - testing

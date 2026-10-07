@@ -4,7 +4,6 @@ type: plan
 title: Project milestones
 status: active
 created: 2026-09-22
-updated: 2026-09-23
 milestone: roadmap
 owners:
   - hisamekms

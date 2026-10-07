@@ -4,7 +4,6 @@ type: plan
 title: AGENTS.mdの「作業中」「起動と停止」「着地と人の判断」から移した運用の規則の経緯
 status: completed
 created: 2026-10-03
-updated: 2026-10-03
 owners:
   - hisamekms
 tags:

@@ -4,7 +4,6 @@ type: plan
 title: 着地の検証でcoverageの計測をやめたときの短縮の見積もり（cargo llvm-cov nextestとcargo nextest runの比較）
 status: completed
 created: 2026-09-29
-updated: 2026-09-29
 owners:
   - hisamekms
 tags:

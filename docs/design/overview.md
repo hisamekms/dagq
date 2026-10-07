@@ -4,8 +4,6 @@ type: design
 title: System overview
 status: current
 created: 2026-09-21
-updated: 2026-10-06
-last_verified: 2026-10-06
 scope: system
 related:
   - adr-t1545-1

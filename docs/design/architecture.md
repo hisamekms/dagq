@@ -4,8 +4,6 @@ type: design
 title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
 status: current
 created: 2026-10-04
-updated: 2026-10-07
-last_verified: 2026-10-07
 scope: system
 related:
   - adr-t1545-1

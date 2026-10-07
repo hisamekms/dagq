@@ -4,7 +4,6 @@ type: plan
 title: NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方
 status: active
 created: 2026-09-27
-updated: 2026-10-01
 owners:
   - hisamekms
 tags:

@@ -4,7 +4,6 @@ type: plan
 title: Claude の worker の既定を非対話にした変更（task 1340、印 61916）の基準値と評価のコマンドと、既定を対話に戻す基準の案
 status: active
 created: 2026-10-02
-updated: 2026-10-04
 owners:
   - hisamekms
 tags:

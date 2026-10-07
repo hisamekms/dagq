@@ -4,7 +4,6 @@ type: plan
 title: landing recheckのきっかけを広げた（ADR-t1310-1）前後の本番のrecheckの件数・時間・commandの回数と、hostの負荷への影響
 status: completed
 created: 2026-10-05
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

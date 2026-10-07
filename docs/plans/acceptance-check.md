@@ -4,7 +4,6 @@ type: plan
 title: worker が受け入れ条件を根拠と照合する変更の前の、run の review の差し戻しの基準値と、前後比較の script
 status: active
 created: 2026-10-03
-updated: 2026-10-05
 owners:
   - hisamekms
 tags:

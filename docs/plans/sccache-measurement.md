@@ -4,7 +4,6 @@ type: plan
 title: sccache導入前後のintegrateのllvm-covの所要時間とhit率
 status: completed
 created: 2026-09-28
-updated: 2026-09-28
 owners:
   - hisamekms
 tags:

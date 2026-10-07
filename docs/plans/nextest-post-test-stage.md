@@ -4,7 +4,6 @@ type: plan
 title: cargo llvm-cov nextestのtest段の後（一覧・profrawのmerge・report）の内訳
 status: completed
 created: 2026-09-28
-updated: 2026-09-28
 owners:
   - hisamekms
 tags:

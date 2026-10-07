@@ -4,7 +4,6 @@ type: plan
 title: review と plan review の revise と concern で差し戻された理由の分類と、ラベルの定義案
 status: completed
 created: 2026-09-28
-updated: 2026-09-28
 owners:
   - hisamekms
 tags:

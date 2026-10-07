@@ -4,7 +4,6 @@ type: plan
 title: 過去の着地の差分に IT の対応表を当てた、絞った IT の時間と見逃しの測定と、全部流す閾値・共通のファイル・表の古さの上限
 status: active
 created: 2026-10-06
-updated: 2026-10-06
 owners:
   - hisamekms
 tags:

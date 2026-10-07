@@ -4,7 +4,6 @@ type: plan
 title: Rust runtime MVP
 status: completed
 created: 2026-09-22
-updated: 2026-09-25
 milestone: mvp
 target: 2026-10-31
 owners:

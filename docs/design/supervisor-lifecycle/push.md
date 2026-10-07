@@ -4,8 +4,6 @@ type: design
 title: "KPIのpush（目標割れの記録とホストのコマンドへの通知）"
 status: current
 created: 2026-09-27
-updated: 2026-10-02
-last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle

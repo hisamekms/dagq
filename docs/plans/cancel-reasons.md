@@ -4,7 +4,6 @@ type: plan
 title: task の cancel の理由の分類と、ラベルの定義案
 status: completed
 created: 2026-09-28
-updated: 2026-09-30
 owners:
   - hisamekms
 tags:
