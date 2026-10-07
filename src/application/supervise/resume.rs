@@ -391,13 +391,7 @@ impl Supervisor<'_> {
             worktree.display()
         );
         let task = self.queue.show(run.task_id())?.task;
-        let landed = landed_since(
-            &mut *self.queue,
-            &*self.repository,
-            &*self.files,
-            run,
-            &request.main,
-        )?;
+        let landed = landed_since(&mut *self.queue, &*self.repository, run, &request.main)?;
         let message = with_instruction(
             resume_request(&task, run, request, &landed)?,
             self.verifier.language().as_ref(),
@@ -856,32 +850,22 @@ pub(super) fn resume_reason(
 }
 
 /// The tasks landed on `main` since the run's base, oldest first, from the
-/// `Dagq-Task` trailers, each with its integrated run's receipt summary.
+/// `Dagq-Task` trailers, each by ID and title.
 pub(super) fn landed_since(
     queue: &mut dyn Queue,
     repository: &dyn Repository,
-    files: &dyn RunFiles,
     run: &TaskRun,
     main: &CommitSha,
-) -> Result<Vec<PredecessorSummary>> {
+) -> Result<Vec<LandedTask>> {
     let mut landed = Vec::new();
     for task_id in repository.landed_task_ids(run.base_commit().as_str(), main.as_str())? {
         let Ok(detail) = queue.show(task_id) else {
             continue;
         };
-        let integrated_run = detail
-            .runs
-            .iter()
-            .rev()
-            .find(|r| r.status() == RunStatus::Integrated)
-            .cloned();
-        landed.push(PredecessorSummary::from_predecessor(
-            files,
-            &Predecessor {
-                task: detail.task,
-                integrated_run,
-            },
-        ));
+        landed.push(LandedTask {
+            task_id,
+            title: detail.task.title().to_owned(),
+        });
     }
     Ok(landed)
 }

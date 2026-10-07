@@ -91,6 +91,20 @@ impl PredecessorSummary {
     }
 }
 
+/// One task landed on the landing branch since a run's base, as the
+/// resolution request lists it: the ID and the title, no receipt summary
+/// (the worker reads what landed with git).
+#[derive(Debug, Clone)]
+pub struct LandedTask {
+    pub task_id: TaskId,
+    pub title: String,
+}
+
+/// Lines of landed tasks a resolution request lists, newest first
+/// (ADR-t1892-1): a resume is sent again after each landing, so the list is
+/// capped and the rest is counted and left to `git log`.
+pub const LANDED_TASK_LINES: usize = 20;
+
 /// Characters of a receipt summary the prompt keeps for each task of a goal
 /// the task depended on: a goal may hold many tasks, so each is a hint of
 /// what landed, not the whole account.
@@ -2154,6 +2168,35 @@ pub(crate) enum ResumeKind {
     E2e,
 }
 
+/// The section of a resolution request on the tasks landed on `branch`
+/// between `base` and `main` (`landed` oldest first): the newest
+/// [`LANDED_TASK_LINES`] by ID and title, and a line counting the rest.
+fn landed_lines(branch: &str, base: &str, main: &str, landed: &[LandedTask]) -> Vec<String> {
+    if landed.is_empty() {
+        return vec![format!("Tasks landed on {branch} since your base: none.")];
+    }
+    let mut lines = vec![format!(
+        "Tasks landed on {branch} since your base, newest first (git log {base}..{main} and git show <commit> tell what each changed):"
+    )];
+    lines.extend(
+        landed
+            .iter()
+            .rev()
+            .take(LANDED_TASK_LINES)
+            .map(|task| format!("- task {}: {}", task.task_id, task.title)),
+    );
+    if let Some(more) = landed
+        .len()
+        .checked_sub(LANDED_TASK_LINES)
+        .filter(|n| *n > 0)
+    {
+        lines.push(format!(
+            "- … and {more} more; git log --oneline {base}..{main} lists them all"
+        ));
+    }
+    lines
+}
+
 /// The fixed resolution request the supervisor types into a resumed
 /// session (ADR-0019 decision 1), or into a passed run's live session whose
 /// head conflicts with main (ADR-0027 decision 4), one instruction per
@@ -2162,7 +2205,7 @@ pub(crate) fn resume_request(
     task: &Task,
     run: &TaskRun,
     request: &ResumeRequest,
-    landed: &[PredecessorSummary],
+    landed: &[LandedTask],
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let route = Route::of(run);
@@ -2223,17 +2266,12 @@ pub(crate) fn resume_request(
         request.main,
         run.base_commit()
     ));
-    if landed.is_empty() {
-        lines.push(format!("Tasks landed on {branch} since your base: none."));
-    } else {
-        lines.push(format!("Tasks landed on {branch} since your base:"));
-        for task in landed {
-            lines.push(format!(
-                "- task {}: {}; summary: {}",
-                task.task_id, task.title, task.summary
-            ));
-        }
-    }
+    lines.extend(landed_lines(
+        branch,
+        run.base_commit().as_str(),
+        request.main.as_str(),
+        landed,
+    ));
     lines.push("Steps:".to_owned());
     let checks = local_checks(&serde_json::to_string(task.verification_commands())?);
     if request.kind == ResumeKind::EvidenceMissing {
@@ -4646,6 +4684,50 @@ mod tests {
 
     const SHA: &str = "1111111111111111111111111111111111111111";
     const RUN: &str = "00000000-0000-4000-8000-000000000001";
+
+    #[test]
+    fn landed_lines_list_the_newest_tasks_by_title_up_to_the_cap() {
+        let landed = |count: i64| -> Vec<LandedTask> {
+            (1..=count)
+                .map(|id| LandedTask {
+                    task_id: TaskId::new(id),
+                    title: format!("title {id}"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            landed_lines("main", "b", "m", &[]),
+            ["Tasks landed on main since your base: none."]
+        );
+
+        let header = "Tasks landed on main since your base, newest first (git log b..m and git show <commit> tell what each changed):";
+        let few = landed_lines("main", "b", "m", &landed(3));
+        assert_eq!(
+            few,
+            [
+                header,
+                "- task 3: title 3",
+                "- task 2: title 2",
+                "- task 1: title 1"
+            ]
+        );
+
+        let full = landed_lines("main", "b", "m", &landed(LANDED_TASK_LINES as i64));
+        assert_eq!(full.len(), 1 + LANDED_TASK_LINES);
+        assert_eq!(full[1], "- task 20: title 20");
+        assert_eq!(full[LANDED_TASK_LINES], "- task 1: title 1");
+
+        let many = landed_lines("main", "b", "m", &landed(23));
+        assert_eq!(many.len(), 2 + LANDED_TASK_LINES);
+        assert_eq!(many[0], header);
+        assert_eq!(many[1], "- task 23: title 23");
+        assert_eq!(many[LANDED_TASK_LINES], "- task 4: title 4");
+        assert_eq!(
+            many[LANDED_TASK_LINES + 1],
+            "- … and 3 more; git log --oneline b..m lists them all"
+        );
+        assert!(many.iter().all(|line| !line.contains("summary")));
+    }
 
     fn task(id: i64, title: &str, status: TaskStatus) -> Task {
         verified_task(id, title, status, Vec::new())

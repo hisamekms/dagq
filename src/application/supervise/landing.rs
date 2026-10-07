@@ -1024,13 +1024,7 @@ impl Supervisor<'_> {
         let sent = match &live {
             Some(live) => {
                 let task = self.queue.show(run.task_id())?.task;
-                let landed = landed_since(
-                    &mut *self.queue,
-                    &*self.repository,
-                    &*self.files,
-                    run,
-                    &main,
-                )?;
+                let landed = landed_since(&mut *self.queue, &*self.repository, run, &main)?;
                 let request = ResumeRequest {
                     main: main.clone(),
                     branch: self.repository.landing_branch()?.name,

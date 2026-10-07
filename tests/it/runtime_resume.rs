@@ -397,7 +397,10 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
             "main is now {first_landed} (your base commit was {}).",
             run.base_commit()
         ),
-        "Tasks landed on main since your base:\n- task 1: test task; summary: done".to_owned(),
+        format!(
+            "Tasks landed on main since your base, newest first (git log {base}..{first_landed} and git show <commit> tell what each changed):\n- task 1: test task\nSteps:",
+            base = run.base_commit()
+        ),
         format!("git rebase {first_landed}"),
         "[\"test -f seed.txt\"]".to_owned(),
         format!(
