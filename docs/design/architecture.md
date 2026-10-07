@@ -159,7 +159,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 ## 観測と分析
 
 起きたことを読み、数え、予測し、知らせること（events・watch・stats・KPI・forecast・印・observer・スループットの見直し・CIの見張り）。
-計測の作り直しの予定と、新しいportと台帳の係をこのcontextに置くことは[計測](measurement.md)が持つ（[ADR-t1662-2](../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定6）。
+新しいportと台帳の係をこのcontextに置く計測の作り直しは[計測](measurement.md)が持つ（ADR-t1662-2決定6）。
 
 **所有する状態**
 
@@ -177,13 +177,13 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 **公開するport**
 
 - `QueueRecords`の読み取り（findingとreportとKPIの目標割れ、CIの見張りのeventと`ci_failure`のfinding）を全てのcontextに、`ci_watch::known_failures`を着地の検証に公開する。
-  `QueueRecords`のうち計画管理の表を読むmethodは、portを分けるときに計画管理へ移す（[混在しているmodule](#混在しているmodule)）。
+  `QueueRecords`のうち計画管理の表を読むmethodはportを分けるときに計画管理へ移す（[混在しているmodule](#混在しているmodule)）。
   書き込み（`record_*`）は内部。
 - findingのIDと`finding_*`のeventを値として公開する（計画管理のfindingのplannerが読む）。
-- CIの見張りの保留（`Supervisor::ci_watch_held`・`ci_watch_unreadable`）を実行と着地に読み取りとして公開し、状態を変えるのは`supervise::ci_watch`だけ。
-- timerのjob（observer・スループットの見直し）の使えなかった終わりを、型付きの値（`domain::throughput_review::UnusableFinish`・`supervise::observer::UnusableTimerJob`）として実行と着地に公開する。
+- CIの見張りの保留（`Supervisor::ci_watch_held`・`ci_watch_unreadable`）を実行と着地に読み取りで公開し、変えるのは`supervise::ci_watch`だけ。
+- timerのjob（observer・スループットの見直し）の使えなかった終わりを型付きの値（`throughput_review::UnusableFinish`・`observer::UnusableTimerJob`）で実行と着地に公開する。
   控えるのは実行と着地の`supervise::provider`で、同じ終わりを1回だけ控える（[Provider lifecycle](provider-lifecycle.md)）。
-- `watch`の`AskNotifier`を所有し、実装はhost運用のinboxの操作を使う。
+- `watch`の`AskNotifier`を所有し、実装`application::watch::InboxNotifier`は実行と着地の`SessionRegistry::session_workspace`でinboxのworkspaceを読み、host運用の`WorkspaceBackend::notify`で送る。
 - KPIのpushの待ち（`queue_pushes`）をhost運用の`inbox_nudge`に公開する。
 - `ObserverLog`・`EventReads`は内部。
 

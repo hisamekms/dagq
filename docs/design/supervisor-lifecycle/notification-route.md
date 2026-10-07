@@ -51,5 +51,5 @@ supervisorはinboxの画面を読まず、どのterminalにも打ち込まず、
   `[push]`を読めなければ`recorded`にして`push_error`に理由を書く。
   過去の記録の`typed`・`notified`と`inbox_nudge_failed`（画面への打ち込みと`cmux notify`）はそのまま読める。
 - **`[push]`**: `pushed`のとき、KPIのpushと同じ`[push]`のcommandに`kind`が`inbox_watch`のmessage（`domain::kpi::push::inbox_watch_message`。titleと件数だけ）を1つ渡す。
-  送り方・やり直し・記録（`kpi_push_sent` / `kpi_push_failed`、`push_kind`は`inbox_watch`）はKPIのpushと同じ（[KPI](kpi.md)）。
+  送り方・やり直し・記録（`kpi_push_sent` / `kpi_push_failed`、`push_kind`は`inbox_watch`）はKPIのpushと同じ（[KPIのpush](push.md)）。
   `[push]`の`daily`・`breach`はこのmessageを止めない。
