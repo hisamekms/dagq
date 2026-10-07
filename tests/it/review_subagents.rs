@@ -278,7 +278,7 @@ fn a_selected_agent_without_its_definition_fails_the_review() {
     let failed = payloads(&detail, "review_failed");
     assert_eq!(failed.len(), 1);
     let why = format!(
-        "the review's required subagents could not be read: the review subagent design that dagq.toml names has no definition {DEFINITION} (nor .dagq/review-agents/design.md) in the landing branch's commit {main}"
+        "the review's required subagents could not be read: the review subagent design that dagq.toml names has no definition {DEFINITION} in the landing branch's commit {main}"
     );
     assert!(
         failed[0]["error"].as_str().unwrap().contains(&why),
@@ -298,8 +298,8 @@ fn a_selected_agent_without_its_definition_fails_the_review() {
     assert_eq!(
         doctor["agents"]["errors"],
         json!([
-            "[review.subagents.design] names an agent without a definition: neither .dagq/agents/design/AGENT.md nor .dagq/review-agents/design.md is committed",
-            "[review.subagents.unused] names an agent without a definition: neither .dagq/agents/unused/AGENT.md nor .dagq/review-agents/unused.md is committed",
+            "[review.subagents.design] names an agent without a definition: .dagq/agents/design/AGENT.md is not committed",
+            "[review.subagents.unused] names an agent without a definition: .dagq/agents/unused/AGENT.md is not committed",
         ]),
         "{doctor}"
     );

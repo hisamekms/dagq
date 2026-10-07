@@ -22,7 +22,7 @@ related:
 
 # agentのeval
 
-> **一部だけ実装（2026-10-07）**: この文書はagentの定義とeval（goal 125）の今の予定で、実装したのは定義のpath（`.dagq/agents/<name>/AGENT.md`、移行の間は旧の`.dagq/review-agents/<agent>.md`にも戻る）と、名指すagentの定義の有無と複数の役割の検査（`dagq doctor`の`agents`。task 1866）と、下の「道具の宣言」の宣言の検査とproviderごとの変換の関数（task 1873。どの起動にもまだ当たらない）と、下の「ケースの欄」の読み手・「採点」・「漏れの検査」の関数（evalのコマンドからはまだ呼ばれない）だけ。
+> **一部だけ実装（2026-10-07）**: この文書はagentの定義とeval（goal 125）の今の予定で、実装したのは定義のpath（`.dagq/agents/<name>/AGENT.md`）と、名指すagentの定義の有無と複数の役割の検査（`dagq doctor`の`agents`。task 1866）と、下の「道具の宣言」の宣言の検査とproviderごとの変換の関数（task 1873。どの起動にもまだ当たらない）と、下の「ケースの欄」の読み手・「採点」・「漏れの検査」の関数（evalのコマンドからはまだ呼ばれない）だけ。
 > 今動いているreviewのagent（親のreview jobの中のsubagent）は[Review](supervisor-lifecycle/review.md#reviewのsubagent)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、この文書はそれらを変えない。
 > 後続のtask（1867〜1874）が実装したら、この注記と各節を今の姿に直す。
 
@@ -30,12 +30,12 @@ related:
 
 ## 定義とケースの置き場
 
-- 定義: `.dagq/agents/<name>/AGENT.md`。形は今の`.dagq/review-agents/<agent>.md`と同じ（frontmatterの`description`と本文の検査項目と参照先の文書）に、道具の宣言の`tools`（下の「道具の宣言」）を足したもの。`<name>`は今と同じkebab-case。
+- 定義: `.dagq/agents/<name>/AGENT.md`。形は[ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の定義と同じ（frontmatterの`description`と本文の検査項目と参照先の文書）に、道具の宣言の`tools`（下の「道具の宣言」）を足したもの。`<name>`はkebab-case。
 - ケース: `.dagq/agents/<name>/evals/`の`dev.json`・`holdout.json`・`production.json`（Spikeの`evals.json`は`dev.json`）。splitはこのファイルで区分し、ケースの欄に持たない。
 - patchの共有の置き場: `.dagq/agent-cases/patches/<sha256>.patch`（patchの内容のSHA-256。agentの名前と衝突しないよう`.dagq/agents/`の外に置く）。同じ内容のpatchは1つだけ置き、ケースはhashで参照する。どのケースからも参照されないpatchと、ケースが参照するhashのpatchが無いことは、下の設定の検査が誤りにする。
-- どこで走るか: `dagq.toml`の`[review.subagents.<name>] paths`のまま（形は変えない）。定義のpathだけが`.dagq/agents/<name>/AGENT.md`に変わった（task 1866。移行の間は旧の`.dagq/review-agents/<name>.md`にも戻る。[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
+- どこで走るか: `dagq.toml`の`[review.subagents.<name>] paths`のまま（形は変えない）。定義のpathだけが`.dagq/agents/<name>/AGENT.md`に変わった（[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
 - 設定の検査（`dagq.toml`を読むときと、`review_subagents::this_repository_names_only_agents_it_defines`の後継のtest）: `[review.subagents.<name>]`が名指す`<name>`に`.dagq/agents/<name>/AGENT.md`が無いこと、同じ`<name>`を複数の役割の表が名指すこと（今の役割の表は`[review.subagents]`だけ。役割の表が増えたら同じ検査に足す）を誤りにする。
-  この2つは実装済みで、`dagq doctor`の`agents`の`errors`が出す（役割の表の集合は`domain::review_subagents::ROLE_SECTIONS`、移行の間は旧の`.dagq/review-agents/<name>.md`も定義と数える。[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
+  この2つは実装済みで、`dagq doctor`の`agents`の`errors`が出す（役割の表の集合は`domain::review_subagents::ROLE_SECTIONS`。[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
 - ケースのファイルの形とpatchの置き場の参照の過不足（上）は、ケースの一覧の読み手と、このrepositoryの全ての一覧をそれで読むtestが検査する。
   `dagq doctor`と設定の読み込みにはまだ足していない。
 

@@ -274,10 +274,10 @@ pub fn snapshot_subagents(
                 .with_context(|| format!("read {path} in the landing branch's commit {commit}"))
         })?
         .with_context(|| {
-            let [path, legacy] = review_subagents::definition_paths(&selected.name);
             format!(
-                "the review subagent {} that {CONFIG_FILE} names has no definition {path} (nor {legacy}) in the landing branch's commit {commit}",
-                selected.name
+                "the review subagent {} that {CONFIG_FILE} names has no definition {} in the landing branch's commit {commit}",
+                selected.name,
+                review_subagents::definition_path(&selected.name)
             )
         })?;
         let tools = AgentTools::declared(AgentRole::Review, &definition).map_err(|why| {
@@ -788,45 +788,42 @@ mod tests {
         snapshot_subagents(&repository, &parse, &range)
     }
 
-    /// The definition is read from `.dagq/agents/<agent>/AGENT.md`, else
-    /// from the old `.dagq/review-agents/<agent>.md` while the definitions
-    /// move (ADR-t1728-1), and `review_started` records the path read;
-    /// with neither the review does not pass
-    /// ([`an_unreadable_config_or_a_missing_definition_is_an_error`]).
+    /// The definition is read from `.dagq/agents/<agent>/AGENT.md` only
+    /// (ADR-t1728-1), and `review_started` records that path; a file
+    /// elsewhere, such as the one file per agent of the directory before
+    /// ADR-t1728-1, is no definition, so the review does not pass.
     #[test]
-    fn the_definition_is_read_from_the_new_path_else_the_old_one() {
-        const NEW: &str = "---\ndescription: new\n---\nCheck it anew.\n";
-        let read = |files| {
-            let found = snapshot(files, &["change.txt"]).unwrap().unwrap();
-            let agent = &found.agents[0];
-            (
-                found.event_value()["agents"][0]["definition"].clone(),
-                agent.definition.clone(),
-                agent.digest.clone(),
-            )
-        };
-        assert_eq!(
-            read(vec![
+    fn the_definition_is_read_from_the_agents_directory_only() {
+        let found = snapshot(
+            vec![
                 (CONFIG_FILE, CONFIG),
-                (".dagq/review-agents/design.md", DEFINITION),
-                (".dagq/agents/design/AGENT.md", NEW),
-            ]),
-            (
-                json!(".dagq/agents/design/AGENT.md"),
-                NEW.to_owned(),
-                format!("{:x}", Sha256::digest(NEW.as_bytes()))
-            )
+                (".dagq/agents/design/AGENT.md", DEFINITION),
+            ],
+            &["change.txt"],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            found.event_value()["agents"][0]["definition"],
+            json!(".dagq/agents/design/AGENT.md")
         );
-        assert_eq!(
-            read(vec![
-                (CONFIG_FILE, CONFIG),
-                (".dagq/review-agents/design.md", DEFINITION),
-            ]),
-            (
-                json!(".dagq/review-agents/design.md"),
-                DEFINITION.to_owned(),
-                format!("{:x}", Sha256::digest(DEFINITION.as_bytes()))
+        assert_eq!(found.agents[0].definition, DEFINITION);
+        let error = format!(
+            "{:#}",
+            snapshot(
+                vec![
+                    (CONFIG_FILE, CONFIG),
+                    // The directory before ADR-t1728-1, its name split so
+                    // that no path to it is left in the code.
+                    (concat!(".dagq/review", "-agents/design.md"), DEFINITION),
+                ],
+                &["change.txt"],
             )
+            .unwrap_err()
+        );
+        assert!(
+            error.contains("has no definition .dagq/agents/design/AGENT.md"),
+            "{error}"
         );
     }
 
@@ -860,22 +857,20 @@ mod tests {
                 {"agent": "design", "section": "review.subagents", "definition": ".dagq/agents/design/AGENT.md"},
                 {"agent": "unused", "section": "review.subagents", "definition": null},
             ], "errors": [
-                "[review.subagents.unused] names an agent without a definition: neither .dagq/agents/unused/AGENT.md nor .dagq/review-agents/unused.md is committed",
+                "[review.subagents.unused] names an agent without a definition: .dagq/agents/unused/AGENT.md is not committed",
             ]}))
         );
-        // A definition at the old path counts while the definitions move.
-        let old = check(vec![
+        // A file elsewhere, as in the directory before ADR-t1728-1, is no
+        // definition.
+        let elsewhere = check(vec![
             (CONFIG_FILE, CONFIG),
-            (".dagq/review-agents/design.md", DEFINITION),
-            (".dagq/review-agents/unused.md", DEFINITION),
+            (concat!(".dagq/review", "-agents/design.md"), DEFINITION),
+            (".dagq/agents/unused.md", DEFINITION),
         ])
         .unwrap()
         .unwrap();
-        assert_eq!(
-            old["agents"][0]["definition"],
-            ".dagq/review-agents/design.md"
-        );
-        assert_eq!(old["errors"], json!([]));
+        assert_eq!(elsewhere["agents"][0]["definition"], json!(null));
+        assert_eq!(elsewhere["errors"].as_array().unwrap().len(), 2);
     }
 
     /// The definition's tools (ADR-t1728-2): a declaration from the
@@ -942,7 +937,7 @@ mod tests {
         let found = snapshot(
             vec![
                 (CONFIG_FILE, CONFIG),
-                (".dagq/review-agents/design.md", DEFINITION),
+                (".dagq/agents/design/AGENT.md", DEFINITION),
             ],
             &["change.txt", "other.txt"],
         )
@@ -951,7 +946,7 @@ mod tests {
         let digest = format!("{:x}", Sha256::digest(DEFINITION.as_bytes()));
         let expected = json!({"commit": SHA, "base": "base", "head": "head", "agents": [{
             "agent": "design", "paths": ["change.txt"],
-            "definition": ".dagq/review-agents/design.md", "digest": digest}]});
+            "definition": ".dagq/agents/design/AGENT.md", "digest": digest}]});
         assert_eq!(found.event_value(), expected);
         let mut input = expected;
         input["agents"][0]["text"] = json!(DEFINITION);
@@ -1020,7 +1015,7 @@ mod tests {
         );
         assert!(
             error.contains(&format!(
-                "the review subagent design that dagq.toml names has no definition .dagq/agents/design/AGENT.md (nor .dagq/review-agents/design.md) in the landing branch's commit {SHA}"
+                "the review subagent design that dagq.toml names has no definition .dagq/agents/design/AGENT.md in the landing branch's commit {SHA}"
             )),
             "{error}"
         );

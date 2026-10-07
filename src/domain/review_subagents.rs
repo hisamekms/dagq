@@ -22,11 +22,6 @@ pub const DEFINITION_DIR: &str = ".dagq/agents";
 /// The definition's file in an agent's directory.
 pub const DEFINITION_FILE: &str = "AGENT.md";
 
-/// Where the definitions were before ADR-t1728-1, one `<agent>.md` each;
-/// read while the definitions move, when an agent has none at
-/// [`definition_path`].
-pub const LEGACY_DEFINITION_DIR: &str = ".dagq/review-agents";
-
 /// The configuration's section of the review's subagents.
 pub const REVIEW_SECTION: &str = "review.subagents";
 
@@ -68,30 +63,14 @@ pub fn definition_path(agent: &str) -> String {
     format!("{DEFINITION_DIR}/{agent}/{DEFINITION_FILE}")
 }
 
-/// The repository-relative path of `agent`'s definition before
-/// ADR-t1728-1.
-pub fn legacy_definition_path(agent: &str) -> String {
-    format!("{LEGACY_DEFINITION_DIR}/{agent}.md")
-}
-
-/// The paths `agent`'s definition is read from, in order: the first that
-/// a commit's tree has is the definition, and none means it has none.
-pub fn definition_paths(agent: &str) -> [String; 2] {
-    [definition_path(agent), legacy_definition_path(agent)]
-}
-
-/// `agent`'s definition as `read` finds it at [`definition_paths`]: the
-/// first path it has and that path's text, `None` when it has neither.
+/// `agent`'s definition as `read` finds it at [`definition_path`]: the
+/// path and its text, `None` when the commit's tree has none there.
 pub fn find_definition<E>(
     agent: &str,
     mut read: impl FnMut(&str) -> Result<Option<String>, E>,
 ) -> Result<Option<(String, String)>, E> {
-    for path in definition_paths(agent) {
-        if let Some(text) = read(&path)? {
-            return Ok(Some((path, text)));
-        }
-    }
-    Ok(None)
+    let path = definition_path(agent);
+    Ok(read(&path)?.map(|text| (path, text)))
 }
 
 /// One agent a role's section of the configuration names: the section
@@ -143,10 +122,11 @@ pub fn config_problems(named: &[NamedAgent], defined: &dyn Fn(&str) -> bool) -> 
             ));
         }
         if !defined(&entry.agent) {
-            let [path, legacy] = definition_paths(&entry.agent);
             problems.push(format!(
-                "[{}.{}] names an agent without a definition: neither {path} nor {legacy} is committed",
-                entry.section, entry.agent
+                "[{}.{}] names an agent without a definition: {} is not committed",
+                entry.section,
+                entry.agent,
+                definition_path(&entry.agent)
             ));
         }
     }
@@ -788,15 +768,12 @@ mod tests {
         }
     }
 
-    /// The definition is read from `.dagq/agents/<agent>/AGENT.md`, else
-    /// from the path before ADR-t1728-1, else there is none.
+    /// The definition is read from `.dagq/agents/<agent>/AGENT.md` only:
+    /// the one file per agent of the directory before ADR-t1728-1, or a
+    /// file elsewhere, is no definition.
     #[test]
-    fn a_definition_is_read_from_the_new_path_then_the_old_one() {
+    fn a_definition_is_read_from_the_agents_directory_only() {
         assert_eq!(definition_path("design"), ".dagq/agents/design/AGENT.md");
-        assert_eq!(
-            legacy_definition_path("design"),
-            ".dagq/review-agents/design.md"
-        );
         let found = |files: &[(&str, &str)]| {
             find_definition("design", |path| {
                 Ok::<_, ()>(
@@ -808,18 +785,17 @@ mod tests {
             })
             .unwrap()
         };
-        let both = [
-            (".dagq/review-agents/design.md", "old"),
-            (".dagq/agents/design/AGENT.md", "new"),
-        ];
         assert_eq!(
-            found(&both),
+            found(&[(".dagq/agents/design/AGENT.md", "new")]),
             Some((".dagq/agents/design/AGENT.md".to_owned(), "new".to_owned()))
         );
+        // The directory before ADR-t1728-1, its name split so that no
+        // path to it is left in the code.
         assert_eq!(
-            found(&both[..1]),
-            Some((".dagq/review-agents/design.md".to_owned(), "old".to_owned()))
+            found(&[(concat!(".dagq/review", "-agents/design.md"), "old")]),
+            None
         );
+        assert_eq!(found(&[(".dagq/agents/design.md", "elsewhere")]), None);
         assert_eq!(found(&[(".dagq/agents/other/AGENT.md", "x")]), None);
         assert_eq!(
             find_definition("design", |_| Err::<Option<String>, _>("unreadable")),
@@ -848,7 +824,7 @@ mod tests {
         assert_eq!(
             config_problems(&review, &|agent| agent == "design"),
             [
-                "[review.subagents.tests] names an agent without a definition: neither .dagq/agents/tests/AGENT.md nor .dagq/review-agents/tests.md is committed"
+                "[review.subagents.tests] names an agent without a definition: .dagq/agents/tests/AGENT.md is not committed"
             ]
         );
         let mut two_roles = review.clone();
@@ -860,7 +836,7 @@ mod tests {
             config_problems(&two_roles, &|agent| agent != "design"),
             [
                 "the agent design is named in more than one role's section: [review.subagents.design], [eval.subagents.design]; an agent has one role",
-                "[review.subagents.design] names an agent without a definition: neither .dagq/agents/design/AGENT.md nor .dagq/review-agents/design.md is committed",
+                "[review.subagents.design] names an agent without a definition: .dagq/agents/design/AGENT.md is not committed",
             ]
         );
     }
