@@ -200,7 +200,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 - attentionの判定は`event_attention`・`run_attention`・`supervisor_attention`、次の一手は`AttentionNext`（`src/domain/mod.rs`）。
   attentionは全てinboxのもので、plannerのものは無い（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定17）。
-- `show`・`goal show`の既定の圧縮形は`src/view.rs`が作り、キー名は`--full`と同じで、省くか切るだけ。
+- `show`・`goal show`の圧縮形（`view`）は`--full`のキー名を変えずに省くか切り、全文に無い`claim_deferral`などを足す。
 - `ci failures`は`ci_checked`のeventを畳み込んだビュー（`domain::ci_watch::WatchState::fold`）で、表を持たない（[CI watch](supervisor-lifecycle/ci-watch.md)）。
 
 ### 役割の柵

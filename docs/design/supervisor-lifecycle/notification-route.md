@@ -28,7 +28,7 @@ ADR-0016で次を決めた。`status`のattentionとcursor、`events --after`、
   workerとplannerへの終了と回答は次のturnの依頼として書き、inboxのwatcherが居ないときの後ろ盾も画面を読まず打ち込まない（下記「supervisorによるinboxへの知らせ」）。
   watchが張られていることは、watcherの生存の記録と`status` / `doctor`の`inbox_watcher`（[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）とpluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）で保証する。
   `integrate`は`watch`からもイベントの副作用としても呼ばない。
-- 人の経路のコマンドは既定で圧縮し（既存キー名を変えずに省く・切り詰める）、全文は`--full`。`show`・`goal show`・`doctor`は実装済み（`doctor`は上、`show`と`goal show`は[domain-model](../domain-model.md)）。手でのレビューは`review ID`が`<run_dir>/review.md`を書き、subagentにpathを渡す（`review`は実装済み。下記「`review`」）。
+- 人の経路のコマンドは既定で圧縮し（既存キー名を変えずに省く・切り詰め、件数などの圧縮形だけの派生のキーを足す）、全文は`--full`。`show`・`goal show`・`doctor`は実装済み（`doctor`は上、`show`と`goal show`は[domain-model](../domain-model.md)）。手でのレビューは`review ID`が`<run_dir>/review.md`を書き、subagentにpathを渡す（`review`は実装済み。下記「`review`」）。
 
 ## supervisorによるinboxへの知らせ（ADR-t1433-5）
 
