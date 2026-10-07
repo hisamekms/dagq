@@ -5,7 +5,9 @@
 //! against the new main off the loop,
 //! one recheck at a time: `git merge-tree` for a conflict, then the
 //! `[recheck] command` of `dagq.toml` on main's tree with the run merged
-//! in, in one scratch worktree with one target directory of the queue's.
+//! in, in one scratch worktree with one target directory of the queue's,
+//! when that tree differs from main in a path `[recheck] paths` names (or
+//! there are none, ADR-t2032-1).
 //! A run found no longer landing is parked for a resume at once, whatever
 //! asks it waits on; a run this supervisor holds in a slot is parked when
 //! it would land. A run found still landing records that (ADR-t1311-1).
@@ -14,7 +16,8 @@
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::recheck::{
-    self, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED, Landed, RecheckFailure,
+    self, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED, Landed, RecheckConfig,
+    RecheckFailure,
 };
 
 /// Where the recheck keeps its scratch worktree and its target directory,
@@ -62,7 +65,11 @@ pub(super) struct Target {
 /// What the recheck found for one run.
 #[derive(Debug)]
 pub(super) enum Finding {
-    Clean,
+    /// Still lands; `skipped_by_paths` when the run's diff touches none of
+    /// `[recheck] paths`, so the command was not run (ADR-t2032-1).
+    Clean {
+        skipped_by_paths: bool,
+    },
     Failed(RecheckFailure),
     /// Git or the command could not be run: nothing is recorded on the run.
     Error(String),
@@ -400,11 +407,12 @@ impl Supervisor<'_> {
         };
         // A command whose program [run.env] cannot find would fail on every
         // run (ADR-0049 decision 9): only the merge is checked then.
-        let command = if self.run_env_missing {
-            None
+        let config = if self.run_env_missing {
+            RecheckConfig::default()
         } else {
-            self.verifier.recheck_command()?
+            self.verifier.recheck_config()?
         };
+        let command = config.command.clone();
         let dir = self.recheck_dir()?;
         info!(
             "landing recheck of {} waiting run(s) against main {main} after {}{}",
@@ -422,14 +430,13 @@ impl Supervisor<'_> {
         let verifier = self.verifier.clone();
         let files = self.files.clone();
         let on = main.clone();
-        let run_command = command.clone();
         let handle = spawn_traced(move || {
             recheck_runs(
                 &*repository,
                 &*verifier,
                 &*files,
                 &on,
-                run_command.as_deref(),
+                &config,
                 &dir,
                 targets,
             )
@@ -453,6 +460,9 @@ impl Supervisor<'_> {
         let mut counts = json!({
             "checked": found.len(),
             "clean": 0,
+            // Of `clean`, the runs whose diff touched none of `[recheck]
+            // paths`, so the command was not run on them (ADR-t2032-1).
+            "command_skipped": 0,
             "conflicts": 0,
             "check_failed": 0,
             "errors": 0,
@@ -462,9 +472,12 @@ impl Supervisor<'_> {
         let mut failed_runs = Vec::new();
         for (target, finding) in found {
             let failure = match finding {
-                Finding::Clean => {
+                Finding::Clean { skipped_by_paths } => {
                     bump(&mut counts, "clean");
-                    match self.record_recheck_clean(watch, &target) {
+                    if skipped_by_paths {
+                        bump(&mut counts, "command_skipped");
+                    }
+                    match self.record_recheck_clean(watch, &target, skipped_by_paths) {
                         Ok(true) => {}
                         Ok(false) => {
                             info!(run_id = %target.run_id, "run {}: the landing recheck found it still landing on main {}, but it moved on meanwhile", target.run_id, watch.main);
@@ -532,10 +545,16 @@ impl Supervisor<'_> {
 
     /// Record on the run that it still lands on the main checked
     /// (ADR-t1311-1): `landing_recheck_clean`, and the finding as the
-    /// recheck's paragraph of its open asks. Whether it was recorded: not
-    /// when the run moved on since it was checked (another head, another
-    /// status, or a lease of another process).
-    fn record_recheck_clean(&mut self, watch: &RecheckWatch, target: &Target) -> Result<bool> {
+    /// recheck's paragraph of its open asks, as one with no command run
+    /// when `skipped_by_paths`. Whether it was recorded: not when the run
+    /// moved on since it was checked (another head, another status, or a
+    /// lease of another process).
+    fn record_recheck_clean(
+        &mut self,
+        watch: &RecheckWatch,
+        target: &Target,
+        skipped_by_paths: bool,
+    ) -> Result<bool> {
         let run = self.queue.run(&target.run_id)?;
         if run.status() != RunStatus::AwaitingIntegration
             || run.result_commit() != Some(&target.head)
@@ -554,10 +573,11 @@ impl Supervisor<'_> {
                 &watch.main,
                 &target.head,
                 watch.command.as_deref(),
+                skipped_by_paths,
             ),
         )?;
-        let note =
-            recheck::clean_ask_note(watch.landed.as_ref(), &watch.main, watch.command.as_deref());
+        let command = watch.command.as_deref().filter(|_| !skipped_by_paths);
+        let note = recheck::clean_ask_note(watch.landed.as_ref(), &watch.main, command);
         for ask in self
             .queue
             .note_on_asks(run.id(), &note, LANDING_RECHECK_CLEAN)?
@@ -664,8 +684,9 @@ fn bump(counts: &mut Value, key: &str) {
 }
 
 /// Check each target against `main`, one after another (ADR-0068 decision
-/// 2): `git merge-tree` first; a clean merge, when there is a `command`,
-/// is committed on top of main, checked out in the scratch worktree under
+/// 2): `git merge-tree` first; a clean merge, when there is a `command`
+/// and the merged tree differs from main in a path of `[recheck] paths`
+/// (or there are none, ADR-t2032-1), is committed on top of main, checked out in the scratch worktree under
 /// `dir` and the command run there in `/bin/sh` with the run's `[run.env]`
 /// and `CARGO_TARGET_DIR` set to the one target directory under `dir`, its
 /// output in `recheck-<main>.log` of the run directory.
@@ -674,14 +695,14 @@ fn recheck_runs(
     verifier: &dyn Verifier,
     files: &dyn RunFiles,
     main: &CommitSha,
-    command: Option<&str>,
+    config: &RecheckConfig,
     dir: &Path,
     targets: Vec<Target>,
 ) -> Vec<(Target, Finding)> {
     targets
         .into_iter()
         .map(|target| {
-            let finding = recheck_run(repository, verifier, files, main, command, dir, &target)
+            let finding = recheck_run(repository, verifier, files, main, config, dir, &target)
                 .unwrap_or_else(|error| Finding::Error(format!("{error:#}")));
             (target, finding)
         })
@@ -693,7 +714,7 @@ fn recheck_run(
     verifier: &dyn Verifier,
     files: &dyn RunFiles,
     main: &CommitSha,
-    command: Option<&str>,
+    config: &RecheckConfig,
     dir: &Path,
     target: &Target,
 ) -> Result<Finding> {
@@ -701,9 +722,21 @@ fn recheck_run(
         Ok(tree) => tree,
         Err(paths) => return Ok(Finding::Failed(RecheckFailure::Conflict { paths })),
     };
-    let Some(command) = command else {
-        return Ok(Finding::Clean);
+    let Some(command) = config.command.as_deref() else {
+        return Ok(Finding::Clean {
+            skipped_by_paths: false,
+        });
     };
+    if !config.paths.is_empty()
+        && !recheck::runs_command(
+            &config.paths,
+            &repository.changed_paths(main.as_str(), &tree)?,
+        )
+    {
+        return Ok(Finding::Clean {
+            skipped_by_paths: true,
+        });
+    }
     let merged = repository.commit_tree(
         &tree,
         main.as_str(),
@@ -726,7 +759,9 @@ fn recheck_run(
         .join(format!("recheck-{}.log", &main.as_str()[..12]));
     let exit = verifier.run_to_log(command, &scratch, &env, &log)?;
     if exit.success {
-        return Ok(Finding::Clean);
+        return Ok(Finding::Clean {
+            skipped_by_paths: false,
+        });
     }
     let output = files.read_to_string(&log).unwrap_or_default();
     Ok(Finding::Failed(RecheckFailure::CheckFailed {

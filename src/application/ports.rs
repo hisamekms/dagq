@@ -3308,7 +3308,8 @@ pub trait Repository {
     /// rebase that stopped (a conflict), left in progress.
     fn rebase(&self, worktree: &Path, onto: &str) -> Result<std::result::Result<(), String>>;
     fn conflicted_files(&self, worktree: &Path) -> Result<Vec<String>>;
-    /// Paths that differ between two commits.
+    /// Paths that differ between two commits, or trees (the landing
+    /// recheck's merged tree against main, ADR-t2032-1).
     fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>>;
     /// Paths `to` adds over `from`.
     fn added_paths(&self, from: &str, to: &str) -> Result<Vec<String>>;
@@ -3435,11 +3436,12 @@ pub trait Verifier {
     /// The queue's secret salt of the `[run.env]` hashes, made on first use
     /// and kept outside the events (ADR-0051 decision 11).
     fn run_env_salt(&self) -> Result<String>;
-    /// The command the landing recheck runs on main's tree with a waiting
-    /// run merged in (`[recheck] command` of `dagq.toml`, ADR-0068 decision
-    /// 2); `None` checks the merge only.
-    fn recheck_command(&self) -> Result<Option<String>> {
-        Ok(None)
+    /// `[recheck]` of `dagq.toml`: the command the landing recheck runs on
+    /// main's tree with a waiting run merged in (ADR-0068 decision 2; none
+    /// checks the merge only) and the paths a run's diff must touch for it
+    /// to run (ADR-t2032-1; none runs it on every run).
+    fn recheck_config(&self) -> Result<crate::domain::recheck::RecheckConfig> {
+        Ok(crate::domain::recheck::RecheckConfig::default())
     }
     /// The limited trial of the worker's model (`[worker.trial]` of
     /// `dagq.toml`, ADR-0079 decision 4); off by default.

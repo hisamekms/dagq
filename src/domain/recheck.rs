@@ -7,7 +7,7 @@
 
 use serde_json::{Value, json};
 
-use super::{CommitSha, ReasonCode, RunEvent, RunId, TaskId};
+use super::{CommitSha, ReasonCode, RunEvent, RunId, TaskId, scope::glob_matches};
 
 /// A run the recheck found no longer landing on main (ADR-0068 decision
 /// 3). Its `action` says what followed: [`RESUMED`] (it was parked for a
@@ -33,6 +33,33 @@ pub const RESUMED: &str = "resumed";
 /// `action` of a failure recorded on a run this supervisor holds in a slot
 /// (waiting for the landing slot, or for its session's `/exit`).
 pub const HELD: &str = "held";
+
+/// `command_skipped` of a clean finding whose run's diff touches none of
+/// `[recheck] paths` (ADR-t2032-1): the recheck had a command and did not
+/// run it. A clean finding without a command at all has no
+/// `command_skipped`.
+pub const SKIPPED_BY_PATHS: &str = "paths";
+
+/// `[recheck]` of `dagq.toml` (ADR-0068 decision 2, ADR-t2032-1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecheckConfig {
+    /// The command run on main's tree with a waiting run merged in; none
+    /// checks the merge only.
+    pub command: Option<String>,
+    /// The globs a run's diff against main must touch for the command to
+    /// run on it; empty (no `paths`) runs it on every run.
+    pub paths: Vec<String>,
+}
+
+/// Whether the recheck runs its command on a run whose merged tree differs
+/// from main in `changed` (ADR-t2032-1): always without `paths`, otherwise
+/// only when a changed path matches one of them.
+pub fn runs_command(paths: &[String], changed: &[String]) -> bool {
+    paths.is_empty()
+        || changed
+            .iter()
+            .any(|path| paths.iter().any(|glob| glob_matches(glob, path)))
+}
 
 /// The landing whose commit the recheck checked against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,20 +154,28 @@ fn after(landed: Option<&Landed>) -> String {
 
 /// The payload of [`LANDING_RECHECK_CLEAN`] (ADR-t1311-1). `command` is
 /// null when only `git merge-tree` was looked at, and `landed_run_id` and
-/// `landed_task_id` when main moved without a dagq landing.
+/// `landed_task_id` when main moved without a dagq landing. A run whose
+/// diff touched none of `[recheck] paths` (`skipped_by_paths`) has a null
+/// `command` and `command_skipped` [`SKIPPED_BY_PATHS`] (ADR-t2032-1), so
+/// it is told apart from a recheck that had no command to run.
 pub fn clean_payload(
     landed: Option<&Landed>,
     main: &CommitSha,
     head: &CommitSha,
     command: Option<&str>,
+    skipped_by_paths: bool,
 ) -> Value {
-    json!({
+    let mut payload = json!({
         "main": main,
         "head": head,
-        "command": command,
+        "command": if skipped_by_paths { None } else { command },
         "landed_run_id": landed.map(|l| &l.run_id),
         "landed_task_id": landed.map(|l| l.task_id),
-    })
+    });
+    if skipped_by_paths {
+        payload["command_skipped"] = json!(SKIPPED_BY_PATHS);
+    }
+    payload
 }
 
 /// How the recheck's paragraph in a run's open asks starts: the asks hold
@@ -314,7 +349,7 @@ mod tests {
             "Landing recheck: after main moved without a dagq landing, the landing recheck found that the run still lands cleanly on main aaaaaaaaaaaa: git merges it without a conflict (no command was run)."
         );
         assert_eq!(
-            clean_payload(Some(&landed()), &main, &head, None),
+            clean_payload(Some(&landed()), &main, &head, None, false),
             json!({
                 "main": main,
                 "head": head,
@@ -324,9 +359,35 @@ mod tests {
             })
         );
         assert_eq!(
-            clean_payload(None, &main, &head, Some("cargo check"))["command"],
+            clean_payload(None, &main, &head, Some("cargo check"), false)["command"],
             "cargo check"
         );
+        assert_eq!(
+            clean_payload(None, &main, &head, Some("cargo check"), true),
+            json!({
+                "main": main,
+                "head": head,
+                "command": null,
+                "command_skipped": "paths",
+                "landed_run_id": null,
+                "landed_task_id": null,
+            })
+        );
+    }
+
+    /// The command runs on every run without `[recheck] paths`, and with
+    /// them only on a run whose diff touches one (ADR-t2032-1).
+    #[test]
+    fn the_command_runs_only_when_the_diff_touches_a_path() {
+        let paths = ["**/*.rs".to_owned(), "Cargo.lock".to_owned()];
+        let changed = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert!(runs_command(&[], &changed(&["docs/a.md"])));
+        assert!(runs_command(&[], &[]));
+        assert!(runs_command(&paths, &changed(&["docs/a.md", "src/lib.rs"])));
+        assert!(runs_command(&paths, &changed(&["Cargo.lock"])));
+        assert!(!runs_command(&paths, &changed(&["docs/a.md", "dagq.toml"])));
+        assert!(!runs_command(&paths, &changed(&["sub/Cargo.lock"])));
+        assert!(!runs_command(&paths, &[]));
     }
 
     #[test]

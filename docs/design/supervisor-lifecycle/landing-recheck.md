@@ -13,6 +13,7 @@ related:
   - adr-0027
   - adr-0047
   - adr-0049
+  - adr-t2032-1
 ---
 
 # Landing recheck
@@ -37,6 +38,8 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
 
 1. `git merge-tree --write-tree --name-only --no-messages -z <main> <head>`（`Repository::merged_tree`）。衝突すれば`rebase_conflict`で、衝突したpathを持つ。
 2. 衝突が無く、main checkoutの`dagq.toml`の`[recheck] command`（[Run environment](run-environment.md)）があれば、mergeした木を`commit-tree`でmainの上の1 commitにし（refは作らない）、queue dirの`recheck/worktree`に`Repository::checkout_scratch`で出す（worktreeでなければ`git worktree prune`の後に`git worktree add --detach --force`、worktreeなら`checkout --detach --force`と`clean -ffdxq`）。そこで`/bin/sh`でcommandを実行する。envはそのrunの`[run.env]`（`${DAGQ_RUN_DIR}`はそのrunのrun dir）に、`CARGO_TARGET_DIR=<queue dir>/recheck/target`を上書きしたもの。出力はrun dirの`recheck-<mainの先頭12桁>.log`。非0の終了は`verification_failed`で、`command`・`exit_code`・`log_path`・`output_tail`（末尾2000文字）を持つ。
+   `[recheck] paths`があれば、2はmergeした木とmainの差分のpath（`Repository::changed_paths(main, tree)`）がどれかのglobに当たるrunにだけ行う（`recheck::runs_command`、[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
+   当たらないrunは1だけを見て、scratch worktreeも出さない。
 3. `[recheck]`が無いか、`[run.env]`のprogramが見つからない間（ADR-0049の決定9）は1だけを見る。Gitやcommandが実行できなかったrunは`errors`に数え、runには何も記録しない。
 
 この repositoryの`dagq.toml`には`[recheck]`の`command = "cargo check --locked --all-targets"`がある。task 529が、固定バイナリにtask 462の実装が入った後に足した。target（`recheck/target`）は1つで、recheckは直列なので、同時にそれを使うのは1本だけ。worktreeとtargetはqueue dirの`recheck/`に残り、次のrecheckが使い回す。
@@ -48,6 +51,9 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
 - **leaseの無いrun**: `park_rechecked`が1 transactionでrunを`awaiting_integration` → `needs_session`にし（`last_error`は`reason`）、`landing_recheck_failed`（`code`、`main`、`head`、`landed_run_id`、`landed_task_id`、`conflicts`か`command`・`exit_code`・`log_path`・`output_tail`、`reason`、`action: resumed`、`status: needs_session`）を記録する。次のpassの`resume_candidates`（[`needs_session`](needs-session.md)）が、ふつうのresumeとして拾い、効く優先度の順で空いたslotを受ける。依頼文は`ResumeKind::Recheck`（「waiting to land … the supervisor's landing recheck found that it no longer lands」）で、手順は着地の延期と同じrebaseと、commandの失敗ならrebase後にそのcommandを手元で流して直すこと。
 - **このsupervisorがslotに持つrun**: `landing_recheck_failed`を`action: held`（`reason`付き）で記録するだけにする。そのrunが`AwaitingSlot`で着地slotを取る直前に`park_held_by_recheck`が、最新の`landing_recheck_failed`が`held`で`main`と`head`が今のmainと`result_commit`に一致するかを見て、一致すれば`park_rechecked`（このsupervisorのtoken）でleaseを手放して`needs_session`にし、同じ内容を`action: resumed`、`repeat: true`でもう1度記録する（`lease_released`の`reason`は`landing_recheck_failed`）。mainがさらに動いていれば着地を試みる。
 - **きれいなrun**（ADR-t1311-1）: merge-treeが衝突せず、`[recheck] command`があればそれも通ったrunのうち、leaseが無いかこのsupervisorがslotに持つものに`landing_recheck_clean`（`main`、`head`、`command`（merge-treeだけならnull）、`landed_run_id`、`landed_task_id`（着地のrunの無いmainの動きならnull））を記録する（`record_recheck_clean`、payloadは`recheck::clean_payload`）。statusは変えない。
+  - `paths`で飛ばしたrunもきれいなrunで、`command`はnullにし、`command_skipped: "paths"`を足す。
+  - この印は、commandが無い・`[run.env]`のprogramが見つからずに流せなかったnullと、`paths`で流す要が無かったnullを分ける。
+    commandを流さなかったきれいな結果を確かめ直すかを決めるときは、後者を確かめ済みのまま数える。
 - **askの段落**: 失敗でもきれいでも、runの閉じていないask（答えの有無を問わない）のquestionのrecheckの段落を最新の結果1つに置き換え、`ask_updated`（`ask_id`、`kind`、`why`）を記録する（`AskStore::note_on_asks`、置き換えは`recheck::noted_question`）。recheckの段落は`Landing recheck: `で始まる段落（空行で区切ったもの）で、置くときは前のものを全部除いてからquestionの末尾に置く（ADR-t1311-1以前のバイナリが積み重ねた段落も除く）。置き換えた結果が前のquestionと同じなら書き直さず、`ask_updated`も記録しない。askは閉じない。
   - 失敗（`why: landing_recheck_failed`、`recheck::ask_note`）: `Landing recheck: <reason>. The supervisor resumes the run …`（`held`なら`… parks the run for a resume instead of landing it once its session has exited.`）。
   - きれい（`why: landing_recheck_clean`、`recheck::clean_ask_note`）: `Landing recheck: after task <task> (run <run>) landed, the landing recheck found that the run still lands cleanly on main <mainの先頭12桁>: git merges it without a conflict and "<command>" passes on main with the run merged in.`。commandを流さなかったときは`…: git merges it without a conflict (no command was run).`、着地のrunの無い動きなら冒頭は`after main moved without a dagq landing, …`。

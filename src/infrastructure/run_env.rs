@@ -6,7 +6,8 @@
 //! decision 4). `[conflicts]` holds the thresholds of the
 //! `conflict_hotspot` alert of `stats` (goal 31). `[recheck]` holds the
 //! `command` the landing recheck runs on main's tree with a waiting run
-//! merged in (ADR-0068 decision 2). `[disk]` holds how much free disk
+//! merged in (ADR-0068 decision 2), and the `paths` a run's diff must touch
+//! for it to run (ADR-t2032-1). `[disk]` holds how much free disk
 //! space a claim and a landing need (ADR-0047 decision 44, task 377).
 //! `[resume]` holds the limit of a run's conflict-only attempts (ADR-0047
 //! decision 24). `[exit]` held the retries of a `/exit` the session held
@@ -57,6 +58,7 @@ use crate::{
         landing_branch::RepositoryConfig,
         light_slots::LightChanges,
         provider_switch::ProviderFallback,
+        recheck::RecheckConfig,
         resume::ResumeConfig,
         review_subagents::{self, ReviewSubagent},
         run_env::{RunEnvCheck, RunEnvProgram},
@@ -165,8 +167,9 @@ const TABLES: [&str; 20] = [
     PROVIDER_FALLBACK_TABLE,
     CI_WATCH_TABLE,
 ];
-/// The one key of `[recheck]`.
+/// The keys of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
+const RECHECK_PATHS: &str = "paths";
 /// Names the runtime itself sets on a workspace (`DAGQ_ROLE`, `DAGQ_QUEUE`)
 /// and may set later; `[run.env]` cannot override them.
 const RESERVED_PREFIX: &str = "DAGQ_";
@@ -204,8 +207,9 @@ pub struct Config {
     pub stall: StallConfig,
     /// `[conflicts]`, the defaults for the keys it does not set.
     pub conflicts: ConflictConfig,
-    /// `[recheck] command`; none checks the merge only.
-    pub recheck_command: Option<String>,
+    /// `[recheck]`: no command checks the merge only, no paths runs the
+    /// command on every run.
+    pub recheck: RecheckConfig,
     /// `[disk]`, the defaults for the keys it does not set.
     pub disk: DiskConfig,
     /// `[resume]`, the default for the key it does not set.
@@ -277,6 +281,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut kpi = KpiTables::default();
     let mut areas: Option<Vec<(String, Vec<String>)>> = None;
     let mut e2e_paths_seen: Option<usize> = None;
+    let mut recheck_paths_seen = false;
     // The line of the `[review.subagents.<agent>]` header whose `paths`
     // is not read yet.
     let mut subagent_open: Option<usize> = None;
@@ -650,21 +655,38 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 }
             }
             Some(RECHECK_TABLE) => {
-                ensure!(
-                    key == RECHECK_COMMAND,
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{RECHECK_TABLE}]; the key is {RECHECK_COMMAND}"
-                );
-                ensure!(
-                    config.recheck_command.is_none(),
-                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
-                );
-                let command = parse_string(rest.trim())
-                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
-                ensure!(
-                    !command.trim().is_empty(),
-                    "{CONFIG_FILE_NAME}:{number}: {key} is blank"
-                );
-                config.recheck_command = Some(command);
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                match key {
+                    RECHECK_COMMAND => {
+                        ensure!(
+                            config.recheck.command.is_none(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                        );
+                        let command = parse_string(rest.trim()).with_context(with)?;
+                        ensure!(
+                            !command.trim().is_empty(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} is blank"
+                        );
+                        config.recheck.command = Some(command);
+                    }
+                    RECHECK_PATHS => {
+                        ensure!(
+                            !recheck_paths_seen,
+                            "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                        );
+                        recheck_paths_seen = true;
+                        let globs = parse_string_array(rest.trim()).with_context(with)?;
+                        ensure!(
+                            !globs.is_empty(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} is empty; leave it out to run the command on every run"
+                        );
+                        validate_path_globs(&globs).with_context(with)?;
+                        config.recheck.paths = dedup_globs(&globs);
+                    }
+                    _ => bail!(
+                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{RECHECK_TABLE}]; the keys are {RECHECK_COMMAND} and {RECHECK_PATHS}"
+                    ),
+                }
             }
             Some(REPOSITORY_TABLE) => {
                 let repository = &mut config.repository;
@@ -1151,16 +1173,16 @@ pub fn load_kpi_settings(root: &Path) -> Result<Option<KpiSettings>> {
     })
 }
 
-/// `[recheck] command` of the `dagq.toml` in `root`; no file, no table or
-/// no key is none.
-pub fn load_recheck_command(root: &Path) -> Result<Option<String>> {
+/// `[recheck]` of the `dagq.toml` in `root`; no file, no table or no key
+/// is the default (no command, no paths).
+pub fn load_recheck_config(root: &Path) -> Result<RecheckConfig> {
     let path = root.join(CONFIG_FILE_NAME);
     let Some(text) = read_config(&path)? else {
-        return Ok(None);
+        return Ok(RecheckConfig::default());
     };
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
-        .recheck_command)
+        .recheck)
 }
 
 /// `[repository]` of the `dagq.toml` in `root` (ADR-t615-1); no file, no
@@ -1590,8 +1612,8 @@ impl Verifier for ShellVerifier {
         run_env_salt(queue_dir)
     }
 
-    fn recheck_command(&self) -> Result<Option<String>> {
-        load_recheck_command(&self.checkout)
+    fn recheck_config(&self) -> Result<RecheckConfig> {
+        load_recheck_config(&self.checkout)
     }
 
     fn worker_trial(&self) -> Result<WorkerTrial> {
@@ -2504,6 +2526,14 @@ LITERAL = 'no \n escapes # here'
             ),
             ("[recheck]\ncommand = ' '", "command is blank"),
             ("[recheck]\ncommand = x", "expected a quoted string"),
+            ("[recheck]\npaths = []", "2: paths is empty"),
+            ("[recheck]\npaths = 'src/**'", "2: value of paths"),
+            ("\n[recheck]\npaths = ['/src/**']", "3: value of paths"),
+            ("[recheck]\npaths = ['src/../x']", "2: value of paths"),
+            (
+                "[recheck]\npaths = ['a']\npaths = ['b']",
+                "3: paths is defined twice",
+            ),
             ("[run.env]\nA 'x'", "expected KEY"),
             ("[run.env]\n1A = 'x'", "not an environment variable name"),
             ("[run.env]\nA-B = 'x'", "not an environment variable name"),
@@ -2977,24 +3007,31 @@ LITERAL = 'no \n escapes # here'
     }
 
     #[test]
-    fn reads_the_recheck_command() {
+    fn reads_the_recheck_table() {
         let config =
             parse_config("[recheck]\ncommand = \"cargo check --locked\" # fast\n").unwrap();
         assert_eq!(
-            config.recheck_command.as_deref(),
+            config.recheck.command.as_deref(),
             Some("cargo check --locked")
         );
-        assert_eq!(parse_config("").unwrap().recheck_command, None);
+        assert!(config.recheck.paths.is_empty());
+        assert_eq!(parse_config("").unwrap().recheck, RecheckConfig::default());
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load_recheck_command(dir.path()).unwrap(), None);
+        assert_eq!(
+            load_recheck_config(dir.path()).unwrap(),
+            RecheckConfig::default()
+        );
         fs::write(
             dir.path().join(CONFIG_FILE_NAME),
-            "[run.env]\nA = 'x'\n[recheck]\ncommand = 'make check'\n",
+            "[run.env]\nA = 'x'\n[recheck]\ncommand = 'make check'\npaths = [\"**/*.rs\", 'Cargo.lock', \"**/*.rs\"] # rust\n",
         )
         .unwrap();
         assert_eq!(
-            load_recheck_command(dir.path()).unwrap().as_deref(),
-            Some("make check")
+            load_recheck_config(dir.path()).unwrap(),
+            RecheckConfig {
+                command: Some("make check".to_owned()),
+                paths: vec!["**/*.rs".to_owned(), "Cargo.lock".to_owned()],
+            }
         );
         let verifier = ShellVerifier {
             checkout: dir.path().to_owned(),
@@ -3003,11 +3040,11 @@ LITERAL = 'no \n escapes # here'
             verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
         };
         assert_eq!(
-            verifier.recheck_command().unwrap().as_deref(),
+            verifier.recheck_config().unwrap().command.as_deref(),
             Some("make check")
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[recheck]\nnope = 1\n").unwrap();
-        assert!(load_recheck_command(dir.path()).is_err());
+        assert!(load_recheck_config(dir.path()).is_err());
     }
 
     #[test]

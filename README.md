@@ -132,7 +132,7 @@ The supervisor passes these variables to every worker and to the verification co
 command = "cargo check --locked --all-targets"
 ```
 
-After each landing, the supervisor checks the runs still waiting to land against the new tip of the landing branch. Without `[recheck]` it checks only for Git conflicts (`git merge-tree`). With it, it also runs `command` on the merged tree in a scratch worktree under the queue directory. A run that conflicts or fails the command goes back to its worker before it tries to land ([Landing recheck](docs/design/supervisor-lifecycle/landing-recheck.md)).
+After each landing, the supervisor checks the runs still waiting to land against the new tip of the landing branch. Without `[recheck]` it checks only for Git conflicts (`git merge-tree`). With it, it also runs `command` on the merged tree in a scratch worktree under the queue directory. With `paths` (globs) in `[recheck]`, it runs `command` only on the runs whose merged tree differs from the tip in a path one of the globs matches. A run that conflicts or fails the command goes back to its worker before it tries to land ([Landing recheck](docs/design/supervisor-lifecycle/landing-recheck.md)).
 
 ### Supervisor and the rest
 

@@ -354,6 +354,94 @@ fn a_waiting_run_that_still_lands_is_left_waiting() {
     );
 }
 
+/// Commit `[recheck]` with a command that always fails and `paths`.
+fn failing_recheck_with_paths(repo: &Path, paths: &str) {
+    fs::write(
+        repo.join("dagq.toml"),
+        format!("[recheck]\ncommand = 'exit 1'\npaths = {paths}\n"),
+    )
+    .unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "the recheck"]);
+}
+
+/// With `[recheck] paths` that the waiting run's diff against main touches
+/// none of (ADR-t2032-1), the recheck checks the merge only: the command,
+/// which would fail, is not run, no scratch worktree is checked out, and
+/// the run is recorded clean with a null command, told apart as skipped
+/// by the paths, and its ask says no command was run.
+#[test]
+fn a_waiting_run_whose_diff_misses_the_recheck_paths_runs_no_command() {
+    let (dir, repo, db) = fixture();
+    failing_recheck_with_paths(&repo, "['**/*.rs', 'Cargo.lock']");
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(
+        2,
+        "printf 'fn f() {}\\n' > lib.rs && git add lib.rs && git commit -q -m rust; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let (waiting, ask, reviewer) = waiting_then_landing(&backend, &repo, &db);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let second = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+    assert_eq!(second.status(), RunStatus::Integrated);
+    let main = git_out(&repo, &["rev-parse", "main"]);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(payloads(&detail, "landing_recheck_failed").is_empty());
+    assert_eq!(
+        payloads(&detail, "landing_recheck_clean"),
+        [&json!({
+            "main": main,
+            "head": waiting.result_commit().unwrap(),
+            "command": null,
+            "command_skipped": "paths",
+            "landed_run_id": second.id(),
+            "landed_task_id": 2,
+        })]
+    );
+    let question = queue.read_ask(ask.id).unwrap().question;
+    assert!(
+        question.ends_with("git merges it without a conflict (no command was run)."),
+        "{question}"
+    );
+    let recheck_dir = fs::canonicalize(dir.path()).unwrap().join("recheck");
+    assert!(!recheck_dir.join("worktree").exists());
+    let recheck = &runtime::status(&db).unwrap()["landing_recheck"];
+    assert_eq!(recheck["command"], "exit 1", "{recheck}");
+    assert_eq!(recheck["clean"], 1);
+    assert_eq!(recheck["command_skipped"], 1);
+    assert_eq!(recheck["check_failed"], 0);
+}
+
+/// With `[recheck] paths` that the waiting run's diff against main touches,
+/// the command runs as without them: here it fails, and the run is parked
+/// and resumed with the command's failure.
+#[test]
+fn a_waiting_run_whose_diff_touches_the_recheck_paths_runs_the_command() {
+    let (_dir, repo, db) = fixture();
+    failing_recheck_with_paths(&repo, "['**/*.rs', '*.txt']");
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(
+        2,
+        "printf 'other\\n' > other.md && git add other.md && git commit -q -m other; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    backend.resume_script_for(1, "await_message; idle; await_exit");
+    let (_waiting, _ask, reviewer) = waiting_then_landing(&backend, &repo, &db);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert!(payloads(&detail, "landing_recheck_clean").is_empty());
+    let found = payloads(&detail, "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(found[0]["code"], "verification_failed");
+    assert_eq!(found[0]["command"], "exit 1");
+    let recheck = &runtime::status(&db).unwrap()["landing_recheck"];
+    assert_eq!(recheck["check_failed"], 1, "{recheck}");
+    assert_eq!(recheck["command_skipped"], 0);
+}
+
 /// Commit `file` on main by hand, outside dagq; the new main.
 fn move_main(repo: &Path, file: &str, text: &str) -> String {
     fs::write(repo.join(file), text).unwrap();
