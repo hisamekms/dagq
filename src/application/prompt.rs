@@ -374,7 +374,7 @@ fn headless_provider_line(provider: Provider) -> &'static str {
         }
         Provider::Codex => {
             "Wait for each command to finish before you answer: a command still running when you answer is stopped with the turn.\n\
-             Put temporary files, throwaway repositories and any other CARGO_TARGET_DIR under $TMPDIR (a directory the runtime made for this run and removes after it), never directly in /tmp or /private/tmp; build in the worktree's own target/ (cargo's default).\n"
+             Put temporary files, throwaway repositories and any build output you keep outside the worktree under $TMPDIR (a directory the runtime made for this run and removes after it), never directly in /tmp or /private/tmp; where to build otherwise is for the repository's instructions (AGENTS.md or CLAUDE.md) to say.\n"
         }
     }
 }
@@ -790,7 +790,7 @@ fn e2e_line(task: &Task, e2e_paths: &[String]) -> String {
     if e2e_paths.is_empty() && !task.required_evidence().contains(&EvidenceCheck::E2e) {
         return String::new();
     }
-    "E2E: do not run the e2e (tests/e2e.rs) yourself. When the run needs it (the task asks for it, or the diff touches the repository's dagq.toml [e2e] paths), the runtime runs it on the host after the review passes, before the run lands, and sends the run back to a session if it fails. Report `e2e` in the receipt as not_applicable with that reason.\n".to_owned()
+    "E2E: do not run the e2e yourself. When the run needs it (the task asks for it, or the diff touches the repository's dagq.toml [e2e] paths), the runtime runs it on the host after the review passes, before the run lands, and sends the run back to a session if it fails. Report `e2e` in the receipt as not_applicable with that reason.\n".to_owned()
 }
 
 /// What the worker's prompt says of a worker_question's `--topic`
@@ -2488,7 +2488,7 @@ pub(crate) fn resume_request(
         lines.push(format!("2. {checks}"));
     } else if request.kind == ResumeKind::E2e {
         lines.push(format!(
-            "1. Read the logs the reason names and fix the e2e tests that failed (each failed once more on its rerun by name) and commit; if {branch} moved, git rebase {} first. You may run a failed test by name to reproduce it (cargo test --locked --test e2e -- --ignored --exact <name>), but not the whole e2e: the runtime runs it again after the review.",
+            "1. Read the logs the reason names and fix the e2e tests that failed (each failed once more on its rerun by name) and commit; if {branch} moved, git rebase {} first. You may run a failed test by name to reproduce it, the way the repository's instructions (AGENTS.md or CLAUDE.md) say, but not the whole e2e: the runtime runs it again after the review.",
             request.main
         ));
         lines.push(format!("2. {checks}"));
@@ -5141,7 +5141,7 @@ mod tests {
         let own_run = run(7, RunStatus::Claimed, None);
         let e2e = ["tests/e2e.rs".to_owned()];
         let open = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-        let line = "E2E: do not run the e2e (tests/e2e.rs) yourself.";
+        let line = "E2E: do not run the e2e yourself.";
         let codex = run_on(Provider::Codex, WorkerMode::Headless);
         for worker in [&own_run, &codex] {
             let text = prompt(&open, worker, None, &[], &[], &[], None, &e2e).unwrap();
@@ -5176,9 +5176,67 @@ mod tests {
                 "{resumed}"
             );
             assert!(resumed.contains("Reason: the e2e failed: a; see /runs/r/e2e-1.log"));
-            assert!(resumed.contains("--exact <name>"), "{resumed}");
+            assert!(
+                resumed.contains("You may run a failed test by name to reproduce it, the way the repository's instructions (AGENTS.md or CLAUDE.md) say, but not the whole e2e"),
+                "{resumed}"
+            );
             assert!(!resumed.contains("Codex worker E2E"), "{resumed}");
             assert!(!resumed.contains("E2E marks"), "{resumed}");
+        }
+    }
+
+    /// Goal 52 acceptance (3): what the runtime tells a worker of building,
+    /// temporary files and the e2e names no build tool, build directory or
+    /// e2e file of one repository, on either provider and in every text the
+    /// session is sent; the Codex worker still keeps its temporary files
+    /// under `$TMPDIR`, and the e2e stays the runtime's to run, reproduced by
+    /// name only on an e2e resume.
+    #[test]
+    fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
+        let open = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        let required = task_with_evidence(7, vec![EvidenceCheck::E2e]);
+        let e2e = ["tests/e2e/**".to_owned()];
+        for provider in [Provider::Claude, Provider::Codex] {
+            let worker = run_on(provider, WorkerMode::Headless);
+            let mut texts = session_texts(&open, &worker);
+            texts.extend(session_texts(&required, &worker));
+            texts.push(prompt(&open, &worker, None, &[], &[], &[], None, &e2e).unwrap());
+            for text in &texts {
+                let lower = text.to_lowercase();
+                for leak in ["cargo", "target/", "tests/e2e.rs", "--exact", "--ignored"] {
+                    assert!(!lower.contains(leak), "{provider:?} {leak}: {text}");
+                }
+                assert!(!text.contains("CARGO_TARGET_DIR"), "{provider:?}: {text}");
+            }
+            let first = &texts[0];
+            if provider == Provider::Codex {
+                assert!(first.contains("throwaway repositories"), "{first}");
+                assert!(first.contains("under $TMPDIR (a directory the runtime made for this run"));
+                assert!(first.contains("never directly in /tmp or /private/tmp"));
+            } else {
+                assert!(!first.contains("$TMPDIR"), "{first}");
+            }
+            let with_e2e = texts.last().unwrap();
+            assert!(
+                with_e2e.contains("E2E: do not run the e2e yourself."),
+                "{with_e2e}"
+            );
+            assert!(with_e2e.contains("the runtime runs it on the host after the review passes"));
+            assert!(with_e2e.contains("Report `e2e` in the receipt as not_applicable"));
+            let request = ResumeRequest {
+                main: CommitSha::try_from(SHA).unwrap(),
+                branch: "main".into(),
+                reason: "the e2e failed: a".into(),
+                kind: ResumeKind::E2e,
+            };
+            let resumed = resume_request(&open, &worker, &request, &[]).unwrap();
+            for step in [
+                "fix the e2e tests that failed",
+                "run a failed test by name to reproduce it, the way the repository's instructions (AGENTS.md or CLAUDE.md) say",
+                "but not the whole e2e: the runtime runs it again after the review",
+            ] {
+                assert!(resumed.contains(step), "{step}: {resumed}");
+            }
         }
     }
 
@@ -6402,7 +6460,7 @@ mod tests {
         let tmp = "under $TMPDIR (a directory the runtime made for this run";
         assert!(codex[0].contains(tmp), "{}", codex[0]);
         assert!(codex[0].contains("never directly in /tmp or /private/tmp"));
-        assert!(codex[0].contains("worktree's own target/"));
+        assert!(codex[0].contains("the repository's instructions (AGENTS.md or CLAUDE.md) to say"));
         assert!(!claude[0].contains("$TMPDIR"), "{}", claude[0]);
     }
 

@@ -74,7 +74,7 @@ fn a_passed_run_that_needs_the_e2e_runs_it_on_the_host_and_lands() {
     let run = &detail.runs[0];
     let prompt = read_prompt(run);
     assert!(
-        prompt.contains("E2E: do not run the e2e (tests/e2e.rs) yourself."),
+        prompt.contains("E2E: do not run the e2e yourself."),
         "{prompt}"
     );
     let validated = payloads(&detail, "validation_finished");

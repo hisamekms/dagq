@@ -47,6 +47,8 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
 
 着地の関門は`integrate`の検証がrebase後に1回だけ流す。runtimeのtaskではverifyのcoverageの関門を`dagq.toml`の`[landing_verification]`がunit test全件と影響範囲で絞ったIT（既に落ちているtestを除く）に置き換え、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`を流す（[testの制約](testing.md)の「test binary」、仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md#着地の検証)）。全部のtestとcoverageの80%はmainのCIが最終関門として見る。着地の検証が軽くなっても、workerの手元の検証は上のとおりで変わらない（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)決定6）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md#workerのprompt)の「workerのprompt」のverification commandsの項が持つ。例外は「resumeでの再現」の1つだけ。
 
+buildは原則としてworktreeの既定の`target/`で行う。例外として、worktreeの外にtargetが要るとき（使い捨てのrepositoryのbuildなど）だけ`CARGO_TARGET_DIR`を`$TMPDIR`の下に向け、`/tmp`や`/private/tmp`に直接置かない（Codexのworkerにruntimeが渡す`$TMPDIR`はrunごとに作られ、runの後に消える）。
+
 subagent reviewは該当するときに実行し、しないときは理由をreceiptに書く。
 
 ## testの範囲

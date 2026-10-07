@@ -94,7 +94,9 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   走っているtaskのpathsは変えられず、plannerが広げて登録し直すため。
 - e2eはworkerが流さない（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)）。
   runがe2eを要りうるときだけ、runtimeがreviewのpassの後にhostで流すことと、receiptの`e2e`を`not_applicable`にすることを1行で言う。
-  e2eが落ちて戻ったrunのresumeだけが、落ちたtestを名前で絞って再現するよう頼む。
+  e2eが落ちて戻ったrunのresumeだけが、落ちたtestを名前で絞ってrepositoryの指示（AGENTS.mdかCLAUDE.md）のとおりに再現するよう頼む。
+  e2eのファイルや再現のコマンドはpromptに書かない（どのrepositoryにも渡る文なので）。
+  このrepositoryのそれは[手元の検証](../../development/local-checks.md)の「e2eを流さない」が持つ。
   関門の印は着地の前のe2eがlanding branchのtreeから読み、promptには載せない。
 - Predecessor tasksにはtask依存に続けてgoal依存（[ADR-0038](../../adr/0038-task-depends-on-a-goal-until-it-is-achieved.md)）のgoalと、その完了したtaskを並べる。
   goalのtaskは多くなりうるので、summaryを短く切る（`GOAL_TASK_SUMMARY_CHARS`）。
