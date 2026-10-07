@@ -105,6 +105,28 @@ pub struct LandedTask {
 /// capped and the rest is counted and left to `git log`.
 pub const LANDED_TASK_LINES: usize = 20;
 
+/// Bytes of a landed task's title its line keeps, the cut's mark included:
+/// a title has no length limit in the domain, so one title could make the
+/// section, and the whole request, as long as it is. The 2,000 commit
+/// subjects (each a landed task's title) before 2026-10-08 took 150 bytes
+/// at the median, 362 at p99 and 443 at most, so a title is cut only when
+/// it is longer than any seen. A cut title keeps its start and ends with
+/// [`LANDED_TITLE_MARK`]'s count of the bytes left out; the commit's
+/// subject in `git log <base>..<main>` has it whole.
+pub const LANDED_TITLE_BYTES: usize = 500;
+
+/// The start of the mark a cut title ends with: `… [+<N> bytes]`, N the bytes
+/// left out.
+const LANDED_TITLE_MARK: &str = "… [+";
+
+/// Bytes the section on landed tasks takes at most, its newlines included,
+/// with `base` and `main` commit IDs of 40 bytes and a branch name of at
+/// most 256 bytes: [`LANDED_TASK_LINES`] lines of `- task <ID>: ` (at most
+/// 29 bytes) and a title of at most [`LANDED_TITLE_BYTES`], about 10,600,
+/// and the header, the line on cut titles and the line counting the rest,
+/// under 1,000 together.
+pub const LANDED_SECTION_BYTES: usize = 12_000;
+
 /// Characters of a receipt summary the prompt keeps for each task of a goal
 /// the task depended on: a goal may hold many tasks, so each is a hint of
 /// what landed, not the whole account.
@@ -2312,13 +2334,17 @@ fn landed_lines(branch: &str, base: &str, main: &str, landed: &[LandedTask]) -> 
     let mut lines = vec![format!(
         "Tasks landed on {branch} since your base, newest first (git log {base}..{main} and git show <commit> tell what each changed):"
     )];
-    lines.extend(
-        landed
-            .iter()
-            .rev()
-            .take(LANDED_TASK_LINES)
-            .map(|task| format!("- task {}: {}", task.task_id, task.title)),
-    );
+    let mut cut = false;
+    for task in landed.iter().rev().take(LANDED_TASK_LINES) {
+        let title = landed_title(&task.title);
+        cut |= title.len() != task.title.len();
+        lines.push(format!("- task {}: {title}", task.task_id));
+    }
+    if cut {
+        lines.push(format!(
+            "- titles ending {LANDED_TITLE_MARK}N bytes] are cut; each is whole as its commit's subject in git log {base}..{main}"
+        ));
+    }
     if let Some(more) = landed
         .len()
         .checked_sub(LANDED_TASK_LINES)
@@ -2329,6 +2355,27 @@ fn landed_lines(branch: &str, base: &str, main: &str, landed: &[LandedTask]) -> 
         ));
     }
     lines
+}
+
+/// `title` within [`LANDED_TITLE_BYTES`]: whole when it fits, else its
+/// start cut on a character boundary and the mark of the bytes left out.
+fn landed_title(title: &str) -> std::borrow::Cow<'_, str> {
+    if title.len() <= LANDED_TITLE_BYTES {
+        return title.into();
+    }
+    // The mark's length depends on the count it names: take the longest
+    // it can be.
+    let room = LANDED_TITLE_BYTES - format!("{LANDED_TITLE_MARK}{} bytes]", title.len()).len();
+    let mut end = room;
+    while !title.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}{LANDED_TITLE_MARK}{} bytes]",
+        &title[..end],
+        title.len() - end
+    )
+    .into()
 }
 
 /// The fixed resolution request the supervisor types into a resumed
@@ -4865,6 +4912,55 @@ mod tests {
             "- … and 3 more; git log --oneline b..m lists them all"
         );
         assert!(many.iter().all(|line| !line.contains("summary")));
+    }
+
+    #[test]
+    fn landed_lines_cut_a_long_title_to_its_bytes_and_say_where_it_is_whole() {
+        let at_cap = "t".repeat(LANDED_TITLE_BYTES);
+        let fits = landed_lines(
+            "main",
+            "b",
+            "m",
+            &[LandedTask {
+                task_id: TaskId::new(1),
+                title: at_cap.clone(),
+            }],
+        );
+        assert_eq!(fits[1], format!("- task 1: {at_cap}"));
+        assert_eq!(fits.len(), 2);
+
+        // Multibyte titles longer than the cap, the most lines, the
+        // longest IDs, commit IDs and branch name the limit counts.
+        let title = "長".repeat(1_000);
+        let landed: Vec<LandedTask> = (0..LANDED_TASK_LINES as i64 + 5)
+            .map(|n| LandedTask {
+                task_id: TaskId::new(i64::MAX - n),
+                title: title.clone(),
+            })
+            .collect();
+        let branch = "b".repeat(256);
+        let (base, main) = ("1".repeat(40), "2".repeat(40));
+        let lines = landed_lines(&branch, &base, &main, &landed);
+        assert_eq!(lines.len(), 1 + LANDED_TASK_LINES + 2);
+        let section = lines.iter().map(|line| line.len() + 1).sum::<usize>();
+        assert!(section <= LANDED_SECTION_BYTES, "{section}");
+        for line in &lines[1..=LANDED_TASK_LINES] {
+            let (_, kept) = line.split_once(": ").unwrap();
+            assert!(kept.len() <= LANDED_TITLE_BYTES, "{}", kept.len());
+            let (start, mark) = kept.split_once(LANDED_TITLE_MARK).unwrap();
+            assert!(title.starts_with(start));
+            assert_eq!(mark, format!("{} bytes]", title.len() - start.len()));
+        }
+        assert_eq!(
+            lines[LANDED_TASK_LINES + 1],
+            format!(
+                "- titles ending … [+N bytes] are cut; each is whole as its commit's subject in git log {base}..{main}"
+            )
+        );
+        assert_eq!(
+            lines[LANDED_TASK_LINES + 2],
+            format!("- … and 5 more; git log --oneline {base}..{main} lists them all")
+        );
     }
 
     fn task(id: i64, title: &str, status: TaskStatus) -> Task {
