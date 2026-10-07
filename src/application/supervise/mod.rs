@@ -1595,8 +1595,8 @@ impl Supervisor<'_> {
             // Every pass, draining or not, so a hold on landings ends as soon
             // as the program is found (ADR-0049 decision 9).
             self.check_run_env_programs()?;
-            // And the sccache server, before any sandboxed turn or job
-            // could start one (ADR-t1215-1).
+            // And the sccache server, which no process given [run.env]
+            // may start (ADR-t1215-1, ADR-t2086-1).
             self.sccache_pass();
             self.check_landing_branch(options.landing_recheck);
             self.mark_run_env_change()?;

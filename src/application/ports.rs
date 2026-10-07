@@ -1333,9 +1333,9 @@ pub trait SccacheServer {
     /// until it listens on `port`, and read the pid of the process that
     /// listens there.
     fn start(&self, program: &Path, env: &[(String, String)], port: u16) -> Result<ServerPid>;
-    /// Make in `dir` the guard a sandboxed turn or job is given as
-    /// `RUSTC_WRAPPER` (ADR-t2008-1), and return its path; one that cannot
-    /// be made is an error, and the turn or job then runs without
+    /// Make in `dir` the guard a process given `[run.env]` is given as
+    /// `RUSTC_WRAPPER` (ADR-t2086-1), and return its path; one
+    /// that cannot be made is an error, and the process then runs without
     /// `RUSTC_WRAPPER`.
     fn guard(&self, dir: &Path) -> Result<PathBuf> {
         anyhow::bail!("no guard is made for {}", dir.display())

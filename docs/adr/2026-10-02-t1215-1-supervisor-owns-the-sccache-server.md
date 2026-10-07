@@ -10,6 +10,7 @@ amends:
   - adr-0049 decision 3
 amended_by:
   - adr-t2008-1
+  - adr-t2086-1
 owners:
   - hisamekms
 tags:

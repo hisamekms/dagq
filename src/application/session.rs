@@ -160,7 +160,7 @@ pub struct Session<'a> {
     /// Where the supervisor started this wrapper.
     pub start: WrapperStart,
     /// The sccache the wrapper's environment names as `RUSTC_WRAPPER` and
-    /// how its server is looked at before a Codex turn (ADR-t1215-1);
+    /// how its server is looked at before each turn (ADR-t2086-1);
     /// `None` names none.
     pub sccache: Option<(
         crate::domain::sccache::SccacheTarget,

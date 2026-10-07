@@ -2,10 +2,12 @@
 id: adr-t2008-1
 type: adr
 title: sandboxの中のturnとjobはsccacheのserverの起動を拒まれ、serverを確かめたものはguardを通してcompileする（ADR-t1215-1決定2をamends）
-status: accepted
+status: superseded
 created: 2026-10-07
 updated: 2026-10-07
 accepted_on: 2026-10-07
+superseded_by: adr-t2086-1
+superseded_on: 2026-10-08
 amends:
   - adr-t1215-1 decision 2
 owners:
@@ -23,6 +25,8 @@ related:
 ---
 
 # ADR-t2008-1: sandboxの中のturnとjobはsccacheのserverの起動を拒まれ、serverを確かめたものはguardを通してcompileする（ADR-t1215-1決定2をamends）
+
+> **置き換え済み（2026-10-08）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2086-1](2026-10-08-t2086-1-no-runtime-process-starts-the-sccache-server.md)を読む。
 
 ## Context
 

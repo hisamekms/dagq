@@ -1,11 +1,11 @@
 //! The sccache server of a `[run.env]` whose `RUSTC_WRAPPER` is sccache
 //! (ADR-t1215-1): the supervisor, outside any sandbox, starts and keeps
-//! it; a process the runtime runs in a sandbox (a Codex worker's turn, a
-//! Codex job given `[run.env]`) must not, so a sandboxed turn whose server
+//! it; no other process the runtime gives `[run.env]` may (ADR-t2086-1),
+//! sandboxed or not: each is refused the server's start, one whose server
 //! could not be confirmed just before it starts runs without
 //! `RUSTC_WRAPPER`, and one whose server was confirmed compiles through
-//! the guard, which refuses the server's start should the server stop
-//! after the look (ADR-t2008-1).
+//! the guard, which runs the compiler itself should the server stop after
+//! the look ([`GuardLook`]).
 
 use std::path::Path;
 
@@ -174,12 +174,18 @@ pub enum CheckReason {
     Startup,
     /// A later pass found no server.
     Missing,
-    /// Before a Codex worker's workspace opens.
+    /// Before a worker's session opens, on either provider.
     BeforeWorker,
-    /// Before a Codex run's `needs_session` resume opens.
+    /// Before a run's `needs_session` resume opens, on either provider.
     BeforeResume,
-    /// Before a Codex job given `[run.env]` (the run's review) starts.
+    /// Before the run's review job starts, on either provider.
     BeforeReview,
+    /// Before a landing of the supervisor's runs its verification commands.
+    BeforeIntegrate,
+    /// Before the landing recheck runs its command.
+    BeforeRecheck,
+    /// Before the e2e of a run starts.
+    BeforeE2e,
 }
 
 impl CheckReason {
@@ -190,25 +196,28 @@ impl CheckReason {
             Self::BeforeWorker => "before_worker",
             Self::BeforeResume => "before_resume",
             Self::BeforeReview => "before_review",
+            Self::BeforeIntegrate => "before_integrate",
+            Self::BeforeRecheck => "before_recheck",
+            Self::BeforeE2e => "before_e2e",
         }
     }
 }
 
-/// What a look before a sandboxed turn or job found.
+/// What the supervisor's look before a process given `[run.env]` found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerCheck {
     /// `[run.env]` names no sccache: nothing to do.
     NotConfigured,
-    /// The server listens.
-    Running,
+    /// The server listens on `port`.
+    Running { port: u16 },
     /// No server could be confirmed (none listens, none could be started,
     /// or the look failed): the turn or job runs without `RUSTC_WRAPPER`.
     Unconfirmed { port: u16, why: String },
 }
 
-/// The file name of the guard (ADR-t2008-1): a link to the `dagq` binary
-/// that a sandboxed turn or job is given as `RUSTC_WRAPPER` in place of
-/// sccache. `dagq` invoked by this name is the guard, not the CLI.
+/// The file name of the guard (ADR-t2086-1): a link to the `dagq` binary
+/// that a process given `[run.env]` is given as `RUSTC_WRAPPER` in place
+/// of sccache. `dagq` invoked by this name is the guard, not the CLI.
 pub const GUARD_NAME: &str = "dagq-rustc-wrapper";
 /// The variable that tells the guard the sccache `[run.env]` names.
 pub const GUARD_PROGRAM_VAR: &str = "DAGQ_SCCACHE_PROGRAM";
@@ -216,9 +225,11 @@ pub const GUARD_PROGRAM_VAR: &str = "DAGQ_SCCACHE_PROGRAM";
 /// first: its log, before it binds the port or leaves the client.
 pub const ERROR_LOG_VAR: &str = "SCCACHE_ERROR_LOG";
 /// A log no process can open (`/dev/null` is no directory), so a server
-/// started with it exits before it listens: what a sandboxed turn or job
-/// is given as [`ERROR_LOG_VAR`], so that no sccache it runs (its client
-/// re-executes itself as the server, with its environment) starts one.
+/// started with it exits before it listens: what every process the
+/// runtime gives `[run.env]` naming sccache is given as [`ERROR_LOG_VAR`]
+/// (ADR-t2086-1), so that no sccache it runs (its client re-executes
+/// itself as the server, with its environment) starts one. The
+/// supervisor's own start of the server is never given it.
 pub const REFUSED_ERROR_LOG: &str = "/dev/null/dagq-refuses-the-sccache-server";
 
 /// Whether the guard's argv\[0\] names it ([`GUARD_NAME`]).
@@ -226,18 +237,72 @@ pub fn invoked_as_guard(argv0: &std::ffi::OsStr) -> bool {
     Path::new(argv0).file_name() == Some(std::ffi::OsStr::new(GUARD_NAME))
 }
 
-/// The variables a sandboxed turn or job of `target` runs with beside its
-/// `[run.env]`: always the [`REFUSED_ERROR_LOG`], and, with `guard` (the
-/// link to the guard, made when its server was confirmed), the guard as
+/// The variables a process of `target` runs with beside its `[run.env]`:
+/// always the [`REFUSED_ERROR_LOG`], and, with `guard` (the link to the
+/// guard, made when its server was confirmed), the guard as
 /// `RUSTC_WRAPPER` and the sccache it compiles through. Without `guard`
 /// the caller takes `RUSTC_WRAPPER` out.
-pub fn sandbox_env(target: &SccacheTarget, guard: Option<&str>) -> Vec<(String, String)> {
+pub fn guarded_env(target: &SccacheTarget, guard: Option<&str>) -> Vec<(String, String)> {
     let mut env = vec![(ERROR_LOG_VAR.to_owned(), REFUSED_ERROR_LOG.to_owned())];
     if let Some(guard) = guard {
         env.push((WRAPPER_VAR.to_owned(), guard.to_owned()));
         env.push((GUARD_PROGRAM_VAR.to_owned(), target.program.clone()));
     }
     env
+}
+
+/// What the look just before a process the runtime gives `[run.env]`
+/// found (ADR-t2086-1), for every such process alike: a worker's turn and
+/// resume and the run's review on either provider, integrate's
+/// verification commands, the landing recheck and the e2e.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardLook {
+    /// Nothing looks at the server here (no sccache in `[run.env]`, or no
+    /// port to look with): `[run.env]` is given as it is.
+    NotConfigured,
+    /// The server listened and the guard was made at this path.
+    Guard(String),
+    /// The server on `port` could not be confirmed, or the guard not
+    /// made: the process runs without `RUSTC_WRAPPER`, which its caller
+    /// records as `sccache_wrapper_removed` with `why` as its `reason`.
+    Unconfirmed { port: u16, why: String },
+}
+
+impl GuardLook {
+    /// The variables a process of `target` runs without and with beside
+    /// its `[run.env]`: refused the server's start unless nothing looked,
+    /// through the guard when there is one, else without `RUSTC_WRAPPER`.
+    pub fn vars(&self, target: &SccacheTarget) -> (&'static [&'static str], Vec<(String, String)>) {
+        match self {
+            Self::NotConfigured => (&[], Vec::new()),
+            Self::Guard(guard) => (&[], guarded_env(target, Some(guard))),
+            Self::Unconfirmed { .. } => (&[WRAPPER_VAR], guarded_env(target, None)),
+        }
+    }
+
+    /// [`Self::vars`] put into `env` (a `[run.env]`), which names the
+    /// sccache it is about; one that names none is left alone. Returns the
+    /// variables the process must not inherit either.
+    pub fn apply(&self, env: &mut Vec<(String, String)>) -> &'static [&'static str] {
+        let Some(target) = SccacheTarget::of_pairs(env) else {
+            return &[];
+        };
+        let (without, with) = self.vars(&target);
+        env.retain(|(key, _)| !without.contains(&key.as_str()));
+        for (key, value) in with {
+            env.retain(|(name, _)| *name != key);
+            env.push((key, value));
+        }
+        without
+    }
+
+    /// The port and why, when the process runs without `RUSTC_WRAPPER`.
+    pub fn removed(&self) -> Option<(u16, &str)> {
+        match self {
+            Self::Unconfirmed { port, why } => Some((*port, why)),
+            _ => None,
+        }
+    }
 }
 
 /// What the guard runs a compile with.
@@ -361,9 +426,9 @@ mod tests {
             port: 4300,
         };
         let refused = (ERROR_LOG_VAR.to_owned(), REFUSED_ERROR_LOG.to_owned());
-        assert_eq!(sandbox_env(&target, None), std::slice::from_ref(&refused));
+        assert_eq!(guarded_env(&target, None), std::slice::from_ref(&refused));
         assert_eq!(
-            sandbox_env(&target, Some("/q/runs/r/dagq-rustc-wrapper")),
+            guarded_env(&target, Some("/q/runs/r/dagq-rustc-wrapper")),
             [
                 refused,
                 (
@@ -378,6 +443,65 @@ mod tests {
         );
         // The log is no file anyone can open.
         assert!(REFUSED_ERROR_LOG.starts_with("/dev/null/"));
+    }
+
+    #[test]
+    fn every_look_refuses_the_start_and_only_a_confirmed_one_keeps_a_wrapper() {
+        let run_env = || {
+            vec![
+                ("RUSTC_WRAPPER".to_owned(), "/opt/bin/sccache".to_owned()),
+                ("SCCACHE_SERVER_PORT".to_owned(), "4300".to_owned()),
+                ("CARGO_BUILD_JOBS".to_owned(), "4".to_owned()),
+            ]
+        };
+        let refused = (ERROR_LOG_VAR.to_owned(), REFUSED_ERROR_LOG.to_owned());
+        // Confirmed: through the guard, refused the start.
+        let mut env = run_env();
+        let guard = GuardLook::Guard("/q/runs/r/dagq-rustc-wrapper".into());
+        assert!(guard.apply(&mut env).is_empty());
+        assert_eq!(
+            env,
+            [
+                ("SCCACHE_SERVER_PORT".to_owned(), "4300".to_owned()),
+                ("CARGO_BUILD_JOBS".to_owned(), "4".to_owned()),
+                refused.clone(),
+                (
+                    "RUSTC_WRAPPER".to_owned(),
+                    "/q/runs/r/dagq-rustc-wrapper".to_owned()
+                ),
+                (
+                    "DAGQ_SCCACHE_PROGRAM".to_owned(),
+                    "/opt/bin/sccache".to_owned()
+                ),
+            ]
+        );
+        assert_eq!(guard.removed(), None);
+        // Unconfirmed: no wrapper (nor an inherited one), refused the start.
+        let mut env = run_env();
+        let unconfirmed = GuardLook::Unconfirmed {
+            port: 4300,
+            why: "no sccache server listens on port 4300".into(),
+        };
+        assert_eq!(unconfirmed.apply(&mut env), ["RUSTC_WRAPPER"]);
+        assert_eq!(
+            env,
+            [
+                ("SCCACHE_SERVER_PORT".to_owned(), "4300".to_owned()),
+                ("CARGO_BUILD_JOBS".to_owned(), "4".to_owned()),
+                refused,
+            ]
+        );
+        assert_eq!(
+            unconfirmed.removed(),
+            Some((4300, "no sccache server listens on port 4300"))
+        );
+        // Nothing looked, or no sccache named: as it is.
+        let mut env = run_env();
+        assert!(GuardLook::NotConfigured.apply(&mut env).is_empty());
+        assert_eq!(env, run_env());
+        let mut other = vec![("RUSTC_WRAPPER".to_owned(), "ccache".to_owned())];
+        assert!(unconfirmed.apply(&mut other).is_empty());
+        assert_eq!(other, [("RUSTC_WRAPPER".to_owned(), "ccache".to_owned())]);
     }
 
     #[test]
@@ -436,6 +560,9 @@ mod tests {
             CheckReason::BeforeWorker,
             CheckReason::BeforeResume,
             CheckReason::BeforeReview,
+            CheckReason::BeforeIntegrate,
+            CheckReason::BeforeRecheck,
+            CheckReason::BeforeE2e,
         ]
         .iter()
         .map(|reason| reason.as_str())
@@ -447,7 +574,10 @@ mod tests {
                 "missing",
                 "before_worker",
                 "before_resume",
-                "before_review"
+                "before_review",
+                "before_integrate",
+                "before_recheck",
+                "before_e2e"
             ]
         );
         assert_eq!(SCCACHE_SERVER_STARTED, "sccache_server_started");

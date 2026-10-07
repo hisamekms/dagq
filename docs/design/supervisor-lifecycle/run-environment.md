@@ -20,7 +20,7 @@ related:
   - adr-0049
   - adr-0079
   - adr-t1215-1
-  - adr-t2008-1
+  - adr-t2086-1
   - design-supervisor-lifecycle-worker-model
   - design-supervisor-lifecycle-actor-model
 ---
@@ -35,7 +35,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - 渡し先: (a) `provision`がworkerのsession wrapperをbackgroundで起動するとき、`DAGQ_ROLE`ほかのworkerの変数の後ろにwrapperのprocessのenvとして足す（ADR-0026の仕組みを[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定3でprocessのenvと読む。以前はworkspaceの`--env KEY=VALUE`）。worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、wrapperは起動せずsupervisorはclaimを止める。(b) `integrate`の`verification_commands`を`Command`のenvに足す（validatingは検証コマンドを実行しない）。読めないファイルは着地処理のエラーで、runは元の状態に戻る。(c) reviewのheadless実行（ADR-0049の決定2）のコマンドのenvに足す。(d) `needs_session`のresumeが起動するwrapperのprocessのenvに、(a)と同じくworkerのenv（`DAGQ_ROLE` / `DAGQ_QUEUE`とworkerのactorの名前）の後ろに並べる（task 303）。resumeのsessionはworkerと同じ手元の検証（fmt・clippy・関係するtest・e2e）を回すので、workerと同じ`[run.env]`（sccache、buildとtestの並列度）が要るため。ADR-0049の決定3（ADR-0040の決定3を引き継ぐ）は渡し先をworkerのworkspace・`integrate`の検証・reviewの3つと書くが、resumeのsessionはrunのworkerのsessionの続きで、その「workerのworkspace」に含まれると読む。値は`begin_resume`の前に読み（`start_resume`に渡す）、landing branchと同じく読めなければ試行を使わずrunは`needs_session`のまま（landing branchの読み込みが同じfileを先に検査するので、壊れた`dagq.toml`はそこで止まる）。`[run.env]`が名指すプログラムが見つからない間は、claimと同じくresumeも始めない（下の「`[run.env]`が名指すプログラムの検査」。始めるとsessionのcargoがすべて失敗して試行を使うため）。resumeの時点のmain checkoutの`dagq.toml`を読むので、workerの起動の後に変えた値はresumeのsessionで効く。
 - `dagq.toml`はrepositoryにcommitされ、値はworkerのwrapperとturnのprocessのenvに渡る（以前はworkspaceを開く`cmux`のargvに出た）ので、secretは入れない。
 - この repositoryの`dagq.toml`の`[run.env]`は、sccache（`RUSTC_WRAPPER = "sccache"`と`SCCACHE_IGNORE_SERVER_IO_ERROR = "1"`。[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定6・7、task 393）と、buildとtestの並列度（`CARGO_BUILD_JOBS`・`RUST_TEST_THREADS`・`NEXTEST_TEST_THREADS`）を置く。値と理由の要点、置かないもの（`CARGO_TARGET_DIR`・`CARGO_INCREMENTAL`）とsccacheの入れ方の規則は`dagq.toml`の`[run.env]`のコメント、`.config/nextest.toml`に並列度を書かない理由はその冒頭のコメント、その補足とほかのhostのツールの入れ方は[運用の開発文書](../../development/operations.md)の「`[run.env]`とtestの並列度の置き場」と「hostのツール」、並列度の経緯と測定は[NEXTEST_TEST_THREADS の測定](../../plans/nextest-test-threads.md)・[nextest の測定](../../plans/nextest-measurement.md)・[運用の規則の経緯](../../plans/operation-rules-history.md)が持つ。
-- 実装の振る舞い: serverはsupervisorがsandboxの外で起動して持ち、sandboxの中でserverと話せないときにcompilerを直接実行するのはclientではなくguardで、起動に失敗したclientは`sccache: error:`で失敗する（下の「sccacheのserver」）。`[run.env]`の値は渡し先(a)〜(d)のすべてに効く。`RUST_TEST_THREADS`は1つのtest binaryの中のtestのthread数で、cargo-nextestはそれを読まず既定でCPU数だけprocessを走らせるので、coverageの関門（`cargo llvm-cov nextest`）が同時に走らせるtestのprocess数は`NEXTEST_TEST_THREADS`で決まる（[ADR-0076](../../adr/0076-run-the-coverage-gate-tests-with-nextest.md)の決定2）。cargo-nextestは`[run.env]`が名指すプログラムではないので決定9の検査の対象ではなく、無いhostでは`integrate`の検証の失敗になる（ADR-0076の決定3。hostに入れる手順は[運用](../../development/operations.md)の「hostのツール」）。
+- 実装の振る舞い: serverはsupervisorがsandboxの外で起動して持ち、`[run.env]`を受けるprocessがserverと話せないときにcompilerを直接実行するのはclientではなくguardで、起動に失敗したclientは`sccache: error:`で失敗する（下の「sccacheのserver」）。`[run.env]`の値は渡し先(a)〜(d)のすべてに効く。`RUST_TEST_THREADS`は1つのtest binaryの中のtestのthread数で、cargo-nextestはそれを読まず既定でCPU数だけprocessを走らせるので、coverageの関門（`cargo llvm-cov nextest`）が同時に走らせるtestのprocess数は`NEXTEST_TEST_THREADS`で決まる（[ADR-0076](../../adr/0076-run-the-coverage-gate-tests-with-nextest.md)の決定2）。cargo-nextestは`[run.env]`が名指すプログラムではないので決定9の検査の対象ではなく、無いhostでは`integrate`の検証の失敗になる（ADR-0076の決定3。hostに入れる手順は[運用](../../development/operations.md)の「hostのツール」）。
 - `[recheck]`は`command`（文字列。空白だけは拒否）と`paths`（globの配列）を持ち、`command`は着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査になる（[Landing recheck](landing-recheck.md)、[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2。`load_recheck_config`、`Verifier::recheck_config`、`domain::recheck::RecheckConfig`）。表が無ければmerge-treeだけを見る。commandには`[run.env]`と、queue dirの`recheck/target`を指す`CARGO_TARGET_DIR`が渡る。この repositoryの`dagq.toml`には`command = "cargo check --locked --all-targets"`と、Rustのファイルと、Rustのcompileが`include_str!`・`include_bytes!`・`build.rs`で読むRust以外のファイルのglobの`paths`がある。
   - `paths`があればmergeした木とmainの差分がどれかのglobに当たるrunにだけcommandを流し、無ければ全てのrunに流す（[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
   - globの規則と、受け付けないglob・配列でない値・重複のエラーは`[e2e] paths`と同じで、空の配列もエラーにする。
@@ -89,15 +89,17 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 ## sccacheのserver
 
-sccacheのserverはsupervisorがsandboxの外で起動して持ち、sandboxの中のclientには起動させない（[ADR-t1215-1](../../adr/2026-10-02-t1215-1-supervisor-owns-the-sccache-server.md)、[ADR-t2008-1](../../adr/2026-10-07-t2008-1-sandboxed-turns-and-jobs-refuse-the-sccache-server-start.md)）。
-clientが起動したserverはclientのsandboxを引き継ぎ、他のrunのbuildも失敗させるため。
-sandboxの中のCodexのturnとjobには、どのprocessも開けない`SCCACHE_ERROR_LOG`を渡す。
-clientは自分を起動し直してserverにし、その子はlistenの前にこのlogを開いて終わるので、turnやjobの途中でserverが止まってもsandboxの中からは起動されない。
-開始の直前にserverを確かめたturnとjobは、`RUSTC_WRAPPER`をrun dirのguard（dagqへのlink）にする。
+sccacheのserverはsupervisorがsandboxの外で起動して持ち、runtimeが`[run.env]`を渡すほかのprocessには、sandboxの中でも外でも起動させない（[ADR-t1215-1](../../adr/2026-10-02-t1215-1-supervisor-owns-the-sccache-server.md)、[ADR-t2086-1](../../adr/2026-10-08-t2086-1-no-runtime-process-starts-the-sccache-server.md)）。
+clientが起動したserverはclientのsandboxを引き継いで他のrunのbuildも失敗させ、起動の記録も残さないため。
+適用先は渡し先(a)〜(d)（providerを問わない）と、着地前の再確認とe2eのコマンド。
+適用先には、どのprocessも開けない`SCCACHE_ERROR_LOG`を渡す（supervisor自身の起動には渡さない）。
+clientは自分を起動し直してserverにし、その子はlistenの前にこのlogを開いて終わるので、途中でserverが止まっても適用先からは起動されない。
+開始の直前にserverを確かめたものは、`RUSTC_WRAPPER`をguard（dagqへのlink）にする。
 guardはcompileごとにportを確かめ、listenしていれば`[run.env]`のsccacheを通してcacheを使う。
 listenしていないとき、確認の直後に止まったserverの起動を拒まれてclientが自分のerrorで失敗したときは、compilerを直接実行する。
-serverを確かめられないturnとreview、guardを作れなかったものはwrapperを外し、cacheなしでbuildを通す。
-wrapperとguardはserverを起動せず、監視と起動はsupervisorが担う。
+serverを確かめられないもの、guardを作れなかったものはwrapperを外してcacheなしでbuildを通し、eventに残す。
+supervisorが始めるものの前の確認は、居ないserverをsupervisorが起動する機会でもある。
+wrapperのturnの前・人の`integrate`・e2eのgateの確認とguardはportを見るだけで起動しない。
 runtimeの外からの起動までは防げず、下の検知が扱う。
 
 ### 外部serverと失敗の偏り
@@ -122,7 +124,8 @@ supervisorが置換の起動を記録すると知らせが消え、人が別のs
 - identityと失敗の判断は`domain::sccache`、出どころと再起動の記録は`application::sccache`。
   再起動の失敗の通知は、稼働中とserver不在の両経路から`record_restart_failure`で照合する。
 - hostへの問い合わせと起動、guardのlinkは`infrastructure::sccache::SystemSccache`、guardの実行は`run_guard`、その判断は`domain::sccache::GuardStep`。
-  sandboxのturnへのwrapperの適用は`application::headless_session`、jobへの適用は`application::supervise::sccache`、渡す変数は`domain::sccache::sandbox_env`。
+  確認の結果は`domain::sccache::GuardLook`、確認は`application::sccache::look`と起動もする`Supervisor::sccache_look`、eventは`application::sccache::record_wrapper_removed`。
+  適用はturnが`application::headless_session`、ほかは`[run.env]`を組む各所（review・`integrate`・recheck・`e2e_gate`）。
 - doctor/statusの表示条件と読み取りは`application::sccache::add_diagnostics`と`report`。
   statusは統計clientを呼ばず、doctorが統計を読む。
 

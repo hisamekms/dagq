@@ -954,15 +954,25 @@ const NEXTEST_FLAKY_RESULT: &str = "NEXTEST_FLAKY_RESULT";
 /// `script` under `/bin/sh -c` in `cwd` with `env`. The first verification
 /// takes nextest's flaky result from `.config/nextest.toml`, so a value the
 /// process inherited (a supervisor or test started inside a flaky retry's
-/// verification) is not passed on unless `env` names one (task 1161).
+/// verification) is not passed on unless `env` names one (task 1161). An
+/// `env` that refuses the sccache server's start was looked at for it
+/// (ADR-t2086-1): its `RUSTC_WRAPPER` is the guard, or none when the server
+/// was not confirmed, never one the process inherited.
 fn verification_command(script: &str, cwd: &Path, env: &[(String, String)]) -> Command {
+    use crate::domain::sccache::{ERROR_LOG_VAR, REFUSED_ERROR_LOG, WRAPPER_VAR};
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
         .arg(script)
         .current_dir(cwd)
-        .env_remove(NEXTEST_FLAKY_RESULT)
-        .envs(env.iter().map(|(key, value)| (key, value)));
+        .env_remove(NEXTEST_FLAKY_RESULT);
+    if env
+        .iter()
+        .any(|(key, value)| key == ERROR_LOG_VAR && value == REFUSED_ERROR_LOG)
+    {
+        command.env_remove(WRAPPER_VAR);
+    }
+    command.envs(env.iter().map(|(key, value)| (key, value)));
     command
 }
 
@@ -4560,6 +4570,33 @@ mod tests {
             flaky_result(&[(NEXTEST_FLAKY_RESULT.to_owned(), "pass".to_owned())]),
             Some(Some("pass".to_owned()))
         );
+    }
+
+    /// A verification command refused the sccache server's start drops an
+    /// inherited `RUSTC_WRAPPER` and gets only the guard it is given, or
+    /// none (ADR-t2086-1); one that is not keeps what it inherits.
+    #[test]
+    fn a_refused_verification_command_takes_its_wrapper_only_from_the_runtime() {
+        use crate::domain::sccache::REFUSED_ERROR_LOG;
+        let wrapper = |env: &[(&str, &str)]| {
+            let env: Vec<(String, String)> = env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            let command = verification_command("true", Path::new("/"), &env);
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "RUSTC_WRAPPER")
+                .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let refused = ("SCCACHE_ERROR_LOG", REFUSED_ERROR_LOG);
+        assert_eq!(wrapper(&[refused]), Some(None));
+        assert_eq!(
+            wrapper(&[refused, ("RUSTC_WRAPPER", "/q/runs/r/dagq-rustc-wrapper")]),
+            Some(Some("/q/runs/r/dagq-rustc-wrapper".to_owned()))
+        );
+        assert_eq!(wrapper(&[]), None);
+        assert_eq!(wrapper(&[("SCCACHE_ERROR_LOG", "/tmp/sccache.log")]), None);
     }
 
     /// Claude Code gets the broker client's server and the permission to

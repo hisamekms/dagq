@@ -46,7 +46,7 @@ use super::{
 use crate::domain::{
     ActorContext, ActorRole, PlannerId, Provider, RunEvent, TaskRun, event_kind,
     provider_switch::{since_switch, switches},
-    sccache::{SccacheTarget, WRAPPER_VAR, sandbox_env},
+    sccache::SccacheTarget,
     stall::StallConfig,
     tokens::TokenUsage,
     turn::{
@@ -118,10 +118,10 @@ pub(super) struct Turns<'a> {
     /// supervisor's request instead of starting with the task's prompt.
     pub(super) resume: bool,
     /// The sccache its environment names as `RUSTC_WRAPPER`, and how its
-    /// server is looked at and the guard made: a Codex turn runs in Codex's
-    /// sandbox, so it runs without `RUSTC_WRAPPER` unless the server listens
-    /// just before it starts (ADR-t1215-1), and through the guard when it
-    /// does (ADR-t2008-1). `None` when the wrapper names no sccache.
+    /// server is looked at and the guard made: a turn on either provider
+    /// runs without `RUSTC_WRAPPER` unless the server listens just before
+    /// it starts, and through the guard when it does (ADR-t2086-1). `None`
+    /// when the wrapper names no sccache.
     pub(super) sccache: Option<(&'a SccacheTarget, &'a dyn SccacheServer)>,
     /// The wrapper runs in the background (ADR-t1404-1 decision 6): its
     /// stdout is the session's log, not a terminal, and takes the `[dagq]`
@@ -659,21 +659,21 @@ impl<'a> Turns<'a> {
         }
     }
 
-    /// The variables turn `turn` on `provider` runs without and with. A
-    /// Codex turn runs in Codex's sandbox, where no sccache may start the
-    /// server, which would keep the sandbox (ADR-t1215-1): it is given the
-    /// refusal of the server's start, and its server is looked at just
-    /// before it starts (a connect to the port, which starts nothing). One
-    /// whose server listens compiles through the guard made in `run_dir`,
-    /// which runs the compiler itself should the server stop during the
-    /// turn (ADR-t2008-1); one whose server does not, or whose guard could
-    /// not be made, runs without `RUSTC_WRAPPER` (its build is uncached but
+    /// The variables turn `turn` runs without and with, on either provider
+    /// (ADR-t2086-1): no sccache a turn runs may start the server, which
+    /// would keep a Codex turn's sandbox (ADR-t1215-1) and is the
+    /// supervisor's to start for any. The turn is given the refusal of the
+    /// server's start, and its server is looked at just before it starts
+    /// (a connect to the port, which starts nothing). One whose server
+    /// listens compiles through the guard made in `run_dir`, which runs the
+    /// compiler itself should the server stop during the turn
+    /// (ADR-t2086-1); one whose server does not, or whose guard could not
+    /// be made, runs without `RUSTC_WRAPPER` (its build is uncached but
     /// correct), recorded as `sccache_wrapper_removed`.
     fn sccache_turn(
         &mut self,
         run_dir: &Path,
         turn: u64,
-        provider: Provider,
     ) -> (&'static [&'static str], Vec<(String, String)>) {
         let Some((target, server)) = self.sccache else {
             return (&[], Vec::new());
@@ -681,36 +681,19 @@ impl<'a> Turns<'a> {
         let TurnOwner::Run(run) = self.owner else {
             return (&[], Vec::new());
         };
-        if provider != Provider::Codex {
-            return (&[], Vec::new());
+        let look = turn_look(target, server, run_dir);
+        if let Some((port, why)) = look.removed() {
+            crate::application::sccache::record_wrapper_removed(
+                &*self.queue,
+                run.id(),
+                i64::try_from(unix_secs(self.clock)).unwrap_or(i64::MAX),
+                "wrapper",
+                port,
+                why,
+                json!({"turn": turn}),
+            );
         }
-        let why = match server.listening(target.port) {
-            Ok(true) => match server.guard(run_dir) {
-                Ok(guard) => match guard.to_str() {
-                    Some(guard) => return (&[], sandbox_env(target, Some(guard))),
-                    None => format!("the guard's path {} is not UTF-8", guard.display()),
-                },
-                Err(error) => format!("the guard could not be made: {error:#}"),
-            },
-            Ok(false) => format!("no sccache server listens on port {}", target.port),
-            Err(error) => format!("the sccache server could not be looked at: {error:#}"),
-        };
-        tracing::warn!(run_id = %run.id(), "run {}: turn {turn} runs without {WRAPPER_VAR}: {why}", run.id());
-        let at = unix_secs(self.clock);
-        if let Err(error) = self.queue.record_runtime_event(
-            run.id(),
-            EventKind::SccacheWrapperRemoved,
-            json!({
-                "at": at,
-                "by": "wrapper",
-                "turn": turn,
-                "port": target.port,
-                "reason": why,
-            }),
-        ) {
-            tracing::warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
-        }
-        (&[WRAPPER_VAR], sandbox_env(target, None))
+        look.vars(target)
     }
 
     /// Heartbeat the wrapper; a failure (the queue busy) is only logged,
@@ -759,7 +742,7 @@ impl<'a> Turns<'a> {
         let agent = self.agent(on.provider)?;
         let mut reader = agent.turn_reader()?;
         let cwd = self.cwd()?;
-        let (without_env, with_env) = self.sccache_turn(run_dir, turn, on.provider);
+        let (without_env, with_env) = self.sccache_turn(run_dir, turn);
         let session = match resume {
             Some(id) => TurnSession::Resume(id),
             None => TurnSession::New(&on.name),
@@ -1308,6 +1291,18 @@ impl<'a> Turns<'a> {
     }
 }
 
+/// The look just before a run's turn on either provider starts, a new
+/// turn or one that resumes the session alike (ADR-t2086-1): the server
+/// of `target` looked at through `server` (which starts nothing) and the
+/// guard made in `run_dir`.
+fn turn_look(
+    target: &SccacheTarget,
+    server: &dyn SccacheServer,
+    run_dir: &Path,
+) -> crate::domain::sccache::GuardLook {
+    crate::application::sccache::look(server, target, run_dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1611,5 +1606,51 @@ mod tests {
         let before = At(std::time::UNIX_EPOCH - Duration::from_secs(1));
         assert_eq!(now_millis(&before), 0);
         assert_eq!(unix_secs(&before), 0);
+    }
+
+    #[test]
+    fn a_turn_is_refused_the_servers_start_and_guarded_only_when_it_listens() {
+        use crate::application::sccache::LookedAt;
+        use crate::domain::sccache::{GuardLook, REFUSED_ERROR_LOG};
+        let target = SccacheTarget {
+            program: "/opt/bin/sccache".into(),
+            port: 4300,
+        };
+        let run_dir = Path::new("/q/runs/r");
+        let refused = ("SCCACHE_ERROR_LOG".to_owned(), REFUSED_ERROR_LOG.to_owned());
+        // Nothing about the turn's provider is asked: a Claude turn and a
+        // Codex turn, new or resumed, are given the same.
+        let look = turn_look(&target, &LookedAt::new(Ok(true), true), run_dir);
+        let (without, with) = look.vars(&target);
+        assert_eq!(
+            look,
+            GuardLook::Guard("/q/runs/r/dagq-rustc-wrapper".into())
+        );
+        assert!(without.is_empty());
+        assert_eq!(
+            with,
+            [
+                refused.clone(),
+                (
+                    "RUSTC_WRAPPER".to_owned(),
+                    "/q/runs/r/dagq-rustc-wrapper".to_owned()
+                ),
+                (
+                    "DAGQ_SCCACHE_PROGRAM".to_owned(),
+                    "/opt/bin/sccache".to_owned()
+                ),
+            ]
+        );
+        for server in [
+            LookedAt::new(Ok(false), true),
+            LookedAt::new(Err("refused"), true),
+            LookedAt::new(Ok(true), false),
+        ] {
+            let look = turn_look(&target, &server, run_dir);
+            let (without, with) = look.vars(&target);
+            assert_eq!(look.removed().map(|(port, _)| port), Some(4300));
+            assert_eq!(without, ["RUSTC_WRAPPER"]);
+            assert_eq!(with, std::slice::from_ref(&refused));
+        }
     }
 }

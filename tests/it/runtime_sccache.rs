@@ -3,13 +3,14 @@
 //! `SCCACHE_IDLE_TIMEOUT` and `PATH`; the server's port is a loopback port
 //! the test listens on once the stub was called, or never. The supervisor
 //! looks at the port without running sccache, starts the server outside
-//! the sandbox with `SCCACHE_IDLE_TIMEOUT=0`, and a Codex turn or review
-//! whose server is not confirmed runs without `RUSTC_WRAPPER`. One whose
-//! server is confirmed compiles through the guard (`dagq` as
-//! `RUSTC_WRAPPER`, ADR-t2008-1), which no sccache in the sandbox gets past
-//! to start a server when the server stops during the turn.
+//! the sandbox with `SCCACHE_IDLE_TIMEOUT=0`, and a turn, a review or a
+//! landing's verification whose server is not confirmed runs without
+//! `RUSTC_WRAPPER`. One whose server is confirmed compiles through the
+//! guard (`dagq` as `RUSTC_WRAPPER`, ADR-t2086-1), which no sccache it
+//! runs gets past to start a server when the server stops meanwhile: in a
+//! sandbox or not, only the supervisor starts it (ADR-t2086-1).
 use crate::common;
-use crate::runtime_codex::{FINISH, codex_fixture, detail};
+use crate::runtime_codex::{FINISH, TASK, codex_fixture, detail};
 use crate::runtime_support;
 
 use dagq::{
@@ -179,6 +180,31 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Have the Codex fixture's task verified, after its own command, by
+/// `command`: integrate runs it on the host, outside any sandbox. The
+/// fixture's task is ready already, whose commands only the store's row
+/// changes.
+fn verify_also(db: &Path, command: String) {
+    let commands = json!(["test -f seed.txt", command]).to_string();
+    let changed = Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=?2",
+            rusqlite::params![commands, TASK.as_i64()],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+/// A verification command that writes its `RUSTC_WRAPPER` and
+/// `SCCACHE_ERROR_LOG` to `log`.
+fn log_wrapper(log: &Path) -> String {
+    format!(
+        "printf '%s\\n%s\\n' \"${{RUSTC_WRAPPER-unset}}\" \"${{SCCACHE_ERROR_LOG-unset}}\" > {}",
+        common::shell_path(log)
+    )
+}
+
 /// The `[run.env]` naming `program` as `RUSTC_WRAPPER` on `port`, and the
 /// review on Codex, committed.
 fn configure(repo: &Path, program: &Path, port: u16, path: &str) {
@@ -249,6 +275,8 @@ fn the_supervisor_starts_a_missing_server_outside_the_sandbox_and_records_it() {
     // does: each turn inherits it unless the turn removes it.
     backend.inherited_env = vec![("RUSTC_WRAPPER".into(), program.display().to_string())];
     set_turns(dir.path(), FINISH);
+    let verification = dir.path().join("verification-env.log");
+    verify_also(&db, log_wrapper(&verification));
     // The server listens once the stub was called to start it.
     let log = program.with_file_name("sccache-calls.log");
     let server = thread::spawn(move || {
@@ -288,7 +316,7 @@ fn the_supervisor_starts_a_missing_server_outside_the_sandbox_and_records_it() {
     assert!(started.get("pid_error").is_none(), "{started}");
     assert!(queue_events(&db, "sccache_server_start_failed").is_empty());
     // The turns and the review compiled through the guard in the run's
-    // directory, a link to dagq (ADR-t2008-1), and were given the refusal
+    // directory, a link to dagq (ADR-t2086-1), and were given the refusal
     // of the server's start.
     let detail = detail(&db);
     assert!(payloads(&detail, "sccache_wrapper_removed").is_empty());
@@ -313,10 +341,16 @@ fn the_supervisor_starts_a_missing_server_outside_the_sandbox_and_records_it() {
     ] {
         assert_eq!(lines(&log), [REFUSED_ERROR_LOG], "{}", log.display());
     }
+    // So did the landing's verification on the host, outside any sandbox
+    // (ADR-t2086-1).
+    assert_eq!(
+        lines(&verification),
+        [guard.display().to_string(), REFUSED_ERROR_LOG.to_owned()]
+    );
 }
 
 #[test]
-fn turns_and_reviews_without_a_confirmed_server_run_without_the_wrapper() {
+fn turns_reviews_and_verifications_without_a_confirmed_server_run_without_the_wrapper() {
     let (dir, repo, db, mut backend, codex) = codex_fixture();
     backend.wrapper_processes = Some(Arc::new(WrapperProcesses));
     let (program, path) = stub_sccache(dir.path(), "sccache");
@@ -331,6 +365,8 @@ fn turns_and_reviews_without_a_confirmed_server_run_without_the_wrapper() {
     // does: each turn inherits it unless the turn removes it.
     backend.inherited_env = vec![("RUSTC_WRAPPER".into(), program.display().to_string())];
     set_turns(dir.path(), FINISH);
+    let verification = dir.path().join("verification-env.log");
+    verify_also(&db, log_wrapper(&verification));
     let result = supervise_codex(dir.path(), &repo, &db, &backend, codex);
     assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
 
@@ -361,11 +397,12 @@ fn turns_and_reviews_without_a_confirmed_server_run_without_the_wrapper() {
         failed[0]
     );
 
-    // The turn (by its wrapper) and the review (by the supervisor) ran
-    // without RUSTC_WRAPPER, and said so.
+    // The turn (by its wrapper), the review (by the supervisor) and the
+    // landing's verification (by integrate) ran without RUSTC_WRAPPER, and
+    // said so.
     let detail = detail(&db);
     let removed = payloads(&detail, "sccache_wrapper_removed");
-    assert_eq!(removed.len(), 2, "{removed:?}");
+    assert_eq!(removed.len(), 3, "{removed:?}");
     assert_eq!(removed[0]["by"], "wrapper");
     assert_eq!(removed[0]["turn"], 1);
     assert_eq!(removed[0]["port"], port);
@@ -380,6 +417,25 @@ fn turns_and_reviews_without_a_confirmed_server_run_without_the_wrapper() {
     assert_eq!(removed[1]["by"], "supervisor");
     assert_eq!(removed[1]["job"], "review");
     assert_eq!(removed[1]["attempt"], 1);
+    assert_eq!(removed[2]["by"], "integrate");
+    assert_eq!(removed[2]["job"], "verification");
+    // The same shape as the wrapper's and the supervisor's.
+    for removed in &removed {
+        assert!(removed["at"].is_i64(), "{removed}");
+    }
+    assert_eq!(removed[2]["port"], port);
+    assert!(
+        removed[2]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no sccache server listens"),
+        "{}",
+        removed[2]
+    );
+    assert_eq!(
+        lines(&verification),
+        ["unset".to_owned(), REFUSED_ERROR_LOG.to_owned()]
+    );
     let run = &detail.runs[0];
     let turns =
         fs::read_to_string(Path::new(run.run_dir().unwrap()).join("stub-wrapper.log")).unwrap();
@@ -387,7 +443,7 @@ fn turns_and_reviews_without_a_confirmed_server_run_without_the_wrapper() {
     assert_eq!(turns.trim(), "unset");
     let review = fs::read_to_string(dir.path().join("codex-review-wrapper.log")).unwrap();
     assert_eq!(review.trim(), "unset");
-    // Neither may start a server by an sccache of its own (ADR-t2008-1).
+    // Neither may start a server by an sccache of its own (ADR-t2086-1).
     for log in [
         dir.path().join("codex-review-error-log.log"),
         Path::new(run.run_dir().unwrap()).join("stub-error-log.log"),
@@ -1022,7 +1078,7 @@ fn compile_after(dir: &Path, rustc: &Path, stop: &str, stopped: &str, name: &str
 }
 
 #[test]
-fn a_server_that_stops_during_a_turn_or_a_review_is_not_started_from_the_sandbox() {
+fn a_server_that_stops_during_a_turn_a_review_or_a_verification_is_not_started_by_it() {
     let (dir, repo, db, mut backend, codex) = codex_fixture();
     backend.wrapper_processes = Some(Arc::new(WrapperProcesses));
     let (program, path) = stub_sccache(dir.path(), "sccache");
@@ -1064,6 +1120,17 @@ fn a_server_that_stops_during_a_turn_or_a_review_is_not_started_from_the_sandbox
         ),
     )
     .unwrap();
+    // The landing's verification, on the host: the server it was confirmed
+    // with stays stopped after the review's (the port answers, the client
+    // finds no server).
+    verify_also(
+        &db,
+        format!(
+            "\"$RUSTC_WRAPPER\" {rustc} --crate-name verification > /dev/null 2>&1; echo $? >> {status}",
+            rustc = common::shell_path(&rustc),
+            status = common::shell_path(dir.path().join("compile-status.log")),
+        ),
+    );
 
     // The host's server, as the supervisor's starts make it listen.
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1110,24 +1177,30 @@ fn a_server_that_stops_during_a_turn_or_a_review_is_not_started_from_the_sandbox
     joined(controller, "the stub server controller");
     assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
 
-    // Both compiled, by the compiler itself, uncached and correct.
-    assert_eq!(lines(&dir.path().join("compile-status.log")), ["0", "0"]);
+    // All compiled, by the compiler itself, uncached and correct.
+    assert_eq!(
+        lines(&dir.path().join("compile-status.log")),
+        ["0", "0", "0"]
+    );
     assert_eq!(
         lines(&program.with_file_name("rustc-calls.log")),
         [
             "via=direct --crate-name turn",
-            "via=direct --crate-name review"
+            "via=direct --crate-name review",
+            "via=direct --crate-name verification"
         ]
     );
     // The turn's guard found nothing listening and ran no sccache; the
-    // review's sccache found no server and its start was refused. No
-    // server was started from the sandbox; every start was the
-    // supervisor's.
-    assert_eq!(compiles(&program).len(), 1, "{:?}", calls(&program));
-    assert!(compiles(&program)[0].contains("--crate-name review"));
+    // review's and the verification's sccache found no server and its
+    // start was refused. No server was started by them, in the sandbox or
+    // on the host; every start was the supervisor's.
+    let compiled = compiles(&program);
+    assert_eq!(compiled.len(), 2, "{:?}", calls(&program));
+    assert!(compiled[0].contains("--crate-name review"));
+    assert!(compiled[1].contains("--crate-name verification"));
     assert_eq!(
         lines(&program.with_file_name("server-starts.log")),
-        ["refused"]
+        ["refused", "refused"]
     );
     for call in calls(&program)
         .iter()
@@ -1135,8 +1208,8 @@ fn a_server_that_stops_during_a_turn_or_a_review_is_not_started_from_the_sandbox
     {
         assert_eq!(*call, format!("--start-server idle=0 path={path}"));
     }
-    // Both had their server confirmed when they started: no wrapper was
-    // removed, and both ran through the guard.
+    // All had their server confirmed when they started: no wrapper was
+    // removed, and all ran through the guard.
     let detail = detail(&db);
     assert!(payloads(&detail, "sccache_wrapper_removed").is_empty());
     let guard = Path::new(detail.runs[0].run_dir().unwrap()).join(GUARD_NAME);

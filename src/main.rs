@@ -4604,8 +4604,8 @@ fn print_session_log(
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().collect();
-    // cargo's `RUSTC_WRAPPER` in a sandboxed turn or job, not the CLI
-    // (ADR-t2008-1).
+    // cargo's `RUSTC_WRAPPER` in a process given `[run.env]`, not the CLI
+    // (ADR-t2086-1).
     if args
         .first()
         .is_some_and(|argv0| dagq::domain::sccache::invoked_as_guard(argv0))

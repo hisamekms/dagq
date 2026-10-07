@@ -208,6 +208,14 @@ pub struct Integration<'a> {
     /// What the retry of a verification command that failed on a full disk
     /// checks first (task 639); `None` retries without a check.
     pub retry_disk: Option<RetryDisk<'a>>,
+    /// What the verification commands' sccache server is looked at and
+    /// their guard made with (ADR-t2086-1): given `[run.env]` naming
+    /// sccache, they are refused the server's start, and compile through
+    /// the guard made in the run's directory when the server listens just
+    /// before, else without `RUSTC_WRAPPER`, recorded as
+    /// `sccache_wrapper_removed` (`by` `integrate`). `None` looks at
+    /// nothing and gives `[run.env]` as it is.
+    pub sccache: Option<&'a dyn super::SccacheServer>,
 }
 
 /// The free disk space integrate checks before it retries a verification
@@ -597,6 +605,8 @@ fn land_integrating(
             ctx.load_average,
             ctx.files,
             ctx.retry_disk.as_ref(),
+            ctx.sccache,
+            ctx.clock,
             &task,
             run,
             &onto,
@@ -1021,6 +1031,8 @@ fn land(
     load_average: fn() -> Option<f64>,
     files: &dyn RunFiles,
     retry_disk: Option<&RetryDisk<'_>>,
+    sccache: Option<&dyn super::SccacheServer>,
+    clock: &dyn Clock,
     task: &Task,
     run: &TaskRun,
     landing_branch: &LandingBranch,
@@ -1269,7 +1281,19 @@ fn land(
         if let Some(message) = verifier.run_env_programs(Some(run_dir))?.missing_message() {
             bail!("{message}");
         }
-        verifier.run_env(run_dir)?
+        let mut env = verifier.run_env(run_dir)?;
+        if let Some((port, why)) = guard_verification(sccache, run_dir, &mut env) {
+            super::sccache::record_wrapper_removed(
+                &*queue,
+                run.id(),
+                clock.now(),
+                "integrate",
+                port,
+                &why,
+                json!({"job": "verification"}),
+            );
+        }
+        env
     };
     // The landing's verification, done once more when only flaky tests
     // failed (task 768, ADR-t768-1): a new attempt of every command on the
@@ -1496,6 +1520,27 @@ fn landing_env<Q: RunLog + QueueRecords + ?Sized>(
         &path_text(&path)?,
         fix_run,
     ))
+}
+
+/// Put into `env`, the `[run.env]` of the verification commands, what the
+/// look at its sccache server just before them found (ADR-t2086-1): the
+/// guard made in `run_dir`, or no `RUSTC_WRAPPER`, refused the server's
+/// start either way. Returns the port and why when they run without
+/// `RUSTC_WRAPPER`, for `sccache_wrapper_removed`.
+fn guard_verification(
+    sccache: Option<&dyn super::SccacheServer>,
+    run_dir: &Path,
+    env: &mut Vec<(String, String)>,
+) -> Option<(u16, String)> {
+    let look = match (
+        sccache,
+        crate::domain::sccache::SccacheTarget::of_pairs(env),
+    ) {
+        (Some(server), Some(target)) => super::sccache::look(server, &target, run_dir),
+        _ => return None,
+    };
+    look.apply(env);
+    look.removed().map(|(port, why)| (port, why.to_owned()))
 }
 
 /// How integrate runs one verification command of an attempt and records
@@ -3704,5 +3749,61 @@ mod tests {
             run_dir.join("integrate-10-verify-10.log").display()
         )));
         assert_eq!(next_integrate_attempt(&files, &run_dir.join("missing")), 1);
+    }
+}
+
+#[cfg(test)]
+mod sccache_tests {
+    use super::*;
+    use crate::application::sccache::LookedAt;
+    use crate::domain::sccache::REFUSED_ERROR_LOG;
+
+    fn run_env() -> Vec<(String, String)> {
+        vec![
+            ("RUSTC_WRAPPER".to_owned(), "sccache".to_owned()),
+            ("CARGO_BUILD_JOBS".to_owned(), "4".to_owned()),
+        ]
+    }
+
+    fn get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn the_verification_is_refused_the_servers_start_and_guarded_when_it_listens() {
+        let run_dir = Path::new("/q/runs/r");
+        let mut env = run_env();
+        let server = LookedAt::new(Ok(true), true);
+        assert_eq!(guard_verification(Some(&server), run_dir, &mut env), None);
+        assert_eq!(
+            get(&env, "RUSTC_WRAPPER"),
+            Some("/q/runs/r/dagq-rustc-wrapper")
+        );
+        assert_eq!(get(&env, "DAGQ_SCCACHE_PROGRAM"), Some("sccache"));
+        assert_eq!(get(&env, "SCCACHE_ERROR_LOG"), Some(REFUSED_ERROR_LOG));
+        assert_eq!(get(&env, "CARGO_BUILD_JOBS"), Some("4"));
+
+        for server in [
+            LookedAt::new(Ok(false), true),
+            LookedAt::new(Ok(true), false),
+        ] {
+            let mut env = run_env();
+            let (port, why) = guard_verification(Some(&server), run_dir, &mut env).unwrap();
+            assert_eq!(port, crate::domain::sccache::DEFAULT_PORT);
+            assert!(!why.is_empty());
+            assert_eq!(get(&env, "RUSTC_WRAPPER"), None);
+            assert_eq!(get(&env, "SCCACHE_ERROR_LOG"), Some(REFUSED_ERROR_LOG));
+        }
+
+        // Nothing to look with, or no sccache named: as it is.
+        let mut env = run_env();
+        assert_eq!(guard_verification(None, run_dir, &mut env), None);
+        assert_eq!(env, run_env());
+        let mut other = vec![("CARGO_BUILD_JOBS".to_owned(), "4".to_owned())];
+        let server = LookedAt::new(Ok(false), true);
+        assert_eq!(guard_verification(Some(&server), run_dir, &mut other), None);
+        assert_eq!(server.looks.get(), 0);
     }
 }

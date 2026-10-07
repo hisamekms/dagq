@@ -139,18 +139,32 @@ pub fn run(
     target_dir: Option<&Path>,
     settings: &E2eSettings,
 ) -> Result<E2eOutcome> {
-    run_inheriting(checkout, target_dir, settings, std::env::vars_os())
+    // Only looked at: the supervisor starts the server (ADR-t2086-1). The
+    // guard is this `dagq`.
+    let sccache = super::sccache::SystemSccache {
+        dagq: std::env::current_exe().ok(),
+        ..super::sccache::SystemSccache::new(&settings.scratch, Duration::ZERO)
+    };
+    run_inheriting(
+        checkout,
+        target_dir,
+        settings,
+        std::env::vars_os(),
+        &sccache,
+    )
 }
 
-/// [`run`], with `inherited` as the starting process's environment.
+/// [`run`], with `inherited` as the starting process's environment and
+/// `sccache` to look at the server of its `[run.env]` with.
 fn run_inheriting(
     checkout: &Path,
     target_dir: Option<&Path>,
     settings: &E2eSettings,
     inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    sccache: &dyn crate::application::SccacheServer,
 ) -> Result<E2eOutcome> {
     let inherited = passed_env(inherited);
-    let env = match &settings.run_env_root {
+    let mut env = match &settings.run_env_root {
         Some(root) => super::run_env::load_run_env(
             root,
             settings.queue_dir.as_deref().unwrap_or(&settings.scratch),
@@ -175,6 +189,10 @@ fn run_inheriting(
     });
     fs::create_dir_all(&settings.scratch)
         .with_context(|| format!("create {}", settings.scratch.display()))?;
+    // The e2e and its rerun may not start the sccache server
+    // (ADR-t2086-1): looked at once its turn came, the guard beside its
+    // fixtures.
+    let sccache_wrapper_removed = guard_e2e(sccache, &settings.scratch, &mut env);
     // What an earlier gate left when it was stopped before its cleanup; a
     // gate still running (an install next to the automatic update's job)
     // keeps its own.
@@ -257,7 +275,23 @@ fn run_inheriting(
         rerun,
         quarantine: read_quarantine(checkout),
         lock_wait_secs,
+        sccache_wrapper_removed,
     })
+}
+
+/// Put into `env`, the e2e's `[run.env]`, what the look at its sccache
+/// server found ([`crate::application::sccache::look`], the guard made in
+/// `dir`), and return the port and why when the e2e runs without
+/// `RUSTC_WRAPPER`, for its caller to record as `sccache_wrapper_removed`.
+fn guard_e2e(
+    sccache: &dyn crate::application::SccacheServer,
+    dir: &Path,
+    env: &mut Vec<(String, String)>,
+) -> Option<(u16, String)> {
+    let target = crate::domain::sccache::SccacheTarget::of_pairs(env)?;
+    let look = crate::application::sccache::look(sccache, &target, dir);
+    look.apply(env);
+    look.removed().map(|(port, why)| (port, why.to_owned()))
 }
 
 /// Wait for the host's e2e lock at `path` and hold it while the file stays
@@ -1423,7 +1457,16 @@ esac
             ("DAGQ_E2E_WINDOWS", "1"),
         ]
         .map(|(name, value)| (OsString::from(name), OsString::from(value)));
-        let outcome = run_inheriting(dir, Some(&dir.join("target")), &settings, inherited).unwrap();
+        let outcome = run_inheriting(
+            dir,
+            Some(&dir.join("target")),
+            &settings,
+            inherited,
+            &crate::application::sccache::LookedAt::new(Ok(true), true),
+        )
+        .unwrap();
+        // A [run.env] that names no sccache is given as it is.
+        assert_eq!(outcome.sccache_wrapper_removed, None);
         let rerun = outcome.rerun.as_ref().expect("the failed test is rerun");
         assert!(rerun.failed.is_empty(), "{outcome:?}");
         let received = fs::read_to_string(&received).unwrap();
@@ -1488,6 +1531,64 @@ esac
             }
         }
     }
+
+    /// The e2e and its rerun of a `[run.env]` naming sccache are refused
+    /// the server's start, through the guard beside their fixtures when
+    /// the server listens, else without `RUSTC_WRAPPER`, which the outcome
+    /// says (ADR-t2086-1).
+    #[test]
+    fn the_e2e_and_its_rerun_are_refused_the_servers_start_and_guarded_as_looked() {
+        use crate::application::sccache::LookedAt;
+        use crate::domain::sccache::REFUSED_ERROR_LOG;
+        for (server, guarded) in [
+            (LookedAt::new(Ok(true), true), true),
+            (LookedAt::new(Ok(false), true), false),
+            (LookedAt::new(Ok(true), false), false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let dir = dir.path();
+            fs::create_dir_all(dir.join("repo")).unwrap();
+            fs::write(
+                dir.join("repo").join("dagq.toml"),
+                "[run.env]\nRUSTC_WRAPPER = '/opt/bin/sccache'\nSCCACHE_SERVER_PORT = '4300'\n",
+            )
+            .unwrap();
+            let received = dir.join("received");
+            let received_arg =
+                crate::application::naming::shell_quote(&received.display().to_string());
+            let settings = settings(
+                dir,
+                &format!(
+                    "echo \"${{RUSTC_WRAPPER-unset}} ${{SCCACHE_ERROR_LOG-unset}}\" >> {received_arg}; \
+                     if [ -n \"${{DAGQ_E2E_RERUN:-}}\" ]; then echo 'test e2e::a ... ok'; exit 0; fi; \
+                     echo 'test e2e::a ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed'; exit 101"
+                ),
+                Duration::from_secs(30),
+            );
+            let outcome =
+                run_inheriting(dir, Some(&dir.join("target")), &settings, [], &server).unwrap();
+            assert!(outcome.rerun.is_some(), "{outcome:?}");
+            let wrapper = if guarded {
+                settings.scratch.join(GUARD).display().to_string()
+            } else {
+                "unset".to_owned()
+            };
+            assert_eq!(
+                fs::read_to_string(&received).unwrap(),
+                format!("{wrapper} {REFUSED_ERROR_LOG}\n").repeat(2)
+            );
+            match &outcome.sccache_wrapper_removed {
+                None => assert!(guarded),
+                Some((port, why)) => {
+                    assert!(!guarded);
+                    assert_eq!(*port, 4300);
+                    assert!(!why.is_empty());
+                }
+            }
+        }
+    }
+
+    const GUARD: &str = crate::domain::sccache::GUARD_NAME;
 
     /// A failing e2e names its failed tests; one past its timeout is
     /// stopped, and what it left (a process in its `TMPDIR`) cleaned up.

@@ -453,6 +453,14 @@ fn e2e_gate(
             return failed(queue, job, "e2e", &error, json!({"e2e_log": log})).map(Some);
         }
     };
+    // It ran without RUSTC_WRAPPER (ADR-t2086-1): said, whatever it found.
+    if let Some(removed) = wrapper_removed(&outcome, job.pid)
+        && let Err(error) = job
+            .subject
+            .record(&*queue, EventKind::SccacheWrapperRemoved, removed)
+    {
+        tracing::warn!(error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
+    }
     // The gates before this one, for a marked test failing in a row
     // (ADR-t1165-1).
     let history = queue.e2e_gate_events(super::e2e_verdict::HISTORY)?;
@@ -486,6 +494,14 @@ fn e2e_gate(
     job.subject
         .record(&*queue, EventKind::UpdateE2ePassed, passed)?;
     Ok(None)
+}
+
+/// The payload of the `sccache_wrapper_removed` of the job `pid` whose
+/// e2e ran without `RUSTC_WRAPPER` (ADR-t2086-1): `by` `update`, `job`
+/// `e2e`, the server's `port` and why (`reason`).
+fn wrapper_removed(outcome: &super::install::E2eOutcome, pid: u32) -> Option<Value> {
+    let (port, why) = outcome.sccache_wrapper_removed.as_ref()?;
+    Some(json!({"by": "update", "job": "e2e", "pid": pid, "port": port, "reason": why}))
 }
 
 /// Add the fields of `extra` (an object) to `value` (an object).
@@ -2003,5 +2019,22 @@ mod tests {
             Some(updates[0].id)
         );
         assert!(failed_step(&updates, crate::domain::AskId::new(4)).is_none());
+    }
+
+    #[test]
+    fn an_e2e_without_the_wrapper_is_said_by_the_job() {
+        assert_eq!(
+            wrapper_removed(&crate::application::install::E2eOutcome::default(), 9),
+            None
+        );
+        let outcome = crate::application::install::E2eOutcome {
+            sccache_wrapper_removed: Some((4300, "no sccache server listens on port 4300".into())),
+            ..crate::application::install::E2eOutcome::default()
+        };
+        assert_eq!(
+            wrapper_removed(&outcome, 9),
+            Some(json!({"by": "update", "job": "e2e", "pid": 9, "port": 4300,
+                        "reason": "no sccache server listens on port 4300"}))
+        );
     }
 }

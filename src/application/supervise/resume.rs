@@ -116,9 +116,7 @@ impl Supervisor<'_> {
         let Some((run, attempt)) = begun else {
             return Ok(());
         };
-        if run.actual_provider() == crate::domain::Provider::Codex {
-            self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeResume);
-        }
+        self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeResume);
         let request = ResumeRequest {
             main,
             branch,

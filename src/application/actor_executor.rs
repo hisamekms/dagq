@@ -93,10 +93,9 @@ pub enum SessionAgent<'a> {
     /// One turn of a headless worker (ADR-t813-1): `prompt` starting a
     /// session or going on with one, as `session` says, its output to
     /// `stdout` and `stderr` rather than the wrapper's terminal, without
-    /// the variables `without_env` names (`RUSTC_WRAPPER` for a sandboxed
-    /// turn whose sccache server was not confirmed, ADR-t1215-1) and with
-    /// those of `with_env` (a sandboxed turn's refusal of the sccache
-    /// server's start and its guard, ADR-t2008-1).
+    /// the variables `without_env` names (`RUSTC_WRAPPER` for a turn whose
+    /// sccache server was not confirmed) and with those of `with_env` (the
+    /// refusal of the sccache server's start and its guard, ADR-t2086-1).
     Turn {
         run: &'a TaskRun,
         prompt: &'a str,
@@ -206,8 +205,8 @@ pub enum ActorProgram<'a> {
     /// 4), its model, whether it loads no MCP server, the environment
     /// beside the actor's (the repository's `[run.env]`, the observer's
     /// `PATH`), the variables it does not inherit (`RUSTC_WRAPPER` for a
-    /// sandboxed job whose sccache server was not confirmed, ADR-t1215-1)
-    /// and where its output goes.
+    /// job whose sccache server was not confirmed, ADR-t2086-1) and where
+    /// its output goes.
     Headless {
         program: HeadlessProgram<'a>,
         session_id: Option<&'a str>,

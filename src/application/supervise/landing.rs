@@ -112,12 +112,17 @@ impl Supervisor<'_> {
     /// thread (`previous` is where an error before `main` moved returns it).
     /// It pushes unless an approving `integrate --no-push` recorded
     /// `push: false`; a run landed on a passed review always pushes.
+    /// Its verification commands may not start the sccache server
+    /// (ADR-t2086-1): the supervisor looks at the server first and starts
+    /// a missing one, and the landing looks again and guards them.
     pub(super) fn spawn_landing(
-        &self,
+        &mut self,
         run: TaskRun,
         previous: RunStatus,
         main: CommitSha,
     ) -> Result<thread::JoinHandle<Result<IntegrationOutcome>>> {
+        self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeIntegrate);
+        let sccache = self.sccache_port.clone();
         let queues = self.queues.clone();
         let repository = self.repository.clone();
         let remote = self.remote.clone();
@@ -163,6 +168,9 @@ impl Supervisor<'_> {
                     retry_disk: Some(integration::RetryDisk {
                         config: disk_config,
                         free: &free,
+                    }),
+                    sccache: sccache.as_ref().map(|SccachePort(server)| {
+                        &**server as &dyn crate::application::SccacheServer
                     }),
                 },
                 &request,
@@ -605,13 +613,18 @@ impl Supervisor<'_> {
         // The repository's [run.env] reaches the review too (ADR-0023
         // decision 3).
         let mut env = self.verifier.run_env(&run_dir)?;
-        // A Codex review runs in Codex's sandbox: its server is the
-        // supervisor's to start (ADR-t1215-1).
-        let without_env = if launch.provider == crate::domain::Provider::Codex {
-            self.sccache_before_job(run.id(), "review", attempt, &run_dir, &mut env)
-        } else {
-            &[]
-        };
+        // The review on either provider may not start the sccache server
+        // (ADR-t2086-1).
+        let look = self.sccache_look(crate::domain::sccache::CheckReason::BeforeReview, &run_dir);
+        let named = crate::domain::sccache::SccacheTarget::of_pairs(&env).is_some();
+        let without_env = look.apply(&mut env);
+        if named {
+            self.record_wrapper_removed(
+                run.id(),
+                &look,
+                json!({"job": "review", "attempt": attempt}),
+            );
+        }
         // Each required agent's definition as committed on the landing
         // branch, for the provider to hand its job.
         let definitions: Vec<AgentDefinition> = subagents

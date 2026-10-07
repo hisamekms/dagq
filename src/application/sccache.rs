@@ -328,5 +328,127 @@ pub fn record_restart_failure(
     Ok(())
 }
 
+/// The look just before a process of `target` given `[run.env]` starts
+/// (ADR-t2086-1), where nothing starts a missing server (a wrapper's turn,
+/// a person's `integrate`, the e2e): a connect to its port, then the guard
+/// made in `dir`. The supervisor looks with its own start first.
+pub fn look(server: &dyn SccacheServer, target: &SccacheTarget, dir: &Path) -> GuardLook {
+    let unconfirmed = |why: String| GuardLook::Unconfirmed {
+        port: target.port,
+        why,
+    };
+    match server.listening(target.port) {
+        Ok(true) => guard_in(server, dir, target.port),
+        Ok(false) => unconfirmed(format!("no sccache server listens on port {}", target.port)),
+        Err(error) => unconfirmed(format!(
+            "the sccache server could not be looked at: {error:#}"
+        )),
+    }
+}
+
+/// The guard made in `dir` for the server confirmed on `port`, or why the
+/// process runs without `RUSTC_WRAPPER`.
+pub fn guard_in(server: &dyn SccacheServer, dir: &Path, port: u16) -> GuardLook {
+    let why = match server.guard(dir) {
+        Ok(guard) => match guard.to_str() {
+            Some(guard) => return GuardLook::Guard(guard.to_owned()),
+            None => format!("the guard's path {} is not UTF-8", guard.display()),
+        },
+        Err(error) => format!("the guard could not be made: {error:#}"),
+    };
+    GuardLook::Unconfirmed { port, why }
+}
+
+/// The payload of `sccache_wrapper_removed`, one shape whoever writes it
+/// (ADR-t2086-1): when (`at`, Unix seconds), who looked (`by`: `wrapper`,
+/// `supervisor` or `integrate`), the server's `port`, why (`reason`), and
+/// the process's `fields` (its `turn`, or its `job` and `attempt`).
+pub fn removed_payload(at: i64, by: &str, port: u16, why: &str, fields: Value) -> Value {
+    let mut payload = json!({
+        "at": at,
+        "by": by,
+        "port": port,
+        "reason": why,
+    });
+    if let (Some(payload), Some(fields)) = (payload.as_object_mut(), fields.as_object()) {
+        payload.extend(fields.clone());
+    }
+    payload
+}
+
+/// Record `sccache_wrapper_removed` ([`removed_payload`]) on run `run`:
+/// its process runs without `RUSTC_WRAPPER`. The one writer of the event
+/// for the wrapper, the supervisor and integrate; a failure to record is
+/// only logged, as the process runs either way.
+pub fn record_wrapper_removed(
+    queue: &dyn RunLog,
+    run: &crate::domain::RunId,
+    at: i64,
+    by: &str,
+    port: u16,
+    why: &str,
+    fields: Value,
+) {
+    tracing::warn!(run_id = %run, "run {run}: its {} runs without {WRAPPER_VAR}: {why}", process_name(&fields));
+    let payload = removed_payload(at, by, port, why, fields);
+    if let Err(error) = queue.record_runtime_event(run, EventKind::SccacheWrapperRemoved, payload) {
+        tracing::warn!(run_id = %run, error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
+    }
+}
+
+/// How the log names the process of `fields`: its job, or its turn.
+fn process_name(fields: &Value) -> String {
+    match (fields["job"].as_str(), fields["turn"].as_u64()) {
+        (Some(job), _) => job.to_owned(),
+        (None, Some(turn)) => format!("turn {turn}"),
+        _ => "process".to_owned(),
+    }
+}
+
+/// A server that is only looked at and guarded, for the tests of the
+/// processes given `[run.env]`: it listens or not (or cannot be looked at),
+/// and makes the guard `<dir>/dagq-rustc-wrapper` or fails to.
+#[cfg(test)]
+pub(crate) struct LookedAt {
+    pub listening: Result<bool, &'static str>,
+    pub guard: bool,
+    pub looks: std::cell::Cell<usize>,
+}
+
+#[cfg(test)]
+impl LookedAt {
+    pub fn new(listening: Result<bool, &'static str>, guard: bool) -> Self {
+        Self {
+            listening,
+            guard,
+            looks: std::cell::Cell::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SccacheServer for LookedAt {
+    fn listening(&self, _: u16) -> Result<bool> {
+        self.looks.set(self.looks.get() + 1);
+        self.listening.map_err(|why| anyhow::anyhow!(why))
+    }
+    fn process(&self, _: u16) -> Result<Option<ServerProcess>> {
+        Ok(None)
+    }
+    fn stats(&self, _: &Path, _: &[(String, String)], _: u16) -> Result<Option<ServerStats>> {
+        unreachable!("a look reads no stats")
+    }
+    fn stop(&self, _: &Path, _: &[(String, String)], _: u16) -> Result<()> {
+        unreachable!("a look stops nothing")
+    }
+    fn start(&self, _: &Path, _: &[(String, String)], _: u16) -> Result<super::ServerPid> {
+        unreachable!("a look starts nothing")
+    }
+    fn guard(&self, dir: &Path) -> Result<std::path::PathBuf> {
+        anyhow::ensure!(self.guard, "no dagq binary to make the guard of");
+        Ok(dir.join(GUARD_NAME))
+    }
+}
+
 #[cfg(test)]
 mod tests;

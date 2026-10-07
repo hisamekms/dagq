@@ -2,8 +2,9 @@
 //! with a connect to its loopback port, never with an sccache client (which
 //! starts the server it does not find, with the caller's environment and
 //! no event); it is started with `sccache --start-server` from the
-//! supervisor, outside any sandbox. A sandboxed turn or job compiles
-//! through the guard ([`run_guard`]), which refuses the server's start.
+//! supervisor, outside any sandbox. Every other process the runtime gives
+//! `[run.env]` compiles through the guard ([`run_guard`]), which refuses
+//! the server's start (ADR-t2086-1).
 
 use super::agent_dir::Directory;
 use crate::application::{SccacheServer, ServerPid};
@@ -245,6 +246,10 @@ impl SccacheServer for SystemSccache {
         let mut command = Command::new(program);
         command
             .arg("--start-server")
+            // The refusal a process given `[run.env]` carries is never the
+            // supervisor's (ADR-t2086-1): one it inherited (a supervisor an
+            // e2e started) would refuse its own start.
+            .env_remove(ERROR_LOG_VAR)
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
@@ -329,7 +334,7 @@ impl SccacheServer for SystemSccache {
     }
 }
 
-/// The guard (ADR-t2008-1): `dagq` run by cargo as `RUSTC_WRAPPER` under
+/// The guard (ADR-t2086-1): `dagq` run by cargo as `RUSTC_WRAPPER` under
 /// the name [`GUARD_NAME`], with the compiler and its arguments in `args`
 /// (after argv\[0\]). It compiles through the sccache of
 /// [`GUARD_PROGRAM_VAR`] while its server listens, and runs the compiler

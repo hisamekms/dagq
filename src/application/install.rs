@@ -237,6 +237,11 @@ pub struct E2eOutcome {
     /// How long it waited for the host's e2e lock before it started
     /// ([`E2eSettings::lock`], ADR-t1233-2 decision 4).
     pub lock_wait_secs: u64,
+    /// The port and why when the e2e ran without `RUSTC_WRAPPER`: its
+    /// `[run.env]` names sccache, and its server was not confirmed just
+    /// before or its guard not made (ADR-t2086-1). Its caller records it as
+    /// `sccache_wrapper_removed`.
+    pub sccache_wrapper_removed: Option<(u16, String)>,
 }
 
 /// How the rerun of the tests the e2e failed went (ADR-t1165-1): the same

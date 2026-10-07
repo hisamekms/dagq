@@ -1,26 +1,29 @@
 //! The sccache server of a `[run.env]` whose `RUSTC_WRAPPER` is sccache
 //! (ADR-t1215-1). sccache's client starts the server it does not find, and
 //! a server started in a sandbox keeps the sandbox: every build through it
-//! fails then. So the supervisor, outside any sandbox, looks at the server
-//! at its start, every [`LOOK_INTERVAL`] after, and just before a Codex
-//! worker's workspace, a Codex resume or a Codex review opens; it starts
-//! a missing one with `SCCACHE_IDLE_TIMEOUT=0` and records
+//! fails then. So the supervisor, outside any sandbox, is the only one to
+//! start it (ADR-t2086-1): it looks at the server at its start, every
+//! [`LOOK_INTERVAL`] after, and just before each process it gives
+//! `[run.env]` starts (a worker's session or resume, the run's review on
+//! either provider, a landing's verification, the landing recheck, a run's
+//! e2e); it starts a missing one with `SCCACHE_IDLE_TIMEOUT=0` and records
 //! `sccache_server_started` (or `sccache_server_start_failed`). The look
 //! is a connect to the server's loopback port. Only confirmed existing
 //! servers are queried for process identity and stats; foreign servers
 //! are recorded, and failure-only deltas or known confinement cause a
-//! stop and restart outside the sandbox. A Codex review is given the
-//! refusal of the server's start and, when its server was confirmed,
-//! compiles through the guard (ADR-t2008-1); one whose server could not be
-//! confirmed runs without `RUSTC_WRAPPER`, recorded as
-//! `sccache_wrapper_removed`. A Codex worker's turns are looked at by its
-//! wrapper the same way ([`crate::application::headless_session`]).
+//! stop and restart outside the sandbox. Each process the supervisor
+//! starts with `[run.env]` is given the refusal of the server's start and,
+//! when its server was confirmed, compiles through the guard
+//! ([`Supervisor::sccache_look`], ADR-t2086-1); one whose server could not
+//! be confirmed runs without `RUSTC_WRAPPER`, recorded as
+//! `sccache_wrapper_removed` ([`Supervisor::record_wrapper_removed`]). A
+//! worker's turns are looked at by its wrapper the same way
+//! ([`crate::application::headless_session`]).
 
 use super::*;
 use crate::application::SccacheServer;
 use crate::domain::sccache::{
-    CheckReason, IDLE_TIMEOUT, IDLE_TIMEOUT_VAR, SccacheTarget, ServerCheck, WRAPPER_VAR,
-    sandbox_env,
+    CheckReason, GuardLook, IDLE_TIMEOUT, IDLE_TIMEOUT_VAR, SccacheTarget, ServerCheck, WRAPPER_VAR,
 };
 
 /// How often a pass looks at the server.
@@ -141,10 +144,10 @@ impl Supervisor<'_> {
             ) {
                 Ok(Some(payload)) => restart = Some(payload),
                 Ok(None) if restart.is_some() => {}
-                Ok(None) => return ServerCheck::Running,
+                Ok(None) => return ServerCheck::Running { port: target.port },
                 Err(error) => {
                     warn!("sccache observation failed: {error:#}");
-                    return ServerCheck::Running;
+                    return ServerCheck::Running { port: target.port };
                 }
             }
             let mut payload = restart.unwrap();
@@ -160,7 +163,7 @@ impl Supervisor<'_> {
             ) {
                 Ok(()) => {
                     self.sccache.failed_at = None;
-                    ServerCheck::Running
+                    ServerCheck::Running { port: target.port }
                 }
                 Err(error) => {
                     self.sccache.failed_at = Some(self.generators.clock.monotonic());
@@ -229,7 +232,7 @@ impl Supervisor<'_> {
                 {
                     warn!(error = %format_args!("{error:#}"), "sccache_server_started could not be recorded: {error:#}");
                 }
-                ServerCheck::Running
+                ServerCheck::Running { port: target.port }
             }
             Err(error) => {
                 self.sccache.failed_at = Some(self.generators.clock.monotonic());
@@ -279,73 +282,51 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Before a Codex job of run `run` given `env` (`[run.env]`) starts:
-    /// the variables it runs without. It is given the refusal of the
-    /// server's start; when the server was confirmed it compiles through
-    /// the guard made in `dir` (ADR-t2008-1), else (or when the guard could
-    /// not be made) it runs without `RUSTC_WRAPPER`, recorded as
-    /// `sccache_wrapper_removed` and taken out of `env`.
-    pub(super) fn sccache_before_job(
-        &mut self,
-        run: &RunId,
-        job: &str,
-        attempt: usize,
-        dir: &Path,
-        env: &mut Vec<(String, String)>,
-    ) -> &'static [&'static str] {
-        let (port, why, target) = match self.ensure_sccache(CheckReason::BeforeReview) {
-            ServerCheck::NotConfigured => return &[],
-            ServerCheck::Running => {
-                let Some(target) = SccacheTarget::of_pairs(env) else {
-                    return &[];
-                };
-                let guard = self
-                    .sccache_port
-                    .as_ref()
-                    .context("no sccache port")
-                    .and_then(|SccachePort(server)| server.guard(dir));
-                let why = match guard {
-                    Ok(guard) => match guard.to_str() {
-                        Some(guard) => {
-                            set_env(env, sandbox_env(&target, Some(guard)));
-                            return &[];
-                        }
-                        None => format!("the guard's path {} is not UTF-8", guard.display()),
-                    },
-                    Err(error) => format!("the guard could not be made: {error:#}"),
-                };
-                (target.port, why, Some(target))
-            }
-            ServerCheck::Unconfirmed { port, why } => (port, why, SccacheTarget::of_pairs(env)),
+    /// The look just before a process given `[run.env]` starts, for
+    /// `reason` (ADR-t2086-1): the server looked at and, when none listens,
+    /// started ([`Self::ensure_sccache`]), then the guard made in `dir`.
+    pub(super) fn sccache_look(&mut self, reason: CheckReason, dir: &Path) -> GuardLook {
+        let check = self.ensure_sccache(reason);
+        let server = self.sccache_port.clone();
+        look_of(
+            check,
+            server
+                .as_ref()
+                .map(|SccachePort(server)| &**server as &dyn SccacheServer),
+            dir,
+        )
+    }
+
+    /// Record `sccache_wrapper_removed` on run `run` when `look` takes
+    /// `RUSTC_WRAPPER` out of the process `fields` name (its `job`, and its
+    /// `attempt` when it has one), with the port and the `reason`.
+    pub(super) fn record_wrapper_removed(&mut self, run: &RunId, look: &GuardLook, fields: Value) {
+        let Some((port, why)) = look.removed() else {
+            return;
         };
-        if let Some(target) = target {
-            set_env(env, sandbox_env(&target, None));
-        }
-        env.retain(|(key, _)| key != WRAPPER_VAR);
-        warn!(run_id = %run, "run {run}: its {job} runs without {WRAPPER_VAR}: {why}");
-        if let Err(error) = self.queue.record_runtime_event(
+        crate::application::sccache::record_wrapper_removed(
+            &*self.queue,
             run,
-            EventKind::SccacheWrapperRemoved,
-            json!({
-                "at": self.generators.clock.now(),
-                "by": "supervisor",
-                "job": job,
-                "attempt": attempt,
-                "port": port,
-                "reason": why,
-            }),
-        ) {
-            warn!(run_id = %run, error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
-        }
-        &[WRAPPER_VAR]
+            self.generators.clock.now(),
+            "supervisor",
+            port,
+            why,
+            fields,
+        );
     }
 }
 
-/// `env` with each of `vars` in place of the variable of its name.
-fn set_env(env: &mut Vec<(String, String)>, vars: Vec<(String, String)>) {
-    for (key, value) in vars {
-        env.retain(|(name, _)| *name != key);
-        env.push((key, value));
+/// What the supervisor's `check` before a process given `[run.env]`
+/// means for it: through the guard made in `dir` when the server runs,
+/// without `RUSTC_WRAPPER` when it could not be confirmed, as it is when
+/// nothing is configured.
+fn look_of(check: ServerCheck, server: Option<&dyn SccacheServer>, dir: &Path) -> GuardLook {
+    match (check, server) {
+        (ServerCheck::Running { port }, Some(server)) => {
+            crate::application::sccache::guard_in(server, dir, port)
+        }
+        (ServerCheck::Unconfirmed { port, why }, _) => GuardLook::Unconfirmed { port, why },
+        _ => GuardLook::NotConfigured,
     }
 }
 
@@ -357,25 +338,42 @@ fn retry_waiting(elapsed: Option<Duration>) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn set_env_replaces_the_variables_of_the_same_name() {
-        let mut env = vec![
-            ("RUSTC_WRAPPER".to_owned(), "sccache".to_owned()),
-            ("PATH".to_owned(), "/bin".to_owned()),
-        ];
-        set_env(
-            &mut env,
-            vec![
-                ("SCCACHE_ERROR_LOG".to_owned(), "/dev/null/x".to_owned()),
-                ("RUSTC_WRAPPER".to_owned(), "/q/guard".to_owned()),
-            ],
+    fn every_process_the_supervisor_gives_run_env_is_guarded_as_its_check_says() {
+        use crate::application::sccache::LookedAt;
+        let dir = Path::new("/q/recheck");
+        let server = LookedAt::new(Ok(true), true);
+        // The same for a review on either provider, a landing's
+        // verification, the recheck and a run's e2e.
+        assert_eq!(
+            look_of(ServerCheck::Running { port: 4300 }, Some(&server), dir),
+            GuardLook::Guard("/q/recheck/dagq-rustc-wrapper".into())
+        );
+        // The supervisor's look does not look again: the guard is made.
+        assert_eq!(server.looks.get(), 0);
+        let unmade = look_of(
+            ServerCheck::Running { port: 4300 },
+            Some(&LookedAt::new(Ok(true), false)),
+            dir,
+        );
+        assert_eq!(unmade.removed().map(|(port, _)| port), Some(4300));
+        let unconfirmed = ServerCheck::Unconfirmed {
+            port: 4300,
+            why: "the last start failed".into(),
+        };
+        assert_eq!(
+            look_of(unconfirmed, Some(&server), dir),
+            GuardLook::Unconfirmed {
+                port: 4300,
+                why: "the last start failed".into()
+            }
         );
         assert_eq!(
-            env,
-            [
-                ("PATH".to_owned(), "/bin".to_owned()),
-                ("SCCACHE_ERROR_LOG".to_owned(), "/dev/null/x".to_owned()),
-                ("RUSTC_WRAPPER".to_owned(), "/q/guard".to_owned()),
-            ]
+            look_of(ServerCheck::NotConfigured, Some(&server), dir),
+            GuardLook::NotConfigured
+        );
+        assert_eq!(
+            look_of(ServerCheck::Running { port: 4300 }, None, dir),
+            GuardLook::NotConfigured
         );
     }
 

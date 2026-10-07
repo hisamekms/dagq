@@ -19,6 +19,7 @@ use crate::domain::recheck::{
     self, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED, Landed, RecheckConfig,
     RecheckFailure,
 };
+use crate::domain::sccache::{CheckReason, GuardLook};
 
 /// Where the recheck keeps its scratch worktree and its target directory,
 /// under the queue's directory.
@@ -414,6 +415,17 @@ impl Supervisor<'_> {
         };
         let command = config.command.clone();
         let dir = self.recheck_dir()?;
+        // The command may not start the sccache server (ADR-t2086-1): its
+        // guard lives beside the recheck's target directory.
+        let look = match &command {
+            Some(_) => {
+                self.files.create_dir_all(&dir)?;
+                let look = self.sccache_look(CheckReason::BeforeRecheck, &dir);
+                self.record_wrapper_removed(&record_on, &look, json!({"job": "recheck"}));
+                look
+            }
+            None => GuardLook::NotConfigured,
+        };
         info!(
             "landing recheck of {} waiting run(s) against main {main} after {}{}",
             targets.len(),
@@ -438,6 +450,7 @@ impl Supervisor<'_> {
                 &on,
                 &config,
                 &dir,
+                &look,
                 targets,
             )
         });
@@ -688,8 +701,10 @@ fn bump(counts: &mut Value, key: &str) {
 /// and the merged tree differs from main in a path of `[recheck] paths`
 /// (or there are none, ADR-t2032-1), is committed on top of main, checked out in the scratch worktree under
 /// `dir` and the command run there in `/bin/sh` with the run's `[run.env]`
-/// and `CARGO_TARGET_DIR` set to the one target directory under `dir`, its
-/// output in `recheck-<main>.log` of the run directory.
+/// (refused the sccache server's start and guarded as `look` says,
+/// ADR-t2086-1) and `CARGO_TARGET_DIR` set to the one target directory
+/// under `dir`, its output in `recheck-<main>.log` of the run directory.
+#[allow(clippy::too_many_arguments)]
 fn recheck_runs(
     repository: &dyn Repository,
     verifier: &dyn Verifier,
@@ -697,18 +712,22 @@ fn recheck_runs(
     main: &CommitSha,
     config: &RecheckConfig,
     dir: &Path,
+    look: &GuardLook,
     targets: Vec<Target>,
 ) -> Vec<(Target, Finding)> {
     targets
         .into_iter()
         .map(|target| {
-            let finding = recheck_run(repository, verifier, files, main, config, dir, &target)
-                .unwrap_or_else(|error| Finding::Error(format!("{error:#}")));
+            let finding = recheck_run(
+                repository, verifier, files, main, config, dir, look, &target,
+            )
+            .unwrap_or_else(|error| Finding::Error(format!("{error:#}")));
             (target, finding)
         })
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn recheck_run(
     repository: &dyn Repository,
     verifier: &dyn Verifier,
@@ -716,6 +735,7 @@ fn recheck_run(
     main: &CommitSha,
     config: &RecheckConfig,
     dir: &Path,
+    look: &GuardLook,
     target: &Target,
 ) -> Result<Finding> {
     let tree = match repository.merged_tree(main.as_str(), target.head.as_str())? {
@@ -748,12 +768,7 @@ fn recheck_run(
     let scratch = dir.join("worktree");
     files.create_dir_all(dir)?;
     repository.checkout_scratch(&scratch, merged.as_str())?;
-    let mut env = verifier.run_env(&target.run_dir)?;
-    env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
-    env.push((
-        "CARGO_TARGET_DIR".to_owned(),
-        path_text(&dir.join("target"))?,
-    ));
+    let env = recheck_env(verifier.run_env(&target.run_dir)?, dir, look)?;
     let log = target
         .run_dir
         .join(format!("recheck-{}.log", &main.as_str()[..12]));
@@ -770,4 +785,72 @@ fn recheck_run(
         log_path: path_text(&log)?,
         output_tail: tail(&output, 2000).to_owned(),
     }))
+}
+
+/// The command's environment: the run's `[run.env]` with the recheck's one
+/// target directory under `dir` as `CARGO_TARGET_DIR`, refused the sccache
+/// server's start and guarded as `look` says (ADR-t2086-1).
+fn recheck_env(
+    mut env: Vec<(String, String)>,
+    dir: &Path,
+    look: &GuardLook,
+) -> Result<Vec<(String, String)>> {
+    env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
+    env.push((
+        "CARGO_TARGET_DIR".to_owned(),
+        path_text(&dir.join("target"))?,
+    ));
+    look.apply(&mut env);
+    Ok(env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::sccache::REFUSED_ERROR_LOG;
+
+    #[test]
+    fn the_recheck_command_is_refused_the_servers_start_and_guarded_as_looked() {
+        let dir = Path::new("/q/recheck");
+        let run_env = || {
+            vec![
+                ("RUSTC_WRAPPER".to_owned(), "sccache".to_owned()),
+                ("CARGO_TARGET_DIR".to_owned(), "/elsewhere".to_owned()),
+            ]
+        };
+        let pairs = |items: &[(&str, &str)]| -> Vec<(String, String)> {
+            items
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect()
+        };
+        let guard = GuardLook::Guard("/q/recheck/dagq-rustc-wrapper".into());
+        assert_eq!(
+            recheck_env(run_env(), dir, &guard).unwrap(),
+            pairs(&[
+                ("CARGO_TARGET_DIR", "/q/recheck/target"),
+                ("SCCACHE_ERROR_LOG", REFUSED_ERROR_LOG),
+                ("RUSTC_WRAPPER", "/q/recheck/dagq-rustc-wrapper"),
+                ("DAGQ_SCCACHE_PROGRAM", "sccache"),
+            ])
+        );
+        let unconfirmed = GuardLook::Unconfirmed {
+            port: 4226,
+            why: "no sccache server listens on port 4226".into(),
+        };
+        assert_eq!(
+            recheck_env(run_env(), dir, &unconfirmed).unwrap(),
+            pairs(&[
+                ("CARGO_TARGET_DIR", "/q/recheck/target"),
+                ("SCCACHE_ERROR_LOG", REFUSED_ERROR_LOG),
+            ])
+        );
+        assert_eq!(
+            recheck_env(run_env(), dir, &GuardLook::NotConfigured).unwrap(),
+            pairs(&[
+                ("RUSTC_WRAPPER", "sccache"),
+                ("CARGO_TARGET_DIR", "/q/recheck/target"),
+            ])
+        );
+    }
 }

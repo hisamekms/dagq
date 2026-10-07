@@ -1271,8 +1271,8 @@ pub fn supervise_with_reviewer(
                     start_timeout: settings.start_timeout,
                     lsof: settings.lsof.clone(),
                     ps: settings.ps.clone(),
-                    // The guard of a sandboxed job is the `dagq` its
-                    // sessions run (ADR-t2008-1).
+                    // The guard of a process it gives `[run.env]` is the
+                    // `dagq` its sessions run (ADR-t2086-1).
                     dagq: Some(runner.to_path_buf()),
                 },
             ))
@@ -1428,6 +1428,14 @@ impl OneShot {
         let read_free =
             || (self.free_space)(&runs_dir(&db)).or_else(|| db.parent().and_then(self.free_space));
         let free = read_free();
+        // Only looked at: the supervisor starts the server (ADR-t2086-1).
+        let sccache = crate::infrastructure::sccache::SystemSccache {
+            dagq: std::env::current_exe().ok(),
+            ..crate::infrastructure::sccache::SystemSccache::new(
+                db.parent().unwrap_or(Path::new(".")),
+                Duration::ZERO,
+            )
+        };
         let mut integration = Integration {
             queue: &mut queue,
             repository: &repository,
@@ -1445,6 +1453,7 @@ impl OneShot {
                 config: disk,
                 free: &read_free,
             }),
+            sccache: Some(&sccache),
         };
         let integrator = Integrator::of_process(std::process::id());
         let Some(request) = integrator.approve(&mut integration, &requester, target, repo)? else {
@@ -3166,8 +3175,8 @@ pub fn session_in_background(
 
 /// [`session_in_background`] whose wrapper is the process `pid` rather
 /// than this one, its environment naming `sccache` as `RUSTC_WRAPPER` when
-/// given (ADR-t1215-1: a Codex turn runs without it unless its server
-/// listens on the loopback port just before): a test that runs each background
+/// given (ADR-t2086-1: a turn runs without it unless its server listens
+/// on the loopback port just before): a test that runs each background
 /// wrapper on a thread names it by a process of its own, so that every
 /// session has a handle of its own (task 1439).
 #[allow(clippy::too_many_arguments)]
@@ -3197,7 +3206,7 @@ pub fn session_in_background_as(
     )
 }
 /// A background wrapper with injected process identity and control, whose
-/// sandboxed turns' guard links to `dagq` (ADR-t2008-1).
+/// turns' guard links to `dagq` (ADR-t2086-1).
 #[allow(clippy::too_many_arguments)]
 pub fn session_in_background_as_with_processes(
     db: &Path,
@@ -3281,7 +3290,7 @@ fn run_session_as(
         crate::domain::actor::ActorContext::instance(crate::domain::actor::ActorRole::Wrapper, id),
     );
     // The wrapper only looks at the server and makes the guard of its
-    // turns (ADR-t2008-1); the supervisor starts the server.
+    // turns (ADR-t2086-1); the supervisor starts the server.
     let looker = crate::infrastructure::sccache::SystemSccache {
         log: PathBuf::new(),
         start_timeout: Duration::ZERO,

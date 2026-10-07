@@ -19,7 +19,7 @@ related:
   - adr-t813-2
   - adr-t813-3
   - adr-t1215-1
-  - adr-t2008-1
+  - adr-t2086-1
   - adr-t1063-1
   - plan-headless-worker-spike
   - adr-0040
@@ -254,7 +254,7 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - `exec resume`は最初の呼び出しの権限を引き継がないので、権限とtrustの`-c`は毎回同じものを渡す。
 - 書ける場所はworktree・worktreeの管理dirとdagqのbranchのref・run dir・cargoのregistry・一時ファイルの場所で、repository全体・`main`のref・`$HOME`・queueのdirは入れない。
 - turnの`TMPDIR`はrun dirの`tmp`にし、元の`$TMPDIR`も書けるままにする。
-- networkを開けるのはsupervisorがsandboxの外で起動したsccacheのserverに接続するためで、sandboxの中からの起動は拒む（ADR-t1215-1・ADR-t2008-1、[Run environment](supervisor-lifecycle/run-environment.md#sccacheのserver)）。
+- networkを開けるのはsupervisorがsandboxの外で起動したsccacheのserverに接続するためで、sandboxの中からの起動は拒む（ADR-t1215-1・ADR-t2086-1、[Run environment](supervisor-lifecycle/run-environment.md#sccacheのserver)）。
 - worktreeのtrustを`trusted`で渡す。
   渡さないと`codex exec`がthreadを始めるときに人の`~/.codex/config.toml`へmain checkoutのtrustを書き込むため。
 - `pkill` / `killall`を止める主の防御はsandboxで、worktreeに書くrules（`info/exclude`でcommitから外す）は補助。

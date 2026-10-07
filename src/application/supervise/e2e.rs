@@ -170,6 +170,9 @@ impl Supervisor<'_> {
             }),
         )?;
         info!(run_id = %run.id(), "run {} runs its e2e at {commit} before it lands (attempt {})", run.id(), due.attempt);
+        // The e2e may not start the sccache server (ADR-t2086-1): a missing
+        // one is started here, and the gate looks again and guards it.
+        self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeE2e);
         let thread_settings = settings.clone();
         let handle = spawn_traced(move || (port.run)(&worktree, &thread_settings));
         Ok(Some(Phase::E2e(E2eWatch {
@@ -239,6 +242,18 @@ impl Supervisor<'_> {
                 return self.e2e_unavailable(slot, run, base, format!("{error:#}"));
             }
         };
+        // The e2e ran without RUSTC_WRAPPER (ADR-t2086-1).
+        if let Some((port, why)) = &outcome.sccache_wrapper_removed {
+            let look = crate::domain::sccache::GuardLook::Unconfirmed {
+                port: *port,
+                why: why.clone(),
+            };
+            self.record_wrapper_removed(
+                run.id(),
+                &look,
+                json!({"job": "e2e", "attempt": watch.attempt}),
+            );
+        }
         // Past its timeout, or a rerun past its timeout or that could not
         // start, the e2e told nothing of the change (ADR-t1233-2 decision
         // 3): it is tried again, not sent back to the worker.

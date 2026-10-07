@@ -55,7 +55,19 @@ impl RunLog for MemoryLog {
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()> {
-        unreachable!("sccache reads queue events only")
+        let mut events = self.events.borrow_mut();
+        let event_id = EventId::new(events.len() as i64 + 1);
+        events.push(RunEvent {
+            id: event_id,
+            task_id: None,
+            goal_id: None,
+            run_id: Some(id.clone()),
+            kind: kind.as_str().into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        });
+        Ok(())
     }
     fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
         unreachable!("sccache reads queue events only")
@@ -863,4 +875,85 @@ fn diagnostics_use_the_configured_program_when_resolution_fails_or_is_missing() 
         assert_eq!(output["sccache"]["health"], "unknown_origin");
         assert_eq!(*server.stats_programs.borrow(), ["/configured/sccache"]);
     }
+}
+
+#[test]
+fn a_look_guards_a_listening_server_and_says_why_it_could_not() {
+    use crate::application::sccache::{LookedAt, look};
+    let target = SccacheTarget {
+        program: "sccache".into(),
+        port: 4300,
+    };
+    let dir = Path::new("/q/runs/r");
+    assert_eq!(
+        look(&LookedAt::new(Ok(true), true), &target, dir),
+        GuardLook::Guard("/q/runs/r/dagq-rustc-wrapper".into())
+    );
+    let why = |server: LookedAt| match look(&server, &target, dir) {
+        GuardLook::Unconfirmed { port, why } => {
+            assert_eq!(port, 4300);
+            why
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        why(LookedAt::new(Ok(false), true)),
+        "no sccache server listens on port 4300"
+    );
+    assert!(
+        why(LookedAt::new(Err("refused"), true))
+            .starts_with("the sccache server could not be looked at: refused")
+    );
+    assert!(why(LookedAt::new(Ok(true), false)).starts_with("the guard could not be made"));
+}
+
+#[test]
+fn a_removed_wrapper_has_one_shape_whoever_writes_it() {
+    use crate::application::sccache::removed_payload;
+    assert_eq!(
+        removed_payload(
+            7,
+            "supervisor",
+            4300,
+            "no server",
+            json!({"job": "review", "attempt": 2})
+        ),
+        json!({"at": 7, "by": "supervisor", "port": 4300, "reason": "no server",
+               "job": "review", "attempt": 2})
+    );
+    assert_eq!(
+        removed_payload(7, "wrapper", 4300, "no server", json!({"turn": 3})),
+        json!({"at": 7, "by": "wrapper", "port": 4300, "reason": "no server", "turn": 3})
+    );
+    assert_eq!(
+        removed_payload(
+            7,
+            "integrate",
+            4300,
+            "no server",
+            json!({"job": "verification"})
+        ),
+        json!({"at": 7, "by": "integrate", "port": 4300, "reason": "no server",
+               "job": "verification"})
+    );
+}
+
+#[test]
+fn a_removed_wrapper_is_recorded_on_its_run() {
+    use crate::application::sccache::record_wrapper_removed;
+    let log = MemoryLog::default();
+    let run = RunId::new("r1").unwrap();
+    record_wrapper_removed(
+        &log,
+        &run,
+        7,
+        "integrate",
+        4300,
+        "no server",
+        json!({"job": "verification"}),
+    );
+    let recorded = log.payloads("sccache_wrapper_removed");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0]["at"], 7);
+    assert_eq!(recorded[0]["by"], "integrate");
 }
