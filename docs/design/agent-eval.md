@@ -71,6 +71,10 @@ related:
 - 共通の欄（役割に依らない）: `id`（ファイルの中で一意）・`source`（`generated` / `handmade` / `production`）・`made_by`（作った道具と版、productionはラベルを付けたproviderと版）・`base_commit`（patchを当てるcommit）・`patch`（共有の置き場のhash）・`adjudicated`（人の決定。`null`か、決めた人・日・内容）・`disputed`（争いの印。`null`か理由。立っているケースは主の指標から外す）・`k`（任意。無ければファイルの`k`）。
 - 役割ごとの欄: 役割の名前の欄（今は`review`）の下に`input`と`expected`を置く。reviewの`input`は今は空（差分はpatch、規則は定義が持つ）。reviewの`expected`は`verdict`（`violation`＝`revise`か`concern`、`clean`＝`pass`）・`codes`（求める規則コード）・`acceptable_codes`（挙げても誤検出に数えないコード）・`note`（期待の理由。`acceptable_codes`を使うときは許す理由）。
 - 読み手が知らない欄はファイルに残してよく、読まない。
+  Spikeから取り込んだケースは、由来（元の区分・本番のreviewの結果など）を記録する追加の欄を共通の欄にも役割の欄の下にも持ちうる。
+  それらは任意で、無いケースもある。
+  読み手はそれらを誤りにせず、読んだケースの型にも持たない（ファイルにだけ残る）。
+  採点（判定と規則コードのrecall・precision）が使うのは`expected`の`verdict`・`codes`・`acceptable_codes`と`disputed`だけで、追加の欄も`note`のような読む任意の欄も成績を変えない。
 - `handmade`はdevだけに置く。改善するsessionが中身を読んだケースはholdoutに置かない。
 - 読み手は形の誤り（欄の欠けと型の違い・知らないファイル・置き場に無いpatchの参照・ファイルの中のidの重複など）を、最初の1つでなく全て返す。
 - 起動・形の検査・採点・productionのケースの作り方は役割ごとのharnessが持つ。今作るのはreviewのharnessだけ。
