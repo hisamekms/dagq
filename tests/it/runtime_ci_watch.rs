@@ -549,6 +549,54 @@ fn a_missing_or_logged_out_gh_holds_the_claims_and_tells_the_inbox() {
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
 }
 
+/// A supervisor that continues under its token after a handoff reads its
+/// own latest hold however many records of the same kinds the others wrote
+/// since, and does not record the hold it already holds again.
+#[test]
+fn a_handed_off_supervisor_reads_its_own_hold_past_the_others_records() {
+    use dagq::domain::{EventKind, LeaseToken};
+    let (fixture, repo, db) = fixture();
+    let gh = watched(&fixture, &repo);
+    let missing = gh.with_file_name("missing-gh");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .register_supervisor(&LeaseToken::new("handed"), std::process::id(), 4, "0.0.1")
+        .unwrap();
+    queue
+        .record_queue_event(
+            EventKind::CiWatchHeld,
+            json!({"reason": "pending", "workflow": "ci.yml", "supervisor": "handed"}),
+        )
+        .unwrap();
+    for _ in 0..70 {
+        for kind in [EventKind::CiWatchHeld, EventKind::CiWatchResumed] {
+            queue
+                .record_queue_event(kind, json!({"reason": "pending", "supervisor": "other"}))
+                .unwrap();
+        }
+    }
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = SuperviseOptions {
+        handoff_token: Some(LeaseToken::new("handed")),
+        ..options(&missing)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(outcome["runs"], json!([]), "{outcome}");
+    let handed: Vec<(String, String)> = hold_events(&db)
+        .into_iter()
+        .filter(|(_, payload)| payload["supervisor"] == "handed")
+        .map(|(kind, payload)| (kind, payload["reason"].as_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(
+        handed,
+        [
+            ("ci_watch_held".to_owned(), "pending".to_owned()),
+            ("ci_watch_held".to_owned(), "unreadable".to_owned()),
+        ],
+        "{handed:?}"
+    );
+}
+
 /// AC 1: a supervisor that may watch the CI but whose `dagq.toml` has no
 /// `[ci_watch]` reads nothing, records nothing and holds nothing.
 #[test]

@@ -500,6 +500,120 @@ fn the_supervisors_own_holds_are_served_in_held_as_printed() {
     );
 }
 
+/// A live supervisor's own holds are served from its latest record however
+/// many records of the same kinds another supervisor wrote after it, in
+/// `candidates`' `held` and `status`' supervisors as the command line
+/// prints them, until it records their end.
+#[test]
+fn a_supervisor_s_own_holds_are_served_past_another_s_records() {
+    use dagq::domain::{EventKind, LeaseToken};
+    use dagq::infrastructure::sqlite::SqliteQueue;
+    let (queue, _, _) = seeded();
+    let mut sqlite = SqliteQueue::open(&queue.db).unwrap();
+    for supervisor in ["live", "other"] {
+        sqlite
+            .register_supervisor(&LeaseToken::new(supervisor), std::process::id(), 2, "0.0.1")
+            .unwrap();
+    }
+    let record = |kind: EventKind, payload: Value| {
+        sqlite.record_queue_event(kind, payload).unwrap();
+    };
+    record(
+        EventKind::CiWatchHeld,
+        json!({"reason": "unreadable", "workflow": "ci.yml", "supervisor": "live"}),
+    );
+    record(
+        EventKind::LandingBranchUnresolved,
+        json!({"reason": "unresolved", "error": "no landing branch", "supervisor": "live"}),
+    );
+    for _ in 0..70 {
+        record(
+            EventKind::CiWatchHeld,
+            json!({"reason": "pending", "supervisor": "other"}),
+        );
+        record(
+            EventKind::CiWatchResumed,
+            json!({"reason": "pending", "supervisor": "other"}),
+        );
+        record(
+            EventKind::LandingBranchUnresolved,
+            json!({"reason": "unresolved", "error": "flaky", "supervisor": "other"}),
+        );
+        record(
+            EventKind::LandingBranchResolved,
+            json!({"reason": "unresolved", "supervisor": "other"}),
+        );
+    }
+    let plan_review = token(&queue, &Principal::of(&ActorContext::plan_review_job(1, 1)));
+    let reasons = |served: &Value| -> Vec<String> {
+        served["held"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|held| held["reason"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let holds = |status: &Value, key: &str| -> Vec<Value> {
+        status["supervisors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|supervisor| supervisor.get(key).cloned())
+            .collect()
+    };
+    let served = answer(&queue, &plan_review, UseCase::Candidates, &Value::Null);
+    assert_eq!(
+        reasons(&served),
+        ["ci_watch_held", "landing_branch_unresolved"],
+        "{served}"
+    );
+    assert_eq!(served["held"][0]["record"]["supervisor"], "live");
+    assert_eq!(served["held"][1]["record"]["supervisor"], "live");
+    same_as_cli(
+        &queue,
+        &plan_review,
+        UseCase::Candidates,
+        &Value::Null,
+        &["candidates"],
+    );
+    for status in [
+        answer(&queue, &plan_review, UseCase::Status, &json!({})),
+        ok(&queue.db, &["status"]),
+    ] {
+        for key in ["ci_watch_hold", "landing_branch_hold"] {
+            let held = holds(&status, key);
+            assert_eq!(held.len(), 1, "{key}: {status}");
+            assert_eq!(held[0]["supervisor"], "live", "{key}: {status}");
+        }
+    }
+
+    record(
+        EventKind::CiWatchResumed,
+        json!({"reason": "unreadable", "supervisor": "live"}),
+    );
+    record(
+        EventKind::LandingBranchResolved,
+        json!({"reason": "unresolved", "supervisor": "live"}),
+    );
+    let served = answer(&queue, &plan_review, UseCase::Candidates, &Value::Null);
+    assert!(reasons(&served).is_empty(), "{served}");
+    same_as_cli(
+        &queue,
+        &plan_review,
+        UseCase::Candidates,
+        &Value::Null,
+        &["candidates"],
+    );
+    for status in [
+        answer(&queue, &plan_review, UseCase::Status, &json!({})),
+        ok(&queue.db, &["status"]),
+    ] {
+        for key in ["ci_watch_hold", "landing_branch_hold"] {
+            assert!(holds(&status, key).is_empty(), "{key}: {status}");
+        }
+    }
+}
+
 #[test]
 fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
     let (queue, task, _) = seeded();

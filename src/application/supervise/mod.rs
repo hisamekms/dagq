@@ -2358,14 +2358,18 @@ impl Supervisor<'_> {
         kinds: claim_hold::OwnHold,
         hold: Option<(&str, Value)>,
     ) -> bool {
-        let recorded =
-            crate::application::health::own_hold_records(&*self.queue, kinds).and_then(|records| {
-                let last = claim_hold::OwnHold::latest_of(&records, self.token.as_str());
-                match kinds.transition(hold, last, &self.token) {
-                    Some((kind, payload)) => self.queue.record_queue_event(kind, payload).map(drop),
-                    None => Ok(()),
-                }
-            });
+        let recorded = crate::application::health::own_hold_records(
+            &*self.queue,
+            kinds,
+            &[self.token.as_str()],
+        )
+        .and_then(|records| {
+            let last = claim_hold::OwnHold::latest_of(&records, self.token.as_str());
+            match kinds.transition(hold, last, &self.token) {
+                Some((kind, payload)) => self.queue.record_queue_event(kind, payload).map(drop),
+                None => Ok(()),
+            }
+        });
         if let Err(error) = recorded {
             warn!(error = %format_args!("{error:#}"), "the hold {} could not be recorded: {error:#}", kinds.held.as_str());
             return false;
@@ -3943,6 +3947,13 @@ mod tests {
             unreachable!("requested_by_job writes queue events only")
         }
         fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
+            unreachable!("requested_by_job writes queue events only")
+        }
+        fn latest_events_by_supervisor(
+            &self,
+            kinds: &[&str],
+            supervisors: &[&str],
+        ) -> Result<Vec<RunEvent>> {
             unreachable!("requested_by_job writes queue events only")
         }
         fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {

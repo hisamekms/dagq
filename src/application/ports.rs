@@ -2206,6 +2206,14 @@ pub trait RunLog {
     fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>>;
     /// The newest event of the queue itself (on no run) of one of `kinds`.
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>>;
+    /// For each of `supervisors`, the newest event of one of `kinds` whose
+    /// payload names it as its `supervisor`, however many the others
+    /// recorded since; one with none has no entry.
+    fn latest_events_by_supervisor(
+        &self,
+        kinds: &[&str],
+        supervisors: &[&str],
+    ) -> Result<Vec<RunEvent>>;
     /// The events of one of `kinds` with `after < id <= upto`, oldest
     /// first, at most `limit`.
     fn events_of_between(

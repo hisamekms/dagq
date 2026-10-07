@@ -558,16 +558,24 @@ fn slots_and_waits(
         ("provider_hold", provider_hold),
     ];
     // Each supervisor's own holds, by its own latest record.
+    let tokens: Vec<&str> = registrations
+        .iter()
+        .map(|registration| registration.token.as_str())
+        .collect();
     let own_holds = [
         (
             "ci_watch_hold",
             crate::domain::ci_watch::CI_WATCH_HOLD,
-            own_hold_records(queue, crate::domain::ci_watch::CI_WATCH_HOLD)?,
+            own_hold_records(queue, crate::domain::ci_watch::CI_WATCH_HOLD, &tokens)?,
         ),
         (
             "landing_branch_hold",
             crate::domain::landing_branch::LANDING_BRANCH_HOLD,
-            own_hold_records(queue, crate::domain::landing_branch::LANDING_BRANCH_HOLD)?,
+            own_hold_records(
+                queue,
+                crate::domain::landing_branch::LANDING_BRANCH_HOLD,
+                &tokens,
+            )?,
         ),
     ];
     let supervisors = health
@@ -715,11 +723,15 @@ pub fn claim_holds(
     };
     let mut records: Vec<RunEvent> = records.into_iter().flatten().filter(of_live).collect();
     // Each live supervisor's own holds, by its own latest record.
+    let tokens: Vec<&str> = live
+        .iter()
+        .map(|registration| registration.token.as_str())
+        .collect();
     for kinds in [
         crate::domain::ci_watch::CI_WATCH_HOLD,
         crate::domain::landing_branch::LANDING_BRANCH_HOLD,
     ] {
-        let own = own_hold_records(queue, kinds)?;
+        let own = own_hold_records(queue, kinds, &tokens)?;
         records.extend(
             live.iter()
                 .filter_map(|registration| own_held(kinds, &own, registration.token.as_str())),
@@ -728,18 +740,17 @@ pub fn claim_holds(
     Ok(held(live.is_empty(), records, spacing))
 }
 
-/// The newest records of both kinds of a supervisor's own hold
-/// ([`OwnHold`](crate::domain::claim_hold::OwnHold)), each supervisor's
-/// latest among them ([`OwnHold::latest_of`](crate::domain::claim_hold::OwnHold::latest_of)).
+/// Each of `tokens`' latest record of either kind of its own hold
+/// ([`OwnHold`](crate::domain::claim_hold::OwnHold)), however many the
+/// other supervisors recorded since; one that recorded none has no entry
+/// ([`OwnHold::latest_of`](crate::domain::claim_hold::OwnHold::latest_of)
+/// picks a supervisor's).
 pub(crate) fn own_hold_records(
     queue: &(impl super::RunLog + ?Sized),
     kinds: crate::domain::claim_hold::OwnHold,
+    tokens: &[&str],
 ) -> Result<Vec<RunEvent>> {
-    let mut records = Vec::new();
-    for kind in kinds.kinds() {
-        records.extend(queue.latest_events_of(kind, crate::domain::claim_hold::OWN_HOLD_RECENT)?);
-    }
-    Ok(records)
+    queue.latest_events_by_supervisor(&kinds.kinds(), tokens)
 }
 
 /// The latest record of `token`'s own hold of `kinds` among `records`

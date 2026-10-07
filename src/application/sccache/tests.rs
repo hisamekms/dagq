@@ -109,6 +109,13 @@ impl RunLog for MemoryLog {
     fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
         unreachable!("sccache reads queue events only")
     }
+    fn latest_events_by_supervisor(
+        &self,
+        kinds: &[&str],
+        supervisors: &[&str],
+    ) -> Result<Vec<RunEvent>> {
+        unreachable!("sccache reads queue events only")
+    }
     fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
         unreachable!("sccache reads queue events only")
     }

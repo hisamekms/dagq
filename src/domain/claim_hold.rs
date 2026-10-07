@@ -324,12 +324,6 @@ pub struct OwnHold {
     pub resumed: EventKind,
 }
 
-/// How many of the newest records of each kind of an [`OwnHold`] are read
-/// for each supervisor's latest: they are written only where a hold
-/// changes, so a live supervisor's latest is among them unless the others
-/// changed theirs this many times since.
-pub const OWN_HOLD_RECENT: usize = 64;
-
 impl OwnHold {
     /// Both kinds, for reading the latest of them.
     pub const fn kinds(self) -> [&'static str; 2] {

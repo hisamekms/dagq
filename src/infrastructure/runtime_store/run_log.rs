@@ -279,6 +279,35 @@ impl SqliteQueue {
         Ok(latest)
     }
 
+    /// For each of `supervisors`, the newest event of one of `kinds` whose
+    /// payload names it as its `supervisor`, in one query.
+    pub fn latest_events_by_supervisor(
+        &self,
+        kinds: &[&str],
+        supervisors: &[&str],
+    ) -> Result<Vec<RunEvent>> {
+        if kinds.is_empty() || supervisors.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kind_marks = vec!["?"; kinds.len()].join(",");
+        let supervisor_marks = vec!["?"; supervisors.len()].join(",");
+        Ok(self
+            .conn
+            .prepare(&format!(
+                "SELECT * FROM run_events WHERE id IN (
+                     SELECT MAX(id) FROM run_events
+                     WHERE kind IN ({kind_marks})
+                       AND json_extract(payload, '$.supervisor') IN ({supervisor_marks})
+                     GROUP BY json_extract(payload, '$.supervisor'))
+                 ORDER BY id"
+            ))?
+            .query_map(
+                rusqlite::params_from_iter(kinds.iter().chain(supervisors)),
+                event_row,
+            )?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Per task, its newest event of one of `kinds`, by task.
     pub fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         if kinds.is_empty() {
@@ -922,6 +951,13 @@ impl RunLog for SqliteQueue {
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
         SqliteQueue::latest_queue_event(self, kinds)
     }
+    fn latest_events_by_supervisor(
+        &self,
+        kinds: &[&str],
+        supervisors: &[&str],
+    ) -> Result<Vec<RunEvent>> {
+        SqliteQueue::latest_events_by_supervisor(self, kinds, supervisors)
+    }
     fn events_of_between(
         &self,
         kinds: &[&str],
@@ -1036,6 +1072,57 @@ mod tests {
         assert!(
             lease.iter().all(|line| line.starts_with("SEARCH")),
             "{lease:#?}"
+        );
+    }
+
+    /// Each supervisor named gets its newest record of the kinds, however
+    /// many the others wrote after it; one with none, a kind not asked for
+    /// and a supervisor not named are left out.
+    #[test]
+    fn each_supervisor_s_latest_is_read_past_the_others_records() {
+        use crate::domain::EventKind;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let record = |kind: EventKind, supervisor: &str| {
+            queue
+                .record_queue_event(kind, serde_json::json!({"supervisor": supervisor}))
+                .unwrap()
+        };
+        record(EventKind::CiWatchHeld, "a");
+        let a = record(EventKind::CiWatchResumed, "a");
+        let mut b = record(EventKind::CiWatchHeld, "b");
+        for _ in 0..100 {
+            record(EventKind::CiWatchHeld, "c");
+            b = record(EventKind::CiWatchResumed, "b");
+        }
+        record(EventKind::LandingBranchUnresolved, "a");
+        let kinds = [
+            EventKind::CiWatchHeld.as_str(),
+            EventKind::CiWatchResumed.as_str(),
+        ];
+        let latest = queue
+            .latest_events_by_supervisor(&kinds, &["a", "b", "none"])
+            .unwrap();
+        let ids: Vec<_> = latest.iter().map(|event| event.id).collect();
+        assert_eq!(ids, [a, b]);
+        assert_eq!(latest[0].kind, "ci_watch_resumed");
+        assert!(
+            queue
+                .latest_events_by_supervisor(&kinds, &[])
+                .unwrap()
+                .is_empty()
+        );
+        // The records of the kinds are found by their index, not by a walk
+        // of every event.
+        let steps = plan(
+            &queue.conn,
+            "SELECT MAX(id) FROM run_events WHERE kind IN (?1, ?2)
+               AND json_extract(payload, '$.supervisor') IN (?3)
+             GROUP BY json_extract(payload, '$.supervisor')",
+        );
+        assert!(
+            !steps.iter().any(|line| line == "SCAN run_events"),
+            "{steps:#?}"
         );
     }
 }
