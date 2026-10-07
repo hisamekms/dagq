@@ -9,15 +9,18 @@
 //! is a connect to the server's loopback port. Only confirmed existing
 //! servers are queried for process identity and stats; foreign servers
 //! are recorded, and failure-only deltas or known confinement cause a
-//! stop and restart outside the sandbox. A Codex review whose server could
-//! not be confirmed runs without `RUSTC_WRAPPER`, recorded as
-//! `sccache_wrapper_removed`; a Codex worker's turns are looked at by its
+//! stop and restart outside the sandbox. A Codex review is given the
+//! refusal of the server's start and, when its server was confirmed,
+//! compiles through the guard (ADR-t2008-1); one whose server could not be
+//! confirmed runs without `RUSTC_WRAPPER`, recorded as
+//! `sccache_wrapper_removed`. A Codex worker's turns are looked at by its
 //! wrapper the same way ([`crate::application::headless_session`]).
 
 use super::*;
 use crate::application::SccacheServer;
 use crate::domain::sccache::{
     CheckReason, IDLE_TIMEOUT, IDLE_TIMEOUT_VAR, SccacheTarget, ServerCheck, WRAPPER_VAR,
+    sandbox_env,
 };
 
 /// How often a pass looks at the server.
@@ -277,20 +280,47 @@ impl Supervisor<'_> {
     }
 
     /// Before a Codex job of run `run` given `env` (`[run.env]`) starts:
-    /// the variables it runs without, `RUSTC_WRAPPER` when the server was
-    /// not confirmed, recorded as `sccache_wrapper_removed` and taken out
-    /// of `env`.
+    /// the variables it runs without. It is given the refusal of the
+    /// server's start; when the server was confirmed it compiles through
+    /// the guard made in `dir` (ADR-t2008-1), else (or when the guard could
+    /// not be made) it runs without `RUSTC_WRAPPER`, recorded as
+    /// `sccache_wrapper_removed` and taken out of `env`.
     pub(super) fn sccache_before_job(
         &mut self,
         run: &RunId,
         job: &str,
         attempt: usize,
+        dir: &Path,
         env: &mut Vec<(String, String)>,
     ) -> &'static [&'static str] {
-        let ServerCheck::Unconfirmed { port, why } = self.ensure_sccache(CheckReason::BeforeReview)
-        else {
-            return &[];
+        let (port, why, target) = match self.ensure_sccache(CheckReason::BeforeReview) {
+            ServerCheck::NotConfigured => return &[],
+            ServerCheck::Running => {
+                let Some(target) = SccacheTarget::of_pairs(env) else {
+                    return &[];
+                };
+                let guard = self
+                    .sccache_port
+                    .as_ref()
+                    .context("no sccache port")
+                    .and_then(|SccachePort(server)| server.guard(dir));
+                let why = match guard {
+                    Ok(guard) => match guard.to_str() {
+                        Some(guard) => {
+                            set_env(env, sandbox_env(&target, Some(guard)));
+                            return &[];
+                        }
+                        None => format!("the guard's path {} is not UTF-8", guard.display()),
+                    },
+                    Err(error) => format!("the guard could not be made: {error:#}"),
+                };
+                (target.port, why, Some(target))
+            }
+            ServerCheck::Unconfirmed { port, why } => (port, why, SccacheTarget::of_pairs(env)),
         };
+        if let Some(target) = target {
+            set_env(env, sandbox_env(&target, None));
+        }
         env.retain(|(key, _)| key != WRAPPER_VAR);
         warn!(run_id = %run, "run {run}: its {job} runs without {WRAPPER_VAR}: {why}");
         if let Err(error) = self.queue.record_runtime_event(
@@ -311,6 +341,14 @@ impl Supervisor<'_> {
     }
 }
 
+/// `env` with each of `vars` in place of the variable of its name.
+fn set_env(env: &mut Vec<(String, String)>, vars: Vec<(String, String)>) {
+    for (key, value) in vars {
+        env.retain(|(name, _)| *name != key);
+        env.push((key, value));
+    }
+}
+
 fn retry_waiting(elapsed: Option<Duration>) -> bool {
     elapsed.is_some_and(|elapsed| elapsed < RETRY_AFTER)
 }
@@ -318,6 +356,29 @@ fn retry_waiting(elapsed: Option<Duration>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn set_env_replaces_the_variables_of_the_same_name() {
+        let mut env = vec![
+            ("RUSTC_WRAPPER".to_owned(), "sccache".to_owned()),
+            ("PATH".to_owned(), "/bin".to_owned()),
+        ];
+        set_env(
+            &mut env,
+            vec![
+                ("SCCACHE_ERROR_LOG".to_owned(), "/dev/null/x".to_owned()),
+                ("RUSTC_WRAPPER".to_owned(), "/q/guard".to_owned()),
+            ],
+        );
+        assert_eq!(
+            env,
+            [
+                ("PATH".to_owned(), "/bin".to_owned()),
+                ("SCCACHE_ERROR_LOG".to_owned(), "/dev/null/x".to_owned()),
+                ("RUSTC_WRAPPER".to_owned(), "/q/guard".to_owned()),
+            ]
+        );
+    }
+
     #[test]
     fn failed_restarts_wait_until_the_retry_boundary() {
         assert!(!retry_waiting(None));

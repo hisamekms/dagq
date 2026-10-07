@@ -255,6 +255,36 @@ impl Directory {
         check(unsafe { libc::renameat(self.0.fd(), from.as_ptr(), to_dir.0.fd(), to.as_ptr()) })
     }
 
+    /// Make the link `name` to `target` (`symlinkat`); an existing entry
+    /// of that name is an error.
+    pub(crate) fn symlink(&self, target: &Path, name: impl AsRef<OsStr>) -> io::Result<()> {
+        let name = entry_name(name)?;
+        let target = CString::new(target.as_os_str().as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: the descriptor is open and both strings are NUL terminated.
+        check(unsafe { libc::symlinkat(target.as_ptr(), self.0.fd(), name.as_ptr()) })
+    }
+
+    /// What the link `name` names (`readlinkat`), never followed.
+    pub(crate) fn read_link(&self, name: impl AsRef<OsStr>) -> io::Result<std::path::PathBuf> {
+        let name = entry_name(name)?;
+        let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: descriptor, name and buffer are valid for the call.
+        let length = unsafe {
+            libc::readlinkat(
+                self.0.fd(),
+                name.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if length < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        buffer.truncate(length as usize);
+        Ok(std::path::PathBuf::from(OsString::from_vec(buffer)))
+    }
+
     /// A fresh inode, never an existing link/hardlink/FIFO. Publish by
     /// rename relative to this same descriptor. Returning the open file
     /// also lets a child's stdout keep writing this inode after a worker
@@ -383,6 +413,24 @@ mod tests {
         let path = CString::new(path.as_os_str().as_bytes()).unwrap();
         // SAFETY: NUL terminated path; test owns its temporary directory.
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
+
+    #[test]
+    fn a_link_is_made_and_read_relative_to_the_directory_never_followed() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = Directory::open(root.path()).unwrap();
+        dir.symlink(Path::new("/opt/dagq"), "guard").unwrap();
+        assert_eq!(dir.read_link("guard").unwrap(), Path::new("/opt/dagq"));
+        assert_eq!(
+            fs::read_link(root.path().join("guard")).unwrap(),
+            Path::new("/opt/dagq")
+        );
+        // An existing name is not replaced, and a file is no link.
+        assert!(dir.symlink(Path::new("/opt/other"), "guard").is_err());
+        fs::write(root.path().join("file"), "").unwrap();
+        assert!(dir.read_link("file").is_err());
+        assert!(dir.read_link("missing").is_err());
+        assert!(dir.symlink(Path::new("/x"), "a/b").is_err());
     }
 
     #[test]

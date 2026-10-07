@@ -93,7 +93,9 @@ pub enum SessionAgent<'a> {
     /// session or going on with one, as `session` says, its output to
     /// `stdout` and `stderr` rather than the wrapper's terminal, without
     /// the variables `without_env` names (`RUSTC_WRAPPER` for a sandboxed
-    /// turn whose sccache server was not confirmed, ADR-t1215-1).
+    /// turn whose sccache server was not confirmed, ADR-t1215-1) and with
+    /// those of `with_env` (a sandboxed turn's refusal of the sccache
+    /// server's start and its guard, ADR-t2008-1).
     Turn {
         run: &'a TaskRun,
         prompt: &'a str,
@@ -101,6 +103,7 @@ pub enum SessionAgent<'a> {
         stdout: &'a Path,
         stderr: &'a Path,
         without_env: &'a [&'a str],
+        with_env: &'a [(String, String)],
     },
     /// A planner in a terminal (ADR-0041): only a person's, opened before
     /// `dagq plan` was abolished (ADR-t1394-1). The runtime's planners run
@@ -679,6 +682,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let provider = self.provider()?;
                 let mut streams = Streams::Inherit;
                 let mut without: &[&str] = &[];
+                let mut with: &[(String, String)] = &[];
                 // The resource broker's tools, as the supervisor left them
                 // in the run's dir (ADR-t827-4 decision 1, ADR-t838-1): a
                 // `required` run without them is refused here, before any
@@ -713,9 +717,11 @@ only; an interactive session has no settings that refuse the built-in tools",
                         stdout,
                         stderr,
                         without_env,
+                        with_env,
                     } => {
                         streams = Streams::Files { stdout, stderr };
                         without = without_env;
+                        with = with_env;
                         let mut target = TurnTarget::of_run(run)?;
                         if let super::broker_run::WorkerBroker::Required(config) = &broker {
                             target.broker_required = Some(config);
@@ -761,6 +767,7 @@ only; an interactive session has no settings that refuse the built-in tools",
                         command.env_remove(name);
                     }
                 }
+                command.envs(with.iter().map(|(key, value)| (key, value)));
                 for name in without {
                     command.env_remove(name);
                 }
@@ -1911,6 +1918,7 @@ mod tests {
                     stdout: &stdout,
                     stderr: &stderr,
                     without_env: &[],
+                    with_env: &[],
                 },
                 SessionAgent::Turn {
                     run: &run,
@@ -1919,6 +1927,7 @@ mod tests {
                     stdout: &stdout,
                     stderr: &stderr,
                     without_env: &[],
+                    with_env: &[],
                 },
                 SessionAgent::Worker {
                     run: &run,

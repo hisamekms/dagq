@@ -2,12 +2,20 @@
 //! with a connect to its loopback port, never with an sccache client (which
 //! starts the server it does not find, with the caller's environment and
 //! no event); it is started with `sccache --start-server` from the
-//! supervisor, outside any sandbox.
+//! supervisor, outside any sandbox. A sandboxed turn or job compiles
+//! through the guard ([`run_guard`]), which refuses the server's start.
 
+use super::agent_dir::Directory;
 use crate::application::{SccacheServer, ServerPid};
+use crate::domain::sccache::{
+    DEFAULT_PORT, ERROR_LOG_VAR, GUARD_NAME, GUARD_PROGRAM_VAR, GuardStep, PORT_VAR,
+    REFUSED_ERROR_LOG,
+};
 use anyhow::{Context, Result, bail};
 use std::{
+    ffi::OsString,
     fs,
+    io::Write,
     net::{Ipv4Addr, SocketAddr, TcpStream},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
@@ -32,6 +40,9 @@ pub struct SystemSccache {
     pub start_timeout: Duration,
     pub lsof: PathBuf,
     pub ps: PathBuf,
+    /// The `dagq` binary the guard links to ([`SccacheServer::guard`]);
+    /// `None` makes no guard.
+    pub dagq: Option<PathBuf>,
 }
 
 impl SystemSccache {
@@ -42,6 +53,7 @@ impl SystemSccache {
             start_timeout,
             lsof: "lsof".into(),
             ps: "ps".into(),
+            dagq: None,
         }
     }
 }
@@ -275,6 +287,93 @@ impl SccacheServer for SystemSccache {
             &self.lsof,
         ))
     }
+
+    fn guard(&self, dir: &Path) -> Result<PathBuf> {
+        let dagq = self
+            .dagq
+            .as_deref()
+            .context("no dagq binary to make the guard of")?;
+        // The run's directory is the worker's to write: its entries are
+        // reached through the directory's descriptor, never by a path a
+        // link could redirect (ADR-t813-3 decision 6).
+        let run_dir = Directory::open(dir).with_context(|| format!("open {}", dir.display()))?;
+        if run_dir
+            .read_link(GUARD_NAME)
+            .is_ok_and(|target| target == dagq)
+        {
+            return Ok(dir.join(GUARD_NAME));
+        }
+        // A link of its own renamed over the name: a turn and a job of the
+        // same run may make it at once.
+        let tmp = format!(".{GUARD_NAME}.{}.tmp", std::process::id());
+        let _ = run_dir.remove(&tmp);
+        run_dir
+            .symlink(dagq, &tmp)
+            .with_context(|| format!("link {tmp} in {} to {}", dir.display(), dagq.display()))?;
+        if let Err(error) = run_dir.rename(&tmp, &run_dir, GUARD_NAME) {
+            let _ = run_dir.remove(&tmp);
+            return Err(error)
+                .with_context(|| format!("rename to {GUARD_NAME} in {}", dir.display()));
+        }
+        let guard = dir.join(GUARD_NAME);
+        Ok(guard)
+    }
+}
+
+/// The guard (ADR-t2008-1): `dagq` run by cargo as `RUSTC_WRAPPER` under
+/// the name [`GUARD_NAME`], with the compiler and its arguments in `args`
+/// (after argv\[0\]). It compiles through the sccache of
+/// [`GUARD_PROGRAM_VAR`] while its server listens, and runs the compiler
+/// itself otherwise: no server is there to reach, or the sccache client
+/// failed, which its refused start of a server does
+/// ([`REFUSED_ERROR_LOG`], given again here). The compiler replaces the
+/// guard's process (its jobserver and streams are cargo's); sccache's
+/// output is held until it is known to be the compile's. Returns the exit
+/// status to end with.
+pub fn run_guard(args: &[OsString]) -> i32 {
+    let Some((compiler, compiler_args)) = args.split_first() else {
+        eprintln!("{GUARD_NAME}: no compiler to run");
+        return 2;
+    };
+    let program = std::env::var_os(GUARD_PROGRAM_VAR).filter(|program| !program.is_empty());
+    let port = std::env::var(PORT_VAR)
+        .ok()
+        .and_then(|port| port.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(DEFAULT_PORT);
+    let step = GuardStep::first(program.is_some(), listening(port));
+    if let (GuardStep::Sccache, Some(program)) = (step, program) {
+        let output = Command::new(&program)
+            .arg(compiler)
+            .args(compiler_args)
+            .env(ERROR_LOG_VAR, REFUSED_ERROR_LOG)
+            .stdin(Stdio::inherit())
+            .output();
+        // An sccache that cannot run is no compile either.
+        if let Ok(output) = output
+            && GuardStep::after_sccache(output.status.success(), &output.stderr).is_none()
+        {
+            let _ = std::io::stdout().write_all(&output.stdout);
+            let _ = std::io::stderr().write_all(&output.stderr);
+            return exit_code(output.status);
+        }
+    }
+    let error = Command::new(compiler).args(compiler_args).exec();
+    eprintln!(
+        "{GUARD_NAME}: {} could not run: {error}",
+        Path::new(compiler).display()
+    );
+    2
+}
+
+/// The status to end with for `status`: its code, or 128 plus the signal
+/// that ended it, as a shell says.
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -375,6 +474,51 @@ esac
         assert_eq!(process.sandboxed, Some(true));
         fs::write(&lsof, "#!/bin/sh\nexit 1\n").unwrap();
         assert!(process_with(free_port(), &lsof, &ps).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_guard_is_a_link_to_dagq_made_again_when_it_names_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sccache = SystemSccache::new(dir.path(), Duration::ZERO);
+        assert!(sccache.guard(dir.path()).is_err());
+        let dagq = dir.path().join("dagq");
+        sccache.dagq = Some(dagq.clone());
+        let guard = sccache.guard(dir.path()).unwrap();
+        assert_eq!(guard, dir.path().join(GUARD_NAME));
+        assert_eq!(fs::read_link(&guard).unwrap(), dagq);
+        // Made again, the same; one that names another dagq is replaced.
+        assert_eq!(sccache.guard(dir.path()).unwrap(), guard);
+        let newer = dir.path().join("dagq-new");
+        sccache.dagq = Some(newer.clone());
+        sccache.guard(dir.path()).unwrap();
+        assert_eq!(fs::read_link(&guard).unwrap(), newer);
+        // No temporary link is left.
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(GUARD_NAME)]);
+    }
+
+    #[test]
+    fn the_guard_is_not_made_through_a_run_directory_a_link_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::create_dir_all(root.path().join("runs")).unwrap();
+        let run_dir = root.path().join("runs").join("r1");
+        std::os::unix::fs::symlink(&elsewhere, &run_dir).unwrap();
+        let mut sccache = SystemSccache::new(root.path(), Duration::ZERO);
+        sccache.dagq = Some(root.path().join("dagq"));
+        assert!(sccache.guard(&run_dir).is_err());
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+        // A worker's directory at the name is not replaced, and no
+        // temporary link is left beside it.
+        fs::remove_file(&run_dir).unwrap();
+        fs::create_dir_all(run_dir.join(GUARD_NAME)).unwrap();
+        assert!(sccache.guard(&run_dir).is_err());
+        assert_eq!(fs::read_dir(&run_dir).unwrap().count(), 1);
+        assert!(run_dir.join(GUARD_NAME).is_dir());
     }
 
     #[test]

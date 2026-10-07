@@ -1256,6 +1256,9 @@ pub fn supervise_with_reviewer(
                     start_timeout: settings.start_timeout,
                     lsof: settings.lsof.clone(),
                     ps: settings.ps.clone(),
+                    // The guard of a sandboxed job is the `dagq` its
+                    // sessions run (ADR-t2008-1).
+                    dagq: Some(runner.to_path_buf()),
                 },
             ))
         }),
@@ -3166,9 +3169,11 @@ pub fn session_in_background_as(
         pid,
         &SystemProcesses,
         sccache,
+        std::env::current_exe().ok().as_deref(),
     )
 }
-/// A background wrapper with injected process identity and control.
+/// A background wrapper with injected process identity and control, whose
+/// sandboxed turns' guard links to `dagq` (ADR-t2008-1).
 #[allow(clippy::too_many_arguments)]
 pub fn session_in_background_as_with_processes(
     db: &Path,
@@ -3181,6 +3186,7 @@ pub fn session_in_background_as_with_processes(
     pid: u32,
     processes: &dyn ProcessControl,
     sccache: Option<crate::domain::sccache::SccacheTarget>,
+    dagq: Option<&Path>,
 ) -> Result<Value> {
     run_session_as(
         db,
@@ -3195,6 +3201,7 @@ pub fn session_in_background_as_with_processes(
         sccache,
         pid,
         processes,
+        dagq,
     )
 }
 
@@ -3224,6 +3231,7 @@ fn run_session(
         sccache,
         std::process::id(),
         &SystemProcesses,
+        std::env::current_exe().ok().as_deref(),
     )
 }
 
@@ -3242,17 +3250,20 @@ fn run_session_as(
     sccache: Option<crate::domain::sccache::SccacheTarget>,
     pid: u32,
     processes: &dyn ProcessControl,
+    dagq: Option<&Path>,
 ) -> Result<Value> {
     // The wrapper's events are its own, not the worker's (ADR-t728-1).
     let mut queue = SqliteQueue::open(db)?.with_actor(
         crate::domain::actor::ActorContext::instance(crate::domain::actor::ActorRole::Wrapper, id),
     );
-    // The wrapper only looks at the server; the supervisor starts it.
+    // The wrapper only looks at the server and makes the guard of its
+    // turns (ADR-t2008-1); the supervisor starts the server.
     let looker = crate::infrastructure::sccache::SystemSccache {
         log: PathBuf::new(),
         start_timeout: Duration::ZERO,
         lsof: "lsof".into(),
         ps: "ps".into(),
+        dagq: dagq.map(Path::to_path_buf),
     };
     wrapper::run_session(
         Session {

@@ -3,7 +3,9 @@
 //! it; a process the runtime runs in a sandbox (a Codex worker's turn, a
 //! Codex job given `[run.env]`) must not, so a sandboxed turn whose server
 //! could not be confirmed just before it starts runs without
-//! `RUSTC_WRAPPER`.
+//! `RUSTC_WRAPPER`, and one whose server was confirmed compiles through
+//! the guard, which refuses the server's start should the server stop
+//! after the look (ADR-t2008-1).
 
 use std::path::Path;
 
@@ -178,6 +180,75 @@ pub enum ServerCheck {
     Unconfirmed { port: u16, why: String },
 }
 
+/// The file name of the guard (ADR-t2008-1): a link to the `dagq` binary
+/// that a sandboxed turn or job is given as `RUSTC_WRAPPER` in place of
+/// sccache. `dagq` invoked by this name is the guard, not the CLI.
+pub const GUARD_NAME: &str = "dagq-rustc-wrapper";
+/// The variable that tells the guard the sccache `[run.env]` names.
+pub const GUARD_PROGRAM_VAR: &str = "DAGQ_SCCACHE_PROGRAM";
+/// The variable sccache's server, and nothing else of sccache, opens
+/// first: its log, before it binds the port or leaves the client.
+pub const ERROR_LOG_VAR: &str = "SCCACHE_ERROR_LOG";
+/// A log no process can open (`/dev/null` is no directory), so a server
+/// started with it exits before it listens: what a sandboxed turn or job
+/// is given as [`ERROR_LOG_VAR`], so that no sccache it runs (its client
+/// re-executes itself as the server, with its environment) starts one.
+pub const REFUSED_ERROR_LOG: &str = "/dev/null/dagq-refuses-the-sccache-server";
+
+/// Whether the guard's argv\[0\] names it ([`GUARD_NAME`]).
+pub fn invoked_as_guard(argv0: &std::ffi::OsStr) -> bool {
+    Path::new(argv0).file_name() == Some(std::ffi::OsStr::new(GUARD_NAME))
+}
+
+/// The variables a sandboxed turn or job of `target` runs with beside its
+/// `[run.env]`: always the [`REFUSED_ERROR_LOG`], and, with `guard` (the
+/// link to the guard, made when its server was confirmed), the guard as
+/// `RUSTC_WRAPPER` and the sccache it compiles through. Without `guard`
+/// the caller takes `RUSTC_WRAPPER` out.
+pub fn sandbox_env(target: &SccacheTarget, guard: Option<&str>) -> Vec<(String, String)> {
+    let mut env = vec![(ERROR_LOG_VAR.to_owned(), REFUSED_ERROR_LOG.to_owned())];
+    if let Some(guard) = guard {
+        env.push((WRAPPER_VAR.to_owned(), guard.to_owned()));
+        env.push((GUARD_PROGRAM_VAR.to_owned(), target.program.clone()));
+    }
+    env
+}
+
+/// What the guard runs a compile with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardStep {
+    /// The compiler itself: no server to reach, or the sccache client
+    /// failed (its start of the server refused). Uncached but correct.
+    Compiler,
+    /// sccache, which compiles through the server that listens.
+    Sccache,
+}
+
+impl GuardStep {
+    /// The first step: sccache only when the guard knows it and its server
+    /// listens now. A server that stops after this look is the one case
+    /// where the client tries to start one, and the start is refused.
+    pub fn first(program_known: bool, listening: bool) -> Self {
+        if program_known && listening {
+            Self::Sccache
+        } else {
+            Self::Compiler
+        }
+    }
+
+    /// After sccache exited: whether the compiler runs instead. Only when
+    /// sccache failed and said its own error (`sccache: error:`, as its
+    /// client reports a failed connect or start); a compile the compiler
+    /// failed is the compiler's exit, said by the compiler.
+    pub fn after_sccache(success: bool, stderr: &[u8]) -> Option<Self> {
+        let client_failed = !success
+            && stderr
+                .split(|byte| *byte == b'\n')
+                .any(|line| line.starts_with(b"sccache: error:"));
+        client_failed.then_some(Self::Compiler)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +325,80 @@ mod tests {
                 .program,
             "sccache"
         );
+    }
+
+    #[test]
+    fn a_sandboxed_env_refuses_the_servers_start_and_guards_a_confirmed_server() {
+        let target = SccacheTarget {
+            program: "/opt/bin/sccache".into(),
+            port: 4300,
+        };
+        let refused = (ERROR_LOG_VAR.to_owned(), REFUSED_ERROR_LOG.to_owned());
+        assert_eq!(sandbox_env(&target, None), std::slice::from_ref(&refused));
+        assert_eq!(
+            sandbox_env(&target, Some("/q/runs/r/dagq-rustc-wrapper")),
+            [
+                refused,
+                (
+                    "RUSTC_WRAPPER".to_owned(),
+                    "/q/runs/r/dagq-rustc-wrapper".to_owned()
+                ),
+                (
+                    "DAGQ_SCCACHE_PROGRAM".to_owned(),
+                    "/opt/bin/sccache".to_owned()
+                ),
+            ]
+        );
+        // The log is no file anyone can open.
+        assert!(REFUSED_ERROR_LOG.starts_with("/dev/null/"));
+    }
+
+    #[test]
+    fn the_guard_is_known_by_its_name_only() {
+        use std::ffi::OsStr;
+        assert!(invoked_as_guard(OsStr::new("dagq-rustc-wrapper")));
+        assert!(invoked_as_guard(OsStr::new("/q/runs/r/dagq-rustc-wrapper")));
+        assert!(!invoked_as_guard(OsStr::new("dagq")));
+        assert!(!invoked_as_guard(OsStr::new("/usr/local/bin/dagq")));
+        assert!(!invoked_as_guard(OsStr::new("dagq-rustc-wrapper/dagq")));
+        assert!(!invoked_as_guard(OsStr::new("")));
+    }
+
+    #[test]
+    fn the_guard_compiles_through_sccache_only_while_its_server_listens() {
+        assert_eq!(GuardStep::first(true, true), GuardStep::Sccache);
+        assert_eq!(GuardStep::first(true, false), GuardStep::Compiler);
+        assert_eq!(GuardStep::first(false, true), GuardStep::Compiler);
+        assert_eq!(GuardStep::first(false, false), GuardStep::Compiler);
+    }
+
+    #[test]
+    fn the_compiler_runs_again_only_after_the_clients_own_failure() {
+        // The start of a server was refused: the client's error.
+        let refused = b"sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?\nRun with SCCACHE_LOG=debug SCCACHE_NO_DAEMON=1 to get more information\n";
+        assert_eq!(
+            GuardStep::after_sccache(false, refused),
+            Some(GuardStep::Compiler)
+        );
+        assert_eq!(
+            GuardStep::after_sccache(
+                false,
+                b"warning: x\nsccache: error: Server startup failed: x\n"
+            ),
+            Some(GuardStep::Compiler)
+        );
+        // The compiler's own failure, through the server, is the compile's.
+        assert_eq!(
+            GuardStep::after_sccache(false, b"error[E0425]: cannot find value `x`\n"),
+            None
+        );
+        // A line that only mentions sccache is not its error.
+        assert_eq!(
+            GuardStep::after_sccache(false, b"error: see sccache: error: in the log\n"),
+            None
+        );
+        assert_eq!(GuardStep::after_sccache(true, refused), None);
+        assert_eq!(GuardStep::after_sccache(false, b""), None);
     }
 
     #[test]

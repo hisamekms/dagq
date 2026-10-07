@@ -145,7 +145,11 @@ ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question -
 /// when there is one; with `codex-review-failure.jsonl` it prints that
 /// and fails, and with `codex-review-hang` it runs a command in a process
 /// group of its own until it is stopped (or the test process or the
-/// stub's directory is gone).
+/// stub's directory is gone). A job sources `codex-review-hook.sh` when
+/// there is one. Each turn and job logs its `RUSTC_WRAPPER` and
+/// `SCCACHE_ERROR_LOG` (`stub-wrapper.log` and `stub-error-log.log` in the
+/// run directory, `codex-review-wrapper.log` and
+/// `codex-review-error-log.log` beside the stub).
 pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
     let test_pid = std::process::id();
     let stub = dir.join("codex-headless");
@@ -172,6 +176,8 @@ if [ -n "$REVIEW" ]; then
   printf '%s\n' "$ARGS" >> {dir}/codex-review-args.log
   printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> {dir}/codex-review-actors.log
   printf '%s\n' "${{RUSTC_WRAPPER-unset}}" >> {dir}/codex-review-wrapper.log
+  printf '%s\n' "${{SCCACHE_ERROR_LOG-unset}}" >> {dir}/codex-review-error-log.log
+  [ -f {dir}/codex-review-hook.sh ] && . {dir}/codex-review-hook.sh
   REVIEW_CALL=$(wc -l < {dir}/codex-review-actors.log | tr -d ' ')
   printf '{{"type":"thread.started","thread_id":"codex-review-thread"}}\n{{"type":"turn.started"}}\n'
   # The review's model goes to its thread's rollout only, as Codex writes it.
@@ -217,6 +223,8 @@ printf '%s
 ' "$ARGS" >> "$RUN_DIR/stub-args.log"
 printf '%s
 ' "${{RUSTC_WRAPPER-unset}}" >> "$RUN_DIR/stub-wrapper.log"
+printf '%s
+' "${{SCCACHE_ERROR_LOG-unset}}" >> "$RUN_DIR/stub-error-log.log"
 ENDED=
 say() {{ printf '{{"type":"item.completed","item":{{"id":"m%s","type":"agent_message","text":"%s"}}}}
 ' "$TURN" "$1"; }}

@@ -4,12 +4,18 @@
 //! the test listens on once the stub was called, or never. The supervisor
 //! looks at the port without running sccache, starts the server outside
 //! the sandbox with `SCCACHE_IDLE_TIMEOUT=0`, and a Codex turn or review
-//! whose server is not confirmed runs without `RUSTC_WRAPPER`.
+//! whose server is not confirmed runs without `RUSTC_WRAPPER`. One whose
+//! server is confirmed compiles through the guard (`dagq` as
+//! `RUSTC_WRAPPER`, ADR-t2008-1), which no sccache in the sandbox gets past
+//! to start a server when the server stops during the turn.
 use crate::common;
 use crate::runtime_codex::{FINISH, codex_fixture, detail};
 use crate::runtime_support;
 
-use dagq::{domain::sccache::SccacheTarget, runtime::SccacheOptions};
+use dagq::{
+    domain::sccache::{GUARD_NAME, REFUSED_ERROR_LOG, SccacheTarget},
+    runtime::SccacheOptions,
+};
 use runtime_support::*;
 use std::net::{Ipv4Addr, TcpListener};
 
@@ -82,20 +88,76 @@ fn free_port() -> u16 {
 }
 
 /// A stub `sccache` in `<dir>/bin` (failing while `sccache-fails` is
-/// there), and the `PATH` the `[run.env]` gives.
+/// there), and the `PATH` the `[run.env]` gives. A compile (a first
+/// argument that is no flag) behaves as sccache 0.18's client
+/// (`connect_or_start_server` in its `src/commands.rs`): without a server
+/// (`server-up` beside it) it re-executes itself with
+/// `SCCACHE_START_SERVER=1`, a server that opens `SCCACHE_ERROR_LOG` before
+/// it listens (`refused` or `started` in `server-starts.log`), says
+/// `sccache: error:` when the start failed, and runs the compiler with
+/// `VIA_SCCACHE=1` otherwise.
 fn stub_sccache(dir: &Path, name: &str) -> (PathBuf, String) {
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let program = bin.join(name);
     fs::write(
         &program,
-        "#!/bin/sh\nprintf '%s idle=%s path=%s\\n' \"$*\" \"${SCCACHE_IDLE_TIMEOUT-unset}\" \"$PATH\" >> \"${0%/*}/sccache-calls.log\"\n[ -f \"${0%/*}/sccache-fails\" ] && { echo 'sccache stub refused' >&2; exit 2; }\n[ \"$1\" = --show-stats ] && echo '{\"stats\":{\"compile_requests\":0,\"compile_fails\":0,\"compilations\":0}}'\nexit 0\n",
+        r#"#!/bin/sh
+D="${0%/*}"
+if [ "${SCCACHE_START_SERVER-}" = 1 ]; then
+  if [ -n "${SCCACHE_ERROR_LOG-}" ] && ! ( : >> "$SCCACHE_ERROR_LOG" ) 2>/dev/null; then
+    echo refused >> "$D/server-starts.log"; exit 1
+  fi
+  echo started >> "$D/server-starts.log"; exit 0
+fi
+printf '%s idle=%s path=%s\n' "$*" "${SCCACHE_IDLE_TIMEOUT-unset}" "$PATH" >> "$D/sccache-calls.log"
+case "$1" in
+  -*) ;;
+  *)
+    if [ ! -f "$D/server-up" ]; then
+      SCCACHE_START_SERVER=1 "$0" || {
+        echo 'sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?' >&2
+        exit 2
+      }
+    fi
+    VIA_SCCACHE=1 exec "$@" ;;
+esac
+[ -f "$D/sccache-fails" ] && { echo 'sccache stub refused' >&2; exit 2; }
+[ "$1" = --show-stats ] && echo '{"stats":{"compile_requests":0,"compile_fails":0,"compilations":0}}'
+exit 0
+"#,
     )
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!("{}:/usr/bin:/bin", bin.display());
     (program, path)
+}
+
+/// A stub `rustc` beside `program`: it logs `via=<VIA_SCCACHE or direct>`
+/// and its arguments to `rustc-calls.log`, prints `rustc out`, and fails
+/// with a compiler's error while `rustc-fails` is there.
+fn stub_rustc(program: &Path) -> PathBuf {
+    let rustc = program.with_file_name("rustc");
+    common::template::script(
+        &rustc,
+        r#"#!/bin/sh
+D="${0%/*}"
+printf 'via=%s %s\n' "${VIA_SCCACHE:-direct}" "$*" >> "$D/rustc-calls.log"
+echo 'rustc out'
+[ -f "$D/rustc-fails" ] && { echo 'error[E0425]: cannot find value' >&2; exit 1; }
+exit 0
+"#,
+    );
+    rustc
+}
+
+fn lines(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn calls(program: &Path) -> Vec<String> {
@@ -225,19 +287,32 @@ fn the_supervisor_starts_a_missing_server_outside_the_sandbox_and_records_it() {
     assert_eq!(started["command"], "sccache --server");
     assert!(started.get("pid_error").is_none(), "{started}");
     assert!(queue_events(&db, "sccache_server_start_failed").is_empty());
-    // The turns and the review kept RUSTC_WRAPPER.
+    // The turns and the review compiled through the guard in the run's
+    // directory, a link to dagq (ADR-t2008-1), and were given the refusal
+    // of the server's start.
     let detail = detail(&db);
     assert!(payloads(&detail, "sccache_wrapper_removed").is_empty());
     assert_eq!(
         payloads(&detail, "review_started")[0]["launch"]["provider"],
         "codex"
     );
-    let review = fs::read_to_string(dir.path().join("codex-review-wrapper.log")).unwrap();
-    assert_eq!(review.trim(), program.display().to_string());
     let run = &detail.runs[0];
-    let turns =
-        fs::read_to_string(Path::new(run.run_dir().unwrap()).join("stub-wrapper.log")).unwrap();
-    assert_eq!(turns.trim(), program.display().to_string());
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let guard = run_dir.join(GUARD_NAME);
+    assert_eq!(
+        fs::read_link(&guard).unwrap(),
+        Path::new(env!("CARGO_BIN_EXE_dagq"))
+    );
+    let review = fs::read_to_string(dir.path().join("codex-review-wrapper.log")).unwrap();
+    assert_eq!(review.trim(), guard.display().to_string());
+    let turns = fs::read_to_string(run_dir.join("stub-wrapper.log")).unwrap();
+    assert_eq!(turns.trim(), guard.display().to_string());
+    for log in [
+        dir.path().join("codex-review-error-log.log"),
+        run_dir.join("stub-error-log.log"),
+    ] {
+        assert_eq!(lines(&log), [REFUSED_ERROR_LOG], "{}", log.display());
+    }
 }
 
 #[test]
@@ -312,6 +387,13 @@ fn turns_and_reviews_without_a_confirmed_server_run_without_the_wrapper() {
     assert_eq!(turns.trim(), "unset");
     let review = fs::read_to_string(dir.path().join("codex-review-wrapper.log")).unwrap();
     assert_eq!(review.trim(), "unset");
+    // Neither may start a server by an sccache of its own (ADR-t2008-1).
+    for log in [
+        dir.path().join("codex-review-error-log.log"),
+        Path::new(run.run_dir().unwrap()).join("stub-error-log.log"),
+    ] {
+        assert_eq!(lines(&log), [REFUSED_ERROR_LOG], "{}", log.display());
+    }
 }
 
 #[test]
@@ -794,4 +876,270 @@ fn the_supervisor_restarts_a_sandboxed_server_and_carries_a_failed_replacement_f
             .iter()
             .all(|entry| entry["kind"] != "sccache_server_restart_failed")
     );
+}
+
+/// The guard of `dir`: a link to dagq by its name, as the wrapper and the
+/// supervisor make it in a run's directory.
+fn guard_link(dir: &Path) -> PathBuf {
+    let guard = dir.join(GUARD_NAME);
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_dagq"), &guard).unwrap();
+    guard
+}
+
+/// Run `guard` as cargo runs `RUSTC_WRAPPER`, with `rustc` and its
+/// arguments, for the sccache `program` on `port`. The environment does
+/// not refuse the server's start: the guard does.
+fn compile(guard: &Path, program: &Path, port: u16, rustc: &Path) -> std::process::Output {
+    let _running = common::within(common::STEP_LIMIT, "the guard's compile");
+    std::process::Command::new(guard)
+        .arg(rustc)
+        .args(["--crate-name", "stub", "-"])
+        .env("DAGQ_SCCACHE_PROGRAM", program)
+        .env("SCCACHE_SERVER_PORT", port.to_string())
+        .env_remove("SCCACHE_ERROR_LOG")
+        .output()
+        .unwrap()
+}
+
+/// The sccache calls that were compiles (no flag first).
+fn compiles(program: &Path) -> Vec<String> {
+    calls(program)
+        .into_iter()
+        .filter(|call| !call.starts_with('-'))
+        .collect()
+}
+
+#[test]
+fn the_guard_compiles_through_a_server_that_listens() {
+    let dir = tempfile::tempdir().unwrap();
+    let (program, _) = stub_sccache(dir.path(), "sccache");
+    let rustc = stub_rustc(&program);
+    let guard = guard_link(dir.path());
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    fs::write(program.with_file_name("server-up"), "").unwrap();
+
+    let output = compile(&guard, &program, port, &rustc);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "rustc out\n");
+    assert_eq!(compiles(&program).len(), 1);
+    assert_eq!(
+        lines(&program.with_file_name("rustc-calls.log")),
+        ["via=1 --crate-name stub -"]
+    );
+    assert!(lines(&program.with_file_name("server-starts.log")).is_empty());
+
+    // The compiler's own failure through the server is the compile's:
+    // said by the compiler, and not run again.
+    fs::write(program.with_file_name("rustc-fails"), "").unwrap();
+    let output = compile(&guard, &program, port, &rustc);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error[E0425]"));
+    assert_eq!(lines(&program.with_file_name("rustc-calls.log")).len(), 2);
+    drop(listener);
+}
+
+#[test]
+fn a_server_stopped_before_the_compile_is_not_started_and_the_compiler_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (program, _) = stub_sccache(dir.path(), "sccache");
+    let rustc = stub_rustc(&program);
+    let guard = guard_link(dir.path());
+    // The server stopped during the turn: nothing listens.
+    let port = free_port();
+
+    let output = compile(&guard, &program, port, &rustc);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "rustc out\n");
+    assert!(calls(&program).is_empty(), "{:?}", calls(&program));
+    assert_eq!(
+        lines(&program.with_file_name("rustc-calls.log")),
+        ["via=direct --crate-name stub -"]
+    );
+    assert!(lines(&program.with_file_name("server-starts.log")).is_empty());
+}
+
+#[test]
+fn a_server_that_stops_after_the_guards_look_is_refused_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (program, _) = stub_sccache(dir.path(), "sccache");
+    let rustc = stub_rustc(&program);
+    let guard = guard_link(dir.path());
+    // The port still answers the guard's look, but the client finds no
+    // server: it stopped in between.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let output = compile(&guard, &program, port, &rustc);
+    assert!(output.status.success(), "{output:?}");
+    // Only the compiler's output: the client's error was not the compile's.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "rustc out\n");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("sccache"),
+        "{output:?}"
+    );
+    assert_eq!(compiles(&program).len(), 1);
+    // The client tried to start a server, which exited before it listened.
+    assert_eq!(
+        lines(&program.with_file_name("server-starts.log")),
+        ["refused"]
+    );
+    assert_eq!(
+        lines(&program.with_file_name("rustc-calls.log")),
+        ["via=direct --crate-name stub -"]
+    );
+    drop(listener);
+}
+
+/// Wait (bounded) for `path` to hold at least `count` lines.
+fn await_lines(path: &Path, count: usize, what: &str) {
+    let _waiting = common::within(common::STEP_LIMIT, what);
+    while lines(path).len() < count {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Wait (bounded) for `path` to be there.
+fn await_path(path: &Path, what: &str) {
+    let _waiting = common::within(common::STEP_LIMIT, what);
+    while !path.exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Have the turn or job ask the test to stop the server (`stop`), wait
+/// until it did (`stopped`; the wait ends with the test), and compile
+/// through its `RUSTC_WRAPPER` as cargo does, as `name`, its status to
+/// `compile-status.log`.
+fn compile_after(dir: &Path, rustc: &Path, stop: &str, stopped: &str, name: &str) -> String {
+    format!(
+        ": > {stop}\n{wait}\n\"$RUSTC_WRAPPER\" {rustc} --crate-name {name} > /dev/null 2>&1\necho $? >> {status}\n",
+        stop = common::shell_path(dir.join(stop)),
+        wait = common::await_path(dir.join(stopped)),
+        rustc = common::shell_path(rustc),
+        status = common::shell_path(dir.join("compile-status.log")),
+    )
+}
+
+#[test]
+fn a_server_that_stops_during_a_turn_or_a_review_is_not_started_from_the_sandbox() {
+    let (dir, repo, db, mut backend, codex) = codex_fixture();
+    backend.wrapper_processes = Some(Arc::new(WrapperProcesses));
+    let (program, path) = stub_sccache(dir.path(), "sccache");
+    let rustc = stub_rustc(&program);
+    let port = free_port();
+    configure(&repo, &program, port, &path);
+    backend.sccache = Some(SccacheTarget {
+        program: program.display().to_string(),
+        port,
+    });
+    backend.inherited_env = vec![
+        ("RUSTC_WRAPPER".into(), program.display().to_string()),
+        ("SCCACHE_SERVER_PORT".into(), port.to_string()),
+    ];
+    // The turn: the server stops (nothing listens any more), then it
+    // compiles. The review: the server stops after the guard's look (the
+    // port still answers, the client finds no server), then it compiles.
+    set_turns(
+        dir.path(),
+        &format!(
+            "{}{FINISH}",
+            compile_after(
+                dir.path(),
+                &rustc,
+                "stop-listener",
+                "listener-stopped",
+                "turn"
+            )
+        ),
+    );
+    fs::write(
+        dir.path().join("codex-review-hook.sh"),
+        compile_after(
+            dir.path(),
+            &rustc,
+            "stop-server",
+            "server-stopped",
+            "review",
+        ),
+    )
+    .unwrap();
+
+    // The host's server, as the supervisor's starts make it listen.
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let controller = {
+        let (done, dir, program) = (done.clone(), dir.path().to_path_buf(), program.clone());
+        thread::spawn(move || {
+            let up = program.with_file_name("server-up");
+            let starts = |count| {
+                let _waiting = common::within(common::STEP_LIMIT, "a start of the server");
+                while calls(&program)
+                    .iter()
+                    .filter(|call| call.starts_with("--start-server"))
+                    .count()
+                    < count
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            };
+            starts(1);
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+            fs::write(&up, "").unwrap();
+            await_path(&dir.join("stop-listener"), "the turn to ask for the stop");
+            drop(listener);
+            fs::remove_file(&up).unwrap();
+            fs::write(dir.join("listener-stopped"), "").unwrap();
+            // Started again only after the turn compiled, by the
+            // supervisor's next look or its look before the review.
+            await_lines(&dir.join("compile-status.log"), 1, "the turn's compile");
+            starts(2);
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+            fs::write(&up, "").unwrap();
+            await_path(&dir.join("stop-server"), "the review to ask for the stop");
+            fs::remove_file(&up).unwrap();
+            fs::write(dir.join("server-stopped"), "").unwrap();
+            while !done.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            drop(listener);
+        })
+    };
+    let stop = StopOnDrop(done);
+    let result = supervise_codex(dir.path(), &repo, &db, &backend, codex);
+    drop(stop);
+    joined(controller, "the stub server controller");
+    assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
+
+    // Both compiled, by the compiler itself, uncached and correct.
+    assert_eq!(lines(&dir.path().join("compile-status.log")), ["0", "0"]);
+    assert_eq!(
+        lines(&program.with_file_name("rustc-calls.log")),
+        [
+            "via=direct --crate-name turn",
+            "via=direct --crate-name review"
+        ]
+    );
+    // The turn's guard found nothing listening and ran no sccache; the
+    // review's sccache found no server and its start was refused. No
+    // server was started from the sandbox; every start was the
+    // supervisor's.
+    assert_eq!(compiles(&program).len(), 1, "{:?}", calls(&program));
+    assert!(compiles(&program)[0].contains("--crate-name review"));
+    assert_eq!(
+        lines(&program.with_file_name("server-starts.log")),
+        ["refused"]
+    );
+    for call in calls(&program)
+        .iter()
+        .filter(|call| call.starts_with("--start-server"))
+    {
+        assert_eq!(*call, format!("--start-server idle=0 path={path}"));
+    }
+    // Both had their server confirmed when they started: no wrapper was
+    // removed, and both ran through the guard.
+    let detail = detail(&db);
+    assert!(payloads(&detail, "sccache_wrapper_removed").is_empty());
+    let guard = Path::new(detail.runs[0].run_dir().unwrap()).join(GUARD_NAME);
+    let review = fs::read_to_string(dir.path().join("codex-review-wrapper.log")).unwrap();
+    assert_eq!(review.trim(), guard.display().to_string());
 }

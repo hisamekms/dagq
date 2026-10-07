@@ -46,7 +46,7 @@ use super::{
 use crate::domain::{
     ActorContext, ActorRole, PlannerId, Provider, RunEvent, TaskRun, event_kind,
     provider_switch::{since_switch, switches},
-    sccache::{SccacheTarget, WRAPPER_VAR},
+    sccache::{SccacheTarget, WRAPPER_VAR, sandbox_env},
     stall::StallConfig,
     tokens::TokenUsage,
     turn::{
@@ -118,9 +118,10 @@ pub(super) struct Turns<'a> {
     /// supervisor's request instead of starting with the task's prompt.
     pub(super) resume: bool,
     /// The sccache its environment names as `RUSTC_WRAPPER`, and how its
-    /// server is looked at: a Codex turn runs in Codex's sandbox, so it
-    /// runs without `RUSTC_WRAPPER` unless the server listens just before
-    /// it starts (ADR-t1215-1). `None` when the wrapper names no sccache.
+    /// server is looked at and the guard made: a Codex turn runs in Codex's
+    /// sandbox, so it runs without `RUSTC_WRAPPER` unless the server listens
+    /// just before it starts (ADR-t1215-1), and through the guard when it
+    /// does (ADR-t2008-1). `None` when the wrapper names no sccache.
     pub(super) sccache: Option<(&'a SccacheTarget, &'a dyn SccacheServer)>,
     /// The wrapper runs in the background (ADR-t1404-1 decision 6): its
     /// stdout is the session's log, not a terminal, and takes the `[dagq]`
@@ -658,25 +659,39 @@ impl<'a> Turns<'a> {
         }
     }
 
-    /// The variables turn `turn` on `provider` runs without: a Codex turn
-    /// whose sccache server does not listen just before it starts runs
-    /// without `RUSTC_WRAPPER` (its build is uncached but correct), so that
-    /// the sccache client in Codex's sandbox does not start a server that
-    /// keeps the sandbox (ADR-t1215-1); recorded as
-    /// `sccache_wrapper_removed`. The look connects to the port and starts
-    /// nothing.
-    fn sccache_turn(&mut self, turn: u64, provider: Provider) -> &'static [&'static str] {
+    /// The variables turn `turn` on `provider` runs without and with. A
+    /// Codex turn runs in Codex's sandbox, where no sccache may start the
+    /// server, which would keep the sandbox (ADR-t1215-1): it is given the
+    /// refusal of the server's start, and its server is looked at just
+    /// before it starts (a connect to the port, which starts nothing). One
+    /// whose server listens compiles through the guard made in `run_dir`,
+    /// which runs the compiler itself should the server stop during the
+    /// turn (ADR-t2008-1); one whose server does not, or whose guard could
+    /// not be made, runs without `RUSTC_WRAPPER` (its build is uncached but
+    /// correct), recorded as `sccache_wrapper_removed`.
+    fn sccache_turn(
+        &mut self,
+        run_dir: &Path,
+        turn: u64,
+        provider: Provider,
+    ) -> (&'static [&'static str], Vec<(String, String)>) {
         let Some((target, server)) = self.sccache else {
-            return &[];
+            return (&[], Vec::new());
         };
         let TurnOwner::Run(run) = self.owner else {
-            return &[];
+            return (&[], Vec::new());
         };
         if provider != Provider::Codex {
-            return &[];
+            return (&[], Vec::new());
         }
         let why = match server.listening(target.port) {
-            Ok(true) => return &[],
+            Ok(true) => match server.guard(run_dir) {
+                Ok(guard) => match guard.to_str() {
+                    Some(guard) => return (&[], sandbox_env(target, Some(guard))),
+                    None => format!("the guard's path {} is not UTF-8", guard.display()),
+                },
+                Err(error) => format!("the guard could not be made: {error:#}"),
+            },
             Ok(false) => format!("no sccache server listens on port {}", target.port),
             Err(error) => format!("the sccache server could not be looked at: {error:#}"),
         };
@@ -695,7 +710,7 @@ impl<'a> Turns<'a> {
         ) {
             tracing::warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
         }
-        &[WRAPPER_VAR]
+        (&[WRAPPER_VAR], sandbox_env(target, None))
     }
 
     /// Heartbeat the wrapper; a failure (the queue busy) is only logged,
@@ -744,7 +759,7 @@ impl<'a> Turns<'a> {
         let agent = self.agent(on.provider)?;
         let mut reader = agent.turn_reader()?;
         let cwd = self.cwd()?;
-        let without_env = self.sccache_turn(turn, on.provider);
+        let (without_env, with_env) = self.sccache_turn(run_dir, turn, on.provider);
         let session = match resume {
             Some(id) => TurnSession::Resume(id),
             None => TurnSession::New(&on.name),
@@ -760,6 +775,7 @@ impl<'a> Turns<'a> {
                     stdout: &stdout,
                     stderr: &stderr,
                     without_env,
+                    with_env: &with_env,
                 },
             ),
             TurnOwner::Planner { id, plugin_dir, .. } => (

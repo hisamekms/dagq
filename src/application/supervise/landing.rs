@@ -602,7 +602,7 @@ impl Supervisor<'_> {
         // A Codex review runs in Codex's sandbox: its server is the
         // supervisor's to start (ADR-t1215-1).
         let without_env = if launch.provider == crate::domain::Provider::Codex {
-            self.sccache_before_job(run.id(), "review", attempt, &mut env)
+            self.sccache_before_job(run.id(), "review", attempt, &run_dir, &mut env)
         } else {
             &[]
         };

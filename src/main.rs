@@ -4602,7 +4602,17 @@ fn print_session_log(
 }
 
 fn main() -> ExitCode {
-    let result = run(env::args_os().collect()).and_then(|value| {
+    let args: Vec<OsString> = env::args_os().collect();
+    // cargo's `RUSTC_WRAPPER` in a sandboxed turn or job, not the CLI
+    // (ADR-t2008-1).
+    if args
+        .first()
+        .is_some_and(|argv0| dagq::domain::sccache::invoked_as_guard(argv0))
+    {
+        let status = dagq::infrastructure::sccache::run_guard(&args[1..]);
+        return ExitCode::from(u8::try_from(status).unwrap_or(1));
+    }
+    let result = run(args).and_then(|value| {
         let mut stdout = io::stdout().lock();
         if let Some(text) = value
             .as_object()

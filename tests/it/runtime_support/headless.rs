@@ -352,6 +352,7 @@ pub fn launch_background(
             pid,
             processes.as_deref().unwrap_or(&SystemProcesses),
             sccache,
+            Some(Path::new(env!("CARGO_BIN_EXE_dagq"))),
         );
         // The wrapper's process ends with it.
         drop(stand);
