@@ -380,7 +380,9 @@ impl Supervisor<'_> {
 fn hold_outcome(phase: &Phase, answer: &str) -> &'static str {
     match answer {
         DONE if phase.holds_live_session() => CONTINUED,
-        CANCEL_AFFECTED if phase.holds_live_session() || matches!(phase, Phase::ReviewHeld(_)) => {
+        CANCEL_AFFECTED
+            if phase.holds_live_session() || matches!(phase, Phase::ReviewHeld { .. }) =>
+        {
             RELEASED
         }
         _ => MOVED_ON,

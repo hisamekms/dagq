@@ -101,6 +101,8 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    読めない（JSONが無い・壊れている・未知の欄）か非0で終わったreviewは、やり直しでなければ同じ入力で1回だけやり直す（`review_retried`）。
    時間の上限で止まったreviewと起動できなかったreviewはやり直さず、reviewの失敗にする。
    やり直しの数はsupervisorの状態（`ReviewWatch::retried`）が持つので、引き継いだreviewは最初から数える。
+   待ち（`Phase::ReviewHeld`）を挟んでもやり直しかどうかを保ち、やり直しのreviewは待ちの後に失敗してもやり直さない。
+   やり直しが待つときは`review_retried`を待つ前に記録し、待ちの後に始まるreviewはやり直しとして始まる。
 4. **reviseの往復**: `revise`と、適用する`send_back`のconcernは、回にreviseが残り、sessionが生きていれば、直す依頼を生きているsessionの次のturnに書く（`revise_requested`）。
    文面と手順は`application::prompt::revise_request`が持つ。
    書き込みに失敗したら`revise_unsent`で取り消し、回数から引く。

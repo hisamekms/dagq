@@ -179,10 +179,24 @@ impl Supervisor<'_> {
         run: &TaskRun,
         session: Option<SessionRef>,
     ) -> Result<Phase> {
-        if self.review_held(run) {
-            return Ok(Phase::ReviewHeld(session));
+        self.resume_review(run, session, false)
+    }
+    /// Start the review of `run`, or wait in [`Phase::ReviewHeld`] while
+    /// its route waits, keeping `retried`: a review that waited starts
+    /// again as the retry it was (one retry per review across the wait).
+    pub(super) fn resume_review(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        retried: bool,
+    ) -> Result<Phase> {
+        match held_review(&self.review_route(), session, retried) {
+            Ok((held, why)) => {
+                info!(run_id = %run.id(), "run {}: its review waits: {why}", run.id());
+                Ok(held)
+            }
+            Err(session) => self.begin_review(run, session, retried),
         }
-        self.begin_review(run, session, false)
     }
     /// Where the next review goes (ADR-t1207-1). A `[roles.review]` that
     /// names no provider reviews on Claude as before: under `--no-claude`
@@ -202,14 +216,6 @@ impl Supervisor<'_> {
             self.queue_hold,
             |provider| self.job_unusable(provider),
         )
-    }
-    /// Whether the review waits with the session open (`review_route`).
-    fn review_held(&self, run: &TaskRun) -> bool {
-        let ReviewRoute::Wait(why) = self.review_route() else {
-            return false;
-        };
-        info!(run_id = %run.id(), "run {}: its review waits: {why}", run.id());
-        true
     }
     /// Move review `attempt` off `unusable`, the provider that could not
     /// run it and is held now (ADR-t1063-1 decisions 4 and 5): record
@@ -245,12 +251,12 @@ impl Supervisor<'_> {
         }
         self.queue
             .record_runtime_event(run.id(), EventKind::ReviewRetried, retried_event)?;
-        Ok(Ok(match route {
-            ReviewRoute::Wait(why) => {
+        Ok(Ok(match held_review(&route, session, retried) {
+            Ok((held, why)) => {
                 warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}); the review waits: {why}", run.id(), provider.as_str(), reason.as_str());
-                Phase::ReviewHeld(session)
+                held
             }
-            _ => {
+            Err(session) => {
                 warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}); reviewing it on the other provider", run.id(), provider.as_str(), reason.as_str());
                 self.begin_review(run, session, retried)?
             }
@@ -259,7 +265,10 @@ impl Supervisor<'_> {
     /// Review the run once more with the same input after review `attempt`
     /// printed no readable verdict (task 328) or its job exited non-zero
     /// (task 1984), as `cause` says: record `review_retried` with why, then
-    /// start the next review, whose own failure is not retried again.
+    /// start the next review, whose own failure is not retried again. While
+    /// the review's route waits, the next review waits in
+    /// [`Phase::ReviewHeld`] as the retry, `review_retried` already
+    /// recorded, and starts as the retry once the wait ends.
     ///
     /// The event's `cause` says which retry it is: `"unreadable"` after a
     /// verdict that could not be read (no verdict JSON, or one lacking the
@@ -275,9 +284,6 @@ impl Supervisor<'_> {
         (error, cause): (&str, RetryCause),
         job_session: Option<&JobSession>,
     ) -> Result<Phase> {
-        if self.review_held(run) {
-            return Ok(Phase::ReviewHeld(session));
-        }
         let mut retried_event = json!({
             "attempt": attempt,
             "error": error,
@@ -294,7 +300,7 @@ impl Supervisor<'_> {
             RetryCause::JobFailed => "failed",
         };
         warn!(run_id = %run.id(), error = %error, "run {} review {attempt} {what}: {error}; reviewing it once more", run.id());
-        self.begin_review(run, session, true)
+        self.resume_review(run, session, true)
     }
     /// Start the next review attempt of `run` (one more than its recorded
     /// reviews) where [`Self::review_route`] sends it: it waits in
@@ -320,7 +326,7 @@ impl Supervisor<'_> {
             ReviewRoute::Start(launch, switchable) => (launch, switchable),
             ReviewRoute::Wait(why) => {
                 info!(run_id = %run.id(), "run {}: its review waits: {why}", run.id());
-                return Ok(Phase::ReviewHeld(session));
+                return Ok(Phase::ReviewHeld { session, retried });
             }
             ReviewRoute::Manual(error) => {
                 (self.review_material)(run.task_id(), None)?;
@@ -1588,6 +1594,22 @@ pub(super) fn retries_review(
     (retry && !retried && !manual).then_some(cause)
 }
 
+/// The phase of a review that waits on `route`, with why, when the route
+/// waits: [`Phase::ReviewHeld`] keeping whether the review is the retry
+/// (`retried`), so that the review that starts after the wait is the retry
+/// it was and is not retried again (one retry per review across the wait).
+/// `Err` gives the session back when the route does not wait.
+pub(super) fn held_review(
+    route: &ReviewRoute,
+    session: Option<SessionRef>,
+    retried: bool,
+) -> std::result::Result<(Phase, &str), Option<SessionRef>> {
+    match route {
+        ReviewRoute::Wait(why) => Ok((Phase::ReviewHeld { session, retried }, why)),
+        ReviewRoute::Start(..) | ReviewRoute::Manual(_) => Err(session),
+    }
+}
+
 /// The attempt whose output the ask of review `attempt` names when that
 /// review could not start, so wrote none (task 426): the review before,
 /// when this one was its retry (after an unreadable verdict or a non-zero
@@ -2024,6 +2046,51 @@ mod tests {
         }
         assert_eq!(RetryCause::Unreadable.as_str(), "unreadable");
         assert_eq!(RetryCause::JobFailed.as_str(), "job_failed");
+    }
+
+    /// A review that waits keeps whether it is the retry (task 2013): the
+    /// held phase carries `retried`, so the review that starts after the
+    /// wait is not retried again when it was the retry, and is retried once
+    /// when it was not. A route that does not wait gives the session back.
+    #[test]
+    fn a_held_review_keeps_whether_it_is_the_retry() {
+        let exited = ReviewEnd::Failed(JobFailed::Exited(
+            "the headless review exited with exit status: 1: (none)".into(),
+        ));
+        let wait = ReviewRoute::Wait("the hold ask holds Claude".into());
+        for retried in [false, true] {
+            let session = Some(SessionRef {
+                workspace: "w1".into(),
+                resume: None,
+            });
+            let Ok((held, why)) = held_review(&wait, session, retried) else {
+                panic!("the review does not wait");
+            };
+            assert_eq!(why, "the hold ask holds Claude");
+            let Phase::ReviewHeld {
+                session: Some(session),
+                retried: kept,
+            } = held
+            else {
+                panic!("not held with its session");
+            };
+            assert_eq!(session.workspace, "w1");
+            assert_eq!(kept, retried);
+            let again = retries_review(&exited, true, kept, false, false);
+            assert_eq!(again, (!retried).then_some(RetryCause::JobFailed));
+        }
+        let manual = ReviewRoute::Manual("no provider".into());
+        let Err(Some(session)) = held_review(
+            &manual,
+            Some(SessionRef {
+                workspace: "w1".into(),
+                resume: None,
+            }),
+            true,
+        ) else {
+            panic!("a route that does not wait held the review");
+        };
+        assert_eq!(session.workspace, "w1");
     }
 
     /// The reasons a `send_back` (with and without the person's reason)

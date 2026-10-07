@@ -880,6 +880,87 @@ fn a_review_that_exits_non_zero_once_is_reviewed_again_and_lands() {
     assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
 }
 
+/// A review that was already the retry stays the retry across a wait
+/// (task 2013): review 1 exits non-zero and is reviewed once more; review
+/// 2 stops at a login that ran out and waits with the hold ask; after
+/// `done`, review 3 starts as that retry (its attempt follows the wait),
+/// so its own non-zero exit is not retried again but fails to the person
+/// with `review_failed` and the `approve_landing` ask. Which phase each
+/// wait keeps is `landing::tests::a_held_review_keeps_whether_it_is_the_retry`.
+#[test]
+fn a_retried_review_that_waited_at_a_wall_and_fails_again_asks_a_person() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let reviewer = Arc::new(TestReviewer::new(&[
+        "echo broken >&2; exit 3".to_owned(),
+        "printf 'Invalid API key · Please run /login\\n'; exit 1".to_owned(),
+        "echo broken again >&2; exit 3".to_owned(),
+        verdict("pass", &[], "meets the acceptance"),
+    ]));
+    let supervisor = {
+        let (db, repo, backend, reviewer) =
+            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &supervise_options(1, true),
+            )
+        })
+    };
+    let hold = |queue: &mut SqliteQueue| {
+        queue
+            .asks(AskQuery {
+                open: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .find(|ask| ask.kind == AskKind::QueueHold)
+    };
+    wait_until(&db, Duration::from_secs(60), |queue| hold(queue).is_some());
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = hold(&mut queue).unwrap();
+    queue.answer(ask.id, "done").unwrap();
+    let outcome = joined(supervisor, "the supervisor to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert_eq!(reviewer.prompts().len(), 3, "{kinds:?}");
+    let started = payloads(&detail, "review_started");
+    let attempts: Vec<&Value> = started.iter().map(|p| &p["attempt"]).collect();
+    assert_eq!(attempts, [&json!(1), &json!(2), &json!(3)]);
+    let retried = payloads(&detail, "review_retried");
+    assert_eq!(retried.len(), 1, "{kinds:?}");
+    assert_eq!(retried[0]["attempt"], 1);
+    assert_eq!(retried[0]["cause"], "job_failed");
+    assert!(!kinds.contains(&"review_finished"), "{kinds:?}");
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{kinds:?}");
+    assert_eq!(failed[0]["attempt"], 3);
+    assert_eq!(failed[0]["code"], "job_failed");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("exited with exit status: 3: broken again"),
+        "{failed:?}"
+    );
+    let landing: Vec<_> = queue
+        .asks(AskQuery::default())
+        .unwrap()
+        .into_iter()
+        .filter(|ask| ask.kind == AskKind::ApproveLanding)
+        .collect();
+    assert_eq!(landing.len(), 1, "{landing:?}");
+    assert_eq!(failed[0]["ask_id"], json!(landing[0].id));
+}
+
 /// A review stopped at its timeout is not reviewed again (task 1984): it
 /// fails to the person at once, with one `approve_landing` ask.
 #[test]

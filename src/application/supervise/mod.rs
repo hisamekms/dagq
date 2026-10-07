@@ -1336,8 +1336,13 @@ enum Phase {
     Review(ReviewWatch),
     /// An accepted run whose review waits for the authentication or
     /// usage-limit ask that holds the queue's jobs (task 437); its session
-    /// stays open, and the review starts once nothing holds.
-    ReviewHeld(Option<SessionRef>),
+    /// stays open, and the review starts once nothing holds. `retried` is
+    /// whether the review that waits is the one retry of the review
+    /// ([`ReviewWatch::retried`]): it stays one across the wait.
+    ReviewHeld {
+        session: Option<SessionRef>,
+        retried: bool,
+    },
     /// The live session fixes what a `revise` verdict named (ADR-0027
     /// decision 2).
     Revise(ReviseWatch),
@@ -3349,11 +3354,11 @@ impl Supervisor<'_> {
                 slot.run = run;
                 Ok(Step::Continue)
             }
-            Phase::ReviewHeld(session) => {
+            Phase::ReviewHeld { session, retried } => {
                 if !matches!(self.review_route(), landing::ReviewRoute::Wait(_)) {
-                    let session = session.take();
+                    let (session, retried) = (session.take(), *retried);
                     let run = self.queue.run(slot.run.id())?;
-                    slot.phase = self.start_review(&run, session)?;
+                    slot.phase = self.resume_review(&run, session, retried)?;
                     slot.run = run;
                 }
                 Ok(Step::Continue)
@@ -3390,7 +3395,8 @@ impl Supervisor<'_> {
                     && self.raise_job_wall(wall, &HoldJob::Review(run.id().clone()), error)
                 {
                     info!(run_id = %run.id(), "run {} review {attempt} stopped at the {} wall; it waits for the hold ask with its session open", run.id(), wall.as_str());
-                    slot.phase = Phase::ReviewHeld(session);
+                    let retried = watch.retried;
+                    slot.phase = Phase::ReviewHeld { session, retried };
                     slot.run = run;
                     return Ok(Step::Continue);
                 }
