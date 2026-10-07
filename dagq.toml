@@ -67,7 +67,7 @@ light_changes = ["docs", "config"]
 [provider_fallback]
 # worker は使えない provider から別の provider へ切り替えず、控えが解けるのを待って同じ provider で続ける。人の判断（2026-10-06）。
 # 振る舞いは ADR-t1857-1 と docs/design/provider-lifecycle.md の「切り替えを止める設定」、書式は run-environment.md の [provider_fallback] の項。
-# jobs は書かない（task 1858 が未着地で、job の切り替えを止めるかは人が決めていない）。
+# jobs は書かない（job の切り替えを止めるかは人が決めていないので、既定 true のまま）。
 # supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
 # [provider_fallback] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1857 を含んでから足した。
 workers = false
