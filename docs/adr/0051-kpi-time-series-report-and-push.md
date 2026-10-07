@@ -11,6 +11,7 @@ amended_by:
   - adr-t980-1
   - adr-t1381-1
   - adr-t1662-1
+  - adr-t1971-1
 owners:
   - hisamekms
 tags:

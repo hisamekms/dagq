@@ -10,6 +10,7 @@ tags:
   - planning
   - conventions
 related:
+  - adr-t1971-1
   - adr-t1639-1
   - adr-t1639-2
   - adr-t1453-2
@@ -122,6 +123,8 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 | `normal` | 通常の機能開発・整理。エンタープライズ対応も、割り込みや先行が要る根拠が無ければこの段を目安にする |
 | `low` | 後回しの改善、大きな拡張や条件待ち。テーマごとの受け皿の goal はこの段にする |
 
+この目安は AI が付ける goal（AI 由来の新しい goal と、人の言葉に優先度の無い新しい goal）に当てはめる。人が明示した優先度（`interrupt` を含む）は目安で変えない。人の言葉に優先度の無い新しい goal に目安で段を付けたときは、そのことを goal の description か task の context に書く。AI 由来の task（由来の判定は [ADR-t1971-1](../adr/2026-10-07-t1971-1-plan-review-keeps-human-origin-priority-and-membership-and-ai-tasks-inherit-goal-priority.md) 決定1・2）には個別の優先度を付けず goal から継がせ、優先度を変えたいときは所属か goal の優先度を見直す。
+
 2026-10-02 の段と 2026-10-03 の方針は棚卸しの初期値の案の材料で、テーマと段を恒久的に結び付ける規則ではない。既存の goal ごとの優先度案と今の task の値とのずれは[棚卸しの「2. goal ごとの表」](../plans/goal-priority-inventory.md#2-goal-ごとの表)にあり、値の適用と今の並びとの調整は人が別に決める。この設定と文書の変更では既存の goal・task の値や所属を変えない。
 
 受け皿は元の goal ごとの積み残しではなく、同じラベルのテーマごとにまとめ、優先度を `low` にする（[ADR-t1639-2](../adr/2026-10-04-t1639-2-defer-improvements-outside-acceptance-to-a-low-goal-per-tag.md)）。goal・task の優先度の付け方と継承、後回しの判定・所属の記録・受け皿の選択と移動の汎用の手順は plugin の `dagq` の `reference/register.md` が持つ。
@@ -152,4 +155,6 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
 - 挙動や仕様を変えるtaskは、関連文書（[文書の規則](documents.md)の「workerの文書の照合」が挙げる文書）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
 - 負荷の下で落ちるtestのtaskが上の「負荷の下で落ちるtestを直すtask」を満たすこと。acceptanceかdescriptionが高い負荷の下での再現を求めるtaskは`revise`にする（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。ただし人がapprove_planのaskにreadyと答えて認めたtask（ask 323のtask 1360・1361、ask 304のtask 1344）は例外として保ち、`revise`にしない。plan reviewは自分で新しい例外を作らない（決定(e)）。
+- 優先度と所属はproposalの由来で分けて見る（[ADR-t1971-1](../adr/2026-10-07-t1971-1-plan-review-keeps-human-origin-priority-and-membership-and-ai-tasks-inherit-goal-priority.md)）。人間由来（requestに結ばれたproposal、持ち主が人のproposal）のtaskとgoalの優先度と所属は自分で変えず（`lower_priority`を付けない）、疑いがあれば`concern`にする。人の言葉に優先度の無い新しいgoalにplannerが付けた段は下のAI由来のgoalと同じ目安で見てよいが、外れていれば`revise`にする。
+- AI由来のproposalでは次を見る。taskには個別の優先度を置かずgoalから継がせる（`lower_priority`は値を置かず個別の指定を外す形で効き、passでruntimeも外す）。継いだ優先度が高すぎると見えるときは、下の所属かgoalの優先度の問題として扱う。新しいgoalの優先度が上の「goal の優先度とラベル」の段の目安から外れていれば`revise`にする（goalの優先度は自分で変えない）。既存のgoalに入れたtask（元goalのあるfollow_upは下の行による）は、そのgoalの受け入れ条件の達成に関係するかを見て、関係なければ`revise`にし、新しいgoalかgoalの無い単独のtaskにさせる（後回しの受け皿は上と同じ）。
 - 元goalのあるfollow_upのdraftは、plannerの所属の判断（分類・acceptanceの項目・理由・証拠・所属先・判定時の版）を起点に検査する。手順と判定の基準はpluginの`dagq`の`reference/register.md`の「A follow_up's membership」、決定は[ADR-t1504-1](../adr/2026-10-04-t1504-1-follow-ups-belong-to-the-goal-whose-acceptance-needs-them.md)と[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)が持つ。疑わしいときにこのrepositoryで読む周辺の証拠は、元のrunのreceipt（`dagq events --full --run R --kind integration_receipt`）、元のtaskの差分（commit）、元goalのacceptanceの他の項目とdoc、名指されたADRと`docs/design/`の節。直せる対応づけの誤りは`revise`、follow_upを外すためにacceptanceを弱めたものは`concern`にする。
