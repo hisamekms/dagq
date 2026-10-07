@@ -1389,27 +1389,42 @@ impl Supervisor<'_> {
             Some(_) => self.queue.planner_draft_tasks(view.planner.id)?,
             None => Vec::new(),
         };
-        // A request's planner asks about the request, a finding's about the
-        // finding, a draft's about the drafts of its bundle.
-        let asks: Vec<_> = self
-            .queue
-            .asks(crate::application::AskQuery {
-                all: true,
-                ..Default::default()
-            })?
-            .into_iter()
-            .filter(|ask| {
-                ask.kind == AskKind::PlannerQuestion
-                    && match (finding, request) {
-                        (_, Some(request)) => ask.request_id == Some(request),
-                        (Some(finding), None) => ask.finding_id == Some(finding),
-                        (None, None) => {
-                            ask.finding_id.is_none()
-                                && ask.task_id.is_some_and(|task| drafts.contains(&task))
-                        }
+        // A request's planner asks about the request or a draft a planner
+        // of it added (ADR-t2015-1), a finding's about the finding, a
+        // draft's about the drafts of its bundle.
+        let mut asks = Vec::new();
+        for ask in self.queue.asks(crate::application::AskQuery {
+            all: true,
+            ..Default::default()
+        })? {
+            let its = ask.kind == AskKind::PlannerQuestion
+                && match (finding, request) {
+                    (_, Some(request)) => {
+                        ask.request_id == Some(request)
+                            || (ask.request_id.is_none()
+                                && ask.finding_id.is_none()
+                                && ask.task_id.is_some()
+                                // Only what can hold it: not closed, or
+                                // delivered to it.
+                                && (ask.closed_at.is_none()
+                                    || match view.planner.workspace_id.as_deref() {
+                                        Some(workspace) => {
+                                            self.queue.ask_delivered_to(ask.id, workspace)?
+                                        }
+                                        None => false,
+                                    })
+                                && self.queue.answer_request(&ask)? == Some(request))
                     }
-            })
-            .collect();
+                    (Some(finding), None) => ask.finding_id == Some(finding),
+                    (None, None) => {
+                        ask.finding_id.is_none()
+                            && ask.task_id.is_some_and(|task| drafts.contains(&task))
+                    }
+                };
+            if its {
+                asks.push(ask);
+            }
+        }
         if asks
             .iter()
             .any(|ask| ask.closed_at.is_none() && ask.answered_at.is_none())

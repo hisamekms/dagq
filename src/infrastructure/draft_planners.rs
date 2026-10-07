@@ -28,7 +28,7 @@ use crate::domain::{
     Ask, AskId, AskKind, BundleKey, DraftBundleMember, DraftBundleView, DraftOrigin, DraftOutcome,
     DraftRevisit, DraftTarget, Finding, FindingId, FindingQuery, FindingStatus, FindingView,
     FollowUpDraft, GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession,
-    RegisteredFollowUp, RunHistory, RunId, Task, TaskId, TaskOrigin, TaskStatus,
+    RegisteredFollowUp, RequestId, RunHistory, RunId, Task, TaskId, TaskOrigin, TaskStatus,
     follow_up::{FollowUpFacts, RevisitChange, adopt_needs_person, revisit_refusal},
 };
 
@@ -732,6 +732,9 @@ impl DraftPlannerStore for SqliteQueue {
     fn planner_answer_route(&self, ask: &Ask) -> Result<PlannerAnswerRoute> {
         SqliteQueue::planner_answer_route(self, ask)
     }
+    fn answer_request(&self, ask: &Ask) -> Result<Option<RequestId>> {
+        answer_request(&self.conn, ask)
+    }
     fn claim_planner_answer(
         &mut self,
         ask: AskId,
@@ -1245,12 +1248,24 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
             PlannerId::new(id),
         )?)));
     }
+    // A draft a request's planner added and left goes the way of that
+    // request's planners, whatever became of the request (ADR-t2015-1).
+    let request = request_of_draft(conn, task_id)?;
+    let request_route = request
+        .map(|request| super::plan_requests::draft_route_of(conn, request))
+        .transpose()?;
+    if let Some(PlannerAnswerRoute::Planner(planner)) = request_route {
+        return Ok(PlannerAnswerRoute::Planner(planner));
+    }
     // A draft kept by the answer waits as it is for a planning request the
     // inbox records (ADR-t1394-1 decision 8), or for its revisit time
     // (ADR-t1540-1), and needs nothing more of the runtime's: nobody is
     // left to tell.
     if ask.answer.as_deref().map(str::trim) == Some("keep_draft") {
         return Ok(PlannerAnswerRoute::Close);
+    }
+    if let Some(route) = request_route {
+        return Ok(route);
     }
     let task = read_task(conn, task_id)?;
     // A draft without an origin is planned only by a revisit
@@ -1276,6 +1291,47 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
         TaskStatus::Draft if !in_proposal && !exhausted => Ok(PlannerAnswerRoute::NewPlanner),
         TaskStatus::Draft => Ok(PlannerAnswerRoute::Person),
         _ => Ok(PlannerAnswerRoute::Close),
+    }
+}
+
+/// The planning request whose planner of the runtime's added `task`
+/// (its `task_created` was written as that planner) and left it a draft
+/// with no origin and in no proposal that was not canceled: its
+/// `planner_question`s go the way of the request's planners
+/// (ADR-t2015-1).
+pub(super) fn request_of_draft(conn: &Connection, task: TaskId) -> Result<Option<RequestId>> {
+    if planned_origin(conn, task)?.is_some() {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT p.request_id FROM tasks t
+                 JOIN run_events e ON e.task_id=t.id AND e.kind='{}'
+                 JOIN planners p ON e.actor_role='planner' AND e.actor_id='planner:' || p.id
+                 WHERE t.id=?1 AND t.status='draft' AND p.origin='runtime'
+                 AND p.request_id IS NOT NULL
+                 AND NOT EXISTS(SELECT 1 FROM proposals x
+                     WHERE x.id=t.proposal_id AND x.status!='canceled')
+                 ORDER BY e.id LIMIT 1",
+                event_kind::TASK_CREATED
+            ),
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The request whose planner of the runtime's carries the answer of
+/// `ask`: the request it is about, or the one whose planner added the
+/// draft it is about ([`request_of_draft`]).
+pub(super) fn answer_request(conn: &Connection, ask: &Ask) -> Result<Option<RequestId>> {
+    if ask.request_id.is_some() || ask.finding_id.is_some() {
+        return Ok(ask.request_id);
+    }
+    match ask.task_id {
+        Some(task) => request_of_draft(conn, task),
+        None => Ok(None),
     }
 }
 
@@ -2050,5 +2106,141 @@ mod tests {
             queue.open_draft_planner(&[first], Some(asked.id)).unwrap(),
             DraftPlannerStart::Skipped
         ));
+    }
+
+    /// ADR-t2015-1: the answer about a draft a request's planner added and
+    /// left outside a proposal goes to the request's open planner, or to a
+    /// new planner of the request even when the request is no longer
+    /// `open`; a kept draft's is closed, and a draft with an origin, in a
+    /// proposal or a person added keeps its way.
+    #[test]
+    fn an_answer_about_a_request_planners_draft_goes_the_requests_way() {
+        use crate::application::{PlanRequestStore, RequestPlannerStart};
+        use crate::domain::actor::{ActorContext, ActorRole};
+        use crate::domain::plan_request::NewPlanRequest;
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let request = queue
+            .record_plan_request(
+                &NewPlanRequest {
+                    text: "plan it".into(),
+                    note: None,
+                    refs: Vec::new(),
+                },
+                "inbox",
+                "inbox:1",
+            )
+            .unwrap()
+            .id;
+        let RequestPlannerStart::Opened { planner: first, .. } =
+            queue.open_request_planner(request, None).unwrap()
+        else {
+            panic!("no planner opened");
+        };
+        let person = draft(&mut queue, "a person's");
+        queue
+            .actors
+            .set(ActorContext::instance(ActorRole::Planner, first.id));
+        let [left, origin, proposed] = ["left", "origin", "proposed"].map(|t| draft(&mut queue, t));
+        queue.actors.set(ActorContext::user());
+        queue
+            .record_draft_origin(origin, DraftOrigin::FollowUp, &json!({}))
+            .unwrap();
+        queue
+            .submit(crate::domain::Submission {
+                tasks: vec![proposed],
+                goals: Vec::new(),
+                proposal: None,
+                owner: crate::domain::PlannerOwner {
+                    origin: PlannerOrigin::Runtime,
+                    workspace_id: None,
+                },
+            })
+            .unwrap();
+        // Sent back into its proposal by plan review, it is a draft again.
+        queue
+            .conn
+            .execute("UPDATE tasks SET status='draft' WHERE id=?1", [proposed])
+            .unwrap();
+        let answered = |queue: &mut SqliteQueue, task, answer| {
+            let asked = question(queue, task, AskKind::PlannerQuestion);
+            queue.answer(asked.id, answer).unwrap()
+        };
+
+        // Its planner is open: the answer is typed into it.
+        let ask = answered(&mut queue, left, "adopt");
+        assert_eq!(queue.answer_request(&ask).unwrap(), Some(request));
+        assert_eq!(
+            queue.planner_answer_route(&ask).unwrap(),
+            PlannerAnswerRoute::Planner(Box::new(queue.planner(first.id).unwrap()))
+        );
+        let delivers = kinds(&mut queue, left, event_kind::ASK_ANSWERED);
+        assert_eq!(delivers.last().unwrap()["runtime_delivers"], true);
+        let kept = answered(&mut queue, left, "keep_draft");
+        assert_eq!(
+            queue.planner_answer_route(&kept).unwrap(),
+            PlannerAnswerRoute::Planner(Box::new(queue.planner(first.id).unwrap()))
+        );
+
+        // Gone, with the request proposed: a new planner of the request
+        // carries it, past the request's state; a kept draft's is closed.
+        queue.close_planner(first.id, None).unwrap();
+        assert_eq!(
+            queue.planner_answer_route(&kept).unwrap(),
+            PlannerAnswerRoute::Close
+        );
+        // The open request waits for the answers, as for its own question.
+        assert!(queue.planner_requests().unwrap().is_empty());
+        queue
+            .conn
+            .execute(
+                "UPDATE plan_requests SET status='proposed' WHERE id=?1",
+                [request],
+            )
+            .unwrap();
+        assert_eq!(
+            queue.planner_answer_route(&ask).unwrap(),
+            PlannerAnswerRoute::NewPlanner
+        );
+        assert!(matches!(
+            queue.open_request_planner(request, None).unwrap(),
+            RequestPlannerStart::Skipped
+        ));
+        let RequestPlannerStart::Opened {
+            planner: second, ..
+        } = queue.open_request_planner(request, Some(ask.id)).unwrap()
+        else {
+            panic!("no planner carries the answer");
+        };
+        assert_eq!(second.request_id, Some(request));
+        assert_eq!(
+            queue.planner_answer_route(&ask).unwrap(),
+            PlannerAnswerRoute::Planner(Box::new(queue.planner(second.id).unwrap()))
+        );
+        assert!(matches!(
+            queue.open_request_planner(request, Some(ask.id)).unwrap(),
+            RequestPlannerStart::Skipped
+        ));
+        queue.close_planner(second.id, None).unwrap();
+
+        // An origin, a proposal or a person's hand keeps its way.
+        let ask = answered(&mut queue, origin, "adopt");
+        assert_eq!(queue.answer_request(&ask).unwrap(), None);
+        assert_eq!(
+            queue.planner_answer_route(&ask).unwrap(),
+            PlannerAnswerRoute::NewPlanner
+        );
+        assert!(matches!(
+            queue.open_request_planner(request, Some(ask.id)).unwrap(),
+            RequestPlannerStart::Skipped
+        ));
+        for task in [proposed, person] {
+            let ask = answered(&mut queue, task, "adopt");
+            assert_eq!(queue.answer_request(&ask).unwrap(), None);
+            assert_eq!(
+                queue.planner_answer_route(&ask).unwrap(),
+                PlannerAnswerRoute::Person
+            );
+        }
     }
 }

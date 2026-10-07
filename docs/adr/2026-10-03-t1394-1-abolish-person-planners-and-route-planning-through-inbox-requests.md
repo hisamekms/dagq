@@ -12,6 +12,7 @@ amended_by:
   - adr-t1487-1
   - adr-t1540-1
   - adr-t1704-1
+  - adr-t2015-1
 amends:
   - adr-0047 decision 1
   - adr-0047 decision 5
@@ -45,6 +46,8 @@ related:
 ---
 
 # ADR-t1394-1: 人が開くplannerを廃止し、計画の入口をinboxからruntimeのplannerへの移譲に一本化する
+
+> **一部変更（2026-10-07）**: 決定7のうち依頼のplannerが作りproposalに入れなかったdraftへの`planner_question`の答えは[ADR-t2015-1](2026-10-07-t2015-1-answers-about-a-request-planners-draft-go-the-requests-way.md)がamendsした（依頼の経路に乗せ、依頼が`open`でなくても答えを載せたplannerを依頼に立て直す）。
 
 ## Context
 

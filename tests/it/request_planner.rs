@@ -582,6 +582,93 @@ fn a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three
     );
 }
 
+/// ADR-t2015-1: a question about a draft the request's planner added and
+/// left outside a proposal goes the request's way: typed into its live
+/// planner, else carried by a new planner of the request even after the
+/// request was proposed; the runtime delivers it, so the inbox is not told.
+#[test]
+fn an_answer_about_a_draft_a_requests_planner_left_reaches_it_or_a_new_one_after_the_proposal() {
+    use dagq::domain::actor::{ActorContext, ActorRole};
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    let id = record(&mut queue, "split the store");
+    // Plan review passes the proposal it submits.
+    let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    let first = request_planner(&queue, id).unwrap();
+    let mut as_planner = SqliteQueue::open(&fx.db)
+        .unwrap()
+        .with_actor(ActorContext::instance(ActorRole::Planner, first));
+    let left = draft(&mut as_planner, goal, "left");
+    let submitted = draft(&mut as_planner, goal, "submitted");
+    let about_left = |queue: &mut SqliteQueue| {
+        queue
+            .ask(NewAsk {
+                task_id: Some(left),
+                request_id: None,
+                options: vec!["adopt".into(), "cancel".into(), "keep_draft".into()],
+                ..planner_question_of(id)
+            })
+            .unwrap()
+            .ask
+    };
+
+    // Its planner is open: the answer is its next turn.
+    let asked = about_left(&mut as_planner);
+    idle(&queue, &fx.db, first);
+    queue.answer(asked.id, "adopt").unwrap();
+    supervise(&fx, &backend, &reviewer);
+    let requests = turn_requests(&fx.db, first);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(
+        requests[0]["prompt"],
+        format!("answer to ask {}: adopt", asked.id)
+    );
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+
+    // It submits another draft (the request is proposed), asks again
+    // about the one it left and ends before the answer.
+    let workspace = queue.planner(first).unwrap().workspace_id.unwrap();
+    submit_from(&mut queue, &workspace, submitted);
+    assert_eq!(
+        queue.plan_request(id).unwrap().status,
+        RequestStatus::Proposed
+    );
+    let again = about_left(&mut as_planner);
+    queue.planner_exited(first, std::process::id(), 0).unwrap();
+    supervise(&fx, &backend, &reviewer);
+    supervise(&fx, &backend, &reviewer);
+    assert_eq!(request_planner(&queue, id), None);
+    queue.answer(again.id, "cancel").unwrap();
+    let answered = queue
+        .show(left)
+        .unwrap()
+        .events
+        .into_iter()
+        .rev()
+        .find(|event| event.kind == "ask_answered")
+        .unwrap();
+    assert_eq!(answered.payload["runtime_delivers"], true);
+    supervise(&fx, &backend, &reviewer);
+    let second = request_planner(&queue, id).expect("a planner carries the answer");
+    let prompt = planner_prompt(&fx.db, second);
+    assert!(
+        prompt.contains(&format!("answer to ask {}: cancel", again.id)),
+        "{prompt}"
+    );
+    assert!(prompt.contains(&format!("draft task {left}")), "{prompt}");
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    let opened = request_events(&fx.db, id, "request_planner_opened");
+    assert_eq!(opened.len(), 2);
+    assert_eq!(opened[1].0["ask_id"], again.id.as_i64());
+    assert_eq!(
+        queue.plan_request(id).unwrap().status,
+        RequestStatus::Proposed
+    );
+}
+
 fn planner_question_of(request: RequestId) -> NewAsk {
     NewAsk {
         recommendation: None,

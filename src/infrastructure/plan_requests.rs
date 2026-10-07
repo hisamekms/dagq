@@ -25,14 +25,25 @@ use crate::domain::{
 };
 
 /// The requests waiting for a planner of the runtime's: `open`, no planner
-/// of the runtime's open for it, no `planner_question` about it nobody
-/// closed, and no draft it names (`task:N`) taken by an open planner of
+/// of the runtime's open for it, no `planner_question` about it or about a
+/// draft its planner left (ADR-t2015-1, as `request_of_draft` tells one)
+/// nobody closed, and no draft it names (`task:N`) taken by an open planner of
 /// the runtime's for drafts, such as one its revisit time opened: the
 /// request's planner waits for it to end (ADR-t1540-1).
 const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
     AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.request_id=r.id AND p.closed_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.request_id=r.id
         AND a.kind='planner_question' AND a.closed_at IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM asks a JOIN tasks t ON t.id=a.task_id AND t.status='draft'
+        JOIN run_events e ON e.task_id=t.id AND e.kind='task_created' AND e.actor_role='planner'
+        JOIN planners p ON e.actor_id='planner:' || p.id AND p.origin='runtime' AND p.request_id=r.id
+        WHERE a.kind='planner_question' AND a.closed_at IS NULL AND a.run_id IS NULL
+        AND a.request_id IS NULL AND a.finding_id IS NULL
+        AND NOT EXISTS(SELECT 1 FROM draft_origins o WHERE o.task_id=t.id)
+        AND NOT EXISTS(SELECT 1 FROM draft_revisits v WHERE v.task_id=t.id)
+        AND NOT EXISTS(SELECT 1 FROM draft_reopens d WHERE d.task_id=t.id
+            AND json_extract(d.material,'$.proposal_id')=t.proposal_id)
+        AND NOT EXISTS(SELECT 1 FROM proposals x WHERE x.id=t.proposal_id AND x.status!='canceled'))
     AND NOT EXISTS(SELECT 1 FROM json_each(r.refs) j JOIN planners p ON p.closed_at IS NULL
         AND p.origin='runtime' AND (p.draft_task_id=json_extract(j.value,'$.id')
              OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id
@@ -174,7 +185,7 @@ impl PlanRequestStore for SqliteQueue {
             // and still for a new planner of this request.
             Some(ask) => {
                 let ask = read_ask(&tx, ask)?;
-                ask.request_id == Some(request)
+                super::draft_planners::answer_request(&tx, &ask)? == Some(request)
                     && super::draft_planners::route_of(&tx, &ask)? == PlannerAnswerRoute::NewPlanner
             }
         };
@@ -321,6 +332,18 @@ pub(super) fn route_of(conn: &Connection, request: RequestId) -> Result<PlannerA
             RequestAnswerRoute::OwnPlanner | RequestAnswerRoute::Close => PlannerAnswerRoute::Close,
         },
     )
+}
+
+/// Where the answer of a `planner_question` about a draft a planner of
+/// `request` added goes (ADR-t2015-1): the planner of the runtime's open
+/// for the request; else a new planner for it carrying the answer, even
+/// when the request is no longer `open` (proposed, declined or out of
+/// planners), so the draft is decided.
+pub(super) fn draft_route_of(conn: &Connection, request: RequestId) -> Result<PlannerAnswerRoute> {
+    Ok(match open_planner_of(conn, request)? {
+        Some(planner) => PlannerAnswerRoute::Planner(Box::new(planner)),
+        None => PlannerAnswerRoute::NewPlanner,
+    })
 }
 
 /// Link the proposal a request's planner submits to its request, inside

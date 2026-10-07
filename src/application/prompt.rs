@@ -1962,10 +1962,18 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
     ));
     if let Some(answer) = material.answer {
         let (question, text) = planner_answer(&mut fit, answer);
-        let carried = format!(
-            "\nThe planner before you asked a person (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer as step 3 says.\n",
-            aid = answer.id,
-        );
+        let carried = match answer.task_id.filter(|_| answer.request_id.is_none()) {
+            // About a draft an earlier planner added for the request and
+            // left outside a proposal (ADR-t2015-1).
+            Some(t) => format!(
+                "\nAn earlier planner of this request added draft task {t}, asked a person about it (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer to draft task {t} (`dagq show {t}`) first: on adopt complete it and submit it with `dagq submit {t}`, on cancel cancel it with `dagq cancel {t}` and record why with `dagq note --task {t} --text '<why>'` naming the ask, on keep_draft leave it as it is; any other answer, as it says. The request may no longer be open (proposed, declined or out of planners): then this draft is all that is left to you, and you do not decline the request.\n",
+                aid = answer.id,
+            ),
+            None => format!(
+                "\nThe planner before you asked a person (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer as step 3 says.\n",
+                aid = answer.id,
+            ),
+        };
         fit.section("answer", &carried);
         out.push_str(&carried);
     }

@@ -168,6 +168,7 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 - 立てる（`open_draft_planner`）は、対象であることをトランザクションの中で再検査してから行を作るので、2つのsupervisorが同じdraftに立てない。
 - 結末: plannerを閉じたトランザクションの中で、束のdraftごとに今のtaskの状態から結末を決めて書く（`settle_bundle`）。
 - 回答の行き先（`planner_answer_route`）は、生きているplanner・新しいplanner・人・閉じるのどれかで、`answer`も同じ判定で`runtime_delivers`を書く。
+  依頼のplannerが作り由来もproposalも持たないdraftの回答は、依頼の回答の経路に乗せる（`request_of_draft`。作成のeventのactorで依頼を引く、[ADR-t2015-1](../adr/2026-10-07-t2015-1-answers-about-a-request-planners-draft-go-the-requests-way.md)）。
 - runtimeのplannerがfollow-upをsubmitできる深さの上限は[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)で、`proposals::submit`の中の`check_adoptions`が拒む。
 
 ### planning requests（`plan_requests.rs`）
@@ -180,6 +181,7 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 - submitは、submitしたplannerの依頼にproposalを結び、最初のproposalで依頼を`proposed`にする。
 - 却下と`ask --request`は依頼のplanner自身だけが打て、却下は判定に使ったplannerがまだその依頼のものかをトランザクションの中で確かめる。
 - 依頼のaskの回答は、依頼のplannerが生きていればそのplannerへ、いなければ新しいplannerか閉じるで、人へは回さない（`route_of`）。
+  依頼のplannerが作ったdraftの回答は、依頼が`open`でなくても新しいplannerにする（`draft_route_of`）。
 
 ## findings
 

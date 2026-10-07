@@ -32,11 +32,12 @@ use crate::{
 };
 
 impl Supervisor<'_> {
-    /// Deliver the answer of a `planner_question` about `request`: typed
-    /// into the live planner opened for it once it stopped after asking,
-    /// handed to a new planner when that one is gone (within the limit),
-    /// or closed when the request moved on (proposed, declined, out of
-    /// planners).
+    /// Deliver the answer of a `planner_question` about `request`, or about
+    /// a draft its planner added (ADR-t2015-1): typed into the live
+    /// planner opened for it once it stopped after asking, handed to a new
+    /// planner when that one is gone (within the limit; for a draft even
+    /// when the request moved on), or closed when the request moved on
+    /// (proposed, declined, out of planners) or the draft is kept.
     pub(super) fn deliver_request_answer(
         &mut self,
         views: &[PlannerView],
@@ -113,6 +114,14 @@ impl Supervisor<'_> {
             }
             // At the limit: the answer waits for a planner to end.
             PlannerAnswerRoute::NewPlanner => {}
+            // A draft kept by the answer waits as it is (ADR-t1540-1).
+            PlannerAnswerRoute::Close if ask.request_id.is_none() => {
+                self.queue.close_planner_answer(
+                    ask.id,
+                    "its draft is kept as it is and no planner of the runtime's works on it",
+                )?;
+                info!(ask_id = %ask.id, "ask {} closed: its draft of request {request} is kept", ask.id);
+            }
             PlannerAnswerRoute::Close => {
                 self.queue.close_planner_answer(
                     ask.id,

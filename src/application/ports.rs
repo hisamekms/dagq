@@ -2666,6 +2666,10 @@ pub trait DraftPlannerStore {
     fn planner_answers(&self) -> Result<Vec<Ask>>;
     /// Where the answer of an answered `planner_question` goes.
     fn planner_answer_route(&self, ask: &Ask) -> Result<PlannerAnswerRoute>;
+    /// The planning request whose planners carry the answer of `ask`: the
+    /// one it is about, or the one whose planner added the draft it is
+    /// about and left it outside any proposal (ADR-t2015-1).
+    fn answer_request(&self, ask: &Ask) -> Result<Option<crate::domain::RequestId>>;
     /// Claim the typing of the answer of `ask` into `planner`'s
     /// `workspace` (`planner_answer_claimed`), in one write transaction:
     /// `false` when another process claimed it, the ask was closed, or its

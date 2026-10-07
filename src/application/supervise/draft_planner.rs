@@ -42,7 +42,9 @@ impl Supervisor<'_> {
         runtime_open: &mut usize,
     ) -> Result<()> {
         for ask in self.queue.planner_answers()? {
-            if let Some(request) = ask.request_id {
+            // A question about a draft a request's planner added goes the
+            // way of the request's (ADR-t2015-1).
+            if let Some(request) = self.queue.answer_request(&ask)? {
                 self.deliver_request_answer(views, runtime_open, &ask, request)?;
                 continue;
             }
