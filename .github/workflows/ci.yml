@@ -119,6 +119,11 @@ jobs:
           sh scripts/check-layer-deps.sh
           sh scripts/check-layer-deps.sh --self-test
 
+      # The landing verification's choice of IT on its fixtures only; the
+      # choice on a real diff needs the runtime's variables and the table.
+      - name: Landing IT choice
+        run: sh scripts/landing-it.sh --self-test
+
       # The check scripts check the tree of the cwd, as the program review of
       # a run runs them (docs/development/task-registration.md).
       - name: Check scripts' root
