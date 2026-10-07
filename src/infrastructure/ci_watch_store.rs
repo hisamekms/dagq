@@ -30,9 +30,9 @@ impl SqliteQueue {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Write `record` unless the latest `ci_checked` is no longer the one
-    /// it was decided after (`None` then): of two supervisors that read the
-    /// same run, one records it. The finding's evidence is the run's
+    /// Write `record` unless the latest `ci_checked` event is no longer the
+    /// one it was decided after (`None` then): of two supervisors that read
+    /// the same run and attempt, one records it. The finding's evidence is the run's
     /// `ci_checked` and `ci_turned_red`, which name it back (`finding_id`,
     /// `finding_ids`); a resolved finding the run opens again is marked for
     /// a proposal anew.
@@ -41,14 +41,13 @@ impl SqliteQueue {
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let latest: Option<i64> = tx
             .query_row(
-                "SELECT json_extract(payload,'$.run_id') FROM run_events WHERE kind=?1
+                "SELECT id FROM run_events WHERE kind=?1
                  AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
                  ORDER BY id DESC LIMIT 1",
                 [CI_CHECKED],
                 |r| r.get(0),
             )
-            .optional()?
-            .flatten();
+            .optional()?;
         if latest != record.previous {
             return Ok(None);
         }

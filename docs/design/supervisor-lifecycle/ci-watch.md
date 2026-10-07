@@ -29,7 +29,8 @@ related:
 
 - supervisorのループの各passで、`[ci_watch]`をmain checkoutの`dagq.toml`から読み直す（`[provider_fallback]`の後の`ci_watch_pass`）。ファイルか表が無ければ何もしない（eventも書かない）。読めなければ（書式の誤りなど）warnを1回出し、使っている表のまま続ける。表が変われば次のpassで確かめる。
 - 前に確かめてから`interval_secs`が経ったpass（前の確かめの始まりからの経過をsupervisorの注入した`Clock::monotonic`で測り、`domain::ci_watch::check_due`が決める）で1回確かめる（プロセスの最初のpass、つまり起動とexecの引き継ぎの直後は経過を問わず確かめる）。drain・handoffの間も確かめ、handoffのexecは走っている確かめの終わりを待つ。確かめ（`application::ci_watch::check`。GitHubとGitはport `application::ci_watch::CiSource`越しに読み、実装は`infrastructure::ci_watch::GhSource`）はjobのthreadで行い、ループを待たせない。終わった確かめの答えは次のpassで受け取る。
-- 実行1件の記録は1つの書き込みトランザクション（`SqliteQueue::record_ci_check`、`infrastructure::ci_watch_store`）で、`BEGIN IMMEDIATE`の中で最新の`ci_checked`の`run_id`を読み直し、確かめの始めに読んだものと違えば（他のsupervisorが記録した）何も書かずにその確かめを終える（同じ実行を2度記録しない）。同じトランザクションで`ci_checked`・`ci_turned_red` / `ci_turned_green`・finding・runtimeの`resolved`（下の「閉じ方」）を書く。
+- 実行1件の記録は1つの書き込みトランザクション（`SqliteQueue::record_ci_check`、`infrastructure::ci_watch_store`）で、`BEGIN IMMEDIATE`の中で最新の`ci_checked`のevent IDを読み直し、確かめで読んだものと違えば（他のsupervisorが記録した）何も書かずにその確かめを終える（同じ実行の同じattemptを2度記録しない）。
+  同じトランザクションで`ci_checked`・`ci_turned_red` / `ci_turned_green`・finding・runtimeの`resolved`（下の「閉じ方」）を書く。
 - 確かめるのは`SuperviseOptions::ci_watch`（`CiWatchOptions`: `program`は既定`gh`、`interval`はtestが間隔を縮める上書き）を持つsupervisorだけで、CLIの`dagq supervise`は`--once`でなければ付ける。`--once`のsupervisorと、付けないlibraryの呼び出し元（tests）は確かめない。
 
 ## ghの呼び方
@@ -37,7 +38,12 @@ related:
 どれも`[ci_watch]`のmain checkoutをcwdにし、1回の呼び出しは60秒（`CI_WATCH_CALL_TIMEOUT`）で止める。repositoryは`--repo <owner>/<name>`で明示し、`[repository] remote`（既定`origin`）の`git remote get-url`がGitHubのURL（`https://github.com/<owner>/<name>(.git)`・`git@github.com:<owner>/<name>(.git)`・`ssh://git@github.com/<owner>/<name>(.git)`）なら、そこから決める（`domain::ci_watch::github_repo`）。GitHubのURLでない・remoteが無いときは設定の誤りとして`ci_watch_unavailable`（`reason: not_github`）にし、`git`が動かない・時間切れは一時の失敗（下の「eventの種類と欄」の`ci_check_failed`の数え方）にする。
 
 1. **読む手段の確かめ**（毎回）: `gh`を`[run.env]`のプログラムの検査と同じ規則（supervisorのPATH、`/`を含む値はそのpath。`resolve_program`）で解決し、`gh auth status --hostname github.com`の終了コードを見る。
-2. **実行の一覧**: `gh run list --repo R --workflow <workflow> --branch <branch> --event push --status completed --limit 50 --json databaseId,number,headSha,conclusion,url,createdAt,displayTitle`。`createdAt`の古い順に並べ、最新の`ci_checked`の`run_id`より後に作られたものだけを処理する。見張りの最初の確かめ（queueに`ci_checked`が無い）は最新の1件だけを処理し、過去を遡らない。supervisorが長く止まっていて、返った50件（`RUN_LIST_LIMIT`）の最も古いものより前に未処理の実行が残る（50件が返り、最も古いものが最新の`ci_checked`の実行より後に作られている）ときは、遡らずに返った分だけを処理し、最初の`ci_checked`に`gap: true`を書く（`range`の`from`はqueueに記録した最後の緑のまま）。
+2. **実行の一覧**: `gh run list --repo R --workflow <workflow> --branch <branch> --event push --status completed --limit 50 --json databaseId,number,attempt,headSha,conclusion,url,createdAt,displayTitle`。
+   `createdAt`の古い順に並べ、`ci_checked`が記録した実行（成否の決まった実行と`skipped_runs`）の`(run_id, attempt)`に無いものを処理する（`domain::ci_watch::runs_to_process`）。
+   作られた順より遅れて終わった実行と、re-runの新しいattemptも、こうして次の確かめで読む。
+   ただし見張りが最初に記録した実行より前に作られた実行は読まない。
+   見張りの最初の確かめ（queueに`ci_checked`が無い）は最新の1件だけを処理し、過去を遡らない。
+   supervisorが長く止まっていて、返った50件（`RUN_LIST_LIMIT`）の最も古いものより前に未処理の実行が残る（50件が返り、最も古いものが記録した実行のうち最後に作られたものより後に作られている）ときは、遡らずに返った分だけを処理し、最初の`ci_checked`に`gap: true`を書く（`range`の`from`はqueueに記録した最後の緑のまま）。
 3. **落ちたjobとstep**: 赤の実行ごとに`gh run view <id> --repo R --json jobs`の`conclusion`が`failure`・`timed_out`・`cancelled`・`startup_failure`のjobとそのstep（同じconclusionのstep）。読めなければwarnを出してjobなしで続ける（1つの実行で見張りが止まらない）（[CI failure issues](../ci-failure-issues.md)の本文と同じ読み方）。
 4. **JUnit**: `junit_artifacts`があれば、成否の決まった実行ごとに`gh run download <id> --repo R --pattern <glob> --dir <queue dir>/ci-watch/<id>/<globの番号>`（globごとに1回、重なるglobがぶつからないようglobごとのdir。落とせないglobはwarnを出して残りを読む）で落とし、その下の`*.xml`を全部読む（`domain::ci_watch::parse_junit`）。読み終えたらdirを消す。成果物が無い・落とせない・XMLが読めないときはその実行のtestの成否を「分からない」とし（`junit: missing`）、jobとstepだけを使う。`junit_artifacts`が空なら落とさない（`junit: not_configured`）。
 
@@ -55,6 +61,11 @@ related:
     同じ実行で一時の失敗の上限まで続いたら、緑と読まずに飛ばす実行に数えて先へ進み、そのことをeventに残す。
   - 飛ばした実行は記録しないので、次に成否の決まった実行まで間隔ごとにjobsを読み直す。
     docsだけのpushでdocの検査が落ちた赤の項目（jobとstep）は、docsだけの修正では外れず、Rustのjobも流して通る実行で外れる。
+- **遅れて終わった実行**: 記録した実行のうち最後に作られたもの（以下「先頭」）より前に作られた実行（先頭のre-runは除く）は、`ci_checked`に`late: true`を付けて記録するだけで、一覧・状態・範囲を変えない（`ci_turned_red` / `ci_turned_green`もfindingも書かない。`domain::ci_watch::decide`）。
+  後に作られた実行がより新しいcommitで既に決めたことを、古いcommitの成否で戻したり上書きしたりしないためで、落ちたtestとjobは`failed_tests`・`failed_jobs`に残る。
+- **re-run**: 先頭の実行の新しいattemptは、新しい実行と同じに扱う。
+  赤だった先頭をre-runして緑になれば一覧の全ての項目を外して`ci_turned_green`を書き、赤のままなら他の赤の実行と同じに、一覧に無い落ちたtestを足し、JUnitで通ったtestを外す（下の「一覧」）。
+  先頭より前に作られた実行のre-runは上の遅れて終わった実行と同じに記録だけする。
 - **testの名前**: JUnitの`testcase`の`classname`（nextestではbinary id。例`dagq::it`）と`name`（例`runtime_claim::claims_in_order`）を空白1つでつないだ`dagq::it runtime_claim::claims_in_order`（nextestの表示と同じ）。`failure`か`error`の子を持てば落ちた、`skipped`の子を持てば流していない、どちらも無ければ通った。同じ名前が複数のファイルにあれば（macOSとLinuxのjob）、どれかで落ちれば落ちた、どれでも落ちずどれかで通れば通った。
 - **testの名前が取れない失敗**: 赤の実行で、JUnitが`missing`か`not_configured`か、JUnitが落ちたtestを1つも名指さないときは、落ちたjobの落ちたstepごとに`job:<job名>/step:<step名>`（落ちたstepの無い落ちたjobは`job:<job名>`）を一覧の項目にする。JUnitのファイルとjobを結びつけられないので、jobごとではなく実行ごとに決める。
 
@@ -64,7 +75,7 @@ related:
 
 - **足す**: 赤の実行で落ちたtest（とtestの名前が取れない失敗の項目）のうち、一覧に無いもの。
 - **外す**: 後の赤の実行のJUnitでそのtestが通ったとき（`junit: missing` / `not_configured`の実行と、そのtestを流していない実行では外さない）。緑の実行では、一覧の全ての項目を外す。jobとstepの項目は緑の実行でだけ外す。外したことは`removed`に`reason`（`passed` / `green`）付きで記録する。
-- 項目は、足した実行（`added`: `run_id`・`sha`・`url`・`at`（その`ci_checked`を記録した時刻））と、その実行で記録したfindingの`finding_id`（無ければnull）を持つ。
+- 項目は、足した実行（`added`: `run_id`・`attempt`・`sha`・`url`・`at`（その`ci_checked`を記録した時刻））と、その実行で記録したfindingの`finding_id`（無ければnull）を持つ。
 
 ## eventの種類と欄
 
@@ -72,7 +83,7 @@ related:
 
 | kind | いつ | payloadの欄 |
 | --- | --- | --- |
-| `ci_checked` | 成否の決まった実行を1件処理したとき（間隔ごとの空振りでは書かない） | `run_id`（GitHubの`databaseId`）・`run_number`・`sha`・`url`・`created_at`・`conclusion`・`state`（`green` / `red`）・`skipped_runs`（この実行より前に飛ばした実行の`run_id`の配列）・`junit`（`read` / `missing` / `not_configured`）・`failed_tests`（名前の配列）・`failed_jobs`（`{job, steps[]}`の配列）・`added`（一覧に足した項目の名前の配列）・`removed`（`{name, reason}`の配列）・`known_failures`（処理の後の一覧の件数）・`finding_id`（この実行で記録・更新した`ci_failure`のfinding。無ければ欄を書かない）・`gap`（上の「実行の一覧」の飛びがあったときだけ`true`） |
+| `ci_checked` | 成否の決まった実行の1つのattemptを処理したとき（間隔ごとの空振りでは書かない） | `run_id`（GitHubの`databaseId`）・`run_number`・`attempt`・`sha`・`url`・`created_at`・`conclusion`・`state`（`green` / `red`）・`skipped_runs`（この実行より前に飛ばした実行の`run_id`の配列）・`skipped_attempts`（同じ位置の`skipped_runs`のattempt）・`junit`（`read` / `missing` / `not_configured`）・`failed_tests`（名前の配列）・`failed_jobs`（`{job, steps[]}`の配列）・`added`（一覧に足した項目の名前の配列）・`removed`（`{name, reason}`の配列）・`known_failures`（処理の後の一覧の件数）・`finding_id`（この実行で記録・更新した`ci_failure`のfinding。無ければ欄を書かない）・`gap`（上の「実行の一覧」の飛びがあったときだけ`true`）・`late`（遅れて終わった実行のときだけ`true`） |
 | `ci_turned_red` | 直前の`state`が`green`か無いときに赤の実行を処理したとき | `run_id`・`sha`・`url`・`last_green`（`{run_id, sha, url}`か、記録が無ければnull）・`finding_ids`（このとき記録・更新したfinding。`[]`か1件） |
 | `ci_turned_green` | 直前の`state`が`red`のときに緑の実行を処理したとき | `run_id`・`sha`・`url`・`red_since`（最初の赤の`{run_id, sha, url}`）・`red_secs`（最初の赤の`created_at`からこの実行の`created_at`まで） |
 | `ci_watch_unavailable` | 読む手段が無いと分かり、queueの最新の`ci_watch_unavailable` / `ci_watch_available`が同じ`reason`の`ci_watch_unavailable`でないとき（理由が変われば、例えば`gh_missing`から`gh_unauthenticated`へ、また記録する） | `reason`（`gh_missing` / `gh_unauthenticated` / `not_github`）・`program`（`gh`の値）・`path`（探したPATH）・`message` |
@@ -116,7 +127,7 @@ related:
   - `range`: `{from, to, commits}`。`from`は`last_green`の`sha`（その実行より前で最後に緑だった実行。queueに無ければnull）、`to`はこの実行の`sha`、`commits`は`git rev-list --count from..to`（`from`がnullならnull）。cancelで飛ばした実行の分も含む
   - `url`: 実行のURL
   - `binary_contains`: supervisorのbuild識別子が名乗るcommit（`build_id::named_commit`、[Build identifier](build-identifier.md)）を`binary_commit`に書き、`to`がその祖先なら`all`、`from`がnullでなく、名乗るcommitが`from`か`from`の祖先なら`none`、名乗るcommitが`from..to`の中なら`some`、名乗るcommitが無い（リリース・`+unknown`）か判定できなければ`unknown`
-  - `run`: その実行の`{run_id, sha, url}`
+  - `run`: その実行の`{run_id, attempt, sha, url}`
 - **plannerへの載せ方**: `finding_planner_prompt`は`kind`が`ci_failure`のとき節`## A CI failure`を足し、`detail`の各項をtaskの`description`に写すこと、`dagq search`で同じtestを直すtaskが既にあればtaskを作らず`finding dismiss <id> --covered-by <task> --reason '...'`にすること（`--covered-by`はfindingの`covered_by_task`に書き、`finding_status_changed`に`covered_by_task`を載せる。`ci_failure`のfindingにだけ受け付け、taskは閉じていないものに限る）、`--priority`は`normal`（ADR-0051決定26）を付けることを指示する。plan reviewの規則は変えない（`high`以上は今までどおり`normal`に下がる）。
 - **閉じ方**: findingの項目が全部一覧から外れたら（`removed`）、findingが`open`で閉じていないruntimeのplannerが無ければ、その実行を記録する同じトランザクションで`resolved`にする（理由`its tests passed on <shaの先頭12文字>`、`finding_status_changed`の`by: runtime`）。plannerが立っていれば閉じず、plannerの決定（proposalか`dismiss`）に任せ、promptに載らない後からの緑は次のpassの`ci failures`で読める。`proposed`のfindingは今までどおりproposalの終わり（`settle_findings`）で決まる。
 
@@ -132,17 +143,24 @@ related:
     "state": "red",
     "watch": "available",
     "checked_at": "2026-10-06T12:00:00Z",
-    "latest_run": {"run_id": 123, "sha": "…", "url": "…", "conclusion": "failure"},
+    "latest_run": {"run_id": 123, "attempt": 2, "sha": "…", "url": "…", "conclusion": "failure"},
     "failures": [
       {"name": "dagq::it runtime_claim::claims_in_order", "kind": "test",
-       "added": {"run_id": 120, "sha": "…", "url": "…", "at": "…"},
+       "added": {"run_id": 120, "attempt": 1, "sha": "…", "url": "…", "at": "…"},
        "finding_id": 45}
     ],
     "kept_for_task": []
   }
   ```
 
-  `workflow`は`[ci_watch]`のもので、表が無ければ最新の`ci_checked`のもの。`branch`は`[ci_watch] branch`、書かなければ最新の`ci_checked`のもの（見張りが着地先のbranchで記録した名前）で、どちらも無い（`branch`を書かず、まだ何も記録していない）ときはnull。`state`は`green` / `red` / `unknown`（記録が無い）、`watch`は`available` / `unavailable` / `disabled`。`kind`は`test`か`job_step`。`--task ID`を付けると、そのtaskのproposalに紐づいたか、そのtaskを`covered_by_task`に持つ`ci_failure`のfinding（`ci_failure_findings_of`）の項目を`failures`から除き`kept_for_task`に移す（下の「修正taskのrun」）。`[ci_watch]`が無く記録も無ければ`{"enabled": false, "state": "unknown", "watch": "disabled", "failures": []}`。
+  `workflow`は`[ci_watch]`のもので、表が無ければ最新の`ci_checked`のもの。
+  `branch`は`[ci_watch] branch`、書かなければ最新の`ci_checked`のもの（見張りが着地先のbranchで記録した名前）で、どちらも無い（`branch`を書かず、まだ何も記録していない）ときはnull。
+  `state`は`green` / `red` / `unknown`（記録が無い）で、`latest_run`とともに「実行の扱い」の先頭の実行の最後に記録したattemptのもの（遅れて終わった実行は`latest_run`にも`state`にもならず、一覧を戻さない）。
+  `failures`の`added`はその項目を足した実行とattempt。
+  `watch`は`available` / `unavailable` / `disabled`。
+  `kind`は`test`か`job_step`。
+  `--task ID`を付けると、そのtaskのproposalに紐づいたか、そのtaskを`covered_by_task`に持つ`ci_failure`のfinding（`ci_failure_findings_of`）の項目を`failures`から除き`kept_for_task`に移す（下の「修正taskのrun」）。
+  `[ci_watch]`が無く記録も無ければ`{"enabled": false, "state": "unknown", "watch": "disabled", "failures": []}`。
 - **`status`**: 最上位の`ci`の欄に`{state, watch, failures: <件数>, checked_at, latest_run_url}`（どのroleの`status`にも出す）。見張りの記録が無ければnull。
 - **runtimeの中の読み手**（CLIと同じ`application::ci_watch::known_failures(queue, config, branch, task)`を使う）: 着地の検証は、`integrate`がtaskの検証のコマンドを着地の検証のコマンドに置き換えるとき（[Validation](validation.md#着地の検証)）、runのtaskについて読んだ一覧（上のCLIの`--task`の出力と同じ形）をrunのrun dirに書き、そのpathと修正taskのrunかを置き換えたコマンドのenvに足す（`application::integrate`の`landing_env`。envとファイルの名前と意味は`domain::landing_verification`のdoc comment）。
   どのtestを外すかの適用は`dagq.toml`の着地の検証のコマンドとrepositoryのscriptが受け持つ。

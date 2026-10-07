@@ -100,13 +100,25 @@ fn watching(mut options: SuperviseOptions, gh: &Path) -> SuperviseOptions {
     options
 }
 
-/// The runs `gh run list` returns: (id, conclusion, commit), in order.
+/// The runs `gh run list` returns: (id, conclusion, commit), in order,
+/// each at its first attempt.
 fn runs(gh: &Path, runs: &[(i64, &str, &str)]) {
+    let first: Vec<(i64, i64, &str, &str)> = runs
+        .iter()
+        .map(|(id, conclusion, sha)| (*id, 1, *conclusion, *sha))
+        .collect();
+    attempts(gh, &first);
+}
+
+/// The runs `gh run list` returns: (id, attempt, conclusion, commit); a
+/// run's creation time follows its ID whatever its attempt.
+fn attempts(gh: &Path, runs: &[(i64, i64, &str, &str)]) {
     let list: Vec<Value> = runs
         .iter()
-        .map(|(id, conclusion, sha)| {
+        .map(|(id, attempt, conclusion, sha)| {
             json!({
-                "databaseId": id, "number": id, "headSha": sha, "conclusion": conclusion,
+                "databaseId": id, "number": id, "attempt": attempt, "headSha": sha,
+                "conclusion": conclusion,
                 "url": format!("https://github.com/owner/name/actions/runs/{id}"),
                 "createdAt": format!("2026-10-06T00:{id:02}:00Z"), "displayTitle": "x",
             })
@@ -686,4 +698,128 @@ fn a_supervisor_at_work_checks_again_once_the_interval_passed() {
         supervisor.join().unwrap().unwrap();
     });
     assert_eq!(watch_events(&db)[1].1["run_id"], 2);
+}
+
+/// AC 2–4: a run created before a later one but ended after it is read at
+/// the next check and recorded `late`, leaving the list and the state to
+/// the later run; a green re-run of the red run (a new attempt of the
+/// same ID) is read and empties the list; neither is read twice.
+#[test]
+fn a_run_that_ends_late_and_a_green_re_run_are_each_recorded_once() {
+    let (fixture, repo, db) = fixture();
+    let gh = watched(&fixture, &repo);
+    fs::write(gh.with_file_name("authed"), "").unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    drop(queue);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = options(&gh);
+    let green = head(&repo);
+    let slow = commit(&repo, "two");
+    let flaky = commit(&repo, "three");
+
+    runs(&gh, &[(1, "success", &green)]);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    // Run 3 ends red while run 2, created before it, still runs.
+    runs(&gh, &[(1, "success", &green), (3, "failure", &flaky)]);
+    red(&gh, 3, &["runtime_claim::flaky"], &[]);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    // Run 2 ends red with another failure: recorded late, nothing changes.
+    runs(
+        &gh,
+        &[
+            (1, "success", &green),
+            (2, "failure", &slow),
+            (3, "failure", &flaky),
+        ],
+    );
+    red(&gh, 2, &["runtime_claim::other"], &[]);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    let checked = |db: &Path| -> Vec<Value> {
+        watch_events(db)
+            .into_iter()
+            .filter(|(kind, _)| kind == "ci_checked")
+            .map(|(_, payload)| payload)
+            .collect()
+    };
+    let records = checked(&db);
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| (
+                r["run_id"].as_i64().unwrap(),
+                r["attempt"].as_i64().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [(1, 1), (3, 1), (2, 1)]
+    );
+    assert_eq!(records[2]["late"], true);
+    assert_eq!(
+        records[2]["failed_tests"],
+        json!(["dagq::it runtime_claim::other"])
+    );
+    assert_eq!(records[2]["added"], json!([]));
+    assert_eq!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .findings(&dagq::domain::FindingQuery::default())
+            .unwrap()
+            .len(),
+        1
+    );
+    let list = runtime::ci_failures(&db, None).unwrap();
+    assert_eq!(list["state"], "red");
+    assert_eq!(list["latest_run"]["run_id"], 3);
+    assert_eq!(list["latest_run"]["attempt"], 1);
+    assert_eq!(list["failures"][0]["name"], "dagq::it runtime_claim::flaky");
+    assert_eq!(list["failures"][0]["added"]["attempt"], 1);
+    assert_eq!(list["failures"].as_array().unwrap().len(), 1);
+
+    // The red run 3 is re-run and passes: its new attempt empties the list.
+    attempts(
+        &gh,
+        &[
+            (1, 1, "success", &green),
+            (2, 1, "failure", &slow),
+            (3, 2, "success", &flaky),
+        ],
+    );
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    // A check with nothing new records nothing: no run or attempt twice.
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    let events = watch_events(&db);
+    let kinds: Vec<&str> = events.iter().map(|(kind, _)| kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "ci_checked",
+            "ci_checked",
+            "ci_turned_red",
+            "ci_checked",
+            "ci_checked",
+            "ci_turned_green"
+        ]
+    );
+    let rerun = &events[4].1;
+    assert_eq!(
+        (rerun["run_id"].as_i64(), rerun["attempt"].as_i64()),
+        (Some(3), Some(2))
+    );
+    assert_eq!(
+        rerun["removed"],
+        json!([{"name": "dagq::it runtime_claim::flaky", "reason": "green"}])
+    );
+    let list = runtime::ci_failures(&db, None).unwrap();
+    assert_eq!(list["state"], "green");
+    assert_eq!(list["failures"], json!([]));
+    assert_eq!(list["latest_run"]["attempt"], 2);
+    // Its finding is resolved: none is left open.
+    let open = SqliteQueue::open(&db)
+        .unwrap()
+        .findings(&dagq::domain::FindingQuery::default())
+        .unwrap();
+    assert!(open.is_empty(), "{open:?}");
+    backend.join();
 }

@@ -3,6 +3,8 @@
 //! when they go or come back, then records each settled run after the
 //! latest one recorded, with the list of the tests that fail already, the
 //! turns to red and green, and the `ci_failure` finding of new failures.
+//! A run is processed once per attempt, by its ID and attempt, so one that
+//! ended after a later-created one and a re-run's new attempt are read too.
 //! The readers of the list (`ci failures`, `status`) fold the same events.
 //! What GitHub says comes through [`CiSource`]; what it means is
 //! `domain::ci_watch`.
@@ -54,8 +56,9 @@ pub struct CheckOutcome {
     pub taken: bool,
 }
 
-/// One check: the means, then every settled run after the latest one
-/// recorded (the newest only at a queue's first check), the runs ended
+/// One check: the means, then every run whose ID and attempt no record
+/// holds, in the order they were created ([`runs_to_process`]; the newest
+/// only at a queue's first check), the runs ended
 /// with no outcome counted into the next settled one's `skipped_runs`.
 /// `build` is the supervisor's build identifier, whose commit tells
 /// whether it contains a red range. An error (a call that failed or ran
@@ -86,12 +89,12 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
     }
     let runs = source.completed_runs()?;
     let mut watch = WatchState::fold(&queue.ci_watch_events()?);
-    let (runs, mut gap) = runs_to_process(runs, watch.last());
+    let (runs, mut gap) = runs_to_process(runs, &watch);
     let mut skipped = Vec::new();
     let named = crate::build_id::named_commit(build);
     for run in &runs {
         let Some(state) = classify(&run.conclusion) else {
-            skipped.push(run.run_id);
+            skipped.push((run.run_id, run.attempt));
             continue;
         };
         let failed_jobs = match state {
@@ -142,7 +145,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
             })
         };
         let record = CiCheckRecord {
-            previous: watch.latest.as_ref().map(|latest| latest.run_id),
+            previous: watch.last_event,
             checked: stamp(Some(decision.checked)).unwrap_or_default(),
             turned_red: stamp(decision.turned_red),
             turned_green: stamp(decision.turned_green),

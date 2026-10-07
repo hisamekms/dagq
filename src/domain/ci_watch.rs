@@ -140,26 +140,37 @@ pub struct CiRun {
     pub conclusion: String,
     pub url: String,
     pub created_at: String,
+    /// The run's attempt (`gh run list`'s `attempt`): a re-run keeps the
+    /// run's ID and creation time and counts up from 1.
+    pub attempt: i64,
 }
 
-/// The runs a check processes, oldest first: after the latest recorded
-/// one (`last`, its run ID and creation time), or only the newest one at
-/// the first check of a queue. `gap` when the list was full and even its
-/// oldest run came after `last`: the runs in between are not read.
-pub fn runs_to_process(mut runs: Vec<CiRun>, last: Option<(i64, &str)>) -> (Vec<CiRun>, bool) {
-    runs.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then(a.run_id.cmp(&b.run_id))
-    });
-    let Some((last_id, last_at)) = last else {
+impl CiRun {
+    /// Its place in the order the runs were created in.
+    fn key(&self) -> (&str, i64) {
+        (self.created_at.as_str(), self.run_id)
+    }
+}
+
+/// The runs a check processes, in the order they were created: each one
+/// whose run ID and attempt no `ci_checked` recorded (settled or among its
+/// `skipped_runs`), created no earlier than the first run the watch
+/// recorded, so a run that ended after a later-created one, or a re-run's
+/// new attempt, is still read; only the newest one at the first check of
+/// a queue. `gap` when the list was full and even its oldest run came
+/// after the latest recorded one: the runs in between are not read.
+pub fn runs_to_process(mut runs: Vec<CiRun>, watch: &WatchState) -> (Vec<CiRun>, bool) {
+    runs.sort_by(|a, b| a.key().cmp(&b.key()));
+    let (Some(head), Some((floor_at, floor_id))) = (watch.head(), &watch.floor) else {
         return (runs.pop().into_iter().collect(), false);
     };
-    let newer = |run: &CiRun| {
-        run.run_id != last_id && (run.created_at.as_str(), run.run_id) > (last_at, last_id)
-    };
-    let gap = runs.len() >= RUN_LIST_LIMIT && runs.first().is_some_and(newer);
-    (runs.into_iter().filter(newer).collect(), gap)
+    let gap = runs.len() >= RUN_LIST_LIMIT && runs.first().is_some_and(|run| run.key() > head);
+    let floor = (floor_at.as_str(), *floor_id);
+    let runs = runs
+        .into_iter()
+        .filter(|run| run.key() >= floor && !watch.processed.contains(&(run.run_id, run.attempt)))
+        .collect();
+    (runs, gap)
 }
 
 /// A JUnit test case's outcome.
@@ -395,6 +406,7 @@ pub struct RunRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Added {
     pub run_id: i64,
+    pub attempt: i64,
     pub sha: String,
     pub url: String,
     /// When its `ci_checked` was recorded.
@@ -412,10 +424,12 @@ pub struct KnownFailure {
     pub finding_id: Option<i64>,
 }
 
-/// The latest run a `ci_checked` recorded.
+/// The run a `ci_checked` recorded that was created last (a run recorded
+/// late, after it, does not take its place), at its attempt recorded last.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LatestRun {
     pub run_id: i64,
+    pub attempt: i64,
     pub sha: String,
     pub url: String,
     pub conclusion: String,
@@ -438,6 +452,15 @@ pub struct WatchState {
     pub failures: BTreeMap<String, KnownFailure>,
     /// Whether any event of the watch is recorded.
     pub recorded: bool,
+    /// The run ID and attempt of every run a `ci_checked` recorded,
+    /// settled or skipped: processed, never again.
+    pub processed: BTreeSet<(i64, i64)>,
+    /// The creation time and run ID of the first run recorded: the watch
+    /// does not read back before it.
+    pub floor: Option<(String, i64)>,
+    /// The ID of the latest `ci_checked` event: a record decided after it
+    /// is written only while it is still the latest.
+    pub last_event: Option<i64>,
 }
 
 impl WatchState {
@@ -449,11 +472,16 @@ impl WatchState {
             state.recorded |= CI_WATCH_KINDS.contains(&event.kind.as_str());
             if event.kind == CI_CHECKED {
                 state.apply(&event.payload, &event.created_at);
+                state.last_event = Some(event.id.as_i64());
             }
         }
         state
     }
 
+    /// Fold one `ci_checked`. A run recorded `late` (created before the
+    /// latest recorded one) is only marked processed: it changes neither
+    /// the list nor the state. An event without `attempt` (or
+    /// `skipped_attempts`) is of attempt 1.
     fn apply(&mut self, payload: &Value, recorded_at: &str) {
         let text = |key: &str| payload[key].as_str().unwrap_or_default().to_owned();
         let run = RunRef {
@@ -461,6 +489,31 @@ impl WatchState {
             sha: text("sha"),
             url: text("url"),
         };
+        let attempt = payload["attempt"].as_i64().unwrap_or(1);
+        self.processed.insert((run.run_id, attempt));
+        let skipped_attempts = payload["skipped_attempts"].as_array();
+        for (index, id) in payload["skipped_runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if let Some(id) = id.as_i64() {
+                let attempt = skipped_attempts
+                    .and_then(|attempts| attempts.get(index))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1);
+                self.processed.insert((id, attempt));
+            }
+        }
+        let key = (text("created_at"), run.run_id);
+        if self.floor.as_ref().is_none_or(|floor| key < *floor) {
+            self.floor = Some(key);
+        }
+        self.checked_at = Some(recorded_at.to_owned());
+        if payload["late"].as_bool() == Some(true) {
+            return;
+        }
         for removed in payload["removed"].as_array().into_iter().flatten() {
             if let Some(name) = removed["name"].as_str() {
                 self.failures.remove(name);
@@ -476,6 +529,7 @@ impl WatchState {
                         kind: FailureKind::of(name),
                         added: Added {
                             run_id: run.run_id,
+                            attempt,
                             sha: run.sha.clone(),
                             url: run.url.clone(),
                             at: recorded_at.to_owned(),
@@ -501,19 +555,28 @@ impl WatchState {
         }
         self.latest = Some(LatestRun {
             run_id: run.run_id,
+            attempt,
             sha: run.sha,
             url: run.url,
             conclusion: text("conclusion"),
             created_at: text("created_at"),
         });
-        self.checked_at = Some(recorded_at.to_owned());
     }
 
-    /// The run ID and creation time of the latest recorded run.
-    pub fn last(&self) -> Option<(i64, &str)> {
+    /// The creation time and run ID of the latest recorded run.
+    fn head(&self) -> Option<(&str, i64)> {
         self.latest
             .as_ref()
-            .map(|run| (run.run_id, run.created_at.as_str()))
+            .map(|run| (run.created_at.as_str(), run.run_id))
+    }
+
+    /// Whether `run` was created before the latest recorded run (and is
+    /// not a re-run of it): it ended late, and a later-created run already
+    /// decided the list and the state.
+    pub fn is_late(&self, run: &CiRun) -> bool {
+        self.latest.as_ref().is_some_and(|head| {
+            head.run_id != run.run_id && run.key() < (head.created_at.as_str(), head.run_id)
+        })
     }
 }
 
@@ -599,7 +662,7 @@ pub struct RunDecision {
 /// What the store writes for one settled run, in one transaction.
 #[derive(Debug, Clone)]
 pub struct CiCheckRecord {
-    /// The run ID of the latest `ci_checked` the caller read (`None` for
+    /// The event ID of the latest `ci_checked` the caller read (`None` for
     /// none): another supervisor's record since then takes the run.
     pub previous: Option<i64>,
     pub checked: Value,
@@ -625,8 +688,8 @@ pub struct CiCheckRecorded {
 pub struct RunInput<'a> {
     pub run: &'a CiRun,
     pub state: CiState,
-    /// The runs skipped since the last settled one.
-    pub skipped: &'a [i64],
+    /// The runs skipped since the last settled one: run ID and attempt.
+    pub skipped: &'a [(i64, i64)],
     pub junit: &'a Junit,
     pub failed_jobs: &'a [FailedJob],
     /// The list returned was full and its oldest run came after the last
@@ -639,7 +702,11 @@ pub struct RunInput<'a> {
 /// when the run's JUnit is missing or names no failed test), the ones it
 /// removes (a test its JUnit shows passing; all of them on a green run),
 /// the turn to red or green, the finding of the added ones, and the
-/// findings left with no item.
+/// findings left with no item. A run created before the latest recorded
+/// one (and not a re-run of it, [`WatchState::is_late`]) is recorded
+/// `late` and changes nothing: no item added or removed, no turn, no
+/// finding, so it neither rolls the list back nor overrides the later
+/// run's decision. A re-run of the latest one is decided like a new run.
 pub fn decide(
     watch: &WatchState,
     input: &RunInput<'_>,
@@ -648,10 +715,12 @@ pub fn decide(
     branch: &str,
 ) -> RunDecision {
     let run = input.run;
+    let late = watch.is_late(run);
     let failed_tests = input.junit.failed();
     let mut removed: Vec<(String, &'static str)> = Vec::new();
     let mut added: Vec<String> = Vec::new();
     match input.state {
+        _ if late => {}
         CiState::Green => {
             removed.extend(watch.failures.keys().map(|name| (name.clone(), "green")));
         }
@@ -681,12 +750,14 @@ pub fn decide(
         "branch": branch,
         "run_id": run.run_id,
         "run_number": run.run_number,
+        "attempt": run.attempt,
         "sha": run.sha,
         "url": run.url,
         "created_at": run.created_at,
         "conclusion": run.conclusion,
         "state": input.state.as_str(),
-        "skipped_runs": input.skipped,
+        "skipped_runs": input.skipped.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        "skipped_attempts": input.skipped.iter().map(|(_, attempt)| attempt).collect::<Vec<_>>(),
         "junit": input.junit.as_str(),
         "failed_tests": failed_tests,
         "failed_jobs": input.failed_jobs,
@@ -700,7 +771,18 @@ pub fn decide(
     if input.gap {
         checked["gap"] = json!(true);
     }
-    let this = json!({"run_id": run.run_id, "sha": run.sha, "url": run.url});
+    if late {
+        checked["late"] = json!(true);
+        return RunDecision {
+            checked,
+            turned_red: None,
+            turned_green: None,
+            finding: None,
+            resolved: Vec::new(),
+        };
+    }
+    let this =
+        json!({"run_id": run.run_id, "attempt": run.attempt, "sha": run.sha, "url": run.url});
     let turned_red =
         (input.state == CiState::Red && watch.state != Some(CiState::Red)).then(|| {
             json!({
@@ -1102,7 +1184,27 @@ mod tests {
             conclusion: conclusion.into(),
             url: format!("https://github.com/o/n/actions/runs/{id}"),
             created_at: at.into(),
+            attempt: 1,
         }
+    }
+
+    /// The watch after `ci_checked` of `runs` (settled, attempt 1) in order.
+    fn recorded(runs: &[&CiRun]) -> WatchState {
+        let events: Vec<RunEvent> = runs
+            .iter()
+            .enumerate()
+            .map(|(index, run)| {
+                event(
+                    index as i64 + 1,
+                    CI_CHECKED,
+                    json!({"run_id": run.run_id, "attempt": run.attempt, "sha": run.sha,
+                           "url": run.url, "created_at": run.created_at,
+                           "conclusion": run.conclusion, "state": "green",
+                           "added": [], "removed": []}),
+                )
+            })
+            .collect();
+        WatchState::fold(&events)
     }
 
     fn event(id: i64, kind: &str, payload: Value) -> RunEvent {
@@ -1165,14 +1267,199 @@ mod tests {
             run(1, "success", "2026-10-06T01:00:00Z"),
             run(2, "failure", "2026-10-06T02:00:00Z"),
         ];
-        let (first, gap) = runs_to_process(runs.clone(), None);
+        let (first, gap) = runs_to_process(runs.clone(), &WatchState::default());
         assert_eq!(first.iter().map(|r| r.run_id).collect::<Vec<_>>(), [3]);
         assert!(!gap);
-        let (next, gap) = runs_to_process(runs.clone(), Some((1, "2026-10-06T01:00:00Z")));
+        let (next, gap) = runs_to_process(runs.clone(), &recorded(&[&runs[1]]));
         assert_eq!(next.iter().map(|r| r.run_id).collect::<Vec<_>>(), [2, 3]);
         assert!(!gap);
-        let (none, _) = runs_to_process(runs, Some((3, "2026-10-06T03:00:00Z")));
+        // The runs created before the first one recorded are not read back.
+        let (none, _) = runs_to_process(runs.clone(), &recorded(&[&runs[0]]));
         assert!(none.is_empty());
+        // The same run at the same attempt is processed once, skipped
+        // ones too; a skipped one's other attempt is new.
+        let mut watch = recorded(&[&runs[1]]);
+        watch.processed.insert((2, 1));
+        watch.processed.insert((3, 1));
+        assert!(runs_to_process(runs.clone(), &watch).0.is_empty());
+        let mut again = runs.clone();
+        again[0].attempt = 2;
+        let (rerun, _) = runs_to_process(again, &watch);
+        assert_eq!(
+            rerun
+                .iter()
+                .map(|r| (r.run_id, r.attempt))
+                .collect::<Vec<_>>(),
+            [(3, 2)]
+        );
+    }
+
+    #[test]
+    fn a_run_that_ends_after_a_later_one_is_read_late_and_changes_nothing() {
+        // Run 2 was created before run 3 but ended after it: run 3 was
+        // recorded first.
+        let one = run(1, "success", "2026-10-06T01:00:00Z");
+        let two = run(2, "failure", "2026-10-06T02:00:00Z");
+        let three = run(3, "failure", "2026-10-06T03:00:00Z");
+        let mut watch = WatchState::default();
+        let mut decisions = Vec::new();
+        for (run, state, junit) in [
+            (&one, CiState::Green, Junit::NotConfigured),
+            (&three, CiState::Red, tests(&[("t a", TestOutcome::Failed)])),
+        ] {
+            process(
+                &mut watch,
+                &mut decisions,
+                RunInput {
+                    run,
+                    state,
+                    skipped: &[],
+                    junit: &junit,
+                    failed_jobs: &[],
+                    gap: false,
+                },
+            );
+        }
+        let (pending, _) = runs_to_process(vec![one.clone(), three.clone(), two.clone()], &watch);
+        assert_eq!(pending.iter().map(|r| r.run_id).collect::<Vec<_>>(), [2]);
+        assert!(watch.is_late(&two));
+        let before = watch.clone();
+        process(
+            &mut watch,
+            &mut decisions,
+            RunInput {
+                run: &two,
+                state: CiState::Red,
+                skipped: &[],
+                junit: &tests(&[("t a", TestOutcome::Passed), ("t b", TestOutcome::Failed)]),
+                failed_jobs: &[],
+                gap: false,
+            },
+        );
+        let late = &decisions[2];
+        assert_eq!(late.checked["late"], true);
+        assert_eq!(late.checked["run_id"], 2);
+        assert_eq!(late.checked["attempt"], 1);
+        assert_eq!(late.checked["state"], "red");
+        assert_eq!(late.checked["failed_tests"], json!(["t b"]));
+        assert_eq!(late.checked["added"], json!([]));
+        assert_eq!(late.checked["removed"], json!([]));
+        assert_eq!(late.checked["known_failures"], 1);
+        assert!(late.turned_red.is_none() && late.turned_green.is_none());
+        assert!(late.finding.is_none() && late.resolved.is_empty());
+        // Recorded: processed, never again; the list and the state stay.
+        assert!(runs_to_process(vec![one, two, three], &watch).0.is_empty());
+        assert_eq!(watch.failures, before.failures);
+        assert_eq!(watch.latest, before.latest);
+        assert_eq!(watch.state, before.state);
+        assert_eq!(watch.last_green, before.last_green);
+        // A late green does not empty the list either.
+        let mut early = run(0, "success", "2026-10-06T02:30:00Z");
+        early.run_id = 9;
+        let green = decide(
+            &watch,
+            &RunInput {
+                run: &early,
+                state: CiState::Green,
+                skipped: &[],
+                junit: &Junit::NotConfigured,
+                failed_jobs: &[],
+                gap: false,
+            },
+            &RangeFacts::default(),
+            "ci.yml",
+            "main",
+        );
+        assert_eq!(green.checked["late"], true);
+        assert_eq!(green.checked["removed"], json!([]));
+        assert!(green.turned_green.is_none() && green.resolved.is_empty());
+    }
+
+    #[test]
+    fn a_green_re_run_of_the_latest_red_empties_the_list() {
+        let one = run(1, "success", "2026-10-06T01:00:00Z");
+        let mut two = run(2, "failure", "2026-10-06T02:00:00Z");
+        let mut watch = WatchState::default();
+        let mut decisions = Vec::new();
+        for (run, state, junit) in [
+            (&one, CiState::Green, Junit::NotConfigured),
+            (&two, CiState::Red, tests(&[("t a", TestOutcome::Failed)])),
+        ] {
+            process(
+                &mut watch,
+                &mut decisions,
+                RunInput {
+                    run,
+                    state,
+                    skipped: &[],
+                    junit: &junit,
+                    failed_jobs: &[],
+                    gap: false,
+                },
+            );
+        }
+        assert_eq!(watch.failures["t a"].added.attempt, 1);
+        // The re-run keeps the ID and the creation time; its attempt is new.
+        two.attempt = 2;
+        two.conclusion = "success".into();
+        let (pending, _) = runs_to_process(vec![one.clone(), two.clone()], &watch);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|r| (r.run_id, r.attempt))
+                .collect::<Vec<_>>(),
+            [(2, 2)]
+        );
+        assert!(!watch.is_late(&two));
+        process(
+            &mut watch,
+            &mut decisions,
+            RunInput {
+                run: &two,
+                state: CiState::Green,
+                skipped: &[],
+                junit: &Junit::NotConfigured,
+                failed_jobs: &[],
+                gap: false,
+            },
+        );
+        let rerun = &decisions[2];
+        assert!(rerun.checked.get("late").is_none());
+        assert_eq!(rerun.checked["attempt"], 2);
+        assert_eq!(
+            rerun.checked["removed"],
+            json!([{"name": "t a", "reason": "green"}])
+        );
+        assert_eq!(
+            rerun.turned_green.as_ref().unwrap()["red_since"]["run_id"],
+            2
+        );
+        assert_eq!(
+            rerun.resolved.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [2]
+        );
+        assert!(watch.failures.is_empty());
+        assert_eq!(watch.state, Some(CiState::Green));
+        assert_eq!(
+            watch.latest.as_ref().map(|l| (l.run_id, l.attempt)),
+            Some((2, 2))
+        );
+        assert!(runs_to_process(vec![one, two], &watch).0.is_empty());
+    }
+
+    #[test]
+    fn skipped_runs_are_processed_with_their_attempts() {
+        let events = vec![event(
+            1,
+            CI_CHECKED,
+            json!({"run_id": 5, "attempt": 1, "created_at": "2026-10-06T05:00:00Z",
+                   "state": "green", "skipped_runs": [3, 4], "skipped_attempts": [2],
+                   "added": [], "removed": []}),
+        )];
+        let watch = WatchState::fold(&events);
+        // An older record without `skipped_attempts` reads attempt 1.
+        assert_eq!(watch.processed, BTreeSet::from([(3, 2), (4, 1), (5, 1)]));
+        assert_eq!(watch.last_event, Some(1));
     }
 
     #[test]
@@ -1180,11 +1467,18 @@ mod tests {
         let runs: Vec<CiRun> = (0..RUN_LIST_LIMIT as i64)
             .map(|i| run(100 + i, "success", &format!("2026-10-07T00:{:02}:00Z", i)))
             .collect();
-        let (all, gap) = runs_to_process(runs.clone(), Some((1, "2026-10-06T00:00:00Z")));
+        let last = recorded(&[&run(1, "success", "2026-10-06T00:00:00Z")]);
+        let (all, gap) = runs_to_process(runs.clone(), &last);
         assert_eq!(all.len(), RUN_LIST_LIMIT);
         assert!(gap);
         // Not full: the runs in between are simply none.
-        let (_, gap) = runs_to_process(runs[1..].to_vec(), Some((1, "2026-10-06T00:00:00Z")));
+        let (_, gap) = runs_to_process(runs[1..].to_vec(), &last);
+        assert!(!gap);
+        // Full but reaching back to the last record: no gap.
+        let mut reaching = runs[1..].to_vec();
+        reaching.push(run(1, "success", "2026-10-06T00:00:00Z"));
+        let (rest, gap) = runs_to_process(reaching, &last);
+        assert_eq!(rest.len(), RUN_LIST_LIMIT - 1);
         assert!(!gap);
     }
 
@@ -1435,7 +1729,7 @@ mod tests {
             RunInput {
                 run: &green,
                 state: CiState::Green,
-                skipped: &[4],
+                skipped: &[(4, 1)],
                 junit: &Junit::Missing,
                 failed_jobs: &[],
                 gap: false,
@@ -1489,7 +1783,7 @@ mod tests {
             &RunInput {
                 run: &red,
                 state: CiState::Red,
-                skipped: &[2],
+                skipped: &[(2, 1)],
                 junit: &tests(&[("t a", TestOutcome::Failed)]),
                 failed_jobs: &[],
                 gap: false,
@@ -1719,7 +2013,7 @@ mod tests {
         assert_eq!(view["failures"][1]["finding_id"], 4);
         assert_eq!(
             view["failures"][1]["added"],
-            json!({"run_id": 7, "sha": "s7", "url": "u7", "at": "2026-10-06T00:00:01Z"})
+            json!({"run_id": 7, "attempt": 1, "sha": "s7", "url": "u7", "at": "2026-10-06T00:00:01Z"})
         );
         let kept = failures_view(
             true,

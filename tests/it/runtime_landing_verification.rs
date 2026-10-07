@@ -48,9 +48,10 @@ fn configure(repo: &Path, command: &str) {
 }
 
 /// Record a red CI run adding `name`, with a `ci_failure` finding for it,
-/// as the watch does; the finding's ID.
-fn red(db: &Path, previous: Option<i64>, run_id: i64, name: &str) -> FindingId {
-    SqliteQueue::open(db)
+/// as the watch does, after the `ci_checked` event `previous`; the
+/// finding's ID and the event's.
+fn red(db: &Path, previous: Option<i64>, run_id: i64, name: &str) -> (FindingId, i64) {
+    let recorded = SqliteQueue::open(db)
         .unwrap()
         .record_ci_check(CiCheckRecord {
             previous,
@@ -79,9 +80,8 @@ fn red(db: &Path, previous: Option<i64>, run_id: i64, name: &str) -> FindingId {
             resolve: Vec::new(),
         })
         .unwrap()
-        .unwrap()
-        .finding
-        .unwrap()
+        .unwrap();
+    (recorded.finding.unwrap(), recorded.event.as_i64())
 }
 
 /// The task's command that names the coverage gate is replaced by the
@@ -97,8 +97,8 @@ fn the_repository_command_runs_in_place_of_the_coverage_gate_with_the_landing_en
         &repo,
         r#"echo "base=$DAGQ_LANDING_BASE"; echo "fix=$DAGQ_CI_FIX_RUN"; echo "list=$DAGQ_CI_KNOWN_FAILURES"; cat "$DAGQ_CI_KNOWN_FAILURES""#,
     );
-    let fixed = red(&db, None, 3, "dagq::it runtime_x::fixed");
-    red(&db, Some(3), 4, "dagq::it runtime_x::other");
+    let (fixed, event) = red(&db, None, 3, "dagq::it runtime_x::fixed");
+    red(&db, Some(event), 4, "dagq::it runtime_x::other");
     SqliteQueue::open(&db)
         .unwrap()
         .set_finding_status_covered(

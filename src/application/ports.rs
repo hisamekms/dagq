@@ -2387,7 +2387,8 @@ pub trait QueueRecords {
     /// Every event of the CI watch (ADR-t1920-1), oldest first.
     fn ci_watch_events(&self) -> Result<Vec<RunEvent>>;
     /// Record one settled CI run in one write transaction unless another
-    /// supervisor recorded a run since `record.previous`; `None` then.
+    /// supervisor recorded a run since the event `record.previous`; `None`
+    /// then.
     fn record_ci_check(
         &self,
         record: crate::domain::ci_watch::CiCheckRecord,

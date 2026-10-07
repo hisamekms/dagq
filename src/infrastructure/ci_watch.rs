@@ -230,7 +230,7 @@ impl CiSource for GhSource {
             "--limit",
             &limit,
             "--json",
-            "databaseId,number,headSha,conclusion,url,createdAt,displayTitle",
+            "databaseId,number,attempt,headSha,conclusion,url,createdAt,displayTitle",
         ])?;
         let runs: Vec<Value> =
             serde_json::from_str(&out).context("read the output of gh run list")?;
@@ -246,6 +246,7 @@ impl CiSource for GhSource {
                     conclusion: text("conclusion"),
                     url: text("url"),
                     created_at: text("createdAt"),
+                    attempt: run["attempt"].as_i64().unwrap_or(1),
                 })
             })
             .collect()
