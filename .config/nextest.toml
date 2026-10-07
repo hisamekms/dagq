@@ -28,3 +28,12 @@ slow-timeout = { period = "60s" }
 # 表に入れるため JUnit を target/nextest/it-coverage/junit.xml に書く。
 [profile.it-coverage.junit]
 path = "junit.xml"
+
+# CI（.github/workflows/ci.yml の macOS の cargo llvm-cov nextest と Linux の
+# cargo nextest run）が NEXTEST_PROFILE=ci で使う profile。default の設定（retries・
+# flaky-result・fail-fast・slow-timeout）をそのまま継ぎ、JUnit を
+# target/nextest/ci/junit.xml（cargo llvm-cov nextest でも同じ）に書くことだけを足す。CI はそれを成果物
+# nextest-junit-<job> として上げ、CI の見張り（ADR-t1920-1）が落ちた test の名前を
+# 読む。default に足さないのは、integrate と人の手元で使わない XML を書かせないため。
+[profile.ci.junit]
+path = "junit.xml"

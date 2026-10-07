@@ -139,9 +139,29 @@ jobs:
       # The output is also kept for the slow-tests step below. shell: bash
       # runs with -o pipefail, so the step fails exactly when cargo llvm-cov
       # nextest fails (tee does not hide its exit status).
+      # NEXTEST_PROFILE=ci is the default profile plus a JUnit file
+      # (.config/nextest.toml), uploaded by the next step.
       - name: cargo llvm-cov nextest
         shell: bash
+        env:
+          NEXTEST_PROFILE: ci
         run: cargo llvm-cov nextest --locked --workspace --fail-under-lines 80 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+
+      # The tests' results for the CI watch, which reads the failed tests'
+      # names from the artifacts named nextest-junit-* (ADR-t1920-1,
+      # docs/design/supervisor-lifecycle/ci-watch.md). It runs after a failed
+      # test step too, and its own failure never fails CI. cargo llvm-cov
+      # builds in target/llvm-cov-target, but nextest writes the file under
+      # the workspace's target/nextest.
+      - name: Upload the nextest JUnit
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-macos
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 30
 
       # The slowest tests and the counts over 1, 5 and 30 seconds, in the job
       # summary (scripts/slow-tests.sh, docs/design/slow-tests.md). It runs
@@ -231,9 +251,23 @@ jobs:
       # the e2e tests left #[ignore]d. .config/nextest.toml has fail-fast off,
       # so one run lists every failed test. shell: bash runs with -o pipefail,
       # so the step fails exactly when nextest fails.
+      # NEXTEST_PROFILE=ci adds the JUnit file the next step uploads, as in
+      # the macOS job.
       - name: cargo nextest run
         shell: bash
+        env:
+          NEXTEST_PROFILE: ci
         run: cargo nextest run --locked --color never 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+
+      - name: Upload the nextest JUnit
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-linux
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 30
 
       # The failed tests, one "<binary id> <test name>" per row, in the job
       # summary. FLKY-FL is a test that failed and then passed on its retry.
