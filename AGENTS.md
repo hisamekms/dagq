@@ -37,7 +37,7 @@ runtime の worker の prompt が名指す「worker の部分」。作業の場�
 
 ### planner
 
-planner は runtime だけが立て、`dagq-planner` skill に従う。基本方針は skill の「Basic policy (ADR-t451-1)」: 推奨が出せる判断は自分で決めて進め、理由を note か context に残す。人に上げるのは人が要る理由に当たり材料で決めきれないものと確信度 low のものだけ（条件と権限は本文と「Where your authority ends」）。人が開く planner は廃止し、`dagq plan` は拒む（ADR-t1394-1）。task の `--verify`・`--paths`・`--evidence`・`--change` の取り方は [task-registration.md](docs/development/task-registration.md)（ADR を書く task は「ADRを書くtask」）。runtime・test・migration を変える task は「変更の範囲ごと」も読む。
+planner は runtime だけが立て、`dagq-planner` skill に従う。基本方針は skill の「Basic policy」: 推奨が出せる判断は自分で決めて進め、理由を note か context に残す。人に上げるのは人が要る理由に当たり材料で決めきれないものと確信度 low のものだけ（条件と権限は本文と「Where your authority ends」）。人が開く planner は廃止し、`dagq plan` は拒む（ADR-t1394-1）。task の `--verify`・`--paths`・`--evidence`・`--change` の取り方は [task-registration.md](docs/development/task-registration.md)（ADR を書く task は「ADRを書くtask」）。runtime・test・migration を変える task は「変更の範囲ごと」も読む。
 
 ### plan review
 

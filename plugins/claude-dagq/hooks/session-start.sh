@@ -11,13 +11,13 @@
 # itself after a start, a resume, compaction or /clear. The inbox's output
 # starts with one line telling it to start `watch --role inbox
 # --until-attention --after <cursor>` in the background as its first move
-# (ADR-t906-1), one command with no timeout and no shell loop, so that no
-# ask waits unseen for want of a watch. A planner's startup and resume
-# print nothing: its initial prompt orients it, and a resume keeps its
-# context. The status comes after one line of text
+# (the inbox's session runs its own watch): one command with no timeout and
+# no shell loop, so that no ask waits unseen for want of a watch. A
+# planner's startup and resume print nothing: its initial prompt orients
+# it, and a resume keeps its context. The status comes after one line of text
 # naming the role and its skill, and pointing at the status's `language`
-# (ADR-t616-2), whose `instruction` names the language to write for people
-# in when one is set: Claude Code reads a stdout that is JSON as
+# (the language setting), whose `instruction` names the language to write
+# for people in when one is set: Claude Code reads a stdout that is JSON as
 # the hook's control output and drops its unknown keys, so the bare status
 # would never reach the context. Every other session, workers included,
 # gets no output. The hook never fails the session start: when status cannot

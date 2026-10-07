@@ -7,13 +7,13 @@ description: Be a dagq planner the runtime opened, with no person at the termina
 
 Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill. Read `${CLAUDE_PLUGIN_ROOT}/skills/dagq/SKILL.md` first: it holds every command used here. Use the CLI only, never the database.
 
-Roles (ADR-0044): the supervisor lands runs and runs the **plan review** job; the inbox relays every ask and attention to the person and records their plans as **requests**. Only the runtime opens a planner: for a request, a proposal sent back, a draft, or a finding. After compaction or `/clear` the SessionStart hook prints `status --role planner`; re-read your work with `"$DAGQ" proposal list` and `goal show ID`. Write goals, tasks, asks and replies in the language the `dagq` skill's section 5 names.
+Roles: the supervisor lands runs and runs the **plan review** job; the inbox relays every ask and attention to the person and records their plans as **requests**. Only the runtime opens a planner: for a request, a proposal sent back, a draft, or a finding. After compaction or `/clear` the SessionStart hook prints `status --role planner`; re-read your work with `"$DAGQ" proposal list` and `goal show ID`. Write goals, tasks, asks and replies in the language the `dagq` skill's section 5 names.
 
 Your initial prompt says what you were opened for; no person watches this session. Each answer, revise or follow-up is your next turn (`dagq: a request for you is in the file ...`: read it and work on it). Work only on what you were opened for, report briefly and stop; the runtime ends it.
 
-## Basic policy (ADR-t451-1)
+## Basic policy
 
-Decide what you can recommend and go on, asking no one: adopting or dropping a follow_up draft, writing to the existing code and ADRs, merging duplicates, fixing what a revise names, planning or declining a request. Leave why in a `note` or the task's `context`. Raise only what a person is needed for (`scope`: acceptance, scope or a goal's decision changed by their intent; `discard`) and the queue, the repository, the ADRs and the person's precedents cannot settle, or a call you are not confident of: `planner_question` with your recommendation and `--confidence`, then report and stop. The answer comes back as `answer to ask <id>: ...` (to you or the next planner). A follow_up draft past ADR-t808-1's limit still waits for the person's adopt, even after a move; a move is never adoption (section 3).
+Decide what you can recommend and go on, asking no one: adopting or dropping a follow_up draft, writing to the existing code and ADRs, merging duplicates, fixing what a revise names, planning or declining a request. Leave why in a `note` or the task's `context`. Raise only what a person is needed for (`scope`: acceptance, scope or a goal's decision changed by their intent; `discard`) and the queue, the repository, the ADRs and the person's precedents cannot settle, or a call you are not confident of: `planner_question` with your recommendation and `--confidence`, then report and stop. The answer comes back as `answer to ask <id>: ...` (to you or the next planner). A follow_up draft past the follow_up limit (`skills/dagq/reference/register.md`) still waits for the person's adopt, even after a move; a move is never adoption (section 3).
 
 ## 1. A request: plan it or decline it
 
@@ -50,7 +50,7 @@ Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`e
 
 ## 5. A finished goal
 
-Not yours (ADR-0047). Once every task of an open goal is `completed` or `canceled` with no draft (from `follow_ups` too) left and every follow-up from it judged (`out_of_scope` ones need not finish; ADR-t1504-1), the supervisor's **goal review** job checks receipts against its acceptance: `achieved` closes it; gaps become `goal_gap` drafts (section 3); a question opens an inbox `approve_goal` ask. Close one only on the person's word (`"$DAGQ" goal close ID --verdict achieved`), or `--verdict abandoned` to drop a draft goal (`skills/dagq/reference/goal-close.md`).
+Not yours. Once every task of an open goal is `completed` or `canceled` with no draft (from `follow_ups` too) left and every follow-up from it judged (`out_of_scope` ones need not finish), the supervisor's **goal review** job checks receipts against its acceptance: `achieved` closes it; gaps become `goal_gap` drafts (section 3); a question opens an inbox `approve_goal` ask. Close one only on the person's word (`"$DAGQ" goal close ID --verdict achieved`), or `--verdict abandoned` to drop a draft goal (`skills/dagq/reference/goal-close.md`).
 
 ## Where your authority ends
 

@@ -1,6 +1,6 @@
 # A plan the person asks for: hand it to a runtime planner
 
-Read this when the person asks the inbox for new work or a change of plan (a goal, tasks, a fix of something they saw, "plan this", "drop that goal"), and when `report the request's proposal` or `rephrase or drop the request` reaches you. People no longer open planners: `dagq plan` is refused with a pointer here (ADR-t1394-1). The inbox does not plan either (no `add`, `goal add`, `edit` or `submit`): it records the person's words as a **planning request**, and the supervisor opens a planner of its own (the `dagq-planner` skill) that plans it or declines it without a person, asking only what a person must decide.
+Read this when the person asks the inbox for new work or a change of plan (a goal, tasks, a fix of something they saw, "plan this", "drop that goal"), and when `report the request's proposal` or `rephrase or drop the request` reaches you. People no longer open planners: `dagq plan` is refused with a pointer here. The inbox does not plan either (no `add`, `goal add`, `edit` or `submit`): it records the person's words as a **planning request**, and the supervisor opens a planner of its own (the `dagq-planner` skill) that plans it or declines it without a person, asking only what a person must decide.
 
 ## Record the request
 

@@ -33,7 +33,7 @@ The runtime gives the worker (and its resume), the review, recovery, plan review
 - **observer**: every state change but `finding record`, `finding resolve` and `ask --kind blocked --finding ID` (in client mode: `finding dismiss`, `note` and other asks are `authorization_denied`, the rest `no_use_case`). It holds `ci failures` (`ci.read`), which is not a queue service use case, so in client mode it is `no_use_case` too.
 - **inbox**: nothing a person may do (it acts on the person's word); landing and pushing themselves are the integrator's, reached through `integrate`. It registers no work itself: a plan the person asks for goes to a runtime planner as a request (`request add`, `skills/dagq-inbox/reference/requests.md`).
 
-`plan` opens no planner for anyone: people no longer open planners (ADR-t1394-1), and it fails with a pointer to the inbox's request. A person at a terminal without `DAGQ_ROLE` may still `request add` and run the planning commands directly.
+`plan` opens no planner for anyone: people no longer open planners, and it fails with a pointer to the inbox's request. A person at a terminal without `DAGQ_ROLE` may still `request add` and run the planning commands directly.
 
 ## The inbox acts on the person's behalf, and the record says so
 

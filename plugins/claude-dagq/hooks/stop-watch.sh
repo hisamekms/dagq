@@ -1,6 +1,6 @@
 #!/bin/sh
 # Stop hook of the claude-dagq plugin: keeps the inbox from ending a turn
-# without a watch (ADR-t906-1).
+# without its own `watch --role inbox` running.
 #
 # Only the inbox (DAGQ_ROLE=inbox) is affected. The hook reads
 # `dagq status --role inbox`, whose `inbox_watcher.watching` counts the

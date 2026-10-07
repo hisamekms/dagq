@@ -229,6 +229,23 @@ fn numbered_anecdote(text: &str) -> Option<&str> {
     None
 }
 
+/// Where a numbered decision record (`ADR-0044`, `ADR-t451-1`) is cited:
+/// an installed plugin cannot reach dagq's own records, so a rule is told in
+/// words instead.
+fn numbered_adr(text: &str) -> Option<&str> {
+    text.match_indices("ADR-").find_map(|(start, _)| {
+        let rest = &text[start + 4..];
+        let digits = rest.strip_prefix('t').unwrap_or(rest);
+        if !digits.starts_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .unwrap_or(rest.len());
+        Some(&text[start..start + 4 + end])
+    })
+}
+
 /// Where a date (`2026-09-26`) stands.
 fn dated(text: &str) -> Option<&str> {
     let bytes = text.as_bytes();
@@ -275,11 +292,12 @@ fn link_out_of_the_plugin<'a>(dir: &[&str], text: &'a str) -> Option<&'a str> {
 /// threshold, the test binaries and helpers, which paths take the runtime
 /// checks), its `[areas]` name, its host tools, the old ADR file form,
 /// wording that speaks for "this repository", this repository's term "fixed
-/// binary" (looked for in every file of the plugin), a path into its
-/// `docs/design/` or `docs/plans/`, a pointer to "the design docs" and a
-/// relative link out of the plugin's directory (none of them reachable from
-/// an installed plugin), a task's, goal's or ask's number told as an
-/// anecdote, and a date. Where each rule lives now is in
+/// binary", a path into its `docs/design/` or `docs/plans/`, a pointer to
+/// "the design docs" and a relative link out of the plugin's directory (none
+/// of them reachable from an installed plugin), and a date. In every file of
+/// the plugin (skills, references, hooks, bin, manifests): "fixed binary", a
+/// numbered ADR of dagq's own, and a task's, goal's or ask's number told as
+/// an anecdote. Where each rule lives now is in
 /// `docs/plans/agents-slim-inventory.md` section 4.
 #[test]
 fn no_skill_carries_this_repository_s_rules() {
@@ -293,6 +311,9 @@ fn no_skill_carries_this_repository_s_rules() {
         None
     );
     assert_eq!(numbered_anecdote("ask <id>, the task's goal"), None);
+    assert_eq!(numbered_adr("Roles (ADR-0044): the"), Some("ADR-0044"));
+    assert_eq!(numbered_adr("# (ADR-t906-1), one"), Some("ADR-t906-1"));
+    assert_eq!(numbered_adr("the ADRs and ADR-NNNN"), None);
     assert_eq!(dated("on 2026-09-26 (median"), Some("2026-09-26"));
     assert_eq!(dated("version 0.4.0-dev"), None);
     let reference = ["skills", "dagq", "reference"];
@@ -410,19 +431,21 @@ fn no_skill_carries_this_repository_s_rules() {
     }
     assert!(files.len() > 4, "{files:?}");
     assert!(others.len() > 4, "{others:?}");
-    let mut found: Vec<String> = others
-        .iter()
-        .filter(|file| {
-            fs::read_to_string(file)
-                .unwrap()
-                .to_ascii_lowercase()
-                .contains("fixed binary")
-        })
-        .map(|file| {
-            let name = file.strip_prefix(plugin_root()).unwrap().display();
-            format!("{name}: fixed binary")
-        })
-        .collect();
+    let mut found = Vec::new();
+    for file in &others {
+        let Ok(text) = fs::read_to_string(file) else {
+            continue;
+        };
+        let name = file.strip_prefix(plugin_root()).unwrap().display();
+        if text.to_ascii_lowercase().contains("fixed binary") {
+            found.push(format!("{name}: fixed binary"));
+        }
+        for (number, line) in text.lines().enumerate() {
+            let at = |what: &str| format!("{name}:{}: {what}", number + 1);
+            found.extend(numbered_adr(line).map(at));
+            found.extend(numbered_anecdote(line).map(at));
+        }
+    }
     for file in files {
         let text = fs::read_to_string(&file).unwrap();
         let name = file
@@ -451,6 +474,7 @@ fn no_skill_carries_this_repository_s_rules() {
                     })
                     .map(|mark| at(mark)),
             );
+            found.extend(numbered_adr(line).map(at));
             found.extend(numbered_anecdote(line).map(at));
             found.extend(dated(line).map(at));
             found.extend(link_out_of_the_plugin(&dir, line).map(at));

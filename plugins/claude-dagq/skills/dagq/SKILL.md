@@ -49,7 +49,7 @@ No verification commands, draft goals (`goal add --draft`): `reference/register.
 
 ### Register the tasks
 
-Split the goal into tasks, each one session in one worktree. Per task: title, description, acceptance, `--verify`, `--depends-on` (or `--depends-on-goal`), `--context`, `--evidence`, `--paths`, `--change` and the worker's `--provider` (`reference/provider.md`); `--kind` is refused (ADR-t980-1). What each means: `reference/register.md`; the combinations per changed target: `reference/scope.md`.
+Split the goal into tasks, each one session in one worktree. Per task: title, description, acceptance, `--verify`, `--depends-on` (or `--depends-on-goal`), `--context`, `--evidence`, `--paths`, `--change` and the worker's `--provider` (`reference/provider.md`); `--kind` is refused. What each means: `reference/register.md`; the combinations per changed target: `reference/scope.md`.
 
 ```sh
 "$DAGQ" add "TITLE" --goal 1 \

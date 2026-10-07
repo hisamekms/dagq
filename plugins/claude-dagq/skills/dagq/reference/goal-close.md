@@ -1,6 +1,6 @@
 # Closing a goal
 
-A goal is closed once. Closing it after its last task is not a planner's step (ADR-0047 decisions 16 and 43): the supervisor's headless **goal review** job judges it.
+A goal is closed once. Closing it after its last task is not a planner's step: the supervisor's headless **goal review** job judges it.
 
 ## The goal review job
 
@@ -35,11 +35,11 @@ A planner, the person or the inbox (on the person's word) still runs `goal close
 
 ## When a goal may close achieved
 
-ADR-t1504-1 decision 4: the required work is done and every follow-up found from the goal's tasks has its membership judged. In detail: every task of the goal is `completed` or `canceled`, and each unfinished follow-up from it has a current judgement (not missing, not `undecided`, not older than the goal's acceptance version) and is not `required` while outside the goal. A follow-up judged `out_of_scope` does not wait to be done. Moving an unjudged one out does not count. `abandoned` claims nothing, so this condition does not hold it. The goal review start, its `achieved`, an `approve_goal` answer `achieved` and `goal close --verdict achieved` all use it: the review starts only when it holds, and its verdict, the answer and `goal close` check it again in the transaction that closes, so a follow-up registered, a judgement corrected or the acceptance changed meanwhile keeps the goal open until it is settled again.
+The condition to close: the required work is done and every follow-up found from the goal's tasks has its membership judged. In detail: every task of the goal is `completed` or `canceled`, and each unfinished follow-up from it has a current judgement (not missing, not `undecided`, not older than the goal's acceptance version) and is not `required` while outside the goal. A follow-up judged `out_of_scope` does not wait to be done. Moving an unjudged one out does not count. `abandoned` claims nothing, so this condition does not hold it. The goal review start, its `achieved`, an `approve_goal` answer `achieved` and `goal close --verdict achieved` all use it: the review starts only when it holds, and its verdict, the answer and `goal close` check it again in the transaction that closes, so a follow-up registered, a judgement corrected or the acceptance changed meanwhile keeps the goal open until it is settled again.
 
 ## After an achieved close
 
-A misclassification found after the goal closed `achieved` is recorded with the same `judge-follow-up` (a planner, or the person or the inbox on their word); the goal's `goal_closed`, its verdict and the earlier judgements stay (ADR-t1504-1 decision 6(b), ADR-t1504-2 decision 9).
+A misclassification found after the goal closed `achieved` is recorded with the same `judge-follow-up` (a planner, or the person or the inbox on their word); the goal's `goal_closed`, its verdict and the earlier judgements stay.
 
 - **An ordinary correction is the planner's**: a wrong destination, or `out_of_scope` judged again with better grounds. It records the correction, which moves a draft or ready follow-up to the open destination; no one is asked.
 - **A correction that says the acceptance was not met** (a follow-up judged `required` after the close, new or from `out_of_scope` / `undecided`; a `required` recheck is not one) opens a `correct_goal` ask to the person in the same transaction (`correction_ask_id` in the output and in `follow_up_judged`). The question lists the judgement and every task the goal released (`dependents`), with their status and runs. The runtime reopens nothing, stops no running dependent and rewrites no event. While the ask is open, `judge-follow-up` and `set-goal` on that follow-up are refused. The person chooses:
