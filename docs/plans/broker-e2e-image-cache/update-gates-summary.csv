@@ -1,0 +1,10 @@
+period,subset,events,secs_n,secs_median,secs_p90,secs_max,timeouts,log_missing,log_no_test_result,log_read,broker_not_run,finished_in_median,finished_in_p90,finished_in_max,broker_last,broker_slow
+before,all,132,132,181,447,1403,0,0,1,131,54,144.43,351.91,1280.37,73/131,77/131
+before,broker_ran,77,77,230,473,1403,0,0,0,77,0,196.29,386.72,1280.37,73/77,77/77
+before,no_broker,54,54,109.5,345,584,0,0,0,54,54,76.04,326.84,404.02,0/54,0/54
+afterA,all,17,17,174,274,414,0,0,0,17,0,118.52,219.45,219.71,14/17,17/17
+afterA,broker_ran,17,17,174,274,414,0,0,0,17,0,118.52,219.45,219.71,14/17,17/17
+afterA,no_broker,0,0,,,,0,0,0,0,0,,,,0/0,0/0
+afterB,all,61,60,129.5,233,330,0,1,0,60,1,92.85,144.73,284.62,36/60,59/60
+afterB,broker_ran,59,59,130,240,330,0,0,0,59,0,92.89,152.28,284.62,36/59,59/59
+afterB,no_broker,1,1,94,94,94,0,0,0,1,1,64.17,64.17,64.17,0/1,0/1

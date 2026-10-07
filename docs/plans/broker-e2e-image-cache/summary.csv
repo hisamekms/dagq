@@ -1,0 +1,10 @@
+period,subset,events,secs_n,secs_median,secs_p90,secs_max,timeouts,log_missing,log_no_test_result,log_read,broker_not_run,finished_in_median,finished_in_p90,finished_in_max,broker_last,broker_slow,wait_n,wait_missing,wait_median,wait_p90,wait_max,waited,wait_median_of_waited
+before,all,79,79,141,288,717,0,1,0,78,31,117.55,246.76,522.59,47/78,47/78,78,1,0,0,1186,5/78,170
+before,broker_ran,47,47,179,293,566,0,0,0,47,0,153.98,264.54,522.59,47/47,47/47,47,0,0,121,1186,5/47,170
+before,no_broker,31,31,80,151,220,0,0,0,31,31,66.97,102.35,198.14,0/31,0/31,31,0,0,0,0,0/31,
+afterA,all,9,9,121,327,327,0,0,0,9,1,88.22,144.55,144.55,7/9,8/9,9,0,0,128,128,2/9,85
+afterA,broker_ran,8,8,139,327,327,0,0,0,8,0,104.31,144.55,144.55,7/8,8/8,8,0,0,42,42,1/8,42
+afterA,no_broker,1,1,72,72,72,0,0,0,1,1,70.29,70.29,70.29,0/1,0/1,1,0,128,128,128,1/1,128
+afterB,all,30,30,103.5,270,1800,1,0,1,29,0,79.34,188.62,212.85,12/29,28/29,30,0,0,60,209,6/30,63
+afterB,broker_ran,29,29,103,270,367,0,0,0,29,0,79.34,188.62,212.85,12/29,28/29,29,0,0,66,209,5/29,66
+afterB,no_broker,0,0,,,,0,0,0,0,0,,,,0/0,0/0,0,0,,,,0/0,

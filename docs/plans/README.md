@@ -31,6 +31,7 @@ tags:
 - [docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）の定義と基準値](docs-slim.md)（goal 159、task 1946・1966）
 - [過去の着地の差分に IT の対応表を当てた、絞った IT の時間と見逃しの測定と、全部流す閾値・共通のファイル・表の古さの上限](landing-it-selection.md)（goal 157、task 1924）
 - [上限を入れた後の本番のobserverのpromptのbyte数と節ごとの大きさ、上限を見直すかの結論](observer-prompt-size.md)（task 1575）
+- [broker の image の build のキャッシュの前後の、着地前の e2e と関門の e2e の時間・broker の e2e の完了順・e2e の待ちの測定と、broker の e2e を差分で絞る案の判断](broker-e2e-image-cache.md)（goal 93、task 1452）
 - [夜の人の答え待ちが着地を遅らせた量](night-human-wait-measurement.md)（goal 62、task 919）
 - [スパイク：過去の run の再現で task の重さと手戻りの予測の担い手を比べる](spike-predictor-replay.md)
 - [review と plan review の revise と concern で差し戻された理由の分類と、ラベルの定義案](review-sendback-reasons.md)（goal 64、task 945）
