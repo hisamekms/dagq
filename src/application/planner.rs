@@ -620,8 +620,6 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
         workspace_listed: false,
         wrapper_alive: false,
         idle: None,
-        working: None,
-        screen_idle: None,
     };
     if planner.closed_at.is_none() {
         if let Some(workspace) = &planner.workspace_id {
@@ -789,8 +787,6 @@ pub fn close_abandoned_planners(
             workspace_listed,
             wrapper_alive: planner.wrapper_pid.is_some_and(|pid| processes.alive(pid)),
             idle: None,
-            working: None,
-            screen_idle: None,
         };
         if planner.abandoned(&probe) {
             let (code, reason) = if background && planner.exited_at.is_some() {
@@ -902,8 +898,6 @@ pub fn remove_unused_planner_runners(
             workspace_listed: false,
             wrapper_alive: planner.wrapper_pid.is_some_and(|pid| processes.alive(pid)),
             idle: None,
-            working: None,
-            screen_idle: None,
         };
         if !planner.runner_unused(&probe) {
             continue;

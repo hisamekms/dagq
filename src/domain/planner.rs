@@ -55,22 +55,16 @@ pub struct PlannerSession {
 /// registration before it counts as `lost`, as a run's startup is bounded.
 pub const PLANNER_STARTUP_SECS: i64 = 120;
 
-/// What was looked at to judge a planner: whether cmux still lists its
-/// workspace, whether its wrapper's process is alive, the idle marker its
+/// What was looked at to judge a planner: whether its session is still
+/// open, whether its wrapper's process is alive and the idle marker its
 /// agent's `Stop` hook wrote (only one no older than the session's last
-/// input), whether its screen shows the agent at work (`None` when the
-/// screen could not be read) and, without such a marker, since when its
-/// screen shows it idle (ADR-t803-1).
+/// input).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlannerProbe {
     pub now: i64,
     pub workspace_listed: bool,
     pub wrapper_alive: bool,
     pub idle: Option<IdleProbe>,
-    pub working: Option<bool>,
-    /// The idle the screen was inferred from (ADR-t803-1): since the first
-    /// capture of its span, with the background work it showed.
-    pub screen_idle: Option<IdleProbe>,
 }
 
 /// The idle marker of a planner's agent: when it was written (Unix
@@ -92,11 +86,10 @@ impl PlannerSession {
     /// is gone, a late heartbeat being no sign of its death (ADR-t1404-1
     /// decisions 2 and 10); before the wrapper registers it is
     /// `opening`, and `lost` once [`PLANNER_STARTUP_SECS`] passed; a live
-    /// wrapper that has not recorded its agent's pid is `opening` too. A live agent is `working` while its screen shows a turn,
-    /// and `idle` once its `Stop` hook wrote the marker with no background
-    /// work left; without a marker (or with one older than its last
-    /// input) it is `idle` once its screen was inferred idle with no
-    /// background work shown, `working` until then.
+    /// wrapper that has not recorded its agent's pid is `opening` too. A
+    /// live agent is `idle` once its `Stop` hook wrote the marker with no
+    /// background work left, and `working` without one (or with one older
+    /// than its last input).
     pub fn state(&self, probe: &PlannerProbe) -> PlannerState {
         if self.closed_at.is_some() || (self.workspace_id.is_some() && !probe.workspace_listed) {
             return PlannerState::Closed;
@@ -128,21 +121,12 @@ impl PlannerSession {
         }
         if self.agent_pid.is_none() {
             // The wrapper runs but has not recorded its agent yet: no idle
-            // marker or screen is the agent's (task 1329), and input sent
-            // now would reach no agent.
+            // marker is the agent's (task 1329), and input sent now would
+            // reach no agent.
             return PlannerState::Opening;
-        }
-        if probe.working == Some(true) {
-            return PlannerState::Working;
         }
         match probe.idle {
             Some(idle) if !idle.background_running => PlannerState::Idle,
-            None if probe
-                .screen_idle
-                .is_some_and(|idle| !idle.background_running) =>
-            {
-                PlannerState::Idle
-            }
             _ => PlannerState::Working,
         }
     }
@@ -300,8 +284,6 @@ mod tests {
             workspace_listed: true,
             wrapper_alive: true,
             idle: None,
-            working: None,
-            screen_idle: None,
         }
     }
 
@@ -356,14 +338,6 @@ mod tests {
             ..probe()
         };
         assert_eq!(live.state(&idle_probe), PlannerState::Idle);
-        // The screen of a new turn wins over an older marker.
-        assert_eq!(
-            live.state(&PlannerProbe {
-                working: Some(true),
-                ..idle_probe
-            }),
-            PlannerState::Working
-        );
         assert_eq!(
             live.state(&PlannerProbe {
                 idle: Some(IdleProbe {
@@ -391,50 +365,6 @@ mod tests {
         );
         assert!(PlannerState::Idle.alive() && PlannerState::Working.alive());
         assert!(!PlannerState::Lost.alive());
-    }
-
-    #[test]
-    fn a_planner_without_a_fresh_marker_is_idle_by_its_screen() {
-        let live = session();
-        let screen = IdleProbe {
-            since: 104,
-            background_running: false,
-        };
-        let inferred = PlannerProbe {
-            screen_idle: Some(screen),
-            ..probe()
-        };
-        assert_eq!(live.state(&inferred), PlannerState::Idle);
-        // A screen that shows background work keeps it working.
-        assert_eq!(
-            live.state(&PlannerProbe {
-                screen_idle: Some(IdleProbe {
-                    background_running: true,
-                    ..screen
-                }),
-                ..probe()
-            }),
-            PlannerState::Working
-        );
-        // A screen at work wins, and a fresh marker left with background
-        // work decides over the screen.
-        assert_eq!(
-            live.state(&PlannerProbe {
-                working: Some(true),
-                ..inferred
-            }),
-            PlannerState::Working
-        );
-        assert_eq!(
-            live.state(&PlannerProbe {
-                idle: Some(IdleProbe {
-                    since: 105,
-                    background_running: true,
-                }),
-                ..inferred
-            }),
-            PlannerState::Working
-        );
     }
 
     #[test]
@@ -553,7 +483,7 @@ mod tests {
         };
         assert_eq!(unregistered.state(&probe()), PlannerState::Opening);
         // A wrapper that has not recorded its agent is opening, whatever an
-        // idle marker or the screen shows (task 1329).
+        // idle marker shows (task 1329).
         let agentless = PlannerSession {
             agent_pid: None,
             ..session()
@@ -566,10 +496,6 @@ mod tests {
             probe(),
             PlannerProbe {
                 idle: Some(idle),
-                ..probe()
-            },
-            PlannerProbe {
-                screen_idle: Some(idle),
                 ..probe()
             },
         ] {
