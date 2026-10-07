@@ -67,6 +67,12 @@ jobs:
       - name: Frontmatter date lines
         run: sh scripts/check-frontmatter-dates.sh
 
+      - name: Docs frontmatter
+        run: sh scripts/check-doc-frontmatter.sh
+
+      - name: Docs relative links
+        run: sh scripts/check-doc-links.sh
+
       - name: Migration numbers and released migrations
         run: sh scripts/check-migration-numbers.sh
 

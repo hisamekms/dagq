@@ -100,7 +100,7 @@ A `deprecated` ADR has no `superseded_by` or `superseded_on`, and a `superseded`
 
 ## Validation
 
-Future documentation validation should check unique IDs, allowed status values, date formats, links in `related`, `depends_on`, `superseded_by`, and `supersedes`, the ADR status and field combinations and matching dates, and the filename convention. `scripts/check-adr-numbers.sh` already checks the ADR IDs (what it checks is in the script's header comment). Example paths:
+Future documentation validation should check unique IDs, allowed status values, date formats, links in `related`, `depends_on`, `superseded_by`, and `supersedes`, the ADR status and field combinations and matching dates, and the filename convention. `scripts/check-adr-numbers.sh` already checks the ADR IDs, `scripts/check-frontmatter-dates.sh` the form of the date lines, and `scripts/check-doc-frontmatter.sh` the required keys, the type and status values, and the form and uniqueness of the IDs of the documents other than the ADRs (what each checks is in the script's header comment). Example paths:
 
 ```text
 docs/adr/0001-rust-runtime.md
