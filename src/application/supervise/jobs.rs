@@ -101,26 +101,38 @@ impl HeadlessJob {
         files: &dyn RunFiles,
         provider: &dyn AgentProvider,
     ) -> Result<Option<std::result::Result<String, String>>> {
+        Ok(self
+            .poll_end(files, provider)?
+            .map(|output| output.map_err(JobFailed::into_error)))
+    }
+
+    /// [`Self::poll`] with how the job failed, for a caller that treats a
+    /// non-zero exit and the timeout apart (a run's review).
+    pub(super) fn poll_end(
+        &mut self,
+        files: &dyn RunFiles,
+        provider: &dyn AgentProvider,
+    ) -> Result<Option<std::result::Result<String, JobFailed>>> {
         let status = match self.child.try_wait()? {
             Some(status) => status,
             None if self.started.elapsed() < self.timeout => return Ok(None),
             None => {
                 self.stop();
-                return Ok(Some(Err(format!(
+                return Ok(Some(Err(JobFailed::TimedOut(format!(
                     "the headless {} did not finish within {} seconds",
                     self.what,
                     self.timeout.as_secs()
-                ))));
+                )))));
             }
         };
         self.ended(headless_job::ENDED);
         if !status.success {
             let stderr = files.read_to_string(&self.stderr).unwrap_or_default();
-            return Ok(Some(Err(format!(
+            return Ok(Some(Err(JobFailed::Exited(format!(
                 "the headless {} exited with {status}: {}",
                 self.what,
                 or_none(tail(stderr.trim(), 500))
-            ))));
+            )))));
         }
         let stdout = files.read_to_string(&self.stdout).unwrap_or_default();
         Ok(Some(Ok(provider.job_reply(&stdout))))
@@ -494,7 +506,41 @@ pub(super) enum ReviewEnd {
     /// with the same input.
     Unreadable(String),
     /// The job itself failed: it exited non-zero or timed out.
-    Failed(String),
+    Failed(JobFailed),
+}
+
+impl ReviewEnd {
+    /// Why a review that gave no verdict failed; `None` for a verdict.
+    pub(super) fn error(&self) -> Option<&str> {
+        match self {
+            Self::Verdict(_) => None,
+            Self::Unreadable(error) => Some(error),
+            Self::Failed(failed) => Some(failed.error()),
+        }
+    }
+}
+
+/// How a headless job ended without a reply, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum JobFailed {
+    /// Its process exited non-zero.
+    Exited(String),
+    /// It did not finish within its timeout and was stopped.
+    TimedOut(String),
+}
+
+impl JobFailed {
+    pub(super) fn error(&self) -> &str {
+        match self {
+            Self::Exited(error) | Self::TimedOut(error) => error,
+        }
+    }
+
+    pub(super) fn into_error(self) -> String {
+        match self {
+            Self::Exited(error) | Self::TimedOut(error) => error,
+        }
+    }
 }
 
 impl ReviewWatch {
@@ -504,13 +550,16 @@ impl ReviewWatch {
         files: &dyn RunFiles,
         provider: &dyn AgentProvider,
     ) -> Result<Option<ReviewEnd>> {
-        Ok(self.job.poll(files, provider)?.map(|output| match output {
-            Ok(stdout) => match ReviewVerdict::parse(&stdout) {
-                Ok(verdict) => review_end(verdict, &self.required),
-                Err(error) => ReviewEnd::Unreadable(error),
-            },
-            Err(error) => ReviewEnd::Failed(error),
-        }))
+        Ok(self
+            .job
+            .poll_end(files, provider)?
+            .map(|output| match output {
+                Ok(stdout) => match ReviewVerdict::parse(&stdout) {
+                    Ok(verdict) => review_end(verdict, &self.required),
+                    Err(error) => ReviewEnd::Unreadable(error),
+                },
+                Err(error) => ReviewEnd::Failed(error),
+            }))
     }
 }
 

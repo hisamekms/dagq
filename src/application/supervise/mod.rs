@@ -244,7 +244,8 @@ impl ObserveMode {
 pub struct LoopSettings {
     /// Explicit operator policy: never start Claude; unsupported roles wait for manual handling.
     pub no_claude: bool,
-    /// Retry an unreadable review once; tests may disable the retry.
+    /// Retry once a review with an unreadable verdict or a job that exited
+    /// non-zero; tests may disable the retry.
     pub retry_unreadable_review: bool,
     /// Upper bound on runs executing at once (`parallel`), on the runs
     /// waiting for a person outside the slots (`max_waiting`, ADR-0062
@@ -3237,8 +3238,9 @@ impl Supervisor<'_> {
                 // A review stopped at a login that ran out or the usage
                 // limit is no failure of the run: it joins the hold ask and
                 // waits, its session open, until the hold ends (task 438).
-                if let ReviewEnd::Unreadable(error) | ReviewEnd::Failed(error) = &outcome
-                    && let Some(wall) = self.job_wall(&watch.job)
+                let wall = outcome.error().and_then(|_| self.job_wall(&watch.job));
+                if let Some(error) = outcome.error()
+                    && let Some(wall) = wall
                     && self.raise_job_wall(wall, &HoldJob::Review(run.id().clone()), error)
                 {
                     info!(run_id = %run.id(), "run {} review {attempt} stopped at the {} wall; it waits for the hold ask with its session open", run.id(), wall.as_str());
@@ -3253,7 +3255,11 @@ impl Supervisor<'_> {
                 // `--no-claude` it fails to the person below (ADR-t1207-1).
                 let retried = watch.retried;
                 let mut session = session;
-                if let ReviewEnd::Unreadable(error) | ReviewEnd::Failed(error) = &outcome
+                // Whether the job's provider was found unusable and the
+                // review did not move off it (`move_review` gave it back, or
+                // the wall's hold could not be written).
+                let mut not_moved = wall.is_some();
+                if let Some(error) = outcome.error()
                     && watch.job.provider != Provider::Claude
                 {
                     let stdout = self
@@ -3282,17 +3288,23 @@ impl Supervisor<'_> {
                                 slot.run = run;
                                 return Ok(Step::Continue);
                             }
-                            Err(back) => session = back,
+                            Err(back) => {
+                                session = back;
+                                not_moved = true;
+                            }
                         }
                     }
                 }
-                // With no provider left to review it again (`--no-claude`),
-                // an unreadable verdict fails as it is, its output named.
-                let retry_unreadable = landing::retries_review(
+                // An unreadable verdict or a non-zero exit is reviewed once
+                // more (tasks 328 and 1984); with no provider left to review
+                // it again (`--no-claude`) it fails as it is, its output
+                // named.
+                let retry = landing::retries_review(
                     &outcome,
                     self.retry_unreadable_review,
                     retried,
                     matches!(self.review_route(), landing::ReviewRoute::Manual(_)),
+                    not_moved,
                 );
                 slot.phase = match outcome {
                     ReviewEnd::Verdict(verdict) => {
@@ -3331,10 +3343,20 @@ impl Supervisor<'_> {
                             sv.act_on_verdict(&run, session, verdict, &job, attempt)
                         })?
                     }
-                    ReviewEnd::Unreadable(error) if retry_unreadable => {
-                        self.retry_review(&run, session, attempt, &error, job_session.as_ref())?
+                    outcome @ (ReviewEnd::Unreadable(_) | ReviewEnd::Failed(_))
+                        if let Some(cause) = retry =>
+                    {
+                        let error = outcome.error().unwrap_or_default();
+                        self.retry_review(
+                            &run,
+                            session,
+                            attempt,
+                            (error, cause),
+                            job_session.as_ref(),
+                        )?
                     }
-                    ReviewEnd::Unreadable(error) | ReviewEnd::Failed(error) => {
+                    ReviewEnd::Unreadable(error)
+                    | ReviewEnd::Failed(JobFailed::Exited(error) | JobFailed::TimedOut(error)) => {
                         warn!(run_id = %run.id(), error = %error, "run {} review {attempt} failed: {error}; a person is asked", run.id());
                         self.close_review_session(&run, job_session.as_ref());
                         Phase::Exiting(ExitWatch::new(

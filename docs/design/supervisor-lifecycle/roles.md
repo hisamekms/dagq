@@ -4,8 +4,8 @@ type: design
 title: "Roles"
 status: current
 created: 2026-09-26
-updated: 2026-10-06
-last_verified: 2026-10-06
+updated: 2026-10-07
+last_verified: 2026-10-07
 scope: runtime
 related:
   - adr-t1228-2
@@ -126,6 +126,6 @@ review・recovery・plan review・goal reviewのjobは、それぞれ`review-job
 
 - 未知の欄を拒む: 4つのverdictと入れ子の型（reviewのverdict、recoveryのaction、plan reviewのaction・`reopen`、goal reviewの`criteria`・`gaps`）は`#[serde(deny_unknown_fields)]`で、未知の欄・未知のactionを含む出力は読めない出力として扱う。
 - 例外は`PlanReviewVerdict`の`predictions`で、`serde_json::Value`のまま持つ。型にするとtaskの重さの見積もりの形が崩れただけでverdict全体が読めず、plan reviewが失敗するが、見積もりは記録するだけで遷移を変えない（ADR-0079決定2）ため。supervisorは`parse_predictions`で型付きの`TaskWeightPrediction`にしてから記録し、読めなければ記録しないだけで、生の値から遷移を決めない。
-- 壊れた出力はfail closed: 読めないverdictで何かが着地・retry・`ready`・goalのcloseになることはない。reviewは1回だけ同じ入力で再review（`review_retried`）し、それも読めなければ`review_failed`と`approve_landing`のask。recoveryは`triage_failed`（`triage by hand`）。生きているrunのjobの失敗はそのalertのask（`reason_category: recovery_failed`。ADR-t609-1）。plan reviewは`plan_review_failed`（`plan review by hand`）でproposalは`submitted`のまま。goal reviewは`goal_review_failed`（`goal review by hand`）でgoalは開いたまま。
+- 壊れた出力はfail closed: 読めないverdictで何かが着地・retry・`ready`・goalのcloseになることはない。reviewは読めないverdictか非0の終了で1回だけ同じ入力で再review（`review_retried`）し、それも読めないか非0なら`review_failed`と`approve_landing`のask。recoveryは`triage_failed`（`triage by hand`）。生きているrunのjobの失敗はそのalertのask（`reason_category: recovery_failed`。ADR-t609-1）。plan reviewは`plan_review_failed`（`plan review by hand`）でproposalは`submitted`のまま。goal reviewは`goal_review_failed`（`goal review by hand`）でgoalは開いたまま。
 - 記録: verdictを適用したeventは上の「eventのactor」のとおりactorがsupervisor、`requested_by`がjobのactor id。reviewの`concern`と差し戻せない`revise`（上限を使い切った・sessionが終わっていた・切り替えられなかった・送れなかった）と、`pass`の後の衝突の事前検査が上限で人に聞く`approve_landing`のaskは、sessionの終了の後に開くが、`AfterExit::Ask`がverdictを返したreview jobのactor（`requested_by`）を持ち、askを開くときだけ`for_job`で包むので、その`ask_opened`もactorがsupervisor、`requested_by`が`review-job:<run>:<attempt>`になる（task 798）。askの後にleaseを返すなどのeventは`for_job`の外で、`requested_by`を持たない。supervisorの引き継ぎ（`adopt.rs`）が履歴から`AfterExit::Ask`を組み立て直すときは、引き継ぐ（か直前の）`review_finished`のpayloadの`attempt`から同じjobを復元し、`attempt`が無ければ別のjobを名指ししないよう`requested_by`を付けない。引き継いだpassのrunの衝突の事前検査も同じjobの`for_job`の中で行うので、その`conflict_precheck`も生きている経路と同じく`requested_by`を持つ。差し戻しや衝突の依頼を生きているsessionが果たさなかった後（sessionが終わった・receiptの直しを送れなかった）のaskは、verdictを適用し終えた後のsupervisor自身の判断なので`requested_by`を持たない。jobの失敗のeventはjobの依頼ではないので`requested_by`を持たない（どのjobかはpayloadの`attempt`で分かる）。jobが開くaskの`asked_by`（`plan_review`・`goal_review`など）は変えない。
 - test: `tests/it/runtime_job_verdicts.rs`（reviewのpassが検証の落ちるrunを着地させないこと、reviewと終わったrunと生きているrunの各alertのrecoveryの壊れた出力（alertごとに代表の1つ。形ごとのerrorは`RecoveryVerdict::parse`と`ReviewVerdict::parse`のunit test）、`concern`・上限を超えた`revise`・引き継いだ`concern`のaskが`requested_by`にreview jobを持ち、失敗したreviewのaskは持たないこと）、`tests/it/plan_review.rs`と`tests/it/goal_review.rs`の`..._applied_at_its_jobs_request_and_a_broken_one_fails_closed`。

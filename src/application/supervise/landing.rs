@@ -257,28 +257,43 @@ impl Supervisor<'_> {
         }))
     }
     /// Review the run once more with the same input after review `attempt`
-    /// printed no readable verdict (task 328): record `review_retried` with
-    /// why, then start the next review, whose own unreadable verdict is not
-    /// retried again.
+    /// printed no readable verdict (task 328) or its job exited non-zero
+    /// (task 1984), as `cause` says: record `review_retried` with why, then
+    /// start the next review, whose own failure is not retried again.
+    ///
+    /// The event's `cause` says which retry it is: `"unreadable"` after a
+    /// verdict that could not be read (no verdict JSON, or one lacking the
+    /// results of its required subagents), `"job_failed"` after a job that
+    /// exited non-zero. The `review_retried` of a review moved off a
+    /// provider that cannot be used ([`Self::move_review`]) has no `cause`:
+    /// its `switch_reason` says why instead.
     pub(super) fn retry_review(
         &mut self,
         run: &TaskRun,
         session: Option<SessionRef>,
         attempt: usize,
-        error: &str,
+        (error, cause): (&str, RetryCause),
         job_session: Option<&JobSession>,
     ) -> Result<Phase> {
         if self.review_held(run) {
             return Ok(Phase::ReviewHeld(session));
         }
-        let mut retried_event = json!({"attempt": attempt, "error": error});
+        let mut retried_event = json!({
+            "attempt": attempt,
+            "error": error,
+            "cause": cause.as_str(),
+        });
         // The job that ran on Codex names its thread and model (task 1339).
         if let Some(job_session) = job_session {
             job_session.record(&mut retried_event);
         }
         self.queue
             .record_runtime_event(run.id(), EventKind::ReviewRetried, retried_event)?;
-        warn!(run_id = %run.id(), error = %error, "run {} review {attempt} printed no readable verdict: {error}; reviewing it once more", run.id());
+        let what = match cause {
+            RetryCause::Unreadable => "printed no readable verdict",
+            RetryCause::JobFailed => "failed",
+        };
+        warn!(run_id = %run.id(), error = %error, "run {} review {attempt} {what}: {error}; reviewing it once more", run.id());
         self.begin_review(run, session, true)
     }
     pub(super) fn begin_review(
@@ -1526,24 +1541,54 @@ fn revise_limit_why(revises: usize) -> String {
     format!("the review still asks for changes after {revises} revises")
 }
 
-/// Whether a review that ended as `outcome` is reviewed once more with the
-/// same input (task 328): only stdout without a readable verdict, while the
-/// retry is on (`retry_unreadable`), when the review was not itself the
-/// retry (`retried`) and a provider is left to review it (`manual`: the
-/// `--no-claude` route that gives it to a person). A job that failed (a
-/// non-zero exit, the timeout) is not reviewed again.
+/// Why a review is reviewed once more with the same input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetryCause {
+    /// Its stdout held no readable verdict (task 328).
+    Unreadable,
+    /// Its job exited non-zero (task 1984).
+    JobFailed,
+}
+
+impl RetryCause {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreadable => "unreadable",
+            Self::JobFailed => "job_failed",
+        }
+    }
+}
+
+/// Why a review that ended as `outcome` is reviewed once more with the
+/// same input, if it is: stdout without a readable verdict (task 328) or a
+/// job that exited non-zero (task 1984), while the retry is on (`retry`),
+/// when the review was not itself a retry (`retried`, one retry per review
+/// for either cause) and a provider is left to review it (`manual`: the
+/// `--no-claude` route that gives it to a person). A job stopped at the
+/// timeout is not reviewed again: another review would spend the timeout
+/// once more on a job that did not end. Nor is a non-zero exit of a job
+/// whose provider was found unusable and that did not move off it
+/// (`unusable`, after `move_review`): that failure is the provider's, not
+/// a passing one, and goes to the person as before.
 pub(super) fn retries_review(
     outcome: &ReviewEnd,
-    retry_unreadable: bool,
+    retry: bool,
     retried: bool,
     manual: bool,
-) -> bool {
-    matches!(outcome, ReviewEnd::Unreadable(_)) && retry_unreadable && !retried && !manual
+    unusable: bool,
+) -> Option<RetryCause> {
+    let cause = match outcome {
+        ReviewEnd::Unreadable(_) => RetryCause::Unreadable,
+        ReviewEnd::Failed(JobFailed::Exited(_)) if !unusable => RetryCause::JobFailed,
+        ReviewEnd::Failed(_) | ReviewEnd::Verdict(_) => return None,
+    };
+    (retry && !retried && !manual).then_some(cause)
 }
 
 /// The attempt whose output the ask of review `attempt` names when that
 /// review could not start, so wrote none (task 426): the review before,
-/// when this one was its retry after an unreadable verdict; else none.
+/// when this one was its retry (after an unreadable verdict or a non-zero
+/// exit); else none.
 fn unstarted_review_output(retried: bool, attempt: usize) -> Option<usize> {
     retried.then(|| attempt - 1)
 }
@@ -1914,28 +1959,68 @@ mod tests {
         );
     }
 
-    /// Only stdout without a readable verdict is reviewed once more: not a
-    /// job that failed, not the retry itself, not with the retry off, and
-    /// not when no provider is left to review it (`--no-claude`). A verdict
-    /// is acted on, retried or not.
+    /// A verdict that cannot be read and a job that exited non-zero are
+    /// reviewed once more, each with its cause: not a job stopped at the
+    /// timeout, not a retry itself (one retry per review for either cause),
+    /// not with the retry off, and not when no provider is left to review
+    /// it (`--no-claude`). A verdict is acted on, retried or not.
     #[test]
-    fn only_an_unreadable_verdict_is_reviewed_again_once() {
+    fn an_unreadable_verdict_or_a_non_zero_exit_is_reviewed_again_once() {
         let unreadable = || ReviewEnd::Unreadable("the review printed no verdict JSON".into());
-        let failed =
-            || ReviewEnd::Failed("the headless review did not finish within 1 seconds".into());
+        let exited = || {
+            ReviewEnd::Failed(JobFailed::Exited(
+                "the headless review exited with exit status: 1: (none)".into(),
+            ))
+        };
+        let timed_out = || {
+            ReviewEnd::Failed(JobFailed::TimedOut(
+                "the headless review did not finish within 1 seconds".into(),
+            ))
+        };
         let pass = || {
             ReviewEnd::Verdict(verdict(
                 json!({"verdict": "pass", "reasons": [], "summary": "ok"}),
             ))
         };
-        assert!(retries_review(&unreadable(), true, false, false));
-        assert!(!retries_review(&unreadable(), true, true, false));
-        assert!(!retries_review(&unreadable(), false, false, false));
-        assert!(!retries_review(&unreadable(), true, false, true));
-        for retried in [false, true] {
-            assert!(!retries_review(&failed(), true, retried, false));
-            assert!(!retries_review(&pass(), true, retried, false));
+        for (end, cause) in [
+            (unreadable as fn() -> ReviewEnd, RetryCause::Unreadable),
+            (exited, RetryCause::JobFailed),
+        ] {
+            assert_eq!(
+                retries_review(&end(), true, false, false, false),
+                Some(cause)
+            );
+            for (retry, retried, manual) in [
+                (true, true, false),
+                (false, false, false),
+                (true, false, true),
+                (false, true, true),
+            ] {
+                assert_eq!(retries_review(&end(), retry, retried, manual, false), None);
+            }
         }
+        // A provider found unusable that the review did not move off: its
+        // non-zero exit goes to the person; an unreadable verdict is retried
+        // as before.
+        assert_eq!(retries_review(&exited(), true, false, false, true), None);
+        assert_eq!(
+            retries_review(&unreadable(), true, false, false, true),
+            Some(RetryCause::Unreadable)
+        );
+        for retry in [false, true] {
+            for retried in [false, true] {
+                for manual in [false, true] {
+                    for unusable in [false, true] {
+                        let decide =
+                            |end: ReviewEnd| retries_review(&end, retry, retried, manual, unusable);
+                        assert_eq!(decide(timed_out()), None);
+                        assert_eq!(decide(pass()), None);
+                    }
+                }
+            }
+        }
+        assert_eq!(RetryCause::Unreadable.as_str(), "unreadable");
+        assert_eq!(RetryCause::JobFailed.as_str(), "job_failed");
     }
 
     /// The reasons a `send_back` (with and without the person's reason)
@@ -2133,8 +2218,11 @@ mod tests {
             panic!("a pass without its agent's result was acted on");
         };
         assert!(why.ends_with("no result of design"), "{why}");
-        assert!(retries_review(&end, true, false, false));
-        assert!(!retries_review(&end, true, true, false));
+        assert_eq!(
+            retries_review(&end, true, false, false, false),
+            Some(RetryCause::Unreadable)
+        );
+        assert_eq!(retries_review(&end, true, true, false, false), None);
         assert!(matches!(review_end(pass(), &[]), ReviewEnd::Verdict(_)));
         let failed = verdict(json!({"verdict": "pass", "reasons": [], "summary": "ok",
             "agents": [{"agent": "design", "status": "failed"}]}));

@@ -4,8 +4,8 @@ type: design
 title: Supervisor and workspace lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-10-06
-last_verified: 2026-10-06
+updated: 2026-10-07
+last_verified: 2026-10-07
 scope: runtime
 related:
   - design-supervisor-lifecycle-task-replanning
@@ -74,7 +74,7 @@ ready task (dependencies completed)
       revise  → fixed request to the live session → rewritten receipt
                 → validate → review again (at most 2 revises)
       concern / 3rd non-pass → exit request → close → approve_landing ask
-      unreadable verdict     → review once more (review_retried)
+      unreadable / non-zero  → review once more (review_retried; once per review)
       review failed          → review span closed → exit request → close → approve_landing ask + review_failed
   → release run lease               ─┘
   → integrate (by hand, one at a time, FIFO by validation):

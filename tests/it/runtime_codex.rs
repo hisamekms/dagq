@@ -320,6 +320,9 @@ fn no_claude_codex_review_revise_reaches_the_worker_and_passes() {
     assert!(payloads(&detail, "review_failed").is_empty());
 }
 
+/// Under `--no-claude` a Codex review whose job fails (a general failure,
+/// not one that holds Codex) is reviewed once more on Codex (task 1984);
+/// when that fails too it asks a person, and Claude never starts.
 #[test]
 fn no_claude_codex_review_failure_asks_without_starting_claude() {
     let (dir, repo, db, backend, codex) = codex_fixture();
@@ -358,16 +361,26 @@ fn no_claude_codex_review_failure_asks_without_starting_claude() {
     // closed when the job ended.
     assert_eq!(failed[0]["session_id"], REVIEW_THREAD);
     assert_eq!(failed[0]["model"], REVIEW_MODEL);
+    assert_eq!(failed[0]["attempt"], 2);
+    let retried = payloads(&detail, "review_retried");
+    assert_eq!(retried.len(), 1, "{retried:?}");
+    assert_eq!(retried[0]["cause"], "job_failed");
+    assert_eq!(retried[0]["session_id"], REVIEW_THREAD);
     let spans = review_spans(&detail);
-    assert_eq!(spans.len(), 1, "{spans:?}");
-    assert_eq!(spans[0]["session_id"], REVIEW_THREAD);
-    assert_eq!(spans[0]["model"], REVIEW_MODEL);
+    assert_eq!(spans.len(), 2, "{spans:?}");
+    for span in &spans {
+        assert_eq!(span["session_id"], REVIEW_THREAD);
+        assert_eq!(span["model"], REVIEW_MODEL);
+    }
     let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
+    // The stats count the review's end, as before the retry.
     assert_eq!(jobs["by_model"][REVIEW_MODEL]["failed"], 1, "{jobs}");
-    assert_eq!(
-        payloads(&detail, "review_started")[0]["launch"]["provider"],
-        "codex"
-    );
+    let started = payloads(&detail, "review_started");
+    assert_eq!(started.len(), 2);
+    for started in started {
+        assert_eq!(started["launch"]["provider"], "codex");
+    }
+    assert!(reviewer.prompts().is_empty());
     assert_eq!(payloads(&detail, "ask_opened").len(), 1);
     assert!(payloads(&detail, "review_finished").is_empty());
 }

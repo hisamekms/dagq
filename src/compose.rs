@@ -227,7 +227,8 @@ pub struct ReleaseUpdateJob {
 pub struct SuperviseOptions {
     /// Explicit operator policy: never start Claude; unsupported roles wait for manual handling.
     pub no_claude: bool,
-    /// Retry an unreadable review once (the production default). Tests
+    /// Retry once a review whose verdict cannot be read or whose job exited
+    /// non-zero (the production default). Tests
     /// unrelated to review retries can skip the second headless job.
     /// No CLI or repository setting overrides this policy.
     pub retry_unreadable_review: bool,
