@@ -44,7 +44,7 @@ description: この repository の本番 queue の着地の流れ（スループ
 
 plugin の [reference/kpi.md](../../../plugins/claude-dagq/skills/dagq/reference/kpi.md) の「Raising throughput: the weekly review」の 1〜5 を、`~/.local/bin/dagq kpi --period week --last 4`（週）と `--period day`（日）で、この host の前提に当てはめて行う。
 
-この host の前提と当てはめの 1〜4（算数の確認・制約を 1 つ特定・枠の時間のパレート・外れ値）は [reference/weekly.md](reference/weekly.md)。docs/design の4指標を基準値と前週と並べる手順は同じ reference の「docs の4指標」。
+この host の前提と当てはめの 1〜4（算数の確認・制約を 1 つ特定・枠の時間のパレート・外れ値）は [reference/weekly.md](reference/weekly.md)。docs/design の4指標と M5（docs だけの衝突の種類）を基準値と前週と並べる手順は同じ reference の「docs の4指標」。
 
 5. **1 つだけ手を打ち、印を打つ提案をする**: 候補を 1 つに絞って人に提案する（設定・運用・host の変更は人が決め、効いた時点で人か planner が `dagq mark '<label>' --note '...'` を打つ。build・`--parallel`・Claude Code・`[run.env]` の変化は runtime が印にする）。`[run.env]` の値を変えるなら [operations.md](../../../docs/development/operations.md) の「`[run.env]`とtestの並列度の置き場」の理由と合わせて見直す
 

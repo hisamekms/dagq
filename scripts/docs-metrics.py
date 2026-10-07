@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Count the four docs metrics of goal 159 (task 1946) for a period [since, until).
+"""Count the docs metrics of goal 159 (tasks 1946 and 1966) for a period [since, until).
 
-Read-only: it reads main's Git history, a `dagq stats --since` JSON file and
-Claude Code's transcripts, and prints JSON or Markdown tables. The definitions
+Read-only: it reads main's Git history, a `dagq stats --since` JSON file,
+Claude Code's transcripts and `dagq events --full` JSON files, and prints JSON
+or Markdown tables. The definitions
 and the baseline are in docs/plans/docs-slim.md; the weekly procedure is in
 .claude/skills/throughput-review/reference/weekly.md.
 
@@ -47,6 +48,30 @@ and the baseline are in docs/plans/docs-slim.md; the weekly procedure is in
     grep/rg with a path operand under src/, whatever their time. The runs are
     those whose earliest worker conversation's first record is in the period,
     a run that read no src/ counting as 0; count, median and p90.
+- M5 docs-only conflicts by type, from `dagq events --full --kind ...` JSON
+  files (passed as files; several pages or periods may overlap):
+  - Which: the events of CONFLICT_KINDS whose payload has a non-empty
+    `conflicts` list (paths), one per event id over every file, with
+    `created_at` in [since, until). Docs-only: every
+    path of `conflicts` is under docs/; an event with any other path is not
+    counted (only `mixed`).
+  - merge_base: the payload's, else `git merge-base <main> <head>`. When main
+    or head is not an object of --repo or no merge base comes out, the event is
+    irreproducible.
+  - Per path: when it is missing at merge_base, main or head (added or
+    deleted), one hunk of type 5 without merge-file; else the hunks
+    (<<<<<<< to >>>>>>>) of `git merge-file -p --diff3` of main, merge_base
+    and head. A path with no hunk (the rebase applies commit by commit, so the
+    three ends may merge cleanly) is an irreproducible path.
+  - An event is classified when a path gives a hunk, its type is the heaviest
+    of its hunks' types (EVENT_ORDER), and it is partial too when some path
+    gives none; it is irreproducible when no path gives a hunk.
+  - A hunk's type (classify_hunk), the first that holds in HUNK_ORDER, over
+    the non-blank lines of its three sides: 1 every line is a frontmatter date
+    (updated, last_verified, created); 2 the merge_base side is empty and both
+    others are not; 5 every line starts with `|`; 3 every line starts with
+    `- `, `* ` or `<number>. ` after its indent; 4 any other hunk.
+  - Shares of the types are over the classified events.
 """
 
 import argparse
@@ -61,6 +86,7 @@ import shlex
 import statistics
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 
 DESIGN = "docs/design/"
@@ -99,6 +125,21 @@ RG_VALUE = {
     "--pre-glob", "--max-filesize", "--path-separator", "--color", "--colors",
 }
 SEPARATORS = {";", "|", "||", "&", "&&", "(", ")", "\n"}
+
+# M5: the event kinds that record a rebase conflict with its paths
+# (2026-10-07: conflict_precheck in src/application/supervise/landing.rs with
+# main, head, merge_base and conflicts; landing_recheck_failed from
+# src/domain/recheck.rs and integration_deferred from
+# src/application/integrate.rs with main, head and conflicts, no merge_base).
+CONFLICT_KINDS = ("conflict_precheck", "landing_recheck_failed", "integration_deferred")
+TYPES = {1: "frontmatter_date", 2: "append", 3: "list_item", 4: "paragraph", 5: "table_or_file"}
+# The order a hunk's type is tried in: the narrowest first.
+HUNK_ORDER = (1, 2, 5, 3, 4)
+# The order an event's type is chosen by, the heaviest (the hardest to merge
+# by a rule) first.
+EVENT_ORDER = (4, 5, 3, 2, 1)
+DATE_LINE = re.compile(r"(updated|last_verified|created):")
+LIST_LINE = re.compile(r"\s*([-*] |\d+\. )")
 
 
 def parse_time(text):
@@ -538,6 +579,147 @@ def m4(projects, since, until):
     }
 
 
+# --- M5 -------------------------------------------------------------------
+
+
+def try_git(repo, *args):
+    """git's exit status and stdout as bytes, never exiting."""
+    out = subprocess.run(["git", "-C", repo, *args], capture_output=True)
+    return out.returncode, out.stdout
+
+
+def load_events(paths):
+    """The events of the files (`dagq events` objects or bare lists), one per id."""
+    by_id = {}
+    for path in paths:
+        with open(path) as f:
+            data = json.load(f)
+        for event in data.get("events", []) if isinstance(data, dict) else data:
+            if isinstance(event, dict) and event.get("id") is not None:
+                by_id.setdefault(event["id"], event)
+    return [by_id[key] for key in sorted(by_id)]
+
+
+def hunks_of(merged):
+    """The (main, base, head) lines of each conflict hunk of a diff3 output."""
+    hunks, side = [], None
+    for line in merged.splitlines():
+        if line.startswith("<<<<<<<"):
+            side, current = 0, ([], [], [])
+        elif side is not None and line.startswith("|||||||"):
+            side = 1
+        elif side is not None and line.startswith("======="):
+            side = 2
+        elif side is not None and line.startswith(">>>>>>>"):
+            hunks.append(current)
+            side = None
+        elif side is not None:
+            current[side].append(line)
+    return hunks
+
+
+def classify_hunk(main, base, head):
+    """The type of a hunk, the first of HUNK_ORDER that holds."""
+    filled = lambda lines: [line for line in lines if line.strip()]
+    lines = filled(main) + filled(base) + filled(head)
+    tests = {
+        1: lambda: bool(lines) and all(DATE_LINE.match(line) for line in lines),
+        2: lambda: not filled(base) and bool(filled(main)) and bool(filled(head)),
+        5: lambda: bool(lines) and all(line.startswith("|") for line in lines),
+        3: lambda: bool(lines) and all(LIST_LINE.match(line) for line in lines),
+        4: lambda: True,
+    }
+    return next(kind for kind in HUNK_ORDER if tests[kind]())
+
+
+def path_hunks(repo, commits, path, tmp):
+    """The types of a path's hunks: one 5 when it is missing at one or two
+    of the commits, none when it is at none of them."""
+    versions = []
+    for commit in commits:
+        code, out = try_git(repo, "cat-file", "blob", f"{commit}:{path}")
+        versions.append(out if code == 0 else None)
+    if all(v is None for v in versions):
+        return []
+    if any(v is None for v in versions):
+        return [5]
+    files = []
+    for name, data in zip(("main", "base", "head"), versions):
+        files.append(os.path.join(tmp, name))
+        with open(files[-1], "wb") as f:
+            f.write(data)
+    out = subprocess.run(["git", "merge-file", "-p", "--diff3", "-L", "main", "-L", "base", "-L", "head",
+                          *files], capture_output=True)
+    # The exit status is the number of hunks up to 127; an error is above.
+    if out.returncode > 127:
+        return []
+    return [classify_hunk(*h) for h in hunks_of(out.stdout.decode(errors="replace"))]
+
+
+def m5(repo, paths, since, until):
+    days = (until - since).total_seconds() / 86400
+    conflicts, mixed = 0, 0
+    by_kind = {kind: 0 for kind in CONFLICT_KINDS}
+    classified = partial = irreproducible = paths_irreproducible = 0
+    event_types = {kind: 0 for kind in TYPES}
+    hunk_types = {kind: 0 for kind in TYPES}
+    with tempfile.TemporaryDirectory(prefix="docs-metrics-m5.") as tmp:
+        for event in load_events(paths):
+            payload = event.get("payload") or {}
+            files = payload.get("conflicts")
+            at = event.get("created_at")
+            if (event.get("kind") not in CONFLICT_KINDS or not isinstance(files, list) or not files
+                    or not isinstance(at, str) or not since <= parse_time(at) < until):
+                continue
+            conflicts += 1
+            if not all(isinstance(p, str) and p.startswith("docs/") for p in files):
+                mixed += 1
+                continue
+            by_kind[event["kind"]] += 1
+            main, head = payload.get("main"), payload.get("head")
+            base = payload.get("merge_base")
+            known = all(isinstance(c, str) and c and try_git(repo, "cat-file", "-e", f"{c}^{{commit}}")[0] == 0
+                        for c in (main, head))
+            if known and not (isinstance(base, str) and base):
+                code, out = try_git(repo, "merge-base", main, head)
+                base = out.decode().strip() if code == 0 else None
+            if not known or not base:
+                irreproducible += 1
+                continue
+            found, missing = [], 0
+            for path in files:
+                kinds = path_hunks(repo, (main, base, head), path, tmp)
+                if kinds:
+                    found += kinds
+                else:
+                    missing += 1
+            paths_irreproducible += missing
+            if not found:
+                irreproducible += 1
+                continue
+            classified += 1
+            partial += missing > 0
+            event_types[next(kind for kind in EVENT_ORDER if kind in found)] += 1
+            for kind in found:
+                hunk_types[kind] += 1
+    total = sum(by_kind.values())
+    return {
+        "kinds": list(CONFLICT_KINDS),
+        "conflict_events": conflicts,
+        "mixed_events": mixed,
+        "docs_events": {**by_kind, "total": total},
+        "docs_events_per_day": round(total / days, 2),
+        "classified": classified,
+        "partial": partial,
+        "irreproducible": irreproducible,
+        "types": {f"{kind}_{name}": {"events": event_types[kind], "share": ratio(event_types[kind], classified)}
+                  for kind, name in TYPES.items()},
+        "hunks": {"total": sum(hunk_types.values()),
+                  **{f"{kind}_{name}": hunk_types[kind] for kind, name in TYPES.items()}},
+        "paths_irreproducible": paths_irreproducible,
+    }
+
+
 # --- output ---------------------------------------------------------------
 
 
@@ -592,6 +774,19 @@ def markdown(out):
             + table(["runs", "runs with 0", "median chars", "p90 chars"],
                     [[r["runs"], r["zero_runs"], r["median_chars"], r["p90_chars"]]])
             + f"\n\nskipped: {json.dumps(m['skipped'], sort_keys=True)}")
+    if out.get("m5"):
+        m = out["m5"]
+        e = m["docs_events"]
+        parts.append("## M5 docs-only conflicts\n\n" + table(
+            ["conflict events", "mixed", *m["kinds"], "docs-only", "per day", "classified", "partial",
+             "irreproducible", "irreproducible paths"],
+            [[m["conflict_events"], m["mixed_events"], *[e[k] for k in m["kinds"]], e["total"],
+              m["docs_events_per_day"], m["classified"], m["partial"], m["irreproducible"],
+              m["paths_irreproducible"]]])
+            + "\n\nTypes (shares over the classified events)\n\n"
+            + table(["type", "events", "share", "hunks"],
+                    [[name, t["events"], t["share"], m["hunks"][name]] for name, t in m["types"].items()]
+                    + [["total", m["classified"], None, m["hunks"]["total"]]]))
     return "\n\n".join(parts) + "\n"
 
 
@@ -600,12 +795,15 @@ def main():
     parser.add_argument("--since", help="UTC start, YYYY-MM-DD or RFC 3339 (inclusive)")
     parser.add_argument("--until", help="UTC end, YYYY-MM-DD or RFC 3339 (exclusive)")
     parser.add_argument("--input", help="a JSON output saved earlier: print it as Markdown and read nothing else")
-    parser.add_argument("--repo", default=".", help="the repository (M1, M2)")
+    parser.add_argument("--repo", default=".", help="the repository (M1, M2, M5)")
     parser.add_argument("--ref", default="main", help="the branch whose history is read (M1, M2)")
     parser.add_argument("--stats", help="a file with the JSON of `dagq stats --since` (M3)")
     parser.add_argument("--claude-projects", help="Claude Code's projects dir, ~/.claude/projects (M4)")
-    parser.add_argument("--metrics", default="m1,m2,m3,m4",
-                        help="comma-separated metrics; M3 and M4 also need their input")
+    parser.add_argument("--events", nargs="+", action="extend", default=[],
+                        help="files with the JSON of `dagq events --full --kind ...` (M5); "
+                             "an event id in several files counts once")
+    parser.add_argument("--metrics", default="m1,m2,m3,m4,m5",
+                        help="comma-separated metrics; M3, M4 and M5 also need their input")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     args = parser.parse_args()
     if args.input:
@@ -619,7 +817,7 @@ def main():
         sys.exit("docs-metrics: --since must be before --until")
     wanted = set(args.metrics.split(","))
     out = {"since": iso(since), "until": iso(until), "ref": args.ref,
-           "m1": None, "m2": None, "m3": None, "m4": None}
+           "m1": None, "m2": None, "m3": None, "m4": None, "m5": None}
     if "m1" in wanted:
         out["m1"] = m1(args.repo, args.ref, since, until)
     if "m2" in wanted:
@@ -628,6 +826,8 @@ def main():
         out["m3"] = m3(args.stats)
     if "m4" in wanted and args.claude_projects:
         out["m4"] = m4(os.path.expanduser(args.claude_projects), since, until)
+    if "m5" in wanted and args.events:
+        out["m5"] = m5(args.repo, args.events, since, until)
     if args.format == "json":
         json.dump(out, sys.stdout, indent=2, ensure_ascii=False)
         print()

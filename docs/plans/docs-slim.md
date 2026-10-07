@@ -1,7 +1,7 @@
 ---
 id: plan-docs-slim
 type: plan
-title: docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）の定義と基準値
+title: docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）の定義と基準値
 status: active
 created: 2026-10-07
 updated: 2026-10-07
@@ -18,7 +18,7 @@ related:
 # docs/design の4指標の定義と基準値
 
 goal 159（request 44）の再発防止の4（計測）と、段4の前後比較の基準。
-4指標は `scripts/docs-metrics.py` が数え、`scripts/docs-metrics-test.py` が fixture（`scripts/docs-metrics-fixtures/`）で確かめる。
+4指標と M5（docs だけの衝突の件数と種類の内訳、request 46）は `scripts/docs-metrics.py` が数え、`scripts/docs-metrics-test.py` が fixture（`scripts/docs-metrics-fixtures/`）で確かめる。
 毎週の見直しで流して基準値と前週と並べる手順は `.claude/skills/throughput-review/reference/weekly.md` の「docs の4指標」が持つ。
 KPI（runtime）にしないのは、M4 が runtime の持たない会話記録を読み、M1・M2 は git で足りるため。
 
@@ -26,14 +26,15 @@ KPI（runtime）にしないのは、M4 が runtime の持たない会話記録�
 
 ```sh
 python3 scripts/docs-metrics.py --since 2026-09-29T00:00:00Z --until 2026-10-06T00:00:00Z \
-  --stats stats.json --claude-projects ~/.claude/projects --format json
+  --stats stats.json --claude-projects ~/.claude/projects --events events-*.json --format json
 ```
 
 - 期間は `--since` と `--until`（UTC、`[since, until)` の半開区間。日付だけなら 00:00Z）。
 - M1・M2 は `--repo`（既定は cwd）の `--ref`（既定は `main`）の履歴を読む。
 - M3 は `--stats` に `dagq stats --since <since>` の JSON を保存したファイルを渡す（script は queue を読まない）。
 - M4 は `--claude-projects` に Claude Code の会話記録の dir（`~/.claude/projects`）を渡す。
-- `--stats` と `--claude-projects` を省くと M3・M4 は `null`。`--metrics m1,m2` で選べる。`--format` は `markdown`（既定）か `json`。
+- M5 は `--events` に `dagq events --full --kind ...` の JSON を保存したファイル（複数可。頁送りの各頁）を渡し、`--repo` の git の object を読む。
+- `--stats`・`--claude-projects`・`--events` を省くと M3・M4・M5 は `null`。`--metrics m1,m2` で選べる。`--format` は `markdown`（既定）か `json`。
 
 ## 定義
 
@@ -74,6 +75,30 @@ python3 scripts/docs-metrics.py --since 2026-09-29T00:00:00Z --until 2026-10-06T
 - **(b) worker が src/ を読む量の run ごとの集計**: Read の `file_path` が `src/` 配下、Grep の `path` が `src/` を指す、Bash の grep/rg の path の引数が `src/` を指す呼び出しの tool_result の文字数を、worker の会話（その subagents を含む）だけで run ごとに合計し、run の数・0 の run の数・中央値・p90 を出す。
   - run への束ね方: 同じ dir（`-runs-<run id>-worktree`）の会話を1つの run とし、dir 名の run id を key にする。
   - 分母の run: その run の worker の会話の最初の記録の timestamp（会話が複数なら最も早いもの）が `[since, until)` に入る run。その run の記録は区間の外にかかるものも全て数え、`src/` を読まなかった run は 0 として数える。
+
+### M5 docs だけの衝突の件数と種類の内訳
+
+task 1957 の前後比較に足す、request 46 の衝突の種類の内訳（task 1966）。
+
+- **kind と欄**: `conflict_precheck`（`main`・`head`・`merge_base`・`conflicts`）、`landing_recheck_failed` と `integration_deferred`（`main`・`head`・`conflicts`、`merge_base` なし）。
+  2026-10-07 の `src/application/supervise/landing.rs`・`src/domain/recheck.rs`・`src/application/integrate.rs` で確かめ、script の `CONFLICT_KINDS` が持つ。
+  `conflicts` が空か無い event（送れずに取り下げた request、衝突でない `integration_deferred` など）は数えない。
+- **重複の除き方**: 入力の全てのファイルを通して event ID が同じものは1件（最初に読んだもの）。同じ run の別の event は別に数える。
+- **期間**: event の `created_at`（UTC）が `[since, until)` に入るもの。1日あたりは期間の日数（`until − since`）で割る。
+- **docs だけ**: `conflicts` の path が全て `docs/` 配下の event。1つでも外が混ざる event は数えず、`mixed_events` にだけ数える。
+- **merge_base の補い方**: payload の `merge_base` を使い、無ければ `git merge-base <main> <head>`（2つの commit が決まれば時刻に依らない）。`main` か `head` が `--repo` の object に無いか、merge-base が出なければ event は再現不可。
+- **再現**: path ごとに merge_base・main・head の版を取り、`git merge-file -p --diff3` の衝突の塊（`<<<<<<<` から `>>>>>>>`）を取り出す。
+  path が3つのうち1つか2つに無い（追加と削除）ときは merge-file にかけず種類 5 の塊1つ。3つ全てに無い path と塊の出ない path（rebase は commit ごとに当てるので端の3つの版では衝突しないことがある）は path 再現不可。
+- **event の扱い**: 1つ以上の path で塊が出れば分類済み、そのうち塊の出ない path があれば一部再現にも数える。どの path にも塊が出なければ（object の欠けを含む）再現不可。
+- **塊の種類**: 3つの側の空でない行で、1 → 2 → 5 → 3 → 4 の順に最初に当たるもの（狭いものから）。
+  - 1 frontmatter の日付の行: 全ての行が `updated:`・`last_verified:`・`created:` で始まる。
+  - 2 同じ位置への追記: merge_base の側が空で、main と head の側が空でない（`docs/adr/README.md` の表の末尾など。足した行が表の行や箇条書きでも 2）。
+  - 5 表の行とファイルの追加・削除: 全ての行が `|` で始まる。追加・削除の path は上の再現の規則で 5。
+  - 3 箇条書きの項目: 全ての行が字下げの後に `- `・`* `・`数字. ` で始まる。
+  - 4 段落: それ以外（種類の混ざった塊を含む）。
+- **event の種類**: 塊の出た path の塊の種類のうち、規則で合わせにくい重いものの順（4 段落 → 5 表とファイル → 3 箇条書き → 2 追記 → 1 日付）で最初のもの。
+- **割合の分母**: 種類ごとの event の割合は分類済みの event の数で割る。再現不可は分母に入れず件数を別に出す。塊の数は種類ごとと合計を出す。
+- 規則は request 46 の値に合わせて調整しない（proposal 739 の revise 1）。
 
 ## 基準値
 
@@ -129,7 +154,15 @@ request 44 の値は人の session がその場で数えたもので、対象の
 前の値は task 1957 が同じ script・同じ母集団で `[2026-09-29, 2026-10-06)` について求める。
 request 44 の全結果の中央値 1.1K・p90 6.9K は (a) の基準値に流用しない（全 tool_result の分位点から上位文書の grep の分位点は導けない）。
 
+### M5（参考の値: request 46、人の session の値）
+
+request 46（2026-10-06、人の session）が数えた docs の衝突 135件の内訳: 1 frontmatter の日付が 72件、2 同じ位置への追記が 18件、3 箇条書きが 29件、4 段落が 12件、5 表の行とファイルの追加・削除が 4件。
+分類の手順はこの script と別（その場の数え方）なので、上の定義と比べられる基準値ではない。
+
+script の基準の期間 `[2026-09-29, 2026-10-06)` の値は、worker が本番の queue を読まないので task 1957 が同じ script で求める。
+request 46 の値との差（件数と種類の違い）と理由（分類の規則・再現の仕方・対象の kind の違い）も task 1957 がここに書く。
+
 ## 保存
 
-週次の見直しは script の JSON の出力を `~/.local/share/dagq-hostmetrics/docs-slim/<since>_<until>.json`（UTC の日付）に保存し、前週と基準値はそこから読む。
+週次の見直しは script の JSON の出力を `~/.local/share/dagq-hostmetrics/docs-slim/<since>_<until>.json`（UTC の日付）に、M5 の入力の events の JSON を同じ dir の `events-<since>_<until>-<頁>.json` に保存し、前週と基準値はそこから読む。
 Claude Code は既定で30日より古い会話記録を消すので、基準の期間の M4 は 2026-10-28 より前に流して保存する。

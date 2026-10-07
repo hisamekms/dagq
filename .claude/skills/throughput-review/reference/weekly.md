@@ -17,18 +17,25 @@
 
 ## docs の4指標
 
-毎週の見直しで、docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）を `scripts/docs-metrics.py` で数え、基準値と前週と並べる。定義と基準値は [docs/plans/docs-slim.md](../../../../docs/plans/docs-slim.md)。repository の root（main が着地の branch の checkout）で、inbox か人が流す（M4 は数分かかる）。期間は先週の月曜 00:00Z から今週の月曜 00:00Z（`[since, until)`）。
+毎週の見直しで、docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と M5（docs だけの衝突の件数と種類の内訳）を `scripts/docs-metrics.py` で数え、基準値と前週と並べる。定義と基準値は [docs/plans/docs-slim.md](../../../../docs/plans/docs-slim.md)。repository の root（main が着地の branch の checkout）で、inbox か人が流す（M4 は数分かかる）。期間は先週の月曜 00:00Z から今週の月曜 00:00Z（`[since, until)`）。
 
 ```sh
 since=2026-10-12 until=2026-10-19   # 先週の月曜と今週の月曜（UTC の日付）に置き換える
 out=~/.local/share/dagq-hostmetrics/docs-slim; mkdir -p "$out"
 ~/.local/bin/dagq stats --since "${since}T00:00:00Z" --until "${until}T00:00:00Z" > "$out/stats-${since}_${until}.json"
+after=0 page=0; while :; do   # M5 の入力: 衝突の event を 1000 件ずつ --after で頁送りして保存
+  f="$out/events-${since}_${until}-$page.json"
+  ~/.local/bin/dagq events --full --kind conflict_precheck --kind landing_recheck_failed --kind integration_deferred \
+    --since "${since}T00:00:00Z" --until "${until}T00:00:00Z" --limit 1000 --after "$after" > "$f" || break
+  n=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["events"]))' "$f") || break; [ "$n" -lt 1000 ] && break
+  after=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["cursor"])' "$f") || break; page=$((page+1))
+done
 python3 scripts/docs-metrics.py --since "$since" --until "$until" --stats "$out/stats-${since}_${until}.json" \
-  --claude-projects ~/.claude/projects --format json > "$out/${since}_${until}.json"
+  --claude-projects ~/.claude/projects --events "$out/events-${since}_${until}-"*.json --format json > "$out/${since}_${until}.json"
 python3 scripts/docs-metrics.py --input "$out/${since}_${until}.json"   # 今週の表
 ls "$out"; python3 scripts/docs-metrics.py --input "$out/<前週の since>_<前週の until>.json"   # 前週の表
 ```
 
-- M3 は `dagq stats --since` の JSON（上で保存したファイル）を、M4 は `~/.claude/projects` を渡す。script は queue を読まない
-- 報告は指標ごとに今週・前週・docs-slim.md の基準値を並べる: M1 は最後の日の総 byte と1日あたりの伸び・30 KiB 超の数、M2 は2つの割合と追加・削除の行、M3 は docs の衝突の割合と控えの件数・expired・待ちの時間、M4 は docs と src の割合・grep/rg と範囲の Read の回数・中央値と p90、(a) 上位文書の grep の結果の中央値と p90、(b) worker の run ごとの src/ の読みの中央値と p90
-- **着地の後の最初の週次の見直しでは、基準の期間も流して保存する**: `since=2026-09-29 until=2026-10-06` にして上の 2〜5 行目を流し、`$out/2026-09-29_2026-10-06.json` を残す（M4 の同じ定義の前の値。task 1957 の前後比較が使う）。Claude Code は既定で30日より古い会話記録を消すので、2026-10-28 より前に流す
+- M3 は `dagq stats --since` の JSON（上で保存したファイル）を、M4 は `~/.claude/projects` を、M5 は `dagq events --full` の頁ごとの JSON（上の `events-*.json`。頁は返った件数が `--limit` に満たなければ終わり、満ちれば `cursor` を `--after` に渡して次を読む。`dagq events` か読み取りが失敗すると loop は止まるので、そのときは中身を確かめて流し直す）を渡す。script は queue を読まず、M5 は repository の git の object も読む
+- 報告は指標ごとに今週・前週・docs-slim.md の基準値を並べる: M1 は最後の日の総 byte と1日あたりの伸び・30 KiB 超の数、M2 は2つの割合と追加・削除の行、M3 は docs の衝突の割合と控えの件数・expired・待ちの時間、M4 は docs と src の割合・grep/rg と範囲の Read の回数・中央値と p90、(a) 上位文書の grep の結果の中央値と p90、(b) worker の run ごとの src/ の読みの中央値と p90、M5 は docs だけの衝突の件数と1日あたり・再現不可の数・種類 1〜5 の割合
+- **着地の後の最初の週次の見直しでは、基準の期間も流して保存する**: `since=2026-09-29 until=2026-10-06` にして上の 2〜12 行目を流し、`$out/2026-09-29_2026-10-06.json` と M5 の入力の `$out/events-2026-09-29_2026-10-06-*.json` を残す（M4 と M5 の同じ定義の前の値。task 1957 の前後比較が使う）。Claude Code は既定で30日より古い会話記録を消すので、2026-10-28 より前に流す
