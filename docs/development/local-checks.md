@@ -45,7 +45,7 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
 - 足した・変えたtestのstress（下の「stress」）
 - `tests/it`のtestを足した・変えたら、そのstressのnextestの出力に時間の関門のscript（下の「itのtestの時間の関門」）
 
-全部のtestは`integrate`の検証（runtimeのtaskでは`cargo llvm-cov nextest`（coverageの関門）、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`）がrebase後に1回だけ流す（仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md)）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の冒頭（`# Prompt`の節）のverification commandsの段落が持つ。例外は「resumeでの再現」の1つだけ。
+全部のtestは`integrate`の検証（runtimeのtaskでは`cargo llvm-cov nextest`（coverageの関門）、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`）がrebase後に1回だけ流す（仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md)）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md#workerのprompt)の「workerのprompt」のverification commandsの項が持つ。例外は「resumeでの再現」の1つだけ。
 
 subagent reviewは該当するときに実行し、しないときは理由をreceiptに書く。
 

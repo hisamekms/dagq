@@ -210,6 +210,10 @@ impl Inheritance {
 /// The other tasks a worker is told are executing alongside it: of the
 /// `in_progress` tasks (ID order), those sharing the task's goal, or all of
 /// them when the task has no goal; the task itself is never listed.
+///
+/// The supervisor claims one task at a time, so of two tasks claimed in
+/// the same pass only the later one lists the earlier. A task whose run
+/// waits to land or for a session is still `in_progress` and is listed.
 pub fn siblings_in_progress(task: &Task, in_progress: Vec<Task>) -> Vec<Task> {
     in_progress
         .into_iter()
@@ -437,6 +441,10 @@ pub(crate) fn local_checks(verify: &str) -> String {
 /// Context, Predecessor and Sibling sections are always present, `none`
 /// when empty, so the prompt keeps one shape whether or not a task has a
 /// goal, a context, dependencies or company.
+///
+/// The text is a snapshot at claim time and is never rewritten: a
+/// `goal edit` or a sibling's change made while the run works reaches only
+/// the prompt of a later claim.
 #[allow(clippy::too_many_arguments)]
 pub fn prompt(
     task: &Task,
@@ -3449,24 +3457,39 @@ pub const PLAN_REVIEW_PROMPT_LIMIT: usize = 400_000;
 /// instructions and the verdict's schema, the proposal's tasks and their
 /// expected files, the goals, `lint`, the language's instruction) take at
 /// most; past it their largest material is replaced by how to read it with
-/// the read-only dagq commands (ADR-t1566-1 decisions 2, 3).
+/// the read-only dagq commands (ADR-t1566-1 decisions 2, 3). Half the whole
+/// limit: an ordinary proposal's required sections take about half of this
+/// limit, so nothing is replaced, and past it the optional sections still
+/// keep the other half of the whole. Nothing is moved to a file of the job's directory.
 pub const PLAN_REVIEW_REQUIRED_LIMIT: usize = 200_000;
 
 /// Ready and in-progress tasks the plan review prompt gives in full at
-/// most, and the bytes of their full text.
+/// most, and the bytes of their full text. The full text was most of the
+/// prompt that could not start; the 20 that overlap the proposal most are
+/// enough to judge its dependencies, and the bytes keep one huge task from
+/// filling the section. The rest is read with `dagq show ID --full`.
 pub const QUEUED_FULL_TASKS: usize = 20;
 pub const QUEUED_FULL_BYTES: usize = 100_000;
 
-/// The bytes of the summaries of the ready and in-progress tasks.
+/// The bytes of the summaries of the ready and in-progress tasks, those
+/// that overlap first: about 96 lines of an average summary. The rest is
+/// read with `dagq list`.
 pub const QUEUED_SUMMARY_BYTES: usize = 64_000;
 
 /// Asks a person answered the plan review prompt quotes at most, newest
-/// first, and the bytes they take.
+/// first, and the bytes they take: one question and answer, each up to
+/// [`PRECEDENT_CHARS`] characters, may pass 2 KB in Japanese. Older ones
+/// are read with `dagq asks --all`.
 pub const PRECEDENT_ASKS: usize = 20;
 pub const PRECEDENT_BYTES: usize = 16_000;
 
 /// The bytes of the conflict hotspots, of the duplicate candidates and of
-/// the other proposals.
+/// the other proposals. The hotspots (about 5 KB) are kept first, as the
+/// dependencies are judged by them. The candidates take about 4 KB a task,
+/// and the rest are found with `dagq related` / `dagq search`. The other
+/// proposals carry their tasks' whole description and acceptance, so they
+/// grow with the proposals waiting; the rest is read with
+/// `dagq proposal show ID`.
 pub const HOTSPOT_BYTES: usize = 16_000;
 pub const CANDIDATE_BYTES: usize = 48_000;
 pub const OTHER_PROPOSAL_BYTES: usize = 48_000;
@@ -3515,6 +3538,12 @@ const OPTIONAL_SECTIONS: usize = 6;
 /// The sections add up to `total`; `omitted` counts, by section, the items
 /// left out or replaced by how to read them; `over_limit` says why the
 /// required sections were cut, when they were.
+///
+/// `omitted` counts an item once only where it is chosen by
+/// `Fit::lines` or is the draft planner's `origin` section as a whole.
+/// The draft planner's `drafts` and the planners' `asks` and `goals`
+/// (`planner_asks`, `planner_goals`) add a field's cut and an item
+/// left out separately, so one item may count more than once there.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PromptBytes {
     pub total: usize,
@@ -3913,7 +3942,9 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<PlanRevie
 
     // The optional sections, in the order they keep their room: the
     // hotspots, the duplicate candidates, the other proposals, the asks a
-    // person answered, the full text, the summaries.
+    // person answered, the full text, the summaries. What bears on the
+    // dependencies and duplicates comes first; the summaries, which a CLI
+    // list replaces most easily, come last.
     let touching = |path: &str, ids: &mut dyn Iterator<Item = TaskId>| {
         ids.filter(|&id| crate::domain::claim_defer::touches(expected(id), path))
             .collect::<Vec<_>>()

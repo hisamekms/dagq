@@ -310,12 +310,6 @@ path = "docs/design/supervisor-lifecycle/prompt-waiting.md"
 tasks = 3
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/prompt.md"
-size = 61635
-line = 2753
-tasks = 65
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/push.md"
 tasks = 3
 
