@@ -788,7 +788,10 @@ impl SqliteQueue {
     /// Record the stop of the run's session (its background wrapper; before
     /// ADR-t1433-3, a confirmed cmux close). Only an accepted run whose
     /// session is still recorded as open qualifies; the worktree and branch
-    /// stay for integration.
+    /// stay for integration. The stop is a column (`workspace_closed_at`),
+    /// not derived from events, so `doctor`, `recover` and landing find the
+    /// sessions not yet stopped in one query, and a retry after
+    /// `cleanup_failed` need not order those events.
     pub fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(

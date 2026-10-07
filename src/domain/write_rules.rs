@@ -1,8 +1,14 @@
 //! The rules a SQLite CHECK held that no domain type expresses
 //! (ADR-t876-1): the write port checks them before it writes, and a broken
 //! one is an error instead of a row. Rules a type holds (a `string_enum!`
-//! column, a validated input) are not repeated here; the list of every
-//! CHECK and where its rule lives is in `docs/design/persistence.md`.
+//! column, a validated input) are not repeated here, and neither are rules
+//! the port's way of writing keeps: both columns of a pair set in one
+//! statement, JSON serialized from a typed value, a constant in the SQL.
+//! A reader that meets a value outside a rule stops with an error and does
+//! not repair the row (fail closed), except the open kinds of asks and
+//! events (ADR-0073) and the few columns read leniently (a task's `change`,
+//! an ask's `confidence` and `topics`). Each rule has a test that refuses
+//! its violation at the type, the validation or the write port.
 
 use super::{DomainError, RunId, TaskId, error::require};
 

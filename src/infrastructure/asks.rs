@@ -942,7 +942,11 @@ pub(super) fn close_asks_in(
 }
 
 /// The `subject` of a `planner_question` about planning request `id`:
-/// `request:<id>`.
+/// `request:<id>`. The request also goes in `subject` because the partial
+/// unique index `asks_open` keeps one open ask per task, run, kind, reason,
+/// subject and finding but not per request: two requests' questions name no
+/// task, run or finding and would collide. Rebuilding a unique index is not
+/// a compatible migration, so the index stays as it is.
 pub(super) fn request_ask_subject(id: crate::domain::RequestId) -> String {
     format!("request:{id}")
 }

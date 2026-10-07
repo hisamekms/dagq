@@ -1,3 +1,23 @@
+//! The queue's SQLite store of tasks, goals, dependencies, claims and lists
+//! (ADR-0013). A row is restored into its domain aggregate (`Task`, `Goal`,
+//! `TaskRun`), handed to a domain command, and the aggregate that comes back
+//! is written; the store decides nothing a command decides. A row the
+//! aggregate refuses to restore is a read error, never a default.
+//!
+//! Every state change runs in one `BEGIN IMMEDIATE` transaction with the
+//! events it records. A `WHERE status=<the status read>` or
+//! `AND supervisor_token=<token>` on an update only detects a concurrent
+//! change (which the immediate transaction normally rules out); it is not
+//! where a transition is allowed. A new row takes its ID from `next_id`
+//! inside the same transaction, so a refused insert rolls back without
+//! spending an ID. The only rule left in SQL is cycle detection over the
+//! whole dependency graph (a recursive CTE over task, goal and membership
+//! edges); whether to refuse, and the error, are the domain's.
+//!
+//! A planning command passes the task state it was authorized on; the
+//! `*_authorized` writes compare it right after the transaction opens and
+//! refuse without writing when it changed. Writers that are not authorized
+//! per command (the supervisor's landing, draft planners) skip the check.
 use crate::domain::event_kind::{self, EventKind};
 use std::{
     collections::BTreeMap,

@@ -1,5 +1,17 @@
 //! Leases, heartbeats, supervisor registrations, run processes and the
 //! repository binding ([`RunCoordination`]).
+//!
+//! A lease is its own table rather than columns of `task_runs`, so the run's
+//! record and the ownership that comes and goes do not mix (ADR-0007).
+//! `run_leases.token` matches `supervisors.token`, which `status` and
+//! `doctor` join on, but there is no foreign key: `integrate` holds a lease
+//! without registering. What a registration row says of its process
+//! (`mode`, `binary_version`, the handoff marks) lives and dies with the row,
+//! not in a file next to the queue that would outlive the process and need
+//! its own staleness rules. Only `supervise` itself, `up` and `down`
+//! remove registrations; `status`, `doctor`, `recover` and
+//! `integrate` never do, and a supervisor that ends on a failed heartbeat
+//! leaves its row to show as stale.
 
 use super::*;
 

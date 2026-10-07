@@ -3,7 +3,8 @@
 //! give, each candidate with the clues that scored it. Nothing here reads
 //! meaning: a person or an LLM judges the few candidates it lists.
 //!
-//! The clues and their weights (docs/design/persistence.md lists them):
+//! The clues and their weights (the constants below; ADR-0063 lets them
+//! change without a new decision, with `tests/it/related.rs` kept in step):
 //! declared `paths` that overlap, file names, test names (snake_case
 //! identifiers of three or more words, `--test NAME`, and the module of
 //! `--test it <module>::`), ADR IDs (`ADR-0046`, `ADR-t598-1`) and

@@ -1136,6 +1136,14 @@ fn use_revisit(
 /// Record that the draft `task` is a ready task plan review reopened and
 /// whose proposal was withdrawn (origin `reopened`, task 418), inside the
 /// caller's write transaction; a later withdrawal replaces the material.
+///
+/// `draft_reopens` is a table of its own, not an origin in `draft_origins`,
+/// because widening that origin would rebuild the table (a breaking
+/// migration) and an older binary could not read the new origin; an older
+/// binary just opens no planner for such a draft. The row counts only while
+/// its material's `proposal_id` is the task's current proposal, and it is
+/// read before `draft_origins`, so a follow-up that was adopted and later
+/// reopened shows as `reopened`. It is not counted as a registered draft.
 pub(super) fn record_reopened(
     conn: &Connection,
     task: TaskId,

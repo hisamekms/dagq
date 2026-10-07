@@ -79,12 +79,6 @@ line = 6880
 tasks = 27
 
 [[doc]]
-path = "docs/design/persistence.md"
-size = 155989
-line = 5532
-tasks = 43
-
-[[doc]]
 path = "docs/design/plugin-integration.md"
 size = 55208
 line = 4652

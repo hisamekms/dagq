@@ -42,7 +42,9 @@ impl SqliteQueue {
 
     /// [`Self::set_finding_status`], a dismissal with the open task that
     /// covers a `ci_failure` finding (`finding dismiss --covered-by`,
-    /// ADR-t1920-1) written with it in the same transaction.
+    /// ADR-t1920-1) written with it in the same transaction. The column has
+    /// no foreign key (a compatible migration cannot add one), so only a task
+    /// just read in this transaction is written.
     pub fn set_finding_status_covered(
         &mut self,
         id: FindingId,
