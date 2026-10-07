@@ -40,7 +40,7 @@ A task that registers no `--paths` (code, per the repository's rules) has nothin
 - plan review, to find duplicates and partial overlaps with other tasks; tasks that merely touch the same files, even the stats' conflict hotspots, get no dependency for it: the runtime's claim deferral holds a task back from hot files, and rebase or the landing resolves the rest;
 - `related`, whose clues include file names in a task's text, so `related` ranks the right completed tasks higher, and their landed files are what the runtime forecasts this task will touch.
 
-The list is a forecast, not a limit: the worker may change other files as the work needs, and nothing checks the list (`lint` does not require it). Do not write it as `--paths` instead: `--paths` declares what a run may change, and a path outside it parks the run (`scope_violation`); and the runtime forecasts from declared `--paths` instead of `related` when a task has them, so a wide glob matches more hot files and the supervisor defers claiming the task more often.
+The list is a forecast, not a limit: the worker may change other files as the work needs, and nothing checks the list (`lint` does not require it). Do not write it as `--paths` instead: `--paths` declares what a run may change, and a path outside it parks the run (`scope_violation`); and the forecast does not need the list there. Of a task's declared `--paths`, only the concrete paths stand in for `related`'s forecast; a path with a wildcard (`*`, `**`, `?`) forecasts nothing, and when no concrete path is left, the runtime forecasts from the landed diffs of the most similar completed tasks `related` finds, as for a task without `--paths`.
 
 ## What happens outside the paths
 
