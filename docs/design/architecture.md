@@ -140,7 +140,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **操作**
 
-- application: `application::stats`・`application::areas`・`application::marks`（`mark`・`mark --retract`。`MarkLog`と注入した`Clock`越し。task 1548が`compose`から移した）・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`（行き先の`job_start_route`はobserverと共有する。その結果の値`JobStartRoute`は共有の部品の`domain::actor_model`にあり、実行と着地の復旧jobも読む。task 1225）・`observer`（observerとスループットの見直しのjobの終わりの`provider_unusable`・`error`・`output.out`を読んで値`UnusableFinish`にし（`Supervisor::unusable_of`）、読むかの判断`retries_unusable`（規則は`domain::actor_model::records_unusable`）を持つ。控えるのは実行と着地の`supervise::provider::hold_unusable`に値で渡し、Codexは`ProviderHold`、Claudeは`[provider_fallback] jobs = false`のときだけ認証・利用上限で控えのask（`jobs::raise_job_wall`、`HoldJob::Observer`・`HoldJob::ThroughputReview`）、起動の失敗で`ProviderHold`。task 1223、task 1858）・`ci_watch`（CIの見張りのpassとjob。時刻は注入した`Clock`）。`application::ci_watch`（1回の確かめ`check`と、一覧の読み手`known_failures`・`status`・`doctor`。portは`RunLog`と`QueueRecords`だけを取る。task 1921）。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`。task 251がレイヤーの外から移した）・`application::throughput_review`（スループットの見直しのjob。promptの組み立てと`ACCESS`。portは`ThroughputReviewSources`と`ThroughputReviewHost`。task 1615がレイヤーの外から移した）。組み立ては`compose::throughput_review`・`compose::throughput_review_launch`・`compose::observe`・`compose::observer_launch`（手で打つ`observe`の`[roles.observer]`。task 1223）。レイヤーの外の`src/view.rs`。
+- application: `application::stats`・`application::areas`・`application::marks`（`mark`・`mark --retract`。`MarkLog`と注入した`Clock`越し。task 1548が`compose`から移した）・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`（行き先の`job_start_route`はobserverと共有する。その結果の値`JobStartRoute`は共有の部品の`domain::actor_model`にあり、実行と着地の復旧jobも読む。task 1225）・`observer`（observerとスループットの見直しのjobの終わりの`provider_unusable`・`error`・`output.out`を読んで値`UnusableFinish`にし（`Supervisor::unusable_of`）、読むかの判断`retries_unusable`（規則は`domain::actor_model::records_unusable`）を持つ。控えるのは実行と着地の`supervise::provider::hold_unusable`に値で渡し、Codexは`ProviderHold`、Claudeは`[provider_fallback] jobs = false`のときだけ認証・利用上限で控えのask（`jobs::raise_job_wall`、`HoldJob::Observer`・`HoldJob::ThroughputReview`）、起動の失敗で`ProviderHold`。task 1223、task 1858）・`ci_watch`（CIの見張りのpassとjob。時刻は注入した`Clock`）。`application::ci_watch`（1回の確かめ`check`と、一覧の読み手`known_failures`・`status`・`doctor`。portは`RunLog`と`QueueRecords`だけを取る。task 1921）。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`）・`application::throughput_review`（スループットの見直しのjob。promptの組み立てと`ACCESS`。portは`ThroughputReviewSources`と`ThroughputReviewHost`と、`jobs = false`でClaudeの壁を読む`AgentSignals`）。組み立ては`compose::throughput_review`・`compose::throughput_review_launch`・`compose::observe`・`compose::observer_launch`（手で打つ`observe`の`[roles.observer]`。task 1223）。レイヤーの外の`src/view.rs`。
 - CLI: `events`・`watch`・`stats`・`kpi`・`report`・`forecast`・`mark`・`marks`・`timeline`・`finding`・`findings`・`ci failures`・`observe`・`throughput-review`・`note`・`notes`、`status`の読み取り（`ci`の欄を含む）と`doctor`の`ci_watch`。
 - infrastructure: `findings`・`observer`（observerのファイル・設定・headlessのagentのprocess）・`throughput_review`（見直しのdirのファイル・`[roles.throughput_review]`・hostの時間帯・agentのprocess）・`runtime_store::queue_records`・`kpi_config`・`kpi_push`・`report_config`・`d2`・`transcripts`・`claude_turns`・`codex_turns`・`ci_watch`（hostの`gh`とmain checkoutのGitを読むadapter `GhSource`、`up`のpreflight、`doctor`の`ci_watch`の材料）・`ci_watch_store`（`SqliteQueue`のCIの見張りのeventと`findings`の書き込み）。
 
@@ -153,8 +153,8 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **許す依存の向き**
 
-- 他のcontextの状態とeventを読むだけで、他のcontextのtableを書かず、他のcontextの操作（claim・遷移・answerの適用）を呼ばない（ADR-t1545-1決定2）。例外は1つ: timerのjobの終わりで使えなかったproviderを、実行と着地が公開する`Supervisor::hold_unusable`に値で渡して控えさせる（上の実行と着地の「公開するport」。task 1223、task 1858）。
-- 書くのは自分の種類のeventと`findings`と、findingに紐づく`blocked`のask（共有の部品）だけ。`hold_unusable`を通した`provider_held`とqueueのhold askへの参加は実行と着地が書く。
+- 他のcontextの状態とeventを読むだけで、他のcontextのtableを書かず、他のcontextの操作（claim・遷移・answerの適用）を呼ばない（ADR-t1545-1決定2）。`Supervisor::hold_unusable`への今の依存はこれに反する（「今の違反と行き先」のC2）。
+- 書くのは自分の種類のeventと`findings`と、findingに紐づく`blocked`のask（共有の部品）だけ。
 
 **境界をまたぐtransaction**: 無い（T6はこのcontextの`findings`を計画管理が書くもの）。
 
@@ -282,6 +282,7 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 | --- | --- | --- | --- |
 | L5 | `src/application`の`Instant::now`（2026-10-04で109箇所。多いのは`lifecycle.rs`・`supervise/adopt.rs`。`supervise/revise.rs`・`reopen.rs`・`resume.rs`・`session.rs`の21箇所はtask 1557が注入した`Clock::monotonic`に置き換えて0） | 判断が実時間を読む | task 1558（stall・stall_recovery・adopt）。残りは計測（task 1559）の後に判断 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | task 1620 |
+| C2 | `supervise::observer`・`supervise::throughput_review`から`Supervisor::hold_unusable` | 観測と分析が控え（`ProviderHold`・`provider_held`・控えのask）を書かせる（決定2） | task 1999 |
 | C3 | `src/application/supervise/mod.rs`の`Supervisor`と、`impl Supervisor`を持つ`supervise/`の39のsubmodule（2026-10-04） | 全てのcontextの欄を1つのstructで共有し、submoduleが互いの欄を変える | task 1552・1553 |
 | C4 | `Box<dyn Queue>`・`&mut dyn Queue`・`QueueOpener`を取るuse case（`application::lifecycle`・`update`・`install`・`health`・`supervise`ほか） | 要るportだけを取っていない | task 1555（観測と分析・host運用）、task 1553（実行と着地） |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | task 1554 |

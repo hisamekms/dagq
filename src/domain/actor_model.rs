@@ -735,10 +735,6 @@ mod tests {
         ));
     }
 
-    /// With `[provider_fallback] jobs` off a job whose role names its
-    /// provider waits for that provider when it cannot be used, whichever
-    /// provider and reason; `--no-claude` still moves a Claude role to
-    /// Codex (ADR-t1857-1).
     /// A job that waits says why: with the fallback off, for its own
     /// provider (the other one may be usable); otherwise because neither
     /// provider can run it, as for `--no-claude` with the fallback off
@@ -772,6 +768,10 @@ mod tests {
         );
     }
 
+    /// With `[provider_fallback] jobs` off a job whose role names its
+    /// provider waits for that provider when it cannot be used, whichever
+    /// provider and reason; `--no-claude` still moves a Claude role to
+    /// Codex (ADR-t1857-1).
     #[test]
     fn with_the_fallback_off_a_job_waits_for_its_own_provider() {
         let mut models = RoleModels::default();

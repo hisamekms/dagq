@@ -186,11 +186,11 @@ impl Supervisor<'_> {
         job: &HoldJob,
         switchable: bool,
     ) -> Option<(Provider, SwitchReason)> {
-        let (wall, unusable) = job_failure_route(provider, failure, switchable, self.fallback.jobs);
+        let (wall, unusable) = job_failure_route(provider, failure, switchable);
         if let Some(wall) = wall {
             self.raise_job_wall(wall, job, error);
         }
-        let (reason, hold, _) = unusable?;
+        let (reason, hold) = unusable?;
         if hold && let Err(held) = self.hold_provider(provider, reason, None, said) {
             warn!(error = %format_args!("{held:#}"), "{} could not be held after the headless {} failed: {held:#}", provider.as_str(), job.entry());
         }
@@ -602,25 +602,23 @@ pub(super) fn again_on(fallback: bool, provider: Provider) -> String {
 /// What a headless job of `provider` that failed with `failure` leads to
 /// (task 438, ADR-t1063-1 decisions 4 and 5): the wall Claude's job raises
 /// the queue's hold ask for, and, for a role that names its provider
-/// (`switchable`), why `provider` cannot be used, whether it is held for
-/// that (not when the hold ask holds it already) and whether the job moves
-/// to the other provider. With `[provider_fallback] jobs` off (`fallback`
-/// false, ADR-t1857-1) the failure is told and held the same, and the job
-/// does not move: it waits for `provider` to be usable again.
+/// (`switchable`), why `provider` cannot be used and whether it is held for
+/// that (not when the hold ask holds it already). `[provider_fallback] jobs`
+/// (ADR-t1857-1) does not change either: whether the job moves to the other
+/// provider or waits for `provider` is the caller's route.
 pub(super) fn job_failure_route(
     provider: Provider,
     failure: JobFailure,
     switchable: bool,
-    fallback: bool,
 ) -> (
     Option<crate::domain::queue_hold::Wall>,
-    Option<(SwitchReason, bool, bool)>,
+    Option<(SwitchReason, bool)>,
 ) {
     let wall = failure.wall().filter(|_| provider == Provider::Claude);
     let unusable = failure
         .switch_reason()
         .filter(|_| switchable)
-        .map(|reason| (reason, wall.is_none(), fallback));
+        .map(|reason| (reason, wall.is_none()));
     (wall, unusable)
 }
 
@@ -906,43 +904,39 @@ mod tests {
     }
 
     /// A failed job's provider: Claude's login or usage limit raises the
-    /// queue's hold ask, a role that names its provider moves, and a
-    /// provider not held by the ask is held for it; Codex raises no ask.
-    /// With `[provider_fallback] jobs` off the same failure is held the
-    /// same and does not move (ADR-t1857-1).
+    /// queue's hold ask, and a role that names its provider holds a
+    /// provider not held by the ask; Codex raises no ask.
     #[test]
     fn a_failed_job_raises_the_hold_ask_or_holds_its_provider() {
         use crate::domain::queue_hold::Wall;
         use Provider::{Claude, Codex};
-        for fallback in [true, false] {
-            assert_eq!(
-                job_failure_route(Claude, JobFailure::UsageLimit, true, fallback),
-                (
-                    Some(Wall::UsageLimit),
-                    Some((SwitchReason::UsageLimit, false, fallback))
-                )
-            );
-            assert_eq!(
-                job_failure_route(Claude, JobFailure::Authentication, false, fallback),
-                (Some(Wall::Authentication), None)
-            );
-            assert_eq!(
-                job_failure_route(Claude, JobFailure::LaunchFailed, true, fallback),
-                (None, Some((SwitchReason::LaunchFailed, true, fallback)))
-            );
-            assert_eq!(
-                job_failure_route(Codex, JobFailure::Authentication, true, fallback),
-                (None, Some((SwitchReason::Authentication, true, fallback)))
-            );
-            assert_eq!(
-                job_failure_route(Codex, JobFailure::UsageLimit, false, fallback),
-                (None, None)
-            );
-            assert_eq!(
-                job_failure_route(Claude, JobFailure::Other, true, fallback),
-                (None, None)
-            );
-        }
+        assert_eq!(
+            job_failure_route(Claude, JobFailure::UsageLimit, true),
+            (
+                Some(Wall::UsageLimit),
+                Some((SwitchReason::UsageLimit, false))
+            )
+        );
+        assert_eq!(
+            job_failure_route(Claude, JobFailure::Authentication, false),
+            (Some(Wall::Authentication), None)
+        );
+        assert_eq!(
+            job_failure_route(Claude, JobFailure::LaunchFailed, true),
+            (None, Some((SwitchReason::LaunchFailed, true)))
+        );
+        assert_eq!(
+            job_failure_route(Codex, JobFailure::Authentication, true),
+            (None, Some((SwitchReason::Authentication, true)))
+        );
+        assert_eq!(
+            job_failure_route(Codex, JobFailure::UsageLimit, false),
+            (None, None)
+        );
+        assert_eq!(
+            job_failure_route(Claude, JobFailure::Other, true),
+            (None, None)
+        );
     }
 
     /// `[roles.goal_review]` gives the job its model and effort, recorded
