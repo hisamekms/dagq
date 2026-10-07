@@ -139,8 +139,8 @@ runtimeが起動するsessionとjobは、kindごとの区間（`session_opened` 
 - 終わりのeventの無いまま次の開始が来た区間は推定（`inferred`）で閉じ、時刻はtranscriptの最後のレコードに寄せる。
 - 失敗したreviewの`review_failed`はworkerの`/exit`の後に書かれるので、supervisorはjobが終わった時点で区間を閉じ、区間に`/exit`の待ちを入れない。
 - hookの区間は`SessionEnd`を取り逃しうる。
-  workspaceの無い区間は同じkindの別sessionの開始で閉じる（[ADR-t655-1](../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)）。
-  workspaceのある区間は、cmuxを呼ばないsupervisor（ADR-t1433-1）が閉じない。
+  workspaceの無い区間は同じkindの別sessionの開始で閉じる（ADR-t655-1）。
+  plannerの行・wrapper・後の別sessionのinboxから終わった区間は、supervisorがcmuxを呼ばず推定で閉じて取り込む（`inferred_hook_closes`、ADR-t2022-1）。
   常駐sessionの長いidleを終了と取り違えないため、経過時間では閉じない。
 - `/clear`の`SessionEnd`と次の`SessionStart`が両方来ても、閉じた区間への2回目の終了は何も書かないので二重に数えない。
 - 非対話のruntimeのplannerの区間はhookでなくturnから記録し、turnの`claude -p`がhookを走らせても`record_hook`は書かない。

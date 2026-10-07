@@ -2079,6 +2079,14 @@ pub trait SessionRegistry {
         &self,
         hook: &crate::domain::sessions::SessionHook,
     ) -> Result<serde_json::Value>;
+    /// The open spans the hook recorded (inbox and planner sessions'),
+    /// oldest first.
+    fn open_hook_session_spans(&self) -> Result<Vec<crate::domain::sessions::OpenSpan>>;
+    /// Close, as `inferred`, the hook's spans among `ended` still open:
+    /// their session is over without a `SessionEnd` (ADR-t2022-1). Each
+    /// takes in its transcript and ends at its last record. Returns how
+    /// many it closed.
+    fn close_inferred_sessions(&self, ended: &[EventId]) -> Result<usize>;
     /// Close the run's review span still open, as `job_finished` now: its
     /// headless job ended (or could not start) without a verdict, and its
     /// `review_failed` waits for the session's `/exit` (task 541); returns

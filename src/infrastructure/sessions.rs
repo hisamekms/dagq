@@ -2057,6 +2057,46 @@ fn planner_anchor(
     Ok((task, Some(proposal), proposal_goals(conn, Some(proposal))?))
 }
 
+/// The open spans the hook recorded, oldest first: what the supervisor
+/// judges for [`crate::domain::sessions::inferred_hook_closes`].
+pub(super) fn hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
+    open_hook_spans(conn)
+}
+
+/// Close, as `inferred`, the spans the hook recorded that are among
+/// `ended` and still open: their session is over and their `SessionEnd`
+/// never came (ADR-t2022-1). Unlike a hook's close, each takes in its
+/// transcript now (ADR-t655-1 decision 1) and ends at its last record (now
+/// when it cannot be read, ADR-0048 decision 7). Returns how many it
+/// closed.
+pub(super) fn close_inferred_hook_spans(conn: &Connection, ended: &[EventId]) -> Result<usize> {
+    let spans: Vec<OpenSpan> = open_hook_spans(conn)?
+        .into_iter()
+        .filter(|span| ended.contains(&span.opened_event_id))
+        .collect();
+    if spans.is_empty() {
+        return Ok(0);
+    }
+    let closing: Vec<(OpenSpan, &'static str)> =
+        spans.iter().map(|span| (span.clone(), INFERRED)).collect();
+    let _read = read_before(conn, Closing::Spans(&closing))?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let now = now(&tx)?;
+    let mut closed = 0;
+    // Found outside the write lock; checked again under it one by one, so a
+    // span a hook closed meanwhile is not closed twice.
+    for span in &spans {
+        if span_closed(&tx, span.opened_event_id)? {
+            continue;
+        }
+        let task = span_task(&tx, span)?;
+        close(&tx, &now, task, None, span, INFERRED)?;
+        closed += 1;
+    }
+    tx.commit()?;
+    Ok(closed)
+}
+
 /// The open spans of the job of the queue an event of `kind` is about
 /// ([`queue_span_kind`]: the observer's or the throughput review's), or
 /// `None` when it is not an event of the queue's spans.
@@ -4778,6 +4818,47 @@ mod tests {
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.task_id, Some(first));
         assert_eq!(closed.payload["reason"], crate::domain::sessions::EXITED);
+    }
+
+    /// The hook's spans the supervisor found over close as inferred, at
+    /// their transcript's last record, taking it in at once (ADR-t2022-1,
+    /// ADR-t655-1 decision 1); the others stay open, and a span closed
+    /// already is not closed again.
+    #[test]
+    fn hook_spans_found_over_close_as_inferred_at_their_last_record() {
+        use crate::domain::sessions::{INBOX, PLANNER};
+        let dir = tempfile::tempdir().unwrap();
+        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &queue.conn;
+        record_hook(
+            conn,
+            &hook(dir.path(), Some("startup"), INBOX, "s-1", "W-1"),
+        )
+        .unwrap();
+        record_hook(
+            conn,
+            &hook(dir.path(), Some("startup"), PLANNER, "s-2", "W-2"),
+        )
+        .unwrap();
+        let start = retime(conn, 0, 100);
+        hook_transcript(dir.path(), "s-2", start, &[(5, 25)], 30);
+        let spans = hook_spans(conn).unwrap();
+        assert_eq!(
+            spans.iter().map(OpenSpan::kind).collect::<Vec<_>>(),
+            [INBOX, PLANNER]
+        );
+        let ended = [spans[1].opened_event_id];
+        assert_eq!(close_inferred_hook_spans(conn, &ended).unwrap(), 1);
+        assert_eq!(close_inferred_hook_spans(conn, &ended).unwrap(), 0);
+        assert_eq!(close_inferred_hook_spans(conn, &[]).unwrap(), 0);
+        let closed = &of_kind(&queue, SESSION_CLOSED)[0];
+        assert_eq!(closed.payload["kind"], "planner");
+        assert_eq!(closed.payload["reason"], INFERRED);
+        assert_eq!(closed.payload["active_secs"], 20);
+        assert!(closed.payload.get("active_unavailable").is_none());
+        assert_eq!(closed.created_at, millis_text(start + 30_000));
+        assert_eq!(hook_spans(conn).unwrap().len(), 1);
     }
 
     /// An event about a run that names no task is refused before the write

@@ -541,56 +541,104 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     assert!(candidate(&queue));
 }
 
-/// ADR-t1433-1 decision 1: the supervisor lists no cmux workspace, so it
-/// no longer closes as inferred the inbox and planner spans whose
-/// workspace looks gone; their hooks' `SessionEnd` closes them.
+/// ADR-t2022-1: the supervisor closes, as inferred and without listing
+/// cmux, the hook's spans whose session is over though no `SessionEnd`
+/// came: a runtime planner's whose row is closed, a person's planner's
+/// (its row closed as `person_retired`), and an inbox's that a later inbox
+/// session in another workspace followed. The later inbox session, resumed
+/// in a third workspace, goes on in its span.
 #[test]
-fn the_supervisor_leaves_the_inbox_and_planner_spans_to_their_hooks_without_listing_cmux() {
+fn the_supervisor_closes_the_spans_of_ended_inbox_and_planner_sessions_without_listing_cmux() {
     use dagq::{
         application::SessionRegistry,
-        domain::sessions::{HookEvent, INBOX, PLANNER, SessionHook},
+        domain::{
+            PlannerOrigin,
+            sessions::{HookEvent, INBOX, PLANNER, RUNTIME_PLANNER, SessionHook},
+        },
     };
     let (_dir, repo, db) = fixture();
-    let queue = {
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        queue
-            .transition(TaskId::new(1), TaskAction::Cancel)
-            .unwrap();
-        queue
-    };
-    for (kind, session, workspace) in [
-        (INBOX, "s-inbox", "W-LISTED"),
-        (PLANNER, "s-plan", "W-GONE"),
-    ] {
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let runtime = queue.open_planner(PlannerOrigin::Runtime, None).unwrap().id;
+    queue
+        .planner_workspace_created(runtime, "W-RUNTIME")
+        .unwrap();
+    let person = queue.open_planner(PlannerOrigin::Person, None).unwrap().id;
+    queue.planner_workspace_created(person, "W-PERSON").unwrap();
+    let hook = |kind, session: &str, source: &str, workspace: &str, planner: Option<i64>| {
         queue
             .record_session_hook(&SessionHook {
                 event: HookEvent::Start {
-                    source: "startup".into(),
+                    source: source.into(),
                 },
                 kind,
                 session_id: session.into(),
                 transcript_path: None,
                 cwd: None,
                 workspace_id: Some(workspace.into()),
-                planner_id: None,
+                planner_id: planner,
                 launch: None,
             })
             .unwrap();
-    }
+    };
+    hook(INBOX, "s-old", "startup", "W-OLD", None);
+    hook(
+        RUNTIME_PLANNER,
+        "s-runtime",
+        "startup",
+        "W-RUNTIME",
+        Some(runtime.as_i64()),
+    );
+    hook(
+        PLANNER,
+        "s-person",
+        "startup",
+        "W-PERSON",
+        Some(person.as_i64()),
+    );
+    hook(INBOX, "s-new", "startup", "W-NEW", None);
+    hook(INBOX, "s-new", "resume", "W-OTHER", None);
+    assert!(
+        queue
+            .end_planner(runtime, &serde_json::json!({"code": "runtime_exited"}))
+            .unwrap()
+    );
+
     let backend = TestWorkspace::new(&db, false, "exit 0");
-    backend.listed.lock().unwrap().push("w-listed".into());
+    // The person's planner's row closes after this pass's intake, and its
+    // span at the next one.
+    supervise(&db, &repo, &backend).unwrap();
+    assert!(queue.planners(false).unwrap().is_empty());
     supervise(&db, &repo, &backend).unwrap();
     assert_eq!(
         backend.listings.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "the supervisor lists no cmux workspace"
     );
-    assert!(
-        queue
-            .latest_events_of("session_closed", 10)
-            .unwrap()
-            .is_empty()
+    let mut closed: Vec<(String, String, String)> = queue
+        .latest_events_of("session_closed", 10)
+        .unwrap()
+        .into_iter()
+        .map(|event| {
+            let text = |key: &str| event.payload[key].as_str().unwrap().to_owned();
+            (text("kind"), text("session_id"), text("reason"))
+        })
+        .collect();
+    closed.sort();
+    let inferred = |kind: &str, session: &str| (kind.into(), session.into(), "inferred".into());
+    assert_eq!(
+        closed,
+        [
+            inferred("inbox", "s-old"),
+            inferred("planner", "s-person"),
+            inferred("runtime_planner", "s-runtime"),
+        ]
     );
+    // The latest inbox session's span is still open.
+    let opened = queue.latest_events_of("session_opened", 10).unwrap();
+    assert_eq!(opened.len(), 4);
 }
 
 /// Goal 54 (1): the supervisor's sweep closes the record of a planner of

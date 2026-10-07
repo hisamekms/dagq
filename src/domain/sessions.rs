@@ -686,6 +686,52 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
     }
 }
 
+/// The open spans the hook recorded (oldest first, headless planners'
+/// spans not among them) that the supervisor closes as `inferred`: their
+/// session is over though no `SessionEnd` closed them (ADR-t2022-1, which
+/// amends ADR-0048 decision 7 not to ask cmux). `planner_over(id)` says
+/// whether planner `id`'s row is closed or its background wrapper is
+/// gone (an unknown row is not over), and `person_planners_open` whether
+/// a person's planner row is still open.
+///
+/// - A `runtime_planner` span closes once its planner is over; one that
+///   names no planner stays open.
+/// - A `planner` span (a person's, opened before `dagq plan` was
+///   abolished) closes once its planner is over, or, naming none, once no
+///   person's planner row is open.
+/// - An `inbox` span closes once a later inbox span of another session
+///   id is open (one in another workspace, which the hook's `next_span`
+///   did not close); the same session resumed or compacted goes on in its
+///   span. The latest inbox span is never closed this way.
+///
+/// No span closes by how long its transcript has been still: a resident
+/// inbox idles for long (ADR-t655-1).
+pub fn inferred_hook_closes(
+    open: &[OpenSpan],
+    planner_over: impl Fn(i64) -> bool,
+    person_planners_open: bool,
+) -> Vec<OpenSpan> {
+    let latest_inbox = open
+        .iter()
+        .filter(|span| span.kind() == INBOX)
+        .max_by_key(|span| span.opened_event_id);
+    open.iter()
+        .filter(|span| {
+            let planner = span.payload["planner_id"].as_i64();
+            match span.kind() {
+                RUNTIME_PLANNER => planner.is_some_and(&planner_over),
+                PLANNER => planner.map_or(!person_planners_open, &planner_over),
+                INBOX => latest_inbox.is_some_and(|latest| {
+                    latest.opened_event_id > span.opened_event_id
+                        && latest.session_id() != span.session_id()
+                }),
+                _ => false,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1367,5 +1413,64 @@ mod tests {
             let ended = changes("planner_closed", &json!({"code": code}), &open, &context);
             assert_eq!(closed(&ended[0]), (5, reason), "{code}");
         }
+    }
+
+    /// ADR-t2022-1: the supervisor closes a planner's hook span once its
+    /// planner is over, a person's planner's naming none once no person's
+    /// row is open, and an inbox span once a later one of another session
+    /// is open; a planner running, a resumed inbox session and the latest
+    /// inbox span stay open.
+    #[test]
+    fn hook_spans_close_as_inferred_once_their_session_is_over() {
+        let open = [
+            span(
+                1,
+                json!({"kind": INBOX, "session_id": "i-1", "workspace_id": "W-1"}),
+            ),
+            span(
+                2,
+                json!({"kind": RUNTIME_PLANNER, "session_id": "p-1", "planner_id": 7}),
+            ),
+            span(
+                3,
+                json!({"kind": RUNTIME_PLANNER, "session_id": "p-2", "planner_id": 8}),
+            ),
+            span(4, json!({"kind": RUNTIME_PLANNER, "session_id": "p-3"})),
+            span(
+                5,
+                json!({"kind": PLANNER, "session_id": "h-1", "planner_id": 9}),
+            ),
+            span(6, json!({"kind": PLANNER, "session_id": "h-2"})),
+            span(
+                7,
+                json!({"kind": INBOX, "session_id": "i-2", "workspace_id": "W-2"}),
+            ),
+            span(8, json!({"kind": REVIEW, "session_id": "r-1"})),
+        ];
+        let ids = |spans: Vec<OpenSpan>| -> Vec<i64> {
+            spans
+                .iter()
+                .map(|span| span.opened_event_id.as_i64())
+                .collect()
+        };
+        let over = |id: i64| id == 7 || id == 9;
+        assert_eq!(ids(inferred_hook_closes(&open, over, true)), [1, 2, 5]);
+        assert_eq!(ids(inferred_hook_closes(&open, over, false)), [1, 2, 5, 6]);
+        assert_eq!(ids(inferred_hook_closes(&open, |_| false, true)), [1]);
+
+        // One inbox session, resumed or compacted in another workspace,
+        // goes on in its span; a lone inbox span stays open.
+        let same = [
+            span(
+                1,
+                json!({"kind": INBOX, "session_id": "i-1", "workspace_id": "W-1"}),
+            ),
+            span(
+                2,
+                json!({"kind": INBOX, "session_id": "i-1", "workspace_id": "W-2"}),
+            ),
+        ];
+        assert!(inferred_hook_closes(&same, |_| true, false).is_empty());
+        assert!(inferred_hook_closes(&same[..1], |_| true, false).is_empty());
     }
 }

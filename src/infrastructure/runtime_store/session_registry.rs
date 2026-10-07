@@ -195,6 +195,12 @@ impl SessionRegistry for SqliteQueue {
     ) -> Result<serde_json::Value> {
         crate::infrastructure::sessions::record_hook(&self.conn, hook)
     }
+    fn open_hook_session_spans(&self) -> Result<Vec<crate::domain::sessions::OpenSpan>> {
+        crate::infrastructure::sessions::hook_spans(&self.conn)
+    }
+    fn close_inferred_sessions(&self, ended: &[EventId]) -> Result<usize> {
+        crate::infrastructure::sessions::close_inferred_hook_spans(&self.conn, ended)
+    }
     fn close_review_session(
         &self,
         id: &RunId,

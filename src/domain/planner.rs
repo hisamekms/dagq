@@ -183,6 +183,33 @@ impl PlannerSession {
 }
 
 impl PlannerSession {
+    /// Whether the planner's session is over, for the span its hook
+    /// recorded (ADR-t2022-1): its row is closed, or its wrapper ran in the
+    /// background and the handle's pid is dead (`alive`) or shows another
+    /// start than the handle recorded (`start`, ADR-t1404-1 decision 2). A
+    /// heartbeat's age is no evidence, nor is a start that cannot be read;
+    /// a wrapper in a workspace is over only with its row.
+    pub fn session_over(
+        &self,
+        alive: impl Fn(u32) -> bool,
+        start: impl Fn(u32) -> Option<String>,
+    ) -> bool {
+        if self.closed_at.is_some() {
+            return true;
+        }
+        let Some(handle) = self
+            .workspace_id
+            .as_deref()
+            .and_then(super::background_wrapper::BackgroundHandle::parse)
+        else {
+            return false;
+        };
+        !alive(handle.pid)
+            || start(handle.pid).is_some_and(|start| !handle.is(handle.pid, Some(&start)))
+    }
+}
+
+impl PlannerSession {
     /// Whether the runtime closes this row as a person's planner opened
     /// before `dagq plan` was abolished (ADR-t1433-2 decision 5): opened by
     /// a person and not closed, alive or not. Its workspace is neither
@@ -668,5 +695,28 @@ mod tests {
         assert!(!planner.abandoned(&unread));
         // A wrapper in a workspace is still told by its heartbeat.
         assert_eq!(session().state(&silent), PlannerState::Lost);
+    }
+
+    /// ADR-t2022-1: a planner's session is over for its hook span once its
+    /// row is closed, or once its background wrapper's pid is dead or
+    /// shows another start; a live wrapper, a start that cannot be read,
+    /// a late heartbeat and a wrapper in a workspace keep it running.
+    #[test]
+    fn a_planner_session_is_over_by_its_row_or_its_background_wrapper() {
+        let start = |text: &'static str| move |_: u32| Some(text.to_owned());
+        let unread = |_: u32| None;
+        let mut workspace = session();
+        workspace.heartbeat_at = Some(0);
+        assert!(!workspace.session_over(|_| false, unread));
+        workspace.closed_at = Some(120);
+        assert!(workspace.session_over(|_| true, unread));
+
+        let mut background = session();
+        background.workspace_id = Some("background:42:Sat_Oct_3_10:00:01_2026".into());
+        background.heartbeat_at = Some(0);
+        assert!(!background.session_over(|pid| pid == 42, start("Sat Oct  3 10:00:01 2026")));
+        assert!(!background.session_over(|_| true, unread));
+        assert!(background.session_over(|_| false, unread));
+        assert!(background.session_over(|_| true, start("Sun Oct  4 09:00:00 2026")));
     }
 }

@@ -2778,11 +2778,77 @@ impl Supervisor<'_> {
             return;
         }
         self.last_turns = Some(Instant::now());
+        self.close_ended_sessions();
         match self.queue.record_session_turns() {
             Ok(0) => {}
             Ok(spans) => info!("recorded the transcript turns of {spans} session span(s)"),
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "transcript turns could not be recorded: {error:#}")
+            }
+        }
+    }
+    /// Close, as `inferred`, the inbox and planner spans the hook recorded
+    /// whose session is over without its `SessionEnd`
+    /// ([`crate::domain::sessions::inferred_hook_closes`], ADR-t2022-1),
+    /// judged from the queue's planner rows and the processes of their
+    /// background wrappers; no cmux is asked. A failure is logged only
+    /// (ADR-0048 decision 10).
+    fn close_ended_sessions(&mut self) {
+        let spans = match self.queue.open_hook_session_spans() {
+            Ok(spans) if spans.is_empty() => return,
+            Ok(spans) => spans,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the open inbox and planner session spans could not be read: {error:#}");
+                return;
+            }
+        };
+        // Unread, a person's planner counts as open: only the spans that
+        // name no planner wait for the next pass.
+        let person_planners_open = match self.queue.planners(false) {
+            Ok(planners) => planners.iter().any(|planner| planner.person_retired()),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the planners of the open session spans could not be read: {error:#}");
+                true
+            }
+        };
+        let mut over = std::collections::HashMap::new();
+        for id in spans
+            .iter()
+            .filter_map(|span| span.payload["planner_id"].as_i64())
+        {
+            if over.contains_key(&id) {
+                continue;
+            }
+            // A row that cannot be read is not taken for over.
+            let ended = self
+                .queue
+                .planner(crate::domain::PlannerId::new(id))
+                .is_ok_and(|planner| {
+                    planner.session_over(
+                        |pid| self.processes.alive(pid),
+                        |pid| self.processes.start_identity(pid),
+                    )
+                });
+            over.insert(id, ended);
+        }
+        let ended: Vec<EventId> = crate::domain::sessions::inferred_hook_closes(
+            &spans,
+            |id| over.get(&id).copied().unwrap_or(false),
+            person_planners_open,
+        )
+        .into_iter()
+        .map(|span| span.opened_event_id)
+        .collect();
+        if ended.is_empty() {
+            return;
+        }
+        match self.queue.close_inferred_sessions(&ended) {
+            Ok(0) => {}
+            Ok(closed) => {
+                info!("closed {closed} inbox or planner session span(s) whose session is over")
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the spans of ended inbox and planner sessions could not be closed: {error:#}")
             }
         }
     }
