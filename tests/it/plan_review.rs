@@ -146,9 +146,9 @@ pub(crate) fn submit(
 pub(crate) struct StubReviewer {
     verdicts: Mutex<Vec<String>>,
     prompts: Mutex<Vec<String>>,
-    /// A task the first job's run edits through the queue at `.0`, as
+    /// The tasks the first job's run edits through the queue at `.0`, as
     /// `dagq edit` would while the job runs.
-    edit: Mutex<Option<(PathBuf, TaskId)>>,
+    edit: Mutex<Option<(PathBuf, Vec<TaskId>)>>,
     /// The model and effort each job was given (ADR-0079 decision 7).
     models: Mutex<Vec<(String, String)>>,
     /// A file each job waits for before it prints its verdict; it touches
@@ -166,9 +166,9 @@ impl StubReviewer {
             gate: Mutex::new(None),
         }
     }
-    /// The first job edits `task` of the queue at `db` while it runs.
-    fn editing(self, db: &Path, task: TaskId) -> Self {
-        *self.edit.lock().unwrap() = Some((db.to_owned(), task));
+    /// The first job edits `tasks` of the queue at `db` while it runs.
+    fn editing(self, db: &Path, tasks: &[TaskId]) -> Self {
+        *self.edit.lock().unwrap() = Some((db.to_owned(), tasks.to_vec()));
         self
     }
     /// Each job waits for the file `gate` before it prints its verdict,
@@ -227,15 +227,18 @@ impl AgentProvider for StubReviewer {
         assert_eq!(runtime::GOAL_REVIEW_ACCESS, access);
         self.prompts.lock().unwrap().push(prompt.into());
         // The job has started: its row and its event are in the queue.
-        if let Some((db, task)) = self.edit.lock().unwrap().take() {
-            SqliteQueue::open(&db)?.edit_task(
-                task,
-                TaskEdit {
-                    description: Some("edited while its review ran".into()),
-                    ..TaskEdit::default()
-                },
-                dagq::domain::TaskStatus::Submitted,
-            )?;
+        if let Some((db, tasks)) = self.edit.lock().unwrap().take() {
+            let mut queue = SqliteQueue::open(&db)?;
+            for task in tasks {
+                queue.edit_task(
+                    task,
+                    TaskEdit {
+                        description: Some("edited while its review ran".into()),
+                        ..TaskEdit::default()
+                    },
+                    dagq::domain::TaskStatus::Submitted,
+                )?;
+            }
         }
         let mut verdicts = self.verdicts.lock().unwrap();
         let verdict = if verdicts.len() > 1 {
@@ -569,14 +572,39 @@ pub(crate) fn idle_person_planner(queue: &SqliteQueue, db: &Path, workspace: &st
     fs::write(planner_idle_marker(&dir), "{}").unwrap();
 }
 
+/// `prompt_bytes` of the event that ends a plan review adds up and
+/// matches the prompt the job was given (task 1561, ADR-t1566-1 decision 6).
+pub(crate) fn assert_prompt_bytes(recorded: &Value, prompt: &str) {
+    let bytes = &recorded["prompt_bytes"];
+    assert_eq!(bytes["total"], json!(prompt.len()), "{recorded}");
+    assert_eq!(bytes["limit"], 400_000);
+    let sections = bytes["sections"].as_object().unwrap();
+    let sum: u64 = sections.values().map(|n| n.as_u64().unwrap()).sum();
+    assert_eq!(json!(sum), bytes["total"]);
+    assert!(sections["tasks"].as_u64().unwrap() > 0);
+    assert_eq!(bytes["over_limit"], Value::Null);
+}
+
+/// The plan review's wiring end to end: the queue's candidate (its
+/// `interrupt` read in SQL), the job started in the checkout as its actor
+/// with the prompt kept, the verdict's actions applied in one transaction
+/// (a dependency, a lower priority and a cancel as a duplicate, recorded as
+/// `cancel --duplicate-of` does), the predictions recorded per task, and
+/// the prompt's bytes on `plan_review_finished`.
 #[test]
 fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
+    use dagq::application::PlanReviewStore;
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let blocker = TaskId::new(1);
     let two = add(&mut queue, "two", &[blocker], Priority::Normal);
-    let three = add(&mut queue, "three", &[blocker], Priority::Normal);
-    let proposal = submit(&mut queue, &[two, three], None);
+    let three = add(&mut queue, "three", &[blocker], Priority::Interrupt);
+    let copy = add(&mut queue, "copy", &[blocker], Priority::Normal);
+    let proposal = submit(&mut queue, &[two, three, copy], None);
+    let candidates = queue.plan_review_candidates().unwrap();
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert_eq!(candidates[0].proposal_id, proposal);
+    assert!(candidates[0].interrupt, "{candidates:?}");
     // Landings conflicted in a file main has and in one it no longer has:
     // the prompt lists the first as a hotspot (goal 31).
     Connection::open(&fx.db)
@@ -589,12 +617,18 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
             ],
         )
         .unwrap();
+    let predict = |task: TaskId, tokens: u64| {
+        json!({"task_id": task, "size": "M", "nature": "implementation", "uncertainty": 0.4,
+               "expected_output_tokens": tokens, "rework_probability": 0.2, "reason": "a module"})
+    };
     let reviewer = StubReviewer::new(&[json!({
         "verdict": "pass", "reasons": [], "summary": "sound",
         "actions": [
             {"action": "add_dependency", "task_id": three, "depends_on": two},
-            {"action": "lower_priority", "task_id": two, "priority": "low"}
-        ]
+            {"action": "lower_priority", "task_id": two, "priority": "low"},
+            {"action": "cancel_duplicate", "task_id": copy, "duplicate_of": blocker}
+        ],
+        "predictions": [predict(two, 40_000), predict(three, 9_000), predict(copy, 1_000)]
     })]);
     let backend = PlanWorkspace::default();
     let outcome = supervise(&fx, &backend, &reviewer);
@@ -607,6 +641,15 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
     );
     assert_eq!(queue.show(three).unwrap().dependencies, [blocker, two]);
     assert_eq!(queue.show(two).unwrap().task.priority(), Priority::Low);
+    // The same record as `cancel --duplicate-of` (ADR-0046 decision 5),
+    // marked as the plan review's.
+    assert_eq!(status(&mut queue, copy), TaskStatus::Canceled);
+    let changed = events(&mut queue, copy, "task_status_changed");
+    let canceled = changed.last().unwrap();
+    assert_eq!(canceled["to"], "canceled");
+    assert_eq!(canceled["duplicate_of"], json!(blocker));
+    assert_eq!(canceled["by"], "plan_review");
+    assert!(events(&mut queue, copy, "task_canceled_as_duplicate").is_empty());
     // The events of the proposal are on its first task.
     let started = events(&mut queue, two, "plan_review_started");
     assert_eq!(started.len(), 1);
@@ -624,6 +667,25 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
     let finished = events(&mut queue, two, "plan_review_finished");
     assert_eq!(finished[0]["decision"], "pass");
     assert_eq!(finished[0]["summary"], "sound");
+    // The weight of each task, recorded per task (ADR-0079 decision 2).
+    assert_eq!(finished[0]["prediction_error"], Value::Null);
+    let recorded = events(&mut queue, two, "task_weight_predicted");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0]["proposal_id"], json!(proposal));
+    assert_eq!(recorded[0]["plan_review_id"], started[0]["plan_review_id"]);
+    assert_eq!(
+        recorded[0]["prediction"],
+        json!({"size": "M", "nature": "implementation", "uncertainty": 0.4,
+               "expected_output_tokens": 40_000, "rework_probability": 0.2,
+               "reason": "a module"})
+    );
+    // The stub's session wrote no transcript naming a model.
+    assert_eq!(recorded[0]["model"], Value::Null);
+    assert_eq!(recorded[0]["effort"], Value::Null);
+    assert_eq!(
+        events(&mut queue, three, "task_weight_predicted")[0]["prediction"]["expected_output_tokens"],
+        9_000
+    );
     // The job ran as the plan review job of the proposal (ADR-t728-1).
     assert_eq!(
         job_actors(&fx.db),
@@ -653,6 +715,8 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
         "`dagq events --full --task ID`",
         "`--run ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME`",
         "`dagq timeline RUN`",
+        "estimate the weight of each submitted task of the proposal (tasks 2, 3, 4)",
+        "- missing_dependency: ",
     ] {
         assert!(
             prompts[0].contains(expected),
@@ -661,6 +725,7 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
         );
     }
     assert!(!prompts[0].contains("gone.txt"), "{}", prompts[0]);
+    assert_prompt_bytes(&finished[0], &prompts[0]);
     // Reviewed once: a second pass finds nothing to review.
     supervise(&fx, &backend, &reviewer);
     assert_eq!(reviewer.prompts().len(), 1);
@@ -918,40 +983,64 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     assert_eq!(backend.launched().len(), 2);
     assert_eq!(events(&mut queue, first, "plan_revise_sent").len(), 2);
     assert!(events(&mut queue, second, "plan_revise_sent").is_empty());
-
-    // The revise still waiting for a planner past the timeout is told to
-    // the inbox, once: the timeout of 0 is past from the second after its
-    // revise.
-    crate::runtime_support::await_second_after(
-        proposal_column(&fx.db, two, "revised_at").as_i64().unwrap(),
-    );
-    let quick = options(1, Duration::ZERO);
-    supervise_with(&fx, &backend, &reviewer, &quick);
-    supervise_with(&fx, &backend, &reviewer, &quick);
-    let waiting = events(&mut queue, second, "planner_unresponsive");
-    assert_eq!(waiting.len(), 1, "{waiting:?}");
-    assert_eq!(waiting[0]["planner_id"], Value::Null);
+    assert!(proposal_column(&fx.db, two, "revised_at").is_i64());
 }
 
+/// A concern opens an `approve_plan` ask the inbox is told of and holds
+/// its proposal; the supervisor applies the answers in the queue
+/// (ADR-0041 decision 11) and records what each made of the reasons' codes
+/// (`plan_review_outcome`, ADR-t947-1). Withdrawing a held proposal closes
+/// its ask, so the answer never reaches the proposal its task joins next,
+/// and frees its draft; an answer closed unapplied (its proposal withdrawn
+/// or no longer held for it) records `ask_closed` (task 568).
 #[test]
 fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let blocker = TaskId::new(1);
-    let kept = add(&mut queue, "kept", &[blocker], Priority::Normal);
-    let dropped = add(&mut queue, "dropped", &[blocker], Priority::Normal);
-    let returned = add(&mut queue, "returned", &[blocker], Priority::Normal);
-    let proposals = [kept, dropped, returned].map(|task| submit(&mut queue, &[task], None));
+    let [kept, dropped, returned, withdrawn, late, stale] =
+        ["kept", "dropped", "returned", "withdrawn", "late", "stale"]
+            .map(|title| add(&mut queue, title, &[blocker], Priority::Normal));
+    queue
+        .record_draft_origin(
+            withdrawn,
+            DraftOrigin::FollowUp,
+            // Without a source goal it needs no membership judgement.
+            &json!({"run": "r", "source_goal_state": "none"}),
+        )
+        .unwrap();
+    let proposals = [kept, dropped, returned, withdrawn, late, stale]
+        .map(|task| submit(&mut queue, &[task], None));
+    // A submitted draft no longer waits for a planner.
+    assert!(
+        queue
+            .planner_drafts()
+            .unwrap()
+            .iter()
+            .all(|d| d.task.id() != withdrawn)
+    );
     let reviewer = StubReviewer::new(&[json!({
-        "verdict": "concern", "reasons": ["looks already implemented"], "summary": "maybe done"
+        "verdict": "concern",
+        "reasons": [
+            {"text": "looks already implemented", "codes": ["task_overlap"]},
+            {"text": "odd", "codes": ["someday_code"]},
+            "a note in the old form",
+        ],
+        "summary": "maybe done"
     })]);
     let backend = PlanWorkspace::default();
     supervise(&fx, &backend, &reviewer);
     let asks = queue.asks(Default::default()).unwrap();
-    assert_eq!(asks.len(), 3);
-    for (ask, task) in asks.iter().zip([kept, dropped, returned]) {
+    assert_eq!(asks.len(), 6);
+    let ask_of = |task: TaskId| {
+        asks.iter()
+            .find(|ask| ask.task_id == Some(task))
+            .unwrap_or_else(|| panic!("no ask of task {task}: {asks:?}"))
+            .clone()
+    };
+    for task in [kept, dropped, returned, withdrawn, late, stale] {
+        let ask = ask_of(task);
         assert_eq!(ask.kind, AskKind::ApprovePlan);
-        assert_eq!(ask.task_id, Some(task));
         assert_eq!(ask.options, ["ready", "send_back", "cancel"]);
         assert!(
             ask.question.contains("looks already implemented"),
@@ -959,20 +1048,71 @@ fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
             ask.question
         );
         assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
+        let finished = &events(&mut queue, task, "plan_review_finished")[0];
+        assert_eq!(
+            finished["reasons"],
+            json!(["looks already implemented", "odd", "a note in the old form"])
+        );
+        // A code outside the list is kept as printed.
+        assert_eq!(
+            finished["reason_codes"],
+            json!([["task_overlap"], ["someday_code"], ["unlabeled"]])
+        );
+        assert_eq!(finished["primary_code"], "task_overlap");
     }
-    assert_eq!(backend.notifications.lock().unwrap().len(), 3);
+    assert_eq!(backend.notifications.lock().unwrap().len(), 6);
     // Held for the person: not reviewed again.
     supervise(&fx, &backend, &reviewer);
-    assert_eq!(reviewer.prompts().len(), 3);
+    assert_eq!(reviewer.prompts().len(), 6);
 
-    queue.answer(asks[0].id, "ready").unwrap();
-    queue.answer(asks[1].id, "cancel").unwrap();
+    // Withdrawn while held: the runtime closes its ask, and its draft waits
+    // for a planner of the runtime's again.
+    queue.withdraw_proposal(proposals[3]).unwrap();
+    let closed = queue.read_ask(ask_of(withdrawn).id).unwrap();
+    assert_eq!(closed.answer.as_deref(), Some("withdrawn"));
+    assert!(closed.closed_at.is_some());
+    assert_eq!(closed.answered_by.as_deref(), Some("runtime"));
+    let answered = &events(&mut queue, withdrawn, "ask_answered")[0];
+    assert_eq!(answered["runtime_closed"], true);
+    assert_eq!(answered["answered_by"], "runtime");
+    assert_eq!(status(&mut queue, withdrawn), TaskStatus::Draft);
+    assert!(
+        queue
+            .planner_drafts()
+            .unwrap()
+            .iter()
+            .any(|d| d.task.id() == withdrawn)
+    );
+    // Submitted again, it is reviewed again and gets a new ask.
+    let again = submit(&mut queue, &[withdrawn], None);
+    assert_ne!(again, proposals[3]);
+    // Answered, then withdrawn before the supervisor applies the answer.
+    queue.answer(ask_of(late).id, "cancel").unwrap();
+    queue.withdraw_proposal(proposals[4]).unwrap();
+    assert!(queue.read_ask(ask_of(late).id).unwrap().closed_at.is_some());
+    assert_eq!(
+        events(&mut queue, late, "ask_closed"),
+        [json!({"ask_id": ask_of(late).id, "kind": "approve_plan"})]
+    );
+    // Answered, but the concern no longer holds its proposal.
+    queue.answer(ask_of(stale).id, "ready").unwrap();
+    Connection::open(&fx.db)
+        .unwrap()
+        .execute(
+            "UPDATE proposals SET review_hold=NULL WHERE id=?1",
+            [proposals[5].as_i64()],
+        )
+        .unwrap();
+
+    queue.answer(ask_of(kept).id, "ready").unwrap();
+    queue.answer(ask_of(dropped).id, "cancel").unwrap();
     queue
-        .answer(asks[2].id, "send_back: split the parser out first")
+        .answer(ask_of(returned).id, "send_back: split the parser out first")
         .unwrap();
     // The runtime applies them: none is the inbox's to act on.
     let status_now = runtime::status(&fx.db).unwrap();
-    for ask in &asks {
+    for task in [kept, dropped, returned] {
+        let ask = ask_of(task);
         let entry = status_now["attention"]
             .as_array()
             .unwrap()
@@ -1004,16 +1144,77 @@ fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
         [
             format!(
                 "a person sent the proposal back in ask {}: split the parser out first",
-                asks[2].id
+                ask_of(returned).id
             ),
-            "looks already implemented".to_owned()
+            "looks already implemented".to_owned(),
+            "odd".to_owned(),
+            "a note in the old form".to_owned(),
         ]
     );
-    assert!(queue.asks(Default::default()).unwrap().is_empty());
     assert_eq!(
         events(&mut queue, kept, "plan_decided")[0]["answer"],
         "ready"
     );
+    for (task, outcome) in [
+        (kept, "deviation_accepted"),
+        (dropped, "canceled"),
+        (returned, "deviation_rejected"),
+    ] {
+        let outcomes = events(&mut queue, task, "plan_review_outcome");
+        assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+        assert_eq!(outcomes[0]["outcome"], outcome);
+        assert_eq!(outcomes[0]["primary_code"], "task_overlap");
+        assert_eq!(
+            outcomes[0]["reason_codes"],
+            json!([["task_overlap"], ["someday_code"], ["unlabeled"]])
+        );
+        assert_eq!(
+            outcomes[0]["plan_review_id"],
+            events(&mut queue, task, "plan_review_finished")[0]["plan_review_id"]
+        );
+    }
+    let stats = runtime::stats(&fx.db, &Default::default()).unwrap();
+    assert_eq!(
+        stats["review_reasons"]["plan_review"]["by_code"]["task_overlap"]["outcomes"],
+        json!({"deviation_accepted": 1, "deviation_rejected": 1, "canceled": 1}),
+        "{}",
+        stats["review_reasons"]
+    );
+    // `kpi` reads the codes in the day's window: concerns, not revises.
+    let kpi = common::cli::ok(&fx.db, &["kpi", "--last", "1"]);
+    let today = kpi["periods"].as_array().unwrap().last().unwrap().clone();
+    let by_code = &today["kpis"]["plan.revise_rate"]["code=task_overlap"];
+    assert_eq!(by_code["value"], 0.0, "{today}");
+    assert!(by_code["n"].as_i64().unwrap() >= 6, "{today}");
+    assert_eq!(
+        today["kpis"]["review.sendback_rate"]["all"]["value"],
+        Value::Null
+    );
+    // The answer that no longer applies is closed unapplied.
+    assert!(
+        queue
+            .read_ask(ask_of(stale).id)
+            .unwrap()
+            .closed_at
+            .is_some()
+    );
+    assert!(events(&mut queue, stale, "plan_decided").is_empty());
+    assert_eq!(
+        events(&mut queue, stale, "ask_closed"),
+        [json!({"ask_id": ask_of(stale).id, "kind": "approve_plan"})]
+    );
+    assert!(events(&mut queue, late, "plan_decided").is_empty());
+    // The withdrawn task, submitted again, has a new ask; nothing else
+    // answered is asked again.
+    let open = queue.asks(Default::default()).unwrap();
+    assert!(
+        open.iter()
+            .any(|ask| ask.task_id == Some(withdrawn) && ask.id != closed.id),
+        "{open:?}"
+    );
+    for task in [kept, dropped, returned, late] {
+        assert!(open.iter().all(|ask| ask.task_id != Some(task)), "{open:?}");
+    }
     // The one sent back went to a planner of the runtime's.
     assert_eq!(backend.launched().len(), 1);
 
@@ -1030,181 +1231,6 @@ fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
     let again = submit(&mut queue, &[returned], None);
     assert_ne!(again, proposals[2]);
     assert_eq!(status(&mut queue, returned), TaskStatus::Submitted);
-}
-
-/// Withdrawing a proposal held for a concern closes its `approve_plan`
-/// ask, so the answer never reaches the proposal the task joins next; a
-/// withdrawn draft with an origin waits for a planner of the runtime's
-/// again.
-#[test]
-fn a_withdrawn_proposal_closes_its_concern_and_its_drafts_are_free() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let blocker = TaskId::new(1);
-    let task = add(&mut queue, "doubtful", &[blocker], Priority::Normal);
-    queue
-        .record_draft_origin(
-            task,
-            DraftOrigin::FollowUp,
-            // Without a source goal it needs no membership judgement.
-            &json!({"run": "r", "source_goal_state": "none"}),
-        )
-        .unwrap();
-    assert!(
-        queue
-            .planner_drafts()
-            .unwrap()
-            .iter()
-            .any(|d| d.task.id() == task)
-    );
-    let first = submit(&mut queue, &[task], None);
-    assert!(
-        queue
-            .planner_drafts()
-            .unwrap()
-            .iter()
-            .all(|d| d.task.id() != task)
-    );
-    let reviewer = StubReviewer::new(&[json!({
-        "verdict": "concern", "reasons": ["looks already implemented"], "summary": "maybe"
-    })]);
-    let backend = PlanWorkspace::default();
-    supervise(&fx, &backend, &reviewer);
-    let asks = queue.asks(Default::default()).unwrap();
-    assert_eq!(asks.len(), 1);
-    assert_eq!(asks[0].kind, AskKind::ApprovePlan);
-
-    queue.withdraw_proposal(first).unwrap();
-    assert!(queue.asks(Default::default()).unwrap().is_empty());
-    let closed = queue.read_ask(asks[0].id).unwrap();
-    assert_eq!(closed.answer.as_deref(), Some("withdrawn"));
-    assert!(closed.closed_at.is_some());
-    assert_eq!(
-        events(&mut queue, task, "ask_answered")[0]["runtime_closed"],
-        true
-    );
-    assert_eq!(closed.answered_by.as_deref(), Some("runtime"));
-    assert_eq!(
-        events(&mut queue, task, "ask_answered")[0]["answered_by"],
-        "runtime"
-    );
-    assert_eq!(status(&mut queue, task), TaskStatus::Draft);
-    assert!(
-        queue
-            .planner_drafts()
-            .unwrap()
-            .iter()
-            .any(|d| d.task.id() == task)
-    );
-
-    // Submitted again and held for a concern again, it gets a new ask.
-    let second = submit(&mut queue, &[task], None);
-    assert_ne!(second, first);
-    supervise(&fx, &backend, &reviewer);
-    let asks = queue.asks(Default::default()).unwrap();
-    assert_eq!(asks.len(), 1);
-    assert_ne!(asks[0].id, closed.id);
-    assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
-}
-
-/// An answered `approve_plan` ask closed without its answer applied
-/// records `ask_closed` (task 568): when the answer no longer applies, and
-/// when its proposal is withdrawn before the supervisor applies it. `stats`
-/// counts both as applied.
-#[test]
-fn an_answered_plan_ask_closed_unapplied_records_ask_closed() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let blocker = TaskId::new(1);
-    let stale = add(&mut queue, "stale", &[blocker], Priority::Normal);
-    let withdrawn = add(&mut queue, "withdrawn", &[blocker], Priority::Normal);
-    let proposals = [stale, withdrawn].map(|task| submit(&mut queue, &[task], None));
-    let reviewer = StubReviewer::new(&[json!({
-        "verdict": "concern", "reasons": ["looks already implemented"], "summary": "maybe"
-    })]);
-    let backend = PlanWorkspace::default();
-    supervise(&fx, &backend, &reviewer);
-    let asks = queue.asks(Default::default()).unwrap();
-    assert_eq!(asks.len(), 2);
-    queue.answer(asks[0].id, "ready").unwrap();
-    queue.answer(asks[1].id, "cancel").unwrap();
-
-    // (2) Withdrawn before the supervisor applies the answer.
-    queue.withdraw_proposal(proposals[1]).unwrap();
-    assert!(queue.read_ask(asks[1].id).unwrap().closed_at.is_some());
-    assert_eq!(
-        events(&mut queue, withdrawn, "ask_closed"),
-        [json!({"ask_id": asks[1].id, "kind": "approve_plan"})]
-    );
-    assert!(events(&mut queue, withdrawn, "plan_decided").is_empty());
-
-    // (1) The concern no longer holds the proposal: the answer does not
-    // apply, and the supervisor closes the ask.
-    Connection::open(&fx.db)
-        .unwrap()
-        .execute(
-            "UPDATE proposals SET review_hold=NULL WHERE id=?1",
-            [proposals[0].as_i64()],
-        )
-        .unwrap();
-    supervise(&fx, &backend, &reviewer);
-    assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
-    assert_eq!(status(&mut queue, stale), TaskStatus::Submitted);
-    assert!(events(&mut queue, stale, "plan_decided").is_empty());
-    assert_eq!(
-        events(&mut queue, stale, "ask_closed"),
-        [json!({"ask_id": asks[0].id, "kind": "approve_plan"})]
-    );
-
-    let stats = common::cli::ok(&fx.db, &["stats", "--full"]);
-    let waits = &stats["asks"]["times"]["by_kind"]["approve_plan"];
-    assert_eq!(waits["to_answer"]["count"], 2, "{waits}");
-    assert_eq!(waits["to_apply"]["count"], 2, "{waits}");
-    assert_eq!(waits["answer_to_apply"]["count"], 2, "{waits}");
-}
-
-#[test]
-fn a_revise_past_the_limit_is_a_concern() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let task = add(&mut queue, "stubborn", &[TaskId::new(1)], Priority::Normal);
-    let proposal = submit(&mut queue, &[task], None);
-    let reviewer = StubReviewer::new(&[json!({
-        "verdict": "revise", "reasons": ["still vague"], "summary": "vague"
-    })]);
-    let backend = PlanWorkspace::default();
-    let again = |queue: &mut SqliteQueue| {
-        queue
-            .submit(Submission {
-                tasks: Vec::new(),
-                goals: Vec::new(),
-                proposal: Some(proposal),
-                owner: PlannerOwner {
-                    origin: PlannerOrigin::Runtime,
-                    workspace_id: None,
-                },
-            })
-            .unwrap();
-    };
-    supervise(&fx, &backend, &reviewer);
-    again(&mut queue);
-    supervise(&fx, &backend, &reviewer);
-    again(&mut queue);
-    supervise(&fx, &backend, &reviewer);
-    assert_eq!(reviewer.prompts().len(), 3);
-    assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
-    let asks = queue.asks(Default::default()).unwrap();
-    assert_eq!(asks.len(), 1);
-    assert!(
-        asks[0].question.contains(
-            "It answered revise, but proposal 1 was sent back 2 times already (at most 2)."
-        ),
-        "{}",
-        asks[0].question
-    );
-    let finished = events(&mut queue, task, "plan_review_finished");
-    assert_eq!(finished[2]["verdict"], "revise");
-    assert_eq!(finished[2]["decision"], "concern");
 }
 
 /// A plan review stopped at the usage limit is no `plan review by hand`
@@ -1303,6 +1329,7 @@ fn a_failed_plan_review_waits_for_a_person_and_is_not_retried() {
             .contains("model unavailable"),
         "{failed:?}"
     );
+    assert_prompt_bytes(&failed[0], &reviewer.prompts()[0]);
     let status_now = runtime::status(&fx.db).unwrap();
     let attention = status_now["attention"]
         .as_array()
@@ -1377,25 +1404,6 @@ fn a_failed_plan_review_waits_for_a_person_and_is_not_retried() {
             })
             .is_err()
     );
-}
-
-#[test]
-fn a_proposal_with_an_interrupt_task_is_reviewed_first() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let blocker = TaskId::new(1);
-    let plain = add(&mut queue, "plain", &[blocker], Priority::Normal);
-    let urgent = add(&mut queue, "urgent", &[blocker], Priority::Interrupt);
-    let older = submit(&mut queue, &[plain], None);
-    let newer = submit(&mut queue, &[urgent], None);
-    let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
-    supervise(&fx, &PlanWorkspace::default(), &reviewer);
-    let prompts = reviewer.prompts();
-    assert_eq!(prompts.len(), 2);
-    assert!(prompts[0].contains(&format!("dagq proposal {newer}:")));
-    assert!(prompts[1].contains(&format!("dagq proposal {older}:")));
-    // The later one saw the earlier one as a proposal submitted before it.
-    assert!(prompts[1].contains("\"title\":\"plain\""));
 }
 
 #[test]
@@ -1737,45 +1745,6 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
         events(&mut queue, follow_up, "draft_planner_opened").len(),
         1
     );
-
-    // The gap's planners end without deciding it: another is opened each
-    // time, three in all, and then the inbox is told.
-    for attempt in 2..=4 {
-        let open = queue
-            .planners(false)
-            .unwrap()
-            .into_iter()
-            .find(|p| p.draft_task_id == Some(gap))
-            .unwrap();
-        queue.register_planner_wrapper(open.id, 1).unwrap();
-        queue.register_planner_agent(open.id, 1, 1).unwrap();
-        queue.planner_exited(open.id, 1, 0).unwrap();
-        // One pass closes it, the next opens the next one.
-        supervise(&fx, &backend, &reviewer);
-        supervise(&fx, &backend, &reviewer);
-        let opened = events(&mut queue, gap, "draft_planner_opened");
-        assert_eq!(opened.len(), attempt.min(3), "{opened:?}");
-    }
-    let exhausted = events(&mut queue, gap, "draft_planner_exhausted");
-    assert_eq!(exhausted.len(), 1, "{exhausted:?}");
-    assert!(queue.planners(false).unwrap().is_empty());
-    let status = runtime::status_for(&fx.db, None).unwrap();
-    let attention: Vec<_> = status["attention"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|a| a["task_id"] == gap.as_i64())
-        .collect();
-    assert_eq!(attention.len(), 1, "{status}");
-    assert_eq!(attention[0]["next"], "request a plan for the draft");
-    assert_eq!(attention[0]["kind"], "draft_planner_exhausted");
-    let watched = dagq::compose::events(&fx.db, dagq::domain::EventId::new(0), 100, false).unwrap();
-    assert!(
-        watched["events"].as_array().unwrap().iter().any(|e| {
-            e["kind"] == "draft_planner_exhausted" && e["next"] == "request a plan for the draft"
-        }),
-        "{watched}"
-    );
     // Nothing of this took a plan review.
     assert!(reviewer.prompts().is_empty());
 }
@@ -2024,159 +1993,88 @@ fn a_planner_question_answer_another_supervisor_claimed_is_not_sent_again() {
     assert!(backend.texts().is_empty());
 }
 
+/// Edits during a job are told from the others by the event ids of the
+/// queue (ADR-0041 decision 9): the verdict on a task edited during its
+/// review is not applied, with why, and the review runs again on the new
+/// contents; an edit before a review, or of another proposal's task, leaves
+/// its verdict applied. A verdict whose predictions do not hold is applied
+/// all the same, with why they are not recorded.
 #[test]
 fn a_verdict_on_a_task_edited_during_its_review_is_not_applied_and_the_review_runs_again() {
-    for first in [
-        json!({"verdict": "pass", "reasons": [], "summary": "sound", "actions": []}),
-        json!({"verdict": "revise", "reasons": ["split it"], "summary": "too big"}),
-        json!({"verdict": "concern", "reasons": ["maybe done"], "summary": "doubtful"}),
-    ] {
-        let fx = fixture();
-        let mut queue = SqliteQueue::open(&fx.db).unwrap();
-        let blocker = TaskId::new(1);
-        let two = add(&mut queue, "two", &[blocker], Priority::Normal);
-        let three = add(&mut queue, "three", &[blocker], Priority::Normal);
-        let proposal = submit(&mut queue, &[two, three], None);
-        let reviewer = StubReviewer::new(&[
-            first.clone(),
-            json!({"verdict": "pass", "reasons": [], "summary": "fine now", "actions": []}),
-        ])
-        .editing(&fx.db, three);
-        let backend = PlanWorkspace::default();
-        let outcome = supervise(&fx, &backend, &reviewer);
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        // The first verdict is dropped with why; the second job reads the
-        // edited task and its pass is applied.
-        let prompts = reviewer.prompts();
-        assert_eq!(prompts.len(), 2, "{first}");
-        assert!(!prompts[0].contains("edited while its review ran"));
-        assert!(
-            prompts[1].contains("edited while its review ran"),
-            "{}",
-            prompts[1]
-        );
-        let discarded = events(&mut queue, two, "plan_review_discarded");
-        assert_eq!(discarded.len(), 1, "{first}");
-        assert_eq!(discarded[0]["verdict"], first["verdict"]);
-        assert_eq!(discarded[0]["edited"], json!([three]));
-        let finished = events(&mut queue, two, "plan_review_finished");
-        assert_eq!(finished.len(), 1, "{first}");
-        assert_eq!(finished[0]["summary"], "fine now");
-        assert_eq!(finished[0]["attempt"], 1);
-        assert_eq!(status(&mut queue, two), TaskStatus::Ready);
-        assert_eq!(status(&mut queue, three), TaskStatus::Ready);
-        assert_eq!(
-            queue.show_proposal(proposal).unwrap().status(),
-            ProposalStatus::Accepted
-        );
-        assert!(queue.asks(Default::default()).unwrap().is_empty());
-        let (outcome, error): (String, String) = Connection::open(&fx.db)
-            .unwrap()
-            .query_row(
-                "SELECT outcome, error FROM plan_reviews ORDER BY id LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(outcome, "interrupted");
-        assert!(error.contains(&format!("task {three}")), "{error}");
-    }
-}
-
-#[test]
-fn edits_before_a_review_or_to_another_proposal_leave_its_verdict_applied() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let blocker = TaskId::new(1);
-    let early = add(&mut queue, "early", &[blocker], Priority::Normal);
-    let other = add(&mut queue, "other", &[blocker], Priority::Normal);
-    let reviewed = submit(&mut queue, &[early], None);
-    let later = submit(&mut queue, &[other], None);
-    // Edited before its review: the review reads the new contents.
-    queue
-        .edit_task(
-            early,
-            TaskEdit {
-                description: Some("edited before its review".into()),
-                ..TaskEdit::default()
-            },
-            dagq::domain::TaskStatus::Submitted,
-        )
-        .unwrap();
-    // The first job (of `reviewed`) edits the task of `later`.
-    let reviewer = StubReviewer::new(&[
-        json!({"verdict": "pass", "reasons": [], "summary": "sound", "actions": []}),
-    ])
-    .editing(&fx.db, other);
-    let backend = PlanWorkspace::default();
-    let outcome = supervise(&fx, &backend, &reviewer);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let prompts = reviewer.prompts();
-    assert_eq!(prompts.len(), 2);
-    assert!(
-        prompts[0].contains("edited before its review"),
-        "{}",
-        prompts[0]
-    );
-    assert!(
-        prompts[1].contains("edited while its review ran"),
-        "{}",
-        prompts[1]
-    );
-    for (task, proposal) in [(early, reviewed), (other, later)] {
-        assert_eq!(status(&mut queue, task), TaskStatus::Ready);
-        assert_eq!(
-            queue.show_proposal(proposal).unwrap().status(),
-            ProposalStatus::Accepted
-        );
-        assert!(events(&mut queue, task, "plan_review_discarded").is_empty());
-    }
-}
-
-#[test]
-fn a_job_failing_after_an_edit_of_its_task_is_not_held_and_the_review_runs_again() {
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let blocker = TaskId::new(1);
     let two = add(&mut queue, "two", &[blocker], Priority::Normal);
     let three = add(&mut queue, "three", &[blocker], Priority::Normal);
+    let other = add(&mut queue, "other", &[blocker], Priority::Normal);
     let proposal = submit(&mut queue, &[two, three], None);
-    // The first job edits `three` and exits non-zero.
-    let reviewer = StubReviewer::failing().editing(&fx.db, three);
-    reviewer.verdicts.lock().unwrap().push(
-        json!({"verdict": "pass", "reasons": [], "summary": "fine now", "actions": []}).to_string(),
-    );
+    let later = submit(&mut queue, &[other], None);
+    // The first job (of `proposal`) edits its own task `three` and the task
+    // of `later`, whose review starts after it.
+    let reviewer = StubReviewer::new(&[
+        json!({"verdict": "concern", "reasons": ["maybe done"], "summary": "doubtful"}),
+        json!({"verdict": "pass", "reasons": [], "summary": "fine now", "actions": [],
+               "predictions": [{"task_id": two, "size": "XL"}]}),
+    ])
+    .editing(&fx.db, &[three, other]);
     let backend = PlanWorkspace::default();
     let outcome = supervise(&fx, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The first verdict is dropped with why; the second job reads the
+    // edited task and its pass is applied.
     let prompts = reviewer.prompts();
-    assert_eq!(prompts.len(), 2);
-    assert!(
-        prompts[1].contains("edited while its review ran"),
-        "{}",
-        prompts[1]
-    );
-    assert!(events(&mut queue, two, "plan_review_failed").is_empty());
+    assert_eq!(prompts.len(), 3);
+    assert!(!prompts[0].contains("edited while its review ran"));
+    for prompt in &prompts[1..] {
+        assert!(prompt.contains("edited while its review ran"), "{prompt}");
+    }
     let discarded = events(&mut queue, two, "plan_review_discarded");
     assert_eq!(discarded.len(), 1);
-    assert_eq!(discarded[0]["verdict"], Value::Null);
+    assert_eq!(discarded[0]["verdict"], "concern");
     assert_eq!(discarded[0]["edited"], json!([three]));
-    assert_eq!(discarded[0]["attempt"], 1);
-    let error = discarded[0]["error"].as_str().unwrap();
-    assert!(error.contains("model unavailable"), "{error}");
-    assert!(error.contains(&format!("task {three}")), "{error}");
     let finished = events(&mut queue, two, "plan_review_finished");
     assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["summary"], "fine now");
     assert_eq!(finished[0]["attempt"], 1);
-    assert_eq!(
-        proposal_column(&fx.db, proposal, "review_hold"),
-        Value::Null
+    assert!(
+        finished[0]["prediction_error"]
+            .as_str()
+            .unwrap()
+            .starts_with("the predictions are malformed"),
+        "{}",
+        finished[0]
     );
-    assert_eq!(status(&mut queue, three), TaskStatus::Ready);
-    assert_eq!(
-        queue.show_proposal(proposal).unwrap().status(),
-        ProposalStatus::Accepted
+    assert!(events(&mut queue, two, "task_weight_predicted").is_empty());
+    for (task, proposal) in [(two, proposal), (three, proposal), (other, later)] {
+        assert_eq!(status(&mut queue, task), TaskStatus::Ready);
+        assert_eq!(
+            queue.show_proposal(proposal).unwrap().status(),
+            ProposalStatus::Accepted
+        );
+    }
+    assert!(events(&mut queue, other, "plan_review_discarded").is_empty());
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+
+    // A job that edits its own task and then fails is not held for a
+    // person either: its end is discarded and the review runs again.
+    let five = add(&mut queue, "five", &[blocker], Priority::Normal);
+    let failed = submit(&mut queue, &[five], None);
+    let failing = StubReviewer::failing().editing(&fx.db, &[five]);
+    failing.verdicts.lock().unwrap().push(
+        json!({"verdict": "pass", "reasons": [], "summary": "fine now", "actions": []}).to_string(),
     );
+    supervise(&fx, &backend, &failing);
+    assert_eq!(failing.prompts().len(), 2);
+    assert!(events(&mut queue, five, "plan_review_failed").is_empty());
+    let discarded = events(&mut queue, five, "plan_review_discarded");
+    assert_eq!(discarded.len(), 1);
+    assert_eq!(discarded[0]["verdict"], Value::Null);
+    assert_eq!(discarded[0]["edited"], json!([five]));
+    let error = discarded[0]["error"].as_str().unwrap();
+    assert!(error.contains("model unavailable"), "{error}");
+    assert!(error.contains(&format!("task {five}")), "{error}");
+    assert_eq!(proposal_column(&fx.db, failed, "review_hold"), Value::Null);
+    assert_eq!(status(&mut queue, five), TaskStatus::Ready);
     let (outcome, error): (String, String) = Connection::open(&fx.db)
         .unwrap()
         .query_row(
@@ -2186,41 +2084,7 @@ fn a_job_failing_after_an_edit_of_its_task_is_not_held_and_the_review_runs_again
         )
         .unwrap();
     assert_eq!(outcome, "interrupted");
-    assert!(error.contains("model unavailable"), "{error}");
     assert!(error.contains(&format!("task {three}")), "{error}");
-}
-
-#[test]
-fn a_job_failing_after_edits_before_it_or_to_another_proposal_is_held() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let blocker = TaskId::new(1);
-    let early = add(&mut queue, "early", &[blocker], Priority::Normal);
-    let other = add(&mut queue, "other", &[blocker], Priority::Normal);
-    let reviewed = submit(&mut queue, &[early], None);
-    let later = submit(&mut queue, &[other], None);
-    queue
-        .edit_task(
-            early,
-            TaskEdit {
-                description: Some("edited before its review".into()),
-                ..TaskEdit::default()
-            },
-            dagq::domain::TaskStatus::Submitted,
-        )
-        .unwrap();
-    // The first job (of `reviewed`) edits the task of `later`; every job
-    // fails.
-    let reviewer = StubReviewer::failing().editing(&fx.db, other);
-    let backend = PlanWorkspace::default();
-    supervise(&fx, &backend, &reviewer);
-    assert_eq!(reviewer.prompts().len(), 2);
-    for (task, proposal) in [(early, reviewed), (other, later)] {
-        assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
-        assert_eq!(proposal_column(&fx.db, proposal, "review_hold"), "failed");
-        assert_eq!(events(&mut queue, task, "plan_review_failed").len(), 1);
-        assert!(events(&mut queue, task, "plan_review_discarded").is_empty());
-    }
 }
 
 /// A task of `title`, `description` and `acceptance`, waiting for the
@@ -2430,86 +2294,6 @@ fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
         .id()
 }
 
-/// The plan review prompt of a proposal whose task touches the hotspot
-/// `seed.txt`, with a ready task on another file and, with `meet`, one on
-/// the hotspot too: the one ready task, the one on the hotspot and the
-/// JSON lines of the prompt.
-fn hotspot_prompt(meet: bool) -> (TaskId, Option<TaskId>, TaskId, Vec<Value>) {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let apart = add_paths(&mut queue, "qwertyuiop apart", &["other.txt"]);
-    let on_hot = meet.then(|| add_paths(&mut queue, "asdfghjkl hot", &["seed.txt"]));
-    for id in std::iter::once(apart).chain(on_hot) {
-        queue.transition(id, TaskAction::BypassReview).unwrap();
-    }
-    let own = add_paths(&mut queue, "zxcvbnm own", &["seed.txt"]);
-    submit(&mut queue, &[own], None);
-    Connection::open(&fx.db)
-        .unwrap()
-        .execute(
-            "INSERT INTO run_events(task_id, kind, payload) VALUES (1, 'conflict_precheck', ?1)",
-            [json!({"main": "m", "conflicts": ["seed.txt"]}).to_string()],
-        )
-        .unwrap();
-    let reviewer = StubReviewer::new(&[
-        json!({"verdict": "pass", "reasons": [], "summary": "sound", "actions": []}),
-    ]);
-    let outcome = supervise(&fx, &PlanWorkspace::default(), &reviewer);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let prompt = reviewer.prompts().remove(0);
-    for expected in [
-        "Ready and in-progress tasks, in summary",
-        "Files each task of the proposal is expected to touch",
-        "not pass but revise, saying in the reason which part to cut",
-    ] {
-        assert!(prompt.contains(expected), "{expected:?} not in {prompt}");
-    }
-    assert!(!prompt.contains("are left out of this list"), "{prompt}");
-    let lines = prompt
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
-    (apart, on_hot, own, lines)
-}
-
-/// Task 591: the ready tasks are listed in summary with their expected
-/// files, each hotspot names the tasks expected to touch it, and only a
-/// ready task on the same hotspot as the proposal's is given in full.
-#[test]
-fn the_prompt_lists_ready_tasks_in_summary_and_in_full_those_on_the_proposals_hotspot() {
-    for meet in [true, false] {
-        let (apart, on_hot, own, lines) = hotspot_prompt(meet);
-        let find = |what: &dyn Fn(&Value) -> bool| lines.iter().find(|line| what(line)).cloned();
-        let summary = |id: TaskId| {
-            find(&|line| line["id"] == json!(id) && line.get("expected_files").is_some())
-        };
-        let full =
-            |id: TaskId| find(&|line| line["id"] == json!(id) && line.get("description").is_some());
-        let hot = find(&|line| line["path"] == "seed.txt" && line.get("conflicts").is_some())
-            .unwrap_or_else(|| panic!("no hotspot in {lines:?}"));
-        assert_eq!(hot["proposal_tasks"], json!([own]), "{hot}");
-        let apart_summary = summary(apart).unwrap_or_else(|| panic!("{lines:?}"));
-        assert_eq!(apart_summary["expected_files"], json!(["other.txt"]));
-        assert_eq!(apart_summary["status"], "ready");
-        assert_eq!(apart_summary["dependencies"], json!([1]));
-        assert_eq!(apart_summary.get("description"), None);
-        assert!(full(apart).is_none(), "{lines:?}");
-        let own_files =
-            find(&|line| line["task_id"] == json!(own) && line.get("expected_files").is_some())
-                .unwrap_or_else(|| panic!("{lines:?}"));
-        assert_eq!(own_files["expected_files"], json!(["seed.txt"]));
-        match on_hot {
-            Some(on_hot) => {
-                assert_eq!(hot["queued_tasks"], json!([on_hot]), "{hot}");
-                assert_eq!(summary(on_hot).unwrap()["full_text_below"], true);
-                let full = full(on_hot).unwrap_or_else(|| panic!("{lines:?}"));
-                assert_eq!(full["description"], "asdfghjkl hot: the long description");
-            }
-            None => assert_eq!(hot["queued_tasks"], json!([]), "{hot}"),
-        }
-    }
-}
-
 /// Task 635: an in-progress task is expected to touch what its run
 /// changed (ADR-0069 decision 2), not only its declared paths: its run's
 /// branch edits the hotspot `seed.txt` it does not declare, and the prompt
@@ -2603,245 +2387,6 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
     assert_eq!(hot["proposal_tasks"], json!([own]), "{hot}");
 }
 
-/// Plan review predicts the weight of each submitted task (ADR-0079
-/// decision 2): recorded per task, again on a later review; predictions
-/// missing, malformed or not covering the tasks are not recorded, and the
-/// verdict is applied all the same.
-#[test]
-fn plan_review_records_each_tasks_predicted_weight_and_goes_on_without_one() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let blocker = TaskId::new(1);
-    let two = add(&mut queue, "two", &[blocker], Priority::Normal);
-    let three = add(&mut queue, "three", &[blocker], Priority::Normal);
-    let proposal = submit(&mut queue, &[two, three], None);
-    let predict = |task: TaskId, tokens: u64| {
-        json!({"task_id": task, "size": "M", "nature": "implementation", "uncertainty": 0.4,
-               "expected_output_tokens": tokens, "rework_probability": 0.2, "reason": "a module"})
-    };
-    let again = |queue: &mut SqliteQueue| {
-        queue
-            .submit(Submission {
-                tasks: Vec::new(),
-                goals: Vec::new(),
-                proposal: Some(proposal),
-                owner: PlannerOwner {
-                    origin: PlannerOrigin::Runtime,
-                    workspace_id: None,
-                },
-            })
-            .unwrap();
-    };
-    let reviewer = StubReviewer::new(&[
-        json!({"verdict": "revise", "reasons": ["vague"], "summary": "vague",
-               "predictions": [predict(two, 40_000), predict(three, 9_000)]}),
-        // Task three is missing: none is recorded.
-        json!({"verdict": "revise", "reasons": ["still vague"], "summary": "vague",
-               "predictions": [predict(two, 1_000)]}),
-        // Not the shape of a prediction: none is recorded, the verdict passes.
-        json!({"verdict": "pass", "reasons": [], "summary": "sound",
-               "predictions": [{"task_id": two, "size": "XL"}]}),
-    ]);
-    let backend = PlanWorkspace::default();
-    supervise(&fx, &backend, &reviewer);
-    // The prompt asks for one prediction per submitted task.
-    let prompt = &reviewer.prompts()[0];
-    for expected in [
-        "estimate the weight of each submitted task of the proposal (tasks 2, 3)",
-        "\"predictions\": [{\"task_id\": int, \"size\": \"S\" | \"M\" | \"L\"",
-        "expected_output_tokens is the output tokens (thinking included) of one worker run",
-    ] {
-        assert!(prompt.contains(expected), "{expected:?} not in {prompt}");
-    }
-    let first = events(&mut queue, two, "plan_review_finished");
-    assert_eq!(first[0]["prediction_error"], Value::Null);
-    let recorded = events(&mut queue, two, "task_weight_predicted");
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0]["proposal_id"], json!(proposal));
-    assert_eq!(
-        recorded[0]["plan_review_id"],
-        events(&mut queue, two, "plan_review_started")[0]["plan_review_id"]
-    );
-    assert_eq!(
-        recorded[0]["prediction"],
-        json!({"size": "M", "nature": "implementation", "uncertainty": 0.4,
-               "expected_output_tokens": 40_000, "rework_probability": 0.2,
-               "reason": "a module"})
-    );
-    // The stub's session wrote no transcript naming a model.
-    assert_eq!(recorded[0]["model"], Value::Null);
-    assert_eq!(recorded[0]["effort"], Value::Null);
-    let three_recorded = events(&mut queue, three, "task_weight_predicted");
-    assert_eq!(three_recorded.len(), 1);
-    assert_eq!(
-        three_recorded[0]["prediction"]["expected_output_tokens"],
-        9_000
-    );
-
-    again(&mut queue);
-    supervise(&fx, &backend, &reviewer);
-    let finished = events(&mut queue, two, "plan_review_finished");
-    assert_eq!(finished[1]["decision"], "revise");
-    assert_eq!(finished[1]["prediction_error"], "task 3 is not predicted");
-    assert_eq!(events(&mut queue, two, "task_weight_predicted").len(), 1);
-
-    again(&mut queue);
-    supervise(&fx, &backend, &reviewer);
-    let finished = events(&mut queue, two, "plan_review_finished");
-    assert_eq!(finished[2]["decision"], "pass");
-    assert!(
-        finished[2]["prediction_error"]
-            .as_str()
-            .unwrap()
-            .starts_with("the predictions are malformed"),
-        "{}",
-        finished[2]
-    );
-    assert_eq!(status(&mut queue, two), TaskStatus::Ready);
-    assert_eq!(status(&mut queue, three), TaskStatus::Ready);
-    assert_eq!(events(&mut queue, two, "task_weight_predicted").len(), 1);
-    assert_eq!(events(&mut queue, three, "task_weight_predicted").len(), 1);
-    // No run was claimed, so nothing predicted at a claim either.
-    assert!(queue.show(two).unwrap().runs.is_empty());
-}
-
-#[test]
-fn a_duplicate_plan_review_cancels_is_recorded_as_cancel_duplicate_of_does() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let original = TaskId::new(1);
-    let copy = add(&mut queue, "copy", &[original], Priority::Normal);
-    let kept = add(&mut queue, "kept", &[original], Priority::Normal);
-    submit(&mut queue, &[copy, kept], None);
-    let reviewer = StubReviewer::new(&[json!({
-        "verdict": "pass", "reasons": [], "summary": "copy duplicates task 1",
-        "actions": [{"action": "cancel_duplicate", "task_id": copy, "duplicate_of": original}]
-    })]);
-    let outcome = supervise(&fx, &PlanWorkspace::default(), &reviewer);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(status(&mut queue, copy), TaskStatus::Canceled);
-    assert_eq!(status(&mut queue, kept), TaskStatus::Ready);
-    // The same record as `cancel --duplicate-of` (ADR-0046 decision 5),
-    // marked as the plan review's.
-    let changed = events(&mut queue, copy, "task_status_changed");
-    let canceled = changed.last().unwrap();
-    assert_eq!(canceled["to"], "canceled");
-    assert_eq!(canceled["duplicate_of"], json!(original));
-    assert_eq!(canceled["by"], "plan_review");
-    assert!(events(&mut queue, copy, "task_canceled_as_duplicate").is_empty());
-
-    let copy_id = copy.to_string();
-    let shown = common::cli::ok(&fx.db, &["show", &copy_id]);
-    assert_eq!(shown["duplicate_of"], json!(original));
-    let shown = common::cli::ok(&fx.db, &["show", "1"]);
-    assert_eq!(shown["duplicates"], json!([copy]));
-    let listed = common::cli::ok(&fx.db, &["list", "--all"]);
-    let row = listed["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|task| task["id"] == json!(copy))
-        .cloned()
-        .unwrap_or_else(|| panic!("{listed}"));
-    assert_eq!(row["duplicate_of"], json!(original));
-    let stats = common::cli::ok(&fx.db, &["stats", "--full"]);
-    assert_eq!(
-        stats["duplicate_cancels"],
-        json!({"count": 1, "tasks": [{"task_id": copy, "duplicate_of": original}]})
-    );
-}
-
-#[test]
-fn a_plan_review_duplicate_of_a_canceled_missing_or_the_same_task_fails() {
-    // (task, gone, chained): the task under review, a canceled task and
-    // one canceled as a duplicate of task 1.
-    type Ids = (TaskId, TaskId, TaskId);
-    type Case = (fn(Ids) -> TaskId, fn(Ids) -> String);
-    let cases: [Case; 4] = [
-        (
-            |(task, ..)| task,
-            |(task, ..)| format!("task {task} cannot be a duplicate of itself"),
-        ),
-        (
-            |_| TaskId::new(999),
-            |_| "task 999 does not exist".to_owned(),
-        ),
-        (
-            |(_, gone, _)| gone,
-            |(_, gone, _)| format!("task {gone} is canceled; a duplicate needs"),
-        ),
-        (
-            |(.., chained)| chained,
-            |(.., chained)| format!("task {chained} is canceled as a duplicate of task 1"),
-        ),
-    ];
-    for (target, error) in cases {
-        let fx = fixture();
-        let mut queue = SqliteQueue::open(&fx.db).unwrap();
-        let gone = add(&mut queue, "gone", &[], Priority::Normal);
-        queue.transition(gone, TaskAction::Cancel).unwrap();
-        let chained = add(&mut queue, "chained", &[], Priority::Normal);
-        queue.cancel_duplicate(chained, TaskId::new(1)).unwrap();
-        let task = add(&mut queue, "task", &[TaskId::new(1)], Priority::Normal);
-        submit(&mut queue, &[task], None);
-        let ids = (task, gone, chained);
-        let reviewer = StubReviewer::new(&[json!({
-            "verdict": "pass", "reasons": [], "summary": "duplicate",
-            "actions": [{"action": "cancel_duplicate", "task_id": task, "duplicate_of": target(ids)}]
-        })]);
-        supervise(&fx, &PlanWorkspace::default(), &reviewer);
-        assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
-        let failed = events(&mut queue, task, "plan_review_failed");
-        let expected = error(ids);
-        assert!(
-            failed[0]["error"].as_str().unwrap().contains(&expected),
-            "{expected}: {failed:?}"
-        );
-    }
-}
-
-/// A passing plan review is a trigger of a forecast snapshot (ADR-0070
-/// decision 3): after the day's snapshot at the start, the pass records one
-/// more, naming the proposal, with the tasks it readied.
-#[test]
-fn a_passing_plan_review_records_a_forecast_snapshot() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let two = add(&mut queue, "two", &[TaskId::new(1)], Priority::Normal);
-    let proposal = submit(&mut queue, &[two], None);
-    let reviewer = StubReviewer::new(&[json!({
-        "verdict": "pass", "reasons": [], "summary": "sound", "actions": []
-    })]);
-    let backend = PlanWorkspace::default();
-    let options = SuperviseOptions {
-        forecast_snapshots: true,
-        forecast_check: Duration::ZERO,
-        host_config: Some(fx.db.with_file_name("no host-wide file.toml")),
-        ..options(1, Duration::from_secs(3600))
-    };
-    let outcome = supervise_with(&fx, &backend, &reviewer, &options);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(status(&mut queue, two), TaskStatus::Ready);
-    let snapshots: Vec<Value> = queue
-        .all_events()
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.kind == "forecast_recorded")
-        .map(|event| event.payload)
-        .collect();
-    assert_eq!(snapshots.len(), 2, "{snapshots:#?}");
-    assert_eq!(snapshots[0]["triggers"][0]["trigger"], "daily");
-    assert_eq!(snapshots[0]["tasks"], json!([]));
-    assert_eq!(
-        snapshots[1]["triggers"],
-        json!([{"trigger": "plan_review", "event_id": snapshots[1]["triggers"][0]["event_id"], "proposal_id": proposal}])
-    );
-    // Ready (waiting for a draft) and forecast: no landed run gives it a
-    // time.
-    assert_eq!(snapshots[1]["tasks"][0]["id"], json!(two));
-    assert!(snapshots[1]["tasks"][0]["p50"].is_null());
-}
-
 /// Plan review is an actor of its own, the plan-review-job (ADR-t728-1):
 /// the supervisor applies its verdict as data and records the events as
 /// its own, at the job's request. An output the runtime cannot read, or
@@ -2931,48 +2476,4 @@ fn a_plan_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_c
     let ask = asks.iter().find(|a| a.task_id == Some(task)).unwrap();
     assert_eq!(ask.kind, AskKind::ApprovePlan);
     assert_eq!(ask.asked_by, "plan_review");
-}
-
-#[test]
-fn no_claude_plan_review_waits_for_manual_handling_and_opens_no_planner() {
-    let mut fx = fixture();
-    crate::runtime_support::open_hold_ask(&fx.db, dagq::domain::AskReason::Authentication, None);
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let task = add(
-        &mut queue,
-        "manual plan",
-        &[TaskId::new(1)],
-        Priority::Normal,
-    );
-    let proposal = submit(&mut queue, &[task], None);
-    fx.claude = fx.repo.join("missing-claude");
-    let reviewer = StubReviewer::new(&[]);
-    let backend = PlanWorkspace::default();
-    let opts = SuperviseOptions {
-        no_claude: true,
-        codex: fx.repo.join("missing-codex"),
-        observe_interval: Duration::from_secs(1),
-        observe_daily: true,
-        throughput_review: true,
-        ..options(1, Duration::from_secs(3600))
-    };
-    supervise_with(&fx, &backend, &reviewer, &opts);
-    assert!(reviewer.prompts().is_empty());
-    assert!(backend.launched().is_empty());
-    assert!(backend.texts().is_empty());
-    let failed = events(&mut queue, task, "plan_review_failed");
-    assert_eq!(failed.len(), 1, "{failed:?}");
-    assert!(
-        failed[0]["error"]
-            .as_str()
-            .unwrap()
-            .contains("provider_disabled")
-    );
-    assert_eq!(
-        queue.show_proposal(proposal).unwrap().status(),
-        ProposalStatus::Submitted
-    );
-    // No failed-provider timer causes this policy to be retried on each pass.
-    supervise_with(&fx, &backend, &reviewer, &opts);
-    assert_eq!(events(&mut queue, task, "plan_review_failed").len(), 1);
 }

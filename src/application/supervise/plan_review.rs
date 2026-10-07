@@ -12,7 +12,8 @@ use super::*;
 use crate::domain::EventKind;
 use crate::domain::actor_model::RoleModels;
 use crate::domain::language::with_instruction;
-use crate::domain::{ActorContext, AskConfidence};
+use crate::domain::provider_switch::SwitchReason;
+use crate::domain::{ActorContext, Ask, AskConfidence, PlannerId};
 use crate::{
     application::{
         PlanReviewApply, PlanReviewFailure, PlanReviewJob, PlannerHold, RevisingProposal,
@@ -30,12 +31,15 @@ use crate::{
         screen_idle,
     },
     domain::{
-        MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict,
-        PlannerCloseCode, PlannerOrigin, PlannerState, Proposal, ProposalId, Task, TaskDetail,
+        PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict, PlannerCloseCode,
+        PlannerOrigin, PlannerState, Proposal, ProposalId, Task, TaskDetail,
         actor_model::{ActorLaunch, JobRoute, ModelRole, job_route, job_wait_text},
         claim_defer::expected_files,
         next_to_review,
-        plan_review::{PlanConcernDecision, PlanConcernEscalation, PlanRecommendation},
+        plan_review::{
+            PlanConcernDecision, PlanConcernEscalation, PlanRecommendation, PlanVerdictDecision,
+            decide_verdict,
+        },
         search::{SearchKind, SearchQuery, SearchRef, any_word_query},
         stats::{LiveSnapshot, SlotSnapshot, StatsQuery, conflicts::ConflictHotspot},
     },
@@ -142,38 +146,14 @@ impl Supervisor<'_> {
     fn plan_review_route(&self) -> PlanReviewRoute {
         let role = ModelRole::PlanReview;
         let models = self.role_models(role);
-        let launch = models.launch(role);
-        if !models.switchable(role) {
-            if self.no_claude {
-                return PlanReviewRoute::Manual(format!(
-                    "{PLAN_REVIEW_PROVIDER_DISABLED}; handle this role manually"
-                ));
-            }
-            return match self.queue_hold {
-                Some(_) => PlanReviewRoute::Wait,
-                None => PlanReviewRoute::Start(launch, false),
-            };
-        }
-        match job_route(&launch, true, self.fallback.jobs, |provider| {
-            self.job_unusable(provider)
-        }) {
-            JobRoute::Start(launch) => PlanReviewRoute::Start(launch, true),
-            JobRoute::Wait { .. } if self.no_claude => {
-                let codex = self
-                    .job_unusable(Provider::Codex)
-                    .map_or("unknown", |reason| reason.as_str());
-                PlanReviewRoute::Manual(format!(
-                    "{PLAN_REVIEW_PROVIDER_DISABLED} and codex cannot be used ({codex}); handle this role manually"
-                ))
-            }
-            JobRoute::Wait { provider, reason } => {
-                tracing::debug!(
-                    "the plan review waits: {}",
-                    job_wait_text(provider, reason, self.fallback.jobs)
-                );
-                PlanReviewRoute::Wait
-            }
-        }
+        plan_review_route(
+            models.launch(role),
+            models.switchable(role),
+            self.no_claude,
+            self.queue_hold.is_some(),
+            self.fallback.jobs,
+            |provider| self.job_unusable(provider),
+        )
     }
 
     /// Start the plan review of the next candidate, when none runs.
@@ -623,51 +603,19 @@ impl Supervisor<'_> {
         let proposal = job.proposal_id;
         // A sure concern is applied as its recommendation; the rest wait
         // for a person (ADR-t451-1 decision 4).
-        let concern = verdict.decide_concern(revise_count);
-        let (decision, overridden) = match verdict.verdict {
-            PlanReviewDecision::Revise if revise_count >= MAX_PLAN_REVISES => (
-                PlanReviewDecision::Concern,
-                Some(format!(
-                    "proposal {proposal} was sent back {revise_count} times already (at most {MAX_PLAN_REVISES})"
-                )),
-            ),
-            PlanReviewDecision::Concern => match concern.and_then(|decided| decided.applied) {
-                Some(applied) => (applied, None),
-                None => (PlanReviewDecision::Concern, None),
-            },
-            decision => (decision, None),
-        };
-        let answered = self.queue.answered_asks(usize::MAX >> 1)?;
-        let precedents: Vec<String> = verdict
-            .precedents
-            .iter()
-            .filter_map(|id| answered.iter().find(|ask| ask.id == *id))
-            .map(precedent_line)
-            .collect();
+        let decided = decide_verdict(proposal, &verdict, revise_count);
+        let precedents = quoted_precedents(
+            &verdict.precedents,
+            &self.queue.answered_asks(usize::MAX >> 1)?,
+        );
         let mut revise_reasons = verdict.reasons.clone();
         revise_reasons.extend(precedents.iter().cloned());
-        let ask = (decision == PlanReviewDecision::Concern).then(|| NewAsk {
-            recommendation: concern
-                .and_then(|decided| decided.recommendation)
-                .map(|recommended| recommended.as_str().to_owned()),
-            confidence: concern.and_then(|decided| decided.confidence),
-            kind: AskKind::ApprovePlan,
-            task_id: Some(job.anchor),
-            run_id: None,
-            question: plan_question(
-                job,
-                &verdict,
-                overridden.as_deref(),
-                concern.as_ref(),
-                &precedents,
-            ),
-            options: PLAN_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
-            asked_by: PLAN_REVIEW_ASKER.to_owned(),
-            reason_category: concern.map_or(AskReason::Scope, |decided| decided.ask_reason()),
-            topics: Vec::new(),
-            finding_id: None,
-            request_id: None,
-        });
+        let ask = plan_ask(job, &verdict, &decided, &precedents);
+        let PlanVerdictDecision {
+            decision,
+            overridden,
+            concern,
+        } = decided;
         let applied = self.queue.finish_plan_review(
             job,
             &self.token,
@@ -762,44 +710,42 @@ impl Supervisor<'_> {
         let mut views = self.planner_views()?;
         for revise in self.queue.revising_proposals()? {
             let proposal = revise.proposal.id();
-            match (revise.sent_at, revise.planner_id) {
-                (Some(sent_at), Some(planner_id)) => {
-                    let gone = views
-                        .iter()
-                        .find(|view| view.planner.id == planner_id)
-                        .is_none_or(|view| self.planner_gone(view));
-                    if gone {
-                        info!(
-                            "proposal {proposal}: planner {planner_id} is gone before it submitted again; the revise goes to another planner"
-                        );
-                        self.queue.revise_lost(
-                            proposal,
-                            Some(planner_id),
-                            "its planner is gone before it submitted again",
-                        )?;
-                    } else if revise.unresponsive_at.is_none() && now - sent_at > timeout {
-                        warn!(
-                            "proposal {proposal}: planner {planner_id} did not submit it again within {timeout} seconds; the inbox is told"
-                        );
-                        self.queue.planner_unresponsive(
-                            proposal,
-                            Some(planner_id),
-                            now - sent_at,
-                            &[],
-                        )?;
-                    }
+            let gone = |planner_id: PlannerId| {
+                views
+                    .iter()
+                    .find(|view| view.planner.id == planner_id)
+                    .is_none_or(|view| self.planner_gone(view))
+            };
+            match revise_watch(
+                (revise.sent_at, revise.planner_id),
+                revise.unresponsive_at,
+                revise.revised_at,
+                gone,
+                now,
+                timeout,
+            ) {
+                ReviseWatch::PlannerGone(planner_id) => {
+                    info!(
+                        "proposal {proposal}: planner {planner_id} is gone before it submitted again; the revise goes to another planner"
+                    );
+                    self.queue.revise_lost(
+                        proposal,
+                        Some(planner_id),
+                        "its planner is gone before it submitted again",
+                    )?;
                 }
-                // A delivery claimed and never recorded (its supervisor
-                // died in between) is delivered again.
-                (Some(sent_at), None) if now - sent_at > HEARTBEAT_TIMEOUT_SECS => {
+                ReviseWatch::PlannerSilent { planner_id, waited } => {
+                    warn!(
+                        "proposal {proposal}: planner {planner_id} did not submit it again within {timeout} seconds; the inbox is told"
+                    );
+                    self.queue
+                        .planner_unresponsive(proposal, Some(planner_id), waited, &[])?;
+                }
+                ReviseWatch::DeliveryLost => {
                     self.queue
                         .revise_lost(proposal, None, "its delivery was never recorded")?;
                 }
-                (None, _)
-                    if revise.unresponsive_at.is_none()
-                        && revise.revised_at.is_some_and(|at| now - at > timeout) =>
-                {
-                    let waited = now - revise.revised_at.unwrap_or(now);
+                ReviseWatch::NoPlanner { waited } => {
                     let holders = self.planner_holds(&views)?;
                     warn!(
                         "proposal {proposal}: its revise waited {waited} seconds for a planner; the inbox is told"
@@ -807,7 +753,7 @@ impl Supervisor<'_> {
                     self.queue
                         .planner_unresponsive(proposal, None, waited, &holders)?;
                 }
-                _ => {}
+                ReviseWatch::Nothing => {}
             }
         }
         let mut runtime_open = views
@@ -1309,6 +1255,69 @@ impl Supervisor<'_> {
     }
 }
 
+/// What a pass makes of a revise on its way to a planner (ADR-0041
+/// decisions 12, 13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviseWatch {
+    /// The planner it went to is gone before it submitted again: the
+    /// revise goes to another planner.
+    PlannerGone(PlannerId),
+    /// The planner it went to did not submit again within the timeout:
+    /// the inbox is told, once.
+    PlannerSilent {
+        planner_id: PlannerId,
+        waited: i64,
+    },
+    /// A delivery claimed and never recorded (its supervisor died in
+    /// between): it is delivered again.
+    DeliveryLost,
+    /// No planner took it within the timeout: the inbox is told, once.
+    NoPlanner {
+        waited: i64,
+    },
+    Nothing,
+}
+
+/// What a pass at `now` makes of a revise (`sent`: when its delivery was
+/// claimed and the planner it went to; `unresponsive_at`: when the inbox
+/// was told; `revised_at`: since when it waits), `planner_gone` judging
+/// whether a planner's session is over, with the planner timeout of
+/// `timeout` seconds.
+fn revise_watch(
+    sent: (Option<i64>, Option<PlannerId>),
+    unresponsive_at: Option<i64>,
+    revised_at: Option<i64>,
+    planner_gone: impl Fn(PlannerId) -> bool,
+    now: i64,
+    timeout: i64,
+) -> ReviseWatch {
+    match sent {
+        (Some(sent_at), Some(planner_id)) => {
+            if planner_gone(planner_id) {
+                ReviseWatch::PlannerGone(planner_id)
+            } else if unresponsive_at.is_none() && now - sent_at > timeout {
+                ReviseWatch::PlannerSilent {
+                    planner_id,
+                    waited: now - sent_at,
+                }
+            } else {
+                ReviseWatch::Nothing
+            }
+        }
+        (Some(sent_at), None) if now - sent_at > HEARTBEAT_TIMEOUT_SECS => {
+            ReviseWatch::DeliveryLost
+        }
+        (None, _)
+            if unresponsive_at.is_none() && revised_at.is_some_and(|at| now - at > timeout) =>
+        {
+            ReviseWatch::NoPlanner {
+                waited: now - revised_at.unwrap_or(now),
+            }
+        }
+        _ => ReviseWatch::Nothing,
+    }
+}
+
 /// Why a planner of the runtime's is not ended (task 884), as the
 /// `busy` of a [`PlannerHold`] and of `planner_released` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1438,6 +1447,96 @@ impl Supervisor<'_> {
     }
 }
 
+/// Where the next plan review goes, for a role whose `launch` names its
+/// provider when `switchable`: a role that names none runs on Claude, waits
+/// while the queue's hold ask (`held`) holds it, and goes to a person under
+/// `--no-claude`; one that names its provider goes by [`job_route`] (to the
+/// other provider when its own cannot be used, `unusable` saying why, and
+/// `[provider_fallback] jobs` lets it), and under `--no-claude` to a person
+/// told why when it would wait.
+fn plan_review_route(
+    launch: ActorLaunch,
+    switchable: bool,
+    no_claude: bool,
+    held: bool,
+    fallback_jobs: bool,
+    unusable: impl Fn(Provider) -> Option<SwitchReason>,
+) -> PlanReviewRoute {
+    if !switchable {
+        if no_claude {
+            return PlanReviewRoute::Manual(format!(
+                "{PLAN_REVIEW_PROVIDER_DISABLED}; handle this role manually"
+            ));
+        }
+        return if held {
+            PlanReviewRoute::Wait
+        } else {
+            PlanReviewRoute::Start(launch, false)
+        };
+    }
+    match job_route(&launch, true, fallback_jobs, &unusable) {
+        JobRoute::Start(launch) => PlanReviewRoute::Start(launch, true),
+        JobRoute::Wait { .. } if no_claude => {
+            let codex = unusable(Provider::Codex).map_or("unknown", |reason| reason.as_str());
+            PlanReviewRoute::Manual(format!(
+                "{PLAN_REVIEW_PROVIDER_DISABLED} and codex cannot be used ({codex}); handle this role manually"
+            ))
+        }
+        JobRoute::Wait { provider, reason } => {
+            tracing::debug!(
+                "the plan review waits: {}",
+                job_wait_text(provider, reason, fallback_jobs)
+            );
+            PlanReviewRoute::Wait
+        }
+    }
+}
+
+/// The lines quoting the asks a verdict names as its precedents, of those
+/// `answered`, in the verdict's order; an ask not answered is left out.
+fn quoted_precedents(precedents: &[AskId], answered: &[Ask]) -> Vec<String> {
+    precedents
+        .iter()
+        .filter_map(|id| answered.iter().find(|ask| ask.id == *id))
+        .map(precedent_line)
+        .collect()
+}
+
+/// The `approve_plan` ask the job's verdict opens when the runtime's
+/// decision is a `concern` (ADR-0041 decision 11), carrying the concern's
+/// recommendation, confidence and the reason a person is needed
+/// (ADR-t451-1 decision 4); none for any other decision.
+fn plan_ask(
+    job: &PlanReviewJob,
+    verdict: &PlanReviewVerdict,
+    decided: &PlanVerdictDecision,
+    precedents: &[String],
+) -> Option<NewAsk> {
+    let concern = decided.concern;
+    (decided.decision == PlanReviewDecision::Concern).then(|| NewAsk {
+        recommendation: concern
+            .and_then(|decided| decided.recommendation)
+            .map(|recommended| recommended.as_str().to_owned()),
+        confidence: concern.and_then(|decided| decided.confidence),
+        kind: AskKind::ApprovePlan,
+        task_id: Some(job.anchor),
+        run_id: None,
+        question: plan_question(
+            job,
+            verdict,
+            decided.overridden.as_deref(),
+            concern.as_ref(),
+            precedents,
+        ),
+        options: PLAN_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
+        asked_by: PLAN_REVIEW_ASKER.to_owned(),
+        reason_category: concern.map_or(AskReason::Scope, |decided| decided.ask_reason()),
+        topics: Vec::new(),
+        finding_id: None,
+        request_id: None,
+    })
+}
+
 /// The question of the `approve_plan` ask a concern opens.
 fn plan_question(
     job: &PlanReviewJob,
@@ -1498,6 +1597,7 @@ fn warns_of_ignored_route(warned: bool, roles: &RoleModels) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::MAX_PLAN_REVISES;
 
     /// Any value of the old key is warned of, and only once; no key is
     /// not.
@@ -1510,5 +1610,311 @@ mod tests {
             assert_eq!(warns_of_ignored_route(false, &roles), Some(value));
             assert_eq!(warns_of_ignored_route(true, &roles), None);
         }
+    }
+
+    fn launch(provider: Provider) -> ActorLaunch {
+        ActorLaunch {
+            provider,
+            ..ActorLaunch::default_of(ModelRole::PlanReview)
+        }
+    }
+
+    /// Where a plan review starts, waits or goes to a person, by the role,
+    /// the providers that can be used and `--no-claude` (moved from the
+    /// integration tests without_codex_the_plan_review_starts_on_claude,
+    /// no_claude_plan_review_waits_for_manual_handling_and_opens_no_planner
+    /// and the ok and missing cases of
+    /// no_claude_plan_review_runs_on_codex_and_never_falls_back).
+    #[test]
+    fn a_plan_review_starts_where_its_role_and_the_providers_let_it() {
+        let claude = launch(Provider::Claude);
+        let codex = launch(Provider::Codex);
+        let usable = |_: Provider| None;
+        let route = |launch: &ActorLaunch,
+                     switchable,
+                     no_claude,
+                     held,
+                     unusable: &dyn Fn(Provider) -> Option<SwitchReason>| {
+            match plan_review_route(launch.clone(), switchable, no_claude, held, true, unusable) {
+                PlanReviewRoute::Start(launch, switchable) => {
+                    format!(
+                        "start {} {switchable} {:?}",
+                        launch.provider.as_str(),
+                        launch.switch_reason
+                    )
+                }
+                PlanReviewRoute::Wait => "wait".to_owned(),
+                PlanReviewRoute::Manual(why) => why,
+            }
+        };
+        // A role that names no provider: Claude, waiting while held, a
+        // person's under --no-claude whatever the hold.
+        assert_eq!(
+            route(&claude, false, false, false, &usable),
+            "start claude false None"
+        );
+        assert_eq!(route(&claude, false, false, true, &usable), "wait");
+        for held in [false, true] {
+            assert_eq!(
+                route(&claude, false, true, held, &usable),
+                "provider_disabled: Claude is disabled by --no-claude; handle this role manually"
+            );
+        }
+        // One that names Codex starts there, or on Claude when no Codex
+        // runs, with why.
+        assert_eq!(
+            route(&codex, true, false, false, &usable),
+            "start codex true None"
+        );
+        let missing = |provider: Provider| {
+            (provider == Provider::Codex).then_some(SwitchReason::ExecutableMissing)
+        };
+        assert_eq!(
+            route(&codex, true, false, false, &missing),
+            "start claude true Some(ExecutableMissing)"
+        );
+        // Under --no-claude it runs on Codex and never moves to Claude.
+        let no_claude =
+            |provider: Provider| (provider == Provider::Claude).then_some(SwitchReason::Disabled);
+        assert_eq!(
+            route(&codex, true, true, false, &no_claude),
+            "start codex true None"
+        );
+        for reason in [
+            SwitchReason::ExecutableMissing,
+            SwitchReason::Authentication,
+        ] {
+            let neither = move |provider: Provider| match provider {
+                Provider::Claude => Some(SwitchReason::Disabled),
+                Provider::Codex => Some(reason),
+            };
+            assert_eq!(
+                route(&codex, true, true, false, &neither),
+                format!(
+                    "provider_disabled: Claude is disabled by --no-claude and codex cannot be used ({}); handle this role manually",
+                    reason.as_str()
+                )
+            );
+            // Without --no-claude it waits for one.
+            assert_eq!(route(&codex, true, false, false, &neither), "wait");
+        }
+    }
+
+    fn job() -> PlanReviewJob {
+        PlanReviewJob {
+            id: 4,
+            proposal_id: ProposalId::new(1),
+            attempt: 1,
+            anchor: TaskId::new(2),
+            dir: PathBuf::from("/q/plan-reviews/4"),
+            session_id: None,
+        }
+    }
+
+    /// The `approve_plan` ask of a concern: the recommendation, the
+    /// confidence, the reason a person is needed and the question, for
+    /// each reason the runtime leaves a concern to a person and for a
+    /// revise past the limit (moved from the integration tests
+    /// low_scope_discard_and_the_old_shape_wait_for_a_person_with_the_recommendation,
+    /// a_sure_send_back_is_a_revise_counted_toward_the_limit_then_a_person_decides,
+    /// a_revise_past_the_limit_is_a_concern and
+    /// a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers).
+    #[test]
+    fn a_concern_left_to_a_person_asks_with_its_recommendation_and_why() {
+        let concern = |extra: &str| {
+            PlanReviewVerdict::parse(&format!(
+                r#"{{"verdict":"concern","reasons":["looks already implemented"],"summary":"maybe done"{extra}}}"#
+            ))
+            .unwrap()
+        };
+        let cases = [
+            (
+                r#","recommendation":"ready","confidence":"low""#,
+                0,
+                Some("ready"),
+                Some(AskConfidence::Low),
+                AskReason::Scope,
+                "It recommends ready (confidence low); left to a person: low_confidence.",
+            ),
+            (
+                r#","recommendation":"ready","confidence":"high","reason_category":"scope""#,
+                0,
+                Some("ready"),
+                Some(AskConfidence::High),
+                AskReason::Scope,
+                "It recommends ready (confidence high); left to a person: scope.",
+            ),
+            (
+                r#","recommendation":"cancel","confidence":"high","reason_category":"discard""#,
+                0,
+                Some("cancel"),
+                Some(AskConfidence::High),
+                AskReason::Discard,
+                "It recommends cancel (confidence high); left to a person: discard.",
+            ),
+            (
+                "",
+                0,
+                None,
+                None,
+                AskReason::Scope,
+                "It recommends nothing (confidence none); left to a person: no_recommendation.",
+            ),
+            (
+                r#","recommendation":"send_back","confidence":"high""#,
+                MAX_PLAN_REVISES,
+                Some("send_back"),
+                Some(AskConfidence::High),
+                AskReason::Scope,
+                "It recommends send_back (confidence high); left to a person: revise_limit.",
+            ),
+        ];
+        for (extra, revises, recommendation, confidence, reason, says) in cases {
+            let verdict = concern(extra);
+            let decided = decide_verdict(ProposalId::new(1), &verdict, revises);
+            let ask =
+                plan_ask(&job(), &verdict, &decided, &[]).unwrap_or_else(|| panic!("{extra}"));
+            assert_eq!(ask.kind, AskKind::ApprovePlan);
+            assert_eq!(ask.task_id, Some(TaskId::new(2)));
+            assert_eq!(ask.options, ["ready", "send_back", "cancel"]);
+            assert_eq!(ask.asked_by, "plan_review");
+            assert_eq!(ask.recommendation.as_deref(), recommendation, "{extra}");
+            assert_eq!(ask.confidence, confidence, "{extra}");
+            assert_eq!(ask.reason_category, reason, "{extra}");
+            assert!(ask.question.contains(says), "{says} in {}", ask.question);
+            assert!(
+                ask.question
+                    .contains("\nReasons:\n- looks already implemented"),
+                "{}",
+                ask.question
+            );
+        }
+        // A revise past the limit says why it is a concern.
+        let revise = PlanReviewVerdict::parse(
+            r#"{"verdict":"revise","reasons":["still vague"],"summary":"vague"}"#,
+        )
+        .unwrap();
+        let decided = decide_verdict(ProposalId::new(1), &revise, MAX_PLAN_REVISES);
+        let precedents = ["precedent: ask 3 (blocked) asked: q — a person answered: a".to_owned()];
+        let ask = plan_ask(&job(), &revise, &decided, &precedents).unwrap();
+        assert_eq!(
+            ask.question,
+            "Plan review of proposal 1 (its first task is 2) needs a person: vague\n\
+             It answered revise, but proposal 1 was sent back 2 times already (at most 2).\n\
+             Reasons:\n- still vague\n\
+             - precedent: ask 3 (blocked) asked: q — a person answered: a\n\
+             Plan review material: /q/plan-reviews/4/prompt.txt\n\
+             ready: make the proposal's tasks ready as they are. send_back: send it back to its planner (answer `send_back: <your reason>` to add yours). cancel: cancel the proposal's tasks."
+        );
+        assert_eq!(ask.reason_category, AskReason::Scope);
+        assert_eq!(ask.recommendation, None);
+        // A pass, a revise within the limit and a sure concern open none.
+        for (text, revises) in [
+            (r#"{"verdict":"pass","reasons":[],"summary":"ok"}"#, 0),
+            (r#"{"verdict":"revise","reasons":["x"],"summary":"s"}"#, 1),
+            (
+                r#"{"verdict":"concern","reasons":["x"],"summary":"s","recommendation":"ready","confidence":"high"}"#,
+                0,
+            ),
+        ] {
+            let verdict = PlanReviewVerdict::parse(text).unwrap();
+            let decided = decide_verdict(ProposalId::new(1), &verdict, revises);
+            assert!(
+                plan_ask(&job(), &verdict, &decided, &[]).is_none(),
+                "{text}"
+            );
+        }
+    }
+
+    /// The precedents a verdict names are quoted from the answered asks,
+    /// in its order; one not answered is left out.
+    #[test]
+    fn a_verdicts_precedents_are_quoted_from_the_answered_asks() {
+        let ask = |id: i64, answer: &str| -> Ask {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "kind": "blocked", "task_id": null, "run_id": null,
+                "question": "task 9 changes a type", "options": [], "answer": answer,
+                "asked_by": "observer", "reason_category": "scope", "created_at": 1,
+                "answered_at": 2, "closed_at": null
+            }))
+            .unwrap()
+        };
+        let answered = [ask(3, "drop that line"), ask(5, "keep it")];
+        assert_eq!(
+            quoted_precedents(&[AskId::new(5), AskId::new(4), AskId::new(3)], &answered),
+            [
+                "precedent: ask 5 (blocked) asked: task 9 changes a type — a person answered: keep it",
+                "precedent: ask 3 (blocked) asked: task 9 changes a type — a person answered: drop that line",
+            ]
+        );
+    }
+
+    /// A revise on its way to a planner: its planner gone, silent past
+    /// the timeout (told once), a delivery never recorded, or no planner
+    /// taking it past the timeout (told once) (moved from the part of the
+    /// integration test a_revise_without_a_live_planner_opens_planners_within_the_limit
+    /// that waited past the timeout).
+    #[test]
+    fn a_revise_is_given_to_another_planner_or_told_to_the_inbox_by_its_times() {
+        let planner = PlannerId::new(7);
+        let alive = |_: PlannerId| false;
+        let gone = |_: PlannerId| true;
+        let (now, timeout) = (1_000, 60);
+        let watch = |sent, unresponsive, revised, gone: &dyn Fn(PlannerId) -> bool| {
+            revise_watch(sent, unresponsive, revised, gone, now, timeout)
+        };
+        assert_eq!(
+            watch((Some(990), Some(planner)), None, Some(980), &gone),
+            ReviseWatch::PlannerGone(planner)
+        );
+        assert_eq!(
+            watch((Some(990), Some(planner)), None, Some(980), &alive),
+            ReviseWatch::Nothing
+        );
+        assert_eq!(
+            watch((Some(900), Some(planner)), None, Some(900), &alive),
+            ReviseWatch::PlannerSilent {
+                planner_id: planner,
+                waited: 100
+            }
+        );
+        assert_eq!(
+            watch((Some(900), Some(planner)), Some(990), Some(900), &alive),
+            ReviseWatch::Nothing
+        );
+        assert_eq!(
+            watch(
+                (Some(now - HEARTBEAT_TIMEOUT_SECS - 1), None),
+                None,
+                Some(0),
+                &alive
+            ),
+            ReviseWatch::DeliveryLost
+        );
+        assert_eq!(
+            watch(
+                (Some(now - HEARTBEAT_TIMEOUT_SECS), None),
+                None,
+                Some(0),
+                &alive
+            ),
+            ReviseWatch::Nothing
+        );
+        assert_eq!(
+            watch((None, None), None, Some(939), &alive),
+            ReviseWatch::NoPlanner { waited: 61 }
+        );
+        assert_eq!(
+            watch((None, None), None, Some(940), &alive),
+            ReviseWatch::Nothing
+        );
+        assert_eq!(
+            watch((None, None), Some(990), Some(900), &alive),
+            ReviseWatch::Nothing
+        );
+        assert_eq!(
+            watch((None, None), None, None, &alive),
+            ReviseWatch::Nothing
+        );
     }
 }

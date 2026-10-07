@@ -32,7 +32,7 @@ use crate::{
         PlanReviewCandidate, PlanReviewDecision, PlannerId, Priority, ProposalId, ProposalStatus,
         TaskAction, TaskId, TaskStatus,
         plan_quality::{self, ProposalFeatures},
-        plan_review::{PlanReviewOutcome, ReviewHold},
+        plan_review::{self, PlanReviewEnd, PlanReviewOutcome, ReviewHold},
         prediction, proposal, review_reason,
         sessions::SESSION_CLOSED,
         task,
@@ -123,62 +123,112 @@ fn reviewable(conn: &Connection, proposal_id: ProposalId) -> Result<bool> {
 }
 
 /// The tasks of the proposal edited since the job started (ADR-0041
-/// decision 9): its verdict is of their old contents. Event ids order the
-/// edits against the job's `plan_review_started`.
+/// decision 9), by [`plan_review::edited_during`]: its verdict is of their
+/// old contents. Event ids order the edits against the job's
+/// `plan_review_started`.
 fn edited_during(conn: &Connection, job: &PlanReviewJob) -> Result<Vec<TaskId>> {
-    Ok(conn
+    let started: Option<i64> = conn
+        .query_row(
+            &format!(
+                "SELECT id FROM run_events WHERE task_id=?1 AND kind='{}'
+                 AND json_extract(payload,'$.plan_review_id')=?2",
+                event_kind::PLAN_REVIEW_STARTED
+            ),
+            params![job.anchor, job.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let edits: Vec<(i64, TaskId)> = conn
         .prepare(&format!(
-            "SELECT DISTINCT e.task_id FROM run_events e JOIN tasks t ON t.id = e.task_id
-             WHERE e.kind='{}' AND t.proposal_id=?1 AND e.id > (
-                 SELECT id FROM run_events WHERE task_id=?2 AND kind='{}'
-                 AND json_extract(payload,'$.plan_review_id')=?3)
-             ORDER BY e.task_id",
-            event_kind::TASK_EDITED,
-            event_kind::PLAN_REVIEW_STARTED
+            "SELECT e.id, e.task_id FROM run_events e JOIN tasks t ON t.id = e.task_id
+             WHERE e.kind='{}' AND t.proposal_id=?1",
+            event_kind::TASK_EDITED
         ))?
-        .query_map(params![job.proposal_id, job.anchor, job.id], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
+        .query_map([job.proposal_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(plan_review::edited_during(started, &edits))
 }
 
-/// The error a job interrupted by edits of its tasks closes with.
-fn edited_error(edited: &[TaskId]) -> String {
-    format!(
-        "task {} of the proposal was edited during its review",
-        edited
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+/// Take the end of a job that is not applied ([`plan_review::plan_review_end`]):
+/// a proposal that moved on interrupts the job's row; tasks edited during
+/// it interrupt it too and record `plan_review_discarded`, leaving the
+/// proposal for the next pass to review again. `verdict` is the job's
+/// verdict, as recorded and as decided, `failure` its error when it failed.
+/// `false` when the end is to be applied.
+fn end_unapplied(
+    conn: &Connection,
+    job: &PlanReviewJob,
+    now: i64,
+    verdict: Option<(&Value, PlanReviewDecision)>,
+    failure: Option<&str>,
+) -> Result<bool> {
+    let reviewable = reviewable(conn, job.proposal_id)?;
+    let edited = if reviewable {
+        edited_during(conn, job)?
+    } else {
+        Vec::new()
+    };
+    let recorded = verdict.map(|(recorded, _)| recorded);
+    match plan_review::plan_review_end(reviewable, edited, failure) {
+        PlanReviewEnd::Ends => return Ok(false),
+        PlanReviewEnd::MovedOn { error } => {
+            finish_row(
+                conn,
+                job.id,
+                now,
+                PlanReviewOutcome::Interrupted,
+                recorded,
+                Some(&error),
+            )?;
+            sessions::close_plan_review(conn, job.id, false)?;
+        }
+        PlanReviewEnd::Discarded { edited, error } => {
+            finish_row(
+                conn,
+                job.id,
+                now,
+                PlanReviewOutcome::Interrupted,
+                recorded,
+                Some(&error),
+            )?;
+            sessions::close_plan_review(conn, job.id, false)?;
+            event(
+                conn,
+                job.anchor,
+                None,
+                EventKind::PlanReviewDiscarded,
+                json!({
+                    "proposal_id": job.proposal_id,
+                    "plan_review_id": job.id,
+                    "attempt": job.attempt,
+                    "verdict": verdict.map(|(_, decided)| decided),
+                    "edited": edited,
+                    "error": error,
+                }),
+            )?;
+        }
+    }
+    Ok(true)
 }
 
-/// Check an action against the proposal before anything is applied: it
-/// changes a submitted task of the proposal, a dependency names another
-/// task, a priority only goes down, and a duplicate is of another task
-/// that is not canceled.
+/// Check an action against the proposal before anything is applied
+/// ([`plan_review::check_action`]): it changes a submitted task of the
+/// proposal, a dependency names another task that exists, a priority only
+/// goes down, and a duplicate is of another task that is not canceled.
 fn check_action(conn: &Connection, members: &[TaskId], action: &PlanReviewAction) -> Result<()> {
     let task_id = action.task_id();
-    ensure!(
-        members.contains(&task_id),
-        "plan review may change only the tasks of the proposal, not task {task_id}"
-    );
-    let target = read_task(conn, task_id)?;
-    ensure!(
-        target.status() == TaskStatus::Submitted,
-        "task {task_id} is {}, not submitted",
-        target.status().as_str()
-    );
+    let target = if members.contains(&task_id) {
+        let task = read_task(conn, task_id)?;
+        Some((task.status(), task.priority()))
+    } else {
+        None
+    };
+    plan_review::check_action(members, action, target).map_err(anyhow::Error::msg)?;
     match action {
         PlanReviewAction::AddDependency { depends_on, .. } => {
-            task::check_not_self(task_id, *depends_on)?;
             read_task(conn, *depends_on)?;
         }
-        PlanReviewAction::LowerPriority { priority, .. } => ensure!(
-            *priority < target.priority(),
-            "plan review may only lower the priority of task {task_id} ({}), not set it to {}",
-            target.priority().as_str(),
-            priority.as_str()
-        ),
+        PlanReviewAction::LowerPriority { .. } => {}
         PlanReviewAction::CancelDuplicate { duplicate_of, .. } => {
             check_duplicate(conn, task_id, *duplicate_of)?;
         }
@@ -269,7 +319,7 @@ fn reopen(
     now: &str,
     at: i64,
 ) -> Result<std::result::Result<ReopenedTask, String>> {
-    let Some((status, current)) = conn
+    let found = conn
         .query_row(
             "SELECT t.status, p.id, p.status FROM tasks t
              LEFT JOIN proposals p ON p.id = t.proposal_id WHERE t.id=?1",
@@ -295,20 +345,9 @@ fn reopen(
                 ))
             },
         )
-        .optional()?
-    else {
-        return Ok(Err(format!("task {task_id} does not exist")));
-    };
-    if status != TaskStatus::Ready {
-        return Ok(Err(format!(
-            "task {task_id} is {}, not ready: it is not changed now",
-            status.as_str()
-        )));
-    }
-    if let Some(current) = current {
-        return Ok(Err(format!(
-            "task {task_id} is in proposal {current}, still under plan review or revise: it is not moved"
-        )));
+        .optional()?;
+    if let Some(why) = plan_review::reopen_refusal(task_id, found) {
+        return Ok(Err(why));
     }
     let id = ProposalId::new(super::sqlite::next_id(conn, "proposals")?);
     let reopened = proposal::reopen(id, vec![task_id], now.into())?;
@@ -321,9 +360,7 @@ fn reopen(
     await_delivery(
         conn,
         id,
-        &[format!(
-            "plan review of proposal {reviewed} found that ready task {task_id} has to change: {reason}"
-        )],
+        &[plan_review::reopen_reason(reviewed, task_id, reason)],
         at,
     )?;
     event(
@@ -339,20 +376,19 @@ fn reopen(
     }))
 }
 
-/// Whether the answer `text` of `ask` is one the supervisor applies: one
-/// of the plan options, while the proposal of the ask's task is still
-/// submitted and held for this concern.
+/// Whether the answer `text` of `ask` is one the supervisor applies
+/// ([`plan_review::plan_answer_applies`]).
 pub(super) fn plan_answer_applies(conn: &Connection, ask: &Ask, text: &str) -> Result<bool> {
-    if ask.kind != AskKind::ApprovePlan || PlanAnswer::parse(text).is_none() {
-        return Ok(false);
-    }
-    let Some(proposal_id) = ask_proposal(conn, ask)? else {
-        return Ok(false);
+    // The proposal's status and hold are read only for an `approve_plan`
+    // ask; any other kind does not apply whatever they are.
+    let proposal = match ask_proposal(conn, ask)? {
+        Some(proposal_id) if ask.kind == AskKind::ApprovePlan => Some((
+            proposals::read(conn, proposal_id)?.status(),
+            hold(conn, proposal_id)?,
+        )),
+        _ => None,
     };
-    Ok(
-        proposals::read(conn, proposal_id)?.status() == ProposalStatus::Submitted
-            && hold(conn, proposal_id)? == Some(ReviewHold::Concern),
-    )
+    Ok(plan_review::plan_answer_applies(&ask.kind, text, proposal))
 }
 
 fn ask_proposal(conn: &Connection, ask: &Ask) -> Result<Option<ProposalId>> {
@@ -598,50 +634,13 @@ impl PlanReviewStore for SqliteQueue {
             });
         }
         let verdict_json = serde_json::to_value(&apply.verdict)?;
-        if !reviewable(&tx, job.proposal_id)? {
-            finish_row(
-                &tx,
-                job.id,
-                now,
-                PlanReviewOutcome::Interrupted,
-                Some(&verdict_json),
-                Some("the proposal moved on during its review"),
-            )?;
-            sessions::close_plan_review(&tx, job.id, false)?;
-            tx.commit()?;
-            return Ok(PlanReviewApplied {
-                stale: true,
-                ..PlanReviewApplied::default()
-            });
-        }
-        let edited = edited_during(&tx, job)?;
-        if !edited.is_empty() {
-            // The proposal stays submitted and unheld: the next pass
-            // reviews the edited tasks.
-            let error = edited_error(&edited);
-            finish_row(
-                &tx,
-                job.id,
-                now,
-                PlanReviewOutcome::Interrupted,
-                Some(&verdict_json),
-                Some(&error),
-            )?;
-            sessions::close_plan_review(&tx, job.id, false)?;
-            event(
-                &tx,
-                job.anchor,
-                None,
-                EventKind::PlanReviewDiscarded,
-                json!({
-                    "proposal_id": job.proposal_id,
-                    "plan_review_id": job.id,
-                    "attempt": job.attempt,
-                    "verdict": apply.verdict.verdict,
-                    "edited": edited,
-                    "error": error,
-                }),
-            )?;
+        if end_unapplied(
+            &tx,
+            job,
+            now,
+            Some((&verdict_json, apply.verdict.verdict)),
+            None,
+        )? {
             tx.commit()?;
             return Ok(PlanReviewApplied {
                 stale: true,
@@ -663,30 +662,9 @@ impl PlanReviewStore for SqliteQueue {
             for action in &apply.verdict.actions {
                 check_action(&tx, &members, action)?;
             }
-            // A task canceled as a duplicate is no original of another.
-            let canceled: Vec<TaskId> = apply
-                .verdict
-                .actions
-                .iter()
-                .filter(|a| matches!(a, PlanReviewAction::CancelDuplicate { .. }))
-                .map(PlanReviewAction::task_id)
-                .collect();
-            for action in &apply.verdict.actions {
-                if let PlanReviewAction::CancelDuplicate { duplicate_of, .. } = action {
-                    ensure!(
-                        !canceled.contains(duplicate_of),
-                        "task {duplicate_of} is canceled as a duplicate itself; it is no original"
-                    );
-                }
-            }
         }
-        for reopen in &apply.verdict.reopen {
-            ensure!(
-                !members.contains(&reopen.task_id),
-                "task {} is in the proposal under review, not a ready task to reopen",
-                reopen.task_id
-            );
-        }
+        plan_review::check_verdict(&members, apply.decision, &apply.verdict)
+            .map_err(anyhow::Error::msg)?;
         let mut applied = PlanReviewApplied::default();
         let mut skipped = Vec::new();
         match apply.decision {
@@ -813,62 +791,14 @@ impl PlanReviewStore for SqliteQueue {
         if !running(&tx, job, token)? {
             return Ok(());
         }
-        if !reviewable(&tx, job.proposal_id)? {
-            finish_row(
-                &tx,
-                job.id,
-                now,
-                PlanReviewOutcome::Interrupted,
-                None,
-                Some(error),
-            )?;
-            sessions::close_plan_review(&tx, job.id, false)?;
+        if end_unapplied(&tx, job, now, None, Some(error))? {
             tx.commit()?;
             return Ok(());
         }
-        let edited = edited_during(&tx, job)?;
-        if !edited.is_empty() {
-            // As with a verdict (ADR-0041 decision 9): the edited tasks are
-            // unreviewed, so the next pass reviews them instead of holding
-            // the proposal for a person.
-            let error = format!("{error}; {}", edited_error(&edited));
-            finish_row(
-                &tx,
-                job.id,
-                now,
-                PlanReviewOutcome::Interrupted,
-                None,
-                Some(&error),
-            )?;
-            sessions::close_plan_review(&tx, job.id, false)?;
-            event(
-                &tx,
-                job.anchor,
-                None,
-                EventKind::PlanReviewDiscarded,
-                json!({
-                    "proposal_id": job.proposal_id,
-                    "plan_review_id": job.id,
-                    "attempt": job.attempt,
-                    "verdict": Value::Null,
-                    "edited": edited,
-                    "error": error,
-                }),
-            )?;
-            tx.commit()?;
-            return Ok(());
-        }
-        // A provider that could not be used leaves the proposal unheld, to
-        // be reviewed again at once on the other provider (ADR-t1063-1
-        // decision 4).
-        let outcome = if failure.unusable.is_some() {
-            PlanReviewOutcome::Interrupted
-        } else {
-            PlanReviewOutcome::Failed
-        };
+        let (outcome, hold) = plan_review::failed_end(failure.unusable.is_some());
         finish_row(&tx, job.id, now, outcome, None, Some(error))?;
-        if failure.unusable.is_none() {
-            set_hold(&tx, job.proposal_id, Some(ReviewHold::Failed))?;
+        if hold.is_some() {
+            set_hold(&tx, job.proposal_id, hold)?;
         }
         let mut failed = json!({
             "code": crate::domain::ReasonCode::JobFailed,
@@ -1162,14 +1092,10 @@ impl PlanReviewStore for SqliteQueue {
             PlanAnswer::Ready => proposals::approve(&tx, proposal_id, &stamp)?,
             PlanAnswer::SendBack(reason) => {
                 let sent = proposals::send_back(&tx, proposal_id, &stamp)?;
-                let mut reasons = vec![match reason {
-                    Some(reason) => {
-                        format!("a person sent the proposal back in ask {ask_id}: {reason}")
-                    }
-                    None => format!(
-                        "a person sent the proposal back in ask {ask_id} for plan review's findings"
-                    ),
-                }];
+                let mut reasons = vec![plan_review::person_send_back_reason(
+                    ask_id,
+                    reason.as_deref(),
+                )];
                 reasons.extend(latest_reasons(&tx, proposal_id)?);
                 await_delivery(&tx, proposal_id, &reasons, now)?;
                 sent

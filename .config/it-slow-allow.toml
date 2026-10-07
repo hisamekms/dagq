@@ -120,12 +120,6 @@ name = "plan_review::a_planner_question_answer_goes_to_its_planner_as_a_turn_or_
 reason = "B 境界（守る境界）: supervisor passes deliver the answer as a background planner's next turn or carry it in a new planner's prompt (task 1441 moved it off cmux)"
 task = 1441
 
-# 7.867s, class D
-[[test]]
-name = "plan_review::drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: planner limit/origin rule"
-task = 1707
-
 # 10.708s, class R
 [[test]]
 name = "planner_headless::a_headless_draft_planner_takes_the_answer_of_its_question_as_its_next_turn"

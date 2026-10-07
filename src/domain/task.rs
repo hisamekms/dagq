@@ -474,6 +474,31 @@ pub fn check_not_self(task_id: TaskId, predecessor_id: TaskId) -> Result<(), Dom
     require(task_id != predecessor_id, || DomainError::SelfDependency)
 }
 
+/// Why `task_id` may not be canceled as a duplicate of `duplicate_of`
+/// (ADR-0046 decision 5), `None` when it may: not of itself, and of a task
+/// that exists and is not canceled. `target` is `duplicate_of`'s status
+/// and, when a cancel made it a duplicate, its original, which the refusal
+/// names; `None` when it does not exist.
+pub fn duplicate_refusal(
+    task_id: TaskId,
+    duplicate_of: TaskId,
+    target: Option<(TaskStatus, Option<TaskId>)>,
+) -> Option<String> {
+    if task_id == duplicate_of {
+        return Some(format!("task {task_id} cannot be a duplicate of itself"));
+    }
+    match target {
+        None => Some(format!("task {duplicate_of} does not exist")),
+        Some((TaskStatus::Canceled, Some(original))) => Some(format!(
+            "task {duplicate_of} is canceled as a duplicate of task {original}; pass --duplicate-of {original}"
+        )),
+        Some((TaskStatus::Canceled, None)) => Some(format!(
+            "task {duplicate_of} is canceled; a duplicate needs a task that is not"
+        )),
+        Some(_) => None,
+    }
+}
+
 /// Whether `task` may gain or lose a predecessor.
 pub fn check_dependencies_editable(task: &Task) -> Result<(), DomainError> {
     require_editable(task, "dependencies")
@@ -1180,5 +1205,38 @@ mod tests {
         let ready = Task::restore(record(TaskStatus::Ready)).unwrap();
         check_status_authorized(&ready, TaskStatus::Ready).unwrap();
         assert!(check_status_authorized(&ready, TaskStatus::InProgress).is_err());
+    }
+
+    /// A duplicate is of another task that exists and is not canceled; one
+    /// canceled as a duplicate names its original (moved from the
+    /// integration test a_plan_review_duplicate_of_a_canceled_missing_or_the_same_task_fails).
+    #[test]
+    fn a_duplicate_is_of_another_task_that_is_not_canceled() {
+        let (task, original) = (TaskId::new(5), TaskId::new(1));
+        assert_eq!(
+            duplicate_refusal(task, original, Some((TaskStatus::Ready, None))),
+            None
+        );
+        assert_eq!(
+            duplicate_refusal(task, task, Some((TaskStatus::Ready, None))).as_deref(),
+            Some("task 5 cannot be a duplicate of itself")
+        );
+        assert_eq!(
+            duplicate_refusal(task, TaskId::new(999), None).as_deref(),
+            Some("task 999 does not exist")
+        );
+        assert_eq!(
+            duplicate_refusal(task, TaskId::new(2), Some((TaskStatus::Canceled, None))).as_deref(),
+            Some("task 2 is canceled; a duplicate needs a task that is not")
+        );
+        assert_eq!(
+            duplicate_refusal(
+                task,
+                TaskId::new(3),
+                Some((TaskStatus::Canceled, Some(original)))
+            )
+            .as_deref(),
+            Some("task 3 is canceled as a duplicate of task 1; pass --duplicate-of 1")
+        );
     }
 }

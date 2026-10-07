@@ -342,6 +342,267 @@ pub fn next_to_review(candidates: &[PlanReviewCandidate]) -> Option<ProposalId> 
         .map(|candidate| candidate.proposal_id)
 }
 
+/// What the runtime applies of a verdict (ADR-0041 decision 11, ADR-t451-1
+/// decision 4): its decision, why it is not the verdict's own when it is
+/// not, and what became of a `concern`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanVerdictDecision {
+    pub decision: PlanReviewDecision,
+    /// Why a `revise` became a `concern`: the proposal was sent back
+    /// [`MAX_PLAN_REVISES`] times already.
+    pub overridden: Option<String>,
+    pub concern: Option<PlanConcernDecision>,
+}
+
+/// What the runtime makes of `verdict` on `proposal`, sent back
+/// `revise_count` times when its job started: a `revise` past
+/// [`MAX_PLAN_REVISES`] is a `concern`, a sure `concern` is applied as its
+/// recommendation ([`PlanReviewVerdict::decide_concern`]), and the rest is
+/// the verdict's own.
+pub fn decide_verdict(
+    proposal: ProposalId,
+    verdict: &PlanReviewVerdict,
+    revise_count: u32,
+) -> PlanVerdictDecision {
+    let concern = verdict.decide_concern(revise_count);
+    let (decision, overridden) = match verdict.verdict {
+        PlanReviewDecision::Revise if revise_count >= MAX_PLAN_REVISES => (
+            PlanReviewDecision::Concern,
+            Some(format!(
+                "proposal {proposal} was sent back {revise_count} times already (at most {MAX_PLAN_REVISES})"
+            )),
+        ),
+        PlanReviewDecision::Concern => match concern.and_then(|decided| decided.applied) {
+            Some(applied) => (applied, None),
+            None => (PlanReviewDecision::Concern, None),
+        },
+        decision => (decision, None),
+    };
+    PlanVerdictDecision {
+        decision,
+        overridden,
+        concern,
+    }
+}
+
+/// Check a verdict against the proposal it is applied to before anything
+/// is: on a `pass`, a task canceled as a duplicate is no original of
+/// another; whatever the decision, a task to reopen is not one of the
+/// proposal's `members`.
+pub fn check_verdict(
+    members: &[TaskId],
+    decision: PlanReviewDecision,
+    verdict: &PlanReviewVerdict,
+) -> Result<(), String> {
+    if decision == PlanReviewDecision::Pass {
+        let canceled: Vec<TaskId> = verdict
+            .actions
+            .iter()
+            .filter(|a| matches!(a, PlanReviewAction::CancelDuplicate { .. }))
+            .map(PlanReviewAction::task_id)
+            .collect();
+        for action in &verdict.actions {
+            if let PlanReviewAction::CancelDuplicate { duplicate_of, .. } = action
+                && canceled.contains(duplicate_of)
+            {
+                return Err(format!(
+                    "task {duplicate_of} is canceled as a duplicate itself; it is no original"
+                ));
+            }
+        }
+    }
+    match verdict
+        .reopen
+        .iter()
+        .find(|reopen| members.contains(&reopen.task_id))
+    {
+        Some(reopen) => Err(format!(
+            "task {} is in the proposal under review, not a ready task to reopen",
+            reopen.task_id
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Check one action of a `pass` against the proposal's `members` and its
+/// task (`target`: its status and priority, read only for a member): it
+/// changes a submitted task of the proposal, a dependency names another
+/// task, and a priority only goes down. Whether the other task of a
+/// dependency or a duplicate holds is the store's to read.
+pub fn check_action(
+    members: &[TaskId],
+    action: &PlanReviewAction,
+    target: Option<(super::TaskStatus, Priority)>,
+) -> Result<(), String> {
+    let task_id = action.task_id();
+    if !members.contains(&task_id) {
+        return Err(format!(
+            "plan review may change only the tasks of the proposal, not task {task_id}"
+        ));
+    }
+    let Some((status, priority)) = target else {
+        return Err(format!("task {task_id} does not exist"));
+    };
+    if status != super::TaskStatus::Submitted {
+        return Err(format!(
+            "task {task_id} is {}, not submitted",
+            status.as_str()
+        ));
+    }
+    match action {
+        PlanReviewAction::AddDependency { depends_on, .. } => {
+            super::task::check_not_self(task_id, *depends_on).map_err(|error| error.to_string())
+        }
+        PlanReviewAction::LowerPriority { priority: to, .. } if *to >= priority => Err(format!(
+            "plan review may only lower the priority of task {task_id} ({}), not set it to {}",
+            priority.as_str(),
+            to.as_str()
+        )),
+        PlanReviewAction::LowerPriority { .. } | PlanReviewAction::CancelDuplicate { .. } => Ok(()),
+    }
+}
+
+/// Why the ready task `task_id` is not reopened (ADR-0041 decision 14),
+/// `None` when it is: `found` is its status and the active proposal it is
+/// in, `None` when it does not exist.
+pub fn reopen_refusal(
+    task_id: TaskId,
+    found: Option<(super::TaskStatus, Option<ProposalId>)>,
+) -> Option<String> {
+    let Some((status, active)) = found else {
+        return Some(format!("task {task_id} does not exist"));
+    };
+    if status != super::TaskStatus::Ready {
+        return Some(format!(
+            "task {task_id} is {}, not ready: it is not changed now",
+            status.as_str()
+        ));
+    }
+    active.map(|proposal| {
+        format!(
+            "task {task_id} is in proposal {proposal}, still under plan review or revise: it is not moved"
+        )
+    })
+}
+
+/// The revise reason a reopened task's own proposal waits for a planner
+/// with.
+pub fn reopen_reason(reviewed: ProposalId, task_id: TaskId, reason: &str) -> String {
+    format!(
+        "plan review of proposal {reviewed} found that ready task {task_id} has to change: {reason}"
+    )
+}
+
+/// The tasks of the proposal edited while its job ran (ADR-0041 decision
+/// 9), once each, in order: those of `edits` (each `task_edited` of a task
+/// of the proposal, by event id) after the job's `plan_review_started`
+/// (`started`, none when it is not recorded).
+pub fn edited_during(started: Option<i64>, edits: &[(i64, TaskId)]) -> Vec<TaskId> {
+    let Some(started) = started else {
+        return Vec::new();
+    };
+    let mut edited: Vec<TaskId> = edits
+        .iter()
+        .filter(|(event, _)| *event > started)
+        .map(|(_, task)| *task)
+        .collect();
+    edited.sort();
+    edited.dedup();
+    edited
+}
+
+/// The error a job interrupted by edits of its tasks closes with.
+pub fn edited_error(edited: &[TaskId]) -> String {
+    format!(
+        "task {} of the proposal was edited during its review",
+        edited
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// How the end of a plan review job is taken, by what became of its
+/// proposal while it ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanReviewEnd {
+    /// The proposal is no longer the submitted, unheld one the job took:
+    /// the job's row is interrupted with `error`, and nothing else changes.
+    MovedOn { error: String },
+    /// Tasks of the proposal were edited during the job: its row is
+    /// interrupted with `error` and `plan_review_discarded` says why; the
+    /// proposal stays submitted and unheld, so the next pass reviews it
+    /// again instead of applying a verdict on the old contents or holding
+    /// it for a person.
+    Discarded { edited: Vec<TaskId>, error: String },
+    /// The verdict is applied, or the failure recorded.
+    Ends,
+}
+
+/// How the end of a job is taken: `reviewable` is whether its proposal is
+/// still the one it took, `edited` its tasks edited during it
+/// ([`edited_during`]), `failure` the job's error when it failed.
+pub fn plan_review_end(
+    reviewable: bool,
+    edited: Vec<TaskId>,
+    failure: Option<&str>,
+) -> PlanReviewEnd {
+    if !reviewable {
+        return PlanReviewEnd::MovedOn {
+            error: failure
+                .unwrap_or("the proposal moved on during its review")
+                .to_owned(),
+        };
+    }
+    if edited.is_empty() {
+        return PlanReviewEnd::Ends;
+    }
+    let error = match failure {
+        Some(failure) => format!("{failure}; {}", edited_error(&edited)),
+        None => edited_error(&edited),
+    };
+    PlanReviewEnd::Discarded { edited, error }
+}
+
+/// How a failed job's row ends and whether its proposal is held for a
+/// person (`plan_review_failed`): a provider that could not be used
+/// (`unusable`) leaves it interrupted and unheld, to be reviewed again at
+/// once on the other provider (ADR-t1063-1 decision 4); any other failure
+/// holds it.
+pub fn failed_end(unusable: bool) -> (PlanReviewOutcome, Option<ReviewHold>) {
+    if unusable {
+        (PlanReviewOutcome::Interrupted, None)
+    } else {
+        (PlanReviewOutcome::Failed, Some(ReviewHold::Failed))
+    }
+}
+
+/// Whether an answer `text` to an ask of `kind` is one the supervisor
+/// applies: one of [`PLAN_OPTIONS`] to an `approve_plan` ask, while the
+/// proposal of the ask's task (`proposal`: its status and hold, `None`
+/// without one) is still submitted and held for this concern.
+pub fn plan_answer_applies(
+    kind: &super::AskKind,
+    text: &str,
+    proposal: Option<(super::ProposalStatus, Option<ReviewHold>)>,
+) -> bool {
+    *kind == super::AskKind::ApprovePlan
+        && PlanAnswer::parse(text).is_some()
+        && proposal == Some((super::ProposalStatus::Submitted, Some(ReviewHold::Concern)))
+}
+
+/// The revise reason a person's `send_back` answer to ask `ask` puts
+/// first, with the person's `reason` when they gave one.
+pub fn person_send_back_reason(ask: AskId, reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!("a person sent the proposal back in ask {ask}: {reason}"),
+        None => {
+            format!("a person sent the proposal back in ask {ask} for plan review's findings")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,5 +822,292 @@ mod tests {
             candidate(4, "t9", true),
         ];
         assert_eq!(next_to_review(&urgent), Some(ProposalId::new(4)));
+    }
+
+    fn verdict(text: &str) -> PlanReviewVerdict {
+        PlanReviewVerdict::parse(text).unwrap()
+    }
+
+    /// A revise past the limit is a concern saying why; a sure concern is
+    /// applied as its recommendation, counted toward the limit like any
+    /// revise; the rest is the verdict's own (moved from the integration
+    /// tests a_revise_past_the_limit_is_a_concern,
+    /// a_sure_send_back_is_a_revise_counted_toward_the_limit_then_a_person_decides
+    /// and a_sure_ready_with_an_action_that_does_not_hold_fails_as_a_pass_would).
+    #[test]
+    fn the_runtime_decides_a_verdict_by_the_revise_limit_and_the_concerns_confidence() {
+        use PlanReviewDecision as D;
+        let proposal = ProposalId::new(1);
+        let revise = verdict(r#"{"verdict":"revise","reasons":["still vague"],"summary":"vague"}"#);
+        for count in 0..MAX_PLAN_REVISES {
+            let decided = decide_verdict(proposal, &revise, count);
+            assert_eq!((decided.decision, decided.overridden), (D::Revise, None));
+            assert_eq!(decided.concern, None);
+        }
+        let past = decide_verdict(proposal, &revise, MAX_PLAN_REVISES);
+        assert_eq!(past.decision, D::Concern);
+        assert_eq!(
+            past.overridden.as_deref(),
+            Some("proposal 1 was sent back 2 times already (at most 2)")
+        );
+        assert_eq!(past.concern, None);
+        let pass = verdict(r#"{"verdict":"pass","reasons":[],"summary":"ok"}"#);
+        assert_eq!(
+            decide_verdict(proposal, &pass, MAX_PLAN_REVISES).decision,
+            D::Pass
+        );
+        // A sure send_back is a revise until the limit, then a person's.
+        let send_back = verdict(
+            r#"{"verdict":"concern","reasons":["looks already implemented"],"summary":"s",
+                "recommendation":"send_back","confidence":"high","reason_category":null}"#,
+        );
+        for count in 0..MAX_PLAN_REVISES {
+            let decided = decide_verdict(proposal, &send_back, count);
+            assert_eq!(decided.decision, D::Revise, "{count}");
+            assert_eq!(decided.concern.unwrap().applied, Some(D::Revise));
+        }
+        let limited = decide_verdict(proposal, &send_back, MAX_PLAN_REVISES);
+        assert_eq!(limited.decision, D::Concern);
+        assert_eq!(limited.overridden, None);
+        assert_eq!(
+            limited.concern.unwrap().escalated_because,
+            Some(PlanConcernEscalation::ReviseLimit)
+        );
+        // A sure ready is a pass, whose actions are checked as a pass's.
+        let ready = verdict(
+            r#"{"verdict":"concern","reasons":["x"],"summary":"s","recommendation":"ready",
+                "confidence":"high","actions":[{"action":"cancel_duplicate","task_id":2,"duplicate_of":2}]}"#,
+        );
+        let decided = decide_verdict(proposal, &ready, 0);
+        assert_eq!(decided.decision, D::Pass);
+        assert_eq!(decided.concern.unwrap().applied, Some(D::Pass));
+        // The old shape and a low confidence stay a concern.
+        for text in [
+            r#"{"verdict":"concern","reasons":["x"],"summary":"s"}"#,
+            r#"{"verdict":"concern","reasons":["x"],"summary":"s","recommendation":"ready","confidence":"low"}"#,
+        ] {
+            let decided = decide_verdict(proposal, &verdict(text), 0);
+            assert_eq!(decided.decision, D::Concern, "{text}");
+            assert_eq!(decided.concern.unwrap().applied, None, "{text}");
+        }
+    }
+
+    /// A pass's actions are checked against the proposal before any is
+    /// applied (moved from the integration tests
+    /// a_failed_plan_review_waits_for_a_person_and_is_not_retried and
+    /// a_ready_task_the_review_reopens_leaves_the_claim_for_a_planner).
+    #[test]
+    fn a_pass_changes_only_submitted_tasks_of_the_proposal_and_only_lowers_priorities() {
+        use super::super::TaskStatus as S;
+        let members = [TaskId::new(2), TaskId::new(3)];
+        let submitted = Some((S::Submitted, Priority::Normal));
+        let lower = |task: i64, to: Priority| PlanReviewAction::LowerPriority {
+            task_id: TaskId::new(task),
+            priority: to,
+        };
+        assert_eq!(
+            check_action(&members, &lower(2, Priority::Low), submitted),
+            Ok(())
+        );
+        assert_eq!(
+            check_action(&members, &lower(2, Priority::Urgent), submitted),
+            Err(
+                "plan review may only lower the priority of task 2 (normal), not set it to urgent"
+                    .into()
+            )
+        );
+        assert_eq!(
+            check_action(&members, &lower(2, Priority::Normal), submitted),
+            Err(
+                "plan review may only lower the priority of task 2 (normal), not set it to normal"
+                    .into()
+            )
+        );
+        assert_eq!(
+            check_action(&members, &lower(9, Priority::Low), None),
+            Err("plan review may change only the tasks of the proposal, not task 9".into())
+        );
+        assert_eq!(
+            check_action(
+                &members,
+                &lower(3, Priority::Low),
+                Some((S::Ready, Priority::Normal))
+            ),
+            Err("task 3 is ready, not submitted".into())
+        );
+        assert_eq!(
+            check_action(&members, &lower(3, Priority::Low), None),
+            Err("task 3 does not exist".into())
+        );
+        let depend = |on: i64| PlanReviewAction::AddDependency {
+            task_id: TaskId::new(3),
+            depends_on: TaskId::new(on),
+        };
+        assert_eq!(check_action(&members, &depend(2), submitted), Ok(()));
+        assert_eq!(
+            check_action(&members, &depend(3), submitted),
+            Err("a task cannot depend on itself".into())
+        );
+        let cancel = |task: i64, of: i64| PlanReviewAction::CancelDuplicate {
+            task_id: TaskId::new(task),
+            duplicate_of: TaskId::new(of),
+        };
+        assert_eq!(check_action(&members, &cancel(3, 1), submitted), Ok(()));
+
+        // A task canceled as a duplicate is no original; a reopen is not of
+        // the proposal's own tasks.
+        let mut pass = verdict(r#"{"verdict":"pass","reasons":[],"summary":"ok"}"#);
+        pass.actions = vec![cancel(3, 1), cancel(2, 3)];
+        assert_eq!(
+            check_verdict(&members, PlanReviewDecision::Pass, &pass),
+            Err("task 3 is canceled as a duplicate itself; it is no original".into())
+        );
+        // Actions are applied on a pass only.
+        assert_eq!(
+            check_verdict(&members, PlanReviewDecision::Revise, &pass),
+            Ok(())
+        );
+        pass.actions = vec![cancel(3, 1)];
+        assert_eq!(
+            check_verdict(&members, PlanReviewDecision::Pass, &pass),
+            Ok(())
+        );
+        pass.reopen = vec![Reopen {
+            task_id: TaskId::new(2),
+            reason: "x".into(),
+        }];
+        for decision in [PlanReviewDecision::Pass, PlanReviewDecision::Concern] {
+            assert_eq!(
+                check_verdict(&members, decision, &pass),
+                Err("task 2 is in the proposal under review, not a ready task to reopen".into())
+            );
+        }
+        pass.reopen[0].task_id = TaskId::new(7);
+        assert_eq!(
+            check_verdict(&members, PlanReviewDecision::Pass, &pass),
+            Ok(())
+        );
+    }
+
+    /// Only a ready task outside an active proposal is reopened; the rest
+    /// is skipped with why.
+    #[test]
+    fn a_reopen_takes_only_a_ready_task_no_active_proposal_holds() {
+        use super::super::TaskStatus as S;
+        let task = TaskId::new(4);
+        assert_eq!(reopen_refusal(task, Some((S::Ready, None))), None);
+        assert_eq!(
+            reopen_refusal(task, None).as_deref(),
+            Some("task 4 does not exist")
+        );
+        assert_eq!(
+            reopen_refusal(task, Some((S::Draft, None))).as_deref(),
+            Some("task 4 is draft, not ready: it is not changed now")
+        );
+        assert_eq!(
+            reopen_refusal(task, Some((S::Ready, Some(ProposalId::new(2))))).as_deref(),
+            Some("task 4 is in proposal 2, still under plan review or revise: it is not moved")
+        );
+        assert_eq!(
+            reopen_reason(ProposalId::new(1), task, "it must use the new API"),
+            "plan review of proposal 1 found that ready task 4 has to change: it must use the new API"
+        );
+    }
+
+    /// Edits of the proposal's tasks after the job started discard its
+    /// end, a verdict's or a failure's, and the proposal is reviewed again
+    /// unheld; edits before it leave the end applied, and a failure then
+    /// holds the proposal unless its provider could not be used (moved
+    /// from the integration tests
+    /// a_job_failing_after_an_edit_of_its_task_is_not_held_and_the_review_runs_again,
+    /// a_job_failing_after_edits_before_it_or_to_another_proposal_is_held
+    /// and edits_before_a_review_or_to_another_proposal_leave_its_verdict_applied).
+    #[test]
+    fn edits_during_a_job_discard_its_end_and_a_failure_otherwise_holds_the_proposal() {
+        let (two, three) = (TaskId::new(2), TaskId::new(3));
+        assert_eq!(edited_during(Some(10), &[(4, two), (9, three)]), []);
+        assert_eq!(
+            edited_during(Some(10), &[(4, two), (12, three), (11, three), (15, two)]),
+            [two, three]
+        );
+        assert_eq!(edited_during(None, &[(12, three)]), []);
+        assert_eq!(
+            edited_error(&[two, three]),
+            "task 2, 3 of the proposal was edited during its review"
+        );
+        assert_eq!(plan_review_end(true, Vec::new(), None), PlanReviewEnd::Ends);
+        assert_eq!(
+            plan_review_end(true, Vec::new(), Some("model unavailable")),
+            PlanReviewEnd::Ends
+        );
+        assert_eq!(
+            plan_review_end(true, vec![three], None),
+            PlanReviewEnd::Discarded {
+                edited: vec![three],
+                error: "task 3 of the proposal was edited during its review".into(),
+            }
+        );
+        assert_eq!(
+            plan_review_end(true, vec![three], Some("model unavailable")),
+            PlanReviewEnd::Discarded {
+                edited: vec![three],
+                error: "model unavailable; task 3 of the proposal was edited during its review"
+                    .into(),
+            }
+        );
+        assert_eq!(
+            plan_review_end(false, Vec::new(), None),
+            PlanReviewEnd::MovedOn {
+                error: "the proposal moved on during its review".into()
+            }
+        );
+        assert_eq!(
+            plan_review_end(false, Vec::new(), Some("model unavailable")),
+            PlanReviewEnd::MovedOn {
+                error: "model unavailable".into()
+            }
+        );
+        assert_eq!(
+            failed_end(false),
+            (PlanReviewOutcome::Failed, Some(ReviewHold::Failed))
+        );
+        assert_eq!(failed_end(true), (PlanReviewOutcome::Interrupted, None));
+    }
+
+    /// An answer applies while its proposal is submitted and held for the
+    /// concern; a withdrawn or released one is closed unapplied (moved from
+    /// the integration test an_answered_plan_ask_closed_unapplied_records_ask_closed).
+    #[test]
+    fn an_answer_applies_only_while_its_proposal_waits_for_it() {
+        use super::super::{AskKind, ProposalStatus as P};
+        let held = Some((P::Submitted, Some(ReviewHold::Concern)));
+        for answer in ["ready", "cancel", "send_back: split it"] {
+            assert!(
+                plan_answer_applies(&AskKind::ApprovePlan, answer, held),
+                "{answer}"
+            );
+        }
+        assert!(!plan_answer_applies(&AskKind::ApprovePlan, "maybe", held));
+        assert!(!plan_answer_applies(&AskKind::Blocked, "ready", held));
+        for proposal in [
+            None,
+            Some((P::Submitted, None)),
+            Some((P::Submitted, Some(ReviewHold::Failed))),
+            Some((P::Revising, None)),
+            Some((P::Canceled, Some(ReviewHold::Concern))),
+        ] {
+            assert!(
+                !plan_answer_applies(&AskKind::ApprovePlan, "ready", proposal),
+                "{proposal:?}"
+            );
+        }
+        assert_eq!(
+            person_send_back_reason(AskId::new(7), Some("split the parser out first")),
+            "a person sent the proposal back in ask 7: split the parser out first"
+        );
+        assert_eq!(
+            person_send_back_reason(AskId::new(7), None),
+            "a person sent the proposal back in ask 7 for plan review's findings"
+        );
     }
 }

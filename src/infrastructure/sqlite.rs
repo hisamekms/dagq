@@ -2280,22 +2280,30 @@ pub(super) fn check_duplicate(
     task_id: TaskId,
     duplicate_of: TaskId,
 ) -> Result<()> {
-    ensure!(
-        task_id != duplicate_of,
-        "task {task_id} cannot be a duplicate of itself"
-    );
-    let target = read_task(conn, duplicate_of)?;
-    if target.status() == TaskStatus::Canceled {
-        match duplicate_target(conn, duplicate_of)? {
-            Some(original) => anyhow::bail!(
-                "task {duplicate_of} is canceled as a duplicate of task {original}; pass --duplicate-of {original}"
-            ),
-            None => anyhow::bail!(
-                "task {duplicate_of} is canceled; a duplicate needs a task that is not"
-            ),
+    let target = if task_id == duplicate_of {
+        None
+    } else {
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE id=?1",
+                [duplicate_of],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match status
+            .map(|status| status.parse::<TaskStatus>())
+            .transpose()?
+        {
+            Some(TaskStatus::Canceled) => {
+                Some((TaskStatus::Canceled, duplicate_target(conn, duplicate_of)?))
+            }
+            other => other.map(|status| (status, None)),
         }
+    };
+    match crate::domain::task::duplicate_refusal(task_id, duplicate_of, target) {
+        Some(why) => anyhow::bail!(why),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// What a cancel records as a duplicate in its `task_status_changed`.

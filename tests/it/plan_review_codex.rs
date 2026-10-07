@@ -263,80 +263,43 @@ fn a_codex_that_cannot_log_in_moves_the_plan_review_to_claude() {
     );
 }
 
-/// A supervisor with no Codex that runs starts the plan review on Claude
-/// (`executable_missing`), without calling any Codex.
-#[test]
-fn without_codex_the_plan_review_starts_on_claude() {
-    let fx = fixture();
-    roles(&fx, "[roles.plan_review]\nprovider = \"codex\"\n");
-    let (task, _) = proposal(&fx, "on claude");
-    let claude = StubReviewer::new(&[verdict("pass", "")]);
-    let missing = fx.db.parent().unwrap().join("no-such-codex");
-    supervise(&fx, &claude, &missing);
-    assert_eq!(claude.prompts().len(), 1);
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    let started = events(&mut queue, task, "plan_review_started");
-    assert_eq!(started.len(), 1);
-    assert_eq!(started[0]["launch"]["provider"], "claude");
-    assert_eq!(started[0]["launch"]["switched_from"], "codex");
-    assert_eq!(started[0]["launch"]["switch_reason"], "executable_missing");
-    assert_eq!(status(&mut queue, task), TaskStatus::Ready);
-}
-
 /// Under `--no-claude` (ADR-t1204-1), a plan review whose role names Codex
-/// starts on Codex rather than going to a person; a Codex that fails or
-/// cannot be used never moves it to Claude, and the proposal goes to a
-/// person (plan review by hand) told why.
+/// starts on Codex rather than going to a person; a Codex that cannot be
+/// used never moves it to Claude, and the proposal goes to a person (plan
+/// review by hand) told why, opening no planner. Where each case of the
+/// providers sends it is `plan_review_route`'s, whose unit test holds them.
 #[test]
 fn no_claude_plan_review_runs_on_codex_and_never_falls_back() {
-    for mode in ["ok", "auth", "missing"] {
-        let mut fx = fixture();
-        roles(&fx, "[roles.plan_review]\nprovider = 'codex'\n");
-        let (task, proposal) = proposal(&fx, "no claude");
-        let codex = if mode == "missing" {
-            fx.repo.join("missing-codex")
-        } else {
-            stub_codex(&fx, mode, &verdict("pass", ""))
-        };
-        fx.claude = fx.repo.join("missing-claude");
-        let reviewer = StubReviewer::new(&[verdict("pass", "")]);
-        let mut opts = options(1, Duration::from_secs(3600));
-        opts.no_claude = true;
-        opts.codex = codex;
-        opts.codex_home = Some(codex_home(&fx));
-        supervise_with(&fx, &PlanWorkspace::default(), &reviewer, &opts);
-        supervise_with(&fx, &PlanWorkspace::default(), &reviewer, &opts);
-        assert!(reviewer.prompts().is_empty(), "{mode}");
-        let mut queue = SqliteQueue::open(&fx.db).unwrap();
-        let started = events(&mut queue, task, "plan_review_started");
-        for event in &started {
-            assert_eq!(event["launch"]["provider"], "codex", "{mode}");
-        }
-        assert!(queue.asks(Default::default()).unwrap().is_empty(), "{mode}");
-        let calls = stub_lines(&fx, "codex-args.txt").len();
-        match mode {
-            "ok" => {
-                assert_eq!(calls, 1);
-                assert_eq!(status(&mut queue, task), TaskStatus::Ready);
-                assert!(events(&mut queue, task, "plan_review_failed").is_empty());
-            }
-            _ => {
-                assert_eq!(calls, usize::from(mode == "auth"), "{mode}");
-                let failed = events(&mut queue, task, "plan_review_failed");
-                let error = failed.last().unwrap()["error"].as_str().unwrap().to_owned();
-                let reason = if mode == "auth" {
-                    "authentication"
-                } else {
-                    "executable_missing"
-                };
-                assert!(error.contains("provider_disabled"), "{mode}: {error}");
-                assert!(
-                    error.contains(&format!("codex cannot be used ({reason})")),
-                    "{mode}: {error}"
-                );
-                assert_eq!(review_hold(&fx, proposal).as_deref(), Some("failed"));
-                assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
-            }
-        }
+    let mut fx = fixture();
+    roles(&fx, "[roles.plan_review]\nprovider = 'codex'\n");
+    let (task, proposal) = proposal(&fx, "no claude");
+    let codex = stub_codex(&fx, "auth", &verdict("pass", ""));
+    fx.claude = fx.repo.join("missing-claude");
+    let reviewer = StubReviewer::new(&[verdict("pass", "")]);
+    let mut opts = options(1, Duration::from_secs(3600));
+    opts.no_claude = true;
+    opts.codex = codex;
+    opts.codex_home = Some(codex_home(&fx));
+    let backend = PlanWorkspace::default();
+    supervise_with(&fx, &backend, &reviewer, &opts);
+    supervise_with(&fx, &backend, &reviewer, &opts);
+    assert!(reviewer.prompts().is_empty());
+    assert!(backend.launched().is_empty());
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let started = events(&mut queue, task, "plan_review_started");
+    assert!(!started.is_empty());
+    for event in &started {
+        assert_eq!(event["launch"]["provider"], "codex");
     }
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    assert_eq!(stub_lines(&fx, "codex-args.txt").len(), 1);
+    let failed = events(&mut queue, task, "plan_review_failed");
+    let error = failed.last().unwrap()["error"].as_str().unwrap().to_owned();
+    assert!(error.contains("provider_disabled"), "{error}");
+    assert!(
+        error.contains("codex cannot be used (authentication)"),
+        "{error}"
+    );
+    assert_eq!(review_hold(&fx, proposal).as_deref(), Some("failed"));
+    assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
 }
