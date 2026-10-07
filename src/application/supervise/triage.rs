@@ -844,7 +844,7 @@ impl Supervisor<'_> {
                 if detail
                     .events
                     .iter()
-                    .any(crate::domain::resume::is_inherit_retry)
+                    .any(crate::domain::resume::uses_automatic_inherit)
                 {
                     return Err(format!(
                         "task {} was retried with a branch carried over already (once per task)",

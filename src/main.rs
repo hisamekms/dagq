@@ -232,8 +232,16 @@ enum Command {
     Ready {
         id: i64,
         /// Skip plan review (recorded as a review_bypassed event).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "inherit")]
         bypass_review: bool,
+        /// Retry an in-progress task whose latest run failed or was interrupted, carrying that
+        /// run's branch (its commits on top of its base) over to the next run, without plan
+        /// review: user or inbox only, refused while a recovery job holds the run.
+        #[arg(long, requires = "reason")]
+        inherit: bool,
+        /// Why the run is carried over (with --inherit), recorded in its triage_finished event.
+        #[arg(long, requires = "inherit")]
+        reason: Option<String>,
     },
     /// Return a ready or submitted task to draft.
     Draft { id: i64 },
@@ -2097,8 +2105,13 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             C::TaskWrite,
             goal_id.map_or(Resource::Queue, |goal| Resource::Goal(GoalId::new(goal))),
         ),
-        Command::Ready { id, bypass_review } => one(
-            if *bypass_review {
+        Command::Ready {
+            id,
+            bypass_review,
+            inherit,
+            ..
+        } => one(
+            if *bypass_review || *inherit {
                 C::TaskReadyBypassReview
             } else {
                 C::TaskReady
@@ -3344,9 +3357,19 @@ fn execute(cli: Cli) -> Result<Value> {
                 dagq::view::task_detail(&detail, events)
             }
         }
-        Command::Ready { id, bypass_review } => {
-            serde_json::to_value(planning!().ready(TaskId::new(id), bypass_review)?)?
-        }
+        Command::Ready {
+            id,
+            inherit: true,
+            reason,
+            ..
+        } => serde_json::to_value(planning!().ready_inheriting(
+            TaskId::new(id),
+            reason.as_deref().unwrap_or_default(),
+            &dagq::infrastructure::adapters::RunRepositories,
+        )?)?,
+        Command::Ready {
+            id, bypass_review, ..
+        } => serde_json::to_value(planning!().ready(TaskId::new(id), bypass_review)?)?,
         Command::Submit {
             tasks,
             goals,

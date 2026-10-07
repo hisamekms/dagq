@@ -906,6 +906,7 @@ pub mod headless_job;
 pub mod host_metrics;
 pub mod idle_process;
 pub mod ids;
+pub mod inherit_by_hand;
 mod input;
 pub mod kpi;
 pub mod landing_branch;

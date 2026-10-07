@@ -400,30 +400,6 @@ fn claim_creates_a_lease_that_only_its_owner_can_use_or_release() {
     assert_eq!(raw_token, "first");
 }
 
-/// A clock the test moves by hand, in whole seconds.
-#[derive(Clone)]
-struct ManualClock(Arc<AtomicI64>);
-
-impl ManualClock {
-    fn at(secs: i64) -> Self {
-        Self(Arc::new(AtomicI64::new(secs)))
-    }
-
-    fn set(&self, secs: i64) {
-        self.0.store(secs, Ordering::SeqCst);
-    }
-}
-
-impl Clock for ManualClock {
-    fn system_time(&self) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(self.0.load(Ordering::SeqCst) as u64)
-    }
-
-    fn monotonic(&self) -> std::time::Instant {
-        std::time::Instant::now()
-    }
-}
-
 /// IDs handed out in order.
 struct FixedIds(Mutex<Vec<&'static str>>);
 

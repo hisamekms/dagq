@@ -977,7 +977,7 @@ impl Supervisor<'_> {
             .show(run.task_id())?
             .events
             .iter()
-            .any(is_inherit_retry);
+            .any(uses_automatic_inherit);
         let own_commits = head != *run.base_commit();
         match decide_conflict(&history, !inherited && own_commits, self.resume_config) {
             ConflictDecision::RequestRebase => {}

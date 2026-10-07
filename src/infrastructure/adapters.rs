@@ -2212,6 +2212,42 @@ fn parse_main_log(log: &str) -> Vec<MainCommit> {
     commits
 }
 
+/// [`crate::application::inherit::CarriedBranches`] in each run's own
+/// repository (its `repo_path`), for a person's `ready --inherit`, run from
+/// wherever the person stands. A run that never got a repository has
+/// nothing to carry over.
+pub struct RunRepositories;
+
+impl RunRepositories {
+    fn of(run: &TaskRun) -> Result<Option<GitRepository>> {
+        run.repo_path()
+            .map(|path| GitRepository::inspect(Path::new(path)))
+            .transpose()
+    }
+}
+
+impl crate::application::inherit::CarriedBranches for RunRepositories {
+    fn carried_head(&self, run: &TaskRun) -> Result<Option<CommitSha>> {
+        if crate::domain::run::check_triageable(run).is_err() {
+            return Ok(None);
+        }
+        match Self::of(run)? {
+            Some(repository) => crate::application::inherit::carried_head(
+                run,
+                &super::run_files::LocalRunFiles,
+                &repository,
+            ),
+            None => Ok(None),
+        }
+    }
+
+    fn keep(&self, run: &TaskRun, head: &CommitSha) -> Result<()> {
+        let repository = Self::of(run)?
+            .with_context(|| format!("run {} has no repository to keep {head} in", run.id()))?;
+        crate::application::inherit::keep_carried_head(&repository, run.id(), head)
+    }
+}
+
 /// The Git port over the inherent methods above, which callers that hold a
 /// `GitRepository` keep using directly.
 impl Repository for GitRepository {

@@ -90,7 +90,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説明する）:
 
 - worker: `integrate`・`answer`・`ask close`・`ready`・`cancel`・計画系の全て・`request add`・`request decline`・`recover`・`review`・`supervise`・`observe`・`plan`・`up`・`down`・`install`・`auto-update`・`init`・`migrate`・`rebind`・`finding`・`mark`、自分のrun以外への`ask`・`note`・`session`・`session-event`
-- planner: `ready`（`--bypass-review`を含む）・`goal ready`・`goal review`・`request add`・他の依頼の`request decline`と`ask --request`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run log`・`run send`・`planner screen`・`planner log`・`planner send`・`planner request`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、draft以外と上限に達したdraftの`revisit`、他のplannerのproposalの取り下げ
+- planner: `ready`（`--bypass-review`・`--inherit`を含む）・`goal ready`・`goal review`・`request add`・他の依頼の`request decline`と`ask --request`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run log`・`run send`・`planner screen`・`planner log`・`planner send`・`planner request`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、draft以外と上限に達したdraftの`revisit`、他のplannerのproposalの取り下げ
 - 4つのjob: 状態を変える全て（`reviewer may not change queue state`）
 - observer: `finding record`・`finding resolve`・findingに紐づく`blocked`のask以外の全て（`observer may not change queue state`）
 - inbox: 人（user）と同じで、拒まれるのは誰にも与えない着地の実行・pushと予約だけ
@@ -128,7 +128,7 @@ host実行ではIntegratorもsupervisorや`integrate`と同じプロセスとユ
 
 ## answerと代行の記録
 
-inboxは全てのaskにanswerでき、`dagq-recover`の手作業（`integrate`・`recover`・`review`・`ready --bypass-review`・`cancel`・`up` / `down` / `install`など）も人の言葉で代行できる（ADR-t728-3の決定1）。そのかわり記録で人自身と区別する（決定2）。
+inboxは全てのaskにanswerでき、`dagq-recover`の手作業（`integrate`・`recover`・`review`・`ready --bypass-review`・`ready --inherit`・`cancel`・`up` / `down` / `install`など）も人の言葉で代行できる（ADR-t728-3の決定1）。そのかわり記録で人自身と区別する（決定2）。
 
 - eventのactor: 人自身は`actor_role`が`user`、inboxの代行は`inbox`（`events --full`・`show --full`の`actor`）。Integratorが着地するときは`requested_by`が`user`か`inbox`
 - answer: askの`answer_authority`（`ask_answered`のpayloadの`authority`）が、人自身は`user`、inboxは`delegated`、runtimeが閉じたものは`runtime`。承認に当たるask（`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`correct_goal`・`approve_update`・`update_failed`と、`blocked` / `stalled`の`propose` / `dismiss`）は`answer_approval`が`1`

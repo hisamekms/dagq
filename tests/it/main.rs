@@ -119,6 +119,7 @@ mod runtime_headless_reopen;
 mod runtime_headless_stall;
 mod runtime_heartbeat;
 mod runtime_host_metrics;
+mod runtime_inherit_by_hand;
 mod runtime_integrate;
 mod runtime_job_verdicts;
 mod runtime_landing_answers;

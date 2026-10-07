@@ -64,7 +64,6 @@ tasks = 27
 path = "docs/design/plugin-integration.md"
 size = 55208
 line = 4652
-tasks = 6
 
 [[doc]]
 path = "docs/design/queue-service.md"

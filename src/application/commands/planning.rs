@@ -6,9 +6,11 @@
 //! than to what the command line says. The policy is the
 //! [`crate::domain::StaticPolicy`]'s (`docs/design/authorization.md`).
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use serde_json::Value;
 use tracing::warn;
+
+use crate::application::inherit::{CarriedBranches, InheritRequest, InheritStore, InheritedByHand};
 
 use crate::domain::{
     ActorContext, AuthorizationError, Authorizer, Capability, DraftRevisit, FindingId, Goal,
@@ -343,6 +345,51 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     }
 }
 
+impl<S: PlanningStore + InheritStore + ?Sized> Planning<'_, S> {
+    /// `ready --inherit`: a person's (user's, or the inbox's at their
+    /// word) retry of an `in_progress` task whose latest run failed or was
+    /// interrupted, carrying that run's branch over to the next run without
+    /// plan review (ADR-t1962-1). Authorized as `task.ready_bypass_review`;
+    /// the retry itself is execution and landing's ([`InheritStore`]).
+    /// The head is read before the store's transaction and kept under
+    /// `refs/dagq/runs/<run-id>` only after it committed.
+    pub fn ready_inheriting(
+        &mut self,
+        task: TaskId,
+        reason: &str,
+        branches: &dyn CarriedBranches,
+    ) -> Result<InheritedByHand> {
+        let status = self.authorize_task(Capability::TaskReadyBypassReview, task)?;
+        let reason = reason.trim();
+        ensure!(
+            !reason.is_empty(),
+            "--reason must say why the run is carried over"
+        );
+        let detail = self.store.show(task)?;
+        let latest = detail.runs.last();
+        let head = match latest {
+            Some(run) => branches.carried_head(run)?,
+            None => None,
+        };
+        let inherited = InheritStore::inherit_by_hand(
+            &mut *self.store,
+            InheritRequest {
+                task,
+                authorized: status,
+                run: latest.map(|run| run.id().clone()),
+                head,
+                role: self.actor.role(),
+                reason: reason.to_owned(),
+            },
+        )?;
+        // The store refuses unless `latest` is the run it carried over.
+        if let Some(run) = latest {
+            branches.keep(run, &inherited.head)?;
+        }
+        Ok(inherited)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -494,7 +541,28 @@ mod tests {
         }
     }
 
+    impl InheritStore for Store {
+        fn inherit_by_hand(&mut self, _: InheritRequest) -> Result<InheritedByHand> {
+            Err(reached("inherit"))
+        }
+    }
+
     type Command = fn(&mut Planning<'_, Store>) -> Result<()>;
+
+    /// A repository whose runs carry nothing over.
+    struct NoBranches;
+
+    impl CarriedBranches for NoBranches {
+        fn carried_head(
+            &self,
+            _: &crate::domain::TaskRun,
+        ) -> Result<Option<crate::domain::CommitSha>> {
+            Ok(None)
+        }
+        fn keep(&self, _: &crate::domain::TaskRun, _: &crate::domain::CommitSha) -> Result<()> {
+            Err(anyhow!("kept"))
+        }
+    }
 
     const TASK: TaskId = TaskId::new(1);
     const GOAL: GoalId = GoalId::new(1);
@@ -553,6 +621,9 @@ mod tests {
             ("draft", |p| p.draft(TASK).map(drop)),
             ("ready", |p| p.ready(TASK, false).map(drop)),
             ("ready --bypass-review", |p| p.ready(TASK, true).map(drop)),
+            ("ready --inherit", |p| {
+                p.ready_inheriting(TASK, "why", &NoBranches).map(drop)
+            }),
             ("cancel", |p| p.cancel(TASK, None).map(drop)),
             ("cancel --duplicate-of", |p| {
                 p.cancel(TASK, Some(TaskId::new(2))).map(drop)
@@ -798,6 +869,7 @@ mod tests {
         for name in [
             "ready",
             "ready --bypass-review",
+            "ready --inherit",
             "goal ready",
             "goal review",
         ] {

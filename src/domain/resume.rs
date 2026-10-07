@@ -359,10 +359,24 @@ pub enum Exhaustion {
     },
 }
 
-/// Whether the event is the automatic retry that carried a run's branch
-/// over.
+/// Whether the event is a retry that carried a run's branch over: the
+/// runtime's or the recovery job's, or a person's by hand
+/// ([`is_inherit_retry_by_hand`]).
 pub fn is_inherit_retry(event: &RunEvent) -> bool {
     event.kind == "triage_finished" && event.payload["action"] == RETRY_INHERIT
+}
+
+/// Whether the event is a retry that carried a run's branch over by hand
+/// (`ready --inherit`, ADR-t1962-1): its `by` is `user` or `inbox`.
+pub fn is_inherit_retry_by_hand(event: &RunEvent) -> bool {
+    is_inherit_retry(event) && matches!(event.payload["by"].as_str(), Some("user" | "inbox"))
+}
+
+/// Whether the event used the task's one automatic retry that carries a
+/// branch over: an [`is_inherit_retry`] not made by hand, which does not
+/// count (ADR-t1962-1).
+pub fn uses_automatic_inherit(event: &RunEvent) -> bool {
+    is_inherit_retry(event) && !is_inherit_retry_by_hand(event)
 }
 
 /// Whether a run whose resumes are used up is retried with its branch
@@ -371,7 +385,7 @@ pub fn is_inherit_retry(event: &RunEvent) -> bool {
 /// only, and no run of its task (`task_events`) was retried that way
 /// before. Otherwise a person decides.
 pub fn inherits_on_exhaustion(run_events: &[RunEvent], task_events: &[RunEvent]) -> bool {
-    history(run_events).reviewed_conflict() && !task_events.iter().any(is_inherit_retry)
+    history(run_events).reviewed_conflict() && !task_events.iter().any(uses_automatic_inherit)
 }
 
 /// Whether the run was ended by the automatic retry that carries its
@@ -652,6 +666,29 @@ mod tests {
             event("triage_decided", json!({"answer": "retry"}))
         ]));
         assert!(!retried_with_inheritance(&run));
+    }
+
+    #[test]
+    fn a_retry_carried_over_by_hand_is_inherited_but_leaves_the_automatic_one() {
+        let run = [pass(), conflict(), resume()];
+        for by in ["user", "inbox"] {
+            let by_hand = event(
+                "triage_finished",
+                json!({"action": RETRY_INHERIT, "by": by}),
+            );
+            assert!(is_inherit_retry(&by_hand));
+            assert!(is_inherit_retry_by_hand(&by_hand));
+            assert!(!uses_automatic_inherit(&by_hand));
+            assert!(retried_with_inheritance(std::slice::from_ref(&by_hand)));
+            let task: Vec<RunEvent> = run.iter().cloned().chain([by_hand]).collect();
+            assert!(inherits_on_exhaustion(&run, &task));
+        }
+        let automatic = event(
+            "triage_finished",
+            json!({"action": RETRY_INHERIT, "by": "runtime"}),
+        );
+        assert!(uses_automatic_inherit(&automatic));
+        assert!(!is_inherit_retry_by_hand(&automatic));
     }
 
     fn killed() -> RunEvent {

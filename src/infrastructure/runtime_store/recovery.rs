@@ -644,7 +644,7 @@ impl SqliteQueue {
                     .query_map([run.task_id()], event_row)?
                     .collect::<rusqlite::Result<_>>()?;
                 ensure!(
-                    !task_events.iter().any(resume::is_inherit_retry),
+                    !task_events.iter().any(resume::uses_automatic_inherit),
                     "task {} was retried with a branch carried over already",
                     run.task_id()
                 );
@@ -902,6 +902,136 @@ impl SqliteQueue {
         Ok(result)
     }
 
+    /// A person's retry that carries the task's latest run over
+    /// (`ready --inherit`, ADR-t1962-1), in one transaction as immediate as
+    /// [`Self::begin_triage`]'s: check the task's status against the
+    /// authorized one, that `request.run` is still its latest run, and the
+    /// preconditions of [`crate::domain::inherit_by_hand::check`] (a lease
+    /// that is not stale refuses; a stale one is removed, so that the round
+    /// that held it can neither finish nor apply anything after this). Then
+    /// make the task `ready` without plan review, close the recovery job's
+    /// unclosed `decide` asks of the run (an open one answered by the
+    /// runtime), and record `triage_finished` (action `retry_inherit`) with
+    /// `by`, `reason`, `inherit`, `closed_asks` and `removed_lease`, which
+    /// the next run inherits. A refusal changes nothing.
+    pub fn inherit_by_hand(
+        &mut self,
+        request: crate::application::inherit::InheritRequest,
+    ) -> Result<crate::application::inherit::InheritedByHand> {
+        use crate::domain::inherit_by_hand::{InheritFacts, InheritRefusal, check};
+        let task_id = request.task;
+        let refused =
+            |refusal: InheritRefusal| anyhow!("task {task_id} is not carried over: {refusal}");
+        // The spans it closes read their transcripts first (task 543).
+        let _read = match &request.run {
+            Some(id) => Some(read_before(
+                &self.conn,
+                Closing::Run(id, &[event_kind::TRIAGE_FINISHED]),
+            )?),
+            None => None,
+        };
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        let task = read_task(&tx, task_id)?;
+        crate::domain::task::check_status_authorized(&task, request.authorized)?;
+        let latest = tx
+            .query_row(
+                "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+                [task_id],
+                run_row(&self.runs_dir),
+            )
+            .optional()?;
+        ensure!(
+            latest.as_ref().map(TaskRun::id) == request.run.as_ref(),
+            "task {task_id}'s latest run changed while it was read; nothing is carried over, try again"
+        );
+        let (lease, process_alive) = match &latest {
+            Some(run) => (
+                run_lease_of(&tx, run.id())?,
+                tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM run_processes WHERE run_id=?1
+                     AND exited_at IS NULL AND heartbeat_at >= ?2-?3)",
+                    params![run.id(), now, HEARTBEAT_TIMEOUT_SECS],
+                    |r| r.get(0),
+                )?,
+            ),
+            None => (None, false),
+        };
+        check(InheritFacts {
+            role: request.role,
+            task: task.status(),
+            latest_run: latest.as_ref().map(TaskRun::status),
+            leased: lease.as_ref().is_some_and(|l| !lease_is_stale(l, now)),
+            process_alive,
+            own_commits: request.head.is_some(),
+        })
+        .map_err(refused)?;
+        let (Some(run), Some(head)) = (latest, request.head) else {
+            unreachable!("checked above");
+        };
+        let id = run.id();
+        // The stale lease goes, so its holder cannot renew it and finish or
+        // apply its round after this (ADR-0039 decision 7).
+        let removed_lease = match lease {
+            Some(lease) => {
+                tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+                Some(lease.token)
+            }
+            None => None,
+        };
+        let task = crate::infrastructure::sqlite::transition_task(
+            &tx,
+            task_id,
+            TaskAction::Ready,
+            &self.generators.clock.timestamp(),
+        )?;
+        let decides: Vec<crate::domain::Ask> = tx
+            .prepare(
+                "SELECT * FROM asks WHERE run_id=?1 AND kind='decide' AND asked_by=?2
+                 AND closed_at IS NULL ORDER BY id",
+            )?
+            .query_map(
+                params![id, TRIAGE_ASKER],
+                crate::infrastructure::asks::ask_row,
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        let answer = format!(
+            "carried over by hand ({} ran `dagq ready --inherit`): {}",
+            request.role.as_str(),
+            request.reason
+        );
+        for ask in &decides {
+            crate::infrastructure::asks::close_by_runtime(&tx, ask, &answer, now)?;
+        }
+        let closed_asks: Vec<AskId> = decides.iter().map(|ask| ask.id).collect();
+        let branch = run.branch().map(str::to_owned);
+        run_event(
+            &tx,
+            id,
+            EventKind::TriageFinished,
+            json!({
+                "action": resume::RETRY_INHERIT,
+                "by": request.role.as_str(),
+                "reason": request.reason,
+                "inherit": {"branch": branch, "head": head},
+                "closed_asks": closed_asks,
+                "removed_lease": removed_lease,
+                "status": run.status().as_str(),
+            }),
+        )?;
+        tx.commit()?;
+        Ok(crate::application::inherit::InheritedByHand {
+            task,
+            run_id: id.clone(),
+            branch,
+            head,
+            closed_asks,
+            removed_lease,
+        })
+    }
+
     /// The answered `decide` asks the supervisor opened about a `failed` or
     /// `interrupted` run that nobody closed, oldest first: the triage's
     /// asks whose answers the supervisor applies.
@@ -916,6 +1046,16 @@ impl SqliteQueue {
                     && ask.answered_at.is_some()
             })
             .collect())
+    }
+}
+
+/// The port execution and landing publishes to `ready --inherit` (T10).
+impl crate::application::inherit::InheritStore for SqliteQueue {
+    fn inherit_by_hand(
+        &mut self,
+        request: crate::application::inherit::InheritRequest,
+    ) -> Result<crate::application::inherit::InheritedByHand> {
+        SqliteQueue::inherit_by_hand(self, request)
     }
 }
 

@@ -1,8 +1,9 @@
 #!/bin/sh
 # Check the forbidden dependencies between the layers of the runtime. The
 # rules (their IDs L1, L2, L3, L4 and L6), what counts in short and the allow
-# list's place and format are in docs/design/architecture.md, sections
-# "レイヤーの規則" and "検査の範囲"; the details of what counts are here.
+# list's place are in docs/design/architecture.md, sections "レイヤーの規則"
+# and "検査の範囲"; the allow list's format is in its own header
+# (.config/layer-deps-allow.txt); the details of what counts are here.
 #
 # What counts is the path of a reference (`crate::application::timestamp`,
 # `std::time::SystemTime::now`), with a grouped `use crate::{a, b}` expanded

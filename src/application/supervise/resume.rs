@@ -298,29 +298,16 @@ impl Supervisor<'_> {
         self.close_open_workspaces(&failed, WorkspaceCloser::Triage)?;
         Ok(())
     }
-    /// The commit of the run's branch a retry carries over: its validated
-    /// commit (the one its review passed), or without one the head of its
-    /// worktree when no rebase is stopped half way there, kept
-    /// under `refs/dagq/runs/<run-id>` so that it outlives the branch.
-    /// `None` when the branch holds nothing on top of the run's base.
+    /// The commit of the run's branch a retry carries over
+    /// ([`crate::application::inherit::carried_head`]), kept under
+    /// `refs/dagq/runs/<run-id>` so that it outlives the branch. `None`
+    /// when the branch holds nothing on top of the run's base.
     pub(super) fn inherited_head(&mut self, run: &TaskRun) -> Result<Option<CommitSha>> {
-        // The reviewed commit, not whatever an unresolved session left in
-        // the worktree (a rebase stopped half way, say).
-        let head = match (run.result_commit(), run.worktree_path().map(Path::new)) {
-            (Some(commit), _) => Some(commit.clone()),
-            (None, Some(worktree))
-                if self.files.is_dir(worktree)
-                    && !self.repository.rebase_in_progress(worktree)? =>
-            {
-                Some(self.repository.head(worktree)?)
-            }
-            _ => None,
-        };
-        let Some(head) = head.filter(|head| head != run.base_commit()) else {
+        use crate::application::inherit::{carried_head, keep_carried_head};
+        let Some(head) = carried_head(run, &*self.files, &*self.repository)? else {
             return Ok(None);
         };
-        self.repository
-            .update_ref(&format!("refs/dagq/runs/{}", run.id()), head.as_str())?;
+        keep_carried_head(&*self.repository, run.id(), &head)?;
         Ok(Some(head))
     }
     /// Retry the task of a run whose resumes were used up on conflicts

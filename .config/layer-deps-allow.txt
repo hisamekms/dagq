@@ -1,7 +1,16 @@
-# The layer violations scripts/check-layer-deps.sh allows today. Rules, what
-# counts and this format: docs/design/architecture.md, section "検査の範囲".
-# The task that fixes a violation removes its item in the same change; an item
-# whose reference is gone fails the check.
+# The layer violations scripts/check-layer-deps.sh allows today. The rules
+# and what counts: docs/design/architecture.md, sections "レイヤーの規則" and
+# "検査の範囲" (the details of what counts: the script's header). This header
+# holds the format.
+#
+# One item per line, `rule | path | reference | task | reason`; lines that
+# start with `#` and blank lines are not read. rule is one of L1, L2, L3, L4
+# and L6; path is a file from `src/`; reference is the reference as the
+# script prints it; task is one task ID or several separated by `,`; reason
+# is not empty. The same reference in the same file is one item. A reference
+# with no item, an item whose reference is gone (the task that fixes a
+# violation removes its item in the same change), a malformed line and a
+# duplicate item all fail the check.
 #
 # rule | path | reference | task | reason
 L6 | src/infrastructure/queue_service.rs | crate::view | 1620 | view::task_detailを呼ぶ

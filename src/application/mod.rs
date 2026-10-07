@@ -23,6 +23,7 @@ mod headless_session;
 pub mod health;
 pub mod inbox_guardrail;
 pub mod inbox_watcher;
+pub mod inherit;
 pub mod install;
 pub mod integrate;
 pub mod kpi;

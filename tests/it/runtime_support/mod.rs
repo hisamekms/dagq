@@ -2318,3 +2318,27 @@ pub fn open_hold_ask(
         .unwrap()
         .ask
 }
+
+/// A clock the test moves by hand, in whole seconds.
+#[derive(Clone)]
+pub struct ManualClock(Arc<AtomicI64>);
+
+impl ManualClock {
+    pub fn at(secs: i64) -> Self {
+        Self(Arc::new(AtomicI64::new(secs)))
+    }
+
+    pub fn set(&self, secs: i64) {
+        self.0.store(secs, Ordering::SeqCst);
+    }
+}
+
+impl Clock for ManualClock {
+    fn system_time(&self) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(self.0.load(Ordering::SeqCst) as u64)
+    }
+
+    fn monotonic(&self) -> Instant {
+        Instant::now()
+    }
+}

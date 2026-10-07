@@ -159,6 +159,10 @@ pub struct Inheritance {
     /// Its receipt's summary, whitespace collapsed; `(receipt unavailable)`
     /// when it cannot be read.
     pub summary: String,
+    /// The role (`user` or `inbox`) and reason of a person's retry by hand
+    /// that carried it over (`ready --inherit`, ADR-t1962-1); `None` for the
+    /// runtime's and the recovery job's.
+    pub by_hand: Option<(String, String)>,
 }
 
 impl Inheritance {
@@ -170,11 +174,17 @@ impl Inheritance {
         if !resume::retried_with_inheritance(events) {
             return None;
         }
-        let inherit = &events
-            .iter()
-            .rev()
-            .find(|e| resume::is_inherit_retry(e))?
-            .payload["inherit"];
+        let retry = events.iter().rev().find(|e| resume::is_inherit_retry(e))?;
+        let inherit = &retry.payload["inherit"];
+        let by_hand = resume::is_inherit_retry_by_hand(retry).then(|| {
+            (
+                retry.payload["by"].as_str().unwrap_or_default().to_owned(),
+                retry.payload["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        });
         let head = inherit["head"].as_str()?.to_owned();
         let receipt_path = previous.receipt_path().map(str::to_owned);
         let summary = receipt_path
@@ -197,14 +207,21 @@ impl Inheritance {
             branch: inherit["branch"].as_str().map(str::to_owned),
             receipt_path,
             summary,
+            by_hand,
         })
     }
 
     /// The prompt's section on it: start from its commit, bring it onto the
     /// current main, resolve the conflicts, verify and write the receipt.
     fn section(&self) -> String {
+        let why = match &self.by_hand {
+            Some((by, reason)) => format!(
+                "{by} carried its work over by hand after it ended ({reason}), so this run starts from its work instead of from scratch."
+            ),
+            None => "its review passed, but its landing kept conflicting with the landing branch until its resumes were used up, so this run starts from its work instead of from scratch.".to_owned(),
+        };
         format!(
-            "Carried over from run {run}: its review passed, but its landing kept conflicting with the landing branch until its resumes were used up, so this run starts from its work instead of from scratch. \
+            "Carried over from run {run}: {why} \
              Its work is commit {head} (kept as refs/dagq/runs/{run}{branch}); its own commits are {base}..{head}. \
              Bring them onto your base, the current landing branch (for example `git cherry-pick {base}..{head}` in your worktree), resolve the conflicts keeping what both sides meant, rerun your checks in the worktree as above, and write the receipt for your own head. \
              Its receipt ({receipt}) summary: {summary}\n",
@@ -4970,6 +4987,7 @@ mod tests {
             branch: None,
             receipt_path: None,
             summary: "earlier".into(),
+            by_hand: None,
         };
         let retried = prompt(
             &verified,
@@ -4984,6 +5002,28 @@ mod tests {
         .unwrap();
         let (before, carried) = retried.split_once("Carried over from run").unwrap();
         assert!(before.contains(checks));
+        assert!(carried.contains("rerun your checks in the worktree as above"));
+        assert!(carried.contains("its landing kept conflicting"));
+        let by_hand = Inheritance {
+            by_hand: Some(("inbox".into(), "the person chose retry_inherit".into())),
+            ..inheritance.clone()
+        };
+        let retried = prompt(
+            &verified,
+            &own_run,
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&by_hand),
+            &[],
+        )
+        .unwrap();
+        let (_, carried) = retried.split_once("Carried over from run").unwrap();
+        assert!(carried.contains(
+            "inbox carried its work over by hand after it ended (the person chose retry_inherit)"
+        ));
+        assert!(!carried.contains("its landing kept conflicting"));
         assert!(carried.contains("rerun your checks in the worktree as above"));
 
         let default = r#"when the instructions name no such checks, run the verification commands ["make gate"]."#;

@@ -114,9 +114,10 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 
 - 実行と着地の状態（`task_runs`・`run_leases`・`run_processes`）を書かない。
   runの結果は`RunLog`の読み取りとeventで読む。
+  `ready --inherit`は実行と着地の`InheritStore`を呼ぶ（T10）。
 - 観測と分析の`findings`を書くのはfindingのproposalの採否（T6）だけ。
 
-**境界をまたぐtransaction**: T3・T5・T6・T7・T8・T9（書き手）、T1・T2・T4（実行と着地が書く）。
+**境界をまたぐtransaction**: T3・T5・T6・T7・T8・T9（書き手）、T1・T2・T4・T10（実行と着地が書く）。
 
 ## 実行と着地
 
@@ -143,16 +144,17 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
 - 着地先のbranchの解決（`Repository::landing_branch`）を観測と分析のCIの見張りに公開する。
   解決できなければ見張りは確かめず、着地先の保留に任せる。
+- `application::inherit`の`InheritStore`・`CarriedBranches`を計画管理の`ready --inherit`に公開する（T10）。
 - `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`のleaseとprocessの部分は内部。
 
 **許す依存の向き**
 
 - 計画管理のtaskを読むのは`TaskStore`の読み取りとT1だけ。
-  taskの状態を変えるのはT2（着地）とT4（triage）だけ。
+  taskの状態を変えるのはT2（着地）・T4（triage）・T10（引き継ぎ）だけ。
 - follow_upsは`DraftPlannerStore::register_follow_ups`（T7）で渡し、`tasks`・`draft_origins`をSQLで書かない。
 - 観測と分析・host運用の状態を書かない。
 
-**境界をまたぐtransaction**: T1・T2・T4（書き手）、T7（計画管理の公開する関数を呼ぶ）。
+**境界をまたぐtransaction**: T1・T2・T4・T10（書き手）、T7（計画管理の公開する関数を呼ぶ）。
 
 ## 観測と分析
 
@@ -271,6 +273,7 @@ contextを1つに決められず、分ける先を持つもの。
 | T7 | follow_upsのdraftの登録 | 計画管理（実行と着地が呼ぶ） | runを読み、draftの`tasks`と`draft_origins`を書く | 着地したrunのfollow_upsを由来つきで1回だけdraftにする | `infrastructure::draft_planners`の`register_follow_ups`（T2とは別のtransaction） |
 | T8 | follow_upの所属の判断の記録 | 計画管理 | 判断の行・taskのgoalの移動・要るなら`correct_goal`のask | 判断と所属と人への問いを食い違わせない（ADR-t1504-2決定1・6・9） | `infrastructure::follow_up_membership`の`judge_follow_up` |
 | T9 | achievedの後の訂正のanswerの適用 | 計画管理 | askを閉じ、goalを開き直すかfollow_upを移す | 答えとgoal・所属・残った問いを1回で揃える（ADR-t1504-2決定9） | `infrastructure::follow_up_membership`の`decide_correction` |
+| T10 | 手での引き継ぎ | 実行と着地（`ready --inherit`が呼ぶ） | leaseを消しaskを閉じてtaskを`ready`に | 復旧jobと競合せず一度だけ引き継ぐ（ADR-t1962-1） | `runtime_store::recovery`の`inherit_by_hand` |
 
 所属の判断の流れは[所属の判断](follow-up-membership.md)が持つ。
 
@@ -344,23 +347,19 @@ contextを1つに決められず、分ける先を持つもの。
 
 - scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に当てる。
   CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。
-- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えない。
-  `#[cfg(test)]`の中はL1・L3・L6では数え、L2・L4では数えない。
-  testか判定できない`cfg`は本番として数える（安全側）。
+- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えず、testの中はL1・L3・L6だけで数える。
   細目（`use`の組の展開、testとする`cfg`の形と範囲、`--self-test`）はscriptの先頭のコメントが持つ。
 - SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
-- 許可の一覧は`.config/layer-deps-allow.txt`で、1行が1項目の`規則 | path | 参照 | 行き先のtask | 理由`（`#`の行と空行は読まない）。
-  規則はL1・L2・L3・L4・L6のどれか、pathは`src/`からのファイル、参照はscriptが出す参照、行き先は1つか`,`で区切った複数のtask ID、理由は空でない。
-  同じファイルの同じ参照は1項目で、一覧に無い参照・もう無い参照の項目・書式の誤りと重複はどれも落ちる。
+- 許可の一覧は`.config/layer-deps-allow.txt`で、1行1項目の`規則 | path | 参照 | 行き先のtask | 理由`。
+  各欄の値・読まない行・落ちる条件（一覧に無い参照、もう無い項目など）は一覧の先頭のコメントが持つ。
 - 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置く（ADR-t1545-1決定4）。
   違反を直す変更は、同じ変更で一覧の項目と「[今の違反と行き先](#今の違反と行き先)」の行を消す。
-- 「検査: review」の規則と、境界を変えた差分がこの文書と許可の一覧を直しているかは、reviewのsubagent `architecture-boundaries`（`.dagq/agents/architecture-boundaries/AGENT.md`、[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が見て、scriptの規則は見ない。
+- 「検査: review」の規則と、境界を変えた差分がこの文書と許可の一覧を直しているかは、reviewのsubagent `architecture-boundaries`（[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が見て、scriptの規則は見ない。
 
 ## 今の違反と行き先
 
 scriptが検査する規則（L1・L2・L3・L4・L6）の行は、許可の一覧`.config/layer-deps-allow.txt`の項目と一致し、行き先のtaskは一覧の項目が持つ。
 reviewで見る規則の行は、行き先をこの表の言葉で書く。
-行き先が「未登録」のまま残っているのはX3・C1の行だけ。
 
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
