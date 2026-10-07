@@ -23,10 +23,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 pub const START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// [`SccacheServer`] on this host. The start's output goes to `log`.
+/// Process identity and stats queries are bounded to five seconds. The process
+/// uses C-locale `ps` start text; only a `sandbox-exec` parent proves confinement.
+/// `lsof` and `ps` paths can be injected without changing the host's PATH.
 #[derive(Debug, Clone)]
 pub struct SystemSccache {
     pub log: PathBuf,
     pub start_timeout: Duration,
+    pub lsof: PathBuf,
+    pub ps: PathBuf,
 }
 
 impl SystemSccache {
@@ -35,6 +40,8 @@ impl SystemSccache {
         Self {
             log: queue_dir.join("sccache-start.log"),
             start_timeout,
+            lsof: "lsof".into(),
+            ps: "ps".into(),
         }
     }
 }
@@ -50,14 +57,13 @@ pub fn listening(port: u16) -> bool {
 
 /// The pid of the process listening on TCP `port`, as `lsof` lists it, or
 /// why it could not be read.
-fn listener_pid(port: u16) -> ServerPid {
-    let output = crate::infrastructure::adapters::unpiped_output(Command::new("lsof").args([
-        "-nP",
-        "-t",
-        &format!("-iTCP:{port}"),
-        "-sTCP:LISTEN",
-    ]))
-    .map_err(|error| format!("lsof could not be run: {error}"))?;
+fn listener_pid(port: u16, lsof: &Path) -> ServerPid {
+    let output = crate::infrastructure::adapters::unpiped_output_within(
+        Command::new(lsof).args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"]),
+        Duration::from_secs(5),
+    )
+    .map_err(|error| format!("lsof could not be run: {error}"))?
+    .ok_or_else(|| "lsof timed out reading the sccache listener".to_owned())?;
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .find_map(|line| line.trim().parse().ok())
@@ -71,9 +77,9 @@ fn listener_pid(port: u16) -> ServerPid {
 }
 
 /// [`listener_pid`], tried again until `deadline` while lsof lists none.
-fn listener_pid_until(port: u16, deadline: Instant) -> ServerPid {
+fn listener_pid_until(port: u16, deadline: Instant, lsof: &Path) -> ServerPid {
     loop {
-        let pid = listener_pid(port);
+        let pid = listener_pid(port, lsof);
         if pid.is_ok() || Instant::now() >= deadline {
             return pid;
         }
@@ -81,9 +87,135 @@ fn listener_pid_until(port: u16, deadline: Instant) -> ServerPid {
     }
 }
 
+/// Bounded host queries: neither process listing nor stats may stall a pass.
+fn query(command: &mut Command) -> Result<std::process::Output> {
+    let output =
+        crate::infrastructure::adapters::unpiped_output_within(command, Duration::from_secs(5))?
+            .ok_or_else(|| anyhow::anyhow!("sccache query timed out"))?;
+    if !output.status.success() {
+        bail!(
+            "sccache query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output)
+}
+
+fn process_with(
+    port: u16,
+    lsof: &Path,
+    ps: &Path,
+) -> Result<Option<crate::domain::sccache::ServerProcess>> {
+    use crate::domain::sccache::ServerProcess;
+    let output = crate::infrastructure::adapters::unpiped_output_within(
+        Command::new(lsof).args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"]),
+        Duration::from_secs(5),
+    )?
+    .ok_or_else(|| anyhow::anyhow!("lsof timed out"))?;
+    let Some(pid) = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().parse::<u32>().ok())
+    else {
+        if !listening(port) {
+            return Ok(None);
+        }
+        bail!("lsof could not identify the listener on port {port}");
+    };
+    let output = query(Command::new(ps).env("LC_ALL", "C").args([
+        "-p",
+        &pid.to_string(),
+        "-o",
+        "ppid=,lstart=,command=",
+    ]))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<_> = text.split_whitespace().collect();
+    if parts.len() < 7 {
+        bail!("ps did not describe pid {pid}");
+    }
+    let parent_pid: u32 = parts[0].parse()?;
+    let command = parts[6..].join(" ");
+    // An observed sandbox-exec ancestor is positive evidence. Absence is
+    // unknown: a daemon can have been reparented after inheriting a sandbox.
+    let parent =
+        query(Command::new(ps).args(["-p", &parent_pid.to_string(), "-o", "command="])).ok();
+    let sandboxed = parent.as_ref().and_then(|output| {
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.split_whitespace()
+            .next()
+            .and_then(|command| Path::new(command).file_name())
+            .is_some_and(|name| name == "sandbox-exec")
+            .then_some(true)
+    });
+    Ok(Some(ServerProcess {
+        pid,
+        parent_pid,
+        started_at: parts[1..6].join(" "),
+        command,
+        sandboxed,
+    }))
+}
+
+fn parse_stats(bytes: &[u8]) -> Result<crate::domain::sccache::ServerStats> {
+    let json: serde_json::Value = serde_json::from_slice(bytes)?;
+    let stats = &json["stats"];
+    let count = |key| {
+        stats[key]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("sccache stats missing {key}"))
+    };
+    Ok(crate::domain::sccache::ServerStats {
+        requests: count("compile_requests")?,
+        failures: count("compile_fails")?,
+        compilations: count("compilations")?,
+    })
+}
+
 impl SccacheServer for SystemSccache {
     fn listening(&self, port: u16) -> Result<bool> {
         Ok(listening(port))
+    }
+
+    fn process(&self, port: u16) -> Result<Option<crate::domain::sccache::ServerProcess>> {
+        process_with(port, &self.lsof, &self.ps)
+    }
+
+    fn stats(
+        &self,
+        program: &Path,
+        env: &[(String, String)],
+        port: u16,
+    ) -> Result<Option<crate::domain::sccache::ServerStats>> {
+        // A missing listener never invokes a client. In sccache 0.18 the
+        // ShowStats branch also uses connect_to_server, not connect_or_start.
+        if !listening(port) {
+            return Ok(None);
+        }
+        let output = query(
+            Command::new(program)
+                .args(["--show-stats", "--stats-format", "json"])
+                .envs(env.iter().map(|(k, v)| (k, v)))
+                .env("SCCACHE_SERVER_PORT", port.to_string())
+                .env("SCCACHE_IDLE_TIMEOUT", "0"),
+        )?;
+        parse_stats(&output.stdout).map(Some)
+    }
+
+    fn stop(&self, program: &Path, env: &[(String, String)], port: u16) -> Result<()> {
+        query(
+            Command::new(program)
+                .arg("--stop-server")
+                .envs(env.iter().map(|(k, v)| (k, v)))
+                .env("SCCACHE_SERVER_PORT", port.to_string())
+                .env("SCCACHE_IDLE_TIMEOUT", "0"),
+        )?;
+        let deadline = Instant::now() + self.start_timeout;
+        while listening(port) {
+            if Instant::now() >= deadline {
+                bail!("sccache still listens after --stop-server");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
     }
 
     fn start(&self, program: &Path, env: &[(String, String)], port: u16) -> Result<ServerPid> {
@@ -140,6 +272,7 @@ impl SccacheServer for SystemSccache {
         Ok(listener_pid_until(
             port,
             deadline.max(Instant::now() + Duration::from_secs(2)),
+            &self.lsof,
         ))
     }
 }
@@ -182,6 +315,69 @@ mod tests {
     }
 
     #[test]
+    fn stats_client_is_skipped_without_a_listener_and_reads_json_with_run_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("sccache");
+        fs::write(
+            &program,
+            r#"#!/bin/sh
+printf '%s idle=%s path=%s\n' "$*" "$SCCACHE_IDLE_TIMEOUT" "$PATH" >> "${0%/*}/calls.log"
+printf '%s\n' '{"stats":{"compile_requests":7,"compile_fails":7,"compilations":0}}'
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let server = SystemSccache::new(dir.path(), Duration::from_secs(5));
+        assert_eq!(server.stats(&program, &[], free_port()).unwrap(), None);
+        assert!(calls(dir.path()).is_empty());
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let stats = server
+            .stats(
+                &program,
+                &[("PATH".into(), "/configured/bin".into())],
+                listener.local_addr().unwrap().port(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(stats.failures, 7);
+        assert_eq!(stats.failure_ratio(), 1.0);
+        assert_eq!(
+            calls(dir.path()),
+            ["--show-stats --stats-format json idle=0 path=/configured/bin"]
+        );
+        assert!(parse_stats(br#"{"stats":{}}"#).is_err());
+    }
+
+    #[test]
+    fn stub_process_listing_retains_identity_parent_command_and_sandbox_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let lsof = dir.path().join("lsof");
+        let ps = dir.path().join("ps");
+        fs::write(&lsof, "#!/bin/sh\nprintf '42\\n'\n").unwrap();
+        fs::write(
+            &ps,
+            r#"#!/bin/sh
+case "$*" in
+*ppid*) printf '%s\n' '12 Mon Oct 5 10:11:12 2026 /bin/sccache --internal-start-server' ;;
+*) printf '%s\n' '/usr/bin/sandbox-exec -p profile /bin/sccache' ;;
+esac
+"#,
+        )
+        .unwrap();
+        for path in [&lsof, &ps] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let process = process_with(4226, &lsof, &ps).unwrap().unwrap();
+        assert_eq!(process.pid, 42);
+        assert_eq!(process.parent_pid, 12);
+        assert_eq!(process.started_at, "Mon Oct 5 10:11:12 2026");
+        assert_eq!(process.command, "/bin/sccache --internal-start-server");
+        assert_eq!(process.sandboxed, Some(true));
+        fs::write(&lsof, "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(process_with(free_port(), &lsof, &ps).unwrap().is_none());
+    }
+
+    #[test]
     fn a_look_at_a_port_starts_nothing() {
         let dir = tempfile::tempdir().unwrap();
         stub(dir.path(), 0);
@@ -202,7 +398,11 @@ mod tests {
     fn a_start_runs_the_program_with_the_environment_and_waits_for_the_port() {
         let dir = tempfile::tempdir().unwrap();
         let program = stub(dir.path(), 0);
-        let sccache = SystemSccache::new(dir.path(), Duration::from_secs(30));
+        let mut sccache = SystemSccache::new(dir.path(), Duration::from_secs(30));
+        let lsof = dir.path().join("lsof");
+        fs::write(&lsof, "#!/bin/sh\necho 42\n").unwrap();
+        fs::set_permissions(&lsof, fs::Permissions::from_mode(0o755)).unwrap();
+        sccache.lsof = lsof;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let env = vec![
@@ -214,18 +414,17 @@ mod tests {
             calls(dir.path()),
             ["--start-server idle=0 path=/run/env/bin:/usr/bin:/bin"]
         );
-        // lsof names this process (the listener's); a host without lsof
-        // says why there is no pid.
-        match pid {
-            Ok(pid) => assert_eq!(pid, std::process::id()),
-            Err(why) => assert!(why.contains("lsof could not be run"), "{why}"),
-        }
+        assert_eq!(pid.unwrap(), 42);
     }
 
     #[test]
     fn a_port_nothing_listens_on_has_no_pid_and_says_why() {
         let port = free_port();
-        let why = listener_pid_until(port, Instant::now()).unwrap_err();
+        let dir = tempfile::tempdir().unwrap();
+        let lsof = dir.path().join("lsof");
+        fs::write(&lsof, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&lsof, fs::Permissions::from_mode(0o755)).unwrap();
+        let why = listener_pid_until(port, Instant::now(), &lsof).unwrap_err();
         assert!(
             why.contains(&format!("no process listening on port {port}"))
                 || why.contains("lsof could not be run"),

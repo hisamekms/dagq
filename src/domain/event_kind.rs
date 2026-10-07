@@ -245,6 +245,9 @@ event_kinds! {
     RunWaitingStarted => "run_waiting_started",
     RuntimeError => "runtime_error",
     SccacheServerStartFailed => "sccache_server_start_failed",
+    SccacheServerDetected => "sccache_server_detected",
+    SccacheServerUnhealthy => "sccache_server_unhealthy",
+    SccacheServerRestartFailed => "sccache_server_restart_failed",
     SccacheServerStarted => "sccache_server_started",
     SccacheWrapperRemoved => "sccache_wrapper_removed",
     ScopeViolation => "scope_violation",
@@ -437,6 +440,9 @@ impl EventKind {
                 | RunEnvChanged
                 // The sccache server the supervisor started, or failed to,
                 // outside any sandbox (ADR-t1215-1).
+                | SccacheServerDetected
+                | SccacheServerUnhealthy
+                | SccacheServerRestartFailed
                 | SccacheServerStarted
                 | SccacheServerStartFailed
                 | MarkRecorded
@@ -1128,6 +1134,15 @@ mod tests {
             (
                 EventKind::SccacheServerStartFailed,
                 "sccache_server_start_failed",
+            ),
+            (EventKind::SccacheServerDetected, "sccache_server_detected"),
+            (
+                EventKind::SccacheServerUnhealthy,
+                "sccache_server_unhealthy",
+            ),
+            (
+                EventKind::SccacheServerRestartFailed,
+                "sccache_server_restart_failed",
             ),
             (EventKind::SccacheServerStarted, "sccache_server_started"),
             (EventKind::SccacheWrapperRemoved, "sccache_wrapper_removed"),

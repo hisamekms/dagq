@@ -6,8 +6,10 @@
 //! worker's workspace, a Codex resume or a Codex review opens; it starts
 //! a missing one with `SCCACHE_IDLE_TIMEOUT=0` and records
 //! `sccache_server_started` (or `sccache_server_start_failed`). The look
-//! is a connect to the server's loopback port, never an sccache client,
-//! which would start a server itself. A Codex review whose server could
+//! is a connect to the server's loopback port. Only confirmed existing
+//! servers are queried for process identity and stats; foreign servers
+//! are recorded, and failure-only deltas or known confinement cause a
+//! stop and restart outside the sandbox. A Codex review whose server could
 //! not be confirmed runs without `RUSTC_WRAPPER`, recorded as
 //! `sccache_wrapper_removed`; a Codex worker's turns are looked at by its
 //! wrapper the same way ([`crate::application::headless_session`]).
@@ -32,6 +34,7 @@ pub struct SccachePort(pub Arc<dyn SccacheServer + Send + Sync>);
 pub(super) struct SccacheWatch {
     last_look: Option<Instant>,
     failed_at: Option<Instant>,
+    failures: crate::domain::sccache::FailureWatch,
 }
 
 impl Supervisor<'_> {
@@ -43,7 +46,9 @@ impl Supervisor<'_> {
         }
         let reason = match self.sccache.last_look {
             None => CheckReason::Startup,
-            Some(at) if at.elapsed() < LOOK_INTERVAL => return,
+            Some(at) if self.generators.clock.monotonic().duration_since(at) < LOOK_INTERVAL => {
+                return;
+            }
             Some(_) => CheckReason::Missing,
         };
         self.ensure_sccache(reason);
@@ -55,7 +60,7 @@ impl Supervisor<'_> {
         let Some(SccachePort(server)) = self.sccache_port.clone() else {
             return ServerCheck::NotConfigured;
         };
-        self.sccache.last_look = Some(Instant::now());
+        self.sccache.last_look = Some(self.generators.clock.monotonic());
         let queue_dir = self.layout.db.parent().unwrap_or(Path::new("."));
         let env = match self.verifier.run_env(queue_dir) {
             Ok(env) => env,
@@ -74,19 +79,20 @@ impl Supervisor<'_> {
             port: target.port,
             why,
         };
-        match server.listening(target.port) {
-            Ok(true) => return ServerCheck::Running,
-            Ok(false) => {}
+        let running = match server.listening(target.port) {
+            Ok(running) => running,
             Err(error) => {
                 return unconfirmed(format!(
                     "the sccache server could not be looked at: {error:#}"
                 ));
             }
-        }
-        if self
-            .sccache
-            .failed_at
-            .is_some_and(|at| at.elapsed() < RETRY_AFTER)
+        };
+        if !running
+            && retry_waiting(
+                self.sccache
+                    .failed_at
+                    .map(|at| self.generators.clock.monotonic().duration_since(at)),
+            )
         {
             return unconfirmed(format!(
                 "no sccache server listens on port {}, and the last start failed",
@@ -102,6 +108,63 @@ impl Supervisor<'_> {
                 .find(|program| program.variable == WRAPPER_VAR)
                 .and_then(|program| program.resolved)
         });
+        let mut restart =
+            crate::application::sccache::pending_restart(&*self.queue, &*server, target.port)
+                .unwrap_or_else(|error| {
+                    warn!("sccache pending restart could not be read: {error:#}");
+                    None
+                });
+        if running
+            && retry_waiting(
+                self.sccache
+                    .failed_at
+                    .map(|at| self.generators.clock.monotonic().duration_since(at)),
+            )
+        {
+            return unconfirmed(
+                "the unhealthy sccache server's restart is waiting for retry".into(),
+            );
+        }
+        if running {
+            let program = program.as_deref().unwrap_or(&target.program);
+            match crate::application::sccache::observe(
+                &*self.queue,
+                &*server,
+                &target,
+                Path::new(program),
+                &env,
+                &mut self.sccache.failures,
+                self.generators.clock.now(),
+            ) {
+                Ok(Some(payload)) => restart = Some(payload),
+                Ok(None) if restart.is_some() => {}
+                Ok(None) => return ServerCheck::Running,
+                Err(error) => {
+                    warn!("sccache observation failed: {error:#}");
+                    return ServerCheck::Running;
+                }
+            }
+            let mut payload = restart.unwrap();
+            payload["supervisor"] = json!(self.token);
+            payload["supervisor_pid"] = json!(self.layout.pid);
+            payload["at"] = json!(self.generators.clock.now());
+            return match crate::application::sccache::restart(
+                &*self.queue,
+                &*server,
+                Path::new(program),
+                &env,
+                payload,
+            ) {
+                Ok(()) => {
+                    self.sccache.failed_at = None;
+                    ServerCheck::Running
+                }
+                Err(error) => {
+                    self.sccache.failed_at = Some(self.generators.clock.monotonic());
+                    unconfirmed(format!("sccache restart failed: {error:#}"))
+                }
+            };
+        }
         let started = match &program {
             Some(program) => {
                 let mut start_env = env;
@@ -120,7 +183,8 @@ impl Supervisor<'_> {
             "program": program.as_deref().unwrap_or(&target.program),
             "supervisor": self.token,
             "supervisor_pid": self.layout.pid,
-            "reason": reason.as_str(),
+            "reason": restart.as_ref().map(|_| "restart").unwrap_or(reason.as_str()),
+            "replaced": restart,
             "idle_timeout": IDLE_TIMEOUT,
         });
         match started {
@@ -149,6 +213,13 @@ impl Supervisor<'_> {
                         payload["pid_error"] = json!(why);
                     }
                 }
+                if let Ok(Some(process)) = server.process(target.port)
+                    && payload["pid"] == process.pid
+                {
+                    payload["started_at"] = json!(process.started_at);
+                    payload["parent_pid"] = json!(process.parent_pid);
+                    payload["command"] = json!(process.command);
+                }
                 if let Err(error) = self
                     .queue
                     .record_queue_event(EventKind::SccacheServerStarted, payload)
@@ -158,9 +229,23 @@ impl Supervisor<'_> {
                 ServerCheck::Running
             }
             Err(error) => {
-                self.sccache.failed_at = Some(Instant::now());
+                self.sccache.failed_at = Some(self.generators.clock.monotonic());
                 let message = format!("{error:#}");
                 payload["error"] = json!(message);
+                if let Some(replaced) = payload.get("replaced").filter(|v| !v.is_null()) {
+                    let mut failure = replaced.clone();
+                    failure["error"] = json!(message);
+                    failure["at"] = json!(self.generators.clock.now());
+                    failure["supervisor"] = json!(self.token);
+                    failure["supervisor_pid"] = json!(self.layout.pid);
+                    if let Err(error) = crate::application::sccache::record_restart_failure(
+                        &*self.queue,
+                        Path::new(program.as_deref().unwrap_or(&target.program)),
+                        failure,
+                    ) {
+                        warn!("sccache restart failure could not be recorded: {error:#}");
+                    }
+                }
                 self.record_start_failure(payload);
                 unconfirmed(message)
             }
@@ -223,5 +308,22 @@ impl Supervisor<'_> {
             warn!(run_id = %run, error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
         }
         &[WRAPPER_VAR]
+    }
+}
+
+fn retry_waiting(elapsed: Option<Duration>) -> bool {
+    elapsed.is_some_and(|elapsed| elapsed < RETRY_AFTER)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn failed_restarts_wait_until_the_retry_boundary() {
+        assert!(!retry_waiting(None));
+        assert!(retry_waiting(Some(Duration::ZERO)));
+        assert!(retry_waiting(Some(RETRY_AFTER - Duration::from_nanos(1))));
+        assert!(!retry_waiting(Some(RETRY_AFTER)));
+        assert!(!retry_waiting(Some(RETRY_AFTER + Duration::from_secs(1))));
     }
 }

@@ -308,6 +308,60 @@ fn no_skill_carries_this_repository_s_rules() {
         link_out_of_the_plugin(&reference, "[w](https://example.com/../..)"),
         None
     );
+    // These are public runtime diagnostics, not this repository's choice
+    // of host tools. Keep the marks everywhere except their named API notes.
+    fn runtime_sccache_note(name: &str, section: &str, line: &str, mark: &str) -> bool {
+        matches!(mark, "sccache" | "RUSTC_WRAPPER")
+            && match name {
+                "skills/dagq-recover/reference/doctor.md" => section == "## sccache server",
+                "skills/dagq-inbox/reference/status.md" => {
+                    line.starts_with("- `sccache`:")
+                        || line
+                            .starts_with("  - `stop sccache on the host; the supervisor starts it`")
+                }
+                "skills/dagq-inbox/SKILL.md" => {
+                    line.starts_with("- `stop sccache on the host; the supervisor starts it`")
+                }
+                _ => false,
+            }
+    }
+    let doctor = "skills/dagq-recover/reference/doctor.md";
+    assert!(runtime_sccache_note(
+        doctor,
+        "## sccache server",
+        "",
+        "sccache"
+    ));
+    assert!(runtime_sccache_note(
+        doctor,
+        "## sccache server",
+        "",
+        "RUSTC_WRAPPER"
+    ));
+    assert!(!runtime_sccache_note(
+        doctor,
+        "## Common cases",
+        "",
+        "sccache"
+    ));
+    assert!(!runtime_sccache_note(
+        "skills/dagq/SKILL.md",
+        "## sccache server",
+        "",
+        "sccache"
+    ));
+    assert!(!runtime_sccache_note(
+        doctor,
+        "## sccache server",
+        "",
+        "fixed binary"
+    ));
+    assert!(!runtime_sccache_note(
+        "skills/dagq-inbox/reference/status.md",
+        "## status",
+        "install sccache for this repository",
+        "sccache"
+    ));
     const MARKS: [&str; 27] = [
         "llvm-cov",
         "nextest",
@@ -383,12 +437,18 @@ fn no_skill_carries_this_repository_s_rules() {
             .iter()
             .map(|part| part.to_str().unwrap())
             .collect();
+        let mut section = "";
         for (number, line) in text.lines().enumerate() {
+            if line.starts_with("## ") {
+                section = line;
+            }
             let at = |what: &str| format!("{name}:{}: {what}", number + 1);
             found.extend(
                 MARKS
                     .iter()
-                    .filter(|mark| line.contains(*mark))
+                    .filter(|mark| {
+                        line.contains(*mark) && !runtime_sccache_note(&name, section, line, mark)
+                    })
                     .map(|mark| at(mark)),
             );
             found.extend(numbered_anecdote(line).map(at));

@@ -1939,6 +1939,9 @@ pub enum AttentionNext {
     /// (`ci_watch_unavailable` with `reason: not_github`, ADR-t1920-1): a
     /// person fixes the remote or has a task take the table out.
     FixDagqToml,
+    /// Stop the faulty server on the host; let the supervisor start its
+    /// replacement so the recorded start clears restart-failure attention.
+    CheckSccache,
     /// The automatic update put a new binary in place of the supervisor's
     /// (`update_installed`, ADR-0073 decision 17): a notice the inbox
     /// passes on to the person, who acts on nothing.
@@ -2049,6 +2052,7 @@ impl fmt::Display for AttentionNext {
             Self::ReportRequest => f.write_str("report the request's proposal"),
             Self::RephraseRequest => f.write_str("rephrase or drop the request"),
             Self::DecideWaiting => f.write_str("request a plan for the waiting tasks"),
+            Self::CheckSccache => f.write_str("stop sccache on the host; the supervisor starts it"),
             Self::InstallTool => f.write_str("install tool"),
             Self::LogInToGh => f.write_str("log in to gh"),
             Self::FixDagqToml => f.write_str("fix dagq.toml"),
@@ -2103,6 +2107,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::DEPENDENCY_STRANDED,
     run_env::RUN_ENV_PROGRAM_MISSING,
     ci_watch::CI_WATCH_UNAVAILABLE,
+    sccache::RESTART_FAILED,
     UPDATE_INSTALLED,
     event_kind::THROUGHPUT_REVIEW_REPORTED,
     event_kind::THROUGHPUT_REVIEW_FINISHED,
@@ -2312,6 +2317,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // The release of a dead landing could not stop what its worktree
         // still runs (task 1129).
         (event_kind::LANDING_RELEASE_STUCK, _) => Some(AttentionNext::StopLandingProcesses),
+        (sccache::RESTART_FAILED, _) => Some(AttentionNext::CheckSccache),
         (run_env::RUN_ENV_PROGRAM_MISSING, _) => Some(AttentionNext::InstallTool),
         // The means to read the CI went away (ADR-t1920-1 decision 2); its
         // return is no attention.

@@ -688,6 +688,8 @@ pub struct TestWorkspace {
     /// environment held it (the wrapper's `[run.env]` in production),
     /// set before each turn's own variables ([`headless::InheritingSpawner`]).
     pub inherited_env: Vec<(String, String)>,
+    /// Process identity used by the fixture wrapper and its supervisor.
+    pub wrapper_processes: Option<Arc<dyn ProcessControl + Send + Sync>>,
 }
 
 impl TestWorkspace {
@@ -726,6 +728,7 @@ impl TestWorkspace {
             codex: None,
             sccache: None,
             inherited_env: Vec::new(),
+            wrapper_processes: None,
         }
     }
     /// The sessions open: those it started and those `list` named, less

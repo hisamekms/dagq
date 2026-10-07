@@ -303,7 +303,12 @@ pub fn launch_background(
     }
     let claude = backend.claude_for(&run, resume)?;
     let (provider, other) = headless_provider(&run, claude.as_deref(), backend.codex.as_deref());
-    let stand = Stand::start()?;
+    let stand = Stand::start_with(
+        backend
+            .wrapper_processes
+            .as_deref()
+            .unwrap_or(&SystemProcesses),
+    )?;
     let handle = stand.handle.clone();
     let pid = stand.pid;
     // The process runs but starts no wrapper, which never registers.
@@ -322,6 +327,7 @@ pub fn launch_background(
     let (db, ready) = (backend.db.clone(), backend.headless_ready.clone());
     let sccache = backend.sccache.clone();
     let inherited_env = backend.inherited_env.clone();
+    let processes = backend.wrapper_processes.clone();
     let worker = thread::spawn(move || {
         let spawner = ReadySpawner {
             inner: StubSpawner { db: db.clone() },
@@ -335,7 +341,7 @@ pub fn launch_background(
                 Vec::new()
             },
         };
-        let returned = runtime::session_in_background_as(
+        let returned = runtime::session_in_background_as_with_processes(
             &db,
             &id,
             &token,
@@ -344,6 +350,7 @@ pub fn launch_background(
             &spawner,
             resume,
             pid,
+            processes.as_deref().unwrap_or(&SystemProcesses),
             sccache,
         );
         // The wrapper's process ends with it.
@@ -373,6 +380,10 @@ pub struct Stand {
 
 impl Stand {
     pub fn start() -> Result<Self> {
+        Self::start_with(&SystemProcesses)
+    }
+
+    fn start_with(processes: &dyn ProcessControl) -> Result<Self> {
         let child = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(format!(
@@ -384,7 +395,7 @@ impl Stand {
             .stderr(std::process::Stdio::null())
             .spawn()?;
         let pid = child.id();
-        let start = SystemProcesses
+        let start = processes
             .start_identity(pid)
             .context("the background wrapper's start")?;
         let handle =

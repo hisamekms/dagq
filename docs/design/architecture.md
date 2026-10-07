@@ -108,6 +108,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 **公開するport**
 
 - `RunLog`の読み取り（`runs_with_status`・`run`・`run_events`・`all_runs`・`all_events`・`latest_*`・`events_of_between`）を全てのcontextに公開する。
+- `Verifier`の`run_env`・`run_env_programs`（環境とprogramの読み取り）をhost運用の診断に公開する。検証コマンドを実行する`run_to_log`は実行と着地の内部。
 - `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
 - 着地先のbranchの解決（`Repository::landing_branch`、`domain::landing_branch`）を読み取りとして観測と分析のCIの見張りに公開する（`supervise::ci_watch::ci_watch_pass`が`[ci_watch] branch`の無いときの見るbranchに使う。解決できなければ確かめを始めず、着地先の保留に任せる。task 1921）。
 - timerのjob（observer・スループットの見直し）が使えなかったproviderを控える操作`Supervisor::hold_unusable`（`supervise::provider`）を観測と分析に公開する。終わりのeventは観測と分析の側（`supervise::observer::UnusableFinish`）が読み、ここは値（providerと理由・errorと出力）だけを受けて、Codexと起動しなかったClaudeは`ProviderHold`（`provider_held`）で、`[provider_fallback] jobs = false`のClaudeの認証・利用上限はqueueのhold askに入れて（`jobs::raise_job_wall`、`HoldJob::Observer`・`HoldJob::ThroughputReview`）控える（task 1223、task 1858、ADR-t1857-1）。
@@ -173,9 +174,14 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 **操作**
 
-- application: `application::lifecycle`（`up`・`down`）・`application::install`・`application::update`・`application::release_update`・`application::broker`・`application::broker_admin`・`application::broker_run`・`application::queue_service`・`application::rebind`・`application::inbox_watcher`・`application::inbox_guardrail`・`application::actor_executor`・`application::execution`（AIのactorを動かす場所と隔離）、`application::supervise`の`update`・`release`・`broker`・`queue_service`・`sccache`・`disk`・`cleanup`・`sweep`・`host_metrics`・`handoff`・`inbox_nudge`。
+- application: `application::lifecycle`（`up`・`down`）・`application::install`・`application::update`・`application::release_update`・`application::broker`・`application::broker_admin`・`application::broker_run`・`application::queue_service`・`application::sccache`・`application::rebind`・`application::inbox_watcher`・`application::inbox_guardrail`・`application::actor_executor`・`application::execution`（AIのactorを動かす場所と隔離）、
+  `application::supervise`の`update`・`release`・`broker`・`queue_service`・`sccache`・`disk`・`cleanup`・`sweep`・`host_metrics`・`handoff`・`inbox_nudge`。
 - CLI: `auto-update`・`release-update`・`init`・`locate`・`up`・`down`・`install`・`migrate`・`rebind`・`broker`・`service`、`doctor`のhostの部分。
 - infrastructure: `launchd`・`binaries`・`broker_*`・`queue_service`・`sccache`・`host_metrics`・`release_update`・`location`・`schema`・`telemetry`・`inbox_watchers`・`agent_dir`・`git_binary`・`runtime_store::coordination`のsupervisorの登録と引き継ぎの部分。`crates/`のbrokerのcrate（`dagq-broker`・`dagq-broker-client`・`dagq-broker-protocol`）。
+
+`application::sccache::add_diagnostics`がdoctor/statusのsccache欄と再起動失敗のattentionの表示条件、統計clientのprogramを決める。
+composeは束縛されたcheckoutのverifierとserverのadapterを渡すだけで、この判断を持たない。
+`supervise::sccache`の観測間隔と失敗後の再試行は注入した`Clock::monotonic`で測る。
 
 **公開するport**
 

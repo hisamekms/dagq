@@ -4,8 +4,8 @@ type: design
 title: "`status`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06
-last_verified: 2026-10-06
+updated: 2026-10-07
+last_verified: 2026-10-07
 scope: runtime
 related:
   - adr-t1228-2
@@ -70,3 +70,11 @@ related:
 ## CIの見張り（ADR-t1920-1）
 
 [ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)（task 1921）。attentionの行に`kind: ci_watch_unavailable`・`status: unavailable`・`next`（`reason`が`gh_missing`なら`install tool`、`gh_unauthenticated`なら`log in to gh`、`not_github`なら`fix dagq.toml`。後の2つは`AttentionNext::LogInToGh` / `FixDagqToml`）・`last_error`（payloadの`message`）を出し（`run_id` / `task_id`はnull）、`ci_watch_available`で消える。最上位の`ci`はどのroleの`status`にも出し、`{state, watch, failures（一覧の件数）, checked_at, latest_run_url}`か、見張りの記録が無ければnull。
+
+## sccacheのserver
+
+表示条件とserverの要約は`application::sccache::add_diagnostics`と`report`が持つ。
+束縛されたcheckoutの設定がsccacheを名指すときだけ表示し、統計clientを呼ばない。
+再起動に失敗した知らせはinboxへ届き、人はdoctorでidentityとportを確かめてhostで止め、起動をsupervisorに任せる。
+同じ故障の再試行はinboxを繰り返し起こさず、故障が変われば再通知する。
+supervisorが置換の起動を記録すると知らせが消え、人が別のserverを起動して検知されただけでは消えない（[Run environment](run-environment.md#外部serverと失敗の偏り)）。

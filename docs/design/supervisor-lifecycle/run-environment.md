@@ -82,20 +82,35 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 ## sccacheのserver
 
-[ADR-t1215-1](../../adr/2026-10-02-t1215-1-supervisor-owns-the-sccache-server.md)（ADR-0049の決定3をamends）、task 1215。`[run.env]`の`RUSTC_WRAPPER`がsccache（値のbasenameが`sccache`。`domain::sccache::SccacheTarget`）のとき、sccacheのserverはsupervisorがsandboxの外で起動して持ち、runtimeがsandboxの中で走らせるプロセスには起動させない。sccacheのclientは居ないserverを自分で起動し、sandboxの中で起動したserverはsandboxを引き継いで、それを通す全部のbuildが`Operation not permitted`になるため（goal 79）。`RUSTC_WRAPPER`がsccacheでない・`[run.env]`に無い・`dagq.toml`が無いときは何もしない。
+sccacheのserverはsupervisorがsandboxの外で起動して持ち、sandboxの中のclientには起動させない（[ADR-t1215-1](../../adr/2026-10-02-t1215-1-supervisor-owns-the-sccache-server.md)）。
+clientが起動したserverはclientのsandboxを引き継ぎ、他のrunのbuildも失敗させるため。
+serverを確かめられないCodexのturnとreviewはwrapperを外し、cacheなしでbuildを通す。
+wrapperはserverを起動せず、監視と起動はsupervisorが担う。
+turnの途中でserverが止まることや、runtimeの外からの起動までは防げない。
 
-- **port**: `[run.env]`の`SCCACHE_SERVER_PORT`（1〜65535）、無ければsccacheの既定の4226。serverは`127.0.0.1`のそのportで待つ。
-- **確かめ方**: loopbackのportへのTCPの接続（`infrastructure::sccache::listening`、上限500ms）だけで見る。sccacheのclientのコマンド（`--show-stats`など）は打たない。clientは居ないserverを、そのときの呼び出し元のenv（`SCCACHE_IDLE_TIMEOUT=0`なし）で起動し、eventも残らないため。portで待つのがsccacheかどうかは見ない（誰が起動したかの検知は後続のtask 1216）。
-- **いつ確かめるか**（`Supervisor::ensure_sccache`）: supervisorの起動（引き継ぎを含む）の後の最初の周回（理由`startup`）、以後は周回ごとに10秒（`LOOK_INTERVAL`）に1回（理由`missing`）、Codexのworkerのwrapperを起動する前（`before_worker`）、Codexのrunの`needs_session`のresumeのwrapperを起動する前（`before_resume`）、Codexで動くrunのreviewを起動する前（`before_review`）。drain・引き継ぎの間も周回ごとに確かめる。
-- **起動**: 居なければ、`[run.env]`の`RUSTC_WRAPPER`を`[run.env]`のプログラムの検査と同じPATH（supervisorのPATH。`Verifier::run_env_programs`の`resolved`）で解決し、`<sccache> --start-server`をsupervisorのenvに`[run.env]`（`${DAGQ_RUN_DIR}`はqueue directoryに展開する）と`SCCACHE_IDLE_TIMEOUT=0`を足して、自分のprocess groupで起動する（`infrastructure::sccache::SystemSccache`）。idleで止まって次の起動者がsandboxの中になるのを防ぐため、idleの上限は付けない。`[run.env]`に`PATH`があればserverもそのPATHで動く。clientが終わってportで待つようになるまで最大30秒（`START_TIMEOUT`）待ち、serverのpidは`lsof -nP -t -iTCP:<port> -sTCP:LISTEN`で、そのportで待つプロセスとして読む（lsofが何も出さなければ起動の上限まで、少なくとも2秒は読み直す）。読めなくてもserverは動いているので起動の失敗にはせず、eventの`pid`をnullにして読めなかった理由を`pid_error`に書く（lsofが無い・lsofがそのportで待つプロセスを出さない）。clientの出力は`<queue dir>/sccache-start.log`に上書きする。失敗の後60秒（`RETRY_AFTER`）は起動し直さない。
-- **event**（queueのevent）: 起動したら`sccache_server_started`（`at`（unix秒）・`pid`（読めなければnullと`pid_error`）・`port`・`program`（解決したpath）・`supervisor`（token）・`supervisor_pid`・`reason`・`idle_timeout`（`"0"`））。起動できなかったら`sccache_server_start_failed`（同じ欄の`pid`の代わりに`error`）を、最新のserverのeventが同じ`program`と`error`の失敗でないときだけ記録する（60秒ごとの再試行が同じ理由で失敗し続けても1件）。PATHで見つからないのも失敗で、`run_env_program_missing`とは別に記録する。
-- **確かめられなかったsandboxの中のturnとjob**: sccache 0.18にはclientのserverの自動起動を止める設定が無いので、直前にserverが待っているのを確かめられなかったものは、`RUSTC_WRAPPER`を外して起動する（buildはcacheなしで正しく通る）。外したらrunのevent`sccache_wrapper_removed`（`at`・`by`・`port`・`reason`）を残す。
-  - **Codexのworkerのturn**（resumeのturnを含む）: wrapper（`dagq session`。sandboxの外）が、turnを起動するたびにその直前に同じ接続で確かめる（`Turns::sccache_turn`）。wrapperが見るのは自分のenv（processのenvに渡った`[run.env]`）の`RUSTC_WRAPPER`と`SCCACHE_SERVER_PORT`で、turnは`env_remove`で`RUSTC_WRAPPER`を外して起動する。`by`は`wrapper`、`turn`はturnの番号。wrapperはserverを起動しない（起動はsupervisorだけ）。Claudeのturnはsandboxが無いので見ない。
-  - **Codexで動くrunのreview**（[Review](review.md)、`[roles.review] provider = "codex"`、read-onlyのsandbox）: supervisorが`before_review`で確かめ（居なければ起動を試み）、確かめられなければ`[run.env]`から`RUSTC_WRAPPER`を除き、jobのenvからも外す。`by`は`supervisor`、`job`は`review`、`attempt`はreviewの試行。
-  - `[run.env]`を受けるjobは今はreviewだけで、plan review・goal review・復旧・observerは`[run.env]`を受けないので対象外。
-- **sandboxの外のもの**: Claudeのworker、`integrate`の検証、着地前の再確認、自動更新のe2e、着地の前のe2eは今までどおり`RUSTC_WRAPPER`を渡す。そこで起動したserverはsandboxを持たないので壊れない（どれも`SCCACHE_IDLE_TIMEOUT`は付かず、supervisorは誰が起動したかを今は記録しない。後続のtask 1216）。
-- **防げないもの**: turnやjobの途中でserverが止まれば、そのturnの中のclientが起動しうる。runtimeの外（人が開いたCodexのsessionなど）でsandboxの中から起動したものも防げない。どちらも後続のtask 1216の検知が扱う。
-- **CLIだけ**: `dagq supervise`（`up`が起動するもの、`--once`を含む）は`SuperviseOptions::sccache`を持ち、libraryの呼び出し元（tests）は求めたときだけ持つ。
+### 外部serverと失敗の偏り
+
+起動の記録と現在のidentityが一致しなければ、serverの出どころは不明として扱う。
+親processは付け替わるため、sandboxの印が読めないことはsandboxの外で起動した証拠にならない。
+既存の失敗率だけで壊れたserverとは決めず、同じidentityの新しい失敗の偏りか、確かめられたsandboxの印で判断する。
+成功なしの新しい失敗の差分が累計3以上なら壊れた印とし、成功・identityの変更・統計のリセットで取り直す。
+processや統計を読めないことだけでも壊れたものとは決めない。
+統計を読む前に存在を確かめ、診断の読み取りでserverを起動させない。
+
+再起動の失敗は次のsupervisorへ引き継ぐが、別のidentityを古い故障の理由で止めない。
+同じidentity・program・errorの再起動の失敗は、supervisorが起動を記録するまで再通知せず、再試行は続ける。
+同じidentityと理由の壊れた印も繰り返し記録せず、故障の変化とsupervisorの起動を区別する。
+再起動に失敗した知らせを受けた人はdoctorでidentityとportを確かめ、hostでserverを止め、起動をsupervisorに任せる。
+この知らせのkindは`sccache_server_restart_failed`、nextは`stop sccache on the host; the supervisor starts it`。
+supervisorが置換の起動を記録すると知らせが消え、人が別のserverを起動して検知されただけでは消えない。
+
+- 監視と再試行の入口は`application::supervise::sccache`。
+  drain中も監視し、待ちの経過は注入した時計で測る。
+- identityと失敗の判断は`domain::sccache`、出どころと再起動の記録は`application::sccache`。
+  再起動の失敗の通知は、稼働中とserver不在の両経路から`record_restart_failure`で照合する。
+- hostへの問い合わせと起動は`infrastructure::sccache::SystemSccache`、sandboxのturnへのwrapperの適用は`application::headless_session`。
+- doctor/statusの表示条件と読み取りは`application::sccache::add_diagnostics`と`report`。
+  statusは統計clientを呼ばず、doctorが統計を読む。
 
 ## main checkoutの決め方
 

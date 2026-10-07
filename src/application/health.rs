@@ -1183,6 +1183,26 @@ pub fn attention(
             next,
         });
     }
+    if let Some(event) = queue.latest_queue_event(&[
+        crate::domain::sccache::RESTART_FAILED,
+        crate::domain::sccache::SCCACHE_SERVER_STARTED,
+    ])? && event.kind == crate::domain::sccache::RESTART_FAILED
+    {
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: event.payload["pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok()),
+            ask_id: None,
+            reason_category: None,
+            status: "failed".into(),
+            kind: event.kind,
+            last_error: event.payload["error"].as_str().map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::CheckSccache,
+        });
+    }
     // A program [run.env] names that the supervisor did not find stops its
     // claims and landings until a person installs it or takes it out of
     // dagq.toml (ADR-0049 decision 9).

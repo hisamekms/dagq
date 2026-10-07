@@ -24,6 +24,78 @@ pub const SCCACHE_SERVER_START_FAILED: &str =
 pub const SCCACHE_WRAPPER_REMOVED: &str =
     crate::domain::event_kind::EventKind::SccacheWrapperRemoved.as_str();
 
+/// Process identity: `pid` plus `started_at` distinguishes reused PIDs.
+/// `started_at` is the host's C-locale `ps lstart` text, not a queue timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServerProcess {
+    pub pid: u32,
+    pub started_at: String,
+    pub parent_pid: u32,
+    pub command: String,
+    /// True only when the observed parent command establishes confinement.
+    /// Unknown when it does not: a reparented daemon may keep its sandbox.
+    pub sandboxed: Option<bool>,
+}
+
+/// Lifetime compile counters returned by sccache, not per-observation deltas.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServerStats {
+    pub requests: u64,
+    pub failures: u64,
+    pub compilations: u64,
+}
+
+impl ServerStats {
+    pub fn failure_ratio(self) -> f64 {
+        if self.requests == 0 {
+            0.0
+        } else {
+            self.failures as f64 / self.requests as f64
+        }
+    }
+}
+
+/// Accumulate consecutive failure-only deltas. A first observation is a
+/// baseline, never evidence that a previously healthy server is broken.
+/// Three new failures without a success mark the server unhealthy. Success,
+/// a changed identity or decreased counters reset the streak; idle samples
+/// add nothing. No compile probe runs to obtain these counters.
+#[derive(Default)]
+pub struct FailureWatch {
+    previous: Option<(ServerProcess, ServerStats)>,
+    failures: u64,
+}
+impl FailureWatch {
+    pub fn observe(&mut self, process: &ServerProcess, stats: ServerStats) -> bool {
+        if let Some((old_process, old)) = &self.previous {
+            if old_process.pid != process.pid
+                || old_process.started_at != process.started_at
+                || stats.requests < old.requests
+                || stats.failures < old.failures
+                || stats.compilations < old.compilations
+            {
+                self.failures = 0;
+            } else {
+                let requests = stats.requests - old.requests;
+                let failures = stats.failures - old.failures;
+                if stats.compilations > old.compilations || requests > failures {
+                    self.failures = 0;
+                } else {
+                    self.failures = self.failures.saturating_add(failures);
+                }
+            }
+        }
+        self.previous = Some((process.clone(), stats));
+        self.failures >= 3
+    }
+}
+
+pub const DETECTED: &str = crate::domain::event_kind::EventKind::SccacheServerDetected.as_str();
+pub const UNHEALTHY: &str = crate::domain::event_kind::EventKind::SccacheServerUnhealthy.as_str();
+pub const RESTART_FAILED: &str =
+    crate::domain::event_kind::EventKind::SccacheServerRestartFailed.as_str();
+pub const HEALTH_KINDS: &[&str] = &[SCCACHE_SERVER_STARTED, DETECTED, UNHEALTHY, RESTART_FAILED];
+
 /// The sccache a `[run.env]` names as cargo's wrapper, and the port of its
 /// server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +184,35 @@ mod tests {
 
     fn target(env: &[(&str, &str)]) -> Option<SccacheTarget> {
         SccacheTarget::of(env.iter().copied())
+    }
+
+    #[test]
+    fn failures_need_new_samples_and_reset_on_success_identity_or_zeroed_stats() {
+        let mut process = ServerProcess {
+            pid: 1,
+            started_at: "first".into(),
+            parent_pid: 0,
+            command: "sccache".into(),
+            sandboxed: None,
+        };
+        let stats = |requests, failures, compilations| ServerStats {
+            requests,
+            failures,
+            compilations,
+        };
+        let mut watch = FailureWatch::default();
+        assert!(!watch.observe(&process, stats(7, 7, 0))); // historical failures are baseline
+        assert!(!watch.observe(&process, stats(7, 7, 0))); // idle is no evidence
+        assert!(!watch.observe(&process, stats(9, 9, 0)));
+        assert!(!watch.observe(&process, stats(10, 9, 1))); // success clears the streak
+        assert!(!watch.observe(&process, stats(12, 11, 1)));
+        assert!(watch.observe(&process, stats(13, 12, 1)));
+        process.started_at = "reused pid".into();
+        assert!(!watch.observe(&process, stats(13, 12, 1)));
+        assert!(!watch.observe(&process, stats(0, 0, 0))); // --zero-stats
+        assert!(watch.observe(&process, stats(3, 3, 0)));
+        assert_eq!(stats(0, 0, 0).failure_ratio(), 0.0);
+        assert_eq!(stats(7, 7, 0).failure_ratio(), 1.0);
     }
 
     #[test]

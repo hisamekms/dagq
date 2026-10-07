@@ -1007,3 +1007,134 @@ fn past_ask_request_taken_events_are_still_read() {
     assert_eq!(shown, 2, "{show}");
     ok(&db, &["stats", "--full"]);
 }
+
+#[test]
+fn doctor_and_status_report_sccache_identity_bias_and_skip_absent_or_other_wrappers() {
+    use serde_json::json;
+    use std::{
+        fs,
+        net::{Ipv4Addr, TcpListener},
+    };
+    let (dir, db) = queue();
+    bind(&db, dir.path(), "dagq");
+    let repo = dir.path().join("repo-dagq");
+    let bin = dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("sccache");
+    common::template::script(
+        &program,
+        r#"#!/bin/sh
+printf '%s idle=%s\n' "$*" "$SCCACHE_IDLE_TIMEOUT" >> "${0%/*}/stats-calls"
+printf '%s\n' '{"stats":{"compile_requests":7,"compile_fails":7,"compilations":0}}'
+"#,
+    );
+    common::template::script(
+        &bin.join("lsof"),
+        r#"#!/bin/sh
+[ -f "${0%/*}/server-present" ] && echo 42
+"#,
+    );
+    common::template::script(
+        &bin.join("ps"),
+        r#"#!/bin/sh
+case "$*" in
+*ppid*) echo '1 Mon Oct 5 10:11:12 2026 /bin/sccache --internal-start-server' ;;
+*) echo '/sbin/launchd' ;;
+esac
+"#,
+    );
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = repo.join("dagq.toml");
+    fs::write(
+        &config,
+        format!(
+            "[run.env]\nRUSTC_WRAPPER = '{}'\nSCCACHE_SERVER_PORT = '{port}'\n",
+            program.display()
+        ),
+    )
+    .unwrap();
+    fs::write(bin.join("server-present"), "").unwrap();
+    let unknown = ok(&db, &["doctor"])["sccache"].clone();
+    assert_eq!(unknown["server"]["pid"], 42);
+    assert_eq!(unknown["server"]["started_at"], "Mon Oct 5 10:11:12 2026");
+    assert_eq!(unknown["started_by"], "unknown");
+    assert_eq!(unknown["port"], port);
+    assert_eq!(unknown["failure_ratio"], 1.0);
+    assert_eq!(unknown["stats"]["compilations"], 0);
+    let queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .record_queue_event(
+            EventKind::SccacheServerStarted,
+            json!({
+                "pid":42, "started_at":"Mon Oct 5 10:11:12 2026", "port":port,
+                "supervisor":"owner", "at":1,
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        ok(&db, &["doctor", "--full"])["sccache"]["started_by"],
+        "owner"
+    );
+    queue
+        .record_queue_event(
+            EventKind::SccacheServerUnhealthy,
+            json!({
+                "pid":42, "started_at":"Mon Oct 5 10:11:12 2026", "port":port,
+                "reason":"failure_bias", "at":2,
+            }),
+        )
+        .unwrap();
+    let before_status = fs::read_to_string(bin.join("stats-calls")).unwrap();
+    let status = ok(&db, &["status"]);
+    assert_eq!(status["sccache"]["health"], "unhealthy");
+    assert_eq!(
+        status["sccache"]["last_detection"]["kind"],
+        "sccache_server_unhealthy"
+    );
+    assert_eq!(
+        fs::read_to_string(bin.join("stats-calls")).unwrap(),
+        before_status
+    );
+    // Unknown origin remains visible when no matching start event exists.
+    queue
+        .record_queue_event(
+            EventKind::SccacheServerStarted,
+            json!({"pid":99,"port":port}),
+        )
+        .unwrap();
+    assert_eq!(ok(&db, &["status"])["sccache"]["started_by"], "unknown");
+    drop(listener);
+    fs::remove_file(bin.join("server-present")).unwrap();
+    assert_eq!(ok(&db, &["doctor"])["sccache"]["health"], "absent");
+    assert_eq!(
+        fs::read_to_string(bin.join("stats-calls")).unwrap(),
+        before_status
+    );
+    queue
+        .record_queue_event(
+            EventKind::SccacheServerRestartFailed,
+            json!({"error":"refused"}),
+        )
+        .unwrap();
+    fs::write(&config, "[run.env]\nRUSTC_WRAPPER = 'other-wrapper'\n").unwrap();
+    assert!(ok(&db, &["doctor"]).get("sccache").is_none());
+    let status = ok(&db, &["status"]);
+    assert!(status.get("sccache").is_none());
+    assert!(
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["kind"] != "sccache_server_restart_failed")
+    );
+    assert_eq!(
+        fs::read_to_string(bin.join("stats-calls")).unwrap(),
+        before_status
+    );
+    assert!(
+        before_status
+            .lines()
+            .all(|line| line == "--show-stats --stats-format json idle=0")
+    );
+}

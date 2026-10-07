@@ -18,7 +18,8 @@ pub use crate::application::{
 pub use crate::compose::{
     CiWatchOptions, OneShot, ProcessesPort, ReleaseIndexPort, RunE2eOptions, RunFilesPort,
     SccacheOptions, SuperviseOptions, ask, ci_failures, doctor, ended_run_material, integrate,
-    rebind, recover, review, session, session_in_background, session_in_background_as, stats,
-    status, status_for, supervise, supervise_with_reviewer,
+    rebind, recover, review, session, session_in_background, session_in_background_as,
+    session_in_background_as_with_processes, stats, status, status_for, supervise,
+    supervise_with_reviewer,
 };
 pub use crate::infrastructure::claude::{PromptKind, detect_prompt};

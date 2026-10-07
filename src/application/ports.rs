@@ -1329,6 +1329,15 @@ pub trait SccacheServer {
     /// starting anything: no sccache client runs (a client starts the
     /// server it does not find, with the caller's environment).
     fn listening(&self, port: u16) -> Result<bool>;
+    fn process(&self, port: u16) -> Result<Option<crate::domain::sccache::ServerProcess>>;
+    /// Never call a stats client when the port is absent.
+    fn stats(
+        &self,
+        program: &Path,
+        env: &[(String, String)],
+        port: u16,
+    ) -> Result<Option<crate::domain::sccache::ServerStats>>;
+    fn stop(&self, program: &Path, env: &[(String, String)], port: u16) -> Result<()>;
     /// Start the server with `program --start-server` and `env` beside this
     /// process's (the caller puts `SCCACHE_IDLE_TIMEOUT=0` in it), wait
     /// until it listens on `port`, and read the pid of the process that

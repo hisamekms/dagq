@@ -4,8 +4,8 @@ type: design
 title: "`doctor`"
 status: current
 created: 2026-09-26
-updated: 2026-10-06
-last_verified: 2026-10-06
+updated: 2026-10-07
+last_verified: 2026-10-07
 scope: runtime
 related:
   - adr-t1228-2
@@ -44,3 +44,9 @@ cmux workspaceの存在は確認しない（cmuxなしで動く）。IDを見て
 ## CIの見張り（ADR-t1920-1）
 
 [ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)（task 1921）。結びついたcheckoutの`dagq.toml`に`[ci_watch]`があれば`ci_watch`の欄に`config`（読んだ表）・`gh`（`doctor`のPATHで解決したpathかnull）・`authenticated`（`gh auth status --hostname github.com`が0で終わるか）・`repo`（`<owner>/<name>`かnull）・`supervisor_last`（最後の`ci_watch_unavailable` / `ci_watch_available`の`{kind, created_at, payload}`かnull）を出す。ファイルが読めなければ`{error}`、表が無ければ欄を出さない。状態は変えない。
+
+## sccacheのserver
+
+serverの出どころと失敗の偏りを読む入口は`application::sccache::add_diagnostics`と`report`。
+束縛されたcheckoutの設定がsccacheを名指すときだけ表示し、診断の読み取りでserverを起動させない。
+出どころを確かめられないことと壊れたserverの判断は分ける（[Run environment](run-environment.md#外部serverと失敗の偏り)）。

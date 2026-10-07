@@ -436,6 +436,9 @@ impl Default for CiWatchOptions {
 /// ([`SuperviseOptions::sccache`]).
 #[derive(Debug, Clone)]
 pub struct SccacheOptions {
+    /// Process query programs; defaults use the host PATH.
+    pub lsof: PathBuf,
+    pub ps: PathBuf,
     /// How long a start may take before it is taken to have failed.
     pub start_timeout: Duration,
 }
@@ -444,6 +447,8 @@ impl Default for SccacheOptions {
     fn default() -> Self {
         Self {
             start_timeout: crate::infrastructure::sccache::START_TIMEOUT,
+            lsof: "lsof".into(),
+            ps: "ps".into(),
         }
     }
 }
@@ -1242,10 +1247,15 @@ pub fn supervise_with_reviewer(
         run_e2e,
         sccache: options.sccache.as_ref().map(|settings| {
             crate::application::supervise::SccachePort(Arc::new(
-                crate::infrastructure::sccache::SystemSccache::new(
-                    db.parent().unwrap_or(Path::new(".")),
-                    settings.start_timeout,
-                ),
+                crate::infrastructure::sccache::SystemSccache {
+                    log: db
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join("sccache-start.log"),
+                    start_timeout: settings.start_timeout,
+                    lsof: settings.lsof.clone(),
+                    ps: settings.ps.clone(),
+                },
             ))
         }),
         ci_watch,
@@ -1453,6 +1463,7 @@ impl OneShot {
         role: Option<SessionRole>,
     ) -> Result<Value> {
         let mut status = health::status(queue, &SystemProcesses, &*self.generators.clock, role)?;
+        add_sccache_diagnostics(queue, db, false, &mut status)?;
         let live_builds: Vec<String> = status["supervisors"]
             .as_array()
             .into_iter()
@@ -1547,6 +1558,7 @@ impl OneShot {
                 if let Some(repository) = doctor_repository(&queue)? {
                     report["repository"] = repository;
                 }
+                add_sccache_diagnostics(&queue, db, true, &mut report)?;
                 report["roles"] = doctor_roles(&queue);
                 // The means the CI watch reads GitHub with (ADR-t1920-1).
                 if let Some(ci_watch) = doctor_ci_watch(&queue)? {
@@ -2614,6 +2626,32 @@ fn up_run_env_programs(
     )
 }
 
+fn add_sccache_diagnostics(
+    queue: &SqliteQueue,
+    db: &Path,
+    stats: bool,
+    output: &mut Value,
+) -> Result<()> {
+    let verifier = bound_checkout(queue)?.map(|checkout| ShellVerifier {
+        checkout,
+        db: db.to_path_buf(),
+        user_config: None,
+        verification_timeout: VERIFICATION_TIMEOUT,
+    });
+    let server = crate::infrastructure::sccache::SystemSccache::new(
+        db.parent().unwrap_or(Path::new(".")),
+        crate::infrastructure::sccache::START_TIMEOUT,
+    );
+    crate::application::sccache::add_diagnostics(
+        queue,
+        &server,
+        verifier.as_ref().map(|verifier| verifier as &dyn Verifier),
+        db.parent().unwrap_or(Path::new(".")),
+        stats,
+        output,
+    )
+}
+
 /// The programs the `[run.env]` of the main checkout of the repository the
 /// queue is bound to names, resolved on this process's PATH (ADR-0049
 /// decision 9).
@@ -3116,6 +3154,33 @@ pub fn session_in_background_as(
     pid: u32,
     sccache: Option<crate::domain::sccache::SccacheTarget>,
 ) -> Result<Value> {
+    session_in_background_as_with_processes(
+        db,
+        id,
+        token,
+        provider,
+        other,
+        spawner,
+        resume,
+        pid,
+        &SystemProcesses,
+        sccache,
+    )
+}
+/// A background wrapper with injected process identity and control.
+#[allow(clippy::too_many_arguments)]
+pub fn session_in_background_as_with_processes(
+    db: &Path,
+    id: &RunId,
+    token: &LeaseToken,
+    provider: &dyn AgentProvider,
+    other: Option<&dyn AgentProvider>,
+    spawner: &dyn Spawner,
+    resume: bool,
+    pid: u32,
+    processes: &dyn ProcessControl,
+    sccache: Option<crate::domain::sccache::SccacheTarget>,
+) -> Result<Value> {
     run_session_as(
         db,
         id,
@@ -3128,6 +3193,7 @@ pub fn session_in_background_as(
         WrapperStart::Background,
         sccache,
         pid,
+        processes,
     )
 }
 
@@ -3156,6 +3222,7 @@ fn run_session(
         start,
         sccache,
         std::process::id(),
+        &SystemProcesses,
     )
 }
 
@@ -3173,6 +3240,7 @@ fn run_session_as(
     start: WrapperStart,
     sccache: Option<crate::domain::sccache::SccacheTarget>,
     pid: u32,
+    processes: &dyn ProcessControl,
 ) -> Result<Value> {
     // The wrapper's events are its own, not the worker's (ADR-t728-1).
     let mut queue = SqliteQueue::open(db)?.with_actor(
@@ -3182,6 +3250,8 @@ fn run_session_as(
     let looker = crate::infrastructure::sccache::SystemSccache {
         log: PathBuf::new(),
         start_timeout: Duration::ZERO,
+        lsof: "lsof".into(),
+        ps: "ps".into(),
     };
     wrapper::run_session(
         Session {
@@ -3191,7 +3261,7 @@ fn run_session_as(
             other,
             spawner,
             queue_service: &crate::infrastructure::queue_service::SystemServiceAccess,
-            processes: &SystemProcesses,
+            processes,
             files: &LocalRunFiles,
             pid,
             own_workspace,

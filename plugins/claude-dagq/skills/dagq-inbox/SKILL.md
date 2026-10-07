@@ -44,7 +44,7 @@ It prints each open ask in full, oldest first. One at a time:
 
 Context: `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave open an ask the person will not answer yet.
 
-Before showing an ask whose kind, options or effect you are unsure of, read `reference/asks.md`: every kind, its options, and the answers the runtime applies (`propose`, `dismiss`, `approve_goal`). An answer the runtime does not apply comes back as `read the answer of ask <id> and close it` (step 4).
+Before showing an ask whose kind, options or effect is unclear, read `reference/asks.md` for kinds, options and runtime-applied answers (`propose`, `dismiss`, `approve_goal`). Other answers return as `read the answer of ask <id> and close it` (step 4).
 
 ## 4. Report the other attention, act only on the person's word
 
@@ -57,7 +57,7 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 - A new plan the person asks for: `"$DAGQ" request add --text '<the person's words>'` records it and a runtime planner takes it (`reference/requests.md`); `report the request's proposal`, `rephrase or drop the request` and a `planner_question` on a request: the same file. More words for an open runtime planner: `"$DAGQ" planner request <planner id> --text '<the person's words>'`, its next turn.
 - `check the planner`, `plan review by hand`: `dagq-recover` section 8.
 - `report the update` (`update_installed`), `report the review`, `check the failed review`, `check the failed observer` (`observe_finished`): tell the person (`reference/watch.md`).
-- `install tool` (`run_env_program_missing`, `ci_watch_unavailable`), `log in to gh`, `fix dagq.toml` (`ci_watch_unavailable`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
+- `stop sccache on the host; the supervisor starts it`, `install tool` (`run_env_program_missing`, `ci_watch_unavailable`), `log in to gh`, `fix dagq.toml` (`ci_watch_unavailable`), `fix the push command` (`kpi_push_abandoned`), `check the e2e host` (`run_e2e_finished`): the person fixes it.
 - `stop the dead landing's processes` (`landing_release_stuck`): the person stops its pids.
 - `dagq service status` (`queue_service_down`): `service start` on the person's word.
 - `dagq broker status` (`broker_unhealthy`, `broker_claims_held`): `dagq-recover` section 9.
