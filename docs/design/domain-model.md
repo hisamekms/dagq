@@ -35,6 +35,7 @@ related:
   - adr-0037
   - design-persistence
   - adr-t947-4
+  - adr-t1992-1
 ---
 
 # Domain model
@@ -162,7 +163,10 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 - `claim`だけが`ready → in_progress`へ動かし、同じトランザクションで`TaskRun::new`がrunを作る。
 - 候補は依存が全て`completed`、goal依存の先が全て`achieved`で閉じ、draftのgoalに属さないreadyのtask（storeの`READY_QUERY`）。
 - 順は1つの関数が決める: `dependency_graph`の`candidates`（効く優先度 → 解放する数 → ID）。
-  `graph`で再現できるので、順の記録は持たない。
+  `fill_slots`の`queue.candidates()`とstats・KPIの標本は控えを除かない。
+  順は記録せず`candidates --ignore-deferrals`で読む。
+- CLIの`candidates`と`graph`の`candidates`は共有の`claim_view`で、supervisorが最後に記録したclaimの控えを除き`deferred`に理由・ファイル・原因のrunと出す（[ADR-t1992-1](../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。
+  CLIは記録を読むだけで、claimを止める条件と生きたsupervisorの不在は`candidates`だけの`held`に出す。
 - `wait_for_build`のtaskは、判定したsupervisorが順に名指したときだけclaimされ、順を渡さないclaimは取らない（[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
 - canceled・失敗・中断・統合待ち・着地中・セッション待ちは、依存の完了の条件を満たさない。
 
@@ -209,7 +213,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 ## 集約: TaskとGoal
 
-- 作成は`Task::new` / `Goal::new`（作成時の規則を通す）、復元は`Task::restore` / `Goal::restore`（保存済みの行が必ず満たすことだけを確かめる）。
+- 作成は`Task::new` / `Goal::new`（作成時の規則を通す）、復元は`Task::restore` / `Goal::restore`。
 - 依存の辺はtaskの外にあるので、domainは判断だけを持ち、辺はstoreが保存する。
 - `updated_at`はDBが更新のたびに書き、`goal::close`だけは`closed_at`と揃えるため時刻を引数に取る。
 - 集約は`Serialize`だけを持ち、`Deserialize`を持たない（作る入口を1つにするため）。
@@ -220,7 +224,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 [ADR-t947-4](../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定で、まだ実装していない。
 実装までは`cancel`は理由を持たず、`--duplicate-of`だけが構造の理由である。
-ADR-t947-4決定5により一覧と定義はこの節が持つ（元の分析は[cancel-reasons](../plans/cancel-reasons.md#ラベルの定義案)）。
+一覧と定義はこの節が持つ（ADR-t947-4決定5、元の分析は[cancel-reasons](../plans/cancel-reasons.md#ラベルの定義案)）。
 
 - `dagq cancel TASK --reason <code> [--duplicate-of X] [--note <text>]`で、`--reason`か`--duplicate-of`のどちらかを必須にする。
 - `duplicate`・`already_done`・`absorbed`・`re_registered`は`--duplicate-of`を必須にし、`other`は`--note`を必須にする。
@@ -311,7 +315,7 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 
 - 意味・上書き・読み方（statusとの組）は`TaskRun`の`last_error`の欄のdoc commentが持つ。
 - 書く文は書くコマンドのdoc commentと、そのrunのeventの`reason` / `message`が持つ。
-- コードは列を持たず、`domain::reason::last_error_code`がrunのeventから導く（下の「理由の分類コード」）。
+- コードは列を持たず、runのeventから導く（下の「理由の分類コード」）。
 
 ## providerの切り替えの理由（`SwitchReason`）
 
@@ -342,10 +346,10 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 ## 予定: plannerの人だけの答え待ちの記録と回数
 
 [ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3・5で、まだ実装していない。
-人だけの答え待ちで終わったplannerを上限から除く（[予定: 人の答えだけを待つplannerの枠の解放](supervisor-lifecycle/plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)）。
+人だけの答え待ちで終わったplannerを上限から除く（[plan-planners](supervisor-lifecycle/plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)）。
 
 ## CIの見張り（ADR-t1920-1）
 
-- 着地先のbranchで既に落ちているtestの一覧は、eventを畳み込んだビュー`domain::ci_watch::WatchState`で表を持たない（[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)）。
+- 着地先のbranchで既に落ちているtestの一覧は`domain::ci_watch::WatchState`が持つ（[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)）。
 - `finding dismiss --covered-by`は`ci_failure`のfindingにだけ、閉じていないtaskだけを受ける（`domain::finding::check_covered_by`）。
 - 見張りの流れと設定は[CI watch](supervisor-lifecycle/ci-watch.md)。
