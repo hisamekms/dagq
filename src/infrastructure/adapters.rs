@@ -1394,7 +1394,10 @@ impl GitRepository {
     /// The paths that conflict when `head` is merged with `main` (over
     /// their merge base), judged by `git merge-tree --write-tree` in the
     /// object store alone: no worktree, index or ref moves (ADR-0027
-    /// decision 4). Empty when they merge cleanly.
+    /// decision 4). Empty when they merge cleanly. No `--merge-base` is
+    /// passed, which Git 2.39 lacks: Git finds the merge base as `git
+    /// merge-base` does, and a caller that records it asks [`Self::merge_base`]
+    /// for it separately.
     pub fn merge_conflicts(&self, main: &str, head: &str) -> Result<Vec<String>> {
         Ok(self.merged_tree(main, head)?.err().unwrap_or_default())
     }

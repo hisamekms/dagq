@@ -366,12 +366,6 @@ path = "docs/design/supervisor-lifecycle/review-command.md"
 line = 1604
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/review.md"
-size = 104368
-line = 9517
-tasks = 79
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/roles.md"
 line = 2012
 tasks = 18

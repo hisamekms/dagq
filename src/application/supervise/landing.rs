@@ -296,6 +296,14 @@ impl Supervisor<'_> {
         warn!(run_id = %run.id(), error = %error, "run {} review {attempt} {what}: {error}; reviewing it once more", run.id());
         self.begin_review(run, session, true)
     }
+    /// Start the next review attempt of `run` (one more than its recorded
+    /// reviews) where [`Self::review_route`] sends it: it waits in
+    /// [`Phase::ReviewHeld`] while no provider can be used, and goes to
+    /// the person when none is left. The required subagents are read from
+    /// the landing branch before `review_started`, and a review whose
+    /// subagents cannot be read or run fails to the person without a job,
+    /// never passing on fewer checks. `retried` is whether this attempt is
+    /// the one retry of the review.
     pub(super) fn begin_review(
         &mut self,
         run: &TaskRun,
@@ -1252,6 +1260,8 @@ impl Supervisor<'_> {
     /// (task 377). Called before new claims, so a queued run lands first;
     /// the queue is read from the events, so a run approved under another
     /// supervisor is landed once, with its ask left closed (task 949).
+    /// A landing that fails to start is only noted by the caller, which goes on,
+    /// and the run stays queued for a later pass.
     pub(super) fn start_approved_landings(&mut self, parallel: usize) -> Result<()> {
         if self.run_env_missing
             || self.ci_watch_held()

@@ -638,7 +638,10 @@ impl Supervisor<'_> {
     /// ([`turn::adopted_delivery`]); when it is neither waiting nor taken
     /// it is written once to the session in `workspace` and recorded as
     /// `turn_requested`. Without the text the request is only waited for,
-    /// up to the resume timeout. Whether its text was read.
+    /// up to the resume timeout. A write that fails only warns and waits:
+    /// unlike the first send, it records no `revise_unsent` or `unsent`,
+    /// since the request was recorded already, and the person is asked
+    /// after the resume timeout. Whether its text was read.
     fn adopted_start(
         &mut self,
         run: &TaskRun,

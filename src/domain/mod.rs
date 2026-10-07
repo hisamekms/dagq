@@ -552,7 +552,10 @@ pub enum LandingAnswer {
 
 impl LandingAnswer {
     /// One of [`LANDING_OPTIONS`], `send_back` optionally followed by `:`
-    /// and the person's reason; anything else is the inbox's to read.
+    /// and the person's reason; anything else is the inbox's to read
+    /// (`land: x`, `cancel: x`, `send_backwards`, `send_back reason`). The
+    /// supervisor that applies the answer, `answer`'s `runtime_delivers` and
+    /// `status`'s `applying the answer` all read it here, so they agree.
     pub fn parse(answer: &str) -> Option<Self> {
         match answer.trim() {
             "land" => Some(Self::Land),

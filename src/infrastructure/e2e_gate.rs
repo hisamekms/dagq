@@ -59,6 +59,11 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 /// password from (`XDG_CONFIG_HOME`), and the e2e's own opt-ins (`DAGQ_E2E_LAUNCHD`,
 /// `DAGQ_E2E_WINDOWS`). `TMPDIR`, `CARGO_TARGET_DIR`, `DAGQ_E2E_CMUX`,
 /// `DAGQ_E2E_SKIP` and `DAGQ_E2E_RERUN` are the gate's own.
+///
+/// No key of `dagq.toml` adds a name: a binary that does not know such a
+/// key could not read the file, so one is added only after the fixed
+/// binary reads it. A value that is not a credential can be put in the
+/// repository's `[run.env]` meanwhile, which is given as written.
 pub const PASSED_ENV: &[&str] = &[
     "PATH",
     "HOME",
