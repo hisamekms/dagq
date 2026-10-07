@@ -438,12 +438,7 @@ impl Supervisor<'_> {
         let Some(wall) = provider_switch::wall_of(reason) else {
             return Ok(());
         };
-        let (outcome, _) = ask::hold(
-            &mut *self.queue,
-            &self.layout.main_checkout,
-            NewHold::wall(wall, None, None),
-            self.cmux,
-        )?;
+        let (outcome, _) = ask::hold(&mut *self.queue, NewHold::wall(wall, None, None))?;
         self.queue.record_runtime_event(
             run.id(),
             wall.event_kind(),
@@ -795,11 +790,9 @@ pub(super) fn raise_wall(
     {
         return Ok(false);
     }
-    let (outcome, value) = ask::hold(
+    let (outcome, _) = ask::hold(
         &mut *sv.queue,
-        &sv.layout.main_checkout,
         NewHold::wall(wall, Some(run.id().clone()), None),
-        sv.cmux,
     )?;
     if outcome.joined {
         sv.queue.record_runtime_event(
@@ -812,7 +805,7 @@ pub(super) fn raise_wall(
                 "ask_id": outcome.ask.id,
             }),
         )?;
-        warn!(ask_id = %outcome.ask.id, run_id = %run.id(), "run {} stopped at the {} wall in workspace {workspace}; ask {} holds {} run(s) and job(s) (notified: {})", run.id(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len(), value["notified"]);
+        warn!(ask_id = %outcome.ask.id, run_id = %run.id(), "run {} stopped at the {} wall in workspace {workspace}; ask {} holds {} run(s) and job(s)", run.id(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len());
     }
     Ok(true)
 }

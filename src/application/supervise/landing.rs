@@ -1122,7 +1122,8 @@ impl Supervisor<'_> {
         }
     }
     /// Open the `approve_landing` ask of a run whose review did not pass
-    /// (ADR-0027, ADR-0022 decision 3) and notify the inbox; returns its ID.
+    /// (ADR-0027, ADR-0022 decision 3), which the inbox's watch notifies;
+    /// returns its ID.
     pub(super) fn open_landing_ask(
         &mut self,
         run: &TaskRun,
@@ -1188,10 +1189,9 @@ impl Supervisor<'_> {
         {
             info!(run_id = %run.id(), ask_id = %stale.id, "run {}: closed its earlier approve_landing ask {}", run.id(), stale.id);
         }
-        // Through `ask`, like the CLI: a new ask notifies the inbox.
+        // Through `ask`, like the CLI: the inbox's watch notifies it.
         let outcome = ask::ask(
             &mut *self.queue,
-            &self.layout.main_checkout,
             NewAsk {
                 recommendation,
                 confidence,
@@ -1206,7 +1206,6 @@ impl Supervisor<'_> {
                 finding_id: None,
                 request_id: None,
             },
-            self.cmux,
         )?;
         outcome["id"]
             .as_i64()

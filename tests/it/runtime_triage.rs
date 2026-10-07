@@ -410,7 +410,8 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
     assert!(ask.is_open());
-    assert_eq!(backend.notifications.lock().unwrap().len(), 1);
+    // The supervisor notifies nobody: the inbox's watch tells of the ask.
+    assert!(backend.notifications.lock().unwrap().is_empty());
     // The run is no attention: its ask is.
     let status = runtime::status(&db).unwrap();
     assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
@@ -537,7 +538,8 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
     ] {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
-    assert_eq!(backend.notifications.lock().unwrap().len(), 1);
+    // The supervisor notifies nobody: the inbox's watch tells of the ask.
+    assert!(backend.notifications.lock().unwrap().is_empty());
     // The close failed: recorded, the session kept, the ask still made.
     let cleanup = payloads(&detail, "cleanup_failed");
     assert_eq!(cleanup.len(), 1);

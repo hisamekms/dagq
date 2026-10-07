@@ -1,11 +1,14 @@
-//! End-to-end happy paths through the real binary, real Git, real cmux and
-//! real launchd, from `add` to the squash landing by `integrate`, from
-//! `up` to `down`, and from a killed supervisor to the adoption of its run.
+//! End-to-end happy paths through the real binary, real Git and real
+//! launchd, from `add` to the squash landing by `integrate`, from `up` to
+//! `down`, and from a killed supervisor to the adoption of its run.
 //! Claude is replaced by a stub script whose worker turns do what the
 //! prompt asks: change, commit, write the receipt; a later turn of the
 //! session takes a person's answer or the supervisor's resolution request as
-//! its prompt and resolves the conflict. Requires a running cmux, so it is ignored by
-//! default: `cargo test --locked --test e2e -- --ignored --nocapture`.
+//! its prompt and resolves the conflict. Only the `up` / `down` tests, which
+//! open the inbox, need a running cmux (ADR-t1433-1 decision 3): the others
+//! run on a host without one (named, as `--ignored --exact <name>`). All are
+//! ignored by default: `cargo test --locked --test e2e -- --ignored
+//! --nocapture`, which the e2e gates run whole, cmux included.
 //!
 //! The launchd `up` / `down` test is temporarily off even under `--ignored`:
 //! no project runs the launchd mode now, and without a cmux socket password
@@ -27,12 +30,13 @@ mod other_repository;
 mod stub;
 
 use cleanup::{
-    GroupGuard, WorkspaceGuard, claim_fixture_dir, cmux_retrying, listed_group,
-    sweep_abandoned_fixtures, workspace_listed,
+    GroupGuard, WorkspaceGuard, claim_fixture_dir, cmux_retrying, sweep_abandoned_fixtures,
+    workspace_listed,
 };
 #[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
 use cleanup::{
-    cmux_attempt, listed_workspace, try_listed_workspace, wait_for_listed, wait_until_not_listed,
+    cmux_attempt, listed_group, listed_workspace, try_listed_workspace, wait_for_listed,
+    wait_until_not_listed,
 };
 use common::{Bounded, Cleanup, Waiting, WithoutActor};
 use dagq::application::ProcessControl;
@@ -354,9 +358,13 @@ struct Fixture {
     /// Declared first so that it drops first, while the run directories
     /// its wrappers run from are still there.
     wrappers: WrapperGuard,
-    group: GroupGuard,
+    /// The queue's workspace group, for a fixture with cmux
+    /// ([`fixture_with_cmux`]) only.
+    group: Option<GroupGuard>,
     _dir: tempfile::TempDir,
-    cmux: PathBuf,
+    /// The running cmux, pinged, for the `up` / `down` tests that open the
+    /// inbox ([`fixture_with_cmux`]); `None` for the others, which need none.
+    cmux: Option<PathBuf>,
     repo: PathBuf,
     stub: PathBuf,
     base: String,
@@ -368,8 +376,34 @@ struct Fixture {
     _test: Waiting,
 }
 
+/// A fixture without cmux: the runtime calls none (ADR-t1433-1).
 fn fixture() -> Fixture {
     fixture_on("main", &[])
+}
+
+/// [`fixture`] with the running cmux pinged (it fails, never skips, without
+/// one), and the queue's workspace group cleaned up after it: for the
+/// `up` / `down` tests, which open the inbox's workspace.
+fn fixture_with_cmux() -> Fixture {
+    let cmux = cmux_executable();
+    let cmux_version = preflight(&cmux);
+    eprintln!("cmux: {cmux_version}");
+    sweep_abandoned_fixtures(&cmux);
+    let mut fixture = fixture();
+    // A repository queue's directory is named after the queue hash, which
+    // is the external ID of its workspace group.
+    let external_id = fixture
+        .db
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    fixture.group = Some(GroupGuard::new(cmux.clone(), external_id));
+    fixture.cmux = Some(cmux);
+    fixture
 }
 
 /// [`fixture`] whose repository's default branch is `branch` and whose seed
@@ -377,10 +411,6 @@ fn fixture() -> Fixture {
 /// `dagq.toml`.
 fn fixture_on(branch: &str, files: &[(&str, &str)]) -> Fixture {
     let test = common::within(TEST_LIMIT, "the test to finish");
-    let cmux = cmux_executable();
-    let cmux_version = preflight(&cmux);
-    eprintln!("cmux: {cmux_version}");
-    sweep_abandoned_fixtures(&cmux);
     let dir = tempfile::tempdir().unwrap();
     let owner = claim_fixture_dir(dir.path());
     let repo = dir.path().join(E2E_REPO_NAME);
@@ -418,20 +448,9 @@ fn fixture_on(branch: &str, files: &[(&str, &str)]) -> Fixture {
     assert_eq!(dagq(&env, &["locate"])["db_exists"], true);
     Fixture {
         wrappers: WrapperGuard::default(),
-        // A repository queue's directory is named after the queue hash,
-        // which is the external ID of its workspace group.
-        group: GroupGuard::new(
-            cmux.clone(),
-            db.parent()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned(),
-        ),
+        group: None,
         _dir: dir,
-        cmux,
+        cmux: None,
         repo,
         stub,
         base,
@@ -443,8 +462,15 @@ fn fixture_on(branch: &str, files: &[(&str, &str)]) -> Fixture {
 }
 
 impl Fixture {
+    /// The running cmux of a [`fixture_with_cmux`].
+    fn cmux(&self) -> &Path {
+        self.cmux.as_deref().expect("a fixture with cmux")
+    }
+
+    #[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
     fn group(&self) -> Option<Value> {
-        listed_group(&self.cmux, &self.group.external_id)
+        let group = self.group.as_ref().expect("a fixture with cmux");
+        listed_group(self.cmux(), &group.external_id)
     }
 }
 
@@ -631,10 +657,7 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
     // The queue's service, which `up` starts and a worker's `dagq` goes to
     // in client mode (goal 82's stage (3)); a one-shot `supervise` keeps
     // none of its own. It is stopped when the pass ends.
-    dagq(
-        &fixture.env,
-        &["service", "start", "--cmux", fixture.cmux.to_str().unwrap()],
-    );
+    dagq(&fixture.env, &["service", "start"]);
     let _service = ServiceGuard(&fixture.env);
     let started = Instant::now();
     let mut child = ChildGuard::new(
@@ -647,8 +670,6 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
             .arg("--once")
             .args(NO_LOAD_HOLD)
             .args(extra)
-            .arg("--cmux")
-            .arg(&fixture.cmux)
             .arg("--claude")
             .arg(&fixture.stub)
             .stdin(Stdio::null())
@@ -718,7 +739,7 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
 }
 
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
     let fixture = fixture();
     let Fixture {
@@ -912,12 +933,6 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
         !review_session.is_empty() && review_session != run_id,
         "{review_log}"
     );
-    // A run opens no workspace, so the supervisor asks cmux for no
-    // workspace group of the queue (ADR-t1433-3).
-    assert!(
-        fixture.group().is_none(),
-        "a run made the queue's workspace group"
-    );
     // The wrapper's output went to the run directory's log, which
     // `run log` reads.
     let launched = detail["events"]
@@ -1066,7 +1081,7 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
 /// prompt of its next turn (ADR-t813-1), closes the ask, and the worker
 /// commits it with its change, which is reviewed and lands.
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
     let fixture = fixture();
     let Fixture { repo, env, .. } = &fixture;
@@ -1205,7 +1220,7 @@ fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
 /// that depends on one of them waits for its integration and then starts
 /// from the main that contains it.
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() {
     let fixture = fixture();
     let Fixture {
@@ -1471,7 +1486,7 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
 /// run from the dead supervisor's stale lease (ADR-0012), requests the
 /// session's exit once, validates it, and `integrate` lands it: nothing is redone.
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     let fixture = fixture();
     let Fixture { repo, env, .. } = &fixture;
@@ -1497,8 +1512,6 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
             .env("XDG_DATA_HOME", &fixture.env.data_home)
             .args(["supervise", "--parallel", "1"])
             .args(NO_LOAD_HOLD)
-            .arg("--cmux")
-            .arg(&fixture.cmux)
             .arg("--claude")
             .arg(&fixture.stub)
             .stdin(Stdio::null())
@@ -1784,9 +1797,9 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
     if !launchd_e2e_enabled() {
         return;
     }
-    let fixture = fixture();
+    let fixture = fixture_with_cmux();
+    let cmux = fixture.cmux();
     let Fixture {
-        cmux,
         repo,
         stub,
         db,
@@ -1807,7 +1820,7 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
         plist: plist.clone(),
     };
     let mut workspaces = WorkspaceGuard {
-        cmux: cmux.clone(),
+        cmux: cmux.to_path_buf(),
         ids: Vec::new(),
     };
 
@@ -1951,7 +1964,7 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
 // Out until task 1443 deletes this case and this cfg (ADR-t1582-1).
 #[cfg(any())]
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes() {
     let fixture = fixture();
     let Fixture {
@@ -1970,7 +1983,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
     let label = located["label"].as_str().unwrap().to_owned();
     let log_dir = PathBuf::from(located["log_dir"].as_str().unwrap());
     let mut workspaces = WorkspaceGuard {
-        cmux: cmux.clone(),
+        cmux: cmux.to_path_buf(),
         ids: Vec::new(),
     };
 
@@ -2259,12 +2272,10 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
 /// through its receipt, review, exit request and landing on main. `--rollback`
 /// hands it over again to the binary the install kept.
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     let fixture = fixture();
-    let Fixture {
-        cmux, repo, env, ..
-    } = &fixture;
+    let Fixture { repo, env, .. } = &fixture;
     let task_id = add_ready_task_described(
         env,
         "e2e handoff task",
@@ -2285,8 +2296,6 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
             .env("XDG_DATA_HOME", &env.data_home)
             .args(["supervise", "--parallel", "1", "--observe-interval", "0"])
             .args(NO_LOAD_HOLD)
-            .arg("--cmux")
-            .arg(cmux)
             .arg("--claude")
             .arg(&fixture.stub)
             .stdin(Stdio::null())
@@ -2435,16 +2444,10 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
 /// binary under test), puts it in place and hands the supervisor over under
 /// its pid and token, and the worker's run goes on and lands.
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     let fixture = fixture();
-    let Fixture {
-        cmux,
-        repo,
-        env,
-        db,
-        ..
-    } = &fixture;
+    let Fixture { repo, env, db, .. } = &fixture;
     let task_id = add_ready_task_described(
         env,
         "e2e auto-update task",
@@ -2471,8 +2474,6 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
             .env("XDG_DATA_HOME", &env.data_home)
             .args(["supervise", "--parallel", "1", "--observe-interval", "0"])
             .args(NO_LOAD_HOLD)
-            .arg("--cmux")
-            .arg(cmux)
             .arg("--claude")
             .arg(&fixture.stub)
             .args(["--auto-update", "--update-interval", "1"])

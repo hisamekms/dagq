@@ -158,8 +158,9 @@ case "$prompt" in
     # The worker's dagq goes to the queue service (goal 82's stage (3)).
     "$add_dir/runner" ask --run "$sid" --kind worker_question \
       --because scope --topic acceptance_conflict --question 'Which word goes into answer.txt?' > "$add_dir/ask.json"
-    # The new ask notified a person through the real cmux.
-    grep -Eq '"notified": *true' "$add_dir/ask.json" || { printf 'stub: ask did not notify\n' >&2; exit 66; }
+    # The ask notifies nobody: the inbox's watch tells the person of it.
+    grep -q '"notified"' "$add_dir/ask.json" && { printf 'stub: ask reported a notification\n' >&2; exit 66; }
+    grep -Eq '"created": *true' "$add_dir/ask.json" || { printf 'stub: ask opened no new ask\n' >&2; exit 66; }
     end_turn 'asked which word goes into answer.txt'
     ;;
 esac

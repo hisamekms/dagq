@@ -68,7 +68,7 @@ printf '{"type":"turn.completed","usage":{"input_tokens":13,"cached_input_tokens
 /// the run, the turn's usage too, and the run is validated, reviewed and
 /// landed.
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
     let fixture = fixture();
     let Fixture {
@@ -189,7 +189,7 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
 /// present, a Claude task runs on Codex, and its lease is released so a
 /// person's integration can land the receipt.
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn no_claude_runs_codex_through_cmux_and_allows_manual_landing() {
     let fixture = fixture();
     let Fixture { env, stub, .. } = &fixture;

@@ -28,9 +28,10 @@ use runtime_support::*;
 const CHILD: &str = "BACKGROUND_PROCESS_TEST_SUPERVISOR";
 
 /// The production cmux adapter over a stub `cmux` next to the queue at
-/// `db`, which answers the supervisor's `ping`, cannot list the workspaces
-/// (`list-windows` fails), and records every call in `calls`: a background
-/// handle is served by the real `BackgroundWrappers` and never reaches it.
+/// `db`, which answers `ping`, cannot list the workspaces (`list-windows`
+/// fails), and records every call in `calls`: the supervisor calls it for
+/// nothing (no preflight, ADR-t1433-1), and a background handle is served
+/// by the real `BackgroundWrappers` and never reaches it.
 fn cmux(db: &Path) -> Cmux {
     let stub = cmux_stub(db);
     if !stub.exists() {
@@ -540,9 +541,10 @@ fn the_sweep_stops_an_ended_background_session_while_cmux_cannot_list() {
         "{stops:?}"
     );
     assert!(stops[0]["children_killed"].is_u64(), "{stops:?}");
-    let calls = fs::read_to_string(cmux_stub(&db).with_file_name("calls")).unwrap();
-    assert!(!calls.contains("list-windows"), "{calls}");
-    assert!(!calls.contains("WS-EARLIER"), "{calls}");
+    // Nothing was asked of cmux: no stub call was recorded at all, so
+    // neither a listing nor the earlier workspace.
+    let calls = cmux_stub(&db).with_file_name("calls");
+    assert!(!calls.exists(), "{:?}", fs::read_to_string(&calls));
 }
 
 /// Stops, when a test ends (a failing one included), the wrapper and the

@@ -174,11 +174,6 @@ impl StallConfig {
         self.known("idle_process_secs")
     }
 
-    /// `screen_idle_secs` as a [`Duration`].
-    pub fn screen_idle(&self) -> Duration {
-        self.known("screen_idle_secs")
-    }
-
     /// The limits a headless worker's turns are held to.
     pub fn turn_limits(&self) -> super::turn::TurnLimits {
         super::turn::TurnLimits {
@@ -294,7 +289,10 @@ mod tests {
         assert_eq!(config.send_confirm(), Duration::from_secs(60));
         assert_eq!(config.background_alert(), Duration::from_secs(30 * 60));
         assert_eq!(config.idle_process(), Duration::from_secs(30 * 60));
-        assert_eq!(config.screen_idle(), Duration::from_secs(2 * 60));
+        assert_eq!(
+            config.threshold("screen_idle_secs"),
+            Some(Duration::from_secs(2 * 60))
+        );
         let short = StallConfig::KEYS
             .iter()
             .fold(config, |config, key| config.with_millis(key, 200));
@@ -329,10 +327,10 @@ mod tests {
         assert_eq!(config.threshold("other"), None);
         assert_eq!(
             StallConfig {
-                screen_idle_secs: -1,
+                idle_process_secs: -1,
                 ..config
             }
-            .screen_idle(),
+            .idle_process(),
             Duration::ZERO
         );
     }

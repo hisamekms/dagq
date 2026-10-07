@@ -1,73 +1,34 @@
-//! The supervisor's nudge of an inbox without a watcher (ADR-t906-1
+//! The runtime's backstop for an inbox without a watcher (ADR-t1433-5
 //! decision 1 (3)): while no watch watches and an ask waited past the
-//! threshold, one line is typed into the inbox's workspace when its screen
-//! looks idle with nothing typed, once more later, then a `cmux notify`,
-//! each recorded as `inbox_nudged`. The watcher's changes are recorded as
+//! threshold, the supervisor records `inbox_nudged` once for the absence
+//! and, with `[push]` in `host.toml`, sends one message through it; it
+//! reads no screen and types nothing (decision 2), and these tests run it
+//! on the backend of background wrappers alone, with no cmux fake
+//! (ADR-t1433-1 decision 3). The watcher's changes are recorded as
 //! `inbox_watcher_absent` / `inbox_watcher_returned`, and `kpi` derives
 //! from them how long an ask waited to be seen (`ask_seen_wait`, task
 //! 1021).
 
-use crate::plan_review::{Fixture, PlanWorkspace, StubReviewer, fixture, options};
+use crate::plan_review::{Fixture, StubReviewer, fixture, options};
 use dagq::{
-    application::{Clock, Generators, inbox_watcher::WatcherRecord},
+    application::{Clock, Generators, TaskStore, inbox_watcher::WatcherRecord},
     domain::{
-        AskKind, AskReason, EventKind, NewAsk, SessionRole, TaskId,
-        event_kind::{
-            ASK_OPENED, INBOX_NUDGE_FAILED, INBOX_NUDGED, INBOX_WATCHER_ABSENT,
-            INBOX_WATCHER_RETURNED,
-        },
-        stall::StallConfig,
+        AskKind, AskReason, EventKind, NewAsk, SessionRole, TaskAction, TaskId,
+        event_kind::{ASK_OPENED, INBOX_NUDGED, INBOX_WATCHER_ABSENT, INBOX_WATCHER_RETURNED},
     },
-    infrastructure::sqlite::SqliteQueue,
+    infrastructure::{adapters::BackgroundSessions, sqlite::SqliteQueue},
     runtime::{self, SuperviseOptions},
 };
 use serde_json::{Value, json};
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicI64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-/// How long a screen must look idle in these tests.
-const SCREEN_IDLE_SECS: i64 = 5;
-
-const INBOX: &str = "INBOX";
-
-/// Claude Code at rest: its empty input box, no spinner, no dialog.
-const READY: &str = "\
-⏺ Done.
-
-──────────────────────────────────────────────────────────────────────
-❯
-──────────────────────────────────────────────────────────────────────
-  ? for shortcuts
-";
-
-/// Claude Code at work on a turn.
-const WORKING: &str = "\
-⏺ Done.
-
-✻ Working… (3s · esc to interrupt)
-
-──────────────────────────────────────────────────────────────────────
-❯
-──────────────────────────────────────────────────────────────────────
-  ? for shortcuts
-";
-
-/// Claude Code at rest with a person's half-typed line in its box.
-const TYPING: &str = "\
-⏺ Done.
-
-──────────────────────────────────────────────────────────────────────
-❯ answer ask 3 with
-──────────────────────────────────────────────────────────────────────
-  ? for shortcuts
-";
 
 /// The wall clock moved on by a number of seconds the test sets.
 #[derive(Default)]
@@ -85,75 +46,92 @@ impl Clock for Ahead {
 
 struct Inbox {
     fx: Fixture,
-    backend: PlanWorkspace,
     clock: Arc<Ahead>,
+    /// Where the `[push]` command keeps what it read, when there is one.
+    pushed: Option<PathBuf>,
 }
 
 impl Inbox {
-    /// A queue whose inbox workspace is recorded and listed, showing
-    /// `screen`, with one open ask when `ask`.
-    fn new(screen: &str, ask: bool) -> Self {
+    /// A queue whose inbox workspace is recorded, with one open ask when
+    /// `ask` and, with `push`, a `[push]` in `host.toml`. Its one task is
+    /// canceled: the supervisor claims nothing.
+    fn new(ask: bool, push: bool) -> Self {
         let fx = fixture();
         let mut queue = SqliteQueue::open(&fx.db).unwrap();
         queue
-            .register_session_workspace(SessionRole::Inbox, INBOX)
+            .transition(TaskId::new(1), TaskAction::Cancel)
+            .unwrap();
+        queue
+            .register_session_workspace(SessionRole::Inbox, "INBOX")
             .unwrap();
         if ask {
             open_ask(&mut queue);
         }
-        let backend = PlanWorkspace::listing(&[INBOX]);
-        *backend.screen.lock().unwrap() = Some(Ok(screen.to_owned()));
+        let queue_dir = fx
+            .db
+            .canonicalize()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let pushed = push.then(|| {
+            let pushed = queue_dir.join("pushed");
+            fs::create_dir(&pushed).unwrap();
+            let script = queue_dir.join("push.sh");
+            crate::common::template::script_env(
+                &script,
+                "#!/bin/sh\nn=$(ls \"$STUB_INBOX\" | wc -l | tr -d ' ')\ncat > \"$STUB_INBOX/$n.json\"\nprintf '%s\\n' \"$DAGQ_PUSH_KIND\" > \"$STUB_INBOX/$n.env\"\n",
+                &[("STUB_INBOX", pushed.to_str().unwrap())],
+            );
+            fs::write(
+                queue_dir.join("host.toml"),
+                format!(
+                    "[push]\ncommand = [\"{}\"]\ntimeout_secs = 10\ndaily = false\nbreach = false\n",
+                    script.display()
+                ),
+            )
+            .unwrap();
+            pushed
+        });
         Self {
             fx,
-            backend,
             clock: Arc::default(),
+            pushed,
         }
     }
 
-    fn show(&self, screen: &str) {
-        *self.backend.screen.lock().unwrap() = Some(Ok(screen.to_owned()));
-    }
-
-    /// One `supervise --once` with the clock `at` seconds ahead.
+    /// One `supervise --once` with the clock `at` seconds ahead, on the
+    /// backend of background wrappers alone: no cmux, nor a fake of it.
     fn supervise(&self, at: i64) {
         self.clock.0.store(at, Ordering::SeqCst);
+        let queue_dir = self
+            .fx
+            .db
+            .canonicalize()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let options = SuperviseOptions {
             generators: Generators {
                 clock: self.clock.clone(),
                 ids: dagq::infrastructure::clock::system().ids,
             },
-            stall: Some(StallConfig {
-                screen_idle_secs: SCREEN_IDLE_SECS,
-                ..Default::default()
-            }),
+            report_daily: self.pushed.is_some(),
+            host_config: Some(queue_dir.join("no host-wide file.toml")),
+            push_retry: [Duration::from_millis(10), Duration::from_millis(10)],
             ..options(1, Duration::from_secs(3600))
         };
         runtime::supervise_with_reviewer(
             &self.fx.db,
             &self.fx.repo,
-            &self.backend,
+            &BackgroundSessions,
             &self.fx.claude,
             &StubReviewer::new(&[]),
             Path::new(env!("CARGO_BIN_EXE_dagq")),
             &options,
         )
         .unwrap();
-    }
-
-    /// Supervise twice, [`SCREEN_IDLE_SECS`] apart from `at`: a screen that
-    /// looks idle over them is inferred idle.
-    fn supervise_twice(&self, at: i64) {
-        self.supervise(at);
-        self.supervise(at + SCREEN_IDLE_SECS + 1);
-    }
-
-    fn typed(&self) -> Vec<String> {
-        self.backend
-            .texts()
-            .into_iter()
-            .filter(|(workspace, _)| workspace == INBOX)
-            .map(|(_, text)| text)
-            .collect()
     }
 
     fn nudges(&self, kind: &str) -> Vec<Value> {
@@ -166,6 +144,23 @@ impl Inbox {
             .collect();
         events.reverse();
         events
+    }
+
+    /// What the `[push]` command read, each message with its kind.
+    fn pushed(&self) -> Vec<(Value, String)> {
+        let dir = self.pushed.as_ref().unwrap();
+        let mut messages = Vec::new();
+        for n in 0.. {
+            let Ok(json) = fs::read(dir.join(format!("{}.json", 2 * n))) else {
+                break;
+            };
+            let kind = fs::read_to_string(dir.join(format!("{}.env", 2 * n))).unwrap();
+            messages.push((
+                serde_json::from_slice(&json).unwrap(),
+                kind.trim().to_owned(),
+            ));
+        }
+        messages
     }
 
     /// A watch's record under the queue's directory, its heartbeat `at`
@@ -189,7 +184,7 @@ impl Inbox {
     }
 }
 
-/// One open ask for the inbox on task 1.
+/// One open ask for the inbox, on no task.
 fn open_ask(queue: &mut SqliteQueue) -> dagq::domain::AskId {
     queue
         .ask(NewAsk {
@@ -197,7 +192,7 @@ fn open_ask(queue: &mut SqliteQueue) -> dagq::domain::AskId {
             confidence: None,
             topics: Vec::new(),
             kind: AskKind::Blocked,
-            task_id: Some(TaskId::new(1)),
+            task_id: None,
             run_id: None,
             question: "which way?".into(),
             options: vec![],
@@ -218,171 +213,59 @@ fn now() -> i64 {
         .as_secs() as i64
 }
 
+/// Without `[push]`, the absence is recorded once, as the event alone,
+/// past the threshold, and never again in the same absence.
 #[test]
-fn an_idle_inbox_is_nudged_twice_then_the_person_is_notified_then_nothing() {
-    let inbox = Inbox::new(READY, true);
+fn an_inbox_without_a_watch_is_recorded_once_and_nothing_is_typed() {
+    let inbox = Inbox::new(true, false);
     // The ask is new: nothing yet.
-    inbox.supervise_twice(0);
-    assert!(inbox.typed().is_empty());
-    // Past the threshold, once the screen looked idle over two captures.
+    inbox.supervise(0);
+    assert!(inbox.nudges(INBOX_NUDGED).is_empty());
     inbox.supervise(400);
-    assert!(inbox.typed().is_empty(), "one capture infers no idle");
-    inbox.supervise(400 + SCREEN_IDLE_SECS + 1);
-    let typed = inbox.typed();
-    assert_eq!(typed.len(), 1, "{typed:?}");
-    assert!(typed[0].contains("1 open ask(s)"), "{}", typed[0]);
-    assert!(
-        typed[0].contains("dagq status --role inbox"),
-        "{}",
-        typed[0]
-    );
-    assert!(!typed[0].contains('\n'), "one line: {}", typed[0]);
     let nudges = inbox.nudges(INBOX_NUDGED);
-    assert_eq!(nudges.len(), 1);
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
     assert_eq!(nudges[0]["attempt"], 1);
-    assert_eq!(nudges[0]["action"], "typed");
+    assert_eq!(nudges[0]["action"], "recorded");
     assert_eq!(nudges[0]["absent_since"], 0);
-    assert_eq!(nudges[0]["workspace_id"], INBOX);
     assert_eq!(nudges[0]["open_asks"], 1);
-    // Not again in the same absence before the interval.
-    inbox.supervise_twice(500);
-    assert_eq!(inbox.typed().len(), 1);
-    // Once more past it.
-    inbox.supervise_twice(1_020);
-    assert_eq!(inbox.typed().len(), 2);
-    // Then the notify, idle or not, and nothing after it.
-    inbox.show(WORKING);
-    inbox.supervise(1_640);
-    assert_eq!(inbox.typed().len(), 2);
-    let notifications = inbox.backend.notifications();
-    assert_eq!(notifications.len(), 1, "{notifications:?}");
-    assert!(notifications[0].0.contains("inbox has no watch"));
-    inbox.show(READY);
-    inbox.supervise_twice(3_000);
-    inbox.supervise_twice(5_000);
-    assert_eq!(inbox.typed().len(), 2);
-    assert_eq!(inbox.backend.notifications().len(), 1);
+    assert_eq!(nudges[0]["waiting_asks"], 1);
+    assert_eq!(nudges[0]["push_error"], Value::Null);
+    assert_eq!(
+        nudges[0].get("workspace_id"),
+        None,
+        "no workspace is aimed at"
+    );
+    inbox.supervise(1_100);
+    inbox.supervise(5_000);
+    assert_eq!(inbox.nudges(INBOX_NUDGED).len(), 1);
+}
+
+/// With `[push]`, the absence is recorded and sent once through it, with
+/// the counts and nothing of the asks' content.
+#[test]
+fn an_inbox_without_a_watch_is_told_once_through_push() {
+    let inbox = Inbox::new(true, true);
+    inbox.supervise(0);
+    assert!(inbox.pushed().is_empty());
+    inbox.supervise(400);
     let nudges = inbox.nudges(INBOX_NUDGED);
-    let attempts: Vec<(i64, &str)> = nudges
-        .iter()
-        .map(|n| {
-            (
-                n["attempt"].as_i64().unwrap(),
-                n["action"].as_str().unwrap(),
-            )
-        })
-        .collect();
-    assert_eq!(attempts, [(1, "typed"), (2, "typed"), (3, "notified")]);
-    assert!(inbox.nudges(INBOX_NUDGE_FAILED).is_empty());
-}
-
-#[test]
-fn failed_submissions_are_recorded_once_and_advance_to_the_next_nudge() {
-    let mut inbox = Inbox::new(READY, true);
-    let error = "fake inbox text submission failed";
-    inbox.backend.send_text_error = Some(error.into());
-
-    // send_text fails and the line is not left in the box, so submit_input
-    // returns that error.
-    // Each supervise call must still return successfully.
-    inbox.supervise_twice(400);
-    let first = inbox.nudges(INBOX_NUDGED);
-    assert_eq!(first.len(), 1);
-    assert_eq!(first[0]["absent_since"], 0);
-    assert_eq!(first[0]["attempt"], 1);
-    assert_eq!(first[0]["action"], "typed");
-    assert_eq!(first[0]["workspace_id"], INBOX);
-    let failed = |attempt| {
-        json!({
-            "absent_since": 0,
-            "attempt": attempt,
-            "action": "typed",
-            "workspace_id": INBOX,
-            "error": error,
-        })
-    };
-    assert_eq!(inbox.nudges(INBOX_NUDGE_FAILED), [failed(1)]);
-    assert_eq!(inbox.typed().len(), 1);
-
-    // A fresh supervisor reads the failed attempt from the persisted claim.
-    // The screen remains eligible, so only the history prevents a retry.
-    inbox.supervise_twice(500);
-    assert_eq!(inbox.typed().len(), 1);
-    assert_eq!(inbox.nudges(INBOX_NUDGED), first);
-    assert_eq!(inbox.nudges(INBOX_NUDGE_FAILED), [failed(1)]);
-    assert!(inbox.backend.notifications().is_empty());
-
-    inbox.supervise_twice(1_020);
-    assert_eq!(inbox.typed().len(), 2);
-    assert_eq!(inbox.nudges(INBOX_NUDGE_FAILED), [failed(1), failed(2)]);
-    assert!(inbox.backend.notifications().is_empty());
-    inbox.supervise_twice(1_100);
-    assert_eq!(inbox.typed().len(), 2);
-    assert_eq!(inbox.nudges(INBOX_NUDGED).len(), 2);
-
-    inbox.supervise(1_640);
-    inbox.supervise_twice(3_000);
-    assert_eq!(inbox.typed().len(), 2);
-    let notifications = inbox.backend.notifications();
-    assert_eq!(notifications.len(), 1);
-    assert!(notifications[0].0.contains("inbox has no watch"));
-    let nudges = inbox.nudges(INBOX_NUDGED);
-    let attempts: Vec<_> = nudges
-        .iter()
-        .map(|n| {
-            (
-                n["attempt"].as_i64().unwrap(),
-                n["action"].as_str().unwrap(),
-            )
-        })
-        .collect();
-    assert_eq!(attempts, [(1, "typed"), (2, "typed"), (3, "notified")]);
-    assert_eq!(inbox.nudges(INBOX_NUDGE_FAILED), [failed(1), failed(2)]);
-}
-
-#[test]
-fn an_inbox_at_work_or_with_a_line_typed_is_not_nudged() {
-    let inbox = Inbox::new(WORKING, true);
-    inbox.supervise_twice(400);
-    inbox.supervise_twice(420);
-    assert!(inbox.typed().is_empty());
-    inbox.show(TYPING);
-    inbox.supervise_twice(440);
-    inbox.supervise_twice(460);
-    assert!(inbox.typed().is_empty());
-    assert!(inbox.nudges(INBOX_NUDGED).is_empty());
-    // Once the box is empty and the screen idle, it is.
-    inbox.show(READY);
-    inbox.supervise_twice(480);
-    assert_eq!(inbox.typed().len(), 1);
-}
-
-#[test]
-fn nothing_is_typed_with_a_watcher_without_an_ask_or_without_the_workspace() {
-    // A watcher alive.
-    let inbox = Inbox::new(READY, true);
-    inbox.watching(400);
-    inbox.supervise_twice(400);
-    assert!(inbox.typed().is_empty());
-    assert!(inbox.nudges(INBOX_NUDGED).is_empty());
-    // No ask.
-    let inbox = Inbox::new(READY, false);
-    inbox.supervise_twice(400);
-    assert!(inbox.typed().is_empty());
-    // The workspace closed.
-    let inbox = Inbox::new(READY, true);
-    let _ = dagq::application::WorkspaceBackend::close(&inbox.backend, INBOX);
-    inbox.supervise_twice(400);
-    assert!(inbox.typed().is_empty());
-    assert!(inbox.nudges(INBOX_NUDGED).is_empty());
-    // Not recorded.
-    let inbox = Inbox::new(READY, true);
-    SqliteQueue::open(&inbox.fx.db)
-        .unwrap()
-        .remove_session_workspace(SessionRole::Inbox)
-        .unwrap();
-    inbox.supervise_twice(400);
-    assert!(inbox.typed().is_empty());
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert_eq!(nudges[0]["action"], "pushed");
+    let pushed = inbox.pushed();
+    assert_eq!(pushed.len(), 1, "{pushed:?}");
+    let (message, kind) = &pushed[0];
+    assert_eq!(kind, "inbox_watch");
+    assert_eq!(message["kind"], "inbox_watch");
+    assert_eq!(message["open_asks"], 1);
+    assert_eq!(message["waiting_asks"], 1);
+    assert!(!message.to_string().contains("which way?"), "{message}");
+    assert_eq!(
+        inbox.nudges("kpi_push_sent"),
+        [json!({"push_kind": "inbox_watch", "period": "absent since 0", "attempt": 1})]
+    );
+    inbox.supervise(2_000);
+    assert_eq!(inbox.pushed().len(), 1);
+    assert_eq!(inbox.nudges(INBOX_NUDGED).len(), 1);
 }
 
 #[test]
@@ -413,7 +296,7 @@ fn a_nudge_of_an_absence_is_claimed_once_across_supervisors() {
 /// neither one opened before the first record nor one not seen yet.
 #[test]
 fn the_watchers_changes_are_recorded_once_and_give_how_long_an_ask_waited_to_be_seen() {
-    let inbox = Inbox::new(READY, false);
+    let inbox = Inbox::new(false, false);
     let mut queue = SqliteQueue::open(&inbox.fx.db).unwrap();
     // One ask open at a time on the task: each closed before the next.
     let mut open = open_ask(&mut queue);

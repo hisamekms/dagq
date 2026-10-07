@@ -238,9 +238,8 @@ impl Supervisor<'_> {
             .replace("{claim}", &show(needs.claim))
             .replace("{landing}", &show(needs.landing));
         for run in joining {
-            let (outcome, value) = ask::hold(
+            let (outcome, _) = ask::hold(
                 &mut *self.queue,
-                &self.layout.main_checkout,
                 NewHold {
                     reason_category: AskReason::Cost,
                     subject: Some(DISK_SUBJECT.into()),
@@ -250,10 +249,9 @@ impl Supervisor<'_> {
                     options: DISK_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
                     asked_by: SessionRole::Supervisor.as_str().into(),
                 },
-                self.cmux,
             )?;
             if outcome.created {
-                warn!(ask_id = %outcome.ask.id, "the free disk space stays short after the cleanup: opened the disk ask {} (notified: {})", outcome.ask.id, value["notified"]);
+                warn!(ask_id = %outcome.ask.id, "the free disk space stays short after the cleanup: opened the disk ask {}", outcome.ask.id);
             }
             if let Some(run) = run {
                 self.disk.joined.push(run);

@@ -971,7 +971,6 @@ impl Supervisor<'_> {
         let question = ended_question(run, alert, &note, exhausted, verify_failed);
         let outcome = ask::ask(
             &mut *self.queue,
-            &self.layout.main_checkout,
             NewAsk {
                 recommendation: None,
                 confidence: None,
@@ -986,7 +985,6 @@ impl Supervisor<'_> {
                 finding_id: None,
                 request_id: None,
             },
-            self.cmux,
         )?;
         let ask_id = outcome["id"]
             .as_i64()

@@ -1604,22 +1604,10 @@ fn run_agent_with_review_retry(
     }
     assert_eq!(kinds.contains(&"cleanup_failed"), close_fail);
     // A run at rest is reported through `watch`, not a notification
-    // (ADR-0022); only the `approve_landing` ask of an accepted run whose
-    // stand-in review printed no verdict notifies (task 328).
-    assert_eq!(
-        backend.notifications.lock().unwrap().len(),
-        usize::from(run.status() == RunStatus::AwaitingIntegration),
-        "{:?}",
-        backend.notifications.lock().unwrap()
-    );
-    assert!(
-        backend
-            .notifications
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|n| n.0.ends_with("approve_landing"))
-    );
+    // (ADR-0022), and the supervisor notifies nobody of its own asks: the
+    // inbox's watch does (ADR-t1433-1 decision 2).
+    let notifications = backend.notifications.lock().unwrap().clone();
+    assert!(notifications.is_empty(), "{notifications:?}");
     // The run's wrapper ran in the background (task 1439): no workspace and
     // no group; it started in the run's worktree with its output in the
     // run dir, its environment carrying its role, actor id, run and task

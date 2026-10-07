@@ -35,7 +35,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use super::adapters::Cmux;
 use super::dialogue::DialogueQueue;
 use super::sqlite::SqliteQueue;
 use crate::application::commands::DenialLog;
@@ -584,17 +583,14 @@ fn lock_held(queue_dir: &Path) -> bool {
 
 /// How the service answers a read use case: as the command line reads it
 /// (`compose::read_queue`), given by the composition root. It takes the
-/// request's queue, its DB and the cmux that lists the workspaces for
-/// `stats` (none when it does not resolve).
+/// request's queue and its DB. No read calls cmux (ADR-t1433-1).
 pub type ServiceReads =
-    Arc<dyn Fn(&mut SqliteQueue, &Path, Option<&Cmux>, &QueueRead) -> Result<Value> + Send + Sync>;
+    Arc<dyn Fn(&mut SqliteQueue, &Path, &QueueRead) -> Result<Value> + Send + Sync>;
 
 /// How `dagq service serve` runs.
 #[derive(Clone)]
 pub struct ServeOptions {
     pub db: PathBuf,
-    /// The cmux a new ask notifies the inbox through.
-    pub cmux: PathBuf,
     pub generators: Generators,
     pub reads: ServiceReads,
     /// Set by SIGINT or SIGTERM: the service stops accepting and exits.
@@ -682,7 +678,6 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
     let backend = Arc::new(SqliteServiceBackend {
         db: options.db.clone(),
         queue_dir: queue_dir.clone(),
-        cmux: options.cmux.clone(),
         generators: options.generators.clone(),
         reads: options.reads.clone(),
     });
@@ -765,7 +760,6 @@ fn answer(stream: UnixStream, backend: &dyn ServiceBackend, pid: u32) -> Result<
 pub struct SqliteServiceBackend {
     pub db: PathBuf,
     pub queue_dir: PathBuf,
-    pub cmux: PathBuf,
     pub generators: Generators,
     pub reads: ServiceReads,
 }
@@ -793,10 +787,6 @@ impl ServiceBackend for SqliteServiceBackend {
         Ok(Box::new(ServiceSqlite {
             queue,
             db: self.db.clone(),
-            queue_dir: self.queue_dir.clone(),
-            cmux: Cmux {
-                executable: self.cmux.clone(),
-            },
             reads: self.reads.clone(),
         }))
     }
@@ -814,8 +804,6 @@ impl ServiceBackend for SqliteServiceBackend {
 struct ServiceSqlite {
     queue: SqliteQueue,
     db: PathBuf,
-    queue_dir: PathBuf,
-    cmux: Cmux,
     reads: ServiceReads,
 }
 
@@ -823,8 +811,6 @@ impl ServiceSqlite {
     fn dialogue(&mut self) -> DialogueQueue<'_> {
         DialogueQueue {
             queue: &mut self.queue,
-            checkout: &self.queue_dir,
-            cmux: &self.cmux,
         }
     }
 }
@@ -901,14 +887,9 @@ impl ServiceQueue for ServiceSqlite {
         )?)?)
     }
 
-    /// As the command line reads it ([`ServiceReads`]), with the
-    /// service's own cmux for `stats`' workspaces: as for the command
-    /// line, a cmux that does not resolve lists none.
+    /// As the command line reads it ([`ServiceReads`]), without cmux.
     fn read(&mut self, read: &QueueRead) -> Result<Value> {
-        let cmux = super::adapters::executable(&self.cmux.executable)
-            .ok()
-            .map(|executable| Cmux { executable });
-        (self.reads)(&mut self.queue, &self.db, cmux.as_ref(), read)
+        (self.reads)(&mut self.queue, &self.db, read)
     }
 }
 
@@ -923,15 +904,13 @@ impl ServiceQueue for ServiceSqlite {
 pub struct SystemQueueService {
     pub db: PathBuf,
     pub executable: PathBuf,
-    pub cmux: PathBuf,
 }
 
 impl SystemQueueService {
-    pub fn new(db: &Path, executable: &Path, cmux: &Path) -> Self {
+    pub fn new(db: &Path, executable: &Path) -> Self {
         Self {
             db: db.to_path_buf(),
             executable: executable.to_path_buf(),
-            cmux: cmux.to_path_buf(),
         }
     }
 
@@ -1050,8 +1029,7 @@ impl QueueServiceControl for SystemQueueService {
         command
             .arg("--db")
             .arg(&self.db)
-            .args(["service", "serve", "--cmux"])
-            .arg(&self.cmux)
+            .args(["service", "serve"])
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
@@ -1254,11 +1232,8 @@ mod tests {
         .unwrap();
         fs::write(service_dir(dir.path()).join(LOCK_FILE), b"").unwrap();
         assert_eq!(probe(dir.path()).state, ServiceState::Stopped);
-        let control = SystemQueueService::new(
-            &dir.path().join("queue.db"),
-            Path::new("/nonexistent/dagq"),
-            Path::new("cmux"),
-        );
+        let control =
+            SystemQueueService::new(&dir.path().join("queue.db"), Path::new("/nonexistent/dagq"));
         assert_eq!(control.stop(Duration::from_secs(1)).unwrap(), None);
         assert!(ServiceRecord::read(dir.path()).is_none());
         // A start of a binary that is not there fails.

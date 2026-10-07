@@ -64,7 +64,10 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
 
 ## runtimeが流すe2e
 
-> **予定（goal 92）**: [ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定3で、実cmuxを要るe2eはinboxを開く`up` / `down`のtestだけになり、他のe2eは対話のstubのworkerをやめてcmuxの無いhostでも流れる形にする。1本ずつ流すことと関門の位置は変えない。e2eのrunはtask 1440からworkspaceを開かずbackgroundのwrapperで動く（[testの制約](../../development/testing.md#e2e)）が、e2eの関門と各ケースは今もcmuxを要る。残りの実装と本数・時間の前後の測定は後続のtask（1443・1444）。
+[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定3で、実cmuxを要るe2eはinboxを開く`up` / `down`のtestだけで、ほかのe2eの本文はcmuxを使わない（[testの制約](../../development/testing.md#e2e)）。
+切り分け: cmuxの要らないe2eは、cmuxの無いhostでも名前で絞って手で流せる（`cargo test --locked --test e2e -- --ignored --exact <名前>`）。
+一方、関門は全部のe2eを求める: 自動更新と`install`の関門（ADR-t963-1決定1。[Auto-update](auto-update.md)の「e2eの関門」）も着地の前のe2e（ADR-t1233-2決定3。[Review](review.md#着地の前のe2e)）も、inboxを開く`up`のe2eを含めて流し、`src/infrastructure/e2e_gate.rs`はcmuxの`ping`を前提に残す。
+cmuxが答えないhostでは、要らないe2eだけを流して関門を通すことはせず、今までどおり`unavailable`にする（自動更新・`install`は入れ替えず、着地の前のe2eは`run_e2e_finished`の`outcome: unavailable`で後で流し直す）。
 
 [ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2・3が決めたe2eの要否を、validatingが決めて記録する。e2eを流すのはworkerではなく、reviewのpassの後にruntimeがhostで流す工程で（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)。流し方は[Review](review.md#着地の前のe2e)の「着地の前のe2e」）、workerのreceiptは`e2e`を裏付けない（`domain::required_of`が`e2e`を落とす）。そこで落ちたe2e（上限の内に終わり、流し直しても印で通らない）だけがrunを`needs_session`に戻し、上限切れや始められないe2eは変更のせいとせずruntimeが流し直す。
 

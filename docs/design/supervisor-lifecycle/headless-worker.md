@@ -253,6 +253,8 @@ inboxと、廃止の前に人が開いたplannerは対象外。
   agentのenvの組み立ては[session wrapper](session-wrapper.md)が持つ。
 - **識別と生死**: 生きているとは、handleのpidが記録した起動時刻のまま居ること（`Supervisor::wrapper_lives`）。
   adopt・引き継ぎ（[Handoff](handoff.md)）・開き直しは記録したhandleで行うので、supervisorが止まってもwrapperとturnは動き続ける。
+  heartbeatの古さは生死に使わない（沈黙は[Silent wrapper](silent-wrapper.md)の判定）。
+  `stats`の`workspace_mismatch`もcmuxを呼ばずこの生死だけで判じ、終わりを記録せずに居なくなったwrapperを`run_without_wrapper`として出す（[Stats](stats.md)）。
 - **停止**: runtimeはまず終了の依頼で終わらせ、残っていればhandleの`stop_background`で止める（ADR-t1404-1決定3）。
   wrapperにSIGTERMを送り、猶予の後にgroupと控えた子孫にSIGKILLを送る（`BackgroundWrappers::stop`）。
   wrapperが先に死んで残したturnは子孫として見つからないので、最後の`turn_started`の記録から止める（`stopping_left_turns`）。
@@ -293,7 +295,7 @@ runtimeのplannerは経路の選択なしに非対話で立ち、この文書の
   wrapperはそのとき壁のturnのidle markerを書き直す（`renew_wall_marker`）。
 - **状態**（`planner_view`）: 画面を読まず、idle markerと待っている依頼から`idle` / `working`を決める。
   壁で終わったturnのplannerは依頼が待っていても`idle`。
-  生死はhandleとwrapperのpidとheartbeatで判じ、cmuxに聞かない。
+  生死はhandleのpidと記録した起動時刻だけで判じ、heartbeatが古くても`lost`にせず、cmuxに聞かない。
   答えを読み終えたかは、その依頼を取ったturnが壁でなく終わるまで追う（`request_read`）。
   壁で失敗した直後に終わらせると答えが読まれずに失われるため。
 - **時間切れ**: wrapperがturnを`[stall]`の上限で止めたとき、plannerごとに1回`planner_unresponsive`を出す（`tell_of_stopped_planner_turns`、ADR-t1394-2決定3）。

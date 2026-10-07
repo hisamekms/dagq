@@ -448,7 +448,7 @@ impl SessionWatch {
                     json!({
                         "ask_id": ask_id,
                         "workspace_id": workspace,
-                        "submitted": !matches!(submission, Submission::Stuck(_)),
+                        "submitted": matches!(submission, Submission::Queued),
                     }),
                 )?;
                 info!(run_id = %run.id(), "run {} was held by ask {ask_id}: told it to go on in workspace {workspace}", run.id());

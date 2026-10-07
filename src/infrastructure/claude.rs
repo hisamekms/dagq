@@ -1,14 +1,7 @@
-//! What Claude Code shows and writes that the supervisor reads of a live
-//! session ([`AgentSignals`]): the dialogs of its TUI on the screen
-//! (ADR-0019 decision 6) and the input its `Stop` hook writes to the idle
-//! marker (ADR-0016, task 147), the input its `UserPromptSubmit` hook
-//! writes to the input marker (ADR-0043 decision 2, task 409), its input
-//! box (task 285) and the dialogs
-//! the supervisor answers by rule (ADR-0047 decision 29). The formats
-//! are Claude Code's own; the supervisor only learns the kind of a dialog,
-//! an excerpt of the screen, whether background work was left running,
-//! whether the input box is drawn, what it still holds and whether the
-//! agent works.
+//! What Claude Code writes that the runtime reads ([`AgentSignals`]): the
+//! input its `Stop` hook writes to the idle marker (ADR-0016) and the
+//! output of a headless job that failed at a wall (task 438). The formats
+//! are Claude Code's own; the runtime reads no screen of it.
 
 use serde_json::Value;
 
@@ -17,80 +10,6 @@ use crate::{
     application::{AgentSignals, IdleHook},
     domain::{headless_job::JobFailure, queue_hold::Wall, stall::BackgroundTask},
 };
-
-/// `prompt_waiting` carries this many last non-empty lines of the screen.
-const PROMPT_EXCERPT_LINES: usize = 15;
-
-/// Only this many last non-empty lines are searched for a dialog: a dialog
-/// sits at the bottom, and text higher up is usually the work itself.
-const PROMPT_SCAN_LINES: usize = 30;
-
-/// Another numbered option counts within this many lines of the `❯` one.
-const OPTION_REACH: usize = 3;
-
-/// The input box closes within this many non-empty lines of the bottom:
-/// under it Claude Code draws only its hints, the status line and the menu
-/// of slash commands a `/` opens.
-const INPUT_FOOTER_LINES: usize = 14;
-
-/// This many last letters and digits of a text typed into the input box
-/// are looked for in it: wrapping and `cmux send`'s rewriting of the text
-/// (one line, slashes for backslashes) change the rest.
-const INPUT_TAIL_CHARS: usize = 24;
-
-/// Which dialog of the agent's TUI holds the session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptKind {
-    /// The folder trust question.
-    Trust,
-    /// A `❯`-marked choice among numbered options (a plugin
-    /// recommendation, the auto mode notice, ...).
-    Choice,
-    /// A footer such as `Enter to confirm · Esc to cancel` alone.
-    Confirm,
-}
-
-impl PromptKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Trust => "trust",
-            Self::Choice => "choice",
-            Self::Confirm => "confirm",
-        }
-    }
-}
-
-/// Whether the bottom of a screen shows a dialog: a line starting with `Do
-/// you trust` or an option offering to trust the folder, a line starting
-/// with `❯` and a numbered option within three lines of another numbered
-/// option, or a
-/// line starting with `Enter to confirm` or `Esc to cancel`. Box borders are
-/// ignored, and a phrase inside other text (a quote, code) does not count.
-pub fn detect_prompt(screen: &str) -> Option<PromptKind> {
-    let lines: Vec<&str> = screen
-        .lines()
-        .map(strip_frame)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let tail = &lines[lines.len().saturating_sub(PROMPT_SCAN_LINES)..];
-    if tail.iter().any(|line| {
-        line.starts_with("Do you trust")
-            || option_text(line).is_some_and(|text| text.contains("trust this folder"))
-    }) {
-        return Some(PromptKind::Trust);
-    }
-    // An option's text can wrap, so another option may be a few lines away.
-    let is_option = |i: usize| tail.get(i).is_some_and(|line| option_text(line).is_some());
-    let near = |i: usize| {
-        (i.saturating_sub(OPTION_REACH)..=i + OPTION_REACH).any(|j| j != i && is_option(j))
-    };
-    if (0..tail.len()).any(|i| tail[i].starts_with('❯') && is_option(i) && near(i)) {
-        return Some(PromptKind::Choice);
-    }
-    tail.iter()
-        .any(|line| line.starts_with("Enter to confirm") || line.starts_with("Esc to cancel"))
-        .then_some(PromptKind::Confirm)
-}
 
 /// How Claude Code reports a login that ran out or was never there (task
 /// 266): its error line, under the tool call or the prompt it failed, starts
@@ -119,23 +38,6 @@ const USAGE_LIMITS: &[&str] = &[
 /// The longest window name before `limit reached` (`5-hour`, `Opus
 /// weekly`, ...): a longer head is a sentence of the work.
 const LIMIT_WINDOW_CHARS: usize = 24;
-
-/// Whether the bottom of a screen shows the session stopped at a login
-/// that ran out (ADR-0047 decision 42): one of the last lines, box borders
-/// and the `⎿` of a result ignored, starts with one of [`AUTH_ERRORS`] and
-/// asks for `/login`.
-pub fn auth_required(screen: &str) -> bool {
-    bottom_lines(screen).iter().any(|line| auth_line(line))
-}
-
-/// Whether the bottom of a screen shows the session stopped at the usage
-/// limit (ADR-0047 decision 42, task 438): one of the last lines, read as
-/// [`auth_required`] reads them, is [`usage_limit_line`].
-pub fn usage_limited(screen: &str) -> bool {
-    bottom_lines(screen)
-        .iter()
-        .any(|line| usage_limit_line(line))
-}
 
 /// The wall a headless job's output (its stdout and stderr, a `claude -p`
 /// JSON result's `result` too) shows it stopped at, if any (task 438):
@@ -176,20 +78,6 @@ pub fn job_failure(output: &str) -> JobFailure {
     job_wall(output).map_or(JobFailure::Other, JobFailure::of_wall)
 }
 
-/// The last non-empty lines of a screen, box borders and the `⎿` / `⏺` of
-/// a result stripped.
-fn bottom_lines(screen: &str) -> Vec<&str> {
-    let lines: Vec<&str> = screen
-        .lines()
-        .map(strip_frame)
-        .filter(|line| !line.is_empty())
-        .collect();
-    lines[lines.len().saturating_sub(PROMPT_SCAN_LINES)..]
-        .iter()
-        .map(|line| line.trim_start_matches(['⎿', '⏺', ' ']))
-        .collect()
-}
-
 fn auth_line(line: &str) -> bool {
     AUTH_ERRORS.iter().any(|error| line.starts_with(error)) && line.contains("/login")
 }
@@ -211,188 +99,6 @@ fn usage_limit_line(line: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | ' '))
         && (rest.starts_with('∙') || rest.starts_with('·'))
         && rest.contains("reset")
-}
-
-fn strip_frame(line: &str) -> &str {
-    line.trim_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '┃' | '║' | '|'))
-}
-
-/// The text of a numbered option line (`1. Yes`, `❯ 2. No`), if it is one.
-fn option_text(line: &str) -> Option<&str> {
-    let line = line.strip_prefix('❯').unwrap_or(line).trim_start();
-    let digits = line.chars().take_while(char::is_ascii_digit).count();
-    let rest = line[digits..].strip_prefix(". ")?;
-    (digits > 0).then_some(rest)
-}
-
-/// A horizontal rule or the top or bottom border of a box, which Claude
-/// Code draws above and below its input box.
-fn is_rule(line: &str) -> bool {
-    let mut chars = line.chars();
-    matches!(
-        (chars.next(), chars.next()),
-        (
-            Some('─' | '━' | '═' | '╭' | '╰' | '┌' | '└'),
-            Some('─' | '━' | '═')
-        )
-    )
-}
-
-/// The lines of the input box at the bottom of a screen, the prompt line
-/// (`❯`, `>` or the shell mode's `!`, frame stripped) first: the lines
-/// between the last rule within [`INPUT_FOOTER_LINES`] of the bottom and
-/// the rule above it, the first of them a prompt line. `None` while the
-/// TUI is not drawn yet (the shell's own `❯` line has no rule above it),
-/// when a dialog replaced the box, or once Claude Code exited and left its
-/// last frame above `Resume this session with:`.
-fn input_box(screen: &str) -> Option<Vec<&str>> {
-    let lines = framed_lines(screen);
-    let (open, close) = input_box_rows(&lines)?;
-    Some(lines[open..close].to_vec())
-}
-
-/// The non-empty lines of a screen, frame stripped, as [`input_box`] and
-/// [`transcript`] read them.
-fn framed_lines(screen: &str) -> Vec<&str> {
-    screen
-        .lines()
-        .map(strip_frame)
-        .filter(|line| !line.is_empty())
-        .collect()
-}
-
-/// Where the input box is in `lines` ([`framed_lines`]): its first line
-/// (the prompt line, just under the rule above it) and the closing rule.
-fn input_box_rows(lines: &[&str]) -> Option<(usize, usize)> {
-    let close = (lines.len().saturating_sub(INPUT_FOOTER_LINES + 1)..lines.len())
-        .rev()
-        .find(|&i| is_rule(lines[i]))?;
-    if lines[close + 1..]
-        .iter()
-        .any(|line| line.contains("Resume this session with"))
-    {
-        return None;
-    }
-    let open = (0..close).rev().find(|&i| is_rule(lines[i]))? + 1;
-    let prompt = lines.get(open).filter(|_| open < close)?;
-    (prompt.starts_with(['❯', '>', '!']) && option_text(prompt).is_none()).then_some((open, close))
-}
-
-/// The transcript of a screen: the lines above the input box's rule, the
-/// part only the agent's work changes (task 319). What Claude Code draws
-/// under the box (the status line with its clock and cost, hints,
-/// notifications) and the box itself are left out. A screen without the
-/// box is all transcript.
-pub fn transcript(screen: &str) -> String {
-    let lines = framed_lines(screen);
-    match input_box_rows(&lines) {
-        Some((open, _)) => lines[..open - 1].join("\n"),
-        None => lines.join("\n"),
-    }
-}
-
-/// Whether Claude Code's input box is drawn and no dialog is on the
-/// screen: the session takes what is typed now. A booting session (the
-/// shell's line, the welcome banner alone) is not ready.
-pub fn input_ready(screen: &str) -> bool {
-    input_box(screen).is_some() && detect_prompt(screen).is_none()
-}
-
-/// Whether the input box still holds `text` typed into it (its last
-/// letters and digits, however wrapped), or a paste Claude Code collapsed
-/// to `[Pasted text #N ...]`: Enter did not submit it. A screen without the
-/// box holds nothing.
-pub fn input_pending(screen: &str, text: &str) -> bool {
-    let Some(lines) = input_box(screen) else {
-        return false;
-    };
-    let content = lines.join(" ");
-    let content = content.trim_start_matches(['❯', '>', '!']).trim();
-    if content.contains("[Pasted text") {
-        return true;
-    }
-    let alnum =
-        |text: &str| -> Vec<char> { text.chars().filter(|c| c.is_alphanumeric()).collect() };
-    let typed = alnum(text);
-    let tail: String = typed[typed.len().saturating_sub(INPUT_TAIL_CHARS)..]
-        .iter()
-        .collect();
-    !tail.is_empty()
-        && alnum(content)
-            .into_iter()
-            .collect::<String>()
-            .contains(&tail)
-}
-
-/// Whether Claude Code's input box is drawn with no dialog and holds no
-/// text: nothing after its prompt, or only the placeholder Claude Code
-/// draws in an empty box (`Try "..."`).
-pub fn input_empty(screen: &str) -> bool {
-    if detect_prompt(screen).is_some() {
-        return false;
-    }
-    let Some(lines) = input_box(screen) else {
-        return false;
-    };
-    let content = lines.join(" ");
-    let content = content.trim_start_matches(['❯', '>']).trim();
-    content.is_empty() || content.starts_with("Try \"")
-}
-
-/// The kinds of background work Claude Code counts in the status line
-/// under its input box (`⏵⏵ auto mode on · 3 shells · ↓ to manage`), each
-/// after its number: a `/exit` sent while one runs stops at its
-/// "Background work is running" dialog.
-const BACKGROUND_COUNTS: &[&str] = &[
-    "shell",
-    "shells",
-    "background task",
-    "background tasks",
-    "monitor",
-    "monitors",
-    "agent",
-    "agents",
-];
-
-/// Whether the lines under Claude Code's input box count background work
-/// it keeps running: a `·`-separated item of a number above zero and one
-/// of [`BACKGROUND_COUNTS`] (`3 shells`). The hints (`← for agents`, `↓ to
-/// manage`) have no number, and what the transcript above the box says is
-/// not read. A screen without the box shows none.
-pub fn background_on_screen(screen: &str) -> bool {
-    let lines = framed_lines(screen);
-    let Some((_, close)) = input_box_rows(&lines) else {
-        return false;
-    };
-    lines[close + 1..]
-        .iter()
-        .flat_map(|line| line.split('·'))
-        .any(|item| {
-            let item = item.trim();
-            item.split_once(' ').is_some_and(|(count, kind)| {
-                count.parse::<u32>().is_ok_and(|count| count > 0)
-                    && BACKGROUND_COUNTS.contains(&kind.trim().to_lowercase().as_str())
-            })
-        })
-}
-
-/// Whether the agent is at work: Claude Code shows `esc to interrupt`
-/// next to its spinner while it runs a turn.
-pub fn agent_working(screen: &str) -> bool {
-    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    lines[lines.len().saturating_sub(PROMPT_SCAN_LINES)..]
-        .iter()
-        .any(|line| line.to_lowercase().contains("esc to interrupt"))
-}
-
-/// The last `count` non-empty lines of a screen, right-trimmed.
-fn screen_tail(screen: &str, count: usize) -> String {
-    let lines: Vec<&str> = screen
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.is_empty())
-        .collect();
-    lines[lines.len().saturating_sub(count)..].join("\n")
 }
 
 /// The idle marker is the input of Claude Code's `Stop` hook, as JSON.
@@ -430,482 +136,19 @@ pub fn idle_hook(content: &[u8]) -> IdleHook {
 }
 
 impl AgentSignals for ClaudeCode {
-    fn detect_prompt(&self, screen: &str) -> Option<&'static str> {
-        detect_prompt(screen).map(PromptKind::as_str)
-    }
-
     fn job_failure(&self, output: &str) -> JobFailure {
         job_failure(output)
-    }
-
-    fn screen_excerpt(&self, screen: &str) -> String {
-        screen_tail(screen, PROMPT_EXCERPT_LINES)
     }
 
     fn idle_hook(&self, content: &[u8]) -> IdleHook {
         idle_hook(content)
     }
-
-    fn input_ready(&self, screen: &str) -> bool {
-        input_ready(screen)
-    }
-
-    fn input_pending(&self, screen: &str, text: &str) -> bool {
-        input_pending(screen, text)
-    }
-
-    fn input_empty(&self, screen: &str) -> bool {
-        input_empty(screen)
-    }
-
-    fn working(&self, screen: &str) -> bool {
-        agent_working(screen)
-    }
-
-    fn screen_background(&self, screen: &str) -> Option<bool> {
-        Some(background_on_screen(screen))
-    }
-
-    fn transcript(&self, screen: &str) -> String {
-        transcript(screen)
-    }
-
-    fn idle_hook_failure(&self, log: &str) -> Option<String> {
-        stop_hook_failure(log)
-    }
-}
-
-/// The latest line of Claude Code's debug log that says its `Stop` hook
-/// failed (`Hook Stop (Stop) error: No space left on device`), trimmed.
-pub fn stop_hook_failure(log: &str) -> Option<String> {
-    log.lines()
-        .rev()
-        .find(|line| line.contains("Hook Stop") && line.to_lowercase().contains("error"))
-        .map(|line| line.trim().to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    const TRUST: &str = "\
-╭──────────────────────────────────────────────────────────────────────╮
-│ Do you trust the files in this folder?                               │
-│                                                                      │
-│ /Users/me/.local/share/dagq/0123/runs/abcd/worktree                  │
-│                                                                      │
-│ Claude Code may read, write, or execute files contained in this      │
-│ directory. This can pose security risks, so only use files from      │
-│ trusted sources.                                                     │
-│                                                                      │
-│ ❯ 1. Yes, proceed                                                    │
-│   2. No, exit                                                        │
-│                                                                      │
-╰──────────────────────────────────────────────────────────────────────╯
-   Enter to confirm · Esc to exit
-";
-
-    const LSP_PLUGIN: &str = "\
- ✻ Welcome to Claude Code!
-
- Plugin recommendation
-
- This project uses Rust. The rust-analyzer LSP plugin gives Claude
- go-to-definition and diagnostics.
-
-   1. Install rust-analyzer-lsp
- ❯ 2. Not now
-   3. Don't suggest this again
-
- Enter to confirm · Esc to cancel
-
-
-";
-
-    const AUTO_MODE: &str = "\
-> Implement the task
-
-⏺ Reading the repository instructions.
-
-────────────────────────────────────────────────────────────────────
- Auto mode is available
-
- Claude can run commands and edit files without asking each time,
- with a classifier that stops risky actions.
-
- ❯ 1. Yes, turn on auto mode
-   2. No, keep asking
-
- Esc to cancel
-";
-
-    const WORK: &str = "\
-⏺ Bash(cargo test --locked)
-  ⎿  test result: ok. 42 passed; 0 failed
-     grep -n \"Esc to cancel\" src/runtime.rs
-     let text = \"Do you trust the files in this folder?\";
-
-⏺ Update(src/runtime.rs)
-  ⎿  Updated src/runtime.rs with 3 additions
-     1. Added the check
-     2. Added the test
-
-✽ Compiling… (esc to interrupt)
-
-╭──────────────────────────────────────────────────────────────────────╮
-│ ❯ run the tests again                                                │
-╰──────────────────────────────────────────────────────────────────────╯
-  ? for shortcuts
-";
-
-    /// The runner's shell line before Claude Code draws anything: the
-    /// shell's own `❯` has no rule above it.
-    const BOOT: &str = "\
-Last login: Thu Sep 24 22:27:53 on ttys008
-worktree on  dagq/f8f7c65d is 📦 v0.3.0 via 🦀 v1.93.0
-❯ '/runs/f8f7c65d/runner' '--db' '/queue.db' 'session' '--run' 'f8f7c65d' '--resume'
-";
-
-    /// The welcome banner of a session still loading its conversation.
-    const BOOT_BANNER: &str = "\
-❯ '/runs/f8f7c65d/runner' '--db' '/queue.db' 'session' '--run' 'f8f7c65d' '--resume'
-╭───────────────────────────────────────────────────╮
-│ ✻ Welcome to Claude Code!                         │
-│                                                   │
-│   cwd: /runs/f8f7c65d/worktree                    │
-╰───────────────────────────────────────────────────╯
-";
-
-    const READY: &str = "\
-⏺ The receipt is written; the run is ready for review.
-
-──────────────────────────────────────────────────────────────────────
-❯\u{a0}
-──────────────────────────────────────────────────────────────────────
-  ⏵⏵ auto mode on (shift+tab to cycle)
-";
-
-    /// Claude Code 1.x draws the input box as a box.
-    const READY_BOXED: &str = "\
-╭──────────────────────────────────────────────────────────────────────╮
-│ >                                                                    │
-╰──────────────────────────────────────────────────────────────────────╯
-  ? for shortcuts
-";
-
-    /// The resolution request, pasted and wrapped, with Enter taken as part
-    /// of the paste.
-    const LONG_PENDING: &str = "\
-──────────────────────────────────────────────────────────────────────
-❯ dagq: integrate could not land run f8f7c65d (task 221) and returned n
-  eeds_session. Reason: rebase conflicted in src/runtime.rs ... Do not m
-  erge or push. When done, report briefly and stop; do not run /exit.
-──────────────────────────────────────────────────────────────────────
-  ⏵⏵ auto mode on (shift+tab to cycle)
-";
-
-    const PASTED: &str = "\
-──────────────────────────────────────────────────────────────────────
-❯ [Pasted text #1 +3 lines]
-──────────────────────────────────────────────────────────────────────
-";
-
-    /// `/exit` typed after the paste, and the menu of slash commands.
-    const EXIT_PENDING: &str = "\
-──────────────────────────────────────────────────────────────────────
-❯ /exit
-──────────────────────────────────────────────────────────────────────
-  /exit                 Exit the REPL
-  /export               Export the current conversation
-";
-
-    /// Claude Code exited on `/exit`: its last frame stays above the
-    /// shell's lines.
-    const EXITED: &str = "\
-──────────────────────────────────────────────────────────────────────
-❯ /exit
-──────────────────────────────────────────────────────────────────────
-
-Resume this session with:
-claude --resume 68a96a60-1826-461e-8002-40690588884d
-worktree on  dagq/68a96a60 took 8h32m49s
-❯
-";
-
-    const REQUEST: &str = "dagq: integrate could not land run f8f7c65d (task 221) and returned needs_session.\nReason: rebase conflicted in src/runtime.rs ...\nDo not merge or push. When done, report briefly and stop; do not run /exit.";
-
-    #[test]
-    fn input_ready_waits_for_the_input_box_without_a_dialog() {
-        assert!(!input_ready(BOOT));
-        assert!(!input_ready(BOOT_BANNER));
-        assert!(!input_ready(""));
-        assert!(input_ready(READY));
-        assert!(input_ready(READY_BOXED));
-        assert!(input_ready(LONG_PENDING));
-        assert!(input_ready(EXIT_PENDING));
-        // A working session takes input too.
-        assert!(input_ready(WORK));
-        for dialog in [TRUST, LSP_PLUGIN, AUTO_MODE] {
-            assert!(!input_ready(dialog), "{dialog}");
-        }
-        assert!(!input_ready(EXITED));
-        // A quote under a rule in the transcript is not the input box.
-        let quoted = format!("{}\n> quoted\n{READY}", "─".repeat(70));
-        assert_eq!(input_box(&quoted).unwrap(), ["❯"]);
-        // A box scrolled far above the bottom is not the input box.
-        let scrolled = format!("{READY}{}", "output line\n".repeat(INPUT_FOOTER_LINES));
-        assert!(!input_ready(&scrolled));
-    }
-
-    #[test]
-    fn input_empty_reads_a_box_with_nothing_typed_in_it() {
-        assert!(input_empty(READY));
-        assert!(input_empty(READY_BOXED));
-        let placeholder = READY.replacen("❯\u{a0}\n", "❯ Try \"how does main.rs work?\"\n", 1);
-        assert!(input_empty(&placeholder));
-        for screen in [
-            LONG_PENDING,
-            PASTED,
-            EXIT_PENDING,
-            BOOT,
-            BOOT_BANNER,
-            EXITED,
-            "",
-        ] {
-            assert!(!input_empty(screen), "{screen}");
-        }
-        for dialog in [TRUST, LSP_PLUGIN, AUTO_MODE] {
-            assert!(!input_empty(dialog), "{dialog}");
-        }
-        let shell = READY.replacen("❯\u{a0}\n", "! ls\n", 1);
-        assert!(!input_empty(&shell));
-        let typing = READY.replacen("❯\u{a0}\n", "❯ half a senten\n", 1);
-        assert!(!input_empty(&typing));
-        let signals = ClaudeCode {
-            executable: "claude".into(),
-        };
-        assert!(signals.input_empty(READY));
-    }
-
-    #[test]
-    fn input_pending_finds_the_typed_text_left_in_the_box() {
-        assert!(input_pending(LONG_PENDING, REQUEST));
-        assert!(input_pending(PASTED, REQUEST));
-        assert!(input_pending(EXIT_PENDING, "/exit"));
-        assert!(input_pending(WORK, "run the tests again"));
-        for screen in [READY, READY_BOXED, BOOT, BOOT_BANNER, TRUST, AUTO_MODE] {
-            assert!(!input_pending(screen, REQUEST), "{screen}");
-            assert!(!input_pending(screen, "/exit"), "{screen}");
-        }
-        assert!(!input_pending(EXITED, "/exit"));
-        // A typed `/exit` is not the request. (A request left in the box
-        // counts for `/exit` too, which its own `/exit` ends: one Enter
-        // submits both.)
-        assert!(!input_pending(EXIT_PENDING, REQUEST));
-        assert!(!input_pending(LONG_PENDING, "answer to ask 3: yes"));
-        assert!(!input_pending(READY, ""));
-    }
-
-    #[test]
-    fn a_failed_stop_hook_is_found_in_the_debug_log() {
-        let log = "2026-09-27T01:00:00Z [DEBUG] Hook UserPromptSubmit (UserPromptSubmit) success\n\
-                   2026-09-27T01:02:00Z [DEBUG] Hook Stop (Stop) error: No space left on device\n\
-                   2026-09-27T01:02:01Z [DEBUG] idle\n";
-        assert_eq!(
-            ClaudeCode {
-                executable: "claude".into(),
-            }
-            .idle_hook_failure(log)
-            .as_deref(),
-            Some("2026-09-27T01:02:00Z [DEBUG] Hook Stop (Stop) error: No space left on device")
-        );
-        assert_eq!(stop_hook_failure("Hook Stop (Stop) success\n"), None);
-    }
-
-    /// Claude Code 2.x idle after a turn that left three background
-    /// shells running, as `cmux read-screen` captured it (2026-09-28).
-    const IDLE_WITH_SHELLS: &str = "\
-⏺ I'm pausing briefly so a background capture can record the idle screen with background shells
-  running.
-
-✻ Worked for 1m 5s · done 9:41 · 3 shells still running
-
-───────────────────────────────────────────────────────────────────────────────────────────────────
-❯\x20
-───────────────────────────────────────────────────────────────────────────────────────────────────
-  ⏵⏵ auto mode on · 3 shells · ← for agents · ↓ to manage
-";
-
-    /// The same session at work on a turn with one shell running.
-    const WORKING_WITH_A_SHELL: &str = "\
-✽ Swirling… (50s · ↓ 3.1k tokens)
-  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
-
-───────────────────────────────────────────────────────────────────────────────────────────────────
-❯\x20
-───────────────────────────────────────────────────────────────────────────────────────────────────
-  ⏵⏵ auto mode on · 1 shell · esc to interrupt · ← for agents · ↓ to manage
-";
-
-    #[test]
-    fn background_on_screen_reads_the_count_under_the_input_box() {
-        assert!(background_on_screen(IDLE_WITH_SHELLS));
-        assert!(input_ready(IDLE_WITH_SHELLS) && !agent_working(IDLE_WITH_SHELLS));
-        assert!(background_on_screen(WORKING_WITH_A_SHELL));
-        assert_eq!(
-            ClaudeCode {
-                executable: "claude".into()
-            }
-            .screen_background(IDLE_WITH_SHELLS),
-            Some(true)
-        );
-        // Once the shells are done the count is gone; the hints stay.
-        let done = IDLE_WITH_SHELLS.replace("· 3 shells ", "");
-        assert!(!background_on_screen(&done));
-        for other in ["2 background tasks", "1 monitor", "1 agent"] {
-            let screen = IDLE_WITH_SHELLS.replace("3 shells", other);
-            assert!(background_on_screen(&screen), "{other}");
-        }
-        for none in ["0 shells", "shells", "12 files"] {
-            let screen = IDLE_WITH_SHELLS.replace("3 shells", none);
-            assert!(!background_on_screen(&screen), "{none}");
-        }
-        // The transcript above the box is not read, nor a screen without it.
-        let above = "3 shells still running\n· 2 shells ·\n";
-        assert!(!background_on_screen(above));
-        let only_above = format!("· 2 shells ·\n{done}");
-        assert!(!background_on_screen(&only_above));
-    }
-
-    #[test]
-    fn agent_working_reads_the_spinner() {
-        assert!(agent_working(WORK));
-        for screen in [READY, BOOT, LONG_PENDING, TRUST] {
-            assert!(!agent_working(screen), "{screen}");
-        }
-        let claude = ClaudeCode {
-            executable: "claude".into(),
-        };
-        assert!(claude.working("✻ Thinking… (3s · Esc to interrupt)\n"));
-        assert!(claude.input_ready(READY));
-        assert!(claude.input_pending(EXIT_PENDING, "/exit"));
-    }
-
-    #[test]
-    fn detect_prompt_finds_the_three_dialogs() {
-        assert_eq!(detect_prompt(TRUST), Some(PromptKind::Trust));
-        assert_eq!(detect_prompt(LSP_PLUGIN), Some(PromptKind::Choice));
-        assert_eq!(detect_prompt(AUTO_MODE), Some(PromptKind::Choice));
-        let newer_trust = "│ Quick safety check: Is this a project you created or one you trust?\n│ ❯ 1. Yes, I trust this folder\n│   2. No, exit\n";
-        assert_eq!(detect_prompt(newer_trust), Some(PromptKind::Trust));
-        let wrapped = "Allow this edit?\n❯ 1. Yes, and don't ask again for edits in\n     /Users/me/worktree\n  2. No\n";
-        assert_eq!(detect_prompt(wrapped), Some(PromptKind::Choice));
-        assert_eq!(
-            detect_prompt("Save changes?\n  Enter to confirm · Esc to cancel\n"),
-            Some(PromptKind::Confirm)
-        );
-    }
-
-    #[test]
-    fn detect_prompt_ignores_a_working_session() {
-        assert_eq!(detect_prompt(WORK), None);
-        assert_eq!(detect_prompt(""), None);
-        // A single marked option is not a choice among options.
-        assert_eq!(detect_prompt("❯ 1. only line\n"), None);
-        // A dialog scrolled far above the bottom no longer counts.
-        let scrolled = format!("{AUTO_MODE}{}", "output line\n".repeat(PROMPT_SCAN_LINES));
-        assert_eq!(detect_prompt(&scrolled), None);
-    }
-
-    /// The resolution request just submitted: echoed in the transcript,
-    /// the box empty, the status line under it at one time and cost.
-    const SUBMITTED: &str = "\
-⏺ The receipt is written; the run is ready for review.
-
-> dagq: integrate could not land run f8f7c65d (task 221) and returned needs_session.
-  Reason: rebase conflicted in src/runtime.rs ...
-
-──────────────────────────────────────────────────────────────────────
-❯\u{a0}
-──────────────────────────────────────────────────────────────────────
-  Opus 5.5 · $1.84 · 12:04:31 · ctx 42%
-  ⏵⏵ auto mode on (shift+tab to cycle)
-";
-
-    /// [`SUBMITTED`] a minute on with nothing done: only the status
-    /// line's clock and cost moved, and a notification came up.
-    const SUBMITTED_TICKED: &str = "\
-⏺ The receipt is written; the run is ready for review.
-
-> dagq: integrate could not land run f8f7c65d (task 221) and returned needs_session.
-  Reason: rebase conflicted in src/runtime.rs ...
-
-──────────────────────────────────────────────────────────────────────
-❯\u{a0}
-──────────────────────────────────────────────────────────────────────
-  Opus 5.5 · $1.86 · 12:05:31 · ctx 42%
-  ⏵⏵ auto mode on (shift+tab to cycle)       ✓ Update installed · Restart to apply
-";
-
-    /// [`SUBMITTED`] after the agent took the request up.
-    const SUBMITTED_ANSWERED: &str = "\
-⏺ The receipt is written; the run is ready for review.
-
-> dagq: integrate could not land run f8f7c65d (task 221) and returned needs_session.
-  Reason: rebase conflicted in src/runtime.rs ...
-
-⏺ Bash(git status)
-  ⎿  interactive rebase in progress; onto 3da0244
-
-──────────────────────────────────────────────────────────────────────
-❯\u{a0}
-──────────────────────────────────────────────────────────────────────
-  Opus 5.5 · $1.92 · 12:05:31 · ctx 43%
-  ⏵⏵ auto mode on (shift+tab to cycle)
-";
-
-    #[test]
-    fn transcript_leaves_out_the_input_box_and_what_is_under_it() {
-        assert_eq!(
-            transcript(SUBMITTED),
-            "⏺ The receipt is written; the run is ready for review.\n\
-             > dagq: integrate could not land run f8f7c65d (task 221) and returned needs_session.\n\
-             Reason: rebase conflicted in src/runtime.rs ..."
-        );
-        // A clock, a cost or a notification under the box is no change.
-        assert_eq!(transcript(SUBMITTED), transcript(SUBMITTED_TICKED));
-        assert_ne!(transcript(SUBMITTED), transcript(SUBMITTED_ANSWERED));
-        // Nor is text typed into the box, or the slash menu under it.
-        let typed = SUBMITTED.replace("❯\u{a0}", "❯ /exit") + "  /exit   Exit the REPL\n";
-        assert_eq!(transcript(SUBMITTED), transcript(&typed));
-        assert_eq!(transcript(EXIT_PENDING), "");
-        assert_eq!(transcript(LONG_PENDING), "");
-        assert_eq!(transcript(READY_BOXED), "");
-        // The transcript of a working session ends at its spinner.
-        assert!(transcript(WORK).ends_with("✽ Compiling… (esc to interrupt)"));
-        // A screen without the box is all transcript.
-        for screen in [BOOT, BOOT_BANNER, TRUST, EXITED] {
-            assert_eq!(
-                transcript(screen),
-                framed_lines(screen).join("\n"),
-                "{screen}"
-            );
-        }
-        let claude = ClaudeCode {
-            executable: "claude".into(),
-        };
-        assert_eq!(claude.transcript(SUBMITTED), transcript(SUBMITTED_TICKED));
-    }
-
-    #[test]
-    fn screen_tail_keeps_the_last_non_empty_lines() {
-        assert_eq!(screen_tail("a  \n\nb\nc\n\n\n", 2), "b\nc");
-        assert_eq!(screen_tail("a\n", 15), "a");
-        assert_eq!(option_text("❯ 12. Twelve"), Some("Twelve"));
-        assert_eq!(option_text(". none"), None);
-        assert_eq!(PromptKind::Confirm.as_str(), "confirm");
-    }
 
     #[test]
     fn idle_hook_reads_background_tasks_of_the_stop_hook_input() {
@@ -964,61 +207,35 @@ worktree on  dagq/68a96a60 took 8h32m49s
         let idle = claude.idle_hook(b"not json");
         assert!(!idle.background_running);
         assert_eq!(idle.evidence[0], ("hook_event_name", Value::Null));
-        assert_eq!(
-            claude.detect_prompt("Save changes?\n  Esc to cancel\n"),
-            Some("confirm")
-        );
-        assert_eq!(claude.screen_excerpt("a\n\nb\n"), "a\nb");
     }
 
     #[test]
-    fn auth_required_reads_a_login_that_ran_out() {
-        let expired = "\
-⏺ Bash(cargo test)
-  ⎿  API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}} · Please run /login
-
-│ ❯ 
-  ? for shortcuts
-";
-        assert!(auth_required(expired));
-        assert!(auth_required("│ Invalid API key · Please run /login │\n"));
-        assert!(!auth_required(WORK));
-        assert!(!auth_required(READY));
+    fn a_wall_is_read_only_from_a_line_that_starts_with_it() {
+        assert!(auth_line(
+            "API Error: 401 {\"type\":\"error\"} · Please run /login"
+        ));
+        assert!(auth_line("Invalid API key · Please run /login"));
         // Text that only mentions the error is the work.
-        assert!(!auth_required(
-            "src/claude.rs:12: \"API Error: 401\" · Please run /login\n"
+        assert!(!auth_line(
+            "src/claude.rs:12: \"API Error: 401\" · Please run /login"
         ));
-        assert!(!auth_required("  ⎿  API Error: 401 (retrying)\n"));
-        // A phrase far above the bottom is the work, not the session's state.
-        let mut old = String::from("Please run /login\n");
-        old.push_str(&"line\n".repeat(PROMPT_SCAN_LINES));
-        assert!(!auth_required(&old));
-    }
-
-    #[test]
-    fn usage_limited_reads_a_limit_reached_at_the_bottom() {
-        for screen in [
-            "⏺ Bash(cargo test)\n  ⎿  5-hour limit reached ∙ resets 3pm\n     /upgrade to increase your usage limit.\n\n│ ❯ \n",
-            "  ⎿  Opus weekly limit reached · resets Mon 9am (Asia/Tokyo)\n",
-            "⏺ Claude AI usage limit reached|1759000000\n",
-            "│ You've hit your limit · resets 11pm │\n",
+        assert!(!auth_line("API Error: 401 (retrying)"));
+        for line in [
+            "5-hour limit reached ∙ resets 3pm",
+            "Opus weekly limit reached · resets Mon 9am (Asia/Tokyo)",
+            "Claude AI usage limit reached|1759000000",
+            "You've hit your limit · resets 11pm",
         ] {
-            assert!(usage_limited(screen), "{screen}");
-            assert!(!auth_required(screen), "{screen}");
+            assert!(usage_limit_line(line), "{line}");
+            assert!(!auth_line(line), "{line}");
         }
-        assert!(!usage_limited(WORK));
-        assert!(!usage_limited(READY));
-        // The work that only mentions it is no limit.
-        assert!(!usage_limited(
-            "src/claude.rs:12: \"Claude AI usage limit reached\"\n"
+        assert!(!usage_limit_line(
+            "src/claude.rs:12: \"Claude AI usage limit reached\""
         ));
-        assert!(!usage_limited(
-            "  ⎿  The retry budget of the whole job's limit reached · resets nothing\n"
+        assert!(!usage_limit_line(
+            "The retry budget of the whole job's limit reached · resets nothing"
         ));
-        assert!(!usage_limited("  ⎿  5-hour limit reached (a note)\n"));
-        let mut old = String::from("5-hour limit reached ∙ resets 3pm\n");
-        old.push_str(&"line\n".repeat(PROMPT_SCAN_LINES));
-        assert!(!usage_limited(&old));
+        assert!(!usage_limit_line("5-hour limit reached (a note)"));
     }
 
     #[test]

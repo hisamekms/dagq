@@ -140,7 +140,7 @@ CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、
 
 ### 対話と記録のコマンド（application）
 
-`ask`・`ask close`・`answer`・`note`・`mark`（`--retract`を含む）・`finding record/resolve/dismiss`は、`src/application/commands/dialogue.rs`の`Dialogue`が全てのroleについて判定してからstoreを呼ぶ。port `DialogueStore`は`src/infrastructure/dialogue.rs`の`DialogueQueue`（`SqliteQueue`と、askの通知に使うcheckoutとcmux）が実装する。拒否の記録（`authorization_denied`）とerrorの形は計画系と同じで、判定と記録の共通の部分は`src/application/commands/mod.rs`の`Gate`が持つ。
+`ask`・`ask close`・`answer`・`note`・`mark`（`--retract`を含む）・`finding record/resolve/dismiss`は、`src/application/commands/dialogue.rs`の`Dialogue`が全てのroleについて判定してからstoreを呼ぶ。port `DialogueStore`は`src/infrastructure/dialogue.rs`の`DialogueQueue`（`SqliteQueue`を包む）が実装する。拒否の記録（`authorization_denied`）とerrorの形は計画系と同じで、判定と記録の共通の部分は`src/application/commands/mod.rs`の`Gate`が持つ。
 
 | コマンド | capability | resource |
 | --- | --- | --- |

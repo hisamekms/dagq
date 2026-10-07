@@ -326,6 +326,7 @@ impl Drop for WorkspaceGuard {
 
 /// The queue's workspace group in `cmux --json workspace-group list`,
 /// found by its external ID (the queue hash).
+#[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
 pub(crate) fn listed_group(cmux: &Path, external_id: &str) -> Option<Value> {
     try_listed_group(cmux, external_id).unwrap_or_else(|error| panic!("{error:#}"))
 }

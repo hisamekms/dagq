@@ -115,7 +115,8 @@ fn a_sure_ready_concern_is_applied_as_a_pass_with_its_actions_and_counted() {
     // Past the limit, a person decides, with the job's recommendation.
     let asks = queue.asks(Default::default()).unwrap();
     assert_eq!(asks.len(), 2, "{asks:?}");
-    assert_eq!(backend.notifications().len(), 2);
+    // The supervisor notifies nobody: the inbox's watch tells of each ask.
+    assert!(backend.notifications().is_empty());
     let sent_back = asks.iter().find(|a| a.task_id == Some(limited)).unwrap();
     assert_eq!(sent_back.kind, AskKind::ApprovePlan);
     assert_eq!(sent_back.recommendation.as_deref(), Some("send_back"));

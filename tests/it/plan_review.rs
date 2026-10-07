@@ -1080,7 +1080,8 @@ fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
         );
         assert_eq!(finished["primary_code"], "task_overlap");
     }
-    assert_eq!(backend.notifications.lock().unwrap().len(), 6);
+    // The supervisor notifies nobody: the inbox's watch tells of each ask.
+    assert!(backend.notifications.lock().unwrap().is_empty());
     // Held for the person: not reviewed again.
     supervise(&fx, &backend, &reviewer);
     assert_eq!(reviewer.prompts().len(), 6);

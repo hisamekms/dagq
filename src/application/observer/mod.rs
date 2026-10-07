@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use crate::{
     application::{
         AgentProvider, AgentSignals, AskQuery, Generators, ObserverLog, Queue, RunLog,
-        WorkspaceBackend, dependency_graph, lifecycle::OBSERVER_ROLE,
+        dependency_graph, lifecycle::OBSERVER_ROLE,
     },
     domain::{
         ActorContext, ActorRole, AskId, CONSECUTIVE_FAILURES, EventId, FindingQuery, NewHold,
@@ -60,9 +60,6 @@ pub use crate::application::supervise::{DAILY_WINDOW_SECS, ObserveMode};
 #[derive(Debug, Clone)]
 pub struct ObserveOptions {
     pub mode: ObserveMode,
-    /// cmux executable; bare names resolve on PATH. None disables workspace
-    /// listing and inbox notifications, as does an executable not found.
-    pub cmux: Option<PathBuf>,
     /// The cursor to read `stats` past; by default the hourly observation's
     /// saved cursor, or for the daily one the last event 24 hours ago.
     pub since: Option<EventId>,
@@ -101,15 +98,14 @@ pub struct ObserveOptions {
 
 /// The reads of the queue the observer's input takes that the composition
 /// root assembles (`stats`, the KPIs, the improvements and the bound
-/// checkout), and the cmux the hold ask notifies the inbox through.
+/// checkout). The observer calls no cmux (ADR-t1433-1): the inbox's watch
+/// notifies the person of a hold ask it opens.
 pub trait ObserverSources<Q: ?Sized> {
     fn stats(&self, queue: &Q, db: &Path, query: &StatsQuery) -> Result<Value>;
     fn kpi(&self, queue: &Q, db: &Path) -> Result<Value>;
     fn improvements(&self, queue: &Q) -> Result<Value>;
     /// The checkout the queue is bound to, if any.
     fn checkout(&self, queue: &Q) -> Result<Option<PathBuf>>;
-    /// The configured cmux, when there is one and it was found.
-    fn cmux(&self) -> Option<&dyn WorkspaceBackend>;
 }
 
 /// The host the observation runs on: its files under `<queue
@@ -345,7 +341,7 @@ pub fn observe<Q: Queue + ObserverLog>(
     // A hold that could not be written is logged: the observation's
     // finish is recorded either way.
     let hold = wall.and_then(|wall| {
-        hold_wall(queue, wall, checkout.as_deref(), sources.cmux())
+        hold_wall(queue, wall)
             .inspect_err(|error| {
                 tracing::warn!(error = %format_args!("{error:#}"), "the observer stopped at the {} wall, and its hold ask could not be written: {error:#}", wall.as_str());
             })
@@ -524,22 +520,12 @@ fn merge(payload: &mut Value, extra: &Value) {
     }
 }
 
-/// Add the observer to the hold ask of `wall`, or open it (notifying the
-/// inbox through `cmux` when there is one), and record `auth_required` or
+/// Add the observer to the hold ask of `wall`, or open it (the inbox's
+/// watch notifies the person of a new one), and record `auth_required` or
 /// `usage_limited` on the queue when it joined. Returns the ask's ID.
-fn hold_wall(
-    queue: &mut dyn Queue,
-    wall: Wall,
-    checkout: Option<&Path>,
-    cmux: Option<&dyn WorkspaceBackend>,
-) -> Result<AskId> {
+fn hold_wall(queue: &mut dyn Queue, wall: Wall) -> Result<AskId> {
     let hold = NewHold::wall(wall, None, Some(HoldJob::Observer));
-    let outcome = match (checkout, cmux) {
-        (Some(checkout), Some(cmux)) => {
-            crate::application::ask::hold(queue, checkout, hold, cmux)?.0
-        }
-        _ => queue.hold(hold)?,
-    };
+    let outcome = crate::application::ask::hold(queue, hold)?.0;
     if outcome.joined {
         queue.record_queue_event(
             wall.event_kind(),

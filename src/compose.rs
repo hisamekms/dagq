@@ -39,7 +39,7 @@ use crate::{
         recording::RecordingBackend,
         review::{self as reviewing, Review},
         session::{self as wrapper, OwnWorkspace, Session, WrapperStart},
-        stats::{self as statistics, StatsSources, WorkspaceListing},
+        stats::{self as statistics, StatsSources},
         supervise::{self as supervisor, Heartbeat, Layout, LoopSettings, Ports, UpdateSettings},
         update,
     },
@@ -459,8 +459,6 @@ impl Default for SccacheOptions {
 pub struct QueueServiceOptions {
     /// The binary the service runs: the supervisor's own.
     pub executable: PathBuf,
-    /// The cmux a new ask notifies the inbox through.
-    pub cmux: PathBuf,
     pub interval: Duration,
     pub start_timeout: Duration,
     /// Starts, looks at and stops the service instead of the system's
@@ -1234,7 +1232,6 @@ pub fn supervise_with_reviewer(
                             crate::infrastructure::queue_service::SystemQueueService::new(
                                 &db,
                                 &settings.executable,
-                                &settings.cmux,
                             ),
                         )
                             as Arc<dyn crate::application::queue_service::QueueServiceControl>
@@ -1631,24 +1628,13 @@ impl OneShot {
     /// checkout of the repository the queue is bound to, main's history
     /// from that checkout, and the workspaces from
     /// `workspaces` (`None`: `workspace_mismatch` is not judged).
-    pub fn stats(
-        &self,
-        db: &Path,
-        query: &StatsQuery,
-        workspaces: Option<&dyn WorkspaceListing>,
-    ) -> Result<Value> {
-        self.stats_of(&self.open_read_only(db)?, db, query, workspaces)
+    pub fn stats(&self, db: &Path, query: &StatsQuery) -> Result<Value> {
+        self.stats_of(&self.open_read_only(db)?, db, query)
     }
 
     /// [`Self::stats`] on `queue`, the queue at `db` the caller already
     /// opened, so a command opens it once.
-    pub fn stats_of(
-        &self,
-        queue: &SqliteQueue,
-        db: &Path,
-        query: &StatsQuery,
-        workspaces: Option<&dyn WorkspaceListing>,
-    ) -> Result<Value> {
+    pub fn stats_of(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
         let now = self.generators.clock.now();
         let checkout = bound_checkout(queue)?;
         let config_file = || match &checkout {
@@ -1666,7 +1652,6 @@ impl OneShot {
         let signals = ClaudeCode {
             executable: PathBuf::from("claude"),
         };
-        let queue_hash = QueueLocation::explicit(db).hash();
         let host_dir = db
             .parent()
             .unwrap_or(Path::new("."))
@@ -1676,8 +1661,6 @@ impl OneShot {
         let sources = StatsSources {
             files: &LocalRunFiles,
             signals: &signals,
-            workspaces,
-            queue_hash: &queue_hash,
             config_file: &config_file,
             conflicts_file: &conflicts_file,
             history: &history,
@@ -2325,11 +2308,9 @@ same in one step",
                 })
             },
             broker: self,
-            queue_service: &|db, executable, cmux| {
+            queue_service: &|db, executable| {
                 Box::new(
-                    crate::infrastructure::queue_service::SystemQueueService::new(
-                        db, executable, cmux,
-                    ),
+                    crate::infrastructure::queue_service::SystemQueueService::new(db, executable),
                 )
             },
         }
@@ -2504,14 +2485,11 @@ pub fn recover(db: &Path, id: &RunId) -> Result<Value> {
     OneShot::system().recover(db, id)
 }
 
-/// `ask`: register an ask and, when it is new, tell a person with one
-/// `cmux notify` aimed at the inbox workspace `up` recorded (see
-/// [`crate::application::ask::ask`]).
-pub fn ask(db: &Path, checkout: &Path, ask: NewAsk, cmux: &dyn WorkspaceBackend) -> Result<Value> {
+/// `ask`: register an ask (see [`crate::application::ask::ask`]); the
+/// inbox's watch notifies the person of it.
+pub fn ask(db: &Path, ask: NewAsk) -> Result<Value> {
     let mut queue = SqliteQueue::open(db)?;
-    let binding = queue.repository_binding()?.map(PathBuf::from);
-    let checkout = crate::infrastructure::adapters::naming_checkout(binding.as_deref(), checkout);
-    crate::application::ask::ask(&mut queue, &checkout, ask, cmux)
+    crate::application::ask::ask(&mut queue, ask)
 }
 
 /// Where the queue of `location` lives, as `up` and `down` take it.
@@ -3412,9 +3390,9 @@ pub fn rebind(db: &Path, repo: &Path) -> Result<Value> {
     OneShot::system().rebind(db, repo)
 }
 
-/// `stats` on the system clock without cmux: see [`OneShot::stats`].
+/// `stats` on the system clock: see [`OneShot::stats`].
 pub fn stats(db: &Path, query: &StatsQuery) -> Result<Value> {
-    OneShot::system().stats(db, query, None)
+    OneShot::system().stats(db, query)
 }
 
 /// The near-term dependency diagram of `graph --format d2|svg`
@@ -3449,29 +3427,28 @@ fn render_svg(source: &str) -> Result<String> {
 /// its read use case ([`QueueRead`], ADR-t1233-5 decision 1): both call
 /// this, so a read gives the same JSON either way. The read itself is
 /// [`crate::application::queue_reads::answer`]; this passes it the queue
-/// and the host's reads. `cmux` lists the workspaces for `stats`'
-/// `workspace_mismatch` (unjudged without).
+/// and the host's reads. None calls cmux (ADR-t1433-1): `stats`'
+/// `workspace_mismatch` is judged by the runs' background wrappers.
 ///
 /// [`QueueRead`]: crate::application::queue_reads::QueueRead
 pub fn read_queue(
     queue: &mut SqliteQueue,
     db: &Path,
     one_shot: &OneShot,
-    cmux: Option<&Cmux>,
     read: &crate::application::queue_reads::QueueRead,
 ) -> Result<Value> {
-    crate::application::queue_reads::answer(queue, &HostReads { db, one_shot, cmux }, read)
+    crate::application::queue_reads::answer(queue, &HostReads { db, one_shot }, read)
 }
 
 /// How the queue service answers a read use case: [`read_queue`] with the
 /// user's `config.toml` for the language, as the command line reads it.
 pub fn service_reads() -> crate::infrastructure::queue_service::ServiceReads {
-    std::sync::Arc::new(|queue, db, cmux, read| {
+    std::sync::Arc::new(|queue, db, read| {
         let one_shot = OneShot {
             user_config: crate::infrastructure::language::user_config_file(),
             ..OneShot::new(queue.generators().clone())
         };
-        read_queue(queue, db, &one_shot, cmux, read)
+        read_queue(queue, db, &one_shot, read)
     })
 }
 
@@ -3479,7 +3456,6 @@ pub fn service_reads() -> crate::infrastructure::queue_service::ServiceReads {
 struct HostReads<'a> {
     db: &'a Path,
     one_shot: &'a OneShot,
-    cmux: Option<&'a Cmux>,
 }
 
 impl crate::application::queue_reads::QueueReadSources<SqliteQueue> for HostReads<'_> {
@@ -3487,12 +3463,7 @@ impl crate::application::queue_reads::QueueReadSources<SqliteQueue> for HostRead
         self.one_shot.status_of(self.db, queue, role)
     }
     fn stats(&self, queue: &SqliteQueue, query: &StatsQuery) -> Result<Value> {
-        self.one_shot.stats_of(
-            queue,
-            self.db,
-            query,
-            self.cmux.map(|cmux| cmux as &dyn WorkspaceListing),
-        )
+        self.one_shot.stats_of(queue, self.db, query)
     }
     fn kpi(&self, queue: &SqliteQueue, query: &crate::domain::kpi::KpiQuery) -> Result<Value> {
         self.one_shot.kpi_of(queue, self.db, query)
@@ -3779,10 +3750,9 @@ pub fn queue_service_status(db: &Path) -> Value {
 /// `dagq service start`: [`crate::application::queue_service::ensure`] with
 /// `executable`, recorded as `queue_service_started` (`by: service start`)
 /// unless one of this build already answered.
-pub fn queue_service_start(db: &Path, executable: &Path, cmux: &Path) -> Result<Value> {
+pub fn queue_service_start(db: &Path, executable: &Path) -> Result<Value> {
     let queue = SqliteQueue::open(db)?;
-    let control =
-        crate::infrastructure::queue_service::SystemQueueService::new(db, executable, cmux);
+    let control = crate::infrastructure::queue_service::SystemQueueService::new(db, executable);
     let report = crate::application::queue_service::ensure(
         &control,
         crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT,
@@ -3811,11 +3781,8 @@ pub fn queue_service_start(db: &Path, executable: &Path, cmux: &Path) -> Result<
 pub fn queue_service_stop(db: &Path) -> Result<Value> {
     use crate::application::queue_service::QueueServiceControl;
     let queue = SqliteQueue::open(db)?;
-    let control = crate::infrastructure::queue_service::SystemQueueService::new(
-        db,
-        Path::new("dagq"),
-        Path::new("cmux"),
-    );
+    let control =
+        crate::infrastructure::queue_service::SystemQueueService::new(db, Path::new("dagq"));
     Ok(
         match control.stop(crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT)? {
             Some(pid) => {
@@ -3995,7 +3962,7 @@ pub fn open_queue_read_only(db: &Path) -> Result<SqliteQueue> {
 
 /// `observe`: one observation of the queue at `db`
 /// ([`crate::application::observer::observe`]) with the repository's reads,
-/// the configured cmux and the local host. `signals` must belong to the
+/// and the local host; no cmux (ADR-t1433-1). `signals` must belong to the
 /// provider that starts it.
 pub fn observe(
     db: &Path,
@@ -4008,16 +3975,8 @@ pub fn observe(
         .context("queue must already be initialized")?;
     let mut queue = SqliteQueue::open(&db)?;
     let generators = queue.generators().clone();
-    // The configured cmux lists the workspaces for `workspace_mismatch`;
-    // without one, only that alert is left unjudged.
-    let cmux = options
-        .cmux
-        .as_deref()
-        .and_then(|path| executable(path).ok())
-        .map(|executable| Cmux { executable });
     let sources = ObserverReads {
         one_shot: OneShot::new(generators.clone()),
-        cmux: cmux.as_ref(),
     };
     crate::application::observer::observe(
         &mut queue,
@@ -4034,19 +3993,13 @@ pub fn observe(
 }
 
 /// The observer's reads that [`OneShot`] gives on the opened queue.
-struct ObserverReads<'a> {
+struct ObserverReads {
     one_shot: OneShot,
-    cmux: Option<&'a Cmux>,
 }
 
-impl crate::application::observer::ObserverSources<SqliteQueue> for ObserverReads<'_> {
+impl crate::application::observer::ObserverSources<SqliteQueue> for ObserverReads {
     fn stats(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
-        self.one_shot.stats_of(
-            queue,
-            db,
-            query,
-            self.cmux.map(|cmux| cmux as &dyn WorkspaceListing),
-        )
+        self.one_shot.stats_of(queue, db, query)
     }
     fn kpi(&self, queue: &SqliteQueue, db: &Path) -> Result<Value> {
         self.one_shot.observer_kpi(queue, db)
@@ -4056,9 +4009,6 @@ impl crate::application::observer::ObserverSources<SqliteQueue> for ObserverRead
     }
     fn checkout(&self, queue: &SqliteQueue) -> Result<Option<PathBuf>> {
         bound_checkout(queue)
-    }
-    fn cmux(&self) -> Option<&dyn WorkspaceBackend> {
-        self.cmux.map(|cmux| cmux as &dyn WorkspaceBackend)
     }
 }
 
@@ -4134,7 +4084,7 @@ impl crate::application::throughput_review::ThroughputReviewSources<SqliteQueue>
     for ThroughputReviewReads
 {
     fn stats(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
-        self.one_shot.stats_of(queue, db, query, None)
+        self.one_shot.stats_of(queue, db, query)
     }
     fn kpi(
         &self,
@@ -4195,9 +4145,10 @@ pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) 
 
 /// `watch` on the queue at `db` ([`crate::application::watch::watch`]); a
 /// `watch --role inbox` keeps its record in a file under the queue's
-/// directory, never in the queue (ADR-t906-1).
+/// directory, never in the queue (ADR-t906-1). It notifies nobody: only
+/// the command line's watch in the inbox's session runs cmux.
 pub fn watch(db: &Path, options: &crate::application::watch::WatchOptions) -> Result<Value> {
-    watch_in(db, &open_queue_watch(db)?, options)
+    watch_in(db, &open_queue_watch(db)?, options, None)
 }
 
 /// `watch` using the live read-only queue already opened by the CLI.
@@ -4206,6 +4157,7 @@ pub fn watch_in(
     db: &Path,
     queue: &SqliteQueue,
     options: &crate::application::watch::WatchOptions,
+    cmux: Option<&Path>,
 ) -> Result<Value> {
     use crate::infrastructure::inbox_watchers;
     ensure!(
@@ -4233,6 +4185,30 @@ pub fn watch_in(
             .ok()
         })
         .flatten();
+    // The inbox's watch tells the person of a new ask through the cmux of
+    // the inbox's session (ADR-t1433-1 decision 2); a cmux not found tells
+    // nobody, and the watch goes on.
+    let inbox_cmux = (options.role == Some(SessionRole::Inbox))
+        .then(|| cmux.and_then(|cmux| executable(cmux).ok()))
+        .flatten()
+        .map(|executable| Cmux { executable });
+    let notifier = inbox_cmux
+        .as_ref()
+        .map(|cmux| crate::application::watch::InboxNotifier {
+            queue,
+            backend: cmux,
+            // A queue bound to no repository is named after the working
+            // directory, as the other commands name it.
+            checkout: crate::infrastructure::adapters::naming_checkout(
+                queue
+                    .repository_binding()
+                    .ok()
+                    .flatten()
+                    .map(PathBuf::from)
+                    .as_deref(),
+                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
+        });
     crate::application::watch::watch(
         queue,
         clock.as_ref(),
@@ -4240,6 +4216,9 @@ pub fn watch_in(
         record
             .as_mut()
             .map(|record| record as &mut dyn crate::application::watch::WatchRecord),
+        notifier
+            .as_ref()
+            .map(|notifier| notifier as &dyn crate::application::watch::AskNotifier),
         options,
     )
 }

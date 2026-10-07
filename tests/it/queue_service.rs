@@ -157,8 +157,10 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
         ok(&queue.db, &["show", &task.to_string(), "--full"])
     );
 
-    // The worker asks on its own run, recorded as itself, and the inbox
-    // is told through the service's cmux.
+    // The worker asks on its own run, recorded as itself. The service,
+    // started with `--cmux` as a registered argv has it, accepts and
+    // ignores it: it runs no cmux, and the inbox's watch tells of the ask
+    // (ADR-t1433-1).
     let asked = call(
         &queue,
         Some(&worker_token),
@@ -172,6 +174,10 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
     assert_eq!(asks[0]["run_id"], json!(queue.run.id()));
     let opened = events(&queue.db, "ask_opened");
     assert_eq!(opened[0]["actor"]["role"], "worker", "{opened:?}");
+    assert!(
+        !queue.cmux.with_file_name("notifications").exists(),
+        "the service ran cmux"
+    );
 
     // Not on another run: refused by the service and recorded as the
     // worker, whatever it names.
@@ -368,14 +374,13 @@ fn the_supervisor_starts_the_service_and_holds_its_claims_while_it_is_down() {
     let options = |executable: &Path| dagq::compose::SuperviseOptions {
         queue_service: Some(dagq::compose::QueueServiceOptions {
             executable: executable.to_path_buf(),
-            cmux: PathBuf::from("/nonexistent/cmux"),
             interval: Duration::ZERO,
             start_timeout: TIMEOUT,
             control: None,
         }),
         ..supervise_options(1, true)
     };
-    let control = SystemQueueService::new(&db, Path::new("dagq"), Path::new("cmux"));
+    let control = SystemQueueService::new(&db, Path::new("dagq"));
     struct Stop(SystemQueueService);
     impl Drop for Stop {
         fn drop(&mut self) {
@@ -519,7 +524,6 @@ impl Running {
         let options = dagq::compose::SuperviseOptions {
             queue_service: Some(dagq::compose::QueueServiceOptions {
                 executable: executable.to_path_buf(),
-                cmux: PathBuf::from("/nonexistent/cmux"),
                 interval: Duration::ZERO,
                 start_timeout: TIMEOUT,
                 control: control.map(dagq::compose::QueueServiceControlPort),

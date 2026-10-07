@@ -83,10 +83,14 @@ pub struct IdleProbe {
 
 impl PlannerSession {
     /// The planner's state from what `probe` saw. A closed planner or one
-    /// whose workspace cmux no longer lists is `closed`; an agent that
-    /// exited in a workspace still open is `exited`; a wrapper whose process
-    /// is gone or whose heartbeat is older than [`HEARTBEAT_TIMEOUT_SECS`]
-    /// without a recorded exit is `lost`; before the wrapper registers it is
+    /// whose session is not open (`workspace_listed`: for a background
+    /// wrapper, its handle's pid showing the start it recorded) is
+    /// `closed`; an agent that exited in a session still open is `exited`;
+    /// a wrapper in a workspace whose process is gone or whose heartbeat is
+    /// older than [`HEARTBEAT_TIMEOUT_SECS`] without a recorded exit is
+    /// `lost`, while a background wrapper is `lost` only once its process
+    /// is gone, a late heartbeat being no sign of its death (ADR-t1404-1
+    /// decisions 2 and 10); before the wrapper registers it is
     /// `opening`, and `lost` once [`PLANNER_STARTUP_SECS`] passed; a live
     /// wrapper that has not recorded its agent's pid is `opening` too. A live agent is `working` while its screen shows a turn,
     /// and `idle` once its `Stop` hook wrote the marker with no background
@@ -111,7 +115,15 @@ impl PlannerSession {
             return PlannerState::Exited;
         }
         let age = self.heartbeat_at.map_or(i64::MAX, |at| probe.now - at);
-        if heartbeat_stale(probe.wrapper_alive, age) {
+        // A background wrapper is told by its process alone: a late
+        // heartbeat is no sign of its death. Its handle may still look open
+        // while a turn its dead wrapper left runs, so a dead pid is `lost`.
+        let lost = if self.background() {
+            !probe.wrapper_alive
+        } else {
+            heartbeat_stale(probe.wrapper_alive, age)
+        };
+        if lost {
             return PlannerState::Lost;
         }
         if self.agent_pid.is_none() {
@@ -138,12 +150,15 @@ impl PlannerSession {
 
 impl PlannerSession {
     /// Whether the planner's row can be closed for good (a person's
-    /// planner included): not closed yet, its workspace recorded and not in
-    /// cmux's listing, and its wrapper done (its agent's exit recorded, its
-    /// process gone or its heartbeat older than [`HEARTBEAT_TIMEOUT_SECS`],
-    /// or never registered within [`PLANNER_STARTUP_SECS`] of the record).
-    /// A workspace not listed alone is no evidence: a wrapper still alive
-    /// keeps the row open.
+    /// planner included): not closed yet, its session recorded and not open
+    /// (`workspace_listed`: for a background wrapper, its handle's pid
+    /// showing the start it recorded), and its wrapper done (its agent's
+    /// exit recorded, its process gone, or, in a workspace, its heartbeat
+    /// older than [`HEARTBEAT_TIMEOUT_SECS`]; or never registered within
+    /// [`PLANNER_STARTUP_SECS`] of the record). A session not open alone is
+    /// no evidence: a wrapper still alive keeps the row open, and a
+    /// background one's late heartbeat closes nothing (ADR-t1404-1
+    /// decisions 2 and 10).
     pub fn abandoned(&self, probe: &PlannerProbe) -> bool {
         if self.closed_at.is_some() || self.workspace_id.is_none() || probe.workspace_listed {
             return false;
@@ -151,8 +166,19 @@ impl PlannerSession {
         if self.wrapper_pid.is_none() {
             return probe.now - self.created_at > PLANNER_STARTUP_SECS;
         }
+        if self.background() {
+            return self.exited_at.is_some() || !probe.wrapper_alive;
+        }
         let age = self.heartbeat_at.map_or(i64::MAX, |at| probe.now - at);
         self.exited_at.is_some() || heartbeat_stale(probe.wrapper_alive, age)
+    }
+
+    /// Whether the row's session is a background wrapper's handle
+    /// (ADR-t1404-1), judged by its process alone.
+    pub fn background(&self) -> bool {
+        self.workspace_id
+            .as_deref()
+            .is_some_and(super::background_wrapper::is_background)
     }
 }
 
@@ -587,5 +613,60 @@ mod tests {
         // A question someone else opened waits only for it to be idle.
         assert!(!answer_waits(PlannerState::Idle, false, false, Some(9), 10));
         assert!(!answer_waits(PlannerState::Idle, false, false, None, 10));
+    }
+
+    /// A background planner is alive while its handle's pid shows the start
+    /// it recorded (`workspace_listed`), however late its heartbeat
+    /// (ADR-t1404-1 decisions 2 and 10): a heartbeat past the timeout makes
+    /// it neither `lost` nor abandoned, so its row and its span stay open;
+    /// a handle that is gone (dead, or its pid another process's) closes it.
+    #[test]
+    fn a_background_planner_lives_by_its_handle_not_its_heartbeat() {
+        let planner = PlannerSession {
+            origin: PlannerOrigin::Runtime,
+            route: PlannerRoute::Headless,
+            workspace_id: Some("background:10:Mon_Oct__5_10:00:00_2026".into()),
+            ..session()
+        };
+        assert!(planner.background());
+        assert!(!session().background());
+        let silent = PlannerProbe {
+            now: 100 + HEARTBEAT_TIMEOUT_SECS + 1,
+            ..probe()
+        };
+        assert_eq!(planner.state(&silent), PlannerState::Working);
+        assert!(!planner.abandoned(&silent));
+        let gone = PlannerProbe {
+            workspace_listed: false,
+            wrapper_alive: false,
+            ..silent
+        };
+        assert_eq!(planner.state(&gone), PlannerState::Closed);
+        assert!(planner.abandoned(&gone));
+        // A wrapper killed while a turn it left runs (its handle still
+        // open) is lost by its pid.
+        assert_eq!(
+            planner.state(&PlannerProbe {
+                wrapper_alive: false,
+                ..silent
+            }),
+            PlannerState::Lost
+        );
+        // A recent heartbeat does not keep a gone wrapper's row open either.
+        let gone_now = PlannerProbe {
+            workspace_listed: false,
+            wrapper_alive: false,
+            ..probe()
+        };
+        assert!(planner.abandoned(&gone_now));
+        // A handle that only failed to read once, its pid alive, is no
+        // evidence: the row stays open.
+        let unread = PlannerProbe {
+            workspace_listed: false,
+            ..silent
+        };
+        assert!(!planner.abandoned(&unread));
+        // A wrapper in a workspace is still told by its heartbeat.
+        assert_eq!(session().state(&silent), PlannerState::Lost);
     }
 }

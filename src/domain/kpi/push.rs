@@ -90,6 +90,9 @@ pub enum PushKind {
     Daily,
     Weekly,
     Breach,
+    /// No `watch --role inbox` ran while asks waited for the inbox
+    /// (ADR-t1433-5 decision 1 (3)): sent once per absence.
+    InboxWatch,
 }
 
 impl PushKind {
@@ -98,6 +101,7 @@ impl PushKind {
             Self::Daily => "daily",
             Self::Weekly => "weekly",
             Self::Breach => "breach",
+            Self::InboxWatch => "inbox_watch",
         }
     }
 }
@@ -267,6 +271,40 @@ pub fn breach_message(name: &str, queue: &str, started: &Value) -> PushMessage {
             "text": breach_text(started),
             "breaches": [breach_line(started)],
             "resolved": [],
+            "report_html": Value::Null,
+            "report_json": Value::Null,
+        }),
+        report_html: None,
+        report_json: None,
+    }
+}
+
+/// The message that no `watch --role inbox` runs while `waiting` of the
+/// `open` asks for the inbox waited past the threshold, for the absence
+/// since `absent_since` (unix seconds, 0 for a watcher never seen;
+/// ADR-t1433-5 decision 1 (3)). Only that and the counts go out: no ask's
+/// or attention's content.
+pub fn inbox_watch_message(
+    name: &str,
+    queue: &str,
+    absent_since: i64,
+    open: usize,
+    waiting: usize,
+) -> PushMessage {
+    let period = format!("absent since {absent_since}");
+    PushMessage {
+        kind: PushKind::InboxWatch,
+        period: period.clone(),
+        body: json!({
+            "kind": PushKind::InboxWatch,
+            "queue": queue,
+            "period": period,
+            "title": format!("{name}: the inbox has no watch"),
+            "text": format!(
+                "{waiting} of {open} open ask(s) wait for the inbox and no `dagq watch --role inbox` is running."
+            ),
+            "open_asks": open,
+            "waiting_asks": waiting,
             "report_html": Value::Null,
             "report_json": Value::Null,
         }),

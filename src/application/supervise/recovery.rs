@@ -1637,7 +1637,6 @@ impl SessionWatch {
         }
         let outcome = ask::ask(
             &mut *sv.queue,
-            &sv.layout.main_checkout,
             NewAsk {
                 recommendation: None,
                 confidence: None,
@@ -1652,7 +1651,6 @@ impl SessionWatch {
                 finding_id: None,
                 request_id: None,
             },
-            sv.cmux,
         )?;
         let id = AskId::new(outcome["id"].as_i64().context("ask returned no id")?);
         let now = sv.files.now();

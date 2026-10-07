@@ -67,7 +67,6 @@ pub(crate) fn observe_options(
 ) -> dagq::application::observer::ObserveOptions {
     dagq::application::observer::ObserveOptions {
         mode,
-        cmux: None,
         since: None,
         dry_run: false,
         timeout: Duration::from_secs(60),
@@ -515,10 +514,8 @@ fn an_observer_at_a_login_that_ran_out_joins_the_authentication_ask() {
     let required = queue_events(&db, "auth_required");
     assert_eq!(required.len(), 1, "{required:?}");
     assert_eq!(required[0]["job"], "observer");
-    // An explicitly missing executable has the same hold behavior as None.
-    let mut missing = observe_options(ObserveMode::Daily);
-    missing.cmux = Some(db.parent().unwrap().join("missing-cmux"));
-    let second = observe(&db, &logged_out, &missing).unwrap();
+    // A second observation at the same wall joins the same ask.
+    let second = observe(&db, &logged_out, &observe_options(ObserveMode::Daily)).unwrap();
     assert_eq!(second["hold_ask_id"], json!(asks[0].id), "{second}");
     assert_eq!(queue_events(&db, "auth_required").len(), 1);
     // A failure at no wall is no hold.
@@ -649,7 +646,7 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
     assert_eq!(outcome["runs"], json!([]));
     let arguments = fs::read_to_string(&arguments).unwrap();
     assert!(
-        arguments.contains("observe\n--cmux\n/usr/bin/true\n"),
+        arguments.contains("observe\n--claude\n") && !arguments.contains("--cmux"),
         "{arguments}"
     );
     let finished = queue_events(&db, "observe_finished");
@@ -1267,9 +1264,11 @@ fn a_handoff_leaves_no_observer_process() {
     );
 }
 
+/// The observer calls no cmux (ADR-t1433-1): `observe --cmux`, as a
+/// supervisor of an older binary passes it, is accepted and ignored, and
+/// the cmux it names is never run.
 #[test]
-fn observe_uses_only_the_selected_cmux_for_workspace_listing() {
-    use dagq::application::observer::ObserveMode;
+fn observe_accepts_its_cmux_and_never_runs_it() {
     let (_dir, _repo, db) = fixture();
     let cmux = db.parent().unwrap().join("selected-cmux");
     let calls = db.parent().unwrap().join("cmux-calls");
@@ -1277,38 +1276,8 @@ fn observe_uses_only_the_selected_cmux_for_workspace_listing() {
         &cmux,
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "${0%/*}/cmux-calls"
-case "$4" in
-  list-windows) echo '[{"id":"test-window"}]' ;;
-  workspace) echo '{"workspaces":[]}' ;;
-esac
 "#,
     );
-    let provider = ObserverProvider {
-        script: "exit 0".into(),
-    };
-    let mut options = observe_options(ObserveMode::Daily);
-    options.dry_run = true;
-    let without = observe(&db, &provider, &options).unwrap();
-    assert!(!calls.exists());
-    options.cmux = Some(db.parent().unwrap().join("missing-cmux"));
-    let missing = observe(&db, &provider, &options).unwrap();
-    assert_eq!(missing["dry_run"], without["dry_run"]);
-    assert!(
-        !missing["prompt"]
-            .as_str()
-            .unwrap()
-            .contains("workspace_mismatch")
-    );
-    assert!(!calls.exists());
-    options.cmux = Some(cmux.clone());
-    observe(&db, &provider, &options).unwrap();
-    assert!(
-        fs::read_to_string(&calls)
-            .unwrap()
-            .contains("workspace list")
-    );
-    fs::remove_file(&calls).unwrap();
-    // Exercise CLI parsing and forwarding as well as the library entry point.
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
         .without_actor_env()
         .args([
@@ -1327,11 +1296,7 @@ esac
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        fs::read_to_string(&calls)
-            .unwrap()
-            .contains("workspace list")
-    );
+    assert!(!calls.exists(), "the observer ran cmux");
 }
 
 #[test]
@@ -1369,22 +1334,7 @@ fn observer_uses_the_supplied_providers_failure_signals() {
             assert_eq!(output, "provider stdout\nprovider stderr");
             JobFailure::UsageLimit
         }
-        fn detect_prompt(&self, _: &str) -> Option<&'static str> {
-            unreachable!()
-        }
-        fn screen_excerpt(&self, _: &str) -> String {
-            unreachable!()
-        }
         fn idle_hook(&self, _: &[u8]) -> IdleHook {
-            unreachable!()
-        }
-        fn input_ready(&self, _: &str) -> bool {
-            unreachable!()
-        }
-        fn input_pending(&self, _: &str, _: &str) -> bool {
-            unreachable!()
-        }
-        fn working(&self, _: &str) -> bool {
             unreachable!()
         }
     }

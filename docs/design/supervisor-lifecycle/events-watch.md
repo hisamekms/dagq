@@ -10,6 +10,8 @@ related:
   - design-supervisor-lifecycle
   - design-domain-model
   - adr-t906-1
+  - adr-t1433-1
+  - adr-t1433-5
 ---
 
 # `events` / `watch`
@@ -34,11 +36,13 @@ task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足�
 
 ## inboxのwatcherの記録（ADR-t906-1）
 
-> **予定（goal 92）**: ADR-t906-1は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)に置き換えられた。この節の記録と判定（ADR-t906-1決定1の(1)）とhook（(2)）はADR-t1433-5が引き継ぐ。supervisorのinboxへの打ち込みはやめ、後ろ盾は`[push]`とeventになる。`watch --role inbox`は`ask_opened`を見たときに`cmux notify`を出すようになる（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定2）。実装は後続のtask。
+ADR-t906-1は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)に置き換えられ、この節の記録と判定（決定1の(1)）とhook（(2)）はそれが引き継ぐ。
+watcherが居ないときの後ろ盾は、supervisorの`inbox_nudged`のeventと`host.toml`の`[push]`で、supervisorはinboxに打ち込まない（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）。
+`watch --role inbox`は、返す`ask_opened`ごとに1回、inboxの`cmux notify`で人に知らせる（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定2、[人への通知](cmux-notify.md#人への通知cmux-notify)）。
 
 `watch --role inbox`は実行中、自分の記録を queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`inbox-watchers/<開始のミリ秒>-<pid>.json`に書く（`src/infrastructure/inbox_watchers.rs`）。queue DBには書かず、`watch`はqueueを読むだけのまま。記録は`{pid, started_at, heartbeat_at, ended_at, timeout_secs, interval_secs}`（時刻はunix秒。`timeout_secs`は`--until-attention`のwatchでは`null`で、`--until-attention`より前の記録は数値を持ち、欄が無い記録も`null`として読む）で、開始時に書き、queueを読むたび（`--interval`ごと。読みが無くても同じ間隔でloopが回る）に`heartbeat_at`を更新し、返るときに`ended_at`を書く（errorで抜けたときもdropで書く）。書き込みは一時ファイルとrenameで、書けなくてもwatchは止まらない（tracingのwarnだけ）。ファイル名が開始時刻とpidを持つので、pidが再利用されても別の記録になり、各watchは自分のファイルだけを書き換える。複数のwatchが同時に走ってよい。開始時に、最後に見えた時刻が7日（`PRUNE_AFTER_SECS`）より前の記録を消す。`--role inbox`以外のwatchは記録を書かない。
 
-判定は`application::inbox_watcher::judge(records, processes, now)`の1か所にあり、`status`・`doctor`・pluginのStop hook（`status`を通して）・supervisorのinboxへの知らせ（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t906-1)）が同じもの（`judge_with`）を使う。生存はheartbeatの新しさで決め、processは居ないと数える側にだけ効く補助の条件にする（task 927）。`judge`自身はprocessを見ない純粋な判定で、記録ごとのprocessの状態（`WatcherProcess`: 居る（開始のunix秒つき）`Running` / 居ない`Gone` / 分からない`Unknown`）を`inbox_watcher::processes`が`ProcessControl`（`alive`と`started_at`。実装は`SystemProcesses`で、開始は`ps -o etime=`の経過秒を今の時刻から引いた秒）に問い合わせて渡す。問い合わせるのは記録だけでwatchingになる記録（`ended_at`が無くheartbeatが新しい）だけで、それ以外は`Unknown`のまま（数日分の記録にprocessを引かない）。queue DBには書かない:
+判定は`application::inbox_watcher::judge(records, processes, now)`の1か所にあり、`status`・`doctor`・pluginのStop hook（`status`を通して）・supervisorのinboxへの知らせ（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）が同じもの（`judge_with`）を使う。生存はheartbeatの新しさで決め、processは居ないと数える側にだけ効く補助の条件にする（task 927）。`judge`自身はprocessを見ない純粋な判定で、記録ごとのprocessの状態（`WatcherProcess`: 居る（開始のunix秒つき）`Running` / 居ない`Gone` / 分からない`Unknown`）を`inbox_watcher::processes`が`ProcessControl`（`alive`と`started_at`。実装は`SystemProcesses`で、開始は`ps -o etime=`の経過秒を今の時刻から引いた秒）に問い合わせて渡す。問い合わせるのは記録だけでwatchingになる記録（`ended_at`が無くheartbeatが新しい）だけで、それ以外は`Unknown`のまま（数日分の記録にprocessを引かない）。queue DBには書かない:
 
 - **watching**: `ended_at`が無く、`now - heartbeat_at <= 3 × interval + 10`秒（`HEARTBEAT_INTERVALS`・`HEARTBEAT_SLACK_SECS`。既定の`--interval 2`で16秒）で、かつ`timeout_secs`があれば`now <= started_at + timeout + 同じ閾値`（自分の`--timeout`を過ぎても返らないwatchは固まっている）。`timeout_secs`が`null`（`--until-attention`）のwatchはこの条件を当てはめず、heartbeatの新しさだけで決める（何時間走っても、heartbeatが新しければwatching）。heartbeatが閾値より古ければ、processが残っていても（固まった・queueを読めていない）watchingでない。
 - **processが終わっている記録**: 上の条件を満たしても、記録の`pid`のprocessが居ない（`Gone`）か、居てもその開始が記録の`started_at`の`PROCESS_START_LEAD_SECS`（60秒）前から`PROCESS_START_LAG_SECS`（5秒）後までに入らない（pidの再利用）ときはwatchingに数えない。Claude Codeの`/clear`やKillShellがwatchをSIGKILLするとdropが走らず`ended_at`が書かれないので、これが無いとheartbeatの閾値（既定16秒）のあいだwatchingに数えられ、Stop hookが居ると誤ってturnの終わりを通しうる。許容の幅: 前の60秒は、processの起動から記録を書くまで（queueを開くまでの遅れを含む）の分、後の5秒は、`etime`が秒単位で切り捨てられる分（引く時刻は`ps`の前に読むので、`ps`の起動が遅い分は前側にずれる）。記録を消さずにSIGKILLされ、親がまだ回収していないzombieは居ると数えるが、親（Claude Codeのshell）がすぐ回収する。pidを再利用したprocessは元のwatchが終わった後（`started_at`より後）に始まるので、後ろ側の幅を狭くする。終わった時刻は分からないので猶予の起点にせず、`last_seen_at`は最後の`heartbeat_at`のまま（猶予の中の他の記録が無ければ`absent`）。processが居て開始が合うとき、居るが開始を読めないとき（`Unknown`。`ProcessControl::started_at`の既定、`ps`が失敗したとき）は、heartbeatだけの判定と同じ。processが居ることはwatchingに数える理由にならない（heartbeatの新しさが要る）。
@@ -47,7 +51,7 @@ task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足�
 
 ### watcherの変わり目の記録
 
-記録のファイルは7日で消え、`kpi`はrun_eventsだけから導くので、supervisorがwatcherの状態の変わり目をqueueのeventに残す（task 1021。`src/application/supervise/inbox_nudge.rs`の`record_watcher_change`）。supervisorは毎pass（drain中も、`--no-claude`でも）、知らせ（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t906-1)）と同じ`judge_with`の判定で、`alive`なら`inbox_watcher_returned`、`absent`なら`inbox_watcher_absent`をqueueのevent（task・goal・runを持たない）として`record_inbox_watcher_change`で書く。この2つのkindのうち最新のeventが同じkindなら書かずに`false`を返す（1つのwrite transaction。`claim_inbox_nudge`と同じ排他）ので、watcherが居続ける・居ないままのpassでは書かず、同じqueueの複数のsupervisorとexecの引き継ぎの後のprocessも同じ変わり目を二度書かない。最新のeventの`at`より古い判定（遅れて書こうとしたsupervisorの、別のsupervisorより前の判定）も書かない。どちらも記録の無いqueueでは、最初のpassの判定をそのまま書く（`inbox_watcher_returned`は最初の`alive`も表す）。payloadは`{at（判定のunix秒）, watching, last_seen_at, absent_secs}`（判定の値。`absent_secs`は`absent`のときだけ数値）。書けなくてもwarnを出すだけで、次のpassで書き直す。どちらもattentionではない。`watch`と`status`はqueue DBを読み取り専用のまま。`kpi`の`ask_seen_wait`（[kpi](kpi.md)）がこれを読む。
+記録のファイルは7日で消え、`kpi`はrun_eventsだけから導くので、supervisorがwatcherの状態の変わり目をqueueのeventに残す（task 1021。`src/application/supervise/inbox_nudge.rs`の`record_watcher_change`）。supervisorは毎pass（drain中も）、知らせ（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）と同じ`judge_with`の判定で、`alive`なら`inbox_watcher_returned`、`absent`なら`inbox_watcher_absent`をqueueのevent（task・goal・runを持たない）として`record_inbox_watcher_change`で書く。この2つのkindのうち最新のeventが同じkindなら書かずに`false`を返す（1つのwrite transaction。`claim_inbox_nudge`と同じ排他）ので、watcherが居続ける・居ないままのpassでは書かず、同じqueueの複数のsupervisorとexecの引き継ぎの後のprocessも同じ変わり目を二度書かない。最新のeventの`at`より古い判定（遅れて書こうとしたsupervisorの、別のsupervisorより前の判定）も書かない。どちらも記録の無いqueueでは、最初のpassの判定をそのまま書く（`inbox_watcher_returned`は最初の`alive`も表す）。payloadは`{at（判定のunix秒）, watching, last_seen_at, absent_secs}`（判定の値。`absent_secs`は`absent`のときだけ数値）。書けなくてもwarnを出すだけで、次のpassで書き直す。どちらもattentionではない。`watch`と`status`はqueue DBを読み取り専用のまま。`kpi`の`ask_seen_wait`（[kpi](kpi.md)）がこれを読む。
 
 ## CIの見張り（ADR-t1920-1）
 

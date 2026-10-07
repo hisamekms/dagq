@@ -84,30 +84,6 @@ name = "finding_planner::a_planner_question_about_a_finding_reaches_its_planner_
 reason = "B 境界（守る境界）: supervisor passes with the plan review job deliver the answer to a background planner's turns/ and reopen planners up to the limit (task 1441 moved it off cmux)"
 task = 1441
 
-# 8.637s, class B
-[[test]]
-name = "inbox_nudge::an_idle_inbox_is_nudged_twice_then_the_person_is_notified_then_nothing"
-reason = "B 境界（守る境界: supervisorの配線、inboxへのcmuxの送り出しと通知）: representative cmux send/notify wiring (inbox stays)"
-task = 1707
-
-# 6.611s, class D
-[[test]]
-name = "inbox_nudge::an_inbox_at_work_or_with_a_line_typed_is_not_nudged"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: screen-idle judgment from text"
-task = 1707
-
-# 7.422s, class D
-[[test]]
-name = "inbox_nudge::failed_submissions_are_recorded_once_and_advance_to_the_next_nudge"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: nudge step progression decision"
-task = 1707
-
-# 5.651s, class D
-[[test]]
-name = "inbox_nudge::nothing_is_typed_with_a_watcher_without_an_ask_or_without_the_workspace"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: precondition decision"
-task = 1707
-
 # 5.198s, class D
 [[test]]
 name = "landing_branch::no_push_records_the_configured_remote"

@@ -217,7 +217,7 @@ fn assert_required_run_landed(fixture: &Fixture, task_id: &str) -> String {
 /// on the landed commit, so the work reached the run branch through the
 /// broker.
 #[test]
-#[ignore = "needs a running cmux and podman; builds the broker's image; run with --ignored"]
+#[ignore = "needs podman; builds the broker's image; run with --ignored"]
 fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
     let fixture = fixture();
     let Fixture { repo, env, .. } = &fixture;
@@ -317,7 +317,7 @@ fn a_preferred_worker_does_its_task_through_the_broker_and_lands() {
 /// operations of the run, no built-in tool is counted, and the run's token
 /// is revoked with its landing.
 #[test]
-#[ignore = "needs a running cmux and podman; builds the broker's image; run with --ignored"]
+#[ignore = "needs podman; builds the broker's image; run with --ignored"]
 fn a_required_worker_does_its_task_only_through_the_broker_and_lands() {
     let fixture = fixture();
     let Fixture { repo, env, .. } = &fixture;
@@ -351,7 +351,7 @@ fn a_required_worker_does_its_task_only_through_the_broker_and_lands() {
 /// ready itself (task 923), the hold ends (`broker_claims_resumed`) before
 /// the claim, and the run lands through the broker as above.
 #[test]
-#[ignore = "needs a running cmux and podman; builds the broker's image; run with --ignored"]
+#[ignore = "needs podman; builds the broker's image; run with --ignored"]
 fn a_required_queue_claims_nothing_while_its_broker_is_stopped_and_tells_the_inbox() {
     let fixture = fixture();
     let Fixture { repo, env, .. } = &fixture;
@@ -387,8 +387,6 @@ fn a_required_queue_claims_nothing_while_its_broker_is_stopped_and_tells_the_inb
                 "--host-metrics-interval",
                 "0",
             ])
-            .arg("--cmux")
-            .arg(&fixture.cmux)
             .arg("--claude")
             .arg(&fixture.stub)
             .stdin(Stdio::null())

@@ -292,11 +292,9 @@ impl Supervisor<'_> {
 
     fn hold_job(&mut self, wall: Wall, job: &HoldJob, error: &str) -> Result<()> {
         let run = job.run_id().cloned();
-        let (outcome, value) = ask::hold(
+        let (outcome, _) = ask::hold(
             &mut *self.queue,
-            &self.layout.main_checkout,
             NewHold::wall(wall, run.clone(), Some(job.clone())),
-            self.cmux,
         )?;
         if outcome.joined {
             let payload = json!({
@@ -317,7 +315,7 @@ impl Supervisor<'_> {
         if self.queue_hold.is_none() {
             self.queue_hold = crate::domain::queue_hold::hold_of(&outcome.ask);
         }
-        warn!(ask_id = %outcome.ask.id, "the headless {} stopped at the {} wall: ask {} holds {} run(s) and job(s) (notified: {})", job.entry(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len(), value["notified"]);
+        warn!(ask_id = %outcome.ask.id, "the headless {} stopped at the {} wall: ask {} holds {} run(s) and job(s)", job.entry(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len());
         Ok(())
     }
 

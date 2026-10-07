@@ -128,14 +128,6 @@ mod tests {
     struct Signals;
 
     impl AgentSignals for Signals {
-        fn detect_prompt(&self, _: &str) -> Option<&'static str> {
-            None
-        }
-
-        fn screen_excerpt(&self, screen: &str) -> String {
-            screen.to_owned()
-        }
-
         fn idle_hook(&self, content: &[u8]) -> IdleHook {
             IdleHook {
                 background_running: content == b"running",
@@ -143,29 +135,12 @@ mod tests {
                 evidence: vec![("hook_event_name", json!("Stop"))],
             }
         }
-
-        fn input_ready(&self, _: &str) -> bool {
-            true
-        }
-
-        fn input_pending(&self, _: &str, _: &str) -> bool {
-            false
-        }
-
-        fn working(&self, _: &str) -> bool {
-            false
-        }
     }
 
     fn idle_after_receipt(files: &MemoryFiles, receipt: &Path, marker: &Path) -> Option<Value> {
         IdleMarker::read(files, &Signals, marker)
             .unwrap()
             .and_then(|idle| idle.idle_after_receipt(files, receipt).unwrap())
-    }
-
-    #[test]
-    fn the_transcript_is_the_whole_screen_by_default() {
-        assert_eq!(Signals.transcript("work\n❯\n12:04"), "work\n❯\n12:04");
     }
 
     #[test]

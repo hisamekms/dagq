@@ -4,7 +4,6 @@ use crate::{
         AgentProvider, CommandSpec, DetachedRefusal, FileStamp, LandingBranchStamp, MainRemote,
         PlannerCommand, PluginState, ProcessControl, Repository, SupervisorEnvironment, TurnReader,
         TurnTarget, WorkspaceBackend, WorkspaceTags, execution::permission_deny,
-        stats::WorkspaceListing,
     },
     domain::{
         ActorRole, CommitSha, TaskId, TaskRun,
@@ -2792,9 +2791,120 @@ impl WorkspaceBackend for Cmux {
     }
 }
 
-impl WorkspaceListing for Cmux {
-    fn list_workspaces(&self) -> Result<Vec<ListedWorkspace>> {
-        listed_workspaces(&self.workspace_listing()?)
+/// The sessions backend of the supervisor, the queue service and the
+/// reads that judge a session (`planners`, `stats`): this host's background
+/// wrappers (ADR-t1404-1), and no cmux (ADR-t1433-1 decision 1). Every call
+/// on a [`BackgroundHandle`] is served as [`Cmux`] serves it; a cmux
+/// workspace (one an older binary opened) is not looked up (`exists` says
+/// it is not open) nor closed, and every other cmux call is refused without
+/// running anything. Only `up` / `down` and the inbox's session use
+/// [`Cmux`].
+pub struct BackgroundSessions;
+
+/// The refusal of a call that only cmux could make.
+fn no_cmux(what: &str) -> anyhow::Error {
+    anyhow::anyhow!("{what} needs cmux, which only the inbox uses (ADR-t1433-1)")
+}
+
+impl WorkspaceBackend for BackgroundSessions {
+    fn launch_background(
+        &self,
+        cwd: &Path,
+        command: &str,
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<String> {
+        background_wrappers().launch(cwd, command, env, log)
+    }
+
+    /// Nothing to ping: no cmux is called.
+    fn preflight(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
+        Err(no_cmux("a detached ping"))
+    }
+
+    fn call_timeout(&self) -> Duration {
+        OUTPUT_TIMEOUT
+    }
+
+    fn send_text(&self, workspace_id: &str, _: &str) -> Result<()> {
+        refuse_background(workspace_id, "text")?;
+        Err(no_cmux("typing into a workspace"))
+    }
+
+    fn send_enter(&self, workspace_id: &str) -> Result<()> {
+        refuse_background(workspace_id, "keys")?;
+        Err(no_cmux("a key"))
+    }
+
+    fn capture(&self, workspace_id: &str) -> Result<String> {
+        refuse_background(workspace_id, "a screen")?;
+        Err(no_cmux("reading a screen"))
+    }
+
+    fn close(&self, workspace_id: &str) -> Result<()> {
+        match BackgroundHandle::parse(workspace_id) {
+            Some(handle) => background_wrappers().stop(&handle).map(drop),
+            None => Err(no_cmux("closing a workspace")),
+        }
+    }
+
+    fn stop_background(&self, handle: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
+        let parsed = BackgroundHandle::parse(handle)
+            .with_context(|| format!("{handle} is not a background wrapper's handle"))?;
+        background_wrappers().stop(&parsed).map(Some)
+    }
+
+    fn set_color(&self, workspace_id: &str, _: &str) -> Result<()> {
+        if is_background(workspace_id) {
+            return Ok(());
+        }
+        Err(no_cmux("a workspace's color"))
+    }
+
+    fn set_status(&self, workspace_id: &str, _: &str, _: &str, _: &str) -> Result<()> {
+        if is_background(workspace_id) {
+            return Ok(());
+        }
+        Err(no_cmux("a workspace's status pill"))
+    }
+
+    fn pin(&self, workspace_id: &str) -> Result<()> {
+        if is_background(workspace_id) {
+            return Ok(());
+        }
+        Err(no_cmux("pinning a workspace"))
+    }
+
+    fn send_exit(&self, workspace_id: &str) -> Result<()> {
+        refuse_background(workspace_id, "/exit")?;
+        Err(no_cmux("typing /exit"))
+    }
+
+    /// A background wrapper by its process; a cmux workspace is not looked
+    /// up and counts as not open.
+    fn exists(&self, workspace_id: &str) -> Result<bool> {
+        Ok(BackgroundHandle::parse(workspace_id)
+            .is_some_and(|handle| background_wrappers().alive(&handle)))
+    }
+
+    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
+        Err(no_cmux("listing the workspaces"))
+    }
+
+    fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
+        Err(no_cmux("opening a workspace"))
+    }
+
+    fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
+        Err(no_cmux("a workspace group"))
+    }
+
+    fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
+        Err(no_cmux("a notification"))
     }
 }
 
@@ -5721,7 +5831,7 @@ esac
         assert!(cmux.exists("W-0").unwrap());
         assert!(cmux.exists("w-1").unwrap(), "a workspace of another window");
         assert!(!cmux.exists("W-2").unwrap());
-        assert_eq!(cmux.list_workspaces().unwrap().len(), 2);
+        assert_eq!(cmux.listed_workspace_ids().unwrap().len(), 2);
         let calls = fs::read_to_string(&log).unwrap();
         assert!(
             calls.contains(

@@ -2,7 +2,8 @@
 //! [`crate::domain::stats::stats`] derives the per-run and per-goal times
 //! and the thresholds crossed from, and what the running alerts (ADR-0043
 //! decision 5) read outside the queue: the run directories' markers and
-//! cmux's workspaces; and main's Git history for `conflict_hotspots`.
+//! the processes of the runs' background wrappers (no cmux, ADR-t1433-1);
+//! and main's Git history for `conflict_hotspots`.
 
 use std::{collections::HashSet, path::Path, time::SystemTime};
 
@@ -10,12 +11,12 @@ use anyhow::Result;
 
 use super::{AgentSignals, ProcessControl, Queue, RunFiles, StatusFilter, TaskQuery};
 use crate::domain::{
-    GoalStatus, RunId, RunStatus, SessionRole, SupervisorPulse, TaskRun, TaskStatus,
+    GoalStatus, RunId, RunStatus, SupervisorPulse, TaskRun, TaskStatus,
     host_metrics::HostSummary,
     stall::{BackgroundTask, IDLE_LOG, StallConfig, background_first_seen},
     stats::{
-        ConflictConfig, ConflictConfigReport, History, ListedWorkspace, LiveRun, LiveSnapshot,
-        SlotSnapshot, StallConfigReport, Stats, StatsQuery, Workspaces,
+        ConflictConfig, ConflictConfigReport, History, LiveRun, LiveSnapshot, SlotSnapshot,
+        StallConfigReport, Stats, StatsQuery,
         conflicts::{MainHistory, earliest_conflict},
         stats as aggregate, timestamp_millis, with_areas, with_changes, without_cargo_measures,
     },
@@ -25,19 +26,10 @@ use crate::domain::{
 /// takes an input (ADR-0043 decision 2), in the run directory.
 pub const PROMPT_SUBMIT_MARKER: &str = "prompt-submit.json";
 
-/// The workspaces cmux has open, for `workspace_mismatch`.
-pub trait WorkspaceListing {
-    fn list_workspaces(&self) -> Result<Vec<ListedWorkspace>>;
-}
-
 /// What `stats` reads outside the queue.
 pub struct StatsSources<'a> {
     pub files: &'a dyn RunFiles,
     pub signals: &'a dyn AgentSignals,
-    /// `None` when there is no cmux to ask.
-    pub workspaces: Option<&'a dyn WorkspaceListing>,
-    /// The queue's hash, which its worker workspaces carry.
-    pub queue_hash: &'a str,
     /// The `[stall]` of `dagq.toml`; `None` when there is no file.
     pub config_file: &'a dyn Fn() -> Result<Option<StallConfig>>,
     /// The `[conflicts]` of `dagq.toml`; `None` when there is no file.
@@ -94,9 +86,9 @@ pub fn conflict_config(file: Option<ConflictConfig>) -> ConflictConfigReport {
 /// Per-run and per-goal times and the thresholds crossed, derived from
 /// `run_events`. The idle alert looks at the live supervisors' slots at
 /// `now`, `processes` telling which are alive. The running alerts read the
-/// unfinished runs' directories and cmux's workspaces through `sources`;
-/// a cmux that cannot be asked leaves only `workspace_mismatch` unjudged.
-/// Reads only.
+/// unfinished runs' directories through `sources`, and `workspace_mismatch`
+/// the processes of their background wrappers through `processes` (its pid
+/// and the start its handle recorded; no cmux, no heartbeat). Reads only.
 pub fn stats(
     queue: &dyn Queue,
     processes: &dyn ProcessControl,
@@ -187,30 +179,8 @@ pub fn stats(
         live.background_alive = background_alive(&events, run.id(), run.workspace_id(), processes);
         runs.push(live);
     }
-    let mut session_workspaces = Vec::new();
-    for role in [
-        SessionRole::Supervisor,
-        SessionRole::Inbox,
-        SessionRole::Planner,
-    ] {
-        session_workspaces.extend(queue.session_workspace(role)?);
-    }
-    let workspaces = match sources.workspaces {
-        None => Workspaces::Unavailable("no cmux to list the workspaces".to_owned()),
-        Some(listing) => match listing.list_workspaces() {
-            Ok(workspaces) => Workspaces::Listed(workspaces),
-            Err(error) => Workspaces::Unavailable(format!("{error:#}")),
-        },
-    };
     let live = LiveSnapshot {
         runs,
-        known_runs: all_runs
-            .iter()
-            .map(|run| (run.id().clone(), run.task_id()))
-            .collect(),
-        session_workspaces,
-        workspaces,
-        queue_hash: sources.queue_hash.to_owned(),
         config,
         history: conflict_history(&events, sources.history),
         conflicts: conflict_config((sources.conflicts_file)()?),

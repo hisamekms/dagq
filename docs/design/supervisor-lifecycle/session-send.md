@@ -18,10 +18,10 @@ worker の session への打ち込み・入力欄の確認・Enter の送り直�
 
 1. worker への依頼と答えは `deliver::submit` が `headless::request_turn` を通して run dir の `turns/` に書く。終了も終了依頼ファイルへ書く。
 2. wrapper が次の turn として依頼を取り、turn の出力と結果を記録する。turn の依頼・終わり・receipt を使って監視する。
-3. `submit_input` を使うのは inbox の促し（task 1442）だけになった。人の planner には打ち込まない（人の planner の行は cmux を呼ばずに閉じ、revise と answer は新しい runtime の planner が受ける）。runtime の planner は非対話だけで、打ち込まない（task 1441）。text を打ち、入力欄に残る間は `submit_check_interval` ごとに Enter だけを最大3回送り直す。ダイアログが現れれば送らず `Dialog`、残れば `Stuck`、離れれば `Submitted` とする。
-4. `Input::Exit` の送信と、送信失敗・時間切れの判定は `submit_input` に残るが、今これを使う処理は無い（どの planner にも打たない。worker と runtime の planner はこの打鍵の処理を使わない）。
-5. plannerの最後の入力の印は `supervisor-input.json` へ書く（非対話の依頼の前。どの planner にも打たない）。inbox の readiness は引き続き画面から判定する。人の planner の画面からは idle を判定しない。
-6. inbox の上の処理の撤去は後続 task（1442）が担当する。
+3. supervisorはどのsessionのterminalにも打ち込まない（[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)決定2）。
+   inboxへの打ち込みの促しも無く、watcherが居ないときは`inbox_nudged`と`[push]`で知らせる（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）。
+4. 人の planner の行は cmux を呼ばずに閉じ、revise と answer は新しい runtime の planner が受ける。
+5. plannerの最後の入力の印は `supervisor-input.json` へ書く（非対話の依頼の前。どの planner にも打たない）。人の planner の画面からは idle を判定しない。
 
 
 ## 人とinboxの画面の読み取りと送信
@@ -42,5 +42,4 @@ worker の session への打ち込み・入力欄の確認・Enter の送り直�
 - backgroundで動く非対話のsession（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)）のturnの要約は、画面の代わりに`run log RUN [--lines N] [--follow]` / `planner log ID [--lines N] [--follow]`でそのlogを読む（終わったrun・閉じたplannerも。capabilityは`screen.read`で、何も記録しないのでqueueを読み取りで開く。[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)の「logを読むCLI」）
 - 記録: どのコマンドも`screen_read` / `screen_input_sent`を残さない（task 1441まではplannerの画面の読み取りと送信が残した。過去のeventは履歴として読める）
 - 判定: capabilityは`screen.read`・`screen.send`で、userとinboxだけが持つ（[Authorization](../authorization.md)）。`Operation`の入口で判定し、拒めば`authorization_denied`を残す。`planner screen` / `planner send`はもうeventを残さないが、queueは今も書き込みで開く（本番queueでは固定バイナリで打つ）
-- supervisorがinboxに打つときの送信の判定（`AgentSignals`）はClaude Codeの画面のもの（`ClaudeCode`）を使う。画面を持つsessionはClaude Codeだけのため
 - runtimeのplannerはどれも非対話（`route: headless`）で、supervisorはこの文書の送信と確認を使わない（古いバイナリがworkspaceで開いたruntimeのplannerの行にも打ち込まない）。reviseの指摘・`planner_question`のanswer・Claudeが使えなかったturnの続き（`provider retry`）・終了は、`Supervisor::send_to_planner`が次のturnの依頼と終了の依頼としてplannerのディレクトリの`turns/`に置く（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)、ADR-t1394-2決定2）。`planner screen`の`screen: null`と`turns`の形と、非対話のplannerへの`planner send`の拒否は[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)のもの。人の言葉を足す続きの依頼は、cmuxでの送信でなく`planner request`が次のturnの依頼として置き、対話のplannerには拒む（[続きの依頼と非対話のplannerのCLI](plan-planners.md#続きの依頼と非対話のplannerのcli)）

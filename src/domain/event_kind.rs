@@ -689,14 +689,16 @@ pub const HOLD_CONTINUE_SENT: &str = EventKind::HoldContinueSent.as_str();
 /// A session without a fresh idle marker whose screen was inferred idle
 /// (ADR-t803-1), once per span.
 pub const IDLE_INFERRED: &str = EventKind::IdleInferred.as_str();
-/// The supervisor typed a line into the inbox without a watcher, or told a
-/// person by `cmux notify` (ADR-t906-1 decision 1 (3)): its claim, once per
-/// absence and attempt.
+/// The supervisor found the inbox without a watcher while asks waited
+/// (ADR-t1433-5 decision 1 (3)): recorded once per absence, with whether it
+/// was also sent through `[push]` (`action`). Older records hold the typed
+/// lines and the `cmux notify` of ADR-t906-1.
 pub const INBOX_NUDGED: &str = EventKind::InboxNudged.as_str();
 /// `up` opened the inbox's workspace, with whether it started the inbox
 /// with the settings that deny raw cmux (ADR-t1228-2 decision 4).
 pub const INBOX_OPENED: &str = EventKind::InboxOpened.as_str();
-/// A nudge of the inbox the supervisor could not deliver.
+/// A nudge of the inbox an older supervisor could not type or notify
+/// (ADR-t906-1); read only.
 pub const INBOX_NUDGE_FAILED: &str = EventKind::InboxNudgeFailed.as_str();
 /// The supervisor judged the inbox's watcher absent after it was alive, or
 /// first (task 1021): once per change of its state.

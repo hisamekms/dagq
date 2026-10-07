@@ -138,10 +138,9 @@ pub(super) fn nudge_stale_receipt(
             if let Some(attempt) = attempt {
                 detail["attempt"] = json!(attempt);
             }
-            // Only a request that left the input box is a repair; one stuck
-            // there or under a dialog went on to the ask. The text is typed,
-            // so a record that fails is only noted.
-            if matches!(submission, Submission::Submitted(_) | Submission::Queued)
+            // The request is written as the session's next turn; a record
+            // that fails is only noted.
+            if matches!(submission, Submission::Queued)
                 && let Err(error) = sv.queue.record_runtime_event(
                     run.id(),
                     EventKind::AutoRepaired,

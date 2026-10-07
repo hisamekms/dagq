@@ -183,6 +183,8 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - CIの見張りの保留（`Supervisor::ci_watch_held`・`ci_watch_unreadable`）を実行と着地に読み取りとして公開し、状態を変えるのは`supervise::ci_watch`だけ。
 - timerのjob（observer・スループットの見直し）の使えなかった終わりを、型付きの値（`domain::throughput_review::UnusableFinish`・`supervise::observer::UnusableTimerJob`）として実行と着地に公開する。
   控えるのは実行と着地の`supervise::provider`で、同じ終わりを1回だけ控える（[Provider lifecycle](provider-lifecycle.md)）。
+- `watch`の`AskNotifier`を所有し、実装はhost運用のinboxの操作を使う。
+- KPIのpushの待ち（`queue_pushes`）をhost運用の`inbox_nudge`に公開する。
 - `ObserverLog`・`EventReads`は内部。
 
 **許す依存の向き**
@@ -219,18 +221,18 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 **hostの操作のport**
 
-今は1つのtrait`WorkspaceBackend`（`src/application/ports.rs`）が、次の2つの責務を持つ。
+`WorkspaceBackend`（`src/application/ports.rs`）が次の2つの責務を持つ。
 cmuxを使うのはinboxだけ（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
 
 - inboxのworkspace（cmux）の操作: workspaceを開く・閉じる・在るかを見る・画面を読む・文字とkeyを送る。
-  所有する呼び手はinboxと`up` / `down`（`application::lifecycle`、inboxへの催促の`supervise::inbox_nudge`）。
-  人への通知（`notify`）とresumeの待ちの長さ（`resume_timeout`ほか）も今はこのtraitにある（呼び手はtraitのdoc comment）。
+  所有する呼び手はinboxと`up` / `down`（`application::lifecycle`）と、inboxの中の`watch --role inbox`の通知（`notify`）。
+  `resume_timeout`ほかの待ちの長さもこのtraitにある。
   実装は`infrastructure::adapters::Cmux`がcmuxのCLIを呼ぶ。
-- 非対話のrunとruntimeのplannerのsession wrapperを、workspaceなしのbackgroundのprocessとして扱う操作: 起動（`launch_background`）・停止（`stop_background`、停止の結果`WrapperStop`を返す）・生死確認（handleを渡した`exists`）。
-  所有する呼び手はsupervisor（`supervise::background`・`reopen`、起動は`application::actor_executor`経由）とruntimeのplanner（`application::planner`）で、`stats`はrunの最後のhandleの生死を`ProcessControl`で読むだけ。
-  実装は`Cmux`のこれらのmethodが`infrastructure::background::BackgroundWrappers`に委ね、cmuxを呼ばない。
+- 非対話のrunとruntimeのplannerのsession wrapperを、workspaceなしのbackgroundのprocessとして扱う操作: 起動（`launch_background`）・停止（`stop_background`、`WrapperStop`を返す）・生死確認（handleを渡した`exists`）。
+  所有する呼び手はsupervisor（`supervise::background`・`reopen`、起動は`actor_executor`経由）とruntimeのplanner（`application::planner`）で、`stats`は最後のhandleの生死を`ProcessControl`で読むだけ。
+  supervisorの実装`BackgroundSessions`は`BackgroundWrappers`に委ねcmuxは拒む。
   停止の記録（`wrapper_stopped`）は`application::recording::RecordingBackend`が書く。
-- 落とし穴: backgroundのhandle（`domain::background_wrapper::BackgroundHandle`）はworkspaceのIDと同じ引数で渡り、画面とkeyの操作は拒まれ、色と印は何もしない。
+- 落とし穴: backgroundのhandle（`BackgroundHandle`）はworkspaceのIDと同じ引数で渡り、画面とkeyの操作は拒まれ、色と印は何もしない。
 - 決定は[ADR-t1404-1](../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)、停止の流れと記録は[非対話のworker](supervisor-lifecycle/headless-worker.md#workspaceなしのbackgroundのwrapper)の「停止の記録」。
 - portを2つに分けたら、この項を分けた後のtraitの名前と分け方に直す（C7）。
 

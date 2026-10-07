@@ -1,30 +1,26 @@
 //! The queue the dialogue and record commands work on
 //! ([`crate::application::commands::dialogue`]): the asks, notes, marks
 //! and findings of a [`SqliteQueue`] (a mark through
-//! [`crate::application::marks`], on the queue's injected clock), with the
-//! checkout that names the repository and the backend that notifies the
-//! inbox of a new ask.
+//! [`crate::application::marks`], on the queue's injected clock). A new
+//! ask notifies nobody here: the inbox's watch tells the person
+//! (ADR-t1433-1 decision 2).
 
 use crate::domain::EventKind;
-use std::path::Path;
-
 use anyhow::Result;
 use serde_json::Value;
 
 use super::sqlite::SqliteQueue;
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
-use crate::application::{RunLog, TaskStore, WorkspaceBackend, marks};
+use crate::application::{RunLog, TaskStore, marks};
 use crate::domain::{
     Answerer, Ask, AskId, Finding, FindingId, FindingOutcome, FindingStatus, NewAsk, NewFinding,
     NewNote, PlannerId, RequestId, RunEvent,
 };
 
-/// A queue, with what opening an ask needs besides it.
+/// A queue the dialogue commands work on.
 pub struct DialogueQueue<'a> {
     pub queue: &'a mut SqliteQueue,
-    pub checkout: &'a Path,
-    pub cmux: &'a dyn WorkspaceBackend,
 }
 
 impl DenialLog for DialogueQueue<'_> {
@@ -43,12 +39,7 @@ impl DialogueStore for DialogueQueue<'_> {
     }
 
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value> {
-        let binding = self
-            .queue
-            .repository_binding()?
-            .map(std::path::PathBuf::from);
-        let checkout = super::adapters::naming_checkout(binding.as_deref(), self.checkout);
-        crate::application::ask::ask(self.queue, &checkout, ask, self.cmux)
+        crate::application::ask::ask(self.queue, ask)
     }
 
     fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {

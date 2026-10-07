@@ -989,12 +989,9 @@ pub fn planner_idle_marker(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("idle.json")
 }
 
-/// Provider marker and job-output signals for workers, plus screen signals
-/// retained for the interactive planner and inbox submission paths.
+/// What a provider's agent leaves for the runtime to read: its idle
+/// marker's content and a headless job's output.
 pub trait AgentSignals {
-    /// The kind of dialog at the bottom of `screen` that holds the session
-    /// or `None` while it works. Used by planner and inbox submission.
-    fn detect_prompt(&self, screen: &str) -> Option<&'static str>;
     /// Why a headless job that failed did, from its output (its stdout and
     /// stderr), in the classes shared by every provider (ADR-t1063-1
     /// decision 4): a login that ran out and the usage limit are the walls
@@ -1002,44 +999,9 @@ pub trait AgentSignals {
     fn job_failure(&self, _output: &str) -> crate::domain::headless_job::JobFailure {
         crate::domain::headless_job::JobFailure::Other
     }
-    /// The last lines of the screen of the inbox.
-    fn screen_excerpt(&self, screen: &str) -> String;
     /// What the idle marker's content says. A content the adapter cannot
     /// read still marks a stop.
     fn idle_hook(&self, content: &[u8]) -> IdleHook;
-    /// Whether the agent's input box is drawn with no dialog over it: text
-    /// typed now reaches the agent (a booting session drops it).
-    fn input_ready(&self, screen: &str) -> bool;
-    /// Whether the input box still holds `text` after it was submitted.
-    fn input_pending(&self, screen: &str, text: &str) -> bool;
-    /// Whether the input box is drawn and holds nothing a person typed
-    /// (ADR-t906-1 decision 1 (3)): the supervisor types into a session a
-    /// person may use only then. `false` by default, which never types.
-    fn input_empty(&self, _screen: &str) -> bool {
-        false
-    }
-    /// Whether the screen shows the agent at work on a turn.
-    fn working(&self, screen: &str) -> bool;
-    /// Whether `screen` shows background work the agent keeps running
-    /// (Claude Code's count of background shells under its input box): a
-    /// `/exit` sent now stops at the agent's own dialog. `None` from a
-    /// provider whose screen does not tell, which counts as none.
-    fn screen_background(&self, _screen: &str) -> Option<bool> {
-        None
-    }
-    /// The part of `screen` only the agent's work changes (its
-    /// transcript), compared for a sign of work after a submit: what the
-    /// TUI redraws by itself (a clock, a cost, a notification) is left
-    /// out. The whole screen by default.
-    fn transcript(&self, screen: &str) -> String {
-        screen.to_owned()
-    }
-    /// The line of `log`, the end of the agent's debug log, that says its
-    /// idle hook failed to write the marker (ADR-t803-1), the latest; a
-    /// provider that logs none never has one.
-    fn idle_hook_failure(&self, _log: &str) -> Option<String> {
-        None
-    }
 }
 
 /// The content of an idle marker, as [`AgentSignals::idle_hook`] read it.
@@ -1140,17 +1102,16 @@ pub struct WorkspaceTags {
 
 /// The host's operations of two kinds (docs/design/architecture.md,
 /// "host運用"): the inbox's cmux workspace, which the inbox and `up` /
-/// `down` own (ADR-t1433-1; the supervisor's nudge of the inbox reaches it
-/// through `deliver` and `screen_idle`), and the session wrappers of the headless runs
+/// `down` own (ADR-t1433-1), and the session wrappers of the headless runs
 /// and the runtime's planners started without a workspace as background
 /// processes, which the supervisor and the planner launch, stop and check
 /// ([`launch_background`](Self::launch_background),
 /// [`stop_background`](Self::stop_background), [`exists`](Self::exists);
-/// ADR-t1404-1). A background wrapper's handle goes where a workspace ID
+/// ADR-t1404-1) through `BackgroundSessions`, which refuses every cmux call. A background wrapper's handle goes where a workspace ID
 /// goes, so the calls on the screen and the keys refuse it and the
 /// sidebar's do nothing. It also carries, for now, the notification to a
-/// person ([`notify`](Self::notify), which the asks, the observer's hold
-/// ask and the inbox nudge send) and the waits of a resumed session
+/// person ([`notify`](Self::notify), which only the inbox's `watch --role
+/// inbox` sends, for each new ask) and the waits of a resumed session
 /// ([`resume_timeout`](Self::resume_timeout) and the others, which the
 /// supervisor's session, revise, resume and stale sweep read).
 pub trait WorkspaceBackend {
@@ -1270,9 +1231,10 @@ pub trait WorkspaceBackend {
     fn ensure_group(&self, external_id: &str, name: &str) -> Result<String>;
     /// Tell a person that something waits for them: a notification, never
     /// keystrokes into a terminal. `workspace` is the workspace it belongs
-    /// to; `None` sends it without one. Only `ask` sends one, for a new
-    /// ask, aimed at the inbox (ADR-0022 decision 5); the supervisor sends
-    /// none.
+    /// to; `None` sends it without one. Only the inbox's `watch --role
+    /// inbox` sends one, for each new ask it returns, aimed at the inbox
+    /// (ADR-0022 decision 5, ADR-t1433-1 decision 2); the supervisor, the
+    /// queue service and the observer send none.
     fn notify(&self, title: &str, body: &str, workspace: Option<&str>) -> Result<()>;
     /// How long one call may run before the backend gives it up as failed;
     /// recorded with every `backend_call_failed`.
@@ -2102,12 +2064,6 @@ pub trait SessionRegistry {
         &self,
         hook: &crate::domain::sessions::SessionHook,
     ) -> Result<serde_json::Value>;
-    /// The open spans the hook recorded, each with its workspace.
-    fn hook_session_workspaces(&self) -> Result<Vec<(EventId, String)>>;
-    /// Close, as `inferred`, the spans among `gone` the hook recorded that
-    /// are still open: their workspace is gone (ADR-0048 decision 7).
-    /// Returns how many it closed.
-    fn close_gone_sessions(&self, gone: &[EventId]) -> Result<usize>;
     /// Close the run's review span still open, as `job_finished` now: its
     /// headless job ended (or could not start) without a verdict, and its
     /// `review_failed` waits for the session's `/exit` (task 541); returns

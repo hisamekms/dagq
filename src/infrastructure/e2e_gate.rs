@@ -1811,7 +1811,11 @@ echo 'test result: FAILED. 0 passed; 2 failed'; exit 101";
         assert!(!calls.contains("workspace-group delete"));
     }
 
-    /// Without a running cmux the e2e does not start.
+    /// Without a running cmux the e2e does not start: the gates run every
+    /// e2e, the `up` / `down` one that opens the inbox included, so a host
+    /// whose cmux does not answer passes none by running only the e2e that
+    /// need no cmux (ADR-t963-1 decision 1, ADR-t1233-2 decision 3,
+    /// ADR-t1433-1 decision 3).
     #[test]
     fn the_e2e_needs_a_running_cmux() {
         let dir = tempfile::tempdir().unwrap();

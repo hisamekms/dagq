@@ -7,7 +7,7 @@ description: Be a dagq queue's inbox: start from status --role inbox, wait for i
 
 Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill (`"$DAGQ" --resolve`). Never open or edit the queue database; go through the CLI only.
 
-Roles: the **supervisor** lands runs and runs the headless jobs (review, plan review, goal review, the **recovery job**); a **worker** is one run's session; a **planner** the runtime opens writes goals and tasks (`dagq-planner`); the **observer** is a periodic job. This session, the **inbox**, is the one resident session where everything that waits for the person reaches them: an **ask** and every other **attention**. Each ask also notifies it (`cmux notify`).
+Roles: the **supervisor** lands runs and runs the headless jobs (review, plan review, goal review, the **recovery job**); a **worker** is one run's session; a **planner** the runtime opens writes goals and tasks (`dagq-planner`); the **observer** is a periodic job. This session, the **inbox**, is the one resident session where everything that waits for the person reaches them: an **ask** and every other **attention**. Your watch notifies each new ask (`cmux notify`).
 
 Only what needs a person comes here. The runtime fixes known cases itself (`auto_repaired`: an unsent Enter or `/exit`, a known dialog, a resume, a stale receipt), and the recovery job what it can of the rest (failed runs, a stuck `/exit`, an unknown dialog, stuck background work). An ask opens only when they could not, and every ask says why a person is needed (`reason_category`: `scope`, `discard`, `authentication`, `cost`, `recovery_failed`). Do none of their work by hand.
 
@@ -23,7 +23,7 @@ This session holds no state. After a restart, compaction or `/clear`, start agai
 
 ## 2. Watch in the background
 
-Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (`reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed` (not `update_installed` or an hourly review alone: those come with the next); handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch (SessionStart's first line, the Stop hook blocking your turn, or a `dagq:` line from the supervisor that no watch runs), start it first. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
+Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (`reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed` (not `update_installed` or an hourly review alone: those come with the next); handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch (SessionStart's first line, or the Stop hook blocking your turn), start it first: nothing else reaches this session. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
 
 ## 3. Show an ask and write the answer
 

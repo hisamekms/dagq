@@ -70,10 +70,8 @@ use super::{
         recovery_prompt, resume_request, review_prompt, revise_mismatch_request, revise_request,
         siblings_in_progress, stale_receipt_nudge, stall_nudge,
     },
-    recording::{
-        RecordingBackend, exit_unsent, reason_of_error, text_on_screen, timed_out_maybe_sent,
-    },
-    tail, unix_millis, unix_seconds,
+    recording::{RecordingBackend, reason_of_error},
+    tail, unix_seconds,
 };
 use crate::domain::{
     ABANDON_EXIT_FAILED, ABANDON_EXIT_REQUESTED_BEFORE, ABANDON_EXIT_SENT, ActorContext,
@@ -158,7 +156,7 @@ use self::broker::broker_refused;
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub use self::ci_watch::{CiSourceMaker, CiWatchFile, CiWatchPort};
 pub use self::claim_defer::read_conflicts_at_start;
-pub(crate) use self::deliver::{Input, Submission, submit_input};
+pub(crate) use self::deliver::{Input, Submission};
 pub use self::disk::CLEANUP_INTERVAL;
 pub use self::e2e::RunE2ePort;
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
@@ -354,7 +352,9 @@ pub struct Layout {
     pub common_dir: PathBuf,
     /// The `claude` the run sessions start.
     pub claude: PathBuf,
-    /// The cmux executable passed to the observer.
+    /// The cmux of `supervise --cmux`: the supervisor calls none
+    /// (ADR-t1433-1); only the e2e it runs before a landing pings it, as
+    /// the e2e gate's precondition (ADR-t1233-2 decision 3).
     pub cmux: PathBuf,
     /// The `codex` a Codex worker starts (`supervise --codex`), resolved
     /// when it was found.
@@ -730,9 +730,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         !layout.db.starts_with(&layout.repo_root) || layout.db.starts_with(&layout.common_dir),
         "keep the queue outside the worktree or under its Git common directory"
     );
-    ports.cmux.preflight()?;
-    // The screen of the inbox and the idle markers are read with the
-    // interactive Claude adapter's signals.
+    // No cmux is pinged: the supervisor calls none (ADR-t1433-1); the
+    // backend it holds starts and stops the background wrappers. The idle
+    // markers are read with the interactive Claude adapter's signals.
     let interactive = ports
         .workers
         .get(Worker::CLAUDE_INTERACTIVE)
@@ -918,7 +918,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         job_ends: JobEnds::default(),
         jobs_swept: false,
         planner_exits: Vec::new(),
-        screen_spans: Default::default(),
         handoff: None,
         exec: None,
         run_env_missing: false,
@@ -1010,7 +1009,7 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   `parallel`, `max_waiting`, `limits`, `slot_flags`, `light_changes`,
 ///   `spaced_since`, `finished`, `errors`, `claiming`, `provisioning_error`,
 ///   `triaged`, `stall`, `conflicts*`, `job_ends`, `live_job_ends`,
-///   `screen_spans`, `last_turns`, `run_env_missing`, `landing_*`,
+///   `last_turns`, `run_env_missing`, `landing_*`,
 ///   `run_e2e`, `e2e`, `queue_hold`, `provider_holds`,
 ///   `timer_finishes_held`, `fallback*`, `moved`, `hold_continue`,
 ///   `reopens`, `notice_failures`, `rechecks`, `defer`, `loads`,
@@ -1161,9 +1160,6 @@ struct Supervisor<'a> {
     /// The runtime's planners this process asked to exit (their exit
     /// request), and when.
     planner_exits: Vec<(crate::domain::PlannerId, Instant)>,
-    /// The screen's idle spans of the sessions without a fresh idle marker
-    /// (ADR-t803-1), kept here so a disk that takes no file loses none.
-    screen_spans: crate::application::screen_idle::Spans,
     /// The binary a handoff asked this process to exec (ADR-0045 decision
     /// 10): no new work starts, and the loop ends once every slot rests at
     /// a point the next process rebuilds it from.
@@ -1767,11 +1763,11 @@ impl Supervisor<'_> {
             self.release_pass(!stopping && self.claiming);
             // A message waiting is sent while the supervisor does not stop.
             self.push_pass(!stopping);
-            // An inbox without a watcher is woken while asks wait for it
-            // (ADR-t906-1 decision 1 (3)), draining or not: a drain waits
-            // for their answers. The watcher's changes are recorded either
-            // way (task 1021).
-            self.inbox_nudge_pass(!self.no_claude);
+            // An inbox without a watcher while asks wait for it is recorded
+            // and told through `[push]` (ADR-t1433-5 decision 1 (3)),
+            // draining or not: a drain waits for their answers. The
+            // watcher's changes are recorded either way (task 1021).
+            self.inbox_nudge_pass();
             // Reaped on every pass, started only by a supervisor at work.
             // Its route decides on `--no-claude` and the hold: a login or
             // usage limit that holds Claude starts no Claude review, but
@@ -2654,8 +2650,6 @@ impl Supervisor<'_> {
             .arg("--db")
             .arg(&self.layout.db)
             .arg("observe")
-            .arg("--cmux")
-            .arg(&self.layout.cmux)
             .arg("--claude")
             .arg(&self.layout.claude)
             .arg("--codex")
@@ -2748,50 +2742,11 @@ impl Supervisor<'_> {
             return;
         }
         self.last_turns = Some(Instant::now());
-        self.close_gone_sessions();
         match self.queue.record_session_turns() {
             Ok(0) => {}
             Ok(spans) => info!("recorded the transcript turns of {spans} session span(s)"),
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "transcript turns could not be recorded: {error:#}")
-            }
-        }
-    }
-    /// Close, as `inferred`, the inbox and planner spans whose workspace cmux
-    /// no longer lists: their `SessionEnd` never came (ADR-0048 decision 7).
-    /// The spans are read before the listing, so a span opened after it is
-    /// not taken for gone. A failure is logged only (decision 10).
-    fn close_gone_sessions(&mut self) {
-        let spans = match self.queue.hook_session_workspaces() {
-            Ok(spans) if spans.is_empty() => return,
-            Ok(spans) => spans,
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the open inbox and planner session spans could not be read: {error:#}");
-                return;
-            }
-        };
-        let listed = match self.cmux.listed_workspace_ids() {
-            Ok(listed) => listed,
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the workspaces of the open inbox and planner session spans could not be listed: {error:#}");
-                return;
-            }
-        };
-        let gone: Vec<EventId> = spans
-            .into_iter()
-            .filter(|(_, workspace)| !listed.iter().any(|id| id.eq_ignore_ascii_case(workspace)))
-            .map(|(span, _)| span)
-            .collect();
-        if gone.is_empty() {
-            return;
-        }
-        match self.queue.close_gone_sessions(&gone) {
-            Ok(0) => {}
-            Ok(closed) => {
-                info!("closed {closed} inbox or planner session span(s) whose workspace is gone")
-            }
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the spans of gone inbox and planner sessions could not be closed: {error:#}")
             }
         }
     }

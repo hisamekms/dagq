@@ -9,7 +9,7 @@ use super::*;
 /// under a number `master` already has is landed as it is, since the
 /// renumbering is for dagq's source repository only (ADR-t614-1).
 #[test]
-#[ignore = "needs a running cmux; run with --ignored"]
+#[ignore = "an e2e; run with --ignored"]
 fn a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md() {
     let fixture = fixture_on(
         "master",

@@ -97,13 +97,10 @@ esac"#
             .any(|p| p["ask_id"] == json!(ask.id) && p["asked_by"] == "worker"),
         "{opened:?}"
     );
-    // The service told the inbox, through its own cmux.
-    let notified = fs::read_to_string(fake_cmux_dir(&db).join("calls")).unwrap_or_default();
-    assert!(
-        notified.contains("ask #1 worker_question --body which file")
-            && notified.contains(&format!("run {}", run.id())),
-        "{notified}"
-    );
+    // The service notified nobody and ran no cmux: the inbox's watch
+    // tells of the ask (ADR-t1433-1 decision 2).
+    let calls = fs::read_to_string(fake_cmux_dir(&db).join("calls")).unwrap_or_default();
+    assert!(!calls.contains("notify"), "{calls}");
 
     // The command printed the ask the service opened, and its turn was
     // given the service, not the queue's path.

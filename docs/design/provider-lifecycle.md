@@ -61,7 +61,7 @@ headless job（runのreview・復旧・plan review・goal review・observerな�
 
 ## 責務と境界
 
-- applicationは`AgentProvider`（起動するコマンド）と`AgentSignals`（画面・idle marker・jobの出力の壁）と`TurnReader`（非対話のturnの出力）の3つのportだけでproviderにつながる（`src/application/ports.rs`）。
+- applicationは`AgentProvider`（起動するコマンド）と`AgentSignals`（idle marker・jobの出力の壁）と`TurnReader`（非対話のturnの出力）の3つのportだけでproviderにつながる（`src/application/ports.rs`）。
 - コマンドは`std::process::Command`でなく値の`CommandSpec`で返し、起動は`Spawner` port（実装は`infrastructure::process::LocalSpawner`）が行う。
   supervisorとsession wrapperのユースケースはプロセスを直接扱わない。
 - AI actorの起動は全て`ActorExecutor`（`HostActorExecutor`、`src/application/actor_executor.rs`）を通り、roleとcapabilityと環境はroleごとに1か所で決まる（[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）。
@@ -133,14 +133,14 @@ runtimeが起動するsessionとjobは、kindごとの区間（`session_opened` 
 | 区間を書く場所 | `infrastructure::sessions::follow`・`follow_goal`（`infrastructure::sqlite`のevent書き込みの後に呼ぶ） |
 | hookが記録するinboxと人のplannerの区間 | `domain::sessions::hook_changes`、`infrastructure::sessions::record_hook`、hookは[plugin-integration](plugin-integration.md#sessionの区間hookadr-0048) |
 | 失敗したreviewの区間を閉じる | `SessionRegistry::close_review_session`（`infrastructure::sessions::close_review`） |
-| workspaceが消えた区間を閉じる | `SessionRegistry::close_gone_sessions` |
 
 約束と落とし穴:
 
 - 終わりのeventの無いまま次の開始が来た区間は推定（`inferred`）で閉じ、時刻はtranscriptの最後のレコードに寄せる。
 - 失敗したreviewの`review_failed`はworkerの`/exit`の後に書かれるので、supervisorはjobが終わった時点で区間を閉じ、区間に`/exit`の待ちを入れない。
 - hookの区間は`SessionEnd`を取り逃しうる。
-  workspaceのある区間はworkspaceが消えたら、workspaceの無い区間は同じkindの別sessionの開始で閉じる（[ADR-t655-1](../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)）。
+  workspaceの無い区間は同じkindの別sessionの開始で閉じる（[ADR-t655-1](../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)）。
+  workspaceのある区間は、cmuxを呼ばないsupervisor（ADR-t1433-1）が閉じない。
   常駐sessionの長いidleを終了と取り違えないため、経過時間では閉じない。
 - `/clear`の`SessionEnd`と次の`SessionStart`が両方来ても、閉じた区間への2回目の終了は何も書かないので二重に数えない。
 - 非対話のruntimeのplannerの区間はhookでなくturnから記録し、turnの`claude -p`がhookを走らせても`record_hook`は書かない。

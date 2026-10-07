@@ -121,11 +121,13 @@ fn watch_role(
     .unwrap()
 }
 
-/// The one notification is `ask`'s (ADR-0022 decision 5): a run reaching
-/// awaiting_integration sends none, a new ask sends one to the inbox
-/// workspace `up` recorded, and a repeated ask none.
+/// No ask notifies anyone where it is opened (ADR-t1433-1 decision 2): the
+/// supervisor's own ask and one through `ask` call no cmux, whether the
+/// inbox's workspace is recorded or not, and a repeated ask returns the
+/// open one. The inbox's `watch` tells the person of each `ask_opened`
+/// (tests/it/inbox_watch_notify.rs).
 #[test]
-fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
+fn an_ask_notifies_nobody_where_it_is_opened() {
     use dagq::domain::{AskKind, NewAsk, SessionRole};
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, "commit work; receipt \"$(git rev-parse HEAD)\"");
@@ -134,25 +136,14 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
     let run_id = outcome["runs"][0]["id"].as_str().unwrap().to_owned();
     // The supervisor's own ask #1, of the failed stand-in review (task
-    // 328), notified; it is closed so that the run can be asked again.
-    {
-        let mut notifications = backend.notifications.lock().unwrap();
-        assert_eq!(notifications.len(), 1, "{notifications:?}");
-        assert!(notifications[0].0.ends_with("ask #1 approve_landing"));
-        notifications.clear();
-    }
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue
-        .answer(dagq::domain::AskId::new(1), "withdrawn")
-        .unwrap();
-    queue.close_ask(dagq::domain::AskId::new(1)).unwrap();
-
+    // 328), is opened without a notification.
+    assert!(backend.notifications.lock().unwrap().is_empty());
     let new_ask = |question: &str| NewAsk {
         recommendation: None,
         confidence: None,
         topics: Vec::new(),
-        kind: AskKind::ApproveLanding,
-        task_id: None,
+        kind: AskKind::Decide,
+        task_id: Some(TaskId::new(1)),
         run_id: Some(RunId::new(run_id.clone()).unwrap()),
         question: question.into(),
         options: vec!["land".into()],
@@ -161,94 +152,25 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
         finding_id: None,
         request_id: None,
     };
-    // Without an inbox the notification names no workspace; the bound
-    // repository's main checkout names the queue.
-    let other = repo.parent().unwrap().join("elsewhere");
-    let asked = runtime::ask(&db, &other, new_ask(&"長".repeat(250)), &backend).unwrap();
-    assert_eq!(asked["created"], true);
-    assert_eq!(asked["notified"], true);
-    let repo_name = repo.file_name().unwrap().to_string_lossy().into_owned();
-    assert_eq!(
-        *backend.notifications.lock().unwrap(),
-        vec![(
-            format!("[{repo_name}] ask #2 approve_landing"),
-            format!("{}…\ntask 1 run {run_id}", "長".repeat(200)),
-            None
-        )]
-    );
-    // The same run and kind again: the open ask, no notification.
-    let again = runtime::ask(&db, &repo, new_ask("again"), &backend).unwrap();
-    assert_eq!(again["created"], false);
-    assert_eq!(again["notified"], false);
-    assert_eq!(backend.notifications.lock().unwrap().len(), 1);
-
-    // With the inbox recorded, a new ask goes to its workspace.
-    let queue = queue;
-    queue
+    SqliteQueue::open(&db)
+        .unwrap()
         .register_session_workspace(SessionRole::Inbox, "INBOX-UUID")
         .unwrap();
-    let asked = runtime::ask(
-        &db,
-        &other,
-        NewAsk {
-            recommendation: None,
-            confidence: None,
-            topics: Vec::new(),
-            kind: AskKind::Decide,
-            task_id: Some(TaskId::new(1)),
-            run_id: None,
-            question: "which?".into(),
-            options: Vec::new(),
-            asked_by: "worker".into(),
-            reason_category: dagq::domain::AskReason::RecoveryFailed,
-            finding_id: None,
-            request_id: None,
-        },
-        &backend,
-    )
-    .unwrap();
-    assert_eq!(asked["notified"], true);
-    assert_eq!(
-        backend.notifications.lock().unwrap()[1],
-        (
-            format!("[{repo_name}] ask #3 decide"),
-            "which?\ntask 1".into(),
-            Some("INBOX-UUID".into())
-        )
-    );
-    // The observer's blocked ask on no task notifies the inbox too, with
-    // the question alone as its body.
-    let blocked = runtime::ask(
-        &db,
-        &other,
-        NewAsk {
-            recommendation: None,
-            confidence: None,
-            topics: Vec::new(),
-            kind: AskKind::Blocked,
-            task_id: None,
-            run_id: None,
-            question: "slots idle".into(),
-            options: Vec::new(),
-            asked_by: "observer".into(),
-            reason_category: dagq::domain::AskReason::Scope,
-            finding_id: None,
-            request_id: None,
-        },
-        &backend,
-    )
-    .unwrap();
-    assert_eq!(blocked["task_id"], Value::Null);
-    assert_eq!(blocked["notified"], true);
-    assert_eq!(
-        backend.notifications.lock().unwrap()[2],
-        (
-            format!("[{repo_name}] ask #4 blocked"),
-            "slots idle".into(),
-            Some("INBOX-UUID".into())
-        )
-    );
-    assert_eq!(backend.notifications.lock().unwrap().len(), 3);
+    let asked = runtime::ask(&db, new_ask("which?")).unwrap();
+    assert_eq!(asked["created"], true);
+    assert_eq!(asked.get("notified"), None, "{asked}");
+    let again = runtime::ask(&db, new_ask("again")).unwrap();
+    assert_eq!(again["created"], false);
+    assert_eq!(again["id"], asked["id"]);
+    assert!(backend.notifications.lock().unwrap().is_empty());
+    let opened: Vec<Value> = SqliteQueue::open(&db)
+        .unwrap()
+        .latest_events_of("ask_opened", 10)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(opened.len(), 2, "{opened:?}");
 }
 
 #[test]

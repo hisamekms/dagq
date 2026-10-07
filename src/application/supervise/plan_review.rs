@@ -647,22 +647,6 @@ impl Supervisor<'_> {
         for reopened in &applied.reopened {
             info!(task_id = %reopened.task_id, "task {} left ready for proposal {} to fix it", reopened.task_id, reopened.proposal_id);
         }
-        if let Some(outcome) = &applied.ask {
-            // The verdict is applied: a notification that fails is only
-            // reported.
-            let error = match ask::notify(
-                &mut *self.queue,
-                &self.layout.main_checkout,
-                outcome,
-                self.cmux,
-            ) {
-                Ok(notified) => notified.get("notify_error").map(ToString::to_string),
-                Err(error) => Some(format!("{error:#}")),
-            };
-            if let Some(error) = error {
-                warn!(ask_id = %outcome.ask.id, "proposal {proposal}: the inbox was not notified of ask {}: {error}", outcome.ask.id);
-            }
-        }
         Ok(())
     }
 

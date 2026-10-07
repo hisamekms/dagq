@@ -67,7 +67,9 @@ supervisorの着地（`land_integrating`）は上の「判定と掃除」の控�
 
 ## inboxに知らせる
 
-掃除の後も（別のjobに乗った空き容量の掃除なら、その残りのjobの後も。task 1478）claimか着地の閾値を下回れば、そのjobが終わった後の周回で（次の掃除の頼みはjobの終わりから60秒経つまで出ないので、判定が先送りされない。task 1627）、queueで1件の`cost`のask（`kind: queue_hold`、`reason_category: cost`、`subject: disk`、optionsは`done` / `wait`）を開く（ADR-0047の決定42）。着地を待つrunは`affected`に足され（`ask_updated`）、questionの末尾の`Affected runs:`に並ぶ。ログインのaskと違い、sessionを止めるものではないので、`hold_of`（sessionの待ちと停滞の見張りがログインの控えを見る）には当たらない。claimだけが足りないときはrunを持たない（`NewHold::run_id`が`None`）。通知（`cmux notify`）は最初の1回だけ。questionは、掃除したもの（終わったrunと、答え・着地・resumeを待つ誰も作業していないrunのビルド成果物、`completed` / `canceled`のtaskのrunのworktreeとClaude Codeのscratchpadとrunの一時ファイルのdir（task 1290）、`git worktree prune`）と、閾値が直近のrunの大きさ（ビルド成果物の最大値とscratchpadの最大値とrunの一時ファイルのdirの最大値の和）に係数を掛けたものであることを書く。人の`integrate`が断るときのエラーも同じ言い方で大きさを書く（task 1100、task 1290）
+掃除の後も（別のjobに乗った空き容量の掃除なら、その残りのjobの後も。task 1478）claimか着地の閾値を下回れば、そのjobが終わった後の周回で（次の掃除の頼みはjobの終わりから60秒経つまで出ないので、判定が先送りされない。task 1627）、queueで1件の`cost`のask（`kind: queue_hold`、`reason_category: cost`、`subject: disk`、optionsは`done` / `wait`）を開く（ADR-0047の決定42）。着地を待つrunは`affected`に足され（`ask_updated`）、questionの末尾の`Affected runs:`に並ぶ。ログインのaskと違い、sessionを止めるものではないので、`hold_of`（sessionの待ちと停滞の見張りがログインの控えを見る）には当たらない。claimだけが足りないときはrunを持たない（`NewHold::run_id`が`None`）。
+askを開いても誰にも通知を送らず、人にはinboxのwatchが`ask_opened`として知らせる（[人への通知](cmux-notify.md)）。
+questionは、掃除したもの（終わったrunと、答え・着地・resumeを待つ誰も作業していないrunのビルド成果物、`completed` / `canceled`のtaskのrunのworktreeとClaude Codeのscratchpadとrunの一時ファイルのdir（task 1290）、`git worktree prune`）と、閾値が直近のrunの大きさ（ビルド成果物の最大値とscratchpadの最大値とrunの一時ファイルのdirの最大値の和）に係数を掛けたものであることを書く。人の`integrate`が断るときのエラーも同じ言い方で大きさを書く（task 1100、task 1290）
 
 - 同じ不足の間は開き直さない。supervisorはこの不足でaskを開いたことを覚え、空きが戻るまで新しく開かない
 - `done`（人が空けた）: supervisorがaskを閉じ、すぐ掃除し直して確かめる（空き容量のための掃除が待つか走るあいだは、新しく頼まずにその終わりを待つ）。まだ足りなければもう1件開く

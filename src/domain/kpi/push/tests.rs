@@ -196,3 +196,22 @@ fn the_stderr_kept_is_a_tail_without_the_arguments() {
     assert!(tail.starts_with('…'));
     assert!(tail.len() <= STDERR_TAIL_BYTES + '…'.len_utf8());
 }
+
+#[test]
+fn the_inbox_watch_message_carries_only_the_counts() {
+    let message = inbox_watch_message("dagq", "/q/queue.db", 1_000, 3, 2);
+    assert_eq!(message.kind, PushKind::InboxWatch);
+    assert_eq!(message.kind.as_str(), "inbox_watch");
+    assert_eq!(message.period, "absent since 1000");
+    assert_eq!(message.body["kind"], "inbox_watch");
+    assert_eq!(message.body["open_asks"], 3);
+    assert_eq!(message.body["waiting_asks"], 2);
+    assert_eq!(message.body["title"], "dagq: the inbox has no watch");
+    assert!(
+        message.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("2 of 3 open ask(s)")
+    );
+    assert_eq!(message.report_html, None);
+}

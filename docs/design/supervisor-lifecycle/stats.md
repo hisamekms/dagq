@@ -51,7 +51,7 @@ related:
 ```text
 CLI（src/main.rs） / observer
   └─▶ compose::OneShot::stats_of        今の時刻を1回読む
-        └─▶ application::stats::stats   queue・run directory・cmux・mainの履歴・host/ を読む
+        └─▶ application::stats::stats   queue・run directory・wrapperのprocess・mainの履歴・host/ を読む
               └─▶ domain::stats::stats  純粋関数: events → runs・群・alerts・期間の集計
                     └─▶ with_changes / with_areas / without_cargo_measures → JSON
 ```
@@ -72,7 +72,7 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 - domain（`src/domain/stats.rs`と、集計ごとのmoduleを置く`src/domain/stats/`）が全ての数え方を持ち、I/Oを持たない。
   この地図は集計のmoduleを名前だけで指す。
   入力はeventの全件、task→goalの対応、今の時刻、supervisorの空きslotの観測（`SlotSnapshot`）、走っているrunの観測（`LiveSnapshot`）。
-- application（`src/application/stats.rs`）はqueueと外の情報源（`StatsSources`: run directory、idle marker、cmuxのworkspace、`[stall]`・`[conflicts]`、mainの履歴）を読んで渡すだけで、判断を足さない。
+- application（`src/application/stats.rs`）はqueueと外の情報源（`StatsSources`: run directory、idle marker、`[stall]`・`[conflicts]`、mainの履歴）を読んで渡すだけで、判断を足さない。
 - `stats`は何も書かない。
   hostの負荷はqueueのディレクトリの`host/`を、衝突の多いファイルの着地数はmainのgitの履歴を読むだけ。
 - 記録を書くのは各工程（supervisor・`integrate`・hook・job）で、記録の欄の意味は書く側の型と文書が持つ。
@@ -126,16 +126,17 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 
 ## running alerts
 
-- 入口: `RunningAlert`と`running_alerts`、markerとcmuxを読むのは`application::stats::stats`。
+- 入口: `RunningAlert`と`running_alerts`、markerとwrapperの生死を読むのは`application::stats::stats`。
 - `--since`に関係なく毎回出す。
 - 見ているsessionは、workerのsession・resume中のsession・送ったreviseのsessionのどれかで、それ以外のrunは見ない。
 - `idle_without_receipt`で`nudged`も`asked`もfalseなら、supervisorの検知の漏れを示す（[receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)）。
 - `long_background`は観測だけで、復旧jobを起動しない。
   経過は、その処理が途切れずにmarkerに載り続けた最初の時刻から測る（markerは上書きされ開始時刻を持たないので、hookが追記するlogから読む。`domain::stall::IDLE_LOG`と`background_first_seen`）。
   logが無いときはmarkerのmtimeからの下限になる。
-- `workspace_mismatch`のworkspaceの対応はcmuxのgroupでなくdescriptionで見る（groupはlistに出ない）。
-  backgroundのwrapperはcmuxのlistでなくpidの起動時刻で生死を見る（pidを別のprocessが継げば死んでいる。[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定10）。
-- cmuxに聞けなければ`workspace_mismatch`だけを判定せず、`stats`自体は失敗しない（`workspace_check`）。
+- `workspace_mismatch`はcmuxに聞かず、runの最後のsessionのbackgroundのwrapperをpidと記録した起動時刻だけで見る（pidを別のprocessが継げば死んでいる。[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定2・10、[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
+  heartbeatの古さは生死に使わない（[wrapperが黙ったsession](silent-wrapper.md)の側）。
+  古いバイナリのworkspaceのsessionは判定せず、`workspace_check`が数を出す。
+  `stats --cmux`は受け付けて無視する。
 
 ## 閾値ごとの検知
 

@@ -16,7 +16,8 @@ related:
 
 # `doctor`
 
-> **予定（goal 92）**: inboxのwatcherの記録と表示（ADR-t906-1決定1の(1)）は、ADR-t906-1を置き換えた[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)が引き継ぐ。supervisorとqueue serviceはcmuxを呼ばず、workspaceの診断はinboxのものだけになる（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。後続のtaskが実装するまでの今の姿である。
+inboxのwatcherの記録と表示（ADR-t906-1決定1の(1)）は、ADR-t906-1を置き換えた[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)が引き継ぐ。
+doctorも、supervisorとqueue serviceもcmuxを呼ばない（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
 
 ユースケースは`application::health::doctor`で、worktreeとrun directoryとreceiptの有無は`RunFiles`、PIDの生死は`ProcessControl`で見る。
 

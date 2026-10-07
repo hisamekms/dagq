@@ -261,7 +261,9 @@ pub(crate) fn stop_run_session(
 
 /// Stop the session `id`: a background wrapper's handle by
 /// `stop_background`, recorded as `wrapper_stopped` with `route` (task
-/// 1657), a workspace by its `close`.
+/// 1657). A workspace ID is not closed: the supervisor calls no cmux
+/// (ADR-t1433-1), so a workspace an older binary opened is left to a
+/// person to close in their own terminal, and it counts as stopped.
 pub(crate) fn stop_session(
     sessions: &dyn WorkspaceBackend,
     id: &str,
@@ -270,7 +272,8 @@ pub(crate) fn stop_session(
     if is_background(id) {
         sessions.stop_background(id, route).map(drop)
     } else {
-        sessions.close(id)
+        info!("the workspace {id} is left to a person to close: the supervisor calls no cmux");
+        Ok(())
     }
 }
 
@@ -404,17 +407,15 @@ mod tests {
     }
 
     /// `stop_session` stops a background handle by `stop_background` with
-    /// its route, and closes a workspace (a planner's) as before.
+    /// its route, and leaves a workspace to a person: it calls no cmux.
     #[test]
     fn a_session_is_stopped_by_its_kind() {
         let sessions = Sessions::default();
         let handle = "background:4242:Mon_Oct__5_10:00:00_2026";
         stop_session(&sessions, handle, StopRoute::Sweep).unwrap();
+        // A workspace an older binary opened is not closed: no cmux.
         stop_session(&sessions, "WS-1", StopRoute::Planner).unwrap();
-        assert_eq!(
-            sessions.calls(),
-            [format!("stop {handle} sweep"), "close WS-1".to_owned()]
-        );
+        assert_eq!(sessions.calls(), [format!("stop {handle} sweep")]);
     }
 
     /// Only `"workspace"` is warned of, and only once: a supervisor that

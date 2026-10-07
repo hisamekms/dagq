@@ -296,15 +296,16 @@ pub struct Ports<'a> {
     /// The queue's resource broker: `up`'s preflight and `down`'s stop
     /// (ADR-t827-3 decision 2).
     pub broker: &'a dyn BrokerLifecycle,
-    /// `queue_service(db, executable, cmux)`: the control of the queue's
-    /// service, started from `executable` (ADR-t1233-4 decision 1).
+    /// `queue_service(db, executable)`: the control of the queue's
+    /// service, started from `executable` (ADR-t1233-4 decision 1). The
+    /// service calls no cmux (ADR-t1433-1).
     pub queue_service: &'a QueueServiceControls,
 }
 
 /// How `up` and `down` reach the queue's service: see
 /// [`Ports::queue_service`].
 pub type QueueServiceControls =
-    dyn Fn(&Path, &Path, &Path) -> Box<dyn crate::application::queue_service::QueueServiceControl>;
+    dyn Fn(&Path, &Path) -> Box<dyn crate::application::queue_service::QueueServiceControl>;
 
 /// What `up` and `down` do about the queue's resource broker (ADR-t827-3
 /// decision 2). With the mode `disabled` (the default) neither does
@@ -503,7 +504,7 @@ pub fn up(
     // The queue's service before the supervisor, of this binary's build
     // (ADR-t1233-4 decision 1): one that does not start stops `up`.
     let queue_service = if options.queue_service {
-        let control = (ports.queue_service)(&db, &environment.current_exe, &options.cmux);
+        let control = (ports.queue_service)(&db, &environment.current_exe);
         let report =
             crate::application::queue_service::ensure(&*control, QUEUE_SERVICE_START_TIMEOUT)
                 .map_err(|error| {
@@ -2236,7 +2237,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     // The queue's service stops after the supervisors (ADR-t1233-4
     // decision 1): `down` stops it once they are gone, and asks the ones
     // about to drain to stop it when their drain ends.
-    let service = (ports.queue_service)(&location.db, Path::new("dagq"), Path::new("cmux"));
+    let service = (ports.queue_service)(&location.db, Path::new("dagq"));
     let service_running =
         service.probe().state != crate::domain::queue_service::ServiceState::Stopped;
     if !live.is_empty() && !options.force {

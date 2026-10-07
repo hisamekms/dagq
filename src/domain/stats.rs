@@ -3,7 +3,7 @@
 //! thresholds it crossed. Everything is derived from `run_events`; this
 //! module is a pure function of the events, the task → goal map and a
 //! snapshot of the supervisors' free slots.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -510,8 +510,8 @@ pub struct Stats {
     /// The runs not finished yet that look stalled now (ADR-0043 decision
     /// 5), whatever `--since` says; with `--goal`, only that goal's.
     pub running_alerts: Vec<RunningAlert>,
-    /// Whether `workspace_mismatch` could be judged: cmux's workspaces
-    /// were listed, or why not.
+    /// How `workspace_mismatch` was judged: by the runs' background
+    /// wrappers, without cmux (ADR-t1404-1 decision 10, ADR-t1433-1).
     pub workspace_check: WorkspaceCheck,
     /// The thresholds `running_alerts` were judged by, and where they came from.
     pub stall_config: StallConfigReport,
@@ -666,11 +666,12 @@ pub struct RunningAlert {
     pub value: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub threshold: Option<i64>,
-    /// `run_without_workspace` or `workspace_without_run` for a
-    /// `workspace_mismatch`.
+    /// `run_without_wrapper` for a `workspace_mismatch` (older records
+    /// also hold `run_without_workspace` and `workspace_without_run`,
+    /// which cmux's list once gave).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
-    /// The worker workspace no unfinished run owns.
+    /// The handle of the session whose wrapper is gone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     /// For `idle_without_receipt`: whether the supervisor nudged this
@@ -703,13 +704,16 @@ impl RunningAlert {
     }
 }
 
+/// How `workspace_mismatch` was judged: by each run's background wrapper
+/// (its handle's pid showing the start it recorded), never by cmux's list
+/// (ADR-t1404-1 decision 10, ADR-t1433-1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum WorkspaceCheck {
-    /// cmux listed this many workspaces.
-    Checked { workspaces: usize },
-    /// cmux could not be asked; no `workspace_mismatch` is judged.
-    Unavailable { reason: String },
+    /// `judged` runs in flight whose last session runs in the background
+    /// were judged by their wrapper; `unjudged` ones last opened a session
+    /// in a workspace (an older binary's), which is not looked up.
+    Wrappers { judged: usize, unjudged: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -726,13 +730,6 @@ pub struct StallConfigReport {
 pub struct ListedWorkspace {
     pub id: String,
     pub description: Option<String>,
-}
-
-/// cmux's workspaces, or why they could not be listed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Workspaces {
-    Listed(Vec<ListedWorkspace>),
-    Unavailable(String),
 }
 
 /// What `stats` reads of a run not finished yet outside the queue: the
@@ -765,14 +762,6 @@ pub struct LiveRun {
 pub struct LiveSnapshot {
     /// The queue's runs not finished yet.
     pub runs: Vec<LiveRun>,
-    /// Every run of the queue, with its task: a workspace naming one of
-    /// them belongs to this queue.
-    pub known_runs: HashMap<RunId, TaskId>,
-    /// The inbox's, planner's and supervisor's workspaces (`session_workspaces`).
-    pub session_workspaces: Vec<String>,
-    pub workspaces: Workspaces,
-    /// The queue's hash, which its worker workspaces' descriptions carry.
-    pub queue_hash: String,
     pub config: StallConfigReport,
     /// Main's history since the earliest conflict, for `conflict_hotspots`.
     pub history: History,
@@ -787,14 +776,10 @@ pub struct LiveSnapshot {
 }
 
 impl Default for LiveSnapshot {
-    /// No run in flight, no workspace listed, the default thresholds.
+    /// No run in flight, the default thresholds.
     fn default() -> Self {
         Self {
             runs: Vec::new(),
-            known_runs: HashMap::new(),
-            session_workspaces: Vec::new(),
-            workspaces: Workspaces::Unavailable("not listed".to_owned()),
-            queue_hash: String::new(),
             config: StallConfigReport {
                 config: StallConfig::default(),
                 source: "default",
@@ -838,14 +823,7 @@ pub fn stats(
         .into_iter()
         .filter(|alert| alert.task_id.is_none_or(in_goal))
         .collect();
-    let workspace_check = match &live.workspaces {
-        Workspaces::Listed(workspaces) => WorkspaceCheck::Checked {
-            workspaces: workspaces.len(),
-        },
-        Workspaces::Unavailable(reason) => WorkspaceCheck::Unavailable {
-            reason: reason.clone(),
-        },
-    };
+    let workspace_check = workspace_check(events, live);
     let mut first_event: HashMap<&str, EventId> = HashMap::new();
     for event in events {
         if let Some(run_id) = &event.run_id {
@@ -1345,22 +1323,26 @@ fn watched_phase(status: RunStatus, events: &[&RunEvent]) -> Option<(&'static st
     }
 }
 
-/// The run a worker workspace's description names, with the queue hash it
-/// names: `dagq role=worker queue=<hash> run=<id> task=<id>` for the
-/// worker's own workspace, `run <id> resume` (no hash) for a resume's.
-fn described_run(description: &str) -> Option<(Option<&str>, &str)> {
-    let words: Vec<&str> = description.split_whitespace().collect();
-    match words.as_slice() {
-        ["run", run, "resume"] => Some((None, run)),
-        ["dagq", fields @ ..] => {
-            let field = |name: &str| {
-                fields
+/// How many runs in flight last opened a session in the background, whose
+/// wrapper `running_alerts` judges, and how many in a workspace an older
+/// binary opened, which nothing looks up.
+fn workspace_check(events: &[RunEvent], live: &LiveSnapshot) -> WorkspaceCheck {
+    let judged = live
+        .runs
+        .iter()
+        .filter(|run| {
+            crate::domain::background_wrapper::last_session(
+                events
                     .iter()
-                    .find_map(|field| field.strip_prefix(name)?.strip_prefix('='))
-            };
-            (field("role")? == "worker").then_some((field("queue"), field("run")?))
-        }
-        _ => None,
+                    .filter(|event| event.run_id.as_ref() == Some(&run.run_id)),
+                run.workspace_id.as_deref(),
+            )
+            .is_some_and(crate::domain::background_wrapper::is_background)
+        })
+        .count();
+    WorkspaceCheck::Wrappers {
+        judged,
+        unjudged: live.runs.len() - judged,
     }
 }
 
@@ -1389,26 +1371,6 @@ fn running_alerts(
         .into_iter()
         .filter_map(|(goal, mut works)| Some((goal, median(&mut works)?)))
         .collect();
-    let listed: Option<Vec<(&ListedWorkspace, Option<&str>)>> = match &live.workspaces {
-        Workspaces::Listed(workspaces) => Some(
-            workspaces
-                .iter()
-                .map(|workspace| {
-                    let run = workspace
-                        .description
-                        .as_deref()
-                        .and_then(described_run)
-                        .filter(|(queue, run)| match queue {
-                            Some(queue) => *queue == live.queue_hash,
-                            None => live.known_runs.keys().any(|known| known.as_str() == *run),
-                        })
-                        .map(|(_, run)| run);
-                    (workspace, run)
-                })
-                .collect(),
-        ),
-        Workspaces::Unavailable(_) => None,
-    };
     let mut alerts = Vec::new();
     for run in &live.runs {
         let run_events: Vec<&RunEvent> = events
@@ -1516,17 +1478,18 @@ fn running_alerts(
         }
         // The run's session now: the one it opened last (a resume's or a
         // reopening's `workspace_created`), else its first session's. A
-        // session whose wrapper runs in the background has no workspace
-        // for cmux to list (ADR-t1404-1). The setting is read as each
-        // session starts, so a run's sessions may be of either kind.
+        // session an older binary opened in a workspace is not looked up:
+        // no cmux is asked (ADR-t1433-1).
         let current = crate::domain::background_wrapper::last_session(
             run_events.iter().copied(),
             run.workspace_id.as_deref(),
         );
         let background = current.is_some_and(crate::domain::background_wrapper::is_background);
-        // A background session is judged by its wrapper, not by cmux's list
-        // (ADR-t1404-1 decision 10): one that is gone (dead, or its pid
-        // another process's now) without recording that its session ended.
+        // A background session is judged by its wrapper alone (ADR-t1404-1
+        // decisions 2 and 10): one that is gone (dead, or its pid another
+        // process's now) without recording that its session ended. Its
+        // heartbeat's age is not looked at: a wrapper that only went quiet
+        // is the silent wrapper's (silent-wrapper.md).
         if background
             && phase.is_some()
             && run.background_alive == Some(false)
@@ -1541,55 +1504,6 @@ fn running_alerts(
             alert.workspace_id = current.map(str::to_owned);
             alerts.push(alert);
         }
-        if let (Some(listed), Some(_), false) = (&listed, phase, background) {
-            let known: HashSet<&str> = run
-                .workspace_id
-                .iter()
-                .map(String::as_str)
-                .chain(current)
-                .chain(
-                    run_events
-                        .iter()
-                        .filter(|event| event.kind == "resume_finished")
-                        .filter_map(|event| event.payload["workspace_id"].as_str()),
-                )
-                .collect();
-            let open = listed.iter().any(|(workspace, owner)| {
-                *owner == Some(run.run_id.as_str())
-                    || known
-                        .iter()
-                        .any(|id| id.eq_ignore_ascii_case(&workspace.id))
-            });
-            if !open {
-                let mut alert = RunningAlert::new(
-                    "workspace_mismatch",
-                    Some(run.task_id),
-                    Some(run.run_id.clone()),
-                );
-                alert.reason = Some("run_without_workspace");
-                alert.workspace_id = current.map(str::to_owned);
-                alerts.push(alert);
-            }
-        }
-    }
-    for (workspace, owner) in listed.iter().flatten() {
-        let Some(owner) = owner else { continue };
-        if live
-            .session_workspaces
-            .iter()
-            .any(|id| id.eq_ignore_ascii_case(&workspace.id))
-            || live.runs.iter().any(|run| run.run_id.as_str() == *owner)
-        {
-            continue;
-        }
-        let run_id = RunId::new(*owner).ok();
-        let task_id = run_id
-            .as_ref()
-            .and_then(|run_id| live.known_runs.get(run_id).copied());
-        let mut alert = RunningAlert::new("workspace_mismatch", task_id, run_id);
-        alert.reason = Some("workspace_without_run");
-        alert.workspace_id = Some(workspace.id.clone());
-        alerts.push(alert);
     }
     alerts
 }
@@ -2426,16 +2340,9 @@ mod tests {
         }
     }
 
-    fn snapshot(runs: Vec<LiveRun>, workspaces: Workspaces) -> LiveSnapshot {
+    fn snapshot(runs: Vec<LiveRun>) -> LiveSnapshot {
         LiveSnapshot {
-            known_runs: [R1, R2, R3]
-                .iter()
-                .map(|run| (RunId::new(*run).unwrap(), TaskId::new(1)))
-                .collect(),
             runs,
-            session_workspaces: vec!["WS-INBOX".to_owned()],
-            workspaces,
-            queue_hash: "hash".to_owned(),
             config: StallConfigReport {
                 config: StallConfig::default(),
                 source: "default",
@@ -2542,7 +2449,7 @@ mod tests {
         ];
         let mut run = live_run(R1, RunStatus::Running);
         run.idle = Some(((T + 60) * 1000, cargo_test()));
-        let live = snapshot(vec![run.clone()], Workspaces::Unavailable("none".into()));
+        let live = snapshot(vec![run.clone()]);
         // Under the threshold: nothing yet.
         assert!(running(&events, &live, T + 60 + 1200).is_empty());
         let alerts = running(&events, &live, T + 60 + 1300);
@@ -2579,13 +2486,7 @@ mod tests {
         let now = T + 5000;
         let events = [run_event(1, R1, "agent_started", json!({}), T)];
         let idle = |run: &mut LiveRun| run.idle = Some(((T + 60) * 1000, Vec::new()));
-        let alerts = |events: &[RunEvent], run: LiveRun| {
-            running(
-                events,
-                &snapshot(vec![run], Workspaces::Unavailable("none".into())),
-                now,
-            )
-        };
+        let alerts = |events: &[RunEvent], run: LiveRun| running(events, &snapshot(vec![run]), now);
         let mut run = live_run(R1, RunStatus::Running);
         idle(&mut run);
         assert_eq!(alerts(&events, run.clone()).len(), 1);
@@ -2648,7 +2549,7 @@ mod tests {
         run.idle = Some(((T + 60) * 1000, Vec::new()));
         // An older receipt does not answer the resume.
         run.receipt = Some((T - 100) * 1000);
-        let live = snapshot(vec![run.clone()], Workspaces::Unavailable("none".into()));
+        let live = snapshot(vec![run.clone()]);
         let alerts = running(&resume, &live, now);
         assert_eq!(alerts[0].phase, Some("resume"), "{alerts:?}");
         let mut finished = resume.to_vec();
@@ -2666,7 +2567,7 @@ mod tests {
             run_event(2, R1, "revise_requested", json!({"attempt": 1}), T),
         ];
         run.status = RunStatus::AwaitingIntegration;
-        let live = snapshot(vec![run], Workspaces::Unavailable("none".into()));
+        let live = snapshot(vec![run]);
         assert_eq!(running(&revise, &live, now)[0].phase, Some("revise"));
         let mut answered = revise.to_vec();
         answered.push(run_event(3, R1, "revise_finished", json!({}), T + 30));
@@ -2678,7 +2579,7 @@ mod tests {
         let mut run = live_run(R1, RunStatus::Running);
         run.idle = Some((T * 1000, cargo_test()));
         run.background_since = Some((T - 1000) * 1000);
-        let live = snapshot(vec![run.clone()], Workspaces::Unavailable("none".into()));
+        let live = snapshot(vec![run.clone()]);
         let alerts = running(&[], &live, T + 1000);
         let background: Vec<_> = alerts
             .iter()
@@ -2688,7 +2589,7 @@ mod tests {
         assert_eq!(background[0].value, Some(2000));
         // Timed from the marker alone, it is under the threshold.
         run.background_since = None;
-        let live = snapshot(vec![run], Workspaces::Unavailable("none".into()));
+        let live = snapshot(vec![run]);
         assert!(
             !running(&[], &live, T + 1000)
                 .iter()
@@ -2701,7 +2602,7 @@ mod tests {
         let mut run = live_run(R1, RunStatus::AwaitingIntegration);
         run.idle = Some((T * 1000, cargo_test()));
         run.receipt = Some((T - 10) * 1000);
-        let live = snapshot(vec![run], Workspaces::Unavailable("none".into()));
+        let live = snapshot(vec![run]);
         let events = [run_event(1, R1, "validation_finished", json!({}), T - 5)];
         let alerts = running(&events, &live, T + 1801);
         assert_eq!(alerts.len(), 1);
@@ -2760,10 +2661,7 @@ mod tests {
             ));
         }
         events.push(run_event(30, R1, "run_claimed", json!({}), T + 1000));
-        let live = snapshot(
-            vec![live_run(R1, RunStatus::Running)],
-            Workspaces::Unavailable("none".into()),
-        );
+        let live = snapshot(vec![live_run(R1, RunStatus::Running)]);
         let alerts = |now| {
             stats(
                 &events,
@@ -2802,19 +2700,58 @@ mod tests {
         );
     }
 
-    /// A run's sessions may run in a workspace or in the background
-    /// (ADR-t1404-1), each as the setting said when it started: the session
-    /// it opened last decides whether cmux must list one. A run that began
-    /// in a workspace and is resumed in the background is no
-    /// `run_without_workspace` once its first workspace is gone; one that
-    /// began in the background and is resumed in a workspace is, until cmux
-    /// lists the resume's workspace.
+    /// A background session is judged by its wrapper alone, never by
+    /// cmux's list (ADR-t1404-1 decisions 2 and 10, ADR-t1433-1): one whose
+    /// wrapper runs (its pid with its recorded start) is fine; one whose
+    /// wrapper is gone (dead, or its pid another process's now) without the
+    /// session's end recorded is `run_without_wrapper`; one whose session
+    /// recorded its end, or whose wrapper is unknown, is not. A session an
+    /// older binary opened in a workspace is not looked up at all.
     #[test]
-    fn the_session_a_run_opened_last_decides_its_workspace_check() {
+    fn a_background_session_is_judged_by_its_wrapper() {
         let handle = "background:4242:Sat_Oct_3_10:00:01_2026";
-        let resumed = |first: &str, resume: &str| {
+        let mut run = live_run(R1, RunStatus::Running);
+        run.workspace_id = Some(handle.to_owned());
+        let events = vec![
+            run_event(
+                1,
+                R1,
+                "workspace_created",
+                json!({"workspace_id": handle}),
+                T,
+            ),
+            run_event(2, R1, "agent_started", json!({}), T),
+        ];
+        let alerts = |events: &[RunEvent], alive: Option<bool>| {
+            let mut run = run.clone();
+            run.background_alive = alive;
+            running(events, &snapshot(vec![run]), T + 10)
+                .into_iter()
+                .filter(|alert| alert.kind == "workspace_mismatch")
+                .map(|alert| (alert.reason, alert.workspace_id))
+                .collect::<Vec<_>>()
+        };
+        let gone = vec![(Some("run_without_wrapper"), Some(handle.to_owned()))];
+        assert!(alerts(&events, Some(true)).is_empty());
+        assert!(alerts(&events, None).is_empty());
+        assert_eq!(alerts(&events, Some(false)), gone);
+        for end in ["session_exited", "workspace_closed"] {
+            let mut ended = events.clone();
+            ended.push(run_event(
+                3,
+                R1,
+                end,
+                json!({"workspace_id": handle}),
+                T + 5,
+            ));
+            assert!(alerts(&ended, Some(false)).is_empty(), "{end}");
+        }
+        // A resume in the background after a session in a workspace: its
+        // wrapper is the one judged.
+        let resumed = |first: &str, resume: &str, alive: Option<bool>| {
             let mut run = live_run(R2, RunStatus::NeedsSession);
             run.workspace_id = Some(first.to_owned());
+            run.background_alive = alive;
             let events = vec![
                 run_event(
                     1,
@@ -2832,220 +2769,69 @@ mod tests {
                     T + 2,
                 ),
             ];
-            (run, events)
-        };
-        let missing = |events: &[RunEvent], run: &LiveRun, listed: Vec<ListedWorkspace>| {
-            running(
-                events,
-                &snapshot(vec![run.clone()], Workspaces::Listed(listed)),
-                T + 10,
-            )
-            .into_iter()
-            .filter(|alert| alert.reason == Some("run_without_workspace"))
-            .map(|alert| alert.workspace_id)
-            .collect::<Vec<_>>()
-        };
-        // Workspace, then background: nothing for cmux to list.
-        let (run, events) = resumed("WS-FIRST", handle);
-        assert!(missing(&events, &run, Vec::new()).is_empty());
-        // Background, then a workspace: it must be listed.
-        let (run, events) = resumed(handle, "WS-RESUME");
-        assert_eq!(
-            missing(&events, &run, Vec::new()),
-            [Some("WS-RESUME".to_owned())]
-        );
-        let listed = ListedWorkspace {
-            id: "ws-resume".to_owned(),
-            description: None,
-        };
-        assert!(missing(&events, &run, vec![listed]).is_empty());
-        // A first session in the background, never resumed.
-        let mut run = live_run(R1, RunStatus::Running);
-        run.workspace_id = Some(handle.to_owned());
-        let events = [
-            run_event(
-                1,
-                R1,
-                "workspace_created",
-                json!({"workspace_id": handle}),
-                T,
-            ),
-            run_event(2, R1, "agent_started", json!({}), T),
-        ];
-        assert!(missing(&events, &run, Vec::new()).is_empty());
-    }
-
-    /// A background session is judged by its wrapper, not by cmux's list
-    /// (ADR-t1404-1 decision 10), and so even when cmux cannot be asked:
-    /// one whose wrapper runs (its pid with its recorded start) is fine;
-    /// one whose wrapper is gone (dead, or its pid another process's now)
-    /// without the session's end recorded is `run_without_wrapper`; one
-    /// whose session recorded its end, or whose wrapper is unknown, is not.
-    #[test]
-    fn a_background_session_is_judged_by_its_wrapper() {
-        let handle = "background:4242:Sat_Oct_3_10:00:01_2026";
-        let mut run = live_run(R1, RunStatus::Running);
-        run.workspace_id = Some(handle.to_owned());
-        let events = vec![
-            run_event(
-                1,
-                R1,
-                "workspace_created",
-                json!({"workspace_id": handle}),
-                T,
-            ),
-            run_event(2, R1, "agent_started", json!({}), T),
-        ];
-        let alerts = |events: &[RunEvent], alive: Option<bool>, workspaces: Workspaces| {
-            let mut run = run.clone();
-            run.background_alive = alive;
-            running(events, &snapshot(vec![run], workspaces), T + 10)
+            let live = snapshot(vec![run]);
+            let reasons: Vec<_> = running(&events, &live, T + 10)
                 .into_iter()
-                .filter(|alert| alert.kind == "workspace_mismatch")
-                .map(|alert| (alert.reason, alert.workspace_id))
-                .collect::<Vec<_>>()
+                .map(|alert| alert.reason)
+                .collect();
+            (
+                reasons,
+                stats(
+                    &events,
+                    &HashMap::new(),
+                    T + 10,
+                    SlotSnapshot::default(),
+                    &StatsQuery::default(),
+                    &live,
+                )
+                .workspace_check,
+            )
         };
-        let gone = vec![(Some("run_without_wrapper"), Some(handle.to_owned()))];
-        for workspaces in [
-            Workspaces::Listed(Vec::new()),
-            Workspaces::Unavailable("no cmux".into()),
-        ] {
-            assert!(alerts(&events, Some(true), workspaces.clone()).is_empty());
-            assert!(alerts(&events, None, workspaces.clone()).is_empty());
-            assert_eq!(alerts(&events, Some(false), workspaces.clone()), gone);
-            for end in ["session_exited", "workspace_closed"] {
-                let mut ended = events.clone();
-                ended.push(run_event(
-                    3,
-                    R1,
-                    end,
-                    json!({"workspace_id": handle}),
-                    T + 5,
-                ));
-                assert!(
-                    alerts(&ended, Some(false), workspaces.clone()).is_empty(),
-                    "{end}"
-                );
-            }
-        }
-        // A resume in the background after a session in a workspace: its
-        // wrapper is the one judged.
-        let mut resumed = live_run(R2, RunStatus::NeedsSession);
-        resumed.workspace_id = Some("WS-FIRST".to_owned());
-        resumed.background_alive = Some(false);
-        let events = [
-            run_event(
-                1,
-                R2,
-                "workspace_created",
-                json!({"workspace_id": "WS-FIRST"}),
-                T,
-            ),
-            run_event(2, R2, "resume_started", json!({}), T + 1),
-            run_event(
-                3,
-                R2,
-                "workspace_created",
-                json!({"workspace_id": handle, "resume_attempt": 1}),
-                T + 2,
-            ),
-        ];
-        let reasons: Vec<_> = running(
-            &events,
-            &snapshot(vec![resumed], Workspaces::Listed(Vec::new())),
-            T + 10,
-        )
-        .into_iter()
-        .map(|alert| alert.reason)
-        .collect();
-        assert_eq!(reasons, [Some("run_without_wrapper")]);
+        assert_eq!(
+            resumed("WS-FIRST", handle, Some(false)),
+            (
+                vec![Some("run_without_wrapper")],
+                WorkspaceCheck::Wrappers {
+                    judged: 1,
+                    unjudged: 0
+                }
+            )
+        );
+        // A session last opened in a workspace is neither listed nor an
+        // alert, whatever is known of a wrapper.
+        assert_eq!(
+            resumed(handle, "WS-RESUME", None),
+            (
+                Vec::new(),
+                WorkspaceCheck::Wrappers {
+                    judged: 0,
+                    unjudged: 1
+                }
+            )
+        );
     }
 
+    /// The thresholds and how `workspace_mismatch` was judged are shown as
+    /// they were.
     #[test]
-    fn workspaces_and_unfinished_runs_that_do_not_match_are_alerts() {
-        let workspace = |id: &str, description: Option<String>| ListedWorkspace {
-            id: id.to_owned(),
-            description,
-        };
-        let listed = vec![
-            // R1 runs in its own workspace (listed in another case).
-            workspace(&format!("WS-{R1}"), None),
-            // R2 is resumed: its workspace is known by its description.
-            workspace("WS-RESUME", Some(format!("run {R2} resume"))),
-            // R3 finished, and its worker workspace is still open.
-            workspace(
-                "WS-LEFT",
-                Some(format!("dagq role=worker queue=hash run={R3} task=1")),
-            ),
-            // Another queue's worker, the inbox, a person's own workspace.
-            workspace(
-                "WS-OTHER",
-                Some(format!("dagq role=worker queue=other run={R3} task=1")),
-            ),
-            workspace("ws-inbox", Some("dagq role=inbox queue=hash".into())),
-            workspace("WS-MINE", None),
-        ];
-        let events = [
-            run_event(1, R1, "agent_started", json!({}), T),
-            run_event(2, R2, "resume_started", json!({}), T),
-        ];
-        let runs = vec![
-            live_run(R1, RunStatus::Running),
-            live_run(R2, RunStatus::NeedsSession),
-        ];
+    fn the_workspace_check_and_the_thresholds_are_reported() {
         let result = stats(
-            &events,
+            &[],
             &HashMap::new(),
             T + 10,
             SlotSnapshot::default(),
             &StatsQuery::default(),
-            &snapshot(runs.clone(), Workspaces::Listed(listed.clone())),
-        );
-        assert_eq!(
-            result.workspace_check,
-            WorkspaceCheck::Checked { workspaces: 6 }
-        );
-        let alerts = result.running_alerts;
-        assert_eq!(alerts.len(), 1, "{alerts:?}");
-        assert_eq!(alerts[0].kind, "workspace_mismatch");
-        assert_eq!(alerts[0].reason, Some("workspace_without_run"));
-        assert_eq!(alerts[0].workspace_id.as_deref(), Some("WS-LEFT"));
-        assert_eq!(alerts[0].run_id.as_ref().map(RunId::as_str), Some(R3));
-        assert_eq!(alerts[0].task_id, Some(TaskId::new(1)));
-
-        // Neither workspace of R1 and R2 is open any more.
-        let alerts = running(
-            &events,
-            &snapshot(runs.clone(), Workspaces::Listed(listed[2..].to_vec())),
-            T + 10,
-        );
-        let missing: Vec<_> = alerts
-            .iter()
-            .filter(|alert| alert.reason == Some("run_without_workspace"))
-            .map(|alert| alert.run_id.as_ref().unwrap().as_str())
-            .collect();
-        assert_eq!(missing, [R1, R2]);
-
-        // Without cmux, nothing is judged about workspaces.
-        let result = stats(
-            &events,
-            &HashMap::new(),
-            T + 10,
-            SlotSnapshot::default(),
-            &StatsQuery::default(),
-            &snapshot(runs, Workspaces::Unavailable("cmux is gone".into())),
+            &snapshot(Vec::new()),
         );
         assert!(result.running_alerts.is_empty());
         assert_eq!(
             serde_json::to_value(&result.workspace_check).unwrap(),
-            json!({"status": "unavailable", "reason": "cmux is gone"})
+            json!({"status": "wrappers", "judged": 0, "unjudged": 0})
         );
         assert_eq!(
             serde_json::to_value(&result.stall_config).unwrap(),
             json!({"idle_without_receipt_secs": 1200, "send_confirm_secs": 60, "background_alert_secs": 1800, "idle_process_secs": 1800, "screen_idle_secs": 120, "turn_silence_secs": 900, "turn_limit_secs": 14400, "source": "default"})
         );
-        assert_eq!(described_run("dagq role=worker queue=hash"), None);
-        assert_eq!(described_run("run x"), None);
     }
 
     #[test]
@@ -3140,7 +2926,7 @@ mod tests {
         ];
         let mut run = live_run(R1, RunStatus::Running);
         run.idle = Some(((T + 1320) * 1000, Vec::new()));
-        let live = snapshot(vec![run], Workspaces::Unavailable("none".into()));
+        let live = snapshot(vec![run]);
         let at = |query: &StatsQuery, goals: &HashMap<TaskId, Option<GoalId>>| {
             stats(
                 &events,

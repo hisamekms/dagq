@@ -32,7 +32,6 @@ titleは表示専用で、runtimeはどのworkspaceもtitleで探さない（[AD
 存在判定は`WorkspaceBackend::exists`（cmux adapterは`cmux --json --id-format uuids list-windows`で全windowを列挙し、windowごとの`cmux --json --id-format uuids workspace list --window <window>`をまとめたlistのidに大文字小文字を問わず一致するか）で、listに居ないUUIDの行は消して作り直す。
 `--window`なしの`workspace list`は呼び出し元のwindowのworkspaceしか返さないので、別のwindowへ移したinbox・supervisor・人のplannerのworkspaceも居るものとして扱うために全windowを見る（task 246）。
 1つのwindowでもlistに失敗すれば判定全体をerrorにする（見落としたworkspaceを閉じたと誤らないため）。
-`WorkspaceListing::list_workspaces`（`stats`）も同じ全windowのlistを読む。
 この文書で「`workspace list`に居る」と書くのはこの全windowのlistのこと。
 window一覧とwindowごとのlistの間にwindowが閉じると判定はerrorになり、その間にworkspaceが未走査のwindowから走査済みのwindowへ移ると見落とす（どちらも人の操作と重なったときだけ）。
 

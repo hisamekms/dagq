@@ -146,11 +146,6 @@ path = "docs/design/supervisor-lifecycle/cleanup-and-recovery.md"
 line = 1782
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/cmux-notify.md"
-line = 2110
-tasks = 2
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/conflict-thresholds.md"
 line = 1565
 
@@ -277,7 +272,6 @@ tasks = 15
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/notification-route.md"
-line = 1177
 tasks = 7
 
 [[doc]]
@@ -317,7 +311,6 @@ tasks = 1
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/receipt-and-session-exit.md"
-line = 1439
 tasks = 15
 
 [[doc]]

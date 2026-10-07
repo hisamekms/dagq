@@ -654,3 +654,94 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
     let anonymous = call(&queue, None, UseCase::Stats, json!({}));
     assert_eq!(anonymous["error"]["code"], "unauthenticated");
 }
+
+/// ADR-t1404-1 decisions 2 and 10, ADR-t1433-1: `stats`' `workspace_mismatch`
+/// judges a running run's background wrapper by its handle's pid and the
+/// start it recorded alone, without cmux, on the command line (whose
+/// `--cmux` names none that runs) and in the service alike. A live wrapper
+/// whose heartbeat is far past its timeout is no alert; one whose process
+/// is gone is `run_without_wrapper`.
+#[test]
+fn stats_judges_a_background_wrapper_by_its_pid_and_start_on_both_paths() {
+    use dagq::{
+        application::ProcessControl,
+        domain::{EventKind, background_wrapper::BackgroundHandle},
+        infrastructure::{adapters::SystemProcesses, sqlite::SqliteQueue},
+    };
+    let queue = queue();
+    // The wrapper's stand-in is killed when the test ends, however it ends.
+    let mut wrapper = crate::common::KillOnDrop::new(
+        std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .unwrap(),
+        "a background wrapper's stand-in",
+    );
+    let pid = wrapper.child().id();
+    let start_identity = SystemProcesses.start_identity(pid).unwrap();
+    let handle = BackgroundHandle::new(pid, &start_identity).to_string();
+    let recorded = SqliteQueue::open(&queue.db).unwrap();
+    let run = queue.run.id();
+    recorded
+        .record_runtime_event(
+            run,
+            EventKind::WorkspaceCreated,
+            json!({"workspace_id": handle}),
+        )
+        .unwrap();
+    recorded
+        .record_runtime_event(run, EventKind::AgentStarted, json!({}))
+        .unwrap();
+    let conn = rusqlite::Connection::open(&queue.db).unwrap();
+    conn.execute(
+        "UPDATE task_runs SET status='running', workspace_id=?2 WHERE id=?1",
+        rusqlite::params![run.as_str(), handle],
+    )
+    .unwrap();
+    // The wrapper's row, its heartbeat far older than the timeout.
+    conn.execute(
+        "INSERT INTO run_processes(run_id, role, pid, heartbeat_at) VALUES (?1, 'wrapper', ?2, unixepoch() - 100000)",
+        rusqlite::params![run.as_str(), pid],
+    )
+    .unwrap();
+    start(&queue);
+    let worker = token(&queue, &Principal::worker(run, queue.run.task_id()));
+    let mismatches = |stats: &Value| -> Vec<Value> {
+        stats["running_alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|alert| alert["kind"] == "workspace_mismatch")
+            .cloned()
+            .collect()
+    };
+    let both = || {
+        let cli = ok(&queue.db, &["stats", "--cmux", "/nonexistent/cmux"]);
+        let served = answer(&queue, &worker, UseCase::Stats, &json!({}));
+        assert_eq!(cli["workspace_check"], served["workspace_check"]);
+        (
+            mismatches(&cli),
+            mismatches(&served),
+            cli["workspace_check"].clone(),
+        )
+    };
+    let (cli, served, check) = both();
+    assert!(cli.is_empty(), "{cli:?}");
+    assert!(served.is_empty(), "{served:?}");
+    assert_eq!(
+        check,
+        json!({"status": "wrappers", "judged": 1, "unjudged": 0})
+    );
+    wrapper.child().kill().unwrap();
+    wrapper.child().wait().unwrap();
+    let expected = vec![json!({
+        "kind": "workspace_mismatch",
+        "task_id": queue.run.task_id().as_i64(),
+        "run_id": run.as_str(),
+        "reason": "run_without_wrapper",
+        "workspace_id": handle,
+    })];
+    let (cli, served, _) = both();
+    assert_eq!(cli, expected);
+    assert_eq!(served, expected);
+}

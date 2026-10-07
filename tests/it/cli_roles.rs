@@ -28,9 +28,24 @@ fn ask_answer_asks_and_close_through_the_cli() {
         ],
     );
     assert_eq!(asked["created"], true);
-    assert_eq!(asked["notified"], true);
-    // A new ask sends one notification; no inbox is recorded, so it names
-    // no workspace, and a `--db` queue is named after the working directory.
+    // `ask` notifies nobody: the inbox's watch does (ADR-t1433-1 decision
+    // 2). No inbox is recorded, so it names no workspace, and a `--db`
+    // queue is named after the working directory.
+    assert_eq!(asked.get("notified"), None);
+    assert_eq!(notifications(&db), "");
+    let cursor_text = cursor.to_string();
+    ok(
+        &db,
+        &[
+            "watch",
+            "--role",
+            "inbox",
+            "--after",
+            &cursor_text,
+            "--timeout",
+            "1",
+        ],
+    );
     let repo = std::env::current_dir().unwrap();
     let repo = repo.file_name().unwrap().to_string_lossy();
     assert_eq!(
@@ -60,7 +75,6 @@ fn ask_answer_asks_and_close_through_the_cli() {
         ],
     );
     assert_eq!(again["created"], false);
-    assert_eq!(again["notified"], false);
     assert_eq!(notifications(&db).matches("notify\n").count(), 1);
     assert_eq!(again["id"], id);
     assert_eq!(again["question"], "Which ADR number?");
@@ -334,9 +348,10 @@ fn ask_answer_asks_and_close_through_the_cli() {
         ok(&db, &["asks", "--role", "inbox"])["asks"],
         serde_json::json!([])
     );
-    // Answers and closes notify nobody: two asks, two notifications.
+    // Neither asks, answers nor closes notify anyone: the two notifications
+    // are the inbox watches' above, one for each ask they returned.
     assert_eq!(notifications(&db).matches("notify\n").count(), 2);
-    // The ask stands when the notification cannot go out.
+    // `--cmux` is accepted and ignored.
     let unsent = ok(
         &db,
         &[
@@ -354,8 +369,7 @@ fn ask_answer_asks_and_close_through_the_cli() {
         ],
     );
     assert_eq!(unsent["created"], true);
-    assert_eq!(unsent["notified"], false);
-    assert!(unsent["notify_error"].is_string());
+    assert_eq!(unsent.get("notify_error"), None);
 }
 
 /// `stats` times an ask still open up to the window's end, also one
@@ -634,8 +648,12 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
     );
     assert_eq!(idle["task_id"], Value::Null);
     assert_eq!(idle["created"], true);
-    // The blocked ask on no task is notified with its question alone.
-    assert_eq!(idle["notified"], true);
+    // The inbox's watch notifies the blocked ask on no task with its
+    // question alone.
+    ok(
+        &db,
+        &["watch", "--role", "inbox", "--after", "0", "--timeout", "1"],
+    );
     assert!(
         notifications(&db).ends_with(&format!(
             "--title\n[{}] ask #{} blocked\n--body\nslots idle\n",

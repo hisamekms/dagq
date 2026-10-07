@@ -516,10 +516,12 @@ fn the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited()
     use dagq::application::{ProcessControl, WorkspaceBackend, planner::close_abandoned_planners};
     let fx = fixture();
     let queue = SqliteQueue::open(&fx.db).unwrap();
-    let backend = PlanWorkspace::running();
+    // A parked wrapper: a real process that ends once the test's process
+    // is gone, however the test ends.
+    let backend = PlanWorkspace::default();
     let log = fx.db.parent().unwrap().join("wrapper.log");
     let handle = backend
-        .launch_background(fx.db.parent().unwrap(), "sleep 600", &[], &log)
+        .launch_background(fx.db.parent().unwrap(), "planner-session", &[], &log)
         .unwrap();
     let wrapper = dagq::domain::background_wrapper::BackgroundHandle::parse(&handle)
         .unwrap()
@@ -557,6 +559,65 @@ fn the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited()
     let events = queue_events(&fx.db, "planner_closed");
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["code"], "runtime_exited");
+}
+
+/// ADR-t1404-1 decisions 2 and 10, ADR-t1433-1: whether a background
+/// planner lives is judged by its handle's pid and recorded start alone,
+/// without cmux (`planners --cmux` names none that runs). One whose
+/// heartbeat is far past the timeout but whose wrapper runs is alive (not
+/// `lost`, so the supervisor neither ends its row nor closes its span); one
+/// whose wrapper is gone reads `closed`.
+#[test]
+fn a_background_planner_with_a_late_heartbeat_is_alive_until_its_wrapper_is_gone() {
+    use crate::common::cli;
+    use dagq::application::WorkspaceBackend;
+    let fx = fixture();
+    let queue = SqliteQueue::open(&fx.db).unwrap();
+    // A parked wrapper: a real process that ends once the test's process
+    // is gone, however the test ends.
+    let backend = PlanWorkspace::default();
+    let log = fx.db.parent().unwrap().join("wrapper.log");
+    let handle = backend
+        .launch_background(fx.db.parent().unwrap(), "planner-session", &[], &log)
+        .unwrap();
+    let wrapper = dagq::domain::background_wrapper::BackgroundHandle::parse(&handle)
+        .unwrap()
+        .pid;
+    let planner = queue
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap();
+    queue
+        .set_planner_route(planner.id, PlannerRoute::Headless)
+        .unwrap();
+    queue
+        .planner_workspace_created(planner.id, &handle)
+        .unwrap();
+    queue.register_planner_wrapper(planner.id, wrapper).unwrap();
+    rusqlite::Connection::open(&fx.db)
+        .unwrap()
+        .execute(
+            "UPDATE planners SET heartbeat_at = heartbeat_at - 100000",
+            [],
+        )
+        .unwrap();
+    let view = || {
+        let planners = cli::ok(&fx.db, &["planners", "--cmux", "/nonexistent/cmux"]);
+        planners["planners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["id"] == planner.id.as_i64())
+            .cloned()
+            .unwrap_or_else(|| panic!("{planners}"))
+    };
+    let alive = view();
+    assert_eq!(alive["alive"], true, "{alive}");
+    assert_ne!(alive["state"], "lost", "{alive}");
+    // Its wrapper is gone: the row reads closed, by the handle alone.
+    backend.close(&handle).unwrap();
+    let gone = view();
+    assert_eq!(gone["state"], "closed", "{gone}");
+    assert_eq!(gone["alive"], false, "{gone}");
 }
 
 /// A planning request's planner (ADR-t1394-1) on the headless route: its

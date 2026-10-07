@@ -39,7 +39,7 @@ pub trait DialogueStore: DenialLog {
     /// The planner of the runtime's open for `request`, if any: the only
     /// planner that asks on it. A missing request is an error.
     fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>>;
-    /// Register the ask and notify the inbox of a new one.
+    /// Register the ask; the inbox's watch notifies the person of a new one.
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value>;
     fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask>;
     fn close_ask(&mut self, id: AskId) -> Result<Ask>;

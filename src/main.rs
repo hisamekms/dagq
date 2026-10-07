@@ -665,7 +665,8 @@ enum Command {
         /// waiting for new work.
         #[arg(long)]
         once: bool,
-        /// cmux executable; a bare name is resolved on PATH.
+        /// cmux executable, accepted from registered command lines: the supervisor calls no cmux
+        /// (ADR-t1433-1); only the e2e it runs before a landing and the update's job ping it.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         /// Claude Code executable; a bare name is resolved on PATH.
@@ -906,8 +907,7 @@ enum Command {
         /// resolved on PATH outside cmux's shims.
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
-        /// cmux executable for workspace listing and inbox notifications; bare names resolve
-        /// on PATH. If not found, neither listing nor notification is attempted.
+        /// Accepted from registered command lines and ignored: the observer calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         /// What the agent starts with, as the supervisor routed it (an actor launch as JSON);
@@ -1133,7 +1133,7 @@ enum Command {
     },
     /// Register a question for a person about a task or one of its runs; prints the ask.
     /// An open ask of the same task, run and kind is returned instead (`created: false`).
-    /// A new ask sends one `cmux notify` to the inbox workspace (`notified`, or `notify_error`).
+    /// Nothing is notified here: the inbox's `watch --role inbox` tells the person of the new ask.
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Ask {
         #[command(subcommand)]
@@ -1189,7 +1189,7 @@ enum Command {
         /// (ADR-t1394-1 decision 7).
         #[arg(long, conflicts_with_all = ["task_id", "run", "finding"])]
         request: Option<i64>,
-        /// cmux executable, used to notify the inbox; a bare name is resolved on PATH.
+        /// Accepted and ignored: the inbox's watch notifies the person of a new ask.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -1276,6 +1276,10 @@ enum Command {
         /// which come back with the next events that wake it; planner never.
         #[arg(long, value_parser = ROLES)]
         role: Option<String>,
+        /// cmux executable the inbox's watch tells the person of each new ask through (`cmux
+        /// notify`, ADR-t1433-1); a bare name is resolved on PATH, and one not found tells nobody.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
     },
     /// Per-run times in seconds (work, validate, wait_to_land, startup) and counts, per-goal and
     /// overall count/total/median, and alerts over thresholds, derived from run events. The latest
@@ -1297,8 +1301,8 @@ enum Command {
         /// Every finished run instead of the latest 50 (or the next 50 past --since).
         #[arg(long)]
         full: bool,
-        /// cmux executable, used to list the workspaces for `workspace_mismatch`; a bare name is
-        /// resolved on PATH.
+        /// Accepted and ignored: `workspace_mismatch` is judged by the runs' background wrappers,
+        /// without cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -1621,7 +1625,7 @@ enum ServiceCommand {
     /// Start the queue service of this binary unless one of its build answers, replacing one
     /// of another build; `up` does this before the supervisor.
     Start {
-        /// cmux the service notifies the inbox of a new ask through.
+        /// Accepted from registered command lines and ignored: the service calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -1630,7 +1634,7 @@ enum ServiceCommand {
     /// Run the queue service in the foreground until SIGINT or SIGTERM (what `start`, `up`
     /// and the supervisor run in the background). A second one for the same queue is refused.
     Serve {
-        /// cmux the service notifies the inbox of a new ask through.
+        /// Accepted from registered command lines and ignored: the service calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -1830,7 +1834,7 @@ enum PlannerCommand {
         /// its path.
         #[arg(long, group = "words", alias = "file")]
         text_file: Option<PathBuf>,
-        /// cmux executable, used to judge whether the planner is alive.
+        /// Accepted and ignored: the planner is judged by its background wrapper, without cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -2738,9 +2742,8 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
 /// The use case and params of the queue service a client-mode `dagq`
 /// sends `command` as (goal 82's stage (3), ADR-t1233-1 decision 7): the
 /// same options the service reads back as the command line's. `None` for
-/// a command the service has no use case for. A `--cmux` is the service's
-/// own: an ask notifies the inbox through it, and `stats` lists the
-/// workspaces with it.
+/// a command the service has no use case for. A `--cmux` is not sent:
+/// neither the client nor the service calls cmux (ADR-t1433-1).
 fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
     if let Some(read) = queue_read(command) {
         return Ok(Some(read.request()));
@@ -3111,31 +3114,26 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     // The broker's container needs no queue state, only its paths.
     if let Command::Service { command } = cli.command {
-        use dagq::infrastructure::adapters::executable;
         return match command {
             ServiceCommand::Status => Ok(dagq::compose::queue_service_status(&db)),
-            ServiceCommand::Start { cmux } => dagq::compose::queue_service_start(
-                &db,
-                &env::current_exe()?,
-                &executable(&cmux).unwrap_or(cmux),
-            ),
-            ServiceCommand::Stop => dagq::compose::queue_service_stop(&db),
-            ServiceCommand::Serve { cmux } => {
-                dagq::infrastructure::queue_service::serve(
-                    &dagq::infrastructure::queue_service::ServeOptions {
-                        db: db.clone(),
-                        // A missing cmux fails only an ask's notification.
-                        cmux: executable(&cmux).unwrap_or(cmux),
-                        generators: generators.clone(),
-                        reads: dagq::compose::service_reads(),
-                        stop: install_stop_signal()?,
-                        poll: Duration::from_millis(50),
-                        owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
-                            env::var(name).ok()
-                        }),
-                    },
-                )
+            // `--cmux` is accepted and ignored: the service calls no cmux
+            // (ADR-t1433-1).
+            ServiceCommand::Start { cmux: _ } => {
+                dagq::compose::queue_service_start(&db, &env::current_exe()?)
             }
+            ServiceCommand::Stop => dagq::compose::queue_service_stop(&db),
+            ServiceCommand::Serve { cmux: _ } => dagq::infrastructure::queue_service::serve(
+                &dagq::infrastructure::queue_service::ServeOptions {
+                    db: db.clone(),
+                    generators: generators.clone(),
+                    reads: dagq::compose::service_reads(),
+                    stop: install_stop_signal()?,
+                    poll: Duration::from_millis(50),
+                    owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
+                        env::var(name).ok()
+                    }),
+                },
+            ),
         };
     }
     if let Command::Broker { command } = cli.command {
@@ -3243,18 +3241,12 @@ fn execute(cli: Cli) -> Result<Value> {
         };
     }
     // The asks, answers, notes, marks and findings, likewise (task 733).
-    // Only `ask` notifies; the others never reach the backend.
-    let no_cmux = dagq::infrastructure::adapters::Cmux {
-        executable: PathBuf::from("cmux"),
-    };
+    // None notifies: the inbox's watch tells the person of a new ask
+    // (ADR-t1433-1 decision 2).
     let mut dialogue_store;
     macro_rules! dialogue {
-        ($cmux:expr) => {{
-            dialogue_store = dagq::infrastructure::dialogue::DialogueQueue {
-                queue: &mut queue,
-                checkout: &cwd,
-                cmux: $cmux,
-            };
+        () => {{
+            dialogue_store = dagq::infrastructure::dialogue::DialogueQueue { queue: &mut queue };
             dagq::application::commands::dialogue::Dialogue::new(
                 &mut dialogue_store,
                 &actor,
@@ -3265,16 +3257,7 @@ fn execute(cli: Cli) -> Result<Value> {
     // The reads of the queue, as the queue service answers them too
     // (ADR-t1233-5 decision 1).
     if let Some(read) = queue_read(&cli.command) {
-        use dagq::infrastructure::adapters::{Cmux, executable};
-        // `stats` lists the workspaces with its cmux; a missing one leaves
-        // only `workspace_mismatch` unjudged.
-        let cmux = match &cli.command {
-            Command::Stats { cmux, .. } => {
-                executable(cmux).ok().map(|executable| Cmux { executable })
-            }
-            _ => None,
-        };
-        return dagq::compose::read_queue(&mut queue, &db, &one_shot, cmux.as_ref(), &read);
+        return dagq::compose::read_queue(&mut queue, &db, &one_shot, &read);
     }
     Ok(match cli.command {
         Command::Init
@@ -3616,7 +3599,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 (_, Some(run), _) => NoteTarget::Run(RunId::new(run)?),
                 (_, _, goal) => NoteTarget::Goal(GoalId::new(goal.context("note needs a target")?)),
             };
-            serde_json::to_value(dialogue!(&no_cmux).note(NewNote {
+            serde_json::to_value(dialogue!().note(NewNote {
                 target,
                 text,
                 kind,
@@ -3628,7 +3611,7 @@ fn execute(cli: Cli) -> Result<Value> {
             note,
             at,
             retract,
-        } => dialogue!(&no_cmux).mark(match retract {
+        } => dialogue!().mark(match retract {
             Some(id) => {
                 dagq::application::commands::dialogue::MarkChange::Retract(EventId::new(id))
             }
@@ -3653,7 +3636,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     evidence,
                     propose,
                 },
-        } => serde_json::to_value(dialogue!(&no_cmux).record_finding(NewFinding {
+        } => serde_json::to_value(dialogue!().record_finding(NewFinding {
             kind,
             target: finding_target(task, run, goal)?.unwrap_or(FindingTarget::Queue),
             subject,
@@ -3666,9 +3649,7 @@ fn execute(cli: Cli) -> Result<Value> {
         })?)?,
         Command::Finding {
             command: FindingCommand::Resolve { id, reason },
-        } => {
-            serde_json::to_value(dialogue!(&no_cmux).resolve_finding(FindingId::new(id), &reason)?)?
-        }
+        } => serde_json::to_value(dialogue!().resolve_finding(FindingId::new(id), &reason)?)?,
         Command::Finding {
             command:
                 FindingCommand::Dismiss {
@@ -3676,7 +3657,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     reason,
                     covered_by,
                 },
-        } => serde_json::to_value(dialogue!(&no_cmux).dismiss_finding(
+        } => serde_json::to_value(dialogue!().dismiss_finding(
             FindingId::new(id),
             &reason,
             covered_by.map(TaskId::new),
@@ -3743,7 +3724,7 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Ask {
             command: Some(AskCommand::Close { id }),
             ..
-        } => serde_json::to_value(dialogue!(&no_cmux).close(AskId::new(id))?)?,
+        } => serde_json::to_value(dialogue!().close(AskId::new(id))?)?,
         Command::Ask {
             command: None,
             kind,
@@ -3757,14 +3738,11 @@ fn execute(cli: Cli) -> Result<Value> {
             run,
             finding,
             request,
-            cmux,
+            cmux: _,
         } => {
-            use dagq::infrastructure::adapters::{Cmux, executable};
-            // A missing cmux fails only the notification, not the ask.
-            let cmux = Cmux {
-                executable: executable(&cmux).unwrap_or(cmux),
-            };
-            dialogue!(&cmux).ask(NewAsk {
+            // `--cmux` is accepted and ignored: the inbox's watch notifies
+            // the person of the new ask (ADR-t1433-1 decision 2).
+            dialogue!().ask(NewAsk {
                 recommendation: recommend,
                 confidence: confidence.as_deref().map(str::parse).transpose()?,
                 kind: kind.unwrap_or_default().parse::<AskKind>()?,
@@ -3783,7 +3761,7 @@ fn execute(cli: Cli) -> Result<Value> {
         // The user's own answer or the inbox's delegated one, which the
         // application records from the actor (ADR-t728-3 decision 2).
         Command::Answer { id, text } => {
-            serde_json::to_value(dialogue!(&no_cmux).answer(AskId::new(id), &text)?)?
+            serde_json::to_value(dialogue!().answer(AskId::new(id), &text)?)?
         }
         Command::Watch {
             after,
@@ -3791,6 +3769,7 @@ fn execute(cli: Cli) -> Result<Value> {
             until_attention,
             interval,
             role: r,
+            cmux,
         } => dagq::compose::watch_in(
             &db,
             &queue,
@@ -3801,6 +3780,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 interval: Duration::from_secs(interval),
                 role: parse_role(r)?,
             },
+            Some(&cmux),
         )?,
         Command::Supervise {
             no_claude,
@@ -3837,8 +3817,11 @@ fn execute(cli: Cli) -> Result<Value> {
             tick_ms,
         } => {
             use dagq::compose::SuperviseOptions;
-            use dagq::infrastructure::adapters::{Cmux, executable};
-            let cmux = executable(&cmux)?;
+            use dagq::infrastructure::adapters::executable;
+            // The supervisor calls no cmux (ADR-t1433-1): `--cmux` is
+            // accepted, need not resolve, and goes on only to the e2e and
+            // the update's job, which ping it as their gate's precondition.
+            let cmux = executable(&cmux).unwrap_or(cmux);
             let mut options = SuperviseOptions {
                 no_claude,
                 stop: install_stop_signal()?,
@@ -3894,7 +3877,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 // decision 2); a one-shot pass does not.
                 queue_service: (!once).then(|| dagq::compose::QueueServiceOptions {
                     executable: env::current_exe().unwrap_or_else(|_| PathBuf::from("dagq")),
-                    cmux: cmux.clone(),
                     interval: dagq::application::supervise::QUEUE_SERVICE_INTERVAL,
                     start_timeout: dagq::application::supervise::QUEUE_SERVICE_START_TIMEOUT,
                     control: None,
@@ -3915,7 +3897,7 @@ fn execute(cli: Cli) -> Result<Value> {
             dagq::compose::supervise(
                 &db,
                 &checkout(repo),
-                &Cmux { executable: cmux },
+                &dagq::infrastructure::adapters::BackgroundSessions,
                 &if no_claude {
                     claude
                 } else {
@@ -4074,17 +4056,14 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Plan { .. } => bail!(dagq::application::planner::PLAN_REFUSED),
-        Command::Planners { all, cmux } => {
-            use dagq::infrastructure::adapters::{Cmux, executable};
-            one_shot.planners_of(
-                &queue,
-                &db,
-                &Cmux {
-                    executable: executable(&cmux)?,
-                },
-                all,
-            )?
-        }
+        // `--cmux` is accepted and ignored: a planner is judged by its
+        // background wrapper, without cmux (ADR-t1433-1).
+        Command::Planners { all, cmux: _ } => one_shot.planners_of(
+            &queue,
+            &db,
+            &dagq::infrastructure::adapters::BackgroundSessions,
+            all,
+        )?,
         Command::Run { command } => {
             use dagq::application::screen::{self, RunTarget};
             match command {
@@ -4110,7 +4089,6 @@ fn execute(cli: Cli) -> Result<Value> {
         }
         Command::Planner { command } => {
             use dagq::application::screen;
-            use dagq::infrastructure::adapters::{Cmux, executable};
             match command {
                 // Neither reads a screen nor types: no cmux is built
                 // (ADR-t1433-2).
@@ -4138,16 +4116,14 @@ fn execute(cli: Cli) -> Result<Value> {
                     planner,
                     text,
                     text_file,
-                    cmux,
+                    cmux: _,
                 } => {
                     let words = request_words("--text", text, text_file, &cwd)?
                         .expect("clap requires --text or --text-file");
                     one_shot.request_planner(
                         &mut queue,
                         &db,
-                        &Cmux {
-                            executable: executable(&cmux)?,
-                        },
+                        &dagq::infrastructure::adapters::BackgroundSessions,
                         PlannerId::new(planner),
                         &words,
                     )?
@@ -4228,7 +4204,9 @@ fn execute(cli: Cli) -> Result<Value> {
             timeout,
             claude,
             codex,
-            cmux,
+            // Accepted from registered command lines and ignored: the
+            // observer calls no cmux (ADR-t1433-1).
+            cmux: _,
             launch,
             codex_home,
             switchable,
@@ -4298,7 +4276,6 @@ fn execute(cli: Cli) -> Result<Value> {
                     } else {
                         ObserveMode::Hourly
                     },
-                    cmux: Some(cmux),
                     since: since.map(EventId::new),
                     dry_run,
                     timeout: Duration::from_secs(timeout),

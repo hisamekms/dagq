@@ -474,22 +474,6 @@ impl Supervisor<'_> {
         for task in &applied.gap_tasks {
             info!(task_id = %task, "goal {goal}: gap registered as draft task {task}");
         }
-        if let Some(outcome) = &applied.ask {
-            // The verdict is applied: a notification that fails is only
-            // reported.
-            let error = match ask::notify(
-                &mut *self.queue,
-                &self.layout.main_checkout,
-                outcome,
-                self.cmux,
-            ) {
-                Ok(notified) => notified.get("notify_error").map(ToString::to_string),
-                Err(error) => Some(format!("{error:#}")),
-            };
-            if let Some(error) = error {
-                warn!(ask_id = %outcome.ask.id, "goal {goal}: the inbox was not notified of ask {}: {error}", outcome.ask.id);
-            }
-        }
         Ok(())
     }
 

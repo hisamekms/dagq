@@ -218,12 +218,8 @@ impl Supervisor<'_> {
             WallStep::Hold { reason, wall } => {
                 let ask_id = match wall {
                     Some(wall) => {
-                        let (outcome, _) = ask::hold(
-                            &mut *self.queue,
-                            &self.layout.main_checkout,
-                            NewHold::wall(wall, None, None),
-                            self.cmux,
-                        )?;
+                        let (outcome, _) =
+                            ask::hold(&mut *self.queue, NewHold::wall(wall, None, None))?;
                         Some(outcome.ask.id)
                     }
                     None => {

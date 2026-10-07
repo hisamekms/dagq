@@ -1,93 +1,31 @@
-//! `ask`: register a question for a person and, when it is new, tell them
-//! with one notification aimed at the inbox workspace `up` recorded
-//! (ADR-0022 decision 5). The supervisor's own asks take this path too.
+//! `ask`: register a question for a person. Nothing is notified here: the
+//! `watch --role inbox` that runs in the inbox's session tells the person
+//! of each `ask_opened` it sees (ADR-t1433-1 decision 2), and the
+//! supervisor, the queue service and the observer call no cmux. The
+//! supervisor's own asks take this path too.
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::path::Path;
 
-use super::{Queue, WorkspaceBackend, naming::ask_notification_title};
-use crate::domain::{AskOutcome, HoldOutcome, NewAsk, NewHold, SessionRole};
+use super::AskStore;
+use crate::domain::{AskOutcome, HoldOutcome, NewAsk, NewHold};
 
-/// Characters of an ask's question the notification keeps before `…`.
-const NOTIFY_QUESTION_CHARS: usize = 200;
-
-/// Register `ask` and, when it is new, notify the inbox (without a
-/// workspace when there is none). A repeated ask notifies nobody. The ask
-/// stands whether or not the notification goes out; a failure is reported
-/// as `notify_error` next to `notified: false`. `checkout` names the
-/// repository in the title: its main checkout, as the caller resolved it.
-pub fn ask(
-    queue: &mut dyn Queue,
-    checkout: &Path,
-    ask: NewAsk,
-    cmux: &dyn WorkspaceBackend,
-) -> Result<Value> {
+/// Register `ask`. A repeated ask returns the open one (`created: false`).
+pub fn ask(queue: &mut dyn AskStore, ask: NewAsk) -> Result<Value> {
     let outcome = queue.ask(ask)?;
-    notify(queue, checkout, &outcome, cmux)
+    Ok(serde_json::to_value(&outcome)?)
 }
 
 /// Open the authentication or cost ask of `hold` with its run, or add the
-/// run to the open one (ADR-0047 decision 42), and notify the inbox only
-/// when the ask is new: a run that joins it notifies nobody.
-pub fn hold(
-    queue: &mut dyn Queue,
-    checkout: &Path,
-    hold: NewHold,
-    cmux: &dyn WorkspaceBackend,
-) -> Result<(HoldOutcome, Value)> {
+/// run to the open one (ADR-0047 decision 42). Only a new ask is an
+/// `ask_opened` for the inbox's watch to notify; a run that joins it
+/// notifies nobody.
+pub fn hold(queue: &mut dyn AskStore, hold: NewHold) -> Result<(HoldOutcome, Value)> {
     let outcome = queue.hold(hold)?;
-    let mut value = notify(
-        queue,
-        checkout,
-        &AskOutcome {
-            ask: outcome.ask.clone(),
-            created: outcome.created,
-        },
-        cmux,
-    )?;
+    let mut value = serde_json::to_value(AskOutcome {
+        ask: outcome.ask.clone(),
+        created: outcome.created,
+    })?;
     value["joined"] = json!(outcome.joined);
     Ok((outcome, value))
-}
-
-/// Notify the inbox of an ask registered elsewhere (the `follow_up` ask a
-/// verdict opens in its own transaction) as [`ask`] does: only a new one,
-/// and a failed notification is `notify_error` next to `notified: false`.
-pub fn notify(
-    queue: &mut dyn Queue,
-    checkout: &Path,
-    outcome: &AskOutcome,
-    cmux: &dyn WorkspaceBackend,
-) -> Result<Value> {
-    let mut value = serde_json::to_value(outcome)?;
-    if !outcome.created {
-        value["notified"] = json!(false);
-        return Ok(value);
-    }
-    // The caller resolves the checkout that names the repository.
-    let repo_root = checkout;
-    let ask = &outcome.ask;
-    let question = super::health::truncate(&ask.question, NOTIFY_QUESTION_CHARS)
-        .unwrap_or_else(|| ask.question.clone());
-    // An observer's blocked ask may belong to no task (and then no run).
-    let mut body = question;
-    if let Some(task_id) = ask.task_id {
-        body.push_str(&format!("\ntask {task_id}"));
-        if let Some(run_id) = &ask.run_id {
-            body.push_str(&format!(" run {run_id}"));
-        }
-    }
-    let inbox = queue.session_workspace(SessionRole::Inbox)?;
-    match cmux.notify(
-        &ask_notification_title(repo_root, ask),
-        &body,
-        inbox.as_deref(),
-    ) {
-        Ok(()) => value["notified"] = json!(true),
-        Err(error) => {
-            value["notified"] = json!(false);
-            value["notify_error"] = json!(format!("{error:#}"));
-        }
-    }
-    Ok(value)
 }

@@ -67,6 +67,7 @@ fn the_watch_connection_rejects_writes_and_sees_attention_added_after_a_poll() {
                 reader.generators().clock.as_ref(),
                 &SystemProcesses,
                 Some(&mut record),
+                None,
                 &options,
             )
             .unwrap();
@@ -147,7 +148,7 @@ fn cli_and_library_watch_use_read_only_connections_on_the_live_queue() {
                 role,
             };
             let _waiting = common::within(common::STEP_LIMIT, "writable watch refusal");
-            let error = compose::watch_in(&db, &writer, &options).unwrap_err();
+            let error = compose::watch_in(&db, &writer, &options, None).unwrap_err();
             assert!(
                 error
                     .to_string()

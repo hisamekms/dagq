@@ -135,7 +135,7 @@ supervisorが置換の起動を記録すると知らせが消え、人が別のs
 | bare（main worktreeに作業ファイルが無い。bareのrepositoryに`git worktree add`した構成を含む） | 無い。理由（`... is bare ...`）とbareでないcloneを使う案内のerror |
 | `git init --separate-git-dir`（common directoryがmain worktreeの外） | Gitはmain worktreeの場所を記録せず、`worktree list`はcommon directoryそのものを出す。実行したcheckoutがmain worktree（`--absolute-git-dir`がcommon directory）ならそれ、linked worktreeやcommon directoryからは分からず、main worktreeで打つよう案内するerror（ask 142で人が決めた） |
 
-main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`で代わりにしない（runごとに設定が変わりうるため）。`up`はpreflightで`...; the supervisor was not started`で止まり、`supervise`と`integrate`は起動時に同じerrorで止まり、`doctor`の`repository`は`error`を出して`run_env`は出さない。`dagq plan`はmain checkoutを読まずに拒む。`--from`なしの`install`は`--from`を求めるerrorになる。askの通知は、main checkoutが無ければqueueが束縛されたcommon directoryの名前で出す（束縛の無いqueueでは実行したcheckout）。supervisorのaskの通知は`Layout.main_checkout`の名前で出す。
+main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`で代わりにしない（runごとに設定が変わりうるため）。`up`はpreflightで`...; the supervisor was not started`で止まり、`supervise`と`integrate`は起動時に同じerrorで止まり、`doctor`の`repository`は`error`を出して`run_env`は出さない。`dagq plan`はmain checkoutを読まずに拒む。`--from`なしの`install`は`--from`を求めるerrorになる。inboxのwatchのaskの通知は、queueが束縛されたcommon directoryの名前で出す（束縛の無いqueueでは実行したcheckout）。
 
 ## `[run.env]`が名指すプログラムの検査
 
