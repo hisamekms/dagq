@@ -13,8 +13,8 @@
 use super::*;
 use crate::application::ci_watch::{CheckOutcome, CiSource};
 use crate::domain::ci_watch::{
-    CI_WATCH_ACCESS_KINDS, CI_WATCH_HOLD, CiWatchConfig, FailureStreak, available_after_failure,
-    check_due, hold_reason,
+    CI_WATCH_ACCESS_KINDS, CI_WATCH_HOLD, CiWatchConfig, FailureStreak, JobsUnread,
+    available_after_failure, check_due, hold_reason,
 };
 
 /// Reads `[ci_watch]` of the main checkout's `dagq.toml` (`None` without
@@ -51,6 +51,9 @@ pub(super) struct CiWatchState {
     /// this process's first one (or without the table).
     available: Option<bool>,
     failures: FailureStreak,
+    /// The success run whose jobs the last check could not read, which the
+    /// next check counts on from (ADR-t2034-1 decision 5).
+    jobs_unread: JobsUnread,
     /// The hold's reason this process last recorded or found recorded
     /// (`Some(None)`: none); `None` before its first look at the queue.
     recorded: Option<Option<&'static str>>,
@@ -167,9 +170,18 @@ impl Supervisor<'_> {
         let queues = self.queues.clone();
         let token = self.token.clone();
         let build = self.layout.version.clone();
+        let jobs_unread = self.ci.jobs_unread.clone();
         self.ci.job = Some(spawn_traced(move || {
             let queue = queues.open()?;
-            crate::application::ci_watch::check(&*queue, &*source, &config, &branch, &token, &build)
+            crate::application::ci_watch::check(
+                &*queue,
+                &*source,
+                &config,
+                &branch,
+                &token,
+                &build,
+                &jobs_unread,
+            )
         }));
     }
 
@@ -198,6 +210,7 @@ impl Supervisor<'_> {
                     _ => {}
                 }
                 self.ci.available = Some(outcome.available);
+                self.ci.jobs_unread = outcome.jobs_unread;
                 if outcome.recorded > 0 {
                     info!("the CI watch recorded {} run(s)", outcome.recorded);
                 }

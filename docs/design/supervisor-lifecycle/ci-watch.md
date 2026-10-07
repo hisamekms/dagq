@@ -50,17 +50,12 @@ related:
 ## 実行の扱い
 
 - `conclusion`が`success`なら緑、`failure`か`timed_out`なら赤、それ以外（`cancelled`・`skipped`・`neutral`・`action_required`・`startup_failure`・`stale`）は飛ばす。飛ばした実行は次の`ci_checked`の`skipped_runs`に数え、範囲は次に成否の決まった実行が引き受ける（`ci.yml`の`concurrency`は変えない）。
-- **名指したjobが飛んだsuccess**（**予定（未実装）**、[ADR-t2034-1](../../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）: `[ci_watch] required_jobs`（jobの`name`の配列）があれば、`success`の実行ごとに上の3と同じ`gh run view <id> --json jobs`を読み、名指したjobが全部`success`で終わった実行だけを緑とする。
-  どれかが`skipped`などで終わった実行（docsだけのpushでRustのjobを飛ばした実行）は上の飛ばす実行と同じに扱い、`ci_turned_green`も一覧の`removed`も書かない。
-  `required_jobs`が無ければjobを読まない。
-  - 名指したjobが実行のjobsに無い: 飛ばす実行に数え、設定と`ci.yml`のずれを見張りのeventで知らせ、inbox宛てのattentionにする。
-    同じずれは、間に名指したjobが揃った緑が無い限り繰り返し記録しない。
-    直すのは`dagq.toml`か`ci.yml`のtaskで、`doctor`は実行を読まないので出さない。
-  - jobsを読めない（`gh`の非0・時間切れ・形の読めない出力）: その実行も後の実行も処理せず、`ci_checked`を書かずに次の間隔で読み直す。
-    下の`ci_check_failed`の数え方の一時の失敗で、claimも着地も止めない。
-    同じ実行で一時の失敗の上限まで続いたら、緑と読まずに飛ばす実行に数えて先へ進み、そのことをeventに残す。
-  - 飛ばした実行は記録しないので、次に成否の決まった実行まで間隔ごとにjobsを読み直す。
-    docsだけのpushでdocの検査が落ちた赤の項目（jobとstep）は、docsだけの修正では外れず、Rustのjobも流して通る実行で外れる。
+- **名指したjobが飛んだsuccess**（[ADR-t2034-1](../../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）: `CiWatchConfig`の`required_jobs`があれば`success`の実行のjobsも読み、名指したjobが全部`success`の実行だけを緑とする（`domain::ci_watch::read_green`）。
+  緑でない`success`は飛ばす実行に数え、次に成否の決まった実行が理由（`Undecided`）とともに引き受ける。
+  - 名指したjobが無い: `ci_jobs_missing`で知らせ、名指したjobが揃った緑までinbox宛てのattention（`fix dagq.toml`）にする（`WatchState::jobs_missing_event`）。
+  - jobsを読めない: その実行も後の実行も処理せず次の間隔で読み直し、実行ごとに上限まで続けば`ci_check_failed`を1回記録して飛ばす（`JobsUnread`）。
+  - どれも緑と読まないので、既に落ちているtestの一覧は消えない。
+    docsだけのpushで落ちたdocの検査の項目は、Rustのjobも流して通る実行で外れる。
 - **遅れて終わった実行**: 記録した実行のうち最後に作られたもの（以下「先頭」）より前に作られた実行（先頭のre-runは除く）は、`ci_checked`に`late: true`を付けて記録するだけで、一覧・状態・範囲を変えない（`ci_turned_red` / `ci_turned_green`もfindingも書かない。`domain::ci_watch::decide`）。
   後に作られた実行がより新しいcommitで既に決めたことを、古いcommitの成否で戻したり上書きしたりしないためで、落ちたtestとjobは`failed_tests`・`failed_jobs`に残る。
 - **re-run**: 先頭の実行の新しいattemptは、新しい実行と同じに扱う。
@@ -88,8 +83,10 @@ related:
 | `ci_turned_green` | 直前の`state`が`red`のときに緑の実行を処理したとき | `run_id`・`sha`・`url`・`red_since`（最初の赤の`{run_id, sha, url}`）・`red_secs`（最初の赤の`created_at`からこの実行の`created_at`まで） |
 | `ci_watch_unavailable` | 読む手段が無いと分かり、queueの最新の`ci_watch_unavailable` / `ci_watch_available`が同じ`reason`の`ci_watch_unavailable`でないとき（理由が変われば、例えば`gh_missing`から`gh_unauthenticated`へ、また記録する） | `reason`（`gh_missing` / `gh_unauthenticated` / `not_github`）・`program`（`gh`の値）・`path`（探したPATH）・`message` |
 | `ci_watch_available` | 読む手段があり、queueの最新が`ci_watch_unavailable`のとき | `program`・`resolved`（解決したpath） |
+| `ci_jobs_missing` | 上の「実行の扱い」 | `WatchState::jobs_missing_event` |
 
 通信の失敗・`gh`の非0の終了（認証以外）・時間切れは`ci_watch_unavailable`にせず、logにwarnを出して次の間隔でやり直す。この失敗はclaimも着地も止めない（その後はqueueの最新の`ci_watch_unavailable` / `ci_watch_available`の答えに従う。失敗の前に`ci_watch_available`を記録した確かめなら、そこで保留が解ける）。同じ理由で3回（`CI_WATCH_FAILURE_LIMIT`）続いたら`ci_check_failed`（`error`・`failures`・`since`（unix秒）・`supervisor`）を1回記録する（attentionにしない。observerが読む）。
+jobsを読めない実行の`ci_check_failed`は上の「実行の扱い」（`application::ci_watch::check`）。
 
 ## 読む手段が無いとき
 
@@ -190,7 +187,7 @@ eventの種類にはmigrationが要らないが（上の「eventの種類と欄�
 | `[ci_watch]` | [Run environment](run-environment.md)、[`supervise`](supervise.md)（passごとの読み直しとclaim・着地の保留） |
 | `dagq ci failures`（新しい読むコマンド） | [domain-model](../domain-model.md)の「Current operations」、[Authorization](../authorization.md)の「Policy」と「ほかのコマンド」（`ci.read`。workerとjobには許さない）と[Security](../security.md)、[Queue service](../queue-service.md)の「まだ無いもの」、pluginのdagqの`reference/inspect.md`と`reference/authority.md`（documents.mdの「権限の表を写す文書」） |
 | `finding dismiss --covered-by`・`covered_by_task` | [domain-model](../domain-model.md)の`finding dismiss`、[Queue service](../queue-service.md)の`finding_dismiss`（引数`covered_by`）、[Authorization](../authorization.md)（capabilityは`finding.dismiss`のままで、表は変えない）、[persistence](../persistence.md)の「findings」、pluginの`dagq-planner`の`SKILL.md`と`reference/register.md`の`finding dismiss`の書き方 |
-| `status`の`ci`、attention `ci_watch_unavailable`と`next`の値 | [`status`](status.md)、[`events` / `watch`](events-watch.md)、pluginの`dagq-inbox`の`reference/status.md`（`next`の手当て: `log in to gh`は人が`gh auth login`を打つ） |
+| `status`の`ci`、attention `ci_watch_unavailable`・`ci_jobs_missing`と`next`の値 | [`status`](status.md)、[`events` / `watch`](events-watch.md)、pluginの`dagq-inbox`の`reference/status.md`（`next`の手当て: `log in to gh`は人が`gh auth login`を打つ） |
 | `doctor`の`ci_watch` | [`doctor`](doctor.md)、pluginの`dagq-recover`の`reference/doctor.md` |
 | `up`のpreflightの`gh` | [`up` / `down`](up-down.md)、pluginの`dagq-recover`の`reference/up-down.md` |
 | eventの種類（`ci_checked`ほか） | `domain::event_kind`（`is_queue`）だけ（migrationは要らない） |

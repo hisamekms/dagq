@@ -18,7 +18,7 @@ use super::adapters::capture;
 use super::run_env::resolve_program;
 use crate::application::ci_watch::CiSource;
 use crate::domain::ci_watch::{
-    Access, CI_WATCH_CALL_TIMEOUT, CiRun, CiWatchConfig, FailedJob, Junit, RUN_LIST_LIMIT,
+    Access, CI_WATCH_CALL_TIMEOUT, CiJob, CiRun, CiWatchConfig, FailedJob, Junit, RUN_LIST_LIMIT,
     Unavailable, github_repo, job_failed, merge_outcomes, parse_junit, remote_repo,
 };
 
@@ -271,6 +271,33 @@ impl CiSource for GhSource {
                     .collect(),
             })
             .collect())
+    }
+
+    fn jobs(&self, run_id: i64, attempt: i64) -> Result<Vec<CiJob>> {
+        let out = self.gh(&[
+            "run",
+            "view",
+            &run_id.to_string(),
+            "--attempt",
+            &attempt.to_string(),
+            "--json",
+            "jobs",
+        ])?;
+        let view: Value = serde_json::from_str(&out).context("read the output of gh run view")?;
+        view["jobs"]
+            .as_array()
+            .context("the output of gh run view has no jobs")?
+            .iter()
+            .map(|job| {
+                Ok(CiJob {
+                    name: job["name"]
+                        .as_str()
+                        .context("a job of gh run view has no name")?
+                        .to_owned(),
+                    conclusion: job["conclusion"].as_str().unwrap_or_default().to_owned(),
+                })
+            })
+            .collect()
     }
 
     fn junit(&self, run_id: i64) -> Junit {

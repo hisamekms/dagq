@@ -15,10 +15,12 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::{QueueRecords, RunLog};
+use crate::domain::EventKind;
 use crate::domain::ci_watch::{
-    Access, CI_WATCH_ACCESS_KINDS, CiCheckRecord, CiRun, CiState, CiWatchConfig, FINDING_KIND,
-    FailedJob, Junit, RangeFacts, RunInput, WatchState, binary_contains, classify, decide,
-    failures_view, runs_to_process, status_view,
+    Access, CI_WATCH_ACCESS_KINDS, CI_WATCH_FAILURE_LIMIT, CiCheckRecord, CiJob, CiRun, CiState,
+    CiWatchConfig, FINDING_KIND, FailedJob, GreenReading, JobsUnread, Junit, RangeFacts, RunInput,
+    Undecided, WatchState, binary_contains, classify, decide, failures_view, read_green,
+    runs_to_process, status_view,
 };
 use crate::domain::{FindingTarget, Impact, LeaseToken, NewFinding, TaskId};
 
@@ -33,6 +35,10 @@ pub trait CiSource: Send + Sync {
     fn completed_runs(&self) -> Result<Vec<CiRun>>;
     /// The failed jobs of a red run, with their failed steps.
     fn failed_jobs(&self, run_id: i64) -> Result<Vec<FailedJob>>;
+    /// Every job of a run's attempt with how it ended, for a success run
+    /// read against `required_jobs` ([`read_green`]); an error when they
+    /// cannot be read.
+    fn jobs(&self, run_id: i64, attempt: i64) -> Result<Vec<CiJob>>;
     /// The JUnit of a run's artifacts ([`Junit::Missing`] when they cannot
     /// be read).
     fn junit(&self, run_id: i64) -> Junit;
@@ -44,7 +50,7 @@ pub trait CiSource: Send + Sync {
 }
 
 /// What one check did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckOutcome {
     /// Whether the means to read GitHub are there: claims and landings
     /// wait while they are not.
@@ -54,12 +60,20 @@ pub struct CheckOutcome {
     /// Another supervisor recorded a run first; the next check goes on
     /// after it.
     pub taken: bool,
+    /// The success runs whose jobs this check could not read, with the
+    /// failures in a row: the next check is given it back to count on.
+    pub jobs_unread: JobsUnread,
 }
 
 /// One check: the means, then every run whose ID and attempt no record
 /// holds, in the order they were created ([`runs_to_process`]; the newest
 /// only at a queue's first check), the runs ended
 /// with no outcome counted into the next settled one's `skipped_runs`.
+/// With `required_jobs`, a success run's jobs are read too and one that
+/// does not read green ([`read_green`]) counts with them; one whose jobs
+/// cannot be read stops the check there, to be read again by the next
+/// (`jobs_unread`, the last check's count for each run), and at the
+/// limit is counted with them and `ci_check_failed` recorded once.
 /// `build` is the supervisor's build identifier, whose commit tells
 /// whether it contains a red range. An error (a call that failed or ran
 /// out of time) is a passing failure the caller counts.
@@ -70,6 +84,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
     branch: &str,
     supervisor: &LeaseToken,
     build: &str,
+    jobs_unread: &JobsUnread,
 ) -> Result<CheckOutcome> {
     let access = source.access()?;
     let last = queue.latest_queue_event(&CI_WATCH_ACCESS_KINDS)?;
@@ -83,6 +98,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
         available: access.is_available(),
         recorded: 0,
         taken: false,
+        jobs_unread: JobsUnread::default(),
     };
     if !outcome.available {
         return Ok(outcome);
@@ -91,12 +107,63 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
     let mut watch = WatchState::fold(&queue.ci_watch_events()?);
     let (runs, mut gap) = runs_to_process(runs, &watch);
     let mut skipped = Vec::new();
+    let mut undecided: Vec<(i64, i64, Undecided)> = Vec::new();
     let named = crate::build_id::named_commit(build);
     for run in &runs {
         let Some(state) = classify(&run.conclusion) else {
             skipped.push((run.run_id, run.attempt));
             continue;
         };
+        if state == CiState::Green && !config.required_jobs.is_empty() {
+            let jobs = source.jobs(run.run_id, run.attempt);
+            let reading = match &jobs {
+                Ok(list) => read_green(&config.required_jobs, Ok(list), 0),
+                Err(error) => {
+                    let failures = outcome.jobs_unread.fail(jobs_unread, run);
+                    read_green(&config.required_jobs, Err(&format!("{error:#}")), failures)
+                }
+            };
+            match reading {
+                GreenReading::Green => {}
+                GreenReading::Retry => {
+                    if let Err(error) = &jobs {
+                        tracing::warn!(error = %format_args!("{error:#}"), "the jobs of CI run {} could not be read ({} in a row); it is read again at the next check: {error:#}", run.run_id, outcome.jobs_unread.failures(run));
+                    }
+                    return Ok(outcome);
+                }
+                GreenReading::Undecided(why) => {
+                    if let Undecided::JobsMissing { jobs } = &why
+                        && let Some(mut payload) =
+                            watch.jobs_missing_event(run, jobs, config, branch)
+                    {
+                        payload["supervisor"] = json!(supervisor);
+                        queue.record_queue_event(EventKind::CiJobsMissing, payload)?;
+                        watch = WatchState::fold(&queue.ci_watch_events()?);
+                    }
+                    if let Undecided::JobsUnreadable { error, failures } = &why {
+                        // The count stays past the limit while the run is
+                        // read again (until a settled run records it), so
+                        // it is told once.
+                        if *failures == CI_WATCH_FAILURE_LIMIT {
+                            tracing::warn!(error = %error, "the jobs of CI run {} could not be read {failures} times in a row; it is counted as settling nothing", run.run_id);
+                            queue.record_queue_event(
+                                EventKind::CiCheckFailed,
+                                json!({
+                                    "error": error,
+                                    "failures": failures,
+                                    "run_id": run.run_id,
+                                    "attempt": run.attempt,
+                                    "supervisor": supervisor,
+                                }),
+                            )?;
+                        }
+                    }
+                    skipped.push((run.run_id, run.attempt));
+                    undecided.push((run.run_id, run.attempt, why));
+                    continue;
+                }
+            }
+        }
         let failed_jobs = match state {
             // A run whose jobs cannot be read is taken without them, so
             // one run does not stop the watch.
@@ -115,6 +182,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
             run,
             state,
             skipped: &skipped,
+            undecided: &undecided,
             junit: &junit,
             failed_jobs: &failed_jobs,
             gap,
@@ -168,6 +236,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
         }
         outcome.recorded += 1;
         skipped.clear();
+        undecided.clear();
         gap = false;
         watch = WatchState::fold(&queue.ci_watch_events()?);
     }

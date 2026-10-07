@@ -1942,7 +1942,10 @@ pub enum AttentionNext {
     LogInToGh,
     /// `[ci_watch]` of `dagq.toml` cannot be watched as written
     /// (`ci_watch_unavailable` with `reason: not_github`, ADR-t1920-1): a
-    /// person fixes the remote or has a task take the table out.
+    /// person fixes the remote or has a task take the table out. Or its
+    /// `required_jobs` names a job the workflow's runs lack
+    /// (`ci_jobs_missing`, ADR-t2034-1): a task fixes `dagq.toml` or the
+    /// workflow.
     FixDagqToml,
     /// Stop the faulty server on the host; let the supervisor start its
     /// replacement so the recorded start clears restart-failure attention.
@@ -2112,6 +2115,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::DEPENDENCY_STRANDED,
     run_env::RUN_ENV_PROGRAM_MISSING,
     ci_watch::CI_WATCH_UNAVAILABLE,
+    ci_watch::CI_JOBS_MISSING,
     sccache::RESTART_FAILED,
     UPDATE_INSTALLED,
     event_kind::THROUGHPUT_REVIEW_REPORTED,
@@ -2329,6 +2333,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         (ci_watch::CI_WATCH_UNAVAILABLE, _) => Some(ci_watch::Unavailable::next_of(
             payload.get("reason").and_then(serde_json::Value::as_str),
         )),
+        // `required_jobs` names a job a success run lacks (ADR-t2034-1
+        // decision 5): `dagq.toml` or the workflow is fixed by a task.
+        (ci_watch::CI_JOBS_MISSING, _) => Some(AttentionNext::FixDagqToml),
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
         (UPDATE_INSTALLED, _) => Some(AttentionNext::ReportUpdate),
@@ -3428,6 +3435,11 @@ mod attention_tests {
                 Some(FixDagqToml),
             ),
             ("ci_watch_available", json!({"program": "gh"}), None),
+            (
+                "ci_jobs_missing",
+                json!({"jobs": ["linux"]}),
+                Some(FixDagqToml),
+            ),
             (
                 "kpi_push_abandoned",
                 json!({"push_kind": "daily", "period": "2026-09-26"}),

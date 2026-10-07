@@ -30,8 +30,13 @@ pub const CI_WATCH_UNAVAILABLE: &str = EventKind::CiWatchUnavailable.as_str();
 /// The means to read GitHub came back.
 pub const CI_WATCH_AVAILABLE: &str = EventKind::CiWatchAvailable.as_str();
 /// The same passing failure (network, a non-zero `gh`) repeated
-/// [`CI_WATCH_FAILURE_LIMIT`] times.
+/// [`CI_WATCH_FAILURE_LIMIT`] times, or the jobs of one success run could
+/// not be read that many times in a row (ADR-t2034-1 decision 5).
 pub const CI_CHECK_FAILED: &str = EventKind::CiCheckFailed.as_str();
+/// A success run lacks a job `required_jobs` names: the setting and the
+/// workflow disagree (ADR-t2034-1 decision 5), an attention for the inbox
+/// until a green run with every named job is recorded.
+pub const CI_JOBS_MISSING: &str = EventKind::CiJobsMissing.as_str();
 /// The two kinds of the means' state, for reading the latest of them.
 pub const CI_WATCH_ACCESS_KINDS: [&str; 2] = [CI_WATCH_UNAVAILABLE, CI_WATCH_AVAILABLE];
 /// The supervisor started holding its claims, resumes and landings for
@@ -49,13 +54,14 @@ pub const CI_WATCH_HOLD: super::claim_hold::OwnHold = super::claim_hold::OwnHold
     resumed: EventKind::CiWatchResumed,
 };
 /// Every kind the watch records, oldest first in the queue.
-pub const CI_WATCH_KINDS: [&str; 6] = [
+pub const CI_WATCH_KINDS: [&str; 7] = [
     CI_CHECKED,
     CI_TURNED_RED,
     CI_TURNED_GREEN,
     CI_WATCH_UNAVAILABLE,
     CI_WATCH_AVAILABLE,
     CI_CHECK_FAILED,
+    CI_JOBS_MISSING,
 ];
 
 /// The kind of the finding a red run records (ADR-t1920-1 decision 4).
@@ -83,10 +89,22 @@ pub struct CiWatchConfig {
     pub interval_secs: u64,
     /// The globs of the artifacts holding JUnit XML; empty reads none.
     pub junit_artifacts: Vec<String>,
+    /// `required_jobs = ["name", ...]`: the `name`s of the jobs a success
+    /// run must have run to `success` to read green (ADR-t2034-1 decision
+    /// 4). A success run where one of them ended otherwise (skipped on a
+    /// docs-only push), is absent, or whose jobs cannot be read is not
+    /// green ([`read_green`]). Empty (the key left out) reads no job.
+    pub required_jobs: Vec<String>,
 }
 
 impl CiWatchConfig {
-    pub const KEYS: [&'static str; 4] = ["workflow", "branch", "interval_secs", "junit_artifacts"];
+    pub const KEYS: [&'static str; 5] = [
+        "workflow",
+        "branch",
+        "interval_secs",
+        "junit_artifacts",
+        "required_jobs",
+    ];
 
     /// How long after a check the next one is due.
     pub const fn interval(&self) -> Duration {
@@ -128,6 +146,119 @@ pub fn classify(conclusion: &str) -> Option<CiState> {
         "success" => Some(CiState::Green),
         "failure" | "timed_out" => Some(CiState::Red),
         _ => None,
+    }
+}
+
+/// A job of a run and how it ended, as `gh run view --json jobs` gives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CiJob {
+    pub name: String,
+    /// Empty while the job has not ended.
+    pub conclusion: String,
+}
+
+/// Why a success run is not read green but counted with the runs that
+/// settle nothing (in the next settled run's `skipped_runs`, and its
+/// `undecided` with this reason): it neither turns the watch green nor
+/// takes anything off the list (ADR-t2034-1 decisions 4 and 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum Undecided {
+    /// A named job ended other than `success` (`skipped` when the run
+    /// left it out): the named jobs that did, with their conclusions.
+    JobsNotPassed { jobs: Vec<CiJob> },
+    /// A named job is not among the run's jobs (renamed or moved in the
+    /// workflow): the names missing. [`CI_JOBS_MISSING`] tells the inbox.
+    JobsMissing { jobs: Vec<String> },
+    /// The run's jobs could not be read [`CI_WATCH_FAILURE_LIMIT`] times
+    /// in a row: the last error.
+    JobsUnreadable { error: String, failures: usize },
+}
+
+/// What a success run reads as once `required_jobs` is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GreenReading {
+    /// Every named job ended `success`: green.
+    Green,
+    /// Not green: counted with the runs that settle nothing.
+    Undecided(Undecided),
+    /// Its jobs could not be read, fewer than [`CI_WATCH_FAILURE_LIMIT`]
+    /// times in a row: neither it nor any later run is processed, and the
+    /// next check reads it again.
+    Retry,
+}
+
+/// What the success run reads as by `required_jobs` (`required`) and its
+/// jobs (`jobs`, or the error reading them, the `failures`-th in a row
+/// with this one). A named job that is missing outweighs one that did
+/// not pass; a job named twice in the run must pass in each. Neither an
+/// absent job nor an unreadable list is read green, so the list of the
+/// failing tests is not emptied by a run whose jobs are not known.
+pub fn read_green(
+    required: &[String],
+    jobs: Result<&[CiJob], &str>,
+    failures: usize,
+) -> GreenReading {
+    if required.is_empty() {
+        return GreenReading::Green;
+    }
+    let jobs = match jobs {
+        Ok(jobs) => jobs,
+        Err(_) if failures < CI_WATCH_FAILURE_LIMIT => return GreenReading::Retry,
+        Err(error) => {
+            return GreenReading::Undecided(Undecided::JobsUnreadable {
+                error: error.to_owned(),
+                failures,
+            });
+        }
+    };
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|name| !jobs.iter().any(|job| &job.name == *name))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        return GreenReading::Undecided(Undecided::JobsMissing { jobs: missing });
+    }
+    let not_passed: Vec<CiJob> = jobs
+        .iter()
+        .filter(|job| required.contains(&job.name) && job.conclusion != "success")
+        .cloned()
+        .collect();
+    if not_passed.is_empty() {
+        GreenReading::Green
+    } else {
+        GreenReading::Undecided(Undecided::JobsNotPassed { jobs: not_passed })
+    }
+}
+
+/// How many checks in a row could not read the jobs of each success run
+/// (by run ID and attempt): what a check counts on from and hands to the
+/// next. A check keeps only the runs whose jobs it failed to read, so a run
+/// read or recorded since drops out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobsUnread(BTreeMap<(i64, i64), usize>);
+
+impl JobsUnread {
+    /// One more failure to read `run`'s jobs, counted on from `last` (the
+    /// previous check's) and kept here: the failures in a row. Past
+    /// [`CI_WATCH_FAILURE_LIMIT`] it stays there, so a run given up is
+    /// given up again at once and told once, and every run has its own
+    /// count, so several unreadable runs in a row are each given up.
+    pub fn fail(&mut self, last: &Self, run: &CiRun) -> usize {
+        let key = (run.run_id, run.attempt);
+        let before = last.failures(run);
+        let failures = (before + 1).min(CI_WATCH_FAILURE_LIMIT + 1);
+        self.0.insert(key, failures);
+        failures
+    }
+
+    /// The failures in a row counted for `run` (0 for none).
+    pub fn failures(&self, run: &CiRun) -> usize {
+        self.0
+            .get(&(run.run_id, run.attempt))
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -461,6 +592,10 @@ pub struct WatchState {
     /// The ID of the latest `ci_checked` event: a record decided after it
     /// is written only while it is still the latest.
     pub last_event: Option<i64>,
+    /// The payload of the latest [`CI_JOBS_MISSING`] while no green run
+    /// (which had every named job) was recorded after it: the attention
+    /// that stands.
+    pub jobs_missing: Option<Value>,
 }
 
 impl WatchState {
@@ -470,6 +605,9 @@ impl WatchState {
         let mut state = Self::default();
         for event in events {
             state.recorded |= CI_WATCH_KINDS.contains(&event.kind.as_str());
+            if event.kind == CI_JOBS_MISSING {
+                state.jobs_missing = Some(event.payload.clone());
+            }
             if event.kind == CI_CHECKED {
                 state.apply(&event.payload, &event.created_at);
                 state.last_event = Some(event.id.as_i64());
@@ -544,6 +682,7 @@ impl WatchState {
             Some(CiState::Green) => {
                 self.last_green = Some(run.clone());
                 self.red_since = None;
+                self.jobs_missing = None;
             }
             Some(CiState::Red) if self.state != Some(CiState::Red) => {
                 self.red_since = Some((run.clone(), text("created_at")));
@@ -561,6 +700,40 @@ impl WatchState {
             conclusion: text("conclusion"),
             created_at: text("created_at"),
         });
+    }
+
+    /// The [`CI_JOBS_MISSING`] payload for `run`, which lacks the named
+    /// jobs `missing`; none while the same ones stand missing (no green
+    /// since), so one disagreement is told once.
+    pub fn jobs_missing_event(
+        &self,
+        run: &CiRun,
+        missing: &[String],
+        config: &CiWatchConfig,
+        branch: &str,
+    ) -> Option<Value> {
+        let same = self
+            .jobs_missing
+            .as_ref()
+            .is_some_and(|last| last["jobs"] == json!(missing));
+        (!same).then(|| {
+            json!({
+                "workflow": config.workflow,
+                "branch": branch,
+                "run_id": run.run_id,
+                "attempt": run.attempt,
+                "sha": run.sha,
+                "url": run.url,
+                "jobs": missing,
+                "required_jobs": config.required_jobs,
+                "message": format!(
+                    "the CI run {} of {} has no job {} that required_jobs of [ci_watch] names: no success run is read green until dagq.toml or the workflow is fixed",
+                    run.url,
+                    config.workflow,
+                    missing.join(", ")
+                ),
+            })
+        })
     }
 
     /// The creation time and run ID of the latest recorded run.
@@ -690,6 +863,9 @@ pub struct RunInput<'a> {
     pub state: CiState,
     /// The runs skipped since the last settled one: run ID and attempt.
     pub skipped: &'a [(i64, i64)],
+    /// Those of them that ended `success` but did not read green, with
+    /// why ([`read_green`]).
+    pub undecided: &'a [(i64, i64, Undecided)],
     pub junit: &'a Junit,
     pub failed_jobs: &'a [FailedJob],
     /// The list returned was full and its oldest run came after the last
@@ -770,6 +946,18 @@ pub fn decide(
     });
     if input.gap {
         checked["gap"] = json!(true);
+    }
+    if !input.undecided.is_empty() {
+        checked["undecided"] = input
+            .undecided
+            .iter()
+            .map(|(run_id, attempt, why)| {
+                let mut entry = json!(why);
+                entry["run_id"] = json!(run_id);
+                entry["attempt"] = json!(attempt);
+                entry
+            })
+            .collect();
     }
     if late {
         checked["late"] = json!(true);
@@ -1314,6 +1502,7 @@ mod tests {
                     run,
                     state,
                     skipped: &[],
+                    undecided: &[],
                     junit: &junit,
                     failed_jobs: &[],
                     gap: false,
@@ -1331,6 +1520,7 @@ mod tests {
                 run: &two,
                 state: CiState::Red,
                 skipped: &[],
+                undecided: &[],
                 junit: &tests(&[("t a", TestOutcome::Passed), ("t b", TestOutcome::Failed)]),
                 failed_jobs: &[],
                 gap: false,
@@ -1362,6 +1552,7 @@ mod tests {
                 run: &early,
                 state: CiState::Green,
                 skipped: &[],
+                undecided: &[],
                 junit: &Junit::NotConfigured,
                 failed_jobs: &[],
                 gap: false,
@@ -1392,6 +1583,7 @@ mod tests {
                     run,
                     state,
                     skipped: &[],
+                    undecided: &[],
                     junit: &junit,
                     failed_jobs: &[],
                     gap: false,
@@ -1418,6 +1610,7 @@ mod tests {
                 run: &two,
                 state: CiState::Green,
                 skipped: &[],
+                undecided: &[],
                 junit: &Junit::NotConfigured,
                 failed_jobs: &[],
                 gap: false,
@@ -1550,6 +1743,7 @@ mod tests {
                 run: &green,
                 state: CiState::Green,
                 skipped: &[],
+                undecided: &[],
                 junit: &Junit::NotConfigured,
                 failed_jobs: &[],
                 gap: false,
@@ -1569,6 +1763,7 @@ mod tests {
                 run: &red,
                 state: CiState::Red,
                 skipped: &[],
+                undecided: &[],
                 junit: &junit,
                 failed_jobs: &jobs,
                 gap: false,
@@ -1621,6 +1816,7 @@ mod tests {
                     run: &red,
                     state: CiState::Red,
                     skipped: &[],
+                    undecided: &[],
                     junit: &junit,
                     failed_jobs: &[],
                     gap: false,
@@ -1644,6 +1840,7 @@ mod tests {
                 run: &red,
                 state: CiState::Red,
                 skipped: &[],
+                undecided: &[],
                 junit: &more,
                 failed_jobs: &[],
                 gap: false,
@@ -1673,6 +1870,7 @@ mod tests {
                 run: &red,
                 state: CiState::Red,
                 skipped: &[],
+                undecided: &[],
                 junit: &tests(&[("t a", TestOutcome::Failed), ("t b", TestOutcome::Failed)]),
                 failed_jobs: &jobs,
                 gap: false,
@@ -1688,6 +1886,7 @@ mod tests {
                 run: &red,
                 state: CiState::Red,
                 skipped: &[],
+                undecided: &[],
                 junit: &Junit::Missing,
                 failed_jobs: &jobs,
                 gap: false,
@@ -1709,6 +1908,7 @@ mod tests {
                 run: &red,
                 state: CiState::Red,
                 skipped: &[],
+                undecided: &[],
                 junit: &tests(&[("t a", TestOutcome::Passed), ("t z", TestOutcome::Failed)]),
                 failed_jobs: &jobs,
                 gap: false,
@@ -1730,6 +1930,7 @@ mod tests {
                 run: &green,
                 state: CiState::Green,
                 skipped: &[(4, 1)],
+                undecided: &[],
                 junit: &Junit::Missing,
                 failed_jobs: &[],
                 gap: false,
@@ -1772,6 +1973,7 @@ mod tests {
                 run: &green,
                 state: CiState::Green,
                 skipped: &[],
+                undecided: &[],
                 junit: &Junit::NotConfigured,
                 failed_jobs: &[],
                 gap: false,
@@ -1784,6 +1986,7 @@ mod tests {
                 run: &red,
                 state: CiState::Red,
                 skipped: &[(2, 1)],
+                undecided: &[],
                 junit: &tests(&[("t a", TestOutcome::Failed)]),
                 failed_jobs: &[],
                 gap: false,
@@ -1818,6 +2021,7 @@ mod tests {
                 run: &red,
                 state: CiState::Red,
                 skipped: &[],
+                undecided: &[],
                 junit: &tests(&[("t a", TestOutcome::Passed)]),
                 failed_jobs: &jobs,
                 gap: true,
@@ -2108,5 +2312,223 @@ mod tests {
         assert_eq!(hold_reason(true, None), Some("pending"));
         assert_eq!(hold_reason(true, Some(false)), Some("unreadable"));
         assert_eq!(hold_reason(true, Some(true)), None);
+    }
+
+    fn job(name: &str, conclusion: &str) -> CiJob {
+        CiJob {
+            name: name.into(),
+            conclusion: conclusion.into(),
+        }
+    }
+
+    /// ADR-t2034-1 decisions 4 and 5: a success run is green only when
+    /// every named job ran to `success`; a skipped one, a missing one and
+    /// jobs that stay unreadable up to the limit are not green, and fewer
+    /// failures to read retry.
+    #[test]
+    fn a_success_run_is_green_only_when_every_named_job_succeeded() {
+        let required = vec!["rust".to_owned(), "linux".to_owned()];
+        let ran = [
+            job("docs", "success"),
+            job("rust", "success"),
+            job("linux", "success"),
+        ];
+        assert_eq!(read_green(&[], Err("x"), 1), GreenReading::Green);
+        assert_eq!(read_green(&required, Ok(&ran), 0), GreenReading::Green);
+        let docs_only = [
+            job("docs", "success"),
+            job("rust", "skipped"),
+            job("linux", "skipped"),
+        ];
+        assert_eq!(
+            read_green(&required, Ok(&docs_only), 0),
+            GreenReading::Undecided(Undecided::JobsNotPassed {
+                jobs: vec![job("rust", "skipped"), job("linux", "skipped")]
+            })
+        );
+        // A job named twice (a matrix) passes only when each did.
+        let matrix = [
+            job("rust", "success"),
+            job("linux", "success"),
+            job("linux", "neutral"),
+        ];
+        assert_eq!(
+            read_green(&required, Ok(&matrix), 0),
+            GreenReading::Undecided(Undecided::JobsNotPassed {
+                jobs: vec![job("linux", "neutral")]
+            })
+        );
+        // A missing job outweighs a skipped one.
+        let renamed = [job("docs", "success"), job("rust", "skipped")];
+        assert_eq!(
+            read_green(&required, Ok(&renamed), 0),
+            GreenReading::Undecided(Undecided::JobsMissing {
+                jobs: vec!["linux".into()]
+            })
+        );
+        assert_eq!(
+            read_green(&required, Ok(&[]), 0),
+            GreenReading::Undecided(Undecided::JobsMissing {
+                jobs: required.clone()
+            })
+        );
+        for failures in 1..CI_WATCH_FAILURE_LIMIT {
+            assert_eq!(
+                read_green(&required, Err("HTTP 502"), failures),
+                GreenReading::Retry
+            );
+        }
+        assert_eq!(
+            read_green(&required, Err("HTTP 502"), CI_WATCH_FAILURE_LIMIT),
+            GreenReading::Undecided(Undecided::JobsUnreadable {
+                error: "HTTP 502".into(),
+                failures: CI_WATCH_FAILURE_LIMIT
+            })
+        );
+    }
+
+    #[test]
+    fn unread_jobs_count_on_for_each_run_and_attempt() {
+        let first = run(7, "success", "2026-10-06T01:00:00Z");
+        let second = run(8, "success", "2026-10-06T02:00:00Z");
+        let rerun = CiRun {
+            attempt: 2,
+            ..first.clone()
+        };
+        // Each check counts on from the last one's, run by run.
+        let mut last = JobsUnread::default();
+        for check in 1..=CI_WATCH_FAILURE_LIMIT + 3 {
+            let mut next = JobsUnread::default();
+            let capped = check.min(CI_WATCH_FAILURE_LIMIT + 1);
+            assert_eq!(next.fail(&last, &first), capped);
+            assert_eq!(next.fail(&last, &second), capped);
+            last = next;
+        }
+        assert!(matches!(
+            read_green(&["rust".into()], Err("e"), last.failures(&first)),
+            GreenReading::Undecided(Undecided::JobsUnreadable { .. })
+        ));
+        // Another attempt counts from one; a run not failed in a check
+        // drops out of it.
+        let mut next = JobsUnread::default();
+        assert_eq!(next.fail(&last, &rerun), 1);
+        assert_eq!(next.failures(&first), 0);
+        assert_eq!(next.failures(&second), 0);
+    }
+
+    /// A success run that did not read green is skipped like a cancelled
+    /// one: no turn to green, nothing off the list, and the next settled
+    /// run counts it in `skipped_runs` with why in `undecided`.
+    #[test]
+    fn an_undecided_success_keeps_the_list_and_the_next_settled_run_takes_it() {
+        let mut watch = WatchState::default();
+        let mut decisions = Vec::new();
+        let red = run(1, "failure", "2026-10-06T01:00:00Z");
+        process(
+            &mut watch,
+            &mut decisions,
+            RunInput {
+                run: &red,
+                state: CiState::Red,
+                skipped: &[],
+                undecided: &[],
+                junit: &tests(&[("t a", TestOutcome::Failed)]),
+                failed_jobs: &[],
+                gap: false,
+            },
+        );
+        let skipped = Undecided::JobsNotPassed {
+            jobs: vec![job("rust", "skipped")],
+        };
+        let missing = Undecided::JobsMissing {
+            jobs: vec!["linux".into()],
+        };
+        let red_again = run(4, "failure", "2026-10-06T04:00:00Z");
+        process(
+            &mut watch,
+            &mut decisions,
+            RunInput {
+                run: &red_again,
+                state: CiState::Red,
+                skipped: &[(2, 1), (3, 1)],
+                undecided: &[(2, 1, skipped), (3, 1, missing)],
+                junit: &tests(&[("t a", TestOutcome::Failed)]),
+                failed_jobs: &[],
+                gap: false,
+            },
+        );
+        let checked = &decisions[1].checked;
+        assert_eq!(checked["skipped_runs"], json!([2, 3]));
+        assert_eq!(
+            checked["undecided"],
+            json!([
+                {"run_id": 2, "attempt": 1, "reason": "jobs_not_passed",
+                 "jobs": [{"name": "rust", "conclusion": "skipped"}]},
+                {"run_id": 3, "attempt": 1, "reason": "jobs_missing", "jobs": ["linux"]},
+            ])
+        );
+        assert!(decisions[1].turned_green.is_none());
+        assert_eq!(checked["removed"], json!([]));
+        assert_eq!(watch.failures.len(), 1);
+        assert_eq!(watch.state, Some(CiState::Red));
+        assert!(watch.processed.contains(&(2, 1)) && watch.processed.contains(&(3, 1)));
+        // Without undecided runs the field is not written.
+        assert!(decisions[0].checked.get("undecided").is_none());
+    }
+
+    /// One disagreement of `required_jobs` with the workflow is told once
+    /// until a green run is recorded; other missing jobs are told anew.
+    #[test]
+    fn a_missing_job_is_told_once_until_a_green_run() {
+        let config = CiWatchConfig {
+            workflow: "ci.yml".into(),
+            branch: None,
+            interval_secs: DEFAULT_INTERVAL_SECS,
+            junit_artifacts: Vec::new(),
+            required_jobs: vec!["rust".into(), "linux".into()],
+        };
+        let success = run(2, "success", "2026-10-06T02:00:00Z");
+        let linux = vec!["linux".to_owned()];
+        let mut watch = WatchState::default();
+        let told = watch
+            .jobs_missing_event(&success, &linux, &config, "main")
+            .unwrap();
+        assert_eq!(told["jobs"], json!(["linux"]));
+        assert_eq!(told["required_jobs"], json!(["rust", "linux"]));
+        assert_eq!(told["run_id"], 2);
+        assert!(told["message"].as_str().unwrap().contains("required_jobs"));
+        let mut events = vec![event(1, CI_JOBS_MISSING, told)];
+        watch = WatchState::fold(&events);
+        assert!(watch.recorded && watch.jobs_missing.is_some());
+        let later = run(3, "success", "2026-10-06T03:00:00Z");
+        assert!(
+            watch
+                .jobs_missing_event(&later, &linux, &config, "main")
+                .is_none()
+        );
+        assert!(
+            watch
+                .jobs_missing_event(&later, &config.required_jobs, &config, "main")
+                .is_some()
+        );
+        // A red run does not end it; a green one does.
+        events.push(event(
+            2,
+            CI_CHECKED,
+            json!({"run_id": 4, "created_at": "2026-10-06T04:00:00Z", "state": "red"}),
+        ));
+        assert!(WatchState::fold(&events).jobs_missing.is_some());
+        events.push(event(
+            3,
+            CI_CHECKED,
+            json!({"run_id": 5, "created_at": "2026-10-06T05:00:00Z", "state": "green"}),
+        ));
+        watch = WatchState::fold(&events);
+        assert!(watch.jobs_missing.is_none());
+        assert!(
+            watch
+                .jobs_missing_event(&later, &linux, &config, "main")
+                .is_some()
+        );
     }
 }

@@ -1403,6 +1403,28 @@ pub fn attention(
             ),
         });
     }
+    // `required_jobs` of `[ci_watch]` names a job the workflow's runs lack:
+    // no success run reads green until a task fixes `dagq.toml` or the
+    // workflow (ADR-t2034-1 decision 5); a green run ends it.
+    if let Some(payload) =
+        crate::domain::ci_watch::WatchState::fold(&queue.ci_watch_events()?).jobs_missing
+    {
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "missing".into(),
+            kind: crate::domain::ci_watch::CI_JOBS_MISSING.into(),
+            last_error: payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::FixDagqToml,
+        });
+    }
     // The host's KPI push command that failed a message three times waits
     // for a person until a push succeeds (ADR-0051 decision 23).
     if let Some(event) = queue.latest_queue_event(&KPI_PUSH_ATTENTION_KINDS)?

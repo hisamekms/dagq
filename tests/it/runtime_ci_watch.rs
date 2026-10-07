@@ -15,9 +15,10 @@ use runtime_support::*;
 /// list` prints `runs.json`, `run view ID` prints `jobs-ID.json` (fails
 /// while `jobs-ID.fail` exists), and `run download ID --pattern P --dir D`
 /// copies the artifacts `artifacts-ID/P` into `D` (fails when none
-/// matches, as gh does).
+/// matches, as gh does). Each call is appended to `calls`.
 const FAKE_GH: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
+echo "$*" >> "$dir/calls"
 case "$1 $2" in
 "auth status")
     [ -f "$dir/authed" ] && exit 0
@@ -50,11 +51,16 @@ esac
 /// Write `[ci_watch]` to the repository's `dagq.toml` and name a GitHub
 /// remote; the fake `gh` goes in `bin/` of the fixture, logged in.
 fn watched(fixture: &Fixture, repo: &Path) -> PathBuf {
+    watched_with(fixture, repo, "")
+}
+
+/// `watched` with `more` keys in `[ci_watch]`.
+fn watched_with(fixture: &Fixture, repo: &Path, more: &str) -> PathBuf {
     fs::write(
         repo.join("dagq.toml"),
         // Overlapping globs and one that matches nothing: each into its
         // own directory, the others read all the same.
-        "[ci_watch]\nworkflow = \"ci.yml\"\njunit_artifacts = [\"junit-*\", \"junit-mac*\", \"absent-*\"]\n",
+        format!("[ci_watch]\nworkflow = \"ci.yml\"\njunit_artifacts = [\"junit-*\", \"junit-mac*\", \"absent-*\"]\n{more}"),
     )
     .unwrap();
     git(repo, &["add", "dagq.toml"]);
@@ -821,5 +827,243 @@ fn a_run_that_ends_late_and_a_green_re_run_are_each_recorded_once() {
         .findings(&dagq::domain::FindingQuery::default())
         .unwrap();
     assert!(open.is_empty(), "{open:?}");
+    backend.join();
+}
+
+/// The jobs `gh run view ID` prints: (name, conclusion).
+fn jobs(gh: &Path, id: i64, jobs: &[(&str, &str)]) {
+    let jobs: Vec<Value> = jobs
+        .iter()
+        .map(|(name, conclusion)| json!({"name": name, "conclusion": conclusion, "steps": []}))
+        .collect();
+    fs::write(
+        gh.with_file_name(format!("jobs-{id}.json")),
+        json!({ "jobs": jobs }).to_string(),
+    )
+    .unwrap();
+}
+
+/// ADR-t2034-1 decisions 4 and 5: with
+/// `required_jobs`, a success run whose named job was skipped, one that
+/// lacks a named job (told to the inbox once) and one whose jobs stay
+/// unreadable (read again at each check, then given up at the limit) are
+/// not read green: the list stays and the next settled run takes them in
+/// `skipped_runs`.
+#[test]
+fn success_runs_without_their_named_jobs_are_not_read_green() {
+    let (fixture, repo, db) = fixture();
+    let gh = watched_with(&fixture, &repo, "required_jobs = [\"rust\", \"linux\"]\n");
+    fs::write(gh.with_file_name("authed"), "").unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    drop(queue);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = options(&gh);
+    let red_sha = head(&repo);
+    let docs = commit(&repo, "docs");
+    let renamed = commit(&repo, "renamed");
+    let unread = commit(&repo, "unread");
+    let unread_too = commit(&repo, "unread too");
+    let fixed = commit(&repo, "fixed");
+    let kinds =
+        |db: &Path| -> Vec<String> { watch_events(db).into_iter().map(|(kind, _)| kind).collect() };
+    let attention = |db: &Path| {
+        runtime::status(db).unwrap()["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["kind"] == "ci_jobs_missing")
+            .cloned()
+    };
+
+    runs(&gh, &[(1, "failure", &red_sha)]);
+    red(&gh, 1, &["runtime_claim::fails"], &[]);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(kinds(&db), ["ci_checked", "ci_turned_red"]);
+
+    // A docs-only push: the Rust jobs skipped, the run a success. Nothing
+    // is recorded and the list stays.
+    runs(&gh, &[(1, "failure", &red_sha), (2, "success", &docs)]);
+    jobs(
+        &gh,
+        2,
+        &[
+            ("docs", "success"),
+            ("rust", "skipped"),
+            ("linux", "skipped"),
+        ],
+    );
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(kinds(&db), ["ci_checked", "ci_turned_red"]);
+    let list = runtime::ci_failures(&db, None).unwrap();
+    assert_eq!(list["state"], "red");
+    assert_eq!(list["failures"][0]["name"], "dagq::it runtime_claim::fails");
+    let calls = fs::read_to_string(gh.with_file_name("calls")).unwrap();
+    assert!(
+        calls.contains("run view 2 --attempt 1 --json jobs"),
+        "{calls}"
+    );
+
+    // A run without the job `linux`: told once, an attention for the
+    // inbox, and still not green.
+    runs(
+        &gh,
+        &[
+            (1, "failure", &red_sha),
+            (2, "success", &docs),
+            (3, "success", &renamed),
+        ],
+    );
+    jobs(
+        &gh,
+        3,
+        &[("rust", "success"), ("linux (renamed)", "success")],
+    );
+    for _ in 0..2 {
+        supervise_with(&db, &repo, &backend, &options).unwrap();
+    }
+    assert_eq!(
+        kinds(&db),
+        ["ci_checked", "ci_turned_red", "ci_jobs_missing"]
+    );
+    let told = &watch_events(&db)[2].1;
+    assert_eq!(told["jobs"], json!(["linux"]));
+    assert_eq!(told["run_id"], 3);
+    let fix = attention(&db).unwrap();
+    assert_eq!(fix["next"], "fix dagq.toml");
+    assert_eq!(fix["status"], "missing");
+    assert_eq!(runtime::ci_failures(&db, None).unwrap()["state"], "red");
+
+    // Jobs that cannot be read stop the check there (the later runs wait
+    // too) and are read again at each check; at the limit the run is
+    // given up, each of two in a row on its own count.
+    runs(
+        &gh,
+        &[
+            (1, "failure", &red_sha),
+            (2, "success", &docs),
+            (3, "success", &renamed),
+            (4, "success", &unread),
+            (5, "success", &unread_too),
+            (6, "success", &fixed),
+        ],
+    );
+    fs::write(gh.with_file_name("jobs-4.fail"), "").unwrap();
+    fs::write(gh.with_file_name("jobs-5.fail"), "").unwrap();
+    jobs(&gh, 6, &[("rust", "success"), ("linux", "success")]);
+    let (options, ahead) = supervise_options_ahead(4, false);
+    let mut options = watching(options, &gh);
+    if let Some(watch) = &mut options.ci_watch {
+        watch.interval = Some(Duration::from_secs(600));
+    }
+    let stop = options.stop.clone();
+    let reads_of = |id: i64| {
+        fs::read_to_string(gh.with_file_name("calls"))
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with(&format!("run view {id} ")))
+            .count()
+    };
+    let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(Instant::now() < deadline, "waited for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let told = |db: &Path, id: i64| {
+        watch_events(db)
+            .iter()
+            .filter(|(kind, payload)| kind == "ci_check_failed" && payload["run_id"] == id)
+            .count()
+    };
+    std::thread::scope(|scope| {
+        let supervisor = scope.spawn(|| supervise_with(&db, &repo, &backend, &options));
+        let _stop = StopOnDrop(stop.clone());
+        // (reads of run 4, reads of run 5) after each check: 4 is given up
+        // at the third, 5 at the fifth, and run 6 is recorded then.
+        for (check, reads) in [(1, (1, 0)), (2, (2, 0)), (3, (3, 1)), (4, (4, 2))] {
+            if check > 1 {
+                ahead.by(Duration::from_secs(600));
+            }
+            wait_for("a check", &|| (reads_of(4), reads_of(5)) == reads);
+            let given_up = usize::from(check >= 3);
+            wait_for("run 4 told", &|| told(&db, 4) == given_up);
+            assert_eq!(kinds(&db).len(), 3 + given_up);
+        }
+        ahead.by(Duration::from_secs(600));
+        wait_for("run 6", &|| kinds(&db).len() == 7);
+        assert_eq!((told(&db, 4), told(&db, 5)), (1, 1));
+        // The newest run's jobs stay unreadable: given up at the limit, it
+        // is given up again at once at the next check, told once.
+        let mut list: Vec<Value> =
+            serde_json::from_str(&fs::read_to_string(gh.with_file_name("runs.json")).unwrap())
+                .unwrap();
+        let mut seven = list[5].clone();
+        seven["databaseId"] = json!(7);
+        seven["createdAt"] = json!("2026-10-06T00:07:00Z");
+        list.push(seven);
+        fs::write(gh.with_file_name("runs.json"), json!(list).to_string()).unwrap();
+        fs::write(gh.with_file_name("jobs-7.fail"), "").unwrap();
+        for read in 1..=4 {
+            ahead.by(Duration::from_secs(600));
+            wait_for("a read of run 7", &|| reads_of(7) == read);
+        }
+        wait_for("run 7 given up", &|| told(&db, 7) == 1);
+        assert_eq!(kinds(&db).len(), 8);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _waiting =
+            crate::common::within(crate::common::STEP_LIMIT, "the supervisor at work to stop");
+        supervisor.join().unwrap().unwrap();
+    });
+    let events = watch_events(&db);
+    let kinds: Vec<&str> = events.iter().map(|(kind, _)| kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "ci_checked",
+            "ci_turned_red",
+            "ci_jobs_missing",
+            "ci_check_failed",
+            "ci_check_failed",
+            "ci_checked",
+            "ci_turned_green",
+            "ci_check_failed"
+        ]
+    );
+    assert_eq!(events[3].1["run_id"], 4);
+    assert_eq!(events[3].1["failures"], 3);
+    assert_eq!(events[4].1["run_id"], 5);
+    let checked = &events[5].1;
+    assert_eq!(checked["run_id"], 6);
+    assert_eq!(checked["skipped_runs"], json!([2, 3, 4, 5]));
+    let reasons: Vec<&str> = checked["undecided"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "jobs_not_passed",
+            "jobs_missing",
+            "jobs_unreadable",
+            "jobs_unreadable"
+        ]
+    );
+    assert_eq!(
+        checked["removed"],
+        json!([{"name": "dagq::it runtime_claim::fails", "reason": "green"}])
+    );
+    assert_eq!(events[6].1["red_since"]["run_id"], 1);
+    // The green run with every named job ends the attention.
+    assert!(attention(&db).is_none());
+    assert_eq!(
+        runtime::ci_failures(&db, None).unwrap()["failures"],
+        json!([])
+    );
     backend.join();
 }

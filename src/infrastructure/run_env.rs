@@ -144,7 +144,12 @@ const HEADLESS_WRAPPER: &str = "wrapper";
 /// they cannot use (ADR-t1857-1).
 const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
 /// `[ci_watch]`: the landing branch's CI the supervisor watches
-/// (ADR-t1920-1).
+/// (ADR-t1920-1). `workflow` (a non-blank string) is required; `branch`
+/// (a branch name without `refs/heads/`), `interval_secs` (at least
+/// [`MIN_INTERVAL_SECS`]), `junit_artifacts` (an array of distinct
+/// non-blank globs) and `required_jobs` (an array of distinct non-blank
+/// job names, ADR-t2034-1) are optional; what each means is on
+/// [`CiWatchConfig`].
 const CI_WATCH_TABLE: &str = "ci_watch";
 /// `[landing_verification]`: the command `integrate` runs in place of
 /// some of a task's (ADR-t1925-1 decision 4).
@@ -386,6 +391,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         branch: None,
                         interval_secs: DEFAULT_INTERVAL_SECS,
                         junit_artifacts: Vec::new(),
+                        required_jobs: Vec::new(),
                     },
                 ));
             }
@@ -649,6 +655,20 @@ pub fn parse_config(text: &str) -> Result<Config> {
                             );
                         }
                         config.junit_artifacts = globs;
+                    }
+                    "required_jobs" => {
+                        let names = parse_string_array(rest.trim()).with_context(with)?;
+                        for (index, name) in names.iter().enumerate() {
+                            ensure!(
+                                !name.trim().is_empty(),
+                                "{CONFIG_FILE_NAME}:{number}: {key} has a blank job name"
+                            );
+                            ensure!(
+                                !names[..index].contains(name),
+                                "{CONFIG_FILE_NAME}:{number}: {key} names {name:?} twice"
+                            );
+                        }
+                        config.required_jobs = names;
                     }
                     _ => {
                         let value = parse_string(rest.trim()).with_context(with)?;
@@ -2751,11 +2771,12 @@ LITERAL = 'no \n escapes # here'
                 branch: None,
                 interval_secs: 600,
                 junit_artifacts: Vec::new(),
+                required_jobs: Vec::new(),
             })
         );
         assert_eq!(
             parse_config(
-                "[ci_watch]\nworkflow = 'CI'\nbranch = 'trunk'\ninterval_secs = 60 # a minute\njunit_artifacts = ['junit-*', 'more'] # globs\n"
+                "[ci_watch]\nworkflow = 'CI'\nbranch = 'trunk'\ninterval_secs = 60 # a minute\njunit_artifacts = ['junit-*', 'more'] # globs\nrequired_jobs = ['Rust (macOS)', 'linux']\n"
             )
             .unwrap()
             .ci_watch,
@@ -2764,13 +2785,14 @@ LITERAL = 'no \n escapes # here'
                 branch: Some("trunk".into()),
                 interval_secs: 60,
                 junit_artifacts: vec!["junit-*".into(), "more".into()],
+                required_jobs: vec!["Rust (macOS)".into(), "linux".into()],
             })
         );
         for (text, expected) in [
             ("[ci_watch]\n", "dagq.toml:1: [ci_watch] has no workflow"),
             (
                 "[ci_watch]\nworkflow = 'a'\nkind = 'b'\n",
-                "dagq.toml:3: unknown key kind in [ci_watch]; the keys are workflow, branch, interval_secs, junit_artifacts",
+                "dagq.toml:3: unknown key kind in [ci_watch]; the keys are workflow, branch, interval_secs, junit_artifacts, required_jobs",
             ),
             (
                 "[ci_watch]\nworkflow = 'a'\nworkflow = 'b'\n",
@@ -2803,6 +2825,18 @@ LITERAL = 'no \n escapes # here'
             (
                 "[ci_watch]\nworkflow = 'a'\njunit_artifacts = ['x', 'x']\n",
                 "dagq.toml:3: junit_artifacts names \"x\" twice",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\nrequired_jobs = 'x'\n",
+                "dagq.toml:3: value of required_jobs",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\nrequired_jobs = [' ']\n",
+                "dagq.toml:3: required_jobs has a blank job name",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\nrequired_jobs = ['x', 'x']\n",
+                "dagq.toml:3: required_jobs names \"x\" twice",
             ),
             (
                 "[ci_watch]\nworkflow = 'a'\n[ci_watch]\n",

@@ -69,7 +69,7 @@ related:
 
 ## CIの見張り（ADR-t1920-1）
 
-[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)。attentionの行に`kind: ci_watch_unavailable`・`status: unavailable`・`next`（`reason`が`gh_missing`なら`install tool`、`gh_unauthenticated`なら`log in to gh`、`not_github`なら`fix dagq.toml`。後の2つは`AttentionNext::LogInToGh` / `FixDagqToml`）・`last_error`（payloadの`message`）を出し（`run_id` / `task_id`はnull）、`ci_watch_available`で消える。最上位の`ci`はどのroleの`status`にも出し、`{state, watch, failures（一覧の件数）, checked_at, latest_run_url}`か、見張りの記録が無ければnull。
+[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)。attentionの行に`kind: ci_watch_unavailable`・`status: unavailable`・`next`（`reason`が`gh_missing`なら`install tool`、`gh_unauthenticated`なら`log in to gh`、`not_github`なら`fix dagq.toml`）・`last_error`（payloadの`message`）を出し（`run_id` / `task_id`はnull）、`ci_watch_available`で消える。`ci_jobs_missing`（`status: missing`）は[CI watch](ci-watch.md)。最上位の`ci`はどのroleの`status`にも出し、`{state, watch, failures（一覧の件数）, checked_at, latest_run_url}`か、見張りの記録が無ければnull。
 
 ## sccacheのserver
 
