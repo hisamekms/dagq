@@ -24,7 +24,7 @@ related:
 
 # このrepositoryの文書の規則
 
-`docs/`の文書とcommitを書く・変えるときの今の規則。読むのは、ADR・design・plansを書くかcommitするworker（AGENTS.mdの「### worker」から辿る）、ADRを書くtaskを登録するplannerとそれを見るplan review（[taskの登録](task-registration.md)の「ADRを書くtask」から辿る）、人。ADRの書き方の規則はこの文書が正本で、[文書の案内](../README.md)・[ADRの索引](../adr/README.md)・[frontmatter仕様](../frontmatter.md)はここを指す。frontmatterの欄・ADRの状態の意味・注記の書式はfrontmatter仕様、経緯はADR（[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)ほか）が持つ。
+`docs/`の文書とcommitを書く・変えるときの今の規則。読むのは、ADR・design・plansを書くかcommitするworker（AGENTS.mdの「### worker」から辿る）、ADRを書くtaskを登録するplannerとそれを見るplan review（[taskの登録](task-registration.md)の「ADRを書くtask」から辿る）、人。ADRの書き方の規則はこの文書が正本で、[文書の案内](../README.md)・[ADRの案内](../adr/README.md)・[frontmatter仕様](../frontmatter.md)はここを指す。frontmatterの欄・ADRの状態の意味・注記の書式はfrontmatter仕様、経緯はADR（[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)ほか）が持つ。
 
 ## 判断の記録
 
@@ -38,7 +38,9 @@ related:
 - 小さなADR: 1 ADRに決定1つ（密に結びついた数個まで）、本文はおおむね100行以内。書くのは変えるのに人の判断が要るもの（問題と文脈、方針・原則・境界・不変条件、退けた案、結果。目安は「これを変えるとき人に聞くか」）で、eventの種類と欄・CLIのflagの綴り・JSONの形・既定値や閾値の数値・関数やmoduleやファイルの名前・migrationの番号・testの名前はコード（定義のそばのdoc comment）か`docs/design/`の地図に書く（ADR-t598-1決定2・3、決定3は[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)がamends。下の「design」）。
 - 置き換えか`amends`か: 元のADRの決定の数と変える範囲で決め、IDの形（4桁か新しい形か）では決めない（[ADR-t1091-1](../adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)）。番号付きの決定を複数持つADR（4桁でも新しい形でも。0047・0073・t813-2など）の一部の決定を変えるときは、小さな新しいADRの`amends`に変える決定（例: `adr-0047 decision 24`）を書き、元のADRの`amended_by`にそのIDを足し、同じ変更で今の姿（`docs/design/`かdoc comment）を直す。決定が1つのADRを変えるときと、決定の大半を変えるときは、新しいADRで丸ごと置き換え、まだ有効な古い決定を書き直して引き継ぎ、古いADRを丸ごと`superseded`にする（1つのADRが複数を置き換えてもよい）。どちらにするかをtaskに書くことは[taskの登録](task-registration.md)の「ADRを書くtask」が持つ。
 - 置き換えは後継を`accepted`にする変更と同じ変更で行い、古いADRの`superseded_on`は後継の`accepted_on`と同じ日にする。`proposed`の後継は何も置き換えない（`supersedes`に予定のIDを書いてよいが、古いADRの状態は後継がacceptedになるまで変えない）。
-- ADRの状態を変える変更は、同じ変更で[ADRの索引](../adr/README.md)の表を直す。新しい形の行は4桁の行の後ろに`accepted_on`の順で並べる。
+- ADRの索引は各ADRのfrontmatterから`scripts/adr-index.sh`が生成するgitignoreした`docs/adr/INDEX.md`で、commitしない（[ADR-t1967-1](../adr/2026-10-07-t1967-1-adr-index-generated-from-frontmatter.md)）。状態と後継の正本はfrontmatterの欄（`status`・`accepted_on`・`superseded_by`・`superseded_on`・`deprecated_on`）で、ADRを足す・状態を変える変更は欄だけを直し、索引も[ADRの案内](../adr/README.md)も書き換えない。
+- 索引を読む前に、無ければ`sh scripts/adr-index.sh`で作る（あれば何もしない。`--force`で作り直し、`--stdout`はファイルに書かず出す。CIは`--stdout`で全てのADRを読めることを確かめる）。表は有効なADRと置き換え・廃止のADRの2つで、4桁の行の後ろに`accepted_on`の順で並ぶ。
+- cloneの後に1回`git config core.hooksPath .githooks`を打つ。`.githooks/post-checkout`がcheckoutと`git worktree add`（dagqのrunのworktreeも）のたびに、`.githooks/post-merge`がmerge（着地でmain checkoutを進めるfast-forwardも）のたびに`sh scripts/adr-index.sh --force`を打ち、失敗してもgitの操作を止めない。hookが無い環境や、自分の変更でADRを足した・状態を変えたworktreeでは`--force`で作り直してから読む。このrepositoryのhostへの設定は人かinboxが行い、workerはhostのgitの設定を変えない。
 
 ## ADRのID
 
@@ -152,9 +154,9 @@ pluginとrepositoryの規則・値・経緯の受け持ちは[ADR-t1453-2](../ad
 
 ## workerの文書の照合
 
-workerはreceiptの前に、受け入れ条件の対応づけ（[手元の検証](local-checks.md)の「受け入れ条件の対応づけ」）に続けて、workerのpromptが指示する文書の照合（仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「文書の照合」、[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)・[ADR-t1942-2](../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)）を行う。このrepositoryで差分と照合する文書は、taskが名指す文書と、変えた挙動を説明する`docs/design/`・pluginのskillとreference・AGENTS.md・`docs/development/`・ADRの索引で、`summary`に更新したpath・節か不要の理由を書く。taskのpathsの外のずれは`docs_drift`のfollow_upにする。
+workerはreceiptの前に、受け入れ条件の対応づけ（[手元の検証](local-checks.md)の「受け入れ条件の対応づけ」）に続けて、workerのpromptが指示する文書の照合（仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「文書の照合」、[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)・[ADR-t1942-2](../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)）を行う。このrepositoryで差分と照合する文書は、taskが名指す文書と、変えた挙動を説明する`docs/design/`・pluginのskillとreference・AGENTS.md・`docs/development/`・ADRの索引（`docs/adr/INDEX.md`、無ければ`sh scripts/adr-index.sh`で作る。生成物なので直さず、ずれはADRのfrontmatterで直す）で、`summary`に更新したpath・節か不要の理由を書く。taskのpathsの外のずれは`docs_drift`のfollow_upにする。
 
-- 候補は、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）で`docs/design/`・`docs/development/`・`plugins/claude-dagq/skills`の`SKILL.md`と`reference/`・AGENTS.md・ADRの索引（`docs/adr/README.md`）を探して拾い、`summary`に探した名前を書く（ADR-t1942-2決定1・3。探す手段は問わない）。
+- 候補は、変えた名前（コマンド・flag・設定のkey・役割・fileのpath）で`docs/design/`・`docs/development/`・`plugins/claude-dagq/skills`の`SKILL.md`と`reference/`・AGENTS.md・ADRの索引（`docs/adr/INDEX.md`、無ければ`sh scripts/adr-index.sh`で作る）を探して拾い、`summary`に探した名前を書く（ADR-t1942-2決定1・3。探す手段は問わない）。
 - 見つけた`docs/design/`の文書を書き直すのは、流れ・境界・不変条件・コードから読めない約束が変わったときと、記述が差分と食い違うときだけ（ADR-t1942-2決定2）。
   変えた名前がdesignに無いことはずれではなく、名前・欄・既定値を書き足さない。
   その意味は定義のそばのdoc commentに書く。

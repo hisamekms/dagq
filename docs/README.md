@@ -4,7 +4,7 @@ type: design
 title: Documentation guide
 status: current
 created: 2026-09-21
-updated: 2026-10-03
+updated: 2026-10-07
 last_verified: 2026-10-03
 tags:
   - documentation
@@ -16,7 +16,7 @@ dagqの文書は、決定、現在の設計、このrepositoryの開発の規則
 
 ## 文書の種類
 
-- `adr/`: なぜその決定をしたか。ADRの書き方・ID・置き換えとamendsの規則は[文書の規則](development/documents.md)の「ADR」「ADRのID」、欄と状態は[frontmatter仕様](frontmatter.md)、索引は[adr/README.md](adr/README.md)。
+- `adr/`: なぜその決定をしたか。ADRの書き方・ID・置き換えとamendsの規則は[文書の規則](development/documents.md)の「ADR」「ADRのID」、欄と状態は[frontmatter仕様](frontmatter.md)、案内は[adr/README.md](adr/README.md)、索引はfrontmatterから生成したgitignoreの`adr/INDEX.md`（無ければ`sh scripts/adr-index.sh`で作る）。
 - `design/`: 現在の実装がどうなっているか。コードを読む前のショートカットとして保守する。
 - `development/`: このrepositoryの開発の今の規則（plannerのverify・paths・evidence・changeの選び方、workerのtestの範囲、testの制約、文書の規則など）。書き換えてよく、経緯はADRとplansに残す。AGENTS.md・plugin・reviewのsubagent定義は規則の本文を写さず、ここを参照する（[ADR-t1453-2](adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)）。
 - `plans/`: これから何を作るか。ステップの順序と完了条件を持つ（更新と状態の規則は[文書の規則](development/documents.md)の「plans」）。

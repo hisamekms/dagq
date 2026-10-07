@@ -4,7 +4,7 @@ type: plan
 title: ADR 0001〜0034の決定・後継ADR・designの対応表
 status: completed
 created: 2026-09-25
-updated: 2026-09-30
+updated: 2026-10-07
 owners:
   - hisamekms
 tags:
@@ -33,7 +33,7 @@ related:
 - **未実装**: 後継の決定は`accepted`だが実装がまだのもの。ADRとしては後継の決定が現在の決定なので、上書きとして扱う。
 - 対象外: 0032〜0034は`proposed`のまま（acceptedになるときにADR-t598-1とfrontmatter仕様に従う）。0012・0014・0023・0024は置き換え済み（0012 → [ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)、0014 → [ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)、0023 → [ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)、0024 → [ADR-0041](../adr/0041-on-demand-planners-proposals-submitted-and-plan-review-job.md)）で、表には後継だけを書く。ADR-0041は2026-09-26に[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)に丸ごと置き換えられ、決定1〜17は同じ番号で引き継がれた（決定4だけ内容が変わった）ので、この文書の「ADR-0041 決定N」はADR-0044の決定Nと読む。ADR-0044とADR-0019・ADR-0043は2026-09-26に[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)に丸ごと置き換えられた。ADR-0044の決定NはADR-0047の決定N、ADR-0019の決定NはADR-0047の決定23+N、ADR-0043の決定NはADR-0047の決定29+Nと読む（ADR-0047のContextの対応表）。ADR-0019の決定はADR-0047の決定24〜29から辿る。
 - **判定の時点**: 表の「現在」「上書き」「根拠」は2026-09-25〜26の棚卸しの判定を保存する（「今」「未実装」も当時の記述）。今回、判定は変えず、designへの参照を追加した。以後の実装状況・細部は「今の姿（design）」の文書を読む。記録・一度きりの手順などに今の設計の記載が無ければ「designに無い」と示す。
-- **後継の辿り方**: 置き換え済みのADRは[ADR索引](../adr/README.md#置き換え・廃止されたadr)と`superseded_by`で後継を辿り、`amended_by`があれば変更した決定を辿る。表のADR-0040はADR-0049へ、ADR-0045はADR-0073へ進む。本文を凍結した大きなADRの一部は小さなamendsで直す（ADR-t598-1決定5。現在の適用範囲は[ADR-t1091-1](../adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)）。上書きされた決定があることだけを理由に旧ADRを丸ごと置き換えない。
+- **後継の辿り方**: 置き換え済みのADRはADRの索引（`docs/adr/INDEX.md`、無ければ`sh scripts/adr-index.sh`で作る）と`superseded_by`で後継を辿り、`amended_by`があれば変更した決定を辿る。表のADR-0040はADR-0049へ、ADR-0045はADR-0073へ進む。本文を凍結した大きなADRの一部は小さなamendsで直す（ADR-t598-1決定5。現在の適用範囲は[ADR-t1091-1](../adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)）。上書きされた決定があることだけを理由に旧ADRを丸ごと置き換えない。
 
 ## ADRごとの表
 

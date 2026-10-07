@@ -2,3 +2,4 @@
 __pycache__/
 /.worktrees/
 /docs/plans/acceptance-check/snapshot/
+/docs/adr/INDEX.md

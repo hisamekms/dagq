@@ -1,0 +1,9 @@
+#!/bin/sh
+# Regenerate the ADR index docs/adr/INDEX.md (gitignored) after every merge,
+# the fast-forward that moves the main checkout on a landing included
+# (ADR-t1967-1). Enable once per clone with
+# `git config core.hooksPath .githooks`. A failure never stops the merge.
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -f "$root/scripts/adr-index.sh" ] || exit 0
+(cd "$root" && sh scripts/adr-index.sh --force) >/dev/null 2>&1 || true
+exit 0

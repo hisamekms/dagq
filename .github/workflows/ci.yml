@@ -64,6 +64,11 @@ jobs:
       - name: ADR numbers
         run: sh scripts/check-adr-numbers.sh
 
+      # The ADR index is generated and not committed (ADR-t1967-1); this
+      # checks that every ADR's frontmatter can be read into it.
+      - name: ADR index
+        run: sh scripts/adr-index.sh --stdout >/dev/null
+
       - name: Frontmatter date lines
         run: sh scripts/check-frontmatter-dates.sh
 

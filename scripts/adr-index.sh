@@ -1,0 +1,162 @@
+#!/bin/sh
+# Generate the ADR index docs/adr/INDEX.md from the frontmatter of the ADRs
+# under docs/adr/ (ADR-t1967-1). The index is not committed (.gitignore); the
+# frontmatter fields (id, title, status, accepted_on, superseded_by,
+# superseded_on, deprecated_on) are the source of record.
+#
+# Two tables are written:
+#
+# - Accepted ADRs (status: accepted): ADR, Title, accepted_on.
+# - Superseded and deprecated ADRs: ADR, Status, superseded_by,
+#   superseded_on / deprecated_on (superseded_by is empty for deprecated).
+#
+# Rows are ordered as the hand-written tables were: four-digit ADRs by number
+# first, then task-ID ADRs by accepted_on (then task ID and branch number).
+# Proposed ADRs, README.md, INDEX.md and 0000-template.md are not listed.
+#
+# Usage:
+#   sh scripts/adr-index.sh            write INDEX.md only when it is missing
+#   sh scripts/adr-index.sh --force    write INDEX.md again
+#   sh scripts/adr-index.sh --stdout   print the index, write no file
+#
+# .githooks/post-checkout (checkout and `git worktree add`) and
+# .githooks/post-merge (merge, the fast-forward of a landing included) run it
+# with --force once `git config core.hooksPath .githooks` is set; the default
+# (write when missing) covers a clone without the hooks and CI. A failed run
+# writes no file.
+#
+# The tree read is the git work tree of the cwd (`git rev-parse
+# --show-toplevel`), as in scripts/check-*.sh. Outside a git work tree it is
+# the repository found from the script's own location. The frontmatter is read
+# as in scripts/check-adr-numbers.sh.
+#
+# Exit 0 on success (also when INDEX.md exists and nothing is written), 1 when
+# an ADR lacks a field the index needs, 2 on a bad argument or when docs/adr/
+# is not found.
+set -eu
+
+mode=missing
+case "${1:-}" in
+  "") ;;
+  --force) mode=force ;;
+  --stdout) mode=stdout ;;
+  *)
+    echo "usage: sh scripts/adr-index.sh [--force | --stdout]" >&2
+    exit 2
+    ;;
+esac
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+if [ ! -d docs/adr ]; then
+  echo "adr-index: docs/adr not found under $root" >&2
+  exit 2
+fi
+
+out=docs/adr/INDEX.md
+if [ "$mode" = missing ] && [ -e "$out" ]; then
+  exit 0
+fi
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/adr-index.XXXXXX")
+trap 'rm -f "$tmp" "$tmp".*' EXIT
+
+# One awk pass reads the frontmatter of every ADR (a single-line scalar per
+# field, surrounding quotes removed) and prints one tab-separated line per ADR:
+# sort key, id, file name, status, title, accepted_on, superseded_by, date.
+# An ADR lacking a field the index needs goes to stderr and fails the run.
+set --
+for f in docs/adr/*.md; do
+  [ -e "$f" ] || continue
+  case "$(basename "$f")" in
+    README.md | INDEX.md | 0000-template.md) continue ;;
+  esac
+  set -- "$@" "$f"
+done
+
+status=0
+[ "$#" -gt 0 ] || set -- /dev/null
+awk '
+  function val(line, key,   v) {
+    v = substr(line, length(key) + 2)
+    sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
+    if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+    return v
+  }
+  function flush(   st, key, n, p, date, sup) {
+    if (file == "") return
+    st = f["status"]
+    if (st == "accepted" || st == "superseded" || st == "deprecated") {
+      sup = f["superseded_by"]; date = ""
+      if (st == "superseded") date = f["superseded_on"]
+      if (st == "deprecated") { date = f["deprecated_on"]; sup = "" }
+      if (f["id"] == "" || f["title"] == "" || (st == "accepted" && f["accepted_on"] == "") ||
+          (st == "superseded" && sup == "")) {
+        print "adr-index: " file " (" st ") lacks id, title, accepted_on or superseded_by" > "/dev/stderr"
+        bad = 1
+      } else {
+        if (f["id"] ~ /^adr-t[0-9]+-[0-9]+$/) {
+          n = split(substr(f["id"], 6), p, "-")
+          key = sprintf("1 %s %010d %04d", (f["accepted_on"] == "" ? "9999-99-99" : f["accepted_on"]), p[1], p[2])
+        } else key = "0 " f["id"]
+        name = file; sub(/.*\//, "", name)
+        title = f["title"]; gsub(/\|/, "\\|", title)
+        print key "\t" f["id"] "\t" name "\t" st "\t" title "\t" f["accepted_on"] "\t" sup "\t" date
+      }
+    }
+    file = ""; delete f
+  }
+  FNR == 1 { flush(); file = FILENAME; infm = ($0 == "---"); next }
+  !infm { next }
+  $0 == "---" { infm = 0; next }
+  {
+    for (i = 1; i <= nk; i++) if (index($0, keys[i] ":") == 1) { if (!(keys[i] in f)) f[keys[i]] = val($0, keys[i]); break }
+  }
+  BEGIN { nk = split("id title status accepted_on superseded_by superseded_on deprecated_on", keys, " ") }
+  END { flush(); exit bad }
+' "$@" >"$tmp.rows" || status=1
+
+LC_ALL=C sort -t "$(printf '\t')" -k1,1 "$tmp.rows" >"$tmp.sorted"
+
+# The display label of an id: adr-0004 -> ADR-0004, adr-t598-1 -> ADR-t598-1.
+awk -F '\t' '
+  function label(id) { return "ADR-" substr(id, 5) }
+  NR == FNR { file[$2] = $3; next }
+  function link(id) { return (id in file) ? "[" label(id) "](" file[id] ")" : label(id) }
+  { row[++n] = $0 }
+  END {
+    print "<!-- Generated by scripts/adr-index.sh from the ADR frontmatter (ADR-t1967-1). Do not edit or commit. -->"
+    print ""
+    print "# ADR index"
+    print ""
+    print "The meaning of each status and the rules are in [README.md](README.md)."
+    print ""
+    print "## 有効なADR"
+    print ""
+    print "| ADR | Title | accepted_on |"
+    print "| --- | --- | --- |"
+    for (i = 1; i <= n; i++) {
+      split(row[i], c, "\t")
+      if (c[4] == "accepted") print "| " link(c[2]) " | " c[5] " | " c[6] " |"
+    }
+    print ""
+    print "## 置き換え・廃止されたADR"
+    print ""
+    print "| ADR | Status | superseded_by | superseded_on / deprecated_on |"
+    print "| --- | --- | --- | --- |"
+    for (i = 1; i <= n; i++) {
+      split(row[i], c, "\t")
+      if (c[4] != "accepted") print "| " link(c[2]) " | " c[4] " | " (c[7] == "" ? "" : link(c[7])) " | " c[8] " |"
+    }
+  }
+' "$tmp.sorted" "$tmp.sorted" >"$tmp.out"
+
+# A run that failed writes no file, so the default mode does not keep an
+# incomplete index.
+[ "$status" -eq 0 ] || exit "$status"
+
+case "$mode" in
+  stdout) cat "$tmp.out" ;;
+  *) cat "$tmp.out" >"$out.tmp.$$" && mv "$out.tmp.$$" "$out" ;;
+esac

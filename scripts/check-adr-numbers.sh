@@ -16,7 +16,8 @@
 # Outside a git work tree it is the repository found from the script's own
 # location. Run it from the repository root (`sh scripts/check-adr-numbers.sh`).
 #
-# Any other .md under docs/adr/ except README.md is reported.
+# Any other .md under docs/adr/ except README.md and INDEX.md (the generated
+# index, ADR-t1967-1) is reported.
 #
 # Exit 0 when every ADR is fine, 1 when any check fails (the offending files go
 # to stderr), 2 when docs/adr/ is not found.
@@ -52,7 +53,7 @@ for f in docs/adr/*.md; do
   [ -e "$f" ] || continue
   b=$(basename "$f")
   case "$b" in
-    README.md | 0000-template.md)
+    README.md | INDEX.md | 0000-template.md)
       continue
       ;;
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*)

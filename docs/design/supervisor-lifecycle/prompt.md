@@ -4,7 +4,7 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-10-06
+updated: 2026-10-07
 last_verified: 2026-10-06
 scope: runtime
 related:
@@ -96,11 +96,11 @@ providerごとに決める（task 817）。
 
 ## repositoryの規則を読む順
 
-runtimeはrepositoryの規則（検証のコマンド、宣言するpaths、要るevidence、ADRのような記録の規則）を持たず、promptはsessionをrepositoryの指示へ向けるだけにする（goal 52、task 625）。promptと固定の文字列には、dagqのrepositoryの規則（ADRの索引や番号の付け方、dagqのADR番号、Rustのlinterの名前など）を書かない。
+runtimeはrepositoryの規則（検証のコマンド、宣言するpaths、要るevidence、ADRのような記録の規則）を持たず、promptはsessionをrepositoryの指示へ向けるだけにする。promptと固定の文字列には、dagqのrepositoryの規則（ADRの索引や番号の付け方、dagqのADR番号、Rustのlinterの名前など）を書かない。
 
 - **worker**: `WORKER_READING`と`local_checks`が「AGENTS.mdかCLAUDE.md」を名指す。
-- **planner**: `repository_rules(ask)`の一文が、taskの`--verify`・`--paths`・`--evidence`をrepositoryの指示とそれが名指す文書・規則から、AGENTS.md → （無ければ）CLAUDE.md → （どちらも無ければ）README・CIの設定・buildの設定の順で決め、どれでも決まらなければ`ask`する、と指示する。`ask`はruntimeが立てるplanner（`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`）では`RUNTIME_PLANNER_ASK`で、source・ADR・人の先例から自分で決め、その材料で決めきれず人の判断（`scope`・`discard`）に当たるか確信度が`low`のときだけ`planner_question`のaskにする（ADR-t451-1決定5、task 1320）。
-- **plan review**: repositoryの指示（AGENTS.md・CLAUDE.md）と、それが名指す文書・規則（とくにplan review向けの記述）を読んで当てはめさせ、AGENTS.mdが無いrepositoryではCLAUDE.md → README・CIの設定・buildの設定の順で判断し、どれでも決まらなければ`concern`にさせる。dagqのrepositoryでは、AGENTS.mdの「plan review」の節が`docs/development/task-registration.md`の「plan reviewが当てはめる規則」を名指し、そこが`docs/adr/README.md`とADRのIDの規則（`docs/development/documents.md`の「ADRのID」）を名指す。
+- **planner**: `repository_rules(ask)`の一文が、taskの`--verify`・`--paths`・`--evidence`をrepositoryの指示とそれが名指す文書・規則から、AGENTS.md → （無ければ）CLAUDE.md → （どちらも無ければ）README・CIの設定・buildの設定の順で決め、どれでも決まらなければ`ask`する、と指示する。`ask`はruntimeが立てるplanner（`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`）では`RUNTIME_PLANNER_ASK`で、source・ADR・人の先例から自分で決め、その材料で決めきれず人の判断（`scope`・`discard`）に当たるか確信度が`low`のときだけ`planner_question`のaskにする（ADR-t451-1決定5）。
+- **plan review**: repositoryの指示（AGENTS.md・CLAUDE.md）と、それが名指す文書・規則（とくにplan review向けの記述）を読んで当てはめさせ、AGENTS.mdが無いrepositoryではCLAUDE.md → README・CIの設定・buildの設定の順で判断し、どれでも決まらなければ`concern`にさせる。dagqのrepositoryでは、AGENTS.mdの「plan review」の節が`docs/development/task-registration.md`の「plan reviewが当てはめる規則」を名指し、そこが`docs/adr/INDEX.md`（無ければ`sh scripts/adr-index.sh`で作る）とADRのIDの規則（documents.mdの「ADRのID」）を名指す。
 - **review**: `review_prompt`の`REVIEW_RULES`の一文が、providerに依らず、worktreeのrootのrepositoryの指示（AGENTS.md・CLAUDE.mdのあるもの）とそれが名指す文書を読み、変更に当たる規則で差分を判定させる。資料の行の後、`REVIEW_DOCS_CHECK`（文書の照合）の前に置く。Claudeのreviewは`--setting-sources ""`で起動して`CLAUDE.md`をmemoryとして読まないので、promptで名指す（[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)決定2、[Review](review.md)の「headless実行」）。`revise`の例は「repositoryのformatter・linter・その他の検査の指摘」で、特定の言語のツールを名指さない。
 
 follow_up・goal gap・findingのdraftの`context`の見出しは英語（`follow-up draft (proposed by the receipt of run <run> of task <id>)`、`goal gap draft (proposed by the judgment of goal <id>)`、`from finding <id> (<kind>)`。[Language](language.md#日本語が残っていた固定の文字列)）。testは`src/application/prompt.rs`の`prompts_take_the_rules_from_the_repository_in_order`と`the_review_prompt_names_the_repositorys_instructions`（reviewの`REVIEW_RULES`の位置と中身）、`tests/it/plan_review.rs`。
