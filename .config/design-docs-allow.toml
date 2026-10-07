@@ -29,7 +29,7 @@ tasks = 8
 path = "docs/design/architecture.md"
 size = 50606
 line = 2071
-tasks = 66
+tasks = 27
 
 [[doc]]
 path = "docs/design/authorization.md"
@@ -88,7 +88,7 @@ tasks = 43
 path = "docs/design/plugin-integration.md"
 size = 55208
 line = 4652
-tasks = 19
+tasks = 6
 
 [[doc]]
 path = "docs/design/provider-lifecycle.md"
@@ -448,13 +448,12 @@ tasks = 154
 path = "docs/design/supervisor-lifecycle/status.md"
 size = 34852
 line = 8752
-tasks = 17
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/supervise.md"
 size = 42997
 line = 5419
-tasks = 26
+tasks = 6
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/task-replanning.md"
