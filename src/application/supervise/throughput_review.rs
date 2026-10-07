@@ -14,9 +14,8 @@
 //! progress holds a claim or a landing.
 
 use super::*;
-use crate::domain::actor_model::{JobRoute, JobStartRoute, ModelRole, job_route, job_wait_text};
+use crate::domain::actor_model::{JobStartRoute, ModelRole, UnnamedWithoutClaude, job_start_route};
 use crate::domain::event_kind::{THROUGHPUT_REVIEW_FINISHED, THROUGHPUT_REVIEW_STARTED};
-use crate::domain::provider_switch::SwitchReason;
 use crate::domain::queue_hold::HoldJob;
 use crate::domain::throughput_review::{
     HISTORY_EVENTS, RUNNING_MS, ReviewMode, UnusableFinish, children_finished, reviewed, running,
@@ -93,46 +92,39 @@ impl Supervisor<'_> {
     }
 
     /// Where the due job of `role` (the throughput review, the observer)
-    /// goes, or `None` while it waits. A role that names no provider runs
-    /// on Claude as before: it waits while the queue's hold ask holds
-    /// Claude, and does not start under `--no-claude` (ADR-t1204-1
-    /// decision 2). One that names its provider starts there when it can
-    /// be used, else on the other provider when that one can be, else
-    /// waits, or, under `--no-claude`, records why (a Codex job never
-    /// moves to Claude then). With `[provider_fallback] jobs` off it waits
-    /// for its own provider instead of moving off one it cannot use
-    /// (ADR-t1857-1); `--no-claude` still moves a Claude one to Codex.
+    /// goes, or `None` while it waits ([`job_start_route`] with
+    /// `[provider_fallback] jobs`): a role that names no provider does not
+    /// start under `--no-claude` (ADR-t1204-1 decision 2).
     pub(super) fn job_start_route(&self, role: ModelRole) -> Option<JobStartRoute> {
+        self.start_route(role, self.fallback.jobs, UnnamedWithoutClaude::Wait)
+    }
+
+    /// Where the due job of `role` goes, from `[roles.<role>]` as it reads
+    /// now, the queue's hold ask and why each provider cannot be used
+    /// ([`job_start_route`]), or `None` while it waits, saying why in the
+    /// debug log.
+    pub(super) fn start_route(
+        &self,
+        role: ModelRole,
+        fallback: bool,
+        unnamed: UnnamedWithoutClaude,
+    ) -> Option<JobStartRoute> {
         let models = self.role_models(role);
-        let launch = models.launch(role);
-        if !models.switchable(role) {
-            return (!self.no_claude && self.queue_hold.is_none())
-                .then_some(JobStartRoute::Start(launch, false));
-        }
-        match job_route(&launch, true, self.fallback.jobs, |provider| {
-            self.job_unusable(provider)
-        }) {
-            JobRoute::Start(launch) => Some(JobStartRoute::Start(launch, true)),
-            JobRoute::Wait { .. } if self.no_claude => {
-                let codex = self
-                    .job_unusable(Provider::Codex)
-                    .map_or("unknown", SwitchReason::as_str);
-                Some(JobStartRoute::Unavailable(
-                    launch,
-                    format!(
-                        "provider_disabled: Claude is disabled by --no-claude and codex cannot be used ({codex}); handle this role manually"
-                    ),
-                ))
+        job_start_route(
+            models.launch(role),
+            models.switchable(role),
+            self.no_claude,
+            self.queue_hold.is_some(),
+            fallback,
+            unnamed,
+            |provider| self.job_unusable(provider),
+        )
+        .inspect_err(|why| {
+            if let Some(why) = why {
+                tracing::debug!("the {} job waits: {why}", role.as_str());
             }
-            JobRoute::Wait { provider, reason } => {
-                tracing::debug!(
-                    "the {} job waits: {}",
-                    role.as_str(),
-                    job_wait_text(provider, reason, self.fallback.jobs)
-                );
-                None
-            }
-        }
+        })
+        .ok()
     }
 
     /// Reap the review once it exited, and those an exec handed over: the

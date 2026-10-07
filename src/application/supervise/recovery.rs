@@ -6,7 +6,7 @@ use super::*;
 use crate::application::prompt::{BinaryFacts, FittedPrompt, binary_facts, recovery_binary_file};
 use crate::domain::ActorContext;
 use crate::domain::EventKind;
-use crate::domain::actor_model::{ActorLaunch, JobRoute, JobStartRoute, ModelRole, job_route};
+use crate::domain::actor_model::{ActorLaunch, JobStartRoute, ModelRole, UnnamedWithoutClaude};
 use crate::domain::headless_job::JobSession;
 use crate::domain::idle_process::{
     CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
@@ -323,62 +323,6 @@ pub(super) fn job_file(alert: RecoveryAlert, attempt: usize, what: &str) -> Stri
     format!("recovery-{}-{attempt}.{what}", alert.as_str())
 }
 
-/// How the error of a recovery job no agent ran begins when `--no-claude`
-/// leaves no provider for it: the run goes to a person (`triage_failed`
-/// of a run that ended, the `recovery_failed` ask of a live one).
-const RECOVERY_PROVIDER_DISABLED: &str = "provider_disabled: Claude is disabled by --no-claude";
-
-/// Where a recovery job starts (ADR-t1063-1 decisions 1, 4 and 5,
-/// ADR-t1204-1), or `None` while it waits, given its role's `launch`,
-/// whether `[roles.recovery]` names its provider (`switchable`),
-/// `--no-claude`, whether the queue's hold ask holds Claude
-/// (`claude_held`) and why each provider cannot be used now
-/// (`unusable`). A role that names no provider runs on Claude as before:
-/// it waits while the hold ask holds Claude, and under `--no-claude` goes
-/// to a person told why. One that names its provider starts there when it
-/// can be used, else on the other provider when that one can be, else
-/// waits, or, under `--no-claude`, goes to a person told why: a Codex job
-/// never moves to Claude then.
-pub(super) fn recovery_route_of(
-    launch: ActorLaunch,
-    switchable: bool,
-    no_claude: bool,
-    claude_held: bool,
-    unusable: impl Fn(Provider) -> Option<SwitchReason>,
-) -> Option<JobStartRoute> {
-    if !switchable {
-        if no_claude {
-            return Some(JobStartRoute::Unavailable(
-                launch,
-                format!("{RECOVERY_PROVIDER_DISABLED}; handle this role manually"),
-            ));
-        }
-        return (!claude_held).then_some(JobStartRoute::Start(launch, false));
-    }
-    // The recovery job is not among the jobs `[provider_fallback] jobs`
-    // turns off (ADR-t1857-1, task 1858): it moves as before.
-    match job_route(&launch, true, true, &unusable) {
-        JobRoute::Start(launch) => Some(JobStartRoute::Start(launch, true)),
-        JobRoute::Wait { .. } if no_claude => {
-            let codex = unusable(Provider::Codex).map_or("unknown", SwitchReason::as_str);
-            Some(JobStartRoute::Unavailable(
-                launch,
-                format!(
-                    "{RECOVERY_PROVIDER_DISABLED} and codex cannot be used ({codex}); handle this role manually"
-                ),
-            ))
-        }
-        JobRoute::Wait { provider, reason } => {
-            tracing::debug!(
-                "the recovery job waits: {} cannot be used ({}), nor can the other provider",
-                provider.as_str(),
-                reason.as_str()
-            );
-            None
-        }
-    }
-}
-
 /// What the end of a recovery job records beyond its verdict
 /// (ADR-t1063-1 decisions 4 and 6): the session its provider names itself
 /// (Codex's thread, and its model or why none was read; none on Claude,
@@ -403,18 +347,14 @@ impl JobEnd {
 }
 
 impl Supervisor<'_> {
-    /// Where the next recovery job starts ([`recovery_route_of`]), from
-    /// `[roles.recovery]` as it reads now.
+    /// Where the next recovery job starts (ADR-t1063-1 decisions 1, 4 and
+    /// 5, ADR-t1204-1), or `None` while it waits, from `[roles.recovery]` as
+    /// it reads now ([`Self::start_route`]). Under `--no-claude` a role that
+    /// names no provider goes to a person told why, and the job is not
+    /// among those `[provider_fallback] jobs` turns off (ADR-t1857-1): it
+    /// moves off a provider it cannot use as before.
     pub(super) fn recovery_route(&self) -> Option<JobStartRoute> {
-        let role = ModelRole::Recovery;
-        let models = self.role_models(role);
-        recovery_route_of(
-            models.launch(role),
-            models.switchable(role),
-            self.no_claude,
-            self.queue_hold.is_some(),
-            |provider| self.job_unusable(provider),
-        )
+        self.start_route(ModelRole::Recovery, true, UnnamedWithoutClaude::Unavailable)
     }
 
     /// The end of the recovery `job` once it ended: the session its
@@ -1897,105 +1837,6 @@ mod tests {
             ["wait", "stop", "kill it"]
         );
         assert_eq!(ask_options(&[], Some(&jobs)), ["wait", "kill it"]);
-    }
-
-    fn describe(route: Option<JobStartRoute>) -> String {
-        match route {
-            None => "wait".to_owned(),
-            Some(JobStartRoute::Start(launch, switchable)) => format!(
-                "start {} {switchable} {:?} {:?}",
-                launch.provider.as_str(),
-                launch.switched_from.map(Provider::as_str),
-                launch.switch_reason.map(SwitchReason::as_str),
-            ),
-            Some(JobStartRoute::Unavailable(launch, why)) => {
-                format!("manual {} {why}", launch.provider.as_str())
-            }
-        }
-    }
-
-    /// Where a recovery job starts (task 1225, ADR-t1063-1 decisions 1, 4
-    /// and 5, ADR-t1204-1): a role that names no provider runs on Claude,
-    /// waits while the hold ask holds Claude and goes to a person under
-    /// `--no-claude`; one that names Codex starts there, moves to Claude
-    /// when Codex cannot be used, waits when neither can be, and under
-    /// `--no-claude` never moves to Claude but goes to a person told why.
-    #[test]
-    fn a_recovery_job_starts_on_a_provider_it_can_use_waits_or_goes_to_a_person() {
-        use crate::domain::actor_model::RoleModels;
-        let usable = |_: Provider| None;
-        let claude_only = |provider: Provider| {
-            (provider == Provider::Codex).then_some(SwitchReason::ExecutableMissing)
-        };
-        let neither = |provider: Provider| {
-            Some(match provider {
-                Provider::Claude => SwitchReason::Disabled,
-                Provider::Codex => SwitchReason::Authentication,
-            })
-        };
-        let default = RoleModels::default().launch(ModelRole::Recovery);
-        assert_eq!(
-            describe(recovery_route_of(
-                default.clone(),
-                false,
-                false,
-                false,
-                usable
-            )),
-            "start claude false None None"
-        );
-        assert_eq!(
-            describe(recovery_route_of(
-                default.clone(),
-                false,
-                false,
-                true,
-                usable
-            )),
-            "wait"
-        );
-        assert_eq!(
-            describe(recovery_route_of(default, false, true, false, usable)),
-            "manual claude provider_disabled: Claude is disabled by --no-claude; handle this role manually"
-        );
-
-        let mut models = RoleModels::default();
-        models.entry(ModelRole::Recovery).provider = Some(Provider::Codex);
-        let codex = models.launch(ModelRole::Recovery);
-        assert!(models.switchable(ModelRole::Recovery));
-        // Claude's hold ask does not hold a Codex job.
-        assert_eq!(
-            describe(recovery_route_of(codex.clone(), true, false, true, usable)),
-            "start codex true None None"
-        );
-        assert_eq!(
-            describe(recovery_route_of(
-                codex.clone(),
-                true,
-                false,
-                false,
-                claude_only
-            )),
-            "start claude true Some(\"codex\") Some(\"executable_missing\")"
-        );
-        let held = |provider: Provider| {
-            Some(match provider {
-                Provider::Claude => SwitchReason::UsageLimit,
-                Provider::Codex => SwitchReason::Authentication,
-            })
-        };
-        assert_eq!(
-            describe(recovery_route_of(codex.clone(), true, false, true, held)),
-            "wait"
-        );
-        assert_eq!(
-            describe(recovery_route_of(codex.clone(), true, true, false, usable)),
-            "start codex true None None"
-        );
-        assert_eq!(
-            describe(recovery_route_of(codex, true, true, false, neither)),
-            "manual codex provider_disabled: Claude is disabled by --no-claude and codex cannot be used (authentication); handle this role manually"
-        );
     }
 
     /// The end of a recovery job records the thread and model its provider

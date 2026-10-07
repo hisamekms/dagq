@@ -265,10 +265,10 @@ pub enum JobRoute {
 }
 
 /// How a due headless job starts once its route is decided (ADR-t1063-1
-/// decisions 1, 4 and 5, ADR-t1204-1): the throughput review's and the
-/// observer's (`job_start_route`) and the recovery job's
-/// (`recovery_route_of`, task 1225). A value both the observation and the
-/// execution contexts read, so it lives here with [`JobRoute`].
+/// decisions 1, 4 and 5, ADR-t1204-1): the throughput review's, the
+/// observer's and the recovery job's ([`job_start_route`]). A value both
+/// the observation and the execution contexts read, so it lives here with
+/// [`JobRoute`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobStartRoute {
     /// On this launch; `true` when its `[roles.<role>]` names its provider.
@@ -303,6 +303,67 @@ pub fn job_route(
     JobRoute::Wait {
         provider: launch.provider,
         reason,
+    }
+}
+
+/// What [`job_start_route`] does under `--no-claude` with a job whose role
+/// names no provider, which runs on Claude only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnnamedWithoutClaude {
+    /// It does not start (the throughput review, the observer;
+    /// ADR-t1204-1 decision 2).
+    Wait,
+    /// It starts no agent and goes to a person told why (the recovery job).
+    Unavailable,
+}
+
+/// Where the due headless job that `launch` starts goes, or, as `Err`,
+/// that it waits, with the reason [`job_wait_text`] gives when a provider
+/// cannot be used. `switchable` says that its role names its provider,
+/// `no_claude` is `--no-claude`, `claude_held` that the queue's hold ask
+/// holds Claude, `fallback` is `[provider_fallback] jobs` for the job
+/// (ADR-t1857-1), `unnamed` what a role that names no provider does under
+/// `--no-claude`, and `unusable` why each provider cannot be used now. A
+/// role that names no provider runs on Claude as before: it waits while
+/// the hold ask holds Claude. One that names its provider goes by
+/// [`job_route`]; when that waits under `--no-claude` it is
+/// [`JobStartRoute::Unavailable`] with the reason, as a Codex job never
+/// moves to Claude then.
+pub fn job_start_route(
+    launch: ActorLaunch,
+    switchable: bool,
+    no_claude: bool,
+    claude_held: bool,
+    fallback: bool,
+    unnamed: UnnamedWithoutClaude,
+    unusable: impl Fn(Provider) -> Option<SwitchReason>,
+) -> Result<JobStartRoute, Option<String>> {
+    const DISABLED: &str = "provider_disabled: Claude is disabled by --no-claude";
+    if !switchable {
+        if no_claude {
+            return match unnamed {
+                UnnamedWithoutClaude::Wait => Err(None),
+                UnnamedWithoutClaude::Unavailable => Ok(JobStartRoute::Unavailable(
+                    launch,
+                    format!("{DISABLED}; handle this role manually"),
+                )),
+            };
+        }
+        if claude_held {
+            return Err(None);
+        }
+        return Ok(JobStartRoute::Start(launch, false));
+    }
+    match job_route(&launch, true, fallback, &unusable) {
+        JobRoute::Start(launch) => Ok(JobStartRoute::Start(launch, true)),
+        JobRoute::Wait { .. } if no_claude => {
+            let codex = unusable(Provider::Codex).map_or("unknown", SwitchReason::as_str);
+            Ok(JobStartRoute::Unavailable(
+                launch,
+                format!("{DISABLED} and codex cannot be used ({codex}); handle this role manually"),
+            ))
+        }
+        JobRoute::Wait { provider, reason } => Err(Some(job_wait_text(provider, reason, fallback))),
     }
 }
 
@@ -816,6 +877,143 @@ mod tests {
         };
         assert_eq!(moved.provider, Provider::Codex);
         assert_eq!(moved.switch_reason, Some(SwitchReason::Disabled));
+    }
+
+    fn describe(route: Result<JobStartRoute, Option<String>>) -> String {
+        match route {
+            Err(None) => "wait".to_owned(),
+            Err(Some(why)) => format!("wait: {why}"),
+            Ok(JobStartRoute::Start(launch, switchable)) => format!(
+                "start {} {switchable} {:?} {:?}",
+                launch.provider.as_str(),
+                launch.switched_from.map(Provider::as_str),
+                launch.switch_reason.map(SwitchReason::as_str),
+            ),
+            Ok(JobStartRoute::Unavailable(launch, why)) => {
+                format!("manual {} {why}", launch.provider.as_str())
+            }
+        }
+    }
+
+    /// A due job whose role names no provider runs on Claude and waits
+    /// while the hold ask holds Claude; under `--no-claude` the throughput
+    /// review and the observer wait and the recovery job goes to a person
+    /// (ADR-t1204-1).
+    #[test]
+    fn a_job_whose_role_names_no_provider_runs_on_claude_or_waits_or_goes_to_a_person() {
+        use UnnamedWithoutClaude::{Unavailable, Wait};
+        let usable = |_: Provider| None;
+        for role in [
+            ModelRole::ThroughputReview,
+            ModelRole::Observer,
+            ModelRole::Recovery,
+        ] {
+            let launch = RoleModels::default().launch(role);
+            for (unnamed, fallback) in [(Wait, true), (Wait, false), (Unavailable, true)] {
+                let route = |no_claude, held| {
+                    describe(job_start_route(
+                        launch.clone(),
+                        false,
+                        no_claude,
+                        held,
+                        fallback,
+                        unnamed,
+                        usable,
+                    ))
+                };
+                assert_eq!(route(false, false), "start claude false None None");
+                assert_eq!(route(false, true), "wait");
+                let disabled = if unnamed == Wait {
+                    "wait"
+                } else {
+                    "manual claude provider_disabled: Claude is disabled by --no-claude; handle this role manually"
+                };
+                assert_eq!(route(true, false), disabled, "{}", role.as_str());
+                assert_eq!(route(true, true), disabled, "{}", role.as_str());
+            }
+        }
+    }
+
+    /// A due job whose role names Codex starts there whatever holds
+    /// Claude, moves to Claude when Codex cannot be used and the fallback
+    /// lets it, waits when neither can run it, and under `--no-claude`
+    /// never moves to Claude but records why, for the throughput review,
+    /// the observer and the recovery job alike (ADR-t1063-1 decisions 4
+    /// and 5, ADR-t1204-1, ADR-t1857-1).
+    #[test]
+    fn a_job_whose_role_names_codex_starts_where_it_can_waits_or_says_why() {
+        use UnnamedWithoutClaude::{Unavailable, Wait};
+        let usable = |_: Provider| None;
+        let claude_only = |provider: Provider| {
+            (provider == Provider::Codex).then_some(SwitchReason::ExecutableMissing)
+        };
+        let held = |provider: Provider| {
+            Some(match provider {
+                Provider::Claude => SwitchReason::UsageLimit,
+                Provider::Codex => SwitchReason::Authentication,
+            })
+        };
+        let neither = |provider: Provider| {
+            Some(match provider {
+                Provider::Claude => SwitchReason::Disabled,
+                Provider::Codex => SwitchReason::Authentication,
+            })
+        };
+        for (role, unnamed) in [
+            (ModelRole::ThroughputReview, Wait),
+            (ModelRole::Observer, Wait),
+            (ModelRole::Recovery, Unavailable),
+        ] {
+            let mut models = RoleModels::default();
+            models.entry(role).provider = Some(Provider::Codex);
+            assert!(models.switchable(role));
+            let codex = models.launch(role);
+            let route =
+                |no_claude,
+                 claude_held,
+                 fallback,
+                 unusable: &dyn Fn(Provider) -> Option<SwitchReason>| {
+                    describe(job_start_route(
+                        codex.clone(),
+                        true,
+                        no_claude,
+                        claude_held,
+                        fallback,
+                        unnamed,
+                        unusable,
+                    ))
+                };
+            for fallback in [true, false] {
+                // Claude's hold ask does not hold a Codex job.
+                assert_eq!(
+                    route(false, true, fallback, &usable),
+                    "start codex true None None"
+                );
+                assert_eq!(
+                    route(false, false, fallback, &held),
+                    format!(
+                        "wait: {}",
+                        job_wait_text(Provider::Codex, SwitchReason::Authentication, fallback)
+                    )
+                );
+                assert_eq!(
+                    route(true, false, fallback, &usable),
+                    "start codex true None None"
+                );
+                assert_eq!(
+                    route(true, false, fallback, &neither),
+                    "manual codex provider_disabled: Claude is disabled by --no-claude and codex cannot be used (authentication); handle this role manually"
+                );
+            }
+            assert_eq!(
+                route(false, false, true, &claude_only),
+                "start claude true Some(\"codex\") Some(\"executable_missing\")"
+            );
+            assert_eq!(
+                route(false, false, false, &claude_only),
+                "wait: codex cannot be used (executable_missing); [provider_fallback] jobs is false, so it waits for codex"
+            );
+        }
     }
 
     #[test]
