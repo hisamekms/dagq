@@ -19,7 +19,8 @@ use crate::domain::event_kind::{THROUGHPUT_REVIEW_FINISHED, THROUGHPUT_REVIEW_ST
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::queue_hold::HoldJob;
 use crate::domain::throughput_review::{
-    HISTORY_EVENTS, RUNNING_MS, ReviewMode, children_finished, reviewed, running, window,
+    HISTORY_EVENTS, RUNNING_MS, ReviewMode, UnusableFinish, children_finished, reviewed, running,
+    window,
 };
 
 /// The newest finishes a supervisor that exec'd reads for the reviews it
@@ -134,15 +135,19 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Reap the review once it exited; when `start` and none runs, start
-    /// the one due. A failure to start is logged and not retried for that
-    /// period in this process.
-    pub(super) fn throughput_review_pass(&mut self, options: &LoopSettings, start: bool) {
-        self.reap_handed_over_reviews(options);
+    /// Reap the review once it exited, and those an exec handed over: the
+    /// finishes among them that say their provider could not be used, for
+    /// 実行と着地 to hold that provider before the next start
+    /// ([`Self::start_throughput_review`]).
+    pub(super) fn reap_throughput_reviews(
+        &mut self,
+        options: &LoopSettings,
+    ) -> Vec<observer::UnusableTimerJob> {
+        let mut unusable = self.reap_handed_over_reviews(options);
         if let Some(job) = self.throughput_review.job.as_mut() {
             let (mode, period) = (job.mode, &job.period);
             match job.child.try_wait() {
-                Ok(None) => return,
+                Ok(None) => return unusable,
                 Ok(Some(status)) => {
                     info!(
                         "throughput review ({} {period}) exited: {status}",
@@ -156,10 +161,16 @@ impl Supervisor<'_> {
             if let Some(job) = self.throughput_review.job.take()
                 && job.retries_unusable
             {
-                self.review_unusable(&job);
+                unusable.extend(self.review_unusable(&job));
             }
         }
-        if !start || !options.throughput_review {
+        unusable
+    }
+
+    /// When `start` and none runs, start the review due. A failure to
+    /// start is logged and not retried for that period in this process.
+    pub(super) fn start_throughput_review(&mut self, options: &LoopSettings, start: bool) {
+        if !start || !options.throughput_review || self.throughput_review.running() {
             return;
         }
         let now = self.generators.clock.now();
@@ -255,14 +266,18 @@ impl Supervisor<'_> {
     /// is reaped once and nothing else. Only a supervisor that took over by
     /// an exec looks, for [`RUNNING_MS`] after its first pass, by when such
     /// a review finished or was killed at its timeout.
-    fn reap_handed_over_reviews(&mut self, options: &LoopSettings) {
+    fn reap_handed_over_reviews(
+        &mut self,
+        options: &LoopSettings,
+    ) -> Vec<observer::UnusableTimerJob> {
+        let mut unusable = Vec::new();
         if options.handoff_token.is_none() {
-            return;
+            return unusable;
         }
         let now_ms = self.generators.clock.now() * 1000;
         let first = *self.throughput_review.first_pass_ms.get_or_insert(now_ms);
         if now_ms - first > RUNNING_MS {
-            return;
+            return unusable;
         }
         let finished = match self
             .queue
@@ -271,7 +286,7 @@ impl Supervisor<'_> {
             Ok(finished) => finished,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the throughput reviews to reap could not be read: {error:#}");
-                return;
+                return unusable;
             }
         };
         // A review may finish just before the exec, with nobody left to
@@ -281,22 +296,25 @@ impl Supervisor<'_> {
                 self.processes.reap(pid);
                 self.throughput_review.reaped.push(pid);
                 info!("throughput review handed over by the exec reaped: pid {pid}");
-                // One that found its provider unusable holds it here, as for
+                // One that found its provider unusable has it held, as for
                 // a review this process started, so its period, due again,
                 // goes to the other provider (or waits for this one) rather
                 // than to it once more.
                 if let Some(finish) = finished
                     .iter()
                     .find(|event| event.payload["pid"].as_u64() == Some(u64::from(pid)))
+                    && let Some(read) = UnusableFinish::of(finish)
                 {
-                    self.hold_finish_unusable(
-                        finish,
-                        &HoldJob::ThroughputReview,
-                        &review_entry(finish),
-                    );
+                    unusable.push(self.unusable_timer_job(
+                        read,
+                        HoldJob::ThroughputReview,
+                        review_entry(finish),
+                        observer::TimerJob::HandedOver,
+                    ));
                 }
             }
         }
+        unusable
     }
 
     /// Kill the review still running and the processes it started, so none
@@ -330,15 +348,12 @@ impl Supervisor<'_> {
     }
 
     /// After a review whose finish is read for `provider_unusable`
-    /// ([`ReviewJob::retries_unusable`]) exited: when its finish says its
-    /// provider could not be used, hold that provider as a worker's or
-    /// another job's failure does ([`Self::hold_unusable`]), and let the
-    /// period be due again, so that it starts on the other provider (or,
-    /// under `--no-claude`, records why), or, with `[provider_fallback]
-    /// jobs` off, on the same provider once its hold ends (ADR-t1063-1
-    /// decisions 4 and 5, ADR-t1857-1). A hold that cannot be written keeps
-    /// the period as started, so it is not started again at once.
-    fn review_unusable(&mut self, job: &ReviewJob) {
+    /// ([`ReviewJob::retries_unusable`]) exited: its finish, when it says
+    /// its provider could not be used, for 実行と着地 to hold that provider
+    /// as a worker's or another job's failure does; once it is held the
+    /// period is due again ([`Self::review_due_again`]; ADR-t1063-1
+    /// decisions 4 and 5, ADR-t1857-1).
+    fn review_unusable(&self, job: &ReviewJob) -> Option<observer::UnusableTimerJob> {
         let finished = match self
             .queue
             .latest_events_of(THROUGHPUT_REVIEW_FINISHED, HANDED_OVER_EVENTS)
@@ -346,25 +361,33 @@ impl Supervisor<'_> {
             Ok(finished) => finished,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the throughput review's finish could not be read: {error:#}");
-                return;
+                return None;
             }
         };
         let pid = u64::from(job.child.id());
-        let Some(finish) = finished.iter().find(|event| {
+        let finish = finished.iter().find(|event| {
             event.payload["mode"] == job.mode.as_str()
                 && event.payload["period"] == job.period.as_str()
                 && event.payload["pid"].as_u64() == Some(pid)
-        }) else {
-            return;
-        };
-        if self
-            .hold_finish_unusable(finish, &HoldJob::ThroughputReview, &review_entry(finish))
-            .is_some()
-        {
-            self.throughput_review
-                .launched
-                .retain(|(mode, period)| !(*mode == job.mode && *period == job.period));
-        }
+        })?;
+        Some(self.unusable_timer_job(
+            UnusableFinish::of(finish)?,
+            HoldJob::ThroughputReview,
+            review_entry(finish),
+            observer::TimerJob::Review(job.mode, job.period.clone()),
+        ))
+    }
+
+    /// Let the period of `mode`, whose review's provider is held now, be
+    /// due again, so that it starts on the other provider (or, under
+    /// `--no-claude`, records why), or, with `[provider_fallback] jobs`
+    /// off, on the same provider once its hold ends. A review whose hold
+    /// could not be written keeps its period as started, so it is not
+    /// started again at once.
+    pub(super) fn review_due_again(&mut self, mode: ReviewMode, period: &str) {
+        self.throughput_review
+            .launched
+            .retain(|(was, was_period)| !(*was == mode && was_period == period));
     }
 }
 

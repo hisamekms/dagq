@@ -1,15 +1,17 @@
 //! The observer job the supervisor starts on its timer, on the provider
 //! its route gives (ADR-t1063-1 decisions 1, 4 and 5, ADR-t1222-1, task
-//! 1223): a Codex one that found Codex unusable holds Codex and starts
-//! again on the other provider, or, under `--no-claude`, records why. With
-//! `[provider_fallback] jobs` off it starts again on the provider it could
-//! not use once that provider's hold ends, a Claude one too (ADR-t1857-1).
+//! 1223): a Codex one that found Codex unusable publishes its finish, has
+//! Codex held by 実行と着地, which owns the holds (ADR-t1545-1 decision 2),
+//! and starts again on the other provider, or, under `--no-claude`,
+//! records why. With `[provider_fallback] jobs` off it starts again on the
+//! provider it could not use once that provider's hold ends, a Claude one
+//! too (ADR-t1857-1).
 
 use super::*;
 use crate::domain::actor_model::records_unusable;
 use crate::domain::event_kind::OBSERVE_FINISHED;
-use crate::domain::provider_switch::SwitchReason;
-use serde_json::Value;
+use crate::domain::queue_hold::HoldJob;
+use crate::domain::throughput_review::{ReviewMode, UnusableFinish};
 
 /// The newest observations a supervisor reads for the finish of the one it
 /// waited on.
@@ -19,8 +21,8 @@ const FINISH_EVENTS: usize = 10;
 pub(super) struct ObserverJob {
     pub(super) mode: ObserveMode,
     pub(super) child: Box<dyn Spawned>,
-    /// Whether a finish that says its provider could not be used holds
-    /// that provider and makes the observation due again
+    /// Whether a finish that says its provider could not be used has
+    /// that provider held and makes the observation due again
     /// ([`retries_unusable`]).
     pub(super) retries_unusable: bool,
     /// The newest event when it started: its finish comes after.
@@ -43,110 +45,114 @@ pub(super) const fn retries_unusable(
     !unavailable && records_unusable(provider, switchable, fallback)
 }
 
-/// The provider and reason of a finish's `provider_unusable` (an
-/// `observe_finished` or a `throughput_review_finished`), when it has one
-/// with a provider and a reason known.
-pub(super) fn finish_unusable(payload: &Value) -> Option<(Provider, SwitchReason)> {
-    let unusable = &payload["provider_unusable"];
-    let provider = unusable["provider"].as_str()?.parse::<Provider>().ok()?;
-    let reason = unusable["reason"].as_str()?.parse::<SwitchReason>().ok()?;
-    Some((provider, reason))
+/// The job on the timer a finish that says its provider could not be used
+/// ended: what is due again once that provider is held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TimerJob {
+    /// The observation of this mode, due again.
+    Observer(ObserveMode),
+    /// The throughput review of this mode and period, due again.
+    Review(ReviewMode, String),
+    /// A review the process before an exec left running: its period has
+    /// no start of this process to clear.
+    HandedOver,
 }
 
-/// What the finish of a job on its timer says about the provider it could
-/// not use, read here so that the hold ([`Supervisor::hold_unusable`])
-/// takes plain values: the provider and reason, the job's error and its
-/// provider's words (`output.out` in its directory).
-pub(super) struct UnusableFinish {
-    pub(super) unusable: (Provider, SwitchReason),
-    pub(super) error: String,
+/// The finish of a job on the timer that says its provider could not be
+/// used, as 観測と分析 publishes it to 実行と着地, which holds that provider
+/// (`Supervisor::hold_timer_jobs_unusable`): the finish read
+/// ([`UnusableFinish`]), its provider's words (`output.out` in its
+/// directory), the job as the hold ask names it, the job as the log names
+/// it, and what is due again once held.
+pub(super) struct UnusableTimerJob {
+    pub(super) finish: UnusableFinish,
     pub(super) output: String,
+    pub(super) hold: HoldJob,
+    pub(super) what: String,
+    pub(super) job: TimerJob,
 }
 
 /// The finish of the observation of `mode` started after `mark` among
-/// `finished` (newest first), and the provider and reason it says could not
-/// be used, when it says so (`provider_unusable`).
+/// `finished` (newest first), read as one whose provider could not be
+/// used, when it says so (`provider_unusable`).
 fn unusable_finish(
     finished: &[RunEvent],
     mark: EventId,
     mode: ObserveMode,
-) -> Option<(&RunEvent, Provider, SwitchReason)> {
+) -> Option<UnusableFinish> {
     let finish = finished
         .iter()
         .find(|event| event.id > mark && event.payload["mode"] == mode.as_str())?;
-    let (provider, reason) = finish_unusable(&finish.payload)?;
-    Some((finish, provider, reason))
+    UnusableFinish::of(finish)
 }
 
 impl Supervisor<'_> {
-    /// The provider `finish` (an `observe_finished` or a
-    /// `throughput_review_finished`) says could not be used, with its error
-    /// and its provider's words, when it says so.
-    pub(super) fn unusable_of(&self, finish: &RunEvent) -> Option<UnusableFinish> {
-        let unusable = finish_unusable(&finish.payload)?;
-        let error = finish.payload["error"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        let output = finish.payload["dir"]
-            .as_str()
+    /// `finish` of `job` (`what` in the log) with its provider's words, to
+    /// publish: `output.out` in its directory, empty when unreadable.
+    pub(super) fn unusable_timer_job(
+        &self,
+        finish: UnusableFinish,
+        hold: HoldJob,
+        what: String,
+        job: TimerJob,
+    ) -> UnusableTimerJob {
+        let output = finish
+            .dir
+            .as_deref()
             .and_then(|dir| {
                 self.files
                     .read_to_string(&Path::new(dir).join("output.out"))
                     .ok()
             })
             .unwrap_or_default();
-        Some(UnusableFinish {
-            unusable,
-            error,
+        UnusableTimerJob {
+            finish,
             output,
-        })
-    }
-
-    /// Hold the provider `finish` says could not be used
-    /// ([`Self::unusable_of`], [`Self::hold_unusable`]); the provider held,
-    /// when it is held now.
-    pub(super) fn hold_finish_unusable(
-        &mut self,
-        finish: &RunEvent,
-        job: &HoldJob,
-        what: &str,
-    ) -> Option<Provider> {
-        let read = self.unusable_of(finish)?;
-        self.hold_unusable(read.unusable, (&read.error, &read.output), job, what)
+            hold,
+            what,
+            job,
+        }
     }
 
     /// After an observation whose finish is read for `provider_unusable`
-    /// ([`ObserverJob::retries_unusable`]) exited: when its finish says its
-    /// provider could not be used, hold that provider as a worker's or
-    /// another job's failure does ([`Self::hold_unusable`]: Codex's
+    /// ([`ObserverJob::retries_unusable`]) exited: its finish, when it says
+    /// its provider could not be used, for 実行と着地 to hold that provider
+    /// as a worker's or another job's failure does (Codex's
     /// [`crate::domain::provider_switch::ProviderHold`], Claude's hold ask
-    /// or, for an agent that did not start, its `ProviderHold`), and make
-    /// the observation due again, so that it starts on the other provider
-    /// (or, under `--no-claude`, records why), or, with `[provider_fallback]
-    /// jobs` off, on the same provider once its hold ends (ADR-t1857-1). A
-    /// hold that cannot be written leaves the observation to its interval,
-    /// so it is not started again at once.
-    pub(super) fn observer_unusable(&mut self, job: &ObserverJob) {
+    /// or, for an agent that did not start, its `ProviderHold`). Once it is
+    /// held the observation is due again ([`Self::timer_job_due_again`]).
+    pub(super) fn observer_unusable(&self, job: &ObserverJob) -> Option<UnusableTimerJob> {
         let finished = match self.queue.latest_events_of(OBSERVE_FINISHED, FINISH_EVENTS) {
             Ok(finished) => finished,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the observer's finish could not be read: {error:#}");
-                return;
+                return None;
             }
         };
-        let Some((finish, _, _)) = unusable_finish(&finished, job.mark, job.mode) else {
-            return;
-        };
-        let finish = finish.clone();
-        let what = format!("observer ({})", job.mode.as_str());
-        if self
-            .hold_finish_unusable(&finish, &HoldJob::Observer, &what)
-            .is_some()
-        {
-            self.observers_launched
-                .retain(|(launched, _)| *launched != job.mode);
-            self.observer_again = Some(job.mode);
+        let finish = unusable_finish(&finished, job.mark, job.mode)?;
+        Some(self.unusable_timer_job(
+            finish,
+            HoldJob::Observer,
+            format!("observer ({})", job.mode.as_str()),
+            TimerJob::Observer(job.mode),
+        ))
+    }
+
+    /// Make `job`, whose provider is held now, due again, so that it starts
+    /// on the other provider (or, under `--no-claude`, records why), or,
+    /// with `[provider_fallback] jobs` off, on the same provider once its
+    /// hold ends (ADR-t1857-1). A job whose hold could not be written is
+    /// not given here: it is left to its interval, so it is not started
+    /// again at once.
+    pub(super) fn timer_job_due_again(&mut self, job: TimerJob) {
+        match job {
+            TimerJob::Observer(mode) => {
+                self.observers_launched
+                    .retain(|(launched, _)| *launched != mode);
+                self.observer_again = Some(mode);
+            }
+            TimerJob::Review(mode, period) => self.review_due_again(mode, &period),
+            TimerJob::HandedOver => {}
         }
     }
 }
@@ -154,6 +160,7 @@ impl Supervisor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::provider_switch::SwitchReason;
 
     fn finish(id: i64, payload: serde_json::Value) -> RunEvent {
         RunEvent {
@@ -190,19 +197,18 @@ mod tests {
                                          "provider_unusable": unusable}),
             ),
         ];
-        let (event, provider, reason) =
-            unusable_finish(&finished, EventId::new(5), ObserveMode::Daily).unwrap();
+        let read = unusable_finish(&finished, EventId::new(5), ObserveMode::Daily).unwrap();
         assert_eq!(
-            (event.id, provider, reason),
+            (read.event, read.provider, read.reason),
             (EventId::new(7), Provider::Codex, SwitchReason::UsageLimit)
         );
         // Claude's, which only a fallback turned off records.
         let claude = serde_json::json!({"mode": "daily", "outcome": "failed",
             "provider_unusable": {"provider": "claude", "reason": "launch_failed"}});
-        let (_, provider, reason) =
+        let read =
             unusable_finish(&[finish(8, claude)], EventId::new(5), ObserveMode::Daily).unwrap();
         assert_eq!(
-            (provider, reason),
+            (read.provider, read.reason),
             (Provider::Claude, SwitchReason::LaunchFailed)
         );
         // The hourly one past the mark succeeded; the older failure is

@@ -9,9 +9,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DomainError, RunEvent,
+    DomainError, EventId, Provider, RunEvent,
     event_kind::{THROUGHPUT_REVIEW_FINISHED, THROUGHPUT_REVIEW_STARTED},
     kpi::{DAY_MS, Period},
+    provider_switch::SwitchReason,
     stats::timestamp_millis,
 };
 
@@ -353,6 +354,68 @@ pub fn parse_output(output: &str) -> ReviewOutput {
     }
 }
 
+/// How many of the finishes it held the supervisor remembers, so that the
+/// same finish is not held twice ([`finishes_to_hold`]).
+pub const HELD_FINISHES: usize = 16;
+
+/// What the finish of a job on the supervisor's timer (an `observe_finished`
+/// or a `throughput_review_finished`) says about the provider it could not
+/// use, restored as a typed value: the `provider_unusable` with a provider
+/// and a reason known, the job's `error` and its directory (`dir`, where
+/// its provider's words are). 観測と分析 reads it off its finish and
+/// publishes it; 実行と着地, which owns the holds, holds that provider
+/// (ADR-t1545-1 decision 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusableFinish {
+    pub event: EventId,
+    pub provider: Provider,
+    pub reason: SwitchReason,
+    pub error: String,
+    pub dir: Option<String>,
+}
+
+impl UnusableFinish {
+    /// The provider `finish` says could not be used, when it says so with a
+    /// provider and a reason known; a missing or mistyped `error` or `dir`
+    /// reads as empty or absent, as earlier finishes may have it.
+    pub fn of(finish: &RunEvent) -> Option<Self> {
+        let text = |value: Option<&serde_json::Value>| {
+            value.and_then(serde_json::Value::as_str).map(str::to_owned)
+        };
+        let unusable = finish.payload.get("provider_unusable")?;
+        let provider = text(unusable.get("provider"))?.parse().ok()?;
+        let reason = text(unusable.get("reason"))?.parse().ok()?;
+        Some(Self {
+            event: finish.id,
+            provider,
+            reason,
+            error: text(finish.payload.get("error")).unwrap_or_default(),
+            dir: text(finish.payload.get("dir")),
+        })
+    }
+}
+
+/// Of `pending` (each with its finish's event, `event`), the ones to hold
+/// now: the first of each finish that is not among those held already
+/// (`held`), so that one finish writes its hold (`provider_held`, the hold
+/// ask) once.
+pub fn finishes_to_hold<T>(
+    pending: Vec<T>,
+    held: &[EventId],
+    event: impl Fn(&T) -> EventId,
+) -> Vec<T> {
+    let mut seen = held.to_vec();
+    pending
+        .into_iter()
+        .filter(|item| {
+            let id = event(item);
+            let new = !seen.contains(&id);
+            seen.push(id);
+            new
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,5 +672,82 @@ mod tests {
         for mode in ReviewMode::ALL {
             assert_eq!(mode.as_str().parse::<ReviewMode>().unwrap(), mode);
         }
+    }
+
+    fn timer_finish(id: i64, payload: serde_json::Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            run_id: None,
+            task_id: None,
+            goal_id: None,
+            kind: THROUGHPUT_REVIEW_FINISHED.into(),
+            payload,
+            created_at: "2026-10-07T00:00:00Z".into(),
+            actor: None,
+        }
+    }
+
+    /// A finish is read as one whose provider could not be used only with
+    /// a provider and a reason known; its error and directory come along,
+    /// read as empty or absent when an earlier finish has them missing or
+    /// of another type (ADR-t1545-1 decision 2, C6).
+    #[test]
+    fn a_timer_jobs_finish_says_the_provider_it_could_not_use() {
+        let read = UnusableFinish::of(&timer_finish(
+            7,
+            serde_json::json!({"outcome": "failed", "error": "limit", "dir": "/q/tr/1",
+                "provider_unusable": {"provider": "codex", "reason": "usage_limit"}}),
+        ))
+        .unwrap();
+        assert_eq!(
+            read,
+            UnusableFinish {
+                event: EventId::new(7),
+                provider: Provider::Codex,
+                reason: SwitchReason::UsageLimit,
+                error: "limit".to_owned(),
+                dir: Some("/q/tr/1".to_owned()),
+            }
+        );
+        let bare = UnusableFinish::of(&timer_finish(
+            8,
+            serde_json::json!({"error": 3, "dir": null,
+                "provider_unusable": {"provider": "claude", "reason": "launch_failed"}}),
+        ))
+        .unwrap();
+        assert_eq!(
+            (bare.provider, bare.reason, bare.error.as_str(), bare.dir),
+            (Provider::Claude, SwitchReason::LaunchFailed, "", None)
+        );
+        for payload in [
+            serde_json::json!({"outcome": "failed"}),
+            serde_json::json!({"provider_unusable": null}),
+            serde_json::json!({"provider_unusable": {"provider": "gemini", "reason": "usage_limit"}}),
+            serde_json::json!({"provider_unusable": {"provider": "codex", "reason": "no_such_reason"}}),
+            serde_json::json!({"provider_unusable": {"provider": "codex"}}),
+            serde_json::json!("not an object"),
+        ] {
+            assert!(
+                UnusableFinish::of(&timer_finish(9, payload.clone())).is_none(),
+                "{payload}"
+            );
+        }
+    }
+
+    /// One finish is held once: a second read of it, in the same batch or
+    /// after it was held, holds nothing (no second `provider_held`).
+    #[test]
+    fn a_finish_is_held_once() {
+        let id = EventId::new;
+        let pending = vec![(id(5), "a"), (id(6), "b"), (id(5), "a again"), (id(4), "c")];
+        assert_eq!(
+            finishes_to_hold(pending, &[id(4)], |(event, _)| *event),
+            [(id(5), "a"), (id(6), "b")]
+        );
+        assert!(finishes_to_hold(vec![(id(4), "c")], &[id(4)], |(event, _)| *event).is_empty());
+        assert_eq!(
+            finishes_to_hold(vec![(id(3), "d")], &[], |(event, _)| *event),
+            [(id(3), "d")]
+        );
     }
 }

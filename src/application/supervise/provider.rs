@@ -22,6 +22,7 @@ use crate::domain::{
         self, MAX_PROVIDER_SWITCHES, ProviderHold, SwitchPhase, SwitchReason, WallMove,
         WorkerRoute, switched_payload,
     },
+    throughput_review::{HELD_FINISHES, finishes_to_hold},
     turn::{TurnFailure, TurnRequest, taken_path},
     worker::WorkerMode,
 };
@@ -564,14 +565,45 @@ pub(super) fn unusable_hold(
 }
 
 impl Supervisor<'_> {
+    /// Hold the providers the finishes of jobs on 観測と分析's timer say
+    /// could not be used (`unusable`, which that context read off its
+    /// finish events into typed values and published), each finish once
+    /// ([`finishes_to_hold`], so no second `provider_held`): the jobs whose
+    /// provider is held now, which 観測と分析 makes due again. Called in the
+    /// pass that reaped them, before either job's next start reads the
+    /// holds (ADR-t1545-1 decision 2).
+    pub(super) fn hold_timer_jobs_unusable(
+        &mut self,
+        unusable: Vec<observer::UnusableTimerJob>,
+    ) -> Vec<observer::TimerJob> {
+        let mut held = Vec::new();
+        for job in finishes_to_hold(unusable, &self.timer_finishes_held, |job| job.finish.event) {
+            self.timer_finishes_held.push(job.finish.event);
+            let over = self.timer_finishes_held.len().saturating_sub(HELD_FINISHES);
+            self.timer_finishes_held.drain(..over);
+            let finish = &job.finish;
+            if self
+                .hold_unusable(
+                    (finish.provider, finish.reason),
+                    (&finish.error, &job.output),
+                    &job.hold,
+                    &job.what,
+                )
+                .is_some()
+            {
+                held.push(job.job);
+            }
+        }
+        held
+    }
+
     /// Hold `provider`, which a job on its timer (`job`, `what` in the
     /// log) could not use for `reason`, as [`unusable_hold`] says: `error`
     /// is the job's error and `output` its provider's words, which may say
     /// when a usage limit resets. The provider held, when it is held now (a
     /// hold that cannot be written is logged, and the job is not started
-    /// again at once). The job's own context reads its finish into these
-    /// values (`supervise::observer::UnusableFinish`).
-    pub(super) fn hold_unusable(
+    /// again at once).
+    fn hold_unusable(
         &mut self,
         (provider, reason): (Provider, SwitchReason),
         (error, output): (&str, &str),

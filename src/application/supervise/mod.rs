@@ -925,6 +925,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         landing_stamp: None,
         queue_hold: None,
         provider_holds: Vec::new(),
+        timer_finishes_held: Vec::new(),
         moved: HashMap::new(),
         hold_continue: HashMap::new(),
         reopens: HashMap::new(),
@@ -1159,6 +1160,10 @@ struct Supervisor<'a> {
     /// decision 6): Codex for any reason, Claude for an agent that did not
     /// start. Their tasks run on the other provider meanwhile.
     provider_holds: Vec<crate::domain::provider_switch::ProviderHold>,
+    /// The latest finishes of jobs on 観測と分析's timer whose provider
+    /// this supervisor held, so that none is held twice
+    /// ([`crate::domain::throughput_review::finishes_to_hold`]).
+    timer_finishes_held: Vec<EventId>,
     /// The runs whose worker moved to the other provider in this step: the
     /// slot's copy takes the new worker once the step returns.
     moved: HashMap<RunId, Worker>,
@@ -1671,7 +1676,8 @@ impl Supervisor<'_> {
                         self.broker_pass(false);
                         self.broker_sweep();
                         self.poll_observer();
-                        self.throughput_review_pass(options, false);
+                        let unusable = self.reap_throughput_reviews(options);
+                        self.hold_timer_jobs(unusable);
                         self.report_pass(false);
                         self.forecast_pass(false);
                         self.release_pass(false);
@@ -1733,7 +1739,9 @@ impl Supervisor<'_> {
             // usage limit that holds Claude starts no Claude review, but
             // one whose role names its provider may run on Codex
             // (ADR-t1063-1 decision 5, ADR-t1204-1, task 1220).
-            self.throughput_review_pass(options, !stopping && self.claiming && self.service_up);
+            let unusable = self.reap_throughput_reviews(options);
+            self.hold_timer_jobs(unusable);
+            self.start_throughput_review(options, !stopping && self.claiming && self.service_up);
             if !stopping && self.claiming {
                 // Its route decides on `--no-claude` and the hold as the
                 // throughput review's does (task 1223).
@@ -2722,9 +2730,23 @@ impl Supervisor<'_> {
             descendants.len()
         );
     }
+    /// Have 実行と着地, which owns the holds, hold the providers the
+    /// finishes 観測と分析 reaped (`unusable`) say could not be used
+    /// ([`Self::hold_timer_jobs_unusable`]), and make the jobs whose
+    /// provider is held now due again ([`Self::timer_job_due_again`]),
+    /// before either job's next start reads the holds.
+    fn hold_timer_jobs(&mut self, unusable: Vec<observer::UnusableTimerJob>) {
+        if unusable.is_empty() {
+            return;
+        }
+        for job in self.hold_timer_jobs_unusable(unusable) {
+            self.timer_job_due_again(job);
+        }
+    }
     /// Reap the observer once it exited; its own `observe_finished` is the
-    /// record. One that found its provider unusable holds that provider
-    /// and is due again ([`Self::observer_unusable`]).
+    /// record. One that found its provider unusable has that provider held
+    /// and is due again ([`Self::observer_unusable`],
+    /// [`Self::hold_timer_jobs`]).
     fn poll_observer(&mut self) {
         let Some(job) = self.observer.as_mut() else {
             return;
@@ -2742,7 +2764,8 @@ impl Supervisor<'_> {
         if let Some(job) = self.observer.take()
             && job.retries_unusable
         {
-            self.observer_unusable(&job);
+            let unusable = self.observer_unusable(&job);
+            self.hold_timer_jobs(unusable.into_iter().collect());
         }
     }
     /// Whether this process still drives `id` in a slot. Such a run whose
