@@ -635,6 +635,87 @@ fn claim_spacing(
     }))
 }
 
+/// What holds the claims now, as the supervisors recorded it, for
+/// `candidates`' `held` (ADR-t1992-1): `no_supervisor` while no registered
+/// supervisor is alive with a fresh heartbeat, then the latest record of
+/// each hold that is on (`claim_held` for the load, the disk or a queue
+/// hold, `broker_claims_held`, `run_env_program_missing`) of a live
+/// supervisor or of none named, then each live
+/// supervisor's wait for its claim spacing. A hold no supervisor records
+/// is not shown, nor guessed at.
+pub fn claim_holds(
+    queue: &(impl super::RunLog + super::RunCoordination + ?Sized),
+    control: &dyn ProcessControl,
+    clock: &dyn Clock,
+) -> Result<Vec<Value>> {
+    let now = clock.now();
+    let registrations = queue.supervisors()?;
+    let live: Vec<&SupervisorRegistration> = registrations
+        .iter()
+        .filter(|registration| {
+            !heartbeat_stale(
+                control.alive(registration.pid),
+                now - registration.heartbeat_at,
+            )
+        })
+        .collect();
+    let on = |kinds: &[&str], held: &str| -> Result<Option<RunEvent>> {
+        Ok(queue
+            .latest_queue_event(kinds)?
+            .filter(|event| event.kind == held))
+    };
+    let claims = crate::domain::claim_hold::CLAIMS;
+    let records = [
+        on(&claims.kinds(), claims.held.as_str())?,
+        on(&broker::BROKER_CLAIMS_KINDS, broker::BROKER_CLAIMS_HELD)?,
+        on(&RUN_ENV_PROGRAM_KINDS, RUN_ENV_PROGRAM_MISSING)?,
+    ];
+    let last_claim = queue.latest_event_of(event_kind::RUN_CLAIMED)?;
+    let spacing = live
+        .iter()
+        .filter_map(|registration| {
+            claim_spacing(registration, last_claim.as_ref(), now).map(|spacing| {
+                let mut spacing = spacing;
+                spacing["supervisor"] = json!(registration.token);
+                spacing
+            })
+        })
+        .collect::<Vec<_>>();
+    // A hold of a supervisor that is gone holds nothing, as `status` and
+    // the supervisors read it.
+    let of_live = |event: &RunEvent| {
+        event
+            .payload
+            .get("supervisor")
+            .and_then(Value::as_str)
+            .is_none_or(|token| live.iter().any(|r| r.token.as_str() == token))
+    };
+    let records = records.into_iter().flatten().filter(of_live);
+    Ok(held(live.is_empty(), records, spacing))
+}
+
+/// The entries of `held` (`reason`, `since` when known, the `record` as
+/// is): a record's kind is its reason; a claim spacing is one only while
+/// it waits.
+fn held(
+    no_supervisor: bool,
+    records: impl IntoIterator<Item = RunEvent>,
+    spacing: impl IntoIterator<Item = Value>,
+) -> Vec<Value> {
+    let none = no_supervisor.then(|| json!({"reason": "no_supervisor"}));
+    let records = records.into_iter().map(
+        |event| json!({"reason": event.kind, "since": event.created_at, "record": event.payload}),
+    );
+    let spacing = spacing
+        .into_iter()
+        .filter(|spacing| spacing["waiting"] == true)
+        .map(|spacing| {
+            json!({"reason": "claim_spacing", "since": spacing["last_claim_at"],
+                   "record": spacing})
+        });
+    none.into_iter().chain(records).chain(spacing).collect()
+}
+
 /// `doctor`: with `full`, every registered supervisor and every unfinished
 /// run with its lease, processes and paths; without it, one line's worth
 /// per run and per supervisor ([`RunHealth::summary`],
@@ -1818,5 +1899,32 @@ mod tests {
             truncate_reason(&long),
             format!("{}…", "x".repeat(REASON_CHARS))
         );
+    }
+
+    #[test]
+    fn held_names_the_recorded_holds_and_a_waiting_spacing_after_no_supervisor() {
+        let record = RunEvent {
+            id: crate::domain::EventId::new(5),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: "claim_held".to_owned(),
+            payload: json!({"reason": "load", "supervisor": "tok"}),
+            created_at: "2026-10-06 22:40:00".to_owned(),
+            actor: None,
+        };
+        let waiting = json!({"waiting": true, "last_claim_at": "2026-10-06 22:41:00"});
+        let idle = json!({"waiting": false, "last_claim_at": "2026-10-06 22:30:00"});
+        assert_eq!(
+            held(true, [record.clone()], [waiting.clone(), idle.clone()]),
+            [
+                json!({"reason": "no_supervisor"}),
+                json!({"reason": "claim_held", "since": "2026-10-06 22:40:00",
+                       "record": {"reason": "load", "supervisor": "tok"}}),
+                json!({"reason": "claim_spacing", "since": "2026-10-06 22:41:00",
+                       "record": waiting}),
+            ]
+        );
+        assert!(held(false, [], [idle]).is_empty());
     }
 }

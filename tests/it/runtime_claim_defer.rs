@@ -756,3 +756,119 @@ fn an_invalid_conflicts_table_at_the_start_is_warned_of_once() {
     );
     assert!(events(&db, "conflicts_config_changed").is_empty());
 }
+
+fn high_load() -> Option<f64> {
+    Some(40.0)
+}
+
+/// `candidates` shows the supervisor's last judgment of the deferrals
+/// (ADR-t1992-1): while every slot is taken, and then while the claims are
+/// held for the load, the supervisor does not judge the claims, so the
+/// deferral it recorded stays open past `defer_max_secs` and `candidates`
+/// keeps the task in `deferred`, closing and adding none; `held` names the
+/// hold and the supervisor's absence.
+#[test]
+fn a_deferral_stays_shown_while_the_supervisor_does_not_judge_the_claims() {
+    let (_dir, repo, db) = hot_fixture();
+    let (hot, near, apart) = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        let hot = add_task(&mut queue, "edits the hot file", &[HOT], Priority::Normal);
+        let near = add_task(&mut queue, "edits the docs", &["docs/**"], Priority::Normal);
+        let apart = add_task(
+            &mut queue,
+            "edits elsewhere",
+            &["other.txt"],
+            Priority::Normal,
+        );
+        (hot, near, apart)
+    };
+    let shown = |db: &Path| crate::common::cli::ok(db, &["candidates"]);
+    let deferred = |view: &Value| -> Vec<Value> {
+        view["deferred"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|deferral| deferral["task_id"].clone())
+            .collect()
+    };
+    let held = |view: &Value| -> Vec<Value> {
+        view["held"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|held| held["reason"].clone())
+            .collect()
+    };
+
+    // Three slots, three sessions that work until the test lets them go:
+    // task 1, the hot task and the one apart take every slot, and the task
+    // meeting the hot run is deferred.
+    let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
+    let working = options(1);
+    let passes = working.passes.clone();
+    let supervisor = {
+        let (db, repo, backend, working) =
+            (db.clone(), repo.clone(), backend.clone(), working.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &working))
+    };
+    wait_until(&db, Duration::from_secs(60), |_| {
+        events(&db, "claim_deferred").len() == 1
+            && [TaskId::new(1), hot, apart]
+                .iter()
+                .all(|task| runs_of(&db, *task) == 1)
+    });
+    let deferred_at = SqliteQueue::open(&db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == "claim_deferred")
+        .and_then(|event| dagq::domain::stats::timestamp_millis(&event.created_at))
+        .unwrap();
+    // Past the limit, more passes with no free slot: no judgment.
+    await_second_after(deferred_at.div_euclid(1000) + 1);
+    await_passes(&passes, SOME_PASSES);
+    assert!(events(&db, "claim_deferral_ended").is_empty());
+    assert_eq!(runs_of(&db, near), 0);
+    let view = shown(&db);
+    assert_eq!(deferred(&view), [json!(near)], "{view}");
+    assert!(view["candidates"].as_array().unwrap().is_empty(), "{view}");
+    assert!(!held(&view).contains(&json!("no_supervisor")), "{view}");
+    assert_eq!(view["deferred"][0]["reason"], "hot_files");
+    assert_eq!(view["deferred"][0]["files"], json!([HOT]));
+
+    // Let the sessions finish and the supervisor drain.
+    working.stop.store(true, Ordering::SeqCst);
+    for task in [TaskId::new(1), hot, apart] {
+        let run = SqliteQueue::open(&db).unwrap().show(task).unwrap().runs[0].clone();
+        fs::write(
+            Path::new(run.run_dir().unwrap()).join("exit-requested.go"),
+            "",
+        )
+        .unwrap();
+    }
+    joined(supervisor, "the supervisor thread to drain").unwrap();
+    backend.join();
+
+    // A pass with the claims held for the load does not judge them either.
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let held_pass = SuperviseOptions {
+        max_load: Some(16.0),
+        load_average: high_load,
+        ..options(1)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &held_pass).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(!events(&db, "claim_held").is_empty());
+    assert!(events(&db, "claim_deferral_ended").is_empty());
+    assert_eq!(runs_of(&db, near), 0);
+    let view = shown(&db);
+    assert_eq!(deferred(&view), [json!(near)], "{view}");
+    // The hold's supervisor is gone: its record holds nothing now.
+    assert_eq!(held(&view), [json!("no_supervisor")], "{view}");
+    assert_eq!(
+        crate::common::cli::ok(&db, &["graph"])["deferred"],
+        view["deferred"]
+    );
+}

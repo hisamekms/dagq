@@ -4,7 +4,7 @@ type: design
 title: "当面の依存図（`graph --format d2|svg`）"
 status: current
 created: 2026-09-27
-updated: 2026-09-28
+updated: 2026-10-07
 last_verified: 2026-09-28
 scope: runtime
 related:
@@ -21,7 +21,9 @@ related:
 
 ## コマンド
 
-`dagq graph [--goal ID] [--format json|d2|svg] [--out PATH]`。既定の`json`は今までの`DependencyGraph`のJSONで変わらない。`d2`はd2のソースを、`svg`はSVGを標準出力にそのまま書く（JSONで包まない。`main.rs`の`RAW_STDOUT`）。`--out`があればそのファイルに書き、`{"format", "out", "tasks"}`（`tasks`は描いたtaskのID）のJSONを返す。`--format json`に`--out`は付けられない。`--goal`は、`json`では`graph`と同じく`tasks`・`candidates`・`critical`の起点を絞る。`d2` / `svg`では選ぶ起点だけをgoalに絞り、goalの外の前提と`critical`の鎖も描く（下の選び方。task 764）。queueの状態を変えず、queueはread-onlyで開く。observerとheadlessのjob（`DAGQ_ROLE=observer` / `review-job`などのjobのrole）は`--out`の無い`graph`だけを打てる（`--out`はファイルを書くので許可の一覧から外す）。
+`dagq graph [--goal ID] [--format json|d2|svg] [--out PATH]`。既定の`json`は依存の見取り図で、`candidates`はsupervisorが記録した控えのtaskを`deferred`に分けたもの（[claimを控える](claim-defer.md)）。
+図は控えを分けない`DependencyGraph`から描く。
+`d2`はd2のソースを、`svg`はSVGを標準出力にそのまま書く（JSONで包まない。`main.rs`の`RAW_STDOUT`）。`--out`があればそのファイルに書き、`{"format", "out", "tasks"}`（`tasks`は描いたtaskのID）のJSONを返す。`--format json`に`--out`は付けられない。`--goal`は、`json`では`graph`と同じく`tasks`・`candidates`・`critical`の起点を絞る。`d2` / `svg`では選ぶ起点だけをgoalに絞り、goalの外の前提と`critical`の鎖も描く（下の選び方。task 764）。queueの状態を変えず、queueはread-onlyで開く。observerとheadlessのjob（`DAGQ_ROLE=observer` / `review-job`などのjobのrole）は`--out`の無い`graph`だけを打てる（`--out`はファイルを書くので許可の一覧から外す）。
 
 ## 選び方（`application::diagram::select`）
 

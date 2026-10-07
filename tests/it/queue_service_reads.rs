@@ -274,6 +274,11 @@ fn the_read_roles_read_what_their_prompts_name_as_the_command_line_prints_it() {
             vec!["list", "--all", "--full", "--limit", "5"],
         ),
         (UseCase::Candidates, Value::Null, vec!["candidates"]),
+        (
+            UseCase::Candidates,
+            json!({"ignore_deferrals": true}),
+            vec!["candidates", "--ignore-deferrals"],
+        ),
         (UseCase::Graph, json!({}), vec!["graph"]),
         (UseCase::Status, json!({}), vec!["status"]),
         (

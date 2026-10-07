@@ -224,7 +224,7 @@ fn a_task_waits_for_its_goal_dependency_until_the_goal_is_achieved() {
             "priority": "normal", "priority_source": "default"}])
     );
     let candidates = |db: &Path| -> Vec<i64> {
-        ok(db, &["candidates"])
+        ok(db, &["candidates"])["candidates"]
             .as_array()
             .unwrap()
             .iter()
@@ -361,7 +361,10 @@ fn draft_goal_tasks_wait_for_goal_ready() {
     let id = goal["id"].to_string();
     ok(&db, &["add", "proposed", "--goal", &id]);
     ok(&db, &["ready", "1", "--bypass-review"]);
-    assert_eq!(ok(&db, &["candidates"]), serde_json::json!([]));
+    assert_eq!(
+        ok(&db, &["candidates"])["candidates"],
+        serde_json::json!([])
+    );
     assert_eq!(ok(&db, &["goal", "list"])[0]["status"], "draft");
     assert_eq!(ok(&db, &["goal", "show", &id])["goal"]["status"], "draft");
     let graph = ok(&db, &["graph"]);
@@ -371,7 +374,7 @@ fn draft_goal_tasks_wait_for_goal_ready() {
     let opened = ok(&db, &["goal", "ready", &id]);
     assert_eq!(opened["status"], "open");
     let candidates = ok(&db, &["candidates"]);
-    assert_eq!(candidates[0]["id"], 1);
+    assert_eq!(candidates["candidates"][0]["id"], 1);
     assert_eq!(ok(&db, &["graph"])["tasks"][0]["goal_status"], "open");
     let again = invoke(&db, &["goal", "ready", &id]);
     assert!(!again.status.success());

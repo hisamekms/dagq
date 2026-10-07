@@ -13,6 +13,7 @@ pub mod broker;
 pub mod broker_admin;
 pub mod broker_run;
 pub mod ci_watch;
+pub mod claim_view;
 pub mod commands;
 pub mod diagram;
 pub mod e2e_verdict;

@@ -4,7 +4,7 @@ type: design
 title: "claimを控える（衝突の多いファイル）"
 status: current
 created: 2026-09-26
-updated: 2026-10-06
+updated: 2026-10-07
 last_verified: 2026-10-06
 scope: runtime
 related:
@@ -97,4 +97,7 @@ supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[
 
 - `status`: `claim_deferrals`に、今控えているtask（taskの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`が`claim_deferred`のもの）を`{task_id, reason, since, files, runs, supervisor}`で並べる。buildを待つtask（`reason: not_in_build`）は`files` / `runs`がnullで、`build`と`missing`を足す（他の理由では出さない。`domain::claim_defer::OpenDeferral`。[`status`](status.md)）
 - `show`: 既定の（圧縮した）出力は、今控えているtaskなら同じ形を`claim_deferral`に出す（控えていなければこのキーは無い。`view::task_detail`）。`show --full`は`TaskDetail`をそのまま出すのでこのキーを持たず、控えはeventsの`claim_deferred` / `claim_deferral_ended`で読む。`wait_for_build`を宣言したtaskはtaskの`wait_for_build: true`でも分かる
+- `candidates`と`graph`: 同じ記録を`application::claim_view`で読み、開いている控えのtaskを`candidates`から除いて`deferred`に出す（[ADR-t1992-1](../../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。
+  CLIは控えを判定し直さず（`decide`・hotspotの計算・providerの経路を走らせない）、記録を閉じたり足したりもしない。
+  控えが閉じるのはsupervisorが次に判定したときだけで、`fill_slots`はslotが無いpassとclaimを止めているpass（両方のproviderが使えないpassを除く）では判定せず、hotspotの入力もcacheするので、その間は前の判定の控えが開いたまま出る（遅れの上限は無い）。
 - `stats`: `claim_deferrals`に、windowの中で始まった控えの`count`と`secs`、終わり方ごとの`by_end: {<why>: {count, secs}}`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`、`claim_deferral_ended`の前にclaimされた`claimed`、まだ終わっていない`open`、同じtaskの`claim_deferred`で置き換わった`superseded`）、hotspotごとの控えた回数`by_file`、今の控え`deferred`を出す。控えは次の`claim_deferral_ended`かそのtaskの`run_claimed`で終わり、まだ終わっていない控えはwindowの終わりまでを数える。空きslotがあり控えているtaskがあれば、alert `claim_deferred`（`value`は控えているtaskの数）を`idle_slots`の代わりに出す（[`stats`](stats.md)）

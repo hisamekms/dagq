@@ -32,9 +32,12 @@ fn cli_persists_across_processes_and_reports_dependency_errors_as_json() {
     let second = ok(&db, &["add", "second", "--depends-on", &a]);
     let b = second["id"].to_string();
     ok(&db, &["ready", &b, "--bypass-review"]);
-    assert_eq!(ok(&db, &["candidates"]), serde_json::json!([]));
+    assert_eq!(
+        ok(&db, &["candidates"])["candidates"],
+        serde_json::json!([])
+    );
     ok(&db, &["ready", &a, "--bypass-review"]);
-    assert_eq!(ok(&db, &["candidates"])[0]["id"], first["id"]);
+    assert_eq!(ok(&db, &["candidates"])["candidates"][0]["id"], first["id"]);
     let output = invoke(&db, &["dependency", "add", &a, &b]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
@@ -45,9 +48,15 @@ fn cli_persists_across_processes_and_reports_dependency_errors_as_json() {
     assert_eq!(detail["dependencies"], serde_json::json!([]));
     assert_eq!(ok(&db, &["list"])["tasks"].as_array().unwrap().len(), 2);
     ok(&db, &["cancel", &a]);
-    assert_eq!(ok(&db, &["candidates"]), serde_json::json!([]));
+    assert_eq!(
+        ok(&db, &["candidates"])["candidates"],
+        serde_json::json!([])
+    );
     ok(&db, &["dependency", "remove", &b, &a]);
-    assert_eq!(ok(&db, &["candidates"])[0]["id"], second["id"]);
+    assert_eq!(
+        ok(&db, &["candidates"])["candidates"][0]["id"],
+        second["id"]
+    );
 }
 
 #[test]
@@ -602,7 +611,7 @@ fn priority_is_named_changed_while_editable_and_orders_candidates() {
     assert_eq!(ok(&db, &["list"])["tasks"][0]["priority"], "urgent");
 
     let candidates = ok(&db, &["candidates"]);
-    let order: Vec<(i64, &str, &str)> = candidates
+    let order: Vec<(i64, &str, &str)> = candidates["candidates"]
         .as_array()
         .unwrap()
         .iter()
@@ -633,7 +642,7 @@ fn priority_is_named_changed_while_editable_and_orders_candidates() {
         ok(&db, &["graph"])["candidates"],
         serde_json::json!([2, 3, 1])
     );
-    let ids: Vec<i64> = ok(&db, &["candidates"])
+    let ids: Vec<i64> = ok(&db, &["candidates"])["candidates"]
         .as_array()
         .unwrap()
         .iter()

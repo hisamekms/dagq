@@ -4,7 +4,7 @@ type: design
 title: Queue service
 status: current
 created: 2026-10-02
-updated: 2026-10-06
+updated: 2026-10-07
 last_verified: 2026-10-06
 scope: runtime
 tags:
@@ -96,12 +96,12 @@ observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（`ki
 
 ## 読み取りのユースケース
 
-queue全体の読み取り（ADR-t1233-5決定1〜3、task 1242）。1つの読み取りのコマンドに1つのユースケースで、paramsはそのコマンドのoption（名前はlong optionの名前、既定値はCLIの既定値）、答えはそのコマンドが出すJSONと同じ。CLIとserviceは同じ`application::queue_reads::answer`で答える。CLIは`compose::read_queue`で、serviceは起動部分が`ServeOptions.reads`に注入する`compose::service_reads`（中身は`compose::read_queue`）で呼ぶので、`infrastructure::queue_service`は起動部分を参照しない。paramsは`application::queue_reads::QueueRead`が読む（CLIのparserが拒む値、例えば`limit: 0`・知らない`format`・`role`・`kind`・`change`・`area`・`status`、読めないrun id、2つの対象は`bad_request`）。認可はCLIがそのコマンドに求めるのと同じ`queue.read`（queue）を`Gate`でprincipalに通す。goal 82では全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。`stats`・`kpi`・`forecast`・`status`の「今」はserviceが要求を受けた時刻で、CLIと同じ。
+queue全体の読み取り（ADR-t1233-5決定1〜3）。1つの読み取りのコマンドに1つのユースケースで、paramsはそのコマンドのoption（名前はlong optionの名前、既定値はCLIの既定値）、答えはそのコマンドが出すJSONと同じ。CLIとserviceは同じ`application::queue_reads::answer`で答える。CLIは`compose::read_queue`で、serviceは起動部分が`ServeOptions.reads`に注入する`compose::service_reads`（中身は`compose::read_queue`）で呼ぶので、`infrastructure::queue_service`は起動部分を参照しない。paramsは`application::queue_reads::QueueRead`が読む（CLIのparserが拒む値、例えば`limit: 0`・知らない`format`・`role`・`kind`・`change`・`area`・`status`、読めないrun id、2つの対象は`bad_request`）。認可はCLIがそのコマンドに求めるのと同じ`queue.read`（queue）を`Gate`でprincipalに通す。全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。`stats`・`kpi`・`forecast`・`status`・`candidates`の「今」はserviceが要求を受けた時刻。
 
 | use_case | CLI | params（既定） |
 | --- | --- | --- |
 | `list` | `list` | `status`（配列）・`all`・`goal`・`limit`（20）・`before`・`full` |
-| `candidates` | `candidates` | なし |
+| `candidates` | `candidates` | `ignore_deferrals` |
 | `graph` | `graph`（`--out`なし） | `goal`・`format`（`json`か`d2`。`d2`は`{"__dagq_raw_stdout": <本文>}`で、CLIはこれをそのまま出す。`svg`はhostのd2を起動するので受け取らない） |
 | `status` | `status` | `role`（`inbox`・`planner`） |
 | `asks` | `asks` | `open`・`role`・`all` |

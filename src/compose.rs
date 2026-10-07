@@ -3502,6 +3502,9 @@ impl crate::application::queue_reads::QueueReadSources<SqliteQueue> for HostRead
     fn goal_tags(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
         goal_tags(queue)
     }
+    fn claim_holds(&self, queue: &SqliteQueue) -> Result<Vec<Value>> {
+        health::claim_holds(queue, &SystemProcesses, queue.generators().clock.as_ref())
+    }
     fn render_svg(&self, source: &str) -> Result<String> {
         render_svg(source)
     }

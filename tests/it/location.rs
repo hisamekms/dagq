@@ -204,7 +204,7 @@ fn every_worktree_of_a_repository_shares_one_queue_under_the_data_home() {
         &["ready", &added["id"].to_string(), "--bypass-review"],
     );
     assert_eq!(
-        ok(&run_worktree, &env, &["candidates"])[0]["id"],
+        ok(&run_worktree, &env, &["candidates"])["candidates"][0]["id"],
         added["id"]
     );
     // Re-running init keeps the queue and its binding.

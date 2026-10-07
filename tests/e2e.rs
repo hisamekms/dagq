@@ -697,7 +697,13 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
         &[],
         &[VERIFY_RUN_ENV],
     );
-    assert_eq!(dagq(env, &["candidates"]).as_array().unwrap().len(), 1);
+    assert_eq!(
+        dagq(env, &["candidates"])["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     // The supervisor pushes what it lands to the repository's bare origin.
     let origin = repo.parent().unwrap().join("origin.git");
     git(
@@ -990,7 +996,13 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
     assert_eq!(processes.len(), 2);
     assert!(processes.iter().all(|p| p["exit_code"] == 0));
 
-    assert_eq!(dagq(env, &["candidates"]).as_array().unwrap().len(), 0);
+    assert_eq!(
+        dagq(env, &["candidates"])["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
     let status = dagq(env, &["status"]);
     assert_eq!(status["supervisors"], Value::Array(vec![]), "{status}");
     assert_eq!(status["runs"], Value::Array(vec![]), "{status}");
@@ -1161,7 +1173,13 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
     let first = add_ready_task(env, "e2e first", &[]);
     let second = add_ready_task(env, "e2e second", &[]);
     let third = add_ready_task(env, "e2e dependent", &[&first]);
-    assert_eq!(dagq(env, &["candidates"]).as_array().unwrap().len(), 2);
+    assert_eq!(
+        dagq(env, &["candidates"])["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 
     let pass = supervise_once(&fixture, &["--parallel", "2"], &[&first, &second]);
     assert!(
@@ -1193,7 +1211,13 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
     let detail = dagq(env, &["show", &third, "--full"]);
     assert_eq!(detail["task"]["status"], "ready");
     assert_eq!(detail["runs"], Value::Array(vec![]));
-    assert_eq!(dagq(env, &["candidates"]).as_array().unwrap().len(), 0);
+    assert_eq!(
+        dagq(env, &["candidates"])["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
     // `doctor` still lists the two waiting runs (task 1520), but neither
     // holds a lease nor is left for `recover`: the pass let go of both.
     let doctor = dagq(env, &["doctor", "--full"]);
@@ -1224,7 +1248,10 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
     let first_landed = git(repo, &["rev-parse", "main"]);
     assert_ne!(first_landed, first_commit);
     assert_eq!(git(repo, &["rev-parse", "main^"]), base.as_str());
-    assert_eq!(dagq(env, &["candidates"])[0]["id"].to_string(), third);
+    assert_eq!(
+        dagq(env, &["candidates"])["candidates"][0]["id"].to_string(),
+        third
+    );
     let pass = supervise_once(&fixture, &["--parallel", "2"], &[&third]);
     // The same pass rechecks the second task's waiting run against the main
     // the direct integrate moved (ADR-t1310-1): it rewrote the same file as

@@ -19,6 +19,7 @@ use anyhow::Result;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
+use crate::application::claim_view::{Deferrals, claim_view, open_deferrals};
 use crate::application::forecast::ForecastQuery;
 use crate::application::{
     AskQuery, AskStore, Clock, EventReads, ObserverLog, QueueRecords, RunLog, StatusFilter,
@@ -37,7 +38,7 @@ use crate::domain::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueueRead {
     List(ListRead),
-    Candidates,
+    Candidates(CandidatesRead),
     Graph(GraphRead),
     Status(RoleRead),
     Asks(AsksRead),
@@ -74,6 +75,15 @@ pub struct ListRead {
     pub before: Option<i64>,
     #[serde(default)]
     pub full: bool,
+}
+
+/// `candidates`' option.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidatesRead {
+    /// The rule's order, the deferred tasks kept in it (ADR-t1992-1).
+    #[serde(default)]
+    pub ignore_deferrals: bool,
 }
 
 /// `graph`'s options, without `--out`.
@@ -519,19 +529,9 @@ impl QueueRead {
                 ))
             })
         }
-        fn none(use_case: UseCase, params: &Value) -> Result<()> {
-            match params {
-                Value::Null => Ok(()),
-                Value::Object(object) if object.is_empty() => Ok(()),
-                _ => Err(bad(format!("{} takes no params", use_case.as_str()))),
-            }
-        }
         let read = match use_case {
             UseCase::List => Self::List(read(use_case, params)?),
-            UseCase::Candidates => {
-                none(use_case, params)?;
-                Self::Candidates
-            }
+            UseCase::Candidates => Self::Candidates(read(use_case, params)?),
             UseCase::Graph => Self::Graph(read(use_case, params)?),
             UseCase::Status => Self::Status(read(use_case, params)?),
             UseCase::Asks => Self::Asks(read(use_case, params)?),
@@ -671,7 +671,7 @@ impl QueueRead {
                 read.tags()
                     .map_err(|error| bad(format!("goal list's tag: {error}")))?;
             }
-            Self::Candidates
+            Self::Candidates(_)
             | Self::Stats(_)
             | Self::Marks(_)
             | Self::GoalShow(_)
@@ -697,7 +697,10 @@ impl QueueRead {
                 json!({"status": read.status, "all": read.all, "goal": read.goal,
                        "limit": read.limit, "before": read.before, "full": read.full}),
             ),
-            Self::Candidates => (UseCase::Candidates, json!({})),
+            Self::Candidates(read) => (
+                UseCase::Candidates,
+                json!({"ignore_deferrals": read.ignore_deferrals}),
+            ),
             Self::Graph(read) => (
                 UseCase::Graph,
                 json!({"goal": read.goal, "format": read.format}),
@@ -798,6 +801,9 @@ pub trait QueueReadSources<Q: ?Sized> {
     /// The repository's set of goal tags (ADR-t1639-1 decision 6), none
     /// without a checkout.
     fn goal_tags(&self, queue: &Q) -> Result<Option<crate::domain::TagSet>>;
+    /// What holds the claims now as the supervisors recorded it
+    /// (`candidates`' `held`, ADR-t1992-1).
+    fn claim_holds(&self, queue: &Q) -> Result<Vec<Value>>;
     /// The SVG the host's d2 draws from `source`.
     fn render_svg(&self, source: &str) -> Result<String>;
     /// A page of an observation's input (`observe --input`).
@@ -861,13 +867,38 @@ where
             before: read.before.map(TaskId::new),
             full: read.full,
         })?)?,
-        QueueRead::Candidates => {
+        QueueRead::Candidates(read) => {
             let graph = dependency_graph(queue.graph_input()?, None);
-            serde_json::to_value(claim_candidates(queue.candidates()?, &graph))?
+            let deferrals = if read.ignore_deferrals {
+                Deferrals::Ignored
+            } else {
+                Deferrals::Excluded
+            };
+            let view = claim_view(
+                claim_candidates(queue.candidates()?, &graph),
+                |candidate| candidate.task.id(),
+                open_deferrals(queue)?,
+                deferrals,
+            );
+            json!({
+                "candidates": view.candidates,
+                "deferred": view.deferred,
+                "held": sources.claim_holds(queue)?,
+            })
         }
         QueueRead::Graph(read) => match read.format.as_str() {
             "json" => {
-                serde_json::to_value(dependency_graph(queue.graph_input()?, goal(read.goal)))?
+                let mut graph = dependency_graph(queue.graph_input()?, goal(read.goal));
+                let view = claim_view(
+                    std::mem::take(&mut graph.candidates),
+                    |id| *id,
+                    open_deferrals(queue)?,
+                    Deferrals::Excluded,
+                );
+                let mut value = serde_json::to_value(graph)?;
+                value["candidates"] = serde_json::to_value(view.candidates)?;
+                value["deferred"] = serde_json::to_value(view.deferred)?;
+                value
             }
             format => {
                 let (source, _) = graph_diagram(queue, goal(read.goal))?;
@@ -1144,6 +1175,7 @@ mod tests {
                 json!({"status": ["ready"], "goal": 3, "limit": 5, "before": 9, "full": true}),
             ),
             (UseCase::Candidates, json!({})),
+            (UseCase::Candidates, json!({"ignore_deferrals": true})),
             (UseCase::Graph, json!({"goal": 2, "format": "d2"})),
             (UseCase::Status, json!({"role": "inbox"})),
             (UseCase::Asks, json!({"open": true, "role": "planner"})),

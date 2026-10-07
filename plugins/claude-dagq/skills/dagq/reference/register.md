@@ -38,7 +38,7 @@ A one-shot task omits `--goal`. `add` makes a `draft`, never claimed. `submit` (
 - `revise` returns them to `draft` with reasons for their planner to fix and `submit --proposal ID` again.
 - `concern` asks the person through the inbox.
 
-`proposal list` / `proposal show ID` read proposals. Its planner withdraws one with `proposal withdraw ID` (a dropped plan, or `EmptyProposal`): it ends `canceled`, its submitted tasks `draft` (`reference/inspect.md`). Only plan review readies a task; `ready --bypass-review` skips it on a person's explicit word. `candidates` lists claimable ready tasks; a ready one missing from it is blocked (`show ID`).
+`proposal list` / `proposal show ID` read proposals. Its planner withdraws one with `proposal withdraw ID` (a dropped plan, or `EmptyProposal`): it ends `canceled`, its submitted tasks `draft` (`reference/inspect.md`). Only plan review readies a task; `ready --bypass-review` skips it on a person's explicit word. `candidates` lists claimable ready tasks; a ready one missing from it is blocked (`show ID`), or deferred by the supervisor and listed in `deferred` with the reason.
 
 ## Changing a registered task
 

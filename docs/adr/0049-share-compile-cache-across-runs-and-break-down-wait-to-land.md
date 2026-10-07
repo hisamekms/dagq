@@ -18,6 +18,7 @@ amended_by:
   - adr-t1662-1
   - adr-t1662-2
   - adr-t1850-1
+  - adr-t1992-1
 owners:
   - hisamekms
 tags:

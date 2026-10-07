@@ -1593,7 +1593,7 @@ fn launcher_resolves_the_binary_and_the_repository_queue_under_the_data_home() {
             .success()
     );
     assert_eq!(
-        stdout_json(&launcher(&env, &data_home, &worktree, &["candidates"]))[0]["id"],
+        stdout_json(&launcher(&env, &data_home, &worktree, &["candidates"]))["candidates"][0]["id"],
         added["id"]
     );
     // An explicit database path wins over the convention, for --resolve too.

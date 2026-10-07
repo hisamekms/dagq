@@ -361,7 +361,7 @@ fn a_goals_priority_orders_the_tasks_that_inherit_it_and_not_those_with_their_ow
     let submitted = submit_from(&db, Some("W-1"), None, &["5"]);
     assert!(submitted.status.success());
     let candidates = |db: &std::path::Path| -> Vec<i64> {
-        ok(db, &["candidates"])
+        ok(db, &["candidates"])["candidates"]
             .as_array()
             .unwrap()
             .iter()
@@ -372,7 +372,7 @@ fn a_goals_priority_orders_the_tasks_that_inherit_it_and_not_those_with_their_ow
 
     ok(&db, &["goal", "edit", &goal, "--priority", "high"]);
     assert_eq!(candidates(&db), [2, 1, 3]);
-    let first = &ok(&db, &["candidates"])[0];
+    let first = &ok(&db, &["candidates"])["candidates"][0];
     assert_eq!(source(first), pair("high", "goal"));
     assert_eq!(first["effective_priority"], "high");
     let graph = ok(&db, &["graph"]);

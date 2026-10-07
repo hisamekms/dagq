@@ -598,14 +598,23 @@ enum Command {
     },
     /// List ready tasks whose prerequisites are all completed, whose goal dependencies are all
     /// closed as achieved and whose goal is not a draft, in claim order (highest
-    /// `effective_priority`, then most `unblocks`, then lowest ID); does not claim.
-    Candidates,
+    /// `effective_priority`, then most `unblocks`, then lowest ID) less those whose claim the
+    /// supervisor last recorded as deferred (`candidates`); the deferred ones apart with the
+    /// recorded reason, files, runs and since (`deferred`), and what holds every claim now as the
+    /// supervisors recorded it, or `no_supervisor` (`held`). The deferrals are the supervisor's
+    /// last judgment, kept while it does not judge again (full slots, a hold). Does not claim.
+    Candidates {
+        /// Keep the deferred tasks in `candidates`: the claim rule's order alone.
+        #[arg(long)]
+        ignore_deferrals: bool,
+    },
     /// Show the unfinished tasks' dependencies: per task its direct predecessors (`depends_on`),
     /// its goal dependencies (`goal_dependencies`), what it still waits for (`ready_after`: unfinished
     /// predecessors, then `{"goal": ID}` for goals not closed as achieved), the tasks it blocks
     /// directly (including those waiting for its open goal) and how many it releases transitively
     /// (`unblocks`), its `priority` and the `effective_priority` it inherits from the ready tasks
-    /// waiting for it; `candidates` in claim order and the `critical` chain. With `--format d2`
+    /// waiting for it; `candidates` in claim order less the deferred tasks (as `candidates`
+    /// shows them), `deferred` and the `critical` chain. With `--format d2`
     /// or `svg`, the near-term dependency diagram instead (ADR-0077): the d2 source, or the SVG the
     /// host's `d2 --layout=tala` draws from it.
     Graph {
@@ -2018,7 +2027,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         Command::Locate
         | Command::List { .. }
         | Command::Show { .. }
-        | Command::Candidates
+        | Command::Candidates { .. }
         | Command::Graph { out: None, .. }
         | Command::Status { .. }
         | Command::Asks { .. }
@@ -2533,7 +2542,9 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             before,
             full,
         }),
-        Command::Candidates => QueueRead::Candidates,
+        Command::Candidates { ignore_deferrals } => {
+            QueueRead::Candidates(reads::CandidatesRead { ignore_deferrals })
+        }
         Command::Graph {
             goal_id,
             format,
@@ -3265,7 +3276,7 @@ fn execute(cli: Cli) -> Result<Value> {
         }
         // Answered above as reads.
         Command::List { .. }
-        | Command::Candidates
+        | Command::Candidates { .. }
         | Command::Graph { out: None, .. }
         | Command::Status { .. }
         | Command::Asks { .. }

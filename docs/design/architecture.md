@@ -67,7 +67,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 
 **操作**
 
-- application: `application::commands::planning`・`application::commands::requests`、`application::planner`・`application::planner_request`・`application::planner_handoff`、`application::supervise`の`plan_review`・`goal_review`・`draft_planner`・`finding_planner`・`request_planner`・`planner_turns`、`application::diagram`（依存図）。
+- application: `application::commands::planning`・`application::commands::requests`、`application::planner`・`application::planner_request`・`application::planner_handoff`、`application::supervise`の`plan_review`・`goal_review`・`draft_planner`・`finding_planner`・`request_planner`・`planner_turns`、`application::diagram`（依存図）、`application::claim_view`（`candidates`・`graph`の控えを分けた表示）。
 - CLI: `add`・`edit`・`ready`・`draft`・`cancel`・`dependency`・`goal`・`set-goal`・`judge-follow-up`・`set-paths`・`set-priority`・`revisit`・`submit`・`proposal`・`lint`・`request`・`requests`・`search`・`related`・`candidates`・`graph`・`plan`・`planners`・`planner`・`planner-session`、読み取りの`list`・`show`。
 - infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）、`proposals`・`plan_reviews`・`goal_reviews`・`draft_planners`・`follow_up_membership`（所属の判断とdraft/readyの移動を同じtransactionで記録し、achievedで閉じた元goalへのrequiredではそのtransactionで`correct_goal`のaskを開く。そのaskのanswerの適用（`decide_correction`）も1つのtransaction。[所属の判断](follow-up-membership.md)、下のT8・T9）・`finding_planners`・`plan_requests`・`planners`・`planning`・`search`・`related`・`stranded`。
 
@@ -211,7 +211,7 @@ contextを1つに決められず、分ける先のtaskを持つもの。
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners`（`open_planner`・`close_planner`・`planner_*`） | task 1554（portの分割） |
 | `application::queue_reads` | CLIとqueue serviceの読み取りの入口（`answer`。task 1549で`compose::read_queue`から移した）で、各armは自分のcontextのport（`TaskStore`・`AskStore`・`RunLog`・`EventReads`・`ObserverLog`・`QueueRecords`）と起動部分が組む`QueueReadSources`を読む | 未登録（follow_up） |
 | `application::prompt` | workerのprompt（実行と着地）、inbox・plannerのprompt（計画管理）、observerとスループットの見直しのprompt（観測と分析） | 未登録（follow_up） |
-| `application::health` | `status`・`doctor`とattention（観測と分析）、`recover`（実行と着地）、`doctor`のhostの部分（host運用） | 未登録（follow_up） |
+| `application::health` | `status`・`doctor`とattention、`candidates`の`held`（`claim_holds`）（観測と分析）、`recover`（実行と着地）、`doctor`のhostの部分（host運用） | 未登録（follow_up） |
 
 ## 境界をまたぐtransaction
 

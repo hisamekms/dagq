@@ -33,7 +33,10 @@ fn submit_bundles_drafts_into_a_proposal_that_plan_review_or_a_bypass_readies() 
     assert_eq!(ok(&db, &["show", "1"])["task"]["status"], "submitted");
     let listed = ok(&db, &["list", "--status", "submitted"]);
     assert_eq!(listed["total"], 2);
-    assert_eq!(ok(&db, &["candidates"]), serde_json::json!([]));
+    assert_eq!(
+        ok(&db, &["candidates"])["candidates"],
+        serde_json::json!([])
+    );
     let graph = ok(&db, &["graph"]);
     assert_eq!(graph["candidates"], serde_json::json!([]));
     assert_eq!(ok(&db, &["status"])["proposals"][0]["id"], 1);
@@ -82,7 +85,10 @@ fn submit_bundles_drafts_into_a_proposal_that_plan_review_or_a_bypass_readies() 
             .any(|e| e["kind"] == "review_bypassed")
     );
     assert_eq!(
-        ok(&db, &["candidates"]).as_array().unwrap().len(),
+        ok(&db, &["candidates"])["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
         0,
         "draft goal"
     );

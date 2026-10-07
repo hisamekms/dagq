@@ -16,6 +16,7 @@ mod cli_actor;
 mod cli_areas;
 mod cli_authorization;
 mod cli_broker;
+mod cli_candidates;
 mod cli_changes;
 mod cli_dialogue;
 mod cli_forecast;
