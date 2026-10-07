@@ -59,6 +59,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   進行はstatusでなく`review_started`・`review_finished`などのeventで読む。
 - review jobは読むだけで、worktreeとrun dirのファイルを読み、verdictのJSONをstdoutに出す。
   worktreeは生きているworkerのsessionのものなので、jobは書く道具を持たない。
+  Claudeのreviewは予約のwakeupが`claude -p`の終了を妨げるので予約の道具を拒む（一覧と理由は`PRINT_MODE_DENIED_TOOLS`のdoc comment）。
 - 直すのはworkerのsessionで、supervisorは依頼を次のturnとしてrun dirの`turns/`に書くだけ（[非対話のworker](headless-worker.md#run-dirのturns)）。
 - 着地は`integrate`と同じ処理をsupervisorが別threadで走らせる（[integrate](integrate.md)）。
   review中のrun（supervisorのleaseがある）を人の`integrate`は拒む。
@@ -100,9 +101,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 3. **verdict**: verdictが読めれば`review_finished`を記録する。
    読めない（JSONが無い・壊れている・未知の欄）か非0で終わったreviewは、やり直しでなければ同じ入力で1回だけやり直す（`review_retried`）。
    時間の上限で止まったreviewと起動できなかったreviewはやり直さず、reviewの失敗にする。
-   やり直しの数はsupervisorの状態（`ReviewWatch::retried`）が持つので、引き継いだreviewは最初から数える。
-   待ち（`Phase::ReviewHeld`）を挟んでもやり直しかどうかを保ち、やり直しのreviewは待ちの後に失敗してもやり直さない。
-   やり直しが待つときは`review_retried`を待つ前に記録し、待ちの後に始まるreviewはやり直しとして始まる。
+   やり直しかどうかはsupervisorの状態（`ReviewWatch::retried`）が持ち、待ちを挟んでも保つ。
 4. **reviseの往復**: `revise`と、適用する`send_back`のconcernは、回にreviseが残り、sessionが生きていれば、直す依頼を生きているsessionの次のturnに書く（`revise_requested`）。
    文面と手順は`application::prompt::revise_request`が持つ。
    書き込みに失敗したら`revise_unsent`で取り消し、回数から引く。
@@ -135,7 +134,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    - reviseか衝突の依頼の後なら、sessionが生きていればその待ちに戻る。
      記録の後・書く前に止まったときのため、依頼が`turns/`に届いているかを照合し、無ければ1回だけ書く（`domain::turn::adopted_delivery`）。
    - `review_finished`の後ならそのverdictで進み、concernは決め直す。
-   - askにするはずの錨の後に、閉じていないsupervisorの`approve_landing`のaskがあれば、開き直さずにそのaskを待つ（開き直すと古いaskを閉じ、inboxに2回知らせ、止まっていた間の答えを捨てる）。
+   - askにするはずの錨の後に、閉じていないsupervisorの`approve_landing`のaskがあれば、開き直さずにそのaskを待つ。
      reviewの失敗のaskを開いて`review_failed`の前に止まったときも同じで、`adopted: true`の`review_failed`を補う。
    - それ以外はreviewを最初からやり直す。
    - sessionもwrapperの終了の記録も無く消えたrunは、sessionが終わったものとして扱い、reviseはaskになる。

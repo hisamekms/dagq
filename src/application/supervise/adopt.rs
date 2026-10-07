@@ -405,7 +405,8 @@ impl Supervisor<'_> {
     ) -> Result<Phase> {
         // The ask was opened before the supervisor died, after this anchor:
         // the run waits for it (open or answered) rather than asking again,
-        // which would close it as stale and notify the inbox twice (task 425).
+        // which would close it as stale, notify the inbox twice and lose an
+        // answer given while no supervisor ran (task 425).
         if matches!(then, AfterExit::Ask { .. })
             && let Some(ask) = self.unclosed_landing_ask_after(events, anchor)?
         {

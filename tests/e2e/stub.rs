@@ -59,7 +59,7 @@ if [ -n "$headless" ] && [ "$output" != stream-json ]; then
   [ -z "$prompt" ] || { printf 'stub: the review prompt is an argument\n' >&2; exit 64; }
   prompt=$(cat)
   [ -n "$session_id" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
-    && [ "$tools" = "Read,Grep,Glob" ] && [ "$denied" = "Bash,Edit,Write,NotebookEdit" ] \
+    && [ "$tools" = "Read,Grep,Glob" ] && [ "$denied" = "Bash,Edit,Write,NotebookEdit,ScheduleWakeup,CronCreate" ] \
     && [ -z "$sources" ] || { printf 'stub: bad review arguments\n' >&2; exit 64; }
   ! grep -q '"Stop"' "$settings" || { printf 'stub: review settings would write the idle marker\n' >&2; exit 64; }
   review=$(printf '%s\n' "$prompt" | sed -n 's/^Read the review material at \(.*\): the task.*/\1/p')

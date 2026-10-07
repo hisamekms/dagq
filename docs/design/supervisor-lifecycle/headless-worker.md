@@ -65,6 +65,8 @@ supervisor
 - e2eはworkerのturnで流さず、要るrunにはreviewのpassの後にruntimeがhostで流す（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[Review](review.md#着地の前のe2e)）。
   落ちれば同じsessionの次のturnとしてresumeを依頼する。
 - 人への質問は`dagq ask`だけで、turnの設定はagentの質問の道具を拒む。
+- Claudeのturn（workerとruntimeのplanner）の設定は、後のpromptを予約する道具も拒む。
+  予約したwakeupは`claude -p`をturnの終わりの後も生かし、turnを終わらせないため（一覧と理由は`adapters.rs`の`PRINT_MODE_DENIED_TOOLS`のdoc comment）。
 - runtimeはrunのためにcmuxのworkspaceもgroupも作らない（inboxは対象外、[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
 
 ### 不変条件
@@ -87,7 +89,7 @@ supervisor
 | `turns/`のfileの名前・依頼・idle marker・turnのcost | `src/domain/turn.rs`（`TurnRequest`・`idle_marker`・`turn_own_cost`・`request_to_take`・`request_read`） |
 | Claudeの呼び出しと出力の読み | `ClaudeCode::turn_command`、`src/infrastructure/claude_turns.rs` |
 | Codexの呼び出しと出力の読み | `src/infrastructure/codex_turns.rs` |
-| turnの設定（拒否の規則） | `src/infrastructure/adapters.rs`の`headless_worker_settings`・`headless_required_settings`・`HEADLESS_DENIED_TOOLS` |
+| turnの設定（拒否の規則） | `src/infrastructure/adapters.rs`の`headless_worker_settings`・`headless_required_settings`・`HEADLESS_DENIED_TOOLS`・`PRINT_MODE_DENIED_TOOLS` |
 | run dirのfileの境界 | `src/infrastructure/agent_dir.rs`（`in_run_dir`）、`LocalRunFiles` |
 | receiptの無いturnの扱い | `src/application/supervise/stall.rs`の`StallWatch::observe_turn` |
 | sessionの終わりとrunの状態 | `domain::run::session_end_status` |

@@ -485,7 +485,10 @@ pub(super) struct ReviewWatch {
     /// Whether this review is the retry of one whose stdout held no
     /// readable verdict or whose job exited non-zero: it is not retried
     /// again for either cause ([`super::landing::retries_review`]). The
-    /// supervisor alone holds this, so a review it adopts counts afresh.
+    /// supervisor alone holds this, so a review it adopts counts afresh. A
+    /// wait (`Phase::ReviewHeld`) keeps it: a retry that waits records
+    /// `review_retried` before the wait, and the review after the wait
+    /// starts as the retry, so it is not retried again either.
     pub(super) retried: bool,
     /// Whether `[roles.review]` names its provider: a provider that cannot
     /// be used then moves the review to the other (ADR-t1207-1).

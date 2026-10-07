@@ -33,6 +33,9 @@ task 443。supervisorが起動するheadlessのjob（runのreview、終わった
 ## 起動と終わりのinterface
 
 jobは[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)のinterfaceでproviderにつながる（task 1064）: 権限は意図（`JobAccess`）で渡し、`HeadlessJob::poll`はjobを起動したprovider（`HeadlessJob::provider`の`Supervisor::job_agent`: Claudeはsupervisorの`reviewer`、Codexは`codex_jobs`。task 1065）の`job_reply`でstdoutから取り出した最終の返答を返し（失敗なら理由の文）、失敗したjobの分類は`Supervisor::job_failure`（Claudeは`AgentSignals::job_failure`、Codexは`AgentProvider::job_failure`。共通の`JobFailure`）で読む。時間の上限の止め方（子孫をpidで集めてから止める）はproviderによらず同じ。
+Claudeのjobは、後のpromptを予約する道具を`--disallowedTools`で拒む。
+予約したwakeupは1回きりの`claude -p`を返答の後も終わらせず、jobは時間の上限で殺されるため。
+一覧と理由は`src/infrastructure/adapters.rs`の`PRINT_MODE_DENIED_TOOLS`のdoc commentが持つ。
 
 ## promptの渡し方と大きさ
 

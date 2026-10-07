@@ -3599,8 +3599,9 @@ impl AgentProvider for ClaudeCode {
     /// `claude -p` (print mode): no terminal, no trust dialog, no settings
     /// of dagq's ([`AgentSettings::None`]); a tool that needs permission
     /// and is not among the tools of `access` ([`claude_tools`]) is
-    /// refused. The prompt is its standard input, never an argument: `-p`
-    /// with no prompt reads it there, and a prompt of any size starts
+    /// refused, and [`PRINT_MODE_DENIED_TOOLS`] are refused outright. The
+    /// prompt is its standard input, never an argument: `-p` with no
+    /// prompt reads it there, and a prompt of any size starts
     /// (task 1560; on the command line one past the system's limit on the
     /// arguments fails with `E2BIG`).
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
@@ -3610,7 +3611,10 @@ impl AgentProvider for ClaudeCode {
         if !tools.is_empty() {
             command.arg("--allowedTools").args(tools);
         }
-        command.stdin(prompt);
+        command
+            .arg("--disallowedTools")
+            .arg(PRINT_MODE_DENIED_TOOLS.join(","))
+            .stdin(prompt);
         Ok(command)
     }
     /// `claude -p` prints the final reply of the job only (its default
@@ -3623,7 +3627,8 @@ impl AgentProvider for ClaudeCode {
     /// the review never writes the live session's idle marker. It may only
     /// do what `access` says (for [`JobAccess::ReadFiles`], `Read`, `Grep`,
     /// `Glob` allowed; `Bash`, `Edit`, `Write`, `NotebookEdit`
-    /// disallowed); `review.md` is in the run directory. It loads no
+    /// disallowed), and never [`PRINT_MODE_DENIED_TOOLS`]; `review.md` is in
+    /// the run directory. It loads no
     /// setting sources (`--setting-sources ""`), with or without required
     /// subagents: the worktree's `.claude/settings.json`,
     /// `.claude/settings.local.json`, `.claude/agents`, `.claude/skills`,
@@ -3662,7 +3667,13 @@ impl AgentProvider for ClaudeCode {
             // The live worker session owns the worktree: the review never
             // edits it or runs commands in it.
             .arg("--disallowedTools")
-            .arg(review_disallowed_tools(access).join(","))
+            .arg(
+                review_disallowed_tools(access)
+                    .into_iter()
+                    .chain(PRINT_MODE_DENIED_TOOLS)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
             .arg("--setting-sources")
             .arg("")
             .stdin(prompt);
@@ -3868,7 +3879,8 @@ pub const HEADLESS_SETTINGS: &str = "claude-headless-settings.json";
 
 /// Settings of a headless worker's turns (ADR-t813-1): no hook, the
 /// worker's `permissions.deny` ([`SIGNAL_BY_NAME_DENIED`], then
-/// [`HEADLESS_DENIED_TOOLS`], then `deny`, as in [`stop_hook_settings`])
+/// [`HEADLESS_DENIED_TOOLS`] and [`PRINT_MODE_DENIED_TOOLS`], then `deny`,
+/// as in [`stop_hook_settings`])
 /// and the same `autoMode` environment as an interactive run session.
 pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&serde_json::json!({
@@ -3876,6 +3888,7 @@ pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
             "deny": SIGNAL_BY_NAME_DENIED
                 .iter()
                 .chain(HEADLESS_DENIED_TOOLS.iter())
+                .chain(PRINT_MODE_DENIED_TOOLS.iter())
                 .map(|rule| (*rule).to_owned())
                 .chain(deny.iter().cloned())
                 .collect::<Vec<_>>()
@@ -3916,7 +3929,8 @@ pub const BROKER_REQUIRED_ALLOWED: [&str; 2] =
 
 /// Settings of a `required` run's turns (ADR-t838-1): those of
 /// [`headless_worker_settings`] with [`BROKER_REQUIRED_DENIED_TOOLS`] denied
-/// after [`HEADLESS_DENIED_TOOLS`] and [`BROKER_REQUIRED_ALLOWED`] allowed.
+/// after [`HEADLESS_DENIED_TOOLS`] and [`PRINT_MODE_DENIED_TOOLS`] and
+/// [`BROKER_REQUIRED_ALLOWED`] allowed.
 /// A guardrail, not enforcement: the worker is a process of this user on
 /// this host (ADR-t728-1 decision 6).
 pub fn headless_required_settings(deny: &[String]) -> Result<String> {
@@ -3926,6 +3940,7 @@ pub fn headless_required_settings(deny: &[String]) -> Result<String> {
             "deny": SIGNAL_BY_NAME_DENIED
                 .iter()
                 .chain(HEADLESS_DENIED_TOOLS.iter())
+                .chain(PRINT_MODE_DENIED_TOOLS.iter())
                 .chain(BROKER_REQUIRED_DENIED_TOOLS.iter())
                 .map(|rule| (*rule).to_owned())
                 .chain(deny.iter().cloned())
@@ -4004,7 +4019,8 @@ const CLAUDE_AGENT_TOOLS: [(&str, AgentTool); 7] = [
 /// allowed, in the list's order, and every other refused, so a
 /// declaration only narrows. Of a review's default they are the run's
 /// review's own of [`JobAccess::ReadFiles`] (`Read,Grep,Glob` and
-/// `Bash,Edit,Write,NotebookEdit`); no tool allowed leaves
+/// `Bash,Edit,Write,NotebookEdit`, before the [`PRINT_MODE_DENIED_TOOLS`]
+/// its launch refuses too); no tool allowed leaves
 /// `--allowedTools` out. Only the tools: the job's `--setting-sources ""`
 /// and its settings (ADR-t1470-1) stay its launch's. No launch is given
 /// them yet: the eval's agent job (task 1869) and the run's review's
@@ -4331,6 +4347,21 @@ pub const SIGNAL_BY_NAME_DENIED: [&str; 2] = ["Bash(pkill:*)", "Bash(killall:*)"
 /// and a call is recorded as refused (`turn_finished`'s `denied_tools`).
 /// The person is asked through `dagq ask` only (goal 85).
 pub const HEADLESS_DENIED_TOOLS: [&str; 1] = ["AskUserQuestion"];
+
+/// The tools every non-interactive launch of Claude Code (`claude -p`: the
+/// run's review, a headless job, a worker's or a runtime planner's turn)
+/// refuses: the tools that schedule a later prompt, `ScheduleWakeup` (a
+/// wakeup of a self-paced loop) and `CronCreate` (a prompt on a schedule).
+/// `claude -p` stays alive until a scheduled wakeup or job fires, though its
+/// last turn has ended and its reply is written, so a launch that scheduled
+/// one does not end until then and its time limit kills it with no output.
+/// A one-off `-p` has no use for them: it waits for a subagent through the
+/// `Agent` call's result. The review's subagents get the review's
+/// `--disallowedTools` too (ADR-t1453-1 decision 8). The review and the
+/// headless jobs refuse them with `--disallowedTools`, a turn with its
+/// settings' `permissions.deny` ([`headless_worker_settings`],
+/// [`headless_required_settings`]).
+pub const PRINT_MODE_DENIED_TOOLS: [&str; 2] = ["ScheduleWakeup", "CronCreate"];
 
 #[cfg(test)]
 mod tests {
@@ -5326,7 +5357,13 @@ mod tests {
         assert_eq!(command.get_current_dir(), Some(Path::new("/tmp/obs")));
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["-p", "--allowedTools", "Bash(dagq:*)"]
+            [
+                "-p",
+                "--allowedTools",
+                "Bash(dagq:*)",
+                "--disallowedTools",
+                "ScheduleWakeup,CronCreate",
+            ]
         );
         // The prompt is its standard input, never an argument (task 1560).
         assert_eq!(command.get_stdin(), Some("observe"));
@@ -5341,6 +5378,8 @@ mod tests {
                 "-p",
                 "--allowedTools",
                 "Bash(dagq:*)",
+                "--disallowedTools",
+                "ScheduleWakeup,CronCreate",
                 "--session-id",
                 "s-1",
             ]
@@ -5353,6 +5392,8 @@ mod tests {
                 "-p",
                 "--allowedTools",
                 "Bash(dagq:*)",
+                "--disallowedTools",
+                "ScheduleWakeup,CronCreate",
                 "--session-id",
                 "s-1",
                 "--strict-mcp-config",
@@ -5367,7 +5408,8 @@ mod tests {
     /// Claude job was started with before jobs named intents (task 1064):
     /// the recovery job reads files, the plan and goal reviews read files
     /// and run the queue CLI, the observer and the throughput review run
-    /// the queue CLI only.
+    /// the queue CLI only. Each refuses the tools that schedule a later
+    /// prompt ([`PRINT_MODE_DENIED_TOOLS`]).
     #[test]
     fn each_jobs_intent_starts_claude_with_the_tools_it_had() {
         let claude = ClaudeCode {
@@ -5405,6 +5447,7 @@ mod tests {
                 .unwrap();
             let mut expected = vec!["-p", "--allowedTools"];
             expected.extend(tools);
+            expected.extend(["--disallowedTools", "ScheduleWakeup,CronCreate"]);
             assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{job}");
             assert_eq!(command.get_stdin(), Some("p"), "{job}");
         }
@@ -5439,7 +5482,7 @@ mod tests {
                 "--allowedTools",
                 "Read,Grep,Glob",
                 "--disallowedTools",
-                "Bash,Edit,Write,NotebookEdit",
+                "Bash,Edit,Write,NotebookEdit,ScheduleWakeup,CronCreate",
                 "--setting-sources",
                 "",
             ]
@@ -5456,13 +5499,15 @@ mod tests {
         // Nor does it load the worktree's auto memory (ADR-t1470-1).
         assert_eq!(settings["autoMemoryEnabled"], Value::Bool(false));
         // A review that may run the queue CLI keeps `Bash(dagq:*)` and is
-        // refused only the edits.
+        // refused only the edits and the tools that schedule a prompt.
         let command = claude
             .review_command(&run, "p", JobAccess::ReadFilesAndQueueCli)
             .unwrap();
         let args: Vec<_> = command.get_args().collect();
         assert!(args.contains(&std::ffi::OsStr::new("Read,Grep,Glob,Bash(dagq:*)")));
-        assert!(args.contains(&std::ffi::OsStr::new("Edit,Write,NotebookEdit")));
+        assert!(args.contains(&std::ffi::OsStr::new(
+            "Edit,Write,NotebookEdit,ScheduleWakeup,CronCreate"
+        )));
     }
 
     /// An agent's job's tools (ADR-t1728-2): a review's default is the run's
@@ -5573,7 +5618,10 @@ mod tests {
                 ["--setting-sources", ""],
                 ["--settings", &settings.to_string_lossy()],
                 ["--allowedTools", "Read,Grep,Glob"],
-                ["--disallowedTools", "Bash,Edit,Write,NotebookEdit"],
+                [
+                    "--disallowedTools",
+                    "Bash,Edit,Write,NotebookEdit,ScheduleWakeup,CronCreate",
+                ],
             ] {
                 assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
             }
@@ -5611,9 +5659,10 @@ mod tests {
         }
     }
 
-    /// A headless turn's settings deny `AskUserQuestion` beside the
-    /// signals by name and the role's denials, keep the `autoMode`
-    /// environment and add no hook (task 1373).
+    /// A headless turn's settings deny `AskUserQuestion` and the tools
+    /// that schedule a later prompt beside the signals by name and the
+    /// role's denials, keep the `autoMode` environment and add no hook
+    /// (task 1373).
     #[test]
     fn a_headless_turns_settings_deny_ask_user_question() {
         let role = vec!["Bash(dagq integrate:*)".to_owned()];
@@ -5627,6 +5676,8 @@ mod tests {
                 "Bash(pkill:*)",
                 "Bash(killall:*)",
                 "AskUserQuestion",
+                "ScheduleWakeup",
+                "CronCreate",
                 "Bash(dagq integrate:*)"
             ]
         );
@@ -5711,7 +5762,9 @@ mod tests {
             for tool in ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] {
                 assert!(deny.contains(&tool.to_owned()), "{tool}");
             }
-            assert!(deny.contains(&"AskUserQuestion".to_owned()));
+            for tool in ["AskUserQuestion", "ScheduleWakeup", "CronCreate"] {
+                assert!(deny.contains(&tool.to_owned()), "{tool}");
+            }
             assert!(deny.contains(&"Bash(pkill:*)".to_owned()));
             // The worker's role still runs `dagq ask`; Bash itself and the
             // broker's server are not denied.
@@ -5757,6 +5810,90 @@ mod tests {
         assert_eq!(settings, before);
         assert!(settings["permissions"].get("allow").is_none());
         assert_eq!(claude.turn_permission_mode(false), Some("auto"));
+    }
+
+    /// Every non-interactive launch refuses the tools that schedule a later
+    /// prompt, whose wakeup keeps `claude -p` from ending: the run's
+    /// review and a headless job in `--disallowedTools`, a worker's and a
+    /// runtime planner's turn, with or without the broker's `required`, in
+    /// its settings' `permissions.deny`.
+    #[test]
+    fn every_print_mode_launch_refuses_the_scheduling_tools() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let scheduling = ["ScheduleWakeup", "CronCreate"];
+        assert_eq!(PRINT_MODE_DENIED_TOOLS, scheduling);
+        let refused = |command: &CommandSpec| -> Vec<String> {
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let at = args
+                .iter()
+                .position(|arg| arg == "--disallowedTools")
+                .unwrap_or_else(|| panic!("no --disallowedTools in {args:?}"));
+            args[at + 1].split(',').map(str::to_owned).collect()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_in(dir.path());
+        for access in [
+            JobAccess::ReadFiles,
+            JobAccess::QueueCli,
+            JobAccess::ReadFilesAndQueueCli,
+        ] {
+            let review = claude.review_command(&run, "p", access).unwrap();
+            let job = claude
+                .headless_command(Path::new("/tmp/job"), "p", access)
+                .unwrap();
+            for (launch, command) in [("review", &review), ("job", &job)] {
+                let refused = refused(command);
+                for tool in scheduling {
+                    assert!(
+                        refused.contains(&tool.to_owned()),
+                        "{launch} {access:?}: {tool}"
+                    );
+                }
+            }
+            // The review's own refusals stay first.
+            let review_refused = refused(&review);
+            let own = review_disallowed_tools(access);
+            assert_eq!(review_refused[..own.len()], own[..], "{access:?}");
+        }
+        let log = dir.path().join("turn.log");
+        let config = dir.path().join("broker/mcp.json");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "{}").unwrap();
+        for role in [ActorRole::Worker, ActorRole::Planner] {
+            for required in [None, Some(config.as_path())] {
+                claude
+                    .turn_command(
+                        &TurnTarget {
+                            role,
+                            dir: dir.path(),
+                            cwd: dir.path(),
+                            debug_log: Some(&log),
+                            plugin_dir: None,
+                            broker_required: required,
+                        },
+                        "go",
+                        crate::domain::turn::TurnSession::New("s"),
+                    )
+                    .unwrap();
+                let settings: Value = serde_json::from_str(
+                    &fs::read_to_string(dir.path().join(HEADLESS_SETTINGS)).unwrap(),
+                )
+                .unwrap();
+                let deny: Vec<String> =
+                    serde_json::from_value(settings["permissions"]["deny"].clone()).unwrap();
+                for tool in scheduling {
+                    assert!(
+                        deny.contains(&tool.to_owned()),
+                        "{role:?} {required:?}: {tool}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
