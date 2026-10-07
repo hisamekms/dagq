@@ -26,28 +26,39 @@ pub struct AuditRecord {
     /// The token's id, from verified claims only (never from a token that
     /// did not verify).
     pub jti: Option<String>,
+    /// From the claims, as `jti`. A token whose signature verified but whose
+    /// active mark is gone still names its run, task and actor here.
     pub run_id: Option<String>,
     pub task_id: Option<u64>,
     pub actor_id: Option<String>,
-    /// `fs`, `process` or `git`; `null` for health and unknown routes.
+    /// `fs`, `process`, `git` or `package`; `null` for health and unknown
+    /// routes.
     pub backend: Option<String>,
-    /// The operation (`fs.read` and so on); `null` for an unknown route.
+    /// The operation (`fs.read` and so on, `health` for health); `null` for
+    /// an unknown route.
     pub op: Option<String>,
     /// The capability the operation needs.
     pub capability: Option<String>,
-    /// The resource, relative to the workspace.
+    /// The resource, relative to the workspace (`.` for the workspace
+    /// itself), only when the request names one path. A path the lexical
+    /// confinement refused is not written; one the backend refused (a
+    /// symlink) is.
     pub path: Option<String>,
-    /// `argv[0]`'s basename, for `process.exec`.
+    /// `argv[0]`'s basename, for `process.exec`; for `package.install` the
+    /// configured command's, and `null` for a name not configured.
     pub program: Option<String>,
     pub argc: Option<usize>,
-    /// SHA-256 of the arguments (for matching; not a secret, and guessable
-    /// arguments can be recovered from it).
+    /// SHA-256, lower-case hex, of `argv[1..]` with a NUL after each
+    /// argument (for matching; not a secret, and guessable arguments can be
+    /// recovered from it).
     pub argv_sha256: Option<String>,
     /// The decision: `ok` or the error code.
     pub result: String,
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
+    /// The bytes of the request's body.
     pub bytes_in: u64,
+    /// The bytes of the answer's body.
     pub bytes_out: u64,
 }
 

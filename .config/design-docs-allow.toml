@@ -38,12 +38,6 @@ line = 2281
 tasks = 29
 
 [[doc]]
-path = "docs/design/broker.md"
-size = 156777
-line = 3916
-tasks = 85
-
-[[doc]]
 path = "docs/design/ci-failure-issues.md"
 tasks = 3
 

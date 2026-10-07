@@ -596,7 +596,7 @@ dagq のソースでない repository で使えること（goal 52）は、stub 
 
 ### podman の用意
 
-- podman は人が入れる（`brew install podman`）。`podman machine init` は人が打たない。dagq 専用の machine `dagq` は `dagq broker start` か supervisor が必要なときに最小の資源で `init`・`start` する（[Resource broker](broker.md)の「人が行うこと」「用意の手順」）。最初の起動は machine の image の download と broker の image の build で数分かかる。
+- podman は人が入れる（`brew install podman`）。`podman machine init` は人が打たない。dagq 専用の machine `dagq` は `dagq broker start` か supervisor が必要なときに最小の資源で `init`・`start` する（[Resource broker](broker.md)の「containerとPodman machine」）。最初の起動は machine の image の download と broker の image の build で数分かかる。
 - 人の machine（`podman-machine-default` など）が動いていれば `machine_busy` で止まる。止めてよいか人が決める（dagq は人の machine を止めない）。
 - scratch の dagq の隣に、同じ commit の `dagq-broker-client` を置く: 確かめたい commit で `cargo build --locked -p dagq -p dagq-broker-client` し、両方を `<scratch>/bin` にコピーする（`install` と同じ配置。[Resource broker](broker.md)の「配布と版」）。
 

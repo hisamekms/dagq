@@ -3407,7 +3407,12 @@ impl AgentProvider for ClaudeCode {
     /// [`headless_required_settings`] (the built-in file tools denied,
     /// only the broker's server and `dagq` allowed) and
     /// `--mcp-config <config> --strict-mcp-config`: the broker's server and
-    /// no other.
+    /// no other. It also reads no setting sources (`--setting-sources ""`),
+    /// so neither the user's nor the worktree's `.claude/` (which the
+    /// broker's `write_file` can write) widens what `Bash` may run. The
+    /// user's plugins, hooks, `env`, `apiKeyHelper` and model default are
+    /// not read either: a host that relies on them for the login or the
+    /// model can fail a `required` turn.
     fn turn_command(
         &self,
         target: &TurnTarget<'_>,

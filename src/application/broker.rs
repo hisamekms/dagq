@@ -477,7 +477,11 @@ pub fn connect<P: Podman>(
 // The machine.
 
 /// dagq's machine and its resources (ADR-t827-3 decision 7): the fewest
-/// with which the image builds and the broker runs.
+/// with which the image builds and the broker runs, as measured; a host that
+/// needs more sets `host.toml`'s `[broker]`. The resources
+/// take effect at `init` only: to change them on a machine that exists, a
+/// person removes it (`podman machine rm dagq`) and the next start makes it
+/// again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MachineSpec {
     pub name: String,
@@ -511,8 +515,12 @@ impl MachineSpec {
     }
 
     /// `podman machine init`: rootless, the default volumes (ADR-t827-3
-    /// decision 6), and `--update-connection=false` so the machine does
-    /// not become the default connection even when it is the first.
+    /// decision 6), and `--update-connection=false`. Podman (seen with
+    /// 6.1.2) still makes the first machine's connection the default on a
+    /// host with no connection at all, since the flag does not act on
+    /// `init`; a person's default connection, when there is one, stays. A
+    /// person who later makes a machine of their own picks the default
+    /// again (`podman system connection default <name>`).
     pub fn init_args(&self) -> Vec<String> {
         let mut all = args(["machine", "init"]);
         all.extend([

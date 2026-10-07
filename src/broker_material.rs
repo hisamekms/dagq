@@ -30,7 +30,11 @@ pub const BUILD_END: &str = "# dagq:build-from-source end";
 /// registry and target directory, kept by the machine between builds and
 /// not images, so the start's prune of images keeps them. The Containerfile
 /// of a checkout and of a release both use them, so a build whose
-/// `Cargo.lock` and Rust are the same compiles no dependency again.
+/// `Cargo.lock` and Rust are the same compiles no dependency again. Cargo
+/// never removes stale outputs, so each new dependency, Rust or release
+/// version leaves the old ones in the target cache, which grows on the
+/// machine's disk with no bound and no cleanup. A lost cache only makes
+/// cargo compile again.
 pub const CACHE_MOUNTS: [&str; 2] = [
     "--mount=type=cache,id=dagq-broker-cargo-registry,target=/usr/local/cargo/registry,sharing=locked",
     "--mount=type=cache,id=dagq-broker-cargo-target,target=/src/target,sharing=locked",
