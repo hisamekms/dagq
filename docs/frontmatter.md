@@ -98,7 +98,11 @@ A `deprecated` ADR has no `superseded_by` or `superseded_on`, and a `superseded`
 
 ## Validation
 
-Future documentation validation should check unique IDs, allowed status values, date formats, links in `related`, `depends_on`, `superseded_by`, and `supersedes`, the ADR status and field combinations and matching dates, and the filename convention. `scripts/check-adr-numbers.sh` already checks the ADR IDs, `scripts/check-frontmatter-dates.sh` the form of the date lines, and `scripts/check-doc-frontmatter.sh` the required keys, the type and status values, and the form and uniqueness of the IDs of the documents other than the ADRs (what each checks is in the script's header comment). Example paths:
+Three scripts check the frontmatter (what each checks in detail is in the script's header comment). `scripts/check-adr-numbers.sh` checks the ADR filenames and IDs and their uniqueness among the ADRs, and that a task-ID ADR that is `accepted`, `superseded` or `deprecated` has an `accepted_on` equal to the date in its filename. `scripts/check-frontmatter-dates.sh` checks that each `created`, `updated` and `last_verified` line in a frontmatter under `docs/` holds only a date of the form `YYYY-MM-DD`. `scripts/check-doc-frontmatter.sh` checks, for the documents other than the ADRs, the required keys, the type and status values, the form and uniqueness of the IDs, and that no `updated` or `last_verified` line is there.
+
+No script checks yet: that the IDs in `related`, `depends_on`, `superseded_by` and `supersedes` name existing documents; that an ADR ID differs from the IDs of the other documents; the required keys and the status values of the ADRs; the other ADR status and field combinations and dates (see [ADR fields](#adr-fields)), including the form of `accepted_on`, `superseded_on` and `deprecated_on`; and the filenames of the documents other than the ADRs. These are left to the review.
+
+Example paths:
 
 ```text
 docs/adr/0001-rust-runtime.md
