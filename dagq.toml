@@ -77,6 +77,18 @@ workers = false
 workflow = "ci.yml"
 junit_artifacts = ["nextest-junit-*"]
 
+[landing_verification]
+# 着地の検証で、task の coverage の関門のコマンドを unit test 全件と影響範囲で絞った IT に置き換える（ADR-t1925-1、task 1927、goal 157 の段 3b）。
+# 置き換えと env の受け渡しは runtime（domain::landing_verification の doc comment）、IT の選び方・表の cache・閾値などの値は scripts/landing-it.sh と
+# scripts/landing-it.py の冒頭が持ち、値の根拠は docs/plans/landing-it-selection.md の「決めたこと」。登録済みの task の --verify は書き換えない。
+# replaces は旧と今の関門（cargo llvm-cov nextest ... と cargo llvm-cov --locked --fail-under-lines 80）に当たる。
+# command は unit test 全件（workspace の lib・bin）と絞った IT を 1 回の cargo nextest run で流し、既に落ちているテストを外す。
+# fmt・clippy・layer-deps と task に固有の検査は task の --verify にあるものが登録のまま流れるので、ここに重ねない。
+# 行カバレッジの関門は CI（ci.yml）だけが見る。外すときはこの節を消せば、次の着地から登録のコマンドに戻る。
+# [landing_verification] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1926 を含んでから足した。
+replaces = ["cargo llvm-cov nextest", "cargo llvm-cov --locked --fail-under-lines 80"]
+command = "sh scripts/landing-it.sh"
+
 [tasks]
 # task が宣言する変更の種類（change）の値の集合（ADR-t980-1、task 983。書式は
 # docs/design/supervisor-lifecycle/run-environment.md、各値の意味と選び方は docs/development/task-registration.md の「change」）。

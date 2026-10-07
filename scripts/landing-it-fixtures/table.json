@@ -1,0 +1,22 @@
+{
+ "version": 1,
+ "commit": "0123456789abcdef0123456789abcdef01234567",
+ "generated_at": "2026-10-06T00:00:00Z",
+ "run_url": null,
+ "filter": "kind(test) - binary(e2e)",
+ "tests": {
+  "dagq::it::a::one": {"binary_id": "dagq::it", "name": "a::one", "duration_secs": 10.0, "status": "passed", "coverage": true, "files": 1},
+  "dagq::it::a::two": {"binary_id": "dagq::it", "name": "a::two", "duration_secs": 10.0, "status": "passed", "coverage": true, "files": 1},
+  "dagq::it::b::big": {"binary_id": "dagq::it", "name": "b::big", "duration_secs": 100.0, "status": "passed", "coverage": true, "files": 1},
+  "dagq::it::c::small": {"binary_id": "dagq::it", "name": "c::small", "duration_secs": 1.0, "status": "passed", "coverage": true, "files": 1},
+  "dagq::it::c::not_run": {"binary_id": "dagq::it", "name": "c::not_run", "duration_secs": null, "status": "not_run", "coverage": false, "files": 0},
+  "dagq::plugin::p": {"binary_id": "dagq::plugin", "name": "p", "duration_secs": 1.0, "status": "passed", "coverage": true, "files": 1},
+  "dagq-broker::serve::serve::s": {"binary_id": "dagq-broker::serve", "name": "serve::s", "duration_secs": 1.0, "status": "passed", "coverage": true, "files": 1}
+ },
+ "files": {
+  "src/a.rs": ["dagq::it::a::one", "dagq::it::a::two"],
+  "src/big.rs": ["dagq::it::b::big"],
+  "src/c.rs": ["dagq::it::c::small"],
+  "crates/dagq-broker/src/lib.rs": ["dagq-broker::serve::serve::s"]
+ }
+}

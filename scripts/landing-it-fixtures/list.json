@@ -1,0 +1,17 @@
+{
+ "rust-suites": {
+  "dagq": {"binary-id": "dagq", "kind": "lib", "status": "skipped", "testcases": {"a::tests::unit": {"filter-match": {"status": "mismatch", "reason": "expression"}, "ignored": false}}},
+  "dagq::e2e": {"binary-id": "dagq::e2e", "kind": "test", "status": "skipped", "testcases": {}},
+  "dagq::it": {"binary-id": "dagq::it", "kind": "test", "status": "listed", "testcases": {
+   "a::one": {"filter-match": {"status": "matches"}, "ignored": false},
+   "a::two": {"filter-match": {"status": "matches"}, "ignored": false},
+   "a::added_after_the_table": {"filter-match": {"status": "matches"}, "ignored": false},
+   "b::big": {"filter-match": {"status": "matches"}, "ignored": false},
+   "c::small": {"filter-match": {"status": "matches"}, "ignored": false},
+   "c::renamed_after_the_table": {"filter-match": {"status": "matches"}, "ignored": false},
+   "c::ignored_after_the_table": {"filter-match": {"status": "matches"}, "ignored": true}
+  }},
+  "dagq::plugin": {"binary-id": "dagq::plugin", "kind": "test", "status": "listed", "testcases": {"p": {"filter-match": {"status": "matches"}, "ignored": false}}},
+  "dagq-broker::serve": {"binary-id": "dagq-broker::serve", "kind": "test", "status": "listed", "testcases": {"serve::s": {"filter-match": {"status": "matches"}, "ignored": false}}}
+ }
+}

@@ -1,0 +1,411 @@
+[
+ {
+  "name": "a source file selects the table's tests and the IT not in the table",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [],
+   "kept": [],
+   "filter": "(kind(lib) | kind(bin) | kind(proc-macro)) | ((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))"
+  }
+ },
+ {
+  "name": "a changed test file selects the tests it defines",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "tests/it/c.rs",
+   "crates/dagq-broker/tests/serve.rs",
+   "tests/plugin.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(/^c::/))",
+    "binary_id(=dagq-broker::serve)",
+    "binary_id(=dagq::plugin)",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "a test added in a new module file is selected though the table does not know it",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "tests/it/d/mod.rs",
+   "tests/it/main.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(/^d::/))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "files the tests read select the tests that read them",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "plugins/dagq/skills/x.md",
+   "dagq.toml"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "binary_id(=dagq::plugin)",
+    "(binary_id(=dagq::it) & test(/^installed_plugin::/))",
+    "(binary_id(=dagq::it) & test(=review_subagents::this_repository_names_only_agents_it_defines))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "a file in the table's tree with no test and a unit test module select no IT but the IT not in the table",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/lib.rs",
+   "src/domain/tests/new.rs",
+   "src/b_tests.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "the threshold runs every IT",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/big.rs"
+  ],
+  "want": {
+   "full": true,
+   "reasons": [
+    "the narrowed IT's estimated wall time 100.0 s exceeds 50.0 s (0.5 of every IT's)"
+   ],
+   "narrowed": [],
+   "not_in_table": [],
+   "excluded": [],
+   "kept": [],
+   "filter": "(kind(lib) | kind(bin) | kind(proc-macro)) | (kind(test) - binary(e2e))"
+  }
+ },
+ {
+  "name": "a common file runs every IT",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "Cargo.lock",
+   "tests/common/template.rs"
+  ],
+  "want": {
+   "full": true,
+   "reasons": [
+    "a common file: Cargo.lock",
+    "a common file: tests/common/template.rs"
+   ],
+   "narrowed": [],
+   "not_in_table": [],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "a source file not in the table's tree runs every IT",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/new_module.rs",
+   "crates/dagq-broker/src/new.rs"
+  ],
+  "want": {
+   "full": true,
+   "reasons": [
+    "a source file not in the table's tree: src/new_module.rs",
+    "a source file not in the table's tree: crates/dagq-broker/src/new.rs"
+   ],
+   "narrowed": [],
+   "not_in_table": [],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "a table older than the limit runs every IT",
+  "now": "2026-10-08T00:00:01Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "want": {
+   "full": true,
+   "reasons": [
+    "the table is older than 48 hours: generated_at 2026-10-06T00:00:00Z"
+   ],
+   "narrowed": [],
+   "not_in_table": [],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "a table just within the limit is used",
+  "now": "2026-10-08T00:00:00Z",
+  "diff": [
+   "src/c.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=c::small))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "no table runs every IT",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "no_table": true,
+  "want": {
+   "full": true,
+   "reasons": [
+    "the table is not available: gh failed"
+   ],
+   "narrowed": [],
+   "not_in_table": [],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "a table that cannot be read runs every IT",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "table_patch": {
+   "generated_at": "yesterday"
+  },
+  "want": {
+   "full": true,
+   "reasons": [
+    "the table cannot be read: time data 'yesterday' does not match format '%Y-%m-%dT%H:%M:%SZ'"
+   ],
+   "narrowed": [],
+   "not_in_table": [],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "a table of another version runs every IT",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "table_patch": {
+   "version": 2
+  },
+  "want": {
+   "full": true,
+   "reasons": [
+    "the table cannot be read: version 2"
+   ],
+   "narrowed": [],
+   "not_in_table": [],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "a forced reason runs every IT",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [],
+  "full": "DAGQ_LANDING_BASE is not set",
+  "want": {
+   "full": true,
+   "reasons": [
+    "DAGQ_LANDING_BASE is not set"
+   ],
+   "narrowed": [],
+   "not_in_table": [],
+   "excluded": [],
+   "kept": []
+  }
+ },
+ {
+  "name": "known failures are left out and job steps ignored",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "known": {
+   "failures": [
+    {
+     "name": "dagq::it a::two",
+     "kind": "test"
+    },
+    {
+     "name": "dagq app::tests::unit_fails",
+     "kind": "test"
+    },
+    {
+     "name": "job: checks / clippy",
+     "kind": "job_step"
+    }
+   ],
+   "kept_for_task": []
+  },
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [
+    "dagq::it a::two",
+    "dagq app::tests::unit_fails"
+   ],
+   "kept": [],
+   "filter": "((kind(lib) | kind(bin) | kind(proc-macro)) | ((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))) - ((binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq) & test(=app::tests::unit_fails)))"
+  }
+ },
+ {
+  "name": "known failures are left out when every IT runs too",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "Cargo.toml"
+  ],
+  "known": {
+   "failures": [
+    {
+     "name": "dagq::it b::big",
+     "kind": "test"
+    }
+   ],
+   "kept_for_task": []
+  },
+  "want": {
+   "full": true,
+   "reasons": [
+    "a common file: Cargo.toml"
+   ],
+   "narrowed": [],
+   "not_in_table": [],
+   "excluded": [
+    "dagq::it b::big"
+   ],
+   "kept": [],
+   "filter": "((kind(lib) | kind(bin) | kind(proc-macro)) | (kind(test) - binary(e2e))) - ((binary_id(=dagq::it) & test(=b::big)))"
+  }
+ },
+ {
+  "name": "a fix run runs the tests of its findings though the diff does not reach them and leaves out the others",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "fix_run": true,
+  "known": {
+   "failures": [
+    {
+     "name": "dagq::it c::small",
+     "kind": "test"
+    }
+   ],
+   "kept_for_task": [
+    {
+     "name": "dagq::it b::big",
+     "kind": "test"
+    }
+   ]
+  },
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))",
+    "(binary_id(=dagq::it) & test(=b::big))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [
+    "dagq::it c::small"
+   ],
+   "kept": [
+    "dagq::it b::big"
+   ],
+   "filter": "((kind(lib) | kind(bin) | kind(proc-macro)) | ((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)) | (binary_id(=dagq::it) & test(=b::big)))) - ((binary_id(=dagq::it) & test(=c::small)))"
+  }
+ }
+]
