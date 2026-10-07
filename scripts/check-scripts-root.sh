@@ -49,7 +49,8 @@ check-layer-deps layer_stale_allow_item
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-doc-links doc_broken_link
-check-doc-frontmatter doc_frontmatter_missing_key"
+check-doc-frontmatter doc_frontmatter_missing_key
+check-doc-frontmatter doc_frontmatter_updated_line"
 
 violate_migration_gap() {
   echo 'SELECT 1;' >migrations/9999_scripts_root_gap.sql
@@ -94,7 +95,11 @@ violate_doc_broken_link() {
 }
 
 violate_doc_frontmatter_missing_key() {
-  printf -- '---\nid: zz-scripts-root-fixture\ntype: plan\nstatus: active\ncreated: 2026-10-07\nupdated: 2026-10-07\n---\n\n# fixture\n' >docs/zz-scripts-root-frontmatter.md
+  printf -- '---\nid: zz-scripts-root-fixture\ntype: plan\nstatus: active\ncreated: 2026-10-07\n---\n\n# fixture\n' >docs/zz-scripts-root-frontmatter.md
+}
+
+violate_doc_frontmatter_updated_line() {
+  printf -- '---\nid: zz-scripts-root-updated\ntype: design\ntitle: fixture\nstatus: current\ncreated: 2026-10-07\nupdated: 2026-10-07\n---\n\n# fixture\n' >docs/design/zz-scripts-root-updated.md
 }
 
 unset LAYER_DEPS_ROOT LAYER_DEPS_ALLOW_FILE E2E_QUARANTINE_FILE

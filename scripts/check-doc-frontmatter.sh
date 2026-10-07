@@ -8,15 +8,17 @@
 # - type is design, plan or development (adr only for the ADRs), and status
 #   is one of the allowed values of that type ("Type-specific fields");
 # - id is lowercase kebab-case, and no two checked documents share one.
-# updated and last_verified are not required: task 1964 (ADR-t1964-1) takes
-# them out of the documents other than the ADRs.
+# - no updated or last_verified line is in the frontmatter: ADR-t1964-1
+#   takes them out of the documents other than the ADRs, so a line of either
+#   is reported with its file and line number. Only the frontmatter is read;
+#   such a line in the body (a code example) is not reported.
 #
 # The ADRs (every .md under docs/adr/ except README.md, the template
 # included) are not checked here: check-adr-numbers.sh checks their IDs,
 # filenames and dates, and their required keys and status values are left to
 # the review. The form of the date lines (created, updated, last_verified) is
 # check-frontmatter-dates.sh's; this script only checks that the required
-# ones are there.
+# ones are there and that updated and last_verified are not.
 #
 # The tree checked is the git work tree of the cwd (`git rev-parse
 # --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
@@ -48,8 +50,9 @@ done | awk '
   # The file names come on stdin, one per line, and each file is read with
   # getline, so a name with a space works and an empty file is reported.
   function report(msg) { out = out cur ": " msg "\n" }
+  function report_line(ln, msg) { out = out cur ":" ln ": " msg "\n" }
   function check(cur) {
-    opened = 0; closed = 0; split("", val); n = 0
+    opened = 0; closed = 0; split("", val); n = 0; dated = ""
     while ((r = (getline raw < cur)) > 0) {
       n++
       line = raw; sub(/\r$/, "", line)
@@ -61,12 +64,19 @@ done | awk '
         sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
         if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
         val[key] = v
+        if (key == "updated" || key == "last_verified") dated = dated " " n ":" key
       }
     }
     close(cur)
     if (r < 0) { report("cannot be read"); return }
     if (!opened) { report("no frontmatter (the first line is not ---)"); return }
     if (!closed) { report("no closing --- of the frontmatter"); return }
+    # Reported only once the closing --- is found, so a body line is never.
+    k = split(dated, dl, " ")
+    for (i = 1; i <= k; i++) {
+      split(dl[i], lk, ":")
+      report_line(lk[1], lk[2] " is not kept in the documents other than the ADRs (ADR-t1964-1)")
+    }
     k = split("id type title status created", req, " ")
     for (i = 1; i <= k; i++)
       if (!(req[i] in val) || val[req[i]] == "") report("missing required key " req[i])
