@@ -38,8 +38,10 @@ NEXTEST_TEST_THREADS = "6"
 # paths は command を流す差分の glob（ADR-t2032-1）。Rust に関わる差分の無い run は、merge した木の Rust の部分が
 # 着地のときに検証済みの main と同じで compile が壊れる経路がほぼ無いので、cargo check を流さず merge-tree だけを見る。
 # migrations/** は build.rs と include_str! が compile のときに読み、crates/** は workspace の crate なので含める。
+# Rust の compile が include_str! / include_bytes! / build.rs で読む Rust 以外のファイルも入れる: kpi.md は throughput_review.rs の
+# include_str!、src/**/fixtures/** は test の include_str!、containers/broker/** は build.rs が Containerfile を読んで埋め込む。
 command = "cargo check --locked --all-targets"
-paths = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "migrations/**", "crates/**"]
+paths = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "migrations/**", "crates/**", "plugins/claude-dagq/skills/dagq/reference/kpi.md", "src/**/fixtures/**", "containers/broker/**"]
 
 [supervisor]
 # runtime が同時に立てる planner の上限（draft・finding・revise の planner で共有。既定 1）。
