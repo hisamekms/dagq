@@ -755,16 +755,12 @@ fn short_title(title: &str) -> String {
 }
 
 /// The lines of `tasks`, the newest first within `bytes`, kept in their
-/// order, with a note of how many were left out and how to read them.
-fn planner_task_lines(
-    fit: &mut Fit,
-    name: &'static str,
-    tasks: &[GoalTask],
-    bytes: usize,
-    read: &str,
-) -> String {
+/// order, with a note of how many were left out and how to read them, and
+/// that many: the caller counts them, as lines or as a cut of the item
+/// they are a part of.
+fn planner_task_lines(tasks: &[GoalTask], bytes: usize, read: &str) -> (String, usize) {
     if tasks.is_empty() {
-        return "(none)".to_owned();
+        return ("(none)".to_owned(), 0);
     }
     let lines: Vec<String> = tasks
         .iter()
@@ -785,7 +781,6 @@ fn planner_task_lines(
         .filter(|(_, kept)| !**kept)
         .map(|(t, _)| t.id.to_string())
         .collect();
-    fit.omit(name, left_out.len());
     let mut text = lines
         .into_iter()
         .zip(&kept)
@@ -797,76 +792,76 @@ fn planner_task_lines(
         text.push('\n');
         text.push_str(&left_out_note("tasks (the oldest)", &left_out, read));
     }
-    text
+    (text, left_out.len())
 }
 
 /// The section of a goal in a planner's prompt: `heading`, its text
 /// fields, its doc when `doc`, and the lines of `tasks` (headed
-/// `tasks_label`), each held to its limit.
+/// `tasks_label`), each held to its limit, and whether any was cut (a
+/// task line left out among them): [`planner_goals`] counts the goal, not
+/// its parts.
 fn planner_goal(
-    fit: &mut Fit,
     heading: &str,
     goal: &Goal,
     (tasks, tasks_label): (&[GoalTask], &str),
     doc: bool,
-) -> String {
+) -> (String, bool) {
     let read = format!("read it whole with `dagq goal show {} --full`", goal.id());
-    let description = fit.text(
-        "goals",
+    let (description, description_cut) = prompt_fit::cut_part(
         or_none(goal.description()),
         PLANNER_GOAL_TEXT_BYTES,
         Keep::Start,
         &read,
     );
-    let acceptance = fit.text(
-        "goals",
+    let (acceptance, acceptance_cut) = prompt_fit::cut_part(
         or_none(goal.acceptance()),
         PLANNER_GOAL_TEXT_BYTES,
         Keep::Start,
         &read,
     );
-    let constraints = fit.text(
-        "goals",
+    let (constraints, constraints_cut) = prompt_fit::cut_part(
         or_none(goal.constraints()),
         PLANNER_GOAL_TEXT_BYTES / 2,
         Keep::Start,
         &read,
     );
-    let tasks = planner_task_lines(
-        fit,
-        "goals",
+    let (tasks, tasks_left_out) = planner_task_lines(
         tasks,
         PLANNER_GOAL_TASKS_BYTES,
         &format!("`dagq goal show {} --full`", goal.id()),
     );
-    format!(
+    let cut = description_cut || acceptance_cut || constraints_cut || tasks_left_out > 0;
+    let text = format!(
         "{heading}\n\n{description}\n\nAcceptance:\n{acceptance}\n\nConstraints:\n{constraints}\n\n{doc}{tasks_label}:\n{tasks}\n",
         doc = if doc {
             format!("Doc: {}\n\n", goal.doc().unwrap_or("(none)"))
         } else {
             String::new()
         },
-    )
+    );
+    (text, cut)
 }
 
 /// The goals' sections of a planner's prompt within
 /// [`PLANNER_GOALS_BYTES`] in their order, with a note of the goals left
-/// out.
-fn planner_goals(fit: &mut Fit, sections: Vec<(GoalId, String)>) -> String {
-    let sizes: Vec<usize> = sections.iter().map(|(_, text)| text.len()).collect();
+/// out. Each goal counts once in `goals`: left out, or kept and cut
+/// ([`planner_goal`]).
+fn planner_goals(fit: &mut Fit, sections: Vec<(GoalId, (String, bool))>) -> String {
+    let sizes: Vec<usize> = sections.iter().map(|(_, (text, _))| text.len()).collect();
+    let cuts: Vec<bool> = sections.iter().map(|(_, (_, cut))| *cut).collect();
     let kept = prompt_fit::pick(&sizes, 0..sections.len(), usize::MAX, PLANNER_GOALS_BYTES);
+    fit.picked("goals", &kept, &cuts);
     let left_out: Vec<String> = sections
         .iter()
         .zip(&kept)
         .filter(|(_, kept)| !**kept)
         .map(|((id, _), _)| id.to_string())
         .collect();
-    fit.omit("goals", left_out.len());
     let mut text: String = sections
         .into_iter()
         .zip(&kept)
         .filter(|(_, kept)| **kept)
-        .map(|((_, text), _)| text)
+        .map(|((_, (text, _)), _)| text)
         .collect();
     if !left_out.is_empty() {
         text.push_str(&format!(
@@ -880,26 +875,23 @@ fn planner_goals(fit: &mut Fit, sections: Vec<(GoalId, String)>) -> String {
 
 /// The lines of `asks`, the newest first within [`PLANNER_ASKS_BYTES`] and
 /// kept in their order, each question and answer cut, with a note of the
-/// asks left out. `kind` adds each ask's kind.
+/// asks left out. `kind` adds each ask's kind. Each ask counts once in
+/// `asks`: left out, or kept and cut.
 fn planner_asks(fit: &mut Fit, asks: &[Ask], kind: bool) -> String {
     let read = "read it whole with `dagq asks --all`";
+    let mut cuts = Vec::new();
     let lines: Vec<String> = asks
         .iter()
         .map(|ask| {
-            let question = fit.text(
-                "asks",
-                &ask.question,
-                PLANNER_ASK_TEXT_BYTES,
-                Keep::Start,
-                read,
-            );
-            let answer = fit.text(
-                "asks",
+            let (question, question_cut) =
+                prompt_fit::cut_part(&ask.question, PLANNER_ASK_TEXT_BYTES, Keep::Start, read);
+            let (answer, answer_cut) = prompt_fit::cut_part(
                 ask.answer.as_deref().unwrap_or("(none yet)"),
                 PLANNER_ASK_TEXT_BYTES,
                 Keep::Start,
                 read,
             );
+            cuts.push(question_cut || answer_cut);
             format!(
                 "- ask {aid}{kind}: {question}\n  answer: {answer}\n",
                 aid = ask.id,
@@ -919,13 +911,13 @@ fn planner_asks(fit: &mut Fit, asks: &[Ask], kind: bool) -> String {
         usize::MAX,
         PLANNER_ASKS_BYTES,
     );
+    fit.picked("asks", &kept, &cuts);
     let left_out: Vec<String> = asks
         .iter()
         .zip(&kept)
         .filter(|(_, kept)| !**kept)
         .map(|(ask, _)| ask.id.to_string())
         .collect();
-    fit.omit("asks", left_out.len());
     let mut text: String = lines
         .into_iter()
         .zip(&kept)
@@ -1000,33 +992,29 @@ pub fn runtime_planner_prompt(
             priority_source: task.priority_source(),
         })
         .collect();
-    let tasks = planner_task_lines(
-        &mut fit,
-        "tasks",
+    let (tasks, tasks_left_out) = planner_task_lines(
         &goal_tasks,
         RUNTIME_PLANNER_TASKS_BYTES,
         &format!("`dagq proposal show {proposal}`"),
     );
+    fit.omit("tasks", tasks_left_out);
     fit.section("tasks", &tasks);
     let reason_read = review_anchor.map_or_else(
         || "the plan review anchor is unknown, so there is no known way to read the full reasons".to_owned(),
         |anchor| format!("read it whole with `dagq events --full --task {anchor} --kind plan_review_finished`"),
     );
-    let lines: Vec<String> = reasons
+    let (lines, cuts): (Vec<String>, Vec<bool>) = reasons
         .iter()
         .map(|reason| {
-            format!(
-                "- {}",
-                fit.text(
-                    "reasons",
-                    reason,
-                    RUNTIME_PLANNER_REASON_BYTES,
-                    Keep::Start,
-                    &reason_read
-                )
-            )
+            let (text, cut) = prompt_fit::cut_part(
+                reason,
+                RUNTIME_PLANNER_REASON_BYTES,
+                Keep::Start,
+                &reason_read,
+            );
+            (format!("- {text}"), cut)
         })
-        .collect();
+        .unzip();
     let sizes: Vec<usize> = lines.iter().map(String::len).collect();
     let kept = prompt_fit::pick(
         &sizes,
@@ -1034,8 +1022,8 @@ pub fn runtime_planner_prompt(
         usize::MAX,
         RUNTIME_PLANNER_REASONS_BYTES,
     );
+    fit.picked("reasons", &kept, &cuts);
     let left_out = kept.iter().filter(|kept| !**kept).count();
-    fit.omit("reasons", left_out);
     let mut reasons = if lines.is_empty() {
         "(none given)".to_owned()
     } else {
@@ -1112,9 +1100,17 @@ pub const DRAFT_REVISIT_ITEM_BYTES: usize = 2_000;
 /// The section of the drafts whose revisit time came (ADR-t1540-1): the
 /// time, who set it and why, and the last decision about each (its
 /// `planner_question` asks with their recommendation and answer, and its
-/// notes), the newest first; empty when none came.
+/// notes), the newest first; empty when none came. The section counts
+/// once in `revisit` when any question or note in it or the section as a
+/// whole was cut.
 fn revisit_section(fit: &mut Fit, material: &DraftPlannerMaterial<'_>) -> String {
     let mut out = String::new();
+    let mut cut = false;
+    let mut cut_text = |text: &str, max: usize, read: &str| {
+        let (text, was_cut) = prompt_fit::cut_part(text, max, Keep::Start, read);
+        cut |= was_cut;
+        text
+    };
     for (target, _) in material.members {
         let Some(revisit) = &target.revisit else {
             continue;
@@ -1139,7 +1135,7 @@ fn revisit_section(fit: &mut Fit, material: &DraftPlannerMaterial<'_>) -> String
             text.push_str(&format!(
                 "- ask {aid}: {question}\n  Recommended: {recommend} ({confidence}). Answer: {answer}\n",
                 aid = ask.id,
-                question = fit.text("revisit", &ask.question, DRAFT_REVISIT_ITEM_BYTES, Keep::Start, &read),
+                question = cut_text(&ask.question, DRAFT_REVISIT_ITEM_BYTES, &read),
                 recommend = ask.recommendation.as_deref().unwrap_or("(none)"),
                 confidence = ask
                     .confidence
@@ -1154,13 +1150,7 @@ fn revisit_section(fit: &mut Fit, material: &DraftPlannerMaterial<'_>) -> String
         for note in notes {
             text.push_str(&format!(
                 "- {}\n",
-                fit.text(
-                    "revisit",
-                    note,
-                    DRAFT_REVISIT_ITEM_BYTES,
-                    Keep::Start,
-                    &read
-                )
+                cut_text(note, DRAFT_REVISIT_ITEM_BYTES, &read)
             ));
         }
         out.push_str(&text);
@@ -1168,13 +1158,12 @@ fn revisit_section(fit: &mut Fit, material: &DraftPlannerMaterial<'_>) -> String
     if out.is_empty() {
         return out;
     }
-    let out = fit.text(
-        "revisit",
+    let out = cut_text(
         &out,
         DRAFT_REVISIT_BYTES,
-        Keep::Start,
         "`dagq show ID --full` for each draft",
     );
+    fit.omit("revisit", usize::from(cut));
     fit.section("revisit", &out);
     out
 }
@@ -1333,7 +1322,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
             max = MAX_DRAFT_PLANNERS,
         )
     };
-    let mut drafts = Vec::new();
+    let (mut drafts, mut cuts) = (Vec::new(), Vec::new());
     for (target, attempt) in material.members {
         let task = &target.task;
         let heading = if single {
@@ -1342,19 +1331,34 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
             format!("## Draft {} (planner {attempt} for it)", task.id())
         };
         let read = format!("read it whole with `dagq show {} --full`", task.id());
+        // A draft counts once in `drafts`, however many of its fields
+        // were cut.
+        let (title, title_cut) =
+            prompt_fit::cut_part(task.title(), DRAFT_TITLE_BYTES, Keep::Start, &read);
+        let (description, description_cut) = fit.required_part(
+            "drafts",
+            or_none(task.description()),
+            DRAFT_DESCRIPTION_BYTES,
+            &read,
+        );
+        let (context, context_cut) = prompt_fit::cut_part(
+            or_none(task.context()),
+            DRAFT_CONTEXT_BYTES,
+            Keep::Start,
+            &read,
+        );
+        cuts.push(title_cut || description_cut || context_cut);
         drafts.push(format!(
             "\n{heading}\n\nTask {id}: {title}\n{category}{proposal}\n### Description\n\n{description}\n\n### Context\n\n{context}\n",
             id = task.id(),
-            title = fit.text("drafts", task.title(), DRAFT_TITLE_BYTES, Keep::Start, &read),
             category = follow_up_category_line(target),
             proposal = follow_up_proposal_line(target)?,
-            description = fit.required("drafts", or_none(task.description()), DRAFT_DESCRIPTION_BYTES, &read),
-            context = fit.text("drafts", or_none(task.context()), DRAFT_CONTEXT_BYTES, Keep::Start, &read),
         ));
     }
     // The drafts in their order (the oldest first) within their limit.
     let sizes: Vec<usize> = drafts.iter().map(String::len).collect();
     let kept = prompt_fit::pick(&sizes, 0..drafts.len(), usize::MAX, DRAFT_MEMBERS_BYTES);
+    fit.picked("drafts", &kept, &cuts);
     let left_out: Vec<String> = material
         .members
         .iter()
@@ -1362,7 +1366,6 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
         .filter(|(_, kept)| !**kept)
         .map(|((target, _), _)| target.task.id().to_string())
         .collect();
-    fit.omit("drafts", left_out.len());
     let mut members: String = drafts
         .into_iter()
         .zip(&kept)
@@ -1523,13 +1526,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
             );
             (
                 goal.id(),
-                planner_goal(
-                    &mut fit,
-                    &heading,
-                    goal,
-                    (siblings, "Its other tasks"),
-                    true,
-                ),
+                planner_goal(&heading, goal, (siblings, "Its other tasks"), true),
             )
         })
         .collect();
@@ -1766,13 +1763,7 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
                     ""
                 },
             );
-            let section = planner_goal(
-                &mut fit,
-                &heading,
-                goal,
-                (material.siblings, "Its tasks"),
-                false,
-            );
+            let section = planner_goal(&heading, goal, (material.siblings, "Its tasks"), false);
             out.push_str(&planner_goals(&mut fit, vec![(goal.id(), section)]));
         }
         None => out.push_str(
@@ -1927,7 +1918,7 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
         out.push_str("\n## What it refers to\n");
     }
     // Each reference within its limit, in the order the inbox gave them.
-    let mut refs = Vec::new();
+    let (mut refs, mut cuts) = (Vec::new(), Vec::new());
     for reference in material.refs {
         let (label, read, text) = request_ref(reference)?;
         let read_note = if matches!(reference, RequestRefMaterial::Unreadable { .. }) {
@@ -1935,11 +1926,13 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
         } else {
             format!("read it whole with {read}")
         };
-        let text = fit.text("refs", &text, REQUEST_REF_BYTES, Keep::Start, &read_note);
+        let (text, cut) = prompt_fit::cut_part(&text, REQUEST_REF_BYTES, Keep::Start, &read_note);
         refs.push((label, read, text));
+        cuts.push(cut);
     }
     let sizes: Vec<usize> = refs.iter().map(|(_, _, text)| text.len()).collect();
     let kept = prompt_fit::pick(&sizes, 0..refs.len(), usize::MAX, REQUEST_REFS_BYTES);
+    fit.picked("refs", &kept, &cuts);
     let mut referred = String::new();
     let mut left_out = Vec::new();
     for ((label, read, text), kept) in refs.into_iter().zip(&kept) {
@@ -1949,7 +1942,6 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
             left_out.push(format!("{label} ({read})"));
         }
     }
-    fit.omit("refs", left_out.len());
     if !left_out.is_empty() {
         referred.push_str(&format!(
             "\n### Left out\n\n{}",
@@ -1973,7 +1965,7 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
             );
             (
                 goal.id(),
-                planner_goal(&mut fit, &heading, goal, (tasks, "Its tasks"), false),
+                planner_goal(&heading, goal, (tasks, "Its tasks"), false),
             )
         })
         .collect();
@@ -3605,11 +3597,15 @@ const OPTIONAL_SECTIONS: usize = 6;
 /// left out or replaced by how to read them; `over_limit` says why the
 /// required sections were cut, when they were.
 ///
-/// `omitted` counts an item once only where it is chosen by
-/// `Fit::lines` or is the draft planner's `origin` section as a whole.
-/// The draft planner's `drafts` and the planners' `asks` and `goals`
-/// (`planner_asks`, `planner_goals`) add a field's cut and an item
-/// left out separately, so one item may count more than once there.
+/// In the sections of a list (chosen by `Fit::lines`, and the planners'
+/// `drafts`, `asks`, `goals`, `reasons` and `refs`) and the draft
+/// planner's `origin` and `revisit`, `omitted` counts each item once,
+/// chosen after its parts are cut: left out, or kept with any part cut. A
+/// goal of the planners' `goals` is one item with its task lines; `origin`
+/// and `revisit` are each one item, whichever of their parts or the whole
+/// was cut. The recovery job's `task`, the finding planner's `finding` and
+/// the planners' `answer` still count each cut field of their one item,
+/// so that item may count up to four (`answer`: two) times.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PromptBytes {
     pub total: usize,
@@ -8007,6 +8003,393 @@ mod tests {
                 assert!(section.contains("bytes left out by the prompt's limit"));
                 assert!(section.contains("dagq show"));
             }
+        }
+    }
+
+    /// A draft of `title`, `description` and `context` bytes.
+    fn task_sized(id: i64, title: usize, description: usize, context: usize) -> Task {
+        Task::restore(TaskRecord {
+            goal_priority: None,
+            id: TaskId::new(id),
+            title: big("title", title),
+            description: big("description", description),
+            acceptance: String::new(),
+            verification_commands: Vec::new(),
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            status: TaskStatus::Draft,
+            goal_id: Some(GoalId::new(1)),
+            context: big("context", context),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
+            named_mode: None,
+            wait_for_build: false,
+        })
+        .unwrap()
+    }
+
+    fn follow_up_draft(task: Task) -> (DraftTarget, usize) {
+        let index = task.id().as_i64();
+        (
+            DraftTarget {
+                task,
+                origin: DraftOrigin::FollowUp,
+                material: json!({"source_run_id": RUN, "source_task_id": 3, "index": index}),
+                planners: 0,
+                revisit: None,
+            },
+            1,
+        )
+    }
+
+    fn draft_prompt_of(
+        members: &[(DraftTarget, usize)],
+        revisits: &[RevisitHistory],
+    ) -> FittedPrompt {
+        let key = members[0].0.bundle_key();
+        draft_planner_prompt(&DraftPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            key: &key,
+            members,
+            source: None,
+            receipt: None,
+            goals: &[],
+            answer: None,
+            revisits,
+        })
+        .unwrap()
+    }
+
+    fn omitted(bytes: &PromptBytes, section: &str) -> usize {
+        bytes.omitted.get(section).copied().unwrap_or(0)
+    }
+
+    /// A draft counts once in `drafts`: kept with its title, description
+    /// and context all cut, left out with them cut, or left out uncut.
+    #[test]
+    fn draft_planner_drafts_count_each_draft_once() {
+        // Each `cut` draft has its three fields cut (about 11 KB); an
+        // uncut one of about 9.5 KB does not fit after one of them.
+        let cut = |id| task_sized(id, 5_000, 10_000, 10_000);
+        let uncut = |id| task_sized(id, 10, 5_500, 3_800);
+        for (members, left_out, counted) in [
+            (vec![uncut(10)], vec![], 0),
+            (vec![cut(10)], vec![], 1),
+            (vec![cut(10), cut(11)], vec![11], 2),
+            (vec![cut(10), uncut(11)], vec![11], 2),
+            (vec![uncut(10), uncut(11), cut(12)], vec![12], 1),
+        ] {
+            let members: Vec<_> = members.into_iter().map(follow_up_draft).collect();
+            let fitted = draft_prompt_of(&members, &[]);
+            let shown: Vec<i64> = members
+                .iter()
+                .map(|(target, _)| target.task.id().as_i64())
+                .filter(|id| fitted.text.contains(&format!("\nTask {id}: ")))
+                .collect();
+            let all: Vec<i64> = members.iter().map(|(t, _)| t.task.id().as_i64()).collect();
+            assert_eq!(
+                all.iter()
+                    .filter(|id| !shown.contains(id))
+                    .copied()
+                    .collect::<Vec<_>>(),
+                left_out,
+                "{:?}",
+                fitted.bytes
+            );
+            assert_eq!(
+                omitted(&fitted.bytes, "drafts"),
+                counted,
+                "{:?}",
+                fitted.bytes
+            );
+        }
+    }
+
+    /// An ask counts once in `asks`: kept with its question and answer
+    /// cut, left out with them cut, or left out uncut.
+    #[test]
+    fn planner_asks_count_each_ask_once() {
+        // A cut ask takes about 2 KB, an uncut one of 900 bytes each
+        // about 1.9 KB; the newest are taken first within 8 KB, and one
+        // that does not fit is skipped for an older smaller one.
+        for (asks, left_out, counted) in [
+            (vec![asked(1, 900)], 0, 0),
+            (vec![asked(1, 5_000)], 0, 1),
+            (
+                vec![
+                    asked(1, 5_000),
+                    asked(2, 5_000),
+                    asked(3, 5_000),
+                    asked(4, 5_000),
+                    asked(5, 5_000),
+                ],
+                2,
+                5,
+            ),
+            (
+                vec![
+                    asked(1, 900),
+                    asked(2, 900),
+                    asked(3, 900),
+                    asked(4, 900),
+                    asked(5, 900),
+                ],
+                1,
+                1,
+            ),
+            (
+                vec![
+                    asked(1, 900),
+                    asked(2, 5_000),
+                    asked(3, 5_000),
+                    asked(4, 5_000),
+                    asked(5, 5_000),
+                ],
+                1,
+                4,
+            ),
+        ] {
+            let mut fit = Fit::new(100_000);
+            let text = planner_asks(&mut fit, &asks, false);
+            let shown = asks
+                .iter()
+                .filter(|ask| text.contains(&format!("- ask {}: ", ask.id)))
+                .count();
+            let bytes = fit.finish(text).bytes;
+            assert_eq!(asks.len() - shown, left_out, "{bytes:?}");
+            assert_eq!(omitted(&bytes, "asks"), counted, "{bytes:?}");
+        }
+    }
+
+    /// A goal counts once in `goals`, its task lines with it: kept with
+    /// its fields cut or task lines left out, left out cut, or left out
+    /// uncut.
+    #[test]
+    fn planner_goals_count_each_goal_once_with_its_task_lines() {
+        let section = |goal: Goal, tasks: Vec<GoalTask>| {
+            (
+                goal.id(),
+                planner_goal(
+                    &format!("\n## Goal {}", goal.id()),
+                    &goal,
+                    (&tasks, "Its tasks"),
+                    true,
+                ),
+            )
+        };
+        // A cut goal takes about 10 KB, its 50 task lines 4 KB more, an
+        // uncut one about 5.5 KB; the goals take 16 KB.
+        for (goals, left_out, counted) in [
+            (vec![section(goal_of(1, 100), goal_tasks(2))], 0, 0),
+            (vec![section(goal_of(1, 5_000), Vec::new())], 0, 1),
+            (vec![section(goal_of(1, 100), goal_tasks(50))], 0, 1),
+            (
+                vec![
+                    section(goal_of(1, 5_000), goal_tasks(50)),
+                    section(goal_of(2, 5_000), goal_tasks(50)),
+                ],
+                1,
+                2,
+            ),
+            (
+                vec![
+                    section(goal_of(1, 5_000), goal_tasks(50)),
+                    section(goal_of(2, 1_800), Vec::new()),
+                ],
+                1,
+                2,
+            ),
+            (
+                vec![
+                    section(goal_of(1, 1_800), Vec::new()),
+                    section(goal_of(2, 1_800), Vec::new()),
+                    section(goal_of(3, 1_800), Vec::new()),
+                ],
+                1,
+                1,
+            ),
+        ] {
+            let n = goals.len();
+            let mut fit = Fit::new(100_000);
+            let text = planner_goals(&mut fit, goals);
+            let shown = (1..=n)
+                .filter(|id| text.contains(&format!("\n## Goal {id}\n")))
+                .count();
+            let bytes = fit.finish(text).bytes;
+            assert_eq!(n - shown, left_out, "{bytes:?}");
+            assert_eq!(omitted(&bytes, "goals"), counted, "{bytes:?}");
+        }
+    }
+
+    /// A reason counts once in `reasons`: kept cut, left out cut, or left
+    /// out uncut.
+    #[test]
+    fn runtime_planner_reasons_count_each_reason_once() {
+        // A cut reason takes about 4 KB, an uncut one about 3 KB; the
+        // reasons take 12 KB in their order.
+        let (cut, uncut) = (big("reason", 10_000), big("reason", 3_000));
+        for (reasons, left_out, counted) in [
+            (vec![uncut.clone()], 0, 0),
+            (vec![cut.clone()], 0, 1),
+            (
+                vec![cut.clone(), uncut.clone(), uncut.clone(), uncut.clone()],
+                1,
+                2,
+            ),
+            (
+                vec![
+                    cut.clone(),
+                    uncut.clone(),
+                    uncut.clone(),
+                    cut.clone(),
+                    uncut.clone(),
+                ],
+                2,
+                3,
+            ),
+        ] {
+            let fitted = runtime_planner_prompt(
+                Path::new("/q/queue.db"),
+                ProposalId::new(3),
+                &[],
+                &reasons,
+                Some(TaskId::new(42)),
+            )
+            .unwrap();
+            assert_eq!(
+                fitted
+                    .text
+                    .contains(&format!("({left_out} more reasons left out")),
+                left_out > 0,
+                "{:?}",
+                fitted.bytes
+            );
+            assert_eq!(
+                omitted(&fitted.bytes, "reasons"),
+                counted,
+                "{:?}",
+                fitted.bytes
+            );
+        }
+    }
+
+    /// A reference counts once in `refs`: kept cut, left out cut, or left
+    /// out uncut.
+    #[test]
+    fn request_planner_refs_count_each_reference_once() {
+        let request = crate::domain::plan_request::PlanRequest {
+            id: crate::domain::RequestId::new(6),
+            text: "plan it".into(),
+            note: None,
+            refs: Vec::new(),
+            requested_by: "inbox".into(),
+            requested_by_id: "inbox".into(),
+            status: crate::domain::plan_request::RequestStatus::Open,
+            status_reason: None,
+            proposals: Vec::new(),
+            planners: 0,
+            created_at: 0,
+            updated_at: 0,
+        };
+        // A cut ask takes about 8 KB, an uncut one of 3,000 bytes each
+        // about 6 KB; the references take 32 KB in their order.
+        let refer = |id, bytes| RequestRefMaterial::Ask(asked(id, bytes));
+        for (refs, left_out, counted) in [
+            (vec![refer(1, 3_000)], 0, 0),
+            (vec![refer(1, 20_000)], 0, 1),
+            (
+                vec![
+                    refer(1, 20_000),
+                    refer(2, 20_000),
+                    refer(3, 20_000),
+                    refer(4, 20_000),
+                    refer(5, 20_000),
+                ],
+                2,
+                5,
+            ),
+            (
+                vec![
+                    refer(1, 20_000),
+                    refer(2, 3_000),
+                    refer(3, 3_000),
+                    refer(4, 3_000),
+                    refer(5, 3_000),
+                ],
+                1,
+                2,
+            ),
+        ] {
+            let fitted = request_planner_prompt(&RequestPlannerMaterial {
+                db: Path::new("/q/queue.db"),
+                request: &request,
+                handed: "The person's words are in /q/planners/1/request.md.",
+                attempt: 1,
+                refs: &refs,
+                goals: &[],
+                asks: &[],
+                answer: None,
+            })
+            .unwrap();
+            let shown = (1..=refs.len())
+                .filter(|id| fitted.text.contains(&format!("### Ask {id} ")))
+                .count();
+            assert_eq!(refs.len() - shown, left_out, "{:?}", fitted.bytes);
+            assert_eq!(
+                omitted(&fitted.bytes, "refs"),
+                counted,
+                "{:?}",
+                fitted.bytes
+            );
+        }
+    }
+
+    /// The revisit section is one composite item: it counts once in
+    /// `revisit` when a question or note in it, the section as a whole,
+    /// or both were cut.
+    #[test]
+    fn draft_planner_revisit_counts_inner_and_whole_cuts_once() {
+        let mut members = vec![follow_up_draft(task_sized(10, 10, 100, 100))];
+        members[0].0.revisit = Some(crate::domain::DraftRevisit {
+            task_id: TaskId::new(10),
+            revisit_at: 0,
+            revisit_at_utc: "1970-01-01T00:00:00.000Z".into(),
+            note: Some("look again".into()),
+            set_by: "inbox".into(),
+            set_by_id: "inbox:1".into(),
+            created_at: 0,
+            opened_at: None,
+            planner_id: None,
+        });
+        // No cut, inner cuts only, the whole section only (ten asks of
+        // about 1 KB each), and inner plus whole section cuts.
+        for (asks, notes, whole_cut, counted) in [
+            (1, 100, false, 0),
+            (1, 5_000, false, 1),
+            (10, 100, true, 1),
+            (10, 5_000, true, 1),
+        ] {
+            let history = [RevisitHistory {
+                task: TaskId::new(10),
+                asks: (1..=asks).map(|id| asked(id, 500)).collect(),
+                notes: vec![big("noted", notes), big("noted", notes)],
+            }];
+            let fitted = draft_prompt_of(&members, &history);
+            assert_eq!(
+                fitted.text.contains("`dagq show ID --full` for each draft"),
+                whole_cut,
+                "{:?}",
+                fitted.bytes
+            );
+            assert_eq!(
+                omitted(&fitted.bytes, "revisit"),
+                counted,
+                "{:?}",
+                fitted.bytes
+            );
         }
     }
 

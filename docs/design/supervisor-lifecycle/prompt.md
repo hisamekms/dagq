@@ -239,5 +239,6 @@ workerの`prompt.txt`はこの方針の範囲に含めない。
   それでも超えたときだけ、先頭と末尾（指示とverdictのschema）を残して中ほどを切る（`Fit::finish`）。
 - 約束: 復旧jobの固定バイナリの節はretryの判断の材料なので、alertの事実の直後に置き、中ほどを切っても残る側に置く（`binary_sections`）。
 - 記録: どのjobも`PromptBytes`を`prompt_bytes`としてeventに記録し、plan reviewと同じ形を持つ。
-  省いた件数の数え方の落とし穴（同じ項目を複数回数える節がある）は`PromptBytes`のdoc commentが持つ。
+  省いた件数（`omitted`）は節ごとに、省いた項目と残して切った項目を数える。
+  1件を1回だけ数える節とその単位、欄ごとに数える例外の節は`PromptBytes`のdoc commentが持つ。
 - 上限を確かめるunit testは`src/application/prompt.rs`の「最も大きな入力でも上限に収まる」test群で、eventの記録は各jobの`tests/it`のmoduleが確かめる。

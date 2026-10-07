@@ -89,6 +89,16 @@ pub(crate) fn cut(text: &str, max: usize, keep: Keep, read: &str) -> Option<(Str
     Some((format!("{kept}\n{note}"), left_out))
 }
 
+/// `text` within `max` bytes (see [`cut`]) and whether it was cut,
+/// counted in no section: the caller counts the item the text is a part
+/// of once ([`Fit::picked`]).
+pub(crate) fn cut_part(text: &str, max: usize, keep: Keep, read: &str) -> (String, bool) {
+    match cut(text, max, keep, read) {
+        Some((cut, _)) => (cut, true),
+        None => (text.to_owned(), false),
+    }
+}
+
 /// The longest string in `value`.
 fn longest(value: &mut Value) -> Option<&mut String> {
     match value {
@@ -257,6 +267,17 @@ impl Fit {
         }
     }
 
+    /// Count the items of section `name` chosen by [`pick`] once each:
+    /// those left out (not `kept`), and those kept that were `cut`.
+    pub(crate) fn picked(&mut self, name: &'static str, kept: &[bool], cut: &[bool]) {
+        let counted = kept
+            .iter()
+            .zip(cut)
+            .filter(|(kept, cut)| !**kept || **cut)
+            .count();
+        self.omit(name, counted);
+    }
+
     /// `text` of section `name` within `max` bytes (see [`cut`]), counted
     /// as one item cut when it was.
     pub(crate) fn text(
@@ -267,13 +288,9 @@ impl Fit {
         keep: Keep,
         read: &str,
     ) -> String {
-        match cut(text, max, keep, read) {
-            Some((cut, _)) => {
-                self.omit(name, 1);
-                cut
-            }
-            None => text.to_owned(),
-        }
+        let (text, cut) = cut_part(text, max, keep, read);
+        self.omit(name, usize::from(cut));
+        text
     }
 
     /// [`Self::text`] of material the prompt cannot do without: a cut is
@@ -285,16 +302,30 @@ impl Fit {
         max: usize,
         read: &str,
     ) -> String {
+        let (text, cut) = self.required_part(name, text, max, read);
+        self.omit(name, usize::from(cut));
+        text
+    }
+
+    /// [`Self::required`] of a part of an item of section `name`, and
+    /// whether it was cut: the cut is said in `over_limit` but counted in
+    /// no section, as [`cut_part`].
+    pub(crate) fn required_part(
+        &mut self,
+        name: &'static str,
+        text: &str,
+        max: usize,
+        read: &str,
+    ) -> (String, bool) {
         match cut(text, max, Keep::Start, read) {
             Some((cut, left_out)) => {
-                self.omit(name, 1);
                 self.over(format!(
                     "{name}: {left_out} of {} bytes left out by its limit of {max}",
                     text.len()
                 ));
-                cut
+                (cut, true)
             }
-            None => text.to_owned(),
+            None => (text.to_owned(), false),
         }
     }
 
@@ -338,12 +369,8 @@ impl Fit {
         let sizes: Vec<usize> = lines.iter().map(|(line, _)| line.len()).collect();
         let kept = pick(&sizes, order, count, bytes);
         let left_out: Vec<usize> = (0..items.len()).filter(|index| !kept[*index]).collect();
-        let kept_cuts = lines
-            .iter()
-            .zip(&kept)
-            .filter(|((_, cut), kept)| *cut && **kept)
-            .count();
-        self.omit(name, left_out.len() + kept_cuts);
+        let cuts: Vec<bool> = lines.iter().map(|(_, cut)| *cut).collect();
+        self.picked(name, &kept, &cuts);
         (
             lines
                 .into_iter()
