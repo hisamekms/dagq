@@ -573,15 +573,16 @@ impl Supervisor<'_> {
         self.expected(task)
     }
 
-    /// The files `task` is expected to touch: its declared paths, or the
-    /// files its most related landed tasks changed.
+    /// The files `task` is expected to touch: its declared concrete paths,
+    /// or, when it declares none, the files its most related landed tasks
+    /// changed (ADR-t1981-1).
     pub(super) fn expected(&mut self, task: TaskId) -> Result<Vec<String>> {
         if let Some(files) = self.defer.expected.get(&task) {
             return Ok(files.clone());
         }
         let declared = self.queue.show(task)?.task.paths().to_vec();
         let mut changed = Vec::new();
-        if declared.is_empty() {
+        if claim_defer::needs_related_landings(&declared) {
             match self.queue.related_landed_commits(task, RELATED_TASKS) {
                 Ok(commits) => {
                     for commit in commits {

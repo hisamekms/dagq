@@ -3818,7 +3818,7 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<PlanRevie
                         None,
                         bytes,
                         format!(
-                            "dagq show {id} --full (its declared paths; without them, dagq related {id})"
+                            "dagq show {id} --full (its declared paths without wildcards; without any, dagq related {id})"
                         ),
                     );
                     line.len()
@@ -3886,7 +3886,7 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<PlanRevie
         format!("{over_note}{}", json_block(&task_lines))
     };
     sections.own_expected = if expected_lines.is_empty() && omitted.contains_key("expected_files") {
-        "(left out: read each task's declared paths with `dagq show ID --full`; without them, `dagq related ID`)".to_owned()
+        "(left out: read each task's declared paths without wildcards with `dagq show ID --full`; without any, `dagq related ID`)".to_owned()
     } else {
         json_block(&expected_lines)
     };
@@ -4282,7 +4282,7 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
          Where the repository has no AGENTS.md, judge a task's verification, paths and evidence in this order: CLAUDE.md; then what the README, the CI configuration and the build configuration show; when none of them settles it, it needs a person: a concern.\n\n\
          The proposal was submitted {submitted} and was sent back {revises} time(s) before (at most {max}; a revise past that goes to a person as a concern).\n\n\
          Tasks of the proposal:\n{tasks}\n\n\
-         Files each task of the proposal is expected to touch (its declared paths; without them, the files the landings of its 3 most related completed tasks changed; a guess, so check it against the source):\n{own_expected}\n\n\
+         Files each task of the proposal is expected to touch (its declared paths without wildcards; without any, the files the landings of its 3 most related completed tasks changed; a guess, so check it against the source):\n{own_expected}\n\n\
          Goals they belong to (description, acceptance, constraints; constraints win over a task's description):\n{goals}\n\n\
          The mechanical checks (`dagq lint`) found:\n{lint}\n\n\
          Other proposals not ready yet:\n{others}\n\n\

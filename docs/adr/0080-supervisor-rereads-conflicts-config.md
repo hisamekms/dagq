@@ -10,6 +10,7 @@ amended_by:
   - adr-t774-1
   - adr-t775-1
   - adr-t1484-1
+  - adr-t1981-1
 supersedes:
   - adr-0069
 owners:

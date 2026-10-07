@@ -2297,7 +2297,7 @@ impl<T: RunLog + ?Sized> MarkLog for T {
 pub trait QueueRecords {
     /// The commits that landed the `limit` completed tasks most related to
     /// `task` (`dagq related`, ADR-0046), for the files it is expected to
-    /// touch when it declares no paths (ADR-0069).
+    /// touch when it declares no concrete path (ADR-0069, ADR-t1981-1).
     fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>>;
     /// The `limit` tasks most related to `task`, best first, with their
     /// clues, kept to `statuses` (empty: any status; `dagq related`,

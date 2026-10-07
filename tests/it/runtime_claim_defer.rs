@@ -126,7 +126,7 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
         // Task 1 (the fixture's) declares no paths and has no related
         // landing: nothing is expected of it.
         let hot = add_task(&mut queue, "edits the hot file", &[HOT], Priority::Normal);
-        let near = add_task(&mut queue, "edits the docs", &["docs/**"], Priority::Normal);
+        let near = add_task(&mut queue, "edits the docs", &[HOT], Priority::Normal);
         let apart = add_task(
             &mut queue,
             "edits elsewhere",
@@ -227,7 +227,7 @@ fn a_run_waiting_for_its_owner_past_the_grace_lets_the_deferred_task_go() {
     let (hot, near) = {
         let mut queue = SqliteQueue::open(&db).unwrap();
         let hot = add_task(&mut queue, "edits the hot file", &[HOT], Priority::Normal);
-        let near = add_task(&mut queue, "edits the docs", &["docs/**"], Priority::Normal);
+        let near = add_task(&mut queue, "edits the docs", &[HOT], Priority::Normal);
         (hot, near)
     };
     let with_grace = |grace: i64| SuperviseOptions {
@@ -303,7 +303,7 @@ fn after_a_failed_run_in_the_way(agent: &str) -> (Fixture, PathBuf, TaskId) {
     let (hot, near) = {
         let mut queue = SqliteQueue::open(&db).unwrap();
         let hot = add_task(&mut queue, "edits the hot file", &[HOT], Priority::Normal);
-        let near = add_task(&mut queue, "edits the docs", &["docs/**"], Priority::Normal);
+        let near = add_task(&mut queue, "edits the docs", &[HOT], Priority::Normal);
         (hot, near)
     };
     let backend = TestWorkspace::new(&db, false, agent);
@@ -401,7 +401,7 @@ fn a_changed_conflicts_table_is_read_again_without_a_restart() {
     };
     let limit = Duration::from_secs(60);
     wait_until(&db, limit, |_| runs_of(&db, hot) == 1);
-    let near = add("edits the docs", &["docs/**"]);
+    let near = add("edits the docs", &[HOT]);
     wait_until(&db, limit, |_| runs_of(&db, near) == 1);
     assert!(events(&db, "claim_deferred").is_empty());
     assert!(events(&db, "conflicts_config_changed").is_empty());
@@ -411,7 +411,7 @@ fn a_changed_conflicts_table_is_read_again_without_a_restart() {
     wait_until(&db, limit, |_| {
         events(&db, "conflicts_config_changed").len() == 1
     });
-    let later = add("edits the docs later", &["docs/**"]);
+    let later = add("edits the docs later", &[HOT]);
     wait_until(&db, limit, |_| events(&db, "claim_deferred").len() == 1);
     let deferred = events(&db, "claim_deferred");
     assert_eq!(deferred[0].0, Some(later));
@@ -431,7 +431,7 @@ fn a_changed_conflicts_table_is_read_again_without_a_restart() {
         })
     });
     conflicts("hotspot_conflicts = 3\ndefer_max_secs = 0\n");
-    let last = add("edits the docs last", &["docs/**"]);
+    let last = add("edits the docs last", &[HOT]);
     wait_until(&db, limit, |_| {
         events(&db, "candidates_sampled")
             .iter()
@@ -773,7 +773,7 @@ fn a_deferral_stays_shown_while_the_supervisor_does_not_judge_the_claims() {
     let (hot, near, apart) = {
         let mut queue = SqliteQueue::open(&db).unwrap();
         let hot = add_task(&mut queue, "edits the hot file", &[HOT], Priority::Normal);
-        let near = add_task(&mut queue, "edits the docs", &["docs/**"], Priority::Normal);
+        let near = add_task(&mut queue, "edits the docs", &[HOT], Priority::Normal);
         let apart = add_task(
             &mut queue,
             "edits elsewhere",

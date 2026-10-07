@@ -2089,7 +2089,12 @@ fn a_verdict_on_a_task_edited_during_its_review_is_not_applied_and_the_review_ru
 
 /// A task of `title`, `description` and `acceptance`, waiting for the
 /// blocker.
-fn add_text(queue: &mut SqliteQueue, title: &str, description: &str, acceptance: &str) -> TaskId {
+pub(crate) fn add_text(
+    queue: &mut SqliteQueue,
+    title: &str,
+    description: &str,
+    acceptance: &str,
+) -> TaskId {
     queue
         .add(NewTask {
             change: None,
@@ -2271,7 +2276,7 @@ fn the_search_candidates_of_a_japanese_title_include_similar_japanese_tasks() {
 }
 
 /// A task that declares `paths`, waiting for the draft blocker.
-fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
+pub(crate) fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
     queue
         .add(NewTask {
             change: None,
@@ -2292,99 +2297,6 @@ fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
         })
         .unwrap()
         .id()
-}
-
-/// Task 635: an in-progress task is expected to touch what its run
-/// changed (ADR-0069 decision 2), not only its declared paths: its run's
-/// branch edits the hotspot `seed.txt` it does not declare, and the prompt
-/// lists that file for it and names it on the hotspot. The run has no
-/// lease: the supervisor recovers it and its recovery job cannot start,
-/// which leaves the task in progress with the run as its latest.
-#[test]
-fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
-    let fx = fixture();
-    let mut queue = SqliteQueue::open(&fx.db).unwrap();
-    // The one task without the draft blocker, so the only one claimed.
-    let running = queue
-        .add(NewTask {
-            change: None,
-            title: "poiuytrewq running".into(),
-            description: "d".into(),
-            acceptance: "a".into(),
-            verification_commands: vec!["true".into()],
-            required_evidence: Vec::new(),
-            paths: vec!["other.txt".into()],
-            priority: Some(Priority::Normal),
-            dependencies: Vec::new(),
-            goal_dependencies: Vec::new(),
-            goal_id: None,
-            context: String::new(),
-            provider: None,
-            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
-            wait_for_build: false,
-        })
-        .unwrap()
-        .id();
-    queue.transition(running, TaskAction::BypassReview).unwrap();
-    let head = String::from_utf8(
-        Command::new(git_executable().expect("git executable"))
-            .arg("-C")
-            .arg(&fx.repo)
-            .args(["rev-parse", "HEAD"])
-            .bounded_output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let base = dagq::domain::CommitSha::parse(head.trim(), "base commit").unwrap();
-    let dagq::domain::ClaimOutcome::Claimed { run } = queue.claim(&base).unwrap() else {
-        panic!("task {running} was not claimed");
-    };
-    assert_eq!(run.task_id(), running);
-    // The run's branch changes the hotspot, a file its task does not declare.
-    git(&fx.repo, &["checkout", "-b", "dagq/running"]);
-    fs::write(fx.repo.join("seed.txt"), "changed by the run\n").unwrap();
-    git(&fx.repo, &["commit", "-am", "the run's change"]);
-    git(&fx.repo, &["checkout", "main"]);
-    let conn = Connection::open(&fx.db).unwrap();
-    conn.execute(
-        "UPDATE task_runs SET branch='dagq/running' WHERE id=?1",
-        [run.id().as_str()],
-    )
-    .unwrap();
-    let own = add_paths(&mut queue, "zxcvbnm own", &["seed.txt"]);
-    submit(&mut queue, &[own], None);
-    conn.execute(
-        "INSERT INTO run_events(task_id, kind, payload) VALUES (1, 'conflict_precheck', ?1)",
-        [json!({"main": "m", "conflicts": ["seed.txt"]}).to_string()],
-    )
-    .unwrap();
-    let reviewer = StubReviewer::new(&[
-        json!({"verdict": "pass", "reasons": [], "summary": "sound", "actions": []}),
-    ]);
-    let outcome = supervise(&fx, &PlanWorkspace::default(), &reviewer);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let prompt = reviewer.prompts().remove(0);
-    let lines: Vec<Value> = prompt
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
-    let summary = lines
-        .iter()
-        .find(|line| line["id"] == json!(running) && line.get("expected_files").is_some())
-        .unwrap_or_else(|| panic!("{prompt}"));
-    assert_eq!(summary["status"], "in_progress", "{summary}");
-    assert_eq!(
-        summary["expected_files"],
-        json!(["other.txt", "seed.txt"]),
-        "{summary}"
-    );
-    let hot = lines
-        .iter()
-        .find(|line| line["path"] == "seed.txt" && line.get("conflicts").is_some())
-        .unwrap_or_else(|| panic!("no hotspot in {prompt}"));
-    assert_eq!(hot["queued_tasks"], json!([running]), "{hot}");
-    assert_eq!(hot["proposal_tasks"], json!([own]), "{hot}");
 }
 
 /// Plan review is an actor of its own, the plan-review-job (ADR-t728-1):

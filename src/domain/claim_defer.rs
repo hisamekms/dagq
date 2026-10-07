@@ -71,11 +71,11 @@ pub const OWNER_WAITING: &str = "owner_waiting";
 pub const NO_COMMIT: &str = "no_commit";
 
 /// How many related landed tasks give the files of a task that declares no
-/// paths.
+/// concrete path.
 pub const RELATED_TASKS: usize = 3;
 
 /// The files a run in flight is expected to touch: its diff from its base
-/// and the expected files of its task, as paths and globs.
+/// and the expected files of its task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InFlight {
     pub run_id: String,
@@ -195,18 +195,41 @@ pub struct OverlapRun {
     pub task_id: TaskId,
 }
 
-/// Whether `files` (paths or `--paths` globs) touch `path`.
+/// Whether `files` (paths, read as globs) touch `path`.
 pub fn touches(files: &[String], path: &str) -> bool {
     files.iter().any(|file| glob_matches(file, path))
 }
 
-/// The expected files of a task: its declared paths, or, when it declares
-/// none, the files the landings of its most related tasks changed.
+/// The wildcards of a `--paths` glob ([`glob_matches`] reads `*`, `**`
+/// and `?`).
+const WILDCARDS: [char; 2] = ['*', '?'];
+
+/// The declared paths that name a file: those with no wildcard. A glob
+/// declares the scope a task may change, not the files it means to touch,
+/// so it is left out of the expected files (ADR-t1981-1, amending ADR-0080
+/// decision 1).
+pub fn concrete_paths(declared: &[String]) -> Vec<&String> {
+    declared
+        .iter()
+        .filter(|path| !path.contains(WILDCARDS))
+        .collect()
+}
+
+/// Whether the expected files of a task that declares `declared` come from
+/// the landings of its most related tasks: it declares no concrete path.
+pub fn needs_related_landings(declared: &[String]) -> bool {
+    concrete_paths(declared).is_empty()
+}
+
+/// The expected files of a task: its declared concrete paths, or, when it
+/// declares none (no paths, or only globs), the files the landings of its
+/// most related tasks changed (ADR-t1981-1).
 pub fn expected_files(declared: &[String], related_changes: &[String]) -> Vec<String> {
-    let files = if declared.is_empty() {
-        related_changes
+    let concrete = concrete_paths(declared);
+    let files: Vec<&String> = if concrete.is_empty() {
+        related_changes.iter().collect()
     } else {
-        declared
+        concrete
     };
     let mut unique: Vec<String> = Vec::new();
     for file in files {
@@ -660,13 +683,38 @@ mod tests {
     #[test]
     fn declared_paths_come_before_the_related_landings() {
         assert_eq!(
-            expected_files(&strings(&["docs/**"]), &strings(&["src/a.rs"])),
-            strings(&["docs/**"])
+            expected_files(&strings(&["src/b.rs"]), &strings(&["src/a.rs"])),
+            strings(&["src/b.rs"])
         );
         assert_eq!(
             expected_files(&[], &strings(&["src/a.rs", "src/b.rs", "src/a.rs"])),
             strings(&["src/a.rs", "src/b.rs"])
         );
+    }
+
+    #[test]
+    fn globs_are_left_out_of_the_expected_files() {
+        assert_eq!(
+            expected_files(&strings(&["docs/**", "src/a.rs"]), &strings(&["x.md"])),
+            strings(&["src/a.rs"])
+        );
+        assert_eq!(
+            expected_files(&strings(&["src/*.rs", "a?.md", "b.md"]), &[]),
+            strings(&["b.md"])
+        );
+        assert!(!needs_related_landings(&strings(&["docs/**", "src/a.rs"])));
+    }
+
+    #[test]
+    fn only_globs_fall_back_to_the_related_landings() {
+        let declared = strings(&["docs/**", "*.md"]);
+        assert!(needs_related_landings(&declared));
+        assert!(needs_related_landings(&[]));
+        assert_eq!(
+            expected_files(&declared, &strings(&["src/a.rs", "src/a.rs"])),
+            strings(&["src/a.rs"])
+        );
+        assert_eq!(expected_files(&declared, &[]), Vec::<String>::new());
     }
 
     fn hot() -> Option<Overlap> {

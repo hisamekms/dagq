@@ -34,7 +34,6 @@ use crate::{
         PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict, PlannerCloseCode,
         PlannerOrigin, PlannerState, Proposal, ProposalId, Task, TaskDetail,
         actor_model::{ActorLaunch, JobRoute, ModelRole, job_route, job_wait_text},
-        claim_defer::expected_files,
         next_to_review,
         plan_review::{
             PlanConcernDecision, PlanConcernEscalation, PlanRecommendation, PlanVerdictDecision,
@@ -403,10 +402,10 @@ impl Supervisor<'_> {
 
     /// The files each task of the proposal and each ready or in-progress
     /// task is expected to touch, by the rule of the claim's deferral
-    /// (ADR-0069 decisions 1, 2): its declared paths or the files its most
-    /// related landed tasks changed, and for an in-progress task also what
-    /// its run changed. The proposal's tasks are read afresh, as the
-    /// planner may have changed their paths.
+    /// (ADR-0069 decisions 1, 2, ADR-t1981-1): its declared concrete paths
+    /// or the files its most related landed tasks changed, and for an
+    /// in-progress task also what its run changed. The proposal's tasks are
+    /// read afresh, as the planner may have changed their paths.
     fn plan_expected_files(
         &mut self,
         tasks: &[TaskDetail],
@@ -426,7 +425,14 @@ impl Supervisor<'_> {
         {
             for run in self.runs_in_flight()? {
                 if let Some(files) = expected.get_mut(&run.task_id) {
-                    *files = expected_files(&run.files, &[]);
+                    // Already expected files and a diff, not declared
+                    // paths: deduplicated, not filtered again.
+                    files.clear();
+                    for file in &run.files {
+                        if !files.contains(file) {
+                            files.push(file.clone());
+                        }
+                    }
                 }
             }
         }

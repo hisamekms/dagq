@@ -64,6 +64,7 @@ mod observer_codex;
 mod plan_review;
 mod plan_review_codex;
 mod plan_review_concern;
+mod plan_review_expected_files;
 mod plan_review_launch;
 mod plan_review_turns;
 mod planner_close;
