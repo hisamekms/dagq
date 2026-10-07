@@ -276,6 +276,15 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
         vec![proposal.id(), second.id()]
     );
     assert_eq!(attention(&fx.db, "request_proposed").len(), 1);
+    // Withdrawn and submitted again by a planner without the request, its
+    // task stays the request's (ADR-t1971-1 decision 2).
+    queue.withdraw_proposal(second.id()).unwrap();
+    let again = submit_from(&mut queue, "another planner", more);
+    assert_eq!(
+        queue.plan_request(id).unwrap().proposals,
+        vec![proposal.id(), second.id(), again.id()]
+    );
+    assert_eq!(attention(&fx.db, "request_proposed").len(), 1);
     // A proposed request waits for no planner, and is listed with --all.
     assert!(queue.planner_requests().unwrap().is_empty());
     assert!(

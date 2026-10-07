@@ -87,7 +87,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 
 ## KPIの目標割れと改善の上限
 
-[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定24〜26（task 433）。observerはKPIの目標割れの継続を種類`kpi`のfindingにし、そこから作る改善のproposalは同時の数に上限がある。
+[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定24〜26（決定26はADR-t1971-1がamends）。observerはKPIの目標割れの継続を種類`kpi`のfindingにし、そこから作る改善のproposalは同時の数に上限がある。
 
 - **入力の`kpi`**（`OneShot::observer_kpi`、純粋関数は`domain::kpi::observe::observer_input`）: [`kpi`](kpi.md)を直近7日（`--period day --last 7`）と直近4週（`--period week --last 4`）で`dagq kpi`と同じ設定（main checkoutの`dagq.toml`の`[kpi]`にhost.tomlを重ねたもの）で計算し、次を載せる。数字は`kpi`の出力をそのまま引き、observerは作らない。読めなければ`{"error": ...}`にして他の入力で観察を続ける。
   - `config`: `min_samples`・`breach_periods`・`breach_weeks`。
@@ -98,7 +98,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 - **入力の`improvements`**（`OneShot::improvements_of`）: 動いている改善の数`running`、上限`limit`、`reached`、上限に達しているときにplannerを待つfindingの`waiting`（`finding_id`と`reason: improvement_limit`）。`dagq findings`も同じものを`improvements`として返す。
 - **promptの読み方**: `breaches`の各項を、その`finding_kind`・対象`queue`・その`subject`・根拠`evidence_event_id`で`finding record --kind <finding_kind> --queue --subject '<subject>' --evidence <id>`にし、summaryとdetailに値・目標・続いた期間・印をそのまま写す。根拠が無い（まだ記録されていない）目標割れは次のobservationに回す。日と週の同じKPIと層、続いている目標割れは`subject`が同じなので1件のfindingにまとまり（ADR-0044の決定18）、新しいeventがあるときだけ記録し直す（決定21）。`missed`と`not_judged`はfindingにしない。`kpi`か`forecast`のfindingの目標が`ok`に戻ったら、戻った期間を理由に`finding resolve`する。影響と続いた期間から改善が要ると読めば`--propose`を付け、目標割れを`blocked`のaskにはしない。`trend`は印と並べて読み、入力に無い数字を計算しない。
 - **改善の上限**（[Finding planners](finding-planners.md)の3と11）: runtimeのplannerがfindingに紐づけて出したproposalのうち終わっていないもの（人が開いたplannerのproposalは数えない）と、`open`のfindingのために立ったruntimeのplannerの数が、`dagq.toml`の`[kpi]`の`max_improvement_proposals`（既定2。host.tomlでは変えない）に達しているあいだ、supervisorは印の付いたfindingに新しいplannerを立てない。findingは`open`のまま待ち、1つ終われば印の古い順に立つ。
-- **優先度**: 改善のproposalのtaskは`normal`以下。plan reviewがpassのときに、findingに紐づいたproposalの`high`以上のtaskを`lower_priority`で`normal`に下げる（[Finding planners](finding-planners.md)の6）。
+- **優先度**: 改善のproposalのtaskは個別の優先度を持たずgoalから継ぎ、`normal`以下はgoalと所属で守る（[Finding planners](finding-planners.md)の6）。
 - **test**: `domain::kpi::observe`のunit test（目標割れのsubject・根拠・印、根拠の無い目標割れ）、`observer`のunit test（入力のキーとpromptの読み方。flakyなtestの読み方（e2eの関門のtestごとの回数を含む）は`prompt_explains_how_to_record_the_flaky_tests`）、`tests/it/runtime_observer.rs`の`observe_reads_the_kpis_and_the_improvements_and_keeps_one_kpi_finding_per_subject`（`dagq.toml`の目標と上限が入力に載り、同じsubjectの`kpi`のfindingが1件にまとまる）と`observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_finding`（下の「完了見込みの誤差」）。
 
 ## 完了見込みの誤差
@@ -107,7 +107,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 
 - **入力**: 入力の`kpi.forecast`（上）に、日と週の期間ごとの答え合わせの指標（p50の誤差の秒と絶対値と比、p90の的中率、遅れ側・早い側の割合を`all`・`target=*`・`change=*`・`band=*`・`method=*`・`marks=0` / `marks=1+`の層で）と件数が載る。`marks=0`は見積もり方法そのものの誤差、`marks=1+`は計画の変更を含む。
 - **偏りの判定**: 「偏りが続く」は`forecast.*`の目標（`dagq.toml`の`[kpi.targets]`。planner が書く。初めの案はp50の誤差の比の中央値が±25%以内、p90の的中率が75%以上）の目標割れ（`breach`）だけで、別の経路は作らない。observerは`kpi.forecast`の数字から自分で偏りを判定しない。
-- **finding**: `forecast.*`のKPIの目標割れは`kpi.breaches`に`finding_kind: forecast`、`subject`は接頭辞`forecast.`を除いた`<指標>/<層>`（例: `p50_error_ratio/change=feature`、`p90_hit_rate/all`）で載り（`domain::kpi::observe::finding_kind`と`subject`）、observerは種類`forecast`・対象`queue`のfindingを記録か更新する。根拠・日と週のまとめ・解消・`--propose`はKPIの目標割れと同じで、改善のproposalの上限と優先度（ADR-0051の決定25・26）も同じく効く。`blocked`のaskにはせず、人には上げない。
+- **finding**: `forecast.*`のKPIの目標割れは`kpi.breaches`に`finding_kind: forecast`、`subject`は接頭辞`forecast.`を除いた`<指標>/<層>`（例: `p50_error_ratio/change=feature`、`p90_hit_rate/all`）で載り（`domain::kpi::observe::finding_kind`と`subject`）、observerは種類`forecast`・対象`queue`のfindingを記録か更新する。根拠・日と週のまとめ・解消・`--propose`はKPIの目標割れと同じで、改善のproposalの上限（ADR-0051の決定25）と優先度（ADR-t1971-1）も同じく効く。`blocked`のaskにはせず、人には上げない。
 - 見込みのsnapshotのeventは記帳のeventとしてobserverを起こさない。`dagq forecast`は読み取りのコマンドで、promptの読むコマンドに並ぶ。
 - **test**: `domain::kpi::observe`のunit test `a_forecast_breach_is_a_forecast_finding_and_its_scoring_is_listed`と、`tests/it/runtime_observer.rs`の`observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_finding`（p90を過ぎて完了したtaskの答え合わせが入力に載り、p90の的中率の目標割れが種類`forecast`のfindingになり、`kpi`のfindingにはならない）。
 

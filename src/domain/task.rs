@@ -263,6 +263,12 @@ impl Task {
         self.own_priority
     }
 
+    /// Its goal's priority, which it takes without one of its own; none
+    /// without a goal.
+    pub fn goal_priority(&self) -> Option<Priority> {
+        self.goal_priority
+    }
+
     pub fn change(&self) -> Option<&TaskChange> {
         self.change.as_ref()
     }

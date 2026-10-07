@@ -30,6 +30,7 @@ use crate::domain::{
     MAX_PLAN_REVISES, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, Predecessor, Proposal, ProposalId,
     Provider, Receipt, RunEvent, RunId, RunStatus, TRIAGE_RETRY_FAILURES, Task, TaskDetail, TaskId,
     TaskRun,
+    plan_review::ProposalOrigin,
     recovery::{ProcessInfo, RecoveryAlert},
     related::RelatedTask,
     required_of, resume,
@@ -1753,7 +1754,7 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
          1. Tasks for an open goal: when the remedy is within an open goal's scope (the one above, or another from `dagq goal list`), add its tasks to that goal as drafts (`dagq add --goal GOAL ...`, with `--context` beginning with `from finding {id} ({kind})` and saying why you chose this remedy), check them with `dagq lint`, and submit them with `dagq submit ID... --finding {id}`.\n\
          2. A new goal: when no open goal covers it, write a draft goal (`dagq goal add --draft ...`) and its draft tasks, lint them and submit with `dagq submit --goal GOAL --finding {id}`.\n\
          Either way the submission makes finding {id} proposed with the proposal, and plan review checks it before it becomes ready; you need no person's approval for it, even for a new goal. \
-         An improvement's tasks are `--priority normal` or `low`, never higher (without --priority a task inherits its goal's): plan review lowers a higher one to normal.\n\
+         Give an improvement's tasks no `--priority`: each takes its goal's (`normal` with no goal). Put a task in an existing goal only when that goal's acceptance needs it, and an improvement only in a goal of `normal` or lower; otherwise write a new goal (its priority by the repository's rules for goal priorities, `normal` or lower for an improvement) or leave the task with no goal. Plan review checks the goal you chose.\n\
          3. Dismiss: when a task already remedies it (name the task), it no longer occurs, or it is not worth remedying, run `dagq finding dismiss {id} --reason '<why>'`, the reason saying why you decided so.\n\
          4. Ask: only when you cannot decide it yourself: (a) it needs a person's judgement, `scope` (the plan's intent, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; or (b) your confidence in the decision is low. Run `dagq ask --finding {id} --kind planner_question --because scope --recommend <propose|dismiss> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option propose --option dismiss` (`--because discard` when the question is whether to throw work away), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (propose: do 1 or 2; dismiss: do 3).\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this finding. Never open the queue database directly; use the dagq CLI only.\n",
@@ -1769,7 +1770,7 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
              The supervisor recorded this finding when the watched branch's CI turned up failures not on its list of the tests that fail already (`dagq ci failures`). Its detail is one JSON object: `tests` (the new failures; a `job:<job>/step:<step>` item is a failed step without a test name), `failed_jobs`, `range` (`from` the last green commit, `to` the first red one, `commits` between them), `url` (the CI run), `binary_contains` (whether the supervisor's build contains the range: `all`, `some`, `none` or `unknown`) and `binary_commit`.\n\
              - Copy each of them into the fix task's `--description`.\n\
              - Before you add a task, look for one that already fixes the same tests (`dagq search '<a test name>'`, `dagq list`). When one is open, add no task: run `dagq finding dismiss {id} --covered-by <task> --reason '<why>'`; that task's runs then keep these tests on their list.\n\
-             - Give the fix task `--priority normal`: it is an improvement.\n"
+             - Give the fix task no `--priority`: like any improvement it takes its goal's (a goal of `normal` or lower, or no goal).\n"
         );
         fit.section("ci_failure", &section);
         out.push_str(&section);
@@ -3409,6 +3410,8 @@ pub const SUMMARY_EXPECTED_FILES: usize = 10;
 /// files that conflict often and each task's duplicate candidates.
 pub struct PlanReviewMaterial<'a> {
     pub proposal: &'a Proposal,
+    /// Where the proposal comes from.
+    pub origin: ProposalOrigin,
     pub tasks: &'a [TaskDetail],
     pub goals: &'a [Goal],
     pub lint: &'a [LintViolation],
@@ -4295,6 +4298,23 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<PlanRevie
     })
 }
 
+/// Where a proposal comes from, as its plan review is told (ADR-t1971-1
+/// decision 1).
+fn origin_text(origin: ProposalOrigin) -> &'static str {
+    match origin {
+        ProposalOrigin::Request => {
+            "a person: a person's planning request (it, or a proposal whose tasks or goals it carries, is linked to the request)"
+        }
+        ProposalOrigin::Person => "a person: a person owns or submitted it",
+        ProposalOrigin::Finding => {
+            "the AI: a planner of the runtime's submitted it to remedy a finding (an improvement)"
+        }
+        ProposalOrigin::Planner => {
+            "the AI: a planner of the runtime's submitted it, not from a person's request"
+        }
+    }
+}
+
 /// The plan review prompt with its variable sections written in.
 fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) -> String {
     let proposal = material.proposal;
@@ -4319,7 +4339,8 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
          First read the repository's own rules in {repo}: its instructions (AGENTS.md and CLAUDE.md), the documents and rules they name (the plan review's part of them above all), and the documents the tasks name. \
          Apply what they say (the verification each kind of change needs, the declared paths, the required evidence, the rules for the records they keep, ...); the runtime has no such rules of its own. \
          Where the repository has no AGENTS.md, judge a task's verification, paths and evidence in this order: CLAUDE.md; then what the README, the CI configuration and the build configuration show; when none of them settles it, it needs a person: a concern.\n\n\
-         The proposal was submitted {submitted} and was sent back {revises} time(s) before (at most {max}; a revise past that goes to a person as a concern).\n\n\
+         The proposal was submitted {submitted} and was sent back {revises} time(s) before (at most {max}; a revise past that goes to a person as a concern).\n\
+         It comes from {origin}.\n\n\
          Tasks of the proposal:\n{tasks}\n\n\
          Files each task of the proposal is expected to touch (its declared paths without wildcards; without any, the files the landings of its 3 most related completed tasks changed; a guess, so check it against the source):\n{own_expected}\n\n\
          Goals they belong to (description, acceptance, constraints; constraints win over a task's description):\n{goals}\n\n\
@@ -4351,7 +4372,10 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
          reason_category is scope when your recommendation would let a task through against a decision the repository records, the goal's constraints or a person's precedent; discard when you recommend cancel; null otherwise. \
          A high ready or send_back with reason_category null is applied without a person (a ready as a pass, its actions included); a low confidence, scope, discard, or a send_back past the revises above goes to a person with your recommendation.\n\
          When a finding is of the same kind as an answered ask above, put that ask's id in precedents and say in the reason how the person answered then.\n\n\
-         actions are the only changes you make yourself, and only with pass (or a concern whose high ready is applied): add_dependency (a task of the proposal waits for another task whose landing its work needs; never only for a shared file or hotspot), lower_priority (never raise one), cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern). Everything else is the planner's. A proposal that remedies a finding (an improvement) keeps its tasks at normal or low: lower a high or urgent one to normal with lower_priority and pass, never revise for it (a pass lowers any you miss).\n\n\
+         actions are the only changes you make yourself, and only with pass (or a concern whose high ready is applied): add_dependency (a task of the proposal waits for another task whose landing its work needs; never only for a shared file or hotspot), lower_priority (never raise one; on the AI's task it takes the task's own priority off, so the task takes its goal's), cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern). Everything else is the planner's.\n\n\
+         Priorities and goals, by where the proposal comes from (above):\n\
+         - a person's proposal: the priorities of its tasks and goals and the goals its tasks belong to are the person's decision. Do not change them: the runtime does not apply a lower_priority to it. When one looks wrong, say so in a concern with reason_category scope.\n\
+         - the AI's proposal: its tasks have no priority of their own and take their goal's (a pass takes off any own priority a person did not set). Check instead that a new goal's priority follows the repository's rules for goal priorities, and that each task put in an existing goal is needed by that goal's acceptance; when either does not hold, revise, so the planner fixes the goal's priority, or moves the task to a new goal or leaves it with no goal. An improvement (a proposal that remedies a finding) stays below high by the goal it belongs to, not by a priority of its tasks.\n\n\
          Whatever the verdict, also estimate the weight of each submitted task of the proposal (tasks {predicted}), one entry per task in predictions, from what you read: \
          a worker (one Claude Opus session in its own Git worktree) implements the task, runs the checks the repository's instructions ask of a worker (formatting, lint, the tests of the change, ...), commits and writes a receipt; \
          then a headless review (pass / revise / concern) and `integrate`'s verification after the rebase onto main follow, and a failure, a conflict or missing evidence resumes the run. \
@@ -4373,6 +4397,7 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
         max = MAX_PLAN_REVISES,
         most = DUPLICATE_CANDIDATES,
         codes = reason_codes_section(review_reason::PLAN_REVIEW_CODES),
+        origin = origin_text(material.origin),
     )
 }
 
@@ -4949,6 +4974,7 @@ mod tests {
         hotspots: Vec<ConflictHotspot>,
         candidates: Vec<DuplicateCandidates>,
         language: Option<crate::domain::language::Language>,
+        origin: ProposalOrigin,
     }
 
     impl PlanCase {
@@ -4971,6 +4997,7 @@ mod tests {
             .unwrap();
             plan_review_prompt(&PlanReviewMaterial {
                 proposal: &proposal,
+                origin: self.origin,
                 tasks: &self.tasks,
                 goals: &self.goals,
                 lint: &[],
@@ -5074,6 +5101,7 @@ mod tests {
             hotspots: vec![hotspot("src/hot.rs"), hotspot("src/cold.rs")],
             candidates,
             language: None,
+            origin: ProposalOrigin::Planner,
         }
     }
 
@@ -5163,6 +5191,49 @@ mod tests {
             "read the evidence around it",
         ] {
             assert!(prompt.contains(instruction), "{instruction}");
+        }
+        // Where the proposal comes from, and what plan review does with
+        // the priorities and goals of each (ADR-t1971-1).
+        assert!(
+            prompt.contains(
+                "It comes from the AI: a planner of the runtime's submitted it, not from a person's request."
+            ),
+            "{prompt}"
+        );
+        for instruction in [
+            "- a person's proposal: the priorities of its tasks and goals and the goals its tasks belong to are the person's decision. Do not change them",
+            "When one looks wrong, say so in a concern with reason_category scope.",
+            "- the AI's proposal: its tasks have no priority of their own and take their goal's",
+            "a new goal's priority follows the repository's rules for goal priorities",
+            "each task put in an existing goal is needed by that goal's acceptance; when either does not hold, revise",
+            "lower_priority (never raise one; on the AI's task it takes the task's own priority off, so the task takes its goal's)",
+            "stays below high by the goal it belongs to, not by a priority of its tasks",
+        ] {
+            assert!(prompt.contains(instruction), "{instruction}");
+        }
+        for gone in [
+            "keeps its tasks at normal or low",
+            "a pass lowers any you miss",
+        ] {
+            assert!(!prompt.contains(gone), "{gone}");
+        }
+        for (origin, text) in [
+            (
+                ProposalOrigin::Request,
+                "It comes from a person: a person's planning request",
+            ),
+            (
+                ProposalOrigin::Person,
+                "It comes from a person: a person owns or submitted it.",
+            ),
+            (
+                ProposalOrigin::Finding,
+                "It comes from the AI: a planner of the runtime's submitted it to remedy a finding",
+            ),
+        ] {
+            case.origin = origin;
+            let prompt = case.prompt().text;
+            assert!(prompt.contains(text), "{origin:?} {prompt}");
         }
     }
 
@@ -6784,8 +6855,19 @@ mod tests {
             "4. Ask: only when you cannot decide it yourself:",
             "(b) your confidence in the decision is low",
             "dagq ask --finding 4 --kind planner_question --because scope --recommend <propose|dismiss> --confidence <high|low>",
+            // No own priority: the goal's priority and membership hold an
+            // improvement below high (ADR-t1971-1 decision 4).
+            "Give an improvement's tasks no `--priority`: each takes its goal's (`normal` with no goal).",
+            "Put a task in an existing goal only when that goal's acceptance needs it, and an improvement only in a goal of `normal` or lower",
+            "or leave the task with no goal",
         ] {
             assert!(prompt.contains(part), "{part} in {prompt}");
+        }
+        for gone in [
+            "plan review lowers a higher one to normal",
+            "`--priority normal` or `low`",
+        ] {
+            assert!(!prompt.contains(gone), "{gone} in {prompt}");
         }
         assert!(
             !prompt.contains("a change that is large and hard to undo"),
@@ -6819,10 +6901,11 @@ mod tests {
             "## A CI failure",
             "Copy each of them into the fix task's `--description`.",
             "`dagq finding dismiss 4 --covered-by <task> --reason '<why>'`",
-            "Give the fix task `--priority normal`",
+            "Give the fix task no `--priority`: like any improvement it takes its goal's",
         ] {
             assert!(prompt.contains(part), "{part} in {prompt}");
         }
+        assert!(!prompt.contains("--priority normal"), "{prompt}");
     }
 
     /// A task in progress with `goal` and `context`.

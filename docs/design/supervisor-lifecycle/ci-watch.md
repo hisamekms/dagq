@@ -125,7 +125,7 @@ jobsを読めない実行の`ci_check_failed`は上の「実行の扱い」（`a
   - `url`: 実行のURL
   - `binary_contains`: supervisorのbuild識別子が名乗るcommit（`build_id::named_commit`、[Build identifier](build-identifier.md)）を`binary_commit`に書き、`to`がその祖先なら`all`、`from`がnullでなく、名乗るcommitが`from`か`from`の祖先なら`none`、名乗るcommitが`from..to`の中なら`some`、名乗るcommitが無い（リリース・`+unknown`）か判定できなければ`unknown`
   - `run`: その実行の`{run_id, attempt, sha, url}`
-- **plannerへの載せ方**: `finding_planner_prompt`は`kind`が`ci_failure`のとき節`## A CI failure`を足し、`detail`の各項をtaskの`description`に写すこと、`dagq search`で同じtestを直すtaskが既にあればtaskを作らず`finding dismiss <id> --covered-by <task> --reason '...'`にすること（`--covered-by`はfindingの`covered_by_task`に書き、`finding_status_changed`に`covered_by_task`を載せる。`ci_failure`のfindingにだけ受け付け、taskは閉じていないものに限る）、`--priority`は`normal`（ADR-0051決定26）を付けることを指示する。plan reviewの規則は変えない（`high`以上は今までどおり`normal`に下がる）。
+- **plannerへの載せ方**: `finding_planner_prompt`は`kind`が`ci_failure`のとき節`## A CI failure`を足し、`detail`の各項をtaskの`description`に写すこと、`dagq search`で同じtestを直すtaskが既にあればtaskを作らず`finding dismiss <id> --covered-by <task> --reason '...'`にすること（`--covered-by`はfindingの`covered_by_task`に書き、`finding_status_changed`に`covered_by_task`を載せる。`ci_failure`のfindingにだけ受け付け、taskは閉じていないものに限る）、改善の規則どおり`--priority`を付けないこと（[Finding planners](finding-planners.md)の6）を指示する。
 - **閉じ方**: findingの項目が全部一覧から外れたら（`removed`）、findingが`open`で閉じていないruntimeのplannerが無ければ、その実行を記録する同じトランザクションで`resolved`にする（理由`its tests passed on <shaの先頭12文字>`、`finding_status_changed`の`by: runtime`）。plannerが立っていれば閉じず、plannerの決定（proposalか`dismiss`）に任せ、promptに載らない後からの緑は次のpassの`ci failures`で読める。`proposed`のfindingは今までどおりproposalの終わり（`settle_findings`）で決まる。
 
 ## 一覧の読み方

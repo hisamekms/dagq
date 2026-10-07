@@ -261,7 +261,8 @@ fn a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies() {
 /// finding with a task to do) stop new planners at `[kpi]
 /// max_improvement_proposals` of the checkout's `dagq.toml`; the finding
 /// waits, `open`, and `findings` says why, until one ends. Plan review's
-/// pass lowers an improvement's task to `normal`.
+/// pass takes an improvement's own priority off for its goal's
+/// (ADR-t1971-1 decision 4).
 #[test]
 fn improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most() {
     let fx = fixture();
@@ -300,9 +301,17 @@ fn improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most() {
     );
 
     // Its planner submits a high task: the proposal is the improvement
-    // running now, and plan review's pass lowers the task to normal.
-    let task = draft_at(&mut queue, goal, "split a", Priority::High);
-    queue
+    // running now, and plan review's pass takes the task's own priority
+    // off, so it takes its goal's.
+    let mut planner =
+        SqliteQueue::open(&fx.db)
+            .unwrap()
+            .with_actor(dagq::domain::ActorContext::instance(
+                dagq::domain::ActorRole::Planner,
+                planners[0].id,
+            ));
+    let task = draft_at(&mut planner, goal, "split a", Priority::High);
+    planner
         .submit_linking(
             Submission {
                 tasks: vec![task],
@@ -321,13 +330,21 @@ fn improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most() {
         .unwrap();
     supervise_with(&fx, &backend, &reviewer, &three);
     assert_eq!(status(&mut queue, task), TaskStatus::Ready);
-    assert_eq!(queue.show(task).unwrap().task.priority(), Priority::Normal);
+    let inherited = queue.show(task).unwrap().task;
+    assert_eq!(
+        (inherited.priority(), inherited.own_priority()),
+        (Priority::Normal, None)
+    );
     let lowered = events(&mut queue, task, "task_priority_changed");
     assert_eq!(lowered.len(), 1, "{lowered:?}");
     assert_eq!(
         (&lowered[0]["from"], &lowered[0]["to"], &lowered[0]["by"]),
         (&json!("high"), &json!("normal"), &json!("plan_review"))
     );
+    assert_ne!(lowered[0]["to_source"], "task");
+    let finished = events(&mut queue, task, "plan_review_finished");
+    assert_eq!(finished[0]["origin"], "finding");
+    assert_eq!(finished[0]["priorities_inherited"], json!([task]));
     assert!(finding_events(&fx.db, second, "finding_planner_opened").is_empty());
     assert_eq!(finding(&queue, second).status, FindingStatus::Open);
 

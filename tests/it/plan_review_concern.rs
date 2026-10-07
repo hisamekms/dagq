@@ -37,8 +37,8 @@ fn a_sure_ready_concern_is_applied_as_a_pass_with_its_actions_and_counted() {
     let blocker = TaskId::new(1);
     let two = add(&mut queue, "two", &[blocker], Priority::High);
     let three = add(&mut queue, "three", &[blocker], Priority::Normal);
-    // An improvement: the proposal remedies a finding, so a pass lowers
-    // its high task to normal (ADR-0051 decision 26).
+    // The proposal remedies a finding but a person submitted it, so a pass
+    // keeps its high task's priority (ADR-t1971-1 decision 3).
     let finding = queue
         .record_finding(NewFinding {
             kind: "conflict_hotspot".into(),
@@ -99,7 +99,7 @@ fn a_sure_ready_concern_is_applied_as_a_pass_with_its_actions_and_counted() {
         ProposalStatus::Accepted
     );
     assert_eq!(queue.show(three).unwrap().dependencies, [blocker, two]);
-    assert_eq!(queue.show(two).unwrap().task.priority(), Priority::Normal);
+    assert_eq!(queue.show(two).unwrap().task.priority(), Priority::High);
     let finished = &events(&mut queue, two, "plan_review_finished")[0];
     assert_eq!(finished["verdict"], "concern");
     assert_eq!(finished["decision"], "pass");

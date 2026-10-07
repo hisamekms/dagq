@@ -18,8 +18,8 @@ use super::{
     asks::{insert_ask, read_ask, record_ask_closed},
     proposals, sessions,
     sqlite::{
-        SqliteQueue, cancel_as_duplicate, check_duplicate, enum_col, event, insert_dependency,
-        read_task, transition_task,
+        SqliteQueue, cancel_as_duplicate, change_priority, check_duplicate, enum_col, event,
+        insert_dependency, read_task, transition_task,
     },
 };
 use crate::{
@@ -32,10 +32,12 @@ use crate::{
         PlanReviewCandidate, PlanReviewDecision, PlannerId, Priority, ProposalId, ProposalStatus,
         TaskAction, TaskId, TaskStatus,
         plan_quality::{self, ProposalFeatures},
-        plan_review::{self, PlanReviewEnd, PlanReviewOutcome, ReviewHold},
+        plan_review::{
+            self, OriginRecord, PassPriority, PlanReviewEnd, PlanReviewOutcome, ProposalOrigin,
+            ReviewHold,
+        },
         prediction, proposal, review_reason,
         sessions::SESSION_CLOSED,
-        task,
     },
 };
 
@@ -242,9 +244,9 @@ fn apply_action(conn: &Connection, action: &PlanReviewAction, now: &str) -> Resu
             task_id,
             depends_on,
         } => insert_dependency(conn, *task_id, *depends_on, now),
-        PlanReviewAction::LowerPriority { task_id, priority } => {
-            set_priority(conn, *task_id, *priority, now)
-        }
+        // An AI's task takes its goal's priority instead of a lower one of
+        // its own (ADR-t1971-1 decision 4).
+        PlanReviewAction::LowerPriority { task_id, .. } => inherit_priority(conn, *task_id, now),
         PlanReviewAction::CancelDuplicate {
             task_id,
             duplicate_of,
@@ -255,57 +257,62 @@ fn apply_action(conn: &Connection, action: &PlanReviewAction, now: &str) -> Resu
     }
 }
 
-/// An improvement proposal's tasks are `normal` at most (ADR-0051
-/// decision 26): for a proposal linked to a finding, a `lower_priority` to
-/// `normal` for each of its submitted `members` still above `normal` after
-/// the verdict's own actions. A pass applies them, so the job's missing one
-/// does not leave an improvement task `high`; a person may raise it again
-/// with `set-priority`.
-fn improvement_priorities(
-    conn: &Connection,
-    proposal: ProposalId,
-    members: &[TaskId],
-) -> Result<Vec<PlanReviewAction>> {
-    let linked: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM findings WHERE proposal_id=?1)",
+/// Where the proposal comes from (ADR-t1971-1 decision 1), read from its
+/// request links, its owner and the findings it remedies by
+/// [`plan_review::proposal_origin`].
+fn origin(conn: &Connection, proposal: ProposalId) -> Result<ProposalOrigin> {
+    let (requested, owner_origin, owner_actor, remedies_finding): (
+        bool,
+        String,
+        Option<String>,
+        bool,
+    ) = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM plan_request_proposals WHERE proposal_id=p.id),
+                    p.owner_origin, p.owner_actor_id,
+                    EXISTS(SELECT 1 FROM findings WHERE proposal_id=p.id)
+             FROM proposals p WHERE p.id=?1",
         [proposal],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    if !linked {
-        return Ok(Vec::new());
-    }
-    let mut actions = Vec::new();
-    for &task_id in members {
-        let task = read_task(conn, task_id)?;
-        if task.status() == TaskStatus::Submitted && task.priority() > Priority::Normal {
-            actions.push(PlanReviewAction::LowerPriority {
-                task_id,
-                priority: Priority::Normal,
-            });
-        }
-    }
-    Ok(actions)
+    Ok(plan_review::proposal_origin(&OriginRecord {
+        requested,
+        owner_origin: owner_origin.parse()?,
+        owner_actor: owner_actor.as_deref(),
+        remedies_finding,
+    }))
 }
 
-/// Lower the task's priority to `to` as a priority of its own, so a later
-/// change of its goal's priority does not raise it again (ADR-t1639-1
-/// decision 2).
-fn set_priority(conn: &Connection, task_id: TaskId, to: Priority, now: &str) -> Result<()> {
+/// How a pass sees the task's priority: the actor that set its own
+/// priority last is that of its latest `task_priority_changed`, or of its
+/// creation when none changed it.
+fn pass_priority(conn: &Connection, task_id: TaskId) -> Result<PassPriority> {
     let task = read_task(conn, task_id)?;
-    let (from, from_source) = (task.priority(), task.priority_source());
-    let changed = task::set_priority(task, Some(to))?;
-    conn.execute(
-        "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
-        params![changed.own_priority().map(Priority::as_i64), now, task_id],
-    )?;
-    event(
-        conn,
+    let own_set_by: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT actor_id FROM run_events WHERE task_id=?1 AND kind IN ('{}','{}')
+                 ORDER BY id DESC LIMIT 1",
+                event_kind::TASK_CREATED,
+                event_kind::TASK_PRIORITY_CHANGED
+            ),
+            [task_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(PassPriority {
         task_id,
-        None,
-        EventKind::TaskPriorityChanged,
-        json!({"from": from, "to": to, "from_source": from_source,
-            "to_source": changed.priority_source(), "by": "plan_review"}),
-    )
+        status: task.status(),
+        own: task.own_priority(),
+        goal: task.goal_priority(),
+        own_set_by,
+    })
+}
+
+/// A pass's own priority taken off the task for its goal's, the way
+/// `set-priority --inherit` does, marked as the plan review's.
+fn inherit_priority(conn: &Connection, task_id: TaskId, now: &str) -> Result<()> {
+    change_priority(conn, task_id, None, now, Some("plan_review"))
 }
 
 /// Take the ready task out of the claim into a proposal of its own that
@@ -515,6 +522,10 @@ impl PlanReviewStore for SqliteQueue {
         candidates(&self.conn)
     }
 
+    fn proposal_origin(&self, proposal: ProposalId) -> Result<ProposalOrigin> {
+        origin(&self.conn, proposal)
+    }
+
     fn begin_plan_review(
         &mut self,
         proposal_id: ProposalId,
@@ -658,22 +669,56 @@ impl PlanReviewStore for SqliteQueue {
         }
         let predictions =
             prediction::parse_predictions(apply.verdict.predictions.as_ref(), &submitted);
+        // A pass leaves a priority it may not change (ADR-t1971-1
+        // decisions 3, 4) unapplied with why, and the rest of the verdict
+        // goes on.
+        let origin = origin(&tx, job.proposal_id)?;
+        let mut actions = Vec::new();
+        let mut actions_skipped = Vec::new();
         if apply.decision == PlanReviewDecision::Pass {
             for action in &apply.verdict.actions {
-                check_action(&tx, &members, action)?;
+                let refusal = match action {
+                    PlanReviewAction::LowerPriority { task_id, .. }
+                        if members.contains(task_id) =>
+                    {
+                        plan_review::priority_refusal(
+                            job.proposal_id,
+                            origin,
+                            &pass_priority(&tx, *task_id)?,
+                        )
+                    }
+                    _ => None,
+                };
+                match refusal {
+                    Some(reason) => {
+                        actions_skipped.push(json!({"action": action, "reason": reason}));
+                    }
+                    None => {
+                        check_action(&tx, &members, action)?;
+                        actions.push(action);
+                    }
+                }
             }
         }
         plan_review::check_verdict(&members, apply.decision, &apply.verdict)
             .map_err(anyhow::Error::msg)?;
         let mut applied = PlanReviewApplied::default();
         let mut skipped = Vec::new();
+        let mut priorities_inherited = Vec::new();
         match apply.decision {
             PlanReviewDecision::Pass => {
-                for action in &apply.verdict.actions {
+                for action in actions {
                     apply_action(&tx, action, &stamp)?;
                 }
-                for action in improvement_priorities(&tx, job.proposal_id, &members)? {
-                    apply_action(&tx, &action, &stamp)?;
+                // Every submitted task of an AI's proposal takes its goal's
+                // priority, actions or none (ADR-t1971-1 decision 4).
+                let mut tasks = Vec::new();
+                for &member in &members {
+                    tasks.push(pass_priority(&tx, member)?);
+                }
+                for (task_id, _) in plan_review::priorities_to_inherit(origin, &tasks) {
+                    inherit_priority(&tx, task_id, &stamp)?;
+                    priorities_inherited.push(task_id);
                 }
                 proposals::approve(&tx, job.proposal_id, &stamp)?;
             }
@@ -725,6 +770,9 @@ impl PlanReviewStore for SqliteQueue {
                     .then(|| review_reason::primary(&apply.verdict.recorded_codes())),
                 "summary": apply.verdict.summary,
                 "actions": apply.verdict.actions,
+                "origin": origin,
+                "actions_skipped": actions_skipped,
+                "priorities_inherited": priorities_inherited,
                 "reopened": applied.reopened,
                 "reopen_skipped": skipped,
                 "precedents": apply.verdict.precedents,

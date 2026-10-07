@@ -873,30 +873,13 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
-        let task = read_task(&tx, task_id)?;
-        let (from, from_source) = (task.priority(), task.priority_source());
-        let own = task.own_priority();
-        let task = task::set_priority(task, priority)?;
-        // Setting or clearing the task's own priority is the change, even
-        // when the base value stays the same (ADR-t1639-1 decision 2).
-        if own != task.own_priority() {
-            tx.execute(
-                "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
-                params![
-                    task.own_priority().map(Priority::as_i64),
-                    self.generators.clock.timestamp(),
-                    task_id
-                ],
-            )?;
-            event(
-                &tx,
-                task_id,
-                None,
-                EventKind::TaskPriorityChanged,
-                json!({"from": from, "to": task.priority(),
-                    "from_source": from_source, "to_source": task.priority_source()}),
-            )?;
-        }
+        change_priority(
+            &tx,
+            task_id,
+            priority,
+            &self.generators.clock.timestamp(),
+            None,
+        )?;
         let result = read_task(&tx, task_id)?;
         tx.commit()?;
         Ok(result)
@@ -2562,6 +2545,36 @@ pub(super) fn record_queue_event_in(
         kind,
         payload,
     )
+}
+
+/// Give the task a priority of its own, or with none take its goal's again
+/// (`set-priority`, `--inherit` for none), recording `task_priority_changed`
+/// (with `by` when the runtime changes it for a job) when the own priority
+/// changes, even if the base value stays the same (ADR-t1639-1 decision 2).
+pub(super) fn change_priority(
+    conn: &Connection,
+    task_id: TaskId,
+    priority: Option<Priority>,
+    now: &str,
+    by: Option<&str>,
+) -> Result<()> {
+    let task = read_task(conn, task_id)?;
+    let (from, from_source) = (task.priority(), task.priority_source());
+    let own = task.own_priority();
+    let task = task::set_priority(task, priority)?;
+    if own == task.own_priority() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
+        params![task.own_priority().map(Priority::as_i64), now, task_id],
+    )?;
+    let mut payload = json!({"from": from, "to": task.priority(),
+        "from_source": from_source, "to_source": task.priority_source()});
+    if let Some(by) = by {
+        payload["by"] = json!(by);
+    }
+    event(conn, task_id, None, EventKind::TaskPriorityChanged, payload)
 }
 
 pub(super) fn event(

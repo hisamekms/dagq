@@ -2898,6 +2898,12 @@ pub trait PlanReviewStore {
     /// Submitted proposals plan review may take now: not held, with a
     /// submitted task, and whether one of those has the interrupt priority.
     fn plan_review_candidates(&self) -> Result<Vec<PlanReviewCandidate>>;
+    /// Where `proposal` comes from (ADR-t1971-1 decision 1), which its
+    /// plan review is shown and its pass applies by.
+    fn proposal_origin(
+        &self,
+        proposal: ProposalId,
+    ) -> Result<crate::domain::plan_review::ProposalOrigin>;
     /// Record the start of a plan review of `proposal` by `token`, in the
     /// directory named by its row's ID under `plan_reviews_dir`
     /// (`plan_review_started`, with `cwd`, the checkout the job runs in, for

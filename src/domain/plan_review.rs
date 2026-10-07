@@ -462,6 +462,151 @@ pub fn check_action(
     }
 }
 
+// Where a proposal comes from (ADR-t1971-1 decision 1): a person's
+// (`request`: linked to a planning request, a resubmission of its tasks or
+// goals included; `person`: a person owns or submitted it) or the AI's
+// (`finding`: it remedies a finding; `planner`: any other planner's, such
+// as a follow_up's, a goal gap's or a draft's).
+string_enum!(ProposalOrigin {
+    Request => "request",
+    Person => "person",
+    Finding => "finding",
+    Planner => "planner",
+});
+
+impl ProposalOrigin {
+    /// A person's proposal, whose priorities and membership plan review
+    /// does not change itself.
+    pub const fn is_human(self) -> bool {
+        matches!(self, Self::Request | Self::Person)
+    }
+}
+
+/// What the queue records of where a proposal comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OriginRecord<'a> {
+    /// Linked to a planning request (`plan_request_proposals`).
+    pub requested: bool,
+    /// Who opened the planner that owns it.
+    pub owner_origin: super::PlannerOrigin,
+    /// The actor that submitted it last; `None` before the queue recorded
+    /// it.
+    pub owner_actor: Option<&'a str>,
+    /// Linked to a finding it remedies (`findings.proposal_id`).
+    pub remedies_finding: bool,
+}
+
+/// Where the proposal of `record` comes from (ADR-t1971-1 decision 1). A
+/// proposal the record does not show to be a person's is the AI's; the
+/// words of a task or goal are never read.
+pub fn proposal_origin(record: &OriginRecord<'_>) -> ProposalOrigin {
+    if record.requested {
+        ProposalOrigin::Request
+    } else if record.owner_origin == super::PlannerOrigin::Person
+        || record.owner_actor.is_some_and(is_person_actor)
+    {
+        ProposalOrigin::Person
+    } else if record.remedies_finding {
+        ProposalOrigin::Finding
+    } else {
+        ProposalOrigin::Planner
+    }
+}
+
+/// Whether `actor_id` (`<role>` or `<role>:<instance>`) is a person: the
+/// user at a terminal, or the inbox, which acts on a person's words.
+pub fn is_person_actor(actor_id: &str) -> bool {
+    let role = actor_id.split(':').next().unwrap_or_default();
+    matches!(
+        role.parse::<super::ActorRole>(),
+        Ok(super::ActorRole::User | super::ActorRole::Inbox)
+    )
+}
+
+/// The requests a new submission is linked to through what it carries
+/// over (ADR-t1971-1 decision 2): those linked (`links`, request by
+/// proposal) to a proposal its tasks or goals still name (`previous`),
+/// each once.
+pub fn carried_requests(
+    previous: &[ProposalId],
+    links: &[(ProposalId, super::RequestId)],
+) -> Vec<super::RequestId> {
+    let mut requests: Vec<_> = links
+        .iter()
+        .filter(|(proposal, _)| previous.contains(proposal))
+        .map(|(_, request)| *request)
+        .collect();
+    requests.sort();
+    requests.dedup();
+    requests
+}
+
+/// How a pass sees the priority of one task of the proposal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassPriority {
+    pub task_id: TaskId,
+    pub status: super::TaskStatus,
+    /// Its priority of its own, `None` when it takes its goal's.
+    pub own: Option<Priority>,
+    /// Its goal's priority, `None` without a goal.
+    pub goal: Option<Priority>,
+    /// The actor that set its own priority last (the `set-priority` or the
+    /// creation that gave it); `None` when the record does not say.
+    pub own_set_by: Option<String>,
+}
+
+impl PassPriority {
+    /// Its own priority is a person's decision, or nobody can tell whose
+    /// (ADR-t1971-1 decision 4: then it is kept).
+    fn kept(&self) -> bool {
+        self.own_set_by.as_deref().is_none_or(is_person_actor)
+    }
+}
+
+/// Why a pass does not apply `lower_priority` to `task` of `proposal`
+/// (ADR-t1971-1 decisions 3, 4), `None` when it is applied, by taking the
+/// task's own priority off for its goal's: a person's proposal keeps its
+/// priorities, and an AI's keeps an own priority a person set.
+pub fn priority_refusal(
+    proposal: ProposalId,
+    origin: ProposalOrigin,
+    task: &PassPriority,
+) -> Option<String> {
+    if origin.is_human() {
+        return Some(format!(
+            "proposal {proposal} is a person's ({}): plan review does not change its priorities; a doubt is a concern",
+            origin.as_str()
+        ));
+    }
+    (task.own.is_some() && task.kept()).then(|| {
+        format!(
+            "a person set the priority of task {} ({}): plan review does not change it; a doubt is a concern",
+            task.task_id,
+            task.own.map_or("", Priority::as_str)
+        )
+    })
+}
+
+/// The submitted tasks of an AI's proposal whose own priority a pass takes
+/// off (ADR-t1971-1 decision 4), each with the priority it then takes from
+/// its goal (`normal` without one): every own priority but one a person set.
+/// A person's proposal keeps all of them.
+pub fn priorities_to_inherit(
+    origin: ProposalOrigin,
+    tasks: &[PassPriority],
+) -> Vec<(TaskId, Priority)> {
+    if origin.is_human() {
+        return Vec::new();
+    }
+    tasks
+        .iter()
+        .filter(|task| {
+            task.status == super::TaskStatus::Submitted && task.own.is_some() && !task.kept()
+        })
+        .map(|task| (task.task_id, super::base_priority(None, task.goal).0))
+        .collect()
+}
+
 /// Why the ready task `task_id` is not reopened (ADR-0041 decision 14),
 /// `None` when it is: `found` is its status and the active proposal it is
 /// in, `None` when it does not exist.
@@ -1108,6 +1253,168 @@ mod tests {
         assert_eq!(
             person_send_back_reason(AskId::new(7), None),
             "a person sent the proposal back in ask 7 for plan review's findings"
+        );
+    }
+
+    /// Where a proposal comes from is read from its links and its owner,
+    /// and a resubmission keeps the request of the proposal its tasks or
+    /// goals came from (ADR-t1971-1 decisions 1, 2).
+    #[test]
+    fn a_proposals_origin_is_a_persons_by_its_request_or_owner_and_the_ais_otherwise() {
+        use super::super::PlannerOrigin as O;
+        let record = |requested, owner_origin, owner_actor, remedies_finding| OriginRecord {
+            requested,
+            owner_origin,
+            owner_actor,
+            remedies_finding,
+        };
+        let planner = Some("planner:7");
+        // Linked to a request, whoever submitted it and whatever it remedies.
+        assert_eq!(
+            proposal_origin(&record(true, O::Runtime, planner, true)),
+            ProposalOrigin::Request
+        );
+        // A person owns it: a person's planner, or a person submitted it.
+        for (origin, actor) in [
+            (O::Person, planner),
+            (O::Runtime, Some("user")),
+            (O::Runtime, Some("inbox")),
+            (O::Runtime, Some("inbox:inbox")),
+        ] {
+            assert_eq!(
+                proposal_origin(&record(false, origin, actor, true)),
+                ProposalOrigin::Person,
+                "{origin:?} {actor:?}"
+            );
+        }
+        // The AI's: an improvement, or any other planner's; an owner the
+        // record does not name is no person.
+        assert_eq!(
+            proposal_origin(&record(false, O::Runtime, planner, true)),
+            ProposalOrigin::Finding
+        );
+        for actor in [
+            planner,
+            Some("supervisor:1"),
+            Some("plan-review-job:3:1"),
+            None,
+        ] {
+            assert_eq!(
+                proposal_origin(&record(false, O::Runtime, actor, false)),
+                ProposalOrigin::Planner,
+                "{actor:?}"
+            );
+        }
+        assert!(ProposalOrigin::Request.is_human() && ProposalOrigin::Person.is_human());
+        assert!(!ProposalOrigin::Finding.is_human() && !ProposalOrigin::Planner.is_human());
+        assert!(!is_person_actor("worker:run") && !is_person_actor("users"));
+
+        // Request 44's proposal 734 is resubmitted as 737 by a revise
+        // planner that has no request: 737 takes 734's request, and stays
+        // a person's.
+        let request = super::super::RequestId::new(44);
+        let links = [
+            (ProposalId::new(734), request),
+            (ProposalId::new(800), super::super::RequestId::new(50)),
+        ];
+        let carried = carried_requests(&[ProposalId::new(734), ProposalId::new(734)], &links);
+        assert_eq!(carried, [request]);
+        assert_eq!(
+            proposal_origin(&record(!carried.is_empty(), O::Runtime, planner, false)),
+            ProposalOrigin::Request
+        );
+        assert!(carried_requests(&[ProposalId::new(9)], &links).is_empty());
+    }
+
+    /// A pass keeps a person's priorities and takes an AI task's own
+    /// priority off for its goal's, with or without actions and a finding
+    /// (ADR-t1971-1 decisions 3, 4).
+    #[test]
+    fn a_pass_keeps_a_persons_priorities_and_an_ais_tasks_inherit_their_goals() {
+        use super::super::TaskStatus as S;
+        let task = |id: i64, status, own, goal, by: Option<&str>| PassPriority {
+            task_id: TaskId::new(id),
+            status,
+            own,
+            goal,
+            own_set_by: by.map(str::to_owned),
+        };
+        let proposal = ProposalId::new(5);
+        let tasks = [
+            // An AI's high and low, one under a normal goal, one alone.
+            task(
+                2,
+                S::Submitted,
+                Some(Priority::High),
+                Some(Priority::Low),
+                Some("planner:1"),
+            ),
+            task(
+                3,
+                S::Submitted,
+                Some(Priority::Low),
+                None,
+                Some("planner:1"),
+            ),
+            // Set by a person, or by nobody the record names: kept.
+            task(
+                4,
+                S::Submitted,
+                Some(Priority::Urgent),
+                Some(Priority::Normal),
+                Some("user"),
+            ),
+            task(5, S::Submitted, Some(Priority::High), None, None),
+            // No own priority, or no longer submitted: nothing to take off.
+            task(6, S::Submitted, None, Some(Priority::High), None),
+            task(
+                7,
+                S::Canceled,
+                Some(Priority::High),
+                None,
+                Some("planner:1"),
+            ),
+        ];
+        let inherited = vec![
+            (TaskId::new(2), Priority::Low),
+            (TaskId::new(3), Priority::Normal),
+        ];
+        // A finding's improvement and a planner's proposal alike, so even a
+        // pass with no actions (the store runs this on every pass).
+        for origin in [ProposalOrigin::Finding, ProposalOrigin::Planner] {
+            assert_eq!(
+                priorities_to_inherit(origin, &tasks),
+                inherited,
+                "{origin:?}"
+            );
+            // A lower_priority is applied as taking the own priority off...
+            assert_eq!(priority_refusal(proposal, origin, &tasks[0]), None);
+            assert_eq!(priority_refusal(proposal, origin, &tasks[4]), None);
+            // ...but not over a person's.
+            assert_eq!(
+                priority_refusal(proposal, origin, &tasks[2]).as_deref(),
+                Some(
+                    "a person set the priority of task 4 (urgent): plan review does not change it; a doubt is a concern"
+                )
+            );
+            assert!(priority_refusal(proposal, origin, &tasks[3]).is_some());
+        }
+        // A person's proposal (by its request or its owner) keeps every
+        // priority, and a lower_priority is not applied, with why.
+        for origin in [ProposalOrigin::Request, ProposalOrigin::Person] {
+            assert!(
+                priorities_to_inherit(origin, &tasks).is_empty(),
+                "{origin:?}"
+            );
+            for task in &tasks {
+                assert!(priority_refusal(proposal, origin, task).is_some());
+            }
+        }
+        assert_eq!(
+            priority_refusal(proposal, ProposalOrigin::Request, &tasks[0]).as_deref(),
+            Some(
+                "proposal 5 is a person's (request): plan review does not change its priorities; a doubt is a concern"
+            )
         );
     }
 }

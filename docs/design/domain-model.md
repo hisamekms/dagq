@@ -143,8 +143,8 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 - 基の値は個別の指定、無ければ所属goalの優先度、goalが無ければ`normal`で、1か所の`domain::base_priority`が決める（[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)決定2）。
 - 個別の指定の無いtaskは状態によらずgoalの今の値に追随し、claimの時に凍らせない（[ADR-t1811-1](../adr/2026-10-05-t1811-1-tasks-without-own-priority-follow-the-goal-in-every-status.md)）。
-  そのrunがどの優先度でclaimされたかは表示でなく`run_claimed`の記録で読む。
-- plan reviewが下げた優先度は個別の指定として置くので、後でgoalの優先度を上げても戻らない。
+  runがclaimされた優先度は表示でなく`run_claimed`の記録で読む。
+- plan reviewはAI由来のtaskの個別の優先度を外す（人が置いた値と人間由来は残す。[Plan review](supervisor-lifecycle/plan-review.md)の6）。
 - 効く優先度（`application::effective_priority`）は自分を推移的に待つ`ready`のtaskの値も継ぐが、永久にclaimされないtaskからは継がない（[ADR-t791-1](../adr/2026-09-28-t791-1-effective-priority-ignores-tasks-waiting-on-abandoned-goals.md)）。
 - claimの順・`needs_session`の再開・復旧jobは効く優先度で1つの列に並ぶ（`domain::slot_order`、[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
   goal間のrankは作らない。

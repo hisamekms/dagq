@@ -61,6 +61,7 @@ impl SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous = super::plan_requests::previous_proposals(&tx, &submission)?;
         let proposal = super::proposals::submit(
             &tx,
             submission,
@@ -70,8 +71,15 @@ impl SqliteQueue {
         )?;
         link_findings(&tx, proposal.id(), workspace.as_deref(), findings, by, now)?;
         // The request of a request's planner that submits (ADR-t1394-1
-        // decision 6).
-        super::plan_requests::link_requests(&tx, proposal.id(), workspace.as_deref(), now)?;
+        // decision 6), and those of the proposals it carries on
+        // (ADR-t1971-1 decision 2).
+        super::plan_requests::link_requests(
+            &tx,
+            proposal.id(),
+            workspace.as_deref(),
+            &previous,
+            now,
+        )?;
         let proposal = super::proposals::read(&tx, proposal.id())?;
         tx.commit()?;
         Ok(proposal)

@@ -383,8 +383,10 @@ impl Supervisor<'_> {
             .map(|detail| self.duplicate_candidates(proposal, &detail.task))
             .collect::<Result<Vec<_>>>()?;
         let language = self.verifier.language();
+        let origin = self.queue.proposal_origin(proposal.id())?;
         plan_review_prompt(&PlanReviewMaterial {
             proposal,
+            origin,
             tasks: &tasks,
             goals: &goals,
             lint: &lint,

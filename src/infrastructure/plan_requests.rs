@@ -17,6 +17,7 @@ use super::{
 use crate::application::{PlanRequestStore, PlannerAnswerRoute, RequestPlannerStart};
 use crate::domain::{
     Ask, AskId, EventId, PlannerId, PlannerOrigin, PlannerSession, ProposalId, RequestId, RunEvent,
+    Submission,
     plan_request::{
         NewPlanRequest, NextRequestPlanner, PlanRequest, ProposalLink, RequestAnswerRoute,
         RequestStatus, check_decline, next_request_planner, proposal_link, request_answer_route,
@@ -351,55 +352,143 @@ pub(super) fn draft_route_of(conn: &Connection, request: RequestId) -> Result<Pl
 /// planner of the runtime's that submits from `workspace`. Each proposal
 /// is linked once; the first makes an `open` request `proposed`, with
 /// `request_proposed`. A request already ended otherwise (declined, out of
-/// planners) is left as it is.
+/// planners) is left as it is. Whoever submits, the proposal is also linked
+/// to the requests of the proposals its tasks and goals still name
+/// (`previous`, [`previous_proposals`]), so a resubmission by another
+/// planner stays the request's (ADR-t1971-1 decision 2), even when the
+/// request has ended otherwise since: the link records where the plan came
+/// from.
 pub(super) fn link_requests(
     conn: &Connection,
     proposal: ProposalId,
     workspace: Option<&str>,
+    previous: &[ProposalId],
     now: i64,
 ) -> Result<Vec<RequestId>> {
-    let Some(workspace) = workspace else {
-        return Ok(Vec::new());
+    let own: Vec<(PlannerId, RequestId)> = match workspace {
+        Some(workspace) => conn
+            .prepare(
+                "SELECT id, request_id FROM planners WHERE workspace_id=?1 AND origin='runtime'
+                 AND closed_at IS NULL AND request_id IS NOT NULL ORDER BY id",
+            )?
+            .query_map([workspace], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?,
+        None => Vec::new(),
     };
-    let own: Vec<(PlannerId, RequestId)> = conn
-        .prepare(
-            "SELECT id, request_id FROM planners WHERE workspace_id=?1 AND origin='runtime'
-             AND closed_at IS NULL AND request_id IS NOT NULL ORDER BY id",
-        )?
-        .query_map([workspace], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
     let mut linked = Vec::new();
     for (planner, request) in own {
         let link = proposal_link(read_request(conn, request)?.status);
         if link == ProposalLink::Skip {
             continue;
         }
-        conn.execute(
-            "INSERT OR IGNORE INTO plan_request_proposals(request_id, proposal_id, created_at)
-             VALUES (?1, ?2, ?3)",
-            params![request, proposal, now],
-        )?;
-        if link == ProposalLink::Propose {
-            set_status(
-                conn,
-                request,
-                RequestStatus::Proposed,
-                &format!("proposal {proposal} was submitted from it"),
-                now,
-            )?;
-            record_queue_event_in(
-                conn,
-                EventKind::RequestProposed,
-                &json!({
-                    "request_id": request,
-                    "proposal_id": proposal,
-                    "planner_id": planner,
-                }),
-            )?;
+        link_request(conn, request, proposal, link, Some(planner), now)?;
+        linked.push(request);
+    }
+    for request in carried_requests(conn, previous)? {
+        if linked.contains(&request) {
+            continue;
         }
+        let link = proposal_link(read_request(conn, request)?.status);
+        link_request(conn, request, proposal, link, None, now)?;
         linked.push(request);
     }
     Ok(linked)
+}
+
+/// The proposals the tasks and goals of `submission` name before it is
+/// submitted (a withdrawn or sent back proposal keeps them until then),
+/// the draft tasks of its goals included. An accepted proposal is not one
+/// carried on: new tasks for a goal it opened are another plan.
+pub(super) fn previous_proposals(
+    conn: &Connection,
+    submission: &Submission,
+) -> Result<Vec<ProposalId>> {
+    let mut named: Vec<ProposalId> = Vec::new();
+    for task in &submission.tasks {
+        named.extend(
+            conn.query_row("SELECT proposal_id FROM tasks WHERE id=?1", [task], |r| {
+                r.get::<_, Option<ProposalId>>(0)
+            })
+            .optional()?
+            .flatten(),
+        );
+    }
+    for goal in &submission.goals {
+        let ids: Vec<Option<ProposalId>> = conn
+            .prepare(
+                "SELECT proposal_id FROM goals WHERE id=?1
+                 UNION SELECT proposal_id FROM tasks WHERE goal_id=?1 AND status='draft'",
+            )?
+            .query_map([goal], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        named.extend(ids.into_iter().flatten());
+    }
+    named.sort();
+    named.dedup();
+    let mut previous = Vec::new();
+    for proposal in named {
+        let accepted: bool = conn.query_row(
+            "SELECT status='accepted' FROM proposals WHERE id=?1",
+            [proposal],
+            |r| r.get(0),
+        )?;
+        if !accepted {
+            previous.push(proposal);
+        }
+    }
+    Ok(previous)
+}
+
+/// The requests linked to a proposal of `previous`.
+fn carried_requests(conn: &Connection, previous: &[ProposalId]) -> Result<Vec<RequestId>> {
+    let mut links = Vec::new();
+    for &proposal in previous {
+        let requests: Vec<RequestId> = conn
+            .prepare("SELECT request_id FROM plan_request_proposals WHERE proposal_id=?1")?
+            .query_map([proposal], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        links.extend(requests.into_iter().map(|request| (proposal, request)));
+    }
+    Ok(crate::domain::plan_review::carried_requests(
+        previous, &links,
+    ))
+}
+
+/// Link `proposal` to `request` once; by `link`, an `open` request becomes
+/// `proposed` with `request_proposed` (with the planner that submitted it
+/// from the request, when one did).
+fn link_request(
+    conn: &Connection,
+    request: RequestId,
+    proposal: ProposalId,
+    link: ProposalLink,
+    planner: Option<PlannerId>,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO plan_request_proposals(request_id, proposal_id, created_at)
+         VALUES (?1, ?2, ?3)",
+        params![request, proposal, now],
+    )?;
+    if link == ProposalLink::Propose {
+        set_status(
+            conn,
+            request,
+            RequestStatus::Proposed,
+            &format!("proposal {proposal} was submitted from it"),
+            now,
+        )?;
+        record_queue_event_in(
+            conn,
+            EventKind::RequestProposed,
+            &json!({
+                "request_id": request,
+                "proposal_id": proposal,
+                "planner_id": planner,
+            }),
+        )?;
+    }
+    Ok(())
 }
 
 /// What the request commands record a refusal on: the queue itself.
