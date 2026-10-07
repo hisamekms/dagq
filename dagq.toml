@@ -64,6 +64,19 @@ parallel = 3
 # [provider_fallback] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1857 を含んでから足した。
 workers = false
 
+[ci_watch]
+# supervisor が main の CI（.github/workflows/ci.yml、name: CI）の結果を gh で定期的に確かめて event に記録し、赤になったら
+# 修正の finding を出し、既に落ちているテストの一覧を持つ（ADR-t1920-1、task 1921、goal 157 の段 1）。
+# 振る舞いは docs/design/supervisor-lifecycle/ci-watch.md、書式は run-environment.md の [ci_watch] の項。
+# branch は書かず、着地先の branch（[repository] が無いので origin の HEAD から決まる main）を見る。interval_secs は design の推奨の既定 600 のまま書かない。
+# junit_artifacts は ci.yml が nextest の JUnit を上げる成果物 nextest-junit-macos・nextest-junit-linux の glob で、
+# ci.yml で名前を変えたらここも合わせる。
+# gh が無いか login していなければ up の preflight が拒み、走っている supervisor は claim と着地を止めて inbox に知らせる（worker は host にツールを入れない）。
+# supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
+# [ci_watch] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1921 を含んでから足した。
+workflow = "ci.yml"
+junit_artifacts = ["nextest-junit-*"]
+
 [tasks]
 # task が宣言する変更の種類（change）の値の集合（ADR-t980-1、task 983。書式は
 # docs/design/supervisor-lifecycle/run-environment.md、各値の意味と選び方は docs/development/task-registration.md の「change」）。
