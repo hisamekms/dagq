@@ -908,6 +908,7 @@ pub mod idle_process;
 pub mod ids;
 pub mod inherit_by_hand;
 mod input;
+pub mod instructions;
 pub mod kpi;
 pub mod landing_branch;
 pub mod landing_hold;

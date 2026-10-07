@@ -331,6 +331,13 @@ pub struct SuperviseOptions {
     pub resume: Option<crate::domain::resume::ResumeConfig>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
+    /// The Claude Code configuration directory whose
+    /// `plugins/installed_plugins.json` names the plugin a Claude worker
+    /// loads, hashed once per claim pass (goal 113). The CLI gives the
+    /// host's ([`crate::infrastructure::adapters::claude_config_dir`]); a
+    /// caller of the library (the tests) reads none, and records the
+    /// plugin `unknown`, unless it gives its own.
+    pub claude_config_dir: Option<PathBuf>,
     /// The directories Claude Code keeps the sessions' scratchpads under,
     /// whose ended runs' scratchpads the supervisor removes (task 1100);
     /// `None` is the host's, looked for at each cleanup
@@ -594,6 +601,7 @@ impl SuperviseOptions {
             disk: None,
             resume: None,
             free_space: free_disk_bytes,
+            claude_config_dir: None,
             scratchpad_roots: Some(Vec::new()),
             report_daily: false,
             forecast_snapshots: false,
@@ -1214,6 +1222,16 @@ pub fn supervise_with_reviewer(
             },
         ),
         host_versions,
+        worker_plugin: {
+            let config_dir = options.claude_config_dir.clone();
+            Arc::new(move |project: &Path| {
+                crate::infrastructure::adapters::worker_plugin_hash(
+                    config_dir.as_deref(),
+                    crate::application::lifecycle::DAGQ_PLUGIN,
+                    project,
+                )
+            })
+        },
         reports,
         max_improvement_proposals,
         conflicts_file,

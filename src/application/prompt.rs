@@ -635,6 +635,131 @@ pub fn prompt(
     ))
 }
 
+/// The worker's prompt on `provider` before the task's values go in
+/// (goal 113): [`prompt`] of a placeholder task with every section in it (a
+/// goal, a predecessor, a goal it waited for, a sibling, a run it carries
+/// over, required evidence, paths and the e2e), each value a placeholder,
+/// followed by the same task with every section empty (and the run carried
+/// over by hand), so both branches of each section are in it. Its text is fixed by this binary, so its hash changes with the prompt's
+/// headings and sentences and never with a task's values.
+pub fn worker_template(provider: Provider) -> Result<String> {
+    use crate::domain::{
+        GoalRecord, GoalStatus, RunRecord, TaskRecord, TaskStatus,
+        worker::{Worker, WorkerMode},
+    };
+    const SHA: &str = "0000000000000000000000000000000000000000";
+    const RUN: &str = "00000000-0000-4000-8000-000000000000";
+    let value = |name: &str| format!("<{name}>");
+    let record = || TaskRecord {
+        goal_priority: None,
+        id: TaskId::new(1),
+        title: value("title"),
+        description: value("description"),
+        acceptance: value("acceptance"),
+        verification_commands: vec![value("verification command")],
+        required_evidence: vec![
+            EvidenceCheck::Tests,
+            EvidenceCheck::E2e,
+            EvidenceCheck::SubagentReview,
+        ],
+        paths: vec![value("path")],
+        priority: Default::default(),
+        change: None,
+        status: TaskStatus::InProgress,
+        goal_id: Some(GoalId::new(1)),
+        context: value("context"),
+        created_at: String::new(),
+        updated_at: String::new(),
+        worker: Worker {
+            provider,
+            mode: WorkerMode::Headless,
+        },
+        named_mode: None,
+        wait_for_build: false,
+    };
+    let task = Task::restore(record())?;
+    let run = TaskRun::restore(RunRecord {
+        id: RunId::new(RUN)?,
+        task_id: task.id(),
+        status: RunStatus::Claimed,
+        requested_provider: provider,
+        actual_provider: provider,
+        worker_mode: WorkerMode::Headless,
+        base_commit: CommitSha::try_from(SHA)?,
+        branch: Some(value("branch")),
+        worktree_path: Some(value("worktree")),
+        workspace_id: None,
+        receipt_path: Some(value("receipt")),
+        log_path: None,
+        result_commit: None,
+        repo_path: None,
+        run_dir: Some(value("run directory")),
+        last_error: None,
+        workspace_closed_at: None,
+        created_at: String::new(),
+    })?;
+    let goal = Goal::restore(GoalRecord {
+        id: GoalId::new(1),
+        title: value("goal title"),
+        description: value("goal description"),
+        acceptance: value("goal acceptance"),
+        constraints: value("goal constraints"),
+        doc: Some(value("goal doc")),
+        priority: Default::default(),
+        tags: Vec::new(),
+        status: GoalStatus::Open,
+        closed_at: None,
+        verdict: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    })?;
+    let predecessor = PredecessorSummary {
+        task_id: TaskId::new(2),
+        title: value("predecessor title"),
+        result_commit: value("result commit"),
+        summary: value("summary"),
+    };
+    let goal_predecessor = GoalPredecessorSummary {
+        goal_id: GoalId::new(2),
+        title: value("goal predecessor title"),
+        tasks: vec![predecessor.clone()],
+    };
+    let inherited = Inheritance {
+        run_id: run.id().clone(),
+        base: run.base_commit().clone(),
+        head: value("head"),
+        branch: Some(value("branch")),
+        receipt_path: Some(value("receipt")),
+        summary: value("summary"),
+        by_hand: None,
+    };
+    let full = prompt(
+        &task,
+        &run,
+        Some(&goal),
+        &[predecessor],
+        &[goal_predecessor],
+        std::slice::from_ref(&task),
+        Some(&inherited),
+        &[value("e2e path")],
+    )?;
+    // The other branch of each section: `none`, and a run a person carried
+    // over by hand.
+    let bare = Task::restore(TaskRecord {
+        required_evidence: Vec::new(),
+        paths: Vec::new(),
+        goal_id: None,
+        context: String::new(),
+        ..record()
+    })?;
+    let by_hand = Inheritance {
+        by_hand: Some((value("by"), value("reason"))),
+        ..inherited
+    };
+    let empty = prompt(&bare, &run, None, &[], &[], &[], Some(&by_hand), &[])?;
+    Ok(format!("{full}\n{empty}"))
+}
+
 /// What the worker's prompt says of the e2e (ADR-t1233-2 decision 1): the
 /// runtime runs it on the host after the review passes, so the worker does
 /// not. Only when the run may need it (the task asks for it, or the
@@ -5967,6 +6092,64 @@ mod tests {
         for never in ["/exit", "this terminal", "went idle"] {
             assert!(!notice.contains(never), "{never}: {notice}");
         }
+    }
+
+    /// The worker's template (goal 113) is the prompt with every section
+    /// and a placeholder for each value: no task's value is in it, so a
+    /// task's title or description never changes its hash, and a changed
+    /// fixed sentence does.
+    #[test]
+    fn the_worker_template_holds_every_section_and_no_tasks_values() {
+        use crate::domain::instructions::template_hash;
+        for provider in [Provider::Claude, Provider::Codex] {
+            let template = worker_template(provider).unwrap();
+            assert_eq!(worker_template(provider).unwrap(), template);
+            for fixed in [
+                "Task title: <title>",
+                "Goal (the higher-level problem",
+                "Context (why this task exists",
+                "Predecessor tasks (their changes",
+                "- goal 2 (closed as achieved): <goal predecessor title>",
+                "Sibling tasks in progress (other tasks",
+                "Carried over from run",
+                "Required evidence:",
+                "Paths you may change",
+                "E2E: do not run the e2e",
+                "Goal: none, this task stands alone",
+                "Context: none",
+                "Predecessor tasks: none",
+                "Sibling tasks in progress: none",
+                "<by> carried its work over by hand",
+                WORKER_READING,
+                ACCEPTANCE_MAP,
+                DOCS_CHECK,
+                HEADLESS_STOP,
+                headless_provider_line(provider),
+            ] {
+                assert!(template.contains(fixed), "{provider:?} {fixed}");
+            }
+            // A fixed sentence changed is another template.
+            let hash = template_hash(&template);
+            assert_ne!(
+                template_hash(&template.replacen(DOCS_CHECK, "Then check.\n", 1)),
+                hash
+            );
+            // The prompts of two tasks differ by their values; the template
+            // is neither, and holds none of them.
+            let first = task(7, "first title", TaskStatus::InProgress);
+            let second = task(7, "second title", TaskStatus::InProgress);
+            let run = run_on(provider, WorkerMode::Headless);
+            let prompt_of =
+                |task: &Task| prompt(task, &run, None, &[], &[], &[], None, &[]).unwrap();
+            assert_ne!(prompt_of(&first), prompt_of(&second));
+            for value in ["first title", "second title"] {
+                assert!(!template.contains(value), "{value}");
+            }
+        }
+        assert_ne!(
+            worker_template(Provider::Claude).unwrap(),
+            worker_template(Provider::Codex).unwrap()
+        );
     }
 
     /// Task 7's claimed run, whose worker is `provider` in `mode`.

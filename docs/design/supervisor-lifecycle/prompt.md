@@ -44,6 +44,7 @@ claim ──> prompt(task, run, goal, predecessors, goal_predecessors, siblings)
             ├─ Goal / Context / Predecessor tasks / Sibling tasks（常に4節）
             ├─ 受け入れ条件の対応づけ → 文書の照合 → receiptの契約
             └─ 最後の段落（非対話のturn、providerの1行）＋言語の指示
+claim ──> 指示の版のhash ──> run_claimed（下の「workerが読んだ指示の版」）
 
 runの途中 ──> resume・revise・促し・askの答え・復旧jobの指示 ──> 次のturnのprompt
 
@@ -146,6 +147,21 @@ reviewの側は[Review](review.md#文書の照合)が持つ（`REVIEW_DOCS_CHECK
 - 落とし穴: Claude Codeはturnの終わりに`run_in_background`のshellを止めるので、待つためにturnを終えると処理も止まる。
   receiptの無い促しは、それならforegroundで流し直すよう言う。
 - `WORKER_READING`の「AGENTS.mdかCLAUDE.md」はどのproviderでも同じ（Codexは起動時にAGENTS.mdを読む）。
+
+### workerが読んだ指示の版
+
+claimのたびに、supervisorはworkerが読む指示の内容のhashを3つ求め、runのproviderの値を`run_claimed`に別々のキーで記録する。
+値は内容だけから決まり、commitのIDや時刻を含まない。
+求められないものは`unknown`にし、claimは止めない。
+読み方は[kpi](kpi.md#workerが読んだ指示の版)が持つ。
+
+- promptの雛形: taskとrunの値の代わりにplaceholderを入れたworkerのpromptで、providerごとに1つある（`worker_template`）。
+  節の見出しと定型の文とproviderで変わる行が対象で、定型の文を変えるとhashが変わり、taskの値では変わらない。
+  taskの値を差し込んだ後のpromptは、taskごとに違って層にならないので対象にしない。
+  言語の指示、resource brokerのqueueだけが足す文、resume・reviseなどの依頼も対象にしない。
+- plugin: ClaudeのworkerがClaude Codeから読むdagqのpluginのファイルの内容（`infrastructure::adapters::worker_plugin_hash`）。
+  Codexのworkerにはpluginを渡さないので`none`にする。
+- repositoryの指示の文書: runのbaseのcommitでの`AGENTS.md`・`CLAUDE.md`・`docs/development/`の内容（`domain::instructions::REPOSITORY_INSTRUCTIONS`）。
 
 ### subagent review
 

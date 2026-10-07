@@ -544,6 +544,68 @@ pub fn host_versions(claude: &Path, codex: Option<&Path>, rustc_in: Option<&Path
     }
 }
 
+/// The Claude Code configuration directory: `$CLAUDE_CONFIG_DIR` when set
+/// (non-empty), else `~/.claude`.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| Path::new(&home).join(".claude")))
+}
+
+/// The hash of the plugin `name` a Claude worker session started in
+/// `project` loads (goal 113): the content of the directory
+/// `plugins/installed_plugins.json` under `config_dir` installs it in
+/// ([`instructions::installed_plugin_dir`]), every file by its path in it
+/// (`.git` left out). [`instructions::NO_PLUGIN`] when none is installed,
+/// [`instructions::UNKNOWN`] when the record or the directory cannot be
+/// read.
+pub fn worker_plugin_hash(config_dir: Option<&Path>, name: &str, project: &Path) -> String {
+    use crate::domain::instructions;
+    let Some(config_dir) = config_dir else {
+        return instructions::UNKNOWN.to_owned();
+    };
+    let listed = match fs::read(config_dir.join("plugins/installed_plugins.json")) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return instructions::NO_PLUGIN.to_owned();
+        }
+        Err(_) => return instructions::UNKNOWN.to_owned(),
+    };
+    let Ok(listed) = serde_json::from_slice::<Value>(&listed) else {
+        return instructions::UNKNOWN.to_owned();
+    };
+    let Some(dir) = instructions::installed_plugin_dir(&listed, name, &project.to_string_lossy())
+    else {
+        return instructions::NO_PLUGIN.to_owned();
+    };
+    let mut files = Vec::new();
+    match plugin_files(Path::new(&dir), "", &mut files) {
+        Ok(()) => instructions::content_hash(files),
+        Err(_) => instructions::UNKNOWN.to_owned(),
+    }
+}
+
+/// Every file under `dir` (symbolic links followed, `.git` left out), by
+/// its path from the plugin's root (`prefix` is `dir`'s), with its content.
+fn plugin_files(dir: &Path, prefix: &str, files: &mut Vec<(String, Vec<u8>)>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let relative = format!("{prefix}{name}");
+        if fs::metadata(&path)?.is_dir() {
+            plugin_files(&path, &format!("{relative}/"), files)?;
+        } else {
+            files.push((relative, fs::read(&path)?));
+        }
+    }
+    Ok(())
+}
+
 /// The version the path of Claude Code names: the file name of what
 /// `claude` resolves to when it sits in a `versions` directory.
 pub fn claude_version(claude: &Path) -> Option<String> {
@@ -1330,6 +1392,25 @@ impl GitRepository {
                 .args(["cat-file", "blob", &format!("{commit}:{path}")]),
         )
         .map(Some)
+    }
+
+    /// The blob ID of each file at or under `paths` in `commit`'s tree, by
+    /// its path, from the object store (`git ls-tree -r`).
+    pub fn blobs_in(&self, commit: &str, paths: &[&str]) -> Result<Vec<(String, String)>> {
+        let listed = output(
+            self.git_root()
+                .args(["ls-tree", "-r", "-z", commit, "--"])
+                .args(paths),
+        )?;
+        Ok(listed
+            .split('\0')
+            .filter_map(|entry| {
+                let (meta, path) = entry.split_once('\t')?;
+                let mut fields = meta.split_whitespace();
+                let (_, kind, id) = (fields.next()?, fields.next()?, fields.next()?);
+                (kind == "blob").then(|| (path.to_owned(), id.to_owned()))
+            })
+            .collect())
     }
 
     /// Symbolic HEAD of a worktree, or None when detached.
@@ -2267,6 +2348,9 @@ impl Repository for GitRepository {
     }
     fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
         GitRepository::file_in(self, commit, path)
+    }
+    fn blobs_in(&self, commit: &str, paths: &[&str]) -> Result<Vec<(String, String)>> {
+        GitRepository::blobs_in(self, commit, paths)
     }
     fn main_history(&self, since: i64) -> Result<MainHistory> {
         GitRepository::main_history(self, since)
@@ -4677,6 +4761,109 @@ mod tests {
             git.file_in(git.main_head().unwrap().as_str(), "binary")
                 .is_err()
         );
+    }
+
+    /// The repository's instruction documents hash by the blobs of the
+    /// named files and directories in a commit (goal 113): a byte of one
+    /// changes the value, a file outside them and a checkout edit do not.
+    #[test]
+    fn instruction_blobs_are_read_from_the_commit() {
+        use crate::domain::instructions::{REPOSITORY_INSTRUCTIONS, content_hash};
+        let (dir, git) = committed_repository();
+        let hash = |git: &GitRepository| {
+            let head = git.main_head().unwrap();
+            content_hash(
+                git.blobs_in(head.as_str(), &REPOSITORY_INSTRUCTIONS)
+                    .unwrap(),
+            )
+        };
+        let commit = |path: &str, text: &str| {
+            let file = dir.path().join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, text).unwrap();
+            assert!(git_in(dir.path(), &["add", path]).status.success());
+            assert!(
+                git_in(dir.path(), &["commit", "-qm", path])
+                    .status
+                    .success()
+            );
+        };
+        let none = hash(&git);
+        assert_eq!(none, content_hash(Vec::<(&str, &str)>::new()));
+        commit("AGENTS.md", "rules\n");
+        commit("docs/development/testing.md", "tests\n");
+        let head = git.main_head().unwrap();
+        let mut blobs = git
+            .blobs_in(head.as_str(), &REPOSITORY_INSTRUCTIONS)
+            .unwrap();
+        blobs.sort();
+        assert_eq!(
+            blobs
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            ["AGENTS.md", "docs/development/testing.md"]
+        );
+        let two = hash(&git);
+        assert_ne!(two, none);
+        commit("docs/design/other.md", "other\n");
+        fs::write(dir.path().join("AGENTS.md"), "uncommitted").unwrap();
+        assert_eq!(hash(&git), two, "outside the documents, or not committed");
+        commit("docs/development/testing.md", "tests.\n");
+        assert_ne!(hash(&git), two, "one byte of one document");
+        assert!(
+            git.blobs_in("refs/heads/missing", &REPOSITORY_INSTRUCTIONS)
+                .is_err()
+        );
+    }
+
+    /// The plugin a Claude worker loads hashes by its files (goal 113),
+    /// whatever order they are read in; none installed is `none`, and a
+    /// record or a directory that cannot be read is `unknown`.
+    #[test]
+    fn the_worker_plugin_hashes_by_its_installed_files() {
+        use crate::domain::instructions::{NO_PLUGIN, UNKNOWN};
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let plugin = dir.path().join("plugin");
+        let project = Path::new("/repo");
+        let hash = || worker_plugin_hash(Some(&config), "claude-dagq", project);
+        assert_eq!(hash(), NO_PLUGIN, "no record");
+        assert_eq!(worker_plugin_hash(None, "claude-dagq", project), UNKNOWN);
+        fs::create_dir_all(config.join("plugins")).unwrap();
+        let record = config.join("plugins/installed_plugins.json");
+        fs::write(&record, "not json").unwrap();
+        assert_eq!(hash(), UNKNOWN);
+        fs::write(&record, r#"{"version":2,"plugins":{}}"#).unwrap();
+        assert_eq!(hash(), NO_PLUGIN, "not installed");
+        fs::write(
+            &record,
+            serde_json::to_string(&serde_json::json!({"version": 2, "plugins": {
+                "claude-dagq@dagq": [{"scope": "user", "installPath": plugin}]
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(hash(), UNKNOWN, "the directory is gone");
+        fs::create_dir_all(plugin.join("skills/dagq")).unwrap();
+        fs::create_dir_all(plugin.join(".git")).unwrap();
+        fs::write(plugin.join("skills/dagq/SKILL.md"), "skill").unwrap();
+        fs::write(plugin.join("plugin.json"), "{}").unwrap();
+        fs::write(plugin.join(".git/HEAD"), "ref").unwrap();
+        let first = hash();
+        assert_eq!(first.len(), 16);
+        assert_eq!(hash(), first);
+        fs::write(plugin.join(".git/HEAD"), "other").unwrap();
+        assert_eq!(hash(), first, ".git is left out");
+        fs::write(plugin.join("skills/dagq/extra.md"), "x").unwrap();
+        let added = hash();
+        assert_ne!(added, first, "an added file");
+        fs::remove_file(plugin.join("skills/dagq/extra.md")).unwrap();
+        assert_eq!(hash(), first, "removed again");
+        fs::remove_file(plugin.join("plugin.json")).unwrap();
+        assert_ne!(hash(), first, "a removed file");
+        fs::write(plugin.join("plugin.json"), "{ ").unwrap();
+        assert_ne!(hash(), first, "one byte");
     }
 
     /// The landing branch follows origin's HEAD before `main` and

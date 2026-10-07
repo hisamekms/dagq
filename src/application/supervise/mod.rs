@@ -37,7 +37,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -84,6 +84,7 @@ use crate::domain::{
     after_validation,
     claim_hold::{self, ClaimHold, HoldInputs},
     claim_spacing, decide_conflict, decide_revise, event_kind, headless_job, heartbeat_stale,
+    instructions::{self, InstructionVersions},
     kpi::CandidatesSample,
     marks::{RUN_ENV_CHANGED, run_env_digest},
     measure::{ClaimAttributes, ClaimSpacing, HostVersions, LoadSummary, LoadWindow},
@@ -189,6 +190,8 @@ struct ClaimPass {
     /// Since when a claim waits for the claim spacing (ADR-t1479-1).
     spaced_since: Option<i64>,
     host: Option<HostVersions>,
+    /// The hash of the plugin a Claude worker loads, read once per pass.
+    plugin: Option<String>,
     trial: WorkerTrial,
 }
 
@@ -435,6 +438,11 @@ pub struct Ports<'a> {
     /// `rustc` (run in the given checkout; none without one) a claim
     /// records (task 197).
     pub host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
+    /// The hash of the plugin a Claude worker session started in the
+    /// given checkout loads (goal 113), or
+    /// [`NO_PLUGIN`](crate::domain::instructions::NO_PLUGIN) /
+    /// [`UNKNOWN`](crate::domain::instructions::UNKNOWN).
+    pub worker_plugin: Arc<dyn Fn(&Path) -> String + Send + Sync>,
     /// Writes the daily KPI reports (ADR-0051 decision 20); `None` writes
     /// none.
     pub reports: Option<ReportPort>,
@@ -942,6 +950,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         spaced_since: None,
         load_average: ports.load_average,
         host_versions: ports.host_versions,
+        worker_plugin: ports.worker_plugin.clone(),
         reports: ports.reports.clone(),
         max_improvement_proposals: ports.max_improvement_proposals.clone(),
         report: report::ReportWatch::default(),
@@ -1232,6 +1241,7 @@ struct Supervisor<'a> {
     /// The 1-minute load average, and the host's versions a claim records.
     load_average: fn() -> Option<f64>,
     host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
+    worker_plugin: Arc<dyn Fn(&Path) -> String + Send + Sync>,
     /// Writes the daily KPI reports; `None` writes none.
     reports: Option<ReportPort>,
     /// Records the host's load; `None` records none (task 516).
@@ -1963,6 +1973,7 @@ impl Supervisor<'_> {
                 claims = Some(ClaimPass {
                     spaced_since,
                     host: None,
+                    plugin: None,
                     trial,
                 });
                 // Only while there is room for a claim, as the claim loop
@@ -2145,10 +2156,16 @@ impl Supervisor<'_> {
                     .then_some(self.layout.repo_root.as_path());
                 (self.host_versions)(&self.layout.claude, codex, rustc_in)
             });
+            let host = host.clone();
+            let plugin = pass
+                .plugin
+                .get_or_insert_with(|| (self.worker_plugin)(&self.layout.main_checkout))
+                .clone();
             let attributes = ClaimAttributes {
                 spacing,
                 light_room: (room == ClaimRoom::LightOnly).then_some(true),
-                ..self.claim_attributes(parallel, host.clone())
+                instructions: self.instruction_versions(&base, &plugin),
+                ..self.claim_attributes(parallel, host)
             };
             let run = match self.queue.claim_for_supervisor_in_order(
                 &base,
@@ -2423,7 +2440,26 @@ impl Supervisor<'_> {
             load_avg: (self.load_average)(),
             spacing: None,
             light_room: None,
+            instructions: BTreeMap::new(),
         }
+    }
+    /// The versions of the instructions a worker on each of this
+    /// supervisor's providers reads in a run from `base` (goal 113), with
+    /// `plugin` the hash of a Claude worker's plugin
+    /// ([`instructions::by_provider`]).
+    fn instruction_versions(
+        &self,
+        base: &CommitSha,
+        plugin: &str,
+    ) -> BTreeMap<String, InstructionVersions> {
+        instructions::by_provider(
+            self.workers.iter().map(|worker| worker.provider),
+            |provider| crate::application::prompt::worker_template(provider).ok(),
+            plugin,
+            self.repository
+                .blobs_in(base.as_str(), &instructions::REPOSITORY_INSTRUCTIONS)
+                .ok(),
+        )
     }
     /// Sample the load average once for every slot's current interval
     /// (task 197); the windows of runs no slot holds any more are dropped.

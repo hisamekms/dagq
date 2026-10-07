@@ -287,6 +287,76 @@ fn supervisor_claims_the_candidate_that_releases_the_most_tasks_first() {
     assert_eq!(outcome["runs"][1]["task_id"], 2);
 }
 
+/// A worker's claim records the versions of the instructions it reads
+/// (goal 113) under their own keys: its prompt's template, the plugin its
+/// Claude Code installs and the repository's instruction documents at the
+/// run's base, each the hash of its content; the versions of the other
+/// providers are not kept.
+#[test]
+fn the_claim_records_the_versions_of_the_workers_instructions() {
+    use dagq::domain::instructions::{content_hash, template_hash};
+    let (_dir, repo, db) = fixture();
+    fs::write(repo.join("AGENTS.md"), "rules\n").unwrap();
+    git(&repo, &["add", "AGENTS.md"]);
+    git(&repo, &["commit", "-qm", "instructions"]);
+    let config = tempfile::tempdir().unwrap();
+    let plugin = config.path().join("plugin");
+    fs::create_dir_all(plugin.join("skills/dagq")).unwrap();
+    fs::write(plugin.join("skills/dagq/SKILL.md"), "skill").unwrap();
+    fs::create_dir_all(config.path().join("plugins")).unwrap();
+    fs::write(
+        config.path().join("plugins/installed_plugins.json"),
+        json!({"version": 2, "plugins": {
+            "claude-dagq@dagq": [{"scope": "user", "installPath": plugin}]
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let mut options = supervise_options(1, true);
+    options.claude_config_dir = Some(config.path().to_owned());
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let claimed = &detail
+        .events
+        .iter()
+        .find(|event| event.kind == "run_claimed")
+        .unwrap()
+        .payload;
+    let blob = Command::new(git_executable().unwrap())
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "HEAD:AGENTS.md"])
+        .bounded_output()
+        .unwrap();
+    let blob = String::from_utf8(blob.stdout).unwrap().trim().to_owned();
+    assert_eq!(
+        claimed["instructions_prompt"],
+        template_hash(
+            &dagq::application::prompt::worker_template(dagq::domain::Provider::Claude).unwrap()
+        ),
+        "{claimed}"
+    );
+    assert_eq!(
+        claimed["instructions_plugin"],
+        content_hash([("skills/dagq/SKILL.md", "skill")]),
+        "{claimed}"
+    );
+    assert_eq!(
+        claimed["instructions_repo"],
+        content_hash([("AGENTS.md", blob)]),
+        "{claimed}"
+    );
+    assert!(
+        claimed.get("instructions_by_provider").is_none(),
+        "{claimed}"
+    );
+}
+
 /// The supervisor claims in the order `candidates` and `graph` show: the
 /// highest effective priority first, whatever the ID or unblocks, and a
 /// candidate that an urgent ready task waits for inherits urgent

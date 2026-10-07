@@ -5,7 +5,9 @@
 //! that ends the interval). Versions, counts and loads are domain values;
 //! no path goes in (ADR-0032's classification of the records).
 
+use super::instructions::InstructionVersions;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// The versions of the host a run is claimed on: Claude Code's (from the
 /// versioned file `--claude` resolves to; null when that path names no
@@ -77,6 +79,13 @@ pub struct ClaimAttributes {
     /// leaves (ADR-t1591-1); left out otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub light_room: Option<bool>,
+    /// Each provider's [`InstructionVersions`], by its name; left out
+    /// when empty.
+    #[serde(
+        rename = "instructions_by_provider",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub instructions: BTreeMap<String, InstructionVersions>,
 }
 
 /// The spacing a claim was made under (ADR-t1479-1).
@@ -161,6 +170,7 @@ pub fn load_band_order(band: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::instructions;
     use serde_json::json;
 
     #[test]
@@ -257,6 +267,7 @@ mod tests {
             load_avg: Some(7.5),
             spacing: None,
             light_room: None,
+            instructions: BTreeMap::new(),
         };
         assert_eq!(
             serde_json::to_value(&attributes).unwrap(),
@@ -284,6 +295,14 @@ mod tests {
             light_room: Some(true),
             ..spaced
         };
-        assert_eq!(serde_json::to_value(light).unwrap()["light_room"], true);
+        assert_eq!(serde_json::to_value(&light).unwrap()["light_room"], true);
+        let instructed = ClaimAttributes {
+            instructions: BTreeMap::from([("claude".to_owned(), InstructionVersions::unknown())]),
+            ..light
+        };
+        assert_eq!(
+            serde_json::to_value(instructed).unwrap()[instructions::BY_PROVIDER]["claude"]["instructions_repo"],
+            instructions::UNKNOWN
+        );
     }
 }

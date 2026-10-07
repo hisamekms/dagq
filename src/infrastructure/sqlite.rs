@@ -2185,7 +2185,11 @@ pub(super) fn claim_task(
                 .get(&format!("{}_version", run.actual_provider().as_str()))
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            payload.extend(attributes.clone());
+            let mut attributes = attributes.clone();
+            // The versions of the instructions the run's worker reads
+            // (goal 113), of its own provider among the supervisor's.
+            crate::domain::instructions::settle(&mut attributes, run.actual_provider().as_str());
+            payload.extend(attributes);
             payload.insert("provider_version".to_owned(), version);
         }
         if let Some(payload) = payload.as_object_mut() {

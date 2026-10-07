@@ -3273,6 +3273,13 @@ pub trait Repository {
         anyhow::bail!("this repository cannot read committed files")
     }
 
+    /// The blob ID of each file at or under `paths` (files, or directories
+    /// and everything under them) in `commit`'s tree, by its path; a path
+    /// the tree lacks gives none.
+    fn blobs_in(&self, _commit: &str, _paths: &[&str]) -> Result<Vec<(String, String)>> {
+        anyhow::bail!("this repository cannot list committed files")
+    }
+
     /// Main's first-parent history since `since` (unix seconds) and the
     /// paths it has now, for `conflict_hotspots`; a repository that cannot
     /// tell has none.

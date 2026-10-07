@@ -3858,6 +3858,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     dagq::infrastructure::clock::logical_cores(),
                 ),
                 user_config: dagq::infrastructure::language::user_config_file(),
+                claude_config_dir: dagq::infrastructure::adapters::claude_config_dir(),
                 codex,
                 host_metrics: (host_metrics_interval > 0).then(|| {
                     dagq::compose::HostMetricsSettings::new(
