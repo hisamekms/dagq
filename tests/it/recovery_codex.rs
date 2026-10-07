@@ -11,8 +11,11 @@
 use crate::common;
 use crate::runtime_support;
 
-use dagq::domain::AskReason;
+use dagq::application::RunLog;
+use dagq::domain::provider_switch::{ProviderHold, SwitchReason};
+use dagq::domain::{AskReason, EventKind, Provider};
 use runtime_support::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The thread the stub `codex` names for a read-only job.
 const THREAD: &str = "codex-review-thread";
@@ -38,13 +41,19 @@ const CODEX_AUTH_FAILURE: &str = "{\"type\":\"error\",\"message\":\"unexpected s
 /// Have the stub `codex` in `dir` answer its `call`th read-only job with
 /// `verdict`, and write [`MODEL`] to the job's rollout.
 fn codex_verdict(dir: &Path, call: usize, verdict: Value) {
+    codex_reply(dir, call, verdict);
+    fs::write(dir.join("codex-review-model"), MODEL).unwrap();
+}
+
+/// Have the stub `codex` in `dir` answer its `call`th read-only job with
+/// `verdict`, writing no rollout.
+fn codex_reply(dir: &Path, call: usize, verdict: Value) {
     let reply = json!({"type": "item.completed", "item": {"id": "recovery", "type": "agent_message", "text": verdict.to_string()}});
     fs::write(
         dir.join(format!("codex-review-{call}.jsonl")),
         format!("{reply}\n"),
     )
     .unwrap();
-    fs::write(dir.join("codex-review-model"), MODEL).unwrap();
 }
 
 /// The stub `codex` and the supervisor's options with it as the Codex of
@@ -430,11 +439,12 @@ fn no_claude_recovery(prepare: impl FnOnce(&Path)) -> (Fixture, PathBuf, dagq::d
 
 /// Acceptance (3) under `--no-claude` (ADR-t1204-1): the recovery job of a
 /// Codex run that failed starts on Codex rather than going to a person,
-/// and its `wait` is applied.
+/// and its `wait` is applied. Its thread wrote no rollout, so its end
+/// records the thread and why its model is unknown.
 #[test]
 fn a_no_claude_supervisor_runs_the_codex_recovery_job() {
     let (_dir, db, detail) = no_claude_recovery(|dir| {
-        codex_verdict(
+        codex_reply(
             dir,
             1,
             json!({"verdict": "repair", "confidence": "high",
@@ -449,7 +459,12 @@ fn a_no_claude_supervisor_runs_the_codex_recovery_job() {
     assert_eq!(recovery_providers(&db), ["codex"]);
     let finished = &run_payloads(&detail, run, "triage_finished")[0];
     assert_eq!(finished["action"], "wait");
-    assert_eq!(finished["session_id"], THREAD);
+    let recovered = &run_payloads(&detail, run, "recovery_finished")[0];
+    for end in [finished, recovered] {
+        assert_eq!(end["session_id"], THREAD, "{end}");
+        assert!(end["model"].is_null(), "{end}");
+        assert!(end["model_unknown"].is_string(), "{end}");
+    }
     assert!(run_payloads(&detail, run, "triage_failed").is_empty());
 }
 
@@ -694,6 +709,105 @@ fn a_failed_codex_recovery_job_of_a_stalled_run_asks_a_person() {
         ask.question.contains("the recovery job failed"),
         "{}",
         ask.question
+    );
+}
+
+/// Acceptance (3) under `--no-claude` for a live run: the stalled alert of
+/// a Codex run comes while Codex is held (`authentication`), so with no
+/// provider left its recovery job starts on neither Codex nor Claude, and
+/// the `stalled` ask (`recovery_failed`) tells a person why. The run's
+/// first turn waits until the hold is recorded, so that the alert comes
+/// after it.
+#[test]
+fn a_no_claude_live_run_with_codex_held_asks_a_person_and_starts_no_recovery_job() {
+    let (dir, repo, db, backend, codex) = crate::runtime_codex::codex_fixture();
+    select_codex_recovery(&repo);
+    let gate = dir.path().join("codex-held");
+    set_turns(
+        dir.path(),
+        &format!(
+            "i=0; while [ ! -f {gate} ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1)); done; say thinking",
+            gate = shell_path(&gate)
+        ),
+    );
+    let options = SuperviseOptions {
+        no_claude: true,
+        codex: codex.clone(),
+        codex_home: Some(dir.path().join(headless::CODEX_HOME)),
+        ..supervise_options(1, true)
+    };
+    let reviewer = Arc::new(TestReviewer::new(&[]));
+    let backend = Arc::new(backend);
+    let supervisor = {
+        let (db, repo, backend, judge) =
+            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
+        let claude = dir.path().join("missing-claude");
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude,
+                &*judge,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue
+            .show(crate::runtime_codex::TASK)
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.status() == RunStatus::Running)
+    });
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let hold = ProviderHold::new(Provider::Codex, SwitchReason::Authentication, now);
+    RunLog::record_queue_event(
+        &SqliteQueue::open(&db).unwrap(),
+        EventKind::ProviderHeld,
+        hold.held_payload(None),
+    )
+    .unwrap();
+    fs::write(&gate, "").unwrap();
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !stalled_asks(queue).is_empty()
+    });
+    let ask = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
+    assert_eq!(ask.reason_category, AskReason::RecoveryFailed, "{ask:?}");
+    assert!(
+        ask.question.contains(
+            "provider_disabled: Claude is disabled by --no-claude and codex cannot be used (authentication)"
+        ),
+        "{}",
+        ask.question
+    );
+    let asked = crate::runtime_codex::detail(&db);
+    let requested = payloads(&asked, "recovery_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["alert"], "stalled");
+    assert_eq!(requested[0]["launch"]["provider"], "codex");
+    assert!(recovery_providers(&db).is_empty(), "no recovery job ran");
+    assert!(
+        !dir.path().join("codex-review-args.log").exists(),
+        "Codex ran no job"
+    );
+    assert!(reviewer.triage_prompts().is_empty(), "no Claude job");
+
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(ask.id, "stop")
+        .unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        crate::runtime_codex::detail(&db).runs[0].status(),
+        RunStatus::Failed
     );
 }
 
