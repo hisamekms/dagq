@@ -40,9 +40,13 @@ pub struct Goal {
     /// What the goal is about, each once, in the order given (ADR-t1639-1
     /// decision 6).
     tags: Vec<GoalTag>,
+    /// `draft` or `open` (ADR-0044 decision 5): a draft goal's tasks are
+    /// not candidates and are never claimed. Closing does not change it.
     status: GoalStatus,
     /// Set together with `verdict` by the one close.
     closed_at: Option<String>,
+    /// Recorded once per close. Only a person's `reopen` of a goal closed
+    /// as achieved clears it ([`reopen`]); the `goal_closed` event stays.
     verdict: Option<GoalVerdict>,
     created_at: String,
     updated_at: String,

@@ -34,20 +34,51 @@ pub struct TaskRun {
     id: RunId,
     task_id: TaskId,
     status: RunStatus,
+    /// The provider of the task's worker at the claim.
     requested_provider: Provider,
+    /// The provider the run's worker runs on now: the requested one until
+    /// the run moves to the other provider because the first cannot be used
+    /// (ADR-t813-2 decision 2).
     actual_provider: Provider,
     /// The mode of its worker, as its task asked at the claim (ADR-t813-1
     /// decision 7); a run from before the mode existed is interactive.
     worker_mode: WorkerMode,
+    /// The commit of main the run's branch starts from, in lowercase.
     base_commit: CommitSha,
     branch: Option<String>,
+    /// Like `run_dir`, `receipt_path` and `log_path`, read again from the
+    /// queue's current `runs/` directory on every load ([`RunPaths`],
+    /// ADR-0017), so a moved queue still finds its runs.
     worktree_path: Option<String>,
+    /// The handle of the run's session: the background wrapper's
+    /// `background:<pid>:<start>` since ADR-t1433-3, a cmux workspace's UUID
+    /// for a run from before it (such a workspace is never closed by the
+    /// runtime; a person closes it). A run has at most one session at a
+    /// time, so there is no workspace entity of its own.
     workspace_id: Option<String>,
     receipt_path: Option<String>,
     log_path: Option<String>,
+    /// The commit validation checked; once `integrated`, the squash commit
+    /// the run landed on main.
     result_commit: Option<CommitSha>,
     repo_path: Option<String>,
     run_dir: Option<String>,
+    /// The one latest reason that stopped the run or needs a person to
+    /// look; a later reason overwrites it and landing clears it, and the
+    /// whole history stays in `run_events`. Read it with the status and the
+    /// run's latest event, which says which step wrote it: on `failed`, why
+    /// the run failed (the session's exit, the rejected or `failed`
+    /// receipt, used-up resumes, a cancelled landing); on an unfinished run
+    /// still `claimed` to `validating`, a runtime error (the supervisor let
+    /// the run go, unless the error was the wrapper's own or the failure of
+    /// the supervisor's heartbeat); on `awaiting_integration`, a failed stop
+    /// of its session, a landing stopped before main moved or held for a
+    /// person on a host failure; on `needs_session`, why the run waits for
+    /// its session (a landing conflict, missing evidence, a path out of
+    /// scope); on `integrated`, only a failed removal of the landed worktree.
+    /// `recover` leaves it as it is. Its code is not stored:
+    /// [`super::reason::last_error_code`] derives it from the event that
+    /// wrote it.
     last_error: Option<String>,
     /// Set once the run's session was stopped (its background wrapper's
     /// handle closed; before ADR-t1433-3, once cmux confirmed its

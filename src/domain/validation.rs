@@ -144,20 +144,26 @@ pub struct CheckedOut {
     pub current: Option<String>,
 }
 
-/// A fact [`judge`] needs next.
+/// A fact [`judge`] needs next, in the order it asks for them; each line
+/// names the reason code a rejection on that fact carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fact {
-    /// Read the receipt file.
+    /// Read the receipt file: `receipt_missing` when there is none, else
+    /// the code of the parse or check error.
     Receipt,
-    /// The run branch and what the worktree has checked out.
+    /// The run branch and what the worktree has checked out:
+    /// `commit_mismatch` when it is not on the run branch.
     CheckedOut,
-    /// The head commit of the worktree.
+    /// The head commit of the worktree: `commit_mismatch` when the receipt
+    /// does not name it or it is still the base.
     Head,
-    /// Whether the head descends from the base commit.
+    /// Whether the head descends from the base commit: `commit_mismatch`.
     Descends,
-    /// `git status` of the worktree.
+    /// `git status` of the worktree: `worktree_dirty`.
     Status,
-    /// The paths changed from where the head forked from main to the head.
+    /// The paths changed from where the head forked from main to the head,
+    /// asked only when the task declares paths or the diff decides the
+    /// e2e: `scope_violation` for a path outside the task's.
     Changes,
 }
 

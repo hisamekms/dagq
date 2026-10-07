@@ -108,7 +108,10 @@ pub struct Task {
     paths: Vec<String>,
     /// How urgently a person wants it claimed (ADR-0040 decision 4): its
     /// own setting, else its goal's (ADR-t1639-1 decision 2). The claim
-    /// order raises it to the effective priority.
+    /// order raises it to the effective priority. Without a setting of its
+    /// own it follows the goal's current priority in every status, read
+    /// each time and never frozen at the claim (ADR-t1811-1 decision 1);
+    /// the priority a run was claimed at is in its `run_claimed` event.
     priority: Priority,
     /// Where `priority` comes from: `task`, `goal` or `default`.
     priority_source: PrioritySource,
@@ -137,8 +140,13 @@ pub struct Task {
     /// one follows a change of the default (ADR-t1340-1). Not shown.
     #[serde(skip)]
     named_mode: Option<WorkerMode>,
+    /// Only a claim makes a task `in_progress`, and only the landing of its
+    /// run makes it `completed`; a terminal status never changes.
     status: TaskStatus,
+    /// The one goal it belongs to, if any. A closed goal takes no new tasks.
     goal_id: Option<GoalId>,
+    /// Why the task exists and what to read first; the worker's prompt
+    /// carries it.
     context: String,
     created_at: String,
     updated_at: String,

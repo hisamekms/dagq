@@ -48,12 +48,6 @@ path = "docs/design/ci-failure-issues.md"
 tasks = 3
 
 [[doc]]
-path = "docs/design/domain-model.md"
-size = 154265
-line = 11022
-tasks = 56
-
-[[doc]]
 path = "docs/design/follow-up-membership.md"
 tasks = 1
 
