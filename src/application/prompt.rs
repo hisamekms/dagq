@@ -334,9 +334,13 @@ pub const ACCEPTANCE_MAP: &str = "Before the receipt, map each acceptance criter
 /// against the diff, and summary says what was updated or why nothing was.
 /// The candidates include what a search of the repository for each changed
 /// name finds, and summary gives the names searched, so the review can
-/// search again (ADR-t1688-1). It names no tool and no repository path,
-/// asks for no command and no document change only to show the check.
-pub const DOCS_CHECK: &str = "Then check against your diff the documents on what you changed: named by the task, found as you work, or found by searching the repository for each changed name (command, flag, setting, role, path). Fix stale ones in the task's paths, file the rest as docs_drift follow_ups with path and section (one the acceptance names is a criterion above); in summary give the names searched and each path and section updated or why none was. Touch no document only to show it.\n";
+/// search again. A document is written only when a flow, boundary,
+/// invariant or promise the code does not show changed, or it disagrees
+/// with the code; a name missing from it is not drift, and neither a list
+/// of identifiers nor history goes in (ADR-t1942-2). It names no tool, no
+/// repository path and none of a repository's own document rules, and asks
+/// for no command and no document change only to show the check.
+pub const DOCS_CHECK: &str = "Then check against your diff the documents on what you changed: named by the task, found as you work, or found by searching the repository for each changed name (command, flag, setting, role, path). Fix stale ones in the task's paths, file the rest as docs_drift follow_ups with path and section (one the acceptance names is a criterion above); in summary give the names searched and each path and section updated or why none was. Write to a document only when a flow, boundary, invariant or promise the code does not show changed, or the document disagrees with the code or an accepted decision; a changed name missing from it is not drift. Add no list of fields, flags, defaults or names and no history (task numbers, what was before); put what a name means in a doc comment by its definition. Touch no document only to show it.\n";
 
 /// What a resumed or revised session adds before it rewrites the receipt
 /// (ADR-t1420-1): the mapping of the criteria its fix touched, again, with
@@ -2492,9 +2496,12 @@ pub fn review_prompt(
 }
 
 /// How a review checks the documents on the changed behavior
-/// (ADR-t1428-1 decision 5): against the diff and the summary, never taking
-/// a document's diff alone as proof, and naming stale ones as before.
-pub const REVIEW_DOCS_CHECK: &str = "Read the documents on the behavior the diff changes (named by the task's description or context or by the summary, or found as you read) against the diff and the summary. A document's diff alone does not show the change is right; check the summary's reason for leaving a document as it is like any other claim. Report a stale document as docs_drift whether or not the task named it.\n";
+/// (ADR-t1428-1 decision 5, ADR-t1942-2 decision 4): against the diff and
+/// the summary, never taking a document's diff alone as proof, in both
+/// directions: stale ones as before, and what the diff adds to a document
+/// that copies the code or carries history. A name missing from a document
+/// alone is not drift. The verdict's shape and the codes stay as they are.
+pub const REVIEW_DOCS_CHECK: &str = "Read the documents on the behavior the diff changes (named by the task's description or context or by the summary, or found as you read) against the diff and the summary. A document's diff alone does not show the change is right; check the summary's reason for leaving a document as it is like any other claim. Report as docs_drift a stale document, or a changed flow, boundary, invariant or promise it misses, whether or not the task named it; a name missing from a document alone is not stale. Also report text the diff adds to a document when that text copies the code (lists of fields, flags, defaults, function or test names) or carries history (task numbers, what was before).\n";
 
 /// Where the review finds the repository's rules: its instructions in the
 /// worktree, which a Claude review that loads no setting sources no longer
@@ -5978,9 +5985,11 @@ mod tests {
     /// second map; the Codex review line does not say it again; every
     /// resume and revise request keeps the record of the check inside the
     /// remap's phrase, not as another sentence; the run's review prompt is
-    /// untouched. Task 1688 (ADR-t1688-1): the check finds candidates by a
-    /// search for each changed name and gives the names searched in
-    /// summary, still naming no command, tool or repository path.
+    /// untouched. ADR-t1942-2: the check finds candidates by a search for
+    /// each changed name and gives the names searched in summary, writes a
+    /// document only when a flow, boundary, invariant or promise changed,
+    /// adds no list of identifiers and no history, and still names no
+    /// command, tool, repository path or document rule of one repository.
     #[test]
     fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
         let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
@@ -6021,12 +6030,27 @@ mod tests {
         assert!(!codex.contains("documents") && !codex.contains("docs_drift"));
         assert!(!DOCS_CHECK.contains("own diff"));
         // Candidates come from a search for each changed name, and summary
-        // gives the names searched (ADR-t1688-1).
+        // gives the names searched (ADR-t1942-2 decisions 1 and 3).
         assert!(DOCS_CHECK.contains("searching the repository for each changed name"));
-        // No new command, no tool, no repository path, and short
-        // (ADR-t1428-1, ADR-t1688-1; goals 91 and 112's constraints).
-        assert!(DOCS_CHECK.len() <= 470, "{}", DOCS_CHECK.len());
-        for word in ["cargo", "`", "docs/", "grep"] {
+        assert!(DOCS_CHECK.contains("in summary give the names searched"));
+        // A document is written when a flow, boundary, invariant or promise
+        // changed; a missing name is not drift, no list of identifiers and
+        // no history go in, and the detail goes to a doc comment
+        // (ADR-t1942-2 decision 2).
+        for part in [
+            "only when a flow, boundary, invariant or promise the code does not show changed",
+            "a changed name missing from it is not drift",
+            "Add no list of fields, flags, defaults or names and no history (task numbers",
+            "put what a name means in a doc comment by its definition",
+        ] {
+            assert!(DOCS_CHECK.contains(part), "{part}");
+        }
+        // No new command, no tool, no repository path or document rule of
+        // one repository, and short (ADR-t1428-1, ADR-t1453-2).
+        assert!(DOCS_CHECK.len() <= 840, "{}", DOCS_CHECK.len());
+        for word in [
+            "cargo", "`", "docs/", "grep", "design", "concept", "map", "budget", "KiB", "byte",
+        ] {
             assert!(!DOCS_CHECK.contains(word), "{word}");
         }
         let review = review_prompt(
@@ -6062,12 +6086,22 @@ mod tests {
             "named by the task's description or context or by the summary",
             "A document's diff alone does not show the change is right",
             "check the summary's reason for leaving a document as it is",
-            "as docs_drift whether or not the task named it",
+            "whether or not the task named it",
+            "a changed flow, boundary, invariant or promise it misses",
+            // Both directions (ADR-t1942-2 decision 4): a missing name alone
+            // is not stale, and what the diff adds that copies the code or
+            // carries history is reported too.
+            "a name missing from a document alone is not stale",
+            "Also report text the diff adds to a document when that text copies the code (lists of fields, flags, defaults, function or test names)",
+            "or carries history (task numbers",
         ] {
             assert!(REVIEW_DOCS_CHECK.contains(part), "{part}");
         }
+        for word in ["design", "concept", "docs/", "budget", "KiB", "byte"] {
+            assert!(!REVIEW_DOCS_CHECK.contains(word), "{word}");
+        }
         assert!(
-            REVIEW_DOCS_CHECK.len() <= 400,
+            REVIEW_DOCS_CHECK.len() <= 690,
             "{}",
             REVIEW_DOCS_CHECK.len()
         );

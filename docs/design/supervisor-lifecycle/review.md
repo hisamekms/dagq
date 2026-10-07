@@ -8,6 +8,7 @@ updated: 2026-10-07
 last_verified: 2026-10-07
 scope: runtime
 related:
+  - adr-t1942-2
   - adr-t1728-2
   - design-supervisor-lifecycle-task-replanning
   - adr-t1570-1
@@ -100,9 +101,17 @@ related:
 
 ## 文書の照合
 
-[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)の決定5（goal 91、task 1429。goal 90のcloseを待つ依存は人の判断で外し、goal 90のcloseの前に足した）。runのreviewのprompt（`review_prompt`）は、`review.md`を読む指示の後、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落（英語で383文字）を置く（その間に、repositoryの規則を読ませる`REVIEW_RULES`の1文がある。ADR-t1470-1決定2、task 1470）: 変えた挙動を説明する文書（taskのdescriptionかcontextが名指すもの、receiptの`summary`が名指すもの、読んで見つけたもの）を差分と`summary`の説明に照らして読む。文書の差分があることだけでは変更を正しいとしない。`summary`が文書を直さなかった理由も他の主張と同じく確かめる。古い文書は、taskが名指したかどうかに関わらず今までどおり`docs_drift`（[差し戻しの分類コード](#差し戻しの分類コード)）で指摘する。verdictの選び方（pass・revise・concern）、[AIが決めるconcern](#aiが決めるconcern未実装)の推奨、分類コードの一覧と定義、`ReviewVerdict`の形は変えない。
+runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を置く（[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)決定5、[ADR-t1942-2](../../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)決定4）。
 
-plannerが関連文書をtaskのcontextに書いてもreviewが読めるように、`review.md`のTaskの節はdescriptionの後に`### Context`（taskのcontext。空なら`(none)`）を持つ（[`review`](review-command.md#review)）。ClaudeとCodexのreview jobは同じpromptと`review.md`を読むので両方に効く。testは`src/application/prompt.rs`の`the_review_prompt_checks_the_documents_and_keeps_its_verdict`と`src/application/review.rs`の`the_review_material_carries_the_task_context_or_none`。
+- 変えた挙動を説明する文書（task・`summary`が名指すもの、読んで見つけたもの）を差分と`summary`に照らして読む。
+  文書の差分だけでは正しいとせず、文書を直さなかった理由も確かめる。
+- 両方向: 古い文書と変わった流れ・境界・不変条件・約束の書き漏れを`docs_drift`で指摘し、加えて差分が文書に入れたコードの書き写し（欄・flag・既定値・関数名・test名の列挙）と経緯も指摘する。
+  名前が文書に無いことだけでは古いとしない。
+- verdictの形と分類コードは変えない。
+- このrepositoryでは、探した名前の確かめと書き写し・経緯・予算の指摘をdesign-consistencyの[subagent](#reviewのsubagent)が受け持ち、規則は[documents.md](../../development/documents.md#design)が持つ。
+
+`review.md`のTaskの節はdescriptionの後に`### Context`（空なら`(none)`）を持ち、plannerがcontextに書いた関連文書もreviewが読む（[`review`](review-command.md#review)）。
+testの入口は`src/application/prompt.rs`の`the_review_prompt_checks_the_documents_and_keeps_its_verdict`と`src/application/review.rs`の`the_review_material_carries_the_task_context_or_none`。
 
 ## 差し戻しの分類コード<a id="差し戻しの分類コード未実装"></a>
 
