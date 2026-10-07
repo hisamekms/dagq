@@ -1607,6 +1607,11 @@ enum RequestCommand {
         /// What it refers to: ask:N, task:N, run:ID, event:N, finding:N or goal:N; repeatable.
         #[arg(long = "ref")]
         refs: Vec<String>,
+        /// The priority the person's words name (interrupt, urgent, high, normal or low), and
+        /// only then: the runtime gives it, as the person's, to the goals the request's planner
+        /// makes.
+        #[arg(long, value_parser = PRIORITIES)]
+        priority: Option<String>,
     },
     /// Decline an open request with the reason (only the planner opened for it): nothing will be
     /// planned of it. The inbox is told.
@@ -1900,9 +1905,10 @@ enum GoalCommand {
         #[arg(long)]
         draft: bool,
         /// The priority its tasks without one of their own inherit (ADR-t1639-1): interrupt,
-        /// urgent, high, normal or low.
-        #[arg(long, default_value = "normal", value_parser = PRIORITIES)]
-        priority: String,
+        /// urgent, high, normal or low; normal when left out. A planner of a request a person
+        /// gave a priority leaves it out: the runtime attaches the request's.
+        #[arg(long, value_parser = PRIORITIES)]
+        priority: Option<String>,
         /// A tag naming what the goal is about (ADR-t1639-1); repeatable. With `[goals] tags` in
         /// dagq.toml, one of them.
         #[arg(long = "tag")]
@@ -3441,7 +3447,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 constraints,
                 doc,
                 draft,
-                priority: priority.parse()?,
+                priority: priority.map(|priority| priority.parse()).transpose()?,
                 tags: goal_tags(&tags)?,
             })?)?,
             GoalCommand::Ready { id } => {
@@ -3665,6 +3671,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     note,
                     note_file,
                     refs,
+                    priority,
                 },
         } => {
             if text.as_deref() == Some("-") && note.as_deref() == Some("-") {
@@ -3680,6 +3687,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     .iter()
                     .map(|value| dagq::domain::plan_request::RequestRef::parse(value))
                     .collect::<Result<_, _>>()?,
+                priority: priority.map(|priority| priority.parse()).transpose()?,
             };
             serde_json::to_value(
                 dagq::application::commands::requests::Requests::new(

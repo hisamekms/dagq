@@ -597,6 +597,7 @@ mod tests {
                 status: TaskStatus::Ready,
                 priority: crate::domain::Priority::High,
                 priority_source: crate::domain::PrioritySource::Goal,
+                priority_by: crate::domain::plan_request::PriorityBy::Human,
             }],
             dependents: vec![GoalTask {
                 id: TaskId::new(5),
@@ -604,6 +605,7 @@ mod tests {
                 status: TaskStatus::Draft,
                 priority: crate::domain::Priority::Low,
                 priority_source: crate::domain::PrioritySource::Task,
+                priority_by: crate::domain::plan_request::PriorityBy::Ai,
             }],
             events: (1..=11).map(|id| event(id, json!({"goal": {}}))).collect(),
         };
@@ -614,12 +616,12 @@ mod tests {
         assert_eq!(
             view["tasks"],
             json!([{"id": 2, "title": "t", "status": "ready", "priority": "high",
-                "priority_source": "goal"}])
+                "priority_source": "goal", "priority_by": "human"}])
         );
         assert_eq!(
             view["dependents"],
             json!([{"id": 5, "title": "waits", "status": "draft", "priority": "low",
-                "priority_source": "task"}])
+                "priority_source": "task", "priority_by": "ai"}])
         );
         assert_eq!(view["events_total"], 11);
         let events = view["events"].as_array().unwrap();

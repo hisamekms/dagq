@@ -30,6 +30,7 @@ use crate::domain::{
     FollowUpDraft, GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession,
     RegisteredFollowUp, RequestId, RunHistory, RunId, Task, TaskId, TaskOrigin, TaskStatus,
     follow_up::{FollowUpFacts, RevisitChange, adopt_needs_person, revisit_refusal},
+    plan_request::Creator,
 };
 
 /// How long a claim on typing the answer of a `planner_question` holds
@@ -157,7 +158,12 @@ impl SqliteQueue {
                 if let (Some(changes), Some(change)) = (&self.changes, &new.change) {
                     changes.check(change)?;
                 }
-                let created = insert_task(&tx, new, &self.generators.clock.timestamp())?;
+                let created = insert_task(
+                    &tx,
+                    new,
+                    &self.generators.clock.timestamp(),
+                    Creator::Draft(DraftOrigin::FollowUp),
+                )?;
                 tx.execute(
                     "UPDATE tasks SET follow_up_depth=?2 WHERE id=?1",
                     params![created.id(), depth],
@@ -2056,6 +2062,7 @@ mod tests {
             text: "plan it".into(),
             note: None,
             refs: vec![RequestRef::Task(task)],
+            priority: None,
         };
         let named = queue
             .record_plan_request(&request(first), "inbox", "inbox:1")
@@ -2126,6 +2133,7 @@ mod tests {
                     text: "plan it".into(),
                     note: None,
                     refs: Vec::new(),
+                    priority: None,
                 },
                 "inbox",
                 "inbox:1",

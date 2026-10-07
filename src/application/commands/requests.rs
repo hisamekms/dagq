@@ -107,6 +107,7 @@ mod tests {
             text: "plan it".into(),
             note: None,
             refs: Vec::new(),
+            priority: None,
             requested_by: "inbox".into(),
             requested_by_id: "inbox".into(),
             status,
@@ -158,6 +159,7 @@ mod tests {
             text: "plan it".into(),
             note: None,
             refs: Vec::new(),
+            priority: None,
         }
     }
 

@@ -16,8 +16,8 @@ use super::{
 };
 use crate::application::{PlanRequestStore, PlannerAnswerRoute, RequestPlannerStart};
 use crate::domain::{
-    Ask, AskId, EventId, PlannerId, PlannerOrigin, PlannerSession, ProposalId, RequestId, RunEvent,
-    Submission,
+    Ask, AskId, EventId, PlannerId, PlannerOrigin, PlannerSession, Priority, ProposalId, RequestId,
+    RunEvent, Submission,
     plan_request::{
         NewPlanRequest, NextRequestPlanner, PlanRequest, ProposalLink, RequestAnswerRoute,
         RequestStatus, check_decline, next_request_planner, proposal_link, request_answer_route,
@@ -67,14 +67,15 @@ impl SqliteQueue {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
-               created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6)",
+               created_at, updated_at, priority) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7)",
             params![
                 request.text,
                 request.note,
                 serde_json::to_string(&request.refs)?,
                 by_role,
                 by_id,
-                now
+                now,
+                request.priority.map(Priority::as_i64)
             ],
         )?;
         let id = RequestId::new(tx.last_insert_rowid());
@@ -84,6 +85,7 @@ impl SqliteQueue {
             &json!({
                 "request_id": id,
                 "refs": request.refs,
+                "priority": request.priority,
                 "requested_by": by_role,
             }),
         )?;
@@ -282,6 +284,17 @@ fn request_row(r: &Row<'_>) -> rusqlite::Result<PlanRequest> {
         text: r.get("text")?,
         note: r.get("note")?,
         refs: json_col(r, "refs")?,
+        priority: r
+            .get::<_, Option<i64>>("priority")?
+            .map(Priority::from_i64)
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Integer,
+                    Box::new(error),
+                )
+            })?,
         requested_by: r.get("requested_by")?,
         requested_by_id: r.get("requested_by_id")?,
         status: enum_col(r, "status")?,

@@ -1137,6 +1137,7 @@ pub fn runtime_planner_prompt(
             status: task.status(),
             priority: task.priority(),
             priority_source: task.priority_source(),
+            priority_by: task.priority_by(),
         })
         .collect();
     let (tasks, tasks_left_out) = planner_task_lines(
@@ -2047,6 +2048,12 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
         by = request.requested_by,
         at = request.created_at,
     ));
+    if let Some(priority) = request.priority {
+        out.push_str(&format!(
+            "\nThe person gave it the priority `{p}`. The runtime gives `{p}`, as the person's, to each goal you add for it, and to each task of it you add to a goal without it as the person's or to no goal: leave `--priority` out of `goal add` and `add` (another value is refused).\n",
+            p = priority.as_str(),
+        ));
+    }
     if let Some(note) = &request.note {
         let note = format!(
             "\nThe inbox added this, apart from the person's words:\n\n{}\n",
@@ -7575,6 +7582,7 @@ mod tests {
                 status: TaskStatus::Completed,
                 priority: crate::domain::Priority::Normal,
                 priority_source: crate::domain::PrioritySource::Goal,
+                priority_by: crate::domain::plan_request::PriorityBy::Ai,
             })
             .collect()
     }
@@ -8564,6 +8572,7 @@ mod tests {
             text: "plan it".into(),
             note: None,
             refs: Vec::new(),
+            priority: None,
             requested_by: "inbox".into(),
             requested_by_id: "inbox".into(),
             status: crate::domain::plan_request::RequestStatus::Open,
@@ -8829,6 +8838,7 @@ mod tests {
             text: "plan it".into(),
             note: Some(big("note", 50_000)),
             refs: Vec::new(),
+            priority: None,
             requested_by: "inbox".into(),
             requested_by_id: "inbox".into(),
             status: crate::domain::plan_request::RequestStatus::Open,

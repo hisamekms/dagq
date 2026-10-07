@@ -43,11 +43,15 @@ use crate::{
         ChangeSet, ClaimOutcome, CommitSha, DomainError, EventId, Goal, GoalDetail, GoalEdit,
         GoalId, GoalPredecessor, GoalRecord, GoalSummary, GoalTask, GoalVerdict, LintInput,
         LintNode, NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND,
-        Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, RunRecord, Submission,
-        TagSet, Task, TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId, TaskRecord, TaskRun,
-        TaskStatus, TaskStatusCounts,
+        PlannerOrigin, Predecessor, Priority, Proposal, ProposalId, RequestId, RunEvent, RunId,
+        RunRecord, Submission, TagSet, Task, TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId,
+        TaskRecord, TaskRun, TaskStatus, TaskStatusCounts,
         actor::ActorContext,
         goal,
+        plan_request::{
+            CreatingPlanner, Creator, PriorityBy, RecordedOrigin, creation_origin,
+            goal_priority_at_creation, task_priority_at_creation,
+        },
         provider_switch::{self, SwitchPhase, WorkerRoute},
         scope::validate_path_globs,
         task,
@@ -69,7 +73,8 @@ const APPLICATION_ID: i64 = 0x43545131;
 /// without a priority of its own inherits (ADR-t1639-1 decision 2).
 macro_rules! select_tasks {
     () => {
-        "SELECT t.*, (SELECT g.priority FROM goals g WHERE g.id = t.goal_id) AS goal_priority
+        "SELECT t.*, (SELECT g.priority FROM goals g WHERE g.id = t.goal_id) AS goal_priority,
+         (SELECT g.priority_by FROM goals g WHERE g.id = t.goal_id) AS goal_priority_by
          FROM tasks t"
     };
 }
@@ -896,7 +901,8 @@ impl TaskStore for SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = insert_task(&tx, new, &self.generators.clock.timestamp())?;
+        let creator = creator_of_actor(&tx)?;
+        let result = insert_task(&tx, new, &self.generators.clock.timestamp(), creator)?;
         tx.commit()?;
         Ok(result)
     }
@@ -1208,16 +1214,26 @@ impl TaskStore for SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Its origin, and a request's priority attached as a person's
+        // (ADR-t1975-1 decisions 2 and 5).
+        let creator = creator_of_actor(&tx)?;
+        let origin = creation_origin(creator);
+        let (priority, priority_by) =
+            goal_priority_at_creation(creator, request_priority(&tx, origin)?, new.priority)?;
+        let mut new = new;
+        new.priority = Some(priority);
         let goal = Goal::new(
             GoalId::new(next_id(&tx, "goals")?),
             new,
             self.generators.clock.timestamp(),
-        )?;
+        )?
+        .with_record(priority_by, origin);
         let id = goal.id();
         tx.execute(
             "INSERT INTO goals(id, title, description, acceptance, constraints, doc, status,
-                               created_at, updated_at, priority, tags)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                               created_at, updated_at, priority, tags, priority_by, origin,
+                               origin_kind, origin_request_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 id,
                 goal.title(),
@@ -1229,7 +1245,11 @@ impl TaskStore for SqliteQueue {
                 goal.created_at(),
                 goal.updated_at(),
                 goal.priority().as_i64(),
-                serde_json::to_string(goal.tags())?
+                serde_json::to_string(goal.tags())?,
+                goal.priority_by().as_str(),
+                origin.origin.as_str(),
+                origin.kind.map(|kind| kind.as_str()),
+                origin.request_id
             ],
         )?;
         let result = read_goal(&tx, id)?;
@@ -1268,14 +1288,16 @@ impl TaskStore for SqliteQueue {
         let follow_up_memberships = super::follow_up_membership::goal_memberships(&tx, goal_id)?;
         let tasks = tx
             .prepare(
-                "SELECT t.id, t.title, t.status, t.priority, g.priority AS goal_priority
+                "SELECT t.id, t.title, t.status, t.priority, t.priority_by,
+                 g.priority AS goal_priority, g.priority_by AS goal_priority_by
                  FROM tasks t JOIN goals g ON g.id = t.goal_id WHERE t.goal_id=?1 ORDER BY t.id",
             )?
             .query_map([goal_id], goal_task_row)?
             .collect::<rusqlite::Result<_>>()?;
         let dependents = tx
             .prepare(
-                "SELECT t.id, t.title, t.status, t.priority, g.priority AS goal_priority
+                "SELECT t.id, t.title, t.status, t.priority, t.priority_by,
+                 g.priority AS goal_priority, g.priority_by AS goal_priority_by
                  FROM task_goal_dependencies d
                  JOIN tasks t ON t.id = d.task_id LEFT JOIN goals g ON g.id = t.goal_id
                  WHERE d.goal_id=?1 AND t.status NOT IN ('completed','canceled') ORDER BY t.id",
@@ -1310,10 +1332,15 @@ impl TaskStore for SqliteQueue {
         // The event keeps the goal before the edit, which consumes it.
         let old_json = serde_json::to_value(&old)?;
         let old_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
+        // A change of priority records who set it (ADR-t1975-1 decision 3).
+        let priority_by = match edit.priority {
+            Some(priority) if priority != old.priority() => PriorityBy::of(creator_of_actor(&tx)?),
+            _ => old.priority_by(),
+        };
         let new = goal::edit(old, edit)?;
         tx.execute(
             "UPDATE goals SET title=?1, description=?2, acceptance=?3, constraints=?4, doc=?5,
-             updated_at=?6, priority=?8, tags=?9 WHERE id=?7",
+             updated_at=?6, priority=?8, tags=?9, priority_by=?10 WHERE id=?7",
             params![
                 new.title(),
                 new.description(),
@@ -1323,7 +1350,8 @@ impl TaskStore for SqliteQueue {
                 self.generators.clock.timestamp(),
                 goal_id,
                 new.priority().as_i64(),
-                serde_json::to_string(new.tags())?
+                serde_json::to_string(new.tags())?,
+                priority_by.as_str()
             ],
         )?;
         goal_event(
@@ -1662,26 +1690,52 @@ pub(crate) fn tag_busy(error: anyhow::Error) -> anyhow::Error {
 /// Register `new` inside the caller's write transaction with
 /// `task_created` and its dependencies: what `add` does, and what a
 /// follow-up triage's `adopt` does in the transaction that cancels the draft.
-pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Task> {
+///
+/// `creator` is who creates it ([`creator_of_actor`] for the actor of the
+/// write): its origin is recorded once, and a task of a request a person
+/// gave a priority takes that priority as a person's own unless its goal
+/// already has it (ADR-t1975-1 decisions 2 and 5).
+pub(super) fn insert_task(
+    tx: &Connection,
+    mut new: NewTask,
+    now: &str,
+    creator: Creator,
+) -> Result<Task> {
     let dependencies = new.dependencies.clone();
     let goal_dependencies = new.goal_dependencies.clone();
-    let task = Task::new(TaskId::new(next_id(tx, "tasks")?), new, now.to_owned())?;
-    if let Some(goal_id) = task.goal_id() {
-        goal::check_accepts_tasks(&read_goal(tx, goal_id)?)?;
+    let origin = creation_origin(creator);
+    let goal = new
+        .goal_id
+        .map(|goal_id| read_goal(tx, goal_id))
+        .transpose()?;
+    if let Some(goal) = &goal {
+        goal::check_accepts_tasks(goal)?;
     }
+    let (priority, priority_by) = task_priority_at_creation(
+        creator,
+        request_priority(tx, origin)?,
+        new.priority,
+        goal.as_ref()
+            .map(|goal| (goal.priority(), goal.priority_by())),
+    )?;
+    new.priority = priority;
+    let task = Task::new(TaskId::new(next_id(tx, "tasks")?), new, now.to_owned())?;
     let id = task.id();
     tx.execute(
             "INSERT INTO tasks(id, title, description, acceptance, verification_commands, status, goal_id,
                                context, required_evidence, paths, priority, created_at,
-                               updated_at, worker_provider, worker_mode, change, wait_for_build)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                               updated_at, worker_provider, worker_mode, change, wait_for_build,
+                               priority_by, origin, origin_kind, origin_request_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![id, task.title(), task.description(), task.acceptance(),
                 serde_json::to_string(task.verification_commands())?, task.status().as_str(),
                 task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
                 serde_json::to_string(task.paths())?, task.own_priority().map(Priority::as_i64),
                 task.created_at(), task.updated_at(),
                 task.worker().provider.as_str(), task.stored_worker_mode().map(WorkerMode::as_str),
-                task.change().map(TaskChange::as_str), task.wait_for_build()],
+                task.change().map(TaskChange::as_str), task.wait_for_build(),
+                priority_by.map(PriorityBy::as_str), origin.origin.as_str(),
+                origin.kind.map(|kind| kind.as_str()), origin.request_id],
         )?;
     event(
         tx,
@@ -1701,6 +1755,87 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
     read_task(tx, id)
 }
 
+/// Who creates a goal or task as the actor of `conn`'s writes
+/// (ADR-t1975-1 decision 5): the user or the inbox, a planner by its row
+/// (`planner:<id>`), or any other actor.
+pub(super) fn creator_of_actor(conn: &Connection) -> Result<Creator> {
+    let (role, actor): (String, String) =
+        conn.query_row("SELECT dagq_actor_role(), dagq_actor_id()", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+    if crate::domain::plan_review::is_person_actor(&role) {
+        return Ok(Creator::Person);
+    }
+    if role != crate::domain::ActorRole::Planner.as_str() {
+        return Ok(Creator::Other);
+    }
+    let Some(planner) = actor
+        .strip_prefix("planner:")
+        .and_then(|id| id.parse::<i64>().ok())
+    else {
+        return Ok(Creator::Planner(CreatingPlanner::default()));
+    };
+    let row = conn
+        .query_row(
+            "SELECT p.origin, p.request_id, p.finding_id IS NOT NULL,
+               coalesce(p.draft_task_id, (SELECT min(m.task_id) FROM draft_bundle_members m
+                   WHERE m.planner_id = p.id)),
+               (SELECT min(l.request_id) FROM plan_request_proposals l
+                   WHERE l.proposal_id = p.proposal_id)
+             FROM planners p WHERE p.id = ?1",
+            [planner],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<RequestId>>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, Option<TaskId>>(3)?,
+                    r.get::<_, Option<RequestId>>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((opened_by, request, finding, draft, revised_request)) = row else {
+        return Ok(Creator::Planner(CreatingPlanner::default()));
+    };
+    let draft = match draft {
+        Some(task) => {
+            Some(super::draft_planners::draft_origin(conn, task)?.map(|(origin, _)| origin))
+        }
+        None => None,
+    };
+    Ok(Creator::Planner(CreatingPlanner {
+        opened_by: opened_by.parse::<PlannerOrigin>().ok(),
+        request,
+        revised_request,
+        finding,
+        draft,
+    }))
+}
+
+/// The request `origin` names and the priority a person gave it, when it
+/// has one (ADR-t1975-1 decision 2).
+fn request_priority(
+    conn: &Connection,
+    origin: RecordedOrigin,
+) -> Result<Option<(RequestId, Priority)>> {
+    let Some(request) = origin.request_id else {
+        return Ok(None);
+    };
+    let priority: Option<i64> = conn
+        .query_row(
+            "SELECT priority FROM plan_requests WHERE id=?1",
+            [request],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(priority
+        .map(Priority::from_i64)
+        .transpose()?
+        .map(|priority| (request, priority)))
+}
+
 pub(super) fn read_goal(conn: &Connection, goal_id: GoalId) -> Result<Goal> {
     conn.query_row("SELECT * FROM goals WHERE id=?1", [goal_id], goal_row)
         .optional()?
@@ -1712,16 +1847,20 @@ const GOAL_DEPENDENCIES_QUERY: &str =
     "SELECT goal_id FROM task_goal_dependencies WHERE task_id=?1 ORDER BY goal_id";
 
 fn goal_task_row(row: &Row<'_>) -> rusqlite::Result<GoalTask> {
-    let (priority, priority_source) = crate::domain::base_priority(
-        optional_priority_col(row, "priority")?,
-        optional_priority_col(row, "goal_priority")?,
-    );
+    let own = optional_priority_col(row, "priority")?;
+    let (priority, priority_source) =
+        crate::domain::base_priority(own, optional_priority_col(row, "goal_priority")?);
     Ok(GoalTask {
         id: row.get("id")?,
         title: row.get("title")?,
         status: enum_col(row, "status")?,
         priority,
         priority_source,
+        priority_by: PriorityBy::effective(
+            own,
+            optional_enum_col(row, "priority_by")?,
+            optional_enum_col(row, "goal_priority_by")?,
+        ),
     })
 }
 
@@ -1953,6 +2092,7 @@ fn read_graph_input(conn: &Connection) -> Result<GraphInput> {
                 status: task.status(),
                 priority: task.priority(),
                 priority_source: task.priority_source(),
+                priority_by: task.priority_by(),
                 goal_id: task.goal_id(),
                 title: task.into_title(),
             })
@@ -2569,9 +2709,19 @@ pub(super) fn change_priority(
     if own == task.own_priority() {
         return Ok(());
     }
+    // Who set it (ADR-t1975-1 decision 3); none without an own priority.
+    let priority_by = match task.own_priority() {
+        Some(_) => Some(PriorityBy::of(creator_of_actor(conn)?)),
+        None => None,
+    };
     conn.execute(
-        "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
-        params![task.own_priority().map(Priority::as_i64), now, task_id],
+        "UPDATE tasks SET priority=?1, updated_at=?2, priority_by=?4 WHERE id=?3",
+        params![
+            task.own_priority().map(Priority::as_i64),
+            now,
+            task_id,
+            priority_by.map(PriorityBy::as_str)
+        ],
     )?;
     let mut payload = json!({"from": from, "to": task.priority(),
         "from_source": from_source, "to_source": task.priority_source()});
@@ -2635,7 +2785,7 @@ pub(super) fn json_col<T: DeserializeOwned>(row: &Row<'_>, name: &str) -> rusqli
 }
 
 fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
-    Task::restore(TaskRecord {
+    Ok(Task::restore(TaskRecord {
         id: row.get("id")?,
         title: row.get("title")?,
         description: row.get("description")?,
@@ -2669,7 +2819,21 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
-    .map_err(restore_error)
+    .map_err(restore_error)?
+    .with_record(
+        optional_enum_col(row, "priority_by")?,
+        optional_enum_col(row, "goal_priority_by")?,
+        origin_cols(row)?,
+    ))
+}
+
+/// The origin a goal or task row records (ADR-t1975-1 decision 5).
+fn origin_cols(row: &Row<'_>) -> rusqlite::Result<RecordedOrigin> {
+    Ok(RecordedOrigin {
+        origin: enum_col(row, "origin")?,
+        kind: optional_enum_col(row, "origin_kind")?,
+        request_id: row.get("origin_request_id")?,
+    })
 }
 
 /// A nullable priority column, stored as `low`=0 … `interrupt`=4.
@@ -2693,7 +2857,7 @@ pub(super) fn optional_enum_col<T: std::str::FromStr<Err = DomainError>>(
 
 fn goal_row(row: &Row<'_>) -> rusqlite::Result<Goal> {
     let verdict: Option<String> = row.get("verdict")?;
-    Goal::restore(GoalRecord {
+    Ok(Goal::restore(GoalRecord {
         id: row.get("id")?,
         title: row.get("title")?,
         description: row.get("description")?,
@@ -2712,7 +2876,8 @@ fn goal_row(row: &Row<'_>) -> rusqlite::Result<Goal> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
-    .map_err(restore_error)
+    .map_err(restore_error)?
+    .with_record(enum_col(row, "priority_by")?, origin_cols(row)?))
 }
 
 /// A stored row the domain refuses to restore, reported like a column that
@@ -2804,4 +2969,224 @@ pub(super) fn set_goal_in(
     }
     let result = read_task(conn, task_id)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod origin_migration_tests {
+    use super::*;
+    use crate::domain::plan_request::{Origin, OriginKind};
+
+    /// The migration that records origins fills the rows already queued
+    /// from their records (ADR-t1975-1 decision 6): the creation event's
+    /// actor and planner, the request a proposal is linked to, a draft's
+    /// origin; a row none of them decides is `unknown`. A priority is the
+    /// AI's only when the row is and its recorded setter is; no value
+    /// changes.
+    #[test]
+    fn the_migration_fills_origins_and_who_set_priorities_from_the_records() {
+        let at = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("ALTER TABLE goals ADD COLUMN origin "))
+            .unwrap();
+        let before = i64::try_from(at).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        let raw = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..at] {
+            raw.execute_batch(migration).unwrap();
+        }
+        raw.execute_batch(&format!(
+            "PRAGMA foreign_keys = OFF;
+             PRAGMA application_id = 1129599281; PRAGMA user_version = {before};
+             INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor});
+             INSERT INTO plan_requests(id, text, requested_by, requested_by_id, created_at,
+                 updated_at) VALUES (44, 'plan it', 'inbox', 'inbox', 0, 0);
+             INSERT INTO proposals(id, status, owner_origin, submitted_at, created_at, updated_at)
+                 VALUES (7, 'submitted', 'runtime', '', '', '');
+             INSERT INTO plan_request_proposals(request_id, proposal_id, created_at)
+                 VALUES (44, 7, 0);
+             INSERT INTO planners(id, origin, request_id, finding_id, draft_task_id, proposal_id,
+                 created_at) VALUES
+                 (1, 'runtime', 44, NULL, NULL, NULL, 0),
+                 (2, 'runtime', NULL, 5, NULL, NULL, 0),
+                 (3, 'runtime', NULL, NULL, 10, NULL, 0),
+                 (4, 'runtime', NULL, NULL, NULL, 7, 0),
+                 (5, 'runtime', NULL, NULL, NULL, NULL, 0);
+             INSERT INTO goals(id, title, description, acceptance, constraints, status, priority)
+             VALUES (1, 'request', '', '', '', 'open', 4), (2, 'person', '', '', '', 'open', 2),
+                    (3, 'planner', '', '', '', 'open', 2), (4, 'old', '', '', '', 'open', 1);
+             INSERT INTO tasks(id, title, description, acceptance, verification_commands, status,
+                 priority, proposal_id) VALUES
+                 (1, 'request', '', '', '[]', 'draft', NULL, NULL),
+                 (2, 'finding', '', '', '[]', 'draft', 2, NULL),
+                 (3, 'follow-up planner', '', '', '[]', 'draft', NULL, NULL),
+                 (4, 'revised', '', '', '[]', 'draft', NULL, NULL),
+                 (5, 'follow-up', '', '', '[]', 'draft', 3, NULL),
+                 (6, 'planner', '', '', '[]', 'draft', 3, NULL),
+                 (7, 'linked', '', '', '[]', 'submitted', NULL, 7),
+                 (8, 'old', '', '', '[]', 'ready', 2, NULL),
+                 (9, 'inbox', '', '', '[]', 'ready', NULL, NULL),
+                 (10, 'drafted', '', '', '[]', 'draft', NULL, NULL),
+                 (11, 'no planner row', '', '', '[]', 'draft', 2, NULL),
+                 (12, 'reopened later', '', '', '[]', 'draft', NULL, NULL);
+             INSERT INTO draft_reopens(task_id, material, created_at) VALUES (12, '{{}}', 0);
+             INSERT INTO draft_origins(task_id, origin, material, created_at)
+                 VALUES (5, 'follow_up', '{{}}', 0), (10, 'follow_up', '{{}}', 0);
+             INSERT INTO run_events(goal_id, kind, payload, actor_role, actor_id) VALUES
+                 (1, 'goal_created', '{{\"goal\":{{\"priority\":\"interrupt\"}}}}', 'planner', 'planner:1'),
+                 (2, 'goal_created', '{{\"goal\":{{\"priority\":\"high\"}}}}', 'user', 'user'),
+                 (3, 'goal_created', '{{\"goal\":{{\"priority\":\"high\"}}}}', 'planner', 'planner:5');
+             INSERT INTO run_events(task_id, kind, payload, actor_role, actor_id) VALUES
+                 (1, 'task_created', '{{}}', 'planner', 'planner:1'),
+                 (2, 'task_created', '{{}}', 'planner', 'planner:2'),
+                 (3, 'task_created', '{{}}', 'planner', 'planner:3'),
+                 (4, 'task_created', '{{}}', 'planner', 'planner:4'),
+                 (5, 'task_created', '{{}}', 'supervisor', 'supervisor'),
+                 (5, 'task_priority_changed', '{{}}', 'user', 'user'),
+                 (6, 'task_created', '{{}}', 'planner', 'planner:5'),
+                 (9, 'task_created', '{{}}', 'inbox', 'inbox'),
+                 (11, 'task_created', '{{}}', 'planner', 'planner');",
+            floor = schema::floor_for(before),
+        ))
+        .unwrap();
+        drop(raw);
+        SqliteQueue::migrate(&path, None, 0).unwrap();
+        let mut queue = SqliteQueue::open(&path).unwrap();
+        let request = Some(RequestId::new(44));
+        let human = |kind| (Origin::Human, Some(kind));
+        let ai = |kind| (Origin::Ai, Some(kind));
+        for (id, (origin, kind), from, priority_by, priority) in [
+            (
+                1,
+                human(OriginKind::Request),
+                request,
+                PriorityBy::Ai,
+                Priority::Normal,
+            ),
+            (
+                2,
+                ai(OriginKind::Finding),
+                None,
+                PriorityBy::Ai,
+                Priority::High,
+            ),
+            (
+                3,
+                ai(OriginKind::FollowUp),
+                None,
+                PriorityBy::Ai,
+                Priority::Normal,
+            ),
+            (
+                4,
+                human(OriginKind::Request),
+                request,
+                PriorityBy::Ai,
+                Priority::Normal,
+            ),
+            // A person set its priority after the runtime registered it.
+            (
+                5,
+                ai(OriginKind::FollowUp),
+                None,
+                PriorityBy::Human,
+                Priority::Urgent,
+            ),
+            (
+                6,
+                ai(OriginKind::Planner),
+                None,
+                PriorityBy::Ai,
+                Priority::Urgent,
+            ),
+            (
+                7,
+                human(OriginKind::Request),
+                request,
+                PriorityBy::Ai,
+                Priority::Normal,
+            ),
+            // Nobody can tell: a person's, so plan review keeps it.
+            (
+                8,
+                (Origin::Unknown, None),
+                None,
+                PriorityBy::Human,
+                Priority::High,
+            ),
+            (
+                9,
+                human(OriginKind::Person),
+                None,
+                PriorityBy::Ai,
+                Priority::Normal,
+            ),
+            // A planner without its row, and a reopen without a recorded
+            // creator: who made them is unknown.
+            (
+                11,
+                (Origin::Unknown, None),
+                None,
+                PriorityBy::Human,
+                Priority::High,
+            ),
+            (
+                12,
+                (Origin::Unknown, None),
+                None,
+                PriorityBy::Ai,
+                Priority::Normal,
+            ),
+        ] {
+            let task = queue.show(TaskId::new(id)).unwrap().task;
+            let recorded = task.origin();
+            assert_eq!(
+                (recorded.origin, recorded.kind, recorded.request_id),
+                (origin, kind, from),
+                "task {id}"
+            );
+            assert_eq!(task.priority_by(), priority_by, "task {id}");
+            assert_eq!(task.priority(), priority, "task {id}");
+        }
+        for (id, (origin, kind), from, priority_by, priority) in [
+            (
+                1,
+                human(OriginKind::Request),
+                request,
+                PriorityBy::Human,
+                Priority::Interrupt,
+            ),
+            (
+                2,
+                human(OriginKind::Person),
+                None,
+                PriorityBy::Human,
+                Priority::High,
+            ),
+            (
+                3,
+                ai(OriginKind::Planner),
+                None,
+                PriorityBy::Ai,
+                Priority::High,
+            ),
+            (
+                4,
+                (Origin::Unknown, None),
+                None,
+                PriorityBy::Human,
+                Priority::Normal,
+            ),
+        ] {
+            let goal = queue.show_goal(GoalId::new(id)).unwrap().goal;
+            let recorded = goal.origin();
+            assert_eq!(
+                (recorded.origin, recorded.kind, recorded.request_id),
+                (origin, kind, from),
+                "goal {id}"
+            );
+            assert_eq!(goal.priority_by(), priority_by, "goal {id}");
+            assert_eq!(goal.priority(), priority, "goal {id}");
+        }
+    }
 }

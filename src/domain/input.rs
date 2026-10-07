@@ -115,9 +115,11 @@ pub struct NewGoal {
     pub doc: Option<String>,
     /// Register the goal as a draft whose tasks are not candidates.
     pub draft: bool,
-    /// What its tasks inherit (ADR-t1639-1 decision 1).
+    /// What its tasks inherit (ADR-t1639-1 decision 1); none is `normal`,
+    /// or the priority of the request whose planner adds it (ADR-t1975-1
+    /// decision 2).
     #[serde(default)]
-    pub priority: Priority,
+    pub priority: Option<Priority>,
     /// Its tags, each once (ADR-t1639-1 decision 6).
     #[serde(default)]
     pub tags: Vec<GoalTag>,

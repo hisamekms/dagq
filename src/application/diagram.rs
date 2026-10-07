@@ -604,6 +604,7 @@ mod tests {
             status: TaskStatus::Ready,
             priority: Priority::Normal,
             priority_source: crate::domain::PrioritySource::Default,
+            priority_by: crate::domain::plan_request::PriorityBy::Ai,
             effective_priority: Priority::Normal,
             title: format!("task {id}"),
             goal_id: goal.map(GoalId::new),

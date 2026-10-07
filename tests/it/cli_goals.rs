@@ -61,9 +61,9 @@ fn goals_group_tasks_and_report_counts_by_status() {
         shown["tasks"],
         serde_json::json!([
             {"id": 1, "title": "prompt", "status": "draft", "priority": "normal",
-                "priority_source": "goal"},
+                "priority_source": "goal", "priority_by": "human"},
             {"id": 2, "title": "entity", "status": "ready", "priority": "normal",
-                "priority_source": "goal"}
+                "priority_source": "goal", "priority_by": "human"}
         ])
     );
     assert_eq!(shown["events"][0]["kind"], "goal_created");
@@ -167,7 +167,7 @@ fn graph_reports_unfinished_dependencies_releases_and_the_critical_chain() {
         tasks[1],
         serde_json::json!({
             "id": 2, "status": "ready", "priority": "normal", "priority_source": "default",
-            "effective_priority": "normal", "title": "root", "goal_id": null,
+            "priority_by": "ai", "effective_priority": "normal", "title": "root", "goal_id": null,
             "depends_on": [], "goal_dependencies": [], "blocks": [3], "unblocks": 2,
             "ready_after": [],
         })
@@ -221,7 +221,7 @@ fn a_task_waits_for_its_goal_dependency_until_the_goal_is_achieved() {
     assert_eq!(
         goal["dependents"],
         serde_json::json!([{"id": 2, "title": "downstream", "status": "ready",
-            "priority": "normal", "priority_source": "default"}])
+            "priority": "normal", "priority_source": "default", "priority_by": "ai"}])
     );
     let candidates = |db: &Path| -> Vec<i64> {
         ok(db, &["candidates"])["candidates"]

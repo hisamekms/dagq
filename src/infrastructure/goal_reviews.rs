@@ -216,6 +216,9 @@ fn register_gaps(
                 wait_for_build: false,
             },
             stamp,
+            crate::domain::plan_request::Creator::Draft(
+                crate::domain::follow_up::DraftOrigin::GoalGap,
+            ),
         )?;
         let material = json!({
             "goal_id": goal,

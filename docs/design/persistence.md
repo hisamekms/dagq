@@ -89,6 +89,7 @@ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（
 ```text
 tasks                  -- task 1つに1行。priorityのnullは所属goalの優先度を継ぐ。worker_modeのnullはproviderの既定（ADR-t1340-1）、
                        --   保存された'interactive'はclaimとresumeで非対話と読む（ADR-t1433-2）。follow_up_depthは人の判断を経ずに続いたfollow-upの段数
+                       --   origin*は作成時だけ書き、priority_byは誰が置いたか（ADR-t1975-1）
 task_dependencies      -- taskの依存（task → predecessor）
 task_goal_dependencies -- taskからgoalへの依存。goalがachievedで閉じるまでclaimしない（ADR-0038）
 task_runs              -- run 1つに1行（試行ごとに新しい行）。pathの列は記録時の絶対pathで、読むときは開いたqueueのruns/から解決し直す（ADR-0017）
@@ -99,7 +100,7 @@ queue_repository       -- queueを束縛するGit common directory（1行）
 schema_floor           -- 受け入れるバイナリのschemaの下限（1行。ADR-0045）
 supervisors            -- 常駐superviseの登録。runを持たないsupervisorもstatus / doctorに見せる。providers以降の列のnullはその列を知らない古いbinaryの登録
 session_workspaces     -- upが開いた常駐sessionのworkspace（role主キー）
-goals                  -- goal 1つに1行。acceptance_versionはacceptanceの文が変わったときだけtriggerが増やす（ADR-t1504-2）。priorityは個別の指定の無いtaskが継ぎ、tagsはgoalのラベル（ADR-t1639-1）
+goals                  -- goal 1つに1行。acceptance_versionはacceptanceの文が変わったときだけtriggerが増やす（ADR-t1504-2）。priorityは個別の指定の無いtaskが継ぎ、tagsはgoalのラベル（ADR-t1639-1）。origin* / priority_byはtasksと同じ
 proposals              -- plan reviewに出したgoalとtaskの束。memberは表を持たず、tasks / goalsのproposal_idが今の所属を指す
 plan_reviews           -- plan review job 1つに1行。未完了は1行まで（部分unique index）
 goal_reviews           -- goal review job 1つに1行。未完了は1行まで（indexでなくBEGIN IMMEDIATEの中の検査）
@@ -178,7 +179,6 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 
 - 依頼のeventはtask・goal・runに付かないqueueのeventで、payloadに`request_id`を持つ。
 - 立てる（`open_request_planner`）は対象であることをトランザクションの中で再検査し、上限に達した依頼を`exhausted`にする。
-- submitは、submitしたplannerの依頼にproposalを結び、最初のproposalで依頼を`proposed`にする。
 - 却下と`ask --request`は依頼のplanner自身だけが打て、却下は判定に使ったplannerがまだその依頼のものかをトランザクションの中で確かめる。
 - 依頼のaskの回答は、依頼のplannerが生きていればそのplannerへ、いなければ新しいplannerか閉じるで、人へは回さない（`route_of`）。
   依頼のplannerが作ったdraftの回答は、依頼が`open`でなくても新しいplannerにする（`draft_route_of`）。

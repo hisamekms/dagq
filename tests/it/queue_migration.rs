@@ -1804,6 +1804,7 @@ fn migration_to_goal_priority_keeps_every_tasks_priority_and_the_claim_order() {
                     status: status.parse().unwrap(),
                     priority: Priority::from_i64(*priority).unwrap(),
                     priority_source: PrioritySource::Task,
+                    priority_by: dagq::domain::plan_request::PriorityBy::Ai,
                     title: String::new(),
                     goal_id: goal.map(GoalId::new),
                     goal_status: goal.map(|_| GoalStatus::Open),

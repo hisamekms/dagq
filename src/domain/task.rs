@@ -6,7 +6,9 @@ use serde::Serialize;
 
 use super::{
     DomainError, EvidenceCheck, GoalId, NewTask, Priority, PrioritySource, Provider, TaskChange,
-    TaskEdit, TaskId, TaskRecord, TaskStatus, base_priority, require,
+    TaskEdit, TaskId, TaskRecord, TaskStatus, base_priority,
+    plan_request::{PriorityBy, RecordedOrigin},
+    require,
     scope::{dedup_globs, validate_path_globs},
     worker::{Worker, WorkerMode},
 };
@@ -115,12 +117,26 @@ pub struct Task {
     priority: Priority,
     /// Where `priority` comes from: `task`, `goal` or `default`.
     priority_source: PrioritySource,
+    /// Who set `priority`, its own's setter or its goal's (ADR-t1975-1
+    /// decision 2): `human` for a person's.
+    priority_by: PriorityBy,
     /// The task's own setting; none inherits `goal_priority`. Not shown.
     #[serde(skip)]
     own_priority: Option<Priority>,
+    /// Who set its own priority; none without one, or when nobody can
+    /// tell (read as a person's). Not shown.
+    #[serde(skip)]
+    own_priority_by: Option<PriorityBy>,
     /// The priority of the goal it belongs to, as read with it. Not shown.
     #[serde(skip)]
     goal_priority: Option<Priority>,
+    /// Who set its goal's priority, as read with it. Not shown.
+    #[serde(skip)]
+    goal_priority_by: Option<PriorityBy>,
+    /// Where it comes from, recorded at its creation (ADR-t1975-1
+    /// decision 5): shown as `origin`, `origin_kind`, `origin_request_id`.
+    #[serde(flatten)]
+    origin: RecordedOrigin,
     /// The kind of change it makes, as the registrant declared it
     /// (ADR-t980-1); null for a task registered without one.
     change: Option<TaskChange>,
@@ -169,8 +185,12 @@ impl Task {
             paths: dedup_globs(&new.paths),
             priority,
             priority_source,
+            priority_by: PriorityBy::effective(new.priority, None, None),
             own_priority: new.priority,
+            own_priority_by: None,
             goal_priority: None,
+            goal_priority_by: None,
+            origin: RecordedOrigin::UNKNOWN,
             change: new.change,
             wait_for_build: new.wait_for_build,
             title: new.title,
@@ -207,8 +227,12 @@ impl Task {
             paths: record.paths,
             priority,
             priority_source,
+            priority_by: PriorityBy::effective(record.priority, None, None),
             own_priority: record.priority,
+            own_priority_by: None,
             goal_priority: record.goal_priority,
+            goal_priority_by: None,
+            origin: RecordedOrigin::UNKNOWN,
             change: record.change,
             wait_for_build: record.wait_for_build,
             worker: record.worker,
@@ -219,6 +243,22 @@ impl Task {
             created_at: record.created_at,
             updated_at: record.updated_at,
         })
+    }
+
+    /// The task with what the queue records beside it: who set its own
+    /// priority and its goal's, and its origin.
+    pub fn with_record(
+        mut self,
+        own_priority_by: Option<PriorityBy>,
+        goal_priority_by: Option<PriorityBy>,
+        origin: RecordedOrigin,
+    ) -> Self {
+        self.own_priority_by = self.own_priority.and(own_priority_by);
+        self.goal_priority_by = self.goal_priority.and(goal_priority_by);
+        self.priority_by =
+            PriorityBy::effective(self.own_priority, own_priority_by, goal_priority_by);
+        self.origin = origin;
+        self
     }
 
     pub fn id(&self) -> TaskId {
@@ -256,6 +296,22 @@ impl Task {
 
     pub fn priority_source(&self) -> PrioritySource {
         self.priority_source
+    }
+
+    /// Who set [`Self::priority`] (ADR-t1975-1 decision 2).
+    pub fn priority_by(&self) -> PriorityBy {
+        self.priority_by
+    }
+
+    /// Who set its own priority, none without one.
+    pub fn own_priority_by(&self) -> Option<PriorityBy> {
+        self.own_priority
+            .map(|_| self.own_priority_by.unwrap_or(PriorityBy::Human))
+    }
+
+    /// Where it comes from (ADR-t1975-1 decision 5).
+    pub fn origin(&self) -> RecordedOrigin {
+        self.origin
     }
 
     /// The task's own setting, which the store keeps; none inherits.

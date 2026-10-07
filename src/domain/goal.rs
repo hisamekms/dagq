@@ -6,7 +6,9 @@ use serde::Serialize;
 
 use super::{
     DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalSummary, GoalTag, GoalVerdict,
-    NewGoal, Priority, TaskId, TaskStatus, TaskStatusCounts, require,
+    NewGoal, Priority, TaskId, TaskStatus, TaskStatusCounts,
+    plan_request::{PriorityBy, RecordedOrigin},
+    require,
 };
 
 impl GoalVerdict {
@@ -37,6 +39,13 @@ pub struct Goal {
     /// What the goal's tasks without a priority of their own inherit
     /// (ADR-t1639-1 decisions 1 and 2).
     priority: Priority,
+    /// Who set `priority` (ADR-t1975-1 decision 2): `human` for a person's,
+    /// the priority of a request the runtime attached included.
+    priority_by: PriorityBy,
+    /// Where it comes from, recorded at its creation (ADR-t1975-1
+    /// decision 5): shown as `origin`, `origin_kind`, `origin_request_id`.
+    #[serde(flatten)]
+    origin: RecordedOrigin,
     /// What the goal is about, each once, in the order given (ADR-t1639-1
     /// decision 6).
     tags: Vec<GoalTag>,
@@ -69,7 +78,9 @@ impl Goal {
             acceptance: new.acceptance,
             constraints: new.constraints,
             doc: new.doc.filter(|d| !d.trim().is_empty()),
-            priority: new.priority,
+            priority: new.priority.unwrap_or_default(),
+            priority_by: PriorityBy::Ai,
+            origin: RecordedOrigin::UNKNOWN,
             tags: new.tags,
             status: if new.draft {
                 GoalStatus::Draft
@@ -102,6 +113,8 @@ impl Goal {
             constraints: record.constraints,
             doc: record.doc,
             priority: record.priority,
+            priority_by: PriorityBy::Human,
+            origin: RecordedOrigin::UNKNOWN,
             tags: record.tags,
             status: record.status,
             closed_at: record.closed_at,
@@ -137,6 +150,24 @@ impl Goal {
 
     pub fn priority(&self) -> Priority {
         self.priority
+    }
+
+    /// Who set [`Self::priority`] (ADR-t1975-1 decision 2).
+    pub fn priority_by(&self) -> PriorityBy {
+        self.priority_by
+    }
+
+    /// Where it comes from (ADR-t1975-1 decision 5).
+    pub fn origin(&self) -> RecordedOrigin {
+        self.origin
+    }
+
+    /// The goal with what the queue records beside it: who set its
+    /// priority, and its origin.
+    pub fn with_record(mut self, priority_by: PriorityBy, origin: RecordedOrigin) -> Self {
+        self.priority_by = priority_by;
+        self.origin = origin;
+        self
     }
 
     pub fn tags(&self) -> &[GoalTag] {
@@ -470,7 +501,8 @@ mod tests {
             serde_json::json!({
                 "id": 1, "title": "g", "description": "", "acceptance": "",
                 "constraints": "", "doc": "docs/g.md", "priority": "normal", "tags": [],
-                "status": "draft",
+                "priority_by": "ai", "origin": "unknown", "origin_kind": null,
+                "origin_request_id": null, "status": "draft",
                 "closed_at": null, "verdict": null,
                 "created_at": "now", "updated_at": "now"
             })
@@ -570,7 +602,7 @@ mod tests {
             constraints: String::new(),
             doc: None,
             draft: false,
-            priority: Priority::Normal,
+            priority: Some(Priority::Normal),
             tags: vec![tag("b"), tag("b")],
         };
         assert!(Goal::new(GoalId::new(1), new, "now".into()).is_err());

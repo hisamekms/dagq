@@ -277,6 +277,14 @@ pub enum DomainError {
     RequestRefInvalid {
         value: String,
     },
+    /// A planner of a request a person gave a priority gives the goal or
+    /// task it makes another one (ADR-t1975-1 decision 2): the runtime
+    /// attaches the request's.
+    RequestPriorityDiffers {
+        request_id: RequestId,
+        priority: super::Priority,
+        given: super::Priority,
+    },
     /// A `worker_question` without a topic code (ADR-t947-2 decision 1).
     AskWithoutTopic,
     /// A topic code on an ask that is not a `worker_question` (ADR-t947-2
@@ -704,6 +712,17 @@ impl fmt::Display for DomainError {
                 f,
                 "request {request_id} is {}, not open: only an open request is declined",
                 status.as_str()
+            ),
+            Self::RequestPriorityDiffers {
+                request_id,
+                priority,
+                given,
+            } => write!(
+                f,
+                "request {request_id} carries the priority a person gave it, {}: leave --priority out (the runtime attaches {}), not {}",
+                priority.as_str(),
+                priority.as_str(),
+                given.as_str()
             ),
             Self::RequestRefInvalid { value } => write!(
                 f,

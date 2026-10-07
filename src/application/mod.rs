@@ -66,7 +66,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
     EvidenceCheck, GoalId, GoalStatus, GoalVerdict, Priority, PrioritySource, RunId, RunStatus,
-    Task, TaskChange, TaskId, TaskStatus,
+    Task, TaskChange, TaskId, TaskStatus, plan_request::PriorityBy,
 };
 
 /// Which task statuses `list` returns.
@@ -132,6 +132,8 @@ pub struct TaskListItem {
     pub priority: Priority,
     /// Where `priority` comes from: `task`, `goal` or `default`.
     pub priority_source: PrioritySource,
+    /// Who set `priority` (ADR-t1975-1 decision 2): `human` for a person's.
+    pub priority_by: PriorityBy,
     /// The kind of change it declares (ADR-t980-1); null without one.
     pub change: Option<TaskChange>,
     /// The provider and mode of its worker (ADR-t813-2), shown as
@@ -167,6 +169,9 @@ pub struct TaskListDetails {
     pub required_evidence: Vec<EvidenceCheck>,
     pub paths: Vec<String>,
     pub context: String,
+    /// Where it comes from (ADR-t1975-1 decision 5).
+    #[serde(flatten)]
+    pub origin: crate::domain::plan_request::RecordedOrigin,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -187,6 +192,7 @@ impl TaskListItem {
             required_evidence: task.required_evidence().to_vec(),
             paths: task.paths().to_vec(),
             context: task.context().to_owned(),
+            origin: task.origin(),
             created_at: task.created_at().to_owned(),
             updated_at: task.updated_at().to_owned(),
         });
@@ -195,6 +201,7 @@ impl TaskListItem {
             status: task.status(),
             priority: task.priority(),
             priority_source: task.priority_source(),
+            priority_by: task.priority_by(),
             change: task.change().cloned(),
             worker: task.worker(),
             title: task.title().to_owned(),
@@ -217,6 +224,8 @@ pub struct GraphTask {
     /// Its base priority: its own, else its goal's (ADR-t1639-1).
     pub priority: Priority,
     pub priority_source: PrioritySource,
+    /// Who set `priority` (ADR-t1975-1 decision 2).
+    pub priority_by: PriorityBy,
     pub title: String,
     pub goal_id: Option<GoalId>,
     /// Status of the task's goal; a draft goal's tasks are not candidates.
@@ -270,6 +279,8 @@ pub struct GraphNode {
     pub priority: Priority,
     /// Where `priority` comes from: `task`, `goal` or `default`.
     pub priority_source: PrioritySource,
+    /// Who set `priority` (ADR-t1975-1 decision 2): `human` for a person's.
+    pub priority_by: PriorityBy,
     /// The priority the claim order compares: the highest of its own and
     /// those of the ready tasks that wait for it (see [`ClaimRank`]).
     pub effective_priority: Priority,
@@ -456,6 +467,7 @@ pub fn dependency_graph(input: GraphInput, goal_id: Option<GoalId>) -> Dependenc
             status: task.status,
             priority: task.priority,
             priority_source: task.priority_source,
+            priority_by: task.priority_by,
             title: task.title,
             goal_id: task.goal_id,
             goal_status: task.goal_status,
@@ -513,6 +525,7 @@ mod tests {
             },
             priority: Priority::Normal,
             priority_source: PrioritySource::Default,
+            priority_by: crate::domain::plan_request::PriorityBy::Ai,
             title: format!("task {id}"),
             goal_id: goal_id.map(GoalId::new),
             goal_status: goal_id.map(|_| GoalStatus::Open),

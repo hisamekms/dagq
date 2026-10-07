@@ -62,6 +62,8 @@ pub struct GoalTask {
     /// Its base priority and where it comes from (ADR-t1639-1 decision 2).
     pub priority: Priority,
     pub priority_source: PrioritySource,
+    /// Who set it (ADR-t1975-1 decision 2): `human` for a person's.
+    pub priority_by: super::plan_request::PriorityBy,
 }
 
 #[derive(Debug, Clone, Serialize)]

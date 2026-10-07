@@ -145,6 +145,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 - 個別の指定の無いtaskは状態によらずgoalの今の値に追随し、claimの時に凍らせない（[ADR-t1811-1](../adr/2026-10-05-t1811-1-tasks-without-own-priority-follow-the-goal-in-every-status.md)）。
   runがclaimされた優先度は表示でなく`run_claimed`の記録で読む。
 - plan reviewはAI由来のtaskの個別の優先度を外す（人が置いた値と人間由来は残す。[Plan review](supervisor-lifecycle/plan-review.md)の6）。
+- 誰が置いたか（`PriorityBy`。`human`は人・inbox・依頼の値）は効く段（`PrioritySource`）と別の軸で、goal・taskの由来（`RecordedOrigin`）は作成時に1回だけ書く（`domain::plan_request`、ADR-t1975-1決定2・5）。
 - 効く優先度（`application::effective_priority`）は自分を推移的に待つ`ready`のtaskの値も継ぐが、永久にclaimされないtaskからは継がない（[ADR-t791-1](../adr/2026-09-28-t791-1-effective-priority-ignores-tasks-waiting-on-abandoned-goals.md)）。
 - claimの順・`needs_session`の再開・復旧jobは効く優先度で1つの列に並ぶ（`domain::slot_order`、[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
   goal間のrankは作らない。
@@ -200,7 +201,6 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 - attentionの判定は`event_attention`・`run_attention`・`supervisor_attention`、次の一手は`AttentionNext`（`src/domain/mod.rs`）。
   attentionは全てinboxのもので、plannerのものは無い（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定17）。
 - `show`・`goal show`の既定の圧縮形は`src/view.rs`が作り、キー名は`--full`と同じで、省くか切るだけ。
-- 全文検索と`related`の索引と重みは[persistence](persistence.md#全文検索search)。
 - `ci failures`は`ci_checked`のeventを畳み込んだビュー（`domain::ci_watch::WatchState::fold`）で、表を持たない（[CI watch](supervisor-lifecycle/ci-watch.md)）。
 
 ### 役割の柵
@@ -212,8 +212,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 ## IDとcommitのnewtype
 
 - 入口は`src/domain/ids.rs`で、task IDとgoal IDのように意味の違う値を型で分ける（ADR-0013決定4）。
-- serdeは素の値で出すので、CLIのJSONは変わらない。
-  `RunId`と`CommitSha`の読み込みは生成と同じ検証を通し、空のrun IDや不正なcommitの行は変換のエラーになる。
+- `RunId`と`CommitSha`の読み込みは生成と同じ検証を通し、空のrun IDや不正なcommitの行は変換のエラーになる。
 - 落とし穴: receiptの`run_id`と`commit`は文字列のまま持つ。
   `Receipt::check`が決まった順で検証し、最初に外れた項目の文を`last_error`に書くため、parseの時点では検証しない。
 - 落とし穴: Gitの`rebase`・`diff_*`などの引数は`main`やrefも受けるrevisionなので、`CommitSha`でなく`&str`のまま。
@@ -221,7 +220,6 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 ## 集約: TaskとGoal
 
 - 作成は`Task::new` / `Goal::new`（作成時の規則を通す）、復元は`Task::restore` / `Goal::restore`。
-- 依存の辺はtaskの外にあるので、domainは判断だけを持ち、辺はstoreが保存する。
 - `updated_at`はDBが更新のたびに書き、`goal::close`だけは`closed_at`と揃えるため時刻を引数に取る。
 - 集約は`Serialize`だけを持ち、`Deserialize`を持たない（作る入口を1つにするため）。
   入力型（`NewTask`・`NewGoal`・`GoalEdit`）は`Deserialize`を持つ。

@@ -66,6 +66,7 @@ fn record(queue: &mut SqliteQueue, text: &str) -> RequestId {
                 text: text.into(),
                 note: None,
                 refs: Vec::new(),
+                priority: None,
             },
             "inbox",
             "inbox",
@@ -94,7 +95,7 @@ fn draft(queue: &mut SqliteQueue, goal: dagq::domain::GoalId, title: &str) -> Ta
             verification_commands: vec!["true".into()],
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority: Some(Priority::Normal),
+            priority: None,
             dependencies: vec![TaskId::new(1)],
             goal_dependencies: Vec::new(),
             goal_id: Some(goal),
@@ -173,10 +174,13 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
             "task:1",
             "--ref",
             &format!("goal:{goal}"),
+            "--priority",
+            "interrupt",
         ],
     );
     let id = RequestId::new(recorded["id"].as_i64().unwrap());
     assert_eq!(recorded["status"], "open");
+    assert_eq!(recorded["priority"], "interrupt");
     assert_eq!(recorded["text"], words);
     assert_eq!(recorded["requested_by"], "inbox");
     assert_eq!(
@@ -186,6 +190,7 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
     let events = request_events(&fx.db, id, "request_recorded");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].1.as_deref(), Some("inbox"));
+    assert_eq!(events[0].0["priority"], "interrupt");
     let listed = ok_as("inbox", &fx.db, &["requests"]);
     assert_eq!(listed["requests"].as_array().unwrap().len(), 1);
 
@@ -236,6 +241,7 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
         format!("dagq ask --request {id} --kind planner_question"),
         "`dagq events --full --task ID`".to_owned(),
         "AGENTS.md".to_owned(),
+        "The person gave it the priority `interrupt`.".to_owned(),
     ] {
         assert!(prompt.contains(&expected), "{expected}\n{prompt}");
     }
@@ -268,8 +274,51 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
     let told = attention(&fx.db, "request_proposed");
     assert_eq!(told.len(), 1, "{told:?}");
     assert_eq!(told[0]["next"], "report the request's proposal");
+    // The goal its planner adds takes the priority the person gave the
+    // request as the person's (another value is refused), and the goal and
+    // its task record the request as their origin (ADR-t1975-1 decisions 2
+    // and 5).
+    let mut as_planner =
+        SqliteQueue::open(&fx.db)
+            .unwrap()
+            .with_actor(dagq::domain::actor::ActorContext::instance(
+                dagq::domain::actor::ActorRole::Planner,
+                planners[0].id,
+            ));
+    let new_goal = |priority| dagq::domain::NewGoal {
+        title: "bring the rate back".into(),
+        priority,
+        ..Default::default()
+    };
+    let refused = as_planner
+        .add_goal(new_goal(Some(Priority::Normal)))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("attaches interrupt"), "{refused}");
+    let planned = as_planner.add_goal(new_goal(None)).unwrap().id();
+    let more = draft(&mut as_planner, planned, "and more");
+    let origin = json!({"origin": "human", "origin_kind": "request",
+        "origin_request_id": id.as_i64()});
+    let goal_show = ok_as("inbox", &fx.db, &["goal", "show", &planned.to_string()]);
+    let task_show = ok_as("inbox", &fx.db, &["show", &more.to_string()]);
+    for (shown, priority_source) in [
+        (&goal_show["goal"], None),
+        (&task_show["task"], Some("goal")),
+    ] {
+        assert_eq!(shown["priority"], "interrupt", "{shown}");
+        assert_eq!(shown["priority_by"], "human", "{shown}");
+        assert_eq!(
+            shown.get("priority_source").and_then(Value::as_str),
+            priority_source
+        );
+        for key in ["origin", "origin_kind", "origin_request_id"] {
+            assert_eq!(shown[key], origin[key], "{key} {shown}");
+        }
+    }
+    assert_eq!(goal_show["tasks"][0]["priority_by"], "human");
+    let listed = ok_as("inbox", &fx.db, &["list", "--goal", &planned.to_string()]);
+    assert_eq!(listed["tasks"][0]["priority_by"], "human", "{listed}");
     // A second proposal of it is linked too, and tells nobody again.
-    let more = draft(&mut queue, goal, "and more");
     let second = submit_from(&mut queue, &handle, more);
     assert_eq!(
         queue.plan_request(id).unwrap().proposals,
@@ -283,6 +332,16 @@ fn a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it() {
     assert_eq!(
         queue.plan_request(id).unwrap().proposals,
         vec![proposal.id(), second.id(), again.id()]
+    );
+    // Its origin and the person's priority stay as they were recorded.
+    let resubmitted = queue.show(more).unwrap().task;
+    assert_eq!(serde_json::to_value(resubmitted.origin()).unwrap(), origin);
+    assert_eq!(
+        (resubmitted.priority(), resubmitted.priority_by()),
+        (
+            Priority::Interrupt,
+            dagq::domain::plan_request::PriorityBy::Human
+        )
     );
     assert_eq!(attention(&fx.db, "request_proposed").len(), 1);
     // A proposed request waits for no planner, and is listed with --all.
@@ -925,6 +984,7 @@ fn an_ask_or_an_event_alone_leads_the_prompt_to_its_goal() {
                     text: "plan it".into(),
                     note: None,
                     refs: vec![reference.clone()],
+                    priority: None,
                 },
                 "inbox",
                 "inbox",

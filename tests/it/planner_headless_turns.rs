@@ -41,6 +41,7 @@ fn record(queue: &mut SqliteQueue, text: &str) -> RequestId {
                 text: text.into(),
                 note: None,
                 refs: Vec::new(),
+                priority: None,
             },
             "inbox",
             "inbox",
