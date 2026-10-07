@@ -1,7 +1,9 @@
 //! Runtime tests: a person's retry that carries a failed or interrupted
 //! run's branch over (`ready --inherit`, ADR-t1962-1), its refusals, its
-//! relation to the automatic `retry_inherit`, and its race with a recovery
-//! job's round, ordered by the test on a clock it moves.
+//! relation to the automatic `retry_inherit`, its race with a recovery
+//! job's round, ordered by the test on a clock it moves, and the refusal of
+//! a bare `retry_inherit` answer to the recovery job's `decide` ask that
+//! points to it.
 use crate::common;
 use crate::runtime_support;
 use dagq::application::TRIAGE_ASKER;
@@ -320,6 +322,115 @@ fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
     );
     assert_eq!(run_ref(&repo, &running), None);
     unchanged(&mut queue);
+}
+
+/// The option a recovery job adds to its `decide` ask for carrying the
+/// work over.
+const INHERIT_OPTION: &str = "retry_inherit once process inspection is allowed";
+
+/// `dagq answer ID --text TEXT` by the inbox.
+fn answer(db: &Path, ask: AskId, text: &str) -> std::process::Output {
+    common::cli::invoke_with(&INBOX, db, &["answer", &ask.to_string(), "--text", text])
+}
+
+/// The `ask_answered` payloads of `ask`.
+fn answers_of(db: &Path, ask: AskId) -> Vec<Value> {
+    let conn = Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT payload FROM run_events
+             WHERE kind='ask_answered' AND json_extract(payload,'$.ask_id')=?1",
+        )
+        .unwrap();
+    stmt.query_map([ask], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
+        .collect()
+}
+
+/// An answer to the recovery job's `decide` ask that is only a runtime
+/// operation's name and none of its options is refused before anything is
+/// written: the ask stays open, and the message names the option with the
+/// name and the retry by hand. An option as it is and a person's own words
+/// are taken as before.
+#[test]
+fn a_bare_operation_name_to_a_decide_ask_is_refused_and_the_ask_stays_open() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
+    let reviewer =
+        TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[recovery(json!({
+            "verdict": "escalate",
+            "confidence": "high",
+            "diagnosis": "a person decides",
+            "question": "Carry the work over?",
+            "options": [INHERIT_OPTION],
+        }))]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Failed);
+    let ask = decide_ask(&queue, &run);
+    assert_eq!(ask.asked_by, TRIAGE_ASKER);
+    assert!(ask.options.iter().any(|option| option == INHERIT_OPTION));
+
+    for text in ["retry_inherit", " RETRY_INHERIT ", "\"retry_inherit\""] {
+        let printed: Value = serde_json::from_str(&refusal(&answer(&db, ask.id, text))).unwrap();
+        let error = printed["error"].as_str().unwrap();
+        assert!(error.contains("the ask stays open"), "{error}");
+        assert!(error.contains(&format!("\"{INHERIT_OPTION}\"")), "{error}");
+        assert!(error.contains("dagq ready 1 --inherit --reason"), "{error}");
+        let now = queue.read_ask(ask.id).unwrap();
+        assert!(now.is_open(), "{now:?}");
+        assert!(now.answer.is_none() && now.answered_at.is_none());
+        assert!(answers_of(&db, ask.id).is_empty());
+    }
+
+    // The option as it is goes to the runtime (here, to the recovery job).
+    let output = answer(&db, ask.id, INHERIT_OPTION);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answered = answers_of(&db, ask.id);
+    assert_eq!(answered.len(), 1);
+    assert_eq!(answered[0]["runtime_delivers"], true);
+
+    // A person's own words, to the same kind of ask: a person reads them.
+    queue.close_ask(ask.id).unwrap();
+    let second = queue
+        .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            kind: AskKind::Decide,
+            task_id: None,
+            run_id: Some(run.id().clone()),
+            question: "Carry the work over?".into(),
+            options: ask.options.clone(),
+            asked_by: TRIAGE_ASKER.into(),
+            reason_category: AskReason::RecoveryFailed,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap()
+        .ask;
+    assert_ne!(second.id, ask.id);
+    let words = "carry it over with retry_inherit once you can";
+    let output = answer(&db, second.id, words);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        queue.read_ask(second.id).unwrap().answer.as_deref(),
+        Some(words)
+    );
+    let answered = answers_of(&db, second.id);
+    assert_eq!(answered.len(), 1);
+    assert_eq!(answered[0]["runtime_delivers"], false);
 }
 
 /// ADR-t1962-1: the retry by hand does not use the automatic one. After a

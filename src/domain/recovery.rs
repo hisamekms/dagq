@@ -5,7 +5,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{AskKind, AskReason, DomainError, RunEvent, RunStatus, parse_json_object};
+use super::{
+    AskId, AskKind, AskReason, DomainError, RunEvent, RunStatus, TRIAGE_OPTIONS, TaskId,
+    parse_json_object,
+};
 
 // The alert a recovery job is started for (`recovery_requested`'s `alert`,
 // ADR-0047 decision 39).
@@ -248,6 +251,18 @@ pub enum RecoveryAction {
 }
 
 impl RecoveryAction {
+    /// The name of every action, as [`Self::name`] gives it.
+    pub const NAMES: [&'static str; 8] = [
+        "retry",
+        "retry_inherit",
+        "resume",
+        "send_instruction",
+        "stop_processes",
+        "answer_known_dialog",
+        "close_and_proceed",
+        "wait",
+    ];
+
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Retry => "retry",
@@ -259,6 +274,89 @@ impl RecoveryAction {
             Self::CloseAndProceed => "close_and_proceed",
             Self::Wait { .. } => "wait",
         }
+    }
+}
+
+/// An answer to a recovery job's `decide` ask that is only the name of a
+/// runtime operation and none of the ask's options (`answer` refuses it
+/// and leaves the ask open): written as is, it would close the ask as a
+/// free answer that nobody applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BareActionAnswer<'a> {
+    /// The operation the answer names.
+    pub action: &'static str,
+    /// The ask's options that name the operation, as the ask offers them.
+    pub options: Vec<&'a str>,
+}
+
+/// Whether `answer` to an ask is only the name of a runtime operation (a
+/// recovery job's action or a [`TRIAGE_OPTIONS`] one; blanks, case and
+/// quotes aside) that is none of its `options`, for a `decide` ask the
+/// supervisor opened (`asked_by_supervisor`) on a run that is `failed` or
+/// `interrupted`. Any other answer is taken as it was: an option is
+/// applied, a person's own words are read by a person.
+pub fn bare_action_answer<'a>(
+    kind: &AskKind,
+    asked_by_supervisor: bool,
+    run: Option<RunStatus>,
+    options: &'a [String],
+    answer: &str,
+) -> Option<BareActionAnswer<'a>> {
+    if *kind != AskKind::Decide
+        || !asked_by_supervisor
+        || !matches!(run, Some(RunStatus::Failed | RunStatus::Interrupted))
+        || options.iter().any(|option| option == answer.trim())
+    {
+        return None;
+    }
+    let quotes =
+        |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’');
+    let bare = answer.trim_matches(quotes).to_lowercase();
+    let action = RecoveryAction::NAMES
+        .iter()
+        .chain(TRIAGE_OPTIONS)
+        .find(|name| **name == bare)?;
+    let options = options
+        .iter()
+        .filter(|option| {
+            option
+                .to_lowercase()
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word == *action)
+        })
+        .map(String::as_str)
+        .collect();
+    Some(BareActionAnswer { action, options })
+}
+
+impl BareActionAnswer<'_> {
+    /// Why `answer` refuses it for `ask` of a run of `task`, and what to
+    /// answer or run instead: the option that names the operation, and the
+    /// retry by hand that carries the branch over for `retry_inherit`.
+    pub fn refusal(&self, ask: AskId, task: TaskId) -> String {
+        let mut message = format!(
+            "`{}` is the name of a runtime operation and none of the options of ask {ask} (a recovery job's decide ask); nothing was written and the ask stays open.",
+            self.action
+        );
+        if self.options.is_empty() {
+            message.push_str(" No option names it: answer with an option's text as it is, or in your own words for a person to read.");
+        } else {
+            let quoted: Vec<String> = self
+                .options
+                .iter()
+                .map(|option| format!("\"{option}\""))
+                .collect();
+            message.push_str(&format!(
+                " Answer with the option's text as it is, and the runtime or the recovery job takes it: {}.",
+                quoted.join(" or ")
+            ));
+        }
+        if self.action == RecoveryAction::RetryInherit.name() {
+            message.push_str(&format!(
+                " To carry the run's branch over by hand now, user or inbox runs `dagq ready {task} --inherit --reason '...'` (ADR-t1962-1)."
+            ));
+        }
+        message
     }
 }
 
@@ -369,6 +467,163 @@ pub fn run_processes<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One of each action: the match makes a new variant fail to build
+    /// until it is listed here and in [`RecoveryAction::NAMES`].
+    fn every_action() -> Vec<RecoveryAction> {
+        let all = vec![
+            RecoveryAction::Retry,
+            RecoveryAction::RetryInherit,
+            RecoveryAction::Resume {
+                instruction: String::new(),
+            },
+            RecoveryAction::SendInstruction {
+                instruction: String::new(),
+            },
+            RecoveryAction::StopProcesses { pids: Vec::new() },
+            RecoveryAction::AnswerKnownDialog {
+                dialog: String::new(),
+            },
+            RecoveryAction::CloseAndProceed,
+            RecoveryAction::Wait {
+                recheck_after_secs: 0,
+            },
+        ];
+        for action in &all {
+            match action {
+                RecoveryAction::Retry
+                | RecoveryAction::RetryInherit
+                | RecoveryAction::Resume { .. }
+                | RecoveryAction::SendInstruction { .. }
+                | RecoveryAction::StopProcesses { .. }
+                | RecoveryAction::AnswerKnownDialog { .. }
+                | RecoveryAction::CloseAndProceed
+                | RecoveryAction::Wait { .. } => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn the_names_are_every_actions_name() {
+        let names: Vec<&str> = every_action().iter().map(RecoveryAction::name).collect();
+        assert_eq!(names, RecoveryAction::NAMES);
+    }
+
+    const OPTION: &str = "retry_inherit once process inspection is allowed";
+
+    fn decide_options() -> Vec<String> {
+        ["retry", "resume", "cancel", OPTION, "Retry anyway"]
+            .map(String::from)
+            .to_vec()
+    }
+
+    fn bare(answer: &str) -> Option<BareActionAnswer<'static>> {
+        let options: &'static [String] = decide_options().leak();
+        bare_action_answer(
+            &AskKind::Decide,
+            true,
+            Some(RunStatus::Failed),
+            options,
+            answer,
+        )
+    }
+
+    #[test]
+    fn a_bare_operation_name_that_is_no_option_is_refused_with_the_options_naming_it() {
+        for answer in [
+            "retry_inherit",
+            "  retry_inherit\n",
+            "RETRY_INHERIT",
+            "\"retry_inherit\"",
+            "`Retry_Inherit`",
+            "'retry_inherit'",
+        ] {
+            assert_eq!(
+                bare(answer),
+                Some(BareActionAnswer {
+                    action: "retry_inherit",
+                    options: vec![OPTION],
+                }),
+                "{answer:?}"
+            );
+        }
+        // An option's own word in another case names every option with it.
+        assert_eq!(
+            bare("Retry"),
+            Some(BareActionAnswer {
+                action: "retry",
+                options: vec!["retry", "Retry anyway"],
+            })
+        );
+        // No option names it: refused all the same.
+        assert_eq!(
+            bare("wait"),
+            Some(BareActionAnswer {
+                action: "wait",
+                options: vec![],
+            })
+        );
+        let interrupted = decide_options();
+        assert!(
+            bare_action_answer(
+                &AskKind::Decide,
+                true,
+                Some(RunStatus::Interrupted),
+                &interrupted,
+                "stop_processes",
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn options_free_answers_and_other_asks_are_taken_as_they_were() {
+        let options = decide_options();
+        // An option as it is, and a person's own words.
+        for answer in [
+            "retry",
+            " cancel ",
+            OPTION,
+            "retry_inherit please, the work is done",
+            "try again",
+        ] {
+            assert_eq!(bare(answer), None, "{answer:?}");
+        }
+        // Another kind, another asker, a run that is not failed or
+        // interrupted, or no run.
+        for (kind, by_supervisor, run) in [
+            (AskKind::WorkerQuestion, true, Some(RunStatus::Failed)),
+            (AskKind::Stalled, true, Some(RunStatus::Failed)),
+            (AskKind::Decide, false, Some(RunStatus::Failed)),
+            (AskKind::Decide, true, Some(RunStatus::Running)),
+            (AskKind::Decide, true, Some(RunStatus::NeedsSession)),
+            (AskKind::Decide, true, None),
+        ] {
+            assert_eq!(
+                bare_action_answer(&kind, by_supervisor, run, &options, "retry_inherit"),
+                None,
+                "{kind:?} {by_supervisor} {run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_the_option_and_the_retry_by_hand() {
+        let refusal = bare("retry_inherit")
+            .unwrap()
+            .refusal(AskId::new(531), TaskId::new(661));
+        assert!(refusal.contains("ask 531"), "{refusal}");
+        assert!(refusal.contains("the ask stays open"), "{refusal}");
+        assert!(refusal.contains(&format!("\"{OPTION}\"")), "{refusal}");
+        assert!(
+            refusal.contains("dagq ready 661 --inherit --reason"),
+            "{refusal}"
+        );
+        let wait = bare("wait").unwrap().refusal(AskId::new(1), TaskId::new(2));
+        assert!(wait.contains("No option names it"), "{wait}");
+        assert!(!wait.contains("--inherit"), "{wait}");
+    }
 
     fn process(pid: u32, ppid: u32, cwd: &str) -> ProcessInfo {
         ProcessInfo {

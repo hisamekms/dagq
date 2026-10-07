@@ -201,6 +201,7 @@ impl SqliteQueue {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ask = read_ask(&tx, id)?;
         ensure!(ask.is_open(), "ask {id} is not open");
+        refuse_bare_action(&tx, &ask, text)?;
         let now = self.generators.clock.now();
         let mut payload =
             json!({"ask_id": id, "kind": ask.kind, "reason_category": ask.reason_category});
@@ -881,6 +882,32 @@ impl SqliteQueue {
 
     pub fn read_ask(&self, id: AskId) -> Result<Ask> {
         read_ask(&self.conn, id)
+    }
+}
+
+/// Refuse, before anything is written, an answer to the recovery job's
+/// `decide` ask of a run that ended that is only a runtime operation's name
+/// and none of its options ([`crate::domain::recovery::bare_action_answer`]):
+/// written, it would close the ask as a free answer nobody applies.
+fn refuse_bare_action(tx: &Connection, ask: &Ask, text: &str) -> Result<()> {
+    let Some(run_id) = ask.run_id.as_ref() else {
+        return Ok(());
+    };
+    let (status, task): (String, i64) = tx.query_row(
+        "SELECT status, task_id FROM task_runs WHERE id=?1",
+        [run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let bare = crate::domain::recovery::bare_action_answer(
+        &ask.kind,
+        ask.asked_by == super::runtime_store::TRIAGE_ASKER,
+        Some(status.parse()?),
+        &ask.options,
+        text,
+    );
+    match bare {
+        Some(bare) => anyhow::bail!(bare.refusal(ask.id, TaskId::new(task))),
+        None => Ok(()),
     }
 }
 
