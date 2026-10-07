@@ -35,7 +35,11 @@ NEXTEST_TEST_THREADS = "6"
 # （target は 1 つで同時に使うのは 1 本だけ）。env は [run.env] が渡る。
 # 書式と流れは docs/design/supervisor-lifecycle/landing-recheck.md と run-environment.md。
 # [recheck] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 462 を含んでから足した。
+# paths は command を流す差分の glob（ADR-t2032-1）。Rust に関わる差分の無い run は、merge した木の Rust の部分が
+# 着地のときに検証済みの main と同じで compile が壊れる経路がほぼ無いので、cargo check を流さず merge-tree だけを見る。
+# migrations/** は build.rs と include_str! が compile のときに読み、crates/** は workspace の crate なので含める。
 command = "cargo check --locked --all-targets"
+paths = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "migrations/**", "crates/**"]
 
 [supervisor]
 # runtime が同時に立てる planner の上限（draft・finding・revise の planner で共有。既定 1）。
