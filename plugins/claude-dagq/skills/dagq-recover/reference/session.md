@@ -55,7 +55,7 @@ The answer `exit` is carried out as `reference/stuck-exit.md` says; `wait` needs
 
 ## A `stalled` ask
 
-A session idle without a receipt after the supervisor's one nudge, or a `long_background` / `idle_process` alert its recovery job escalated. The supervisor applies and closes `wait` itself, and closes the ask once the session moves on or exits. `intervene` is carried out as `reference/stalled.md` says: read the screen, check the background work, send the person's instruction (as the ask's answer) or `/exit` the session, then `ask close <id>`.
+A headless session whose turn ended without a receipt after the supervisor's nudges and its recovery job (or again after a `wait`) (`turn_without_receipt`), whose tools were refused too often (`permission_denied`), or an `idle_process` alert its recovery job escalated. It has no screen and takes no keys: read what its turns did and answer `wait`, `stop`, `propose` (or an option the job added), or the person's instruction as the answer's text, which the supervisor sends as the session's next turn. The supervisor applies every answer and closes the ask itself; an answer starting with `intervene` is not sent, and the supervisor opens the ask again without it. The steps: `reference/stalled.md`, "A headless run's `stalled` ask".
 
 ## A live run's recovery job failed
 
