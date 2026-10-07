@@ -266,11 +266,13 @@ paths = ["src/**", "crates/**", "docs/design/**"]
 [review.subagents.test-rules]
 paths = ["tests/**", "src/**", "crates/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml"]
 
+# migration か schema を変える差分にだけ当てる。test の書き方の規則（A-140）は、migration を足す差分で同じ差分の test と一緒に見る。
 [review.subagents.migration-rules]
-paths = ["migrations/**", "build.rs", "src/infrastructure/schema.rs", "src/infrastructure/schema/**", "tests/**", "crates/**"]
+paths = ["migrations/**", "build.rs", "src/infrastructure/schema.rs", "src/infrastructure/schema/**"]
 
+# 規則は ADR・ADR の ID・ADR の frontmatter なので ADR の差分にだけ当てる。ADR 以外の docs の frontmatter は CI の scripts/check-doc-frontmatter.sh が見る。
 [review.subagents.adr-rules]
-paths = ["docs/**"]
+paths = ["docs/adr/**"]
 
 [review.subagents.config-rules]
 paths = ["dagq.toml", ".config/**"]
