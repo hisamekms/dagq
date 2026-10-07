@@ -116,7 +116,7 @@ fn codex_options(mode: ObserveMode) -> dagq::application::observer::ObserveOptio
 
 /// Commit `dagq.toml` with `text` to the fixture's checkout and bind the
 /// queue to it, so the supervisor reads its role table.
-fn roles(db: &Path, repo: &Path, text: &str) {
+pub(crate) fn roles(db: &Path, repo: &Path, text: &str) {
     fs::write(repo.join("dagq.toml"), text).unwrap();
     for args in [
         &["add", "dagq.toml"][..],

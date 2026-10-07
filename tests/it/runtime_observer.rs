@@ -1564,3 +1564,190 @@ fn observe_counts_its_failures_in_a_row_and_a_success_or_a_skip_ends_them() {
         .collect::<Vec<_>>();
     assert_eq!(listed, counts);
 }
+
+/// The walls of a Claude observer: what Claude prints there, the wall the
+/// observation finishes with, the reason Claude cannot be used and the
+/// queue event of a job that joins the hold ask.
+const CLAUDE_WALLS: [(&str, &str, &str, &str); 2] = [
+    (
+        "Invalid API key \u{b7} Please run /login",
+        "authentication",
+        "authentication",
+        "auth_required",
+    ),
+    (
+        "Claude AI usage limit reached",
+        "usage_limit",
+        "usage_limit",
+        "usage_limited",
+    ),
+];
+
+/// A Claude Code stand-in for the supervisor's observer that stops at the
+/// wall Claude reports with `line`.
+fn walled_claude(db: &Path, line: &str) -> PathBuf {
+    let stub = db.parent().unwrap().join("claude-walled-stub");
+    crate::common::template::script(
+        &stub,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"-p\" ]; then\n  cat > /dev/null\n  printf '%s\\n' '{line}'\n  exit 1\nfi\nprintf 'test provider\\n'\n"
+        ),
+    );
+    stub
+}
+
+/// One `--once` pass of a supervisor of the fixture, its task cancelled,
+/// whose `[roles.observer]` names Claude with `[provider_fallback] jobs =
+/// false`, observing hourly through the child `observe` with `claude`.
+fn supervise_claude_observer(db: &Path, repo: &Path, claude: &Path) {
+    crate::observer_codex::roles(
+        db,
+        repo,
+        "[roles.observer]\nprovider = \"claude\"\n\n[provider_fallback]\njobs = false\n",
+    );
+    common::service::serve(db);
+    SqliteQueue::open(db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let backend = TestWorkspace::new(db, false, VALID_AGENT);
+    let options = SuperviseOptions {
+        observe_interval: Duration::from_secs(3600),
+        observe_daily: false,
+        ..supervise_options(1, true)
+    };
+    runtime::supervise(
+        db,
+        repo,
+        &backend,
+        claude,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+}
+
+/// The open hold asks of the queue.
+fn hold_asks(db: &Path) -> Vec<dagq::domain::Ask> {
+    SqliteQueue::open(db)
+        .unwrap()
+        .asks(AskQuery {
+            open: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .filter(|ask| ask.kind == AskKind::QueueHold)
+        .collect()
+}
+
+/// With `[provider_fallback] jobs = false`, a Claude observer stopped at
+/// a login that ran out or at the usage limit is added to the hold ask of
+/// its wall twice: by the child `observe` (`observer::hold_wall`) and by
+/// the supervisor that reads its finish (`Supervisor::hold_unusable` to
+/// `raise_job_wall`). Whichever comes first, the queue records
+/// `auth_required` / `usage_limited` once and the ask lists the observer
+/// job once. The queue's join itself is
+/// `runtime_queue_hold_detect::runs_and_jobs_join_the_one_ask_of_their_wall`'s.
+#[test]
+fn a_claude_observer_at_its_wall_joins_the_hold_ask_once_from_the_child_and_the_supervisor() {
+    use dagq::application::observer::ObserveMode;
+    for (line, wall, reason, event) in CLAUDE_WALLS {
+        // The child first: it opens the ask and records the event; the
+        // supervisor that reads its finish then finds the observer in it.
+        let (_dir, repo, db) = fixture();
+        supervise_claude_observer(&db, &repo, &walled_claude(&db, line));
+        let finished = queue_events(&db, "observe_finished");
+        assert_eq!(finished.len(), 1, "{wall}: {finished:?}");
+        assert_eq!(finished[0]["wall"], wall, "{finished:?}");
+        // The finish the supervisor reads says Claude cannot be used, so
+        // it raises the observer at the wall too.
+        assert_eq!(
+            finished[0]["provider_unusable"],
+            json!({"provider": "claude", "reason": reason}),
+            "{finished:?}"
+        );
+        let asks = hold_asks(&db);
+        assert_eq!(asks.len(), 1, "{wall}: {asks:?}");
+        assert_eq!(finished[0]["hold_ask_id"], json!(asks[0].id));
+        assert_eq!(
+            asks[0].affected,
+            ["observer job"],
+            "{wall}, the child first"
+        );
+        let recorded = queue_events(&db, event);
+        assert_eq!(recorded.len(), 1, "{wall}, the child first: {recorded:?}");
+        assert_eq!(recorded[0]["job"], "observer");
+        assert_eq!(recorded[0]["ask_id"], json!(asks[0].id));
+        // The child's record: the supervisor's carries the job's error.
+        assert!(recorded[0].get("error").is_none(), "{recorded:?}");
+        // It waits for Claude: no observation starts on Codex.
+        assert_eq!(queue_events(&db, "observe_started").len(), 1);
+
+        // The supervisor first: the child's hold cannot be written, so the
+        // supervisor opens the ask and records the event; the next child
+        // at the wall then finds the observer in it.
+        let (_dir, repo, db) = fixture();
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER child_hold_fails BEFORE INSERT ON asks
+                 WHEN NOT EXISTS (SELECT 1 FROM run_events WHERE kind = 'observe_finished')
+                 BEGIN SELECT RAISE(ABORT, 'the child cannot write its hold'); END;",
+            )
+            .unwrap();
+        supervise_claude_observer(&db, &repo, &walled_claude(&db, line));
+        let finished = queue_events(&db, "observe_finished");
+        assert_eq!(finished.len(), 1, "{wall}: {finished:?}");
+        assert_eq!(finished[0]["wall"], wall, "{finished:?}");
+        assert_eq!(finished[0]["hold_ask_id"], Value::Null, "{finished:?}");
+        let asks = hold_asks(&db);
+        assert_eq!(asks.len(), 1, "{wall}: {asks:?}");
+        assert_eq!(
+            asks[0].affected,
+            ["observer job"],
+            "{wall}, the supervisor first"
+        );
+        let recorded = queue_events(&db, event);
+        assert_eq!(
+            recorded.len(),
+            1,
+            "{wall}, the supervisor first: {recorded:?}"
+        );
+        assert_eq!(recorded[0]["job"], "observer");
+        assert_eq!(recorded[0]["ask_id"], json!(asks[0].id));
+        assert!(recorded[0].get("error").is_some(), "{recorded:?}");
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch("DROP TRIGGER child_hold_fails;")
+            .unwrap();
+        let walled = ObserverProvider {
+            script: format!("printf '%s\\n' '{line}'; exit 1"),
+        };
+        let child = observe(
+            &db,
+            &walled,
+            &dagq::application::observer::ObserveOptions {
+                switchable: true,
+                fallback: false,
+                ..observe_options(ObserveMode::Daily)
+            },
+        )
+        .unwrap();
+        assert_eq!(child["wall"], wall, "{child}");
+        assert_eq!(child["hold_ask_id"], json!(asks[0].id), "{child}");
+        let after = hold_asks(&db);
+        assert_eq!(after.len(), 1, "{wall}: {after:?}");
+        assert_eq!(
+            after[0].affected,
+            ["observer job"],
+            "{wall}, the child after the supervisor"
+        );
+        let recorded = queue_events(&db, event);
+        assert_eq!(
+            recorded.len(),
+            1,
+            "{wall}, the child after the supervisor: {recorded:?}"
+        );
+    }
+}
