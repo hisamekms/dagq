@@ -659,6 +659,11 @@ impl TurnMark {
 /// rounded to a millionth of a dollar. The whole `total` for a turn that
 /// started its session, and when no earlier total was recorded or `total`
 /// is below it (the session is not the one the earlier turn ran in).
+///
+/// Turns recorded before `session_cost_usd` existed kept the running total
+/// as a resumed turn's `cost_usd`; those events are not rewritten and
+/// `stats` / `kpi` do not correct them when read, so a Claude headless
+/// cost summed over that period counts a resumed run's earlier turns again.
 pub fn turn_own_cost(events: &[RunEvent], turn: u64, session: &str, total: f64) -> f64 {
     let resumed = events
         .iter()

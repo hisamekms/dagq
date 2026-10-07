@@ -3819,6 +3819,14 @@ pub fn claude_global_config(config_dir: Option<&str>, home: Option<&str>) -> Opt
 /// worktree resolves to its repository's root for the trust check, so this
 /// one key decides whether run sessions stop at the dialog
 /// (docs/design/provider-lifecycle.md). A missing config trusts nothing.
+///
+/// Claude Code keys the trust by the canonical Git root (a linked
+/// worktree resolves to its main checkout), wherever the worktree lies,
+/// and walks parent directories only up to the Git root (a linked
+/// worktree's own root), so a parent's trust is not looked at here either. No flag skips the dialog
+/// (`--dangerously-skip-permissions` does not), print mode (`-p`) never
+/// shows it, and accepting it for the person is not the runtime's to do,
+/// so `up` refuses an untrusted repository instead.
 pub fn claude_trusts_repository(config: &Path, root: &Path) -> Result<bool> {
     let text = match fs::read_to_string(config) {
         Ok(text) => text,
@@ -3880,6 +3888,10 @@ exit 0"#;
 /// environment and, being a non-empty environment from flag settings, keeps
 /// the "Teach auto mode about your environment?" dialog from opening in a
 /// run session (docs/design/provider-lifecycle.md).
+/// `$defaults` expands to the built-in entries, so the classifier behaves
+/// as with no setting. Claude Code's LSP plugin recommendation has no
+/// setting or flag (it reads only the global config); it closes by itself
+/// after 30 seconds, and the runtime does not write the person's config.
 ///
 /// `permissions.deny` refuses [`SIGNAL_BY_NAME_DENIED`]: the session may
 /// stop what it started by pid, never processes picked by name or pattern.
@@ -3946,6 +3958,10 @@ pub fn runtime_session_settings(idle_marker: &Path, deny: &[String]) -> Result<S
 /// llvm-cov`), so a worker's `pkill -f llvm-cov` also ended the other
 /// runs' sessions (exit 143) and `integrate`'s checks (task 359). Claude
 /// Code applies a deny rule to each command of a `;` / `&&` chain.
+/// Only a command that starts with `pkill` / `killall` is refused:
+/// `/usr/bin/pkill`, `sh -c 'pkill ...'`, `kill $(pgrep ...)` and
+/// `pgrep ... | xargs kill` pass, so the prompt's rule to stop by pid is
+/// the rest of the defence. `pgrep` alone is left, for diagnosis.
 pub const SIGNAL_BY_NAME_DENIED: [&str; 2] = ["Bash(pkill:*)", "Bash(killall:*)"];
 
 /// The tools a headless turn's settings deny: nobody reads a headless

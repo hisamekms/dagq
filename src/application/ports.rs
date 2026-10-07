@@ -835,6 +835,10 @@ pub trait TurnReader: Send {
     /// The lines read next were read at `at` (unix milliseconds): a reader
     /// whose output has no times takes them as its items' (Codex's, for
     /// [`crate::domain::turn::TurnResult::commands`]).
+    /// The wrapper reads about once per [`AgentProvider::wait_interval`],
+    /// so such a time is late by up to that interval, and the lines of one
+    /// read share it: a command shorter than the interval may read as 0
+    /// or 1 second.
     fn stamp(&mut self, _at: i64) {}
     /// Whether the output goes on while the agent works (a heartbeat), so
     /// that a silence means the turn is stuck.

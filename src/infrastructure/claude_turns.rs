@@ -257,7 +257,9 @@ impl TurnReader for ClaudeTurnReader {
             cost_usd: result.and_then(|r| r["total_cost_usd"].as_f64()),
             // `total_cost_usd` (like `modelUsage`) is the session's total so
             // far, a resumed session's earlier turns included; `usage`,
-            // `num_turns` and `duration_ms` are the turn's own.
+            // `num_turns` and `duration_ms` are the turn's own. `usage`
+            // leaves out the turn's subagents, which only `modelUsage`
+            // counts; it is not read yet (ADR-t1486-1).
             cost_cumulative: true,
             usage: result.map_or(Value::Null, |r| r["usage"].clone()),
             permission_denials: result

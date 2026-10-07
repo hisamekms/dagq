@@ -79,12 +79,6 @@ line = 4652
 tasks = 6
 
 [[doc]]
-path = "docs/design/provider-lifecycle.md"
-size = 177862
-line = 7478
-tasks = 111
-
-[[doc]]
 path = "docs/design/queue-service.md"
 size = 35535
 line = 1502
