@@ -3,11 +3,13 @@
 # against docs/frontmatter.md:
 # - the file starts with a frontmatter: a first line of "---" and a closing
 #   "---";
-# - the required keys id, type, title, status, created and updated are there
-#   with a value, and a design document also has last_verified;
+# - the required keys id, type, title, status and created are there with a
+#   value;
 # - type is design, plan or development (adr only for the ADRs), and status
 #   is one of the allowed values of that type ("Type-specific fields");
 # - id is lowercase kebab-case, and no two checked documents share one.
+# updated and last_verified are not required: task 1964 (ADR-t1964-1) takes
+# them out of the documents other than the ADRs.
 #
 # The ADRs (every .md under docs/adr/ except README.md, the template
 # included) are not checked here: check-adr-numbers.sh checks their IDs,
@@ -65,7 +67,7 @@ done | awk '
     if (r < 0) { report("cannot be read"); return }
     if (!opened) { report("no frontmatter (the first line is not ---)"); return }
     if (!closed) { report("no closing --- of the frontmatter"); return }
-    k = split("id type title status created updated", req, " ")
+    k = split("id type title status created", req, " ")
     for (i = 1; i <= k; i++)
       if (!(req[i] in val) || val[req[i]] == "") report("missing required key " req[i])
     t = val["type"]
@@ -76,8 +78,6 @@ done | awk '
       else { allowed = ""; report("type " t " is not design, plan or development") }
       if (allowed != "" && ("status" in val) && val["status"] != "" && index(allowed, " " val["status"] " ") == 0)
         report("status " val["status"] " is not allowed for type " t " (allowed:" allowed ")")
-      if (t == "design" && (!("last_verified" in val) || val["last_verified"] == ""))
-        report("missing last_verified of a design document")
     }
     if (("id" in val) && val["id"] != "") {
       if (val["id"] !~ /^[a-z0-9]+(-[a-z0-9]+)*$/) report("id " val["id"] " is not lowercase kebab-case")
