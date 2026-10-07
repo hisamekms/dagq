@@ -1,0 +1,599 @@
+{
+ "agent": "adr-rules",
+ "role": "review",
+ "codes": [
+  "A-150",
+  "A-152",
+  "A-155",
+  "A-162",
+  "A-163"
+ ],
+ "k": 1,
+ "cases": [
+  {
+   "id": "prod-adr-rules-t1560-a3",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "c3cb8efdd372944f8f29d008589dcd5f4fdd602b27c1491c60d84c47c840dbb4",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1560-a4",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "8986bfe7162f60044d35a6d060b2aad0c7514e84181728a0dfe3945112f2dcdc",
+   "adjudicated": null,
+   "disputed": {
+    "date": "2026-10-05",
+    "kind": "ambiguous",
+    "by": "hisamekms",
+    "reason": "iter5 が『ADR の決定を新しい ADR なしで変えた』（A-150・A-152・A-163）と指摘したが、人も規則と ADR の本文からは決定の変更かを判断できなかった。正解を置けないので主の指標から外す。変更: 起動できない job の provider を控える決定（ADR-t1063-1 決定 4 等）から、E2BIG と StdinUnprepared を外して other に分類した"
+   },
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1232-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "38f909d135f9d9fb4c1cdb37c67d0109fabaed7a891828fc2d4b755ba977d90b",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-155"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1400-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "65d745f88df95a92919e5ea8c23889570e6e01df646d839d50cc21a6af9dff6e",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1462-a2",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "6be8b813a7f871c26f6ab5b5e9fb2615f6e3218f9537603b76438d9c7062fa69",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1269-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "d9efd6d84dd7d74c1c8e1b4f2381ca1f849d2d15f6132994e50cd5e9406d0634",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1361-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "972924d779259c0fc45346d492d535e4a45a0639f4e92004aa5a4964243edf55",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-155"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t774-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "69e0d618e7fb7803d0dfaa095e1ff7b9c6f10e6055bf4c29564a34625af9852a",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-162"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t655-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "71c21250a0af6a2b6c626b87c33d857b6335155e5503da0e4df5a9afa27e46df",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-150"
+     ],
+     "acceptable_codes": [
+      "A-152",
+      "A-163"
+     ],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t655-a2",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "f9b53e678fc4519affbabf87443d7fc08494ca41f91b519b9bb97d553017791d",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-162"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1504-a2",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "2d31670ffa6f2744c24e993a8ad49e2db0c5359ec983ed7a31ad63200cb63197",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-162",
+      "A-163"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1509-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "7276ad4d118d47ac47b456ec53164a6fb3aab3eea3335918ac5351538b81d5ed",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1570-a2",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "c2bcd3fda6edad0afd1bee6fadfb0977a8707f5db82b76f299b6825a47a7235e",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-152",
+      "A-162",
+      "A-163"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1596-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "1fa5e7696781c48a4a52be2702e6d3fd80802066044a993be9ac8d00ceec8827",
+   "adjudicated": null,
+   "disputed": {
+    "date": "2026-10-05",
+    "kind": "ambiguous",
+    "by": "hisamekms",
+    "reason": "iter5 が『ADR の決定を新しい ADR なしで変えた』（A-150・A-152・A-163）と指摘したが、人も規則と ADR の本文からは決定の変更かを判断できなかった。正解を置けないので主の指標から外す。変更: ADR-t1394-2 決定 3（idle は turn が終わり取られていない依頼が無いとき）に対し、壁に当たった planner を依頼が残っていても idle と表示する design にした"
+   },
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1707-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "b43f96a309d511d61bf35c8547fd8d22c3808206aa2386adcc13086d08b64288",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-152"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t840-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "f45e4ca64f51d3181226ca21170205584b9d476ab4bdbcc4b6b0f6d57359b638",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-155"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t840-a2",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "7300b75af26e18e16b2365617d819f23f6453eaca07be86051b130541477a710",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-150"
+     ],
+     "acceptable_codes": [
+      "A-152",
+      "A-163"
+     ],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1632-a2",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "5cd9cfe44aef01bb89530332264e1a36ea8287eafe4f5cc50df826f06efdc91d",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-162"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1794-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "bb2da7bb4db70c96fc64a31ad8b1a4177bd15f4ee7960108611a91c07ff991a3",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-155"
+     ],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1537-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "7435de74a0d9127cd838fcf571c636f4396b7da44babc5e5e804259b97d5191a",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1641-a4",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "3ec84739b4954c03ed878ced0587d08f5411479da89da6148c0e614f7ca76992",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-150"
+     ],
+     "acceptable_codes": [
+      "A-152",
+      "A-163"
+     ],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1529-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "850ba1452b13807504b4dc59693f664b916b43c3ffba96712f1d87bac3c2b9cb",
+   "adjudicated": null,
+   "disputed": {
+    "date": "2026-10-05",
+    "kind": "ambiguous",
+    "by": "hisamekms",
+    "reason": "iter5 が『ADR の決定を新しい ADR なしで変えた』（A-150・A-152・A-163）と指摘したが、人も規則と ADR の本文からは決定の変更かを判断できなかった。正解を置けないので主の指標から外す。変更: ADR-t963-1 決定 3（supervise の判断を e2e の範囲に含めない）に対し、run をまたぐ振る舞いを変える task に --evidence e2e を求める手順を開発文書に足した"
+   },
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1641-a3",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "4c4195c84f10ad70a807cd04fbecdb591dd39268a2247681cae9592ca31993a7",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-150"
+     ],
+     "acceptable_codes": [
+      "A-152",
+      "A-163"
+     ],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1223-a3",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "cf53c554a238d05ceae1713032986111df9b0b2f6cf6df742e96f9fbdacf2e21",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1641-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "92731909fd6dbe33174cad1e126d5498113358ac50131bf74afc9367d077cb4f",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "violation",
+     "codes": [
+      "A-150"
+     ],
+     "acceptable_codes": [
+      "A-152",
+      "A-163"
+     ],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1223-a2",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "cc55974a81bc3f6cd469af1b52697e2b1071483e10bfde624b2ec5c90de47bb2",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1514-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "38c366750c93bb4db753724ba50e8c7af32e6d1abf5d55a0d4de2a83f8cdf277",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1223-a1",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "448fa40a26017f8c15ed678d0b4d04982319beb7534bc7cd3191173c08bd8d72",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  },
+  {
+   "id": "prod-adr-rules-t1440-a3",
+   "source": "production",
+   "made_by": "fixture from the Spike's 20261005T044010Z-0c00dde92d16-production-baseline-iter0.json",
+   "base_commit": "0000000000000000000000000000000000000000",
+   "patch": "78ce64e6ce1ca58a3c69365385cd35690187609631f7c0e8b3a0aa3af5159fdc",
+   "adjudicated": null,
+   "disputed": null,
+   "review": {
+    "input": {},
+    "expected": {
+     "verdict": "clean",
+     "codes": [],
+     "acceptable_codes": [],
+     "note": ""
+    }
+   }
+  }
+ ]
+}

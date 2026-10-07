@@ -1,0 +1,662 @@
+[
+ {
+  "case": "prod-adr-rules-t1223-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": []
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1223-a2",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": []
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1223-a3",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": []
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1232-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": []
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1269-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-151",
+      "A-152",
+      "A-162",
+      "A-163"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-156",
+      "A-159",
+      "A-160",
+      "A-161"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-155"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1361-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-162"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-151",
+      "A-152",
+      "A-163"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-155",
+      "A-156",
+      "A-159",
+      "A-160",
+      "A-161"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1400-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-151",
+      "A-152",
+      "A-162",
+      "A-163",
+      "A-156",
+      "A-159",
+      "A-160",
+      "A-161"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-156",
+      "A-159",
+      "A-160",
+      "A-161"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-155"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1440-a3",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": []
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1462-a2",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-151",
+      "A-152",
+      "A-162",
+      "A-163"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-156",
+      "A-159",
+      "A-160",
+      "A-161"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-155"
+     ]
+    },
+    {
+     "text": "",
+     "codes": []
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1504-a2",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-162"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-162"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-152",
+      "A-163"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-163"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1509-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": []
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1514-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-155"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-156",
+      "A-159",
+      "A-160",
+      "A-161"
+     ]
+    },
+    {
+     "text": "",
+     "codes": []
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1529-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-152",
+      "A-163"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-159"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1537-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-151",
+      "A-152",
+      "A-162",
+      "A-163"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-155"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-156",
+      "A-159",
+      "A-160",
+      "A-161"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1560-a3",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-151",
+      "A-152",
+      "A-156",
+      "A-159",
+      "A-160",
+      "A-161",
+      "A-162",
+      "A-163"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-155"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1560-a4",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": []
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1570-a2",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-152",
+      "A-163"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1596-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "concern",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-151"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-150"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-155",
+      "A-156"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1632-a2",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "pass",
+   "reasons": []
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1641-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-159",
+      "A-162"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1641-a3",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-162"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1641-a4",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-162",
+      "A-163"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-163"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1707-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-155"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-156",
+      "A-159",
+      "A-160",
+      "A-161"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-151",
+      "A-152",
+      "A-162",
+      "A-163"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t1794-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-155"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t655-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-151",
+      "A-162"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-152",
+      "A-163"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-155"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t655-a2",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-162"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t774-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-162"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-162"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t840-a1",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-151",
+      "A-152"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-150",
+      "A-156"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "case": "prod-adr-rules-t840-a2",
+  "round": 0,
+  "agent": {
+   "status": "completed",
+   "verdict": "revise",
+   "reasons": [
+    {
+     "text": "",
+     "codes": [
+      "A-150"
+     ]
+    },
+    {
+     "text": "",
+     "codes": [
+      "A-152"
+     ]
+    }
+   ]
+  }
+ }
+]

@@ -1,7 +1,7 @@
 ---
 id: design-agent-eval
 type: design
-title: agentのeval（定義とケースの置き場・ケースの欄・patchの共有・CLI・event・費用の上限と既定値・evalの枠・採用の判定・productionのケースと見張り・道具の宣言とproviderごとの変換・本番と共有する起動経路・programのreviewの当て方）
+title: agentのeval（定義とケースの置き場・ケースの欄・patchの共有・採点・漏れの検査・CLI・event・費用の上限と既定値・evalの枠・採用の判定・productionのケースと見張り・道具の宣言とproviderごとの変換・本番と共有する起動経路・programのreviewの当て方）
 status: draft
 created: 2026-10-06
 scope: runtime
@@ -22,7 +22,9 @@ related:
 
 # agentのeval
 
-> **一部だけ実装（2026-10-06）**: この文書はagentの定義とeval（goal 125）の今の予定で、実装したのは定義のpath（`.dagq/agents/<name>/AGENT.md`、移行の間は旧の`.dagq/review-agents/<agent>.md`にも戻る）と、名指すagentの定義の有無と複数の役割の検査（`dagq doctor`の`agents`。task 1866）と、下の「道具の宣言」の宣言の検査とproviderごとの変換の関数（task 1873。どの起動にもまだ当たらない）だけ。今動いているreviewのagent（親のreview jobの中のsubagent）は[Review](supervisor-lifecycle/review.md#reviewのsubagent)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、この文書はそれらを変えない。後続のtask（1867〜1874）が実装したら、この注記と各節を今の姿に直す。
+> **一部だけ実装（2026-10-07）**: この文書はagentの定義とeval（goal 125）の今の予定で、実装したのは定義のpath（`.dagq/agents/<name>/AGENT.md`、移行の間は旧の`.dagq/review-agents/<agent>.md`にも戻る）と、名指すagentの定義の有無と複数の役割の検査（`dagq doctor`の`agents`。task 1866）と、下の「道具の宣言」の宣言の検査とproviderごとの変換の関数（task 1873。どの起動にもまだ当たらない）と、下の「ケースの欄」の読み手・「採点」・「漏れの検査」の関数（evalのコマンドからはまだ呼ばれない）だけ。
+> 今動いているreviewのagent（親のreview jobの中のsubagent）は[Review](supervisor-lifecycle/review.md#reviewのsubagent)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、この文書はそれらを変えない。
+> 後続のtask（1867〜1874）が実装したら、この注記と各節を今の姿に直す。
 
 決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。ここはpath・欄・コマンド・event・数値・設定のkeyの予定を持つ。名前と数値は実装のtaskが確かめて決め、変えたらここを直す。
 
@@ -32,7 +34,10 @@ related:
 - ケース: `.dagq/agents/<name>/evals/`の`dev.json`・`holdout.json`・`production.json`（Spikeの`evals.json`は`dev.json`）。splitはこのファイルで区分し、ケースの欄に持たない。
 - patchの共有の置き場: `.dagq/agent-cases/patches/<sha256>.patch`（patchの内容のSHA-256。agentの名前と衝突しないよう`.dagq/agents/`の外に置く）。同じ内容のpatchは1つだけ置き、ケースはhashで参照する。どのケースからも参照されないpatchと、ケースが参照するhashのpatchが無いことは、下の設定の検査が誤りにする。
 - どこで走るか: `dagq.toml`の`[review.subagents.<name>] paths`のまま（形は変えない）。定義のpathだけが`.dagq/agents/<name>/AGENT.md`に変わった（task 1866。移行の間は旧の`.dagq/review-agents/<name>.md`にも戻る。[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
-- 設定の検査（`dagq.toml`を読むときと、`review_subagents::this_repository_names_only_agents_it_defines`の後継のtest）: `[review.subagents.<name>]`が名指す`<name>`に`.dagq/agents/<name>/AGENT.md`が無いこと、同じ`<name>`を複数の役割の表が名指すこと（今の役割の表は`[review.subagents]`だけ。役割の表が増えたら同じ検査に足す）を誤りにする。この2つは実装済みで、`dagq doctor`の`agents`の`errors`が出す（役割の表の集合は`domain::review_subagents::ROLE_SECTIONS`、移行の間は旧の`.dagq/review-agents/<name>.md`も定義と数える。[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。あわせて、ケースのファイルの形と、patchの置き場の参照の過不足（上）を検査する。
+- 設定の検査（`dagq.toml`を読むときと、`review_subagents::this_repository_names_only_agents_it_defines`の後継のtest）: `[review.subagents.<name>]`が名指す`<name>`に`.dagq/agents/<name>/AGENT.md`が無いこと、同じ`<name>`を複数の役割の表が名指すこと（今の役割の表は`[review.subagents]`だけ。役割の表が増えたら同じ検査に足す）を誤りにする。
+  この2つは実装済みで、`dagq doctor`の`agents`の`errors`が出す（役割の表の集合は`domain::review_subagents::ROLE_SECTIONS`、移行の間は旧の`.dagq/review-agents/<name>.md`も定義と数える。[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
+- ケースのファイルの形とpatchの置き場の参照の過不足（上）は、ケースの一覧の読み手と、このrepositoryの全ての一覧をそれで読むtestが検査する。
+  `dagq doctor`と設定の読み込みにはまだ足していない。
 
 ## ケースの欄
 
@@ -65,8 +70,39 @@ related:
 
 - 共通の欄（役割に依らない）: `id`（ファイルの中で一意）・`source`（`generated` / `handmade` / `production`）・`made_by`（作った道具と版、productionはラベルを付けたproviderと版）・`base_commit`（patchを当てるcommit）・`patch`（共有の置き場のhash）・`adjudicated`（人の決定。`null`か、決めた人・日・内容）・`disputed`（争いの印。`null`か理由。立っているケースは主の指標から外す）・`k`（任意。無ければファイルの`k`）。
 - 役割ごとの欄: 役割の名前の欄（今は`review`）の下に`input`と`expected`を置く。reviewの`input`は今は空（差分はpatch、規則は定義が持つ）。reviewの`expected`は`verdict`（`violation`＝`revise`か`concern`、`clean`＝`pass`）・`codes`（求める規則コード）・`acceptable_codes`（挙げても誤検出に数えないコード）・`note`（期待の理由。`acceptable_codes`を使うときは許す理由）。
+- 読み手が知らない欄はファイルに残してよく、読まない。
 - `handmade`はdevだけに置く。改善するsessionが中身を読んだケースはholdoutに置かない。
+- 読み手は形の誤り（欄の欠けと型の違い・知らないファイル・置き場に無いpatchの参照・ファイルの中のidの重複など）を、最初の1つでなく全て返す。
 - 起動・形の検査・採点・productionのケースの作り方は役割ごとのharnessが持つ。今作るのはreviewのharnessだけ。
+  役割が増えたら、その役割のharnessを足す。
+
+## 採点
+
+reviewのharnessは、1周の実行（ケース × kの1回）を単位に数える。
+
+- 判定: `revise`と`concern`を違反あり、`pass`を違反なしとする。
+  期待が`violation`で違反あり＝TP、`violation`で違反なし＝FN、`clean`で違反あり＝FP、`clean`で違反なし＝TN。
+- 規則コード: 違反ありの結果の理由が挙げた規則コードを、コードごとに期待のコードと比べる。
+  期待のコードを挙げた回＝TP、挙げなかった回＝FN、期待にも`acceptable_codes`にも無いコードを挙げた回＝FP（`acceptable_codes`は挙げても誤検出に数えない）。
+  agentの値はコードごとの和から出す。
+- recall＝TP /（TP＋FN）、precision＝TP /（TP＋FP）。
+  分母が0なら値なし。
+- 判定の無い実行（完了しない・結果が読めない）はerrorで、判定にも規則コードにも数えない。
+- `disputed`のケースとその実行は主の指標から外し、含めた値は別に返す。
+- 閾値: 判定と規則コードのrecall・precisionの4つがすべて閾値以上で、errorが無いときだけ通る。
+  値なしは下回ったと数える。
+  閾値の値は下の「費用の上限と既定値」の`[eval] threshold`。
+  規則コードごとの値も返すが、採用の判断はagentの値で行う。
+
+## 漏れの検査
+
+定義がケースに合わせて書かれていないかを見る。
+誤りにはせず、見つけたケースと語を返す。
+
+- ケース固有の語: ケースのpatchが変えたpathとファイルの名前、変わった行のADRのIDとbacktickで囲んだ名前のうち、普通の語でない固有の名前。
+- 規則の語: 定義がlinkする規則の文書（landing branchのcommitのもの）とそのpathに現れる語。
+  ケース固有の語でも規則の語なら漏れにしない。
+- 漏れ: 規則の語でないケース固有の語が、1つの語として定義に現れたもの。
 
 ## CLI
 
