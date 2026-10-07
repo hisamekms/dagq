@@ -268,6 +268,19 @@ fn an_inbox_without_a_watch_is_told_once_through_push() {
     assert_eq!(inbox.nudges(INBOX_NUDGED).len(), 1);
 }
 
+/// The supervisor reads a live watch's record under the queue's directory
+/// and records nothing for an ask that waited past the threshold. The
+/// other cases of the
+/// judgment (no ask, an ask not waited long enough) are the unit test
+/// `supervise::inbox_nudge::tests::no_nudge_while_a_watcher_is_alive_or_no_ask_waited_long_enough`.
+#[test]
+fn nothing_is_recorded_while_a_watch_watches() {
+    let inbox = Inbox::new(true, false);
+    inbox.watching(400);
+    inbox.supervise(400);
+    assert!(inbox.nudges(INBOX_NUDGED).is_empty());
+}
+
 #[test]
 fn a_nudge_of_an_absence_is_claimed_once_across_supervisors() {
     let fx = fixture();
