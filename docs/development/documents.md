@@ -146,7 +146,7 @@ ADR以外の文書（design・development・plans、`docs/README.md`・`docs/fro
 
 `created`とADRの`updated`の行は`YYYY-MM-DD`の日付だけを書き、行末にどのtaskが何を変えたかのコメント（`# task N`など）を書かない。どのtaskが変えたかはgitの履歴（着地のcommitの`Dagq-Task` trailer）が持つ。既存の文書（ADRも含む。決定と本文に触れないのでappend-onlyに当たらない）の日付の行にコメントがあれば、日付の値を変えずにコメントだけを消してよい。経緯は[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)。`scripts/check-frontmatter-dates.sh`はfrontmatterの日付の行（frontmatter仕様が持たせるもの）にコメントがあれば、ファイルと行を出して落ちる検査で、CIが実行する（docsを変えるtaskのverifyへの足し方は[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
 
-`scripts/check-doc-frontmatter.sh`はADR以外の`docs/`の文書のfrontmatter（必須のkey、typeとstatusの値、idの形と重複）を、`scripts/check-doc-links.sh`は`docs/`とrootの`.md`の相対リンクが実在のファイルかdirectoryを指すことを検査し、違反のファイルと理由を出して落ちる。どちらもCIが実行し、`docs/`を変えるtaskのverifyに付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。検査の範囲と例外（ADRのfrontmatterを見ないこと、append-onlyのADRから削除済みの`docs/journal/`へのリンク）はscriptの冒頭のcommentが持つ。
+`scripts/check-doc-frontmatter.sh`はADR以外の`docs/`の文書のfrontmatter（必須のkey、typeとstatusの値、idの形と重複、`updated`と`last_verified`の行が無いこと（ADR-t1964-1））を、`scripts/check-doc-links.sh`は`docs/`とrootの`.md`の相対リンクが実在のファイルかdirectoryを指すことを検査し、違反のファイルと理由を出して落ちる。どちらもCIが実行し、`docs/`を変えるtaskのverifyに付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。検査の範囲と例外（ADRのfrontmatterを見ないこと、append-onlyのADRから削除済みの`docs/journal/`へのリンク）はscriptの冒頭のcommentが持つ。
 
 ## 権限の表を写す文書
 
