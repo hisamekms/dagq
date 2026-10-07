@@ -229,7 +229,7 @@ live worker alert (stalled, idle_process)
 
 ## スループットの見直し
 
-- [スループットの見直し（`throughput-review`）](supervisor-lifecycle/throughput-review.md)（supervisorがtimerで毎時（runtimeの規則に当たった時間だけ）・日次・週次に読むだけのheadlessのjobを始め、結果を`<queue dir>/reports/reviews/`に残し、inboxに知らせるだけのattention（`report the review`）で届ける。週次の次の一手はproposalを求めるfindingになる。[ADR-t996-1](../adr/2026-09-29-t996-1-supervisor-runs-throughput-review-jobs-and-reports-to-inbox.md)）
+- [スループットの見直し（`throughput-review`）](supervisor-lifecycle/throughput-review.md)（supervisorがtimerで毎時・日次・週次に読むだけのheadlessのjobを始め、結果を`<queue dir>/reports/reviews/`に残し、日次・週次と規則に当たった毎時をinboxに知らせるだけのattention（`report the review`）で届ける。週次の次の一手はproposalを求めるfindingになる。[ADR-t996-1](../adr/2026-09-29-t996-1-supervisor-runs-throughput-review-jobs-and-reports-to-inbox.md)）
 
 ## `session` wrapper
 

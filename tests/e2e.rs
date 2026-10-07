@@ -201,6 +201,45 @@ fn dagq_output(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> std::proces
     command.bounded_output().unwrap()
 }
 
+/// [`dagq`] with its stdout and stderr in files of `env`'s data home
+/// rather than pipes, for a thread that runs commands while the test spawns
+/// long-lived processes (the queue service, the supervisor). On macOS a
+/// pipe becomes close-on-exec only after it is made, so a process spawned
+/// by another thread in between inherits its write end and keeps
+/// `Command::output` waiting for an end of file until that process exits.
+/// A file has no end to wait for.
+fn dagq_in_files(env: &Env, args: &[&str]) -> Value {
+    let stdout = tempfile::tempfile_in(&env.data_home).unwrap();
+    let stderr = tempfile::tempfile_in(&env.data_home).unwrap();
+    let mut command = Command::new(BIN);
+    command.without_actor_env();
+    let status = command
+        .current_dir(&env.repo)
+        .env("XDG_DATA_HOME", &env.data_home)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(stdout.try_clone().unwrap())
+        .stderr(stderr.try_clone().unwrap())
+        .bounded_status()
+        .unwrap();
+    let read = |mut file: fs::File| {
+        use std::io::Seek;
+        file.rewind().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        bytes
+    };
+    checked(
+        args,
+        std::process::Output {
+            status,
+            stdout: read(stdout),
+            stderr: read(stderr),
+        },
+    )
+}
+
 fn checked(args: &[&str], output: std::process::Output) -> Value {
     assert!(
         output.status.success(),
@@ -1068,9 +1107,11 @@ fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
                     started.elapsed() < SUPERVISE_TIMEOUT,
                     "the worker asked nothing, or its run never waited"
                 );
-                let asks = dagq(&env, &["asks", "--open"]);
+                // Its commands write to files: the main thread spawns the
+                // service and the supervisor meanwhile ([`dagq_in_files`]).
+                let asks = dagq_in_files(&env, &["asks", "--open"]);
                 let waiting = || {
-                    dagq(&env, &["show", &task_id, "--full"])["events"]
+                    dagq_in_files(&env, &["show", &task_id, "--full"])["events"]
                         .as_array()
                         .unwrap()
                         .iter()
@@ -1082,7 +1123,7 @@ fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
                     assert_eq!(ask["kind"], "worker_question", "{ask}");
                     assert_eq!(ask["asked_by"], "worker", "{ask}");
                     let id = ask["id"].to_string();
-                    dagq(&env, &["answer", &id, "--text", "blue"]);
+                    dagq_in_files(&env, &["answer", &id, "--text", "blue"]);
                     return ask["id"].as_i64().unwrap();
                 }
                 thread::sleep(Duration::from_millis(200));

@@ -2,9 +2,10 @@
 //! `throughput-review` on its timer for the last whole hour, yesterday and
 //! the ISO week before this one. For an hour the runtime counts the
 //! landings and judges them by rules
-//! ([`crate::domain::throughput_review::judge_hourly`]); an hour no rule
-//! hit starts no agent and records a skipped `throughput_review_finished`.
-//! Otherwise a headless agent (`DAGQ_ROLE=throughput-review-job`, which the
+//! ([`crate::domain::throughput_review::judge_hourly`]); every hour is
+//! reviewed whatever the rules found (ADR-t1172-1), and the rules it met
+//! (`reasons`) go into the inputs and the events, head its review, and
+//! make its report a notice to the inbox. A headless agent (`DAGQ_ROLE=throughput-review-job`, which the
 //! queue lets read only, without MCP), on the provider of its launch (Claude
 //! by default, Codex when `[roles.throughput_review]` names it, task 1220),
 //! reads the landings, `kpi`, `stats`,
@@ -122,8 +123,7 @@ pub struct ReviewOptions {
     /// The unix second the period is the latest finished one at; now
     /// without (the supervisor passes the second it found the review due).
     pub at: Option<i64>,
-    /// Build and return the prompt without starting the agent, whatever
-    /// the rules made of the hour.
+    /// Build and return the prompt without starting the agent.
     pub dry_run: bool,
     pub timeout: Duration,
     /// The `dagq` binary the agent calls; its directory goes first on PATH.
@@ -311,27 +311,9 @@ fn review_period<Q: Queue + EventReads>(
         ))?),
         _ => None,
     };
-    if !options.dry_run
-        && let Some(judged) = judgment.as_ref().filter(|judged| !judged.triggered)
-    {
-        let payload = json!({
-            "mode": options.mode.as_str(),
-            "period": period.label,
-            "outcome": "skipped",
-            "reason": "the hour met no rule",
-            "hourly": judged,
-            "pid": failure["pid"],
-            "parent_pid": failure["parent_pid"],
-        });
-        tracing::info!(
-            period = period.label,
-            "throughput review (hourly) skipped: no rule met"
-        );
-        return Ok(payload);
-    }
     failure["reasons"] = json!(judgment.as_ref().map(|judged| &judged.reasons));
     // No provider can run it (`--no-claude`, Codex not usable): the period
-    // that needs a review fails with why, for a person (ADR-t1204-1).
+    // fails with why, for a person (ADR-t1204-1).
     if !options.dry_run
         && let Some(why) = &options.unavailable
     {
@@ -900,13 +882,7 @@ fn render_prompt(
     input_path: &Path,
 ) -> Result<String> {
     let cadence = match period.mode {
-        ReviewMode::Hourly => format!(
-            "This is the hourly review of the hour {label}. The runtime's rules found it worth a look (`hourly.reasons` in the inputs: \
-             `deviation` — its landings are far off the 6 hours before, `sustained_drop` — the 3-hour average stayed well below the 24-hour one for 3 hours, \
-             `no_landing` — nothing landed). Step 6 says an hour alone is noise: say whether landings have stopped or slowed on the 3–6 hour moving average, \
-             and why the hour rose or fell (which runs were long, what waited: a person, the landing slot, the claims deferred, the load).",
-            label = period.label
-        ),
+        ReviewMode::Hourly => hourly_cadence(&period.label, &summary["hourly"]["reasons"]),
         ReviewMode::Daily => format!(
             "This is the daily review of {label}: step 6's daily part, the outliers (step 4) and the targets in `breach` \
              (`kpi` of the last days in the inputs, with the day under review last).",
@@ -960,6 +936,35 @@ fn render_prompt(
         end = millis_text(period.end_ms),
         input = serde_json::to_string_pretty(summary)?,
     ))
+}
+
+/// The hourly review's part of the prompt (ADR-t1172-1 decision 2): an
+/// hour that met rules (`reasons`, the judgment's) puts them at the head of
+/// its conclusion and explains them; a quiet hour, which met none, is
+/// written short by step 6's hourly cadence (an hour alone is noise): what
+/// is steady, and any sign that would matter if it went on.
+fn hourly_cadence(label: &str, reasons: &Value) -> String {
+    let met: Vec<&str> = reasons
+        .as_array()
+        .map(|reasons| reasons.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let rules = "`deviation` — its landings are far off the 6 hours before, `sustained_drop` — the 3-hour average stayed well below the 24-hour one for 3 hours, \
+                 `no_landing` — nothing landed";
+    if met.is_empty() {
+        format!(
+            "This is the hourly review of the hour {label}. The hour met none of the runtime's rules ({rules}): it is a quiet hour. \
+             Step 6 says an hour alone is noise, so keep the review short: say in the conclusion what is steady on the 3–6 hour moving average, \
+             and name any sign that would matter if it went on (runs growing longer, waits on a person, the landing slot, the claims deferred, the load), or that there is none."
+        )
+    } else {
+        format!(
+            "This is the hourly review of the hour {label}. The hour met the runtime's rules {met} (`hourly.reasons` in the inputs; {rules}). \
+             Start the `## Conclusion` with a line that names the rules met, `Rules met: {met}`, before anything else. \
+             Step 6 says an hour alone is noise: say whether landings have stopped or slowed on the 3–6 hour moving average, \
+             and why the hour rose or fell (which runs were long, what waited: a person, the landing slot, the claims deferred, the load).",
+            met = met.join(", ")
+        )
+    }
 }
 
 /// The part of the review's `input` the prompt carries (task 1099): the
@@ -1203,6 +1208,32 @@ mod tests {
             ),
             "{daily}"
         );
+    }
+
+    /// An hour that met rules puts them at the head of its conclusion; a
+    /// quiet hour is written short (ADR-t1172-1 decision 2).
+    #[test]
+    fn the_hourly_prompt_stresses_the_rules_met_and_keeps_a_quiet_hour_short() {
+        let hour = window(ReviewMode::Hourly, 1_790_655_900_000, 9 * HOUR_MS);
+        let prompt = |hourly: Value| {
+            review_prompt(
+                &hour,
+                "dagq",
+                &json!({"hourly": hourly}),
+                Path::new("/q/input.json"),
+            )
+            .unwrap()
+        };
+        let met = prompt(json!({"reasons": ["deviation", "no_landing"], "triggered": true}));
+        assert!(met.contains("Rules met: deviation, no_landing"), "{met}");
+        assert!(met.contains("why the hour rose or fell"), "{met}");
+        assert!(!met.contains("it is a quiet hour"), "{met}");
+        for quiet in [json!({"reasons": [], "triggered": false}), Value::Null] {
+            let text = prompt(quiet);
+            assert!(text.contains("it is a quiet hour"), "{text}");
+            assert!(text.contains("keep the review short"), "{text}");
+            assert!(!text.contains("Rules met:"), "{text}");
+        }
     }
 
     /// A KPI period of `kpis` KPIs, each with `strata` strata and a

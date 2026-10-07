@@ -1957,7 +1957,9 @@ pub enum AttentionNext {
     ReportUpdate,
     /// A throughput review of the supervisor's reached its conclusion
     /// (`throughput_review_reported`, ADR-t996-1 decision 3): a notice the
-    /// inbox shows the person, who acts on nothing.
+    /// inbox shows the person, who acts on nothing. Only a daily or weekly
+    /// review's, and an hourly one's whose hour met a rule (`reasons` not
+    /// empty); a quiet hour's review is only saved (ADR-t1172-1 decision 3).
     ReportReview,
     /// A throughput review of the supervisor's ended `error` (it could not
     /// start, ran out of time, or its review could not be saved) or
@@ -2340,10 +2342,14 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
         (UPDATE_INSTALLED, _) => Some(AttentionNext::ReportUpdate),
-        // A throughput review's conclusion is a notice too (ADR-t996-1).
-        (event_kind::THROUGHPUT_REVIEW_REPORTED, _) => Some(AttentionNext::ReportReview),
+        // A throughput review's conclusion is a notice too (ADR-t996-1),
+        // but for a quiet hour's (ADR-t1172-1 decision 3).
+        (event_kind::THROUGHPUT_REVIEW_REPORTED, _) => {
+            reported_review_notifies(payload).then_some(AttentionNext::ReportReview)
+        }
         // One that did not reach its conclusion is a notice as well (task
-        // 1099); a skipped hour and a success are none, and so is one whose
+        // 1099); a skipped hour (only in past records) and a success are
+        // none, and so is one whose
         // provider could not be used, which starts again on the other one
         // (ADR-t1063-1 decision 4, task 1220).
         (event_kind::THROUGHPUT_REVIEW_FINISHED, _)
@@ -2476,6 +2482,20 @@ pub fn consecutive_failures(previous: Option<&serde_json::Value>, outcome: &str)
             .unwrap_or_else(|| i64::from(observer_failed(previous)))
     });
     before + 1
+}
+
+/// Whether a `throughput_review_reported` is a notice to the inbox
+/// (ADR-t1172-1 decision 3): a daily or weekly review's, and an hourly one's
+/// whose hour met a rule (its `reasons` not empty). A quiet hour's review
+/// stays in its event and under `reports/reviews/`. A report without its
+/// mode is a notice, as it was.
+fn reported_review_notifies(payload: &serde_json::Value) -> bool {
+    payload.get("mode").and_then(serde_json::Value::as_str)
+        != Some(throughput_review::ReviewMode::Hourly.as_str())
+        || payload
+            .get("reasons")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|reasons| !reasons.is_empty())
 }
 
 /// Whether an attention event wakes the inbox's `watch` (ADR-t1418-1): the
@@ -3170,7 +3190,7 @@ mod attention_tests {
 
     #[test]
     fn only_update_installed_and_the_hourly_review_leave_the_inbox_asleep() {
-        let reported = |mode: &str| json!({"mode": mode, "label": "x"});
+        let reported = |mode: &str| json!({"mode": mode, "label": "x", "reasons": ["no_landing"]});
         assert!(!wakes_inbox(UPDATE_INSTALLED, &json!({"version": "1"})));
         assert!(!wakes_inbox(
             event_kind::THROUGHPUT_REVIEW_REPORTED,
@@ -3206,6 +3226,48 @@ mod attention_tests {
         assert!(
             event_attention(event_kind::THROUGHPUT_REVIEW_REPORTED, &reported("hourly")).is_some()
         );
+    }
+
+    /// Only an hour that met a rule tells the inbox of its review; a quiet
+    /// hour's review is no attention at all, and the daily and weekly ones
+    /// and every failure are notices whatever their reasons (ADR-t1172-1
+    /// decision 3).
+    #[test]
+    fn a_quiet_hours_review_is_no_attention_and_one_that_met_a_rule_is() {
+        let reported = |payload| event_attention(event_kind::THROUGHPUT_REVIEW_REPORTED, &payload);
+        for quiet in [
+            json!({"mode": "hourly", "period": "2026-09-30T04", "reasons": []}),
+            json!({"mode": "hourly", "period": "2026-09-30T04", "reasons": null}),
+            json!({"mode": "hourly", "period": "2026-09-30T04"}),
+        ] {
+            assert_eq!(reported(quiet), None);
+        }
+        assert_eq!(
+            reported(json!({"mode": "hourly", "reasons": ["deviation", "no_landing"]})),
+            Some(AttentionNext::ReportReview)
+        );
+        for mode in ["daily", "weekly"] {
+            assert_eq!(
+                reported(json!({"mode": mode, "reasons": null})),
+                Some(AttentionNext::ReportReview)
+            );
+        }
+        // A report without its mode stays a notice.
+        assert_eq!(reported(json!({})), Some(AttentionNext::ReportReview));
+        for mode in ["hourly", "daily", "weekly"] {
+            for reasons in [json!([]), json!(["no_landing"])] {
+                let failed = json!({"mode": mode, "outcome": "failed", "reasons": reasons});
+                assert_eq!(
+                    event_attention(event_kind::THROUGHPUT_REVIEW_FINISHED, &failed),
+                    Some(AttentionNext::CheckReview)
+                );
+                let succeeded = json!({"mode": mode, "outcome": "succeeded", "reasons": reasons});
+                assert_eq!(
+                    event_attention(event_kind::THROUGHPUT_REVIEW_FINISHED, &succeeded),
+                    None
+                );
+            }
+        }
     }
 
     #[test]
@@ -3612,6 +3674,18 @@ mod attention_tests {
                 json!({"mode": "weekly", "period": "2026-W39", "conclusion": ["x"]}),
                 Some(ReportReview),
             ),
+            (
+                "throughput_review_reported",
+                json!({"mode": "hourly", "period": "2026-09-30T02", "reasons": ["deviation"]}),
+                Some(ReportReview),
+            ),
+            // A quiet hour's review is only saved (ADR-t1172-1).
+            (
+                "throughput_review_reported",
+                json!({"mode": "hourly", "period": "2026-09-30T04", "reasons": []}),
+                None,
+            ),
+            // A skipped hour, which only past records hold.
             (
                 "throughput_review_finished",
                 json!({"outcome": "skipped"}),

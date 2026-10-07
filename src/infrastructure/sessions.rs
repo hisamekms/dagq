@@ -4103,14 +4103,16 @@ mod tests {
         assert_eq!(closed[0].payload["effort"], "high");
         assert_eq!(closed[0].payload["active"], "recorded");
 
-        // The daily review died without its finish: a skipped hour closes
+        // The daily review died without its finish: the finish of a later
+        // hour's review, one that failed before its agent started, closes
         // it once it has been open past its time, at its transcript's end.
         let old = THROUGHPUT_REVIEW_OPEN_MS / 1000 + 60;
         let daily_start = retime(conn, daily_from, old);
         write("/tr/d", "s-d", daily_start, "claude-sonnet-5", "medium");
         record(
             EventKind::ThroughputReviewFinished,
-            json!({"mode": "hourly", "period": "2026-09-29T14", "outcome": "skipped"}),
+            json!({"mode": "hourly", "period": "2026-09-29T14", "outcome": "error",
+                   "session_id": null, "dir": null}),
         );
         let closed = of_kind(&queue, SESSION_CLOSED);
         assert_eq!(closed.len(), 2);

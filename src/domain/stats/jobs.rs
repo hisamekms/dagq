@@ -201,7 +201,7 @@ fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String
                 None,
             )),
         },
-        // An hour no rule met starts no agent (ADR-t996-1 decision 2).
+        // A skipped hour, which only past records hold, started no agent.
         event_kind::THROUGHPUT_REVIEW_FINISHED => match payload["outcome"].as_str() {
             Some("skipped") => None,
             outcome => Some((
@@ -727,7 +727,7 @@ mod tests {
     }
 
     /// The throughput review pairs its end with its start by mode, period
-    /// and session; an hour no rule met (a skipped end) is no job; `failed`
+    /// and session; a skipped hour of past records is no job; `failed`
     /// and `error` are failures; and each mode is counted apart, listed
     /// with no job too (task 1173).
     #[test]
@@ -743,7 +743,7 @@ mod tests {
         let finished = event_kind::THROUGHPUT_REVIEW_FINISHED;
         let codex = json!({"provider": "codex"});
         let events = [
-            // An hour no rule met: no agent, no job.
+            // A skipped hour of past records: no agent, no job.
             review(
                 1,
                 finished,

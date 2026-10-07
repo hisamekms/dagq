@@ -689,9 +689,9 @@ enum Command {
         /// Also run the daily observation of the last 24 hours once a day.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         observe_daily: bool,
-        /// Start the throughput reviews (ADR-t996-1): each hour one whose landings the runtime's rules
-        /// find off (an hour that meets none starts no agent), each day one of yesterday and each week
-        /// one of the ISO week before, saved under the queue's reports/reviews/ and told to the inbox.
+        /// Start the throughput reviews (ADR-t996-1, ADR-t1172-1): each hour one of the last hour, each
+        /// day one of yesterday and each week one of the ISO week before, saved under the queue's
+        /// reports/reviews/ and told to the inbox but for an hour the runtime's rules find quiet.
         /// Default true, or false with --once.
         #[arg(long, action = clap::ArgAction::Set)]
         throughput_review: Option<bool>,
@@ -932,13 +932,14 @@ enum Command {
         unavailable: Option<String>,
     },
     /// Run the throughput review once (ADR-t996-1): for the last whole hour (--mode hourly), yesterday
-    /// (daily) or the ISO week before this one (weekly). An hour the runtime's rules find unremarkable starts
-    /// no agent and records throughput_review_finished with outcome skipped. Otherwise a headless agent
-    /// under DAGQ_ROLE=throughput-review-job, which may only read, follows the weekly review of the dagq
+    /// (daily) or the ISO week before this one (weekly). Every hour is reviewed (ADR-t1172-1): the rules
+    /// the runtime's judgment of the hour met head its review, and only an hour that met one reaches the
+    /// inbox. A headless agent under DAGQ_ROLE=throughput-review-job, which may only read, follows the weekly review of the dagq
     /// skill's reference/kpi.md: on Claude by default, or on Codex in its read-only sandbox when
     /// [roles.throughput_review] of dagq.toml says provider = "codex" (the supervisor passes the
     /// provider it routed the review to). The review is saved under <queue dir>/reports/reviews/ and its
-    /// conclusion reaches the inbox as throughput_review_reported (next: report the review). A weekly
+    /// conclusion reaches the inbox as throughput_review_reported (next: report the review), but for a
+    /// quiet hour's, which is only saved. A weekly
     /// next move becomes a finding marked for a proposal. A review that fails or cannot start reaches the
     /// inbox as its throughput_review_finished (next: check the failed review), except one whose Codex
     /// could not be used (provider_unusable), which the supervisor reviews again on the other provider.

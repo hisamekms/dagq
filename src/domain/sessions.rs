@@ -1059,13 +1059,14 @@ mod tests {
         assert_eq!(finished.len(), 1);
         assert_eq!(closed(&finished[0]), (10, JOB_FINISHED));
 
-        // A skipped hour names no session: it closes only what is past its
-        // time, as inferred.
-        let skipped = json!({"mode": "hourly", "period": "2026-09-29T14", "outcome": "skipped"});
+        // A review that failed before its agent started names no session:
+        // it closes only what is past its time, as inferred.
+        let unstarted = json!({"mode": "hourly", "period": "2026-09-29T14", "outcome": "error",
+                             "session_id": null, "dir": null});
         assert!(
             changes(
                 "throughput_review_finished",
-                &skipped,
+                &unstarted,
                 std::slice::from_ref(&daily),
                 &at(120_000)
             )
@@ -1073,7 +1074,7 @@ mod tests {
         );
         let late = changes(
             "throughput_review_finished",
-            &skipped,
+            &unstarted,
             std::slice::from_ref(&daily),
             &at(60_000 + THROUGHPUT_REVIEW_OPEN_MS),
         );
@@ -1095,7 +1096,7 @@ mod tests {
         assert!(
             changes(
                 "throughput_review_finished",
-                &skipped,
+                &unstarted,
                 &[span(
                     12,
                     json!({"kind": THROUGHPUT_REVIEW, "session_id": "x"})

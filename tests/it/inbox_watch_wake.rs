@@ -1,7 +1,8 @@
 //! What wakes `watch --role inbox` (ADR-t1418-1): `update_installed` and
 //! the hourly `throughput_review_reported` do not on their own; the next
 //! event that does brings them back with it, oldest first. A watch for
-//! every role still wakes on each.
+//! every role still wakes on each. A quiet hour's report, whose hour met
+//! no rule, is no attention at all (ADR-t1172-1): no watch returns it.
 
 use crate::common::{self, cli::*};
 use dagq::{application::RunLog, domain::EventKind, infrastructure::sqlite::SqliteQueue};
@@ -22,11 +23,23 @@ fn installed(db: &Path) -> i64 {
     )
 }
 
+/// A review's report; an hourly one's hour met a rule.
 fn reported(db: &Path, mode: &str) -> i64 {
     record(
         db,
         EventKind::ThroughputReviewReported,
-        json!({"mode": mode, "period": "2026-10-02T12", "conclusion": "steady"}),
+        json!({"mode": mode, "period": "2026-10-02T12", "conclusion": "slowed",
+               "reasons": if mode == "hourly" { json!(["deviation"]) } else { Value::Null }}),
+    )
+}
+
+/// The report of a quiet hour, which met no rule.
+fn quiet(db: &Path) -> i64 {
+    record(
+        db,
+        EventKind::ThroughputReviewReported,
+        json!({"mode": "hourly", "period": "2026-10-02T13", "conclusion": "steady",
+               "reasons": []}),
     )
 }
 
@@ -61,6 +74,8 @@ fn the_inbox_watch_sleeps_through_notices_and_brings_them_with_the_next_ask() {
     let after = start.to_string();
     let update = installed(&db);
     let hourly = reported(&db, "hourly");
+    // A quiet hour's report shows in no watch nor `events` below.
+    quiet(&db);
 
     // The notices alone: a timeout with no events and the cursor kept.
     let slept = watch(&db, &["--role", "inbox", "--after", &after]);

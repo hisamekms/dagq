@@ -1,10 +1,10 @@
 //! The throughput review (ADR-t996-1): which period a review of each
-//! cadence covers, the rules that decide whether an hour is worth a review,
-//! and what the job's output says. The supervisor starts the job; the
-//! runtime counts the landings and judges the hour, so a quiet hour starts
-//! no agent. The thresholds are the initial values a person set on
-//! 2026-09-28; `docs/design/supervisor-lifecycle/throughput-review.md`
-//! holds them.
+//! cadence covers, the rules that judge an hour, and what the job's output
+//! says. The supervisor starts the job for every period, each hour
+//! included (ADR-t1172-1); the runtime counts the landings and judges the
+//! hour, and the rules an hour met do not decide whether its agent starts
+//! but what its review stresses and whether the inbox hears of it. The
+//! thresholds below are the initial values a person set on 2026-09-28.
 
 use serde::{Deserialize, Serialize};
 
@@ -194,10 +194,12 @@ pub struct HourlyJudgment {
     pub mean_baseline: f64,
     pub mean_short: f64,
     pub mean_long: f64,
-    /// The rules the judged hour met.
+    /// The rules the judged hour met: the review stresses them first, and
+    /// only an hour that met one tells the inbox (ADR-t1172-1).
     pub reasons: Vec<HourlyReason>,
-    /// Whether the job starts: the hour met a rule (ADR-t996-1 decision 2).
-    /// A state that goes on is reviewed each hour it lasts.
+    /// Whether the hour met a rule. It does not decide whether the job
+    /// starts: every hour is reviewed, a quiet one too (ADR-t1172-1
+    /// decision 1). A state that goes on is stressed each hour it lasts.
     pub triggered: bool,
 }
 
@@ -468,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn a_steady_hour_starts_no_review() {
+    fn a_steady_hour_meets_no_rule() {
         let judged = judge_hourly(&hours(4, &[5])).unwrap();
         assert!(judged.reasons.is_empty());
         assert!(!judged.triggered);
@@ -477,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn an_hour_off_its_average_by_half_and_three_landings_starts_one() {
+    fn an_hour_off_its_average_by_half_and_three_landings_meets_a_rule() {
         let rise = judge_hourly(&hours(4, &[10])).unwrap();
         assert_eq!(rise.reasons, [HourlyReason::Deviation]);
         assert!(rise.triggered);
@@ -490,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_average_below_the_long_one_for_three_hours_starts_one_each_hour() {
+    fn a_short_average_below_the_long_one_for_three_hours_meets_a_rule_each_hour() {
         // 3h means at the last three hours: 2, 2, 2 against a long mean near 6.
         let first = judge_hourly(&hours(6, &[2, 2, 2, 2])).unwrap();
         assert!(
@@ -498,8 +500,8 @@ mod tests {
             "{first:?}"
         );
         assert!(first.triggered);
-        // An hour later it goes on, and is reviewed again (ADR-t996-1
-        // decision 2: every hour that meets a rule).
+        // An hour later it goes on, and meets it again: every hour it
+        // lasts is stressed.
         let later = judge_hourly(&hours(6, &[2, 2, 2, 2, 2])).unwrap();
         assert!(later.reasons.contains(&HourlyReason::SustainedDrop));
         assert!(later.triggered);
@@ -509,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn every_hour_without_a_landing_starts_one() {
+    fn every_hour_without_a_landing_meets_a_rule() {
         let first = judge_hourly(&hours(1, &[0])).unwrap();
         assert_eq!(first.reasons, [HourlyReason::NoLanding]);
         assert!(first.triggered);

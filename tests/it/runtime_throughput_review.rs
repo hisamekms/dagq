@@ -1,4 +1,4 @@
-//! Runtime tests: the throughput review (ADR-t996-1).
+//! Runtime tests: the throughput review (ADR-t996-1, ADR-t1172-1).
 use crate::{common, runtime_support};
 use dagq::application::throughput_review::{PROMPT_INPUT_LIMIT, PROMPT_LIMIT, ReviewOptions};
 use dagq::domain::throughput_review::{HOUR_MS, ReviewMode, window};
@@ -152,26 +152,75 @@ printf '## Conclusion\n- landings rose to 10 in the hour\n- nothing to do\n\n## 
 printf '```next_move\n{"summary": "split the e2e", "why": "verify is the constraint"}\n```\n'
 "#;
 
+/// A quiet hour's agent: a short review of what is steady.
+const QUIET_REVIEWER: &str = r#"
+printf '## Conclusion\n- a steady hour: 4 landed, as the 6 hours before\n\n## Details\nthe numbers\n'
+"#;
+
+/// Every hour is reviewed whatever the rules found (ADR-t1172-1): a quiet
+/// hour's review is saved like any other, and its report reaches neither
+/// the inbox's events nor its watch.
 #[test]
-fn an_hour_no_rule_meets_starts_no_agent() {
+fn an_hour_no_rule_meets_is_reviewed_and_saved_but_not_told_to_the_inbox() {
     let (_dir, _repo, db) = fixture();
     land(&db, &[4; 28]);
-    let provider = ReviewProvider::new("exit 9");
-    let skipped = review(&db, &provider, &options(ReviewMode::Hourly)).unwrap();
-    assert_eq!(skipped["outcome"], "skipped", "{skipped}");
-    assert_eq!(skipped["period"], "2026-09-29T03");
-    assert_eq!(skipped["hourly"]["landings"], 4);
-    assert_eq!(skipped["hourly"]["triggered"], false);
+    let provider = ReviewProvider::new(QUIET_REVIEWER);
+    let done = review(&db, &provider, &options(ReviewMode::Hourly)).unwrap();
+    assert_eq!(done["outcome"], "succeeded", "{done}");
+    assert_eq!(done["period"], "2026-09-29T03");
+    assert_eq!(done["reasons"], json!([]));
     // Its pid and its parent's, by which a supervisor that exec'd reaps it.
-    assert_eq!(skipped["pid"], json!(std::process::id()));
+    assert_eq!(done["pid"], json!(std::process::id()));
     assert_eq!(
-        skipped["parent_pid"],
+        done["parent_pid"],
         json!(std::os::unix::process::parent_id())
     );
-    assert!(queue_events(&db, "throughput_review_started").is_empty());
-    assert_eq!(queue_events(&db, "throughput_review_finished").len(), 1);
-    assert!(queue_events(&db, "throughput_review_reported").is_empty());
-    // A dry run shows the prompt whatever the rules found.
+    assert_eq!(
+        queue_events(&db, "throughput_review_finished"),
+        vec![done.clone()]
+    );
+    let started = queue_events(&db, "throughput_review_started");
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0]["reasons"], json!([]));
+    let dir = PathBuf::from(done["dir"].as_str().unwrap());
+    assert!(
+        dir.ends_with("reports/reviews/hourly-2026-09-29T03"),
+        "{}",
+        dir.display()
+    );
+    // The judgment stays in the inputs.
+    let input: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("input.json")).unwrap()).unwrap();
+    assert_eq!(input["hourly"]["landings"], 4);
+    assert_eq!(input["hourly"]["reasons"], json!([]));
+    assert_eq!(input["hourly"]["triggered"], false);
+    // The prompt asks for a short review of a quiet hour.
+    let prompt = fs::read_to_string(dir.join("prompt.md")).unwrap();
+    assert!(prompt.contains("it is a quiet hour"), "{prompt}");
+    assert!(!prompt.contains("Rules met:"), "{prompt}");
+    let saved = fs::read_to_string(dir.join("review.md")).unwrap();
+    assert!(saved.contains("a steady hour"), "{saved}");
+    let summary: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("review.json")).unwrap()).unwrap();
+    assert_eq!(summary["reasons"], json!([]));
+    assert_eq!(
+        summary["conclusion"],
+        json!(["- a steady hour: 4 landed, as the 6 hours before"])
+    );
+    // Its report is recorded, with the review's path, but is no attention.
+    let reported = queue_events(&db, "throughput_review_reported");
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0]["reasons"], json!([]));
+    assert_eq!(reported[0]["path"], json!(dir.join("review.md")));
+    assert!(
+        attentions(&db).iter().all(|event| !event["kind"]
+            .as_str()
+            .unwrap()
+            .starts_with("throughput_review")),
+        "{:?}",
+        attentions(&db)
+    );
+    // A dry run shows the prompt and records nothing.
     let dry = review(
         &db,
         &provider,
@@ -246,6 +295,10 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
     ] {
         assert!(!input[key].is_null(), "{key}: {input}");
     }
+    // The rules it met head the review the prompt asks for.
+    let prompt = fs::read_to_string(dir.join("prompt.md")).unwrap();
+    assert!(prompt.contains("Rules met: deviation"), "{prompt}");
+    assert!(!prompt.contains("it is a quiet hour"), "{prompt}");
     let saved = fs::read_to_string(dir.join("review.md")).unwrap();
     assert!(saved.contains("## Details"), "{saved}");
     assert!(!saved.contains("split the e2e"), "{saved}");
@@ -269,7 +322,6 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
     );
     // Its start and its finish record what its prompt took (ADR-t1566-1
     // decision 6), in the observer's names.
-    let prompt = fs::read_to_string(dir.join("prompt.md")).unwrap();
     let finished = &queue_events(&db, "throughput_review_finished")[0];
     for event in [&started[0], finished] {
         assert_eq!(event["prompt_bytes"], prompt.len(), "{event}");
@@ -326,9 +378,10 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
     assert_eq!(notice["next"], "report the review");
     assert_eq!(notice["period"], "2026-09-29T03");
     assert_eq!(notice["mode"], "hourly");
+    assert_eq!(notice["reasons"], json!(["deviation"]));
     assert_eq!(notice["conclusion"][0], "- landings rose to 10 in the hour");
     assert_eq!(notice["path"], json!(dir.join("review.md")));
-    // The skipped and started events are no attention.
+    // The started and succeeded finished events are no attention.
     assert!(
         attention["events"]
             .as_array()
@@ -687,7 +740,8 @@ fn the_supervisor_starts_each_review_due_once_without_a_run_slot() {
     };
     // Nothing was ever reviewed: the hour, the day and the week are due,
     // the hour first; `--once` waits for each. The hour of an idle queue
-    // landed nothing, which is a rule of its own (ADR-t996-1 decision 2).
+    // landed nothing, which is a rule of its own, so its report is a
+    // notice too.
     let outcome = supervise_reviewing();
     let after = now_secs();
     assert_eq!(outcome["runs"], json!([]));

@@ -885,7 +885,9 @@ pub const TASK_STATUS_CHANGED: &str = EventKind::TaskStatusChanged.as_str();
 pub const TASK_SUBMITTED: &str = EventKind::TaskSubmitted.as_str();
 pub const TASK_WEIGHT_PREDICTED: &str = EventKind::TaskWeightPredicted.as_str();
 /// A throughput review ended (ADR-t996-1): `mode`, `period`, `outcome`
-/// (`skipped` for an hour no rule hit, `succeeded`, `failed`, `error`).
+/// (`succeeded`, `failed`, `error`). Every hour is reviewed (ADR-t1172-1);
+/// `skipped`, an hour that met no rule and started no agent, is only in
+/// past records.
 pub const THROUGHPUT_REVIEW_FINISHED: &str = EventKind::ThroughputReviewFinished.as_str();
 /// A throughput review's conclusion for the inbox: a notice (`report the
 /// review`) that asks nothing.

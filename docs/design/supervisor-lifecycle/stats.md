@@ -333,7 +333,7 @@ worker以外のheadlessのjobを種類・provider・実際のmodelごとに数�
 
 - 入口: `jobs`と`JobStats`（providerの記録は[Actor model](actor-model.md)）。
 - 窓の中に終わりのeventが記録されたjobを数え、終わりは直前の同じ対応の開始と組にする。
-- agentを起動しなかったもの（規則に当たらなかった周回、Codexも使えなかったobserver）はjobに数えない。
+- agentを起動しなかったもの（過去の記録に残る見直しのskippedの終わり、Codexも使えなかったobserver）はjobに数えない。
   開始の無い復旧の終わり（上限まで使い切って起動しなかった段上げ）も数えないので、`auto_repairs`の復旧jobより少なく出うる。
 - providerの記録の無い開始は`claude`に数え、goal reviewは`--goal`でもそのgoalに数える。
 - Claudeのjobは実際のmodelを終わりのeventに写さないので、開始の`session_id`で区間の閉じた記録に結び付ける。
