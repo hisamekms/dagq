@@ -1,9 +1,25 @@
 #!/bin/sh
 # Check the forbidden dependencies between the layers of the runtime. The
-# rules (their IDs L1, L2, L3, L4 and L6), what counts (comments, strings,
-# #[cfg(test)]) and the allow list's place and format are in
-# docs/design/architecture.md, sections "レイヤーの規則" and "検査の範囲";
-# this script only applies them and does not restate them.
+# rules (their IDs L1, L2, L3, L4 and L6), what counts in short and the allow
+# list's place and format are in docs/design/architecture.md, sections
+# "レイヤーの規則" and "検査の範囲"; the details of what counts are here.
+#
+# What counts is the path of a reference (`crate::application::timestamp`,
+# `std::time::SystemTime::now`), with a grouped `use crate::{a, b}` expanded
+# into one path each. Comments (`//`, `//!`, `///` and `/* */`, nested ones
+# too), doc links and string and character literals do not count.
+# A cfg is taken for test when its predicate requires test: `test` itself,
+# an `all(...)` with any argument that requires test, or an `any(...)` all of
+# whose arguments do (`#[cfg(test)]` over several lines, `cfg(any(test))`,
+# `cfg(all(test, unix))`, `cfg(all(unix, any(test)))`). `cfg(any(test,
+# unix))`, `not(...)` and any form not judged hold in a `test=false` build
+# too, so they count as production (the safe side). The test range of a cfg
+# is the item it is put on (a `mod tests { ... }`, a function, a `use`) to
+# its end, and the files a test `mod name;` declares (`name.rs` and `name/`
+# at the module's place, inline modules' names included); a test module
+# inside an inline module is handled and the range ends where it ends. An
+# inner `#![cfg(test)]` at the top of a file makes the whole file test.
+# Inside a test range L1, L3 and L6 count and L2 and L4 do not.
 #
 # Every occurrence the rules forbid must have its (rule, path, reference) in
 # the allow list (.config/layer-deps-allow.txt, or LAYER_DEPS_ALLOW_FILE),
@@ -20,7 +36,9 @@
 # LAYER_DEPS_ROOT names another tree to check (its src/ is read) and
 # LAYER_DEPS_ALLOW_FILE another allow list; --self-test checks the script
 # itself on small fixtures in a temporary directory under ${TMPDIR:-target/}
-# and removes them.
+# (no violation, one not in the list, a stale item, an item without a task,
+# references only in comments and strings, nested block comments, the cfg
+# forms above and a test range inside an inline module) and removes them.
 #
 # Exit 0 when every occurrence is allowed and no item is stale, 1 when an
 # occurrence is not allowed, an item is stale or the allow list is malformed

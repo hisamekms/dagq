@@ -1138,6 +1138,21 @@ pub struct WorkspaceTags {
     pub group: Option<String>,
 }
 
+/// The host's operations of two kinds (docs/design/architecture.md,
+/// "host運用"): the inbox's cmux workspace, which the inbox and `up` /
+/// `down` own (ADR-t1433-1; the supervisor's nudge of the inbox reaches it
+/// through `deliver` and `screen_idle`), and the session wrappers of the headless runs
+/// and the runtime's planners started without a workspace as background
+/// processes, which the supervisor and the planner launch, stop and check
+/// ([`launch_background`](Self::launch_background),
+/// [`stop_background`](Self::stop_background), [`exists`](Self::exists);
+/// ADR-t1404-1). A background wrapper's handle goes where a workspace ID
+/// goes, so the calls on the screen and the keys refuse it and the
+/// sidebar's do nothing. It also carries, for now, the notification to a
+/// person ([`notify`](Self::notify), which the asks, the observer's hold
+/// ask and the inbox nudge send) and the waits of a resumed session
+/// ([`resume_timeout`](Self::resume_timeout) and the others, which the
+/// supervisor's session, revise, resume and stale sweep read).
 pub trait WorkspaceBackend {
     fn preflight(&self) -> Result<()>;
     /// Check that cmux accepts a connection from a process that is not a
@@ -2298,6 +2313,13 @@ impl<T: RunLog + ?Sized> MarkLog for T {
 
 /// What reports read and record of the queue as a whole: the written
 /// reports, KPI breaches, forecasts and the lookups `stats` joins runs with.
+///
+/// Owned by the observation and analysis context
+/// (docs/design/architecture.md): its reads are open to every context and
+/// its `record_*` writes are its own. The lookups of the planning tables
+/// (`related_*`, `search_documents`, `task_goals`, `task_titles`,
+/// `task_changes`, `draft_origins`) belong to planning and move there when
+/// the ports are split by context.
 pub trait QueueRecords {
     /// The commits that landed the `limit` completed tasks most related to
     /// `task` (`dagq related`, ADR-0046), for the files it is expected to

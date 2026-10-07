@@ -21,33 +21,71 @@ related:
 
 # レイヤーとコンテキストの境界
 
-runtime（`src/`と`crates/`）の責務を、レイヤーとコンテキスト（context）の2軸で分ける今の境界と、それを守る規則の正本。決めた理由は[ADR-t1545-1](../adr/2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md)（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)決定1をamends）が持つ。レイヤーごとのmoduleの説明は[overview](overview.md)、集約は[Domain model](domain-model.md)、tableとtransactionの詳細は[Persistence](persistence.md)、supervisorのループは[`supervise`](supervisor-lifecycle/supervise.md)が持つ。
+## 概念
 
-reviewのsubagentと禁止依存の検査のscriptは、この文書の節（「[検査できる規則](#検査できる規則)」の規則のIDと「[境界をまたぐtransaction](#境界をまたぐtransaction)」の一覧）を参照し、規則の本文を写さない（ADR-t1545-1決定4）。
+### 目的
 
-この文書の事実は2026-10-04のmain（base `e465d467`）を読んで確かめたものに、follow_upの所属の判断を反映している。goal 92の削除（対話の経路とcmuxの依存）と、goal 100・goal 3の後続のtaskが進むと変わるので、それらのtaskは同じ変更でこの文書を直す。
+runtime（`src/`と`crates/`）の責務を、レイヤーとコンテキスト（context）の2軸で分ける今の境界と、それを守る規則の正本。
+決めた理由は[ADR-t1545-1](../adr/2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md)（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)決定1をamends）が持つ。
+moduleの説明は[overview](overview.md)、集約は[Domain model](domain-model.md)、tableは[Persistence](persistence.md)、supervisorのループは[`supervise`](supervisor-lifecycle/supervise.md)が持つ。
+reviewのsubagentと禁止依存の検査のscriptは、この文書の規則のID（「[検査できる規則](#検査できる規則)」）と一覧（「[境界をまたぐtransaction](#境界をまたぐtransaction)」）を参照し、規則の本文を写さない（ADR-t1545-1決定4）。
+
+### 全体の流れ
+
+```text
+起動部分（src/main.rs → src/compose.rs）: adapterを作り、use caseに注入する
+   │
+   ▼
+infrastructure（src/infrastructure/）: portの実装（SQLite・Git・cmux・agent・process・file）
+   │ implements
+   ▼
+application（src/application/）: use caseとport（trait）。時刻・I/Oはportを通す
+   │ calls
+   ▼
+domain（src/domain/）: 集約・値・判断。I/Oを持たない
+
+context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / T7 follow_ups──▶ 計画管理
+         観測と分析は全てを読む（書かない）
+         host運用が全体を起動・停止し、hostの資源を持つ
+```
+
+### 責務と境界
+
+- **レイヤー**（ADR-0013決定1）: `domain`・`application`・`infrastructure`・起動部分（`src/compose.rs`と`src/main.rs`）。
+  依存は外から内へだけ向く（起動部分 → infrastructure → application → domain）。
+- **context**（ADR-t1545-1決定1）: 計画管理・実行と着地・観測と分析・host運用の4つと、どれにも属さない「[共有の部品](#共有の部品)」。
+- 1つのmoduleは1つのレイヤーと1つのcontextに属し、contextはこの文書の各節で決まる（決められないものは「[混在しているmodule](#混在しているmodule)」）。
+
+### 不変条件
+
+- domainはI/O・時計・乱数を持たず、applicationはそれらをportで受ける（L1〜L5）。
+- 各contextは自分の状態（table・file・eventの種類・`Supervisor`の欄）だけを書き、他のcontextの状態は公開したportと一覧のtransactionでだけ変える（C1・C5・X1）。
+- 観測と分析は読むだけ（C2）。
+- 今ある違反は「[今の違反と行き先](#今の違反と行き先)」と許可の一覧にだけ置く。
 
 ## 2つの軸
 
-- **レイヤー**（ADR-0013決定1）: `domain`（`src/domain/`）・`application`（`src/application/`）・`infrastructure`（`src/infrastructure/`）・起動部分（`src/compose.rs`と`src/main.rs`）。依存は外から内へだけ向く（起動部分 → infrastructure → application → domain）。
-- **context**（ADR-t1545-1決定1）: 計画管理・実行と着地・観測と分析・host運用の4つと、どれにも属さない共有の部品。
-- 1つのmoduleは1つのレイヤーと1つのcontextに属する。2026-10-04の時点では、directoryはレイヤーでだけ分かれ、contextはmoduleの名前と下の表で決まる。contextを1つに決められないmoduleは「[混在しているmodule](#混在しているmodule)」に挙げ、分ける先のtaskを持つ。
+- レイヤーの入口は`src/lib.rs`のdoc comment（各レイヤーとレイヤーの外のmoduleの役割）。
+- eventの種類の所有するcontextは`src/domain/event_kind.rs`のmoduleのdoc comment、`Supervisor`の欄の所有するcontextは`src/application/supervise/mod.rs`の`Supervisor`のdoc commentが持つ。
 
 ## 共有の部品
 
-どのcontextにも属さず、全てのcontextが使ってよいもの。業務の判断を持たせない（ADR-t1545-1決定1）。
+どのcontextにも属さず、全てのcontextが使ってよいもの。
+業務の判断を持たせない（ADR-t1545-1決定1）。
 
-- IDと値: `domain::ids`（`TaskId`・`GoalId`・`RunId`・`CommitSha`・`EventId`ほか）、`domain::error`（`DomainError`）、`domain::reason`（理由の分類コード）、`domain::views`・`domain::input`の共通の型（taskの着地commit`Landing`を含む。計画管理の`TaskStore::build_waits`が返し、実行と着地のclaimの`domain::build_wait`が読む）。
-- build識別子: `build_id`（`crates/dagq-broker-protocol`の`build_id`の再export）。識別子の規則（`build_identifier`・`is_prerelease`・`UNKNOWN_COMMIT`）と、それが名乗るcommitを読む`named_commit`はI/Oを持たない関数で、host運用の自動更新（`application::update::build_commit`）と実行と着地の`domain::build_wait`、観測と分析のCIの見張り（`application::ci_watch::check`が修正taskの`binary_commit`と`binary_contains`に使う）が使うのはこの部分だけ。同じmoduleの`emit`・`compute`はgitを呼ぶbuild scriptの側で、runtimeのcontextからは呼ばない。
-- 時刻とID生成: `application::ports`の`Clock`（壁時計の`system_time`と、supervisorの待ちを測る単調時計の`monotonic`）・`IdGenerator`（組は`Generators`）、実装は`infrastructure::clock`。
-- eventの記録と種類: `run_events`表への追記（`RunLog::record_runtime_event`・`RunLog::record_queue_event`、`infrastructure::runtime_store`の`run_event`と`infrastructure::sqlite`の`event`）と、種類の定数`domain::event_kind::EventKind`。各contextは自分の種類のeventだけを書く（下の各contextの「所有する状態」）。どの種類も所有するcontextは1つで、接頭辞で書いた種類（末尾が`*`）は、他のcontextが名前で書いた種類を含まない。共有の部品の種類は`ask_*`・`authorization_denied`と、どのcontextの自動修正も数える`auto_repaired`（ADR-0047）。
-- 人への問い合わせ: `asks`表と`AskStore`（`infrastructure::asks`）、CLIの`ask`・`answer`・`asks`。askを開くのと、answerを自分の状態に適用するのは、そのaskの`kind`を持つcontextが行う（例: `worker_question`と`approve_landing`は実行と着地、`plan_review`は計画管理、`blocked`のfindingは観測と分析、`update`はhost運用）。
-- actorと認可: `domain::actor`・`domain::actor_model`（役割の起動の`ActorLaunch`と、headlessのjobの行き先の値`JobRoute`・`JobStartRoute`を含む。`JobStartRoute`は観測と分析のスループットの見直しとobserver（`job_start_route`）、実行と着地の復旧job（`recovery::recovery_route_of`）が読む）・`domain::authorization`、`infrastructure::event_actor`・`infrastructure::denials`（[Authorization](authorization.md)）。
-- 組み立ての共有の欄: `Supervisor`の`queue`・`queues`・`generators`・`layout`・`processes`・`utc_offset`（どのcontextの処理も読む接続・時計・配置）。
-- 名前と出力: `application::naming`、`tracing`のマクロ（subscriberは`infrastructure::telemetry`）。
-- 共有の規則: `domain::write_rules`（SQLiteのCHECKが持っていた表をまたぐ規則）、`domain::language`（人に向けて書く言語）。
-- `src/broker_material.rs`: brokerのimageの材料（std だけを使い、`infrastructure::broker_image`が使う）。`migration_numbers`と同じ扱いの共有の部品で、host運用の中で使う。
-- `src/migration_numbers.rs`: migrationのファイル名の規則（`build.rs`と共有する、I/Oを持たない関数だけ）。domainと同じ扱いで、`application::integrate`のmigrationの振り直しが参照してよい。
+- IDと値: `domain::ids`・`domain::error`・`domain::reason`・`domain::views`・`domain::input`。
+- build識別子: `build_id`（`crates/dagq-broker-protocol`の再export）。
+  runtimeのcontextが使うのはI/Oを持たない識別子の規則と`named_commit`だけで、gitを呼ぶ`emit`・`compute`はbuild scriptの側（`src/lib.rs`のdoc comment）。
+- 時刻とID生成: `application::ports`の`Clock`（壁時計と単調時計）・`IdGenerator`、実装は`infrastructure::clock`。
+- eventの記録: `RunLog::record_runtime_event`・`record_queue_event`と種類の`domain::event_kind::EventKind`。
+- 人への問い合わせ: `asks`表と`AskStore`（`infrastructure::asks`）。
+  askを開くのと、answerを自分の状態に適用するのは、そのaskの`kind`を持つcontextが行う（例: `worker_question`は実行と着地、`plan_review`は計画管理、`update`はhost運用）。
+- actorと認可: `domain::actor`・`domain::actor_model`（headlessのjobの行き先の値を含む）・`domain::authorization`（[Authorization](authorization.md)）。
+- 名前・出力・共有の規則: `application::naming`、`tracing`のマクロ、`domain::write_rules`（表をまたぐ書き込みの規則）、`domain::language`。
+- `src/broker_material.rs`: brokerのimageの材料で`build.rs`と共有し、stdでファイルを読む。
+  host運用の中で`infrastructure::broker_image`が使う。
+- `src/migration_numbers.rs`: migrationのファイル名の規則で`build.rs`と共有するI/Oの無い関数。
+  domainと同じ扱いで、applicationが参照してよい（L3の例外）。
 
 ## 計画管理
 
@@ -55,99 +93,95 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 
 **所有する状態**
 
-- table: `tasks`・`task_dependencies`・`task_goal_dependencies`・`goals`（`acceptance_version`を含む）・`follow_up_judgements`・`proposals`・`plan_reviews`・`goal_reviews`・`planners`・`draft_bundles`・`draft_bundle_members`・`draft_origins`・`draft_reopens`・`draft_revisits`・`plan_requests`・`plan_request_proposals`・`search_index`・`landed_commits`（検索と関連の索引）。
-- eventの種類: `task_*`（`task_created`・`task_edited`・`task_status_changed`・`task_submitted`・`task_reopened`・`task_goal_changed`・`task_paths_changed`・`task_priority_changed`・`task_weight_predicted`）、`dependency_*`、`goal_*`（`goal_review_*`を含む）、`proposal_*`、`plan_*`（`plan_review_*`・`plan_decided`・`plan_concern_decided`・`plan_revise_*`）、`planner_*`、`draft_*`、`follow_up_*`、`request_*`、`finding_planner_*`。
-- `Supervisor`の欄（`src/application/supervise/mod.rs`）: `plan_review`・`goal_review`・`planner_exits`・`route_setting_warned`（runtimeのplannerが無視する`[roles.runtime_planner] route`を警告したか。plannerを開く`&self`の読みの中で立てるので`AtomicBool`。ADR-t1433-2）・`max_improvement_proposals`。
+- table: `tasks`・`goals`と依存、`proposals`・`plan_reviews`・`goal_reviews`・`planners`・draftと依頼の表、`follow_up_judgements`、検索の索引（`search_index`・`landed_commits`）。
+- eventの種類: `task_*`・`dependency_*`・`goal_*`・`proposal_*`・`plan_*`・`planner_*`・`draft_*`・`follow_up_*`・`request_*`・`finding_planner_*`。
 
-**判断**（domain）
-
-`domain::task`（`Task`・`TaskAction`）、`domain::goal`、`domain::proposal`、`domain::plan_review`、`domain::goal_review`、`domain::plan_request`、`domain::planner`、`domain::follow_up`、`domain::lint`、`domain::plan_quality`、`domain::prediction`、`domain::related`・`domain::search`、`domain::change`（taskの変更の宣言）、`domain::goal_tag`（goalのラベルとその語彙）。
+**判断**（domain）: `domain::task`・`goal`・`proposal`・`plan_review`・`goal_review`・`planner`・`follow_up`・`lint`・`prediction`・`search`ほか。
 
 **操作**
 
-- application: `application::commands::planning`・`application::commands::requests`、`application::planner`・`application::planner_request`・`application::planner_handoff`、`application::supervise`の`plan_review`・`goal_review`・`draft_planner`・`finding_planner`・`request_planner`・`planner_turns`、`application::diagram`（依存図）、`application::claim_view`（`candidates`・`graph`の控えを分けた表示）。
-- CLI: `add`・`edit`・`ready`・`draft`・`cancel`・`dependency`・`goal`・`set-goal`・`judge-follow-up`・`set-paths`・`set-priority`・`revisit`・`submit`・`proposal`・`lint`・`request`・`requests`・`search`・`related`・`candidates`・`graph`・`plan`・`planners`・`planner`・`planner-session`、読み取りの`list`・`show`。
-- infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）、`proposals`・`plan_reviews`・`goal_reviews`・`draft_planners`・`follow_up_membership`（所属の判断とdraft/readyの移動を同じtransactionで記録し、achievedで閉じた元goalへのrequiredではそのtransactionで`correct_goal`のaskを開く。そのaskのanswerの適用（`decide_correction`）も1つのtransaction。[所属の判断](follow-up-membership.md)、下のT8・T9）・`finding_planners`・`plan_requests`・`planners`・`planning`・`search`・`related`・`stranded`。
+- application: `application::commands::planning`・`commands::requests`、`application::planner`系、`application::supervise`のplan review・goal review・各plannerのsubmodule。
+- infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）と、上のtableと同じ名前のstoreのmodule（`proposals`・`plan_reviews`・`draft_planners`・`follow_up_membership`ほか）。
 
 **公開するport**
 
-- `TaskStore`の読み取り（`show`・`list`・`candidates`・`build_waits`・`predecessors`・`goal_predecessors`・`tasks_in_progress`・`graph_input`・`lint_input`・`show_goal`・`list_goals`）を全てのcontextに公開する。
-- `TaskStore::claim`（と`RunTransitions::claim_for_supervisor_in_order`）は実行と着地だけに公開し、越境のtransaction **T1**として扱う。
-- `DraftPlannerStore::register_follow_ups`を実行と着地に公開する（着地したrunのfollow_upsを計画管理のdraftとして渡す。transactionは着地と別）。
-- `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・残りの`DraftPlannerStore`・`TaskStore`の書き込みは内部のport（このcontextの操作とCLIだけが使う）。CLIの`request add` / `request decline`のport `RequestStore`も内部で、その`request_planner`（依頼の閉じていないruntimeのplanner）は`ask --request`の判定も`DialogueStore::request_planner`から読む。
+- `TaskStore`の読み取りを全てのcontextに公開する。
+- `TaskStore::claim`（と`RunTransitions::claim_for_supervisor_in_order`）は実行と着地だけに公開し、T1として扱う。
+- `DraftPlannerStore::register_follow_ups`を実行と着地に公開する（T7）。
+- `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・`RequestStore`・残りの`DraftPlannerStore`と`TaskStore`の書き込みは内部。
 
 **許す依存の向き**
 
-- 実行と着地の状態（`task_runs`・`run_leases`・`run_processes`）を書かない。runの結果は`RunLog`の読み取りとeventで読む（goal reviewとplan reviewの材料）。
-- 観測と分析の`findings`を書くのはfindingのproposalの採否（越境のtransaction **T6**）だけ。
+- 実行と着地の状態（`task_runs`・`run_leases`・`run_processes`）を書かない。
+  runの結果は`RunLog`の読み取りとeventで読む。
+- 観測と分析の`findings`を書くのはfindingのproposalの採否（T6）だけ。
 
-**境界をまたぐtransaction**: T1・T2・T4（書き手は実行と着地）、T3・T5・T6・T7（[一覧](#境界をまたぐtransaction)）。
+**境界をまたぐtransaction**: T3・T5・T6・T7・T8・T9（書き手）、T1・T2・T4（実行と着地が書く）。
 
 ## 実行と着地
 
-taskをrunにして動かし、検証し、mainへ着地させること（claim・run・session・review・integrate・resume・triageと復旧・e2eの工程）。
+taskをrunにして動かし、検証し、mainへ着地させること（claim・run・session・review・integrate・resume・triageと復旧・e2e）。
 
 **所有する状態**
 
-- table: `task_runs`・`run_leases`・`run_processes`・`session_workspaces`。ファイルはqueueのdirの`runs/<run-id>/`（receipt・log・idle marker。`RunFiles`）とrunのworktree。
-- eventの種類（廃止した worker の画面・打鍵の event は過去の記録を読むためのもの）: `worker_mode_converted`、`run_*`（`run_claimed`・`run_planned`・`run_integrated`・`run_adopted`・`run_recovered`・`run_e2e_*`・`run_waiting_*`ほか。run_tmp_removedはhost運用）、`supervision_finished`（runのrunningからvalidatingへの遷移。`domain::run::recorded`が返す）、`lease_*`、`claim_*`、`worktree_*`、`workspace_*`、`wrapper_*`、`agent_started`、`session_*`、`turn_*`、`receipt_observed`・`validation_finished`・`verification_command`・`scope_violation`・`evidence_missing`、`review_*`、`revise_*`、`resume_*`、`triage_*`、`recovery_*`、`integration_*`、`landing_*`、`conflict_*`、`concern_*`、`approve_withheld`、`exit_*`、`stall_*`、`stale_receipt_*`、`prompt_waiting`・`prompt_cleared`・`screen_*`・`idle_inferred`・`input_not_ready`・`known_dialog_unanswered`、`provider_*`、`queue_hold_applied`・`hold_*`・`usage_limited`・`auth_required`、`submit_*`（sessionへの打ち込み）、`stall_config_loaded`・`conflicts_config_changed`・`run_env_changed`・`run_env_program_*`、`first_commit_observed`、`migration_renumbered`、`push_*`（着地のpush）、`job_restarted`・`runtime_error`・`cleanup_failed`。
-- `Supervisor`の欄: `workers`・`slots`・`parallel`・`max_waiting`・`limits`・`slot_flags`・`finished`・`errors`・`claiming`・`provisioning_error`・`triaged`・`stall`・`conflicts`・`conflicts_file`・`conflicts_error`・`job_ends`・`screen_spans`（inboxの画面のidleの区間。workerのrunとplannerには使わない）・`last_turns`・`run_env_missing`・`landing_unresolved`・`landing_stamp`・`run_e2e`・`e2e`・`queue_hold`・`provider_holds`・`timer_finishes_held`（控えたtimerのjobの終わり）・`fallback`・`fallback_file`・`fallback_error`（`[provider_fallback]`、ADR-t1857-1）・`moved`・`hold_continue`・`reopens`・`notice_failures`・`rechecks`・`defer`・`loads`・`resume_config`・`retry_unreadable_review`・`review_material`・`live_job_ends`（生きているrunの復旧jobの終わりで、escalateの`recovery_finished`が載せるthreadとmodel）・`wrapper_setting_warned`（workerが無視する`[headless] wrapper = "workspace"`を警告したか。ADR-t1433-3）と、使うadapter（`repository`・`remote`・`verifier`・`reviewer`・`codex_jobs`・`signals`・`spawner`・`files`）。
+- table: `task_runs`・`run_leases`・`run_processes`・`session_workspaces`。
+- ファイル: queueのdirの`runs/<run-id>/`（`RunFiles`）とrunのworktree。
+- eventの種類: `run_*`・`lease_*`・`claim_*`・`worktree_*`・`workspace_*`・`wrapper_*`・`session_*`・`turn_*`・`review_*`・`revise_*`・`resume_*`・`triage_*`・`recovery_*`・`integration_*`・`landing_*`・`provider_*`・`push_*`ほか。
 
-**判断**（domain）
-
-`domain::run`（`TaskRun`と遷移）・`domain::run::history`（`RunHistory`）・`domain::run::payload`（`RunHistory`が読む記録済みのeventのpayloadの型付きの復元の値）・`domain::run::recorded`、`domain::resume`・`domain::recovery`・`domain::receipt`・`domain::validation`・`domain::verify_failure`・`domain::concern`・`domain::review_reason`・`domain::review_subagents`・`domain::agent_eval`（agentのevalのケースの読み手・採点・漏れの検査）、`domain::claim_defer`・`domain::build_wait`・`domain::claim_hold`・`domain::queue_hold`・`domain::slot_limits`・`domain::waiting`・`domain::recheck`・`domain::stall`・`domain::exit`・`domain::idle_process`・`domain::sessions`・`domain::turn`・`domain::worker`・`domain::worker_question`・`domain::provider_switch`・`domain::run_e2e`・`domain::e2e_quarantine`・`domain::landing_branch`・`domain::landing_hold`（着地を始めるか待つか、drainが人に返すか。`[run.env]`・CIの見張り・着地先・diskの保留を読む）・`domain::landing_release`・`domain::scope`・`domain::run_env`・`domain::headless_job`・`domain::background_wrapper`・`domain::worker_model`（plan reviewの重さの予測とtrialからclaimのときにworkerのmodelを選ぶ）。
+**判断**（domain）: `domain::run`（`TaskRun`と遷移、`run::history`・`run::payload`）を中心に、receipt・review・resume・復旧・claimの控え・slot・待ち・stall・e2e・着地の保留・backgroundのwrapperの各module。
 
 **操作**
 
-- application: `application::supervise`のループとslot（`mod.rs`）と工程のsubmodule（`session`・`exit`・`jobs`・`landing`・`revise`・`resume`・`reopen`・`triage`・`adopt`・`recovery`・`stall`・`stall_recovery`・`waiting`・`deliver`・`idle`・`recheck`・`claim_defer`・`queue_hold`・`provider`・`slot_limits`・`e2e`・`stale`・`headless`・`background`・`file_time`）、`application::session`・`application::headless_session`・`application::integrate`・`application::review`・`application::e2e_verdict`・`application::screen`・`application::screen_idle`・`application::recording`・`application::commands::operations`。
-- CLI: `supervise`・`run`・`session`・`session-event`（session wrapper）・`integrate`・`review`・`recover`。
-- infrastructure: `runtime_store`の`transitions`・`recovery`・`session_registry`・`run_log`と`coordination`のleaseとprocessの部分、`sessions`・`adapters`（`GitRepository`・`ClaudeCode`）・`claude`・`codex`・`run_files`・`run_env`・`e2e_gate`・`process`・`background`。
+- application: `application::supervise`のループとslot（`mod.rs`）と工程のsubmodule、`application::session`・`headless_session`・`integrate`・`review`・`recording`ほか。
+- infrastructure: `runtime_store`の`transitions`・`recovery`・`session_registry`・`run_log`と`coordination`のleaseとprocessの部分、`adapters`（`GitRepository`・`ClaudeCode`）・`claude`・`codex`・`run_files`・`process`・`background`ほか。
 
 **公開するport**
 
-- `RunLog`の読み取り（`runs_with_status`・`run`・`run_events`・`all_runs`・`all_events`・`latest_*`・`events_of_between`）を全てのcontextに公開する。
-- `Verifier`の`run_env`・`run_env_programs`（環境とprogramの読み取り）をhost運用の診断に公開する。検証コマンドを実行する`run_to_log`は実行と着地の内部。
+- `RunLog`の読み取りを全てのcontextに公開する。
+- `Verifier`の環境とprogramの読み取りをhost運用の診断に公開する。
+  検証コマンドの実行は内部。
 - `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
-- 着地先のbranchの解決（`Repository::landing_branch`、`domain::landing_branch`）を読み取りとして観測と分析のCIの見張りに公開する（`supervise::ci_watch::ci_watch_pass`が`[ci_watch] branch`の無いときの見るbranchに使う。解決できなければ確かめを始めず、着地先の保留に任せる）。
-- `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`のleaseとprocessの部分は内部のport。
+- 着地先のbranchの解決（`Repository::landing_branch`）を観測と分析のCIの見張りに公開する。
+  解決できなければ見張りは確かめを始めず、着地先の保留に任せる。
+- `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`のleaseとprocessの部分は内部。
 
 **許す依存の向き**
 
-- 計画管理のtaskを読むのは`TaskStore`の読み取りと、claimのT1だけ。taskの状態を変えるのはT2（着地）とT4（triageのretry・cancel）だけ。
-- follow_upsは`DraftPlannerStore::register_follow_ups`（T7）で計画管理に渡す。`tasks`・`draft_origins`をSQLで書かない。
+- 計画管理のtaskを読むのは`TaskStore`の読み取りとT1だけ。
+  taskの状態を変えるのはT2（着地）とT4（triage）だけ。
+- follow_upsは`DraftPlannerStore::register_follow_ups`（T7）で渡し、`tasks`・`draft_origins`をSQLで書かない。
 - 観測と分析・host運用の状態を書かない。
 
-**境界をまたぐtransaction**: T1・T2・T4（書き手）、T7（計画管理の公開する関数を呼ぶ）（[一覧](#境界をまたぐtransaction)）。
+**境界をまたぐtransaction**: T1・T2・T4（書き手）、T7（計画管理の公開する関数を呼ぶ）。
 
 ## 観測と分析
 
-起きたことを読み、数え、予測し、知らせること（events・watch・stats・KPI・forecast・印・observer・スループットの見直し）。
-
-計測の作り直し（区間とタグ・台帳とそれを作る係・論理ストアのSSOTとビューの区分・送る口）の予定は[計測](measurement.md)が持ち、新しいportと台帳の係はこのcontextに置く（[ADR-t1662-2](../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定6）。まだ実装は無く、下の節は今の姿のまま。
+起きたことを読み、数え、予測し、知らせること（events・watch・stats・KPI・forecast・印・observer・スループットの見直し・CIの見張り）。
+計測の作り直しの予定と、新しいportと台帳の係をこのcontextに置くことは[計測](measurement.md)が持つ（[ADR-t1662-2](../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定6）。
 
 **所有する状態**
 
-- table: `findings`。ファイルはqueueのdirの日次のKPIのreport（`report_written`が指す）とKPIのpushの待ち。
-- eventの種類: `observation`・`observe_*`、`finding_recorded`・`finding_updated`・`finding_status_changed`、`mark_recorded`・`mark_retracted`、`forecast_recorded`、`kpi_breach_*`・`kpi_push_*`、`report_written`、`throughput_review_*`、`candidates_sampled`、CIの見張りの`ci_checked`・`ci_turned_red`・`ci_turned_green`・`ci_watch_unavailable`・`ci_watch_available`・`ci_check_failed`（[CI watch](supervisor-lifecycle/ci-watch.md)、ADR-t1920-1）。
-- `Supervisor`の欄: `observer`・`observers_launched`・`observer_again`（Codexを使えなかったobservationを起動し直すmode。`[provider_fallback] jobs = false`ではClaudeを使えなかったものも）・`throughput_review`・`report`・`reports`・`forecasts`・`forecast`・`push`（KPIのpush）・`candidates`・`ci_watch_port`・`ci`（CIの見張り。`ci`は`supervise::ci_watch`だけが変え、実行と着地のclaim・resume・着地は`ci_watch_held`・`ci_watch_unreadable`で読むだけ）。
+- table: `findings`。
+- ファイル: queueのdirの日次のKPIのreportとKPIのpushの待ち。
+- eventの種類: `observation`・`observe_*`・`finding_*`・`mark_*`・`forecast_recorded`・`kpi_*`・`report_written`・`throughput_review_*`・`candidates_sampled`・CIの見張りの`ci_*`（[CI watch](supervisor-lifecycle/ci-watch.md)）。
 
-**判断**（domain）
-
-`domain::stats`とその下（`stats::conflicts`・`stats::thresholds`ほか）、`domain::kpi`とその下、`domain::forecast`とその下、`domain::marks`、`domain::timeline`、`domain::measure`、`domain::worktime`、`domain::tokens`、`domain::transcript`、`domain::throughput_review`、`domain::finding`、`domain::areas`（runの差分から導く範囲の分類。`application::areas`が読む）、`domain::ci_watch`（CIの実行の読み方・既に落ちているtestの一覧・赤と緑の遷移・`ci_failure`のfindingの鍵・読む手段の有無）。
+**判断**（domain）: `domain::stats`・`kpi`・`forecast`とその下、`marks`・`timeline`・`throughput_review`・`finding`・`ci_watch`ほか。
 
 **操作**
 
-- application: `application::stats`・`application::areas`・`application::marks`（`mark`・`mark --retract`。`MarkLog`と注入した`Clock`越し）・`application::kpi`・`application::forecast`・`application::report`・`application::push`、`application::supervise`の`forecast`・`report`・`push`・`throughput_review`（行き先の`job_start_route`はobserverと共有する。その結果の値`JobStartRoute`は共有の部品の`domain::actor_model`にあり、実行と着地の復旧jobも読む）・`observer`（observerとスループットの見直しのjobの終わりを値`UnusableTimerJob`にし、読むかの判断`retries_unusable`（規則は`domain::actor_model::records_unusable`）と、控えた後に起動し直す`timer_job_due_again`を持つ）・`ci_watch`（CIの見張りのpassとjob。時刻は注入した`Clock`）。`application::ci_watch`（1回の確かめ`check`と、一覧の読み手`known_failures`・`status`・`doctor`。portは`RunLog`と`QueueRecords`だけを取る）。`application::observer`（observerのjob）・`application::watch`（`events`・`timeline`・`watch`）・`application::throughput_review`（スループットの見直しのjob。promptの組み立てと`ACCESS`。portは`ThroughputReviewSources`と`ThroughputReviewHost`と、`jobs = false`でClaudeの壁を読む`AgentSignals`）。組み立ては`compose::throughput_review`・`compose::throughput_review_launch`・`compose::observe`・`compose::observer_launch`（手で打つ`observe`の`[roles.observer]`）。レイヤーの外の`src/view.rs`。
-- CLI: `events`・`watch`・`stats`・`kpi`・`report`・`forecast`・`mark`・`marks`・`timeline`・`finding`・`findings`・`ci failures`・`observe`・`throughput-review`・`note`・`notes`、`status`の読み取り（`ci`の欄を含む）と`doctor`の`ci_watch`。
-- infrastructure: `findings`・`observer`（observerのファイル・設定・headlessのagentのprocess）・`throughput_review`（見直しのdirのファイル・`[roles.throughput_review]`・hostの時間帯・agentのprocess）・`runtime_store::queue_records`・`kpi_config`・`kpi_push`・`report_config`・`d2`・`transcripts`・`claude_turns`・`codex_turns`・`ci_watch`（hostの`gh`とmain checkoutのGitを読むadapter `GhSource`、`up`のpreflight、`doctor`の`ci_watch`の材料）・`ci_watch_store`（`SqliteQueue`のCIの見張りのeventと`findings`の書き込み）。
+- application: `application::stats`・`kpi`・`forecast`・`report`・`observer`・`watch`・`throughput_review`・`ci_watch`ほかと、`application::supervise`の同名のsubmodule。
+- infrastructure: `findings`・`observer`・`throughput_review`・`runtime_store::queue_records`・`kpi_*`・`transcripts`・`ci_watch`・`ci_watch_store`ほか。
 
 **公開するport**
 
-- `QueueRecords`の読み取り（`findings`・`reports_written`・`kpi_breaches_open`）を全てのcontextに公開する。`task_changes`・`task_goals`・`task_titles`・`draft_origins`・`related_landed_commits`・`related_tasks`・`search_documents`は計画管理の表（`tasks`・`draft_origins`・`landed_commits`・`search_index`）を読むmethodで、task 1554でportを分けるときに計画管理へ移す。`record_*`（report・KPIの目標割れ・push・forecast）は内部。
+- `QueueRecords`の読み取り（findingとreportとKPIの目標割れ、CIの見張りのeventと`ci_failure`のfinding）を全てのcontextに公開する。
+  `QueueRecords`のうち計画管理の表を読むmethodは、portをcontextごとに分けるときに計画管理へ移す（[混在しているmodule](#混在しているmodule)）。
+  書き込み（`record_*`）は内部。
 - findingのIDと`finding_*`のeventを値として公開する（計画管理のfindingのplannerが読む）。
-- CIの見張り: `QueueRecords`の`ci_watch_events`と`ci_failure_findings_of`（`tasks.proposal_id`を読む）は読み取りとして全てのcontextに公開する（着地の検証とworkerのpromptが既に落ちているtestを読む予定の段3b・5）。`record_ci_check`（1つの実行の`ci_*`のeventと`ci_failure`のfindingと、runtimeがfindingを閉じる`resolved`を1つの`BEGIN IMMEDIATE`で書く。どれもこのcontextの状態なので境界をまたぐtransactionではない）は内部。`application::ci_watch::CiSource`（GitHubとGitを読むport）と`application::supervise`の`CiWatchPort`・`CiWatchFile`・`CiSourceMaker`は内部で、起動部分が注入する。`Supervisor::ci_watch_held`・`ci_watch_unreadable`を実行と着地に公開する（claim・resume・着地の保留）。
-- timerのjob（observer・スループットの見直し）の終わりのうち使えなかったproviderを言うものを、型付きの値`domain::throughput_review::UnusableFinish`（`provider_unusable`・`error`・`dir`の復元）と`supervise::observer::UnusableTimerJob`（それと`output.out`・`HoldJob`・起動し直すjob）として実行と着地に公開する。控えは実行と着地の`supervise::provider::hold_timer_jobs_unusable`が同じpassの起動の前に書き（Codexと起動しなかったClaudeは`ProviderHold`、`[provider_fallback] jobs = false`のClaudeの認証・利用上限はhold ask。ADR-t1857-1）、同じ終わりは`finishes_to_hold`で1回だけ控える。
-- `ObserverLog`（observerの観察の記録と書いたものの読み取り）と`EventReads`（cursorより後のeventの読み取り）は`application::ports`のportで、observerと`events`・`timeline`・`watch`のユースケースが内部で使う。
+- CIの見張りの保留（`Supervisor::ci_watch_held`・`ci_watch_unreadable`）を実行と着地に読み取りとして公開し、状態を変えるのは`supervise::ci_watch`だけ。
+- timerのjob（observer・スループットの見直し）の使えなかった終わりを、型付きの値（`domain::throughput_review::UnusableFinish`・`supervise::observer::UnusableTimerJob`）として実行と着地に公開する。
+  控えるのは実行と着地の`supervise::provider`で、同じ終わりを1回だけ控える（[Provider lifecycle](provider-lifecycle.md)）。
+- `ObserverLog`・`EventReads`は内部。
 
 **許す依存の向き**
 
@@ -158,132 +192,184 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 ## host運用
 
-runtime自身をhostで動かし続けること（up・down・install・自動更新・broker・queue service・compileの共有・diskの後始末・hostの計測）。
+runtime自身をhostで動かし続けること（up・down・install・自動更新・broker・queue service・compileの共有・diskの後始末・hostの計測・inbox）。
 
 **所有する状態**
 
-- table: `supervisors`・`queue_repository`・`schema_floor`・`binary_updates`・`headless_jobs`（jobのprocessの台帳）。ファイルはqueueのdirの`service/`（queue service）・`broker/`（brokerのtokenとaudit）・`logs/`、launchdのplist、sccacheのserver。
-- eventの種類: `supervisor_*`、`update_*`・`release_check*`、`broker_*`、`queue_service_*`、`sccache_*`、`build_outputs_removed`・`scratchpad_removed`・`run_tmp_removed`、`inbox_*`、`supervisor_config_changed`、`backend_call_failed`、`headless_job_stopped`。
-- `Supervisor`の欄: `token`・`heartbeat`・`supervisor_file`・`supervisor_error`・`exec`・`handoff`・`draining`・`stop_recorded`・`service_up`・`service_access`・`update`・`max_load`・`load_average`・`host_versions`・`host_metrics_port`・`host_metrics`・`broker_port`・`broker_leftovers`・`broker`・`queue_service_port`・`queue_service`・`release_port`・`release`・`disk_config`・`free_space`・`scratchpad_roots`・`disk`・`free`・`cleanup`・`sccache_port`・`sccache`・`last_sweep`・`sweep_failures`・`jobs_swept`・`process_sample`・`no_claude`・`cmux`。
+- table: `supervisors`・`queue_repository`・`schema_floor`・`binary_updates`・`headless_jobs`。
+- ファイル: queueのdirの`service/`・`broker/`・`logs/`、launchdのplist、sccacheのserver。
+- eventの種類: `supervisor_*`・`update_*`・`release_check*`・`broker_*`・`queue_service_*`・`sccache_*`・後始末の`build_outputs_removed`・`scratchpad_removed`・`run_tmp_removed`・`inbox_*`・`backend_call_failed`・`headless_job_stopped`。
 
-**判断**（domain）
-
-`domain::broker`・`domain::broker_usage`・`domain::disk`・`domain::sccache`・`domain::release_update`・`domain::queue_service`・`domain::host_metrics`・`domain::source_repository`。
+**判断**（domain）: `domain::broker`・`disk`・`sccache`・`release_update`・`queue_service`・`host_metrics`ほか。
 
 **操作**
 
-- application: `application::lifecycle`（`up`・`down`）・`application::install`・`application::update`・`application::release_update`・`application::broker`・`application::broker_admin`・`application::broker_run`・`application::queue_service`・`application::sccache`・`application::rebind`・`application::inbox_watcher`・`application::inbox_guardrail`・`application::actor_executor`・`application::execution`（AIのactorを動かす場所と隔離）、
-  `application::supervise`の`update`・`release`・`broker`・`queue_service`・`sccache`・`disk`・`cleanup`・`sweep`・`host_metrics`・`handoff`・`inbox_nudge`。
-- CLI: `auto-update`・`release-update`・`init`・`locate`・`up`・`down`・`install`・`migrate`・`rebind`・`broker`・`service`、`doctor`のhostの部分。
-- infrastructure: `launchd`・`binaries`・`broker_*`・`queue_service`・`sccache`・`host_metrics`・`release_update`・`location`・`schema`・`telemetry`・`inbox_watchers`・`agent_dir`・`git_binary`・`runtime_store::coordination`のsupervisorの登録と引き継ぎの部分。`crates/`のbrokerのcrate（`dagq-broker`・`dagq-broker-client`・`dagq-broker-protocol`）。
-
-`application::sccache::add_diagnostics`がdoctor/statusのsccache欄と再起動失敗のattentionの表示条件、統計clientのprogramを決める。
-composeは束縛されたcheckoutのverifierとserverのadapterを渡すだけで、この判断を持たない。
-`supervise::sccache`の観測間隔と失敗後の再試行は注入した`Clock::monotonic`で測る。
+- application: `application::lifecycle`（`up`・`down`）・`install`・`update`・`broker`系・`queue_service`・`sccache`・`actor_executor`・`execution`ほかと、`application::supervise`の同名のsubmoduleと`disk`・`cleanup`・`sweep`・`handoff`・`inbox_nudge`。
+- infrastructure: `launchd`・`binaries`・`broker_*`・`queue_service`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`のsupervisorの登録と引き継ぎの部分。
+  `crates/`のbrokerのcrateもこのcontext。
 
 **公開するport**
 
-- `RunCoordination`のsupervisorの登録と引き継ぎ（`register_supervisor`・`heartbeat`・`take_handoff`など）を実行と着地のループに公開する。
+- `RunCoordination`のsupervisorの登録と引き継ぎを実行と着地のループに公開する。
 - `HeadlessJobStore`（jobのprocessの台帳）を、jobを起動する各contextに公開する。
 - `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、AIのactorの起動（`application::actor_executor`）を他のcontextに公開する。
-- `AuditFiles`（`application::broker_admin`。brokerのauditの日のファイルを読む。adapterは`infrastructure::broker_audit::AuditDir`）は、このcontextの中だけで使う（`dagq broker audit`の`compose::broker_audit`と、tokenの失効の前の数え`infrastructure::broker_token`が注入する）。他のcontextには公開しない。
-- `application::lifecycle::Ports::ci_watch_preflight`（`up`がCIの見張りの読む手段を確かめる。adapterは`infrastructure::ci_watch::preflight`）は、このcontextの中だけで使う。
-- `WorkspaceBackend`はinboxのworkspaceのためのport（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)、goal 92で縮める）。
+- `AuditFiles`とCIの見張りのpreflightは内部。
+
+**hostの操作のport**
+
+今は1つのtrait`WorkspaceBackend`（`src/application/ports.rs`）が、次の2つの責務を持つ。
+cmuxを使うのはinboxだけ（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
+
+- inboxのworkspace（cmux）の操作: workspaceを開く・閉じる・在るかを見る・画面を読む・文字とkeyを送る。
+  所有する呼び手はinboxと`up` / `down`（`application::lifecycle`、inboxへの催促の`supervise::inbox_nudge`）。
+  人への通知（`notify`）とresumeの待ちの長さ（`resume_timeout`ほか）も今はこのtraitにある（呼び手はtraitのdoc comment）。
+  実装は`infrastructure::adapters::Cmux`がcmuxのCLIを呼ぶ。
+- 非対話のrunとruntimeのplannerのsession wrapperを、workspaceなしのbackgroundのprocessとして扱う操作: 起動（`launch_background`）・停止（`stop_background`、停止の結果`WrapperStop`を返す）・生死確認（handleを渡した`exists`）。
+  所有する呼び手はsupervisor（`supervise::background`・`reopen`、起動は`application::actor_executor`経由）とruntimeのplanner（`application::planner`）で、`stats`はrunの最後のhandleの生死を`ProcessControl`で読むだけ。
+  実装は`Cmux`のこれらのmethodが`infrastructure::background::BackgroundWrappers`に委ね、cmuxを呼ばない。
+  停止の記録（`wrapper_stopped`）は`application::recording::RecordingBackend`が書く。
+- 落とし穴: backgroundのhandle（`domain::background_wrapper::BackgroundHandle`）はworkspaceのIDと同じ引数で渡り、画面とkeyの操作は拒まれ、色と印は何もしない。
+- 決定は[ADR-t1404-1](../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)、停止の流れと記録は[非対話のworker](supervisor-lifecycle/headless-worker.md#workspaceなしのbackgroundのwrapper)の「停止の記録」。
+- portを2つに分けたら、この項を分けた後のtraitの名前と分け方に直す（C7）。
 
 **許す依存の向き**
 
-- 他のcontextのuse caseを起動・停止してよい（supervisorのループ・handoff・drain）が、他のcontextの状態は公開したportで変える。
+- 他のcontextのuse caseを起動・停止してよいが、他のcontextの状態は公開したportで変える。
 - brokerのcrateはrootの`dagq`のcrateに依存しない（`dagq-broker-protocol`だけを共有する。[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)）。
 
 **境界をまたぐtransaction**: 無い。
 
 ## 混在しているmodule
 
-contextを1つに決められず、分ける先のtaskを持つもの。
+contextを1つに決められず、分ける先を持つもの。
 
 | module | 混ざっているcontext | 分ける先 |
 | --- | --- | --- |
-| `src/application/ports.rs` | 全てのcontextのportと`Queue`（13のstoreのportのsupertrait）・`QueueOpener` | task 1554（contextごとのmodule）、task 1555（use caseが要るportだけを取る） |
-| `src/application/supervise/mod.rs`の`Supervisor` | 4つのcontextの欄（上の各節）を1つのstructで持ち、`impl Supervisor`のsubmoduleが互いの欄を変える | task 1552（観測と分析・host運用）、task 1553（実行と着地のslotと工程） |
-| `src/compose.rs` | 全てのcontextの組み立て | task 1556（contextごとの組み立てのmodule） |
-| `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners`（`open_planner`・`close_planner`・`planner_*`） | task 1554（portの分割） |
-| `application::queue_reads` | CLIとqueue serviceの読み取りの入口（`answer`。task 1549で`compose::read_queue`から移した）で、各armは自分のcontextのport（`TaskStore`・`AskStore`・`RunLog`・`EventReads`・`ObserverLog`・`QueueRecords`）と起動部分が組む`QueueReadSources`を読む | 未登録（follow_up） |
+| `src/application/ports.rs` | 全てのcontextのportと`Queue`（storeのportのsupertrait）・`QueueOpener` | contextごとのmodule、use caseが要るportだけを取る形（C4） |
+| `src/application/supervise/mod.rs`の`Supervisor` | 4つのcontextの欄を1つのstructで持つ（C3） | contextごとに分ける |
+| `src/compose.rs` | 全てのcontextの組み立て | contextごとの組み立てのmodule |
+| `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
+| `application::queue_reads` | 読み取りの入口で、各armが自分のcontextのportを読む | 未登録（follow_up） |
 | `application::prompt` | workerのprompt（実行と着地）、inbox・plannerのprompt（計画管理）、observerとスループットの見直しのprompt（観測と分析） | 未登録（follow_up） |
-| `application::health` | `status`・`doctor`とattention、`candidates`の`held`（`claim_holds`）（観測と分析）、`recover`（実行と着地）、`doctor`のhostの部分（host運用） | 未登録（follow_up） |
+| `application::health` | `status`・`doctor`とattention（観測と分析）、`recover`（実行と着地）、`doctor`のhostの部分（host運用） | 未登録（follow_up） |
 
 ## 境界をまたぐtransaction
 
-複数のcontextの状態を1つの`BEGIN IMMEDIATE`のtransactionで変えてよいのは、この一覧のものだけ（ADR-t1545-1決定3）。原子性を守るための例外で、[Persistence](persistence.md)の「Runtime ownership」「Transactions and constraints」の規則（claimとlease、`renew_lease`、着地）を弱めない。一覧に足す・外す変更は同じ変更でこの表を直す。
+複数のcontextの状態を1つの`BEGIN IMMEDIATE`のtransactionで変えてよいのは、この一覧のものだけ（ADR-t1545-1決定3）。
+原子性を守るための例外で、[Persistence](persistence.md)のclaimとlease・着地の規則を弱めない。
+一覧に足す・外す変更は同じ変更でこの表を直す。
+変える状態の細目は表のコードの関数が持つ。
 
-| ID | transaction | 書き手のcontext | 変える状態 | 理由 | コード |
+| ID | transaction | 書き手 | 主に変える状態 | 理由 | コード |
 | --- | --- | --- | --- | --- | --- |
-| T1 | claim | 実行と着地 | `tasks`を`ready`から`in_progress`に、`task_runs`を作り、`task_runs.supervisor_token`と`run_leases`の行、`run_claimed`・`lease_acquired`（interactiveのtaskを非対話でclaimしたときは`worker_mode_converted`も） | 所有者の無いclaimed runとrunの無い`in_progress`を作らない（ADR-0054、ADR-0013決定9） | `infrastructure::runtime_store::transitions`の`SqliteQueue::claim_for_supervisor_in_order`が`infrastructure::sqlite::claim_task`を呼ぶ。人の`claim`は`TaskStore::claim` |
-| T2 | 着地の完了 | 実行と着地 | runを`integrated`にし、`run_leases`の行を消し、`tasks`を`completed`に、`run_integrated`・`lease_released`・`task_status_changed`。`run_integrated`の追記でSQLのtrigger（`search_run_integrated`）が`landed_commits`と`search_index`を書く | mainへの着地とtaskの完了を食い違わせない | `infrastructure::runtime_store::transitions`の`SqliteQueue::finish_integration` |
-| T3 | plan reviewのverdictの適用 | 計画管理 | `asks`を閉じ、`proposals`を承認・差し戻し・取り消しにし、その`tasks`を`ready`・`draft`・`canceled`にし、`plan_decided` | proposalとそのtaskの状態を1回で揃える（同じcontextの中の表とaskの組で、askは共有の部品） | `infrastructure::plan_reviews`の`decide_plan`（`infrastructure::proposals`の`approve`・`send_back`が`transition_task`を呼ぶ） |
-| T4 | triageのanswerの適用 | 実行と着地 | `run_leases`・`task_runs`を見て`asks`を閉じ、`retry`は`tasks`を`ready`に、`cancel`は`canceled`に、`resume`はrunを`needs_session`に、`triage_decided` | runの失敗の扱いとtaskの次の状態を1回で決める（ADR-0047決定40） | `infrastructure::runtime_store::recovery`の`decide_triage`が`infrastructure::sqlite::transition_task`を呼ぶ |
-| T5 | goal reviewのverdictの適用 | 計画管理 | `asks`を閉じ、`goals`を閉じるか、足りないtaskを`tasks`に登録し、`goal_reviews`を直し、`goal_decided` | goalの判定と隙間のtaskを1回で揃える（同じcontextの中の表とask） | `infrastructure::goal_reviews`の`decide_goal`（`register_gaps`） |
-| T6 | findingのproposalの採否 | 計画管理 | `proposals`を作り`findings`をそのproposalに結ぶ（`submit_linking`）、proposalとそのtaskの状態から`findings`の状態を決める（`settle_findings`） | findingを1つのproposalに結び、二重のproposalを作らず、採否をfindingに戻す | `infrastructure::finding_planners`の`submit_linking`・`settle_findings`（判断は`domain::finding::settle`） |
-| T7 | follow_upsのdraftの登録 | 計画管理（実行と着地が`register_follow_ups`で呼ぶ） | `task_runs`と`run_events`を読み、`tasks`（draft）と`draft_origins`を書く | 着地したrunのfollow_upsをそのrunの由来つきで1回だけdraftにする | `infrastructure::draft_planners`の`register_follow_ups`（呼び出しは`application::integrate`。着地のT2とは別のtransaction） |
-| T8 | follow_upの所属の判断の記録 | 計画管理 | `follow_up_judgements`に行を足し、draft / readyの`tasks`の`goal_id`を移し（`task_goal_changed`）、achievedで閉じた元goalへのrequiredなら`asks`に`correct_goal`を開き（`ask_opened`）、`follow_up_judged` | 判断と所属と人への問いを食い違わせない（ADR-t1504-2決定1・6・9） | `infrastructure::follow_up_membership`の`SqliteQueue::judge_follow_up`（移動は`infrastructure::sqlite::set_goal_in`、askは`infrastructure::asks::insert_ask`） |
-| T9 | achievedの後の訂正のanswerの適用 | 計画管理 | `asks`を閉じ（`ask_closed`）、`reopen`は`goals`を開き直し（`goal_reopened`）、draft / readyのfollow_upの`tasks`の`goal_id`を移し、同じgoalのほかの`correct_goal`と残った`approve_goal`の`asks`をruntimeが答えて閉じ、`goal_correction_decided` | 人の答えとgoalの状態・follow_upの所属・残った問いを1回で揃える（ADR-t1504-2決定9。T5の`decide_goal`の対） | `infrastructure::follow_up_membership`の`decide_correction`（`domain::goal::reopen`、`infrastructure::asks::close_by_runtime`） |
+| T1 | claim | 実行と着地 | `tasks`を`in_progress`に、`task_runs`と`run_leases`を作る | 持ち主の無いrunとrunの無い`in_progress`を作らない（ADR-0054） | `runtime_store::transitions`→`sqlite::claim_task` |
+| T2 | 着地の完了 | 実行と着地 | runを`integrated`、taskを`completed`に（triggerが検索の索引を書く） | mainへの着地とtaskの完了を食い違わせない | `runtime_store::transitions`の`finish_integration` |
+| T3 | plan reviewのverdictの適用 | 計画管理 | askを閉じ、`proposals`とその`tasks`の状態を揃える | proposalとそのtaskを1回で揃える | `infrastructure::plan_reviews`の`decide_plan` |
+| T4 | triageのanswerの適用 | 実行と着地 | askを閉じ、runとtaskの次の状態を決める | runの失敗の扱いとtaskの次の状態を1回で決める（ADR-0047決定40） | `runtime_store::recovery`の`decide_triage`→`sqlite::transition_task` |
+| T5 | goal reviewのverdictの適用 | 計画管理 | askを閉じ、goalを閉じるか足りないtaskを登録する | goalの判定と隙間のtaskを1回で揃える | `infrastructure::goal_reviews`の`decide_goal` |
+| T6 | findingのproposalの採否 | 計画管理 | proposalを作り`findings`を結び、採否を`findings`に戻す | 二重のproposalを作らず、採否をfindingに戻す | `infrastructure::finding_planners`の`submit_linking`・`settle_findings` |
+| T7 | follow_upsのdraftの登録 | 計画管理（実行と着地が呼ぶ） | runを読み、draftの`tasks`と`draft_origins`を書く | 着地したrunのfollow_upsを由来つきで1回だけdraftにする | `infrastructure::draft_planners`の`register_follow_ups`（T2とは別のtransaction） |
+| T8 | follow_upの所属の判断の記録 | 計画管理 | 判断の行・taskのgoalの移動・要るなら`correct_goal`のask | 判断と所属と人への問いを食い違わせない（ADR-t1504-2決定1・6・9） | `infrastructure::follow_up_membership`の`judge_follow_up` |
+| T9 | achievedの後の訂正のanswerの適用 | 計画管理 | askを閉じ、goalを開き直すかfollow_upを移す | 答えとgoal・所属・残った問いを1回で揃える（ADR-t1504-2決定9） | `infrastructure::follow_up_membership`の`decide_correction` |
+
+所属の判断の流れは[所属の判断](follow-up-membership.md)が持つ。
 
 ## 検査できる規則
 
-規則のIDは後続の検査のscriptとreviewのsubagentが参照するので変えない。規則を変えるときはIDを足すか、古いIDを「廃止」と書いて残す。各規則の「検査」は、機械的な検査（script）で見るか、reviewで見るかを書く。
+規則のIDは検査のscriptとreviewのsubagentが参照するので変えない。
+規則を変えるときはIDを足すか、古いIDを「廃止」と書いて残す。
+各規則の「検査」は、script（機械）で見るかreviewで見るかを書く。
 
 ### レイヤーの規則
 
-- **L1** `src/domain`のコードは`crate::application`・`crate::infrastructure`・`crate::compose`と、レイヤーの外のmodule（`crate::view`・`crate::runtime`・`crate::lifecycle`）を参照しない。`#[cfg(test)]`の中も同じ（domainのtestはdomainの値と関数だけで組む）。検査: script。
-- **L2** `src/domain`の本番のコード（`test=false`のビルドに残りうるコード）は`rusqlite`・`std::fs`・`std::process`・`std::net`・`SystemTime::now`・`Instant::now`・`Uuid::new_v4`・`anyhow`を参照しない（ADR-0013のAlternativesの検査の機械化）。検査: script。
-- **L3** `src/application`のコードは`crate::infrastructure`・`crate::compose`とレイヤーの外のmoduleを参照しない。`#[cfg(test)]`の中も同じ（testはapplicationのtest double、たとえば`application::memory_files`を使う）。例外は共有の部品の`crate::migration_numbers`だけ。検査: script。
-- **L4** `src/application`の本番のコード（`test=false`のビルドに残りうるコード）は`rusqlite`・`std::fs`・`std::process::Command`・`SystemTime::now`・`Uuid::new_v4`を直接使わず、portを通す。`#[cfg(test)]`の中でfixtureを作る`std::fs`と`tempfile`はよい。検査: script。
-- **L5** `src/application`の状態の判断（遷移・回数と上限・送るかどうか・待つかどうかを決めるもの）は、時刻を`Clock`か値の引数で受け、`Instant::now`・`SystemTime::now`を判断の中で読まない（[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）。待ちの判断は、今の時刻（壁時計なら`Clock::system_time` / `now`、経過の計測なら`Clock::monotonic`の値）と観測（待ちを始めた時刻・最後の入力の時刻・記録の有無など）を引数に取り、次の操作（待つ・送り直す・終了を求める・諦める）を値で返す副作用のない関数にし、境界の時刻（ちょうど閾値・その1 ms前）をunit testで確かめる。時計を読んでその結果をportで実行するのは呼ぶ側の薄い処理にする（例: `supervise::session`の`passed`・`registration_pending`・`waited_out_after_receipt`、`revise`の`revise_deadline`、`resume`の`exit_wait`・`resume_deadline`、`reopen`の`awaits_registration`・`turn_outlived`・`attempt_waits`）。検査: review（今の`Instant::now`は数が多く、task 1558などが減らすまでscriptには入れない）。
-- **L6** `src/infrastructure`のコードは`crate::compose`とレイヤーの外のmoduleを参照しない。検査: script。
-- **L7** 起動部分（`src/compose.rs`と、task 1556が作るその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。検査: review（task 1556の後にscript）。
-- **L8** レイヤーの外のmodule（`view`）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。新しいmoduleをレイヤーの外に足さない。検査: script（L1・L3・L6として）とreview。
+- **L1** `src/domain`のコードはapplication・infrastructure・起動部分とレイヤーの外のmoduleを参照しない。
+  `#[cfg(test)]`の中も同じ。
+  検査: script。
+- **L2** `src/domain`の本番のコード（`test=false`のビルドに残りうるコード）はDB・ファイル・process・network・時計・乱数のID・`anyhow`を参照しない（ADR-0013のAlternativesの機械化）。
+  検査: script（禁止するpathの一覧はscriptが持つ）。
+- **L3** `src/application`のコードはinfrastructure・起動部分とレイヤーの外のmoduleを参照しない。
+  `#[cfg(test)]`の中も同じ（testはapplicationのtest doubleを使う）。
+  例外は共有の部品の`crate::migration_numbers`だけ。
+  検査: script。
+- **L4** `src/application`の本番のコードはDB・ファイル・外のcommand・壁時計・乱数のIDを直接使わず、portを通す。
+  `#[cfg(test)]`の中でfixtureを作るファイル操作はよい。
+  検査: script。
+- **L5** `src/application`の状態の判断（遷移・回数と上限・送るか・待つか）は、時刻を`Clock`か値の引数で受け、判断の中で時計を読まない（[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）。
+  待ちの判断は、今の時刻と観測を引数に取り次の操作を値で返す副作用のない関数にし、境界の時刻（ちょうど閾値・その1 ms前）をunit testで確かめる。
+  時計を読んで結果をportで実行するのは呼ぶ側の薄い処理にする（例: `supervise::session`・`reopen`の待ちの判断）。
+  検査: review（残る`Instant::now`が多いので、減るまでscriptに入れない）。
+- **L6** `src/infrastructure`のコードは`crate::compose`とレイヤーの外のmoduleを参照しない。
+  検査: script。
+- **L7** 起動部分（`src/compose.rs`とその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。
+  検査: review（組み立てをcontextごとのmoduleに分けた後にscript）。
+- **L8** レイヤーの外のmodule（`view`）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。
+  新しいmoduleをレイヤーの外に足さない。
+  検査: script（L1・L3・L6として）とreview。
 
 ### コンテキストの規則
 
-- **C1** あるcontextの`src/infrastructure`のstoreのmoduleは、自分のcontextのtable（上の各節の「所有する状態」）にだけ`INSERT`・`UPDATE`・`DELETE`を書く。他のcontextのtableを書くのは「[境界をまたぐtransaction](#境界をまたぐtransaction)」の一覧にあるものだけ。検査: review（task 1554の後にscript）。
-- **C2** 観測と分析のコードは、他のcontextの状態を変えるportのmethod（`TaskStore`の書き込み・`RunTransitions`・`RunRecovery`・`RunCoordination`の書き込み・`PlanReviewStore`・`GoalReviewStore`・`DraftPlannerStore`の書き込み）を呼ばない。検査: review。
-- **C3** `application::supervise`のsubmoduleは、自分のcontextの`Supervisor`の欄（上の各節）だけを変える。他のcontextの欄は読むか、そのcontextの関数を呼ぶ。検査: review（task 1552・1553の後にscript）。
-- **C4** 新しく足す・変えるuse caseは`Box<dyn Queue>`・`&mut dyn Queue`・`QueueOpener`を取らず、要るportだけを取る（ADR-0013決定1の「portは原則applicationに定義する」のまま、幅を狭める）。検査: review（task 1555の後にscript）。
-- **C5** 他のcontextの公開していないport（各節の「公開するport」で内部としたもの）を使わない。検査: review。
-- **C6** 他のcontextのeventを読むときは、kindを`domain::event_kind`か所有するdomainのmoduleの定数で名指し、状態の判断に使うpayloadは文字列のkeyではなく型付きの復元の値で読む（`serde_json::Value`の`payload["..."]`で判断しない）。古いeventの読み取りは保つ。検査: review（task 1551・1558の後にscript）。
-- **C7** 新しいportは、どのcontextが所有し、どのcontextに公開するかをこの文書の該当の節に足してから置く。`application::ports`に足すときはtask 1554の後のcontextのmoduleに置く。検査: review。
+- **C1** あるcontextの`src/infrastructure`のstoreのmoduleは、自分のcontextのtable（各節の「所有する状態」）にだけ`INSERT`・`UPDATE`・`DELETE`を書く。
+  他のcontextのtableを書くのは「[境界をまたぐtransaction](#境界をまたぐtransaction)」の一覧のものだけ。
+  検査: review（portをcontextごとに分けた後にscript）。
+- **C2** 観測と分析のコードは、他のcontextの状態を変えるportのmethod（`TaskStore`・`RunCoordination`・`DraftPlannerStore`の書き込み、`RunTransitions`・`RunRecovery`・`PlanReviewStore`・`GoalReviewStore`）を呼ばない。
+  検査: review。
+- **C3** `application::supervise`のsubmoduleは、自分のcontextの`Supervisor`の欄（`Supervisor`のdoc comment）だけを変える。
+  他のcontextの欄は読むか、そのcontextの関数を呼ぶ。
+  検査: review（`Supervisor`を分けた後にscript）。
+- **C4** 新しく足す・変えるuse caseは`Box<dyn Queue>`・`&mut dyn Queue`・`QueueOpener`を取らず、要るportだけを取る（ADR-0013決定1の「portは原則applicationに定義する」のまま、幅を狭める）。
+  検査: review（portを分けた後にscript）。
+- **C5** 他のcontextの公開していないport（各節の「公開するport」で内部としたもの）を使わない。
+  検査: review。
+- **C6** 他のcontextのeventを読むときは、kindを`domain::event_kind`か所有するdomainのmoduleの定数で名指し、状態の判断に使うpayloadは文字列のkeyではなく型付きの復元の値で読む。
+  古いeventの読み取りは保つ。
+  検査: review。
+- **C7** 新しいportは、どのcontextが所有し、どのcontextに公開するかをこの文書の該当の節に足してから置く。
+  `application::ports`に足すときは、portをcontextごとのmoduleに分けた後はそのmoduleに置く。
+  検査: review。
 
 ### transactionの規則
 
-- **X1** 複数のcontextの状態を変える1つのtransactionは、上の一覧のIDを持つものだけ。新しく要るときは同じ変更で一覧に足す。検査: review。
-- **X2** 境界の規則のためにtransactionを分けない。一覧のtransactionの述語（`WHERE status IN (...)`・`renew_lease`・`BEGIN IMMEDIATE`）を外へ出さない（ADR-0013決定9）。検査: review。
-- **X3** 一覧のtransactionの中で、他のcontextの状態を変えるのは、そのcontextのinfrastructureが公開する関数（`infrastructure::sqlite::transition_task`など）を通す。SQLの文を書き写さない。検査: review。今のT1・T2・T6はこの形になっていない（「[今の違反と行き先](#今の違反と行き先)」のX3の行）。
+- **X1** 複数のcontextの状態を変える1つのtransactionは、上の一覧のIDを持つものだけ。
+  新しく要るときは同じ変更で一覧に足す。
+  検査: review。
+- **X2** 境界の規則のためにtransactionを分けない。
+  一覧のtransactionの述語（`WHERE status IN (...)`・`renew_lease`・`BEGIN IMMEDIATE`）を外へ出さない（ADR-0013決定9）。
+  検査: review。
+- **X3** 一覧のtransactionの中で、他のcontextの状態を変えるのは、そのcontextのinfrastructureが公開する関数（`infrastructure::sqlite::transition_task`など）を通す。
+  SQLの文を書き写さない。
+  検査: review。
+  今のT1・T2・T6はこの形になっていない（「[今の違反と行き先](#今の違反と行き先)」）。
 
 ### 検査の範囲
 
-- SQLのtrigger（migrationが作る`search_*`のtrigger）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
-- コメントの行（`//`・`//!`・`///`）とdocのlinkは数えない（docのlinkの`crate::application::...`は依存ではない）。
-- `#[cfg(test)]`の中は、L1・L3・L6（参照の向き）では数え、L2・L4（I/Oと時刻）では数えない。
-- 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置き、直したtaskが同じ変更で一覧から外す（ADR-t1545-1決定4）。
-- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に当てる。CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。`sh scripts/check-layer-deps.sh --self-test`は`TMPDIR`（未設定なら`target/`）の下の一時directoryに小さなfixture（違反なし・一覧に無い違反・古い項目・task IDの無い項目・コメントと文字列だけの参照・入れ子のブロックコメント・複数行のcfg・testが必須のcfg・本番に残りうるcfg・inline modの中のtestの範囲と終わり）を作って判定を確かめ、終わったら消す。
-- 数えるのはpath（`crate::application::timestamp`・`std::time::SystemTime::now`など）で、`use crate::{infrastructure::sqlite, ...}`のような組の`use`も展開して数える。コメント（`//`・`//!`・`///`・入れ子も含む`/* */`）と文字列・文字のliteralの中は数えない。
-- testとして扱うcfgは、条件が`test`そのもの、`all(...)`の引数のどれかがtestを必須とするもの、`any(...)`の引数のすべてがtestを必須とするもの。`#[cfg(test)]`（複数行も含む）・`cfg(any(test))`・`cfg(all(test, unix))`・`cfg(all(unix, any(test)))`はtestとして扱う。`cfg(any(test, unix))`・`cfg(any(test, feature = "x"))`は`test=false`でも成立しうるため本番として数える。`cfg(not(test))`と、`not`を含むものや判定できない形も本番として数える（安全側）。
-- このcfgの範囲は、属性が付いた項目（`mod tests { ... }`・関数・`use`など）の終わりまでと、testの範囲で`mod name;`が宣言するファイル（inline modの名前を含むmoduleの位置の`name.rs`と`name/`の下）。inline modの中にあるtestのmodも扱い、範囲の終わりでは元の扱いに戻る。ファイル先頭の`#![cfg(test)]`などtestが必須の内側の属性はファイル全体をtestとして扱う。上のとおりL1・L3・L6では数え、L2・L4では数えない。
-- 許可の一覧は`.config/layer-deps-allow.txt`。1行が1項目で、`規則 | path | 参照 | 行き先のtask | 理由`の5つを`|`で区切る（`#`で始まる行と空行は読まない）。規則はL1・L2・L3・L4・L6のどれか、pathは`src/`からのファイル、参照はscriptが出す参照（`crate::application`・`std::fs`・`SystemTime::now`・`anyhow`など、規則が禁止する形の先頭）、行き先のtaskはtask IDか`,`で区切った複数のtask ID、理由は空でない。同じファイルの同じ参照は何箇所あっても1項目。一覧に無い参照（新しい違反）、一覧にあるのにもう無い参照（古い項目）、書式の誤りと重複はどれもexit 1。
-- 違反を直すtaskは、同じ変更で一覧の項目と下の「今の違反と行き先」の行を消す。
-- 「検査: review」の規則と、境界を変えた差分がこの文書と許可の一覧を直しているかは、`src/**`・`crates/**`の差分で選ばれるreviewのsubagent `architecture-boundaries`（定義は`.dagq/agents/architecture-boundaries/AGENT.md`、移す前は旧の`.dagq/review-agents/architecture-boundaries.md`、[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が見て、scriptが見る規則は見ない。
+- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に当てる。
+  CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。
+- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えない。
+  `#[cfg(test)]`の中はL1・L3・L6では数え、L2・L4では数えない。
+  testか判定できない`cfg`は本番として数える（安全側）。
+  細目（`use`の組の展開、testとする`cfg`の形と範囲、`--self-test`）はscriptの先頭のコメントが持つ。
+- SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
+- 許可の一覧は`.config/layer-deps-allow.txt`で、1行が1項目の`規則 | path | 参照 | 行き先のtask | 理由`（`#`の行と空行は読まない）。
+  規則はL1・L2・L3・L4・L6のどれか、pathは`src/`からのファイル、参照はscriptが出す参照、行き先は1つか`,`で区切った複数のtask ID、理由は空でない。
+  同じファイルの同じ参照は1項目で、一覧に無い参照・もう無い参照の項目・書式の誤りと重複はどれも落ちる。
+- 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置く（ADR-t1545-1決定4）。
+  違反を直す変更は、同じ変更で一覧の項目と「[今の違反と行き先](#今の違反と行き先)」の行を消す。
+- 「検査: review」の規則と、境界を変えた差分がこの文書と許可の一覧を直しているかは、reviewのsubagent `architecture-boundaries`（`.dagq/agents/architecture-boundaries/AGENT.md`、[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が見て、scriptの規則は見ない。
 
 ## 今の違反と行き先
 
-2026-10-04のmain（base `e465d467`）で`grep`して見つけたもの。scriptが検査する規則（L1・L2・L3・L4・L6）の行は、どれも行き先のtaskを持ち、許可の一覧`.config/layer-deps-allow.txt`の項目と一致する（一覧の書式は「[検査の範囲](#検査の範囲)」）。行き先が「未登録」のまま残っているのはreviewで見るX3・C1の行だけ。行き先のtaskは着地したら同じ変更でこの表の行と一覧の項目を消す。
+scriptが検査する規則（L1・L2・L3・L4・L6）の行は、許可の一覧`.config/layer-deps-allow.txt`の項目と一致し、行き先のtaskは一覧の項目が持つ。
+reviewで見る規則の行は、行き先をこの表の言葉で書く。
+行き先が「未登録」のまま残っているのはX3・C1の行だけ。
 
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
-| L5 | `src/application`の`Instant::now`（2026-10-04で109箇所。多いのは`lifecycle.rs`・`supervise/adopt.rs`。`supervise/revise.rs`・`reopen.rs`・`resume.rs`・`session.rs`の21箇所はtask 1557が注入した`Clock::monotonic`に置き換えて0） | 判断が実時間を読む | task 1558（stall・stall_recovery・adopt）。残りは計測の後に判断 |
-| L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | task 1620 |
-| C3 | `src/application/supervise/mod.rs`の`Supervisor`と、`impl Supervisor`を持つ`supervise/`の39のsubmodule（2026-10-04） | 全てのcontextの欄を1つのstructで共有し、submoduleが互いの欄を変える | task 1552・1553 |
-| C4 | `Box<dyn Queue>`・`&mut dyn Queue`・`QueueOpener`を取るuse case（`application::lifecycle`・`update`・`install`・`health`・`supervise`ほか） | 要るportだけを取っていない | task 1555（観測と分析・host運用）、task 1553（実行と着地） |
-| C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | task 1554 |
-| C6 | `src/application/supervise/stall.rs`・`supervise/adopt.rs`ほか | 判断に使うeventのpayloadを`serde_json::Value`の文字列のkeyで読む（`src/domain/run/history.rs`はtask 1551で型付きの復元の値`domain::run::payload`に移した） | task 1558（stall・adopt）、task 681（domainのkindの比較を定数へ） |
+| L5 | `src/application`の`Instant::now`（`lifecycle.rs`・`supervise/adopt.rs`・`stall.rs`ほか） | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
+| L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | 許可の一覧の項目 |
+| C3 | `Supervisor`と、`impl Supervisor`を持つ`supervise/`のsubmodule | submoduleが他のcontextの欄を変える | `Supervisor`の分割 |
+| C4 | `Box<dyn Queue>`などを取るuse case（`application::lifecycle`・`health`・`supervise`ほか） | 要るportだけを取っていない | portの分割 |
+| C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | portの分割 |
+| C6 | `src/application/supervise/stall.rs`・`supervise/adopt.rs`ほか | 判断に使うeventのpayloadを文字列のkeyで読む | 型付きの復元の値（`domain::run::payload`の形）へ |
 | X3・C1 | T1: `src/infrastructure/sqlite.rs`の`claim_task`（計画管理のstore）が`INSERT INTO task_runs`を書く | 計画管理のstoreが実行と着地の表をSQLで直接書く | 未登録（follow_up） |
-| X3・C1 | T2: `src/infrastructure/runtime_store/transitions.rs`の`finish_integration`が`UPDATE tasks SET status='completed'`を書く | 実行と着地のstoreが計画管理の表を`transition_task`を通さずSQLで直接書く | 未登録（follow_up） |
-| X3・C1 | T6: `src/infrastructure/finding_planners.rs`（`settle_findings`・`link_findings`ほか）が`UPDATE findings`を書く | 計画管理のstoreが観測と分析の表を`infrastructure::findings`を通さずSQLで直接書く | 未登録（follow_up） |
+| X3・C1 | T2: `src/infrastructure/runtime_store/transitions.rs`の`finish_integration`が`UPDATE tasks SET status='completed'`を書く | 実行と着地のstoreが計画管理の表を`transition_task`を通さず書く | 未登録（follow_up） |
+| X3・C1 | T6: `src/infrastructure/finding_planners.rs`（`settle_findings`ほか）が`UPDATE findings`を書く | 計画管理のstoreが観測と分析の表を`infrastructure::findings`を通さず書く | 未登録（follow_up） |

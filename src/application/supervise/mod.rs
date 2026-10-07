@@ -995,6 +995,37 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
 /// A listing of this user's processes with the wall time it was taken.
 type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 
+/// The supervisor's state, one struct for every context
+/// (docs/design/architecture.md, "混在しているmodule"). Which context owns
+/// each field, so that a submodule changes only its own context's fields
+/// and reads or calls the others (rule C3):
+///
+/// - shared: `queue`, `queues`, `generators`, `layout`, `processes` and
+///   `utc_offset`, the connection, clocks and places every context reads.
+/// - planning: `plan_review`, `goal_review`, `planner_exits`,
+///   `route_setting_warned` and `max_improvement_proposals`.
+/// - execution and landing: the slots and phases (`workers`, `slots`,
+///   `parallel`, `max_waiting`, `limits`, `slot_flags`, `light_changes`,
+///   `spaced_since`, `finished`, `errors`, `claiming`, `provisioning_error`,
+///   `triaged`, `stall`, `conflicts*`, `job_ends`, `live_job_ends`,
+///   `screen_spans`, `last_turns`, `run_env_missing`, `landing_*`,
+///   `run_e2e`, `e2e`, `queue_hold`, `provider_holds`,
+///   `timer_finishes_held`, `fallback*`, `moved`, `hold_continue`,
+///   `reopens`, `notice_failures`, `rechecks`, `defer`, `loads`,
+///   `resume_config`, `retry_unreadable_review`, `review_material`,
+///   `wrapper_setting_warned`) and the adapters it uses (`repository`,
+///   `remote`, `verifier`, `reviewer`, `codex_jobs`, `signals`, `spawner`,
+///   `files`).
+/// - observation and analysis: `observer`, `observers_launched`,
+///   `observer_again`, `throughput_review`, `report`, `reports`,
+///   `forecasts`, `forecast`, `push`, `candidates`, `ci_watch_port` and
+///   `ci`. Only `ci_watch` changes `ci`; the claim, the resume and the
+///   landing read it through `ci_watch_held` and `ci_watch_unreadable`.
+/// - host operation: the registration and handoff (`token`, `heartbeat`,
+///   `supervisor_file`, `supervisor_error`, `exec`, `handoff`, `draining`,
+///   `stop_recorded`), the queue service, the update, the release, the
+///   broker, sccache, the disk and its cleanup, the sweep, the host's load
+///   and metrics, `service_access`, `no_claude` and `cmux`.
 struct Supervisor<'a> {
     no_claude: bool,
     queue: Box<dyn Queue + Send>,

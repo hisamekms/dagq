@@ -9,6 +9,42 @@
 //! the constants here, or by the constant of the domain module that owns it
 //! (`recheck::LANDING_RECHECK_FINISHED`, `claim_hold::CLAIM_HELD`, ...),
 //! never by a literal; each is the `as_str` of its [`EventKind`].
+//!
+//! Each kind is owned by one context of docs/design/architecture.md, and
+//! only that context writes it; a kind named by a prefix (`run_*`) does
+//! not take in a kind another context names in full. Shared by every
+//! context: `ask_*`, `authorization_denied` and `auto_repaired` (any
+//! context's automatic repair, ADR-0047). The others by prefix:
+//!
+//! - planning: `task_*`, `dependency_*`, `goal_*`, `proposal_*`, `plan_*`,
+//!   `planner_*`, `draft_*`, `follow_up_*`, `request_*` and
+//!   `finding_planner_*`.
+//! - execution and landing: `run_*` (but `run_tmp_removed`), `lease_*`,
+//!   `claim_*`, `worktree_*`, `workspace_*`, `wrapper_*`, `session_*`,
+//!   `turn_*`, `review_*`, `revise_*`, `resume_*`, `triage_*`,
+//!   `recovery_*`, `integration_*`, `landing_*`, `conflict_*`,
+//!   `concern_*`, `exit_*`, `stall_*`, `provider_*`, `hold_*`, `submit_*`
+//!   (typing into a session), `push_*` (the landing's push), and the
+//!   kinds of receipts and validation (`receipt_observed`,
+//!   `validation_finished`, `verification_command`, `scope_violation`,
+//!   `evidence_missing`), of the screen (`prompt_waiting`,
+//!   `prompt_cleared`, `screen_*`, `idle_inferred`, `input_not_ready`,
+//!   `known_dialog_unanswered`) and of the run environment
+//!   (`run_env_changed`, `run_env_program_*`). Named in full too: `worker_mode_converted`, `supervision_finished`,
+//!   `agent_started`, `approve_withheld`, `stale_receipt_*`,
+//!   `queue_hold_applied`, `usage_limited`, `auth_required`,
+//!   `conflicts_config_changed`, `first_commit_observed`,
+//!   `migration_renumbered`, `job_restarted`, `runtime_error` and
+//!   `cleanup_failed`. The kinds of the retired worker screen and keys are
+//!   kept only so old records are read.
+//! - observation and analysis: `observation`, `observe_*`, `finding_*`
+//!   (but `finding_planner_*`), `mark_*`, `forecast_recorded`, `kpi_*`,
+//!   `report_written`, `throughput_review_*`, `candidates_sampled` and the
+//!   CI watch's `ci_*`.
+//! - host operation: `supervisor_*`, `update_*`, `release_check*`,
+//!   `broker_*`, `queue_service_*`, `sccache_*`, `inbox_*`, the cleanup's
+//!   `build_outputs_removed`, `scratchpad_removed` and `run_tmp_removed`,
+//!   `backend_call_failed` and `headless_job_stopped`.
 
 macro_rules! event_kinds {
     ($($variant:ident => $name:literal,)*) => {

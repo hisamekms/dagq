@@ -26,12 +26,6 @@ path = "docs/design/agent-eval.md"
 tasks = 8
 
 [[doc]]
-path = "docs/design/architecture.md"
-size = 50606
-line = 2071
-tasks = 27
-
-[[doc]]
 path = "docs/design/authorization.md"
 size = 49549
 line = 2281
