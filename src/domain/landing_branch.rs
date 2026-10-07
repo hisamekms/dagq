@@ -12,6 +12,22 @@ use super::DomainError;
 /// set (ADR-0019 decision 3, ADR-t615-1).
 pub const DEFAULT_REMOTE: &str = "origin";
 
+/// The supervisor started holding its claims and landings because the
+/// landing branch does not resolve (`reason`: `unresolved`, `error`,
+/// `supervisor`).
+pub const LANDING_BRANCH_UNRESOLVED: &str =
+    super::event_kind::EventKind::LandingBranchUnresolved.as_str();
+/// The landing branch resolves again (`reason` that ended, `supervisor`).
+pub const LANDING_BRANCH_RESOLVED: &str =
+    super::event_kind::EventKind::LandingBranchResolved.as_str();
+/// The supervisor's hold while the landing branch does not resolve.
+pub const LANDING_BRANCH_HOLD: super::claim_hold::OwnHold = super::claim_hold::OwnHold {
+    held: super::event_kind::EventKind::LandingBranchUnresolved,
+    resumed: super::event_kind::EventKind::LandingBranchResolved,
+};
+/// The `reason` of [`LANDING_BRANCH_UNRESOLVED`].
+pub const UNRESOLVED_REASON: &str = "unresolved";
+
 string_enum!(BranchSource {
     Config => "config",
     RemoteHead => "remote_head",

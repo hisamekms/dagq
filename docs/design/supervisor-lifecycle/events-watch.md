@@ -20,6 +20,8 @@ attentionイベントの判定は`domain::event_attention(kind, payload)`（候�
 
 sccacheの再起動失敗もqueue全体の知らせとしてinboxを起こす。
 判定の入口は`domain::event_attention`、現在の知らせを消す条件は`application::health::attention`。
+supervisorがclaimを止めている記録（`claim_held`・`ci_watch_held`・`landing_branch_unresolved`とその終わり）はattentionにせず、`events --all`と`status`・`candidates`の`held`で読む。
+人の手が要る原因は別のattention（`ci_watch_unavailable`・`run_env_program_missing`など）が知らせる。
 復旧の分担は[Run environment](run-environment.md#外部serverと失敗の偏り)が持つ。
 
 task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足した。`--full`は各イベントを`id`、`kind`、`task_id`、`goal_id`、`run_id`（無ければnull）、`payload`（切り詰めない）、`created_at`の全フィールドで返す。task 730から、書いたactorを`actor`（`role`・`id`と、headless jobのverdictを適用したeventでは`requested_by`。[Roles](roles.md)のeventのactor）に足し、actorを記録する前の行には`actor`の欄が無い。絞り込みは`--run RUN`、`--task ID`、`--goal ID`（goalのイベントと、そのgoalのtaskとrunのイベント）、`--kind KIND`（繰り返し可）、`--since` / `--until`（UTCの`YYYY-MM-DD`（その日の0時）か`YYYY-MM-DDTHH:MM:SS[.fff][Z]`。桁と範囲を検査し、合わない値はerror。`since <= created_at < until`）で、どれも組み合わせられ、`--after` / `--limit` / cursorの意味は変わらない。`--kind`を渡すと既定のattentionだけの絞り込みは外れ、そのkindをattentionかどうかに関わらず返す。`--kind`も`--all`も無いときは、`--run` / `--task` / `--goal` / 時刻の絞り込みもattentionのイベントの中で効く（全kindを読むには`--all`を付ける）。条件は`EventFilter`（`src/domain/views.rs`）で、`SqliteQueue::events_between`が1つのSQLで絞る。

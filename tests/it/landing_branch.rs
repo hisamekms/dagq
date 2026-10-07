@@ -500,4 +500,37 @@ fn a_running_supervisor_follows_each_change_of_the_landing_branch() {
     assert_eq!(outcome["outcome"], "stopped", "{outcome}");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(queue.show(TaskId::new(1)).unwrap().runs.is_empty());
+    // Each hold and its end recorded once, though the branch that did not
+    // resolve was resolved again at every pass.
+    let records: Vec<(String, Value)> = rusqlite::Connection::open(&db)
+        .unwrap()
+        .prepare(
+            "SELECT kind, payload FROM run_events \
+             WHERE kind IN ('landing_branch_unresolved', 'landing_branch_resolved') ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                serde_json::from_str(&row.get::<_, String>(1)?).unwrap(),
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let kinds: Vec<&str> = records.iter().map(|(kind, _)| kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["landing_branch_unresolved", "landing_branch_resolved"].repeat(3),
+        "{records:?}"
+    );
+    for (kind, payload) in &records {
+        assert_eq!(payload["reason"], "unresolved", "{kind}");
+        assert!(payload["supervisor"].is_string(), "{kind}");
+        assert_eq!(
+            payload["error"].is_string(),
+            kind == "landing_branch_unresolved",
+            "{payload}"
+        );
+    }
 }

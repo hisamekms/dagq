@@ -166,3 +166,91 @@ fn the_recorded_holds_stand_in_held_and_leave_the_order_alone() {
         ["broker_claims_held", "run_env_program_missing"]
     );
 }
+
+/// A live supervisor's hold for the CI watch and for a landing branch that
+/// does not resolve stand in `held` with their records until it records
+/// their end, whatever another supervisor records after it; a gone
+/// supervisor's hold holds nothing.
+#[test]
+fn the_ci_watch_and_landing_branch_holds_stand_in_held() {
+    let (_dir, db) = queue();
+    three_ready(&db);
+    for token in ["live", "other"] {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .register_supervisor(&LeaseToken::new(token), std::process::id(), 2, "0.0.1")
+            .unwrap();
+    }
+    record_queue(
+        &db,
+        EventKind::CiWatchHeld,
+        json!({"reason": "pending", "workflow": "ci.yml", "supervisor": "gone"}),
+    );
+    record_queue(
+        &db,
+        EventKind::LandingBranchUnresolved,
+        json!({"reason": "unresolved", "error": "no branch", "supervisor": "gone"}),
+    );
+    assert_eq!(reasons(&ok(&db, &["candidates"])), Vec::<String>::new());
+
+    record_queue(
+        &db,
+        EventKind::CiWatchHeld,
+        json!({"reason": "unreadable", "workflow": "ci.yml", "supervisor": "live"}),
+    );
+    record_queue(
+        &db,
+        EventKind::LandingBranchUnresolved,
+        json!({"reason": "unresolved", "error": "no branch", "supervisor": "live"}),
+    );
+    // The other supervisor's hold and its end, after the live one's.
+    record_queue(
+        &db,
+        EventKind::CiWatchHeld,
+        json!({"reason": "pending", "workflow": "ci.yml", "supervisor": "other"}),
+    );
+    record_queue(
+        &db,
+        EventKind::CiWatchResumed,
+        json!({"reason": "pending", "supervisor": "other"}),
+    );
+    let view = ok(&db, &["candidates"]);
+    assert_eq!(
+        reasons(&view),
+        ["ci_watch_held", "landing_branch_unresolved"]
+    );
+    assert_eq!(view["held"][0]["record"]["reason"], "unreadable");
+    assert_eq!(view["held"][1]["record"]["error"], "no branch");
+    assert!(view["held"][1]["since"].is_string(), "{view}");
+    assert_eq!(ids(&view["candidates"]), [2, 1, 3]);
+    assert_eq!(view["deferred"], json!([]));
+    // `status` shows each on its supervisor only.
+    let status = ok(&db, &["status"]);
+    let supervisors = status["supervisors"].as_array().unwrap();
+    assert_eq!(supervisors.len(), 2, "{status}");
+    let holding: Vec<&Value> = supervisors
+        .iter()
+        .filter(|supervisor| supervisor.get("ci_watch_hold").is_some())
+        .collect();
+    assert_eq!(holding.len(), 1, "{status}");
+    assert_eq!(
+        holding[0]["ci_watch_hold"]["reason"], "unreadable",
+        "{status}"
+    );
+    assert_eq!(
+        holding[0]["landing_branch_hold"]["error"], "no branch",
+        "{status}"
+    );
+
+    record_queue(
+        &db,
+        EventKind::CiWatchResumed,
+        json!({"reason": "unreadable", "supervisor": "live"}),
+    );
+    record_queue(
+        &db,
+        EventKind::LandingBranchResolved,
+        json!({"reason": "unresolved", "supervisor": "live"}),
+    );
+    assert_eq!(reasons(&ok(&db, &["candidates"])), Vec::<String>::new());
+}

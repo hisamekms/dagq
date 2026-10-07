@@ -13,7 +13,8 @@
 use super::*;
 use crate::application::ci_watch::{CheckOutcome, CiSource};
 use crate::domain::ci_watch::{
-    CI_WATCH_ACCESS_KINDS, CiWatchConfig, FailureStreak, available_after_failure, check_due,
+    CI_WATCH_ACCESS_KINDS, CI_WATCH_HOLD, CiWatchConfig, FailureStreak, available_after_failure,
+    check_due, hold_reason,
 };
 
 /// Reads `[ci_watch]` of the main checkout's `dagq.toml` (`None` without
@@ -50,6 +51,9 @@ pub(super) struct CiWatchState {
     /// this process's first one (or without the table).
     available: Option<bool>,
     failures: FailureStreak,
+    /// The hold's reason this process last recorded or found recorded
+    /// (`Some(None)`: none); `None` before its first look at the queue.
+    recorded: Option<Option<&'static str>>,
 }
 
 impl CiWatchState {
@@ -63,7 +67,7 @@ impl Supervisor<'_> {
     /// means to read the CI: the table is set and this process has no
     /// answer yet or the last one found them missing.
     pub(super) fn ci_watch_held(&self) -> bool {
-        self.ci.config.is_some() && self.ci.available != Some(true)
+        hold_reason(self.ci.config.is_some(), self.ci.available).is_some()
     }
 
     /// Whether the last answer found the means to read the CI missing (not
@@ -73,11 +77,36 @@ impl Supervisor<'_> {
     }
 
     /// Read `[ci_watch]` again, reap the check that ended and start the one
-    /// that is due.
+    /// that is due, then record where the hold for the watch changed.
     pub(super) fn ci_watch_pass(&mut self) {
         let Some(port) = self.ci_watch_port.clone() else {
             return;
         };
+        self.ci_watch_step(&port);
+        self.record_ci_watch_hold();
+    }
+
+    /// Record `ci_watch_held` / `ci_watch_resumed` when the hold's reason
+    /// ([`hold_reason`]) differs from the one this process last recorded,
+    /// against its own latest on the queue; a pass that changes nothing
+    /// reads nothing.
+    fn record_ci_watch_hold(&mut self) {
+        let reason = hold_reason(self.ci.config.is_some(), self.ci.available);
+        if self.ci.recorded == Some(reason) {
+            return;
+        }
+        let workflow = self
+            .ci
+            .config
+            .as_ref()
+            .map(|config| config.workflow.clone());
+        let hold = reason.map(|reason| (reason, json!({"workflow": workflow})));
+        if self.record_own_hold(CI_WATCH_HOLD, hold) {
+            self.ci.recorded = Some(reason);
+        }
+    }
+
+    fn ci_watch_step(&mut self, port: &CiWatchPort) {
         match (port.file)() {
             Ok(config) => {
                 if config != self.ci.config {

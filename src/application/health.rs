@@ -490,7 +490,9 @@ fn provider_checks(
 /// that wait to go back (`state: returning` in `waiting`). A supervisor that holds its claims
 /// has `claim_hold`: its latest `claim_held` payload and `since` (task
 /// 327); one that holds the landings' verification for the disk has
-/// `landing_hold` in the same shape (task 377).
+/// `landing_hold` in the same shape (task 377), and one that holds its
+/// claims for the CI watch or a landing branch that does not resolve
+/// `ci_watch_hold` / `landing_branch_hold`.
 fn slots_and_waits(
     queue: &dyn Queue,
     health: Vec<SupervisorHealth>,
@@ -555,6 +557,19 @@ fn slots_and_waits(
         ("landing_hold", held(crate::domain::claim_hold::LANDINGS)?),
         ("provider_hold", provider_hold),
     ];
+    // Each supervisor's own holds, by its own latest record.
+    let own_holds = [
+        (
+            "ci_watch_hold",
+            crate::domain::ci_watch::CI_WATCH_HOLD,
+            own_hold_records(queue, crate::domain::ci_watch::CI_WATCH_HOLD)?,
+        ),
+        (
+            "landing_branch_hold",
+            crate::domain::landing_branch::LANDING_BRANCH_HOLD,
+            own_hold_records(queue, crate::domain::landing_branch::LANDING_BRANCH_HOLD)?,
+        ),
+    ];
     let supervisors = health
         .into_iter()
         .enumerate()
@@ -589,6 +604,13 @@ fn slots_and_waits(
                         event.payload.get("supervisor").and_then(Value::as_str)
                             == Some(registration.token.as_str())
                     }) {
+                        let mut held = event.payload.clone();
+                        held["since"] = json!(event.created_at);
+                        value[*key] = held;
+                    }
+                }
+                for (key, kinds, records) in &own_holds {
+                    if let Some(event) = own_held(*kinds, records, registration.token.as_str()) {
                         let mut held = event.payload.clone();
                         held["since"] = json!(event.created_at);
                         value[*key] = held;
@@ -639,7 +661,8 @@ fn claim_spacing(
 /// `candidates`' `held` (ADR-t1992-1): `no_supervisor` while no registered
 /// supervisor is alive with a fresh heartbeat, then the latest record of
 /// each hold that is on (`claim_held` for the load, the disk or a queue
-/// hold, `broker_claims_held`, `run_env_program_missing`) of a live
+/// hold, `broker_claims_held`, `run_env_program_missing`, `ci_watch_held`,
+/// `landing_branch_unresolved`) of a live
 /// supervisor or of none named, then each live
 /// supervisor's wait for its claim spacing. A hold no supervisor records
 /// is not shown, nor guessed at.
@@ -690,8 +713,44 @@ pub fn claim_holds(
             .and_then(Value::as_str)
             .is_none_or(|token| live.iter().any(|r| r.token.as_str() == token))
     };
-    let records = records.into_iter().flatten().filter(of_live);
+    let mut records: Vec<RunEvent> = records.into_iter().flatten().filter(of_live).collect();
+    // Each live supervisor's own holds, by its own latest record.
+    for kinds in [
+        crate::domain::ci_watch::CI_WATCH_HOLD,
+        crate::domain::landing_branch::LANDING_BRANCH_HOLD,
+    ] {
+        let own = own_hold_records(queue, kinds)?;
+        records.extend(
+            live.iter()
+                .filter_map(|registration| own_held(kinds, &own, registration.token.as_str())),
+        );
+    }
     Ok(held(live.is_empty(), records, spacing))
+}
+
+/// The newest records of both kinds of a supervisor's own hold
+/// ([`OwnHold`](crate::domain::claim_hold::OwnHold)), each supervisor's
+/// latest among them ([`OwnHold::latest_of`](crate::domain::claim_hold::OwnHold::latest_of)).
+pub(crate) fn own_hold_records(
+    queue: &(impl super::RunLog + ?Sized),
+    kinds: crate::domain::claim_hold::OwnHold,
+) -> Result<Vec<RunEvent>> {
+    let mut records = Vec::new();
+    for kind in kinds.kinds() {
+        records.extend(queue.latest_events_of(kind, crate::domain::claim_hold::OWN_HOLD_RECENT)?);
+    }
+    Ok(records)
+}
+
+/// The latest record of `token`'s own hold of `kinds` among `records`
+/// when it holds.
+fn own_held(
+    kinds: crate::domain::claim_hold::OwnHold,
+    records: &[RunEvent],
+    token: &str,
+) -> Option<RunEvent> {
+    let latest = crate::domain::claim_hold::OwnHold::latest_of(records, token);
+    kinds.holds(latest).then(|| latest.cloned()).flatten()
 }
 
 /// The entries of `held` (`reason`, `since` when known, the `record` as

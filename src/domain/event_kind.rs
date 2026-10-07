@@ -101,6 +101,8 @@ event_kinds! {
     CiTurnedGreen => "ci_turned_green",
     CiTurnedRed => "ci_turned_red",
     CiWatchAvailable => "ci_watch_available",
+    CiWatchHeld => "ci_watch_held",
+    CiWatchResumed => "ci_watch_resumed",
     CiWatchUnavailable => "ci_watch_unavailable",
     ClaimDeferralEnded => "claim_deferral_ended",
     ClaimDeferred => "claim_deferred",
@@ -180,6 +182,8 @@ event_kinds! {
     KpiPushFailed => "kpi_push_failed",
     KpiPushSent => "kpi_push_sent",
     LandingDecided => "landing_decided",
+    LandingBranchResolved => "landing_branch_resolved",
+    LandingBranchUnresolved => "landing_branch_unresolved",
     LandingHeld => "landing_held",
     LandingQueued => "landing_queued",
     LandingReleaseStuck => "landing_release_stuck",
@@ -413,6 +417,12 @@ impl EventKind {
                 | CiWatchUnavailable
                 | CiWatchAvailable
                 | CiCheckFailed
+                // The supervisor's hold of its claims for the CI watch and
+                // for a landing branch that does not resolve (task 2016).
+                | CiWatchHeld
+                | CiWatchResumed
+                | LandingBranchUnresolved
+                | LandingBranchResolved
                 | SessionOpened
                 | SessionClosed
                 // A planner's screen inferred idle without its idle marker
@@ -961,6 +971,8 @@ mod tests {
             (EventKind::CiTurnedGreen, "ci_turned_green"),
             (EventKind::CiTurnedRed, "ci_turned_red"),
             (EventKind::CiWatchAvailable, "ci_watch_available"),
+            (EventKind::CiWatchHeld, "ci_watch_held"),
+            (EventKind::CiWatchResumed, "ci_watch_resumed"),
             (EventKind::CiWatchUnavailable, "ci_watch_unavailable"),
             (EventKind::ClaimDeferralEnded, "claim_deferral_ended"),
             (EventKind::ClaimDeferred, "claim_deferred"),
@@ -1055,6 +1067,11 @@ mod tests {
             (EventKind::KpiPushFailed, "kpi_push_failed"),
             (EventKind::KpiPushSent, "kpi_push_sent"),
             (EventKind::LandingDecided, "landing_decided"),
+            (EventKind::LandingBranchResolved, "landing_branch_resolved"),
+            (
+                EventKind::LandingBranchUnresolved,
+                "landing_branch_unresolved",
+            ),
             (EventKind::LandingHeld, "landing_held"),
             (EventKind::LandingQueued, "landing_queued"),
             (EventKind::LandingReleaseStuck, "landing_release_stuck"),

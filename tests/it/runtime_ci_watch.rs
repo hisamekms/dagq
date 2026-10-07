@@ -151,10 +151,26 @@ fn red(gh: &Path, id: i64, failed: &[&str], passed: &[&str]) {
 }
 
 /// The queue events of the watch, oldest first: (kind, payload).
+/// The check's records: the supervisor's hold for the watch apart
+/// ([`hold_events`]).
 fn watch_events(db: &Path) -> Vec<(String, Value)> {
+    events_where(
+        db,
+        "kind LIKE 'ci_%' AND kind NOT IN ('ci_watch_held', 'ci_watch_resumed')",
+    )
+}
+
+/// The supervisors' `ci_watch_held` / `ci_watch_resumed`.
+fn hold_events(db: &Path) -> Vec<(String, Value)> {
+    events_where(db, "kind IN ('ci_watch_held', 'ci_watch_resumed')")
+}
+
+fn events_where(db: &Path, filter: &str) -> Vec<(String, Value)> {
     Connection::open(db)
         .unwrap()
-        .prepare("SELECT kind, payload FROM run_events WHERE kind LIKE 'ci_%' ORDER BY id")
+        .prepare(&format!(
+            "SELECT kind, payload FROM run_events WHERE {filter} ORDER BY id"
+        ))
         .unwrap()
         .query_map([], |row| {
             Ok((
@@ -479,6 +495,47 @@ fn a_missing_or_logged_out_gh_holds_the_claims_and_tells_the_inbox() {
     assert_eq!(events[2].0, "ci_watch_available");
     assert_eq!(events[2].1["resolved"], gh.to_str().unwrap());
     assert!(attention(&db).is_none());
+    // Each supervisor recorded its hold where it changed, not per pass:
+    // waiting for its first answer, then for the means while they were
+    // missing, and its end once they were there.
+    let holds: Vec<(String, String, String)> = hold_events(&db)
+        .into_iter()
+        .map(|(kind, payload)| {
+            (
+                payload["supervisor"].as_str().unwrap().to_owned(),
+                kind,
+                payload["reason"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let mut supervisors: Vec<&str> = holds.iter().map(|(token, ..)| token.as_str()).collect();
+    supervisors.dedup();
+    assert_eq!(supervisors.len(), 4, "{holds:?}");
+    let of = |token: &str| -> Vec<(&str, &str)> {
+        holds
+            .iter()
+            .filter(|(holder, ..)| holder == token)
+            .map(|(_, kind, reason)| (kind.as_str(), reason.as_str()))
+            .collect()
+    };
+    for token in &supervisors[..3] {
+        assert_eq!(
+            of(token),
+            [
+                ("ci_watch_held", "pending"),
+                ("ci_watch_held", "unreadable")
+            ],
+            "{holds:?}"
+        );
+    }
+    assert_eq!(
+        of(supervisors[3]),
+        [
+            ("ci_watch_held", "pending"),
+            ("ci_watch_resumed", "pending")
+        ],
+        "{holds:?}"
+    );
     assert_eq!(
         dagq::infrastructure::ci_watch::preflight(&repo, Some(path.clone().into())).unwrap(),
         None
@@ -506,6 +563,7 @@ fn without_the_table_nothing_is_watched_nor_held() {
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(watch_events(&db).is_empty());
+    assert!(hold_events(&db).is_empty());
     assert_eq!(runtime::status(&db).unwrap()["ci"], Value::Null);
     assert_eq!(
         runtime::ci_failures(&db, None).unwrap(),

@@ -452,6 +452,54 @@ fn raw(queue: &Queue, request: &Value) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 
+/// A live supervisor's hold for the CI watch and for a landing branch
+/// that does not resolve stand in `candidates`' `held` as the command line
+/// prints it, with their records, and leave the order alone.
+#[test]
+fn the_supervisors_own_holds_are_served_in_held_as_printed() {
+    use dagq::domain::{EventKind, LeaseToken};
+    use dagq::infrastructure::sqlite::SqliteQueue;
+    let (queue, _, _) = seeded();
+    let mut sqlite = SqliteQueue::open(&queue.db).unwrap();
+    sqlite
+        .register_supervisor(&LeaseToken::new("live"), std::process::id(), 2, "0.0.1")
+        .unwrap();
+    sqlite
+        .record_queue_event(
+            EventKind::CiWatchHeld,
+            json!({"reason": "unreadable", "workflow": "ci.yml", "supervisor": "live"}),
+        )
+        .unwrap();
+    sqlite
+        .record_queue_event(
+            EventKind::LandingBranchUnresolved,
+            json!({"reason": "unresolved", "error": "no landing branch", "supervisor": "live"}),
+        )
+        .unwrap();
+    let plan_review = token(&queue, &Principal::of(&ActorContext::plan_review_job(1, 1)));
+    let served = answer(&queue, &plan_review, UseCase::Candidates, &Value::Null);
+    let reasons: Vec<&str> = served["held"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|held| held["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        ["ci_watch_held", "landing_branch_unresolved"],
+        "{served}"
+    );
+    assert_eq!(served["held"][0]["record"]["reason"], "unreadable");
+    assert_eq!(served["held"][1]["record"]["error"], "no landing branch");
+    same_as_cli(
+        &queue,
+        &plan_review,
+        UseCase::Candidates,
+        &Value::Null,
+        &["candidates"],
+    );
+}
+
 #[test]
 fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
     let (queue, task, _) = seeded();

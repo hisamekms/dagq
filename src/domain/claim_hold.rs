@@ -311,6 +311,78 @@ pub fn transition_of(
     }
 }
 
+/// A hold of one supervisor's claims kept outside [`ClaimHold::judge`]
+/// (the CI watch's, [`super::ci_watch::CI_WATCH_HOLD`]; the landing
+/// branch's, [`super::landing_branch::LANDING_BRANCH_HOLD`]), recorded by
+/// its pair of queue events only where it changes, so that `status` and
+/// `candidates`' `held` read it. Each supervisor's records stand apart:
+/// one's hold is read from its own latest record, which another's do not
+/// end or repeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnHold {
+    pub held: EventKind,
+    pub resumed: EventKind,
+}
+
+/// How many of the newest records of each kind of an [`OwnHold`] are read
+/// for each supervisor's latest: they are written only where a hold
+/// changes, so a live supervisor's latest is among them unless the others
+/// changed theirs this many times since.
+pub const OWN_HOLD_RECENT: usize = 64;
+
+impl OwnHold {
+    /// Both kinds, for reading the latest of them.
+    pub const fn kinds(self) -> [&'static str; 2] {
+        [self.held.as_str(), self.resumed.as_str()]
+    }
+
+    /// The latest of `records` (of the two kinds, in any order) that the
+    /// supervisor `token` recorded.
+    pub fn latest_of<'e>(records: &'e [RunEvent], token: &str) -> Option<&'e RunEvent> {
+        records
+            .iter()
+            .filter(|event| text(event, "supervisor") == Some(token))
+            .max_by_key(|event| event.id)
+    }
+
+    /// Whether `latest` (a supervisor's latest record) is a hold.
+    pub fn holds(self, latest: Option<&RunEvent>) -> bool {
+        latest.is_some_and(|event| event.kind == self.held.as_str())
+    }
+
+    /// The event the supervisor `token` records when its hold (`hold`: the
+    /// reason and the rest of the payload, `None` while it holds nothing)
+    /// differs from its own latest record (`last`, [`Self::latest_of`]):
+    /// `held` when it holds and the last one is not a hold for the same
+    /// reason, `resumed` (with the reason that ended) when it holds nothing
+    /// and the last one is a hold, else none.
+    pub fn transition(
+        self,
+        hold: Option<(&str, Value)>,
+        last: Option<&RunEvent>,
+        token: &LeaseToken,
+    ) -> Option<(EventKind, Value)> {
+        let held = last.filter(|event| self.holds(Some(event)));
+        let held_reason = held.and_then(|event| text(event, "reason"));
+        match hold {
+            Some((reason, _)) if held_reason == Some(reason) => None,
+            Some((reason, mut payload)) => {
+                if !payload.is_object() {
+                    payload = json!({});
+                }
+                payload["reason"] = json!(reason);
+                payload["supervisor"] = json!(token);
+                Some((self.held, payload))
+            }
+            None if held.is_some() => Some((
+                self.resumed,
+                json!({"reason": held_reason, "supervisor": token}),
+            )),
+            None => None,
+        }
+    }
+}
+
 /// One reason's holds in a window.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ReasonHolds {
@@ -440,6 +512,59 @@ mod tests {
             created_at: format!("2026-09-26T01:{at}.000Z"),
             actor: None,
         }
+    }
+
+    /// An own hold is recorded once where it starts, again only for
+    /// another reason, and closed once; each supervisor reads its own
+    /// latest record, which another's records do not change.
+    #[test]
+    fn an_own_hold_records_only_its_changes() {
+        use super::super::ci_watch::{CI_WATCH_HELD, CI_WATCH_HOLD as HOLD, CI_WATCH_RESUMED};
+        let me = LeaseToken::new("me");
+        let record = |id: i64, kind: &str, reason: &str, by: &str| {
+            event(
+                id,
+                kind,
+                json!({"reason": reason, "supervisor": by}),
+                "00:00",
+            )
+        };
+        let pending = || Some(("pending", json!({"workflow": "ci.yml"})));
+        let (kind, payload) = HOLD.transition(pending(), None, &me).unwrap();
+        assert_eq!(kind, EventKind::CiWatchHeld);
+        assert_eq!(
+            payload,
+            json!({"reason": "pending", "workflow": "ci.yml", "supervisor": "me"})
+        );
+        let mine = record(1, CI_WATCH_HELD, "pending", "me");
+        assert!(HOLD.transition(pending(), Some(&mine), &me).is_none());
+        let (kind, payload) = HOLD
+            .transition(Some(("unreadable", json!({}))), Some(&mine), &me)
+            .unwrap();
+        assert_eq!(
+            (kind, payload["reason"].as_str()),
+            (EventKind::CiWatchHeld, Some("unreadable"))
+        );
+        let (kind, payload) = HOLD.transition(None, Some(&mine), &me).unwrap();
+        assert_eq!(kind, EventKind::CiWatchResumed);
+        assert_eq!(payload, json!({"reason": "pending", "supervisor": "me"}));
+        let resumed = record(2, CI_WATCH_RESUMED, "pending", "me");
+        assert!(HOLD.transition(None, Some(&resumed), &me).is_none());
+        assert!(HOLD.transition(None, None, &me).is_none());
+
+        // Another supervisor's records, before and after, are not this one's
+        // latest: neither repeats its hold nor ends it.
+        let records = [
+            record(3, CI_WATCH_HELD, "pending", "other"),
+            mine.clone(),
+            record(4, CI_WATCH_RESUMED, "pending", "other"),
+        ];
+        let latest = OwnHold::latest_of(&records, "me");
+        assert_eq!(latest.map(|event| event.id), Some(mine.id));
+        assert!(HOLD.holds(latest));
+        assert!(HOLD.transition(pending(), latest, &me).is_none());
+        assert!(!HOLD.holds(OwnHold::latest_of(&records, "other")));
+        assert!(OwnHold::latest_of(&records, "gone").is_none());
     }
 
     fn load(value: Option<f64>, max: Option<f64>) -> Option<ClaimHold> {

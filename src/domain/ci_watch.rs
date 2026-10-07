@@ -34,6 +34,20 @@ pub const CI_WATCH_AVAILABLE: &str = EventKind::CiWatchAvailable.as_str();
 pub const CI_CHECK_FAILED: &str = EventKind::CiCheckFailed.as_str();
 /// The two kinds of the means' state, for reading the latest of them.
 pub const CI_WATCH_ACCESS_KINDS: [&str; 2] = [CI_WATCH_UNAVAILABLE, CI_WATCH_AVAILABLE];
+/// The supervisor started holding its claims, resumes and landings for
+/// the watch (`reason`: `pending` before this process's first answer,
+/// `unreadable` while the last one found the means missing; `workflow`,
+/// `supervisor`), or holds them for the other reason.
+pub const CI_WATCH_HELD: &str = EventKind::CiWatchHeld.as_str();
+/// The hold for the watch ended (`reason` that ended, `supervisor`).
+pub const CI_WATCH_RESUMED: &str = EventKind::CiWatchResumed.as_str();
+/// The supervisor's hold for the watch, which the check's own records do
+/// not show: [`CI_WATCH_UNAVAILABLE`] is the queue's answer, not whether
+/// a supervisor waits for one.
+pub const CI_WATCH_HOLD: super::claim_hold::OwnHold = super::claim_hold::OwnHold {
+    held: EventKind::CiWatchHeld,
+    resumed: EventKind::CiWatchResumed,
+};
 /// Every kind the watch records, oldest first in the queue.
 pub const CI_WATCH_KINDS: [&str; 6] = [
     CI_CHECKED,
@@ -1063,6 +1077,18 @@ pub fn available_after_failure(last: Option<&str>) -> bool {
     last != Some(CI_WATCH_UNAVAILABLE)
 }
 
+/// Why a supervisor with `[ci_watch]` (`watched`) holds its claims, resumes
+/// and landings for the watch, by the means' state at its last answer
+/// (`available`): `pending` before its first answer, `unreadable` while the
+/// means are missing; `None` while it does not hold.
+pub fn hold_reason(watched: bool, available: Option<bool>) -> Option<&'static str> {
+    match (watched, available) {
+        (false, _) | (true, Some(true)) => None,
+        (true, None) => Some("pending"),
+        (true, Some(false)) => Some("unreadable"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1779,5 +1805,14 @@ mod tests {
         assert!(available_after_failure(None));
         assert!(available_after_failure(Some(CI_WATCH_AVAILABLE)));
         assert!(!available_after_failure(Some(CI_WATCH_UNAVAILABLE)));
+    }
+
+    #[test]
+    fn the_watch_holds_until_an_answer_finds_the_means() {
+        assert_eq!(hold_reason(false, None), None);
+        assert_eq!(hold_reason(false, Some(false)), None);
+        assert_eq!(hold_reason(true, None), Some("pending"));
+        assert_eq!(hold_reason(true, Some(false)), Some("unreadable"));
+        assert_eq!(hold_reason(true, Some(true)), None);
     }
 }

@@ -923,6 +923,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         run_env_missing: false,
         candidates: None,
         landing_unresolved: false,
+        landing_recorded: None,
         landing_stamp: None,
         queue_hold: None,
         provider_holds: Vec::new(),
@@ -1179,6 +1180,10 @@ struct Supervisor<'a> {
     /// (ADR-t615-1): nothing is claimed and no passed run lands until it
     /// does.
     landing_unresolved: bool,
+    /// The reason of the landing branch's hold this process last recorded
+    /// or found recorded (`Some(None)`: none); `None` before its first look
+    /// at the queue, or after a record that failed.
+    landing_recorded: Option<Option<&'static str>>,
     /// The stamp of the landing branch's inputs taken before its last
     /// resolution, and when (task 1078): a pass whose stamp is the same,
     /// within [`LANDING_BRANCH_RECHECK`], keeps that resolution without
@@ -2296,28 +2301,76 @@ impl Supervisor<'_> {
             && stamp == last
             && at.elapsed() < recheck
         {
+            // A resolution kept after a record of its end that failed.
+            if self.landing_recorded != Some(None) {
+                self.record_landing_hold(None);
+            }
             return;
         }
         self.landing_stamp = stamp.map(|stamp| (stamp, Instant::now()));
         self.resolve_landing_branch();
     }
     /// Resolve the landing branch now and hold claims and landings while it
-    /// does not resolve, warning when that changes.
+    /// does not resolve, warning when that changes, and record
+    /// `landing_branch_unresolved` / `landing_branch_resolved` where the
+    /// hold differs from this supervisor's latest record, so `status` and
+    /// `candidates` read it, and a pass that resolves it again records
+    /// nothing.
     fn resolve_landing_branch(&mut self) {
-        match self.repository.landing_branch() {
+        let error = match self.repository.landing_branch() {
             Ok(branch) => {
                 if self.landing_unresolved {
                     info!(branch = %branch.name, "the landing branch resolves again to {}; claiming and landing resume", branch.name);
                 }
                 self.landing_unresolved = false;
+                None
             }
             Err(error) => {
                 if !self.landing_unresolved {
                     warn!(error = %format_args!("{error:#}"), "{error:#}; no task is claimed and no run lands until it resolves");
                 }
                 self.landing_unresolved = true;
+                Some(format!("{error:#}"))
             }
+        };
+        self.record_landing_hold(error);
+    }
+    /// Record the landing branch's hold (`error` while it does not
+    /// resolve) where it differs from the one this process last recorded.
+    fn record_landing_hold(&mut self, error: Option<String>) {
+        use crate::domain::landing_branch::{LANDING_BRANCH_HOLD, UNRESOLVED_REASON};
+        let reason = error.is_some().then_some(UNRESOLVED_REASON);
+        if self.landing_recorded == Some(reason) {
+            return;
         }
+        let hold = error.map(|error| (UNRESOLVED_REASON, json!({"error": error})));
+        self.landing_recorded = self
+            .record_own_hold(LANDING_BRANCH_HOLD, hold)
+            .then_some(reason);
+    }
+    /// Record the change of a hold of this supervisor's claims kept in its
+    /// memory against its own latest record
+    /// ([`claim_hold::OwnHold::transition`]); a queue that cannot be read
+    /// or written is warned of and `false` returned, for the caller to try
+    /// again.
+    pub(super) fn record_own_hold(
+        &mut self,
+        kinds: claim_hold::OwnHold,
+        hold: Option<(&str, Value)>,
+    ) -> bool {
+        let recorded =
+            crate::application::health::own_hold_records(&*self.queue, kinds).and_then(|records| {
+                let last = claim_hold::OwnHold::latest_of(&records, self.token.as_str());
+                match kinds.transition(hold, last, &self.token) {
+                    Some((kind, payload)) => self.queue.record_queue_event(kind, payload).map(drop),
+                    None => Ok(()),
+                }
+            });
+        if let Err(error) = recorded {
+            warn!(error = %format_args!("{error:#}"), "the hold {} could not be recorded: {error:#}", kinds.held.as_str());
+            return false;
+        }
+        true
     }
     /// Record `run_env_changed` when the normalized `[run.env]` of the main
     /// checkout hashes differently from the latest one on the queue

@@ -74,6 +74,11 @@ related:
 - **`up`のpreflight**: `[ci_watch]`があれば、`[run.env]`の検査の後に`up`のPATHで上の「読む手段の確かめ」を行い（`lifecycle::Ports::ci_watch_preflight`、実装は`infrastructure::ci_watch::preflight`）、だめならsupervisorを起動せず、理由と対処（`gh`を入れる・`gh auth login`・remoteを直す、または`dagq.toml`から`[ci_watch]`を外すtaskを登録する）を挙げ`; the supervisor was not started`で終わるerrorで止まる。
 - **supervisor**: 確かめるたびに答えを見て、`[ci_watch]`があり、このプロセスがまだ答えを持たないか最後の答えがだめな間（`ci_watch_held`）は、各fill passのclaimをせず、reviewを通ったrunは着地slotを取らずに`awaiting_integration`で待たせ（`Phase::AwaitingSlot`。着地の列のrunの`start_approved_landings`も待つ）、drain・handoff・claimの停止の最中なら、最後の答えがだめなとき（`ci_watch_unreadable`）だけleaseを返す（理由`the CI [ci_watch] watches cannot be read`。最初の答えを待っている間は返さずに待つ）。どれも`[run.env]`のプログラムが見つからないとき（「着地の保留」）と同じで、走っているrun・review・triage・始まった着地・始まったresumeは止めず、新しいresumeは始めない。一覧はそのまま（最後に記録した状態）で読まれ続ける。戻れば`ci_watch_available`を記録して次のpassからclaimと着地を再開する。
 - **attention**: `ci_watch_unavailable`はinbox宛てのattentionで（`domain::event_attention`の`ATTENTION_KINDS`に足す。[`events` / `watch`](events-watch.md)）、`watch`はこのeventで起き、`ci_watch_available`では起きない。`next`は`reason`が`gh_missing`なら`install tool`、`gh_unauthenticated`なら`log in to gh`、`not_github`なら`fix dagq.toml`（後の2つは`AttentionNext`に足す）。`status`は最新が`ci_watch_unavailable`の間`kind: ci_watch_unavailable`、`status: unavailable`、その`next`、`last_error`に`message`を出す（`run_id` / `task_id`はnull。`run_env_program_missing`の`status: missing`の行と同じ形、[`status`](status.md)）。`ci_watch_available`で消える。
+- **保留の記録**: `ci_watch_unavailable` / `ci_watch_available`はqueueの答えで、supervisorが保留していることは示さないので、supervisorは保留に入ったとき・理由が変わったとき・抜けたときだけ`ci_watch_held` / `ci_watch_resumed`を記録する（`domain::claim_hold::OwnHold`）。
+  各supervisorは自分の最新の記録と比べ、passごとには記録せず、`[ci_watch]`の無いsupervisorは記録しない。
+  `ci_check_failed`はこの保留の始まりと終わりではない。
+  `candidates`の`held`は生きたsupervisorの記録だけを読み、`status`は登録された各supervisor（生きていないものも）の項目にそのsupervisor自身の最新の保留を出す。
+  どちらもattentionにはしない（人の手が要る読めないときは`ci_watch_unavailable`が知らせる）。
 - **`doctor`**: 結びついたcheckoutの`dagq.toml`に`[ci_watch]`があれば`ci_watch`の欄に`config`（読んだ`[ci_watch]`）・`gh`（`doctor`のPATHで解決したpathか null）・`authenticated`（bool。`gh auth status --hostname github.com`が0で終わるか）・`repo`（`<owner>/<name>`か null）・`supervisor_last`（最後の`ci_watch_unavailable` / `ci_watch_available`の`{kind, created_at, payload}`か null）を出す。ファイルが読めなければ`{error}`、表が無ければ欄ごと出さない。
 
 ## finding（修正taskの材料）
