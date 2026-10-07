@@ -1,0 +1,68 @@
+{
+  "conflict_hotspots": {
+    "count": 9,
+    "files": [
+      {
+        "path": "docs/design/persistence.md",
+        "conflicts": 5,
+        "tasks": 4,
+        "task_ids": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "landings": 12,
+        "ratio": 0.42,
+        "state": "present",
+        "alert": true
+      },
+      {
+        "path": "docs/adr/README.md",
+        "conflicts": 3,
+        "tasks": 3,
+        "task_ids": [
+          2,
+          5,
+          6
+        ],
+        "landings": 20,
+        "ratio": 0.15,
+        "state": "present",
+        "alert": true
+      },
+      {
+        "path": "src/a.rs",
+        "conflicts": 2,
+        "tasks": 2,
+        "task_ids": [
+          7,
+          8
+        ],
+        "landings": 5,
+        "ratio": 0.4,
+        "state": "present",
+        "alert": false
+      }
+    ]
+  },
+  "claim_deferrals": {
+    "count": 4,
+    "secs": 7200,
+    "by_end": {
+      "expired": {
+        "count": 1,
+        "secs": 3600
+      },
+      "claimed": {
+        "count": 3,
+        "secs": 3600
+      }
+    },
+    "by_file": {
+      "docs/design/persistence.md": 4
+    },
+    "deferred": []
+  },
+  "next_cursor": 123
+}

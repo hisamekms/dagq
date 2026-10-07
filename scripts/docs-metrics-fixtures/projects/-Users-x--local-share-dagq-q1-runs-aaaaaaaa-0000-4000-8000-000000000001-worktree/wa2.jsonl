@@ -1,0 +1,7 @@
+{"type": "permission-mode", "permissionMode": "bypassPermissions"}
+{"type": "user", "timestamp": "2026-10-02T00:00:00.000Z", "message": {"role": "user", "content": "You are executing dagq task 7, run aaaaaaaa-0000-4000-8000-000000000001.\nWork only in the assigned Git worktree."}}
+{"type": "assistant", "timestamp": "2026-10-02T00:00:00.000Z", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "..."}]}}
+{"type": "assistant", "timestamp": "2026-10-02T00:00:01.000Z", "message": {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "id": "toolu_009", "name": "Bash", "input": {"command": "rg --glob '*.md' foo docs/design/supervisor-lifecycle"}}]}}
+{"type": "user", "timestamp": "2026-10-02T00:00:01.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_009", "content": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"}]}}
+{"type": "assistant", "timestamp": "2026-10-02T00:00:02.000Z", "message": {"model": "claude-opus-5-5", "content": [{"type": "tool_use", "id": "toolu_901", "name": "Bash", "input": {"command": "cd /Users/x/.local/share/dagq/q1/runs/aaaaaaaa-0000-4000-8000-000000000001/worktree\nrg -n foo docs/design/persistence.md \\\n  src/c.rs"}}]}}
+{"type": "user", "timestamp": "2026-10-02T00:00:02.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_901", "content": "rrrrrrrrrrrrr"}]}}
