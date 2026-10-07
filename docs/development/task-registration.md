@@ -93,7 +93,7 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
   - `measure`: 数えて確かめる・測る。statsやkpiを読んで結果をdocsに書く測定と、測るための一時の計装
   - `docs`: 文書だけ。ADR・design・pluginのskill・AGENTS.md。実装を伴わない決定の記録
   - `config`: 設定と運用だけ。`dagq.toml`・CI・`scripts/`・toolchain。`Cargo.toml`・`Cargo.lock`を変えるもの（versionと依存）はbuildの設定を変えるのでconfigにせず、`--paths`なしのruntimeの組み合わせで主な目的のchangeにする（下の「plan reviewが当てはめる規則」）
-- `dagq.toml`の`[supervisor] light_changes`に置いたchange（このrepositoryではdocsとconfigを置く予定で、置くのはtask 1593）のtaskは、着地の順番を待つだけのrunが空けた枠でもclaimされうるが、そこでclaimされるのは`--paths`を宣言したtaskだけなので、docs・configのtaskには`--paths`の宣言が要る（[ADR-t1591-1](../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)決定2・3、判定は[claimを控える](../design/supervisor-lifecycle/claim-hold.md#着地待ちが空けた軽い枠)）。軽い枠に重い変更が紛れると、`parallel`と`[run.env]`が前提にする重いbuildの同時数を超えるため。宣言の外を変えたrunは軽い枠のものも上の「pathsと軽い検証」のとおり止まる。
+- `dagq.toml`の`[supervisor] light_changes`に置いたchange（このrepositoryではdocsとconfig）のtaskは、着地の順番を待つだけのrunが空けた枠でもclaimされうるが、そこでclaimされるのは`--paths`を宣言したtaskだけなので、docs・configのtaskには`--paths`の宣言が要る（[ADR-t1591-1](../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)決定2・3、判定は[claimを控える](../design/supervisor-lifecycle/claim-hold.md#着地待ちが空けた軽い枠)）。軽い枠に重い変更が紛れると、`parallel`と`[run.env]`が前提にする重いbuildの同時数を超えるため。宣言の外を変えたrunは軽い枠のものも上の「pathsと軽い検証」のとおり止まる。
 - 混ざるときは主な目的の1つを選ぶ（例: 不具合の修正にtestを足すなら`fix`、新しい機能のdocsを同じtaskで書くなら`feature`）。changeは検証を決めない（検証は上の推奨の組み合わせのとおり、変更の対象で選ぶ）。
 - 作業時間の前後比較で読む層は[運用](operations.md)の「KPIの読み方と印」。
 

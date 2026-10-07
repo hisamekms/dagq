@@ -55,6 +55,14 @@ runtime_planners = 2
 # up に --parallel を付けるとその値がここより優先して登録に焼き込まれ、この parallel を読まなくなる（優先は key ごと）ので付けない。
 # 待ちの上限 max_waiting は既定の 4 のままなので書かない。
 parallel = 3
+# 着地の順番を待つだけの run が空けた枠で claim してよい軽い change（ADR-t1591-1、goal 104。振る舞いは
+# docs/design/supervisor-lifecycle/claim-hold.md の「着地待ちが空けた軽い枠」、値は下の [tasks] changes の中のもの）。
+# 着地は直列なので slot が着地待ちで埋まり、作業中の worker が 0 で claim が止まった（2026-10-03 23:36 JST）。
+# docs と config は直近 7 日の着地で作業が短く verify も無いので軽くする（docs n=32 作業中央 4 分 / p90 12・verify 0、
+# config n=11 作業中央 3 分 / p90 6・verify 0）。measure は verify 0 でも作業 p90 140 分なので入れない。
+# 軽い枠で claim されるのは --paths を宣言した task だけ（規則は docs/development/task-registration.md の「change」）。
+# light_changes を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1591 を含んでから足した。
+light_changes = ["docs", "config"]
 
 [provider_fallback]
 # worker は使えない provider から別の provider へ切り替えず、控えが解けるのを待って同じ provider で続ける。人の判断（2026-10-06）。
