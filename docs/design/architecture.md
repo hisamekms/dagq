@@ -176,7 +176,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 **公開するport**
 
 - `QueueRecords`の読み取り（findingとreportとKPIの目標割れ、CIの見張りのeventと`ci_failure`のfinding）を全てのcontextに、`ci_watch::known_failures`を着地の検証に公開する。
-  `QueueRecords`のうち計画管理の表を読むmethodはportを分けるときに計画管理へ移す（[混在しているmodule](#混在しているmodule)）。
+  `QueueRecords`のうち計画管理の表を読むmethodは計画管理のportへ移す（未登録、follow_up）。
   書き込み（`record_*`）は内部。
 - findingのIDと`finding_*`のeventを値として公開する（計画管理のfindingのplannerが読む）。
 - CIの見張りの保留（`CiWatchState::held`・`unreadable`）を実行と着地に読み取りで公開し、変えるのは`supervise::ci_watch`だけ。
@@ -218,24 +218,25 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、actorの起動（`actor_executor`）を他のcontextに公開する。
 - `AuditFiles`とCIの見張りのpreflightは内部。
 
-**hostの操作のport**
-
-hostの操作は`src/application/ports.rs`の2つのtraitに分かれる。
-cmuxを使うのはinboxだけ（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
-
-- `WorkspaceBackend`: inboxのworkspace（cmux）を開く・閉じる・在るかを見る・色と印・group・通知（`notify`）。
-  呼び手はinboxと`up` / `down`（`application::lifecycle`）と、inboxの中の`watch --role inbox`の通知だけ。
-- `SessionWrappers`: runとruntimeのplannerのsession wrapperを、workspaceなしのbackgroundのprocessとして起動（`launch_background`）・停止（`stop_background`）・生死確認（handleを渡した`exists`）し、supervisorが待つ長さを持つ。
-  呼び手はsupervisor（`supervise::background`・`reopen`、起動は`actor_executor`経由）とruntimeのplanner（`application::planner`）。
-  `stats`は生死を`ProcessControl`で読む。
-  cmuxの操作を持たない。
-- 決定は[ADR-t1404-1](../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)、停止の流れと記録は[非対話のworker](supervisor-lifecycle/headless-worker.md#workspaceなしのbackgroundのwrapper)の「停止の記録」。
-
 **許す依存の向き**
 
 - 他のcontextのuse caseを起動・停止してよいが、他のcontextの状態は公開したportで変える。
 
 **境界をまたぐtransaction**: 無い。
+
+## portのmodule
+
+`src/application/ports/`のportは所有するcontextのmoduleに置く。
+
+| module | port |
+| --- | --- |
+| `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore` |
+| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`SessionRegistry`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier` |
+| `observation`（観測と分析） | `EventReads`・`ObserverLog`・`MarkLog`・`QueueRecords` |
+| `host`（host運用） | `QueueOpener`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore` |
+| `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`Queue` |
+
+`shared`は複数のcontextが同じ意味で使うportだけを持つ（時刻とID、子processの起動、ask、どのuse caseも取る`Queue`）。
 
 ## 混在しているmodule
 
@@ -243,7 +244,7 @@ contextを1つに決められず、分ける先を持つもの。
 
 | module | 混ざっているcontext | 分ける先 |
 | --- | --- | --- |
-| `src/application/ports.rs` | 全てのcontextのportと`Queue`（storeのportのsupertrait）・`QueueOpener` | contextごとのmodule、use caseが要るportだけを取る形（C4） |
+| `application::ports`の`RunCoordination` | 実行と着地のleaseとprocessと、host運用のsupervisorの登録と引き継ぎ | portの分割（未登録、follow_up） |
 | `src/application/supervise/mod.rs`の`Supervisor` | 計画管理・実行と着地の欄とhost運用の残りの欄を持つ（C3） | contextごとに分ける |
 | `src/compose.rs` | 全てのcontextの組み立て | contextごとの組み立てのmodule |
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
@@ -331,8 +332,10 @@ host運用の登録・引き継ぎ・sweep・負荷の上限は`Supervisor`に�
   古いeventの読み取りは保つ。
   検査: review。
 - **C7** 新しいportは、どのcontextが所有し、どのcontextに公開するかをこの文書の該当の節に足してから置く。
-  `application::ports`に足すときは、portをcontextごとのmoduleに分けた後はそのmoduleに置く。
   検査: review。
+- **C8** `src/application/ports/`のmoduleは自分と`shared`のportだけを、moduleのpath（`super::shared::Clock`）で名指す。
+  例外は他のcontextを読む観測と分析と、`Queue`の`shared`。
+  検査: script（`shared`と`crate::application::X`を通す名指しはreview）。
 
 ### transactionの規則
 
@@ -349,9 +352,9 @@ host運用の登録・引き継ぎ・sweep・負荷の上限は`Supervisor`に�
 
 ### 検査の範囲
 
-- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に、C3を分けたcontextのsubmoduleに当てる。
+- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に、C3を分けたcontextのsubmoduleに、C8を`src/application/ports/`のcontextのmoduleに当てる。
   CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。
-- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えず、testの中はL1・L3・L6・C3だけで数える。
+- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えず、testの中はL1・L3・L6・C3・C8だけで数える。
   細目（`use`の組の展開、testとする`cfg`の形と範囲、`--self-test`）はscriptの先頭のコメントが持つ。
 - SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
 - 許可の一覧は`.config/layer-deps-allow.txt`で、1行1項目の`規則 | path | 参照 | 行き先のtask | 理由`。

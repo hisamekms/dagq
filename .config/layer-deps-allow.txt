@@ -6,7 +6,7 @@
 #
 # One item per line, `rule | path | reference | task | reason`; lines that
 # start with `#` and blank lines are not read. rule is one of L1, L2, L3, L4,
-# L6 and C3; path is a file from `src/`; reference is the reference as the
+# L6, C3 and C8; path is a file from `src/`; reference is the reference as the
 # script prints it; task is one task ID or several separated by `,`; reason
 # is not empty. The same reference in the same file is one item. A reference
 # with no item, an item whose reference is gone (the task that fixes a

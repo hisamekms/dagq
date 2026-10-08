@@ -1,7 +1,8 @@
 #!/bin/sh
 # Check the forbidden dependencies between the layers of the runtime, and
-# between the split contexts of the supervisor. The rules (their IDs L1, L2,
-# L3, L4, L6 and C3), what counts in short and the allow list's place are in
+# between the split contexts of the supervisor and of the ports. The rules
+# (their IDs L1, L2, L3, L4, L6, C3 and C8), what counts in short and the
+# allow list's place are in
 # docs/design/architecture.md, sections "レイヤーの規則", "コンテキストの規則"
 # and "検査の範囲"; the allow list's format is in its own header
 # (.config/layer-deps-allow.txt); the details of what counts are here.
@@ -10,6 +11,15 @@
 # submodules that own 観測と分析's and host運用's state): a reference to the
 # loop's struct `Supervisor` or its `Slot` and `Phase`, through which the
 # state of 実行と着地 is reached, is forbidden there, inside tests too.
+#
+# C8 counts in the context modules of src/application/ports/ (every file
+# but mod.rs), outside their inline modules (where `super` is the file's own
+# module), inside tests too: a `super::<name>` whose name is not a module
+# the file may name ($c8_ok; `super::super`, the application, is always
+# allowed, but not `super::super::ports`), a glob `super::*`, and any
+# `crate::application::ports` path. So a port is named by
+# its module (`super::shared::Clock`), never through the re-exports of
+# mod.rs, and only from the modules the rule lets the file use.
 #
 # What counts is the path of a reference (`crate::application::timestamp`,
 # `std::time::SystemTime::now`), with a grouped `use crate::{a, b}` expanded
@@ -45,7 +55,8 @@
 # itself on small fixtures in a temporary directory under ${TMPDIR:-target/}
 # (no violation, one not in the list, a stale item, an item without a task,
 # references only in comments and strings, nested block comments, the cfg
-# forms above, a test range inside an inline module and a C3 reference)
+# forms above, a test range inside an inline module, a C3 reference and the
+# C8 references)
 # and removes them.
 #
 # Exit 0 when every occurrence is allowed and no item is stale, 1 when an
@@ -56,6 +67,9 @@ set -eu
 me=check-layer-deps
 # The submodules of src/application/supervise/ that rule C3 is checked on.
 c3_files="contexts ci_watch forecast observer push report throughput_review cleanup disk host_metrics queue_service release sccache update"
+# Rule C8: each port module of src/application/ports/ and the modules it may
+# name, "module:allowed,allowed"; a port module not listed may name none.
+c8_ok="planning:shared execution:shared host:shared observation:shared,planning,execution,host shared:planning,execution,observation,host"
 script=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -65,7 +79,7 @@ scan() {
   files=$(find src/domain src/application src/infrastructure -type f -name '*.rs' 2>/dev/null | LC_ALL=C sort)
   [ -n "$files" ] || return 0
   # shellcheck disable=SC2086
-  LC_ALL=C awk -v c3_files="$c3_files" '
+  LC_ALL=C awk -v c3_files="$c3_files" -v c8_ok="$c8_ok" '
 BEGIN {
   # The patterns per layer, "rule:pattern"; a pattern starting with ^
   # matches at the start of a path, otherwise anywhere in it. The rules that
@@ -84,6 +98,8 @@ BEGIN {
   prod["application"] = "L4:^rusqlite L4:^std::fs L4:process::Command L4:SystemTime::now L4:Uuid::new_v4"
   n = split(c3_files, o, " ")
   for (i = 1; i <= n; i++) c3["src/application/supervise/" o[i] ".rs"] = 1
+  n = split(c8_ok, o, " ")
+  for (i = 1; i <= n; i++) { split(o[i], kv, ":"); c8[kv[1]] = "," kv[2] "," }
 }
 function load(lst, test,   m, i, it) {
   m = split(lst, it, " ")
@@ -102,11 +118,27 @@ function reset_file() {
   prev = ""; gtop = 0; bk_n = 0; pending_mod = 0; sq = 0; item_sq = 0
   layer = FILENAME; sub(/^.*src\//, "", layer); sub(/\/.*/, "", layer)
   np = 0; load(ref[layer], 1); load(prod[layer], 0)
+  port = ""
+  if (FILENAME ~ /^src\/application\/ports\/[a-z_]+\.rs$/ && FILENAME != "src/application/ports/mod.rs") {
+    port = FILENAME; sub(/^.*\//, "", port); sub(/\.rs$/, "", port)
+  }
   if (FILENAME in c3) load("C3:^Supervisor C3:^super::Supervisor C3:^crate::application::supervise::Supervisor C3:^Slot C3:^super::Slot C3:^crate::application::supervise::Slot C3:^Phase C3:^super::Phase C3:^crate::application::supervise::Phase", 1)
 }
-function check(p, ln, t, dot,   i, hit) {
-  if (p == "" || np == 0) return
+function check(p, ln, t, dot,   i, hit, seg) {
+  if (p == "") return
   if (substr(p, 1, 2) == "::") { p = substr(p, 3); dot = 0 }
+  if (port != "" && !dot && modprefix == "") {
+    if (p == "crate::application::ports" || index(p, "crate::application::ports::") == 1)
+      print "C8\t" FILENAME "\tcrate::application::ports\t" ln
+    else if (index(p, "super::") == 1) {
+      seg = substr(p, 8); sub(/::.*/, "", seg)
+      if (seg == "super") {
+        if (p == "super::super::ports" || index(p, "super::super::ports::") == 1)
+          print "C8\t" FILENAME "\tsuper::super::ports\t" ln
+      } else if (index(c8[port], "," seg ",") == 0) print "C8\t" FILENAME "\tsuper::" seg "\t" ln
+    }
+  }
+  if (np == 0) return
   for (i = 1; i <= np; i++) {
     if (t && !p_test[i]) continue
     if (p_anch[i]) {
@@ -194,6 +226,8 @@ function code_token(tk,   is_ident) {
     return
   }
   if (tk == "::") { prev = "::"; return }
+  # A glob (`super::*`) ends its path with `*`, so C8 sees what it names.
+  if (tk == "*" && prev == "::" && path != "") path = path "::*"
   if (tk == "{" && prev == "::") {
     gtop++; gprefix[gtop] = path; path = ""
     bk[++bk_n] = "g"; prev = "{"; return
@@ -310,8 +344,8 @@ check_tree() {
         if (m < 5) { print me ": " show ":" i ": want rule | path | reference | task | reason" > "/dev/stderr"; bad = 1; continue }
         rule = trim(f[1]); path = trim(f[2]); r = trim(f[3]); task = trim(f[4])
         reason = f[5]; for (j = 6; j <= m; j++) reason = reason "|" f[j]; reason = trim(reason)
-        if (rule !~ /^(L[12346]|C3)$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
-          print me ": " show ":" i ": want a rule (L1, L2, L3, L4, L6, C3), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
+        if (rule !~ /^(L[12346]|C[38])$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
+          print me ": " show ":" i ": want a rule (L1, L2, L3, L4, L6, C3, C8), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
         }
         k = rule "\t" path "\t" r
         if (k in item) { print me ": " show ":" i ": " rule " " path " " r " is listed twice" > "/dev/stderr"; bad = 1; continue }
@@ -545,6 +579,37 @@ EOF
 impl Supervisor<'_> { fn slots(&self) -> usize { self.slots.len() } }
 EOF
   expect 1 "C3: a split context's file reaches the loop's state" "$tmp/context" "src/application/supervise/report.rs:3: C3 forbids Supervisor"
+
+  base ports
+  mkdir -p "$tmp/ports/src/application/ports"
+  cat >"$tmp/ports/src/application/ports/mod.rs" <<'EOF'
+mod observation;
+mod planning;
+mod shared;
+pub use planning::*;
+EOF
+  cat >"$tmp/ports/src/application/ports/planning.rs" <<'EOF'
+//! Named in a comment only: super::execution::RunLog.
+use super::shared::Clock;
+use super::super::GraphInput;
+pub trait TaskStore { fn now(&self, clock: &dyn Clock); }
+#[cfg(test)]
+mod tests { use super::*; use super::TaskStore; }
+EOF
+  cat >"$tmp/ports/src/application/ports/observation.rs" <<'EOF'
+use super::{execution::RunLog, shared::Clock};
+EOF
+  expect 0 "C8: port modules name the modules they may use" "$tmp/ports"
+  cat >>"$tmp/ports/src/application/ports/planning.rs" <<'EOF'
+use super::{execution::RunLog, QueueRecords};
+EOF
+  expect 1 "C8: a port module names another context's module" "$tmp/ports" "src/application/ports/planning.rs:7: C8 forbids super::execution"
+  expect 1 "C8: a port module names a port through the re-exports" "$tmp/ports" "src/application/ports/planning.rs:7: C8 forbids super::QueueRecords"
+  echo 'fn f(_: &dyn crate::application::ports::Clock) {}' >>"$tmp/ports/src/application/ports/observation.rs"
+  expect 1 "C8: a port module names crate::application::ports" "$tmp/ports" "src/application/ports/observation.rs:2: C8 forbids crate::application::ports"
+  echo 'use super::*; use super::super::ports::Clock;' >>"$tmp/ports/src/application/ports/observation.rs"
+  expect 1 "C8: a port module globs the re-exports" "$tmp/ports" "src/application/ports/observation.rs:3: C8 forbids super::*"
+  expect 1 "C8: a port module names ports through super::super" "$tmp/ports" "src/application/ports/observation.rs:3: C8 forbids super::super::ports"
 
   base infra
   cat >>"$tmp/infra/src/infrastructure/store.rs" <<'EOF'

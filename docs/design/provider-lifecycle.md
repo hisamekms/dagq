@@ -39,7 +39,7 @@ related:
 AI agent（Claude Code・Codex）の起動・出力の読み取り・失敗の分類・記録を、providerに依らない契約にまとめる。
 applicationはCLIの引数や出力の形式を直接扱わず、providerの違いはadapterだけが持つ。
 providerが使えないとき（実行ファイルが無い・起動できない・認証・利用上限）は、runやjobを失敗にせず、もう一方のproviderへ移るか待つ。
-引数・出力の欄・既定値の意味は定義のそばのdoc comment（主に`src/application/ports.rs`・`src/infrastructure/adapters.rs`・`claude.rs`・`claude_turns.rs`・`codex.rs`・`codex_turns.rs`・`src/domain/provider_switch.rs`・`src/domain/actor_model.rs`・`src/application/supervise/provider.rs`）が持つ。
+引数・出力の欄・既定値の意味は定義のそばのdoc comment（主に`src/application/ports/`・`src/infrastructure/adapters.rs`・`claude.rs`・`claude_turns.rs`・`codex.rs`・`codex_turns.rs`・`src/domain/provider_switch.rs`・`src/domain/actor_model.rs`・`src/application/supervise/provider.rs`）が持つ。
 
 ## 全体の流れ
 
@@ -63,7 +63,7 @@ headless job（runのreview・復旧・plan review・goal review・observerな�
 
 ## 責務と境界
 
-- applicationは`AgentProvider`（起動するコマンド）と`AgentSignals`（idle marker・jobの出力の壁）と`TurnReader`（非対話のturnの出力）の3つのportだけでproviderにつながる（`src/application/ports.rs`）。
+- applicationは`AgentProvider`（起動するコマンド）と`AgentSignals`（idle marker・jobの出力の壁）と`TurnReader`（非対話のturnの出力）の3つのportだけでproviderにつながる（`src/application/ports/`）。
 - コマンドは`std::process::Command`でなく値の`CommandSpec`で返し、起動は`Spawner` port（実装は`infrastructure::process::LocalSpawner`）が行う。
   supervisorとsession wrapperのユースケースはプロセスを直接扱わない。
 - AI actorの起動は全て`ActorExecutor`（`HostActorExecutor`、`src/application/actor_executor.rs`）を通り、roleとcapabilityと環境はroleごとに1か所で決まる（[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）。
@@ -217,7 +217,7 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 | 知りたいこと | コードの入口 |
 | --- | --- |
 | taskのworkerの型と既定 | `domain::worker`（`Worker`・`Worker::resolve`・`refuse_interactive`） |
-| workerごとのadapterの組 | `WorkerAdapters`（`ports.rs`）、組み立ては`compose::worker_adapters` |
+| workerごとのadapterの組 | `WorkerAdapters`（`ports/`）、組み立ては`compose::worker_adapters` |
 | claimの経路 | `domain::provider_switch::routes` |
 | turnのコマンド | `AgentProvider::turn_command`・`turn_session_exists`（`adapters.rs`・`codex.rs`） |
 | turnの出力の読み手 | `TurnReader`、`claude_turns::ClaudeTurnReader`・`codex_turns::CodexTurnReader` |
