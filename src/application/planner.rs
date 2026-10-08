@@ -783,7 +783,7 @@ pub fn close_abandoned_planners(
                 (
                     PlannerCloseCode::RuntimeAnswerWait,
                     format!(
-                        "planner {} of the runtime was asked to exit because only a person's answer to its planner_question was left, and its wrapper is done; the answer goes to a new planner",
+                        "planner {} of the runtime was asked to exit because only a person's answer to its planner_question was left or the answer could not be sent to it, and its wrapper is done; the answer goes to a new planner",
                         planner.id
                     ),
                 )

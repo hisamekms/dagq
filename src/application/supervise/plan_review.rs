@@ -951,8 +951,9 @@ impl Supervisor<'_> {
                 continue;
             };
             let busy = self.busy_reasons(view, &revising)?;
-            // An answer not sent yet (its delivery failed) is left to the
-            // inbox to settle. One that waits for Claude is not done either (ADR-t1394-2
+            // An answer not sent yet is sent on a later pass (one whose
+            // sending failed ends the planner and goes to a new one). One
+            // that waits for Claude is not done either (ADR-t1394-2
             // decision 5).
             if busy.is_empty()
                 || busy.contains(&PlannerBusy::QuestionOpen)
@@ -1232,7 +1233,7 @@ impl Supervisor<'_> {
                     (
                         PlannerCloseCode::RuntimeAnswerWait,
                         format!(
-                            "planner {id} of the runtime was asked to exit because only a person's answer to its planner_question was left, and its session is over ({}); the answer goes to a new planner",
+                            "planner {id} of the runtime was asked to exit because only a person's answer to its planner_question was left or the answer could not be sent to it, and its session is over ({}); the answer goes to a new planner",
                             if overdue {
                                 "its wrapper was stopped past the exit timeout"
                             } else {
@@ -1304,8 +1305,7 @@ impl Supervisor<'_> {
             // request, or whose request failed): asked again.
             if view.planner.answer_wait_at.is_some() {
                 if asked.is_none() {
-                    self.send_to_planner(view, workspace, Input::Exit, "exit")?;
-                    self.planner_exits.push((id, Instant::now()));
+                    self.request_exit(view, workspace);
                 }
                 continue;
             }
@@ -1372,6 +1372,107 @@ impl Supervisor<'_> {
         self.planner_exits.push((id, Instant::now()));
         info!("{reason}");
         Ok(())
+    }
+
+    /// Hand the answer of `ask`, whose sending to the planner of `view`
+    /// failed (`ask_delivery_failed`), to a new planner: the planner is
+    /// marked as one ended for a person's answer (`answer_wait_at`,
+    /// `planner_answer_wait` naming the ask) and asked to exit, so it is
+    /// not sent the answer again and does not keep its place; the answer
+    /// goes to a new planner (or with its proposal's revise) once its row
+    /// is closed, with what it left; the mark also names its questions not
+    /// answered yet, as [`Self::end_for_answer_wait`]'s does. Judged again
+    /// first: one with a request (another answer, a revise) written after
+    /// its last turn ended, or an answer not taken up yet, is left for a
+    /// later pass (the exit request would drop them), which comes here
+    /// again by the recorded failure. Its state is not asked: the stamp of
+    /// the failed sending makes it look at work until a turn ends, and none
+    /// comes. Nothing is done when the ask was closed or the planner was
+    /// marked or closed since.
+    pub(super) fn hand_over_undelivered_answer(
+        &mut self,
+        view: &PlannerView,
+        workspace: &str,
+        ask: AskId,
+    ) -> Result<()> {
+        let id = view.planner.id;
+        let view = &self.judge_planner(self.queue.planner(id)?)?;
+        if !view.alive || view.planner.answer_wait_at.is_some() || self.request_unread(view)? {
+            return Ok(());
+        }
+        let questions = self.planner_questions(view)?;
+        if self.answer_unread(view, &questions)? {
+            return Ok(());
+        }
+        let mut asks = vec![ask];
+        asks.extend(
+            questions
+                .iter()
+                .filter(|other| other.answered_at.is_none() && other.closed_at.is_none())
+                .map(|other| other.id),
+        );
+        let revise = self
+            .queue
+            .revising_proposals()?
+            .iter()
+            .any(|revise| revise.planner_id == Some(id));
+        let reason = format!(
+            "the answer of ask {ask} could not be sent to planner {id} of the runtime; it is asked to exit to free its place, and the answer goes to a new planner"
+        );
+        let payload = json!({
+            "planner_id": id,
+            "workspace_id": workspace,
+            "asks": asks,
+            "proposal_id": view.planner.proposal_id,
+            "draft_task_id": view.planner.draft_task_id,
+            "finding_id": view.planner.finding_id,
+            "request_id": view.planner.request_id,
+            "revise": revise,
+            "idle_since": view.idle_since,
+            "reason": reason,
+        });
+        if !self.queue.planner_answer_undelivered(id, ask, &payload)? {
+            return Ok(());
+        }
+        if !self.planner_exits.iter().any(|(sent, _)| *sent == id) {
+            self.request_exit(view, workspace);
+        }
+        warn!("{reason}");
+        Ok(())
+    }
+
+    /// Whether a request in the `turns/` of the planner of `view`, taken or
+    /// not, was written after its last turn ended (its idle marker).
+    fn request_unread(&self, view: &PlannerView) -> Result<bool> {
+        let paths = match self
+            .files
+            .read_dir(&crate::domain::turn::turns_dir(&view.dir))
+        {
+            Ok(paths) => paths,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error).context("read the requests of the planner"),
+        };
+        let idle = self.files.modified(&planner_idle_marker(&view.dir)).ok();
+        Ok(paths.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(crate::domain::turn::request_seq)
+                .is_some()
+                && match (self.files.modified(path), idle) {
+                    (Ok(written), Some(idle)) => written > idle,
+                    _ => true,
+                }
+        }))
+    }
+
+    /// Ask the marked planner of `view` to exit. A request that cannot be
+    /// written is waited out like one not obeyed: past the exit timeout its
+    /// wrapper is stopped and its row closed, so its place is freed.
+    fn request_exit(&mut self, view: &PlannerView, workspace: &str) {
+        if let Err(error) = self.send_to_planner(view, workspace, Input::Exit, "exit") {
+            warn!(error = %format_args!("{error:#}"), "the exit request of planner {} of the runtime could not be written: {error:#}; its wrapper is stopped past the exit timeout", view.planner.id);
+        }
+        self.planner_exits.push((view.planner.id, Instant::now()));
     }
 }
 
@@ -1591,8 +1692,23 @@ impl Supervisor<'_> {
         {
             return Ok(Some(PlannerBusy::AnswerUndelivered));
         }
+        if self.answer_unread(view, &asks)? {
+            return Ok(Some(PlannerBusy::AnswerTyped));
+        }
+        if asks
+            .iter()
+            .any(|ask| ask.closed_at.is_none() && ask.answered_at.is_none())
+        {
+            return Ok(Some(PlannerBusy::QuestionOpen));
+        }
+        Ok(None)
+    }
+
+    /// Whether the answer of one of `asks` was delivered to the planner of
+    /// `view` and not taken up yet ([`Self::question_wait`]).
+    fn answer_unread(&mut self, view: &PlannerView, asks: &[Ask]) -> Result<bool> {
         let workspace = view.planner.workspace_id.as_deref();
-        for ask in &asks {
+        for ask in asks {
             let Some(workspace) = workspace else {
                 break;
             };
@@ -1606,7 +1722,7 @@ impl Supervisor<'_> {
             // answer was claimed.
             if let Some(taken) = self.headless_answer_taken(view, ask.id)? {
                 if !taken {
-                    return Ok(Some(PlannerBusy::AnswerTyped));
+                    return Ok(true);
                 }
                 continue;
             }
@@ -1619,16 +1735,10 @@ impl Supervisor<'_> {
                 .answer_claimed_at(ask.id, workspace)?
                 .unwrap_or(view.planner.created_at);
             if view.idle_since.is_none_or(|since| since <= typed) {
-                return Ok(Some(PlannerBusy::AnswerTyped));
+                return Ok(true);
             }
         }
-        if asks
-            .iter()
-            .any(|ask| ask.closed_at.is_none() && ask.answered_at.is_none())
-        {
-            return Ok(Some(PlannerBusy::QuestionOpen));
-        }
-        Ok(None)
+        Ok(false)
     }
 }
 

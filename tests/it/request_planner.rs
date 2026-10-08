@@ -12,7 +12,9 @@ use crate::plan_review::{
     PlanWorkspace, StubReviewer, fixture, open_goal, options, planner_prompt, supervise,
     supervise_with,
 };
-use crate::runtime_support::planner_turns::{exit_requested, idle, turn_requests};
+use crate::runtime_support::planner_turns::{
+    block_next_request, exit_requested, idle, turn_requests,
+};
 use dagq::{
     application::{PlanRequestStore, RequestPlannerStart, TaskStore},
     domain::{
@@ -648,6 +650,49 @@ fn a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three
         request_events(&fx.db, id, "request_planner_opened").len(),
         3
     );
+}
+
+/// An answer whose sending to the request's planner fails is recorded
+/// once as `ask_delivery_failed` and handed over: the planner is asked to
+/// exit and not sent it again, and once its session ended a new planner of
+/// the request carries the answer; the inbox has nothing to close.
+#[test]
+fn an_answer_that_could_not_be_sent_to_a_requests_planner_goes_to_a_new_one() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let id = record(&mut queue, "split the store");
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    let first = request_planner(&queue, id).unwrap();
+    let asked = planner_question(&mut queue, id);
+    idle(&queue, &fx.db, first);
+    queue.answer(asked.id, "plan").unwrap();
+    block_next_request(&fx.db, first, 0);
+    supervise(&fx, &backend, &reviewer);
+    let failed = request_events(&fx.db, id, "ask_delivery_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].0["planner_id"], json!(first));
+    assert!(turn_requests(&fx.db, first).is_empty());
+    assert!(exit_requested(&fx.db, first));
+    supervise(&fx, &backend, &reviewer);
+    assert_eq!(request_events(&fx.db, id, "ask_delivery_failed").len(), 1);
+    assert!(turn_requests(&fx.db, first).is_empty());
+
+    queue.planner_exited(first, std::process::id(), 0).unwrap();
+    supervise(&fx, &backend, &reviewer);
+    supervise(&fx, &backend, &reviewer);
+    let second = request_planner(&queue, id).expect("a planner carries the answer");
+    assert_ne!(second, first);
+    let prompt = planner_prompt(&fx.db, second);
+    assert!(
+        prompt.contains(&format!("answer to ask {}: plan", asked.id)),
+        "{prompt}"
+    );
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    let opened = request_events(&fx.db, id, "request_planner_opened");
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    assert_eq!(opened[1].0["ask_id"], asked.id.as_i64());
 }
 
 /// ADR-t2015-1: a question about a draft the request's planner added and

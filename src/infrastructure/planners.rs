@@ -29,6 +29,34 @@ impl SqliteQueue {
         asks: &[AskId],
         payload: &serde_json::Value,
     ) -> Result<bool> {
+        self.mark_answer_wait(id, asks, false, payload)
+    }
+
+    /// Mark planner `id` of the runtime's as asked to exit because the
+    /// answer of `ask` could not be sent to it (`ask_delivery_failed`), as
+    /// [`Self::planner_answer_wait`] marks one: the answer then goes to a
+    /// new planner once this one's row is closed, with what it left. In one
+    /// write transaction that re-checks that the row is open and not marked
+    /// yet and that the ask is answered and not closed; `false`, with
+    /// nothing written, otherwise.
+    pub fn planner_answer_undelivered(
+        &self,
+        id: PlannerId,
+        ask: AskId,
+        payload: &serde_json::Value,
+    ) -> Result<bool> {
+        self.mark_answer_wait(id, &[ask], true, payload)
+    }
+
+    /// `answer_wait_at` and `planner_answer_wait` of planner `id`, while
+    /// each ask of `asks` is open and answered or not as `answered` says.
+    fn mark_answer_wait(
+        &self,
+        id: PlannerId,
+        asks: &[AskId],
+        answered: bool,
+        payload: &serde_json::Value,
+    ) -> Result<bool> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
@@ -36,8 +64,8 @@ impl SqliteQueue {
         for ask in asks {
             let waiting: bool = tx
                 .query_row(
-                    "SELECT answered_at IS NULL AND closed_at IS NULL FROM asks WHERE id=?1",
-                    [ask],
+                    "SELECT (answered_at IS NOT NULL)=?2 AND closed_at IS NULL FROM asks WHERE id=?1",
+                    params![ask, answered],
                     |r| r.get(0),
                 )
                 .optional()?

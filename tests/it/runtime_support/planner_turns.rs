@@ -83,3 +83,20 @@ pub fn idle(queue: &SqliteQueue, db: &Path, planner: dagq::domain::PlannerId) {
     let dir = planners_dir(db).join(planner.to_string());
     fs::write(planner_idle_marker(&dir), "{}").unwrap();
 }
+
+/// Make writing the request `later` requests after the next to the
+/// `turns/` of headless planner `planner` fail (0: the next): a directory
+/// stands where the request is written before it is renamed into place.
+/// The exit request is still written.
+pub fn block_next_request(db: &Path, planner: dagq::domain::PlannerId, later: u64) {
+    let dir = planners_dir(db).join(planner.to_string());
+    let turns = dagq::domain::turn::turns_dir(&dir);
+    fs::create_dir_all(&turns).unwrap();
+    let names: Vec<String> = fs::read_dir(&turns)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    let seq = dagq::domain::turn::next_seq(names.iter().map(String::as_str)) + later;
+    fs::create_dir_all(dagq::domain::turn::request_path(&dir, seq).with_extension("json.tmp"))
+        .unwrap();
+}

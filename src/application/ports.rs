@@ -2003,6 +2003,17 @@ pub trait SessionRegistry {
         asks: &[AskId],
         payload: &serde_json::Value,
     ) -> Result<bool>;
+    /// Mark planner `id` of the runtime's as asked to exit because the
+    /// answer of `ask` could not be sent to it, as [`Self::planner_answer_wait`]
+    /// marks one, so the answer goes to a new planner once its row is
+    /// closed; once and only while the ask is answered and not closed:
+    /// `false`, with nothing written, otherwise.
+    fn planner_answer_undelivered(
+        &self,
+        id: PlannerId,
+        ask: AskId,
+        payload: &serde_json::Value,
+    ) -> Result<bool>;
     /// What the planner that ended for the answer of `ask` alone left for
     /// the next (ADR-t1704-1 decision 3), if one did.
     fn planner_handover(&self, ask: AskId) -> Result<Option<crate::domain::PlannerHandover>>;
@@ -2699,8 +2710,8 @@ pub trait DraftPlannerStore {
     /// typing, unlike the ask's close after it. `None` without a claim (an
     /// answer a new planner carried in its prompt).
     fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>>;
-    /// Whether typing the answer of `ask` ever failed.
-    fn ask_delivery_failed(&self, ask: AskId) -> Result<bool>;
+    /// Whether sending the answer of `ask` to `planner` ever failed.
+    fn ask_delivery_failed(&self, ask: AskId, planner: PlannerId) -> Result<bool>;
 }
 
 /// One receipt entry prepared by integrate for atomic registration.

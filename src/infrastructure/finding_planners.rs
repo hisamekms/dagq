@@ -337,15 +337,16 @@ impl SqliteQueue {
         )?)
     }
 
-    /// Whether typing the answer of `ask` ever failed (`ask_delivery_failed`).
-    pub fn ask_delivery_failed(&self, ask: AskId) -> Result<bool> {
+    /// Whether sending the answer of `ask` to `planner` ever failed
+    /// (`ask_delivery_failed`).
+    pub fn ask_delivery_failed(&self, ask: AskId, planner: PlannerId) -> Result<bool> {
         Ok(self.conn.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
-             AND json_extract(payload,'$.ask_id')=?1)",
+             AND json_extract(payload,'$.ask_id')=?1 AND json_extract(payload,'$.planner_id')=?2)",
                 event_kind::ASK_DELIVERY_FAILED
             ),
-            [ask],
+            params![ask, planner],
             |r| r.get(0),
         )?)
     }

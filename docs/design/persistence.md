@@ -168,7 +168,7 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
   同じ束の鍵を持つdraftは、その束のplannerが閉じるまで待つ。
 - 立てる（`open_draft_planner`）は、対象であることをトランザクションの中で再検査してから行を作るので、2つのsupervisorが同じdraftに立てない。
 - 結末: plannerを閉じたトランザクションの中で、束のdraftごとに今のtaskの状態から結末を決めて書く（`settle_bundle`）。
-- 人の答え待ちの印（`planner_answer_wait`）はaskが未回答のときだけ書き、印の付いた行は回答の行き先とdraft・finding・依頼の上限の数から外れる（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)）。
+- 人の答え待ちの印（`planner_answer_wait`）はaskが未回答か配送に失敗したときだけ書き、印の付いた行は回答の行き先とdraft・finding・依頼の上限の数から外れる（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)）。
 - 回答の行き先（`planner_answer_route`）は、生きているplanner・新しいplanner・人・閉じるのどれかで、`answer`も同じ判定で`runtime_delivers`を書く。
   依頼のplannerが作り由来もproposalも持たないdraftの回答は、依頼の回答の経路に乗せる（`request_of_draft`。作成のeventのactorで依頼を引く、[ADR-t2015-1](../adr/2026-10-07-t2015-1-answers-about-a-request-planners-draft-go-the-requests-way.md)）。
 - runtimeのplannerがfollow-upをsubmitできる深さの上限は[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)で、`proposals::submit`の中の`check_adoptions`が拒む。

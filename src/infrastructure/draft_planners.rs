@@ -834,8 +834,8 @@ impl DraftPlannerStore for SqliteQueue {
     fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>> {
         SqliteQueue::answer_claimed_at(self, ask, workspace)
     }
-    fn ask_delivery_failed(&self, ask: AskId) -> Result<bool> {
-        SqliteQueue::ask_delivery_failed(self, ask)
+    fn ask_delivery_failed(&self, ask: AskId, planner: PlannerId) -> Result<bool> {
+        SqliteQueue::ask_delivery_failed(self, ask, planner)
     }
 }
 
@@ -1932,6 +1932,94 @@ mod tests {
         assert_eq!(members[0].1, 1);
         queue.close_planner(planner.id, None).unwrap();
         assert_eq!(planners_opened(&queue.conn, runtime).unwrap(), 1);
+    }
+
+    /// An answer whose sending to its draft's planner failed is handed
+    /// over: the planner is marked only while the ask is answered and not
+    /// closed, once, and the answer then goes to a new planner (once the
+    /// row is closed) with the draft left `answer_wait`, counting to no
+    /// limit. The failure is told apart per planner.
+    #[test]
+    fn an_answer_that_could_not_be_sent_goes_from_its_planner_to_a_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let runtime = draft(&mut queue, "runtime");
+        queue
+            .record_draft_origin(runtime, DraftOrigin::FollowUp, &json!({}))
+            .unwrap();
+        let DraftPlannerStart::Opened { planner, .. } =
+            queue.open_draft_planner(&[runtime], None).unwrap()
+        else {
+            panic!("no planner opened");
+        };
+        let asked = question(&mut queue, runtime, AskKind::PlannerQuestion);
+        let payload = json!({"planner_id": planner.id, "asks": [asked.id]});
+        // Not answered yet: nothing to hand over.
+        assert!(
+            !queue
+                .planner_answer_undelivered(planner.id, asked.id, &payload)
+                .unwrap()
+        );
+        let answered = queue.answer(asked.id, "adopt").unwrap();
+        assert_eq!(
+            queue.planner_answer_route(&answered).unwrap(),
+            PlannerAnswerRoute::Planner(Box::new(queue.planner(planner.id).unwrap()))
+        );
+        queue
+            .record_task_event(
+                runtime,
+                EventKind::AskDeliveryFailed,
+                json!({"ask_id": asked.id, "planner_id": planner.id}),
+            )
+            .unwrap();
+        assert!(queue.ask_delivery_failed(asked.id, planner.id).unwrap());
+        assert!(
+            !queue
+                .ask_delivery_failed(asked.id, PlannerId::new(planner.id.as_i64() + 1))
+                .unwrap()
+        );
+        assert!(
+            queue
+                .planner_answer_undelivered(planner.id, asked.id, &payload)
+                .unwrap()
+        );
+        assert!(
+            !queue
+                .planner_answer_undelivered(planner.id, asked.id, &payload)
+                .unwrap()
+        );
+        assert_eq!(
+            queue.planner_answer_route(&answered).unwrap(),
+            PlannerAnswerRoute::NewPlanner
+        );
+        assert!(matches!(
+            queue
+                .open_draft_planner(&[runtime], Some(asked.id))
+                .unwrap(),
+            DraftPlannerStart::Skipped
+        ));
+        queue.close_planner(planner.id, None).unwrap();
+        assert_eq!(
+            queue.draft_bundle(planner.id).unwrap().unwrap().members[0]
+                .outcome
+                .as_deref(),
+            Some("answer_wait")
+        );
+        assert_eq!(planners_opened(&queue.conn, runtime).unwrap(), 0);
+        assert!(matches!(
+            queue
+                .open_draft_planner(&[runtime], Some(asked.id))
+                .unwrap(),
+            DraftPlannerStart::Opened { .. }
+        ));
+        // A closed ask hands nothing over.
+        queue.close_planner_answer(asked.id, "done").unwrap();
+        let next = queue.planners(false).unwrap().remove(0);
+        assert!(
+            !queue
+                .planner_answer_undelivered(next.id, asked.id, &payload)
+                .unwrap()
+        );
     }
 
     #[test]

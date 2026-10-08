@@ -173,6 +173,14 @@ impl SessionRegistry for SqliteQueue {
     ) -> Result<bool> {
         SqliteQueue::planner_answer_wait(self, id, asks, payload)
     }
+    fn planner_answer_undelivered(
+        &self,
+        id: PlannerId,
+        ask: crate::domain::AskId,
+        payload: &Value,
+    ) -> Result<bool> {
+        SqliteQueue::planner_answer_undelivered(self, id, ask, payload)
+    }
     fn planner_handover(
         &self,
         ask: crate::domain::AskId,

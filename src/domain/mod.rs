@@ -2432,6 +2432,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         (event_kind::ASK_ANSWERED, _) => {
             ask_id(payload).map(|ask_id| AttentionNext::ReadAnswer { ask_id })
         }
+        // An answer a planner of the runtime's could not be sent goes to a
+        // new planner by itself; that of a worker is the inbox's.
+        (event_kind::ASK_DELIVERY_FAILED, _) if payload.get("planner_id").is_some() => None,
         (event_kind::ASK_DELIVERY_FAILED, _) => {
             ask_id(payload).map(|ask_id| AttentionNext::DeliverAnswer { ask_id })
         }
@@ -3644,6 +3647,11 @@ mod attention_tests {
                 Some(DeliverAnswer {
                     ask_id: AskId::new(4),
                 }),
+            ),
+            (
+                "ask_delivery_failed",
+                json!({"ask_id": 4, "planner_id": 2, "error": "x"}),
+                None,
             ),
             ("validation_finished", json!({}), None),
             (

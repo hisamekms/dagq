@@ -10,7 +10,9 @@ use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, fixture, open_goal, options, runtime_draft, submit,
     supervise_with,
 };
-use crate::runtime_support::planner_turns::{exit_requested, take_turns, turn_requests};
+use crate::runtime_support::planner_turns::{
+    block_next_request, exit_requested, take_turns, turn_requests,
+};
 use dagq::{
     application::{Clock, Generators, TaskStore, planner_idle_marker},
     domain::{
@@ -556,6 +558,215 @@ fn an_answer_given_as_its_planner_is_ended_goes_once_to_the_next_planner() {
     assert_eq!(delivered.len(), 1, "{delivered:?}");
     assert_eq!(backend.launched().len(), 2);
     assert!(turn_requests(&fx.db, open[0].id).is_empty());
+}
+
+/// An answer whose sending to its draft's planner fails (the request
+/// cannot be written to its `turns/`) is not left to the inbox: the
+/// failure is recorded once as `ask_delivery_failed`, the planner is marked
+/// as one ended for the answer (`planner_answer_wait` naming the ask) and
+/// asked to exit, and is not sent the answer again. Once its session ended
+/// its row closes as `runtime_answer_wait`, its place under
+/// `--runtime-planners` (1 here) is free, and one new planner carries the
+/// answer and the planner's note; no `ask close` is needed.
+#[test]
+fn an_answer_that_could_not_be_sent_to_its_planner_goes_once_to_a_new_planner_and_frees_the_place()
+{
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[]);
+    let clock = Arc::new(Ahead::default());
+    let goal = open_goal(&mut queue);
+    let draft = runtime_draft(
+        &mut queue,
+        "gap",
+        Some(goal),
+        DraftOrigin::FollowUp,
+        json!({"source_task_id": 1, "source_run_id": null, "index": 0}),
+    );
+    supervise(&fx, &backend, &reviewer, &clock, 0);
+    let planner = queue.planners(false).unwrap().remove(0);
+    queue
+        .register_planner_wrapper(planner.id, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
+    heartbeat_ahead(&fx.db);
+    use dagq::domain::actor::{ActorContext, ActorRole};
+    SqliteQueue::open(&fx.db)
+        .unwrap()
+        .with_actor(ActorContext::instance(ActorRole::Planner, planner.id))
+        .add_note(dagq::domain::NewNote {
+            target: dagq::domain::NoteTarget::Task(draft),
+            text: "decided: adopt unless out of the goal".into(),
+            kind: None,
+            by: "planner".into(),
+        })
+        .unwrap();
+    let asked = question(&mut queue, draft, "is this in the goal?");
+    let dir = planners_dir(&fx.db).join(planner.id.to_string());
+    touch_ahead(&planner_idle_marker(&dir), 1);
+    queue.answer(asked.id, "adopt").unwrap();
+    block_next_request(&fx.db, planner.id, 0);
+    supervise(&fx, &backend, &reviewer, &clock, 10);
+
+    let failed: Vec<Value> = queue
+        .show(draft)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|event| event.kind == "ask_delivery_failed")
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["ask_id"], json!(asked.id));
+    assert_eq!(failed[0]["planner_id"], json!(planner.id));
+    assert!(turn_requests(&fx.db, planner.id).is_empty());
+    let waited = events(&queue, "planner_answer_wait");
+    assert_eq!(waited.len(), 1, "{waited:?}");
+    assert_eq!(waited[0]["planner_id"], json!(planner.id));
+    assert_eq!(waited[0]["asks"], json!([asked.id]));
+    assert!(queue.planner(planner.id).unwrap().answer_wait_at.is_some());
+    assert!(exit_requested(&fx.db, planner.id));
+
+    // Not sent again, nor recorded as failed again, while it exits.
+    supervise(&fx, &backend, &reviewer, &clock, 11);
+    assert!(turn_requests(&fx.db, planner.id).is_empty());
+    assert_eq!(
+        queue
+            .show(draft)
+            .unwrap()
+            .events
+            .iter()
+            .filter(|event| event.kind == "ask_delivery_failed")
+            .count(),
+        1
+    );
+    assert_eq!(backend.launched().len(), 1, "its place is not free yet");
+
+    // Its session ended: the row closes, and one new planner carries the
+    // answer in its place.
+    queue
+        .planner_exited(planner.id, std::process::id(), 0)
+        .unwrap();
+    for at in [12, 13] {
+        supervise(&fx, &backend, &reviewer, &clock, at);
+    }
+    let closed = events(&queue, "planner_closed");
+    assert_eq!(closed[0]["planner_id"], json!(planner.id));
+    assert_eq!(closed[0]["code"], "runtime_answer_wait", "{closed:?}");
+    let open = queue.planners(false).unwrap();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_ne!(open[0].id, planner.id);
+    assert_eq!(open[0].draft_task_id, Some(draft));
+    let prompt = crate::plan_review::planner_prompt(&fx.db, open[0].id);
+    for carried in [
+        &format!("answer to ask {}: adopt", asked.id),
+        "decided: adopt unless out of the goal",
+    ] {
+        assert!(prompt.contains(carried), "{carried}: {prompt}");
+    }
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    let delivered = queue
+        .show(draft)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|event| event.kind == "ask_delivered")
+        .count();
+    assert_eq!(delivered, 1);
+    assert_eq!(backend.launched().len(), 2);
+    assert!(turn_requests(&fx.db, open[0].id).is_empty());
+}
+
+/// Two answers go to one planner in a pass and only the second cannot be
+/// sent: the planner is not asked to exit before it took the first up in
+/// a turn (the exit would drop that request, whose ask is closed). Once
+/// it did, it is ended for the second, its mark naming it, and a new
+/// planner carries that answer.
+#[test]
+fn a_planner_is_ended_for_an_answer_it_could_not_be_sent_only_after_reading_the_one_sent() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[]);
+    let clock = Arc::new(Ahead::default());
+    let goal = open_goal(&mut queue);
+    let draft = runtime_draft(
+        &mut queue,
+        "gap",
+        Some(goal),
+        DraftOrigin::FollowUp,
+        json!({"source_task_id": 1, "source_run_id": "run-a", "index": 0}),
+    );
+    let other = runtime_draft(
+        &mut queue,
+        "order",
+        Some(goal),
+        DraftOrigin::FollowUp,
+        json!({"source_task_id": 1, "source_run_id": "run-a", "index": 1}),
+    );
+    supervise(&fx, &backend, &reviewer, &clock, 0);
+    let planner = queue.planners(false).unwrap().remove(0);
+    assert_eq!(queue.planners(false).unwrap().len(), 1, "one bundle");
+    queue
+        .register_planner_wrapper(planner.id, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
+    heartbeat_ahead(&fx.db);
+    let first = question(&mut queue, draft, "is this in the goal?");
+    let second = question(&mut queue, other, "and the order?");
+    let dir = planners_dir(&fx.db).join(planner.id.to_string());
+    touch_ahead(&planner_idle_marker(&dir), 1);
+    queue.answer(first.id, "adopt").unwrap();
+    queue.answer(second.id, "cancel").unwrap();
+    block_next_request(&fx.db, planner.id, 1);
+    supervise(&fx, &backend, &reviewer, &clock, 10);
+    let requests = turn_requests(&fx.db, planner.id);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(
+        requests[0]["prompt"],
+        format!("answer to ask {}: adopt", first.id)
+    );
+    let failed = queue
+        .show(other)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|event| event.kind == "ask_delivery_failed")
+        .count();
+    assert_eq!(failed, 1);
+    assert!(!exit_requested(&fx.db, planner.id));
+    assert!(events(&queue, "planner_answer_wait").is_empty());
+
+    // It took the first up: ended for the second.
+    take_turns(&queue, &fx.db, planner.id);
+    touch_ahead(&planner_idle_marker(&dir), 21);
+    supervise(&fx, &backend, &reviewer, &clock, 20);
+    assert!(exit_requested(&fx.db, planner.id));
+    let waited = events(&queue, "planner_answer_wait");
+    assert_eq!(waited.len(), 1, "{waited:?}");
+    assert_eq!(waited[0]["asks"], json!([second.id]));
+    assert_eq!(turn_requests(&fx.db, planner.id).len(), 1);
+
+    queue
+        .planner_exited(planner.id, std::process::id(), 0)
+        .unwrap();
+    for at in [22, 23] {
+        supervise(&fx, &backend, &reviewer, &clock, at);
+    }
+    let open = queue.planners(false).unwrap();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_ne!(open[0].id, planner.id);
+    let prompt = crate::plan_review::planner_prompt(&fx.db, open[0].id);
+    assert!(
+        prompt.contains(&format!("answer to ask {}: cancel", second.id)),
+        "{prompt}"
+    );
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
 }
 
 /// A runtime's planner whose wrapper runs but has not recorded its agent's

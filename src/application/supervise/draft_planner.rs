@@ -34,8 +34,9 @@ impl Supervisor<'_> {
     /// one is gone (within the limit, counted in `runtime_open`), or closed
     /// when the draft moved on. The sending is claimed first
     /// (`planner_answer_claimed`), so only one supervisor sends an answer. A
-    /// sending that fails records `ask_delivery_failed` and leaves the
-    /// answer to the inbox.
+    /// sending that fails records `ask_delivery_failed` and ends the planner
+    /// ([`Self::hand_over_undelivered_answer`]), so the answer goes to a new
+    /// planner.
     pub(super) fn deliver_planner_answers(
         &mut self,
         views: &[PlannerView],
@@ -60,6 +61,14 @@ impl Supervisor<'_> {
                     let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                         continue;
                     };
+                    // An answer whose sending to it failed goes to a new
+                    // planner, not to it again.
+                    if let Some(workspace) = view.planner.workspace_id.as_deref()
+                        && self.queue.ask_delivery_failed(ask.id, planner.id)?
+                    {
+                        self.hand_over_undelivered_answer(view, workspace, ask.id)?;
+                        continue;
+                    }
                     // The planner that asked is typed to once it stopped
                     // after asking; a question someone else opened about
                     // its draft waits only for it to be idle.
@@ -79,10 +88,9 @@ impl Supervisor<'_> {
                     };
                     // One transaction takes the typing first, so two
                     // supervisors (across a handoff) never both type it.
-                    if self.delivery_failed(task, ask.id)?
-                        || !self
-                            .queue
-                            .claim_planner_answer(ask.id, planner.id, &workspace)?
+                    if !self
+                        .queue
+                        .claim_planner_answer(ask.id, planner.id, &workspace)?
                     {
                         continue;
                     }
@@ -99,7 +107,7 @@ impl Supervisor<'_> {
                             info!(task_id = %task, ask_id = %ask.id, "answer of ask {} sent to planner {} in workspace {workspace}", ask.id, planner.id);
                         }
                         Err(error) => {
-                            warn!(task_id = %task, ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; it is left to the inbox", ask.id, planner.id);
+                            warn!(task_id = %task, ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; the planner is ended and the answer goes to a new planner", ask.id, planner.id);
                             self.queue.record_task_event(
                                 task,
                                 EventKind::AskDeliveryFailed,
@@ -110,6 +118,7 @@ impl Supervisor<'_> {
                                     "error": format!("{error:#}"),
                                 }),
                             )?;
+                            self.hand_over_undelivered_answer(view, &workspace, ask.id)?;
                         }
                     }
                 }
@@ -150,13 +159,6 @@ impl Supervisor<'_> {
             }
         }
         Ok(())
-    }
-
-    fn delivery_failed(&mut self, task: TaskId, ask: AskId) -> Result<bool> {
-        Ok(self.queue.show(task)?.events.iter().any(|event| {
-            event.kind == event_kind::ASK_DELIVERY_FAILED
-                && event.payload.get("ask_id").and_then(Value::as_i64) == Some(ask.as_i64())
-        }))
     }
 
     /// Open a planner for each bundle of drafts waiting for one, the

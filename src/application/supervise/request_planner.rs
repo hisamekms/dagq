@@ -50,6 +50,13 @@ impl Supervisor<'_> {
                 let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                     return Ok(());
                 };
+                // An answer whose sending to it failed goes to a new
+                // planner, not to it again.
+                if let Some(workspace) = view.planner.workspace_id.as_deref()
+                    && self.queue.ask_delivery_failed(ask.id, planner.id)?
+                {
+                    return self.hand_over_undelivered_answer(view, workspace, ask.id);
+                }
                 // The planner that asked is typed to once it stopped after
                 // asking; a question someone else opened waits only for it
                 // to be idle.
@@ -68,10 +75,9 @@ impl Supervisor<'_> {
                     return Ok(());
                 };
                 // Claimed first, so two supervisors type it once (task 406).
-                if self.queue.ask_delivery_failed(ask.id)?
-                    || !self
-                        .queue
-                        .claim_planner_answer(ask.id, planner.id, &workspace)?
+                if !self
+                    .queue
+                    .claim_planner_answer(ask.id, planner.id, &workspace)?
                 {
                     return Ok(());
                 }
@@ -90,7 +96,7 @@ impl Supervisor<'_> {
                         info!(ask_id = %ask.id, "answer of ask {} sent to planner {} of request {request} in workspace {workspace}", ask.id, planner.id);
                     }
                     Err(error) => {
-                        warn!(ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; it is left to the inbox", ask.id, planner.id);
+                        warn!(ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; the planner is ended and the answer goes to a new planner", ask.id, planner.id);
                         self.queue.record_queue_event(
                             EventKind::AskDeliveryFailed,
                             json!({
@@ -101,6 +107,7 @@ impl Supervisor<'_> {
                                 "error": format!("{error:#}"),
                             }),
                         )?;
+                        self.hand_over_undelivered_answer(view, &workspace, ask.id)?;
                     }
                 }
             }
