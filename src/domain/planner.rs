@@ -225,18 +225,24 @@ impl PlannerSession {
 impl PlannerSession {
     /// Whether nothing runs the planner's wrapper binary (its `runner`)
     /// any more, so the snapshot can go: its agent's exit is recorded, its
-    /// wrapper's process is gone or its heartbeat older than
-    /// [`HEARTBEAT_TIMEOUT_SECS`], or it never registered within
-    /// [`PLANNER_STARTUP_SECS`] of the record and its row is closed (its
-    /// workspace never opened, or cmux no longer lists it: a slow shell
-    /// in a workspace still open may yet run the runner). A closed row
-    /// alone is no evidence: a wrapper still alive keeps its runner.
+    /// wrapper's process is gone (`wrapper_alive`: for a background
+    /// wrapper, its handle's pid showing the start it recorded) or, in a
+    /// workspace, its heartbeat older than [`HEARTBEAT_TIMEOUT_SECS`], or
+    /// it never registered within [`PLANNER_STARTUP_SECS`] of the record
+    /// and its row is closed (its workspace never opened, or cmux no longer
+    /// lists it: a slow shell in a workspace still open may yet run the
+    /// runner). A closed row alone is no evidence: a wrapper still alive
+    /// keeps its runner, and a background one's late heartbeat frees
+    /// nothing (ADR-t1404-1 decision 2).
     pub fn runner_unused(&self, probe: &PlannerProbe) -> bool {
         if self.exited_at.is_some() {
             return true;
         }
         if self.wrapper_pid.is_none() {
             return self.closed_at.is_some() && probe.now - self.created_at > PLANNER_STARTUP_SECS;
+        }
+        if self.background() {
+            return !probe.wrapper_alive;
         }
         let age = self.heartbeat_at.map_or(i64::MAX, |at| probe.now - at);
         heartbeat_stale(probe.wrapper_alive, age)
@@ -486,6 +492,46 @@ mod tests {
         };
         assert!(!given_up.runner_unused(&probe()));
         assert!(given_up.runner_unused(&late));
+    }
+
+    /// A background wrapper's runner is told by its process alone: a late
+    /// heartbeat keeps it while the wrapper lives, and an exit or a dead
+    /// wrapper frees it.
+    #[test]
+    fn a_background_planner_runner_is_kept_while_its_wrapper_lives_however_late_its_heartbeat() {
+        let background = PlannerSession {
+            workspace_id: Some("background:10:Mon_Oct_5_10:00:00_2026".into()),
+            ..session()
+        };
+        let silent = PlannerProbe {
+            workspace_listed: false,
+            now: 100 + HEARTBEAT_TIMEOUT_SECS + 1,
+            ..probe()
+        };
+        assert!(!background.runner_unused(&silent));
+        assert!(!background.runner_unused(&probe()));
+        assert!(background.runner_unused(&PlannerProbe {
+            wrapper_alive: false,
+            ..probe()
+        }));
+        let exited = PlannerSession {
+            exited_at: Some(108),
+            ..background.clone()
+        };
+        assert!(exited.runner_unused(&probe()));
+        // Never registered: the closed row past its startup time, as in a
+        // workspace.
+        let given_up = PlannerSession {
+            wrapper_pid: None,
+            heartbeat_at: None,
+            closed_at: Some(109),
+            ..background
+        };
+        assert!(!given_up.runner_unused(&probe()));
+        assert!(given_up.runner_unused(&PlannerProbe {
+            now: 90 + PLANNER_STARTUP_SECS + 1,
+            ..probe()
+        }));
     }
 
     #[test]

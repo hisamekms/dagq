@@ -769,6 +769,56 @@ fn the_sweep_removes_the_runners_of_planners_whose_wrapper_is_done() {
     }
 }
 
+/// A background planner's runner is told by its wrapper's handle on the
+/// real processes (ADR-t1404-1 decision 2): a handle of this process's pid
+/// and its start keeps the runner however late the heartbeat, and the same
+/// pid recorded with another start (a pid another process took) frees it.
+#[test]
+fn a_background_planners_runner_goes_by_its_handles_pid_and_start_not_its_heartbeat() {
+    use dagq::{
+        application::{ProcessControl, planner},
+        domain::{PlannerOrigin, background_wrapper::BackgroundHandle},
+        infrastructure::{
+            adapters::SystemProcesses, clock::SystemClock, location::planners_dir,
+            run_files::LocalRunFiles,
+        },
+    };
+    let (_dir, _repo, db) = fixture();
+    let queue = SqliteQueue::open(&db).unwrap();
+    let pid = std::process::id();
+    let start = SystemProcesses.start_identity(pid).unwrap();
+    let record = |handle: BackgroundHandle| {
+        let planner = queue.open_planner(PlannerOrigin::Runtime, None).unwrap();
+        queue
+            .planner_workspace_created(planner.id, &handle.to_string())
+            .unwrap();
+        queue.register_planner_wrapper(planner.id, pid).unwrap();
+        queue.register_planner_agent(planner.id, pid, pid).unwrap();
+        let dir = planners_dir(&db).join(planner.id.to_string());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("runner"), "binary").unwrap();
+        (planner.id, dir)
+    };
+    let (_, kept) = record(BackgroundHandle::new(pid, &start));
+    let (taken, freed) = record(BackgroundHandle::new(pid, "Thu Jan  1 00:00:00 1970"));
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE planners SET heartbeat_at = 1", [])
+        .unwrap();
+
+    let removed = planner::remove_unused_planner_runners(
+        &queue,
+        &SystemProcesses,
+        &LocalRunFiles,
+        &SystemClock,
+        &planners_dir(&db),
+    )
+    .unwrap();
+    assert_eq!(removed, vec![taken]);
+    assert!(kept.join("runner").is_file());
+    assert!(!freed.join("runner").exists());
+}
+
 /// Task 1100: once a run's task is over, the sweep removes the Claude Code
 /// scratchpad of its session (named after its worktree) under each root,
 /// recorded as `scratchpad_removed` with the paths and the bytes. A run

@@ -49,7 +49,7 @@ use crate::domain::{
     ActorContext, IdleProbe, PlannerCloseCode, PlannerId, PlannerOrigin, PlannerProbe,
     PlannerRoute, PlannerSession, PlannerState, ProposalId, Task,
     actor_model::{ActorLaunch, ModelRole, REVISE_ESCALATION, RoleModels},
-    background_wrapper::{BACKGROUND_FLAG, BackgroundSession},
+    background_wrapper::{BACKGROUND_FLAG, BackgroundHandle, BackgroundSession},
     language::Language,
     turn::{self, LIMITS_FILE, TurnLimits, TurnMark, exit_path, request_path, turns_dir},
 };
@@ -872,9 +872,13 @@ pub fn close_person_planners(queue: &dyn Queue) -> Result<Vec<PlannerId>> {
 
 /// Remove the runner of every planner, closed or not, that nothing runs
 /// any more ([`PlannerSession::runner_unused`]: its exit recorded, its
-/// wrapper dead or silent, or never registered in time), for the planners
-/// left before their wrapper removed its own, or whose wrapper did not end
-/// cleanly. A live wrapper's runner is kept. Every removal is tried; the
+/// wrapper dead, in a workspace silent past the heartbeat timeout, or
+/// never registered in time), for the planners left before their wrapper
+/// removed its own, or whose wrapper did not end cleanly. A background
+/// wrapper lives while its handle's pid shows the start the handle
+/// recorded (ADR-t1404-1 decision 2), so a pid another process took frees
+/// the runner; a row without a handle is told by its wrapper's pid. A live
+/// wrapper's runner is kept. Every removal is tried; the
 /// first failure is returned after them. Returns the IDs whose runner went.
 pub fn remove_unused_planner_runners(
     queue: &dyn Queue,
@@ -891,13 +895,7 @@ pub fn remove_unused_planner_runners(
         if !files.exists(&runner) {
             continue;
         }
-        let probe = PlannerProbe {
-            now,
-            workspace_listed: false,
-            wrapper_alive: planner.wrapper_pid.is_some_and(|pid| processes.alive(pid)),
-            idle: None,
-        };
-        if !planner.runner_unused(&probe) {
+        if !runner_unused(&planner, processes, now) {
             continue;
         }
         match remove_runner(files, &runner) {
@@ -914,10 +912,106 @@ pub fn remove_unused_planner_runners(
     }
 }
 
+/// Whether nothing runs `planner`'s runner at `now`
+/// ([`PlannerSession::runner_unused`]), its wrapper alive while its
+/// background handle's pid shows the start the handle recorded, or, with
+/// no handle, while its wrapper's pid runs.
+fn runner_unused(planner: &PlannerSession, processes: &dyn ProcessControl, now: i64) -> bool {
+    let handle = planner
+        .workspace_id
+        .as_deref()
+        .and_then(BackgroundHandle::parse);
+    let wrapper_alive = match handle {
+        Some(handle) => handle.is(handle.pid, processes.start_identity(handle.pid).as_deref()),
+        None => planner.wrapper_pid.is_some_and(|pid| processes.alive(pid)),
+    };
+    planner.runner_unused(&PlannerProbe {
+        now,
+        workspace_listed: false,
+        wrapper_alive,
+        idle: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{FindingId, PlannerRoute, RequestId};
+    use crate::domain::{FindingId, HEARTBEAT_TIMEOUT_SECS, PlannerRoute, RequestId};
+
+    /// Processes by pid with the start the system shows, `None` for one
+    /// whose start cannot be read; a pid not listed runs nothing.
+    struct Starts(Vec<(u32, Option<&'static str>)>);
+
+    impl ProcessControl for Starts {
+        fn alive(&self, pid: u32) -> bool {
+            self.0.iter().any(|(p, _)| *p == pid)
+        }
+        fn terminate(&self, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn interrupt(&self, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn kill(&self, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn start_identity(&self, pid: u32) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(p, _)| *p == pid)
+                .and_then(|(_, start)| start.map(str::to_owned))
+        }
+    }
+
+    /// The sweep keeps a background planner's runner while its handle's
+    /// pid shows the start the handle recorded, however late its
+    /// heartbeat, and frees it once that pid shows another start (a
+    /// process that took it) or none that can be read. A row without a
+    /// handle is told by its wrapper's pid and, in a workspace, its
+    /// heartbeat.
+    #[test]
+    fn a_background_runner_is_kept_while_its_handle_shows_the_recorded_start() {
+        let start = "Mon Oct  5 10:00:00 2026";
+        let row = |workspace: &str| PlannerSession {
+            id: PlannerId::new(1),
+            origin: PlannerOrigin::Runtime,
+            proposal_id: None,
+            draft_task_id: None,
+            finding_id: None,
+            request_id: None,
+            workspace_id: Some(workspace.to_owned()),
+            wrapper_pid: Some(7),
+            agent_pid: Some(8),
+            heartbeat_at: Some(0),
+            exit_code: None,
+            exited_at: None,
+            closed_at: None,
+            error: None,
+            created_at: 0,
+            route: PlannerRoute::Headless,
+            answer_wait_at: None,
+        };
+        let late = HEARTBEAT_TIMEOUT_SECS + 1;
+        let background = row(&BackgroundHandle::new(7, start).to_string());
+        assert!(!runner_unused(
+            &background,
+            &Starts(vec![(7, Some(start))]),
+            late
+        ));
+        for other in [Some("Tue Oct  6 11:00:00 2026"), None] {
+            assert!(
+                runner_unused(&background, &Starts(vec![(7, other)]), late),
+                "{other:?}"
+            );
+        }
+        assert!(runner_unused(&background, &Starts(vec![]), 0));
+        // In a workspace: the pid alone, and a late heartbeat frees it.
+        let workspace = row("W");
+        let running = Starts(vec![(7, None)]);
+        assert!(!runner_unused(&workspace, &running, 0));
+        assert!(runner_unused(&workspace, &running, late));
+        assert!(runner_unused(&workspace, &Starts(vec![]), 0));
+    }
 
     /// A row that records a cmux workspace is retired, whoever opened it:
     /// a planner of the runtime's an older binary opened in one
