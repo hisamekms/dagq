@@ -329,14 +329,14 @@ pub fn stats(db: &Path, query: &StatsQuery) -> Result<Value> {
 
 /// The near-term dependency diagram of `graph --format d2|svg`
 /// (ADR-0077): its d2 source
-/// ([`crate::application::queue_reads::graph_diagram`]), or the SVG the
+/// ([`crate::application::queue_reads::planning::graph_diagram`]), or the SVG the
 /// host's d2 draws from it, and the tasks it shows.
 pub fn graph_diagram(
     queue: &SqliteQueue,
     goal_id: Option<crate::domain::GoalId>,
     format: &str,
 ) -> Result<(String, Vec<TaskId>)> {
-    let (source, tasks) = crate::application::queue_reads::graph_diagram(queue, goal_id)?;
+    let (source, tasks) = crate::application::queue_reads::planning::graph_diagram(queue, goal_id)?;
     let text = if format == "svg" {
         render_svg(&source)?
     } else {
@@ -390,7 +390,28 @@ struct HostReads<'a> {
     one_shot: &'a OneShot,
 }
 
-impl crate::application::queue_reads::QueueReadSources<SqliteQueue> for HostReads<'_> {
+impl crate::application::queue_reads::PlanningSources<SqliteQueue> for HostReads<'_> {
+    fn changes(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeSet>> {
+        task_changes(queue)
+    }
+    fn goal_tags(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
+        goal_tags(queue)
+    }
+    fn claim_holds(&self, queue: &SqliteQueue) -> Result<Vec<Value>> {
+        health::claim_holds(queue, &SystemProcesses, queue.generators().clock.as_ref())
+    }
+    fn render_svg(&self, source: &str) -> Result<String> {
+        render_svg(source)
+    }
+    fn raw_stdout(&self, text: String) -> Value {
+        json!({ crate::view::RAW_STDOUT: text })
+    }
+    fn goal_view(&self, detail: &crate::domain::GoalDetail) -> Value {
+        crate::view::goal_detail(detail)
+    }
+}
+
+impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostReads<'_> {
     fn status(&self, queue: &SqliteQueue, role: Option<SessionRole>) -> Result<Value> {
         self.one_shot.status_of(self.db, queue, role)
     }
@@ -410,18 +431,6 @@ impl crate::application::queue_reads::QueueReadSources<SqliteQueue> for HostRead
     fn improvements(&self, queue: &SqliteQueue) -> Result<Value> {
         self.one_shot.improvements_of(queue)
     }
-    fn changes(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeSet>> {
-        task_changes(queue)
-    }
-    fn goal_tags(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
-        goal_tags(queue)
-    }
-    fn claim_holds(&self, queue: &SqliteQueue) -> Result<Vec<Value>> {
-        health::claim_holds(queue, &SystemProcesses, queue.generators().clock.as_ref())
-    }
-    fn render_svg(&self, source: &str) -> Result<String> {
-        render_svg(source)
-    }
     fn observe_input(
         &self,
         read: &crate::application::queue_reads::ObserveInputRead,
@@ -433,12 +442,6 @@ impl crate::application::queue_reads::QueueReadSources<SqliteQueue> for HostRead
             read.offset,
             read.limit,
         )
-    }
-    fn raw_stdout(&self, text: String) -> Value {
-        json!({ crate::view::RAW_STDOUT: text })
-    }
-    fn goal_view(&self, detail: &crate::domain::GoalDetail) -> Value {
-        crate::view::goal_detail(detail)
     }
     fn clock<'q>(&self, queue: &'q SqliteQueue) -> &'q dyn crate::application::Clock {
         queue.generators().clock.as_ref()

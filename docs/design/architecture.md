@@ -80,6 +80,7 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
 - 時刻とID生成: `application::ports`の`Clock`（壁時計と単調時計）・`IdGenerator`、実装は`infrastructure::clock`。
 - eventの記録: `RunLog::record_runtime_event`・`record_queue_event`と種類の`domain::event_kind::EventKind`。
 - 人への問い合わせ: `asks`表と`AskStore`（`infrastructure::asks`）。
+  読み取りは`queue_reads::shared`。
   askを開くのと、answerを自分の状態に適用するのは、そのaskの`kind`を持つcontextが行う（例: `worker_question`は実行と着地、`plan_review`は計画管理、`update`はhost運用）。
 - actorと認可: `domain::actor`・`domain::actor_model`（headlessのjobの行き先の値を含む）・`domain::authorization`（[Authorization](authorization.md)）。
 - 名前・出力・共有の規則: `application::naming`、`tracing`のマクロ、`domain::write_rules`（表をまたぐ書き込みの規則）、`domain::language`。
@@ -99,7 +100,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 
 **操作**
 
-- application: `application::commands::planning`・`commands::requests`、`application::planner`系、`application::supervise`のplan review・goal review・各plannerのsubmodule。
+- application: `application::commands::planning`・`commands::requests`、`application::planner`系、`queue_reads::planning`、`application::supervise`のplan review・goal review・各plannerのsubmodule。
 - infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）と、上のtableと同じ名前のstoreのmodule（`proposals`・`plan_reviews`・`draft_planners`・`follow_up_membership`ほか）。
 
 **公開するport**
@@ -170,7 +171,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **操作**
 
-- application: `application::stats`・`kpi`・`forecast`・`report`・`observer`・`watch`・`throughput_review`・`ci_watch`ほかと、`application::supervise`の同名のsubmodule。
+- application: `application::stats`・`kpi`・`forecast`・`report`・`observer`・`watch`・`throughput_review`・`ci_watch`・`queue_reads::observation`（`status`も）ほかと、`application::supervise`の同名のsubmodule。
 - infrastructure: `findings`・`observer`・`throughput_review`・`runtime_store::queue_records`・`kpi_*`・`transcripts`・`ci_watch`・`ci_watch_store`ほか。
 
 **公開するport**
@@ -247,7 +248,6 @@ contextを1つに決められず、分ける先を持つもの。
 | `application::ports`の`RunCoordination` | 実行と着地のleaseとprocessと、host運用のsupervisorの登録と引き継ぎ | portの分割（未登録、follow_up） |
 | `src/application/supervise/mod.rs`の`Supervisor` | 計画管理の欄と、実行と着地・host運用の残りの欄を持つ（C3） | contextごとに分ける |
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
-| `application::queue_reads` | 読み取りの入口で、各armが自分のcontextのportを読む | 未登録（follow_up） |
 | `application::prompt` | workerのprompt（実行と着地）、inbox・plannerのprompt（計画管理）、observerとスループットの見直しのprompt（観測と分析） | 未登録（follow_up） |
 | `application::health` | `status`・`doctor`とattention（観測と分析）、`recover`（実行と着地）、`doctor`のhostの部分（host運用） | 未登録（follow_up） |
 

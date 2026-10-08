@@ -13,26 +13,35 @@
 //! (the host's d2 would run), and `watch`, `report`, `graph --out`,
 //! `locate` and `doctor` are no read use case.
 //!
+//! [`answer`] only hands a read to the module of the context whose
+//! operation it is (docs/design/architecture.md): [`planning`] (`list`,
+//! `candidates`, `graph`, `goal`, `lint`, `search`, `related`),
+//! [`observation`] (`status`, `events`, `timeline`, `stats`, `kpi`,
+//! `forecast`, `notes`, `marks`, `findings`, `observe`) and [`shared`]
+//! (`asks`, the shared parts' table). Each module's reads take only the
+//! ports they read and their part of the host's sources
+//! ([`PlanningSources`], [`ObservationSources`]).
+//!
 //! [Queue service]: ../../docs/design/queue-service.md
+
+#[cfg(test)]
+mod fakes;
+pub mod observation;
+pub mod planning;
+pub mod shared;
 
 use anyhow::Result;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
-use crate::application::claim_view::{Deferrals, claim_view, open_deferrals};
-use crate::application::forecast::ForecastQuery;
-use crate::application::{
-    AskQuery, AskStore, Clock, EventReads, ObserverLog, QueueRecords, RunLog, StatusFilter,
-    TaskQuery, TaskStore, claim_candidates, dependency_graph, observer, watch,
-};
-use crate::domain::kpi::{CompareSpec, KpiQuery};
+pub use observation::ObservationSources;
+pub use planning::PlanningSources;
+
+use crate::application::{AskStore, EventReads, ObserverLog, QueueRecords, RunLog, TaskStore};
+use crate::domain::kpi::CompareSpec;
 use crate::domain::queue_service::UseCase;
-use crate::domain::search::{self, SearchQuery};
-use crate::domain::stats::{Cursor, StatsQuery};
-use crate::domain::{
-    ChangeSet, EventFilter, EventId, FindingId, FindingQuery, FindingTarget, GoalDetail, GoalId,
-    NoteQuery, Proposal, ProposalId, Resource, RunId, SessionRole, TaskId, TaskStatus,
-};
+use crate::domain::stats::Cursor;
+use crate::domain::{Resource, SessionRole};
 
 /// A read of the queue, as one read use case of the service takes it.
 #[derive(Debug, Clone, PartialEq)]
@@ -783,341 +792,64 @@ impl QueueRead {
 }
 
 /// What a read takes beyond the queue's records that the composition root
-/// assembles: the reads composed with the host (`status`, `stats`, `kpi`,
-/// `forecast`, the improvements, the repository's set of changes), the
-/// SVG the host's d2 draws, the observation's input files, the command
-/// line's views and the clock.
-pub trait QueueReadSources<Q: ?Sized> {
-    fn status(&self, queue: &Q, role: Option<SessionRole>) -> Result<Value>;
-    fn stats(&self, queue: &Q, query: &StatsQuery) -> Result<Value>;
-    fn kpi(&self, queue: &Q, query: &KpiQuery) -> Result<Value>;
-    fn forecast(&self, queue: &Q, query: &ForecastQuery) -> Result<Value>;
-    /// The limit of the improvement proposals and the ones waiting
-    /// (`findings`' `improvements`).
-    fn improvements(&self, queue: &Q) -> Result<Value>;
-    /// The repository's set of changes (ADR-t980-1), none without a
-    /// checkout.
-    fn changes(&self, queue: &Q) -> Result<Option<ChangeSet>>;
-    /// The repository's set of goal tags (ADR-t1639-1 decision 6), none
-    /// without a checkout.
-    fn goal_tags(&self, queue: &Q) -> Result<Option<crate::domain::TagSet>>;
-    /// What holds the claims now as the supervisors recorded it
-    /// (`candidates`' `held`, ADR-t1992-1).
-    fn claim_holds(&self, queue: &Q) -> Result<Vec<Value>>;
-    /// The SVG the host's d2 draws from `source`.
-    fn render_svg(&self, source: &str) -> Result<String>;
-    /// A page of an observation's input (`observe --input`).
-    fn observe_input(&self, read: &ObserveInputRead) -> Result<Value>;
-    /// What the command line prints as is (`graph --format d2|svg`).
-    fn raw_stdout(&self, text: String) -> Value;
-    /// `goal show`'s compact form, without `--full`.
-    fn goal_view(&self, detail: &GoalDetail) -> Value;
-    /// The clock of `queue` (`timeline`'s time since the last event).
-    fn clock<'q>(&self, queue: &'q Q) -> &'q dyn Clock;
-}
+/// assembles, as one bound: the planning context's
+/// [`PlanningSources`] and the observation context's
+/// [`ObservationSources`]. Every type with both is one.
+pub trait QueueReadSources<Q: ?Sized>: PlanningSources<Q> + ObservationSources<Q> {}
 
-/// The near-term dependency diagram of `graph --format d2|svg` (ADR-0077)
-/// as d2 source, and the tasks it shows.
-pub fn graph_diagram(
-    queue: &(impl TaskStore + ?Sized),
-    goal_id: Option<GoalId>,
-) -> Result<(String, Vec<TaskId>)> {
-    let input = queue.graph_input()?;
-    let graph = dependency_graph(input.clone(), goal_id);
-    let titles = queue
-        .list_goals()?
-        .into_iter()
-        .map(|goal| (goal.id, goal.title))
-        .collect();
-    let diagram = match goal_id {
-        // The goal's prerequisites and critical steps outside it are
-        // drawn too (ADR-0077 decision 1).
-        Some(goal) => crate::application::diagram::near_term_in_goal(
-            &dependency_graph(input, None),
-            &graph,
-            goal,
-            &titles,
-        ),
-        None => crate::application::diagram::near_term(&graph, &titles),
-    };
-    Ok((diagram.to_d2(), diagram.task_ids()))
-}
+impl<Q: ?Sized, T: PlanningSources<Q> + ObservationSources<Q> + ?Sized> QueueReadSources<Q> for T {}
 
 /// The JSON a read of the queue gives, the same for the command line and
-/// the queue service (ADR-t1233-5 decision 1): the read's options become
-/// the queries of the queue's ports, and what the host has to compose
-/// comes from `sources`.
-pub fn answer<Q>(
-    queue: &mut Q,
-    sources: &dyn QueueReadSources<Q>,
-    read: &QueueRead,
-) -> Result<Value>
+/// the queue service (ADR-t1233-5 decision 1). This only hands each read
+/// to the module of the context whose operation it is
+/// (docs/design/architecture.md): the module turns its options into the
+/// queries of the ports it takes, and what the host has to compose comes
+/// from `sources`.
+pub fn answer<Q, S>(queue: &mut Q, sources: &S, read: &QueueRead) -> Result<Value>
 where
     Q: TaskStore + AskStore + RunLog + EventReads + ObserverLog + QueueRecords,
+    S: QueueReadSources<Q> + ?Sized,
 {
-    let goal = |id: Option<i64>| id.map(GoalId::new);
-    let role = |role: &Option<String>| -> Result<Option<SessionRole>> {
-        Ok(role.as_deref().map(str::parse).transpose()?)
-    };
-    Ok(match read {
-        QueueRead::List(read) => serde_json::to_value(queue.list(&TaskQuery {
-            status: list_status(read)?,
-            goal_id: goal(read.goal),
-            limit: usize::try_from(read.limit)?,
-            before: read.before.map(TaskId::new),
-            full: read.full,
-        })?)?,
-        QueueRead::Candidates(read) => {
-            let graph = dependency_graph(queue.graph_input()?, None);
-            let deferrals = if read.ignore_deferrals {
-                Deferrals::Ignored
-            } else {
-                Deferrals::Excluded
-            };
-            let view = claim_view(
-                claim_candidates(queue.candidates()?, &graph),
-                |candidate| candidate.task.id(),
-                open_deferrals(queue)?,
-                deferrals,
-            );
-            json!({
-                "candidates": view.candidates,
-                "deferred": view.deferred,
-                "held": sources.claim_holds(queue)?,
-            })
-        }
-        QueueRead::Graph(read) => match read.format.as_str() {
-            "json" => {
-                let mut graph = dependency_graph(queue.graph_input()?, goal(read.goal));
-                let view = claim_view(
-                    std::mem::take(&mut graph.candidates),
-                    |id| *id,
-                    open_deferrals(queue)?,
-                    Deferrals::Excluded,
-                );
-                let mut value = serde_json::to_value(graph)?;
-                value["candidates"] = serde_json::to_value(view.candidates)?;
-                value["deferred"] = serde_json::to_value(view.deferred)?;
-                value
-            }
-            format => {
-                let (source, _) = graph_diagram(queue, goal(read.goal))?;
-                let text = if format == "svg" {
-                    sources.render_svg(&source)?
-                } else {
-                    source
-                };
-                sources.raw_stdout(text)
-            }
-        },
-        QueueRead::Status(read) => sources.status(queue, role(&read.role)?)?,
-        QueueRead::Asks(read) => json!({"asks": queue.asks(AskQuery {
-            all: read.all,
-            open: read.open,
-            role: role(&read.role)?,
-        })?}),
-        QueueRead::Events(read) => watch::events_in(queue, &events_query(read)?)?,
-        QueueRead::Timeline(read) => watch::timeline_in(
-            queue,
-            &RunId::new(read.run.clone())?,
-            read.gap,
-            read.full,
-            sources.clock(queue),
-        )?,
-        QueueRead::Stats(read) => sources.stats(
-            queue,
-            &StatsQuery {
-                since: read.since,
-                until: read.until,
-                goal_id: goal(read.goal),
-                full: read.full,
-            },
-        )?,
-        QueueRead::Kpi(read) => sources.kpi(queue, &kpi_query(read)?)?,
-        QueueRead::Forecast(read) => sources.forecast(
-            queue,
-            &ForecastQuery {
-                task_id: read.task.map(TaskId::new),
-                goal_id: goal(read.goal),
-                parallel: read.parallel.map(usize::from),
-                trials: read.trials as usize,
-            },
-        )?,
-        QueueRead::Notes(read) => serde_json::to_value(queue.notes(&NoteQuery {
-            goal_id: goal(read.goal),
-            task_id: read.task.map(TaskId::new),
-            since: read.since.map(EventId::new),
-            limit: usize::try_from(read.limit)?,
-        })?)?,
-        QueueRead::Marks(read) => {
-            let marks = crate::domain::marks::marks(&queue.all_events()?, read.since, read.until);
-            json!({ "marks": marks })
-        }
-        QueueRead::Findings(read) => {
-            let findings = QueueRecords::findings(queue, &finding_query(read)?)?;
-            // The limit's settings not reading does not hide the findings.
-            let improvements = sources
-                .improvements(queue)
-                .unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
-            json!({"findings": findings, "improvements": improvements})
-        }
-        QueueRead::Search(read) => serde_json::to_value(
-            queue.search_documents(&SearchQuery {
-                terms: read.query.clone(),
-                kinds: read
-                    .kinds
-                    .iter()
-                    .map(|kind| kind.parse())
-                    .collect::<Result<_, _>>()?,
-                statuses: read
-                    .status
-                    .iter()
-                    .map(|value| search::parse_status(value))
-                    .collect::<Result<_, _>>()?,
-                goal_id: goal(read.goal),
-                limit: usize::try_from(read.limit)?,
-                full: read.full,
-            })?,
-        )?,
-        QueueRead::Related(read) => {
-            let statuses = read
-                .status
-                .iter()
-                .map(|status| Ok(status.trim().parse::<TaskStatus>()?.as_str().to_owned()))
-                .collect::<Result<Vec<_>>>()?;
-            serde_json::to_value(queue.related_tasks(
-                TaskId::new(read.task),
-                &statuses,
-                usize::try_from(read.limit)?,
-            )?)?
-        }
-        QueueRead::GoalList(read) => serde_json::to_value(crate::domain::goal::list(
-            queue.list_goals()?,
-            &read.tags()?,
-        ))?,
-        QueueRead::GoalShow(read) => {
-            let detail = queue.show_goal(GoalId::new(read.id))?;
-            if read.full {
-                serde_json::to_value(detail)?
-            } else {
-                sources.goal_view(&detail)
-            }
-        }
-        QueueRead::Lint(read) => {
-            let mut proposals = Vec::with_capacity(read.proposals.len());
-            for id in &read.proposals {
-                proposals.push(queue.show_proposal(ProposalId::new(*id))?);
-            }
-            let targets = lint_targets(&read.tasks, &proposals);
-            // The repository's set of changes holds the tasks lint checks
-            // (ADR-t980-1).
-            let mut input = queue.lint_input(&targets)?;
-            input.changes = sources.changes(queue)?;
-            input.goal_tags = sources.goal_tags(queue)?;
-            json!({"tasks": targets, "violations": crate::domain::lint::lint(&input)})
-        }
-        QueueRead::ObserveHistory(read) => observer::history(queue, read.limit)?,
-        QueueRead::ObserveInput(read) => sources.observe_input(read)?,
-    })
-}
-
-/// `list`'s statuses: every one with `--all`, the open ones without
-/// `--status`, else those named.
-fn list_status(read: &ListRead) -> Result<StatusFilter> {
-    Ok(if read.all {
-        StatusFilter::Any
-    } else if read.status.is_empty() {
-        StatusFilter::Open
-    } else {
-        StatusFilter::Only(
-            read.status
-                .iter()
-                .map(|value| value.trim().parse::<TaskStatus>())
-                .collect::<Result<_, _>>()?,
-        )
-    })
-}
-
-/// `events`' filters as the query of [`watch::events_in`].
-fn events_query(read: &EventsRead) -> Result<watch::EventsQuery> {
-    Ok(watch::EventsQuery {
-        after: EventId::new(read.after),
-        limit: read.limit as usize,
-        all: read.all,
-        full: read.full,
-        filter: EventFilter {
-            kinds: (!read.kind.is_empty()).then(|| read.kind.clone()),
-            run: read.run.clone().map(RunId::new).transpose()?,
-            task: read.task.map(TaskId::new),
-            goal: read.goal.map(GoalId::new),
-            since: read.since.as_deref().map(watch::event_time).transpose()?,
-            until: read.until.as_deref().map(watch::event_time).transpose()?,
-        },
-    })
-}
-
-fn kpi_query(read: &KpiRead) -> Result<KpiQuery> {
-    Ok(KpiQuery {
-        period: read.period.parse().map_err(anyhow::Error::msg)?,
-        last: usize::from(read.last),
-        at: read.at,
-        since: read.since,
-        until: read.until,
-        changes: read.changes.clone(),
-        areas: read.areas.clone(),
-        by: read
-            .by
-            .iter()
-            .map(|axis| axis.parse())
-            .collect::<Result<_, String>>()
-            .map_err(anyhow::Error::msg)?,
-        cross: read.cross,
-        compare: read.compare,
-        window_days: read.window,
-        goal_id: read.goal.map(GoalId::new),
-    })
-}
-
-/// `findings`' query: the first of `--task`, `--run`, `--goal` and
-/// `--queue` given is its target.
-fn finding_query(read: &FindingsRead) -> Result<FindingQuery> {
-    let target = match (read.task, &read.run, read.goal) {
-        (Some(task), _, _) => Some(FindingTarget::Task(TaskId::new(task))),
-        (_, Some(run), _) => Some(FindingTarget::Run(RunId::new(run.clone())?)),
-        (_, _, Some(id)) => Some(FindingTarget::Goal(GoalId::new(id))),
-        _ => read.queue.then_some(FindingTarget::Queue),
-    };
-    Ok(FindingQuery {
-        id: read.id.map(FindingId::new),
-        all: read.all,
-        statuses: read
-            .status
-            .iter()
-            .map(|value| value.parse())
-            .collect::<Result<_, _>>()?,
-        kinds: read.kinds.clone(),
-        target,
-        full: read.full,
-    })
-}
-
-/// The tasks `lint` checks: those named, then the proposals' tasks, each
-/// once in the order first named.
-fn lint_targets(tasks: &[i64], proposals: &[Proposal]) -> Vec<TaskId> {
-    let mut targets: Vec<TaskId> = tasks.iter().copied().map(TaskId::new).collect();
-    for proposal in proposals {
-        targets.extend_from_slice(proposal.task_ids());
+    match read {
+        QueueRead::List(read) => planning::list(queue, read),
+        QueueRead::Candidates(read) => planning::candidates(queue, sources, read),
+        QueueRead::Graph(read) => planning::graph(queue, sources, read),
+        QueueRead::GoalList(read) => planning::goal_list(queue, read),
+        QueueRead::GoalShow(read) => planning::goal_show(queue, sources, read),
+        QueueRead::Lint(read) => planning::lint(queue, sources, read),
+        QueueRead::Search(read) => planning::search(queue, read),
+        QueueRead::Related(read) => planning::related(queue, read),
+        QueueRead::Status(read) => observation::status(queue, sources, read),
+        QueueRead::Events(read) => observation::events(queue, read),
+        QueueRead::Timeline(read) => observation::timeline(queue, sources, read),
+        QueueRead::Stats(read) => observation::stats(queue, sources, read),
+        QueueRead::Kpi(read) => observation::kpi(queue, sources, read),
+        QueueRead::Forecast(read) => observation::forecast(queue, sources, read),
+        QueueRead::Notes(read) => observation::notes(queue, read),
+        QueueRead::Marks(read) => observation::marks(queue, read),
+        QueueRead::Findings(read) => observation::findings(queue, sources, read),
+        QueueRead::ObserveHistory(read) => observation::observe_history(queue, read),
+        QueueRead::ObserveInput(read) => observation::observe_input::<Q, S>(sources, read),
+        QueueRead::Asks(read) => shared::asks(queue, read),
     }
-    let mut seen = std::collections::HashSet::new();
-    targets.retain(|id| seen.insert(*id));
-    targets
+}
+
+/// `status --role` and `asks --role` as the session role they name.
+fn session_role(role: Option<&String>) -> Result<Option<SessionRole>> {
+    Ok(role.map(|role| role.parse()).transpose()?)
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
+    use super::observation::{events_query, finding_query, kpi_query};
+    use super::planning::{lint_targets, list_status};
     use super::*;
+    use crate::application::StatusFilter;
+    use crate::domain::{
+        EventId, FindingTarget, GoalId, Proposal, ProposalId, RunId, TaskId, TaskStatus,
+    };
 
     #[test]
     fn the_params_default_to_the_command_line_s_defaults() {
