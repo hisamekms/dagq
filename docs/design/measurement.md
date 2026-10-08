@@ -69,6 +69,8 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
   slotのrunはslotの工程・slotの外の待ち・着地の順番待ちから、slotを離れたrunはstatusから工程を読む。
   前と同じ工程とattemptは書かず、プロセスが初めて見るrunは記録を読み直してattemptを引き継ぐ。
   記録の失敗はwarnだけで、runの工程の判断は待たない。
+  人の`integrate`の着地は`Integrator`が書く: integration slotを取った所で`landing`を、mainが動く前にslotを返した所（検査の拒否・エラー・`needs_session`・hold・`failed`）でrunが戻ったstatusの工程を書く。
+  supervisorの着地はslotが書く。
   storeは`run_integrated`と同じtransactionで`push`を、`recover`と放置のrunの回収は`run_recovered`と同じtransactionでstatusの工程（`interrupted`は`ended`、やめた着地は`landing_queue`）を書く。
 - **タグ**: `blocker`は`queue`（slotや着地の順番の空き待ち）・`ai`（agentが動いている）・`compute`（build・test・検証の計算）・`human`（人の答え）・`runtime`（dagq自身の処理と見張りの間隔）・`external`（GitHub・remote・providerのAPIなど外のサービス）・`infra`（実行環境の用意・故障・資源の不足。ADR-t1662-3決定5）。`holds`は`worker_slot`・`landing_slot`・`none`で、slotの数え方（着地の順番だけを待つrunと人の答えを待つrunはslotの外）に従う。
 - **`Phase::tags()`**: 記録の工程の定義（`domain::run_phase`）の隣で網羅的な`match`がタグを返す。

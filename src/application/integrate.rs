@@ -351,16 +351,24 @@ impl Integrator {
             request.requester.actor_id()
         );
         warn!(op = "integrate", run_id = %run.id(), "{message}");
-        if holds
-            && let Err(record) = queue.abort_integration(
+        if holds {
+            match queue.abort_integration(
                 run.id(),
                 &request.token,
                 request.previous.as_str(),
                 &message,
                 &Reason::new(ReasonCode::Other),
-            )
-        {
-            warn!(op = "integrate", run_id = %run.id(), error = %format_args!("{record:#}"), "run {}: could not give the slot back: {record:#}", run.id());
+            ) {
+                Ok(run) => record_landing_left(
+                    &*queue,
+                    &request.requester,
+                    &run,
+                    EventKind::IntegrationError,
+                ),
+                Err(record) => {
+                    warn!(op = "integrate", run_id = %run.id(), error = %format_args!("{record:#}"), "run {}: could not give the slot back: {record:#}", run.id());
+                }
+            }
         }
         bail!("{message}")
     }
@@ -491,6 +499,11 @@ fn begin(
     let token = ctx.ids.lease_token();
     let main = ctx.repository.main_head()?;
     let run = queue.begin_integration(run.id(), &token, &main)?;
+    // It lands from here, holding the integration slot, until its push or
+    // until the landing gives the slot back ([`record_landing_left`]).
+    record_phase(&*queue, run.id(), EventKind::IntegrationStarted, |_| {
+        Some(run_phase::Phase::Landing)
+    });
     Ok(Some(IntegrationRequest {
         requester: requester.clone(),
         run,
@@ -641,19 +654,25 @@ fn land_integrating(
         Err(error) => {
             // Nothing reached main: give the slot back and keep the run where it was.
             let message = format!("integration stopped before main moved: {error:#}");
-            if let Err(record) = queue.abort_integration(
+            match queue.abort_integration(
                 run.id(),
                 token,
                 previous.as_str(),
                 &message,
                 &reason_of_error(&error, ReasonCode::Other),
             ) {
-                warn!(
+                Ok(run) => record_landing_left(
+                    &*queue,
+                    &request.requester,
+                    &run,
+                    EventKind::IntegrationError,
+                ),
+                Err(record) => warn!(
                     op = "integrate",
                     error = %format_args!("{record:#}"),
                     "run {}: could not record the error: {record:#}",
                     run.id()
-                );
+                ),
             }
             return Err(error.context(format!(
                 "run {} returned to {}",
@@ -712,6 +731,12 @@ fn land_integrating(
             // event is a person's only once none are left (as an ask).
             detail["resumes_left"] = json!(resumes_left(queue, run.id()));
             let run = queue.defer_integration(run.id(), token, &reason, detail)?;
+            record_landing_left(
+                &*queue,
+                &request.requester,
+                &run,
+                EventKind::IntegrationDeferred,
+            );
             IntegrationOutcome::NeedsSession {
                 run: Box::new(run),
                 main: main.clone(),
@@ -726,6 +751,12 @@ fn land_integrating(
                 run.id()
             );
             let run = queue.hold_integration(run.id(), token, &reason, detail)?;
+            record_landing_left(
+                &*queue,
+                &request.requester,
+                &run,
+                EventKind::IntegrationHeld,
+            );
             IntegrationOutcome::Held {
                 run: Box::new(run),
                 main: main.clone(),
@@ -740,6 +771,12 @@ fn land_integrating(
                 run.id()
             );
             let run = queue.fail_integration(run.id(), token, &reason, receipt)?;
+            record_landing_left(
+                &*queue,
+                &request.requester,
+                &run,
+                EventKind::IntegrationFailed,
+            );
             IntegrationOutcome::Failed {
                 run: Box::new(run),
                 reason,
@@ -825,6 +862,55 @@ fn record_push_phase<Q: RunLog + ?Sized>(queue: &Q, run_id: &RunId, kind: EventK
         EventKind::RunPhaseChanged,
         run_phase::PhaseChange::new(phase, attempt, cause).payload(),
     )
+}
+
+/// Record the phase `run` is in once its landing gave the integration
+/// slot back before main moved, by the status it left the run in
+/// ([`run_phase::Phase::after_landing`]): `cause` is the event that gave
+/// the slot back. This closes the landing's phase. A landing the
+/// supervisor asked for records nothing here: the supervisor records the
+/// run's phases from its slot, which took the slot and lets it go.
+fn record_landing_left<Q: RunLog + ?Sized>(
+    queue: &Q,
+    requester: &ActorContext,
+    run: &TaskRun,
+    cause: EventKind,
+) {
+    if requester.role() == ActorRole::Supervisor {
+        return;
+    }
+    record_phase(queue, run.id(), cause, |events| {
+        run_phase::Phase::after_landing(run.status(), events)
+    });
+}
+
+/// Record the phase `phase` decides from the run's events, which `cause`
+/// moved it to, in the attempt last recorded, unless it repeats the last
+/// record. A failure is only warned of: the landing goes on either way.
+fn record_phase<Q: RunLog + ?Sized>(
+    queue: &Q,
+    run_id: &RunId,
+    cause: EventKind,
+    phase: impl FnOnce(&[crate::domain::RunEvent]) -> Option<run_phase::Phase>,
+) {
+    let recorded = queue.run_events(run_id).and_then(|events| {
+        match phase(&events)
+            .and_then(|phase| run_phase::next_change(&events, phase, cause.as_str()))
+        {
+            Some(change) => {
+                queue.record_runtime_event(run_id, EventKind::RunPhaseChanged, change.payload())
+            }
+            None => Ok(()),
+        }
+    });
+    if let Err(error) = recorded {
+        warn!(
+            op = "integrate",
+            run_id = %run_id,
+            error = %format_args!("{error:#}"),
+            "run {run_id}: could not record its phase after {cause}: {error:#}"
+        );
+    }
 }
 
 /// What [`decide_push`] did: the report, the event recording it, and why
@@ -2757,9 +2843,20 @@ mod tests {
     }
 
     /// The run log alone, for a use case that reads only it: a test double
-    /// implements this one port, not the whole queue.
+    /// implements this one port, not the whole queue. It keeps the
+    /// `run_phase_changed` payloads recorded.
     struct EventsOnly {
         events: Option<Vec<RunEvent>>,
+        phases: std::cell::RefCell<Vec<Value>>,
+    }
+
+    impl EventsOnly {
+        fn of(events: Option<Vec<RunEvent>>) -> Self {
+            Self {
+                events,
+                phases: Default::default(),
+            }
+        }
     }
 
     #[allow(unused_variables)]
@@ -2802,7 +2899,9 @@ mod tests {
             kind: EventKind,
             payload: serde_json::Value,
         ) -> Result<()> {
-            unreachable!("resumes_left reads only the run's events")
+            assert_eq!(kind, EventKind::RunPhaseChanged);
+            self.phases.borrow_mut().push(payload);
+            Ok(())
         }
         fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
             unreachable!("resumes_left reads only the run's events")
@@ -2882,14 +2981,110 @@ mod tests {
     #[test]
     fn resumes_left_reads_the_run_log_alone() {
         let run = RunId::new(RUN).unwrap();
-        let fresh = EventsOnly {
-            events: Some(Vec::new()),
-        };
+        let fresh = EventsOnly::of(Some(Vec::new()));
         assert_eq!(
             resumes_left(&fresh, &run),
             RunHistory::from_events(&[]).resumes().left()
         );
-        assert_eq!(resumes_left(&EventsOnly { events: None }, &run), 0);
+        assert_eq!(resumes_left(&EventsOnly::of(None), &run), 0);
+    }
+
+    fn phase_event(phase: run_phase::Phase, attempt: run_phase::Attempt) -> RunEvent {
+        landing_event(
+            "run_phase_changed",
+            run_phase::PhaseChange::new(phase, attempt, "x").payload(),
+        )
+    }
+
+    /// A person's `integrate` records the landing, holding the landing
+    /// slot, once it took the integration slot, in the run's attempt.
+    #[test]
+    fn a_persons_landing_is_recorded_as_it_takes_the_slot() {
+        let attempt = run_phase::Attempt::of(run_phase::AttemptKind::Resume, 1);
+        let log = EventsOnly::of(Some(vec![phase_event(
+            run_phase::Phase::LandingAnswer,
+            attempt,
+        )]));
+        record_phase(
+            &log,
+            &RunId::new(RUN).unwrap(),
+            EventKind::IntegrationStarted,
+            |_| Some(run_phase::Phase::Landing),
+        );
+        assert_eq!(
+            *log.phases.borrow(),
+            [json!({
+                "phase": "landing",
+                "blocker": "compute",
+                "holds": "landing_slot",
+                "attempt": {"kind": "resume", "n": 1},
+                "cause": "integration_started",
+                "v": run_phase::RULES_VERSION,
+            })]
+        );
+    }
+
+    /// A person's landing that gives the slot back (a refused check, an
+    /// error before main moved, a deferral, a hold or a failure) closes its
+    /// phase with the phase of the status the run is left in, in the run's
+    /// attempt; it records nothing that repeats the last record or that it
+    /// cannot read, nor for the supervisor's landing.
+    #[test]
+    fn a_landing_given_back_closes_its_phase_by_the_status_it_leaves() {
+        let person = ActorContext::instance(ActorRole::User, 1);
+        let attempt = run_phase::Attempt::of(run_phase::AttemptKind::Revise, 2);
+        let landing = || Some(vec![phase_event(run_phase::Phase::Landing, attempt)]);
+        for (status, cause, phase) in [
+            (
+                RunStatus::AwaitingIntegration,
+                EventKind::IntegrationError,
+                "landing_answer",
+            ),
+            (
+                RunStatus::NeedsSession,
+                EventKind::IntegrationError,
+                "needs_session",
+            ),
+            (
+                RunStatus::NeedsSession,
+                EventKind::IntegrationDeferred,
+                "needs_session",
+            ),
+            (
+                RunStatus::AwaitingIntegration,
+                EventKind::IntegrationHeld,
+                "landing_answer",
+            ),
+            (RunStatus::Failed, EventKind::IntegrationFailed, "ended"),
+        ] {
+            let log = EventsOnly::of(landing());
+            record_landing_left(&log, &person, &run_in(Path::new("/tmp/run"), status), cause);
+            let phases = log.phases.borrow();
+            assert_eq!(phases.len(), 1, "{status:?}: {phases:?}");
+            assert_eq!(phases[0]["phase"], phase);
+            assert_eq!(phases[0]["cause"], cause.as_str());
+            assert_eq!(phases[0]["attempt"], json!({"kind": "revise", "n": 2}));
+        }
+        let rested = EventsOnly::of(Some(vec![phase_event(
+            run_phase::Phase::LandingAnswer,
+            attempt,
+        )]));
+        let awaiting = run_in(Path::new("/tmp/run"), RunStatus::AwaitingIntegration);
+        record_landing_left(&rested, &person, &awaiting, EventKind::IntegrationError);
+        assert!(rested.phases.borrow().is_empty());
+        let unreadable = EventsOnly::of(None);
+        record_landing_left(&unreadable, &person, &awaiting, EventKind::IntegrationError);
+        assert!(unreadable.phases.borrow().is_empty());
+        // The supervisor's landing is recorded by its slot.
+        let supervised = EventsOnly::of(landing());
+        let supervisor = ActorContext::instance(ActorRole::Supervisor, 1);
+        record_landing_left(
+            &supervised,
+            &supervisor,
+            &awaiting,
+            EventKind::IntegrationError,
+        );
+        assert!(supervised.phases.borrow().is_empty());
     }
 
     fn integrating() -> TaskRun {

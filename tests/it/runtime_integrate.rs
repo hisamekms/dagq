@@ -635,16 +635,19 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     let kinds = event_kinds(&detail);
     let position = |kind: &str| kinds.iter().rposition(|k| *k == kind).unwrap();
     // The supervisor recorded each phase it moved the run to from its
-    // claim, the run waited at rest for a person's `integrate`, and the
-    // landing recorded the push right after `run_integrated` (holding no
-    // supervisor's slot) and its skip as the run's end (ADR-t1662-1).
-    let phases: Vec<(&str, &str, &str)> = detail
+    // claim, the run waited at rest for a person's `integrate`, the
+    // person's landing recorded its landing (holding the landing slot) as
+    // it took the integration slot, then the push right after
+    // `run_integrated` (holding no supervisor's slot) and its skip as the
+    // run's end (ADR-t1662-1).
+    let phases: Vec<(&str, &str, &str, &str)> = detail
         .events
         .iter()
         .filter(|e| e.kind == "run_phase_changed")
         .map(|e| {
             (
                 e.payload["phase"].as_str().unwrap(),
+                e.payload["blocker"].as_str().unwrap(),
                 e.payload["holds"].as_str().unwrap(),
                 e.payload["cause"].as_str().unwrap(),
             )
@@ -652,21 +655,34 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
         .collect();
     assert_eq!(
         phases[0],
-        ("provisioning", "worker_slot", "run_claimed"),
+        ("provisioning", "infra", "worker_slot", "run_claimed"),
         "{phases:?}"
     );
     assert_eq!(phases[1].0, "worker", "{phases:?}");
     assert!(phases.iter().any(|p| p.0 == "validating"), "{phases:?}");
     assert_eq!(
-        phases[phases.len() - 3..],
+        phases[phases.len() - 4..],
         [
-            ("landing_answer", "none", "awaiting_integration"),
-            ("push", "none", "run_integrated"),
-            ("ended", "none", "push_skipped"),
+            ("landing_answer", "human", "none", "awaiting_integration"),
+            ("landing", "compute", "landing_slot", "integration_started"),
+            ("push", "external", "none", "run_integrated"),
+            ("ended", "runtime", "none", "push_skipped"),
         ],
         "{phases:?}"
     );
+    // The landing covers the run from `integration_started` to
+    // `run_integrated`: it is recorded right after the one, the push right
+    // after the other, and no phase is recorded between.
+    assert_eq!(
+        kinds[position("integration_started") + 1],
+        "run_phase_changed"
+    );
     assert_eq!(kinds[position("run_integrated") + 1], "run_phase_changed");
+    assert!(
+        !kinds[position("integration_started") + 2..position("run_integrated")]
+            .contains(&"run_phase_changed"),
+        "{kinds:?}"
+    );
     assert!(position("validation_finished") < position("integration_started"));
     assert!(position("integration_started") < position("integration_rebased"));
     // The only verification commands are the landing's, after the rebase.

@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{EventKind, RunEvent, RunStatus, event_kind};
+use super::{EventKind, RunEvent, RunHistory, RunStatus, event_kind};
 
 /// The version of the recording rules a `run_phase_changed` was written by
 /// (its `v`): raised when what a phase or a tag means changes.
@@ -227,6 +227,29 @@ impl Phase {
             _ => (Self::Ended, PUSHED),
         }
     }
+}
+
+impl Phase {
+    /// The phase a landing that gave its slot back before main moved
+    /// leaves the run in, by the status it left the run in and the run's
+    /// `events` (whether it is approved and queued to land): as
+    /// [`Self::at_rest`], `None` for a run another process takes up.
+    pub fn after_landing(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+        let queued = RunHistory::from_events(events).queued_approval().is_some();
+        Self::at_rest(status, queued)
+    }
+}
+
+/// The change that moves the run whose `events` these are to `phase`,
+/// which `cause` moved it to, in the attempt last recorded (the first
+/// when none is); `None` when it repeats the last record.
+pub fn next_change(events: &[RunEvent], phase: Phase, cause: &str) -> Option<PhaseChange> {
+    let last = last_recorded(events);
+    let attempt = last
+        .as_ref()
+        .map_or(Attempt::FIRST, |recorded| recorded.attempt);
+    let change = PhaseChange::new(phase, attempt, cause);
+    (!change.repeats(last.as_ref())).then_some(change)
 }
 
 /// The cause of the end of a run whose push delivered main.
@@ -450,6 +473,69 @@ mod tests {
             PhaseChange::new(Phase::Worker, Attempt::FIRST, "x").blocked_by(Some("r1".into()));
         assert_eq!(worker.blocked_by, None);
         assert!(worker.payload().get("blocked_by").is_none());
+    }
+
+    fn event(id: i64, kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    /// A landing that gave its slot back leaves the run at rest by its
+    /// status; one queued by an `approve_landing` answer is not queued any
+    /// more once its landing started.
+    #[test]
+    fn a_landing_given_back_leaves_the_run_at_rest() {
+        let approved = event(
+            1,
+            event_kind::INTEGRATION_APPROVED,
+            json!({"ask_id": 3, "answer": "land"}),
+        );
+        let started = event(2, event_kind::INTEGRATION_STARTED, json!({}));
+        let after = |status| Phase::after_landing(status, &[approved.clone(), started.clone()]);
+        assert_eq!(
+            after(RunStatus::AwaitingIntegration),
+            Some(Phase::LandingAnswer)
+        );
+        assert_eq!(after(RunStatus::NeedsSession), Some(Phase::NeedsSession));
+        assert_eq!(after(RunStatus::Failed), Some(Phase::Ended));
+        assert_eq!(after(RunStatus::Integrated), None);
+    }
+
+    /// The next change goes on in the attempt last recorded and is `None`
+    /// when it repeats the last record.
+    #[test]
+    fn the_next_change_goes_on_in_the_last_attempt() {
+        let resume = Attempt::of(AttemptKind::Resume, 2);
+        let events = [event(
+            1,
+            event_kind::RUN_PHASE_CHANGED,
+            PhaseChange::new(Phase::LandingAnswer, resume, "x").payload(),
+        )];
+        assert_eq!(
+            next_change(&events, Phase::Landing, "integration_started"),
+            Some(PhaseChange::new(
+                Phase::Landing,
+                resume,
+                "integration_started"
+            ))
+        );
+        assert_eq!(next_change(&events, Phase::LandingAnswer, "y"), None);
+        assert_eq!(
+            next_change(&[], Phase::Landing, "integration_started"),
+            Some(PhaseChange::new(
+                Phase::Landing,
+                Attempt::FIRST,
+                "integration_started"
+            ))
+        );
     }
 
     #[test]
