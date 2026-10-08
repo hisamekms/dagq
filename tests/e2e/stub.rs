@@ -74,36 +74,18 @@ if [ -n "$headless" ] && [ -z "$permission" ]; then
   exit 3
 fi
 # A worker's turn (ADR-t813-1): `claude -p --output-format stream-json
-# --verbose`, the session started by `--session-id` (or resumed), in the
-# run's permission mode (`dontAsk` for a run of `[broker] mode =
-# "required"`, ADR-t838-1) with settings without a Stop hook. The turn's prompt is the
+# --verbose`, the session started by `--session-id` (or resumed), in
+# `auto` with settings without a Stop hook. The turn's prompt is the
 # task's, a person's answer (`answer to ask <id>: ...`) or a resolution
 # request; it does what the prompt asks, commits, writes the receipt and
 # prints the stream: init, a message, the result.
 [ "$output" = stream-json ] || { printf 'stub: not a worker turn\n' >&2; exit 64; }
 sid=${session_id:-$resume}
-[ -n "$headless" ] && [ -n "$sid" ] && { [ "$permission" = auto ] || [ "$permission" = dontAsk ]; } \
+[ -n "$headless" ] && [ -n "$sid" ] && [ "$permission" = auto ] \
   && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
   || { printf 'stub: bad headless turn arguments\n' >&2; exit 64; }
 ! grep -q '"Stop"' "$settings" || { printf 'stub: headless settings have a hook\n' >&2; exit 64; }
 grep -q 'Bash(pkill:\*)' "$settings" || { printf 'stub: headless settings deny no pkill\n' >&2; exit 64; }
-required=
-if [ "$permission" = dontAsk ]; then
-  # A `required` run's turn (ADR-t838-1): the broker's server and no
-  # other, no settings file but the run's, the built-in file tools denied
-  # and only the broker's tools and `dagq` allowed, nothing allowed by
-  # `--allowedTools`.
-  [ -n "$mcp" ] && [ -n "$strict" ] && [ -z "$sources" ] && [ -z "$tools" ] \
-    || { printf 'stub: bad required turn arguments\n' >&2; exit 64; }
-  deny=$(sed -n '/"deny": \[/,/\]/p' "$settings")
-  allow=$(sed -n '/"allow": \[/,/\]/p' "$settings")
-  for tool in Read Edit Write MultiEdit NotebookEdit Glob Grep LS; do
-    printf '%s\n' "$deny" | grep -q "\"$tool\"" || { printf 'stub: required settings do not deny %s\n' "$tool" >&2; exit 64; }
-  done
-  printf '%s\n' "$allow" | grep -q '"mcp__dagq-broker"' && printf '%s\n' "$allow" | grep -q '"Bash(dagq:\*)"' \
-    || { printf 'stub: required settings do not allow the broker and dagq\n' >&2; exit 64; }
-  required=1
-fi
 {
   printf 'turn argv: -p --output-format %s --session-id %s --resume %s --permission-mode %s --add-dir %s --settings %s --model %s\n' \
     "$output" "$session_id" "$resume" "$permission" "$add_dir" "$settings" "$model"
@@ -180,73 +162,10 @@ case "$prompt" in
     git add migrations/0001_e2e.sql
     ;;
 esac
-case "$prompt" in
-  *E2E-BROKER*)
-    # Without the tools the plain path below would commit e2e.txt alone and
-    # the run would fail only at the landing's verification (task 1255).
-    [ -n "$mcp" ] || { printf 'stub: the task asks for the broker, but the worker was given no broker tools (see the run'"'"'s broker_unavailable)\n' >&2; exit 66; }
-    ;;
-esac
-if [ -n "$required" ]; then
-  # The broker's tools are the worker's only way to the worktree
-  # (`[broker] mode = "required"`, ADR-t838-1): every step goes through
-  # the client's MCP server, one `tools/call` per process as Claude Code
-  # would make it, with the command and env its configuration names, and
-  # the receipt is written by `write_receipt`. Nothing here touches the
-  # worktree or git itself.
-  client=$(sed -n 's/^ *"command": "\(.*\)",$/\1/p' "$mcp")
-  url=$(sed -n 's/^ *"DAGQ_BROKER_URL": "\(.*\)",*$/\1/p' "$mcp")
-  token_file=$(sed -n 's/^ *"DAGQ_BROKER_TOKEN_FILE": "\(.*\)",*$/\1/p' "$mcp")
-  receipt_file=$(sed -n 's/^ *"DAGQ_RECEIPT_FILE": "\(.*\)",*$/\1/p' "$mcp")
-  [ "$receipt_file" = "$receipt" ] || { printf 'stub: the configuration names receipt %s, the prompt %s\n' "$receipt_file" "$receipt" >&2; exit 64; }
-  printf 'required turn: --permission-mode %s --mcp-config %s --strict-mcp-config --setting-sources "%s"\n' "$permission" "$mcp" "$sources" > "$add_dir/broker-required-turn.txt"
-  # The tool's answer in `$answer`; a tool error ends the turn.
-  call() {
-    answer=$(printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}\n' "$1" "$2" \
-      | DAGQ_BROKER_URL=$url DAGQ_BROKER_TOKEN_FILE=$token_file DAGQ_RECEIPT_FILE=$receipt_file "$client" mcp 2>> "$add_dir/broker.err")
-    printf '%s %s\n' "$1" "$answer" >> "$add_dir/broker-mcp.jsonl"
-    case "$answer" in
-      *'"isError":false'*) ;;
-      *) printf 'stub: the broker tool %s failed: %s\n' "$1" "$answer" >&2; exit 66 ;;
-    esac
-  }
-  call read_file '{"path":"seed.txt"}'
-  case "$answer" in *fixture*) ;; *) printf 'stub: read_file did not read seed.txt\n' >&2; exit 66 ;; esac
-  call write_file "{\"path\":\"e2e.txt\",\"content\":\"written through the required broker for $sid\"}"
-  call exec '{"argv":["sh","-c","test -f seed.txt && printf \"run by the broker\\n\" > exec.txt"]}'
-  case "$answer" in *'exit_code\":0'*) ;; *) printf 'stub: the broker exec failed\n' >&2; exit 66 ;; esac
-  call package_install '{"name":"e2e-touch"}'
-  case "$answer" in *'exit_code\":0'*) ;; *) printf 'stub: the broker package install failed\n' >&2; exit 66 ;; esac
-  call git_add '{"paths":["e2e.txt","exec.txt","package.txt"]}'
-  call git_commit '{"message":"feat: e2e stub change through the required broker"}'
-  commit=$(printf '%s\n' "$answer" | sed -n 's/.*commit\\":\\"\([0-9a-f]*\)\\".*/\1/p')
-  [ -n "$commit" ] || { printf 'stub: git_commit named no commit\n' >&2; exit 66; }
-  call write_receipt "{\"receipt\":{\"run_id\":\"$sid\",\"result\":\"succeeded\",\"commit\":\"$commit\",\"tests\":{\"status\":\"passed\",\"evidence_or_reason\":\"test -f seed.txt exited 0 through the broker\"},\"e2e\":{\"status\":\"not_applicable\",\"evidence_or_reason\":\"stub agent\"},\"subagent_review\":{\"status\":\"not_applicable\",\"evidence_or_reason\":\"stub agent\"},\"summary\":\"added e2e.txt, exec.txt and package.txt through the broker\"}}"
-  [ -f "$receipt" ] || { printf 'stub: write_receipt wrote no receipt\n' >&2; exit 66; }
-elif [ -n "$mcp" ]; then
-  # The resource broker's tools (`[broker] mode = "preferred"`): the stub
-  # drives the client of its MCP configuration from the shell, with the URL
-  # and the token file the configuration names, as its MCP server would.
-  [ "$tools" = mcp__dagq-broker ] || { printf 'stub: the broker tools are not allowed\n' >&2; exit 64; }
-  client=$(sed -n 's/^ *"command": "\(.*\)",$/\1/p' "$mcp")
-  DAGQ_BROKER_URL=$(sed -n 's/^ *"DAGQ_BROKER_URL": "\(.*\)",*$/\1/p' "$mcp")
-  DAGQ_BROKER_TOKEN_FILE=$(sed -n 's/^ *"DAGQ_BROKER_TOKEN_FILE": "\(.*\)",*$/\1/p' "$mcp")
-  export DAGQ_BROKER_URL DAGQ_BROKER_TOKEN_FILE
-  "$client" fs write e2e.txt --content "written through the broker for $sid" > "$add_dir/broker-fs.json" 2>> "$add_dir/broker.err"
-  "$client" exec -- sh -c 'printf "run by the broker\n" > exec.txt' > "$add_dir/broker-exec.json" 2>> "$add_dir/broker.err"
-  grep -q '"exit_code":0' "$add_dir/broker-exec.json" || { printf 'stub: the broker exec failed\n' >&2; exit 66; }
-  # What the host sees before the broker stages it, for a failure to show.
-  git --no-optional-locks status --porcelain --untracked-files=all > "$add_dir/broker-status-before-add.txt" 2>&1 || true
-  "$client" git add e2e.txt exec.txt > "$add_dir/broker-add.json" 2>> "$add_dir/broker.err" \
-    || { printf 'stub: the broker git add failed\n' >&2; exit 66; }
-  "$client" git commit --message 'feat: e2e stub change through the broker' > "$add_dir/broker-commit.json" 2>> "$add_dir/broker.err" \
-    || { printf 'stub: the broker git commit failed\n' >&2; exit 66; }
-else
-  printf 'written by the stub agent for %s\n' "$sid" > e2e.txt
-  git add e2e.txt
-  git commit -q -m 'feat: e2e stub change'
-fi
-[ -n "$required" ] || write_receipt 'test -f seed.txt exited 0' 'added e2e.txt'
+printf 'written by the stub agent for %s\n' "$sid" > e2e.txt
+git add e2e.txt
+git commit -q -m 'feat: e2e stub change'
+write_receipt 'test -f seed.txt exited 0' 'added e2e.txt'
 # While a test watches the pass (`supervise_once`), the turn stays until
 # the test has seen its background wrapper run (every task's at once), not
 # for a fixed time a loaded host may outlast (task 641).

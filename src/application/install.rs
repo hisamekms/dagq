@@ -66,12 +66,6 @@ pub trait Binaries {
     fn replace(&self, source: &Path, target: &Path) -> Result<()>;
     /// Put [`previous_path`] back at `target` after a failed handoff.
     fn restore(&self, target: &Path) -> Result<()>;
-    /// Move the file at `target` to [`previous_path`] (the client of a
-    /// dagq put in place without one, so no client of another build stays
-    /// beside it).
-    fn set_aside(&self, target: &Path) -> Result<()> {
-        bail!("these binaries cannot set {} aside", target.display())
-    }
     /// Run `binary` with `arguments`; what it printed.
     fn run(&self, binary: &Path, arguments: &[String]) -> Result<Value>;
     /// Point the automatic update's `checkout` at `commit`: a detached
@@ -83,7 +77,7 @@ pub trait Binaries {
     }
     /// Build `checkout` for release into `target_dir`, running `command`
     /// (a shell command) in place of `cargo build --release --locked -p
-    /// dagq -p dagq-broker-client` when given, with what it prints appended to `log`; the binary
+    /// dagq` when given, with what it prints appended to `log`; the binary
     /// built.
     fn build_into(
         &self,
@@ -139,11 +133,6 @@ pub struct E2eSettings {
     pub scratch: PathBuf,
     /// Where the e2e's output is appended.
     pub log: PathBuf,
-    /// The podman the e2e's podman tests ([`PODMAN_E2E`]) use: before the
-    /// e2e, dagq's machine is made ready and its connection must answer
-    /// within the wait; when it does not, those tests are not run and the
-    /// outcome says so (ADR-t1162-1). `None` checks nothing.
-    pub podman: Option<PodmanCheck>,
     /// The host's offset from UTC in seconds, for the local date a mark's
     /// `until` is read against (ADR-t1165-1).
     pub utc_offset_secs: i64,
@@ -176,23 +165,6 @@ impl E2eSettings {
     }
 }
 
-/// The e2e tests that need podman (dagq's machine): the `--skip` filters
-/// of the tests not run when podman cannot be reached (ADR-t1162-1).
-pub const PODMAN_E2E: &[&str] = &["broker::"];
-
-/// How the gate checks podman before the e2e (ADR-t1162-1).
-#[derive(Debug, Clone)]
-pub struct PodmanCheck {
-    /// The podman executable; `None` is `podman` on `PATH`.
-    pub executable: Option<PathBuf>,
-    /// Resources used if dagq's machine needs to be initialized.
-    pub machine: crate::application::broker::MachineSpec,
-    /// Where the host-wide lock of dagq's machine lives.
-    pub lock_home: PathBuf,
-    /// How long a lost connection is waited for.
-    pub reconnect: crate::application::broker::Reconnect,
-}
-
 /// The e2e tests that need a running cmux, the `up` / `down` ones that open
 /// the inbox's workspace (`fixture_with_cmux` of `tests/e2e.rs`): the
 /// `--skip` filters of the tests not run when cmux does not answer `ping`
@@ -200,46 +172,24 @@ pub struct PodmanCheck {
 pub const CMUX_E2E: &[&str] =
     &["up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it"];
 
-/// The e2e tests the gate did not run, and why: those that need podman
-/// when it cannot be reached (ADR-t1162-1) and those that need cmux when it
-/// does not answer (ADR-t2105-1), one or both.
+/// The e2e tests the gate did not run, and why: those that need cmux when
+/// it does not answer (ADR-t2105-1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct E2eSkip {
     /// The `--skip` filters of the tests not run.
     pub tests: Vec<String>,
-    /// Why, for each tool that could not be reached (`podman could not be
-    /// reached: ...`, `cmux did not answer: ...`), joined by `; `.
+    /// Why (`cmux did not answer: ...`).
     pub reason: String,
 }
 
 impl E2eSkip {
-    /// The podman tests ([`PODMAN_E2E`]), not run because podman could not
-    /// be reached for `error`.
-    pub fn podman(error: &str) -> Self {
-        Self::of(PODMAN_E2E, format!("podman could not be reached: {error}"))
-    }
-
     /// The cmux tests ([`CMUX_E2E`]), not run because cmux did not answer
     /// `ping` for `error`.
     pub fn cmux(error: &str) -> Self {
-        Self::of(CMUX_E2E, format!("cmux did not answer: {error}"))
-    }
-
-    fn of(tests: &[&str], reason: String) -> Self {
         Self {
-            tests: tests.iter().map(|test| (*test).to_owned()).collect(),
-            reason,
+            tests: CMUX_E2E.iter().map(|test| (*test).to_owned()).collect(),
+            reason: format!("cmux did not answer: {error}"),
         }
-    }
-
-    /// `skips` as one: their tests and their reasons; `None` when there
-    /// is none.
-    pub fn joined(skips: impl IntoIterator<Item = Self>) -> Option<Self> {
-        skips.into_iter().reduce(|mut all, skip| {
-            all.tests.extend(skip.tests);
-            all.reason = format!("{}; {}", all.reason, skip.reason);
-            all
-        })
     }
 
     pub fn to_json(&self) -> Value {
@@ -267,8 +217,7 @@ pub struct E2eOutcome {
     pub secs: u64,
     /// What was cleaned up after it (groups, processes, the directory).
     pub cleanup: Value,
-    /// The tests not run because podman could not be reached
-    /// (ADR-t1162-1) or cmux did not answer (ADR-t2105-1).
+    /// The tests not run because cmux did not answer (ADR-t2105-1).
     pub skipped: Option<E2eSkip>,
     /// The rerun of the failed tests by name (ADR-t1165-1); `None` when the
     /// e2e passed, ran past its timeout or named no failed test.
@@ -375,14 +324,9 @@ pub fn release_binary(
 pub enum Source {
     /// Build this checkout.
     Checkout(PathBuf),
-    /// A binary built already, given by a person: a client beside it of
-    /// another build (one left in a target directory by an earlier build,
-    /// say) is not its own and is left behind.
+    /// A binary built already: given by a person, or built or installed by
+    /// dagq itself (the automatic update's build, a release).
     Binary(PathBuf),
-    /// A binary dagq built or installed itself with its client (the
-    /// automatic update's build, a release): a client beside it of another
-    /// build replaces nothing (ADR-t827-1 decision 5).
-    Built(PathBuf),
     /// The binary the last install replaced (`<target>.previous`).
     Rollback,
 }
@@ -439,166 +383,6 @@ pub fn previous_path(target: &Path) -> PathBuf {
     let mut name = target.file_name().unwrap_or_default().to_os_string();
     name.push(".previous");
     target.with_file_name(name)
-}
-
-/// The worker's client that goes with a dagq and how it is put in place
-/// with it (ADR-t827-1 decision 5): the client next to the source (or the
-/// `.previous` one on a rollback), checked to name the same build before
-/// anything is replaced, put in place before dagq and back with it.
-struct Client<'a> {
-    binaries: &'a dyn Binaries,
-    files: &'a dyn RunFiles,
-    /// `dagq-broker-client` next to the target.
-    target: PathBuf,
-    /// The client to put in place, or `None` when the source has none.
-    source: Option<PathBuf>,
-    /// Whether a client was at the target before.
-    was_there: bool,
-    /// A client of another build than dagq's refuses the install; else it
-    /// is left behind as if there were none.
-    strict: bool,
-    /// The client beside the source that was left behind, and why.
-    ignored: Option<Value>,
-}
-
-/// What happened to the client, for a report.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ClientStep {
-    /// The source's client was put in place (the one there kept as
-    /// `.previous`).
-    Replaced,
-    /// The source has no client: the one there went to `.previous`.
-    SetAside,
-    /// Neither the source nor the target has one.
-    Absent,
-    /// The source is the target (a release in place already).
-    InPlace,
-}
-
-impl<'a> Client<'a> {
-    /// The client of `source`, the dagq to put at `target`; `rollback` when
-    /// `source` is `target`'s `.previous`.
-    fn of(
-        binaries: &'a dyn Binaries,
-        files: &'a dyn RunFiles,
-        source: &Path,
-        target: &Path,
-        rollback: bool,
-        strict: bool,
-    ) -> Self {
-        let target = super::broker::client_path(target);
-        let candidate = if rollback {
-            previous_path(&target)
-        } else {
-            super::broker::client_path(source)
-        };
-        Self {
-            binaries,
-            files,
-            source: files.is_file(&candidate).then_some(candidate),
-            was_there: files.is_file(&target),
-            target,
-            strict,
-            ignored: None,
-        }
-    }
-
-    /// Check the client names `version`, dagq's build (its `--version`),
-    /// before anything is replaced.
-    /// A client that is not left behind the source has none, and the one
-    /// at the target is set aside.
-    fn check(&mut self, version: &str) -> Result<()> {
-        let Some(client) = &self.source else {
-            return Ok(());
-        };
-        let found = self
-            .binaries
-            .version(client)
-            .map_err(|error| format!("{error:#}"));
-        if found.as_deref() == Ok(version) {
-            return Ok(());
-        }
-        let why = match &found {
-            Ok(found) => format!(
-                "{} is {found} but the dagq beside it is {version}",
-                client.display()
-            ),
-            Err(error) => format!("{} does not report its version: {error}", client.display()),
-        };
-        ensure!(
-            !self.strict,
-            "{why}: nothing was replaced (the two are built and put in place together)"
-        );
-        self.ignored = Some(json!({"path": client, "reason": why}));
-        self.source = None;
-        Ok(())
-    }
-
-    /// Put `source` (dagq) at `target` with the client: the client first,
-    /// then dagq; when dagq cannot be put in place, the client goes back.
-    fn put(&self, source: &Path, target: &Path) -> Result<ClientStep> {
-        let step = match &self.source {
-            Some(client) => {
-                self.binaries.replace(client, &self.target)?;
-                ClientStep::Replaced
-            }
-            None if self.was_there => {
-                self.binaries.set_aside(&self.target)?;
-                ClientStep::SetAside
-            }
-            None => ClientStep::Absent,
-        };
-        if !self.was_there {
-            // No client was in place, so the `.previous` of one is not the
-            // client of the dagq that goes to `.previous` now: a rollback
-            // must not pair them.
-            let _ = self.files.remove_file(&previous_path(&self.target));
-        }
-        if let Err(error) = self.binaries.replace(source, target) {
-            if step != ClientStep::Absent {
-                self.undo(step);
-            }
-            return Err(error);
-        }
-        Ok(step)
-    }
-
-    /// Put the client that was there back after `step`; whether it went
-    /// back, or why not.
-    fn undo(&self, step: ClientStep) -> Value {
-        match step {
-            ClientStep::Replaced if !self.was_there => {
-                // No client was there: the new one goes, so none of
-                // another build stays beside the dagq that went back.
-                match self.files.remove_file(&self.target) {
-                    Ok(()) => json!({"restored": true, "removed": true}),
-                    Err(error) => json!({"restored": false, "reason": error.to_string()}),
-                }
-            }
-            ClientStep::Replaced | ClientStep::SetAside => {
-                match self.binaries.restore(&self.target) {
-                    Ok(()) => json!({"restored": true}),
-                    Err(error) => json!({"restored": false, "reason": format!("{error:#}")}),
-                }
-            }
-            ClientStep::Absent | ClientStep::InPlace => json!({"restored": false}),
-        }
-    }
-
-    /// The `client` of a report.
-    fn report(&self, step: ClientStep) -> Value {
-        json!({
-            "target": self.target,
-            "outcome": match step {
-                ClientStep::Replaced => "replaced",
-                ClientStep::SetAside => "set_aside",
-                ClientStep::Absent => "absent",
-                ClientStep::InPlace => "in_place",
-            },
-            "previous": previous_path(&self.target),
-            "ignored": self.ignored,
-        })
-    }
 }
 
 /// Replace `options.target` with the binary of `options.source` and hand
@@ -661,7 +445,7 @@ install without it)"
             };
             built
         }
-        Source::Binary(binary) | Source::Built(binary) => binary.clone(),
+        Source::Binary(binary) => binary.clone(),
         Source::Rollback => {
             ensure!(
                 files.is_file(&previous),
@@ -677,18 +461,6 @@ install without it)"
     binaries
         .probe(&source)
         .with_context(|| format!("{} does not start on a throwaway queue", source.display()))?;
-    let mut client = Client::of(
-        binaries,
-        files,
-        &source,
-        target,
-        matches!(options.source, Source::Rollback),
-        matches!(options.source, Source::Checkout(_) | Source::Built(_)),
-    );
-    // The binary in place already keeps the client beside it.
-    if source != *target {
-        client.check(&version)?;
-    }
     let replaced_version = if files.is_file(target) {
         binaries.version(target).ok()
     } else {
@@ -700,11 +472,9 @@ install without it)"
     let in_place = source == *target;
     let db = db.filter(|db| files.is_file(db));
     let Some(db) = db else {
-        let step = if in_place {
-            ClientStep::InPlace
-        } else {
-            client.put(&source, target)?
-        };
+        if !in_place {
+            binaries.replace(&source, target)?;
+        }
         return Ok(json!({
             "outcome": "installed",
             "target": target,
@@ -714,7 +484,6 @@ install without it)"
             "migrated": Value::Null,
             "supervisors": [],
             "e2e": e2e,
-            "client": client.report(step),
         }));
     };
     let schema = binaries.schema(&source, db)?;
@@ -732,19 +501,12 @@ wrappers could not open the queue after: nothing was replaced. `install --allow-
 the supervisor (waits for its runs), migrates with a backup and starts it again",
             breaking.join(", ")
         );
-        return install_breaking(
-            ports,
-            db,
-            &source,
-            &client,
-            &version,
-            replaced_version,
-            options,
-        )
-        .map(|mut report| {
-            report["e2e"] = e2e;
-            report
-        });
+        return install_breaking(ports, db, &source, &version, replaced_version, options).map(
+            |mut report| {
+                report["e2e"] = e2e;
+                report
+            },
+        );
     }
     ensure!(
         schema.opens || !schema.pending.is_empty(),
@@ -770,11 +532,9 @@ backups/ directory next to it"
 running supervisor cannot be handed over to it; nothing was replaced. Stop the supervisor \
 (`down --wait`), put the binary in place and run `up`"
     );
-    let step = if in_place {
-        ClientStep::InPlace
-    } else {
-        client.put(&source, target)?
-    };
+    if !in_place {
+        binaries.replace(&source, target)?;
+    }
     let handed = if takes.is_empty() {
         Vec::new()
     } else {
@@ -796,7 +556,6 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
                 version: &version,
                 replaced_version: replaced_version.as_deref(),
                 in_place,
-                client: (&client, step),
             }
             .error(error, supervisors)
         };
@@ -825,7 +584,6 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
         "migrated": migrated,
         "kept": failure.is_some(),
         "e2e": e2e,
-        "client": client.report(step),
         "supervisors": handed.iter().map(Handed::report).collect::<Vec<_>>(),
         // A supervisor of a binary before ADR-0045 takes no handoff;
         // `up` drains and replaces it.
@@ -896,8 +654,6 @@ struct Undo<'a> {
     version: &'a str,
     replaced_version: Option<&'a str>,
     in_place: bool,
-    /// The client put in place with it, which goes back with it.
-    client: (&'a Client<'a>, ClientStep),
 }
 
 impl Undo<'_> {
@@ -930,7 +686,6 @@ impl Undo<'_> {
                     json!({
                         "restored": true,
                         "version": self.replaced_version,
-                        "client": self.client.0.undo(self.client.1),
                     }),
                 ),
                 Err(restore) => {
@@ -995,7 +750,6 @@ fn install_breaking(
     ports: &Ports,
     db: &Path,
     source: &Path,
-    client: &Client,
     version: &str,
     replaced_version: Option<String>,
     options: &InstallOptions,
@@ -1016,7 +770,7 @@ fn install_breaking(
 replaced, and `up` starts the old binary again"
         )
     })?;
-    let step = client.put(source, &options.target)?;
+    binaries.replace(source, &options.target)?;
     let started = match live.first() {
         None => Value::Null,
         Some(drained) => {
@@ -1094,7 +848,6 @@ again"
         "migrated": migrated,
         "drained": drained,
         "up": started,
-        "client": client.report(step),
     }))
 }
 
@@ -1125,30 +878,27 @@ pub fn parse_version(output: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    /// The podman and the cmux skips are named apart and as one, with the
-    /// tool each waited for (ADR-t1162-1, ADR-t2105-1).
+    /// The cmux skip names its tests and why, with the tool it waited for
+    /// (ADR-t2105-1).
     #[test]
     fn the_skipped_e2e_name_their_tests_and_why() {
-        assert_eq!(E2eSkip::joined([]), None);
-        let podman = E2eSkip::podman("broker podman_missing");
-        assert_eq!(podman.tests, ["broker::"]);
-        assert_eq!(
-            podman.sentence(),
-            "the e2e did not run broker:: because podman could not be reached: broker podman_missing"
-        );
         let cmux = E2eSkip::cmux("`cmux ping` failed: Access denied");
         assert_eq!(cmux.tests, CMUX_E2E);
-        let both = E2eSkip::joined([cmux.clone(), podman.clone()]).unwrap();
-        assert_eq!(both.tests, [CMUX_E2E, PODMAN_E2E].concat());
         assert_eq!(
-            both.to_json(),
+            cmux.to_json(),
             json!({
-                "tests": both.tests,
-                "reason": "cmux did not answer: `cmux ping` failed: Access denied; \
-            podman could not be reached: broker podman_missing",
+                "tests": CMUX_E2E,
+                "reason": "cmux did not answer: `cmux ping` failed: Access denied",
             })
         );
-        assert_eq!(E2eSkip::joined([cmux.clone()]), Some(cmux));
+        assert_eq!(
+            cmux.sentence(),
+            format!(
+                "the e2e did not run {} because cmux did not answer: `cmux ping` failed: Access \
+denied",
+                CMUX_E2E.join(", ")
+            )
+        );
     }
 
     /// Every e2e that takes the running cmux (`fixture_with_cmux()`) is

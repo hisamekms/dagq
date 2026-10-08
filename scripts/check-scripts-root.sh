@@ -49,6 +49,7 @@ check-layer-deps layer_stale_allow_item
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-doc-links doc_broken_link
+check-doc-links doc_link_to_removed_design
 check-doc-frontmatter doc_frontmatter_missing_key
 check-doc-frontmatter doc_frontmatter_updated_line"
 
@@ -92,6 +93,14 @@ violate_design_doc_too_big() {
 
 violate_doc_broken_link() {
   printf -- '---\nid: zz-scripts-root-fixture\n---\n\n[fixture](zz-no-such-file.md)\n' >docs/zz-scripts-root-link.md
+}
+
+# The exception of check-doc-links for docs/design/broker.md holds only for
+# the ADRs: a link of any other document to it fails. The file is removed in
+# the clone too, so the case holds whether or not HEAD still has it.
+violate_doc_link_to_removed_design() {
+  rm -f docs/design/broker.md
+  printf -- '---\nid: zz-scripts-root-removed\n---\n\n[fixture](design/broker.md)\n' >docs/zz-scripts-root-removed.md
 }
 
 violate_doc_frontmatter_missing_key() {

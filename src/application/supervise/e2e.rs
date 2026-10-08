@@ -20,9 +20,8 @@
 //!   [`RunE2ePort::retry`] ([`run_e2e::RETRY_SECS`]), and from the
 //!   [`run_e2e::UNAVAILABLE_ATTENTION`]th in a row the inbox is told
 //!   (`attention: true`, `check the e2e host`).
-//! - When cmux does not answer (or podman cannot be reached), the e2e that
-//!   need it are not run and the rest decide (ADR-t2105-1, ADR-t1162-1);
-//!   the tests not run and why are on the `run_e2e_finished` (`skipped`).
+//! - When cmux does not answer, the e2e that need it are not run and the
+//!   rest decide (ADR-t2105-1); the tests not run and why are on the `run_e2e_finished` (`skipped`).
 //! - The repository has no e2e the runtime knows: `run_e2e_finished`
 //!   (`outcome: not_configured`) and the run lands without it.
 //!
@@ -43,7 +42,7 @@ pub type RunE2e = Arc<dyn Fn(&Path, &E2eSettings) -> Result<E2eOutcome> + Send +
 #[derive(Clone)]
 pub struct RunE2ePort {
     /// The e2e's settings: its command, timeout, cmux, `[run.env]`,
-    /// scratch directory, podman and the host's lock. The log is the run's
+    /// scratch directory and the host's lock. The log is the run's
     /// and the time zone the supervisor's, set for each e2e.
     pub settings: E2eSettings,
     /// Run the e2e of the worktree with the settings (the gate's

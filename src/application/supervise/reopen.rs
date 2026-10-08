@@ -372,7 +372,6 @@ impl Supervisor<'_> {
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
         self.prepare_turns(run, &run_dir)?;
-        self.broker_grant_or_refuse(run)?;
         let run_env = self.verifier.run_env(&run_dir)?;
         self.warn_ignored_wrapper_setting();
         let log = self.session_log(&run_dir, Some(lost.attempt), true);

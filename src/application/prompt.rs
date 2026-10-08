@@ -282,21 +282,6 @@ pub fn siblings_in_progress(task: &Task, in_progress: Vec<Task>) -> Vec<Task> {
 /// no terminal: the process ends with the turn, and nobody types into it.
 pub const HEADLESS_WORKER: &str = "This session is headless: each of your turns is one non-interactive call, and the turn ends when you stop. Do the whole task in this turn and end it by writing the receipt, or by an ask when you need a decision. Nobody types into this session: the answer to your ask, a review's request to revise, or a request to go on arrives as the prompt of your next turn, in the same session. Do not rely on background work: what still runs when the turn ends is stopped, so run builds, tests and waits in the foreground and wait for them to finish before you go on.\n";
 
-/// What a worker the supervisor gave the resource broker's tools is told
-/// (`preferred`, ADR-t827-4 decision 1, ADR-t840-1): prefer them, the
-/// configured package commands included, and fall back to the built-in
-/// tools when the broker refuses or cannot be reached. It names no token:
-/// the client reads its file.
-pub const BROKER_TOOLS: &str = "The resource broker's tools are available as the MCP server `dagq-broker` (`mcp__dagq-broker__read_file`, `list_dir`, `write_file`, `edit_file`, `exec`, `git_status`, `git_diff`, `git_log`, `git_show`, `git_add`, `git_commit`, `git_restore`, `package_install`). Prefer them for reading, writing and editing files, for the commands the broker allows, for the package commands the repository configured (`package_install` runs one by its name, such as fetching dependencies), and for Git on your run branch; paths are relative to the worktree. The broker refuses paths outside the worktree, `.git`, pushes and commands it does not allow; when it refuses or cannot be reached, use the built-in tools instead.\n";
-
-/// What a worker of a `required` run is told (ADR-t838-1): the built-in
-/// file and command tools are refused, the broker's tools are the way to
-/// the worktree, `dagq` is the one command Bash runs, the receipt goes
-/// through `write_receipt`, and a broker that stops answering ends the
-/// run with a failed receipt or an ask, never a way around it. It names no
-/// token: the client reads its file.
-pub const BROKER_REQUIRED: &str = "This queue runs `[broker] mode = \"required\"`: the built-in Read, Edit, Write, MultiEdit, NotebookEdit, Glob, Grep and LS are refused, and Bash runs only `dagq` commands (one `dagq ...` per call, without pipes, redirections or other commands). Work through the resource broker's tools, the MCP server `dagq-broker`: `mcp__dagq-broker__read_file`, `list_dir`, `write_file`, `edit_file`, `exec` (only the programs the broker allows, without a shell), `git_status`, `git_diff`, `git_log`, `git_show`, `git_add`, `git_commit`, `git_restore` and `package_install` (only the package commands the repository configured, by their names); paths are relative to the worktree, and the broker refuses paths outside it, `.git`, pushes and programs it does not allow. Write the receipt with `mcp__dagq-broker__write_receipt` (its `receipt` argument is the receipt's JSON object): it writes the receipt file atomically, so do not write the file yourself. A check you cannot run through `exec` is reported in the receipt as not run, with that reason. When a broker tool fails with `unauthorized`, `transport`, `config` or `protocol` (the broker is not answering, or your token is gone), do not look for another way to the files: write a failed receipt with `write_receipt` that names the error, or ask with `dagq ask` when a person must decide.\n";
-
 /// The line in the worker prompt and every request to its session that asks
 /// it to stop its own processes before the turn ends: nothing waits for an
 /// `/exit`, but a process the agent detached outlives its turn (the spike
@@ -590,8 +575,7 @@ pub(crate) fn local_checks(verify: &str) -> String {
 /// sum of the sections' limits below (93,000 bytes), the fixed instructions
 /// (about 10,000) and the headings and notes of what was left out (about
 /// 4,000; the largest input of the unit test takes 103,869 bytes), with room
-/// for the resource broker's paragraph (about 1,400 bytes) and the
-/// language's instruction. A prompt at p99 is not cut as a whole; how much
+/// for the language's instruction. A prompt at p99 is not cut as a whole; how much
 /// of each section is kept is said by its own limit.
 pub const WORKER_PROMPT_LIMIT: usize = 112_000;
 
@@ -10052,12 +10036,6 @@ mod tests {
         let (text, bytes) = (&fitted.text, &fitted.bytes);
         assert!(
             text.len() <= WORKER_PROMPT_LIMIT - prompt_fit::LANGUAGE_ROOM,
-            "{}",
-            text.len()
-        );
-        // The resource broker's paragraph, added after the fit, fits too.
-        assert!(
-            text.len() + BROKER_REQUIRED.len() + prompt_fit::LANGUAGE_ROOM <= WORKER_PROMPT_LIMIT,
             "{}",
             text.len()
         );

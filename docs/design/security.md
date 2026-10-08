@@ -18,7 +18,6 @@ related:
   - adr-t728-3
   - design-authorization
   - design-supervisor-lifecycle-roles
-  - design-broker
 ---
 
 # Security
@@ -158,9 +157,7 @@ capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`Static
 3. **Integratorの分離**: pushの資格情報をIntegratorのプロセスだけに持たせ、supervisorとAI actorから外す
 4. **人しか出せない承認（I6）**: 承認の経路（別のterminal、署名、人の端末からの確認など）を決めてから、`answer_approval`のaskのanswerを人だけに限る
 
-goal 38の「broker」とは別に、fs・process・git・packageを仲介するresource broker（`dagq-broker`）がコードに残る。
-workerはhostのまま`preferred`でrunごとのtokenを使ってPodmanのcontainerのbrokerを通すもので、host実行が助言的であることと`actors`の`enforcement: advisory`は変えない（[Resource broker](broker.md)）。
-resource brokerは外すと決まり（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）、撤去は未実装である。
-上の道筋はresource brokerを経ない。
+上の道筋の「broker」はqueueのbrokerだけを指す。
+fs・process・git・packageを仲介する層（resource broker）は置かず、実行側は隔離環境の中で組み込みの道具をそのまま使い、境界は隔離環境が持つ（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）。
 
 どの段でも、境界がその段の大きさで守れないときは境界を弱めず、follow-upのtaskにする。

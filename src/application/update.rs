@@ -55,13 +55,11 @@ pub const UPDATE_ASKER: &str = "supervisor";
 
 /// The paths whose change makes a landing change the runtime, relative to
 /// the repository root: a directory ends with `/`. `build.rs` embeds the
-/// build identifier. `crates/` holds the broker's crates, whose client and
-/// image source ship with dagq's build, and `rust-toolchain.toml` names the
-/// Rust of the broker's image (ADR-t827-1 decision 4).
+/// build identifier, and `rust-toolchain.toml` names the Rust dagq is
+/// built with.
 pub const RUNTIME_PATHS: &[&str] = &[
     "src/",
     "migrations/",
-    "crates/",
     "Cargo.toml",
     "Cargo.lock",
     "build.rs",
@@ -438,8 +436,8 @@ pub struct JobOptions {
     pub paths: UpdatePaths,
     /// Where the build's output is appended.
     pub log: PathBuf,
-    /// A shell command in place of `cargo build --release --locked -p dagq -p
-    /// dagq-broker-client` (tests), run in the checkout with
+    /// A shell command in place of `cargo build --release --locked -p dagq`
+    /// (tests), run in the checkout with
     /// `CARGO_TARGET_DIR` set.
     pub build_command: Option<String>,
     /// The e2e the build passes before it is put in place (ADR-t963-1
@@ -583,9 +581,9 @@ fn e2e_gate(
         "cleanup": outcome.cleanup,
     });
     extend(&mut passed, &verdict.fields);
-    // The tests it did not run for want of podman or cmux go on to the
+    // The tests it did not run for want of cmux go on to the
     // `update_installed` too, so the swap does not pass them silently
-    // (ADR-t1162-1, ADR-t2105-1).
+    // (ADR-t2105-1).
     if let Some(skipped) = &outcome.skipped {
         passed["skipped"] = skipped.to_json();
         job.e2e_skipped.replace(Some(skipped.clone()));
@@ -920,7 +918,7 @@ fn put_in_place(
         },
         Some(db),
         &InstallOptions {
-            source: Source::Built(binary.to_path_buf()),
+            source: Source::Binary(binary.to_path_buf()),
             target: job.target.to_path_buf(),
             allow_breaking: false,
             restart: Vec::new(),
@@ -1396,23 +1394,11 @@ fn registered_before<'a>(
 }
 
 /// Check a build that waits for a person as `install` would (its version
-/// and a start on a throwaway queue, and the client beside it naming the
-/// same build) and keep a copy of both, so a later build in the target does
-/// not replace what the person is asked about; the `install --from` of the
-/// staged dagq takes the client beside it (ADR-t827-1 decision 5).
+/// and a start on a throwaway queue) and keep a copy of it, so a later
+/// build in the target does not replace what the person is asked about.
 fn stage(ports: &JobPorts, binary: &Path, staged: &Path) -> Result<String> {
     let version = ports.binaries.version(binary)?;
     ports.binaries.probe(binary)?;
-    let client = super::broker::client_path(binary);
-    let client = ports.files.is_file(&client).then_some(client);
-    if let Some(client) = &client {
-        let found = ports.binaries.version(client)?;
-        ensure!(
-            found == version,
-            "{} is {found} but the dagq beside it is {version}",
-            client.display()
-        );
-    }
     if let Some(dir) = staged.parent() {
         ports
             .files
@@ -1423,19 +1409,6 @@ fn stage(ports: &JobPorts, binary: &Path, staged: &Path) -> Result<String> {
         .files
         .copy(binary, staged)
         .with_context(|| format!("keep the build at {}", staged.display()))?;
-    let staged_client = super::broker::client_path(staged);
-    match &client {
-        Some(client) => ports
-            .files
-            .copy(client, &staged_client)
-            .with_context(|| format!("keep the client at {}", staged_client.display()))?,
-        // A client staged with an earlier build is not this one's.
-        None if ports.files.is_file(&staged_client) => ports
-            .files
-            .remove_file(&staged_client)
-            .with_context(|| format!("remove {}", staged_client.display()))?,
-        None => {}
-    }
     Ok(version)
 }
 
@@ -1628,35 +1601,8 @@ fn restore(ports: &JobPorts, job: &Job, previous_version: Option<&str>) -> Value
         });
     }
     match ports.binaries.restore(job.target) {
-        Ok(()) => json!({
-            "restored": true,
-            "version": kept,
-            "client": restore_client(ports, job, previous_version),
-        }),
+        Ok(()) => json!({"restored": true, "version": kept}),
         Err(error) => json!({"restored": false, "reason": format!("{error:#}")}),
-    }
-}
-
-/// Put the client back with the dagq [`restore`] put back (ADR-t827-1
-/// decision 5): its `.previous` when that is the same build, else the new
-/// client goes, so no client of another build stays beside the dagq.
-fn restore_client(ports: &JobPorts, job: &Job, previous_version: Option<&str>) -> Value {
-    let client = super::broker::client_path(job.target);
-    let previous = previous_path(&client);
-    if ports.files.is_file(&previous)
-        && ports.binaries.version(&previous).ok().as_deref() == previous_version
-    {
-        return match ports.binaries.restore(&client) {
-            Ok(()) => json!({"restored": true}),
-            Err(error) => json!({"restored": false, "reason": format!("{error:#}")}),
-        };
-    }
-    if !ports.files.is_file(&client) {
-        return json!({"restored": false, "reason": "no client"});
-    }
-    match ports.files.remove_file(&client) {
-        Ok(()) => json!({"restored": false, "removed": true}),
-        Err(error) => json!({"restored": false, "reason": error.to_string()}),
     }
 }
 
@@ -1917,15 +1863,9 @@ mod tests {
         assert!(changes_runtime(&paths(&["migrations/0032_x.sql"])));
         assert!(changes_runtime(&paths(&["Cargo.lock"])));
         assert!(changes_runtime(&paths(&["build.rs"])));
-        assert!(changes_runtime(&paths(&[
-            "crates/dagq-broker-protocol/src/lib.rs"
-        ])));
         assert!(changes_runtime(&paths(&["rust-toolchain.toml"])));
         assert!(!changes_runtime(&paths(&["docs/src/a.md", "README.md"])));
-        assert!(!changes_runtime(&paths(&[
-            "docs/crates/a.md",
-            "cratesx/a.rs"
-        ])));
+        assert!(!changes_runtime(&paths(&["crates/a/src/lib.rs"])));
         assert!(!changes_runtime(&paths(&["srcs/a.rs", "Cargo.toml.bak"])));
         assert!(!changes_runtime(&[]));
     }

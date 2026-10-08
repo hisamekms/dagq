@@ -22,11 +22,16 @@
 # optional title ("[t](a.md "title")") is dropped. Percent-encoded spaces
 # ("%20") are decoded.
 #
-# The one exception: the links of the ADRs (docs/adr/) into docs/journal/,
-# which was removed after it was frozen (ADR-0008 links two journal entries).
-# The ADRs are append-only (docs/development/documents.md, section "ADR"), so
-# those links are not rewritten and are skipped here; a link of any other
-# document into docs/journal/ fails like any other.
+# The one exception: the links of the ADRs (docs/adr/) to the removed
+# documents named here, which the ADRs keep since they are append-only
+# (docs/development/documents.md, section "ADR"), so those links are not
+# rewritten and are skipped here:
+# - docs/journal/ and anything under it, removed after it was frozen
+#   (ADR-0008 links two journal entries);
+# - docs/design/broker.md (this exact path), removed with the resource broker
+#   (ADR-t2113-1).
+# A link of any other document to them, and a link of an ADR to any other
+# missing path, fails like any other.
 #
 # The tree checked is the git work tree of the cwd (`git rev-parse
 # --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
@@ -91,8 +96,8 @@ links=$({
         if (target ~ /^\//) path = "." target
         else path = dir "/" target
         # The ADRs are append-only, so their links to the removed
-        # docs/journal/ stay (see the header).
-        if (file ~ /^docs\/adr\// && path ~ /^docs\/adr\/\.\.\/journal\//) continue
+        # docs/journal/ and docs/design/broker.md stay (see the header).
+        if (file ~ /^docs\/adr\// && (path ~ /^docs\/adr\/\.\.\/journal\// || path == "docs/adr/../design/broker.md")) continue
         printf "%s\t%d\t%s\t%s\n", file, FNR, target, path
       }
     }

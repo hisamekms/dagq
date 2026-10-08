@@ -42,12 +42,16 @@
 //!   `report_written`, `throughput_review_*`, `candidates_sampled` and the
 //!   CI watch's `ci_*`.
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
-//!   `broker_*`, `queue_service_*`, `sccache_*`, `inbox_*`, the cleanup's
+//!   `queue_service_*`, `sccache_*`, `inbox_*`, the cleanup's
 //!   `build_outputs_removed`, `scratchpad_removed` and `run_tmp_removed`,
 //!   `backend_call_failed`, `headless_job_stopped` and
 //!   `provider_executable_relocated` (named in full: the start of an AI
 //!   actor, `application::actor_executor`, writes it, though `provider_*`
 //!   is execution's).
+//!
+//! The removed resource broker's `broker_*` kinds are no longer kinds of
+//! this binary: a queue's old events of them are read as any kind it does
+//! not know (decision 21, ADR-t2125-1).
 
 macro_rules! event_kinds {
     ($($variant:ident => $name:literal,)*) => {
@@ -85,18 +89,6 @@ event_kinds! {
     AuthorizationDenied => "authorization_denied",
     AutoRepaired => "auto_repaired",
     BackendCallFailed => "backend_call_failed",
-    BrokerClaimsHeld => "broker_claims_held",
-    BrokerClaimsResumed => "broker_claims_resumed",
-    BrokerHealthy => "broker_healthy",
-    BrokerImageBuilt => "broker_image_built",
-    BrokerStarted => "broker_started",
-    BrokerStopRequested => "broker_stop_requested",
-    BrokerStopped => "broker_stopped",
-    BrokerTokenIssued => "broker_token_issued",
-    BrokerTokenRevoked => "broker_token_revoked",
-    BrokerToolUse => "broker_tool_use",
-    BrokerUnavailable => "broker_unavailable",
-    BrokerUnhealthy => "broker_unhealthy",
     BuildOutputsRemoved => "build_outputs_removed",
     CandidatesSampled => "candidates_sampled",
     CiCheckFailed => "ci_check_failed",
@@ -545,17 +537,6 @@ impl EventKind {
                 | UsageLimited
                 // The cleanup for the disk (task 377) is about no run.
                 | AutoRepaired
-                // The supervisor's resource broker (ADR-t827-3 decisions
-                // 2 and 3) is the queue's, and so are the claims `required`
-                // holds for it (ADR-t838-1).
-                | BrokerClaimsHeld
-                | BrokerClaimsResumed
-                | BrokerHealthy
-                | BrokerImageBuilt
-                | BrokerStarted
-                | BrokerStopRequested
-                | BrokerStopped
-                | BrokerUnhealthy
                 // The stop of a gone supervisor's plan or goal review (task
                 // 443).
                 | HeadlessJobStopped
@@ -636,10 +617,6 @@ pub const AUTH_REQUIRED: &str = EventKind::AuthRequired.as_str();
 pub const AUTHORIZATION_DENIED: &str = EventKind::AuthorizationDenied.as_str();
 pub const AUTO_REPAIRED: &str = EventKind::AutoRepaired.as_str();
 pub const BACKEND_CALL_FAILED: &str = EventKind::BackendCallFailed.as_str();
-/// A run's calls through the resource broker and around it, by op and by
-/// built-in tool, recorded when its token is revoked at its end
-/// ([`super::broker_usage`]).
-pub const BROKER_TOOL_USE: &str = EventKind::BrokerToolUse.as_str();
 pub const BUILD_OUTPUTS_REMOVED: &str = EventKind::BuildOutputsRemoved.as_str();
 pub const CLEANUP_FAILED: &str = EventKind::CleanupFailed.as_str();
 /// What the runtime made of a review's `concern` (ADR-t451-1 decision 3):
@@ -975,18 +952,6 @@ mod tests {
             (EventKind::AuthorizationDenied, "authorization_denied"),
             (EventKind::AutoRepaired, "auto_repaired"),
             (EventKind::BackendCallFailed, "backend_call_failed"),
-            (EventKind::BrokerClaimsHeld, "broker_claims_held"),
-            (EventKind::BrokerClaimsResumed, "broker_claims_resumed"),
-            (EventKind::BrokerHealthy, "broker_healthy"),
-            (EventKind::BrokerImageBuilt, "broker_image_built"),
-            (EventKind::BrokerStarted, "broker_started"),
-            (EventKind::BrokerStopRequested, "broker_stop_requested"),
-            (EventKind::BrokerStopped, "broker_stopped"),
-            (EventKind::BrokerTokenIssued, "broker_token_issued"),
-            (EventKind::BrokerTokenRevoked, "broker_token_revoked"),
-            (EventKind::BrokerToolUse, "broker_tool_use"),
-            (EventKind::BrokerUnavailable, "broker_unavailable"),
-            (EventKind::BrokerUnhealthy, "broker_unhealthy"),
             (EventKind::BuildOutputsRemoved, "build_outputs_removed"),
             (EventKind::CandidatesSampled, "candidates_sampled"),
             (EventKind::CiCheckFailed, "ci_check_failed"),

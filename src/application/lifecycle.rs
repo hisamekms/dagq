@@ -293,9 +293,6 @@ pub struct Ports<'a> {
     pub load_average: fn() -> Option<f64>,
     /// The agent of the sessions `up` opens (the inbox), given `--claude`.
     pub agent: &'a dyn Fn(&Path) -> Box<dyn AgentProvider>,
-    /// The queue's resource broker: `up`'s preflight and `down`'s stop
-    /// (ADR-t827-3 decision 2).
-    pub broker: &'a dyn BrokerLifecycle,
     /// `queue_service(db, executable)`: the control of the queue's
     /// service, started from `executable` (ADR-t1233-4 decision 1). The
     /// service calls no cmux (ADR-t1433-1).
@@ -306,28 +303,6 @@ pub struct Ports<'a> {
 /// [`Ports::queue_service`].
 pub type QueueServiceControls =
     dyn Fn(&Path, &Path) -> Box<dyn crate::application::queue_service::QueueServiceControl>;
-
-/// What `up` and `down` do about the queue's resource broker (ADR-t827-3
-/// decision 2). With the mode `disabled` (the default) neither does
-/// anything, and no podman is looked for or run.
-pub trait BrokerLifecycle {
-    /// `up`'s preflight for the supervisor it starts, with the `[broker]`
-    /// of the `dagq.toml` in `checkout` and the queue's `host.toml`: the
-    /// mode, and for a mode other than `disabled` the podman executable on
-    /// `path`. `None` for `disabled`; an error (no podman, `required`) keeps
-    /// the supervisor from starting.
-    fn preflight(&self, checkout: &Path, db: &Path, path: &str) -> Result<Option<Value>>;
-    /// `down` after the drain (`drained`): stop the queue's container and
-    /// then dagq's machine when no container runs on it, as `dagq broker
-    /// stop` does. Before it (a `down` that returns while the supervisor
-    /// drains), only what is left to do. `None` for `disabled`.
-    fn after_drain(&self, db: &Path, drained: bool) -> Result<Option<Value>>;
-    /// Before `down` signals `supervisors`: ask them to stop the queue's
-    /// broker once their drain ends (ADR-t827-3 decisions 2 and 5), so a
-    /// `down` that does not wait for the drain stops it too. `false` for
-    /// `disabled`, which records nothing. `up`'s replacement never asks.
-    fn request_stop(&self, db: &Path, supervisors: &[LeaseToken]) -> Result<bool>;
-}
 
 /// How `up` resolves the language: `(checkout, user_config)` to the
 /// language in force, or the mistake in either file (ADR-t616-2).
@@ -464,12 +439,6 @@ pub fn up(
     if let Some(message) = (ports.ci_watch_preflight)(trust_root, &environment.path)? {
         bail!("{message}; the supervisor was not started");
     }
-    // The supervisor keeps the broker of a mode other than `disabled`
-    // with podman on this PATH (ADR-t827-3 decision 2).
-    let broker = ports
-        .broker
-        .preflight(trust_root, &db, &environment.path)
-        .map_err(|error| anyhow::anyhow!("{error:#}; the supervisor was not started"))?;
     // A mistake in the language is caught before anything starts; later it
     // only leaves the prompts without the instruction (ADR-t616-2).
     let language = (ports.resolve_language)(trust_root, environment.user_config.as_deref())
@@ -649,9 +618,6 @@ pub fn up(
     // What the preflight found, only for a repository with a dagq.toml.
     if run_env.config {
         report["run_env"] = serde_json::to_value(&run_env)?;
-    }
-    if let Some(broker) = broker {
-        report["broker"] = broker;
     }
     if let Some(queue_service) = queue_service {
         report["queue_service"] = queue_service;
@@ -2229,9 +2195,6 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             live.push(registration.clone());
         }
     }
-    // The supervisors about to drain stop the broker when their drain ends
-    // (ADR-t827-3 decision 2); asked before any signal, the unload's
-    // included. A `--force` kill stops it below instead.
     // The queue's service stops after the supervisors (ADR-t1233-4
     // decision 1): `down` stops it once they are gone, and asks the ones
     // about to drain to stop it when their drain ends.
@@ -2240,9 +2203,6 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         service.probe().state != crate::domain::queue_service::ServiceState::Stopped;
     if !live.is_empty() && !options.force {
         let tokens: Vec<LeaseToken> = live.iter().map(|r| r.token.clone()).collect();
-        if let Err(error) = ports.broker.request_stop(&location.db, &tokens) {
-            tracing::warn!(error = %format_args!("{error:#}"), "the broker's stop after the drain could not be asked for: {error:#}");
-        }
         if service_running
             && let Err(error) = queue.record_queue_event(
                 crate::domain::EventKind::QueueServiceStopRequested,
@@ -2256,14 +2216,6 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     // unloaded, or it would keep restarting.
     let agent = launchd.uninstall(&location.label, &location.launch_agent)?;
     let unloaded = agent.loaded;
-    // After the drain the queue's broker is stopped, as `dagq broker stop`
-    // does; a failure is reported, not raised: the supervisor is stopped.
-    let broker = |drained: bool| -> Option<Value> {
-        match ports.broker.after_drain(&location.db, drained) {
-            Ok(report) => report,
-            Err(error) => Some(json!({"error": format!("{error:#}")})),
-        }
-    };
     // After the drain the service is stopped; while the supervisors drain
     // it is left to the last of them. Nothing is said of a service that
     // did not run.
@@ -2309,9 +2261,6 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
                 Stop::SeenThrough,
             ),
         });
-        if let Some(broker) = broker(true) {
-            report["broker"] = broker;
-        }
         if let Some(queue_service) = stop_service(true) {
             report["queue_service"] = queue_service;
         }
@@ -2355,9 +2304,6 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
                 Stop::SeenThrough,
             ),
         });
-        if let Some(broker) = broker(true) {
-            report["broker"] = broker;
-        }
         if let Some(queue_service) = stop_service(true) {
             report["queue_service"] = queue_service;
         }
@@ -2394,9 +2340,6 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         if !pruned.is_empty() {
             report["pruned_supervisors"] = json!(pruned);
         }
-        if let Some(broker) = broker(true) {
-            report["broker"] = broker;
-        }
         if let Some(queue_service) = stop_service(true) {
             report["queue_service"] = queue_service;
         }
@@ -2417,9 +2360,6 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     });
     if !pruned.is_empty() {
         report["pruned_supervisors"] = json!(pruned);
-    }
-    if let Some(broker) = broker(false) {
-        report["broker"] = broker;
     }
     if let Some(queue_service) = stop_service(false) {
         report["queue_service"] = queue_service;

@@ -33,6 +33,7 @@ related:
 
 - 将来の実装や運用に大きな影響を与える決定は`docs/adr/`にADRを追加する。アーキテクチャ全体に影響し手戻りが大きい決定は、実装より先にADRを作る。新しいADRは[template](../adr/0000-template.md)をコピーして作る。
 - 既存のADRは書き換えない（append-only）。後から変えてよいのは`status`・`accepted_on`・`superseded_by`・`superseded_on`・`deprecated_on`・`amended_by`とH1直後の注記1行だけで、これらだけの変更に新しいADRは要らず、`updated`も動かさない。frontmatterの日付の行の行末のコメントは欄の値でも本文でもないので、値を変えずにコメントだけを消すのはこの制限に当たらない（下の「frontmatter」、[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)決定3）。`supersedes`と`amends`は置き換え・amendsの本文と一緒に書く。決定を足す・変える・除くのは、下の置き換えか`amends`の新しいADRで行う。
+- append-onlyのADRがリンクする文書を消すときは、ADRを直さず`scripts/check-doc-links.sh`の例外にその対象を名指して足す（ADRからのリンクだけを読み飛ばし、ADR以外の文書からのリンクは落ちる。今の対象はscriptの冒頭のcomment）。
 - どのADRが今の決定か（`accepted`・`amended_by`・`superseded_by`の辿り方・`deprecated`）は[frontmatter仕様](../frontmatter.md)の「ADR fields」の状態と欄の表が持つ。
 - 小さなADR: 1 ADRに決定1つ（密に結びついた数個まで）、本文はおおむね100行以内。書くのは変えるのに人の判断が要るもの（問題と文脈、方針・原則・境界・不変条件、退けた案、結果。目安は「これを変えるとき人に聞くか」）で、eventの種類と欄・CLIのflagの綴り・JSONの形・既定値や閾値の数値・関数やmoduleやファイルの名前・migrationの番号・testの名前はコード（定義のそばのdoc comment）か`docs/design/`の地図に書く（ADR-t598-1決定2・3、決定3は[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)がamends。下の「design」）。
 - 置き換えか`amends`か: 元のADRの決定の数と変える範囲で決め、IDの形（4桁か新しい形か）では決めない（[ADR-t1091-1](../adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)）。番号付きの決定を複数持つADR（4桁でも新しい形でも。0047・0073・t813-2など）の一部の決定を変えるときは、小さな新しいADRの`amends`に変える決定（例: `adr-0047 decision 24`）を書き、元のADRの`amended_by`にそのIDを足し、同じ変更で今の姿（`docs/design/`かdoc comment）を直す。決定が1つのADRを変えるときと、決定の大半を変えるときは、新しいADRで丸ごと置き換え、まだ有効な古い決定を書き直して引き継ぎ、古いADRを丸ごと`superseded`にする（1つのADRが複数を置き換えてもよい）。どちらにするかをtaskに書くことは[taskの登録](task-registration.md)の「ADRを書くtask」が持つ。
@@ -147,7 +148,7 @@ ADR以外の文書（design・development・plans、`docs/README.md`・`docs/fro
 
 `created`とADRの`updated`の行は`YYYY-MM-DD`の日付だけを書き、行末にどのtaskが何を変えたかのコメント（`# task N`など）を書かない。どのtaskが変えたかはgitの履歴（着地のcommitの`Dagq-Task` trailer）が持つ。既存の文書（ADRも含む。決定と本文に触れないのでappend-onlyに当たらない）の日付の行にコメントがあれば、日付の値を変えずにコメントだけを消してよい。経緯は[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)。`scripts/check-frontmatter-dates.sh`はfrontmatterの日付の行（frontmatter仕様が持たせるもの）にコメントがあれば、ファイルと行を出して落ちる検査で、CIが実行する（docsを変えるtaskのverifyへの足し方は[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
 
-`scripts/check-doc-frontmatter.sh`はADR以外の`docs/`の文書のfrontmatter（必須のkey、typeとstatusの値、idの形と重複、`updated`と`last_verified`の行が無いこと（ADR-t1964-1））を、`scripts/check-doc-links.sh`は`docs/`とrootの`.md`の相対リンクが実在のファイルかdirectoryを指すことを検査し、違反のファイルと理由を出して落ちる。どちらもCIが実行し、`docs/`を変えるtaskのverifyに付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。検査の範囲と例外（ADRのfrontmatterを見ないこと、append-onlyのADRから削除済みの`docs/journal/`へのリンク）はscriptの冒頭のcommentが持つ。
+`scripts/check-doc-frontmatter.sh`はADR以外の`docs/`の文書のfrontmatter（必須のkey、typeとstatusの値、idの形と重複、`updated`と`last_verified`の行が無いこと（ADR-t1964-1））を、`scripts/check-doc-links.sh`は`docs/`とrootの`.md`の相対リンクが実在のファイルかdirectoryを指すことを検査し、違反のファイルと理由を出して落ちる。どちらもCIが実行し、`docs/`を変えるtaskのverifyに付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。検査の範囲と例外（ADRのfrontmatterを見ないこと、append-onlyのADRから削除済みの`docs/journal/`と`docs/design/broker.md`へのリンク）はscriptの冒頭のcommentが持つ。
 
 ## 権限の表を写す文書
 

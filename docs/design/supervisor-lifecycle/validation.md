@@ -12,6 +12,7 @@ related:
   - adr-t963-1
   - adr-t1165-1
   - adr-t1233-2
+  - adr-t2125-1
   - adr-t1925-1
 ---
 
@@ -68,7 +69,8 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
 切り分け: cmuxの要らないe2eは、cmuxの無いhostでも名前で絞って手で流せる（`cargo test --locked --test e2e -- --ignored --exact <名前>`）。
 関門（自動更新と`install`の関門。[Auto-update](auto-update.md)の「e2eの関門」。[着地の前のe2e](landing-e2e.md)）は、e2eの前に`cmux ping`を打ち、cmuxが答えれば全部のe2eを流す。
 答えないとき（cmuxが無い、socketが拒む）だけ、実cmuxを要るe2e（`application::install::CMUX_E2E`の`--skip`のfilter）を流さず、残りで判定する（[ADR-t2105-1](../../adr/2026-10-08-t2105-1-e2e-gate-skips-cmux-e2e-only-when-cmux-does-not-answer.md)）。
-流さなかったtestと理由はpodmanのものと同じ`E2eSkip`で関門の結果とeventに残り、`update_installed`の知らせでinboxに届く。
+流さなかったtestと理由は`E2eSkip`で関門の結果とeventに残り、`update_installed`の知らせでinboxに届く。
+関門が確かめるのはcmuxだけで、podmanの無さで流さないe2eは無い（[ADR-t2125-1](../../adr/2026-10-08-t2125-1-e2e-gate-checks-only-cmux-after-the-broker-removal.md)）。
 cmuxが答えないことは`unavailable`の理由にならない。
 そのときの後始末（`e2e_gate::clean_up_without_cmux`）はcmuxを呼ばず、関門のdirectoryをqueueのhashとともに残し、次にcmuxが答える関門がそのgroupとworkspaceを閉じて消す。
 

@@ -89,39 +89,6 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             release.is_some_and(|value| value[field].is_string()),
             "{command} reports release_update"
         );
-        // Both report the build the broker's client and image must name,
-        // and the client beside this dagq (ADR-t827-1 decisions 5 and 7);
-        // whether the test binary has a client beside it depends on what
-        // the build built, so only its shape is checked.
-        let broker = &report["broker"];
-        assert_eq!(broker["build"], dagq::VERSION, "{command} {broker}");
-        assert_eq!(
-            broker["image"],
-            dagq::infrastructure::broker_image::image(),
-            "{command} {broker}"
-        );
-        assert!(
-            broker["client"]["path"]
-                .as_str()
-                .is_some_and(|path| path.ends_with("/dagq-broker-client"))
-                && broker["client"]["matches"].is_boolean(),
-            "{command} {broker}"
-        );
-        // A fresh queue's broker is disabled, and no supervisor recorded
-        // its health nor issued a token (task 837).
-        assert_eq!(broker["mode"], "disabled", "{command} {broker}");
-        assert_eq!(
-            broker["health"],
-            serde_json::json!({"state": "unknown", "reason": null, "at": null}),
-            "{command} {broker}"
-        );
-        assert_eq!(broker["active_tokens"], 0, "{command} {broker}");
-        if command == "status" {
-            let broker = report.as_object_mut().unwrap().remove("broker").unwrap();
-            assert_eq!(broker["mode"], "disabled", "{broker}");
-            assert_eq!(broker["running_image"], serde_json::Value::Null, "{broker}");
-            assert_eq!(broker["image_matches"], serde_json::Value::Null, "{broker}");
-        }
         // `doctor` reports the language in force (ADR-t616-2), which comes
         // from the user's config.toml of whoever runs the tests, so only its
         // shape is checked; `tests/it/language.rs` checks its values.
@@ -137,21 +104,6 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             assert!(
                 d2.is_some_and(|value| value.get("tala").is_some()),
                 "doctor reports d2"
-            );
-            // Where podman resolves depends on the host's PATH too
-            // (ADR-t827-3); a fresh queue's broker is disabled and has
-            // recorded nothing.
-            let broker = report.as_object_mut().unwrap().remove("broker");
-            let broker = broker.expect("doctor reports the broker");
-            assert_eq!(broker["mode"], "disabled", "{broker}");
-            assert_eq!(broker["machine"], "dagq", "{broker}");
-            assert!(
-                broker["podman"].is_string() || broker["error"]["code"] == "podman_missing",
-                "{broker}"
-            );
-            assert_eq!(
-                broker["recorded"],
-                serde_json::json!({"port": null, "container": null, "image": null, "state": null, "build": null, "started_at": null})
             );
             // Where `claude` and `codex` resolve depends on the host's PATH
             // too (ADR-t813-2); only which providers and modes are checked.

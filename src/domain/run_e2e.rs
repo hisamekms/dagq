@@ -104,7 +104,7 @@ pub fn standing_attention(events: &[RunEvent]) -> Option<&RunEvent> {
 }
 
 /// The file under `tests/` that holds the e2e test `name`: a test of a
-/// module (`broker::…`) lives in `tests/e2e/<module>.rs`, any other in
+/// module (`headless::…`) lives in `tests/e2e/<module>.rs`, any other in
 /// `tests/e2e.rs`.
 pub fn test_file(name: &str) -> String {
     match name.split_once("::") {
@@ -233,14 +233,14 @@ mod tests {
 
     #[test]
     fn a_mark_does_not_pass_a_test_the_run_changes_or_fixes() {
-        assert_eq!(test_file("broker::lands"), "tests/e2e/broker.rs");
+        assert_eq!(test_file("headless::lands"), "tests/e2e/headless.rs");
         assert_eq!(test_file("up_lands"), "tests/e2e.rs");
         let file = QuarantineFile::of(
-            "[[test]]\nname = \"broker::lands\"\nreason = \"r\"\ntask = 4\nuntil = 2999-01-01\n\n\
+            "[[test]]\nname = \"headless::lands\"\nreason = \"r\"\ntask = 4\nuntil = 2999-01-01\n\n\
 [[test]]\nname = \"up_lands\"\nreason = \"r\"\ntask = 5\nuntil = 2999-01-01\n\n\
 [[test]]\nname = \"down_lands\"\nreason = \"r\"\ntask = 6\nuntil = 2999-01-01\n",
         );
-        let (kept, left_out) = marks_for_run(file.clone(), 6, &["tests/e2e/broker.rs".into()]);
+        let (kept, left_out) = marks_for_run(file.clone(), 6, &["tests/e2e/headless.rs".into()]);
         let QuarantineFile::Marks(kept) = kept else {
             panic!("{kept:?}");
         };
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(
             left_out,
             [
-                json!({"name": "broker::lands", "reason": "test_changed_by_the_run"}),
+                json!({"name": "headless::lands", "reason": "test_changed_by_the_run"}),
                 json!({"name": "down_lands", "reason": "fixed_by_this_task"}),
             ]
         );

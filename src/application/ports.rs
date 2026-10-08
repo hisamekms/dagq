@@ -731,16 +731,6 @@ pub trait AgentProvider {
     fn without_mcp(&self, command: &mut CommandSpec) {
         let _ = command;
     }
-    /// Give a worker's turn (`command`, from
-    /// [`AgentProvider::turn_command`]) the resource broker's tools: the
-    /// MCP configuration at `config` (`<run dir>/broker/mcp.json`) and the
-    /// permission to use its server (ADR-t827-4 decision 1). Whether it
-    /// did: a provider whose MCP the runtime does not pass yet (Codex)
-    /// leaves the command as it is.
-    fn broker_tools(&self, command: &mut CommandSpec, config: &std::path::Path) -> bool {
-        let _ = (command, config);
-        false
-    }
     /// Let the agent of `command` (a worker's turn or session, or a
     /// headless job) reach the queue service at `socket`, which its
     /// client-mode `dagq` calls (ADR-t1233-5 decision 4): a provider whose
@@ -798,10 +788,7 @@ pub trait AgentProvider {
     /// The permission mode a headless turn must say it started in; one
     /// that says another is stopped as started otherwise than asked
     /// (ADR-t813-1 decision 8). `None` when the provider says none.
-    /// `broker_required` says the turn was started for a `required` run
-    /// ([`TurnTarget::broker_required`]).
-    fn turn_permission_mode(&self, broker_required: bool) -> Option<&'static str> {
-        let _ = broker_required;
+    fn turn_permission_mode(&self) -> Option<&'static str> {
         None
     }
 }
@@ -945,9 +932,7 @@ impl<'a> WorkerAdapters<'a> {
 /// requests, settings and turns (the run's or the planner's), the directory
 /// it works in (the run's worktree, or the repository's checkout), its
 /// agent's debug log (a provider that writes one refuses a target without
-/// it), the plugin directory it loads (a planner's), and the MCP
-/// configuration of the broker a worker of a `required` run must work
-/// through (ADR-t838-1).
+/// it) and the plugin directory it loads (a planner's).
 #[derive(Debug, Clone, Copy)]
 pub struct TurnTarget<'a> {
     pub role: crate::domain::ActorRole,
@@ -955,10 +940,6 @@ pub struct TurnTarget<'a> {
     pub cwd: &'a std::path::Path,
     pub debug_log: Option<&'a std::path::Path>,
     pub plugin_dir: Option<&'a std::path::Path>,
-    /// `[broker] mode = "required"`: the turn gets the broker's tools from
-    /// this configuration instead of the built-in file and command tools.
-    /// A provider that cannot give it so refuses the turn.
-    pub broker_required: Option<&'a std::path::Path>,
 }
 
 impl<'a> TurnTarget<'a> {
@@ -971,7 +952,6 @@ impl<'a> TurnTarget<'a> {
             cwd: std::path::Path::new(run.worktree_path().context("missing worktree")?),
             debug_log: run.log_path().map(std::path::Path::new),
             plugin_dir: None,
-            broker_required: None,
         })
     }
 }

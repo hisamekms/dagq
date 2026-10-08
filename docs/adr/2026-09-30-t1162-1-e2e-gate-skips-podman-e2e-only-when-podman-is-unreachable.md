@@ -2,10 +2,12 @@
 id: adr-t1162-1
 type: adr
 title: 固定バイナリを入れ替える前のe2eの関門で、上限つきで待ってもpodmanに繋がらないときだけpodmanに頼るe2eを流さずに残りで判定し、流さなかったことを記録してinboxに届ける（ADR-t963-1決定1をamends）
-status: accepted
+status: superseded
 created: 2026-09-30
 updated: 2026-09-30
 accepted_on: 2026-09-30
+superseded_by: adr-t2125-1
+superseded_on: 2026-10-08
 amends:
   - adr-t963-1 decision 1
 amended_by:
@@ -28,6 +30,8 @@ related:
 ---
 
 # ADR-t1162-1: 固定バイナリを入れ替える前のe2eの関門で、上限つきで待ってもpodmanに繋がらないときだけpodmanに頼るe2eを流さずに残りで判定し、流さなかったことを記録してinboxに届ける（ADR-t963-1決定1をamends）
+
+> **置き換え済み（2026-10-08）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2125-1](2026-10-08-t2125-1-e2e-gate-checks-only-cmux-after-the-broker-removal.md)を読む。
 
 ## Context
 

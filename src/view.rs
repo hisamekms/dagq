@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use crate::domain::{
     GoalDetail, OBSERVATION_KIND, RunEvent, TaskDetail,
-    background_wrapper::current_background_session, broker_usage, claim_defer, reason,
+    background_wrapper::current_background_session, claim_defer, reason,
 };
 
 /// The one key of a command's value that is printed as is instead of as
@@ -95,11 +95,6 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
             // (`run log`, ADR-t1404-1 decision 6).
             if let Some(session) = current_background_session(&events) {
                 run.insert("background".into(), json!(session));
-            }
-            // Its calls through the resource broker and around it, when
-            // its end counted them (`broker_tool_use`).
-            if let Some(usage) = broker_usage::latest_tool_use(&events, latest.id()) {
-                run.insert("broker_tool_use".into(), usage);
             }
             Value::Object(run)
         })
@@ -384,7 +379,6 @@ mod tests {
         assert_eq!(runs[0]["truncated"], true);
         assert!(runs[0].get("run_dir").is_none());
         assert!(runs[0]["result_commit"].is_null());
-        assert!(runs[0].get("broker_tool_use").is_none());
         assert_eq!(view["processes"].as_array().unwrap().len(), 1);
         assert_eq!(view["processes"][0]["run_id"], "b");
         assert_eq!(view["events_total"], 13);
@@ -406,17 +400,18 @@ mod tests {
         );
     }
 
-    /// The latest run carries its latest `broker_tool_use` whole: the
-    /// brokered and the direct counts side by side.
+    /// A queue's `broker_tool_use` of the removed resource broker
+    /// (ADR-t2125-1) is shown among the events as any kind this binary does
+    /// not know, and adds nothing to its run.
     #[test]
-    fn task_detail_shows_the_latest_runs_brokered_and_direct_counts() {
+    fn task_detail_shows_a_removed_brokers_events_as_events() {
         let usage = |direct: u64| {
             json!({"brokered": 2, "brokered_by_op": {"fs.read": 2},
                    "direct": direct, "direct_by_tool": {"Bash": direct}})
         };
         let tool_use = |id: i64, run_id: &str, direct: u64| RunEvent {
             run_id: Some(RunId::new(run_id).unwrap()),
-            kind: crate::domain::event_kind::BROKER_TOOL_USE.into(),
+            kind: "broker_tool_use".into(),
             ..event(id, usage(direct))
         };
         let detail = TaskDetail {
@@ -440,7 +435,14 @@ mod tests {
         };
         let view = task_detail(&detail, 10);
         assert_eq!(view["runs"][0]["id"], "b");
-        assert_eq!(view["runs"][0]["broker_tool_use"], usage(3));
+        assert!(view["runs"][0].get("broker_tool_use").is_none());
+        let kinds: Vec<&str> = view["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["broker_tool_use"; 3]);
     }
 
     #[test]

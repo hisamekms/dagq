@@ -174,7 +174,6 @@ mod tests {
             queue_dir: None,
             scratch: "/q/e2e".into(),
             log: "/q/logs/update-1-abc.e2e.log".into(),
-            podman: None,
             utc_offset_secs: 9 * 3600,
             lock: None,
         }

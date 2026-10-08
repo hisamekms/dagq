@@ -118,7 +118,8 @@ fn a_recorded_deferral_leaves_the_order_until_it_ends() {
 
 /// The holds a live supervisor recorded stand in `held`, with their
 /// records, and change neither `candidates` nor `deferred`; a hold that
-/// resumed is gone.
+/// resumed is gone. A queue's `broker_claims_held` of the removed resource
+/// broker holds nothing (ADR-t2125-1).
 #[test]
 fn the_recorded_holds_stand_in_held_and_leave_the_order_alone() {
     let (_dir, db) = queue();
@@ -136,25 +137,20 @@ fn the_recorded_holds_stand_in_held_and_leave_the_order_alone() {
         json!({"reason": "load_average", "value": 40.0, "threshold": 16.0,
                "supervisor": "live"}),
     );
-    record_queue(
-        &db,
-        EventKind::BrokerClaimsHeld,
-        json!({"reason": "not_ready", "message": "the broker starts"}),
-    );
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO run_events(kind,payload) VALUES ('broker_claims_held','{\"reason\":\"not_ready\"}')",
+            [],
+        )
+        .unwrap();
     record_queue(
         &db,
         EventKind::RunEnvProgramMissing,
         json!({"missing": ["sccache"], "supervisor": "live"}),
     );
     let view = ok(&db, &["candidates"]);
-    assert_eq!(
-        reasons(&view),
-        [
-            "claim_held",
-            "broker_claims_held",
-            "run_env_program_missing"
-        ]
-    );
+    assert_eq!(reasons(&view), ["claim_held", "run_env_program_missing"]);
     assert_eq!(view["held"][0]["record"]["reason"], "load_average");
     assert!(view["held"][0]["since"].is_string(), "{view}");
     assert_eq!(ids(&view["candidates"]), [2, 1, 3]);
@@ -163,7 +159,7 @@ fn the_recorded_holds_stand_in_held_and_leave_the_order_alone() {
     record_queue(&db, EventKind::ClaimResumed, json!({"supervisor": "live"}));
     assert_eq!(
         reasons(&ok(&db, &["candidates"])),
-        ["broker_claims_held", "run_env_program_missing"]
+        ["run_env_program_missing"]
     );
 }
 

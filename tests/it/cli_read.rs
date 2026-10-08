@@ -842,6 +842,71 @@ fn status_watch_and_show_read_kinds_a_newer_binary_wrote() {
     ok(&db, &["stats", "--full"]);
 }
 
+/// A queue that has the removed resource broker's events (ADR-t2125-1):
+/// `events`, `timeline`, `show`, `status` and `doctor` read them as kinds
+/// this binary does not know, and an unhealthy broker or claims held for
+/// it ask nothing of anyone.
+#[test]
+fn a_queue_with_the_removed_brokers_events_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let run = run_with_events(
+        &db,
+        &[
+            (
+                "broker_tool_use",
+                serde_json::json!({"brokered": 2, "direct": 1}),
+                "00:00:05",
+            ),
+            ("broker_token_revoked", serde_json::json!({}), "00:00:06"),
+        ],
+    );
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO run_events(kind,payload) VALUES ('broker_started','{\"port\":1}');
+             INSERT INTO run_events(kind,payload) VALUES ('broker_unhealthy','{\"reason\":\"machine_busy\"}');
+             INSERT INTO run_events(kind,payload) VALUES ('broker_claims_held','{\"reason\":\"not_ready\"}');",
+        )
+        .unwrap();
+    let kinds = |value: &Value| -> Vec<String> {
+        value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["kind"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let events = kinds(&ok(&db, &["events", "--after", "0", "--all", "--full"]));
+    for kind in [
+        "broker_tool_use",
+        "broker_token_revoked",
+        "broker_started",
+        "broker_unhealthy",
+        "broker_claims_held",
+    ] {
+        assert!(events.iter().any(|k| k == kind), "{kind}: {events:?}");
+    }
+    ok(&db, &["timeline", &run]);
+    let show = ok(&db, &["show", "1", "--full"]);
+    assert!(
+        kinds(&show).iter().any(|k| k == "broker_tool_use"),
+        "{show}"
+    );
+    assert!(show["runs"][0].get("broker_tool_use").is_none(), "{show}");
+    let status = ok(&db, &["status"]);
+    assert!(
+        !status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["kind"].as_str().is_some_and(|k| k.starts_with("broker_"))),
+        "{status}"
+    );
+    assert!(status.get("broker").is_none(), "{status}");
+    assert!(ok(&db, &["doctor"]).get("broker").is_none());
+}
+
 /// `status` and `doctor` name each AI actor's backend and enforcement: on
 /// the host, advisory and not sandboxed (goal 55); the control plane and
 /// the user are not AI actors and are not listed.

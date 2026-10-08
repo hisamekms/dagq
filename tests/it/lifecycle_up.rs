@@ -72,99 +72,42 @@ fn up_refuses_a_run_env_program_its_path_does_not_find() {
     );
 }
 
-/// With `[broker]` mode other than `disabled`, `up` looks for podman on
-/// the supervisor's PATH and starts no supervisor without it (ADR-t827-3
-/// decision 2); `host.toml` lowering the mode to `disabled` needs none.
-/// `required` (ADR-t838-1) needs podman as `preferred` does. Without
-/// `[broker]` nothing is looked for (every other test here).
+/// A `dagq.toml` and a `host.toml` that still have the removed resource
+/// broker's tables do not stop `up` (ADR-t2125-1): they are not read, no
+/// podman is looked for on a PATH without one, and the report says nothing
+/// of a broker.
 #[test]
-fn up_refuses_a_broker_mode_without_podman_on_its_path() {
+fn up_starts_with_the_removed_brokers_tables_left_in_place() {
     let mut fixture = fixture();
     let bin = fixture.repo.parent().unwrap().join("tools");
     fs::create_dir(&bin).unwrap();
     fs::write(
         fixture.repo.join("dagq.toml"),
-        "[broker]\nmode = \"preferred\"\n",
+        "[broker]\nmode = \"required\"\n[broker.package]\nfetch = [\"cargo\", \"fetch\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.location.queue_dir.join("host.toml"),
+        "[broker]\nmode = \"preferred\"\npodman = \"/nonexistent/podman\"\n",
     )
     .unwrap();
     fixture.environment.path = format!("{}:/nonexistent", bin.display());
     let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    // Not the host's own host.toml.
-    let one_shot = dagq::compose::OneShot {
-        host_config: Some(bin.join("no-host.toml")),
-        ..dagq::compose::OneShot::system()
-    };
-    let try_up =
-        |fixture: &Fixture, cmux: &FakeCmux, launchd: &FakeLaunchd, processes: &FakeProcesses| {
-            one_shot.up(
-                &fixture.location,
-                &fixture.repo,
-                cmux,
-                launchd,
-                processes,
-                &fixture.environment,
-                &fixture.options,
-            )
-        };
-    let up =
-        |fixture: &Fixture, cmux: &FakeCmux, launchd: &FakeLaunchd, processes: &FakeProcesses| {
-            try_up(fixture, cmux, launchd, processes).unwrap()
-        };
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
-    assert!(
-        error.contains("needs podman")
-            && error.contains("brew install podman")
-            && error.contains("the supervisor was not started"),
-        "{error}"
-    );
-    let registered = || {
-        SqliteQueue::open(&fixture.location.db)
-            .unwrap()
-            .supervisors()
-            .unwrap()
-            .len()
-    };
-    assert_eq!(registered(), 0);
-    assert!(launchd.installs.lock().unwrap().is_empty());
-
-    // The host lowers the mode: no podman is needed.
-    let host = fixture.location.queue_dir.join("host.toml");
-    fs::write(&host, "[broker]\nmode = \"disabled\"\n").unwrap();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = dagq::compose::OneShot::system()
+        .up(
+            &fixture.location,
+            &fixture.repo,
+            &cmux,
+            &launchd,
+            &processes,
+            &fixture.environment,
+            &fixture.options,
+        )
+        .unwrap();
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(report.get("broker"), None, "{report}");
-    fs::remove_file(&host).unwrap();
-
-    // Found: `up` goes on and says where.
-    let podman = bin.join("podman");
-    crate::common::template::script(&podman, "#!/bin/sh\n");
-
-    let report = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(report["broker"]["mode"], "preferred", "{report}");
-    assert_eq!(report["broker"]["podman"], podman.to_str().unwrap());
-
-    fs::write(
-        fixture.repo.join("dagq.toml"),
-        "[broker]\nmode = \"required\"\n",
-    )
-    .unwrap();
-    let report = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(report["broker"]["mode"], "required", "{report}");
-    assert_eq!(report["broker"]["podman"], podman.to_str().unwrap());
-    fs::remove_file(&podman).unwrap();
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
-    assert!(
-        error.contains("mode = \"required\"") && error.contains("needs podman"),
-        "{error}"
-    );
 }
 
 /// A mistake in the language stops `up` before it starts anything; a

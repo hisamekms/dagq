@@ -121,7 +121,7 @@ impl Supervisor<'_> {
         };
         let siblings = siblings_in_progress(task, self.queue.tasks_in_progress()?);
         let inherited = self.inheritance(run)?;
-        let mut fitted = prompt(
+        let fitted = prompt(
             task,
             run,
             goal.as_ref(),
@@ -131,31 +131,6 @@ impl Supervisor<'_> {
             inherited.as_ref(),
             &self.e2e_paths(),
         )?;
-        // A Claude worker the supervisor gave the broker's tools is told of
-        // them (ADR-t827-4 decision 1), and with `required` that they are
-        // its only way to the worktree (ADR-t838-1).
-        if run.actual_provider() == Provider::Claude
-            && self
-                .files
-                .exists(&crate::application::broker_run::mcp_config_path(run_dir))
-        {
-            let before = fitted.text.len();
-            fitted.text.push_str(
-                if self
-                    .files
-                    .exists(&crate::application::broker_run::required_path(run_dir))
-                {
-                    crate::application::prompt::BROKER_REQUIRED
-                } else {
-                    crate::application::prompt::BROKER_TOOLS
-                },
-            );
-            fitted
-                .bytes
-                .sections
-                .insert("broker", fitted.text.len() - before);
-            fitted.bytes.total = fitted.text.len();
-        }
         let fitted = fitted.with_language(self.verifier.language().as_ref());
         self.files
             .write(&run_dir.join("prompt.txt"), fitted.text.as_bytes())?;
@@ -189,7 +164,7 @@ impl Supervisor<'_> {
         // before each turn.
         self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeWorker);
         let task = self.queue.show(run.task_id())?.task;
-        let (inherited, mut prompt_bytes) = self.write_prompt(&task, &run, &run_dir)?;
+        let (inherited, prompt_bytes) = self.write_prompt(&task, &run, &run_dir)?;
         if let Some(inherited) = &inherited {
             self.queue.record_runtime_event(
                 run.id(),
@@ -211,13 +186,6 @@ impl Supervisor<'_> {
             EventKind::WorktreeCreated,
             json!({"path": plan.worktree_path, "branch": plan.branch}),
         )?;
-        // The broker's tools: the worker is told of them in its prompt,
-        // written again with them. `required` starts no worker without
-        // them (ADR-t838-1).
-        let granted = self.broker_grant_or_refuse(&run)?;
-        if granted {
-            prompt_bytes = self.write_prompt(&task, &run, &run_dir)?.1;
-        }
         self.warn_ignored_wrapper_setting();
         let log = self.session_log(&run_dir, None, false);
         let command = background::wrapper_command(vec![

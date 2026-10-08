@@ -11,9 +11,8 @@
 //!   parses the CLI and prints what it returns.
 //!
 //! Outside the layers: [`view`] shapes the CLI's compact output;
-//! [`broker_material`] and [`migration_numbers`]
-//! are shared with `build.rs`; and [`runtime`] and [`lifecycle`] only
-//! re-export the names the tests use from before the move.
+//! [`build_id`] and [`migration_numbers`] are shared with `build.rs`; and
+//! [`runtime`] and [`lifecycle`] only re-export the names the tests use from before the move.
 //!
 //! Across the layers, each module also belongs to one context (planning,
 //! execution and landing, observation and analysis, host operation) or to
@@ -24,9 +23,7 @@
 //! which do no I/O; its `emit` and `compute` call Git and belong to the
 //! build script.
 pub mod application;
-pub mod broker_material;
-/// The build identifier's rule, shared with the broker's binaries.
-pub use dagq_broker_protocol::build_id;
+pub mod build_id;
 pub mod compose;
 pub mod domain;
 pub mod infrastructure;

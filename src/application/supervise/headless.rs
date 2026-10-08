@@ -42,10 +42,6 @@ pub(super) fn request_turn(
         Input::Text(text) => (text, None),
         Input::Prompt { text, bytes } => (text, Some(bytes)),
     };
-    // No turn of a `disabled` queue starts with the tools an earlier mode
-    // left (task 1141).
-    // Nor of a `required` run that could not be marked (ADR-t838-1).
-    sv.broker_before_turn(run)?;
     let seq = write_request(&*sv.files, run_dir, text, what)?;
     // Written: a record that fails is only noted, as for a typed text.
     let mut payload = json!({"seq": seq, "what": what, "workspace_id": workspace});

@@ -21,20 +21,15 @@ readme = "README.md"
 keywords = ["task-queue", "dag", "git-worktree", "cmux", "claude"]
 categories = ["command-line-utilities", "development-tools"]
 # Only what builds the binary: migrations are embedded with include_str!,
-# build.rs embeds the build identifier, and the Containerfile is the broker
-# image's material a release embeds (its build stage's Rust is rust-version:
-# rust-toolchain.toml stays out, so that it does not pick an installer's
-# toolchain).
+# and build.rs embeds the build identifier.
 # The integration tests are listed below instead of one binary per tests/*.rs
 # file (ADR-0078).
 autotests = false
-include = ["/build.rs", "/src/**", "/migrations/**", "/plugins/claude-dagq/skills/dagq/reference/kpi.md", "/Cargo.toml", "/Cargo.lock", "/containers/broker/Containerfile", "/README.md", "/LICENSE"]
+include = ["/build.rs", "/src/**", "/migrations/**", "/plugins/claude-dagq/skills/dagq/reference/kpi.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
-# The broker's protocol only, for its tokens: no HTTP stack (ADR-t827-1).
-dagq-broker-protocol = { version = "=0.4.0-dev", path = "crates/dagq-broker-protocol" }
 getrandom = "0.4"
 libc = "0.2"
 rusqlite = { version = "0.40", features = ["backup", "bundled", "functions", "hooks"] }
@@ -45,18 +40,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 uuid = { version = "1.20", features = ["v4"] }
 
-# The build identifier's rule (build_id), shared with the broker's binaries
-# so the three of a checkout name the same build (ADR-t827-1).
-[build-dependencies]
-dagq-broker-protocol = { version = "=0.4.0-dev", path = "crates/dagq-broker-protocol" }
-
 [dev-dependencies]
 tempfile = "3.25"
-# The broker's server and client, in process, for the tests of a run's
-# token only: dagq itself depends on the protocol alone (ADR-t827-1). Path
-# only, with no version, so `cargo publish` drops them.
-dagq-broker = { path = "crates/dagq-broker" }
-dagq-broker-client = { path = "crates/dagq-broker-client" }
 
 # One test binary for the integration tests (tests/it), so tests/common is
 # compiled and the binary linked once; e2e and plugin stay separate because

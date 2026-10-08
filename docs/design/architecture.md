@@ -74,16 +74,15 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
 業務の判断を持たせない（ADR-t1545-1決定1）。
 
 - IDと値: `domain::ids`・`domain::error`・`domain::reason`・`domain::views`・`domain::input`。
-- build識別子: `build_id`（`crates/dagq-broker-protocol`の再export）。
-  runtimeのcontextが使うのはI/Oを持たない識別子の規則と`named_commit`だけで、gitを呼ぶ`emit`・`compute`はbuild scriptの側（`src/lib.rs`のdoc comment）。
+- build識別子: `src/build_id.rs`（`build_id`）で、`build.rs`と共有する。
+  domainと同じ扱いで、domainとapplicationが参照してよい（L1・L3の例外）。
+  使ってよいのはI/Oを持たない識別子の規則と`named_commit`だけで、gitを呼ぶ`emit`・`compute`はbuild scriptの側（`src/lib.rs`のdoc comment）。
 - 時刻とID生成: `application::ports`の`Clock`（壁時計と単調時計）・`IdGenerator`、実装は`infrastructure::clock`。
 - eventの記録: `RunLog::record_runtime_event`・`record_queue_event`と種類の`domain::event_kind::EventKind`。
 - 人への問い合わせ: `asks`表と`AskStore`（`infrastructure::asks`）。
   askを開くのと、answerを自分の状態に適用するのは、そのaskの`kind`を持つcontextが行う（例: `worker_question`は実行と着地、`plan_review`は計画管理、`update`はhost運用）。
 - actorと認可: `domain::actor`・`domain::actor_model`（headlessのjobの行き先の値を含む）・`domain::authorization`（[Authorization](authorization.md)）。
 - 名前・出力・共有の規則: `application::naming`、`tracing`のマクロ、`domain::write_rules`（表をまたぐ書き込みの規則）、`domain::language`。
-- `src/broker_material.rs`: brokerのimageの材料で`build.rs`と共有し、stdでファイルを読む。
-  host運用の中で`infrastructure::broker_image`が使う。
 - `src/migration_numbers.rs`: migrationのファイル名の規則で`build.rs`と共有するI/Oの無い関数。
   domainと同じ扱いで、applicationが参照してよい（L3の例外）。
 
@@ -196,21 +195,20 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 ## host運用
 
-runtime自身をhostで動かし続けること（up・down・install・自動更新・broker・queue service・compileの共有・diskの後始末・hostの計測・inbox）。
+runtime自身をhostで動かし続けること（up・down・install・自動更新・queue service・compileの共有・diskの後始末・hostの計測・inbox）。
 
 **所有する状態**
 
 - table: `supervisors`・`queue_repository`・`schema_floor`・`binary_updates`・`headless_jobs`。
-- ファイル: queueのdirの`service/`・`broker/`・`logs/`、launchdのplist、sccacheのserver。
-- eventの種類: `supervisor_*`・`update_*`・`release_check*`・`broker_*`・`queue_service_*`・`sccache_*`・後始末の`build_outputs_removed`・`scratchpad_removed`・`run_tmp_removed`・`inbox_*`・`backend_call_failed`・`headless_job_stopped`・`provider_executable_relocated`。
+- ファイル: queueのdirの`service/`・`logs/`、launchdのplist、sccacheのserver。
+- eventの種類: `supervisor_*`・`update_*`・`release_check*`・`queue_service_*`・`sccache_*`・後始末の`build_outputs_removed`・`scratchpad_removed`・`run_tmp_removed`・`inbox_*`・`backend_call_failed`・`headless_job_stopped`・`provider_executable_relocated`。
 
-**判断**（domain）: `domain::broker`・`disk`・`sccache`・`release_update`・`queue_service`・`host_metrics`ほか。
+**判断**（domain）: `disk`・`sccache`・`release_update`・`queue_service`・`host_metrics`ほか。
 
 **操作**
 
-- application: `application::lifecycle`（`up`・`down`）・`install`・`update`・`broker`系・`queue_service`・`sccache`・`actor_executor`・`execution`ほかと、`application::supervise`の同名のsubmoduleと`disk`・`cleanup`・`sweep`・`handoff`・`inbox_nudge`。
-- infrastructure: `launchd`・`binaries`・`broker_*`・`queue_service`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`のsupervisorの登録と引き継ぎの部分。
-  `crates/`のbrokerのcrateもこのcontext。
+- application: `application::lifecycle`（`up`・`down`）・`install`・`update`・`queue_service`・`sccache`・`actor_executor`・`execution`ほかと、`application::supervise`の同名のsubmoduleと`disk`・`cleanup`・`sweep`・`handoff`・`inbox_nudge`。
+- infrastructure: `launchd`・`binaries`・`queue_service`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`のsupervisorの登録と引き継ぎの部分。
 
 **公開するport**
 
@@ -237,8 +235,6 @@ cmuxを使うのはinboxだけ（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is
 **許す依存の向き**
 
 - 他のcontextのuse caseを起動・停止してよいが、他のcontextの状態は公開したportで変える。
-- brokerのcrateはrootの`dagq`のcrateに依存しない（`dagq-broker-protocol`だけを共有する）。
-  撤去予定（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）。
 
 **境界をまたぐtransaction**: 無い。
 
@@ -288,12 +284,13 @@ contextを1つに決められず、分ける先を持つもの。
 
 - **L1** `src/domain`のコードはapplication・infrastructure・起動部分とレイヤーの外のmoduleを参照しない。
   `#[cfg(test)]`の中も同じ。
+  例外は共有の部品の`crate::build_id`（I/Oを持たない規則と`named_commit`）だけ。
   検査: script。
 - **L2** `src/domain`の本番のコード（`test=false`のビルドに残りうるコード）はDB・ファイル・process・network・時計・乱数のID・`anyhow`を参照しない（ADR-0013のAlternativesの機械化）。
   検査: script（禁止するpathの一覧はscriptが持つ）。
 - **L3** `src/application`のコードはinfrastructure・起動部分とレイヤーの外のmoduleを参照しない。
   `#[cfg(test)]`の中も同じ（testはapplicationのtest doubleを使う）。
-  例外は共有の部品の`crate::migration_numbers`だけ。
+  例外は共有の部品の`crate::migration_numbers`と`crate::build_id`だけ。
   検査: script。
 - **L4** `src/application`の本番のコードはDB・ファイル・外のcommand・壁時計・乱数のIDを直接使わず、portを通す。
   `#[cfg(test)]`の中でfixtureを作るファイル操作はよい。
@@ -307,6 +304,7 @@ contextを1つに決められず、分ける先を持つもの。
 - **L7** 起動部分（`src/compose.rs`とその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。
   検査: review（組み立てをcontextごとのmoduleに分けた後にscript）。
 - **L8** レイヤーの外のmodule（`view`）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。
+  `build.rs`と共有する`build_id`・`migration_numbers`はレイヤーの外のmoduleに数えず、共有の部品としてL1・L3が名指す例外の範囲で参照してよい。
   新しいmoduleをレイヤーの外に足さない。
   検査: script（L1・L3・L6として）とreview。
 

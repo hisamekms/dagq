@@ -464,8 +464,8 @@ mod tests {
         symlink(&data, dir.path().join("linked")).unwrap();
         let queue = dir.path().join("linked/queue");
         files.create_dir_all(&queue.join("runs/a")).unwrap();
-        files.create_dir_all(&queue.join("broker/tokens")).unwrap();
-        assert!(data.join("queue/broker/tokens").is_dir());
+        files.create_dir_all(&queue.join("host/samples")).unwrap();
+        assert!(data.join("queue/host/samples").is_dir());
         let binary = data.join("dagq-real");
         fs::write(&binary, b"binary").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
@@ -499,8 +499,8 @@ mod tests {
         assert_eq!(files.read_tail(&copy, 1024).unwrap(), b"binary");
     }
 
-    /// A host file reached through a link (an installed binary, a broker
-    /// client, a queue DB) is a file to the runtime, read and written
+    /// A host file reached through a link (an installed binary, a queue
+    /// DB) is a file to the runtime, read and written
     /// through the link as `std::fs` does; in a run directory the same
     /// link is not a file, is not read, and is replaced rather than
     /// written through.

@@ -18,7 +18,7 @@ use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS,
     LandingAnswer, ReasonCode, RunEvent, RunHistory, RunId, RunLease, RunProcess, RunStatus,
     SessionRole, SupervisorMode, SupervisorPulse, SupervisorRegistration, TaskId, TaskRun,
-    UPDATE_FAILED_OPTIONS, broker, event_attention, event_kind, heartbeat_stale,
+    UPDATE_FAILED_OPTIONS, event_attention, event_kind, heartbeat_stale,
     kpi::push::{KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS},
     queue_hold::{self, HoldJob},
     reason, recheck, run_attention, run_attention_of,
@@ -669,7 +669,7 @@ fn claim_spacing(
 /// `candidates`' `held` (ADR-t1992-1): `no_supervisor` while no registered
 /// supervisor is alive with a fresh heartbeat, then the latest record of
 /// each hold that is on (`claim_held` for the load, the disk or a queue
-/// hold, `broker_claims_held`, `run_env_program_missing`, `ci_watch_held`,
+/// hold, `run_env_program_missing`, `ci_watch_held`,
 /// `landing_branch_unresolved`) of a live
 /// supervisor or of none named, then each live
 /// supervisor's wait for its claim spacing. A hold no supervisor records
@@ -698,7 +698,6 @@ pub fn claim_holds(
     let claims = crate::domain::claim_hold::CLAIMS;
     let records = [
         on(&claims.kinds(), claims.held.as_str())?,
-        on(&broker::BROKER_CLAIMS_KINDS, broker::BROKER_CLAIMS_HELD)?,
         on(&RUN_ENV_PROGRAM_KINDS, RUN_ENV_PROGRAM_MISSING)?,
     ];
     let last_claim = queue.latest_event_of(event_kind::RUN_CLAIMED)?;
@@ -1445,48 +1444,6 @@ pub fn attention(
                 .map(truncate_reason),
             last_error_code: None,
             next: AttentionNext::FixPush,
-        });
-    }
-    // The queue's resource broker that could not start, or stays
-    // unhealthy after its restart, waits for a person until it runs again
-    // (ADR-t827-3 decision 3).
-    if let Some(event) = queue.latest_queue_event(&broker::BROKER_ATTENTION_KINDS)?
-        && broker::attention_stands(Some(event.kind.as_str()))
-    {
-        let reason = event.payload.get("reason").and_then(Value::as_str);
-        let message = event.payload.get("message").and_then(Value::as_str);
-        attention.push(Attention {
-            run_id: None,
-            task_id: None,
-            pid: None,
-            ask_id: None,
-            reason_category: None,
-            status: reason.unwrap_or("unhealthy").into(),
-            kind: broker::BROKER_UNHEALTHY.into(),
-            last_error: message.map(truncate_reason),
-            last_error_code: None,
-            next: AttentionNext::BrokerStatus,
-        });
-    }
-    // With `required`, the claims held for want of a usable broker wait
-    // for a person until they go on (ADR-t838-1): no worker runs without
-    // the broker's tools.
-    if let Some(event) = queue.latest_queue_event(&broker::BROKER_CLAIMS_KINDS)?
-        && event.kind == broker::BROKER_CLAIMS_HELD
-    {
-        let reason = event.payload.get("reason").and_then(Value::as_str);
-        let message = event.payload.get("message").and_then(Value::as_str);
-        attention.push(Attention {
-            run_id: None,
-            task_id: None,
-            pid: None,
-            ask_id: None,
-            reason_category: None,
-            status: reason.unwrap_or("held").into(),
-            kind: broker::BROKER_CLAIMS_HELD.into(),
-            last_error: message.map(truncate_reason),
-            last_error_code: None,
-            next: AttentionNext::BrokerStatus,
         });
     }
     // The queue service the supervisor could not keep running waits for a

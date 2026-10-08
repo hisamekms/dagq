@@ -36,7 +36,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 
 | 群 | capability | 対応するCLI |
 | --- | --- | --- |
-| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `doctor` `broker status` `broker logs` `broker audit` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `requests` `lint` `goal list/show` `observe --history` `observe --input` |
+| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `doctor` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `requests` `lint` `goal list/show` `observe --history` `observe --input` |
 | | `queue.watch` | `watch` |
 | | `ci.read` | `ci failures`（着地先のbranchで既に落ちているtestの一覧。[CI watch](supervisor-lifecycle/ci-watch.md)） |
 | | `queue.export` | `graph --out` `report`（ファイルを書く） |
@@ -67,7 +67,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 | schedulerの遷移 | `scheduler.supervise` | `supervise` |
 | | `run.recover` | `recover` |
 | | `workspace.cleanup` | `run close-workspaces`（終わったrunの残ったworkspaceの片付けだったが、runtimeがrunのworkspaceを開かなくなったので、認可の後に理由を示して拒む。[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)の決定3。認可はもとの[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定6・7のまま） |
-| | `service.lifecycle` | `up` `down` `broker start` `broker stop` |
+| | `service.lifecycle` | `up` `down` |
 | | `service.install` | `install` `auto-update` |
 | | `queue.admin` | `init` `migrate` `rebind` |
 | 着地 | `landing.request` | `integrate`（Integratorへの依頼。[ADR-t728-2](../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)） |
@@ -188,7 +188,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 | --- | --- | --- |
 | `init` `migrate`（`--check`を含む） `rebind` | `queue.admin` | queue |
 | `install` / `auto-update` | `service.install` | queue |
-| `up` `down` `broker start` `broker stop` `service start` `service stop` `service serve` | `service.lifecycle` | queue |
+| `up` `down` `service start` `service stop` `service serve` | `service.lifecycle` | queue |
 | `plan`（何も開かず、inboxへの依頼の案内を付けて拒む。ADR-t1394-1） | `planner.open` | queue |
 | `supervise` | `scheduler.supervise` | queue |
 | `observe`（`--history`・`--input`を除く） | `observe.run` | queue |
@@ -247,10 +247,10 @@ queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、�
 
 多層防御の1枚として、runtimeがClaude Codeの設定を書くactor（worker・planner・review job・inbox。[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）の`permissions.deny`に、roleのpolicyから作った規則を入れる（`src/application/execution.rs`の`permission_deny(role)`）。
 
-- `DAGQ_COMMANDS`はroleによって拒まれうる`dagq`のsubcommand（状態を変えるものと`watch`（`queue.watch`）・`report`（`queue.export`）・`ci failures`（`ci.read`））と、その形のどれかが要るcapabilityの表（`ready`は`task.ready`と`task.ready_bypass_review`、`ask`は`ask.open`・`finding.ask`・`ask.close`など）。roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む（例: workerは`Bash(dagq integrate:*)`・`Bash(dagq answer:*)`・`Bash(dagq ready:*)`・`Bash(dagq ask close:*)`、plannerは`integrate`・`answer`・`ready`・`recover`・`supervise`・`run screen`・`run send`・`planner screen`・`planner send`）。読み取りの形を持つcommand（`observe`は`--history`が読み取りなので`observe`ごと、`graph`）は表に入れない。表と`src/main.rs`の`requests`が食い違わないことはunit test（`the_denied_commands_need_what_the_table_says`）が確かめる。clapの全subcommand（`goal close`のような入れ子を含む。`DAGQ_COMMANDS`の親の項目（`dependency`）はその下を覆い、subcommandを必ず取る親（`goal`・`finding`・`proposal`）は自分の項目が要らない。自分の形を持つ親（`ask`）は自分の項目が要る）が`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`（読み取り（`broker status`・`broker logs`・`broker audit`を含む）、読み取りの形を持つ`graph`・`observe`）のどちらかにあることもunit test（`every_subcommand_is_denied_or_left_out_on_purpose`）が確かめ、どちらにも無いsubcommandを足すと落ちる。roleによって拒まれうるsubcommandを足したら、読み取りの形を持つものを除いて表に入れる。
+- `DAGQ_COMMANDS`はroleによって拒まれうる`dagq`のsubcommand（状態を変えるものと`watch`（`queue.watch`）・`report`（`queue.export`）・`ci failures`（`ci.read`））と、その形のどれかが要るcapabilityの表（`ready`は`task.ready`と`task.ready_bypass_review`、`ask`は`ask.open`・`finding.ask`・`ask.close`など）。roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む（例: workerは`Bash(dagq integrate:*)`・`Bash(dagq answer:*)`・`Bash(dagq ready:*)`・`Bash(dagq ask close:*)`、plannerは`integrate`・`answer`・`ready`・`recover`・`supervise`・`run screen`・`run send`・`planner screen`・`planner send`）。読み取りの形を持つcommand（`observe`は`--history`が読み取りなので`observe`ごと、`graph`）は表に入れない。表と`src/main.rs`の`requests`が食い違わないことはunit test（`the_denied_commands_need_what_the_table_says`）が確かめる。clapの全subcommand（`goal close`のような入れ子を含む。`DAGQ_COMMANDS`の親の項目（`dependency`）はその下を覆い、subcommandを必ず取る親（`goal`・`finding`・`proposal`）は自分の項目が要らない。自分の形を持つ親（`ask`）は自分の項目が要る）が`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`（読み取り、読み取りの形を持つ`graph`・`observe`）のどちらかにあることもunit test（`every_subcommand_is_denied_or_left_out_on_purpose`）が確かめ、どちらにも無いsubcommandを足すと落ちる。roleによって拒まれうるsubcommandを足したら、読み取りの形を持つものを除いて表に入れる。
 - actorを名指す変数（`DAGQ_ROLE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`）の書き換え（`<名前>=...`・`export`・`env <名前>=`・`env -u`・`unset`）も全roleで拒む。
 - inboxとplannerには最後に`Bash(cmux:*)`（`RAW_CMUX_DENIED`、`RAW_CMUX_DENIED_ROLES`）も足す（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。workerとjobには足さない（決定7）。
-- workerとplannerのsession・turnの設定とreview jobの設定では、`SIGNAL_BY_NAME_DENIED`（`pkill`・`killall`）の後に置く（turnの設定（`claude-headless-settings.json`）ではその間に`AskUserQuestion`と予約の道具（`PRINT_MODE_DENIED_TOOLS`）を挟む。[非対話のworker](supervisor-lifecycle/headless-worker.md)。`[broker] mode = "required"`のrunのturnでは、それらの後に組み込みのファイルの道具（`BROKER_REQUIRED_DENIED_TOOLS`: `Read`・`Edit`・`Write`・`MultiEdit`・`NotebookEdit`・`Glob`・`Grep`・`LS`）を挟み、`permissions.allow`に`mcp__dagq-broker`と`Bash(dagq:*)`を置き、permission modeを`dontAsk`にする。`Bash`はdenyに入れない（denyがallowに勝ち、workerの`dagq ask`まで拒むため）。これもguardrailで、[Broker](broker.md#required)。review jobの設定はroleの規則だけ）。inboxの設定（`up`が書く`claude-inbox-settings.json`、[`up` / `down`](supervisor-lifecycle/up-down.md)）は`permissions.deny`だけで、roleの規則だけを持ち、`SIGNAL_BY_NAME_DENIED`は入れない。
+- workerとplannerのsession・turnの設定とreview jobの設定では、`SIGNAL_BY_NAME_DENIED`（`pkill`・`killall`）の後に置く（turnの設定（`claude-headless-settings.json`）ではその間に`AskUserQuestion`と予約の道具（`PRINT_MODE_DENIED_TOOLS`）を挟む。[非対話のworker](supervisor-lifecycle/headless-worker.md)。review jobの設定はroleの規則だけ）。inboxの設定（`up`が書く`claude-inbox-settings.json`、[`up` / `down`](supervisor-lifecycle/up-down.md)）は`permissions.deny`だけで、roleの規則だけを持ち、`SIGNAL_BY_NAME_DENIED`は入れない。
 
 これはguardrailでenforcementではない。Claude Codeの規則はコマンドの先頭の形しか見ないので、pathで打つ`~/.local/bin/dagq integrate`、pluginのskillが使う`"$DAGQ" ...`や`${CLAUDE_PLUGIN_ROOT}/bin/dagq ...`、subcommandの前にglobalのflagを置く`dagq --db X integrate`、`sh -c`、scriptの中からの呼び出しは通る。拒む判定はCLIの`Authorizer`（上の「適用の範囲」）がする。どちらもhostではadvisoryで、隔離は将来のsandboxのbackend（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）が担う。
 

@@ -885,8 +885,6 @@ pub mod agent_eval;
 pub mod areas;
 pub mod authorization;
 pub mod background_wrapper;
-pub mod broker;
-pub mod broker_usage;
 pub mod build_wait;
 pub mod change;
 pub mod ci_watch;
@@ -1987,15 +1985,6 @@ pub enum AttentionNext {
     /// a person fixes the command or the service behind it. It ends with
     /// the next push that succeeds.
     FixPush,
-    /// The supervisor could not start the queue's resource broker, or its
-    /// health failed again after the restart (`broker_unhealthy`,
-    /// ADR-t827-3 decision 3): a person reads `dagq broker status` and
-    /// fixes what it names (a machine of theirs running, say). It ends once
-    /// the broker runs again. With `required`, the claims the supervisor
-    /// held because no worker could be given the broker's tools
-    /// (`broker_claims_held`, ADR-t838-1) are the same: it ends once the
-    /// claims go on (`broker_claims_resumed`).
-    BrokerStatus,
     /// The supervisor could not keep the queue service running (it did not
     /// start again within its limit, `queue_service_down`, ADR-t1233-4
     /// decision 3): a person reads `dagq service status` and the service's
@@ -2077,7 +2066,6 @@ impl fmt::Display for AttentionNext {
             Self::CheckReview => f.write_str("check the failed review"),
             Self::CheckObserver => f.write_str("check the failed observer"),
             Self::FixPush => f.write_str("fix the push command"),
-            Self::BrokerStatus => f.write_str("dagq broker status"),
             Self::QueueServiceStatus => f.write_str("dagq service status"),
             Self::CheckE2e => f.write_str("check the e2e host"),
             Self::ExitSession => f.write_str("exit the session"),
@@ -2130,8 +2118,6 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::THROUGHPUT_REVIEW_FINISHED,
     event_kind::OBSERVE_FINISHED,
     kpi::push::KPI_PUSH_ABANDONED,
-    broker::BROKER_UNHEALTHY,
-    broker::BROKER_CLAIMS_HELD,
     queue_service::QUEUE_SERVICE_DOWN,
     "ask_opened",
     "ask_answered",
@@ -2383,9 +2369,6 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
             Some(AttentionNext::CheckObserver)
         }
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
-        (broker::BROKER_UNHEALTHY | broker::BROKER_CLAIMS_HELD, _) => {
-            Some(AttentionNext::BrokerStatus)
-        }
         (queue_service::QUEUE_SERVICE_DOWN, _) => Some(AttentionNext::QueueServiceStatus),
         (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
             Some(AttentionNext::ExitSession)
@@ -3514,17 +3497,11 @@ mod attention_tests {
                 Some(FixPush),
             ),
             ("kpi_push_failed", json!({"attempt": 1}), None),
-            (
-                "broker_unhealthy",
-                json!({"reason": "machine_busy"}),
-                Some(BrokerStatus),
-            ),
+            // A queue's events of the removed resource broker are read but
+            // ask nothing of anyone (ADR-t2125-1).
+            ("broker_unhealthy", json!({"reason": "machine_busy"}), None),
             ("broker_healthy", json!({}), None),
-            (
-                "broker_claims_held",
-                json!({"reason": "not_ready"}),
-                Some(BrokerStatus),
-            ),
+            ("broker_claims_held", json!({"reason": "not_ready"}), None),
             ("broker_claims_resumed", json!({}), None),
             (
                 "queue_service_down",
@@ -3871,7 +3848,6 @@ mod attention_tests {
         assert_eq!(CheckReview.to_string(), "check the failed review");
         assert_eq!(CheckObserver.to_string(), "check the failed observer");
         assert_eq!(FixPush.to_string(), "fix the push command");
-        assert_eq!(BrokerStatus.to_string(), "dagq broker status");
         assert_eq!(QueueServiceStatus.to_string(), "dagq service status");
         assert_eq!(DecideDraft.to_string(), "request a plan for the draft");
         assert_eq!(DecideFinding.to_string(), "request a plan for the finding");

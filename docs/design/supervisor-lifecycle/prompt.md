@@ -109,7 +109,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   どこにも無いもの（兄弟task、taskの記述の切った残り、引き継いだrunのreceiptのsummaryと人が引き継いだ理由の切った残り）は読む方法が無いと書く。
   taskのtitle・description・acceptance・verification commands・pathsは省かず、自分の上限を超えたときだけ切って`over_limit`に書く。
   上限に当たらない入力では節は全文のまま載り、省いたことの注記は載らない。
-- 記録: claimのprovisionが`PromptBytes`（言語の指示とresource brokerの文を含む）を、workerの最初のturnを始める`wrapper_launched`の`prompt_bytes`に記録する。
+- 記録: claimのprovisionが`PromptBytes`（言語の指示を含む）を、workerの最初のturnを始める`wrapper_launched`の`prompt_bytes`に記録する。
   providerの切り替えで書き直した`prompt.txt`は記録しない。
 - 落とし穴: 兄弟taskの一覧はclaimの順で非対称になる（同じpassで後にclaimしたtaskだけが先のtaskを知る）。
   理由は`siblings_in_progress`のdoc comment。
@@ -171,7 +171,7 @@ claimのたびに、supervisorはworkerが読む指示の内容のhashを3つ求
 - promptの雛形: taskとrunの値の代わりにplaceholderを入れたworkerのpromptで、providerごとに1つある（`worker_template`）。
   節の見出しと定型の文とproviderで変わる行が対象で、定型の文を変えるとhashが変わり、taskの値では変わらない。
   taskの値を差し込んだ後のpromptは、taskごとに違って層にならないので対象にしない。
-  言語の指示、resource brokerのqueueだけが足す文、resume・reviseなどの依頼も対象にしない。
+  言語の指示とresume・reviseなどの依頼も対象にしない。
 - plugin: ClaudeのworkerがClaude Codeから読むdagqのpluginのファイルの内容（`infrastructure::adapters::worker_plugin_hash`）。
   Codexのworkerにはpluginを渡さないので`none`にする。
 - repositoryの指示の文書: runのbaseのcommitでの`AGENTS.md`・`CLAUDE.md`・`docs/development/`の内容（`domain::instructions::REPOSITORY_INSTRUCTIONS`）。

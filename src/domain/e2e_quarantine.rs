@@ -32,7 +32,7 @@ pub const FAILURES_IN_A_ROW: usize = 3;
 /// One mark of the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mark {
-    /// The e2e test's name as cargo prints it (`broker::…` for a test of a
+    /// The e2e test's name as cargo prints it (`headless::…` for a test of a
     /// module under `tests/e2e/`).
     pub name: String,
     pub reason: String,
@@ -401,12 +401,12 @@ mod tests {
 
     #[test]
     fn the_marks_are_read_with_their_fields() {
-        let text = "# the marks\n\n[[test]]  # one\nname = \"broker::lands\"  # its name\n\
+        let text = "# the marks\n\n[[test]]  # one\nname = \"headless::lands\"  # its name\n\
 reason = 'a \"quoted\" reason'\ntask = 1120\nuntil = 2026-10-15 # the day\n\n[[test]]\n\
 name = \"b\"\nreason = \"x\\ty\"\ntask = 3\nuntil = \"2024-02-29\"\n";
         let marks = parse(text).unwrap();
         assert_eq!(marks.len(), 2);
-        assert_eq!(marks[0].name, "broker::lands");
+        assert_eq!(marks[0].name, "headless::lands");
         assert_eq!(marks[0].reason, "a \"quoted\" reason");
         assert_eq!(marks[0].task, 1120);
         assert_eq!(marks[0].until, "2026-10-15");
@@ -415,7 +415,7 @@ name = \"b\"\nreason = \"x\\ty\"\ntask = 3\nuntil = \"2024-02-29\"\n";
         assert_eq!(marks[1].until, "2024-02-29");
         assert_eq!(
             marks[0].to_json(),
-            json!({"name": "broker::lands", "reason": "a \"quoted\" reason", "task": 1120, "until": "2026-10-15"})
+            json!({"name": "headless::lands", "reason": "a \"quoted\" reason", "task": 1120, "until": "2026-10-15"})
         );
         assert_eq!(parse("").unwrap(), []);
         assert_eq!(

@@ -108,7 +108,6 @@ supervisor
 - 答え・revise・resume・催促のどれも`deliver::submit`が`request_turn`で`turns/`に書く。
   画面の読み取り、入力欄の確認、Enterの送り直し、ダイアログの応答は無い。
 - idle markerは`Stop`の形で書くので、最初のsession・revise・resume・[待ち](waiting.md)の見張りはidle markerとreceiptとaskをそのまま読む。
-  brokerの道具を渡したrunのturnだけ、組み込みの道具を数える`PreToolUse`のhookが付く（[Broker](../broker.md#組み込みの道具の数)）。
 - 終了はどれも終了の依頼になる（reviewのpassの後、resumeの終わり、黙ったwrapper、`stalled`のaskへの`stop`）。
   wrapperは走っているturnを止めてexit code 0で終わり、残っていれば下の「停止」で止める。
 
@@ -125,7 +124,6 @@ supervisor
 - runtimeのplannerのwrapperは、壁（ログイン切れ・利用上限・起動の失敗）で終わったturnの後は`provider retry`を先に取り、待っていた依頼をその後に取る（`request_to_take`）。
   workerのwrapperは順番を変えない。
 - turnの設定（`claude-headless-settings.json`）は`turn_command`がturnのたびに書く。
-  `[broker] mode = "required"`のrunは別の組の設定になる（[Broker](../broker.md#required)）。
   plannerのturnも同じ設定を使い、拒否はactorのroleのもの。
 
 run dirのI/Oの約束と落とし穴:

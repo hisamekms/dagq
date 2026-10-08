@@ -104,7 +104,6 @@ use crate::domain::{
 
 mod adopt;
 mod background;
-mod broker;
 mod ci_watch;
 mod claim_defer;
 mod cleanup;
@@ -154,8 +153,6 @@ mod waiting;
 pub(crate) use self::background::{
     left_planner_turn, left_turn, stop_left_turn, stop_run_session, stop_session,
 };
-use self::broker::broker_refused;
-pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub use self::ci_watch::{CiSourceMaker, CiWatchFile, CiWatchPort};
 pub use self::claim_defer::read_conflicts_at_start;
 pub(crate) use self::deliver::{Input, Submission};
@@ -473,12 +470,6 @@ pub struct Ports<'a> {
     /// Records the host's load under `<queue dir>/host/` (task 516);
     /// `None` records none.
     pub host_metrics: Option<HostMetricsPort>,
-    /// Keeps the queue's resource broker (ADR-t827-3 decision 2); `None`
-    /// for the mode `disabled`, which calls no podman.
-    pub broker: Option<BrokerPort>,
-    /// With the mode `disabled` only: the runs' tokens an earlier mode
-    /// left, revoked with no podman (task 1125); `None` otherwise.
-    pub broker_leftovers: Option<Arc<dyn crate::application::broker_run::RunTokens>>,
     /// Keeps the queue's service running (ADR-t1233-4 decision 2); `None`
     /// keeps none and holds nothing for it (a `--once` pass, the tests).
     pub queue_service: Option<QueueServicePort>,
@@ -964,9 +955,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         release: release::ReleaseWatch::default(),
         host_metrics_port: ports.host_metrics.clone(),
         host_metrics: host_metrics::HostMetricsWatch::default(),
-        broker_port: ports.broker.clone(),
-        broker_leftovers: ports.broker_leftovers.clone(),
-        broker: broker::BrokerWatch::default(),
         queue_service_port: ports.queue_service.clone(),
         queue_service: queue_service::QueueServiceWatch::default(),
         push: push::PushWatch::default(),
@@ -1037,8 +1025,8 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   landing read it through `ci_watch_held` and `ci_watch_unreadable`.
 /// - host operation: the registration and handoff (`token`, `heartbeat`,
 ///   `supervisor_file`, `supervisor_error`, `exec`, `handoff`, `draining`,
-///   `stop_recorded`), the queue service, the update, the release, the
-///   broker, sccache, the disk and its cleanup, the sweep, the host's load
+///   `stop_recorded`), the queue service, the update, the release,
+///   sccache, the disk and its cleanup, the sweep, the host's load
 ///   and metrics, `service_access`, `no_claude` and `sessions`.
 struct Supervisor<'a> {
     no_claude: bool,
@@ -1252,12 +1240,6 @@ struct Supervisor<'a> {
     host_metrics_port: Option<HostMetricsPort>,
     /// The sample job of the host's load.
     host_metrics: host_metrics::HostMetricsWatch,
-    /// Keeps the queue's broker; `None` for the mode `disabled`.
-    broker_port: Option<BrokerPort>,
-    /// The tokens a `disabled` supervisor revokes (task 1125).
-    broker_leftovers: Option<Arc<dyn crate::application::broker_run::RunTokens>>,
-    /// The broker's job and what the supervisor knows of it.
-    broker: broker::BrokerWatch,
     /// Keeps the queue's service; `None` keeps none.
     queue_service_port: Option<QueueServicePort>,
     /// What the supervisor knows of the queue's service.
@@ -1502,9 +1484,6 @@ impl Supervisor<'_> {
             self.stop_throughput_review("with the supervisor");
         }
         if self.exec.is_none() && self.heartbeat.check().is_ok() {
-            // The tokens of the runs that ended in the last pass are revoked
-            // before the supervisor goes.
-            self.broker_sweep();
             // The mark of the stop (ADR-0051 decision 10); an exec leaves it
             // to the next process's handoff mark.
             let stopped = json!({
@@ -1523,9 +1502,8 @@ impl Supervisor<'_> {
                 warn!(error = %format_args!("{error:#}"), "supervisor registration could not be removed: {error:#}");
             }
             // After the deregistration, so the last of the supervisors a
-            // `down` stops sees no other one left (ADR-t827-3 decision 2).
+            // `down` stops sees no other one left.
             if result.is_ok() && options.stop.load(Ordering::SeqCst) {
-                self.stop_broker_after_down();
                 // The queue service after the supervisor (ADR-t1233-4
                 // decision 1).
                 self.stop_queue_service_after_down();
@@ -1683,7 +1661,6 @@ impl Supervisor<'_> {
                         && !self.host_metrics.running()
                         && !self.forecast.running()
                         && !self.release.running()
-                        && !self.broker.running()
                         && !self.ci.running()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
@@ -1724,10 +1701,6 @@ impl Supervisor<'_> {
                     }
                     if self.handoff.is_some() {
                         self.draining = true;
-                        // A broker job in progress is reaped, none started: an
-                        // exec would orphan its podman command.
-                        self.broker_pass(false);
-                        self.broker_sweep();
                         self.poll_observer();
                         let unusable = self.reap_throughput_reviews(options);
                         self.hold_timer_jobs(unusable);
@@ -1748,13 +1721,6 @@ impl Supervisor<'_> {
                     }
                 }
             }
-            // Before the claims, off the loop: the broker made ready or its
-            // health looked at (ADR-t827-3 decision 2). No claim waits for
-            // it.
-            self.broker_pass(!stopping && self.claiming);
-            // The tokens of the runs that ended are revoked, before a claim
-            // can issue one.
-            self.broker_sweep();
             // The queue service looked at, started again or replaced
             // (ADR-t1233-4 decision 2); while it is down no new run and no
             // queue's job starts.
@@ -1895,10 +1861,6 @@ impl Supervisor<'_> {
             warn!(error = %format_args!("{error:#}"), "a run recovered from its landing could not start its review: {error:#}");
         }
         self.apply_triage_answers()?;
-        // With `[broker] mode = "required"`, no worker starts while none
-        // could be given the broker's tools: the claims and the resumes
-        // wait for it (ADR-t838-1).
-        let broker_held = self.broker_holds_claims();
         // Resumes and triage read the landing branch: they wait with the
         // claims until it resolves (ADR-t615-1). A resumed session gets
         // `[run.env]` like a claimed run, so it waits with the claims for a
@@ -1907,7 +1869,6 @@ impl Supervisor<'_> {
             && !self.landing_unresolved
             && !self.run_env_missing
             && !self.ci_watch_held()
-            && !broker_held
         {
             self.resume_candidates()?
         } else {
@@ -1961,7 +1922,7 @@ impl Supervisor<'_> {
         // (ADR-t1233-4 decision 2).
         let mut claims = None;
         // Nor while the CI cannot be read (ADR-t1920-1 decision 2).
-        if !(self.run_env_missing || self.ci_watch_held() || self.landing_unresolved || broker_held)
+        if !(self.run_env_missing || self.ci_watch_held() || self.landing_unresolved)
             && self.service_up
         {
             // The runs in flight go on; only new claims wait (task 327).
@@ -2196,15 +2157,6 @@ impl Supervisor<'_> {
                 Ok(watch) => {
                     let run = self.queue.run(run.id())?;
                     self.slots.push(Slot::new(run, Phase::Session(watch)));
-                }
-                // `required` refused the run's worker without the broker's
-                // tools (ADR-t838-1): the run fails, and the claims wait
-                // for the broker rather than stop.
-                Err(error) if broker_refused(&error) => {
-                    let message = format!("run {} was not started: {error:#}", run.id());
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{message}");
-                    self.abandon(&run, message, &reason_of_error(&error, ReasonCode::Other));
-                    return Ok(ClaimStep::Stop);
                 }
                 Err(error) => {
                     let message = format!("run {} provisioning failed: {error:#}", run.id());

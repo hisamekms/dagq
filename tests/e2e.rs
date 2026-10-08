@@ -18,8 +18,6 @@
 //! now under ADR-t1582-1 (see the last paragraph).
 //!
 //! ADR-t1582-1 keeps one case, and the helpers only it uses, out under `#[cfg(any())]`.
-#[path = "e2e/broker.rs"]
-mod broker;
 #[path = "e2e/cleanup.rs"]
 mod cleanup;
 mod common;

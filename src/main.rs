@@ -62,9 +62,8 @@ enum Command {
     /// rename that keeps the old one as <name>.previous, and ask the supervisor to exec it. A
     /// failed handoff puts the old binary back.
     Install {
-        /// A checkout to build (`cargo build --release --locked -p dagq -p dagq-broker-client`), or a
-        /// built binary; the dagq-broker-client beside it goes in place beside dagq. Default: build
-        /// the main checkout of the repository of the working directory.
+        /// A checkout to build (`cargo build --release --locked -p dagq`), or a built binary.
+        /// Default: build the main checkout of the repository of the working directory.
         #[arg(long, conflicts_with_all = ["rollback", "release"])]
         from: Option<PathBuf>,
         /// Install a release of crates.io instead (ADR-t618-1): `cargo install --locked
@@ -742,8 +741,7 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         update_interval: u64,
         /// A shell command the automatic update runs in place of `cargo build --release --locked -p
-        /// dagq -p dagq-broker-client` (tests); it must leave the binary at
-        /// $CARGO_TARGET_DIR/release/dagq (and the client beside it, when there is one).
+        /// dagq` (tests); it must leave the binary at $CARGO_TARGET_DIR/release/dagq.
         #[arg(long, hide = true)]
         update_build_command: Option<String>,
         /// A shell command the automatic update runs in place of its e2e gate (`cargo test --locked
@@ -1400,11 +1398,6 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
-    /// The queue's resource broker in dagq's own Podman machine: status, start, stop.
-    Broker {
-        #[command(subcommand)]
-        command: BrokerCommand,
-    },
     /// The queue service: the host process that opens the queue for the callers given its
     /// socket and a token, with use cases (ask, show, note) authorized on its side. `up` starts
     /// it before the supervisor, the supervisor starts it again, and `down` stops it.
@@ -1642,67 +1635,6 @@ enum ServiceCommand {
         /// Accepted from registered command lines and ignored: the service calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
-    },
-}
-
-#[derive(Subcommand, Clone)]
-enum BrokerCommand {
-    /// Report dagq's Podman machine, the broker's image, the queue's container and its health on
-    /// 127.0.0.1, without changing anything.
-    Status {
-        /// podman executable; defaults to podman on PATH.
-        #[arg(long)]
-        podman: Option<PathBuf>,
-    },
-    /// Make the queue's broker run: init and start dagq's own Podman machine with the fewest
-    /// resources when needed (never another machine), build the image from the material this
-    /// binary embeds when missing (never a checkout's files), run the
-    /// container publishing on 127.0.0.1 only, and wait for its health. Idempotent.
-    Start {
-        /// Port on 127.0.0.1; defaults to the queue's last one, else a free one.
-        #[arg(long)]
-        port: Option<u16>,
-        /// podman executable; defaults to podman on PATH.
-        #[arg(long)]
-        podman: Option<PathBuf>,
-    },
-    /// Stop the queue's broker container, then dagq's machine when no container runs on it.
-    Stop {
-        /// podman executable; defaults to podman on PATH.
-        #[arg(long)]
-        podman: Option<PathBuf>,
-    },
-    /// Print the tail of the queue's broker container's podman logs as {"container", "tail",
-    /// "stdout", "stderr"}. Reads only: starts no machine and makes no container, and fails
-    /// with podman_missing, machine_missing, machine_stopped or container_missing instead.
-    Logs {
-        /// Lines from the end.
-        #[arg(long, default_value_t = dagq::application::broker_admin::DEFAULT_LOG_TAIL)]
-        tail: u32,
-        /// podman executable; defaults to podman on PATH.
-        #[arg(long)]
-        podman: Option<PathBuf>,
-    },
-    /// Print the broker's audit lines (<queue dir>/broker/audit/<YYYY-MM-DD>.jsonl, UTC) oldest
-    /// first as {"entries", "skipped", "dropped"}: each entry is the line as the broker wrote
-    /// it, skipped counts broken or cut lines, dropped the older matches past --limit. Reads the
-    /// files only; the queue DB is not touched.
-    Audit {
-        /// Only this run's lines.
-        #[arg(long)]
-        run: Option<String>,
-        /// Only this task's lines.
-        #[arg(long)]
-        task: Option<u64>,
-        /// Only lines at or after this UTC time (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS[.fff]Z).
-        #[arg(long)]
-        since: Option<String>,
-        /// Only lines before this UTC time.
-        #[arg(long)]
-        until: Option<String>,
-        /// The latest lines kept.
-        #[arg(long, default_value_t = dagq::application::broker_admin::DEFAULT_AUDIT_LIMIT)]
-        limit: usize,
     },
 }
 
@@ -2056,10 +1988,6 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Kpi { .. }
         | Command::Forecast { .. }
         | Command::Doctor { .. }
-        | Command::Broker {
-            command:
-                BrokerCommand::Status { .. } | BrokerCommand::Logs { .. } | BrokerCommand::Audit { .. },
-        }
         | Command::Service {
             command: ServiceCommand::Status,
         }
@@ -2090,9 +2018,6 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::ReleaseUpdate { .. }
         | Command::Up { .. }
         | Command::Down { .. }
-        | Command::Broker {
-            command: BrokerCommand::Start { .. } | BrokerCommand::Stop { .. },
-        }
         | Command::Service {
             command:
                 ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
@@ -2280,9 +2205,6 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         Command::AutoUpdate { .. } | Command::ReleaseUpdate { .. } => Operation::AutoUpdate,
         Command::Up { .. } => Operation::Up,
         Command::Down { .. } => Operation::Down,
-        Command::Broker {
-            command: BrokerCommand::Start { .. } | BrokerCommand::Stop { .. },
-        } => Operation::Broker,
         Command::Service {
             command:
                 ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
@@ -2493,10 +2415,6 @@ impl dagq::application::commands::DenialLog for CommandDenials<'_> {
 /// (`denied`: the role, the capability and why), and keeps the message the
 /// observer and the headless jobs always got.
 fn error_json(error: &anyhow::Error) -> Value {
-    // A broker step's failure carries its code (ADR-t827-3).
-    if let Some(failure) = error.downcast_ref::<dagq::application::broker::BrokerFailure>() {
-        return json!({"error": format!("{error:#}"), "broker": failure.to_json()});
-    }
     // A client-mode dagq's failure carries the service's code or its own
     // (goal 82's stage (3)).
     if let Some(failure) =
@@ -3028,13 +2946,6 @@ fn execute(cli: Cli) -> Result<Value> {
             Source::Checkout(checkout)
                 if !skip_e2e && dagq::infrastructure::adapters::is_dagq_source(checkout) =>
             {
-                // A command in place of the e2e (tests) has no broker's
-                // e2e: the host's podman is not checked for it
-                // (ADR-t1162-1).
-                let podman = match &e2e_command {
-                    Some(_) => None,
-                    None => Some(dagq::infrastructure::e2e_gate::podman_check()?),
-                };
                 E2eGate::Run(E2eSettings {
                     command: e2e_command,
                     timeout: Duration::from_secs(e2e_timeout),
@@ -3045,7 +2956,6 @@ fn execute(cli: Cli) -> Result<Value> {
                     log: location
                         .log_dir
                         .join(format!("install-{}.e2e.log", generators.clock.now())),
-                    podman,
                     utc_offset_secs: dagq::infrastructure::clock::local_utc_offset(
                         generators.clock.now(),
                     ),
@@ -3113,7 +3023,7 @@ fn execute(cli: Cli) -> Result<Value> {
     {
         return dagq::compose::ci_failures(&db, task.map(TaskId::new));
     }
-    // The broker's container needs no queue state, only its paths.
+    // The queue service needs no queue state, only its paths.
     if let Command::Service { command } = cli.command {
         return match command {
             ServiceCommand::Status => Ok(dagq::compose::queue_service_status(&db)),
@@ -3135,53 +3045,6 @@ fn execute(cli: Cli) -> Result<Value> {
                     }),
                 },
             ),
-        };
-    }
-    if let Command::Broker { command } = cli.command {
-        return match command {
-            BrokerCommand::Status { podman } => {
-                dagq::compose::broker_status(&location, podman.as_deref())
-            }
-            BrokerCommand::Start { port, podman } => dagq::compose::broker_start(
-                &location,
-                &dagq::compose::BrokerStartOptions {
-                    port,
-                    podman,
-                    cwd: cwd.clone(),
-                },
-            ),
-            BrokerCommand::Stop { podman } => {
-                dagq::compose::broker_stop(&location, podman.as_deref())
-            }
-            BrokerCommand::Logs { tail, podman } => {
-                dagq::compose::broker_logs(&location, podman.as_deref(), tail)
-            }
-            BrokerCommand::Audit {
-                run,
-                task,
-                since,
-                until,
-                limit,
-            } => {
-                let millis = |text: Option<String>| -> Result<Option<i64>> {
-                    text.map(|text| {
-                        let time = dagq::application::watch::event_time(&text)?;
-                        dagq::domain::stats::rfc3339_millis(&time)
-                            .with_context(|| format!("not a UTC time: {text}"))
-                    })
-                    .transpose()
-                };
-                dagq::compose::broker_audit(
-                    &location,
-                    &dagq::application::broker_admin::AuditQuery {
-                        run,
-                        task,
-                        since: millis(since)?,
-                        until: millis(until)?,
-                        limit: Some(limit),
-                    },
-                )
-            }
         };
     }
     // `watch` needs the live read-only file rather than a migrated snapshot.
@@ -3268,7 +3131,6 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Install { .. }
         | Command::Doctor { .. }
         | Command::Ci { .. }
-        | Command::Broker { .. }
         | Command::Service { .. } => {
             unreachable!()
         }
@@ -4772,11 +4634,9 @@ mod tests {
             ),
             ("up", &[]),
             ("down", &[]),
-            ("broker start", &[]),
             ("service start", &[]),
             ("service stop", &[]),
             ("service serve", &[]),
-            ("broker stop", &[]),
             ("plan", &[]),
             ("supervise", &[]),
             ("throughput-review", &[]),
@@ -5079,9 +4939,6 @@ mod tests {
         "kpi",
         "forecast",
         "doctor",
-        "broker status",
-        "broker logs",
-        "broker audit",
         "service status",
         // Forms that read: `graph` without `--out` and `observe --history` /
         // `--input`.

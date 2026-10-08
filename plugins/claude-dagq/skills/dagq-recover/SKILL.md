@@ -1,6 +1,6 @@
 ---
 name: dagq-recover
-description: What a person does by hand in a dagq queue, from the inbox or their own terminal, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or retry a failed push; carry out a stuck_exit, answer_prompt or stalled (intervene) answer with run screen / run send; bypass or resubmit a plan review; start, stop or update the runtime. Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "dagq broker status", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
+description: What a person does by hand in a dagq queue, from the inbox or their own terminal, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or retry a failed push; carry out a stuck_exit, answer_prompt or stalled (intervene) answer with run screen / run send; bypass or resubmit a plan review; start, stop or update the runtime. Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
 ---
 
 # dagq: what a person does by hand
@@ -64,7 +64,3 @@ Only plan review makes a task `ready`. A person may skip it with `"$DAGQ" ready 
 Attention `plan review by hand` (`plan_review_failed`): a proposal's headless plan review failed; it stays `submitted` and held. `check the planner` (`planner_unresponsive`): the person looks at that planner (`planner log ID`). What to read and the person's choices: `reference/plan-review-by-hand.md`.
 
 Attention `goal review by hand` (`goal_review_failed`): a goal review job failed; `reference/goal-review-by-hand.md`.
-
-## 9. The resource broker
-
-Attention `dagq broker status` (`broker_unhealthy`, or `broker_claims_held` under mode `required`, which claims nothing meanwhile) clears by itself. Diagnose with `"$DAGQ" broker status`; what each code asks of the person (podman, dagq's Podman machine, `broker stop` / `broker start`), lowering a host to `disabled`, and a run failed on a broker error: `reference/broker.md`.

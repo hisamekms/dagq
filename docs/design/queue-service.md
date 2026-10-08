@@ -30,7 +30,7 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 
 名前: この文書の「broker」はqueueのbroker（段(4)、未実装）のこと。
 queueのbrokerはserviceと同じ`up` / `down` / execの引き継ぎで動くhostのプロセスで、宛先はservice・`api.anthropic.com`・crates.ioに限る（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)ほか）。
-fs・process・git・packageを仲介するresource broker（[Resource broker](broker.md)）とは別。
+fs・process・git・packageを仲介するresource brokerは置かない（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）。
 
 ## 置き場所と形
 
@@ -143,7 +143,7 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 
 - `watch`（`queue.watch`。inboxのもの）、`report`と`graph --out`（`export.file`。ファイルを書く）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
 - `graph --format svg`: hostのd2を起動するので、serviceは読み取りとして受け取らない（`json`と`d2`は答える）。promptとskillはsvgを名指さない
-- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`・`broker status|logs|audit`・`planners`: 制御側の状態を見るもので、jobのpromptは名指さない。dagq skillは`doctor`を名指すが、AGENTS.mdはworkerの実queueでの`doctor`の確認を人かinboxに任せる。クライアントモードでは`locate`がDBのpathを出さずにsocketを答え、ほかは`no_use_case`で断る（[クライアントモード](#クライアントモード)）
+- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`・`planners`: 制御側の状態を見るもので、jobのpromptは名指さない。dagq skillは`doctor`を名指すが、AGENTS.mdはworkerの実queueでの`doctor`の確認を人かinboxに任せる。クライアントモードでは`locate`がDBのpathを出さずにsocketを答え、ほかは`no_use_case`で断る（[クライアントモード](#クライアントモード)）
 
 ## クライアントモード
 
@@ -152,7 +152,7 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5。`dagq`（`src/main.rs`の`exec
 - コマンドを引数のとおりに読んで（clapの検査はそのまま）、ユースケースとparamsに写す（`client_request`）。読み取りはCLIの読み取りと同じ`QueueRead`（`queue_read`）を`QueueRead::request`でparamsにし、`QueueRead::parse`がそれを同じ読み取りに読み戻す（cursorと`--compare`は`Cursor::text`・`CompareSpec::text`で読み戻せる文字列にする）。`show`・`note`・`ask`・`proposal list|show`・`finding record|resolve|dismiss`は上の表のparamsにする。`ask`と`stats`の`--cmux`は送らない（どちらもcmuxを使わない）。`finding record`の対象の無いものは`queue: true`
 - tokenは`DAGQ_SERVICE_CREDENTIAL_FILE`のfileから読み、要求ごとに送る。答えの`result`をCLIと同じに出す（`graph --format d2`の本文もそのまま）。答えを待つのは`CLIENT_TIMEOUT`（300秒）まで
 - 断り（終了コード1、stderrの`{"error": <message>, "queue_service": {"code": <code>}}`）: serviceの`authorization_denied`・`unauthenticated`・`bad_request`・`failed`・`api_version_mismatch`（答えの版がこのbinaryの版を含まないときもこれ）と、クライアントの`unreachable`（socketに答えるserviceが無い）・`no_credential`（tokenのfileが読めない）・`no_use_case`（serviceのユースケースでないコマンド）・`queue_named`（`--db`でqueueを名指した）。どの断りでもDBを開くことに戻らない（fail closed）
-- `no_use_case`になるもの: 計画系（`add`・`edit`・`submit`・`ready`・`goal add`など）・`answer`・`ask close`・`mark`・runtimeの操作（`up`・`integrate`・`review`・`recover`・`observe`（`--history`・`--input`を除く）・`session`など）・`watch`・`report`・`graph --out`・`doctor`・`service`・`broker`・`init`・`migrate`。段(2)が残した`doctor`（hostとDBのファイルの診断）はこれで断る。`locate`はserviceに送らずに、DBのpathを出さずに答える: `{"client_mode": true, "socket": <socket>, "db": null, "db_exists": null, "note"}`（pluginの`--resolve`が最初に打ち、dagq skillは`db_exists: false`のときだけ`init`を言うので、workerとjobが`init`を試みない。task 1236で決めた）
+- `no_use_case`になるもの: 計画系（`add`・`edit`・`submit`・`ready`・`goal add`など）・`answer`・`ask close`・`mark`・runtimeの操作（`up`・`integrate`・`review`・`recover`・`observe`（`--history`・`--input`を除く）・`session`など）・`watch`・`report`・`graph --out`・`doctor`・`service`・`init`・`migrate`。段(2)が残した`doctor`（hostとDBのファイルの診断）はこれで断る。`locate`はserviceに送らずに、DBのpathを出さずに答える: `{"client_mode": true, "socket": <socket>, "db": null, "db_exists": null, "note"}`（pluginの`--resolve`が最初に打ち、dagq skillは`db_exists: false`のときだけ`init`を言うので、workerとjobが`init`を試みない。task 1236で決めた）
 - workerとjobのpromptとskillのコマンド（`dagq ask`・`dagq show`など）は変えない。observerとスループットの見直しのpromptは、`dagq --db <db>`ではなく`dagq`を名指す（promptはagentの引数なので、DBのpathを含めない）
 - session wrapper（`session`）とhook（`session-event`）は制御側で、`--db`でDBを開く。runのsession wrapperの環境にはserviceの変数を入れないので、wrapperはクライアントモードにならない（agentを起動するときに足す）
 - 確かめるtest: `tests/it/queue_service_client.rs`（CLIのクライアントモード、roleの判定がservice側であること、断り）、`tests/it/runtime_client_mode.rs`（worker・resume・review job・recovery jobのプロセスの環境と引数にDBのpathが無いこと）、`tests/it/runtime_codex_ask.rs`と`tests/it/goal_review_codex.rs`（stubのCodexのworkerとjobからの到達）、observer・スループットの見直し・plan reviewのjobのtest

@@ -527,20 +527,6 @@ impl<'a> HostActorExecutor<'a> {
         self
     }
 
-    /// The broker's client a worker is given (ADR-t827-1 decisions 5 and
-    /// 7): the `dagq-broker-client` next to `dagq` (this process's own
-    /// binary), and only when `version` reads dagq's build from it. A
-    /// missing client or one of another build is a structured
-    /// [`super::broker::BrokerFailure`] (`client_missing`,
-    /// `version_mismatch`), and the worker gets no broker tools.
-    pub fn broker_client(
-        &self,
-        dagq: &Path,
-        version: &dyn Fn(&Path) -> std::result::Result<String, String>,
-    ) -> super::broker::BrokerResult<std::path::PathBuf> {
-        super::broker::resolve_client(dagq, crate::VERSION, version)
-    }
-
     fn workspaces(&self) -> Result<&'a dyn WorkspaceBackend> {
         self.workspaces.context("this executor opens no workspace")
     }
@@ -765,17 +751,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let mut streams = Streams::Inherit;
                 let mut without: &[&str] = &[];
                 let mut with: &[(String, String)] = &[];
-                // The resource broker's tools, as the supervisor left them
-                // in the run's dir (ADR-t827-4 decision 1, ADR-t838-1): a
-                // `required` run without them is refused here, before any
-                // command of the agent is made.
-                let broker = match &agent {
-                    SessionAgent::Turn { run, .. } => super::broker_run::worker_broker(run)?,
-                    SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. } => {
-                        super::broker_run::WorkerBroker::None
-                    }
-                };
-                let (mut command, worker) = match agent {
+                let mut command = match agent {
                     SessionAgent::Turn {
                         run,
                         prompt,
@@ -788,13 +764,10 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         streams = Streams::Files { stdout, stderr };
                         without = without_env;
                         with = with_env;
-                        let mut target = TurnTarget::of_run(run)?;
-                        if let super::broker_run::WorkerBroker::Required(config) = &broker {
-                            target.broker_required = Some(config);
-                        }
-                        (provider.turn_command(&target, prompt, session)?, Some(run))
+                        let target = TurnTarget::of_run(run)?;
+                        provider.turn_command(&target, prompt, session)?
                     }
-                    SessionAgent::Planner(planner) => (provider.planner_command(&planner)?, None),
+                    SessionAgent::Planner(planner) => provider.planner_command(&planner)?,
                     SessionAgent::PlannerTurn {
                         target,
                         prompt,
@@ -803,17 +776,9 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         stderr,
                     } => {
                         streams = Streams::Files { stdout, stderr };
-                        (provider.turn_command(&target, prompt, session)?, None)
+                        provider.turn_command(&target, prompt, session)?
                     }
                 };
-                // With `preferred`, the tools beside the built-in ones when
-                // the supervisor issued the run's token; a run without them
-                // starts as before. `required`'s are the turn's own.
-                if let (Some(_), super::broker_run::WorkerBroker::Preferred(config)) =
-                    (worker, &broker)
-                {
-                    provider.broker_tools(&mut command, config);
-                }
                 if let Some((model, effort)) = model {
                     provider.select_model(&mut command, model, effort);
                 }
@@ -1057,12 +1022,7 @@ mod tests {
         fn without_mcp(&self, command: &mut CommandSpec) {
             command.option_args(["--strict-mcp-config"]);
         }
-        fn broker_tools(&self, command: &mut CommandSpec, config: &Path) -> bool {
-            command.option_args([std::ffi::OsStr::new("--mcp-config"), config.as_os_str()]);
-            true
-        }
-        /// `turn <session> [--required <config>]`: what the turn's target
-        /// asked of the broker.
+        /// `turn <session>`.
         fn turn_command(
             &self,
             target: &TurnTarget<'_>,
@@ -1074,9 +1034,7 @@ mod tests {
                 crate::domain::turn::TurnSession::New(name)
                 | crate::domain::turn::TurnSession::Resume(name) => name,
             });
-            if let Some(config) = target.broker_required {
-                command.arg("--required").arg(config);
-            }
+            let _ = target;
             Ok(command)
         }
     }
@@ -1887,177 +1845,6 @@ mod tests {
         assert!(fake.revoked.lock().unwrap().is_empty());
     }
 
-    /// The broker's tools (`preferred`) reach a worker's new and resumed
-    /// turns only through the MCP configuration the supervisor wrote in the
-    /// run's dir; without it (`disabled`) the command and the environment
-    /// are the provider's own, as before.
-    #[test]
-    fn a_worker_gets_the_brokers_tools_only_with_its_mcp_configuration() {
-        let dir = tempfile::tempdir().unwrap();
-        let run_dir = dir.path().join("r1");
-        let run = provisioned_run(&run_dir);
-        let spawn = || {
-            let fake = Fake::default();
-            let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
-                .with_provider(&fake)
-                .with_spawner(&fake)
-                .with_queue_service(&fake);
-            for agent in [
-                turn(&run, crate::domain::turn::TurnSession::New("s")),
-                turn(&run, crate::domain::turn::TurnSession::Resume("s")),
-            ] {
-                executor
-                    .spawn(ActorExecutionSpec::new(
-                        ActorContext::worker(run.id(), run.task_id()),
-                        WorkspaceAccess::Write("/w".into()),
-                        ActorProgram::SessionAgent { agent, model: None },
-                    ))
-                    .unwrap();
-            }
-            fake.spawned
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|command| {
-                    let args: Vec<String> = command
-                        .get_args()
-                        .map(|arg| arg.to_string_lossy().into_owned())
-                        .collect();
-                    (args, env_of(command))
-                })
-                .collect::<Vec<_>>()
-        };
-        let without = spawn();
-        assert_eq!(without[0].0, ["s"]);
-        assert_eq!(without[1].0, ["s"]);
-        let config = super::super::broker_run::mcp_config_path(&run_dir);
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(&config, "{}").unwrap();
-        let with = spawn();
-        let config = config.to_string_lossy().into_owned();
-        assert_eq!(with[0].0, ["s", "--mcp-config", config.as_str()]);
-        assert_eq!(with[1].0, ["s", "--mcp-config", config.as_str()]);
-        // The environment is the same either way: no token, no URL.
-        assert_eq!(with[0].1, without[0].1);
-        assert_eq!(with[1].1, without[1].1);
-    }
-
-    /// `required` (ADR-t838-1): a run the supervisor marked `required`
-    /// without its MCP configuration is refused before any command of its
-    /// agent is made, so nothing starts with the built-in tools; with the
-    /// configuration, its turns (new and resumed) are made for the broker
-    /// (`TurnTarget::broker_required`) and not given `preferred`'s
-    /// `--mcp-config` beside the built-in tools. Without the mark nothing
-    /// changes.
-    #[test]
-    fn a_required_run_starts_only_with_the_brokers_tools() {
-        use crate::application::broker_run::{
-            BrokerRequiredRefused, mcp_config_path, required_path,
-        };
-        use crate::domain::turn::TurnSession;
-        let dir = tempfile::tempdir().unwrap();
-        let run_dir = dir.path().join("r1");
-        let run = provisioned_run(&run_dir);
-        let (stdout, stderr) = (run_dir.join("out"), run_dir.join("err"));
-        // Each agent's spawn: the arguments started, or the refusal.
-        let spawn = || {
-            let fake = Fake::default();
-            let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
-                .with_provider(&fake)
-                .with_spawner(&fake)
-                .with_queue_service(&fake);
-            let agents = [
-                SessionAgent::Turn {
-                    run: &run,
-                    prompt: "work",
-                    session: TurnSession::New("s"),
-                    stdout: &stdout,
-                    stderr: &stderr,
-                    without_env: &[],
-                    with_env: &[],
-                },
-                SessionAgent::Turn {
-                    run: &run,
-                    prompt: "go on",
-                    session: TurnSession::Resume("s"),
-                    stdout: &stdout,
-                    stderr: &stderr,
-                    without_env: &[],
-                    with_env: &[],
-                },
-            ];
-            let outcomes: Vec<std::result::Result<(), bool>> = agents
-                .into_iter()
-                .map(|agent| {
-                    executor
-                        .spawn(ActorExecutionSpec::new(
-                            ActorContext::worker(run.id(), run.task_id()),
-                            WorkspaceAccess::Write("/w".into()),
-                            ActorProgram::SessionAgent { agent, model: None },
-                        ))
-                        .map(drop)
-                        .map_err(|error| BrokerRequiredRefused::is(&error))
-                })
-                .collect();
-            let spawned: Vec<Vec<String>> = fake
-                .spawned
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|command| {
-                    std::iter::once(command.get_program())
-                        .chain(command.get_args())
-                        .map(|arg| arg.to_string_lossy().into_owned())
-                        .collect()
-                })
-                .collect();
-            (outcomes, spawned)
-        };
-        std::fs::create_dir_all(&run_dir).unwrap();
-        let (outcomes, before) = spawn();
-        assert_eq!(outcomes, [Ok(()), Ok(())]);
-        assert_eq!(before[0], ["turn", "s"]);
-
-        // Marked, without the configuration: nothing is made or started.
-        std::fs::write(required_path(&run_dir), "").unwrap();
-        let (outcomes, spawned) = spawn();
-        assert_eq!(outcomes, [Err(true), Err(true)]);
-        assert!(spawned.is_empty(), "{spawned:?}");
-
-        // With it: the turns are the broker's.
-        let config = mcp_config_path(&run_dir);
-        let config_dir = config.parent().unwrap().to_path_buf();
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(&config, "{}").unwrap();
-        let config = config.to_string_lossy().into_owned();
-        let (outcomes, spawned) = spawn();
-        assert_eq!(outcomes, [Ok(()), Ok(())]);
-        assert_eq!(
-            spawned,
-            [
-                ["turn", "s", "--required", config.as_str()],
-                ["turn", "s", "--required", config.as_str()],
-            ]
-        );
-
-        // The mark gone (`preferred`): the configuration beside the
-        // built-in tools, as before.
-        std::fs::remove_file(required_path(&run_dir)).unwrap();
-        let (outcomes, spawned) = spawn();
-        assert_eq!(outcomes, [Ok(()), Ok(())]);
-        assert_eq!(spawned[0], ["turn", "s", "--mcp-config", config.as_str()]);
-        assert_eq!(spawned[1], ["turn", "s", "--mcp-config", config.as_str()]);
-
-        // Whatever is at the mark's path marks the run (a mark the
-        // supervisor could not write as a file): without the configuration
-        // nothing starts.
-        std::fs::create_dir(required_path(&run_dir)).unwrap();
-        std::fs::remove_dir_all(config_dir).unwrap();
-        let (outcomes, spawned) = spawn();
-        assert_eq!(outcomes, [Err(true), Err(true)]);
-        assert!(spawned.is_empty(), "{spawned:?}");
-    }
-
     #[test]
     fn an_actor_configured_for_podman_is_refused_not_run_on_the_host() {
         let run = claimed_run("r1");
@@ -2095,36 +1882,6 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(fake.spawned.lock().unwrap().len(), 1);
-    }
-
-    /// A worker is given only the client next to dagq that names dagq's
-    /// build: a missing one or one of another build is refused with its
-    /// code, never handed over (ADR-t827-1 decision 7).
-    #[test]
-    fn a_worker_gets_only_the_client_of_dagqs_build() {
-        use crate::application::broker::FailureCode;
-        let dir = tempfile::tempdir().unwrap();
-        let dagq = dir.path().join("dagq");
-        std::fs::write(&dagq, "").unwrap();
-        let executor = HostActorExecutor::new(dir.path());
-        let ours = |_: &Path| Ok::<_, String>(crate::VERSION.to_owned());
-        let error = executor.broker_client(&dagq, &ours).unwrap_err();
-        assert_eq!(error.code, FailureCode::ClientMissing);
-
-        let client = dir.path().join("dagq-broker-client");
-        std::fs::write(&client, "").unwrap();
-        assert_eq!(executor.broker_client(&dagq, &ours).unwrap(), client);
-
-        let other = |_: &Path| Ok::<_, String>("0.0.1-dev+other".to_owned());
-        let error = executor.broker_client(&dagq, &other).unwrap_err();
-        assert_eq!(error.code, FailureCode::VersionMismatch);
-        assert!(
-            error.message.contains("0.0.1-dev+other") && error.message.contains(crate::VERSION),
-            "{error}"
-        );
-        let silent = |_: &Path| Err::<String, _>("exited with 1".to_owned());
-        let error = executor.broker_client(&dagq, &silent).unwrap_err();
-        assert_eq!(error.code, FailureCode::VersionMismatch);
     }
 
     /// A provider whose executable `/gone/claude` is not there, and which
@@ -2199,7 +1956,6 @@ mod tests {
                             cwd: dir.path(),
                             debug_log: None,
                             plugin_dir: None,
-                            broker_required: None,
                         },
                         prompt: "p",
                         session: crate::domain::turn::TurnSession::New("s"),

@@ -15,7 +15,7 @@
 # until = 2026-10-14   # the last day the mark holds (host-local date)
 #
 # A test of a module under tests/e2e/ is named with its module path, as cargo
-# prints it: broker::a_preferred_worker_does_its_task_through_the_broker_and_lands.
+# prints it: other_repository::a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md.
 # At most 3 marks; with more, the gate holds none.
 #
 # No marks now. The example above only shows the format. The first planned

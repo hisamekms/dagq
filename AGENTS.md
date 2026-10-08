@@ -12,7 +12,6 @@ dagq は cmux と Git worktree で依存関係付きの開発タスクを実行�
 
 - 本番 queue（この repository の queue DB）の登録と、状態を変えるコマンド・`migrate`・`up` / `down` / `install` は、どの session でも固定バイナリ `~/.local/bin/dagq` で打つ。`target/` の開発中のバイナリで本番の状態と schema を変えない。状態を変えないコマンド（`status`・`show`・`list`・`events`・`doctor` など）は読み取り専用で開くので、開発中のバイナリで本番を読むのはよい
 - 本番 queue の DB と `~/.local/bin/dagq` を作業成果で置き換えない。固定バイナリの入れ替えは `dagq install` か `up --auto-update` の自動更新だけで行う（手順は `dagq-recover` skill の `reference/update.md`）。DB は手で直さず（例外は無い）、CLI の外で状態を持たない
-- この repository の `dagq.toml` に `[broker]` を足さず、本番 queue の resource broker は既定の disabled のまま（理由は operations.md の「`dagq.toml`を変えるとき」）
 - 新しいビルドの確認とスモークは使い捨ての queue で、人か inbox が行う。worker は使い捨ての queue も操作できず、host にツールを入れない（実バイナリや実 queue での確認が要ると思ったら operations.md の「workerがhostと実queueでできないこと」）
 
 ## 開始時の短い制約

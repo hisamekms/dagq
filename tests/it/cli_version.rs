@@ -51,10 +51,8 @@ fn version_is_the_build_identifier() {
     } else {
         assert_eq!(dagq::VERSION, package);
     }
-    // The rule the broker's binaries embed too, over the same root, so the
-    // three of one checkout name the same build (ADR-t827-1 decisions 5
-    // and 7; their crates' tests hold them to it). `.dirty` is not
-    // compared: an edit after the build marks the tree dirty without a
+    // The rule the build script embeds, over the same root. `.dirty` is
+    // not compared: an edit after the build marks the tree dirty without a
     // rebuild.
     let expected = dagq::build_id::compute(
         env!("CARGO_PKG_NAME"),

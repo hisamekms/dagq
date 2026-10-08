@@ -39,9 +39,9 @@ NEXTEST_TEST_THREADS = "6"
 # 着地のときに検証済みの main と同じで compile が壊れる経路がほぼ無いので、cargo check を流さず merge-tree だけを見る。
 # migrations/** は build.rs と include_str! が compile のときに読み、crates/** は workspace の crate なので含める。
 # Rust の compile が include_str! / include_bytes! / build.rs で読む Rust 以外のファイルも入れる: kpi.md は throughput_review.rs の
-# include_str!、src/**/fixtures/** は test の include_str!、containers/broker/** は build.rs が Containerfile を読んで埋め込む。
+# include_str!、src/**/fixtures/** は test の include_str!。
 command = "cargo check --locked --all-targets"
-paths = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "migrations/**", "crates/**", "plugins/claude-dagq/skills/dagq/reference/kpi.md", "src/**/fixtures/**", "containers/broker/**"]
+paths = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "build.rs", "rust-toolchain.toml", "migrations/**", "crates/**", "plugins/claude-dagq/skills/dagq/reference/kpi.md", "src/**/fixtures/**"]
 
 [supervisor]
 # runtime が同時に立てる planner の上限（draft・finding・revise の planner で共有。既定 1）。

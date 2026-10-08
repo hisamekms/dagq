@@ -24,8 +24,9 @@
 //! `[goals] tags` names the set of tags a goal's tags are taken from
 //! (ADR-t1639-1 decision 6).
 //! `[e2e] paths` names, as globs, the paths whose change requires `e2e` of
-//! a run (ADR-t963-1 decision 2). `[broker]` holds the resource broker's
-//! mode and the limits of its server (ADR-t827-4 decision 4).
+//! a run (ADR-t963-1 decision 2). `[broker]` and `[broker.package]`, the
+//! settings of the removed resource broker, are accepted and not read
+//! (ADR-t2125-1).
 //! `[headless] wrapper` chooses where a headless session's wrapper runs:
 //! in a cmux workspace or as a background process (ADR-t1404-1).
 //! `[provider_fallback] workers` turns off a worker's move off a provider
@@ -50,7 +51,6 @@ use crate::{
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
         areas::AreaMap,
         background_wrapper::HeadlessWrapper,
-        broker::{BrokerConfig, BrokerMode},
         ci_watch::{CiWatchConfig, DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS},
         disk::DiskConfig,
         exit::ExitConfig,
@@ -121,12 +121,14 @@ const GOALS_TAGS: &str = "tags";
 const E2E_TABLE: &str = "e2e";
 /// The one key of `[e2e]`.
 const E2E_PATHS: &str = "paths";
-/// `[broker]`: the resource broker's mode and limits (ADR-t827-4
-/// decision 4).
-const BROKER_TABLE: &str = "broker";
-/// `[broker.package]`: the commands `package.install` may run, each a name
-/// and its argv (task 840).
-const BROKER_PACKAGE_TABLE: &str = "broker.package";
+/// The tables of the removed resource broker (ADR-t2125-1): accepted
+/// without looking into them, however many times they come, so a
+/// repository whose `dagq.toml` still has them is not stopped by them.
+/// Nothing reads them.
+const RETIRED_TABLES: [&str; 2] = ["broker", "broker.package"];
+/// What [`parse_config`] calls the current table while in one of
+/// [`RETIRED_TABLES`].
+const RETIRED_TABLE: &str = "broker";
 /// `[review.subagents.<agent>]`: the globs that make a review's subagent
 /// required (ADR-t1453-1 decision 1), one table per agent.
 const REVIEW_SUBAGENTS_PREFIX: &str = "review.subagents.";
@@ -154,7 +156,7 @@ const CI_WATCH_TABLE: &str = "ci_watch";
 /// `[landing_verification]`: the command `integrate` runs in place of
 /// some of a task's (ADR-t1925-1 decision 4).
 const LANDING_VERIFICATION_TABLE: &str = landing_verification::TABLE;
-const TABLES: [&str; 21] = [
+const TABLES: [&str; 19] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -170,8 +172,6 @@ const TABLES: [&str; 21] = [
     TASKS_TABLE,
     GOALS_TABLE,
     E2E_TABLE,
-    BROKER_TABLE,
-    BROKER_PACKAGE_TABLE,
     HEADLESS_TABLE,
     PROVIDER_FALLBACK_TABLE,
     CI_WATCH_TABLE,
@@ -247,9 +247,6 @@ pub struct Config {
     pub goal_tags: Option<TagSet>,
     /// `[e2e] paths` (ADR-t963-1 decision 2); empty without it.
     pub e2e_paths: Vec<String>,
-    /// `[broker]` (ADR-t827-4 decision 4), the defaults (mode `disabled`)
-    /// for the keys it does not set.
-    pub broker: BrokerConfig,
     /// `[review.subagents.<agent>]` in file order (ADR-t1453-1 decision
     /// 1); empty without any.
     pub review_subagents: Vec<ReviewSubagent>,
@@ -282,7 +279,6 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // `[supervisor] light_changes` and its line, checked against `[tasks]
     // changes` once the file is read whole (ADR-t1591-1).
     let mut light_changes: Option<(Vec<TaskChange>, usize)> = None;
-    let mut broker_keys: Vec<String> = Vec::new();
     let mut fallback_keys: Vec<String> = Vec::new();
     // `[ci_watch]`'s header line and the keys read, the table checked once
     // the file is read whole (its `workflow` is required).
@@ -372,9 +368,13 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 table = Some(REVIEW_SUBAGENTS_TABLE);
                 continue;
             }
+            if RETIRED_TABLES.contains(&name) {
+                table = Some(RETIRED_TABLE);
+                continue;
+            }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -403,7 +403,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             continue;
         }
-        if table == Some(LANGUAGE_TABLE) {
+        if table == Some(LANGUAGE_TABLE) || table == Some(RETIRED_TABLE) {
             continue;
         }
         let (key, rest) = line
@@ -485,66 +485,6 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         .map_err(anyhow::Error::msg)
                         .with_context(with)?,
                 );
-            }
-            Some(BROKER_TABLE) => {
-                ensure!(
-                    BrokerConfig::KEYS.contains(&key),
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{BROKER_TABLE}]; the keys are {}",
-                    BrokerConfig::KEYS.join(", ")
-                );
-                ensure!(
-                    !broker_keys.iter().any(|existing| existing == key),
-                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
-                );
-                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
-                let value = rest.trim();
-                let broker = &mut config.broker;
-                match key {
-                    "mode" => {
-                        let text = parse_string(value).with_context(with)?;
-                        broker.mode = BrokerMode::parse(&text)
-                            .with_context(|| {
-                                format!(
-                                    "expected \"disabled\", \"preferred\" or \"required\", not {text:?}"
-                                )
-                            })
-                            .with_context(with)?;
-                    }
-                    "exec_allow" => {
-                        broker.exec_allow = parse_string_array(value).with_context(with)?
-                    }
-                    "exec_env" => broker.exec_env = parse_string_array(value).with_context(with)?,
-                    _ => {
-                        let number = parse_positive(value, "number")
-                            .with_context(with)?
-                            .unsigned_abs();
-                        match key {
-                            "exec_timeout_secs" => broker.exec_timeout_secs = number,
-                            "exec_max_timeout_secs" => broker.exec_max_timeout_secs = number,
-                            "output_limit_bytes" => broker.output_limit_bytes = number,
-                            _ => broker.fs_limit_bytes = number,
-                        }
-                    }
-                }
-                broker_keys.push(key.to_owned());
-            }
-            Some(BROKER_PACKAGE_TABLE) => {
-                let with = || format!("{CONFIG_FILE_NAME}:{number}");
-                let name = parse_key(key).with_context(with)?;
-                ensure!(
-                    config
-                        .broker
-                        .packages
-                        .iter()
-                        .all(|(existing, _)| *existing != name),
-                    "{CONFIG_FILE_NAME}:{number}: {name} is defined twice"
-                );
-                let argv = parse_string_array(rest.trim())
-                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {name}"))?;
-                dagq_broker_protocol::package::check_command(&name, &argv)
-                    .map_err(anyhow::Error::msg)
-                    .with_context(with)?;
-                config.broker.packages.push((name, argv));
             }
             Some(E2E_TABLE) => {
                 ensure!(
@@ -1008,7 +948,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{BROKER_TABLE}], [{BROKER_PACKAGE_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -1042,11 +982,6 @@ pub fn parse_config(text: &str) -> Result<Config> {
         .check()
         .map_err(anyhow::Error::msg)
         .with_context(|| CONFIG_FILE_NAME.to_owned())?;
-    config
-        .broker
-        .check()
-        .map_err(anyhow::Error::msg)
-        .with_context(|| format!("{CONFIG_FILE_NAME}: [{BROKER_TABLE}]"))?;
     config.areas = areas
         .map(|areas| AreaMap::new(areas).map_err(anyhow::Error::msg))
         .transpose()
@@ -1336,18 +1271,6 @@ pub fn load_landing_verification(root: &Path) -> Result<Option<LandingVerificati
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
         .landing_verification)
-}
-
-/// `[broker]` of the `dagq.toml` in `root` (ADR-t827-4 decision 4); no
-/// file, no table or no key is the default, mode `disabled`.
-pub fn load_broker_config(root: &Path) -> Result<BrokerConfig> {
-    let path = root.join(CONFIG_FILE_NAME);
-    let Some(text) = read_config(&path)? else {
-        return Ok(BrokerConfig::default());
-    };
-    Ok(parse_config(&text)
-        .with_context(|| format!("parse {}", path.display()))?
-        .broker)
 }
 
 /// `[areas]` of the `dagq.toml` in `root` (ADR-t980-1), `None` when there
@@ -2396,101 +2319,20 @@ LITERAL = 'no \n escapes # here'
         assert!(parse_config("[language]\n[language]").is_ok());
     }
 
+    /// The removed resource broker's tables are accepted whatever they
+    /// hold, as often as they come, and change nothing else (ADR-t2125-1):
+    /// a repository that still has them is not stopped by them.
     #[test]
-    fn parses_the_broker_table() {
-        // No table is the default: disabled.
-        assert_eq!(parse_config("").unwrap().broker, BrokerConfig::default());
-        let config = parse_config(
-            "[broker]\nmode = \"preferred\" # the contract\nexec_allow = [\"sh\", \"ls\"]\nexec_env = []\nexec_timeout_secs = 30\nexec_max_timeout_secs = 120\noutput_limit_bytes = 2048\nfs_limit_bytes = 4096\n",
-        )
-        .unwrap()
-        .broker;
-        assert_eq!(
-            config,
-            BrokerConfig {
-                mode: BrokerMode::Preferred,
-                exec_allow: vec!["sh".into(), "ls".into()],
-                exec_env: Vec::new(),
-                exec_timeout_secs: 30,
-                exec_max_timeout_secs: 120,
-                output_limit_bytes: 2048,
-                fs_limit_bytes: 4096,
-                packages: Vec::new(),
-            }
-        );
-        let packages = parse_config(
-            "[broker]\nmode = \"preferred\"\n[broker.package]\ncargo-fetch = [\"cargo\", \"fetch\"] # deps\n\"npm-install\" = [\"npm\", \"install\"]\n",
-        )
-        .unwrap()
-        .broker
-        .packages;
-        assert_eq!(
-            packages,
-            [
-                (
-                    "cargo-fetch".to_owned(),
-                    vec!["cargo".to_owned(), "fetch".to_owned()]
-                ),
-                (
-                    "npm-install".to_owned(),
-                    vec!["npm".to_owned(), "install".to_owned()]
-                ),
-            ]
-        );
-        for (text, error) in [
-            ("[broker]\nmode = \"on\"\n", "dagq.toml:2: value of mode"),
-            ("[broker]\nport = 1\n", "unknown key port in [broker]"),
-            (
-                "[broker]\nmode = \"preferred\"\nmode = \"disabled\"\n",
-                "mode is defined twice",
-            ),
-            (
-                "[broker]\nexec_timeout_secs = 0\n",
-                "value of exec_timeout_secs",
-            ),
-            (
-                "[broker]\nexec_timeout_secs = 400\n",
-                "above exec_max_timeout_secs",
-            ),
-            ("[broker]\n[broker]\n", "[broker] is defined twice"),
-            (
-                "[broker.package]\nfetch = [\"cargo\"]\nfetch = [\"npm\"]\n",
-                "fetch is defined twice",
-            ),
-            (
-                "[broker.package]\npull = [\"git\", \"pull\"]\n",
-                "dagq.toml:2: package command pull: git runs through the git operations only",
-            ),
-            (
-                "[broker.package]\nfetch = []\n",
-                "dagq.toml:2: package command fetch: the argv is empty",
-            ),
-            (
-                "[broker.package]\nfetch = \"cargo fetch\"\n",
-                "dagq.toml:2: value of fetch",
-            ),
-            (
-                "[broker.package]\n[broker.package]\n",
-                "[broker.package] is defined twice",
-            ),
-        ] {
-            let message = format!("{:#}", parse_config(text).unwrap_err());
-            assert!(message.contains(error), "{text}: {message}");
-        }
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            load_broker_config(dir.path()).unwrap(),
-            BrokerConfig::default()
-        );
-        fs::write(
-            dir.path().join(CONFIG_FILE_NAME),
-            "[broker]\nmode = \"required\"\n",
-        )
-        .unwrap();
-        assert_eq!(
-            load_broker_config(dir.path()).unwrap().mode,
-            BrokerMode::Required
-        );
+    fn the_removed_brokers_tables_are_accepted_and_not_read() {
+        let text = "[broker]\nmode = \"required\"\nport = 1\nnot a key\n[broker.package]\nfetch = []\n[broker]\n[e2e]\npaths = [\"src/**\"]\n";
+        let config = parse_config(text).unwrap();
+        assert_eq!(config.e2e_paths, ["src/**"]);
+        let without = parse_config("[e2e]\npaths = [\"src/**\"]\n").unwrap();
+        assert_eq!(config, without);
+        // Another table it does not know still stops it.
+        let error = format!("{:#}", parse_config("[brokers]\n").unwrap_err());
+        assert!(error.contains("unknown table [brokers]"), "{error}");
+        assert!(!error.contains("[broker]"), "{error}");
     }
 
     #[test]
@@ -3206,7 +3048,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [broker], [broker.package], [headless], [provider_fallback], [ci_watch], [landing_verification] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [ci_watch], [landing_verification] and [kpi]"
             ),
             "{error}"
         );

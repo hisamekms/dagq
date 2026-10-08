@@ -11,6 +11,8 @@ amends:
   - adr-t1162-1 decision 3
   - adr-t1233-2 decision 2
   - adr-t1233-2 decision 3
+amended_by:
+  - adr-t2125-1
 owners:
   - hisamekms
 tags:

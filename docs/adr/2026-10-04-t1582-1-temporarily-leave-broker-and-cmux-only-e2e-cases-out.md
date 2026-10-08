@@ -10,6 +10,8 @@ amends:
   - adr-t963-1 decision 1
   - adr-t963-1 decision 3
   - adr-t1233-2 decision 2
+amended_by:
+  - adr-t2125-1
 owners:
   - hisamekms
 tags:

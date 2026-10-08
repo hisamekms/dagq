@@ -1,8 +1,5 @@
-//! [`Binaries`] on this machine: `cargo build --release --locked -p dagq -p
-//! dagq-broker-client` in a checkout (dagq and the worker's broker client,
-//! which go in place together (ADR-t827-1 decision 5); not the server,
-//! which is built into the broker's image), a binary run
-//! as a child process for its version, a throwaway queue and its migrations,
+//! [`Binaries`] on this machine: `cargo build --release --locked -p dagq`
+//! in a checkout, a binary run as a child process for its version, a throwaway queue and its migrations,
 //! and the replacement of a file by a rename in its directory (ADR-0045
 //! decisions 11, 12).
 
@@ -24,17 +21,8 @@ use crate::application::install::{
 
 pub struct LocalBinaries;
 
-/// What a build of dagq's checkout builds: dagq and the worker's client,
-/// which lands next to it in the target (ADR-t827-1 decision 5).
-pub const BUILD_ARGS: [&str; 7] = [
-    "build",
-    "--release",
-    "--locked",
-    "-p",
-    "dagq",
-    "-p",
-    "dagq-broker-client",
-];
+/// What a build of dagq's checkout builds: dagq alone.
+pub const BUILD_ARGS: [&str; 5] = ["build", "--release", "--locked", "-p", "dagq"];
 
 /// Run `binary` with `arguments`; its stdout when it exits 0, or an error
 /// with what it wrote to stderr.
@@ -188,11 +176,6 @@ impl Binaries for LocalBinaries {
         }
         fs::rename(&previous, target)
             .with_context(|| format!("move {} back to {}", previous.display(), target.display()))
-    }
-
-    fn set_aside(&self, target: &Path) -> Result<()> {
-        fs::rename(target, previous_path(target))
-            .with_context(|| format!("move {} aside", target.display()))
     }
 
     /// Every binary run here is the `up` that starts a supervisor again, so
@@ -379,43 +362,6 @@ builds dagq {version})",
             "cargo install left no binary at {}",
             binary.display()
         );
-        self.install_client(version, root, target_dir, log);
         Ok(binary)
-    }
-}
-
-impl CargoInstaller {
-    /// Install the worker's client of the same release beside dagq
-    /// (ADR-t827-1 decision 8). A release without it on crates.io leaves
-    /// none, and no client of another release, beside dagq: `install` then
-    /// sets the one in place aside, and the broker is not used until both
-    /// are there (decision 7).
-    fn install_client(&self, version: &str, root: &Path, target_dir: &Path, log: &Path) {
-        let client = crate::application::broker::client_path(&root.join("bin").join("dagq"));
-        let _ = fs::remove_file(&client);
-        let Ok(file) = fs::OpenOptions::new().create(true).append(true).open(log) else {
-            return;
-        };
-        let Ok(stdout) = file.try_clone() else {
-            return;
-        };
-        let installed = Command::new(&self.program)
-            .args(["install", "--locked"])
-            .arg(format!(
-                "{}@{version}",
-                crate::application::broker::CLIENT_BINARY
-            ))
-            .arg("--root")
-            .arg(root)
-            .arg("--target-dir")
-            .arg(target_dir)
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(file)
-            .status()
-            .is_ok_and(|status| status.success());
-        if !installed {
-            let _ = fs::remove_file(&client);
-        }
     }
 }

@@ -512,7 +512,7 @@ mod tests {
     fn diagnostic_appends_and_tree_operations_stay_with_the_open_directory() {
         let temp = tempfile::tempdir().unwrap();
         let run = temp.path().join("runs/run");
-        fs::create_dir_all(run.join("broker/nested")).unwrap();
+        fs::create_dir_all(run.join("sub/nested")).unwrap();
         let secret = temp.path().join("secret");
         fs::write(&secret, b"secret").unwrap();
         let log = run.join("refusals.log");
@@ -522,23 +522,23 @@ mod tests {
         fs::remove_file(&log).unwrap();
         symlink(&secret, &log).unwrap();
         assert!(append(&log, b"unsafe").is_err());
-        symlink(&secret, run.join("broker/link")).unwrap();
-        symlink(temp.path(), run.join("broker/nested/linkdir")).unwrap();
+        symlink(&secret, run.join("sub/link")).unwrap();
+        symlink(temp.path(), run.join("sub/nested/linkdir")).unwrap();
         // Linux permits non-UTF-8 names; APFS rejects them at creation.
         #[cfg(target_os = "linux")]
         let non_utf8 = OsString::from_vec(vec![0xff]);
         #[cfg(not(target_os = "linux"))]
         let non_utf8 = OsString::from("日本語");
-        fs::write(run.join("broker").join(&non_utf8), b"file").unwrap();
+        fs::write(run.join("sub").join(&non_utf8), b"file").unwrap();
         let dir = Directory::open(&run).unwrap();
-        let broker = dir.child("broker").unwrap();
-        assert!(broker.names().unwrap().contains(&non_utf8));
+        let sub = dir.child("sub").unwrap();
+        assert!(sub.names().unwrap().contains(&non_utf8));
         assert_eq!(
-            kind_of_mode(broker.stat(Some(OsStr::new("link"))).unwrap().st_mode),
+            kind_of_mode(sub.stat(Some(OsStr::new("link"))).unwrap().st_mode),
             EntryKind::Link
         );
-        dir.remove_tree("broker").unwrap();
-        assert!(!run.join("broker").exists());
+        dir.remove_tree("sub").unwrap();
+        assert!(!run.join("sub").exists());
         assert_eq!(fs::read(&secret).unwrap(), b"secret");
     }
 

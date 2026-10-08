@@ -72,12 +72,6 @@ name = "draft_bundles::what_a_bundle_leaves_undecided_makes_the_next_and_the_out
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: next bundle / third-planner exhaustion is decision"
 task = 1707
 
-# 30.331s, class B
-[[test]]
-name = "e2e_gate_podman::a_busy_machine_lock_skips_broker_and_records_why"
-reason = "B 境界（守る境界）: real flock with fake podman"
-task = 1707
-
 # 7.971s (median of 5 stress rounds under load, task 1441), class B
 [[test]]
 name = "finding_planner::a_planner_question_about_a_finding_reaches_its_planner_as_a_turn_and_undecided_planners_end_in_the_inbox"
@@ -202,12 +196,6 @@ task = 1707
 [[test]]
 name = "runtime_background_process::stop_processes_stops_a_background_sessions_orphan"
 reason = "B 境界（守る境界）: real orphan process stopped"
-task = 1707
-
-# 6.397s, class B
-[[test]]
-name = "runtime_broker::a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it"
-reason = "B 境界（守る境界）: token files 0600, MCP config, broker refusal"
 task = 1707
 
 # 6.785s, class B
@@ -618,34 +606,12 @@ name = "worker_escalation::missing_evidence_and_a_scope_violation_keep_the_step"
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: loop of decision cases"
 task = 1707
 
-# task 838: about 5.6s under the worker's stress, most of it parked_conflict's
-# setup (a supervisor run and two integrations) before the resume
-[[test]]
-name = "runtime_broker::a_required_resume_refused_its_tools_is_given_up"
-reason = "B 境界（守る境界）: supervisor の配線（resume の起動）。[broker] mode = required の resume が broker の道具を渡せないとき wrapper を起動せず resume_finished の broker_required になる（fail closed、ADR-t838-1）"
-task = 838
-
-# task 838: 5.8s to 7.4s under the worker's stress (5.17s, class D, in
-# docs/plans/it-reduction/it-tests.tsv); task 838 only added the Grant's
-# receipt field to its body, and most of its time is parked_conflict's setup
-[[test]]
-name = "runtime_broker::a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: grant decision on resume"
-task = 838
-
 # task 1440: 8.5s under the worker's stress, class R in
 # docs/plans/it-reduction/it-tests.tsv; the resume's background launch after
 # a failed e2e (task 1439's test, now with the ignored workspace setting)
 [[test]]
 name = "runtime_background::a_parked_background_run_is_resumed_in_the_background"
 reason = "R 移し替えの予定（代表がある、goal 119 か 120）: wrapper spawn covered by runtime_background::a_turn_left_by_a_killed_background_wrapper_is_stopped_and_a_resumed_wrapper_registers and the runtime_resume tests; ignored [headless] setting and resume choice decision"
-task = 1440
-
-# task 1440: 5.8s under the worker's stress; the body changed only from the
-# deleted workspace tags to the background launches
-[[test]]
-name = "runtime_broker::a_required_reopen_refused_its_tools_opens_no_session"
-reason = "B 境界（守る境界）: supervisor の配線（broker の道具を渡せない reopen が wrapper を起動しない。ADR-t838-1）"
 task = 1440
 
 # task 1440: 6.9s under the worker's stress, most of it parked_conflict's setup
