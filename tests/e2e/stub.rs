@@ -49,8 +49,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $# -eq 0 ] || { printf 'stub: trailing arguments after the prompt\n' >&2; exit 64; }
-if [ -n "$headless" ] && [ "$output" != stream-json ]; then
-  # The supervisor's headless review (ADR-0027): read review.md, print the
+if [ -n "$headless" ] && [ -z "$permission" ]; then
+  # The supervisor's headless review (ADR-0027), started without a worker
+  # turn's permission mode: read review.md, print the
   # verdict JSON on stdout. Only a task that says E2E-REVIEW-PASS passes;
   # any other review fails, and its run waits in an approve_landing ask.
   # The runtime names the review's own session (ADR-0048 decision 4), and

@@ -1173,6 +1173,7 @@ impl<'a> Turns<'a> {
             reason: result.tokens_reason,
             children: result.children,
             turns: Vec::new(),
+            context: result.context.clone(),
         };
         if let Some(rollout) = &result.rollout {
             let counted = match result.session_id.as_deref() {

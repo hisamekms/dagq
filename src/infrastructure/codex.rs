@@ -651,6 +651,7 @@ fn job_tokens(result: &crate::domain::turn::TurnResult) -> ExecutionTokens {
             tokens: result.tokens.clone(),
             source: result.tokens_source,
             reason: result.tokens_reason,
+            context: result.context.clone(),
             ..ExecutionTokens::default()
         },
     }

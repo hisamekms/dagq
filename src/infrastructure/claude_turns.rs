@@ -18,7 +18,8 @@ use serde_json::Value;
 use crate::application::{Exit, TurnReader};
 use crate::domain::queue_hold::Wall;
 use crate::domain::tokens::{
-    ExecutionTokens, MODEL_USAGE_MISSING, ModelTokens, NO_RESULT, NO_USAGE, TokenSource, TokenUsage,
+    ExecutionContext, ExecutionTokens, MODEL_USAGE_MISSING, ModelTokens, NO_RESULT, NO_STREAM,
+    NO_USAGE, TokenSource, TokenUsage, claude_context_window,
 };
 use crate::domain::turn::{TurnFailure, TurnResult, TurnSignal, shortened};
 use crate::infrastructure::claude::job_wall;
@@ -49,6 +50,83 @@ pub struct ClaudeTurnReader {
     /// A real answer of the model: the session has a conversation.
     answered: bool,
     last_text: Option<String>,
+    /// How large the context grew.
+    context: ContextCounter,
+}
+
+/// What a stream says of how large an Execution's context grew
+/// (request 39): the top-level agent's calls, a subagent's (whose events
+/// carry the `parent_tool_use_id` of the tool that started it) left out.
+/// A resumed session's stream is the Execution's own, so an earlier
+/// Execution's compactions are not in it.
+#[derive(Debug, Default)]
+pub struct ContextCounter {
+    /// A `system/init` was read: the output is a stream.
+    streamed: bool,
+    /// The model `system/init` named.
+    model: Option<String>,
+    /// The largest input of one call: an assistant message's
+    /// `input_tokens` + `cache_read_input_tokens` +
+    /// `cache_creation_input_tokens`, fixed when the call starts, so the
+    /// stream's partial usage gives it.
+    peak: Option<i64>,
+    /// The `system/compact_boundary` events.
+    compactions: i64,
+}
+
+impl ContextCounter {
+    /// Count one event of the stream.
+    pub fn event(&mut self, event: &Value) {
+        if !event["parent_tool_use_id"].is_null() {
+            return;
+        }
+        match (event["type"].as_str(), event["subtype"].as_str()) {
+            (Some("system"), Some("init")) => {
+                self.streamed = true;
+                self.model = event["model"].as_str().map(str::to_owned);
+            }
+            (Some("system"), Some("compact_boundary")) => self.compactions += 1,
+            (Some("assistant"), _) => {
+                let usage = &event["message"]["usage"];
+                let Some(input) = usage["input_tokens"].as_i64() else {
+                    return;
+                };
+                let cache = |key: &str| usage[key].as_i64().unwrap_or(0);
+                let call =
+                    input + cache("cache_read_input_tokens") + cache("cache_creation_input_tokens");
+                self.peak = self.peak.max(Some(call));
+            }
+            _ => {}
+        }
+    }
+
+    /// The context counted, with the window of the init's model: the
+    /// `contextWindow` of its `modelUsage` entry in `result`, else
+    /// [`claude_context_window`]; [`NO_STREAM`] when no `system/init` was
+    /// read.
+    pub fn context(&self, result: Option<&Value>) -> ExecutionContext {
+        if !self.streamed {
+            return ExecutionContext::unmeasured(NO_STREAM);
+        }
+        let window = self.model.as_deref().and_then(|model| {
+            result
+                .and_then(|r| r["modelUsage"][model]["contextWindow"].as_i64())
+                .or_else(|| claude_context_window(model))
+        });
+        ExecutionContext::measured(self.peak, window, self.compactions)
+    }
+}
+
+/// The context of a job's stream-json output ([`ContextCounter`]).
+pub fn job_context(stdout: &str, result: Option<&Value>) -> ExecutionContext {
+    let mut counter = ContextCounter::default();
+    for event in stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+    {
+        counter.event(&event);
+    }
+    counter.context(result)
 }
 
 impl ClaudeTurnReader {
@@ -184,6 +262,7 @@ impl TurnReader for ClaudeTurnReader {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
+        self.context.event(&event);
         match event["type"].as_str() {
             Some("system") => self.system(&event),
             Some("assistant") => self.assistant(&event),
@@ -279,6 +358,7 @@ impl TurnReader for ClaudeTurnReader {
             tokens_source: counted.source,
             tokens_reason: counted.reason,
             children: counted.children,
+            context: self.context.context(result),
             rollout: None,
             // Claude's session is the run's: a missing one is started
             // by `turn_session_exists` instead.
@@ -352,9 +432,10 @@ fn model_usage(usage: &Value) -> Option<Vec<ModelTokens>> {
     Some(models)
 }
 
-/// The `result` of a headless job's `claude -p --output-format json`
-/// output: the object it printed (or the last `result` of an array or of
-/// stream lines); `None` when the output has none.
+/// The `result` of a headless job's `claude -p --output-format
+/// stream-json` output: the last `result` of its lines (or the object a
+/// `--output-format json` printed, or the last of an array); `None` when
+/// the output has none.
 pub fn job_result(stdout: &str) -> Option<Value> {
     let is_result = |value: &Value| value["type"] == "result";
     match serde_json::from_str::<Value>(stdout.trim()) {
@@ -388,6 +469,7 @@ fn turn_tokens(usage: &Value, cost_usd: Option<f64>) -> Option<TokenUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::tokens::NO_CALL;
     use serde_json::json;
 
     fn exit(code: i32) -> Exit {
@@ -658,6 +740,73 @@ mod tests {
         );
     }
 
+    /// A turn's context is read from its stream: the largest input
+    /// (`input_tokens` + both caches) of the top-level agent's calls, a
+    /// subagent's (with a `parent_tool_use_id`) left out however large,
+    /// the `compact_boundary`s of the top-level agent, and the window of
+    /// the init's model from `modelUsage`, else from the table, else none.
+    /// A stream without `system/init` measures nothing, and says why.
+    #[test]
+    fn a_turns_context_is_its_top_level_calls_and_compactions() {
+        let call = |parent: Value, input: i64, read: i64, created: i64| {
+            json!({"type": "assistant", "parent_tool_use_id": parent, "message": {
+                "model": "claude-sonnet-5", "content": [],
+                "usage": {"input_tokens": input, "cache_read_input_tokens": read,
+                    "cache_creation_input_tokens": created, "output_tokens": 50_000}}})
+        };
+        let boundary = |parent: Value| {
+            json!({"type": "system", "subtype": "compact_boundary", "parent_tool_use_id": parent,
+                "compact_metadata": {"trigger": "auto", "pre_tokens": 180_000}})
+        };
+        let result = |usage: Value| {
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": "Done.",
+                "modelUsage": usage})
+        };
+        let (mut reader, _) = read(&[
+            init("auto"),
+            call(Value::Null, 2, 100_000, 40_000),
+            call(Value::Null, 3, 150_000, 1_000),
+            boundary(Value::Null),
+            call(Value::Null, 5, 20_000, 9_000),
+            // A subagent's call and compaction are not the turn's.
+            call(json!("toolu_1"), 400_000, 500_000, 0),
+            boundary(json!("toolu_1")),
+            boundary(Value::Null),
+            result(
+                json!({"claude-sonnet-5": {"inputTokens": 1, "outputTokens": 1,
+                "contextWindow": 200_000}}),
+            ),
+        ]);
+        assert_eq!(
+            reader.finish(Some(&exit(0)), "").context,
+            ExecutionContext {
+                peak: Some(151_003),
+                window: Some(200_000),
+                compactions: Some(2),
+                reason: None,
+            }
+        );
+        // No `contextWindow`: the table's; a model it does not list: none.
+        let (mut table, _) = read(&[init("auto"), call(Value::Null, 1, 0, 0), result(json!({}))]);
+        assert_eq!(
+            table.finish(Some(&exit(0)), "").context,
+            ExecutionContext::measured(Some(1), Some(1_000_000), 0)
+        );
+        let (mut unknown, _) = read(&[
+            json!({"type": "system", "subtype": "init", "session_id": "s1", "model": "other"}),
+            result(json!({})),
+        ]);
+        let context = unknown.finish(Some(&exit(0)), "").context;
+        assert_eq!(context, ExecutionContext::measured(None, None, 0));
+        assert_eq!(context.reason, Some(NO_CALL));
+        // A turn whose output is not a stream: not measured, and why.
+        let (mut nothing, _) = read(&[]);
+        assert_eq!(
+            nothing.finish(Some(&exit(1)), "").context,
+            ExecutionContext::unmeasured(NO_STREAM)
+        );
+    }
+
     /// An output without a `modelUsage` (an older Claude Code) is counted
     /// from `usage`, and says so; one with neither, or without a result,
     /// counts nothing and says why. An empty `modelUsage` is a measured 0.
@@ -706,8 +855,8 @@ mod tests {
         );
     }
 
-    /// A job's `--output-format json` output is its result event; an array
-    /// or stream lines give their last one, and text gives none.
+    /// A job's stream lines give their last result event, as do a
+    /// `--output-format json` object and an array; text gives none.
     #[test]
     fn a_jobs_result_is_read_from_its_json_output() {
         let result = json!({"type": "result", "result": "ok"});

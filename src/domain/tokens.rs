@@ -132,6 +132,102 @@ pub const TOKEN_USAGE_RECORD_MISSING: &str = "token_usage_record_missing";
 /// Execution did.
 pub const ROLLOUT_TURN_MISSING: &str = "rollout_turn_missing";
 
+/// The `context_reason` of an Execution that made no call of the model
+/// whose input could be read: its `peak_context` is not measured.
+pub const NO_CALL: &str = "no_call";
+/// The `context_reason` of a Claude Execution whose output is not a stream
+/// of its calls (no `system/init`, or a single result): neither its
+/// `peak_context` nor its `compactions` is measured.
+pub const NO_STREAM: &str = "no_stream";
+/// The `context_reason` of an Execution whose provider's reader does not
+/// read its context.
+pub const CONTEXT_NOT_READ: &str = "context_not_read";
+
+/// How large one Execution's context grew (ADR-t1486-1, request 39): the
+/// largest input of one call of the model, the window of the model, and
+/// how many times the context was compacted. Only the top-level agent's
+/// calls are counted: a Claude subagent's and a Codex child thread's are
+/// not. `None` with a `reason` is not measured, told from a measured 0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionContext {
+    /// The largest input of one call (`peak_context`): Claude's
+    /// `input_tokens` + `cache_read_input_tokens` +
+    /// `cache_creation_input_tokens` of an assistant message, Codex's
+    /// `last_token_usage.input_tokens` (the cached input included).
+    pub peak: Option<i64>,
+    /// The model's context window (`context_window`); `None` when not
+    /// known, without a reason.
+    pub window: Option<i64>,
+    /// How many times the context was compacted (`compactions`): Claude's
+    /// `system/compact_boundary`, the `compacted` records of Codex's root
+    /// rollout in the Execution's turns.
+    pub compactions: Option<i64>,
+    /// Why `peak` or `compactions` is not measured (`context_reason`).
+    pub reason: Option<&'static str>,
+}
+
+impl Default for ExecutionContext {
+    /// Not read ([`CONTEXT_NOT_READ`]): a reader that measures it says so.
+    fn default() -> Self {
+        Self::unmeasured(CONTEXT_NOT_READ)
+    }
+}
+
+impl ExecutionContext {
+    /// Nothing measured, for `reason`.
+    pub const fn unmeasured(reason: &'static str) -> Self {
+        Self {
+            peak: None,
+            window: None,
+            compactions: None,
+            reason: Some(reason),
+        }
+    }
+
+    /// The context of calls whose largest input was `peak` (`None`: no
+    /// call, [`NO_CALL`]) and that were compacted `compactions` times.
+    pub fn measured(peak: Option<i64>, window: Option<i64>, compactions: i64) -> Self {
+        Self {
+            peak,
+            window,
+            compactions: Some(compactions),
+            reason: peak.is_none().then_some(NO_CALL),
+        }
+    }
+
+    /// Put it into the payload of the event that records the Execution:
+    /// `peak_context`, `context_window`, `compactions` and
+    /// `context_reason`, `null` when not measured or not known.
+    pub fn record(&self, payload: &mut Value) {
+        payload["peak_context"] = json!(self.peak);
+        payload["context_window"] = json!(self.window);
+        payload["compactions"] = json!(self.compactions);
+        payload["context_reason"] = json!(self.reason);
+    }
+}
+
+/// The context window of a Claude `model` when its output does not say
+/// it: the one place the windows are kept. A model asked with `[1m]` has
+/// the 1M window; `None` for a model not listed.
+pub fn claude_context_window(model: &str) -> Option<i64> {
+    const ONE_MILLION: i64 = 1_000_000;
+    const WINDOWS: [(&str, i64); 6] = [
+        ("claude-opus-5", ONE_MILLION),
+        ("claude-sonnet-5", ONE_MILLION),
+        ("claude-fable-5", ONE_MILLION),
+        ("claude-haiku-5", 200_000),
+        ("claude-opus-4", 200_000),
+        ("claude-sonnet-4", 200_000),
+    ];
+    if model.ends_with("[1m]") {
+        return Some(ONE_MILLION);
+    }
+    WINDOWS
+        .iter()
+        .find(|(prefix, _)| model.starts_with(prefix))
+        .map(|(_, window)| *window)
+}
+
 /// One model's tokens in an Execution (an entry of Claude's `modelUsage`):
 /// the same kinds as [`TokenUsage`], and the cost when the provider gave
 /// one.
@@ -280,6 +376,8 @@ pub struct ExecutionTokens {
     /// (`tokens_turns`, [`RolloutUsage::tokens`]), which a later Execution
     /// of the thread does not count again; empty for the other sources.
     pub turns: Vec<String>,
+    /// How large its context grew.
+    pub context: ExecutionContext,
 }
 
 impl ExecutionTokens {
@@ -294,7 +392,8 @@ impl ExecutionTokens {
     /// Put them into the payload of the event that records the Execution
     /// (a `turn_finished`, the end of a headless job): `tokens` (`null`
     /// when not measured), `tokens_by_model`, `tokens_source`,
-    /// `tokens_reason` and `children`.
+    /// `tokens_reason` and `children`, and its context
+    /// ([`ExecutionContext::record`]).
     pub fn record(&self, payload: &mut Value) {
         payload["tokens"] = self
             .tokens
@@ -304,6 +403,7 @@ impl ExecutionTokens {
         payload["tokens_source"] = json!(self.source.map(TokenSource::as_str));
         payload["tokens_reason"] = json!(self.reason);
         payload["children"] = json!(self.children);
+        self.context.record(payload);
         if !self.turns.is_empty() {
             payload["tokens_turns"] = json!(self.turns);
         }
@@ -338,6 +438,20 @@ pub struct RolloutUsage {
     /// The root turns, in the order they started.
     pub turns: Vec<String>,
     pub records: Vec<UsageRecord>,
+    /// The context of each root turn of `turns`, by turn.
+    pub contexts: BTreeMap<String, TurnContext>,
+}
+
+/// What the root thread's rollout says of the context of one root turn:
+/// the records after its `task_started` and before the next one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnContext {
+    /// The largest `last_token_usage.input_tokens` of its `token_count`s.
+    pub peak: Option<i64>,
+    /// The last `model_context_window` it names.
+    pub window: Option<i64>,
+    /// Its top-level `compacted` records.
+    pub compactions: i64,
 }
 
 impl RolloutUsage {
@@ -348,7 +462,10 @@ impl RolloutUsage {
     /// threads are those of the records counted. A turn without a record is
     /// a measured 0, as is an Execution whose turns were all counted
     /// before. A record whose rollout named no model before it is in
-    /// `tokens` and in no entry of `by_model`.
+    /// `tokens` and in no entry of `by_model`. Its context is that of the
+    /// same turns in the root thread's rollout: the largest of their peaks,
+    /// the last window named and their compactions together, so neither an
+    /// earlier Execution's turns nor a child thread's are in it.
     pub fn tokens(&self, counted: &[String]) -> ExecutionTokens {
         let turns: Vec<String> = self
             .turns
@@ -399,12 +516,21 @@ impl RolloutUsage {
             entry.cache_read += tokens.cache_read;
             entry.cache_creation += tokens.cache_creation;
         }
+        let mut peak = None;
+        let mut window = None;
+        let mut compactions = 0;
+        for context in turns.iter().filter_map(|turn| self.contexts.get(turn)) {
+            peak = peak.max(context.peak);
+            window = context.window.or(window);
+            compactions += context.compactions;
+        }
         ExecutionTokens {
             tokens: Some(total),
             by_model,
             source: Some(TokenSource::UsageRecord),
             reason: None,
             children: Some(children.len() as i64),
+            context: ExecutionContext::measured(peak, window, compactions),
             turns,
         }
     }
@@ -832,6 +958,7 @@ mod tests {
                 // Another turn's (an earlier Execution of the thread).
                 usage_record("root", "t0", "r0", "gpt-a", [100, 100, 100]),
             ],
+            ..RolloutUsage::default()
         };
         let all = rollout.tokens(&[]);
         assert_eq!(
@@ -867,7 +994,7 @@ mod tests {
         let quiet = RolloutUsage {
             thread_id: "root".to_owned(),
             turns: vec!["t9".to_owned()],
-            records: Vec::new(),
+            ..RolloutUsage::default()
         }
         .tokens(&[]);
         assert_eq!(quiet.tokens, Some(ModelTokens::total(&[], None)));
@@ -934,6 +1061,7 @@ mod tests {
             tokens: Some(ModelTokens::total(&[], None)),
             source: Some(TokenSource::ModelUsage),
             children: Some(0),
+            context: ExecutionContext::measured(Some(0), None, 0),
             ..ExecutionTokens::default()
         }
         .record(&mut zero);
@@ -945,6 +1073,10 @@ mod tests {
                 "tokens_source": "model_usage",
                 "tokens_reason": null,
                 "children": 0,
+                "peak_context": 0,
+                "context_window": null,
+                "compactions": 0,
+                "context_reason": null,
             })
         );
         let mut unmeasured = json!({});
@@ -957,7 +1089,77 @@ mod tests {
                 "tokens_source": null,
                 "tokens_reason": "no_result",
                 "children": null,
+                "peak_context": null,
+                "context_window": null,
+                "compactions": null,
+                "context_reason": "context_not_read",
             })
+        );
+    }
+
+    /// A Codex Execution's context is that of its own root turns: the
+    /// largest peak, the last window named and the compactions together;
+    /// a turn an earlier Execution counted is left out, and turns without
+    /// a call give no peak (and why) but a measured 0 compactions.
+    #[test]
+    fn a_codex_executions_context_is_that_of_its_own_turns() {
+        let turn = |peak: Option<i64>, window: Option<i64>, compactions: i64| TurnContext {
+            peak,
+            window,
+            compactions,
+        };
+        let rollout = RolloutUsage {
+            thread_id: "root".to_owned(),
+            turns: vec!["t1".to_owned(), "t2".to_owned(), "t3".to_owned()],
+            contexts: BTreeMap::from([
+                ("t0".to_owned(), turn(Some(900_000), Some(1), 7)),
+                ("t1".to_owned(), turn(Some(150_000), Some(258_400), 1)),
+                ("t2".to_owned(), turn(Some(120_000), None, 2)),
+                ("t3".to_owned(), turn(None, None, 0)),
+            ]),
+            ..RolloutUsage::default()
+        };
+        assert_eq!(
+            rollout.tokens(&[]).context,
+            ExecutionContext {
+                peak: Some(150_000),
+                window: Some(258_400),
+                compactions: Some(3),
+                reason: None,
+            }
+        );
+        // A resumed thread's earlier Execution counted t1 and t2.
+        let later = rollout.tokens(&["t1".to_owned(), "t2".to_owned()]);
+        assert_eq!(later.context, ExecutionContext::measured(None, None, 0));
+        let mut payload = json!({});
+        later.record(&mut payload);
+        assert_eq!(
+            (
+                &payload["peak_context"],
+                &payload["compactions"],
+                &payload["context_reason"]
+            ),
+            (&Value::Null, &json!(0), &json!(NO_CALL))
+        );
+    }
+
+    /// The window of a Claude model its output does not name comes from
+    /// one table, which tells a 1M model; an unknown model has none.
+    #[test]
+    fn a_claude_models_window_is_known_or_none() {
+        assert_eq!(claude_context_window("claude-opus-5-5"), Some(1_000_000));
+        assert_eq!(claude_context_window("claude-sonnet-4-5"), Some(200_000));
+        assert_eq!(
+            claude_context_window("claude-sonnet-4-5[1m]"),
+            Some(1_000_000)
+        );
+        assert_eq!(claude_context_window("some-other-model"), None);
+        let mut payload = json!({});
+        ExecutionContext::unmeasured(NO_STREAM).record(&mut payload);
+        assert_eq!(
+            payload,
+            json!({"peak_context": null, "context_window": null, "compactions": null,
+                "context_reason": "no_stream"})
         );
     }
 

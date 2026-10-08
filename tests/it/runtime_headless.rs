@@ -131,6 +131,12 @@ fn a_headless_run_lands_after_its_first_turn() {
     assert_eq!(finished["tokens_source"], "result_usage");
     assert_eq!(finished["tokens_reason"], "model_usage_missing");
     assert_eq!(finished["tokens_by_model"], json!([]));
+    // Its stream has no call's usage: no peak, and why; no compaction is a
+    // measured 0; the stub's model has no window known (request 39).
+    assert_eq!(finished["peak_context"], Value::Null);
+    assert_eq!(finished["context_reason"], "no_call");
+    assert_eq!(finished["compactions"], 0);
+    assert_eq!(finished["context_window"], Value::Null);
     let claimed = payloads(&detail, "run_claimed")[0];
     assert_eq!(claimed["provider"], "claude", "{claimed}");
     assert_eq!(claimed["worker_mode"], "headless", "{claimed}");

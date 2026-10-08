@@ -258,6 +258,17 @@ fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
     );
     assert_eq!(finished["tokens_by_model"][0]["model"], REVIEW_MODEL);
     assert_eq!(finished["children"], 0);
+    // Its context, from the same rollout (request 39).
+    assert_eq!(
+        (
+            &finished["peak_context"],
+            &finished["context_window"],
+            &finished["compactions"],
+            &finished["context_reason"]
+        ),
+        (&json!(13), &json!(258_400), &json!(0), &Value::Null),
+        "{finished}"
+    );
     assert!(payloads(&detail, "review_failed").is_empty());
     let spans = review_spans(&detail);
     assert_eq!(spans.len(), 1, "{spans:?}");
@@ -943,6 +954,12 @@ esac"#
         assert_eq!(turn["tokens_reason"], Value::Null, "{turn}");
         assert_eq!(turn["tokens_turns"], json!([format!("turn-{n}")]), "{turn}");
         assert_eq!(turn["tokens_by_model"][0]["model"], "gpt-test-codex");
+        // Its context is its own root turn's: the resumes' compactions
+        // in the same rollout are not counted again (request 39).
+        assert_eq!(turn["peak_context"], 1000 * n, "{turn}");
+        assert_eq!(turn["context_window"], 258_400, "{turn}");
+        assert_eq!(turn["compactions"], 1, "{turn}");
+        assert_eq!(turn["context_reason"], Value::Null, "{turn}");
     }
     // Each turn records the model Codex used, read from the thread's
     // rollout (task 892).
@@ -1112,6 +1129,9 @@ esac"#
     // from it (ADR-t1486-1).
     assert_eq!(turns[0]["tokens"], Value::Null, "{}", turns[0]);
     assert_eq!(turns[0]["tokens_reason"], "rollout_missing");
+    // Nor is its context: `null` and why, not a 0 (request 39).
+    assert_eq!(turns[0]["compactions"], Value::Null, "{}", turns[0]);
+    assert_eq!(turns[0]["context_reason"], "rollout_missing");
     assert_eq!(
         turns[1]["tokens"],
         json!({"input": 14, "output": 10, "cache_read": 8, "cache_creation": 0, "messages": 1}),

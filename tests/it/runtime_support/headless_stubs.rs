@@ -193,6 +193,7 @@ if [ -n "$REVIEW" ]; then
     for _ in 1 2; do
       printf '{{"timestamp":"%s","type":"token_usage_record","payload":{{"thread_id":"codex-review-thread","session_id":"codex-review-thread","turn_id":"review-turn-%s","root_turn_id":"review-turn-%s","response_id":"resp-%s","usage":{{"input_tokens":13,"cached_input_tokens":3,"output_tokens":4}}}}}}\n' "$NOW" "$REVIEW_CALL" "$REVIEW_CALL" "$REVIEW_CALL" >> "$SESSIONS/rollout-2026-09-29T00-00-00-codex-review-thread.jsonl"
     done
+    printf '{{"timestamp":"%s","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":13}},"model_context_window":258400}}}}}}\n' "$NOW" >> "$SESSIONS/rollout-2026-09-29T00-00-00-codex-review-thread.jsonl"
   fi
   if [ -f {dir}/codex-review-failure.jsonl ]; then
     cat {dir}/codex-review-failure.jsonl
@@ -284,6 +285,11 @@ if [ -f {model} ]; then
       printf '{{"timestamp":"%s","type":"token_usage_record","payload":{{"thread_id":"%s","session_id":"%s","turn_id":"turn-%s","root_turn_id":"turn-%s","response_id":"resp-%s","usage":{{"input_tokens":11,"cached_input_tokens":4,"output_tokens":5,"reasoning_output_tokens":2}}}}}}
 ' "$NOW" "$THREAD" "$THREAD" "$TURN" "$TURN" "$TURN" >> "$ROLLOUT"
     done
+    # The context of the turn: a call as large as 1000 per turn so far,
+    # and one compaction of its own.
+    printf '{{"timestamp":"%s","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":%s}},"model_context_window":258400}}}}}}
+{{"timestamp":"%s","type":"compacted","payload":{{"message":""}}}}
+' "$NOW" "$((TURN * 1000))" "$NOW" >> "$ROLLOUT"
   fi
 fi
 . {turns}

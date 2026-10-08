@@ -3440,7 +3440,7 @@ impl AgentProvider for ClaudeCode {
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(cwd)
-            .args(["-p", "--output-format", "json"]);
+            .args(["-p", "--output-format", "stream-json", "--verbose"]);
         let tools = claude_tools(access);
         if !tools.is_empty() {
             command.arg("--allowedTools").args(tools);
@@ -3451,9 +3451,10 @@ impl AgentProvider for ClaudeCode {
             .stdin(prompt);
         Ok(command)
     }
-    /// `claude -p --output-format json` prints the job's `result` event:
-    /// the reply is its `result` text. An output that is no such event (a
-    /// Claude Code that printed text) is the reply as it is.
+    /// `claude -p --output-format stream-json` prints the job's events,
+    /// the last its `result`: the reply is its `result` text. An output
+    /// without such an event (a Claude Code that printed text) is the reply
+    /// as it is.
     fn job_reply(&self, stdout: &str) -> String {
         match crate::infrastructure::claude_turns::job_result(stdout) {
             Some(result) => result["result"].as_str().unwrap_or_default().to_owned(),
@@ -3462,15 +3463,18 @@ impl AgentProvider for ClaudeCode {
     }
     /// The job's tokens, one Execution in a session of its own
     /// (ADR-t1486-1), from its `result` event: its `modelUsage`, which is
-    /// the job's own. The session id and model are not read here: the
+    /// the job's own; and its context from the stream's events
+    /// ([`crate::infrastructure::claude_turns::ContextCounter`]). The
+    /// session id and model are not read here: the
     /// runtime names the session ahead and its transcript gives the model
     /// (ADR-0048 decision 4).
     fn job_session(&self, stdout: &str, _since: Option<i64>) -> Option<JobSession> {
-        let result = crate::infrastructure::claude_turns::job_result(stdout);
+        use crate::infrastructure::claude_turns::{job_context, job_result, result_tokens};
+        let result = job_result(stdout);
+        let mut tokens = result_tokens(result.as_ref());
+        tokens.context = job_context(stdout, result.as_ref());
         Some(JobSession {
-            tokens: Some(crate::infrastructure::claude_turns::result_tokens(
-                result.as_ref(),
-            )),
+            tokens: Some(tokens),
             ..JobSession::default()
         })
     }
@@ -3506,7 +3510,7 @@ impl AgentProvider for ClaudeCode {
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
-            .args(["-p", "--output-format", "json"])
+            .args(["-p", "--output-format", "stream-json", "--verbose"])
             .arg("--debug-file")
             .arg(run_dir.join("claude-review.log"))
             .arg("--add-dir")
@@ -5214,7 +5218,8 @@ mod tests {
             [
                 "-p",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
                 "--allowedTools",
                 "Bash(dagq:*)",
                 "--disallowedTools",
@@ -5233,7 +5238,8 @@ mod tests {
             [
                 "-p",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
                 "--allowedTools",
                 "Bash(dagq:*)",
                 "--disallowedTools",
@@ -5249,7 +5255,8 @@ mod tests {
             [
                 "-p",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
                 "--allowedTools",
                 "Bash(dagq:*)",
                 "--disallowedTools",
@@ -5264,22 +5271,34 @@ mod tests {
         assert_eq!(plain.get_args().collect::<Vec<_>>(), ["a", "b"]);
     }
 
-    /// A Claude job's reply is the `result` of its JSON output, and its
-    /// end records the job's tokens from the same output, not its session
+    /// A Claude job's reply is the `result` of its stream-json output, and
+    /// its end records the job's tokens and context from the same output
+    /// (the top-level calls', not a subagent's), not its session
     /// or model, which the runtime names and its transcript gives
     /// (ADR-t1486-1). Text output is the reply as it is, with nothing
     /// counted.
     #[test]
-    fn a_claude_jobs_reply_and_tokens_are_read_from_its_json_result() {
+    fn a_claude_jobs_reply_tokens_and_context_are_read_from_its_stream() {
         let claude = ClaudeCode {
             executable: "/bin/claude".into(),
         };
-        let stdout = serde_json::json!({"type": "result", "is_error": false,
-            "result": "{\"verdict\":\"pass\"}", "total_cost_usd": 0.3,
-            "usage": {"input_tokens": 1, "output_tokens": 1},
-            "modelUsage": {"claude-opus-5-5": {"inputTokens": 4, "outputTokens": 9, "costUSD": 0.3}},
-            "subagent_stats": {"spawned": 1}})
-        .to_string();
+        let stdout = [
+            serde_json::json!({"type": "system", "subtype": "init", "model": "claude-opus-5-5"}),
+            serde_json::json!({"type": "assistant", "parent_tool_use_id": null, "message": {
+                "usage": {"input_tokens": 3, "cache_read_input_tokens": 40,
+                    "cache_creation_input_tokens": 5, "output_tokens": 1}}}),
+            // A subagent's call is not the job's context.
+            serde_json::json!({"type": "assistant", "parent_tool_use_id": "toolu_1", "message": {
+                "usage": {"input_tokens": 900, "output_tokens": 1}}}),
+            serde_json::json!({"type": "result", "is_error": false,
+                "result": "{\"verdict\":\"pass\"}", "total_cost_usd": 0.3,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "modelUsage": {"claude-opus-5-5": {"inputTokens": 4, "outputTokens": 9,
+                    "costUSD": 0.3, "contextWindow": 1_000_000}},
+                "subagent_stats": {"spawned": 1}}),
+        ]
+        .map(|event| event.to_string())
+        .join("\n");
         assert_eq!(claude.job_reply(&stdout), "{\"verdict\":\"pass\"}");
         let session = claude.job_session(&stdout, None).unwrap();
         let mut payload = serde_json::json!({"session_id": "named-ahead"});
@@ -5300,6 +5319,20 @@ mod tests {
                 &serde_json::json!(1)
             )
         );
+        assert_eq!(
+            (
+                &payload["peak_context"],
+                &payload["context_window"],
+                &payload["compactions"],
+                &payload["context_reason"]
+            ),
+            (
+                &serde_json::json!(48),
+                &serde_json::json!(1_000_000),
+                &serde_json::json!(0),
+                &serde_json::Value::Null
+            )
+        );
         assert_eq!(claude.job_reply("plain verdict\n"), "plain verdict\n");
         let mut text = serde_json::json!({});
         claude
@@ -5308,6 +5341,8 @@ mod tests {
             .record(&mut text);
         assert_eq!(text["tokens"], serde_json::Value::Null);
         assert_eq!(text["tokens_reason"], "no_result");
+        assert_eq!(text["peak_context"], serde_json::Value::Null);
+        assert_eq!(text["context_reason"], "no_stream");
     }
 
     /// Every headless job's intent becomes the same `--allowedTools` its
@@ -5351,7 +5386,13 @@ mod tests {
             let command = claude
                 .headless_command(Path::new("/tmp/job"), "p", access)
                 .unwrap();
-            let mut expected = vec!["-p", "--output-format", "json", "--allowedTools"];
+            let mut expected = vec![
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--allowedTools",
+            ];
             expected.extend(tools);
             expected.extend(["--disallowedTools", "ScheduleWakeup,CronCreate"]);
             assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{job}");
@@ -5380,7 +5421,8 @@ mod tests {
             [
                 "-p",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
                 "--debug-file",
                 &format!("{run_dir}/claude-review.log"),
                 "--add-dir",

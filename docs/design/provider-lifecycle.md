@@ -184,7 +184,7 @@ runのsessionの区間は、閉じるときに作業の内訳（foregroundのtoo
 区間で使ったトークン数を`session_closed`の`tokens`に記録する。
 
 - 入口: `domain::tokens`（`TokenUsage`・`span_usage`）。
-  非対話のturnとheadlessのjobの1回ごとの記録と今の穴は[Executionのトークン数](execution-tokens.md)。
+  非対話のturnとheadlessのjobの1回ごとの記録（contextの大きさとcompactionを含む）と今の穴は[Executionのトークン数](execution-tokens.md)。
 - transcriptでは同じ`message.id`のレコードを1つのmessageとして1回だけ数え、sidechain（subagent）も数える。
 - コストはClaude Codeがレコードに`costUSD`を書いた版だけ記録し、単価表からは計算しない。
 

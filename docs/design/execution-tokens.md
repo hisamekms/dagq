@@ -45,10 +45,16 @@ turnの`turn_finished`とjobの終わりのeventは、providerによらず同じ
 | `tokens_reason` | 数えられなかった理由か、一部が抜ける元で数えた理由 |
 | `children` | Executionが起こしたsubagent（子のthread）の数。providerが言わなければ`null` |
 | `tokens_turns` | Codexのrolloutから数えたroot turn。同じthreadの後のExecutionが再び数えないため |
+| `peak_context` | 1回のAPI呼び出しの入力側（cacheを含む）の、Executionの中の最大 |
+| `context_window` | modelのcontext window。分からなければ`null` |
+| `compactions` | Executionの中でcontextをcompactした回数 |
+| `context_reason` | `peak_context`か`compactions`を数えられなかった理由 |
 
 - 正常な0は`tokens`の各数が0のobjectで、未計測は`tokens`が`null`で`tokens_reason`を持つ。
 - 非対話の区間は`tokens`が`null`のturnを足さない。
 - 親とsubagentごとの内訳は記録しない（ADR-t1486-1決定7）。
+- contextの欄も、正常な0（compactionの無いExecution）と未計測（`null`と`context_reason`）を分ける。
+  呼び出しが1回も無いExecutionは`peak_context`だけが`null`で、理由を持つ。
 
 ## Claudeの数える元
 
@@ -64,7 +70,7 @@ turnの`turn_finished`とjobの終わりのeventは、providerによらず同じ
 - `modelUsage`の無い出力（古いClaude Code）は`result.usage`で数え、subagentの分が抜けたことを`tokens_reason`が示す。
   Claudeでsubagentの分が抜けるのはこのときだけ。
 - subagentの数は`subagent_stats`から取り、sessionの累計ではなくturnの分である。
-- jobは`--output-format json`で起動し、返答もその`result`から読む。
+- jobは`--output-format stream-json`で起動し、返答もその最後の`result`から読む。
   jobのsessionのidとmodelは、出力からではなく開始とtranscriptから取る。
 
 ## Codexの数える元
@@ -109,9 +115,33 @@ turnの`turn_finished`とjobの終わりのeventは、providerによらず同じ
 - turnの特定: `codex exec --json`の出力の`thread.started`はthreadのidだけ、`turn.started`はidを持たない。
   rolloutの`task_started`はturnのidと時刻を持つので、Executionが始まった時刻で分ける。
 
+## contextの大きさとcompaction
+
+worker や job の context が大きくなりすぎていないかを読むための記録で、トークン数と同じExecutionの同じ出力から取る。
+数えるのはトップレベルのエージェント（Codexはroot thread）の呼び出しだけで、Claudeのsubagentの呼び出しとCodexの子のthreadは混ぜない。
+親とsubagentごとの内訳は記録しない。
+対象は非対話のturnとheadlessのjobで、inboxと人が開いた対話のsessionは対象にしない。
+
+- Claudeは`claude -p --output-format stream-json`の出力（jobも同じ）を読む。
+  - `peak_context`は`assistant`の`usage`の`input_tokens`・`cache_read_input_tokens`・`cache_creation_input_tokens`の和の最大。
+    入力側は生成を始めた時点で決まっているので、streamの途中の`usage`でよい。
+    出力側は使わない。
+  - `compactions`は`system`の`compact_boundary`の数。
+  - subagentのeventは`parent_tool_use_id`を持つので除く。
+  - `--resume`でも読むのは今回のExecutionの出力だけなので、前のExecutionのcompactionは入らない。
+  - `context_window`は`system/init`のmodelの`modelUsage`の`contextWindow`、無ければmodelから決まる値（1か所の対応表に置き、1Mのmodelを区別する）、どちらも無ければ`null`。
+  - 出力がstreamでない（`system/init`が無い）ときは未計測。
+- Codexはroot thread（`thread.started`のid）のrolloutだけを読み、子のthreadのrolloutは読まない。
+  - rolloutの`token_count`と最上位の`compacted`はturnのidを持たないので、直前の`task_started`のturnのものとする。
+  - 今回のExecutionの範囲はトークン数と同じく今回のroot turn（Executionが始まった後に始まり、前のExecutionが数えていないturn）。
+    resumeで同じrolloutに積まれた前のExecutionのturnの`compacted`は数えない。
+  - `peak_context`は範囲の`token_count`の`last_token_usage.input_tokens`（cachedを含む）の最大、`context_window`は`model_context_window`、`compactions`は範囲の`compacted`の数。
+  - rolloutが無い・読めない、または範囲が決まらない（`token_usage_record`の無い旧形式、今回のturnが無い）ときは、0にせず`null`とトークン数と同じ理由にする。
+
 ## 今の穴
 
 - 子のthreadのrolloutはExecutionが始まった後に更新されたファイルから探すので、ファイルの更新時刻が書き換えられると見落とす。
 - 累計に落としたturnが前のturnのrolloutから数えた分を引くとき、その分は子のthreadを含み累計は含まないので、子のthreadがあれば引きすぎうる（0は下回らない）。
 - hookの区間（inbox・人のplanner）は閉じた後にだけ記録するので、長く開いたinboxは閉じた日にまとめて数えられる。
-- streamの`assistant`の`usage`は生成を始めた時点の途中の値なので使わない。
+- streamの`assistant`の`usage`は生成を始めた時点の途中の値なので、トークン数には使わない（`peak_context`は入力側だけなので使う）。
+- Codexのturnの最初の`token_count`が前のExecutionの最後の呼び出しの`last_token_usage`を持ち越すと、その間にcompactionがあったとき`peak_context`を大きく読みうる。

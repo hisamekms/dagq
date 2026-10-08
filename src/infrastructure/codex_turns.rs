@@ -21,6 +21,7 @@
 //! (docs/design/execution-tokens.md). The rollouts are only read.
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -30,8 +31,8 @@ use serde_json::Value;
 
 use crate::application::{Exit, TurnReader};
 use crate::domain::tokens::{
-    ROLLOUT_MISSING, ROLLOUT_TURN_MISSING, ROLLOUT_UNREADABLE, RolloutUsage,
-    TOKEN_USAGE_RECORD_MISSING, TokenSource, TokenUsage, UsageRecord,
+    ExecutionContext, ROLLOUT_MISSING, ROLLOUT_TURN_MISSING, ROLLOUT_UNREADABLE, RolloutUsage,
+    TOKEN_USAGE_RECORD_MISSING, TokenSource, TokenUsage, TurnContext, UsageRecord,
 };
 use crate::domain::turn::{TurnCommand, TurnFailure, TurnResult, TurnSignal, shortened};
 use crate::domain::verify_failure::failed_tests;
@@ -239,24 +240,31 @@ fn stamped_since(stamp: &Value, since: Option<i64>) -> bool {
 /// What one rollout file says of the session `session`: the turns it says
 /// started (`task_started`, with their stamps), its `token_usage_record`s
 /// of the session, each with the model of the `turn_context` before it,
-/// and whether it has any `token_usage_record` at all.
+/// whether it has any `token_usage_record` at all, and the context of each
+/// of its turns: the `token_count`s and top-level `compacted` records after
+/// the turn's `task_started` and before the next one, which name no turn.
 #[derive(Default)]
 struct RolloutFile {
     started: Vec<(Value, String)>,
     records: Vec<UsageRecord>,
     has_records: bool,
+    contexts: BTreeMap<String, TurnContext>,
 }
 
 fn read_rollout(path: &Path, session: &str) -> Result<RolloutFile, &'static str> {
     let file = fs::File::open(path).map_err(|_| ROLLOUT_UNREADABLE)?;
     let mut read = RolloutFile::default();
     let mut model: Option<String> = None;
+    // The root turn the lines read now are of: the last `task_started`.
+    let mut turn: Option<String> = None;
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|_| ROLLOUT_UNREADABLE)?;
         if ![
             "\"turn_context\"",
             "\"task_started\"",
             "\"token_usage_record\"",
+            "\"token_count\"",
+            "\"compacted\"",
         ]
         .iter()
         .any(|kind| line.contains(kind))
@@ -271,9 +279,26 @@ fn read_rollout(path: &Path, session: &str) -> Result<RolloutFile, &'static str>
         match record["type"].as_str() {
             Some("turn_context") => model = payload["model"].as_str().map(str::to_owned),
             Some("event_msg") if payload["type"] == "task_started" => {
-                if let Some(turn) = payload["turn_id"].as_str() {
+                turn = payload["turn_id"].as_str().map(str::to_owned);
+                if let Some(turn) = &turn {
                     read.started
-                        .push((record["timestamp"].clone(), turn.to_owned()));
+                        .push((record["timestamp"].clone(), turn.clone()));
+                    let context = read.contexts.entry(turn.clone()).or_default();
+                    context.window = payload["model_context_window"].as_i64().or(context.window);
+                }
+            }
+            Some("event_msg") if payload["type"] == "token_count" => {
+                let Some(turn) = &turn else { continue };
+                let info = &payload["info"];
+                let context = read.contexts.entry(turn.clone()).or_default();
+                context.peak = context
+                    .peak
+                    .max(info["last_token_usage"]["input_tokens"].as_i64());
+                context.window = info["model_context_window"].as_i64().or(context.window);
+            }
+            Some("compacted") => {
+                if let Some(turn) = &turn {
+                    read.contexts.entry(turn.clone()).or_default().compactions += 1;
                 }
             }
             Some("token_usage_record") => {
@@ -390,10 +415,13 @@ pub fn rollout_usage(
         records.extend(read_rollout(&child, thread)?.records);
     }
     records.retain(|record| turns.contains(&record.root_turn_id));
+    let mut contexts = root.contexts;
+    contexts.retain(|turn, _| turns.contains(turn));
     Ok(RolloutUsage {
         thread_id: thread.to_owned(),
         turns,
         records,
+        contexts,
     })
 }
 
@@ -701,6 +729,12 @@ impl TurnReader for CodexTurnReader {
             tokens_cumulative: true,
             tokens_by_model: Vec::new(),
             children: None,
+            // The rollout's context comes with its tokens; without it, why
+            // it could not be read.
+            context: match &rollout {
+                Ok(rollout) => rollout.tokens(&[]).context,
+                Err(why) => ExecutionContext::unmeasured(why),
+            },
             rollout: rollout.ok(),
             cost_cumulative: false,
             permission_denials: std::mem::take(&mut self.denials),
@@ -1285,6 +1319,12 @@ mod tests {
                 "{thread}"
             );
             assert_eq!(result.tokens_reason, Some(why), "{thread}");
+            // Its context is not measured either, with the same reason.
+            assert_eq!(
+                result.context,
+                ExecutionContext::unmeasured(why),
+                "{thread}"
+            );
             assert!(result.tokens_cumulative);
             assert_eq!(
                 result.tokens.map(|tokens| tokens.payload()),
@@ -1300,6 +1340,126 @@ mod tests {
             );
             assert_eq!(result.tokens_reason, Some(why), "{thread}");
         }
+    }
+
+    /// An Execution's context is read from its root thread's rollout, in
+    /// its own root turns: the largest `last_token_usage.input_tokens` of
+    /// their `token_count`s, the `model_context_window` and their top-level
+    /// `compacted` records. A resumed thread's earlier Execution's
+    /// compactions in the same rollout and a child thread's (in its own
+    /// rollout) are not counted; an Execution without any is a measured 0.
+    #[test]
+    fn an_executions_context_is_its_own_root_turns_in_the_rollout() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let day = sessions.join("2026/10/08");
+        fs::create_dir_all(&day).unwrap();
+        let started = |turn: &str, at: &str| {
+            json!({"timestamp": at, "type": "event_msg", "payload": {"type": "task_started",
+                "turn_id": turn, "root_turn_id": turn, "model_context_window": 258_400}})
+        };
+        let count = |at: &str, input: i64| {
+            json!({"timestamp": at, "type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": 9_999_999},
+                "last_token_usage": {"input_tokens": input, "cached_input_tokens": input / 2},
+                "model_context_window": 258_400}}})
+        };
+        let compacted = |at: &str| {
+            json!({"timestamp": at, "type": "compacted",
+                "payload": {"message": "", "replacement_history": []}})
+        };
+        let record = |turn: &str, at: &str, response: &str| {
+            json!({"timestamp": at, "type": "token_usage_record", "payload": {
+                "thread_id": "root", "turn_id": turn, "session_id": "root", "root_turn_id": turn,
+                "response_id": response, "usage": {"input_tokens": 10, "output_tokens": 1}}})
+        };
+        let write = |name: &str, lines: &[Value]| {
+            let text: Vec<String> = lines.iter().map(Value::to_string).collect();
+            fs::write(day.join(name), text.join("\n") + "\n").unwrap();
+        };
+        let (one, two) = ("2020-01-01T01:00:00.000Z", "2020-01-01T03:00:00.000Z");
+        let read = |since: &str| {
+            let mut reader = CodexTurnReader::reading_since(Some(sessions.clone()), at(since));
+            reader.line(&json!({"type": "thread.started", "thread_id": "root"}).to_string());
+            reader.finish(Some(&exit(0)), "")
+        };
+        // The first Execution: a large call and two compactions.
+        let mut root = vec![
+            json!({"type": "session_meta", "payload": {"id": "root", "session_id": "root"}}),
+            started("t1", one),
+            count(one, 240_000),
+            record("t1", one, "r1"),
+            compacted(one),
+            compacted(one),
+        ];
+        write("rollout-2026-10-08T01-00-00-root.jsonl", &root);
+        let first = read(one);
+        assert_eq!(
+            first.context,
+            ExecutionContext {
+                peak: Some(240_000),
+                window: Some(258_400),
+                compactions: Some(2),
+                reason: None,
+            }
+        );
+        // The resume goes on in the same rollout: one compaction.
+        root.extend([
+            started("t2", two),
+            count(two, 90_000),
+            record("t2", two, "r2"),
+            compacted(two),
+            count(two, 130_000),
+        ]);
+        write("rollout-2026-10-08T01-00-00-root.jsonl", &root);
+        // A child thread of the resume, with a larger call and its own
+        // compaction, in its own rollout.
+        write(
+            "rollout-2026-10-08T03-00-05-child.jsonl",
+            &[
+                json!({"type": "session_meta", "payload": {"id": "child", "session_id": "root"}}),
+                started("c1", two),
+                count(two, 250_000),
+                compacted(two),
+            ],
+        );
+        let resumed = read(two);
+        assert_eq!(
+            resumed.context,
+            ExecutionContext {
+                peak: Some(130_000),
+                window: Some(258_400),
+                compactions: Some(1),
+                reason: None,
+            }
+        );
+        let mut payload = json!({});
+        resumed.rollout.unwrap().tokens(&[]).record(&mut payload);
+        assert_eq!(
+            (
+                &payload["peak_context"],
+                &payload["context_window"],
+                &payload["compactions"]
+            ),
+            (&json!(130_000), &json!(258_400), &json!(1))
+        );
+        // An Execution that compacted nothing is a measured 0.
+        write(
+            "rollout-2026-10-08T05-00-00-quiet.jsonl",
+            &[
+                json!({"type": "session_meta", "payload": {"id": "quiet", "session_id": "quiet"}}),
+                started("q1", "2020-01-01T05:00:00.000Z"),
+                count("2020-01-01T05:00:00.000Z", 50_000),
+                record("q1", "2020-01-01T05:00:00.000Z", "r9"),
+            ],
+        );
+        let mut reader =
+            CodexTurnReader::reading_since(Some(sessions.clone()), at("2020-01-01T05:00:00.000Z"));
+        reader.line(&json!({"type": "thread.started", "thread_id": "quiet"}).to_string());
+        assert_eq!(
+            reader.finish(Some(&exit(0)), "").context,
+            ExecutionContext::measured(Some(50_000), Some(258_400), 0)
+        );
     }
 
     /// The reader keeps each command and tool the turn ran with when the

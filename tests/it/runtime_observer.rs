@@ -565,8 +565,10 @@ if [ "$1" = "-p" ]; then
   # The prompt comes on stdin (task 1560).
   case "$(cat)" in *"daily observation"*) mode=daily ;; esac
   dagq finding record --goal 1 --kind observed --subject "$mode" --summary "observed by $DAGQ_ROLE" >/dev/null || exit $?
-  # `--output-format json`'s result: `modelUsage` counts a subagent that
-  # `usage` leaves out (ADR-t1486-1).
+  # `--output-format stream-json`: the call's input is its context, and its
+  # result's `modelUsage` counts a subagent that `usage` leaves out
+  # (ADR-t1486-1).
+  printf '{"type":"system","subtype":"init","model":"claude-opus-5-5"}\n{"type":"assistant","parent_tool_use_id":null,"message":{"usage":{"input_tokens":5,"cache_read_input_tokens":60,"output_tokens":1}}}\n{"type":"system","subtype":"compact_boundary","parent_tool_use_id":null}\n'
   printf '{"type":"result","subtype":"success","is_error":false,"result":"observed","total_cost_usd":0.5,"usage":{"input_tokens":1,"output_tokens":2},"modelUsage":{"claude-opus-5-5":{"inputTokens":10,"outputTokens":20,"cacheReadInputTokens":30,"cacheCreationInputTokens":40,"costUSD":0.4},"claude-haiku-4-5":{"inputTokens":1,"outputTokens":2,"costUSD":0.1}},"subagent_stats":{"spawned":2}}\n'
   exit 0
 fi
@@ -660,6 +662,19 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
         assert_eq!(f["tokens_source"], "model_usage", "{f}");
         assert_eq!(f["tokens_reason"], Value::Null, "{f}");
         assert_eq!(f["children"], 2, "{f}");
+        // Its context: the largest input of one call, the window of the
+        // init's model (from the table, its `modelUsage` naming none) and
+        // its compactions.
+        assert_eq!(
+            (
+                &f["peak_context"],
+                &f["context_window"],
+                &f["compactions"],
+                &f["context_reason"]
+            ),
+            (&json!(65), &json!(1_000_000), &json!(1), &Value::Null),
+            "{f}"
+        );
         assert_eq!(
             f["tokens_by_model"],
             json!([

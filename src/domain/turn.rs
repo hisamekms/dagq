@@ -20,7 +20,7 @@ use super::{
     DomainError, RunEvent,
     event_kind::{TURN_FINISHED, TURN_REQUESTED, TURN_STARTED},
     stats::timestamp_millis,
-    tokens::{ModelTokens, RolloutUsage, TokenSource, TokenUsage},
+    tokens::{ExecutionContext, ModelTokens, RolloutUsage, TokenSource, TokenUsage},
     transcript::Turn,
 };
 
@@ -556,6 +556,10 @@ pub struct TurnResult {
     /// says (Claude's `subagent_stats.spawned`, the turn's own).
     #[serde(skip)]
     pub children: Option<i64>,
+    /// How large the turn's context grew (Claude's stream; Codex's comes
+    /// with `rollout`, and is not measured, with why, without one).
+    #[serde(skip)]
+    pub context: ExecutionContext,
     /// What Codex's rollouts say of the turn, when they could be counted:
     /// the turn's tokens are taken from them, less the root turns the
     /// thread's earlier turns counted ([`counted_rollout_turns`]), and
