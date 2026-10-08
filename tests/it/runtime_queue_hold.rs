@@ -69,8 +69,15 @@ fn an_open_usage_limit_ask_holds_claims_and_reviews_until_done() {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
+    // The run is claimed before its run dir is recorded; the gate below
+    // needs the dir.
     wait_until(&db, Duration::from_secs(30), |queue| {
-        !queue.show(TaskId::new(1)).unwrap().runs.is_empty()
+        queue
+            .show(TaskId::new(1))
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.run_dir().is_some())
     });
     let first = SqliteQueue::open(&db)
         .unwrap()
@@ -143,7 +150,12 @@ fn an_open_usage_limit_ask_holds_claims_and_reviews_until_done() {
         "{status}"
     );
     wait_until(&db, Duration::from_secs(30), |queue| {
-        !queue.show(TaskId::new(2)).unwrap().runs.is_empty()
+        queue
+            .show(TaskId::new(2))
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.run_dir().is_some())
     });
     wait_until(&db, Duration::from_secs(30), |_| {
         kinds_of(&db, 1).iter().any(|kind| kind == "review_started")

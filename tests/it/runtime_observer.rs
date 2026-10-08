@@ -1017,22 +1017,29 @@ fn observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_fi
     )
     .unwrap();
     // Two days ago, a snapshot gave task 1 a p50 of 1 hour and a p90 of 2;
-    // it completed 4 hours later: late past its p90.
+    // it completed 4 hours later: late past its p90. Both times count from
+    // one whole second read once: each statement's own `now` may fall on
+    // either side of a second, and the error is scored in whole seconds.
     let conn = Connection::open(&db).unwrap();
+    let now: i64 = conn
+        .query_row("SELECT CAST(strftime('%s','now') AS INTEGER)", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
     conn.execute(
         "INSERT INTO run_events(kind, payload, created_at) VALUES ('forecast_recorded',
-           json_object('at_secs', CAST(strftime('%s','now','-40 hours') AS INTEGER), 'method', 1,
+           json_object('at_secs', ?1 - 40 * 3600, 'method', 1,
              'tasks', json_array(json_object('id', 1, 'p50_secs', 3600, 'p90_secs', 7200)),
              'goals', json_array()),
-           strftime('%Y-%m-%dT%H:%M:%fZ','now','-40 hours'))",
-        [],
+           strftime('%Y-%m-%dT%H:%M:%fZ', ?1 - 40 * 3600, 'unixepoch'))",
+        [now],
     )
     .unwrap();
     conn.execute(
         "INSERT INTO run_events(task_id, kind, payload, created_at) VALUES (1, 'task_status_changed',
            json_object('from', 'in_progress', 'to', 'completed'),
-           strftime('%Y-%m-%dT%H:%M:%fZ','now','-36 hours'))",
-        [],
+           strftime('%Y-%m-%dT%H:%M:%fZ', ?1 - 36 * 3600, 'unixepoch'))",
+        [now],
     )
     .unwrap();
     drop(conn);
