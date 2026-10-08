@@ -270,6 +270,16 @@ esac"#,
     );
     let requested = payloads(&detail, "turn_requested");
     assert_eq!(requested[0]["what"], "revise request", "{requested:?}");
+    // The findings' bytes, held to the revise request's limit
+    // (ADR-t2072-1).
+    let bytes = &requested[0]["prompt_bytes"];
+    assert_eq!(bytes["limit"], 30_000, "{bytes}");
+    assert_eq!(
+        bytes["sections"]["findings"],
+        "- name the file".len(),
+        "{bytes}"
+    );
+    assert_eq!(bytes["omitted"], json!({}), "{bytes}");
     assert_eq!(reviewer.prompts().len(), 2);
     let finished = payloads(&detail, "turn_finished");
     assert_eq!(finished.len(), 2, "{finished:?}");

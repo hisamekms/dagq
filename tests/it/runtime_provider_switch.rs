@@ -302,6 +302,14 @@ esac"#
         .map(|p| &p["what"])
         .collect();
     assert_eq!(requested, [&json!("provider switch")]);
+    // Its bytes, held to its limit (ADR-t2072-1).
+    let bytes = &payloads(&detail, "turn_requested")[0]["prompt_bytes"];
+    assert_eq!(bytes["limit"], 42_000, "{bytes}");
+    assert!(
+        bytes["sections"]["message"].as_u64().unwrap() > 0,
+        "{bytes}"
+    );
+    assert_eq!(bytes["over_limit"], Value::Null, "{bytes}");
     let limited = payloads(&detail, "usage_limited");
     assert_eq!(limited[0]["switched_to"], "codex", "{limited:?}");
     assert!(queue_events(&db, "provider_held").is_empty());
@@ -716,6 +724,11 @@ esac"#
         .map(|p| &p["what"])
         .collect();
     assert_eq!(requested, [&json!("provider retry")]);
+    // Its bytes, held to its limit (ADR-t2072-1).
+    let bytes = &payloads(&detail, "turn_requested")[0]["prompt_bytes"];
+    assert_eq!(bytes["limit"], 42_000, "{bytes}");
+    assert!(bytes["total"].as_u64().unwrap() > 0, "{bytes}");
+    assert_eq!(bytes["over_limit"], Value::Null, "{bytes}");
     let calls = stub_calls(&detail.runs[0]);
     assert!(calls[1].starts_with("resume codex-thread-1 "), "{calls:?}");
     assert!(
@@ -786,6 +799,11 @@ esac"#
         .map(|p| &p["what"])
         .collect();
     assert_eq!(requested, [&json!("provider retry")]);
+    // Its bytes, held to its limit (ADR-t2072-1).
+    let bytes = &payloads(&detail, "turn_requested")[0]["prompt_bytes"];
+    assert_eq!(bytes["limit"], 42_000, "{bytes}");
+    assert!(bytes["total"].as_u64().unwrap() > 0, "{bytes}");
+    assert_eq!(bytes["over_limit"], Value::Null, "{bytes}");
     let calls = stub_calls(run);
     assert!(calls[1].starts_with("resume codex-thread-1 "), "{calls:?}");
     assert!(

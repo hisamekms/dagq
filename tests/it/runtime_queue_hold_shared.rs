@@ -256,6 +256,16 @@ fn done_tells_the_held_sessions_of_every_supervisor_to_go_on() {
         assert_eq!(sent.len(), 1, "{sent:?}");
         assert_eq!(sent[0]["ask_id"], json!(held.ask.id));
         assert!(payloads(&detail, "runtime_error").is_empty());
+        // Its bytes, held to the next turn's limit (ADR-t2072-1).
+        let continued: Vec<&Value> = payloads(&detail, "turn_requested")
+            .into_iter()
+            .filter(|p| p["what"] == "continue")
+            .collect();
+        assert_eq!(continued.len(), 1, "{continued:?}");
+        let bytes = &continued[0]["prompt_bytes"];
+        assert_eq!(bytes["limit"], 16_000, "{bytes}");
+        assert!(bytes["total"].as_u64().unwrap() > 0, "{bytes}");
+        assert_eq!(bytes["omitted"], json!({}), "{bytes}");
     }
     let applied = applied_to_each(db, runs);
     for (payload, run) in applied.iter().zip(runs) {

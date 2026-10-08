@@ -18,7 +18,6 @@ use crate::domain::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
 use crate::domain::headless_job::JobSession;
-use crate::domain::language::with_instruction;
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::review_reason;
 use crate::domain::review_subagents::{AgentDefinition, Destination, VerdictRoute};
@@ -844,14 +843,25 @@ impl Supervisor<'_> {
             return Ok(ask(why, verdict, session));
         };
         let task = self.queue.show(run.task_id())?.task;
-        let message = with_instruction(
-            revise_request(&task, run, round, &verdict.reasons)?,
-            self.verifier.language().as_ref(),
-        );
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        let findings_file = run_dir.join(format!("revise-{attempt}-findings.txt"));
+        let message = revise_request(
+            &task,
+            run,
+            round,
+            &verdict.reasons,
+            Some(&findings_file.to_string_lossy()),
+        )?
+        .with_language(self.verifier.language().as_ref());
+        // The request names the file as where the cut findings are whole
+        // (ADR-t2072-1).
+        if message.bytes.omitted.contains_key("findings") {
+            self.files
+                .write(&findings_file, revise_findings(&verdict.reasons).as_bytes())?;
+        }
         self.files.write(
             &run_dir.join(format!("revise-{attempt}.txt")),
-            message.as_bytes(),
+            message.text.as_bytes(),
         )?;
         // A revise is rework the task caused: the live session is
         // switched one step up before the request (ADR-0079 decision
@@ -884,7 +894,7 @@ impl Supervisor<'_> {
             self,
             run,
             &live.workspace,
-            Input::Text(&message),
+            Input::from(&message),
             "revise request",
         ) {
             Ok(submission) => submission,

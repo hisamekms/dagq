@@ -756,3 +756,21 @@ task = 2079
 name = "provider_executables::the_supervisors_entry_keeps_a_link_and_finds_a_gone_claude_again_on_path"
 reason = "B 境界（プロセス・supervisor の配線）: 実の dagq supervise の process の入口が link を保ち、それが observer の job の argv と agent の起動まで届くこと、消えた path を PATH で解決し直して起動すること、PATH に無ければ入口で落ち --no-claude では解決しないことを、4 つの supervisor の起動で確かめる。解決の判断は adapters の unit test"
 task = 2079
+
+# 5.4s
+[[test]]
+name = "runtime_handoff::a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it_once"
+reason = "B 境界（復旧と adopt・supervisor の配線）: 引き継ぎの handoff.json が運んだ未送信の resume の依頼を次のプロセスが 1 回だけ送り、組み立てたときの prompt_bytes を turn_requested に記録する。測り直しと切り方の判断は prompt.rs の unit test"
+task = 2123
+
+# 5.5s
+[[test]]
+name = "runtime_handoff::a_resume_request_from_an_old_handoff_state_is_measured_and_cut_to_its_limit"
+reason = "B 境界（復旧と adopt・supervisor の配線）: prompt_bytes の無い古い handoff.json の未送信の resume の依頼を次のプロセスが測り直して切り、記録する。測り直しと切り方の判断は prompt.rs の unit test"
+task = 2123
+
+# 5.6s
+[[test]]
+name = "runtime_handoff::a_resume_request_adopted_after_a_handoff_is_measured_and_cut_to_its_limit"
+reason = "B 境界（復旧と adopt・supervisor の配線）: handoff.json の無い引き継ぎで記録と resume-<attempt>.txt から adopt した未送信の resume の依頼を、生きている wrapper に測り直して切って送り、記録する。測り直しと切り方の判断は prompt.rs の unit test"
+task = 2123

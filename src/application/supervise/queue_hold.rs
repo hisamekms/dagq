@@ -440,9 +440,9 @@ impl SessionWatch {
         let sent_at = sv.files.now();
         let workspace = self.workspace.clone();
         let text = continue_text(run);
-        match submit(sv, run, &workspace, Input::Text(&text), "continue") {
+        match submit(sv, run, &workspace, Input::from(&text), "continue") {
             Ok(submission) => {
-                self.stall.input_sent(sent_at, Some(&text));
+                self.stall.input_sent(sent_at, Some(&text.text));
                 self.answer_start = Some(sent_at);
                 sv.queue.record_runtime_event(
                     run.id(),

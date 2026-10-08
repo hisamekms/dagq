@@ -334,6 +334,7 @@ impl Supervisor<'_> {
                         &live.workspace,
                         "revise request",
                         &format!("revise-{attempt}.txt"),
+                        REVISE_REQUEST_LIMIT,
                     )
                     .then_some(sent_at);
                 let mut watch = ReviseWatch::new(
@@ -366,6 +367,7 @@ impl Supervisor<'_> {
                         &live.workspace,
                         "conflict request",
                         &format!("conflict-{attempt}.txt"),
+                        RESUME_REQUEST_LIMIT,
                     )
                     .then_some(sent_at);
                 let mut watch = ReviseWatch::new(
@@ -537,6 +539,11 @@ impl Supervisor<'_> {
     /// unlike the first send, it records no `revise_unsent` or `unsent`,
     /// since the request was recorded already, and the person is asked
     /// after the resume timeout. Whether its text was read.
+    ///
+    /// The text is written as what it took measured anew against `limit`,
+    /// the whole limit of its kind, and one past it (written before the
+    /// limits) keeps its start and names `file` (ADR-t2072-1).
+    #[allow(clippy::too_many_arguments)]
     fn adopted_start(
         &mut self,
         run: &TaskRun,
@@ -545,6 +552,7 @@ impl Supervisor<'_> {
         workspace: &str,
         what: &str,
         file: &str,
+        limit: usize,
     ) -> bool {
         let Some(run_dir) = run.run_dir().map(Path::new) else {
             return false;
@@ -565,13 +573,17 @@ impl Supervisor<'_> {
                 return true;
             }
         };
-        match turn::adopted_delivery(&requests, what, &text, after) {
+        // Written whole by the supervisor that recorded it, or held to its
+        // limit by an earlier adopter: either is its delivery.
+        let request = restored_request(&text, limit, &path);
+        match turn::adopted_delivery(&requests, what, &[&text, &request.text], after) {
             turn::AdoptedDelivery::Delivered(seq) => {
                 info!(run_id = %run.id(), "the adopted {what} of {} was written as request {seq}; it is not written again", run.id());
             }
             turn::AdoptedDelivery::Write => {
                 info!(run_id = %run.id(), "the adopted {what} of {} was recorded but not written; writing it once", run.id());
-                if let Err(error) = request_turn(self, run, workspace, Input::Text(&text), what) {
+                if let Err(error) = request_turn(self, run, workspace, Input::from(&request), what)
+                {
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the adopted {what} of {} could not be written: {error:#}", run.id());
                 }
             }

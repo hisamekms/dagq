@@ -474,7 +474,7 @@ impl Supervisor<'_> {
             started_at: self.files.now(),
             startup: now,
             message: message.text,
-            message_bytes: Some(message.bytes),
+            message_bytes: message.bytes,
 
             message_sent: None,
             start: None,
@@ -512,12 +512,26 @@ impl Supervisor<'_> {
             attempt,
             started_at,
             message,
+            message_bytes,
             message_sent_at,
             exit_requested,
 
             exit_for_silence,
             approved,
         } = state;
+        let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
+        // A request taken over without what it took (from a `handoff.json`
+        // written before it carried that, or adopted from the run's files)
+        // is measured anew, and one past its whole limit, written before
+        // the limits, is cut (ADR-t2072-1).
+        let (message, message_bytes) = match message_bytes {
+            Some(bytes) => (message, bytes),
+            None => {
+                let file = run_dir.join(format!("resume-{attempt}.txt"));
+                let fitted = restored_request(&message, RESUME_REQUEST_LIMIT, &file);
+                (fitted.text, fitted.bytes)
+            }
+        };
         let task = self.queue.show(run.task_id())?.task;
         let now = self.generators.clock.monotonic();
         // Answers are followed from the request on. A delivered answer
@@ -560,13 +574,13 @@ impl Supervisor<'_> {
             delivered_closed: None,
             workspace,
             attempt,
-            run_dir: PathBuf::from(run.run_dir().context("missing run directory")?),
+            run_dir,
             receipt_path: PathBuf::from(run.receipt_path().context("missing receipt path")?),
             idle_marker: run.idle_marker_path()?,
             started_at,
             startup: now,
             message,
-            message_bytes: None,
+            message_bytes,
 
             // The resume timeout runs from the send, not the takeover.
             message_sent: message_sent_at.map(|at| {
@@ -630,6 +644,7 @@ impl Supervisor<'_> {
                 attempt,
                 started_at,
                 message,
+                message_bytes: None,
                 message_sent_at,
 
                 exit_requested: exit.is_some(),
@@ -911,9 +926,9 @@ pub(super) struct ResumeWatch {
     pub(super) startup: Instant,
     pub(super) message: String,
     /// What `message` takes (ADR-t2072-1), recorded on the request's
-    /// `turn_requested`; `None` for a message an adopter took over from a
-    /// snapshot.
-    pub(super) message_bytes: Option<PromptBytes>,
+    /// `turn_requested`: as it was built, or measured anew when the message
+    /// was taken over without it ([`Supervisor::rebuilt_resume`]).
+    pub(super) message_bytes: PromptBytes,
 
     /// When the resolution request was sent (for its timeout, and for the
     /// idle marker of the response to it).
@@ -982,6 +997,9 @@ pub(super) struct ResumeState {
     pub(super) attempt: usize,
     pub(super) started_at: SystemTime,
     pub(super) message: String,
+    /// What `message` took when it was built; `None` when that was not
+    /// carried over (an adoption, an older `handoff.json`).
+    pub(super) message_bytes: Option<PromptBytes>,
     pub(super) message_sent_at: Option<SystemTime>,
     pub(super) exit_requested: bool,
 
@@ -1209,12 +1227,9 @@ impl ResumeWatch {
     fn send_request(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
         let sent_at = sv.files.now();
         let message = self.message.clone();
-        let input = match &self.message_bytes {
-            Some(bytes) => Input::Prompt {
-                text: &message,
-                bytes,
-            },
-            None => Input::Text(&message),
+        let input = Input::Prompt {
+            text: &message,
+            bytes: &self.message_bytes,
         };
         let _submission = submit(sv, run, &self.workspace, input, "resolution request")?;
         self.message_sent = Some((sv.generators.clock.monotonic(), sent_at));

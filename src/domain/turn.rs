@@ -462,7 +462,8 @@ pub enum AdoptedDelivery {
 }
 
 /// Whether the request of an adopted attempt is among `requests`: one of
-/// the same `what` and the attempt's `text`, numbered after `after` (the
+/// the same `what` and one of the attempt's `texts` (as its file has it,
+/// and as an earlier adopter wrote it held to its limit), numbered after `after` (the
 /// last `turn_requested` recorded before the attempt's record, which an
 /// earlier attempt's request cannot be numbered after), waiting or taken.
 /// `what` is the same for every attempt, so it alone names none; a dropped
@@ -470,7 +471,7 @@ pub enum AdoptedDelivery {
 pub fn adopted_delivery(
     requests: &[ListedRequest],
     what: &str,
-    text: &str,
+    texts: &[&str],
     after: Option<u64>,
 ) -> AdoptedDelivery {
     requests
@@ -478,7 +479,7 @@ pub fn adopted_delivery(
         .filter(|listed| listed.state != RequestState::Dropped)
         .map(|listed| &listed.request)
         .filter(|request| after.is_none_or(|after| request.seq > after))
-        .find(|request| request.what == what && request.prompt == text)
+        .find(|request| request.what == what && texts.contains(&request.prompt.as_str()))
         .map_or(AdoptedDelivery::Write, |request| {
             AdoptedDelivery::Delivered(request.seq)
         })
@@ -1102,7 +1103,7 @@ mod tests {
         let second = "revise 2: fix the docs";
         // Nothing written: write it.
         assert_eq!(
-            adopted_delivery(&[], WHAT, second, Some(1)),
+            adopted_delivery(&[], WHAT, &[second], Some(1)),
             AdoptedDelivery::Write
         );
         // An earlier attempt's request of the same what, in any state,
@@ -1113,7 +1114,7 @@ mod tests {
             RequestState::Dropped,
         ] {
             assert_eq!(
-                adopted_delivery(&[listed(1, state, WHAT, first)], WHAT, second, Some(1)),
+                adopted_delivery(&[listed(1, state, WHAT, first)], WHAT, &[second], Some(1)),
                 AdoptedDelivery::Write
             );
         }
@@ -1124,7 +1125,7 @@ mod tests {
             adopted_delivery(
                 &[listed(1, RequestState::Taken, WHAT, second)],
                 WHAT,
-                second,
+                &[second],
                 Some(1)
             ),
             AdoptedDelivery::Write
@@ -1138,7 +1139,7 @@ mod tests {
                         listed(2, state, WHAT, second)
                     ],
                     WHAT,
-                    second,
+                    &[second],
                     Some(1)
                 ),
                 AdoptedDelivery::Delivered(2)
@@ -1149,7 +1150,7 @@ mod tests {
             adopted_delivery(
                 &[listed(2, RequestState::Dropped, WHAT, second)],
                 WHAT,
-                second,
+                &[second],
                 Some(1)
             ),
             AdoptedDelivery::Write
@@ -1159,7 +1160,7 @@ mod tests {
             adopted_delivery(
                 &[listed(2, RequestState::Pending, "nudge", second)],
                 WHAT,
-                second,
+                &[second],
                 Some(1)
             ),
             AdoptedDelivery::Write
@@ -1170,10 +1171,22 @@ mod tests {
             adopted_delivery(
                 &[listed(1, RequestState::Taken, WHAT, first)],
                 WHAT,
-                first,
+                &[first],
                 None
             ),
             AdoptedDelivery::Delivered(1)
+        );
+        // An earlier adopter wrote it held to its limit: that is its
+        // delivery too, and it is not written again (ADR-t2072-1).
+        let cut = "revise 2: fix [… 9 bytes left out]";
+        assert_eq!(
+            adopted_delivery(
+                &[listed(2, RequestState::Pending, WHAT, cut)],
+                WHAT,
+                &[second, cut],
+                Some(1)
+            ),
+            AdoptedDelivery::Delivered(2)
         );
     }
 

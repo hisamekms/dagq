@@ -419,6 +419,34 @@ impl Fit {
     }
 }
 
+impl Fit {
+    /// `text`, a message built and held to its limits before, measured
+    /// anew as the one section `name`: whole within the limit, else its
+    /// start within it ([`cut`]) with its note and `read`, counted as one
+    /// item cut and said in `over_limit`. Its language's instruction, if
+    /// any, is in `text` already, so the whole limit is the room.
+    pub(crate) fn restored(mut self, name: &'static str, text: &str, read: &str) -> FittedPrompt {
+        let limit = self.bytes.limit;
+        let text = match cut(text, limit, Keep::Start, read) {
+            Some((cut, left_out)) => {
+                self.omit(name, 1);
+                self.over(format!(
+                    "{name}: {left_out} of {} bytes left out by its limit of {limit}",
+                    text.len()
+                ));
+                cut
+            }
+            None => text.to_owned(),
+        };
+        self.section(name, &text);
+        self.bytes.total = text.len();
+        FittedPrompt {
+            text,
+            bytes: self.bytes,
+        }
+    }
+}
+
 impl FittedPrompt {
     /// The prompt with the language's instruction as its last paragraph
     /// (ADR-t616-2), counted in its bytes as `language`.

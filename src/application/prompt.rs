@@ -444,9 +444,28 @@ fn to_session(_run: &TaskRun, text: String) -> String {
 }
 
 /// The text that tells a session held by a login or a usage limit to go
-/// on, once a person answered the hold's ask `done`.
-pub(crate) fn continue_text(run: &TaskRun) -> String {
-    to_session(run, crate::domain::queue_hold::CONTINUE_TEXT.to_owned())
+/// on, once a person answered the hold's ask `done`. It has no text of
+/// variable length: its bytes are counted against [`NEXT_TURN_LIMIT`] like
+/// the other next turns'.
+pub(crate) fn continue_text(run: &TaskRun) -> FittedPrompt {
+    Fit::new(NEXT_TURN_LIMIT).finish(to_session(
+        run,
+        crate::domain::queue_hold::CONTINUE_TEXT.to_owned(),
+    ))
+}
+
+/// A request written to a file of the run directory before it was sent,
+/// sent again from that file without what it took (by the next process
+/// after a handoff whose `handoff.json` did not carry it, by an adopter):
+/// measured anew as the one section `request` against `limit`, the whole
+/// limit of its kind. One past it (written before the limits) keeps its
+/// start, with the bytes left out and `file`, which has it whole.
+pub(crate) fn restored_request(text: &str, limit: usize, file: &Path) -> FittedPrompt {
+    Fit::new(limit).restored(
+        "request",
+        text,
+        &format!("the whole request is in {}", file.display()),
+    )
 }
 
 /// The bytes a next-turn message other than the resolution request takes
@@ -476,6 +495,30 @@ pub const NEXT_TURN_WHY_BYTES: usize = 2_000;
 /// receipt names (a commit ID takes 40 or 64 bytes, but the worker writes
 /// it) and who closed an ask (a role and an actor ID).
 pub const NEXT_TURN_NAME_BYTES: usize = 300;
+
+/// The bytes a provider's retry or switch request (`retry_text` and
+/// `switch_text` of the supervisor's provider module) takes at most
+/// (ADR-t2072-1): its fixed text (under 1,000 bytes with a commit ID of
+/// 64), the provider's message ([`PROVIDER_MESSAGE_BYTES`]), the name
+/// ([`NEXT_TURN_NAME_BYTES`]) and text ([`UNDELIVERED_REQUEST_BYTES`]) of
+/// the request the failed turn did not get to and the notes of what was
+/// cut, with the language's room. The switch requests kept on the host on
+/// 2026-10-08 took 21,541 bytes at most, nearly all of it that request.
+pub const PROVIDER_TURN_LIMIT: usize = 42_000;
+
+/// The bytes of the request a failed turn did not get to, carried by the
+/// retry or switch request whatever it was (a first request, a retry or
+/// switch request that failed in its turn too, one written before the
+/// limits): the largest whole limit of a next turn
+/// ([`RESUME_REQUEST_LIMIT`]), so a request held to its limit is carried
+/// whole and one wrapped again and again stops growing here. What is cut
+/// is in the request's file in the run directory's `turns/`.
+pub const UNDELIVERED_REQUEST_BYTES: usize = RESUME_REQUEST_LIMIT;
+
+/// The bytes of the message a provider's failed turn ended with, which a
+/// switch request quotes: the provider writes it, usually one line. The
+/// worker cannot read the queue, so what is cut is in no file it can read.
+pub const PROVIDER_MESSAGE_BYTES: usize = 2_000;
 
 /// The text that carries a person's answer to the session that asked,
 /// held to [`NEXT_TURN_LIMIT`]: the answer to [`NEXT_TURN_TEXT_BYTES`].
@@ -4211,14 +4254,41 @@ pub fn recovery_prompt(
 /// The fixed request the supervisor types into the live session for a
 /// `revise` verdict (ADR-0027 decision 2), one instruction per line; the
 /// backend sends it as one line.
+///
+/// Held to [`REVISE_REQUEST_LIMIT`] (ADR-t2072-1): the findings, as one
+/// section, are cut to [`REVISE_FINDINGS_BYTES`] and point at
+/// `findings_file`; the verification commands are the task's own and cut
+/// only past [`WORKER_VERIFY_BYTES`], said in `over_limit`; the steps are
+/// never cut.
 pub(crate) fn revise_request(
     task: &Task,
     run: &TaskRun,
     round: usize,
     reasons: &[String],
-) -> Result<String> {
+    findings_file: Option<&str>,
+) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
-    let checks = local_checks(&serde_json::to_string(task.verification_commands())?);
+    let mut fit = Fit::new(REVISE_REQUEST_LIMIT);
+    let findings_read = findings_file.map_or_else(
+        || NOT_READABLE.to_owned(),
+        |file| format!("the whole findings are in {file}"),
+    );
+    let findings = fit.text(
+        "findings",
+        &revise_findings(reasons),
+        REVISE_FINDINGS_BYTES,
+        Keep::Start,
+        &findings_read,
+    );
+    fit.section("findings", &findings);
+    let verify = fit.required(
+        "verify",
+        &serde_json::to_string(task.verification_commands())?,
+        WORKER_VERIFY_BYTES,
+        NOT_READABLE,
+    );
+    fit.section("verify", &verify);
+    let checks = local_checks(&verify);
     let route = Route::of(run);
     let mut lines = route.opening(format!(
         "dagq: the supervisor's review of run {} (task {}) asks for changes (revise {round} of {MAX_REVISE_ATTEMPTS}).",
@@ -4226,8 +4296,8 @@ pub(crate) fn revise_request(
         task.id()
     ));
     lines.push("Findings:".to_owned());
-    for reason in reasons {
-        lines.push(format!("- {reason}"));
+    if !findings.is_empty() {
+        lines.push(findings);
     }
     lines.push("Steps:".to_owned());
     lines.push("1. Fix the findings in this worktree and commit.".to_owned());
@@ -4238,8 +4308,32 @@ pub(crate) fn revise_request(
         "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it. {ACCEPTANCE_REMAP} {FOLLOW_UP_PROPOSAL_AGAIN}"
     ));
     lines.push(format!("6. {}", route.done(run)));
-    Ok(lines.join("\n"))
+    Ok(fit.finish(lines.join("\n")))
 }
+
+/// The findings of a revise request, one line each: what the request
+/// carries, and what its `findings_file` holds whole when it was cut.
+pub(crate) fn revise_findings(reasons: &[String]) -> String {
+    reasons
+        .iter()
+        .map(|reason| format!("- {reason}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The bytes a revise request (`revise_request`) takes at most, the
+/// language's instruction included (ADR-t2072-1): its fixed opening and
+/// steps (under 3,000 bytes), the findings ([`REVISE_FINDINGS_BYTES`]),
+/// the verification commands ([`WORKER_VERIFY_BYTES`]) as in the worker's
+/// prompt and the notes of what was cut, with the language's room. The
+/// revise requests kept on the host on 2026-10-08 took 4,227 bytes at the
+/// median and 10,727 at most, nearly all of it the findings.
+pub const REVISE_REQUEST_LIMIT: usize = 30_000;
+
+/// The bytes of a revise request's findings, all of them as one section:
+/// about twice the longest request seen ([`REVISE_REQUEST_LIMIT`]). What is
+/// cut is in the request's findings file in the run directory.
+pub const REVISE_FINDINGS_BYTES: usize = 20_000;
 
 /// What the headless plan review may do beyond what needs no permission:
 /// read files, and run the dagq CLI (ADR-0044 decision 22, ADR-t1063-1
@@ -4447,6 +4541,53 @@ pub struct PromptBytes {
     pub sections: BTreeMap<&'static str, usize>,
     pub omitted: BTreeMap<&'static str, usize>,
     pub over_limit: Option<String>,
+}
+
+/// Read back from what a process wrote for the next one (a resume's
+/// `handoff.json`), so that a request sent after a handoff records what it
+/// took when it was built.
+impl<'de> serde::Deserialize<'de> for PromptBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Written {
+            total: usize,
+            limit: usize,
+            #[serde(default)]
+            sections: BTreeMap<String, usize>,
+            #[serde(default)]
+            omitted: BTreeMap<String, usize>,
+            #[serde(default)]
+            over_limit: Option<String>,
+        }
+        let written = Written::deserialize(deserializer)?;
+        let names = |map: BTreeMap<String, usize>| {
+            map.into_iter()
+                .map(|(name, bytes)| (section_name(name), bytes))
+                .collect()
+        };
+        Ok(Self {
+            total: written.total,
+            limit: written.limit,
+            sections: names(written.sections),
+            omitted: names(written.omitted),
+            over_limit: written.over_limit,
+        })
+    }
+}
+
+/// A section's name read back as the `&'static str` [`PromptBytes`] keys
+/// by: the runtime's own few names, each kept once for the process.
+fn section_name(name: String) -> &'static str {
+    static NAMES: std::sync::Mutex<BTreeSet<&'static str>> = std::sync::Mutex::new(BTreeSet::new());
+    let mut names = NAMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(known) = names.get(name.as_str()) {
+        return known;
+    }
+    let kept: &'static str = Box::leak(name.into_boxed_str());
+    names.insert(kept);
+    kept
 }
 
 /// The plan review prompt and what it takes.
@@ -6014,7 +6155,9 @@ mod tests {
             );
         }
 
-        let revise = revise_request(&verified, &own_run, 1, &["fix it".into()]).unwrap();
+        let revise = revise_request(&verified, &own_run, 1, &["fix it".into()], None)
+            .unwrap()
+            .text;
         assert!(revise.contains(&format!("2. {}", local_checks(r#"["make gate"]"#))));
         assert!(revise.contains(default), "{revise}");
     }
@@ -7056,7 +7199,11 @@ mod tests {
             };
             texts.push(resume_request(task, run, &request, &[]).unwrap().text);
         }
-        texts.push(revise_request(task, run, 1, &["fix it".into()]).unwrap());
+        texts.push(
+            revise_request(task, run, 1, &["fix it".into()], None)
+                .unwrap()
+                .text,
+        );
         texts.push(
             revise_mismatch_request(run, "the revise", "stale")
                 .unwrap()
@@ -7067,7 +7214,7 @@ mod tests {
         texts.push(stall_nudge(run).unwrap().text);
         texts.push(answer_text(run, 3, "blue").text);
         texts.push(recovery_instruction(run, "stalled", "write the receipt").text);
-        texts.push(continue_text(run));
+        texts.push(continue_text(run).text);
         texts
     }
 
@@ -10393,5 +10540,145 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// ADR-t2072-1: within its limits (no findings, a few, or all of them
+    /// at the section's limit) a revise request carries its findings, one
+    /// line each, and its steps as before, with no note of what was left
+    /// out, and records no cut; so does the text to go on after a hold.
+    #[test]
+    fn within_its_limits_a_revise_request_carries_its_findings_whole() {
+        let run = run_on(Provider::Claude, WorkerMode::Headless);
+        let task = task_with_lists(vec!["src/".into()], vec!["make gate".into()]);
+        // Each finding line is "- " and the finding, joined by newlines.
+        let at_limit = vec!["f".repeat(REVISE_FINDINGS_BYTES - 2)];
+        let few = vec!["name the file".to_owned(), "add a test".to_owned()];
+        for reasons in [vec![], few, at_limit] {
+            let fitted = revise_request(&task, &run, 1, &reasons, Some("/runs/run/f.txt")).unwrap();
+            let findings = reasons
+                .iter()
+                .map(|reason| format!("- {reason}\n"))
+                .collect::<String>();
+            let steps = format!(
+                "Findings:\n{findings}Steps:\n1. Fix the findings in this worktree and commit.\n2. {}\n3. Keep the worktree clean.\n4. {HEADLESS_STOP}\n5. Rewrite the receipt at /runs/run/receipt.json with the new head commit",
+                local_checks(r#"["make gate"]"#)
+            );
+            assert!(fitted.text.contains(&steps), "{}", fitted.text);
+            assert!(fitted.text.contains("\n6. "));
+            assert!(fitted.bytes.omitted.is_empty(), "{:?}", fitted.bytes);
+            assert_eq!(fitted.bytes.over_limit, None);
+            assert_eq!(fitted.bytes.limit, REVISE_REQUEST_LIMIT);
+            assert_eq!(fitted.bytes.total, fitted.text.len());
+            assert!(!fitted.text.contains("left out by"));
+        }
+        let fitted = continue_text(&run);
+        assert_eq!(
+            fitted.text,
+            format!(
+                "{}\n\n{HEADLESS_GO_ON}",
+                crate::domain::queue_hold::CONTINUE_TEXT
+            )
+        );
+        assert_eq!(fitted.bytes.limit, NEXT_TURN_LIMIT);
+        assert_eq!(fitted.bytes.total, fitted.text.len());
+        assert!(fitted.bytes.omitted.is_empty());
+    }
+
+    /// ADR-t2072-1: with the largest input (one huge finding, or very many,
+    /// and huge verification commands) a revise request stays within
+    /// `REVISE_REQUEST_LIMIT` without its middle cut, keeps all its steps,
+    /// cuts the verification commands as the worker's prompt does (said in
+    /// `over_limit`), and says how many bytes of the findings it cut and
+    /// where they are whole, or that they are in no file.
+    #[test]
+    fn a_revise_request_stays_within_its_limit_with_the_largest_input() {
+        let task = task_with_lists(vec!["src/".into()], vec!["c".repeat(100_000)]);
+        let huge = vec!["指".repeat(300_000)];
+        let many: Vec<String> = (0..20_000).map(|n| format!("finding {n}")).collect();
+        let file = "/runs/run/revise-1-findings.txt";
+        for provider in [Provider::Claude, Provider::Codex] {
+            let run = run_on(provider, WorkerMode::Headless);
+            for reasons in [&huge, &many] {
+                let fitted = revise_request(&task, &run, 2, reasons, Some(file)).unwrap();
+                let text = &fitted.text;
+                assert!(text.len() <= room(REVISE_REQUEST_LIMIT), "{}", text.len());
+                assert_eq!(fitted.bytes.total, text.len());
+                let over = fitted.bytes.over_limit.clone().unwrap();
+                assert!(!over.contains("its middle was cut"), "{over}");
+                assert!(over.contains("verify: "), "{over}");
+                assert_eq!(fitted.bytes.omitted["findings"], 1);
+                let whole = revise_findings(reasons);
+                let (kept, note) = text
+                    .split_once("Findings:\n")
+                    .unwrap()
+                    .1
+                    .split_once("\n[… ")
+                    .unwrap();
+                assert!(kept.len() <= REVISE_FINDINGS_BYTES && whole.starts_with(kept));
+                assert!(
+                    note.starts_with(&format!(
+                        "{} bytes left out by the prompt's limit; the whole findings are in {file}]\nSteps:\n",
+                        whole.len() - kept.len()
+                    )),
+                    "{note}"
+                );
+                for step in 1..=6 {
+                    assert!(text.contains(&format!("\n{step}. ")), "{step}");
+                }
+                assert!(text.contains(HEADLESS_STOP) && text.ends_with("end the turn."));
+            }
+        }
+        // Without a file to point at, the cut findings are in no file.
+        let run = run_on(Provider::Claude, WorkerMode::Headless);
+        let text = revise_request(&task, &run, 1, &huge, None).unwrap().text;
+        assert!(
+            text.contains(&format!("by the prompt's limit; {NOT_READABLE}]")),
+            "{text}"
+        );
+    }
+
+    /// ADR-t2072-1: a request sent again from its file without what it
+    /// took is measured anew as one section: whole within its limit, and
+    /// one past it (written before the limits) keeps its start within the
+    /// limit and names the file that has it whole.
+    #[test]
+    fn a_restored_request_is_measured_anew_and_cut_to_its_limit() {
+        let file = Path::new("/runs/run/resume-1.txt");
+        let whole = restored_request("rebase", RESUME_REQUEST_LIMIT, file);
+        assert_eq!(whole.text, "rebase");
+        assert_eq!(whole.bytes.total, 6);
+        assert_eq!(whole.bytes.limit, RESUME_REQUEST_LIMIT);
+        assert_eq!(whole.bytes.sections["request"], 6);
+        assert!(whole.bytes.omitted.is_empty() && whole.bytes.over_limit.is_none());
+        let old = "古".repeat(100_000);
+        for limit in [RESUME_REQUEST_LIMIT, REVISE_REQUEST_LIMIT] {
+            let cut = restored_request(&old, limit, file);
+            assert!(cut.text.len() <= limit, "{}", cut.text.len());
+            assert_eq!(cut.bytes.total, cut.text.len());
+            assert_eq!(cut.bytes.omitted["request"], 1);
+            assert!(cut.bytes.over_limit.unwrap().starts_with("request: "));
+            let (kept, note) = cut.text.split_once("\n[… ").unwrap();
+            assert!(old.starts_with(kept));
+            assert_eq!(
+                note,
+                format!(
+                    "{} bytes left out by the prompt's limit; the whole request is in /runs/run/resume-1.txt]",
+                    old.len() - kept.len()
+                )
+            );
+        }
+    }
+
+    /// What a request took is read back as it was written (a resume's
+    /// `handoff.json` carries it to the next process).
+    #[test]
+    fn prompt_bytes_are_read_back_as_written() {
+        let task = task_with_lists(vec!["src/".into()], vec!["c".repeat(100_000)]);
+        let run = run_on(Provider::Claude, WorkerMode::Headless);
+        let bytes = revise_request(&task, &run, 1, &["x".repeat(50_000)], None)
+            .unwrap()
+            .bytes;
+        let read: PromptBytes = serde_json::from_value(json!(bytes)).unwrap();
+        assert_eq!(read, bytes);
     }
 }

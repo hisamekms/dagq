@@ -64,9 +64,10 @@ use super::{
     or_none, path_text,
     prompt::{
         FittedPrompt, GoalPredecessorSummary, HEADLESS_NEVER, Inheritance, LandedTask,
-        PredecessorSummary, PromptBytes, RecoveryMaterial, ResumeKind, ResumeRequest,
-        TRIAGE_ACCESS, answer_text, closed_question_notice, continue_text, ended_run_material,
-        prompt, recovery_instruction, recovery_prompt, resume_request, review_prompt,
+        PredecessorSummary, PromptBytes, RESUME_REQUEST_LIMIT, REVISE_REQUEST_LIMIT,
+        RecoveryMaterial, ResumeKind, ResumeRequest, TRIAGE_ACCESS, answer_text,
+        closed_question_notice, continue_text, ended_run_material, prompt, recovery_instruction,
+        recovery_prompt, restored_request, resume_request, review_prompt, revise_findings,
         revise_mismatch_request, revise_request, siblings_in_progress, stale_receipt_nudge,
         stall_nudge,
     },

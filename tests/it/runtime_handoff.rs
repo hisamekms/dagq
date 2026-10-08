@@ -1469,15 +1469,52 @@ fn start_resume_wrapper(
     })
 }
 
+/// How the next process finds a resume whose request was not sent yet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Unsent {
+    /// In `handoff.json` as the supervisor wrote it, with what the request
+    /// took.
+    Kept,
+    /// In a `handoff.json` an older binary wrote, without what the request
+    /// took, whose request (and `resume-1.txt`) is one written before the
+    /// limits, past its whole limit.
+    Old,
+    /// Without `handoff.json`, adopted from the run's events and its
+    /// `resume-1.txt`, which holds such a request.
+    Adopted,
+}
+
 /// A handoff after the resumed session's workspace opened but before its
 /// wrapper registered, so before the resolution request was sent: the
 /// state carries the resume without a send, and the next process sends the
 /// request once the wrapper registers, once, into the same resume, without
 /// resuming the run again, and the run lands. Moved from the interactive
 /// `a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it`
-/// (task 1437).
+/// (task 1437). The request records what it took as it was built
+/// (ADR-t2072-1).
 #[test]
 fn a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it_once() {
+    handoff_before_the_resume_request(Unsent::Kept);
+}
+
+/// ADR-t2072-1: a request carried over by an older binary's
+/// `handoff.json`, which says nothing of what it took, is measured anew
+/// when it is sent; one written before the limits is cut to the whole
+/// limit, keeping its start, and names `resume-1.txt`, which has it whole.
+#[test]
+fn a_resume_request_from_an_old_handoff_state_is_measured_and_cut_to_its_limit() {
+    handoff_before_the_resume_request(Unsent::Old);
+}
+
+/// ADR-t2072-1: the same for a resume adopted from the run's events after
+/// a handoff that left no `handoff.json`: its request, read from
+/// `resume-1.txt`, is measured anew and cut when it is sent.
+#[test]
+fn a_resume_request_adopted_after_a_handoff_is_measured_and_cut_to_its_limit() {
+    handoff_before_the_resume_request(Unsent::Adopted);
+}
+
+fn handoff_before_the_resume_request(unsent: Unsent) {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -1507,17 +1544,53 @@ fn a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it_once() {
         !kinds.iter().any(|k| k == "resume_request_sent"),
         "{kinds:?}"
     );
-    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
-    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let snapshot = run_dir.join("handoff.json");
+    let mut written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
     assert_eq!(written["phase"], "resume");
     assert_eq!(written["message_sent_at"], Value::Null, "{written}");
+    assert_eq!(written["message_bytes"]["limit"], 36_000, "{written}");
+    // A request written before the limits: the built one (whose start
+    // the session reads its main from) and much more.
+    let file = run_dir.join("resume-1.txt");
+    let old = format!(
+        "{}\n{}",
+        written["message"].as_str().unwrap(),
+        "旧".repeat(20_000)
+    );
+    match unsent {
+        Unsent::Kept => {}
+        Unsent::Old => {
+            written["message"] = json!(old);
+            written.as_object_mut().unwrap().remove("message_bytes");
+            fs::write(&snapshot, written.to_string()).unwrap();
+            fs::write(&file, &old).unwrap();
+        }
+        Unsent::Adopted => {
+            fs::remove_file(&snapshot).unwrap();
+            fs::write(&file, &old).unwrap();
+        }
+    }
 
+    // An adoption needs the resumed session's wrapper alive, so it starts
+    // and registers before the next process looks.
+    let early = (unsent == Unsent::Adopted).then(|| {
+        let wrapper = start_resume_wrapper(&backend, &run);
+        wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+            queue
+                .processes(run.id())
+                .unwrap()
+                .iter()
+                .any(|p| p.role == "wrapper" && p.exited_at.is_none())
+        });
+        wrapper
+    });
     let next = {
         let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
         thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
     };
     wait_until(&db, crate::common::STEP_LIMIT, |_| !snapshot.exists());
-    let wrapper = start_resume_wrapper(&backend, &run);
+    let wrapper = early.unwrap_or_else(|| start_resume_wrapper(&backend, &run));
     // Well within the resume timeout, after which a request never sent
     // would end the resume too.
     wait_until(&db, Duration::from_secs(30), |queue| {
@@ -1549,6 +1622,35 @@ fn a_handoff_before_the_resume_request_lets_the_next_supervisor_send_it_once() {
         .filter(|p| p["what"] == "resolution request")
         .collect();
     assert_eq!(requests.len(), 1, "{kinds:?}");
+    let bytes = &requests[0]["prompt_bytes"];
+    let taken: dagq::domain::turn::TurnRequest = serde_json::from_str(
+        &fs::read_to_string(dagq::domain::turn::taken_path(
+            run_dir,
+            requests[0]["seq"].as_u64().unwrap(),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    if unsent == Unsent::Kept {
+        // What the request took as it was built.
+        assert_eq!(*bytes, written["message_bytes"], "{bytes}");
+        assert_eq!(taken.prompt, written["message"].as_str().unwrap());
+    } else {
+        assert_eq!(bytes["limit"], 36_000, "{bytes}");
+        assert_eq!(bytes["omitted"]["request"], 1, "{bytes}");
+        assert_eq!(bytes["total"], taken.prompt.len(), "{bytes}");
+        assert!(taken.prompt.len() <= 36_000, "{}", taken.prompt.len());
+        let (kept, note) = taken.prompt.split_once("\n[… ").unwrap();
+        assert!(old.starts_with(kept));
+        assert_eq!(
+            note,
+            format!(
+                "{} bytes left out by the prompt's limit; the whole request is in {}]",
+                old.len() - kept.len(),
+                file.display()
+            )
+        );
+    }
     let adopted: Vec<&Value> = payloads(&detail, "auto_repaired")
         .into_iter()
         .filter(|p| p["repair"] == "resume_adopted")

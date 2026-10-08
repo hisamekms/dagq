@@ -55,6 +55,10 @@ enum Snapshot {
         attempt: usize,
         started_at: f64,
         message: String,
+        /// What `message` took when it was built (ADR-t2072-1); a file
+        /// written by an older binary has none.
+        #[serde(default)]
+        message_bytes: Option<PromptBytes>,
         message_sent_at: Option<f64>,
         not_ready_asked: bool,
         exit_requested: bool,
@@ -150,6 +154,7 @@ impl Supervisor<'_> {
                     attempt: watch.attempt,
                     started_at: seconds(watch.started_at),
                     message: watch.message.clone(),
+                    message_bytes: Some(watch.message_bytes.clone()),
                     message_sent_at: watch.message_sent.map(|(_, at)| seconds(at)),
                     not_ready_asked: false,
                     exit_requested: watch.exit_requested.is_some(),
@@ -310,6 +315,7 @@ impl Supervisor<'_> {
                 attempt,
                 started_at,
                 message,
+                message_bytes,
                 message_sent_at,
                 not_ready_asked: _,
                 exit_requested,
@@ -323,6 +329,7 @@ impl Supervisor<'_> {
                     attempt,
                     started_at: time(started_at),
                     message,
+                    message_bytes,
                     message_sent_at: message_sent_at.map(time),
                     exit_requested,
 

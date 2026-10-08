@@ -15,6 +15,10 @@
 use super::file_time::recorded_at;
 use super::landing::{REVIEW_PROVIDER_DISABLED, ReviewRoute};
 use super::*;
+use crate::application::prompt::{
+    NEXT_TURN_NAME_BYTES, PROVIDER_MESSAGE_BYTES, PROVIDER_TURN_LIMIT, UNDELIVERED_REQUEST_BYTES,
+};
+use crate::application::prompt_fit::{Fit, Keep, NOT_READABLE};
 use crate::domain::{
     actor_model::{ActorLaunch, JobRoute, job_route, job_wait_text},
     claim_hold::QueueHold,
@@ -295,8 +299,13 @@ impl Supervisor<'_> {
         // ask holds the run for a person's `done`: the call is made again
         // there, in the same session.
         if next == WallMove::Retry {
-            let text = retry_text(from, reason, undelivered.as_ref());
-            request_turn(self, run, workspace, Input::Text(&text), PROVIDER_RETRY)?;
+            let text = retry_text(
+                from,
+                reason,
+                undelivered.as_ref(),
+                run.run_dir().map(Path::new),
+            );
+            request_turn(self, run, workspace, Input::from(&text), PROVIDER_RETRY)?;
             info!(run_id = %run.id(), "run {}: {} can be used again; the call of turn {turn} is made again", run.id(), from.as_str());
             return Ok(WallStep::Switched(self.files.now()));
         }
@@ -388,7 +397,7 @@ impl Supervisor<'_> {
         phase: SwitchPhase,
         turn: Option<u64>,
         message: &str,
-        text: &str,
+        text: &FittedPrompt,
     ) -> Result<TaskRun> {
         let worker = Worker {
             provider: to,
@@ -419,7 +428,7 @@ impl Supervisor<'_> {
             self.write_prompt(&task, &moved, Path::new(run_dir))?;
         }
         // The headless session takes the call as its next turn.
-        request_turn(self, &moved, workspace, Input::Text(text), PROVIDER_SWITCH)?;
+        request_turn(self, &moved, workspace, Input::from(text), PROVIDER_SWITCH)?;
         Ok(moved)
     }
 
@@ -654,24 +663,72 @@ pub(super) use crate::domain::turn::PROVIDER_RETRY;
 const HOLD_EVENTS_READ: usize = 20;
 
 /// The request that makes a failed call again on `provider` once its hold
-/// ended: the call it failed at (`undelivered`), or a request to go on.
+/// ended: the call it failed at (`undelivered`, taken from `dir`'s
+/// `turns/`), or a request to go on. Held to [`PROVIDER_TURN_LIMIT`]
+/// ([`undelivered_part`]); the fixed text is never cut.
 pub(super) fn retry_text(
     provider: Provider,
     reason: SwitchReason,
     undelivered: Option<&TurnRequest>,
-) -> String {
+    dir: Option<&Path>,
+) -> FittedPrompt {
+    let mut fit = Fit::new(PROVIDER_TURN_LIMIT);
     let head = format!(
         "dagq: {} can be used again after the {} that stopped your previous turn. Go on with the task in this turn.",
         provider.as_str(),
         reason.as_str()
     );
-    match undelivered {
-        Some(request) => format!(
-            "{head} Your previous turn was asked this ({}) and did not get to it:\n\n{}",
-            request.what, request.prompt
-        ),
+    let text = match undelivered {
+        Some(request) => {
+            let (what, prompt) = undelivered_part(&mut fit, request, dir);
+            format!(
+                "{head} Your previous turn was asked this ({what}) and did not get to it:\n\n{prompt}"
+            )
+        }
         None => head,
-    }
+    };
+    fit.finish(text)
+}
+
+/// The name and the text of the request a failed turn did not get to,
+/// which a retry or switch request carries (ADR-t2072-1): whatever it was
+/// (a first request, a retry or switch request that failed in its turn
+/// too, one written before the limits), its text is one section cut to
+/// [`UNDELIVERED_REQUEST_BYTES`] keeping its start, so a request wrapped
+/// again and again stays within the whole limit; its name is cut to
+/// [`NEXT_TURN_NAME_BYTES`]. What is cut is in the file the wrapper moved
+/// it to in `dir`'s `turns/`, in no file without `dir`.
+fn undelivered_part(
+    fit: &mut Fit,
+    undelivered: &TurnRequest,
+    dir: Option<&Path>,
+) -> (String, String) {
+    let read = dir.map_or_else(
+        || NOT_READABLE.to_owned(),
+        |dir| {
+            format!(
+                "the whole request is in {}",
+                taken_path(dir, undelivered.seq).display()
+            )
+        },
+    );
+    let what = fit.text(
+        "what",
+        &undelivered.what,
+        NEXT_TURN_NAME_BYTES,
+        Keep::Start,
+        &read,
+    );
+    fit.section("what", &what);
+    let prompt = fit.text(
+        "undelivered",
+        &undelivered.prompt,
+        UNDELIVERED_REQUEST_BYTES,
+        Keep::Start,
+        &read,
+    );
+    fit.section("undelivered", &prompt);
+    (what, prompt)
 }
 
 /// Why a run did not move to the other provider: `[provider_fallback]
@@ -692,7 +749,10 @@ fn switch_blocked(fallback: bool, events: &[RunEvent], held: Option<SwitchReason
 /// The first prompt of the new session a switch starts (the wrapper puts
 /// the task's prompt before it, as for any new session): why the worker
 /// moved, that nothing of the conversation carries over, where the work
-/// so far is, and the call the failed turn made (`undelivered`).
+/// so far is, and the call the failed turn made (`undelivered`). Held to
+/// [`PROVIDER_TURN_LIMIT`]: the provider's `message` to
+/// [`PROVIDER_MESSAGE_BYTES`] and the call as [`undelivered_part`] holds
+/// it; the fixed text is never cut.
 pub(super) fn switch_text(
     run: &TaskRun,
     from: Provider,
@@ -700,7 +760,16 @@ pub(super) fn switch_text(
     reason: SwitchReason,
     message: &str,
     undelivered: Option<&TurnRequest>,
-) -> String {
+) -> FittedPrompt {
+    let mut fit = Fit::new(PROVIDER_TURN_LIMIT);
+    let message = fit.text(
+        "message",
+        message,
+        PROVIDER_MESSAGE_BYTES,
+        Keep::Start,
+        NOT_READABLE,
+    );
+    fit.section("message", &message);
     let mut text = format!(
         "dagq: this run's worker moved from {} to {} ({}: {message}). This is a new session: nothing of the earlier conversation carries over. The work so far is in this worktree and its branch: run `git log --oneline {}..HEAD` and `git status` to see the commits and the uncommitted changes, and go on from them rather than starting over.",
         from.as_str(),
@@ -709,12 +778,12 @@ pub(super) fn switch_text(
         run.base_commit(),
     );
     if let Some(request) = undelivered {
+        let (what, prompt) = undelivered_part(&mut fit, request, run.run_dir().map(Path::new));
         text.push_str(&format!(
-            " The earlier session was asked this ({}) and did not get to it:\n\n{}",
-            request.what, request.prompt
+            " The earlier session was asked this ({what}) and did not get to it:\n\n{prompt}"
         ));
     }
-    text
+    fit.finish(text)
 }
 
 /// What a revise's or a resume's watch does about a headless turn at its
@@ -1146,7 +1215,7 @@ mod tests {
     fn a_retry_makes_the_call_again_or_asks_to_go_on() {
         let head = "dagq: codex can be used again after the usage_limit that stopped your previous turn. Go on with the task in this turn.";
         assert_eq!(
-            retry_text(Provider::Codex, SwitchReason::UsageLimit, None),
+            retry_text(Provider::Codex, SwitchReason::UsageLimit, None, None).text,
             head
         );
         let request = TurnRequest {
@@ -1154,11 +1223,190 @@ mod tests {
             what: "revise request".to_owned(),
             prompt: "fix it".to_owned(),
         };
+        let fitted = retry_text(
+            Provider::Codex,
+            SwitchReason::UsageLimit,
+            Some(&request),
+            Some(Path::new("/runs/run")),
+        );
         assert_eq!(
-            retry_text(Provider::Codex, SwitchReason::UsageLimit, Some(&request)),
+            fitted.text,
             format!(
                 "{head} Your previous turn was asked this (revise request) and did not get to it:\n\nfix it"
             )
         );
+        // Within its limits it carries the call whole and records no cut.
+        assert_eq!(fitted.bytes.limit, PROVIDER_TURN_LIMIT);
+        assert_eq!(fitted.bytes.total, fitted.text.len());
+        assert_eq!(fitted.bytes.sections["undelivered"], "fix it".len());
+        assert!(fitted.bytes.omitted.is_empty(), "{:?}", fitted.bytes);
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn run() -> TaskRun {
+        TaskRun::restore(crate::domain::RunRecord {
+            id: RunId::new("run-1").unwrap(),
+            task_id: TaskId::new(7),
+            status: RunStatus::Running,
+            requested_provider: Provider::Claude,
+            actual_provider: Provider::Claude,
+            worker_mode: WorkerMode::Headless,
+            base_commit: CommitSha::try_from(SHA).unwrap(),
+            branch: Some("dagq/run-1".into()),
+            worktree_path: Some("/runs/run/worktree".into()),
+            workspace_id: None,
+            receipt_path: Some("/runs/run/receipt.json".into()),
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: Some("/runs/run".into()),
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    /// The fixed text of a switch request, which no limit cuts.
+    fn switch_steps() -> Vec<String> {
+        vec![
+            "This is a new session: nothing of the earlier conversation carries over.".to_owned(),
+            format!(
+                "run `git log --oneline {SHA}..HEAD` and `git status` to see the commits and the uncommitted changes"
+            ),
+        ]
+    }
+
+    /// ADR-t2072-1: with the largest input (a huge provider message, and a
+    /// huge call the failed turn did not get to, as one written before the
+    /// limits) a retry and a switch request stay within
+    /// `PROVIDER_TURN_LIMIT` without their middle cut, keep their fixed
+    /// text, and say how many bytes they cut and that the call is whole in
+    /// its taken file under `turns/`.
+    #[test]
+    fn a_retry_and_a_switch_stay_within_their_limit_with_the_largest_input() {
+        let run = run();
+        let huge = "依".repeat(400_000);
+        let request = TurnRequest {
+            seq: 9,
+            what: "w".repeat(10_000),
+            prompt: huge.clone(),
+        };
+        let taken = "the whole request is in /runs/run/turns/request-000009.taken.json]";
+        let retry = retry_text(
+            Provider::Codex,
+            SwitchReason::UsageLimit,
+            Some(&request),
+            run.run_dir().map(Path::new),
+        );
+        let switch = switch_text(
+            &run,
+            Provider::Claude,
+            Provider::Codex,
+            SwitchReason::Authentication,
+            &huge,
+            Some(&request),
+        );
+        for (fitted, cut, kept) in [
+            (
+                &retry,
+                vec!["undelivered", "what"],
+                vec!["dagq: codex can be used again after the usage_limit".to_owned()],
+            ),
+            (
+                &switch,
+                vec!["message", "undelivered", "what"],
+                switch_steps(),
+            ),
+        ] {
+            let text = &fitted.text;
+            assert!(
+                text.len() <= PROVIDER_TURN_LIMIT - crate::application::prompt_fit::LANGUAGE_ROOM,
+                "{}",
+                text.len()
+            );
+            assert_eq!(fitted.bytes.total, text.len());
+            assert_eq!(fitted.bytes.over_limit, None);
+            for section in &cut {
+                assert_eq!(fitted.bytes.omitted[section], 1, "{section}");
+            }
+            assert_eq!(fitted.bytes.omitted.len(), cut.len());
+            for kept in kept {
+                assert!(text.contains(&kept), "{kept}");
+            }
+            let (_, call) = text.split_once("did not get to it:\n\n").unwrap();
+            let (kept, note) = call.split_once("\n[… ").unwrap();
+            assert!(kept.len() <= UNDELIVERED_REQUEST_BYTES && huge.starts_with(kept));
+            assert_eq!(
+                note,
+                format!(
+                    "{} bytes left out by the prompt's limit; {taken}",
+                    huge.len() - kept.len()
+                )
+            );
+        }
+        assert!(
+            switch
+                .text
+                .contains(&format!("by the prompt's limit; {NOT_READABLE}]")),
+            "the message is in no file"
+        );
+    }
+
+    /// ADR-t2072-1: a retry or switch request that failed in its turn too
+    /// is the next one's call, wrapped again with its fixed text; however
+    /// often that happens, each request stays within `PROVIDER_TURN_LIMIT`
+    /// without its middle cut and keeps its own fixed text.
+    #[test]
+    fn retries_and_switches_wrapped_again_and_again_stay_within_their_limit() {
+        let run = run();
+        let mut call = TurnRequest {
+            seq: 1,
+            what: "resolution request".to_owned(),
+            prompt: "理".repeat(100_000),
+        };
+        for round in 0..8_u64 {
+            let (fitted, what) = if round % 2 == 0 {
+                let fitted = retry_text(
+                    Provider::Codex,
+                    SwitchReason::UsageLimit,
+                    Some(&call),
+                    run.run_dir().map(Path::new),
+                );
+                (fitted, PROVIDER_RETRY)
+            } else {
+                let fitted = switch_text(
+                    &run,
+                    Provider::Codex,
+                    Provider::Claude,
+                    SwitchReason::UsageLimit,
+                    "usage limit reached",
+                    Some(&call),
+                );
+                assert!(fitted.text.starts_with("dagq: this run's worker moved"));
+                for kept in switch_steps() {
+                    assert!(fitted.text.contains(&kept), "{round}: {kept}");
+                }
+                (fitted, PROVIDER_SWITCH)
+            };
+            let text = &fitted.text;
+            assert!(
+                text.len() <= PROVIDER_TURN_LIMIT - crate::application::prompt_fit::LANGUAGE_ROOM,
+                "{round}: {}",
+                text.len()
+            );
+            assert_eq!(fitted.bytes.over_limit, None, "{round}");
+            assert_eq!(fitted.bytes.omitted["undelivered"], 1, "{round}");
+            assert!(text.contains(&format!(
+                "the whole request is in /runs/run/turns/request-{:06}.taken.json]",
+                call.seq
+            )));
+            call = TurnRequest {
+                seq: call.seq + 1,
+                what: what.to_owned(),
+                prompt: fitted.text,
+            };
+        }
     }
 }

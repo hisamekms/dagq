@@ -361,7 +361,9 @@ fn an_adopted_headless_run_with_a_pending_revise_waits_without_sending_it_again(
 /// supervisor that adopts it (task 1683): the first attempt's request,
 /// taken with the same `what`, is no delivery of the second. The session
 /// runs it as its next turn, and the rewritten receipt is reviewed again
-/// and landed.
+/// and landed. The request in its file was written before the limits: the
+/// adopter writes it measured anew and cut to the revise request's whole
+/// limit, naming the file that has it whole (ADR-t2072-1).
 #[test]
 fn an_adopted_revise_recorded_but_not_written_is_written_once() {
     const FIRST: &str = "dagq: the supervisor's review asks for changes (revise 1 of 2).";
@@ -402,7 +404,7 @@ fn an_adopted_revise_recorded_but_not_written_is_written_once() {
             events.extend(review(2));
             events
         },
-        || SECOND.to_owned(),
+        || old_request(SECOND),
         false,
         &[(FIRST, "revise request")],
     );
@@ -430,7 +432,22 @@ fn an_adopted_revise_recorded_but_not_written_is_written_once() {
         &fs::read_to_string(dagq::domain::turn::taken_path(run_dir, 2)).unwrap(),
     )
     .unwrap();
-    assert_eq!(written.prompt, SECOND);
+    let old = old_request(SECOND);
+    let (kept, note) = written.prompt.split_once("\n[… ").unwrap();
+    assert!(kept.starts_with(SECOND) && old.starts_with(kept));
+    assert_eq!(
+        note,
+        format!(
+            "{} bytes left out by the prompt's limit; the whole request is in {}]",
+            old.len() - kept.len(),
+            run_dir.join("revise-2.txt").display()
+        )
+    );
+    let bytes = &requested[1]["prompt_bytes"];
+    assert_eq!(bytes["limit"], 30_000, "{bytes}");
+    assert_eq!(bytes["total"], written.prompt.len(), "{bytes}");
+    assert!(written.prompt.len() <= 30_000);
+    assert_eq!(bytes["omitted"]["request"], 1, "{bytes}");
     assert!(!dagq::domain::turn::request_path(run_dir, 3).exists());
     assert!(
         !dagq::domain::turn::taken_path(run_dir, 3).exists(),
@@ -529,6 +546,12 @@ fn a_conflict_request_that_cannot_be_written_is_withdrawn_and_the_run_lands() {
     assert!(!kinds.contains(&"conflict_resolved"), "{kinds:?}");
     // Nothing reached the session after its first turn.
     assert_eq!(stub_calls(&detail.runs[0]).len(), 1);
+}
+
+/// `request` as one written before the limits: past every request's whole
+/// limit.
+fn old_request(request: &str) -> String {
+    format!("{request}\n{}", "旧".repeat(20_000))
 }
 
 /// Runs task 1 under a supervisor that died after it recorded a request to

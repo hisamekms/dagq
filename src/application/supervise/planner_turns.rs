@@ -251,7 +251,13 @@ impl Supervisor<'_> {
                 .ok()?;
             serde_json::from_str::<TurnRequest>(&text).ok()
         });
-        let text = retry_text(Provider::Claude, reason, undelivered.as_ref());
+        let text = retry_text(
+            Provider::Claude,
+            reason,
+            undelivered.as_ref(),
+            Some(&view.dir),
+        )
+        .text;
         // Stamped before it is written, as every request: a stamp whose
         // retry was not written (or was, after a turn that already ended)
         // leaves the marker stale, and the wrapper, which takes nothing
