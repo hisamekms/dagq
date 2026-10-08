@@ -27,15 +27,22 @@
 # its module (`super::shared::Clock`), never through the re-exports of
 # mod.rs, and only from the modules the rule lets the file use.
 #
-# L7 counts in src/compose.rs and src/compose/ outside tests: a read of the
-# wall or the monotonic clock (SystemTime::now, Instant::now). L9 counts,
-# inside tests too, in the context modules of src/compose/
-# ($compose_contexts): a reference to another of $compose_modules
-# (`super::host`, `crate::compose::host`); and in every file under src/
+# L7 counts in src/compose.rs and every file under src/compose/ outside
+# tests: a read of the wall or the monotonic clock (SystemTime::now,
+# Instant::now). The modules of src/compose/ are found from the tree: each
+# `name.rs` and `name/` right under it is the module `name`, so a new module
+# is checked without a list. Each of them but those of $compose_loop is a
+# context module. L9 counts, inside tests too, in the files of a context
+# module: a reference to another module of src/compose/ (`super::host`,
+# `crate::compose::host`), and a glob of the root (`super::*`, also inside
+# a group as `super::{*, ..}`, in a file right under src/compose/ outside
+# its inline modules, where `super` is the root; `crate::compose::*`
+# anywhere), which would bring the other modules in unnamed; and in every
+# file under src/
 # outside src/compose.rs, src/compose/ and the three layers (src/main.rs,
-# runtime.rs, lifecycle.rs, view, ...): a reference to any of
-# $compose_modules (`dagq::compose::host`), the root's re-exports being the
-# way in.
+# runtime.rs, lifecycle.rs, view, ...): a reference to any module of
+# src/compose/ (`dagq::compose::host`), the root's re-exports being the way
+# in.
 #
 # What counts is the path of a reference (`crate::application::timestamp`,
 # `std::time::SystemTime::now`), with a grouped `use crate::{a, b}` expanded
@@ -73,7 +80,7 @@
 # references only in comments and strings, nested block comments, the cfg
 # forms above, a test range inside an inline module, the C3 references
 # of a split context and of a stage, the C8 references and the L7 and L9
-# references of the composition root)
+# references of the composition root, a new module of it and a glob of it)
 # and removes them.
 #
 # Exit 0 when every occurrence is allowed and no item is stale, 1 when an
@@ -89,10 +96,10 @@ c3_files="contexts ci_watch forecast observer push report throughput_review clea
 c8_ok="planning:shared execution:shared host:shared observation:shared,planning,execution,host shared:planning,execution,observation,host"
 # The submodules that hold 実行と着地's state by stage, checked by C3 too.
 c3_stage_files="stages"
-# The modules of src/compose/, and those of them that wire one context each
-# (rule L9); the rest (the supervisor loop's) may name the contexts.
-compose_modules="execution planning observation host supervisor"
-compose_contexts="execution planning observation host"
+# The modules of src/compose/ that are not a context module (rule L9): the
+# supervisor loop's, which may name the contexts. Every other module of
+# src/compose/ wires one context.
+compose_loop="supervisor"
 script=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -101,8 +108,10 @@ repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=$(cd "$(dirname "$0")/
 scan() {
   files=$(find src -type f -name '*.rs' 2>/dev/null | LC_ALL=C sort)
   [ -n "$files" ] || return 0
+  # The modules of src/compose/: each name.rs and name/ right under it.
+  compose_modules=$(find src/compose -mindepth 1 -maxdepth 1 \( -name '*.rs' -o -type d \) 2>/dev/null | sed 's|^src/compose/||; s|\.rs$||' | LC_ALL=C sort -u | tr '\n' ' ')
   # shellcheck disable=SC2086
-  LC_ALL=C awk -v c3_files="$c3_files" -v c3_stage_files="$c3_stage_files" -v c8_ok="$c8_ok" -v compose_modules="$compose_modules" -v compose_contexts="$compose_contexts" '
+  LC_ALL=C awk -v c3_files="$c3_files" -v c3_stage_files="$c3_stage_files" -v c8_ok="$c8_ok" -v compose_modules="$compose_modules" -v compose_loop="$compose_loop" '
 BEGIN {
   # The patterns per layer, "rule:pattern"; a pattern starting with ^
   # matches at the start of a path, otherwise anywhere in it. The rules that
@@ -130,8 +139,8 @@ BEGIN {
   prod["compose"] = "L7:SystemTime::now L7:Instant::now"
   prod["compose.rs"] = prod["compose"]
   n_cm = split(compose_modules, cm, " ")
-  n = split(compose_contexts, o, " ")
-  for (i = 1; i <= n; i++) compose_context[o[i]] = 1
+  n = split(compose_loop, o, " ")
+  for (i = 1; i <= n; i++) compose_loop_module[o[i]] = 1
   for (i = 1; i <= n_cm; i++) outside_compose = outside_compose (i > 1 ? " " : "") "L9:compose::" cm[i]
 }
 # c3_patterns prints the C3 patterns of each of the names: bare, through
@@ -158,13 +167,14 @@ function reset_file() {
   prev = ""; gtop = 0; bk_n = 0; pending_mod = 0; sq = 0; item_sq = 0
   layer = FILENAME; sub(/^.*src\//, "", layer); sub(/\/.*/, "", layer)
   np = 0; load(ref[layer], 1); load(prod[layer], 0)
-  port = ""
+  port = ""; compose_ctx = 0
   if (FILENAME ~ /^src\/application\/ports\/[a-z_]+\.rs$/ && FILENAME != "src/application/ports/mod.rs") {
     port = FILENAME; sub(/^.*\//, "", port); sub(/\.rs$/, "", port)
   }
   if (layer == "compose") {
     module = FILENAME; sub(/^.*src\/compose\//, "", module); sub(/(\/.*|\.rs)$/, "", module)
-    if (module in compose_context)
+    compose_ctx = !(module in compose_loop_module)
+    if (compose_ctx)
       for (i = 1; i <= n_cm; i++) if (cm[i] != module) load("L9:^super::" cm[i] " L9:compose::" cm[i], 1)
   } else if (layer != "compose.rs" && layer != "domain" && layer != "application" && layer != "infrastructure") load(outside_compose, 1)
   if (FILENAME in c3) load(c3_names, 1)
@@ -183,6 +193,10 @@ function check(p, ln, t, dot,   i, hit, seg) {
           print "C8\t" FILENAME "\tsuper::super::ports\t" ln
       } else if (index(c8[port], "," seg ",") == 0) print "C8\t" FILENAME "\tsuper::" seg "\t" ln
     }
+  }
+  if (compose_ctx && !dot) {
+    if (p == "super::*" && modprefix == "" && FILENAME ~ /^src\/compose\/[^\/]+\.rs$/) print "L9\t" FILENAME "\tsuper::*\t" ln
+    if (p == "crate::compose::*") print "L9\t" FILENAME "\tcrate::compose::*\t" ln
   }
   if (np == 0) return
   for (i = 1; i <= np; i++) {
@@ -272,8 +286,12 @@ function code_token(tk,   is_ident) {
     return
   }
   if (tk == "::") { prev = "::"; return }
-  # A glob (`super::*`) ends its path with `*`, so C8 sees what it names.
+  # A glob (`super::*`) ends its path with `*`, so C8 and L9 see what it
+  # names; one inside a group (`super::{*, a}`) globs the prefix of the group.
   if (tk == "*" && prev == "::" && path != "") path = path "::*"
+  else if (tk == "*" && gtop > 0 && (prev == "{" || prev == ",") && bk[bk_n] == "g") {
+    path = gprefix[gtop] "::*"; path_line = FNR; path_test = in_test || whole_test; path_dot = 0
+  }
   if (tk == "{" && prev == "::") {
     gtop++; gprefix[gtop] = path; path = ""
     bk[++bk_n] = "g"; prev = "{"; return
@@ -722,6 +740,42 @@ fn fixture() { let _ = std::time::Instant::now(); }
 pub fn up() { let _ = std::time::SystemTime::now(); }
 EOF
   expect 1 "L7: the composition reads the clock outside tests" "$tmp/compose_clock" "src/compose/host.rs:3: L7 forbids SystemTime::now"
+
+  base compose_new_module
+  mkdir -p "$tmp/compose_new_module/src/compose/foo"
+  printf 'mod foo;\nmod host;\n' >"$tmp/compose_new_module/src/compose.rs"
+  echo 'pub fn up() {}' >"$tmp/compose_new_module/src/compose/host.rs"
+  echo 'pub fn run() {}' >"$tmp/compose_new_module/src/compose/foo.rs"
+  echo 'pub fn child() { super::run(); }' >"$tmp/compose_new_module/src/compose/foo/child.rs"
+  expect 0 "L9: a new module that names only the root" "$tmp/compose_new_module"
+  echo 'fn up() { super::host::up(); }' >>"$tmp/compose_new_module/src/compose/foo.rs"
+  expect 1 "L9: a new module names another context's module" "$tmp/compose_new_module" "src/compose/foo.rs:2: L9 forbids super::host"
+  echo 'fn up() { crate::compose::host::up(); }' >"$tmp/compose_new_module/src/compose/foo.rs"
+  expect 1 "L9: a new module's submodule names another" "$tmp/compose_new_module" "src/compose/foo.rs:1: L9 forbids compose::host"
+  echo 'fn main() { dagq::compose::foo::run(); }' >"$tmp/compose_new_module/src/main.rs"
+  expect 1 "L9: outside the composition root a new module is named" "$tmp/compose_new_module" "src/main.rs:1: L9 forbids compose::foo"
+
+  base compose_glob
+  mkdir -p "$tmp/compose_glob/src/compose"
+  printf 'mod host;\nmod observation;\nmod supervisor;\nstruct OneShot;\n' >"$tmp/compose_glob/src/compose.rs"
+  echo 'pub fn up() {}' >"$tmp/compose_glob/src/compose/host.rs"
+  cat >"$tmp/compose_glob/src/compose/observation.rs" <<'EOF'
+//! use super::*; named in a comment only.
+use super::OneShot;
+pub fn status() {}
+#[cfg(test)]
+mod tests { use super::*; }
+EOF
+  echo 'use super::*; fn supervise() { host::up(); }' >"$tmp/compose_glob/src/compose/supervisor.rs"
+  mkdir -p "$tmp/compose_glob/src/compose/observation"
+  echo 'use super::*;' >"$tmp/compose_glob/src/compose/observation/helpers.rs"
+  expect 0 "L9: the loop, a context's inline module and its submodule file glob their super" "$tmp/compose_glob"
+  echo 'use super::*; fn f() { host::up(); }' >>"$tmp/compose_glob/src/compose/observation.rs"
+  expect 1 "L9: a context module globs the root" "$tmp/compose_glob" "src/compose/observation.rs:6: L9 forbids super::*"
+  echo 'use super::{OneShot, *};' >"$tmp/compose_glob/src/compose/host.rs"
+  expect 1 "L9: a context module globs the root in a group" "$tmp/compose_glob" "src/compose/host.rs:1: L9 forbids super::*"
+  echo '#[cfg(test)] mod tests { use crate::compose::*; }' >"$tmp/compose_glob/src/compose/host.rs"
+  expect 1 "L9: a context module globs the root through crate" "$tmp/compose_glob" "src/compose/host.rs:1: L9 forbids crate::compose::*"
 
   base infra
   cat >>"$tmp/infra/src/infrastructure/store.rs" <<'EOF'

@@ -48,6 +48,8 @@ check-layer-deps layer_forbidden_reference
 check-layer-deps layer_stale_allow_item
 check-layer-deps context_reaches_loop_state
 check-layer-deps stage_reaches_other_context
+check-layer-deps compose_new_module_crosses_context
+check-layer-deps compose_super_glob
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-doc-links doc_broken_link
@@ -91,6 +93,14 @@ violate_context_reaches_loop_state() {
 
 violate_stage_reaches_other_context() {
   echo "fn zz_scripts_root(host: &super::contexts::HostOpsState) {}" >>src/application/supervise/stages.rs
+}
+
+violate_compose_new_module_crosses_context() {
+  echo 'fn zz_scripts_root() { super::host::scripts_root_fixture(); }' >src/compose/zz_scripts_root.rs
+}
+
+violate_compose_super_glob() {
+  echo 'use super::*;' >>src/compose/observation.rs
 }
 
 violate_frontmatter_date_comment() {

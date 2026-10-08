@@ -313,7 +313,7 @@ host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の
   `build.rs`と共有する`build_id`・`migration_numbers`はレイヤーの外のmoduleに数えず、共有の部品としてL1・L3が名指す例外の範囲で参照してよい。
   新しいmoduleをレイヤーの外に足さない。
   検査: script（L1・L3・L6として）とreview。
-- **L9** `src/compose/`のcontextごとのmodule（`execution`・`planning`・`observation`・`host`）は互いと`supervisor`（ループ）を参照しない。
+- **L9** `src/compose/`の`supervisor`（ループ）以外のmodule（contextごと）は互いと`supervisor`を参照せず、`use super::*`も書かない。
   共有の配線は`src/compose.rs`に置き、外からは`crate::compose`の再公開だけを参照する。
   検査: script。
 
