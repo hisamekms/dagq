@@ -294,5 +294,6 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 - 約束: 復旧jobの固定バイナリの節はretryの判断の材料なので、alertの事実の直後に置き、中ほどを切っても残る側に置く（`binary_sections`）。
 - 記録: どのjobも`PromptBytes`を`prompt_bytes`としてeventに記録し、plan reviewと同じ形を持つ。
   省いた件数（`omitted`）は節ごとに、省いた項目と残して切った項目を数える。
-  1件を1回だけ数える節とその単位、欄ごとに数える例外の節は`PromptBytes`のdoc commentが持つ。
+  この節のjobとplannerの節は1件を1回だけ数える。
+  単位と、欄ごとに数えるworkerの初期promptの節は`PromptBytes`のdoc commentが持つ。
 - 上限を確かめるunit testは`src/application/prompt.rs`の「最も大きな入力でも上限に収まる」test群で、eventの記録は各jobの`tests/it`のmoduleが確かめる。

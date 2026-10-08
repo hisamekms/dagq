@@ -1463,23 +1463,19 @@ fn planner_asks(fit: &mut Fit, asks: &[Ask], kind: bool) -> String {
 }
 
 /// The question and the answer of the ask a planner carries for the
-/// planner before it, each held to [`PLANNER_ANSWER_BYTES`].
+/// planner before it, each held to [`PLANNER_ANSWER_BYTES`]: the ask is
+/// one item of `answer`, counted once whichever of the two was cut.
 fn planner_answer(fit: &mut Fit, answer: &Ask) -> (String, String) {
     let read = format!("read ask {} whole with `dagq asks --all`", answer.id);
-    let question = fit.text(
-        "answer",
-        &answer.question,
-        PLANNER_ANSWER_BYTES,
-        Keep::Start,
-        &read,
-    );
-    let text = fit.text(
-        "answer",
+    let (question, question_cut) =
+        prompt_fit::cut_part(&answer.question, PLANNER_ANSWER_BYTES, Keep::Start, &read);
+    let (text, text_cut) = prompt_fit::cut_part(
         answer.answer.as_deref().unwrap_or_default(),
         PLANNER_ANSWER_BYTES,
         Keep::Start,
         &read,
     );
+    fit.omit("answer", usize::from(question_cut || text_cut));
     (question, text)
 }
 
@@ -2378,41 +2374,39 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
         (_, _, Some(goal)) => format!("goal {goal}"),
         _ => "the queue".to_owned(),
     };
+    let (summary, summary_cut) =
+        prompt_fit::cut_part(&finding.summary, FINDING_SHORT_BYTES, Keep::Start, &read);
+    let (subject, subject_cut) = prompt_fit::cut_part(
+        or_none(&finding.subject),
+        FINDING_SHORT_BYTES,
+        Keep::Start,
+        &read,
+    );
+    let (why, why_cut) = prompt_fit::cut_part(
+        finding.propose_reason.as_deref().unwrap_or("(none)"),
+        FINDING_SHORT_BYTES,
+        Keep::Start,
+        &read,
+    );
+    let (detail, detail_cut) = fit.required_part(
+        "finding",
+        or_none(&finding.detail),
+        FINDING_DETAIL_BYTES,
+        &read,
+    );
+    // The finding is one item, counted once whichever of its parts was cut.
+    fit.omit(
+        "finding",
+        usize::from(summary_cut || subject_cut || why_cut || detail_cut),
+    );
     let head = format!(
         "\n## Finding {id}: {summary}\n\n- kind: {kind}\n- on: {target}\n- subject: {subject}\n- impact: {impact}\n- occurrences: {occurrences}, first seen {first}, last seen {last} (Unix seconds)\n- recorded by: {by}\n- why a proposal: {why}\n\n### Detail\n\n{detail}\n",
-        summary = fit.text(
-            "finding",
-            &finding.summary,
-            FINDING_SHORT_BYTES,
-            Keep::Start,
-            &read
-        ),
         kind = finding.kind,
-        subject = fit.text(
-            "finding",
-            or_none(&finding.subject),
-            FINDING_SHORT_BYTES,
-            Keep::Start,
-            &read
-        ),
         impact = finding.impact.as_str(),
         occurrences = finding.occurrences,
         first = finding.first_seen_at,
         last = finding.last_seen_at,
         by = finding.recorded_by,
-        why = fit.text(
-            "finding",
-            finding.propose_reason.as_deref().unwrap_or("(none)"),
-            FINDING_SHORT_BYTES,
-            Keep::Start,
-            &read
-        ),
-        detail = fit.required(
-            "finding",
-            or_none(&finding.detail),
-            FINDING_DETAIL_BYTES,
-            &read
-        ),
     );
     fit.section("finding", &head);
     out.push_str(&head);
@@ -4029,30 +4023,30 @@ pub fn recovery_prompt(
 ) -> Result<FittedPrompt> {
     let mut fit = Fit::new(RECOVERY_PROMPT_LIMIT);
     let claimed = "the task as the run claimed it is in prompt.txt of the run directory, and a later edit is a task_edited below";
-    let title = fit.text(
-        "task",
-        task.title(),
-        RECOVERY_TITLE_BYTES,
-        Keep::Start,
-        claimed,
-    );
-    let description = fit.required(
+    let (title, title_cut) =
+        prompt_fit::cut_part(task.title(), RECOVERY_TITLE_BYTES, Keep::Start, claimed);
+    let (description, description_cut) = fit.required_part(
         "task",
         or_none(task.description()),
         RECOVERY_DESCRIPTION_BYTES,
         claimed,
     );
-    let acceptance = fit.required(
+    let (acceptance, acceptance_cut) = fit.required_part(
         "task",
         or_none(task.acceptance()),
         RECOVERY_ACCEPTANCE_BYTES,
         claimed,
     );
-    let verification = fit.required(
+    let (verification, verification_cut) = fit.required_part(
         "task",
         &task.verification_commands().join("\n"),
         RECOVERY_VERIFY_BYTES,
         claimed,
+    );
+    // The task is one item, counted once whichever of its parts was cut.
+    fit.omit(
+        "task",
+        usize::from(title_cut || description_cut || acceptance_cut || verification_cut),
     );
     let pretty = serde_json::to_string_pretty(material.facts)?;
     // Cut as a value, so that what is kept stays JSON.
@@ -4509,10 +4503,10 @@ const OPTIONAL_SECTIONS: usize = 6;
 /// and `revisit` are each one item, whichever of their parts or the whole
 /// was cut. The revise planner's `answer` is a list of the answers it
 /// carries, each counted once. The recovery job's `task`, the finding
-/// planner's `finding` and the other planners' `answer` still count each
-/// cut field of their one item, so that item may count up to four
-/// (`answer`: two) times; so do the worker's `task`, `goal` and `inherited`
-/// (ADR-t2072-1), whose prompt's bytes are recorded on `wrapper_launched`.
+/// planner's `finding` and the other planners' `answer` are each one item,
+/// counted once whichever of its fields was cut. The worker's `task`,
+/// `goal` and `inherited` (ADR-t2072-1), whose prompt's bytes are recorded
+/// on `wrapper_launched`, still count each cut field of their one item.
 /// A next-turn message's (ADR-t2072-1) are recorded on the
 /// `turn_requested` that wrote it, and each of its texts is one item.
 /// The throughput review's `omitted` is keyed not by its sections but by
@@ -9343,6 +9337,186 @@ mod tests {
 
     fn omitted(bytes: &PromptBytes, section: &str) -> usize {
         bytes.omitted.get(section).copied().unwrap_or(0)
+    }
+
+    /// The recovery job's `task` is one item: cut in none of its fields it
+    /// counts 0, cut in one or in all of them 1; a cut of a required field
+    /// is still said in `over_limit`.
+    #[test]
+    fn recovery_task_counts_once_whichever_fields_are_cut() {
+        let bytes_of = |title: usize, description: usize, acceptance: usize, verify: usize| {
+            let task = Task::restore(TaskRecord {
+                goal_priority: None,
+                id: TaskId::new(7),
+                title: big("title", title),
+                description: big("description", description),
+                acceptance: big("acceptance", acceptance),
+                verification_commands: vec![big("cargo test", verify)],
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                priority: Default::default(),
+                change: None,
+                status: TaskStatus::Draft,
+                goal_id: None,
+                context: String::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
+                named_mode: None,
+                wait_for_build: false,
+            })
+            .unwrap();
+            recovery_prompt(
+                &task,
+                &run_on(Provider::Claude, WorkerMode::Headless),
+                1,
+                &RecoveryMaterial {
+                    alert: RecoveryAlert::IdleProcess,
+                    ended: None,
+                    facts: &json!({}),
+                    workspace: "ws",
+                    screen: "",
+                    processes: Ok(Vec::new()),
+                    git_status: "",
+                    head: SHA,
+                    receipt_commit: None,
+                    history: &[],
+                    allowed: &["wait"],
+                    binary: &no_binary(),
+                },
+            )
+            .unwrap()
+            .bytes
+        };
+        let (title, description, acceptance, verify) = (
+            RECOVERY_TITLE_BYTES * 2,
+            RECOVERY_DESCRIPTION_BYTES * 2,
+            RECOVERY_ACCEPTANCE_BYTES * 2,
+            RECOVERY_VERIFY_BYTES * 2,
+        );
+        // (bytes, how many times `task` counts, the required cuts said)
+        for (bytes, counted, said) in [
+            (bytes_of(10, 10, 10, 10), 0, 0),
+            (bytes_of(title, 10, 10, 10), 1, 0),
+            (bytes_of(10, description, 10, 10), 1, 1),
+            (bytes_of(title, description, acceptance, verify), 1, 3),
+        ] {
+            assert_eq!(omitted(&bytes, "task"), counted, "{bytes:?}");
+            assert_eq!(
+                bytes
+                    .over_limit
+                    .as_deref()
+                    .unwrap_or_default()
+                    .matches("task: ")
+                    .count(),
+                said,
+                "{bytes:?}"
+            );
+        }
+    }
+
+    fn finding_view(summary: usize, subject: usize, why: usize, detail: usize) -> FindingView {
+        FindingView {
+            finding: crate::domain::Finding {
+                id: crate::domain::FindingId::new(4),
+                kind: "conflict".into(),
+                target: "queue".into(),
+                task_id: None,
+                run_id: None,
+                goal_id: None,
+                subject: big("subject", subject),
+                summary: big("summary", summary),
+                detail: big("detail", detail),
+                impact: crate::domain::Impact::Normal,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                occurrences: 1,
+                evidence: Vec::new(),
+                status: crate::domain::FindingStatus::Open,
+                status_reason: None,
+                proposal_id: None,
+                covered_by_task: None,
+                propose_reason: Some(big("why", why)),
+                propose_requested_at: None,
+                recorded_by: "observer".into(),
+                updated_at: 0,
+            },
+            proposal_status: None,
+            open_asks: Vec::new(),
+            evidence_events: Some(Vec::new()),
+        }
+    }
+
+    /// The finding planner's `finding` is one item: cut in none of its
+    /// summary, subject, why and detail it counts 0, cut in one or in all
+    /// of them 1.
+    #[test]
+    fn finding_planner_finding_counts_once_whichever_fields_are_cut() {
+        let short = FINDING_SHORT_BYTES * 2;
+        for ((summary, subject, why, detail), counted) in [
+            ((10, 10, 10, 10), 0),
+            ((short, 10, 10, 10), 1),
+            ((10, 10, 10, FINDING_DETAIL_BYTES * 2), 1),
+            ((short, short, short, FINDING_DETAIL_BYTES * 2), 1),
+        ] {
+            let view = finding_view(summary, subject, why, detail);
+            let fitted = finding_planner_prompt(&FindingPlannerMaterial {
+                db: Path::new("/q/queue.db"),
+                finding: &view,
+                attempt: 1,
+                asks: &[],
+                goal: None,
+                goal_closed: false,
+                siblings: &[],
+                answer: None,
+                handover: None,
+            })
+            .unwrap();
+            assert_eq!(
+                omitted(&fitted.bytes, "finding"),
+                counted,
+                "{:?}",
+                fitted.bytes
+            );
+            // The cut of the required detail is still said.
+            assert_eq!(
+                fitted
+                    .bytes
+                    .over_limit
+                    .as_deref()
+                    .is_some_and(|said| said.starts_with("finding: ")),
+                detail > FINDING_DETAIL_BYTES,
+                "{:?}",
+                fitted.bytes
+            );
+        }
+    }
+
+    /// A planner's `answer` is one item, the ask it carries: it counts 0
+    /// when neither its question nor its answer is cut, and 1 when one or
+    /// both are. Every planner that carries an answer this way takes it
+    /// from [`planner_answer`].
+    #[test]
+    fn planner_answer_counts_once_whichever_fields_are_cut() {
+        let big_bytes = PLANNER_ANSWER_BYTES * 2;
+        for ((question, answer), counted) in [
+            ((10, 10), 0),
+            ((big_bytes, 10), 1),
+            ((10, big_bytes), 1),
+            ((big_bytes, big_bytes), 1),
+        ] {
+            let mut ask = asked(1, 10);
+            ask.question = big("question", question);
+            ask.answer = Some(big("answer", answer));
+            let mut fit = Fit::new(100_000);
+            let (question, text) = planner_answer(&mut fit, &ask);
+            assert_eq!(
+                question.contains("read ask 1 whole") || text.contains("read ask 1 whole"),
+                counted == 1
+            );
+            let bytes = fit.finish(format!("{question}{text}")).bytes;
+            assert_eq!(omitted(&bytes, "answer"), counted, "{bytes:?}");
+        }
     }
 
     /// A draft counts once in `drafts`: kept with its title, description
