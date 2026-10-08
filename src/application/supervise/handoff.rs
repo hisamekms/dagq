@@ -116,14 +116,14 @@ impl Supervisor<'_> {
             }
         }
         if let Some(mut watch) = self.plan_review.take() {
-            watch.headless.stop();
+            watch.headless.abandon();
             info!(
                 "plan review {} stopped for the handoff; it runs again",
                 watch.job.attempt
             );
         }
         if let Some(mut watch) = self.goal_review.take() {
-            watch.headless.stop();
+            watch.headless.abandon();
             info!(
                 "goal review {} of goal {} stopped for the handoff; it runs again",
                 watch.job.attempt, watch.job.goal_id
@@ -137,12 +137,12 @@ impl Supervisor<'_> {
             stop_recovery(&mut slot);
             let snapshot = match &mut slot.phase {
                 Phase::Review(watch) => {
-                    watch.job.stop();
+                    watch.job.abandon();
                     info!(run_id = %run.id(), "run {}: review {} stopped for the handoff; it is reviewed again", run.id(), watch.attempt);
                     None
                 }
                 Phase::Recovery(watch) => {
-                    watch.job.stop();
+                    watch.job.abandon();
                     info!(run_id = %run.id(), "run {}: recovery round {} stopped for the handoff; it is taken again", run.id(), watch.round);
                     if let Err(error) = self.queue.release_lease(run.id(), &self.token) {
                         warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not release the lease: {error:#}", run.id());

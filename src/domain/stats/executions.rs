@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use super::{context::RecordedContext, rfc3339_millis, timestamp_millis, tokens::Usd};
 use crate::domain::{
-    GoalId, Provider, RunEvent, RunId, TaskId, event_kind,
+    GoalId, Provider, RunEvent, RunId, TaskId, event_kind, headless_job,
     sessions::{
         GOAL_REVIEW, HEADLESS_ROUTE, KINDS, OBSERVER, PLAN_REVIEW, REVIEW, RUN_SESSION,
         RUNTIME_PLANNER, SESSION_OPENED, SESSION_TOKENS, THROUGHPUT_REVIEW, TOKEN_CUT_KINDS,
@@ -147,6 +147,15 @@ fn actor_of(
         event_kind::GOAL_REVIEW_FINISHED | event_kind::GOAL_REVIEW_FAILED => job(GOAL_REVIEW),
         event_kind::OBSERVE_FINISHED => job(OBSERVER),
         event_kind::THROUGHPUT_REVIEW_FINISHED => job(THROUGHPUT_REVIEW),
+        // A job its supervisor stopped with no other event to end it, by
+        // the kind of its `headless_jobs` row.
+        event_kind::HEADLESS_JOB_STOPPED => match event.payload["kind"].as_str()? {
+            headless_job::REVIEW => job(REVIEW),
+            headless_job::RECOVERY => job(TRIAGE),
+            headless_job::PLAN_REVIEW => job(PLAN_REVIEW),
+            headless_job::GOAL_REVIEW => job(GOAL_REVIEW),
+            _ => None,
+        },
         SESSION_TOKENS => {
             let kind = event.payload["kind"].as_str()?;
             let kind = TOKEN_CUT_KINDS.into_iter().find(|cut| *cut == kind)?;
@@ -790,6 +799,119 @@ mod tests {
         assert_eq!(
             (&json["executions"], &json["unmeasured"], &json["total"]),
             (&json!(4), &json!(2), &json!(74))
+        );
+    }
+    /// The ends a supervisor writes for a job stopped with no other end
+    /// (`headless_job_stopped` of its own job, by its kind), for a plan
+    /// review whose proposal moved on and for an adopted review's
+    /// `review_failed` count as Executions: measured, in the executions
+    /// and the sums; not measured, in `unmeasured`. A takeover's
+    /// `headless_job_stopped` records no Execution and is not counted.
+    #[test]
+    fn jobs_stopped_moved_on_or_adopted_count_as_executions() {
+        use crate::domain::{
+            headless_job::JobSession,
+            tokens::{ExecutionTokens, TokenSource, TokenUsage},
+        };
+        let ended = |session: Option<JobSession>, mut payload: Value| {
+            JobSession::record_execution(session.as_ref(), &mut payload);
+            payload
+        };
+        let measured = || {
+            Some(JobSession {
+                tokens: Some(ExecutionTokens {
+                    tokens: Some(TokenUsage {
+                        input: 10,
+                        output: 2,
+                        ..TokenUsage::default()
+                    }),
+                    source: Some(TokenSource::UsageRecord),
+                    ..ExecutionTokens::default()
+                }),
+                ..JobSession::default()
+            })
+        };
+        let run = Some("r1");
+        let at = "2026-10-01T09:00:00Z";
+        let stopped = |kind: &str| json!({"kind": kind, "provider": "codex"});
+        let mut events = Vec::new();
+        for (i, kind) in ["review", "recovery", "plan_review", "goal_review"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = i64::try_from(i).unwrap() * 2;
+            let on = (kind == "review" || kind == "recovery")
+                .then_some(run)
+                .flatten();
+            events.push(event(
+                id + 1,
+                on,
+                "headless_job_stopped",
+                ended(measured(), stopped(kind)),
+                at,
+            ));
+            events.push(event(
+                id + 2,
+                on,
+                "headless_job_stopped",
+                ended(None, stopped(kind)),
+                at,
+            ));
+        }
+        events.extend([
+            event(
+                9,
+                None,
+                "plan_review_discarded",
+                ended(None, json!({"edited": [], "error": "moved on"})),
+                at,
+            ),
+            event(
+                10,
+                run,
+                "review_failed",
+                ended(measured(), json!({"code": "job_failed", "adopted": true})),
+                at,
+            ),
+            // A gone supervisor's job stopped by a takeover.
+            event(
+                11,
+                run,
+                "headless_job_stopped",
+                json!({"kind": "review", "pid": 4}),
+                at,
+            ),
+        ]);
+        let all = executions(&events);
+        assert_eq!(all.len(), 10);
+        let day = millis("2026-10-01T00:00:00Z");
+        let stats = window(&all, Some(day), day + DAY, |_| true);
+        assert_eq!(
+            (
+                stats.totals.executions,
+                stats.totals.unmeasured,
+                stats.totals.total
+            ),
+            (10, 5, 60)
+        );
+        for (actor, expected) in [
+            ("review", (3, 1, 24)),
+            ("triage", (2, 1, 12)),
+            ("plan_review", (3, 2, 12)),
+            ("goal_review", (2, 1, 12)),
+        ] {
+            let totals = &stats.by_actor[actor].totals;
+            assert_eq!(
+                (totals.executions, totals.unmeasured, totals.total),
+                expected,
+                "{actor}"
+            );
+        }
+        // `kpi`'s `details.tokens` is this window as `stats` prints it.
+        let json = serde_json::to_value(&stats).unwrap();
+        assert_eq!(
+            (&json["executions"], &json["unmeasured"], &json["total"]),
+            (&json!(10), &json!(5), &json!(60))
         );
     }
 }

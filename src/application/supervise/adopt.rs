@@ -457,18 +457,36 @@ impl Supervisor<'_> {
                     || format!("review {attempt} failed and ask {} was opened for it before the supervisor stopped", ask.id),
                     |(_, error)| error.to_owned(),
                 );
-            self.queue.record_runtime_event(
-                run.id(),
-                EventKind::ReviewFailed,
-                json!({
-                    "code": ReasonCode::JobFailed,
-                    "attempt": attempt,
-                    "error": error,
-                    "status": run.status().as_str(),
-                    "ask_id": ask.id,
-                    "adopted": true,
-                }),
-            )?;
+            let failed = json!({
+                "code": ReasonCode::JobFailed,
+                "attempt": attempt,
+                "error": error,
+                "status": run.status().as_str(),
+                "ask_id": ask.id,
+                "adopted": true,
+            });
+            // Its agent's Execution, read from the output it left.
+            let failed = adopted_review_failed(failed, events, started.id, || {
+                let launch = crate::domain::actor_model::ActorLaunch::recorded(
+                    &started.payload,
+                    crate::domain::actor_model::ModelRole::Review,
+                );
+                let stdout = PathBuf::from(run.run_dir()?).join(format!("review-{attempt}.out"));
+                // Its file is made before its process starts: empty, it
+                // never started.
+                let stdout = self
+                    .files
+                    .read_to_string(&stdout)
+                    .ok()
+                    .filter(|stdout| !stdout.is_empty())?;
+                let agent = self.job_agent(launch.provider).unwrap_or(self.reviewer);
+                let started_at = super::file_time::event_time(started)
+                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|since| i64::try_from(since.as_millis()).ok());
+                Some(agent.job_session(&stdout, started_at))
+            });
+            self.queue
+                .record_runtime_event(run.id(), EventKind::ReviewFailed, failed)?;
         }
         info!(run_id = %run.id(), ask_id = %ask.id, "run {} waits for a person in ask {} about its failed review, opened before the supervisor stopped; it is not reviewed again", run.id(), ask.id);
         let mut watch = ExitWatch::new(session.clone(), AfterExit::Rest { close: true });
@@ -1077,6 +1095,33 @@ fn last_request_before(events: &[RunEvent], anchor: EventId) -> Option<u64> {
         .next_back()
 }
 
+/// The `review_failed` an adopter records for the failed review whose
+/// `review_started` is event `started`: `payload` with the Execution its
+/// agent was (ADR-t1486-1), from `ran` (what its output named; `None` when
+/// its agent never started, as no or empty output tells), unless an event after its
+/// start recorded that Execution already.
+fn adopted_review_failed(
+    mut payload: Value,
+    events: &[RunEvent],
+    started: EventId,
+    ran: impl FnOnce() -> Option<Option<crate::domain::headless_job::JobSession>>,
+) -> Value {
+    let ends_review = |event: &RunEvent| match event.kind.as_str() {
+        event_kind::REVIEW_FINISHED | event_kind::REVIEW_FAILED | event_kind::REVIEW_RETRIED => {
+            true
+        }
+        event_kind::HEADLESS_JOB_STOPPED => event.payload["kind"] == headless_job::REVIEW,
+        _ => false,
+    };
+    let recorded = events
+        .iter()
+        .any(|e| e.id > started && ends_review(e) && e.payload.get("tokens_source").is_some());
+    if !recorded && let Some(session) = ran() {
+        crate::domain::headless_job::JobSession::record_execution(session.as_ref(), &mut payload);
+    }
+    payload
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,6 +1168,77 @@ mod tests {
         let route = with.route(true);
         let combined = landing::combined_verdict(&with, &route, false);
         assert_eq!(combined.reasons, ["tests: add a test"]);
+    }
+
+    /// The adopter's `review_failed` carries the Execution of the review's
+    /// agent: the tokens its output gave, or not measured; nothing when
+    /// the agent never started or an end after its start recorded it.
+    #[test]
+    fn an_adopted_review_failed_records_the_reviews_execution_once() {
+        use crate::domain::{
+            headless_job::JobSession,
+            tokens::{ExecutionTokens, TokenSource, TokenUsage},
+        };
+        let event = |id: i64, kind: &str, payload: Value| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let started = event(2, event_kind::REVIEW_STARTED, json!({"attempt": 1}));
+        let base = || json!({"code": "job_failed", "attempt": 1});
+        let measured = || {
+            Some(Some(JobSession {
+                tokens: Some(ExecutionTokens {
+                    tokens: Some(TokenUsage {
+                        input: 9,
+                        output: 1,
+                        ..TokenUsage::default()
+                    }),
+                    source: Some(TokenSource::ModelUsage),
+                    ..ExecutionTokens::default()
+                }),
+                ..JobSession::default()
+            }))
+        };
+        let events = [started.clone()];
+        let failed = adopted_review_failed(base(), &events, started.id, measured);
+        assert_eq!(failed["tokens"]["input"], 9);
+        assert_eq!(failed["tokens_source"], "model_usage");
+        let failed = adopted_review_failed(base(), &events, started.id, || Some(None));
+        assert!(failed["tokens"].is_null(), "{failed}");
+        assert_eq!(failed["tokens_reason"], "tokens_not_read");
+        // No output: its agent never started.
+        let failed = adopted_review_failed(base(), &events, started.id, || None);
+        assert!(failed.get("tokens_source").is_none(), "{failed}");
+        // Its end was recorded with the Execution already: not again, and
+        // its output is not read.
+        let stopped = event(
+            3,
+            event_kind::HEADLESS_JOB_STOPPED,
+            json!({"kind": "review", "tokens": null, "tokens_source": null}),
+        );
+        let events = [started.clone(), stopped];
+        let failed = adopted_review_failed(base(), &events, started.id, || {
+            panic!("the output is not read again")
+        });
+        assert!(failed.get("tokens_source").is_none(), "{failed}");
+        // An end of another job, or an earlier review's, does not count.
+        let events = [
+            event(1, event_kind::REVIEW_FAILED, json!({"tokens_source": null})),
+            started.clone(),
+            event(
+                3,
+                event_kind::HEADLESS_JOB_STOPPED,
+                json!({"kind": "recovery", "tokens_source": null}),
+            ),
+        ];
+        let failed = adopted_review_failed(base(), &events, started.id, || Some(None));
+        assert!(failed.get("tokens_source").is_some(), "{failed}");
     }
 
     fn wrapper(exited: bool, lives: bool, heartbeat_age_secs: i64) -> Option<WrapperSeen> {

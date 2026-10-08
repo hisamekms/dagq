@@ -1088,8 +1088,9 @@ struct Supervisor<'a> {
     plan_review: Option<plan_review::PlanReviewWatch>,
     /// The goal review job running now: one at a time, queue-wide.
     goal_review: Option<goal_review::GoalReviewWatch>,
-    /// The ends of this process's headless jobs still to be written to
-    /// `headless_jobs` (task 443).
+    /// The ends of this process's headless jobs still to be written: the
+    /// outcomes of their `headless_jobs` rows (task 443), and the jobs
+    /// abandoned, written as `headless_job_stopped` with their Execution.
     job_ends: JobEnds,
     /// Whether this process looked for the jobs a gone supervisor left,
     /// its own token's included (after an exec), already.
@@ -1465,7 +1466,10 @@ impl Supervisor<'_> {
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
         self.host.host_metrics.finish();
-        // The jobs the loop stopped last (a handoff stops them all).
+        // The jobs the loop stopped last (a handoff stops them all), and
+        // those a loop that failed leaves running: dropped only after this
+        // last write, their ends would not be written.
+        self.abandon_jobs();
         self.write_job_ends();
         // A loop that ended on an error lets the cleanup job end after its
         // current worktree (all candidates for disk space), recording its work.
@@ -1510,6 +1514,18 @@ impl Supervisor<'_> {
             }
         }
         result
+    }
+    /// Abandon every headless job still running once the loop ended: the
+    /// plan review, the goal review and the slots' jobs
+    /// ([`HeadlessJob::abandon`]).
+    fn abandon_jobs(&mut self) {
+        if let Some(watch) = &mut self.plan_review {
+            watch.headless.abandon();
+        }
+        if let Some(watch) = &mut self.goal_review {
+            watch.headless.abandon();
+        }
+        self.claim.slots.abandon_jobs();
     }
     /// Record, once, that this process drains for a stop request (SIGINT /
     /// SIGTERM, from `down`, the drain of `up` or `install
@@ -3614,11 +3630,12 @@ impl Supervisor<'_> {
 }
 
 /// Kill the headless job (a review or a recovery job) of a slot the
-/// supervisor stops watching.
+/// supervisor stops watching, recording its Execution
+/// ([`HeadlessJob::abandon`]).
 fn stop_job(slot: &mut Slot) {
     match &mut slot.phase {
-        Phase::Review(watch) => watch.job.stop(),
-        Phase::Recovery(watch) => watch.job.stop(),
+        Phase::Review(watch) => watch.job.abandon(),
+        Phase::Recovery(watch) => watch.job.abandon(),
         _ => stop_recovery(slot),
     }
 }

@@ -637,7 +637,9 @@ pub fn edited_error(edited: &[TaskId]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanReviewEnd {
     /// The proposal is no longer the submitted, unheld one the job took:
-    /// the job's row is interrupted with `error`, and nothing else changes.
+    /// the job's row is interrupted with `error`, and a job whose agent
+    /// ran records `plan_review_discarded` with its Execution; nothing
+    /// else changes.
     MovedOn { error: String },
     /// Tasks of the proposal were edited during the job: its row is
     /// interrupted with `error` and `plan_review_discarded` says why; the

@@ -429,6 +429,9 @@ pub struct PlanReviewFailure {
     pub duration_secs: u64,
     /// The session the job's output names, as in [`PlanReviewApply`].
     pub session: Option<crate::domain::headless_job::JobSession>,
+    /// The job's agent ran (its process started), so an end that is not
+    /// applied records its Execution (ADR-t1486-1).
+    pub ran: bool,
     /// The job's provider could not be used, and why (ADR-t1063-1
     /// decision 4): its row ends `interrupted` and the proposal is not
     /// held, so it is reviewed again at once, on the other provider unless

@@ -554,9 +554,12 @@ impl RecoveryWatch {
         self.job.is_some()
     }
 
+    /// Stop the job that runs with no `recovery_finished`: the slot is no
+    /// longer watched. Its Execution is still recorded
+    /// ([`HeadlessJob::abandon`]).
     pub(super) fn stop_job(&mut self) {
         if let Some(job) = &mut self.job {
-            job.job.stop();
+            job.job.abandon();
         }
     }
 

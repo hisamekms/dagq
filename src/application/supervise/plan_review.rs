@@ -586,6 +586,7 @@ impl Supervisor<'_> {
                     error,
                     duration_secs,
                     session,
+                    ran: true,
                     unusable,
                     prompt_bytes: Some(watch.prompt_bytes.clone()),
                 },

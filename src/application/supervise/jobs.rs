@@ -17,30 +17,77 @@ use std::sync::Mutex;
 /// before SIGKILL.
 const TAKEOVER_GRACE: Duration = Duration::from_secs(5);
 
-/// The ends of this process's headless jobs not written to the queue yet
-/// (`headless_jobs` row, outcome): a job ends where no queue is at hand,
-/// and the supervisor writes them at the top of its next pass.
+/// The ends of this process's headless jobs not written to the queue yet:
+/// each `headless_jobs` row's outcome, and the jobs stopped with no event
+/// to end them ([`HeadlessJob::abandon`]). A job ends where no queue is at
+/// hand, and the supervisor writes them at the top of its next pass.
 #[derive(Clone, Default)]
-pub(super) struct JobEnds(Arc<Mutex<Vec<(i64, &'static str)>>>);
+pub(super) struct JobEnds(Arc<Mutex<Ends>>);
+
+#[derive(Default)]
+struct Ends {
+    rows: Vec<(i64, &'static str)>,
+    abandoned: Vec<Abandoned>,
+}
+
+/// A job this process stopped with no event to end it (a handoff, a slot
+/// it stops watching, a drop): its agent ran all the same, so its end is
+/// written as `headless_job_stopped` with its Execution (ADR-t1486-1).
+pub(super) struct Abandoned {
+    pub(super) subject: JobSubject,
+    pub(super) stdout: PathBuf,
+    pub(super) started_at: Option<i64>,
+}
 
 impl JobEnds {
-    fn push(&self, id: i64, outcome: &'static str) {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Ends> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((id, outcome));
     }
-    fn take(&self) -> Vec<(i64, &'static str)> {
-        std::mem::take(
-            &mut *self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
+    fn push(&self, id: i64, outcome: &'static str) {
+        self.lock().rows.push((id, outcome));
+    }
+    fn abandoned(&self, job: Abandoned) {
+        self.lock().abandoned.push(job);
+    }
+    fn take(&self) -> (Vec<(i64, &'static str)>, Vec<Abandoned>) {
+        let mut ends = self.lock();
+        (
+            std::mem::take(&mut ends.rows),
+            std::mem::take(&mut ends.abandoned),
         )
     }
 }
 
+/// The `headless_job_stopped` of `job`, stopped by `supervisor` with no
+/// event to end it, with the Execution its agent was so far
+/// (ADR-t1486-1): `session`, what its output named, or not measured.
+pub(super) fn abandoned_end(
+    job: &Abandoned,
+    supervisor: &LeaseToken,
+    session: Option<&crate::domain::headless_job::JobSession>,
+) -> Value {
+    let subject = &job.subject;
+    let mut payload = json!({
+        "kind": subject.kind,
+        "label": subject.label,
+        "run_id": subject.run_id,
+        "proposal_id": subject.proposal_id,
+        "goal_id": subject.goal_id,
+        "attempt": subject.attempt,
+        "provider": subject.provider,
+        "supervisor": supervisor,
+        // Unix seconds, as a takeover's `headless_job_stopped` gives its
+        // row's.
+        "started_at": job.started_at.map(|ms| ms.div_euclid(1000)),
+    });
+    crate::domain::headless_job::JobSession::record_execution(session, &mut payload);
+    payload
+}
+
 /// What a headless job is about, for its `headless_jobs` row.
+#[derive(Clone)]
 pub(super) struct JobSubject {
     pub(super) kind: &'static str,
     pub(super) label: Option<String>,
@@ -89,6 +136,9 @@ pub(super) struct HeadlessJob {
     pub(super) provider: Provider,
     /// When it started (unix milliseconds), for the model of its session.
     pub(super) started_at: Option<i64>,
+    /// Until it ends, where its end goes if it is stopped with no event to
+    /// end it ([`Self::abandon`]), and what it is about.
+    pub(super) unended: Option<(JobEnds, JobSubject)>,
 }
 
 impl HeadlessJob {
@@ -139,7 +189,8 @@ impl HeadlessJob {
     }
 
     /// Kill the job's process and the processes it started (a `claude -p`'s
-    /// Bash and what that runs), so none outlives the job.
+    /// Bash and what that runs), so none outlives the job. The caller
+    /// records the job's end; one that records none abandons it.
     pub(super) fn stop(&mut self) {
         let descendants = self.processes.descendants(self.child.id());
         let _ = self.child.kill();
@@ -150,7 +201,25 @@ impl HeadlessJob {
         self.ended(headless_job::STOPPED);
     }
 
+    /// Stop a job whose end no event records (a handoff, a slot the
+    /// supervisor stops watching, a drop): as [`Self::stop`], and its end
+    /// is written with the next ends as `headless_job_stopped` with the
+    /// Execution its agent was so far (ADR-t1486-1). A job that ended
+    /// already is left as it is.
+    pub(super) fn abandon(&mut self) {
+        let unended = self.unended.take();
+        self.stop();
+        if let Some((ends, subject)) = unended {
+            ends.abandoned(Abandoned {
+                subject,
+                stdout: self.stdout.clone(),
+                started_at: self.started_at,
+            });
+        }
+    }
+
     fn ended(&mut self, outcome: &'static str) {
+        self.unended = None;
         if let Some((ends, id)) = self.record.take() {
             ends.push(id, outcome);
         }
@@ -179,12 +248,12 @@ impl HeadlessJob {
 }
 
 /// A job dropped before its end was read (an error on the way, a loop that
-/// failed) is stopped, so it neither runs on unwatched nor leaves its row
-/// open while this process lives.
+/// failed) is abandoned, so it neither runs on unwatched nor leaves its row
+/// open while this process lives, and its Execution is recorded.
 impl Drop for HeadlessJob {
     fn drop(&mut self) {
-        if self.record.is_some() {
-            self.stop();
+        if self.record.is_some() || self.unended.is_some() {
+            self.abandon();
         }
     }
 }
@@ -214,8 +283,8 @@ impl Supervisor<'_> {
         let pid = child.id();
         let new = NewHeadlessJob {
             kind: subject.kind,
-            label: subject.label,
-            run_id: subject.run_id,
+            label: subject.label.clone(),
+            run_id: subject.run_id.clone(),
             proposal_id: subject.proposal_id,
             goal_id: subject.goal_id,
             attempt: subject.attempt,
@@ -242,6 +311,7 @@ impl Supervisor<'_> {
             record,
             provider: subject.provider,
             started_at: started_at_ms(&*self.generators.clock),
+            unended: Some((self.job_ends.clone(), subject)),
         }
     }
 
@@ -342,10 +412,39 @@ impl Supervisor<'_> {
     }
 
     pub(super) fn write_job_ends(&mut self) {
-        for (id, outcome) in self.job_ends.take() {
+        let (rows, abandoned) = self.job_ends.take();
+        for (id, outcome) in rows {
             if let Err(error) = self.queue.end_headless_job(id, outcome) {
                 warn!(error = %format_args!("{error:#}"), "the end of headless job {id} could not be recorded: {error:#}");
             }
+        }
+        for job in abandoned {
+            self.write_abandoned(&job);
+        }
+    }
+
+    /// Record `headless_job_stopped` for a job this process stopped with
+    /// no event to end it, on its run, or on the queue for a job with
+    /// none, with the Execution its output names ([`abandoned_end`]).
+    fn write_abandoned(&mut self, job: &Abandoned) {
+        let agent = self
+            .job_agent(job.subject.provider)
+            .unwrap_or(self.reviewer);
+        let stdout = self.files.read_to_string(&job.stdout).unwrap_or_default();
+        let session = agent.job_session(&stdout, job.started_at);
+        let payload = abandoned_end(job, &self.token, session.as_ref());
+        let recorded = match &job.subject.run_id {
+            Some(run) => {
+                self.queue
+                    .record_runtime_event(run, EventKind::HeadlessJobStopped, payload)
+            }
+            None => self
+                .queue
+                .record_queue_event(EventKind::HeadlessJobStopped, payload)
+                .map(|_| ()),
+        };
+        if let Err(error) = recorded {
+            warn!(error = %format_args!("{error:#}"), "the stopped headless {} job (attempt {}) could not be recorded: {error:#}", job.subject.kind, job.subject.attempt);
         }
     }
 
@@ -709,6 +808,7 @@ mod tests {
             record: None,
             provider: Provider::Claude,
             started_at: None,
+            unended: None,
         }
     }
 
@@ -745,6 +845,133 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(failed.contains("it broke"), "{failed}");
+    }
+
+    /// A job stopped with no event to end it (abandoned, or dropped while
+    /// it ran) hands its end to the next ends, once; a job stopped by a
+    /// caller that records its end, or one that ended, hands nothing.
+    #[test]
+    fn an_abandoned_or_dropped_job_hands_its_end_over_once() {
+        let files = MemoryFiles::default();
+        let ends = JobEnds::default();
+        let unended = |job: &mut HeadlessJob, attempt| {
+            job.started_at = Some(7);
+            job.unended = Some((
+                ends.clone(),
+                JobSubject {
+                    provider: Provider::Codex,
+                    ..JobSubject::run(headless_job::REVIEW, &RunId::new("r1").unwrap(), attempt)
+                },
+            ));
+        };
+        let mut abandoned = job(&files, true, "");
+        unended(&mut abandoned, 1);
+        abandoned.abandon();
+        abandoned.abandon();
+        drop(abandoned);
+        let mut dropped = job(&files, true, "");
+        unended(&mut dropped, 2);
+        drop(dropped);
+        let mut stopped = job(&files, true, "");
+        unended(&mut stopped, 3);
+        stopped.stop();
+        drop(stopped);
+        let mut ended = job(&files, true, "");
+        unended(&mut ended, 4);
+        ended.poll(&files, &Plain).unwrap().unwrap().unwrap();
+        drop(ended);
+        let (_, handed) = ends.take();
+        let attempts: Vec<usize> = handed.iter().map(|job| job.subject.attempt).collect();
+        assert_eq!(attempts, [1, 2]);
+        assert_eq!(handed[0].stdout, PathBuf::from("/job/out"));
+        assert_eq!(handed[0].started_at, Some(7));
+    }
+
+    /// The slots' jobs a loop leaves running are abandoned at its end, so
+    /// their ends are handed over before its last write; a slot without a
+    /// job hands nothing.
+    #[test]
+    fn the_slots_jobs_are_abandoned_when_the_loop_ends() {
+        let files = MemoryFiles::default();
+        let ends = JobEnds::default();
+        let run = super::super::recovery::test_run(RunStatus::AwaitingIntegration, None);
+        let mut review = job(&files, true, "");
+        review.unended = Some((
+            ends.clone(),
+            JobSubject::run(headless_job::REVIEW, run.id(), 1),
+        ));
+        let mut slots = super::super::stages::SlotTable::default();
+        slots.admit(Slot::new(
+            run.clone(),
+            Phase::Review(ReviewWatch {
+                session: None,
+                attempt: 1,
+                retried: false,
+                switchable: false,
+                required: Vec::new(),
+                job: review,
+            }),
+        ));
+        slots.admit(Slot::new(run, Phase::AwaitingSlot));
+        slots.abandon_jobs();
+        let (_, handed) = ends.take();
+        assert_eq!(handed.len(), 1);
+        assert_eq!(handed[0].subject.kind, headless_job::REVIEW);
+        // The slot dropped later hands nothing again.
+        drop(slots);
+        assert!(ends.take().1.is_empty());
+    }
+
+    /// The `headless_job_stopped` of an abandoned job says what the job
+    /// was and records its Execution: the tokens its output gave, or not
+    /// measured.
+    #[test]
+    fn an_abandoned_jobs_end_records_its_execution() {
+        use crate::domain::{
+            headless_job::JobSession,
+            tokens::{ExecutionTokens, TokenSource, TokenUsage},
+        };
+        let job = Abandoned {
+            subject: JobSubject {
+                kind: headless_job::PLAN_REVIEW,
+                label: None,
+                run_id: None,
+                proposal_id: Some(crate::domain::ProposalId::new(4)),
+                goal_id: None,
+                attempt: 2,
+                provider: Provider::Codex,
+            },
+            stdout: PathBuf::from("/job/out"),
+            started_at: Some(1_700_000_000_123),
+        };
+        let token = LeaseToken::new("sv");
+        let measured = JobSession {
+            tokens: Some(ExecutionTokens {
+                tokens: Some(TokenUsage {
+                    input: 20,
+                    output: 4,
+                    ..TokenUsage::default()
+                }),
+                source: Some(TokenSource::UsageRecord),
+                ..ExecutionTokens::default()
+            }),
+            ..JobSession::default()
+        };
+        let end = abandoned_end(&job, &token, Some(&measured));
+        assert_eq!(end["kind"], "plan_review");
+        assert_eq!(end["proposal_id"], 4);
+        assert_eq!(end["attempt"], 2);
+        assert_eq!(end["provider"], "codex");
+        assert_eq!(end["supervisor"], "sv");
+        assert_eq!(end["started_at"], 1_700_000_000);
+        assert_eq!(end["tokens"]["input"], 20);
+        assert_eq!(end["tokens_source"], "token_usage_record");
+        for session in [None, Some(JobSession::default())] {
+            let end = abandoned_end(&job, &token, session.as_ref());
+            assert!(end["tokens"].is_null(), "{end}");
+            assert!(end.get("tokens_source").is_some(), "{end}");
+            assert_eq!(end["tokens_reason"], "tokens_not_read");
+        }
     }
 
     /// A clock stopped at a fixed time.

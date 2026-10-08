@@ -175,8 +175,8 @@ fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String
         event_kind::PLAN_REVIEW_FAILED => {
             Some(("plan_review", text(payload, "plan_review_id")?, true, None))
         }
-        // Its proposal was edited while it ran: the job ran, and its
-        // verdict was not applied.
+        // Its proposal was edited, or moved on, while it ran: the job ran,
+        // and its verdict was not applied.
         event_kind::PLAN_REVIEW_DISCARDED => {
             Some(("plan_review", text(payload, "plan_review_id")?, false, None))
         }

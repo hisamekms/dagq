@@ -64,6 +64,15 @@ impl SlotTable {
         self.slots.iter()
     }
 
+    /// Abandon the headless jobs of every slot ([`stop_job`]): nothing
+    /// watches them once the loop ended, and their ends are written with
+    /// the Execution of their agents.
+    pub(super) fn abandon_jobs(&mut self) {
+        for slot in &mut self.slots {
+            stop_job(slot);
+        }
+    }
+
     pub(super) fn len(&self) -> usize {
         self.slots.len()
     }
