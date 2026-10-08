@@ -73,7 +73,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 
 | 節 | 形 | 上限 | 選ぶ順 | 省いたものの今の読み方 |
 | --- | --- | --- | --- | --- |
-| `stats` | key（`alerts`・`running_alerts`を除く） | 節40,000 byte、1 key 8,000 byte | `next_cursor`・`overall`・`stall_thresholds`・`stall_config`・`failed_tests`・`updates`・`asks`・`waiting`・`jobs`・`recommendations`・`escalations`・`auto_repairs`・`review_reasons`・`reason_codes`・`conflict_hotspots`・`landing_utilization`、残りはkeyの名前順 | `stats --since <cursor>` |
+| `stats` | key（`alerts`・`running_alerts`を除く） | 節と1 keyの上限は`observer::input`の`stats`の`Spec`（1 keyの上限の値と理由は`STATS_MAX_ENTRY`のdoc comment） | `next_cursor`・`overall`・`stall_thresholds`・`stall_config`・`failed_tests`・`updates`・`asks`・`waiting`・`jobs`・`recommendations`・`escalations`・`auto_repairs`・`review_reasons`・`reason_codes`・`conflict_hotspots`・`landing_utilization`、残りはkeyの名前順 | `stats --since <cursor>` |
 | `kpi` | key（`breaches`を除く） | 節32,000 byte、1 key 16,000 byte | `error`・`config`・`targets`・`trend`・`forecast`、残りは名前順。`trend`は期間ごとの`label`・`partial`・`runs`・印の件数（`marks`）・悪化したKPIの先頭10件と残りの件数（`worsened_omitted`）に、`forecast`は期間ごとの`label`・`partial`・`details`に要約する（`forecast.*`の値は載せない。偏りは`kpi.breaches`だけで読む） | `kpi` |
 | `findings` | 一覧 | 100件、48,000 byte | `impact`のhigh・normal・low、`occurrences`の多い順、新しい（idの大きい）順 | `findings`・`findings ID --full` |
 | `improvements` | key | 4,000 byte | 名前順 | `findings` |

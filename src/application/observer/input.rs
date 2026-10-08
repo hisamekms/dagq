@@ -51,6 +51,13 @@ struct Spec {
 
 const NONE: usize = usize::MAX;
 
+/// The bytes one key of the `stats` section may take: 12,000, so that a
+/// daily observation's 24 hours of stats carry the keys near the front of
+/// [`STATS_ORDER`] (`overall`, `failed_tests`, `review_reasons`), which
+/// run a little past 8,000 bytes there. The section keeps its 40,000, so
+/// the prompt as a whole takes no more than before.
+const STATS_MAX_ENTRY: usize = 12_000;
+
 /// The sections in priority order.
 const SECTIONS: &[Spec] = &[
     Spec {
@@ -95,7 +102,7 @@ const SECTIONS: &[Spec] = &[
         required: false,
         max_items: NONE,
         max_bytes: 40_000,
-        max_entry: 8_000,
+        max_entry: STATS_MAX_ENTRY,
         cli: "`{dagq} stats{since}`",
     },
     Spec {
@@ -740,5 +747,35 @@ mod tests {
             PROMPT_LIMIT,
         );
         assert!(!whole.text.contains("Strings are cut"), "{}", whole.text);
+    }
+
+    /// A `stats` key of a daily's size (over 8,000 bytes) is carried whole;
+    /// one past the key's limit is left out with how to read it.
+    #[test]
+    fn a_stats_key_within_its_limit_is_carried_and_a_bigger_one_is_left_out() {
+        let input = json!({"stats": {
+            "overall": {"text": "o".repeat(9_000)},
+            "failed_tests": {"text": "f".repeat(11_900)},
+            "review_reasons": {"text": "r".repeat(12_100)},
+        }});
+        let fitted = fit("head\n", &input, &reading(), PROMPT_LIMIT);
+        let stats = fitted
+            .sections
+            .iter()
+            .find(|section| section.name == "stats")
+            .unwrap();
+        assert_eq!((stats.total, stats.kept, stats.omitted), (3, 2, 1));
+        assert!(fitted.text.contains(&"o".repeat(9_000)), "{}", fitted.text);
+        assert!(fitted.text.contains(&"f".repeat(11_900)), "{}", fitted.text);
+        assert!(
+            !fitted.text.contains(&"r".repeat(12_100)),
+            "{}",
+            fitted.text
+        );
+        assert!(
+            fitted.text.contains("Left out 1 key (review_reasons): read each with `dagq observe --input 1791005872 --section stats.<key>`, or now with `dagq stats --since 12`."),
+            "{}",
+            fitted.text
+        );
     }
 }
