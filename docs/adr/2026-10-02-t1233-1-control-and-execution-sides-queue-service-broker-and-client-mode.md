@@ -9,6 +9,8 @@ accepted_on: 2026-10-02
 amended_by:
   - adr-t1433-1
   - adr-t2113-3
+  - adr-t2114-1
+  - adr-t2114-3
 owners:
   - hisamekms
 tags:

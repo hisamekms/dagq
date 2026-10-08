@@ -147,10 +147,14 @@ inboxは全てのaskにanswerでき、`dagq-recover`の手作業（`integrate`�
 
 capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`StaticPolicy`）はbackendを替えても変えない。sandboxやserviceは、同じ模型の上に強制の点を足すだけで、模型を作り直さない（ADR-t728-1の決定6）。
 
-1. **Podman（draftのgoal 38）**: `ExecutorBackend::Podman`は予約の名前で、今は`ensure_implemented`がerrorにし、選ばれたactorを起動しない（hostに黙って戻さない。fail closed）。最初に隔離するのは、最も広いworktreeを持ち信頼しないworkerで、`[actors.worker] backend = "podman"`の形で選ぶ。containerはrunのworktreeとrun dirだけをmountし、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。予約のcapability（filesystem・network・secret）はこのbackendが強制する。
+1. **Podman（draftのgoal 38）**: `ExecutorBackend::Podman`は予約の名前で、今は`ensure_implemented`がerrorにし、選ばれたactorを起動しない（hostに黙って戻さない。fail closed）。最初に隔離するのは、最も広いworktreeを持ち信頼しないworkerで、`[actors.worker] backend = "podman"`の形で選ぶ。containerはrunのworktreeとrun dirだけをmountし（例外はbrokerへのrunのunix socketと、compileのcache。[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)・[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。予約のcapability（filesystem・network・secret）はこのbackendが強制する。
    containerで動かすのは信頼しないコードを走らせるworker・resumeとintegrateのverificationだけで、読むだけのheadlessのjobの隔離はOSのsandboxにする（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)）。
    containerのrunにはhostのgitの共通dirをmountせず、runごとのcloneを渡す（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）
 2. **queue service / broker（goal 82・goal 38）**: DBの直接操作とenvの偽装を塞ぐには、AI actorがqueueのファイルに触れず、制御側のserviceにだけ依頼する形にする。serviceと、workerとjobのdagqのクライアントモード（unix socket・APIのversion・tokenによるprincipalとservice側の判定・`ask`・`show`・`note`・findingと読み取り、claim・resume・jobの起動でのtokenの発行）はある（[Queue service](queue-service.md)、ADR-t1233-1・ADR-t1233-4・ADR-t1233-5）。host構成ではtokenのfileも同じユーザーが読めるので、助言的であることは変わらない（ADR-t1233-4決定5）。serviceは起動した制御側が発行した資格（actor idとrunに紐づくもの）でactorを識別し、`DAGQ_ROLE`を信用しない。判定は今と同じapplicationの境界（`Planning`・`Dialogue`・`Operation`・`Integrator`）で行い、wrapperとhookをworkerの環境から分けてwrapperのactorとして判定する
+   queueのbrokerは未実装である。
+   決まった形は、queue serviceと同じ`up` / `down` / execの引き継ぎで動くhostのプロセスで、宛先をqueue service・`api.anthropic.com`・crates.ioに限り、allowlistの外を拒む（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)）。
+   containerにClaudeの資格情報を置かず、brokerがrun tokenを検証してhostの長期tokenに差し替える（[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）。
+   workerのcontainerは`--network none`で、VMの中のrelayからmountしたrunごとのunix socketだけでbrokerに届く（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)）。
 3. **Integratorの分離**: pushの資格情報をIntegratorのプロセスだけに持たせ、supervisorとAI actorから外す
 4. **人しか出せない承認（I6）**: 承認の経路（別のterminal、署名、人の端末からの確認など）を決めてから、`answer_approval`のaskのanswerを人だけに限る
 

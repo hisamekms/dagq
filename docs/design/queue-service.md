@@ -26,9 +26,11 @@ related:
 
 hostで動き、queue DBを開いてユースケース単位のAPIを、service側で認可して提供するプロセス。決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側の分け方・serviceとAPIと認可・unix socket・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止の責任・落ちたときの知らせ方・tokenによるprincipalの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
 
-今の段（goal 82の段(2)・(3)、task 1234・1235・1242・1236）: serviceがあり、`hello`・`ask`・`show`・`note`（task 1234）と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（task 1235。goal 80のCodexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（task 1242。[読み取りのユースケース](#読み取りのユースケース)）のユースケースを答える。**worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（task 1236。[クライアントモード](#クライアントモード)）。supervisor・session wrapperとhook・inbox・planner・人のCLIは、今までどおりDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
+今の段（段(2)・(3)）: serviceがあり、`hello`・`ask`・`show`・`note`と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（Codexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）のユースケースを答える。**worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。supervisor・session wrapperとhook・inbox・planner・人のCLIはDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
 
-名前: この文書の「broker」はqueueのbroker（段(4)）のこと。fs・process・git・packageを仲介するresource broker（[Resource broker](broker.md)）とは別。
+名前: この文書の「broker」はqueueのbroker（段(4)、未実装）のこと。
+queueのbrokerはserviceと同じ`up` / `down` / execの引き継ぎで動くhostのプロセスで、宛先はservice・`api.anthropic.com`・crates.ioに限る（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)ほか）。
+fs・process・git・packageを仲介するresource broker（[Resource broker](broker.md)）とは別。
 
 ## 置き場所と形
 
@@ -64,7 +66,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`と`task_id`）をtokenから決め、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。
 
 - 発行: 制御側だけが`queue_service::issue`で発行する。AI actorにtokenを作るコマンドは無い。tokenは32 bytesの乱数のhex。発行できるprincipalはAI actor（`TrustLevel::UntrustedAgent`）だけで、人と制御側（user・supervisor・wrapper・integrator）は段(5)まで今のままDBを直接開く。同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。発行するのはactorの起動の1か所（`HostActorExecutor`、applicationのport `ServiceAccess`、hostの実装は`SystemServiceAccess`）:
-  - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するとき（`ActorProgram::RunSession`）に発行する。wrapperの環境には入れず、session wrapperがagent（非対話のturn。最初のsessionもresumeもturnで動き、対話のsessionはtask 1437・1438から起動しない）を起動するとき（`ActorProgram::SessionAgent`）にそのfileのpathを渡す。fileが無いとき（claimの発行を経ずに起動したwrapper）だけwrapperが発行する（wrapperも制御側）
+  - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するとき（`ActorProgram::RunSession`）に発行する。wrapperの環境には入れず、session wrapperがagent（非対話のturn。最初のsessionもresumeもturnで動き、対話のsessionは起動しない）を起動するとき（`ActorProgram::SessionAgent`）にそのfileのpathを渡す。fileが無いとき（claimの発行を経ずに起動したwrapper）だけwrapperが発行する（wrapperも制御側）
   - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`のコマンド）が起動のとき（`ActorProgram::Headless`）に発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
 - 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。加えてserviceは、principalがrunを名指すtokenを、そのrunの状態が`integrated`・`succeeded`・`failed`・`interrupted`のとき、またはqueueに無いときに断る（runの終わりで失効。`run_holds_token`。workerのtokenのfileはresumeの発行し直しまで残るが、使えない）
 - 断り: tokenが無い（`missing_token`）・発行していない値か失効した（`unknown_token`）・runが終わった（`run_ended`）要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（`use_case`・`reason`。tokenの値は書かない）に残す。actorはservice自身（role `supervisor`、id `queue-service:<pid>`。制御側の一部）
@@ -127,8 +129,8 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 
 | 呼び出し元 | どこが言うか | コマンド |
 | --- | --- | --- |
-| plan review job（`ReadFilesAndQueueCli`） | `prompt::plan_review_prompt`と`RECORD_READING`、上限で省いたものを読む方法の`prompt::PLAN_REVIEW_READS`（task 1561。[Plan review](supervisor-lifecycle/plan-review.md)の4）、AGENTS.mdのplan reviewの節 | `show ID`・`show ID --full`・`proposal show ID`・`goal show ID --full`・`search`・`related`・`findings`・`stats`・`lint`・`lint --proposal ID`・`asks --all`・`list --status ready,in_progress --limit 200`・`events --full`・`timeline RUN` |
-| goal review job（`ReadFilesAndQueueCli`） | `prompt::goal_review_prompt`、上限で省いたものを読む方法の`prompt::GOAL_REVIEW_READS`（task 1571。[Prompt](supervisor-lifecycle/prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)） | `show ID`・`show ID --full`・`goal show ID --full`・`findings`・`events --goal ID --full`・`events --full --all --goal ID`・`events --full --goal ID --kind goal_review_finished`・`events --full --task ID --kind integration_receipt`・`search` |
+| plan review job（`ReadFilesAndQueueCli`） | `prompt::plan_review_prompt`と`RECORD_READING`、上限で省いたものを読む方法の`prompt::PLAN_REVIEW_READS`（[Plan review](supervisor-lifecycle/plan-review.md)の4）、AGENTS.mdのplan reviewの節 | `show ID`・`show ID --full`・`proposal show ID`・`goal show ID --full`・`search`・`related`・`findings`・`stats`・`lint`・`lint --proposal ID`・`asks --all`・`list --status ready,in_progress --limit 200`・`events --full`・`timeline RUN` |
+| goal review job（`ReadFilesAndQueueCli`） | `prompt::goal_review_prompt`、上限で省いたものを読む方法の`prompt::GOAL_REVIEW_READS`（[Prompt](supervisor-lifecycle/prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)） | `show ID`・`show ID --full`・`goal show ID --full`・`findings`・`events --goal ID --full`・`events --full --all --goal ID`・`events --full --goal ID --kind goal_review_finished`・`events --full --task ID --kind integration_receipt`・`search` |
 | observer（`QueueCli`） | `observer::observer_prompt` | 読み取り: `findings [ID] [--full]`・`stats`・`kpi`・`marks`・`notes`・`show ID`・`asks`・`graph`・`forecast`・`goal show ID`・`events --full`・`timeline RUN`・`observe --history`、promptが省いたものの`asks --open`・`candidates`・`observe --input OBSERVATION [--section PATH] [--offset N]`。書き込み: `finding record`・`finding resolve`・`ask --kind blocked --finding ID` |
 | スループットの見直しのjob（`QueueCli`） | `throughput_review::review_prompt`と、それが載せるdagq skillの`reference/kpi.md`の手順 | `kpi [--period] [--last] [--area] [--change]`・`stats [--since] [--until] [--full]`・`timeline RUN`・`events --full --kind --since --until`・`asks`・`marks`・`findings`・`show ID`・`forecast` |
 | review job・復旧job（`ReadFiles`） | `prompt::review_prompt`・`prompt::recovery_prompt` | なし（Bashを持たず、dagqを打たない） |
@@ -145,7 +147,7 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 
 ## クライアントモード
 
-ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、task 1236。`dagq`（`src/main.rs`の`execute`）は、環境に`DAGQ_SERVICE_SOCKET`があれば、`DAGQ_ROLE`もqueueの解決（cwdや`--db`）も読まずにクライアントモードで動く（`infrastructure::queue_service::Client`）。
+ADR-t1233-1決定7、ADR-t1233-5決定1・2・5。`dagq`（`src/main.rs`の`execute`）は、環境に`DAGQ_SERVICE_SOCKET`があれば、`DAGQ_ROLE`もqueueの解決（cwdや`--db`）も読まずにクライアントモードで動く（`infrastructure::queue_service::Client`）。
 
 - コマンドを引数のとおりに読んで（clapの検査はそのまま）、ユースケースとparamsに写す（`client_request`）。読み取りはCLIの読み取りと同じ`QueueRead`（`queue_read`）を`QueueRead::request`でparamsにし、`QueueRead::parse`がそれを同じ読み取りに読み戻す（cursorと`--compare`は`Cursor::text`・`CompareSpec::text`で読み戻せる文字列にする）。`show`・`note`・`ask`・`proposal list|show`・`finding record|resolve|dismiss`は上の表のparamsにする。`ask`と`stats`の`--cmux`は送らない（どちらもcmuxを使わない）。`finding record`の対象の無いものは`queue: true`
 - tokenは`DAGQ_SERVICE_CREDENTIAL_FILE`のfileから読み、要求ごとに送る。答えの`result`をCLIと同じに出す（`graph --format d2`の本文もそのまま）。答えを待つのは`CLIENT_TIMEOUT`（300秒）まで
@@ -160,11 +162,11 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、task 1236。`dagq`（`src/main
 - workerのturn（workspace-write、networkを開ける。ADR-t813-3決定4）: そのままsocketに届く。`codex sandbox`（0.159.2）で、workspace-writeで`sandbox_workspace_write.network_access=true`ならunix socketにつなげ、networkを閉じると断られることを確かめた
 - 読み取りだけのjob（goal reviewなど）: `--sandbox read-only`の代わりに、`:read-only`を継いでnetworkをCodexのnetwork proxy経由で開き、serviceのsocket（実path）だけを許すpermission profile `dagq_job`で動かす（`AgentProvider::reach_queue_service`、`codex::job_service_config`。`-c features.network_proxy=true`・`default_permissions="dagq_job"`・`permissions.dagq_job.extends=":read-only"`・`permissions.dagq_job.network.enabled=true`・`permissions.dagq_job.network.unix_sockets={"<socket>"="allow"}`）。`codex sandbox`（0.159.2）で、この設定でsocketに答えが返り、TCPの接続とfileの書き込みは断られ、socketの項を外すとsocketも断られることを確かめた。`codex exec`で同じ設定を確かめたのはstubのCodexまでで、実Codexでのjobの確認は手動スモークに任せる
 - Claude Codeのagentはsandboxを持たないので何も足さない
-- Codexのworkerの`dagq ask`はserviceのユースケースとして送る（ADR-t1233-5決定5）。以前のrun dirの`ask-requests/`への要求とsupervisorによる取り込み（ADR-t813-3決定3）はtask 1323で撤去した。過去のevent `ask_request_taken`は読めるように`EventKind`に残し、新しくは書かない
+- Codexのworkerの`dagq ask`はserviceのユースケースとして送る（ADR-t1233-5決定5）。過去のevent `ask_request_taken`は読めるように`EventKind`に残し、新しくは書かない
 
 ## 起動と停止（ADR-t1233-4決定1・2）
 
-serviceは`dagq --db <db> service serve`で、固定バイナリ（`up`かsupervisorを動かしているもの）から起動する。起動するときはactorを名指すenv（`DAGQ_ROLE`など）を外し、`setsid`で起動元のsessionから離し、もう1度forkして起動元の子でなくし（execで入れ替わるsupervisorにzombieを残さない）、`service.log`に出力を足す。起動したものは、このbuildのserviceが答えれば（競った別の起動元のものでも）成功とする。`SIGINT`・`SIGTERM`で受け付けを止めて終わる。queueのDBが消えれば（使い捨てのqueueの片付け）2秒以内に自分で終わる（`outcome: queue_gone`）。起動元のenvの`DAGQ_SERVICE_OWNER_PID`（`domain::queue_service::OWNER_PID_ENV`）がpidを名指していれば、そのprocessが居なくなって（親が回収して`kill(pid, 0)`が`ESRCH`になって）から2秒以内にも終わる（`outcome: owner_gone`）。これを付けるのはtestだけで（`tests/common/service.rs`の`OwnedByTest`と`owned_executable`。testのprocessが時間切れの`process::exit`やSIGKILLで`Drop`もqueueのディレクトリの削除も通らずに終わっても、testが起動したserviceを残さない。task 1352）、本番の起動元（`up`・supervisor・`service start`）は付けないので、本番のserviceの寿命（supervisorのexecの引き継ぎやdrainの間も動き続けること）は変わらない。
+serviceは`dagq --db <db> service serve`で、固定バイナリ（`up`かsupervisorを動かしているもの）から起動する。起動するときはactorを名指すenv（`DAGQ_ROLE`など）を外し、`setsid`で起動元のsessionから離し、もう1度forkして起動元の子でなくし（execで入れ替わるsupervisorにzombieを残さない）、`service.log`に出力を足す。起動したものは、このbuildのserviceが答えれば（競った別の起動元のものでも）成功とする。`SIGINT`・`SIGTERM`で受け付けを止めて終わる。queueのDBが消えれば（使い捨てのqueueの片付け）2秒以内に自分で終わる（`outcome: queue_gone`）。起動元のenvの`DAGQ_SERVICE_OWNER_PID`（`domain::queue_service::OWNER_PID_ENV`）がpidを名指していれば、そのprocessが居なくなって（親が回収して`kill(pid, 0)`が`ESRCH`になって）から2秒以内にも終わる（`outcome: owner_gone`）。これを付けるのはtestだけで（`tests/common/service.rs`の`OwnedByTest`と`owned_executable`。testのprocessが時間切れの`process::exit`やSIGKILLで`Drop`もqueueのディレクトリの削除も通らずに終わっても、testが起動したserviceを残さない）、本番の起動元（`up`・supervisor・`service start`）は付けないので、本番のserviceの寿命（supervisorのexecの引き継ぎやdrainの間も動き続けること）は変わらない。
 `service serve`と`service start`の`--cmux`は、登録済みのargvのために受け付けて無視する。
 
 - `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。このbuildのserviceが答えれば`reused`、居なければ`started`、別のbuildか答えないものが居れば止めて`replaced`。起動できなければ`up`はsupervisorを起動せずに止まる。結果は`up`の出力の`queue_service`（`outcome`・`service`・`replaced`）で、`started` / `replaced`はevent `queue_service_started`（`by: up`）に残す。`UpOptions::queue_service`がfalse（`up`の他の段のtest）なら何もしない
@@ -208,8 +210,8 @@ queueのevent（`EventKind::is_queue`）: `queue_service_started`（`by`（`up`�
 - runの終わりでのworkerのtokenのfileの片付け（serviceはrunの終わったtokenを断るので使えないが、fileは次のresumeの発行し直しか手の片付けまで残る）
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - `dagq ci failures`（`ci.read`。[CI watch](supervisor-lifecycle/ci-watch.md)）の読み取りのユースケース。clientのmodeでは`no_use_case`で断る
-- 段(4)〜(6)（goal 38）: queueのbroker、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
+- 段(4)〜(6): queueのbroker（決定はADR-t2114-1〜4）、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
 
 ## CIの見張り（ADR-t1920-1）
 
-[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)（task 1921）。`finding_dismiss`の引数に`covered_by`（task ID、任意。serdeの既定で省略できる）がある（`dagq finding dismiss --covered-by`。CLIは与えたときだけkeyを送る）。引数の追加なので`API_VERSION`は変えず、keyを知らない古いserviceは引数を読めず`bad_request`で拒む（「API versionと互換」）。`dagq ci failures`はserviceのユースケースに載せていない（clientのmodeでは`no_use_case`。上の「まだ無いもの」）。
+[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)。`finding_dismiss`の引数に`covered_by`（task ID、任意。serdeの既定で省略できる）がある（`dagq finding dismiss --covered-by`。CLIは与えたときだけkeyを送る）。引数の追加なので`API_VERSION`は変えず、keyを知らない古いserviceは引数を読めず`bad_request`で拒む（「API versionと互換」）。`dagq ci failures`はserviceのユースケースに載せていない（clientのmodeでは`no_use_case`。上の「まだ無いもの」）。
