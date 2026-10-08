@@ -500,10 +500,10 @@ impl Supervisor<'_> {
         };
         // Not while the cleanup job is to clear the run's worktree (task
         // 405).
-        let cleaning = self.cleanup.cleaning();
+        let cleaning = self.host.cleanup.cleaning();
         let mut guard = cleanup::lock_cleaning(&cleaning);
         if !guard.may_lease(run.id()) {
-            self.cleanup.deferred = true;
+            self.host.cleanup.defer();
             return Ok(());
         }
         // The route as it reads now: a job reaped earlier in this pass may

@@ -33,45 +33,51 @@ impl HostMetricsWatch {
     }
 }
 
-impl Supervisor<'_> {
+impl HostMetricsWatch {
     /// Reap the sample job once it ended; start one when the interval
-    /// passed since the last one started.
-    pub(super) fn host_metrics_pass(&mut self) {
-        let Some(port) = self.host_metrics_port.clone() else {
+    /// passed since the last one started, unless `handing_off`: a handoff
+    /// waits for the job and none starts once it is asked for, so a slow
+    /// sample cannot put the exec off. `now` reads the injected clock's unix
+    /// second, `at` its monotonic time.
+    pub(super) fn pass(
+        &mut self,
+        port: Option<&HostMetricsPort>,
+        handing_off: bool,
+        now: impl FnOnce() -> i64,
+        at: Instant,
+    ) {
+        let Some(port) = port.cloned() else {
             return;
         };
-        if let Some(job) = self.host_metrics.job.take() {
+        if let Some(job) = self.job.take() {
             if !job.is_finished() {
-                self.host_metrics.job = Some(job);
+                self.job = Some(job);
                 return;
             }
-            self.reap_host_metrics(job);
+            self.reap(job);
         }
-        // A handoff waits for the job: none starts once it is asked for,
-        // so a slow sample cannot put the exec off.
-        if self.handoff.is_some() {
-            return;
-        }
-        if self
-            .host_metrics
-            .started
-            .is_some_and(|started| started.elapsed() < port.interval)
+        if handing_off
+            || !sample_due(
+                self.started
+                    .map(|started| at.saturating_duration_since(started)),
+                port.interval,
+            )
         {
             return;
         }
-        self.host_metrics.started = Some(Instant::now());
-        let now = self.generators.clock.now();
-        self.host_metrics.job = Some(spawn_traced(move || (port.record)(now)));
+        self.started = Some(at);
+        let now = now();
+        self.job = Some(spawn_traced(move || (port.record)(now)));
     }
 
     /// Wait for the sample job still running, as the loop ends.
-    pub(super) fn finish_host_metrics(&mut self) {
-        if let Some(job) = self.host_metrics.job.take() {
-            self.reap_host_metrics(job);
+    pub(super) fn finish(&mut self) {
+        if let Some(job) = self.job.take() {
+            self.reap(job);
         }
     }
 
-    fn reap_host_metrics(&mut self, job: thread::JoinHandle<Result<Vec<PathBuf>>>) {
+    fn reap(&mut self, job: thread::JoinHandle<Result<Vec<PathBuf>>>) {
         let failure = match job.join() {
             Ok(Ok(removed)) => {
                 for path in removed {
@@ -80,18 +86,43 @@ impl Supervisor<'_> {
                         path.display()
                     );
                 }
-                if self.host_metrics.failing {
+                if self.failing {
                     info!("the host's load is recorded again");
                 }
-                self.host_metrics.failing = false;
+                self.failing = false;
                 return;
             }
             Ok(Err(error)) => format!("{error:#}"),
             Err(_) => "the sample job panicked".to_owned(),
         };
-        if !self.host_metrics.failing {
+        if !self.failing {
             warn!(error = %failure, "the host's load could not be recorded: {failure}");
         }
-        self.host_metrics.failing = true;
+        self.failing = true;
+    }
+}
+
+/// Whether a sample is due `since_started` the last one started (`None`:
+/// none yet), taken every `interval`.
+fn sample_due(since_started: Option<Duration>, interval: Duration) -> bool {
+    since_started.is_none_or(|since| since >= interval)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first pass samples, and the next one once the interval passed
+    /// since the last sample started: not 1 ms before.
+    #[test]
+    fn a_sample_is_due_first_and_then_once_the_interval_passed() {
+        let interval = Duration::from_secs(60);
+        assert!(sample_due(None, interval));
+        assert!(!sample_due(Some(Duration::ZERO), interval));
+        assert!(!sample_due(
+            Some(interval - Duration::from_millis(1)),
+            interval
+        ));
+        assert!(sample_due(Some(interval), interval));
     }
 }

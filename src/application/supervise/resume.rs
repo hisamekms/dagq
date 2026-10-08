@@ -98,10 +98,10 @@ impl Supervisor<'_> {
         };
         let (reason, kind) = resume_reason(&self.queue.run_events(run.id())?, run.last_error());
         // Not while the cleanup job clears the run's worktree (task 405).
-        let cleaning = self.cleanup.cleaning();
+        let cleaning = self.host.cleanup.cleaning();
         let mut guard = cleanup::lock_cleaning(&cleaning);
         if !guard.may_lease(run.id()) {
-            self.cleanup.deferred = true;
+            self.host.cleanup.defer();
             return Ok(());
         }
         let begun = self.queue.begin_resume(
@@ -220,10 +220,10 @@ impl Supervisor<'_> {
             .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?;
         // Not while the cleanup job clears the run's build outputs (task
         // 1289): it lands or is validated from its worktree.
-        let cleaning = self.cleanup.cleaning();
+        let cleaning = self.host.cleanup.cleaning();
         let mut guard = cleanup::lock_cleaning(&cleaning);
         if !guard.may_lease(run.id()) {
-            self.cleanup.deferred = true;
+            self.host.cleanup.defer();
             return Ok(());
         }
         let skipped = self

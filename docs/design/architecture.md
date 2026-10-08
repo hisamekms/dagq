@@ -179,11 +179,11 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
   `QueueRecords`のうち計画管理の表を読むmethodはportを分けるときに計画管理へ移す（[混在しているmodule](#混在しているmodule)）。
   書き込み（`record_*`）は内部。
 - findingのIDと`finding_*`のeventを値として公開する（計画管理のfindingのplannerが読む）。
-- CIの見張りの保留（`Supervisor::ci_watch_held`・`ci_watch_unreadable`）を実行と着地に読み取りで公開し、変えるのは`supervise::ci_watch`だけ。
+- CIの見張りの保留（`CiWatchState::held`・`unreadable`）を実行と着地に読み取りで公開し、変えるのは`supervise::ci_watch`だけ。
 - timerのjob（observer・スループットの見直し）の使えなかった終わりを型付きの値（`throughput_review::UnusableFinish`・`observer::UnusableTimerJob`）で実行と着地に公開する。
   控えるのは実行と着地の`supervise::provider`で、同じ終わりを1回だけ控える（[Provider lifecycle](provider-lifecycle.md)）。
 - `watch`の`AskNotifier`を所有し、実装`application::watch::InboxNotifier`は実行と着地の`SessionRegistry::session_workspace`でinboxのworkspaceを読み、host運用の`WorkspaceBackend::notify`で送る。
-- KPIのpushの待ち（`queue_pushes`）をhost運用の`inbox_nudge`に公開する。
+- KPIのpushの待ちと行き先（`queue_pushes`・`reports`）をhost運用の`inbox_nudge`に公開する。
 - `ObserverLog`・`EventReads`は内部。
 
 **許す依存の向き**
@@ -213,6 +213,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 **公開するport**
 
 - `RunCoordination`のsupervisorの登録と引き継ぎを実行と着地のループに公開する。
+- 空きdiskとsccacheの読み取り（`HostOpsState`）と`CleanupWatch::cleaning`・`defer`・`ensure_sccache`・`sccache_look`を実行と着地に公開する。
 - `HeadlessJobStore`（jobのprocessの台帳）を、jobを起動する各contextに公開する。
 - `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、actorの起動（`actor_executor`）を他のcontextに公開する。
 - `AuditFiles`とCIの見張りのpreflightは内部。
@@ -224,12 +225,10 @@ cmuxを使うのはinboxだけ（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is
 
 - `WorkspaceBackend`: inboxのworkspace（cmux）を開く・閉じる・在るかを見る・色と印・group・通知（`notify`）。
   呼び手はinboxと`up` / `down`（`application::lifecycle`）と、inboxの中の`watch --role inbox`の通知だけ。
-  実装は`infrastructure::adapters::Cmux`がcmuxのCLIを呼び、失敗は`application::recording::RecordingBackend`が記録する。
 - `SessionWrappers`: runとruntimeのplannerのsession wrapperを、workspaceなしのbackgroundのprocessとして起動（`launch_background`）・停止（`stop_background`）・生死確認（handleを渡した`exists`）し、supervisorが待つ長さを持つ。
   呼び手はsupervisor（`supervise::background`・`reopen`、起動は`actor_executor`経由）とruntimeのplanner（`application::planner`）。
   `stats`は生死を`ProcessControl`で読む。
-  実装は`infrastructure::adapters::BackgroundSessions`が`BackgroundWrappers`に委ね、cmuxの操作を持たない。
-  失敗と停止（`wrapper_stopped`）は`application::recording::RecordingSessions`が記録する。
+  cmuxの操作を持たない。
 - 決定は[ADR-t1404-1](../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)、停止の流れと記録は[非対話のworker](supervisor-lifecycle/headless-worker.md#workspaceなしのbackgroundのwrapper)の「停止の記録」。
 
 **許す依存の向き**
@@ -245,12 +244,18 @@ contextを1つに決められず、分ける先を持つもの。
 | module | 混ざっているcontext | 分ける先 |
 | --- | --- | --- |
 | `src/application/ports.rs` | 全てのcontextのportと`Queue`（storeのportのsupertrait）・`QueueOpener` | contextごとのmodule、use caseが要るportだけを取る形（C4） |
-| `src/application/supervise/mod.rs`の`Supervisor` | 4つのcontextの欄を1つのstructで持つ（C3） | contextごとに分ける |
+| `src/application/supervise/mod.rs`の`Supervisor` | 計画管理・実行と着地の欄とhost運用の残りの欄を持つ（C3） | contextごとに分ける |
 | `src/compose.rs` | 全てのcontextの組み立て | contextごとの組み立てのmodule |
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
 | `application::queue_reads` | 読み取りの入口で、各armが自分のcontextのportを読む | 未登録（follow_up） |
 | `application::prompt` | workerのprompt（実行と着地）、inbox・plannerのprompt（計画管理）、observerとスループットの見直しのprompt（観測と分析） | 未登録（follow_up） |
 | `application::health` | `status`・`doctor`とattention（観測と分析）、`recover`（実行と着地）、`doctor`のhostの部分（host運用） | 未登録（follow_up） |
+
+## `Supervisor`の状態
+
+観測と分析と、host運用の更新・sccache・disk・後始末などは`supervise::contexts`の`ObservationState`・`HostOpsState`が持つ。
+変えるのはそのcontextのpassだけで、passは自分の状態と`PassEnv`と値を取り、ループは呼び出しと結果の適用だけを行う。
+host運用の登録・引き継ぎ・sweep・負荷の上限は`Supervisor`に残り、`sweep`・`handoff`・`inbox_nudge`とループが変える。
 
 ## 境界をまたぐtransaction
 
@@ -315,9 +320,9 @@ contextを1つに決められず、分ける先を持つもの。
   検査: review（portをcontextごとに分けた後にscript）。
 - **C2** 観測と分析のコードは、他のcontextの状態を変えるportのmethod（`TaskStore`・`RunCoordination`・`DraftPlannerStore`の書き込み、`RunTransitions`・`RunRecovery`・`PlanReviewStore`・`GoalReviewStore`）を呼ばない。
   検査: review。
-- **C3** `application::supervise`のsubmoduleは、自分のcontextの`Supervisor`の欄（`Supervisor`のdoc comment）だけを変える。
+- **C3** `application::supervise`のsubmoduleは、自分のcontextの`Supervisor`の欄か分けた状態だけを変える。
   他のcontextの欄は読むか、そのcontextの関数を呼ぶ。
-  検査: review（`Supervisor`を分けた後にscript）。
+  検査: 分けた状態のsubmoduleはscript、残りはreview。
 - **C4** 新しく足す・変えるuse caseは`Box<dyn Queue>`・`&mut dyn Queue`・`QueueOpener`を取らず、要るportだけを取る（ADR-0013決定1の「portは原則applicationに定義する」のまま、幅を狭める）。
   検査: review（portを分けた後にscript）。
 - **C5** 他のcontextの公開していないport（各節の「公開するport」で内部としたもの）を使わない。
@@ -344,9 +349,9 @@ contextを1つに決められず、分ける先を持つもの。
 
 ### 検査の範囲
 
-- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に当てる。
+- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に、C3を分けたcontextのsubmoduleに当てる。
   CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。
-- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えず、testの中はL1・L3・L6だけで数える。
+- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えず、testの中はL1・L3・L6・C3だけで数える。
   細目（`use`の組の展開、testとする`cfg`の形と範囲、`--self-test`）はscriptの先頭のコメントが持つ。
 - SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
 - 許可の一覧は`.config/layer-deps-allow.txt`で、1行1項目の`規則 | path | 参照 | 行き先のtask | 理由`。
@@ -364,7 +369,7 @@ reviewで見る規則の行は、行き先をこの表の言葉で書く。
 | --- | --- | --- | --- |
 | L5 | `src/application`の`Instant::now`（`lifecycle.rs`・`supervise/mod.rs`・`supervise/recovery.rs`・`supervise/jobs.rs`・`supervise/triage.rs`ほか） | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | 許可の一覧の項目 |
-| C3 | `Supervisor`と、`impl Supervisor`を持つ`supervise/`のsubmodule | submoduleが他のcontextの欄を変える | `Supervisor`の分割 |
+| C3 | `Supervisor`と、`impl Supervisor`を持つ`supervise/`のsubmodule | submoduleが他のcontextの欄を変える | 残りの欄の分割 |
 | C4 | `Box<dyn Queue>`などを取るuse case（`application::lifecycle`・`health`・`supervise`ほか） | 要るportだけを取っていない | portの分割 |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | portの分割 |
 | C6 | `src/application/supervise/resume.rs`・`supervise/recheck.rs`・`supervise/recovery.rs`ほか | 判断に使うeventのpayloadを文字列のkeyで読む | 型付きの復元の値（`domain::run::payload`の形）へ |

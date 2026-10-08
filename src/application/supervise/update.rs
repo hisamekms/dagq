@@ -84,16 +84,16 @@ pub(super) struct UpdateWatch {
     passed: Option<String>,
 }
 
-impl Supervisor<'_> {
+impl HostOpsState {
     /// One look at main for the automatic update; what fails is logged and
     /// looked at again on the next pass.
-    pub(super) fn auto_update_pass(&mut self, options: &LoopSettings) {
-        if let Err(error) = self.auto_update(options) {
+    pub(super) fn auto_update_pass(&mut self, env: &mut PassEnv<'_>, options: &LoopSettings) {
+        if let Err(error) = self.auto_update(env, options) {
             warn!(error = %format_args!("{error:#}"), "automatic update: {error:#}");
         }
     }
 
-    fn auto_update(&mut self, options: &LoopSettings) -> Result<()> {
+    fn auto_update(&mut self, env: &mut PassEnv<'_>, options: &LoopSettings) -> Result<()> {
         if let Some(job) = self.update.job.as_mut()
             && let Some(exit) = job.try_wait()?
         {
@@ -108,17 +108,17 @@ impl Supervisor<'_> {
             return Ok(());
         }
         self.update.last_check = Some(Instant::now());
-        let enabled = self
+        let enabled = env
             .queue
             .supervisors()?
             .iter()
-            .any(|registration| registration.token == self.token && registration.auto_update);
+            .any(|registration| registration.token == *env.token && registration.auto_update);
         if !enabled {
             return Ok(());
         }
         // Only dagq's source builds dagq (ADR-t614-1): elsewhere the
         // registration's auto_update builds nothing.
-        if !self.repository.is_dagq_source() {
+        if !env.repository.is_dagq_source() {
             if !self.update.not_source {
                 warn!(
                     "automatic update: the repository is not dagq's source (its Cargo.toml has no [package] named dagq), so nothing is built; update dagq with `cargo install dagq` or `dagq install --from`"
@@ -127,24 +127,24 @@ impl Supervisor<'_> {
             self.update.not_source = true;
             // Read after the source check, so a head logged here was looked
             // at as not dagq's source.
-            if let Ok(head) = self.repository.main_head() {
+            if let Ok(head) = env.repository.main_head() {
                 self.log_nothing_built(head.as_str(), "the repository is not dagq's source");
             }
             return Ok(());
         }
         self.update.not_source = false;
-        self.apply_update_answers()?;
+        self.apply_update_answers(env)?;
         if self.update.job.is_some() {
             return Ok(());
         }
-        let updates = self.queue.update_events(50)?;
+        let updates = env.queue.update_events(50)?;
         if let Some(step) = latest_job_step(&updates) {
             // A job this process started before it exec'd is its child
             // with no other reaper: collect it once it ended.
             if let Some(pid) = job_pid(step) {
-                self.processes.reap(pid);
+                env.processes.reap(pid);
             }
-            if in_progress(step, &*self.processes) {
+            if in_progress(step, &**env.processes) {
                 return Ok(());
             }
         }
@@ -154,19 +154,19 @@ impl Supervisor<'_> {
             && JOB_STEPS.contains(&step.kind.as_str())
         {
             if let Some(pid) = job_pid(step) {
-                self.processes.reap(pid);
+                env.processes.reap(pid);
             }
-            if !in_progress(step, &*self.processes) {
-                return self.job_interrupted(step);
+            if !in_progress(step, &**env.processes) {
+                return self.job_interrupted(env, step);
             }
         }
-        let head = self.repository.main_head()?.to_string();
+        let head = env.repository.main_head()?.to_string();
         let first = self
             .update
             .first_head
             .get_or_insert_with(|| head.clone())
             .clone();
-        let base = base_commit(&updates, &self.layout.version, Some(&first));
+        let base = base_commit(&updates, &env.layout.version, Some(&first));
         if !retry_requested(&updates) {
             if base.as_deref() == Some(head.as_str())
                 || self.update.seen.as_deref() == Some(head.as_str())
@@ -174,7 +174,7 @@ impl Supervisor<'_> {
                 return Ok(());
             }
             let changes = match &base {
-                Some(base) => match self.repository.changed_paths(base, &head) {
+                Some(base) => match env.repository.changed_paths(base, &head) {
                     Ok(paths) => changes_runtime(&paths),
                     // A base Git does not know (a build of another clone):
                     // build main's head once, which becomes the base.
@@ -191,7 +191,7 @@ impl Supervisor<'_> {
                 return Ok(());
             }
         }
-        self.start_update_job(&head, base.as_deref(), options)
+        self.start_update_job(env, &head, base.as_deref(), options)
     }
 
     /// Log once per head that a look at main's `head` builds nothing, and
@@ -206,7 +206,7 @@ impl Supervisor<'_> {
     /// A job that died before it recorded how it ended (killed, a reboot):
     /// record `update_failed` for its commit and ask the inbox, so the
     /// update is neither lost nor retried on its own.
-    fn job_interrupted(&mut self, step: &RunEvent) -> Result<()> {
+    fn job_interrupted(&mut self, env: &mut PassEnv<'_>, step: &RunEvent) -> Result<()> {
         let commit = step_commit(step).unwrap_or_default().to_owned();
         let question = format!(
             "The automatic update's job for main's {} (pid {}) ended without recording how, at \
@@ -217,7 +217,7 @@ to wait for the next landing that changes the runtime.",
             job_pid(step).unwrap_or_default(),
             step.kind
         );
-        let ask = self.queue.open_update_ask(
+        let ask = env.queue.open_update_ask(
             AskKind::UpdateFailed,
             &question,
             UPDATE_FAILED_OPTIONS,
@@ -226,10 +226,10 @@ to wait for the next landing that changes the runtime.",
             Value::Null,
         )?;
         record(
-            &*self.queue,
+            &*env.queue,
             EventKind::UpdateFailed,
             step_commit(step),
-            json!({"stage": "interrupted", "after": step.kind, "ask_id": ask.id, "supervisor": self.token}),
+            json!({"stage": "interrupted", "after": step.kind, "ask_id": ask.id, "supervisor": env.token}),
         )?;
         warn!(
             "automatic update: the job for {commit} was interrupted; ask {} opened",
@@ -241,9 +241,9 @@ to wait for the next landing that changes the runtime.",
     /// Close the answered `update_failed` asks: `retry` asks the next look
     /// to build main's head again, `skip` waits for the next landing. Any
     /// other answer is left for the inbox to read.
-    fn apply_update_answers(&mut self) -> Result<()> {
-        let updates = self.queue.update_events(UPDATE_HISTORY)?;
-        for ask in self.queue.update_answers(&AskKind::UpdateFailed)? {
+    fn apply_update_answers(&mut self, env: &mut PassEnv<'_>) -> Result<()> {
+        let updates = env.queue.update_events(UPDATE_HISTORY)?;
+        for ask in env.queue.update_answers(&AskKind::UpdateFailed)? {
             // The failure of a release's job is the release pass's, and
             // a person's install's the inbox's alone: its answer builds
             // nothing (ADR-0073 decision 14).
@@ -260,12 +260,12 @@ to wait for the next landing that changes the runtime.",
                 _ => continue,
             };
             record(
-                &*self.queue,
+                &*env.queue,
                 kind,
                 None,
-                json!({"ask_id": ask.id, "answer": answer, "supervisor": self.token}),
+                json!({"ask_id": ask.id, "answer": answer, "supervisor": env.token}),
             )?;
-            self.queue.close_ask(ask.id)?;
+            env.queue.close_ask(ask.id)?;
             info!(ask_id = %ask.id, "automatic update: ask {} answered {answer}", ask.id);
         }
         Ok(())
@@ -275,19 +275,20 @@ to wait for the next landing that changes the runtime.",
     /// output in the queue's `logs/`, and record `update_started`.
     fn start_update_job(
         &mut self,
+        env: &mut PassEnv<'_>,
         head: &str,
         base: Option<&str>,
         options: &LoopSettings,
     ) -> Result<()> {
-        let layout = self.layout;
+        let layout = env.layout;
         let queue_dir = layout.db.parent().unwrap_or(Path::new("."));
         let logs = queue_dir.join("logs");
-        self.files
+        env.files
             .create_dir_all(&logs)
             .with_context(|| format!("create {}", logs.display()))?;
         let name = format!(
             "update-{}-{}",
-            self.generators.clock.now(),
+            env.generators.clock.now(),
             &head[..head.len().min(12)]
         );
         let (log, build_log, report) = (
@@ -300,7 +301,7 @@ to wait for the next landing that changes the runtime.",
             .arg("--db")
             .arg(&layout.db)
             .arg("auto-update")
-            .args(["--commit", head, "--token", self.token.as_str()])
+            .args(["--commit", head, "--token", env.token.as_str()])
             .envs(layout.supervisor_actor().env())
             // It opens the queue it names, not a client-mode `dagq`.
             .env_remove(crate::domain::queue_service::SOCKET_ENV)
@@ -336,7 +337,7 @@ to wait for the next landing that changes the runtime.",
         if let Some(poll) = options.update.poll {
             command.arg("--poll-ms").arg(poll.as_millis().to_string());
         }
-        let job = self.spawner.spawn(
+        let job = env.spawner.spawn(
             &command,
             Streams::Files {
                 stdout: &report,
@@ -344,13 +345,13 @@ to wait for the next landing that changes the runtime.",
             },
         )?;
         record(
-            &*self.queue,
+            &*env.queue,
             EventKind::UpdateStarted,
             Some(head),
             json!({
                 "pid": job.id(),
                 "base": base,
-                "supervisor": self.token,
+                "supervisor": env.token,
                 "version": layout.version,
                 "log": log,
                 "build_log": build_log,

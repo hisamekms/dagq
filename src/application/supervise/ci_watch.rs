@@ -63,37 +63,37 @@ impl CiWatchState {
     pub(super) const fn running(&self) -> bool {
         self.job.is_some()
     }
-}
 
-impl Supervisor<'_> {
     /// Whether the claims, the resumes and the landings wait for the
     /// means to read the CI: the table is set and this process has no
     /// answer yet or the last one found them missing.
-    pub(super) fn ci_watch_held(&self) -> bool {
-        hold_reason(self.ci.config.is_some(), self.ci.available).is_some()
+    pub(super) fn held(&self) -> bool {
+        hold_reason(self.config.is_some(), self.available).is_some()
     }
 
     /// Whether the last answer found the means to read the CI missing (not
     /// merely none yet): what a drain hands a run back to a person for.
-    pub(super) fn ci_watch_unreadable(&self) -> bool {
-        self.ci.config.is_some() && self.ci.available == Some(false)
+    pub(super) fn unreadable(&self) -> bool {
+        self.config.is_some() && self.available == Some(false)
     }
+}
 
+impl ObservationState {
     /// Read `[ci_watch]` again, reap the check that ended and start the one
     /// that is due, then record where the hold for the watch changed.
-    pub(super) fn ci_watch_pass(&mut self) {
+    pub(super) fn ci_watch_pass(&mut self, env: &mut PassEnv<'_>) {
         let Some(port) = self.ci_watch_port.clone() else {
             return;
         };
-        self.ci_watch_step(&port);
-        self.record_ci_watch_hold();
+        self.ci_watch_step(env, &port);
+        self.record_ci_watch_hold(env);
     }
 
     /// Record `ci_watch_held` / `ci_watch_resumed` when the hold's reason
     /// ([`hold_reason`]) differs from the one this process last recorded,
     /// against its own latest on the queue; a pass that changes nothing
     /// reads nothing.
-    fn record_ci_watch_hold(&mut self) {
+    fn record_ci_watch_hold(&mut self, env: &mut PassEnv<'_>) {
         let reason = hold_reason(self.ci.config.is_some(), self.ci.available);
         if self.ci.recorded == Some(reason) {
             return;
@@ -104,12 +104,12 @@ impl Supervisor<'_> {
             .as_ref()
             .map(|config| config.workflow.clone());
         let hold = reason.map(|reason| (reason, json!({"workflow": workflow})));
-        if self.record_own_hold(CI_WATCH_HOLD, hold) {
+        if env.record_own_hold(CI_WATCH_HOLD, hold) {
             self.ci.recorded = Some(reason);
         }
     }
 
-    fn ci_watch_step(&mut self, port: &CiWatchPort) {
+    fn ci_watch_step(&mut self, env: &mut PassEnv<'_>, port: &CiWatchPort) {
         match (port.file)() {
             Ok(config) => {
                 if config != self.ci.config {
@@ -137,12 +137,12 @@ impl Supervisor<'_> {
                 }
             }
         }
-        self.reap_ci_check();
+        self.reap_ci_check(env);
         let Some(config) = self.ci.config.clone() else {
             return;
         };
         let interval = port.interval.unwrap_or_else(|| config.interval());
-        let now = self.generators.clock.monotonic();
+        let now = env.generators.clock.monotonic();
         let since_start = self
             .ci
             .started
@@ -152,7 +152,7 @@ impl Supervisor<'_> {
         }
         let branch = match &config.branch {
             Some(branch) => branch.clone(),
-            None => match self.repository.landing_branch() {
+            None => match env.repository.landing_branch() {
                 Ok(branch) => branch.name,
                 // The landing branch's own hold covers it.
                 Err(_) => return,
@@ -167,9 +167,9 @@ impl Supervisor<'_> {
             }
         };
         self.ci.started = Some(now);
-        let queues = self.queues.clone();
-        let token = self.token.clone();
-        let build = self.layout.version.clone();
+        let queues = env.queues.clone();
+        let token = env.token.clone();
+        let build = env.layout.version.clone();
         let jobs_unread = self.ci.jobs_unread.clone();
         self.ci.job = Some(spawn_traced(move || {
             let queue = queues.open()?;
@@ -186,7 +186,7 @@ impl Supervisor<'_> {
     }
 
     /// Take the answer of the check that ended.
-    fn reap_ci_check(&mut self) {
+    fn reap_ci_check(&mut self, env: &mut PassEnv<'_>) {
         let Some(job) = self.ci.job.take() else {
             return;
         };
@@ -221,16 +221,16 @@ impl Supervisor<'_> {
                 // A passing failure holds nothing: the queue's last answer
                 // stands (the check may have recorded the means' return
                 // before it failed).
-                if let Ok(last) = self.queue.latest_queue_event(&CI_WATCH_ACCESS_KINDS) {
+                if let Ok(last) = env.queue.latest_queue_event(&CI_WATCH_ACCESS_KINDS) {
                     self.ci.available = Some(available_after_failure(
                         last.as_ref().map(|event| event.kind.as_str()),
                     ));
                 }
                 if let Some(mut payload) =
-                    self.ci.failures.fail(&message, self.generators.clock.now())
+                    self.ci.failures.fail(&message, env.generators.clock.now())
                 {
-                    payload["supervisor"] = json!(self.token);
-                    if let Err(error) = self
+                    payload["supervisor"] = json!(env.token);
+                    if let Err(error) = env
                         .queue
                         .record_queue_event(EventKind::CiCheckFailed, payload)
                     {

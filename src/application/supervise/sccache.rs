@@ -14,9 +14,9 @@
 //! stop and restart outside the sandbox. Each process the supervisor
 //! starts with `[run.env]` is given the refusal of the server's start and,
 //! when its server was confirmed, compiles through the guard
-//! ([`Supervisor::sccache_look`], ADR-t2086-1); one whose server could not
+//! ([`HostOpsState::sccache_look`], ADR-t2086-1); one whose server could not
 //! be confirmed runs without `RUSTC_WRAPPER`, recorded as
-//! `sccache_wrapper_removed` ([`Supervisor::record_wrapper_removed`]). A
+//! `sccache_wrapper_removed` ([`record_wrapper_removed`]). A
 //! worker's turns are looked at by its wrapper the same way
 //! ([`crate::application::headless_session`]).
 
@@ -43,32 +43,36 @@ pub(super) struct SccacheWatch {
     failures: crate::domain::sccache::FailureWatch,
 }
 
-impl Supervisor<'_> {
+impl HostOpsState {
     /// Look at the server every [`LOOK_INTERVAL`], draining or not: the
     /// first look is the start's.
-    pub(super) fn sccache_pass(&mut self) {
+    pub(super) fn sccache_pass(&mut self, pass: &mut PassEnv<'_>) {
         if self.sccache_port.is_none() {
             return;
         }
         let reason = match self.sccache.last_look {
             None => CheckReason::Startup,
-            Some(at) if self.generators.clock.monotonic().duration_since(at) < LOOK_INTERVAL => {
+            Some(at) if pass.generators.clock.monotonic().duration_since(at) < LOOK_INTERVAL => {
                 return;
             }
             Some(_) => CheckReason::Missing,
         };
-        self.ensure_sccache(reason);
+        self.ensure_sccache(pass, reason);
     }
 
     /// Look at the server and start it when none listens. Not configured
     /// without a port or a `[run.env]` whose `RUSTC_WRAPPER` is sccache.
-    pub(super) fn ensure_sccache(&mut self, reason: CheckReason) -> ServerCheck {
+    pub(super) fn ensure_sccache(
+        &mut self,
+        pass: &mut PassEnv<'_>,
+        reason: CheckReason,
+    ) -> ServerCheck {
         let Some(SccachePort(server)) = self.sccache_port.clone() else {
             return ServerCheck::NotConfigured;
         };
-        self.sccache.last_look = Some(self.generators.clock.monotonic());
-        let queue_dir = self.layout.db.parent().unwrap_or(Path::new("."));
-        let env = match self.verifier.run_env(queue_dir) {
+        self.sccache.last_look = Some(pass.generators.clock.monotonic());
+        let queue_dir = pass.layout.db.parent().unwrap_or(Path::new("."));
+        let env = match pass.verifier.run_env(queue_dir) {
             Ok(env) => env,
             Err(error) => {
                 // Provisioning and the review report the file themselves.
@@ -97,7 +101,7 @@ impl Supervisor<'_> {
             && retry_waiting(
                 self.sccache
                     .failed_at
-                    .map(|at| self.generators.clock.monotonic().duration_since(at)),
+                    .map(|at| pass.generators.clock.monotonic().duration_since(at)),
             )
         {
             return unconfirmed(format!(
@@ -107,7 +111,7 @@ impl Supervisor<'_> {
         }
         // On the PATH the programs of [run.env] are checked on (ADR-0049
         // decision 9).
-        let program = self.verifier.run_env_programs(None).ok().and_then(|check| {
+        let program = pass.verifier.run_env_programs(None).ok().and_then(|check| {
             check
                 .programs
                 .into_iter()
@@ -115,7 +119,7 @@ impl Supervisor<'_> {
                 .and_then(|program| program.resolved)
         });
         let mut restart =
-            crate::application::sccache::pending_restart(&*self.queue, &*server, target.port)
+            crate::application::sccache::pending_restart(&*pass.queue, &*server, target.port)
                 .unwrap_or_else(|error| {
                     warn!("sccache pending restart could not be read: {error:#}");
                     None
@@ -124,7 +128,7 @@ impl Supervisor<'_> {
             && retry_waiting(
                 self.sccache
                     .failed_at
-                    .map(|at| self.generators.clock.monotonic().duration_since(at)),
+                    .map(|at| pass.generators.clock.monotonic().duration_since(at)),
             )
         {
             return unconfirmed(
@@ -134,13 +138,13 @@ impl Supervisor<'_> {
         if running {
             let program = program.as_deref().unwrap_or(&target.program);
             match crate::application::sccache::observe(
-                &*self.queue,
+                &*pass.queue,
                 &*server,
                 &target,
                 Path::new(program),
                 &env,
                 &mut self.sccache.failures,
-                self.generators.clock.now(),
+                pass.generators.clock.now(),
             ) {
                 Ok(Some(payload)) => restart = Some(payload),
                 Ok(None) if restart.is_some() => {}
@@ -151,11 +155,11 @@ impl Supervisor<'_> {
                 }
             }
             let mut payload = restart.unwrap();
-            payload["supervisor"] = json!(self.token);
-            payload["supervisor_pid"] = json!(self.layout.pid);
-            payload["at"] = json!(self.generators.clock.now());
+            payload["supervisor"] = json!(pass.token);
+            payload["supervisor_pid"] = json!(pass.layout.pid);
+            payload["at"] = json!(pass.generators.clock.now());
             return match crate::application::sccache::restart(
-                &*self.queue,
+                &*pass.queue,
                 &*server,
                 Path::new(program),
                 &env,
@@ -166,7 +170,7 @@ impl Supervisor<'_> {
                     ServerCheck::Running { port: target.port }
                 }
                 Err(error) => {
-                    self.sccache.failed_at = Some(self.generators.clock.monotonic());
+                    self.sccache.failed_at = Some(pass.generators.clock.monotonic());
                     unconfirmed(format!("sccache restart failed: {error:#}"))
                 }
             };
@@ -184,11 +188,11 @@ impl Supervisor<'_> {
             )),
         };
         let mut payload = json!({
-            "at": self.generators.clock.now(),
+            "at": pass.generators.clock.now(),
             "port": target.port,
             "program": program.as_deref().unwrap_or(&target.program),
-            "supervisor": self.token,
-            "supervisor_pid": self.layout.pid,
+            "supervisor": pass.token,
+            "supervisor_pid": pass.layout.pid,
             "reason": restart.as_ref().map(|_| "restart").unwrap_or(reason.as_str()),
             "replaced": restart,
             "idle_timeout": IDLE_TIMEOUT,
@@ -226,7 +230,7 @@ impl Supervisor<'_> {
                     payload["parent_pid"] = json!(process.parent_pid);
                     payload["command"] = json!(process.command);
                 }
-                if let Err(error) = self
+                if let Err(error) = pass
                     .queue
                     .record_queue_event(EventKind::SccacheServerStarted, payload)
                 {
@@ -235,24 +239,24 @@ impl Supervisor<'_> {
                 ServerCheck::Running { port: target.port }
             }
             Err(error) => {
-                self.sccache.failed_at = Some(self.generators.clock.monotonic());
+                self.sccache.failed_at = Some(pass.generators.clock.monotonic());
                 let message = format!("{error:#}");
                 payload["error"] = json!(message);
                 if let Some(replaced) = payload.get("replaced").filter(|v| !v.is_null()) {
                     let mut failure = replaced.clone();
                     failure["error"] = json!(message);
-                    failure["at"] = json!(self.generators.clock.now());
-                    failure["supervisor"] = json!(self.token);
-                    failure["supervisor_pid"] = json!(self.layout.pid);
+                    failure["at"] = json!(pass.generators.clock.now());
+                    failure["supervisor"] = json!(pass.token);
+                    failure["supervisor_pid"] = json!(pass.layout.pid);
                     if let Err(error) = crate::application::sccache::record_restart_failure(
-                        &*self.queue,
+                        &*pass.queue,
                         Path::new(program.as_deref().unwrap_or(&target.program)),
                         failure,
                     ) {
                         warn!("sccache restart failure could not be recorded: {error:#}");
                     }
                 }
-                self.record_start_failure(payload);
+                self.record_start_failure(pass, payload);
                 unconfirmed(message)
             }
         }
@@ -261,9 +265,9 @@ impl Supervisor<'_> {
     /// Record `sccache_server_start_failed` unless the latest of the
     /// server's events is the same failure, so a start retried every
     /// [`RETRY_AFTER`] is recorded once until it changes.
-    fn record_start_failure(&mut self, payload: Value) {
+    fn record_start_failure(&mut self, pass: &mut PassEnv<'_>, payload: Value) {
         warn!(error = %payload["error"], "the sccache server could not be started: {}", payload["error"]);
-        let latest = self.queue.latest_queue_event(&[
+        let latest = pass.queue.latest_queue_event(&[
             crate::domain::sccache::SCCACHE_SERVER_STARTED,
             crate::domain::sccache::SCCACHE_SERVER_START_FAILED,
         ]);
@@ -274,7 +278,7 @@ impl Supervisor<'_> {
         {
             return;
         }
-        if let Err(error) = self
+        if let Err(error) = pass
             .queue
             .record_queue_event(EventKind::SccacheServerStartFailed, payload)
         {
@@ -285,8 +289,13 @@ impl Supervisor<'_> {
     /// The look just before a process given `[run.env]` starts, for
     /// `reason` (ADR-t2086-1): the server looked at and, when none listens,
     /// started ([`Self::ensure_sccache`]), then the guard made in `dir`.
-    pub(super) fn sccache_look(&mut self, reason: CheckReason, dir: &Path) -> GuardLook {
-        let check = self.ensure_sccache(reason);
+    pub(super) fn sccache_look(
+        &mut self,
+        pass: &mut PassEnv<'_>,
+        reason: CheckReason,
+        dir: &Path,
+    ) -> GuardLook {
+        let check = self.ensure_sccache(pass, reason);
         let server = self.sccache_port.clone();
         look_of(
             check,
@@ -296,24 +305,29 @@ impl Supervisor<'_> {
             dir,
         )
     }
+}
 
-    /// Record `sccache_wrapper_removed` on run `run` when `look` takes
-    /// `RUSTC_WRAPPER` out of the process `fields` name (its `job`, and its
-    /// `attempt` when it has one), with the port and the `reason`.
-    pub(super) fn record_wrapper_removed(&mut self, run: &RunId, look: &GuardLook, fields: Value) {
-        let Some((port, why)) = look.removed() else {
-            return;
-        };
-        crate::application::sccache::record_wrapper_removed(
-            &*self.queue,
-            run,
-            self.generators.clock.now(),
-            "supervisor",
-            port,
-            why,
-            fields,
-        );
-    }
+/// Record `sccache_wrapper_removed` on run `run` when `look` takes
+/// `RUSTC_WRAPPER` out of the process `fields` name (its `job`, and its
+/// `attempt` when it has one), with the port and the `reason`.
+pub(super) fn record_wrapper_removed(
+    pass: &PassEnv<'_>,
+    run: &RunId,
+    look: &GuardLook,
+    fields: Value,
+) {
+    let Some((port, why)) = look.removed() else {
+        return;
+    };
+    crate::application::sccache::record_wrapper_removed(
+        &*pass.queue,
+        run,
+        pass.generators.clock.now(),
+        "supervisor",
+        port,
+        why,
+        fields,
+    );
 }
 
 /// What the supervisor's `check` before a process given `[run.env]`

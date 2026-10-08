@@ -59,10 +59,10 @@ impl ReportWatch {
     }
 }
 
-impl Supervisor<'_> {
+impl ObservationState {
     /// Reap the report job once it ended; start one when the local day
     /// changed since the reports were last found written.
-    pub(super) fn report_pass(&mut self, start: bool) {
+    pub(super) fn report_pass(&mut self, env: &mut PassEnv<'_>, start: bool) {
         let Some(port) = self.reports.clone() else {
             return;
         };
@@ -104,14 +104,14 @@ impl Supervisor<'_> {
         {
             return;
         }
-        let now = self.generators.clock.now();
+        let now = env.generators.clock.now();
         let day = report::local_day(now, (port.utc_offset)(now));
         if self.report.checked == Some(day) {
             return;
         }
-        let queues = self.queues.clone();
-        let files = self.files.clone();
-        let token = self.token.clone();
+        let queues = env.queues.clone();
+        let files = env.files.clone();
+        let token = env.token.clone();
         let job = spawn_traced(move || -> Result<ReportJob> {
             let setup = (port.setup)(now)?;
             let queue = queues.open()?;

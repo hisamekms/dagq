@@ -40,7 +40,7 @@ impl PushWatch {
     }
 }
 
-impl Supervisor<'_> {
+impl ObservationState {
     /// Queue `messages` for the command of `config`, each for its first
     /// attempt now.
     pub(super) fn queue_pushes(&mut self, config: PushConfig, messages: Vec<PushMessage>) {
@@ -57,7 +57,7 @@ impl Supervisor<'_> {
 
     /// Record the message sent once its command ended; start the next due
     /// message when `start`.
-    pub(super) fn push_pass(&mut self, start: bool) {
+    pub(super) fn push_pass(&mut self, env: &mut PassEnv<'_>, start: bool) {
         let Some(port) = self.reports.clone() else {
             return;
         };
@@ -82,7 +82,7 @@ impl Supervisor<'_> {
                 );
             }
             let again = push::record_attempt(
-                &*self.queue,
+                &*env.queue,
                 &pending.config,
                 &pending.message,
                 pending.attempt,

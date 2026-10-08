@@ -121,7 +121,7 @@ impl Supervisor<'_> {
         main: CommitSha,
     ) -> Result<thread::JoinHandle<Result<IntegrationOutcome>>> {
         self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeIntegrate);
-        let sccache = self.sccache_port.clone();
+        let sccache = self.host.sccache_port.clone();
         let queues = self.queues.clone();
         let repository = self.repository.clone();
         let remote = self.remote.clone();
@@ -133,7 +133,7 @@ impl Supervisor<'_> {
         let push = RunHistory::from_events(&self.queue.run_events(run.id())?).landing_pushes();
         let generators = self.generators.clone();
         let load_average = self.load_average;
-        let (disk_config, free_space) = (self.disk_config, self.free_space);
+        let (disk_config, free_space) = (self.host.disk_config, self.host.free_space);
         let runs_dir = self.layout.runs_dir.clone();
         let db = self.layout.db.clone();
         // The supervisor asks; the Integrator checks and lands (ADR-t728-2).
@@ -1286,9 +1286,9 @@ impl Supervisor<'_> {
     /// and the run stays queued for a later pass.
     pub(super) fn start_approved_landings(&mut self, parallel: usize) -> Result<()> {
         if self.run_env_missing
-            || self.ci_watch_held()
+            || self.observation.ci.held()
             || self.landing_unresolved
-            || self.disk.landing_short
+            || self.host.disk.landing_short
             || self.used_slots() >= parallel
             || !self
                 .queue
@@ -1323,10 +1323,10 @@ impl Supervisor<'_> {
         };
         // Not while the cleanup job clears the run's build outputs (task
         // 1289): the landing builds them again once it has passed.
-        let cleaning = self.cleanup.cleaning();
+        let cleaning = self.host.cleanup.cleaning();
         let mut guard = cleanup::lock_cleaning(&cleaning);
         if !guard.may_lease(run.id()) {
-            self.cleanup.deferred = true;
+            self.host.cleanup.defer();
             return Ok(());
         }
         // A run that still needs its e2e (ADR-t1233-2) runs it in a slot
@@ -1375,10 +1375,10 @@ impl Supervisor<'_> {
             }
             // Not while the cleanup job clears the run's build outputs
             // (task 1289).
-            let cleaning = self.cleanup.cleaning();
+            let cleaning = self.host.cleanup.cleaning();
             let mut guard = cleanup::lock_cleaning(&cleaning);
             if !guard.may_lease(run.id()) {
-                self.cleanup.deferred = true;
+                self.host.cleanup.defer();
                 continue;
             }
             let leased = self.queue.lease_for_review(run.id(), &self.token)?;

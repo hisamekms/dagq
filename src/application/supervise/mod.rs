@@ -22,7 +22,9 @@
 //! the submodules: `session` (the worker's session), `exit` (its `/exit`),
 //! `jobs` (the headless review and triage), `landing` (the review verdict
 //! and the landing), `revise`, `resume`, `triage`, `adopt` and `idle` (the
-//! idle marker). The prompts and requests are in [`super::prompt`].
+//! idle marker). The state of 観測と分析 and host運用 is apart from the
+//! loop's, in [`contexts`]. The prompts and requests are in
+//! [`super::prompt`].
 
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
@@ -101,12 +103,14 @@ use crate::domain::{
     worker::Worker,
     worker_model::{WorkerSession, WorkerTrial},
 };
+use contexts::{HostOpsState, ObservationState, PassEnv};
 
 mod adopt;
 mod background;
 mod ci_watch;
 mod claim_defer;
 mod cleanup;
+mod contexts;
 mod deliver;
 mod disk;
 mod draft_planner;
@@ -900,10 +904,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         errors: Vec::new(),
         claiming: true,
         provisioning_error: None,
-        observer: None,
-        observers_launched: Vec::new(),
-        observer_again: None,
-        throughput_review: throughput_review::ThroughputReviewWatch::default(),
         last_sweep: None,
         last_turns: None,
         process_sample: None,
@@ -925,7 +925,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         handoff: None,
         exec: None,
         run_env_missing: false,
-        candidates: None,
         landing_unresolved: false,
         landing_recorded: None,
         landing_stamp: None,
@@ -938,8 +937,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         notice_failures: HashMap::new(),
         draining: false,
         stop_recorded: false,
-        service_up: true,
-        update: update::UpdateWatch::default(),
         utc_offset: settings.utc_offset,
         rechecks: recheck::Rechecks::default(),
         max_load: settings.max_load,
@@ -947,34 +944,16 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         load_average: ports.load_average,
         host_versions: ports.host_versions,
         worker_plugin: ports.worker_plugin.clone(),
-        reports: ports.reports.clone(),
         max_improvement_proposals: ports.max_improvement_proposals.clone(),
-        report: report::ReportWatch::default(),
-        forecasts: ports.forecasts.clone(),
-        forecast: forecast::ForecastWatch::default(),
-        release_port: ports.release.clone(),
-        release: release::ReleaseWatch::default(),
-        host_metrics_port: ports.host_metrics.clone(),
-        host_metrics: host_metrics::HostMetricsWatch::default(),
-        queue_service_port: ports.queue_service.clone(),
-        queue_service: queue_service::QueueServiceWatch::default(),
-        push: push::PushWatch::default(),
         loads: HashMap::new(),
         defer: claim_defer::DeferWatch::default(),
-        disk_config: settings.disk,
         resume_config: settings.resume,
         retry_unreadable_review: settings.retry_unreadable_review,
-        free_space: ports.free_space,
-        scratchpad_roots: ports.scratchpad_roots.clone(),
-        disk: disk::DiskWatch::default(),
-        free: None,
-        cleanup: cleanup::CleanupWatch::default(),
         run_e2e: ports.run_e2e.clone(),
         e2e: e2e::E2eWaits::default(),
-        sccache_port: ports.sccache.clone(),
-        sccache: sccache::SccacheWatch::default(),
-        ci_watch_port: ports.ci_watch.clone(),
-        ci: ci_watch::CiWatchState::default(),
+
+        observation: contexts::ObservationState::new(ports),
+        host: contexts::HostOpsState::new(ports, settings),
     };
     // Before any job starts again: the jobs a gone supervisor left, and
     // after an exec those the previous binary of this process started.
@@ -998,10 +977,10 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
 /// A listing of this user's processes with the wall time it was taken.
 type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 
-/// The supervisor's state, one struct for every context
-/// (docs/design/architecture.md, "混在しているmodule"). Which context owns
-/// each field, so that a submodule changes only its own context's fields
-/// and reads or calls the others (rule C3):
+/// The supervisor's loop and the state of the contexts that are not split
+/// off yet (docs/design/architecture.md, "`Supervisor`の状態"). Which
+/// context owns each field, so that a submodule changes only its own
+/// context's fields and reads or calls the others (rule C3):
 ///
 /// - shared: `queue`, `queues`, `generators`, `layout`, `processes` and
 ///   `utc_offset`, the connection, clocks and places every context reads.
@@ -1019,16 +998,16 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   `wrapper_setting_warned`) and the adapters it uses (`repository`,
 ///   `remote`, `verifier`, `reviewer`, `codex_jobs`, `signals`, `spawner`,
 ///   `files`).
-/// - observation and analysis: `observer`, `observers_launched`,
-///   `observer_again`, `throughput_review`, `report`, `reports`,
-///   `forecasts`, `forecast`, `push`, `candidates`, `ci_watch_port` and
-///   `ci`. Only `ci_watch` changes `ci`; the claim, the resume and the
-///   landing read it through `ci_watch_held` and `ci_watch_unreadable`.
-/// - host operation: the registration and handoff (`token`, `heartbeat`,
-///   `supervisor_file`, `supervisor_error`, `exec`, `handoff`, `draining`,
-///   `stop_recorded`), the queue service, the update, the release,
-///   sccache, the disk and its cleanup, the sweep, the host's load
-///   and metrics, `service_access`, `no_claude` and `sessions`.
+/// - observation and analysis: `observation`
+///   ([`contexts::ObservationState`]), changed only by its submodules
+///   through their passes.
+/// - host operation: `host` ([`contexts::HostOpsState`]), changed only by
+///   its submodules through their passes; and on the loop, the
+///   registration and handoff (`token`, `heartbeat`, `supervisor_file`,
+///   `supervisor_error`, `exec`, `handoff`, `draining`, `stop_recorded`),
+///   the sweep (`last_sweep`, `sweep_failures`), the host's load
+///   (`max_load`, `load_average`, `host_versions`), `service_access`,
+///   `no_claude` and `sessions`.
 struct Supervisor<'a> {
     no_claude: bool,
     queue: Box<dyn Queue + Send>,
@@ -1092,20 +1071,6 @@ struct Supervisor<'a> {
     /// does not burn through every candidate.
     claiming: bool,
     provisioning_error: Option<String>,
-    /// The observer job running now: one at a time, outside the run slots.
-    observer: Option<observer::ObserverJob>,
-    /// When this process last launched each observation, so one that dies
-    /// before it records anything is not relaunched on every pass.
-    observers_launched: Vec<(ObserveMode, Instant)>,
-    /// The observation due again now whatever the queue says: one that
-    /// found its provider unusable, which starts again on the other
-    /// provider (ADR-t1063-1 decision 4, task 1223) or, with
-    /// `[provider_fallback] jobs` off, on the same one once its hold ends
-    /// (ADR-t1857-1).
-    observer_again: Option<ObserveMode>,
-    /// The throughput review running now (ADR-t996-1), and the periods this
-    /// process started.
-    throughput_review: throughput_review::ThroughputReviewWatch,
     /// When this process last swept the workspaces of ended runs
     /// (`LoopSettings::sweep_interval`); `None` until the first pass sweeps.
     last_sweep: Option<Instant>,
@@ -1172,9 +1137,6 @@ struct Supervisor<'a> {
     /// at the last claim pass (ADR-0049 decision 9): nothing is claimed and
     /// no passed run lands until it does.
     run_env_missing: bool,
-    /// The `candidates_sampled` this process recorded last (ADR-0051
-    /// decision 3); `None` until its first claim pass records one.
-    candidates: Option<CandidatesSample>,
     /// The landing branch did not resolve at the top of this pass
     /// (ADR-t615-1): nothing is claimed and no passed run lands until it
     /// does.
@@ -1218,11 +1180,6 @@ struct Supervisor<'a> {
     /// Whether this process recorded `supervisor_draining` for its stop
     /// request (task 1277): once, on the first pass that saw it.
     stop_recorded: bool,
-    /// Whether the queue service ran at the last look, or no service is
-    /// kept (ADR-t1233-4 decision 2): new claims and jobs wait for it.
-    service_up: bool,
-    /// The automatic update's look at main (ADR-0045 decision 17).
-    update: update::UpdateWatch,
     /// The landing recheck running and the one due (ADR-0068).
     rechecks: recheck::Rechecks,
     /// `--max-load` (task 327).
@@ -1235,62 +1192,25 @@ struct Supervisor<'a> {
     load_average: fn() -> Option<f64>,
     host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
     worker_plugin: Arc<dyn Fn(&Path) -> String + Send + Sync>,
-    /// Writes the daily KPI reports; `None` writes none.
-    reports: Option<ReportPort>,
-    /// Records the host's load; `None` records none (task 516).
-    host_metrics_port: Option<HostMetricsPort>,
-    /// The sample job of the host's load.
-    host_metrics: host_metrics::HostMetricsWatch,
-    /// Keeps the queue's service; `None` keeps none.
-    queue_service_port: Option<QueueServicePort>,
-    /// What the supervisor knows of the queue's service.
-    queue_service: queue_service::QueueServiceWatch,
     /// Reads the limit on the improvement proposals running.
     max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
-    /// The report job and the day the reports were last found written.
-    report: report::ReportWatch,
-    /// Takes the forecast snapshots; `None` takes none.
-    forecasts: Option<ForecastPort>,
-    /// The snapshot job and where the last look for triggers left off.
-    forecast: forecast::ForecastWatch,
-    /// Looks for a new release; `None` looks for none.
-    release_port: Option<ReleasePort>,
-    /// The release look running and when the last one started.
-    release: release::ReleaseWatch,
-    /// The KPI push's messages waiting and the one being sent.
-    push: push::PushWatch,
     /// The load samples of each held run's current interval (task 197).
     loads: HashMap<RunId, LoadWindow>,
     /// The claims deferred on conflict hotspots (ADR-0069).
     defer: claim_defer::DeferWatch,
-    /// `[disk]`: how much free disk space a claim and a landing need
-    /// (task 377).
-    disk_config: crate::domain::disk::DiskConfig,
     /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
     /// decision 24).
     resume_config: ResumeConfig,
     retry_unreadable_review: bool,
-    /// Reads the free bytes of the file system of a path.
-    free_space: fn(&Path) -> Option<u64>,
-    /// Lists the directories of the Claude Code scratchpads (task 1100).
-    scratchpad_roots: ScratchpadRoots,
-    /// The disk between passes (task 377).
-    disk: disk::DiskWatch,
-    /// The free bytes of the queue's directory read this pass.
-    free: Option<u64>,
-    /// The cleanup of ended runs' worktrees off the loop (task 405).
-    cleanup: cleanup::CleanupWatch,
     /// Runs the e2e of the runs after their review (ADR-t1233-2).
     run_e2e: Option<RunE2ePort>,
     /// The runs waiting for the e2e, and when one that could not run is
     /// tried again.
     e2e: e2e::E2eWaits,
-    /// Looks at and starts the host's sccache server (ADR-t1215-1).
-    sccache_port: Option<SccachePort>,
-    sccache: sccache::SccacheWatch,
-    /// Watches the landing branch's CI (ADR-t1920-1).
-    ci_watch_port: Option<CiWatchPort>,
-    ci: ci_watch::CiWatchState,
+    /// 観測と分析's state.
+    observation: contexts::ObservationState,
+    /// host運用's state.
+    host: contexts::HostOpsState,
 }
 
 /// One executing run between provisioning and rest.
@@ -1454,6 +1374,108 @@ impl Supervisor<'_> {
         })
     }
 
+    /// The loop's shared parts and adapters ([`PassEnv`]), borrowed apart
+    /// from 観測と分析's and host運用's states, with those states.
+    fn split(
+        &mut self,
+    ) -> (
+        PassEnv<'_>,
+        &mut contexts::ObservationState,
+        &mut contexts::HostOpsState,
+    ) {
+        (
+            PassEnv {
+                queue: &mut *self.queue,
+                queues: &self.queues,
+                generators: &self.generators,
+                layout: self.layout,
+                processes: &self.processes,
+                files: &self.files,
+                repository: &self.repository,
+                verifier: &self.verifier,
+                spawner: self.spawner,
+                token: &self.token,
+            },
+            &mut self.observation,
+            &mut self.host,
+        )
+    }
+
+    /// Run `pass` of 観測と分析 on its state.
+    fn on_observation<R>(
+        &mut self,
+        pass: impl FnOnce(&mut contexts::ObservationState, &mut PassEnv<'_>) -> R,
+    ) -> R {
+        let (mut env, observation, _) = self.split();
+        pass(observation, &mut env)
+    }
+
+    /// Run `pass` of host運用 on its state.
+    fn on_host<R>(
+        &mut self,
+        pass: impl FnOnce(&mut contexts::HostOpsState, &mut PassEnv<'_>) -> R,
+    ) -> R {
+        let (mut env, _, host) = self.split();
+        pass(host, &mut env)
+    }
+
+    /// Run `call` with the loop's shared parts only.
+    fn with_env<R>(&mut self, call: impl FnOnce(&mut PassEnv<'_>) -> R) -> R {
+        let (mut env, _, _) = self.split();
+        call(&mut env)
+    }
+
+    /// The runs the slots hold, which a cleanup leaves alone.
+    fn held_runs(&self) -> Vec<RunId> {
+        self.slots
+            .iter()
+            .map(|slot| slot.run.id().clone())
+            .collect()
+    }
+
+    /// Ask host運用 for the worktrees of ended runs to be cleaned, every
+    /// such run's or only `task`'s ([`contexts::HostOpsState::request_cleanup`]).
+    pub(super) fn request_cleanup(&mut self, task: Option<TaskId>) {
+        let held = self.held_runs();
+        self.on_host(|host, env| host.request_cleanup(env, &held, task, None));
+    }
+
+    /// A handoff withdrawn while this process drained: the cleanup goes
+    /// back to normal ([`contexts::HostOpsState::resume_cleanup`]).
+    fn resume_cleanup(&mut self) {
+        let held = self.held_runs();
+        self.on_host(|host, env| host.resume_cleanup(env, &held));
+    }
+
+    /// host運用's look at the sccache server before a process given
+    /// `[run.env]` starts ([`contexts::HostOpsState::ensure_sccache`]).
+    pub(super) fn ensure_sccache(
+        &mut self,
+        reason: crate::domain::sccache::CheckReason,
+    ) -> crate::domain::sccache::ServerCheck {
+        self.on_host(|host, env| host.ensure_sccache(env, reason))
+    }
+
+    /// The look and the guard in `dir` before a process given `[run.env]`
+    /// starts ([`contexts::HostOpsState::sccache_look`]).
+    pub(super) fn sccache_look(
+        &mut self,
+        reason: crate::domain::sccache::CheckReason,
+        dir: &Path,
+    ) -> crate::domain::sccache::GuardLook {
+        self.on_host(|host, env| host.sccache_look(env, reason, dir))
+    }
+
+    /// Record `sccache_wrapper_removed` on `run` ([`sccache::record_wrapper_removed`]).
+    pub(super) fn record_wrapper_removed(
+        &mut self,
+        run: &RunId,
+        look: &crate::domain::sccache::GuardLook,
+        fields: Value,
+    ) {
+        self.with_env(|env| sccache::record_wrapper_removed(env, run, look, fields));
+    }
+
     /// The handoff request this process drains for was replaced by one for
     /// `now`: the drain goes on for the new binary (task 1286).
     fn replace_handoff(&mut self, binary: &str, now: String) {
@@ -1470,19 +1492,24 @@ impl Supervisor<'_> {
     /// database may be unreachable), and it goes stale with the leases.
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
-        self.finish_host_metrics();
+        self.host.host_metrics.finish();
         // The jobs the loop stopped last (a handoff stops them all).
         self.write_job_ends();
         // A loop that ended on an error lets the cleanup job end after its
         // current worktree (all candidates for disk space), recording its work.
         if result.is_err() {
-            self.poll_cleanup(true);
-            self.finish_cleanup();
+            let held = self.held_runs();
+            self.on_host(|host, env| {
+                host.poll_cleanup(env, &held, true);
+                host.finish_cleanup(env, &held);
+            });
         }
         if self.exec.is_none() {
             // Only a loop that ended on an error leaves one running.
-            self.stop_observer("with the supervisor");
-            self.stop_throughput_review("with the supervisor");
+            self.on_observation(|observation, env| {
+                observation.stop_observer(env, "with the supervisor");
+                observation.stop_throughput_review(env, "with the supervisor");
+            });
         }
         if self.exec.is_none() && self.heartbeat.check().is_ok() {
             // The mark of the stop (ADR-0051 decision 10); an exec leaves it
@@ -1507,7 +1534,7 @@ impl Supervisor<'_> {
             if result.is_ok() && options.stop.load(Ordering::SeqCst) {
                 // The queue service after the supervisor (ADR-t1233-4
                 // decision 1).
-                self.stop_queue_service_after_down();
+                self.on_host(|host, env| host.stop_queue_service_after_down(env));
             }
         }
         result
@@ -1569,18 +1596,27 @@ impl Supervisor<'_> {
                 self.record_stop_request();
             }
             // Every pass, draining or handing off too (task 516).
-            self.host_metrics_pass();
+            let handing_off = self.handoff.is_some();
+            let (host, generators) = (&mut self.host, &self.generators);
+            host.host_metrics.pass(
+                host.host_metrics_port.as_ref(),
+                handing_off,
+                || generators.clock.now(),
+                Instant::now(),
+            );
             // Before any job starts: none runs twice (task 443).
             self.tend_headless_jobs();
             // What the cleanup job removed is recorded before the disk is
             // read (task 405).
-            self.poll_cleanup(stopping || self.handoff.is_some());
+            let ending = stopping || self.handoff.is_some();
+            let held = self.held_runs();
+            self.on_host(|host, env| host.poll_cleanup(env, &held, ending));
             // Every pass, draining or not, so a hold on landings ends as soon
             // as the program is found (ADR-0049 decision 9).
             self.check_run_env_programs()?;
             // And the sccache server, which no process given [run.env]
             // may start (ADR-t1215-1, ADR-t2086-1).
-            self.sccache_pass();
+            self.on_host(|host, env| host.sccache_pass(env));
             self.check_landing_branch(options.landing_recheck);
             self.mark_run_env_change()?;
             // Every pass, before any claim: a change of `[conflicts]` takes
@@ -1595,10 +1631,19 @@ impl Supervisor<'_> {
             self.reread_provider_fallback();
             // And `[ci_watch]`, whose check is reaped and started off the
             // loop, draining and handing off too (ADR-t1920-1).
-            self.ci_watch_pass();
+            self.on_observation(|observation, env| observation.ci_watch_pass(env));
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
-            self.check_disk(options.disk_cleanup_interval)?;
+            let landings: Vec<RunId> = self
+                .slots
+                .iter()
+                .filter(|slot| matches!(slot.phase, Phase::AwaitingSlot))
+                .map(|slot| slot.run.id().clone())
+                .collect();
+            let held = self.held_runs();
+            self.on_host(|host, env| {
+                host.check_disk(env, options.disk_cleanup_interval, &landings, &held)
+            })?;
             // Every pass too: the answer of an authentication or usage-limit
             // ask is applied and the hold read before any work starts (task
             // 437), and Codex's hold ends once its time is up (ADR-t813-2).
@@ -1644,7 +1689,7 @@ impl Supervisor<'_> {
                         );
                         // Read after the cleanup was polled: this pass
                         // drains on it already.
-                        self.end_cleanup_for_handoff();
+                        self.host.end_cleanup_for_handoff();
                     }
                 }
                 if let Some(binary) = self.handoff.clone() {
@@ -1656,13 +1701,8 @@ impl Supervisor<'_> {
                     // and the rest of a cleanup for room it took on (task 1426).
                     self.recheck_pass();
                     if !self.rechecks.running()
-                        && !self.cleanup.running()
-                        && !self.push.running()
-                        && !self.report.running()
-                        && !self.host_metrics.running()
-                        && !self.forecast.running()
-                        && !self.release.running()
-                        && !self.ci.running()
+                        && !self.host.handoff_waits()
+                        && !self.observation.handoff_waits()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
                         if self.queue.take_handoff(&self.token, &binary)? {
@@ -1703,12 +1743,13 @@ impl Supervisor<'_> {
                     if self.handoff.is_some() {
                         self.draining = true;
                         self.poll_observer();
-                        let unusable = self.reap_throughput_reviews(options);
-                        self.hold_timer_jobs(unusable);
-                        self.report_pass(false);
-                        self.forecast_pass(false);
-                        self.release_pass(false);
-                        self.push_pass(false);
+                        self.reap_throughput_reviews(options);
+                        self.on_observation(|observation, env| {
+                            observation.report_pass(env, false);
+                            observation.forecast_pass(env, false);
+                        });
+                        self.on_host(|host, env| host.release_pass(env, false));
+                        self.on_observation(|observation, env| observation.push_pass(env, false));
                         // A plan or goal review that ended meanwhile is
                         // reaped and its verdict applied, none started: a
                         // verdict left to the exec would be thrown away
@@ -1725,7 +1766,8 @@ impl Supervisor<'_> {
             // The queue service looked at, started again or replaced
             // (ADR-t1233-4 decision 2); while it is down no new run and no
             // queue's job starts.
-            self.service_up = self.queue_service_pass(!stopping && self.claiming);
+            let working = !stopping && self.claiming;
+            self.on_host(|host, env| host.queue_service_pass(env, working));
             if self.claiming && !stopping {
                 self.fill_slots(self.parallel, options.sweep_interval)?;
                 self.sample_candidates(self.parallel);
@@ -1740,15 +1782,18 @@ impl Supervisor<'_> {
             let rechecked = self.recheck_pass();
             // A supervisor that stopped claiming is draining, not observing
             // nor starting plan reviews, nor updating itself.
-            // Reaped on every pass, started only by a supervisor at work.
-            self.report_pass(!stopping && self.claiming);
-            // Looked for by a supervisor at work only: the triggers stay in
-            // the queue for the next look (ADR-0070 decision 3).
-            self.forecast_pass(!stopping && self.claiming);
+            let working = !stopping && self.claiming;
+            self.on_observation(|observation, env| {
+                // Reaped on every pass, started only by a supervisor at work.
+                observation.report_pass(env, working);
+                // Looked for by a supervisor at work only: the triggers stay
+                // in the queue for the next look (ADR-0070 decision 3).
+                observation.forecast_pass(env, working);
+            });
             // Looked for by a supervisor at work only (ADR-t618-1).
-            self.release_pass(!stopping && self.claiming);
+            self.on_host(|host, env| host.release_pass(env, working));
             // A message waiting is sent while the supervisor does not stop.
-            self.push_pass(!stopping);
+            self.on_observation(|observation, env| observation.push_pass(env, !stopping));
             // An inbox without a watcher while asks wait for it is recorded
             // and told through `[push]` (ADR-t1433-5 decision 1 (3)),
             // draining or not: a drain waits for their answers. The
@@ -1759,17 +1804,21 @@ impl Supervisor<'_> {
             // usage limit that holds Claude starts no Claude review, but
             // one whose role names its provider may run on Codex
             // (ADR-t1063-1 decision 5, ADR-t1204-1, task 1220).
-            let unusable = self.reap_throughput_reviews(options);
-            self.hold_timer_jobs(unusable);
-            self.start_throughput_review(options, !stopping && self.claiming && self.service_up);
+            self.reap_throughput_reviews(options);
+            self.start_throughput_review(
+                options,
+                !stopping && self.claiming && self.host.service_up,
+            );
             if !stopping && self.claiming {
                 // Its route decides on `--no-claude` and the hold as the
                 // throughput review's does (task 1223).
-                if self.service_up {
+                if self.host.service_up {
                     self.start_observer_when_due(options);
                 }
-                self.auto_update_pass(options);
-                self.release_update_pass(options);
+                self.on_host(|host, env| {
+                    host.auto_update_pass(env, options);
+                    host.release_update_pass(env, options);
+                });
             }
             // A plan review that just readied tasks is followed by one more
             // pass, which claims them.
@@ -1778,7 +1827,7 @@ impl Supervisor<'_> {
             // 437), but one whose role names its provider may run on Codex
             // while Claude is held (ADR-t1063-1 decision 5). One in progress
             // is followed.
-            let starting = !stopping && self.claiming && self.service_up;
+            let starting = !stopping && self.claiming && self.host.service_up;
             let mut progressed = self.plan_review_pass(options, starting);
             progressed |= self.goal_review_pass(starting);
             if self.slots.is_empty() {
@@ -1791,23 +1840,16 @@ impl Supervisor<'_> {
                 // resumes the runs it parked; a cleanup for room by one
                 // that claims if there is room now. Any other cleanup is
                 // joined once the loop ends.
-                let job = self.observer.is_some()
-                    || self.throughput_review.running()
-                    || self.report.running()
-                    || self.forecast.running()
-                    || self.release.running()
-                    // A CI check holds the claims until it answers.
-                    || self.ci.running()
-                    // A message being sent is bounded by the command's
-                    // timeout; `--once` also waits for those still to be
-                    // tried, a stop does not.
-                    || self.push.running()
-                    || (options.once && !stopping && self.push.busy())
+                // A message being sent is bounded by the command's timeout;
+                // `--once` also waits for those still to be tried, a stop
+                // does not.
+                let job = self.observation.busy(options.once && !stopping)
+                    || self.host.release.running()
                     || self.plan_review.is_some()
                     || self.goal_review.is_some()
                     || self.rechecks.running()
-                    || self.cleanup.for_disk()
-                    || self.cleanup.deferred
+                    || self.host.cleanup.for_disk()
+                    || self.host.cleanup.deferred()
                     || rechecked;
                 if !job && !progressed && (options.once || stopping || !self.claiming) {
                     break;
@@ -1818,7 +1860,8 @@ impl Supervisor<'_> {
             self.tick(false);
             thread::sleep(options.tick);
         }
-        self.finish_cleanup();
+        let held = self.held_runs();
+        self.on_host(|host, env| host.finish_cleanup(env, &held));
         if let Some(message) = &self.provisioning_error {
             bail!(
                 "{message}; claiming stopped and {} active run(s) were drained; inspect doctor before recovery",
@@ -1869,7 +1912,7 @@ impl Supervisor<'_> {
         let resumes = if self.used_slots() < parallel
             && !self.landing_unresolved
             && !self.run_env_missing
-            && !self.ci_watch_held()
+            && !self.observation.ci.held()
         {
             self.resume_candidates()?
         } else {
@@ -1923,8 +1966,8 @@ impl Supervisor<'_> {
         // (ADR-t1233-4 decision 2).
         let mut claims = None;
         // Nor while the CI cannot be read (ADR-t1920-1 decision 2).
-        if !(self.run_env_missing || self.ci_watch_held() || self.landing_unresolved)
-            && self.service_up
+        if !(self.run_env_missing || self.observation.ci.held() || self.landing_unresolved)
+            && self.host.service_up
         {
             // The runs in flight go on; only new claims wait (task 327).
             if self.hold_claims()? {
@@ -2177,8 +2220,7 @@ impl Supervisor<'_> {
     /// Record `candidates_sampled` (ADR-0051 decision 3) when this pass's
     /// claimable ready tasks (`graph`'s `candidates`), free slots or ready
     /// tasks differ from the sample this process recorded last, and on its
-    /// first claim pass. A failure is logged: the sample is bookkeeping for
-    /// `kpi`, and the next pass tries again.
+    /// first claim pass ([`contexts::ObservationState::record_candidates`]).
     fn sample_candidates(&mut self, parallel: usize) {
         let sample = self.queue.graph_input().map(|input| {
             let graph = dependency_graph(input, None);
@@ -2192,18 +2234,7 @@ impl Supervisor<'_> {
                     .count(),
             }
         });
-        let result = sample.and_then(|sample| {
-            if let Some(mut payload) = sample.transition(self.candidates.as_ref()) {
-                payload["supervisor"] = json!(self.token);
-                self.queue
-                    .record_queue_event(EventKind::CandidatesSampled, payload)?;
-                self.candidates = Some(sample);
-            }
-            Ok(())
-        });
-        if let Err(error) = result {
-            warn!(error = %format_args!("{error:#}"), "the candidates could not be sampled: {error:#}");
-        }
+        self.on_observation(|observation, env| observation.record_candidates(env, sample));
     }
     /// Judge whether new claims are held now ([`ClaimHold::judge`]: the
     /// free disk space this pass read against what a claim needs (task
@@ -2211,24 +2242,24 @@ impl Supervisor<'_> {
     /// the answer differs from the hold in place on the queue (task 327).
     /// Returns whether they are held.
     fn hold_claims(&mut self) -> Result<bool> {
-        let needed = self.disk_needs()?.claim;
+        let needed = self.on_host(|host, env| host.disk_needs(env))?.claim;
         // Short while a cleanup for room runs: wait for it without a hold
         // (task 405).
-        if self.disk.cleaning
-            && matches!((self.free, needed), (Some(free), Some(need)) if free < need)
+        if self.host.disk.cleaning
+            && matches!((self.host.free, needed), (Some(free), Some(need)) if free < need)
         {
             return Ok(true);
         }
         let hold = ClaimHold::judge(&HoldInputs {
             load_average: (self.load_average)(),
             max_load: self.max_load,
-            free_bytes: self.free,
+            free_bytes: self.host.free,
             needed_bytes: needed,
             // Claude's hold ask holds the claims only while no worker can
             // run on the other provider either (ADR-t813-2 decision 6).
             queue_hold: self.queue_hold.filter(|_| self.routes().is_empty()),
         });
-        self.record_hold(claim_hold::CLAIMS, hold.as_ref())
+        self.with_env(|env| env.record_hold(claim_hold::CLAIMS, hold.as_ref()))
     }
     /// Check the programs `[run.env]` names on this process's PATH
     /// (ADR-0049 decision 9) and record `run_env_program_missing` or
@@ -2321,36 +2352,8 @@ impl Supervisor<'_> {
         }
         let hold = error.map(|error| (UNRESOLVED_REASON, json!({"error": error})));
         self.landing_recorded = self
-            .record_own_hold(LANDING_BRANCH_HOLD, hold)
+            .with_env(|env| env.record_own_hold(LANDING_BRANCH_HOLD, hold))
             .then_some(reason);
-    }
-    /// Record the change of a hold of this supervisor's claims kept in its
-    /// memory against its own latest record
-    /// ([`claim_hold::OwnHold::transition`]); a queue that cannot be read
-    /// or written is warned of and `false` returned, for the caller to try
-    /// again.
-    pub(super) fn record_own_hold(
-        &mut self,
-        kinds: claim_hold::OwnHold,
-        hold: Option<(&str, Value)>,
-    ) -> bool {
-        let recorded = crate::application::health::own_hold_records(
-            &*self.queue,
-            kinds,
-            &[self.token.as_str()],
-        )
-        .and_then(|records| {
-            let last = claim_hold::OwnHold::latest_of(&records, self.token.as_str());
-            match kinds.transition(hold, last, &self.token) {
-                Some((kind, payload)) => self.queue.record_queue_event(kind, payload).map(drop),
-                None => Ok(()),
-            }
-        });
-        if let Err(error) = recorded {
-            warn!(error = %format_args!("{error:#}"), "the hold {} could not be recorded: {error:#}", kinds.held.as_str());
-            return false;
-        }
-        true
     }
     /// Record `run_env_changed` when the normalized `[run.env]` of the main
     /// checkout hashes differently from the latest one on the queue
@@ -2570,47 +2573,14 @@ impl Supervisor<'_> {
             }
         }
     }
-    /// The observation due now, if any: the daily one when it has not run
-    /// for 24 hours, else the hourly one when the interval passed since the
-    /// last one started or finished (from the queue, whichever supervisor
-    /// ran it) and since this process last launched it.
-    fn due_observation(&self, options: &LoopSettings) -> Result<Option<ObserveMode>> {
-        if options.observe_interval.is_zero() {
-            return Ok(None);
-        }
-        let now = self.generators.clock.now();
-        let mut modes = vec![(
-            ObserveMode::Hourly,
-            i64::try_from(options.observe_interval.as_secs())?,
-        )];
-        if options.observe_daily {
-            modes.insert(0, (ObserveMode::Daily, DAILY_WINDOW_SECS));
-        }
-        if let Some(mode) = self.observer_again {
-            return Ok(Some(mode));
-        }
-        for (mode, every) in modes {
-            let recorded = self
-                .queue
-                .last_observe(mode.as_str())?
-                .is_some_and(|last| now - last < every);
-            let launched = self.observers_launched.iter().any(|(launched, at)| {
-                *launched == mode && at.elapsed().as_secs() < every.unsigned_abs()
-            });
-            if !recorded && !launched {
-                return Ok(Some(mode));
-            }
-        }
-        Ok(None)
-    }
-    /// Launch `dagq observe` as a child process when an observation is due
-    /// and none is running. It takes no run slot. A failure to launch is
-    /// logged and retried after the interval.
+    /// Launch `dagq observe` when an observation is due and none is
+    /// running ([`contexts::ObservationState::observer_due`]), on the route
+    /// 実行と着地's holds give it. The observer reads the active time of the
+    /// spans still open too, recorded first.
     fn start_observer_when_due(&mut self, options: &LoopSettings) {
-        if self.observer.is_some() {
-            return;
-        }
-        let mode = match self.due_observation(options) {
+        let mode = match self
+            .on_observation(|observation, env| observation.observer_due(env, options))
+        {
             Ok(Some(mode)) => mode,
             Ok(None) => return,
             Err(error) => {
@@ -2622,14 +2592,6 @@ impl Supervisor<'_> {
         else {
             return;
         };
-        let (launch, switchable, unavailable) = match route {
-            crate::domain::actor_model::JobStartRoute::Start(launch, switchable) => {
-                (launch, switchable, None)
-            }
-            crate::domain::actor_model::JobStartRoute::Unavailable(launch, why) => {
-                (launch, false, Some(why))
-            }
-        };
         // Its finish is the first `observe_finished` past this mark.
         let mark = match self.queue.latest_event_id() {
             Ok(mark) => mark,
@@ -2638,69 +2600,36 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        // The observer reads the active time of the spans still open too.
         self.record_session_turns(true);
-        self.observer_again = None;
-        self.observers_launched
-            .retain(|(launched, _)| *launched != mode);
-        self.observers_launched.push((mode, Instant::now()));
-        let mut command = CommandSpec::new(&self.layout.runner);
-        command
-            .arg("--db")
-            .arg(&self.layout.db)
-            .arg("observe")
-            .arg("--claude")
-            .arg(&self.layout.claude)
-            .arg("--codex")
-            .arg(&self.layout.codex)
-            .arg("--launch")
-            .arg(launch.to_value().to_string())
-            .current_dir(&self.layout.repo_root);
-        if let Some(home) = &self.layout.codex_home {
-            command.arg("--codex-home").arg(home);
-        }
-        if switchable {
-            command.arg("--switchable");
-            if !self.fallback.jobs {
-                command.arg("--no-provider-fallback");
-            }
-        }
-        if let Some(why) = &unavailable {
-            command.arg("--unavailable").arg(why);
-        }
-        for name in &self.layout.observer_env_remove {
-            command.env_remove(name);
-        }
-        // The observe command is the supervisor's; its agent is the
-        // observer (ADR-t728-1 decision 4).
-        command.envs(self.layout.supervisor_actor().env());
-        if mode == ObserveMode::Daily {
-            command.arg("--daily");
-        }
-        match self.spawner.spawn(&command, Streams::Null) {
-            Ok(child) => {
-                info!(
-                    "observer ({}) started on {}: pid {}",
-                    mode.as_str(),
-                    launch.provider.as_str(),
-                    child.id()
-                );
-                self.observer = Some(observer::ObserverJob {
-                    mode,
-                    child,
-                    retries_unusable: observer::retries_unusable(
-                        launch.provider,
-                        switchable,
-                        self.fallback.jobs,
-                        unavailable.is_some(),
-                    ),
-                    mark,
-                });
-            }
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "observer ({}) could not start: {error:#}", mode.as_str())
-            }
-        }
+        let fallback_jobs = self.fallback.jobs;
+        self.on_observation(|observation, env| {
+            observation.start_observer(env, mode, route, mark, fallback_jobs);
+        });
+    }
+    /// Start the throughput review due, on the route 実行と着地's holds give
+    /// it, when `start` and none runs.
+    fn start_throughput_review(&mut self, options: &LoopSettings, start: bool) {
+        let Some(due) = self.on_observation(|observation, env| {
+            observation.throughput_review_due(env, options, start)
+        }) else {
+            return;
+        };
+        let Some(route) =
+            self.job_start_route(crate::domain::actor_model::ModelRole::ThroughputReview)
+        else {
+            return;
+        };
+        let fallback_jobs = self.fallback.jobs;
+        self.on_observation(|observation, env| {
+            observation.start_throughput_review(env, due, route, fallback_jobs);
+        });
+    }
+    /// Reap the throughput reviews and have the providers their finishes
+    /// say could not be used held.
+    fn reap_throughput_reviews(&mut self, options: &LoopSettings) {
+        let unusable = self
+            .on_observation(|observation, env| observation.reap_throughput_reviews(env, options));
+        self.hold_timer_jobs(unusable);
     }
     /// Apply what the headless job `job` returned: the events written
     /// meanwhile record the supervisor as their actor and the job as
@@ -2825,30 +2754,10 @@ impl Supervisor<'_> {
             }
         }
     }
-    /// Kill the observer still running and the processes it started (its
-    /// agent and that agent's Bash), so none outlives this supervisor or
-    /// runs on unwatched after its exec; `why` ends the log line.
+    /// Kill the observer still running and the processes it started;
+    /// `why` ends the log line.
     pub(super) fn stop_observer(&mut self, why: &str) {
-        let Some(observer::ObserverJob {
-            mode, mut child, ..
-        }) = self.observer.take()
-        else {
-            return;
-        };
-        // Listed before the kill: once `observe` is gone, its agent is no
-        // longer its descendant.
-        let descendants = self.processes.descendants(child.id());
-        let _ = child.kill();
-        let _ = child.wait();
-        for pid in &descendants {
-            let _ = self.processes.kill(*pid);
-        }
-        info!(
-            "observer ({}) stopped {why}: pid {} and {} descendant(s) killed",
-            mode.as_str(),
-            child.id(),
-            descendants.len()
-        );
+        self.on_observation(|observation, env| observation.stop_observer(env, why));
     }
     /// Have 実行と着地, which owns the holds, hold the providers the
     /// finishes 観測と分析 reaped (`unusable`) say could not be used
@@ -2860,33 +2769,16 @@ impl Supervisor<'_> {
             return;
         }
         for job in self.hold_timer_jobs_unusable(unusable) {
-            self.timer_job_due_again(job);
+            self.observation.timer_job_due_again(job);
         }
     }
-    /// Reap the observer once it exited; its own `observe_finished` is the
-    /// record. One that found its provider unusable has that provider held
-    /// and is due again ([`Self::observer_unusable`],
+    /// Reap the observer once it exited; one that found its provider
+    /// unusable has that provider held and is due again
+    /// ([`contexts::ObservationState::poll_observer`],
     /// [`Self::hold_timer_jobs`]).
     fn poll_observer(&mut self) {
-        let Some(job) = self.observer.as_mut() else {
-            return;
-        };
-        let mode = job.mode;
-        match job.child.try_wait() {
-            Ok(None) => return,
-            Ok(Some(status)) => {
-                info!("observer ({}) exited: {status}", mode.as_str());
-            }
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "observer ({}) could not be waited for: {error:#}", mode.as_str());
-            }
-        }
-        if let Some(job) = self.observer.take()
-            && job.retries_unusable
-        {
-            let unusable = self.observer_unusable(&job);
-            self.hold_timer_jobs(unusable.into_iter().collect());
-        }
+        let unusable = self.on_observation(|observation, env| observation.poll_observer(env));
+        self.hold_timer_jobs(unusable.into_iter().collect());
     }
     /// Whether this process still drives `id` in a slot. Such a run whose
     /// lease another token holds now, stale or not, is adopted, resumed or
@@ -3093,11 +2985,11 @@ impl Supervisor<'_> {
                 match crate::domain::landing_hold::judge(
                     crate::domain::landing_hold::LandingHoldInputs {
                         run_env_missing: self.run_env_missing,
-                        ci_held: self.ci_watch_held(),
-                        ci_unreadable: self.ci_watch_unreadable(),
+                        ci_held: self.observation.ci.held(),
+                        ci_unreadable: self.observation.ci.unreadable(),
                         landing_unresolved: self.landing_unresolved,
-                        landing_short: self.disk.landing_short,
-                        disk_cleaning: self.disk.cleaning,
+                        landing_short: self.host.disk.landing_short,
+                        disk_cleaning: self.host.disk.cleaning,
                         draining: self.draining,
                     },
                 ) {

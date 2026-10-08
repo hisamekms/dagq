@@ -48,10 +48,10 @@ impl ForecastWatch {
     }
 }
 
-impl Supervisor<'_> {
+impl ObservationState {
     /// Reap the snapshot job once it ended; with `start`, look for the
     /// triggers when it is time and start a job when there are any.
-    pub(super) fn forecast_pass(&mut self, start: bool) {
+    pub(super) fn forecast_pass(&mut self, env: &mut PassEnv<'_>, start: bool) {
         let Some(port) = self.forecasts.clone() else {
             return;
         };
@@ -107,9 +107,9 @@ impl Supervisor<'_> {
             return;
         }
         self.forecast.looked = Some(Instant::now());
-        let now = self.generators.clock.now();
+        let now = env.generators.clock.now();
         let pending = match forecast::pending(
-            &*self.queue,
+            &*env.queue,
             now,
             port.utc_offset,
             self.forecast.checked,
@@ -122,9 +122,9 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let queues = self.queues.clone();
-        let processes = self.processes.clone();
-        let token = self.token.clone();
+        let queues = env.queues.clone();
+        let processes = env.processes.clone();
+        let token = env.token.clone();
         self.forecast.job = Some(spawn_traced(move || {
             snapshot(&*queues, &*processes, &port, &token, now, &pending)
         }));

@@ -70,7 +70,7 @@ reviewとe2eを終えて着地の順番を待つだけのrun（着地待ち）�
 
 ## 記録
 
-判定がqueueの前回の記録と変わったときだけ、queueイベント（task・goal・runを持たない）を1件書く（`domain::claim_hold::transition`、supervisorの側は`Supervisor::record_hold`）。前回はqueueの最新の`claim_held` / `claim_resumed`で、最新の`claim_held`は、書いたsupervisorがこのsupervisor自身か、今動いている（登録があり、heartbeatがstaleでない）間だけ控えが続いているとみなす。loadはhostのものなので、同じqueueに2つのsupervisorが居ても交互に書き直さない。控えていたsupervisorが止まった（`down --wait`の後の`up`など）か死んだ後に、loadが高いまま起動したsupervisorは自分のtokenで`claim_held`を書き直すので、`status`と`stats`は控えを出し続ける。loadが下がっていれば、残った`claim_held`を`claim_resumed`で終える。
+判定がqueueの前回の記録と変わったときだけ、queueイベント（task・goal・runを持たない）を1件書く（`domain::claim_hold::transition`、supervisorの側は`PassEnv::record_hold`）。前回はqueueの最新の`claim_held` / `claim_resumed`で、最新の`claim_held`は、書いたsupervisorがこのsupervisor自身か、今動いている（登録があり、heartbeatがstaleでない）間だけ控えが続いているとみなす。loadはhostのものなので、同じqueueに2つのsupervisorが居ても交互に書き直さない。控えていたsupervisorが止まった（`down --wait`の後の`up`など）か死んだ後に、loadが高いまま起動したsupervisorは自分のtokenで`claim_held`を書き直すので、`status`と`stats`は控えを出し続ける。loadが下がっていれば、残った`claim_held`を`claim_resumed`で終える。
 
 - `claim_held`: 控え始めたとき、または別の理由で控え直したとき。payloadは`reason`、`value`（判定した値。loadなら1分のload average）、`threshold`（`--max-load`）、`message`、`supervisor`、認証か利用上限の控えなら`ask_id`
 - `claim_resumed`: 控えが終わったとき。payloadは終わった控えの`reason`と`supervisor`

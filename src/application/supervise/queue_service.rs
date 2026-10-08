@@ -68,12 +68,18 @@ pub(super) struct QueueServiceWatch {
     accepted: Option<String>,
 }
 
-impl Supervisor<'_> {
+impl HostOpsState {
+    /// Look at the service ([`Self::look_at_queue_service`]) and keep
+    /// whether new claims and jobs may start in `service_up`.
+    pub(super) fn queue_service_pass(&mut self, env: &mut PassEnv<'_>, working: bool) {
+        self.service_up = self.look_at_queue_service(env, working);
+    }
+
     /// Look at the service when due, start it again or replace it as
     /// needed, and say whether new claims and jobs may start: always
     /// without a port, else whether the service runs. `working` is false
     /// while the supervisor drains or hands off: it only answers.
-    pub(super) fn queue_service_pass(&mut self, working: bool) -> bool {
+    fn look_at_queue_service(&mut self, env: &mut PassEnv<'_>, working: bool) -> bool {
         let Some(port) = self.queue_service_port.clone() else {
             return true;
         };
@@ -93,9 +99,10 @@ impl Supervisor<'_> {
             && found.build.is_some()
             && found.build == self.queue_service.accepted;
         if found.current() || accepted {
-            if !self.queue_service.up && self.queue_service_attention_stands() {
+            if !self.queue_service.up && self.queue_service_attention_stands(env) {
                 info!("the queue service answers again");
                 self.record_queue_service(
+                    env,
                     EventKind::QueueServiceRunning,
                     json!({"pid": found.pid, "build": found.build}),
                 );
@@ -111,16 +118,15 @@ impl Supervisor<'_> {
             self.queue_service.up = false;
         }
         let window = QUEUE_SERVICE_RESTART_WINDOW;
-        self.queue_service
-            .starts
-            .retain(|start| start.elapsed() < window);
-        if !replacing && self.queue_service.starts.len() >= QUEUE_SERVICE_RESTARTS {
+        let limited = restart_limited(&mut self.queue_service.starts, Instant::now(), window);
+        if !replacing && limited {
             warn!(
                 "the queue service was started {} times in {}s and is still not running: left to a person",
                 self.queue_service.starts.len(),
                 window.as_secs()
             );
             self.queue_service_down(
+                env,
                 "restart_limit",
                 &format!(
                     "started {} times in {}s; {}",
@@ -143,6 +149,7 @@ impl Supervisor<'_> {
                     started.socket.display()
                 );
                 self.record_queue_service(
+                    env,
                     EventKind::QueueServiceStarted,
                     json!({
                         "by": "supervisor",
@@ -162,7 +169,7 @@ impl Supervisor<'_> {
             Err(error) => {
                 self.queue_service.up = false;
                 warn!(error = %format_args!("{error:#}"), "the queue service could not be started: {error:#}; no new run is claimed meanwhile");
-                self.queue_service_down("start_failed", &format!("{error:#}"));
+                self.queue_service_down(env, "start_failed", &format!("{error:#}"));
                 false
             }
         }
@@ -170,11 +177,11 @@ impl Supervisor<'_> {
 
     /// At the end of a drain: stop the service when `down` asked this
     /// supervisor to and no other supervisor of the queue runs.
-    pub(super) fn stop_queue_service_after_down(&mut self) {
+    pub(super) fn stop_queue_service_after_down(&mut self, env: &mut PassEnv<'_>) {
         let Some(port) = self.queue_service_port.clone() else {
             return;
         };
-        let asked = match self
+        let asked = match env
             .queue
             .latest_queue_event(&[QUEUE_SERVICE_STOP_REQUESTED])
         {
@@ -184,7 +191,7 @@ impl Supervisor<'_> {
                     .is_some_and(|tokens| {
                         tokens
                             .iter()
-                            .any(|token| token.as_str() == Some(self.token.as_str()))
+                            .any(|token| token.as_str() == Some(env.token.as_str()))
                     })
             }),
             Err(error) => {
@@ -195,14 +202,14 @@ impl Supervisor<'_> {
         if !asked {
             return;
         }
-        let now = self.generators.clock.now();
-        let others = match self.queue.supervisors() {
+        let now = env.generators.clock.now();
+        let others = match env.queue.supervisors() {
             Ok(registrations) => registrations
                 .into_iter()
                 .filter(|registration| {
-                    registration.token != self.token
+                    registration.token != *env.token
                         && !heartbeat_stale(
-                            self.processes.alive(registration.pid),
+                            env.processes.alive(registration.pid),
                             now - registration.heartbeat_at,
                         )
                 })
@@ -225,6 +232,7 @@ impl Supervisor<'_> {
                     "the drain `down` asked for is over: the queue service is stopped"
                 );
                 self.record_queue_service(
+                    env,
                     EventKind::QueueServiceStopped,
                     json!({"pid": pid, "by": "supervisor"}),
                 );
@@ -236,11 +244,8 @@ impl Supervisor<'_> {
         }
     }
 
-    fn queue_service_attention_stands(&self) -> bool {
-        match self
-            .queue
-            .latest_queue_event(&QUEUE_SERVICE_ATTENTION_KINDS)
-        {
+    fn queue_service_attention_stands(&mut self, env: &mut PassEnv<'_>) -> bool {
+        match env.queue.latest_queue_event(&QUEUE_SERVICE_ATTENTION_KINDS) {
             Ok(latest) => latest.is_some_and(|event| event.kind == QUEUE_SERVICE_DOWN),
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the queue service's events could not be read: {error:#}");
@@ -250,19 +255,20 @@ impl Supervisor<'_> {
     }
 
     /// The attention `queue_service_down`, unless it already stands.
-    fn queue_service_down(&mut self, reason: &str, message: &str) {
-        if self.queue_service_attention_stands() {
+    fn queue_service_down(&mut self, env: &mut PassEnv<'_>, reason: &str, message: &str) {
+        if self.queue_service_attention_stands(env) {
             return;
         }
         self.record_queue_service(
+            env,
             EventKind::QueueServiceDown,
             json!({"reason": reason, "message": message}),
         );
     }
 
-    fn record_queue_service(&mut self, kind: EventKind, mut payload: Value) {
-        payload["supervisor"] = json!(self.token);
-        if let Err(error) = self.queue.record_queue_event(kind, payload) {
+    fn record_queue_service(&mut self, env: &mut PassEnv<'_>, kind: EventKind, mut payload: Value) {
+        payload["supervisor"] = json!(env.token);
+        if let Err(error) = env.queue.record_queue_event(kind, payload) {
             warn!(error = %format_args!("{error:#}"), "the queue service's {kind} could not be recorded: {error:#}");
         }
     }
@@ -273,5 +279,41 @@ fn describe(found: &ServiceProbe) -> String {
     match &found.error {
         Some(error) => format!("{}: {error}", found.state.as_str()),
         None => found.state.as_str().to_owned(),
+    }
+}
+
+/// Keep the `starts` still in `window` at `at`, and say whether they reach
+/// [`QUEUE_SERVICE_RESTARTS`]: the service is then left to a person.
+fn restart_limited(starts: &mut Vec<Instant>, at: Instant, window: Duration) -> bool {
+    starts.retain(|start| at.saturating_duration_since(*start) < window);
+    starts.len() >= QUEUE_SERVICE_RESTARTS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The starts are counted in the window up to 1 ms before its end: at
+    /// its end the oldest leaves it and the service is started again.
+    #[test]
+    fn the_restart_limit_counts_the_starts_in_the_window_only() {
+        let window = QUEUE_SERVICE_RESTART_WINDOW;
+        let base = Instant::now();
+        let starts = || {
+            (0..QUEUE_SERVICE_RESTARTS as u64)
+                .map(|n| base + Duration::from_secs(n))
+                .collect::<Vec<_>>()
+        };
+        let mut held = starts();
+        assert!(restart_limited(
+            &mut held,
+            base + window - Duration::from_millis(1),
+            window
+        ));
+        assert_eq!(held.len(), QUEUE_SERVICE_RESTARTS);
+        let mut freed = starts();
+        assert!(!restart_limited(&mut freed, base + window, window));
+        assert_eq!(freed.len(), QUEUE_SERVICE_RESTARTS - 1);
+        assert!(!restart_limited(&mut Vec::new(), base, window));
     }
 }

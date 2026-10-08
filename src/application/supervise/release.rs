@@ -7,7 +7,7 @@
 //! wait for it but, like the report job, before it ends or execs. Nothing
 //! is claimed or held on it; a failure is only logged and recorded.
 //!
-//! What it found is acted on by [`Supervisor::release_update_pass`]
+//! What it found is acted on by [`HostOpsState::release_update_pass`]
 //! (decisions 4 and 5): the `approve_release` ask for a new release, its
 //! answer and the `update_failed` answers of a release's job, and the job
 //! (the hidden `release-update` command, [`crate::application::update::run_release`])
@@ -64,10 +64,10 @@ impl ReleaseWatch {
     }
 }
 
-impl Supervisor<'_> {
+impl HostOpsState {
     /// Reap the look once it ended; start one on the first pass and every
     /// [`RELEASE_LOOK`] after, when `start`.
-    pub(super) fn release_pass(&mut self, start: bool) {
+    pub(super) fn release_pass(&mut self, env: &mut PassEnv<'_>, start: bool) {
         let Some(port) = self.release_port.clone() else {
             return;
         };
@@ -104,9 +104,9 @@ impl Supervisor<'_> {
         if config.release == ReleaseMode::Off {
             return;
         }
-        let now = self.generators.clock.now();
-        let queues = self.queues.clone();
-        let token = self.token.clone();
+        let now = env.generators.clock.now();
+        let queues = env.queues.clone();
+        let token = env.token.clone();
         self.release.job = Some(spawn_traced(move || {
             let queue = queues.open()?;
             release_update::check(
@@ -123,11 +123,11 @@ impl Supervisor<'_> {
     }
 }
 
-impl Supervisor<'_> {
+impl HostOpsState {
     /// One look at what the release update has to do; what fails is logged
     /// and looked at again on the next pass.
-    pub(super) fn release_update_pass(&mut self, options: &LoopSettings) {
-        if let Err(error) = self.release_update(options) {
+    pub(super) fn release_update_pass(&mut self, env: &mut PassEnv<'_>, options: &LoopSettings) {
+        if let Err(error) = self.release_update(env, options) {
             warn!(error = %format_args!("{error:#}"), "release update: {error:#}");
         }
     }
@@ -136,7 +136,7 @@ impl Supervisor<'_> {
     /// host does not turn `release` off: apply the answers, report a job
     /// that died, then start a job or ask as [`release_update::next_action`]
     /// says. One job of the update runs at a time, whichever started it.
-    fn release_update(&mut self, options: &LoopSettings) -> Result<()> {
+    fn release_update(&mut self, env: &mut PassEnv<'_>, options: &LoopSettings) -> Result<()> {
         if let Some(job) = self.release.install.as_mut()
             && let Some(exit) = job.try_wait()?
         {
@@ -163,16 +163,16 @@ impl Supervisor<'_> {
         if config.release == ReleaseMode::Off {
             return Ok(());
         }
-        self.apply_release_answers(&port.current)?;
+        self.apply_release_answers(env, &port.current)?;
         if self.release.install.is_some() {
             return Ok(());
         }
-        let updates = self.queue.update_events(UPDATE_HISTORY)?;
+        let updates = env.queue.update_events(UPDATE_HISTORY)?;
         if let Some(step) = latest_job_step(&updates) {
             if let Some(pid) = job_pid(step) {
-                self.processes.reap(pid);
+                env.processes.reap(pid);
             }
-            if in_progress(step, &*self.processes) {
+            if in_progress(step, &**env.processes) {
                 return Ok(());
             }
         }
@@ -182,15 +182,15 @@ impl Supervisor<'_> {
             && JOB_STEPS.contains(&step.kind.as_str())
         {
             if let Some(pid) = job_pid(step) {
-                self.processes.reap(pid);
+                env.processes.reap(pid);
             }
-            if !in_progress(step, &*self.processes)
+            if !in_progress(step, &**env.processes)
                 && let Some(version) = step_release(step)
             {
-                return self.release_job_interrupted(step, version);
+                return self.release_job_interrupted(env, step, version);
             }
         }
-        let checked = self.queue.latest_queue_event(&[RELEASE_CHECKED])?;
+        let checked = env.queue.latest_queue_event(&[RELEASE_CHECKED])?;
         let read = |key: &str| {
             checked
                 .as_ref()
@@ -212,10 +212,10 @@ impl Supervisor<'_> {
                 dropped["plugin_only"]
             );
             let mut payload = dropped;
-            payload["supervisor"] = json!(self.token);
-            record(&*self.queue, EventKind::UpdateDropped, None, payload)?;
+            payload["supervisor"] = json!(env.token);
+            record(&*env.queue, EventKind::UpdateDropped, None, payload)?;
         }
-        let open: Vec<String> = self
+        let open: Vec<String> = env
             .queue
             .asks(AskQuery::default())?
             .into_iter()
@@ -241,14 +241,14 @@ impl Supervisor<'_> {
         }
         match action {
             ReleaseAction::Start(version) => {
-                self.start_release_job(&version, &port.current, options, false)
+                self.start_release_job(env, &version, &port.current, options, false)
             }
             ReleaseAction::StartPlugin(version) => {
-                self.start_release_job(&version, &port.current, options, true)
+                self.start_release_job(env, &version, &port.current, options, true)
             }
-            ReleaseAction::Ask(version) => self.open_release_ask(&version, &port.current),
+            ReleaseAction::Ask(version) => self.open_release_ask(env, &version, &port.current),
             ReleaseAction::AskPlugin(version) => {
-                self.open_plugin_ask(&version, plugin.as_deref().unwrap_or("older"))
+                self.open_plugin_ask(env, &version, plugin.as_deref().unwrap_or("older"))
             }
             ReleaseAction::Nothing => Ok(()),
         }
@@ -263,8 +263,8 @@ impl Supervisor<'_> {
     /// `plugin_only` of its `ask_opened`, or of the `update_failed` that
     /// opened it), whatever build applies it; for an ask opened before that
     /// was recorded, whether its release is the build `current`.
-    fn apply_release_answers(&mut self, current: &str) -> Result<()> {
-        for ask in self.queue.update_answers(&AskKind::ApproveRelease)? {
+    fn apply_release_answers(&mut self, env: &mut PassEnv<'_>, current: &str) -> Result<()> {
+        for ask in env.queue.update_answers(&AskKind::ApproveRelease)? {
             let answer = ask.answer.as_deref().map(str::trim).unwrap_or_default();
             let Some(version) = ask.subject.clone() else {
                 continue;
@@ -272,9 +272,10 @@ impl Supervisor<'_> {
             if !APPROVE_RELEASE_OPTIONS.contains(&answer) {
                 continue;
             }
-            let recorded = self.queue.ask_opened_payload(ask.id)?["plugin_only"].as_bool();
+            let recorded = env.queue.ask_opened_payload(ask.id)?["plugin_only"].as_bool();
             let plugin_only = release_update::answer_plugin_only(recorded, &version, current);
             self.record_release_answer(
+                env,
                 EventKind::UpdateAnswered,
                 ask.id,
                 answer,
@@ -282,8 +283,8 @@ impl Supervisor<'_> {
                 plugin_only,
             )?;
         }
-        let updates = self.queue.update_events(UPDATE_HISTORY)?;
-        for ask in self.queue.update_answers(&AskKind::UpdateFailed)? {
+        let updates = env.queue.update_events(UPDATE_HISTORY)?;
+        for ask in env.queue.update_answers(&AskKind::UpdateFailed)? {
             let Some(step) = failed_step(&updates, ask.id) else {
                 continue;
             };
@@ -296,17 +297,18 @@ impl Supervisor<'_> {
                 "skip" => EventKind::UpdateAnswered,
                 _ => continue,
             };
-            let recorded = self.queue.ask_opened_payload(ask.id)?["plugin_only"]
+            let recorded = env.queue.ask_opened_payload(ask.id)?["plugin_only"]
                 .as_bool()
                 .or_else(|| failure_plugin_only(step));
             let plugin_only = release_update::answer_plugin_only(recorded, version, current);
-            self.record_release_answer(kind, ask.id, answer, version, plugin_only)?;
+            self.record_release_answer(env, kind, ask.id, answer, version, plugin_only)?;
         }
         Ok(())
     }
 
     fn record_release_answer(
         &mut self,
+        env: &mut PassEnv<'_>,
         kind: EventKind,
         ask: crate::domain::AskId,
         answer: &str,
@@ -319,17 +321,22 @@ impl Supervisor<'_> {
             "source": RELEASE_SOURCE,
             "release": version,
             "plugin_only": plugin_only,
-            "supervisor": self.token,
+            "supervisor": env.token,
         });
-        record(&*self.queue, kind, None, payload)?;
-        self.queue.close_ask(ask)?;
+        record(&*env.queue, kind, None, payload)?;
+        env.queue.close_ask(ask)?;
         info!(ask_id = %ask, "release update: ask {ask} answered {answer} for release {version}");
         Ok(())
     }
 
     /// Open the `approve_release` ask about `version`, closing the one of an
     /// older release still open.
-    fn open_release_ask(&mut self, version: &str, current: &str) -> Result<()> {
+    fn open_release_ask(
+        &mut self,
+        env: &mut PassEnv<'_>,
+        version: &str,
+        current: &str,
+    ) -> Result<()> {
         let question = format!(
             "dagq {version} is released on crates.io (https://crates.io/crates/dagq/{version}); \
 this queue's supervisor runs {current}. Answer `install` to have the supervisor install it with \
@@ -339,9 +346,9 @@ the supervisor is handed over without stopping the runs, and the binary it repla
 <name>.previous. A release that brings a breaking migration is not installed: it asks again \
 (`approve_update`), since it needs the supervisor drained. Answer `skip` to leave {version}; the \
 next release asks again.",
-            self.layout.runner.display()
+            env.layout.runner.display()
         );
-        let ask = self.queue.open_update_ask(
+        let ask = env.queue.open_update_ask(
             AskKind::ApproveRelease,
             &question,
             APPROVE_RELEASE_OPTIONS,
@@ -356,7 +363,12 @@ next release asks again.",
     /// Open the `approve_release` ask about bringing the installed plugin,
     /// at `plugin`, to `version`, the release the binary is already
     /// (ADR-t618-2 decision 4).
-    fn open_plugin_ask(&mut self, version: &str, plugin: &str) -> Result<()> {
+    fn open_plugin_ask(
+        &mut self,
+        env: &mut PassEnv<'_>,
+        version: &str,
+        plugin: &str,
+    ) -> Result<()> {
         let question = format!(
             "The {name} plugin installed in Claude Code is {plugin}, older than dagq {version} that \
 this queue's supervisor runs. Answer `install` to have the supervisor bring only the plugin to the \
@@ -367,7 +379,7 @@ sessions open now keep the plugin they started with, so reopen them afterwards t
             lifecycle::PLUGIN_UPDATE_ARGUMENTS[1].join(" "),
             name = lifecycle::DAGQ_PLUGIN,
         );
-        let ask = self.queue.open_update_ask(
+        let ask = env.queue.open_update_ask(
             AskKind::ApproveRelease,
             &question,
             APPROVE_RELEASE_OPTIONS,
@@ -382,7 +394,12 @@ sessions open now keep the plugin they started with, so reopen them afterwards t
     /// A job of a release that died before it recorded how it ended:
     /// record `update_failed` for it and ask the inbox, so it is neither
     /// lost nor tried again on its own.
-    fn release_job_interrupted(&mut self, step: &RunEvent, version: &str) -> Result<()> {
+    fn release_job_interrupted(
+        &mut self,
+        env: &mut PassEnv<'_>,
+        step: &RunEvent,
+        version: &str,
+    ) -> Result<()> {
         let plugin_only = step.payload["plugin_only"] == true;
         let question = if plugin_only {
             format!(
@@ -405,7 +422,7 @@ leave it (the next release asks again).",
                 step.kind
             )
         };
-        let ask = self.queue.open_update_ask(
+        let ask = env.queue.open_update_ask(
             AskKind::UpdateFailed,
             &question,
             UPDATE_FAILED_OPTIONS,
@@ -414,7 +431,7 @@ leave it (the next release asks again).",
             json!({"plugin_only": plugin_only}),
         )?;
         record(
-            &*self.queue,
+            &*env.queue,
             EventKind::UpdateFailed,
             None,
             json!({
@@ -423,7 +440,7 @@ leave it (the next release asks again).",
                 "plugin_only": plugin_only,
                 "after": step.kind,
                 "ask_id": ask.id,
-                "supervisor": self.token,
+                "supervisor": env.token,
                 "source": RELEASE_SOURCE,
                 "release": version,
             }),
@@ -440,18 +457,19 @@ leave it (the next release asks again).",
     /// `logs/`, and record `update_started`.
     fn start_release_job(
         &mut self,
+        env: &mut PassEnv<'_>,
         version: &str,
         current: &str,
         options: &LoopSettings,
         plugin_only: bool,
     ) -> Result<()> {
-        let layout = self.layout;
+        let layout = env.layout;
         let queue_dir = layout.db.parent().unwrap_or(Path::new("."));
         let logs = queue_dir.join("logs");
-        self.files
+        env.files
             .create_dir_all(&logs)
             .with_context(|| format!("create {}", logs.display()))?;
-        let name = format!("release-{}-{version}", self.generators.clock.now());
+        let name = format!("release-{}-{version}", env.generators.clock.now());
         let (log, build_log, report) = (
             logs.join(format!("{name}.log")),
             logs.join(format!("{name}.build.log")),
@@ -462,7 +480,7 @@ leave it (the next release asks again).",
             .arg("--db")
             .arg(&layout.db)
             .arg("release-update")
-            .args(["--release", version, "--token", self.token.as_str()])
+            .args(["--release", version, "--token", env.token.as_str()])
             .envs(layout.supervisor_actor().env())
             // It opens the queue it names, not a client-mode `dagq`.
             .env_remove(crate::domain::queue_service::SOCKET_ENV)
@@ -488,7 +506,7 @@ leave it (the next release asks again).",
         if plugin_only {
             command.arg("--plugin-only");
         }
-        let job = self.spawner.spawn(
+        let job = env.spawner.spawn(
             &command,
             Streams::Files {
                 stdout: &report,
@@ -499,7 +517,7 @@ leave it (the next release asks again).",
             "pid": job.id(),
             "source": RELEASE_SOURCE,
             "release": version,
-            "supervisor": self.token,
+            "supervisor": env.token,
             "version": current,
             "log": log,
             "build_log": build_log,
@@ -508,7 +526,7 @@ leave it (the next release asks again).",
         if plugin_only {
             started["plugin_only"] = json!(true);
         }
-        record(&*self.queue, EventKind::UpdateStarted, None, started)?;
+        record(&*env.queue, EventKind::UpdateStarted, None, started)?;
         info!(
             "release update: job {} installs release {version}{} (log {})",
             job.id(),

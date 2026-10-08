@@ -20,7 +20,10 @@ use crate::application::prompt::{
 };
 use crate::application::prompt_fit::{Fit, Keep, NOT_READABLE};
 use crate::domain::{
-    actor_model::{ActorLaunch, JobRoute, job_route, job_wait_text},
+    actor_model::{
+        ActorLaunch, JobRoute, JobStartRoute, ModelRole, UnnamedWithoutClaude, job_route,
+        job_start_route, job_wait_text,
+    },
     claim_hold::QueueHold,
     provider_switch::{
         self, MAX_PROVIDER_SWITCHES, ProviderHold, SwitchPhase, SwitchReason, WallMove,
@@ -798,6 +801,43 @@ pub(super) enum WallGate {
     /// The call went to the other provider at this time, the watch's last
     /// input now.
     Moved(SystemTime),
+}
+
+impl Supervisor<'_> {
+    /// Where the due job of `role` (the throughput review, the observer)
+    /// goes, or `None` while it waits ([`job_start_route`] with
+    /// `[provider_fallback] jobs`): a role that names no provider does not
+    /// start under `--no-claude` (ADR-t1204-1 decision 2).
+    pub(super) fn job_start_route(&self, role: ModelRole) -> Option<JobStartRoute> {
+        self.start_route(role, UnnamedWithoutClaude::Wait)
+    }
+
+    /// Where the due job of `role` goes, from `[roles.<role>]` as it reads
+    /// now, the queue's hold ask, `[provider_fallback] jobs` and why each
+    /// provider cannot be used ([`job_start_route`]), or `None` while it
+    /// waits, saying why in the debug log.
+    pub(super) fn start_route(
+        &self,
+        role: ModelRole,
+        unnamed: UnnamedWithoutClaude,
+    ) -> Option<JobStartRoute> {
+        let models = self.role_models(role);
+        job_start_route(
+            models.launch(role),
+            models.switchable(role),
+            self.no_claude,
+            self.queue_hold.is_some(),
+            self.fallback.jobs,
+            unnamed,
+            |provider| self.job_unusable(provider),
+        )
+        .inspect_err(|why| {
+            if let Some(why) = why {
+                tracing::debug!("the {} job waits: {why}", role.as_str());
+            }
+        })
+        .ok()
+    }
 }
 
 impl SessionWatch {

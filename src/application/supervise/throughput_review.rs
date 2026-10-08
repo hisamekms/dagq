@@ -14,7 +14,7 @@
 //! progress holds a claim or a landing.
 
 use super::*;
-use crate::domain::actor_model::{JobStartRoute, ModelRole, UnnamedWithoutClaude, job_start_route};
+use crate::domain::actor_model::JobStartRoute;
 use crate::domain::event_kind::{THROUGHPUT_REVIEW_FINISHED, THROUGHPUT_REVIEW_STARTED};
 use crate::domain::queue_hold::HoldJob;
 use crate::domain::throughput_review::{
@@ -54,24 +54,38 @@ pub(super) struct ThroughputReviewWatch {
     reaped: Vec<u32>,
 }
 
+/// A review due: its mode and period, and the unix second and the host's
+/// offset (seconds east of UTC) it is judged at.
+pub(super) struct DueReview {
+    mode: ReviewMode,
+    period: String,
+    now: i64,
+    offset: i64,
+}
+
 impl ThroughputReviewWatch {
     pub(super) const fn running(&self) -> bool {
         self.job.is_some()
     }
 }
 
-impl Supervisor<'_> {
+impl ObservationState {
     /// The review due at `now`, `offset` seconds east of UTC: the hour
     /// first (its period passes soonest), then the day, then the week, whose
     /// latest finished period has no finish recorded and no start of the
     /// last [`crate::domain::throughput_review::RUNNING_MS`] (one a handoff
     /// left running, or another supervisor's).
-    fn due_throughput_review(&self, offset: i64, now: i64) -> Result<Option<(ReviewMode, String)>> {
+    fn due_throughput_review(
+        &self,
+        env: &PassEnv<'_>,
+        offset: i64,
+        now: i64,
+    ) -> Result<Option<(ReviewMode, String)>> {
         let offset_ms = offset * 1000;
-        let finished = self
+        let finished = env
             .queue
             .latest_events_of(THROUGHPUT_REVIEW_FINISHED, HISTORY_EVENTS)?;
-        let started = self
+        let started = env
             .queue
             .latest_events_of(THROUGHPUT_REVIEW_STARTED, HISTORY_EVENTS)?;
         for mode in [ReviewMode::Hourly, ReviewMode::Daily, ReviewMode::Weekly] {
@@ -91,50 +105,16 @@ impl Supervisor<'_> {
         Ok(None)
     }
 
-    /// Where the due job of `role` (the throughput review, the observer)
-    /// goes, or `None` while it waits ([`job_start_route`] with
-    /// `[provider_fallback] jobs`): a role that names no provider does not
-    /// start under `--no-claude` (ADR-t1204-1 decision 2).
-    pub(super) fn job_start_route(&self, role: ModelRole) -> Option<JobStartRoute> {
-        self.start_route(role, UnnamedWithoutClaude::Wait)
-    }
-
-    /// Where the due job of `role` goes, from `[roles.<role>]` as it reads
-    /// now, the queue's hold ask, `[provider_fallback] jobs` and why each
-    /// provider cannot be used ([`job_start_route`]), or `None` while it
-    /// waits, saying why in the debug log.
-    pub(super) fn start_route(
-        &self,
-        role: ModelRole,
-        unnamed: UnnamedWithoutClaude,
-    ) -> Option<JobStartRoute> {
-        let models = self.role_models(role);
-        job_start_route(
-            models.launch(role),
-            models.switchable(role),
-            self.no_claude,
-            self.queue_hold.is_some(),
-            self.fallback.jobs,
-            unnamed,
-            |provider| self.job_unusable(provider),
-        )
-        .inspect_err(|why| {
-            if let Some(why) = why {
-                tracing::debug!("the {} job waits: {why}", role.as_str());
-            }
-        })
-        .ok()
-    }
-
     /// Reap the review once it exited, and those an exec handed over: the
     /// finishes among them that say their provider could not be used, for
     /// 実行と着地 to hold that provider before the next start
     /// ([`Self::start_throughput_review`]).
     pub(super) fn reap_throughput_reviews(
         &mut self,
+        env: &PassEnv<'_>,
         options: &LoopSettings,
     ) -> Vec<observer::UnusableTimerJob> {
-        let mut unusable = self.reap_handed_over_reviews(options);
+        let mut unusable = self.reap_handed_over_reviews(env, options);
         if let Some(job) = self.throughput_review.job.as_mut() {
             let (mode, period) = (job.mode, &job.period);
             match job.child.try_wait() {
@@ -152,31 +132,57 @@ impl Supervisor<'_> {
             if let Some(job) = self.throughput_review.job.take()
                 && job.retries_unusable
             {
-                unusable.extend(self.review_unusable(&job));
+                unusable.extend(Self::review_unusable(env, &job));
             }
         }
         unusable
     }
 
-    /// When `start` and none runs, start the review due. A failure to
-    /// start is logged and not retried for that period in this process.
-    pub(super) fn start_throughput_review(&mut self, options: &LoopSettings, start: bool) {
+    /// When `start` and none runs, the review due now: its mode and
+    /// period, the unix second and the host's offset it is judged at. A
+    /// failure to read the schedule is logged.
+    pub(super) fn throughput_review_due(
+        &self,
+        env: &PassEnv<'_>,
+        options: &LoopSettings,
+        start: bool,
+    ) -> Option<DueReview> {
         if !start || !options.throughput_review || self.throughput_review.running() {
-            return;
+            return None;
         }
-        let now = self.generators.clock.now();
+        let now = env.generators.clock.now();
         let offset = (options.utc_offset)(now);
-        let (mode, period) = match self.due_throughput_review(offset, now) {
-            Ok(Some(due)) => due,
-            Ok(None) => return,
+        match self.due_throughput_review(env, offset, now) {
+            Ok(Some((mode, period))) => Some(DueReview {
+                mode,
+                period,
+                now,
+                offset,
+            }),
+            Ok(None) => None,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "throughput review schedule could not be read: {error:#}");
-                return;
+                None
             }
-        };
-        let Some(route) = self.job_start_route(ModelRole::ThroughputReview) else {
-            return;
-        };
+        }
+    }
+
+    /// Start the review `due` on `route` (`fallback_jobs` is
+    /// `[provider_fallback] jobs`). A failure to start is logged and not
+    /// retried for that period in this process.
+    pub(super) fn start_throughput_review(
+        &mut self,
+        env: &PassEnv<'_>,
+        due: DueReview,
+        route: JobStartRoute,
+        fallback_jobs: bool,
+    ) {
+        let DueReview {
+            mode,
+            period,
+            now,
+            offset,
+        } = due;
         let (launch, switchable, unavailable) = match route {
             JobStartRoute::Start(launch, switchable) => (launch, switchable, None),
             JobStartRoute::Unavailable(launch, why) => (launch, false, Some(why)),
@@ -185,10 +191,10 @@ impl Supervisor<'_> {
             .launched
             .retain(|(was, _)| *was != mode);
         self.throughput_review.launched.push((mode, period.clone()));
-        let mut command = CommandSpec::new(&self.layout.runner);
+        let mut command = CommandSpec::new(&env.layout.runner);
         command
             .arg("--db")
-            .arg(&self.layout.db)
+            .arg(&env.layout.db)
             .arg("throughput-review")
             .arg("--mode")
             .arg(mode.as_str())
@@ -197,31 +203,31 @@ impl Supervisor<'_> {
             .arg("--utc-offset")
             .arg(offset.to_string())
             .arg("--claude")
-            .arg(&self.layout.claude)
+            .arg(&env.layout.claude)
             .arg("--codex")
-            .arg(&self.layout.codex)
+            .arg(&env.layout.codex)
             .arg("--launch")
             .arg(launch.to_value().to_string())
-            .current_dir(&self.layout.repo_root);
-        if let Some(home) = &self.layout.codex_home {
+            .current_dir(&env.layout.repo_root);
+        if let Some(home) = &env.layout.codex_home {
             command.arg("--codex-home").arg(home);
         }
         if switchable {
             command.arg("--switchable");
-            if !self.fallback.jobs {
+            if !fallback_jobs {
                 command.arg("--no-provider-fallback");
             }
         }
         if let Some(why) = &unavailable {
             command.arg("--unavailable").arg(why);
         }
-        for name in &self.layout.observer_env_remove {
+        for name in &env.layout.observer_env_remove {
             command.env_remove(name);
         }
         // The command is the supervisor's; its agent is the
         // throughput-review-job (ADR-t996-1 decision 4).
-        command.envs(self.layout.supervisor_actor().env());
-        match self.spawner.spawn(&command, Streams::Null) {
+        command.envs(env.layout.supervisor_actor().env());
+        match env.spawner.spawn(&command, Streams::Null) {
             Ok(child) => {
                 info!(
                     "throughput review ({} {period}) started on {}: pid {}",
@@ -239,7 +245,7 @@ impl Supervisor<'_> {
                     retries_unusable: observer::retries_unusable(
                         launch.provider,
                         switchable,
-                        self.fallback.jobs,
+                        fallback_jobs,
                         unavailable.is_some(),
                     ),
                 });
@@ -259,18 +265,19 @@ impl Supervisor<'_> {
     /// a review finished or was killed at its timeout.
     fn reap_handed_over_reviews(
         &mut self,
+        env: &PassEnv<'_>,
         options: &LoopSettings,
     ) -> Vec<observer::UnusableTimerJob> {
         let mut unusable = Vec::new();
         if options.handoff_token.is_none() {
             return unusable;
         }
-        let now_ms = self.generators.clock.now() * 1000;
+        let now_ms = env.generators.clock.now() * 1000;
         let first = *self.throughput_review.first_pass_ms.get_or_insert(now_ms);
         if now_ms - first > RUNNING_MS {
             return unusable;
         }
-        let finished = match self
+        let finished = match env
             .queue
             .latest_events_of(THROUGHPUT_REVIEW_FINISHED, HANDED_OVER_EVENTS)
         {
@@ -282,9 +289,9 @@ impl Supervisor<'_> {
         };
         // A review may finish just before the exec, with nobody left to
         // wait on it.
-        for pid in children_finished(&finished, self.layout.pid, first - 60_000) {
+        for pid in children_finished(&finished, env.layout.pid, first - 60_000) {
             if !self.throughput_review.reaped.contains(&pid) {
-                self.processes.reap(pid);
+                env.processes.reap(pid);
                 self.throughput_review.reaped.push(pid);
                 info!("throughput review handed over by the exec reaped: pid {pid}");
                 // One that found its provider unusable has it held, as for
@@ -296,7 +303,8 @@ impl Supervisor<'_> {
                     .find(|event| event.payload["pid"].as_u64() == Some(u64::from(pid)))
                     && let Some(read) = UnusableFinish::of(finish)
                 {
-                    unusable.push(self.unusable_timer_job(
+                    unusable.push(observer::unusable_timer_job(
+                        &**env.files,
                         read,
                         HoldJob::ThroughputReview,
                         review_entry(finish),
@@ -314,7 +322,7 @@ impl Supervisor<'_> {
     /// `RUNNING_MS`. A handoff does not stop it: the review goes on under
     /// the exec'd process, records its own finish, and its start keeps the
     /// next process from starting it again.
-    pub(super) fn stop_throughput_review(&mut self, why: &str) {
+    pub(super) fn stop_throughput_review(&mut self, env: &PassEnv<'_>, why: &str) {
         let Some(ReviewJob {
             mode,
             period,
@@ -324,11 +332,11 @@ impl Supervisor<'_> {
         else {
             return;
         };
-        let descendants = self.processes.descendants(child.id());
+        let descendants = env.processes.descendants(child.id());
         let _ = child.kill();
         let _ = child.wait();
         for pid in &descendants {
-            let _ = self.processes.kill(*pid);
+            let _ = env.processes.kill(*pid);
         }
         info!(
             "throughput review ({} {period}) stopped {why}: pid {} and {} descendant(s) killed",
@@ -344,8 +352,8 @@ impl Supervisor<'_> {
     /// as a worker's or another job's failure does; once it is held the
     /// period is due again ([`Self::review_due_again`]; ADR-t1063-1
     /// decisions 4 and 5, ADR-t1857-1).
-    fn review_unusable(&self, job: &ReviewJob) -> Option<observer::UnusableTimerJob> {
-        let finished = match self
+    fn review_unusable(env: &PassEnv<'_>, job: &ReviewJob) -> Option<observer::UnusableTimerJob> {
+        let finished = match env
             .queue
             .latest_events_of(THROUGHPUT_REVIEW_FINISHED, HANDED_OVER_EVENTS)
         {
@@ -361,7 +369,8 @@ impl Supervisor<'_> {
                 && event.payload["period"] == job.period.as_str()
                 && event.payload["pid"].as_u64() == Some(pid)
         })?;
-        Some(self.unusable_timer_job(
+        Some(observer::unusable_timer_job(
+            &**env.files,
             UnusableFinish::of(finish)?,
             HoldJob::ThroughputReview,
             review_entry(finish),

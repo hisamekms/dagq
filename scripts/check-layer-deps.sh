@@ -1,9 +1,15 @@
 #!/bin/sh
-# Check the forbidden dependencies between the layers of the runtime. The
-# rules (their IDs L1, L2, L3, L4 and L6), what counts in short and the allow
-# list's place are in docs/design/architecture.md, sections "レイヤーの規則"
+# Check the forbidden dependencies between the layers of the runtime, and
+# between the split contexts of the supervisor. The rules (their IDs L1, L2,
+# L3, L4, L6 and C3), what counts in short and the allow list's place are in
+# docs/design/architecture.md, sections "レイヤーの規則", "コンテキストの規則"
 # and "検査の範囲"; the allow list's format is in its own header
 # (.config/layer-deps-allow.txt); the details of what counts are here.
+#
+# C3 counts in the files of $c3_files under src/application/supervise/ (the
+# submodules that own 観測と分析's and host運用's state): a reference to the
+# loop's struct `Supervisor` or its `Slot` and `Phase`, through which the
+# state of 実行と着地 is reached, is forbidden there, inside tests too.
 #
 # What counts is the path of a reference (`crate::application::timestamp`,
 # `std::time::SystemTime::now`), with a grouped `use crate::{a, b}` expanded
@@ -39,7 +45,8 @@
 # itself on small fixtures in a temporary directory under ${TMPDIR:-target/}
 # (no violation, one not in the list, a stale item, an item without a task,
 # references only in comments and strings, nested block comments, the cfg
-# forms above and a test range inside an inline module) and removes them.
+# forms above, a test range inside an inline module and a C3 reference)
+# and removes them.
 #
 # Exit 0 when every occurrence is allowed and no item is stale, 1 when an
 # occurrence is not allowed, an item is stale or the allow list is malformed
@@ -47,6 +54,8 @@
 set -eu
 
 me=check-layer-deps
+# The submodules of src/application/supervise/ that rule C3 is checked on.
+c3_files="contexts ci_watch forecast observer push report throughput_review cleanup disk host_metrics queue_service release sccache update"
 script=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -56,7 +65,7 @@ scan() {
   files=$(find src/domain src/application src/infrastructure -type f -name '*.rs' 2>/dev/null | LC_ALL=C sort)
   [ -n "$files" ] || return 0
   # shellcheck disable=SC2086
-  LC_ALL=C awk '
+  LC_ALL=C awk -v c3_files="$c3_files" '
 BEGIN {
   # The patterns per layer, "rule:pattern"; a pattern starting with ^
   # matches at the start of a path, otherwise anywhere in it. The rules that
@@ -73,6 +82,8 @@ BEGIN {
   }
   prod["domain"] = "L2:^rusqlite L2:^std::fs L2:^std::process L2:^std::net L2:SystemTime::now L2:Instant::now L2:Uuid::new_v4 L2:^anyhow"
   prod["application"] = "L4:^rusqlite L4:^std::fs L4:process::Command L4:SystemTime::now L4:Uuid::new_v4"
+  n = split(c3_files, o, " ")
+  for (i = 1; i <= n; i++) c3["src/application/supervise/" o[i] ".rs"] = 1
 }
 function load(lst, test,   m, i, it) {
   m = split(lst, it, " ")
@@ -91,6 +102,7 @@ function reset_file() {
   prev = ""; gtop = 0; bk_n = 0; pending_mod = 0; sq = 0; item_sq = 0
   layer = FILENAME; sub(/^.*src\//, "", layer); sub(/\/.*/, "", layer)
   np = 0; load(ref[layer], 1); load(prod[layer], 0)
+  if (FILENAME in c3) load("C3:^Supervisor C3:^super::Supervisor C3:^crate::application::supervise::Supervisor C3:^Slot C3:^super::Slot C3:^crate::application::supervise::Slot C3:^Phase C3:^super::Phase C3:^crate::application::supervise::Phase", 1)
 }
 function check(p, ln, t, dot,   i, hit) {
   if (p == "" || np == 0) return
@@ -298,8 +310,8 @@ check_tree() {
         if (m < 5) { print me ": " show ":" i ": want rule | path | reference | task | reason" > "/dev/stderr"; bad = 1; continue }
         rule = trim(f[1]); path = trim(f[2]); r = trim(f[3]); task = trim(f[4])
         reason = f[5]; for (j = 6; j <= m; j++) reason = reason "|" f[j]; reason = trim(reason)
-        if (rule !~ /^L[12346]$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
-          print me ": " show ":" i ": want a rule (L1, L2, L3, L4, L6), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
+        if (rule !~ /^(L[12346]|C3)$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
+          print me ": " show ":" i ": want a rule (L1, L2, L3, L4, L6, C3), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
         }
         k = rule "\t" path "\t" r
         if (k in item) { print me ": " show ":" i ": " rule " " path " " r " is listed twice" > "/dev/stderr"; bad = 1; continue }
@@ -518,6 +530,21 @@ EOF
 fn production() {}
 EOF
   expect 1 "attribute_ref" "$tmp/attribute_ref" "L1 forbids crate::application"
+
+  base context
+  mkdir -p "$tmp/context/src/application/supervise"
+  cat >"$tmp/context/src/application/supervise/report.rs" <<'EOF'
+//! A pass of a split context; Supervisor is named in a comment only.
+pub(super) fn pass(state: &mut ReportWatch, env: &mut PassEnv<'_>) {}
+EOF
+  cat >"$tmp/context/src/application/supervise/landing.rs" <<'EOF'
+impl Supervisor<'_> { fn landing(&mut self) { self.slots.clear(); } }
+EOF
+  expect 0 "C3: a split context's file names no state of the loop" "$tmp/context"
+  cat >>"$tmp/context/src/application/supervise/report.rs" <<'EOF'
+impl Supervisor<'_> { fn slots(&self) -> usize { self.slots.len() } }
+EOF
+  expect 1 "C3: a split context's file reaches the loop's state" "$tmp/context" "src/application/supervise/report.rs:3: C3 forbids Supervisor"
 
   base infra
   cat >>"$tmp/infra/src/infrastructure/store.rs" <<'EOF'

@@ -121,7 +121,12 @@ impl Supervisor<'_> {
         let absent_since = absence(watcher);
         let waited = waiting(&opened, absent_since, now);
         // A `[push]` that cannot be read pushes nothing; the event says so.
-        let (push, push_error) = match self.reports.as_ref().map(|port| (port.push_config)()) {
+        let (push, push_error) = match self
+            .observation
+            .reports
+            .as_ref()
+            .map(|port| (port.push_config)())
+        {
             None | Some(Ok(None)) => (None, None),
             Some(Ok(Some(config))) => (Some(config), None),
             Some(Err(error)) => (None, Some(format!("{error:#}"))),
@@ -140,7 +145,7 @@ impl Supervisor<'_> {
         if !self.queue.claim_inbox_nudge(payload)? {
             return Ok(());
         }
-        match (push, self.reports.as_ref()) {
+        match (push, self.observation.reports.as_ref()) {
             (Some(config), Some(port)) => {
                 let message = inbox_watch_message(
                     &port.push_target.name,
@@ -149,7 +154,7 @@ impl Supervisor<'_> {
                     opened.len(),
                     waited,
                 );
-                self.queue_pushes(config, vec![message]);
+                self.observation.queue_pushes(config, vec![message]);
                 info!(
                     "no watch runs in the inbox while {waited} ask(s) wait: recorded, and sent through [push]"
                 );

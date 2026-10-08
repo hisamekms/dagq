@@ -1,8 +1,8 @@
 //! The cleanup of ended runs' worktrees off the supervisor's loop (task
 //! 405): measuring and removing gigabytes of build outputs took the loop
 //! away from the live runs, so a job thread does it. The loop picks the
-//! candidates ([`Supervisor::request_cleanup`]), and joins the job on a
-//! later pass ([`Supervisor::poll_cleanup`]) to record what it removed.
+//! candidates ([`HostOpsState::request_cleanup`]), and joins the job on a
+//! later pass ([`HostOpsState::poll_cleanup`]) to record what it removed.
 //!
 //! One job runs at a time; what is asked for meanwhile waits for the next
 //! one, so no worktree is cleaned twice at once. The loop does not wait
@@ -114,7 +114,10 @@ pub(super) struct CleanupWatch {
     ending: bool,
     /// The loop left a run reserved by the job for a later pass: it waits
     /// for the job, as for a run.
-    pub(super) deferred: bool,
+    deferred: bool,
+    /// The paths the job could not clean: retried on every cleanup, their
+    /// `cleanup_failed` recorded once per process.
+    failed: Vec<String>,
 }
 
 struct Job {
@@ -143,6 +146,16 @@ impl CleanupWatch {
     /// the job has yet to pass, which the loop leaves for a later pass.
     pub(super) fn cleaning(&self) -> Arc<Mutex<Cleaning>> {
         self.cleaning.clone()
+    }
+    /// The loop left a run the job reserved for a later pass: it waits for
+    /// the job, as for a run, until the job is joined.
+    pub(super) const fn defer(&mut self) {
+        self.deferred = true;
+    }
+    /// A run was left for the job ([`Self::defer`]) and the job is not
+    /// joined yet.
+    pub(super) const fn deferred(&self) -> bool {
+        self.deferred
     }
 }
 
@@ -386,14 +399,17 @@ struct JobPorts {
     scratchpad_roots: Vec<PathBuf>,
 }
 
-impl Supervisor<'_> {
+impl HostOpsState {
     /// Ask for the worktrees of ended runs to be cleaned, every such run's
-    /// or only `task`'s (see [`Self::clean_ended_worktrees`] for what is
+    /// or only `task`'s (see the sweep's `clean_ended_worktrees` for what is
     /// removed), for disk space when `disk` is given. It starts at once
-    /// unless a job runs; then it waits for the next one. Whether it was
-    /// taken: none is once ending (a stop or a handoff).
+    /// unless a job runs; then it waits for the next one. The runs the
+    /// slots hold (`held`) are left out. Whether it was taken: none is once
+    /// ending (a stop or a handoff).
     pub(super) fn request_cleanup(
         &mut self,
+        env: &mut PassEnv<'_>,
+        held: &[RunId],
         task: Option<TaskId>,
         disk: Option<DiskRequest>,
     ) -> bool {
@@ -421,7 +437,7 @@ impl Supervisor<'_> {
         if disk.is_none() || task.is_some() {
             self.cleanup.pending.add(task, None);
         }
-        self.start_cleanup();
+        self.start_cleanup(env, held);
         true
     }
     /// Join a finished job and record what it did, then start what waits;
@@ -429,7 +445,7 @@ impl Supervisor<'_> {
     /// current worktree (all candidates for disk space) and start nothing
     /// more but the rest of a cleanup for room another job took on, which
     /// goes to its last candidate too (task 1426).
-    pub(super) fn poll_cleanup(&mut self, ending: bool) {
+    pub(super) fn poll_cleanup(&mut self, env: &mut PassEnv<'_>, held: &[RunId], ending: bool) {
         if ending {
             self.end_cleanup();
         }
@@ -444,14 +460,14 @@ impl Supervisor<'_> {
         // panicked) is free again.
         lock_cleaning(&self.cleanup.cleaning).reserved.clear();
         self.cleanup.deferred = false;
-        let cleaned = self.record_cleanup(outcomes);
+        let cleaned = self.record_cleanup(env, outcomes);
         if let Some(disk) = job.disk.or(job.counted) {
-            self.cleaned_for_disk(disk, &cleaned);
+            self.cleaned_for_disk(env, disk, &cleaned);
             // The next cleanup for room waits its interval from here, so
             // the pass after it judges the reading after it (task 1627).
             self.disk.cleaned = Some(Instant::now());
         }
-        self.start_cleanup();
+        self.start_cleanup(env, held);
     }
     /// A stop or a handoff: take no more requests, let an ordinary job end
     /// after its current worktree, and drop what waits but the rest of a
@@ -483,34 +499,34 @@ impl Supervisor<'_> {
     /// has not seen the stop yet goes on, and every ended run is asked for
     /// at once, which picks up what the drain dropped. A job that stopped
     /// after its current worktree leaves the rest to that request.
-    pub(super) fn resume_cleanup(&mut self) {
+    pub(super) fn resume_cleanup(&mut self, env: &mut PassEnv<'_>, held: &[RunId]) {
         if !self.cleanup.ending {
             return;
         }
         self.cleanup.ending = false;
         self.cleanup.stop.store(false, Ordering::SeqCst);
-        self.request_cleanup(None, None);
+        self.request_cleanup(env, held, None, None);
     }
     /// Once the loop ended: wait for the job and whatever waits for the
     /// next one, and record what they did. After a stop, only the running
     /// job and the rest of a cleanup for room it took on remain; ordinary
     /// cleanup stops after its current worktree.
-    pub(super) fn finish_cleanup(&mut self) {
+    pub(super) fn finish_cleanup(&mut self, env: &mut PassEnv<'_>, held: &[RunId]) {
         while let Some(job) = &self.cleanup.job {
             while !job.handle.is_finished() {
                 thread::sleep(Duration::from_millis(20));
             }
-            self.poll_cleanup(false);
+            self.poll_cleanup(env, held, false);
         }
     }
     /// Start a job for what waits, unless one runs: the candidates are
     /// picked here, on the loop, less the runs a slot holds.
-    fn start_cleanup(&mut self) {
+    fn start_cleanup(&mut self, env: &mut PassEnv<'_>, held: &[RunId]) {
         if self.cleanup.job.is_some() || self.cleanup.pending.is_empty() {
             return;
         }
         let request = std::mem::take(&mut self.cleanup.pending);
-        let listed = match self.queue.ended_run_worktrees() {
+        let listed = match env.queue.ended_run_worktrees() {
             Ok(listed) => listed,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the worktrees of ended runs could not be listed for their cleanup: {error:#}");
@@ -521,7 +537,7 @@ impl Supervisor<'_> {
         let candidates = pick_candidates(
             listed,
             &request,
-            |run| self.slots.iter().any(|slot| slot.run.id() == run),
+            |run| held.contains(run),
             &mut cleaning.settled,
         );
         if candidates.is_empty() && !request.prune {
@@ -530,12 +546,12 @@ impl Supervisor<'_> {
         cleaning.reserved = candidates.iter().map(|w| w.run_id.clone()).collect();
         drop(cleaning);
         let ports = JobPorts {
-            files: self.files.clone(),
-            processes: self.processes.clone(),
-            repository: self.repository.clone(),
-            queues: self.queues.clone(),
-            runs_dir: self.layout.runs_dir.clone(),
-            repo_root: self.layout.repo_root.clone(),
+            files: env.files.clone(),
+            processes: env.processes.clone(),
+            repository: env.repository.clone(),
+            queues: env.queues.clone(),
+            runs_dir: env.layout.runs_dir.clone(),
+            repo_root: env.layout.repo_root.clone(),
             cleaning: self.cleanup.cleaning.clone(),
             // A cleanup for room goes to its last candidate: it is not
             // stopped with ordinary cleanup.
@@ -555,7 +571,7 @@ impl Supervisor<'_> {
         });
     }
     /// Record the events of what the job did; what it removed.
-    fn record_cleanup(&mut self, outcomes: Vec<Outcome>) -> Cleaned {
+    fn record_cleanup(&mut self, env: &mut PassEnv<'_>, outcomes: Vec<Outcome>) -> Cleaned {
         let mut cleaned = Cleaned::default();
         for outcome in outcomes {
             let recorded = match outcome {
@@ -569,11 +585,8 @@ impl Supervisor<'_> {
                     let (why, payload) = build_outputs_record(cleanup, &paths, bytes);
                     info!(run_id = %run_id, "run {run_id} is {}{why}; removed the build outputs of its worktree ({bytes} bytes)", status.as_str());
                     cleaned.add(&run_id, bytes);
-                    self.queue.record_runtime_event(
-                        &run_id,
-                        EventKind::BuildOutputsRemoved,
-                        payload,
-                    )
+                    env.queue
+                        .record_runtime_event(&run_id, EventKind::BuildOutputsRemoved, payload)
                 }
                 Outcome::Worktree {
                     run_id,
@@ -612,7 +625,7 @@ impl Supervisor<'_> {
                         payload["processes_unlisted"] = json!(unlisted);
                     }
                     cleaned.add(&run_id, bytes);
-                    self.queue
+                    env.queue
                         .record_runtime_event(&run_id, EventKind::WorktreeRemoved, payload)
                 }
                 Outcome::Scratchpads {
@@ -623,7 +636,7 @@ impl Supervisor<'_> {
                 } => {
                     info!(run_id = %run_id, "run {run_id}'s task is {}; removed its Claude Code scratchpad(s) {} ({bytes} bytes)", task_status.as_str(), paths.join(", "));
                     cleaned.add(&run_id, bytes);
-                    self.queue.record_runtime_event(
+                    env.queue.record_runtime_event(
                         &run_id,
                         EventKind::ScratchpadRemoved,
                         json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())}),
@@ -637,7 +650,7 @@ impl Supervisor<'_> {
                 } => {
                     info!(run_id = %run_id, "run {run_id}'s task is {}; removed its temporary files {path} ({bytes} bytes)", task_status.as_str());
                     cleaned.add(&run_id, bytes);
-                    self.queue.record_runtime_event(
+                    env.queue.record_runtime_event(
                         &run_id,
                         EventKind::RunTmpRemoved,
                         json!({"paths": [path], "bytes": bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())}),
@@ -649,14 +662,14 @@ impl Supervisor<'_> {
                     path,
                     error,
                 } => {
-                    if self.sweep_failures.contains(&path) {
+                    if self.cleanup.failed.contains(&path) {
                         warn!(run_id = %run_id, "run {run_id}: {what} {path} still could not be cleaned: {error:#}");
                         continue;
                     }
-                    self.sweep_failures.push(path.clone());
+                    self.cleanup.failed.push(path.clone());
                     let message = format!("{what} {path} could not be cleaned: {error:#}");
                     warn!(run_id = %run_id, "run {run_id}: {message}");
-                    self.queue.record_runtime_event(
+                    env.queue.record_runtime_event(
                         &run_id,
                         EventKind::CleanupFailed,
                         reason_of_error(&error, ReasonCode::Other)
@@ -920,7 +933,7 @@ fn remove_run_tmp(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut
     }
 }
 
-/// Clean one ended run's worktree ([`Supervisor::clean_ended_worktrees`]).
+/// Clean one ended run's worktree (see the sweep's `clean_ended_worktrees`).
 fn clean_worktree(
     ports: &JobPorts,
     candidate: &EndedRunWorktree,

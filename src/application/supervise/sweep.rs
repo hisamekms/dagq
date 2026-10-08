@@ -299,7 +299,7 @@ impl Supervisor<'_> {
     /// `message`, `by: supervisor`) once per worktree and process, is
     /// retried on the next sweep, and the others go on.
     pub(super) fn clean_ended_worktrees(&mut self, task: Option<TaskId>) {
-        self.request_cleanup(task, None);
+        self.request_cleanup(task);
     }
     /// [`Self::clean_ended_worktrees`] for `task` as one of its runs ends.
     pub(super) fn clean_task_worktrees(&mut self, task: TaskId) {

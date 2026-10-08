@@ -1080,7 +1080,10 @@ pub struct WorkspaceTags {
 /// 2), recorded where a run or a planner records its session; any other
 /// session ID (a workspace an older binary opened) names no wrapper. Beside
 /// the start, the stop and the liveness, it carries the limits of one call
-/// and the waits the supervisor gives a wrapper.
+/// and the waits the supervisor gives a wrapper. Implemented by
+/// `infrastructure::adapters::BackgroundSessions` over `BackgroundWrappers`;
+/// [`crate::application::recording::RecordingSessions`] records its failures
+/// and stops (`wrapper_stopped`).
 pub trait SessionWrappers {
     /// Start the session wrapper `command` (a shell command line) in `cwd`
     /// as a process detached from this one, with `env` in its environment
@@ -1150,7 +1153,9 @@ pub trait SessionWrappers {
 /// opens, looks up, marks and closes the workspaces it keeps, and the
 /// inbox's `watch --role inbox` notifies a person. The session wrappers of
 /// the runs and the runtime's planners are [`SessionWrappers`]', which call
-/// no cmux.
+/// no cmux. Implemented by `infrastructure::adapters::Cmux`, which calls
+/// cmux's CLI; [`crate::application::recording::RecordingBackend`] records
+/// its failures.
 pub trait WorkspaceBackend {
     fn preflight(&self) -> Result<()>;
     /// Close the workspace; the worktree and branch are not touched. A

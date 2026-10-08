@@ -46,6 +46,7 @@ check-e2e-quarantine e2e_quarantine_malformed
 check-agents-md-size agents_md_too_big
 check-layer-deps layer_forbidden_reference
 check-layer-deps layer_stale_allow_item
+check-layer-deps context_reaches_loop_state
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-doc-links doc_broken_link
@@ -81,6 +82,10 @@ violate_layer_forbidden_reference() {
 violate_layer_stale_allow_item() {
   mkdir -p .config
   echo 'L1 | src/domain/zz_scripts_root.rs | crate::infrastructure | 1899 | fixture' >>.config/layer-deps-allow.txt
+}
+
+violate_context_reaches_loop_state() {
+  echo "impl Supervisor<'_> { fn zz_scripts_root(&self) -> usize { self.slots.len() } }" >>src/application/supervise/report.rs
 }
 
 violate_frontmatter_date_comment() {
