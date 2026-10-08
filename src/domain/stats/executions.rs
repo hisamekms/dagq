@@ -689,4 +689,103 @@ mod tests {
         );
         assert_eq!(Coverage::of(Some(5), None, 10), Coverage::Partial);
     }
+
+    /// The end of a job that started an agent counts as an Execution even
+    /// when nothing else of it is recorded (a recovery job stopped, a plan
+    /// review discarded): measured, in the executions and the sums; not
+    /// measured, in the executions and `unmeasured` only. An end that
+    /// started no agent (a review that never ran) records no Execution and
+    /// is not counted.
+    #[test]
+    fn a_stopped_or_discarded_job_counts_and_one_that_started_no_agent_does_not() {
+        use crate::domain::{
+            headless_job::JobSession,
+            tokens::{ExecutionTokens, TokenSource, TokenUsage},
+        };
+        let ended = |session: Option<JobSession>, mut payload: Value| {
+            JobSession::record_execution(session.as_ref(), &mut payload);
+            payload
+        };
+        let measured = || {
+            Some(JobSession {
+                tokens: Some(ExecutionTokens {
+                    tokens: Some(TokenUsage {
+                        input: 30,
+                        output: 7,
+                        ..TokenUsage::default()
+                    }),
+                    source: Some(TokenSource::UsageRecord),
+                    ..ExecutionTokens::default()
+                }),
+                ..JobSession::default()
+            })
+        };
+        let run = Some("r1");
+        let at = "2026-10-01T09:00:00Z";
+        let events = vec![
+            event(
+                1,
+                run,
+                "recovery_finished",
+                ended(measured(), json!({"outcome": "session_ended"})),
+                at,
+            ),
+            event(
+                2,
+                run,
+                "recovery_finished",
+                ended(None, json!({"outcome": "session_ended"})),
+                at,
+            ),
+            event(
+                3,
+                None,
+                "plan_review_discarded",
+                ended(measured(), json!({"edited": [2]})),
+                at,
+            ),
+            event(
+                4,
+                None,
+                "plan_review_discarded",
+                ended(Some(JobSession::default()), json!({"edited": [2]})),
+                at,
+            ),
+            // A review that never started: no session, no Execution.
+            event(
+                5,
+                run,
+                "review_failed",
+                json!({"code": "job_failed", "duration_secs": 0}),
+                at,
+            ),
+        ];
+        let all = executions(&events);
+        assert_eq!(all.len(), 4);
+        let day = millis("2026-10-01T00:00:00Z");
+        let stats = window(&all, Some(day), day + DAY, |_| true);
+        assert_eq!(
+            (
+                stats.totals.executions,
+                stats.totals.unmeasured,
+                stats.totals.total
+            ),
+            (4, 2, 74)
+        );
+        for actor in ["triage", "plan_review"] {
+            let totals = &stats.by_actor[actor].totals;
+            assert_eq!(
+                (totals.executions, totals.unmeasured, totals.total),
+                (2, 1, 37),
+                "{actor}"
+            );
+        }
+        assert_eq!(stats.by_actor["review"].totals.executions, 0);
+        // `kpi`'s `details.tokens` is this window as `stats` prints it.
+        let json = serde_json::to_value(&stats).unwrap();
+        assert_eq!(
+            (&json["executions"], &json["unmeasured"], &json["total"]),
+            (&json!(4), &json!(2), &json!(74))
+        );
+    }
 }

@@ -322,6 +322,27 @@ pub(super) fn ask_options(base: &[&str], note: Option<&Note>) -> Vec<String> {
     options
 }
 
+/// The `recovery_finished` of the job `attempt` of `alert` (raised for
+/// `reason` at `marker`) stopped as `outcome`, with the Execution its agent
+/// was so far: `session`, what its output named, or not measured.
+fn stopped_end(
+    (alert, reason): (RecoveryAlert, Option<&str>),
+    attempt: usize,
+    marker: Option<SystemTime>,
+    outcome: &str,
+    session: Option<&JobSession>,
+) -> Value {
+    let mut finished = json!({
+        "alert": alert,
+        "reason": reason,
+        "attempt": attempt,
+        "outcome": outcome,
+        "marker_at_ms": marker.map(millis),
+    });
+    JobSession::record_execution(session, &mut finished);
+    finished
+}
+
 /// The name of a recovery job's file in the run directory: its prompt
 /// (`prompt.txt`), stdout (`out`) and stderr (`err`).
 pub(super) fn job_file(alert: RecoveryAlert, attempt: usize, what: &str) -> String {
@@ -503,20 +524,24 @@ impl RecoveryWatch {
     }
 
     /// Stop the job that runs, recording `outcome` as its
-    /// `recovery_finished`.
+    /// `recovery_finished` with the Execution its agent was so far
+    /// (ADR-t1486-1): the tokens its output gives, or not measured.
     fn stop_running(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun, outcome: &str) {
         let mut job = self.job.take().expect("checked above");
         job.job.stop();
+        let agent = sv.job_agent(job.job.provider).unwrap_or(sv.reviewer);
+        let stdout = sv.files.read_to_string(&job.job.stdout).unwrap_or_default();
+        let session = agent.job_session(&stdout, job.job.started_at);
         let recorded = sv.queue.record_runtime_event(
             run.id(),
             EventKind::RecoveryFinished,
-            json!({
-                "alert": job.alert,
-                "reason": job.reason,
-                "attempt": job.attempt,
-                "outcome": outcome,
-                "marker_at_ms": job.marker.map(millis),
-            }),
+            stopped_end(
+                (job.alert, job.reason),
+                job.attempt,
+                job.marker,
+                outcome,
+                session.as_ref(),
+            ),
         );
         if let Err(error) = recorded {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the stopped recovery job could not be recorded: {error:#}", run.id());
@@ -1888,6 +1913,47 @@ mod tests {
                 "provider_unusable": {"provider": "codex", "reason": "authentication"},
             })
         );
+    }
+
+    /// A stopped job's `recovery_finished` records the Execution its agent
+    /// was so far: the tokens its output gave, or not measured when it
+    /// gave none (ADR-t1486-1).
+    #[test]
+    fn a_stopped_jobs_end_records_its_execution() {
+        use crate::domain::tokens::{ExecutionTokens, TokenSource, TokenUsage};
+        let stopped = |session: Option<JobSession>| {
+            stopped_end(
+                (RecoveryAlert::Stalled, Some("turn_without_receipt")),
+                2,
+                None,
+                "session_ended",
+                session.as_ref(),
+            )
+        };
+        let measured = stopped(Some(JobSession {
+            tokens: Some(ExecutionTokens {
+                tokens: Some(TokenUsage {
+                    input: 12,
+                    output: 3,
+                    ..TokenUsage::default()
+                }),
+                source: Some(TokenSource::ModelUsage),
+                ..ExecutionTokens::default()
+            }),
+            ..JobSession::default()
+        }));
+        assert_eq!(measured["outcome"], "session_ended");
+        assert_eq!(measured["attempt"], 2);
+        assert_eq!(measured["reason"], "turn_without_receipt");
+        assert_eq!(measured["tokens"]["input"], 12);
+        assert_eq!(measured["tokens_source"], "model_usage");
+        assert!(measured["tokens_reason"].is_null(), "{measured}");
+        for session in [None, Some(JobSession::default())] {
+            let unmeasured = stopped(session);
+            assert!(unmeasured["tokens"].is_null(), "{unmeasured}");
+            assert!(unmeasured.get("tokens_source").is_some(), "{unmeasured}");
+            assert_eq!(unmeasured["tokens_reason"], "tokens_not_read");
+        }
     }
 
     /// The processes are sampled every tenth of the threshold in whole

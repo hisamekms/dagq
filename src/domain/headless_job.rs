@@ -142,6 +142,23 @@ impl JobSession {
             tokens.record(payload);
         }
     }
+
+    /// Put the session of a job that started an agent into the payload of
+    /// the event that ends it, as [`Self::record`], and record its
+    /// Execution (ADR-t1486-1) whatever its output gave: not measured
+    /// ([`TOKENS_NOT_READ`](crate::domain::tokens::TOKENS_NOT_READ)) when
+    /// it gave no tokens, so that the end counts among the Executions.
+    pub fn record_execution(session: Option<&Self>, payload: &mut serde_json::Value) {
+        if let Some(session) = session {
+            session.record(payload);
+        }
+        if session.is_none_or(|session| session.tokens.is_none()) {
+            crate::domain::tokens::ExecutionTokens::unmeasured(
+                crate::domain::tokens::TOKENS_NOT_READ,
+            )
+            .record(payload);
+        }
+    }
 }
 
 /// What a supervisor that takes over does with the process of a job of a
@@ -291,6 +308,39 @@ mod tests {
         assert_eq!(payload["session_id"], "ahead");
         assert!(payload.get("model").is_none(), "{payload}");
         assert_eq!(payload["tokens_reason"], "no_usage");
+    }
+
+    #[test]
+    fn a_job_that_started_an_agent_always_records_its_execution() {
+        // No tokens from its output, or no session read: not measured.
+        for session in [None, Some(JobSession::default())] {
+            let mut payload = serde_json::json!({});
+            JobSession::record_execution(session.as_ref(), &mut payload);
+            assert!(payload["tokens"].is_null(), "{payload}");
+            assert!(payload.get("tokens_source").is_some(), "{payload}");
+            assert_eq!(payload["tokens_reason"], "tokens_not_read");
+        }
+        // Tokens counted: they are recorded as they are.
+        let tokens = super::super::tokens::ExecutionTokens {
+            tokens: Some(super::super::tokens::TokenUsage {
+                input: 3,
+                output: 4,
+                ..Default::default()
+            }),
+            source: Some(super::super::tokens::TokenSource::ModelUsage),
+            ..Default::default()
+        };
+        let mut payload = serde_json::json!({});
+        JobSession::record_execution(
+            Some(&JobSession {
+                tokens: Some(tokens),
+                ..JobSession::default()
+            }),
+            &mut payload,
+        );
+        assert_eq!(payload["tokens"]["input"], 3);
+        assert_eq!(payload["tokens_source"], "model_usage");
+        assert!(payload["tokens_reason"].is_null(), "{payload}");
     }
 
     #[test]

@@ -55,6 +55,8 @@ turnの`turn_finished`とjobの終わりのeventは、providerによらず同じ
 | `context_reason` | `peak_context`か`compactions`を数えられなかった理由 |
 
 - 正常な0は`tokens`の各数が0のobjectで、未計測は`tokens`が`null`で`tokens_reason`を持つ。
+- 見張りが止めた復旧のjobの`recovery_finished`と、捨てたplan reviewの`plan_review_discarded`も、agentを起動したjobの終わりとしてこの欄を持ち、providerの読みが出力からトークン数を返さなければ未計測にする。
+  agentを起動していない終わり（起動の前に失敗したreviewなど）はExecutionではなく、この欄を持たない。
 - 非対話の区間は`tokens`が`null`のturnを足さない。
 - 親とsubagentごとの内訳は記録しない（ADR-t1486-1決定7）。
 - contextの欄も、正常な0（compactionの無いExecution）と未計測（`null`と`context_reason`）を分ける。
@@ -211,7 +213,8 @@ taskとrunへの集約は区間の`tokens`で行い（[stats](supervisor-lifecyc
   区切りのある区間は区切りだけを足すので、閉じたときの区間のトークン数でも補わない。
 - 区切りの無い区間（区切りの窓のうちにsupervisorが区切らなかったもの）のトークン数は、`stats`と`kpi`の期間の集計に入らない。
 - jobの終わりのeventが`provider`を持たず、トークン数も数えられなかったjobは、`stats`と`kpi`でproviderが`unknown`になる。
-- 記録を書かないjobの終わり（止めた復旧のjob、捨てたplan review、sessionの無いreviewの失敗）は、記録の形より前のものと同じく数えない（`unmeasured`にも入らない）。
+- agentを起動したjobのうち次の終わりは、Executionの記録を持たず数えない（`unmeasured`にも入らない）。
+  proposalが先に進んで中断したplan review（eventを書かない）、引き継ぎやslotの見張りの終わりで`recovery_finished`などの終わりのeventを書かずに止めたjob、前のsupervisorが走らせて引き継いだ側が`review_failed`だけを書くreview。
 - `kpi`の`all`・`provider=`・`model=`の層は全体の`coverage`で判定するので、actorごとに記録の始まりが違うと、始まりの遅いactorの記録より前の分は欠けたまま値になる（`actor=`の層と`details.tokens`の`recorded_from`で分かる）。
 - streamの`assistant`の`usage`は生成を始めた時点の途中の値なので、トークン数には使わない（`peak_context`は入力側だけなので使う）。
 - Codexのturnの最初の`token_count`が前のExecutionの最後の呼び出しの`last_token_usage`を持ち越すと、その間にcompactionがあったとき`peak_context`を大きく読みうる。

@@ -171,6 +171,9 @@ pub const TOKEN_USAGE_RECORD_MISSING: &str = "token_usage_record_missing";
 /// The same for a thread's rollout in which no turn started since the
 /// Execution did.
 pub const ROLLOUT_TURN_MISSING: &str = "rollout_turn_missing";
+/// The `tokens_reason` of a job's Execution whose provider's reader does
+/// not read its tokens from its output: nothing was counted.
+pub const TOKENS_NOT_READ: &str = "tokens_not_read";
 
 /// The `context_reason` of an Execution that made no call of the model
 /// whose input could be read: its `peak_context` is not measured.

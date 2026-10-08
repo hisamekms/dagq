@@ -31,6 +31,7 @@ use crate::{
         Ask, AskId, AskKind, HEARTBEAT_TIMEOUT_SECS, PlanAnswer, PlanReviewAction,
         PlanReviewCandidate, PlanReviewDecision, PlannerId, Priority, ProposalId, ProposalStatus,
         TaskAction, TaskId, TaskStatus,
+        headless_job::JobSession,
         plan_quality::{self, ProposalFeatures},
         plan_review::{self, PassPriority, PlanReviewEnd, PlanReviewOutcome, ReviewHold},
         prediction, proposal, review_reason,
@@ -151,15 +152,17 @@ fn edited_during(conn: &Connection, job: &PlanReviewJob) -> Result<Vec<TaskId>> 
 /// Take the end of a job that is not applied ([`plan_review::plan_review_end`]):
 /// a proposal that moved on interrupts the job's row; tasks edited during
 /// it interrupt it too and record `plan_review_discarded`, leaving the
-/// proposal for the next pass to review again. `verdict` is the job's
-/// verdict, as recorded and as decided, `failure` its error when it failed.
-/// `false` when the end is to be applied.
+/// proposal for the next pass to review again, with the job's Execution
+/// (ADR-t1486-1) from `session`, what its output named. `verdict` is the
+/// job's verdict, as recorded and as decided, `failure` its error when it
+/// failed. `false` when the end is to be applied.
 fn end_unapplied(
     conn: &Connection,
     job: &PlanReviewJob,
     now: i64,
     verdict: Option<(&Value, PlanReviewDecision)>,
     failure: Option<&str>,
+    session: Option<&JobSession>,
 ) -> Result<bool> {
     let reviewable = reviewable(conn, job.proposal_id)?;
     let edited = if reviewable {
@@ -191,19 +194,21 @@ fn end_unapplied(
                 Some(&error),
             )?;
             sessions::close_plan_review(conn, job.id, false)?;
+            let mut discarded = json!({
+                "proposal_id": job.proposal_id,
+                "plan_review_id": job.id,
+                "attempt": job.attempt,
+                "verdict": verdict.map(|(_, decided)| decided),
+                "edited": edited,
+                "error": error,
+            });
+            JobSession::record_execution(session, &mut discarded);
             event(
                 conn,
                 job.anchor,
                 None,
                 EventKind::PlanReviewDiscarded,
-                json!({
-                    "proposal_id": job.proposal_id,
-                    "plan_review_id": job.id,
-                    "attempt": job.attempt,
-                    "verdict": verdict.map(|(_, decided)| decided),
-                    "edited": edited,
-                    "error": error,
-                }),
+                discarded,
             )?;
         }
     }
@@ -598,6 +603,7 @@ impl PlanReviewStore for SqliteQueue {
             now,
             Some((&verdict_json, apply.verdict.verdict)),
             None,
+            apply.session.as_ref(),
         )? {
             tx.commit()?;
             return Ok(PlanReviewApplied {
@@ -781,7 +787,7 @@ impl PlanReviewStore for SqliteQueue {
         if !running(&tx, job, token)? {
             return Ok(());
         }
-        if end_unapplied(&tx, job, now, None, Some(error))? {
+        if end_unapplied(&tx, job, now, None, Some(error), failure.session.as_ref())? {
             tx.commit()?;
             return Ok(());
         }
@@ -1505,5 +1511,126 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// A job whose task was edited while it ran is discarded with the
+    /// Execution it was (ADR-t1486-1): the tokens its output gave, or not
+    /// measured when it named none.
+    #[test]
+    fn a_discarded_plan_review_records_its_execution() {
+        use crate::domain::{
+            TaskEdit,
+            tokens::{ExecutionTokens, TokenSource, TokenUsage},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let task_id = queue.add(new_task("t")).unwrap().id();
+        let proposal_id = queue
+            .submit(Submission {
+                tasks: vec![task_id],
+                goals: Vec::new(),
+                proposal: None,
+                owner: PlannerOwner {
+                    origin: PlannerOrigin::Person,
+                    workspace_id: None,
+                },
+            })
+            .unwrap()
+            .id();
+        let token = LeaseToken::new("token");
+        let measured = JobSession {
+            tokens: Some(ExecutionTokens {
+                tokens: Some(TokenUsage {
+                    input: 40,
+                    output: 2,
+                    ..TokenUsage::default()
+                }),
+                source: Some(TokenSource::UsageRecord),
+                ..ExecutionTokens::default()
+            }),
+            ..JobSession::default()
+        };
+        // A failed job and a job with a verdict, each discarded.
+        let ends = [
+            ("first edit", Some(measured.clone()), false),
+            ("second edit", None, false),
+            ("third edit", Some(measured), true),
+        ];
+        for (edit, session, verdict) in ends {
+            let job = queue
+                .begin_plan_review(
+                    proposal_id,
+                    &token,
+                    &dir.path().join("plan-reviews"),
+                    Path::new("/repo"),
+                    &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),
+                )
+                .unwrap()
+                .unwrap();
+            queue
+                .edit_task(
+                    task_id,
+                    TaskEdit {
+                        description: Some(edit.into()),
+                        ..TaskEdit::default()
+                    },
+                    TaskStatus::Submitted,
+                )
+                .unwrap();
+            if verdict {
+                let applied = queue
+                    .finish_plan_review(
+                        &job,
+                        &token,
+                        &PlanReviewApply {
+                            verdict: plan_review::PlanReviewVerdict::parse(
+                                r#"{"verdict": "pass", "reasons": [], "summary": "fine"}"#,
+                            )
+                            .unwrap(),
+                            decision: PlanReviewDecision::Pass,
+                            overridden: None,
+                            revise_reasons: Vec::new(),
+                            ask: None,
+                            concern: None,
+                            duration_secs: 1,
+                            session,
+                            prompt_bytes: None,
+                        },
+                    )
+                    .unwrap();
+                assert!(applied.stale);
+            } else {
+                queue
+                    .fail_plan_review(
+                        &job,
+                        &token,
+                        &PlanReviewFailure {
+                            error: "no verdict".into(),
+                            session,
+                            ..PlanReviewFailure::default()
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        let discarded: Vec<Value> = queue
+            .conn
+            .prepare(
+                "SELECT payload FROM run_events WHERE kind='plan_review_discarded' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|text| serde_json::from_str(&text.unwrap()).unwrap())
+            .collect();
+        assert_eq!(discarded.len(), 3);
+        assert_eq!(discarded[0]["tokens"]["input"], 40);
+        assert_eq!(discarded[0]["tokens_source"], "token_usage_record");
+        assert!(discarded[1]["tokens"].is_null(), "{}", discarded[1]);
+        assert!(discarded[1].get("tokens_source").is_some());
+        assert_eq!(discarded[1]["tokens_reason"], "tokens_not_read");
+        assert_eq!(discarded[2]["verdict"], "pass");
+        assert_eq!(discarded[2]["tokens"]["output"], 2);
+        assert_eq!(discarded[2]["tokens_source"], "token_usage_record");
     }
 }
