@@ -167,6 +167,15 @@ provider = "codex"
 # --skip-git-repo-check を付ける）を両方含むことを verify の関門で確かめてから足す。
 provider = "codex"
 
+[roles.recovery]
+# 復旧 job（終わった run の triage と生きている run の復旧）を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
+# 「inbox と worker は Claude、それ以外の actor は Codex」の復旧 job の分。goal 80、task 1226）。
+# 書式と振る舞いは docs/design/supervisor-lifecycle/triage.md の「Codexで動かす」と actor-model.md の provider。
+# model と effort は書かず、Codex の既定の model と medium に任せる。
+# 固定バイナリが task 1225（復旧 job の Codex 対応）と task 1378（Git の外の job に
+# --skip-git-repo-check を付ける）を両方含むことを verify の関門で確かめてから足す。
+provider = "codex"
+
 [roles.runtime_planner]
 # runtime の planner（revise・draft・finding・計画の依頼）の経路の欄（goal 87、ADR-t1394-2 の決定 1、task 1396・1402 で足した）。
 # task 1441（ADR-t1433-2 の決定 3）から runtime の planner は非対話だけで動き、route は値に関わらず受け付けて無視する

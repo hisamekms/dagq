@@ -73,7 +73,7 @@ ADR-t609-1より前のruntimeは、`stalled`以外のalertのjobの失敗を`rec
 
 ## Codexで動かす
 
-`[roles.recovery] provider = "codex"`の生きているrunのjob（task 1225。終わったrunのjobと同じ役割・同じ行き先で、仕組みは[Triage](triage.md#codexで動かす)）。区間は持たない（`recovery_requested`の`launch`と`recovery_finished`が記録）。
+`[roles.recovery] provider = "codex"`の生きているrunのjob（task 1225。終わったrunのjobと同じ役割・同じ行き先で、仕組みとこの repositoryの設定は[Triage](triage.md#codexで動かす)）。区間は持たない（`recovery_requested`の`launch`と`recovery_finished`が記録）。
 
 - **行き先**（`Supervisor::recovery_route`）: alertのjobを始めるとき決め、`recovery_requested`の`launch`に書く。providerを書かない役割はClaudeで、queueのholdのあいだは始めない（alertは解けてから追い直す）。providerを書いた役割（`claude`を書いたものも）は使えるproviderで始め、Claudeのholdは`codex`のjobを止めない。`[provider_fallback] jobs = false`なら、使えない理由ではもう一方で始めず、控えが解けるまで待って同じproviderで始める（`--no-claude`による行き先は変わらない。[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。`--no-claude`で動かせるproviderが無ければjobを起動せず、jobの失敗と同じそのalertのask（`recovery_failed`、`the recovery job could not start: provider_disabled: …; handle this role manually`）にする。
 - **起動と検査**: Codexでは`codex exec --json`の読み取りだけのsandbox（queue serviceに届くjobのprofile）で、verdictは最終の`agent_message`から読み、上の「適用」と同じ検査（alertごとに許す操作、`confidence: high`の`repair`だけ、適用の直前の前提の再確認、alertごとの3回）を通る。jobはworktree・run directory・cmuxのworkspaceに書けず、`stop_processes`はruntimeがpidで行う。
