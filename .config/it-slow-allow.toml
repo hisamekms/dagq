@@ -770,3 +770,9 @@ task = 1847
 name = "runtime_claim::the_claim_records_its_slots_its_line_and_its_attributes"
 reason = "B 境界（SQLite・supervisor の配線）: 1 slot の supervisor が 2 本の run を claim から着地まで通し、slot が埋まって空くまでの slots_full_* の 1 組と、run_claimed の順位・候補数・goal の優先度・属性の組が実際の claim の transaction で記録されることを確かめる（ADR-t1410-1 の代表の 1 本）。区間・順位・組の判断は domain::pre_claim・claim_facts の unit test"
 task = 1664
+
+# 5.4s (median of a stress run under the host's load; 3.4 to 3.9s in a quieter one)
+[[test]]
+name = "runtime_headless_jobs::an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs"
+reason = "B 境界（SQLite・プロセス・復旧とadopt）: 死んだ supervisor の review と review_program の job の process を headless_jobs の行から adopt の前に止め、pid の再利用と生きている supervisor の行には触らず、adopter の review だけが走って着地することを実 process で確かめる。止めるかどうかの判断は domain::headless_job の unit test"
+task = 1896

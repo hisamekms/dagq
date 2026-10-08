@@ -168,6 +168,9 @@ pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
 pub(crate) use self::headless::{lock_waiting, provider_failure, write_request};
 pub use self::host_metrics::HostMetricsPort;
+pub use self::jobs::{
+    HeadlessJob, JobEnds, JobFailed, JobPorts, JobSubject, record_job, start_program_job,
+};
 pub use self::queue_service::{
     QUEUE_SERVICE_INTERVAL, QUEUE_SERVICE_RESTART_WINDOW, QUEUE_SERVICE_RESTARTS,
     QUEUE_SERVICE_START_TIMEOUT, QueueServicePort,
@@ -271,6 +274,9 @@ pub struct LoopSettings {
     pub provider_fallback: crate::domain::provider_switch::ProviderFallback,
     /// `[fresh_session]` at the start (ADR-t2080-1), read again each pass.
     pub fresh_session: crate::domain::fresh_session::FreshSessionConfig,
+    /// `[review.jobs]` at the start (ADR-t1895-1 decision 1): the timeout
+    /// of each kind of job of a run's review.
+    pub review_jobs: crate::domain::headless_job::JobTimeouts,
     /// Exit when no run is active and no task can be claimed, instead of
     /// polling for new work.
     pub once: bool,
@@ -920,6 +926,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         token,
         heartbeat,
         fresh_session: settings.fresh_session,
+        review_jobs: settings.review_jobs,
         fresh_session_file: ports.fresh_session_file.clone(),
         fresh_session_error: None,
         finished: Vec::new(),
@@ -1034,8 +1041,8 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   the loop, the steps of the slots' phases (each slot's [`Phase`] is
 ///   held in the [`stages::SlotTable`]) and what spans the stages
 ///   (`finished`, `errors`, `stall`, `notice_failures`, `job_ends`,
-///   `jobs_swept`, `last_turns`, `fresh_session*`, `queue_hold`,
-///   `hold_continue`, `review_material`, `wrapper_setting_warned`), with
+///   `jobs_swept`, `last_turns`, `fresh_session*`, `review_jobs`,
+///   `queue_hold`, `hold_continue`, `review_material`, `wrapper_setting_warned`), with
 ///   the adapters it uses (`repository`, `remote`, `verifier`, `reviewer`,
 ///   `codex_jobs`, `signals`, `spawner`, `files`).
 /// - observation and analysis: `observation`
@@ -1077,6 +1084,9 @@ struct Supervisor<'a> {
     /// `[fresh_session]` as last read (ADR-t2080-1): past what context a
     /// worker's send-back or resume starts a new session.
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
+    /// `[review.jobs]` as read at the start: the timeout of each kind of
+    /// job of a run's review ([`Self::job_timeout`]).
+    review_jobs: crate::domain::headless_job::JobTimeouts,
     /// Reads `[fresh_session]` again each pass; `None` keeps
     /// `fresh_session`.
     fresh_session_file: Option<FreshSessionFile>,

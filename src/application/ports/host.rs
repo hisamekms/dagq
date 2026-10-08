@@ -375,8 +375,10 @@ pub struct NewHeadlessJob {
     pub proposal_id: Option<ProposalId>,
     pub goal_id: Option<GoalId>,
     pub attempt: usize,
-    /// The provider the job runs on (`headless_jobs.provider`).
-    pub provider: crate::domain::Provider,
+    /// The provider an agent job runs on (`headless_jobs.provider`);
+    /// `None` for a program job, recorded as
+    /// [`crate::domain::headless_job::NO_PROVIDER`].
+    pub provider: Option<crate::domain::Provider>,
     pub pid: u32,
     /// [`ProcessControl::start_identity`] of `pid` just after the start.
     pub process_start: Option<String>,
@@ -394,7 +396,7 @@ pub struct HeadlessJobRecord {
     pub goal_id: Option<GoalId>,
     pub attempt: usize,
     /// The provider it ran on, as stored (`claude` for a row written
-    /// before the column was).
+    /// before the column was, `none` for a program job).
     pub provider: String,
     pub pid: u32,
     pub process_start: Option<String>,

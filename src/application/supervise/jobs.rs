@@ -2,13 +2,17 @@
 //! (ADR-0047 decisions 39 and 40), each a process waited for with a
 //! timeout. Every headless job's process is recorded in `headless_jobs`
 //! (task 443): a supervisor that takes over from one that died stops the
-//! jobs it left before it starts its own.
+//! jobs it left before it starts its own. A job of a run's review stage is
+//! of one of two kinds ([`JobKind`], ADR-t1895-1 decision 1), an agent's
+//! session or a program's process, and both go the one way here: start,
+//! record, wait under the kind's timeout, stop with what the job started,
+//! and take over.
 
 use super::*;
 use crate::domain::EventKind;
-use crate::domain::headless_job::JobFailure;
+use crate::domain::headless_job::{JobFailure, JobKind, JobStop};
 use crate::{
-    application::{HeadlessJobRecord, NewHeadlessJob},
+    application::{Clock, CommandSpec, HeadlessJobRecord, HeadlessJobStore, NewHeadlessJob},
     domain::headless_job::{Takeover, takeover},
 };
 use std::sync::Mutex;
@@ -22,7 +26,7 @@ const TAKEOVER_GRACE: Duration = Duration::from_secs(5);
 /// to end them ([`HeadlessJob::abandon`]). A job ends where no queue is at
 /// hand, and the supervisor writes them at the top of its next pass.
 #[derive(Clone, Default)]
-pub(super) struct JobEnds(Arc<Mutex<Ends>>);
+pub struct JobEnds(Arc<Mutex<Ends>>);
 
 #[derive(Default)]
 struct Ends {
@@ -58,6 +62,17 @@ impl JobEnds {
             std::mem::take(&mut ends.abandoned),
         )
     }
+
+    /// Write the rows' ends not written yet to `store`; the rows whose end
+    /// could not be written, with why. The abandoned jobs are left to the
+    /// supervisor, whose agents read their Execution
+    /// ([`Supervisor::write_job_ends`]).
+    pub fn write(&self, store: &dyn HeadlessJobStore) -> Vec<(i64, anyhow::Error)> {
+        let rows = std::mem::take(&mut self.lock().rows);
+        rows.into_iter()
+            .filter_map(|(id, outcome)| store.end_headless_job(id, outcome).err().map(|e| (id, e)))
+            .collect()
+    }
 }
 
 /// The `headless_job_stopped` of `job`, stopped by `supervisor` with no
@@ -86,10 +101,17 @@ pub(super) fn abandoned_end(
     payload
 }
 
-/// What a headless job is about, for its `headless_jobs` row.
+/// What a headless job is about, for its `headless_jobs` row and its
+/// timeout.
 #[derive(Clone)]
-pub(super) struct JobSubject {
+pub struct JobSubject {
     pub(super) kind: &'static str,
+    /// What runs it: an agent, unless it is a program job of a run's
+    /// review.
+    pub(super) job: JobKind,
+    /// Whether it is a job of a run's review stage, whose timeout
+    /// `[review.jobs]` sets by its kind.
+    pub(super) review_stage: bool,
     pub(super) label: Option<String>,
     pub(super) run_id: Option<RunId>,
     pub(super) proposal_id: Option<crate::domain::ProposalId>,
@@ -100,12 +122,14 @@ pub(super) struct JobSubject {
 }
 
 impl JobSubject {
-    /// A job of `run`, on Claude; a job whose role names another provider
-    /// sets `provider` to its launch's (the review and the recovery job,
-    /// ADR-t1063-1).
+    /// An agent job of `run`, on Claude; a job whose role names another
+    /// provider sets `provider` to its launch's (the review and the
+    /// recovery job, ADR-t1063-1).
     pub(super) fn run(kind: &'static str, run: &RunId, attempt: usize) -> Self {
         Self {
             kind,
+            job: JobKind::Agent,
+            review_stage: false,
             label: None,
             run_id: Some(run.clone()),
             proposal_id: None,
@@ -114,13 +138,125 @@ impl JobSubject {
             provider: crate::domain::actor_model::ROLE_PROVIDER,
         }
     }
+
+    /// A `job` job of `run`'s review `attempt`.
+    pub(super) fn review(job: JobKind, run: &RunId, attempt: usize) -> Self {
+        Self {
+            job,
+            review_stage: true,
+            ..Self::run(job.review_kind(), run, attempt)
+        }
+    }
+
+    /// The program job named `program` of `run`'s review `attempt`: no
+    /// provider runs it.
+    pub fn review_program(run: &RunId, attempt: usize, program: &str) -> Self {
+        Self {
+            label: Some(program.to_owned()),
+            ..Self::review(JobKind::Program, run, attempt)
+        }
+    }
+}
+
+/// What every headless job starts through, whatever its kind: where its
+/// row is written, how its process is found and stopped, whose job it is
+/// and where its end waits to be written.
+pub struct JobPorts<'a> {
+    pub store: &'a dyn HeadlessJobStore,
+    pub processes: Arc<dyn ProcessControl + Send + Sync>,
+    pub supervisor_token: &'a LeaseToken,
+    pub clock: &'a dyn Clock,
+    pub ends: &'a JobEnds,
+}
+
+/// The job whose process `child` just started, recorded in
+/// `headless_jobs` with its kind, its pid and the start of its process,
+/// waited for at most `timeout`. A record that fails is only noted: the
+/// job runs either way.
+pub fn record_job(
+    ports: &JobPorts<'_>,
+    what: &'static str,
+    child: Box<dyn Spawned>,
+    (stdout, stderr): (PathBuf, PathBuf),
+    subject: JobSubject,
+    timeout: Duration,
+) -> HeadlessJob {
+    let pid = child.id();
+    let new = NewHeadlessJob {
+        kind: subject.kind,
+        label: subject.label.clone(),
+        run_id: subject.run_id.clone(),
+        proposal_id: subject.proposal_id,
+        goal_id: subject.goal_id,
+        attempt: subject.attempt,
+        provider: (subject.job == JobKind::Agent).then_some(subject.provider),
+        pid,
+        process_start: ports.processes.start_identity(pid),
+        supervisor_token: ports.supervisor_token.clone(),
+    };
+    let record = match ports.store.record_headless_job(&new) {
+        Ok(id) => Some((ports.ends.clone(), id)),
+        Err(error) => {
+            warn!(error = %format_args!("{error:#}"), "the start of the headless {what} (pid {pid}) could not be recorded: {error:#}");
+            None
+        }
+    };
+    HeadlessJob {
+        what,
+        kind: subject.job,
+        child,
+        started: Instant::now(),
+        timeout,
+        stdout,
+        stderr,
+        processes: ports.processes.clone(),
+        record,
+        provider: subject.provider,
+        started_at: started_at_ms(ports.clock),
+        // Only an agent's job is an Execution whose end is recorded when it
+        // is abandoned (ADR-t1486-1); a program job's ends with its row.
+        unended: (subject.job == JobKind::Agent).then(|| (ports.ends.clone(), subject)),
+    }
+}
+
+/// Start the program job `program` (ADR-t1895-1 decision 1) in a process
+/// group of its own, its stdout and stderr to `output`, and record it as
+/// [`record_job`] does: its timeout stops the group and what the program
+/// started.
+pub fn start_program_job(
+    ports: &JobPorts<'_>,
+    spawner: &dyn Spawner,
+    program: &CommandSpec,
+    output: (PathBuf, PathBuf),
+    subject: JobSubject,
+    timeout: Duration,
+) -> Result<HeadlessJob> {
+    let mut program = program.clone();
+    program.new_session();
+    let child = spawner.spawn(
+        &program,
+        Streams::Files {
+            stdout: &output.0,
+            stderr: &output.1,
+        },
+    )?;
+    Ok(record_job(
+        ports,
+        "review program",
+        child,
+        output,
+        subject,
+        timeout,
+    ))
 }
 
 /// A headless job's process (a review or a recovery job) whose stdout and stderr
 /// go to files, waited for at most `timeout`.
-pub(super) struct HeadlessJob {
+pub struct HeadlessJob {
     /// What the job is, for its failure messages: `review`, `recovery job`.
     pub(super) what: &'static str,
+    /// What runs it.
+    pub(super) kind: JobKind,
     pub(super) child: Box<dyn Spawned>,
     pub(super) started: Instant,
     pub(super) timeout: Duration,
@@ -131,8 +267,8 @@ pub(super) struct HeadlessJob {
     /// Its `headless_jobs` row, until its end is handed to `ends`; `None`
     /// when the start could not be recorded.
     pub(super) record: Option<(JobEnds, i64)>,
-    /// The provider it runs on, whose implementation reads its reply,
-    /// session and failure (ADR-t1063-1).
+    /// The provider an agent job runs on, whose implementation reads its
+    /// reply, session and failure (ADR-t1063-1); unread for a program job.
     pub(super) provider: Provider,
     /// When it started (unix milliseconds), for the model of its session.
     pub(super) started_at: Option<i64>,
@@ -163,6 +299,18 @@ impl HeadlessJob {
         files: &dyn RunFiles,
         provider: &dyn AgentProvider,
     ) -> Result<Option<std::result::Result<String, JobFailed>>> {
+        Ok(self
+            .poll_output(files)?
+            .map(|output| output.map(|stdout| provider.job_reply(&stdout))))
+    }
+
+    /// `Some` once the job ended, whatever its kind: its stdout, or how it
+    /// failed (a non-zero exit, or the timeout, after which it is
+    /// [`Self::stop`]ped).
+    pub fn poll_output(
+        &mut self,
+        files: &dyn RunFiles,
+    ) -> Result<Option<std::result::Result<String, JobFailed>>> {
         let status = match self.child.try_wait()? {
             Some(status) => status,
             None if self.started.elapsed() < self.timeout => return Ok(None),
@@ -184,16 +332,31 @@ impl HeadlessJob {
                 or_none(tail(stderr.trim(), 500))
             )))));
         }
-        let stdout = files.read_to_string(&self.stdout).unwrap_or_default();
-        Ok(Some(Ok(provider.job_reply(&stdout))))
+        Ok(Some(Ok(files
+            .read_to_string(&self.stdout)
+            .unwrap_or_default())))
+    }
+
+    /// The provider whose adapter reads why the job failed
+    /// ([`Supervisor::job_failure`]): an agent job's. No provider reads a
+    /// program's output, so a program job's failure is `other`: it never
+    /// holds a provider or stops at a wall.
+    pub(super) fn failure_reader(&self) -> Option<Provider> {
+        (self.kind == JobKind::Agent).then_some(self.provider)
+    }
+
+    /// The pid of the job's process.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Kill the job's process and the processes it started (a `claude -p`'s
-    /// Bash and what that runs), so none outlives the job. The caller
-    /// records the job's end; one that records none abandons it.
-    pub(super) fn stop(&mut self) {
+    /// Bash and what that runs, a program's children), so none outlives
+    /// the job: with its process group when it leads one (a program job).
+    /// The caller records the job's end; one that records none abandons it.
+    pub fn stop(&mut self) {
         let descendants = self.processes.descendants(self.child.id());
-        let _ = self.child.kill();
+        let _ = self.child.kill_group();
         let _ = self.child.wait();
         for pid in descendants {
             let _ = self.processes.kill(pid);
@@ -269,9 +432,19 @@ fn started_at_ms(clock: &dyn crate::application::Clock) -> Option<i64> {
 }
 
 impl Supervisor<'_> {
-    /// The job whose process `child` just started, recorded in
-    /// `headless_jobs` with its pid and the start of its process. A record
-    /// that fails is only noted: the job runs either way.
+    /// The ports this supervisor's jobs start through ([`JobPorts`]).
+    fn job_ports(&self) -> JobPorts<'_> {
+        JobPorts {
+            store: &*self.queue,
+            processes: self.processes.clone(),
+            supervisor_token: &self.token,
+            clock: &*self.generators.clock,
+            ends: &self.job_ends,
+        }
+    }
+
+    /// The job whose process `child` just started ([`record_job`]), under
+    /// its timeout ([`Self::job_timeout`]).
     pub(super) fn headless_job(
         &mut self,
         what: &'static str,
@@ -280,39 +453,41 @@ impl Supervisor<'_> {
         stderr: PathBuf,
         subject: JobSubject,
     ) -> HeadlessJob {
-        let pid = child.id();
-        let new = NewHeadlessJob {
-            kind: subject.kind,
-            label: subject.label.clone(),
-            run_id: subject.run_id.clone(),
-            proposal_id: subject.proposal_id,
-            goal_id: subject.goal_id,
-            attempt: subject.attempt,
-            provider: subject.provider,
-            pid,
-            process_start: self.processes.start_identity(pid),
-            supervisor_token: self.token.clone(),
-        };
-        let record = match self.queue.record_headless_job(&new) {
-            Ok(id) => Some((self.job_ends.clone(), id)),
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the start of the headless {what} (pid {pid}) could not be recorded: {error:#}");
-                None
-            }
-        };
-        HeadlessJob {
+        let timeout = self.job_timeout(&subject);
+        record_job(
+            &self.job_ports(),
             what,
             child,
-            started: Instant::now(),
-            timeout: self.reviewer.review_timeout(),
-            stdout,
-            stderr,
-            processes: self.processes.clone(),
-            record,
-            provider: subject.provider,
-            started_at: started_at_ms(&*self.generators.clock),
-            unended: Some((self.job_ends.clone(), subject)),
-        }
+            (stdout, stderr),
+            subject,
+            timeout,
+        )
+    }
+
+    /// How long a job about `subject` may run
+    /// ([`crate::domain::headless_job::JobTimeouts::job_timeout`]).
+    pub(super) fn job_timeout(&self, subject: &JobSubject) -> Duration {
+        self.timeout_of(
+            subject.review_stage.then_some(subject.job),
+            subject.provider,
+        )
+    }
+
+    /// The timeout of a `kind` job of a run's review on `provider`
+    /// ([`Self::job_timeout`]).
+    pub(super) fn review_job_timeout(&self, kind: JobKind, provider: Provider) -> Duration {
+        self.timeout_of(Some(kind), provider)
+    }
+
+    /// The timeout of a job of the review stage's `stage` kind (`None`
+    /// outside the stage) on `provider`, from `[review.jobs]` and the
+    /// review timeouts of `provider`'s agent and of the reviewer.
+    fn timeout_of(&self, stage: Option<JobKind>, provider: Provider) -> Duration {
+        let reviewer = self.reviewer.review_timeout();
+        let provider = self
+            .job_agent(provider)
+            .map_or(reviewer, |agent| agent.review_timeout());
+        self.review_jobs.job_timeout(stage, provider, reviewer)
     }
 
     /// Why a headless job failed, in the classes shared by every provider
@@ -320,7 +495,10 @@ impl Supervisor<'_> {
     /// output: Claude Code's by its signals (task 438), another's by its
     /// agent.
     pub(super) fn job_failure(&self, job: &HeadlessJob) -> JobFailure {
-        match (job.provider, self.job_agent(job.provider)) {
+        let Some(provider) = job.failure_reader() else {
+            return JobFailure::Other;
+        };
+        match (provider, self.job_agent(provider)) {
             (Provider::Codex, Some(agent)) => {
                 let read = |path: &Path| self.files.read_to_string(path).unwrap_or_default();
                 agent.job_failure(&read(&job.stdout), &read(&job.stderr))
@@ -624,7 +802,7 @@ impl ReviewEnd {
 
 /// How a headless job ended without a reply, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum JobFailed {
+pub enum JobFailed {
     /// Its process exited non-zero.
     Exited(String),
     /// It did not finish within its timeout and was stopped.
@@ -632,13 +810,21 @@ pub(super) enum JobFailed {
 }
 
 impl JobFailed {
-    pub(super) fn error(&self) -> &str {
+    /// How it ended, for whether it is retried ([`JobKind::retries`]).
+    pub fn stop(&self) -> JobStop {
+        match self {
+            Self::Exited(_) => JobStop::Exited,
+            Self::TimedOut(_) => JobStop::TimedOut,
+        }
+    }
+
+    pub fn error(&self) -> &str {
         match self {
             Self::Exited(error) | Self::TimedOut(error) => error,
         }
     }
 
-    pub(super) fn into_error(self) -> String {
+    pub fn into_error(self) -> String {
         match self {
             Self::Exited(error) | Self::TimedOut(error) => error,
         }
@@ -799,6 +985,7 @@ mod tests {
         files.put(&err, std::time::SystemTime::UNIX_EPOCH, "it broke\n");
         HeadlessJob {
             what: "review",
+            kind: JobKind::Agent,
             child: Box::new(Ended { success }),
             started: Instant::now(),
             timeout: Duration::from_secs(60),
@@ -810,6 +997,121 @@ mod tests {
             started_at: None,
             unended: None,
         }
+    }
+
+    /// The `headless_jobs` rows written, and nothing else.
+    #[derive(Default)]
+    struct Rows(Mutex<Vec<NewHeadlessJob>>);
+
+    impl HeadlessJobStore for Rows {
+        fn record_headless_job(&self, job: &NewHeadlessJob) -> Result<i64> {
+            let mut rows = self.0.lock().unwrap();
+            rows.push(job.clone());
+            Ok(rows.len() as i64)
+        }
+        fn end_headless_job(&self, _: i64, _: &str) -> Result<bool> {
+            Ok(true)
+        }
+        fn orphaned_headless_jobs(
+            &self,
+            _: &LeaseToken,
+            _: bool,
+        ) -> Result<Vec<HeadlessJobRecord>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A program job of the review (ADR-t1895-1 decision 1) goes the
+    /// common way with what its kind changes: its row names the program
+    /// and no provider, it is bounded by the timeout it is given, its
+    /// reply is its stdout as it is (no provider reads it out), and its
+    /// failure is no provider's: it holds no provider and stops at no wall.
+    #[test]
+    fn a_program_job_is_recorded_read_and_classed_as_no_providers() {
+        let rows = Rows::default();
+        let ends = JobEnds::default();
+        let token = LeaseToken::new("me");
+        let clock = At(std::time::UNIX_EPOCH);
+        let ports = JobPorts {
+            store: &rows,
+            processes: Arc::new(NoProcesses),
+            supervisor_token: &token,
+            clock: &clock,
+            ends: &ends,
+        };
+        let run = RunId::new("run-1").unwrap();
+        let files = MemoryFiles::default();
+        let output = (PathBuf::from("/job/out"), PathBuf::from("/job/err"));
+        files.put(
+            &output.0,
+            std::time::SystemTime::UNIX_EPOCH,
+            "{\"text\": \"ok\"}\n",
+        );
+        let mut program = record_job(
+            &ports,
+            "review program",
+            Box::new(Ended { success: true }),
+            output.clone(),
+            JobSubject::review_program(&run, 2, "fmt"),
+            Duration::from_secs(30),
+        );
+        let agent = record_job(
+            &ports,
+            "review",
+            Box::new(Ended { success: true }),
+            output,
+            JobSubject {
+                provider: Provider::Codex,
+                ..JobSubject::review(JobKind::Agent, &run, 2)
+            },
+            Duration::from_secs(600),
+        );
+        let written: Vec<_> = rows
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|row| (row.kind, row.label.clone(), row.provider, row.attempt))
+            .collect();
+        assert_eq!(
+            written,
+            [
+                ("review_program", Some("fmt".to_owned()), None, 2),
+                ("review", None, Some(Provider::Codex), 2),
+            ]
+        );
+        assert_eq!(program.timeout, Duration::from_secs(30));
+        assert_eq!(agent.timeout, Duration::from_secs(600));
+        assert_eq!(program.failure_reader(), None);
+        assert_eq!(agent.failure_reader(), Some(Provider::Codex));
+        assert_eq!(
+            program.poll_output(&files).unwrap().unwrap().unwrap(),
+            "{\"text\": \"ok\"}\n"
+        );
+        // Stopped with no event to end it, an agent job hands its
+        // Execution's end over; a program job, which is no Execution, only
+        // its row's.
+        drop(agent);
+        let mut stray = record_job(
+            &ports,
+            "review program",
+            Box::new(Ended { success: true }),
+            (PathBuf::from("/job/out"), PathBuf::from("/job/err")),
+            JobSubject::review_program(&run, 2, "lint"),
+            Duration::from_secs(30),
+        );
+        stray.abandon();
+        let (rows, handed) = ends.take();
+        assert_eq!(rows, [(1, "ended"), (2, "stopped"), (3, "stopped")]);
+        let handed: Vec<_> = handed.iter().map(|job| job.subject.kind).collect();
+        assert_eq!(handed, ["review"]);
+        // A program that exits non-zero is its check's result, not retried.
+        let mut failed = job(&files, false, "");
+        failed.kind = JobKind::Program;
+        let end = failed.poll_output(&files).unwrap().unwrap().unwrap_err();
+        assert_eq!(end.stop(), JobStop::Exited);
+        assert!(!JobKind::Program.retries(end.stop()));
+        assert!(JobKind::Agent.retries(end.stop()));
     }
 
     /// The job reads its verdict from the reply its provider reads out of
@@ -934,6 +1236,8 @@ mod tests {
         let job = Abandoned {
             subject: JobSubject {
                 kind: headless_job::PLAN_REVIEW,
+                job: JobKind::Agent,
+                review_stage: false,
                 label: None,
                 run_id: None,
                 proposal_id: Some(crate::domain::ProposalId::new(4)),

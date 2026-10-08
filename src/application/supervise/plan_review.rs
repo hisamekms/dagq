@@ -308,6 +308,8 @@ impl Supervisor<'_> {
             stderr,
             JobSubject {
                 kind: headless_job::PLAN_REVIEW,
+                job: headless_job::JobKind::Agent,
+                review_stage: false,
                 label: None,
                 run_id: None,
                 proposal_id: Some(job.proposal_id),

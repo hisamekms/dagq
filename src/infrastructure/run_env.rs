@@ -35,6 +35,8 @@
 //! `[fresh_session] peak_context_above` starts a worker's send-back or
 //! resume in a new session past a context of that many tokens
 //! (ADR-t2080-1).
+//! `[review.jobs]` sets the timeout of each kind of job of a run's review
+//! (ADR-t1895-1 decision 1).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -58,6 +60,7 @@ use crate::{
         disk::DiskConfig,
         exit::ExitConfig,
         fresh_session::FreshSessionConfig,
+        headless_job::JobTimeouts,
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
         landing_verification::{self, LandingVerification},
@@ -153,6 +156,9 @@ const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
 /// resume starts a new session (ADR-t2080-1); its key is on
 /// [`FreshSessionConfig`].
 const FRESH_SESSION_TABLE: &str = "fresh_session";
+/// `[review.jobs]`: the timeout of each kind of job of a run's review
+/// (ADR-t1895-1 decision 1); its keys are on [`JobTimeouts`].
+const REVIEW_JOBS_TABLE: &str = "review.jobs";
 /// `[ci_watch]`: the landing branch's CI the supervisor watches
 /// (ADR-t1920-1). `workflow` (a non-blank string) is required; `branch`
 /// (a branch name without `refs/heads/`), `interval_secs` (at least
@@ -164,7 +170,7 @@ const CI_WATCH_TABLE: &str = "ci_watch";
 /// `[landing_verification]`: the command `integrate` runs in place of
 /// some of a task's (ADR-t1925-1 decision 4).
 const LANDING_VERIFICATION_TABLE: &str = landing_verification::TABLE;
-const TABLES: [&str; 20] = [
+const TABLES: [&str; 21] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -183,6 +189,7 @@ const TABLES: [&str; 20] = [
     HEADLESS_TABLE,
     PROVIDER_FALLBACK_TABLE,
     FRESH_SESSION_TABLE,
+    REVIEW_JOBS_TABLE,
     CI_WATCH_TABLE,
     LANDING_VERIFICATION_TABLE,
 ];
@@ -267,6 +274,9 @@ pub struct Config {
     pub provider_fallback: ProviderFallback,
     /// `[fresh_session]` (ADR-t2080-1); no key starts no new session.
     pub fresh_session: FreshSessionConfig,
+    /// `[review.jobs]` (ADR-t1895-1 decision 1); a kind without its key
+    /// keeps the provider's review timeout.
+    pub review_jobs: JobTimeouts,
     /// `[ci_watch]` (ADR-t1920-1); `None` without the table, which watches
     /// nothing.
     pub ci_watch: Option<CiWatchConfig>,
@@ -292,6 +302,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut light_changes: Option<(Vec<TaskChange>, usize)> = None;
     let mut fallback_keys: Vec<String> = Vec::new();
     let mut fresh_session_keys: Vec<String> = Vec::new();
+    let mut review_jobs_keys: Vec<String> = Vec::new();
     // `[ci_watch]`'s header line and the keys read, the table checked once
     // the file is read whole (its `workflow` is required).
     let mut ci_watch: Option<(usize, CiWatchConfig)> = None;
@@ -386,7 +397,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -585,6 +596,23 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.fresh_session.peak_context_above =
                     Some(u64::try_from(tokens).with_context(with)?);
                 fresh_session_keys.push(key.to_owned());
+            }
+            Some(REVIEW_JOBS_TABLE) => {
+                ensure!(
+                    JobTimeouts::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_JOBS_TABLE}]; the keys are {}",
+                    JobTimeouts::KEYS.join(", ")
+                );
+                ensure!(
+                    !review_jobs_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let secs = parse_positive(rest.trim(), "number of seconds").with_context(with)?;
+                config
+                    .review_jobs
+                    .set(key, u64::try_from(secs).with_context(with)?);
+                review_jobs_keys.push(key.to_owned());
             }
             Some(CI_WATCH_TABLE) => {
                 ensure!(
@@ -976,7 +1004,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -1287,6 +1315,21 @@ pub fn load_fresh_session(root: &Path) -> Result<Option<FreshSessionConfig>> {
         parse_config(&text)
             .with_context(|| format!("parse {}", path.display()))?
             .fresh_session,
+    ))
+}
+
+/// `[review.jobs]` of the `dagq.toml` in `root` (ADR-t1895-1 decision
+/// 1), `None` when there is no file; no table or no key keeps each kind's
+/// timeout the provider's review timeout.
+pub fn load_review_jobs(root: &Path) -> Result<Option<JobTimeouts>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .review_jobs,
     ))
 }
 
@@ -2898,6 +2941,71 @@ LITERAL = 'no \n escapes # here'
         );
     }
 
+    /// `[review.jobs]` sets each kind's timeout in whole seconds above
+    /// 0; a kind without its key keeps the provider's review timeout.
+    #[test]
+    fn parses_the_timeouts_of_the_review_jobs_table() {
+        let jobs = |text: &str| parse_config(text).unwrap().review_jobs;
+        assert_eq!(jobs(""), JobTimeouts::default());
+        assert_eq!(jobs("[review.jobs]\n"), JobTimeouts::default());
+        assert_eq!(
+            jobs("[review.jobs]\nprogram_timeout_secs = 120 # seconds\n"),
+            JobTimeouts {
+                agent: None,
+                program: Some(120),
+            }
+        );
+        assert_eq!(
+            jobs("[review.jobs]\nagent_timeout_secs = 1_800\nprogram_timeout_secs = 60\n"),
+            JobTimeouts {
+                agent: Some(1800),
+                program: Some(60),
+            }
+        );
+        // Beside `[review.subagents.<agent>]`, as its own table.
+        assert_eq!(
+            jobs("[review.subagents.docs]\npaths = [\"docs/**\"]\n[review.jobs]\nagent_timeout_secs = 5\n")
+                .agent,
+            Some(5)
+        );
+        for (text, error) in [
+            (
+                "[review.jobs]\nagent_timeout_secs = 0\n",
+                "must be a positive",
+            ),
+            (
+                "[review.jobs]\nagent_timeout_secs = \"10m\"\n",
+                "expected a whole",
+            ),
+            (
+                "[review.jobs]\ntimeout = 1\n",
+                "dagq.toml:2: unknown key timeout in [review.jobs]; the keys are agent_timeout_secs, program_timeout_secs",
+            ),
+            (
+                "[review.jobs]\nagent_timeout_secs = 1\nagent_timeout_secs = 2\n",
+                "dagq.toml:3: agent_timeout_secs is defined twice",
+            ),
+            (
+                "[review.jobs]\n[review.jobs]\n",
+                "dagq.toml:2: [review.jobs] is defined twice",
+            ),
+        ] {
+            let got = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(got.contains(error), "{text:?}: {got}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_review_jobs(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[review.jobs]\nprogram_timeout_secs = 30\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_review_jobs(dir.path()).unwrap().unwrap().program,
+            Some(30)
+        );
+    }
+
     /// `[fresh_session] peak_context_above` is a whole number of tokens
     /// above 0, none without it; the table knows no other key and takes
     /// the key once (ADR-t2080-1).
@@ -3170,7 +3278,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [ci_watch], [landing_verification] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification] and [kpi]"
             ),
             "{error}"
         );

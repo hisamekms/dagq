@@ -262,6 +262,8 @@ impl Supervisor<'_> {
             stderr,
             JobSubject {
                 kind: headless_job::GOAL_REVIEW,
+                job: headless_job::JobKind::Agent,
+                review_stage: false,
                 label: None,
                 run_id: None,
                 proposal_id: None,

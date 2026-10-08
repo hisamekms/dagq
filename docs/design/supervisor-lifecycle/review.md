@@ -98,6 +98,9 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    Claudeのreviewは`--setting-sources ""`とsettingsの`autoMemoryEnabled: false`で、worktreeの`.claude/`・`.mcp.json`・`CLAUDE.md`・auto memoryとuserの設定を読まない（[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)）。
    そのためpromptが、worktreeのrootのinstructionsとそれが名指す文書を読んで判定するよう1文で求める。
    reviewのsettingsは`Stop` hookを持たない（生きているworkerのsessionのidle markerを書かないため）。
+   jobはreviewの段のjobの共通の経路（[Headless job processes](headless-job-processes.md#記録)）を`agent`の種類（`JobKind::Agent`、`headless_jobs.kind`は`review`）として通り、起動の記録・timeoutの停止・引き継ぎは`program`の種類のjobと同じである。
+   やり直すかどうかはどちらも`JobKind::retries`で決め、`agent`のjobは非0のexitを1回だけやり直す（`program`のjobはやり直さない）。
+   時間の上限は種類ごとで、`[review.jobs] agent_timeout_secs`（[Run environment](run-environment.md)）が無ければjobを動かすproviderの`AgentProvider::review_timeout`。
 3. **verdict**: verdictが読めれば`review_finished`を記録する。
    読めない（JSONが無い・壊れている・未知の欄）か非0で終わったreviewは、やり直しでなければ同じ入力で1回だけやり直す（`review_retried`）。
    時間の上限で止まったreviewと起動できなかったreviewはやり直さず、reviewの失敗にする。

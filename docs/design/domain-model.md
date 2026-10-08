@@ -331,10 +331,10 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 - 失敗したtestやturnでは切り替えず、使えないと安全に判定できるときだけ切り替える。
 - 必須のreviewのsubagentを動かせない行き先は、reviewの起動の理由にだけ入りproviderは控えない（動かせる側の控えは待つ。[Review](supervisor-lifecycle/review.md#reviewのsubagent)）。
 
-## headless jobの権限の意図と失敗の分類（`JobAccess`・`JobFailure`）
+## headless jobの種類・権限の意図・失敗（`JobKind`・`JobAccess`・`JobFailure`）
 
-- 入口は`domain::headless_job`の閉じた集合（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)決定2・4）。
-- `JobFailure`のうち4つは`SwitchReason`と同じ値で、認証と利用上限は人しか動かせない壁として扱う。
+- 入口は`domain::headless_job`の閉じた集合（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)決定2・4、ADR-t1895-1決定1）。
+- `JobFailure`の4つは`SwitchReason`と同値、認証と利用上限は人だけが動かす壁。
 - 値の意味とClaude Codeへの訳は[Agent provider lifecycle](provider-lifecycle.md#headless-jobのinterface)。
 
 ## 理由の分類コード（`code`）

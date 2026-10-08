@@ -17,7 +17,7 @@ use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
-use crate::domain::headless_job::JobSession;
+use crate::domain::headless_job::{JobKind, JobSession};
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::review_reason;
 use crate::domain::review_subagents::{AgentDefinition, Destination, VerdictRoute};
@@ -446,20 +446,16 @@ impl Supervisor<'_> {
         let error = match spawned {
             Ok(Ok((child, stdout, stderr))) => {
                 info!(run_id = %run.id(), "run {} review {attempt} started on {} (session {})", run.id(), launch.provider.as_str(), if live { "kept open" } else { "ended" });
-                let mut job = self.headless_job(
+                let job = self.headless_job(
                     "review",
                     child,
                     stdout,
                     stderr,
                     JobSubject {
                         provider: launch.provider,
-                        ..JobSubject::run(headless_job::REVIEW, run.id(), attempt)
+                        ..JobSubject::review(JobKind::Agent, run.id(), attempt)
                     },
                 );
-                // The provider that runs the review bounds it.
-                if let Some(agent) = self.job_agent(launch.provider) {
-                    job.timeout = agent.review_timeout();
-                }
                 return Ok(Phase::Review(ReviewWatch {
                     session,
                     attempt,
@@ -702,7 +698,7 @@ impl Supervisor<'_> {
                             },
                         },
                     )
-                    .with_timeout(agent.review_timeout()),
+                    .with_timeout(self.review_job_timeout(JobKind::Agent, launch.provider)),
                 )
                 .context("start the review")?
                 .process()
@@ -1675,7 +1671,10 @@ pub(super) fn retries_review(
 ) -> Option<RetryCause> {
     let cause = match outcome {
         ReviewEnd::Unreadable(_) => RetryCause::Unreadable,
-        ReviewEnd::Failed(JobFailed::Exited(_)) if !unusable => RetryCause::JobFailed,
+        // A run's review is an agent job.
+        ReviewEnd::Failed(failed) if !unusable && JobKind::Agent.retries(failed.stop()) => {
+            RetryCause::JobFailed
+        }
         ReviewEnd::Failed(_) | ReviewEnd::Verdict(_) => return None,
     };
     (retry && !retried && !manual).then_some(cause)

@@ -2,9 +2,11 @@
 //! pid is recorded in `headless_jobs`; a supervisor that takes over from
 //! one that died stops the job it left before starting its own, never a
 //! process that took the pid later, and a job's timeout stops what the job
-//! started too.
+//! started too, whatever the job's kind (an agent's or a program's).
 use crate::runtime_support;
-use dagq::domain::EventKind;
+use dagq::application::supervise::{JobEnds, JobFailed, JobPorts, JobSubject, start_program_job};
+use dagq::domain::{EventKind, LeaseToken};
+use dagq::infrastructure::adapters::SystemProcesses;
 
 use runtime_support::*;
 
@@ -79,8 +81,10 @@ fn job_rows(db: &Path) -> Vec<JobRow> {
 /// A supervisor died while the review of its run ran (the stub job never
 /// ends). The supervisor that adopts the run stops that job, the process
 /// the job started with it, before it starts its own review, and records
-/// `headless_job_stopped` with the pid, the kind and the run; only its own
-/// review runs then, and the run lands. A row of the dead supervisor whose
+/// `headless_job_stopped` with the pid, the kind and the run, and a
+/// program job of the review (ADR-t1895-1 decision 1) the same way; only
+/// its own review runs then, and the run lands. A row of the dead
+/// supervisor whose
 /// pid runs another process now (a pid used again) is closed without a
 /// signal, and one whose process is gone is only closed.
 #[test]
@@ -136,6 +140,13 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
         .unwrap();
     };
     insert("review", old_job, &process_start(old_job));
+    let program_job = orphan("sleep 120 & wait");
+    conn.execute(
+        "INSERT INTO headless_jobs(kind, label, run_id, attempt, pid, process_start, supervisor_token, started_at, provider)
+         VALUES ('review_program', 'fmt', ?1, 1, ?2, ?3, 'dead-supervisor', unixepoch(), 'none')",
+        rusqlite::params![run.id(), program_job, process_start(program_job)],
+    )
+    .unwrap();
     insert("recovery", other, "Thu Jan  1 00:00:00 1970");
     insert("recovery", u32::MAX / 2, "Thu Jan  1 00:00:00 1970");
     // A supervisor whose heartbeat went stale while its process lives (a
@@ -162,6 +173,7 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     // The old job and its child are gone; the other process runs on.
     assert!(!running(old_job));
     assert!(!running(old_child));
+    assert!(!running(program_job));
     assert!(running(other));
     assert!(running(asleep_job));
     for pid in [other, asleep, asleep_job] {
@@ -170,7 +182,10 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_landed(&repo, &detail.runs[0], "test task", &base);
     let stopped = payloads(&detail, "headless_job_stopped");
-    assert_eq!(stopped.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(stopped.len(), 2, "{:?}", event_kinds(&detail));
+    assert_eq!(stopped[1]["pid"], program_job);
+    assert_eq!(stopped[1]["kind"], "review_program");
+    assert_eq!(stopped[1]["label"], "fmt");
     assert_eq!(stopped[0]["pid"], old_job);
     assert_eq!(stopped[0]["kind"], "review");
     assert_eq!(stopped[0]["run_id"], run.id().as_str());
@@ -189,11 +204,12 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     assert!(at("headless_job_stopped", 1) < at("review_started", 2));
     assert_eq!(reviewer.prompts().len(), 1);
     let rows = job_rows(&db);
-    assert_eq!(rows.len(), 5, "{rows:?}");
+    assert_eq!(rows.len(), 6, "{rows:?}");
     let outcomes: Vec<_> = rows.iter().map(|r| r.5.as_deref()).collect();
     assert_eq!(
         outcomes,
         [
+            Some("taken_over"),
             Some("taken_over"),
             Some("not_the_job"),
             Some("gone"),
@@ -201,7 +217,7 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
             Some("ended")
         ]
     );
-    let (kind, run_id, attempt, _, token, _) = &rows[4];
+    let (kind, run_id, attempt, _, token, _) = &rows[5];
     assert_eq!(kind, "review");
     assert_eq!(run_id.as_deref(), Some(run.id().as_str()));
     assert_eq!(*attempt, 2);
@@ -210,10 +226,19 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
 
 /// A review that times out is stopped with what it started: the process
 /// its shell left in the background does not outlive the job, and the
-/// job's row is closed as stopped.
+/// job's row is closed as stopped. Its timeout is `[review.jobs]
+/// agent_timeout_secs` of the repository's `dagq.toml`, not the provider's
+/// (ADR-t1895-1 decision 1).
 #[test]
 fn a_timed_out_review_stops_the_processes_it_started() {
     let (_dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[review.jobs]\nagent_timeout_secs = 1\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-m", "review jobs"]);
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     // Beside the queue, whose own name has a quote.
     let pid_file = db.parent().unwrap().join("review-child.pid");
@@ -221,7 +246,8 @@ fn a_timed_out_review_stops_the_processes_it_started() {
         "sleep 120 & echo $! > {}; wait",
         shell_path(&pid_file)
     )]);
-    reviewer.timeout = Duration::from_secs(1);
+    // The provider's own timeout is far longer.
+    reviewer.timeout = Duration::from_secs(60);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let child: u32 = fs::read_to_string(&pid_file)
@@ -251,4 +277,138 @@ fn a_timed_out_review_stops_the_processes_it_started() {
     assert_eq!(rows[0].0, "review");
     assert_eq!(rows[0].2, 1);
     assert_eq!(rows[0].5.as_deref(), Some("stopped"));
+}
+
+/// A program job's `headless_jobs` row: kind, label, provider, outcome,
+/// supervisor.
+type ProgramRow = (String, Option<String>, String, Option<String>, String);
+
+/// Poll `job` until it ends, at most 20 seconds.
+fn ended(job: &mut dagq::application::supervise::HeadlessJob) -> Result<String, JobFailed> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(end) = job.poll_output(&LocalRunFiles).unwrap() {
+            return end;
+        }
+        assert!(Instant::now() < deadline, "the program job never ended");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A program job of a run's review (ADR-t1895-1 decision 1) runs as a
+/// child process in a group of its own, on the common path of every job:
+/// it is recorded as `review_program` with the program's name and no
+/// provider; one that ends gives its stdout and its row ends as `ended`;
+/// one past its timeout is stopped with the processes it started, and its
+/// row ends as `stopped`.
+#[test]
+fn a_program_job_is_recorded_and_its_timeout_stops_what_it_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db).unwrap();
+    let ends = JobEnds::default();
+    let token = LeaseToken::new("program-supervisor");
+    let ports = JobPorts {
+        store: &queue,
+        processes: Arc::new(SystemProcesses),
+        supervisor_token: &token,
+        clock: &SystemClock,
+        ends: &ends,
+    };
+    let run = RunId::new("run-1").unwrap();
+    let output = |name: &str| {
+        (
+            dir.path().join(format!("{name}.out")),
+            dir.path().join(format!("{name}.err")),
+        )
+    };
+    let start = |script: &str, name: &str, timeout: Duration| {
+        let mut program = CommandSpec::new("/bin/sh");
+        program.args(["-c", script]);
+        start_program_job(
+            &ports,
+            &process::LocalSpawner,
+            &program,
+            output(name),
+            JobSubject::review_program(&run, 1, name),
+            timeout,
+        )
+        .unwrap()
+    };
+    let mut done = start("echo formatted", "fmt", Duration::from_secs(60));
+    assert_eq!(ended(&mut done).unwrap(), "formatted\n");
+    // A child, and a grandchild whose parent (a subshell) exits at once:
+    // it leaves the job's descendants but stays in the job's process
+    // group, so only the group's stop reaches it.
+    let pid_file = dir.path().join("child.pid");
+    let orphan_file = dir.path().join("orphan.pid");
+    let mut slow = start(
+        &format!(
+            "(sleep 120 & echo $! > {}); sleep 120 & echo $! > {}; wait",
+            shell_path(&orphan_file),
+            shell_path(&pid_file)
+        ),
+        "slow",
+        Duration::from_secs(2),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let read_pid =
+        |file: &Path| -> Option<u32> { fs::read_to_string(file).ok()?.trim().parse().ok() };
+    while (read_pid(&pid_file).is_none() || read_pid(&orphan_file).is_none())
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let orphan = read_pid(&orphan_file).expect("the program's grandchild never started");
+    let failed = ended(&mut slow).unwrap_err();
+    assert!(matches!(failed, JobFailed::TimedOut(_)), "{failed:?}");
+    assert!(
+        failed
+            .error()
+            .contains("review program did not finish within 2 seconds"),
+        "{failed:?}"
+    );
+    let child: u32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running(child) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!running(child), "the program's child {child} outlived it");
+    while running(orphan) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !running(orphan),
+        "the program's grandchild {orphan} outside its descendants outlived its group"
+    );
+    assert!(!running(slow.pid()));
+    let unwritten: Vec<_> = ends.write(&queue).into_iter().map(|(id, _)| id).collect();
+    assert!(unwritten.is_empty(), "{unwritten:?}");
+    let rows: Vec<ProgramRow> =
+        Connection::open(&db)
+            .unwrap()
+            .prepare(
+                "SELECT kind, label, provider, outcome, supervisor_token FROM headless_jobs ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+    let row = |label: &str, outcome: &str| {
+        (
+            "review_program".to_owned(),
+            Some(label.to_owned()),
+            "none".to_owned(),
+            Some(outcome.to_owned()),
+            "program-supervisor".to_owned(),
+        )
+    };
+    assert_eq!(rows, [row("fmt", "ended"), row("slow", "stopped")]);
 }

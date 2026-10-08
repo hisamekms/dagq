@@ -18,7 +18,8 @@ pub const EXIT_RETRY_INTERVALS_SECS: [u64; 3] = [30, 60, 120];
 /// nothing retries a `/exit` any more.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitConfig {
-    /// The retries after the timeout.
+    /// The retries after the timeout; 0 retried none and, once they were
+    /// used up, did not close the workspace to go on to land.
     pub retries: usize,
     /// The wait after retry `n` is `intervals[n - 1]`; past the list, its
     /// last value.

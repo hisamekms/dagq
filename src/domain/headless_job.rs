@@ -19,6 +19,12 @@ pub const RECOVERY: &str = "recovery";
 pub const PLAN_REVIEW: &str = "plan_review";
 /// `headless_jobs.kind` of a goal review (ADR-0047 decision 43).
 pub const GOAL_REVIEW: &str = "goal_review";
+/// `headless_jobs.kind` of a program job of a run's review stage
+/// (ADR-t1895-1 decision 1); its `label` names the program.
+pub const REVIEW_PROGRAM: &str = "review_program";
+/// `headless_jobs.provider` of a job no provider runs (a program job): the
+/// column is the provider of an agent job only.
+pub const NO_PROVIDER: &str = "none";
 
 /// `headless_jobs.outcome` of a job that ended by itself (its exit read).
 pub const ENDED: &str = "ended";
@@ -35,6 +41,103 @@ pub const GONE: &str = "gone";
 /// another process now (or whose start could not be told): it is not
 /// touched.
 pub const NOT_THE_JOB: &str = "not_the_job";
+
+string_enum!(JobKind {
+    Agent => "agent",
+    Program => "program",
+});
+
+/// What runs a job of a run's review stage (ADR-t1895-1 decision 1): an
+/// `agent` job is a provider's headless session, a `program` job a child
+/// process of a set program in a process group of its own. Either starts,
+/// is waited for under its kind's timeout, is stopped with its descendants
+/// at the timeout, is recorded in `headless_jobs` and is taken over by
+/// another supervisor the same way. Every other headless job (the
+/// recovery job, the plan review, the goal review) is an agent job.
+impl JobKind {
+    /// The `headless_jobs.kind` of this kind's job of a run's review.
+    pub const fn review_kind(self) -> &'static str {
+        match self {
+            Self::Agent => REVIEW,
+            Self::Program => REVIEW_PROGRAM,
+        }
+    }
+
+    /// Whether a job of this kind that ended as `stop` is worth one more
+    /// job with the same input. An agent job that exited non-zero is a
+    /// passing failure (task 328); a program's exit is its check's result
+    /// (ADR-t1895-2 decision 3), not a failure to try again. A timeout is
+    /// retried for neither: another job would spend the timeout again, and
+    /// a program's is a review failure (ADR-t1895-2 decision 4).
+    pub const fn retries(self, stop: JobStop) -> bool {
+        matches!((self, stop), (Self::Agent, JobStop::Exited))
+    }
+}
+
+/// How a job ended without a reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStop {
+    /// Its process exited non-zero.
+    Exited,
+    /// It did not end within its timeout and was stopped.
+    TimedOut,
+}
+
+/// `[review.jobs]` of `dagq.toml`: the timeout of each kind of job of a
+/// run's review stage, in seconds. A kind without a key keeps the
+/// timeout of the provider's review ([`JobTimeouts::of`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobTimeouts {
+    /// `agent_timeout_secs`, a whole number above 0.
+    pub agent: Option<u64>,
+    /// `program_timeout_secs`, a whole number above 0.
+    pub program: Option<u64>,
+}
+
+impl JobTimeouts {
+    /// The keys of `[review.jobs]`, the agent's first.
+    pub const KEYS: [&'static str; 2] = ["agent_timeout_secs", "program_timeout_secs"];
+
+    /// Set the key `key` (one of [`Self::KEYS`]) to `secs`.
+    pub fn set(&mut self, key: &str, secs: u64) {
+        if key == Self::KEYS[0] {
+            self.agent = Some(secs);
+        } else {
+            self.program = Some(secs);
+        }
+    }
+
+    /// The timeout of a `kind` job of a run's review: its key's, else
+    /// `default`, the provider's review timeout the review had before the
+    /// kinds.
+    pub fn of(self, kind: JobKind, default: std::time::Duration) -> std::time::Duration {
+        match kind {
+            JobKind::Agent => self.agent,
+            JobKind::Program => self.program,
+        }
+        .map_or(default, std::time::Duration::from_secs)
+    }
+
+    /// How long a job may run. One outside a run's review stage (`stage`
+    /// `None`: the recovery job, a plan review, a goal review) gets
+    /// `reviewer`'s, the review timeout of the supervisor's reviewer,
+    /// whatever `[review.jobs]` says. A `kind` job of the stage gets its
+    /// key's ([`Self::of`]), else `provider`'s (the review timeout of the
+    /// provider that runs it) for an agent job and `reviewer`'s for a
+    /// program job, which no provider runs.
+    pub fn job_timeout(
+        self,
+        stage: Option<JobKind>,
+        provider: std::time::Duration,
+        reviewer: std::time::Duration,
+    ) -> std::time::Duration {
+        match stage {
+            None => reviewer,
+            Some(JobKind::Agent) => self.of(JobKind::Agent, provider),
+            Some(JobKind::Program) => self.of(JobKind::Program, reviewer),
+        }
+    }
+}
 
 string_enum!(JobAccess {
     ReadFiles => "read_files",
@@ -253,6 +356,70 @@ mod tests {
         assert_eq!(takeover(true, Some("a"), Some("b")), Takeover::NotTheJob);
         assert_eq!(takeover(true, None, Some("b")), Takeover::NotTheJob);
         assert_eq!(takeover(true, Some("a"), None), Takeover::NotTheJob);
+    }
+
+    #[test]
+    fn each_kind_is_recorded_retried_and_bounded_its_own_way() {
+        assert_eq!(JobKind::Agent.review_kind(), REVIEW);
+        assert_eq!(JobKind::Program.review_kind(), REVIEW_PROGRAM);
+        for kind in [JobKind::Agent, JobKind::Program] {
+            assert_eq!(kind.as_str().parse::<JobKind>().unwrap(), kind);
+            assert!(!kind.retries(JobStop::TimedOut));
+        }
+        assert!(JobKind::Agent.retries(JobStop::Exited));
+        assert!(!JobKind::Program.retries(JobStop::Exited));
+        let default = std::time::Duration::from_secs(600);
+        let none = JobTimeouts::default();
+        assert_eq!(none.of(JobKind::Agent, default), default);
+        assert_eq!(none.of(JobKind::Program, default), default);
+        let mut set = JobTimeouts::default();
+        set.set("program_timeout_secs", 30);
+        assert_eq!(set.of(JobKind::Program, default).as_secs(), 30);
+        assert_eq!(set.of(JobKind::Agent, default), default);
+        set.set("agent_timeout_secs", 900);
+        assert_eq!(set.of(JobKind::Agent, default).as_secs(), 900);
+    }
+
+    #[test]
+    fn a_jobs_timeout_follows_its_stage_and_kind() {
+        let secs = std::time::Duration::from_secs;
+        let (provider, reviewer) = (secs(120), secs(600));
+        // Without `[review.jobs]`: the review's agent job keeps its
+        // provider's, a program job and any other job the reviewer's.
+        let none = JobTimeouts::default();
+        assert_eq!(
+            none.job_timeout(Some(JobKind::Agent), provider, reviewer),
+            provider
+        );
+        assert_eq!(
+            none.job_timeout(Some(JobKind::Program), provider, reviewer),
+            reviewer
+        );
+        assert_eq!(none.job_timeout(None, provider, reviewer), reviewer);
+        // With it: each kind of the stage gets its key's; a job outside
+        // the stage (the recovery job, a plan or goal review) does not.
+        let set = JobTimeouts {
+            agent: Some(900),
+            program: Some(30),
+        };
+        assert_eq!(
+            set.job_timeout(Some(JobKind::Agent), provider, reviewer),
+            secs(900)
+        );
+        assert_eq!(
+            set.job_timeout(Some(JobKind::Program), provider, reviewer),
+            secs(30)
+        );
+        assert_eq!(set.job_timeout(None, provider, reviewer), reviewer);
+        // One key alone leaves the other kind at its default.
+        let program = JobTimeouts {
+            agent: None,
+            program: Some(30),
+        };
+        assert_eq!(
+            program.job_timeout(Some(JobKind::Agent), provider, reviewer),
+            provider
+        );
     }
 
     #[test]

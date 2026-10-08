@@ -47,7 +47,8 @@ use crate::{
         process::LocalSpawner,
         run_env::{
             ShellVerifier, load_conflict_config, load_disk_config, load_fresh_session,
-            load_provider_fallback, load_resume_config, load_stall_config, load_supervisor_config,
+            load_provider_fallback, load_resume_config, load_review_jobs, load_stall_config,
+            load_supervisor_config,
         },
         run_files::LocalRunFiles,
         runtime_store::SqliteOpener,
@@ -364,6 +365,7 @@ impl SuperviseOptions {
             light_changes: Default::default(),
             provider_fallback: Default::default(),
             fresh_session: Default::default(),
+            review_jobs: Default::default(),
             slot_flags: self.slot_flags(),
             once: self.once,
             stop: self.stop.clone(),
@@ -516,6 +518,14 @@ pub fn supervise_with_reviewer(
         Arc::new(move || load_fresh_session(&checkout))
             as crate::application::supervise::FreshSessionFile
     });
+    // `[review.jobs]` (ADR-t1895-1 decision 1), read at the start: a table
+    // that cannot be read keeps each kind's timeout the provider's.
+    let review_jobs = load_review_jobs(&main_checkout)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %format_args!("{error:#}"), "[review.jobs] of dagq.toml not read: {error:#}; using the providers' review timeouts");
+            None
+        })
+        .unwrap_or_default();
     let pid = std::process::id();
     let generators = options.generators.clone();
     let agent = ClaudeCode {
@@ -726,6 +736,7 @@ pub fn supervise_with_reviewer(
         light_changes,
         provider_fallback,
         fresh_session,
+        review_jobs,
         ..options.settings(stall, conflicts, disk, resume, limits)
     };
     supervisor::supervise(&ports, &settings)

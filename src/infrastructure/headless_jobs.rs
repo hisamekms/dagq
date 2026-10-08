@@ -5,8 +5,8 @@ use anyhow::Result;
 use rusqlite::{TransactionBehavior, params};
 
 use super::sqlite::SqliteQueue;
-use crate::domain::LeaseToken;
 use crate::domain::write_rules::check_non_blank;
+use crate::domain::{LeaseToken, Provider, headless_job};
 use crate::{
     application::{HeadlessJobRecord, HeadlessJobStore, NewHeadlessJob},
     domain::HEARTBEAT_TIMEOUT_SECS,
@@ -32,7 +32,8 @@ impl HeadlessJobStore for SqliteQueue {
                 job.process_start,
                 job.supervisor_token,
                 now,
-                job.provider.as_str()
+                job.provider
+                    .map_or(headless_job::NO_PROVIDER, Provider::as_str)
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -95,7 +96,7 @@ impl HeadlessJobStore for SqliteQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{RunId, headless_job};
+    use crate::domain::RunId;
 
     fn job(token: &LeaseToken, pid: u32) -> NewHeadlessJob {
         NewHeadlessJob {
@@ -105,7 +106,7 @@ mod tests {
             proposal_id: None,
             goal_id: None,
             attempt: 2,
-            provider: crate::domain::Provider::Claude,
+            provider: Some(crate::domain::Provider::Claude),
             pid,
             process_start: Some("Sun Sep 27 10:00:00 2026".into()),
             supervisor_token: token.clone(),
@@ -208,8 +209,9 @@ mod tests {
         );
     }
 
-    /// A job records its provider, and a row written without one (by an
-    /// older binary, or before migration 0055) reads as `claude`.
+    /// A job records its provider, a program job none, and a row written
+    /// without one (by an older binary, or before migration 0055) reads as
+    /// `claude`; each reads back with its kind.
     #[test]
     fn a_job_records_its_provider_and_one_without_reads_as_claude() {
         let dir = tempfile::tempdir().unwrap();
@@ -217,8 +219,16 @@ mod tests {
         let token = LeaseToken::new("me");
         let codex = queue
             .record_headless_job(&NewHeadlessJob {
-                provider: crate::domain::Provider::Codex,
+                provider: Some(crate::domain::Provider::Codex),
                 ..job(&token, 10)
+            })
+            .unwrap();
+        let program = queue
+            .record_headless_job(&NewHeadlessJob {
+                kind: headless_job::REVIEW_PROGRAM,
+                label: Some("check-docs".into()),
+                provider: None,
+                ..job(&token, 12)
             })
             .unwrap();
         queue
@@ -229,17 +239,26 @@ mod tests {
                 [],
             )
             .unwrap();
-        let providers: Vec<(i64, String)> = queue
+        let providers: Vec<(i64, String, String, Option<String>)> = queue
             .orphaned_headless_jobs(&token, true)
             .unwrap()
             .into_iter()
-            .map(|j| (j.id, j.provider))
+            .map(|j| (j.id, j.kind, j.provider, j.label))
             .collect();
+        let row = |id: i64, kind: &str, provider: &str, label: Option<&str>| {
+            (
+                id,
+                kind.to_owned(),
+                provider.to_owned(),
+                label.map(str::to_owned),
+            )
+        };
         assert_eq!(
             providers,
             vec![
-                (codex, "codex".to_owned()),
-                (codex + 1, "claude".to_owned())
+                row(codex, "review", "codex", None),
+                row(program, "review_program", "none", Some("check-docs")),
+                row(program + 1, "goal_review", "claude", None),
             ]
         );
     }
