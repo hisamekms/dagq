@@ -1,0 +1,9 @@
+run_id,task_id,landed_at,reason
+312c1f8c-1f1c-4e2c-a1e7-a7d9f0b75d49,2063,2026-10-08T10:17:42.353Z,IT を絞った関門（2045 tests run）
+5ae18eca-68af-4be3-95c6-7f0bee79dff2,1544,2026-10-08T10:52:35.910Z,nextest の段が無い（関門の test を流さない task）
+fd7065b8-98c2-4630-a0aa-41e40014ca0f,2128,2026-10-08T11:57:49.994Z,"最初の試行で落ちた: 3106 passed (4 slow), 1 failed, 6 skipped"
+71d151d3-8837-4e82-9ead-106bebbb5bd6,2154,2026-10-08T12:18:54.541Z,nextest の段が無い（関門の test を流さない task）
+26972e1a-29a5-4a10-b365-79c6fa8d617a,1554,2026-10-08T13:12:01.522Z,"最初の試行で落ちた: 3108 passed, 1 failed, 6 skipped"
+765595e5-3189-4137-aa8d-0508646a8be1,1902,2026-10-08T13:22:57.087Z,nextest の段が無い（関門の test を流さない task）
+dd06164e-2311-4605-b92e-c93830f3624b,1553,2026-10-08T13:56:07.143Z,"最初の試行で落ちた: 3113 passed (2 slow), 1 failed, 6 skipped"
+a4d8e39e-ad80-44a4-9238-19f4d014a2d8,1847,2026-10-08T15:22:06.233Z,"最初の試行で落ちた: 3124 passed (4 slow), 2 failed, 6 skipped"
