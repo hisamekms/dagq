@@ -27,14 +27,14 @@ related:
 
 `DependencyGraph`の`tasks`のうち、(i) `in_progress`、(ii) `effective_priority`が`high`以上、(iii) `critical`の鎖に載る、のどれかに当たるtaskと、それらの`ready_after`（1段だけ）: 未完了のtask、と`{"goal": ID}`のgoalの未完了のtask全部。前提の前提は辿らない。理由（`in_progress` / `priority` / `critical` / `prerequisite`）はこの順で最初に当たったもの。
 
-`--goal G`の`d2` / `svg`（`near_term_in_goal`、`select_in`）: (i)・(ii)はGのtaskに絞り、(iii)は`graph --goal G`の`critical`の鎖（Gのtaskから始まり、Gの外へ続きうる）の全部のtask、(iv)の前提は絞らない`graph`（`dependency_graph(..., None)`）の全部のtaskから引く。Gの外のtaskは自分のgoalの帯・枠に置く（goalの無いtaskは`goal なし`の帯）。`critical`の鎖をGの外まで描くのは、ADR-0077の決定1の(iii)が「`graph`の`critical`の鎖に載るtask」で、`--goal`の`graph`の`critical`がGの外まで続く鎖だから。鎖の外に出たtaskの前提も(iv)として1段だけ描く。Gの外のtaskは`in_progress`や`high`でも(i)・(ii)の起点にしない（鎖か前提として入ったときだけ描き、理由は`critical` / `prerequisite`、色は`Tone`のまま）。着手可の印は絞らない`graph`の`candidates`で付ける。`--goal`の無いときは`select`と同じ。
+`--goal G`の`d2` / `svg`（`near_term_in_goal`、`select_in`）: (i)・(ii)はGのtaskに絞り、(iii)は`graph --goal G`の`critical`の鎖（Gのtaskから始まり、Gの外へ続きうる）の全部のtask、(iv)の前提は絞らない`graph`（`dependency_graph(..., None)`）の全部のtaskから引く。Gの外のtaskは自分のgoalの帯・枠に置く（goalの無いtaskは`no goal`の帯）。`critical`の鎖をGの外まで描くのは、ADR-0077の決定1の(iii)が「`graph`の`critical`の鎖に載るtask」で、`--goal`の`graph`の`critical`がGの外まで続く鎖だから。鎖の外に出たtaskの前提も(iv)として1段だけ描く。Gの外のtaskは`in_progress`や`high`でも(i)・(ii)の起点にしない（鎖か前提として入ったときだけ描き、理由は`critical` / `prerequisite`、色は`Tone`のまま）。着手可の印は絞らない`graph`の`candidates`で付ける。`--goal`の無いときは`select`と同じ。
 
 ## 配置（`application::diagram::layout`）
 
 純粋な関数で、同じ`DependencyGraph`とgoalの題から同じ結果になる（`BTreeMap`の順）。
 
 - **列**: 描いたtaskの間の前提（`ready_after`のtaskと、`ready_after`のgoalの描いたtask）の最長の鎖の長さ（`depths`）。前提が左。
-- **帯**: goalごと（goalの無いtaskは`goal なし`の帯）。帯の中は列ごとにtaskをIDの順に行へ積み、帯の高さは最も多い列の行数で決まる。
+- **帯**: goalごと（goalの無いtaskは`no goal`の帯）。帯の中は列ごとにtaskをIDの順に行へ積み、帯の高さは最も多い列の行数で決まる。
 - **帯の順**: 描いた前提でgoalどうしをつないだ連結成分のうち、2つ以上のgoalのものを先に（成分の中は最初の列、次にgoalのID）、他とつながらない帯を後に並べる。
 - **lane**: 帯は順に、直前の帯と同じlaneの右に置けるなら（最初の列が、そのlaneの最後の帯の最後の列より右）そこへ、置けなければ下に新しいlaneを開く。
 - **座標**（px）: 列の間隔`COLUMN_WIDTH` 300、箱`NODE_WIDTH` 240 × `NODE_HEIGHT` 64、行の間隔`ROW_HEIGHT` 88、枠の見出し`HEADER_HEIGHT` 36、枠の余白`FRAME_PADDING` 16、laneの間`LANE_GAP` 40、外周`MARGIN` 20。
@@ -42,7 +42,7 @@ related:
 
 ## d2のソース（`Diagram::to_d2`）
 
-枠（`goal_<ID>` / `goal_none`。containerにせず、`label.near: top-left`の見出しを持つ矩形）を先に書いて箱の背後にし、次に箱（`t<ID>`、label `#ID` と題の2行）、辺、凡例（`legend_0`〜`legend_3`と`legend_note_0` / `legend_note_1`）を書く。どの形も`top` / `left`（枠と箱は`width` / `height`も）で固定する。文字列はd2のdouble-quoteで、`"`・`\`・`$`をescapeし、制御文字を落とす。
+枠（`goal_<ID>` / `goal_none`。containerにせず、`label.near: top-left`の見出しを持つ矩形）を先に書いて箱の背後にし、次に箱（`t<ID>`、label `#ID` と題の2行）、辺、凡例（`legend_0`〜`legend_3`と`legend_note_0` / `legend_note_1`。凡例と`no goal`の見出しは英語の固定の文字列で、taskとgoalの題は利用者が書いたまま）を書く。どの形も`top` / `left`（枠と箱は`width` / `height`も）で固定する。文字列はd2のdouble-quoteで、`"`・`\`・`$`をescapeし、制御文字を落とす。
 
 - **色**（`Tone`、fill / stroke）: `in_progress` `#dbeafe` / `#1d4ed8`、`interrupt`と`urgent` `#fee2e2` / `#b91c1c`、`high` `#fef3c7` / `#b45309`、`normal`以下 `#f3f4f6` / `#6b7280`。判定は`in_progress`を先に、次に`effective_priority`。枠は`#fafafa` / `#9ca3af`の破線。
 - **辺**: taskの前提は`t<前> -> t<後>`、goalの前提は`goal_<ID> -> t<後>`。`critical`の鎖の隣り合う2つを結ぶ辺（goalの辺は、そのgoalの描いたtaskから鎖が続くとき）は`#dc2626`の太さ4、他は`#6b7280`の太さ1。

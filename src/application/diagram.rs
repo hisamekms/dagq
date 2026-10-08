@@ -82,7 +82,7 @@ impl Tone {
             Self::InProgress => "in_progress",
             Self::Pressing => "interrupt / urgent",
             Self::High => "high",
-            Self::Normal => "normal 以下",
+            Self::Normal => "normal or lower",
         }
     }
 }
@@ -346,7 +346,7 @@ pub fn layout(
                 "goal {goal}: {}",
                 goal_titles.get(&goal).map(String::as_str).unwrap_or("")
             ),
-            None => "goal なし".to_owned(),
+            None => "no goal".to_owned(),
         };
         frames.push(Frame {
             goal_id: key,
@@ -580,8 +580,8 @@ impl Diagram {
             left += 200;
         }
         let notes = [
-            format!("{STARTABLE_MARK}二重枠: 今すぐ着手できる"),
-            "赤の太線: critical の鎖".to_owned(),
+            format!("{STARTABLE_MARK}double border: startable now"),
+            "thick red line: critical chain".to_owned(),
         ];
         for (index, note) in notes.iter().enumerate() {
             out.push_str(&format!(
@@ -913,5 +913,52 @@ mod tests {
         // Frames come before the boxes, so they are drawn behind them.
         assert!(d2.find("goal_none: {").unwrap() < d2.find("t1: {").unwrap());
         assert_eq!(quoted("a\u{7}b\nc"), "\"ab\\nc\"");
+    }
+
+    /// Whether `text` has a Hiragana, Katakana or CJK ideograph character.
+    fn has_japanese(text: &str) -> bool {
+        text.chars().any(|c| {
+            matches!(c,
+                '\u{3040}'..='\u{309f}'
+                | '\u{30a0}'..='\u{30ff}'
+                | '\u{31f0}'..='\u{31ff}'
+                | '\u{ff66}'..='\u{ff9f}'
+                | '\u{3400}'..='\u{4dbf}'
+                | '\u{4e00}'..='\u{9fff}'
+                | '\u{f900}'..='\u{faff}')
+        })
+    }
+
+    #[test]
+    fn fixed_labels_are_english() {
+        let titles = BTreeMap::from([
+            (GoalId::new(10), "first goal".to_owned()),
+            (GoalId::new(20), "second goal".to_owned()),
+            (GoalId::new(30), "third goal".to_owned()),
+        ]);
+        // Every tone, a startable task, the critical chain and a band
+        // without a goal are drawn, so every fixed label is in the source.
+        let diagram = near_term(&graph(), &titles);
+        let d2 = diagram.to_d2();
+        assert!(!has_japanese(&d2), "{d2}");
+        assert!(d2.contains("label: \"normal or lower\""));
+        assert!(d2.contains("label: \"no goal\""));
+        assert!(d2.contains(&format!(
+            "label: \"{STARTABLE_MARK}double border: startable now\""
+        )));
+        assert!(d2.contains("label: \"thick red line: critical chain\""));
+        let in_goal = near_term_in_goal(&graph(), &graph(), GoalId::new(10), &titles).to_d2();
+        assert!(!has_japanese(&in_goal), "{in_goal}");
+        assert!(has_japanese("あア漢"));
+    }
+
+    #[test]
+    fn user_titles_are_drawn_unchanged() {
+        let mut graph = graph();
+        graph.tasks[0].title = "日本語の題".to_owned();
+        let titles = BTreeMap::from([(GoalId::new(10), "ゴールの題".to_owned())]);
+        let d2 = near_term(&graph, &titles).to_d2();
+        assert!(d2.contains("#1\\n日本語の題"), "{d2}");
+        assert!(d2.contains("label: \"goal 10: ゴールの題\""), "{d2}");
     }
 }
