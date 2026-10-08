@@ -267,6 +267,8 @@ pub struct LoopSettings {
     /// `[provider_fallback]` at the start (ADR-t1857-1), read again each
     /// pass.
     pub provider_fallback: crate::domain::provider_switch::ProviderFallback,
+    /// `[fresh_session]` at the start (ADR-t2080-1), read again each pass.
+    pub fresh_session: crate::domain::fresh_session::FreshSessionConfig,
     /// Exit when no run is active and no task can be claimed, instead of
     /// polling for new work.
     pub once: bool,
@@ -465,6 +467,9 @@ pub struct Ports<'a> {
     /// for no file), read again each pass (ADR-t1857-1); `None` reads
     /// nothing.
     pub provider_fallback_file: Option<ProviderFallbackFile>,
+    /// `[fresh_session]` of the main checkout's `dagq.toml` (`None` for no
+    /// file), read again each pass (ADR-t2080-1); `None` reads nothing.
+    pub fresh_session_file: Option<FreshSessionFile>,
     /// Records the forecast snapshots (ADR-0070 decision 3); `None`
     /// records none.
     pub forecasts: Option<ForecastPort>,
@@ -505,6 +510,11 @@ pub type SupervisorFile = Arc<dyn Fn() -> Result<Option<SupervisorConfig>> + Sen
 /// (ADR-t1857-1).
 pub type ProviderFallbackFile =
     Arc<dyn Fn() -> Result<Option<crate::domain::provider_switch::ProviderFallback>> + Send + Sync>;
+
+/// Reads `[fresh_session]` of the main checkout's `dagq.toml`
+/// (ADR-t2080-1).
+pub type FreshSessionFile =
+    Arc<dyn Fn() -> Result<Option<crate::domain::fresh_session::FreshSessionConfig>> + Send + Sync>;
 
 /// Spawn a thread that reports its `tracing` events to the subscriber of
 /// the spawning thread, so a supervisor run under a scoped subscriber (the
@@ -900,6 +910,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         fallback: settings.provider_fallback,
         fallback_file: ports.provider_fallback_file.clone(),
         fallback_error: None,
+        fresh_session: settings.fresh_session,
+        fresh_session_file: ports.fresh_session_file.clone(),
+        fresh_session_error: None,
         finished: Vec::new(),
         errors: Vec::new(),
         claiming: true,
@@ -992,7 +1005,7 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   `triaged`, `stall`, `conflicts*`, `job_ends`, `live_job_ends`,
 ///   `last_turns`, `run_env_missing`, `landing_*`,
 ///   `run_e2e`, `e2e`, `queue_hold`, `provider_holds`,
-///   `timer_finishes_held`, `fallback*`, `moved`, `hold_continue`,
+///   `timer_finishes_held`, `fallback*`, `fresh_session*`, `moved`, `hold_continue`,
 ///   `reopens`, `notice_failures`, `rechecks`, `defer`, `loads`,
 ///   `resume_config`, `retry_unreadable_review`, `review_material`,
 ///   `wrapper_setting_warned`) and the adapters it uses (`repository`,
@@ -1065,6 +1078,15 @@ struct Supervisor<'a> {
     /// The error the last read of `[provider_fallback]` failed with,
     /// warned of once until it changes or a read succeeds.
     fallback_error: Option<String>,
+    /// `[fresh_session]` as last read (ADR-t2080-1): past what context a
+    /// worker's send-back or resume starts a new session.
+    fresh_session: crate::domain::fresh_session::FreshSessionConfig,
+    /// Reads `[fresh_session]` again each pass; `None` keeps
+    /// `fresh_session`.
+    fresh_session_file: Option<FreshSessionFile>,
+    /// The error the last read of `[fresh_session]` failed with, warned of
+    /// once until it changes or a read succeeds.
+    fresh_session_error: Option<String>,
     finished: Vec<TaskRun>,
     errors: Vec<RunError>,
     /// Cleared after a provisioning failure so an unavailable cmux or Git
@@ -1629,6 +1651,9 @@ impl Supervisor<'_> {
             // And `[provider_fallback]`: turning the workers' fallback on
             // or off takes effect without a restart (ADR-t1857-1).
             self.reread_provider_fallback();
+            // And `[fresh_session]`: a new threshold takes effect without
+            // a restart (ADR-t2080-1).
+            self.reread_fresh_session();
             // And `[ci_watch]`, whose check is reaped and started off the
             // loop, draining and handing off too (ADR-t1920-1).
             self.on_observation(|observation, env| observation.ci_watch_pass(env));

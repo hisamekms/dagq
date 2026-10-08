@@ -8,6 +8,7 @@ scope: runtime
 related:
   - adr-t1566-1
   - adr-t2072-1
+  - adr-t2080-1
   - adr-t1892-1
   - adr-t1428-1
   - adr-t1942-2
@@ -111,6 +112,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   上限に当たらない入力では節は全文のまま載り、省いたことの注記は載らない。
 - 記録: claimのprovisionが`PromptBytes`（言語の指示を含む）を、workerの最初のturnを始める`wrapper_launched`の`prompt_bytes`に記録する。
   providerの切り替えで書き直した`prompt.txt`は記録しない。
+- 新しいsession（ADR-t2080-1）の最初のturnは`prompt.txt`と引き継ぎのprompt（`handoff_text`）で、wrapperがつなぐ（`domain::turn::new_session_prompt`）。
 - 落とし穴: 兄弟taskの一覧はclaimの順で非対称になる（同じpassで後にclaimしたtaskだけが先のtaskを知る）。
   理由は`siblings_in_progress`のdoc comment。
 - 落とし穴: `tests/e2e.rs`のstubはpromptの1行目とreceiptのpathの行だけを読むので、節を足してもstubは変わらない。
@@ -121,9 +123,8 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 - workerのpromptはreceiptの書き方の直前に`ACCEPTANCE_MAP`を置く（[ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
   各項目を満たすものへ対応づけ、満たせない項目を`follow_ups`に回して`succeeded`にしない。
 - resumeとreviseの依頼はreceiptを書き直す手順に`ACCEPTANCE_REMAP`と`FOLLOW_UP_PROPOSAL_AGAIN`を足す。
-- どのproviderのworkerも同じ文で、新しい検査のコマンドは求めない。
+- どのproviderのworkerも同じ文で、対応づけにも文書の照合にも検査のコマンドやtestの実行は求めない。
 - Codexのworkerの自分のdiffの見直しはこの対応づけの手順に寄せ、受け入れ条件との照合を2度言わない（下の[subagent review](#subagent-review)）。
-- runのreviewの側は[Review](review.md#文書の照合)が持つ。
 
 ## 文書の照合
 
@@ -137,14 +138,12 @@ workerのpromptは`ACCEPTANCE_MAP`の直後に`DOCS_CHECK`を置き、対応づ�
   示すためだけに文書を触らない。
 - 汎用に保つ: 探す道具、repository固有のpath、文書の層や予算は名指さない（ADR-t1453-2）。
   このrepositoryの範囲と書き方は[documents.md](../../development/documents.md#workerの文書の照合)が持つ。
-- どのproviderのworkerのpromptも同じ文で、検査のコマンドやtestの実行は求めない。
 
 resumeとreviseの依頼は`ACCEPTANCE_REMAP`の「`summary`の句を書き直す」に照合した文書を含める。
 reviewの側は[Review](review.md#文書の照合)が持つ（`REVIEW_DOCS_CHECK`）。
 
 ## 経路とproviderごとの文面
 
-- workerに送る文（`prompt.txt`、resume・revise・食い違い・古いreceipt・receiptの無い促し・閉じたaskの知らせ、askの答え、復旧jobの指示、holdの後の続き）は全て非対話のsessionの文である（[非対話のworker](headless-worker.md)、[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)）。
 - 分けるのはprovider（`Route::of(run)`、runの`actual_provider`）だけで、違いは最後の段落のproviderの1行と[subagent review](#subagent-review)である。
 - 対話と記録されたrunもclaimとresumeで非対話に変わり、Claudeの非対話のrunと同じ文を受け取る（[非対話のworker](headless-worker.md#対話と記録されたtaskのclaimとresume)）。
 - 入口:
@@ -193,12 +192,10 @@ claimのたびに、supervisorはworkerが読む指示の内容のhashを3つ求
 - どのworkerの記録でも非対話の操作だけを案内し、画面のダイアログに答える操作と閉じて進める操作は許す操作から除く。
   返されてもsupervisorの`check_live`（`src/application/supervise/recovery.rs`）が拒む。
 - `send_instruction`は次のturnの依頼で、画面の代わりにturnの抜粋を読む。
-- workerに打鍵する操作は無い。
 - 判定と上限は[復旧job](background-recovery-job.md)と下の[上限](#goal-reviewrunのreview復旧jobruntimeのplannerの上限)が持つ。
 
 ## repositoryの規則を読む順
 
-runtimeはrepositoryの規則（検証のコマンド、宣言するpaths、要るevidence、ADRのような記録の規則）を持たず、promptはsessionをrepositoryの指示へ向けるだけにする。
 promptと固定の文字列には、dagqのrepositoryの規則（ADRの索引や番号の付け方、Rustのlinterの名前など）を書かない。
 
 - worker: `WORKER_READING`と`local_checks`が「AGENTS.mdかCLAUDE.md」を名指す。
@@ -243,7 +240,7 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 | 復旧job | `read_files` | `recovery_prompt`（`RecoveryMaterial`） | `RECOVERY_*` |
 | runtimeのplanner | plannerのrole | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt` | `RUNTIME_PLANNER_*`・`DRAFT_*`・`FINDING_*`・`REQUEST_*`・`PLANNER_*` |
 | workerの初期prompt | worktreeのファイル・git・goalのdoc | `prompt::prompt`（[上](#workerのprompt)） | `WORKER_PROMPT_LIMIT`・`WORKER_*` |
-| workerの次のturnの文 | worktreeとrun directoryのファイル・git | `resume_request`・`revise_request`・`revise_mismatch_request`・`stale_receipt_nudge`・`stall_nudge`・`answer_text`・`recovery_instruction`・`closed_question_notice`・`continue_text`・`restored_request`、supervisorの`retry_text`・`switch_text`（[下](#次のturnの文の上限)） | `RESUME_*`・`REVISE_*`・`PROVIDER_*`・`UNDELIVERED_REQUEST_BYTES`・`NEXT_TURN_*`（taskのpathsと検証は`WORKER_*`） |
+| workerの次のturnの文 | worktreeとrun directoryのファイル・git | `resume_request`・`revise_request`・`revise_mismatch_request`・`stale_receipt_nudge`・`stall_nudge`・`answer_text`・`recovery_instruction`・`closed_question_notice`・`continue_text`・`restored_request`・`handoff_text`、supervisorの`retry_text`・`switch_text`（[下](#次のturnの文の上限)） | `RESUME_*`・`REVISE_*`・`PROVIDER_*`・`UNDELIVERED_REQUEST_BYTES`・`NEXT_TURN_*`・`HANDOFF_*`（taskのpathsと検証は`WORKER_*`） |
 
 ### plan reviewの上限
 
@@ -264,6 +261,10 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
   receiptの名指すcommitはreceiptで読ませ、ほかの文はworkerが読める場所に無いので読む方法が無いと書く。
 - providerの再試行と切り替え: 届かなかった依頼は出どころによらず1つの節として切り、全文は`turns/request-<seq>.taken.json`で読ませる。
   前の文が何度包み直されても全体の上限を超えない。
+- 引き継ぎのprompt: 材料は`handoff_prompt`が集め、transcriptは持たない。
+  節の上限は`HANDOFF_*`、全体は`HANDOFF_LIMIT`で、最初のturnはtaskのpromptとの和に収まる。
+  省いたcommitと変更はgitで、reviewの理由と依頼は呼び手が名指すファイルで、receiptのsummaryはreceiptで読ませる。
+  依頼は必須の節で、切れば`over_limit`に書く。
 - 必須の節: resumeとreviseのtaskの検証とresumeのpathsはtaskそのものの記述なので省かず、初期promptと同じ`WORKER_*`の上限で切って`over_limit`に書く。
   手順の行と、切り替えの固定の文（`git log`と`git status`で作業を見る手順など）は省かない。
 - 「Tasks landed」の節はその節の行数とtitleの上限で有界なので、ここでは切らずに全体の上限に数える（[ADR-t1892-1](../../adr/2026-10-07-t1892-1-resume-request-lists-landed-tasks-by-title-with-a-cap.md)）。

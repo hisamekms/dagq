@@ -298,6 +298,7 @@ event_kinds! {
     SessionGoneParked => "session_gone_parked",
     SessionIdleObserved => "session_idle_observed",
     SessionOpened => "session_opened",
+    SessionRenewed => "session_renewed",
     SessionReopenFailed => "session_reopen_failed",
     SessionTokens => "session_tokens",
     SessionTurns => "session_turns",
@@ -854,6 +855,15 @@ pub const SESSION_EXITED: &str = EventKind::SessionExited.as_str();
 pub const SESSION_GONE_PARKED: &str = EventKind::SessionGoneParked.as_str();
 pub const SESSION_IDLE_OBSERVED: &str = EventKind::SessionIdleObserved.as_str();
 pub const SESSION_OPENED: &str = EventKind::SessionOpened.as_str();
+/// A headless run's worker goes on in a new session of the same provider,
+/// worktree, branch and run, because its previous turn's context was
+/// large (ADR-t2080-1): `after_turn` (the last turn of the session it
+/// leaves), `peak_context` and `threshold` (why: the peak, in tokens, was
+/// above `[fresh_session] peak_context_above`), `provider`, `session` (the
+/// new session's name; Codex names its thread itself, recorded by
+/// `turn_session_identified`) and `count`. A boundary of the session as a
+/// `provider_switched` is ([`crate::domain::provider_switch::session_starts`]).
+pub const SESSION_RENEWED: &str = EventKind::SessionRenewed.as_str();
 /// A headless run's lost session the supervisor could not open again
 /// during its wait (task 1372): `attempt`, `cause`, `error`, and the
 /// `workspace_id` it opened when there was one.
@@ -1203,6 +1213,7 @@ mod tests {
             (EventKind::SessionGoneParked, "session_gone_parked"),
             (EventKind::SessionIdleObserved, "session_idle_observed"),
             (EventKind::SessionOpened, "session_opened"),
+            (EventKind::SessionRenewed, "session_renewed"),
             (EventKind::SessionReopenFailed, "session_reopen_failed"),
             (EventKind::SessionTokens, "session_tokens"),
             (EventKind::SessionTurns, "session_turns"),

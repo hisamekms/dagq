@@ -386,7 +386,6 @@ line = 8752
 path = "docs/design/supervisor-lifecycle/supervise.md"
 size = 42997
 line = 5419
-tasks = 6
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/task-replanning.md"

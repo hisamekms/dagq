@@ -317,15 +317,25 @@ impl<'a> TurnSession<'a> {
 }
 
 /// The name of the session a provider that takes one (Claude) gives the
-/// run `run_id` after `switches` switches of its provider (ADR-t813-2
-/// decision 4): the run's id until the first switch, then a UUID of its own
-/// for each, since Claude Code refuses a session id in use and the session
-/// after a switch is a new one.
-pub fn session_name(run_id: &str, switches: usize) -> String {
-    if switches == 0 {
+/// run `run_id` after `starts` new sessions of its worker
+/// ([`crate::domain::provider_switch::session_starts`]: switches of its
+/// provider, ADR-t813-2 decision 4, and new sessions for a large context,
+/// ADR-t2080-1): the run's id until the first, then a UUID of its own for
+/// each, since Claude Code refuses a session id in use and each is a new
+/// session.
+pub fn session_name(run_id: &str, starts: usize) -> String {
+    if starts == 0 {
         return run_id.to_owned();
     }
-    uuid_of(&format!("{run_id}/{switches}"))
+    uuid_of(&format!("{run_id}/{starts}"))
+}
+
+/// The prompt of the first turn of a new session that a request starts
+/// (a switch's, a new session's handoff, a request no session took yet):
+/// the task's prompt, then the request. The session carries no earlier
+/// conversation, so the task is told again.
+pub fn new_session_prompt(task_prompt: &str, request: &str) -> String {
+    format!("{task_prompt}\n\n{request}")
 }
 
 /// The name of the session of the headless planner opened at `created_at`

@@ -925,6 +925,7 @@ pub mod exit;
 pub mod finding;
 pub mod follow_up;
 pub mod forecast;
+pub mod fresh_session;
 pub mod goal;
 pub mod goal_review;
 pub mod goal_tag;

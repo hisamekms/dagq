@@ -172,13 +172,23 @@ pub fn waiting_on(events: &[RunEvent], turn: u64) -> bool {
         .any(|e| e.kind == event_kind::PROVIDER_WAITING && e.payload["turn"] == turn)
 }
 
-/// The run's events since its last switch: those of the session of its
-/// current provider (all of them when it never switched).
-pub fn since_switch(events: &[RunEvent]) -> &[RunEvent] {
-    match events
-        .iter()
-        .rposition(|e| e.kind == event_kind::PROVIDER_SWITCHED)
-    {
+/// Whether `event` starts a new session of the run's worker: a switch of
+/// its provider, or a new session of the same one for a large context
+/// (`session_renewed`, ADR-t2080-1 decision 5).
+fn starts_session(event: &RunEvent) -> bool {
+    event.kind == event_kind::PROVIDER_SWITCHED || event.kind == event_kind::SESSION_RENEWED
+}
+
+/// How many new sessions the run's worker started after its first: its
+/// switches and its renewals, as recorded.
+pub fn session_starts(events: &[RunEvent]) -> usize {
+    events.iter().filter(|e| starts_session(e)).count()
+}
+
+/// The run's events since its worker's session last started anew: those
+/// of its current session (all of them when it never did).
+pub fn since_session_start(events: &[RunEvent]) -> &[RunEvent] {
+    match events.iter().rposition(starts_session) {
         Some(at) => &events[at + 1..],
         None => events,
     }
@@ -652,14 +662,34 @@ mod tests {
             &[event(event_kind::PROVIDER_WAITING, json!({"turn": 1}))],
             1
         ));
-        assert_eq!(since_switch(&events).len(), 0);
+        assert_eq!(since_session_start(&events).len(), 0);
         assert!(switch_of_turn(&events, 1).is_some());
         assert!(switch_of_turn(&events, 2).is_none());
         let events = vec![first, turn.clone(), second, turn];
         assert_eq!(switches(&events), 2);
         assert!(!may_switch(&events));
-        assert_eq!(since_switch(&events).len(), 1);
-        assert_eq!(since_switch(&[]).len(), 0);
+        assert_eq!(since_session_start(&events).len(), 1);
+        assert_eq!(since_session_start(&[]).len(), 0);
+    }
+
+    /// A new session for a large context (ADR-t2080-1) is a boundary of
+    /// the session as a switch is, but no switch: it uses up none of them.
+    #[test]
+    fn a_renewed_session_starts_anew_without_a_switch() {
+        let events = vec![
+            event(event_kind::TURN_STARTED, json!({"turn": 1})),
+            event(event_kind::PROVIDER_SWITCHED, json!({"turn": 1})),
+            event(event_kind::TURN_STARTED, json!({"turn": 2})),
+            event(event_kind::SESSION_RENEWED, json!({"after_turn": 2})),
+            event(event_kind::TURN_STARTED, json!({"turn": 3})),
+            event(event_kind::SESSION_RENEWED, json!({"after_turn": 3})),
+        ];
+        assert_eq!(switches(&events), 1);
+        assert!(may_switch(&events));
+        assert_eq!(session_starts(&events), 3);
+        assert_eq!(since_session_start(&events).len(), 0);
+        assert_eq!(since_session_start(&events[..5]).len(), 1);
+        assert_eq!(session_starts(&events[..1]), 0);
     }
 
     #[test]

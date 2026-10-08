@@ -45,15 +45,15 @@ use super::{
 };
 use crate::domain::{
     ActorContext, ActorRole, PlannerId, Provider, RunEvent, TaskRun, event_kind,
-    provider_switch::{since_switch, switches},
+    provider_switch::{session_starts, since_session_start},
     sccache::SccacheTarget,
     stall::StallConfig,
     tokens::{ExecutionTokens, ModelTokens, TokenSource, TokenUsage},
     turn::{
         LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSession,
-        TurnSignal, commands_path, counted_rollout_turns, exit_path, idle_marker, output_path,
-        pending, renew_wall_marker, request_path, request_to_take, session_name, taken_path,
-        thread_total_own, turn_own_cost, turn_own_models, turns_dir,
+        TurnSignal, commands_path, counted_rollout_turns, exit_path, idle_marker,
+        new_session_prompt, output_path, pending, renew_wall_marker, request_path, request_to_take,
+        session_name, taken_path, thread_total_own, turn_own_cost, turn_own_models, turns_dir,
     },
     worker_model::WorkerSession,
 };
@@ -132,10 +132,16 @@ pub(super) struct Turns<'a> {
     pub(super) clock: &'a dyn Clock,
 }
 
-/// The session of the provider a run is on, as its events since it last
-/// moved to that provider say (ADR-t813-2 decision 4).
+/// The session of the provider a run is on, as its events since its
+/// worker's session last started anew say: since it moved to that provider
+/// (ADR-t813-2 decision 4) or started a new session there for a large
+/// context (ADR-t2080-1).
 struct Agent {
     provider: Provider,
+    /// The run's new sessions after its first when it started
+    /// ([`session_starts`]): one more recorded starts the next turn in a
+    /// new session.
+    starts: usize,
     /// A turn of it had its model answer: there is a conversation to
     /// resume.
     created: bool,
@@ -143,15 +149,17 @@ struct Agent {
     /// recorded.
     identified: Option<String>,
     /// The name of its session for a provider that takes one (Claude): the
-    /// run's id until the run first switched, a name of its own after.
+    /// run's id until its session first started anew, a name of its own
+    /// after.
     name: String,
 }
 
 impl Agent {
     fn new(name: String, provider: Provider, events: &[RunEvent]) -> Self {
-        let current = since_switch(events);
+        let current = since_session_start(events);
         Self {
             provider,
+            starts: session_starts(events),
             created: current.iter().any(|e| {
                 e.kind == event_kind::TURN_FINISHED && e.payload["session_created"] == true
             }),
@@ -162,6 +170,13 @@ impl Agent {
             name,
         }
     }
+}
+
+/// Whether the next turn is the first of a new session rather than one
+/// of `on`'s: the run is on another `provider` now, or `events` record a
+/// new session `on` did not start in ([`session_starts`]).
+fn starts_anew(on: &Agent, provider: Provider, events: &[RunEvent]) -> bool {
+    provider != on.provider || session_starts(events) != on.starts
 }
 
 /// How a turn ended.
@@ -388,7 +403,7 @@ impl<'a> Turns<'a> {
     /// ([`session_name`]), or the planner's own.
     fn session_name(&self, events: &[RunEvent]) -> String {
         match &self.owner {
-            TurnOwner::Run(run) => session_name(run.id().as_str(), switches(events)),
+            TurnOwner::Run(run) => session_name(run.id().as_str(), session_starts(events)),
             TurnOwner::Planner { session, .. } => session.clone(),
         }
     }
@@ -485,22 +500,29 @@ impl<'a> Turns<'a> {
                     }
                 },
             };
-            // The supervisor moved the run to the other provider: this turn
-            // is the first of a new session there, in the same worktree.
+            // The supervisor moved the run to the other provider, or started
+            // its worker over for a large context (ADR-t2080-1): this turn
+            // is the first of a new session, in the same worktree.
             let provider = self.provider_now()?;
-            if provider != on.provider {
-                let events = self.events()?;
+            let events = self.events()?;
+            if starts_anew(&on, provider, &events) {
                 on = Agent::new(self.session_name(&events), provider, &events);
-                // The supervisor wrote the task's prompt again for this
-                // provider's worker.
+                // After a switch the supervisor wrote the task's prompt
+                // again for this provider's worker.
                 task_prompt = self.files.read_to_string(&run_dir.join("prompt.txt"))?;
-                say(
-                    self.background,
-                    &format!(
-                        "the run moved to {}; a new session starts",
-                        provider.as_str()
-                    ),
-                );
+                let renewed = events
+                    .iter()
+                    .rfind(|e| {
+                        e.kind == event_kind::PROVIDER_SWITCHED
+                            || e.kind == event_kind::SESSION_RENEWED
+                    })
+                    .is_some_and(|e| e.kind == event_kind::SESSION_RENEWED);
+                let why = if renewed {
+                    "the run's worker starts over for its large context".to_owned()
+                } else {
+                    format!("the run moved to {}", provider.as_str())
+                };
+                say(self.background, &format!("{why}; a new session starts"));
             }
             let agent = self.agent(on.provider)?;
             // A session is resumed once its model answered or the agent
@@ -517,7 +539,7 @@ impl<'a> Turns<'a> {
             };
             let asked = prompt.clone();
             let prompt = match &request {
-                Some(_) if resume.is_none() => format!("{task_prompt}\n\n{prompt}"),
+                Some(_) if resume.is_none() => new_session_prompt(&task_prompt, &prompt),
                 _ => prompt,
             };
             turn += 1;
@@ -1345,6 +1367,66 @@ fn turn_look(
 mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
+
+    fn run_event(kind: &str, payload: serde_json::Value) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    /// A `session_renewed` (ADR-t2080-1) starts the next turn in a new
+    /// session of the same provider: it carries none of the conversation
+    /// (no session created or identified to resume) and takes a name of its
+    /// own; the provider stays.
+    #[test]
+    fn a_renewed_session_starts_anew_on_the_same_provider() {
+        let mut events = vec![
+            run_event(
+                event_kind::TURN_SESSION_IDENTIFIED,
+                json!({"turn": 1, "session_id": "thread-1"}),
+            ),
+            run_event(
+                event_kind::TURN_FINISHED,
+                json!({"turn": 1, "session_created": true, "peak_context": 300_000}),
+            ),
+        ];
+        let name = |events: &[RunEvent]| session_name("run-1", session_starts(events));
+        let on = Agent::new(name(&events), Provider::Codex, &events);
+        assert!(on.created);
+        assert_eq!(on.identified.as_deref(), Some("thread-1"));
+        assert_eq!(on.name, "run-1");
+        assert!(!starts_anew(&on, Provider::Codex, &events));
+        let renewal = crate::domain::fresh_session::renewed_payload(
+            "run-1",
+            Provider::Codex,
+            &events,
+            (300_000, 150_000),
+        );
+        events.push(run_event(event_kind::SESSION_RENEWED, renewal));
+        assert!(starts_anew(&on, Provider::Codex, &events));
+        let renewed = Agent::new(name(&events), Provider::Codex, &events);
+        assert_eq!(renewed.provider, Provider::Codex);
+        assert!(!renewed.created);
+        assert_eq!(renewed.identified, None);
+        assert_ne!(renewed.name, on.name);
+        assert_eq!(renewed.name, events[2].payload["session"]);
+        assert!(!starts_anew(&renewed, Provider::Codex, &events));
+        // A switch of the provider still starts anew too.
+        assert!(starts_anew(&renewed, Provider::Claude, &events));
+        // The first turn of the new session is the task's prompt, then the
+        // handoff.
+        assert_eq!(
+            new_session_prompt("the task", "the handoff"),
+            "the task\n\nthe handoff"
+        );
+    }
 
     fn limits() -> TurnLimits {
         TurnLimits {

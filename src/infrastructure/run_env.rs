@@ -32,6 +32,9 @@
 //! `[provider_fallback] workers` turns off a worker's move off a provider
 //! it cannot use, and `jobs` that of a headless job whose role names its
 //! provider (ADR-t1857-1).
+//! `[fresh_session] peak_context_above` starts a worker's send-back or
+//! resume in a new session past a context of that many tokens
+//! (ADR-t2080-1).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -54,6 +57,7 @@ use crate::{
         ci_watch::{CiWatchConfig, DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS},
         disk::DiskConfig,
         exit::ExitConfig,
+        fresh_session::FreshSessionConfig,
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
         landing_verification::{self, LandingVerification},
@@ -145,6 +149,10 @@ const HEADLESS_WRAPPER: &str = "wrapper";
 /// `[provider_fallback]`: whether a worker and a job move off a provider
 /// they cannot use (ADR-t1857-1).
 const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
+/// `[fresh_session]`: the context past which a worker's send-back or
+/// resume starts a new session (ADR-t2080-1); its key is on
+/// [`FreshSessionConfig`].
+const FRESH_SESSION_TABLE: &str = "fresh_session";
 /// `[ci_watch]`: the landing branch's CI the supervisor watches
 /// (ADR-t1920-1). `workflow` (a non-blank string) is required; `branch`
 /// (a branch name without `refs/heads/`), `interval_secs` (at least
@@ -156,7 +164,7 @@ const CI_WATCH_TABLE: &str = "ci_watch";
 /// `[landing_verification]`: the command `integrate` runs in place of
 /// some of a task's (ADR-t1925-1 decision 4).
 const LANDING_VERIFICATION_TABLE: &str = landing_verification::TABLE;
-const TABLES: [&str; 19] = [
+const TABLES: [&str; 20] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -174,6 +182,7 @@ const TABLES: [&str; 19] = [
     E2E_TABLE,
     HEADLESS_TABLE,
     PROVIDER_FALLBACK_TABLE,
+    FRESH_SESSION_TABLE,
     CI_WATCH_TABLE,
     LANDING_VERIFICATION_TABLE,
 ];
@@ -256,6 +265,8 @@ pub struct Config {
     /// `[provider_fallback]` (ADR-t1857-1), the default (on) for the keys
     /// it does not set.
     pub provider_fallback: ProviderFallback,
+    /// `[fresh_session]` (ADR-t2080-1); no key starts no new session.
+    pub fresh_session: FreshSessionConfig,
     /// `[ci_watch]` (ADR-t1920-1); `None` without the table, which watches
     /// nothing.
     pub ci_watch: Option<CiWatchConfig>,
@@ -280,6 +291,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // changes` once the file is read whole (ADR-t1591-1).
     let mut light_changes: Option<(Vec<TaskChange>, usize)> = None;
     let mut fallback_keys: Vec<String> = Vec::new();
+    let mut fresh_session_keys: Vec<String> = Vec::new();
     // `[ci_watch]`'s header line and the keys read, the table checked once
     // the file is read whole (its `workflow` is required).
     let mut ci_watch: Option<(usize, CiWatchConfig)> = None;
@@ -557,6 +569,22 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     config.provider_fallback.workers = on;
                 }
                 fallback_keys.push(key.to_owned());
+            }
+            Some(FRESH_SESSION_TABLE) => {
+                ensure!(
+                    FreshSessionConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{FRESH_SESSION_TABLE}]; the keys are {}",
+                    FreshSessionConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !fresh_session_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let tokens = parse_positive(rest.trim(), "number of tokens").with_context(with)?;
+                config.fresh_session.peak_context_above =
+                    Some(u64::try_from(tokens).with_context(with)?);
+                fresh_session_keys.push(key.to_owned());
             }
             Some(CI_WATCH_TABLE) => {
                 ensure!(
@@ -1245,6 +1273,20 @@ pub fn load_provider_fallback(root: &Path) -> Result<Option<ProviderFallback>> {
         parse_config(&text)
             .with_context(|| format!("parse {}", path.display()))?
             .provider_fallback,
+    ))
+}
+
+/// `[fresh_session]` of the `dagq.toml` in `root` (ADR-t2080-1), `None`
+/// when there is no file; no table or no key starts no new session.
+pub fn load_fresh_session(root: &Path) -> Result<Option<FreshSessionConfig>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .fresh_session,
     ))
 }
 
@@ -2854,6 +2896,86 @@ LITERAL = 'no \n escapes # here'
                 jobs: false
             })
         );
+    }
+
+    /// `[fresh_session] peak_context_above` is a whole number of tokens
+    /// above 0, none without it; the table knows no other key and takes
+    /// the key once (ADR-t2080-1).
+    #[test]
+    fn parses_the_threshold_of_the_fresh_session_table() {
+        let fresh = |text: &str| parse_config(text).unwrap().fresh_session;
+        assert_eq!(fresh(""), FreshSessionConfig::default());
+        assert_eq!(fresh("").peak_context_above, None);
+        assert_eq!(fresh("[fresh_session]\n"), FreshSessionConfig::default());
+        assert_eq!(
+            fresh("[fresh_session]\npeak_context_above = 150_000 # tokens\n").peak_context_above,
+            Some(150_000)
+        );
+        assert_eq!(
+            fresh("[fresh_session]\npeak_context_above = 1\n").peak_context_above,
+            Some(1)
+        );
+        for (text, expected) in [
+            (
+                "[fresh_session]\npeak_context_above = 0\n",
+                "dagq.toml:2: value of peak_context_above: must be a positive number of tokens, not 0",
+            ),
+            (
+                "[fresh_session]\npeak_context_above = -1\n",
+                "dagq.toml:2: value of peak_context_above: must be a positive number of tokens, not -1",
+            ),
+            (
+                "[fresh_session]\npeak_context_above = 1.5\n",
+                "dagq.toml:2: value of peak_context_above: expected a whole number of tokens, not 1.5",
+            ),
+            (
+                "[fresh_session]\npeak_context_above = \"150k\"\n",
+                "dagq.toml:2: value of peak_context_above: expected a whole number of tokens",
+            ),
+            (
+                "[fresh_session]\npeak_context_above = \n",
+                "dagq.toml:2: value of peak_context_above: missing value",
+            ),
+            (
+                "[fresh_session]\nthreshold = 1\n",
+                "dagq.toml:2: unknown key threshold in [fresh_session]; the keys are peak_context_above",
+            ),
+            (
+                "[fresh_session]\npeak_context_above = 1\npeak_context_above = 2\n",
+                "dagq.toml:3: peak_context_above is defined twice",
+            ),
+            (
+                "[fresh_session]\n[fresh_session]\n",
+                "dagq.toml:2: [fresh_session] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_fresh_session(dir.path()).unwrap(), None);
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[stall]\n").unwrap();
+        assert_eq!(
+            load_fresh_session(dir.path()).unwrap(),
+            Some(FreshSessionConfig::default())
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[fresh_session]\npeak_context_above = 200000\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_fresh_session(dir.path()).unwrap(),
+            Some(FreshSessionConfig {
+                peak_context_above: Some(200_000)
+            })
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[fresh_session]\npeak_context_above = 0\n",
+        )
+        .unwrap();
+        assert!(load_fresh_session(dir.path()).is_err());
     }
 
     /// `[supervisor] light_changes` names changes of `[tasks] changes`,

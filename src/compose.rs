@@ -66,8 +66,9 @@ use crate::{
         },
         process::LocalSpawner,
         run_env::{
-            ShellVerifier, load_conflict_config, load_disk_config, load_kpi_settings,
-            load_provider_fallback, load_resume_config, load_stall_config, load_supervisor_config,
+            ShellVerifier, load_conflict_config, load_disk_config, load_fresh_session,
+            load_kpi_settings, load_provider_fallback, load_resume_config, load_stall_config,
+            load_supervisor_config,
         },
         run_files::LocalRunFiles,
         runtime_store::SqliteOpener,
@@ -655,6 +656,7 @@ impl SuperviseOptions {
             limits,
             light_changes: Default::default(),
             provider_fallback: Default::default(),
+            fresh_session: Default::default(),
             slot_flags: self.slot_flags(),
             once: self.once,
             stop: self.stop.clone(),
@@ -816,6 +818,20 @@ pub fn supervise_with_reviewer(
         let checkout = main_checkout.clone();
         Arc::new(move || load_provider_fallback(&checkout))
             as crate::application::supervise::ProviderFallbackFile
+    });
+    // `[fresh_session]` (ADR-t2080-1), read as `[provider_fallback]` is:
+    // a table that cannot be read at the start starts no new session;
+    // later reads keep the value in use.
+    let fresh_session = load_fresh_session(&main_checkout)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %format_args!("{error:#}"), "[fresh_session] of dagq.toml not read: {error:#}; starting no new session");
+            None
+        })
+        .unwrap_or_default();
+    let fresh_session_file = Some({
+        let checkout = main_checkout.clone();
+        Arc::new(move || load_fresh_session(&checkout))
+            as crate::application::supervise::FreshSessionFile
     });
     let pid = std::process::id();
     let generators = options.generators.clone();
@@ -1152,6 +1168,7 @@ pub fn supervise_with_reviewer(
         conflicts_file,
         supervisor_file,
         provider_fallback_file,
+        fresh_session_file,
         forecasts,
         release: Some(release),
         host_metrics,
@@ -1197,6 +1214,7 @@ pub fn supervise_with_reviewer(
         conflicts_error,
         light_changes,
         provider_fallback,
+        fresh_session,
         ..options.settings(stall, conflicts, disk, resume, limits)
     };
     supervisor::supervise(&ports, &settings)

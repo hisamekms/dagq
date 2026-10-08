@@ -3,9 +3,10 @@
 //! its `worker_question` asks.
 
 use super::*;
-use crate::application::prompt::PromptBytes;
+use crate::application::prompt::{HandoffMaterial, PromptBytes, handoff_text};
 use crate::domain::EventKind;
 use crate::domain::e2e_quarantine;
+use crate::domain::fresh_session::{self, NextSession};
 
 impl Supervisor<'_> {
     /// Start the validation of `run` on a thread (see [`spawn_validation`]).
@@ -717,6 +718,143 @@ impl SessionWatch {
             }
         }
         Ok(typed)
+    }
+}
+
+impl Supervisor<'_> {
+    /// Read `[fresh_session]` of `dagq.toml` again (ADR-t2080-1), as
+    /// `[provider_fallback]` is: a file that cannot be read keeps the
+    /// threshold in use, with one warning until the error changes.
+    pub(super) fn reread_fresh_session(&mut self) {
+        let Some(read) = self.fresh_session_file.clone() else {
+            return;
+        };
+        let to = match read() {
+            Ok(Some(to)) => to,
+            Ok(None) => {
+                self.fresh_session_error = None;
+                return;
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                if self.fresh_session_error.as_ref() != Some(&message) {
+                    warn!(error = %message, "[fresh_session] of dagq.toml not read: {message}; keeping peak_context_above = {:?}", self.fresh_session.peak_context_above);
+                    self.fresh_session_error = Some(message);
+                }
+                return;
+            }
+        };
+        self.fresh_session_error = None;
+        if to != self.fresh_session {
+            info!(
+                "[fresh_session] of dagq.toml changed: peak_context_above {:?} -> {:?}",
+                self.fresh_session.peak_context_above, to.peak_context_above
+            );
+            self.fresh_session = to;
+        }
+    }
+
+    /// Whether a send-back or resume of `run`'s worker goes on in its
+    /// session or in a new one (ADR-t2080-1 decisions 1 and 4): by its
+    /// previous turn's `peak_context` and `[fresh_session]` alone.
+    #[allow(
+        dead_code,
+        reason = "the revise, the needs_session resume and the triage's resume call it once connected"
+    )]
+    pub(super) fn next_session(&self, run: &TaskRun) -> Result<NextSession> {
+        let events = self.queue.run_events(run.id())?;
+        Ok(fresh_session::next_session(
+            fresh_session::previous_peak_context(&events),
+            self.fresh_session.peak_context_above,
+        ))
+    }
+
+    /// The handoff prompt of a new session of `run`'s worker
+    /// ([`handoff_text`]): its commits and its worktree's changes as git
+    /// shows them, the summary of the receipt it wrote last, `review` and
+    /// the `request` it would have been sent (with the file that holds it
+    /// whole). What git cannot show is said, not an error: the session
+    /// reads it in its worktree. The language's instruction is added here
+    /// once, so `request` is passed without it.
+    #[allow(
+        dead_code,
+        reason = "the revise, the needs_session resume and the triage's resume call it once connected"
+    )]
+    pub(super) fn handoff_prompt(
+        &self,
+        run: &TaskRun,
+        (peak_context, threshold): (u64, u64),
+        review: Option<(&str, Option<&Path>)>,
+        (request, request_file): (&str, Option<&Path>),
+    ) -> Result<FittedPrompt> {
+        let worktree = Path::new(run.worktree_path().context("missing worktree")?);
+        let unread = |what: &str, error: anyhow::Error| {
+            warn!(run_id = %run.id(), "the {what} of {} could not be read for its handoff: {error:#}", run.id());
+            format!("(could not be read: run `git {what}` in your worktree)")
+        };
+        let commits = self
+            .repository
+            .head(worktree)
+            .and_then(|head| {
+                self.repository
+                    .log_oneline(run.base_commit().as_str(), head.as_str())
+            })
+            .unwrap_or_else(|error| unread("log", error));
+        let changes = self
+            .repository
+            .status(worktree)
+            .unwrap_or_else(|error| unread("status", error));
+        let receipt = run
+            .receipt_path()
+            .and_then(|path| self.files.read_to_string(Path::new(path)).ok())
+            .and_then(|text| Receipt::parse(&text).ok());
+        let prompt = handoff_text(
+            run,
+            &HandoffMaterial {
+                peak_context,
+                threshold,
+                commits: &commits,
+                changes: &changes,
+                review,
+                receipt_summary: receipt.as_ref().map(Receipt::summary),
+                request,
+                request_file,
+            },
+        );
+        Ok(prompt.with_language(self.verifier.language().as_ref()))
+    }
+
+    /// Start `run`'s worker over in a new session (ADR-t2080-1 decision
+    /// 5): record the boundary as `session_renewed` (why, the provider it
+    /// stays on, the new session's name) and write `handoff` as the
+    /// session's next request (`what`). The run, its worktree, its branch
+    /// and its provider stay; the session wrapper starts the request as the
+    /// first turn of a new session with the task's prompt before it, and
+    /// carries no conversation over.
+    #[allow(
+        dead_code,
+        reason = "the revise, the needs_session resume and the triage's resume call it once connected"
+    )]
+    pub(super) fn start_fresh_session(
+        &mut self,
+        run: &TaskRun,
+        workspace: &str,
+        fresh: (u64, u64),
+        handoff: &FittedPrompt,
+        what: &str,
+    ) -> Result<()> {
+        let events = self.queue.run_events(run.id())?;
+        let payload = fresh_session::renewed_payload(
+            run.id().as_str(),
+            run.actual_provider(),
+            &events,
+            fresh,
+        );
+        info!(run_id = %run.id(), "run {}'s worker goes on in a new session ({}): its previous turn's context took {} tokens, above {}", run.id(), payload["session"], fresh.0, fresh.1);
+        self.queue
+            .record_runtime_event(run.id(), EventKind::SessionRenewed, payload)?;
+        request_turn(self, run, workspace, Input::from(handoff), what)?;
+        Ok(())
     }
 }
 

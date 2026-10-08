@@ -18,6 +18,7 @@ related:
   - adr-0004
   - adr-t813-1
   - adr-t813-2
+  - adr-t2080-1
   - adr-t813-3
   - adr-t1215-1
   - adr-t2086-1
@@ -281,8 +282,6 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - turnが壁に当たってもwrapperはsessionを終えずに次の依頼を待ち、supervisorが切り替えるか、控えが解けたら同じsessionへもう一度送るか、待つ。
   切り替えられないときもrunは失敗にしない。
 - 切り替えた後は会話が引き継がれないので、文がcommitと変更を見て続けるよう言い、promptも新しいproviderの文面で書き直す。
-- 切り替えの後のClaudeのsessionは新しい名前で始める（`domain::turn::session_name`）。
-  Claude Codeは使われた`--session-id`を拒むため。
 - 両方が起動できないときと、Codexの壁でClaudeが使えるのに切り替えの上限に達したときは、人を待つものが無いのでaskを開かない。
 - runtimeのplannerは同じ壁で同じsessionを待たせ、もう一度送るが、providerは切り替えない（[Plan planners](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。
 - headless jobは1回きりなので、起動の前に行き先を決め、起動の後に使えないと分かったjobは失敗を記録して次のpassでもう一方で起動し直す。
@@ -294,6 +293,15 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - timer jobの使えない終わりの読み取りは観測と分析の側（`supervise::observer`）が値にし、控えは実行と着地の側（`supervise::provider`）が行う（[Architecture](architecture.md)）。
 - 記録と集計（`provider_switched`・`stats`の`provider_switches`・`kpi`の`provider=`）は[stats](supervisor-lifecycle/stats.md)と[kpi](supervisor-lifecycle/kpi.md)。
   集計のproviderは切り替えの後のactualで数える。
+
+## 大きなcontextからの新しいsession
+
+[ADR-t2080-1](../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)。
+
+判定は`domain::fresh_session::next_session`（直前のturnの`peak_context`と閾値だけ）、入口は`supervise::session`の`start_fresh_session`で、区切りと理由を`session_renewed`に残す。
+
+- wrapperは`provider_switched`と同じ区切りとし、providerを変えず新しいsessionにする。
+  どちらの後もClaudeのsessionは新しい名前（`domain::turn::session_name`。Claude Codeは使われた`--session-id`を拒む）。
 
 ## Trust prompt
 

@@ -504,6 +504,163 @@ pub const UNDELIVERED_REQUEST_BYTES: usize = RESUME_REQUEST_LIMIT;
 /// worker cannot read the queue, so what is cut is in no file it can read.
 pub const PROVIDER_MESSAGE_BYTES: usize = 2_000;
 
+/// What the handoff prompt of a new session of a run's worker carries
+/// (ADR-t2080-1 decision 2): why the session is new, the work so far as
+/// git shows it, why the review sent the run back, the summary of the
+/// receipt the worker wrote last, and the request the earlier session
+/// would have been sent next (a revise's, a resume's or a triage's
+/// instruction). No transcript of the conversation: the worktree and its
+/// commits hold the work. The task's prompt is the new session's first
+/// part, which the session wrapper puts before it
+/// ([`crate::domain::turn::new_session_prompt`]).
+#[derive(Debug, Clone, Copy)]
+pub struct HandoffMaterial<'a> {
+    /// The previous turn's `peak_context` and `[fresh_session]
+    /// peak_context_above` it was above, in tokens.
+    pub peak_context: u64,
+    pub threshold: u64,
+    /// `git log --oneline <base>..<branch>`: the commits so far, newest
+    /// first.
+    pub commits: &'a str,
+    /// `git status --porcelain` of the worktree: the uncommitted changes.
+    pub changes: &'a str,
+    /// Why the review sent the run back, and the file in the run directory
+    /// that holds it whole; `None` when no review did.
+    pub review: Option<(&'a str, Option<&'a Path>)>,
+    /// The summary of the receipt the worker wrote last; `None` without
+    /// one.
+    pub receipt_summary: Option<&'a str>,
+    /// The request the earlier session would have been sent, built and
+    /// held to its own limit, and the file that holds it whole if any.
+    pub request: &'a str,
+    pub request_file: Option<&'a Path>,
+}
+
+/// The bytes the handoff prompt of a new session (`handoff_text`) takes
+/// at most, the language's instruction included (ADR-t2080-1 decision 2,
+/// held as ADR-t2072-1 holds the next turns): its fixed text (under 1,500
+/// bytes with commit IDs of 64), the commits ([`HANDOFF_COMMITS_BYTES`]),
+/// the changes ([`HANDOFF_CHANGES_BYTES`]), the review's reasons
+/// ([`HANDOFF_REVIEW_BYTES`]), the receipt's summary
+/// ([`HANDOFF_RECEIPT_BYTES`]), the request ([`HANDOFF_REQUEST_BYTES`]) and
+/// the notes of what was cut, with the language's room: the sections'
+/// limits take 78,000 bytes together. The new session's first turn is the
+/// task's prompt ([`WORKER_PROMPT_LIMIT`]) and this.
+pub const HANDOFF_LIMIT: usize = 82_000;
+
+/// The bytes of the commits' lines, the newest kept: about 100 lines of
+/// `git log --oneline`. The rest is in the worktree's `git log`.
+pub const HANDOFF_COMMITS_BYTES: usize = 8_000;
+
+/// The bytes of the uncommitted changes' lines: about 100 paths of `git
+/// status --porcelain`. The rest is in the worktree's `git status`.
+pub const HANDOFF_CHANGES_BYTES: usize = 8_000;
+
+/// The bytes of the review's reasons: as many as a revise request carries
+/// ([`REVISE_FINDINGS_BYTES`]), since the revise request it would have
+/// sent carries them too and is cut there the same.
+pub const HANDOFF_REVIEW_BYTES: usize = REVISE_FINDINGS_BYTES;
+
+/// The bytes of the receipt's summary: a predecessor's summary took
+/// 2,121 bytes at the median and 6,580 at p90 on 2026-10-08, so it is cut
+/// only past p90. The rest is in the receipt the run directory keeps.
+pub const HANDOFF_RECEIPT_BYTES: usize = 6_000;
+
+/// The bytes of the request the earlier session would have been sent: the
+/// largest whole limit of a next turn ([`RESUME_REQUEST_LIMIT`]), so a
+/// request held to its limit is carried whole.
+pub const HANDOFF_REQUEST_BYTES: usize = RESUME_REQUEST_LIMIT;
+
+/// The handoff prompt of a new session of `run`'s worker for a large
+/// context ([`HandoffMaterial`]), held to [`HANDOFF_LIMIT`]. Each part is
+/// one section cut to its bytes keeping its start, with the bytes left out
+/// and how to read the rest: the commits and the changes with git in the
+/// worktree, the review's reasons and the request in their files when the
+/// caller names them, the receipt's summary in the receipt. The request is
+/// required material (a cut is said in `over_limit`); the fixed text is
+/// never cut.
+pub fn handoff_text(run: &TaskRun, material: &HandoffMaterial<'_>) -> FittedPrompt {
+    let mut fit = Fit::new(HANDOFF_LIMIT);
+    let base = run.base_commit();
+    let in_file = |path: Option<&Path>| {
+        path.map_or_else(
+            || NOT_READABLE.to_owned(),
+            |path| format!("the whole of it is in {}", path.display()),
+        )
+    };
+    let mut text = format!(
+        "dagq: this run's worker goes on in a new session: its previous turn's context took {} tokens, above the {} tokens this repository sets, so nothing of the earlier conversation carries over. The task's prompt is above; the run, its worktree, its branch and its provider are the same. The work so far is in this worktree and its branch: go on from it rather than starting over.",
+        material.peak_context, material.threshold,
+    );
+    let commits = fit.text(
+        "commits",
+        material.commits.trim(),
+        HANDOFF_COMMITS_BYTES,
+        Keep::Start,
+        &format!("`git log --oneline {base}..HEAD` in your worktree lists them all"),
+    );
+    fit.section("commits", &commits);
+    text.push_str(&format!(
+        "\n\nCommits since the base {base}, newest first:\n{}",
+        or_none(&commits)
+    ));
+    let changes = fit.text(
+        "changes",
+        material.changes.trim_end(),
+        HANDOFF_CHANGES_BYTES,
+        Keep::Start,
+        "`git status` and `git diff` in your worktree show them all",
+    );
+    fit.section("changes", &changes);
+    text.push_str(&format!(
+        "\n\nUncommitted changes in the worktree (`git status --porcelain`):\n{}",
+        or_none(&changes)
+    ));
+    if let Some((review, file)) = material.review {
+        let review = fit.text(
+            "review",
+            review.trim(),
+            HANDOFF_REVIEW_BYTES,
+            Keep::Start,
+            &in_file(file),
+        );
+        fit.section("review", &review);
+        text.push_str(&format!(
+            "\n\nWhy the review sent the run back:\n{}",
+            or_none(&review)
+        ));
+    }
+    if let Some(summary) = material.receipt_summary {
+        let read = run.receipt_path().map_or_else(
+            || NOT_READABLE.to_owned(),
+            |path| format!("the receipt at {path} holds the whole summary"),
+        );
+        let summary = fit.text(
+            "receipt",
+            summary.trim(),
+            HANDOFF_RECEIPT_BYTES,
+            Keep::Start,
+            &read,
+        );
+        fit.section("receipt", &summary);
+        text.push_str(&format!(
+            "\n\nThe summary of the receipt you wrote last:\n{}",
+            or_none(&summary)
+        ));
+    }
+    let request = fit.required(
+        "request",
+        material.request,
+        HANDOFF_REQUEST_BYTES,
+        &in_file(material.request_file),
+    );
+    fit.section("request", &request);
+    text.push_str(&format!(
+        "\n\nThe earlier session would have been sent this next; it is yours now:\n\n{request}"
+    ));
+    fit.finish(text)
+}
+
 /// The text that carries a person's answer to the session that asked,
 /// held to [`NEXT_TURN_LIMIT`]: the answer to [`NEXT_TURN_TEXT_BYTES`].
 pub(crate) fn answer_text(
@@ -10800,5 +10957,155 @@ mod tests {
             .bytes;
         let read: PromptBytes = serde_json::from_value(json!(bytes)).unwrap();
         assert_eq!(read, bytes);
+    }
+
+    /// ADR-t2080-1 decision 2: the handoff prompt of a new session carries
+    /// why it is new, the commits, the uncommitted changes, the review's
+    /// reasons, the receipt's summary and the request it would have been
+    /// sent, whole when they fit, and nothing else (no transcript); with
+    /// the task's prompt before it, it is the new session's first turn.
+    #[test]
+    fn a_handoff_carries_the_work_the_review_the_receipt_and_the_request() {
+        let run = run_on(Provider::Codex, WorkerMode::Headless);
+        let findings = Path::new("/runs/run/turns/revise-findings.txt");
+        let material = HandoffMaterial {
+            peak_context: 200_001,
+            threshold: 200_000,
+            commits: "abc1234 runtime: the fix\nabc1233 runtime: the start\n",
+            changes: " M src/lib.rs\n?? notes.txt\n",
+            review: Some(("- the test misses the boundary", Some(findings))),
+            receipt_summary: Some("did the fix"),
+            request: "dagq: the review asks you to revise.",
+            request_file: None,
+        };
+        let fitted = handoff_text(&run, &material);
+        assert_eq!(
+            fitted.text,
+            format!(
+                "dagq: this run's worker goes on in a new session: its previous turn's context took 200001 tokens, above the 200000 tokens this repository sets, so nothing of the earlier conversation carries over. The task's prompt is above; the run, its worktree, its branch and its provider are the same. The work so far is in this worktree and its branch: go on from it rather than starting over.\n\nCommits since the base {SHA}, newest first:\nabc1234 runtime: the fix\nabc1233 runtime: the start\n\nUncommitted changes in the worktree (`git status --porcelain`):\n M src/lib.rs\n?? notes.txt\n\nWhy the review sent the run back:\n- the test misses the boundary\n\nThe summary of the receipt you wrote last:\ndid the fix\n\nThe earlier session would have been sent this next; it is yours now:\n\ndagq: the review asks you to revise."
+            )
+        );
+        assert!(fitted.bytes.omitted.is_empty(), "{:?}", fitted.bytes);
+        assert_eq!(fitted.bytes.over_limit, None);
+        assert_eq!(fitted.bytes.limit, HANDOFF_LIMIT);
+        assert_eq!(fitted.bytes.total, fitted.text.len());
+        for section in ["commits", "changes", "review", "receipt", "request"] {
+            assert!(fitted.bytes.sections[section] > 0, "{section}");
+        }
+        // A clean worktree with no commit, no review and no receipt says
+        // so, and still carries the request.
+        let bare = handoff_text(
+            &run,
+            &HandoffMaterial {
+                commits: "",
+                changes: "",
+                review: None,
+                receipt_summary: None,
+                ..material
+            },
+        );
+        assert!(bare.text.contains("newest first:\n(none)\n\nUncommitted"));
+        assert!(bare.text.contains("--porcelain`):\n(none)\n\nThe earlier"));
+        assert!(!bare.text.contains("Why the review"));
+        assert!(!bare.text.contains("The summary of the receipt"));
+        assert!(bare.text.ends_with("dagq: the review asks you to revise."));
+        // The first turn of the new session: the task's prompt, then this.
+        let first = crate::domain::turn::new_session_prompt("the task's prompt", &fitted.text);
+        assert!(first.starts_with("the task's prompt\n\ndagq: this run's worker goes on"));
+    }
+
+    /// ADR-t2080-1 decision 2 within ADR-t2072-1's limits: with the largest
+    /// material each section is cut to its bytes keeping its start, says
+    /// how many bytes it left out and where to read them, and the whole
+    /// stays within `HANDOFF_LIMIT` without its middle cut; the request's
+    /// cut is said in `over_limit`.
+    #[test]
+    fn a_handoff_with_the_largest_material_stays_within_its_limits() {
+        let run = run_on(Provider::Claude, WorkerMode::Headless);
+        let huge = "引".repeat(300_000);
+        let findings = Path::new("/runs/run/turns/revise-findings.txt");
+        let request_file = Path::new("/runs/run/turns/request-9.json");
+        let material = HandoffMaterial {
+            peak_context: u64::MAX,
+            threshold: u64::MAX - 1,
+            commits: &huge,
+            changes: &huge,
+            review: Some((&huge, Some(findings))),
+            receipt_summary: Some(&huge),
+            request: &huge,
+            request_file: Some(request_file),
+        };
+        let fitted = handoff_text(&run, &material);
+        assert!(fitted.text.len() <= HANDOFF_LIMIT - prompt_fit::LANGUAGE_ROOM);
+        assert_eq!(fitted.bytes.total, fitted.text.len());
+        assert!(
+            !fitted
+                .bytes
+                .over_limit
+                .as_deref()
+                .unwrap_or_default()
+                .contains("its middle was cut"),
+            "{:?}",
+            fitted.bytes
+        );
+        assert!(
+            fitted
+                .bytes
+                .over_limit
+                .as_deref()
+                .unwrap()
+                .starts_with("request: ")
+        );
+        for (section, bytes, read) in [
+            (
+                "commits",
+                HANDOFF_COMMITS_BYTES,
+                format!("`git log --oneline {SHA}..HEAD` in your worktree lists them all"),
+            ),
+            (
+                "changes",
+                HANDOFF_CHANGES_BYTES,
+                "`git status` and `git diff` in your worktree show them all".to_owned(),
+            ),
+            (
+                "review",
+                HANDOFF_REVIEW_BYTES,
+                format!("the whole of it is in {}", findings.display()),
+            ),
+            (
+                "receipt",
+                HANDOFF_RECEIPT_BYTES,
+                "the receipt at /runs/run/receipt.json holds the whole summary".to_owned(),
+            ),
+            (
+                "request",
+                HANDOFF_REQUEST_BYTES,
+                format!("the whole of it is in {}", request_file.display()),
+            ),
+        ] {
+            assert_eq!(fitted.bytes.omitted[section], 1, "{section}");
+            assert!(fitted.bytes.sections[section] <= bytes, "{section}");
+            assert!(
+                fitted
+                    .text
+                    .contains(&format!("by the prompt's limit; {read}]")),
+                "{section}"
+            );
+        }
+        assert!(
+            fitted
+                .text
+                .starts_with("dagq: this run's worker goes on in a new session")
+        );
+        assert!(
+            fitted
+                .text
+                .contains("The earlier session would have been sent this next")
+        );
+        // With the task's prompt at its own limit, the first turn stays
+        // within the two limits.
+        let task_prompt = "p".repeat(WORKER_PROMPT_LIMIT);
+        let first = crate::domain::turn::new_session_prompt(&task_prompt, &fitted.text);
+        assert!(first.len() <= WORKER_PROMPT_LIMIT + HANDOFF_LIMIT);
     }
 }
