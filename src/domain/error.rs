@@ -285,6 +285,13 @@ pub enum DomainError {
         priority: super::Priority,
         given: super::Priority,
     },
+    /// An actor other than a person changes a priority a person set
+    /// (ADR-t1975-1 decision 3): only the user and the inbox change it.
+    PersonsPriority {
+        holder: super::authorization::PriorityHolder,
+        priority: super::Priority,
+        role: super::ActorRole,
+    },
     /// A `worker_question` without a topic code (ADR-t947-2 decision 1).
     AskWithoutTopic,
     /// A topic code on an ask that is not a `worker_question` (ADR-t947-2
@@ -723,6 +730,16 @@ impl fmt::Display for DomainError {
                 priority.as_str(),
                 priority.as_str(),
                 given.as_str()
+            ),
+            Self::PersonsPriority {
+                holder,
+                priority,
+                role,
+            } => write!(
+                f,
+                "a person set the priority of {holder} ({}): {} may not change it; only the user or the inbox, at a person's word, may (a doubt goes to a person)",
+                priority.as_str(),
+                role.as_str()
             ),
             Self::RequestRefInvalid { value } => write!(
                 f,

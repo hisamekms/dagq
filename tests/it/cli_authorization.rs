@@ -232,12 +232,72 @@ fn the_planner_keeps_its_authority_on_tasks_that_have_not_started() {
     allowed_as(&me, &db, &["dependency", "add", "2", "1"]);
     allowed_as(&me, &db, &["dependency", "remove", "2", "1"]);
     allowed_as(&me, &db, &["set-goal", "2", "1"]);
+    assert!(denials(&db).is_empty());
+    // A person's priority (ADR-t1975-1 decisions 3 and 4): the planner may
+    // change neither the person's goal's nor the one its task takes, and
+    // each refusal is recorded; moving the task to the planner's normal
+    // goal keeps the person's value as the task's own.
+    ok(
+        &db,
+        &["goal", "add", "a person's", "--priority", "interrupt"],
+    );
+    ok(&db, &["add", "third", "--goal", "2"]);
+    let error = denied_as(&me, &db, &["set-priority", "3", "low"]);
+    assert!(
+        error["error"].as_str().unwrap().starts_with(
+            "a person set the priority of task 3 (interrupt): planner may not change it"
+        ),
+        "{error}"
+    );
+    let error = denied_as(&me, &db, &["goal", "edit", "2", "--priority", "low"]);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("goal 2 (interrupt)"),
+        "{error}"
+    );
+    let recorded = denials(&db);
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    for (event, resource) in recorded.iter().zip([
+        json!({"kind": "task", "id": 3, "status": "draft"}),
+        json!({"kind": "goal", "id": 2}),
+    ]) {
+        assert_eq!(event["actor"]["id"], "planner:1");
+        assert_eq!(event["payload"]["reason"], "a person's priority");
+        assert_eq!(event["payload"]["resource"], resource);
+    }
+    assert_eq!(
+        ok(&db, &["goal", "show", "2"])["goal"]["priority"],
+        "interrupt"
+    );
+    allowed_as(&me, &db, &["set-goal", "3", "1"]);
+    let moved = &ok(&db, &["show", "3"])["task"];
+    assert_eq!(
+        (
+            &moved["goal_id"],
+            &moved["priority"],
+            &moved["priority_source"],
+            &moved["priority_by"]
+        ),
+        (
+            &json!(1),
+            &json!("interrupt"),
+            &json!("task"),
+            &json!("human")
+        )
+    );
+    // The inbox changes it, and it stays the person's.
+    let high = ok_as("inbox", &db, &["set-priority", "3", "high"]);
+    assert_eq!(
+        (&high["priority"], &high["priority_by"]),
+        (&json!("high"), &json!("human"))
+    );
     allowed_as(&me, &db, &["cancel", "2"]);
     assert_eq!(ok(&db, &["show", "2"])["task"]["status"], "canceled");
     allowed_as(&me, &db, &["cancel", "1"]);
     allowed_as(&me, &db, &["goal", "close", "1", "--verdict", "abandoned"]);
     assert_eq!(ok(&db, &["goal", "show", "1"])["closed"], true);
-    assert!(denials(&db).is_empty());
 }
 
 #[test]

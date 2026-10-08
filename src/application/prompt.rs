@@ -31,7 +31,6 @@ use crate::domain::{
     MAX_PLAN_REVISES, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, Predecessor, Proposal, ProposalId,
     Provider, Receipt, RunEvent, RunId, RunStatus, TRIAGE_RETRY_FAILURES, Task, TaskDetail, TaskId,
     TaskRun,
-    plan_review::ProposalOrigin,
     recovery::{ProcessInfo, RecoveryAlert},
     related::RelatedTask,
     required_of, resume,
@@ -4379,8 +4378,6 @@ pub const SUMMARY_EXPECTED_FILES: usize = 10;
 /// files that conflict often and each task's duplicate candidates.
 pub struct PlanReviewMaterial<'a> {
     pub proposal: &'a Proposal,
-    /// Where the proposal comes from.
-    pub origin: ProposalOrigin,
     pub tasks: &'a [TaskDetail],
     pub goals: &'a [Goal],
     pub lint: &'a [LintViolation],
@@ -5325,23 +5322,6 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<PlanRevie
     })
 }
 
-/// Where a proposal comes from, as its plan review is told (ADR-t1971-1
-/// decision 1).
-fn origin_text(origin: ProposalOrigin) -> &'static str {
-    match origin {
-        ProposalOrigin::Request => {
-            "a person: a person's planning request (it, or a proposal whose tasks or goals it carries, is linked to the request)"
-        }
-        ProposalOrigin::Person => "a person: a person owns or submitted it",
-        ProposalOrigin::Finding => {
-            "the AI: a planner of the runtime's submitted it to remedy a finding (an improvement)"
-        }
-        ProposalOrigin::Planner => {
-            "the AI: a planner of the runtime's submitted it, not from a person's request"
-        }
-    }
-}
-
 /// The plan review prompt with its variable sections written in.
 fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) -> String {
     let proposal = material.proposal;
@@ -5367,7 +5347,7 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
          Apply what they say (the verification each kind of change needs, the declared paths, the required evidence, the rules for the records they keep, ...); the runtime has no such rules of its own. \
          Where the repository has no AGENTS.md, judge a task's verification, paths and evidence in this order: CLAUDE.md; then what the README, the CI configuration and the build configuration show; when none of them settles it, it needs a person: a concern.\n\n\
          The proposal was submitted {submitted} and was sent back {revises} time(s) before (at most {max}; a revise past that goes to a person as a concern).\n\
-         It comes from {origin}.\n\n\
+         Each task of the proposal and each goal below records where it comes from (origin: human, by a person's request or a person's own add; ai, by a planner or the runtime on its own; unknown, from before the queue recorded it, which counts as a person's) and who set its priority (priority_by: human for a person; a task's is its own priority's setter, else its goal's).\n\n\
          Tasks of the proposal:\n{tasks}\n\n\
          Files each task of the proposal is expected to touch (its declared paths without wildcards; without any, the files the landings of its 3 most related completed tasks changed; a guess, so check it against the source):\n{own_expected}\n\n\
          Goals they belong to (description, acceptance, constraints; constraints win over a task's description):\n{goals}\n\n\
@@ -5400,9 +5380,9 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
          A high ready or send_back with reason_category null is applied without a person (a ready as a pass, its actions included); a low confidence, scope, discard, or a send_back past the revises above goes to a person with your recommendation.\n\
          When a finding is of the same kind as an answered ask above, put that ask's id in precedents and say in the reason how the person answered then.\n\n\
          actions are the only changes you make yourself, and only with pass (or a concern whose high ready is applied): add_dependency (a task of the proposal waits for another task whose landing its work needs; never only for a shared file or hotspot), lower_priority (never raise one; on the AI's task it takes the task's own priority off, so the task takes its goal's), cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern). Everything else is the planner's.\n\n\
-         Priorities and goals, by where the proposal comes from (above):\n\
-         - a person's proposal: the priorities of its tasks and goals and the goals its tasks belong to are the person's decision. Do not change them: the runtime does not apply a lower_priority to it. When one looks wrong, say so in a concern with reason_category scope.\n\
-         - the AI's proposal: its tasks have no priority of their own and take their goal's (a pass takes off any own priority a person did not set). Check instead that a new goal's priority follows the repository's rules for goal priorities, and that each task put in an existing goal is needed by that goal's acceptance; when either does not hold, revise, so the planner fixes the goal's priority, or moves the task to a new goal or leaves it with no goal. An improvement (a proposal that remedies a finding) stays below high by the goal it belongs to, not by a priority of its tasks.\n\n\
+         Priorities and goals, by those records:\n\
+         - a priority a person set (priority_by human), and a task or goal of a person's (origin human or unknown): its priority and the goals its tasks belong to are the person's decision. Do not change them: the runtime refuses to change a priority a person set, and does not apply a lower_priority to it. When one looks wrong, say so in a concern with reason_category scope.\n\
+         - the AI's task (origin ai): it has no priority of its own and takes its goal's (a pass takes off an own priority the AI set). Check instead that a new goal's priority follows the repository's rules for goal priorities, and that each task put in an existing goal is needed by that goal's acceptance; when either does not hold, revise, so the planner fixes the goal's priority, or moves the task to a new goal or leaves it with no goal. An improvement (a proposal that remedies a finding) stays below high by the goal it belongs to, not by a priority of its tasks.\n\n\
          Whatever the verdict, also estimate the weight of each submitted task of the proposal (tasks {predicted}), one entry per task in predictions, from what you read: \
          a worker (one Claude Opus session in its own Git worktree) implements the task, runs the checks the repository's instructions ask of a worker (formatting, lint, the tests of the change, ...), commits and writes a receipt; \
          then a headless review (pass / revise / concern) and `integrate`'s verification after the rebase onto main follow, and a failure, a conflict or missing evidence resumes the run. \
@@ -5424,7 +5404,6 @@ fn plan_review_text(material: &PlanReviewMaterial<'_>, sections: &PlanSections) 
         max = MAX_PLAN_REVISES,
         most = DUPLICATE_CANDIDATES,
         codes = reason_codes_section(review_reason::PLAN_REVIEW_CODES),
-        origin = origin_text(material.origin),
     )
 }
 
@@ -6199,7 +6178,6 @@ mod tests {
         hotspots: Vec<ConflictHotspot>,
         candidates: Vec<DuplicateCandidates>,
         language: Option<crate::domain::language::Language>,
-        origin: ProposalOrigin,
     }
 
     impl PlanCase {
@@ -6222,7 +6200,6 @@ mod tests {
             .unwrap();
             plan_review_prompt(&PlanReviewMaterial {
                 proposal: &proposal,
-                origin: self.origin,
                 tasks: &self.tasks,
                 goals: &self.goals,
                 lint: &[],
@@ -6326,7 +6303,6 @@ mod tests {
             hotspots: vec![hotspot("src/hot.rs"), hotspot("src/cold.rs")],
             candidates,
             language: None,
-            origin: ProposalOrigin::Planner,
         }
     }
 
@@ -6417,18 +6393,23 @@ mod tests {
         ] {
             assert!(prompt.contains(instruction), "{instruction}");
         }
-        // Where the proposal comes from, and what plan review does with
-        // the priorities and goals of each (ADR-t1971-1).
+        // Where each task and goal comes from and who set its priority, by
+        // their records, and what plan review does with a person's
+        // (ADR-t1971-1, ADR-t1975-1 decisions 3 and 7).
         assert!(
             prompt.contains(
-                "It comes from the AI: a planner of the runtime's submitted it, not from a person's request."
+                "Each task of the proposal and each goal below records where it comes from (origin: human, by a person's request or a person's own add; ai, by a planner or the runtime on its own; unknown, from before the queue recorded it, which counts as a person's) and who set its priority (priority_by: human for a person;"
             ),
             "{prompt}"
         );
+        assert_eq!(
+            (&task(1000)["origin"], &task(1000)["priority_by"]),
+            (&serde_json::json!("unknown"), &serde_json::json!("ai"))
+        );
         for instruction in [
-            "- a person's proposal: the priorities of its tasks and goals and the goals its tasks belong to are the person's decision. Do not change them",
+            "- a priority a person set (priority_by human), and a task or goal of a person's (origin human or unknown): its priority and the goals its tasks belong to are the person's decision. Do not change them: the runtime refuses to change a priority a person set, and does not apply a lower_priority to it.",
             "When one looks wrong, say so in a concern with reason_category scope.",
-            "- the AI's proposal: its tasks have no priority of their own and take their goal's",
+            "- the AI's task (origin ai): it has no priority of its own and takes its goal's (a pass takes off an own priority the AI set)",
             "a new goal's priority follows the repository's rules for goal priorities",
             "each task put in an existing goal is needed by that goal's acceptance; when either does not hold, revise",
             "lower_priority (never raise one; on the AI's task it takes the task's own priority off, so the task takes its goal's)",
@@ -6439,26 +6420,10 @@ mod tests {
         for gone in [
             "keeps its tasks at normal or low",
             "a pass lowers any you miss",
+            "It comes from",
+            "a person's proposal",
         ] {
             assert!(!prompt.contains(gone), "{gone}");
-        }
-        for (origin, text) in [
-            (
-                ProposalOrigin::Request,
-                "It comes from a person: a person's planning request",
-            ),
-            (
-                ProposalOrigin::Person,
-                "It comes from a person: a person owns or submitted it.",
-            ),
-            (
-                ProposalOrigin::Finding,
-                "It comes from the AI: a planner of the runtime's submitted it to remedy a finding",
-            ),
-        ] {
-            case.origin = origin;
-            let prompt = case.prompt().text;
-            assert!(prompt.contains(text), "{origin:?} {prompt}");
         }
     }
 
@@ -6959,7 +6924,7 @@ mod tests {
         use crate::domain::related::RelatedTask;
         let mut case = plan_case(0, 0);
         case.tasks = vec![proposal_task(
-            sized_task(1000, TaskStatus::Submitted, 185_000),
+            sized_task(1000, TaskStatus::Submitted, 184_000),
             Vec::new(),
         )];
         case.queued = (1..=600)
@@ -6995,7 +6960,7 @@ mod tests {
         let prompt = case.prompt();
         assert_within_limit(&prompt);
         assert_eq!(prompt.bytes.over_limit, None);
-        assert!(prompt.bytes.sections["tasks"] > 185_000);
+        assert!(prompt.bytes.sections["tasks"] > 184_000);
         assert!(
             prompt.bytes.sections["full_text"] > 90_000,
             "{:?}",

@@ -516,14 +516,6 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
         ],
     )
     .unwrap();
-    // The proposal is of a person's planning request (ADR-t1971-1).
-    conn.execute_batch(&format!(
-        "INSERT INTO plan_requests(id, text, requested_by, requested_by_id, status, created_at,
-           updated_at) VALUES (7, 'plan it', 'inbox', 'inbox', 'proposed', 0, 0);
-         INSERT INTO plan_request_proposals(request_id, proposal_id, created_at)
-           VALUES (7, {proposal}, 0);"
-    ))
-    .unwrap();
     let predict = |task: TaskId, tokens: u64| {
         json!({"task_id": task, "size": "M", "nature": "implementation", "uncertainty": 0.4,
                "expected_output_tokens": tokens, "rework_probability": 0.2, "reason": "a module"})
@@ -547,8 +539,9 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
         ProposalStatus::Accepted
     );
     assert_eq!(queue.show(three).unwrap().dependencies, [blocker, two]);
-    // The request's priority is the person's: the lower_priority is left
-    // unapplied with why, and the rest of the verdict goes on.
+    // The task's record says a person made it (ADR-t1975-1 decision 7;
+    // no request link): the lower_priority is left unapplied with why,
+    // and the rest of the verdict goes on.
     assert_eq!(queue.show(two).unwrap().task.priority(), Priority::Normal);
     assert!(events(&mut queue, two, "task_priority_changed").is_empty());
     // The same record as `cancel --duplicate-of` (ADR-0046 decision 5),
@@ -577,12 +570,16 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
     let finished = events(&mut queue, two, "plan_review_finished");
     assert_eq!(finished[0]["decision"], "pass");
     assert_eq!(finished[0]["summary"], "sound");
-    assert_eq!(finished[0]["origin"], "request");
+    assert_eq!(
+        queue.show(two).unwrap().task.origin().origin.as_str(),
+        "human"
+    );
+    assert_eq!(finished[0].get("origin"), None);
     assert_eq!(
         finished[0]["actions_skipped"],
         json!([{
             "action": {"action": "lower_priority", "task_id": two, "priority": "low"},
-            "reason": format!("proposal {proposal} is a person's (request): plan review does not change its priorities; a doubt is a concern"),
+            "reason": format!("task {two} is a person's (origin human): plan review does not change its priority; a doubt is a concern"),
         }])
     );
     assert_eq!(finished[0]["priorities_inherited"], json!([]));
@@ -635,7 +632,8 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
         "`--run ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME`",
         "`dagq timeline RUN`",
         "estimate the weight of each submitted task of the proposal (tasks 2, 3, 4)",
-        "It comes from a person: a person's planning request",
+        "\"priority_by\":\"human\"",
+        "\"origin\":\"human\",\"origin_kind\":\"person\"",
         "- missing_dependency: ",
     ] {
         assert!(

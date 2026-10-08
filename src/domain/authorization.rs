@@ -16,7 +16,7 @@ use super::{
     ActorContext, ActorRole, AskId, AskKind, FindingId, GoalId, PlannerId, ProposalId, RequestId,
     RunId,
 };
-use super::{DomainError, TaskId, TaskStatus};
+use super::{DomainError, Priority, TaskId, TaskStatus, error::require, plan_request::PriorityBy};
 
 string_enum!(Capability {
     // Reading.
@@ -265,6 +265,9 @@ pub enum DenyReason {
     Resource,
     /// The role does not open asks of this kind.
     AskKind,
+    /// The change would change a priority a person set, which only a
+    /// person changes ([`check_priority_change`]).
+    PersonsPriority,
 }
 
 impl DenyReason {
@@ -275,6 +278,7 @@ impl DenyReason {
             Self::Reserved => "reserved",
             Self::Resource => "not on this resource",
             Self::AskKind => "not of this kind",
+            Self::PersonsPriority => "a person's priority",
         }
     }
 }
@@ -592,6 +596,52 @@ fn planner_permits(actor: &ActorContext, capability: Capability, resource: &Reso
         } => planner.is_some_and(|id| actor.actor_id() == format!("planner:{id}")),
         _ => true,
     }
+}
+
+/// What holds a priority: a task (its own, or the goal's it takes) or a
+/// goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorityHolder {
+    Task(TaskId),
+    Goal(GoalId),
+}
+
+impl fmt::Display for PriorityHolder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Task(id) => write!(f, "task {id}"),
+            Self::Goal(id) => write!(f, "goal {id}"),
+        }
+    }
+}
+
+/// Whether `role` changes a priority a person set (ADR-t1975-1 decision
+/// 3): the user, and the inbox at a person's word. The AI's actors (a
+/// planner, the jobs, the supervisor applying a verdict or fixing on its
+/// own) do not.
+pub const fn changes_persons_priority(role: ActorRole) -> bool {
+    matches!(role, ActorRole::User | ActorRole::Inbox)
+}
+
+/// Refuse `role` a change of the priority `holder` has now, `priority`
+/// set by `by` (for a task, who set the priority it takes: its own's
+/// setter, else its goal's), when a person set it and `role` is not a
+/// person's ([`changes_persons_priority`]). The caller asks only for a
+/// change that changes something; the error names the person's value.
+pub fn check_priority_change(
+    role: ActorRole,
+    holder: PriorityHolder,
+    priority: Priority,
+    by: PriorityBy,
+) -> Result<(), DomainError> {
+    require(
+        by != PriorityBy::Human || changes_persons_priority(role),
+        || DomainError::PersonsPriority {
+            holder,
+            priority,
+            role,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1353,5 +1403,53 @@ mod membership_policy_tests {
                 );
             }
         }
+    }
+
+    /// ADR-t1975-1 decision 3: a priority a person set (on a task, its own
+    /// or the goal's it takes; on a goal) is changed by the user and the
+    /// inbox only, and the refusal names the person's value; one the AI set
+    /// is changed by anyone the allowlist lets.
+    #[test]
+    fn only_the_user_and_the_inbox_change_a_persons_priority() {
+        let task = PriorityHolder::Task(TaskId::new(5));
+        let goal = PriorityHolder::Goal(GoalId::new(3));
+        for role in ActorRole::ALL {
+            let person = matches!(role, ActorRole::User | ActorRole::Inbox);
+            assert_eq!(changes_persons_priority(role), person, "{role:?}");
+            for holder in [task, goal] {
+                let result =
+                    check_priority_change(role, holder, Priority::Interrupt, PriorityBy::Human);
+                assert_eq!(result.is_ok(), person, "{role:?} {holder}");
+                assert!(
+                    check_priority_change(role, holder, Priority::Low, PriorityBy::Ai).is_ok(),
+                    "{role:?} {holder}"
+                );
+            }
+        }
+        assert_eq!(
+            check_priority_change(
+                ActorRole::Planner,
+                task,
+                Priority::Interrupt,
+                PriorityBy::Human
+            )
+            .unwrap_err()
+            .to_string(),
+            "a person set the priority of task 5 (interrupt): planner may not change it; only the user or the inbox, at a person's word, may (a doubt goes to a person)"
+        );
+        assert_eq!(
+            check_priority_change(
+                ActorRole::Supervisor,
+                goal,
+                Priority::High,
+                PriorityBy::Human
+            ),
+            Err(DomainError::PersonsPriority {
+                holder: goal,
+                priority: Priority::High,
+                role: ActorRole::Supervisor,
+            })
+        );
+        assert_eq!(DenyReason::PersonsPriority.as_str(), "a person's priority");
     }
 }

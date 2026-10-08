@@ -13,9 +13,9 @@ use tracing::warn;
 use crate::application::inherit::{CarriedBranches, InheritRequest, InheritStore, InheritedByHand};
 
 use crate::domain::{
-    ActorContext, AuthorizationError, Authorizer, Capability, DraftRevisit, FindingId, Goal,
-    GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal, ProposalId, Resource,
-    Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
+    ActorContext, AuthorizationError, Authorizer, Capability, DomainError, DraftRevisit, FindingId,
+    Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal, ProposalId,
+    Resource, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
     authorization::DenyReason, follow_up::RevisitChange,
 };
 
@@ -130,9 +130,10 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     /// interactive worker mode is refused (ADR-t1433-2), as by `edit`.
     pub fn add(&mut self, task: NewTask) -> Result<Task> {
         let resource = task.goal_id.map_or(Resource::Queue, Resource::Goal);
-        self.authorize(Capability::TaskWrite, resource)?;
+        self.authorize(Capability::TaskWrite, resource.clone())?;
         crate::domain::worker::refuse_interactive(task.worker_mode)?;
-        self.store.add(task)
+        let result = self.store.add(task);
+        self.recorded(result, Capability::TaskWrite, &resource)
     }
 
     pub fn edit(&mut self, task: TaskId, edit: TaskEdit) -> Result<Task> {
@@ -177,9 +178,17 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         self.store.set_paths(task, paths, status)
     }
 
+    /// `set-priority`: the store refuses to change a person's priority
+    /// for an actor other than a person (ADR-t1975-1 decision 3), and the
+    /// refusal is recorded as the authorizer's are.
     pub fn set_priority(&mut self, task: TaskId, priority: Option<Priority>) -> Result<Task> {
         let status = self.authorize_task(Capability::TaskWrite, task)?;
-        self.store.set_priority(task, priority, status)
+        let result = self.store.set_priority(task, priority, status);
+        let resource = Resource::Task {
+            id: task,
+            status: Some(status),
+        };
+        self.recorded(result, Capability::TaskWrite, &resource)
     }
 
     /// `revisit`: the draft's revisit time set, changed or cleared
@@ -261,12 +270,14 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
 
     pub fn add_goal(&mut self, goal: NewGoal) -> Result<Goal> {
         self.authorize(Capability::GoalWrite, Resource::Queue)?;
-        self.store.add_goal(goal)
+        let result = self.store.add_goal(goal);
+        self.recorded(result, Capability::GoalWrite, &Resource::Queue)
     }
 
     pub fn edit_goal(&mut self, goal: GoalId, edit: GoalEdit) -> Result<Goal> {
         self.authorize(Capability::GoalWrite, Resource::Goal(goal))?;
-        self.store.edit_goal(goal, edit)
+        let result = self.store.edit_goal(goal, edit);
+        self.recorded(result, Capability::GoalWrite, &Resource::Goal(goal))
     }
 
     pub fn ready_goal(&mut self, goal: GoalId) -> Result<Goal> {
@@ -336,6 +347,36 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         };
         self.record(&error, &resource);
         Err(error.into())
+    }
+
+    /// `result` of a change the store refused because it would change a
+    /// person's priority (ADR-t1975-1 decisions 2 and 3: another value
+    /// than the request's, or a change of one a person set) is recorded
+    /// as a refusal, `a person's priority`, and returned as it is, naming
+    /// the person's value.
+    fn recorded<T>(
+        &self,
+        result: Result<T>,
+        capability: Capability,
+        resource: &Resource,
+    ) -> Result<T> {
+        if let Err(error) = &result
+            && matches!(
+                error.downcast_ref::<DomainError>(),
+                Some(
+                    DomainError::PersonsPriority { .. }
+                        | DomainError::RequestPriorityDiffers { .. }
+                )
+            )
+        {
+            let refusal = AuthorizationError {
+                role: self.actor.role(),
+                capability,
+                reason: DenyReason::PersonsPriority,
+            };
+            self.record(&refusal, resource);
+        }
+        result
     }
 
     fn record(&self, error: &AuthorizationError, resource: &Resource) {
@@ -413,6 +454,41 @@ mod tests {
         /// The status the last change of a task was handed as the
         /// authorized one.
         authorized_as: Option<TaskStatus>,
+        /// The store refuses a change of priority as a person's.
+        persons_priority: bool,
+    }
+
+    impl Store {
+        /// A request's planner giving another priority than the request's.
+        fn request_refusal(&self, what: &str) -> anyhow::Error {
+            if self.persons_priority {
+                DomainError::RequestPriorityDiffers {
+                    request_id: crate::domain::RequestId::new(44),
+                    priority: Priority::Interrupt,
+                    given: Priority::Low,
+                }
+                .into()
+            } else {
+                reached(what)
+            }
+        }
+
+        fn refusal(
+            &self,
+            what: &str,
+            holder: crate::domain::authorization::PriorityHolder,
+        ) -> anyhow::Error {
+            if self.persons_priority {
+                DomainError::PersonsPriority {
+                    holder,
+                    priority: Priority::Interrupt,
+                    role: ActorRole::Planner,
+                }
+                .into()
+            } else {
+                reached(what)
+            }
+        }
     }
 
     fn reached(what: &str) -> anyhow::Error {
@@ -434,7 +510,7 @@ mod tests {
             Ok(())
         }
         fn add(&mut self, _: NewTask) -> Result<Task> {
-            Err(reached("add"))
+            Err(self.request_refusal("add"))
         }
         fn edit_task(&mut self, _: TaskId, _: TaskEdit, authorized: TaskStatus) -> Result<Task> {
             self.authorized_as = Some(authorized);
@@ -468,7 +544,10 @@ mod tests {
             authorized: TaskStatus,
         ) -> Result<Task> {
             self.authorized_as = Some(authorized);
-            Err(reached("set-priority"))
+            Err(self.refusal(
+                "set-priority",
+                crate::domain::authorization::PriorityHolder::Task(TASK),
+            ))
         }
         fn revisit_draft(
             &mut self,
@@ -525,10 +604,13 @@ mod tests {
             Err(reached("withdraw"))
         }
         fn add_goal(&mut self, _: NewGoal) -> Result<Goal> {
-            Err(reached("goal add"))
+            Err(self.request_refusal("goal add"))
         }
         fn edit_goal(&mut self, _: GoalId, _: GoalEdit) -> Result<Goal> {
-            Err(reached("goal edit"))
+            Err(self.refusal(
+                "goal edit",
+                crate::domain::authorization::PriorityHolder::Goal(GOAL),
+            ))
         }
         fn ready_goal(&mut self, _: GoalId) -> Result<Goal> {
             Err(reached("goal ready"))
@@ -709,6 +791,105 @@ mod tests {
 
     fn planner(id: i64) -> ActorContext {
         ActorContext::instance(ActorRole::Planner, id)
+    }
+
+    /// ADR-t1975-1 decisions 2 and 3: the store's refusal to change a
+    /// person's priority (`set-priority`, `--inherit` too, and `goal
+    /// edit`) or to give another priority than the request's (`add`, `goal
+    /// add`) is recorded as a refusal of the command's capability on its
+    /// resource, and the error names the person's value; any other failure
+    /// of the store records nothing.
+    #[test]
+    fn a_refusal_to_change_a_persons_priority_is_recorded() {
+        let me = planner(7);
+        let commands: [(Command, &str, Value); 6] = [
+            (
+                |p| p.set_priority(TASK, Some(Priority::Low)).map(drop),
+                "task.write",
+                json!({"kind": "task", "id": 1, "status": "ready"}),
+            ),
+            (
+                |p| p.set_priority(TASK, None).map(drop),
+                "task.write",
+                json!({"kind": "task", "id": 1, "status": "ready"}),
+            ),
+            (
+                |p| {
+                    p.add(NewTask {
+                        priority: Some(Priority::Low),
+                        ..new_task()
+                    })
+                    .map(drop)
+                },
+                "task.write",
+                json!({"kind": "queue"}),
+            ),
+            (
+                |p| {
+                    p.add(NewTask {
+                        priority: Some(Priority::Low),
+                        goal_id: Some(GOAL),
+                        ..new_task()
+                    })
+                    .map(drop)
+                },
+                "task.write",
+                json!({"kind": "goal", "id": 1}),
+            ),
+            (
+                |p| {
+                    p.add_goal(NewGoal {
+                        priority: Some(Priority::Low),
+                        ..new_goal()
+                    })
+                    .map(drop)
+                },
+                "goal.write",
+                json!({"kind": "queue"}),
+            ),
+            (
+                |p| {
+                    p.edit_goal(
+                        GOAL,
+                        GoalEdit {
+                            priority: Some(Priority::Low),
+                            ..GoalEdit::default()
+                        },
+                    )
+                    .map(drop)
+                },
+                "goal.write",
+                json!({"kind": "goal", "id": 1}),
+            ),
+        ];
+        for (command, capability, resource) in commands {
+            let mut store = Store {
+                status: Some(TaskStatus::Ready),
+                persons_priority: true,
+                ..Store::default()
+            };
+            let error = command(&mut Planning::new(&mut store, &me, &StaticPolicy)).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("(interrupt): planner may not change it")
+                    || message
+                        .contains("request 44 carries the priority a person gave it, interrupt"),
+                "{error:#}"
+            );
+            assert_eq!(
+                store.denials.into_inner(),
+                [json!({
+                    "event": "authorization_denied",
+                    "role": "planner",
+                    "capability": capability,
+                    "reason": "a person's priority",
+                    "resource": resource,
+                })]
+            );
+            let (outcome, denials) = run(&me, TaskStatus::Ready, None, command);
+            assert!(matches!(outcome, Outcome::Allowed));
+            assert!(denials.is_empty(), "{denials:?}");
+        }
     }
 
     /// ADR-t1433-2: `add` and `edit` refuse the interactive worker mode

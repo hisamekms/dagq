@@ -98,6 +98,9 @@ CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`req
 
 旧値の`DAGQ_ROLE=reviewer`はreview-jobとして読む（[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）。jobの環境には今`DAGQ_RUN_ID`が無いので、`review.submit`・`triage.submit`は持ち主が分からず拒まれる。verdictは今までどおりデータとしてsupervisorが読む。
 
+人の出どころの優先度（`priority_by: human`）はuserとinboxだけが変える。
+他のroleの`set-priority`・`goal edit`と依頼と違う優先度の`goal add`・`add`はstoreが同じtransactionで拒み、理由`a person's priority`の`authorization_denied`を記録し、`denied`の無い人の値を名指すerrorを返す。
+
 askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisorはCLIが開けるどのkindも、workerは`worker_question`、plannerは`planner_question`だけを開ける。observerの`ask --kind blocked --finding`は`ask.open`ではなく`finding.ask`で、finding（`Resource::Finding`）に対して判定する。kindがroleに合わなければ理由`not of this kind`で拒む。
 
 `AuthorizationError`はroleと拒んだcapabilityと理由（`not granted`・`reserved`・`not on this resource`・`not of this kind`）だけを出し、actor id（session idを含みうる）やresourceのid・本文を出さない。
@@ -118,8 +121,8 @@ userとinboxだけに与えるcapabilityを1つ足し、ほかのroleは拒む�
 | --- | --- | --- |
 | `add` | `task.write` | `--goal`のgoal、無ければqueue |
 | `edit` `set-goal` `set-paths` `draft` `dependency add/remove` | `task.write` | task（queueにある状態） |
-| `set-priority` | `task.write` | task（queueにある状態）。`in_progress`のtask（再開待ちか復旧を待つrunを持つもの）にも置け・外せ、次の再開と復旧jobの順に効く（[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)の決定7）。plannerは今の規則（in_progress以降のtaskの`task.write`は`not on this resource`）で拒まれ、user・inboxだけが通る。新しいcapabilityは作らない。`completed` / `canceled`は全てのroleでdomainが拒む |
-| `revisit ID --at` / `revisit ID --clear` | `task.write` | task（queueにある状態）。draftの再検討の時刻を付け・変え・外す（[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。開始前のtaskの変更と同じroleの集合（user・inbox・planner。worker・observer・job・supervisorは`not granted`）なので、新しいcapabilityを作らず`task.write`に含めた。storeは同じtransactionでtaskが`draft`であることを確かめ（認可に使った状態は渡さない。draft以外は全てのroleに拒む）、`user` / `inbox`以外が`draft_planner_exhausted`のあるdraftに付けるのを拒む |
+| `set-priority` | `task.write` | task（queueにある状態）。`in_progress`のtask（再開待ちか復旧を待つrunを持つもの）にも置け・外せ、次の再開と復旧jobの順に効く（[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)の決定7）。`in_progress`のtaskではplannerは`not on this resource`で拒まれ、user・inboxだけが通る。`completed` / `canceled`は全てのroleでdomainが拒む |
+| `revisit ID --at` / `revisit ID --clear` | `task.write` | task（queueにある状態）。draftの再検討の時刻を付け・変え・外す（[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。開始前のtaskの変更と同じroleの集合なので、新しいcapabilityを作らず`task.write`に含めた。storeは同じtransactionでtaskが`draft`であることを確かめ（認可に使った状態は渡さない。draft以外は全てのroleに拒む）、`user` / `inbox`以外が`draft_planner_exhausted`のあるdraftに付けるのを拒む |
 | `judge-follow-up` | `follow_up.judge` | task（状態による制限なし。follow_upの出どころと必須の欄・遷移をstoreが同一transactionで検査） |
 | `edit --verify` / `edit --no-verify`（`in_progress`のみ） | `task.verify_edit` | task（最新runが終了し、生きているrunが無いことをstoreが同一transactionで検査） |
 | `ready` / `ready --bypass-review`・`ready --inherit` | `task.ready` / `task.ready_bypass_review` | task（状態） |
@@ -134,7 +137,7 @@ userとinboxだけに与えるcapabilityを1つ足し、ほかのroleは拒む�
 
 policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く。`in_progress`のtaskの`set-priority`もuserとinboxだけ）は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・4つのjob・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
 
-拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。payloadは`role`・`capability`・`reason`（`not granted`・`reserved`・`not on this resource`）・`resource`（`kind`と`id`、taskなら`status`、proposalなら`owner`、依頼なら`planner`。開くask（`new_ask`）はidの代わりに`ask_kind`・`run`・`task`を持ち、`--request`付きなら`request`と依頼の`planner`も持つ）。記録に失敗しても拒否は拒否のまま返す。observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
+拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。payloadは`role`・`capability`・`reason`（上の理由）・`resource`（`kind`と`id`、taskなら`status`、proposalなら`owner`、依頼なら`planner`。開くask（`new_ask`）はidの代わりに`ask_kind`・`run`・`task`を持ち、`--request`付きなら`request`と依頼の`planner`も持つ）。記録に失敗しても拒否は拒否のまま返す。observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
 
 CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、`error`はobserverなら`observer may not change queue state`、4つのjob（と`reviewer`）なら`reviewer may not change queue state`（今までの文言）、それ以外は`<role> may not <capability> (<reason>)`。
 
@@ -173,7 +176,7 @@ answerは誰の権限で書かれたか（`AnswerAuthority`）を記録する（
 | `delegated` | inbox（人の言葉での代行） | `inbox` |
 | `runtime` | runtimeが自分で閉じる・取り下げる・置き換えるask | `runtime` |
 
-askの行には`answer_authority`と`answer_approval`（`0047_answer_authority.sql`）を、`ask_answered`のpayloadには`authority`と`approval`を書く。`answered_by`と`asked_by`の値の綴りは変えない（jobのaskの`asked_by`の改名とhumanからuserへの改名はgoal 48のtask 502が持つ）。eventのactorの列（roleとid）も同じ区別を持つ。migrationより前のanswerと古いバイナリのanswerは両方とも`NULL`で、JSONには出ない。
+askの行には`answer_authority`と`answer_approval`（`0047_answer_authority.sql`）を、`ask_answered`のpayloadには`authority`と`approval`を書く。`answered_by`と`asked_by`の値の綴りは変えない。eventのactorの列（roleとid）も同じ区別を持つ。migrationより前のanswerと古いバイナリのanswerは両方とも`NULL`で、JSONには出ない。
 
 承認に当たるask（後のgoalで人だけに限るときの土台。ADR-t728-3の決定3）はdomainが分類する（`AskKind::is_approval`と`answer_approves`）: kindが`approve_landing`・`decide`・`approve_plan`・`approve_goal`・`correct_goal`・`approve_update`・`update_failed`のaskのanswer、または`blocked`・`stalled`のaskがoptionに出した`propose` / `dismiss`（runtimeがfindingに適用する答え）。そのanswerは`answer_approval`が`1`、payloadの`approval`が`true`になる。runtimeが自分で閉じる・取り下げる・置き換えるanswer（`authority`が`runtime`）は何も承認しないので、kindに関わらず`0` / `false`にする。この段では承認を人だけに限る強制はしない。
 

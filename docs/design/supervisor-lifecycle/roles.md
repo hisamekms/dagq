@@ -119,7 +119,7 @@ review・recovery・plan review・goal reviewのjobは、それぞれ`review-job
 | review-job | `revise` / `concern` | 生きているsessionへの差し戻し（`revise`の上限を使い切ったか、sessionが終わっていれば`approve_landing`のask） / `approve_landing`のask |
 | recovery-job | `repair`（`confidence: high`） | `RecoveryVerdict::applies()`を通り、さらにalertごとの前提（終わったrunは`plan_ended`、生きているrunは`check_live`）を今も満たすactionだけを適用する。満たさなければaskにする |
 | recovery-job | `repair`（`low`）/ `escalate` | 適用せず、actionを推奨として`decide`などのaskにする |
-| plan-review-job | `pass` / `revise` / `concern` | 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。`concern`の`high`で`reason_category`が`null`の`ready` / `send_back`はpass / reviseとして適用する（[Plan review](plan-review.md#aiが決めるconcern未実装)、ADR-t451-1決定4）。`actions`は`pass`（と適用した`ready`）のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用する。`pass`での優先度の扱いはproposalの由来で分かれる（[Plan review](plan-review.md)の6の`pass`） |
+| plan-review-job | `pass` / `revise` / `concern` | 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。`concern`の`high`で`reason_category`が`null`の`ready` / `send_back`はpass / reviseとして適用する（[Plan review](plan-review.md#aiが決めるconcern未実装)、ADR-t451-1決定4）。`actions`は`pass`（と適用した`ready`）のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用する。`pass`での優先度の扱いは各taskの記録の由来と優先度の出どころで分かれる（[Plan review](plan-review.md)の6の`pass`） |
 | goal-review-job | `achieved` / `gaps` / `ask` | goalを閉じる・gapをdraftにする・`approve_goal`のask（`gaps`の連続が上限を超えたら`ask`） |
 
 - 未知の欄を拒む: 4つのverdictと入れ子の型（reviewのverdict、recoveryのaction、plan reviewのaction・`reopen`、goal reviewの`criteria`・`gaps`）は`#[serde(deny_unknown_fields)]`で、未知の欄・未知のactionを含む出力は読めない出力として扱う。

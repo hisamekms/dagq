@@ -26,7 +26,7 @@ Your prompt holds the person's words. Look for work that covers it first (`searc
 "$DAGQ" submit TASK...          # or --goal GOAL
 ```
 
-  `submit` refuses what `lint` rejects and makes the request `proposed` (no person's approval needed). Report the proposal ID.
+  `submit` refuses what `lint` rejects and makes the request `proposed`. Report the proposal ID.
 - **Decline** (done already, a duplicate in flight, or not plannable as asked; say why): `"$DAGQ" request decline N --reason '<why>'`. The inbox tells the person.
 - **Ask**: `"$DAGQ" ask --request N --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '...' --option plan --option decline`.
 
@@ -34,7 +34,7 @@ The worker's provider: no flag unless the person's words ask for Codex, never to
 
 ## 2. When plan review sends it back (revise)
 
-"Plan review sent proposal N back" arrives with reasons. Fix them (`edit`, `dependency`, `add`, `cancel`), `lint --proposal N`, `"$DAGQ" submit --proposal N`; on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `skills/dagq/reference/register.md`, "A revise".
+"Plan review sent proposal N back" arrives with reasons. Fix them, `lint --proposal N`, `"$DAGQ" submit --proposal N`; on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `skills/dagq/reference/register.md`, "A revise".
 
 ## 3. A draft or a finding you were opened for
 
@@ -46,7 +46,7 @@ Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`e
 
 ## 4. Goals, forecasts, findings, KPIs
 
-`"$DAGQ" goal list` (by priority, `--tag`), `goal show ID`, `graph --goal ID` and `forecast --goal ID` show progress. A request to defer a goal's improvements its acceptance does not need: section 3's judgement. Decide the observer's findings per `skills/dagq/reference/observer.md` (section 3). Mark a change of a setting, the operation or the host (`mark`) and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
+`"$DAGQ" goal list`, `goal show ID`, `graph --goal ID` and `forecast --goal ID` show progress. A request to defer a goal's improvements its acceptance does not need: section 3's judgement. Decide the observer's findings per `skills/dagq/reference/observer.md` (section 3). Mark a change of a setting, the operation or the host (`mark`) and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
 
 ## 5. A finished goal
 
@@ -54,6 +54,6 @@ Not yours. When an open goal's tasks ended (`completed` / `canceled`, no draft l
 
 ## Where your authority ends
 
-The CLI checks this (`skills/dagq/reference/authority.md`); take a refusal as the answer. Within the Basic policy and your prompt's choices: `goal add`, `add`, `edit`, `lint`, `submit`, `dependency`, `set-goal`, `judge-follow-up`, `set-paths`, `set-priority`, `revisit`, `draft`, `proposal withdraw` of your own proposal, `cancel` (`--duplicate-of X`) of a draft, submitted or ready task, `goal edit`, `goal close`, `finding dismiss` / `resolve`, `request decline` of your own request, `note` (on a run too), `mark`, `search`, `related`, `ci failures`, `ask --kind planner_question` (a task, finding or your own request; never a run). Never `ready` (even `--bypass-review`), `goal ready`, `goal review` or `request add`: the CLI refuses them. Never: `integrate`, `review`, `answer`, `ask close`, `recover`, `supervise`, `observe`, `finding record`, `up` / `down` / `install` (allowed, not yours), a change to a task once it is `in_progress` (except recording a follow_up membership judgement), or anything in a run's worktree or workspace; those are the inbox's, on the person's word (`skills/dagq-recover/SKILL.md`).
+The CLI checks this (`skills/dagq/reference/authority.md`); take a refusal as the answer. Within the Basic policy and your prompt's choices: `goal add`, `add`, `edit`, `lint`, `submit`, `dependency`, `set-goal`, `judge-follow-up`, `set-paths`, `set-priority`, `revisit`, `draft`, `proposal withdraw` of your own, `cancel` (`--duplicate-of X`) of a draft, submitted or ready task, `goal edit`, `goal close`, `finding dismiss` / `resolve`, `request decline` of your own, `note` (on a run too), `mark`, `ci failures`, `ask --kind planner_question` (a task, finding or your own request; never a run). Never `ready` (even `--bypass-review`), `goal ready`, `goal review`, `request add` or changing a person's priority (`priority_by: human`): the CLI refuses them; `set-goal` keeps it on the task unless the new goal has it as a person's. Never: `integrate`, `review`, `answer`, `ask close`, `recover`, `supervise`, `observe`, `finding record`, `up` / `down` / `install` (allowed, not yours), a change to a task once it is `in_progress` (except recording a follow_up membership judgement), or anything in a run's worktree or workspace; those are the inbox's, on the person's word (`skills/dagq-recover/SKILL.md`).
 
 `submit` refuses a follow_up draft with a source goal and no current judgement.

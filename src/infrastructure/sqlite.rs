@@ -46,7 +46,8 @@ use crate::{
         PlannerOrigin, Predecessor, Priority, Proposal, ProposalId, RequestId, RunEvent, RunId,
         RunRecord, Submission, TagSet, Task, TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId,
         TaskRecord, TaskRun, TaskStatus, TaskStatusCounts,
-        actor::ActorContext,
+        actor::{ActorContext, ActorRole},
+        authorization::{PriorityHolder, check_priority_change},
         goal,
         plan_request::{
             CreatingPlanner, Creator, PriorityBy, RecordedOrigin, creation_origin,
@@ -826,7 +827,14 @@ impl SqliteQueue {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
         super::follow_up_membership::check_set_goal(&tx, task_id, goal_id)?;
-        let result = set_goal_in(&tx, task_id, goal_id, &self.generators.clock.timestamp())?;
+        let by = task::MovedBy::of(actor_role(&tx)?);
+        let result = set_goal_in(
+            &tx,
+            task_id,
+            goal_id,
+            &self.generators.clock.timestamp(),
+            by,
+        )?;
         tx.commit()?;
         Ok(result)
     }
@@ -1333,8 +1341,17 @@ impl TaskStore for SqliteQueue {
         let old_json = serde_json::to_value(&old)?;
         let old_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
         // A change of priority records who set it (ADR-t1975-1 decision 3).
+        // Only a person changes a person's (ADR-t1975-1 decision 3).
         let priority_by = match edit.priority {
-            Some(priority) if priority != old.priority() => PriorityBy::of(creator_of_actor(&tx)?),
+            Some(priority) if priority != old.priority() => {
+                check_priority_change(
+                    actor_role(&tx)?,
+                    PriorityHolder::Goal(goal_id),
+                    old.priority(),
+                    old.priority_by(),
+                )?;
+                PriorityBy::of(creator_of_actor(&tx)?)
+            }
             _ => old.priority_by(),
         };
         let new = goal::edit(old, edit)?;
@@ -1753,6 +1770,12 @@ pub(super) fn insert_task(
         insert_goal_dependency(tx, id, goal_id, now)?;
     }
     read_task(tx, id)
+}
+
+/// The role of the actor of `conn`'s writes.
+pub(super) fn actor_role(conn: &Connection) -> Result<ActorRole> {
+    let role: String = conn.query_row("SELECT dagq_actor_role()", [], |r| r.get(0))?;
+    Ok(role.parse()?)
 }
 
 /// Who creates a goal or task as the actor of `conn`'s writes
@@ -2703,12 +2726,21 @@ pub(super) fn change_priority(
     by: Option<&str>,
 ) -> Result<()> {
     let task = read_task(conn, task_id)?;
-    let (from, from_source) = (task.priority(), task.priority_source());
+    let (from, from_source, from_by) =
+        (task.priority(), task.priority_source(), task.priority_by());
     let own = task.own_priority();
     let task = task::set_priority(task, priority)?;
     if own == task.own_priority() {
         return Ok(());
     }
+    // A person's priority, its own or its goal's, only a person changes
+    // (ADR-t1975-1 decision 3).
+    check_priority_change(
+        actor_role(conn)?,
+        PriorityHolder::Task(task_id),
+        from,
+        from_by,
+    )?;
     // Who set it (ADR-t1975-1 decision 3); none without an own priority.
     let priority_by = match task.own_priority() {
         Some(_) => Some(PriorityBy::of(creator_of_actor(conn)?)),
@@ -2930,17 +2962,27 @@ pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
     })
 }
 
+/// Move the task to `goal_id`, or out of any goal, as `by` moves it
+/// ([`task::set_goal`]): a person's priority it took from its old goal and
+/// an AI's move would carry off is kept as its own, recorded as
+/// `task_priority_changed` with `kept_on_move` before the move's
+/// `task_goal_changed` (ADR-t1975-1 decision 4).
 pub(super) fn set_goal_in(
     conn: &Connection,
     task_id: TaskId,
     goal_id: Option<GoalId>,
     timestamp: &str,
+    by: task::MovedBy,
 ) -> Result<Task> {
     let task = read_task(conn, task_id)?;
     let from = task.goal_id();
-    let task = task::set_goal(task, goal_id)?;
-    if let Some(goal_id) = task.goal_id() {
-        goal::check_accepts_tasks(&read_goal(conn, goal_id)?)?;
+    let (from_priority, from_source) = (task.priority(), task.priority_source());
+    let own = task.own_priority();
+    let goal = goal_id.map(|id| read_goal(conn, id)).transpose()?;
+    let task = task::set_goal(task, goal.as_ref().map(task::Destination::of), by)?;
+    if let Some(goal) = &goal {
+        let goal_id = goal.id();
+        goal::check_accepts_tasks(goal)?;
         if from != Some(goal_id) {
             // The goal would wait for the task: the task must not wait
             // for the goal (ADR-0038).
@@ -2953,6 +2995,24 @@ pub(super) fn set_goal_in(
             let cycle = waits_for(conn, Node::Task(task_id), Node::Goal(goal_id))?;
             task::check_membership_acyclic(&task, goal_id, direct, cycle)?;
         }
+    }
+    if own != task.own_priority() {
+        conn.execute(
+            "UPDATE tasks SET priority=?1, priority_by=?2 WHERE id=?3",
+            params![
+                task.own_priority().map(Priority::as_i64),
+                task.own_priority_by().map(PriorityBy::as_str),
+                task_id
+            ],
+        )?;
+        event(
+            conn,
+            task_id,
+            None,
+            EventKind::TaskPriorityChanged,
+            json!({"from": from_priority, "to": task.priority(), "from_source": from_source,
+                "to_source": task.priority_source(), "kept_on_move": true}),
+        )?;
     }
     if from != task.goal_id() {
         conn.execute(
@@ -3188,5 +3248,118 @@ mod origin_migration_tests {
             assert_eq!(goal.priority_by(), priority_by, "goal {id}");
             assert_eq!(goal.priority(), priority, "goal {id}");
         }
+    }
+}
+
+#[cfg(test)]
+mod persons_priority_tests {
+    use super::*;
+    use crate::domain::task::MovedBy;
+
+    fn new_goal(title: &str, priority: Priority) -> NewGoal {
+        NewGoal {
+            title: title.into(),
+            description: "d".into(),
+            acceptance: "a".into(),
+            constraints: String::new(),
+            doc: None,
+            draft: false,
+            priority: Some(priority),
+            tags: Vec::new(),
+        }
+    }
+
+    fn new_task(goal: GoalId) -> NewTask {
+        NewTask {
+            title: "t".into(),
+            description: "d".into(),
+            acceptance: "a".into(),
+            verification_commands: Vec::new(),
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: None,
+            change: None,
+            dependencies: Vec::new(),
+            goal_dependencies: Vec::new(),
+            goal_id: Some(goal),
+            context: String::new(),
+            provider: None,
+            worker_mode: None,
+            wait_for_build: false,
+        }
+    }
+
+    /// The store keeps a person's priority from the AI's writes in their
+    /// transaction (ADR-t1975-1 decisions 3 and 4): `set-priority` and
+    /// `goal edit` by a planner are refused naming the value, the
+    /// planner's move keeps the value as the task's own (recorded as
+    /// `kept_on_move`), and the user's move takes the new goal's.
+    #[test]
+    fn the_ais_writes_keep_a_persons_priority_and_a_persons_move_takes_the_goals() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("queue.db")).unwrap();
+        let persons = queue
+            .add_goal(new_goal("a person's", Priority::Interrupt))
+            .unwrap();
+        let task = TaskStore::add(&mut queue, new_task(persons.id()))
+            .unwrap()
+            .id();
+        let other = TaskStore::add(&mut queue, new_task(persons.id()))
+            .unwrap()
+            .id();
+        let mut queue = queue.with_actor(ActorContext::instance(ActorRole::Planner, 1));
+        let ais = queue
+            .add_goal(new_goal("the AI's", Priority::Normal))
+            .unwrap();
+        assert_eq!(ais.priority_by(), PriorityBy::Ai);
+        let refused = queue
+            .set_priority_authorized(task, Some(Priority::Low), None)
+            .unwrap_err();
+        assert!(
+            matches!(
+                refused.downcast_ref::<DomainError>(),
+                Some(DomainError::PersonsPriority {
+                    priority: Priority::Interrupt,
+                    role: ActorRole::Planner,
+                    ..
+                })
+            ),
+            "{refused:#}"
+        );
+        let edit = GoalEdit {
+            priority: Some(Priority::Low),
+            ..GoalEdit::default()
+        };
+        assert!(queue.edit_goal(persons.id(), edit.clone()).is_err());
+        // The AI's goal is the AI's to change.
+        queue.edit_goal(ais.id(), edit).unwrap();
+        let moved = queue
+            .set_goal_authorized(task, Some(ais.id()), None)
+            .unwrap();
+        assert_eq!(
+            (moved.priority(), moved.own_priority_by(), moved.goal_id()),
+            (Priority::Interrupt, Some(PriorityBy::Human), Some(ais.id()))
+        );
+        let kept = queue
+            .conn
+            .query_row(
+                "SELECT payload FROM run_events WHERE task_id=?1 AND kind='task_priority_changed'",
+                [task],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&kept).unwrap(),
+            json!({"from": "interrupt", "to": "interrupt", "from_source": "goal",
+                "to_source": "task", "kept_on_move": true})
+        );
+        // A person's move, as a follow_up's judge or a correct_goal answer
+        // passes it, takes the goal's.
+        let tx = queue.conn.transaction().unwrap();
+        let moved = set_goal_in(&tx, other, Some(ais.id()), "now", MovedBy::Person).unwrap();
+        assert_eq!(
+            (moved.priority(), moved.own_priority(), moved.priority_by()),
+            (Priority::Low, None, PriorityBy::Ai)
+        );
     }
 }

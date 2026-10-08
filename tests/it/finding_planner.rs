@@ -343,7 +343,7 @@ fn improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most() {
     );
     assert_ne!(lowered[0]["to_source"], "task");
     let finished = events(&mut queue, task, "plan_review_finished");
-    assert_eq!(finished[0]["origin"], "finding");
+    assert_eq!(inherited.origin().origin.as_str(), "ai");
     assert_eq!(finished[0]["priorities_inherited"], json!([task]));
     assert!(finding_events(&fx.db, second, "finding_planner_opened").is_empty());
     assert_eq!(finding(&queue, second).status, FindingStatus::Open);

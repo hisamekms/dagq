@@ -418,12 +418,92 @@ pub fn claim(mut task: Task) -> Result<Task, DomainError> {
     Ok(task)
 }
 
-/// Move `task` to `goal_id`, or out of any goal. Whether the goal takes tasks
-/// is [`super::goal::check_accepts_tasks`], which the caller applies to the
+/// The goal a task moves to, as the move reads it: its ID, its priority
+/// and who set that priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Destination {
+    pub id: GoalId,
+    pub priority: Priority,
+    pub priority_by: PriorityBy,
+}
+
+impl Destination {
+    pub fn of(goal: &super::Goal) -> Self {
+        Self {
+            id: goal.id(),
+            priority: goal.priority(),
+            priority_by: goal.priority_by(),
+        }
+    }
+}
+
+/// Who moves a task between goals, for what becomes of a person's priority
+/// it takes from its goal (ADR-t1975-1 decision 4): a person (the user,
+/// the inbox, a person's answer the runtime applies) or the AI (a planner,
+/// the runtime on its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovedBy {
+    Person,
+    Ai,
+}
+
+impl MovedBy {
+    /// Who `role` moves a task as.
+    pub const fn of(role: super::ActorRole) -> Self {
+        if super::authorization::changes_persons_priority(role) {
+            Self::Person
+        } else {
+            Self::Ai
+        }
+    }
+}
+
+/// The priority a move of `task` to `to` (none: out of any goal, which
+/// gives `normal`) by `by` keeps as the task's own and a person's
+/// (ADR-t1975-1 decision 4), none when the task takes its new goal's as it
+/// always did: a person's move, a task with a priority of its own (which no
+/// move changes), a task whose priority no person set, and a move to a
+/// goal whose priority is the same value set by a person, which keeps the
+/// same protection. A goal of the same value the AI set does not: the AI
+/// could then lower the goal, or move the task again.
+pub fn priority_kept_on_move(
+    task: &Task,
+    to: Option<Destination>,
+    by: MovedBy,
+) -> Option<Priority> {
+    let inherits = by == MovedBy::Person
+        || task.own_priority.is_some()
+        || task.priority_by != PriorityBy::Human
+        || to.is_some_and(|goal| {
+            (goal.priority, goal.priority_by) == (task.priority, PriorityBy::Human)
+        });
+    (!inherits).then_some(task.priority)
+}
+
+/// Move `task` to `to`, or out of any goal, as `by` moves it: a person's
+/// priority it took from its old goal stays its own as a person's when
+/// [`priority_kept_on_move`] says so, and otherwise it takes its new
+/// goal's. Whether the goal takes tasks is
+/// [`super::goal::check_accepts_tasks`], which the caller applies to the
 /// goal it reads.
-pub fn set_goal(mut task: Task, goal_id: Option<GoalId>) -> Result<Task, DomainError> {
+pub fn set_goal(mut task: Task, to: Option<Destination>, by: MovedBy) -> Result<Task, DomainError> {
     require_editable(&task, "the goal")?;
-    task.goal_id = goal_id;
+    if task.goal_id == to.map(|goal| goal.id) {
+        return Ok(task);
+    }
+    if let Some(kept) = priority_kept_on_move(&task, to, by) {
+        task.own_priority = Some(kept);
+        task.own_priority_by = Some(PriorityBy::Human);
+    }
+    task.goal_id = to.map(|goal| goal.id);
+    task.goal_priority = to.map(|goal| goal.priority);
+    task.goal_priority_by = to.map(|goal| goal.priority_by);
+    (task.priority, task.priority_source) = base_priority(task.own_priority, task.goal_priority);
+    task.priority_by = PriorityBy::effective(
+        task.own_priority,
+        task.own_priority_by,
+        task.goal_priority_by,
+    );
     Ok(task)
 }
 
@@ -675,6 +755,202 @@ mod tests {
             named_mode: None,
             wait_for_build: false,
         }
+    }
+
+    fn goal(id: i64, priority: Priority, priority_by: PriorityBy) -> Destination {
+        Destination {
+            id: GoalId::new(id),
+            priority,
+            priority_by,
+        }
+    }
+
+    /// A ready task as the store reads it: its own priority and who set
+    /// it, and its goal's.
+    fn read(own: Option<(Priority, PriorityBy)>, in_goal: Option<Destination>) -> Task {
+        Task::restore(TaskRecord {
+            priority: own.map(|(priority, _)| priority),
+            goal_priority: in_goal.map(|goal| goal.priority),
+            goal_id: in_goal.map(|goal| goal.id),
+            ..record(TaskStatus::Ready)
+        })
+        .unwrap()
+        .with_record(
+            own.map(|(_, by)| by),
+            in_goal.map(|goal| goal.priority_by),
+            RecordedOrigin::UNKNOWN,
+        )
+    }
+
+    /// The task read again after its goal changed to `in_goal`.
+    fn reread(task: &Task, in_goal: Option<Destination>) -> Task {
+        read(
+            task.own_priority().zip(task.own_priority_by()),
+            in_goal.filter(|goal| task.goal_id() == Some(goal.id)),
+        )
+    }
+
+    fn state(task: &Task) -> (Priority, PrioritySource, PriorityBy, Option<GoalId>) {
+        (
+            task.priority(),
+            task.priority_source(),
+            task.priority_by(),
+            task.goal_id(),
+        )
+    }
+
+    /// ADR-t1975-1 decision 4: the AI's move of a task that takes a
+    /// person's priority from its goal keeps that value as the task's own
+    /// and a person's, unless the new goal has the same value as a
+    /// person's; a person's move, a task with its own priority and a task
+    /// whose priority the AI set take the new goal's as always.
+    #[test]
+    fn the_ais_move_keeps_a_persons_priority_the_task_took_from_its_goal() {
+        use PriorityBy::{Ai, Human};
+        use PrioritySource as Src;
+        let persons = goal(1, Priority::Interrupt, Human);
+        let low = goal(2, Priority::Low, Ai);
+        let id = |n| Some(GoalId::new(n));
+        // To a lower goal, and out of any goal (which gives normal).
+        for to in [Some(low), None] {
+            let moved = set_goal(read(None, Some(persons)), to, MovedBy::Ai).unwrap();
+            assert_eq!(
+                state(&moved),
+                (
+                    Priority::Interrupt,
+                    Src::Task,
+                    Human,
+                    to.map(|goal| goal.id)
+                ),
+                "{to:?}"
+            );
+            assert_eq!(moved.own_priority_by(), Some(Human));
+            // A person's move takes the new goal's, or normal.
+            let moved = set_goal(read(None, Some(persons)), to, MovedBy::Person).unwrap();
+            assert_eq!(moved.own_priority(), None, "{to:?}");
+            assert_eq!(
+                moved.priority(),
+                to.map_or(Priority::Normal, |goal| goal.priority)
+            );
+        }
+        // A person's own priority stays as it is, wherever the AI moves it.
+        let own = read(Some((Priority::Urgent, Human)), Some(persons));
+        let moved = set_goal(own, Some(low), MovedBy::Ai).unwrap();
+        assert_eq!(state(&moved), (Priority::Urgent, Src::Task, Human, id(2)));
+        // A priority the AI set, its own or its goal's: the new goal's.
+        let ais = goal(3, Priority::High, Ai);
+        let moved = set_goal(read(None, Some(ais)), Some(low), MovedBy::Ai).unwrap();
+        assert_eq!(state(&moved), (Priority::Low, Src::Goal, Ai, id(2)));
+        let moved = set_goal(
+            read(Some((Priority::High, Ai)), Some(persons)),
+            None,
+            MovedBy::Ai,
+        )
+        .unwrap();
+        assert_eq!(state(&moved), (Priority::High, Src::Task, Ai, None));
+        let alone = set_goal(read(None, None), Some(low), MovedBy::Ai).unwrap();
+        assert_eq!(state(&alone), (Priority::Low, Src::Goal, Ai, id(2)));
+        // Staying in the same goal changes nothing.
+        let stays = set_goal(read(None, Some(persons)), Some(persons), MovedBy::Ai).unwrap();
+        assert_eq!(stays.own_priority(), None);
+    }
+
+    /// ADR-t1975-1 decision 4, in a row: the AI moves a task that takes a
+    /// person's `high` to a goal of the same `high` the AI set, which keeps
+    /// it as the task's own; lowering that goal, moving the task to a low
+    /// goal and out of any goal leave the task at the person's `high`.
+    /// Moved instead to a goal of the same value a person set, it takes
+    /// that goal's, and the AI may then change neither.
+    #[test]
+    fn a_kept_priority_survives_the_ais_later_changes_and_moves() {
+        use super::super::{
+            ActorRole,
+            authorization::{PriorityHolder, check_priority_change},
+        };
+        use PriorityBy::{Ai, Human};
+        let persons = goal(1, Priority::High, Human);
+        let same = goal(2, Priority::High, Ai);
+        let task = set_goal(read(None, Some(persons)), Some(same), MovedBy::Ai).unwrap();
+        assert_eq!(
+            task.own_priority().zip(task.own_priority_by()),
+            Some((Priority::High, Human))
+        );
+        // The AI's goal is the AI's to lower...
+        check_priority_change(
+            ActorRole::Planner,
+            PriorityHolder::Goal(same.id),
+            same.priority,
+            same.priority_by,
+        )
+        .unwrap();
+        let lowered = goal(2, Priority::Low, Ai);
+        let task = reread(&task, Some(lowered));
+        assert_eq!(
+            (task.priority(), task.priority_by()),
+            (Priority::High, Human)
+        );
+        // ...but the task's priority is still the person's, and no AI move
+        // changes it.
+        assert!(
+            check_priority_change(
+                ActorRole::Planner,
+                PriorityHolder::Task(task.id()),
+                task.priority(),
+                task.priority_by()
+            )
+            .is_err()
+        );
+        let task = set_goal(task, Some(goal(3, Priority::Low, Ai)), MovedBy::Ai).unwrap();
+        assert_eq!(
+            (task.priority(), task.priority_by()),
+            (Priority::High, Human)
+        );
+        let task = set_goal(task, None, MovedBy::Ai).unwrap();
+        assert_eq!(
+            (task.priority(), task.priority_source(), task.priority_by()),
+            (Priority::High, PrioritySource::Task, Human)
+        );
+
+        // To a goal of the same value a person set: it takes that goal's.
+        let other = goal(4, Priority::High, Human);
+        let task = set_goal(read(None, Some(persons)), Some(other), MovedBy::Ai).unwrap();
+        assert_eq!(
+            (
+                task.own_priority(),
+                task.priority_source(),
+                task.priority_by()
+            ),
+            (None, PrioritySource::Goal, Human)
+        );
+        // The AI changes neither that goal's priority nor the task's.
+        for holder in [
+            PriorityHolder::Goal(other.id),
+            PriorityHolder::Task(task.id()),
+        ] {
+            assert!(
+                check_priority_change(
+                    ActorRole::Planner,
+                    holder,
+                    Priority::High,
+                    task.priority_by()
+                )
+                .is_err(),
+                "{holder}"
+            );
+        }
+        assert!(
+            check_priority_change(
+                ActorRole::Inbox,
+                PriorityHolder::Goal(other.id),
+                Priority::High,
+                Human
+            )
+            .is_ok()
+        );
+        assert_eq!(MovedBy::of(ActorRole::User), MovedBy::Person);
+        assert_eq!(MovedBy::of(ActorRole::Inbox), MovedBy::Person);
+        assert_eq!(MovedBy::of(ActorRole::Planner), MovedBy::Ai);
+        assert_eq!(MovedBy::of(ActorRole::Supervisor), MovedBy::Ai);
     }
 
     /// ADR-t1340-1: a task that names no mode stores none and runs the
@@ -994,7 +1270,12 @@ mod tests {
         let ready = Task::restore(record(TaskStatus::Ready)).unwrap();
         assert!(dependencies_editable(&ready));
         check_dependencies_editable(&ready).unwrap();
-        let moved = set_goal(ready, Some(GoalId::new(4))).unwrap();
+        let moved = set_goal(
+            ready,
+            Some(goal(4, Priority::Normal, PriorityBy::Ai)),
+            MovedBy::Ai,
+        )
+        .unwrap();
         assert_eq!(moved.goal_id(), Some(GoalId::new(4)));
         let scoped = set_paths(moved, vec!["src/**".into(), "src/**".into()]).unwrap();
         assert_eq!(scoped.paths(), ["src/**"]);
@@ -1018,7 +1299,9 @@ mod tests {
         let claimed = || Task::restore(record(TaskStatus::InProgress)).unwrap();
         assert!(!dependencies_editable(&claimed()));
         assert_eq!(
-            set_goal(claimed(), None).unwrap_err().to_string(),
+            set_goal(claimed(), None, MovedBy::Person)
+                .unwrap_err()
+                .to_string(),
             "the goal can only be changed for draft, submitted or ready tasks"
         );
         assert_eq!(

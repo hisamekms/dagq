@@ -254,7 +254,14 @@ impl SqliteQueue {
             && !(judgement.classification == Class::Required && source_goal.is_closed())
             && destination != task_row.goal_id()
         {
-            set_goal_in(&tx, task, destination, &self.generators.clock.timestamp())?;
+            let by = crate::domain::task::MovedBy::of(role.parse()?);
+            set_goal_in(
+                &tx,
+                task,
+                destination,
+                &self.generators.clock.timestamp(),
+                by,
+            )?;
         }
         let version = acceptance_version(&tx, source)?;
         let source_kind = if recorded_source.is_none() {
@@ -483,7 +490,14 @@ pub(super) fn decide_correction(
             // dependencies refuse (the follow-up waits on the goal) leaves
             // the follow-up where it is, and the goal waits for it as a
             // required one outside, instead of failing the answer.
-            match set_goal_in(&tx, task, Some(goal_id), &stamp) {
+            // A person's answer: the follow-up takes the goal's priority.
+            match set_goal_in(
+                &tx,
+                task,
+                Some(goal_id),
+                &stamp,
+                crate::domain::task::MovedBy::Person,
+            ) {
                 Ok(_) => moved = true,
                 Err(error) => move_refused = Some(format!("{error:#}")),
             }
