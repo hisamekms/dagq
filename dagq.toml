@@ -245,7 +245,7 @@ max = 0.6
 [e2e]
 # 差分がこの glob に触れる run にだけ、review が pass した後、着地の前に runtime が host で全部の e2e を流す
 # （ADR-t963-1 の決定 2・3、ADR-t1233-2。worker は e2e を流さず、validating は要否を validation_finished の e2e_requirement に記録するだけ。
-# 要否の判定は docs/design/supervisor-lifecycle/validation.md の「runtimeが流すe2e」、流し方は review.md の「着地の前のe2e」）。
+# 要否の判定は docs/design/supervisor-lifecycle/validation.md の「runtimeが流すe2e」、流し方は landing-e2e.md）。
 # 置くのは実 cmux・実プロセス・実 Git の境目だけ: cmux の adapter、process と session、launchd、lifecycle（up / down・引き継ぎ）、
 # integrate、install、update（自動更新と e2e の関門）、actor（worker・planner・inbox・job の session）の起動と、e2e そのもの（tests/e2e.rs と tests/e2e/ の下）。
 # supervise の判断の部分（src/application/supervise/ の handoff.rs と update.rs 以外）は含めない。runtime の commit の多くが

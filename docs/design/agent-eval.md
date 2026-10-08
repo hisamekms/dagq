@@ -159,7 +159,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 ## 採用の判定（着地の前のdev）
 
 - 対象: runの差分が`.dagq/agents/<name>/AGENT.md`を変えるrun（差分の取り方はreviewのagentの選び方と同じ`<base>...<head>`）。変えたagentごとに1周。
-- reviewのpassの後、着地の前（[Review](supervisor-lifecycle/review.md)の「着地の前のe2e」と同じ位置）に、supervisorがlanding branchのcommitの`.dagq/agents/<name>/evals/dev.json`とpatchで、runのcommitの定義を測る。run branchのケースの追加・変更は使わない。
+- reviewのpassの後、着地の前（[着地の前のe2e](supervisor-lifecycle/landing-e2e.md)と同じ位置）に、supervisorがlanding branchのcommitの`.dagq/agents/<name>/evals/dev.json`とpatchで、runのcommitの定義を測る。run branchのケースの追加・変更は使わない。
 - 待つ間と流す間、runは自分のslotとleaseを持ったまま待つ（e2eと同じ）。
 - `passed`が`false`（閾値を下回った、`incomplete`）なら着地させず、理由（成績・失敗したケースのidとagentの理由）をworkerに差し戻す。差し戻しはreviewの`revise`と同じ経路で送り、reviseの上限に1回と数える（上限を超えれば人の判断）。`refused`（`cost_unknown`・上限超え）はworkerが直せないので人の判断（`approve_landing`のask）にする。
 

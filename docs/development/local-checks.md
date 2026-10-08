@@ -84,7 +84,7 @@ workerは手元のcargo（`cargo test`・`cargo nextest run`・`cargo clippy`・
 ## e2eを流さない
 
 - e2e（`tests/e2e.rs`）はworkerが流さない（[ADR-t1233-2](../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)）。providerに依らず（Codex workerも）同じで、e2eの除外の規則は無い（決定6）。receiptの`e2e`は理由（要るrunはruntimeがreviewのpassの後にhostで流す）つきの`not_applicable`にする。
-- 要るrunのe2eは、reviewのpassの後、着地の前にruntimeがhostで全部流す（[Review](../design/supervisor-lifecycle/review.md)の「着地の前のe2e」）。全部のe2eは自動更新と`install`が固定バイナリを入れ替える前の関門も流す（[Auto-update](../design/supervisor-lifecycle/auto-update.md)）。
+- 要るrunのe2eは、reviewのpassの後、着地の前にruntimeがhostで全部流す（[着地の前のe2e](../design/supervisor-lifecycle/landing-e2e.md)）。全部のe2eは自動更新と`install`が固定バイナリを入れ替える前の関門も流す（[Auto-update](../design/supervisor-lifecycle/auto-update.md)）。
 - 例外: runtimeのe2eが落ちて`needs_session`（`e2e_failed`）でresumeされたrun（理由に落ちたtestとlogがある）は、logを読んで落ちたtestを直してcommitし、再現は落ちたtestを名前で絞って1本ずつ（`sh scripts/cargo-brief.sh cargo test --locked --test e2e -- --ignored --exact <testの名前>`）流すだけにする。全体のe2eは流さない（直したrunはvalidating・reviewの後にruntimeがもう一度流す）。e2eはstressの対象外。
 
 ## stress

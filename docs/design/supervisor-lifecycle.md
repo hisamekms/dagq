@@ -289,6 +289,7 @@ live worker alert (stalled, idle_process)
 ## Review (supervisor)
 
 - [Review (supervisor)](supervisor-lifecycle/review.md)
+- [着地の前のe2e](supervisor-lifecycle/landing-e2e.md)
 
 ## Triage (supervisor)
 
