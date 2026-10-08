@@ -288,6 +288,7 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - headless jobは1回きりなので、起動の前に行き先を決め、起動の後に使えないと分かったjobは失敗を記録して次のpassでもう一方で起動し直す。
   runのreviewは行を持たないので、同じpassで起動し直す（[Review](supervisor-lifecycle/review.md)、goal reviewは[Goal review](supervisor-lifecycle/goal-review.md)の3と6）。
 - `[provider_fallback]`の`workers` / `jobs`がfalseでも、失敗の分類と控えは変わらず、もう一方へ移ることだけを止めて控えが解けるのを待つ。
+  `jobs`が止めるのは`[roles.<role>]`に`provider`を書いたheadlessのjob（`claude`を書いたもの・復旧jobを含む）で、書かないjobは対象の外。
   `--no-claude`と能力による選択（reviewのsubagent）は止めない。
   設定はsupervisorが各passで読み直し、読めないときは使っている値のまま続ける（書式は[Run environment](supervisor-lifecycle/run-environment.md)）。
 - timer jobの使えない終わりの読み取りは観測と分析の側（`supervise::observer`）が値にし、控えは実行と着地の側（`supervise::provider`）が行う（[Architecture](architecture.md)）。

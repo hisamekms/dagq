@@ -33,7 +33,7 @@ What it leaves: `reference/doctor.md`; the next supervisor's recovery job takes 
 
 ## 4. Triage by hand, and recover by hand
 
-Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed; the run stays as it is and is not tried again (a `triage_failed` with `provider_unusable` is not this attention: its next round starts on the other provider). `recover by hand` (`recovery_failed`): an older runtime's record. Before bringing either to the person, read `reference/triage-by-hand.md` (also a broken verify's work: `edit`, then `retry_inherit`; and carrying an ended run's committed work over by hand: `ready ID --inherit`).
+Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed; the run stays as it is and is not tried again (a `triage_failed` with `provider_unusable` is not this attention: its next round starts on the other provider, or, with `[provider_fallback] jobs = false`, on the same provider once its hold ends). `recover by hand` (`recovery_failed`): an older runtime's record. Before bringing either to the person, read `reference/triage-by-hand.md` (also a broken verify's work: `edit`, then `retry_inherit`; and carrying an ended run's committed work over by hand: `ready ID --inherit`).
 
 ## 5. Start, stop and update the runtime
 

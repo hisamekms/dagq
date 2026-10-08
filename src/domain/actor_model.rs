@@ -1016,6 +1016,122 @@ mod tests {
         }
     }
 
+    /// A recovery job (of a run that ended or of a live one) whose
+    /// `[roles.recovery]` names its provider, Codex or Claude, is among the
+    /// jobs `[provider_fallback] jobs` turns off: off, a provider it cannot
+    /// use (before a start, or held after a job found it unusable) keeps it
+    /// waiting for that provider, which it starts on again once usable; on,
+    /// it moves. One that names no provider routes the same on and off, and
+    /// `--no-claude` routes the same on and off (ADR-t1857-1).
+    #[test]
+    fn with_the_fallback_off_a_recovery_job_naming_its_provider_waits_for_it() {
+        use UnnamedWithoutClaude::Unavailable;
+        let named = |provider| {
+            let mut models = RoleModels::default();
+            models.entry(ModelRole::Recovery).provider = Some(provider);
+            models
+        };
+        let route = |models: &RoleModels,
+                     (no_claude, claude_held): (bool, bool),
+                     fallback,
+                     unusable: &dyn Fn(Provider) -> Option<SwitchReason>| {
+            describe(job_start_route(
+                models.launch(ModelRole::Recovery),
+                models.switchable(ModelRole::Recovery),
+                no_claude,
+                claude_held,
+                fallback,
+                Unavailable,
+                unusable,
+            ))
+        };
+        let usable = |_: Provider| None;
+        for reason in [
+            SwitchReason::ExecutableMissing,
+            SwitchReason::LaunchFailed,
+            SwitchReason::Authentication,
+            SwitchReason::UsageLimit,
+        ] {
+            let r = reason.as_str();
+            // Codex named.
+            let codex = named(Provider::Codex);
+            let codex_held = |provider: Provider| (provider == Provider::Codex).then_some(reason);
+            assert_eq!(
+                route(&codex, (false, false), true, &codex_held),
+                format!("start claude true Some(\"codex\") Some(\"{r}\")")
+            );
+            assert_eq!(
+                route(&codex, (false, false), false, &codex_held),
+                format!(
+                    "wait: codex cannot be used ({r}); [provider_fallback] jobs is false, so it waits for codex"
+                )
+            );
+            // Claude named: its login or usage limit holds the queue (the
+            // hold ask) as well as Claude.
+            let claude = named(Provider::Claude);
+            let claude_held = |provider: Provider| (provider == Provider::Claude).then_some(reason);
+            let wall = matches!(
+                reason,
+                SwitchReason::Authentication | SwitchReason::UsageLimit
+            );
+            assert_eq!(
+                route(&claude, (false, wall), true, &claude_held),
+                format!("start codex true Some(\"claude\") Some(\"{r}\")")
+            );
+            assert_eq!(
+                route(&claude, (false, wall), false, &claude_held),
+                format!(
+                    "wait: claude cannot be used ({r}); [provider_fallback] jobs is false, so it waits for claude"
+                )
+            );
+            // Named either way, once usable again it starts on its own
+            // provider.
+            for fallback in [true, false] {
+                assert_eq!(
+                    route(&codex, (false, false), fallback, &usable),
+                    "start codex true None None"
+                );
+                assert_eq!(
+                    route(&claude, (false, false), fallback, &usable),
+                    "start claude true None None"
+                );
+            }
+        }
+        // None named: the same on and off.
+        let unnamed = RoleModels::default();
+        for fallback in [true, false] {
+            assert_eq!(
+                route(&unnamed, (false, false), fallback, &usable),
+                "start claude false None None"
+            );
+            assert_eq!(route(&unnamed, (false, true), fallback, &usable), "wait");
+            assert_eq!(
+                route(&unnamed, (true, false), fallback, &usable),
+                "manual claude provider_disabled: Claude is disabled by --no-claude; handle this role manually"
+            );
+            // `--no-claude`: a Claude role moves to Codex, a Codex one that
+            // cannot be used goes to a person told why.
+            let disabled = |provider: Provider| match provider {
+                Provider::Claude => Some(SwitchReason::Disabled),
+                Provider::Codex => None,
+            };
+            assert_eq!(
+                route(&named(Provider::Claude), (true, false), fallback, &disabled),
+                "start codex true Some(\"claude\") Some(\"provider_disabled\")"
+            );
+            let neither = |provider: Provider| {
+                Some(match provider {
+                    Provider::Claude => SwitchReason::Disabled,
+                    Provider::Codex => SwitchReason::UsageLimit,
+                })
+            };
+            assert_eq!(
+                route(&named(Provider::Codex), (true, false), fallback, &neither),
+                "manual codex provider_disabled: Claude is disabled by --no-claude and codex cannot be used (usage_limit); handle this role manually"
+            );
+        }
+    }
+
     #[test]
     fn efforts_are_checked() {
         for effort in EFFORTS {

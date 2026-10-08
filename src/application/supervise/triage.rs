@@ -409,7 +409,8 @@ impl Supervisor<'_> {
     /// is due while no provider can run the job ([`Self::recovery_route`]
     /// waits): a login or usage limit that holds the queue holds a role
     /// that names no provider (task 437), while one whose role names its
-    /// provider may start on Codex meanwhile (ADR-t1063-1 decision 5).
+    /// provider may start on Codex meanwhile (ADR-t1063-1 decision 5)
+    /// unless `[provider_fallback] jobs` is off (ADR-t1857-1).
     pub(super) fn triage_candidates(&mut self) -> Result<Vec<TaskRun>> {
         if self.recovery_route().is_none() {
             return Ok(Vec::new());
@@ -1057,7 +1058,9 @@ impl Supervisor<'_> {
     /// Both record the job's `end` (its Codex thread and model, the
     /// provider it found unusable). A round whose provider could not be
     /// used (`provider_unusable`) is no person's: the run is due again and
-    /// its next round starts on the other provider, or, when none can run
+    /// its next round starts on the other provider (with `[provider_fallback]
+    /// jobs` off, on the same one once its hold ends, ADR-t1857-1), or, when
+    /// none can run
     /// it (`--no-claude`), fails to a person told why (ADR-t1063-1 decision
     /// 4, [`crate::domain::triage_state`]). Any other failure of a Codex job
     /// never moves to Claude.
@@ -1073,8 +1076,11 @@ impl Supervisor<'_> {
         end: &JobEnd,
     ) {
         let then = match end.unusable {
-            Some(_) => "its provider cannot be used, and the next round starts on the other one",
-            None => "the run waits to be recovered by hand",
+            Some((provider, _)) => format!(
+                "its provider cannot be used, and the next round starts {}",
+                super::goal_review::again_on(self.fallback.jobs, provider)
+            ),
+            None => "the run waits to be recovered by hand".to_owned(),
         };
         warn!(run_id = %run.id(), error = %error, "run {} recovery job {attempt} of {} failed: {error}; {then}", run.id(), alert.as_str());
         for (kind, payload) in [

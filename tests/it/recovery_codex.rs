@@ -948,6 +948,105 @@ fn a_live_codex_recovery_job_that_cannot_log_in_moves_to_claude() {
     assert_eq!(recovery_providers(&db), ["codex", "claude"]);
 }
 
+/// What a Codex job stopped at its usage limit prints.
+const CODEX_LIMIT_FAILURE: &str = "{\"type\":\"error\",\"message\":\"You have hit your usage limit. Try again later.\"}\n{\"type\":\"turn.failed\",\"error\":{\"message\":\"You have hit your usage limit.\"}}\n";
+
+/// With `[provider_fallback] jobs = false` (ADR-t1857-1), a Codex recovery
+/// job of a run that ended that stops at the usage limit holds Codex and
+/// is no person's, but its next round does not move to Claude: nothing
+/// starts while Codex is held, and once the hold ends the round starts on
+/// Codex again, whose `retry` lands the task.
+#[test]
+fn with_the_fallback_off_a_codex_recovery_job_at_its_limit_waits_and_retries_codex() {
+    let (dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[roles.recovery]\nprovider = 'codex'\nmodel = 'gpt-6-astra'\neffort = 'high'\n\n[provider_fallback]\njobs = false\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(
+        &repo,
+        &["commit", "-m", "select Codex for recovery, no fallback"],
+    );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = TestWorkspace::new(&db, false, &fails_once(db.parent().unwrap()));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
+        .with_triages(&[repair(json!({"action": "retry"}), "Claude must not run")]);
+    let failure = dir.path().join("codex-review-failure.jsonl");
+    fs::write(&failure, CODEX_LIMIT_FAILURE).unwrap();
+    let (_codex, options) = codex_options(dir.path(), &db, 4);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    let first = detail.runs[0].clone();
+    assert_eq!(first.status(), RunStatus::Failed);
+    let failed = run_payloads(&detail, &first, "triage_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(
+        failed[0]["provider_unusable"],
+        json!({"provider": "codex", "reason": "usage_limit"})
+    );
+    let held = queue_events(&db, "provider_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["provider"], "codex");
+    assert_eq!(held[0]["reason"], "usage_limit");
+    assert!(reviewer.triage_prompts().is_empty(), "Claude ran no job");
+    assert_eq!(recovery_providers(&db), ["codex"]);
+    // A pass while Codex is held starts nothing: not on Claude, not on
+    // Codex.
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_eq!(run_payloads(&detail, &first, "triage_started").len(), 1);
+    assert!(reviewer.triage_prompts().is_empty(), "Claude ran no job");
+    assert_eq!(recovery_providers(&db), ["codex"]);
+    // Codex's hold ends (its time is up), and Codex can be used again.
+    fs::remove_file(&failure).unwrap();
+    codex_verdict(
+        dir.path(),
+        2,
+        json!({"verdict": "repair", "confidence": "high",
+               "diagnosis": "the session died on its own",
+               "actions": [{"action": "retry"}]}),
+    );
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            EventKind::ProviderReleased,
+            json!({"provider": "codex", "reason": "usage_limit",
+                   "since": held[0]["since"], "why": "retry_due"}),
+        )
+        .unwrap();
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_eq!(detail.runs.len(), 2);
+    assert_landed_run(&detail.runs[1], &repo, &base);
+    let started = run_payloads(&detail, &first, "triage_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    for start in &started {
+        assert_eq!(start["launch"]["provider"], "codex", "{start}");
+        assert!(start["launch"].get("switched_from").is_none(), "{start}");
+    }
+    assert_eq!(
+        run_payloads(&detail, &first, "triage_finished")[0]["action"],
+        "retry"
+    );
+    assert!(reviewer.triage_prompts().is_empty(), "Claude ran no job");
+    assert_eq!(recovery_providers(&db), ["codex", "codex"]);
+}
+
 /// The payloads of the queue's events of `kind`, oldest first.
 fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
     let connection = Connection::open(db).unwrap();

@@ -3253,7 +3253,9 @@ impl Supervisor<'_> {
                 // and that provider could not be used, the provider is held
                 // and the round's `triage_failed` carries
                 // `provider_unusable`: no attention, and the next round
-                // starts on the other provider (ADR-t1063-1 decision 4).
+                // starts on the other provider (ADR-t1063-1 decision 4), or,
+                // with `[provider_fallback] jobs` off, on the same one once
+                // its hold ends (ADR-t1857-1).
                 // Only under `--no-claude`, with no provider left, does the
                 // next round go to a person told why, never to Claude.
                 let end = self.recovery_job_end(

@@ -263,7 +263,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 - 落とし穴: runのファイルのpathはDBの値を信じず、読むたびにqueueの今の`runs/`から解決し直す（`RunPaths`、[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
 - resume・review・reviseの進みは新しい状態を足さず、eventで表す（[needs_session](supervisor-lifecycle/needs-session.md#needs_session)、[review](supervisor-lifecycle/review.md#review-supervisor)、[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）。
 - 復旧のラウンドの状態は`domain::triage_state`が最後の`resume_started`以降のeventから導く（[triage](supervisor-lifecycle/triage.md#triage-supervisor)）。
-  providerを使えずに落ちた復旧jobは`Pending`と読む（次のラウンドがもう一方のproviderで始まる）。
+  providerを使えずに落ちた復旧jobは`Pending`と読む（次のラウンドがもう一方のproviderで、`[provider_fallback] jobs = false`なら控えが解けた後に同じproviderで始まる）。
 
 ### receiptの検証（`domain::validation`）
 

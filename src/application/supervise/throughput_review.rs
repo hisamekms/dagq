@@ -96,17 +96,16 @@ impl Supervisor<'_> {
     /// `[provider_fallback] jobs`): a role that names no provider does not
     /// start under `--no-claude` (ADR-t1204-1 decision 2).
     pub(super) fn job_start_route(&self, role: ModelRole) -> Option<JobStartRoute> {
-        self.start_route(role, self.fallback.jobs, UnnamedWithoutClaude::Wait)
+        self.start_route(role, UnnamedWithoutClaude::Wait)
     }
 
     /// Where the due job of `role` goes, from `[roles.<role>]` as it reads
-    /// now, the queue's hold ask and why each provider cannot be used
-    /// ([`job_start_route`]), or `None` while it waits, saying why in the
-    /// debug log.
+    /// now, the queue's hold ask, `[provider_fallback] jobs` and why each
+    /// provider cannot be used ([`job_start_route`]), or `None` while it
+    /// waits, saying why in the debug log.
     pub(super) fn start_route(
         &self,
         role: ModelRole,
-        fallback: bool,
         unnamed: UnnamedWithoutClaude,
     ) -> Option<JobStartRoute> {
         let models = self.role_models(role);
@@ -115,7 +114,7 @@ impl Supervisor<'_> {
             models.switchable(role),
             self.no_claude,
             self.queue_hold.is_some(),
-            fallback,
+            self.fallback.jobs,
             unnamed,
             |provider| self.job_unusable(provider),
         )

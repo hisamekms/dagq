@@ -347,14 +347,17 @@ impl JobEnd {
 }
 
 impl Supervisor<'_> {
-    /// Where the next recovery job starts (ADR-t1063-1 decisions 1, 4 and
-    /// 5, ADR-t1204-1), or `None` while it waits, from `[roles.recovery]` as
-    /// it reads now ([`Self::start_route`]). Under `--no-claude` a role that
-    /// names no provider goes to a person told why, and the job is not
-    /// among those `[provider_fallback] jobs` turns off (ADR-t1857-1): it
-    /// moves off a provider it cannot use as before.
+    /// Where the next recovery job (of a run that ended or of a live one)
+    /// starts (ADR-t1063-1 decisions 1, 4 and 5, ADR-t1204-1), or `None`
+    /// while it waits, from `[roles.recovery]` as it reads now
+    /// ([`Self::start_route`]). Under `--no-claude` a role that names no
+    /// provider goes to a person told why. A role that names its provider,
+    /// Claude or Codex, is among the jobs `[provider_fallback] jobs` turns
+    /// off (ADR-t1857-1): off, it waits for its own provider instead of
+    /// moving to the other one, before a start and after a job found its
+    /// provider unusable (and held it) alike.
     pub(super) fn recovery_route(&self) -> Option<JobStartRoute> {
-        self.start_route(ModelRole::Recovery, true, UnnamedWithoutClaude::Unavailable)
+        self.start_route(ModelRole::Recovery, UnnamedWithoutClaude::Unavailable)
     }
 
     /// The end of the recovery `job` once it ended: the session its
@@ -393,7 +396,9 @@ impl Supervisor<'_> {
     /// A recovery job whose provider's process did not start (`failed`,
     /// told as `error`): the provider is held when the role names its
     /// provider (`switchable`) and it cannot be used for that, so that the
-    /// next jobs start on the other one (ADR-t1063-1 decisions 4 and 5).
+    /// next jobs start on the other one, or, with `[provider_fallback] jobs`
+    /// off, on it once its hold ends (ADR-t1063-1 decisions 4 and 5,
+    /// ADR-t1857-1).
     pub(super) fn recovery_start_failed(
         &mut self,
         run: &RunId,
@@ -612,7 +617,8 @@ impl RecoveryWatch {
                     })
                     .flatten();
                 // A provider that cannot be used is held, and the alert's
-                // next job starts on the other one (ADR-t1063-1 decision 4).
+                // next job starts where the route says then (ADR-t1063-1
+                // decision 4, ADR-t1857-1).
                 if let Some(unusable) = unusable {
                     let end = JobEnd {
                         session: None,
@@ -707,7 +713,9 @@ impl RecoveryWatch {
                 // A provider that could not be used (its login, its usage
                 // limit, an agent that did not start) of a role that names
                 // its provider is held, and the alert's next job starts on
-                // the other one (ADR-t1063-1 decision 4), or, under
+                // the other one (ADR-t1063-1 decision 4), or, with
+                // `[provider_fallback] jobs` off, on the same one once its
+                // hold ends (ADR-t1857-1), or, under
                 // `--no-claude` with none left, goes to its ask told why.
                 // Any other failure (a non-zero exit, the time limit, a
                 // verdict that does not parse) is the alert's own ask
@@ -801,7 +809,10 @@ impl RecoveryWatch {
         end.record(&mut finished);
         sv.queue
             .record_runtime_event(run.id(), EventKind::RecoveryFinished, finished)?;
-        warn!(run_id = %run.id(), "run {}: recovery job {attempt} of {} failed: {error}; its provider cannot be used, and the next job starts on the other one", run.id(), alert.as_str());
+        let next = end.unusable.map_or_else(String::new, |(provider, _)| {
+            super::goal_review::again_on(sv.fallback.jobs, provider)
+        });
+        warn!(run_id = %run.id(), "run {}: recovery job {attempt} of {} failed: {error}; its provider cannot be used, and the next job starts {next}", run.id(), alert.as_str());
         Ok(())
     }
 

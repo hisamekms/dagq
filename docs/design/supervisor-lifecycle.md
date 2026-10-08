@@ -100,12 +100,14 @@ a run whose resumes are used up is failed with its resume_exhausted alert)
                        a job's option goes back to the job
       job failed → triage_failed (triage by hand, read as recover by hand);
                    its provider could not be used (provider_unusable, a role that names its
-                   provider) → the next round on the other provider (task 1225)
+                   provider) → the next round on the other provider (task 1225),
+                   or on the same one once its hold ends ([provider_fallback] jobs = false)
 live worker alert (stalled, idle_process)
   → the same recovery job in the session's slot → repair applied, or the alert's ask;
     a failed job → the alert's ask too (reason_category recovery_failed, ADR-t609-1);
     its provider could not be used (provider_unusable, a role that names its provider)
     → the provider is held, no ask, and the alert's next job on the other provider
+      (or on the same one once its hold ends with [provider_fallback] jobs = false)
 ```
 
 各節は`supervisor-lifecycle/`の下の別のファイルにある。下の見出しは各ファイルへの目次で、以前この文書の中にあった節へのリンク（見出しのanchor）もここに届く。
