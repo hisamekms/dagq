@@ -76,6 +76,213 @@ impl TokenUsage {
     }
 }
 
+/// Where the tokens of an Execution (one `claude -p` / `codex exec` call:
+/// a headless turn or a headless job, ADR-t1486-1) were counted from: the
+/// `tokens_source` of its record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenSource {
+    /// Claude's result's `modelUsage`: every model of the session, its
+    /// subagents included, summed.
+    ModelUsage,
+    /// Claude's result's `usage`, which leaves the subagents out: the
+    /// fallback for an output without a `modelUsage` (an older Claude
+    /// Code).
+    ResultUsage,
+    /// Codex's `turn.completed`, the thread's running total.
+    ThreadUsage,
+}
+
+impl TokenSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelUsage => "model_usage",
+            Self::ResultUsage => "result_usage",
+            Self::ThreadUsage => "thread_usage",
+        }
+    }
+}
+
+/// The `tokens_reason` of an Execution whose output ended without the
+/// provider's result: nothing was counted.
+pub const NO_RESULT: &str = "no_result";
+/// The `tokens_reason` of an Execution whose result had no usage that
+/// could be read: nothing was counted.
+pub const NO_USAGE: &str = "no_usage";
+/// The `tokens_reason` of a Claude Execution whose result had no
+/// `modelUsage`: its tokens are its `usage`'s, without its subagents.
+pub const MODEL_USAGE_MISSING: &str = "model_usage_missing";
+
+/// One model's tokens in an Execution (an entry of Claude's `modelUsage`):
+/// the same kinds as [`TokenUsage`], and the cost when the provider gave
+/// one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelTokens {
+    pub model: String,
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_creation: i64,
+    pub cost_usd: Option<f64>,
+}
+
+impl ModelTokens {
+    fn counts(&self) -> [i64; 4] {
+        [
+            self.input,
+            self.output,
+            self.cache_read,
+            self.cache_creation,
+        ]
+    }
+
+    /// An entry of `tokens_by_model`: the counts, and `cost_usd` only when
+    /// there is one.
+    pub fn payload(&self) -> Value {
+        let mut payload = json!({
+            "model": self.model,
+            "input": self.input,
+            "output": self.output,
+            "cache_read": self.cache_read,
+            "cache_creation": self.cache_creation,
+        });
+        if let Some(cost) = self.cost_usd {
+            payload["cost_usd"] = json!((cost * 1e6).round() / 1e6);
+        }
+        payload
+    }
+
+    /// The entries of a `tokens_by_model` array; `None` when it is not an
+    /// array of entries with a model and numeric `input` and `output`.
+    pub fn from_payloads(payload: &Value) -> Option<Vec<Self>> {
+        payload
+            .as_array()?
+            .iter()
+            .map(|entry| {
+                let count = |key: &str| entry.get(key).and_then(Value::as_i64);
+                Some(Self {
+                    model: entry.get("model")?.as_str()?.to_owned(),
+                    input: count("input")?,
+                    output: count("output")?,
+                    cache_read: count("cache_read").unwrap_or(0),
+                    cache_creation: count("cache_creation").unwrap_or(0),
+                    cost_usd: entry.get("cost_usd").and_then(Value::as_f64),
+                })
+            })
+            .collect()
+    }
+
+    /// The tokens of the models together, as one Execution's (`messages`
+    /// 1) with `cost_usd`.
+    pub fn total(models: &[Self], cost_usd: Option<f64>) -> TokenUsage {
+        let mut total = TokenUsage {
+            messages: 1,
+            cost_usd,
+            ..TokenUsage::default()
+        };
+        for model in models {
+            total.input += model.input;
+            total.output += model.output;
+            total.cache_read += model.cache_read;
+            total.cache_creation += model.cache_creation;
+        }
+        total
+    }
+
+    /// What was used after `earlier`, when both are a session's running
+    /// totals per model (Claude's `modelUsage`): each model's counts and
+    /// cost less its earlier ones, the models that added nothing left out.
+    /// `None` when a count fell (a model of `earlier` missing counts as
+    /// 0): the totals are not of one session.
+    pub fn since(totals: &[Self], earlier: &[Self]) -> Option<Vec<Self>> {
+        let before = |model: &str| earlier.iter().find(|e| e.model == model);
+        if earlier
+            .iter()
+            .any(|e| !totals.iter().any(|total| total.model == e.model))
+        {
+            return None;
+        }
+        let mut own = Vec::new();
+        for total in totals {
+            let Some(before) = before(&total.model) else {
+                own.push(total.clone());
+                continue;
+            };
+            let counts: Vec<i64> = total
+                .counts()
+                .iter()
+                .zip(before.counts())
+                .map(|(now, then)| now - then)
+                .collect();
+            if counts.iter().any(|count| *count < 0) {
+                return None;
+            }
+            if counts.iter().all(|count| *count == 0) {
+                continue;
+            }
+            own.push(Self {
+                model: total.model.clone(),
+                input: counts[0],
+                output: counts[1],
+                cache_read: counts[2],
+                cache_creation: counts[3],
+                cost_usd: match (total.cost_usd, before.cost_usd) {
+                    (Some(now), Some(then)) => Some((((now - then) * 1e6).round() / 1e6).max(0.0)),
+                    (now, None) => now,
+                    (None, Some(_)) => None,
+                },
+            });
+        }
+        Some(own)
+    }
+}
+
+/// The tokens of one Execution as its record carries them (ADR-t1486-1):
+/// the form every provider's turn and job is recorded in. A count of 0 is
+/// a measured 0; `tokens` `None` with a `reason` is not measured.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExecutionTokens {
+    /// Its tokens, every model and every subagent (child thread) of it
+    /// together; `None` when they could not be counted.
+    pub tokens: Option<TokenUsage>,
+    /// The same per model, when the provider gives them per model (empty
+    /// otherwise).
+    pub by_model: Vec<ModelTokens>,
+    /// What they were counted from; `None` when they were not.
+    pub source: Option<TokenSource>,
+    /// Why nothing was counted ([`NO_RESULT`], [`NO_USAGE`]), or why they
+    /// were counted from a fallback that leaves some out
+    /// ([`MODEL_USAGE_MISSING`]).
+    pub reason: Option<&'static str>,
+    /// The subagents (Claude's `subagent_stats.spawned`) or child threads
+    /// the Execution started, when the provider says.
+    pub children: Option<i64>,
+}
+
+impl ExecutionTokens {
+    /// Nothing counted, for `reason`.
+    pub fn unmeasured(reason: &'static str) -> Self {
+        Self {
+            reason: Some(reason),
+            ..Self::default()
+        }
+    }
+
+    /// Put them into the payload of the event that records the Execution
+    /// (a `turn_finished`, the end of a headless job): `tokens` (`null`
+    /// when not measured), `tokens_by_model`, `tokens_source`,
+    /// `tokens_reason` and `children`.
+    pub fn record(&self, payload: &mut Value) {
+        payload["tokens"] = self
+            .tokens
+            .as_ref()
+            .map_or(Value::Null, TokenUsage::payload);
+        payload["tokens_by_model"] = self.by_model.iter().map(ModelTokens::payload).collect();
+        payload["tokens_source"] = json!(self.source.map(TokenSource::as_str));
+        payload["tokens_reason"] = json!(self.reason);
+        payload["children"] = json!(self.children);
+    }
+}
+
 /// One message's counts: the largest of its records' (the last block of a
 /// message carries its final output count).
 #[derive(Default)]
@@ -445,6 +652,95 @@ mod tests {
     }
     use super::*;
     use crate::domain::transcript::{Transcript, millis_text};
+
+    fn model(name: &str, counts: [i64; 4], cost: Option<f64>) -> ModelTokens {
+        ModelTokens {
+            model: name.to_owned(),
+            input: counts[0],
+            output: counts[1],
+            cache_read: counts[2],
+            cache_creation: counts[3],
+            cost_usd: cost,
+        }
+    }
+
+    /// A session's running totals per model less earlier ones are what was
+    /// used since, the models that added nothing left out; a count that
+    /// fell, or an earlier model gone, is no later total of the session.
+    #[test]
+    fn running_totals_per_model_less_earlier_ones_are_what_was_used_since() {
+        let earlier = [
+            model("opus", [10, 20, 30, 4], Some(1.0)),
+            model("haiku", [1, 2, 0, 0], Some(0.1)),
+        ];
+        let totals = [
+            model("haiku", [1, 2, 0, 0], Some(0.1)),
+            model("opus", [15, 25, 60, 4], Some(1.5)),
+            model("sonnet", [3, 3, 0, 0], None),
+        ];
+        assert_eq!(
+            ModelTokens::since(&totals, &earlier),
+            Some(vec![
+                model("opus", [5, 5, 30, 0], Some(0.5)),
+                model("sonnet", [3, 3, 0, 0], None),
+            ])
+        );
+        let fell = [model("opus", [9, 25, 60, 4], Some(1.5)), totals[0].clone()];
+        assert_eq!(ModelTokens::since(&fell, &earlier), None);
+        assert_eq!(ModelTokens::since(&totals[1..], &earlier), None);
+        assert_eq!(ModelTokens::since(&totals, &[]), Some(totals.to_vec()));
+        let total = ModelTokens::total(&totals, Some(1.6));
+        assert_eq!(
+            (
+                total.input,
+                total.output,
+                total.cache_read,
+                total.cache_creation
+            ),
+            (19, 30, 60, 4)
+        );
+        assert_eq!((total.messages, total.cost_usd), (1, Some(1.6)));
+        let payloads: Value = totals.iter().map(ModelTokens::payload).collect();
+        assert_eq!(ModelTokens::from_payloads(&payloads), Some(totals.to_vec()));
+        assert_eq!(ModelTokens::from_payloads(&json!([{"model": "x"}])), None);
+        assert_eq!(ModelTokens::from_payloads(&Value::Null), None);
+    }
+
+    /// An Execution that used nothing records a 0 that was measured; one
+    /// whose tokens could not be counted records `null` and why.
+    #[test]
+    fn a_measured_zero_is_told_from_tokens_not_measured() {
+        let mut zero = json!({});
+        ExecutionTokens {
+            tokens: Some(ModelTokens::total(&[], None)),
+            source: Some(TokenSource::ModelUsage),
+            children: Some(0),
+            ..ExecutionTokens::default()
+        }
+        .record(&mut zero);
+        assert_eq!(
+            zero,
+            json!({
+                "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0, "messages": 1},
+                "tokens_by_model": [],
+                "tokens_source": "model_usage",
+                "tokens_reason": null,
+                "children": 0,
+            })
+        );
+        let mut unmeasured = json!({});
+        ExecutionTokens::unmeasured(NO_RESULT).record(&mut unmeasured);
+        assert_eq!(
+            unmeasured,
+            json!({
+                "tokens": null,
+                "tokens_by_model": [],
+                "tokens_source": null,
+                "tokens_reason": "no_result",
+                "children": null,
+            })
+        );
+    }
 
     const SESSION: &str = "22222222-2222-4222-8222-222222222222";
 

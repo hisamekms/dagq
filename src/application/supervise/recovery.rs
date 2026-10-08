@@ -326,8 +326,8 @@ pub(super) fn job_file(alert: RecoveryAlert, attempt: usize, what: &str) -> Stri
 /// What the end of a recovery job records beyond its verdict
 /// (ADR-t1063-1 decisions 4 and 6): the session its provider names itself
 /// (Codex's thread, and its model or why none was read; none on Claude,
-/// whose session id its start records), and the provider found unusable
-/// when the job failed for that.
+/// whose session id its start records), the job's tokens (ADR-t1486-1),
+/// and the provider found unusable when the job failed for that.
 #[derive(Debug, Clone, Default)]
 pub(super) struct JobEnd {
     pub(super) session: Option<JobSession>,
@@ -1850,9 +1850,10 @@ mod tests {
         assert_eq!(payload, json!({"alert": "failed"}));
         let end = JobEnd {
             session: Some(JobSession {
+                named: true,
                 session_id: Some("codex-thread-1".into()),
-                model: None,
                 model_unknown: Some("no rollout".into()),
+                ..JobSession::default()
             }),
             unusable: Some((Provider::Codex, SwitchReason::Authentication)),
         };

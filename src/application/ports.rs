@@ -589,10 +589,11 @@ pub trait AgentProvider {
     }
     /// What the output of a headless job that ended (its `stdout`, the job
     /// started at `since`, unix milliseconds) says of its session
-    /// (ADR-t1063-1 decision 6): `None` for a provider whose session the
-    /// runtime names ahead and whose transcript gives the model (Claude
-    /// Code, ADR-0048 decision 4); Codex names its thread in its output and
-    /// the model in its rollout.
+    /// (ADR-t1063-1 decision 6) and of the job's tokens, one Execution
+    /// (ADR-t1486-1): Codex names its thread in its output and the model
+    /// in its rollout; Claude Code, whose session the runtime names ahead
+    /// and whose transcript gives the model (ADR-0048 decision 4), gives
+    /// the tokens only. `None` for a provider whose output says neither.
     fn job_session(
         &self,
         stdout: &str,

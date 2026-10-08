@@ -20,7 +20,7 @@ use super::{
     DomainError, RunEvent,
     event_kind::{TURN_FINISHED, TURN_REQUESTED, TURN_STARTED},
     stats::timestamp_millis,
-    tokens::TokenUsage,
+    tokens::{ModelTokens, TokenSource, TokenUsage},
     transcript::Turn,
 };
 
@@ -541,6 +541,21 @@ pub struct TurnResult {
     /// session's last turn recorded.
     #[serde(skip)]
     pub tokens_cumulative: bool,
+    /// `tokens` per model (Claude's `modelUsage`; the session's running
+    /// totals when `tokens_cumulative`), empty when the provider gives
+    /// none per model.
+    #[serde(skip)]
+    pub tokens_by_model: Vec<ModelTokens>,
+    /// What `tokens` were counted from, and why none were or why a
+    /// fallback was used ([`crate::domain::tokens::ExecutionTokens`]).
+    #[serde(skip)]
+    pub tokens_source: Option<TokenSource>,
+    #[serde(skip)]
+    pub tokens_reason: Option<&'static str>,
+    /// The subagents or child threads the turn started, when the provider
+    /// says (Claude's `subagent_stats.spawned`, the turn's own).
+    #[serde(skip)]
+    pub children: Option<i64>,
     /// The turn resumed a session the agent does not have (Codex's `no
     /// rollout found`): it did nothing, and a new session is started.
     pub session_missing: bool,
@@ -665,11 +680,7 @@ impl TurnMark {
 /// `stats` / `kpi` do not correct them when read, so a Claude headless
 /// cost summed over that period counts a resumed run's earlier turns again.
 pub fn turn_own_cost(events: &[RunEvent], turn: u64, session: &str, total: f64) -> f64 {
-    let resumed = events
-        .iter()
-        .rfind(|e| e.kind == TURN_STARTED && e.payload["turn"].as_u64() == Some(turn))
-        .is_some_and(|e| e.payload["resume"] == true);
-    if !resumed {
+    if !resumed(events, turn) {
         return total;
     }
     let earlier = events
@@ -684,6 +695,40 @@ pub fn turn_own_cost(events: &[RunEvent], turn: u64, session: &str, total: f64) 
         Some(earlier) if total >= earlier => ((total - earlier) * 1e6).round() / 1e6,
         _ => total,
     }
+}
+
+/// Whether turn `turn` resumed its session, as its `turn_started` says.
+fn resumed(events: &[RunEvent], turn: u64) -> bool {
+    events
+        .iter()
+        .rfind(|e| e.kind == TURN_STARTED && e.payload["turn"].as_u64() == Some(turn))
+        .is_some_and(|e| e.payload["resume"] == true)
+}
+
+/// The own tokens per model of turn `turn` of the session `session`,
+/// whose agent gave `totals`, the session's running totals so far
+/// (Claude's `modelUsage`, ADR-t1486-1), taken as [`turn_own_cost`] takes
+/// the cost: when the turn resumed the session, `totals` less those the
+/// session's last turn with them recorded (`tokens_total_by_model`); the
+/// whole `totals` for a turn that started its session, and when no earlier
+/// totals were recorded or a count is below its earlier one (the session
+/// is not the one the earlier turn ran in).
+pub fn turn_own_models(
+    events: &[RunEvent],
+    turn: u64,
+    session: &str,
+    totals: &[ModelTokens],
+) -> Vec<ModelTokens> {
+    if !resumed(events, turn) {
+        return totals.to_vec();
+    }
+    events
+        .iter()
+        .rev()
+        .filter(|e| e.kind == TURN_FINISHED && e.payload["session_id"].as_str() == Some(session))
+        .find_map(|e| ModelTokens::from_payloads(&e.payload["tokens_total_by_model"]))
+        .and_then(|earlier| ModelTokens::since(totals, &earlier))
+        .unwrap_or_else(|| totals.to_vec())
 }
 
 /// The turns of a headless session span and the tokens they used, from
@@ -1404,6 +1449,77 @@ mod tests {
             started(3, true),
         ];
         assert_eq!(turn_own_cost(&older, 3, "s", 5.5), 1.5);
+    }
+
+    /// A resumed turn's tokens per model are what it added to the
+    /// session's running totals (Claude's `modelUsage`), as its cost is
+    /// (task 1199): a turn that started its session, one without an
+    /// earlier total and one whose totals fell below them keep the totals
+    /// (ADR-t1486-1).
+    #[test]
+    fn a_resumed_turn_uses_what_it_added_to_the_sessions_totals_per_model() {
+        let event = |kind: &str, payload: Value| RunEvent {
+            id: super::super::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let model = |name: &str, input: i64, output: i64| ModelTokens {
+            model: name.to_owned(),
+            input,
+            output,
+            ..ModelTokens::default()
+        };
+        let started =
+            |turn: u64, resume: bool| event(TURN_STARTED, json!({"turn": turn, "resume": resume}));
+        let finished = |turn: u64, session: &str, totals: Value| {
+            event(
+                TURN_FINISHED,
+                json!({"turn": turn, "session_id": session, "tokens_total_by_model": totals}),
+            )
+        };
+        let totals = [model("opus", 15, 25), model("haiku", 1, 2)];
+        // The turn started its session: the whole totals.
+        assert_eq!(
+            turn_own_models(&[started(1, false)], 1, "s", &totals),
+            totals
+        );
+        let resumed = [
+            started(1, false),
+            finished(
+                1,
+                "s",
+                json!([{"model": "opus", "input": 10, "output": 20}]),
+            ),
+            // Another session's turn, and one of the session without
+            // totals, are skipped.
+            started(2, false),
+            finished(
+                2,
+                "thread",
+                json!([{"model": "opus", "input": 14, "output": 0}]),
+            ),
+            finished(2, "s", Value::Null),
+            started(3, true),
+        ];
+        assert_eq!(
+            turn_own_models(&resumed, 3, "s", &totals),
+            [model("opus", 5, 5), model("haiku", 1, 2)]
+        );
+        // A count below the earlier one: a session of its own.
+        let fell = [model("opus", 9, 30)];
+        assert_eq!(turn_own_models(&resumed, 3, "s", &fell), fell);
+        // No earlier turn of the session with totals.
+        assert_eq!(
+            turn_own_models(&[started(2, true)], 2, "s", &totals),
+            totals
+        );
+        let without = [finished(1, "s", Value::Null), started(2, true)];
+        assert_eq!(turn_own_models(&without, 2, "s", &totals), totals);
     }
 
     /// A Codex span's turns for its work breakdown (task 1354), from turn

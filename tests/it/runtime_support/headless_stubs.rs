@@ -51,7 +51,8 @@ fn stub_script(path: &Path, script: String, db: &Path, test_pid: u32) {
 /// in the run, `$PROMPT` its prompt, `$MODE` `start` or `resume`,
 /// `$SESSION` the session id. The turn's helpers: `say TEXT`,
 /// `result [TEXT]` (with `$DENIALS` as its `permission_denials` and
-/// `$COST`, 0.01 unless the turn sets it, as its `total_cost_usd`),
+/// `$COST`, 0.01 unless the turn sets it, as its `total_cost_usd`, and
+/// `$EXTRA`, fields the turn may add, such as a `modelUsage`),
 /// `denied` (three refusals), `fail TEXT` (an error result, exit 1),
 /// `commit MESSAGE`, `receipt COMMIT [RESULT] [EVIDENCE]`, `ask QUESTION`
 /// (its notification goes to `true`, not the host's cmux: a real `cmux
@@ -92,9 +93,10 @@ TURN=$(wc -l < "$RUN_DIR/stub-calls.log" | tr -d ' ')
 DENIALS=
 RESULTED=
 COST=0.01
+EXTRA=
 say() {{ printf '{{"type":"assistant","message":{{"model":"stub","content":[{{"type":"text","text":"%s"}}]}}}}\n' "$1"; }}
 result() {{
-  printf '{{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_ms":5,"total_cost_usd":%s,"session_id":"%s","result":"%s","usage":{{"input_tokens":7,"output_tokens":3}},"permission_denials":[%s]}}\n' "$COST" "$SESSION" "${{1:-done}}" "$DENIALS"
+  printf '{{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_ms":5,"total_cost_usd":%s,"session_id":"%s","result":"%s","usage":{{"input_tokens":7,"output_tokens":3}},"permission_denials":[%s]%s}}\n' "$COST" "$SESSION" "${{1:-done}}" "$DENIALS" "$EXTRA"
   RESULTED=1
 }}
 denied() {{ DENIALS='{{"tool_name":"Bash","tool_use_id":"t1","tool_input":{{}}}},{{"tool_name":"Bash","tool_use_id":"t2","tool_input":{{}}}},{{"tool_name":"Edit","tool_use_id":"t3","tool_input":{{}}}}'; }}

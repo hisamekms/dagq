@@ -5,7 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{DomainError, provider_switch::SwitchReason, queue_hold::Wall, recovery::ProcessInfo};
+use super::{
+    DomainError, provider_switch::SwitchReason, queue_hold::Wall, recovery::ProcessInfo,
+    tokens::ExecutionTokens,
+};
 
 /// `headless_jobs.kind` of a headless review of a run (ADR-0027).
 pub const REVIEW: &str = "review";
@@ -103,26 +106,40 @@ impl JobFailure {
     }
 }
 
-/// What the output of a headless job that ended says of its session, for
+/// What the output of a headless job that ended says of its session: for
 /// a provider that names the session itself and whose model the runtime
-/// cannot read from a transcript (Codex, ADR-t1063-1 decision 6): the id
+/// cannot read from a transcript (Codex, ADR-t1063-1 decision 6), the id
 /// the provider named it by (Codex's thread), the model it ran on, and why
-/// none was read when it was not.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// none was read when it was not; and the tokens of the job, one
+/// Execution (ADR-t1486-1), for a provider whose output gives them.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct JobSession {
+    /// The provider named the session itself: `session_id`, `model` and
+    /// `model_unknown` are recorded. A provider whose session the runtime
+    /// names ahead (Claude Code) leaves them to the job's start and
+    /// transcript.
+    pub named: bool,
     pub session_id: Option<String>,
     pub model: Option<String>,
     pub model_unknown: Option<String>,
+    pub tokens: Option<ExecutionTokens>,
 }
 
 impl JobSession {
     /// Put the session into the payload of the event that ends the job:
-    /// `session_id`, `model` and `model_unknown` (only when set).
+    /// `session_id`, `model` and `model_unknown` (only when set) when the
+    /// provider named it, and the tokens ([`ExecutionTokens::record`])
+    /// when its output gave them.
     pub fn record(&self, payload: &mut serde_json::Value) {
-        payload["session_id"] = serde_json::json!(self.session_id);
-        payload["model"] = serde_json::json!(self.model);
-        if let Some(why) = &self.model_unknown {
-            payload["model_unknown"] = serde_json::json!(why);
+        if self.named {
+            payload["session_id"] = serde_json::json!(self.session_id);
+            payload["model"] = serde_json::json!(self.model);
+            if let Some(why) = &self.model_unknown {
+                payload["model_unknown"] = serde_json::json!(why);
+            }
+        }
+        if let Some(tokens) = &self.tokens {
+            tokens.record(payload);
         }
     }
 }
@@ -242,9 +259,10 @@ mod tests {
     fn a_job_session_is_recorded_in_the_end_of_the_job() {
         let mut payload = serde_json::json!({"goal_review_id": 3});
         JobSession {
+            named: true,
             session_id: Some("thread-1".into()),
             model: Some("gpt-6-astra".into()),
-            model_unknown: None,
+            ..JobSession::default()
         }
         .record(&mut payload);
         assert_eq!(payload["session_id"], "thread-1");
@@ -252,13 +270,27 @@ mod tests {
         assert!(payload.get("model_unknown").is_none());
         let mut payload = serde_json::json!({});
         JobSession {
-            session_id: None,
-            model: None,
+            named: true,
             model_unknown: Some("no rollout".into()),
+            ..JobSession::default()
         }
         .record(&mut payload);
         assert!(payload["session_id"].is_null());
         assert_eq!(payload["model_unknown"], "no rollout");
+        assert!(payload.get("tokens").is_none(), "{payload}");
+        // A session the runtime named ahead (Claude's) records the job's
+        // tokens only.
+        let mut payload = serde_json::json!({"session_id": "ahead"});
+        JobSession {
+            tokens: Some(super::super::tokens::ExecutionTokens::unmeasured(
+                super::super::tokens::NO_USAGE,
+            )),
+            ..JobSession::default()
+        }
+        .record(&mut payload);
+        assert_eq!(payload["session_id"], "ahead");
+        assert!(payload.get("model").is_none(), "{payload}");
+        assert_eq!(payload["tokens_reason"], "no_usage");
     }
 
     #[test]

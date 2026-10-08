@@ -1425,9 +1425,9 @@ enum AfterExit {
         /// this one when it ran, the one before when this one could not
         /// start after it (task 426), `None` when no job ran.
         output: Option<usize>,
-        /// What the job's output said of its session when its provider
-        /// names it itself (Codex's thread and model, ADR-t1063-1
-        /// decision 6); `None` on Claude and when no job ran.
+        /// What the job's output said of its session (Codex's thread and
+        /// model, ADR-t1063-1 decision 6; the job's tokens, ADR-t1486-1);
+        /// `None` when no job ran.
         session: Option<crate::domain::headless_job::JobSession>,
     },
     /// Give the lease back: a run parked for evidence (its workspace is
@@ -3376,7 +3376,8 @@ impl Supervisor<'_> {
                 // A provider that names its session itself (Codex) says its
                 // thread and model in its output and rollout: the review's
                 // end records them, as a goal or plan review's does
-                // (ADR-t1063-1 decision 6); Claude's says nothing here.
+                // (ADR-t1063-1 decision 6); Claude's output gives the job's
+                // tokens only (ADR-t1486-1).
                 let job_session = provider.job_session(
                     &self
                         .files

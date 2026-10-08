@@ -9,6 +9,7 @@ related:
   - design-supervisor-lifecycle-task-hold
   - adr-t1857-1
   - adr-t1486-1
+  - design-execution-tokens
   - adr-t1570-1
   - adr-t655-1
   - adr-t1228-2
@@ -91,7 +92,7 @@ worker以外のheadless jobは、providerに権限の意図・promptの渡し方
 | promptをstdinに渡す仕組み | `CommandSpec::stdin`と`infrastructure::process::LocalSpawner` |
 | 最終の返答 | `AgentProvider::job_reply`（Codexは`codex::last_message`） |
 | 失敗の分類 | `domain::headless_job::JobFailure`、起動は`application::job_start_failure`、出力は`claude::job_failure`・`Codex::job_failure` |
-| sessionのidと実際のmodel | `AgentProvider::assign_session_id`（Claude）と`job_session`（Codex）、`domain::headless_job::JobSession` |
+| sessionのidと実際のmodel、jobのトークン数 | `AgentProvider::assign_session_id`（Claude）と`job_session`、`domain::headless_job::JobSession` |
 
 約束と落とし穴:
 
@@ -182,21 +183,10 @@ runのsessionの区間は、閉じるときに作業の内訳（foregroundのtoo
 
 区間で使ったトークン数を`session_closed`の`tokens`に記録する。
 
-- 入口: `domain::tokens`（`TokenUsage`・`span_usage`）、非対話のturnは`TurnResult::tokens`。
+- 入口: `domain::tokens`（`TokenUsage`・`span_usage`）。
+  非対話のturnとheadlessのjobの1回ごとの記録と今の穴は[Executionのトークン数](execution-tokens.md)。
 - transcriptでは同じ`message.id`のレコードを1つのmessageとして1回だけ数え、sidechain（subagent）も数える。
 - コストはClaude Codeがレコードに`costUSD`を書いた版だけ記録し、単価表からは計算しない。
-
-#### 今の数える元と穴（ADR-t1486-1）
-
-[ADR-t1486-1](../adr/2026-10-04-t1486-1-supervisor-records-token-usage-per-execution.md)は、トークン数をsupervisorがExecution（`claude -p` / `codex exec`の1回）ごとに記録すると決めた。
-実装されるまでの今の穴:
-
-- Claudeの非対話のturnは`result.usage`から数え、subagentの分が抜ける（subagentを含む`modelUsage`はsessionの累計で、まだ読まない）。
-- Codexの非対話のturnはthreadの累計からの差で、multi-agentの子のthreadの分が入らない可能性がある。
-- Claudeのjobは区間が閉じたときにだけ記録する。
-- Codexのjobはトークン数を記録しない。
-- hookの区間（inbox・人のplanner）は閉じた後にだけ記録するので、長く開いたinboxは閉じた日にまとめて数えられる。
-- streamの`assistant`の`usage`は生成を始めた時点の途中の値なので使わない。
 
 ### 非対話のworkerの区間
 
@@ -205,7 +195,7 @@ Claudeもtranscriptは読めるが、区間の数え方をproviderで分けな�
 
 - 入口: `domain::turn::HeadlessSpan`、`infrastructure::sessions::close_headless`、turnのトークンは`TurnResult::tokens`、コストは`domain::turn::turn_own_cost`。
 - Codexの`turn.completed`の`usage`はthreadの累計なので、wrapperは前のturnの累計との差をそのturnの分にする（`TurnResult::tokens_cumulative`）。
-- Claudeの`total_cost_usd`と`modelUsage`はsessionの累計なので、同じく差をturnの分にする（`TurnResult::cost_cumulative`）。
+- Claudeの`total_cost_usd`と`modelUsage`はsessionの累計なので、同じく差をturnの分にする（`TurnResult::cost_cumulative`、規則は[Executionのトークン数](execution-tokens.md#claudeの数える元)）。
   差を取る前に記録されたturnのcostは補正しないので、その期間のcostはresumeのあるrunを重ねて数える。
 - Codexの区間はmodelを区間に書かず、各turnの`turn_finished`の`model`に持つ。
 

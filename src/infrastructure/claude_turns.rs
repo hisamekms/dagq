@@ -8,14 +8,18 @@
 //! with `is_error`, `num_turns`, `duration_ms`, `total_cost_usd`, `usage`
 //! and `permission_denials`. `usage`, `num_turns` and `duration_ms` are the
 //! turn's own; `total_cost_usd` and `modelUsage` are the session's total so
-//! far, a resumed session's earlier turns included (task 1199). While a tool runs the stream carries a
-//! heartbeat (`tool_progress`) every 30 seconds.
+//! far, a resumed session's earlier turns included (task 1199);
+//! `modelUsage` counts the turn's subagents, which `usage` leaves out, and
+//! `subagent_stats` the subagents the turn started. While a tool runs the
+//! stream carries a heartbeat (`tool_progress`) every 30 seconds.
 
 use serde_json::Value;
 
 use crate::application::{Exit, TurnReader};
 use crate::domain::queue_hold::Wall;
-use crate::domain::tokens::TokenUsage;
+use crate::domain::tokens::{
+    ExecutionTokens, MODEL_USAGE_MISSING, ModelTokens, NO_RESULT, NO_USAGE, TokenSource, TokenUsage,
+};
 use crate::domain::turn::{TurnFailure, TurnResult, TurnSignal, shortened};
 use crate::infrastructure::claude::job_wall;
 
@@ -245,6 +249,7 @@ impl TurnReader for ClaudeTurnReader {
             .or_else(|| self.last_text.clone());
         let failure =
             is_error.then(|| self.failure(result, message.as_deref().unwrap_or(""), stderr));
+        let counted = result_tokens(result);
         TurnResult {
             result_seen: result.is_some(),
             is_error,
@@ -257,9 +262,7 @@ impl TurnReader for ClaudeTurnReader {
             cost_usd: result.and_then(|r| r["total_cost_usd"].as_f64()),
             // `total_cost_usd` (like `modelUsage`) is the session's total so
             // far, a resumed session's earlier turns included; `usage`,
-            // `num_turns` and `duration_ms` are the turn's own. `usage`
-            // leaves out the turn's subagents, which only `modelUsage`
-            // counts; it is not read yet (ADR-t1486-1).
+            // `num_turns` and `duration_ms` are the turn's own.
             cost_cumulative: true,
             usage: result.map_or(Value::Null, |r| r["usage"].clone()),
             permission_denials: result
@@ -268,8 +271,14 @@ impl TurnReader for ClaudeTurnReader {
                 .flatten()
                 .map(|denial| denial["tool_name"].as_str().unwrap_or("unknown").to_owned())
                 .collect(),
-            tokens: result.and_then(|r| turn_tokens(&r["usage"], r["total_cost_usd"].as_f64())),
-            tokens_cumulative: false,
+            // `modelUsage` is the session's running total, as the cost;
+            // the `usage` it falls back to is the turn's own.
+            tokens_cumulative: counted.source == Some(TokenSource::ModelUsage),
+            tokens: counted.tokens,
+            tokens_by_model: counted.by_model,
+            tokens_source: counted.source,
+            tokens_reason: counted.reason,
+            children: counted.children,
             // Claude's session is the run's: a missing one is started
             // by `turn_session_exists` instead.
             session_missing: false,
@@ -284,10 +293,83 @@ impl TurnReader for ClaudeTurnReader {
     }
 }
 
+/// The tokens of a `claude -p` call (ADR-t1486-1) from its `result`:
+/// its `modelUsage` per model, summed, with `total_cost_usd`, both the
+/// session's running totals ([`TokenSource::ModelUsage`]); without a
+/// `modelUsage` (an older Claude Code), the `usage` of the call alone,
+/// without its subagents ([`MODEL_USAGE_MISSING`]); nothing without
+/// either. The subagents it started are `subagent_stats.spawned`, the
+/// call's own.
+pub fn result_tokens(result: Option<&Value>) -> ExecutionTokens {
+    let Some(result) = result else {
+        return ExecutionTokens::unmeasured(NO_RESULT);
+    };
+    let cost = result["total_cost_usd"].as_f64();
+    let mut counted = if let Some(models) = model_usage(&result["modelUsage"]) {
+        ExecutionTokens {
+            tokens: Some(ModelTokens::total(&models, cost)),
+            by_model: models,
+            source: Some(TokenSource::ModelUsage),
+            ..ExecutionTokens::default()
+        }
+    } else if let Some(tokens) = turn_tokens(&result["usage"], cost) {
+        ExecutionTokens {
+            tokens: Some(tokens),
+            source: Some(TokenSource::ResultUsage),
+            reason: Some(MODEL_USAGE_MISSING),
+            ..ExecutionTokens::default()
+        }
+    } else {
+        ExecutionTokens::unmeasured(NO_USAGE)
+    };
+    counted.children = result["subagent_stats"]["spawned"].as_i64();
+    counted
+}
+
+/// The entries of a `modelUsage` (`inputTokens` without the cache,
+/// `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`,
+/// `costUSD`), by model name; `None` when it is not an object or an entry
+/// has no numeric input and output counts. An empty one is a call that
+/// used nothing.
+fn model_usage(usage: &Value) -> Option<Vec<ModelTokens>> {
+    let mut models = usage
+        .as_object()?
+        .iter()
+        .map(|(model, entry)| {
+            let count = |key: &str| entry[key].as_i64();
+            Some(ModelTokens {
+                model: model.clone(),
+                input: count("inputTokens")?,
+                output: count("outputTokens")?,
+                cache_read: count("cacheReadInputTokens").unwrap_or(0),
+                cache_creation: count("cacheCreationInputTokens").unwrap_or(0),
+                cost_usd: entry["costUSD"].as_f64(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    models.sort_by(|a, b| a.model.cmp(&b.model));
+    Some(models)
+}
+
+/// The `result` of a headless job's `claude -p --output-format json`
+/// output: the object it printed (or the last `result` of an array or of
+/// stream lines); `None` when the output has none.
+pub fn job_result(stdout: &str) -> Option<Value> {
+    let is_result = |value: &Value| value["type"] == "result";
+    match serde_json::from_str::<Value>(stdout.trim()) {
+        Ok(Value::Array(values)) => values.into_iter().rfind(is_result),
+        Ok(value) => Some(value).filter(is_result),
+        Err(_) => stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+            .rfind(is_result),
+    }
+}
+
 /// The tokens of a turn from the `usage` of its `result` (every call of
-/// the turn together) and its `total_cost_usd`: the same kinds as a
-/// transcript's message (`input_tokens` without the cache,
-/// `cache_read_input_tokens`, `cache_creation_input_tokens`,
+/// the turn together, its subagents left out) and its `total_cost_usd`:
+/// the same kinds as a transcript's message (`input_tokens` without the
+/// cache, `cache_read_input_tokens`, `cache_creation_input_tokens`,
 /// `output_tokens`); `None` when the input and output counts are not
 /// numbers.
 fn turn_tokens(usage: &Value, cost_usd: Option<f64>) -> Option<TokenUsage> {
@@ -528,5 +610,116 @@ mod tests {
             result.message.as_deref(),
             Some("Reached maximum number of turns (1)")
         );
+    }
+
+    /// A turn whose subagent `usage` leaves out (the output of a worker's
+    /// turn: `usage`'s output 117.6k, `modelUsage`'s 139.2k) is counted
+    /// from `modelUsage`, the session's running totals per model, with the
+    /// subagents it started (ADR-t1486-1).
+    #[test]
+    fn a_turns_tokens_are_its_model_usage_with_its_subagents() {
+        let (mut reader, _) = read(&[
+            init("auto"),
+            json!({"type": "result", "subtype": "success", "is_error": false, "session_id": "s1",
+                "result": "Done.", "total_cost_usd": 12.5,
+                "usage": {"input_tokens": 12, "output_tokens": 117_600,
+                    "cache_read_input_tokens": 900_000, "cache_creation_input_tokens": 9_000},
+                "modelUsage": {
+                    "claude-opus-5-5": {"inputTokens": 40, "outputTokens": 139_200,
+                        "cacheReadInputTokens": 1_300_000, "cacheCreationInputTokens": 30_000,
+                        "costUSD": 12.0, "contextWindow": 1_000_000},
+                    "claude-haiku-4-5": {"inputTokens": 5, "outputTokens": 800, "costUSD": 0.5}
+                },
+                "subagent_stats": {"spawned": 2, "completed": 2}}),
+        ]);
+        let result = reader.finish(Some(&exit(0)), "");
+        assert!(result.tokens_cumulative);
+        assert_eq!(result.tokens_source, Some(TokenSource::ModelUsage));
+        assert_eq!(result.tokens_reason, None);
+        assert_eq!(result.children, Some(2));
+        assert_eq!(
+            result.tokens.map(|tokens| tokens.payload()),
+            Some(
+                json!({"input": 45, "output": 140_000, "cache_read": 1_300_000,
+                "cache_creation": 30_000, "messages": 1, "cost_usd": 12.5})
+            )
+        );
+        assert_eq!(
+            result
+                .tokens_by_model
+                .iter()
+                .map(|model| (model.model.as_str(), model.output, model.cost_usd))
+                .collect::<Vec<_>>(),
+            [
+                ("claude-haiku-4-5", 800, Some(0.5)),
+                ("claude-opus-5-5", 139_200, Some(12.0))
+            ]
+        );
+    }
+
+    /// An output without a `modelUsage` (an older Claude Code) is counted
+    /// from `usage`, and says so; one with neither, or without a result,
+    /// counts nothing and says why. An empty `modelUsage` is a measured 0.
+    #[test]
+    fn tokens_fall_back_to_usage_and_say_why() {
+        let fallback = result_tokens(Some(&json!({"type": "result", "total_cost_usd": 0.2,
+            "usage": {"input_tokens": 3, "output_tokens": 4}})));
+        assert_eq!(fallback.source, Some(TokenSource::ResultUsage));
+        assert_eq!(fallback.reason, Some(MODEL_USAGE_MISSING));
+        assert_eq!(
+            fallback.tokens.map(|tokens| (tokens.input, tokens.output)),
+            Some((3, 4))
+        );
+        assert_eq!((fallback.by_model, fallback.children), (Vec::new(), None));
+        // A `modelUsage` this reader cannot read falls back too.
+        let unreadable = result_tokens(Some(&json!({"modelUsage": {"m": {"inputTokens": "x"}},
+            "usage": {"input_tokens": 3, "output_tokens": 4}})));
+        assert_eq!(unreadable.reason, Some(MODEL_USAGE_MISSING));
+        let none = result_tokens(Some(
+            &json!({"type": "result", "subagent_stats": {"spawned": 0}}),
+        ));
+        assert_eq!(
+            none,
+            ExecutionTokens {
+                reason: Some(NO_USAGE),
+                children: Some(0),
+                ..ExecutionTokens::default()
+            }
+        );
+        assert_eq!(result_tokens(None), ExecutionTokens::unmeasured(NO_RESULT));
+        let zero = result_tokens(Some(&json!({"modelUsage": {}, "total_cost_usd": 0})));
+        assert_eq!(zero.source, Some(TokenSource::ModelUsage));
+        assert_eq!(
+            zero.tokens.map(|tokens| tokens.payload()),
+            Some(
+                json!({"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0,
+                "messages": 1, "cost_usd": 0.0})
+            )
+        );
+        // A turn that ended without its result.
+        let (mut reader, _) = read(&[init("auto")]);
+        let result = reader.finish(Some(&exit(1)), "");
+        assert_eq!(
+            (result.tokens, result.tokens_reason),
+            (None, Some(NO_RESULT))
+        );
+    }
+
+    /// A job's `--output-format json` output is its result event; an array
+    /// or stream lines give their last one, and text gives none.
+    #[test]
+    fn a_jobs_result_is_read_from_its_json_output() {
+        let result = json!({"type": "result", "result": "ok"});
+        assert_eq!(job_result(&format!("{result}\n")), Some(result.clone()));
+        assert_eq!(
+            job_result(&json!([{"type": "system"}, result.clone()]).to_string()),
+            Some(result.clone())
+        );
+        assert_eq!(
+            job_result(&format!("{{\"type\":\"system\"}}\n{result}\nnot json\n")),
+            Some(result)
+        );
+        assert_eq!(job_result("{\"verdict\":\"pass\"}"), None);
+        assert_eq!(job_result("plain text"), None);
     }
 }

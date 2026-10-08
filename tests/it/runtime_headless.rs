@@ -126,6 +126,11 @@ fn a_headless_run_lands_after_its_first_turn() {
         json!({"input": 7, "output": 3, "cache_read": 0, "cache_creation": 0,
                "messages": 1, "cost_usd": 0.01})
     );
+    // A result without a `modelUsage` is counted from its `usage`, and the
+    // record says so (ADR-t1486-1).
+    assert_eq!(finished["tokens_source"], "result_usage");
+    assert_eq!(finished["tokens_reason"], "model_usage_missing");
+    assert_eq!(finished["tokens_by_model"], json!([]));
     let claimed = payloads(&detail, "run_claimed")[0];
     assert_eq!(claimed["provider"], "claude", "{claimed}");
     assert_eq!(claimed["worker_mode"], "headless", "{claimed}");
@@ -220,16 +225,26 @@ esac"#
 /// its receipt is reviewed again and the run lands. Claude's
 /// `total_cost_usd` is the session's total, so the resume's turn costs what
 /// it added to it and the run's turns sum to the last total (task 1199).
+/// So is `modelUsage`, which counts a subagent `usage` leaves out: the
+/// resume's tokens are what it added per model (ADR-t1486-1).
 #[test]
 fn a_revise_is_sent_to_the_same_session_as_a_resume() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
+    let models = |opus: (i64, i64, i64, f64)| {
+        format!(
+            r#",\"modelUsage\":{{\"claude-opus\":{{\"inputTokens\":{},\"outputTokens\":{},\"cacheReadInputTokens\":{},\"cacheCreationInputTokens\":10,\"costUSD\":{}}},\"claude-haiku\":{{\"inputTokens\":20,\"outputTokens\":5,\"costUSD\":0.7212}}}},\"subagent_stats\":{{\"spawned\":1}}"#,
+            opus.0, opus.1, opus.2, opus.3
+        )
+    };
     set_turns(
         dir.path(),
         &format!(
             r#"case "$MODE" in
-start) COST=4.7212; {FINISH} ;;
-resume) COST=6.0195; printf 'fix\n' >> change.txt; git commit -q -am fix; receipt "$(git rev-parse HEAD)"; say fixed ;;
-esac"#
+start) COST=4.7212; EXTRA="{start}"; {FINISH} ;;
+resume) COST=6.0195; EXTRA="{resume}"; printf 'fix\n' >> change.txt; git commit -q -am fix; receipt "$(git rev-parse HEAD)"; say fixed ;;
+esac"#,
+            start = models((100, 50, 1000, 4.0)),
+            resume = models((130, 70, 1500, 5.2983)),
         ),
     );
     let base = git_out(&repo, &["rev-parse", "main"]);
@@ -274,7 +289,28 @@ esac"#
             (turn["num_turns"].clone(), turn["duration_ms"].clone()),
             (json!(2), json!(5))
         );
+        assert_eq!(turn["tokens_source"], "model_usage", "{turn}");
     }
+    // The first turn's tokens are the session's totals; the resume's what
+    // it added to them, the model that added nothing left out.
+    assert_eq!(
+        finished[0]["tokens"],
+        json!({"input": 120, "output": 55, "cache_read": 1000, "cache_creation": 10,
+               "messages": 1, "cost_usd": 4.7212})
+    );
+    assert_eq!(finished[0]["children"], 1);
+    assert_eq!(
+        finished[1]["tokens"],
+        json!({"input": 30, "output": 20, "cache_read": 500, "cache_creation": 0,
+               "messages": 1, "cost_usd": 1.2983})
+    );
+    assert_eq!(
+        finished[1]["tokens_by_model"],
+        json!([{"model": "claude-opus", "input": 30, "output": 20, "cache_read": 500,
+                "cache_creation": 0, "cost_usd": 1.2983}])
+    );
+    assert_eq!(finished[1]["tokens_total"]["input"], 150);
+    assert_eq!(finished[1]["tokens_total_by_model"][1]["input"], 130);
 }
 
 /// Acceptance (2): a run parked `needs_session` (the e2e the runtime ran

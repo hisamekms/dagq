@@ -26,7 +26,7 @@ use std::{
 use serde_json::Value;
 
 use crate::application::{Exit, TurnReader};
-use crate::domain::tokens::TokenUsage;
+use crate::domain::tokens::{NO_RESULT, NO_USAGE, TokenSource, TokenUsage};
 use crate::domain::turn::{TurnCommand, TurnFailure, TurnResult, TurnSignal, shortened};
 use crate::domain::verify_failure::failed_tests;
 use crate::domain::worktime::SHELL_ITEM;
@@ -477,6 +477,10 @@ impl TurnReader for CodexTurnReader {
         });
         // Codex's output does not name the model: its rollout does.
         let model = self.model();
+        let tokens = self
+            .completed
+            .as_ref()
+            .and_then(|event| turn_tokens(&event["usage"]));
         TurnResult {
             result_seen: self.completed.is_some() || self.failed.is_some(),
             is_error,
@@ -491,13 +495,18 @@ impl TurnReader for CodexTurnReader {
                 .completed
                 .as_ref()
                 .map_or(Value::Null, |event| event["usage"].clone()),
-            tokens: self
-                .completed
-                .as_ref()
-                .and_then(|event| turn_tokens(&event["usage"])),
+            tokens_source: tokens.is_some().then_some(TokenSource::ThreadUsage),
+            tokens_reason: match (&tokens, &self.completed) {
+                (Some(_), _) => None,
+                (None, Some(_)) => Some(NO_USAGE),
+                (None, None) => Some(NO_RESULT),
+            },
+            tokens,
             // `turn.completed` carries the thread's total so far, a
             // resumed thread's earlier turns included.
             tokens_cumulative: true,
+            tokens_by_model: Vec::new(),
+            children: None,
             cost_cumulative: false,
             permission_denials: std::mem::take(&mut self.denials),
             session_missing: stderr.contains("no rollout found"),

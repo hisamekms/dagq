@@ -616,9 +616,12 @@ not started with its own"
     fn job_session(&self, stdout: &str, since: Option<i64>) -> Option<JobSession> {
         let result = read_job(self.sessions_dir(), stdout, "", since);
         Some(JobSession {
+            named: true,
             session_id: result.session_id,
             model: result.model,
             model_unknown: result.model_unknown,
+            // A job's tokens are not counted yet (ADR-t1486-1).
+            tokens: None,
         })
     }
     /// The failure of the turn the job was, as a worker's turn is read

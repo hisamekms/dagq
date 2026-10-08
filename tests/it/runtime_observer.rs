@@ -564,7 +564,11 @@ if [ "$1" = "-p" ]; then
   mode=hourly
   # The prompt comes on stdin (task 1560).
   case "$(cat)" in *"daily observation"*) mode=daily ;; esac
-  exec dagq finding record --goal 1 --kind observed --subject "$mode" --summary "observed by $DAGQ_ROLE"
+  dagq finding record --goal 1 --kind observed --subject "$mode" --summary "observed by $DAGQ_ROLE" >/dev/null || exit $?
+  # `--output-format json`'s result: `modelUsage` counts a subagent that
+  # `usage` leaves out (ADR-t1486-1).
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"observed","total_cost_usd":0.5,"usage":{"input_tokens":1,"output_tokens":2},"modelUsage":{"claude-opus-5-5":{"inputTokens":10,"outputTokens":20,"cacheReadInputTokens":30,"cacheCreationInputTokens":40,"costUSD":0.4},"claude-haiku-4-5":{"inputTokens":1,"outputTokens":2,"costUSD":0.1}},"subagent_stats":{"spawned":2}}\n'
+  exit 0
 fi
 printf 'test provider\n'
 "#,
@@ -644,6 +648,31 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
         [("daily", "succeeded"), ("hourly", "succeeded")]
     );
     assert!(finished.iter().all(|f| f["findings_recorded"] == 1));
+    // Each observation is one Execution: its tokens are its `modelUsage`,
+    // per model and together, with the subagents it started.
+    for f in &finished {
+        assert_eq!(
+            f["tokens"],
+            json!({"input": 11, "output": 22, "cache_read": 30, "cache_creation": 40,
+                   "messages": 1, "cost_usd": 0.5}),
+            "{f}"
+        );
+        assert_eq!(f["tokens_source"], "model_usage", "{f}");
+        assert_eq!(f["tokens_reason"], Value::Null, "{f}");
+        assert_eq!(f["children"], 2, "{f}");
+        assert_eq!(
+            f["tokens_by_model"],
+            json!([
+                {"model": "claude-haiku-4-5", "input": 1, "output": 2, "cache_read": 0,
+                 "cache_creation": 0, "cost_usd": 0.1},
+                {"model": "claude-opus-5-5", "input": 10, "output": 20, "cache_read": 30,
+                 "cache_creation": 40, "cost_usd": 0.4},
+            ]),
+            "{f}"
+        );
+        // Claude's session and model are not read from its output.
+        assert!(f.get("model").is_none(), "{f}");
+    }
     let mut findings = SqliteQueue::open(&db)
         .unwrap()
         .findings(&dagq::domain::FindingQuery {

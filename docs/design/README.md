@@ -25,6 +25,7 @@ tags:
 - [Resource broker](broker.md)（fs・process・git・packageを仲介するdagq-broker。crateと配布・transport・runごとのtoken・mountと閉じ込め・containerとPodman machine・workerのMCPの道具・audit・mode・`required`・Phase 3に進む前提。goal 58と59が実装）
 - [Supervisor lifecycle](supervisor-lifecycle.md)（目次。各節は[`supervisor-lifecycle/`](supervisor-lifecycle/)の下の別のファイルにある）
 - [Provider lifecycle](provider-lifecycle.md)
+- [Executionのトークン数](execution-tokens.md)（非対話のturnとheadlessのjobの1回ごとのトークン数の記録の形・providerごとの数える元・今の穴）
 - [Provider executables](provider-executables.md)（providerを起動するpathをsymlinkのまま持つこと、pathが無いときの名前での解決し直し）
 - [Plugin integration](plugin-integration.md)
 - [Manual smoke](manual-smoke.md)

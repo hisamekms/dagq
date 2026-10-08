@@ -48,11 +48,12 @@ use crate::domain::{
     provider_switch::{since_switch, switches},
     sccache::SccacheTarget,
     stall::StallConfig,
-    tokens::TokenUsage,
+    tokens::{ExecutionTokens, ModelTokens, TokenSource, TokenUsage},
     turn::{
         LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSession,
         TurnSignal, commands_path, exit_path, idle_marker, output_path, pending, renew_wall_marker,
-        request_path, request_to_take, session_name, taken_path, turn_own_cost, turns_dir,
+        request_path, request_to_take, session_name, taken_path, turn_own_cost, turn_own_models,
+        turns_dir,
     },
     worker_model::WorkerSession,
 };
@@ -1048,10 +1049,8 @@ impl<'a> Turns<'a> {
     ) -> Result<Turn> {
         let (cost, session_cost) = self.turn_cost(turn, &result)?;
         result.cost_usd = cost;
-        if let Some(tokens) = result.tokens.as_mut().filter(|_| session_cost.is_some()) {
-            tokens.cost_usd = cost;
-        }
-        let (tokens, tokens_total) = self.turn_tokens(&result)?;
+        let (tokens, tokens_total, total_by_model) =
+            self.turn_tokens(turn, &result, cost, session_cost)?;
         // The provider the turn ran on: the wrapper's copy of the run may
         // predate a switch (ADR-t813-2).
         let provider = self.provider_now()?;
@@ -1082,17 +1081,22 @@ impl<'a> Turns<'a> {
             // known.
             "model": result.model,
             "model_unknown": result.model_unknown,
-            // The runtime's kinds of token, which the span sums
-            // (ADR-t813-2 decision 7).
-            "tokens": tokens.as_ref().map(TokenUsage::payload),
             "tokens_total": tokens_total.as_ref().map(TokenUsage::payload),
             "permission_denials": result.permission_denials.len(),
             "denied_tools": result.permission_denials,
         });
-        // The session's running total the turn's cost was taken from, which
-        // the session's next turn takes its own from (task 1199).
+        // The runtime's kinds of token, which the span sums (ADR-t813-2
+        // decision 7), in the form of every Execution (ADR-t1486-1).
+        tokens.record(&mut payload);
+        // The session's running totals the turn's cost and tokens were
+        // taken from, which the session's next turn takes its own from
+        // (task 1199).
         if let Some(total) = session_cost {
             payload["session_cost_usd"] = json!(total);
+        }
+        if !total_by_model.is_empty() {
+            payload["tokens_total_by_model"] =
+                total_by_model.iter().map(ModelTokens::payload).collect();
         }
         self.record(EventKind::TurnFinished, payload)?;
         // The idle marker the supervisor's watches read, written only once
@@ -1143,17 +1147,47 @@ impl<'a> Turns<'a> {
         ))
     }
 
-    /// The turn's own tokens, and the session's running total when the
-    /// provider gives that instead (Codex): the total less the one the
-    /// session's last turn recorded as `tokens_total`, the whole total for
-    /// a session's first (ADR-t813-2 decision 7).
+    /// The turn's own tokens as its `turn_finished` records them, with its
+    /// own cost `cost` when the provider's was the session's total
+    /// (`session_cost`); and the session's running totals, overall and per
+    /// model, when the provider gives those instead. Claude's
+    /// `modelUsage` (ADR-t1486-1): what the turn added to the totals the
+    /// session's last turn recorded ([`turn_own_models`]). Codex's thread
+    /// total: the total less the one the session's last turn recorded as
+    /// `tokens_total`, the whole total for a session's first (ADR-t813-2
+    /// decision 7).
     fn turn_tokens(
         &mut self,
+        turn: u64,
         result: &TurnResult,
-    ) -> Result<(Option<TokenUsage>, Option<TokenUsage>)> {
-        let Some(total) = result.tokens.clone().filter(|_| result.tokens_cumulative) else {
-            return Ok((result.tokens.clone(), None));
+        cost: Option<f64>,
+        session_cost: Option<f64>,
+    ) -> Result<(ExecutionTokens, Option<TokenUsage>, Vec<ModelTokens>)> {
+        let mut own = ExecutionTokens {
+            tokens: result.tokens.clone(),
+            by_model: result.tokens_by_model.clone(),
+            source: result.tokens_source,
+            reason: result.tokens_reason,
+            children: result.children,
         };
+        let Some(mut total) = result.tokens.clone().filter(|_| result.tokens_cumulative) else {
+            if let Some(tokens) = own.tokens.as_mut().filter(|_| session_cost.is_some()) {
+                tokens.cost_usd = cost;
+            }
+            return Ok((own, None, Vec::new()));
+        };
+        if result.tokens_source == Some(TokenSource::ModelUsage) {
+            let models = match result.session_id.as_deref() {
+                Some(session) => {
+                    turn_own_models(&self.events()?, turn, session, &result.tokens_by_model)
+                }
+                None => result.tokens_by_model.clone(),
+            };
+            own.tokens = Some(ModelTokens::total(&models, cost));
+            own.by_model = models;
+            total.cost_usd = session_cost.or(total.cost_usd);
+            return Ok((own, Some(total), result.tokens_by_model.clone()));
+        }
         let events = self.events()?;
         let earlier = events
             .iter()
@@ -1164,14 +1198,14 @@ impl<'a> Turns<'a> {
                     && e.payload["session_id"].as_str() == result.session_id.as_deref()
             })
             .find_map(|e| TokenUsage::from_payload(&e.payload["tokens_total"]));
-        let own = earlier.map_or_else(
+        own.tokens = Some(earlier.map_or_else(
             || TokenUsage {
                 messages: 1,
                 ..total.clone()
             },
             |earlier| total.since(&earlier),
-        );
-        Ok((Some(own), Some(total)))
+        ));
+        Ok((own, Some(total), Vec::new()))
     }
 
     /// Record the session `id` the agent said turn `turn` runs in, when it

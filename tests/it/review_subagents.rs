@@ -721,6 +721,7 @@ fn an_agents_send_back_under_a_pass_sends_the_run_back() {
 #[test]
 #[ignore = "runs the real Claude Code; see the doc comment"]
 fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
+    use dagq::application::AgentProvider;
     use dagq::domain::review_subagents::AgentDefinition;
     use dagq::infrastructure::adapters::ClaudeCode;
     let executable = std::env::var_os("DAGQ_REAL_CLAUDE")
@@ -835,7 +836,11 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
             process.output().unwrap()
         };
         assert!(output.status.success(), "{output:?}");
-        (String::from_utf8_lossy(&output.stdout).into_owned(), marker)
+        // The review prints its result as JSON: the reply is its `result`.
+        (
+            claude.job_reply(&String::from_utf8_lossy(&output.stdout)),
+            marker,
+        )
     };
 
     let (control, marker) = review(

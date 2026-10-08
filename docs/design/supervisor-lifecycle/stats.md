@@ -234,7 +234,7 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 
 - 入口: `tokens`と`RunTokens`・`TokenSummary`、記録の書き方は[provider-lifecycle](../provider-lifecycle.md)。
 - 区間が閉じたときの記録を足すので、長く開いた区間（常駐のinbox）は閉じた日の窓にまとめて入り、日ごと・actorごとには比べられない。
-  ほかの数えない分（subagent、Codexのjob、Codexの子のthread）と、実行ごとの記録への置き換えは[ADR-t1486-1](../../adr/2026-10-04-t1486-1-supervisor-records-token-usage-per-execution.md)と[provider-lifecycle](../provider-lifecycle.md)が持つ。
+  ほかの数えない分と、実行ごとの記録への置き換えは[ADR-t1486-1](../../adr/2026-10-04-t1486-1-supervisor-records-token-usage-per-execution.md)と[Executionのトークン数](../execution-tokens.md#今の穴)が持つ。
 - runを持たないobserverとplan reviewのトークン数は期間の集計のsessionのkindごとで読む。
 
 ## 重さの予測と実績

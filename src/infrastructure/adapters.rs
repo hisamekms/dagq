@@ -8,7 +8,7 @@ use crate::{
     domain::{
         ActorRole, CommitSha, TaskId, TaskRun,
         disk::ProcessExecutable,
-        headless_job::JobAccess,
+        headless_job::{JobAccess, JobSession},
         landing_branch::{self, LandingBranch, PushTarget, RepositoryConfig, RepositorySettings},
         measure::HostVersions,
         recovery::ProcessInfo,
@@ -3566,7 +3566,9 @@ impl AgentProvider for ClaudeCode {
     /// arguments fails with `E2BIG`).
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         let mut command = CommandSpec::new(&self.executable);
-        command.current_dir(cwd).arg("-p");
+        command
+            .current_dir(cwd)
+            .args(["-p", "--output-format", "json"]);
         let tools = claude_tools(access);
         if !tools.is_empty() {
             command.arg("--allowedTools").args(tools);
@@ -3577,10 +3579,28 @@ impl AgentProvider for ClaudeCode {
             .stdin(prompt);
         Ok(command)
     }
-    /// `claude -p` prints the final reply of the job only (its default
-    /// text output): the reply is stdout as it is.
+    /// `claude -p --output-format json` prints the job's `result` event:
+    /// the reply is its `result` text. An output that is no such event (a
+    /// Claude Code that printed text) is the reply as it is.
     fn job_reply(&self, stdout: &str) -> String {
-        stdout.to_owned()
+        match crate::infrastructure::claude_turns::job_result(stdout) {
+            Some(result) => result["result"].as_str().unwrap_or_default().to_owned(),
+            None => stdout.to_owned(),
+        }
+    }
+    /// The job's tokens, one Execution in a session of its own
+    /// (ADR-t1486-1), from its `result` event: its `modelUsage`, which is
+    /// the job's own. The session id and model are not read here: the
+    /// runtime names the session ahead and its transcript gives the model
+    /// (ADR-0048 decision 4).
+    fn job_session(&self, stdout: &str, _since: Option<i64>) -> Option<JobSession> {
+        let result = crate::infrastructure::claude_turns::job_result(stdout);
+        Some(JobSession {
+            tokens: Some(crate::infrastructure::claude_turns::result_tokens(
+                result.as_ref(),
+            )),
+            ..JobSession::default()
+        })
     }
     /// `claude -p` in the worktree with `claude-review-settings.json` of
     /// the run directory: the worker's settings without its `Stop` hook, so
@@ -3614,7 +3634,7 @@ impl AgentProvider for ClaudeCode {
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
-            .arg("-p")
+            .args(["-p", "--output-format", "json"])
             .arg("--debug-file")
             .arg(run_dir.join("claude-review.log"))
             .arg("--add-dir")
@@ -5321,6 +5341,8 @@ mod tests {
             command.get_args().collect::<Vec<_>>(),
             [
                 "-p",
+                "--output-format",
+                "json",
                 "--allowedTools",
                 "Bash(dagq:*)",
                 "--disallowedTools",
@@ -5338,6 +5360,8 @@ mod tests {
             named.get_args().collect::<Vec<_>>(),
             [
                 "-p",
+                "--output-format",
+                "json",
                 "--allowedTools",
                 "Bash(dagq:*)",
                 "--disallowedTools",
@@ -5352,6 +5376,8 @@ mod tests {
             named.get_args().collect::<Vec<_>>(),
             [
                 "-p",
+                "--output-format",
+                "json",
                 "--allowedTools",
                 "Bash(dagq:*)",
                 "--disallowedTools",
@@ -5364,6 +5390,52 @@ mod tests {
         let mut plain = CommandSpec::new("x");
         plain.arg("a").option_args(["b"]);
         assert_eq!(plain.get_args().collect::<Vec<_>>(), ["a", "b"]);
+    }
+
+    /// A Claude job's reply is the `result` of its JSON output, and its
+    /// end records the job's tokens from the same output, not its session
+    /// or model, which the runtime names and its transcript gives
+    /// (ADR-t1486-1). Text output is the reply as it is, with nothing
+    /// counted.
+    #[test]
+    fn a_claude_jobs_reply_and_tokens_are_read_from_its_json_result() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let stdout = serde_json::json!({"type": "result", "is_error": false,
+            "result": "{\"verdict\":\"pass\"}", "total_cost_usd": 0.3,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "modelUsage": {"claude-opus-5-5": {"inputTokens": 4, "outputTokens": 9, "costUSD": 0.3}},
+            "subagent_stats": {"spawned": 1}})
+        .to_string();
+        assert_eq!(claude.job_reply(&stdout), "{\"verdict\":\"pass\"}");
+        let session = claude.job_session(&stdout, None).unwrap();
+        let mut payload = serde_json::json!({"session_id": "named-ahead"});
+        session.record(&mut payload);
+        assert_eq!(payload["session_id"], "named-ahead");
+        assert!(payload.get("model").is_none(), "{payload}");
+        assert_eq!(
+            (
+                &payload["tokens"]["input"],
+                &payload["tokens"]["output"],
+                &payload["tokens_source"],
+                &payload["children"]
+            ),
+            (
+                &serde_json::json!(4),
+                &serde_json::json!(9),
+                &serde_json::json!("model_usage"),
+                &serde_json::json!(1)
+            )
+        );
+        assert_eq!(claude.job_reply("plain verdict\n"), "plain verdict\n");
+        let mut text = serde_json::json!({});
+        claude
+            .job_session("plain verdict\n", None)
+            .unwrap()
+            .record(&mut text);
+        assert_eq!(text["tokens"], serde_json::Value::Null);
+        assert_eq!(text["tokens_reason"], "no_result");
     }
 
     /// Every headless job's intent becomes the same `--allowedTools` its
@@ -5407,7 +5479,7 @@ mod tests {
             let command = claude
                 .headless_command(Path::new("/tmp/job"), "p", access)
                 .unwrap();
-            let mut expected = vec!["-p", "--allowedTools"];
+            let mut expected = vec!["-p", "--output-format", "json", "--allowedTools"];
             expected.extend(tools);
             expected.extend(["--disallowedTools", "ScheduleWakeup,CronCreate"]);
             assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{job}");
@@ -5435,6 +5507,8 @@ mod tests {
             args,
             [
                 "-p",
+                "--output-format",
+                "json",
                 "--debug-file",
                 &format!("{run_dir}/claude-review.log"),
                 "--add-dir",

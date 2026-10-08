@@ -86,7 +86,7 @@ supervisor
 | --- | --- |
 | wrapperのturnの駆動・止める判断・記録 | `src/application/headless_session.rs`の`Turns` |
 | supervisorから見たsession・依頼の書き込み | `src/application/supervise/headless.rs`（`request_turn`・`prepare_turns`・`send_to_planner`） |
-| `turns/`のfileの名前・依頼・idle marker・turnのcost | `src/domain/turn.rs`（`TurnRequest`・`idle_marker`・`turn_own_cost`・`request_to_take`・`request_read`） |
+| `turns/`のfileの名前・依頼・idle marker・turnのcostとトークン数 | `src/domain/turn.rs`（`TurnRequest`・`idle_marker`・`turn_own_cost`・`turn_own_models`・`request_to_take`・`request_read`） |
 | Claudeの呼び出しと出力の読み | `ClaudeCode::turn_command`、`src/infrastructure/claude_turns.rs` |
 | Codexの呼び出しと出力の読み | `src/infrastructure/codex_turns.rs` |
 | turnの設定（拒否の規則） | `src/infrastructure/adapters.rs`の`headless_worker_settings`・`headless_required_settings`・`HEADLESS_DENIED_TOOLS`・`PRINT_MODE_DENIED_TOOLS` |
@@ -147,7 +147,9 @@ run dirのI/Oの約束と落とし穴:
 - wrapperはsessionの最初のturnのprocessをrunの`agent`として登録し、後のturnは同じ行のpidを差し替える（`register_turn_agent`）。
   runの状態遷移は最初のturnだけで、turnの間は行が終わったturnのpidのまま残る。
 - runのsessionの区間の稼働時間とトークン数は`turn_finished`から取る（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)）。
-- Claudeの`total_cost_usd`はsessionの累計なので、wrapperは前の累計を引いてturnの分にする（`domain::turn::turn_own_cost`）。
+- Claudeの`total_cost_usd`と`modelUsage`はsessionの累計なので、wrapperは前の累計を引いてturnの分にする（`domain::turn::turn_own_cost`・`turn_own_models`）。
+  turnのトークン数は`modelUsage`から取り、subagentの分を含む。
+  `turn_finished`のトークン数の欄と、`modelUsage`の無い出力の扱いは[Executionのトークン数](../execution-tokens.md)。
   `result`の前に止められたturnの分は次のresumeのturnに入り、過去の記録は補正しない。
 - 次のturnをresumeするか始め直すかは、sessionが作られたか、providerがsessionを持っているか（`turn_session_exists`）で決める。
   Claude Codeは使われている名前のsessionを拒むので、答える前に失敗したturnが残したsessionもresumeする。
