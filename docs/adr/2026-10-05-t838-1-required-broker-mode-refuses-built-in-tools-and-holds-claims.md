@@ -2,10 +2,12 @@
 id: adr-t838-1
 type: adr
 title: brokerのmodeがrequiredのworkerとresumeは非対話のturnだけで動かし、組み込みのファイルの道具を拒んでBashはdagqだけを通し、receiptはclientのMCPの道具で書き、brokerが使えなければclaimもresumeもせずinboxに知らせて直接の実行に戻らない（guardrailで、enforcementではない）
-status: accepted
+status: superseded
 created: 2026-10-05
 updated: 2026-10-05
 accepted_on: 2026-10-05
+superseded_by: adr-t2113-1
+superseded_on: 2026-10-08
 owners:
   - hisamekms
 tags:
@@ -23,6 +25,8 @@ related:
 ---
 
 # ADR-t838-1: brokerのmodeがrequiredのworkerとresumeは非対話のturnだけで動かし、組み込みのファイルの道具を拒んでBashはdagqだけを通し、receiptはclientのMCPの道具で書き、brokerが使えなければclaimもresumeもせずinboxに知らせて直接の実行に戻らない（guardrailで、enforcementではない）
+
+> **置き換え済み（2026-10-08）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2113-1](2026-10-08-t2113-1-remove-the-resource-broker.md)を読む。
 
 ## Context
 

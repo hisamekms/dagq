@@ -2,10 +2,12 @@
 id: adr-t827-2
 type: adr
 title: brokerは127.0.0.1だけのHTTP+JSONで話し、supervisorがclaimのときにqueueの鍵で署名したrunごとのtokenを発行して、runの終わりに失効させ、long-livedのcontainerにはqueueのrunsとgitの共通dirを同じ絶対パスでmountしてrunごとの閉じ込めはtokenのworkspaceでbrokerが行い、gitはpushを持たない
-status: accepted
+status: superseded
 created: 2026-09-28
 updated: 2026-09-28
 accepted_on: 2026-09-28
+superseded_by: adr-t2113-1
+superseded_on: 2026-10-08
 amended_by:
   - adr-t840-1
 owners:
@@ -24,6 +26,8 @@ related:
 ---
 
 # ADR-t827-2: brokerは127.0.0.1だけのHTTP+JSONで話し、supervisorがclaimのときにqueueの鍵で署名したrunごとのtokenを発行して、runの終わりに失効させ、long-livedのcontainerにはqueueのrunsとgitの共通dirを同じ絶対パスでmountしてrunごとの閉じ込めはtokenのworkspaceでbrokerが行い、gitはpushを持たない
+
+> **置き換え済み（2026-10-08）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2113-1](2026-10-08-t2113-1-remove-the-resource-broker.md)を読む。
 
 ## Context
 

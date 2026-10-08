@@ -2,10 +2,12 @@
 id: adr-t840-1
 type: adr
 title: brokerに4つめのbackendのpackageとcapabilityのpackage.installを足し、repositoryが名前ごとに設定した少数のコマンドだけを、名前で選ばせてprocess.execと同じ閉じ込めと上限で走らせる
-status: accepted
+status: superseded
 created: 2026-10-05
 updated: 2026-10-05
 accepted_on: 2026-10-05
+superseded_by: adr-t2113-1
+superseded_on: 2026-10-08
 amends:
   - adr-t827-2 decision 1
   - adr-t827-4 decision 1
@@ -25,6 +27,8 @@ related:
 ---
 
 # ADR-t840-1: brokerに4つめのbackendのpackageとcapabilityのpackage.installを足し、repositoryが名前ごとに設定した少数のコマンドだけを、名前で選ばせてprocess.execと同じ閉じ込めと上限で走らせる
+
+> **置き換え済み（2026-10-08）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2113-1](2026-10-08-t2113-1-remove-the-resource-broker.md)を読む。
 
 ## Context
 

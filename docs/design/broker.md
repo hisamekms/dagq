@@ -9,6 +9,8 @@ tags:
   - security
   - broker
 related:
+  - adr-t2113-1
+  - adr-t2113-3
   - adr-t840-1
   - adr-t838-1
   - adr-t1582-1
@@ -25,12 +27,16 @@ related:
 
 # Resource broker
 
+> **撤去予定（未実装）**: resource brokerは外すと決まった（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）。
+> 撤去の実装はまだで、この文書はコードに残る今の姿を書く。
+> resource brokerに機能を足さない。
+
 ## 概念
 
 ### 目的
 
 resource broker（`dagq-broker`）は、workerのfs・process・git・packageの操作を、runごとのtokenで名指したworktreeの中だけに仲介する。
-目的は、workerの操作をtokenとauditでrunに結び、誤りと事故を上限と閉じ込めで止め、workerのcontainer化（Phase 3）に進める安定したAPIを先に作ること。
+目的は、workerの操作をtokenとauditでrunに結び、誤りと事故を上限と閉じ込めで止めること。
 
 **隔離ではない。**
 workerはhostのプロセスのままで、`preferred`のworkerはbrokerを迂回して組み込みの道具やhostのファイルを直接使える。
@@ -192,7 +198,7 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 - **落とし穴**: 限るのは`argv`だけで、コマンドが読むworkspaceの中身（workerが書ける）は限らない。
   `npm install`のlifecycle scriptやcargoの`build.rs`・`.cargo/config.toml`からworkerの書いたものが走りうるので、scriptを走らせない形を設定する。
 - imageにはtoolchainが無いので、使うにはimageかmountの用意が別に要る。
-  networkの制限を強めるのはPhase 4。
+  resource brokerはnetworkの制限を持たず、外への経路を絞るのはqueueのbroker（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）。
 
 ## containerとPodman machine
 
@@ -325,14 +331,6 @@ ADR-t827-3の決定2・3。
 
 - Phase 1: workerはhostのまま、`preferred`で契約を証明する。
 - Phase 2: `required`、組み込みの道具の数、package backend。
-- Phase 3以降: workerのcontainer化（`PodmanActorExecutor`）、runごとのmountでの閉じ込め、containerのworkerのqueueの操作。
-
-### Phase 3に進む前提
-
-- Phase 3はbrokerの側を変えずに、workerを動かす側（`ActorExecutor::spawn`の実装、[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）を替える。
-- 安定させるのはprotocolの型、MCPの道具の名前と形、tokenのclaims、auditの行、`mcp.json`のenvの名前で、変えるときは`PROTOCOL_VERSION`を上げる（ADR-t827-1決定7）。
-- claimの前のhold・tokenの発行と失効・attentionはexecutorに依らないのでそのまま使う。
-- 前提は、`required`の代表taskがbrokerの道具と制御側の操作だけで完走することと、`preferred`の組み込みの道具の数が把握されていること。
-- Phase 3で決めること: containerの中のClaudeの認証、containerのworkerのqueueの操作（ADR-t827-4決定6）、machineのvolume（ADR-t827-3決定6）、Phase 4のegressとcredentialの分離。
-- `actors`の`backend`・`enforcement`はexecutorが出す（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。
-
+- Phase 3以降は無い。
+  workerのcontainer化はresource brokerを経ず、runごとのcontainerの中で組み込みの道具をそのまま使う形で行う（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)・[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)）。
+  gitはmountの設計で守り（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）、外への経路はqueueのbrokerだけにする。

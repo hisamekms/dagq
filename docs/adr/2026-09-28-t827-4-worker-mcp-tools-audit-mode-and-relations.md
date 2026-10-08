@@ -2,10 +2,12 @@
 id: adr-t827-4
 type: adr
 title: workerはbrokerをclientのMCPの道具で使い（preferredでは組み込みの道具も残す）、brokerの全ての操作をqueue dirのauditにtokenと秘密なしで残し、modeはdisabled・preferred・requiredでrepositoryの方針はdagq.toml・hostの資源はhost.tomlに置き、resource brokerはADR-t728-1の助言的なhostとgoal 38のqueue serviceとは別の層にする
-status: accepted
+status: superseded
 created: 2026-09-28
 updated: 2026-09-28
 accepted_on: 2026-09-28
+superseded_by: adr-t2113-1
+superseded_on: 2026-10-08
 amended_by:
   - adr-t840-1
 owners:
@@ -27,6 +29,8 @@ related:
 ---
 
 # ADR-t827-4: workerはbrokerをclientのMCPの道具で使い（preferredでは組み込みの道具も残す）、brokerの全ての操作をqueue dirのauditにtokenと秘密なしで残し、modeはdisabled・preferred・requiredでrepositoryの方針はdagq.toml・hostの資源はhost.tomlに置き、resource brokerはADR-t728-1の助言的なhostとgoal 38のqueue serviceとは別の層にする
+
+> **置き換え済み（2026-10-08）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2113-1](2026-10-08-t2113-1-remove-the-resource-broker.md)を読む。
 
 ## Context
 

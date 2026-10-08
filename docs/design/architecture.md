@@ -239,7 +239,8 @@ cmuxを使うのはinboxだけ（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is
 **許す依存の向き**
 
 - 他のcontextのuse caseを起動・停止してよいが、他のcontextの状態は公開したportで変える。
-- brokerのcrateはrootの`dagq`のcrateに依存しない（`dagq-broker-protocol`だけを共有する。[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)）。
+- brokerのcrateはrootの`dagq`のcrateに依存しない（`dagq-broker-protocol`だけを共有する）。
+  撤去予定（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）。
 
 **境界をまたぐtransaction**: 無い。
 

@@ -2,10 +2,12 @@
 id: adr-t827-1
 type: adr
 title: resource brokerをroot package（dagq）はそのままにcrates/の3つのcrate（protocol・server・client）に分け、dagqはprotocolだけに依存し、clientはdagqの隣に同じbuildで置き、brokerのimageはdagqと同じsourceからbuildして、版が食い違えばbrokerを使わない
-status: accepted
+status: superseded
 created: 2026-09-28
 updated: 2026-09-28
 accepted_on: 2026-09-28
+superseded_by: adr-t2113-1
+superseded_on: 2026-10-08
 amended_by:
   - adr-t828-1
 owners:
@@ -26,6 +28,8 @@ related:
 ---
 
 # ADR-t827-1: resource brokerをroot package（dagq）はそのままにcrates/の3つのcrate（protocol・server・client）に分け、dagqはprotocolだけに依存し、clientはdagqの隣に同じbuildで置き、brokerのimageはdagqと同じsourceからbuildして、版が食い違えばbrokerを使わない
+
+> **置き換え済み（2026-10-08）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2113-1](2026-10-08-t2113-1-remove-the-resource-broker.md)を読む。
 
 ## Context
 
