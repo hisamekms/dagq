@@ -43,11 +43,11 @@ impl std::fmt::Display for ImprovementsAtLimit {
 
 impl std::error::Error for ImprovementsAtLimit {}
 
-impl Supervisor<'_> {
+impl PlanningState {
     /// Resolve the `proposed` findings whose proposal ended with a task
     /// completed, and open again those whose proposal came to nothing.
-    pub(super) fn settle_findings(&mut self) -> Result<()> {
-        for (finding, status) in self.queue.settle_findings()? {
+    pub(super) fn settle_findings(&mut self, env: &mut PlanningEnv<'_>) -> Result<()> {
+        for (finding, status) in env.queue.settle_findings()? {
             info!(
                 "finding {finding}: its proposal ended; it is {}",
                 status.as_str()
@@ -63,12 +63,13 @@ impl Supervisor<'_> {
     /// closed when the finding moved on.
     pub(super) fn deliver_finding_answer(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         views: &[PlannerView],
         runtime_open: &mut usize,
         ask: &Ask,
         finding: FindingId,
     ) -> Result<()> {
-        match self.queue.planner_answer_route(ask)? {
+        match env.queue.planner_answer_route(ask)? {
             PlannerAnswerRoute::Planner(planner) => {
                 let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                     return Ok(());
@@ -76,9 +77,9 @@ impl Supervisor<'_> {
                 // An answer whose sending to it failed goes to a new
                 // planner, not to it again.
                 if let Some(workspace) = view.planner.workspace_id.as_deref()
-                    && self.queue.ask_delivery_failed(ask.id, planner.id)?
+                    && env.queue.ask_delivery_failed(ask.id, planner.id)?
                 {
-                    return self.hand_over_undelivered_answer(view, workspace, ask.id);
+                    return self.hand_over_undelivered_answer(env, view, workspace, ask.id);
                 }
                 // The planner that asked gets it once it stopped after
                 // asking; a question someone else opened waits only for it
@@ -87,7 +88,7 @@ impl Supervisor<'_> {
                 // (ADR-t1394-2 decision 5).
                 if answer_waits(
                     view.state,
-                    self.planner_at_wall(view).is_some(),
+                    self.planner_at_wall(env, view).is_some(),
                     ask.asked_by == SessionRole::Planner.as_str(),
                     view.idle_since,
                     ask.created_at,
@@ -98,7 +99,7 @@ impl Supervisor<'_> {
                     return Ok(());
                 };
                 // Claimed first, so two supervisors type it once (task 406).
-                if !self
+                if !env
                     .queue
                     .claim_planner_answer(ask.id, planner.id, &workspace)?
                 {
@@ -109,16 +110,23 @@ impl Supervisor<'_> {
                     ask.id,
                     ask.answer.as_deref().unwrap_or_default()
                 );
-                self.stamp_planner_input(view);
+                self.stamp_planner_input(env, view);
                 let what = format!("answer of ask {}", ask.id);
-                match self.send_to_planner(view, &workspace, Input::Text(&text), &what) {
+                match send_to_planner(
+                    &**env.files,
+                    &*env.queue,
+                    view,
+                    &workspace,
+                    Input::Text(&text),
+                    &what,
+                ) {
                     Ok(_) => {
-                        self.queue.ask_delivered(ask.id, &workspace)?;
+                        env.queue.ask_delivered(ask.id, &workspace)?;
                         info!(ask_id = %ask.id, "answer of ask {} sent to planner {} of finding {finding} in workspace {workspace}", ask.id, planner.id);
                     }
                     Err(error) => {
                         warn!(ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; the planner is ended and the answer goes to a new planner", ask.id, planner.id);
-                        self.queue.record_finding_event(
+                        env.queue.record_finding_event(
                             finding,
                             EventKind::AskDeliveryFailed,
                             json!({
@@ -129,22 +137,20 @@ impl Supervisor<'_> {
                                 "error": format!("{error:#}"),
                             }),
                         )?;
-                        self.hand_over_undelivered_answer(view, &workspace, ask.id)?;
+                        self.hand_over_undelivered_answer(env, view, &workspace, ask.id)?;
                     }
                 }
             }
-            PlannerAnswerRoute::NewPlanner
-                if *runtime_open < self.claim.limits.runtime_planners.value =>
-            {
-                if let Some(workspace) = self.start_finding_planner(finding, Some(ask), 0)? {
+            PlannerAnswerRoute::NewPlanner if *runtime_open < env.runtime_planners => {
+                if let Some(workspace) = self.start_finding_planner(env, finding, Some(ask), 0)? {
                     *runtime_open += 1;
-                    self.queue.ask_delivered(ask.id, &workspace)?;
+                    env.queue.ask_delivered(ask.id, &workspace)?;
                 }
             }
             // At the limit: the answer waits for a planner to end.
             PlannerAnswerRoute::NewPlanner => {}
             PlannerAnswerRoute::Close => {
-                self.queue.close_planner_answer(
+                env.queue.close_planner_answer(
                     ask.id,
                     "its finding moved on and no planner of the runtime's works on it",
                 )?;
@@ -158,17 +164,21 @@ impl Supervisor<'_> {
     /// Open a planner for each finding waiting for one, the oldest mark
     /// first, while the runtime's planners are below the limit and the
     /// improvements running below theirs (ADR-0051 decision 25).
-    pub(super) fn open_finding_planners(&mut self, runtime_open: &mut usize) -> Result<()> {
-        let findings = self.queue.planner_findings()?;
+    pub(super) fn open_finding_planners(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        runtime_open: &mut usize,
+    ) -> Result<()> {
+        let findings = env.queue.planner_findings()?;
         if findings.is_empty() {
             return Ok(());
         }
         let limit = self.max_improvement_proposals();
         for finding in findings {
-            if *runtime_open >= self.claim.limits.runtime_planners.value {
+            if *runtime_open >= env.runtime_planners {
                 break;
             }
-            match self.start_finding_planner(finding.id, None, limit) {
+            match self.start_finding_planner(env, finding.id, None, limit) {
                 Ok(Some(_)) => *runtime_open += 1,
                 Ok(None) => {}
                 Err(error) if error.is::<ImprovementsAtLimit>() => {
@@ -201,11 +211,12 @@ impl Supervisor<'_> {
     /// `limit` is ignored when the planner carries `answer`.
     fn start_finding_planner(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         finding: FindingId,
         answer: Option<&Ask>,
         limit: usize,
     ) -> Result<Option<String>> {
-        let (planner, attempt) = match self.queue.open_finding_planner(
+        let (planner, attempt) = match env.queue.open_finding_planner(
             finding,
             answer.map(|ask| ask.id),
             limit,
@@ -224,16 +235,16 @@ impl Supervisor<'_> {
                 planner, attempt, ..
             } => (planner, attempt),
         };
-        let prompt = match self.finding_planner_material(finding, attempt, answer) {
+        let prompt = match self.finding_planner_material(env, finding, attempt, answer) {
             Ok(prompt) => prompt,
             Err(error) => {
-                self.queue
+                env.queue
                     .close_planner(planner.id, Some(&format!("{error:#}")))?;
                 return Err(error);
             }
         };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(), *planner, ("finding", &prompt))?;
+        let opened = open_draft_planner(&self.planner_launch(env), *planner, ("finding", &prompt))?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
         info!("finding {finding}: opened planner {id} {attempt} in workspace {workspace}");
         Ok(Some(workspace))
@@ -243,19 +254,20 @@ impl Supervisor<'_> {
     /// it is now.
     fn finding_planner_material(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         finding: FindingId,
         attempt: usize,
         answer: Option<&Ask>,
     ) -> Result<FittedPrompt> {
-        let view = self.queue.finding_view(finding)?;
-        let asks = self.queue.finding_asks(finding)?;
+        let view = env.queue.finding_view(finding)?;
+        let asks = env.queue.finding_asks(finding)?;
         let goal_id: Option<GoalId> = match (view.finding.goal_id, view.finding.task_id) {
             (Some(goal), _) => Some(goal),
-            (None, Some(task)) => self.queue.show(task)?.task.goal_id(),
+            (None, Some(task)) => env.queue.show(task)?.task.goal_id(),
             (None, None) => None,
         };
         let goal = match goal_id {
-            Some(id) => Some(self.queue.show_goal(id)?),
+            Some(id) => Some(env.queue.show_goal(id)?),
             None => None,
         };
         let siblings: Vec<_> = goal
@@ -266,11 +278,11 @@ impl Supervisor<'_> {
         // What the planner that asked left as it ended for the answer alone
         // (ADR-t1704-1 decision 3).
         let handover = match answer {
-            Some(ask) => self.queue.planner_handover(ask.id)?,
+            Some(ask) => env.queue.planner_handover(ask.id)?,
             None => None,
         };
         finding_planner_prompt(&FindingPlannerMaterial {
-            db: &self.layout.db,
+            db: &env.layout.db,
             finding: &view,
             attempt,
             asks: &asks,

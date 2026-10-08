@@ -107,6 +107,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 - 上の表の読み取り`PlanningRecords`を全てのcontextに公開する。
 - `TaskStore::claim`（と`RunTransitions::claim_for_supervisor_in_order`）は実行と着地だけに公開し、T1として扱う。
 - `DraftPlannerStore::register_follow_ups`を実行と着地に公開する（T7）。
+- 引き継ぎのreviewの止めと打ち切り（`PlanningState`）とconflictのhotspotを実行と着地に公開する。
 - `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・`RequestStore`・残りの`DraftPlannerStore`と`TaskStore`の書き込みは内部。
 
 **許す依存の向き**
@@ -143,7 +144,8 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - 着地先のbranchの解決（`Repository::landing_branch`）を観測と分析のCIの見張りに公開する。
   解決できなければ見張りは確かめず着地先の保留に任せる。
 - `application::inherit`の`InheritStore`・`CarriedBranches`を計画管理の`ready --inherit`に公開する（T10）。
-- `RunCoordination`の読み取りを全てのcontextに、`release_lease`をhost運用の引き継ぎに公開する。
+- `RunCoordination`の読み取りを全てのcontextに公開する。
+- 計画管理に`JobDesk`と`DeferWatch`の見込みのファイルを、host運用のsweepにwrapperの停止を公開する。
 - `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`の残りは内部。
 
 **許す依存の向き**
@@ -181,7 +183,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - timerのjob（observer・スループットの見直し）の使えなかった終わりを型付きの値（`throughput_review::UnusableFinish`・`observer::UnusableTimerJob`）で実行と着地に公開する。
   控えるのは実行と着地の`supervise::provider`で、同じ終わりを1回だけ控える（[Provider lifecycle](provider-lifecycle.md)）。
 - `watch`の`AskNotifier`を所有し、実装`application::watch::InboxNotifier`は実行と着地の`SessionRegistry::session_workspace`でinboxのworkspaceを読み、host運用の`WorkspaceBackend::notify`で送る。
-- KPIのpushの待ちと行き先（`queue_pushes`・`reports`）をhost運用の`inbox_nudge`に公開する。
+- KPIのpushの行き先（`reports`）をhost運用の`inbox_nudge`に公開する。
 - `ObserverLog`・`EventReads`は内部。
 
 **許す依存の向き**
@@ -241,18 +243,17 @@ contextを1つに決められず、分ける先を持つもの。
 
 | module | 混ざっているcontext | 分ける先 |
 | --- | --- | --- |
-| `src/application/supervise/mod.rs`の`Supervisor` | 計画管理の欄と、実行と着地・host運用の残りの欄を持つ（C3） | contextごとに分ける |
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
 | `application::prompt` | workerのprompt（実行と着地）、inbox・plannerのprompt（計画管理）、observerとスループットの見直しのprompt（観測と分析） | 未登録（follow_up） |
 | `application::health` | `status`・`doctor`とattention（観測と分析）、`recover`（実行と着地）、`doctor`のhostの部分（host運用） | 未登録（follow_up） |
 
 ## `Supervisor`の状態
 
-観測と分析とhost運用の更新・disk・後始末などは`contexts`の`ObservationState`・`HostOpsState`が持ち、そのcontextのpassだけが変える。
-passは自分の状態と`PassEnv`と値を取り、ループは呼び出しと結果を適用するだけ。
-実行と着地は`stages`の工程ごとの状態と`E2eWaits`が持ち、工程のsubmoduleとループが変える。
-slotの集まりは`SlotTable`だけが変え、各工程と引き継ぎはその操作を呼ぶ。
-host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の遷移・工程をまたぐ欄は`Supervisor`に残る。
+計画管理・観測と分析・host運用の状態は`contexts`の`PlanningState`・`ObservationState`・`HostOpsState`が持ち、そのpassだけが変える。
+passは自分の状態と`PassEnv`（計画管理は`PlanningEnv`）と値を取り、ループは呼んで結果を適用するだけ。
+host運用の登録と引き継ぎは`handoff::Registration`が持ち、その操作とループが変える。
+実行と着地は`stages`の工程ごとの状態と`E2eWaits`が持ち、工程のsubmoduleとループが変える（slotの集まりは`SlotTable`の操作だけ）。
+`Supervisor`に残るのはslotの`Phase`の遷移・工程をまたぐ欄と、どのcontextも読むだけの接続・時計・adapter。
 
 ## 境界をまたぐtransaction
 
@@ -369,7 +370,6 @@ reviewで見る規則の行は、行き先をこの表の言葉で書く。
 | --- | --- | --- | --- |
 | L5 | `src/application`の`Instant::now` | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | 許可の一覧の項目 |
-| C3 | `Supervisor`と、`impl Supervisor`を持つ`supervise/`のsubmodule | submoduleが他のcontextの欄を変える | 残りの欄の分割 |
 | C4 | `Box<dyn Queue>`などを取るuse case（`application::lifecycle`・`health`・`supervise`ほか） | 要るportだけを取っていない | portの分割 |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | portの分割 |
 | C5 | `src/application/health.rs`の`attention`（`status`が呼ぶ）の`planner_question`のaskの分岐 | 観測と分析が計画管理の内部の`DraftPlannerStore::planner_answer_route`を読む | portの分割 |

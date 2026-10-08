@@ -6,11 +6,13 @@
 //! of one of two kinds ([`JobKind`], ADR-t1895-1 decision 1), an agent's
 //! session or a program's process, and both go the one way here: start,
 //! record, wait under the kind's timeout, stop with what the job started,
-//! and take over.
+//! and take over. [`JobDesk`] lends the agents, the record of a job and
+//! the providers' holds to 計画管理's jobs.
 
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::headless_job::{JobFailure, JobKind, JobStop};
+use crate::domain::provider_switch::SwitchReason;
 use crate::{
     application::{Clock, CommandSpec, HeadlessJobRecord, HeadlessJobStore, NewHeadlessJob},
     domain::headless_job::{Takeover, takeover},
@@ -389,15 +391,25 @@ impl HeadlessJob {
     }
 }
 
+/// The agent that starts and reads the headless jobs of `provider`: the
+/// reviewer for Claude (none under `--no-claude`), the Codex this
+/// supervisor found for Codex (`None` without one).
+pub(super) fn job_agent_of<'a>(
+    provider: Provider,
+    no_claude: bool,
+    reviewer: &'a dyn AgentProvider,
+    codex_jobs: Option<&'a dyn AgentProvider>,
+) -> Option<&'a dyn AgentProvider> {
+    match provider {
+        Provider::Claude => (!no_claude).then_some(reviewer),
+        Provider::Codex => codex_jobs,
+    }
+}
+
 impl<'a> Supervisor<'a> {
-    /// The agent that starts and reads the headless jobs of `provider`:
-    /// the reviewer for Claude, the Codex this supervisor found for Codex
-    /// (`None` without one).
+    /// [`job_agent_of`] on this supervisor's agents.
     pub(super) fn job_agent(&self, provider: Provider) -> Option<&'a dyn AgentProvider> {
-        match provider {
-            Provider::Claude => (!self.no_claude).then_some(self.reviewer),
-            Provider::Codex => self.codex_jobs,
-        }
+        job_agent_of(provider, self.no_claude, self.reviewer, self.codex_jobs)
     }
 }
 
@@ -431,13 +443,338 @@ fn started_at_ms(clock: &dyn crate::application::Clock) -> Option<i64> {
         .and_then(|since| i64::try_from(since.as_millis()).ok())
 }
 
+/// The timeout of a job of the review stage's `stage` kind (`None` outside
+/// the stage), from `[review.jobs]` (`review_jobs`) and the review timeouts
+/// of its provider's agent (`agent`, the reviewer's without one) and of the
+/// reviewer.
+fn timeout_of(
+    review_jobs: &crate::domain::headless_job::JobTimeouts,
+    reviewer: &dyn AgentProvider,
+    agent: Option<&dyn AgentProvider>,
+    stage: Option<JobKind>,
+) -> Duration {
+    let reviewer = reviewer.review_timeout();
+    let provider = agent.map_or(reviewer, |agent| agent.review_timeout());
+    review_jobs.job_timeout(stage, provider, reviewer)
+}
+
+/// 実行と着地's headless jobs and providers, lent to a context that starts
+/// a headless job of its own (計画管理's plan and goal reviews and its
+/// planners): the agents that run a job, the record of its process and its
+/// timeout, why a provider cannot be used, and the holds a job that failed
+/// raises. The holds are 実行と着地's state: only these operations change
+/// them.
+pub(super) struct JobDesk<'s> {
+    pub(super) reviewer: &'s dyn AgentProvider,
+    pub(super) codex_jobs: Option<&'s dyn AgentProvider>,
+    pub(super) signals: &'s dyn AgentSignals,
+    pub(super) service_access: &'s dyn crate::application::queue_service::ServiceAccess,
+    pub(super) no_claude: bool,
+    pub(super) job_ends: &'s JobEnds,
+    /// `[review.jobs]` as read at the start.
+    pub(super) review_jobs: crate::domain::headless_job::JobTimeouts,
+    pub(super) provider: &'s mut stages::ProviderState,
+    pub(super) queue_hold: &'s mut Option<claim_hold::QueueHold>,
+}
+
+impl<'s> JobDesk<'s> {
+    /// [`job_agent_of`] on the supervisor's agents.
+    pub(super) fn job_agent(&self, provider: Provider) -> Option<&'s dyn AgentProvider> {
+        job_agent_of(provider, self.no_claude, self.reviewer, self.codex_jobs)
+    }
+
+    /// Whether the queue's open authentication or usage-limit ask holds
+    /// the jobs (task 437).
+    pub(super) const fn held(&self) -> bool {
+        self.queue_hold.is_some()
+    }
+
+    /// `[provider_fallback] jobs` as last read (ADR-t1857-1).
+    pub(super) const fn fallback_jobs(&self) -> bool {
+        self.provider.fallback.jobs
+    }
+
+    /// Why `provider` is held now ([`provider_held_of`]).
+    pub(super) fn provider_held(&self, provider: Provider) -> Option<SwitchReason> {
+        provider_held_of(
+            provider,
+            self.no_claude,
+            self.queue_hold
+                .and_then(|hold| SwitchReason::of_hold(hold.reason)),
+            crate::domain::provider_switch::own_hold(&self.provider.holds, provider),
+        )
+    }
+
+    /// Why a headless job cannot start on `provider` now
+    /// ([`job_unusable_of`]).
+    pub(super) fn job_unusable(&self, provider: Provider) -> Option<SwitchReason> {
+        job_unusable_of(
+            self.provider_held(provider),
+            self.job_agent(provider).is_some(),
+        )
+    }
+
+    /// The actor executor that starts a job on `agent`.
+    pub(super) fn actors_on<'e>(
+        &'e self,
+        env: &'e PassEnv<'_>,
+        agent: &'e dyn AgentProvider,
+    ) -> HostActorExecutor<'e> {
+        HostActorExecutor::new(&env.layout.db)
+            .with_no_claude(self.no_claude)
+            .with_sessions(env.sessions)
+            .with_provider(agent)
+            .with_spawner(env.spawner)
+            .with_queue_service(self.service_access)
+            .with_events(&*env.queue)
+    }
+
+    /// The job whose process `child` just started ([`record_job`]), under
+    /// its timeout (`[review.jobs]` and its provider's review timeout).
+    pub(super) fn headless_job(
+        &self,
+        env: &mut PassEnv<'_>,
+        what: &'static str,
+        child: Box<dyn Spawned>,
+        stdout: PathBuf,
+        stderr: PathBuf,
+        subject: JobSubject,
+    ) -> HeadlessJob {
+        let timeout = timeout_of(
+            &self.review_jobs,
+            self.reviewer,
+            self.job_agent(subject.provider),
+            subject.review_stage.then_some(subject.job),
+        );
+        let ports = JobPorts {
+            store: &*env.queue,
+            processes: env.processes.clone(),
+            supervisor_token: env.token,
+            clock: &*env.generators.clock,
+            ends: self.job_ends,
+        };
+        record_job(&ports, what, child, (stdout, stderr), subject, timeout)
+    }
+
+    /// Why `job` failed ([`job_failure_of`]).
+    pub(super) fn job_failure(&self, files: &dyn RunFiles, job: &HeadlessJob) -> JobFailure {
+        match job.failure_reader() {
+            None => JobFailure::Other,
+            Some(provider) => job_failure_by(files, self.signals, self.job_agent(provider), job),
+        }
+    }
+
+    /// Raise a headless job that failed at `wall` (task 438): the job joins
+    /// the queue's open `authentication` ask (or usage-limit `cost` ask),
+    /// or opens it, listed in its `affected` next to the runs, and records
+    /// `auth_required` (or `usage_limited`) with `job` and its `entry` on
+    /// its run, or on the queue for a job with none. The hold takes effect
+    /// at once: no other headless job starts in this pass either. Its
+    /// failure is no attention while the ask is unclosed
+    /// ([`crate::domain::queue_hold::job_held`]). Whether it was raised: a
+    /// hold that could not be written is logged, and the caller records
+    /// the job's failure as any other.
+    pub(super) fn raise_job_wall(
+        &mut self,
+        env: &mut PassEnv<'_>,
+        wall: Wall,
+        job: &HoldJob,
+        error: &str,
+    ) -> bool {
+        match self.hold_job(env, wall, job, error) {
+            Ok(()) => true,
+            Err(hold_error) => {
+                warn!(error = %format_args!("{hold_error:#}"), "the headless {} stopped at the {} wall, and its hold ask could not be written: {hold_error:#}", job.entry(), wall.as_str());
+                false
+            }
+        }
+    }
+
+    fn hold_job(
+        &mut self,
+        env: &mut PassEnv<'_>,
+        wall: Wall,
+        job: &HoldJob,
+        error: &str,
+    ) -> Result<()> {
+        let run = job.run_id().cloned();
+        let (outcome, _) = ask::hold(
+            &mut *env.queue,
+            NewHold::wall(wall, run.clone(), Some(job.clone())),
+        )?;
+        if outcome.joined {
+            let payload = json!({
+                "job": job.kind(),
+                "entry": job.entry(),
+                "error": tail(error, 500),
+                "ask_id": outcome.ask.id,
+            });
+            match &run {
+                Some(run) => env
+                    .queue
+                    .record_runtime_event(run, wall.event_kind(), payload)?,
+                None => {
+                    env.queue.record_queue_event(wall.event_kind(), payload)?;
+                }
+            }
+        }
+        if self.queue_hold.is_none() {
+            *self.queue_hold = crate::domain::queue_hold::hold_of(&outcome.ask);
+        }
+        warn!(ask_id = %outcome.ask.id, "the headless {} stopped at the {} wall: ask {} holds {} run(s) and job(s)", job.entry(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len());
+        Ok(())
+    }
+
+    /// A headless job of `provider` that failed with `failure` (its start
+    /// or its output): Claude's login or usage limit raises the queue's
+    /// hold ask as before (task 438), and, for a role that names its
+    /// provider (`switchable`), a provider that cannot be used for another
+    /// reason is held like a worker's (Codex's walls and any agent that
+    /// did not start, ADR-t1063-1 decision 5). The provider and why, when
+    /// the job moves to the other provider (ADR-t1063-1 decision 4), or,
+    /// with `[provider_fallback] jobs` off, waits for this one to be
+    /// usable again (ADR-t1857-1).
+    /// `error` is the job's failure, `said` it with the job's output,
+    /// which may say when a usage limit resets.
+    pub(super) fn job_provider_failed(
+        &mut self,
+        env: &mut PassEnv<'_>,
+        provider: Provider,
+        failure: JobFailure,
+        (error, said): (&str, &str),
+        job: &HoldJob,
+        switchable: bool,
+    ) -> Option<(Provider, SwitchReason)> {
+        let (wall, unusable) = job_failure_route(provider, failure, switchable);
+        if let Some(wall) = wall {
+            self.raise_job_wall(env, wall, job, error);
+        }
+        let (reason, hold) = unusable?;
+        if hold && let Err(held) = self.hold_provider(env, provider, reason, None, said) {
+            warn!(error = %format_args!("{held:#}"), "{} could not be held after the headless {} failed: {held:#}", provider.as_str(), job.entry());
+        }
+        Some((provider, reason))
+    }
+}
+
+/// Why `job` failed, read by `agent` (the provider it ran on, when this
+/// supervisor has it) for Codex or by Claude Code's `signals` otherwise.
+fn job_failure_by(
+    files: &dyn RunFiles,
+    signals: &dyn AgentSignals,
+    agent: Option<&dyn AgentProvider>,
+    job: &HeadlessJob,
+) -> JobFailure {
+    match (job.provider, agent) {
+        (Provider::Codex, Some(agent)) => {
+            let read = |path: &Path| files.read_to_string(path).unwrap_or_default();
+            agent.job_failure(&read(&job.stdout), &read(&job.stderr))
+        }
+        _ => signals.job_failure(&job.output(files)),
+    }
+}
+
+/// Why a headless job cannot start on a provider `held` for that reason,
+/// if it is, and whose agent this supervisor has (`has_agent`): its hold,
+/// else no agent for it (no Codex found that runs).
+pub(super) fn job_unusable_of(held: Option<SwitchReason>, has_agent: bool) -> Option<SwitchReason> {
+    held.or((!has_agent).then_some(SwitchReason::ExecutableMissing))
+}
+
+/// Where a job whose `provider` could not be used is started again, as a
+/// log line says it: on the other provider, or, with `[provider_fallback]
+/// jobs` off (`fallback` false), on `provider` once its hold ends
+/// (ADR-t1857-1).
+pub(super) fn again_on(fallback: bool, provider: Provider) -> String {
+    if fallback {
+        "on the other provider".to_owned()
+    } else {
+        format!(
+            "on {} once its hold ends ([provider_fallback] jobs is false)",
+            provider.as_str()
+        )
+    }
+}
+
+/// What a headless job of `provider` that failed with `failure` leads to
+/// (task 438, ADR-t1063-1 decisions 4 and 5): the wall Claude's job raises
+/// the queue's hold ask for, and, for a role that names its provider
+/// (`switchable`), why `provider` cannot be used and whether it is held for
+/// that (not when the hold ask holds it already). `[provider_fallback] jobs`
+/// (ADR-t1857-1) does not change either: whether the job moves to the other
+/// provider or waits for `provider` is the caller's route.
+pub(super) fn job_failure_route(
+    provider: Provider,
+    failure: JobFailure,
+    switchable: bool,
+) -> (Option<Wall>, Option<(SwitchReason, bool)>) {
+    let wall = failure.wall().filter(|_| provider == Provider::Claude);
+    let unusable = failure
+        .switch_reason()
+        .filter(|_| switchable)
+        .map(|reason| (reason, wall.is_none()));
+    (wall, unusable)
+}
+
 impl Supervisor<'_> {
+    /// The loop's shared parts with 実行と着地's jobs and providers
+    /// ([`JobDesk`]), borrowed apart.
+    pub(super) fn job_desk(&mut self) -> (PassEnv<'_>, JobDesk<'_>) {
+        (
+            PassEnv {
+                queue: &mut *self.queue,
+                queues: &self.queues,
+                generators: &self.generators,
+                layout: self.layout,
+                processes: &self.processes,
+                files: &self.files,
+                repository: &self.repository,
+                verifier: &self.verifier,
+                spawner: self.spawner,
+                sessions: self.sessions,
+                token: &self.registration.token,
+            },
+            JobDesk {
+                reviewer: self.reviewer,
+                codex_jobs: self.codex_jobs,
+                signals: self.signals,
+                service_access: self.service_access,
+                no_claude: self.no_claude,
+                job_ends: &self.job_ends,
+                review_jobs: self.review_jobs,
+                provider: &mut self.provider,
+                queue_hold: &mut self.queue_hold,
+            },
+        )
+    }
+
+    /// [`JobDesk::job_unusable`].
+    pub(super) fn job_unusable(&self, provider: Provider) -> Option<SwitchReason> {
+        job_unusable_of(
+            self.provider_held(provider),
+            self.job_agent(provider).is_some(),
+        )
+    }
+
+    /// [`JobDesk::job_provider_failed`].
+    pub(super) fn job_provider_failed(
+        &mut self,
+        provider: Provider,
+        failure: JobFailure,
+        said: (&str, &str),
+        job: &HoldJob,
+        switchable: bool,
+    ) -> Option<(Provider, SwitchReason)> {
+        let (mut env, mut jobs) = self.job_desk();
+        jobs.job_provider_failed(&mut env, provider, failure, said, job, switchable)
+    }
+
     /// The ports this supervisor's jobs start through ([`JobPorts`]).
     fn job_ports(&self) -> JobPorts<'_> {
         JobPorts {
             store: &*self.queue,
             processes: self.processes.clone(),
-            supervisor_token: &self.token,
+            supervisor_token: &self.registration.token,
             clock: &*self.generators.clock,
             ends: &self.job_ends,
         }
@@ -483,11 +820,12 @@ impl Supervisor<'_> {
     /// outside the stage) on `provider`, from `[review.jobs]` and the
     /// review timeouts of `provider`'s agent and of the reviewer.
     fn timeout_of(&self, stage: Option<JobKind>, provider: Provider) -> Duration {
-        let reviewer = self.reviewer.review_timeout();
-        let provider = self
-            .job_agent(provider)
-            .map_or(reviewer, |agent| agent.review_timeout());
-        self.review_jobs.job_timeout(stage, provider, reviewer)
+        timeout_of(
+            &self.review_jobs,
+            self.reviewer,
+            self.job_agent(provider),
+            stage,
+        )
     }
 
     /// Why a headless job failed, in the classes shared by every provider
@@ -495,15 +833,11 @@ impl Supervisor<'_> {
     /// output: Claude Code's by its signals (task 438), another's by its
     /// agent.
     pub(super) fn job_failure(&self, job: &HeadlessJob) -> JobFailure {
-        let Some(provider) = job.failure_reader() else {
-            return JobFailure::Other;
-        };
-        match (provider, self.job_agent(provider)) {
-            (Provider::Codex, Some(agent)) => {
-                let read = |path: &Path| self.files.read_to_string(path).unwrap_or_default();
-                agent.job_failure(&read(&job.stdout), &read(&job.stderr))
+        match job.failure_reader() {
+            None => JobFailure::Other,
+            Some(provider) => {
+                job_failure_by(&*self.files, self.signals, self.job_agent(provider), job)
             }
-            _ => self.signals.job_failure(&job.output(&*self.files)),
         }
     }
 
@@ -518,53 +852,10 @@ impl Supervisor<'_> {
             .filter(|_| job.provider == Provider::Claude)
     }
 
-    /// Raise a headless job that failed at `wall` (task 438): the job joins
-    /// the queue's open `authentication` ask (or usage-limit `cost` ask),
-    /// or opens it, listed in its `affected` next to the runs, and records
-    /// `auth_required` (or `usage_limited`) with `job` and its `entry` on
-    /// its run, or on the queue for a job with none. The hold takes effect
-    /// at once: no other headless job starts in this pass either. Its
-    /// failure is no attention while the ask is unclosed
-    /// ([`crate::domain::queue_hold::job_held`]). Whether it was raised: a
-    /// hold that could not be written is logged, and the caller records
-    /// the job's failure as any other.
+    /// [`JobDesk::raise_job_wall`].
     pub(super) fn raise_job_wall(&mut self, wall: Wall, job: &HoldJob, error: &str) -> bool {
-        match self.hold_job(wall, job, error) {
-            Ok(()) => true,
-            Err(hold_error) => {
-                warn!(error = %format_args!("{hold_error:#}"), "the headless {} stopped at the {} wall, and its hold ask could not be written: {hold_error:#}", job.entry(), wall.as_str());
-                false
-            }
-        }
-    }
-
-    fn hold_job(&mut self, wall: Wall, job: &HoldJob, error: &str) -> Result<()> {
-        let run = job.run_id().cloned();
-        let (outcome, _) = ask::hold(
-            &mut *self.queue,
-            NewHold::wall(wall, run.clone(), Some(job.clone())),
-        )?;
-        if outcome.joined {
-            let payload = json!({
-                "job": job.kind(),
-                "entry": job.entry(),
-                "error": tail(error, 500),
-                "ask_id": outcome.ask.id,
-            });
-            match &run {
-                Some(run) => self
-                    .queue
-                    .record_runtime_event(run, wall.event_kind(), payload)?,
-                None => {
-                    self.queue.record_queue_event(wall.event_kind(), payload)?;
-                }
-            }
-        }
-        if self.queue_hold.is_none() {
-            self.queue_hold = crate::domain::queue_hold::hold_of(&outcome.ask);
-        }
-        warn!(ask_id = %outcome.ask.id, "the headless {} stopped at the {} wall: ask {} holds {} run(s) and job(s)", job.entry(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len());
-        Ok(())
+        let (mut env, mut jobs) = self.job_desk();
+        jobs.raise_job_wall(&mut env, wall, job, error)
     }
 
     /// Write the ends of this process's jobs, then stop the jobs gone
@@ -574,7 +865,10 @@ impl Supervisor<'_> {
     pub(super) fn tend_headless_jobs(&mut self) {
         self.write_job_ends();
         let own = !self.jobs_swept;
-        let orphans = match self.queue.orphaned_headless_jobs(&self.token, own) {
+        let orphans = match self
+            .queue
+            .orphaned_headless_jobs(&self.registration.token, own)
+        {
             Ok(orphans) => orphans,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the headless jobs of gone supervisors could not be read: {error:#}");
@@ -610,7 +904,7 @@ impl Supervisor<'_> {
             .unwrap_or(self.reviewer);
         let stdout = self.files.read_to_string(&job.stdout).unwrap_or_default();
         let session = agent.job_session(&stdout, job.started_at);
-        let payload = abandoned_end(job, &self.token, session.as_ref());
+        let payload = abandoned_end(job, &self.registration.token, session.as_ref());
         let recorded = match &job.subject.run_id {
             Some(run) => {
                 self.queue

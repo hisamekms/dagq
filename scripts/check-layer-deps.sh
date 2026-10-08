@@ -8,10 +8,12 @@
 # (.config/layer-deps-allow.txt); the details of what counts are here.
 #
 # C3 counts in the files of $c3_files under src/application/supervise/ (the
-# submodules that own 観測と分析's and host運用's state): a reference to the
-# loop's struct `Supervisor` or its `Slot` and `Phase`, or to the module
-# `stages`, its states or the e2e's `E2eWaits`, through which the state of
-# 実行と着地 is reached, is forbidden there, inside tests too. It also counts in the
+# submodules that own 計画管理's, 観測と分析's and host運用's state): a
+# reference to the loop's struct `Supervisor` or its `Slot` and `Phase`, or
+# to the module `stages`, its states or the e2e's `E2eWaits`, through which
+# the state of 実行と着地 is reached, is forbidden there, inside tests too.
+# 実行と着地 lends its jobs and providers to 計画管理 through `JobDesk`,
+# whose operations change them. It also counts in the
 # files of $c3_stage_files (実行と着地's state by stage): a reference to
 # `Supervisor` or to the module `contexts` or its states (the other
 # contexts' state and the pass's view of the loop) is forbidden there.
@@ -90,7 +92,7 @@ set -eu
 
 me=check-layer-deps
 # The submodules of src/application/supervise/ that rule C3 is checked on.
-c3_files="contexts ci_watch forecast observer push report throughput_review cleanup disk host_metrics queue_service release sccache update"
+c3_files="contexts ci_watch forecast observer push report throughput_review cleanup disk host_metrics queue_service release sccache update sweep handoff inbox_nudge plan_review goal_review request_planner draft_planner finding_planner planner_turns"
 # Rule C8: each port module of src/application/ports/ and the modules it may
 # name, "module:allowed,allowed"; a port module not listed may name none.
 c8_ok="planning:shared execution:shared host:shared observation:shared,planning,execution,host shared:planning,execution,observation,host"

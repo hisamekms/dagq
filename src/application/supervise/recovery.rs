@@ -844,7 +844,7 @@ impl RecoveryWatch {
         sv.queue
             .record_runtime_event(run.id(), EventKind::RecoveryFinished, finished)?;
         let next = end.unusable.map_or_else(String::new, |(provider, _)| {
-            super::goal_review::again_on(sv.provider.fallback.jobs, provider)
+            again_on(sv.provider.fallback.jobs, provider)
         });
         warn!(run_id = %run.id(), "run {}: recovery job {attempt} of {} failed: {error}; its provider cannot be used, and the next job starts {next}", run.id(), alert.as_str());
         Ok(())

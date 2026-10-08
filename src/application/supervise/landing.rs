@@ -153,7 +153,7 @@ impl Supervisor<'_> {
         let common_dir = path_text(&self.layout.common_dir)?;
         let push = RunHistory::from_events(&self.queue.run_events(run.id())?).landing_pushes();
         let generators = self.generators.clone();
-        let load_average = self.load_average;
+        let load_average = self.host.load_average;
         let (disk_config, free_space) = (self.host.disk_config, self.host.free_space);
         let runs_dir = self.layout.runs_dir.clone();
         let db = self.layout.db.clone();
@@ -163,7 +163,7 @@ impl Supervisor<'_> {
             run,
             previous,
             main,
-            token: self.token.clone(),
+            token: self.registration.token.clone(),
         };
         let integrator = Integrator::of_process(pid);
         Ok(spawn_traced(move || {
@@ -1161,7 +1161,12 @@ impl Supervisor<'_> {
     pub(super) fn close_session(&mut self, run: &TaskRun, session: &SessionRef) -> Result<TaskRun> {
         match session.resume {
             None if run.workspace_closed_at().is_none() && run.workspace_id().is_some() => {
-                close_workspace(&mut *self.queue, self.sessions, &self.token, run)
+                close_workspace(
+                    &mut *self.queue,
+                    self.sessions,
+                    &self.registration.token,
+                    run,
+                )
             }
             None => Ok(run.clone()),
             Some(attempt) => {
@@ -1380,7 +1385,9 @@ impl Supervisor<'_> {
         // A run that still needs its e2e (ADR-t1233-2) runs it in a slot
         // of its own first, and lands from there.
         let Some(main) = main else {
-            let leased = self.queue.lease_for_e2e(run.id(), &self.token)?;
+            let leased = self
+                .queue
+                .lease_for_e2e(run.id(), &self.registration.token)?;
             drop(guard);
             if let Some(run) = leased {
                 info!(run_id = %run.id(), "run {} runs its e2e before it lands as queued", run.id());
@@ -1392,7 +1399,9 @@ impl Supervisor<'_> {
             }
             return Ok(());
         };
-        let landing = self.queue.begin_integration(run.id(), &self.token, &main)?;
+        let landing = self
+            .queue
+            .begin_integration(run.id(), &self.registration.token, &main)?;
         drop(guard);
         info!(run_id = %run.id(), "run {} lands onto main {main} as queued", run.id());
         let handle = self.spawn_landing(landing.clone(), RunStatus::AwaitingIntegration, main)?;
@@ -1436,7 +1445,9 @@ impl Supervisor<'_> {
                 self.host.cleanup.defer();
                 continue;
             }
-            let leased = self.queue.lease_for_review(run.id(), &self.token)?;
+            let leased = self
+                .queue
+                .lease_for_review(run.id(), &self.registration.token)?;
             drop(guard);
             let Some(run) = leased else {
                 continue;
@@ -1519,8 +1530,8 @@ impl Supervisor<'_> {
                 self.queue.transition(run.task_id(), TaskAction::Cancel)?;
                 self.queue.close_ask(ask_id)?;
                 info!(run_id = %run.id(), task_id = %run.task_id(), "run {} failed and task {} was canceled by ask {ask_id}", run.id(), run.task_id());
-                self.close_ended_landing_asks(Some(run.task_id()));
-                self.clean_task_worktrees(run.task_id());
+                close_ended_landing_asks(&mut *self.queue, Some(run.task_id()));
+                self.request_cleanup(Some(run.task_id()));
             }
         }
         Ok(())

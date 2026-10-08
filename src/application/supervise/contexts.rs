@@ -1,15 +1,16 @@
-//! The state of the supervisor's 観測と分析 and host運用 contexts, apart
-//! from the loop's (docs/design/architecture.md, "`Supervisor`の状態").
-//! Each context's submodules change only their own state: their passes
-//! take it with a [`PassEnv`] and the values the loop reads for them (the
-//! clock, whether it drains or hands off, the runs its slots hold), and
-//! the loop calls them and applies what they return.
+//! The state of the supervisor's 計画管理, 観測と分析 and host運用
+//! contexts, apart from the loop's (docs/design/architecture.md,
+//! "`Supervisor`の状態"). Each context's submodules change only their own
+//! state: their passes take it with a [`PassEnv`] (計画管理's with a
+//! [`PlanningEnv`]) and the values the loop reads for them (the clock,
+//! whether it drains or hands off, the runs its slots hold), and the loop
+//! calls them and applies what they return.
 
 use super::*;
 
-/// What a pass of 観測と分析 or host運用 reads and calls of the loop: the
-/// parts every context shares (the queue, the clock, the places) and the
-/// adapters, borrowed apart from the context's own state.
+/// What a pass of a context reads and calls of the loop: the parts every
+/// context shares (the queue, the clock, the places) and the adapters,
+/// borrowed apart from the context's own state.
 pub(super) struct PassEnv<'s> {
     pub(super) queue: &'s mut (dyn Queue + Send),
     pub(super) queues: &'s Arc<dyn QueueOpener>,
@@ -20,10 +21,39 @@ pub(super) struct PassEnv<'s> {
     pub(super) repository: &'s Arc<dyn Repository + Send + Sync>,
     pub(super) verifier: &'s Arc<dyn Verifier + Send + Sync>,
     pub(super) spawner: &'s dyn Spawner,
+    pub(super) sessions: &'s dyn SessionWrappers,
     pub(super) token: &'s LeaseToken,
 }
 
 impl PassEnv<'_> {
+    /// `[roles.*]` of `dagq.toml` as read now ([`role_models_of`]).
+    pub(super) fn role_models(
+        &self,
+        role: crate::domain::actor_model::ModelRole,
+    ) -> crate::domain::actor_model::RoleModels {
+        role_models_of(&**self.verifier, role)
+    }
+
+    /// What a session of `role` starts with, from `[roles.<role>]` as read
+    /// now (ADR-0079 decision 7).
+    pub(super) fn actor_launch(
+        &self,
+        role: crate::domain::actor_model::ModelRole,
+    ) -> crate::domain::actor_model::ActorLaunch {
+        self.role_models(role).launch(role)
+    }
+
+    /// Apply what the headless job `job` returned with the job as the
+    /// `requested_by` of the events written meanwhile (ADR-t728-1 decision
+    /// 1, task 730), put back afterwards (task 783).
+    pub(super) fn for_job<T>(
+        &mut self,
+        job: &ActorContext,
+        apply: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        requested_by_job(self, |env| &*env.queue, job, apply)
+    }
+
     /// Record `kinds`' held or resumed event when `hold` differs from the
     /// hold in place on the queue (task 327); whether it holds.
     pub(super) fn record_hold(
@@ -196,11 +226,11 @@ impl ObservationState {
 
 /// host運用's state: the queue service, the automatic update and the
 /// release update, the sccache server, the free disk space and the cleanup
-/// of what ended runs left, and the record of the host's load. The
-/// supervisor's registration, handoff, sweep and load limit stay on the
-/// loop. The claim
-/// and the landing read the disk's reading ([`HostOpsState::free`],
-/// [`disk::DiskWatch`]) and the sccache server's look.
+/// of what ended runs left, the sweep of their sessions, the record of the
+/// host's load and its limit. The supervisor's registration and handoff
+/// are [`handoff::Registration`]. The claim and the landing read the
+/// disk's reading ([`HostOpsState::free`], [`disk::DiskWatch`]), the
+/// sccache server's look and the load.
 pub(super) struct HostOpsState {
     /// Records the host's load; `None` records none (task 516).
     pub(super) host_metrics_port: Option<HostMetricsPort>,
@@ -235,6 +265,13 @@ pub(super) struct HostOpsState {
     pub(super) free: Option<u64>,
     /// The cleanup of ended runs' worktrees off the loop (task 405).
     pub(super) cleanup: cleanup::CleanupWatch,
+    /// The sweep of the session wrappers ended runs left running.
+    pub(super) sweep: sweep::SweepWatch,
+    /// `--max-load` (task 327).
+    pub(super) max_load: Option<f64>,
+    /// The 1-minute load average, and the host's versions a claim records.
+    pub(super) load_average: fn() -> Option<f64>,
+    pub(super) host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
 }
 
 impl HostOpsState {
@@ -256,6 +293,10 @@ impl HostOpsState {
             disk: disk::DiskWatch::default(),
             free: None,
             cleanup: cleanup::CleanupWatch::default(),
+            sweep: sweep::SweepWatch::default(),
+            max_load: settings.max_load,
+            load_average: ports.load_average,
+            host_versions: ports.host_versions,
         }
     }
 
@@ -263,5 +304,72 @@ impl HostOpsState {
     /// the sample of the host's load and the release look.
     pub(super) const fn handoff_waits(&self) -> bool {
         self.cleanup.running() || self.host_metrics.running() || self.release.running()
+    }
+}
+
+/// 計画管理's state: the plan review and the goal review running now (one
+/// each, queue-wide, outside the run slots), the runtime's planners asked
+/// to exit, and what opening a planner reads. Only its submodules change
+/// it, through their passes.
+pub(super) struct PlanningState {
+    /// The plan review job running now (ADR-0041 decision 11).
+    pub(super) plan_review: Option<plan_review::PlanReviewWatch>,
+    /// The goal review job running now.
+    pub(super) goal_review: Option<goal_review::GoalReviewWatch>,
+    /// The runtime's planners this process asked to exit (their exit
+    /// request), and when.
+    pub(super) planner_exits: Vec<(crate::domain::PlannerId, Instant)>,
+    /// Whether `[roles.runtime_planner] route`, which the runtime's
+    /// planners ignore, was warned of (ADR-t1433-2 decision 3).
+    pub(super) route_setting_warned: bool,
+    /// Reads the limit on the improvement proposals running.
+    pub(super) max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
+}
+
+impl PlanningState {
+    pub(super) fn new(ports: &Ports<'_>) -> Self {
+        Self {
+            plan_review: None,
+            goal_review: None,
+            planner_exits: Vec::new(),
+            route_setting_warned: false,
+            max_improvement_proposals: ports.max_improvement_proposals.clone(),
+        }
+    }
+
+    /// A plan or goal review runs, which a loop with no slot waits for
+    /// like a run.
+    pub(super) const fn busy(&self) -> bool {
+        self.plan_review.is_some() || self.goal_review.is_some()
+    }
+}
+
+/// What a pass of 計画管理 reads and calls apart from its own state: the
+/// loop's shared parts ([`PassEnv`], which it derefs to), 実行と着地's
+/// headless jobs and providers ([`JobDesk`]) and the expected files of the
+/// claim's deferral (a plan review's material), and the values the loop
+/// reads for it: the limit on the runtime's planners, the `[conflicts]`
+/// thresholds and the limits of a headless turn.
+pub(super) struct PlanningEnv<'s> {
+    pub(super) pass: PassEnv<'s>,
+    pub(super) jobs: JobDesk<'s>,
+    pub(super) defer: &'s mut claim_defer::DeferWatch,
+    /// `runtime_planners` of `[supervisor]` as last read.
+    pub(super) runtime_planners: usize,
+    pub(super) conflicts: crate::domain::stats::ConflictConfigReport,
+    pub(super) turn_limits: crate::domain::turn::TurnLimits,
+}
+
+impl<'s> std::ops::Deref for PlanningEnv<'s> {
+    type Target = PassEnv<'s>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pass
+    }
+}
+
+impl std::ops::DerefMut for PlanningEnv<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.pass
     }
 }

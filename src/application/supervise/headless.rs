@@ -120,48 +120,47 @@ pub(crate) fn write_request(
     Ok(seq)
 }
 
-impl Supervisor<'_> {
-    /// Send `input` (`what` names it) to the planner of `view` in
-    /// `workspace`: a headless planner, every planner of the runtime's
-    /// (ADR-t1394-2 decision 2, ADR-t1433-2 decision 3), gets it written as
-    /// its next request in its directory's `turns/`, recorded as
-    /// `turn_requested` naming it, and the exit as its exit request. Nothing
-    /// is typed into a planner: a row in a cmux workspace (one of the
-    /// runtime's an older binary opened, or a person's, ADR-t1433-2
-    /// decision 5) is refused.
-    pub(super) fn send_to_planner(
-        &mut self,
-        view: &PlannerView,
-        workspace: &str,
-        input: Input<'_>,
-        what: &str,
-    ) -> Result<()> {
-        anyhow::ensure!(
-            view.planner.route == PlannerRoute::Headless,
-            "planner {} was opened in a workspace: nothing is typed into it",
-            view.planner.id
-        );
-        let id = view.planner.id;
-        let text = match input {
-            Input::Exit => {
-                self.files.create_dir_all(&turns_dir(&view.dir))?;
-                self.files.write(&exit_path(&view.dir), b"")?;
-                info!("exit requested of the headless planner {id}");
-                return Ok(());
-            }
-            Input::Text(text) | Input::Prompt { text, .. } => text,
-        };
-        let seq = write_request(&*self.files, &view.dir, text, what)?;
-        // Written: a record that fails is only noted, as for a typed text.
-        if let Err(error) = self.queue.record_queue_event(
-            EventKind::TurnRequested,
-            json!({"planner_id": id, "seq": seq, "what": what, "workspace_id": workspace}),
-        ) {
-            warn!(error = %format_args!("{error:#}"), "turn_requested of planner {id} could not be recorded: {error:#}");
+/// Send `input` (`what` names it) to the planner of `view` in
+/// `workspace`: a headless planner, every planner of the runtime's
+/// (ADR-t1394-2 decision 2, ADR-t1433-2 decision 3), gets it written as
+/// its next request in its directory's `turns/`, recorded as
+/// `turn_requested` naming it, and the exit as its exit request. Nothing
+/// is typed into a planner: a row in a cmux workspace (one of the
+/// runtime's an older binary opened, or a person's, ADR-t1433-2
+/// decision 5) is refused.
+pub(super) fn send_to_planner(
+    files: &dyn RunFiles,
+    queue: &dyn Queue,
+    view: &PlannerView,
+    workspace: &str,
+    input: Input<'_>,
+    what: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        view.planner.route == PlannerRoute::Headless,
+        "planner {} was opened in a workspace: nothing is typed into it",
+        view.planner.id
+    );
+    let id = view.planner.id;
+    let text = match input {
+        Input::Exit => {
+            files.create_dir_all(&turns_dir(&view.dir))?;
+            files.write(&exit_path(&view.dir), b"")?;
+            info!("exit requested of the headless planner {id}");
+            return Ok(());
         }
-        info!("{what} requested of the headless planner {id} (request {seq})");
-        Ok(())
+        Input::Text(text) | Input::Prompt { text, .. } => text,
+    };
+    let seq = write_request(files, &view.dir, text, what)?;
+    // Written: a record that fails is only noted, as for a typed text.
+    if let Err(error) = queue.record_queue_event(
+        EventKind::TurnRequested,
+        json!({"planner_id": id, "seq": seq, "what": what, "workspace_id": workspace}),
+    ) {
+        warn!(error = %format_args!("{error:#}"), "turn_requested of planner {id} could not be recorded: {error:#}");
     }
+    info!("{what} requested of the headless planner {id} (request {seq})");
+    Ok(())
 }
 
 /// What the request carrying the answer of the `stalled` ask `ask` is: it
@@ -286,8 +285,8 @@ impl Supervisor<'_> {
 }
 
 /// How the last turn of a headless session ended, from its idle marker.
-pub(super) fn last_turn(sv: &Supervisor<'_>, idle_marker: &Path) -> Option<TurnMark> {
-    sv.files
+pub(super) fn last_turn(files: &dyn RunFiles, idle_marker: &Path) -> Option<TurnMark> {
+    files
         .read(idle_marker)
         .ok()
         .and_then(|content| TurnMark::parse(&content))
@@ -300,7 +299,7 @@ pub(super) fn last_turn(sv: &Supervisor<'_>, idle_marker: &Path) -> Option<TurnM
 /// need not agree to the second) does not mean the session went on past
 /// it.
 pub(super) fn between_turns(sv: &Supervisor<'_>, idle_marker: &Path, events: &[RunEvent]) -> bool {
-    let Some(mark) = last_turn(sv, idle_marker) else {
+    let Some(mark) = last_turn(&*sv.files, idle_marker) else {
         return false;
     };
     events

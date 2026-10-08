@@ -1,14 +1,18 @@
 //! A headless session's wrapper started without a workspace (ADR-t1404-1,
 //! ADR-t1433-3): the log of a run's session, the flag that tells the
 //! wrapper it starts in the background, and the record of its start the
-//! wrapper waits for before it registers.
+//! wrapper waits for before it registers; the stop of the wrappers of a
+//! run that ended ([`close_open_workspaces`], and [`stop_swept_wrapper`] for
+//! host運用's sweep), with their `workspace_closed`.
 
 use super::*;
 use crate::application::prompt::PromptBytes;
+use crate::domain::EventKind;
 use crate::domain::background_wrapper::{
     BACKGROUND_FLAG, BackgroundHandle, HeadlessWrapper, StopRoute, is_background, launch_of,
     session_log_name, wrapper_is_recorded,
 };
+use crate::domain::run::{RunWorkspace, run_workspaces};
 
 impl Supervisor<'_> {
     /// The log of a run's session wrapper, which always starts in the
@@ -284,6 +288,169 @@ pub(crate) fn stop_session(
         info!("the workspace {id} is left to a person to close: the supervisor calls no cmux");
         Ok(())
     }
+}
+
+/// Who stops a run's session wrappers through
+/// [`close_open_workspaces`]: the triage of a `failed` /
+/// `interrupted` run, or the supervisor once a run it landed ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkspaceCloser {
+    Triage,
+    /// The supervisor's own loop: the runs it landed, and the sweep.
+    Runtime,
+}
+
+impl WorkspaceCloser {
+    const fn by(self) -> &'static str {
+        match self {
+            Self::Triage => "triage",
+            Self::Runtime => "supervisor",
+        }
+    }
+    /// The path a session stopped by this closer is recorded with: the
+    /// triage's, or the supervisor's of a landed run.
+    const fn route(self) -> StopRoute {
+        match self {
+            Self::Triage => StopRoute::Triage,
+            Self::Runtime => StopRoute::Landed,
+        }
+    }
+    const fn answer(self) -> &'static str {
+        match self {
+            Self::Triage => "the run was triaged; closed by the runtime",
+            Self::Runtime => "the run ended; closed by the runtime",
+        }
+    }
+    const fn stuck_exit_answer(self) -> &'static str {
+        match self {
+            Self::Triage => "the triage closed the run's workspace",
+            Self::Runtime => "the supervisor closed the run's workspace",
+        }
+    }
+}
+
+/// Why the sweep stops a wrapper of an ended run: a `failed` /
+/// `interrupted` run the triage does not take was superseded (its task
+/// moved on, or a later run took its place); a landed one just ended.
+fn sweep_reason(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Failed | RunStatus::Interrupted => "superseded",
+        _ => "ended",
+    }
+}
+
+/// Stop the background wrapper of `candidate`, an ended run the sweep of
+/// host運用 found still running, and record `workspace_closed` (`by:
+/// supervisor`, `reason` `superseded` or `ended`); `Ok(Err(error))` when the
+/// wrapper could not be stopped, which the sweep records once
+/// ([`record_close_failure`]) and tries again.
+pub(super) fn stop_swept_wrapper(
+    queue: &mut dyn Queue,
+    sessions: &dyn SessionWrappers,
+    candidate: &crate::application::EndedRunWorkspace,
+) -> Result<std::result::Result<(), anyhow::Error>> {
+    let workspace = &candidate.workspace_id;
+    if let Err(error) = stop_session(sessions, workspace, StopRoute::Sweep) {
+        return Ok(Err(error));
+    }
+    info!(run_id = %candidate.run_id, "run {} is {}; stopped its background wrapper {workspace} that still ran", candidate.run_id, candidate.status.as_str());
+    queue.record_workspace_closed(
+        &candidate.run_id,
+        workspace,
+        json!({"by": "supervisor", "reason": sweep_reason(candidate.status)}),
+    )?;
+    Ok(Ok(()))
+}
+
+/// Stop the session wrappers `run` left running, each only while it runs
+/// ([`run_session_open`]): its worker's and each resume's, unless its stop
+/// is recorded ([`run_workspaces`]). A stop records `workspace_closed`
+/// (`by` the closer); a failure records `cleanup_failed` and the others go
+/// on. A `stuck_exit` ask of the run is closed with its workspace, and its
+/// `answer_prompt` and `stalled` asks in any case; its stalled detections
+/// with no end get `stall_resolved` (`run_ended`).
+pub(super) fn close_open_workspaces(
+    queue: &mut dyn Queue,
+    sessions: &dyn SessionWrappers,
+    run: &TaskRun,
+    closer: WorkspaceCloser,
+) -> Result<()> {
+    let events = queue.run_events(run.id())?;
+    let open: Vec<RunWorkspace> = run_workspaces(run, &events)
+        .into_iter()
+        .filter(|w| !w.closed)
+        .collect();
+    let mut closed = false;
+    for workspace in open {
+        let id = workspace.workspace_id;
+        let result = run_session_open(sessions, &id).and_then(|open| {
+            if open {
+                stop_session(sessions, &id, closer.route())?;
+            }
+            Ok(open)
+        });
+        match result {
+            Ok(true) => {
+                let mut payload = json!({"by": closer.by()});
+                if let Some(attempt) = workspace.resume_attempt {
+                    payload["resume_attempt"] = json!(attempt);
+                }
+                if closer == WorkspaceCloser::Runtime {
+                    payload["reason"] = json!(sweep_reason(run.status()));
+                }
+                queue.record_workspace_closed(run.id(), &id, payload)?;
+                closed = true;
+            }
+            Ok(false) => {}
+            Err(error) => record_close_failure(&mut *queue, run.id(), &id, closer, &error)?,
+        }
+    }
+    if closed {
+        queue.close_stuck_exit_asks(run.id(), closer.stuck_exit_answer())?;
+    }
+    // Whatever path took the run out of `running`, no dialog of it waits
+    // for an answer any more, nor is its session stalled.
+    queue.close_answer_prompt_asks(run.id(), closer.answer())?;
+    queue.end_stalled_detections(run.id(), closer.answer())?;
+    Ok(())
+}
+
+/// Close the `approve_landing` asks nobody closed of `task`'s runs, or of
+/// all runs, whose run is `failed` or whose task is `completed` or
+/// `canceled` ([`crate::domain::ended_landing_ask_answer`]): no answer
+/// applies to them any more. Called where a run fails or its task ends,
+/// and by the sweep for what those paths missed. A failure is logged only;
+/// the next sweep tries again.
+pub(super) fn close_ended_landing_asks(queue: &mut dyn Queue, task: Option<TaskId>) {
+    match queue.close_ended_landing_asks(task) {
+        Ok(closed) => {
+            for ask in closed {
+                info!(ask_id = %ask.id, "closed approve_landing ask {} as its run ended without landing", ask.id);
+            }
+        }
+        Err(error) => {
+            warn!(error = %format_args!("{error:#}"), "the approve_landing asks of ended runs could not be closed: {error:#}");
+        }
+    }
+}
+
+/// Record `cleanup_failed` for a session wrapper of the run that could not
+/// be stopped.
+pub(super) fn record_close_failure(
+    queue: &mut dyn Queue,
+    run_id: &RunId,
+    workspace: &str,
+    closer: WorkspaceCloser,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let message = format!("session {workspace} could not be stopped: {error:#}");
+    warn!(run_id = %run_id, "run {run_id}: {message}");
+    queue.record_runtime_event(
+        run_id,
+        EventKind::CleanupFailed,
+        reason_of_error(error, ReasonCode::Other)
+            .on(json!({"workspace_id": workspace, "message": message, "by": closer.by()})),
+    )
 }
 
 #[cfg(test)]

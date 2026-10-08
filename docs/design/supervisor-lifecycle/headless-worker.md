@@ -292,7 +292,7 @@ runtimeのplannerは経路の選択なしに非対話で立ち、この文書の
   providerはClaudeだけで切り替えない（ADR-t1394-2決定5）。
   sessionの名前は同じIDのplannerを作り直したqueueと共有しない（`planner_session_name`）。
   providerにplanner固有の分岐は無い（`TurnTarget`）。
-- **依頼**: revise・`planner_question`の答え・`provider retry`・終了は`Supervisor::send_to_planner`が`turns/`の依頼と終了の依頼にし、plannerには打ち込まない。
+- **依頼**: revise・`planner_question`の答え・`provider retry`・終了は`headless::send_to_planner`が`turns/`の依頼と終了の依頼にし、plannerには打ち込まない。
   落とし穴: 依頼の前に入力の印を書くので、壁で失敗したturnの後に印だけが新しくなると、plannerは`working`に見えたまま誰も壁を見ない。
   wrapperはそのとき壁のturnのidle markerを書き直す（`renew_wall_marker`）。
 - **初期promptが最初のturn**: 人の答えだけを待って終わったplannerの後のanswerは、新しいplannerの初期prompt（`prompt.txt`）に質問・前のplannerのnote・draftと載る（resumeしない）。

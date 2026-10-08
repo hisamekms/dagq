@@ -7,7 +7,14 @@
 //! (ADR-0039), from the queue and the run files, without writing
 //! `run_adopted`. What the queue does not hold — a resumed session's
 //! request, an `/exit` a rejected run waits for — goes through a
-//! `handoff.json` in the run directory.
+//! `handoff.json` in the run directory ([`write_snapshot`],
+//! [`take_snapshot`]).
+//!
+//! This module holds host運用's side: the registration of this process and
+//! the state of its handoff and stop ([`Registration`]), with the decision
+//! on a handoff request read again ([`handoff_change`]). The slots are
+//! 実行と着地's: the loop snapshots them before the exec and rebuilds them
+//! after it (`handoff_slots`).
 
 use super::*;
 use crate::domain::EventKind;
@@ -22,17 +29,126 @@ pub const SUPERVISOR_HANDED_OFF: &str =
 /// What a run directory's `handoff.json` holds for the next process.
 const SNAPSHOT: &str = "handoff.json";
 
-impl Phase {
-    /// Whether the next process can rebuild this phase from the queue and
-    /// the run files: everything but a validation, an e2e (ADR-t1233-2) or a
-    /// landing in progress (and a run waiting for the landing slot, which
-    /// starts one), which a handoff waits for. A headless review or triage is rebuildable because
-    /// it is stopped and started again.
-    pub(super) fn rebuildable(&self) -> bool {
-        !matches!(
-            self,
-            Phase::Validating(..) | Phase::AwaitingSlot | Phase::E2e(_) | Phase::Landing(_)
-        )
+/// host運用's registration of this supervisor: its token and heartbeat, and
+/// the handoff and stop it drains for.
+pub(super) struct Registration {
+    /// The registration's token, which every lease of this process carries.
+    pub(super) token: LeaseToken,
+    pub(super) heartbeat: Heartbeat,
+    /// The binary a handoff asked this process to exec (ADR-0045 decision
+    /// 10): no new work starts, and the loop ends once every slot rests at
+    /// a point the next process rebuilds it from.
+    pub(super) handoff: Option<String>,
+    /// Set when the loop ended for that exec: the registration stays.
+    pub(super) exec: Option<String>,
+    /// This pass drains (a stop, a handoff, or claiming stopped after a
+    /// provisioning failure): nothing may wait for the program to appear.
+    pub(super) draining: bool,
+    /// Whether this process recorded `supervisor_draining` for its stop
+    /// request (task 1277): once, on the first pass that saw it.
+    pub(super) stop_recorded: bool,
+}
+
+/// What the queue's handoff request, read again, makes of the handoff this
+/// process drains for (task 1286).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum HandoffChange {
+    /// The same binary is asked: the drain goes on.
+    Same,
+    /// Another binary is asked: the drain goes on for it.
+    Replaced(String),
+    /// The request was withdrawn: normal work resumes.
+    Withdrawn,
+}
+
+/// [`HandoffChange`] of the handoff to `binary` given the request read now
+/// (`requested`).
+pub(super) fn handoff_change(binary: &str, requested: Option<String>) -> HandoffChange {
+    match requested {
+        Some(now) if now == binary => HandoffChange::Same,
+        Some(now) => HandoffChange::Replaced(now),
+        None => HandoffChange::Withdrawn,
+    }
+}
+
+/// Whether a pass drains: on a stop, while claiming stopped (a
+/// provisioning failure), and while a handoff is asked.
+pub(super) const fn drains(stopping: bool, claiming: bool, handing_off: bool) -> bool {
+    stopping || !claiming || handing_off
+}
+
+impl Registration {
+    /// The handoff request this process drains for was replaced by one for
+    /// `now`: the drain goes on for the new binary (task 1286).
+    pub(super) fn replace_handoff(&mut self, binary: &str, now: String) {
+        info!(
+            "supervisor {} handoff to {binary} was replaced by a handoff to {now}: no new work starts; it execs {now} once the validations and landings in progress are done",
+            self.token
+        );
+        self.handoff = Some(now);
+    }
+
+    /// Record, once, that this process drains for a stop request (SIGINT /
+    /// SIGTERM, from `down`, the drain of `up` or `install
+    /// --allow-breaking`, or launchd's bootout) (task 1277), with the runs
+    /// its slots hold: a handoff waiting for it fails at once instead of at
+    /// its timeout, and the observer reads the stop behind the claims and
+    /// resumes it holds. A failed write is only logged and tried again on
+    /// the next pass.
+    pub(super) fn record_stop_request(&mut self, queue: &dyn Queue, build: &str, runs: &[RunId]) {
+        let handoff = match &self.handoff {
+            Some(binary) => Some(binary.clone()),
+            None => queue.handoff_request(&self.token).ok().flatten(),
+        };
+        let payload = json!({
+            "supervisor": self.token,
+            "pid": std::process::id(),
+            "build": build,
+            "reason": "stop_requested",
+            "handoff_binary": handoff,
+            "runs": runs,
+        });
+        match queue.record_queue_event(EventKind::SupervisorDraining, payload) {
+            Ok(_) => {
+                self.stop_recorded = true;
+                info!(
+                    "supervisor {} asked to stop: it drains the runs in progress; a stop wins over any handoff",
+                    self.token
+                );
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the supervisor's stop request could not be recorded: {error:#}");
+            }
+        }
+    }
+
+    /// The end of a loop not ended for an exec, whose heartbeat holds: stop
+    /// the heartbeat, and remove the registration with the record of the
+    /// stop (ADR-0051 decision 10; `ok` whether the loop ended without an
+    /// error) in one transaction (ADR-t1662-1 decision 6). A record that
+    /// fails keeps the row, which goes stale for the next `up` or `down` to
+    /// prune. Whether the loop ended so; an exec, or a lost heartbeat,
+    /// keeps the registration.
+    pub(super) fn deregister(&mut self, queue: &dyn Queue, version: &str, ok: bool) -> bool {
+        if self.exec.is_some() || self.heartbeat.check().is_err() {
+            return false;
+        }
+        // The mark of the stop; an exec leaves it to the next process's
+        // handoff mark.
+        let stopped = json!({
+            "supervisor": self.token,
+            "dagq_version": version,
+            "outcome": if ok { "stopped" } else { "failed" },
+        });
+        self.heartbeat.stop();
+        if let Err(error) =
+            queue.prune_supervisor(&self.token, EventKind::SupervisorStopped, &|_| {
+                stopped.clone()
+            })
+        {
+            warn!(error = %format_args!("{error:#}"), "the supervisor's stop could not be recorded, and its registration is left for the next prune: {error:#}");
+        }
+        true
     }
 }
 
@@ -48,7 +164,7 @@ struct Stamped {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
-enum Snapshot {
+pub(super) enum Snapshot {
     /// A resumed session of a `needs_session` run.
     Resume {
         workspace: String,
@@ -79,289 +195,71 @@ enum Snapshot {
     },
 }
 
-fn seconds(time: SystemTime) -> f64 {
+pub(super) fn seconds(time: SystemTime) -> f64 {
     time.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
 }
 
-fn time(seconds: f64) -> SystemTime {
+pub(super) fn time(seconds: f64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs_f64(seconds.max(0.0))
 }
 
-impl Supervisor<'_> {
-    /// The last step before the exec: stop the observer and every headless
-    /// job (their runs start them again) but a plan or goal review that
-    /// already ended, whose verdict is applied, give a triaged run's lease back
-    /// (the next process triages it again), and write what a resumed
-    /// session or a rejected run's `/exit` needs. Returns how many runs the
-    /// next process takes over.
-    pub(super) fn prepare_handoff(&mut self) -> usize {
-        self.stop_observer("for the handoff; it runs again when due");
-        // The throughput review goes on through the exec and records its
-        // own finish; its start keeps the next process from starting it
-        // again (a weekly review may take longer than the time between two
-        // updates).
-        // A plan or goal review that already ended is reaped and its
-        // verdict applied, not thrown away (task 1425); only one still
-        // running is stopped. Its row stays unfinished under this token,
-        // and the next startup interrupts it even without another
-        // candidate.
-        for (what, reaped) in [
-            ("plan review", self.poll_plan_review()),
-            ("goal review", self.poll_goal_review()),
-        ] {
-            if let Err(error) = reaped {
-                warn!(error = %format_args!("{error:#}"), "{what}: could not reap it before the handoff: {error:#}");
-            }
-        }
-        if let Some(mut watch) = self.plan_review.take() {
-            watch.headless.abandon();
-            info!(
-                "plan review {} stopped for the handoff; it runs again",
-                watch.job.attempt
-            );
-        }
-        if let Some(mut watch) = self.goal_review.take() {
-            watch.headless.abandon();
-            info!(
-                "goal review {} of goal {} stopped for the handoff; it runs again",
-                watch.job.attempt, watch.job.goal_id
-            );
-        }
-        let mut kept = 0;
-        for mut slot in self.claim.slots.take_all() {
-            let run = slot.run.clone();
-            // A live session's recovery job does not outlive this process;
-            // its alert starts another once the run is rebuilt.
-            stop_recovery(&mut slot);
-            let snapshot = match &mut slot.phase {
-                Phase::Review(watch) => {
-                    watch.job.abandon();
-                    info!(run_id = %run.id(), "run {}: review {} stopped for the handoff; it is reviewed again", run.id(), watch.attempt);
-                    None
-                }
-                Phase::Recovery(watch) => {
-                    watch.job.abandon();
-                    info!(run_id = %run.id(), "run {}: recovery round {} stopped for the handoff; it is taken again", run.id(), watch.round);
-                    if let Err(error) = self.queue.release_lease(run.id(), &self.token) {
-                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not release the lease: {error:#}", run.id());
-                    }
-                    continue;
-                }
-                Phase::Resume(watch) => Some(Snapshot::Resume {
-                    workspace: watch.workspace.clone(),
-                    attempt: watch.attempt,
-                    started_at: seconds(watch.started_at),
-                    message: watch.message.clone(),
-                    message_bytes: Some(watch.message_bytes.clone()),
-                    message_sent_at: watch.message_sent.map(|(_, at)| seconds(at)),
-                    not_ready_asked: false,
-                    exit_requested: watch.exit_requested.is_some(),
-                    exit_typed: watch.exit_requested.is_some(),
-                    exit_for_silence: false,
-                    approved: watch.approved,
-                }),
-                Phase::Exiting(watch) if run.status() != RunStatus::AwaitingIntegration => {
-                    match watch.then {
-                        AfterExit::Rest { close } => Some(Snapshot::Exit {
-                            workspace: watch.session.as_ref().map(|s| s.workspace.clone()),
-                            resume: watch.session.as_ref().and_then(|s| s.resume),
-                            close,
-                            requested: watch.requested,
-                            timed_out: false,
+/// Write `snapshot` into `dir`'s `handoff.json`, stamped with `token`.
+pub(super) fn write_snapshot(
+    files: &dyn RunFiles,
+    token: &LeaseToken,
+    dir: &Path,
+    snapshot: Snapshot,
+) -> Result<()> {
+    let text = serde_json::to_vec(&Stamped {
+        token: token.clone(),
+        snapshot,
+    })?;
+    files.write(&dir.join(SNAPSHOT), &text).map_err(Into::into)
+}
 
-                            exit_for_silence: false,
-                        }),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            if let Some(snapshot) = snapshot {
-                let written = run
-                    .run_dir()
-                    .context("missing run directory")
-                    .and_then(|dir| {
-                        let text = serde_json::to_vec(&Stamped {
-                            token: self.token.clone(),
-                            snapshot,
-                        })?;
-                        self.files
-                            .write(&Path::new(dir).join(SNAPSHOT), &text)
-                            .map_err(Into::into)
-                    });
-                if let Err(error) = written {
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its handoff state could not be written; the next supervisor gives its lease back: {error:#}", run.id());
-                }
-            }
-            kept += 1;
-        }
-        kept
+/// Read and remove `run`'s `handoff.json`; `None` without one, when it does
+/// not parse, or when another token wrote it.
+pub(super) fn take_snapshot(
+    files: &dyn RunFiles,
+    token: &LeaseToken,
+    run: &TaskRun,
+) -> Option<Snapshot> {
+    let path = Path::new(run.run_dir()?).join(SNAPSHOT);
+    if !files.is_file(&path) {
+        return None;
     }
-
-    /// The first step after the exec: a slot for every run whose lease
-    /// carries this process's token, rebuilt the way an adopted run's is
-    /// (ADR-0039) or from its `handoff.json`. A `needs_session` run without
-    /// one whose resumed session lives on is rebuilt from its events like an
-    /// adopted one (task 640). A run that cannot be rebuilt
-    /// gives its lease back, so the supervisor's resume or triage (or
-    /// `recover`) picks it up; one whose rebuild fails is abandoned like
-    /// any other runtime error.
-    pub(super) fn rebuild_own_runs(&mut self, previous_version: Option<&str>) -> Result<()> {
-        // The jobs stopped before exec cannot produce a verdict. Close their
-        // rows and spans even if their goal/proposal is no longer a candidate.
-        self.queue.interrupt_plan_reviews_for_handoff(&self.token)?;
-        self.queue.interrupt_goal_reviews_for_handoff(&self.token)?;
-        for run in self.queue.runs_leased_by(&self.token)? {
-            let snapshot = self.take_snapshot(&run);
-            self.queue.record_runtime_event(
-                run.id(),
-                EventKind::SupervisorHandedOff,
-                json!({
-                    "supervisor": self.token,
-                    "pid": self.layout.pid,
-                    "previous_version": previous_version,
-                    "version": self.layout.version,
-                    "status": run.status().as_str(),
-                    "state": snapshot.as_ref().map(|s| match s {
-                        Snapshot::Resume { .. } => "resume",
-                        Snapshot::Exit { .. } => "exit",
-                    }),
-                }),
-            )?;
-            // A resume whose `handoff.json` could not be written (or is
-            // gone) is rebuilt from its events while its session lives on,
-            // as an adopter does (task 640).
-            // A lookup that fails gives this run's lease back rather than
-            // stopping the takeover of the others.
-            let adopted_resume = snapshot.is_none()
-                && run.status() == RunStatus::NeedsSession
-                && {
-                    let adoptable = self.queue.processes(run.id()).and_then(|processes| {
-                        let wrapper = processes.into_iter().find(|p| p.role == "wrapper");
-                        self.resume_adoptable(&run, wrapper.as_ref())
-                    });
-                    adoptable.unwrap_or_else(|error| {
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: whether its resumed session lives could not be read; its lease is given back: {error:#}", run.id());
-                    false
-                })
-                };
-            let resumed = adopted_resume || matches!(snapshot, Some(Snapshot::Resume { .. }));
-            let phase = match (run.status(), snapshot) {
-                (_, Some(snapshot)) => self.rebuild_from(&run, snapshot),
-                (RunStatus::NeedsSession, None) if adopted_resume => {
-                    self.adopt_resume(&run).map(Phase::Resume)
-                }
-                (
-                    RunStatus::Claimed
-                    | RunStatus::Starting
-                    | RunStatus::Running
-                    | RunStatus::Validating,
-                    None,
-                ) => self.resume(&run),
-                (RunStatus::AwaitingIntegration, None) => self.adopt_review(&run),
-                (status, None) => {
-                    info!(run_id = %run.id(), "run {} ({}) has nothing to take over after the handoff; its lease is given back", run.id(), status.as_str());
-                    self.queue.release_lease(run.id(), &self.token)?;
-                    continue;
-                }
-            };
-            match phase {
-                Ok(phase) => {
-                    info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} taken over after the handoff ({})", run.id(), run.task_id(), run.status().as_str());
-                    // A resumed session goes on watched instead of being
-                    // resumed again (ADR-0047 decision 24).
-                    if let (true, Phase::Resume(watch)) = (resumed, &phase) {
-                        self.note_resume_adopted(&run, watch, Some(previous_version));
-                    }
-                    let mut slot = Slot::new(run, phase);
-                    // Kept as it was, even past the limit (ADR-0062
-                    // decision 7).
-                    self.restore_waiting(&mut slot, true)?;
-                    self.claim.slots.admit_noting(slot, "handoff", &*self.queue);
-                }
-                Err(error) => {
-                    let message = format!(
-                        "run {} could not be taken over after the handoff: {error:#}",
-                        run.id()
-                    );
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{}", message);
-                    self.abandon(&run, message, &reason_of_error(&error, ReasonCode::Other));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Read and remove the run's `handoff.json`; `None` without one or when
-    /// it does not parse.
-    fn take_snapshot(&self, run: &TaskRun) -> Option<Snapshot> {
-        let path = Path::new(run.run_dir()?).join(SNAPSHOT);
-        if !self.files.is_file(&path) {
-            return None;
-        }
-        let text = self.files.read(&path).ok();
-        let _ = self.files.remove_file(&path);
-        text.and_then(|text| serde_json::from_slice::<Stamped>(&text).ok())
-            .filter(|stamped| stamped.token == self.token)
-            .map(|stamped| stamped.snapshot)
-    }
-
-    fn rebuild_from(&mut self, run: &TaskRun, snapshot: Snapshot) -> Result<Phase> {
-        Ok(match snapshot {
-            Snapshot::Resume {
-                workspace,
-                attempt,
-                started_at,
-                message,
-                message_bytes,
-                message_sent_at,
-                not_ready_asked: _,
-                exit_requested,
-                exit_typed: _,
-                exit_for_silence,
-                approved,
-            } => Phase::Resume(self.rebuilt_resume(
-                run,
-                ResumeState {
-                    workspace,
-                    attempt,
-                    started_at: time(started_at),
-                    message,
-                    message_bytes,
-                    message_sent_at: message_sent_at.map(time),
-                    exit_requested,
-
-                    exit_for_silence,
-                    approved,
-                },
-            )?),
-            Snapshot::Exit {
-                workspace,
-                resume,
-                close,
-                requested,
-                timed_out: _,
-
-                exit_for_silence: _,
-            } => {
-                let session = workspace.map(|workspace| SessionRef { workspace, resume });
-                let mut watch = ExitWatch::new(session, AfterExit::Rest { close });
-
-                // Never a second exit request (task 894); the watch has no
-                // timeout since task 1437.
-                watch.requested = requested;
-
-                Phase::Exiting(watch)
-            }
-        })
-    }
+    let text = files.read(&path).ok();
+    let _ = files.remove_file(&path);
+    text.and_then(|text| serde_json::from_slice::<Stamped>(&text).ok())
+        .filter(|stamped| stamped.token == *token)
+        .map(|stamped| stamped.snapshot)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A handoff request read again keeps, replaces or withdraws the
+    /// handoff this process drains for; a pass drains on a stop, a stopped
+    /// claim or a handoff.
+    #[test]
+    fn a_handoff_request_read_again_keeps_replaces_or_withdraws_the_drain() {
+        assert_eq!(
+            handoff_change("/bin/a", Some("/bin/a".to_owned())),
+            HandoffChange::Same
+        );
+        assert_eq!(
+            handoff_change("/bin/a", Some("/bin/b".to_owned())),
+            HandoffChange::Replaced("/bin/b".to_owned())
+        );
+        assert_eq!(handoff_change("/bin/a", None), HandoffChange::Withdrawn);
+        assert!(!drains(false, true, false));
+        assert!(drains(true, true, false));
+        assert!(drains(false, false, false));
+        assert!(drains(false, true, true));
+    }
 
     #[test]
     fn old_resume_snapshot_defaults_exit_typed_to_false() {

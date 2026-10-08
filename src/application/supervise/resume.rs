@@ -106,7 +106,7 @@ impl Supervisor<'_> {
         }
         let begun = self.queue.begin_resume(
             run.id(),
-            &self.token,
+            &self.registration.token,
             &main,
             reason.as_deref(),
             self.resume.config,
@@ -230,9 +230,9 @@ impl Supervisor<'_> {
             self.host.cleanup.defer();
             return Ok(());
         }
-        let skipped = self
-            .queue
-            .skip_resume(run.id(), &self.token, head, main, approved)?;
+        let skipped =
+            self.queue
+                .skip_resume(run.id(), &self.registration.token, head, main, approved)?;
         drop(guard);
         let Some(run) = skipped else {
             return Ok(());
@@ -302,8 +302,13 @@ impl Supervisor<'_> {
         };
         warn!(run_id = %failed.id(), task_id = %failed.task_id(), "run {} of task {} used up its resumes; it is failed and goes to the recovery job (resume_exhausted)", failed.id(), failed.task_id());
         stages::record_rest(&*self.queue, &failed, None, "resume_exhausted");
-        self.close_ended_landing_asks(Some(failed.task_id()));
-        self.close_open_workspaces(&failed, WorkspaceCloser::Triage)?;
+        close_ended_landing_asks(&mut *self.queue, Some(failed.task_id()));
+        close_open_workspaces(
+            &mut *self.queue,
+            self.sessions,
+            &failed,
+            WorkspaceCloser::Triage,
+        )?;
         Ok(())
     }
     /// The commit of the run's branch a retry carries over
@@ -338,7 +343,12 @@ impl Supervisor<'_> {
             return Ok(());
         };
         info!(run_id = %failed.id(), task_id = %failed.task_id(), "run {} of task {} used up its resumes on conflicts after its review passed; the task is ready again and its next run carries {head} over", failed.id(), failed.task_id());
-        self.close_open_workspaces(&failed, WorkspaceCloser::Triage)?;
+        close_open_workspaces(
+            &mut *self.queue,
+            self.sessions,
+            &failed,
+            WorkspaceCloser::Triage,
+        )?;
         self.note_triaged(&failed);
         Ok(())
     }
@@ -427,7 +437,7 @@ impl Supervisor<'_> {
             "--run".into(),
             run.id().to_string(),
             "--lease".into(),
-            self.token.to_string(),
+            self.registration.token.to_string(),
             "--claude".into(),
             path_text(&self.layout.claude)?,
             "--codex".into(),
@@ -715,9 +725,14 @@ impl Supervisor<'_> {
         let id = slot.run.id().clone();
         let run = match verdict.kind {
             ResumeOutcome::Resolved if approved => {
-                let run = self
-                    .queue
-                    .finish_resume(&id, &self.token, None, None, true, payload)?;
+                let run = self.queue.finish_resume(
+                    &id,
+                    &self.registration.token,
+                    None,
+                    None,
+                    true,
+                    payload,
+                )?;
                 self.queue_landing(&run, "resume");
                 slot.run = run;
                 slot.transition(
@@ -730,7 +745,7 @@ impl Supervisor<'_> {
             ResumeOutcome::Resolved => {
                 let run = self.queue.finish_resume(
                     &id,
-                    &self.token,
+                    &self.registration.token,
                     Some(RunStatus::Validating),
                     None,
                     true,
@@ -752,7 +767,7 @@ impl Supervisor<'_> {
             }
             ResumeOutcome::Failed(reason) => self.queue.finish_resume(
                 &id,
-                &self.token,
+                &self.registration.token,
                 Some(RunStatus::Failed),
                 Some(&reason),
                 false,
@@ -761,8 +776,14 @@ impl Supervisor<'_> {
             ResumeOutcome::Unresolved => {
                 payload["exhausted"] =
                     json!(resumes_exhausted(&*self.queue, &id, self.resume.config));
-                self.queue
-                    .finish_resume(&id, &self.token, None, None, false, payload)?
+                self.queue.finish_resume(
+                    &id,
+                    &self.registration.token,
+                    None,
+                    None,
+                    false,
+                    payload,
+                )?
             }
         };
         Ok(Step::Done(Box::new(run)))

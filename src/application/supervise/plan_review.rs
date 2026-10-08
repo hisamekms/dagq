@@ -45,7 +45,6 @@ use crate::{
     },
 };
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
 
 /// Files that conflict often the plan review prompt lists at most.
 const HOTSPOT_FILES: usize = 15;
@@ -85,13 +84,115 @@ enum PlanReviewRoute {
     Manual(String),
 }
 
-impl Supervisor<'_> {
+impl PlanningState {
+    /// The last step of 計画管理 before a handoff's exec: a plan or goal
+    /// review that already ended is reaped and its verdict applied, not
+    /// thrown away (task 1425); only one still running is stopped. Its row
+    /// stays unfinished under this token, and the next startup interrupts
+    /// it even without another candidate.
+    pub(super) fn stop_for_handoff(&mut self, env: &mut PlanningEnv<'_>) {
+        for (what, reaped) in [
+            ("plan review", self.poll_plan_review(env)),
+            ("goal review", self.poll_goal_review(env)),
+        ] {
+            if let Err(error) = reaped {
+                warn!(error = %format_args!("{error:#}"), "{what}: could not reap it before the handoff: {error:#}");
+            }
+        }
+        if let Some(mut watch) = self.plan_review.take() {
+            watch.headless.abandon();
+            info!(
+                "plan review {} stopped for the handoff; it runs again",
+                watch.job.attempt
+            );
+        }
+        if let Some(mut watch) = self.goal_review.take() {
+            watch.headless.abandon();
+            info!(
+                "goal review {} of goal {} stopped for the handoff; it runs again",
+                watch.job.attempt, watch.job.goal_id
+            );
+        }
+    }
+
+    /// Abandon the plan and goal reviews still running once the loop
+    /// ended ([`HeadlessJob::abandon`]): nothing watches them any more, and
+    /// their ends are written with the Execution of their agents.
+    pub(super) fn abandon_jobs(&mut self) {
+        if let Some(watch) = &mut self.plan_review {
+            watch.headless.abandon();
+        }
+        if let Some(watch) = &mut self.goal_review {
+            watch.headless.abandon();
+        }
+    }
+
+    /// The first step of 計画管理 after a handoff's exec: the plan and goal
+    /// reviews the process before stopped cannot produce a verdict, so
+    /// their rows and spans under this token are closed, even when their
+    /// proposal or goal is no longer a candidate.
+    pub(super) fn interrupt_for_handoff(&mut self, env: &mut PlanningEnv<'_>) -> Result<()> {
+        let token = env.token;
+        env.queue.interrupt_plan_reviews_for_handoff(token)?;
+        env.queue.interrupt_goal_reviews_for_handoff(token)?;
+        Ok(())
+    }
+
+    /// The sweep's part of 計画管理, on host運用's sweep interval: close the
+    /// rows of the runtime's planners whose session is gone and whose
+    /// wrapper is done, then remove the runners of the planners nothing
+    /// runs any more.
+    pub(super) fn sweep_planners(&mut self, env: &mut PassEnv<'_>) {
+        self.close_abandoned_planners(env);
+        remove_unused_planner_runners(env);
+    }
+
+    /// Close the rows of the runtime's planners whose session is gone and
+    /// whose wrapper is done ([`planner::close_abandoned_planners`]; no cmux
+    /// workspace is listed, and a person's planner's row is left to
+    /// [`planner::close_person_planners`]), so `planners` stops showing
+    /// them. A failure is logged only.
+    fn close_abandoned_planners(&mut self, env: &mut PassEnv<'_>) {
+        match planner::close_abandoned_planners(
+            &*env.queue,
+            env.sessions,
+            &**env.processes,
+            &*env.generators.clock,
+        ) {
+            Ok(closed) => {
+                for id in closed {
+                    self.planner_exits.retain(|(sent, _)| *sent != id);
+                    info!("planner {id}: its workspace and wrapper are gone; closed its record");
+                    // A headless planner whose turn was stopped at its
+                    // limit, closed before a pass told of it (ADR-t1394-2
+                    // decision 3).
+                    let dir = planner::planner_dir(&env.layout.planners_dir, id);
+                    if let Err(error) = env.queue.planner(id).and_then(|row| {
+                        super::planner_turns::tell_of_stopped_planner_turn(
+                            env, &row, &dir, "closed",
+                        )
+                    }) {
+                        warn!(error = %format_args!("{error:#}"), "planner {id}: its stopped turn could not be told of: {error:#}");
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the planners whose workspace is gone could not be closed: {error:#}");
+            }
+        }
+    }
+
     /// One pass of plan review: apply the answers, reap the job and apply
     /// its verdict, start the next one (unless the loop is draining), then
     /// deliver the revises and tend the planners.
-    pub(super) fn plan_review_pass(&mut self, options: &LoopSettings, starting: bool) -> bool {
+    pub(super) fn plan_review_pass(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        options: &LoopSettings,
+        starting: bool,
+    ) -> bool {
         let mut progressed = false;
-        match self.queue.settle_proposals() {
+        match env.queue.settle_proposals() {
             Ok(settled) => {
                 for (proposal, status) in &settled {
                     info!(
@@ -106,8 +207,8 @@ impl Supervisor<'_> {
             }
         }
         for (what, result) in [
-            ("apply the plan answers", self.apply_plan_answers()),
-            ("reap the plan review", self.poll_plan_review()),
+            ("apply the plan answers", self.apply_plan_answers(env)),
+            ("reap the plan review", self.poll_plan_review(env)),
         ] {
             match result {
                 Ok(done) => progressed |= done,
@@ -123,12 +224,12 @@ impl Supervisor<'_> {
         // raised the hold in this pass (task 438): the route reads it, and
         // a role that names its provider may run on Codex while Claude is
         // held (ADR-t1063-1 decision 5).
-        if let Err(error) = self.start_plan_review() {
+        if let Err(error) = self.start_plan_review(env) {
             warn!(error = %format_args!("{error:#}"), "plan review: could not start a plan review: {error:#}");
         }
         // The planners are Claude's sessions: the hold stops them.
-        if self.queue_hold.is_none()
-            && let Err(error) = self.tend_planners(options)
+        if !env.jobs.held()
+            && let Err(error) = self.tend_planners(env, options)
         {
             warn!(error = %format_args!("{error:#}"), "plan review: could not deliver the revises: {error:#}");
         }
@@ -143,41 +244,42 @@ impl Supervisor<'_> {
     /// `[provider_fallback] jobs` is off, ADR-t1857-1), else waits,
     /// or, under `--no-claude`, goes to a person told why; a Codex plan
     /// review that fails under `--no-claude` never moves to Claude.
-    fn plan_review_route(&self) -> PlanReviewRoute {
+    fn plan_review_route(&self, env: &PlanningEnv<'_>) -> PlanReviewRoute {
         let role = ModelRole::PlanReview;
-        let models = self.role_models(role);
+        let models = env.role_models(role);
         plan_review_route(
             models.launch(role),
             models.switchable(role),
-            self.no_claude,
-            self.queue_hold.is_some(),
-            self.provider.fallback.jobs,
-            |provider| self.job_unusable(provider),
+            env.jobs.no_claude,
+            env.jobs.held(),
+            env.jobs.fallback_jobs(),
+            |provider| env.jobs.job_unusable(provider),
         )
     }
 
     /// Start the plan review of the next candidate, when none runs.
-    fn start_plan_review(&mut self) -> Result<()> {
+    fn start_plan_review(&mut self, env: &mut PlanningEnv<'_>) -> Result<()> {
         if self.plan_review.is_some() {
             return Ok(());
         }
-        let Some(proposal_id) = next_to_review(&self.queue.plan_review_candidates()?) else {
+        let Some(proposal_id) = next_to_review(&env.queue.plan_review_candidates()?) else {
             return Ok(());
         };
-        let (launch, switchable, manual) = match self.plan_review_route() {
+        let (launch, switchable, manual) = match self.plan_review_route(env) {
             PlanReviewRoute::Start(launch, switchable) => (launch, switchable, None),
             PlanReviewRoute::Wait => return Ok(()),
             // Recorded as a job that could not start, on the provider the
             // role names, so that the person sees why.
             PlanReviewRoute::Manual(why) => {
-                (self.actor_launch(ModelRole::PlanReview), false, Some(why))
+                (env.actor_launch(ModelRole::PlanReview), false, Some(why))
             }
         };
-        let Some(job) = self.queue.begin_plan_review(
+        let (token, layout) = (env.token, env.layout);
+        let Some(job) = env.queue.begin_plan_review(
             proposal_id,
-            &self.token,
-            &self.layout.plan_reviews_dir,
-            &self.layout.repo_root,
+            token,
+            &layout.plan_reviews_dir,
+            &layout.repo_root,
             &launch,
         )?
         else {
@@ -186,6 +288,7 @@ impl Supervisor<'_> {
         if let Some(why) = manual {
             let error = format!("the headless plan review could not start: {why}");
             self.fail_plan_review(
+                env,
                 &job,
                 &PlanReviewFailure {
                     error,
@@ -194,8 +297,8 @@ impl Supervisor<'_> {
             );
             return Ok(());
         }
-        let proposal = self.queue.show_proposal(proposal_id)?;
-        match self.spawn_plan_review(&job, &proposal, &launch) {
+        let proposal = env.queue.show_proposal(proposal_id)?;
+        match self.spawn_plan_review(env, &job, &proposal, &launch) {
             Ok((prompt_bytes, Ok(headless))) => {
                 info!(task_id = %job.anchor, "proposal {proposal_id} plan review {} started on {} with a prompt of {} bytes", job.attempt, launch.provider.as_str(), prompt_bytes.total);
                 self.plan_review = Some(PlanReviewWatch {
@@ -210,6 +313,7 @@ impl Supervisor<'_> {
             Err(failed) => {
                 let error = format!("the headless plan review could not start: {failed:#}");
                 self.fail_plan_review(
+                    env,
                     &job,
                     &PlanReviewFailure {
                         error,
@@ -219,7 +323,8 @@ impl Supervisor<'_> {
             }
             Ok((prompt_bytes, Err(failed))) => {
                 let error = format!("the headless plan review could not start: {failed:#}");
-                let unusable = self.job_provider_failed(
+                let unusable = env.jobs.job_provider_failed(
+                    &mut env.pass,
                     launch.provider,
                     job_start_failure(&failed),
                     (&error, &error),
@@ -227,6 +332,7 @@ impl Supervisor<'_> {
                     switchable,
                 );
                 self.fail_plan_review(
+                    env,
                     &job,
                     &PlanReviewFailure {
                         error,
@@ -247,19 +353,20 @@ impl Supervisor<'_> {
     /// the latter says whether the provider can be used.
     fn spawn_plan_review(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         job: &PlanReviewJob,
         proposal: &Proposal,
         launch: &ActorLaunch,
     ) -> Result<(PromptBytes, Result<HeadlessJob>)> {
-        self.files
+        env.files
             .create_dir_all(&job.dir)
             .with_context(|| format!("create {}", job.dir.display()))?;
-        let prompt = self.plan_review_material(proposal)?;
-        self.files
+        let prompt = self.plan_review_material(env, proposal)?;
+        env.files
             .write(&job.dir.join("prompt.txt"), prompt.text.as_bytes())?;
         let stdout = job.dir.join("review.out");
         let stderr = job.dir.join("review.err");
-        let started = self.start_plan_review_job(job, launch, &prompt.text, stdout, stderr);
+        let started = self.start_plan_review_job(env, job, launch, &prompt.text, stdout, stderr);
         Ok((prompt.bytes, started))
     }
 
@@ -268,23 +375,26 @@ impl Supervisor<'_> {
     /// reads the files and the queue as [`PLAN_REVIEW_ACCESS`] allows.
     fn start_plan_review_job(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         job: &PlanReviewJob,
         launch: &ActorLaunch,
         prompt: &str,
         stdout: PathBuf,
         stderr: PathBuf,
     ) -> Result<HeadlessJob> {
-        let agent = self
+        let agent = env
+            .jobs
             .job_agent(launch.provider)
             .with_context(|| format!("no {} runs on this supervisor", launch.provider.as_str()))?;
-        let child = self
-            .actors_on(agent)
+        let child = env
+            .jobs
+            .actors_on(&env.pass, agent)
             .spawn(ActorExecutionSpec::new(
                 ActorContext::plan_review_job(job.proposal_id, job.attempt),
-                WorkspaceAccess::Read(self.layout.repo_root.clone()),
+                WorkspaceAccess::Read(env.layout.repo_root.clone()),
                 ActorProgram::Headless {
                     program: HeadlessProgram::Job {
-                        cwd: &self.layout.repo_root,
+                        cwd: &env.layout.repo_root,
                         prompt,
                         access: PLAN_REVIEW_ACCESS,
                     },
@@ -301,7 +411,8 @@ impl Supervisor<'_> {
             ))
             .context("start the plan review")?
             .process()?;
-        Ok(self.headless_job(
+        Ok(env.jobs.headless_job(
+            &mut env.pass,
             "plan review",
             child,
             stdout,
@@ -322,11 +433,15 @@ impl Supervisor<'_> {
 
     /// The plan review prompt of `proposal` from the queue as it is now,
     /// within its limits (task 1561).
-    fn plan_review_material(&mut self, proposal: &Proposal) -> Result<PlanReviewPrompt> {
+    fn plan_review_material(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        proposal: &Proposal,
+    ) -> Result<PlanReviewPrompt> {
         let tasks = proposal
             .task_ids()
             .iter()
-            .map(|&id| self.queue.show(id))
+            .map(|&id| env.queue.show(id))
             .collect::<Result<Vec<_>>>()?;
         // A follow_up's source goal too, whose acceptance its membership
         // judgement is checked against (ADR-t1504-2 decision 7).
@@ -355,22 +470,22 @@ impl Supervisor<'_> {
         goal_ids.dedup();
         let goals = goal_ids
             .into_iter()
-            .map(|id| Ok(self.queue.show_goal(id)?.goal))
+            .map(|id| Ok(env.queue.show_goal(id)?.goal))
             .collect::<Result<Vec<_>>>()?;
-        let lint = crate::domain::lint::lint(&self.queue.lint_input(proposal.task_ids())?);
+        let lint = crate::domain::lint::lint(&env.queue.lint_input(proposal.task_ids())?);
         let mut others = Vec::new();
-        for other in self.queue.proposals(false)? {
+        for other in env.queue.proposals(false)? {
             if other.id() == proposal.id() {
                 continue;
             }
             let tasks = other
                 .task_ids()
                 .iter()
-                .map(|&id| Ok(self.queue.show(id)?.task))
+                .map(|&id| Ok(env.queue.show(id)?.task))
                 .collect::<Result<Vec<_>>>()?;
             others.push((other, tasks));
         }
-        let page = self.queue.list(&TaskQuery {
+        let page = env.queue.list(&TaskQuery {
             status: StatusFilter::Only(vec![TaskStatus::Ready, TaskStatus::InProgress]),
             limit: QUEUED_TASKS,
             full: true,
@@ -378,14 +493,14 @@ impl Supervisor<'_> {
         })?;
         let queued_left_out = page.total.saturating_sub(page.tasks.len());
         let queued = page.tasks;
-        let expected = self.plan_expected_files(&tasks, &queued)?;
-        let precedents = self.queue.answered_asks(PRECEDENT_ASKS)?;
-        let hotspots = self.conflict_hotspots()?;
+        let expected = self.plan_expected_files(env, &tasks, &queued)?;
+        let precedents = env.queue.answered_asks(PRECEDENT_ASKS)?;
+        let hotspots = self.conflict_hotspots(env)?;
         let candidates = tasks
             .iter()
-            .map(|detail| self.duplicate_candidates(proposal, &detail.task))
+            .map(|detail| self.duplicate_candidates(env, proposal, &detail.task))
             .collect::<Result<Vec<_>>>()?;
-        let language = self.verifier.language();
+        let language = env.verifier.language();
         plan_review_prompt(&PlanReviewMaterial {
             proposal,
             tasks: &tasks,
@@ -398,7 +513,7 @@ impl Supervisor<'_> {
             precedents: &precedents,
             hotspots: &hotspots,
             candidates: &candidates,
-            repo_root: &self.layout.repo_root,
+            repo_root: &env.layout.repo_root,
             language: language.as_ref(),
         })
     }
@@ -411,22 +526,34 @@ impl Supervisor<'_> {
     /// read afresh, as the planner may have changed their paths.
     fn plan_expected_files(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         tasks: &[TaskDetail],
         queued: &[TaskListItem],
     ) -> Result<BTreeMap<TaskId, Vec<String>>> {
         let mut expected = BTreeMap::new();
         for detail in tasks {
             let id = detail.task.id();
-            expected.insert(id, self.expected_now(id)?);
+            expected.insert(
+                id,
+                env.defer
+                    .expected_now(&mut *env.pass.queue, &**env.pass.repository, id)?,
+            );
         }
         for item in queued {
-            expected.insert(item.id, self.expected(item.id)?);
+            expected.insert(
+                item.id,
+                env.defer
+                    .expected(&mut *env.pass.queue, &**env.pass.repository, item.id)?,
+            );
         }
         if queued
             .iter()
             .any(|item| item.status == TaskStatus::InProgress)
         {
-            for run in self.runs_in_flight()? {
+            for run in env
+                .defer
+                .runs_in_flight(&mut *env.pass.queue, &**env.pass.repository)?
+            {
                 if let Some(files) = expected.get_mut(&run.task_id) {
                     // Already expected files and a diff, not declared
                     // paths: deduplicated, not filtered again.
@@ -449,12 +576,13 @@ impl Supervisor<'_> {
     /// them the proposal's own.
     fn duplicate_candidates(
         &self,
+        env: &PlanningEnv<'_>,
         proposal: &Proposal,
         task: &Task,
     ) -> Result<DuplicateCandidates> {
         let own = proposal.task_ids();
         let wanted = DUPLICATE_CANDIDATES + own.len();
-        let related = self
+        let related = env
             .queue
             .related_tasks(task.id(), &[], wanted)?
             .related
@@ -463,7 +591,7 @@ impl Supervisor<'_> {
             .take(DUPLICATE_CANDIDATES)
             .collect();
         let search = match any_word_query(task.title()) {
-            Some(terms) => self
+            Some(terms) => env
                 .queue
                 .search_documents(&SearchQuery {
                     terms,
@@ -495,54 +623,35 @@ impl Supervisor<'_> {
     /// The files the landings conflicted in, as `stats` counts them over
     /// its default window (goal 31), most conflicts first, at most
     /// [`HOTSPOT_FILES`] of those main still has.
-    fn conflict_hotspots(&self) -> Result<Vec<ConflictHotspot>> {
-        Ok(self
-            .conflict_hotspot_files()?
-            .into_iter()
-            .filter(|file| file.state != "deleted")
-            .take(HOTSPOT_FILES)
-            .collect())
-    }
-
-    /// Every file the landings conflicted in, as `stats` counts them over
-    /// its default window, most conflicts first; its `alert` is judged by
-    /// the `[conflicts]` thresholds this process read.
-    pub(super) fn conflict_hotspot_files(&self) -> Result<Vec<ConflictHotspot>> {
-        let events = self.queue.all_events()?;
-        let live = LiveSnapshot {
-            history: crate::application::stats::conflict_history(&events, &|since| {
-                self.repository.main_history(since)
-            }),
-            conflicts: self.claim.conflicts,
-            ..LiveSnapshot::default()
-        };
-        let stats = crate::domain::stats::stats(
-            &events,
-            &self.queue.task_goals()?,
-            self.generators.clock.now(),
-            SlotSnapshot::default(),
-            &StatsQuery::default(),
-            &live,
-        );
-        Ok(stats.conflict_hotspots.files)
+    fn conflict_hotspots(&self, env: &PlanningEnv<'_>) -> Result<Vec<ConflictHotspot>> {
+        Ok(conflict_hotspot_files(
+            &*env.queue,
+            &**env.repository,
+            &*env.generators.clock,
+            env.conflicts,
+        )?
+        .into_iter()
+        .filter(|file| file.state != "deleted")
+        .take(HOTSPOT_FILES)
+        .collect())
     }
 
     /// Reap the job once it ended and apply its verdict, or record its
     /// failure.
-    pub(super) fn poll_plan_review(&mut self) -> Result<bool> {
+    pub(super) fn poll_plan_review(&mut self, env: &mut PlanningEnv<'_>) -> Result<bool> {
         let Some(provider) = self.plan_review.as_ref().map(|w| w.headless.provider) else {
             return Ok(false);
         };
         // The job's reply, session and failure are read by the provider
         // it ran on (ADR-t1063-1 decisions 2, 4 and 6).
-        let agent = self.job_agent(provider).unwrap_or(self.reviewer);
+        let agent = env.jobs.job_agent(provider).unwrap_or(env.jobs.reviewer);
         let watch = self.plan_review.as_mut().expect("read above");
-        let Some(outcome) = watch.headless.poll(&*self.files, agent)? else {
+        let Some(outcome) = watch.headless.poll(&**env.files, agent)? else {
             return Ok(false);
         };
         let watch = self.plan_review.take().expect("polled above");
         let duration_secs = watch.headless.started.elapsed().as_secs();
-        let stdout = self
+        let stdout = env
             .files
             .read_to_string(&watch.headless.stdout)
             .unwrap_or_default();
@@ -550,11 +659,14 @@ impl Supervisor<'_> {
         let verdict = outcome.and_then(|stdout| PlanReviewVerdict::parse(&stdout));
         // Only a job that failed or printed no verdict is read for a wall:
         // a verdict's own text may quote anything (task 438).
-        let failure = verdict.is_err().then(|| self.job_failure(&watch.headless));
+        let failure = verdict
+            .is_err()
+            .then(|| env.jobs.job_failure(&**env.pass.files, &watch.headless));
         let applied = verdict.map_err(|error| anyhow!(error)).and_then(|verdict| {
             let job = ActorContext::plan_review_job(watch.job.proposal_id, watch.job.attempt);
-            self.for_job(&job, |sv| {
-                sv.apply_plan_verdict(
+            env.for_job(&job, |env| {
+                Self::apply_plan_verdict(
+                    env,
                     &watch.job,
                     watch.revise_count,
                     verdict,
@@ -574,7 +686,8 @@ impl Supervisor<'_> {
             // stdout) may say when a usage limit resets.
             let said = format!("{error}\n{stdout}");
             let unusable = failure.and_then(|failure| {
-                self.job_provider_failed(
+                env.jobs.job_provider_failed(
+                    &mut env.pass,
                     watch.headless.provider,
                     failure,
                     (&error, &said),
@@ -583,6 +696,7 @@ impl Supervisor<'_> {
                 )
             });
             self.fail_plan_review(
+                env,
                 &watch.job,
                 &PlanReviewFailure {
                     error,
@@ -602,7 +716,7 @@ impl Supervisor<'_> {
     /// quoted), applied in one transaction; the inbox is told of a new
     /// `approve_plan` ask.
     fn apply_plan_verdict(
-        &mut self,
+        env: &mut PassEnv<'_>,
         job: &PlanReviewJob,
         revise_count: u32,
         verdict: PlanReviewVerdict,
@@ -616,7 +730,7 @@ impl Supervisor<'_> {
         let decided = decide_verdict(proposal, &verdict, revise_count);
         let precedents = quoted_precedents(
             &verdict.precedents,
-            &self.queue.answered_asks(usize::MAX >> 1)?,
+            &env.queue.answered_asks(usize::MAX >> 1)?,
         );
         let mut revise_reasons = verdict.reasons.clone();
         revise_reasons.extend(precedents.iter().cloned());
@@ -626,9 +740,9 @@ impl Supervisor<'_> {
             overridden,
             concern,
         } = decided;
-        let applied = self.queue.finish_plan_review(
+        let applied = env.queue.finish_plan_review(
             job,
-            &self.token,
+            env.token,
             &PlanReviewApply {
                 verdict: verdict.clone(),
                 decision,
@@ -656,27 +770,36 @@ impl Supervisor<'_> {
     /// (`plan_review_failed`) and is not reviewed again by itself, unless
     /// its provider could not be used and it moves (ADR-t1063-1 decision
     /// 4).
-    fn fail_plan_review(&mut self, job: &PlanReviewJob, failure: &PlanReviewFailure) {
+    fn fail_plan_review(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        job: &PlanReviewJob,
+        failure: &PlanReviewFailure,
+    ) {
         let error = &failure.error;
         match failure.unusable {
             Some((provider, reason)) => {
-                let next = super::goal_review::again_on(self.provider.fallback.jobs, provider);
+                let next = again_on(env.jobs.fallback_jobs(), provider);
                 warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; {} cannot be used ({}), and the proposal is reviewed again {next}", job.proposal_id, job.attempt, provider.as_str(), reason.as_str());
             }
             None => {
                 warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; it waits for a person", job.proposal_id, job.attempt);
             }
         }
-        if let Err(recorded) = self.queue.fail_plan_review(job, &self.token, failure) {
+        if let Err(recorded) = env
+            .pass
+            .queue
+            .fail_plan_review(job, env.pass.token, failure)
+        {
             warn!(error = %format_args!("{recorded:#}"), "proposal {}: the plan review failure could not be recorded: {recorded:#}", job.proposal_id);
         }
     }
 
     /// Apply the answered `approve_plan` asks (ADR-0041 decision 11).
-    fn apply_plan_answers(&mut self) -> Result<bool> {
+    fn apply_plan_answers(&mut self, env: &mut PlanningEnv<'_>) -> Result<bool> {
         let mut applied = false;
-        for answered in self.queue.plan_answers()? {
-            match self.queue.decide_plan(answered.id) {
+        for answered in env.queue.plan_answers()? {
+            match env.queue.decide_plan(answered.id) {
                 Ok(Some(decided)) => {
                     applied = true;
                     info!(ask_id = %answered.id, "proposal {} is {} as ask {} answered {}", decided.proposal.id(), decided.proposal.status().as_str(), answered.id, decided.answer)
@@ -694,21 +817,21 @@ impl Supervisor<'_> {
     /// no planner answered within the timeout, deliver every revise not
     /// delivered yet, and end the runtime's planners that are done
     /// (ADR-0041 decisions 12, 13).
-    fn tend_planners(&mut self, options: &LoopSettings) -> Result<()> {
-        self.close_person_planners();
-        if self.no_claude {
+    fn tend_planners(&mut self, env: &mut PlanningEnv<'_>, options: &LoopSettings) -> Result<()> {
+        self.close_person_planners(env);
+        if env.jobs.no_claude {
             return Ok(());
         }
-        let now = self.generators.clock.now();
+        let now = env.generators.clock.now();
         let timeout = i64::try_from(options.planner_timeout.as_secs())?;
-        let mut views = self.planner_views()?;
-        for revise in self.queue.revising_proposals()? {
+        let mut views = self.planner_views(env)?;
+        for revise in env.queue.revising_proposals()? {
             let proposal = revise.proposal.id();
             let gone = |planner_id: PlannerId| {
                 views
                     .iter()
                     .find(|view| view.planner.id == planner_id)
-                    .is_none_or(|view| self.planner_gone(view))
+                    .is_none_or(|view| self.planner_gone(env, view))
             };
             match revise_watch(
                 (revise.sent_at, revise.planner_id),
@@ -722,7 +845,7 @@ impl Supervisor<'_> {
                     info!(
                         "proposal {proposal}: planner {planner_id} is gone before it submitted again; the revise goes to another planner"
                     );
-                    self.queue.revise_lost(
+                    env.queue.revise_lost(
                         proposal,
                         Some(planner_id),
                         "its planner is gone before it submitted again",
@@ -732,23 +855,23 @@ impl Supervisor<'_> {
                     warn!(
                         "proposal {proposal}: planner {planner_id} did not submit it again within {timeout} seconds; the inbox is told"
                     );
-                    self.queue
+                    env.queue
                         .planner_unresponsive(proposal, Some(planner_id), waited, &[])?;
                 }
                 ReviseWatch::DeliveryLost => {
-                    self.queue
+                    env.queue
                         .revise_lost(proposal, None, "its delivery was never recorded")?;
                 }
                 // A revise held back by a question nobody answered yet waits
                 // for the person, not for a planner (ADR-t1704-1
                 // decision 4).
-                ReviseWatch::NoPlanner { .. } if self.revise_questions(proposal)?.0 => {}
+                ReviseWatch::NoPlanner { .. } if self.revise_questions(env, proposal)?.0 => {}
                 ReviseWatch::NoPlanner { waited } => {
-                    let holders = self.planner_holds(&views)?;
+                    let holders = self.planner_holds(env, &views)?;
                     warn!(
                         "proposal {proposal}: its revise waited {waited} seconds for a planner; the inbox is told"
                     );
-                    self.queue
+                    env.queue
                         .planner_unresponsive(proposal, None, waited, &holders)?;
                 }
                 ReviseWatch::Nothing => {}
@@ -761,7 +884,7 @@ impl Supervisor<'_> {
         // A revise with no planner that waited at the limit past the
         // timeout (task 884).
         let mut starved = None;
-        for revise in self.queue.revising_proposals()? {
+        for revise in env.queue.revising_proposals()? {
             if revise.sent_at.is_some() {
                 continue;
             }
@@ -785,22 +908,27 @@ impl Supervisor<'_> {
                     // One that waits for Claude gets it after its retry
                     // (ADR-t1394-2 decision 5).
                     if view.state != PlannerState::Idle
-                        || self.planner_at_wall(view).is_some()
-                        || !self.queue.claim_revise(proposal.id())?
+                        || self.planner_at_wall(env, view).is_some()
+                        || !env.queue.claim_revise(proposal.id())?
                     {
                         continue;
                     }
                     let workspace = view.planner.workspace_id.clone().unwrap_or_default();
                     let text = with_instruction(
                         plan_revise_request(proposal.id(), &revise.reasons),
-                        self.verifier.language().as_ref(),
+                        env.verifier.language().as_ref(),
                     );
-                    self.stamp_planner_input(view);
-                    if let Err(error) =
-                        self.send_to_planner(view, &workspace, Input::Text(&text), "revise")
-                    {
+                    self.stamp_planner_input(env, view);
+                    if let Err(error) = send_to_planner(
+                        &**env.files,
+                        &*env.queue,
+                        view,
+                        &workspace,
+                        Input::Text(&text),
+                        "revise",
+                    ) {
                         warn!(error = %format_args!("{error:#}"), "proposal {}: the revise could not be typed into workspace {workspace}: {error:#}", proposal.id());
-                        self.queue
+                        env.queue
                             .revise_lost(proposal.id(), None, "the typing failed")?;
                         continue;
                     }
@@ -809,40 +937,41 @@ impl Supervisor<'_> {
                         proposal.id(),
                         view.planner.id
                     );
-                    self.queue
+                    env.queue
                         .revise_sent(proposal.id(), view.planner.id, &workspace, None)?;
                 }
                 // Not listed, yet its session runs: it is not given up on
                 // that evidence; the timeout tells the inbox.
-                Some(view) if !self.planner_gone(view) => {}
-                _ if runtime_open < self.claim.limits.runtime_planners.value => {
+                Some(view) if !self.planner_gone(env, view) => {}
+                _ if runtime_open < env.runtime_planners => {
                     // A fix stopped at a question nobody answered yet is not
                     // started again without the answer; the answers given
                     // go with the revise to the same new planner
                     // (ADR-t1704-1 decision 4).
-                    let (held, answers) = self.revise_questions(proposal.id())?;
-                    if held || !self.queue.claim_revise(proposal.id())? {
+                    let (held, answers) = self.revise_questions(env, proposal.id())?;
+                    if held || !env.queue.claim_revise(proposal.id())? {
                         continue;
                     }
                     let handover = match answers.first() {
-                        Some(ask) => self.queue.planner_handover(ask.id)?,
+                        Some(ask) => env.queue.planner_handover(ask.id)?,
                         None => None,
                     };
                     let carried = Carried {
                         answers: &answers,
                         handover: handover.as_ref(),
                     };
-                    let opened = match self.open_planner_for(proposal, &revise.reasons, carried) {
-                        Ok(opened) => opened,
-                        Err(error) => {
-                            self.queue.revise_lost(
-                                proposal.id(),
-                                None,
-                                "the planner could not be opened",
-                            )?;
-                            return Err(error);
-                        }
-                    };
+                    let opened =
+                        match self.open_planner_for(env, proposal, &revise.reasons, carried) {
+                            Ok(opened) => opened,
+                            Err(error) => {
+                                env.queue.revise_lost(
+                                    proposal.id(),
+                                    None,
+                                    "the planner could not be opened",
+                                )?;
+                                return Err(error);
+                            }
+                        };
                     runtime_open += 1;
                     let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
                     info!(
@@ -850,17 +979,17 @@ impl Supervisor<'_> {
                         proposal.id(),
                         opened.planner.id
                     );
-                    self.queue.revise_sent(
+                    env.queue.revise_sent(
                         proposal.id(),
                         opened.planner.id,
                         &workspace,
                         Some(&opened.launch),
                     )?;
                     for ask in &answers {
-                        self.queue.ask_delivered(ask.id, &workspace)?;
+                        env.queue.ask_delivered(ask.id, &workspace)?;
                         info!(ask_id = %ask.id, "answer of ask {} went with the revise of proposal {} to planner {}", ask.id, proposal.id(), opened.planner.id);
                     }
-                    views = self.planner_views()?;
+                    views = self.planner_views(env)?;
                 }
                 // At the limit: the revise waits for a runtime planner to
                 // end, and past the timeout frees a place (task 884).
@@ -873,25 +1002,25 @@ impl Supervisor<'_> {
         }
         // Then the drafts the runtime or a job registered (ADR-0041
         // decision 16), within the same limit.
-        self.deliver_planner_answers(&views, &mut runtime_open)?;
+        self.deliver_planner_answers(env, &views, &mut runtime_open)?;
         // The planning requests a person made through the inbox
         // (ADR-t1394-1) come before the runtime's own drafts and findings:
         // a person waits on them.
-        self.open_request_planners(&mut runtime_open)?;
-        self.open_draft_planners(&mut runtime_open)?;
+        self.open_request_planners(env, &mut runtime_open)?;
+        self.open_draft_planners(env, &mut runtime_open)?;
         // Then the findings marked for a proposal (ADR-0044 decision 19),
         // within the same limit, once those whose proposal ended are
         // settled.
-        self.settle_findings()?;
-        self.open_finding_planners(&mut runtime_open)?;
+        self.settle_findings(env)?;
+        self.open_finding_planners(env, &mut runtime_open)?;
         // A headless planner's turn that failed at Claude waits for it, and
         // one its wrapper stopped at its limit tells the inbox
         // (ADR-t1394-2 decisions 3 and 5).
-        self.tend_planner_walls(&views)?;
-        self.tell_of_stopped_planner_turns(&views)?;
-        self.end_runtime_planners(&views)?;
+        self.tend_planner_walls(env, &views)?;
+        self.tell_of_stopped_planner_turns(env, &views)?;
+        self.end_runtime_planners(env, &views)?;
         if let Some(proposal) = starved {
-            self.release_runtime_planner(proposal, timeout, &views)?;
+            self.release_runtime_planner(env, proposal, timeout, &views)?;
         }
         Ok(())
     }
@@ -899,8 +1028,12 @@ impl Supervisor<'_> {
     /// The runtime's planners alive, each with why it is not ended
     /// ([`Self::busy_reasons`]): what holds the limit a revise with no
     /// planner waits on (task 884).
-    fn planner_holds(&mut self, views: &[PlannerView]) -> Result<Vec<PlannerHold>> {
-        let revising = self.queue.revising_proposals()?;
+    fn planner_holds(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        views: &[PlannerView],
+    ) -> Result<Vec<PlannerHold>> {
+        let revising = env.queue.revising_proposals()?;
         views
             .iter()
             .filter(|view| view.planner.origin == PlannerOrigin::Runtime && view.alive)
@@ -909,7 +1042,7 @@ impl Supervisor<'_> {
                     planner_id: view.planner.id,
                     state: view.state.as_str().to_owned(),
                     busy: self
-                        .busy_reasons(view, &revising)?
+                        .busy_reasons(env, view, &revising)?
                         .into_iter()
                         .map(PlannerBusy::as_str)
                         .collect(),
@@ -931,11 +1064,12 @@ impl Supervisor<'_> {
     /// place anyway.
     fn release_runtime_planner(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         proposal: ProposalId,
         timeout: i64,
         views: &[PlannerView],
     ) -> Result<()> {
-        let now = self.generators.clock.now();
+        let now = env.generators.clock.now();
         let runtime = |view: &&PlannerView| view.planner.origin == PlannerOrigin::Runtime;
         if views.iter().filter(runtime).any(|view| {
             self.planner_exits
@@ -944,7 +1078,7 @@ impl Supervisor<'_> {
         }) {
             return Ok(());
         }
-        let revising = self.queue.revising_proposals()?;
+        let revising = env.queue.revising_proposals()?;
         for view in views
             .iter()
             .filter(runtime)
@@ -953,7 +1087,7 @@ impl Supervisor<'_> {
             let Some(workspace) = view.planner.workspace_id.clone() else {
                 continue;
             };
-            let busy = self.busy_reasons(view, &revising)?;
+            let busy = self.busy_reasons(env, view, &revising)?;
             // An answer not sent yet is sent on a later pass (one whose
             // sending failed ends the planner and goes to a new one). One
             // that waits for Claude is not done either (ADR-t1394-2
@@ -965,7 +1099,7 @@ impl Supervisor<'_> {
             {
                 continue;
             }
-            let last = planner_last_activity(&*self.files, &view.dir, view.planner.created_at)?;
+            let last = planner_last_activity(&**env.files, &view.dir, view.planner.created_at)?;
             if now - last <= timeout {
                 continue;
             }
@@ -976,9 +1110,16 @@ impl Supervisor<'_> {
                 now - last,
                 reasons.join(", ")
             );
-            self.send_to_planner(view, &workspace, Input::Exit, "exit")?;
+            send_to_planner(
+                &**env.files,
+                &*env.queue,
+                view,
+                &workspace,
+                Input::Exit,
+                "exit",
+            )?;
             self.planner_exits.push((id, Instant::now()));
-            self.queue.record_queue_event(
+            env.queue.record_queue_event(
                 EventKind::PlannerReleased,
                 json!({
                     "planner_id": id,
@@ -1001,6 +1142,7 @@ impl Supervisor<'_> {
     /// asked to exit. Empty for an idle planner that is done.
     fn busy_reasons(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         view: &PlannerView,
         revising: &[RevisingProposal],
     ) -> Result<Vec<PlannerBusy>> {
@@ -1020,10 +1162,10 @@ impl Supervisor<'_> {
         }) {
             busy.push(PlannerBusy::RevisePending);
         }
-        if let Some(wait) = self.question_wait(view)? {
+        if let Some(wait) = self.question_wait(env, view)? {
             busy.push(wait);
         }
-        if self.planner_at_wall(view).is_some() {
+        if self.planner_at_wall(env, view).is_some() {
             busy.push(PlannerBusy::ProviderWall);
         }
         if self.planner_exits.iter().any(|(sent, _)| *sent == id) {
@@ -1039,7 +1181,7 @@ impl Supervisor<'_> {
     /// is). A planner of the runtime's an older binary opened in a
     /// workspace is over: the interactive route is retired (ADR-t1433-2
     /// decision 3) and nothing is sent to it.
-    fn planner_gone(&self, view: &PlannerView) -> bool {
+    fn planner_gone(&self, env: &PlanningEnv<'_>, view: &PlannerView) -> bool {
         if retired_workspace(&view.planner) {
             return true;
         }
@@ -1048,29 +1190,29 @@ impl Supervisor<'_> {
             PlannerState::Closed => view
                 .planner
                 .wrapper_pid
-                .is_none_or(|pid| view.planner.exited_at.is_some() || !self.processes.alive(pid)),
+                .is_none_or(|pid| view.planner.exited_at.is_some() || !env.processes.alive(pid)),
             _ => false,
         }
     }
 
     /// The planners not closed, each judged by [`planner_view`].
-    pub(super) fn planner_views(&self) -> Result<Vec<PlannerView>> {
-        self.queue
+    pub(super) fn planner_views(&self, env: &PlanningEnv<'_>) -> Result<Vec<PlannerView>> {
+        env.queue
             .planners(false)?
             .into_iter()
-            .map(|planner| self.judge_planner(planner))
+            .map(|planner| self.judge_planner(env, planner))
             .collect()
     }
 
     /// `planner` judged by [`planner_view`] now.
-    fn judge_planner(&self, planner: PlannerSession) -> Result<PlannerView> {
+    fn judge_planner(&self, env: &PlanningEnv<'_>, planner: PlannerSession) -> Result<PlannerView> {
         let probes = PlannerProbes {
-            sessions: self.sessions,
-            processes: &*self.processes,
-            files: &*self.files,
-            signals: self.signals,
-            clock: &*self.generators.clock,
-            planners_dir: &self.layout.planners_dir,
+            sessions: env.sessions,
+            processes: &**env.processes,
+            files: &**env.files,
+            signals: env.jobs.signals,
+            clock: &*env.generators.clock,
+            planners_dir: &env.layout.planners_dir,
         };
         planner_view(&probes, planner)
     }
@@ -1078,9 +1220,9 @@ impl Supervisor<'_> {
     /// Stamp a request the supervisor is about to write for the planner of
     /// `view`, so an idle marker from before it no longer counts. A stamp
     /// that cannot be written is logged.
-    pub(super) fn stamp_planner_input(&self, view: &PlannerView) {
+    pub(super) fn stamp_planner_input(&self, env: &PlanningEnv<'_>, view: &PlannerView) {
         if let Err(error) =
-            screen_idle::record_supervisor_input(&*self.files, &planner_idle_marker(&view.dir))
+            screen_idle::record_supervisor_input(&**env.files, &planner_idle_marker(&view.dir))
         {
             warn!(error = %error, "planner {}: the stamp of the typed text could not be written: {error}", view.planner.id);
         }
@@ -1090,6 +1232,7 @@ impl Supervisor<'_> {
     /// what it carries from the planner before it.
     fn open_planner_for(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         proposal: &Proposal,
         reasons: &[String],
         carried: Carried<'_>,
@@ -1097,10 +1240,10 @@ impl Supervisor<'_> {
         let tasks = proposal
             .task_ids()
             .iter()
-            .map(|&id| Ok(self.queue.show(id)?.task))
+            .map(|&id| Ok(env.queue.show(id)?.task))
             .collect::<Result<Vec<_>>>()?;
         open_runtime_planner(
-            &self.planner_launch(),
+            &self.planner_launch(env),
             proposal.id(),
             &tasks,
             reasons,
@@ -1112,8 +1255,12 @@ impl Supervisor<'_> {
     /// `proposal`: whether one is not answered yet, which holds its revise
     /// back from a new planner, and those answered, which go with it
     /// (ADR-t1704-1 decision 4).
-    fn revise_questions(&mut self, proposal: ProposalId) -> Result<(bool, Vec<Ask>)> {
-        let (answered, open): (Vec<Ask>, Vec<Ask>) = self
+    fn revise_questions(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        proposal: ProposalId,
+    ) -> Result<(bool, Vec<Ask>)> {
+        let (answered, open): (Vec<Ask>, Vec<Ask>) = env
             .queue
             .proposal_questions(proposal)?
             .into_iter()
@@ -1125,26 +1272,26 @@ impl Supervisor<'_> {
     /// read as each planner opens; an old `[roles.runtime_planner] route`
     /// in it is warned of once per supervisor
     /// ([`Self::warn_ignored_route_setting`]).
-    pub(super) fn planner_launch(&self) -> PlannerLaunch<'_> {
-        let layout = self.layout;
-        let roles = self.verifier.role_models().unwrap_or_else(|error| {
+    pub(super) fn planner_launch<'e>(&mut self, env: &'e PlanningEnv<'_>) -> PlannerLaunch<'e> {
+        let layout = env.layout;
+        let roles = env.verifier.role_models().unwrap_or_else(|error| {
             warn!(error = %format_args!("{error:#}"), "[roles] could not be read; the planner starts as before: {error:#}");
             Default::default()
         });
         self.warn_ignored_route_setting(&roles);
         PlannerLaunch {
-            queue: &*self.queue,
-            backend: self.sessions,
-            files: &*self.files,
+            queue: &*env.queue,
+            backend: env.sessions,
+            files: &**env.files,
             db: &layout.db,
             planners_dir: &layout.planners_dir,
             repo_root: &layout.repo_root,
             runner: &layout.runner,
             claude: &layout.claude,
             plugin_dir: layout.plugin_dir.as_deref(),
-            language: self.verifier.language(),
+            language: env.verifier.language(),
             roles,
-            turn_limits: self.stall.turn_limits(),
+            turn_limits: env.turn_limits,
         }
     }
 
@@ -1153,11 +1300,9 @@ impl Supervisor<'_> {
     /// accepted and ignored, whatever its value, and the runtime's planners
     /// run headless only (ADR-t1433-2 decision 3, handled as ADR-t1433-3
     /// decision 2 handles `[headless] wrapper`).
-    fn warn_ignored_route_setting(&self, roles: &RoleModels) {
-        let warned = self.route_setting_warned.load(Ordering::Relaxed);
-        if let Some(route) = warns_of_ignored_route(warned, roles)
-            && !self.route_setting_warned.swap(true, Ordering::Relaxed)
-        {
+    fn warn_ignored_route_setting(&mut self, roles: &RoleModels) {
+        if let Some(route) = warns_of_ignored_route(self.route_setting_warned, roles) {
+            self.route_setting_warned = true;
             warn!(
                 "[roles.runtime_planner] route = {route:?} of dagq.toml is ignored: the runtime's planners run headless only, in the background"
             );
@@ -1169,8 +1314,8 @@ impl Supervisor<'_> {
     /// revise or an answer for what it owned goes to a new planner of the
     /// runtime's. A queue that cannot close one is logged; the next pass
     /// tries again.
-    fn close_person_planners(&mut self) {
-        match planner::close_person_planners(&*self.queue) {
+    fn close_person_planners(&mut self, env: &mut PlanningEnv<'_>) {
+        match planner::close_person_planners(&*env.queue) {
             Ok(closed) => {
                 for id in closed {
                     info!(
@@ -1193,25 +1338,25 @@ impl Supervisor<'_> {
     /// workspace is closed without cmux, its workspace left for a person to
     /// close (ADR-t1433-2 decision 3). A person's planner is closed by
     /// [`Self::close_person_planners`] (decision 5).
-    fn end_runtime_planners(&mut self, views: &[PlannerView]) -> Result<()> {
-        let revising = self.queue.revising_proposals()?;
+    fn end_runtime_planners(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        views: &[PlannerView],
+    ) -> Result<()> {
+        let revising = env.queue.revising_proposals()?;
         for view in views
             .iter()
             .filter(|view| view.planner.origin == PlannerOrigin::Runtime)
         {
             let id = view.planner.id;
             let workspace = view.planner.workspace_id.clone();
-            let asked = self
-                .planner_exits
-                .iter()
-                .find(|(sent, _)| *sent == id)
-                .map(|(_, at)| at.elapsed());
-            let overdue = asked.is_some_and(|elapsed| elapsed > self.sessions.exit_timeout());
-            if self.planner_gone(view) || overdue {
+            let asked = exit_asked(&self.planner_exits, id, Instant::now());
+            let overdue = exit_overdue(asked, env.sessions.exit_timeout());
+            if self.planner_gone(env, view) || overdue {
                 if overdue {
                     warn!(
                         "planner {id} of the runtime did not exit within {} seconds of its exit request; its wrapper is stopped",
-                        self.sessions.exit_timeout().as_secs()
+                        env.sessions.exit_timeout().as_secs()
                     );
                 }
                 // Only a background wrapper is stopped: the runtime does
@@ -1220,9 +1365,9 @@ impl Supervisor<'_> {
                 if let Some(handle) = workspace
                     .as_deref()
                     .filter(|handle| crate::domain::background_wrapper::is_background(handle))
-                    && self.sessions.exists(handle)?
+                    && env.sessions.exists(handle)?
                 {
-                    stop_session(self.sessions, handle, StopRoute::Planner)?;
+                    stop_session(env.sessions, handle, StopRoute::Planner)?;
                     workspace_closed = true;
                 }
                 let (code, reason) = if retired_workspace(&view.planner) {
@@ -1249,7 +1394,7 @@ impl Supervisor<'_> {
                         PlannerCloseCode::RuntimeExitTimedOut,
                         format!(
                             "planner {id} of the runtime did not exit within {} seconds of its exit request",
-                            self.sessions.exit_timeout().as_secs()
+                            env.sessions.exit_timeout().as_secs()
                         ),
                     )
                 } else {
@@ -1285,7 +1430,7 @@ impl Supervisor<'_> {
                         ),
                     }
                 };
-                self.queue.end_planner(
+                env.queue.end_planner(
                     id,
                     &planner::planner_closed_payload(
                         &view.planner,
@@ -1308,17 +1453,24 @@ impl Supervisor<'_> {
             // request, or whose request failed): asked again.
             if view.planner.answer_wait_at.is_some() {
                 if asked.is_none() {
-                    self.request_exit(view, workspace);
+                    self.request_exit(env, view, workspace);
                 }
                 continue;
             }
-            let busy = self.busy_reasons(view, &revising)?;
+            let busy = self.busy_reasons(env, view, &revising)?;
             if busy.is_empty() {
-                self.send_to_planner(view, workspace, Input::Exit, "exit")?;
+                send_to_planner(
+                    &**env.files,
+                    &*env.queue,
+                    view,
+                    workspace,
+                    Input::Exit,
+                    "exit",
+                )?;
                 self.planner_exits.push((id, Instant::now()));
                 info!("planner {id} of the runtime is done; asked it to exit");
             } else if answer_wait_only(&busy) && view.planner.route == PlannerRoute::Headless {
-                self.end_for_answer_wait(view, workspace, &revising)?;
+                self.end_for_answer_wait(env, view, workspace, &revising)?;
             }
         }
         Ok(())
@@ -1333,18 +1485,19 @@ impl Supervisor<'_> {
     /// goes to a new planner once its row is closed (decision 2).
     fn end_for_answer_wait(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         view: &PlannerView,
         workspace: &str,
         revising: &[RevisingProposal],
     ) -> Result<()> {
         let id = view.planner.id;
-        let now = self.judge_planner(self.queue.planner(id)?)?;
-        let busy = self.busy_reasons(&now, revising)?;
+        let now = self.judge_planner(env, env.queue.planner(id)?)?;
+        let busy = self.busy_reasons(env, &now, revising)?;
         if !answer_wait_only(&busy) || now.planner.answer_wait_at.is_some() {
             return Ok(());
         }
         let asks: Vec<AskId> = self
-            .planner_questions(&now)?
+            .planner_questions(env, &now)?
             .into_iter()
             .filter(|ask| ask.answered_at.is_none() && ask.closed_at.is_none())
             .map(|ask| ask.id)
@@ -1368,10 +1521,17 @@ impl Supervisor<'_> {
             "idle_since": now.idle_since,
             "reason": reason,
         });
-        if asks.is_empty() || !self.queue.planner_answer_wait(id, &asks, &payload)? {
+        if asks.is_empty() || !env.queue.planner_answer_wait(id, &asks, &payload)? {
             return Ok(());
         }
-        self.send_to_planner(&now, workspace, Input::Exit, "exit")?;
+        send_to_planner(
+            &**env.files,
+            &*env.queue,
+            &now,
+            workspace,
+            Input::Exit,
+            "exit",
+        )?;
         self.planner_exits.push((id, Instant::now()));
         info!("{reason}");
         Ok(())
@@ -1394,17 +1554,18 @@ impl Supervisor<'_> {
     /// marked or closed since.
     pub(super) fn hand_over_undelivered_answer(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         view: &PlannerView,
         workspace: &str,
         ask: AskId,
     ) -> Result<()> {
         let id = view.planner.id;
-        let view = &self.judge_planner(self.queue.planner(id)?)?;
-        if !view.alive || view.planner.answer_wait_at.is_some() || self.request_unread(view)? {
+        let view = &self.judge_planner(env, env.queue.planner(id)?)?;
+        if !view.alive || view.planner.answer_wait_at.is_some() || self.request_unread(env, view)? {
             return Ok(());
         }
-        let questions = self.planner_questions(view)?;
-        if self.answer_unread(view, &questions)? {
+        let questions = self.planner_questions(env, view)?;
+        if self.answer_unread(env, view, &questions)? {
             return Ok(());
         }
         let mut asks = vec![ask];
@@ -1414,7 +1575,7 @@ impl Supervisor<'_> {
                 .filter(|other| other.answered_at.is_none() && other.closed_at.is_none())
                 .map(|other| other.id),
         );
-        let revise = self
+        let revise = env
             .queue
             .revising_proposals()?
             .iter()
@@ -1434,11 +1595,11 @@ impl Supervisor<'_> {
             "idle_since": view.idle_since,
             "reason": reason,
         });
-        if !self.queue.planner_answer_undelivered(id, ask, &payload)? {
+        if !env.queue.planner_answer_undelivered(id, ask, &payload)? {
             return Ok(());
         }
         if !self.planner_exits.iter().any(|(sent, _)| *sent == id) {
-            self.request_exit(view, workspace);
+            self.request_exit(env, view, workspace);
         }
         warn!("{reason}");
         Ok(())
@@ -1446,8 +1607,8 @@ impl Supervisor<'_> {
 
     /// Whether a request in the `turns/` of the planner of `view`, taken or
     /// not, was written after its last turn ended (its idle marker).
-    fn request_unread(&self, view: &PlannerView) -> Result<bool> {
-        let paths = match self
+    fn request_unread(&self, env: &PlanningEnv<'_>, view: &PlannerView) -> Result<bool> {
+        let paths = match env
             .files
             .read_dir(&crate::domain::turn::turns_dir(&view.dir))
         {
@@ -1455,13 +1616,13 @@ impl Supervisor<'_> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error).context("read the requests of the planner"),
         };
-        let idle = self.files.modified(&planner_idle_marker(&view.dir)).ok();
+        let idle = env.files.modified(&planner_idle_marker(&view.dir)).ok();
         Ok(paths.iter().any(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .and_then(crate::domain::turn::request_seq)
                 .is_some()
-                && match (self.files.modified(path), idle) {
+                && match (env.files.modified(path), idle) {
                     (Ok(written), Some(idle)) => written > idle,
                     _ => true,
                 }
@@ -1471,12 +1632,69 @@ impl Supervisor<'_> {
     /// Ask the marked planner of `view` to exit. A request that cannot be
     /// written is waited out like one not obeyed: past the exit timeout its
     /// wrapper is stopped and its row closed, so its place is freed.
-    fn request_exit(&mut self, view: &PlannerView, workspace: &str) {
-        if let Err(error) = self.send_to_planner(view, workspace, Input::Exit, "exit") {
+    fn request_exit(&mut self, env: &mut PlanningEnv<'_>, view: &PlannerView, workspace: &str) {
+        if let Err(error) = send_to_planner(
+            &**env.files,
+            &*env.queue,
+            view,
+            workspace,
+            Input::Exit,
+            "exit",
+        ) {
             warn!(error = %format_args!("{error:#}"), "the exit request of planner {} of the runtime could not be written: {error:#}; its wrapper is stopped past the exit timeout", view.planner.id);
         }
         self.planner_exits.push((view.planner.id, Instant::now()));
     }
+}
+
+/// Remove the runners (the binary snapshots) of the planners whose wrapper
+/// is done ([`planner::remove_unused_planner_runners`]); a failure is
+/// logged only, and retried on the next sweep.
+fn remove_unused_planner_runners(env: &PassEnv<'_>) {
+    match planner::remove_unused_planner_runners(
+        &*env.queue,
+        &**env.processes,
+        &**env.files,
+        &*env.generators.clock,
+        &env.layout.planners_dir,
+    ) {
+        Ok(removed) if !removed.is_empty() => {
+            info!("removed the runners of {} ended planners", removed.len());
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(error = %format_args!("{error:#}"), "the runners of ended planners could not be removed: {error:#}");
+        }
+    }
+}
+
+/// Every file the landings conflicted in, as `stats` counts them over its
+/// default window, most conflicts first; its `alert` is judged by the
+/// `[conflicts]` thresholds this process read (`conflicts`). The plan
+/// review's material, and the claim's deferral (ADR-0069).
+pub(super) fn conflict_hotspot_files(
+    queue: &dyn Queue,
+    repository: &dyn Repository,
+    clock: &dyn crate::application::Clock,
+    conflicts: crate::domain::stats::ConflictConfigReport,
+) -> Result<Vec<ConflictHotspot>> {
+    let events = queue.all_events()?;
+    let live = LiveSnapshot {
+        history: crate::application::stats::conflict_history(&events, &|since| {
+            repository.main_history(since)
+        }),
+        conflicts,
+        ..LiveSnapshot::default()
+    };
+    let stats = crate::domain::stats::stats(
+        &events,
+        &queue.task_goals()?,
+        clock.now(),
+        SlotSnapshot::default(),
+        &StatsQuery::default(),
+        &live,
+    );
+    Ok(stats.conflict_hotspots.files)
 }
 
 /// What a pass makes of a revise on its way to a planner (ADR-0041
@@ -1542,6 +1760,21 @@ fn revise_watch(
     }
 }
 
+/// How long before `now` the runtime's planner `id` was asked to exit, if
+/// this process asked it (`exits`, [`PlanningState::planner_exits`]).
+fn exit_asked(exits: &[(PlannerId, Instant)], id: PlannerId, now: Instant) -> Option<Duration> {
+    exits
+        .iter()
+        .find(|(sent, _)| *sent == id)
+        .map(|(_, at)| now.saturating_duration_since(*at))
+}
+
+/// Whether a planner asked to exit `asked` before did not exit within the
+/// exit `timeout`: its wrapper is stopped and its row closed.
+fn exit_overdue(asked: Option<Duration>, timeout: Duration) -> bool {
+    asked.is_some_and(|elapsed| elapsed > timeout)
+}
+
 /// Whether `busy` holds a planner of the runtime's only for a person's
 /// answer (ADR-t1704-1 decision 1): its `planner_question` is not
 /// answered, and nothing else holds it but a revise it took, whose fixes
@@ -1594,12 +1827,16 @@ impl PlannerBusy {
     }
 }
 
-impl Supervisor<'_> {
+impl PlanningState {
     /// The `planner_question`s of a planner of the runtime's: about its
     /// request (or a draft a planner of it added), its finding, the drafts
     /// of its bundle, or the tasks of the proposal it was opened for; one
     /// closed only when it was delivered to this planner.
-    fn planner_questions(&mut self, view: &PlannerView) -> Result<Vec<Ask>> {
+    fn planner_questions(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        view: &PlannerView,
+    ) -> Result<Vec<Ask>> {
         let (draft, finding, request) = (
             view.planner.draft_task_id,
             view.planner.finding_id,
@@ -1609,21 +1846,21 @@ impl Supervisor<'_> {
         // tasks (ADR-t1704-1 decision 4).
         let proposal_tasks = match (draft, finding, request, view.planner.proposal_id) {
             (None, None, None, Some(proposal)) => {
-                self.queue.show_proposal(proposal)?.task_ids().to_vec()
+                env.queue.show_proposal(proposal)?.task_ids().to_vec()
             }
             (None, None, None, None) => return Ok(Vec::new()),
             _ => Vec::new(),
         };
         // The drafts of its bundle (ADR-t807-1).
         let drafts = match draft {
-            Some(_) => self.queue.planner_draft_tasks(view.planner.id)?,
+            Some(_) => env.queue.planner_draft_tasks(view.planner.id)?,
             None => Vec::new(),
         };
         // A request's planner asks about the request or a draft a planner
         // of it added (ADR-t2015-1), a finding's about the finding, a
         // draft's about the drafts of its bundle.
         let mut asks = Vec::new();
-        for ask in self.queue.asks(crate::application::AskQuery {
+        for ask in env.queue.asks(crate::application::AskQuery {
             all: true,
             ..Default::default()
         })? {
@@ -1639,11 +1876,11 @@ impl Supervisor<'_> {
                                 && (ask.closed_at.is_none()
                                     || match view.planner.workspace_id.as_deref() {
                                         Some(workspace) => {
-                                            self.queue.ask_delivered_to(ask.id, workspace)?
+                                            env.queue.ask_delivered_to(ask.id, workspace)?
                                         }
                                         None => false,
                                     })
-                                && self.queue.answer_request(&ask)? == Some(request))
+                                && env.queue.answer_request(&ask)? == Some(request))
                     }
                     (Some(finding), None) => ask.finding_id == Some(finding),
                     (None, None) if draft.is_none() => {
@@ -1656,7 +1893,7 @@ impl Supervisor<'_> {
                             && (ask.closed_at.is_none()
                                 || match view.planner.workspace_id.as_deref() {
                                     Some(workspace) => {
-                                        self.queue.ask_delivered_to(ask.id, workspace)?
+                                        env.queue.ask_delivered_to(ask.id, workspace)?
                                     }
                                     None => false,
                                 })
@@ -1687,15 +1924,19 @@ impl Supervisor<'_> {
     /// close is done; an answer a new planner carried in its prompt is
     /// timed by the planner's opening. An ask closed without a delivery
     /// holds nothing.
-    fn question_wait(&mut self, view: &PlannerView) -> Result<Option<PlannerBusy>> {
-        let asks = self.planner_questions(view)?;
+    fn question_wait(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        view: &PlannerView,
+    ) -> Result<Option<PlannerBusy>> {
+        let asks = self.planner_questions(env, view)?;
         if asks
             .iter()
             .any(|ask| ask.closed_at.is_none() && ask.answered_at.is_some())
         {
             return Ok(Some(PlannerBusy::AnswerUndelivered));
         }
-        if self.answer_unread(view, &asks)? {
+        if self.answer_unread(env, view, &asks)? {
             return Ok(Some(PlannerBusy::AnswerTyped));
         }
         if asks
@@ -1709,13 +1950,18 @@ impl Supervisor<'_> {
 
     /// Whether the answer of one of `asks` was delivered to the planner of
     /// `view` and not taken up yet ([`Self::question_wait`]).
-    fn answer_unread(&mut self, view: &PlannerView, asks: &[Ask]) -> Result<bool> {
+    fn answer_unread(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        view: &PlannerView,
+        asks: &[Ask],
+    ) -> Result<bool> {
         let workspace = view.planner.workspace_id.as_deref();
         for ask in asks {
             let Some(workspace) = workspace else {
                 break;
             };
-            if !self.queue.ask_delivered_to(ask.id, workspace)? {
+            if !env.queue.ask_delivered_to(ask.id, workspace)? {
                 continue;
             }
             // A headless planner took the answer up once a turn carrying
@@ -1723,7 +1969,7 @@ impl Supervisor<'_> {
             // request, or the provider retry after it): its turns are
             // recorded, and a stub's turn may end within the second the
             // answer was claimed.
-            if let Some(taken) = self.headless_answer_taken(view, ask.id)? {
+            if let Some(taken) = self.headless_answer_taken(env, view, ask.id)? {
                 if !taken {
                     return Ok(true);
                 }
@@ -1733,7 +1979,7 @@ impl Supervisor<'_> {
             // answer up yet. Its second counts as before: the views of a
             // pass are taken before the pass types, and an agent does not
             // take an answer up within the second it was typed.
-            let typed = self
+            let typed = env
                 .queue
                 .answer_claimed_at(ask.id, workspace)?
                 .unwrap_or(view.planner.created_at);
@@ -1918,6 +2164,27 @@ mod tests {
         ] {
             assert!(!answer_wait_only(busy), "{busy:?}");
         }
+    }
+
+    /// A planner asked to exit is past the exit timeout only once more
+    /// than the timeout passed since its request, judged on the time and
+    /// the requests given; one never asked is not.
+    #[test]
+    fn a_planner_asked_to_exit_is_overdue_only_past_the_exit_timeout() {
+        let timeout = Duration::from_secs(60);
+        let now = Instant::now();
+        let (asked, other) = (PlannerId::new(7), PlannerId::new(8));
+        let at = |ago: Duration| vec![(asked, now.checked_sub(ago).unwrap())];
+        assert_eq!(exit_asked(&at(timeout), other, now), None);
+        assert!(!exit_overdue(None, timeout));
+        let exits = at(timeout);
+        assert_eq!(exit_asked(&exits, asked, now), Some(timeout));
+        assert!(!exit_overdue(exit_asked(&exits, asked, now), timeout));
+        let exits = at(timeout + Duration::from_millis(1));
+        assert!(exit_overdue(exit_asked(&exits, asked, now), timeout));
+        // A request this process recorded after `now` is no wait yet.
+        let later = vec![(asked, now + timeout)];
+        assert_eq!(exit_asked(&later, asked, now), Some(Duration::ZERO));
     }
 
     /// Any value of the old key is warned of, and only once; no key is

@@ -143,7 +143,7 @@ impl Supervisor<'_> {
             return Ok(None);
         };
         // A handoff starts no e2e: the next process runs it.
-        if self.e2e_retry_pending(run) || self.handoff.is_some() {
+        if self.e2e_retry_pending(run) || self.registration.handoff.is_some() {
             return Ok(Some(Phase::AwaitingE2e));
         }
         if self
@@ -382,11 +382,12 @@ impl Supervisor<'_> {
         let reason = verdict
             .failure
             .unwrap_or_else(|| outcome.failure(&watch.settings));
-        let parked = self
-            .queue
-            .park_e2e_failed(run.id(), &self.token, &reason, payload)?;
+        let parked =
+            self.queue
+                .park_e2e_failed(run.id(), &self.registration.token, &reason, payload)?;
         warn!(run_id = %run.id(), "run {}: its e2e failed, so it waits for a resume instead of landing: {reason}", run.id());
-        self.queue.release_lease(run.id(), &self.token)?;
+        self.queue
+            .release_lease(run.id(), &self.registration.token)?;
         Ok(Step::Done(Box::new(parked)))
     }
 }

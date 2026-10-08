@@ -84,7 +84,7 @@ impl SessionWatch {
         );
         let parked = sv.queue.park_live(
             run.id(),
-            &sv.token,
+            &sv.registration.token,
             &reason,
             json!({
                 "instruction": instruction,

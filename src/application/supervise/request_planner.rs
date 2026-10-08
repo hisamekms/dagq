@@ -31,7 +31,7 @@ use crate::{
     },
 };
 
-impl Supervisor<'_> {
+impl PlanningState {
     /// Deliver the answer of a `planner_question` about `request`, or about
     /// a draft its planner added (ADR-t2015-1): typed into the live
     /// planner opened for it once it stopped after asking, handed to a new
@@ -40,12 +40,13 @@ impl Supervisor<'_> {
     /// (proposed, declined, out of planners) or the draft is kept.
     pub(super) fn deliver_request_answer(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         views: &[PlannerView],
         runtime_open: &mut usize,
         ask: &Ask,
         request: RequestId,
     ) -> Result<()> {
-        match self.queue.planner_answer_route(ask)? {
+        match env.queue.planner_answer_route(ask)? {
             PlannerAnswerRoute::Planner(planner) => {
                 let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                     return Ok(());
@@ -53,9 +54,9 @@ impl Supervisor<'_> {
                 // An answer whose sending to it failed goes to a new
                 // planner, not to it again.
                 if let Some(workspace) = view.planner.workspace_id.as_deref()
-                    && self.queue.ask_delivery_failed(ask.id, planner.id)?
+                    && env.queue.ask_delivery_failed(ask.id, planner.id)?
                 {
-                    return self.hand_over_undelivered_answer(view, workspace, ask.id);
+                    return self.hand_over_undelivered_answer(env, view, workspace, ask.id);
                 }
                 // The planner that asked is typed to once it stopped after
                 // asking; a question someone else opened waits only for it
@@ -64,7 +65,7 @@ impl Supervisor<'_> {
                 // (ADR-t1394-2 decision 5).
                 if answer_waits(
                     view.state,
-                    self.planner_at_wall(view).is_some(),
+                    self.planner_at_wall(env, view).is_some(),
                     ask.asked_by == SessionRole::Planner.as_str(),
                     view.idle_since,
                     ask.created_at,
@@ -75,7 +76,7 @@ impl Supervisor<'_> {
                     return Ok(());
                 };
                 // Claimed first, so two supervisors type it once (task 406).
-                if !self
+                if !env
                     .queue
                     .claim_planner_answer(ask.id, planner.id, &workspace)?
                 {
@@ -86,18 +87,25 @@ impl Supervisor<'_> {
                     ask.id,
                     ask.answer.as_deref().unwrap_or_default()
                 );
-                self.stamp_planner_input(view);
+                self.stamp_planner_input(env, view);
                 // Typed into an interactive planner, the next turn of a
                 // headless one (ADR-t1394-2).
                 let what = format!("answer of ask {}", ask.id);
-                match self.send_to_planner(view, &workspace, Input::Text(&text), &what) {
+                match send_to_planner(
+                    &**env.files,
+                    &*env.queue,
+                    view,
+                    &workspace,
+                    Input::Text(&text),
+                    &what,
+                ) {
                     Ok(_) => {
-                        self.queue.ask_delivered(ask.id, &workspace)?;
+                        env.queue.ask_delivered(ask.id, &workspace)?;
                         info!(ask_id = %ask.id, "answer of ask {} sent to planner {} of request {request} in workspace {workspace}", ask.id, planner.id);
                     }
                     Err(error) => {
                         warn!(ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; the planner is ended and the answer goes to a new planner", ask.id, planner.id);
-                        self.queue.record_queue_event(
+                        env.queue.record_queue_event(
                             EventKind::AskDeliveryFailed,
                             json!({
                                 "ask_id": ask.id,
@@ -107,30 +115,28 @@ impl Supervisor<'_> {
                                 "error": format!("{error:#}"),
                             }),
                         )?;
-                        self.hand_over_undelivered_answer(view, &workspace, ask.id)?;
+                        self.hand_over_undelivered_answer(env, view, &workspace, ask.id)?;
                     }
                 }
             }
-            PlannerAnswerRoute::NewPlanner
-                if *runtime_open < self.claim.limits.runtime_planners.value =>
-            {
-                if let Some(workspace) = self.start_request_planner(request, Some(ask))? {
+            PlannerAnswerRoute::NewPlanner if *runtime_open < env.runtime_planners => {
+                if let Some(workspace) = self.start_request_planner(env, request, Some(ask))? {
                     *runtime_open += 1;
-                    self.queue.ask_delivered(ask.id, &workspace)?;
+                    env.queue.ask_delivered(ask.id, &workspace)?;
                 }
             }
             // At the limit: the answer waits for a planner to end.
             PlannerAnswerRoute::NewPlanner => {}
             // A draft kept by the answer waits as it is (ADR-t1540-1).
             PlannerAnswerRoute::Close if ask.request_id.is_none() => {
-                self.queue.close_planner_answer(
+                env.queue.close_planner_answer(
                     ask.id,
                     "its draft is kept as it is and no planner of the runtime's works on it",
                 )?;
                 info!(ask_id = %ask.id, "ask {} closed: its draft of request {request} is kept", ask.id);
             }
             PlannerAnswerRoute::Close => {
-                self.queue.close_planner_answer(
+                env.queue.close_planner_answer(
                     ask.id,
                     "its request moved on and no planner of the runtime's works on it",
                 )?;
@@ -143,12 +149,16 @@ impl Supervisor<'_> {
 
     /// Open a planner for each request waiting for one, the oldest first,
     /// while the runtime's planners are below the limit.
-    pub(super) fn open_request_planners(&mut self, runtime_open: &mut usize) -> Result<()> {
-        for request in self.queue.planner_requests()? {
-            if *runtime_open >= self.claim.limits.runtime_planners.value {
+    pub(super) fn open_request_planners(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        runtime_open: &mut usize,
+    ) -> Result<()> {
+        for request in env.queue.planner_requests()? {
+            if *runtime_open >= env.runtime_planners {
                 break;
             }
-            if self.start_request_planner(request.id, None)?.is_some() {
+            if self.start_request_planner(env, request.id, None)?.is_some() {
                 *runtime_open += 1;
             }
         }
@@ -161,10 +171,11 @@ impl Supervisor<'_> {
     /// took it, it moved on, or its planners are used up).
     fn start_request_planner(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         request: RequestId,
         answer: Option<&Ask>,
     ) -> Result<Option<String>> {
-        let (planner, current, attempt) = match self
+        let (planner, current, attempt) = match env
             .queue
             .open_request_planner(request, answer.map(|ask| ask.id))?
         {
@@ -181,16 +192,16 @@ impl Supervisor<'_> {
                 attempt,
             } => (planner, request, attempt),
         };
-        let prompt = match self.request_planner_material(&planner, &current, attempt, answer) {
+        let prompt = match self.request_planner_material(env, &planner, &current, attempt, answer) {
             Ok(prompt) => prompt,
             Err(error) => {
-                self.queue
+                env.queue
                     .close_planner(planner.id, Some(&format!("{error:#}")))?;
                 return Err(error);
             }
         };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(), *planner, ("request", &prompt))?;
+        let opened = open_draft_planner(&self.planner_launch(env), *planner, ("request", &prompt))?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
         info!("request {request}: opened planner {id} {attempt} in workspace {workspace}");
         Ok(Some(workspace))
@@ -200,14 +211,15 @@ impl Supervisor<'_> {
     /// is now, after handing it the request's words.
     fn request_planner_material(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         planner: &PlannerSession,
         request: &PlanRequest,
         attempt: usize,
         answer: Option<&Ask>,
     ) -> Result<FittedPrompt> {
-        let dir = planner_dir(&self.layout.planners_dir, planner.id);
+        let dir = planner_dir(&env.layout.planners_dir, planner.id);
         let handed = hand_request_to_planner(
-            &*self.files,
+            &**env.files,
             &dir,
             &format!("request-{}", request.id),
             &request.text,
@@ -215,7 +227,7 @@ impl Supervisor<'_> {
         let mut refs = Vec::new();
         let mut goal_ids: Vec<GoalId> = Vec::new();
         for reference in &request.refs {
-            let read = self.request_ref_material(reference, &mut goal_ids);
+            let read = self.request_ref_material(env, reference, &mut goal_ids);
             refs.push(read.unwrap_or_else(|error| RequestRefMaterial::Unreadable {
                 reference: reference.clone(),
                 error: format!("{error:#}"),
@@ -225,19 +237,19 @@ impl Supervisor<'_> {
         for goal in goal_ids {
             // A goal the request names but the queue does not have is
             // left out; its reference says so.
-            if let Ok(detail) = self.queue.show_goal(goal) {
+            if let Ok(detail) = env.queue.show_goal(goal) {
                 goals.push((detail.goal, detail.closed, detail.tasks));
             }
         }
-        let asks = self.queue.request_asks(request.id)?;
+        let asks = env.queue.request_asks(request.id)?;
         // What the planner that asked left as it ended for the answer alone
         // (ADR-t1704-1 decision 3).
         let handover = match answer {
-            Some(ask) => self.queue.planner_handover(ask.id)?,
+            Some(ask) => env.queue.planner_handover(ask.id)?,
             None => None,
         };
         request_planner_prompt(&RequestPlannerMaterial {
-            db: &self.layout.db,
+            db: &env.layout.db,
             request,
             handed: &handed.sentence,
             attempt,
@@ -252,6 +264,7 @@ impl Supervisor<'_> {
     /// What `reference` holds, adding the goal it leads to to `goals`.
     fn request_ref_material(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         reference: &RequestRef,
         goals: &mut Vec<GoalId>,
     ) -> Result<RequestRefMaterial> {
@@ -264,12 +277,12 @@ impl Supervisor<'_> {
         };
         Ok(match reference {
             RequestRef::Ask(id) => {
-                let ask = self.queue.read_ask(*id)?;
-                lead_to(self.goal_led_to(None, ask.task_id, ask.finding_id)?);
+                let ask = env.queue.read_ask(*id)?;
+                lead_to(self.goal_led_to(env, None, ask.task_id, ask.finding_id)?);
                 RequestRefMaterial::Ask(ask)
             }
             RequestRef::Task(id) => {
-                let detail = self.queue.show(*id)?;
+                let detail = env.queue.show(*id)?;
                 lead_to(detail.task.goal_id());
                 let receipt = detail
                     .events
@@ -283,10 +296,10 @@ impl Supervisor<'_> {
                 }
             }
             RequestRef::Run(run) => {
-                let events = self.queue.run_events(run)?;
+                let events = env.queue.run_events(run)?;
                 anyhow::ensure!(!events.is_empty(), "run {run} has no events in this queue");
                 let task = events.iter().find_map(|event| event.task_id);
-                lead_to(self.goal_led_to(None, task, None)?);
+                lead_to(self.goal_led_to(env, None, task, None)?);
                 let receipt = events
                     .iter()
                     .rev()
@@ -299,16 +312,16 @@ impl Supervisor<'_> {
                 }
             }
             RequestRef::Event(id) => {
-                let event = self
+                let event = env
                     .queue
                     .event_by_id(*id)?
                     .with_context(|| format!("event {id} does not exist"))?;
-                lead_to(self.goal_led_to(event.goal_id, event.task_id, None)?);
+                lead_to(self.goal_led_to(env, event.goal_id, event.task_id, None)?);
                 RequestRefMaterial::Event(event)
             }
             RequestRef::Finding(id) => {
-                let view = self.queue.finding_view(*id)?;
-                lead_to(self.goal_led_to(view.finding.goal_id, view.finding.task_id, None)?);
+                let view = env.queue.finding_view(*id)?;
+                lead_to(self.goal_led_to(env, view.finding.goal_id, view.finding.task_id, None)?);
                 RequestRefMaterial::Finding(Box::new(view))
             }
             RequestRef::Goal(id) => {
@@ -323,6 +336,7 @@ impl Supervisor<'_> {
     /// (the finding's goal, or its task's).
     fn goal_led_to(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         goal: Option<GoalId>,
         task: Option<TaskId>,
         finding: Option<FindingId>,
@@ -331,14 +345,14 @@ impl Supervisor<'_> {
             return Ok(goal);
         }
         if let Some(task) = task
-            && let Some(goal) = self.queue.show(task)?.task.goal_id()
+            && let Some(goal) = env.queue.show(task)?.task.goal_id()
         {
             return Ok(Some(goal));
         }
         match finding {
             Some(finding) => {
-                let view = self.queue.finding_view(finding)?;
-                self.goal_led_to(view.finding.goal_id, view.finding.task_id, None)
+                let view = env.queue.finding_view(finding)?;
+                self.goal_led_to(env, view.finding.goal_id, view.finding.task_id, None)
             }
             None => Ok(None),
         }

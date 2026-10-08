@@ -50,6 +50,8 @@ check-layer-deps context_reaches_loop_state
 check-layer-deps stage_reaches_other_context
 check-layer-deps compose_new_module_crosses_context
 check-layer-deps compose_super_glob
+check-layer-deps planning_reaches_loop_state
+check-layer-deps host_ops_reaches_loop_state
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-doc-links doc_broken_link
@@ -102,6 +104,14 @@ violate_compose_new_module_crosses_context() {
 
 violate_compose_super_glob() {
   echo 'use super::*;' >>src/compose/observation.rs
+}
+
+violate_planning_reaches_loop_state() {
+  echo "impl Supervisor<'_> { fn zz_scripts_root(&self) -> usize { self.slots.len() } }" >>src/application/supervise/plan_review.rs
+}
+
+violate_host_ops_reaches_loop_state() {
+  echo "fn zz_scripts_root(claim: &super::stages::ClaimState) -> usize { claim.slots.len() }" >>src/application/supervise/sweep.rs
 }
 
 violate_frontmatter_date_comment() {

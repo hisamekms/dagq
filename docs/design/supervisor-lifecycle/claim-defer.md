@@ -27,13 +27,13 @@ related:
 
 ## 判定の入力
 
-- **hotspot**: `stats`の`conflict_hotspots`（既定のwindow）で`alert`のファイル（mainから消えたものを除き、名前が変わったものは今の名前）。閾値は`dagq.toml`の`[conflicts]`（[Conflict thresholds](conflict-thresholds.md)）。plan reviewのpromptと同じ計算（`Supervisor::conflict_hotspot_files`）で、10分ごとと、`[conflicts]`の値が変わったとき（[読み直し](conflict-thresholds.md#読み直し)）に読み直す
+- **hotspot**: `stats`の`conflict_hotspots`（既定のwindow）で`alert`のファイル（mainから消えたものを除き、名前が変わったものは今の名前）。閾値は`dagq.toml`の`[conflicts]`（[Conflict thresholds](conflict-thresholds.md)）。plan reviewのpromptと同じ計算（`plan_review::conflict_hotspot_files`）で、10分ごとと、`[conflicts]`の値が変わったとき（[読み直し](conflict-thresholds.md#読み直し)）に読み直す
 - **予想するファイル**（`domain::claim_defer::expected_files`）: taskの`--paths`のうちワイルドカード（`*`・`**`・`?`）を含まない具体的なパス（globは範囲の宣言で予想ではないので外す。[ADR-t1981-1](../../adr/2026-10-07-t1981-1-expected-files-leave-out-path-globs.md)、ADR-0080の決定1をamends）。具体的なパスが残らなければ（`--paths`が無いときと同じく）`dagq related`で最も似た`completed`のtask 3件の`landed_commits`の各commitが変えたファイル（`git diff --name-only <commit>^ <commit>`）。taskごとにhotspotと同じ間隔でcacheする
 - **進行中のrun**（`InFlight`）: `latest_runs_in_progress`（`in_progress`のtaskの最新のrun。着地待ち・`needs_session`を含む）ごとに、base commitからhead（`result_commit`、無ければbranch）までの差分のファイルと、そのtaskの予想するファイル、人だけを待つならその始まり（`owner_waiting_since`。下の「人だけを待つrun」）、自分のcommitを持たないfailedのrunか（`no_commit`。下の「自分のcommitを持たないfailedのrun」）。60秒ごとか、claimの直後に読み直す
 
 ### 人だけを待つrun
 
-[ADR-t1484-1](../../adr/2026-10-04-t1484-1-runs-waiting-only-for-a-person-stop-holding-claims-past-a-grace.md)（ADR-0080の決定2・6をamends。task 1484）。進行中のrunのうち次の両方に当たるものは、人の答えだけを待つ（`domain::claim_defer::owner_waiting_since`。supervisorの側は`Supervisor::owner_waiting_since`が`unclosed_run_asks`・`run_lease`・`run_events`から組み立てる。askが無ければleaseとeventは読まない）。
+[ADR-t1484-1](../../adr/2026-10-04-t1484-1-runs-waiting-only-for-a-person-stop-holding-claims-past-a-grace.md)（ADR-0080の決定2・6をamends。task 1484）。進行中のrunのうち次の両方に当たるものは、人の答えだけを待つ（`domain::claim_defer::owner_waiting_since`。supervisorの側は`claim_defer::run_owner_waiting_since`が`unclosed_run_asks`・`run_lease`・`run_events`から組み立てる。askが無ければleaseとeventは読まない）。
 
 - runに紐づく、答え（`answered_at`）も閉じ（`closed_at`）も無いaskで、kindが`worker_question` / `approve_landing` / `stuck_exit` / `answer_prompt` / `stalled` / `decide`のもの（`waits_for_owner`。`stuck_exit`と`answer_prompt`はtask 1437で新しく開かれなくなり、それより前に開いたaskだけ）がある
 - [人の答えを待つrun](waiting.md)の待ち（`WaitState::of`で終わっていない。戻り待ちは動くので除く）にあるか、どのsupervisorのleaseも持たない（`approve_landing`で休む着地待ち、answerを待つ`needs_session`など）。leaseを持ち待ちに居ないrun（作業中・validating・review・着地中・resume中）は、askがあっても動くので除く

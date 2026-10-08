@@ -55,7 +55,7 @@ stdinは1つのJSONオブジェクト（UTF-8、最後に改行）。受け取�
 - **目標割れの即時通知**（`breach`、`domain::kpi::push::breach_message`）: そのjobで記録した`pushed: true`の`kpi_breach_started`ごとに1通。`kind`・`queue`・`period`（最後に判定できた期間）・`title`（`<repositoryの名前> target breach: <KPI> (<層>)`。固定の文字列は英語。task 625）・`text`（値・stat・目標・続いた期間の数・始まり）・`breaches`（1件: `kpi`・`stratum`・`stat`・`value`・`min`・`max`・`periods`・`since`）・`resolved`（空）・`report_html` / `report_json`（null）。
 - **日次・週次のまとめ**（`daily` / `weekly`、`summary_message`）: そのjobで書いたレポートのうち最新の日と最新の週の分だけ1通ずつ（起動時に遡って書いた古い日の分は送らない）。`title`（`<名前> <期間>: landings N, breaches M`）、`text`（着地の数と`lead_time`・`phase.work`・`first_pass_rate`・`revise_rate`・`asks_per_landing`の`all`の層の値、目標割れ、1期間の外れ（`missed`）、そのjobで記録した同じ周期の解消、open なaskの数、レポートのpath）、`breaches`（そのレポートの目標のうち`breach`のもの全部。即時通知を上限で送らなかった分もここに載る）、`missed`、`resolved`、`open_asks`、`report_html` / `report_json`。値の単位はレポートのHTMLと同じ（秒は`1h 02m`、割合は`%`）。
 - 1つのjobの中では即時通知、日次、週次の順に送る。
-- **inboxの見張りの通知**（`inbox_watch`、`inbox_watch_message`）: inboxのwatchが居ないままaskがinboxを待つと、`supervise::inbox_nudge`が同じ`ReportPort::push_config`で`[push]`を読み、その不在ごとに1通をこの文書の待ちに入れる。
+- **inboxの見張りの通知**（`inbox_watch`、`inbox_watch_message`）: inboxのwatchが居ないままaskがinboxを待つと、`supervise::inbox_nudge`が同じ`ReportPort::push_config`で`[push]`を読み、その不在ごとに1通を返し、ループがこの文書の待ちに入れる。
   送り方・再試行・記録は下の「実行・再試行・失敗」と同じで、`daily`・`breach`はこのmessageを止めない。
   いつ送るかと`inbox_nudged`の記録は[通知経路](notification-route.md)が持つ。
 - レポートを記録した後で目標割れの判定かメッセージづくりが失敗したら、`warn`のlogを出してその回のpushをしない（jobは失敗にせず、レポートは書き直さない）。

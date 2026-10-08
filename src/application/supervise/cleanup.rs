@@ -552,11 +552,46 @@ struct JobPorts {
 
 impl HostOpsState {
     /// Ask for the worktrees of ended runs to be cleaned, every such run's
-    /// or only `task`'s (see the sweep's `clean_ended_worktrees` for what is
-    /// removed), for disk space when `disk` is given. It starts at once
+    /// or only `task`'s (task 376), for disk space when `disk` is given,
+    /// off the loop (task 405: a job thread does it). It starts at once
     /// unless a job runs; then it waits for the next one. The runs the
     /// slots hold (`held`) are left out. Whether it was taken: none is once
     /// ending (a stop or a handoff).
+    ///
+    /// A run nobody leases and no slot holds qualifies once it is
+    /// `integrated`, `succeeded`, `failed` or `interrupted`, or whatever
+    /// its status once its task is over:
+    ///
+    /// - its task `completed` or `canceled`: the worktree and its branch are
+    ///   removed, recorded as `worktree_removed` (`path`, `branch`, `bytes`,
+    ///   `by: supervisor`, `reason` `task_completed` / `task_canceled`, and
+    ///   `repaired: true` when the worktree had to be repaired first, after
+    ///   the queue's rebind, and `broken_git: true` when Git took it for
+    ///   no worktree, its `.git` broken, so the run's own
+    ///   `<runs>/<run-id>/worktree` directory was removed instead, task
+    ///   1587, and `stopped_processes` (`pid`, `executable`, `killed`)
+    ///   for what ran from under the run's own worktree and was stopped
+    ///   before its removal, or `processes_unlisted` when the processes
+    ///   could not be listed, task 1590). A worktree whose directory is already gone
+    ///   loses its branch (after `git worktree prune`), recorded the same
+    ///   with `bytes` 0 and `worktree_missing: true`;
+    /// - otherwise (the task may run it again, or retry it on a new run):
+    ///   only the build outputs ([`BUILD_OUTPUT_DIRS`]) go, and the sources,
+    ///   commits and run directory stay; recorded as
+    ///   `build_outputs_removed` (`paths`, `bytes`, `by: supervisor`,
+    ///   `reason: run_ended`).
+    ///
+    /// The build outputs of an `awaiting_integration` or `needs_session`
+    /// run of a task that goes on, with no lease and no live session, go
+    /// too (task 1289): on every cleanup while an ask of it waits for an
+    /// answer (`reason: awaiting_answer`, with its `ask_id`), else only in
+    /// a cleanup for disk space (`reason: disk_space`).
+    ///
+    /// `bytes` is what the removed files took on disk. Only a worktree
+    /// under the run directory is touched, never the checkout the
+    /// supervisor was given. A failure records `cleanup_failed` (`path`,
+    /// `message`, `by: supervisor`) once per worktree and process, is
+    /// retried on the next sweep, and the others go on.
     pub(super) fn request_cleanup(
         &mut self,
         env: &mut PassEnv<'_>,
@@ -1035,7 +1070,7 @@ fn remove_run_tmp(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut
     }
 }
 
-/// Clean one ended run's worktree (see the sweep's `clean_ended_worktrees`).
+/// Clean one ended run's worktree (see [`HostOpsState::request_cleanup`]).
 fn clean_worktree(
     ports: &JobPorts,
     candidate: &EndedRunWorktree,

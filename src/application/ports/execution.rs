@@ -1046,8 +1046,9 @@ pub trait RunRecovery {
 /// [`SupervisorRegistry`](super::host::SupervisorRegistry), except that
 /// [`heartbeat`](Self::heartbeat) refreshes the registration with the
 /// leases in one write (T11 of docs/design/architecture.md). Its reads
-/// (`run_leases`, `run_lease`, `processes`) are published to every context
-/// and `release_lease` to host運用's handoff; the rest is 実行と着地's own.
+/// (`run_leases`, `run_lease`, `processes`) are published to every context;
+/// the rest is 実行と着地's own (a handoff gives its slots' leases back in
+/// 実行と着地's `supervise::handoff_slots`).
 pub trait RunCoordination {
     /// Refresh every lease `token` holds; how many there were.
     fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize>;

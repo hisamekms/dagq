@@ -256,12 +256,12 @@ max = 0.6
 # 要否の判定は docs/design/supervisor-lifecycle/validation.md の「runtimeが流すe2e」、流し方は landing-e2e.md）。
 # 置くのは実 cmux・実プロセス・実 Git の境目だけ: cmux の adapter、process と session、launchd、lifecycle（up / down・引き継ぎ）、
 # integrate、install、update（自動更新と e2e の関門）、actor（worker・planner・inbox・job の session）の起動と、e2e そのもの（tests/e2e.rs と tests/e2e/ の下）。
-# supervise の判断の部分（src/application/supervise/ の handoff.rs と update.rs 以外）は含めない。runtime の commit の多くが
+# supervise の判断の部分（src/application/supervise/ の handoff.rs・handoff_slots.rs と update.rs 以外）は含めない。runtime の commit の多くが
 # 触るので含めると狭める効果がほぼ消え、判断は fake の cmux の in-process の test（tests/it/runtime_*）が確かめ、
 # 実物との組み合わせは自動更新が固定バイナリを入れ替える前に全部の e2e を流す関門（ADR-t963-1 の決定 1）が確かめるため。
 # task に --evidence e2e を付けたものは、差分に依らず流す。書式の都合で配列は 1 行に書く。
 # [e2e] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 965 を含んでから足した。
-paths = ["src/infrastructure/adapters.rs", "src/infrastructure/process.rs", "src/infrastructure/sessions.rs", "src/infrastructure/launchd.rs", "src/application/lifecycle.rs", "src/application/supervise/handoff.rs", "src/application/integrate.rs", "src/application/install.rs", "src/infrastructure/binaries.rs", "src/application/update.rs", "src/application/supervise/update.rs", "src/infrastructure/e2e_gate.rs", "src/application/actor_executor.rs", "src/application/session.rs", "src/application/headless_session.rs", "src/infrastructure/claude.rs", "src/infrastructure/codex.rs", "tests/e2e.rs", "tests/e2e/**"]
+paths = ["src/infrastructure/adapters.rs", "src/infrastructure/process.rs", "src/infrastructure/sessions.rs", "src/infrastructure/launchd.rs", "src/application/lifecycle.rs", "src/application/supervise/handoff.rs", "src/application/supervise/handoff_slots.rs", "src/application/integrate.rs", "src/application/install.rs", "src/infrastructure/binaries.rs", "src/application/update.rs", "src/application/supervise/update.rs", "src/infrastructure/e2e_gate.rs", "src/application/actor_executor.rs", "src/application/session.rs", "src/application/headless_session.rs", "src/infrastructure/claude.rs", "src/infrastructure/codex.rs", "tests/e2e.rs", "tests/e2e/**"]
 
 # Review の検査項目と参照先は .dagq/agents/<agent>/AGENT.md（ADR-t1453-1、置き場は ADR-t1728-1）。
 # 固定バイナリが task 1455 を含むことを着手時に確認し、着地の verify でも検査する。

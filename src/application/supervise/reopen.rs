@@ -360,8 +360,11 @@ impl Supervisor<'_> {
     fn open_session_again(&mut self, run: &TaskRun, lost: &LostSession<'_>) -> Result<String> {
         // Only the lost wrapper's row (or none) is forgotten: one that
         // registered meanwhile refuses the attempt.
-        self.queue
-            .clear_lost_session(run.id(), &self.token, lost.wrapper.map(|w| w.pid))?;
+        self.queue.clear_lost_session(
+            run.id(),
+            &self.registration.token,
+            lost.wrapper.map(|w| w.pid),
+        )?;
         // A turn its wrapper never saw end (the wrapper was lost in the
         // middle of it) ended with its process: its idle marker says so, so
         // that the reopened session is between turns and takes the answer
@@ -383,7 +386,7 @@ impl Supervisor<'_> {
             "--run".into(),
             run.id().to_string(),
             "--lease".into(),
-            self.token.to_string(),
+            self.registration.token.to_string(),
             "--claude".into(),
             path_text(&self.layout.claude)?,
             "--codex".into(),
@@ -425,10 +428,13 @@ impl Supervisor<'_> {
             },
         });
         let attempt_no = u64::try_from(lost.attempt).unwrap_or(u64::MAX);
-        if let Err(error) =
-            self.queue
-                .session_reopened(run.id(), &self.token, &workspace, attempt_no, repaired)
-        {
+        if let Err(error) = self.queue.session_reopened(
+            run.id(),
+            &self.registration.token,
+            &workspace,
+            attempt_no,
+            repaired,
+        ) {
             // Unrecorded, nothing would find the wrapper to stop it.
             return Err(match stop_session(self.sessions, &workspace, StopRoute::Reopen) {
                 Ok(()) => error.context(format!(

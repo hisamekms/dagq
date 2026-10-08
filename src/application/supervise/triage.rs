@@ -393,8 +393,8 @@ impl Supervisor<'_> {
             match self.queue.decide_triage(run.id(), ask.id, &answer, &reason) {
                 Ok(decided) => {
                     info!(run_id = %decided.id(), task_id = %decided.task_id(), ask_id = %ask.id, "run {} of task {}: {answer} as ask {} answered; the run is {}", decided.id(), decided.task_id(), ask.id, decided.status().as_str());
-                    self.close_ended_landing_asks(Some(decided.task_id()));
-                    self.clean_task_worktrees(decided.task_id());
+                    close_ended_landing_asks(&mut *self.queue, Some(decided.task_id()));
+                    self.request_cleanup(Some(decided.task_id()));
                 }
                 Err(error) => {
                     warn!(run_id = %run.id(), ask_id = %ask.id, error = %format_args!("{error:#}"), "run {}: the answer {answer:?} of ask {} could not be applied: {error:#}", run.id(), ask.id)
@@ -515,9 +515,9 @@ impl Supervisor<'_> {
             JobStartRoute::Start(launch, switchable) => (launch, switchable, None),
             JobStartRoute::Unavailable(launch, why) => (launch, false, Some(why)),
         };
-        let begun = self
-            .queue
-            .begin_triage(run.id(), &self.token, request, &launch)?;
+        let begun =
+            self.queue
+                .begin_triage(run.id(), &self.registration.token, request, &launch)?;
         drop(guard);
         let Some((run, round)) = begun else {
             return Ok(());
@@ -716,7 +716,7 @@ impl Supervisor<'_> {
         end: &JobEnd,
     ) -> Result<TaskRun> {
         ensure!(
-            self.queue.holds_lease(run.id(), &self.token)?,
+            self.queue.holds_lease(run.id(), &self.registration.token)?,
             "the recovery job's lease of run {} was lost",
             run.id()
         );
@@ -786,9 +786,9 @@ impl Supervisor<'_> {
         });
         end.record(&mut finished);
         also.push((EventKind::RecoveryFinished, finished));
-        let finished = self
-            .queue
-            .finish_triage(run.id(), &self.token, &action, payload, also)?;
+        let finished =
+            self.queue
+                .finish_triage(run.id(), &self.registration.token, &action, payload, also)?;
         info!(run_id = %run.id(), "run {}: recovery job {attempt} of {} repaired it ({name}): {}; the run is {}", run.id(), alert.as_str(), verdict.diagnosis, finished.status().as_str());
         self.end_round(&finished)
     }
@@ -1020,7 +1020,7 @@ impl Supervisor<'_> {
         end.record(&mut finished);
         let asked = match self.queue.finish_triage(
             run.id(),
-            &self.token,
+            &self.registration.token,
             &TriageAction::Ask { ask_id },
             payload,
             vec![(EventKind::RecoveryFinished, finished)],
@@ -1047,10 +1047,15 @@ impl Supervisor<'_> {
     /// left open are closed and the lease is released. What fails here is
     /// logged, not a failed round.
     fn end_round(&mut self, run: &TaskRun) -> Result<TaskRun> {
-        if let Err(error) = self.close_open_workspaces(run, WorkspaceCloser::Triage) {
+        if let Err(error) = close_open_workspaces(
+            &mut *self.queue,
+            self.sessions,
+            run,
+            WorkspaceCloser::Triage,
+        ) {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its workspaces could not all be closed: {error:#}", run.id());
         }
-        if let Err(error) = self.queue.release_lease(run.id(), &self.token) {
+        if let Err(error) = self.queue.release_lease(run.id(), &self.registration.token) {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not release the lease: {error:#}", run.id());
         }
         self.queue.run(run.id())
@@ -1083,7 +1088,7 @@ impl Supervisor<'_> {
         let then = match end.unusable {
             Some((provider, _)) => format!(
                 "its provider cannot be used, and the next round starts {}",
-                super::goal_review::again_on(self.provider.fallback.jobs, provider)
+                again_on(self.provider.fallback.jobs, provider)
             ),
             None => "the run waits to be recovered by hand".to_owned(),
         };
@@ -1121,17 +1126,17 @@ impl Supervisor<'_> {
         }
         if self
             .queue
-            .holds_lease(run.id(), &self.token)
+            .holds_lease(run.id(), &self.registration.token)
             .unwrap_or(false)
-            && let Err(error) = self.queue.release_lease(run.id(), &self.token)
+            && let Err(error) = self.queue.release_lease(run.id(), &self.registration.token)
         {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not release the lease: {error:#}", run.id());
         }
     }
     pub(super) fn note_triaged(&mut self, run: &TaskRun) {
         self.record_rest(run.id(), None, EventKind::TriageFinished.as_str());
-        self.close_ended_landing_asks(Some(run.task_id()));
-        self.clean_task_worktrees(run.task_id());
+        close_ended_landing_asks(&mut *self.queue, Some(run.task_id()));
+        self.request_cleanup(Some(run.task_id()));
         let task = self
             .queue
             .show(run.task_id())

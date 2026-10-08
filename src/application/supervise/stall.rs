@@ -1376,7 +1376,7 @@ impl StallWatch {
         now: SystemTime,
         recovery: StallRecovery<'_, '_>,
     ) -> Result<Option<SystemTime>> {
-        let mark = last_turn(sv, idle_marker);
+        let mark = last_turn(&*sv.files, idle_marker);
         let mut seen = TurnSeen {
             ended: mark.is_some_and(|mark| !mark.outcome.goes_on(mark.failure)),
             wall: provider_failure(mark),
@@ -1477,7 +1477,7 @@ impl StallWatch {
         if let Some(mark) = run
             .idle_marker_path()
             .ok()
-            .and_then(|marker| last_turn(sv, &marker))
+            .and_then(|marker| last_turn(&*sv.files, &marker))
         {
             facts["turn"] = json!({
                 "turn": mark.turn,

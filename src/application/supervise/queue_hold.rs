@@ -127,7 +127,7 @@ impl Supervisor<'_> {
                     "ask_id": ask.id,
                     "answer": answer,
                     "outcome": outcome,
-                    "supervisor": self.token,
+                    "supervisor": self.registration.token,
                 }),
             )?;
             match outcome {
@@ -201,7 +201,9 @@ impl Supervisor<'_> {
                 Some(_) if !due => return Ok(()),
                 // Leased by this supervisor but in none of its slots, or
                 // by a gone one: nobody watches it to apply the answer.
-                Some(lease) if lease.token == self.token || self.lease_stale(&lease, now) => {
+                Some(lease)
+                    if lease.token == self.registration.token || self.lease_stale(&lease, now) =>
+                {
                     (UNWATCHED, Some(lease.token))
                 }
                 Some(lease) => (ELSEWHERE, Some(lease.token)),
@@ -244,7 +246,7 @@ impl Supervisor<'_> {
                 "unwatched": of(UNWATCHED),
                 "runs": runs,
                 "jobs": jobs_of(ask),
-                "supervisor": self.token,
+                "supervisor": self.registration.token,
             }),
         )?;
         info!(ask_id = %ask.id, "applied `{answer}` to ask {}: {} run(s) told to go on, {} given up, {} failed job(s) start again", ask.id, of(CONTINUED).len(), of(RELEASED).len(), restarted.len());

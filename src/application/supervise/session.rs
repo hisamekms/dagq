@@ -153,7 +153,8 @@ impl Supervisor<'_> {
             log_path: path_text(&paths.log)?,
         };
         // Save intended paths before any external resource is created.
-        self.queue.plan_run(claimed.id(), &self.token, &plan)?;
+        self.queue
+            .plan_run(claimed.id(), &self.registration.token, &plan)?;
         self.files.create_dir_all(state_dir)?;
         self.files
             .create_new_dir(&run_dir)
@@ -197,7 +198,7 @@ impl Supervisor<'_> {
             "--run".into(),
             run.id().to_string(),
             "--lease".into(),
-            self.token.to_string(),
+            self.registration.token.to_string(),
             "--claude".into(),
             path_text(&self.layout.claude)?,
             "--codex".into(),
@@ -216,7 +217,10 @@ impl Supervisor<'_> {
                 },
             ))?
             .workspace()?;
-        if let Err(error) = self.queue.workspace_created(run.id(), &self.token, &handle) {
+        if let Err(error) =
+            self.queue
+                .workspace_created(run.id(), &self.registration.token, &handle)
+        {
             // Unrecorded, the wrapper would run on with nothing to find it
             // by, and its registration is refused (task 806).
             return Err(match stop_session(self.sessions, &handle, StopRoute::Unrecorded) {
@@ -463,7 +467,7 @@ impl SessionWatch {
             self.recovery.stop(sv, run);
             return sv
                 .queue
-                .finish_supervision_live(run.id(), &sv.token)
+                .finish_supervision_live(run.id(), &sv.registration.token)
                 .map(Some);
         }
         // A lost session no attempt could open again (task 1372) ends as
@@ -482,7 +486,7 @@ impl SessionWatch {
             let receipt = sv.files.is_file(&self.receipt_path);
             return sv
                 .queue
-                .finish_lost_session(run.id(), &sv.token, code, receipt)
+                .finish_lost_session(run.id(), &sv.registration.token, code, receipt)
                 .map(Some);
         }
         if let Some(wrapper) = wrapper {
@@ -492,7 +496,7 @@ impl SessionWatch {
                 let receipt = sv.files.is_file(&self.receipt_path);
                 return sv
                     .queue
-                    .finish_supervision(run.id(), &sv.token, receipt)
+                    .finish_supervision(run.id(), &sv.registration.token, receipt)
                     .map(Some);
             }
             let pulse = wrapper_pulse(

@@ -27,7 +27,7 @@ use crate::{
     },
 };
 
-impl Supervisor<'_> {
+impl PlanningState {
     /// Deliver the answered `planner_question` asks: sent to the live
     /// planner of the runtime's that works on the ask's task once it stopped
     /// after asking (as its next turn), handed to a new planner when the draft's
@@ -39,24 +39,25 @@ impl Supervisor<'_> {
     /// planner.
     pub(super) fn deliver_planner_answers(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         views: &[PlannerView],
         runtime_open: &mut usize,
     ) -> Result<()> {
-        for ask in self.queue.planner_answers()? {
+        for ask in env.queue.planner_answers()? {
             // A question about a draft a request's planner added goes the
             // way of the request's (ADR-t2015-1).
-            if let Some(request) = self.queue.answer_request(&ask)? {
-                self.deliver_request_answer(views, runtime_open, &ask, request)?;
+            if let Some(request) = env.queue.answer_request(&ask)? {
+                self.deliver_request_answer(env, views, runtime_open, &ask, request)?;
                 continue;
             }
             if let Some(finding) = ask.finding_id {
-                self.deliver_finding_answer(views, runtime_open, &ask, finding)?;
+                self.deliver_finding_answer(env, views, runtime_open, &ask, finding)?;
                 continue;
             }
             let Some(task) = ask.task_id else {
                 continue;
             };
-            match self.queue.planner_answer_route(&ask)? {
+            match env.queue.planner_answer_route(&ask)? {
                 PlannerAnswerRoute::Planner(planner) => {
                     let Some(view) = views.iter().find(|view| view.planner.id == planner.id) else {
                         continue;
@@ -64,9 +65,9 @@ impl Supervisor<'_> {
                     // An answer whose sending to it failed goes to a new
                     // planner, not to it again.
                     if let Some(workspace) = view.planner.workspace_id.as_deref()
-                        && self.queue.ask_delivery_failed(ask.id, planner.id)?
+                        && env.queue.ask_delivery_failed(ask.id, planner.id)?
                     {
-                        self.hand_over_undelivered_answer(view, workspace, ask.id)?;
+                        self.hand_over_undelivered_answer(env, view, workspace, ask.id)?;
                         continue;
                     }
                     // The planner that asked is typed to once it stopped
@@ -76,7 +77,7 @@ impl Supervisor<'_> {
                     // (ADR-t1394-2 decision 5).
                     if answer_waits(
                         view.state,
-                        self.planner_at_wall(view).is_some(),
+                        self.planner_at_wall(env, view).is_some(),
                         ask.asked_by == SessionRole::Planner.as_str(),
                         view.idle_since,
                         ask.created_at,
@@ -88,7 +89,7 @@ impl Supervisor<'_> {
                     };
                     // One transaction takes the typing first, so two
                     // supervisors (across a handoff) never both type it.
-                    if !self
+                    if !env
                         .queue
                         .claim_planner_answer(ask.id, planner.id, &workspace)?
                     {
@@ -99,16 +100,23 @@ impl Supervisor<'_> {
                         ask.id,
                         ask.answer.as_deref().unwrap_or_default()
                     );
-                    self.stamp_planner_input(view);
+                    self.stamp_planner_input(env, view);
                     let what = format!("answer of ask {}", ask.id);
-                    match self.send_to_planner(view, &workspace, Input::Text(&text), &what) {
+                    match send_to_planner(
+                        &**env.files,
+                        &*env.queue,
+                        view,
+                        &workspace,
+                        Input::Text(&text),
+                        &what,
+                    ) {
                         Ok(_) => {
-                            self.queue.ask_delivered(ask.id, &workspace)?;
+                            env.queue.ask_delivered(ask.id, &workspace)?;
                             info!(task_id = %task, ask_id = %ask.id, "answer of ask {} sent to planner {} in workspace {workspace}", ask.id, planner.id);
                         }
                         Err(error) => {
                             warn!(task_id = %task, ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; the planner is ended and the answer goes to a new planner", ask.id, planner.id);
-                            self.queue.record_task_event(
+                            env.queue.record_task_event(
                                 task,
                                 EventKind::AskDeliveryFailed,
                                 json!({
@@ -118,19 +126,17 @@ impl Supervisor<'_> {
                                     "error": format!("{error:#}"),
                                 }),
                             )?;
-                            self.hand_over_undelivered_answer(view, &workspace, ask.id)?;
+                            self.hand_over_undelivered_answer(env, view, &workspace, ask.id)?;
                         }
                     }
                 }
-                PlannerAnswerRoute::NewPlanner
-                    if *runtime_open < self.claim.limits.runtime_planners.value =>
-                {
+                PlannerAnswerRoute::NewPlanner if *runtime_open < env.runtime_planners => {
                     // The drafts of its bundle that wait go with it.
                     let mut drafts = vec![task];
-                    if let Some(origin) = self.queue.draft_origin(task)? {
+                    if let Some(origin) = env.queue.draft_origin(task)? {
                         let key = BundleKey::of(origin.0, &origin.1, task);
                         drafts.extend(
-                            self.queue
+                            env.queue
                                 .planner_drafts()?
                                 .into_iter()
                                 .filter(|target| {
@@ -139,15 +145,15 @@ impl Supervisor<'_> {
                                 .map(|target| target.task.id()),
                         );
                     }
-                    if let Some(workspace) = self.start_draft_planner(&drafts, Some(&ask))? {
+                    if let Some(workspace) = self.start_draft_planner(env, &drafts, Some(&ask))? {
                         *runtime_open += 1;
-                        self.queue.ask_delivered(ask.id, &workspace)?;
+                        env.queue.ask_delivered(ask.id, &workspace)?;
                     }
                 }
                 // At the limit: the answer waits for a planner to end.
                 PlannerAnswerRoute::NewPlanner => {}
                 PlannerAnswerRoute::Close => {
-                    self.queue.close_planner_answer(
+                    env.queue.close_planner_answer(
                         ask.id,
                         "its draft moved on and no planner of the runtime's works on it",
                     )?;
@@ -164,13 +170,17 @@ impl Supervisor<'_> {
     /// Open a planner for each bundle of drafts waiting for one, the
     /// bundle of the oldest draft first, while the runtime's planners are
     /// below the limit.
-    pub(super) fn open_draft_planners(&mut self, runtime_open: &mut usize) -> Result<()> {
-        for bundle in bundles(self.queue.planner_drafts()?) {
-            if *runtime_open >= self.claim.limits.runtime_planners.value {
+    pub(super) fn open_draft_planners(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        runtime_open: &mut usize,
+    ) -> Result<()> {
+        for bundle in bundles(env.queue.planner_drafts()?) {
+            if *runtime_open >= env.runtime_planners {
                 break;
             }
             let drafts: Vec<TaskId> = bundle.iter().map(|target| target.task.id()).collect();
-            if self.start_draft_planner(&drafts, None)?.is_some() {
+            if self.start_draft_planner(env, &drafts, None)?.is_some() {
                 *runtime_open += 1;
             }
         }
@@ -183,10 +193,11 @@ impl Supervisor<'_> {
     /// supervisor took them, they moved on, or their planners are used up).
     fn start_draft_planner(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         drafts: &[TaskId],
         answer: Option<&Ask>,
     ) -> Result<Option<String>> {
-        let (planner, key, members, exhausted) = match self
+        let (planner, key, members, exhausted) = match env
             .queue
             .open_draft_planner(drafts, answer.map(|ask| ask.id))?
         {
@@ -209,16 +220,16 @@ impl Supervisor<'_> {
                 "draft tasks {exhausted:?}: planners of the runtime's ended without deciding them; the inbox is told"
             );
         }
-        let prompt = match self.draft_planner_material(&key, &members, answer) {
+        let prompt = match self.draft_planner_material(env, &key, &members, answer) {
             Ok(prompt) => prompt,
             Err(error) => {
-                self.queue
+                env.queue
                     .close_planner(planner.id, Some(&format!("{error:#}")))?;
                 return Err(error);
             }
         };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(), *planner, ("draft", &prompt))?;
+        let opened = open_draft_planner(&self.planner_launch(env), *planner, ("draft", &prompt))?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
         let ids: Vec<TaskId> = members.iter().map(|(target, _)| target.task.id()).collect();
         info!(
@@ -233,6 +244,7 @@ impl Supervisor<'_> {
     /// from the queue as it is now.
     fn draft_planner_material(
         &mut self,
+        env: &mut PlanningEnv<'_>,
         key: &BundleKey,
         members: &[(DraftTarget, usize)],
         answer: Option<&Ask>,
@@ -242,14 +254,14 @@ impl Supervisor<'_> {
             .context("a bundle of drafts has at least one")?
             .0;
         let source = match first.material.get("source_task_id").and_then(Value::as_i64) {
-            Some(id) => Some(self.queue.show(TaskId::new(id))?.task),
+            Some(id) => Some(env.queue.show(TaskId::new(id))?.task),
             None => None,
         };
         let receipt = match (
             first.origin,
             first.material.get("source_run_id").and_then(Value::as_str),
         ) {
-            (DraftOrigin::FollowUp, Some(run)) => self
+            (DraftOrigin::FollowUp, Some(run)) => env
                 .queue
                 .run_events(&RunId::new(run)?)?
                 .into_iter()
@@ -270,7 +282,7 @@ impl Supervisor<'_> {
             {
                 continue;
             }
-            let detail = self.queue.show_goal(goal)?;
+            let detail = env.queue.show_goal(goal)?;
             let siblings = detail
                 .tasks
                 .iter()
@@ -284,7 +296,7 @@ impl Supervisor<'_> {
         let mut revisits = Vec::new();
         for (target, _) in members.iter().filter(|(t, _)| t.revisit.is_some()) {
             let id = target.task.id();
-            let detail = self.queue.show(id)?;
+            let detail = env.queue.show(id)?;
             revisits.push(RevisitHistory {
                 task: id,
                 asks: detail
@@ -303,11 +315,11 @@ impl Supervisor<'_> {
         // What the planner that asked left as it ended for the answer alone
         // (ADR-t1704-1 decision 3).
         let handover = match answer {
-            Some(ask) => self.queue.planner_handover(ask.id)?,
+            Some(ask) => env.queue.planner_handover(ask.id)?,
             None => None,
         };
         draft_planner_prompt(&DraftPlannerMaterial {
-            db: &self.layout.db,
+            db: &env.layout.db,
             key,
             members,
             source: source.as_ref(),

@@ -142,10 +142,7 @@ impl Supervisor<'_> {
         Ok(())
     }
 
-    /// Hold `provider` for `reason`, which a turn of `run` (or a headless
-    /// job, with no run, ADR-t1063-1 decision 5) hit (`message`, the
-    /// turn's, may say when a usage limit resets); a hold in place stays as
-    /// it is.
+    /// [`JobDesk::hold_provider`].
     pub(super) fn hold_provider(
         &mut self,
         provider: Provider,
@@ -153,22 +150,8 @@ impl Supervisor<'_> {
         run: Option<&RunId>,
         message: &str,
     ) -> Result<()> {
-        if self.provider.holds.iter().any(|h| h.provider == provider) {
-            return Ok(());
-        }
-        let now = self.generators.clock.now();
-        let reset = (reason == SwitchReason::UsageLimit)
-            .then(|| provider_switch::reset_at(message, now))
-            .flatten();
-        let hold = ProviderHold::new(provider, reason, now).until(reset);
-        let mut payload = hold.held_payload(run);
-        payload["reset_read"] = json!(reset.is_some());
-        payload["supervisor"] = json!(self.token);
-        self.queue
-            .record_queue_event(EventKind::ProviderHeld, payload)?;
-        warn!(run_id = %run.map_or_else(String::new, ToString::to_string), "{} is held ({}): its workers and jobs go to the other provider until {}", provider.as_str(), reason.as_str(), hold.retry_at);
-        self.provider.holds.push(hold);
-        Ok(())
+        let (mut env, mut jobs) = self.job_desk();
+        jobs.hold_provider(&mut env, provider, reason, run, message)
     }
 
     /// End `provider`'s hold (`why`: `retry_due`, or `done` when a person
@@ -184,7 +167,7 @@ impl Supervisor<'_> {
         };
         let hold = self.provider.holds.remove(at);
         let mut payload = hold.released_payload(why);
-        payload["supervisor"] = json!(self.token);
+        payload["supervisor"] = json!(self.registration.token);
         self.queue
             .record_queue_event(EventKind::ProviderReleased, payload)?;
         info!(
@@ -410,7 +393,7 @@ impl Supervisor<'_> {
         let count = provider_switch::switches(&self.queue.run_events(run.id())?) + 1;
         let moved = self.queue.switch_provider(
             run.id(),
-            &self.token,
+            &self.registration.token,
             worker,
             switched_payload(
                 run.actual_provider(),
@@ -664,6 +647,38 @@ impl Supervisor<'_> {
 /// (`turn_requested`'s `what`).
 pub(super) const PROVIDER_SWITCH: &str = "provider switch";
 
+impl JobDesk<'_> {
+    /// Hold `provider` for `reason`, which a turn of `run` (or a headless
+    /// job, with no run, ADR-t1063-1 decision 5) hit (`message`, the
+    /// turn's, may say when a usage limit resets); a hold in place stays as
+    /// it is.
+    pub(super) fn hold_provider(
+        &mut self,
+        env: &mut PassEnv<'_>,
+        provider: Provider,
+        reason: SwitchReason,
+        run: Option<&RunId>,
+        message: &str,
+    ) -> Result<()> {
+        if self.provider.holds.iter().any(|h| h.provider == provider) {
+            return Ok(());
+        }
+        let now = env.generators.clock.now();
+        let reset = (reason == SwitchReason::UsageLimit)
+            .then(|| provider_switch::reset_at(message, now))
+            .flatten();
+        let hold = ProviderHold::new(provider, reason, now).until(reset);
+        let mut payload = hold.held_payload(run);
+        payload["reset_read"] = json!(reset.is_some());
+        payload["supervisor"] = json!(env.token);
+        env.queue
+            .record_queue_event(EventKind::ProviderHeld, payload)?;
+        warn!(run_id = %run.map_or_else(String::new, ToString::to_string), "{} is held ({}): its workers and jobs go to the other provider until {}", provider.as_str(), reason.as_str(), hold.retry_at);
+        self.provider.holds.push(hold);
+        Ok(())
+    }
+}
+
 /// What a request that makes a failed call again on the same provider,
 /// once its hold ended, is called.
 pub(super) use crate::domain::turn::PROVIDER_RETRY;
@@ -863,7 +878,7 @@ impl SessionWatch {
         if self.input_at.is_some_and(|input| modified <= input) {
             return Ok(WallGate::Open);
         }
-        let Some(failure) = provider_failure(last_turn(sv, &self.idle_marker)) else {
+        let Some(failure) = provider_failure(last_turn(&*sv.files, &self.idle_marker)) else {
             return Ok(WallGate::Open);
         };
         let workspace = self.workspace.clone();

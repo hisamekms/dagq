@@ -274,7 +274,10 @@ impl Supervisor<'_> {
     /// of the table), its markers (a session that moved) and, for a dialog,
     /// its screen. A run waiting to go back only keeps its lease checked.
     pub(super) fn watch_waiting(&mut self, slot: &mut Slot) -> Result<Step> {
-        if !self.queue.holds_lease(slot.run.id(), &self.token)? {
+        if !self
+            .queue
+            .holds_lease(slot.run.id(), &self.registration.token)?
+        {
             return Ok(Step::Disowned);
         }
         if !slot.waiting_now() {

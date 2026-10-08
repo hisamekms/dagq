@@ -123,12 +123,12 @@ fn stopped_turn_notice(
     Some((reason, payload))
 }
 
-impl Supervisor<'_> {
+impl PlanningState {
     /// How the last turn of the planner of `view` ended, if it is a
     /// headless planner of the runtime's whose wrapper wrote it.
-    fn planner_last_turn(&self, view: &PlannerView) -> Option<TurnMark> {
+    fn planner_last_turn(&self, env: &PlanningEnv<'_>, view: &PlannerView) -> Option<TurnMark> {
         headless_runtime(view)
-            .then(|| last_turn(self, &planner_idle_marker(&view.dir)))
+            .then(|| last_turn(&**env.files, &planner_idle_marker(&view.dir)))
             .flatten()
     }
 
@@ -142,13 +142,14 @@ impl Supervisor<'_> {
     /// time.
     pub(super) fn headless_answer_taken(
         &self,
+        env: &PlanningEnv<'_>,
         view: &PlannerView,
         ask: AskId,
     ) -> Result<Option<bool>> {
         if !headless_runtime(view) {
             return Ok(None);
         }
-        let events = self.queue.planner_turn_events(view.planner.id)?;
+        let events = env.queue.planner_turn_events(view.planner.id)?;
         let what = format!("answer of ask {ask}");
         let Some(seq) = events
             .iter()
@@ -163,11 +164,15 @@ impl Supervisor<'_> {
     /// The provider failure the idle headless planner of `view` stopped at
     /// in its last turn, if it did: it waits for Claude rather than being
     /// done (ADR-t1394-2 decision 5).
-    pub(super) fn planner_at_wall(&self, view: &PlannerView) -> Option<TurnFailure> {
+    pub(super) fn planner_at_wall(
+        &self,
+        env: &PlanningEnv<'_>,
+        view: &PlannerView,
+    ) -> Option<TurnFailure> {
         if view.state != PlannerState::Idle {
             return None;
         }
-        provider_failure(self.planner_last_turn(view))
+        provider_failure(self.planner_last_turn(env, view))
     }
 
     /// Hold or go on with each idle headless planner of the runtime's whose
@@ -177,19 +182,28 @@ impl Supervisor<'_> {
     /// with the planner's ID; once Claude is no longer held, the call the
     /// turn failed at is written as the planner's next request (`provider
     /// retry`), as a worker's is.
-    pub(super) fn tend_planner_walls(&mut self, views: &[PlannerView]) -> Result<()> {
+    pub(super) fn tend_planner_walls(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        views: &[PlannerView],
+    ) -> Result<()> {
         for view in views {
-            let Some(failure) = self.planner_at_wall(view) else {
+            let Some(failure) = self.planner_at_wall(env, view) else {
                 continue;
             };
-            if let Err(error) = self.planner_wall(view, failure) {
+            if let Err(error) = self.planner_wall(env, view, failure) {
                 warn!(error = %format_args!("{error:#}"), "planner {}: its turn at {} could not be tended: {error:#}", view.planner.id, failure.as_str());
             }
         }
         Ok(())
     }
 
-    fn planner_wall(&mut self, view: &PlannerView, failure: TurnFailure) -> Result<()> {
+    fn planner_wall(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        view: &PlannerView,
+        failure: TurnFailure,
+    ) -> Result<()> {
         let id = view.planner.id;
         if SwitchReason::of_failure(failure).is_none() {
             return Ok(());
@@ -197,7 +211,7 @@ impl Supervisor<'_> {
         let Some(workspace) = view.planner.workspace_id.clone() else {
             return Ok(());
         };
-        let events = self.queue.planner_turn_events(id)?;
+        let events = env.queue.planner_turn_events(id)?;
         let Some((finished_at, finished)) = events
             .iter()
             .enumerate()
@@ -219,15 +233,21 @@ impl Supervisor<'_> {
                 let ask_id = match wall {
                     Some(wall) => {
                         let (outcome, _) =
-                            ask::hold(&mut *self.queue, NewHold::wall(wall, None, None))?;
+                            ask::hold(&mut *env.queue, NewHold::wall(wall, None, None))?;
                         Some(outcome.ask.id)
                     }
                     None => {
-                        self.hold_provider(Provider::Claude, reason, None, message)?;
+                        env.jobs.hold_provider(
+                            &mut env.pass,
+                            Provider::Claude,
+                            reason,
+                            None,
+                            message,
+                        )?;
                         None
                     }
                 };
-                self.queue.record_queue_event(
+                env.queue.record_queue_event(
                     EventKind::ProviderWaiting,
                     waiting_payload(id, turn, reason, message, ask_id),
                 )?;
@@ -239,16 +259,13 @@ impl Supervisor<'_> {
             }
             WallStep::Retry(reason) => reason,
         };
-        if self.provider_held(Provider::Claude).is_some() {
+        if env.jobs.provider_held(Provider::Claude).is_some() {
             return Ok(());
         }
         // The call that first met the wall, which a retry that met it
         // again carries too.
         let undelivered = request_to_retry(&events).and_then(|seq| {
-            let text = self
-                .files
-                .read_to_string(&taken_path(&view.dir, seq))
-                .ok()?;
+            let text = env.files.read_to_string(&taken_path(&view.dir, seq)).ok()?;
             serde_json::from_str::<TurnRequest>(&text).ok()
         });
         let text = retry_text(
@@ -262,8 +279,15 @@ impl Supervisor<'_> {
         // retry was not written (or was, after a turn that already ended)
         // leaves the marker stale, and the wrapper, which takes nothing
         // before the retry, renews it so that the wall is tended again.
-        self.stamp_planner_input(view);
-        self.send_to_planner(view, &workspace, Input::Text(&text), PROVIDER_RETRY)?;
+        self.stamp_planner_input(env, view);
+        send_to_planner(
+            &**env.files,
+            &*env.queue,
+            view,
+            &workspace,
+            Input::Text(&text),
+            PROVIDER_RETRY,
+        )?;
         info!(
             "planner {id} of the runtime: claude can be used again; the call of turn {turn} is made again"
         );
@@ -275,35 +299,39 @@ impl Supervisor<'_> {
     /// limits (silent past `turn_silence_secs`, or running past
     /// `turn_limit_secs`): the turn's own limit stands in for the planner
     /// timeout of an interactive one (ADR-t1394-2 decision 3).
-    pub(super) fn tell_of_stopped_planner_turns(&mut self, views: &[PlannerView]) -> Result<()> {
-        for view in views {
-            self.tell_of_stopped_planner_turn(&view.planner, &view.dir, view.state.as_str())?;
-        }
-        Ok(())
-    }
-
-    /// [`Self::tell_of_stopped_planner_turns`] for `planner`, whose
-    /// directory is `dir` and state `state`: also for one the sweep closed
-    /// before a pass saw it, its session over after the stopped turn.
-    pub(super) fn tell_of_stopped_planner_turn(
+    pub(super) fn tell_of_stopped_planner_turns(
         &mut self,
-        planner: &PlannerSession,
-        dir: &Path,
-        state: &str,
+        env: &mut PlanningEnv<'_>,
+        views: &[PlannerView],
     ) -> Result<()> {
-        if !headless_runtime_row(planner) {
-            return Ok(());
-        }
-        let Some((reason, payload)) = last_turn(self, &planner_idle_marker(dir))
-            .and_then(|mark| stopped_turn_notice(planner, state, &mark))
-        else {
-            return Ok(());
-        };
-        if self.queue.planner_silent(planner.id, payload)? {
-            warn!("{reason}; the inbox is told");
+        for view in views {
+            tell_of_stopped_planner_turn(env, &view.planner, &view.dir, view.state.as_str())?;
         }
         Ok(())
     }
+}
+
+/// [`PlanningState::tell_of_stopped_planner_turns`] for `planner`, whose
+/// directory is `dir` and state `state`: also for one the sweep closed
+/// before a pass saw it, its session over after the stopped turn.
+pub(super) fn tell_of_stopped_planner_turn(
+    env: &PassEnv<'_>,
+    planner: &PlannerSession,
+    dir: &Path,
+    state: &str,
+) -> Result<()> {
+    if !headless_runtime_row(planner) {
+        return Ok(());
+    }
+    let Some((reason, payload)) = last_turn(&**env.files, &planner_idle_marker(dir))
+        .and_then(|mark| stopped_turn_notice(planner, state, &mark))
+    else {
+        return Ok(());
+    };
+    if env.queue.planner_silent(planner.id, payload)? {
+        warn!("{reason}; the inbox is told");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use tracing::{info, warn};
 
-use super::Supervisor;
+use super::{Queue, Repository, Supervisor};
 use crate::application::DependencyGraph;
 use crate::domain::{
     Priority, RunId, TaskId, build_wait,
@@ -41,7 +41,9 @@ const HOT_REFRESH_SECS: i64 = 600;
 /// comes first.
 const IN_FLIGHT_REFRESH_SECS: i64 = 60;
 
-/// What the supervisor keeps between passes.
+/// What the supervisor keeps between passes. 計画管理's plan review reads
+/// the expected files through [`Self::expected`], [`Self::expected_now`]
+/// and [`Self::runs_in_flight`], which fill the same cache.
 #[derive(Default)]
 pub(super) struct DeferWatch {
     /// A changed value read on the preceding pass, awaiting confirmation.
@@ -199,7 +201,7 @@ impl Supervisor<'_> {
                 "[conflicts] of dagq.toml changed ({} -> {}): the hotspots and the deferred claims are judged by the new values",
                 payload["from"], payload["to"]
             );
-            payload["supervisor"] = serde_json::json!(self.token);
+            payload["supervisor"] = serde_json::json!(self.registration.token);
             self.queue
                 .record_queue_event(EventKind::ConflictsConfigChanged, payload)?;
         }
@@ -224,7 +226,7 @@ impl Supervisor<'_> {
                 "[conflicts] of dagq.toml at the start ({}) differs from the latest change recorded ({}): recorded as a change",
                 payload["to"], payload["from"]
             );
-            payload["supervisor"] = serde_json::json!(self.token);
+            payload["supervisor"] = serde_json::json!(self.registration.token);
             self.queue
                 .record_queue_event(EventKind::ConflictsConfigChanged, payload)?;
         }
@@ -305,7 +307,7 @@ impl Supervisor<'_> {
             match (reason, worker_deferrals.get(&id)) {
                 (Some(_), Some(_)) => continue,
                 (Some((worker, why)), None) => {
-                    events.push((id, worker_deferred(why, worker, &self.token)));
+                    events.push((id, worker_deferred(why, worker, &self.registration.token)));
                     worker_deferrals.insert(id, (why.to_owned(), now));
                     continue;
                 }
@@ -313,7 +315,13 @@ impl Supervisor<'_> {
                     if let Some((why, since)) = worker_deferrals.remove(&id) {
                         events.push((
                             id,
-                            worker_deferral_ended(&why, "cleared", since, now, &self.token),
+                            worker_deferral_ended(
+                                &why,
+                                "cleared",
+                                since,
+                                now,
+                                &self.registration.token,
+                            ),
                         ));
                     }
                     worker_cleared = true;
@@ -334,7 +342,7 @@ impl Supervisor<'_> {
                 &mut deferrals,
                 &self.layout.version,
                 now,
-                &self.token,
+                &self.registration.token,
             ) {
                 Decision::Defer { event } => {
                     events.extend(event.map(|event| (id, event)));
@@ -350,7 +358,10 @@ impl Supervisor<'_> {
             let (overlap, left_out) = if hot.is_empty() || interrupt {
                 (None, None)
             } else {
-                let expected = self.expected(id)?;
+                let expected =
+                    self.claim
+                        .defer
+                        .expected(&mut *self.queue, &*self.repository, id)?;
                 let overlap = claim_defer::overlap(&hot, &expected, &counted);
                 let left_out = if counted.len() < in_flight.len() {
                     claim_defer::left_out(&hot, &expected, &in_flight, &counted)
@@ -367,7 +378,7 @@ impl Supervisor<'_> {
                 &mut deferral,
                 now,
                 max_secs,
-                &self.token,
+                &self.registration.token,
             );
             match deferral {
                 Some(deferral) => deferrals.insert(id, deferral),
@@ -388,7 +399,7 @@ impl Supervisor<'_> {
             }
             events.push((
                 *id,
-                worker_deferral_ended(why, "not_candidate", *since, now, &self.token),
+                worker_deferral_ended(why, "not_candidate", *since, now, &self.registration.token),
             ));
             false
         });
@@ -397,14 +408,17 @@ impl Supervisor<'_> {
             &mut build_deferrals,
             &candidates,
             now,
-            &self.token,
+            &self.registration.token,
         ));
         self.claim.defer.build_deferrals = Some(build_deferrals);
         deferrals.retain(|id, deferral| {
             if candidates.contains(id) {
                 return true;
             }
-            events.extend(claim_defer::left(*deferral, now, &self.token).map(|event| (*id, event)));
+            events.extend(
+                claim_defer::left(*deferral, now, &self.registration.token)
+                    .map(|event| (*id, event)),
+            );
             false
         });
         self.claim.defer.deferrals = Some(deferrals);
@@ -472,7 +486,12 @@ impl Supervisor<'_> {
             .as_ref()
             .is_none_or(|(at, _)| now - at >= HOT_REFRESH_SECS)
         {
-            let hot = match self.conflict_hotspot_files() {
+            let hot = match super::plan_review::conflict_hotspot_files(
+                &*self.queue,
+                &*self.repository,
+                &*self.generators.clock,
+                self.claim.conflicts,
+            ) {
                 Ok(files) => files
                     .into_iter()
                     .filter(|file| file.alert)
@@ -520,15 +539,29 @@ impl Supervisor<'_> {
         Ok((touched, in_flight))
     }
 
+    /// [`DeferWatch::runs_in_flight`] on the supervisor's queue and
+    /// repository.
+    pub(super) fn runs_in_flight(&mut self) -> Result<Vec<InFlight>> {
+        self.claim
+            .defer
+            .runs_in_flight(&mut *self.queue, &*self.repository)
+    }
+}
+
+impl DeferWatch {
     /// The runs in flight (the latest run of each in-progress task) and
     /// the files each is expected to touch: its diff from its base to its
     /// head and the expected files of its task (ADR-0069 decision 2), with
     /// since when each only waits for a person (ADR-t1484-1) and whether it
     /// failed with no commit of its own (ADR-t1634-1).
-    pub(super) fn runs_in_flight(&mut self) -> Result<Vec<InFlight>> {
+    pub(super) fn runs_in_flight(
+        &mut self,
+        queue: &mut dyn Queue,
+        repository: &dyn Repository,
+    ) -> Result<Vec<InFlight>> {
         let mut in_flight = Vec::new();
-        for run in self.queue.latest_runs_in_progress()? {
-            let mut files = self.expected(run.task_id())?;
+        for run in queue.latest_runs_in_progress()? {
+            let mut files = self.expected(&mut *queue, repository, run.task_id())?;
             let head = run
                 .result_commit()
                 .map(|commit| commit.as_str().to_owned())
@@ -537,10 +570,7 @@ impl Supervisor<'_> {
             // A head that cannot be read may hold a change: the run counts.
             let mut readable = true;
             if let Some(head) = head {
-                match self
-                    .repository
-                    .changed_paths(run.base_commit().as_str(), &head)
-                {
+                match repository.changed_paths(run.base_commit().as_str(), &head) {
                     Ok(paths) => changed = Some(paths),
                     Err(error) => {
                         readable = false;
@@ -553,53 +583,45 @@ impl Supervisor<'_> {
                 run_id: run.id().as_str().to_owned(),
                 task_id: run.task_id(),
                 files,
-                owner_waiting_since: self.owner_waiting_since(run.id())?,
+                owner_waiting_since: run_owner_waiting_since(&mut *queue, run.id())?,
                 no_commit: readable && failed_without_commit(run.status(), changed.as_deref()),
             });
         }
         Ok(in_flight)
     }
 
-    /// Since when `run` only waits for a person's answer: its open asks,
-    /// its lease and its events, read only when it has an open ask.
-    fn owner_waiting_since(&self, run: &RunId) -> Result<Option<i64>> {
-        let asks = self.queue.unclosed_run_asks(run)?;
-        if !asks
-            .iter()
-            .any(|ask| ask.answered_at.is_none() && claim_defer::waits_for_owner(&ask.kind))
-        {
-            return Ok(None);
-        }
-        let leased = self.queue.run_lease(run)?.is_some();
-        let events = self.queue.run_events(run)?;
-        Ok(owner_waiting_since(&asks, leased, &events))
-    }
-
     /// The files `task` is expected to touch as it is now, not as cached:
     /// for a task whose paths may have changed since (one under plan
     /// review).
-    pub(super) fn expected_now(&mut self, task: TaskId) -> Result<Vec<String>> {
-        self.claim.defer.expected.remove(&task);
-        self.expected(task)
+    pub(super) fn expected_now(
+        &mut self,
+        queue: &mut dyn Queue,
+        repository: &dyn Repository,
+        task: TaskId,
+    ) -> Result<Vec<String>> {
+        self.expected.remove(&task);
+        self.expected(queue, repository, task)
     }
 
     /// The files `task` is expected to touch: its declared concrete paths,
     /// or, when it declares none, the files its most related landed tasks
     /// changed (ADR-t1981-1).
-    pub(super) fn expected(&mut self, task: TaskId) -> Result<Vec<String>> {
-        if let Some(files) = self.claim.defer.expected.get(&task) {
+    pub(super) fn expected(
+        &mut self,
+        queue: &mut dyn Queue,
+        repository: &dyn Repository,
+        task: TaskId,
+    ) -> Result<Vec<String>> {
+        if let Some(files) = self.expected.get(&task) {
             return Ok(files.clone());
         }
-        let declared = self.queue.show(task)?.task.paths().to_vec();
+        let declared = queue.show(task)?.task.paths().to_vec();
         let mut changed = Vec::new();
         if claim_defer::needs_related_landings(&declared) {
-            match self.queue.related_landed_commits(task, RELATED_TASKS) {
+            match queue.related_landed_commits(task, RELATED_TASKS) {
                 Ok(commits) => {
                     for commit in commits {
-                        match self
-                            .repository
-                            .changed_paths(&format!("{commit}^"), &commit)
-                        {
+                        match repository.changed_paths(&format!("{commit}^"), &commit) {
                             Ok(paths) => changed.extend(paths),
                             Err(error) => {
                                 warn!(error = %format_args!("{error:#}"), "the files commit {commit} changed could not be read: {error:#}")
@@ -613,9 +635,24 @@ impl Supervisor<'_> {
             }
         }
         let files = expected_files(&declared, &changed);
-        self.claim.defer.expected.insert(task, files.clone());
+        self.expected.insert(task, files.clone());
         Ok(files)
     }
+}
+
+/// Since when `run` only waits for a person's answer: its open asks,
+/// its lease and its events, read only when it has an open ask.
+fn run_owner_waiting_since(queue: &mut dyn Queue, run: &RunId) -> Result<Option<i64>> {
+    let asks = queue.unclosed_run_asks(run)?;
+    if !asks
+        .iter()
+        .any(|ask| ask.answered_at.is_none() && claim_defer::waits_for_owner(&ask.kind))
+    {
+        return Ok(None);
+    }
+    let leased = queue.run_lease(run)?.is_some();
+    let events = queue.run_events(run)?;
+    Ok(owner_waiting_since(&asks, leased, &events))
 }
 
 #[cfg(test)]

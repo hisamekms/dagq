@@ -174,7 +174,7 @@ impl Supervisor<'_> {
             applied = true;
         }
         self.landing.rechecks.locked_out = false;
-        if self.landing.rechecks.running.is_none() && !self.draining {
+        if self.landing.rechecks.running.is_none() && !self.registration.draining {
             let due = std::mem::take(&mut self.landing.rechecks.due);
             match self.try_recheck(due) {
                 Ok(Start::Started | Start::Nothing) => {}
@@ -240,7 +240,7 @@ impl Supervisor<'_> {
             && event.payload["main"] == main.as_str()
         {
             // This supervisor checked main as it is.
-            if event.payload["supervisor"] == self.token.as_str() {
+            if event.payload["supervisor"] == self.registration.token.as_str() {
                 self.landing.rechecks.checked = Some(main);
                 return Ok(Start::Nothing);
             }
@@ -341,7 +341,7 @@ impl Supervisor<'_> {
             let held = match self.queue.run_lease(run.id())? {
                 None => false,
                 Some(lease)
-                    if lease.token == self.token
+                    if lease.token == self.registration.token
                         && self.claim.slots.iter().any(|slot| {
                             slot.run.id() == run.id() && slot.phase.waits_to_land()
                         }) =>
@@ -388,7 +388,7 @@ impl Supervisor<'_> {
             .into_iter()
             .filter(|event| event.payload["main"] == main.as_str())
         {
-            if event.payload["supervisor"] == self.token.as_str() {
+            if event.payload["supervisor"] == self.registration.token.as_str() {
                 return Ok(Checked::ByThis);
             }
             checked = Checked::ByOther;
@@ -540,7 +540,7 @@ impl Supervisor<'_> {
             "command": watch.command,
             "duration_secs": watch.started.elapsed().as_secs(),
             "failed_runs": failed_runs,
-            "supervisor": self.token,
+            "supervisor": self.registration.token,
         });
         if let (Some(payload), Some(counts)) = (payload.as_object_mut(), counts.as_object()) {
             payload.extend(counts.clone());
@@ -575,7 +575,7 @@ impl Supervisor<'_> {
             || self
                 .queue
                 .run_lease(run.id())?
-                .is_some_and(|lease| lease.token != self.token)
+                .is_some_and(|lease| lease.token != self.registration.token)
         {
             return Ok(false);
         }
@@ -629,7 +629,7 @@ impl Supervisor<'_> {
                 Some(_) => recheck::RESUMED,
                 None => return Ok(None),
             },
-            Some(lease) if lease.token == self.token => {
+            Some(lease) if lease.token == self.registration.token => {
                 payload["action"] = json!(HELD);
                 payload["reason"] = json!(reason);
                 self.queue.record_runtime_event(
@@ -683,9 +683,12 @@ impl Supervisor<'_> {
             }
         }
         payload["repeat"] = json!(true);
-        let parked = self
-            .queue
-            .park_rechecked(run.id(), Some(&self.token), &reason, payload)?;
+        let parked = self.queue.park_rechecked(
+            run.id(),
+            Some(&self.registration.token),
+            &reason,
+            payload,
+        )?;
         if parked.is_some() {
             info!(run_id = %run.id(), "run {}: parked for a resume instead of landing onto main {main}: {reason}", run.id());
         }

@@ -104,7 +104,7 @@ use crate::domain::{
     worker::Worker,
     worker_model::{WorkerSession, WorkerTrial},
 };
-use contexts::{HostOpsState, ObservationState, PassEnv};
+use contexts::{HostOpsState, ObservationState, PassEnv, PlanningEnv, PlanningState};
 
 mod adopt;
 mod background;
@@ -122,6 +122,7 @@ mod finding_planner;
 mod forecast;
 mod goal_review;
 mod handoff;
+mod handoff_slots;
 mod headless;
 mod host_metrics;
 mod idle;
@@ -156,6 +157,7 @@ mod triage;
 mod update;
 mod waiting;
 
+use self::background::{WorkspaceCloser, close_ended_landing_asks, close_open_workspaces};
 pub(crate) use self::background::{
     left_planner_turn, left_turn, stop_left_turn, stop_run_session, stop_session,
 };
@@ -181,7 +183,7 @@ pub use self::sccache::SccachePort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::{
     deliver::*, exit::*, headless::*, idle::*, jobs::*, provider::*, recovery::*, resume::*,
-    revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
+    revise::*, session::*, stale::*, stall::*, waiting::*,
 };
 
 /// What a candidate in the line of a fill pass starts (ADR-t1850-1).
@@ -923,38 +925,30 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         files: ports.files.clone(),
         processes: ports.processes.clone(),
         review_material: ports.review_material,
-        token,
-        heartbeat,
+        registration: handoff::Registration {
+            token,
+            heartbeat,
+            handoff: None,
+            exec: None,
+            draining: false,
+            stop_recorded: false,
+        },
         fresh_session: settings.fresh_session,
         review_jobs: settings.review_jobs,
         fresh_session_file: ports.fresh_session_file.clone(),
         fresh_session_error: None,
         finished: Vec::new(),
         errors: Vec::new(),
-        last_sweep: None,
         last_turns: None,
-        sweep_failures: Vec::new(),
         generators: ports.generators.clone(),
         stall: settings.stall,
         wrapper_setting_warned: false,
-        route_setting_warned: std::sync::atomic::AtomicBool::new(false),
-        plan_review: None,
-        goal_review: None,
         job_ends: JobEnds::default(),
         jobs_swept: false,
-        planner_exits: Vec::new(),
-        handoff: None,
-        exec: None,
         queue_hold: None,
         hold_continue: HashMap::new(),
-        draining: false,
-        stop_recorded: false,
         utc_offset: settings.utc_offset,
-        max_load: settings.max_load,
-        load_average: ports.load_average,
-        host_versions: ports.host_versions,
         worker_plugin: ports.worker_plugin.clone(),
-        max_improvement_proposals: ports.max_improvement_proposals.clone(),
         claim: stages::ClaimState {
             slots: stages::SlotTable::default(),
             workers: ports
@@ -1000,6 +994,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         e2e: e2e::E2eWaits::new(ports.run_e2e.clone()),
 
         notice_failures: HashMap::new(),
+        planning: contexts::PlanningState::new(ports),
         observation: contexts::ObservationState::new(ports),
         host: contexts::HostOpsState::new(ports, settings),
     };
@@ -1014,9 +1009,12 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     }
     let result = supervisor.run_loop(settings);
     match &result {
-        Ok(value) => info!("supervisor {} exiting: {value}", supervisor.token),
+        Ok(value) => info!(
+            "supervisor {} exiting: {value}",
+            supervisor.registration.token
+        ),
         Err(error) => {
-            error!(error = %format_args!("{error:#}"), "supervisor {} failed: {error:#}", supervisor.token)
+            error!(error = %format_args!("{error:#}"), "supervisor {} failed: {error:#}", supervisor.registration.token)
         }
     }
     result
@@ -1025,15 +1023,17 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
 /// A listing of this user's processes with the wall time it was taken.
 type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 
-/// The supervisor's loop and the state of the contexts that are not split
-/// off yet (docs/design/architecture.md, "`Supervisor`の状態"). Which
-/// context owns each field, so that a submodule changes only its own
-/// context's fields and reads or calls the others (rule C3):
+/// The supervisor's loop, with each context's state apart
+/// (docs/design/architecture.md, "`Supervisor`の状態"). Which context owns
+/// each field, so that a submodule changes only its own context's state and
+/// reads or calls the others (rule C3):
 ///
 /// - shared: `queue`, `queues`, `generators`, `layout`, `processes` and
-///   `utc_offset`, the connection, clocks and places every context reads.
-/// - planning: `plan_review`, `goal_review`, `planner_exits`,
-///   `route_setting_warned` and `max_improvement_proposals`.
+///   `utc_offset`, the connection, clocks and places every context reads,
+///   and the adapters and flags every context reads and none changes
+///   (`sessions`, `service_access`, `no_claude`).
+/// - planning: `planning` ([`contexts::PlanningState`]), changed only by
+///   its submodules through their passes.
 /// - execution and landing: by stage ([`stages`]), the slot assignment
 ///   `claim` (its slots change only through [`stages::SlotTable`]'s
 ///   operations), `landing`, `resume`, `triage`, `provider` and `e2e`
@@ -1044,17 +1044,16 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   `jobs_swept`, `last_turns`, `fresh_session*`, `review_jobs`,
 ///   `queue_hold`, `hold_continue`, `review_material`, `wrapper_setting_warned`), with
 ///   the adapters it uses (`repository`, `remote`, `verifier`, `reviewer`,
-///   `codex_jobs`, `signals`, `spawner`, `files`).
+///   `codex_jobs`, `signals`, `spawner`, `files`). The providers' holds and
+///   `queue_hold` are lent to 計画管理's jobs through [`JobDesk`].
 /// - observation and analysis: `observation`
 ///   ([`contexts::ObservationState`]), changed only by its submodules
 ///   through their passes.
-/// - host operation: `host` ([`contexts::HostOpsState`]), changed only by
-///   its submodules through their passes; and on the loop, the
-///   registration and handoff (`token`, `heartbeat`, `exec`, `handoff`,
-///   `draining`, `stop_recorded`),
-///   the sweep (`last_sweep`, `sweep_failures`), the host's load
-///   (`max_load`, `load_average`, `host_versions`), `service_access`,
-///   `no_claude` and `sessions`.
+/// - host operation: `host` ([`contexts::HostOpsState`], the sweep and the
+///   load among it), changed only by its submodules through their passes,
+///   and `registration` ([`handoff::Registration`]), changed by its own
+///   operations, which the loop calls, and by the loop's steps of a
+///   handoff and a stop.
 struct Supervisor<'a> {
     no_claude: bool,
     queue: Box<dyn Queue + Send>,
@@ -1079,8 +1078,8 @@ struct Supervisor<'a> {
     processes: Arc<dyn ProcessControl + Send + Sync>,
     review_material:
         &'a dyn Fn(TaskId, Option<&crate::application::review::ReviewRange>) -> Result<Value>,
-    token: LeaseToken,
-    heartbeat: Heartbeat,
+    /// host運用's registration of this process, its handoff and its stop.
+    registration: handoff::Registration,
     /// `[fresh_session]` as last read (ADR-t2080-1): past what context a
     /// worker's send-back or resume starts a new session.
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
@@ -1095,15 +1094,9 @@ struct Supervisor<'a> {
     fresh_session_error: Option<String>,
     finished: Vec<TaskRun>,
     errors: Vec<RunError>,
-    /// When this process last swept the workspaces of ended runs
-    /// (`LoopSettings::sweep_interval`); `None` until the first pass sweeps.
-    last_sweep: Option<Instant>,
     /// When this process last recorded the transcript turns of the open
     /// session spans (ADR-0048 decision 8); `None` until the first pass.
     last_turns: Option<Instant>,
-    /// The workspaces the sweep could not close: retried on every sweep,
-    /// their `cleanup_failed` recorded once per process.
-    sweep_failures: Vec<String>,
     /// The clock and IDs `queue` also uses.
     generators: Generators,
     /// The host's time zone ([`LoopSettings::utc_offset`]): the local day
@@ -1114,15 +1107,6 @@ struct Supervisor<'a> {
     /// Whether `[headless] wrapper = "workspace"`, which a worker ignores,
     /// was warned of (ADR-t1433-3 decision 2).
     wrapper_setting_warned: bool,
-    /// Whether `[roles.runtime_planner] route`, which the runtime's planners
-    /// ignore, was warned of (ADR-t1433-2 decision 3). Set where a planner
-    /// opens, which reads `[roles]` through `&self`.
-    route_setting_warned: std::sync::atomic::AtomicBool,
-    /// The plan review job running now (ADR-0041 decision 11): one at a
-    /// time, queue-wide, outside the run slots.
-    plan_review: Option<plan_review::PlanReviewWatch>,
-    /// The goal review job running now: one at a time, queue-wide.
-    goal_review: Option<goal_review::GoalReviewWatch>,
     /// The ends of this process's headless jobs still to be written: the
     /// outcomes of their `headless_jobs` rows (task 443), and the jobs
     /// abandoned, written as `headless_job_stopped` with their Execution.
@@ -1130,15 +1114,6 @@ struct Supervisor<'a> {
     /// Whether this process looked for the jobs a gone supervisor left,
     /// its own token's included (after an exec), already.
     jobs_swept: bool,
-    /// The runtime's planners this process asked to exit (their exit
-    /// request), and when.
-    planner_exits: Vec<(crate::domain::PlannerId, Instant)>,
-    /// The binary a handoff asked this process to exec (ADR-0045 decision
-    /// 10): no new work starts, and the loop ends once every slot rests at
-    /// a point the next process rebuilds it from.
-    handoff: Option<String>,
-    /// Set when the loop ended for that exec: the registration stays.
-    exec: Option<String>,
     /// The open authentication or usage-limit ask read at the top of this
     /// pass (task 437): no new run is claimed and no headless job starts
     /// while it holds.
@@ -1146,20 +1121,7 @@ struct Supervisor<'a> {
     /// The held runs whose session gets the fixed text to go on, with the
     /// ask a person answered `done` (task 437).
     hold_continue: HashMap<RunId, AskId>,
-    /// This pass drains (a stop, a handoff, or claiming stopped after a
-    /// provisioning failure): nothing may wait for the program to appear.
-    draining: bool,
-    /// Whether this process recorded `supervisor_draining` for its stop
-    /// request (task 1277): once, on the first pass that saw it.
-    stop_recorded: bool,
-    /// `--max-load` (task 327).
-    max_load: Option<f64>,
-    /// The 1-minute load average, and the host's versions a claim records.
-    load_average: fn() -> Option<f64>,
-    host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
     worker_plugin: Arc<dyn Fn(&Path) -> String + Send + Sync>,
-    /// Reads the limit on the improvement proposals running.
-    max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
     /// The notices of a question closed without its answer that could not
     /// be sent, by run: tried again a bounded number of times (task 1372).
     notice_failures: HashMap<RunId, stall::NoticeFailure>,
@@ -1172,6 +1134,8 @@ struct Supervisor<'a> {
     /// The e2e stage's state: its port, the runs waiting for the e2e, and
     /// when one that could not run is tried again.
     e2e: e2e::E2eWaits,
+    /// 計画管理's state.
+    planning: contexts::PlanningState,
     /// 観測と分析's state.
     observation: contexts::ObservationState,
     /// host運用's state.
@@ -1365,27 +1329,13 @@ enum Step {
     Disowned,
 }
 impl Supervisor<'_> {
-    /// What a session of `role` starts with (ADR-0079 decision 7):
-    /// `[roles.<role>]` of `dagq.toml`, read at each start so a change takes
-    /// effect without a restart; none, or a file that cannot be read, starts
-    /// it as before.
-    pub(super) fn actor_launch(
-        &self,
-        role: crate::domain::actor_model::ModelRole,
-    ) -> crate::domain::actor_model::ActorLaunch {
-        self.role_models(role).launch(role)
-    }
-
     /// `[roles.*]` of `dagq.toml` as read now, or none (every role started
     /// as before) when it cannot be read, warned of for `role`.
     pub(super) fn role_models(
         &self,
         role: crate::domain::actor_model::ModelRole,
     ) -> crate::domain::actor_model::RoleModels {
-        self.verifier.role_models().unwrap_or_else(|error| {
-            warn!(error = %format_args!("{error:#}"), "[roles.{}] could not be read; starting it as before: {error:#}", role.as_str());
-            crate::domain::actor_model::RoleModels::default()
-        })
+        role_models_of(&*self.verifier, role)
     }
 
     /// The loop's shared parts and adapters ([`PassEnv`]), borrowed apart
@@ -1408,7 +1358,8 @@ impl Supervisor<'_> {
                 repository: &self.repository,
                 verifier: &self.verifier,
                 spawner: self.spawner,
-                token: &self.token,
+                sessions: self.sessions,
+                token: &self.registration.token,
             },
             &mut self.observation,
             &mut self.host,
@@ -1433,15 +1384,74 @@ impl Supervisor<'_> {
         pass(host, &mut env)
     }
 
+    /// Run `pass` of 計画管理 on its state, with 実行と着地's jobs and
+    /// providers ([`JobDesk`]), the claim's expected files and the limits
+    /// the loop read for it ([`contexts::PlanningEnv`]).
+    fn on_planning<R>(
+        &mut self,
+        pass: impl FnOnce(&mut contexts::PlanningState, &mut contexts::PlanningEnv<'_>) -> R,
+    ) -> R {
+        let mut env = contexts::PlanningEnv {
+            pass: PassEnv {
+                queue: &mut *self.queue,
+                queues: &self.queues,
+                generators: &self.generators,
+                layout: self.layout,
+                processes: &self.processes,
+                files: &self.files,
+                repository: &self.repository,
+                verifier: &self.verifier,
+                spawner: self.spawner,
+                sessions: self.sessions,
+                token: &self.registration.token,
+            },
+            jobs: JobDesk {
+                reviewer: self.reviewer,
+                codex_jobs: self.codex_jobs,
+                signals: self.signals,
+                service_access: self.service_access,
+                no_claude: self.no_claude,
+                job_ends: &self.job_ends,
+                review_jobs: self.review_jobs,
+                provider: &mut self.provider,
+                queue_hold: &mut self.queue_hold,
+            },
+            defer: &mut self.claim.defer,
+            runtime_planners: self.claim.limits.runtime_planners.value,
+            conflicts: self.claim.conflicts,
+            turn_limits: self.stall.turn_limits(),
+        };
+        pass(&mut self.planning, &mut env)
+    }
+
     /// Run `call` with the loop's shared parts only.
     fn with_env<R>(&mut self, call: impl FnOnce(&mut PassEnv<'_>) -> R) -> R {
         let (mut env, _, _) = self.split();
         call(&mut env)
     }
 
-    /// The runs the slots hold, which a cleanup leaves alone.
+    /// The runs the slots hold, which a cleanup and the sweep leave alone.
     fn held_runs(&self) -> Vec<RunId> {
         self.claim.slots.runs()
+    }
+
+    /// The sweep of what ended runs left, when host運用's
+    /// [`sweep::SweepWatch`] says it is due: in the same pass the
+    /// `approve_landing` asks the paths that ended their runs left open are
+    /// closed ([`sweep::close_ended_landing_asks`]), the disk of the ended
+    /// runs is asked to be freed ([`Self::request_cleanup`]), 計画管理
+    /// sweeps its planners ([`contexts::PlanningState::sweep_planners`]),
+    /// and the background wrappers of ended runs still running are stopped
+    /// ([`sweep::SweepWatch::sweep_ended_sessions`]).
+    fn sweep_ended_runs(&mut self, interval: Duration) -> Result<()> {
+        if !self.host.sweep.start(Instant::now(), interval) {
+            return Ok(());
+        }
+        close_ended_landing_asks(&mut *self.queue, None);
+        self.request_cleanup(None);
+        self.on_planning(|planning, env| planning.sweep_planners(env));
+        let held = self.held_runs();
+        self.on_host(|host, env| host.sweep.sweep_ended_sessions(env, &held))
     }
 
     /// Ask host運用 for the worktrees of ended runs to be cleaned, every
@@ -1487,16 +1497,6 @@ impl Supervisor<'_> {
         self.with_env(|env| sccache::record_wrapper_removed(env, run, look, fields));
     }
 
-    /// The handoff request this process drains for was replaced by one for
-    /// `now`: the drain goes on for the new binary (task 1286).
-    fn replace_handoff(&mut self, binary: &str, now: String) {
-        info!(
-            "supervisor {} handoff to {binary} was replaced by a handoff to {now}: no new work starts; it execs {now} once the validations and landings in progress are done",
-            self.token
-        );
-        self.handoff = Some(now);
-    }
-
     /// Drive the loop, then remove this process's registration with the
     /// record of its stop: it is about to exit, whether it drained its
     /// runs, ran out of work, or failed on a claim or provisioning. A
@@ -1520,34 +1520,17 @@ impl Supervisor<'_> {
                 host.finish_cleanup(env, &held);
             });
         }
-        if self.exec.is_none() {
+        if self.registration.exec.is_none() {
             // Only a loop that ended on an error leaves one running.
             self.on_observation(|observation, env| {
                 observation.stop_observer(env, "with the supervisor");
                 observation.stop_throughput_review(env, "with the supervisor");
             });
         }
-        if self.exec.is_none() && self.heartbeat.check().is_ok() {
-            // The mark of the stop (ADR-0051 decision 10); an exec leaves it
-            // to the next process's handoff mark.
-            let stopped = json!({
-                "supervisor": self.token,
-                "dagq_version": self.layout.version,
-                "outcome": if result.is_ok() { "stopped" } else { "failed" },
-            });
-            // The stop is recorded in the transaction that removes the
-            // registration (ADR-t1662-1 decision 6): a record that fails
-            // keeps the row, which goes stale for the next `up` or `down`
-            // to prune.
-            self.heartbeat.stop();
-            if let Err(error) =
-                self.queue
-                    .prune_supervisor(&self.token, EventKind::SupervisorStopped, &|_| {
-                        stopped.clone()
-                    })
-            {
-                warn!(error = %format_args!("{error:#}"), "the supervisor's stop could not be recorded, and its registration is left for the next prune: {error:#}");
-            }
+        if self
+            .registration
+            .deregister(&*self.queue, &self.layout.version, result.is_ok())
+        {
             // After the deregistration, so the last of the supervisors a
             // `down` stops sees no other one left.
             if result.is_ok() && options.stop.load(Ordering::SeqCst) {
@@ -1559,57 +1542,16 @@ impl Supervisor<'_> {
         result
     }
     /// Abandon every headless job still running once the loop ended: the
-    /// plan review, the goal review and the slots' jobs
-    /// ([`HeadlessJob::abandon`]).
+    /// plan review and the goal review ([`contexts::PlanningState::abandon_jobs`])
+    /// and the slots' jobs ([`HeadlessJob::abandon`]).
     fn abandon_jobs(&mut self) {
-        if let Some(watch) = &mut self.plan_review {
-            watch.headless.abandon();
-        }
-        if let Some(watch) = &mut self.goal_review {
-            watch.headless.abandon();
-        }
+        self.planning.abandon_jobs();
         self.claim.slots.abandon_jobs();
-    }
-    /// Record, once, that this process drains for a stop request (SIGINT /
-    /// SIGTERM, from `down`, the drain of `up` or `install
-    /// --allow-breaking`, or launchd's bootout) (task 1277): a handoff
-    /// waiting for it fails at once instead of at its timeout, and the
-    /// observer reads the stop behind the claims and resumes it holds.
-    /// A failed write is only logged and tried again on the next pass.
-    fn record_stop_request(&mut self) {
-        let handoff = match &self.handoff {
-            Some(binary) => Some(binary.clone()),
-            None => self.queue.handoff_request(&self.token).ok().flatten(),
-        };
-        let runs: Vec<&RunId> = self.claim.slots.iter().map(|slot| slot.run.id()).collect();
-        let payload = json!({
-            "supervisor": self.token,
-            "pid": std::process::id(),
-            "build": self.layout.version,
-            "reason": "stop_requested",
-            "handoff_binary": handoff,
-            "runs": runs,
-        });
-        match self
-            .queue
-            .record_queue_event(EventKind::SupervisorDraining, payload)
-        {
-            Ok(_) => {
-                self.stop_recorded = true;
-                info!(
-                    "supervisor {} asked to stop: it drains the runs in progress; a stop wins over any handoff",
-                    self.token
-                );
-            }
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the supervisor's stop request could not be recorded: {error:#}");
-            }
-        }
     }
     fn drive(&mut self, options: &LoopSettings) -> Result<Value> {
         loop {
             options.passes.fetch_add(1, Ordering::SeqCst);
-            if let Err(error) = self.heartbeat.check() {
+            if let Err(error) = self.registration.heartbeat.check() {
                 // Supervisor-level failure: note it on every run and keep the
                 // leases and the registration; they go stale once this
                 // process is gone.
@@ -1623,11 +1565,13 @@ impl Supervisor<'_> {
                 return Err(error);
             }
             let stopping = options.stop.load(Ordering::SeqCst);
-            if stopping && !self.stop_recorded {
-                self.record_stop_request();
+            if stopping && !self.registration.stop_recorded {
+                let runs = self.held_runs();
+                self.registration
+                    .record_stop_request(&*self.queue, &self.layout.version, &runs);
             }
             // Every pass, draining or handing off too (task 516).
-            let handing_off = self.handoff.is_some();
+            let handing_off = self.registration.handoff.is_some();
             let (host, generators) = (&mut self.host, &self.generators);
             host.host_metrics.pass(
                 host.host_metrics_port.as_ref(),
@@ -1639,7 +1583,7 @@ impl Supervisor<'_> {
             self.tend_headless_jobs();
             // What the cleanup job removed is recorded before the disk is
             // read (task 405).
-            let ending = cleanup::ends_cleanup(stopping, self.handoff.is_some());
+            let ending = cleanup::ends_cleanup(stopping, self.registration.handoff.is_some());
             let held = self.held_runs();
             self.on_host(|host, env| host.poll_cleanup(env, &held, ending));
             // Every pass, draining or not, so a hold on landings ends as soon
@@ -1656,7 +1600,8 @@ impl Supervisor<'_> {
             // And `[supervisor]`: a change of `parallel`, `max_waiting` or
             // `runtime_planners` takes effect without a restart (task 698,
             // task 941).
-            self.claim.reread_limits(&*self.queue, &self.token)?;
+            self.claim
+                .reread_limits(&*self.queue, &self.registration.token)?;
             // And `[provider_fallback]`: turning the workers' fallback on
             // or off takes effect without a restart (ADR-t1857-1).
             self.reread_provider_fallback();
@@ -1690,16 +1635,19 @@ impl Supervisor<'_> {
             // binary goes on draining for the new one, with no claim
             // between (task 1286).
             let mut handoff_withdrawn = false;
-            if let Some(binary) = self.handoff.clone() {
-                match self.queue.handoff_request(&self.token)? {
-                    Some(now) if now == binary => {}
-                    Some(now) => self.replace_handoff(&binary, now),
-                    None => {
+            if let Some(binary) = self.registration.handoff.clone() {
+                let requested = self.queue.handoff_request(&self.registration.token)?;
+                match handoff::handoff_change(&binary, requested) {
+                    handoff::HandoffChange::Same => {}
+                    handoff::HandoffChange::Replaced(now) => {
+                        self.registration.replace_handoff(&binary, now);
+                    }
+                    handoff::HandoffChange::Withdrawn => {
                         info!(
                             "supervisor {} handoff to {binary} was withdrawn; resuming normal work",
-                            self.token
+                            self.registration.token
                         );
-                        self.handoff = None;
+                        self.registration.handoff = None;
                         handoff_withdrawn = true;
                         // The cleanup goes back to normal with the claims;
                         // a stop keeps it ending (task 1427).
@@ -1709,25 +1657,30 @@ impl Supervisor<'_> {
                     }
                 }
             }
-            self.draining = stopping || !self.claim.claiming || self.handoff.is_some();
+            self.registration.draining = handoff::drains(
+                stopping,
+                self.claim.claiming,
+                self.registration.handoff.is_some(),
+            );
             // Before any new work, draining or not: a drain waits for them
             // (ADR-0062 decision 8).
             self.return_waiting_runs();
             // A stop wins over a handoff: the drain goes on as before.
             if !stopping {
-                if self.handoff.is_none() && !handoff_withdrawn {
-                    self.handoff = self.queue.handoff_request(&self.token)?;
-                    if let Some(binary) = &self.handoff {
+                if self.registration.handoff.is_none() && !handoff_withdrawn {
+                    self.registration.handoff =
+                        self.queue.handoff_request(&self.registration.token)?;
+                    if let Some(binary) = &self.registration.handoff {
                         info!(
                             "supervisor {} asked to hand off to {binary}: no new work starts; it execs once the validations and landings in progress are done",
-                            self.token
+                            self.registration.token
                         );
                         // Read after the cleanup was polled: this pass
                         // drains on it already.
                         self.host.end_cleanup_for_handoff();
                     }
                 }
-                if let Some(binary) = self.handoff.clone() {
+                if let Some(binary) = self.registration.handoff.clone() {
                     // A landing recheck in progress is waited for: its
                     // command would go on in the scratch worktree the next
                     // process uses (ADR-0068). None starts meanwhile (this
@@ -1740,17 +1693,17 @@ impl Supervisor<'_> {
                         && !self.observation.handoff_waits()
                         && self.claim.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
-                        if self.queue.take_handoff(&self.token, &binary)? {
+                        if self.queue.take_handoff(&self.registration.token, &binary)? {
                             let runs = self.prepare_handoff();
                             info!(
                                 "supervisor {} execs {binary}, handing over {runs} run(s)",
-                                self.token
+                                self.registration.token
                             );
-                            self.exec = Some(binary.clone());
+                            self.registration.exec = Some(binary.clone());
                             return Ok(json!({
                                 "outcome": "handoff",
                                 "binary": binary,
-                                "token": self.token,
+                                "token": self.registration.token,
                                 "runs": self.finished,
                                 "handed_over": runs,
                                 "errors": self.errors,
@@ -1759,24 +1712,27 @@ impl Supervisor<'_> {
                         }
                         // Not taken: withdrawn, or replaced by another
                         // binary, which the next pass execs (task 1286).
-                        match self.queue.handoff_request(&self.token)? {
-                            Some(now) if now != binary => self.replace_handoff(&binary, now),
+                        let requested = self.queue.handoff_request(&self.registration.token)?;
+                        match handoff::handoff_change(&binary, requested) {
+                            handoff::HandoffChange::Replaced(now) => {
+                                self.registration.replace_handoff(&binary, now);
+                            }
                             // The same binary asked again meanwhile: taken
                             // on the next pass.
-                            Some(_) => {}
-                            None => {
+                            handoff::HandoffChange::Same => {}
+                            handoff::HandoffChange::Withdrawn => {
                                 info!(
                                     "supervisor {} handoff to {binary} was withdrawn before exec; resuming normal work",
-                                    self.token
+                                    self.registration.token
                                 );
-                                self.handoff = None;
-                                self.draining = !self.claim.claiming;
+                                self.registration.handoff = None;
+                                self.registration.draining = !self.claim.claiming;
                                 self.resume_cleanup();
                             }
                         }
                     }
-                    if self.handoff.is_some() {
-                        self.draining = true;
+                    if self.registration.handoff.is_some() {
+                        self.registration.draining = true;
                         self.poll_observer();
                         self.reap_throughput_reviews(options);
                         self.on_observation(|observation, env| {
@@ -1790,8 +1746,10 @@ impl Supervisor<'_> {
                         // verdict left to the exec would be thrown away
                         // (task 1425). A task it readies waits for the
                         // next process's claim.
-                        self.plan_review_pass(options, false);
-                        self.goal_review_pass(false);
+                        self.on_planning(|planning, env| {
+                            planning.plan_review_pass(env, options, false);
+                            planning.goal_review_pass(env, false);
+                        });
                         self.tick(true);
                         thread::sleep(options.tick);
                         continue;
@@ -1833,7 +1791,12 @@ impl Supervisor<'_> {
             // and told through `[push]` (ADR-t1433-5 decision 1 (3)),
             // draining or not: a drain waits for their answers. The
             // watcher's changes are recorded either way (task 1021).
-            self.inbox_nudge_pass();
+            let reports = self.observation.reports.clone();
+            if let Some((config, message)) =
+                self.with_env(|env| inbox_nudge::inbox_nudge_pass(env, reports.as_ref()))
+            {
+                self.observation.queue_pushes(config, vec![message]);
+            }
             // Reaped on every pass, started only by a supervisor at work.
             // Its route decides on `--no-claude` and the hold: a login or
             // usage limit that holds Claude starts no Claude review, but
@@ -1863,8 +1826,10 @@ impl Supervisor<'_> {
             // while Claude is held (ADR-t1063-1 decision 5). One in progress
             // is followed.
             let starting = !stopping && self.claim.claiming && self.host.service_up;
-            let mut progressed = self.plan_review_pass(options, starting);
-            progressed |= self.goal_review_pass(starting);
+            let progressed = self.on_planning(|planning, env| {
+                let reviewed = planning.plan_review_pass(env, options, starting);
+                planning.goal_review_pass(env, starting) | reviewed
+            });
             if self.claim.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space (with the rest of one another job
@@ -1880,8 +1845,7 @@ impl Supervisor<'_> {
                 // does not.
                 let job = self.observation.busy(options.once && !stopping)
                     || self.host.release.running()
-                    || self.plan_review.is_some()
-                    || self.goal_review.is_some()
+                    || self.planning.busy()
                     || self.landing.rechecks.running()
                     || self.host.cleanup.for_disk()
                     || self.host.cleanup.deferred()
@@ -1943,7 +1907,7 @@ impl Supervisor<'_> {
         // A slot the runs freed since the last pass ends the wait for one
         // before anything takes it again (ADR-t1662-1 decision 6).
         self.claim
-            .note_slots_full(&*self.queue, &self.token, parallel);
+            .note_slots_full(&*self.queue, &self.registration.token, parallel);
         // Resumes and triage read the landing branch: they wait with the
         // claims until it resolves (ADR-t615-1). A resumed session gets
         // `[run.env]` like a claimed run, so it waits with the claims for a
@@ -2075,7 +2039,7 @@ impl Supervisor<'_> {
         }
         // The slots as the pass leaves them.
         self.claim
-            .note_slots_full(&*self.queue, &self.token, parallel);
+            .note_slots_full(&*self.queue, &self.registration.token, parallel);
         Ok(())
     }
     /// The room for the next claim (ADR-t1591-1).
@@ -2149,7 +2113,7 @@ impl Supervisor<'_> {
             // pass judges the load again before it (ADR-t1479-1). The hold
             // itself returned above, before any claim.
             let spacing =
-                claim_spacing::in_effect(self.max_load, self.claim.limits.claim_spacing.value);
+                claim_spacing::in_effect(self.host.max_load, self.claim.limits.claim_spacing.value);
             let now_ms = crate::application::unix_millis(self.generators.clock.system_time());
             if spacing.is_some() {
                 let last = self
@@ -2206,7 +2170,7 @@ impl Supervisor<'_> {
                     .repository
                     .is_dagq_source()
                     .then_some(self.layout.repo_root.as_path());
-                (self.host_versions)(&self.layout.claude, codex, rustc_in)
+                (self.host.host_versions)(&self.layout.claude, codex, rustc_in)
             });
             let host = host.clone();
             let plugin = pass
@@ -2232,7 +2196,7 @@ impl Supervisor<'_> {
             };
             let run = match self.queue.claim_for_supervisor_in_order(
                 &base,
-                &self.token,
+                &self.registration.token,
                 &order,
                 Some(&serde_json::to_value(&attributes)?),
                 &pass.trial,
@@ -2301,8 +2265,8 @@ impl Supervisor<'_> {
             return Ok(true);
         }
         let hold = ClaimHold::judge(&HoldInputs {
-            load_average: (self.load_average)(),
-            max_load: self.max_load,
+            load_average: (self.host.load_average)(),
+            max_load: self.host.max_load,
             free_bytes: self.host.free,
             needed_bytes: needed,
             // Claude's hold ask holds the claims only while no worker can
@@ -2328,7 +2292,7 @@ impl Supervisor<'_> {
         let last = self.queue.latest_queue_event(&RUN_ENV_PROGRAM_KINDS)?;
         if let Some((kind, mut payload)) = check.transition(last.as_ref().map(|e| e.kind.as_str()))
         {
-            payload["supervisor"] = json!(self.token);
+            payload["supervisor"] = json!(self.registration.token);
             self.queue.record_queue_event(kind, payload)?;
             match check.missing_message() {
                 Some(message) => {
@@ -2436,7 +2400,7 @@ impl Supervisor<'_> {
                 "[run.env] changed ({}): recorded as a change mark",
                 payload["changed"]
             );
-            payload["supervisor"] = json!(self.token);
+            payload["supervisor"] = json!(self.registration.token);
             self.queue
                 .record_queue_event(EventKind::RunEnvChanged, payload)?;
         }
@@ -2452,7 +2416,7 @@ impl Supervisor<'_> {
             host,
             parallel,
             slots: self.used_slots(),
-            load_avg: (self.load_average)(),
+            load_avg: (self.host.load_average)(),
             spacing: None,
             light_room: None,
             instructions: BTreeMap::new(),
@@ -2481,7 +2445,7 @@ impl Supervisor<'_> {
     /// Sample the load average once for every slot's current interval
     /// (task 197); the windows of runs no slot holds any more are dropped.
     fn sample_load(&mut self) {
-        let load = (self.load_average)();
+        let load = (self.host.load_average)();
         self.claim.sample_load(load);
     }
     /// The load over the run's interval that ends now, and start the next.
@@ -2541,13 +2505,17 @@ impl Supervisor<'_> {
                     // A landed run needs none of its workspaces; a failed
                     // one keeps them for its triage.
                     if matches!(run.status(), RunStatus::Integrated | RunStatus::Succeeded)
-                        && let Err(error) =
-                            self.close_open_workspaces(&run, WorkspaceCloser::Supervisor)
+                        && let Err(error) = close_open_workspaces(
+                            &mut *self.queue,
+                            self.sessions,
+                            &run,
+                            WorkspaceCloser::Runtime,
+                        )
                     {
                         warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its workspaces could not all be closed: {error:#}", run.id());
                     }
-                    self.close_ended_landing_asks(Some(run.task_id()));
-                    self.clean_task_worktrees(run.task_id());
+                    close_ended_landing_asks(&mut *self.queue, Some(run.task_id()));
+                    self.request_cleanup(Some(run.task_id()));
                     self.finished.push(*run);
                 }
                 Ok(Step::Triaged(run)) => self.note_triaged(&run),
@@ -2561,7 +2529,7 @@ impl Supervisor<'_> {
                 Err(_)
                     if !self
                         .queue
-                        .holds_lease(slot.run.id(), &self.token)
+                        .holds_lease(slot.run.id(), &self.registration.token)
                         .unwrap_or(true) =>
                 {
                     self.disown(&slot)
@@ -2589,7 +2557,10 @@ impl Supervisor<'_> {
                     // only the lease it kept for the landing goes.
                     let message = format!("landing could not start: {error:#}");
                     warn!(run_id = %slot.run.id(), "run {}: {message}", slot.run.id());
-                    if let Err(error) = self.queue.release_lease(slot.run.id(), &self.token) {
+                    if let Err(error) = self
+                        .queue
+                        .release_lease(slot.run.id(), &self.registration.token)
+                    {
                         warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: could not release the lease: {error:#}", slot.run.id());
                     }
                     self.record_rest(slot.run.id(), slot.track.attempt(), "landing_not_started");
@@ -2893,10 +2864,13 @@ impl Supervisor<'_> {
         reason: &Reason,
         session: Option<&Value>,
     ) {
-        if let Err(error) = self
-            .queue
-            .abandon_run(run.id(), &self.token, &message, reason, session)
-        {
+        if let Err(error) = self.queue.abandon_run(
+            run.id(),
+            &self.registration.token,
+            &message,
+            reason,
+            session,
+        ) {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record the error: {error:#}", run.id());
         }
         self.record_rest(run.id(), None, EventKind::RuntimeError.as_str());
@@ -2924,8 +2898,11 @@ impl Supervisor<'_> {
         // workspace from before ADR-t1433-3 is not asked of cmux, and its
         // wrapper's registration alone says whether it ended
         // (`run_session_gone`).
-        if !matches!(self.queue.holds_lease(slot.run.id(), &self.token), Ok(true))
-            || matches!(session_alive(self, slot.run.id()), Ok(false))
+        if !matches!(
+            self.queue
+                .holds_lease(slot.run.id(), &self.registration.token),
+            Ok(true)
+        ) || matches!(session_alive(self, slot.run.id()), Ok(false))
             || matches!(self.run_session_gone(&workspace), Ok(true))
         {
             return None;
@@ -2979,10 +2956,14 @@ impl Supervisor<'_> {
             "workspace_id": workspace,
             "exhausted": resumes_exhausted(&*self.queue, run.id(), self.resume.config),
         }));
-        if let Err(error) =
-            self.queue
-                .finish_resume(run.id(), &self.token, None, None, false, payload)
-        {
+        if let Err(error) = self.queue.finish_resume(
+            run.id(),
+            &self.registration.token,
+            None,
+            None,
+            false,
+            payload,
+        ) {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record the resume error: {error:#}", run.id());
         }
         self.record_rest(run.id(), None, EventKind::ResumeFinished.as_str());
@@ -3035,7 +3016,10 @@ impl Supervisor<'_> {
             }
             return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
         }
-        if !self.queue.holds_lease(slot.run.id(), &self.token)? {
+        if !self
+            .queue
+            .holds_lease(slot.run.id(), &self.registration.token)?
+        {
             return Ok(Step::Disowned);
         }
         match &mut slot.phase {
@@ -3068,14 +3052,15 @@ impl Supervisor<'_> {
                         landing_unresolved: self.landing.unresolved,
                         landing_short: self.host.disk.landing_short,
                         disk_cleaning: self.host.disk.cleaning,
-                        draining: self.draining,
+                        draining: self.registration.draining,
                     },
                 ) {
                     crate::domain::landing_hold::LandingHold::Proceed => {}
                     crate::domain::landing_hold::LandingHold::Wait => return Ok(Step::Continue),
                     crate::domain::landing_hold::LandingHold::HandBack(why) => {
                         warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: {why} and this supervisor stops", slot.run.id());
-                        self.queue.release_lease(slot.run.id(), &self.token)?;
+                        self.queue
+                            .release_lease(slot.run.id(), &self.registration.token)?;
                         return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
                     }
                 }
@@ -3083,9 +3068,13 @@ impl Supervisor<'_> {
                 // supervisor that stops cannot wait for it, and leaves the
                 // run awaiting integration as above (one that hands off
                 // leaves it to the next process, `AwaitingE2e`).
-                if self.draining && self.handoff.is_none() && self.e2e_retry_pending(&slot.run) {
+                if self.registration.draining
+                    && self.registration.handoff.is_none()
+                    && self.e2e_retry_pending(&slot.run)
+                {
                     warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: its e2e could not run and this supervisor stops", slot.run.id());
-                    self.queue.release_lease(slot.run.id(), &self.token)?;
+                    self.queue
+                        .release_lease(slot.run.id(), &self.registration.token)?;
                     return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
                 }
                 // The e2e a passed run needs runs before it lands
@@ -3119,10 +3108,11 @@ impl Supervisor<'_> {
                 if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
                     return Ok(Step::Done(Box::new(parked)));
                 }
-                let run = match self
-                    .queue
-                    .begin_integration(slot.run.id(), &self.token, &main)
-                {
+                let run = match self.queue.begin_integration(
+                    slot.run.id(),
+                    &self.registration.token,
+                    &main,
+                ) {
                     Ok(run) => run,
                     // An `integrate` took the slot since the check: try again later.
                     Err(_)
@@ -3211,7 +3201,7 @@ impl Supervisor<'_> {
                 if let Err(error) = acted {
                     // Another process took the run's lease meanwhile: its
                     // round is the record.
-                    if !self.queue.holds_lease(run.id(), &self.token)? {
+                    if !self.queue.holds_lease(run.id(), &self.registration.token)? {
                         return Ok(Step::Disowned);
                     }
                     self.fail_recovery(
@@ -3250,7 +3240,8 @@ impl Supervisor<'_> {
                     return Ok(Step::Continue);
                 }
                 if run.status() != RunStatus::Validating {
-                    self.queue.release_lease(run.id(), &self.token)?;
+                    self.queue
+                        .release_lease(run.id(), &self.registration.token)?;
                     return Ok(Step::Done(Box::new(run)));
                 }
                 let session = SessionRef {
@@ -3276,9 +3267,11 @@ impl Supervisor<'_> {
                     .join()
                     .map_err(|_| anyhow!("validation thread panicked"))??;
                 validation.load = self.take_load(slot.run.id());
-                let run = self
-                    .queue
-                    .finish_validation(slot.run.id(), &self.token, &validation)?;
+                let run = self.queue.finish_validation(
+                    slot.run.id(),
+                    &self.registration.token,
+                    &validation,
+                )?;
                 // Kept in the phase until it is replaced, so an error before
                 // that still finds the session to ask to exit (task 237).
                 let session = session.clone();
@@ -3512,7 +3505,9 @@ impl Supervisor<'_> {
                             json!({"attempt": watch.attempt, "head": head}),
                         )?;
                         info!(run_id = %slot.run.id(), "run {} rewrote its receipt for {label} (head {head}); validating again", slot.run.id());
-                        let run = self.queue.restart_validation(slot.run.id(), &self.token)?;
+                        let run = self
+                            .queue
+                            .restart_validation(slot.run.id(), &self.registration.token)?;
                         let handle = self.validate(run.clone());
                         slot.run = run;
                         slot.transition(
@@ -3631,7 +3626,8 @@ impl Supervisor<'_> {
                             )?;
                         }
                         info!(run_id = %run.id(), "run {} waits for a person in ask {ask}", run.id());
-                        self.queue.release_lease(run.id(), &self.token)?;
+                        self.queue
+                            .release_lease(run.id(), &self.registration.token)?;
                         Ok(Step::Done(Box::new(self.queue.run(run.id())?)))
                     }
                     AfterExit::ReviewFailed {
@@ -3677,11 +3673,13 @@ impl Supervisor<'_> {
                             EventKind::ReviewFailed,
                             payload,
                         )?;
-                        self.queue.release_lease(run.id(), &self.token)?;
+                        self.queue
+                            .release_lease(run.id(), &self.registration.token)?;
                         Ok(Step::Done(Box::new(self.queue.run(run.id())?)))
                     }
                     AfterExit::Rest { .. } => {
-                        self.queue.release_lease(run.id(), &self.token)?;
+                        self.queue
+                            .release_lease(run.id(), &self.registration.token)?;
                         Ok(Step::Done(Box::new(run)))
                     }
                 }
@@ -3865,6 +3863,18 @@ fn close_workspace(
             )
         }
     }
+}
+
+/// `[roles.*]` of `dagq.toml` as `verifier` reads it now, or none (every
+/// role started as before) when it cannot be read, warned of for `role`.
+fn role_models_of(
+    verifier: &dyn Verifier,
+    role: crate::domain::actor_model::ModelRole,
+) -> crate::domain::actor_model::RoleModels {
+    verifier.role_models().unwrap_or_else(|error| {
+        warn!(error = %format_args!("{error:#}"), "[roles.{}] could not be read; starting it as before: {error:#}", role.as_str());
+        crate::domain::actor_model::RoleModels::default()
+    })
 }
 
 /// Run `apply` on `state` with `job` as the `requested_by` of the events

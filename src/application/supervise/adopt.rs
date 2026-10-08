@@ -25,7 +25,7 @@ impl Supervisor<'_> {
     /// inside `adopt_run`, so two supervisors racing for one run take it
     /// exactly once.
     pub(super) fn adopt_stale_runs(&mut self, parallel: usize) -> Result<()> {
-        for candidate in self.queue.runs_leased_by_others(&self.token)? {
+        for candidate in self.queue.runs_leased_by_others(&self.registration.token)? {
             let now = self.generators.clock.now();
             let LeasedRun {
                 run,
@@ -57,9 +57,13 @@ impl Supervisor<'_> {
                 None => Value::Null,
             };
             let pid = self.layout.pid;
-            let Some(run) =
-                self.queue
-                    .adopt_run(run.id(), &lease.token, &self.token, pid, observed)?
+            let Some(run) = self.queue.adopt_run(
+                run.id(),
+                &lease.token,
+                &self.registration.token,
+                pid,
+                observed,
+            )?
             else {
                 info!(run_id = %run.id(), "run {} was not adopted: its lease changed while judging it", run.id());
                 continue;
