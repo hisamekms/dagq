@@ -2,10 +2,12 @@
 id: adr-t1228-2
 type: adr
 title: ADR-t1228-1のCLIが揃ったら、Claudeのinboxとplannerのsettingsのpermissions.denyにBash(cmux:*)を置き、inboxにはupが起動のcommandに渡すpermissions.denyだけのsettingsを新しく作る。これはguardrailでenforcementではなく、Codexのinboxは同じ趣旨をCodexの手段で持つ
-status: accepted
+status: superseded
 created: 2026-10-02
 updated: 2026-10-02
 accepted_on: 2026-10-02
+superseded_by: adr-t2159-1
+superseded_on: 2026-10-09
 amended_by:
   - adr-t1433-1
 owners:
@@ -29,6 +31,8 @@ related:
 ---
 
 # ADR-t1228-2: inboxとplannerの生のcmuxをguardrailとして拒む
+
+> **置き換え済み（2026-10-09）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2159-1](2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)を読む。
 
 ## Context
 

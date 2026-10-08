@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-08
 updated: 2026-10-08
 accepted_on: 2026-10-08
+amended_by:
+  - adr-t2159-1
 supersedes:
   - adr-t1162-1
 amends:

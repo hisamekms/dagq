@@ -2,10 +2,12 @@
 id: adr-t2105-1
 type: adr
 title: e2eの関門で、cmuxが答えないときだけ実cmuxを要るe2eを流さずに残りで判定し、流さなかったことを記録してinboxに届け、cmuxの後始末は次の関門に残す（ADR-t963-1決定1、ADR-t1162-1決定3、ADR-t1233-2決定2・3をamends）
-status: accepted
+status: superseded
 created: 2026-10-08
 updated: 2026-10-08
 accepted_on: 2026-10-08
+superseded_by: adr-t2159-1
+superseded_on: 2026-10-09
 amends:
   - adr-t963-1 decision 1
   - adr-t1162-1 decision 3
@@ -32,6 +34,8 @@ related:
 ---
 
 # ADR-t2105-1: e2eの関門で、cmuxが答えないときだけ実cmuxを要るe2eを流さずに残りで判定し、流さなかったことを記録してinboxに届け、cmuxの後始末は次の関門に残す
+
+> **置き換え済み（2026-10-09）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2159-1](2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)を読む。
 
 ## Context
 

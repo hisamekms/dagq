@@ -9,6 +9,7 @@ accepted_on: 2026-09-26
 amended_by:
   - adr-t1404-1
   - adr-t1433-1
+  - adr-t2159-1
 supersedes:
   - adr-0001
   - adr-0002

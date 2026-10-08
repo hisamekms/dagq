@@ -2,10 +2,12 @@
 id: adr-0031
 type: adr
 title: upがinbox / plannerのworkspaceに役割の色・status pill・ピンを当て、dagqのworkspace closeはピンを外してから閉じる
-status: accepted
+status: superseded
 created: 2026-09-24
 updated: 2026-09-24
 accepted_on: 2026-09-24
+superseded_by: adr-t2159-1
+superseded_on: 2026-10-09
 owners:
   - hisamekms
 tags:
@@ -19,6 +21,8 @@ related:
 ---
 
 # ADR-0031: upがinbox / plannerのworkspaceに役割の色・status pill・ピンを当て、dagqのworkspace closeはピンを外してから閉じる
+
+> **置き換え済み（2026-10-09）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2159-1](2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)を読む。
 
 ## Context
 

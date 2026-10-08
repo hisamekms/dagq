@@ -2,10 +2,12 @@
 id: adr-0028
 type: adr
 title: cmux workspaceのtitleを`[<repo>]<role>`にし、planner / inboxの名前とrole値を定義する
-status: accepted
+status: superseded
 created: 2026-09-23
 updated: 2026-09-23
 accepted_on: 2026-09-23
+superseded_by: adr-t2159-1
+superseded_on: 2026-10-09
 amended_by:
   - adr-t1433-1
   - adr-t1433-3
@@ -27,6 +29,8 @@ related:
 ---
 
 # ADR-0028: cmux workspaceのtitleを`[<repo>]<role>`にし、planner / inboxの名前とrole値を定義する
+
+> **置き換え済み（2026-10-09）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2159-1](2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)を読む。
 
 ## Context
 

@@ -2,10 +2,12 @@
 id: adr-t1433-1
 type: adr
 title: cmuxはinboxだけが使う。cmuxを呼ぶのはupがinboxのworkspaceを開く・確かめる・閉じることとinboxのsessionの中の操作だけにし、WorkspaceBackendをinboxのためのportに縮め、askの通知をinboxのwatchから出し、cmuxのfakeと実cmuxを要るtestをinboxを開くup / downだけにする（ADR-0052決定3・4などをamends）
-status: accepted
+status: superseded
 created: 2026-10-03
 updated: 2026-10-03
 accepted_on: 2026-10-03
+superseded_by: adr-t2159-1
+superseded_on: 2026-10-09
 amends:
   - adr-0052 decision 3
   - adr-0052 decision 4
@@ -49,6 +51,8 @@ related:
 ---
 
 # ADR-t1433-1: cmuxはinboxだけが使う（ADR-0052決定3・4などをamends）
+
+> **置き換え済み（2026-10-09）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2159-1](2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)を読む。
 
 ## Context
 
