@@ -678,7 +678,7 @@ fn claim_spacing(
 /// supervisor's wait for its claim spacing. A hold no supervisor records
 /// is not shown, nor guessed at.
 pub fn claim_holds(
-    queue: &(impl super::RunLog + super::RunCoordination + ?Sized),
+    queue: &(impl super::RunLog + super::SupervisorRegistry + ?Sized),
     control: &dyn ProcessControl,
     clock: &dyn Clock,
 ) -> Result<Vec<Value>> {

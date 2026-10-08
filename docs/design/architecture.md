@@ -61,7 +61,6 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
 - domainはI/O・時計・乱数を持たず、applicationはそれらをportで受ける（L1〜L5）。
 - 各contextは自分の状態（table・file・eventの種類・`Supervisor`の欄）だけを書き、他のcontextの状態は公開したportと一覧のtransactionでだけ変える（C1・C5・X1）。
 - 観測と分析は読むだけ（C2）。
-- 今ある違反は「[今の違反と行き先](#今の違反と行き先)」と許可の一覧にだけ置く。
 
 ## 2つの軸
 
@@ -134,7 +133,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 **操作**
 
 - application: `application::supervise`のループとslot（`mod.rs`）と工程のsubmodule、`application::session`・`headless_session`・`integrate`・`review`・`recording`ほか。
-- infrastructure: `runtime_store`の`transitions`・`recovery`・`session_registry`・`run_log`と`coordination`のleaseとprocessの部分、`adapters`（`GitRepository`・`ClaudeCode`）・`claude`・`codex`・`run_files`・`process`・`background`ほか。
+- infrastructure: `runtime_store`の`transitions`・`recovery`・`session_registry`・`run_log`と`coordination`の`RunCoordination`、`adapters`（`GitRepository`・`ClaudeCode`）・`claude`・`codex`・`run_files`・`process`・`background`ほか。
 
 **公開するport**
 
@@ -145,16 +144,17 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - 着地先のbranchの解決（`Repository::landing_branch`）を観測と分析のCIの見張りに公開する。
   解決できなければ見張りは確かめず着地先の保留に任せる。
 - `application::inherit`の`InheritStore`・`CarriedBranches`を計画管理の`ready --inherit`に公開する（T10）。
-- `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`のleaseとprocessの部分は内部。
+- `RunCoordination`の読み取りを全てのcontextに、`release_lease`をhost運用の引き継ぎに公開する。
+- `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`の残りは内部。
 
 **許す依存の向き**
 
 - 計画管理のtaskを読むのは`TaskStore`の読み取りとT1だけ。
   taskの状態を変えるのはT2（着地）・T4（triage）・T10（引き継ぎ）だけ。
 - follow_upsは`DraftPlannerStore::register_follow_ups`（T7）で渡し、`tasks`・`draft_origins`をSQLで書かない。
-- 観測と分析・host運用の状態を書かない。
+- 観測と分析・host運用の状態を書かない（T11を除く）。
 
-**境界をまたぐtransaction**: T1・T2・T4・T10（書き手）、T7（計画管理の公開する関数を呼ぶ）。
+**境界をまたぐtransaction**: T1・T2・T4・T10・T11（書き手）、T7（計画管理の公開する関数を呼ぶ）。
 
 ## 観測と分析
 
@@ -209,11 +209,11 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 **操作**
 
 - application: `application::lifecycle`（`up`・`down`）・`install`・`update`・`queue_service`・`sccache`・`actor_executor`・`execution`ほかと、`application::supervise`の同名のsubmoduleと`disk`・`cleanup`・`sweep`・`handoff`・`inbox_nudge`。
-- infrastructure: `launchd`・`binaries`・`queue_service`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`のsupervisorの登録と引き継ぎの部分。
+- infrastructure: `launchd`・`binaries`・`queue_service`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`の`SupervisorRegistry`。
 
 **公開するport**
 
-- `RunCoordination`のsupervisorの登録と引き継ぎを実行と着地のループに公開する。
+- `SupervisorRegistry`を実行と着地のループに、その読み取りを全てのcontextに公開する。
 - 空きdiskとsccacheの読み取り（`HostOpsState`）と`CleanupWatch::cleaning`・`defer`・`ensure_sccache`・`sccache_look`を実行と着地に公開する。
 - `HeadlessJobStore`（jobのprocessの台帳）を、jobを起動する各contextに公開する。
 - `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、actorの起動（`actor_executor`）を他のcontextに公開する。
@@ -223,7 +223,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 - 他のcontextのuse caseを起動・停止してよいが、他のcontextの状態は公開したportで変える。
 
-**境界をまたぐtransaction**: 無い。
+**境界をまたぐtransaction**: T11（実行と着地が書く）。
 
 ## portのmodule
 
@@ -234,10 +234,10 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 | `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore` |
 | `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`SessionRegistry`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier` |
 | `observation`（観測と分析） | `EventReads`・`ObserverLog`・`MarkLog`・`QueueRecords` |
-| `host`（host運用） | `QueueOpener`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore` |
+| `host`（host運用） | `QueueOpener`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry` |
 | `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`Queue` |
 
-`shared`は複数のcontextが同じ意味で使うportだけを持つ（時刻とID、子processの起動、ask、どのuse caseも取る`Queue`）。
+`shared`は複数のcontextが同じ意味で使うportだけを持つ。
 
 ## 混在しているmodule
 
@@ -245,7 +245,6 @@ contextを1つに決められず、分ける先を持つもの。
 
 | module | 混ざっているcontext | 分ける先 |
 | --- | --- | --- |
-| `application::ports`の`RunCoordination` | 実行と着地のleaseとprocessと、host運用のsupervisorの登録と引き継ぎ | portの分割（未登録、follow_up） |
 | `src/application/supervise/mod.rs`の`Supervisor` | 計画管理の欄と、実行と着地・host運用の残りの欄を持つ（C3） | contextごとに分ける |
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
 | `application::prompt` | workerのprompt（実行と着地）、inbox・plannerのprompt（計画管理）、observerとスループットの見直しのprompt（観測と分析） | 未登録（follow_up） |
@@ -277,6 +276,7 @@ host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の
 | T8 | follow_upの所属の判断の記録 | 計画管理 | 判断の行・taskのgoalの移動・要るなら`correct_goal`のask | 判断と所属と人への問いを食い違わせない（ADR-t1504-2決定1・6・9） | `infrastructure::follow_up_membership`の`judge_follow_up` |
 | T9 | achievedの後の訂正のanswerの適用 | 計画管理 | askを閉じ、goalを開き直すかfollow_upを移す | 答えとgoal・所属・残った問いを1回で揃える（ADR-t1504-2決定9） | `infrastructure::follow_up_membership`の`decide_correction` |
 | T10 | 手での引き継ぎ | 実行と着地（`ready --inherit`が呼ぶ） | leaseを消しaskを閉じてtaskを`ready`に | 復旧jobと競合せず一度だけ引き継ぐ（ADR-t1962-1） | `runtime_store::recovery`の`inherit_by_hand` |
+| T11 | supervisorのheartbeat | 実行と着地 | `run_leases`・`supervisors`の`heartbeat_at` | 登録とleaseを揃える | `runtime_store::coordination`の`heartbeat` |
 
 所属の判断の流れは[所属の判断](follow-up-membership.md)が持つ。
 
@@ -322,7 +322,7 @@ host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の
 - **C1** あるcontextの`src/infrastructure`のstoreのmoduleは、自分のcontextのtable（各節の「所有する状態」）にだけ`INSERT`・`UPDATE`・`DELETE`を書く。
   他のcontextのtableを書くのは「[境界をまたぐtransaction](#境界をまたぐtransaction)」の一覧のものだけ。
   検査: review（portをcontextごとに分けた後にscript）。
-- **C2** 観測と分析のコードは、他のcontextの状態を変えるportのmethod（`TaskStore`・`RunCoordination`・`DraftPlannerStore`の書き込み、`RunTransitions`・`RunRecovery`・`PlanReviewStore`・`GoalReviewStore`）を呼ばない。
+- **C2** 観測と分析のコードは、他のcontextの状態を変えるportのmethod（`TaskStore`・`RunCoordination`・`SupervisorRegistry`・`DraftPlannerStore`の書き込み、`RunTransitions`・`RunRecovery`・`PlanReviewStore`・`GoalReviewStore`）を呼ばない。
   検査: review。
 - **C3** `application::supervise`のsubmoduleは、自分のcontextの`Supervisor`の欄か分けた状態だけを変える。
   他のcontextの欄は読むか、そのcontextの関数を呼ぶ。

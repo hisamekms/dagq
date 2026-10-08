@@ -8,7 +8,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::stages::ClaimState;
-use crate::application::ports::{RunCoordination, RunLog};
+use crate::application::ports::{RunLog, SupervisorRegistry};
 use crate::domain::LeaseToken;
 use crate::domain::light_slots::LightChanges;
 use crate::domain::slot_limits::{SlotLimits, supervisor_config_change};
@@ -37,7 +37,7 @@ impl ClaimState {
     /// flag given too, and a change takes effect at the next claim.
     pub(super) fn reread_limits(
         &mut self,
-        queue: &(impl RunCoordination + RunLog + ?Sized),
+        queue: &(impl SupervisorRegistry + RunLog + ?Sized),
         token: &LeaseToken,
     ) -> Result<()> {
         let Some(read) = self.supervisor_file.clone() else {

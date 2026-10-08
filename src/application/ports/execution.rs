@@ -7,7 +7,7 @@ use super::shared::{CommandSpec, Exit};
 use crate::domain::{
     AskId, ClaimOutcome, CommitSha, EventId, EventKind, LeaseToken, PlannerId, PlannerOrigin,
     PlannerSession, ProposalId, Reason, RunEvent, RunId, RunLease, RunPlan, RunProcess, RunStatus,
-    SessionRole, SupervisorMode, SupervisorRegistration, Task, TaskId, TaskRun, TaskStatus,
+    SessionRole, Task, TaskId, TaskRun, TaskStatus,
 };
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -1040,100 +1040,26 @@ pub trait RunRecovery {
     ) -> Result<Option<TaskRun>>;
 }
 
-/// The state processes coordinate through (ADR-0032's second kind): run
-/// leases and heartbeats, supervisor registrations and their handoffs, the
-/// wrapper and agent processes of runs, the backend's slots and the
-/// repository the queue is bound to.
+/// The state runs coordinate through (ADR-0032's second kind): run leases
+/// and heartbeats, the wrapper and agent processes of runs and the
+/// backend's slots. The supervisors' registrations are host運用's
+/// [`SupervisorRegistry`](super::host::SupervisorRegistry), except that
+/// [`heartbeat`](Self::heartbeat) refreshes the registration with the
+/// leases in one write (T11 of docs/design/architecture.md). Its reads
+/// (`run_leases`, `run_lease`, `processes`) are published to every context
+/// and `release_lease` to host運用's handoff; the rest is 実行と着地's own.
 pub trait RunCoordination {
     /// Refresh every lease `token` holds; how many there were.
     fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize>;
-    /// Register a supervisor with its slot limits and their sources in one
-    /// write, so `status` and a reader of the registration never see it
-    /// without them.
-    fn register_supervisor(
-        &mut self,
-        token: &LeaseToken,
-        pid: u32,
-        limits: crate::domain::slot_limits::SlotLimits,
-        binary_version: &str,
-    ) -> Result<SupervisorRegistration>;
-    /// Whether a registration under `token` was removed.
-    fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool>;
-    /// Remove the registration under `token` and record the queue event of
-    /// `kind` with the payload `stopped` builds from the removed row, in one
-    /// transaction; `false`, recording nothing, when there was no row.
-    fn prune_supervisor(
-        &self,
-        token: &LeaseToken,
-        kind: EventKind,
-        stopped: &dyn Fn(&SupervisorRegistration) -> serde_json::Value,
-    ) -> Result<bool>;
-    /// Every registered supervisor, oldest first, alive or not.
-    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>>;
     fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()>;
-    /// Mark `token`'s registration as one that takes a handoff.
-    fn accept_handoff(&self, token: &LeaseToken) -> Result<()>;
-    /// Ask the supervisor `token` to exec `binary`; `false` when it is not
-    /// registered or does not take a handoff (ADR-0045 decision 10).
-    fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
-    /// The binary the supervisor `token` was asked to exec, if any.
-    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>>;
-    /// Atomically take the matching request immediately before an exec.
-    /// A withdrawal or replacement wins if it reached the queue first.
-    fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
-    /// Withdraw a request to exec `binary` not taken yet.
-    fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
-    /// Take `token`'s registration back under `binary_version` after an
-    /// exec, clearing the request.
-    fn resume_registration(
-        &mut self,
-        token: &LeaseToken,
-        pid: u32,
-        binary_version: &str,
-    ) -> Result<SupervisorRegistration>;
-    /// Turn the automatic update of the supervisor `token` on or off
-    /// (ADR-0045 decision 17).
-    fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()>;
-    /// Record the supervisor `token`'s `parallel`, `max_waiting`,
-    /// `runtime_planners` and `claim_spacing` in use (ADR-0062 decision 7,
-    /// ADR-t1479-1) and where each comes from (task 698).
-    fn set_slot_limits(
-        &self,
-        token: &LeaseToken,
-        limits: crate::domain::slot_limits::SlotLimits,
-    ) -> Result<()>;
-    /// Record the supervisor `token`'s `--max-load`, `None` when its load
-    /// hold is off (ADR-t1479-1: `status` reads it for the claim spacing).
-    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()>;
-    /// Record the executables of the supervisor `token`'s providers as it
-    /// resolved them at its start (ADR-t813-2).
-    fn set_supervisor_providers(
-        &self,
-        token: &LeaseToken,
-        providers: &[crate::domain::worker::ProviderCheck],
-    ) -> Result<()>;
     fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool>;
     fn run_leases(&self) -> Result<Vec<RunLease>>;
     fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>>;
-    /// Point the queue at `common_dir` whatever it was bound to, and return
-    /// the previous binding (`rebind`, ADR-0020).
-    fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>>;
-    /// Git common directory the queue is bound to, if any.
-    fn repository_binding(&self) -> Result<Option<String>>;
-    fn bind_repository(&mut self, common_dir: &str) -> Result<()>;
-    fn assert_repository(&self, common_dir: &str) -> Result<()>;
     /// One heartbeat of the process `token`: its registration and every
     /// lease it holds; how many leases there were.
     fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite>;
     /// The processes registered for the run (its wrapper and agent).
     fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>>;
-    /// Record how `up` started the supervisor `token`.
-    fn set_supervisor_mode(
-        &self,
-        token: &LeaseToken,
-        mode: SupervisorMode,
-        workspace_id: Option<&str>,
-    ) -> Result<()>;
     fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()>;
     fn register_resume_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()>;
     /// Forget the processes of a running run whose session was lost, so

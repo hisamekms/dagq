@@ -1,5 +1,6 @@
-//! Leases, heartbeats, supervisor registrations, run processes and the
-//! repository binding ([`RunCoordination`]).
+//! Leases, heartbeats and run processes ([`RunCoordination`]), and
+//! supervisor registrations and the repository binding
+//! ([`SupervisorRegistry`]).
 //!
 //! A lease is its own table rather than columns of `task_runs`, so the run's
 //! record and the ownership that comes and goes do not mix (ADR-0007).
@@ -37,10 +38,7 @@ impl SqliteQueue {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let registered = tx.execute(
-                "UPDATE supervisors SET heartbeat_at=?2 WHERE token=?1",
-                params![token, now],
-            )? > 0;
+            let registered = refresh_registration(&tx, token, now)?;
             let leases = tx.execute(
                 "UPDATE run_leases SET heartbeat_at=?2 WHERE token=?1",
                 params![token, now],
@@ -708,6 +706,16 @@ impl SqliteQueue {
     }
 }
 
+/// Host運用's write of a heartbeat on `token`'s registration, which the
+/// heartbeat of the leases calls inside its transaction (T11 of
+/// docs/design/architecture.md): whether the registration was there.
+fn refresh_registration(conn: &rusqlite::Connection, token: &LeaseToken, now: i64) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE supervisors SET heartbeat_at=?2 WHERE token=?1",
+        params![token, now],
+    )? > 0)
+}
+
 /// The slot limits and their sources on `token`'s registration.
 fn write_slot_limits(
     conn: &rusqlite::Connection,
@@ -747,70 +755,8 @@ impl RunCoordination for SqliteQueue {
     fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize> {
         SqliteQueue::heartbeat_leases(self, token)
     }
-    fn register_supervisor(
-        &mut self,
-        token: &LeaseToken,
-        pid: u32,
-        limits: SlotLimits,
-        binary_version: &str,
-    ) -> Result<SupervisorRegistration> {
-        SqliteQueue::register_supervisor_with_limits(self, token, pid, limits, binary_version)
-    }
-    fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool> {
-        SqliteQueue::deregister_supervisor(self, token)
-    }
-    fn prune_supervisor(
-        &self,
-        token: &LeaseToken,
-        kind: EventKind,
-        stopped: &dyn Fn(&SupervisorRegistration) -> Value,
-    ) -> Result<bool> {
-        SqliteQueue::prune_supervisor(self, token, kind, stopped)
-    }
-    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
-        SqliteQueue::supervisors(self)
-    }
     fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
         SqliteQueue::release_lease(self, id, token)
-    }
-    fn accept_handoff(&self, token: &LeaseToken) -> Result<()> {
-        SqliteQueue::accept_handoff(self, token)
-    }
-    fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        SqliteQueue::request_handoff(self, token, binary)
-    }
-    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
-        SqliteQueue::handoff_request(self, token)
-    }
-    fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        SqliteQueue::take_handoff(self, token, binary)
-    }
-    fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        SqliteQueue::cancel_handoff(self, token, binary)
-    }
-    fn resume_registration(
-        &mut self,
-        token: &LeaseToken,
-        pid: u32,
-        binary_version: &str,
-    ) -> Result<SupervisorRegistration> {
-        SqliteQueue::resume_registration(self, token, pid, binary_version)
-    }
-    fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
-        SqliteQueue::set_auto_update(self, token, enabled)
-    }
-    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()> {
-        SqliteQueue::set_max_load(self, token, max_load)
-    }
-    fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
-        SqliteQueue::set_slot_limits(self, token, limits)
-    }
-    fn set_supervisor_providers(
-        &self,
-        token: &LeaseToken,
-        providers: &[crate::domain::worker::ProviderCheck],
-    ) -> Result<()> {
-        SqliteQueue::set_supervisor_providers(self, token, providers)
     }
     fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
         SqliteQueue::holds_lease(self, id, token)
@@ -821,31 +767,11 @@ impl RunCoordination for SqliteQueue {
     fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>> {
         SqliteQueue::run_lease(self, id)
     }
-    fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
-        SqliteQueue::rebind_repository(self, common_dir)
-    }
-    fn repository_binding(&self) -> Result<Option<String>> {
-        SqliteQueue::repository_binding(self)
-    }
-    fn bind_repository(&mut self, common_dir: &str) -> Result<()> {
-        SqliteQueue::bind_repository(self, common_dir)
-    }
-    fn assert_repository(&self, common_dir: &str) -> Result<()> {
-        SqliteQueue::assert_repository(self, common_dir)
-    }
     fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite> {
         SqliteQueue::heartbeat(self, token)
     }
     fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {
         SqliteQueue::processes(self, id)
-    }
-    fn set_supervisor_mode(
-        &self,
-        token: &LeaseToken,
-        mode: SupervisorMode,
-        workspace_id: Option<&str>,
-    ) -> Result<()> {
-        SqliteQueue::set_supervisor_mode(self, token, mode, workspace_id)
     }
     fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
         SqliteQueue::register_wrapper(self, id, token, pid)
@@ -893,6 +819,92 @@ impl RunCoordination for SqliteQueue {
     }
     fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
         SqliteQueue::backend_slots(self, token)
+    }
+}
+
+/// The [`SupervisorRegistry`] port over the inherent methods above.
+impl SupervisorRegistry for SqliteQueue {
+    fn register_supervisor(
+        &mut self,
+        token: &LeaseToken,
+        pid: u32,
+        limits: SlotLimits,
+        binary_version: &str,
+    ) -> Result<SupervisorRegistration> {
+        SqliteQueue::register_supervisor_with_limits(self, token, pid, limits, binary_version)
+    }
+    fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool> {
+        SqliteQueue::deregister_supervisor(self, token)
+    }
+    fn prune_supervisor(
+        &self,
+        token: &LeaseToken,
+        kind: EventKind,
+        stopped: &dyn Fn(&SupervisorRegistration) -> Value,
+    ) -> Result<bool> {
+        SqliteQueue::prune_supervisor(self, token, kind, stopped)
+    }
+    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
+        SqliteQueue::supervisors(self)
+    }
+    fn accept_handoff(&self, token: &LeaseToken) -> Result<()> {
+        SqliteQueue::accept_handoff(self, token)
+    }
+    fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
+        SqliteQueue::request_handoff(self, token, binary)
+    }
+    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
+        SqliteQueue::handoff_request(self, token)
+    }
+    fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
+        SqliteQueue::take_handoff(self, token, binary)
+    }
+    fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
+        SqliteQueue::cancel_handoff(self, token, binary)
+    }
+    fn resume_registration(
+        &mut self,
+        token: &LeaseToken,
+        pid: u32,
+        binary_version: &str,
+    ) -> Result<SupervisorRegistration> {
+        SqliteQueue::resume_registration(self, token, pid, binary_version)
+    }
+    fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
+        SqliteQueue::set_auto_update(self, token, enabled)
+    }
+    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()> {
+        SqliteQueue::set_max_load(self, token, max_load)
+    }
+    fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
+        SqliteQueue::set_slot_limits(self, token, limits)
+    }
+    fn set_supervisor_providers(
+        &self,
+        token: &LeaseToken,
+        providers: &[crate::domain::worker::ProviderCheck],
+    ) -> Result<()> {
+        SqliteQueue::set_supervisor_providers(self, token, providers)
+    }
+    fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
+        SqliteQueue::rebind_repository(self, common_dir)
+    }
+    fn repository_binding(&self) -> Result<Option<String>> {
+        SqliteQueue::repository_binding(self)
+    }
+    fn bind_repository(&mut self, common_dir: &str) -> Result<()> {
+        SqliteQueue::bind_repository(self, common_dir)
+    }
+    fn assert_repository(&self, common_dir: &str) -> Result<()> {
+        SqliteQueue::assert_repository(self, common_dir)
+    }
+    fn set_supervisor_mode(
+        &self,
+        token: &LeaseToken,
+        mode: SupervisorMode,
+        workspace_id: Option<&str>,
+    ) -> Result<()> {
+        SqliteQueue::set_supervisor_mode(self, token, mode, workspace_id)
     }
 }
 

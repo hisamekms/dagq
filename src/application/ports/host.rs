@@ -1,10 +1,13 @@
 //! The ports of host運用 (docs/design/architecture.md, section
 //! "portのmodule"): the connections to the queue, the service manager,
-//! the session wrappers and cmux, sccache, processes, the installed plugin
-//! and the headless jobs.
+//! the session wrappers and cmux, sccache, processes, the installed plugin,
+//! the headless jobs, and the supervisors' registrations and the repository
+//! binding.
 
 use super::shared::{Queue, StdinUnprepared};
-use crate::domain::{GoalId, LeaseToken, ProposalId, RunId};
+use crate::domain::{
+    EventKind, GoalId, LeaseToken, ProposalId, RunId, SupervisorMode, SupervisorRegistration,
+};
 use anyhow::Result;
 use std::{
     io,
@@ -418,6 +421,92 @@ pub trait HeadlessJobStore {
         token: &LeaseToken,
         own: bool,
     ) -> Result<Vec<HeadlessJobRecord>>;
+}
+
+/// The supervisors' registrations, their handoffs and settings, and the
+/// repository the queue is bound to: the coordination state of host運用
+/// (ADR-0032's second kind). Its reads (`supervisors`, `handoff_request`,
+/// `repository_binding`, `assert_repository`) are published to every
+/// context and the rest to 実行と着地's loop (docs/design/architecture.md).
+pub trait SupervisorRegistry {
+    /// Register a supervisor with its slot limits and their sources in one
+    /// write, so `status` and a reader of the registration never see it
+    /// without them.
+    fn register_supervisor(
+        &mut self,
+        token: &LeaseToken,
+        pid: u32,
+        limits: crate::domain::slot_limits::SlotLimits,
+        binary_version: &str,
+    ) -> Result<SupervisorRegistration>;
+    /// Whether a registration under `token` was removed.
+    fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool>;
+    /// Remove the registration under `token` and record the queue event of
+    /// `kind` with the payload `stopped` builds from the removed row, in one
+    /// transaction; `false`, recording nothing, when there was no row.
+    fn prune_supervisor(
+        &self,
+        token: &LeaseToken,
+        kind: EventKind,
+        stopped: &dyn Fn(&SupervisorRegistration) -> serde_json::Value,
+    ) -> Result<bool>;
+    /// Every registered supervisor, oldest first, alive or not.
+    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>>;
+    /// Mark `token`'s registration as one that takes a handoff.
+    fn accept_handoff(&self, token: &LeaseToken) -> Result<()>;
+    /// Ask the supervisor `token` to exec `binary`; `false` when it is not
+    /// registered or does not take a handoff (ADR-0045 decision 10).
+    fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
+    /// The binary the supervisor `token` was asked to exec, if any.
+    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>>;
+    /// Atomically take the matching request immediately before an exec.
+    /// A withdrawal or replacement wins if it reached the queue first.
+    fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
+    /// Withdraw a request to exec `binary` not taken yet.
+    fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
+    /// Take `token`'s registration back under `binary_version` after an
+    /// exec, clearing the request.
+    fn resume_registration(
+        &mut self,
+        token: &LeaseToken,
+        pid: u32,
+        binary_version: &str,
+    ) -> Result<SupervisorRegistration>;
+    /// Turn the automatic update of the supervisor `token` on or off
+    /// (ADR-0045 decision 17).
+    fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()>;
+    /// Record the supervisor `token`'s `parallel`, `max_waiting`,
+    /// `runtime_planners` and `claim_spacing` in use (ADR-0062 decision 7,
+    /// ADR-t1479-1) and where each comes from (task 698).
+    fn set_slot_limits(
+        &self,
+        token: &LeaseToken,
+        limits: crate::domain::slot_limits::SlotLimits,
+    ) -> Result<()>;
+    /// Record the supervisor `token`'s `--max-load`, `None` when its load
+    /// hold is off (ADR-t1479-1: `status` reads it for the claim spacing).
+    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()>;
+    /// Record the executables of the supervisor `token`'s providers as it
+    /// resolved them at its start (ADR-t813-2).
+    fn set_supervisor_providers(
+        &self,
+        token: &LeaseToken,
+        providers: &[crate::domain::worker::ProviderCheck],
+    ) -> Result<()>;
+    /// Point the queue at `common_dir` whatever it was bound to, and return
+    /// the previous binding (`rebind`, ADR-0020).
+    fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>>;
+    /// Git common directory the queue is bound to, if any.
+    fn repository_binding(&self) -> Result<Option<String>>;
+    fn bind_repository(&mut self, common_dir: &str) -> Result<()>;
+    fn assert_repository(&self, common_dir: &str) -> Result<()>;
+    /// Record how `up` started the supervisor `token`.
+    fn set_supervisor_mode(
+        &self,
+        token: &LeaseToken,
+        mode: SupervisorMode,
+        workspace_id: Option<&str>,
+    ) -> Result<()>;
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ use crate::{
     application::health::{for_role, pulses, supervisors},
     application::{
         AskStore, Clock, EventReads, ProcessControl, RunCoordination, RunLog, SessionRegistry,
-        WorkspaceBackend,
+        SupervisorRegistry, WorkspaceBackend,
     },
     domain::{
         ATTENTION_KINDS, EventFilter, EventId, RunEvent, RunId, SessionRole, UPDATE_EVENT_KINDS,
@@ -300,7 +300,7 @@ pub struct WatchOptions {
 /// 2): the watch runs in the inbox's session, so the notification needs
 /// nothing of the supervisor's. One that fails is only warned of.
 pub fn watch(
-    queue: &(impl RunLog + RunCoordination + EventReads),
+    queue: &(impl RunLog + RunCoordination + SupervisorRegistry + EventReads),
     clock: &dyn Clock,
     control: &dyn ProcessControl,
     mut record: Option<&mut dyn WatchRecord>,

@@ -23,7 +23,7 @@
 //! it; the job's own output goes to the queue's `logs/`.
 
 use super::{
-    Clock, InstalledPlugin, ProcessControl, Queue, QueueOpener, RunCoordination, RunFiles,
+    Clock, InstalledPlugin, ProcessControl, Queue, QueueOpener, RunFiles, SupervisorRegistry,
     install::{self, Binaries, E2eGate, E2eSettings, InstallOptions, Source, previous_path},
     lifecycle,
 };
@@ -1371,7 +1371,7 @@ pub fn install_watched(
 }
 
 fn registration(
-    queue: &dyn RunCoordination,
+    queue: &dyn SupervisorRegistry,
     token: &LeaseToken,
 ) -> Result<Option<SupervisorRegistration>> {
     Ok(queue
