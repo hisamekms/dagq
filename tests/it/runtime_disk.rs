@@ -61,9 +61,12 @@ fn short_disk(_: &Path) -> Option<u64> {
 /// Short of the free space a claim needs, with nothing to clean, the ready
 /// task is not claimed: `claim_held` (reason `disk_space`) is recorded
 /// once and `status` / `stats` show it; the inbox gets one `cost` ask
-/// about the disk. `done` while the disk is still short asks again after
-/// another cleanup; `wait` does not. Once there is room the task is
-/// claimed and `claim_resumed` recorded.
+/// about the disk. The supervisor applies its answers: `done` while the
+/// disk is still short asks again after another cleanup; `wait` does not.
+/// Once there is room the task is claimed and `claim_resumed` recorded.
+/// The ask's text and when it is opened, joined or closed are the unit
+/// tests' of `supervise::disk::disk_ask_step`, `asks_again_on` and
+/// `disk_question`.
 #[test]
 fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     let (_dir, repo, db) = fixture();
@@ -105,21 +108,6 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     assert!(ask.affected.is_empty());
     assert_eq!(ask.task_id, None);
     assert!(ask.question.contains("0.5 GiB free"), "{}", ask.question);
-    // Task 1100: it names the scratchpads among what was cleaned and in
-    // the size of a run the needs follow.
-    assert!(
-        ask.question.contains(
-            "the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs"
-        ),
-        "{}",
-        ask.question
-    );
-    assert!(
-        ask.question
-            .contains("the largest build outputs plus the largest Claude Code scratchpad"),
-        "{}",
-        ask.question
-    );
     assert!(!ask.question.contains("Affected:"));
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
@@ -189,69 +177,6 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
 /// validated before its failure is seen).
 const BUILDING_AGENT: &str = "commit work; mkdir -p target/debug; \
      head -c 65536 /dev/zero > target/debug/big; receipt \"$BASE\"";
-
-/// The directory whose presence makes the second test's disk short.
-static LEFT: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-fn short_while_left(_: &Path) -> Option<u64> {
-    let left = LEFT.lock().unwrap_or_else(PoisonError::into_inner);
-    Some(if left.as_ref().is_some_and(|dir| dir.exists()) {
-        1
-    } else {
-        4 * GIB
-    })
-}
-
-/// Short of the room a claim needs (twice the largest build of the recent
-/// runs), the supervisor cleans the build outputs an ended run left,
-/// records `auto_repaired` (`disk_cleanup`) with the bytes, and claims the
-/// next task without holding or asking.
-#[test]
-fn a_cleanup_that_makes_room_claims_without_holding() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    let first = {
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        add_ready_task(&mut queue, "second task", &[]);
-        queue.show(TaskId::new(1)).unwrap().runs[0].clone()
-    };
-    assert_eq!(first.status(), RunStatus::Failed);
-    let built = queue_events(&db, "build_outputs_removed");
-    assert_eq!(built.len(), 1, "{built:?}");
-    // Something built there again since, and the disk is short while it is.
-    let left = Path::new(first.worktree_path().unwrap()).join("target/debug");
-    fs::create_dir_all(&left).unwrap();
-    fs::write(left.join("left"), vec![0u8; 4096]).unwrap();
-    *LEFT.lock().unwrap() = Some(left.clone());
-    let options = SuperviseOptions {
-        free_space: short_while_left,
-        ..supervise_options(1, true)
-    };
-    supervise_with(&db, &repo, &backend, &options).unwrap();
-    backend.join();
-    assert!(!left.exists());
-    let repaired = queue_events(&db, "auto_repaired");
-    assert_eq!(repaired.len(), 1, "{repaired:?}");
-    assert_eq!(repaired[0]["repair"], "disk_cleanup");
-    assert_eq!(repaired[0]["layer"], "runtime");
-    assert!(repaired[0]["bytes"].as_u64().unwrap() >= 4096);
-    assert_eq!(repaired[0]["detail"]["runs"], json!([first.id().as_str()]));
-    assert_eq!(repaired[0]["conditions"]["free_bytes"], 1);
-    let needed = repaired[0]["conditions"]["needed_bytes"].as_u64().unwrap();
-    assert_eq!(needed, 2 * built[0]["bytes"].as_u64().unwrap());
-    assert!(queue_events(&db, "claim_held").is_empty());
-    assert!(disk_asks(&db).is_empty());
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    assert_eq!(queue.show(TaskId::new(2)).unwrap().runs.len(), 1);
-    // `stats` counts the repair on no task.
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(
-        stats["auto_repairs"]["by_layer"]["runtime"]["by_repair"]["disk_cleanup"], 1,
-        "{stats}"
-    );
-}
 
 /// The queue the third test's supervisor reads, and whether its disk was freed.
 static LANDING_DB: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -387,10 +312,6 @@ fn two_gibibytes(_: &Path) -> Option<u64> {
     Some(2 * GIB)
 }
 
-fn unreadable(_: &Path) -> Option<u64> {
-    None
-}
-
 /// A person's `integrate` with `disk` and the free space `free_space` reads.
 fn integrate_on(
     db: &Path,
@@ -406,81 +327,29 @@ fn integrate_on(
     .integrate(db, IntegrateTarget::Task(TaskId::new(1)), repo, None)
 }
 
-/// A person's `integrate` (task 638) checks the free space against the
-/// landing threshold of `[disk]` before it approves the run: short of it,
-/// it fails with the free and the needed space and leaves the run as it
-/// was, with no `integration_approved`. The threshold follows the latest
-/// `build_outputs_removed` as the supervisor's does; with room it lands.
-#[test]
-fn a_persons_integrate_refuses_to_land_while_the_disk_is_short() {
-    let (_dir, repo, db, run) = awaiting_run();
-    let refused = |disk: Option<DiskConfig>| {
-        let error = format!(
-            "{:#}",
-            integrate_on(&db, &repo, disk, half_a_gibibyte).unwrap_err()
-        );
-        assert!(error.contains("not enough free disk space"), "{error}");
-        assert!(error.contains("0.5 GiB free"), "{error}");
-        assert!(error.contains("dagq doctor"), "{error}");
-        assert!(events_of(&db, run.id(), "integration_approved").is_empty());
-        let now = SqliteQueue::open(&db).unwrap().run(run.id()).unwrap();
-        assert_eq!(now.status(), RunStatus::AwaitingIntegration);
-        error
-    };
-    // min_free_bytes with no build measured.
-    let error = refused(gibibyte_needed());
-    assert!(error.contains("below the 1.0 GiB"), "{error}");
-    assert!(error.contains("none measured"), "{error}");
-    // The largest recent build times integrate_factor (1.5).
-    SqliteQueue::open(&db)
-        .unwrap()
-        .record_runtime_event(
-            run.id(),
-            EventKind::BuildOutputsRemoved,
-            json!({"bytes": GIB}),
-        )
-        .unwrap();
-    let error = refused(Some(DiskConfig::default()));
-    assert!(error.contains("below the 1.5 GiB"), "{error}");
-    assert!(error.contains("1.0 GiB, times"), "{error}");
-    // With room the run lands.
-    let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), two_gibibytes).unwrap();
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    assert_eq!(events_of(&db, run.id(), "integration_approved").len(), 1);
-}
-
-/// With no threshold (no build measured, no `min_free_bytes`) or the free
-/// space unread, a person's `integrate` checks nothing and lands.
-#[test]
-fn a_persons_integrate_without_a_threshold_or_a_reading_lands() {
-    let (_dir, repo, db, _run) = awaiting_run();
-    let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), half_a_gibibyte).unwrap();
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-    let (_dir, repo, db, _run) = awaiting_run();
-    let outcome = integrate_on(&db, &repo, gibibyte_needed(), unreadable).unwrap();
-    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
-}
-
-/// The scratchpad whose presence makes the scratchpad test's disk short,
-/// and the free bytes it reads once it is gone.
+/// The scratchpad whose presence makes the scratchpad test's disk short.
 static SCRATCHPAD: Mutex<Option<PathBuf>> = Mutex::new(None);
-static FREE_AFTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(4 * GIB);
 
 fn short_while_scratchpad(_: &Path) -> Option<u64> {
     let left = SCRATCHPAD.lock().unwrap_or_else(PoisonError::into_inner);
     Some(if left.as_ref().is_some_and(|dir| dir.exists()) {
         1
     } else {
-        FREE_AFTER.load(Ordering::SeqCst)
+        4 * GIB
     })
 }
 
-/// Task 1100: short of room, the cleanup also removes the Claude Code
-/// scratchpad of a run whose task was canceled, and `auto_repaired` counts
-/// its bytes with the worktree's. The size of a run the thresholds follow
-/// is then the largest build outputs and the largest scratchpad together.
+/// Short of the room a claim needs (twice the largest build of the recent
+/// runs), the supervisor cleans what an ended run left: task 1100, the
+/// Claude Code scratchpad of a run whose task was canceled goes with its
+/// worktree and its run `TMPDIR`, and `auto_repaired` (`disk_cleanup`)
+/// counts their bytes. With room after it, the next task is claimed
+/// without a hold or an ask. That a run's size adds the largest
+/// scratchpad and run `TMPDIR` to the largest build is the unit tests' of
+/// `domain::disk::run_size` and `DiskConfig::needs`, read from the queue
+/// as in `a_persons_integrate_counts_the_scratchpads_in_a_runs_size`.
 #[test]
-fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
+fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
     const SCRATCH: usize = 1 << 20;
     let (dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
@@ -494,7 +363,9 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
         add_ready_task(&mut queue, "second task", &[]);
         queue.show(TaskId::new(1)).unwrap().runs[0].clone()
     };
-    assert_eq!(queue_events(&db, "build_outputs_removed").len(), 1);
+    let built = queue_events(&db, "build_outputs_removed");
+    assert_eq!(built.len(), 1, "{built:?}");
+    let built = built[0]["bytes"].as_u64().unwrap();
     let root = dir.path().join("claude-tmp");
     let scratchpad = scratchpad_of(&root, first.worktree_path().unwrap());
     fs::create_dir_all(scratchpad.join("session/scratchpad")).unwrap();
@@ -538,34 +409,30 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
         worktree[0]["bytes"].as_u64().unwrap() + scratched + tmp_bytes
     );
     assert_eq!(repaired[0]["detail"]["runs"], json!([first.id().as_str()]));
+    assert_eq!(repaired[0]["layer"], "runtime");
+    assert_eq!(repaired[0]["conditions"]["free_bytes"], 1);
+    let needed = repaired[0]["conditions"]["needed_bytes"].as_u64().unwrap();
+    assert_eq!(needed, 2 * built);
     assert!(queue_events(&db, "claim_held").is_empty());
-
-    // A run's size is the largest build, the largest scratchpad and the
-    // largest run `TMPDIR`: a claim needs twice that, more than any build
-    // alone.
-    let built = queue_events(&db, "build_outputs_removed")
-        .iter()
-        .map(|event| event["bytes"].as_u64().unwrap())
-        .max()
-        .unwrap();
-    let largest = built + scratched + tmp_bytes;
-    SqliteQueue::open(&db)
-        .unwrap()
-        .transition(TaskId::new(2), TaskAction::Cancel)
-        .unwrap();
-    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "third task", &[]);
-    FREE_AFTER.store(2 * largest - 1, Ordering::SeqCst);
-    supervise_with(&db, &repo, &backend, &options).unwrap();
-    backend.join();
-    let held = queue_events(&db, "claim_held");
-    assert_eq!(held.len(), 1, "{held:?}");
-    assert_eq!(held[0]["reason"], "disk_space");
-    assert_eq!(held[0]["threshold"], json!((2 * largest) as f64));
+    assert!(disk_asks(&db).is_empty());
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(queue.show(TaskId::new(2)).unwrap().runs.len(), 1);
+    // `stats` counts the repair on no task.
+    let stats = runtime::stats(&db, &Default::default()).unwrap();
+    assert_eq!(
+        stats["auto_repairs"]["by_layer"]["runtime"]["by_repair"]["disk_cleanup"], 1,
+        "{stats}"
+    );
 }
 
-/// Task 1100: a person's `integrate` follows the same run size: the
-/// largest `scratchpad_removed` (and, task 1290, `run_tmp_removed`) adds
-/// to the largest `build_outputs_removed`.
+/// A person's `integrate` (task 638) reads the free space and the recent
+/// runs' sizes from the queue before it approves the run: short of the
+/// landing threshold it fails and leaves the run as it was, with no
+/// `integration_approved`; with room it lands. Task 1100: the largest
+/// `scratchpad_removed` (and, task 1290, `run_tmp_removed`) adds to the
+/// largest `build_outputs_removed`. The threshold, the message and the
+/// cases with no threshold or no reading are the unit test
+/// `integrate::tests::a_persons_integrate_refuses_below_the_landing_threshold_only`.
 #[test]
 fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
     let (_dir, repo, db, run) = awaiting_run();
@@ -603,6 +470,10 @@ fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
         error.contains("the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR"),
         "{error}"
     );
+    assert!(events_of(&db, run.id(), "integration_approved").is_empty());
+    let now = SqliteQueue::open(&db).unwrap().run(run.id()).unwrap();
+    assert_eq!(now.status(), RunStatus::AwaitingIntegration);
     let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), two_gibibytes).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(events_of(&db, run.id(), "integration_approved").len(), 1);
 }

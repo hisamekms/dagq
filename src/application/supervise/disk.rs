@@ -96,27 +96,28 @@ impl HostOpsState {
         else {
             return Ok(());
         };
-        if ask {
-            let waiting: &[RunId] = if self.disk.landing_short {
-                landings
-            } else {
-                &[]
-            };
-            let open = unclosed.iter().any(|ask| ask.is_open());
-            self.ask_for_disk(env, free, &needs, waiting, open)?;
-        } else if unclosed.iter().any(|ask| ask.is_open()) || self.disk.asked {
-            self.disk.cleaned = None;
-            self.disk.asked = false;
-            self.disk.joined.clear();
-            for ask in env.queue.close_hold_asks(
-                AskReason::Cost,
-                Some(DISK_SUBJECT),
-                DISK_ENOUGH_CLOSED,
-            )? {
-                info!(ask_id = %ask.id, "the free disk space is enough again: closed the disk ask {}", ask.id);
-            }
+        let waiting: &[RunId] = if self.disk.landing_short {
+            landings
         } else {
-            self.disk.cleaned = None;
+            &[]
+        };
+        let open = unclosed.iter().any(|ask| ask.is_open());
+        match disk_ask_step(ask, self.disk.asked, open, &self.disk.joined, waiting) {
+            AskStep::Open(joining) => self.ask_for_disk(env, free, &needs, joining)?,
+            AskStep::Nothing => {}
+            AskStep::Close => {
+                self.disk.cleaned = None;
+                self.disk.asked = false;
+                self.disk.joined.clear();
+                for ask in env.queue.close_hold_asks(
+                    AskReason::Cost,
+                    Some(DISK_SUBJECT),
+                    DISK_ENOUGH_CLOSED,
+                )? {
+                    info!(ask_id = %ask.id, "the free disk space is enough again: closed the disk ask {}", ask.id);
+                }
+            }
+            AskStep::Forget => self.disk.cleaned = None,
         }
         env.record_hold(claim_hold::LANDINGS, hold.as_ref())?;
         Ok(())
@@ -200,37 +201,17 @@ impl HostOpsState {
             warn!(error = %format_args!("{error:#}"), "the cleanup for disk space could not be recorded: {error:#}");
         }
     }
-    /// Open the disk ask of this shortage, or add the runs whose landing
-    /// waits for the disk to the open one; once opened it is not opened
-    /// again until there is room or a person answers `done`.
+    /// Open the disk ask of this shortage, or add to the open one the
+    /// runs whose landing waits for the disk (`joining`, from
+    /// [`disk_ask_step`]; `None` opens it with no run).
     fn ask_for_disk(
         &mut self,
         env: &mut PassEnv<'_>,
         free: Option<u64>,
         needs: &DiskNeeds,
-        runs: &[RunId],
-        open: bool,
+        joining: Vec<Option<RunId>>,
     ) -> Result<()> {
-        let joining: Vec<Option<RunId>> = if self.disk.asked {
-            if !open {
-                // Answered `wait`: nothing more until there is room.
-                return Ok(());
-            }
-            runs.iter()
-                .filter(|run| !self.disk.joined.contains(run))
-                .cloned()
-                .map(Some)
-                .collect()
-        } else if runs.is_empty() {
-            vec![None]
-        } else {
-            runs.iter().cloned().map(Some).collect()
-        };
-        let show = |bytes: Option<u64>| bytes.map_or_else(|| "unknown".into(), |b| gib(b as f64));
-        let question = DISK_QUESTION
-            .replace("{free}", &show(free))
-            .replace("{claim}", &show(needs.claim))
-            .replace("{landing}", &show(needs.landing));
+        let question = disk_question(free, needs);
         for run in joining {
             let (outcome, _) = ask::hold(
                 &mut *env.queue,
@@ -262,7 +243,7 @@ impl HostOpsState {
             let answer = ask.answer.as_deref().unwrap_or_default().trim().to_owned();
             env.queue.close_ask(ask.id)?;
             info!(ask_id = %ask.id, "applied the answer {answer:?} of the disk ask {}", ask.id);
-            if answer == "done" {
+            if asks_again_on(&answer) {
                 self.disk.asked = false;
                 self.disk.cleaned = None;
                 self.disk.joined.clear();
@@ -400,6 +381,69 @@ pub(super) fn asks_for_cleanup(
     interval: Duration,
 ) -> bool {
     !for_disk && since_cleaned.is_none_or(|since| since >= interval)
+}
+
+/// What a judged pass does with the disk ask ([`disk_ask_step`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AskStep {
+    /// Open the disk ask, once per entry: `None` with no run, a run to
+    /// add the run whose landing waits to it.
+    Open(Vec<Option<RunId>>),
+    /// Short, but the ask of this shortage was answered `wait`: nothing
+    /// until there is room.
+    Nothing,
+    /// There is room again: close the disk ask and forget this shortage.
+    Close,
+    /// There is room and nothing was asked: only the cleanup's interval
+    /// starts anew.
+    Forget,
+}
+
+/// What a judged pass does with the disk ask (ADR-0047 decision 44):
+/// short (`ask`), the ask of this shortage is opened once (with no run
+/// when no landing waits, else with each `waiting` run) and the waiting
+/// runs not `joined` yet are added while it is `open`; once `asked` and no
+/// longer open (answered `wait`), nothing is asked until there is room.
+/// With room, the ask is closed when one is open or was `asked`.
+pub(super) fn disk_ask_step(
+    ask: bool,
+    asked: bool,
+    open: bool,
+    joined: &[RunId],
+    waiting: &[RunId],
+) -> AskStep {
+    match (ask, asked) {
+        (true, true) if !open => AskStep::Nothing,
+        (true, true) => AskStep::Open(
+            waiting
+                .iter()
+                .filter(|run| !joined.contains(run))
+                .cloned()
+                .map(Some)
+                .collect(),
+        ),
+        (true, false) if waiting.is_empty() => AskStep::Open(vec![None]),
+        (true, false) => AskStep::Open(waiting.iter().cloned().map(Some).collect()),
+        (false, _) if open || asked => AskStep::Close,
+        (false, _) => AskStep::Forget,
+    }
+}
+
+/// Whether the answer of a disk ask asks again (a person freed the disk:
+/// `done`), cleaning and checking at once; `wait` and any other answer
+/// leave the queue waiting without asking again.
+pub(super) fn asks_again_on(answer: &str) -> bool {
+    answer.trim() == "done"
+}
+
+/// The question of the disk ask, with the free bytes and what a claim and
+/// a landing need (`unknown` when not read).
+pub(super) fn disk_question(free: Option<u64>, needs: &DiskNeeds) -> String {
+    let show = |bytes: Option<u64>| bytes.map_or_else(|| "unknown".into(), |b| gib(b as f64));
+    DISK_QUESTION
+        .replace("{free}", &show(free))
+        .replace("{claim}", &show(needs.claim))
+        .replace("{landing}", &show(needs.landing))
 }
 
 /// The queue's `cost` ask about the disk.
@@ -625,5 +669,109 @@ mod tests {
                 "{since:?} {for_disk}"
             );
         }
+    }
+
+    /// The disk ask is opened once per shortage, with no run when no
+    /// landing waits and with each waiting landing otherwise; while it is
+    /// open the landings that wait since are added once; answered `wait`
+    /// (closed, still asked) nothing more is asked; with room it is closed
+    /// only when one is open or was asked.
+    #[test]
+    fn the_disk_ask_is_opened_once_joined_by_the_waiting_landings_and_closed_with_room() {
+        let (a, b) = (RunId::new("a").unwrap(), RunId::new("b").unwrap());
+        // Short, not asked yet: opened with no run, or with each landing.
+        assert_eq!(
+            disk_ask_step(true, false, false, &[], &[]),
+            AskStep::Open(vec![None])
+        );
+        assert_eq!(
+            disk_ask_step(true, false, false, &[], &[a.clone(), b.clone()]),
+            AskStep::Open(vec![Some(a.clone()), Some(b.clone())])
+        );
+        // Asked and open: told once, only a new landing joins.
+        assert_eq!(
+            disk_ask_step(true, true, true, &[], &[]),
+            AskStep::Open(vec![])
+        );
+        assert_eq!(
+            disk_ask_step(
+                true,
+                true,
+                true,
+                std::slice::from_ref(&a),
+                &[a.clone(), b.clone()]
+            ),
+            AskStep::Open(vec![Some(b.clone())])
+        );
+        // Answered `wait`: asked, closed, still short.
+        assert_eq!(
+            disk_ask_step(
+                true,
+                true,
+                false,
+                std::slice::from_ref(&a),
+                std::slice::from_ref(&b)
+            ),
+            AskStep::Nothing
+        );
+        // Room: closed when asked or open, else only forgotten.
+        assert_eq!(disk_ask_step(false, true, false, &[], &[]), AskStep::Close);
+        assert_eq!(disk_ask_step(false, false, true, &[], &[]), AskStep::Close);
+        assert_eq!(
+            disk_ask_step(false, false, false, &[], &[a]),
+            AskStep::Forget
+        );
+    }
+
+    /// `done` asks again after another cleanup (the watch forgets it
+    /// asked, so the next short pass opens a new ask); `wait` does not.
+    #[test]
+    fn a_done_answer_asks_again_and_a_wait_does_not() {
+        assert!(asks_again_on("done"));
+        assert!(asks_again_on(" done\n"));
+        assert!(!asks_again_on("wait"));
+        assert!(!asks_again_on(""));
+        // After `done` the watch is not asked: a short pass opens anew.
+        assert_eq!(
+            disk_ask_step(true, false, false, &[], &[]),
+            AskStep::Open(vec![None])
+        );
+        // and a cleanup for room is asked for at once.
+        assert!(asks_for_cleanup(None, false, CLEANUP_INTERVAL));
+    }
+
+    /// The disk ask's question names the free bytes, what a claim and a
+    /// landing need, and the scratchpads both among what was cleaned and
+    /// in the size of a run the needs follow (task 1100); nothing read is
+    /// `unknown`.
+    #[test]
+    fn the_disk_question_names_the_reading_the_needs_and_the_scratchpads() {
+        let question = disk_question(
+            Some(GIB / 2),
+            &DiskNeeds {
+                largest_build: None,
+                claim: Some(GIB),
+                landing: Some(GIB),
+            },
+        );
+        assert!(question.contains("0.5 GiB free"), "{question}");
+        assert!(
+            question.contains("a new run needs 1.0 GiB and a landing's verification 1.0 GiB"),
+            "{question}"
+        );
+        assert!(
+            question.contains(
+                "the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs"
+            ),
+            "{question}"
+        );
+        assert!(
+            question.contains("the largest build outputs plus the largest Claude Code scratchpad"),
+            "{question}"
+        );
+        assert!(!question.contains("Affected:"));
+        let unread = disk_question(None, &DiskNeeds::default());
+        assert!(unread.contains("unknown free"), "{unread}");
+        assert!(unread.contains("a new run needs unknown"), "{unread}");
     }
 }

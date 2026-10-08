@@ -513,15 +513,29 @@ fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()
         largest_build,
     }) = disk_short(queue, &room.config, room.free)?
     {
-        let largest =
-            largest_build.map_or_else(|| "none measured".into(), |bytes| gib(bytes as f64));
-        bail!(
-            "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR of the recent runs, {largest}, times [disk] integrate_factor of dagq.toml, at least min_free_bytes); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
-            gib(free as f64),
-            gib(need as f64),
-        );
+        bail!(disk_refusal(
+            run,
+            DiskShort {
+                free,
+                need,
+                largest_build
+            }
+        ));
     }
     Ok(())
+}
+
+/// Why a person's `integrate` refuses to land `run` while the disk is
+/// `short`.
+fn disk_refusal(run: &RunId, short: DiskShort) -> String {
+    let largest = short
+        .largest_build
+        .map_or_else(|| "none measured".into(), |bytes| gib(bytes as f64));
+    format!(
+        "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR of the recent runs, {largest}, times [disk] integrate_factor of dagq.toml, at least min_free_bytes); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
+        gib(short.free as f64),
+        gib(short.need as f64),
+    )
 }
 
 /// The free disk space below a landing's threshold (task 377): what is
@@ -554,15 +568,22 @@ fn disk_short(
     free: Option<u64>,
 ) -> Result<Option<DiskShort>> {
     let builds = crate::application::recent_run_sizes(queue, config.sample_runs)?;
-    let needs = config.needs(&builds);
-    Ok(match (free, needs.landing) {
+    Ok(landing_short(config, &builds, free))
+}
+
+/// Whether `free` is short of the landing threshold `config` sets over
+/// `sizes`, the sizes of the recent runs ([`crate::domain::disk::run_size`]):
+/// `None` with room, no threshold or no reading.
+fn landing_short(config: &DiskConfig, sizes: &[u64], free: Option<u64>) -> Option<DiskShort> {
+    let needs = config.needs(sizes);
+    match (free, needs.landing) {
         (Some(free), Some(need)) if free < need => Some(DiskShort {
             free,
             need,
             largest_build: needs.largest_build,
         }),
         _ => None,
-    })
+    }
 }
 
 /// Land a run that holds the integration slot under `token` and record
@@ -3646,6 +3667,54 @@ mod tests {
                 "disk": null,
             })
         );
+    }
+
+    /// A person's `integrate` (task 638) refuses below the landing
+    /// threshold of `[disk]`: `min_free_bytes` with no run measured, else
+    /// the recent run size (task 1100: the largest build outputs plus the
+    /// largest scratchpad and run `TMPDIR`) times `integrate_factor`. With
+    /// room, no threshold or no reading it lands.
+    #[test]
+    fn a_persons_integrate_refuses_below_the_landing_threshold_only() {
+        const GIB: u64 = 1 << 30;
+        let least = DiskConfig {
+            min_free_bytes: Some(GIB),
+            ..DiskConfig::default()
+        };
+        let refusal = |config: &DiskConfig, sizes: &[u64], free: Option<u64>| {
+            let short = landing_short(config, sizes, free).expect("short");
+            disk_refusal(&RunId::new("r").unwrap(), short)
+        };
+        // min_free_bytes with no run measured.
+        let error = refusal(&least, &[], Some(GIB / 2));
+        assert!(
+            error.contains("not enough free disk space to land run r"),
+            "{error}"
+        );
+        assert!(error.contains("0.5 GiB free"), "{error}");
+        assert!(error.contains("below the 1.0 GiB"), "{error}");
+        assert!(error.contains("none measured"), "{error}");
+        assert!(error.contains("dagq doctor"), "{error}");
+        assert!(error.contains("not approved and is unchanged"), "{error}");
+        // The largest recent run times integrate_factor (1.5).
+        let error = refusal(&DiskConfig::default(), &[GIB], Some(GIB / 2));
+        assert!(error.contains("below the 1.5 GiB"), "{error}");
+        assert!(error.contains("1.0 GiB, times"), "{error}");
+        // A run of 0.625 GiB (build, scratchpad and TMPDIR together):
+        // above half a gibibyte free.
+        let error = refusal(&DiskConfig::default(), &[GIB * 5 / 8], Some(GIB / 2));
+        assert!(error.contains("below the 0.9 GiB"), "{error}");
+        assert!(error.contains("0.6 GiB, times"), "{error}");
+        assert!(
+            error.contains("the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR"),
+            "{error}"
+        );
+        // Room, no threshold, no reading.
+        assert!(landing_short(&DiskConfig::default(), &[GIB], Some(2 * GIB)).is_none());
+        assert!(landing_short(&least, &[], Some(GIB)).is_none());
+        assert!(landing_short(&DiskConfig::default(), &[], Some(GIB / 2)).is_none());
+        assert!(landing_short(&least, &[], None).is_none());
+        assert!(landing_short(&least, &[GIB], None).is_none());
     }
 
     #[test]
