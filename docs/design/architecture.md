@@ -93,7 +93,6 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 **所有する状態**
 
 - table: `tasks`・`goals`と依存、`proposals`・`plan_reviews`・`goal_reviews`・`planners`・draftと依頼の表、`follow_up_judgements`、検索の索引（`search_index`・`landed_commits`）。
-- eventの種類: `task_*`・`dependency_*`・`goal_*`・`proposal_*`・`plan_*`・`planner_*`・`draft_*`・`follow_up_*`・`request_*`・`finding_planner_*`。
 
 **判断**（domain）: `domain::task`・`goal`・`proposal`・`plan_review`・`goal_review`・`planner`・`follow_up`・`lint`・`prediction`・`search`ほか。
 
@@ -127,7 +126,6 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 - table: `task_runs`・`run_leases`・`run_processes`・`session_workspaces`。
 - ファイル: queueのdirの`runs/<run-id>/`（`RunFiles`）とrunのworktree。
-- eventの種類: `run_*`・`lease_*`・`claim_*`・`slots_full_*`・`worktree_*`・`workspace_*`・`wrapper_*`・`session_*`・`turn_*`・`review_*`・`revise_*`・`resume_*`・`triage_*`・`recovery_*`・`integration_*`・`landing_*`・`provider_*`・`push_*`・`run_phase_changed`ほか。
 
 **判断**（domain）: `domain::run`（`TaskRun`と遷移、`run::history`・`run::payload`）を中心に、receipt・review・resume・復旧・claimの控え・slot・待ち・stall・e2e・着地の保留・backgroundのwrapperの各module。
 
@@ -166,7 +164,6 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 - table: `findings`。
 - ファイル: queueのdirの日次のKPIのreportとKPIのpushの待ち。
-- eventの種類: `observation`・`observe_*`・`finding_*`・`mark_*`・`forecast_recorded`・`kpi_*`・`report_written`・`throughput_review_*`・`candidates_sampled`・CIの見張りの`ci_*`（[CI watch](supervisor-lifecycle/ci-watch.md)）。
 
 **判断**（domain）: `domain::stats`・`kpi`・`forecast`とその下、`marks`・`timeline`・`throughput_review`・`finding`・`ci_watch`ほか。
 
@@ -202,7 +199,6 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 - table: `supervisors`・`queue_repository`・`schema_floor`・`binary_updates`・`headless_jobs`。
 - ファイル: queueのdirの`service/`・`logs/`、launchdのplist、sccacheのserver。
-- eventの種類: `supervisor_*`・`update_*`・`release_check*`・`queue_service_*`・`sccache_*`・後始末の`build_outputs_removed`・`scratchpad_removed`・`run_tmp_removed`・`inbox_*`・`backend_call_failed`・`headless_job_stopped`・`provider_executable_relocated`。
 
 **判断**（domain）: `disk`・`sccache`・`release_update`・`queue_service`・`host_metrics`ほか。
 
@@ -371,7 +367,7 @@ reviewで見る規則の行は、行き先をこの表の言葉で書く。
 
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
-| L5 | `src/application`の`Instant::now`（`lifecycle.rs`・`supervise/mod.rs`・`supervise/recovery.rs`・`supervise/jobs.rs`・`supervise/triage.rs`ほか） | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
+| L5 | `src/application`の`Instant::now` | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | 許可の一覧の項目 |
 | C3 | `Supervisor`と、`impl Supervisor`を持つ`supervise/`のsubmodule | submoduleが他のcontextの欄を変える | 残りの欄の分割 |
 | C4 | `Box<dyn Queue>`などを取るuse case（`application::lifecycle`・`health`・`supervise`ほか） | 要るportだけを取っていない | portの分割 |
