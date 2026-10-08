@@ -1049,15 +1049,15 @@ impl Supervisor<'_> {
                     branch: self.repository.landing_branch()?.name,
                     reason: why.clone(),
                     kind: ResumeKind::Precheck,
+                    reason_file: super::resume::reason_file(run, &format!("conflict-{attempt}")),
                 };
-                let message = with_instruction(
-                    resume_request(&task, run, &request, &landed)?,
-                    self.verifier.language().as_ref(),
-                );
+                let message = resume_request(&task, run, &request, &landed)?
+                    .with_language(self.verifier.language().as_ref());
+                self.write_reason_file(&request, &message)?;
                 let run_dir = Path::new(run.run_dir().context("missing run directory")?);
                 self.files.write(
                     &run_dir.join(format!("conflict-{attempt}.txt")),
-                    message.as_bytes(),
+                    message.text.as_bytes(),
                 )?;
                 let sent_at = self.files.now();
                 // Recorded before it is written, like a revise request (an
@@ -1072,7 +1072,7 @@ impl Supervisor<'_> {
                     self,
                     run,
                     &live.workspace,
-                    Input::Text(&message),
+                    Input::from(&message),
                     "conflict request",
                 )
                 .map(|_submission| (sent_at, sent_at))

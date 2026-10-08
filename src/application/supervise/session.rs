@@ -718,12 +718,12 @@ impl SessionWatch {
             let what = format!("answer of ask {}", ask.id);
             let sent_at = sv.files.now();
             let workspace = self.workspace.clone();
-            match submit(sv, run, &workspace, Input::Text(&text), &what) {
+            match submit(sv, run, &workspace, Input::from(&text), &what) {
                 // Sent: failing to record it must not cost the live run its
                 // lease, so it is only noted (the ask then shows unclosed).
                 Ok(_submission) => {
                     typed = Some(sent_at);
-                    self.stall.input_sent(sent_at, Some(&text));
+                    self.stall.input_sent(sent_at, Some(&text.text));
                     self.answer_start = Some(sent_at);
                     match sv.queue.ask_delivered(ask.id, &self.workspace) {
                         Ok(_) => {

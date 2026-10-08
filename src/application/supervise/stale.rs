@@ -130,7 +130,7 @@ pub(super) fn nudge_stale_receipt(
         sv,
         run,
         workspace,
-        Input::Text(&text),
+        Input::from(&text),
         "stale receipt nudge",
     ) {
         Ok(submission) => {

@@ -9,8 +9,24 @@ use super::*;
 pub(crate) enum Input<'a> {
     /// A request or an answer, as the session's next turn.
     Text(&'a str),
+    /// A next-turn message held to its limits (ADR-t2072-1): `text` as
+    /// [`Input::Text`], and `bytes` recorded as `prompt_bytes` on the
+    /// `turn_requested` of a run's session.
+    Prompt {
+        text: &'a str,
+        bytes: &'a PromptBytes,
+    },
     /// The exit request, never written twice.
     Exit,
+}
+
+impl<'a> From<&'a FittedPrompt> for Input<'a> {
+    fn from(prompt: &'a FittedPrompt) -> Self {
+        Self::Prompt {
+            text: &prompt.text,
+            bytes: &prompt.bytes,
+        }
+    }
 }
 
 /// Where a request ended.

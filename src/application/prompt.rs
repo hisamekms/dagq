@@ -449,22 +449,73 @@ pub(crate) fn continue_text(run: &TaskRun) -> String {
     to_session(run, crate::domain::queue_hold::CONTINUE_TEXT.to_owned())
 }
 
-/// The text that carries a person's answer to the session that asked.
-pub(crate) fn answer_text(run: &TaskRun, ask: impl std::fmt::Display, answer: &str) -> String {
-    to_session(run, format!("answer to ask {ask}: {answer}"))
+/// The bytes a next-turn message other than the resolution request takes
+/// at most, the language's instruction included (ADR-t2072-1): the
+/// revise mismatch, the stale receipt nudge, the stall nudge, an answer, a
+/// recovery job's instruction and the notice of a closed question. Each is
+/// its fixed steps (under 2,000 bytes) and at most one text of
+/// [`NEXT_TURN_TEXT_BYTES`], with its note of what was left out and the
+/// language's room. The 11 answers kept as next turns on the host on
+/// 2026-10-08 took 481 bytes at most.
+pub const NEXT_TURN_LIMIT: usize = 16_000;
+
+/// The bytes of a person's or a job's text a next-turn message carries:
+/// an ask's answer (also one recorded when the ask was closed) and a
+/// recovery job's instruction. A person's answer sent back as a resume's
+/// reason took 3,892 bytes at most on the host on 2026-10-08, so a text is
+/// cut only when it is about twice as long as any seen. The worker cannot
+/// read the queue, so what is cut is said to be in no file it can read.
+pub const NEXT_TURN_TEXT_BYTES: usize = 8_000;
+
+/// The bytes of why the supervisor did not accept a rewritten receipt
+/// (`revise_mismatch_request`): the supervisor writes it, one sentence of
+/// a commit ID and a state.
+pub const NEXT_TURN_WHY_BYTES: usize = 2_000;
+
+/// The bytes of a short value a next-turn message names: the commit a
+/// receipt names (a commit ID takes 40 or 64 bytes, but the worker writes
+/// it) and who closed an ask (a role and an actor ID).
+pub const NEXT_TURN_NAME_BYTES: usize = 300;
+
+/// The text that carries a person's answer to the session that asked,
+/// held to [`NEXT_TURN_LIMIT`]: the answer to [`NEXT_TURN_TEXT_BYTES`].
+pub(crate) fn answer_text(
+    run: &TaskRun,
+    ask: impl std::fmt::Display,
+    answer: &str,
+) -> FittedPrompt {
+    let mut fit = Fit::new(NEXT_TURN_LIMIT);
+    let answer = fit.text(
+        "answer",
+        answer,
+        NEXT_TURN_TEXT_BYTES,
+        Keep::Start,
+        NOT_READABLE,
+    );
+    fit.section("answer", &answer);
+    fit.finish(to_session(run, format!("answer to ask {ask}: {answer}")))
 }
 
 /// The text that carries a recovery job's `send_instruction` to the
-/// session.
-pub(crate) fn recovery_instruction(run: &TaskRun, alert: &str, instruction: &str) -> String {
-    to_session(
+/// session, held to [`NEXT_TURN_LIMIT`]: the instruction to
+/// [`NEXT_TURN_TEXT_BYTES`].
+pub(crate) fn recovery_instruction(run: &TaskRun, alert: &str, instruction: &str) -> FittedPrompt {
+    let mut fit = Fit::new(NEXT_TURN_LIMIT);
+    let instruction = fit.text(
+        "instruction",
+        instruction.trim(),
+        NEXT_TURN_TEXT_BYTES,
+        Keep::Start,
+        NOT_READABLE,
+    );
+    fit.section("instruction", &instruction);
+    fit.finish(to_session(
         run,
         format!(
-            "dagq: the supervisor's recovery job for run {} (alert {alert}) asks: {}",
+            "dagq: the supervisor's recovery job for run {} (alert {alert}) asks: {instruction}",
             run.id(),
-            instruction.trim()
         ),
-    )
+    ))
 }
 
 /// What a worker reads before it starts, and nothing more: everything else
@@ -2783,7 +2834,31 @@ pub(crate) struct ResumeRequest {
     pub branch: String,
     pub reason: String,
     pub kind: ResumeKind,
+    /// The file in the run directory the caller writes the whole `reason`
+    /// to when the request cuts it (its `omitted` names `reason`); `None`
+    /// when there is none, and a cut reason is said to be in no file.
+    pub reason_file: Option<String>,
 }
+
+/// The bytes a resolution request (`resume_request`) takes at most, the
+/// language's instruction included (ADR-t2072-1): its fixed opening and
+/// steps (under 4,000 bytes with a landing branch's name of 256 bytes),
+/// the reason ([`RESUME_REASON_BYTES`]), the task's paths
+/// ([`WORKER_PATHS_BYTES`]) and verification commands
+/// ([`WORKER_VERIFY_BYTES`]) as in the worker's prompt, the section on
+/// landed tasks, bounded by its own [`LANDED_SECTION_BYTES`] and never cut
+/// here, and the notes of what was cut (the largest input of the unit
+/// test takes 30,288 bytes), with the language's room. Of the 581 resolution and conflict requests kept on
+/// the host on 2026-10-08, most of whose length was the landed tasks'
+/// summaries the section no longer carries, the reason took 272 bytes at
+/// the median, 1,070 at p90, 3,338 at p99 and 4,370 at most.
+pub const RESUME_REQUEST_LIMIT: usize = 36_000;
+
+/// The bytes of a resolution request's reason (a review's findings sent
+/// back, a triage's instruction, why integrate or the landing recheck
+/// failed): about twice the longest seen ([`RESUME_REQUEST_LIMIT`]). What
+/// is cut is in the request's `reason_file`.
+pub const RESUME_REASON_BYTES: usize = 8_000;
 
 /// Why the run waits for a session, which decides the request's steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2879,14 +2954,52 @@ fn landed_title(title: &str) -> std::borrow::Cow<'_, str> {
 /// session (ADR-0019 decision 1), or into a passed run's live session whose
 /// head conflicts with main (ADR-0027 decision 4), one instruction per
 /// line; the backend sends it as one line.
+///
+/// Held to [`RESUME_REQUEST_LIMIT`] (ADR-t2072-1): the reason is cut to
+/// [`RESUME_REASON_BYTES`] and points at `reason_file`; the task's paths and
+/// verification commands are the task's own and cut only past their
+/// limits, said in `over_limit`; the section on landed tasks keeps its own
+/// bounds; the steps are never cut.
 pub(crate) fn resume_request(
     task: &Task,
     run: &TaskRun,
     request: &ResumeRequest,
     landed: &[LandedTask],
-) -> Result<String> {
+) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let route = Route::of(run);
+    let mut fit = Fit::new(RESUME_REQUEST_LIMIT);
+    let reason_read = request.reason_file.as_ref().map_or_else(
+        || NOT_READABLE.to_owned(),
+        |file| format!("the whole reason is in {file}"),
+    );
+    let reason = fit.text(
+        "reason",
+        &request.reason,
+        RESUME_REASON_BYTES,
+        Keep::Start,
+        &reason_read,
+    );
+    fit.section("reason", &reason);
+    let paths = if request.kind == ResumeKind::ScopeViolation {
+        let paths = fit.required(
+            "paths",
+            &task.paths().join(", "),
+            WORKER_PATHS_BYTES,
+            NOT_READABLE,
+        );
+        fit.section("paths", &paths);
+        paths
+    } else {
+        String::new()
+    };
+    let verify = fit.required(
+        "verify",
+        &serde_json::to_string(task.verification_commands())?,
+        WORKER_VERIFY_BYTES,
+        NOT_READABLE,
+    );
+    fit.section("verify", &verify);
     let mut lines = route.opening(match request.kind {
         ResumeKind::EvidenceMissing => format!(
             "dagq: the supervisor's validation of run {} (task {}) found required evidence missing from the receipt, so the run is needs_session.",
@@ -2899,10 +3012,9 @@ pub(crate) fn resume_request(
             task.id()
         ),
         ResumeKind::ScopeViolation => format!(
-            "dagq: run {} (task {}) changes paths outside the task's --paths ({}), so the run is needs_session.",
+            "dagq: run {} (task {}) changes paths outside the task's --paths ({paths}), so the run is needs_session.",
             run.id(),
             task.id(),
-            task.paths().join(", ")
         ),
         ResumeKind::Landing => format!(
             "dagq: integrate could not land run {} (task {}) and returned needs_session.",
@@ -2937,21 +3049,23 @@ pub(crate) fn resume_request(
             task.id()
         ),
     });
-    lines.push(format!("Reason: {}", request.reason));
+    lines.push(format!("Reason: {reason}"));
     let branch = &request.branch;
     lines.push(format!(
         "{branch} is now {} (your base commit was {}).",
         request.main,
         run.base_commit()
     ));
-    lines.extend(landed_lines(
+    let landed = landed_lines(
         branch,
         run.base_commit().as_str(),
         request.main.as_str(),
         landed,
-    ));
+    );
+    fit.section("landed", &landed.join("\n"));
+    lines.extend(landed);
     lines.push("Steps:".to_owned());
-    let checks = local_checks(&serde_json::to_string(task.verification_commands())?);
+    let checks = local_checks(&verify);
     if request.kind == ResumeKind::EvidenceMissing {
         lines.push(
             "1. Run the checks the reason names as missing and write their evidence into the receipt."
@@ -3016,14 +3130,22 @@ pub(crate) fn resume_request(
             .to_owned(),
     );
     lines.push(format!("7. {}", route.done(run)));
-    Ok(lines.join("\n"))
+    Ok(fit.finish(lines.join("\n")))
 }
 
 /// The fixed request the supervisor types into the live session when the
 /// receipt it rewrote for a revise or a conflict request does not name its clean worktree HEAD.
-pub(crate) fn revise_mismatch_request(run: &TaskRun, label: &str, why: &str) -> Result<String> {
+/// Held to [`NEXT_TURN_LIMIT`]: `why` to [`NEXT_TURN_WHY_BYTES`].
+pub(crate) fn revise_mismatch_request(
+    run: &TaskRun,
+    label: &str,
+    why: &str,
+) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let route = Route::of(run);
+    let mut fit = Fit::new(NEXT_TURN_LIMIT);
+    let why = fit.text("why", why, NEXT_TURN_WHY_BYTES, Keep::Start, NOT_READABLE);
+    fit.section("why", &why);
     let mut lines = route.opening(format!(
         "dagq: the receipt you rewrote for {label} of run {} cannot be accepted: {why}.",
         run.id()
@@ -3037,20 +3159,31 @@ pub(crate) fn revise_mismatch_request(run: &TaskRun, label: &str, why: &str) -> 
         format!("3. {}", route.stop()),
         format!("4. {}", route.done(run)),
     ]);
-    Ok(lines.join("\n"))
+    Ok(fit.finish(lines.join("\n")))
 }
 
 /// The one fixed request the supervisor sends, as the next turn, to a
 /// session that ended its turn with a receipt naming `receipt_commit` while
 /// its clean worktree HEAD is `head`, a new commit on top of its base (task
 /// 357): rewrite the receipt for the head, or fix the worktree first.
+/// Held to [`NEXT_TURN_LIMIT`]: the receipt's commit, which the worker
+/// wrote, to [`NEXT_TURN_NAME_BYTES`]; the receipt has it whole.
 pub(crate) fn stale_receipt_nudge(
     run: &TaskRun,
     receipt_commit: &str,
     head: &CommitSha,
-) -> Result<String> {
+) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let route = Route::of(run);
+    let mut fit = Fit::new(NEXT_TURN_LIMIT);
+    let receipt_commit = fit.text(
+        "receipt_commit",
+        receipt_commit,
+        NEXT_TURN_NAME_BYTES,
+        Keep::Start,
+        &format!("the receipt at {receipt} has it whole"),
+    );
+    fit.section("receipt_commit", &receipt_commit);
     let mut lines = route.opening(format!(
         "dagq: run {} ended its turn, but its receipt names commit {receipt_commit} while the clean worktree HEAD is {head} (for example after a rebase or a new commit). The supervisor cannot accept a receipt for another commit.",
         run.id()
@@ -3065,15 +3198,17 @@ pub(crate) fn stale_receipt_nudge(
         "If the receipt stays as it is, the run goes on as before and validation judges it."
             .to_owned(),
     ]);
-    Ok(lines.join("\n"))
+    Ok(fit.finish(lines.join("\n")))
 }
 
 /// The one nudge the supervisor sends a worker's session whose turn ended
 /// without a receipt or an open question (ADR-0043 decision 1, ADR-t813-1
 /// decision 9): commit and write the receipt, ask with `dagq ask`, or run
 /// again in the foreground what it ended the turn to wait for. Nothing of
-/// the ended turn still runs, and the nudge is its next turn.
-pub(crate) fn stall_nudge(run: &TaskRun) -> Result<String> {
+/// the ended turn still runs, and the nudge is its next turn. It has no
+/// text of variable length: its bytes are counted against
+/// [`NEXT_TURN_LIMIT`] like the other next turns'.
+pub(crate) fn stall_nudge(run: &TaskRun) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let mut lines = Route::of(run).opening(format!(
         "dagq: the previous turn of run {} ended without a receipt or an open question.",
@@ -3095,7 +3230,7 @@ pub(crate) fn stall_nudge(run: &TaskRun) -> Result<String> {
         "If the turns keep ending without a receipt or an ask, the supervisor hands the run to its recovery job."
             .to_owned(),
     );
-    Ok(lines.join("\n"))
+    Ok(Fit::new(NEXT_TURN_LIMIT).finish(lines.join("\n")))
 }
 
 /// What the supervisor sends a worker's session, in place of the nudge,
@@ -3104,22 +3239,46 @@ pub(crate) fn stall_nudge(run: &TaskRun) -> Result<String> {
 /// (`answer`; `ask close` takes no reason of its own), and that the worker
 /// decides within the task or writes a failed receipt, without asking the
 /// same question again. `closed_by` names the closer, `None` when the
-/// close recorded none.
+/// close recorded none. Held to [`NEXT_TURN_LIMIT`]: the closer to
+/// [`NEXT_TURN_NAME_BYTES`] and the answer to [`NEXT_TURN_TEXT_BYTES`].
 pub(crate) fn closed_question_notice(
     run: &TaskRun,
     ask_id: i64,
     closed_by: Option<&str>,
     answer: Option<&str>,
-) -> Result<String> {
+) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let route = Route::of(run);
-    let closer = closed_by.map_or_else(|| "someone (not recorded)".to_owned(), str::to_owned);
+    let mut fit = Fit::new(NEXT_TURN_LIMIT);
+    let closer = closed_by.map_or_else(
+        || "someone (not recorded)".to_owned(),
+        |closer| {
+            fit.text(
+                "closer",
+                closer,
+                NEXT_TURN_NAME_BYTES,
+                Keep::Start,
+                NOT_READABLE,
+            )
+        },
+    );
+    fit.section("closer", &closer);
     let mut lines = route.opening(format!(
         "dagq: ask {ask_id} (your worker_question on run {}) was closed by {closer} without an answer delivered to you.",
         run.id()
     ));
     lines.push(match answer.map(str::trim).filter(|a| !a.is_empty()) {
-        Some(answer) => format!("What was recorded with it when it was closed: {answer}"),
+        Some(answer) => {
+            let answer = fit.text(
+                "answer",
+                answer,
+                NEXT_TURN_TEXT_BYTES,
+                Keep::Start,
+                NOT_READABLE,
+            );
+            fit.section("answer", &answer);
+            format!("What was recorded with it when it was closed: {answer}")
+        }
         None => "No reason was recorded with the close.".to_owned(),
     });
     lines.push("Do not ask the same question again. Do one of these in this turn:".to_owned());
@@ -3134,7 +3293,7 @@ pub(crate) fn closed_question_notice(
         "If the turns keep ending without a receipt, the supervisor hands the run to its recovery job."
             .to_owned(),
     );
-    Ok(lines.join("\n"))
+    Ok(fit.finish(lines.join("\n")))
 }
 
 /// The bytes the whole run review prompt takes at most, the language's
@@ -4279,6 +4438,8 @@ const OPTIONAL_SECTIONS: usize = 6;
 /// cut field of their one item, so that item may count up to four
 /// (`answer`: two) times; so do the worker's `task`, `goal` and `inherited`
 /// (ADR-t2072-1), whose prompt's bytes are recorded on `wrapper_launched`.
+/// A next-turn message's (ADR-t2072-1) are recorded on the
+/// `turn_requested` that wrote it, and each of its texts is one item.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PromptBytes {
     pub total: usize,
@@ -4298,7 +4459,7 @@ pub struct PlanReviewPrompt {
 /// The prompt of a headless job or of a planner of the runtime's held to
 /// its limits, and what it takes (task 1571, ADR-t1566-1 decisions 4 to
 /// 6): goal review, run review, recovery job and the four planners', and
-/// the worker's `prompt.txt` (ADR-t2072-1).
+/// the worker's `prompt.txt` and its next-turn messages (ADR-t2072-1).
 #[derive(Debug, Clone)]
 pub struct FittedPrompt {
     pub text: String,
@@ -5672,9 +5833,10 @@ mod tests {
             branch: "main".into(),
             reason: "the e2e failed: a; see /runs/r/e2e-1.log".into(),
             kind: ResumeKind::E2e,
+            reason_file: None,
         };
         for worker in [&own_run, &codex] {
-            let resumed = resume_request(&open, worker, &request, &[]).unwrap();
+            let resumed = resume_request(&open, worker, &request, &[]).unwrap().text;
             assert!(
                 resumed.contains("the e2e the runtime ran on the host before landing it failed"),
                 "{resumed}"
@@ -5736,8 +5898,9 @@ mod tests {
                 branch: "main".into(),
                 reason: "the e2e failed: a".into(),
                 kind: ResumeKind::E2e,
+                reason_file: None,
             };
-            let resumed = resume_request(&open, &worker, &request, &[]).unwrap();
+            let resumed = resume_request(&open, &worker, &request, &[]).unwrap().text;
             for step in [
                 "fix the e2e tests that failed",
                 "run a failed test by name to reproduce it, the way the repository's instructions (AGENTS.md or CLAUDE.md) say",
@@ -5836,8 +5999,11 @@ mod tests {
                 branch: "main".into(),
                 reason: "why".into(),
                 kind,
+                reason_file: None,
             };
-            let text = resume_request(&verified, &own_run, &request, &[]).unwrap();
+            let text = resume_request(&verified, &own_run, &request, &[])
+                .unwrap()
+                .text;
             assert!(text.contains(checks), "{kind:?}: {text}");
             assert!(text.contains(default), "{kind:?}: {text}");
             assert!(!text.contains("Rerun the verification commands"), "{text}");
@@ -6713,13 +6879,17 @@ mod tests {
     /// for a run recorded as interactive before, which is resumed headless.
     #[test]
     fn the_nudge_is_the_next_turn_whatever_mode_the_run_recorded() {
-        let headless = stall_nudge(&run_on(Provider::Claude, WorkerMode::Headless)).unwrap();
+        let headless = stall_nudge(&run_on(Provider::Claude, WorkerMode::Headless))
+            .unwrap()
+            .text;
         assert!(headless.starts_with(HEADLESS_NEXT_TURN), "{headless}");
         assert!(
             headless.contains("Do one of these in this turn:"),
             "{headless}"
         );
-        let recorded = stall_nudge(&run_on(Provider::Claude, WorkerMode::Interactive)).unwrap();
+        let recorded = stall_nudge(&run_on(Provider::Claude, WorkerMode::Interactive))
+            .unwrap()
+            .text;
         assert_eq!(recorded, headless);
     }
 
@@ -6730,8 +6900,9 @@ mod tests {
     #[test]
     fn the_notice_of_a_closed_question_names_its_closer_and_what_to_do() {
         let run = run_on(Provider::Claude, WorkerMode::Headless);
-        let notice =
-            closed_question_notice(&run, 5, Some("inbox"), Some("ask the planner")).unwrap();
+        let notice = closed_question_notice(&run, 5, Some("inbox"), Some("ask the planner"))
+            .unwrap()
+            .text;
         assert!(
             notice.contains(&format!(
                 "\ndagq: ask 5 (your worker_question on run {RUN}) was closed by inbox without an answer delivered to you."
@@ -6749,7 +6920,9 @@ mod tests {
         assert!(notice.contains("write a failed receipt at /runs/run/receipt.json"));
         assert!(!notice.contains("dagq ask"), "{notice}");
         let headless = run_on(Provider::Codex, WorkerMode::Headless);
-        let notice = closed_question_notice(&headless, 5, None, Some("  ")).unwrap();
+        let notice = closed_question_notice(&headless, 5, None, Some("  "))
+            .unwrap()
+            .text;
         assert!(
             notice.contains("closed by someone (not recorded)"),
             "{notice}"
@@ -6879,16 +7052,21 @@ mod tests {
                 branch: "main".into(),
                 reason: "why".into(),
                 kind,
+                reason_file: None,
             };
-            texts.push(resume_request(task, run, &request, &[]).unwrap());
+            texts.push(resume_request(task, run, &request, &[]).unwrap().text);
         }
         texts.push(revise_request(task, run, 1, &["fix it".into()]).unwrap());
-        texts.push(revise_mismatch_request(run, "the revise", "stale").unwrap());
+        texts.push(
+            revise_mismatch_request(run, "the revise", "stale")
+                .unwrap()
+                .text,
+        );
         let head = CommitSha::try_from("2222222222222222222222222222222222222222").unwrap();
-        texts.push(stale_receipt_nudge(run, SHA, &head).unwrap());
-        texts.push(stall_nudge(run).unwrap());
-        texts.push(answer_text(run, 3, "blue"));
-        texts.push(recovery_instruction(run, "stalled", "write the receipt"));
+        texts.push(stale_receipt_nudge(run, SHA, &head).unwrap().text);
+        texts.push(stall_nudge(run).unwrap().text);
+        texts.push(answer_text(run, 3, "blue").text);
+        texts.push(recovery_instruction(run, "stalled", "write the receipt").text);
         texts.push(continue_text(run));
         texts
     }
@@ -9936,5 +10114,284 @@ mod tests {
             task.paths().join(", ")
         )));
         assert!(!text.contains("left out by"), "{text}");
+    }
+
+    /// Task 7 with `paths` and `verification_commands`.
+    fn task_with_lists(paths: Vec<String>, verification_commands: Vec<String>) -> Task {
+        Task::restore(TaskRecord {
+            goal_priority: None,
+            id: TaskId::new(7),
+            title: "work".into(),
+            description: String::new(),
+            acceptance: String::new(),
+            verification_commands,
+            required_evidence: Vec::new(),
+            paths,
+            priority: Default::default(),
+            change: None,
+            status: TaskStatus::InProgress,
+            goal_id: None,
+            context: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
+            named_mode: None,
+            wait_for_build: false,
+        })
+        .unwrap()
+    }
+
+    const RESUME_KINDS: [ResumeKind; 9] = [
+        ResumeKind::Landing,
+        ResumeKind::EvidenceMissing,
+        ResumeKind::SentBack,
+        ResumeKind::ScopeViolation,
+        ResumeKind::Precheck,
+        ResumeKind::Triage,
+        ResumeKind::Recheck,
+        ResumeKind::SessionGone,
+        ResumeKind::E2e,
+    ];
+
+    /// The bytes a next-turn message held to `limit` may take before the
+    /// language's instruction is added.
+    fn room(limit: usize) -> usize {
+        limit - prompt_fit::LANGUAGE_ROOM
+    }
+
+    /// ADR-t2072-1: with the largest input (a huge reason, paths and
+    /// verification commands, a landing branch of 256 bytes and more
+    /// landed tasks than the section lists, each with a huge title and the
+    /// longest ID) every resolution request stays within
+    /// `RESUME_REQUEST_LIMIT` without its middle cut, keeps all its steps
+    /// and the section on landed tasks as that section bounds it, and says
+    /// how many bytes it cut and where the rest is.
+    #[test]
+    fn a_resolution_request_stays_within_its_limit_with_the_largest_input() {
+        let reason = "理".repeat(400_000);
+        let task = task_with_lists(
+            (0..10_000).map(|n| format!("src/{n}/")).collect(),
+            vec!["c".repeat(100_000)],
+        );
+        let landed: Vec<LandedTask> = (0..LANDED_TASK_LINES as i64 + 5)
+            .map(|n| LandedTask {
+                task_id: TaskId::new(i64::MAX - n),
+                title: "長".repeat(1_000),
+            })
+            .collect();
+        let file = "/runs/run/resume-1-reason.txt";
+        for provider in [Provider::Claude, Provider::Codex] {
+            let run = run_on(provider, WorkerMode::Headless);
+            for kind in RESUME_KINDS {
+                let request = ResumeRequest {
+                    main: CommitSha::try_from("2".repeat(40).as_str()).unwrap(),
+                    branch: "b".repeat(256),
+                    reason: reason.clone(),
+                    kind,
+                    reason_file: Some(file.into()),
+                };
+                let fitted = resume_request(&task, &run, &request, &landed).unwrap();
+                let text = &fitted.text;
+                assert!(
+                    text.len() <= room(RESUME_REQUEST_LIMIT),
+                    "{kind:?}: {}",
+                    text.len()
+                );
+                assert_eq!(fitted.bytes.total, text.len());
+                assert_eq!(fitted.bytes.limit, RESUME_REQUEST_LIMIT);
+                let over = fitted.bytes.over_limit.clone().unwrap();
+                assert!(!over.contains("its middle was cut"), "{over}");
+                assert!(over.contains("verify: "), "{over}");
+                assert_eq!(
+                    over.contains("paths: "),
+                    kind == ResumeKind::ScopeViolation,
+                    "{over}"
+                );
+                assert_eq!(fitted.bytes.omitted["reason"], 1);
+                let (kept, note) = text
+                    .split_once("Reason: ")
+                    .unwrap()
+                    .1
+                    .split_once("\n[… ")
+                    .unwrap();
+                assert!(kept.len() <= RESUME_REASON_BYTES && reason.starts_with(kept));
+                assert!(
+                    note.starts_with(&format!(
+                        "{} bytes left out by the prompt's limit; the whole reason is in {file}]",
+                        reason.len() - kept.len()
+                    )),
+                    "{note}"
+                );
+                assert!(fitted.bytes.sections["landed"] <= LANDED_SECTION_BYTES);
+                assert!(text.contains("- … and 5 more; git log --oneline"));
+                for step in 1..=7 {
+                    assert!(text.contains(&format!("\n{step}. ")), "{kind:?} {step}");
+                }
+                assert!(text.contains(HEADLESS_STOP) && text.ends_with("end the turn."));
+            }
+        }
+        // Without a file to point at, the cut reason is in no file.
+        let request = ResumeRequest {
+            main: CommitSha::try_from(SHA).unwrap(),
+            branch: "main".into(),
+            reason,
+            kind: ResumeKind::Triage,
+            reason_file: None,
+        };
+        let run = run_on(Provider::Claude, WorkerMode::Headless);
+        let text = resume_request(&task, &run, &request, &[]).unwrap().text;
+        assert!(
+            text.contains(&format!("by the prompt's limit; {NOT_READABLE}]")),
+            "{text}"
+        );
+    }
+
+    /// ADR-t2072-1: within their limits (no text, or each at its limit)
+    /// the next-turn messages carry their texts whole as before, with no
+    /// note of what was left out, and record no cut.
+    #[test]
+    fn within_its_limits_a_next_turn_message_carries_its_texts_whole() {
+        let run = run_on(Provider::Claude, WorkerMode::Headless);
+        let task = task_with_lists(vec!["src/".into()], vec!["make gate".into()]);
+        let head = CommitSha::try_from("2".repeat(40).as_str()).unwrap();
+        for reason in [String::new(), "r".repeat(RESUME_REASON_BYTES)] {
+            for kind in RESUME_KINDS {
+                let request = ResumeRequest {
+                    main: CommitSha::try_from(SHA).unwrap(),
+                    branch: "main".into(),
+                    reason: reason.clone(),
+                    kind,
+                    reason_file: Some("/runs/run/resume-1-reason.txt".into()),
+                };
+                let fitted = resume_request(&task, &run, &request, &[]).unwrap();
+                assert!(fitted.text.contains(&format!("\nReason: {reason}\n")));
+                assert!(
+                    fitted
+                        .text
+                        .contains("run the verification commands [\"make gate\"].")
+                );
+                if kind == ResumeKind::ScopeViolation {
+                    assert!(fitted.text.contains("the task's --paths (src/), so"));
+                }
+                assert!(fitted.bytes.omitted.is_empty(), "{:?}", fitted.bytes);
+                assert_eq!(fitted.bytes.over_limit, None);
+                assert!(!fitted.text.contains("left out by"));
+            }
+        }
+        let answer = "a".repeat(NEXT_TURN_TEXT_BYTES);
+        let name = "n".repeat(NEXT_TURN_NAME_BYTES);
+        let why = "w".repeat(NEXT_TURN_WHY_BYTES);
+        let messages = [
+            (
+                answer_text(&run, 3, &answer),
+                format!("answer to ask 3: {answer}\n\n{HEADLESS_GO_ON}"),
+            ),
+            (
+                answer_text(&run, 3, ""),
+                format!("answer to ask 3: \n\n{HEADLESS_GO_ON}"),
+            ),
+            (
+                recovery_instruction(&run, "stalled", &format!(" {answer}\n")),
+                format!(
+                    "dagq: the supervisor's recovery job for run {RUN} (alert stalled) asks: {answer}\n\n{HEADLESS_GO_ON}"
+                ),
+            ),
+            (
+                revise_mismatch_request(&run, "the revise", &why).unwrap(),
+                format!("of run {RUN} cannot be accepted: {why}.\n"),
+            ),
+            (
+                stale_receipt_nudge(&run, &name, &head).unwrap(),
+                format!("its receipt names commit {name} while"),
+            ),
+            (
+                closed_question_notice(&run, 5, Some(&name), Some(&answer)).unwrap(),
+                format!("closed by {name} without"),
+            ),
+            (
+                closed_question_notice(&run, 5, Some(&name), Some(&answer)).unwrap(),
+                format!("What was recorded with it when it was closed: {answer}\n"),
+            ),
+            (
+                closed_question_notice(&run, 5, None, None).unwrap(),
+                "No reason was recorded with the close.".to_owned(),
+            ),
+            (stall_nudge(&run).unwrap(), "Do one of these".to_owned()),
+        ];
+        for (fitted, whole) in messages {
+            assert!(fitted.text.contains(&whole), "{whole}: {}", fitted.text);
+            assert!(fitted.bytes.omitted.is_empty(), "{:?}", fitted.bytes);
+            assert_eq!(fitted.bytes.over_limit, None);
+            assert_eq!(fitted.bytes.limit, NEXT_TURN_LIMIT);
+            assert_eq!(fitted.bytes.total, fitted.text.len());
+            assert!(!fitted.text.contains("left out by"));
+        }
+    }
+
+    /// ADR-t2072-1: with the largest input (a huge answer, instruction,
+    /// why, receipt commit and closer) the other next-turn messages stay
+    /// within `NEXT_TURN_LIMIT` without their middle cut, keep their fixed
+    /// steps, and say how many bytes they cut and where (or that nowhere)
+    /// the rest can be read.
+    #[test]
+    fn the_other_next_turn_messages_stay_within_their_limit_with_the_largest_input() {
+        let huge = "答".repeat(300_000);
+        let head = CommitSha::try_from("2".repeat(40).as_str()).unwrap();
+        for provider in [Provider::Claude, Provider::Codex] {
+            let run = run_on(provider, WorkerMode::Headless);
+            let not_readable = format!("by the prompt's limit; {NOT_READABLE}]");
+            let messages = [
+                (
+                    answer_text(&run, i64::MAX, &huge),
+                    vec!["answer"],
+                    vec![HEADLESS_GO_ON.to_owned(), not_readable.clone()],
+                ),
+                (
+                    recovery_instruction(&run, "stalled", &huge),
+                    vec!["instruction"],
+                    vec![HEADLESS_GO_ON.to_owned(), not_readable.clone()],
+                ),
+                (
+                    revise_mismatch_request(&run, "the revise", &huge).unwrap(),
+                    vec!["why"],
+                    vec!["\n4. ".to_owned(), not_readable.clone()],
+                ),
+                (
+                    stale_receipt_nudge(&run, &huge, &head).unwrap(),
+                    vec!["receipt_commit"],
+                    vec![
+                        "\n3. ".to_owned(),
+                        "by the prompt's limit; the receipt at /runs/run/receipt.json has it whole]"
+                            .to_owned(),
+                    ],
+                ),
+                (
+                    closed_question_notice(&run, i64::MAX, Some(&huge), Some(&huge)).unwrap(),
+                    vec!["closer", "answer"],
+                    vec![
+                        "\n3. ".to_owned(),
+                        HEADLESS_STOP.to_owned(),
+                        not_readable.clone(),
+                    ],
+                ),
+                (stall_nudge(&run).unwrap(), vec![], vec!["\n3. ".to_owned()]),
+            ];
+            for (fitted, cut, kept) in messages {
+                let text = &fitted.text;
+                assert!(text.len() <= room(NEXT_TURN_LIMIT), "{}", text.len());
+                assert_eq!(fitted.bytes.total, text.len());
+                assert_eq!(fitted.bytes.over_limit, None, "{text}");
+                for section in &cut {
+                    assert_eq!(fitted.bytes.omitted[section], 1, "{section}");
+                }
+                assert_eq!(fitted.bytes.omitted.len(), cut.len());
+                for kept in kept {
+                    assert!(text.contains(&kept), "{kept}: {text}");
+                }
+                if !cut.is_empty() {
+                    assert!(text.contains(" bytes left out by the prompt's limit; "));
+                }
+            }
+        }
     }
 }

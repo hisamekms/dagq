@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::domain::EventKind;
-use crate::domain::language::with_instruction;
 use crate::domain::{
     ParkCause, RunEvent, Task, required_of,
     run::{RunWorkspace, run_workspaces},
@@ -122,6 +121,7 @@ impl Supervisor<'_> {
             branch,
             reason: reason.unwrap_or_else(|| "(no reason recorded)".to_owned()),
             kind,
+            reason_file: reason_file(&run, &format!("resume-{attempt}")),
         };
         match self.start_resume(&run, attempt, &request, run_env) {
             Ok(watch) => {
@@ -357,6 +357,25 @@ impl Supervisor<'_> {
         }
         Ok(())
     }
+    /// Write the whole reason of `request` to its `reason_file` when
+    /// `message` cut it (ADR-t2072-1): the request names that file as where
+    /// the worker reads the rest.
+    pub(super) fn write_reason_file(
+        &mut self,
+        request: &ResumeRequest,
+        message: &FittedPrompt,
+    ) -> Result<()> {
+        if let Some(file) = request
+            .reason_file
+            .as_ref()
+            .filter(|_| message.bytes.omitted.contains_key("reason"))
+        {
+            self.files
+                .write(Path::new(file), request.reason.as_bytes())
+                .context("write the whole reason of the resolution request")?;
+        }
+        Ok(())
+    }
     /// Write the resolution request, refresh the runtime snapshot (the one
     /// the worker ran may predate `session --resume`) and start the resume
     /// wrapper in the background with the same settings and `run_env` as
@@ -377,13 +396,12 @@ impl Supervisor<'_> {
         );
         let task = self.queue.show(run.task_id())?.task;
         let landed = landed_since(&mut *self.queue, &*self.repository, run, &request.main)?;
-        let message = with_instruction(
-            resume_request(&task, run, request, &landed)?,
-            self.verifier.language().as_ref(),
-        );
+        let message = resume_request(&task, run, request, &landed)?
+            .with_language(self.verifier.language().as_ref());
+        self.write_reason_file(request, &message)?;
         self.files.write(
             &run_dir.join(format!("resume-{attempt}.txt")),
-            message.as_bytes(),
+            message.text.as_bytes(),
         )?;
         self.files
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
@@ -455,7 +473,8 @@ impl Supervisor<'_> {
             idle_marker: run.idle_marker_path()?,
             started_at: self.files.now(),
             startup: now,
-            message,
+            message: message.text,
+            message_bytes: Some(message.bytes),
 
             message_sent: None,
             start: None,
@@ -547,6 +566,7 @@ impl Supervisor<'_> {
             started_at,
             startup: now,
             message,
+            message_bytes: None,
 
             // The resume timeout runs from the send, not the takeover.
             message_sent: message_sent_at.map(|at| {
@@ -834,6 +854,19 @@ pub(super) fn resume_reason(
     (reason, kind)
 }
 
+/// The file in `run`'s directory that holds the whole reason of the
+/// request named `request` (`resume-<attempt>`, `conflict-<attempt>`) when
+/// the request cuts it, next to the request's own file; `None` without a
+/// run directory.
+pub(super) fn reason_file(run: &TaskRun, request: &str) -> Option<String> {
+    run.run_dir().map(|dir| {
+        Path::new(dir)
+            .join(format!("{request}-reason.txt"))
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
 /// The tasks landed on `main` since the run's base, oldest first, from the
 /// `Dagq-Task` trailers, each by ID and title.
 pub(super) fn landed_since(
@@ -877,6 +910,10 @@ pub(super) struct ResumeWatch {
     pub(super) started_at: SystemTime,
     pub(super) startup: Instant,
     pub(super) message: String,
+    /// What `message` takes (ADR-t2072-1), recorded on the request's
+    /// `turn_requested`; `None` for a message an adopter took over from a
+    /// snapshot.
+    pub(super) message_bytes: Option<PromptBytes>,
 
     /// When the resolution request was sent (for its timeout, and for the
     /// idle marker of the response to it).
@@ -1172,13 +1209,14 @@ impl ResumeWatch {
     fn send_request(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
         let sent_at = sv.files.now();
         let message = self.message.clone();
-        let _submission = submit(
-            sv,
-            run,
-            &self.workspace,
-            Input::Text(&message),
-            "resolution request",
-        )?;
+        let input = match &self.message_bytes {
+            Some(bytes) => Input::Prompt {
+                text: &message,
+                bytes,
+            },
+            None => Input::Text(&message),
+        };
+        let _submission = submit(sv, run, &self.workspace, input, "resolution request")?;
         self.message_sent = Some((sv.generators.clock.monotonic(), sent_at));
         self.live.input_at = Some(sent_at);
         // A supervisor that adopts this resume does not send it again; a

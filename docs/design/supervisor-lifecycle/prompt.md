@@ -8,6 +8,7 @@ scope: runtime
 related:
   - adr-t1566-1
   - adr-t2072-1
+  - adr-t1892-1
   - adr-t1428-1
   - adr-t1942-2
   - adr-t1453-2
@@ -48,6 +49,7 @@ claim ──> prompt(task, run, goal, predecessors, goal_predecessors, siblings)
 claim ──> 指示の版のhash ──> run_claimed（下の「workerが読んだ指示の版」）
 
 runの途中 ──> resume・revise・促し・askの答え・復旧jobの指示 ──> 次のturnのprompt
+                 └─ 節ごとの上限 → turn_requestedのprompt_bytes
 
 supervisorのjob ──> plan review・observer・goal review・スループットの見直し・runのreview・復旧job
                      └─ 節ごとの上限 → promptのbyte数をeventに記録 → stdinで渡す
@@ -213,7 +215,7 @@ promptと固定の文字列には、dagqのrepositoryの規則（ADRの索引や
 supervisorが起動するheadlessのjobとruntimeのplannerのpromptの共通の方針で、[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)の決定に沿う。
 各jobの文書（[Headless job processes](headless-job-processes.md)、[Plan review](plan-review.md)、[Observer](observer.md)、[Goal review](goal-review.md)、[スループットの見直し](throughput-review.md)、[Review](review.md)、[復旧job](background-recovery-job.md)、[Session prompts](session-prompts.md)）はpromptの大きさと渡し方についてここを指す。
 workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2072-1-worker-prompts-and-next-turns-carry-decision-material-within-limits.md)で同じ方針に入り、渡し方（決定1）だけは今の`prompt.txt`と非対話のturnのままにする。
-上限を持つのは今は初期promptだけで、次のturnの文（resume・revise・促し・askの答えなど）にはまだ上限が無く、表にも行が無い。
+次のturnの文のうち上限を持つのは表の行の入口で、reviewのreviseの依頼とholdの後の続きはまだ上限を持たない。
 
 - 渡し方（決定1）: 大きさに関係なくstdinで渡し、引数で渡さない。
   `AgentProvider::headless_command`と`review_command`がpromptを`CommandSpec::stdin`に持たせ、spawnerが本人だけが読める一時ファイルに書いてすぐunlinkし、子のstdinにする（[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）。
@@ -242,6 +244,7 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 | 復旧job | `read_files` | `recovery_prompt`（`RecoveryMaterial`） | `RECOVERY_*` |
 | runtimeのplanner | plannerのrole | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt` | `RUNTIME_PLANNER_*`・`DRAFT_*`・`FINDING_*`・`REQUEST_*`・`PLANNER_*` |
 | workerの初期prompt | worktreeのファイル・git・goalのdoc | `prompt::prompt`（[上](#workerのprompt)） | `WORKER_PROMPT_LIMIT`・`WORKER_*` |
+| workerの次のturnの文 | worktreeとrun directoryのファイル・git | `resume_request`・`revise_mismatch_request`・`stale_receipt_nudge`・`stall_nudge`・`answer_text`・`recovery_instruction`・`closed_question_notice`（[下](#次のturnの文の上限)） | `RESUME_REQUEST_LIMIT`・`RESUME_REASON_BYTES`・`NEXT_TURN_*`（taskのpathsと検証は`WORKER_*`） |
 
 ### plan reviewの上限
 
@@ -252,6 +255,19 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 - 約束: 必須の節（指示と検査とverdictの形、proposalのtaskの全文、予想するファイル、goal、`lint`、言語の指示）は省かない。
   必須の節だけで上限を超えるときだけ、大きいものから読むだけの`dagq`の案内に替え、jobのdirのファイルには退避しない。
 - 落とし穴: 上限はagentの文脈のためのもので、stdinで渡す今は`ARG_MAX`の制約ではない。
+
+### 次のturnの文の上限
+
+- 入口: 表の行の関数と定数。
+  値の理由と本番の大きさは各定数のdoc commentが持つ。
+- 切り方: 可変の文（resumeの理由、askの答え、復旧jobの指示、食い違いの理由、receiptの名指すcommit、askを閉じた人）は先頭を残して切り、省いたbyte数と読む方法を書く。
+  resumeの理由は、切ったときだけ全文を依頼の文と同じrun directoryの`<依頼>-reason.txt`に書いてそのpathを示す。
+  receiptの名指すcommitはreceiptで読ませ、ほかの文はworkerが読める場所に無いので読む方法が無いと書く。
+- 必須の節: resumeのtaskのpathsと検証はtaskそのものの記述なので省かず、初期promptと同じ`WORKER_*`の上限で切って`over_limit`に書く。
+  手順の行は省かない。
+- 「Tasks landed」の節はその節の行数とtitleの上限で有界なので、ここでは切らずに全体の上限に数える（[ADR-t1892-1](../../adr/2026-10-07-t1892-1-resume-request-lists-landed-tasks-by-title-with-a-cap.md)）。
+- 記録: 依頼を書いた`turn_requested`の`prompt_bytes`（言語の指示を含む）。
+  supervisorの引き継ぎ（`handoff.json`か記録からのadopt）の後に送るresumeの依頼と、adopterが記録から書き直す依頼は記録しない。
 
 ### goal review・runのreview・復旧job・runtimeのplannerの上限
 

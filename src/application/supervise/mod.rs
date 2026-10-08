@@ -28,7 +28,6 @@ use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::Priority;
 use crate::domain::background_wrapper::StopRoute;
-use crate::domain::language::with_instruction;
 use crate::domain::light_slots::{self, ClaimRoom};
 use crate::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
 use crate::domain::slot_order::{SlotCandidate, SlotKind, slot_order};
@@ -64,11 +63,12 @@ use super::{
     naming::shell_join,
     or_none, path_text,
     prompt::{
-        GoalPredecessorSummary, HEADLESS_NEVER, Inheritance, LandedTask, PredecessorSummary,
-        RecoveryMaterial, ResumeKind, ResumeRequest, TRIAGE_ACCESS, answer_text,
-        closed_question_notice, continue_text, ended_run_material, prompt, recovery_instruction,
-        recovery_prompt, resume_request, review_prompt, revise_mismatch_request, revise_request,
-        siblings_in_progress, stale_receipt_nudge, stall_nudge,
+        FittedPrompt, GoalPredecessorSummary, HEADLESS_NEVER, Inheritance, LandedTask,
+        PredecessorSummary, PromptBytes, RecoveryMaterial, ResumeKind, ResumeRequest,
+        TRIAGE_ACCESS, answer_text, closed_question_notice, continue_text, ended_run_material,
+        prompt, recovery_instruction, recovery_prompt, resume_request, review_prompt,
+        revise_mismatch_request, revise_request, siblings_in_progress, stale_receipt_nudge,
+        stall_nudge,
     },
     recording::{RecordingSessions, reason_of_error},
     tail, unix_seconds,
@@ -3556,10 +3556,8 @@ impl Supervisor<'_> {
                         slot.phase = Phase::Validating(Some(handle), Some(session));
                     }
                     ReviseOutcome::Mismatch(code, why) => {
-                        let message = with_instruction(
-                            revise_mismatch_request(&slot.run, &label, &why)?,
-                            self.verifier.language().as_ref(),
-                        );
+                        let message = revise_mismatch_request(&slot.run, &label, &why)?
+                            .with_language(self.verifier.language().as_ref());
                         // Only what the session writes after this counts.
                         let sent_at = self.files.now();
                         let run = slot.run.clone();
@@ -3567,7 +3565,7 @@ impl Supervisor<'_> {
                             self,
                             &run,
                             &session.workspace,
-                            Input::Text(&message),
+                            Input::from(&message),
                             "receipt fix request",
                         ) {
                             Ok(_submission) => {

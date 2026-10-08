@@ -1412,7 +1412,7 @@ fn apply_live_verdict(
                     sv,
                     run,
                     live.workspace,
-                    Input::Text(&text),
+                    Input::from(&text),
                     "recovery instruction",
                 ) {
                     Ok(submission) => submission,
@@ -1428,7 +1428,7 @@ fn apply_live_verdict(
                     action,
                     json!({"instruction": instruction, "workspace_id": live.workspace}),
                 )?;
-                applied.sent = Some((text, sent_at, submission));
+                applied.sent = Some((text.text, sent_at, submission));
             }
 
             RecoveryAction::Resume { instruction } => {

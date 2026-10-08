@@ -44,7 +44,7 @@ pub(super) const IDLE_REASONS: [&str; 3] = [
 /// place of a nudge (task 1372).
 pub(super) struct ClosedNotice {
     ask_id: i64,
-    text: String,
+    text: FittedPrompt,
 }
 
 /// How many times a notice of a closed question is sent before the
@@ -1557,9 +1557,9 @@ impl StallWatch {
         self.nudged(sv, run, workspace, idle, idle_secs, now, None)?;
         let text = stall_nudge(run)?;
         let sent_at = sv.files.now();
-        match submit(sv, run, workspace, Input::Text(&text), "nudge") {
+        match submit(sv, run, workspace, Input::from(&text), "nudge") {
             Ok(_submission) => {
-                self.input_sent(sent_at, Some(&text));
+                self.input_sent(sent_at, Some(&text.text));
                 info!(run_id = %run.id(), "run {} was idle without a receipt for {idle_secs}s; nudged it in workspace {workspace}", run.id());
                 Ok(Some(sent_at))
             }
@@ -1588,7 +1588,7 @@ impl StallWatch {
     ) -> Result<Option<SystemTime>> {
         let sent_at = sv.files.now();
         let what = "notice of a closed question";
-        match submit(sv, run, workspace, Input::Text(&closed.text), what) {
+        match submit(sv, run, workspace, Input::from(&closed.text), what) {
             Ok(_submission) => {
                 sv.notice_failures.remove(run.id());
                 self.nudged(
@@ -1600,7 +1600,7 @@ impl StallWatch {
                     now,
                     Some(closed.ask_id),
                 )?;
-                self.input_sent(sent_at, Some(&closed.text));
+                self.input_sent(sent_at, Some(&closed.text.text));
                 info!(run_id = %run.id(), ask_id = closed.ask_id, "run {} was told in workspace {workspace} that its question {} was closed without an answer", run.id(), closed.ask_id);
                 Ok(Some(sent_at))
             }
@@ -1979,8 +1979,8 @@ impl StallWatch {
                     let text = answer_text(run, id, answer.unwrap_or_default().trim());
                     let workspace = run.workspace_id().unwrap_or_default().to_owned();
                     let sent_at = sv.files.now();
-                    submit(sv, run, &workspace, Input::Text(&text), &what)?;
-                    self.input_sent(sent_at, Some(&text));
+                    submit(sv, run, &workspace, Input::from(&text), &what)?;
+                    self.input_sent(sent_at, Some(&text.text));
                 }
                 sv.queue.close_ask(id)?;
                 Self::resolved(

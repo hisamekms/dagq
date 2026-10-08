@@ -208,6 +208,12 @@ esac"#
     let requested = payloads(&detail, "turn_requested");
     assert_eq!(requested.len(), 1, "{requested:?}");
     assert_eq!(requested[0]["what"], format!("answer of ask {}", ask.id));
+    // The answer's bytes, held to the next turn's limit (ADR-t2072-1).
+    let bytes = &requested[0]["prompt_bytes"];
+    assert_eq!(bytes["limit"], 16_000, "{bytes}");
+    assert_eq!(bytes["sections"]["answer"], "change.txt".len(), "{bytes}");
+    assert!(bytes["total"].as_u64().unwrap() > 0, "{bytes}");
+    assert_eq!(bytes["omitted"], json!({}), "{bytes}");
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "run_waiting_started") < position(&kinds, "run_waiting_ended"));
     assert!(position(&kinds, "run_waiting_ended") < position(&kinds, "ask_delivered"));
@@ -354,6 +360,10 @@ esac"#,
     );
     let requested = payloads(&detail, "turn_requested");
     assert_eq!(requested[0]["what"], "resolution request", "{requested:?}");
+    let bytes = &requested[0]["prompt_bytes"];
+    assert_eq!(bytes["limit"], 36_000, "{bytes}");
+    assert!(bytes["sections"]["reason"].as_u64().unwrap() > 0, "{bytes}");
+    assert!(bytes["sections"]["landed"].as_u64().unwrap() > 0, "{bytes}");
     assert!(event_kinds(&detail).contains(&"run_e2e_failed"));
     assert_eq!(
         payloads(&detail, "run_e2e_finished")[0]["outcome"],
@@ -401,6 +411,23 @@ esac"#
     }
     assert!(calls[3].contains("recovery job"), "{calls:?}");
     assert_eq!(payloads(&detail, "stall_nudged").len(), 2);
+    // Each next turn records its bytes (ADR-t2072-1): the nudges and the
+    // recovery job's instruction.
+    let turns = payloads(&detail, "turn_requested");
+    let whats: Vec<&str> = turns.iter().map(|t| t["what"].as_str().unwrap()).collect();
+    assert_eq!(
+        whats,
+        ["nudge", "nudge", "recovery instruction"],
+        "{turns:?}"
+    );
+    for turn in &turns {
+        assert_eq!(turn["prompt_bytes"]["limit"], 16_000, "{turn}");
+        assert_eq!(turn["prompt_bytes"]["over_limit"], Value::Null, "{turn}");
+    }
+    assert_eq!(
+        turns[2]["prompt_bytes"]["sections"]["instruction"],
+        "write the receipt".len()
+    );
     let requested = payloads(&detail, "recovery_requested");
     assert_eq!(requested.len(), 1, "{requested:?}");
     assert_eq!(requested[0]["alert"], "stalled");
