@@ -2378,6 +2378,16 @@ pub trait AskStore {
     /// The payload of the `ask_opened` of the ask `id`; null when there is
     /// none.
     fn ask_opened_payload(&self, id: crate::domain::AskId) -> Result<serde_json::Value>;
+    /// Answer the open `update_failed` ask `id` `answer` as the runtime
+    /// and close it, its `ask_answered` naming `installed`, the commit put
+    /// in place that contains the failed one; `None` when it is no longer
+    /// open.
+    fn close_installed_update_ask(
+        &mut self,
+        id: crate::domain::AskId,
+        answer: &str,
+        installed: &str,
+    ) -> Result<Option<crate::domain::Ask>>;
     /// Whether the host's `[update]` of this queue looks for releases
     /// (`release` other than `off`, ADR-t618-1): whether a supervisor of a
     /// release build applies the release update's answers.

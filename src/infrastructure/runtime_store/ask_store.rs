@@ -17,6 +17,14 @@ impl AskStore for SqliteQueue {
     fn ask_opened_payload(&self, id: crate::domain::AskId) -> Result<serde_json::Value> {
         SqliteQueue::ask_opened_payload(self, id)
     }
+    fn close_installed_update_ask(
+        &mut self,
+        id: crate::domain::AskId,
+        answer: &str,
+        installed: &str,
+    ) -> Result<Option<crate::domain::Ask>> {
+        SqliteQueue::close_installed_update_ask(self, id, answer, installed)
+    }
     fn release_updates_on(&self) -> bool {
         SqliteQueue::release_updates_on(self)
     }

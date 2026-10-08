@@ -55,6 +55,7 @@ mod lifecycle_down;
 mod lifecycle_handoff_stop;
 mod lifecycle_in_cmux;
 mod lifecycle_install;
+mod lifecycle_install_asks;
 mod lifecycle_install_client;
 mod lifecycle_install_watch;
 mod lifecycle_plan;

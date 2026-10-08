@@ -564,6 +564,40 @@ impl SqliteQueue {
         Ok(opened)
     }
 
+    /// Answer the open `update_failed` ask `id` `answer` as the runtime and
+    /// close it, because the job's swap put `installed`, a commit that
+    /// contains the failed one, in place: `ask_answered` carries
+    /// `runtime_closed` and `installed_commit`. `None` when the ask is not
+    /// an open `update_failed` one any more (answered or closed meanwhile),
+    /// which is left as it is.
+    pub fn close_installed_update_ask(
+        &mut self,
+        id: AskId,
+        answer: &str,
+        installed: &str,
+    ) -> Result<Option<Ask>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ask = read_ask(&tx, id)?;
+        if ask.kind != AskKind::UpdateFailed || !ask.is_open() {
+            return Ok(None);
+        }
+        let now = self.generators.clock.now();
+        let mut payload = json!({
+            "ask_id": id,
+            "kind": ask.kind,
+            "runtime_closed": true,
+            "installed_commit": installed,
+        });
+        write_answer(&tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
+        tx.execute("UPDATE asks SET closed_at=?2 WHERE id=?1", params![id, now])?;
+        ask_event(&tx, None, None, EventKind::AskAnswered, payload)?;
+        let closed = read_ask(&tx, id)?;
+        tx.commit()?;
+        Ok(Some(closed))
+    }
+
     /// The payload of the `ask_opened` of the ask `id`; null when there is
     /// none.
     pub fn ask_opened_payload(&self, id: AskId) -> Result<serde_json::Value> {
@@ -1508,6 +1542,55 @@ mod tests {
             queue.ask_opened_payload(AskId::new(99)).unwrap(),
             serde_json::Value::Null
         );
+    }
+
+    /// The runtime closes an open `update_failed` ask a swap settled, naming
+    /// the commit; one answered already (its `retry` or `skip` for the
+    /// supervisor to apply) and an ask of another kind are left.
+    #[test]
+    fn an_installed_commit_closes_only_an_open_update_failed_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let open = |queue: &mut SqliteQueue, kind: AskKind, by_install: bool| {
+            queue
+                .open_update_ask(
+                    kind,
+                    "retry?",
+                    UPDATE_FAILED_OPTIONS,
+                    "supervisor",
+                    by_install.then_some(crate::application::update::INSTALL_SOURCE),
+                    if by_install {
+                        json!({"source": crate::application::update::INSTALL_SOURCE})
+                    } else {
+                        serde_json::Value::Null
+                    },
+                )
+                .unwrap()
+                .id
+        };
+        let answered = open(&mut queue, AskKind::UpdateFailed, true);
+        queue.answer(answered, "retry").unwrap();
+        let failed = open(&mut queue, AskKind::UpdateFailed, false);
+        let approve = open(&mut queue, AskKind::ApproveUpdate, false);
+        let closed = queue
+            .close_installed_update_ask(failed, "installed", "abc")
+            .unwrap()
+            .unwrap();
+        assert_eq!(closed.answer.as_deref(), Some("installed"));
+        assert_eq!(closed.answered_by.as_deref(), Some("runtime"));
+        assert!(closed.closed_at.is_some());
+        for id in [answered, failed, approve] {
+            assert!(
+                queue
+                    .close_installed_update_ask(id, "installed", "abc")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let answered = queue.read_ask(answered).unwrap();
+        assert_eq!(answered.answer.as_deref(), Some("retry"));
+        assert!(answered.closed_at.is_none());
+        assert!(queue.read_ask(approve).unwrap().is_open());
     }
 
     /// An update ask with a blank question is refused before the write

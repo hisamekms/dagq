@@ -181,6 +181,7 @@ fn run(
             clock: &dagq::infrastructure::clock::SystemClock,
             queues: &queues,
             restart: &restart,
+            is_ancestor: &update::no_ancestry,
         },
         &down,
         Some(&fixture.location.db),

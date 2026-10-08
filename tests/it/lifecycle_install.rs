@@ -767,6 +767,28 @@ fn run_update_job_with_handoff_timeout(
     restarted: &Mutex<Vec<String>>,
     handoff_timeout: Duration,
 ) -> Value {
+    run_update_job_of(
+        fixture,
+        binaries,
+        processes,
+        restarted,
+        handoff_timeout,
+        &("c0ffee".repeat(6) + "c0ff"),
+        &dagq::application::update::no_ancestry,
+    )
+}
+
+/// [`run_update_job`] of `commit`, with `is_ancestor` telling which commits
+/// it contains.
+pub(crate) fn run_update_job_of(
+    fixture: &Fixture,
+    binaries: &UpdateBinaries,
+    processes: &FakeProcesses,
+    restarted: &Mutex<Vec<String>>,
+    handoff_timeout: Duration,
+    commit: &str,
+    is_ancestor: &dyn Fn(&str, &str) -> Result<bool>,
+) -> Value {
     use dagq::application::update;
     let queues = |db: &Path| -> std::sync::Arc<dyn dagq::application::QueueOpener> {
         std::sync::Arc::new(dagq::infrastructure::runtime_store::SqliteOpener {
@@ -791,10 +813,11 @@ fn run_update_job_with_handoff_timeout(
             clock: &dagq::infrastructure::clock::SystemClock,
             queues: &queues,
             restart: &restart,
+            is_ancestor,
         },
         &fixture.location.db,
         &update::JobOptions {
-            commit: "c0ffee".repeat(6) + "c0ff",
+            commit: commit.to_owned(),
             token: LeaseToken::new("auto"),
             target: dir.join("bin").join("dagq"),
             repository: fixture.repo.clone(),
@@ -875,7 +898,7 @@ pub(crate) fn heartbeat_later(fixture: &Fixture, token: &str) {
 
 /// Take the handoff the way the exec'd binary does, and heartbeat on
 /// (`alive`) or die once the job's watch looked at it.
-fn take_and_heartbeat(fixture: &Fixture, processes: &FakeProcesses, alive: bool) {
+pub(crate) fn take_and_heartbeat(fixture: &Fixture, processes: &FakeProcesses, alive: bool) {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     wait_until(processes, UPDATED_PID, || {
         queue
@@ -2511,6 +2534,7 @@ fn run_release_job_with(
             clock: &dagq::infrastructure::clock::SystemClock,
             queues: &queues,
             restart: &restart,
+            is_ancestor: &update::no_ancestry,
         },
         cargo,
         plugin.map(|plugin| plugin as &dyn dagq::application::InstalledPlugin),

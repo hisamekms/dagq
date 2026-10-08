@@ -182,6 +182,101 @@ pub fn failed_step(updates: &[RunEvent], ask_id: crate::domain::AskId) -> Option
     })
 }
 
+/// The commit whose failed build opened the automatic update's
+/// `update_failed` ask `ask_id`. `None` for a person's install's and a
+/// release's failure, a step that names no commit, or one not among
+/// `updates`: no swap is known to contain what failed then.
+pub fn failed_commit(updates: &[RunEvent], ask_id: crate::domain::AskId) -> Option<&str> {
+    failed_step(updates, ask_id)
+        .filter(|step| step_release(step).is_none() && !step_install(step))
+        .and_then(step_commit)
+}
+
+/// [`JobPorts::is_ancestor`] of a job that builds no commit of the
+/// repository (a release's, a person's install): it never tells.
+pub fn no_ancestry(_: &str, _: &str) -> Result<bool> {
+    bail!("this job knows no repository")
+}
+
+/// The answer the runtime gives an open `update_failed` ask when the
+/// automatic update put in place a commit that contains the failed one.
+pub const UPDATE_INSTALLED_ANSWER: &str = "installed";
+
+/// Which of the open `update_failed` asks `asks` a job's swap to
+/// `installed` settles: those whose [`failed_commit`] `is_ancestor` says
+/// `installed` is or descends from. An ask whose commit is unknown, or
+/// that `installed` does not contain, is left; a failed ancestry check is
+/// returned beside, for a warning, and leaves the ask too.
+pub fn settled_failures(
+    asks: &[crate::domain::AskId],
+    updates: &[RunEvent],
+    installed: &str,
+    is_ancestor: &dyn Fn(&str, &str) -> Result<bool>,
+) -> (
+    Vec<crate::domain::AskId>,
+    Vec<(crate::domain::AskId, anyhow::Error)>,
+) {
+    let mut settled = Vec::new();
+    let mut unchecked = Vec::new();
+    for &ask in asks {
+        let Some(failed) = failed_commit(updates, ask) else {
+            continue;
+        };
+        match is_ancestor(failed, installed) {
+            Ok(true) => settled.push(ask),
+            Ok(false) => {}
+            Err(error) => unchecked.push((ask, error)),
+        }
+    }
+    (settled, unchecked)
+}
+
+/// Close the open `update_failed` asks of the automatic update that the
+/// swap to `installed` settled (see [`settled_failures`]): the runtime
+/// answers them [`UPDATE_INSTALLED_ANSWER`]. A person's install's asks
+/// are not the job's to close (ADR-0073 decision 14). Nothing here fails
+/// the swap, which is recorded already: what goes wrong is a warning.
+fn close_settled_failures(ports: &JobPorts, queue: &mut dyn Queue, installed: &str) {
+    let closed = (|| -> Result<()> {
+        let open: Vec<crate::domain::AskId> = queue
+            .asks(super::AskQuery {
+                all: false,
+                open: true,
+                role: None,
+            })?
+            .into_iter()
+            .filter(|ask| {
+                ask.kind == AskKind::UpdateFailed && ask.task_id.is_none() && ask.run_id.is_none()
+            })
+            .map(|ask| ask.id)
+            .collect();
+        if open.is_empty() {
+            return Ok(());
+        }
+        let updates = queue.update_events(UPDATE_HISTORY)?;
+        let (settled, unchecked) = settled_failures(&open, &updates, installed, ports.is_ancestor);
+        for (ask, error) in unchecked {
+            tracing::warn!(
+                "whether {installed} contains the failure of update_failed ask {ask} could not be told, so the ask stays open: {error:#}"
+            );
+        }
+        for ask in settled {
+            // One that cannot be closed does not keep the others open.
+            if let Err(error) =
+                queue.close_installed_update_ask(ask, UPDATE_INSTALLED_ANSWER, installed)
+            {
+                tracing::warn!(
+                    "update_failed ask {ask}, which {installed} settles, could not be closed: {error:#}"
+                );
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = closed {
+        tracing::warn!("the update_failed asks {installed} settles could not be closed: {error:#}");
+    }
+}
+
 /// The release of the release update's job whose failure opened the
 /// `update_failed` ask `ask_id`; `None` when a build of the automatic
 /// update failed (or the step is not among `updates`).
@@ -375,6 +470,10 @@ pub struct JobPorts<'a> {
     /// in place, after it died or was stopped (ADR-0045 decision 13);
     /// what was done.
     pub restart: &'a dyn Fn(&SupervisorRegistration) -> Result<Value>,
+    /// Whether the first commit is the second or its ancestor in the
+    /// repository the automatic update builds from (`git merge-base
+    /// --is-ancestor`): which failed builds a swap put in place.
+    pub is_ancestor: &'a dyn Fn(&str, &str) -> Result<bool>,
 }
 
 /// Build `options.commit` and put it in place of the supervisor's binary
@@ -870,6 +969,9 @@ fn put_in_place(
     }
     job.subject
         .record(&*queue, EventKind::UpdateInstalled, payload.clone())?;
+    if let Subject::Commit(commit) = job.subject {
+        close_settled_failures(ports, queue, commit);
+    }
     // The new binary works with the plugin it had, so it stays (decision
     // 2): the failure only asks.
     if let Some(error) = plugin_error {
@@ -2036,5 +2138,64 @@ mod tests {
             Some(json!({"by": "update", "job": "e2e", "pid": 9, "port": 4300,
                         "reason": "no sccache server listens on port 4300"}))
         );
+    }
+
+    /// The asks a job's swap settles: a failure of a commit the installed
+    /// one is or descends from. Not one whose commit is unknown (a release's,
+    /// a person's install's, a step without one, one not among the updates),
+    /// nor one the installed commit does not contain, nor one whose
+    /// ancestry could not be told, which is returned for a warning.
+    #[test]
+    fn a_swap_settles_the_failures_of_the_commits_it_contains() {
+        use crate::domain::AskId;
+        let updates = vec![
+            update(7, UPDATE_FAILED, json!({"ask_id": 7, "commit": "broken"})),
+            update(
+                6,
+                UPDATE_FAILED,
+                json!({"ask_id": 6, "commit": "elsewhere"}),
+            ),
+            update(
+                5,
+                UPDATE_FAILED,
+                json!({"ask_id": 5, "commit": "unknown-to-git"}),
+            ),
+            update(
+                4,
+                UPDATE_FAILED,
+                json!({"ask_id": 4, "commit": "installed"}),
+            ),
+            update(
+                3,
+                UPDATE_FAILED,
+                json!({"ask_id": 3, "source": RELEASE_SOURCE, "release": "0.4.0"}),
+            ),
+            update(
+                2,
+                UPDATE_FAILED,
+                json!({"ask_id": 2, "source": INSTALL_SOURCE}),
+            ),
+            update(1, UPDATE_FAILED, json!({"ask_id": 1})),
+        ];
+        let is_ancestor = |ancestor: &str, descendant: &str| -> Result<bool> {
+            assert_eq!(descendant, "installed");
+            match ancestor {
+                "broken" | "installed" => Ok(true),
+                "elsewhere" => Ok(false),
+                _ => bail!("fatal: Not a valid commit name {ancestor}"),
+            }
+        };
+        let asks: Vec<AskId> = (1..=8).map(AskId::new).collect();
+        let (settled, unchecked) = settled_failures(&asks, &updates, "installed", &is_ancestor);
+        assert_eq!(settled, vec![AskId::new(4), AskId::new(7)]);
+        assert_eq!(
+            unchecked.iter().map(|(ask, _)| *ask).collect::<Vec<_>>(),
+            vec![AskId::new(5)]
+        );
+        assert_eq!(failed_commit(&updates, AskId::new(3)), None);
+        assert_eq!(failed_commit(&updates, AskId::new(2)), None);
+        assert_eq!(failed_commit(&updates, AskId::new(1)), None);
+        assert_eq!(failed_commit(&updates, AskId::new(8)), None);
+        assert_eq!(failed_commit(&updates, AskId::new(7)), Some("broken"));
     }
 }
