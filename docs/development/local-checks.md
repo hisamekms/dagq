@@ -65,7 +65,6 @@ workerは手元のcargo（`cargo test`・`cargo nextest run`・`cargo clippy`・
 - 選び方の目安: 変えた`src/`のmoduleのunit test（`--lib <moduleのパス>`）と、その機能の`tests/it`のmodule（例: `tests/it/runtime_claim.rs`を変えたら`runtime_claim::`、`tests/it/lifecycle_replace.rs`なら`lifecycle_replace::`）。
 - filterはtestの名前（`<module>::<test>`）の部分一致なので、`runtime_`・`lifecycle_`のような接頭辞だけのfilterは多くのmoduleを選ぶ。`--test it`をfilterなしで流さない、接頭辞だけのfilterや多数のmoduleの列挙で`it`の大半を流さない、`--test it --test plugin`を合わせて全体を流さない。
 - `tests/common`や`tests/it/runtime_support`のhelperを変えたら、それを使っているmoduleを流す。使うmoduleが多いときは代表のmodule（数個）に絞り、残りは着地の検証（絞ったITは`tests/common`に触れれば全部のITを流す）とCIに任せたことをreceiptの`tests`のevidenceに書く。
-- `crates/`のbrokerのcrate（[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)）を変えたら、そのcrateのtestを`sh scripts/cargo-brief.sh cargo test --locked -p <crate>`（`-p dagq-broker-protocol`など。そのcrateの`src/`のunit testと`crates/<crate>/tests/`を流す）で流す。workspaceの`default-members`が全てのcrateを含むので、`-p`を付けない`--test it`と`--lib`も通る（`--lib`は全てのcrateのunit testからfilterに合うものを選ぶ）。
 - これは流す範囲の選び方の手がかりで、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則は変わらない。receiptの`tests`のevidenceには流したtestの範囲（コマンドと件数）を書く。
 
 ## 全体を比べるtest
@@ -91,8 +90,8 @@ workerは手元のcargo（`cargo test`・`cargo nextest run`・`cargo clippy`・
 
 足した・変えたtestを負荷の下で繰り返す。あからさまに不安定なtest（数周で落ちるもの）を着地前に止める軽い見張りで、稀にしか落ちない不安定さを引き出す重い繰り返しはGitHub Actionsの定時実行が行う（[ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md)、仕組みは[Stress CI](../design/stress-ci.md)）。
 
-- 対象はrunのdiff（base commitからの差分）で追加・変更した`#[test]`の関数。integration testは`tests/it/**`（`--test it`）、unit testは`src/`の`#[cfg(test)]`（`--lib`）、`crates/`のcrateのtestは`crates/<crate>/src`の`#[cfg(test)]`と`crates/<crate>/tests/`（`-p <crate>`）。e2e（`tests/e2e.rs`。`#[ignore]`）とplugin（`tests/plugin.rs`）は対象外。
-- コマンドは`sh scripts/cargo-brief.sh cargo nextest run --locked --test it --stress-count 5 -E 'test(=<module>::<name>) | test(=<module>::<name>)'`。unit testは`--test it`の代わりに`--lib`で、名前は`<moduleのパス>::tests::<name>`のようなnextestのtest名。`crates/`のcrateのtestは`--test it`の代わりに`-p <crate>`で、名前はnextestのtest名。種類ごとに分けて流す。
+- 対象はrunのdiff（base commitからの差分）で追加・変更した`#[test]`の関数。integration testは`tests/it/**`（`--test it`）、unit testは`src/`の`#[cfg(test)]`（`--lib`）。e2e（`tests/e2e.rs`。`#[ignore]`）とplugin（`tests/plugin.rs`）は対象外。
+- コマンドは`sh scripts/cargo-brief.sh cargo nextest run --locked --test it --stress-count 5 -E 'test(=<module>::<name>) | test(=<module>::<name>)'`。unit testは`--test it`の代わりに`--lib`で、名前は`<moduleのパス>::tests::<name>`のようなnextestのtest名。種類ごとに分けて流す。
 - 1周が15秒を超えるtestを含むときは`--stress-count 5`の代わりに`--stress-duration 60s`にして上限を付ける。
 - 他のrunがhostを使っている負荷の下で流すことに意味があるので、負荷が下がるのを待ってから流さない。
 - 1回でも落ちたら、流し直して通ったことで済ませず、原因（固定の時間の待ち、他のtestとの状態の共有、順序への依存など）を直してからもう一度同じstressを通し、receiptを書く。

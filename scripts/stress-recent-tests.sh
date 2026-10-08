@@ -6,8 +6,8 @@
 # The tests are chosen as docs/development/local-checks.md, section "stress", chooses them: the
 # #[test] functions whose lines the diff adds or changes in tests/it/** (the
 # `it` binary, named <module>::<name>), in src/ (the dagq lib and bin,
-# named <module path>::tests::<name>), and in crates/<crate>/src and
-# crates/<crate>/tests. tests/e2e.rs and tests/plugin.rs are left out.
+# named <module path>::tests::<name>). tests/e2e.rs and tests/plugin.rs are
+# left out.
 #
 # Usage: sh scripts/stress-recent-tests.sh [--base REV] [--since DATE]
 #                                          [--head REV] [--count N]
@@ -84,25 +84,6 @@ target_of() {
       echo "dagq::it|$(echo "$m" | sed 's#/#::#g')::" ;;
     src/main.rs) echo "dagq::bin/dagq|" ;;
     src/*.rs) echo "dagq|$(module_of "${1#src/}")" ;;
-    crates/*/src/main.rs)
-      c=${1#crates/}; c=${c%%/*}
-      echo "$c::bin/$c|" ;;
-    crates/*/src/*.rs)
-      c=${1#crates/}; c=${c%%/*}
-      echo "$c|$(module_of "${1#crates/"$c"/src/}")" ;;
-    crates/*/tests/*/main.rs)
-      c=${1#crates/}; c=${c%%/*}
-      b=${1#crates/"$c"/tests/}; b=${b%%/*}
-      echo "$c::$b|" ;;
-    crates/*/tests/*/*.rs)
-      c=${1#crates/}; c=${c%%/*}
-      r=${1#crates/"$c"/tests/}; b=${r%%/*}
-      m=${r#"$b"/}; m=${m%.rs}; m=${m%/mod}
-      echo "$c::$b|$(echo "$m" | sed 's#/#::#g')::" ;;
-    crates/*/tests/*.rs)
-      c=${1#crates/}; c=${c%%/*}
-      b=${1#crates/"$c"/tests/}; b=${b%.rs}
-      echo "$c::$b|" ;;
   esac
 }
 
@@ -204,7 +185,7 @@ tests_file=$(mktemp)
 trap 'rm -f "$tests_file"' EXIT
 
 git diff --name-only --diff-filter=AMR "$base_sha" "$head_sha" -- \
-  'src/*.rs' 'tests/it/*.rs' 'crates/*.rs' |
+  'src/*.rs' 'tests/it/*.rs' |
 while IFS= read -r path; do
   target=$(target_of "$path")
   [ -n "$target" ] || continue

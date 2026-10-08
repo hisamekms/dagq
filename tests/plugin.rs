@@ -1744,8 +1744,9 @@ fn the_marketplace_offers_this_repository_s_plugin_from_its_own_path() {
     );
 }
 
-/// Runs a copy of `scripts/check-plugin-version.sh` in a repository of only
-/// the three files it reads, with crate and plugin version `version`.
+/// Runs a copy of `scripts/check-plugin-version.sh` with the cwd at the root
+/// of a git work tree of only the three files it reads (the script checks the
+/// cwd's work tree), with crate and plugin version `version`.
 fn check_plugin_version(version: &str, marketplace: &Value, args: &[&str]) -> Output {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -1782,9 +1783,20 @@ fn check_plugin_version(version: &str, marketplace: &Value, args: &[&str]) -> Ou
         .unwrap(),
     )
     .unwrap();
+    let init = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .bounded_output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
     Command::new("sh")
         .arg(root.join("scripts/check-plugin-version.sh"))
         .args(args)
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
         .env_remove("GITHUB_REF_TYPE")
         .env_remove("GITHUB_REF_NAME")
         .bounded_output()

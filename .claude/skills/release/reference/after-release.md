@@ -6,9 +6,9 @@
 
 ```sh
 dagq add 'release: version を次の開発版 X.Y.Z-dev に上げる' \
-  --description 'vPREV のリリース後、Cargo.toml・crates/*/Cargo.toml と plugins/claude-dagq/.claude-plugin/plugin.json の version を X.Y.Z-dev にし、Cargo.lock を更新する。.claude-plugin/marketplace.json の ref は vPREV のまま変えない' \
-  --acceptance 'Cargo.toml・crates/*/Cargo.toml・plugin.json・Cargo.lock の version が X.Y.Z-dev で、marketplace.json が変わらず、main のビルドの dagq --version が X.Y.Z-dev+<commit> を出す' \
-  --paths Cargo.toml --paths 'crates/*/Cargo.toml' --paths Cargo.lock --paths 'plugins/claude-dagq/.claude-plugin/plugin.json' \
+  --description 'vPREV のリリース後、Cargo.toml と plugins/claude-dagq/.claude-plugin/plugin.json の version を X.Y.Z-dev にし、Cargo.lock を更新する。.claude-plugin/marketplace.json の ref は vPREV のまま変えない' \
+  --acceptance 'Cargo.toml・plugin.json・Cargo.lock の version が X.Y.Z-dev で、marketplace.json が変わらず、main のビルドの dagq --version が X.Y.Z-dev+<commit> を出す' \
+  --paths Cargo.toml --paths Cargo.lock --paths 'plugins/claude-dagq/.claude-plugin/plugin.json' \
   --verify 'sh scripts/check-plugin-version.sh' \
   --verify 'cargo publish --dry-run --locked' --verify 'cargo test --locked --test plugin'
 ```

@@ -48,7 +48,7 @@ sh scripts/slow-tests.sh --self-test
 - 流し直して通った test は、最後の要約に出る `FLKY-FL 2/2 [ 秒s] ...`（古い nextest の `FLAKY`）の秒（通った回の時間）を使う。時間の表には `TRY n PASS`・`TRY n FAIL`・`FAIL`・`SLOW [> 60.000s]`・`SKIP` を入れない（落ちた test は時間に入らない）
 - 完走判定の終了本数には、成功と `TRY n PASS` に加え、`FAIL`・`FAIL + LEAK`・`XFAIL`・`LEAK-FAIL`・`TIMEOUT`・`ABORT`・`SIGSEGV` などの signal・`ABORT SIG n` と、retry の短い status（`TRY n FAIL`・`FL+LK`・`LKFAIL`・`TMT`・`SEGV`・`SIG n` など）を使う（`src/domain/verify_failure.rs` と CI の失敗 status と同じ集合）。`TRY n` の途中の `(───)` は終了として数えない。同じ log の同じ test は最後の結果で 1 本とし、Summary 後の再掲も重複させない。`SLOW`・`SKIP` は終了本数に入れない
 - 色の制御コード（`CARGO_TERM_COLOR=always`）は取り除いてから読む。同じ log に同じ test が 2 回出たら後の方を使う
-- test の名前は nextest の `<binary id> <test 名>`（`dagq::it runtime_resume::...`、`dagq domain::...`、`dagq-broker ...`）
+- test の名前は nextest の `<binary id> <test 名>`（`dagq::it runtime_resume::...`、`dagq domain::...`）
 
 ## 出力の読み方
 
@@ -56,7 +56,7 @@ sh scripts/slow-tests.sh --self-test
 - 失敗を除いた本数の行: 採用した log の終了 status で失敗だった test の本数（同じ test でも log ごとに 1 本）。途中の retry の失敗や、採用しなかった log の失敗は含めない。失敗の秒はどの時間の表にも入れない
 - 範囲の表: `全体` は数えた test の本数と秒の合計、`N 秒を超える` はその test の時間が N 秒より長い本数・その秒の合計・全体の合計に占める割合。合計は test の時間の和で、並列に流れた実時間ではない。`integrate` の test 段の実時間はおおむね「合計 ÷ `NEXTEST_TEST_THREADS`」なので、合計の変化が test 段の変化の目安になる
 - 上位の表: 時間の長い順に N 本
-- test binary ごとの表（`### test binary ごと`、最後の表）: test の名前の先頭の語（nextest の binary id。`dagq::it`、lib の unit test の `dagq`、`dagq::plugin`、`dagq-broker` などの crate）ごとの本数・秒の合計・全体の合計に占める割合を、合計の長い順に並べる。log を複数渡したときの合計は test ごとの中央値の和。throughput-review の日次の見直しが `dagq::it` と `dagq` の行を日ごとに並べる（`.claude/skills/throughput-review/reference/daily.md`）。前の 3 つの表は足す前と同じで、この表は末尾に足しただけなので、CI の job summary の読み方は変わらない
+- test binary ごとの表（`### test binary ごと`、最後の表）: test の名前の先頭の語（nextest の binary id。`dagq::it`、lib の unit test の `dagq`、`dagq::plugin` など）ごとの本数・秒の合計・全体の合計に占める割合を、合計の長い順に並べる。log を複数渡したときの合計は test ごとの中央値の和。throughput-review の日次の見直しが `dagq::it` と `dagq` の行を日ごとに並べる（`.claude/skills/throughput-review/reference/daily.md`）。前の 3 つの表は足す前と同じで、この表は末尾に足しただけなので、CI の job summary の読み方は変わらない
 - log を複数渡すと、test ごとの秒は数えた log をまたいだ中央値（偶数本なら中の 2 つの平均）で、表は中央値で数える。その test が出た log だけで中央値を取るので、期間中に名前の変わった・足された test は別の test として並び、全体の本数が 1 回の実行より多くなることがある。前後を比べるときは、同じ手順で期間を分けて渡し、host の load average を併記する（goal 68 の制約）
 
 ## self-test

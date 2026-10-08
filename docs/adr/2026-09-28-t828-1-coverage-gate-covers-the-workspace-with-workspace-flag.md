@@ -2,10 +2,12 @@
 id: adr-t828-1
 type: adr
 title: coverageの関門はcargo-llvm-covがdefault-membersを見ないので、関門のコマンドに--workspaceを足してbrokerのcrateも80%の行カバレッジに数える（ADR-t827-1決定3をamends）
-status: accepted
+status: superseded
 created: 2026-09-28
 updated: 2026-09-28
 accepted_on: 2026-09-28
+superseded_by: adr-t2126-1
+superseded_on: 2026-10-09
 amends:
   - adr-t827-1 decision 3
 owners:
@@ -21,6 +23,8 @@ related:
 ---
 
 # ADR-t828-1: coverageの関門はcargo-llvm-covがdefault-membersを見ないので、関門のコマンドに--workspaceを足してbrokerのcrateも80%の行カバレッジに数える（ADR-t827-1決定3をamends）
+
+> **置き換え済み（2026-10-09）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2126-1](2026-10-09-t2126-1-single-package-without-workspace-and-coverage-gate-keeps-workspace-flag.md)を読む。
 
 ## Context
 

@@ -1,13 +1,3 @@
-# dagq stays the root package, and the resource broker's crates sit under
-# crates/ (ADR-t827-1). default-members lists every member, so cargo test,
-# cargo clippy --all-targets and cargo nextest at the root cover them all
-# without --workspace. cargo-llvm-cov ignores default-members at a root that
-# is a package, so the coverage gate carries --workspace (ADR-t828-1).
-[workspace]
-members = [".", "crates/dagq-broker-protocol", "crates/dagq-broker", "crates/dagq-broker-client"]
-default-members = [".", "crates/dagq-broker-protocol", "crates/dagq-broker", "crates/dagq-broker-client"]
-resolver = "3"
-
 [package]
 name = "dagq"
 version = "0.4.0-dev"

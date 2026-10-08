@@ -35,7 +35,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-layer-deps check-frontmatter-dates check-design-docs check-doc-links check-doc-frontmatter"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-layer-deps check-frontmatter-dates check-design-docs check-doc-links check-doc-frontmatter check-plugin-version"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -55,7 +55,8 @@ check-design-docs design_doc_too_big
 check-doc-links doc_broken_link
 check-doc-links doc_link_to_removed_design
 check-doc-frontmatter doc_frontmatter_missing_key
-check-doc-frontmatter doc_frontmatter_updated_line"
+check-doc-frontmatter doc_frontmatter_updated_line
+check-plugin-version plugin_version_mismatch"
 
 violate_migration_gap() {
   echo 'SELECT 1;' >migrations/9999_scripts_root_gap.sql
@@ -131,7 +132,13 @@ violate_doc_frontmatter_updated_line() {
   printf -- '---\nid: zz-scripts-root-updated\ntype: design\ntitle: fixture\nstatus: current\ncreated: 2026-10-07\nupdated: 2026-10-07\n---\n\n# fixture\n' >docs/design/zz-scripts-root-updated.md
 }
 
-unset LAYER_DEPS_ROOT LAYER_DEPS_ALLOW_FILE E2E_QUARANTINE_FILE
+# plugin.json's version no longer matches Cargo.toml's.
+violate_plugin_version_mismatch() {
+  f=plugins/claude-dagq/.claude-plugin/plugin.json
+  sed 's/^\( *"version" *: *"\)[^"]*"/\1999.0.0-scripts-root"/' "$f" >"$f.zz" && mv "$f.zz" "$f"
+}
+
+unset LAYER_DEPS_ROOT LAYER_DEPS_ALLOW_FILE E2E_QUARANTINE_FILE GITHUB_REF_TYPE GITHUB_REF_NAME
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 prep_fail() {

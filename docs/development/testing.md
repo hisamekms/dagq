@@ -24,26 +24,25 @@ related:
 
 # このrepositoryのtestの制約
 
-testを書く・置く・直すときの今の規則。読むのは、`tests/`・`crates/*/tests/`・`src/`の`#[cfg(test)]`・`.config/e2e-quarantine.toml`を変えるworkerと、それらを変えるtaskを登録するplanner。手元でどのtestを流すかは[手元の検証](local-checks.md)、taskのverifyの選び方は[taskの登録](task-registration.md)、migrationの規則は[migration](migrations.md)、経緯は[手元の検証とtestの規則の経緯](../plans/local-checks-history.md)とADRが持つ。
+testを書く・置く・直すときの今の規則。読むのは、`tests/`・`src/`の`#[cfg(test)]`・`.config/e2e-quarantine.toml`を変えるworkerと、それらを変えるtaskを登録するplanner。手元でどのtestを流すかは[手元の検証](local-checks.md)、taskのverifyの選び方は[taskの登録](task-registration.md)、migrationの規則は[migration](migrations.md)、経緯は[手元の検証とtestの規則の経緯](../plans/local-checks-history.md)とADRが持つ。
 
 ## coverage
 
 - 行カバレッジの合計を80%以上に保つ（`cargo-llvm-cov`、行基準、全体）。80%を見る関門はCIだけで、CIが最終関門になる（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)決定1・5）。下回る変更も着地し、CIの見張りが修正taskにする（[CI watch](../design/supervisor-lifecycle/ci-watch.md)）。
-- CIの関門のコマンドは`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`。cargo-nextestがtestを1件ずつ別processで、binaryをまたいで並列に流す（ADR-t1925-1決定8）。`--workspace`は、cargo-llvm-covがrootがpackageのworkspaceで`default-members`を見ずroot package（dagq）だけをreportに入れるため、`crates/`のbrokerのcrateも80%に数えるために付ける（[ADR-t828-1](../adr/2026-09-28-t828-1-coverage-gate-covers-the-workspace-with-workspace-flag.md)）。
+- CIの関門のコマンドは`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`。cargo-nextestがtestを1件ずつ別processで、binaryをまたいで並列に流す（ADR-t1925-1決定8）。dagqは`[workspace]`の無い単一のpackageで、`--workspace`はdagqだけを指し、付けない形と同じ範囲を測る（[ADR-t2126-1](../adr/2026-10-09-t2126-1-single-package-without-workspace-and-coverage-gate-keeps-workspace-flag.md)）。
 - 着地の関門は、`integrate`がrebase後にworkerのreceiptを信用せず1回だけ流すtaskの`verification_commands`で（validatingでは実行しない）、そのうちcoverageの関門の行は`dagq.toml`の`[landing_verification]`がunit test全件と影響範囲で絞ったITに置き換える（下の「test binary」）。workerが手元で流すものは[手元の検証](local-checks.md)、taskのverifyの書き方は[taskの登録](task-registration.md)の「coverageの関門」。
 
 ## test binary
 
-testは`src/lib.rs`のunit testと`tests/it`・`tests/e2e.rs`・`tests/plugin.rs`、`crates/`のbrokerのcrateのunit testと`crates/<crate>/tests/`にある。rootの`Cargo.toml`の`[workspace]`の`default-members`が全てのcrateを入れるので、`cargo test`とnextestは`--workspace`なしで全てのcrateのtestを流す（[ADR-t827-1](../adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md)決定3）。このrepositoryのcrateにdoctestは無く、nextestはdoctestを流さない。
+testは`src/lib.rs`のunit testと`tests/it`・`tests/e2e.rs`・`tests/plugin.rs`にある。このrepositoryのcrateにdoctestは無く、nextestはdoctestを流さない。
 
-- 着地で流れるもの: `sh scripts/landing-it.sh`が1回の`cargo nextest run`で、全てのcrateのunit test全件と、CIの夜間の対応表と差分で選んだIT（`tests/e2e.rs`を除く。差分で足した・変えたtestと表に無いtestを必ず含み、絞ったITの見込みの時間が上限を超えるとき・共通のファイルや表が判断できないファイルに触れたとき・表が取れないか古すぎるときはITを全部）を流し、1件でも落ちれば失敗する。既に落ちているtest（[CI watch](../design/supervisor-lifecycle/ci-watch.md)の一覧）は外し、CIの修正taskのrunでは直す対象のtestを外さない。選び方と値はscriptの冒頭、根拠は[着地のITの絞り込みの測定](../plans/landing-it-selection.md)の「決めたこと」。e2eは別に、要るrunで着地の前にruntimeがhostで流す（[Validation](../design/supervisor-lifecycle/validation.md)の「runtimeが流すe2e」）。
+- 着地で流れるもの: `sh scripts/landing-it.sh`が1回の`cargo nextest run`で、unit test全件と、CIの夜間の対応表と差分で選んだIT（`tests/e2e.rs`を除く。差分で足した・変えたtestと表に無いtestを必ず含み、絞ったITの見込みの時間が上限を超えるとき・共通のファイルや表が判断できないファイルに触れたとき・表が取れないか古すぎるときはITを全部）を流し、1件でも落ちれば失敗する。既に落ちているtest（[CI watch](../design/supervisor-lifecycle/ci-watch.md)の一覧）は外し、CIの修正taskのrunでは直す対象のtestを外さない。選び方と値はscriptの冒頭、根拠は[着地のITの絞り込みの測定](../plans/landing-it-selection.md)の「決めたこと」。e2eは別に、要るrunで着地の前にruntimeがhostで流す（[Validation](../design/supervisor-lifecycle/validation.md)の「runtimeが流すe2e」）。
 - CIで流れるもの: coverageの関門（上の「coverage」）が全てのtest binaryを全部実行し、1件でも落ちるか80%を下回れば失敗する。着地の検証が見逃した壊れはここで見つかる。
 
 ## testの置き場所
 
 - e2e（`tests/e2e.rs`）とplugin（`tests/plugin.rs`）以外のintegration testは1つのtest binary `it`（`tests/it/main.rs`）にまとめ、testは機能ごとのファイル`tests/it/<機能>.rs`に足す。新しいファイルは`tests/it/main.rs`に`mod <機能>;`を足す。`Cargo.toml`は`autotests = false`で`[[test]]`は`it`・`e2e`・`plugin`の3本（[ADR-0078](../adr/0078-one-integration-test-binary.md)）。
 - 複数のファイルで使うhelperは`tests/common`（`it`と`plugin`の両方が読む。`tests/it`からは`crate::common`）、runtimeのtestだけが使うfixtureとhelperは`tests/it/runtime_support`（`crate::runtime_support`）に置く。
-- `crates/`のbrokerのcrateのtestは各crateの`src/`のunit testと`crates/<crate>/tests/`に置き、podmanを要るtestはe2eと同じく`#[ignore]`にする（関門とCIに数えない）。
 
 ## testの書き方
 
@@ -75,7 +74,7 @@ testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通�
 
 ## testファイルの行数
 
-- `tests/*.rs`・`tests/common/*.rs`・`tests/it/**/*.rs`（tests/の下の全`.rs`）と`crates/*/tests/**/*.rs`はどれも3,000行以下に保つ（1つのbinaryにまとめてもファイル単位のまま）。末尾にtestを足す形の大きなファイルは別々のtaskの追記が同じ場所で衝突するため。
+- `tests/*.rs`・`tests/common/*.rs`・`tests/it/**/*.rs`（tests/の下の全`.rs`）はどれも3,000行以下に保つ（1つのbinaryにまとめてもファイル単位のまま）。末尾にtestを足す形の大きなファイルは別々のtaskの追記が同じ場所で衝突するため。
 - `scripts/check-test-file-lines.sh`が超えたファイルを名前と行数つきで出してexit 1にし、CIも実行する。
 - 超えそうなら、testを足す前に機能ごとのファイル（`tests/it/runtime_*.rs`・`tests/it/lifecycle_*.rs`のように）へ分け、複数のファイルで使うhelperは`tests/common`に、runtime系だけのものは`tests/it/runtime_support`に寄せる。
 - `src/`はまだ対象外。

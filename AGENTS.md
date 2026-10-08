@@ -56,7 +56,7 @@ inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recov
 
 ### 変更の範囲ごと
 
-- runtime（`src/`・`crates/`）: 触る範囲の `docs/design/*.md`。判断は unit test、境界は integration test（[testing.md](docs/development/testing.md) の「判断と境界のtest」）。broker の crate の verify は task-registration.md の「推奨の組み合わせ」
+- runtime（`src/`）: 触る範囲の `docs/design/*.md`。判断は unit test、境界は integration test（[testing.md](docs/development/testing.md) の「判断と境界のtest」）
 - tests（`tests/`・`#[cfg(test)]`・`.config/e2e-quarantine.toml`）: [testing.md](docs/development/testing.md)（macOS に固有の test は「macOSに固有のtest」）
 - migrations: [migrations.md](docs/development/migrations.md)
 - docs（ADR・design・plans）: [documents.md](docs/development/documents.md)

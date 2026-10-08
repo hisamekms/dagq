@@ -4,9 +4,7 @@
 # has more than 3,000 lines, so the files split by feature do not grow back
 # into one file that every runtime task appends to and conflicts in. The
 # integration tests share one test binary (tests/it, ADR-0078), but the limit
-# stays per file. The integration tests of the broker's crates
-# (crates/*/tests, ADR-t827-1) are held to the same limit. src/ is not
-# checked yet.
+# stays per file. src/ is not checked yet.
 #
 # The tree checked is the git work tree of the cwd (`git rev-parse
 # --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
@@ -31,7 +29,7 @@ fi
 
 status=0
 
-for f in $(find tests crates/*/tests -type f -name '*.rs' 2>/dev/null | sort); do
+for f in $(find tests -type f -name '*.rs' 2>/dev/null | sort); do
   lines=$(wc -l < "$f" | tr -d '[:space:]')
   if [ "$lines" -gt "$limit" ]; then
     echo "check-test-file-lines: $f has $lines lines, more than $limit; split it into files by feature" >&2

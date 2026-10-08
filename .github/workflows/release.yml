@@ -58,31 +58,24 @@ jobs:
           rustup target list --installed | grep -qx "$TARGET"
           cargo --version
 
-      # dagq and the broker's client, built together (ADR-t827-1 decision
-      # 5); the server (dagq-broker) runs in a Linux container and is built
-      # from crates.io into the broker's image, not here.
-      - name: Build the release binaries
+      - name: Build the release binary
         run: |
           set -euo pipefail
-          cargo build --release --locked --target "$TARGET" -p dagq -p dagq-broker-client
+          cargo build --release --locked --target "$TARGET"
           "target/${TARGET}/release/dagq" --version
-          "target/${TARGET}/release/dagq-broker-client" --version
 
       - name: Pack the archive and the checksums
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          archive="dagq-v${VERSION}-${TARGET}.tar.gz"
           mkdir -p dist
-          for binary in dagq dagq-broker-client; do
-            archive="${binary}-v${VERSION}-${TARGET}.tar.gz"
-            cp "target/${TARGET}/release/${binary}" LICENSE README.md dist/
-            tar -czf "dist/${archive}" -C dist "$binary" LICENSE README.md
-            rm "dist/${binary}" dist/LICENSE dist/README.md
-          done
+          cp "target/${TARGET}/release/dagq" LICENSE README.md dist/
+          tar -czf "dist/${archive}" -C dist dagq LICENSE README.md
+          rm dist/dagq dist/LICENSE dist/README.md
           cd dist
-          shasum -a 256 "dagq-v${VERSION}-${TARGET}.tar.gz" \
-            "dagq-broker-client-v${VERSION}-${TARGET}.tar.gz" > SHA256SUMS
+          shasum -a 256 "$archive" > SHA256SUMS
           shasum -a 256 -c SHA256SUMS
           cat SHA256SUMS
 
@@ -92,9 +85,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          assets=("dist/dagq-v${VERSION}-${TARGET}.tar.gz"
-                  "dist/dagq-broker-client-v${VERSION}-${TARGET}.tar.gz"
-                  dist/SHA256SUMS)
+          assets=("dist/dagq-v${VERSION}-${TARGET}.tar.gz" dist/SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
@@ -103,36 +94,24 @@ jobs:
             || gh release upload "$GITHUB_REF_NAME" --clobber "${assets[@]}"
 
       # crates.io is an additional channel (ADR-0030): publish only after the
-      # GitHub Release has its assets, and skip a crate whose version
-      # crates.io already has, so a rerun of this workflow succeeds like the
-      # Release step does. The workspace's crates go out as one version in
-      # this order (ADR-t827-1 decision 8): the protocol first, since the
-      # others depend on it, and the server last, as the material of the
-      # broker's image.
-      - name: Check which crates crates.io already has at this version
+      # GitHub Release has its assets, and skip the version crates.io already
+      # has, so a rerun of this workflow succeeds like the Release step does.
+      - name: Check whether crates.io already has this version
         id: crates
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          pending=
-          for crate in dagq-broker-protocol dagq dagq-broker-client dagq-broker; do
-            status="$(curl -sS -o /dev/null -w '%{http_code}' \
-              -A "dagq-release (https://github.com/hisamekms/dagq)" \
-              "https://crates.io/api/v1/crates/${crate}/${VERSION}")"
-            case "$status" in
-              200) echo "${crate} ${VERSION} is already on crates.io; skipping it" ;;
-              404) pending="${pending} ${crate}" ;;
-              *)   echo "crates.io answered HTTP ${status} for ${crate} ${VERSION}" >&2
-                   exit 1 ;;
-            esac
-          done
-          echo "pending=${pending# }" >> "$GITHUB_OUTPUT"
-          if [ -z "$pending" ]; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
+          status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -A "dagq-release (https://github.com/hisamekms/dagq)" \
+            "https://crates.io/api/v1/crates/dagq/${VERSION}")"
+          case "$status" in
+            200) echo "dagq ${VERSION} is already on crates.io; skipping the publish"
+                 echo "published=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "crates.io answered HTTP ${status} for dagq ${VERSION}" >&2
+                 exit 1 ;;
+          esac
 
       - name: Authenticate to crates.io
         if: steps.crates.outputs.published != 'true'
@@ -141,15 +120,8 @@ jobs:
         # of the crates.io team (ADR-0030).
         uses: rust-lang/crates-io-auth-action@v1
 
-      # One crate at a time, in the order above; each must be on crates.io
-      # before the next that depends on it is verified.
       - name: Publish to crates.io
         if: steps.crates.outputs.published != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
-          PENDING: ${{ steps.crates.outputs.pending }}
-        run: |
-          set -euo pipefail
-          for crate in $PENDING; do
-            cargo publish --locked -p "$crate"
-          done
+        run: cargo publish --locked

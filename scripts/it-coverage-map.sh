@@ -29,8 +29,7 @@
 #
 # Which tests: the nextest filterset "kind(test) - binary(e2e)" over the
 # workspace (--workspace), i.e. the integration test binaries: tests/it
-# (dagq::it), tests/plugin.rs (dagq::plugin) and the broker crates' tests/
-# (dagq-broker::cli and the like). Unit tests (kind lib, run in full at every
+# (dagq::it) and tests/plugin.rs (dagq::plugin). Unit tests (kind lib, run in full at every
 # landing) and tests/e2e.rs (needs cmux, #[ignore]d) are out.
 #
 # How (one profile per test): nextest runs each test in its own process and
@@ -82,7 +81,7 @@
 # nextest filter take binary_id and name from "tests" (binary_id(dagq::it) &
 # test(=runtime_claim::x)), not by splitting the key. "files" has paths
 # relative to the repository root with /, sorted, every file of the
-# repository (src/, crates/, tests/, ...) outside target/ that a test covered
+# repository (src/, tests/, ...) outside target/ that a test covered
 # at least one line of; each list is sorted. A file no test covers is absent.
 # A failed test keeps the files it covered. Coverage is per file, not per
 # line or function.

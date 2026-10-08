@@ -9,13 +9,13 @@ gh run list --workflow release.yml --limit 3     # tag vX.Y.Z の run を探す
 gh run watch <run-id> --exit-status              # 完了まで待つ。失敗なら非 0
 gh run view <run-id>                             # すべての step が成功していること
 gh release view vX.Y.Z --json assets --jq '.assets[].name'
-# dagq-vX.Y.Z-aarch64-apple-darwin.tar.gz、dagq-broker-client-vX.Y.Z-aarch64-apple-darwin.tar.gz と SHA256SUMS の 3 つが出ること
+# dagq-vX.Y.Z-aarch64-apple-darwin.tar.gz と SHA256SUMS の 2 つが出ること
 curl -sS -A 'dagq-release (https://github.com/hisamekms/dagq)' \
   https://crates.io/api/v1/crates/dagq | jq -r '.crate.max_version'
 # X.Y.Z が出ること
 ```
 
-crates.io の API は User-Agent の無い request を拒むので `-A` を付ける。`dagq-broker-protocol`・`dagq-broker-client`・`dagq-broker` も同じ URL の形で `max_version` を見る。
+crates.io の API は User-Agent の無い request を拒むので `-A` を付ける。publish するのは `dagq` の crate だけで、crates.io に既に出た broker の crate の版は残る。
 
 `release.yml` が成功したら、使い捨ての `HOME` で公式の手順の plugin が `X.Y.Z` で入ることを確かめる（ADR-t617-1。自分の `~/.claude` は変えない）:
 
@@ -29,8 +29,6 @@ rm -rf "$tmp"
 ```
 
 `install` が `vX.Y.Z` を見つけられずに失敗するなら tag がまだ push されていない。前の version が入るなら、tag の後に main の `marketplace.json` の `ref` が変わっていないかを見る（2 の変更での書き換え漏れなら `release.yml` の `Check the plugin version` が落ちているので、ここまで来ない）。
-
-**broker の crate の最初の publish**: Trusted Publisher は crates.io に既にある crate にしか登録できないので、`dagq-broker-protocol`・`dagq-broker-client`・`dagq-broker` を含む最初のリリースでは、tag の push の前に人が API token でこの 3 つを手で publish し（`cargo publish --locked -p dagq-broker-protocol` を先に）、それぞれに `dagq` と同じ Trusted Publisher を登録する。そうしないと `Publish to crates.io` が `dagq-broker-protocol` で落ちる（GitHub Release は出る。登録してから `gh run rerun <run-id> --failed`）。
 
 ## 5. 初回の自動 publish の確認
 

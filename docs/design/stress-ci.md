@@ -36,8 +36,6 @@ worker の stress の項と同じ選び方にする。範囲の diff（`git diff
 | `tests/it/**`（`it`） | `dagq::it` | `<ファイルの module>::<inline module>::<name>`（`tests/it/runtime_claim.rs` なら `runtime_claim::<name>`） |
 | `src/**`（`src/main.rs` を除く） | `dagq`（lib） | `<module のパス>::tests::<name>`（`src/domain/exit.rs` なら `domain::exit::tests::<name>`） |
 | `src/main.rs` | `dagq::bin/dagq` | `tests::<name>` など |
-| `crates/<crate>/src/**` | `<crate>`（`main.rs` は `<crate>::bin/<crate>`） | lib と同じ |
-| `crates/<crate>/tests/<file>.rs` | `<crate>::<file>` | `<name>` |
 
 `tests/e2e.rs`（と `tests/e2e/`）と `tests/plugin.rs` は対象外（e2e は cmux を要り `#[ignore]`、plugin は文書を読む test）。`tests/common` と `tests/it/runtime_support` の helper の変更は、それを使う test を選ばない（helper に `#[test]` は無い）。
 

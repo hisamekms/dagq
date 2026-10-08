@@ -187,8 +187,7 @@ jobs:
 
       # cargo llvm-cov nextest runs the same test binaries as cargo test (unit
       # tests in src/lib.rs, the integration tests in the one binary tests/it
-      # (ADR-0078), tests/e2e.rs and tests/plugin.rs, and the tests of the
-      # broker's crates under crates/; no doctests), each
+      # (ADR-0078), tests/e2e.rs and tests/plugin.rs; no doctests), each
       # test in its own process and in parallel across binaries, and fails if
       # any test fails, so there is no separate cargo test step. Landing does
       # not run it: integrate replaces a task's coverage gate command with the
@@ -196,9 +195,9 @@ jobs:
       # selected integration tests), so this step is the final gate that runs
       # every test and holds line coverage at 80% (ADR-t1925-1). Here nextest
       # runs as many tests at once as the runner has CPUs.
-      # --workspace puts the broker's crates under crates/ in the report:
-      # without it cargo-llvm-cov reports only the root package, whatever
-      # default-members says (ADR-t828-1).
+      # dagq is a single package with no [workspace], so --workspace names
+      # dagq alone and measures what the command without it measures; it
+      # stays the gate command of the CI and the tasks' verify (ADR-t2126-1).
       # The e2e tests in tests/e2e.rs need a running cmux, so they stay
       # #[ignore]d here; the runtime runs them on the host before a run lands
       # when the run needs them.

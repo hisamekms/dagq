@@ -28,8 +28,8 @@ related:
 | Install Rust | `rustup toolchain install --no-self-update`。`rust-toolchain.toml` の channel と components を入れる |
 | Install cargo-nextest | `taiki-e/install-action@cargo-nextest` |
 | `Swatinem/rust-cache@v2` | 依存の build の cache |
-| cargo build | `cargo build --locked`（workspace の `default-members` の全ての crate） |
-| cargo nextest run | `cargo nextest run --locked --color never` の出力を `$RUNNER_TEMP/nextest.log` に `tee` する。macOS の関門と同じ test binary（`src/` の unit test、`tests/it`・`tests/plugin.rs`・`tests/e2e.rs`、`crates/` の test）を流し、e2e は `#[ignore]` のまま流さない。`.config/nextest.toml` の `fail-fast = false` で全部の test を流しきり、`retries = 1` も macOS と同じく効く |
+| cargo build | `cargo build --locked` |
+| cargo nextest run | `cargo nextest run --locked --color never` の出力を `$RUNNER_TEMP/nextest.log` に `tee` する。macOS の関門と同じ test binary（`src/` の unit test、`tests/it`・`tests/plugin.rs`・`tests/e2e.rs`）を流し、e2e は `#[ignore]` のまま流さない。`.config/nextest.toml` の `fail-fast = false` で全部の test を流しきり、`retries = 1` も macOS と同じく効く |
 | Failed tests | 前の step が落ちても（`!cancelled()`）走り、job の summary（`$GITHUB_STEP_SUMMARY`）に落ちた test を書く |
 
 runner は `ubuntu-24.04`（x86_64）。`rust-toolchain.toml` の `targets` は `aarch64-apple-darwin` だけを挙げるが、rustup は挙げた target に加えて host（`x86_64-unknown-linux-gnu`）の std を必ず入れるので、Linux の job のために `rust-toolchain.toml` は変えない。rusqlite は `bundled` で、C compiler は runner に入っている。
@@ -75,7 +75,7 @@ task 1237 の後の main の run（例 run 37230895149、`2736 tests run: 2732 p
 | --- | --- | --- |
 | `infrastructure::adapters::tests::proc_pidinfo_reads_a_childs_directory_and_none_for_a_pid_that_runs_nothing` | `src/infrastructure/adapters.rs` | macOS 固有の `proc_pidinfo(PROC_PIDVNODEPATHINFO)` による process の作業ディレクトリの読み取りを検証するため、`#[cfg(target_os = "macos")]` で分ける。子 process の起動時の作業ディレクトリが読め、終了した process や無効な pid では `None` になることを確かめる。Linux は `/proc/<pid>/cwd` を読む別の実装 |
 
-runtime の実装だけを分ける cfg（`src/infrastructure/adapters.rs` の `process_cwd` / `process_executable`、`crates/dagq-broker/src/backends/fs.rs` の `set_errno`、`src/infrastructure/launchd.rs` の `HAS_LAUNCHD`）は test を分けていないので、この一覧に含めない。`tests/it/runtime_headless.rs` と `tests/it/runtime_support/thread_stacks.rs` の `cfg!(target_os = "macos")` は test とその helper 内の分岐で、test 自体は両方の OS で流れるため、同じく含めない。
+runtime の実装だけを分ける cfg（`src/infrastructure/adapters.rs` の `process_cwd` / `process_executable`、`src/infrastructure/launchd.rs` の `HAS_LAUNCHD`）は test を分けていないので、この一覧に含めない。`tests/it/runtime_headless.rs` と `tests/it/runtime_support/thread_stacks.rs` の `cfg!(target_os = "macos")` は test とその helper 内の分岐で、test 自体は両方の OS で流れるため、同じく含めない。
 
 macOS の外だけで流れる逆向きの test は上の一覧とは別: `src/infrastructure/launchd.rs` の `install_off_macos_says_launchd_mode_needs_macos` は `#[cfg(not(target_os = "macos"))]` で、launchd mode が使えないと分かる error を確かめる（上の「task 1238 で扱った Linux の失敗」）。
 
