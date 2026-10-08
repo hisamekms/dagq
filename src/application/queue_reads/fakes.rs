@@ -1,12 +1,12 @@
-//! A [`QueueRecords`] of the tests of the context modules: it records what
-//! a read asked of it and answers no other method.
+//! A [`QueueRecords`] and [`PlanningRecords`] of the tests of the context
+//! modules: it records what a read asked of it and answers no other method.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::application::QueueRecords;
+use crate::application::{PlanningRecords, QueueRecords};
 use crate::domain::related::RelatedPage;
 use crate::domain::search::{SearchPage, SearchQuery};
 use crate::domain::{
@@ -21,7 +21,7 @@ pub(super) struct Records {
     pub findings: RefCell<Vec<FindingQuery>>,
 }
 
-impl QueueRecords for Records {
+impl PlanningRecords for Records {
     fn related_landed_commits(&self, _: TaskId, _: usize) -> Result<Vec<String>> {
         unimplemented!()
     }
@@ -52,6 +52,12 @@ impl QueueRecords for Records {
     fn task_changes(&self) -> Result<HashMap<TaskId, Option<TaskChange>>> {
         unimplemented!()
     }
+    fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>> {
+        unimplemented!()
+    }
+}
+
+impl QueueRecords for Records {
     fn findings(&self, query: &FindingQuery) -> Result<Vec<FindingView>> {
         self.findings.borrow_mut().push(query.clone());
         Ok(Vec::new())
@@ -74,9 +80,6 @@ impl QueueRecords for Records {
         unimplemented!()
     }
     fn record_kpi_push_abandoned(&self, _: serde_json::Value) -> Result<bool> {
-        unimplemented!()
-    }
-    fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>> {
         unimplemented!()
     }
     fn record_forecast(&self, _: serde_json::Value, _: Option<EventId>) -> Result<Option<EventId>> {

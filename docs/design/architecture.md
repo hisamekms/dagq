@@ -100,11 +100,12 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 **操作**
 
 - application: `application::commands::planning`・`commands::requests`、`application::planner`系、`queue_reads::planning`、`application::supervise`のplan review・goal review・各plannerのsubmodule。
-- infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）と、上のtableと同じ名前のstoreのmodule（`proposals`・`plan_reviews`・`draft_planners`・`follow_up_membership`ほか）。
+- infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）と、上のtableと同じ名前のstoreのmodule（`proposals`・`plan_reviews`・`draft_planners`・`follow_up_membership`ほか）、`runtime_store::planning_records`。
 
 **公開するport**
 
 - `TaskStore`と`DraftPlannerStore`の`improvements`・`planner_findings`の読み取りを全てのcontextに公開する。
+- 上の表の読み取り`PlanningRecords`を全てのcontextに公開する。
 - `TaskStore::claim`（と`RunTransitions::claim_for_supervisor_in_order`）は実行と着地だけに公開し、T1として扱う。
 - `DraftPlannerStore::register_follow_ups`を実行と着地に公開する（T7）。
 - `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・`RequestStore`・残りの`DraftPlannerStore`と`TaskStore`の書き込みは内部。
@@ -177,7 +178,6 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 **公開するport**
 
 - `QueueRecords`の読み取り（findingとreportとKPIの目標割れ、CIの見張りのeventと`ci_failure`のfinding）を全てのcontextに、`ci_watch::known_failures`を着地の検証に公開する。
-  `QueueRecords`のうち計画管理の表を読むmethodは計画管理のportへ移す（未登録、follow_up）。
   書き込み（`record_*`）は内部。
 - findingのIDと`finding_*`のeventを値として公開する（計画管理のfindingのplannerが読む）。
 - CIの見張りの保留（`CiWatchState::held`・`unreadable`）を実行と着地に読み取りで公開し、変えるのは`supervise::ci_watch`だけ。
@@ -231,7 +231,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 | module | port |
 | --- | --- |
-| `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore` |
+| `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`・`PlanningRecords` |
 | `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`SessionRegistry`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier` |
 | `observation`（観測と分析） | `EventReads`・`ObserverLog`・`MarkLog`・`QueueRecords` |
 | `host`（host運用） | `QueueOpener`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry` |

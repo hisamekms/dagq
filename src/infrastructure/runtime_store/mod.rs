@@ -3,7 +3,8 @@
 //! One module per port of the run store: `transitions` and `recovery`
 //! save the run aggregate as it moves, `coordination` and
 //! `session_registry` hold the state processes coordinate through,
-//! `run_log` reads runs and events, and `queue_records` serves reports.
+//! `run_log` reads runs and events, `queue_records` serves reports and
+//! `planning_records` the lookups of the planning tables.
 //! The helpers they share stay here.
 use std::collections::HashMap;
 use std::path::Path;
@@ -21,8 +22,8 @@ use super::{
     },
 };
 use crate::application::{
-    AskStore, Generators, HeartbeatWrite, QueueRecords, RunCoordination, RunLog, RunRecovery,
-    RunTransitions, SessionRegistry, SupervisorRegistry, timestamp, unix_seconds,
+    AskStore, Generators, HeartbeatWrite, PlanningRecords, QueueRecords, RunCoordination, RunLog,
+    RunRecovery, RunTransitions, SessionRegistry, SupervisorRegistry, timestamp, unix_seconds,
 };
 use crate::domain::slot_limits::{SettingSource, SlotLimits};
 use crate::domain::worker_model::{self, WorkerTrial};
@@ -58,6 +59,7 @@ pub fn lease_is_stale(lease: &RunLease, now: i64) -> bool {
 
 mod ask_store;
 mod coordination;
+mod planning_records;
 mod queue_records;
 mod recovery;
 mod run_log;

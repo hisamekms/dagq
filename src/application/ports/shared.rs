@@ -7,7 +7,8 @@ use super::execution::{RunCoordination, RunLog, RunRecovery, RunTransitions, Ses
 use super::host::{HeadlessJobStore, SupervisorRegistry};
 use super::observation::QueueRecords;
 use super::planning::{
-    DraftPlannerStore, GoalReviewStore, PlanRequestStore, PlanReviewStore, TaskStore,
+    DraftPlannerStore, GoalReviewStore, PlanRequestStore, PlanReviewStore, PlanningRecords,
+    TaskStore,
 };
 use crate::application::{timestamp, unix_seconds};
 use crate::domain::{
@@ -466,6 +467,7 @@ pub trait Queue:
     + SessionRegistry
     + RunLog
     + QueueRecords
+    + PlanningRecords
     + AskStore
     + DraftPlannerStore
     + PlanRequestStore
@@ -484,6 +486,7 @@ impl<
         + SessionRegistry
         + RunLog
         + QueueRecords
+        + PlanningRecords
         + AskStore
         + DraftPlannerStore
         + PlanRequestStore

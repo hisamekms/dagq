@@ -5,8 +5,7 @@
 //! Each read takes the planning context's [`TaskStore`] and only the reads
 //! the other contexts open to every context: the execution context's
 //! [`RunLog`] (the open claim deferrals of `candidates` and `graph`) and
-//! the observation context's [`QueueRecords`] (the search index and the
-//! related tasks, which it still holds).
+//! its own [`PlanningRecords`] (the search index and the related tasks).
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -17,7 +16,7 @@ use super::{
 };
 use crate::application::claim_view::{Deferrals, claim_view, open_deferrals};
 use crate::application::{
-    QueueRecords, RunLog, StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph,
+    PlanningRecords, RunLog, StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph,
 };
 use crate::domain::search::{self, SearchQuery};
 use crate::domain::{
@@ -188,7 +187,7 @@ pub fn lint<Q: TaskStore + ?Sized>(
 }
 
 /// `search`.
-pub fn search(queue: &(impl QueueRecords + ?Sized), read: &SearchRead) -> Result<Value> {
+pub fn search(queue: &(impl PlanningRecords + ?Sized), read: &SearchRead) -> Result<Value> {
     Ok(serde_json::to_value(
         queue.search_documents(&SearchQuery {
             terms: read.query.clone(),
@@ -211,7 +210,7 @@ pub fn search(queue: &(impl QueueRecords + ?Sized), read: &SearchRead) -> Result
 
 /// `related`: the statuses as the store names them, whatever spacing they
 /// were given with.
-pub fn related(queue: &(impl QueueRecords + ?Sized), read: &RelatedRead) -> Result<Value> {
+pub fn related(queue: &(impl PlanningRecords + ?Sized), read: &RelatedRead) -> Result<Value> {
     let statuses = read
         .status
         .iter()

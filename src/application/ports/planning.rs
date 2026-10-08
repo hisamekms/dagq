@@ -9,11 +9,15 @@ use crate::domain::{
     GoalPredecessor, GoalSummary, GoalVerdict, LeaseToken, LintInput, NewAsk, NewGoal, NewNote,
     NewTask, NotePage, NoteQuery, PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict,
     PlannerId, PlannerSession, Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId,
-    StrandedDependency, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
+    StrandedDependency, Submission, Task, TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId,
+    TaskStatus,
     goal_review::{GoalReviewDecision, GoalReviewVerdict},
+    related::RelatedPage,
+    search::{SearchPage, SearchQuery},
 };
 use anyhow::Result;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub trait TaskStore {
@@ -769,4 +773,33 @@ pub trait GoalReviewStore {
     /// `goal review ID`: let the supervisor review the open goal again
     /// although its tasks did not change (`goal_review_rearmed`).
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<serde_json::Value>;
+}
+
+/// What the other contexts read of the planning tables (`tasks`,
+/// `draft_origins` and the search index with `landed_commits`): the
+/// related tasks and their landed commits, the search, and the lookups
+/// `stats`, `kpi` and `forecast` join runs with. A pure read, open to
+/// every context (docs/design/architecture.md, section "計画管理").
+pub trait PlanningRecords {
+    /// The commits that landed the `limit` completed tasks most related to
+    /// `task` (`dagq related`, ADR-0046), for the files it is expected to
+    /// touch when it declares no concrete path (ADR-0069, ADR-t1981-1).
+    fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>>;
+    /// The `limit` tasks most related to `task`, best first, with their
+    /// clues, kept to `statuses` (empty: any status; `dagq related`,
+    /// ADR-0046 decision 4).
+    fn related_tasks(&self, task: TaskId, statuses: &[String], limit: usize)
+    -> Result<RelatedPage>;
+    /// The documents matching `query`, best first (`dagq search`, ADR-0046).
+    fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage>;
+    /// The goal of every task, for `stats`.
+    fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>>;
+    /// The title of every task, for `stats`.
+    fn task_titles(&self) -> Result<HashMap<TaskId, String>>;
+    /// The change of every task (none for a task without one, ADR-t980-1),
+    /// for `stats`, `kpi` and `forecast`.
+    fn task_changes(&self) -> Result<HashMap<TaskId, Option<TaskChange>>>;
+    /// Where every draft the runtime or a job registered came from, for
+    /// `stats`' `draft_flow`.
+    fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>>;
 }

@@ -3,13 +3,8 @@
 //! observer's log and the marks.
 
 use super::execution::RunLog;
-use crate::domain::{
-    AskId, DraftOrigin, EventId, EventKind, FindingView, GoalId, RunEvent, TaskChange, TaskId,
-    related::RelatedPage,
-    search::{SearchPage, SearchQuery},
-};
+use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, TaskId};
 use anyhow::Result;
-use std::collections::HashMap;
 
 /// The events `events`, `timeline` and `watch` read past a cursor.
 pub trait EventReads {
@@ -82,34 +77,13 @@ impl<T: RunLog + ?Sized> MarkLog for T {
     }
 }
 
-/// What reports read and record of the queue as a whole: the written
-/// reports, KPI breaches, forecasts and the lookups `stats` joins runs with.
+/// What reports read and record of the queue as a whole: the findings,
+/// the written reports, KPI breaches, forecasts and the CI watch.
 ///
 /// Owned by the observation and analysis context
 /// (docs/design/architecture.md): its reads are open to every context and
-/// its `record_*` writes are its own. The lookups of the planning tables
-/// (`related_*`, `search_documents`, `task_goals`, `task_titles`,
-/// `task_changes`, `draft_origins`) belong to planning and move there when
-/// the ports are split by context.
+/// its `record_*` writes are its own.
 pub trait QueueRecords {
-    /// The commits that landed the `limit` completed tasks most related to
-    /// `task` (`dagq related`, ADR-0046), for the files it is expected to
-    /// touch when it declares no concrete path (ADR-0069, ADR-t1981-1).
-    fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>>;
-    /// The `limit` tasks most related to `task`, best first, with their
-    /// clues, kept to `statuses` (empty: any status; `dagq related`,
-    /// ADR-0046 decision 4).
-    fn related_tasks(&self, task: TaskId, statuses: &[String], limit: usize)
-    -> Result<RelatedPage>;
-    /// The documents matching `query`, best first (`dagq search`, ADR-0046).
-    fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage>;
-    /// The goal of every task, for `stats`.
-    fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>>;
-    /// The title of every task, for `stats`.
-    fn task_titles(&self) -> Result<HashMap<TaskId, String>>;
-    /// The change of every task (none for a task without one, ADR-t980-1),
-    /// for `stats`, `kpi` and `forecast`.
-    fn task_changes(&self) -> Result<HashMap<TaskId, Option<TaskChange>>>;
     /// The findings `query` lists, larger impact first (`findings`), for
     /// the KPI report's open findings.
     fn findings(&self, query: &crate::domain::FindingQuery) -> Result<Vec<FindingView>>;
@@ -134,9 +108,6 @@ pub trait QueueRecords {
     /// Record `kpi_push_abandoned` unless one stands since the latest
     /// push that succeeded (ADR-0051 decision 23); `false` when it does.
     fn record_kpi_push_abandoned(&self, payload: serde_json::Value) -> Result<bool>;
-    /// Where every draft the runtime or a job registered came from, for
-    /// `stats`' `draft_flow`.
-    fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>>;
     /// Record a forecast snapshot (`forecast_recorded`, ADR-0070 decision
     /// 3) unless another was recorded after `previous`; its ID, or `None`.
     fn record_forecast(
