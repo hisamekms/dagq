@@ -1,0 +1,6 @@
+Diff in /tmp/demo-crate/demo/src/lib.rs:1:
+\033[31m-pub fn add(left:u64,right: u64)->u64{
+\033(B\033[m\033[32m+pub fn add(left: u64, right: u64) -> u64 {
+\033(B\033[m     left + right
+ }
+ 

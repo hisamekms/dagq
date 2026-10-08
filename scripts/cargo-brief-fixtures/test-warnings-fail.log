@@ -1,0 +1,48 @@
+   Compiling demo v0.1.0 (/tmp/demo-crate/demo)
+warning: unused variable: `unused_a`
+ --> src/lib.rs:2:9
+  |
+2 |     let unused_a = 1;
+  |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_a`
+  |
+  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `unused_b`
+ --> src/lib.rs:3:9
+  |
+3 |     let unused_b = 2;
+  |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_b`
+
+warning: unused variable: `unused_c`
+ --> src/lib.rs:4:9
+  |
+4 |     let unused_c = 3;
+  |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_c`
+
+warning: `demo` (lib) generated 3 warnings (run `cargo fix --lib -p demo` to apply 3 suggestions)
+warning: `demo` (lib test) generated 3 warnings (3 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running unittests src/lib.rs (/tmp/demo-crate/target/debug/deps/demo-1fc9efeab3ed5afc)
+
+running 2 tests
+test tests::it_works ... ok
+test tests::it_also_works ... FAILED
+
+failures:
+
+---- tests::it_also_works stdout ----
+some stdout
+
+thread 'tests::it_also_works' (431737114) panicked at src/lib.rs:20:9:
+assertion `left == right` failed: one plus two
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::it_also_works
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`

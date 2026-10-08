@@ -1,0 +1,23 @@
+        FAIL [   0.012s] [1/3] (2/2) demo tests::it_also_works
+  stdout ───
+
+    some stdout
+
+        tests::it_also_works
+
+  stderr ───
+
+    thread 'tests::it_also_works' (430799086) panicked at src/lib.rs:17:9:
+    assertion `left == right` failed: one plus two
+      left: 3
+     right: 4
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.015s] [2/3] (2/2) demo tests::it_also_works
+        FAIL [   0.022s] [3/3] (2/2) demo tests::it_also_works
+     Summary [   0.054s] 3/3 stress run iterations: 0 passed, 3 failed
+        FAIL [   0.012s] [1/3] (2/2) demo tests::it_also_works
+        FAIL [   0.015s] [2/3] (2/2) demo tests::it_also_works
+        FAIL [   0.022s] [3/3] (2/2) demo tests::it_also_works
+error: test run failed
+cargo-brief: exit 100; full log (89 lines, 3099 bytes): LOG

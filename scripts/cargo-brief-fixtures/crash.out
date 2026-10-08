@@ -1,0 +1,6 @@
+error: test failed, to rerun pass `--lib`
+
+Caused by:
+  process didn't exit successfully: `/tmp/demo-crate/target/debug/deps/demo-1fc9efeab3ed5afc` (signal: 6, SIGABRT: process abort signal)
+Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+cargo-brief: exit 101; full log (9 lines, 421 bytes): LOG

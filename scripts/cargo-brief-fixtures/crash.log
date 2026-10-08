@@ -1,0 +1,9 @@
+   Compiling demo v0.1.0 (/tmp/demo-crate/demo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+     Running unittests src/lib.rs (/tmp/demo-crate/target/debug/deps/demo-1fc9efeab3ed5afc)
+
+running 2 tests
+error: test failed, to rerun pass `--lib`
+
+Caused by:
+  process didn't exit successfully: `/tmp/demo-crate/target/debug/deps/demo-1fc9efeab3ed5afc` (signal: 6, SIGABRT: process abort signal)

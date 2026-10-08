@@ -1,0 +1,2 @@
+cargo fmt: no diff
+cargo-brief: exit 0; full log (0 lines, 0 bytes): LOG

@@ -1,0 +1,55 @@
+   Compiling demo v0.1.0 (/tmp/demo-crate/demo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+────────────
+ Nextest run ID 327be6d8-717d-4f6c-9032-18c5b72beb98 with nextest profile: default
+    Starting 2 tests across 1 binary
+        PASS [   0.010s] (1/2) demo tests::it_works
+  TRY 1 FAIL [   0.010s] (───) demo tests::it_also_works
+  stdout ───
+
+    running 1 test
+    some stdout
+    test tests::it_also_works ... FAILED
+
+    failures:
+
+    failures:
+        tests::it_also_works
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::it_also_works' (431738482) panicked at src/lib.rs:17:9:
+    assertion `left == right` failed: one plus two
+      left: 3
+     right: 4
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.048s] (2/2) demo tests::it_also_works
+  stdout ───
+
+    running 1 test
+    some stdout
+    test tests::it_also_works ... FAILED
+
+    failures:
+
+    failures:
+        tests::it_also_works
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::it_also_works' (431738553) panicked at src/lib.rs:17:9:
+    assertion `left == right` failed: one plus two
+      left: 3
+     right: 4
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.064s] 2 tests run: 1 passed, 1 failed, 0 skipped
+  TRY 2 FAIL [   0.048s] (2/2) demo tests::it_also_works
+error: test run failed

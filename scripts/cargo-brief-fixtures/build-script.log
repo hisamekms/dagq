@@ -1,0 +1,13 @@
+   Compiling demo v0.1.0 (/tmp/demo-crate/demo)
+error: failed to run custom build command for `demo v0.1.0 (/tmp/demo-crate/demo)`
+
+Caused by:
+  process didn't exit successfully: `/tmp/demo-crate/target/debug/build/demo-b200c4ddff8b0afc/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-changed=build.rs
+
+  --- stderr
+
+  thread 'main' (431735384) panicked at build.rs:3:5:
+  migration 0042 is missing
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -1,0 +1,30 @@
+   Compiling demo v0.1.0 (/tmp/demo-crate/demo)
+error[E0277]: cannot add `&str` to `u64`
+ --> src/lib.rs:2:18
+  |
+2 |     left + right + "x"
+  |                  ^ no implementation for `u64 + &str`
+  |
+  = help: the trait `Add<&str>` is not implemented for `u64`
+help: the following other types implement trait `Add<Rhs>`
+ --> /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ops/arith.rs:98:8
+  |
+  = note: `u64` implements `Add`
+ ::: /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/ops/arith.rs:113:0
+  |
+  = note: in this macro invocation
+ --> /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/internal_macros.rs:22:8
+  |
+  = note: `&u64` implements `Add<u64>`
+ ::: /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/internal_macros.rs:33:8
+  |
+  = note: `u64` implements `Add<&u64>`
+ ::: /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/internal_macros.rs:44:8
+  |
+  = note: `&u64` implements `Add`
+  = note: this error originates in the macro `add_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `demo` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `demo` (lib test) due to 1 previous error

@@ -1,0 +1,32 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+ Nextest run ID fcd7173a-8fbf-4aed-a09c-b37bd5c701a8 with nextest profile: default
+    Starting 2 tests across 1 binary
+        FAIL [   0.012s] (1/2) demo tests::it_also_works
+  stdout ───
+
+    running 1 test
+    some stdout
+    test tests::it_also_works ... FAILED
+
+    failures:
+
+    failures:
+        tests::it_also_works
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::it_also_works' (430714193) panicked at src/lib.rs:17:9:
+    assertion `left == right` failed: one plus two
+      left: 3
+     right: 4
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 1 test still running
+        PASS [   0.013s] (2/2) demo tests::it_works
+────────────
+     Summary [   0.013s] 2 tests run: 1 passed, 1 failed, 0 skipped
+        FAIL [   0.012s] (1/2) demo tests::it_also_works
+error: test run failed

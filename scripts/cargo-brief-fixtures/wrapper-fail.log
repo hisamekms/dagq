@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (/tmp/demo-crate/target/debug/deps/demo-1fc9efeab3ed5afc)
+
+running 2 tests
+test tests::it_works ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+wrapper: the selected tests are not in the table: tests::gone

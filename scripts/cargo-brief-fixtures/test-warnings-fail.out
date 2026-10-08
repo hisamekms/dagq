@@ -1,0 +1,19 @@
+---- tests::it_also_works stdout ----
+some stdout
+
+thread 'tests::it_also_works' (431737114) panicked at src/lib.rs:20:9:
+assertion `left == right` failed: one plus two
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    tests::it_also_works
+
+error: test failed, to rerun pass `--lib`
+
+warning: unused variable: `unused_a`
+ --> src/lib.rs:2:9
+cargo-brief: omitted 20 more line(s) (731 bytes) of failures and diagnostics; read them in LOG
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+cargo-brief: exit 101; full log (48 lines, 1541 bytes): LOG

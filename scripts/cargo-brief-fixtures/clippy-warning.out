@@ -1,0 +1,21 @@
+warning: you are using an explicit closure for copying elements
+ --> src/lib.rs:3:5
+  |
+3 |     v.iter().map(|x| *x).sum::<u64>()
+  |     ^^^^^^^^^^^^^^^^^^^^ help: consider calling the dedicated `copied` method: `v.iter().copied()`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#map_clone
+  = note: `#[warn(clippy::map_clone)]` on by default
+
+warning: useless use of `vec!`
+ --> src/lib.rs:2:13
+  |
+2 |     let v = vec![left, right];
+  |             ^^^^^^^^^^^^^^^^^ help: you can use an array directly: `[left, right]`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#useless_vec
+  = note: `#[warn(clippy::useless_vec)]` on by default
+
+warning: `demo` (lib) generated 2 warnings (run `cargo clippy --fix --lib -p demo -- ` to apply 2 suggestions)
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.98s
+cargo-brief: exit 0; full log (21 lines, 988 bytes): LOG

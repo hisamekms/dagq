@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+ Nextest run ID 53eaa6c1-66c9-4092-bf0e-bf4cd6b7da0c with nextest profile: default
+    Starting 2 tests across 1 binary
+        PASS [   0.007s] (1/2) demo tests::it_also_works
+        PASS [   0.007s] (2/2) demo tests::it_works
+────────────
+     Summary [   0.007s] 2 tests run: 2 passed, 0 skipped

@@ -1,0 +1,8 @@
+---- tests::it_also_works stdout ----
+some stdout
+
+thread 'tests::it_also_works' (430713190) panicked at src/lib.rs:17:9:
+assertion `left == right` failed: one plus two
+cargo-brief: omitted 8 more line(s) (177 bytes) of failures and diagnostics; read them in LOG
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+cargo-brief: exit 101; full log (26 lines, 753 bytes): LOG
