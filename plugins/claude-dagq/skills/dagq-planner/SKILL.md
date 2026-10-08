@@ -13,13 +13,13 @@ Your initial prompt says what you were opened for; no person watches this sessio
 
 ## Basic policy
 
-Decide what you can recommend and go on, asking no one: adopting or dropping a follow_up draft, writing to the existing code and ADRs, merging duplicates, fixing what a revise names, planning or declining a request. Leave why in a `note` or the task's `context`. Raise only what a person is needed for (`scope`: acceptance, scope or a goal's decision changed by their intent; `discard`) and the queue, the repository, the ADRs and the person's precedents cannot settle, or a call you are not confident of: `planner_question` with your recommendation and `--confidence`, then report and stop. First decide all the answer does not touch and save the rest (`edit`, `note`): while only the answer waits the runtime ends you, and the answer goes to you or a planner that goes on from them (`skills/dagq/reference/register.md`, "Before stopping at a question"). A follow_up draft past the follow_up limit (`skills/dagq/reference/register.md`) still waits for the person's adopt, even after a move; a move is never adoption (section 3).
+Decide what you can recommend and go on, asking no one: adopting or dropping a follow_up draft, writing to the existing code and ADRs, merging duplicates, fixing what a revise names, planning or declining a request. Leave why in a `note` or the task's `context`. Raise only what a person is needed for (`scope`: acceptance, scope or a goal's decision changed by their intent; `discard`) and the queue, the repository, the ADRs and the person's precedents cannot settle, or a call you are not confident of: `planner_question` with your recommendation and `--confidence`, then report and stop. First decide all the answer does not touch and save the rest (`edit`, `note`): while only the answer waits the runtime ends you, and the answer goes to you or a planner that goes on from them (`skills/dagq/reference/register.md`, "Before stopping at a question"). A follow_up draft past the follow_up limit (`register.md`) still waits for the person's adopt, even after a move; a move is never adoption (section 3).
 
 ## 1. A request: plan it or decline it
 
 Your prompt holds the person's words. Look for work that covers it first (`search`, `related`, `goal list`, the source). Then one of:
 
-- **Plan it**: the `dagq` skill's section 2 and `skills/dagq/reference/register.md`, "For a planner". Then:
+- **Plan it**: the `dagq` skill's section 2 and `register.md`, "For a planner". Then:
 
 ```sh
 "$DAGQ" lint TASK...            # or --proposal ID; fix every violation first
@@ -30,23 +30,23 @@ Your prompt holds the person's words. Look for work that covers it first (`searc
 - **Decline** (done already, a duplicate in flight, or not plannable as asked; say why): `"$DAGQ" request decline N --reason '<why>'`. The inbox tells the person.
 - **Ask**: `"$DAGQ" ask --request N --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '...' --option plan --option decline`.
 
-The worker's provider: no flag unless the person's words ask for Codex, never to dodge a login or usage limit (`skills/dagq/reference/provider.md`). Depend only on a content prerequisite (it must land first); leave a same-file conflict to the runtime's claim deferral, never a dependency or an ask. Record each dependency's kind and reason (`note` or `context`). Ask (`planner_question`) only when a content prerequisite lifts a lower-priority goal's task by inheritance and no reorder, move or split of yours solves it: bring that task forward with its priority, or does the higher goal wait? A goal you add: tags from the repository's vocabulary, priority from the person's words, else the repository's guide (say so in its description). A task's own priority only when the person's words say it goes first or can wait.
+The worker's provider: no flag unless the person's words ask for Codex, never to dodge a login or usage limit (`skills/dagq/reference/provider.md`). Depend only on a content prerequisite (it must land first), its kind and reason in a `note` or `context`; leave a same-file conflict to the runtime's claim deferral, never a dependency or an ask. Ask (`planner_question`) only when a content prerequisite lifts a lower-priority goal's task and no reorder, move or split of yours solves it (`register.md`, "Traffic control is plan review's"). A goal you add: tags from the repository's vocabulary. Priority: the request's, which the runtime gives as the person's (leave `--priority` out, never copy one from the words); without one, the repository's guide (say so in its description), and a task's own only when the words say it goes first or can wait. Origin is the runtime's record, never `context`. Doubt a person's priority: `planner_question`.
 
 ## 2. When plan review sends it back (revise)
 
-"Plan review sent proposal N back" arrives with reasons. Fix them, `lint --proposal N`, `"$DAGQ" submit --proposal N`; on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `skills/dagq/reference/register.md`, "A revise".
+"Plan review sent proposal N back" arrives with reasons. Fix them, `lint --proposal N`, `"$DAGQ" submit --proposal N`; on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. Details: `register.md`, "A revise".
 
 ## 3. A draft or a finding you were opened for
 
-Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel`, `--duplicate-of X`), or, per the Basic policy only, ask (`planner_question`; a finding: `submit --finding N`, `finding dismiss N` or `ask --finding N`). A request naming one (`--ref task:N`, `finding:N`) the same, as the person's (section 1). Details (`revisit`, a `ci_failure` finding): `skills/dagq/reference/register.md`, "A runtime planner".
+Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel`, `--duplicate-of X`), or, per the Basic policy only, ask (`planner_question`; a finding: `submit --finding N`, `finding dismiss N` or `ask --finding N`). A request naming one (`--ref task:N`, `finding:N`) the same, as the person's (section 1). Details (`revisit`, a `ci_failure` finding): `register.md`, "A runtime planner".
 
 **Otherwise what you add here is AI-made:** no task priority of its own (it inherits its goal's); an existing goal only when its acceptance needs it (a follow_up: below), else a new goal (priority by the repository's guide) or no goal. Plan review checks both (`register.md`, "Priority").
 
-**Membership and deferral, one judgement.** A follow_up draft with a source goal (and a goal's remaining tasks when your request asks): before you adopt or ask, judge whether the **source** goal's acceptance can be met without it. No: `required`, it stays and inherits the goal's priority. Yes: `out_of_scope` into an existing fitting goal, else the `low` deferral goal of its tag; never an unrelated catch-all. Never weaken an acceptance to move one out (the person's); after an acceptance change, judge again. Steps: `skills/dagq/reference/register.md`, "A follow_up's membership".
+**Membership and deferral, one judgement.** A follow_up draft with a source goal (and a goal's remaining tasks when your request asks): before you adopt or ask, judge whether the **source** goal's acceptance can be met without it. No: `required`, it stays and inherits the goal's priority. Yes: `out_of_scope` into an existing fitting goal, else the `low` deferral goal of its tag; never an unrelated catch-all. Never weaken an acceptance to move one out (the person's); after an acceptance change, judge again. Steps: `register.md`, "A follow_up's membership".
 
 ## 4. Goals, forecasts, findings, KPIs
 
-`"$DAGQ" goal list`, `goal show ID`, `graph --goal ID` and `forecast --goal ID` show progress. A request to defer a goal's improvements its acceptance does not need: section 3's judgement. Decide the observer's findings per `skills/dagq/reference/observer.md` (section 3). Mark a change of a setting, the operation or the host (`mark`) and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
+`goal show ID`, `graph --goal ID` and `forecast --goal ID` show progress. A request to defer a goal's improvements its acceptance does not need: section 3's judgement. Decide the observer's findings per `skills/dagq/reference/observer.md` (section 3). Mark a change of a setting, the operation or the host (`mark`) and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
 
 ## 5. A finished goal
 

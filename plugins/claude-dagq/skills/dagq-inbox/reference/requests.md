@@ -7,12 +7,13 @@ Read this when the person asks the inbox for new work or a change of plan (a goa
 On the person's word:
 
 ```sh
-"$DAGQ" request add --text '<the person's own words>' [--note '<what you add>'] [--ref task:N ...]
+"$DAGQ" request add --text '<the person's own words>' [--note '<what you add>'] [--ref task:N ...] [--priority LEVEL]
 ```
 
 - `--text` holds the person's own words, not your summary. Give them exactly one way: `--text '<words>'`, `--text-file PATH` (what the file holds when you run it is recorded, not its path; changing the file later changes nothing) or `--text -` (read from stdin). Long words, several lines or words with quotes break in a shell's quoting: write them to a file or pass them on stdin, as below. Two of them, or none, is refused.
 - `--note` is what you add (what you read in `status`, an ask's context), kept apart from their words. It takes the same three forms (`--note`, `--note-file PATH`, `--note -`), at most one; only one of `--text -` and `--note -` can read stdin.
 - A file or stdin that cannot be read, is not UTF-8 or holds nothing (or only blanks) is refused with the reason, and nothing is recorded. The words are kept as given: line breaks, quotes and Japanese unchanged.
+- `--priority LEVEL` (`interrupt`, `urgent`, `high`, `normal` or `low`) only when the person's words give the request a priority; words that give none get none, and you do not infer one from the subject or the repository's guide. The runtime gives that value to the goals the request's planner makes as the person's (`priority_by: human`), which only the person and the inbox can change; the planner does not copy a priority from the words. Words that name different priorities for different parts: leave it out and, once the plan is in, set each on the person's word (`goal edit ID --priority`, `set-priority`).
 - `--ref KIND:ID` (repeatable) names what they refer to: `ask:N`, `task:N`, `run:ID`, `event:N`, `finding:N` or `goal:N`. The planner's prompt carries each one (an ask's question and answer, a task's acceptance and landed receipt, a finding's detail) and the goals they lead to. The three attentions `request a plan for ...` name the draft, finding or stranded task to refer to (`reference/status.md`).
 
 Long words through a file or stdin (a quoted heredoc delimiter keeps `$`, backticks and quotes as written):
@@ -23,8 +24,8 @@ cat > "$TMPDIR/request.md" <<'WORDS'
 WORDS
 "$DAGQ" request add --text-file "$TMPDIR/request.md" --ref goal:N
 
-"$DAGQ" request add --text - --note 'asked in the inbox after the 10:00 report' <<'WORDS'
-<the person's own words>
+"$DAGQ" request add --text - --note 'asked in the inbox after the 10:00 report' --priority urgent <<'WORDS'
+<the person's own words, which call it urgent>
 WORDS
 ```
 
