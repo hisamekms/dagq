@@ -753,6 +753,7 @@ fn run_update_job(
         processes,
         restarted,
         Duration::from_secs(5),
+        &dagq::infrastructure::clock::SystemClock,
     )
 }
 
@@ -762,8 +763,9 @@ fn run_update_job_with_handoff_timeout(
     processes: &FakeProcesses,
     restarted: &Mutex<Vec<String>>,
     handoff_timeout: Duration,
+    clock: &dyn dagq::application::Clock,
 ) -> Value {
-    run_update_job_of(
+    run_update_job_at(
         fixture,
         binaries,
         processes,
@@ -771,6 +773,7 @@ fn run_update_job_with_handoff_timeout(
         handoff_timeout,
         &("c0ffee".repeat(6) + "c0ff"),
         &dagq::application::update::no_ancestry,
+        clock,
     )
 }
 
@@ -784,6 +787,30 @@ pub(crate) fn run_update_job_of(
     handoff_timeout: Duration,
     commit: &str,
     is_ancestor: &dyn Fn(&str, &str) -> Result<bool>,
+) -> Value {
+    run_update_job_at(
+        fixture,
+        binaries,
+        processes,
+        restarted,
+        handoff_timeout,
+        commit,
+        is_ancestor,
+        &dagq::infrastructure::clock::SystemClock,
+    )
+}
+
+/// [`run_update_job_of`] with the job reading the time from `clock`.
+#[allow(clippy::too_many_arguments)]
+fn run_update_job_at(
+    fixture: &Fixture,
+    binaries: &UpdateBinaries,
+    processes: &FakeProcesses,
+    restarted: &Mutex<Vec<String>>,
+    handoff_timeout: Duration,
+    commit: &str,
+    is_ancestor: &dyn Fn(&str, &str) -> Result<bool>,
+    clock: &dyn dagq::application::Clock,
 ) -> Value {
     use dagq::application::update;
     let queues = |db: &Path| -> std::sync::Arc<dyn dagq::application::QueueOpener> {
@@ -806,7 +833,7 @@ pub(crate) fn run_update_job_of(
             binaries,
             files: &dagq::infrastructure::run_files::LocalRunFiles,
             processes,
-            clock: &dagq::infrastructure::clock::SystemClock,
+            clock,
             queues: &queues,
             restart: &restart,
             is_ancestor,
@@ -2056,6 +2083,58 @@ fn take_at_withdrawal(fixture: &Fixture, token: &str) {
         .unwrap();
 }
 
+/// The update job's clock in a late handoff: once the withdrawal
+/// [`take_at_withdrawal`] armed was seen, each read of the time waits until
+/// the supervisor `token` took its registration back (its request is
+/// cleared). The job's look again after the wait ran out reads the time
+/// before the registrations, so it finds the supervisor back however long
+/// the thread standing in for it takes, instead of racing that thread
+/// against a grace as short as the test's handoff wait (issue #10).
+struct UntilBack {
+    db: Mutex<rusqlite::Connection>,
+    token: String,
+}
+
+impl UntilBack {
+    fn new(fixture: &Fixture, token: &str) -> Self {
+        Self {
+            db: Mutex::new(rusqlite::Connection::open(&fixture.location.db).unwrap()),
+            token: token.to_owned(),
+        }
+    }
+}
+
+impl dagq::application::Clock for UntilBack {
+    fn system_time(&self) -> std::time::SystemTime {
+        let db = self.db.lock().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let (seen, asked): (bool, bool) = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM withdrawal_seen),
+                            EXISTS(SELECT 1 FROM supervisors
+                                   WHERE token=?1 AND handoff_binary IS NOT NULL)",
+                    [&self.token],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            if !(seen && asked) {
+                return std::time::SystemTime::now();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "supervisor {} took its request at the withdrawal but never came back",
+                self.token
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn monotonic(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+}
+
 /// After the withdrawal [`take_at_withdrawal`] armed, do `late` as the
 /// supervisor `token` of `pid`; when it came back under an update job's
 /// `watch`, heartbeat on once the watch looked at it. `install` and
@@ -2325,6 +2404,7 @@ fn the_update_job_installs_past_a_supervisor_that_took_the_handoff_as_the_wait_r
             &processes,
             &restarted,
             LATE_HANDOFF_TIMEOUT,
+            &UntilBack::new(&fixture, "auto"),
         )
     });
     assert_eq!(report["outcome"], "installed", "{report}");

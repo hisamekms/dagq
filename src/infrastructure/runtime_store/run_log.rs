@@ -5,24 +5,26 @@ use super::*;
 
 impl SqliteQueue {
     /// The latest `limit` steps of the automatic update, newest first: the
-    /// queue's `update_*` events (ADR-0073 decision 17).
+    /// queue's `update_*` events (ADR-0073 decision 17), each job's
+    /// `update_started` before its steps ([`crate::domain::in_job_order`]).
     pub fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT * FROM run_events
+        Ok(crate::domain::in_job_order(
+            self.conn
+                .prepare(
+                    "SELECT * FROM run_events
                  WHERE kind IN (SELECT value FROM json_each(?1))
                  AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
                  ORDER BY id DESC LIMIT ?2",
-            )?
-            .query_map(
-                params![
-                    serde_json::to_string(crate::domain::UPDATE_EVENT_KINDS)?,
-                    i64::try_from(limit).unwrap_or(i64::MAX)
-                ],
-                event_row,
-            )?
-            .collect::<rusqlite::Result<_>>()?)
+                )?
+                .query_map(
+                    params![
+                        serde_json::to_string(crate::domain::UPDATE_EVENT_KINDS)?,
+                        i64::try_from(limit).unwrap_or(i64::MAX)
+                    ],
+                    event_row,
+                )?
+                .collect::<rusqlite::Result<_>>()?,
+        ))
     }
 
     /// The latest `limit` events of the e2e gates, newest first (see

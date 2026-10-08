@@ -2180,6 +2180,53 @@ pub const UPDATE_EVENT_KINDS: &[&str] = &[
     UPDATE_DROPPED,
 ];
 
+/// `updates` (newest first, as recorded) with each `update_started` put
+/// behind the steps its job wrote before it. The supervisor records
+/// `update_started` once it spawned the job, so a job that ends at once (a
+/// build that fails at its start) can write its end first; read as
+/// recorded, the job would look started and gone (interrupted) and its end
+/// hidden. A step is its job's when it has the job's `pid`, `commit` and
+/// `release` and no other `update_started` nor an answer (`update_retry`,
+/// `update_answered`, `update_dropped`) comes between them: the supervisor
+/// writes the start right after the spawn, so no answer falls between a
+/// job's start and its steps, and a reused pid's job before the answer is
+/// another one.
+pub fn in_job_order(mut updates: Vec<RunEvent>) -> Vec<RunEvent> {
+    let job = |update: &RunEvent| {
+        let field = |name| update.payload.get(name).cloned();
+        (field("pid"), field("commit"), field("release"))
+    };
+    // Oldest first: a start already put behind its steps is not passed
+    // again by a newer one.
+    for index in (0..updates.len()).rev() {
+        if updates[index].kind != UPDATE_STARTED {
+            continue;
+        }
+        let started = job(&updates[index]);
+        if started.0.is_none() {
+            continue;
+        }
+        let before = &updates[index + 1..];
+        let since = before
+            .iter()
+            .position(|update| {
+                matches!(
+                    update.kind.as_str(),
+                    UPDATE_STARTED | UPDATE_RETRY | UPDATE_ANSWERED | UPDATE_DROPPED
+                )
+            })
+            .unwrap_or(before.len());
+        if let Some(first) = before[..since]
+            .iter()
+            .rposition(|update| job(update) == started)
+        {
+            let step = updates.remove(index);
+            updates.insert(index + first + 1, step);
+        }
+    }
+    updates
+}
+
 /// Whether an event of `kind` may be written with its task, goal and run
 /// (ADR-0073 decision 22): one on none of them is a queue event
 /// ([`EventKind::is_queue`]). A reader does not check it.

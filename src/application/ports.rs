@@ -2085,7 +2085,9 @@ impl std::error::Error for RunNotFound {}
 /// recorded outside a run transition.
 pub trait RunLog {
     /// The latest `limit` steps of the automatic update (its `update_*`
-    /// queue events), newest first.
+    /// queue events), newest first in their jobs' order: each job's
+    /// `update_started` behind the steps the job wrote before it
+    /// ([`crate::domain::in_job_order`]).
     fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>>;
     /// The latest `limit` events of the e2e gates, newest first: the
     /// automatic update's (`update_e2e_passed`, `update_failed`) and the

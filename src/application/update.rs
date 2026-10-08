@@ -1997,6 +1997,57 @@ mod tests {
         assert_eq!(status_of_only(&manual)["state"], "idle");
     }
 
+    /// A job that wrote its end before the supervisor recorded its start
+    /// ended, not interrupted: its start reads as before its steps, and a
+    /// step of another job (another pid, another commit, or before the
+    /// start or the answer before) stays where it was.
+    #[test]
+    fn a_job_that_ended_before_its_start_was_recorded_reads_as_ended() {
+        let retry = update(1, UPDATE_RETRY, json!({"ask_id": 1, "answer": "retry"}));
+        let failed = update(
+            2,
+            UPDATE_FAILED,
+            json!({"pid": 8, "commit": "def", "stage": "build", "ask_id": 2}),
+        );
+        let started = update(3, UPDATE_STARTED, json!({"pid": 8, "commit": "def"}));
+        let ordered = crate::domain::in_job_order(vec![started.clone(), failed.clone(), retry]);
+        let ids: Vec<i64> = ordered.iter().map(|u| u.id.as_i64()).collect();
+        assert_eq!(ids, [2, 3, 1]);
+        assert_eq!(latest_job_step(&ordered).unwrap().id, failed.id);
+        assert_eq!(status(&[], &ordered, &NoneAlive, 0)["state"], "failed");
+        assert!(!retry_requested(&ordered));
+
+        let ids = |updates: Vec<RunEvent>| -> Vec<i64> {
+            crate::domain::in_job_order(updates)
+                .iter()
+                .map(|u| u.id.as_i64())
+                .collect()
+        };
+        let other_pid = update(2, UPDATE_FAILED, json!({"pid": 9, "commit": "def"}));
+        assert_eq!(ids(vec![started.clone(), other_pid]), [3, 2]);
+        let other_commit = update(2, UPDATE_FAILED, json!({"pid": 8, "commit": "abc"}));
+        assert_eq!(ids(vec![started.clone(), other_commit]), [3, 2]);
+        let earlier_job = update(1, UPDATE_STARTED, json!({"pid": 7, "commit": "def"}));
+        assert_eq!(
+            ids(vec![started.clone(), earlier_job, failed.clone()]),
+            [3, 1, 2]
+        );
+        // A reused pid's earlier job of the same commit, before a retry,
+        // is another job.
+        let retried = update(2, UPDATE_RETRY, json!({"ask_id": 2, "answer": "retry"}));
+        let earlier = update(1, UPDATE_FAILED, json!({"pid": 8, "commit": "def"}));
+        assert_eq!(ids(vec![started.clone(), retried, earlier]), [3, 2, 1]);
+        // The release update's job is ordered the same way.
+        let release = json!({"pid": 8, "source": "release", "release": "0.5.0"});
+        assert_eq!(
+            ids(vec![
+                update(5, UPDATE_STARTED, release.clone()),
+                update(4, UPDATE_BUILT, release),
+            ]),
+            [4, 5]
+        );
+    }
+
     fn status_of_only(update: &RunEvent) -> Value {
         status(&[], std::slice::from_ref(update), &NoneAlive, 0)
     }
