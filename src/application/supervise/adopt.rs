@@ -82,7 +82,11 @@ impl Supervisor<'_> {
                 Ok(phase) => {
                     let mut slot = Slot::new(run, phase);
                     self.restore_waiting(&mut slot, as_waiting)?;
-                    self.claim.slots.admit(slot);
+                    self.claim.slots.admit_noting(
+                        slot,
+                        EventKind::RunAdopted.as_str(),
+                        &*self.queue,
+                    );
                 }
                 Err(error) => {
                     // The lease is this process's now; give it up like any

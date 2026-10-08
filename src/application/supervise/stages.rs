@@ -8,8 +8,13 @@
 //! pass's and the landing branch's holds and the moved workers; the slots
 //! are changed only through [`SlotTable`]'s operations, which every stage
 //! and the handoff use to take and give back a slot.
+//!
+//! A run's moves between phases, and their records (`run_phase_changed`),
+//! go through [`Slot::transition`], [`Slot::note_phase`], [`record_rest`]
+//! and [`record_claimed`] only.
 
 use super::*;
+use crate::domain::run_phase::{self, Attempt, PhaseChange};
 
 /// The slots, each holding one run and its phase. Which slots there are
 /// changes only through these operations: a stage admits a run, releases
@@ -24,6 +29,18 @@ impl SlotTable {
     /// Give `slot`'s run a slot, after the others.
     pub(super) fn admit(&mut self, slot: Slot) {
         self.slots.push(slot);
+    }
+
+    /// [`Self::admit`] a slot, recording the phase its run enters, which
+    /// `cause` moved it to ([`Slot::note_phase`]).
+    pub(super) fn admit_noting<L: PhaseLog + ?Sized>(
+        &mut self,
+        mut slot: Slot,
+        cause: &str,
+        log: &L,
+    ) {
+        slot.note_phase(cause, log);
+        self.admit(slot);
     }
 
     /// Take the slot at `index` out: for good, or for a step that puts it
@@ -107,6 +124,12 @@ impl SlotTable {
         self.slots[index].waiting = Some(waiting);
     }
 
+    /// Record the phase of the run at `index` when it moved
+    /// ([`Slot::note_phase`]): into a wait or back from one.
+    pub(super) fn note_phase<L: PhaseLog + ?Sized>(&mut self, index: usize, cause: &str, log: &L) {
+        self.slots[index].note_phase(cause, log);
+    }
+
     /// Note that the run at `index` waits in its slot for `ask`; whether
     /// it was not noted yet.
     pub(super) fn defer_wait(&mut self, index: usize, ask: AskId) -> bool {
@@ -139,6 +162,163 @@ impl std::ops::Index<usize> for SlotTable {
 
     fn index(&self, index: usize) -> &Slot {
         &self.slots[index]
+    }
+}
+
+/// Where the phases of the runs are recorded (`run_phase_changed`,
+/// ADR-t1662-1 decision 2), and read back when a process takes a run up.
+pub(super) trait PhaseLog {
+    fn phase_events(&self, run: &RunId) -> Result<Vec<RunEvent>>;
+    fn record_phase(&self, run: &RunId, change: &PhaseChange) -> Result<()>;
+}
+
+impl<T: RunLog + ?Sized> PhaseLog for T {
+    fn phase_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
+        self.run_events(run)
+    }
+
+    fn record_phase(&self, run: &RunId, change: &PhaseChange) -> Result<()> {
+        self.record_runtime_event(run, EventKind::RunPhaseChanged, change.payload())
+    }
+}
+
+/// A run's moves between phases go through these, and only they record
+/// `run_phase_changed`: each record closes the phase before it, so that
+/// the records cover the run from its claim to its end. Which phase the
+/// run is in is read from its slot ([`Slot::recorded_phase`]) and, out of
+/// one, from its status ([`run_phase::Phase::at_rest`]). A record that
+/// fails is warned of and tried again on the next move: the run's own
+/// steps never wait for it.
+impl Slot {
+    /// Move the slot's run to `phase`, which `cause` (the kind of the
+    /// event that moved it, or a reason code) moved it to.
+    pub(super) fn transition<L: PhaseLog + ?Sized>(&mut self, phase: Phase, cause: &str, log: &L) {
+        self.phase = phase;
+        self.note_phase(cause, log);
+    }
+
+    /// The phase the slot's run is in: a wait outside the slots, the
+    /// landing queue (ADR-t1591-1), or the slot's own phase.
+    pub(super) fn recorded_phase(&self) -> run_phase::Phase {
+        match &self.waiting {
+            Some(waiting) if waiting.ended.is_some() => run_phase::Phase::Returning,
+            Some(_) => run_phase::Phase::Waiting,
+            None if self.in_landing_queue() => run_phase::Phase::LandingQueue,
+            None => self.phase.recorded(),
+        }
+    }
+
+    /// Record the phase the slot's run is in when it is not the one last
+    /// recorded ([`PhaseTrack::note`]).
+    pub(super) fn note_phase<L: PhaseLog + ?Sized>(&mut self, cause: &str, log: &L) {
+        let phase = self.recorded_phase();
+        let started = self.phase.attempt();
+        self.track.note(self.run.id(), phase, started, cause, log);
+    }
+}
+
+/// What a slot keeps of its run's records: the attempt its phases are
+/// recorded in, and the phase last recorded, read once from the run's
+/// events when this process first notes it (another process's records,
+/// its attempt).
+#[derive(Debug, Default)]
+pub(super) struct PhaseTrack {
+    attempt: Option<Attempt>,
+    last: Option<run_phase::Recorded>,
+    seeded: bool,
+}
+
+impl PhaseTrack {
+    /// The attempt the run's phases are recorded in; `None` until the
+    /// track read the run's records.
+    pub(super) fn attempt(&self) -> Option<Attempt> {
+        self.seeded.then(|| self.attempt.unwrap_or(Attempt::FIRST))
+    }
+
+    /// Record that run `id` is in `phase`, which `cause` moved it to,
+    /// when it is not the phase and attempt last recorded: `started` is
+    /// the attempt the phase starts (a revise, a resume), else the run
+    /// goes on in its attempt.
+    pub(super) fn note<L: PhaseLog + ?Sized>(
+        &mut self,
+        id: &RunId,
+        phase: run_phase::Phase,
+        started: Option<Attempt>,
+        cause: &str,
+        log: &L,
+    ) {
+        if !self.seeded {
+            let events = match log.phase_events(id) {
+                Ok(events) => events,
+                Err(error) => {
+                    warn!(run_id = %id, error = %format_args!("{error:#}"), "run {id}: its recorded phases could not be read: {error:#}");
+                    return;
+                }
+            };
+            self.last = run_phase::last_recorded(&events);
+            self.attempt = self.last.as_ref().map(|last| last.attempt);
+            self.seeded = true;
+        }
+        if started.is_some() {
+            self.attempt = started;
+        }
+        let change = PhaseChange::new(phase, self.attempt.unwrap_or(Attempt::FIRST), cause);
+        if change.repeats(self.last.as_ref()) {
+            return;
+        }
+        match log.record_phase(id, &change) {
+            Ok(()) => {
+                self.last = Some(run_phase::Recorded {
+                    phase: phase.name().to_owned(),
+                    attempt: change.attempt,
+                });
+            }
+            Err(error) => {
+                warn!(run_id = %id, error = %format_args!("{error:#}"), "run {id}: could not record its phase {}: {error:#}", phase.name());
+            }
+        }
+    }
+}
+
+/// Record the phase a run is in that no slot holds (or whose slot is let
+/// go), from its status: `attempt` is its slot's, `None` the one last
+/// recorded. Nothing is recorded for a run on its way or landed
+/// ([`run_phase::Phase::at_rest`]), nor when it repeats the last record.
+pub(super) fn record_rest<L: PhaseLog + ?Sized>(
+    log: &L,
+    run: &TaskRun,
+    attempt: Option<Attempt>,
+    cause: &str,
+) {
+    let recorded = log.phase_events(run.id()).and_then(|events| {
+        let queued = RunHistory::from_events(&events).queued_approval().is_some();
+        let Some(phase) = run_phase::Phase::at_rest(run.status(), queued) else {
+            return Ok(());
+        };
+        let last = run_phase::last_recorded(&events);
+        let attempt = attempt
+            .or_else(|| last.as_ref().map(|last| last.attempt))
+            .unwrap_or(Attempt::FIRST);
+        let change = PhaseChange::new(phase, attempt, cause);
+        if change.repeats(last.as_ref()) {
+            return Ok(());
+        }
+        log.record_phase(run.id(), &change)
+    });
+    if let Err(error) = recorded {
+        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record its phase: {error:#}", run.id());
+    }
+}
+
+/// Record that a run just claimed is being provisioned: its first phase.
+pub(super) fn record_claimed<L: PhaseLog + ?Sized>(log: &L, run: &RunId) {
+    let change = PhaseChange::new(
+        run_phase::Phase::Provisioning,
+        Attempt::FIRST,
+        EventKind::RunClaimed.as_str(),
+    );
+    if let Err(error) = log.record_phase(run, &change) {
+        warn!(run_id = %run, error = %format_args!("{error:#}"), "run {run}: could not record its phase: {error:#}");
     }
 }
 
@@ -332,10 +512,14 @@ mod tests {
     use crate::domain::waiting::WaitCause;
 
     fn slot(id: &str) -> Slot {
-        let run = TaskRun::restore(crate::domain::RunRecord {
+        Slot::new(run_of(id, RunStatus::Running), Phase::AwaitingSlot)
+    }
+
+    fn run_of(id: &str, status: RunStatus) -> TaskRun {
+        TaskRun::restore(crate::domain::RunRecord {
             id: RunId::new(id).unwrap(),
             task_id: TaskId::new(1),
-            status: RunStatus::Running,
+            status,
             requested_provider: Provider::Claude,
             actual_provider: Provider::Claude,
             worker_mode: Worker::default_mode(Provider::Claude),
@@ -352,8 +536,7 @@ mod tests {
             workspace_closed_at: None,
             created_at: String::new(),
         })
-        .unwrap();
-        Slot::new(run, Phase::AwaitingSlot)
+        .unwrap()
     }
 
     fn waiting(ended: Option<i64>) -> Waiting {
@@ -510,5 +693,412 @@ mod tests {
             claim.loads.keys().cloned().collect::<Vec<_>>(),
             [RunId::new("r2").unwrap()]
         );
+    }
+
+    /// The phases a fake log records, and the run's other events that
+    /// [`record_rest`] reads.
+    #[derive(Default)]
+    struct Records {
+        events: std::cell::RefCell<Vec<RunEvent>>,
+    }
+
+    impl Records {
+        fn push(&self, kind: EventKind, payload: Value) {
+            let mut events = self.events.borrow_mut();
+            let id = crate::domain::EventId::new(events.len() as i64 + 1);
+            events.push(RunEvent {
+                id,
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: kind.as_str().to_owned(),
+                payload,
+                created_at: String::new(),
+                actor: None,
+            });
+        }
+
+        /// The recorded phases, each with its attempt and cause.
+        fn phases(&self) -> Vec<(String, String, String)> {
+            self.events
+                .borrow()
+                .iter()
+                .filter(|event| event.kind == event_kind::RUN_PHASE_CHANGED)
+                .map(|event| {
+                    let p = &event.payload;
+                    let attempt = format!(
+                        "{}{}",
+                        p["attempt"]["kind"].as_str().unwrap(),
+                        p["attempt"]["n"]
+                    );
+                    (
+                        p["phase"].as_str().unwrap().to_owned(),
+                        attempt,
+                        p["cause"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect()
+        }
+
+        /// The names of the recorded phases, after checking that they
+        /// cover the run from its claim with no gap: the first is its
+        /// claim, and each record moves it to another phase or attempt
+        /// than the one it closes.
+        fn covered(&self) -> Vec<String> {
+            let phases = self.phases();
+            assert_eq!(phases[0].0, "provisioning", "{phases:?}");
+            assert_eq!(phases[0].2, "run_claimed", "{phases:?}");
+            for pair in phases.windows(2) {
+                assert_ne!(
+                    (&pair[0].0, &pair[0].1),
+                    (&pair[1].0, &pair[1].1),
+                    "{phases:?}"
+                );
+            }
+            phases.into_iter().map(|(phase, _, _)| phase).collect()
+        }
+
+        /// The landing's records: the push, in the transaction of
+        /// `run_integrated`, and the push's outcome `kind`.
+        fn land(&self, id: &RunId, outcome: EventKind) {
+            let attempt = run_phase::last_recorded(&self.events.borrow())
+                .map_or(Attempt::FIRST, |last| last.attempt);
+            self.push(EventKind::RunIntegrated, json!({}));
+            self.record_phase(
+                id,
+                &PhaseChange::new(
+                    run_phase::Phase::Push { in_slot: true },
+                    attempt,
+                    "run_integrated",
+                ),
+            )
+            .unwrap();
+            self.push(outcome, json!({}));
+            let (phase, cause) = run_phase::Phase::after_push(outcome);
+            self.record_phase(id, &PhaseChange::new(phase, attempt, cause))
+                .unwrap();
+        }
+    }
+
+    impl PhaseLog for Records {
+        fn phase_events(&self, _: &RunId) -> Result<Vec<RunEvent>> {
+            Ok(self.events.borrow().clone())
+        }
+
+        fn record_phase(&self, _: &RunId, change: &PhaseChange) -> Result<()> {
+            self.push(EventKind::RunPhaseChanged, change.payload());
+            Ok(())
+        }
+    }
+
+    fn with_status(slot: &Slot, status: RunStatus) -> TaskRun {
+        run_of(slot.run.id().as_str(), status)
+    }
+
+    use crate::domain::run_phase::{AttemptKind, Phase as P};
+
+    /// The supervisor's moves of one run, in the phases they record: a
+    /// slot admitted at the claim, and each move noted as the loop notes
+    /// it.
+    struct Flow {
+        records: Records,
+        slot: Slot,
+    }
+
+    impl Flow {
+        fn claimed() -> Self {
+            let records = Records::default();
+            let slot = slot("r1");
+            records.push(EventKind::RunClaimed, json!({}));
+            record_claimed(&records, slot.run.id());
+            let mut flow = Self { records, slot };
+            flow.moves(P::Worker, None);
+            flow
+        }
+
+        fn moves(&mut self, phase: P, started: Option<Attempt>) {
+            let id = self.slot.run.id().clone();
+            self.slot
+                .track
+                .note(&id, phase, started, "test", &self.records);
+        }
+
+        /// Through validation, review and the exit to the landing queue.
+        fn queue_to_land(&mut self) {
+            for phase in [
+                P::Validating,
+                P::Review,
+                P::Exiting,
+                P::AwaitingSlot,
+                P::LandingQueue,
+            ] {
+                self.moves(phase, None);
+            }
+        }
+
+        fn lands(&mut self, outcome: EventKind) {
+            self.queue_to_land();
+            self.moves(P::Landing, None);
+            let id = self.slot.run.id().clone();
+            self.records.land(&id, outcome);
+        }
+
+        /// The slot is let go with the run at rest in `status`.
+        fn rests(&mut self, status: RunStatus, cause: &str) {
+            let run = with_status(&self.slot, status);
+            record_rest(&self.records, &run, self.slot.track.attempt(), cause);
+        }
+    }
+
+    const LANDED: [&str; 10] = [
+        "provisioning",
+        "worker",
+        "validating",
+        "review",
+        "exiting",
+        "awaiting_slot",
+        "landing_queue",
+        "landing",
+        "push",
+        "ended",
+    ];
+
+    /// A first attempt lands and its push ends the run, whether main was
+    /// pushed or the push skipped; a failed push leaves it pending.
+    #[test]
+    fn a_landed_run_is_covered_until_its_push_ends() {
+        for (outcome, last, cause) in [
+            (EventKind::PushFinished, "ended", "pushed"),
+            (EventKind::PushSkipped, "ended", "push_skipped"),
+            (EventKind::PushFailed, "push_pending", "push_failed"),
+        ] {
+            let mut flow = Flow::claimed();
+            flow.lands(outcome);
+            let mut expected = LANDED.to_vec();
+            *expected.last_mut().unwrap() = last;
+            assert_eq!(flow.records.covered(), expected);
+            let phases = flow.records.phases();
+            assert_eq!(phases.last().unwrap().2, cause);
+            assert!(phases.iter().all(|(_, attempt, _)| attempt == "first1"));
+        }
+    }
+
+    /// A revise is an attempt of its own, which the phases after it go on
+    /// in, through the landing and the push.
+    #[test]
+    fn a_revise_records_its_attempt_until_the_run_ends() {
+        let mut flow = Flow::claimed();
+        flow.moves(P::Validating, None);
+        flow.moves(P::Review, None);
+        flow.moves(P::Revise, Some(Attempt::of(AttemptKind::Revise, 1)));
+        flow.lands(EventKind::PushFinished);
+        let phases = flow.records.phases();
+        assert_eq!(
+            flow.records.covered(),
+            [
+                &["provisioning", "worker", "validating", "review", "revise"][..],
+                &LANDED[2..]
+            ]
+            .concat()
+        );
+        let revise = phases
+            .iter()
+            .position(|(phase, _, _)| phase == "revise")
+            .unwrap();
+        assert!(
+            phases[..revise]
+                .iter()
+                .all(|(_, attempt, _)| attempt == "first1")
+        );
+        assert!(
+            phases[revise..]
+                .iter()
+                .all(|(_, attempt, _)| attempt == "revise1"),
+            "{phases:?}"
+        );
+    }
+
+    /// A run parked for a resume waits for it at rest, and its resumed
+    /// session's slot goes on in the resume's attempt.
+    #[test]
+    fn a_resume_closes_the_wait_for_it_and_records_its_attempt() {
+        let mut flow = Flow::claimed();
+        flow.moves(P::Validating, None);
+        flow.moves(P::Exiting, None);
+        flow.rests(RunStatus::NeedsSession, "needs_session");
+        // The resume's slot is a new one, which reads the records.
+        let mut resumed = Slot::new(
+            with_status(&flow.slot, RunStatus::Running),
+            Phase::AwaitingSlot,
+        );
+        let id = resumed.run.id().clone();
+        resumed.track.note(
+            &id,
+            P::Resume,
+            Some(Attempt::of(AttemptKind::Resume, 1)),
+            "resume_started",
+            &flow.records,
+        );
+        flow.slot = resumed;
+        flow.lands(EventKind::PushFinished);
+        assert_eq!(
+            flow.records.covered(),
+            [
+                &[
+                    "provisioning",
+                    "worker",
+                    "validating",
+                    "exiting",
+                    "needs_session",
+                    "resume"
+                ][..],
+                &LANDED[2..]
+            ]
+            .concat()
+        );
+        let phases = flow.records.phases();
+        assert_eq!(phases[4].1, "first1");
+        assert_eq!(phases.last().unwrap().1, "resume1");
+    }
+
+    /// The answer to an `approve_landing` ask is a person's wait, which
+    /// holds no slot; a `land` queues the run, and its landing follows.
+    #[test]
+    fn an_approve_landing_ask_is_a_wait_for_a_person() {
+        let mut flow = Flow::claimed();
+        flow.moves(P::Validating, None);
+        flow.moves(P::Review, None);
+        flow.moves(P::Exiting, None);
+        flow.rests(RunStatus::AwaitingIntegration, "awaiting_integration");
+        let waits = flow.records.events.borrow().last().unwrap().payload.clone();
+        assert_eq!(
+            (&waits["phase"], &waits["blocker"], &waits["holds"]),
+            (&json!("landing_answer"), &json!("human"), &json!("none"))
+        );
+        flow.records
+            .push(EventKind::IntegrationApproved, json!({"ask_id": 3}));
+        flow.records.push(
+            EventKind::LandingQueued,
+            json!({"via": "approve", "ask_id": 3}),
+        );
+        let run = with_status(&flow.slot, RunStatus::AwaitingIntegration);
+        record_rest(&flow.records, &run, None, "integration_approved");
+        // The landing's own slot.
+        flow.slot = Slot::new(run, Phase::Landing(None));
+        let id = flow.slot.run.id().clone();
+        flow.slot
+            .track
+            .note(&id, P::Landing, None, "integration_started", &flow.records);
+        flow.records.land(&id, EventKind::PushFinished);
+        assert_eq!(
+            flow.records.covered(),
+            [
+                "provisioning",
+                "worker",
+                "validating",
+                "review",
+                "exiting",
+                "landing_answer",
+                "landing_queue",
+                "landing",
+                "push",
+                "ended",
+            ]
+        );
+    }
+
+    /// A worker's question takes the run out of the slots while a person
+    /// answers, and back.
+    #[test]
+    fn a_question_is_a_wait_outside_the_slots() {
+        let mut flow = Flow::claimed();
+        flow.slot.waiting = Some(waiting(None));
+        let phase = flow.slot.recorded_phase();
+        flow.moves(phase, None);
+        flow.slot.waiting = Some(waiting(Some(1)));
+        let phase = flow.slot.recorded_phase();
+        flow.moves(phase, None);
+        flow.slot.waiting = None;
+        flow.moves(P::Worker, None);
+        assert_eq!(
+            flow.records.covered(),
+            ["provisioning", "worker", "waiting", "returning", "worker"]
+        );
+        assert_eq!(P::Waiting.tags().blocker, run_phase::Blocker::Human);
+    }
+
+    /// A run that does not land ends failed, or canceled by the answer to
+    /// its ask; a repeated end records nothing more.
+    #[test]
+    fn a_run_that_does_not_land_ends_failed_or_canceled() {
+        let mut failed = Flow::claimed();
+        failed.rests(RunStatus::Failed, "failed");
+        failed.rests(RunStatus::Failed, "runtime_error");
+        assert_eq!(
+            failed.records.covered(),
+            ["provisioning", "worker", "ended"]
+        );
+        assert_eq!(failed.records.phases().last().unwrap().2, "failed");
+
+        let mut canceled = Flow::claimed();
+        canceled.moves(P::Validating, None);
+        canceled.moves(P::Review, None);
+        canceled.moves(P::Exiting, None);
+        canceled.rests(RunStatus::AwaitingIntegration, "awaiting_integration");
+        canceled.rests(RunStatus::Failed, "canceled");
+        assert_eq!(
+            canceled.records.covered(),
+            [
+                "provisioning",
+                "worker",
+                "validating",
+                "review",
+                "exiting",
+                "landing_answer",
+                "ended"
+            ]
+        );
+        assert_eq!(canceled.records.phases().last().unwrap().2, "canceled");
+    }
+
+    /// A slot taken up by another process reads what was recorded: it
+    /// records nothing while the run stays in the recorded phase, and
+    /// goes on in the recorded attempt.
+    #[test]
+    fn a_slot_taken_up_goes_on_from_the_records() {
+        let mut flow = Flow::claimed();
+        flow.moves(P::Revise, Some(Attempt::of(AttemptKind::Conflict, 2)));
+        let before = flow.records.phases().len();
+        let mut adopted = Slot::new(
+            with_status(&flow.slot, RunStatus::Running),
+            Phase::AwaitingSlot,
+        );
+        let id = adopted.run.id().clone();
+        adopted
+            .track
+            .note(&id, P::Revise, None, "run_adopted", &flow.records);
+        assert_eq!(flow.records.phases().len(), before);
+        adopted
+            .track
+            .note(&id, P::Validating, None, "conflict_resolved", &flow.records);
+        assert_eq!(flow.records.phases().last().unwrap().1, "conflict2");
+        assert_eq!(
+            adopted.track.attempt(),
+            Some(Attempt::of(AttemptKind::Conflict, 2))
+        );
+    }
+
+    /// The phase of a slot's run: a wait outside the slots or the landing
+    /// queue before the slot's own phase.
+    #[test]
+    fn a_slots_phase_is_its_wait_or_the_landing_queue_before_its_own() {
+        let mut slot = slot("r1");
+        assert_eq!(slot.recorded_phase(), P::AwaitingSlot);
+        slot.landing_turn = true;
+        assert_eq!(slot.recorded_phase(), P::LandingQueue);
+        slot.waiting = Some(waiting(None));
+        assert_eq!(slot.recorded_phase(), P::Waiting);
+        slot.waiting = Some(waiting(Some(1)));
+        assert_eq!(slot.recorded_phase(), P::Returning);
     }
 }

@@ -2,7 +2,7 @@
 //! validation, landing decisions, integration and clean-up ([`RunTransitions`]).
 
 use super::*;
-use crate::domain::EventKind;
+use crate::domain::{EventKind, run_phase};
 
 impl SqliteQueue {
     /// Reserve the next dependency-ready task of a Claude worker
@@ -738,7 +738,22 @@ impl SqliteQueue {
         let mut payload = serde_json::to_value(landing)?;
         payload["result_commit"] = json!(landing.commit);
         payload["git_common_dir"] = json!(common_dir);
+        // The supervisor's slot holds the run through its push; a
+        // person's `integrate` leases it without a supervisor's row.
+        let in_slot = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM supervisors WHERE token=?1)",
+                [token],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
         run_event(&tx, id, EventKind::RunIntegrated, payload)?;
+        phase_event(
+            &tx,
+            id,
+            run_phase::Phase::Push { in_slot },
+            EventKind::RunIntegrated,
+        )?;
         run_event(
             &tx,
             id,
@@ -1110,4 +1125,132 @@ fn abandon_payload(message: &str, lease_released: bool, session: Option<&Value>)
         payload["session"] = session.clone();
     }
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::TaskStore;
+    use crate::domain::NewTask;
+
+    const RUN: &str = "11111111-1111-4111-8111-111111111111";
+
+    /// A queue with one run integrating under `token`'s lease, and the
+    /// phase recorded before it (the landing's, in a revise's attempt).
+    fn integrating(token: &LeaseToken) -> (tempfile::TempDir, SqliteQueue, RunId) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let task = queue
+            .add(NewTask {
+                title: "t".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                verification_commands: Vec::new(),
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                priority: Default::default(),
+                goal_id: None,
+                context: String::new(),
+                change: None,
+                provider: None,
+                worker_mode: None,
+                wait_for_build: false,
+            })
+            .unwrap()
+            .id();
+        let run = RunId::new(RUN).unwrap();
+        queue
+            .conn
+            .execute_batch(&format!(
+                "UPDATE tasks SET status='in_progress' WHERE id={task};
+                 INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit)
+                 VALUES ('{RUN}',{task},'integrating','claude','claude','{}');
+                 INSERT INTO run_leases(run_id,token,pid) VALUES ('{RUN}','{}',1);",
+                "a".repeat(40),
+                token.as_str(),
+            ))
+            .unwrap();
+        let landing = run_phase::PhaseChange::new(
+            run_phase::Phase::Landing,
+            run_phase::Attempt::of(run_phase::AttemptKind::Revise, 2),
+            "integration_started",
+        );
+        run_event(
+            &queue.conn,
+            &run,
+            EventKind::RunPhaseChanged,
+            landing.payload(),
+        )
+        .unwrap();
+        (dir, queue, run)
+    }
+
+    fn landing() -> Landing {
+        let commit = CommitSha::parse("b".repeat(40), "commit").unwrap();
+        Landing {
+            commit: commit.clone(),
+            source_commit: commit.clone(),
+            main_before: commit,
+            history_ref: String::new(),
+            message: String::new(),
+            verification_skipped: false,
+        }
+    }
+
+    fn kinds_and_phases(queue: &SqliteQueue, run: &RunId) -> Vec<(i64, String, Value)> {
+        run_events_of(&queue.conn, run)
+            .unwrap()
+            .into_iter()
+            .map(|event| (event.id.as_i64(), event.kind, event.payload))
+            .collect()
+    }
+
+    /// The landing records the push it moves the run to in the
+    /// transaction of `run_integrated`, right after it, in the run's
+    /// attempt: holding the supervisor's slot when a supervisor lands it,
+    /// none when a person's `integrate` does. A landing that fails writes
+    /// neither.
+    #[test]
+    fn the_push_phase_is_written_with_run_integrated() {
+        for (supervisor, holds) in [(true, "worker_slot"), (false, "none")] {
+            let token = LeaseToken::new("tok");
+            let (_dir, mut queue, run) = integrating(&token);
+            if supervisor {
+                queue.register_supervisor(&token, 1, 1, "0.0.1").unwrap();
+            }
+            queue
+                .finish_integration(&run, &token, &landing(), "/git")
+                .unwrap();
+            let events = kinds_and_phases(&queue, &run);
+            let at = events
+                .iter()
+                .position(|(_, kind, _)| kind == "run_integrated")
+                .unwrap();
+            let (integrated, _, _) = &events[at];
+            let (id, kind, payload) = &events[at + 1];
+            assert_eq!((kind.as_str(), *id), ("run_phase_changed", integrated + 1));
+            assert_eq!(
+                payload,
+                &json!({
+                    "phase": "push",
+                    "blocker": "external",
+                    "holds": holds,
+                    "attempt": {"kind": "revise", "n": 2},
+                    "cause": "run_integrated",
+                    "v": run_phase::RULES_VERSION,
+                })
+            );
+        }
+        // Another token's landing fails as a whole.
+        let (_dir, mut queue, run) = integrating(&LeaseToken::new("tok"));
+        let before = kinds_and_phases(&queue, &run).len();
+        assert!(
+            queue
+                .finish_integration(&run, &LeaseToken::new("other"), &landing(), "/git")
+                .is_err()
+        );
+        assert_eq!(kinds_and_phases(&queue, &run).len(), before);
+    }
 }

@@ -1308,8 +1308,18 @@ impl Supervisor<'_> {
             {
                 continue;
             }
-            if let Err(error) = self.apply_landing_answer(&run, ask.id, &answer, action) {
-                warn!(run_id = %run.id(), ask_id = %ask.id, error = %format_args!("{error:#}"), "run {}: the answer {answer:?} of ask {} could not be applied: {error:#}", run.id(), ask.id);
+            // The phase the answer moves the run to: queued to land, sent
+            // back for a resume, or ended by the cancel.
+            let cause = match &action {
+                LandingAnswer::Land => EventKind::IntegrationApproved.as_str(),
+                LandingAnswer::SendBack(_) => "sent_back",
+                LandingAnswer::Cancel => "canceled",
+            };
+            match self.apply_landing_answer(&run, ask.id, &answer, action) {
+                Ok(()) => self.record_rest(run.id(), None, cause),
+                Err(error) => {
+                    warn!(run_id = %run.id(), ask_id = %ask.id, error = %format_args!("{error:#}"), "run {}: the answer {answer:?} of ask {} could not be applied: {error:#}", run.id(), ask.id);
+                }
             }
         }
         Ok(())
@@ -1378,7 +1388,11 @@ impl Supervisor<'_> {
             drop(guard);
             if let Some(run) = leased {
                 info!(run_id = %run.id(), "run {} runs its e2e before it lands as queued", run.id());
-                self.claim.slots.admit(Slot::new(run, Phase::AwaitingSlot));
+                self.claim.slots.admit_noting(
+                    Slot::new(run, Phase::AwaitingSlot),
+                    "e2e_leased",
+                    &*self.queue,
+                );
             }
             return Ok(());
         };
@@ -1386,9 +1400,11 @@ impl Supervisor<'_> {
         drop(guard);
         info!(run_id = %run.id(), "run {} lands onto main {main} as queued", run.id());
         let handle = self.spawn_landing(landing.clone(), RunStatus::AwaitingIntegration, main)?;
-        self.claim
-            .slots
-            .admit(Slot::new(landing, Phase::Landing(Some(handle))));
+        self.claim.slots.admit_noting(
+            Slot::new(landing, Phase::Landing(Some(handle))),
+            EventKind::IntegrationStarted.as_str(),
+            &*self.queue,
+        );
         Ok(())
     }
     /// Review the runs recovered from a landing they may not land again
@@ -1432,7 +1448,11 @@ impl Supervisor<'_> {
             info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} is reviewed again: its landing was given up before it was approved or passed", run.id(), run.task_id());
             let session = self.session_of(&run)?;
             match self.start_review(&run, session) {
-                Ok(phase) => self.claim.slots.admit(Slot::new(run, phase)),
+                Ok(phase) => self.claim.slots.admit_noting(
+                    Slot::new(run, phase),
+                    EventKind::ReviewStarted.as_str(),
+                    &*self.queue,
+                ),
                 Err(error) => {
                     let message = format!("run {} could not be reviewed: {error:#}", run.id());
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{}", message);

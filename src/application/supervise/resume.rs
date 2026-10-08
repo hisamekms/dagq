@@ -126,7 +126,11 @@ impl Supervisor<'_> {
         match self.start_resume(&run, attempt, &request, run_env) {
             Ok(watch) => {
                 info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} resumed (attempt {attempt}; {} of at most {MAX_RESUME_ATTEMPTS} counted before it) in workspace {}", run.id(), run.task_id(), resumes.counted, watch.workspace);
-                self.claim.slots.admit(Slot::new(run, Phase::Resume(watch)));
+                self.claim.slots.admit_noting(
+                    Slot::new(run, Phase::Resume(watch)),
+                    EventKind::ResumeStarted.as_str(),
+                    &*self.queue,
+                );
             }
             Err(error) => {
                 let message = format!("run {} could not be resumed: {error:#}", run.id());
@@ -244,7 +248,11 @@ impl Supervisor<'_> {
         } else {
             Phase::Validating(Some(self.validate(run.clone())), None)
         };
-        self.claim.slots.admit(Slot::new(run, phase));
+        self.claim.slots.admit_noting(
+            Slot::new(run, phase),
+            EventKind::ResumeFinished.as_str(),
+            &*self.queue,
+        );
         Ok(())
     }
     /// End a `needs_session` run whose resumes are used up (ADR-0047
@@ -293,6 +301,7 @@ impl Supervisor<'_> {
             return Ok(());
         };
         warn!(run_id = %failed.id(), task_id = %failed.task_id(), "run {} of task {} used up its resumes; it is failed and goes to the recovery job (resume_exhausted)", failed.id(), failed.task_id());
+        stages::record_rest(&*self.queue, &failed, None, "resume_exhausted");
         self.close_ended_landing_asks(Some(failed.task_id()));
         self.close_open_workspaces(&failed, WorkspaceCloser::Triage)?;
         Ok(())
@@ -711,7 +720,11 @@ impl Supervisor<'_> {
                     .finish_resume(&id, &self.token, None, None, true, payload)?;
                 self.queue_landing(&run, "resume");
                 slot.run = run;
-                slot.phase = Phase::AwaitingSlot;
+                slot.transition(
+                    Phase::AwaitingSlot,
+                    EventKind::LandingQueued.as_str(),
+                    &*self.queue,
+                );
                 return Ok(Step::Continue);
             }
             ResumeOutcome::Resolved => {
@@ -730,7 +743,11 @@ impl Supervisor<'_> {
                     workspace: workspace.to_owned(),
                     resume: Some(attempt),
                 });
-                slot.phase = Phase::Validating(Some(handle), session);
+                slot.transition(
+                    Phase::Validating(Some(handle), session),
+                    EventKind::ResumeFinished.as_str(),
+                    &*self.queue,
+                );
                 return Ok(Step::Continue);
             }
             ResumeOutcome::Failed(reason) => self.queue.finish_resume(

@@ -634,6 +634,39 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     );
     let kinds = event_kinds(&detail);
     let position = |kind: &str| kinds.iter().rposition(|k| *k == kind).unwrap();
+    // The supervisor recorded each phase it moved the run to from its
+    // claim, the run waited at rest for a person's `integrate`, and the
+    // landing recorded the push right after `run_integrated` (holding no
+    // supervisor's slot) and its skip as the run's end (ADR-t1662-1).
+    let phases: Vec<(&str, &str, &str)> = detail
+        .events
+        .iter()
+        .filter(|e| e.kind == "run_phase_changed")
+        .map(|e| {
+            (
+                e.payload["phase"].as_str().unwrap(),
+                e.payload["holds"].as_str().unwrap(),
+                e.payload["cause"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        phases[0],
+        ("provisioning", "worker_slot", "run_claimed"),
+        "{phases:?}"
+    );
+    assert_eq!(phases[1].0, "worker", "{phases:?}");
+    assert!(phases.iter().any(|p| p.0 == "validating"), "{phases:?}");
+    assert_eq!(
+        phases[phases.len() - 3..],
+        [
+            ("landing_answer", "none", "awaiting_integration"),
+            ("push", "none", "run_integrated"),
+            ("ended", "none", "push_skipped"),
+        ],
+        "{phases:?}"
+    );
+    assert_eq!(kinds[position("run_integrated") + 1], "run_phase_changed");
     assert!(position("validation_finished") < position("integration_started"));
     assert!(position("integration_started") < position("integration_rebased"));
     // The only verification commands are the landing's, after the rebase.

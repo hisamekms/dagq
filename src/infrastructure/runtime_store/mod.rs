@@ -38,7 +38,7 @@ use crate::domain::{
     run,
     search::{SearchPage, SearchQuery},
 };
-use crate::domain::{EventKind, LeaseToken};
+use crate::domain::{EventKind, LeaseToken, run_phase};
 use crate::domain::{provider_switch::WorkerRoute, worker::Worker};
 
 pub use crate::application::{
@@ -325,6 +325,35 @@ fn run_event(
             r.get(0)
         })?;
     event(conn, task_id, Some(id), kind, payload)
+}
+
+/// Record, inside the caller's transaction, that the run moved to `phase`
+/// (`run_phase_changed`, ADR-t1662-1 decision 2) in the attempt last
+/// recorded of it (the first when it cannot be read: the record never
+/// fails the transition), `cause` the kind of the event the same
+/// transaction wrote.
+fn phase_event(
+    conn: &Connection,
+    id: &RunId,
+    phase: run_phase::Phase,
+    cause: EventKind,
+) -> Result<()> {
+    let attempt = conn
+        .query_row(
+            "SELECT payload FROM run_events WHERE run_id=?1 AND kind=?2 ORDER BY id DESC LIMIT 1",
+            params![id, EventKind::RunPhaseChanged.as_str()],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
+        .and_then(|payload| run_phase::Recorded::of(&payload))
+        .map_or(run_phase::Attempt::FIRST, |recorded| recorded.attempt);
+    run_event(
+        conn,
+        id,
+        EventKind::RunPhaseChanged,
+        run_phase::PhaseChange::new(phase, attempt, cause.as_str()).payload(),
+    )
 }
 
 /// End the run's stalled detections inside the caller's transaction, the

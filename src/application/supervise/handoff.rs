@@ -279,7 +279,7 @@ impl Supervisor<'_> {
                     // Kept as it was, even past the limit (ADR-0062
                     // decision 7).
                     self.restore_waiting(&mut slot, true)?;
-                    self.claim.slots.admit(slot);
+                    self.claim.slots.admit_noting(slot, "handoff", &*self.queue);
                 }
                 Err(error) => {
                     let message = format!(

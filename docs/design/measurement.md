@@ -29,7 +29,10 @@ related:
 
 # 計測
 
-> **まだ実装が無い（2026-10-04）**: この文書は計測の作り直し（goal 71、request 13）の今の予定で、`src/`にはまだ何も入っていない。今動いている計測は[`stats`](supervisor-lifecycle/stats.md)（着地待ちの内訳・作業の内訳）・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)・[hostの負荷](supervisor-lifecycle/host-metrics.md)が持ち、この文書はそれらを変えない。後続のtaskが実装したら、この注記と各節を今の姿に直す。
+> **一部だけ実装済み（2026-10-09）**: 「区間とタグ」のrunの工程の記録（`run_phase_changed`）と「終端」は実装済みで、今の姿を書く。
+> ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
+> 今動いている計測は[`stats`](supervisor-lifecycle/stats.md)（着地待ちの内訳・作業の内訳）・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)・[hostの負荷](supervisor-lifecycle/host-metrics.md)が持ち、この文書はそれらを変えない。
+> 後続のtaskが実装したら、この注記と各節を今の姿に直す。
 > 「SSOTとビュー」の表に足すものの範囲は[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)が持つ。
 
 決めた理由はADR-t1662-1（計測のモデル）・ADR-t1662-2（ストアの抽象化）・ADR-t1662-3（実行する側と送る口とコマンドの分類）が持つ。ここはeventの欄・列とJSONの形・数値・関数の名前の予定を持つ。
@@ -58,29 +61,56 @@ related:
 
 runの一生を、重ならず隙間なく全体を覆う区間の列で表す（ADR-t1662-1決定1〜5）。
 
-- **境目の記録**: supervisorが工程を移るたびに`run_phase_changed`を書く。payloadは`phase`（工程の名前。自由）・`blocker`・`holds`・`attempt`（1から）・`cause`（移ったきっかけのevent idか理由のコード）・`v`（payloadの版。1から）。
-- **タグ**: `blocker`は`queue`（slotや着地の順番の空き待ち）・`ai`（agentが動いている）・`compute`（build・test・検証の計算）・`human`（人の答え）・`runtime`（dagq自身の処理と見張りの間隔）・`external`（GitHub・remote・providerのAPIなど外のサービス）・`infra`（実行環境の用意・故障・資源の不足。ADR-t1662-3決定5）。`holds`は`worker_slot`・`landing_slot`・`none`。
-- **`Phase::tags()`**: 工程の定義の隣で網羅的な`match`がタグを返し、工程を足してタグを書き忘れるとコンパイルが止まる。
-- **unattributed**: 区間の列に当たらない時間（記録の抜け）はunattributedの区間として出す。KPIは所要時間に対する割合を見張り、2%以上を目標割れにする。
+- **境目の記録**（実装済み）: supervisorが工程を移るたびに`run_phase_changed`を書き、次の記録が前の工程を閉じる。
+  payloadは`phase`（工程の名前で、自由）・`blocker`・`holds`・`attempt`・`cause`（移ったきっかけのeventのkindか理由のコード）・`v`（記録の規則の版で、1から）。
+  `attempt`は`{kind, n}`で、`kind`は`first`・`revise`・`conflict`・`resume`、`n`はその種類の何回目か（1から）。
+  後の工程は、次のrevise・resumeまで前のattemptのまま。
+- **書く所**: supervisorの中の移りは、実行と着地の工程ごとの状態のmoduleの移す操作だけを通る。
+  slotのrunはslotの工程・slotの外の待ち・着地の順番待ちから、slotを離れたrunはstatusから工程を読む。
+  前と同じ工程とattemptは書かず、プロセスが初めて見るrunは記録を読み直してattemptを引き継ぐ。
+  記録の失敗はwarnだけで、runの工程の判断は待たない。
+  storeは`run_integrated`と同じtransactionで`push`を、`recover`と放置のrunの回収は`run_recovered`と同じtransactionでstatusの工程（`interrupted`は`ended`、やめた着地は`landing_queue`）を書く。
+- **タグ**: `blocker`は`queue`（slotや着地の順番の空き待ち）・`ai`（agentが動いている）・`compute`（build・test・検証の計算）・`human`（人の答え）・`runtime`（dagq自身の処理と見張りの間隔）・`external`（GitHub・remote・providerのAPIなど外のサービス）・`infra`（実行環境の用意・故障・資源の不足。ADR-t1662-3決定5）。`holds`は`worker_slot`・`landing_slot`・`none`で、slotの数え方（着地の順番だけを待つrunと人の答えを待つrunはslotの外）に従う。
+- **`Phase::tags()`**: 記録の工程の定義（`domain::run_phase`）の隣で網羅的な`match`がタグを返す。
+  supervisorの工程も網羅的な`match`で記録の工程に対応し、どちらも工程を足して書き忘れるとコンパイルが止まる。
+- **unattributed**（予定）: 区間の列に当たらない時間（記録の抜け）はunattributedの区間として出す。KPIは所要時間に対する割合を見張り、2%以上を目標割れにする。
 - **物差し**: 所要時間（区間の和）と、slotを握った時間（`holds`が`none`でない区間の和）。
 
-工程とタグの組の例（段1のtaskが決める予定。名前は変わりうる）:
+工程とタグ:
 
-| 工程 | blocker | holds |
-| --- | --- | --- |
-| worker（sessionが作業している） | ai | worker_slot |
-| validating | runtime | worker_slot |
-| review | ai | worker_slot |
-| 人の答え待ち（`approve_landing`・`worker_question`） | human | none |
-| landing_queue（着地slotの順番待ち） | queue | none |
-| verify（`integrate`の検証） | compute | landing_slot |
-| push | external | none |
-| push_pending（`push_failed`の後） | human | none |
-| held（taskのholdで走っていた工程が終わり待ちに入った後。予定・未実装） | human | none |
+| 工程 | 中身 | blocker | holds |
+| --- | --- | --- | --- |
+| `provisioning` | claimの後、worktreeとsessionの用意 | infra | worker_slot |
+| `worker` | workerのsession | ai | worker_slot |
+| `validating` | receiptの検証 | runtime | worker_slot |
+| `review` | reviewのjob | ai | worker_slot |
+| `review_held` | reviewがproviderの控えの終わりを待つ | external | worker_slot |
+| `revise` | 生きているsessionの直し（`revise`・衝突） | ai | worker_slot |
+| `exiting` | sessionの終わりとworkspaceの片付け | runtime | worker_slot |
+| `resume` | resumeしたsession | ai | worker_slot |
+| `recovery` | `failed`・`interrupted`のrunの復旧job | ai | worker_slot |
+| `waiting` | slotの外で人の答えを待つ（`worker_question`など） | human | none |
+| `returning` | 待ちが終わり、slotに戻るのを待つ | queue | none |
+| `awaiting_slot` | slotの中で着地の判断を待つ（e2e・着地の保留・着地slot） | queue | worker_slot |
+| `awaiting_e2e` | 他のrunのe2eかやり直しを待つ | queue | worker_slot |
+| `e2e` | 着地の前のe2e | compute | worker_slot |
+| `landing_queue` | 着地の順番だけを待つ、または`land`の答えで承認されて着地を待つ | queue | none |
+| `landing` | 着地（rebase・検証・mainの移動） | compute | landing_slot |
+| `landing_answer` | `approve_landing`の答えか人の着地を待つ | human | none |
+| `needs_session` | resumeを待つ | queue | none |
+| `push` | `run_integrated`の後のpush | external | supervisorのslotが持つ間は`worker_slot`、人の`integrate`は`none` |
+| `push_pending` | `push_failed`の後 | human | none |
+| `ended` | 終わり（`cause`が`pushed`・`push_skipped`・`failed`・`canceled`・`run_recovered`など） | runtime | none |
+
+予定・未実装: taskのholdで走っていた工程が終わり待ちに入った後の工程`held`（human・none）。
 
 ### 終端
 
-`run_integrated`の後は工程`push`（`run_integrated`と同じtransactionで記録）で、`push_finished`（`already_delivered`を含む）か`push_skipped`で閉じる。`push_failed`は`push_pending`（`blocker: human`）にし、同じremote・branchへの後の`push_finished`で閉じる。着地しないrunは失敗・取り消し・interruptedで閉じる。taskは`completed`（そのrunのpushの終わり）か`canceled`で閉じる（ADR-t1662-1決定16）。
+`run_integrated`の後は工程`push`（`run_integrated`と同じtransactionで記録）で、pushの結果の記録と同じ所で、`push_finished`（`already_delivered`を含む）か`push_skipped`なら`ended`（`cause`は`pushed`・`push_skipped`）を、`push_failed`なら`push_pending`（`blocker: human`）を記録する。
+人の`integrate`も同じ`Integrator`を通るので同じ記録になる。
+`push_pending`を同じremote・branchへの後の`push_finished`で閉じるのは畳む関数（予定）で、人が手で打った`git push`はeventが無いので次の`push_finished`まで`push_pending`のまま。
+着地しないrunは`ended`（`cause`は失敗のstatus・`canceled`・`run_recovered`など）で閉じ、`failed`のrunを復旧jobが動かせば次の工程に移る。
+taskは`completed`（そのrunのpushの終わり）か`canceled`で閉じる（ADR-t1662-1決定16）。
 
 ### claimの前
 

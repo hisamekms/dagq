@@ -31,6 +31,7 @@ use crate::domain::LeaseToken;
 use crate::domain::Priority;
 use crate::domain::background_wrapper::StopRoute;
 use crate::domain::light_slots::{self, ClaimRoom};
+use crate::domain::run_phase;
 use crate::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
 use crate::domain::slot_order::{SlotCandidate, SlotKind, slot_order};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -1156,6 +1157,8 @@ struct Slot {
     /// it waits only for its landing turn (ADR-t1591-1): its last look
     /// found another run landing.
     landing_turn: bool,
+    /// What the slot keeps of its run's recorded phases.
+    track: stages::PhaseTrack,
 }
 
 enum Phase {
@@ -1208,6 +1211,46 @@ enum Phase {
     /// The recovery job of a `failed` or `interrupted` run (ADR-0047
     /// decision 39), under a lease of its own.
     Recovery(EndedRecovery),
+}
+
+impl Phase {
+    /// The phase `run_phase_changed` records for this one, whose tags are
+    /// [`crate::domain::run_phase::Phase::tags`]: a phase added here does
+    /// not compile until it names one.
+    fn recorded(&self) -> crate::domain::run_phase::Phase {
+        use crate::domain::run_phase::Phase as Recorded;
+        match self {
+            Phase::Session(_) => Recorded::Worker,
+            Phase::Validating(..) => Recorded::Validating,
+            Phase::Review(_) => Recorded::Review,
+            Phase::ReviewHeld { .. } => Recorded::ReviewHeld,
+            Phase::Revise(_) => Recorded::Revise,
+            Phase::Exiting(_) => Recorded::Exiting,
+            Phase::Resume(_) => Recorded::Resume,
+            Phase::AwaitingSlot => Recorded::AwaitingSlot,
+            Phase::AwaitingE2e => Recorded::AwaitingE2e,
+            Phase::E2e(_) => Recorded::E2e,
+            Phase::Landing(_) => Recorded::Landing,
+            Phase::Recovery(_) => Recorded::Recovery,
+        }
+    }
+
+    /// The attempt this phase starts: a revise, a conflict request or a
+    /// resume, by its number; the other phases go on in the run's attempt.
+    fn attempt(&self) -> Option<crate::domain::run_phase::Attempt> {
+        use crate::domain::run_phase::{Attempt, AttemptKind};
+        match self {
+            Phase::Revise(watch) => Some(Attempt::of(
+                match watch.fix {
+                    Fix::Revise { .. } => AttemptKind::Revise,
+                    Fix::Conflict(_) => AttemptKind::Conflict,
+                },
+                watch.attempt,
+            )),
+            Phase::Resume(watch) => Some(Attempt::of(AttemptKind::Resume, watch.attempt)),
+            _ => None,
+        }
+    }
 }
 
 /// The session of a run the supervisor keeps open through validation,
@@ -2122,14 +2165,17 @@ impl Supervisor<'_> {
                 ClaimOutcome::NoReadyTask => return Ok(ClaimStep::Next),
             };
             self.claim.defer.claimed();
+            stages::record_claimed(&*self.queue, run.id());
             // The work interval starts at the claim, with its sample.
             self.claim.start_load(run.id(), attributes.load_avg);
             match self.provision(&run) {
                 Ok(watch) => {
                     let run = self.queue.run(run.id())?;
-                    self.claim
-                        .slots
-                        .admit(Slot::new(run, Phase::Session(watch)));
+                    self.claim.slots.admit_noting(
+                        Slot::new(run, Phase::Session(watch)),
+                        EventKind::AgentStarted.as_str(),
+                        &*self.queue,
+                    );
                 }
                 Err(error) => {
                     let message = format!("run {} provisioning failed: {error:#}", run.id());
@@ -2387,11 +2433,27 @@ impl Supervisor<'_> {
             }
             match stepped {
                 Ok(Step::Continue) => {
+                    // What moved without a move of its own: the landing
+                    // turn the step judged again.
+                    let cause = match &slot.waiting {
+                        Some(waiting) if waiting.ended.is_some() => {
+                            EventKind::RunWaitingEnded.as_str()
+                        }
+                        _ if slot.in_landing_queue() => "landing_turn",
+                        _ => "observed",
+                    };
+                    slot.note_phase(cause, &*self.queue);
                     self.claim.slots.put_back(index, slot);
                     index += 1;
                 }
                 Ok(Step::Done(run)) => {
                     info!(run_id = %run.id(), "run {} is {}", run.id(), run.status().as_str());
+                    stages::record_rest(
+                        &*self.queue,
+                        &run,
+                        slot.track.attempt(),
+                        run.status().as_str(),
+                    );
                     // Main moved: the runs that wait to land are checked
                     // against it (ADR-0068 decision 1).
                     if run.status() == RunStatus::Integrated {
@@ -2451,6 +2513,7 @@ impl Supervisor<'_> {
                     if let Err(error) = self.queue.release_lease(slot.run.id(), &self.token) {
                         warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: could not release the lease: {error:#}", slot.run.id());
                     }
+                    self.record_rest(slot.run.id(), slot.track.attempt(), "landing_not_started");
                     self.errors.push(RunError {
                         run_id: slot.run.id().clone(),
                         task_id: slot.run.task_id(),
@@ -2729,6 +2792,16 @@ impl Supervisor<'_> {
             message,
         });
     }
+    /// Record the phase of run `id` as it is now that no slot holds it
+    /// ([`stages::record_rest`]).
+    pub(super) fn record_rest(&self, id: &RunId, attempt: Option<run_phase::Attempt>, cause: &str) {
+        match self.queue.run(id) {
+            Ok(run) => stages::record_rest(&*self.queue, &run, attempt, cause),
+            Err(error) => {
+                warn!(run_id = %id, error = %format_args!("{error:#}"), "run {id}: could not record its phase: {error:#}");
+            }
+        }
+    }
     fn abandon(&mut self, run: &TaskRun, message: String, reason: &Reason) {
         self.abandon_with_session(run, message, reason, None);
     }
@@ -2747,6 +2820,7 @@ impl Supervisor<'_> {
         {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record the error: {error:#}", run.id());
         }
+        self.record_rest(run.id(), None, EventKind::RuntimeError.as_str());
         self.errors.push(RunError {
             run_id: run.id().clone(),
             task_id: run.task_id(),
@@ -2832,6 +2906,7 @@ impl Supervisor<'_> {
         {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record the resume error: {error:#}", run.id());
         }
+        self.record_rest(run.id(), None, EventKind::ResumeFinished.as_str());
         let session_may_live = self.queue.processes(run.id()).map_or(true, |processes| {
             processes
                 .iter()
@@ -2945,7 +3020,7 @@ impl Supervisor<'_> {
                     }
                 }
                 if let Some(phase) = self.e2e_before_landing(&slot.run)? {
-                    slot.phase = phase;
+                    slot.transition(phase, "e2e_due", &*self.queue);
                     return Ok(Step::Continue);
                 }
                 if !self
@@ -2984,14 +3059,19 @@ impl Supervisor<'_> {
                     Err(error) => return Err(error),
                 };
                 info!(run_id = %run.id(), "run {} lands onto main {main} ({})", run.id(), previous.as_str());
-                slot.phase =
+                let landing =
                     Phase::Landing(Some(self.spawn_landing(run.clone(), previous, main)?));
                 slot.run = run;
+                slot.transition(
+                    landing,
+                    EventKind::IntegrationStarted.as_str(),
+                    &*self.queue,
+                );
                 Ok(Step::Continue)
             }
             // Decided again as a run awaiting the slot.
             Phase::AwaitingE2e => {
-                slot.phase = Phase::AwaitingSlot;
+                slot.transition(Phase::AwaitingSlot, "e2e_waited", &*self.queue);
                 Ok(Step::Continue)
             }
             Phase::E2e(watch) => {
@@ -3082,10 +3162,14 @@ impl Supervisor<'_> {
                         resume: None,
                     };
                     slot.run = run;
-                    slot.phase = Phase::Exiting(ExitWatch::new(
-                        Some(session),
-                        AfterExit::Rest { close: true },
-                    ));
+                    slot.transition(
+                        Phase::Exiting(ExitWatch::new(
+                            Some(session),
+                            AfterExit::Rest { close: true },
+                        )),
+                        EventKind::SupervisionFinished.as_str(),
+                        &*self.queue,
+                    );
                     return Ok(Step::Continue);
                 }
                 if run.status() != RunStatus::Validating {
@@ -3098,7 +3182,11 @@ impl Supervisor<'_> {
                 };
                 let handle = self.validate(run.clone());
                 slot.run = run;
-                slot.phase = Phase::Validating(Some(handle), Some(session));
+                slot.transition(
+                    Phase::Validating(Some(handle), Some(session)),
+                    EventKind::SupervisionFinished.as_str(),
+                    &*self.queue,
+                );
                 Ok(Step::Continue)
             }
             Phase::Validating(handle, session) => {
@@ -3127,7 +3215,7 @@ impl Supervisor<'_> {
                     && self
                         .queue
                         .has_unclosed_ask(run.id(), AskKind::ApproveLanding)?;
-                slot.phase =
+                let next =
                     match after_validation(run.status(), history.approved(), awaits_landing_answer)
                     {
                         AfterValidation::Land => {
@@ -3139,6 +3227,7 @@ impl Supervisor<'_> {
                         }
                     };
                 slot.run = run;
+                slot.transition(next, EventKind::ValidationFinished.as_str(), &*self.queue);
                 Ok(Step::Continue)
             }
             Phase::ReviewHeld {
@@ -3149,8 +3238,9 @@ impl Supervisor<'_> {
                 if !self.review_held_waits(subagents) {
                     let (session, retried) = (session.take(), *retried);
                     let run = self.queue.run(slot.run.id())?;
-                    slot.phase = self.resume_review(&run, session, retried)?;
+                    let review = self.resume_review(&run, session, retried)?;
                     slot.run = run;
+                    slot.transition(review, "hold_ended", &*self.queue);
                 }
                 Ok(Step::Continue)
             }
@@ -3188,12 +3278,16 @@ impl Supervisor<'_> {
                 {
                     info!(run_id = %run.id(), "run {} review {attempt} stopped at the {} wall; it waits for the hold ask with its session open", run.id(), wall.as_str());
                     let retried = watch.retried;
-                    slot.phase = Phase::ReviewHeld {
-                        session,
-                        retried,
-                        subagents: Vec::new(),
-                    };
                     slot.run = run;
+                    slot.transition(
+                        Phase::ReviewHeld {
+                            session,
+                            retried,
+                            subagents: Vec::new(),
+                        },
+                        "review_held",
+                        &*self.queue,
+                    );
                     return Ok(Step::Continue);
                 }
                 // Another provider that cannot be used (Codex's login, usage
@@ -3232,8 +3326,8 @@ impl Supervisor<'_> {
                             retried,
                         )? {
                             Ok(phase) => {
-                                slot.phase = phase;
                                 slot.run = run;
+                                slot.transition(phase, "review_moved", &*self.queue);
                                 return Ok(Step::Continue);
                             }
                             Err(back) => {
@@ -3254,7 +3348,7 @@ impl Supervisor<'_> {
                     matches!(self.review_route(), landing::ReviewRoute::Manual(_)),
                     not_moved,
                 );
-                slot.phase = match outcome {
+                let next = match outcome {
                     ReviewEnd::Verdict(verdict) => {
                         let job = ActorContext::review_job(run.id(), attempt);
                         let mut finished = json!({
@@ -3320,6 +3414,7 @@ impl Supervisor<'_> {
                     }
                 };
                 slot.run = run;
+                slot.transition(next, EventKind::ReviewFinished.as_str(), &*self.queue);
                 Ok(Step::Continue)
             }
             Phase::Revise(watch) => {
@@ -3343,7 +3438,11 @@ impl Supervisor<'_> {
                         let run = self.queue.restart_validation(slot.run.id(), &self.token)?;
                         let handle = self.validate(run.clone());
                         slot.run = run;
-                        slot.phase = Phase::Validating(Some(handle), Some(session));
+                        slot.transition(
+                            Phase::Validating(Some(handle), Some(session)),
+                            kind.as_str(),
+                            &*self.queue,
+                        );
                     }
                     ReviseOutcome::Mismatch(code, why) => {
                         let message = revise_mismatch_request(&slot.run, &label, &why)?
@@ -3377,7 +3476,11 @@ impl Supervisor<'_> {
                                 );
                                 warn!(run_id = %slot.run.id(), "run {}: {why}", slot.run.id());
                                 let then = watch.fix.ask(why.clone(), why, None);
-                                slot.phase = Phase::Exiting(ExitWatch::new(Some(session), then));
+                                slot.transition(
+                                    Phase::Exiting(ExitWatch::new(Some(session), then)),
+                                    "fix_unsent",
+                                    &*self.queue,
+                                );
                             }
                         }
                     }
@@ -3389,7 +3492,7 @@ impl Supervisor<'_> {
                             None,
                         );
                         let exit = ExitWatch::new(Some(session), then);
-                        slot.phase = Phase::Exiting(exit);
+                        slot.transition(Phase::Exiting(exit), "fix_ended", &*self.queue);
                     }
                 }
                 Ok(Step::Continue)
@@ -3409,7 +3512,11 @@ impl Supervisor<'_> {
                     AfterExit::Land => {
                         self.queue_landing(&run, "exit");
                         slot.run = run;
-                        slot.phase = Phase::AwaitingSlot;
+                        slot.transition(
+                            Phase::AwaitingSlot,
+                            EventKind::LandingQueued.as_str(),
+                            &*self.queue,
+                        );
                         Ok(Step::Continue)
                     }
                     AfterExit::Ask {

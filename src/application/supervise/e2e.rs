@@ -232,7 +232,11 @@ impl Supervisor<'_> {
             .retry
             .insert(run.id().clone(), Instant::now() + retry);
         slot.run = run;
-        slot.phase = Phase::AwaitingSlot;
+        slot.transition(
+            Phase::AwaitingSlot,
+            EventKind::RunE2eFinished.as_str(),
+            &*self.queue,
+        );
         Ok(Step::Continue)
     }
 
@@ -368,7 +372,11 @@ impl Supervisor<'_> {
                 .record_runtime_event(run.id(), EventKind::RunE2eFinished, payload)?;
             info!(run_id = %run.id(), "run {}: its e2e passed at {}; it lands next", run.id(), watch.commit);
             slot.run = run;
-            slot.phase = Phase::AwaitingSlot;
+            slot.transition(
+                Phase::AwaitingSlot,
+                EventKind::RunE2eFinished.as_str(),
+                &*self.queue,
+            );
             return Ok(Step::Continue);
         }
         let reason = verdict

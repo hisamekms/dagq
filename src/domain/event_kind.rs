@@ -273,6 +273,7 @@ event_kinds! {
     RunEnvProgramMissing => "run_env_program_missing",
     RunInherited => "run_inherited",
     RunIntegrated => "run_integrated",
+    RunPhaseChanged => "run_phase_changed",
     RunPlanned => "run_planned",
     RunRecovered => "run_recovered",
     RunSlotRegained => "run_slot_regained",
@@ -835,6 +836,10 @@ pub const RUN_E2E_STARTED: &str = EventKind::RunE2eStarted.as_str();
 pub const RUN_E2E_WAITING: &str = EventKind::RunE2eWaiting.as_str();
 pub const RUN_INHERITED: &str = EventKind::RunInherited.as_str();
 pub const RUN_INTEGRATED: &str = EventKind::RunIntegrated.as_str();
+/// The phase a run moved to (ADR-t1662-1 decision 2): `phase`, its tags
+/// `blocker` and `holds`, `attempt`, `cause` and the rules' version `v`
+/// ([`super::run_phase::PhaseChange::payload`]).
+pub const RUN_PHASE_CHANGED: &str = EventKind::RunPhaseChanged.as_str();
 pub const RUN_PLANNED: &str = EventKind::RunPlanned.as_str();
 pub const RUN_RECOVERED: &str = EventKind::RunRecovered.as_str();
 /// The supervisor removed the temporary files directory (`TMPDIR`) the
@@ -1179,6 +1184,7 @@ mod tests {
             (EventKind::RunEnvProgramMissing, "run_env_program_missing"),
             (EventKind::RunInherited, "run_inherited"),
             (EventKind::RunIntegrated, "run_integrated"),
+            (EventKind::RunPhaseChanged, "run_phase_changed"),
             (EventKind::RunPlanned, "run_planned"),
             (EventKind::RunRecovered, "run_recovered"),
             (EventKind::RunSlotRegained, "run_slot_regained"),

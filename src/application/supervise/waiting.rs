@@ -36,6 +36,7 @@ impl Slot {
             consumed: Vec::new(),
             deferred: Vec::new(),
             landing_turn: false,
+            track: super::stages::PhaseTrack::default(),
         }
     }
 
@@ -240,6 +241,9 @@ impl Supervisor<'_> {
                 ended: None,
             },
         );
+        self.claim
+            .slots
+            .note_phase(index, EventKind::RunWaitingStarted.as_str(), &*self.queue);
         Ok(())
     }
 
@@ -560,6 +564,9 @@ impl Supervisor<'_> {
             let Some(waiting) = self.claim.slots.regain(index, &*self.files, now) else {
                 continue;
             };
+            self.claim
+                .slots
+                .note_phase(index, EventKind::RunSlotRegained.as_str(), &*self.queue);
             let run = self.claim.slots[index].run.id().clone();
             let used = self.used_slots();
             if let Err(error) = self.record_regained(&run, &waiting, used) {

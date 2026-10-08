@@ -550,9 +550,11 @@ impl Supervisor<'_> {
         match started {
             Ok(watch) => {
                 info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} ({}) recovery job {attempt} for {} started on {} (round {round})", run.id(), run.task_id(), run.status().as_str(), alert.as_str(), watch.job.provider.as_str());
-                self.claim
-                    .slots
-                    .admit(Slot::new(run, Phase::Recovery(watch)));
+                self.claim.slots.admit_noting(
+                    Slot::new(run, Phase::Recovery(watch)),
+                    EventKind::TriageStarted.as_str(),
+                    &*self.queue,
+                );
             }
             Err((failed, spawned)) => {
                 let error = format!("the recovery job could not start: {failed:#}");
@@ -1127,6 +1129,7 @@ impl Supervisor<'_> {
         }
     }
     pub(super) fn note_triaged(&mut self, run: &TaskRun) {
+        self.record_rest(run.id(), None, EventKind::TriageFinished.as_str());
         self.close_ended_landing_asks(Some(run.task_id()));
         self.clean_task_worktrees(run.task_id());
         let task = self

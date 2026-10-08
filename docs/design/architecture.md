@@ -127,7 +127,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 - table: `task_runs`・`run_leases`・`run_processes`・`session_workspaces`。
 - ファイル: queueのdirの`runs/<run-id>/`（`RunFiles`）とrunのworktree。
-- eventの種類: `run_*`・`lease_*`・`claim_*`・`worktree_*`・`workspace_*`・`wrapper_*`・`session_*`・`turn_*`・`review_*`・`revise_*`・`resume_*`・`triage_*`・`recovery_*`・`integration_*`・`landing_*`・`provider_*`・`push_*`ほか。
+- eventの種類: `run_*`・`lease_*`・`claim_*`・`worktree_*`・`workspace_*`・`wrapper_*`・`session_*`・`turn_*`・`review_*`・`revise_*`・`resume_*`・`triage_*`・`recovery_*`・`integration_*`・`landing_*`・`provider_*`・`push_*`・`run_phase_changed`ほか。
 
 **判断**（domain）: `domain::run`（`TaskRun`と遷移、`run::history`・`run::payload`）を中心に、receipt・review・resume・復旧・claimの控え・slot・待ち・stall・e2e・着地の保留・backgroundのwrapperの各module。
 
@@ -143,7 +143,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
   検証コマンドの実行は内部。
 - `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
 - 着地先のbranchの解決（`Repository::landing_branch`）を観測と分析のCIの見張りに公開する。
-  解決できなければ見張りは確かめず、着地先の保留に任せる。
+  解決できなければ見張りは確かめず着地先の保留に任せる。
 - `application::inherit`の`InheritStore`・`CarriedBranches`を計画管理の`ready --inherit`に公開する（T10）。
 - `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`のleaseとprocessの部分は内部。
 

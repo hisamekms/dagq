@@ -14,6 +14,7 @@
 
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
+use crate::domain::run_phase;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -781,8 +782,28 @@ fn push_main(
             error = %format_args!("{error:#}"),
             "run {run_id}: could not record {kind}: {error:#}"
         );
+    } else if let Err(error) = record_push_phase(queue, run_id, kind) {
+        warn!(
+            op = "push",
+            run_id = %run_id,
+            error = %format_args!("{error:#}"),
+            "run {run_id}: could not record the phase after {kind}: {error:#}"
+        );
     }
     report
+}
+
+/// Record the phase the push's outcome `kind` ends the landed run in
+/// ([`run_phase::Phase::after_push`]), in the run's attempt.
+fn record_push_phase<Q: RunLog + ?Sized>(queue: &Q, run_id: &RunId, kind: EventKind) -> Result<()> {
+    let (phase, cause) = run_phase::Phase::after_push(kind);
+    let attempt = run_phase::last_recorded(&queue.run_events(run_id)?)
+        .map_or(run_phase::Attempt::FIRST, |recorded| recorded.attempt);
+    queue.record_runtime_event(
+        run_id,
+        EventKind::RunPhaseChanged,
+        run_phase::PhaseChange::new(phase, attempt, cause).payload(),
+    )
 }
 
 /// What [`decide_push`] did: the report, the event recording it, and why

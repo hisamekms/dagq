@@ -2,7 +2,7 @@
 //! ([`RunRecovery`]).
 
 use super::*;
-use crate::domain::EventKind;
+use crate::domain::{EventKind, run_phase};
 
 impl SqliteQueue {
     /// The runs whose lease carries `token`, oldest first: what a supervisor
@@ -267,6 +267,15 @@ impl SqliteQueue {
         report["lease_deleted"] = json!(leases_deleted == 1);
         Reason::new(ReasonCode::Orphaned).apply_to(&mut report);
         run_event(&tx, id, EventKind::RunRecovered, report)?;
+        // An interrupted run ends; a landing given up waits to land or be
+        // reviewed again, which the supervisor takes up on its own.
+        let queued = run_events_of(&tx, id).is_ok_and(|events| {
+            let history = crate::domain::RunHistory::from_events(&events);
+            history.queued_approval().is_some() || history.recovered_landing().is_some()
+        });
+        if let Some(phase) = run_phase::Phase::at_rest(run.status(), queued) {
+            phase_event(&tx, id, phase, EventKind::RunRecovered)?;
+        }
         // No session of it is stalled any more (ADR-0047 decision 30).
         end_stalled_detections(&tx, id, STALL_RECOVERED_CLOSED, self.generators.clock.now())?;
         // The task stays in_progress; a retry is an explicit `ready` and a new run.
