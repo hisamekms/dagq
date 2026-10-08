@@ -69,37 +69,6 @@ pub fn backend_failure_payload(
     })
 }
 
-/// Whether the last [`TEXT_TAIL_LINES`] lines of `screen` show any trace
-/// of `text`: the head of its first non-blank line as it is typed (tabs as
-/// spaces, up to a backslash), or the `[Pasted text` Claude Code folds a
-/// long paste into. Only the last lines are read, so that an earlier copy
-/// of the same text in the scrollback does not count. A text with no head
-/// to look for counts as shown, so that it is never typed twice on a guess.
-pub fn text_on_screen(screen: &str, text: &str) -> bool {
-    let head: String = text
-        .split(['\n', '\r'])
-        .map(|line| line.replace('\t', " "))
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .trim()
-        .chars()
-        .take_while(|c| *c != '\\')
-        .take(TEXT_HEAD_CHARS)
-        .collect();
-    let head = head.trim_end();
-    let lines: Vec<&str> = screen.lines().collect();
-    let tail = lines[lines.len().saturating_sub(TEXT_TAIL_LINES)..].join("\n");
-    head.is_empty() || tail.contains(head) || tail.contains("[Pasted text")
-}
-
-/// [`text_on_screen`] looks for this many leading characters of a text,
-/// few enough to fit on the first line it wraps to.
-const TEXT_HEAD_CHARS: usize = 24;
-
-/// [`text_on_screen`] reads this many last lines of the screen: the input
-/// box and what was submitted last.
-const TEXT_TAIL_LINES: usize = 30;
-
 /// A failed backend call, handed back by [`RecordingBackend`] so that
 /// whoever records the error later can tell a cmux failure from others
 /// ([`reason_of_error`]). It prints exactly as the error it wraps, with or
@@ -107,8 +76,8 @@ const TEXT_TAIL_LINES: usize = 30;
 #[derive(Debug)]
 pub struct BackendFailure {
     pub op: String,
-    /// The failed call is known to have left nothing behind (a read, or a
-    /// text the screen shows no trace of), so it could be made again.
+    /// The failed call is known to have left nothing behind (a read), so
+    /// it could be made again.
     pub effect_free: bool,
     error: anyhow::Error,
 }
@@ -120,10 +89,6 @@ impl BackendFailure {
             effect_free,
             error,
         })
-    }
-
-    fn timed_out(&self) -> bool {
-        ReasonCode::of_backend_error(&format!("{:#}", self.error)) == ReasonCode::BackendTimeout
     }
 
     /// `backend_timeout` or `backend_failed`, with the call's `op`.
@@ -152,28 +117,6 @@ pub fn reason_of_error(error: &anyhow::Error, fallback: ReasonCode) -> Reason {
         .chain()
         .find_map(|cause| cause.downcast_ref::<BackendFailure>())
         .map_or_else(|| Reason::new(fallback), BackendFailure::reason)
-}
-
-/// Whether `error` is a cmux call that timed out without it being known
-/// whether it took effect: a send that may have reached the session, whose
-/// screen then tells whether it did (task 285), rather than be sent again.
-pub fn timed_out_maybe_sent(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<BackendFailure>())
-        .is_some_and(|failure| failure.timed_out() && !failure.effect_free)
-}
-
-/// Whether `error` is a `/exit` that timed out on every attempt with the
-/// screen showing each time that it did not get there (task 354): the
-/// session was not asked to exit.
-pub fn exit_unsent(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<BackendFailure>())
-        .is_some_and(|failure| {
-            failure.op == "send_exit" && failure.timed_out() && failure.effect_free
-        })
 }
 
 fn timed_out(error: &anyhow::Error) -> bool {
@@ -244,21 +187,16 @@ impl Recorder {
         })
     }
 
-    /// `call`, made again after a backoff (doubled each time) up to the
-    /// port's attempts in all while it fails with a timeout that
-    /// `effect_free` says left nothing behind. `effect_free` is asked after
-    /// the backoff, right before the call is made again, so that a call
-    /// that got through late, during the backoff, is not made twice (task
-    /// 354); after the last attempt it is asked at once. Every failed
-    /// attempt is recorded with its number and the backoff that followed
-    /// it.
+    /// `call`, a read that leaves nothing behind, made again after a
+    /// backoff (doubled each time) up to the port's attempts in all while
+    /// it fails with a timeout. Every failed attempt is recorded with its
+    /// number and the backoff that followed it.
     fn retried<T>(
         &self,
         limits: Limits,
         op: &str,
         workspace_id: &str,
         mut call: impl FnMut() -> Result<T>,
-        effect_free: impl Fn() -> bool,
     ) -> Result<T> {
         let attempts = limits.attempts.max(1);
         let mut backoff = limits.backoff;
@@ -269,12 +207,10 @@ impl Recorder {
                 Err(error) => error,
             };
             let timed_out = timed_out(&error);
-            let waited = timed_out && number < attempts;
-            if waited {
+            let retry = timed_out && number < attempts;
+            if retry {
                 thread::sleep(backoff);
             }
-            let effect_free = timed_out && effect_free();
-            let retry = waited && effect_free;
             let attempt = Attempt {
                 number,
                 of: attempts,
@@ -289,7 +225,7 @@ impl Recorder {
                 attempt,
             );
             if !retry {
-                return Err(BackendFailure::wrap(op, effect_free, error));
+                return Err(BackendFailure::wrap(op, timed_out, error));
             }
             backoff = backoff.saturating_mul(2);
             number += 1;
@@ -392,10 +328,8 @@ impl<'a> RecordingBackend<'a> {
         op: &str,
         workspace_id: &str,
         call: impl FnMut() -> Result<T>,
-        effect_free: impl Fn() -> bool,
     ) -> Result<T> {
-        self.recorder
-            .retried(self.limits(), op, workspace_id, call, effect_free)
+        self.recorder.retried(self.limits(), op, workspace_id, call)
     }
 }
 
@@ -405,39 +339,6 @@ impl WorkspaceBackend for RecordingBackend<'_> {
     }
     fn preflight_detached(&self, environment: &SupervisorEnvironment) -> Result<()> {
         self.inner.preflight_detached(environment)
-    }
-    /// A text that timed out is typed again only while the screen shows no
-    /// trace of it: one that got there is left to the submit check (task
-    /// 285), and one whose screen cannot be read is not guessed at.
-    fn send_text(&self, workspace_id: &str, text: &str) -> Result<()> {
-        self.retried(
-            "send_text",
-            workspace_id,
-            || self.inner.send_text(workspace_id, text),
-            // One read: a screen that does not answer at once is not
-            // waited for, and the text is not typed again.
-            || {
-                let screen = self.inner.capture(workspace_id);
-                self.recorded("capture", Some(workspace_id), screen)
-                    .is_ok_and(|screen| !text_on_screen(&screen, text))
-            },
-        )
-    }
-    fn send_enter(&self, workspace_id: &str) -> Result<()> {
-        let result = self.inner.send_enter(workspace_id);
-        self.recorded("send_enter", Some(workspace_id), result)
-    }
-    fn send_key(&self, workspace_id: &str, key: &str) -> Result<()> {
-        let result = self.inner.send_key(workspace_id, key);
-        self.recorded("send_key", Some(workspace_id), result)
-    }
-    fn capture(&self, workspace_id: &str) -> Result<String> {
-        self.retried(
-            "capture",
-            workspace_id,
-            || self.inner.capture(workspace_id),
-            || true,
-        )
     }
     fn close(&self, workspace_id: &str) -> Result<()> {
         let result = self.inner.close(workspace_id);
@@ -455,39 +356,8 @@ impl WorkspaceBackend for RecordingBackend<'_> {
         let result = self.inner.pin(workspace_id);
         self.recorded("pin", Some(workspace_id), result)
     }
-    /// Never made again: a second `/exit` could pick a dialog's option.
-    fn send_exit(&self, workspace_id: &str) -> Result<()> {
-        let result = self.inner.send_exit(workspace_id);
-        self.recorded("send_exit", Some(workspace_id), result)
-    }
-    /// A `/exit` that timed out is typed again only while the screen, read
-    /// once, shows it did not get there (`unsent`: the input box drawn, no
-    /// dialog, no trace of it), so it is never typed twice into a session
-    /// or a dialog (task 354). One that timed out on every attempt fails
-    /// as effect-free ([`exit_unsent`]).
-    fn send_exit_when(&self, workspace_id: &str, unsent: &dyn Fn(&str) -> bool) -> Result<()> {
-        self.retried(
-            "send_exit",
-            workspace_id,
-            || self.inner.send_exit(workspace_id),
-            || {
-                let screen = self.inner.capture(workspace_id);
-                self.recorded("capture", Some(workspace_id), screen)
-                    .is_ok_and(|screen| unsent(&screen))
-            },
-        )
-    }
     fn exists(&self, workspace_id: &str) -> Result<bool> {
-        self.retried(
-            "exists",
-            workspace_id,
-            || self.inner.exists(workspace_id),
-            || true,
-        )
-    }
-    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        let result = self.inner.listed_workspace_ids();
-        self.recorded("listed_workspace_ids", None, result)
+        self.retried("exists", workspace_id, || self.inner.exists(workspace_id))
     }
     fn create_named(
         &self,
@@ -656,13 +526,9 @@ impl SessionWrappers for RecordingSessions<'_> {
     /// A background session whose wrapper is gone still exists while the
     /// turn it left runs, so that whatever stops it stops that turn.
     fn exists(&self, handle: &str) -> Result<bool> {
-        let exists = self.recorder.retried(
-            self.limits(),
-            "exists",
-            handle,
-            || self.inner.exists(handle),
-            || true,
-        )?;
+        let exists = self.recorder.retried(self.limits(), "exists", handle, || {
+            self.inner.exists(handle)
+        })?;
         Ok(exists || self.left_turn(handle).is_some())
     }
     fn call_timeout(&self) -> Duration {
@@ -737,15 +603,6 @@ mod tests {
         fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
             unimplemented!()
         }
-        fn send_text(&self, _: &str, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn send_enter(&self, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn capture(&self, _: &str) -> Result<String> {
-            unimplemented!()
-        }
         fn close(&self, _: &str) -> Result<()> {
             self.call()
         }
@@ -758,14 +615,8 @@ mod tests {
         fn pin(&self, _: &str) -> Result<()> {
             unimplemented!()
         }
-        fn send_exit(&self, _: &str) -> Result<()> {
-            unimplemented!()
-        }
         fn exists(&self, _: &str) -> Result<bool> {
             self.call().map(|()| true)
-        }
-        fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-            unimplemented!()
         }
         fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
             unimplemented!()
@@ -841,7 +692,6 @@ mod tests {
         let reason = reason_of_error(&error, ReasonCode::Other);
         assert_eq!(reason.code, ReasonCode::BackendTimeout);
         assert_eq!(reason.detail["op"], "exists");
-        assert!(!timed_out_maybe_sent(&error));
 
         let backend = Backend::failing("injected workspace list failure", 1);
         let error = recording(&backend).exists("ws").unwrap_err();
@@ -876,7 +726,6 @@ mod tests {
             reason_of_error(&error, ReasonCode::Other).code,
             ReasonCode::BackendTimeout
         );
-        assert!(timed_out_maybe_sent(&error));
     }
 
     /// `wrapper_stopped` names the handle, its pid, how the wrapper ended,
@@ -1019,22 +868,5 @@ mod tests {
         assert_eq!(payload["attempt"], 2);
         assert_eq!(payload["max_attempts"], 3);
         assert_eq!(payload["retry_after_ms"], 4000);
-    }
-
-    #[test]
-    fn a_text_is_on_the_screen_by_the_head_of_its_first_line() {
-        let text = "answer to ask 12: rebase onto main and run the tests again\nthen commit";
-        assert!(text_on_screen("> answer to ask 12: rebase onto ma", text));
-        assert!(!text_on_screen("> ready", text));
-        // Up to a backslash, which is typed otherwise, and tabs as spaces.
-        assert!(text_on_screen("> see C:", "see C:\\path"));
-        assert!(text_on_screen("> a b", "\n\na\tb"));
-        // A long paste folded in the input box got there.
-        assert!(text_on_screen("> [Pasted text #1 +3 lines]", text));
-        // A copy far up the scrollback is not this one.
-        let old = format!("> {text}\n{}> ready", "work\n".repeat(40));
-        assert!(!text_on_screen(&old, text));
-        // Nothing to look for is never typed again on a guess.
-        assert!(text_on_screen("", "  "));
     }
 }

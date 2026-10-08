@@ -273,8 +273,6 @@ pub struct FakeCmux {
     /// `workspace create` reports failing although cmux makes the
     /// workspace, as a create that timed out does (task 806).
     pub create_times_out: bool,
-    /// The listing of every window's workspaces fails.
-    pub list_fails: bool,
     /// Workspaces created so far, so a UUID is never handed out twice.
     pub created: AtomicUsize,
 }
@@ -344,15 +342,6 @@ impl WorkspaceBackend for FakeCmux {
         }
         Ok(())
     }
-    fn send_text(&self, _: &str, _: &str) -> Result<()> {
-        bail!("up never types into a terminal")
-    }
-    fn send_enter(&self, _: &str) -> Result<()> {
-        bail!("up never types into a terminal")
-    }
-    fn capture(&self, _: &str) -> Result<String> {
-        bail!("not used")
-    }
     fn close(&self, workspace_id: &str) -> Result<()> {
         self.closed.lock().unwrap().push(workspace_id.to_owned());
         let mut workspaces = self.workspaces.lock().unwrap();
@@ -375,9 +364,6 @@ impl WorkspaceBackend for FakeCmux {
     fn pin(&self, workspace_id: &str) -> Result<()> {
         self.look("pin", workspace_id, String::new())
     }
-    fn send_exit(&self, _: &str) -> Result<()> {
-        bail!("not used")
-    }
     fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
         bail!("up does not notify")
     }
@@ -389,17 +375,6 @@ impl WorkspaceBackend for FakeCmux {
             .unwrap()
             .iter()
             .any(|(_, _, id, _)| id == workspace_id))
-    }
-    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        anyhow::ensure!(!self.list_fails, "workspace list failed");
-        Ok(self
-            .workspaces
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(_, _, id, _)| id.clone())
-            .collect())
     }
     fn ensure_group(&self, external_id: &str, name: &str) -> Result<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);

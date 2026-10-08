@@ -103,13 +103,11 @@ fn the_cmux_adapter_notifies_with_title_body_and_an_optional_workspace() {
     assert!(cmux.notify("fail", "body", None).is_err());
 }
 
-/// The real adapter types a text as one line (line breaks and tabs, which
-/// `cmux send` would read as keys, become spaces, and backslashes slashes)
-/// and submits it with Enter, and opens a named workspace (the inbox's) in
-/// its directory with its name, description, env and group. A run's
-/// session opens no workspace (ADR-t1433-3).
+/// The real adapter opens a named workspace (the inbox's) in its directory
+/// with its name, description, env and group. A run's session opens no
+/// workspace (ADR-t1433-3).
 #[test]
-fn the_cmux_adapter_sends_one_line_and_opens_a_named_workspace() {
+fn the_cmux_adapter_opens_a_named_workspace() {
     let dir = tempfile::tempdir().unwrap();
     let dump = dir.path().join("args.txt");
     let stub = dir.path().join("cmux-stub");
@@ -120,12 +118,6 @@ fn the_cmux_adapter_sends_one_line_and_opens_a_named_workspace() {
     );
 
     let cmux = Cmux { executable: stub };
-    cmux.send_text("WS", "line one\n\tline two\\n\n").unwrap();
-    assert_eq!(
-        fs::read_to_string(&dump).unwrap(),
-        "send\n--workspace\nWS\n--\nline one line two/n\nsend-key\n--workspace\nWS\n--\nenter\n"
-    );
-    fs::remove_file(&dump).unwrap();
     assert_eq!(
         cmux.create_named(
             "[my-repo]inbox",

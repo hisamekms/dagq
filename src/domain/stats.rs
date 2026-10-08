@@ -725,13 +725,6 @@ pub struct StallConfigReport {
     pub source: &'static str,
 }
 
-/// A workspace cmux lists: its stable ID and its description.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListedWorkspace {
-    pub id: String,
-    pub description: Option<String>,
-}
-
 /// What `stats` reads of a run not finished yet outside the queue: the
 /// files in its run directory, as unix milliseconds of their last write.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1142,15 +1142,6 @@ mod tests {
         fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
             Ok(())
         }
-        fn send_text(&self, _: &str, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn send_enter(&self, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn capture(&self, _: &str) -> Result<String> {
-            unreachable!()
-        }
         fn close(&self, _: &str) -> Result<()> {
             unreachable!()
         }
@@ -1163,13 +1154,7 @@ mod tests {
         fn pin(&self, _: &str) -> Result<()> {
             unreachable!()
         }
-        fn send_exit(&self, _: &str) -> Result<()> {
-            unreachable!()
-        }
         fn exists(&self, _: &str) -> Result<bool> {
-            unreachable!()
-        }
-        fn listed_workspace_ids(&self) -> Result<Vec<String>> {
             unreachable!()
         }
         fn create_named(

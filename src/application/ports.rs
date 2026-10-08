@@ -1202,23 +1202,6 @@ pub trait WorkspaceBackend {
     /// admits such a process only by socket password). A refusal is a
     /// [`DetachedRefusal`]; any other error means cmux could not be asked.
     fn preflight_detached(&self, environment: &SupervisorEnvironment) -> Result<()>;
-    /// Type one line at the session's prompt and submit it: the resolution
-    /// request to a resumed session, the only text besides `/exit` the
-    /// supervisor sends (ADR-0019). A long text is given time to be pasted
-    /// before the Enter. Whether it was submitted is the caller's to read
-    /// from the screen (task 285).
-    fn send_text(&self, workspace_id: &str, text: &str) -> Result<()>;
-    /// Press Enter alone: a text or `/exit` left in the input box after its
-    /// submit is submitted again without being typed twice (task 285).
-    fn send_enter(&self, workspace_id: &str) -> Result<()>;
-    /// Press one key (`down`, `up`, `enter`, `escape`): the answer to a
-    /// known dialog (ADR-0047 decision 29), the only keys the supervisor
-    /// sends besides Enter. A backend without keys refuses.
-    fn send_key(&self, workspace_id: &str, key: &str) -> Result<()> {
-        let _ = (workspace_id, key);
-        anyhow::bail!("this workspace backend sends no keys")
-    }
-    fn capture(&self, workspace_id: &str) -> Result<String>;
     /// Close the workspace; the worktree and branch are not touched. A
     /// pinned workspace is unpinned first, since cmux refuses to close one
     /// (ADR-0031); every close dagq makes goes through here.
@@ -1230,22 +1213,10 @@ pub trait WorkspaceBackend {
     fn set_status(&self, workspace_id: &str, key: &str, value: &str, icon: &str) -> Result<()>;
     /// Pin the workspace in the sidebar; pinning a pinned one is a no-op.
     fn pin(&self, workspace_id: &str) -> Result<()>;
-    /// Ask the agent session to end the way a person would, without killing it.
-    fn send_exit(&self, workspace_id: &str) -> Result<()>;
-    /// [`send_exit`](Self::send_exit), made again after a timeout while
-    /// `unsent` says from a screen read that the `/exit` did not get there
-    /// (task 354). A backend that retries nothing sends it once.
-    fn send_exit_when(&self, workspace_id: &str, unsent: &dyn Fn(&str) -> bool) -> Result<()> {
-        let _ = unsent;
-        self.send_exit(workspace_id)
-    }
     /// Whether the workspace with this stable ID is still open. Workspaces
     /// are found by the ID the queue recorded, never by their title, which
     /// people may rename (ADR-0026).
     fn exists(&self, workspace_id: &str) -> Result<bool>;
-    /// The stable IDs of every workspace cmux lists, in all its windows:
-    /// one listing for many checks.
-    fn listed_workspace_ids(&self) -> Result<Vec<String>>;
     /// Open a workspace that is not tied to a run (the inbox and planner
     /// sessions, the in-cmux supervisor) and return its stable ID. A run's
     /// session has no workspace: its wrapper starts in the background
@@ -1274,8 +1245,7 @@ pub trait WorkspaceBackend {
         std::time::Duration::from_secs(30)
     }
     /// How many times in all a call that timed out is made when making it
-    /// again is safe (a read, or a text that did not reach the screen;
-    /// task 326).
+    /// again is safe (a read; task 326).
     fn call_attempts(&self) -> u32 {
         3
     }

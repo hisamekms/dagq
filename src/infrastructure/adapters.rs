@@ -14,10 +14,7 @@ use crate::{
         measure::HostVersions,
         recovery::ProcessInfo,
         stall::IDLE_LOG,
-        stats::{
-            ListedWorkspace,
-            conflicts::{MainChange, MainCommit, MainHistory},
-        },
+        stats::conflicts::{MainChange, MainCommit, MainHistory},
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -2815,49 +2812,6 @@ impl WorkspaceBackend for Cmux {
         OUTPUT_TIMEOUT
     }
 
-    /// `cmux send` reads `\n`, `\r` and `\t` as keys, so the text goes as
-    /// one line with backslashes replaced; Enter submits it once the agent
-    /// had [`paste_settle`] to take the paste in (an Enter in the middle of
-    /// a long paste is taken as part of it, task 285).
-    fn send_text(&self, workspace_id: &str, text: &str) -> Result<()> {
-        let line = single_line(text);
-        output(Command::new(&self.executable).args([
-            "send",
-            "--workspace",
-            workspace_id,
-            "--",
-            &line,
-        ]))?;
-        thread::sleep(paste_settle(line.chars().count()));
-        self.send_enter(workspace_id)
-    }
-
-    fn send_enter(&self, workspace_id: &str) -> Result<()> {
-        self.send_key(workspace_id, "enter")
-    }
-
-    fn send_key(&self, workspace_id: &str, key: &str) -> Result<()> {
-        output(Command::new(&self.executable).args([
-            "send-key",
-            "--workspace",
-            workspace_id,
-            "--",
-            key,
-        ]))?;
-        Ok(())
-    }
-
-    fn capture(&self, workspace_id: &str) -> Result<String> {
-        output(Command::new(&self.executable).args([
-            "read-screen",
-            "--workspace",
-            workspace_id,
-            "--scrollback",
-            "--lines",
-            "2000",
-        ]))
-    }
-
     /// cmux refuses to close a pinned workspace ("protected", cmux
     /// 0.64.25), so the pin goes first. An unpin that fails (the
     /// workspace is already gone, say) does not stop the close, whose own
@@ -2894,28 +2848,8 @@ impl WorkspaceBackend for Cmux {
         self.workspace_action(workspace_id, &["pin"])
     }
 
-    /// Type `/exit` at Claude's prompt exactly as a person would.
-    fn send_exit(&self, workspace_id: &str) -> Result<()> {
-        output(Command::new(&self.executable).args([
-            "send",
-            "--workspace",
-            workspace_id,
-            "--",
-            "/exit",
-        ]))?;
-        thread::sleep(paste_settle("/exit".len()));
-        self.send_enter(workspace_id)
-    }
-
     fn exists(&self, workspace_id: &str) -> Result<bool> {
         Ok(workspace_listed(&self.workspace_listing()?, workspace_id))
-    }
-
-    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        Ok(listed_workspaces(&self.workspace_listing()?)?
-            .into_iter()
-            .map(|workspace| workspace.id)
-            .collect())
     }
 
     fn create_named(
@@ -3201,30 +3135,6 @@ pub fn workspace_listed(listing: &Value, id: &str) -> bool {
         })
 }
 
-/// Every workspace of a `cmux --json --id-format uuids workspace list`
-/// reply, with its description.
-pub fn listed_workspaces(listing: &Value) -> Result<Vec<ListedWorkspace>> {
-    listing
-        .get("workspaces")
-        .and_then(Value::as_array)
-        .context("cmux workspace list has no workspaces")?
-        .iter()
-        .map(|workspace| {
-            Ok(ListedWorkspace {
-                id: workspace
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .context("cmux listed a workspace without an ID")?
-                    .to_owned(),
-                description: workspace
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            })
-        })
-        .collect()
-}
-
 /// The group's UUID in a `cmux --json --id-format uuids workspace-group
 /// create` reply, which is the same whether the call created the group or
 /// found it by its external ID.
@@ -3233,24 +3143,6 @@ pub fn created_group_id(reply: &Value) -> Result<&str> {
         .pointer("/group/id")
         .and_then(Value::as_str)
         .context("cmux did not return the workspace group's ID")
-}
-
-/// `text` as one line for `cmux send`: line breaks and tabs become spaces
-/// and backslashes slashes, so nothing in it reads as a key.
-/// How long the agent is given to take in `chars` typed characters
-/// before the Enter that submits them: 300 ms and 1 ms for every 10
-/// characters, at most 3 s (1.6 s for a 13 KB resolution request).
-pub fn paste_settle(chars: usize) -> Duration {
-    Duration::from_millis((300 + chars as u64 / 10).min(3000))
-}
-
-pub fn single_line(text: &str) -> String {
-    text.split(['\n', '\r', '\t'])
-        .filter(|part| !part.trim().is_empty())
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace('\\', "/")
 }
 
 pub fn workspace_handle(raw: &str) -> Result<&str> {
@@ -4647,14 +4539,6 @@ mod tests {
         let _ = child.wait();
         assert_eq!(SystemProcesses.started_at(child.id()), None);
         assert_eq!(SystemProcesses.started_at(u32::MAX), None);
-    }
-
-    #[test]
-    fn a_long_paste_gets_more_time_before_its_enter() {
-        assert_eq!(paste_settle(5), Duration::from_millis(300));
-        assert_eq!(paste_settle(13_000), Duration::from_millis(1600));
-        assert_eq!(paste_settle(1_000_000), Duration::from_secs(3));
-        assert_eq!(single_line("a\\b\n\n  c\t"), "a/b   c");
     }
 
     #[test]
@@ -6188,29 +6072,6 @@ mod tests {
     }
 
     #[test]
-    fn listed_workspaces_read_the_ids_and_descriptions() {
-        let listing = serde_json::json!({"workspaces": [
-            {"id": "A", "description": "dagq role=worker queue=q run=r task=1"},
-            {"id": "B", "description": null}
-        ]});
-        assert_eq!(
-            listed_workspaces(&listing).unwrap(),
-            [
-                ListedWorkspace {
-                    id: "A".into(),
-                    description: Some("dagq role=worker queue=q run=r task=1".into()),
-                },
-                ListedWorkspace {
-                    id: "B".into(),
-                    description: None,
-                },
-            ]
-        );
-        assert!(listed_workspaces(&serde_json::json!({})).is_err());
-        assert!(listed_workspaces(&serde_json::json!({"workspaces": [{}]})).is_err());
-    }
-
-    #[test]
     fn created_group_id_reads_the_group_uuid() {
         let reply = serde_json::json!({
             "created": false,
@@ -6258,7 +6119,6 @@ esac
         assert!(cmux.exists("W-0").unwrap());
         assert!(cmux.exists("w-1").unwrap(), "a workspace of another window");
         assert!(!cmux.exists("W-2").unwrap());
-        assert_eq!(cmux.listed_workspace_ids().unwrap().len(), 2);
         let calls = fs::read_to_string(&log).unwrap();
         assert!(
             calls.contains(
