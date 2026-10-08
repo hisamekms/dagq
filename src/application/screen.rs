@@ -61,11 +61,11 @@ pub(crate) fn resolve_run(queue: &mut dyn Queue, target: &RunTarget) -> Result<T
 
 /// Why `run screen` is refused: no run's session has a screen to read
 /// (ADR-t1433-3 decision 4). The turns' log CLI takes its place.
-pub const RUN_SCREEN_REFUSED: &str = "run screen is refused: a run's session runs in the background without a screen (ADR-t1433-3; the interactive worker was retired, task 1437)";
+pub const RUN_SCREEN_REFUSED: &str = "run screen is refused: a run's session runs in the background without a screen, as every worker runs headless";
 
 /// Why `run close-workspaces` is refused: the runtime opens no workspace
 /// for a run, so there is none to clean up (ADR-t1433-3 decision 3).
-pub const CLOSE_WORKSPACES_REFUSED: &str = "run close-workspaces is refused: the runtime opens no workspace for a run any more and stops a run's background wrapper itself (ADR-t1433-3); close a workspace a run opened before in your own terminal";
+pub const CLOSE_WORKSPACES_REFUSED: &str = "run close-workspaces is refused: the runtime opens no workspace for a run any more and stops a run's background wrapper itself; close a workspace a run opened before in your own terminal";
 
 /// `run screen`: refused for every run, with the reason and the turns' log
 /// CLI (`dagq run log`) that replaced it (ADR-t1433-3 decision 4). The run
@@ -110,7 +110,7 @@ pub fn planner_screen(
     let reason = if session.route == PlannerRoute::Headless {
         "a headless planner has no screen"
     } else {
-        "the screen of a planner in a workspace is not read any more (ADR-t1433-2); read it in its workspace in your own terminal"
+        "the screen of a planner in a workspace is not read any more; read it in its workspace in your own terminal"
     };
     Ok(json!({
         "planner_id": planner,
@@ -135,7 +135,7 @@ pub fn planner_send(registry: &dyn SessionRegistry, planner: PlannerId) -> Resul
         );
     }
     bail!(
-        "planner {planner} takes no keys or answers: nothing is typed into a planner's terminal any more (ADR-t1433-2); answer its question with `answer`, and the supervisor delivers the answer"
+        "planner {planner} takes no keys or answers: nothing is typed into a planner's terminal any more; answer its question with `answer`, and the supervisor delivers the answer"
     )
 }
 

@@ -4214,7 +4214,7 @@ pub fn recovery_prompt(
             RecoveryAlert::StuckExit
             | RecoveryAlert::PromptWaiting
             | RecoveryAlert::LongBackground =>
-                "an alert of the retired interactive worker run (task 1437), which the supervisor no longer raises.",
+                "an alert of the retired interactive worker run, which the supervisor no longer raises.",
         },
         worktree = run.worktree_path().unwrap_or("none"),
         run_dir = run.run_dir().unwrap_or("none"),

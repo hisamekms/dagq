@@ -48,27 +48,30 @@ struct Cli {
 enum Command {
     /// Initialize the queue, creating its directory if needed. An existing queue is checked, never migrated.
     Init,
-    /// Apply the migrations this binary knows and the queue lacks; opening a queue never does (ADR-0045).
-    /// A breaking migration is refused while a supervisor, run or wrapper uses the queue, and the
+    // ADR-0045.
+    /// Apply the migrations this binary knows and the queue lacks; opening a queue never does. A
+    /// breaking migration is refused while a supervisor, run or wrapper uses the queue, and the
     /// database is copied to `backups/` first.
     Migrate {
         /// Report the schema and what would be applied, without changing anything.
         #[arg(long)]
         check: bool,
     },
+    // ADR-0045.
     /// Replace this dagq binary and hand the queue's live supervisor over to the new one without
-    /// waiting for its sessions (ADR-0045): build (or take) the binary, check its --version and a
-    /// start on a throwaway queue, apply the queue's compatible migrations, put it in place by a
-    /// rename that keeps the old one as <name>.previous, and ask the supervisor to exec it. A
-    /// failed handoff puts the old binary back.
+    /// waiting for its sessions: build (or take) the binary, check its --version and a start on a
+    /// throwaway queue, apply the queue's compatible migrations, put it in place by a rename that
+    /// keeps the old one as <name>.previous, and ask the supervisor to exec it. A failed handoff
+    /// puts the old binary back.
     Install {
         /// A checkout to build (`cargo build --release --locked -p dagq`), or a built binary.
         /// Default: build the main checkout of the repository of the working directory.
         #[arg(long, conflicts_with_all = ["rollback", "release"])]
         from: Option<PathBuf>,
-        /// Install a release of crates.io instead (ADR-t618-1): `cargo install --locked
-        /// dagq@<VERSION>` under the queue's update/release directory, then the same check, swap
-        /// and handoff. Without VERSION, the newest release.
+        // ADR-t618-1.
+        /// Install a release of crates.io instead: `cargo install --locked dagq@<VERSION>` under
+        /// the queue's update/release directory, then the same check, swap and handoff. Without
+        /// VERSION, the newest release.
         #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with = "rollback", value_name = "VERSION")]
         release: Option<String>,
         /// The cargo that installs a release (tests give a stub).
@@ -104,10 +107,10 @@ enum Command {
         /// handed-over supervisors.
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
+        // ADR-t963-1 decision 1.
         /// Install a checkout of dagq's source without first running its e2e (`cargo test --locked
-        /// --test e2e -- --ignored`, ADR-t963-1 decision 1), which otherwise must pass before
-        /// anything is replaced. For a person in a hurry; a built binary, `--rollback` and
-        /// `--release` have no e2e.
+        /// --test e2e -- --ignored`), which otherwise must pass before anything is replaced. For a
+        /// person in a hurry; a built binary, `--rollback` and `--release` have no e2e.
         #[arg(long)]
         skip_e2e: bool,
         /// A shell command in place of the e2e (tests).
@@ -116,13 +119,14 @@ enum Command {
         /// Seconds the e2e may run before it counts as failed.
         #[arg(long, hide = true, default_value_t = 1800)]
         e2e_timeout: u64,
+        // task 1048.
         /// Milliseconds between two looks at the supervisors asked to hand off (tests shorten
-        /// it, task 1048).
+        /// it).
         #[arg(long, hide = true, default_value_t = 500)]
         poll_ms: u64,
+        // ADR-0073 decision 13.
         /// Seconds each supervisor handed over may take to heartbeat on under the new binary
-        /// before the install puts the old one back and tells the inbox (ADR-0073 decision 13;
-        /// tests shorten it).
+        /// before the install puts the old one back and tells the inbox (tests shorten it).
         #[arg(long, hide = true, default_value_t = dagq::application::update::WATCH_TIMEOUT.as_secs())]
         watch_timeout: u64,
     },
@@ -159,35 +163,39 @@ enum Command {
         /// integrate refuses to land it. Omitted: no limit.
         #[arg(long = "paths")]
         paths: Vec<String>,
+        // ADR-t1639-1.
         /// How urgently the supervisor should claim it: interrupt (ahead of every other ready
         /// task), urgent (a defect stopping the operation), high (groundwork other work needs
-        /// soon), normal, or low (later). A ready task it waits for inherits it. Omitted: the
-        /// task inherits its goal's priority (normal without a goal) and follows a later change of
-        /// it (ADR-t1639-1).
+        /// soon), normal, or low (later). A ready task it waits for inherits it. Omitted: the task
+        /// inherits its goal's priority (normal without a goal) and follows a later change of it.
         #[arg(long, value_parser = PRIORITIES)]
         priority: Option<String>,
-        /// The kind of change the task makes (ADR-t980-1), as a label of the repository's own (a
-        /// lowercase slug of letters, digits, '-' and '_', not `unknown` or `all`); `stats`, `kpi`
-        /// and `forecast` group the runs by it. When dagq.toml has `[tasks] changes`, one of them,
-        /// and `lint` and `submit` refuse a task without one. Omitted: none.
+        // ADR-t980-1.
+        /// The kind of change the task makes, as a label of the repository's own (a lowercase slug
+        /// of letters, digits, '-' and '_', not `unknown` or `all`); `stats`, `kpi` and `forecast`
+        /// group the runs by it. When dagq.toml has `[tasks] changes`, one of them, and `lint` and
+        /// `submit` refuse a task without one. Omitted: none.
         #[arg(long)]
         change: Option<String>,
-        /// The agent the worker runs on (ADR-t813-2): claude or codex. Omitted: claude.
+        // ADR-t813-2.
+        /// The agent the worker runs on: claude or codex. Omitted: claude.
         #[arg(long, value_parser = PROVIDERS)]
         provider: Option<String>,
-        /// Run the worker non-interactively, one call per turn (ADR-t813-1), and store that mode.
-        /// Omitted: the provider's default, headless for Claude (ADR-t1340-1) and for codex
-        /// (its only mode); the task follows a later change of it.
+        // ADR-t813-1, ADR-t1340-1.
+        /// Run the worker non-interactively, one call per turn, and store that mode. Omitted: the
+        /// provider's default, headless for Claude and for codex (its only mode); the task
+        /// follows a later change of it.
         #[arg(long, conflicts_with = "interactive")]
         headless: bool,
-        /// Refused: the interactive worker was retired and every worker runs headless
-        /// (ADR-t1433-2). Read a run's turns with `run log --follow`; its questions come as
-        /// asks for `answer`.
+        // ADR-t1433-2.
+        /// Refused: the interactive worker was retired and every worker runs headless. Read
+        /// a run's turns with `run log --follow`; its questions come as asks for `answer`.
         #[arg(long)]
         interactive: bool,
+        // ADR-t1632-1.
         /// Claim the task only once the supervisor's own build (its build identifier's commit)
-        /// contains the landed commits of every task it --depends-on (ADR-t1632-1): for a task
-        /// whose work needs the fixed binary to carry them. Until then `status` lists it under
+        /// contains the landed commits of every task it --depends-on: for a task whose work
+        /// needs the fixed binary to carry them. Until then `status` lists it under
         /// `claim_deferrals` (reason not_in_build).
         #[arg(long)]
         wait_for_build: bool,
@@ -259,9 +267,9 @@ enum Command {
         /// Submit this proposal again after plan review sent it back, with the drafts it holds.
         #[arg(long, group = "members")]
         proposal: Option<i64>,
-        /// Open finding the proposal remedies; repeatable. It becomes proposed with the proposal
-        /// (ADR-0044 decision 19). A planner the runtime opened for a finding links that one
-        /// without it.
+        // ADR-0044 decision 19.
+        /// Open finding the proposal remedies; repeatable. It becomes proposed with the
+        /// proposal. A planner the runtime opened for a finding links that one without it.
         #[arg(long = "finding")]
         findings: Vec<i64>,
     },
@@ -287,9 +295,10 @@ enum Command {
     /// Cancel a draft, submitted or ready task. Does not satisfy its dependents.
     Cancel {
         id: i64,
-        /// Record the task as a duplicate of this one (ADR-0046): another task that exists and is
-        /// not canceled; a completed one means it is already implemented there. `show`, `list`
-        /// and `stats` report it.
+        // ADR-0046.
+        /// Record the task as a duplicate of this one: another task that exists and is not
+        /// canceled; a completed one means it is already implemented there. `show`, `list` and
+        /// `stats` report it.
         #[arg(long = "duplicate-of")]
         duplicate_of: Option<i64>,
     },
@@ -399,7 +408,8 @@ enum Command {
         /// Run the worker non-interactively (`add --headless`), named on the task.
         #[arg(long, group = "field", conflicts_with = "interactive")]
         headless: bool,
-        /// Refused, as `add --interactive` is: the interactive worker was retired (ADR-t1433-2).
+        // ADR-t1433-2.
+        /// Refused, as `add --interactive` is: the interactive worker was retired.
         #[arg(long, group = "field")]
         interactive: bool,
         /// Claim it only once the supervisor's build contains its dependencies' landings
@@ -410,10 +420,11 @@ enum Command {
         #[arg(long, group = "field")]
         no_wait_for_build: bool,
     },
-    /// Give a draft, submitted, ready or in-progress task a priority of its own (`add --priority`), or with
-    /// --inherit let it inherit its goal's again (ADR-t1639-1). It takes effect at the next claim,
-    /// or for an in-progress task at the next resume or recovery job of its run (ADR-t1850-1; the
-    /// user and the inbox only), and never stops a running run.
+    // ADR-t1639-1, ADR-t1850-1.
+    /// Give a draft, submitted, ready or in-progress task a priority of its own (`add --priority`),
+    /// or with --inherit let it inherit its goal's again. It takes effect at the next claim, or for
+    /// an in-progress task at the next resume or recovery job of its run (the user and the inbox
+    /// only), and never stops a running run.
     #[command(group = clap::ArgGroup::new("setting").required(true))]
     SetPriority {
         /// Draft, submitted, ready or in-progress task.
@@ -425,9 +436,10 @@ enum Command {
         #[arg(long, group = "setting")]
         inherit: bool,
     },
-    /// Give a draft a revisit time (ADR-t1540-1): when it comes, the runtime opens a planner for
-    /// the draft again, even one kept by a keep_draft answer or one a person added, with the last
-    /// decision about it in its prompt. Setting it again changes it; --clear removes it.
+    // ADR-t1540-1.
+    /// Give a draft a revisit time: when it comes, the runtime opens a planner for the draft
+    /// again, even one kept by a keep_draft answer or one a person added, with the last decision
+    /// about it in its prompt. Setting it again changes it; --clear removes it.
     #[command(group = clap::ArgGroup::new("when").required(true))]
     Revisit {
         /// Draft task.
@@ -472,10 +484,10 @@ enum Command {
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
         limit: u32,
     },
-    /// Record a change mark (ADR-0051 decision 12): a change the KPIs should be compared
-    /// before and after (a setting, the operation, the host). With --retract, record that an
-    /// earlier mark (a `dagq mark` or a `[run.env]` change) was none. Prints the mark. Not for
-    /// the observer or a job.
+    // ADR-0051 decision 12.
+    /// Record a change mark: a change the KPIs should be compared before and after (a setting,
+    /// the operation, the host). With --retract, record that an earlier mark (a `dagq mark` or
+    /// a `[run.env]` change) was none. Prints the mark. Not for the observer or a job.
     #[command(group = clap::ArgGroup::new("mark").required(true))]
     Mark {
         /// Short name of the change, e.g. "parallel 4→3" or "host arm64".
@@ -492,9 +504,10 @@ enum Command {
         #[arg(long, group = "mark")]
         retract: Option<i64>,
     },
-    /// List the change marks oldest first by when they took effect (ADR-0051 decision 12): the
-    /// recorded ones (supervisor start, handoff and stop, `[run.env]` changes, `dagq mark` and
-    /// its retractions) and the ones derived from the claims (`derived:dagq_version`,
+    // ADR-0051 decision 12.
+    /// List the change marks oldest first by when they took effect: the recorded ones
+    /// (supervisor start, handoff and stop, `[run.env]` changes, `dagq mark` and its
+    /// retractions) and the ones derived from the claims (`derived:dagq_version`,
     /// `derived:claude_version`, `derived:codex_version`, `derived:parallel`,
     /// `derived:toolchain`). Reads only.
     Marks {
@@ -505,7 +518,8 @@ enum Command {
         #[arg(long)]
         until: Option<dagq::domain::stats::Cursor>,
     },
-    /// Record a planning request for a planner of the runtime's (ADR-t1394-1), or decline one.
+    // ADR-t1394-1.
+    /// Record a planning request for a planner of the runtime's, or decline one.
     Request {
         #[command(subcommand)]
         command: RequestCommand,
@@ -519,12 +533,14 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// The landing branch's CI as the supervisor's [ci_watch] reads it (ADR-t1920-1).
+    // ADR-t1920-1.
+    /// The landing branch's CI as the supervisor's [ci_watch] reads it.
     Ci {
         #[command(subcommand)]
         command: CiCommand,
     },
-    /// Record a finding (ADR-0044 decision 18), or resolve or dismiss one.
+    // ADR-0044 decision 18.
+    /// Record a finding, or resolve or dismiss one.
     Finding {
         #[command(subcommand)]
         command: FindingCommand,
@@ -561,13 +577,14 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    // ADR-0046.
     /// Full-text search of tasks (title, description, acceptance, context), goals (title,
     /// description, acceptance, constraints), notes and the messages of landed commits, in every
-    /// status (ADR-0046). QUERY is words (all must match; `"..."` for a phrase) with FTS5's AND,
-    /// OR, NOT and parentheses; any substring of 3 or more characters matches, including in
-    /// Japanese, and shorter terms must all be present. Prints {"hits", "total"}, best first: per
-    /// hit its kind, id (a task, goal or note event ID, or a commit SHA), status, title and the
-    /// matching field with an excerpt marking the match with « ».
+    /// status. QUERY is words (all must match; `"..."` for a phrase) with FTS5's AND, OR, NOT and
+    /// parentheses; any substring of 3 or more characters matches, including in Japanese, and
+    /// shorter terms must all be present. Prints {"hits", "total"}, best first: per hit its kind,
+    /// id (a task, goal or note event ID, or a commit SHA), status, title and the matching field
+    /// with an excerpt marking the match with « ».
     Search {
         query: String,
         /// Only these statuses (comma-separated): a task's (draft, submitted, ready, in_progress,
@@ -587,14 +604,15 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
-    /// The tasks most related to TASK (any status, drafts included), scored by fixed rules
-    /// (ADR-0046 decision 4): declared paths that overlap; file names, test names (snake_case of
-    /// three or more words, `--test NAME`), ADR numbers and task numbers in the texts and landed
-    /// commit messages; follow-ups of the same run; the same goal; and how strongly the search
-    /// index matches TASK's title against the other task. A clue many tasks share counts less.
-    /// Prints {"task_id", "related", "total"}, best first: per task its id, status, title, score,
-    /// the clues that scored it ({"clue", "value", "weight"}) and `duplicate_of` when it was
-    /// canceled as a duplicate.
+    // ADR-0046 decision 4.
+    /// The tasks most related to TASK (any status, drafts included), scored by fixed rules:
+    /// declared paths that overlap; file names, test names (snake_case of three or more words,
+    /// `--test NAME`), ADR numbers and task numbers in the texts and landed commit messages;
+    /// follow-ups of the same run; the same goal; and how strongly the search index matches
+    /// TASK's title against the other task. A clue many tasks share counts less. Prints
+    /// {"task_id", "related", "total"}, best first: per task its id, status, title, score, the
+    /// clues that scored it ({"clue", "value", "weight"}) and `duplicate_of` when it was canceled
+    /// as a duplicate.
     Related {
         task_id: i64,
         /// Only these statuses (comma-separated): draft, submitted, ready, in_progress,
@@ -616,15 +634,16 @@ enum Command {
         #[arg(long)]
         ignore_deferrals: bool,
     },
+    // ADR-0077.
     /// Show the unfinished tasks' dependencies: per task its direct predecessors (`depends_on`),
-    /// its goal dependencies (`goal_dependencies`), what it still waits for (`ready_after`: unfinished
-    /// predecessors, then `{"goal": ID}` for goals not closed as achieved), the tasks it blocks
-    /// directly (including those waiting for its open goal) and how many it releases transitively
-    /// (`unblocks`), its `priority` and the `effective_priority` it inherits from the ready tasks
-    /// waiting for it; `candidates` in claim order less the deferred tasks (as `candidates`
-    /// shows them), `deferred` and the `critical` chain. With `--format d2`
-    /// or `svg`, the near-term dependency diagram instead (ADR-0077): the d2 source, or the SVG the
-    /// host's `d2 --layout=tala` draws from it.
+    /// its goal dependencies (`goal_dependencies`), what it still waits for (`ready_after`:
+    /// unfinished predecessors, then `{"goal": ID}` for goals not closed as achieved), the tasks it
+    /// blocks directly (including those waiting for its open goal) and how many it releases
+    /// transitively (`unblocks`), its `priority` and the `effective_priority` it inherits from the
+    /// ready tasks waiting for it; `candidates` in claim order less the deferred tasks (as
+    /// `candidates` shows them), `deferred` and the `critical` chain. With `--format d2` or `svg`,
+    /// the near-term dependency diagram instead: the d2 source, or the SVG the host's `d2
+    /// --layout=tala` draws from it.
     Graph {
         /// Only this goal's tasks and candidates; counts still span every goal.
         #[arg(long = "goal")]
@@ -651,9 +670,10 @@ enum Command {
         /// each pass), else 4.
         #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
         parallel: Option<u16>,
+        // ADR-0062.
         /// Maximum number of runs waiting for a person's answer outside the
-        /// --parallel slots (ADR-0062); 0 keeps every run in its slot.
-        /// Without it, `max_waiting` of `[supervisor]` in dagq.toml, else 4.
+        /// --parallel slots; 0 keeps every run in its slot. Without it,
+        /// `max_waiting` of `[supervisor]` in dagq.toml, else 4.
         #[arg(long)]
         max_waiting: Option<u16>,
         /// Claim no new run while the host's 1-minute load average is above
@@ -665,15 +685,17 @@ enum Command {
         /// waiting for new work.
         #[arg(long)]
         once: bool,
-        /// cmux executable, accepted from registered command lines: the supervisor calls no cmux
-        /// (ADR-t1433-1); only the e2e it runs before a landing and the update's job ping it.
+        // ADR-t1433-1.
+        /// cmux executable, accepted from registered command lines: the supervisor calls no
+        /// cmux; only the e2e it runs before a landing and the update's job ping it.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         /// Claude Code executable; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
-        /// Codex CLI the Codex workers start (ADR-t813-2); a bare name is resolved on PATH. When it
-        /// is not found, the supervisor goes on and starts Codex tasks with non-interactive Claude
+        // ADR-t813-2.
+        /// Codex CLI the Codex workers start; a bare name is resolved on PATH. When it is not
+        /// found, the supervisor goes on and starts Codex tasks with non-interactive Claude
         /// (provider_switched, reason executable_missing).
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
@@ -690,18 +712,21 @@ enum Command {
         /// Also run the daily observation of the last 24 hours once a day.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         observe_daily: bool,
-        /// Start the throughput reviews (ADR-t996-1, ADR-t1172-1): each hour one of the last hour, each
-        /// day one of yesterday and each week one of the ISO week before, saved under the queue's
-        /// reports/reviews/ and told to the inbox but for an hour the runtime's rules find quiet.
-        /// Default true, or false with --once.
+        // ADR-t996-1, ADR-t1172-1.
+        /// Start the throughput reviews: each hour one of the last hour, each day one of yesterday
+        /// and each week one of the ISO week before, saved under the queue's reports/reviews/ and
+        /// told to the inbox but for an hour the runtime's rules find quiet. Default true, or false
+        /// with --once.
         #[arg(long, action = clap::ArgAction::Set)]
         throughput_review: Option<bool>,
+        // ADR-0051 decision 20.
         /// Write the KPI reports of each finished day and ISO week under the queue's reports/
-        /// on the first pass after local midnight (ADR-0051 decision 20).
+        /// on the first pass after local midnight.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         report_daily: bool,
+        // ADR-0070.
         /// Record the forecast of every open task and goal as one event when a plan review
-        /// passes, on a change mark, after a landing that moved it and once a day (ADR-0070).
+        /// passes, on a change mark, after a landing that moved it and once a day.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         forecast_snapshots: bool,
         /// Record the host's load (load average, CPU and memory per kind of process, memory,
@@ -726,17 +751,20 @@ enum Command {
         /// Claude Code plugin directory the planners the runtime opens load.
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
-        /// Continue the registered supervisor with this token after it
-        /// exec'd this binary (ADR-0045 decision 10); set by the handoff.
+        // ADR-0045 decision 10.
+        /// Continue the registered supervisor with this token after it exec'd
+        /// this binary; set by the handoff.
         #[arg(long, hide = true)]
         handoff_token: Option<String>,
-        /// How `up` started this process, for its start mark (ADR-0051 decision 10); set by
-        /// `up`, which gives `launchd`. `in_cmux` comes only from the argv of a supervisor an
-        /// earlier binary started in the retired in-cmux mode.
+        // ADR-0051 decision 10.
+        /// How `up` started this process, for its start mark; set by `up`, which gives
+        /// `launchd`. `in_cmux` comes only from the argv of a supervisor an earlier binary
+        /// started in the retired in-cmux mode.
         #[arg(long, hide = true)]
         mode: Option<String>,
+        // ADR-0045 decision 17.
         /// Register with the automatic update on: build and install the runtime of every landing
-        /// on main that changes it (ADR-0045 decision 17). `up --auto-update` starts it so.
+        /// on main that changes it. `up --auto-update` starts it so.
         #[arg(long)]
         auto_update: bool,
         /// Seconds between two looks at main for the automatic update.
@@ -746,8 +774,9 @@ enum Command {
         /// dagq` (tests); it must leave the binary at $CARGO_TARGET_DIR/release/dagq.
         #[arg(long, hide = true)]
         update_build_command: Option<String>,
+        // ADR-t963-1 decision 1.
         /// A shell command the automatic update runs in place of its e2e gate (`cargo test --locked
-        /// --test e2e -- --ignored`, ADR-t963-1 decision 1; tests).
+        /// --test e2e -- --ignored`; tests).
         #[arg(long, hide = true)]
         update_e2e_command: Option<String>,
         /// Seconds the automatic update's e2e gate may run before it counts as failed.
@@ -760,8 +789,9 @@ enum Command {
         /// at the new supervisor's heartbeat (tests; the job's default is 500).
         #[arg(long, hide = true)]
         update_poll_ms: Option<u64>,
+        // task 1048.
         /// Milliseconds between two heartbeats of the registration and the leases (tests; 2000
-        /// by default, task 1048).
+        /// by default).
         #[arg(long, hide = true)]
         heartbeat_interval_ms: Option<u64>,
         /// Milliseconds between two looks for work while no run is active (tests; 2000 by
@@ -773,10 +803,11 @@ enum Command {
         #[arg(long, hide = true)]
         tick_ms: Option<u64>,
     },
-    /// The automatic update's job (ADR-0045 decision 17), which the supervisor starts: build
-    /// main's COMMIT in the queue's update checkout, check it, put it in place of --to like
-    /// `install` and watch the supervisor take it; on a failure put the old binary back, start the
-    /// supervisor again when it is gone, and open the `update_failed` ask.
+    // ADR-0045 decision 17.
+    /// The automatic update's job, which the supervisor starts: build main's COMMIT in the queue's
+    /// update checkout, check it, put it in place of --to like `install` and watch the supervisor
+    /// take it; on a failure put the old binary back, start the supervisor again when it is gone,
+    /// and open the `update_failed` ask.
     #[command(hide = true)]
     AutoUpdate {
         #[arg(long)]
@@ -795,8 +826,9 @@ enum Command {
         log: PathBuf,
         #[arg(long)]
         build_command: Option<String>,
+        // ADR-t963-1 decision 1.
         /// A shell command in place of the e2e the build passes before it is put in place (`cargo
-        /// test --locked --test e2e -- --ignored`, ADR-t963-1 decision 1).
+        /// test --locked --test e2e -- --ignored`).
         #[arg(long)]
         e2e_command: Option<String>,
         /// Seconds the e2e may run before it counts as failed.
@@ -816,15 +848,17 @@ enum Command {
         /// Seconds the new supervisor may take to heartbeat on.
         #[arg(long, default_value_t = 60)]
         watch_timeout: u64,
+        // task 1048.
         /// Milliseconds between two looks at the handoff and at the new supervisor's heartbeat
-        /// (tests shorten it, task 1048).
+        /// (tests shorten it).
         #[arg(long, hide = true, default_value_t = 500)]
         poll_ms: u64,
     },
-    /// The release update's job (ADR-t618-1 decision 5), which a supervisor of a release build
-    /// starts: `cargo install` RELEASE under the queue's update directory, check it, put it in
-    /// place of --to like `install` and watch the supervisor take it; on a failure put the old
-    /// binary back, start the supervisor again when it is gone, and open the `update_failed` ask.
+    // ADR-t618-1 decision 5.
+    /// The release update's job, which a supervisor of a release build starts: `cargo install`
+    /// RELEASE under the queue's update directory, check it, put it in place of --to like
+    /// `install` and watch the supervisor take it; on a failure put the old binary back, start
+    /// the supervisor again when it is gone, and open the `update_failed` ask.
     #[command(hide = true)]
     ReleaseUpdate {
         #[arg(long)]
@@ -854,20 +888,23 @@ enum Command {
         /// Seconds the new supervisor may take to heartbeat on.
         #[arg(long, default_value_t = 60)]
         watch_timeout: u64,
-        /// Only bring the installed claude-dagq plugin to RELEASE, the binary being it already
-        /// (ADR-t618-2 decision 4).
+        // ADR-t618-2 decision 4.
+        /// Only bring the installed claude-dagq plugin to RELEASE, the binary being it
+        /// already.
         #[arg(long)]
         plugin_only: bool,
     },
+    // ADR-0044 decision 4, ADR-t1222-1.
     /// Run the observer job once: a headless agent under DAGQ_ROLE=observer (Claude by default, or
-    /// Codex in its read-only sandbox when [roles.observer] of dagq.toml says provider = "codex"; the
-    /// supervisor passes the provider it routed the observer to) reads stats past the cursor, the open
-    /// findings, the latest notes, the open asks and the graph, and writes findings and blocked asks on
-    /// them only, through the queue service (ADR-0044 decision 4, ADR-t1222-1). Records observe_started / observe_finished and saves the new cursor.
-    /// observe_finished counts the failures in a row (consecutive_failures); the second reaches the inbox
-    /// (next: check the failed observer).
-    /// When no event but the observer's own came since the last observation, starts no agent and records
-    /// observe_finished with outcome skipped (unless --since is given). The agent loads no MCP server.
+    /// Codex in its read-only sandbox when [roles.observer] of dagq.toml says provider = "codex";
+    /// the supervisor passes the provider it routed the observer to) reads stats past the cursor,
+    /// the open findings, the latest notes, the open asks and the graph, and writes findings and
+    /// blocked asks on them only, through the queue service. Records observe_started /
+    /// observe_finished and saves the new cursor. observe_finished counts the failures in a row
+    /// (consecutive_failures); the second reaches the inbox (next: check the failed observer). When
+    /// no event but the observer's own came since the last observation, starts no agent and records
+    /// observe_finished with outcome skipped (unless --since is given). The agent loads no MCP
+    /// server.
     Observe {
         /// List the past observations instead, newest first: the events each read, the findings and asks it
         /// wrote, how long it took, whether it was skipped and what its prompt came to.
@@ -931,20 +968,21 @@ enum Command {
         #[arg(long, hide = true)]
         unavailable: Option<String>,
     },
-    /// Run the throughput review once (ADR-t996-1): for the last whole hour (--mode hourly), yesterday
-    /// (daily) or the ISO week before this one (weekly). Every hour is reviewed (ADR-t1172-1): the rules
-    /// the runtime's judgment of the hour met head its review, and only an hour that met one reaches the
-    /// inbox. A headless agent under DAGQ_ROLE=throughput-review-job, which may only read, follows the weekly review of the dagq
-    /// skill's reference/kpi.md: on Claude by default, or on Codex in its read-only sandbox when
-    /// [roles.throughput_review] of dagq.toml says provider = "codex" (the supervisor passes the
-    /// provider it routed the review to). The review is saved under <queue dir>/reports/reviews/ and its
-    /// conclusion reaches the inbox as throughput_review_reported (next: report the review), but for a
-    /// quiet hour's, which is only saved. A weekly
-    /// next move becomes a finding marked for a proposal. A review that fails or cannot start reaches the
-    /// inbox as its throughput_review_finished (next: check the failed review), except one whose Codex
-    /// could not be used (provider_unusable), which the supervisor reviews again on the other provider.
-    /// The prompt carries a summary of the inputs; the whole is input.json in the review's directory.
-    /// The agent loads no MCP server; the supervisor starts this on its timer.
+    // ADR-t996-1, ADR-t1172-1.
+    /// Run the throughput review once: for the last whole hour (--mode hourly), yesterday (daily)
+    /// or the ISO week before this one (weekly). Every hour is reviewed: the rules the runtime's
+    /// judgment of the hour met head its review, and only an hour that met one reaches the inbox. A
+    /// headless agent under DAGQ_ROLE=throughput-review-job, which may only read, follows the
+    /// weekly review of the dagq skill's reference/kpi.md: on Claude by default, or on Codex in its
+    /// read-only sandbox when [roles.throughput_review] of dagq.toml says provider = "codex" (the
+    /// supervisor passes the provider it routed the review to). The review is saved under <queue
+    /// dir>/reports/reviews/ and its conclusion reaches the inbox as throughput_review_reported
+    /// (next: report the review), but for a quiet hour's, which is only saved. A weekly next move
+    /// becomes a finding marked for a proposal. A review that fails or cannot start reaches the
+    /// inbox as its throughput_review_finished (next: check the failed review), except one whose
+    /// Codex could not be used (provider_unusable), which the supervisor reviews again on the other
+    /// provider. The prompt carries a summary of the inputs; the whole is input.json in the
+    /// review's directory. The agent loads no MCP server; the supervisor starts this on its timer.
     ThroughputReview {
         #[arg(long, default_value = "hourly", value_parser = ["hourly", "daily", "weekly"])]
         mode: String,
@@ -999,10 +1037,11 @@ enum Command {
         /// `[supervisor]` in the main checkout's dagq.toml, else 4.
         #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
         parallel: Option<u16>,
-        /// Maximum number of runs the supervisor keeps waiting for a
-        /// person's answer outside the --parallel slots (ADR-0062); 0 keeps
-        /// every run in its slot. Passed only when given; without it,
-        /// `max_waiting` of `[supervisor]` in dagq.toml, else 4.
+        // ADR-0062.
+        /// Maximum number of runs the supervisor keeps waiting for a person's
+        /// answer outside the --parallel slots; 0 keeps every run in its slot.
+        /// Passed only when given; without it, `max_waiting` of `[supervisor]`
+        /// in dagq.toml, else 4.
         #[arg(long)]
         max_waiting: Option<u16>,
         /// Maximum number of planners the supervisor's runtime opens at
@@ -1043,21 +1082,24 @@ enum Command {
         /// Claude Code executable; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
-        /// Codex CLI the supervisor's Codex workers start (ADR-t813-2); a bare name is resolved on
-        /// PATH and fixed on the supervisor like --claude. When it is not found, `up` goes on and
-        /// the supervisor starts Codex tasks with non-interactive Claude
-        /// (provider_switched, reason executable_missing).
+        // ADR-t813-2.
+        /// Codex CLI the supervisor's Codex workers start; a bare name is resolved on PATH and
+        /// fixed on the supervisor like --claude. When it is not found, `up` goes on and the
+        /// supervisor starts Codex tasks with non-interactive Claude (provider_switched, reason
+        /// executable_missing).
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
+        // ADR-0045 decision 17.
         /// Have the supervisor build and install the runtime of every landing on main that changes
-        /// it, in the queue's own checkout, and hand itself over to it (ADR-0045 decision 17). Kept
-        /// on the registration; an `up` without it turns it off.
+        /// it, in the queue's own checkout, and hand itself over to it. Kept on the registration;
+        /// an `up` without it turns it off.
         #[arg(long)]
         auto_update: bool,
     },
-    /// Refused: planners a person opens were abolished (ADR-t1394-1). Ask the inbox for a plan
-    /// instead; it records a planning request (`request add`) the runtime opens a planner for.
-    /// Prints the guidance and opens nothing.
+    // ADR-t1394-1.
+    /// Refused: planners a person opens were abolished. Ask the inbox for a plan instead; it
+    /// records a planning request (`request add`) the runtime opens a planner for. Prints the
+    /// guidance and opens nothing.
     Plan {
         /// What an older `dagq plan` took (`--plugin-dir`, `--repo`, `--cmux`, `--claude`):
         /// accepted and ignored, so the refusal shows its guidance.
@@ -1070,23 +1112,26 @@ enum Command {
         /// Include closed planners.
         #[arg(long)]
         all: bool,
-        /// cmux executable, accepted for older command lines: no planner's workspace is looked up in cmux (ADR-t1433-2).
+        // ADR-t1433-2.
+        /// cmux executable, accepted for older command lines: no planner's workspace is looked up
+        /// in cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
-    /// A run's session, named by its run id or its task id (the task's
-    /// latest run): read its screen, or send it a key of a fixed set or the
-    /// answer of an answered ask; or close the workspaces ended runs left
-    /// open (ADR-t1228-1). Each is recorded with its actor.
+    // ADR-t1228-1.
+    /// A run's session, named by its run id or its task id (the task's latest
+    /// run): read its screen, or send it a key of a fixed set or the answer of
+    /// an answered ask; or close the workspaces ended runs left open. Each is
+    /// recorded with its actor.
     Run {
         #[command(subcommand)]
         command: RunCommand,
     },
-    /// A planner's session, named by its planner id: `screen` says it has
-    /// no screen and where its turns are, and `send` is refused
-    /// (ADR-t1433-2); `log` prints a background planner's log; `request`
-    /// hands a headless planner of the runtime's a follow-up request as its
-    /// next turn, recorded with its actor (ADR-t1533-1).
+    // ADR-t1433-2, ADR-t1533-1.
+    /// A planner's session, named by its planner id: `screen` says it has no
+    /// screen and where its turns are, and `send` is refused; `log` prints a
+    /// background planner's log; `request` hands a headless planner of the
+    /// runtime's a follow-up request as its next turn, recorded with its actor.
     Planner {
         #[command(subcommand)]
         command: PlannerCommand,
@@ -1144,15 +1189,18 @@ enum Command {
         /// A choice to offer; repeat for several.
         #[arg(long = "option")]
         options: Vec<String>,
-        /// Why a person is needed (ADR-0047 decision 41): scope (the acceptance, the scope, an ADR or a goal's decision), discard (whether to throw work away) or recovery_failed.
-        /// Authentication and cost asks are the runtime's, one per queue.
-        /// A question that fits none of them is no ask: decide it yourself, or leave it as a note (`dagq note`).
+        // ADR-0047 decision 41.
+        /// Why a person is needed: scope (the acceptance, the scope, an ADR or a goal's decision),
+        /// discard (whether to throw work away) or recovery_failed. Authentication and cost asks
+        /// are the runtime's, one per queue. A question that fits none of them is no ask: decide it
+        /// yourself, or leave it as a note (`dagq note`).
         #[arg(long = "because", required = true, value_parser = ["scope", "discard", "recovery_failed", "authentication", "cost"])]
         because: Option<String>,
-        /// What a worker_question left undecided (ADR-t947-2); repeat for several, the first the
-        /// primary one (what stopped you first), the rest what must be decided with it. Required
-        /// for a worker_question and refused on any other kind. One of: discard_work (throw away
-        /// or redo the work), adr_conflict (the task contradicts an accepted ADR, a design or a
+        // ADR-t947-2.
+        /// What a worker_question left undecided; repeat for several, the first the primary one
+        /// (what stopped you first), the rest what must be decided with it. Required for a
+        /// worker_question and refused on any other kind. One of: discard_work (throw away or
+        /// redo the work), adr_conflict (the task contradicts an accepted ADR, a design or a
         /// person's decision), acceptance_conflict (two criteria cannot both hold),
         /// acceptance_infeasible (a fact keeps a criterion from being met), out_of_scope_change
         /// (a change outside the task's paths or description is needed), task_overlap (another
@@ -1162,13 +1210,14 @@ enum Command {
         /// when two came at once. A code outside the list is kept as given.
         #[arg(long = "topic")]
         topics: Vec<String>,
-        /// The option you recommend (ADR-t451-1 decision 1): one of the ask's --option texts (or
-        /// `propose` / `dismiss`, which the runtime adds to a blocked ask about a finding).
-        /// Required on a blocked ask (ADR-t451-1 decision 2), optional on every other kind; the
-        /// inbox shows it to the person next to the options.
+        // ADR-t451-1 decisions 1 and 2.
+        /// The option you recommend: one of the ask's --option texts (or `propose` / `dismiss`,
+        /// which the runtime adds to a blocked ask about a finding). Required on a blocked ask,
+        /// optional on every other kind; the inbox shows it to the person next to the options.
         #[arg(long = "recommend")]
         recommend: Option<String>,
-        /// How sure you are of the judgement behind the ask: high or low (ADR-t451-1 decision 1).
+        // ADR-t451-1 decision 1.
+        /// How sure you are of the judgement behind the ask: high or low.
         #[arg(long, value_parser = ["high", "low"])]
         confidence: Option<String>,
         /// Task the ask is about. Only a blocked ask, or a planner_question about a finding, may
@@ -1178,14 +1227,15 @@ enum Command {
         /// Run the ask is about (its task is implied).
         #[arg(long)]
         run: Option<String>,
-        /// Finding a blocked ask raises; one ask per finding stays open (ADR-0044 decision 23).
-        /// A blocked ask about a finding also offers `propose` and `dismiss`, which the runtime
-        /// applies to the finding. A planner_question names the finding its planner was opened
-        /// for (decision 19).
+        // ADR-0044 decisions 19 and 23.
+        /// Finding a blocked ask raises; one ask per finding stays open. A blocked ask about a
+        /// finding also offers `propose` and `dismiss`, which the runtime applies to the
+        /// finding. A planner_question names the finding its planner was opened for.
         #[arg(long)]
         finding: Option<i64>,
-        /// Planning request a planner_question is about: the one its planner was opened for
-        /// (ADR-t1394-1 decision 7).
+        // ADR-t1394-1 decision 7.
+        /// Planning request a planner_question is about: the one its planner was opened
+        /// for.
         #[arg(long, conflicts_with_all = ["task_id", "run", "finding"])]
         request: Option<i64>,
         /// Accepted and ignored: the inbox's watch notifies the person of a new ask.
@@ -1275,8 +1325,9 @@ enum Command {
         /// which come back with the next events that wake it; planner never.
         #[arg(long, value_parser = ROLES)]
         role: Option<String>,
+        // ADR-t1433-1.
         /// cmux executable the inbox's watch tells the person of each new ask through (`cmux
-        /// notify`, ADR-t1433-1); a bare name is resolved on PATH, and one not found tells nobody.
+        /// notify`); a bare name is resolved on PATH, and one not found tells nobody.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -1305,14 +1356,13 @@ enum Command {
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
+    // ADR-0051, ADR-t980-1.
     /// KPIs of the flow, rework, people's load, infrastructure, improvements and sessions per day
-    /// or ISO week (ADR-0051), split by the task's change (ADR-t980-1; `unknown` without one),
-    /// by the areas of
-    /// what the run landed when dagq.toml has `[areas]` (ADR-t980-1), and --by the claim's
-    /// attributes, each next to the previous period (and a day's 7-day median), judged
-    /// against the `[kpi.targets]` of dagq.toml and host.toml. --compare splits at a mark (its
-    /// event id) or a time, or compares two windows A..B,C..D, and lists every other mark in and
-    /// between them. Reads only; JSON.
+    /// or ISO week, split by the task's change (`unknown` without one), by the areas of what the
+    /// run landed when dagq.toml has `[areas]`, and --by the claim's attributes, each next to the
+    /// previous period (and a day's 7-day median), judged against the `[kpi.targets]` of
+    /// dagq.toml and host.toml. --compare splits at a mark (its event id) or a time, or compares
+    /// two windows A..B,C..D, and lists every other mark in and between them. Reads only; JSON.
     Kpi {
         #[arg(long, default_value = "day", value_parser = ["day", "week"])]
         period: String,
@@ -1354,11 +1404,12 @@ enum Command {
         #[arg(long = "goal")]
         goal_id: Option<i64>,
     },
+    // ADR-0070.
     /// When the open tasks (ready and in progress, outside a draft goal) and the open goals are
-    /// likely to finish if the plan flows as it is now (ADR-0070): the p50 and p90 of a seeded
-    /// simulation over the dependencies, the claim order, the slots and each change's landed runs
-    /// (the whole distribution for a change with fewer than `[kpi]` `min_samples`), with what it
-    /// assumed. New tasks are not added. Reads only and records nothing; JSON.
+    /// likely to finish if the plan flows as it is now: the p50 and p90 of a seeded simulation
+    /// over the dependencies, the claim order, the slots and each change's landed runs (the whole
+    /// distribution for a change with fewer than `[kpi]` `min_samples`), with what it assumed.
+    /// New tasks are not added. Reads only and records nothing; JSON.
     Forecast {
         /// Only this task, and its goal.
         #[arg(long = "task")]
@@ -1373,12 +1424,13 @@ enum Command {
         #[arg(long, default_value_t = dagq::domain::forecast::DEFAULT_TRIALS as u32, value_parser = clap::value_parser!(u32).range(1..=100_000))]
         trials: u32,
     },
-    /// Write the KPI report of a day or ISO week (ADR-0051 decision 21) as the supervisor writes it
-    /// daily: `dagq kpi --period P --at <the period>` with the build, the time and the top open
-    /// findings, as JSON and as one self-contained HTML page (no script, CSS, font or image from
-    /// anywhere else), under the queue's reports/ (daily/YYYY-MM-DD, weekly/YYYY-Www; today's and
-    /// this week's are named .partial), then index.html and the [report] retention of host.toml.
-    /// Prints the paths written. Changes no queue state.
+    // ADR-0051 decision 21.
+    /// Write the KPI report of a day or ISO week as the supervisor writes it daily: `dagq kpi
+    /// --period P --at <the period>` with the build, the time and the top open findings, as JSON
+    /// and as one self-contained HTML page (no script, CSS, font or image from anywhere else),
+    /// under the queue's reports/ (daily/YYYY-MM-DD, weekly/YYYY-Www; today's and this week's are
+    /// named .partial), then index.html and the [report] retention of host.toml. Prints the paths
+    /// written. Changes no queue state.
     Report {
         #[arg(long, default_value = "day", value_parser = ["day", "week"])]
         period: String,
@@ -1428,7 +1480,8 @@ enum Command {
         lease: String,
         #[arg(long)]
         claude: PathBuf,
-        /// The Codex CLI a Codex worker's turns call (ADR-t813-3).
+        // ADR-t813-3.
+        /// The Codex CLI a Codex worker's turns call.
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
         /// Reopen the session of a `needs_session` run the supervisor resumes.
@@ -1438,21 +1491,24 @@ enum Command {
         /// calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
-        /// Started by the supervisor in the background, without a
-        /// workspace or a terminal (ADR-t1404-1).
+        // ADR-t1404-1.
+        /// Started by the supervisor in the background, without a workspace or
+        /// a terminal.
         #[arg(long)]
         background: bool,
     },
+    // ADR-0048 decision 6.
     /// Record a SessionStart (`open`) or SessionEnd (`close`) of an inbox or planner session:
-    /// the plugin's hook passes its stdin, and the session's environment names its kind
-    /// (ADR-0048 decision 6). Only the session spans are written.
+    /// the plugin's hook passes its stdin, and the session's environment names its kind. Only
+    /// the session spans are written.
     #[command(hide = true)]
     SessionEvent {
         #[arg(value_parser = ["open", "close"])]
         event: String,
+        // task 734.
         /// The run whose session reports, when it is no inbox or planner
-        /// session: what the caller is authorized on (task 734). Without
-        /// it, the caller's `DAGQ_RUN_ID`. A run's session records no span.
+        /// session: what the caller is authorized on. Without it, the caller's
+        /// `DAGQ_RUN_ID`. A run's session records no span.
         #[arg(long)]
         run: Option<String>,
     },
@@ -1464,8 +1520,8 @@ enum Command {
         claude: PathBuf,
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
-        /// The model its agent starts with (ADR-0079 decision 7), given
-        /// with `--effort`.
+        // ADR-0079 decision 7.
+        /// The model its agent starts with, given with `--effort`.
         #[arg(long, requires = "effort")]
         model: Option<String>,
         #[arg(long, requires = "model")]
@@ -1475,12 +1531,14 @@ enum Command {
         /// calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
-        /// The planner's agent runs one call per turn (ADR-t1394-2): the
-        /// wrapper needs no terminal for it.
+        // ADR-t1394-2.
+        /// The planner's agent runs one call per turn: the wrapper needs no
+        /// terminal for it.
         #[arg(long)]
         headless: bool,
-        /// The supervisor started this wrapper in the background, without
-        /// a workspace (ADR-t1404-1 decision 8).
+        // ADR-t1404-1 decision 8.
+        /// The supervisor started this wrapper in the background, without a
+        /// workspace.
         #[arg(long, requires = "headless")]
         background: bool,
     },
@@ -1540,7 +1598,8 @@ enum FindingCommand {
         /// Run event that shows it; repeatable.
         #[arg(long = "evidence")]
         evidence: Vec<i64>,
-        /// Ask for a proposal to remedy it, with the reason (ADR-0044 decision 19).
+        // ADR-0044 decision 19.
+        /// Ask for a proposal to remedy it, with the reason.
         #[arg(long)]
         propose: Option<String>,
     },
@@ -1556,8 +1615,9 @@ enum FindingCommand {
         id: i64,
         #[arg(long)]
         reason: String,
-        /// The open task that already fixes the failure of a ci_failure finding (ADR-t1920-1):
-        /// that task's runs keep the finding's tests on the list of the tests that fail already.
+        // ADR-t1920-1.
+        /// The open task that already fixes the failure of a ci_failure finding: that task's
+        /// runs keep the finding's tests on the list of the tests that fail already.
         #[arg(long = "covered-by", value_name = "TASK")]
         covered_by: Option<i64>,
     },
@@ -1641,10 +1701,10 @@ enum ServiceCommand {
 
 #[derive(Subcommand, Clone)]
 enum RunCommand {
+    // ADR-t1433-3.
     /// Refused for every run, with the reason: a run's session runs in the
-    /// background without a screen (ADR-t1433-3). Read its turns with
-    /// `run log RUN [--follow]`. Nothing is read or recorded, and cmux is
-    /// not needed.
+    /// background without a screen. Read its turns with `run log RUN
+    /// [--follow]`. Nothing is read or recorded, and cmux is not needed.
     Screen {
         /// Run ID, or a task ID for the task's latest run.
         run: String,
@@ -1655,9 +1715,11 @@ enum RunCommand {
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
-    /// Refused for every run: no worker run takes keys or text since task
-    /// 1437. Answer the run's asks with `answer`; the supervisor delivers
-    /// the answer as the session's next turn. cmux is not needed.
+    // task 1437.
+    /// Refused for every run: no worker run takes keys or text, as every
+    /// worker runs headless. Answer the run's asks with `answer`; the
+    /// supervisor delivers the answer as the session's next turn. cmux is
+    /// not needed.
     Send {
         /// Run ID, or a task ID for the task's latest run.
         run: String,
@@ -1671,12 +1733,13 @@ enum RunCommand {
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
-    /// Print the output of the run's session wrapper started in the
-    /// background (ADR-t1404-1): the `[dagq]` summary of each turn (its
-    /// start, the agent's text, its tools, its outcome) in the log of the
-    /// session the run started last, an ended run's too. With --follow,
-    /// keep printing what the wrapper appends until it ends. A run whose
-    /// session ran in a workspace before ADR-t1433-3 has no log.
+    // ADR-t1404-1, ADR-t1433-3.
+    /// Print the output of the run's session wrapper started in the background:
+    /// the `[dagq]` summary of each turn (its start, the agent's text, its
+    /// tools, its outcome) in the log of the session the run started last, an
+    /// ended run's too. With --follow, keep printing what the wrapper appends
+    /// until it ends. A run whose session ran in a workspace an older binary
+    /// opened has no log.
     Log {
         /// Run ID, or a task ID for the task's latest run.
         run: String,
@@ -1687,10 +1750,11 @@ enum RunCommand {
         #[arg(long, short = 'f')]
         follow: bool,
     },
-    /// Refused: the runtime opens no workspace for a run any more and stops
-    /// a run's background wrapper itself (ADR-t1433-3). Close a workspace a
-    /// run opened before in your own terminal. The arguments are accepted
-    /// and ignored, and cmux is not needed.
+    // ADR-t1433-3.
+    /// Refused: the runtime opens no workspace for a run any more and stops a
+    /// run's background wrapper itself. Close a workspace a run opened before
+    /// in your own terminal. The arguments are accepted and ignored, and cmux
+    /// is not needed.
     CloseWorkspaces {
         /// Accepted and ignored.
         #[arg(conflicts_with = "task")]
@@ -1709,11 +1773,12 @@ enum RunCommand {
 
 #[derive(Subcommand, Clone)]
 enum PlannerCommand {
-    /// Print that the planner's session has no screen and where its turns
-    /// are (`turns/` of its directory): a planner of the runtime's runs
-    /// headless, and the terminal of a person's planner is not read any
-    /// more (ADR-t1433-2). Read its turns with `planner log`. Nothing is
-    /// read or recorded, and cmux is not needed.
+    // ADR-t1433-2.
+    /// Print that the planner's session has no screen and where its turns are
+    /// (`turns/` of its directory): a planner of the runtime's runs headless,
+    /// and the terminal of a person's planner is not read any more. Read its
+    /// turns with `planner log`. Nothing is read or recorded, and cmux is not
+    /// needed.
     Screen {
         planner: i64,
         /// Accepted and ignored: there is no screen to read.
@@ -1723,12 +1788,13 @@ enum PlannerCommand {
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
+    // ADR-t1404-1 decision 8.
     /// Print the output of the planner's session wrapper started in the
-    /// background (ADR-t1404-1 decision 8): the `[dagq]` summary of each
-    /// turn in `session.log` of its directory, a closed planner's too.
-    /// With --follow, keep printing what the wrapper appends until it
-    /// ends. A planner in a workspace (a person's, or one an older binary
-    /// opened for the runtime) is refused: its screen is not read any more.
+    /// background: the `[dagq]` summary of each turn in `session.log` of its
+    /// directory, a closed planner's too. With --follow, keep printing what the
+    /// wrapper appends until it ends. A planner in a workspace (a person's, or
+    /// one an older binary opened for the runtime) is refused: its screen is
+    /// not read any more.
     Log {
         planner: i64,
         /// Only the last N lines; without it, the whole log.
@@ -1738,11 +1804,12 @@ enum PlannerCommand {
         #[arg(long, short = 'f')]
         follow: bool,
     },
-    /// Refused for every planner, with the reason (ADR-t1433-2): nothing
-    /// is typed into a planner's session. Answer its `planner_question`
-    /// with `answer`, and the supervisor delivers the answer (to a headless
-    /// planner as its next turn); hand a headless planner a follow-up with
-    /// `planner request`. Nothing is recorded, and cmux is not needed.
+    // ADR-t1433-2.
+    /// Refused for every planner, with the reason: nothing is typed into a
+    /// planner's session. Answer its `planner_question` with `answer`, and the
+    /// supervisor delivers the answer (to a headless planner as its next turn);
+    /// hand a headless planner a follow-up with `planner request`. Nothing is
+    /// recorded, and cmux is not needed.
     Send {
         planner: i64,
         /// Accepted and ignored.
@@ -1837,13 +1904,15 @@ enum GoalCommand {
         /// Register a draft: its tasks are not candidates until `goal ready`.
         #[arg(long)]
         draft: bool,
-        /// The priority its tasks without one of their own inherit (ADR-t1639-1): interrupt,
-        /// urgent, high, normal or low; normal when left out. A planner of a request a person
-        /// gave a priority leaves it out: the runtime attaches the request's.
+        // ADR-t1639-1.
+        /// The priority its tasks without one of their own inherit: interrupt, urgent, high,
+        /// normal or low; normal when left out. A planner of a request a person gave a
+        /// priority leaves it out: the runtime attaches the request's.
         #[arg(long, value_parser = PRIORITIES)]
         priority: Option<String>,
-        /// A tag naming what the goal is about (ADR-t1639-1); repeatable. With `[goals] tags` in
-        /// dagq.toml, one of them.
+        // ADR-t1639-1.
+        /// A tag naming what the goal is about; repeatable. With `[goals] tags` in dagq.toml,
+        /// one of them.
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
@@ -1879,14 +1948,16 @@ enum GoalCommand {
         /// New document path; an empty value clears it.
         #[arg(long, group = "field")]
         doc: Option<String>,
+        // ADR-t1811-1, ADR-t1850-1.
         /// New priority of a draft or open goal; tasks without a priority of their own follow
         /// the goal's current priority in every status. It takes effect at a ready task's next
         /// claim or an in-progress task's next resume or recovery job, and never stops a running
-        /// run (ADR-t1811-1, ADR-t1850-1).
+        /// run.
         #[arg(long, group = "field", value_parser = PRIORITIES)]
         priority: Option<String>,
-        /// The tags that replace the goal's (ADR-t1639-1); repeatable. With `[goals] tags` in
-        /// dagq.toml, each one of them.
+        // ADR-t1639-1.
+        /// The tags that replace the goal's; repeatable. With `[goals] tags` in dagq.toml,
+        /// each one of them.
         #[arg(long = "tag", group = "field", conflicts_with = "no_tags")]
         tags: Vec<String>,
         /// Remove every tag of the goal.
@@ -4523,6 +4594,11 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+mod emitted_text;
+#[cfg(test)]
+mod history_citation;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -5010,6 +5086,52 @@ mod tests {
                 "`{path}` is on both lists"
             );
         }
+    }
+
+    #[test]
+    fn no_help_cites_a_dagq_adr_or_task_number() {
+        // Building clap's command needs more than a test thread's stack.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(every_help_is_plain)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The short and the long help of `dagq` and of every subcommand (what
+    /// `-h` and `--help` print, possible values included) state the rules
+    /// in plain words: a pointer for maintainers goes in a `//` comment,
+    /// which clap does not read.
+    fn every_help_is_plain() {
+        use clap::CommandFactory;
+        fn check(command: &mut clap::Command, path: &str, found: &mut Vec<String>) {
+            for help in [command.render_help(), command.render_long_help()] {
+                // Joined, so that a citation wrapped over two lines is found.
+                let text = help
+                    .to_string()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if let Some(citation) = crate::history_citation::first_citation(&text) {
+                    found.push(format!("`{path} --help`: {citation:?}"));
+                }
+            }
+            for sub in command.get_subcommands_mut() {
+                let path = format!("{path} {}", sub.get_name());
+                check(sub, &path, found);
+            }
+        }
+        let mut command = Cli::command();
+        command.build();
+        let mut found = Vec::new();
+        check(&mut command, "dagq", &mut found);
+        found.dedup();
+        assert!(
+            found.is_empty(),
+            "the help cites dagq's ADRs or task numbers; state the rule in plain words:\n{}",
+            found.join("\n")
+        );
     }
 
     /// `watch` asks to watch the queue, `graph --out` and `report` to

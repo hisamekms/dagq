@@ -119,7 +119,7 @@ impl KpiTables {
             }
             Some(target) => match key {
                 "kind" => bail!(
-                    "the key kind of a target was removed with the task's kind (ADR-t980-1); bound the target by change or area instead"
+                    "the key kind of a target was removed with the task's kind; bound the target by change or area instead"
                 ),
                 "change" => {
                     let change = parse_string(rest).context("value of change")?;

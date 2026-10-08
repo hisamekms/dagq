@@ -171,7 +171,7 @@ pub(super) fn check_judged(
     }
     ensure!(
         refused.is_empty(),
-        "follow_up drafts need a current membership judgement before submit or bypass (ADR-t1504-2): {}. Record one with `dagq judge-follow-up TASK --classification required|out_of_scope ...`",
+        "follow_up drafts need a current membership judgement before submit or bypass: {}. Record one with `dagq judge-follow-up TASK --classification required|out_of_scope ...`",
         refused.join("; ")
     );
     Ok(())

@@ -40,7 +40,7 @@ impl Supervisor<'_> {
         if warn {
             self.wrapper_setting_warned = true;
             warn!(
-                "[headless] wrapper = \"workspace\" of dagq.toml is ignored for workers: a worker's session wrapper always starts in the background (ADR-t1433-3)"
+                "[headless] wrapper = \"workspace\" of dagq.toml is ignored for workers: a worker's session wrapper always starts in the background"
             );
         }
     }
@@ -261,7 +261,7 @@ pub(crate) fn stop_run_session(
 ) -> Result<()> {
     if !is_background(id) {
         info!(
-            "the workspace {id} of a session opened before ADR-t1433-3 is left to a person to close"
+            "the workspace {id} of a session an older binary opened is left to a person to close"
         );
         return Ok(());
     }

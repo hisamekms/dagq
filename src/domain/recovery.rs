@@ -353,7 +353,7 @@ impl BareActionAnswer<'_> {
         }
         if self.action == RecoveryAction::RetryInherit.name() {
             message.push_str(&format!(
-                " To carry the run's branch over by hand now, user or inbox runs `dagq ready {task} --inherit --reason '...'` (ADR-t1962-1)."
+                " To carry the run's branch over by hand now, user or inbox runs `dagq ready {task} --inherit --reason '...'`."
             ));
         }
         message

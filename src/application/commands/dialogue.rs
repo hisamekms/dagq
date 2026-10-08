@@ -697,7 +697,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(
-                error.starts_with("a blocked ask needs --recommend (ADR-t451-1 decision 2)"),
+                error.starts_with("a blocked ask needs --recommend"),
                 "{error}"
             );
             assert!(error.contains("finding's --detail"), "{error}");

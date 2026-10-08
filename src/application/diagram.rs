@@ -516,7 +516,7 @@ impl Diagram {
     /// then the boxes, the edges and the legend, every shape at a fixed
     /// `top` / `left` for TALA.
     pub fn to_d2(&self) -> String {
-        let mut out = String::from("# dagq graph: near-term dependencies (ADR-0077)\n");
+        let mut out = String::from("# dagq graph: near-term dependencies\n");
         for frame in &self.frames {
             out.push_str(&format!(
                 "{key}: {{\n  label: {label}\n  label.near: top-left\n  shape: rectangle\n  top: {top}\n  left: {left}\n  width: {width}\n  height: {height}\n  style.fill: \"{FRAME_FILL}\"\n  style.stroke: \"{FRAME_STROKE}\"\n  style.stroke-dash: 3\n  style.font-size: {FONT_SIZE}\n}}\n",

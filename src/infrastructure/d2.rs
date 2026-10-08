@@ -74,7 +74,7 @@ impl Tools {
             .collect();
         let error = (!missing.is_empty()).then(|| {
             format!(
-                "{} not found on PATH: install it with mise and link it into ~/.local/bin (ADR-0077)",
+                "{} not found on PATH: install it with mise and link it into ~/.local/bin",
                 missing.join(" and ")
             )
         });

@@ -116,7 +116,7 @@ pub struct OpenedPlanner {
 /// person goes instead: the inbox, which records a planning request the
 /// runtime opens a planner for.
 pub const PLAN_REFUSED: &str = "dagq plan no longer opens a planner: planners a person opens were \
-abolished (ADR-t1394-1), and planning goes through the inbox. Ask the inbox for the plan in your \
+abolished, and planning goes through the inbox. Ask the inbox for the plan in your \
 own words; it records them as a planning request (`dagq request add --text '...'`, which a person \
 at a terminal without DAGQ_ROLE may run too), and the supervisor opens a planner of the runtime's \
 for it, which submits a proposal or declines the request with a reason (follow it with \
@@ -854,7 +854,7 @@ pub fn close_person_planners(queue: &dyn Queue) -> Result<Vec<PlannerId>> {
             continue;
         }
         let reason = format!(
-            "planner {} of a person, opened before dagq plan was abolished: its record is closed without cmux; a person closes its workspace{} in their own terminal (ADR-t1433-2)",
+            "planner {} of a person, opened before dagq plan was abolished: its record is closed without cmux; a person closes its workspace{} in their own terminal",
             planner.id,
             planner
                 .workspace_id

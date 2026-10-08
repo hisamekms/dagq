@@ -96,7 +96,7 @@ impl Planned {
     pub fn log_header(&self) -> Option<String> {
         self.replaced().then(|| {
             format!(
-                "# dagq: [{TABLE}] of dagq.toml runs this command in place of the task's {} (ADR-t1925-1)\n",
+                "# dagq: [{TABLE}] of dagq.toml runs this command in place of the task's {}\n",
                 self.replaces
                     .iter()
                     .map(|command| format!("{command:?}"))

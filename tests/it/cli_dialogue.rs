@@ -245,7 +245,7 @@ fn the_observer_still_records_findings_and_raises_blocked_asks() {
     let without = denied_as(&observer, &db, &strs(&ask("blocked", &["--finding", &id])));
     let reason = without["error"].as_str().unwrap();
     assert!(
-        reason.starts_with("a blocked ask needs --recommend (ADR-t451-1 decision 2)"),
+        reason.starts_with("a blocked ask needs --recommend:"),
         "{without}"
     );
     assert!(reason.contains("finding's --detail"), "{without}");

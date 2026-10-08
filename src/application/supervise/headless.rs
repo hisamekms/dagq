@@ -138,7 +138,7 @@ impl Supervisor<'_> {
     ) -> Result<()> {
         anyhow::ensure!(
             view.planner.route == PlannerRoute::Headless,
-            "planner {} was opened in a workspace: nothing is typed into it (ADR-t1433-2)",
+            "planner {} was opened in a workspace: nothing is typed into it",
             view.planner.id
         );
         let id = view.planner.id;

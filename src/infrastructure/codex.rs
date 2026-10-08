@@ -120,7 +120,7 @@ pub fn codex_at_entry(path: &Path) -> Result<PathBuf> {
 pub const RULES_PATH: &str = ".codex/rules/dagq-deny.rules";
 
 /// The content of [`RULES_PATH`].
-pub const RULES: &str = r#"# Written by dagq for this run's Codex worker (ADR-t813-3); not committed.
+pub const RULES: &str = r#"# Written by dagq for this run's Codex worker; not committed.
 prefix_rule(pattern=["pkill"], decision="forbidden", justification="dagq: stop only processes you started, by pid or task; pkill also stops other runs' sessions and checks")
 prefix_rule(pattern=["killall"], decision="forbidden", justification="dagq: stop only processes you started, by pid or task; killall also stops other runs' sessions and checks")
 "#;

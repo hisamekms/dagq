@@ -202,7 +202,7 @@ impl Supervisor<'_> {
                 self.ci.failures.succeed();
                 match (self.ci.available, outcome.available) {
                     (Some(true) | None, false) => warn!(
-                        "the CI cannot be read: no task is claimed and no run lands until it can (ADR-t1920-1)"
+                        "the CI cannot be read: no task is claimed and no run lands until it can"
                     ),
                     (Some(false), true) => {
                         info!("the CI can be read again; claiming and landing resume")

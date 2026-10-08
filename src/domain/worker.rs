@@ -18,7 +18,7 @@ string_enum!(WorkerMode {
 
 /// Why `add` and `edit` refuse `--interactive` (ADR-t1433-2), with what
 /// takes the place of watching and stepping into the worker's session.
-pub const INTERACTIVE_WORKER_RETIRED: &str = "--interactive is refused: the interactive worker was retired (ADR-t1433-2) and every worker runs headless, one non-interactive call per turn; read a run's turns with `dagq run log RUN --follow`, and its questions come as asks you reply to with `dagq answer`";
+pub const INTERACTIVE_WORKER_RETIRED: &str = "--interactive is refused: the interactive worker was retired and every worker runs headless, one non-interactive call per turn; read a run's turns with `dagq run log RUN --follow`, and its questions come as asks you reply to with `dagq answer`";
 
 /// Refuses a worker mode that `add` or `edit` gives when it is the retired
 /// interactive one (ADR-t1433-2); `headless` and none are accepted. A task

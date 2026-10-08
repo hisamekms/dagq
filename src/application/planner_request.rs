@@ -45,7 +45,7 @@ pub fn refused_by_row(planner: &PlannerSession) -> Option<String> {
     }
     if planner.route != PlannerRoute::Headless {
         return Some(format!(
-            "planner {id} is interactive: a follow-up request goes only to a headless planner, as its next turn, and nothing is typed into a terminal (ADR-t1533-1)"
+            "planner {id} is interactive: a follow-up request goes only to a headless planner, as its next turn, and nothing is typed into a terminal"
         ));
     }
     if planner.closed_at.is_some() {

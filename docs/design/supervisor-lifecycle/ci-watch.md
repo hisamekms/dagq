@@ -117,7 +117,7 @@ jobsを読めない実行の`ci_check_failed`は上の「実行の扱い」（`a
 | `detail` | 下の「修正taskが持つもの」をJSONの1 objectで（`tests`・`failed_jobs`・`range`・`url`・`binary_contains`・`binary_commit`） |
 | `impact` | `high` |
 | 根拠 | その実行の`ci_checked`と（あれば）`ci_turned_red`のevent ID |
-| proposalを求める印 | `propose_reason`: `CI on <branch> is red; a fix task is needed (ADR-t1920-1)` |
+| proposalを求める印 | `propose_reason`: `CI on <branch> is red; a fix task is needed` |
 
 - **鍵**: `added`の名前を辞書順に並べ、`\n`でつないだUTF-8のSHA-256の16進の先頭16文字に`ci_failure:`を付ける（`domain::ci_watch::failure_key`）。同じ種類・対象・鍵のfindingがあれば新しい行を作らずに更新する（`record_finding`の今の一致: 閉じていないものか、無ければ最後に閉じたもの）。`resolved`のfinding（下の「閉じ方」で閉じた同じ組がまた落ちた）は`open`に戻って回数と根拠が増え、印を付け直す。`dismissed`のfindingは回数と根拠を足すだけで印を付け直さない（ADR-0047決定18）。
 - **修正taskが持つもの**（findingの`detail`と、plannerがtaskの`description`に写すもの）:

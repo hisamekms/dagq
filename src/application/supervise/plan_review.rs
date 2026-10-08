@@ -1156,7 +1156,7 @@ impl Supervisor<'_> {
             && !self.route_setting_warned.swap(true, Ordering::Relaxed)
         {
             warn!(
-                "[roles.runtime_planner] route = {route:?} of dagq.toml is ignored: the runtime's planners run headless only, in the background (ADR-t1433-2)"
+                "[roles.runtime_planner] route = {route:?} of dagq.toml is ignored: the runtime's planners run headless only, in the background"
             );
         }
     }
@@ -1226,7 +1226,7 @@ impl Supervisor<'_> {
                     (
                         PlannerCloseCode::RuntimeSessionGone,
                         format!(
-                            "planner {id} of the runtime was opened in a workspace by an older binary; the runtime calls no cmux for its planners any more (ADR-t1433-2), so its record is closed and its workspace is left for a person to close"
+                            "planner {id} of the runtime was opened in a workspace by an older binary; the runtime calls no cmux for its planners any more, so its record is closed and its workspace is left for a person to close"
                         ),
                     )
                 } else if view.planner.answer_wait_at.is_some() {

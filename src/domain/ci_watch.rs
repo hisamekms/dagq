@@ -1053,7 +1053,7 @@ pub fn decide(
                 "binary_commit": facts.binary_commit,
                 "run": this,
             }),
-            propose: format!("CI on {branch} is red; a fix task is needed (ADR-t1920-1)"),
+            propose: format!("CI on {branch} is red; a fix task is needed"),
         }
     });
     let mut emptied: BTreeSet<i64> = watch
@@ -1819,10 +1819,7 @@ mod tests {
         assert_eq!(finding.detail["binary_commit"], "abc");
         assert_eq!(finding.detail["tests"], json!(["t a"]));
         assert_eq!(finding.detail["url"], red.url);
-        assert_eq!(
-            finding.propose,
-            "CI on main is red; a fix task is needed (ADR-t1920-1)"
-        );
+        assert_eq!(finding.propose, "CI on main is red; a fix task is needed");
     }
 
     #[test]
