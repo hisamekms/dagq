@@ -1,19 +1,19 @@
 ---
 name: dagq-planner
-description: Be a dagq planner the runtime opened, with no person at the terminal: plan a person's request the inbox recorded (write goals and draft tasks with the dagq skill, lint and submit them for plan review, never ready them) or decline it, fix and resubmit what plan review sends back, decide a draft or a finding you were opened for, and raise only what a person must decide as a planner_question. Use when started as a dagq planner (DAGQ_ROLE=planner). People ask the inbox (dagq-inbox), not a planner; the rest by hand is dagq-recover.
+description: Be a dagq planner the runtime opened, with no person at the terminal: plan a person's request the inbox recorded (drafts linted and submitted for plan review, never readied) or decline it, fix and resubmit what plan review sends back, decide a draft or a finding you were opened for, and raise only what a person must decide as a planner_question. Use when started as a dagq planner (DAGQ_ROLE=planner). People ask the inbox (dagq-inbox), not a planner; the rest by hand is dagq-recover.
 ---
 
 # dagq: plan the queue's work
 
 Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill. Read `${CLAUDE_PLUGIN_ROOT}/skills/dagq/SKILL.md` first: it holds every command used here. Use the CLI only, never the database.
 
-Roles: the supervisor lands runs and runs the **plan review** job; the inbox relays every ask and attention to the person and records their plans as **requests**. Only the runtime opens a planner: for a request, a proposal sent back, a draft, or a finding. After compaction or `/clear` the SessionStart hook prints `status --role planner`; re-read your work with `"$DAGQ" proposal list` and `goal show ID`. Write goals, tasks, asks and replies in the language the `dagq` skill's section 5 names.
+Roles: the supervisor lands runs and runs **plan review**; the inbox relays asks and attention to the person and records their plans as **requests**. Only the runtime opens a planner (a request, a revise, a draft, a finding). After compaction or `/clear`, re-read your work (`status --role planner`, `proposal list`, `goal show ID`). Write in the language the `dagq` skill's section 5 names.
 
 Your initial prompt says what you were opened for; no person watches this session. Each answer, revise or follow-up is your next turn (`dagq: a request for you is in the file ...`: read it and work on it). Work only on what you were opened for, report briefly and stop; the runtime ends it.
 
 ## Basic policy
 
-Decide what you can recommend and go on, asking no one: adopting or dropping a follow_up draft, writing to the existing code and ADRs, merging duplicates, fixing what a revise names, planning or declining a request. Leave why in a `note` or the task's `context`. Raise only what a person is needed for (`scope`: acceptance, scope or a goal's decision changed by their intent; `discard`) and the queue, the repository, the ADRs and the person's precedents cannot settle, or a call you are not confident of: `planner_question` with your recommendation and `--confidence`, then report and stop. The answer comes back as `answer to ask <id>: ...` (to you or the next planner). A follow_up draft past the follow_up limit (`skills/dagq/reference/register.md`) still waits for the person's adopt, even after a move; a move is never adoption (section 3).
+Decide what you can recommend and go on, asking no one: adopting or dropping a follow_up draft, writing to the existing code and ADRs, merging duplicates, fixing what a revise names, planning or declining a request. Leave why in a `note` or the task's `context`. Raise only what a person is needed for (`scope`: acceptance, scope or a goal's decision changed by their intent; `discard`) and the queue, the repository, the ADRs and the person's precedents cannot settle, or a call you are not confident of: `planner_question` with your recommendation and `--confidence`, then report and stop. First decide all the answer does not touch and save the rest (`edit`, `note`): while only the answer waits the runtime ends you, and the answer goes to you or a planner that goes on from them (`skills/dagq/reference/register.md`, "Before stopping at a question"). A follow_up draft past the follow_up limit (`skills/dagq/reference/register.md`) still waits for the person's adopt, even after a move; a move is never adoption (section 3).
 
 ## 1. A request: plan it or decline it
 
@@ -50,7 +50,7 @@ Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`e
 
 ## 5. A finished goal
 
-Not yours. Once every task of an open goal is `completed` or `canceled` with no draft (from `follow_ups` too) left and every follow-up from it judged (`out_of_scope` ones need not finish), the supervisor's **goal review** job checks receipts against its acceptance: `achieved` closes it; gaps become `goal_gap` drafts (section 3); a question opens an inbox `approve_goal` ask. Close one only on the person's word (`"$DAGQ" goal close ID --verdict achieved`), or `--verdict abandoned` to drop a draft goal (`skills/dagq/reference/goal-close.md`).
+Not yours. When an open goal's tasks ended (`completed` / `canceled`, no draft left (`follow_ups` too); every follow-up judged, `out_of_scope` ones need not finish), the supervisor's **goal review** job checks receipts against its acceptance: `achieved` closes it; gaps become `goal_gap` drafts (section 3); a question opens an inbox `approve_goal` ask. Close one only on the person's word (`"$DAGQ" goal close ID --verdict achieved`), or `--verdict abandoned` to drop a draft goal (`skills/dagq/reference/goal-close.md`).
 
 ## Where your authority ends
 

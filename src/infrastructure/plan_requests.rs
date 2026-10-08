@@ -186,10 +186,14 @@ impl PlanRequestStore for SqliteQueue {
             // The answer is routed again as it is now: answered, not closed
             // (the inbox may have closed it since the supervisor read it),
             // and still for a new planner of this request.
+            // A planner of the request still open (asked to exit because
+            // only a person's answer was left) is waited for: one planner
+            // per request (ADR-t1704-1 decision 2).
             Some(ask) => {
                 let ask = read_ask(&tx, ask)?;
                 super::draft_planners::answer_request(&tx, &ask)? == Some(request)
                     && super::draft_planners::route_of(&tx, &ask)? == PlannerAnswerRoute::NewPlanner
+                    && open_planner_of(&tx, request)?.is_none()
             }
         };
         if !eligible {
@@ -270,7 +274,7 @@ pub(super) fn read_request(conn: &Connection, id: RequestId) -> Result<PlanReque
         .query_map([id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let planners: i64 = conn.query_row(
-        "SELECT count(*) FROM planners WHERE request_id=?1",
+        "SELECT count(*) FROM planners WHERE request_id=?1 AND answer_wait_at IS NULL",
         [id],
         |r| r.get(0),
     )?;
@@ -331,12 +335,20 @@ fn open_planner_of(conn: &Connection, request: RequestId) -> Result<Option<Plann
         .optional()?)
 }
 
+/// The planner of the runtime's open for `request` that an answer may
+/// still go to: not one asked to exit because only a person's answer was
+/// left (ADR-t1704-1 decision 2), whose answer waits for a new planner
+/// once its row is closed.
+fn answering_planner_of(conn: &Connection, request: RequestId) -> Result<Option<PlannerSession>> {
+    Ok(open_planner_of(conn, request)?.filter(|planner| planner.answer_wait_at.is_none()))
+}
+
 /// Where the answer of a `planner_question` about `request` goes
 /// (ADR-t1394-1 decision 7): the planner of the runtime's open for it;
 /// else a new planner while the request is still `open`; else closed by
 /// the supervisor (it was proposed, declined or ran out).
 pub(super) fn route_of(conn: &Connection, request: RequestId) -> Result<PlannerAnswerRoute> {
-    if let Some(planner) = open_planner_of(conn, request)? {
+    if let Some(planner) = answering_planner_of(conn, request)? {
         return Ok(PlannerAnswerRoute::Planner(Box::new(planner)));
     }
     // No planner open for it: the request is read only then.
@@ -354,7 +366,7 @@ pub(super) fn route_of(conn: &Connection, request: RequestId) -> Result<PlannerA
 /// when the request is no longer `open` (proposed, declined or out of
 /// planners), so the draft is decided.
 pub(super) fn draft_route_of(conn: &Connection, request: RequestId) -> Result<PlannerAnswerRoute> {
-    Ok(match open_planner_of(conn, request)? {
+    Ok(match answering_planner_of(conn, request)? {
         Some(planner) => PlannerAnswerRoute::Planner(Box::new(planner)),
         None => PlannerAnswerRoute::NewPlanner,
     })

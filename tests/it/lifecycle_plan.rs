@@ -307,8 +307,22 @@ fn each_runtime_planner_starts_its_wrapper_in_the_background_without_a_workspace
     let (db, _, root, _, plugin_dir) = &paths;
     let launch = launch(&fixture, &queue, &backend, &paths, None);
     let reasons = vec!["split it".to_owned()];
-    let first = open_runtime_planner(&launch, first_proposal, &[first_task], &reasons).unwrap();
-    let second = open_runtime_planner(&launch, second_proposal, &[second_task], &reasons).unwrap();
+    let first = open_runtime_planner(
+        &launch,
+        first_proposal,
+        &[first_task],
+        &reasons,
+        Default::default(),
+    )
+    .unwrap();
+    let second = open_runtime_planner(
+        &launch,
+        second_proposal,
+        &[second_task],
+        &reasons,
+        Default::default(),
+    )
+    .unwrap();
     let launched = backend.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 2);
     for (index, (opened, id)) in [(&first, 1), (&second, 2)].into_iter().enumerate() {
@@ -381,7 +395,14 @@ fn each_runtime_planner_starts_its_wrapper_in_the_background_without_a_workspace
     };
     let (third_proposal, third_task) = proposal(&mut queue, "third");
     let launch = self::launch(&fixture, &queue, &failing, &paths, None);
-    let error = open_runtime_planner(&launch, third_proposal, &[third_task], &reasons).unwrap_err();
+    let error = open_runtime_planner(
+        &launch,
+        third_proposal,
+        &[third_task],
+        &reasons,
+        Default::default(),
+    )
+    .unwrap_err();
     assert!(
         format!("{error:#}").contains("the wrapper could not start"),
         "{error:#}"
@@ -426,8 +447,14 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
         }),
     );
     let reasons = vec!["the acceptance is not testable".to_owned()];
-    let opened =
-        open_runtime_planner(&launch, proposal, std::slice::from_ref(&task), &reasons).unwrap();
+    let opened = open_runtime_planner(
+        &launch,
+        proposal,
+        std::slice::from_ref(&task),
+        &reasons,
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(opened.planner.origin, PlannerOrigin::Runtime);
     assert_eq!(opened.planner.proposal_id, Some(proposal));
     let prompt = fs::read_to_string(opened.dir.join("prompt.txt")).unwrap();
@@ -500,9 +527,16 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
         Some(proposal)
     );
     // Nothing to fix and no reasons still makes a prompt that says so.
-    let empty = dagq::application::prompt::runtime_planner_prompt(&db, proposal, &[], &[], None)
-        .unwrap()
-        .text;
+    let empty = dagq::application::prompt::runtime_planner_prompt(
+        &db,
+        proposal,
+        &[],
+        &[],
+        None,
+        Default::default(),
+    )
+    .unwrap()
+    .text;
     assert!(
         empty.contains("(none given)") && empty.contains("(none)"),
         "{empty}"
@@ -512,7 +546,13 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
         assert!(empty.contains(expected), "{expected}\n{empty}");
     }
 
-    let missing = open_runtime_planner(&launch, ProposalId::new(99), &[], &reasons);
+    let missing = open_runtime_planner(
+        &launch,
+        ProposalId::new(99),
+        &[],
+        &reasons,
+        Default::default(),
+    );
     assert!(missing.is_err());
     assert_eq!(queue.planners(true).unwrap().len(), 1);
 }
@@ -847,6 +887,7 @@ fn a_new_planner_does_not_take_the_idle_marker_an_old_database_left() {
         proposal,
         &[task],
         &[],
+        Default::default(),
     )
     .unwrap()
     .planner

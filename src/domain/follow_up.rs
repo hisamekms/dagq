@@ -345,13 +345,17 @@ pub fn bundles(targets: Vec<DraftTarget>) -> Vec<Vec<DraftTarget>> {
 
 // What became of one draft of a bundle when its planner ended
 // (ADR-t807-1): submitted into a proposal, canceled (as a duplicate of
-// another task, or not), kept as a draft by a person's answer, or left
+// another task, or not), kept as a draft by a person's answer, left
+// waiting for the answer of its `planner_question` by a planner that
+// ended for that wait alone (ADR-t1704-1 decision 5: not counted as a
+// planner that ended undecided; the answer opens the next), or left
 // undecided (a later planner takes it again).
 string_enum!(DraftOutcome {
     Submitted => "submitted",
     Canceled => "canceled",
     Duplicate => "duplicate",
     KeepDraft => "keep_draft",
+    AnswerWait => "answer_wait",
     Undecided => "undecided",
 });
 

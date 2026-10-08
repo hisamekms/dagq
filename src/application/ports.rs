@@ -2039,6 +2039,20 @@ pub trait SessionRegistry {
     /// The `turn_*` events of headless planner `id` and its
     /// `provider_waiting`, oldest first.
     fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>>;
+    /// Mark planner `id` of the runtime's as asked to exit because only a
+    /// person's answer to its `planner_question`s `asks` is left, with
+    /// `planner_answer_wait` (`payload`), once and only while none of them
+    /// is answered or closed (ADR-t1704-1 decisions 1 and 2): `false`, with
+    /// nothing written, otherwise.
+    fn planner_answer_wait(
+        &self,
+        id: PlannerId,
+        asks: &[AskId],
+        payload: &serde_json::Value,
+    ) -> Result<bool>;
+    /// What the planner that ended for the answer of `ask` alone left for
+    /// the next (ADR-t1704-1 decision 3), if one did.
+    fn planner_handover(&self, ask: AskId) -> Result<Option<crate::domain::PlannerHandover>>;
     /// The planner's session wrapper registers itself, once.
     fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()>;
     fn register_planner_agent(&self, id: PlannerId, wrapper_pid: u32, agent: u32) -> Result<()>;
@@ -2584,6 +2598,10 @@ pub enum PlannerAnswerRoute {
     /// The draft moved on (submitted, canceled) with no planner left: the
     /// supervisor closes the ask.
     Close,
+    /// Its task is in this proposal, sent back for a revise no planner
+    /// holds: the answer goes with the revise to the planner opened for it
+    /// (ADR-t1704-1 decision 4).
+    Revise(ProposalId),
     /// None of these: a person delivers it through the inbox.
     Person,
 }
@@ -2638,6 +2656,9 @@ pub trait DraftPlannerStore {
     fn planner_answers(&self) -> Result<Vec<Ask>>;
     /// Where the answer of an answered `planner_question` goes.
     fn planner_answer_route(&self, ask: &Ask) -> Result<PlannerAnswerRoute>;
+    /// The `planner_question`s nobody closed about the tasks of
+    /// `proposal`, oldest first (ADR-t1704-1 decision 4).
+    fn proposal_questions(&self, proposal: ProposalId) -> Result<Vec<Ask>>;
     /// The planning request whose planners carry the answer of `ask`: the
     /// one it is about, or the one whose planner added the draft it is
     /// about and left it outside any proposal (ADR-t2015-1).

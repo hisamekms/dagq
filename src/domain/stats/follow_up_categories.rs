@@ -35,8 +35,8 @@ pub struct CategoryFlow {
     /// `duplicate` ÷ the same.
     pub duplicate_rate: Option<f64>,
     /// What the runtime's planners decided of the drafts in the window,
-    /// by `draft_planner_settled`'s `outcome` (`submitted`, `canceled`,
-    /// `duplicate`, `keep_draft`, `undecided`): a draft's last one in it.
+    /// by `draft_planner_settled`'s `outcome` (a
+    /// [`crate::domain::DraftOutcome`]): a draft's last one in it.
     pub planner_outcomes: BTreeMap<String, i64>,
     /// `draft_planner_exhausted` in the window: drafts no more planners
     /// were opened for.

@@ -96,11 +96,11 @@ name = "plan_review::a_planner_question_answer_goes_to_its_planner_as_a_turn_or_
 reason = "B 境界（守る境界）: supervisor passes deliver the answer as a background planner's next turn or carry it in a new planner's prompt (task 1441 moved it off cmux)"
 task = 1441
 
-# 10.708s, class R
+# 9-11s under stress (task 1863), class B
 [[test]]
-name = "planner_headless::a_headless_draft_planner_takes_the_answer_of_its_question_as_its_next_turn"
-reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same turn boundary; answer routing decision"
-task = 1707
+name = "planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer"
+reason = "B 境界（守る境界）: a real background wrapper ends on the answer-wait exit request and the answer's new planner runs its prompt as its first turn (ADR-t1704-1); the decisions are unit tests"
+task = 1863
 
 # 6.888s, class B
 [[test]]
@@ -108,11 +108,11 @@ name = "planner_headless::a_headless_planner_opened_for_a_revise_runs_its_prompt
 reason = "B 境界（守る境界）: representative background wrapper + turns/"
 task = 1707
 
-# 10.044s, class R
+# 8-10s under stress (task 1863), class B
 [[test]]
-name = "planner_headless::a_headless_request_planner_takes_the_answer_as_its_next_turn_and_declines"
-reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same turn boundary; request decline decision"
-task = 1707
+name = "planner_headless::a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines"
+reason = "B 境界（守る境界）: a request's real background planner ends on the answer-wait exit request and the answer's planner declines in its first turn (ADR-t1704-1)"
+task = 1863
 
 # 8.392s, class B
 [[test]]

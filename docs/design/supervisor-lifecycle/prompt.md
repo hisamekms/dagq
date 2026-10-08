@@ -263,6 +263,13 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 - 切り方: 長い文は先頭を残して切り、省いたbyte数と読む方法の注記を付ける。
   JSONの項目は長い文字列から切り、それでも入らなければIDと読む方法だけの行にする。
 - 読む方法: 読めるファイルにも打てるコマンドにも無いもの（復旧jobのalertの事実・プロセス・過去のverdict、読めなかった依頼の参照）は、読む方法が無いと書き、読めない場所に退避しない。
+- 前のplannerからの引き継ぎ: 人の答えだけを待って終わったplanner（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3）の後に立つruntimeのplannerの4種類のprompt（`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt`）は、元の質問とanswerを`answer`の節に、前のplannerのnoteと、それが作った・編集したまだdraftのtaskを`handover`の節に載せる。
+  材料はsupervisorがqueueの記録（前のplannerのactorのnoteと、それが作った・編集したまだdraftのtask）から集める（sessionはresumeしない）。
+  `handover`はnoteを新しい順に取って1件ずつ切り、draftの行はその後に新しい順に取り、どちらも節の上限の中に収める（値と理由は定数のdoc comment）。
+  reviseのplannerの`answer`は運ぶanswerを古い順に節の上限の中で取り、1件を1回数える。
+  4種類の全体の上限は、`handover`（reviseのplannerは`answer`も）の分だけ大きくして節の上限の和を収める。
+  省いたnoteはeventのIDと`dagq events --full --all --after <ID - 1> --limit 1`、省いたdraftは`dagq show ID --full`、省いたanswerは`dagq asks --all`で読むと書く。
+  どのplannerの文面も、質問で止まる前に決められることを決め、draftの編集とnoteを残すように言う。
 - 必須の節: goal reviewのgoal、runのreviewのacceptance、復旧jobのtaskの記述と検証、draftのdescription、findingの見立ては省かず、自分の上限で切って`over_limit`に書く。
 - 不変条件: 節の上限の和は全体の上限（言語の指示の分の空きを除く）に収まるように決める。
   それでも超えたときだけ、先頭と末尾（指示とverdictのschema）を残して中ほどを切る（`Fit::finish`）。

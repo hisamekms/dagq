@@ -6,6 +6,7 @@
 //! triage, and the requests it types into a live session (a resume, a
 //! revise, a receipt that does not match).
 
+use crate::domain::PlannerHandover;
 use crate::domain::event_kind;
 use crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH;
 use crate::domain::headless_job::JobAccess;
@@ -1405,11 +1406,117 @@ fn planner_answer(fit: &mut Fit, answer: &Ask) -> (String, String) {
     (question, text)
 }
 
+/// What a planner the runtime opens is told to leave before it stops at
+/// its `planner_question` (ADR-t1704-1 decisions 1 and 3): the runtime
+/// ends a planner whose only wait is the answer, and the next planner
+/// goes on from the queue's records, not from this session.
+pub const BEFORE_YOU_STOP_AT_A_QUESTION: &str = "Before you stop at a planner_question, decide everything you can without its answer (the other drafts, the fixes the answer does not touch) and leave the rest in the queue: save your edits of the drafts with `dagq edit`, and record with `dagq note` (`--task ID`, or `--goal ID`) what you decided, what you were about to decide, what is left open and why, and what the answer will decide. While only a person's answer is left, the runtime ends this session to free its place; the answer then goes to a new planner with your question, your notes and your drafts in its prompt, which goes on from them.";
+
+/// The bytes of what the planner before a planner the runtime opens left
+/// for it (ADR-t1704-1 decision 3): its notes, the newest first, and the
+/// lines of the drafts it created or edited; and of one note.
+pub const PLANNER_HANDOVER_BYTES: usize = 8_000;
+pub const PLANNER_HANDOVER_NOTE_BYTES: usize = 2_000;
+
+/// What a planner the runtime opens carries from the planner before it
+/// (ADR-t1704-1 decision 3): the answered `planner_question`s that
+/// planner stopped at, and what it left in the queue.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Carried<'a> {
+    pub answers: &'a [Ask],
+    pub handover: Option<&'a PlannerHandover>,
+}
+
+/// The section of what the planner before this one left as it ended for a
+/// person's answer alone (ADR-t1704-1 decision 3): its notes within
+/// [`PLANNER_HANDOVER_BYTES`] (the newest first, kept in their order, each
+/// cut to [`PLANNER_HANDOVER_NOTE_BYTES`]), then the lines of its drafts
+/// within a quarter of it, with how to read what was left out. Each note
+/// counts once in `handover` (left out, or kept and cut), and each draft
+/// line left out once.
+fn handover_section(fit: &mut Fit, handover: &PlannerHandover) -> String {
+    let read_note = |id: i64| {
+        format!(
+            "read it whole with `dagq events --full --all --after {} --limit 1`",
+            id - 1
+        )
+    };
+    let (lines, cuts): (Vec<String>, Vec<bool>) = handover
+        .notes
+        .iter()
+        .map(|(id, text)| {
+            let (text, cut) = prompt_fit::cut_part(
+                text,
+                PLANNER_HANDOVER_NOTE_BYTES,
+                Keep::Start,
+                &read_note(*id),
+            );
+            (
+                format!("- (event {id}) {}\n", text.replace('\n', "\n  ")),
+                cut,
+            )
+        })
+        .unzip();
+    let sizes: Vec<usize> = lines.iter().map(String::len).collect();
+    let kept = prompt_fit::pick(
+        &sizes,
+        (0..lines.len()).rev(),
+        usize::MAX,
+        PLANNER_HANDOVER_BYTES - PLANNER_HANDOVER_BYTES / 4,
+    );
+    fit.picked("handover", &kept, &cuts);
+    let left_out: Vec<String> = handover
+        .notes
+        .iter()
+        .zip(&kept)
+        .filter(|(_, kept)| !**kept)
+        .map(|((id, _), _)| id.to_string())
+        .collect();
+    let mut notes: String = lines
+        .into_iter()
+        .zip(&kept)
+        .filter(|(_, kept)| **kept)
+        .map(|(line, _)| line)
+        .collect();
+    if handover.notes.is_empty() {
+        notes.push_str("(none)\n");
+    }
+    if !left_out.is_empty() {
+        notes.push_str(&left_out_note(
+            "notes (the oldest; event IDs)",
+            &left_out,
+            "`dagq events --full --all --after ID --limit 1` with ID one less than each",
+        ));
+    }
+    let (drafts, drafts_left_out) = planner_task_lines(
+        &handover.drafts,
+        PLANNER_HANDOVER_BYTES / 4,
+        "`dagq show ID --full` for each",
+    );
+    fit.omit("handover", drafts_left_out);
+    let text = format!(
+        "\n## What planner {planner} before you left\n\nIt stopped at the question above, and the runtime ended it while only the person's answer was left; its session is not resumed. Go on from these records and the queue as it is now, and do not redo what it decided.\n\nIts notes, oldest first:\n{notes}\nThe drafts it created or edited, still drafts (as it saved them; read each with `dagq show ID --full`):\n{drafts}\n",
+        planner = handover.planner_id,
+    );
+    fit.section("handover", &text);
+    text
+}
+
 /// The bytes the whole prompt of a planner the runtime opens for a revise
 /// takes at most, the language's instruction included (task 1571): in
 /// production it took 2,849 bytes at the median, 5,084 at p90 and 10,976
-/// at most, mostly the reasons and the tasks' lines.
-pub const RUNTIME_PLANNER_PROMPT_LIMIT: usize = 32_000;
+/// at most, mostly the reasons and the tasks' lines. The 32,000 that held
+/// those grows by the answers it carries and what the planner before it
+/// left ([`RUNTIME_PLANNER_ANSWERS_BYTES`], [`PLANNER_HANDOVER_BYTES`],
+/// ADR-t1704-1), so that the sections' limits and the instructions add up
+/// to no more than the whole.
+pub const RUNTIME_PLANNER_PROMPT_LIMIT: usize =
+    32_000 + RUNTIME_PLANNER_ANSWERS_BYTES + PLANNER_HANDOVER_BYTES;
+
+/// The bytes of the answered questions a planner opened for a revise
+/// carries (the oldest first, each question and answer cut to
+/// [`PLANNER_ANSWER_BYTES`]); the rest are named with `dagq asks --all`.
+pub const RUNTIME_PLANNER_ANSWERS_BYTES: usize = 6_000;
 
 /// The bytes of the reasons plan review gave and of one reason, and of
 /// the lines of the proposal's tasks.
@@ -1429,6 +1536,7 @@ pub fn runtime_planner_prompt(
     tasks: &[Task],
     reasons: &[String],
     review_anchor: Option<TaskId>,
+    carried: Carried<'_>,
 ) -> Result<FittedPrompt> {
     let mut fit = Fit::new(RUNTIME_PLANNER_PROMPT_LIMIT);
     let goal_tasks: Vec<GoalTask> = tasks
@@ -1491,6 +1599,62 @@ pub fn runtime_planner_prompt(
         ));
     }
     fit.section("reasons", &reasons);
+    // The answers the planner before it stopped at, with what it left
+    // (ADR-t1704-1 decisions 3 and 4).
+    let read = "`dagq asks --all`";
+    let (lines, cuts): (Vec<String>, Vec<bool>) = carried
+        .answers
+        .iter()
+        .map(|answer| {
+            let (question, question_cut) =
+                prompt_fit::cut_part(&answer.question, PLANNER_ANSWER_BYTES, Keep::Start, read);
+            let (text, text_cut) = prompt_fit::cut_part(
+                answer.answer.as_deref().unwrap_or_default(),
+                PLANNER_ANSWER_BYTES,
+                Keep::Start,
+                read,
+            );
+            (
+                format!(
+                    "\nThe planner before you asked a person (ask {aid}) about task {task} of this proposal while it fixed it, and was ended while it waited:\n{question}\n\nanswer to ask {aid}: {text}\n",
+                    aid = answer.id,
+                    task = answer.task_id.map_or("?".to_owned(), |t| t.to_string()),
+                ),
+                question_cut || text_cut,
+            )
+        })
+        .unzip();
+    let sizes: Vec<usize> = lines.iter().map(String::len).collect();
+    let kept = prompt_fit::pick(
+        &sizes,
+        0..lines.len(),
+        usize::MAX,
+        RUNTIME_PLANNER_ANSWERS_BYTES,
+    );
+    fit.picked("answer", &kept, &cuts);
+    let left_out: Vec<String> = carried
+        .answers
+        .iter()
+        .zip(&kept)
+        .filter(|(_, kept)| !**kept)
+        .map(|(ask, _)| ask.id.to_string())
+        .collect();
+    let mut carried_text: String = lines
+        .into_iter()
+        .zip(&kept)
+        .filter(|(_, kept)| **kept)
+        .map(|(line, _)| line)
+        .collect();
+    if !left_out.is_empty() {
+        carried_text.push_str(&left_out_note("answered asks", &left_out, read));
+    }
+    if !carried.answers.is_empty() {
+        carried_text.push_str("\nApply these answers together with the reasons above.\n");
+    }
+    fit.section("answer", &carried_text);
+    if let Some(handover) = carried.handover {
+        carried_text.push_str(&handover_section(&mut fit, handover));
+    }
     Ok(fit.finish(format!(
         "You are a planner the dagq runtime opened for proposal {proposal} of the queue at {db}; no person watches this session.\n\
          Plan review sent the proposal back. Its reasons:\n{reasons}\nFull reasons: {reason_read}.\n\
@@ -1498,8 +1662,8 @@ pub fn runtime_planner_prompt(
          Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}` and each task with `dagq show ID`, fix what the reasons point at, and submit it again with `dagq submit --proposal {proposal}`.\n\
          {RECORD_READING}\n\
          {rules}\n\
-         A fix that changes the plan's intent (acceptance, scope, the relation to the goal) needs a person: raise it to the inbox with `dagq ask --task ID --kind planner_question --because scope` as the skill describes, stop, and continue from the answer typed into this terminal.\n\
-         Never open the queue database directly; use the dagq CLI only.\n",
+         A fix that changes the plan's intent (acceptance, scope, the relation to the goal) needs a person: raise it to the inbox with `dagq ask --task ID --kind planner_question --because scope` as the skill describes, stop, and continue from the answer, which arrives as the prompt of your next turn. {BEFORE_YOU_STOP_AT_A_QUESTION}\n\
+         Never open the queue database directly; use the dagq CLI only.\n{carried_text}",
         db = super::path_text(db)?,
         rules = repository_rules(RUNTIME_PLANNER_ASK),
     )))
@@ -1525,6 +1689,9 @@ pub struct DraftPlannerMaterial<'a> {
     /// other than the bundle's.
     pub goals: &'a [(Goal, bool, Vec<GoalTask>)],
     pub answer: Option<&'a Ask>,
+    /// What the planner that asked it left as it ended for the answer
+    /// alone (ADR-t1704-1 decision 3).
+    pub handover: Option<&'a PlannerHandover>,
     /// The last decision about each draft whose revisit time came
     /// (ADR-t1540-1).
     pub revisits: &'a [RevisitHistory],
@@ -1698,7 +1865,9 @@ const DECIDE_YOURSELF: &str = "decide what you can recommend yourself and go on,
 /// 1571): in production it took 18,021 bytes at the median, 26,352 at p90
 /// and 38,241 at most (planner 828: the source task's receipt's summary
 /// 8,423, the goal 7,398, the goal's other tasks 4,303).
-pub const DRAFT_PLANNER_PROMPT_LIMIT: usize = 80_000;
+/// The 80,000 that held that grows by what a planner ended for a person's
+/// answer left ([`PLANNER_HANDOVER_BYTES`], ADR-t1704-1).
+pub const DRAFT_PLANNER_PROMPT_LIMIT: usize = 80_000 + PLANNER_HANDOVER_BYTES;
 
 /// The bytes of the drafts' sections, and of one draft's title,
 /// description and context.
@@ -2026,7 +2195,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
          {membership}{each}Then do exactly one of these three{with_each}:\n\
          1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {t}` and submit it with `dagq submit {t}`. Say in its `--context` why you adopted it. Plan review checks it before it becomes ready.\n\
          2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {t}` and record why with `dagq note --task {t} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {t} --duplicate-of <that task>` instead, so the queue records which task it duplicates, and still note why.\n\
-         3. Ask: only for a draft you cannot decide yourself: (a) it needs a person's judgement, `scope` (the acceptance, the scope or a goal's decision would change with their intent) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; (b) your confidence in the decision is low; or (c) it is a follow_up draft past the runtime's follow_up limit, {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement, a source goal that was missing, closed or unknown at registration (even if its current goal is open), or no current goal or a closed current goal. Run `dagq ask --task {t} --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option adopt --option cancel --option keep_draft` (`--because discard` when the question is whether to throw work away; for (c), recommend what you would do on your own), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is, record why with `dagq note --task {t} --text '<why>'` (naming the ask) and stop. A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again, unless it has a revisit time. When you can tell when it can be decided (after a task lands, after a period to measure), keep it with `dagq revisit {t} --at <RFC 3339 time, e.g. 2026-10-04T12:00:00Z> --note '<what to look at then>'`: at that time the runtime opens a planner for it again with this decision in its prompt. You may keep a draft so yourself, without asking, when that is your recommendation; record why with `dagq note --task {t}` too.\n\
+         3. Ask: only for a draft you cannot decide yourself: (a) it needs a person's judgement, `scope` (the acceptance, the scope or a goal's decision would change with their intent) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; (b) your confidence in the decision is low; or (c) it is a follow_up draft past the runtime's follow_up limit, {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement, a source goal that was missing, closed or unknown at registration (even if its current goal is open), or no current goal or a closed current goal. Run `dagq ask --task {t} --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option adopt --option cancel --option keep_draft` (`--because discard` when the question is whether to throw work away; for (c), recommend what you would do on your own), report briefly and stop; {BEFORE_YOU_STOP_AT_A_QUESTION} The answer arrives as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is, record why with `dagq note --task {t} --text '<why>'` (naming the ask) and stop. A draft kept so stays a draft until a person has the inbox record a planning request that names it; no planner of the runtime's is opened for it again, unless it has a revisit time. When you can tell when it can be decided (after a task lands, after a period to measure), keep it with `dagq revisit {t} --at <RFC 3339 time, e.g. 2026-10-04T12:00:00Z> --note '<what to look at then>'`: at that time the runtime opens a planner for it again with this decision in its prompt. You may keep a draft so yourself, without asking, when that is your recommendation; record why with `dagq note --task {t}` too.\n\
          The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt or already adopted it: ask then, as (c) says. Membership changes (`set-goal` or `judge-follow-up`) do not count as adoption or reset depth; an existing person's adopt remains valid.\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but {this}. Never open the queue database directly; use the dagq CLI only.\n",
         membership = if origin == DraftOrigin::FollowUp {
@@ -2058,6 +2227,9 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
         fit.section("answer", &carried);
         out.push_str(&carried);
     }
+    if let Some(handover) = material.handover {
+        out.push_str(&handover_section(&mut fit, handover));
+    }
     Ok(fit.finish(out))
 }
 
@@ -2065,7 +2237,9 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
 /// takes at most, the language's instruction included (task 1571): in
 /// production it took 37,974 bytes at the median, 156,358 at p90 and
 /// 276,417 at most (planner 768: finding 44's evidence took 270,669).
-pub const FINDING_PLANNER_PROMPT_LIMIT: usize = 80_000;
+/// The 80,000 that held that grows by what a planner ended for a person's
+/// answer left ([`PLANNER_HANDOVER_BYTES`], ADR-t1704-1).
+pub const FINDING_PLANNER_PROMPT_LIMIT: usize = 80_000 + PLANNER_HANDOVER_BYTES;
 
 /// The bytes of the finding's evidence events, the newest first, and of
 /// one event.
@@ -2096,6 +2270,9 @@ pub struct FindingPlannerMaterial<'a> {
     pub siblings: &'a [GoalTask],
     /// The answered `planner_question` of a planner that is gone.
     pub answer: Option<&'a Ask>,
+    /// What the planner that asked it left as it ended for the answer
+    /// alone (ADR-t1704-1 decision 3).
+    pub handover: Option<&'a PlannerHandover>,
 }
 
 /// The initial prompt of a planner the runtime opens for a finding marked
@@ -2228,7 +2405,7 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
          Either way the submission makes finding {id} proposed with the proposal, and plan review checks it before it becomes ready; you need no person's approval for it, even for a new goal. \
          Give an improvement's tasks no `--priority`: each takes its goal's (`normal` with no goal). Put a task in an existing goal only when that goal's acceptance needs it, and an improvement only in a goal of `normal` or lower; otherwise write a new goal (its priority by the repository's rules for goal priorities, `normal` or lower for an improvement) or leave the task with no goal. Plan review checks the goal you chose.\n\
          3. Dismiss: when a task already remedies it (name the task), it no longer occurs, or it is not worth remedying, run `dagq finding dismiss {id} --reason '<why>'`, the reason saying why you decided so.\n\
-         4. Ask: only when you cannot decide it yourself: (a) it needs a person's judgement, `scope` (the plan's intent, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; or (b) your confidence in the decision is low. Run `dagq ask --finding {id} --kind planner_question --because scope --recommend <propose|dismiss> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option propose --option dismiss` (`--because discard` when the question is whether to throw work away), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (propose: do 1 or 2; dismiss: do 3).\n\
+         4. Ask: only when you cannot decide it yourself: (a) it needs a person's judgement, `scope` (the plan's intent, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; or (b) your confidence in the decision is low. Run `dagq ask --finding {id} --kind planner_question --because scope --recommend <propose|dismiss> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option propose --option dismiss` (`--because discard` when the question is whether to throw work away), report briefly and stop; {BEFORE_YOU_STOP_AT_A_QUESTION} The answer arrives as `answer to ask <id>: ...`: follow it (propose: do 1 or 2; dismiss: do 3).\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this finding. Never open the queue database directly; use the dagq CLI only.\n",
         kind = finding.kind,
         rules = repository_rules(RUNTIME_PLANNER_ASK),
@@ -2255,6 +2432,9 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
         );
         fit.section("answer", &carried);
         out.push_str(&carried);
+    }
+    if let Some(handover) = material.handover {
+        out.push_str(&handover_section(&mut fit, handover));
     }
     Ok(fit.finish(out))
 }
@@ -2296,7 +2476,9 @@ pub enum RequestRefMaterial {
 /// it), and the unit test's largest input
 /// (`a_request_planner_prompt_of_huge_references_stays_within_its_limits`)
 /// measures what the sections' limits add up to.
-pub const REQUEST_PLANNER_PROMPT_LIMIT: usize = 80_000;
+/// The 80,000 that held that grows by what a planner ended for a person's
+/// answer left ([`PLANNER_HANDOVER_BYTES`], ADR-t1704-1).
+pub const REQUEST_PLANNER_PROMPT_LIMIT: usize = 80_000 + PLANNER_HANDOVER_BYTES;
 
 /// The bytes of the inbox's note, of the references' sections (in the
 /// order the inbox gave them) and of one reference.
@@ -2322,6 +2504,9 @@ pub struct RequestPlannerMaterial<'a> {
     pub asks: &'a [Ask],
     /// The answered `planner_question` of a planner that is gone.
     pub answer: Option<&'a Ask>,
+    /// What the planner that asked it left as it ended for the answer
+    /// alone (ADR-t1704-1 decision 3).
+    pub handover: Option<&'a PlannerHandover>,
 }
 
 /// The initial prompt of a planner the runtime opens for a planning
@@ -2436,7 +2621,7 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
          Then do exactly one of these:\n\
          1. Plan it: write the goal (`dagq goal add --draft ...`) or the tasks for an open goal (`dagq add --goal GOAL ...`) the request asks for, with `--context` beginning with `from request {id}` and saying why you planned it so, check them with `dagq lint`, and submit them with `dagq submit ...`. Your submission makes request {id} proposed with the proposal, and plan review checks it before it becomes ready; you need no person's approval for it, even for a new goal. You may submit more than one proposal for it.\n\
          2. Decline: when nothing should be planned of it (it is done already: name the task or the code; it duplicates a task in flight: name it; or it cannot be planned as asked: say why), run `dagq request decline {id} --reason '<why>'`. The inbox tells the person, who may ask again in other words.\n\
-         3. Ask: only when you cannot decide it yourself: (a) it needs a person's judgement, `scope` (the plan's intent, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; or (b) your confidence in the decision is low. Run `dagq ask --request {id} --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option plan --option decline` (`--because discard` when the question is whether to throw work away), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (plan: do 1 as it says; decline: do 2).\n\
+         3. Ask: only when you cannot decide it yourself: (a) it needs a person's judgement, `scope` (the plan's intent, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; or (b) your confidence in the decision is low. Run `dagq ask --request {id} --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option plan --option decline` (`--because discard` when the question is whether to throw work away), report briefly and stop; {BEFORE_YOU_STOP_AT_A_QUESTION} The answer arrives as `answer to ask <id>: ...`: follow it (plan: do 1 as it says; decline: do 2).\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this request. Never open the queue database directly; use the dagq CLI only.\n",
         rules = repository_rules(RUNTIME_PLANNER_ASK),
     ));
@@ -2456,6 +2641,9 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
         };
         fit.section("answer", &carried);
         out.push_str(&carried);
+    }
+    if let Some(handover) = material.handover {
+        out.push_str(&handover_section(&mut fit, handover));
     }
     Ok(fit.finish(out))
 }
@@ -4079,16 +4267,18 @@ const OPTIONAL_SECTIONS: usize = 6;
 /// required sections were cut, when they were.
 ///
 /// In the sections of a list (chosen by `Fit::lines`, and the planners'
-/// `drafts`, `asks`, `goals`, `reasons` and `refs`) and the draft
+/// `drafts`, `asks`, `goals`, `reasons`, `refs` and `handover`, whose
+/// notes and draft lines are its items) and the draft
 /// planner's `origin` and `revisit`, `omitted` counts each item once,
 /// chosen after its parts are cut: left out, or kept with any part cut. A
 /// goal of the planners' `goals` is one item with its task lines; `origin`
 /// and `revisit` are each one item, whichever of their parts or the whole
-/// was cut. The recovery job's `task`, the finding planner's `finding` and
-/// the planners' `answer` still count each cut field of their one item,
-/// so that item may count up to four (`answer`: two) times; so do the
-/// worker's `task`, `goal` and `inherited` (ADR-t2072-1), whose prompt's
-/// bytes are recorded on `wrapper_launched`.
+/// was cut. The revise planner's `answer` is a list of the answers it
+/// carries, each counted once. The recovery job's `task`, the finding
+/// planner's `finding` and the other planners' `answer` still count each
+/// cut field of their one item, so that item may count up to four
+/// (`answer`: two) times; so do the worker's `task`, `goal` and `inherited`
+/// (ADR-t2072-1), whose prompt's bytes are recorded on `wrapper_launched`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PromptBytes {
     pub total: usize,
@@ -6049,6 +6239,7 @@ mod tests {
             &[],
             &["fix".into()],
             Some(TaskId::new(42)),
+            Carried::default(),
         )
         .unwrap()
         .text;
@@ -7373,6 +7564,7 @@ mod tests {
             receipt: None,
             goals: &[],
             answer: None,
+            handover: None,
             revisits: &[],
         })
         .unwrap()
@@ -7468,6 +7660,7 @@ mod tests {
                 receipt: None,
                 goals: &[],
                 answer: None,
+                handover: None,
                 revisits: &history,
             })
             .unwrap();
@@ -7516,6 +7709,7 @@ mod tests {
                 receipt: None,
                 goals: &[],
                 answer: None,
+                handover: None,
                 revisits: &[],
             })
             .unwrap()
@@ -7636,6 +7830,7 @@ mod tests {
             goal_closed: false,
             siblings: &[],
             answer: None,
+            handover: None,
         })
         .unwrap()
         .text;
@@ -7685,6 +7880,7 @@ mod tests {
             goal_closed: false,
             siblings: &[],
             answer: None,
+            handover: None,
         })
         .unwrap()
         .text;
@@ -7985,6 +8181,42 @@ mod tests {
             "answered_at": 1, "closed_at": null,
         }))
         .unwrap()
+    }
+
+    /// What a planner before took the most of: notes and drafts well past
+    /// the handover's limit.
+    fn big_handover() -> PlannerHandover {
+        PlannerHandover {
+            planner_id: crate::domain::PlannerId::new(9),
+            notes: (1..=50)
+                .map(|n| (100 + n, big(&format!("note {n}"), 5_000)))
+                .collect(),
+            drafts: (1..=500)
+                .map(|id| GoalTask {
+                    id: TaskId::new(id),
+                    title: big("draft", 500),
+                    status: TaskStatus::Draft,
+                    priority: Default::default(),
+                    priority_source: crate::domain::PrioritySource::Goal,
+                    priority_by: crate::domain::plan_request::PriorityBy::Ai,
+                })
+                .collect(),
+        }
+    }
+
+    /// No section went past its own limit: the whole was not cut in its
+    /// middle.
+    fn sections_within(fitted: &FittedPrompt) {
+        assert!(
+            !fitted
+                .bytes
+                .over_limit
+                .as_deref()
+                .unwrap_or_default()
+                .contains("its middle was cut"),
+            "{:?}",
+            fitted.bytes
+        );
     }
 
     fn no_binary() -> BinaryFacts {
@@ -8507,22 +8739,40 @@ mod tests {
     /// The planner opened for a revise of a proposal with many long tasks
     /// and reasons stays within [`RUNTIME_PLANNER_PROMPT_LIMIT`].
     #[test]
-    fn a_runtime_planner_prompt_of_many_reasons_stays_within_its_limits() {
+    fn a_runtime_planner_prompt_of_many_reasons_and_carried_answers_stays_within_its_limits() {
         let tasks: Vec<Task> = (1..=500)
             .map(|id| task(id, &big("title", 2_000), TaskStatus::Submitted))
             .collect();
         let reasons: Vec<String> = (1..=100)
             .map(|n| big(&format!("reason {n}"), 5_000))
             .collect();
+        // With the most a planner before it can leave (ADR-t1704-1).
+        let answers: Vec<Ask> = (1..=20).map(|id| asked(id, 20_000)).collect();
+        let handover = big_handover();
         let fitted = runtime_planner_prompt(
             Path::new("/q/queue.db"),
             ProposalId::new(3),
             &tasks,
             &reasons,
             Some(TaskId::new(42)),
+            Carried {
+                answers: &answers,
+                handover: Some(&handover),
+            },
         )
         .unwrap();
         within(&fitted, RUNTIME_PLANNER_PROMPT_LIMIT);
+        sections_within(&fitted);
+        assert!(
+            fitted.bytes.omitted["answer"] > 0 && fitted.bytes.omitted["handover"] > 0,
+            "{:?}",
+            fitted.bytes
+        );
+        assert!(
+            fitted
+                .text
+                .contains("answered asks left out by this section's limit")
+        );
         let (text, bytes) = (&fitted.text, &fitted.bytes);
         assert!(
             bytes.omitted["tasks"] > 0 && bytes.omitted["reasons"] > 0,
@@ -8540,6 +8790,74 @@ mod tests {
         assert!(text.contains("dagq submit --proposal 3"));
     }
 
+    /// ADR-t1704-1 decision 3: a planner the runtime opens for a revise
+    /// with the answer the planner before it stopped at carries the
+    /// question, the answer and what that planner left, each held to its
+    /// limit: the notes the newest first, each cut, the ones left out and
+    /// the draft lines left out counted in `handover` with how to read
+    /// them, and the section's bytes recorded.
+    #[test]
+    fn a_planner_carrying_an_answer_shows_what_the_planner_before_it_left_within_its_limits() {
+        let handover = PlannerHandover {
+            planner_id: crate::domain::PlannerId::new(9),
+            notes: (1..=10)
+                .map(|n| (100 + n, big(&format!("note {n}"), 3_000)))
+                .collect(),
+            drafts: (1..=200)
+                .map(|id| GoalTask {
+                    id: TaskId::new(id),
+                    title: big("draft", 100),
+                    status: TaskStatus::Draft,
+                    priority: Default::default(),
+                    priority_source: crate::domain::PrioritySource::Goal,
+                    priority_by: crate::domain::plan_request::PriorityBy::Ai,
+                })
+                .collect(),
+        };
+        let answers = [asked(5, 100)];
+        let fitted = runtime_planner_prompt(
+            Path::new("/q/queue.db"),
+            ProposalId::new(3),
+            &[],
+            &["split it".to_owned()],
+            Some(TaskId::new(42)),
+            Carried {
+                answers: &answers,
+                handover: Some(&handover),
+            },
+        )
+        .unwrap();
+        within(&fitted, RUNTIME_PLANNER_PROMPT_LIMIT);
+        let (text, bytes) = (&fitted.text, &fitted.bytes);
+        assert!(text.contains("answer to ask 5: answer answer"), "{text}");
+        assert!(text.contains("## What planner 9 before you left"));
+        // The newest notes are kept, cut to their own limit.
+        assert!(text.contains("- (event 110) note 10"));
+        assert!(
+            text.contains("read it whole with `dagq events --full --all --after 109 --limit 1`")
+        );
+        assert!(!text.contains("- (event 101) note 1 "));
+        assert!(
+            text.contains("notes (the oldest; event IDs) left out by this section's limit: 101")
+        );
+        assert!(text.contains("To read them: `dagq show ID --full` for each."));
+        // Each note counts once, left out or cut; each draft line too.
+        let notes_kept = (1..=10)
+            .filter(|n| text.contains(&format!("- (event {}) note", 100 + n)))
+            .count();
+        let lines_kept = (1..=200)
+            .filter(|id| text.contains(&format!("- task {id} (draft)")))
+            .count();
+        assert_eq!(
+            bytes.omitted["handover"],
+            10 + (200 - lines_kept),
+            "{notes_kept} notes kept: {bytes:?}"
+        );
+        assert!(bytes.sections["handover"] > 0);
+        assert!(bytes.sections["answer"] > 0);
+        assert!(text.contains(BEFORE_YOU_STOP_AT_A_QUESTION));
+    }
+
     #[test]
     fn a_runtime_planner_without_a_review_anchor_names_no_read_command() {
         let fitted = runtime_planner_prompt(
@@ -8548,6 +8866,7 @@ mod tests {
             &[],
             &[big("reason", 5_000)],
             None,
+            Carried::default(),
         )
         .unwrap();
         assert!(fitted.text.contains(
@@ -8585,6 +8904,7 @@ mod tests {
         let goals: Vec<(Goal, bool, Vec<GoalTask>)> = (1..=10)
             .map(|id| (goal_of(id, 20_000), false, goal_tasks(500)))
             .collect();
+        let handover = big_handover();
         let answer = asked(9, 20_000);
         let fitted = draft_planner_prompt(&DraftPlannerMaterial {
             db: Path::new("/q/queue.db"),
@@ -8594,10 +8914,12 @@ mod tests {
             receipt: Some(&receipt),
             goals: &goals,
             answer: Some(&answer),
+            handover: Some(&handover),
             revisits: &[],
         })
         .unwrap();
         within(&fitted, DRAFT_PLANNER_PROMPT_LIMIT);
+        sections_within(&fitted);
         let (text, bytes) = (&fitted.text, &fitted.bytes);
         for section in ["drafts", "origin", "goals", "answer"] {
             assert!(
@@ -8654,6 +8976,7 @@ mod tests {
                 receipt: Some(&receipt),
                 goals: &[],
                 answer: None,
+                handover: None,
                 revisits: &[],
             })
             .unwrap();
@@ -8735,6 +9058,7 @@ mod tests {
             receipt: None,
             goals: &[],
             answer: None,
+            handover: None,
             revisits,
         })
         .unwrap()
@@ -8934,6 +9258,7 @@ mod tests {
                 &[],
                 &reasons,
                 Some(TaskId::new(42)),
+                Carried::default(),
             )
             .unwrap();
             assert_eq!(
@@ -9010,6 +9335,7 @@ mod tests {
                 goals: &[],
                 asks: &[],
                 answer: None,
+                handover: None,
             })
             .unwrap();
             let shown = (1..=refs.len())
@@ -9123,6 +9449,7 @@ mod tests {
             receipt: Some(&receipt),
             goals: &goals,
             answer: Some(&answer),
+            handover: None,
             revisits: &history,
         })
         .unwrap();
@@ -9177,6 +9504,7 @@ mod tests {
         let asks: Vec<Ask> = (1..=100).map(|id| asked(id, 2_000)).collect();
         let goal = goal_of(5, 20_000);
         let siblings = goal_tasks(500);
+        let handover = big_handover();
         let answer = asked(200, 20_000);
         let fitted = finding_planner_prompt(&FindingPlannerMaterial {
             db: Path::new("/q/queue.db"),
@@ -9187,9 +9515,11 @@ mod tests {
             goal_closed: false,
             siblings: &siblings,
             answer: Some(&answer),
+            handover: Some(&handover),
         })
         .unwrap();
         within(&fitted, FINDING_PLANNER_PROMPT_LIMIT);
+        sections_within(&fitted);
         let (text, bytes) = (&fitted.text, &fitted.bytes);
         for section in ["finding", "evidence", "asks", "goals", "answer"] {
             assert!(
@@ -9260,6 +9590,7 @@ mod tests {
             .map(|id| (goal_of(id, 20_000), false, goal_tasks(500)))
             .collect();
         let asks: Vec<Ask> = (1..=100).map(|id| asked(id, 2_000)).collect();
+        let handover = big_handover();
         let answer = asked(300, 20_000);
         let fitted = request_planner_prompt(&RequestPlannerMaterial {
             db: Path::new("/q/queue.db"),
@@ -9270,9 +9601,11 @@ mod tests {
             goals: &goals,
             asks: &asks,
             answer: Some(&answer),
+            handover: Some(&handover),
         })
         .unwrap();
         within(&fitted, REQUEST_PLANNER_PROMPT_LIMIT);
+        sections_within(&fitted);
         let (text, bytes) = (&fitted.text, &fitted.bytes);
         for section in ["note", "refs", "goals", "asks", "answer"] {
             assert!(

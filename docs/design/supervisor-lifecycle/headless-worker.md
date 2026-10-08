@@ -297,6 +297,7 @@ runtimeのplannerは経路の選択なしに非対話で立ち、この文書の
 - **依頼**: revise・`planner_question`の答え・`provider retry`・終了は`Supervisor::send_to_planner`が`turns/`の依頼と終了の依頼にし、plannerには打ち込まない。
   落とし穴: 依頼の前に入力の印を書くので、壁で失敗したturnの後に印だけが新しくなると、plannerは`working`に見えたまま誰も壁を見ない。
   wrapperはそのとき壁のturnのidle markerを書き直す（`renew_wall_marker`）。
+- **初期promptが最初のturn**: 人の答えだけを待って終わったplannerの後のanswerは、新しいplannerの初期prompt（`prompt.txt`）に質問・前のplannerのnote・draftと載る（resumeしない）。
 - **状態**（`planner_view`）: 画面を読まず、idle markerと待っている依頼から`idle` / `working`を決める。
   壁で終わったturnのplannerは依頼が待っていても`idle`。
   生死はhandleのpidと記録した起動時刻だけで判じ、heartbeatが古くても`lost`にせず、cmuxに聞かない。
@@ -309,12 +310,14 @@ runtimeのplannerは経路の選択なしに非対話で立ち、この文書の
   cmuxのworkspace・色・pill・groupは作らない。
   `dagq submit`はplannerの記録からhandleを読んでproposalの持ち主にするので、wrapperは最初のturnの前にhandleが記録されるのを待つ。
 - **終わり**: 終了の依頼でwrapperはexit code 0で終わる。
+  人の答えだけを待つplannerも終了の依頼で終わり、行は`runtime_answer_wait`で閉じる（[`plan` / `planners`](plan-planners.md#runtimeのplannerの経路)の「人の答えだけを待つplannerの終わり」）。
   掃除はhandleをprocessの識別で判じ、生きているwrapperの行はheartbeatが遅れても閉じない。
   wrapperが殺されて残ったturnは、plannerの最後の`turn_started`から止める（ADR-t1404-1決定3・8）。
 - **区間と集計**: 最初の`turn_started`が区間を開き、plannerの閉じが閉じる（[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。
   経路ごとの集計は[stats](stats.md)と[kpi](kpi.md)、workerの経路の集計はrunの無い`turn_finished`を数えない。
 - **CLI**（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）: `planner screen`は画面を読まずに`turns/`の場所を返し、`planner send`は拒む（[Session send](session-send.md#人とinboxの画面の読み取りと送信)）。
   続きの依頼は次のturnの依頼として置く（[`plan` / `planners`](plan-planners.md#続きの依頼と非対話のplannerのcli)）。
+- **test**: 人の答え待ちでの終了と、answerで立つplannerの最初のturnは本物のwrapperで`planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer`と`a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines`。
 
 ## taskの再計画（予定・未実装）
 

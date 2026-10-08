@@ -373,12 +373,16 @@ string_enum!(PlannerRoute {
 // replaced, stays only in older events), a planner of the runtime's whose agent exited, whose wrapper was
 // lost, whose session is gone with its workspace, or which did not exit in
 // time after `/exit`, and a row whose workspace and wrapper were found gone.
+// `runtime_answer_wait` is a planner of the runtime's asked to exit because
+// only a person's answer to its `planner_question` was left (ADR-t1704-1
+// decision 1), closed once its wrapper ended or was stopped.
 string_enum!(PlannerCloseCode {
     PersonRetired => "person_retired",
     RuntimeExited => "runtime_exited",
     RuntimeLost => "runtime_lost",
     RuntimeSessionGone => "runtime_session_gone",
     RuntimeExitTimedOut => "runtime_exit_timed_out",
+    RuntimeAnswerWait => "runtime_answer_wait",
     Abandoned => "abandoned",
 });
 
@@ -993,7 +997,7 @@ pub use plan_review::{
     MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanAnswer, PlanReviewAction,
     PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict, Reopen, next_to_review,
 };
-pub use planner::{IdleProbe, PlannerProbe, PlannerSession};
+pub use planner::{IdleProbe, PlannerHandover, PlannerProbe, PlannerSession};
 pub use proposal::{PlannerOwner, Proposal, ProposalRecord, Submission};
 pub use reason::{Reason, ReasonCode};
 pub use receipt::{Receipt, ReceiptCheck, evidence_missing_reason, required_of};

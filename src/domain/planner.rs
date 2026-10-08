@@ -49,6 +49,25 @@ pub struct PlannerSession {
     /// How its agent runs (ADR-t1394-2): interactive in a terminal, or one
     /// call per turn.
     pub route: PlannerRoute,
+    /// When the runtime asked it to exit because only a person's answer to
+    /// its `planner_question` was left (ADR-t1704-1 decision 1): no answer
+    /// goes to it any more, and it counts to no limit of planners that
+    /// ended undecided (decision 5).
+    pub answer_wait_at: Option<i64>,
+}
+
+/// What a planner of the runtime's that ended for a person's answer alone
+/// left for the planner that goes on from the answer (ADR-t1704-1
+/// decision 3): the queue's records, not its session, which is not
+/// resumed.
+#[derive(Debug, Clone)]
+pub struct PlannerHandover {
+    pub planner_id: PlannerId,
+    /// Its notes (`dagq note`), oldest first: each event's ID and text.
+    pub notes: Vec<(i64, String)>,
+    /// The drafts it created or edited that are still drafts, by ID: their
+    /// text is the queue's as it is now.
+    pub drafts: Vec<super::GoalTask>,
 }
 
 /// How long a planner may take from its record to its wrapper's
@@ -275,6 +294,7 @@ mod tests {
             error: None,
             created_at: 90,
             route: PlannerRoute::Interactive,
+            answer_wait_at: None,
         }
     }
 

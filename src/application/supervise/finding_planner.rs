@@ -143,7 +143,7 @@ impl Supervisor<'_> {
                 )?;
                 info!(ask_id = %ask.id, "ask {} closed: finding {finding} moved on", ask.id);
             }
-            PlannerAnswerRoute::Person => {}
+            PlannerAnswerRoute::Revise(_) | PlannerAnswerRoute::Person => {}
         }
         Ok(())
     }
@@ -256,6 +256,12 @@ impl Supervisor<'_> {
             .flat_map(|detail| detail.tasks.iter())
             .cloned()
             .collect();
+        // What the planner that asked left as it ended for the answer alone
+        // (ADR-t1704-1 decision 3).
+        let handover = match answer {
+            Some(ask) => self.queue.planner_handover(ask.id)?,
+            None => None,
+        };
         finding_planner_prompt(&FindingPlannerMaterial {
             db: &self.layout.db,
             finding: &view,
@@ -265,6 +271,7 @@ impl Supervisor<'_> {
             goal_closed: goal.as_ref().is_some_and(|detail| detail.closed),
             siblings: &siblings,
             answer,
+            handover: handover.as_ref(),
         })
     }
 }

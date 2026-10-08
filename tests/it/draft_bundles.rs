@@ -398,9 +398,10 @@ fn what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read() {
     );
 }
 
-/// A `planner_question` stays per draft: one about a draft of the bundle
-/// other than its first holds the bundle's planner from exiting and its
-/// answer goes to that planner as its next turn.
+/// A `planner_question` stays per draft: the answer of one about a draft
+/// of the bundle other than its first, given before the bundle's planner
+/// was ended for that wait (ADR-t1704-1 decision 2), goes to that planner
+/// as its next turn.
 #[test]
 fn a_question_about_any_draft_of_the_bundle_goes_to_its_planner() {
     let fx = fixture();
@@ -432,12 +433,11 @@ fn a_question_about_any_draft_of_the_bundle_goes_to_its_planner() {
         .unwrap()
         .ask;
     crate::runtime_support::planner_turns::idle(&queue, &fx.db, planner.id);
+    queue.answer(asked.id, "keep_draft").unwrap();
     pass(&fx, &backend, &reviewer);
     assert!(!crate::runtime_support::planner_turns::exit_requested(
         &fx.db, planner.id
     ));
-    queue.answer(asked.id, "keep_draft").unwrap();
-    pass(&fx, &backend, &reviewer);
     let requests = crate::runtime_support::planner_turns::turn_requests(&fx.db, planner.id);
     assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(
@@ -450,4 +450,84 @@ fn a_question_about_any_draft_of_the_bundle_goes_to_its_planner() {
     );
     // No planner of its own is opened for the draft asked about.
     assert_eq!(queue.planners(false).unwrap().len(), 1);
+}
+
+/// ADR-t1704-1 decisions 4 and 5 (acceptance (c), (e)): the planner of a
+/// bundle that decided one draft and asked about the other is ended once
+/// only the answer is left. The draft decided is settled as such and the
+/// one asked about as `answer_wait`, which counts to no limit; that draft
+/// gets no planner while the question is open, and the answer opens one
+/// for it, carrying the answer, as its first by the count.
+#[test]
+fn a_bundle_planner_that_asked_about_one_draft_ends_after_deciding_the_other_and_the_answer_goes_on()
+ {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    let source = add(&mut queue, "source", &[], Priority::Normal);
+    let a: Vec<TaskId> = (0..2)
+        .map(|i| follow_up(&mut queue, &format!("a{i}"), goal, source, "run-a", i))
+        .collect();
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    pass(&fx, &backend, &reviewer);
+    let planner = planner_of(&queue, a[0]).unwrap();
+    // It drops a0 and asks about a1.
+    queue
+        .transition(a[0], dagq::domain::TaskAction::Cancel)
+        .unwrap();
+    let asked = queue
+        .ask(dagq::domain::NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            kind: dagq::domain::AskKind::PlannerQuestion,
+            task_id: Some(a[1]),
+            run_id: None,
+            question: "is a1 in the goal?".into(),
+            options: vec!["adopt".into(), "cancel".into(), "keep_draft".into()],
+            asked_by: "planner".into(),
+            reason_category: dagq::domain::AskReason::Scope,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap()
+        .ask;
+    crate::runtime_support::planner_turns::idle(&queue, &fx.db, planner.id);
+    pass(&fx, &backend, &reviewer);
+    assert!(crate::runtime_support::planner_turns::exit_requested(
+        &fx.db, planner.id
+    ));
+    queue
+        .planner_exited(planner.id, std::process::id(), 0)
+        .unwrap();
+    pass(&fx, &backend, &reviewer);
+    let bundle = queue.draft_bundle(planner.id).unwrap().unwrap();
+    let outcomes: Vec<(i64, Option<String>)> = bundle
+        .members
+        .iter()
+        .map(|m| (m.task_id.as_i64(), m.outcome.clone()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (a[0].as_i64(), Some("canceled".to_owned())),
+            (a[1].as_i64(), Some("answer_wait".to_owned())),
+        ]
+    );
+    // No planner for a1 while its question is open.
+    pass(&fx, &backend, &reviewer);
+    assert!(queue.planners(false).unwrap().is_empty());
+
+    queue.answer(asked.id, "adopt").unwrap();
+    pass(&fx, &backend, &reviewer);
+    let next = planner_of(&queue, a[1]).expect("the answer opens a planner");
+    assert!(
+        planner_prompt(&fx.db, next.id).contains(&format!("answer to ask {}: adopt", asked.id))
+    );
+    let opened = events(&mut queue, a[1], "draft_planner_opened");
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    assert_eq!(opened[1]["attempt"], 1, "the wait is not counted");
+    // That it counts once it ends undecided is the store's unit test
+    // a_planner_ended_for_a_persons_answer_counts_to_no_limit_of_the_draft.
 }

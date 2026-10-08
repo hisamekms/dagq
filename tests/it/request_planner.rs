@@ -559,14 +559,15 @@ fn a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three
     supervise(&fx, &backend, &reviewer);
     let first = request_planner(&queue, id).unwrap();
 
-    // It asks about the request, on no task, and waits for the answer.
+    // It asks about the request, on no task, and is answered while it is
+    // still there (before a pass ended it for the wait, ADR-t1704-1
+    // decision 2).
     let asked = planner_question(&mut queue, id);
     assert_eq!(asked.request_id, Some(id));
     idle(&queue, &fx.db, first);
-    supervise(&fx, &backend, &reviewer);
-    assert!(!exit_requested(&fx.db, first));
     queue.answer(asked.id, "plan").unwrap();
     supervise(&fx, &backend, &reviewer);
+    assert!(!exit_requested(&fx.db, first));
     let requests = turn_requests(&fx.db, first);
     assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(

@@ -301,6 +301,7 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 - 束の鍵は`BundleKey::of`が材料から決め、作成時刻では束ねない。
 - 上限（`MAX_DRAFT_PLANNERS`）はdraftごとに数え、達したdraftは計画の依頼を待つ（attentionの`DecideDraft`）。
   人のanswerを運ぶときと、人・inboxが付けた再検討の時刻が来たときは1回越える。
+- 人の答えだけを待って終わったplanner（`PlannerSession::answer_wait_at`、draftの結末`DraftOutcome::AnswerWait`）はどの上限にも数えない（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定5）。
 - 同時に立つplannerの数の上限は束1つを1と数え、他の種類のplannerと共有する。
 - 人を経ずに採用できるfollow_upの上限は`adopt_needs_person`（深さは[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）。
 - 落とし穴: follow_upの深さは`add`・人のsubmit・人の`adopt`を経たsubmit・`ready --bypass-review`で0に戻り、runtimeのplannerが人を経ずにsubmitしたtaskではそのまま残る。
@@ -347,11 +348,6 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 - 落とし穴: validationの保留に添えるeventと`backend_call_failed`は、別のeventと同じコードを重ねて持つので、`stats`の`reason_codes`は数えない（`REPEATED_CODE_KINDS`）。
 - runの`last_error`のコードは`domain::reason::last_error_code`が、`last_error`を書いたか中断したeventのうち最新のものから導く（どのeventが当たるかは`explains_last_error`）。
   `status`・`show`の`last_error_code`と`stats`の`reason_codes`がこれを読む（[status](supervisor-lifecycle/status.md#status)）。
-
-## 予定: plannerの人だけの答え待ちの記録と回数
-
-[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3・5で、まだ実装していない。
-人だけの答え待ちで終わったplannerを上限から除く（[plan-planners](supervisor-lifecycle/plan-planners.md#予定-人の答えだけを待つplannerの枠の解放)）。
 
 ## CIの見張り（ADR-t1920-1）
 

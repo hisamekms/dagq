@@ -38,7 +38,7 @@ The next supervisor pass opens a runtime planner for each `open` request, before
 - **declines it** with a reason (done already, a duplicate of work in flight, not plannable as asked); the request becomes `declined`.
 - **asks** a `planner_question` (below).
 
-A planner that ends without deciding is replaced at the next pass, at most 3 per request; then the request is `exhausted`.
+A planner that ends without deciding is replaced at the next pass, at most 3 per request; then the request is `exhausted`. A planner whose only wait is the person's answer to its question is ended to free its place (`planner_closed` with `code` `runtime_answer_wait`; the ask stays open) and is not counted; the planner the answer opens counts only if it too ends without deciding.
 
 Follow them with `"$DAGQ" requests` (the open ones), `requests ID` (one, whatever its status) or `requests --all`: each has `text`, `note`, `refs`, `requested_by`, `status` (`open`, `proposed`, `declined`, `exhausted`), `status_reason`, its `proposals` and the planners opened for it. `dagq planners` lists the planner sessions not closed.
 
@@ -47,11 +47,11 @@ Follow them with `"$DAGQ" requests` (the open ones), `requests ID` (one, whateve
 `watch` brings each outcome (queue events on no task; `status` does not list them, `"$DAGQ" events --kind request_proposed` and the like read them again):
 
 - `report the request's proposal` (`request_proposed`): tell the person the request and the proposal (`"$DAGQ" proposal show ID`, its tasks with `show`). Nothing else waits on them: plan review takes it from here, and the tasks run once it passes.
-- `rephrase or drop the request` (`request_declined` with its `reason`, or `request_planner_exhausted` after 3 planners): show the person the reason. On their word record a new request in other words, naming the old one's references again (and what the reason pointed at); or leave it, which needs no command.
+- `rephrase or drop the request` (`request_declined` with its `reason`, or `request_planner_exhausted` after 3 planners that ended without deciding; one ended only to wait for the person's answer is not one of them): show the person the reason. On their word record a new request in other words, naming the old one's references again (and what the reason pointed at); or leave it, which needs no command.
 
 ## A planner_question about a request
 
-The planner asks with `ask --request N --kind planner_question`: options `plan` / `decline`, its `recommendation` and `confidence`, and a question holding what the person needs. Show it as every ask (the skill's step 3) and write the person's answer as given. The runtime delivers the answer to that planner as its next turn, or, when it is gone, opens a new planner for the request with the answer in its prompt. Do not carry it out yourself.
+The planner asks with `ask --request N --kind planner_question`: options `plan` / `decline`, its `recommendation` and `confidence`, and a question holding what the person needs. Show it as every ask (the skill's step 3) and write the person's answer as given. The runtime delivers the answer to that planner as its next turn, or, when it is gone, opens a new planner for the request with the answer in its prompt. A planner that waits only for the answer is ended meanwhile, and the request gets no planner until the answer: the new one carries the question, the answer and what the ended planner noted and drafted. Do not carry it out yourself.
 
 ## More words for a planner still at work
 

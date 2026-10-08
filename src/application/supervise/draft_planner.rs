@@ -144,7 +144,9 @@ impl Supervisor<'_> {
                     )?;
                     info!(task_id = %task, ask_id = %ask.id, "ask {} closed: draft task {task} moved on", ask.id);
                 }
-                PlannerAnswerRoute::Person => {}
+                // The revise of its proposal carries it (ADR-t1704-1
+                // decision 4).
+                PlannerAnswerRoute::Revise(_) | PlannerAnswerRoute::Person => {}
             }
         }
         Ok(())
@@ -296,6 +298,12 @@ impl Supervisor<'_> {
                     .collect(),
             });
         }
+        // What the planner that asked left as it ended for the answer alone
+        // (ADR-t1704-1 decision 3).
+        let handover = match answer {
+            Some(ask) => self.queue.planner_handover(ask.id)?,
+            None => None,
+        };
         draft_planner_prompt(&DraftPlannerMaterial {
             db: &self.layout.db,
             key,
@@ -304,6 +312,7 @@ impl Supervisor<'_> {
             receipt: receipt.as_ref(),
             goals: &goals,
             answer,
+            handover: handover.as_ref(),
             revisits: &revisits,
         })
     }

@@ -129,7 +129,7 @@ impl Supervisor<'_> {
                 )?;
                 info!(ask_id = %ask.id, "ask {} closed: request {request} moved on", ask.id);
             }
-            PlannerAnswerRoute::Person => {}
+            PlannerAnswerRoute::Revise(_) | PlannerAnswerRoute::Person => {}
         }
         Ok(())
     }
@@ -223,6 +223,12 @@ impl Supervisor<'_> {
             }
         }
         let asks = self.queue.request_asks(request.id)?;
+        // What the planner that asked left as it ended for the answer alone
+        // (ADR-t1704-1 decision 3).
+        let handover = match answer {
+            Some(ask) => self.queue.planner_handover(ask.id)?,
+            None => None,
+        };
         request_planner_prompt(&RequestPlannerMaterial {
             db: &self.layout.db,
             request,
@@ -232,6 +238,7 @@ impl Supervisor<'_> {
             goals: &goals,
             asks: &asks,
             answer,
+            handover: handover.as_ref(),
         })
     }
 

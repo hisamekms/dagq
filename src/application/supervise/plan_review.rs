@@ -24,7 +24,7 @@ use crate::{
         },
         planner_idle_marker,
         prompt::{
-            DUPLICATE_CANDIDATES, DuplicateCandidates, PLAN_REVIEW_ACCESS, PRECEDENT_ASKS,
+            Carried, DUPLICATE_CANDIDATES, DuplicateCandidates, PLAN_REVIEW_ACCESS, PRECEDENT_ASKS,
             PlanReviewMaterial, PlanReviewPrompt, PromptBytes, plan_review_prompt,
             plan_revise_request, precedent_line,
         },
@@ -32,7 +32,8 @@ use crate::{
     },
     domain::{
         PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict, PlannerCloseCode,
-        PlannerOrigin, PlannerState, Proposal, ProposalId, Task, TaskDetail,
+        PlannerOrigin, PlannerRoute, PlannerSession, PlannerState, Proposal, ProposalId, Task,
+        TaskDetail,
         actor_model::{ActorLaunch, JobRoute, ModelRole, job_route, job_wait_text},
         next_to_review,
         plan_review::{
@@ -737,6 +738,10 @@ impl Supervisor<'_> {
                     self.queue
                         .revise_lost(proposal, None, "its delivery was never recorded")?;
                 }
+                // A revise held back by a question nobody answered yet waits
+                // for the person, not for a planner (ADR-t1704-1
+                // decision 4).
+                ReviseWatch::NoPlanner { .. } if self.revise_questions(proposal)?.0 => {}
                 ReviseWatch::NoPlanner { waited } => {
                     let holders = self.planner_holds(&views)?;
                     warn!(
@@ -770,6 +775,10 @@ impl Supervisor<'_> {
                         .find(|view| view.planner.workspace_id.as_deref() == Some(workspace))
                 });
             match owner {
+                // Its planner was asked to exit because only a person's
+                // answer was left: the revise waits for its row to close
+                // and goes to a new planner (ADR-t1704-1 decision 4).
+                Some(view) if view.planner.answer_wait_at.is_some() => {}
                 Some(view) if view.alive => {
                     // A planner at work gets the revise once it is idle.
                     // One that waits for Claude gets it after its retry
@@ -806,10 +815,23 @@ impl Supervisor<'_> {
                 // that evidence; the timeout tells the inbox.
                 Some(view) if !self.planner_gone(view) => {}
                 _ if runtime_open < self.limits.runtime_planners.value => {
-                    if !self.queue.claim_revise(proposal.id())? {
+                    // A fix stopped at a question nobody answered yet is not
+                    // started again without the answer; the answers given
+                    // go with the revise to the same new planner
+                    // (ADR-t1704-1 decision 4).
+                    let (held, answers) = self.revise_questions(proposal.id())?;
+                    if held || !self.queue.claim_revise(proposal.id())? {
                         continue;
                     }
-                    let opened = match self.open_planner_for(proposal, &revise.reasons) {
+                    let handover = match answers.first() {
+                        Some(ask) => self.queue.planner_handover(ask.id)?,
+                        None => None,
+                    };
+                    let carried = Carried {
+                        answers: &answers,
+                        handover: handover.as_ref(),
+                    };
+                    let opened = match self.open_planner_for(proposal, &revise.reasons, carried) {
                         Ok(opened) => opened,
                         Err(error) => {
                             self.queue.revise_lost(
@@ -833,6 +855,10 @@ impl Supervisor<'_> {
                         &workspace,
                         Some(&opened.launch),
                     )?;
+                    for ask in &answers {
+                        self.queue.ask_delivered(ask.id, &workspace)?;
+                        info!(ask_id = %ask.id, "answer of ask {} went with the revise of proposal {} to planner {}", ask.id, proposal.id(), opened.planner.id);
+                    }
                     views = self.planner_views()?;
                 }
                 // At the limit: the revise waits for a runtime planner to
@@ -1027,6 +1053,15 @@ impl Supervisor<'_> {
 
     /// The planners not closed, each judged by [`planner_view`].
     pub(super) fn planner_views(&self) -> Result<Vec<PlannerView>> {
+        self.queue
+            .planners(false)?
+            .into_iter()
+            .map(|planner| self.judge_planner(planner))
+            .collect()
+    }
+
+    /// `planner` judged by [`planner_view`] now.
+    fn judge_planner(&self, planner: PlannerSession) -> Result<PlannerView> {
         let probes = PlannerProbes {
             sessions: self.sessions,
             processes: &*self.processes,
@@ -1035,11 +1070,7 @@ impl Supervisor<'_> {
             clock: &*self.generators.clock,
             planners_dir: &self.layout.planners_dir,
         };
-        self.queue
-            .planners(false)?
-            .into_iter()
-            .map(|planner| planner_view(&probes, planner))
-            .collect()
+        planner_view(&probes, planner)
     }
 
     /// Stamp a request the supervisor is about to write for the planner of
@@ -1053,18 +1084,39 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Open a planner of the runtime's for `proposal` with its reasons.
+    /// Open a planner of the runtime's for `proposal` with its reasons and
+    /// what it carries from the planner before it.
     fn open_planner_for(
         &mut self,
         proposal: &Proposal,
         reasons: &[String],
+        carried: Carried<'_>,
     ) -> Result<crate::application::planner::OpenedPlanner> {
         let tasks = proposal
             .task_ids()
             .iter()
             .map(|&id| Ok(self.queue.show(id)?.task))
             .collect::<Result<Vec<_>>>()?;
-        open_runtime_planner(&self.planner_launch(), proposal.id(), &tasks, reasons)
+        open_runtime_planner(
+            &self.planner_launch(),
+            proposal.id(),
+            &tasks,
+            reasons,
+            carried,
+        )
+    }
+
+    /// The `planner_question`s nobody closed about the tasks of
+    /// `proposal`: whether one is not answered yet, which holds its revise
+    /// back from a new planner, and those answered, which go with it
+    /// (ADR-t1704-1 decision 4).
+    fn revise_questions(&mut self, proposal: ProposalId) -> Result<(bool, Vec<Ask>)> {
+        let (answered, open): (Vec<Ask>, Vec<Ask>) = self
+            .queue
+            .proposal_questions(proposal)?
+            .into_iter()
+            .partition(|ask| ask.answered_at.is_some());
+        Ok((!open.is_empty(), answered))
     }
 
     /// What opening a planner of the runtime's works with. `[roles]` is
@@ -1178,6 +1230,18 @@ impl Supervisor<'_> {
                             "planner {id} of the runtime was opened in a workspace by an older binary; the runtime calls no cmux for its planners any more (ADR-t1433-2), so its record is closed and its workspace is left for a person to close"
                         ),
                     )
+                } else if view.planner.answer_wait_at.is_some() {
+                    (
+                        PlannerCloseCode::RuntimeAnswerWait,
+                        format!(
+                            "planner {id} of the runtime was asked to exit because only a person's answer to its planner_question was left, and its session is over ({}); the answer goes to a new planner",
+                            if overdue {
+                                "its wrapper was stopped past the exit timeout"
+                            } else {
+                                view.state.as_str()
+                            }
+                        ),
+                    )
                 } else if overdue {
                     (
                         PlannerCloseCode::RuntimeExitTimedOut,
@@ -1235,14 +1299,80 @@ impl Supervisor<'_> {
                 );
                 continue;
             }
-            if self.busy_reasons(view, &revising)?.is_empty()
-                && let Some(workspace) = &workspace
-            {
+            let Some(workspace) = &workspace else {
+                continue;
+            };
+            // Marked before (by a supervisor that stopped before its exit
+            // request, or whose request failed): asked again.
+            if view.planner.answer_wait_at.is_some() {
+                if asked.is_none() {
+                    self.send_to_planner(view, workspace, Input::Exit, "exit")?;
+                    self.planner_exits.push((id, Instant::now()));
+                }
+                continue;
+            }
+            let busy = self.busy_reasons(view, &revising)?;
+            if busy.is_empty() {
                 self.send_to_planner(view, workspace, Input::Exit, "exit")?;
                 self.planner_exits.push((id, Instant::now()));
                 info!("planner {id} of the runtime is done; asked it to exit");
+            } else if answer_wait_only(&busy) && view.planner.route == PlannerRoute::Headless {
+                self.end_for_answer_wait(view, workspace, &revising)?;
             }
         }
+        Ok(())
+    }
+
+    /// End the headless planner of `view`, whose only wait is a person's
+    /// answer to its `planner_question` (ADR-t1704-1 decision 1): judged
+    /// again now (a revise or an answer written for it in this pass makes
+    /// it busy), it is marked (`answer_wait_at`, `planner_answer_wait`) in
+    /// one write transaction that holds only while none of its questions is
+    /// answered, and then asked to exit; the ask stays open, and its answer
+    /// goes to a new planner once its row is closed (decision 2).
+    fn end_for_answer_wait(
+        &mut self,
+        view: &PlannerView,
+        workspace: &str,
+        revising: &[RevisingProposal],
+    ) -> Result<()> {
+        let id = view.planner.id;
+        let now = self.judge_planner(self.queue.planner(id)?)?;
+        let busy = self.busy_reasons(&now, revising)?;
+        if !answer_wait_only(&busy) || now.planner.answer_wait_at.is_some() {
+            return Ok(());
+        }
+        let asks: Vec<AskId> = self
+            .planner_questions(&now)?
+            .into_iter()
+            .filter(|ask| ask.answered_at.is_none() && ask.closed_at.is_none())
+            .map(|ask| ask.id)
+            .collect();
+        let reason = format!(
+            "planner {id} of the runtime is idle and waits only for a person's answer to ask {}; it is asked to exit to free its place, and the answer goes to a new planner",
+            asks.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let payload = json!({
+            "planner_id": id,
+            "workspace_id": workspace,
+            "asks": asks,
+            "proposal_id": now.planner.proposal_id,
+            "draft_task_id": now.planner.draft_task_id,
+            "finding_id": now.planner.finding_id,
+            "request_id": now.planner.request_id,
+            "revise": busy.contains(&PlannerBusy::Revise),
+            "idle_since": now.idle_since,
+            "reason": reason,
+        });
+        if asks.is_empty() || !self.queue.planner_answer_wait(id, &asks, &payload)? {
+            return Ok(());
+        }
+        self.send_to_planner(&now, workspace, Input::Exit, "exit")?;
+        self.planner_exits.push((id, Instant::now()));
+        info!("{reason}");
         Ok(())
     }
 }
@@ -1310,6 +1440,19 @@ fn revise_watch(
     }
 }
 
+/// Whether `busy` holds a planner of the runtime's only for a person's
+/// answer (ADR-t1704-1 decision 1): its `planner_question` is not
+/// answered, and nothing else holds it but a revise it took, whose fixes
+/// it did not need the answer for. An answer delivered and not read yet,
+/// a follow-up request or a turn at work, Claude's wall, a revise not
+/// delivered yet, or an exit request already sent keep it.
+fn answer_wait_only(busy: &[PlannerBusy]) -> bool {
+    busy.contains(&PlannerBusy::QuestionOpen)
+        && busy
+            .iter()
+            .all(|reason| matches!(reason, PlannerBusy::QuestionOpen | PlannerBusy::Revise))
+}
+
 /// Why a planner of the runtime's is not ended (task 884), as the
 /// `busy` of a [`PlannerHold`] and of `planner_released` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1350,26 +1493,25 @@ impl PlannerBusy {
 }
 
 impl Supervisor<'_> {
-    /// Whether, and how, a planner of the runtime's still waits on a
-    /// `planner_question` about its draft or finding: one not answered
-    /// yet, one answered whose answer is not delivered yet, or one whose
-    /// answer was delivered to this planner and not taken up yet (task 884):
-    /// a headless planner takes it up once a turn carrying it finished;
-    /// without a record of that request, once it stopped after the delivery,
-    /// timed by its claim (`planner_answer_claimed`), taken before it, not
-    /// by the ask's close after it, so an agent that took the answer up and
-    /// stopped before the close is done; an answer a new planner carried in its prompt is timed
-    /// by the planner's opening. An ask closed without a delivery holds
-    /// nothing.
-    fn question_wait(&mut self, view: &PlannerView) -> Result<Option<PlannerBusy>> {
+    /// The `planner_question`s of a planner of the runtime's: about its
+    /// request (or a draft a planner of it added), its finding, the drafts
+    /// of its bundle, or the tasks of the proposal it was opened for; one
+    /// closed only when it was delivered to this planner.
+    fn planner_questions(&mut self, view: &PlannerView) -> Result<Vec<Ask>> {
         let (draft, finding, request) = (
             view.planner.draft_task_id,
             view.planner.finding_id,
             view.planner.request_id,
         );
-        if draft.is_none() && finding.is_none() && request.is_none() {
-            return Ok(None);
-        }
+        // A planner opened for a proposal (a revise's) asks about its
+        // tasks (ADR-t1704-1 decision 4).
+        let proposal_tasks = match (draft, finding, request, view.planner.proposal_id) {
+            (None, None, None, Some(proposal)) => {
+                self.queue.show_proposal(proposal)?.task_ids().to_vec()
+            }
+            (None, None, None, None) => return Ok(Vec::new()),
+            _ => Vec::new(),
+        };
         // The drafts of its bundle (ADR-t807-1).
         let drafts = match draft {
             Some(_) => self.queue.planner_draft_tasks(view.planner.id)?,
@@ -1402,6 +1544,21 @@ impl Supervisor<'_> {
                                 && self.queue.answer_request(&ask)? == Some(request))
                     }
                     (Some(finding), None) => ask.finding_id == Some(finding),
+                    (None, None) if draft.is_none() => {
+                        ask.finding_id.is_none()
+                            && ask.run_id.is_none()
+                            && ask.asked_by == SessionRole::Planner.as_str()
+                            && ask
+                                .task_id
+                                .is_some_and(|task| proposal_tasks.contains(&task))
+                            && (ask.closed_at.is_none()
+                                || match view.planner.workspace_id.as_deref() {
+                                    Some(workspace) => {
+                                        self.queue.ask_delivered_to(ask.id, workspace)?
+                                    }
+                                    None => false,
+                                })
+                    }
                     (None, None) => {
                         ask.finding_id.is_none()
                             && ask.task_id.is_some_and(|task| drafts.contains(&task))
@@ -1411,19 +1568,36 @@ impl Supervisor<'_> {
                 asks.push(ask);
             }
         }
+        Ok(asks)
+    }
+
+    /// Whether, and how, a planner of the runtime's still waits on a
+    /// `planner_question` about its draft, finding, request or proposal
+    /// ([`Self::planner_questions`]): one answered whose answer is not
+    /// delivered yet, or one whose answer was delivered to this planner and
+    /// not taken up yet (task 884), before one not answered yet, so that a
+    /// planner that waits only on a person tells so (ADR-t1704-1
+    /// decision 1). A headless planner takes an answer up once a turn
+    /// carrying it finished; without a record of that request, once it
+    /// stopped after the delivery, timed by its claim
+    /// (`planner_answer_claimed`), taken before it, not by the ask's close
+    /// after it, so an agent that took the answer up and stopped before the
+    /// close is done; an answer a new planner carried in its prompt is
+    /// timed by the planner's opening. An ask closed without a delivery
+    /// holds nothing.
+    fn question_wait(&mut self, view: &PlannerView) -> Result<Option<PlannerBusy>> {
+        let asks = self.planner_questions(view)?;
         if asks
             .iter()
-            .any(|ask| ask.closed_at.is_none() && ask.answered_at.is_none())
+            .any(|ask| ask.closed_at.is_none() && ask.answered_at.is_some())
         {
-            return Ok(Some(PlannerBusy::QuestionOpen));
-        }
-        if asks.iter().any(|ask| ask.closed_at.is_none()) {
             return Ok(Some(PlannerBusy::AnswerUndelivered));
         }
-        let Some(workspace) = view.planner.workspace_id.as_deref() else {
-            return Ok(None);
-        };
+        let workspace = view.planner.workspace_id.as_deref();
         for ask in &asks {
+            let Some(workspace) = workspace else {
+                break;
+            };
             if !self.queue.ask_delivered_to(ask.id, workspace)? {
                 continue;
             }
@@ -1449,6 +1623,12 @@ impl Supervisor<'_> {
             if view.idle_since.is_none_or(|since| since <= typed) {
                 return Ok(Some(PlannerBusy::AnswerTyped));
             }
+        }
+        if asks
+            .iter()
+            .any(|ask| ask.closed_at.is_none() && ask.answered_at.is_none())
+        {
+            return Ok(Some(PlannerBusy::QuestionOpen));
         }
         Ok(None)
     }
@@ -1605,6 +1785,29 @@ fn warns_of_ignored_route(warned: bool, roles: &RoleModels) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::domain::MAX_PLAN_REVISES;
+
+    /// ADR-t1704-1 decision 1: a planner is ended for a person's answer
+    /// only when its unanswered question is all that holds it, besides a
+    /// revise it took; anything else it waits for keeps it.
+    #[test]
+    fn only_a_question_waiting_on_a_person_and_a_revise_taken_end_a_planner_for_the_answer() {
+        use PlannerBusy::*;
+        for busy in [&[QuestionOpen][..], &[Revise, QuestionOpen]] {
+            assert!(answer_wait_only(busy), "{busy:?}");
+        }
+        for busy in [
+            &[][..],
+            &[Revise],
+            &[AtWork, QuestionOpen],
+            &[RevisePending, QuestionOpen],
+            &[QuestionOpen, ProviderWall],
+            &[QuestionOpen, Exiting],
+            &[AnswerUndelivered],
+            &[AnswerTyped],
+        ] {
+            assert!(!answer_wait_only(busy), "{busy:?}");
+        }
+    }
 
     /// Any value of the old key is warned of, and only once; no key is
     /// not.

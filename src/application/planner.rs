@@ -41,7 +41,7 @@ use super::{
     headless_session::{TurnOwner, Turns},
     naming::shell_join,
     path_text, planner_idle_marker,
-    prompt::{FittedPrompt, runtime_planner_prompt},
+    prompt::{Carried, FittedPrompt, runtime_planner_prompt},
     screen_idle::{self, MarkerState},
     session::{OwnWorkspace, wrapper_refused},
 };
@@ -135,6 +135,7 @@ pub fn open_runtime_planner(
     proposal: ProposalId,
     tasks: &[Task],
     reasons: &[String],
+    carried: Carried<'_>,
 ) -> Result<OpenedPlanner> {
     // The proposal must exist; its record is the one the planner opens for.
     launch.queue.show_proposal(proposal)?;
@@ -155,7 +156,8 @@ pub fn open_runtime_planner(
                     })
         })
         .and_then(|event| event.task_id);
-    let prompt = runtime_planner_prompt(launch.db, proposal, tasks, reasons, review_anchor)?;
+    let prompt =
+        runtime_planner_prompt(launch.db, proposal, tasks, reasons, review_anchor, carried)?;
     let actor = launch
         .roles
         .launch(ModelRole::RuntimePlanner)
@@ -789,7 +791,17 @@ pub fn close_abandoned_planners(
             idle: None,
         };
         if planner.abandoned(&probe) {
-            let (code, reason) = if background && planner.exited_at.is_some() {
+            let (code, reason) = if planner.answer_wait_at.is_some() {
+                // Asked to exit because only a person's answer was left
+                // (ADR-t1704-1 decision 1).
+                (
+                    PlannerCloseCode::RuntimeAnswerWait,
+                    format!(
+                        "planner {} of the runtime was asked to exit because only a person's answer to its planner_question was left, and its wrapper is done; the answer goes to a new planner",
+                        planner.id
+                    ),
+                )
+            } else if background && planner.exited_at.is_some() {
                 (
                     PlannerCloseCode::RuntimeExited,
                     format!(
@@ -945,6 +957,7 @@ mod tests {
             error: None,
             created_at: 0,
             route,
+            answer_wait_at: None,
         };
         let cmux = Some("01234567-89AB-4DEF-8123-000000000000");
         let handle = Some("background:7:start");
@@ -986,6 +999,7 @@ mod tests {
             error: None,
             created_at: 0,
             route: PlannerRoute::Headless,
+            answer_wait_at: None,
         };
         assert_eq!(
             planner_closed_payload(&planner, PlannerCloseCode::RuntimeExited, false, "ended"),

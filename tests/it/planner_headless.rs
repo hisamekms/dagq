@@ -242,16 +242,22 @@ fn a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_
     assert_eq!(doctor["roles"]["runtime_planner"].get("route_source"), None);
 }
 
-/// Acceptance: a headless draft planner that asks a `planner_question`
-/// waits for the answer, which comes as its next request in `turns/`
-/// (recorded as `turn_requested` with its ID) and runs as a turn that
-/// resumes its session; then the exit request ends it. Nothing is typed.
+/// Acceptance (ADR-t1704-1 decisions 1 to 3, 5): a headless draft planner
+/// that notes what it decided and asks a `planner_question`, and then has
+/// only the answer left, is asked to exit (`planner_answer_wait`); its
+/// real wrapper ends on the request and its row closes as
+/// `runtime_answer_wait`, freeing its place, while the ask stays open and
+/// no planner is opened for the draft. The answer opens one new planner
+/// whose first turn's prompt carries the question, the answer and the
+/// note, as the same planner of the draft by the count (the wait is not
+/// counted), and which cancels the draft as answered. Nothing is typed.
 #[test]
-fn a_headless_draft_planner_takes_the_answer_of_its_question_as_its_next_turn() {
+fn a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer() {
     let fx = headless_fixture(
-        r#"case "$TURN" in
-1) "$DAGQ" --db "$DB" ask --kind planner_question --because scope --task 2 --question "in the goal?" --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
-*) "$DAGQ" --db "$DB" cancel 2 >> "$RUN_DIR/cancel.log" 2>&1 ;;
+        r#"case "$PROMPT" in
+*"answer to ask "[0-9]*": cancel"*) "$DAGQ" --db "$DB" cancel 2 >> "$RUN_DIR/cancel.log" 2>&1 ;;
+*) "$DAGQ" --db "$DB" note --task 2 --text "half-decided: cancel unless the goal needs it" >> "$RUN_DIR/ask.log" 2>&1
+   "$DAGQ" --db "$DB" ask --kind planner_question --because scope --task 2 --question "in the goal?" --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
 esac
 say "turn $TURN""#,
     );
@@ -267,22 +273,37 @@ say "turn $TURN""#,
     assert_eq!(draft, TaskId::new(2));
     let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
     let backend = PlanWorkspace::running();
-    // Its first turn asks, and it waits for the answer without an exit.
-    let open_question = || {
-        SqliteQueue::open(&fx.db)
-            .unwrap()
-            .asks(Default::default())
-            .unwrap()
-            .into_iter()
-            .find(|ask| ask.task_id == Some(draft))
-    };
     supervise_until(
         &fx,
         &backend,
         &reviewer,
-        || open_question().is_some() && !queue_events(&fx.db, "turn_finished").is_empty(),
+        || !queue_events(&fx.db, "planner_closed").is_empty(),
         || diagnose_planner(&fx.db),
     );
+    let first = queue.planners(true).unwrap()[0].clone();
+    assert_eq!(first.route, PlannerRoute::Headless);
+    assert_eq!(first.draft_task_id, Some(draft));
+    assert!(first.answer_wait_at.is_some());
+    let asked = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.task_id == Some(draft))
+        .expect("the question stays open");
+    let waited = queue_events(&fx.db, "planner_answer_wait");
+    assert_eq!(waited.len(), 1, "{waited:?}");
+    assert_eq!(waited[0]["planner_id"], first.id.as_i64());
+    assert_eq!(waited[0]["asks"], json!([asked.id]));
+    assert_eq!(waited[0]["draft_task_id"], draft.as_i64());
+    let closed = queue_events(&fx.db, "planner_closed");
+    assert_eq!(closed[0]["code"], "runtime_answer_wait", "{closed:?}");
+    assert_eq!(queue.planner(first.id).unwrap().exit_code, Some(0));
+    assert_eq!(
+        events(&mut queue, draft, "draft_planner_settled")[0]["outcome"],
+        "answer_wait"
+    );
+    // Its place is free, and no planner is opened for the draft without
+    // the answer.
     for _ in 0..3 {
         supervise_with(
             &fx,
@@ -291,55 +312,46 @@ say "turn $TURN""#,
             &options(1, Duration::from_secs(3600)),
         );
     }
-    let planner = queue.planners(false).unwrap()[0].clone();
-    assert_eq!(planner.route, PlannerRoute::Headless);
-    assert_eq!(planner.draft_task_id, Some(draft));
-    let dir = planners_dir(&fx.db).join(planner.id.to_string());
-    assert!(
-        !dir.join("turns").join("exit").exists(),
-        "waits for its answer"
-    );
-    let asked = open_question().unwrap();
+    assert!(queue.planners(false).unwrap().is_empty());
+
     queue.answer(asked.id, "cancel").unwrap();
     supervise_until(
         &fx,
         &backend,
         &reviewer,
-        || !queue_events(&fx.db, "planner_closed").is_empty(),
+        || queue_events(&fx.db, "planner_closed").len() == 2,
         || diagnose_planner(&fx.db),
     );
-    let turns = dir.join("turns");
-    let request: Value =
-        serde_json::from_str(&fs::read_to_string(turns.join("request-000001.taken.json")).unwrap())
-            .unwrap();
-    assert_eq!(request["what"], format!("answer of ask {}", asked.id));
-    assert_eq!(
-        request["prompt"],
-        format!("answer to ask {}: cancel", asked.id)
-    );
-    assert!(turns.join("turn-000002.jsonl").is_file());
-    assert!(turns.join("exit").is_file());
-    let requested = queue_events(&fx.db, "turn_requested");
-    assert_eq!(requested.len(), 1, "{requested:?}");
-    assert_eq!(requested[0]["planner_id"], planner.id.as_i64());
-    assert_eq!(requested[0]["what"], format!("answer of ask {}", asked.id));
-    let started = queue_events(&fx.db, "turn_started");
-    assert_eq!(started.len(), 2, "{started:?}");
-    assert_eq!(started[1]["planner_id"], planner.id.as_i64());
-    assert_eq!(started[1]["resume"], true);
-    assert_eq!(started[1]["request"], 1);
-    let calls = fs::read_to_string(dir.join("stub-calls.log")).unwrap();
-    let calls: Vec<&str> = calls.lines().collect();
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert!(calls[1].starts_with("resume "), "{calls:?}");
+    let planners = queue.planners(true).unwrap();
+    assert_eq!(planners.len(), 2, "{planners:?}");
+    let second = &planners[1];
+    assert_eq!(second.draft_task_id, Some(draft));
+    assert_eq!(second.answer_wait_at, None);
+    let prompt = fs::read_to_string(
+        planners_dir(&fx.db)
+            .join(second.id.to_string())
+            .join("prompt.txt"),
+    )
+    .unwrap();
+    for carried in [
+        "in the goal?",
+        &format!("answer to ask {}: cancel", asked.id),
+        &format!("What planner {} before you left", first.id),
+        "half-decided: cancel unless the goal needs it",
+    ] {
+        assert!(prompt.contains(carried), "{carried}: {prompt}");
+    }
+    let opened = events(&mut queue, draft, "draft_planner_opened");
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    assert_eq!(opened[1]["attempt"], 1, "the wait is not counted");
+    assert_eq!(opened[1]["ask_id"], asked.id.as_i64());
     assert_eq!(events(&mut queue, draft, "ask_delivered").len(), 1);
-    // Its second turn canceled the draft; its wrapper ended on the exit
-    // request.
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
     assert_eq!(
         queue.show(draft).unwrap().task.status(),
         dagq::domain::TaskStatus::Canceled
     );
-    assert_eq!(queue.planner(planner.id).unwrap().exit_code, Some(0));
+    assert!(queue_events(&fx.db, "turn_requested").is_empty());
 }
 
 /// Acceptance (ADR-t1433-2 decision 3): with the old `route =
@@ -626,15 +638,19 @@ fn a_background_planner_with_a_late_heartbeat_is_alive_until_its_wrapper_is_gone
     assert_eq!(gone["alive"], false, "{gone}");
 }
 
-/// A planning request's planner (ADR-t1394-1) on the headless route: its
-/// `planner_question` about the request waits for the answer, which comes
-/// as its next turn, and its decline from that turn ends the request.
+/// A planning request's planner (ADR-t1394-1) on the headless route
+/// (ADR-t1704-1 decisions 1, 2 and 5): its `planner_question` about the
+/// request leaves it only the answer to wait for, so it is asked to exit
+/// and closed as `runtime_answer_wait`, the request opening no planner
+/// meanwhile; the answer opens one new planner with the question in its
+/// first turn, counted as the request's first, which declines it.
 #[test]
-fn a_headless_request_planner_takes_the_answer_as_its_next_turn_and_declines() {
+fn a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines()
+{
     let fx = headless_fixture(
-        r#"case "$TURN" in
-1) "$DAGQ" --db "$DB" ask --kind planner_question --because scope --request 1 --question "plan it?" --option plan --option decline --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
-*) "$DAGQ" --db "$DB" request decline 1 --reason "done already" >> "$RUN_DIR/decline.log" 2>&1 ;;
+        r#"case "$PROMPT" in
+*"answer to ask "[0-9]*": decline"*) "$DAGQ" --db "$DB" request decline 1 --reason "done already" >> "$RUN_DIR/decline.log" 2>&1 ;;
+*) "$DAGQ" --db "$DB" ask --kind planner_question --because scope --request 1 --question "plan it?" --option plan --option decline --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
 esac
 say "turn $TURN""#,
     );
@@ -654,26 +670,6 @@ say "turn $TURN""#,
         .id;
     let reviewer = StubReviewer::new(&[]);
     let backend = PlanWorkspace::running();
-    let open_question = || {
-        SqliteQueue::open(&fx.db)
-            .unwrap()
-            .asks(Default::default())
-            .unwrap()
-            .into_iter()
-            .find(|ask| ask.request_id == Some(request))
-    };
-    supervise_until(
-        &fx,
-        &backend,
-        &reviewer,
-        || open_question().is_some() && !queue_events(&fx.db, "turn_finished").is_empty(),
-        || diagnose_planner(&fx.db),
-    );
-    let planner = queue.planners(false).unwrap()[0].clone();
-    assert_eq!(planner.route, PlannerRoute::Headless);
-    assert_eq!(planner.request_id, Some(request));
-    let asked = open_question().unwrap();
-    queue.answer(asked.id, "decline").unwrap();
     supervise_until(
         &fx,
         &backend,
@@ -681,18 +677,38 @@ say "turn $TURN""#,
         || !queue_events(&fx.db, "planner_closed").is_empty(),
         || diagnose_planner(&fx.db),
     );
-    let turns = planners_dir(&fx.db)
-        .join(planner.id.to_string())
-        .join("turns");
-    let taken: Value =
-        serde_json::from_str(&fs::read_to_string(turns.join("request-000001.taken.json")).unwrap())
-            .unwrap();
-    assert_eq!(taken["what"], format!("answer of ask {}", asked.id));
-    assert_eq!(
-        taken["prompt"],
-        format!("answer to ask {}: decline", asked.id)
-    );
+    let first = queue.planners(true).unwrap()[0].clone();
+    assert_eq!(first.request_id, Some(request));
+    let closed = queue_events(&fx.db, "planner_closed");
+    assert_eq!(closed[0]["code"], "runtime_answer_wait", "{closed:?}");
+    let asked = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.request_id == Some(request))
+        .expect("the question stays open");
     use dagq::application::PlanRequestStore;
+    assert_eq!(queue.plan_request(request).unwrap().planners, 0);
+    supervise_with(
+        &fx,
+        &backend,
+        &reviewer,
+        &options(1, Duration::from_secs(3600)),
+    );
+    assert!(queue.planners(false).unwrap().is_empty());
+
+    queue.answer(asked.id, "decline").unwrap();
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || queue_events(&fx.db, "planner_closed").len() == 2,
+        || diagnose_planner(&fx.db),
+    );
+    let opened = queue_events(&fx.db, "request_planner_opened");
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    assert_eq!(opened[1]["attempt"], 1, "the wait is not counted");
+    assert_eq!(opened[1]["ask_id"], asked.id.as_i64());
     let declined = queue.plan_request(request).unwrap();
     assert_eq!(
         declined.status,

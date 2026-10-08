@@ -122,10 +122,19 @@ impl SqliteQueue {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let eligible = match answer {
             None => is_target(&tx, finding)?,
+            // A planner of the finding still open (asked to exit because
+            // only a person's answer was left) is waited for (ADR-t1704-1
+            // decision 2).
             Some(ask) => {
                 let ask = read_ask(&tx, ask)?;
                 ask.finding_id == Some(finding)
                     && route_of(&tx, finding)? == PlannerAnswerRoute::NewPlanner
+                    && !tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM planners WHERE finding_id=?1
+                         AND closed_at IS NULL)",
+                        [finding],
+                        |r| r.get::<_, bool>(0),
+                    )?
             }
         };
         if !eligible {
@@ -350,10 +359,13 @@ fn is_target(conn: &Connection, finding: FindingId) -> Result<bool> {
     )?)
 }
 
-/// The planners of the runtime's opened for the finding since its mark.
+/// The planners of the runtime's opened for the finding since its mark,
+/// but for those asked to exit because only a person's answer was left
+/// (ADR-t1704-1 decision 5).
 fn planners_since_mark(conn: &Connection, finding: &Finding) -> Result<usize> {
     let count: i64 = conn.query_row(
-        "SELECT count(*) FROM planners WHERE finding_id=?1 AND created_at>=?2",
+        "SELECT count(*) FROM planners WHERE finding_id=?1 AND created_at>=?2
+         AND answer_wait_at IS NULL",
         params![finding.id, finding.propose_requested_at.unwrap_or(0)],
         |r| r.get(0),
     )?;
@@ -419,7 +431,7 @@ pub(super) fn route_of(conn: &Connection, finding: FindingId) -> Result<PlannerA
     let planner: Option<PlannerId> = conn
         .query_row(
             "SELECT id FROM planners WHERE origin='runtime' AND closed_at IS NULL
-             AND finding_id=?1 ORDER BY id DESC LIMIT 1",
+             AND answer_wait_at IS NULL AND finding_id=?1 ORDER BY id DESC LIMIT 1",
             [finding],
             |r| r.get(0),
         )

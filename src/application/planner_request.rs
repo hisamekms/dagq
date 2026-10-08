@@ -208,6 +208,7 @@ mod tests {
             error: None,
             created_at: 0,
             route,
+            answer_wait_at: None,
         }
     }
 

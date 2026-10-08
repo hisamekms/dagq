@@ -576,9 +576,8 @@ fn a_planner_question_about_a_finding_reaches_its_planner_as_a_turn_and_undecide
         .unwrap()
         .ask;
     idle(&queue, &fx.db, planner.id);
-    supervise(&fx, &backend, &reviewer);
-    // Waiting for the answer, it is not asked to exit.
-    assert!(!exit_requested(&fx.db, planner.id));
+    // Answered while the planner is still there (before a pass ended it
+    // for the wait, ADR-t1704-1 decision 2).
     let answered = queue.answer(asked.id, "propose").unwrap();
     // The planner's question is the planner's to act on, not the finding's.
     assert!(answered.closed_at.is_none());
@@ -669,4 +668,74 @@ fn a_planner_question_about_a_finding_reaches_its_planner_as_a_turn_and_undecide
     assert_eq!(finding(&queue, found).proposal_id, Some(proposal.id()));
     assert!(queue.exhausted_findings().unwrap().is_empty());
     assert!(events(&mut queue, task, "task_submitted").len() == 1);
+}
+
+/// ADR-t1704-1 decisions 1, 2, 4 and 5 (acceptance (c), (e)): a finding's
+/// planner whose question about the finding is all that is left is ended,
+/// and its row closes as `runtime_answer_wait`; the finding gets no
+/// planner while the question is open, and the answer opens one that
+/// carries it, the first by the count since the wait is not counted.
+#[test]
+fn a_finding_planner_waiting_on_a_person_ends_and_the_answer_opens_the_next() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let found = record(
+        &mut queue,
+        FindingTarget::Queue,
+        "src/x.rs",
+        Some("recurs daily"),
+    );
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    let planner = queue.planners(false).unwrap()[0].clone();
+    let asked = queue
+        .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            kind: AskKind::PlannerQuestion,
+            task_id: None,
+            run_id: None,
+            question: "a new goal for this?".into(),
+            options: vec!["propose".into(), "dismiss".into()],
+            asked_by: "planner".into(),
+            reason_category: AskReason::Scope,
+            finding_id: Some(found),
+            request_id: None,
+        })
+        .unwrap()
+        .ask;
+    idle(&queue, &fx.db, planner.id);
+    supervise(&fx, &backend, &reviewer);
+    assert!(exit_requested(&fx.db, planner.id));
+    queue
+        .planner_exited(planner.id, std::process::id(), 0)
+        .unwrap();
+    supervise(&fx, &backend, &reviewer);
+    supervise(&fx, &backend, &reviewer);
+    assert!(queue.planners(false).unwrap().is_empty());
+    assert!(
+        queue
+            .asks(Default::default())
+            .unwrap()
+            .iter()
+            .any(|ask| ask.id == asked.id)
+    );
+
+    queue.answer(asked.id, "dismiss").unwrap();
+    supervise(&fx, &backend, &reviewer);
+    let next = queue.planners(false).unwrap();
+    assert_eq!(next.len(), 1, "{next:?}");
+    assert_eq!(next[0].finding_id, Some(found));
+    let prompt = crate::plan_review::planner_prompt(&fx.db, next[0].id);
+    assert!(
+        prompt.contains(&format!("answer to ask {}: dismiss", asked.id)),
+        "{prompt}"
+    );
+    let opened = finding_events(&fx.db, found, "finding_planner_opened");
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    assert_eq!(opened[1]["attempt"], 1, "the wait is not counted");
+    assert_eq!(opened[1]["ask_id"], asked.id.as_i64());
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
 }

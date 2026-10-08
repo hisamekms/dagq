@@ -140,7 +140,9 @@ pub struct PlanRequest {
     pub status_reason: Option<String>,
     /// The proposals its planners submitted, oldest first.
     pub proposals: Vec<ProposalId>,
-    /// The planners of the runtime's opened for it so far.
+    /// The planners of the runtime's opened for it so far that count to
+    /// [`MAX_REQUEST_PLANNERS`]: one asked to exit because only a person's
+    /// answer was left does not (ADR-t1704-1 decision 5).
     pub planners: usize,
     pub created_at: i64,
     pub updated_at: i64,

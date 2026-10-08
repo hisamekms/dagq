@@ -215,6 +215,7 @@ event_kinds! {
     PlanReviseSent => "plan_revise_sent",
     PlannerAnswerClaimed => "planner_answer_claimed",
     PlannerAnswerClosed => "planner_answer_closed",
+    PlannerAnswerWait => "planner_answer_wait",
     PlannerClosed => "planner_closed",
     PlannerPromptWritten => "planner_prompt_written",
     PlannerReleased => "planner_released",
@@ -471,6 +472,10 @@ impl EventKind {
                 // revise with no planner, waiting past the planner timeout,
                 // gets its place (task 884).
                 | PlannerReleased
+                // A planner of the runtime's asked to exit because only a
+                // person's answer to its `planner_question` was left
+                // (ADR-t1704-1 decision 1).
+                | PlannerAnswerWait
                 // A planner the runtime closed, a person's or its own
                 // (ADR-t1300-1).
                 | PlannerClosed
@@ -746,6 +751,7 @@ pub const OBSERVE_FINISHED: &str = EventKind::ObserveFinished.as_str();
 pub const OBSERVE_STARTED: &str = EventKind::ObserveStarted.as_str();
 pub const PLANNER_ANSWER_CLAIMED: &str = EventKind::PlannerAnswerClaimed.as_str();
 pub const PLANNER_ANSWER_CLOSED: &str = EventKind::PlannerAnswerClosed.as_str();
+pub const PLANNER_ANSWER_WAIT: &str = EventKind::PlannerAnswerWait.as_str();
 pub const PLANNER_CLOSED: &str = EventKind::PlannerClosed.as_str();
 pub const PLANNER_RELEASED: &str = EventKind::PlannerReleased.as_str();
 pub const PLANNER_UNRESPONSIVE: &str = EventKind::PlannerUnresponsive.as_str();
@@ -1117,6 +1123,7 @@ mod tests {
             (EventKind::PlanReviseSent, "plan_revise_sent"),
             (EventKind::PlannerAnswerClaimed, "planner_answer_claimed"),
             (EventKind::PlannerAnswerClosed, "planner_answer_closed"),
+            (EventKind::PlannerAnswerWait, "planner_answer_wait"),
             (EventKind::PlannerClosed, "planner_closed"),
             (EventKind::PlannerPromptWritten, "planner_prompt_written"),
             (EventKind::PlannerReleased, "planner_released"),

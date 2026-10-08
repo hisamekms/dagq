@@ -165,6 +165,20 @@ impl SessionRegistry for SqliteQueue {
     fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>> {
         SqliteQueue::planner_turn_events(self, id)
     }
+    fn planner_answer_wait(
+        &self,
+        id: PlannerId,
+        asks: &[crate::domain::AskId],
+        payload: &Value,
+    ) -> Result<bool> {
+        SqliteQueue::planner_answer_wait(self, id, asks, payload)
+    }
+    fn planner_handover(
+        &self,
+        ask: crate::domain::AskId,
+    ) -> Result<Option<crate::domain::PlannerHandover>> {
+        SqliteQueue::planner_handover(self, ask)
+    }
     fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()> {
         SqliteQueue::register_planner_wrapper(self, id, pid)
     }

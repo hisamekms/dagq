@@ -28,7 +28,8 @@ use crate::domain::{
     Ask, AskId, AskKind, BundleKey, DraftBundleMember, DraftBundleView, DraftOrigin, DraftOutcome,
     DraftRevisit, DraftTarget, Finding, FindingId, FindingQuery, FindingStatus, FindingView,
     FollowUpDraft, GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession,
-    RegisteredFollowUp, RequestId, RunHistory, RunId, Task, TaskId, TaskOrigin, TaskStatus,
+    ProposalId, RegisteredFollowUp, RequestId, RunHistory, RunId, Task, TaskId, TaskOrigin,
+    TaskStatus,
     follow_up::{FollowUpFacts, RevisitChange, adopt_needs_person, revisit_refusal},
     plan_request::Creator,
 };
@@ -572,6 +573,22 @@ impl SqliteQueue {
         route_of(&self.conn, ask)
     }
 
+    /// The `planner_question`s a planner asked and nobody closed about the
+    /// tasks of `proposal`, by ID: those not answered hold its revise back
+    /// from a new planner, and those answered go with it (ADR-t1704-1
+    /// decision 4). One the inbox or a person opened holds nothing.
+    pub fn proposal_questions(&self, proposal: ProposalId) -> Result<Vec<Ask>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT a.* FROM asks a JOIN tasks t ON t.id=a.task_id
+                 WHERE t.proposal_id=?1 AND a.kind='planner_question' AND a.run_id IS NULL
+                 AND a.asked_by='planner' AND a.closed_at IS NULL ORDER BY a.id",
+            )?
+            .query_map([proposal], ask_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Claim the typing of the answer of `id` into `planner`'s `workspace`
     /// in one write transaction (`planner_answer_claimed`): `false` when
     /// the ask was closed, no longer goes to that planner, or another
@@ -737,6 +754,9 @@ impl DraftPlannerStore for SqliteQueue {
     }
     fn planner_answer_route(&self, ask: &Ask) -> Result<PlannerAnswerRoute> {
         SqliteQueue::planner_answer_route(self, ask)
+    }
+    fn proposal_questions(&self, proposal: ProposalId) -> Result<Vec<Ask>> {
+        SqliteQueue::proposal_questions(self, proposal)
     }
     fn answer_request(&self, ask: &Ask) -> Result<Option<RequestId>> {
         answer_request(&self.conn, ask)
@@ -913,6 +933,14 @@ fn material_fields(
 /// (`draft_bundle_members.outcome`, `draft_planner_settled`), inside the
 /// caller's write transaction, as the planner ends (ADR-t807-1).
 pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> Result<()> {
+    // A planner asked to exit because only a person's answer was left
+    // leaves each draft whose question its `planner_answer_wait` names,
+    // still open, waiting for that answer (ADR-t1704-1 decision 5).
+    let answer_wait: bool = conn.query_row(
+        "SELECT answer_wait_at IS NOT NULL FROM planners WHERE id=?1",
+        [planner],
+        |r| r.get(0),
+    )?;
     let members: Vec<TaskId> = conn
         .prepare(
             "SELECT task_id FROM draft_bundle_members
@@ -938,8 +966,22 @@ pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> 
                     [task_id],
                     |r| r.get(0),
                 )?;
+                let asked: bool = answer_wait
+                    && conn.query_row(
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM asks a, run_events e, json_each(e.payload,'$.asks') j
+                             WHERE a.task_id=?1 AND a.run_id IS NULL AND a.kind='planner_question'
+                             AND a.closed_at IS NULL AND e.kind='{}'
+                             AND json_extract(e.payload,'$.planner_id')=?2 AND j.value=a.id)",
+                            event_kind::PLANNER_ANSWER_WAIT
+                        ),
+                        params![task_id, planner],
+                        |r| r.get(0),
+                    )?;
                 let outcome = if kept {
                     DraftOutcome::KeepDraft
+                } else if asked {
+                    DraftOutcome::AnswerWait
                 } else {
                     DraftOutcome::Undecided
                 };
@@ -1200,16 +1242,22 @@ pub(super) fn draft_origin(
         .transpose()
 }
 
+/// The planners of the runtime's opened for `draft` that count to
+/// [`MAX_DRAFT_PLANNERS`]: each `draft_planner_opened`, but for those that
+/// left it waiting for the answer of its `planner_question` as they ended
+/// for that wait alone (`answer_wait`, ADR-t1704-1 decision 5).
 fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
     let count: i64 = conn.query_row(
         &format!(
-            "SELECT count(*) FROM run_events WHERE task_id=?1 AND kind='{}'",
-            event_kind::DRAFT_PLANNER_OPENED
+            "SELECT (SELECT count(*) FROM run_events WHERE task_id=?1 AND kind='{}')
+             - (SELECT count(*) FROM draft_bundle_members WHERE task_id=?1 AND outcome='{}')",
+            event_kind::DRAFT_PLANNER_OPENED,
+            DraftOutcome::AnswerWait.as_str()
         ),
         [draft],
         |r| r.get(0),
     )?;
-    Ok(usize::try_from(count)?)
+    Ok(usize::try_from(count.max(0))?)
 }
 
 /// Where the answer of `ask` goes: the planner of the runtime's not closed
@@ -1240,7 +1288,7 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
     let planner: Option<i64> = conn
         .query_row(
             "SELECT p.id FROM planners p JOIN tasks t ON t.id=?1
-             WHERE p.origin='runtime' AND p.closed_at IS NULL
+             WHERE p.origin='runtime' AND p.closed_at IS NULL AND p.answer_wait_at IS NULL
              AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)
                   OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id AND m.task_id=t.id))
              ORDER BY p.id DESC LIMIT 1",
@@ -1262,6 +1310,37 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
         .transpose()?;
     if let Some(PlannerAnswerRoute::Planner(planner)) = request_route {
         return Ok(PlannerAnswerRoute::Planner(planner));
+    }
+    // A task of a proposal sent back for a revise no planner holds: the
+    // answer goes with the revise to the planner opened for it
+    // (ADR-t1704-1 decision 4).
+    let revising: Option<ProposalId> = conn
+        .query_row(
+            "SELECT p.id FROM tasks t JOIN proposals p ON p.id=t.proposal_id
+             WHERE t.id=?1 AND p.status='revising'",
+            [task_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(proposal) = revising {
+        // Its owner still there (a request's or a finding's planner that
+        // submitted it) takes it as its next turn; one asked to exit for a
+        // person's answer does not.
+        let owner: Option<i64> = conn
+            .query_row(
+                "SELECT p.id FROM planners p JOIN proposals x ON x.owner_workspace_id=p.workspace_id
+                 WHERE x.id=?1 AND p.origin='runtime' AND p.closed_at IS NULL
+                 AND p.answer_wait_at IS NULL ORDER BY p.id DESC LIMIT 1",
+                [proposal],
+                |r| r.get(0),
+            )
+            .optional()?;
+        return Ok(match owner {
+            Some(id) => {
+                PlannerAnswerRoute::Planner(Box::new(read_planner(conn, PlannerId::new(id))?))
+            }
+            None => PlannerAnswerRoute::Revise(proposal),
+        });
     }
     // A draft kept by the answer waits as it is for a planning request the
     // inbox records (ADR-t1394-1 decision 8), or for its revisit time
@@ -1794,6 +1873,67 @@ mod tests {
         assert!(queue.planner_drafts().unwrap().is_empty());
     }
 
+    /// ADR-t1704-1 decision 5: a planner that left the draft waiting for
+    /// the answer of its question (`answer_wait`) counts to no limit; one
+    /// that left it undecided does, the planner carrying the answer
+    /// included; and while the planner asked to exit is open, the answer
+    /// goes to no planner but waits for a new one.
+    #[test]
+    fn a_planner_ended_for_a_persons_answer_counts_to_no_limit_of_the_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let runtime = draft(&mut queue, "runtime");
+        queue
+            .record_draft_origin(runtime, DraftOrigin::FollowUp, &json!({}))
+            .unwrap();
+        let DraftPlannerStart::Opened { planner, .. } =
+            queue.open_draft_planner(&[runtime], None).unwrap()
+        else {
+            panic!("no planner opened");
+        };
+        let asked = question(&mut queue, runtime, AskKind::PlannerQuestion);
+        assert!(
+            queue
+                .planner_answer_wait(
+                    planner.id,
+                    &[asked.id],
+                    &json!({"planner_id": planner.id, "asks": [asked.id]})
+                )
+                .unwrap()
+        );
+        let answered = queue.answer(asked.id, "adopt").unwrap();
+        assert_eq!(
+            queue.planner_answer_route(&answered).unwrap(),
+            PlannerAnswerRoute::NewPlanner
+        );
+        // One planner per bundle: the answer waits for the row to close.
+        assert!(matches!(
+            queue
+                .open_draft_planner(&[runtime], Some(asked.id))
+                .unwrap(),
+            DraftPlannerStart::Skipped
+        ));
+        queue.close_planner(planner.id, None).unwrap();
+        assert_eq!(
+            queue.draft_bundle(planner.id).unwrap().unwrap().members[0]
+                .outcome
+                .as_deref(),
+            Some("answer_wait")
+        );
+        assert_eq!(planners_opened(&queue.conn, runtime).unwrap(), 0);
+        let DraftPlannerStart::Opened {
+            planner, members, ..
+        } = queue
+            .open_draft_planner(&[runtime], Some(asked.id))
+            .unwrap()
+        else {
+            panic!("no planner opened");
+        };
+        assert_eq!(members[0].1, 1);
+        queue.close_planner(planner.id, None).unwrap();
+        assert_eq!(planners_opened(&queue.conn, runtime).unwrap(), 1);
+    }
+
     #[test]
     fn answers_about_what_the_runtime_does_not_plan_are_a_persons() {
         let dir = tempfile::tempdir().unwrap();
@@ -1871,6 +2011,46 @@ mod tests {
             queue.open_draft_planner(&[task], Some(asked.id)).unwrap(),
             DraftPlannerStart::Opened { members, .. } if members[0].1 == MAX_DRAFT_PLANNERS + 1
         ));
+    }
+
+    /// ADR-t1704-1 decision 5: a planner its revisit time opened, ended
+    /// for a person's answer alone, counts to no limit of the draft either;
+    /// the revisit itself still counted once it ends undecided.
+    #[test]
+    fn a_revisit_planner_ended_for_a_persons_answer_is_not_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let mine = draft(&mut queue, "mine");
+        set(&mut queue, mine, 0, "planner").unwrap();
+        let DraftPlannerStart::Opened {
+            planner, members, ..
+        } = queue.open_draft_planner(&[mine], None).unwrap()
+        else {
+            panic!("the revisit opens a planner");
+        };
+        assert_eq!(members[0].1, 1);
+        let asked = question(&mut queue, mine, AskKind::PlannerQuestion);
+        assert!(
+            queue
+                .planner_answer_wait(
+                    planner.id,
+                    &[asked.id],
+                    &json!({"planner_id": planner.id, "asks": [asked.id]})
+                )
+                .unwrap()
+        );
+        queue.close_planner(planner.id, None).unwrap();
+        assert_eq!(planners_opened(&queue.conn, mine).unwrap(), 0);
+        // The same planner ended otherwise counts.
+        let other = draft(&mut queue, "other");
+        set(&mut queue, other, 0, "planner").unwrap();
+        let DraftPlannerStart::Opened { planner, .. } =
+            queue.open_draft_planner(&[other], None).unwrap()
+        else {
+            panic!("the revisit opens a planner");
+        };
+        queue.close_planner(planner.id, None).unwrap();
+        assert_eq!(planners_opened(&queue.conn, other).unwrap(), 1);
     }
 
     fn set(queue: &mut SqliteQueue, task: TaskId, at: i64, role: &str) -> Result<DraftRevisit> {

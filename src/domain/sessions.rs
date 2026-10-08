@@ -1406,6 +1406,7 @@ mod tests {
         for (code, reason) in [
             ("runtime_exited", EXITED),
             ("runtime_exit_timed_out", EXITED),
+            ("runtime_answer_wait", EXITED),
             ("runtime_lost", INFERRED),
             ("runtime_session_gone", INFERRED),
             ("abandoned", INFERRED),

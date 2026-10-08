@@ -305,10 +305,36 @@ fn a_revise_at_the_limit_names_its_holders_and_frees_a_place_past_the_timeout() 
     assert_eq!(backend.launched().len(), 2);
 }
 
-/// A planner whose `planner_question` waits on a person holds its place
-/// past the timeout: the revise waits and the inbox is told why.
+/// A `planner_question` about draft `task` by its planner.
+fn question(queue: &mut SqliteQueue, task: TaskId, text: &str) -> dagq::domain::Ask {
+    queue
+        .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            kind: AskKind::PlannerQuestion,
+            task_id: Some(task),
+            run_id: None,
+            question: text.into(),
+            options: vec!["adopt".into(), "cancel".into(), "keep_draft".into()],
+            asked_by: "planner".into(),
+            reason_category: dagq::domain::AskReason::Scope,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap()
+        .ask
+}
+
+/// ADR-t1704-1 decision 1 (acceptance (a)): a headless planner of the
+/// runtime's that is idle with its `planner_question` not answered and
+/// nothing else to do is asked to exit (`planner_answer_wait`, its row's
+/// `answer_wait_at`); once its session ended its row closes as
+/// `runtime_answer_wait` and its place under `--runtime-planners` goes to
+/// the revise that waited at the limit. The ask stays open, and no planner
+/// is opened for the draft without its answer.
 #[test]
-fn a_planner_waiting_on_a_person_keeps_its_place_past_the_timeout() {
+fn a_planner_waiting_only_on_a_person_is_ended_and_its_place_goes_to_a_waiting_revise() {
     let fx = fixture();
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let backend = PlanWorkspace::default();
@@ -333,46 +359,203 @@ fn a_planner_waiting_on_a_person_keeps_its_place_past_the_timeout() {
         .register_planner_agent(planner.id, std::process::id(), std::process::id())
         .unwrap();
     heartbeat_ahead(&fx.db);
-    queue
-        .ask(NewAsk {
-            recommendation: None,
-            confidence: None,
-            topics: Vec::new(),
-            kind: AskKind::PlannerQuestion,
-            task_id: Some(draft),
-            run_id: None,
-            question: "is this in the goal?".into(),
-            options: vec!["adopt".into(), "cancel".into()],
-            asked_by: "planner".into(),
-            reason_category: dagq::domain::AskReason::Scope,
-            finding_id: None,
-            request_id: None,
-        })
-        .unwrap();
-    let dir = planners_dir(&fx.db).join(planner.id.to_string());
-    touch_ahead(&planner_idle_marker(&dir), 1);
-
+    // The revise of a proposal whose planner is gone waits at the limit.
     let task = add(&mut queue, "split", &[TaskId::new(1)], Priority::Normal);
     let proposal = submit(&mut queue, &[task], Some("GONE"));
-    supervise(&fx, &backend, &reviewer, &clock, 10);
-    supervise(
-        &fx,
-        &backend,
-        &reviewer,
-        &clock,
-        10 + TIMEOUT_SECS as i64 + 5,
-    );
-    let told = events(&queue, "planner_unresponsive");
-    assert_eq!(told.len(), 1, "{told:?}");
-    assert_eq!(told[0]["proposal_id"], json!(proposal));
-    assert_eq!(told[0]["holders"][0]["planner_id"], json!(planner.id));
+    supervise(&fx, &backend, &reviewer, &clock, 5);
     assert_eq!(
-        told[0]["holders"][0]["busy"],
-        json!(["planner_question_open"])
+        queue.show_proposal(proposal).unwrap().status(),
+        ProposalStatus::Revising
     );
-    assert!(!exit_requested(&fx.db, planner.id));
-    assert!(events(&queue, "planner_released").is_empty());
     assert_eq!(backend.launched().len(), 1);
+
+    let asked = question(&mut queue, draft, "is this in the goal?");
+    let dir = planners_dir(&fx.db).join(planner.id.to_string());
+    touch_ahead(&planner_idle_marker(&dir), 11);
+    supervise(&fx, &backend, &reviewer, &clock, 10);
+    assert!(exit_requested(&fx.db, planner.id));
+    let waited = events(&queue, "planner_answer_wait");
+    assert_eq!(waited.len(), 1, "{waited:?}");
+    assert_eq!(waited[0]["planner_id"], json!(planner.id));
+    assert_eq!(waited[0]["asks"], json!([asked.id]));
+    assert_eq!(waited[0]["draft_task_id"], json!(draft));
+    assert_eq!(waited[0]["revise"], false);
+    assert!(queue.planner(planner.id).unwrap().answer_wait_at.is_some());
+    // Asked once: the next pass waits for its exit.
+    supervise(&fx, &backend, &reviewer, &clock, 11);
+    assert_eq!(events(&queue, "planner_answer_wait").len(), 1);
+    assert_eq!(backend.launched().len(), 1, "its place is not free yet");
+
+    // Its session ended: the row closes, and the revise gets its place.
+    queue
+        .planner_exited(planner.id, std::process::id(), 0)
+        .unwrap();
+    supervise(&fx, &backend, &reviewer, &clock, 12);
+    let closed = events(&queue, "planner_closed");
+    assert_eq!(closed[0]["planner_id"], json!(planner.id));
+    assert_eq!(closed[0]["code"], "runtime_answer_wait", "{closed:?}");
+    supervise(&fx, &backend, &reviewer, &clock, 13);
+    let open = queue.planners(false).unwrap();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].proposal_id, Some(proposal));
+    assert_eq!(backend.launched().len(), 2);
+    // The ask stays open for the person, and the draft waits for it.
+    let ask = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.id == asked.id)
+        .expect("still open");
+    assert_eq!(ask.answered_at, None);
+    assert!(events(&queue, "planner_unresponsive").is_empty());
+    let bundle = queue.draft_bundle(planner.id).unwrap().unwrap();
+    assert_eq!(bundle.members[0].outcome.as_deref(), Some("answer_wait"));
+}
+
+/// ADR-t1704-1 decision 1 (acceptance (a)): a planner whose question waits
+/// on a person is not ended while it has more to wait for: a follow-up
+/// request a person handed it waits in its `turns/`, or the answer of
+/// another question was sent to it and not read yet.
+#[test]
+fn a_planner_with_a_follow_up_request_or_an_unread_answer_is_not_ended_for_its_question() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[]);
+    let clock = Arc::new(Ahead::default());
+    // An answer sent and not read yet (its request waits in `turns/`), and
+    // a second question not answered.
+    let (planner, dir) = answered_draft_planner(&fx, &mut queue, &backend, &reviewer, &clock);
+    let draft = queue.planner(planner).unwrap().draft_task_id.unwrap();
+    question(&mut queue, draft, "and the order?");
+    taken_without_a_turn(&dir);
+    touch_ahead(&planner_idle_marker(&dir), 25);
+    supervise(&fx, &backend, &reviewer, &clock, 20);
+    assert!(!exit_requested(&fx.db, planner));
+    assert!(events(&queue, "planner_answer_wait").is_empty());
+
+    // It read the answer in the turn of its request; a follow-up request
+    // waits for its next turn.
+    let seq = turn_requests(&fx.db, planner)[0]["seq"].clone();
+    for (kind, payload) in [
+        (
+            dagq::domain::EventKind::TurnStarted,
+            json!({"planner_id": planner, "turn": 1, "request": seq}),
+        ),
+        (
+            dagq::domain::EventKind::TurnFinished,
+            json!({"planner_id": planner, "turn": 1, "outcome": "succeeded"}),
+        ),
+    ] {
+        queue.record_queue_event(kind, payload).unwrap();
+    }
+    take_turns(&queue, &fx.db, planner);
+    crate::common::cli::ok(
+        &fx.db,
+        &[
+            "planner",
+            "request",
+            &planner.to_string(),
+            "--text",
+            "also weigh the order",
+        ],
+    );
+    supervise(&fx, &backend, &reviewer, &clock, 30);
+    assert!(!exit_requested(&fx.db, planner));
+    assert!(events(&queue, "planner_answer_wait").is_empty());
+
+    // Once it took the request in a turn, only the person is left.
+    take_turns(&queue, &fx.db, planner);
+    supervise(&fx, &backend, &reviewer, &clock, 40);
+    assert!(exit_requested(&fx.db, planner));
+    assert_eq!(events(&queue, "planner_answer_wait").len(), 1);
+}
+
+/// ADR-t1704-1 decision 2 (acceptance (b)): an answer given after the
+/// planner was asked to exit for it is neither sent to that planner nor
+/// lost: it waits until the row is closed and the place is free, and then
+/// one new planner carries it, once, with the question, the answer and the
+/// planner's note.
+#[test]
+fn an_answer_given_as_its_planner_is_ended_goes_once_to_the_next_planner() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[]);
+    let clock = Arc::new(Ahead::default());
+    let goal = open_goal(&mut queue);
+    let draft = runtime_draft(
+        &mut queue,
+        "gap",
+        Some(goal),
+        DraftOrigin::FollowUp,
+        json!({"source_task_id": 1, "source_run_id": null, "index": 0}),
+    );
+    supervise(&fx, &backend, &reviewer, &clock, 0);
+    let planner = queue.planners(false).unwrap().remove(0);
+    queue
+        .register_planner_wrapper(planner.id, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
+    heartbeat_ahead(&fx.db);
+    use dagq::domain::actor::{ActorContext, ActorRole};
+    SqliteQueue::open(&fx.db)
+        .unwrap()
+        .with_actor(ActorContext::instance(ActorRole::Planner, planner.id))
+        .add_note(dagq::domain::NewNote {
+            target: dagq::domain::NoteTarget::Task(draft),
+            text: "decided: adopt unless out of the goal".into(),
+            kind: None,
+            by: "planner".into(),
+        })
+        .unwrap();
+    let asked = question(&mut queue, draft, "is this in the goal?");
+    let dir = planners_dir(&fx.db).join(planner.id.to_string());
+    touch_ahead(&planner_idle_marker(&dir), 2);
+    supervise(&fx, &backend, &reviewer, &clock, 1);
+    assert!(exit_requested(&fx.db, planner.id));
+
+    // Answered before its session ended: nothing goes to it.
+    queue.answer(asked.id, "adopt").unwrap();
+    for at in [2, 3] {
+        supervise(&fx, &backend, &reviewer, &clock, at);
+    }
+    assert!(turn_requests(&fx.db, planner.id).is_empty());
+    assert_eq!(queue.planners(false).unwrap().len(), 1);
+    assert!(events(&queue, "planner_answer_claimed").is_empty());
+
+    queue
+        .planner_exited(planner.id, std::process::id(), 0)
+        .unwrap();
+    for at in [4, 5, 6] {
+        supervise(&fx, &backend, &reviewer, &clock, at);
+    }
+    let open = queue.planners(false).unwrap();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_ne!(open[0].id, planner.id);
+    assert_eq!(open[0].draft_task_id, Some(draft));
+    let prompt = crate::plan_review::planner_prompt(&fx.db, open[0].id);
+    for carried in [
+        "is this in the goal?",
+        &format!("answer to ask {}: adopt", asked.id),
+        "decided: adopt unless out of the goal",
+    ] {
+        assert!(prompt.contains(carried), "{carried}: {prompt}");
+    }
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    let delivered: Vec<Value> = queue
+        .show(draft)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|event| event.kind == "ask_delivered")
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!(backend.launched().len(), 2);
+    assert!(turn_requests(&fx.db, open[0].id).is_empty());
 }
 
 /// A runtime's planner whose wrapper runs but has not recorded its agent's
@@ -465,4 +648,79 @@ fn the_supervisor_table_sets_the_limit_of_the_runtimes_planners() {
         &options(3, Duration::from_secs(3600)),
     );
     assert_eq!(queue.planners(false).unwrap().len(), 3);
+}
+
+/// ADR-t1704-1 decision 4 (acceptance (d)): the planner a revise went to
+/// asks a person about a task of the proposal and has nothing else it can
+/// fix: it is ended (`planner_answer_wait` with `revise`), and the revise
+/// it left is not given to a new planner without the answer, even past
+/// the planner timeout, nor told to the inbox as one with no planner. The
+/// answer and the revise go together to one new planner.
+#[test]
+fn a_revise_stopped_at_a_question_waits_for_the_answer_and_goes_with_it_to_one_new_planner() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "revise", "reasons": ["split it"], "summary": "too big"
+    })]);
+    let clock = Arc::new(Ahead::default());
+    let task = add(&mut queue, "split", &[TaskId::new(1)], Priority::Normal);
+    let proposal = submit(&mut queue, &[task], Some("GONE"));
+    supervise(&fx, &backend, &reviewer, &clock, 0);
+    supervise(&fx, &backend, &reviewer, &clock, 1);
+    let planner = queue.planners(false).unwrap().remove(0);
+    assert_eq!(planner.proposal_id, Some(proposal));
+    queue
+        .register_planner_wrapper(planner.id, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
+    heartbeat_ahead(&fx.db);
+    let asked = question(&mut queue, task, "split by layer or by feature?");
+    let dir = planners_dir(&fx.db).join(planner.id.to_string());
+    touch_ahead(&planner_idle_marker(&dir), 3);
+    supervise(&fx, &backend, &reviewer, &clock, 2);
+    assert!(exit_requested(&fx.db, planner.id));
+    let waited = events(&queue, "planner_answer_wait");
+    assert_eq!(waited.len(), 1, "{waited:?}");
+    assert_eq!(waited[0]["revise"], true);
+    assert_eq!(waited[0]["proposal_id"], json!(proposal));
+    queue
+        .planner_exited(planner.id, std::process::id(), 0)
+        .unwrap();
+    for at in [3, TIMEOUT_SECS as i64 + 10] {
+        supervise(&fx, &backend, &reviewer, &clock, at);
+    }
+    assert!(queue.planners(false).unwrap().is_empty());
+    assert_eq!(backend.launched().len(), 1, "not started again unanswered");
+    assert!(
+        events(&queue, "planner_unresponsive").is_empty(),
+        "{:?}",
+        events(&queue, "planner_unresponsive")
+    );
+    assert_eq!(
+        queue.show_proposal(proposal).unwrap().status(),
+        ProposalStatus::Revising
+    );
+
+    queue.answer(asked.id, "by layer").unwrap();
+    let at = TIMEOUT_SECS as i64 + 12;
+    supervise(&fx, &backend, &reviewer, &clock, at);
+    supervise(&fx, &backend, &reviewer, &clock, at + 1);
+    let open = queue.planners(false).unwrap();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].proposal_id, Some(proposal));
+    assert_eq!(backend.launched().len(), 2);
+    let prompt = crate::plan_review::planner_prompt(&fx.db, open[0].id);
+    for carried in [
+        "split it",
+        "split by layer or by feature?",
+        &format!("answer to ask {}: by layer", asked.id),
+        &format!("What planner {} before you left", planner.id),
+    ] {
+        assert!(prompt.contains(carried), "{carried}: {prompt}");
+    }
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
 }

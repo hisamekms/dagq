@@ -9,10 +9,124 @@ use rusqlite::{OptionalExtension, Row, params};
 
 use super::sqlite::{SqliteQueue, enum_col};
 use crate::domain::{
-    PlannerId, PlannerOrigin, PlannerRoute, PlannerSession, ProposalId, RunEvent, event_kind,
+    AskId, GoalTask, PlannerHandover, PlannerId, PlannerOrigin, PlannerRoute, PlannerSession,
+    ProposalId, RunEvent, TaskStatus, event_kind,
 };
 
 impl SqliteQueue {
+    /// Mark planner `id` of the runtime's as asked to exit because only a
+    /// person's answer to `asks`, its `planner_question`s, is left
+    /// (ADR-t1704-1 decision 1): `answer_wait_at` and `planner_answer_wait`
+    /// with `payload`, in one write transaction that re-checks that the row
+    /// is open and not marked yet and that no ask of `asks` was answered or
+    /// closed since. `false`, with nothing written, otherwise: an answer
+    /// recorded first goes to the live planner as its next turn, and one
+    /// recorded after the mark goes to a new planner once this one's row is
+    /// closed, never to both.
+    pub fn planner_answer_wait(
+        &self,
+        id: PlannerId,
+        asks: &[AskId],
+        payload: &serde_json::Value,
+    ) -> Result<bool> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        for ask in asks {
+            let waiting: bool = tx
+                .query_row(
+                    "SELECT answered_at IS NULL AND closed_at IS NULL FROM asks WHERE id=?1",
+                    [ask],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !waiting {
+                return Ok(false);
+            }
+        }
+        let marked = tx.execute(
+            "UPDATE planners SET answer_wait_at=?2
+             WHERE id=?1 AND closed_at IS NULL AND answer_wait_at IS NULL",
+            params![id, self.generators.clock.now()],
+        )? == 1;
+        if !marked {
+            return Ok(false);
+        }
+        super::sqlite::record_queue_event_in(
+            &tx,
+            crate::domain::EventKind::PlannerAnswerWait,
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// What the planner that ended for the answer of `ask` alone
+    /// ([`Self::planner_answer_wait`]) left for the next (ADR-t1704-1
+    /// decision 3): its notes and the drafts it created or edited that are
+    /// still drafts. `None` when no planner ended so for it.
+    pub fn planner_handover(&self, ask: AskId) -> Result<Option<PlannerHandover>> {
+        let planner: Option<PlannerId> = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT json_extract(e.payload,'$.planner_id') FROM run_events e,
+                     json_each(e.payload,'$.asks') j WHERE e.kind='{}' AND j.value=?1
+                     ORDER BY e.id DESC LIMIT 1",
+                    event_kind::PLANNER_ANSWER_WAIT
+                ),
+                [ask],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(planner) = planner else {
+            return Ok(None);
+        };
+        let actor = format!("planner:{planner}");
+        let notes = self
+            .conn
+            .prepare(&format!(
+                "SELECT id, coalesce(json_extract(payload,'$.text'), '') FROM run_events
+                 WHERE kind='{}' AND actor_id=?1 ORDER BY id",
+                event_kind::OBSERVATION
+            ))?
+            .query_map([&actor], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let ids: Vec<crate::domain::TaskId> = self
+            .conn
+            .prepare(&format!(
+                "SELECT DISTINCT e.task_id FROM run_events e JOIN tasks t ON t.id=e.task_id
+                 WHERE e.kind IN ('{}','{}') AND e.actor_id=?1 AND t.status='draft'
+                 ORDER BY e.task_id",
+                event_kind::TASK_CREATED,
+                event_kind::TASK_EDITED
+            ))?
+            .query_map([&actor], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut drafts = Vec::new();
+        for id in ids {
+            let task = super::sqlite::read_task(&self.conn, id)?;
+            if task.status() != TaskStatus::Draft {
+                continue;
+            }
+            drafts.push(GoalTask {
+                id,
+                title: task.title().to_owned(),
+                status: task.status(),
+                priority: task.priority(),
+                priority_source: task.priority_source(),
+                priority_by: task.priority_by(),
+            });
+        }
+        Ok(Some(PlannerHandover {
+            planner_id: planner,
+            notes,
+            drafts,
+        }))
+    }
+
     /// Record a new planner before its workspace exists; the caller opens
     /// the workspace and records it with [`Self::planner_workspace_created`].
     pub fn open_planner(
@@ -208,6 +322,7 @@ pub(super) fn planner_row(r: &Row<'_>) -> rusqlite::Result<PlannerSession> {
             })?,
             None => PlannerRoute::Interactive,
         },
+        answer_wait_at: r.get("answer_wait_at")?,
     })
 }
 
@@ -215,6 +330,100 @@ pub(super) fn planner_row(r: &Row<'_>) -> rusqlite::Result<PlannerSession> {
 mod tests {
     use super::*;
     use crate::domain::PlannerState;
+
+    /// ADR-t1704-1 decisions 1 to 3: a planner is marked as ended for a
+    /// person's answer once, and only while its questions are not answered
+    /// or closed; what it noted and the drafts it created or edited are
+    /// handed to the planner that carries the answer.
+    #[test]
+    fn a_planner_is_marked_for_an_unanswered_question_once_and_hands_over_its_notes_and_drafts() {
+        use crate::application::TaskStore;
+        use crate::domain::{
+            AskKind, AskReason, NewAsk, NewNote, NewTask, NoteTarget,
+            actor::{ActorContext, ActorRole},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let planner = queue.open_planner(PlannerOrigin::Runtime, None).unwrap();
+        let mut as_planner = SqliteQueue::open(dir.path().join("q.db"))
+            .unwrap()
+            .with_actor(ActorContext::instance(ActorRole::Planner, planner.id));
+        let draft = as_planner
+            .add(
+                serde_json::from_value::<NewTask>(serde_json::json!({
+                    "title": "left", "description": "", "acceptance": "",
+                    "verification_commands": [], "dependencies": [], "context": "",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        as_planner
+            .add_note(NewNote {
+                target: NoteTarget::Task(draft.id()),
+                text: "decided: split".into(),
+                kind: None,
+                by: "planner".into(),
+            })
+            .unwrap();
+        let question = |queue: &mut SqliteQueue| {
+            queue
+                .ask(NewAsk {
+                    recommendation: None,
+                    confidence: None,
+                    topics: Vec::new(),
+                    kind: AskKind::PlannerQuestion,
+                    task_id: Some(draft.id()),
+                    run_id: None,
+                    question: "split?".into(),
+                    options: vec!["adopt".into(), "cancel".into()],
+                    asked_by: "planner".into(),
+                    reason_category: AskReason::Scope,
+                    finding_id: None,
+                    request_id: None,
+                })
+                .unwrap()
+                .ask
+        };
+        // An answer recorded first: the planner is not marked.
+        let answered = question(&mut queue);
+        queue.answer(answered.id, "adopt").unwrap();
+        let payload = serde_json::json!({"planner_id": planner.id});
+        assert!(
+            !queue
+                .planner_answer_wait(planner.id, &[answered.id], &payload)
+                .unwrap()
+        );
+        assert_eq!(queue.planner(planner.id).unwrap().answer_wait_at, None);
+        assert!(queue.planner_handover(answered.id).unwrap().is_none());
+        // One not answered: marked once.
+        let open = question(&mut queue);
+        let payload = serde_json::json!({"planner_id": planner.id, "asks": [open.id]});
+        assert!(
+            queue
+                .planner_answer_wait(planner.id, &[open.id], &payload)
+                .unwrap()
+        );
+        assert!(
+            !queue
+                .planner_answer_wait(planner.id, &[open.id], &payload)
+                .unwrap()
+        );
+        assert!(queue.planner(planner.id).unwrap().answer_wait_at.is_some());
+        let handover = queue.planner_handover(open.id).unwrap().unwrap();
+        assert_eq!(handover.planner_id, planner.id);
+        assert_eq!(
+            handover
+                .notes
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            ["decided: split"]
+        );
+        assert_eq!(
+            handover.drafts.iter().map(|t| t.id).collect::<Vec<_>>(),
+            [draft.id()]
+        );
+    }
 
     #[test]
     fn planners_are_recorded_one_row_each_with_their_session() {

@@ -1708,12 +1708,12 @@ fn a_planner_question_answer_goes_to_its_planner_as_a_turn_or_is_carried_by_a_ne
         .unwrap()
         .ask;
     idle(&queue, &fx.db, planner.id);
-    // Waiting for the answer, it is not asked to exit.
-    supervise(&fx, &backend, &reviewer);
-    assert!(!exit_requested(&fx.db, planner.id));
+    // Answered while it is still there (before a pass ended it for the
+    // wait, ADR-t1704-1 decision 2).
     assert!(turn_requests(&fx.db, planner.id).is_empty());
     queue.answer(asked.id, "cancel").unwrap();
     supervise(&fx, &backend, &reviewer);
+    assert!(!exit_requested(&fx.db, planner.id));
     // The answer is its next turn's request; nothing is typed.
     let requests = turn_requests(&fx.db, planner.id);
     assert_eq!(requests.len(), 1, "{requests:?}");
