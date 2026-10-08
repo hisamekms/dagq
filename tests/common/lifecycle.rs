@@ -8,10 +8,7 @@ use dagq::infrastructure::git_binary::git_executable;
 use anyhow::{Result, bail};
 use dagq::{
     VERSION,
-    application::{
-        AgentState, DetachedRefusal, LaunchAgent, ProcessControl, SupervisorEnvironment,
-        WorkspaceBackend, WorkspaceTags,
-    },
+    application::{AgentState, LaunchAgent, ProcessControl, WorkspaceBackend, WorkspaceTags},
     domain::{SupervisorMode, recovery::ProcessInfo},
     infrastructure::{location::QueueLocation, sqlite::SqliteQueue},
     lifecycle::{self, DownOptions, UpEnvironment, UpOptions},
@@ -94,7 +91,6 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
             role: None,
             queue: None,
             path: "/usr/bin:/bin:/home/u/.local/bin".into(),
-            socket_password: None,
             config_home: None,
             current_exe: "/opt/bin/dagq".into(),
             claude_config: Some(claude_config),
@@ -136,6 +132,10 @@ pub fn list_plugins(fixture: &Fixture, listed: &str) {
 pub struct FakeLaunchd {
     pub db: PathBuf,
     pub registers_on_install: bool,
+    /// An install makes every registration already there heartbeat again
+    /// first, the way an alive but silent supervisor can come back while
+    /// `up` waits for the one it started.
+    pub heartbeats_existing_on_install: bool,
     pub loaded: Mutex<bool>,
     /// The agent's process while loaded, as `launchctl print` would show it.
     pub agent_pid: Mutex<Option<u32>>,
@@ -148,6 +148,7 @@ impl FakeLaunchd {
         Self {
             db: db.into(),
             registers_on_install: true,
+            heartbeats_existing_on_install: false,
             loaded: Mutex::new(false),
             agent_pid: Mutex::new(None),
             installs: Mutex::new(Vec::new()),
@@ -167,8 +168,14 @@ impl LaunchAgent for FakeLaunchd {
             .unwrap()
             .push((label.into(), path.into(), contents.into()));
         self.load(Some(std::process::id()));
+        let mut queue = SqliteQueue::open(&self.db)?;
+        if self.heartbeats_existing_on_install {
+            for registration in queue.supervisors()? {
+                queue.heartbeat(&registration.token)?;
+            }
+        }
         if self.registers_on_install {
-            SqliteQueue::open(&self.db)?.register_supervisor(
+            queue.register_supervisor(
                 &LeaseToken::new(uuid::Uuid::new_v4().to_string()),
                 std::process::id(),
                 2,
@@ -243,21 +250,12 @@ impl ProcessControl for FakeProcesses {
     }
 }
 
-/// Named workspaces only; the run-bound methods are the supervisor's and
-/// must not be reached by `up`. Admits or refuses the detached connection
-/// as configured and records the environment `up` proved it with.
+/// The inbox's named workspace, the only cmux workspace `up` opens.
 #[derive(Default)]
 pub struct FakeCmux {
     pub calls: AtomicUsize,
     pub workspaces: Mutex<Vec<(String, PathBuf, String, String)>>,
-    pub refuses_detached: bool,
-    /// The ping could not be run at all (not a refusal).
-    pub detached_unreachable: bool,
-    pub detached_preflights: Mutex<Vec<SupervisorEnvironment>>,
     pub closed: Mutex<Vec<String>>,
-    /// Queue a `[…]supervisor` workspace registers a supervisor in,
-    /// the way the `supervise` cmux runs in its terminal would.
-    pub registers_supervisor_in: Option<PathBuf>,
     /// The tags each workspace was opened with, in `workspaces` order.
     pub tags: Mutex<Vec<WorkspaceTags>>,
     /// Every `ensure_group` call, as (external ID, name).
@@ -326,22 +324,6 @@ impl WorkspaceBackend for FakeCmux {
     fn preflight(&self) -> Result<()> {
         Ok(())
     }
-    fn preflight_detached(&self, environment: &SupervisorEnvironment) -> Result<()> {
-        self.detached_preflights
-            .lock()
-            .unwrap()
-            .push(environment.clone());
-        if self.refuses_detached {
-            return Err(DetachedRefusal {
-                reason: "\"cmux\" ping from outside cmux failed: only processes started inside cmux can connect".into(),
-            }
-            .into());
-        }
-        if self.detached_unreachable {
-            bail!("\"/bin/sh\" did not finish within 60s")
-        }
-        Ok(())
-    }
     fn close(&self, workspace_id: &str) -> Result<()> {
         self.closed.lock().unwrap().push(workspace_id.to_owned());
         let mut workspaces = self.workspaces.lock().unwrap();
@@ -407,23 +389,6 @@ impl WorkspaceBackend for FakeCmux {
         self.tags.lock().unwrap().push(tags.clone());
         if self.create_times_out {
             bail!("Error: Command timed out")
-        }
-        if let Some(db) = self.registers_supervisor_in.as_deref()
-            && name.ends_with("]supervisor")
-        {
-            let mut queue = SqliteQueue::open(db)?;
-            // A supervisor that was merely slow can start heartbeating
-            // again while `up` waits; every registration that is already
-            // there does so here, so the wait must tell them apart.
-            for registration in queue.supervisors()? {
-                queue.heartbeat(&registration.token)?;
-            }
-            queue.register_supervisor(
-                &LeaseToken::new(uuid::Uuid::new_v4().to_string()),
-                std::process::id(),
-                2,
-                VERSION,
-            )?;
         }
         Ok(id)
     }

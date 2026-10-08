@@ -11,13 +11,11 @@
 //! --nocapture`, which the e2e gates run whole, cmux included when it
 //! answers `ping` (ADR-t2105-1).
 //!
-//! The launchd `up` / `down` test is temporarily off even under `--ignored`:
-//! no project runs the launchd mode now, and without a cmux socket password
-//! its preflight always stops `up`. It returns at once, printing why, unless
-//! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test is out for
-//! now under ADR-t1582-1 (see the last paragraph).
-//!
-//! ADR-t1582-1 keeps one case, and the helpers only it uses, out under `#[cfg(any())]`.
+//! The launchd `up` / `down` test runs its body under `--ignored` with no
+//! other setting: the supervisor calls no cmux, so `up` needs no socket
+//! password for it (ADR-t1433-4). It loads a LaunchAgent of its own under a
+//! disposable HOME and label, and fails, not skips, on a host where launchd
+//! cannot be used.
 #[path = "e2e/cleanup.rs"]
 mod cleanup;
 mod common;
@@ -31,11 +29,6 @@ mod stub;
 use cleanup::{
     GroupGuard, WorkspaceGuard, claim_fixture_dir, cmux_retrying, sweep_abandoned_fixtures,
     workspace_listed,
-};
-#[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
-use cleanup::{
-    cmux_attempt, listed_group, listed_workspace, try_listed_workspace, wait_for_listed,
-    wait_until_not_listed,
 };
 use common::{Bounded, Cleanup, Waiting, WithoutActor};
 use dagq::application::ProcessControl;
@@ -252,54 +245,6 @@ fn checked(args: &[&str], output: std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-/// The workspace is pinned, has the sidebar color `color` (cmux lists a
-/// named color by its hex value) and carries the status pill `pill` as
-/// `cmux list-status` prints it. cmux answers `workspace-action` before its
-/// listing shows the change: with other e2e tests driving cmux, a pin sent
-/// right after an unpin is listed as `pinned: false` for up to ~0.5s (task
-/// 1120), so the look is waited for, not read once. A failed listing or
-/// `list-status` (cmux's `Command timed out` under load) is "not yet" too.
-#[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
-fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
-    let deadline = Instant::now() + WAIT_LIMIT;
-    loop {
-        let listed = match try_listed_workspace(cmux, id) {
-            Ok(Some(listed)) => Ok(listed),
-            Ok(None) => Err("not listed".to_owned()),
-            Err(error) => Err(format!("listing failed: {error:#}")),
-        };
-        let status = cmux_attempt(cmux, &["list-status", "--workspace", id]);
-        if let (Ok(listed), Ok(status)) = (&listed, &status)
-            && listed["pinned"] == true
-            && listed["custom_color"] == color
-            && status.lines().any(|line| line == pill)
-        {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "workspace {id} never got its look: {listed:?}\n{status:?}"
-        );
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-/// `cmux workspace env <id> --json`: the environment the workspace was
-/// created with.
-#[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
-fn workspace_env(cmux: &Path, id: &str) -> Value {
-    let output = Command::new(cmux)
-        .args(["workspace", "env", id, "--json"])
-        .bounded_output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "cmux workspace env {id}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice::<Value>(&output.stdout).unwrap()["env"].clone()
-}
-
 /// Kills a still-running supervisor when an assertion fails mid-run, and
 /// when a wait times out and the test binary exits without unwinding.
 struct ChildGuard(Child, Option<Cleanup>);
@@ -466,12 +411,6 @@ impl Fixture {
     /// The running cmux of a [`fixture_with_cmux`].
     fn cmux(&self) -> &Path {
         self.cmux.as_deref().expect("a fixture with cmux")
-    }
-
-    #[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
-    fn group(&self) -> Option<Value> {
-        let group = self.group.as_ref().expect("a fixture with cmux");
-        listed_group(self.cmux(), &group.external_id)
     }
 }
 
@@ -1770,34 +1709,15 @@ fn pid_alive(pid: u32) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// Whether the launchd `up` / `down` e2e runs. It is temporarily off unless
-/// `DAGQ_E2E_LAUNCHD=1`: no project runs the launchd mode now, and without a
-/// cmux socket password `up`'s preflight always stops it, which would fail
-/// every `--ignored` run. To bring it back, drop this check.
-fn launchd_e2e_enabled() -> bool {
-    if env::var("DAGQ_E2E_LAUNCHD").as_deref() == Ok("1") {
-        return true;
-    }
-    eprintln!(
-        "skipping the launchd up/down e2e: the launchd mode is temporarily out of the \
-         default e2e because no project runs it now and, without a cmux socket password, \
-         its preflight always stops `up`; set DAGQ_E2E_LAUNCHD=1 to run it"
-    );
-    false
-}
-
 /// `up` bootstraps the supervisor as a LaunchAgent of the real launchd and
 /// opens the inbox workspace in the real cmux; `status` lists the
 /// supervisor through its registration; `down --wait` unloads the agent
 /// and returns once the supervisor has drained and deregistered.
-///
-/// Runs only with `DAGQ_E2E_LAUNCHD=1`; see [`launchd_e2e_enabled`].
+/// Without launchd (a host other than macOS) `up` fails and so does the
+/// test: it is never passed without its body.
 #[test]
-#[ignore = "needs a running cmux and launchd; run with --ignored and DAGQ_E2E_LAUNCHD=1"]
+#[ignore = "needs a running cmux and launchd; run with --ignored"]
 fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
-    if !launchd_e2e_enabled() {
-        return;
-    }
     let fixture = fixture_with_cmux();
     let cmux = fixture.cmux();
     let Fixture {
@@ -1955,315 +1875,6 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
     }
     let again = dagq_with(env, &[("HOME", home.as_path())], &["down"]);
     assert_eq!(again["outcome"], "not_running", "{again}");
-}
-
-/// `up --in-cmux` needs no socket password: the supervisor runs inside a
-/// cmux workspace of its own, so it is a child of a cmux terminal like any
-/// other client. Nothing about launchd is touched, `status` reports the
-/// mode, and `down --wait` interrupts the supervisor and closes the
-/// workspace once it has drained.
-// Out until task 1443 deletes this case and this cfg (ADR-t1582-1).
-#[cfg(any())]
-#[test]
-#[ignore = "an e2e; run with --ignored"]
-fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes() {
-    let fixture = fixture();
-    let Fixture {
-        cmux,
-        repo,
-        stub,
-        env,
-        ..
-    } = &fixture;
-    // A disposable HOME, so a stray plist could only land there; none should.
-    let home = fixture._dir.path().join("home");
-    fs::create_dir(&home).unwrap();
-    trust_repository(&home, &env.repo);
-    let located = dagq_with(env, &[("HOME", home.as_path())], &["locate"]);
-    let plist = PathBuf::from(located["launch_agent"].as_str().unwrap());
-    let label = located["label"].as_str().unwrap().to_owned();
-    let log_dir = PathBuf::from(located["log_dir"].as_str().unwrap());
-    let mut workspaces = WorkspaceGuard {
-        cmux: cmux.to_path_buf(),
-        ids: Vec::new(),
-    };
-
-    let up_args = [
-        "up",
-        "--in-cmux",
-        "--parallel",
-        "2",
-        "--cmux",
-        cmux.to_str().unwrap(),
-        "--claude",
-        stub.to_str().unwrap(),
-        // The load of a busy host would hold every claim (task 680).
-        NO_LOAD_HOLD[0],
-        NO_LOAD_HOLD[1],
-    ];
-    let started = Instant::now();
-    let first = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
-    eprintln!("up --in-cmux took {:?}: {first}", started.elapsed());
-    assert_eq!(first["supervisor"]["outcome"], "started", "{first}");
-    assert_eq!(first["supervisor"]["mode"], "in_cmux");
-    assert_eq!(first["supervisor"]["plist"], Value::Null);
-    let repo_name = repo.file_name().unwrap().to_str().unwrap();
-    assert_eq!(repo_name, E2E_REPO_NAME);
-    assert_eq!(
-        first["supervisor"]["name"],
-        format!("[{repo_name}]supervisor")
-    );
-    let supervisor_workspace = first["supervisor"]["workspace_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    uuid::Uuid::parse_str(&supervisor_workspace).expect("workspace id is a UUID");
-    assert!(workspace_listed(cmux, &supervisor_workspace));
-    let pid = u32::try_from(first["supervisor"]["pid"].as_u64().unwrap()).unwrap();
-    assert!(pid_alive(pid));
-    let ps = Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
-        .bounded_output()
-        .unwrap();
-    let command = String::from_utf8_lossy(&ps.stdout);
-    assert!(command.contains(" --max-load 0"), "{command}");
-    assert_eq!(first["inbox"]["outcome"], "created", "{first}");
-    let inbox = first["inbox"]["workspace_id"].as_str().unwrap().to_owned();
-    // `up` opens no planner (ADR-0041 decision 6); the runtime does.
-    assert_eq!(first.get("planner"), None, "{first}");
-
-    // Every workspace carries its role and the queue in its own
-    // environment, and all joined the queue's group (ADR-0026).
-    let db = fixture.db.canonicalize().unwrap();
-    for (id, role) in [(&supervisor_workspace, "supervisor"), (&inbox, "inbox")] {
-        let env = workspace_env(cmux, id);
-        assert_eq!(env["DAGQ_ROLE"], role, "{env}");
-        assert_eq!(env["DAGQ_QUEUE"], db.to_str().unwrap(), "{env}");
-    }
-    let group = fixture.group().expect("the queue's workspace group exists");
-    assert_eq!(group["name"], "[dagq-e2e]", "{group}");
-    let members: Vec<String> = group["member_workspace_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|id| id.as_str().unwrap().to_ascii_lowercase())
-        .collect();
-    for id in [&supervisor_workspace, &inbox] {
-        assert!(members.contains(&id.to_ascii_lowercase()), "{group}");
-    }
-    assert_eq!(
-        listed_workspace(cmux, &inbox).unwrap()["description"],
-        format!("dagq role=inbox queue={}", fixture.group.external_id)
-    );
-    // The inbox is Amber, pinned with its role's pill (ADR-0031).
-    assert_look(cmux, &inbox, "#7D6608", "dagq_role=inbox icon=tray");
-    assert_eq!(
-        listed_workspace(cmux, &supervisor_workspace).unwrap()["pinned"],
-        false
-    );
-    // A person renames the inbox workspace; `up` still knows it.
-    let rename = Command::new(cmux)
-        .args(["workspace", "rename", &inbox, "--title", "renamed by hand"])
-        .bounded_output()
-        .unwrap();
-    assert!(rename.status.success(), "{rename:?}");
-
-    // launchd knows nothing about this queue, and no plist was written.
-    assert!(!plist.exists(), "{} exists", plist.display());
-    assert!(
-        !Command::new("launchctl")
-            .args(["print", &format!("gui/{}/{label}", uid())])
-            .bounded_output()
-            .unwrap()
-            .status
-            .success(),
-        "launchd has an agent for {label}"
-    );
-    // The supervisor in the workspace writes its JSON Lines log to the
-    // queue's log directory, exactly as the launchd-run one does
-    // (ADR-0033): the file outlives the workspace.
-    let logs: Vec<PathBuf> = fs::read_dir(&log_dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            let name = path.file_name().unwrap().to_str().unwrap();
-            name.starts_with("supervise-") && name.ends_with(&format!("-{pid}.jsonl"))
-        })
-        .collect();
-    assert_eq!(logs.len(), 1, "{logs:?} in {}", log_dir.display());
-    let supervisor_log = logs[0].clone();
-    assert!(
-        log_messages(&supervisor_log)
-            .iter()
-            .any(|m| m.contains(&format!(
-                "started: version {VERSION}, pid {pid}, parallel 2"
-            )))
-    );
-
-    // The in-cmux supervisor lands a task, and its integrate progress and
-    // the failed push of main (origin does not exist) are records in that
-    // file, not only lines on the workspace's screen.
-    let task_id = add_ready_task_described(
-        env,
-        "logged landing",
-        "Add e2e.txt to the worktree. E2E-REVIEW-PASS",
-        &[],
-        &[],
-    );
-    let missing_origin = repo.parent().unwrap().join("missing-origin.git");
-    git(
-        repo,
-        &["remote", "add", "origin", missing_origin.to_str().unwrap()],
-    );
-    let deadline = Instant::now() + WAIT_LIMIT;
-    let run_id = loop {
-        let detail = dagq(env, &["show", &task_id, "--full"]);
-        if let Some(id) = detail["runs"][0]["workspace_id"].as_str() {
-            workspaces.record(id);
-        }
-        if detail["task"]["status"] == "completed" {
-            break detail["runs"][0]["id"].as_str().unwrap().to_owned();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "task {task_id} did not land: {detail}\n{:?}",
-            log_messages(&supervisor_log)
-        );
-        thread::sleep(Duration::from_millis(500));
-    };
-    // main is pushed after the task completes; wait for its record.
-    let pushed = format!("run {run_id}: push of the landing branch failed");
-    let records = loop {
-        let records = log_records(&supervisor_log);
-        if records
-            .iter()
-            .any(|r| r["message"].as_str().unwrap().contains(&pushed))
-        {
-            break records;
-        }
-        assert!(Instant::now() < deadline, "no push record: {records:#?}");
-        thread::sleep(Duration::from_millis(200));
-    };
-    let find = |needle: &str| {
-        records
-            .iter()
-            .find(|r| r["message"].as_str().unwrap().contains(needle))
-            .unwrap_or_else(|| panic!("no record with {needle:?} in {records:#?}"))
-            .clone()
-    };
-    let integrating = find(&format!(
-        "run {run_id} integrating task {task_id} onto main"
-    ));
-    assert_eq!(integrating["level"], "INFO");
-    assert_eq!(integrating["target"], "dagq::application::integrate");
-    assert_eq!(integrating["fields"]["op"], "integrate");
-    assert_eq!(integrating["fields"]["run_id"], run_id.as_str());
-    assert_eq!(integrating["fields"]["task_id"], task_id.as_str());
-    assert_eq!(integrating["spans"][0]["name"], "integrate");
-    let landed = find(&format!("task {task_id} landed as"));
-    assert_eq!(landed["fields"]["run_id"], run_id.as_str());
-    let push = find(&pushed);
-    assert_eq!(push["level"], "WARN");
-    assert_eq!(push["fields"]["op"], "push");
-    assert!(push["fields"]["error"].as_str().is_some(), "{push}");
-    eprintln!("in-cmux supervisor log {}:", supervisor_log.display());
-    for record in [&integrating, &landed, &push] {
-        eprintln!("{record}");
-    }
-
-    let status = dagq(env, &["status"]);
-    let supervisors = status["supervisors"].as_array().unwrap();
-    assert_eq!(supervisors.len(), 1, "{status}");
-    assert_eq!(supervisors[0]["pid"], pid);
-    assert_eq!(supervisors[0]["mode"], "in_cmux");
-    assert_eq!(
-        supervisors[0]["workspace_id"],
-        supervisor_workspace.as_str()
-    );
-    assert_eq!(supervisors[0]["stale"], false);
-    let doctor = dagq(env, &["doctor", "--full"]);
-    assert_eq!(doctor["supervisors"][0]["mode"], "in_cmux", "{doctor}");
-    assert_eq!(
-        doctor["supervisors"][0]["binary_version"], VERSION,
-        "{doctor}"
-    );
-
-    // Idempotent: the live supervisor is of this binary's own version, so
-    // it is reused with its mode and workspace and nothing is replaced.
-    let second = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
-    assert_eq!(second["supervisor"]["outcome"], "reused", "{second}");
-    assert_eq!(second["supervisor"]["version"], VERSION, "{second}");
-    assert_eq!(second["supervisor"]["mode"], "in_cmux");
-    assert_eq!(
-        second["supervisor"]["workspace_id"],
-        supervisor_workspace.as_str()
-    );
-    assert_eq!(second["inbox"]["outcome"], "reused", "{second}");
-    assert_eq!(second["inbox"]["workspace_id"], inbox.as_str());
-    // The look is put back on a reused workspace that lost it.
-    let unpin = Command::new(cmux)
-        .args([
-            "workspace-action",
-            "--action",
-            "unpin",
-            "--workspace",
-            &inbox,
-        ])
-        .bounded_output()
-        .unwrap();
-    assert!(unpin.status.success(), "{unpin:?}");
-    // The inbox has lost its pin before `up` runs, as cmux lists it.
-    wait_for_listed(cmux, &inbox, "the unpin never showed up", |listed| {
-        listed["pinned"] == false
-    });
-    let third = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
-    assert_eq!(third["inbox"]["outcome"], "reused", "{third}");
-    assert_eq!(third["warnings"], serde_json::json!([]), "{third}");
-    assert_look(cmux, &inbox, "#7D6608", "dagq_role=inbox icon=tray");
-
-    // cmux refuses to close a pinned workspace; dagq's close unpins it
-    // first, so `down` closes the supervisor's workspace even when a person
-    // pinned it.
-    let pin = Command::new(cmux)
-        .args([
-            "workspace-action",
-            "--action",
-            "pin",
-            "--workspace",
-            &supervisor_workspace,
-        ])
-        .bounded_output()
-        .unwrap();
-    assert!(pin.status.success(), "{pin:?}");
-    wait_for_listed(
-        cmux,
-        &supervisor_workspace,
-        "the pin never showed up",
-        |listed| listed["pinned"] == true,
-    );
-    let refused = Command::new(cmux)
-        .args(["workspace", "close", &supervisor_workspace])
-        .bounded_output()
-        .unwrap();
-    eprintln!("cmux workspace close of a pinned workspace: {refused:?}");
-    assert!(!refused.status.success(), "{refused:?}");
-
-    let started = Instant::now();
-    let down = dagq_with(env, &[("HOME", home.as_path())], &["down", "--wait"]);
-    eprintln!("down --wait took {:?}: {down}", started.elapsed());
-    assert_eq!(down["outcome"], "stopped", "{down}");
-    assert_eq!(down["pid"], pid);
-    assert_eq!(down["launch_agent_unloaded"], false);
-    assert_eq!(
-        down["supervisor_workspaces"],
-        serde_json::json!([{"workspace_id": supervisor_workspace, "outcome": "closed"}]),
-        "{down}"
-    );
-    assert!(!pid_alive(pid), "supervisor {pid} is still alive");
-    wait_until_not_listed(cmux, &supervisor_workspace);
-    assert_eq!(dagq(env, &["status"])["supervisors"], Value::Array(vec![]));
-    // The inbox workspace is left open by `down`; the guard closes it.
-    assert!(workspace_listed(cmux, &inbox));
 }
 
 /// `install` hands a supervisor over to the new binary while its worker

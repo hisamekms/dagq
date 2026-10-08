@@ -39,7 +39,6 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 
 ```sh
 "$DAGQ" up            # add --parallel N, --max-waiting N, --auto-update, --claude EXE --codex EXE
-"$DAGQ" up --in-cmux  # only when the preflight sends you there
 "$DAGQ" down            # stop claiming; the supervisor drains its runs and exits
 "$DAGQ" down --wait     # the same, and block until it is gone
 "$DAGQ" install --from PATH  # swap the binary, hand over
@@ -47,7 +46,7 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 
 `--plugin-dir`: only a path the repository names, never `$CLAUDE_PLUGIN_ROOT`. `up --no-claude` forbids Claude (Codex workers; unsupported roles by hand); drain before changing it.
 
-`up` is idempotent: one resident supervisor and the inbox workspace; no planner (`plan` is refused; a plan is the inbox's request: `skills/dagq-inbox/reference/requests.md`). `inbox_guardrail` false (`status`, `doctor`): `reference/up-down.md`, "Open the inbox again". `restart supervisor` is answered with `up`. Update the binary with `install` (or `--rollback`), never `cp`; only a breaking migration drains, and a drain waits for runs waiting on an ask too; `up --auto-update`, `--allow-breaking` and the `update_failed` / `approve_update` asks: `reference/update.md`. `down --force` loses the active runs: only on the person's explicit word. `--claude` / `--codex` take real paths (from a cmux terminal `~/.local/bin/claude`, `~/.local/bin/codex`). `reference/up-down.md`: outcomes, drains, the in-cmux case, logs.
+`up` is idempotent: one resident supervisor and the inbox workspace; no planner (`plan` is refused; a plan is the inbox's request: `skills/dagq-inbox/reference/requests.md`). `inbox_guardrail` false (`status`, `doctor`): `reference/up-down.md`, "Open the inbox again". `restart supervisor` is answered with `up` (`up --in-cmux` is refused). A registered `in_cmux` supervisor still works: move it to launchd once with `down --wait`, then `up` without `--in-cmux`, keeping your usual flags. Update the binary with `install` (or `--rollback`), never `cp`; only a breaking migration drains, and a drain waits for runs waiting on an ask too; `up --auto-update`, `--allow-breaking` and the `update_failed` / `approve_update` asks: `reference/update.md`. `down --force` loses the active runs: only on the person's explicit word. `--claude` / `--codex` take real paths (from a cmux terminal `~/.local/bin/claude`, `~/.local/bin/codex`). `reference/up-down.md`: outcomes, drains, a registered in-cmux supervisor, logs.
 
 ## 6. Review by hand, and a failed push
 

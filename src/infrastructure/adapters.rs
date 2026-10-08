@@ -1,10 +1,9 @@
 use crate::infrastructure::git_binary::git_executable;
 use crate::{
     application::{
-        AgentProvider, CommandSpec, DetachedRefusal, FileStamp, LandingBranchStamp, MainRemote,
-        PlannerCommand, PluginState, ProcessControl, Repository, SessionWrappers,
-        SupervisorEnvironment, TurnReader, TurnTarget, WorkspaceBackend, WorkspaceTags,
-        execution::permission_deny,
+        AgentProvider, CommandSpec, FileStamp, LandingBranchStamp, MainRemote, PlannerCommand,
+        PluginState, ProcessControl, Repository, SessionWrappers, TurnReader, TurnTarget,
+        WorkspaceBackend, WorkspaceTags, execution::permission_deny,
     },
     domain::{
         ActorRole, CommitSha, TaskId, TaskRun,
@@ -21,23 +20,19 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    env,
-    ffi::OsString,
-    fs,
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    env, fs,
+    io::{self, Read, Seek, SeekFrom},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
-    sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub use crate::application::{
-    SOCKET_PASSWORD_ENV,
     naming::{
         ask_notification_title, inbox_workspace_name, shell_join, shell_quote,
-        supervisor_workspace_name, workspace_description, workspace_group_name,
+        workspace_description, workspace_group_name,
     },
     path_text,
 };
@@ -188,74 +183,6 @@ pub(crate) fn relocated(
 }
 
 /// `kill -0` semantics: a process we may not signal (EPERM) still exists.
-/// Run `command`, an outer shell that backgrounds a process printing
-/// `pid=N` as its first stdout line and exits at once, and return what that
-/// process wrote after the pid line and to stderr once it is gone (its exit
-/// closes the pipes). The orphan is not this process's child, so a deadline
-/// is kept by hand and the pid is killed when it passes.
-///
-/// It reads pipes to their end by design (the end is the orphan's exit),
-/// so it shares the race [`output_file`] avoids: a process another thread
-/// spawns while the pipes are being made can inherit their write ends, and
-/// then the read waits for that process too, here up to `timeout`, which
-/// then fails the call though the orphan had answered (task 1273).
-fn orphan_output(command: &mut Command, timeout: Duration) -> Result<(String, String)> {
-    let label = format!("{:?}", command.get_program());
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .with_context(|| format!("start {label}"))?;
-    let stdout = child.stdout.take().context("stdout unavailable")?;
-    let mut stderr = child.stderr.take().context("stderr unavailable")?;
-    let (lines, received) = mpsc::channel();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if lines.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let err = thread::spawn(move || {
-        let mut text = String::new();
-        stderr.read_to_string(&mut text).map(|_| text)
-    });
-    let status = child.wait().with_context(|| format!("wait for {label}"))?;
-    ensure!(status.success(), "{label} failed ({status})");
-    let deadline = Instant::now() + timeout;
-    let mut pid = None;
-    let mut reply = Vec::new();
-    loop {
-        match received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(line) => {
-                let line = line.context("read the orphan's stdout")?;
-                if pid.is_some() {
-                    reply.push(line);
-                } else {
-                    pid = Some(
-                        line.strip_prefix("pid=")
-                            .and_then(|pid| pid.parse::<u32>().ok())
-                            .with_context(|| format!("{label} did not report a pid: {line}"))?,
-                    );
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => {
-                if let Some(pid) = pid {
-                    let _ = signal(pid, libc::SIGKILL);
-                }
-                anyhow::bail!("{label} did not finish within {timeout:?}");
-            }
-        }
-    }
-    let stderr = err
-        .join()
-        .map_err(|_| anyhow::anyhow!("stderr reader failed"))?
-        .context("read the orphan's stderr")?;
-    Ok((reply.join("\n"), stderr))
-}
-
 pub fn process_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -2758,31 +2685,6 @@ pub struct Cmux {
     pub executable: PathBuf,
 }
 
-/// How long the detached ping may take. Without `CMUX_SOCKET_PATH` cmux's
-/// CLI discovers the socket on its own, which has taken up to 11 seconds
-/// (cmux 0.64.25) before the reply or the refusal came.
-pub const DETACHED_PING_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Give `command` the environment a launchd-started supervisor has: every
-/// `CMUX_*` variable in `inherited` (the socket capability, the workspace
-/// and surface IDs, the socket path) removed, PATH replaced, and the socket
-/// password set only when the invoking shell exported it.
-pub fn detach(
-    command: &mut Command,
-    inherited: impl IntoIterator<Item = OsString>,
-    environment: &SupervisorEnvironment,
-) {
-    for name in inherited {
-        if name.to_string_lossy().starts_with("CMUX_") {
-            command.env_remove(name);
-        }
-    }
-    command.env("PATH", &environment.path);
-    if let Some(password) = &environment.socket_password {
-        command.env(SOCKET_PASSWORD_ENV, password);
-    }
-}
-
 fn expect_pong(reply: &str) -> Result<()> {
     ensure!(
         reply.trim() == "PONG",
@@ -2802,10 +2704,6 @@ fn background_wrappers() -> super::background::BackgroundWrappers<'static> {
 impl WorkspaceBackend for Cmux {
     fn preflight(&self) -> Result<()> {
         expect_pong(&output(Command::new(&self.executable).arg("ping"))?)
-    }
-
-    fn preflight_detached(&self, environment: &SupervisorEnvironment) -> Result<()> {
-        self.preflight_detached_within(environment, DETACHED_PING_TIMEOUT)
     }
 
     fn call_timeout(&self) -> Duration {
@@ -2951,59 +2849,6 @@ impl Cmux {
             ]))?;
             serde_json::from_str(&listing).context("decode cmux workspace list")
         })
-    }
-
-    /// The detached ping with an explicit deadline. cmux admits a client by
-    /// its ancestry, not its environment: a child of one of its terminals
-    /// gets through however its variables look, a process under launchd
-    /// does not (verified against cmux 0.64.25). So besides the scrubbed
-    /// environment the ping runs orphaned, the way the LaunchAgent's
-    /// supervisor does: an outer `sh` in a session of its own backgrounds
-    /// an inner one and exits; the inner one waits until the outer is gone
-    /// (so launchd is its parent before cmux looks), prints its pid and
-    /// becomes `cmux ping` by `exec`, so the pid is cmux's and can be
-    /// killed at the deadline.
-    pub fn preflight_detached_within(
-        &self,
-        environment: &SupervisorEnvironment,
-        timeout: Duration,
-    ) -> Result<()> {
-        let mut command = Command::new("/bin/sh");
-        command
-            .args([
-                "-c",
-                r#"/bin/sh -c 'while kill -0 "$1" 2>/dev/null; do sleep 0.01; done; printf "pid=%s\n" "$$"; exec "$0" ping' "$0" "$$" &"#,
-            ])
-            .arg(&self.executable);
-        // SAFETY: setsid only detaches the child from this session and
-        // terminal; it allocates nothing and is async-signal-safe.
-        unsafe {
-            command.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        detach(
-            &mut command,
-            env::vars_os().map(|(name, _)| name),
-            environment,
-        );
-        let (reply, stderr) = orphan_output(&mut command, timeout)?;
-        if reply.trim() == "PONG" {
-            return Ok(());
-        }
-        Err(DetachedRefusal {
-            reason: format!(
-                "{:?} ping from outside cmux failed: {}",
-                self.executable,
-                if stderr.trim().is_empty() {
-                    format!("unexpected response: {reply}")
-                } else {
-                    stderr.trim().to_owned()
-                }
-            ),
-        }
-        .into())
     }
 
     /// `cmux workspace-action --action <action> [flags…] --workspace <id>`.
@@ -5635,10 +5480,10 @@ mod tests {
     #[test]
     fn workspace_names_carry_the_repository() {
         // A root with no basename falls back to the path itself.
-        assert_eq!(supervisor_workspace_name(Path::new("/")), "[/]supervisor");
+        assert_eq!(inbox_workspace_name(Path::new("/")), "[/]inbox");
         assert_eq!(
-            supervisor_workspace_name(Path::new("/home/u/ghq/dagq")),
-            "[dagq]supervisor"
+            inbox_workspace_name(Path::new("/home/u/ghq/dagq")),
+            "[dagq]inbox"
         );
         assert_eq!(
             inbox_workspace_name(Path::new("/tmp/my repo/")),

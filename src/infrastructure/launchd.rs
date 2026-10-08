@@ -144,7 +144,7 @@ impl LaunchAgent for Launchctl {
         );
         let dir = path.parent().context("LaunchAgent path has no parent")?;
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-        // The definition may carry the socket password: readable by its owner only.
+        // The definition carries the user's PATH: readable by its owner only.
         fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod {}", path.display()))?;
@@ -204,7 +204,6 @@ mod tests {
             working_directory: "/repo & co".into(),
             environment: SupervisorEnvironment {
                 path: "/usr/bin:/home/u/.local/bin".into(),
-                socket_password: None,
                 config_home: None,
             },
             log: "/data/q/logs/launchd.log".into(),
@@ -232,23 +231,24 @@ mod tests {
             )
         );
         assert!(xml.ends_with("</dict>\n</plist>\n"));
-        assert!(!xml.contains("CMUX_SOCKET_PASSWORD"));
+        // The supervisor calls no cmux, so no cmux variable is given.
+        assert!(!xml.contains("CMUX_"));
 
-        // An exported password goes into the same dict, escaped like the rest.
-        let with_password = LaunchAgentSpec {
+        // An exported XDG_CONFIG_HOME goes into the same dict, escaped like
+        // the rest.
+        let with_config_home = LaunchAgentSpec {
             environment: SupervisorEnvironment {
                 path: "/usr/bin".into(),
-                socket_password: Some("s3cret&<>".into()),
-                config_home: None,
+                config_home: Some("/home/u/.cfg&<>".into()),
             },
             ..spec
         }
         .xml();
         assert!(
-            with_password.contains(
-                "<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/usr/bin</string>\n\t\t<key>CMUX_SOCKET_PASSWORD</key>\n\t\t<string>s3cret&amp;&lt;&gt;</string>\n\t</dict>"
+            with_config_home.contains(
+                "<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/usr/bin</string>\n\t\t<key>XDG_CONFIG_HOME</key>\n\t\t<string>/home/u/.cfg&amp;&lt;&gt;</string>\n\t</dict>"
             ),
-            "{with_password}"
+            "{with_config_home}"
         );
     }
 

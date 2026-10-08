@@ -63,12 +63,13 @@ hostのツールは人が入れ、miseのshimへのlinkを`~/.local/bin`に置�
 
 ## `up`のコマンド
 
-このrepositoryの`up`は次のとおり。当面はin-cmux modeで運用する（cmuxのsocket passwordを設定していないため。[ADR-0011](../adr/0011-cmux-socket-password-and-in-cmux-fallback.md)）。`up`を打つsession、止まったsupervisorの起動し直し方、launchd modeが止まるときの振る舞い、出力の読み方はpluginの`dagq-recover`の`reference/up-down.md`が持つ。
+このrepositoryの`up`は次のとおり。supervisorはcmuxを呼ばず、launchdのLaunchAgentとしてだけ常駐する（[ADR-t1433-4](../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。`--in-cmux`は廃止され、付けた`up`は何にも触らずに拒まれる。`up`を打つsession、止まったsupervisorの起動し直し方、launchd modeが止まるときの振る舞い、出力の読み方はpluginの`dagq-recover`の`reference/up-down.md`が持つ。
 
 ```sh
-dagq up --in-cmux --claude ~/.local/bin/claude --codex ~/.local/bin/codex --plugin-dir <この repository>/plugins/claude-dagq --auto-update
+dagq up --claude ~/.local/bin/claude --codex ~/.local/bin/codex --plugin-dir <この repository>/plugins/claude-dagq --auto-update
 ```
 
+- 本番のsupervisorがまだ登録済みのin-cmuxのもの（`status`の`supervisors[].mode`が`in_cmux`）なら、launchdに移すのは人かinboxの一度きりの手での操作: `dagq down --wait`で止めてから、上のコマンド（`--in-cmux`なし。`--auto-update`などいつもの引数は付けたまま）を打つ。`down --wait`はそのsupervisorの`[<repo>]supervisor`のworkspaceも閉じる。移すまでは新しいバイナリへの引き継ぎも`down`もそのまま効く。
 - `--parallel`を付けない規則とその理由は`dagq.toml`の`[supervisor]`の`parallel`のコメントが持つ。`--runtime-planners`も同じ理由で付けない（`runtime_planners`は`[supervisor]`で決める）。flagが`[supervisor]`より優先して残る仕組みと、付けて起動したsupervisorを`[supervisor]`に従わせる手順は[Run environment](../design/supervisor-lifecycle/run-environment.md)の`[supervisor]`の項（「優先順」と「起動し直すときの引き継ぎ」）。
 - このrepositoryは自動更新を使う（上のコマンドの`--auto-update`）。打ち直す`up`にも付け続けることとその理由はpluginの`dagq-recover`の`reference/update.md`の「Automatic updates (`up --auto-update`)」が持つ。
 - `--claude`と`--codex`の値は上のコマンドのpath。pathで渡す理由、Claude CodeやCodexを更新したときの解決し直し、`codex`が無いときの振る舞いはpluginの`dagq-recover`の`reference/up-down.md`の「up」、`install --allow-breaking`のdrainが起動し直す`up`に渡すものは同じskillの`reference/update.md`の「install」が持つ。

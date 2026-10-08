@@ -1039,45 +1039,23 @@ pub trait MainRemote {
     ) -> Result<bool>;
 }
 
-/// The one `CMUX_*` variable a detached process may carry: cmux's CLI
-/// reads its socket password from it.
-pub const SOCKET_PASSWORD_ENV: &str = "CMUX_SOCKET_PASSWORD";
-
 /// The variable that moves the user's `config.toml` and the host-wide
 /// `host.toml` away from `~/.config/dagq/`.
 pub const CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
 
 /// The environment variables the LaunchAgent gives the supervisor, which
 /// is all a launchd-started process keeps of the shell that ran `up`: its
-/// PATH and, only when that shell exported them, the cmux socket password
-/// and `XDG_CONFIG_HOME`.
+/// PATH and, only when that shell exported it, `XDG_CONFIG_HOME`. The
+/// supervisor calls no cmux, so no cmux variable is among them
+/// (ADR-t1433-4).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SupervisorEnvironment {
     pub path: String,
-    /// `CMUX_SOCKET_PASSWORD` as exported by the invoking shell; a password
-    /// saved in cmux's Settings is never read or stored here.
-    pub socket_password: Option<String>,
     /// `XDG_CONFIG_HOME` as exported (non-empty) by the invoking shell, so
     /// the supervisor reads the same `config.toml` and `host.toml` as the
     /// `up` that checked them; unset, both are under `~/.config/dagq/`.
     pub config_home: Option<String>,
 }
-
-/// cmux answered the detached ping and did not admit it (its message is
-/// `reason`), as opposed to not answering at all: only this failure has
-/// the socket password as its remedy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DetachedRefusal {
-    pub reason: String,
-}
-
-impl std::fmt::Display for DetachedRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.reason)
-    }
-}
-
-impl std::error::Error for DetachedRefusal {}
 
 /// What a workspace carries besides its title and command (ADR-0026).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1175,13 +1153,6 @@ pub trait SessionWrappers {
 /// no cmux.
 pub trait WorkspaceBackend {
     fn preflight(&self) -> Result<()>;
-    /// Check that cmux accepts a connection from a process that is not a
-    /// child of one of its terminals, the way the launchd-run supervisor
-    /// connects: `ping` run outside cmux's process tree with `environment`
-    /// and none of the `CMUX_*` variables a cmux session inherits (cmux
-    /// admits such a process only by socket password). A refusal is a
-    /// [`DetachedRefusal`]; any other error means cmux could not be asked.
-    fn preflight_detached(&self, environment: &SupervisorEnvironment) -> Result<()>;
     /// Close the workspace; the worktree and branch are not touched. A
     /// pinned workspace is unpinned first, since cmux refuses to close one
     /// (ADR-0031); every close dagq makes goes through here.
@@ -1197,10 +1168,10 @@ pub trait WorkspaceBackend {
     /// are found by the ID the queue recorded, never by their title, which
     /// people may rename (ADR-0026).
     fn exists(&self, workspace_id: &str) -> Result<bool>;
-    /// Open a workspace that is not tied to a run (the inbox and planner
-    /// sessions, the in-cmux supervisor) and return its stable ID. A run's
-    /// session has no workspace: its wrapper starts in the background
-    /// ([`SessionWrappers::launch_background`], ADR-t1433-3).
+    /// Open a workspace that is not tied to a run (the inbox's session) and
+    /// return its stable ID. A run's session has no workspace: its wrapper
+    /// starts in the background ([`SessionWrappers::launch_background`],
+    /// ADR-t1433-3).
     fn create_named(
         &self,
         name: &str,
@@ -1297,8 +1268,9 @@ pub trait ProcessControl {
     /// Ask the process to drain (SIGTERM); used when no agent is loaded for it.
     fn terminate(&self, pid: u32) -> Result<()>;
     /// Ask the process to drain the way Ctrl-C in its terminal would
-    /// (SIGINT); used for the supervisor of an in-cmux workspace, which no
-    /// service manager can signal for us.
+    /// (SIGINT); used for a supervisor an earlier binary started in a cmux
+    /// workspace (the retired in-cmux mode), which no service manager can
+    /// signal for us.
     fn interrupt(&self, pid: u32) -> Result<()>;
     /// End the process immediately (SIGKILL).
     fn kill(&self, pid: u32) -> Result<()>;

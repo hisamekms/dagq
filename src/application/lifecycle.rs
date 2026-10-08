@@ -7,14 +7,13 @@
 //! supervisor drains and is not restarted. Both are idempotent: a second
 //! `up` reuses what the first one started.
 //!
-//! A launchd-started supervisor is not a child of a cmux terminal, and cmux
-//! admits such a process only by socket password. `up` therefore proves the
-//! connection from outside cmux (a `ping` with the agent's environment, run
-//! outside cmux's process tree) before it writes the agent, or launchd would
-//! keep restarting a supervisor that fails its own preflight forever. Where
-//! that password is not configured, `up --in-cmux` starts the supervisor
-//! inside the cmux workspace `[<repo>]supervisor` instead, with no
-//! launchd involved and so nothing to restart it (ADR-0011).
+//! The supervisor calls no cmux, so `up` starts it under launchd only and
+//! asks cmux nothing on its behalf: cmux is checked from the shell that
+//! runs `up` for the inbox's workspace alone. The in-cmux mode is retired
+//! (ADR-t1433-4): `up --in-cmux` is refused, and a supervisor some earlier
+//! binary registered in that mode is still handed over, replaced and
+//! stopped (its SIGINT and the close of its workspace) until a person
+//! moves it to launchd with `down --wait` and `up`.
 //!
 //! A supervisor is only reused while it runs this binary's own build.
 //! Every registration carries the `binary_version` its process recorded,
@@ -27,17 +26,13 @@
 //! the files through [`Ports`]; the entry points in [`crate::compose`]
 //! build the adapters.
 use super::{
-    AgentProvider, CONFIG_HOME_ENV, Clock, DetachedRefusal, LaunchAgent, ProcessControl, Queue,
-    QueueOpener, RunFiles, SOCKET_PASSWORD_ENV, SupervisorEnvironment, WorkspaceBackend,
-    WorkspaceTags,
+    AgentProvider, CONFIG_HOME_ENV, Clock, LaunchAgent, ProcessControl, Queue, QueueOpener,
+    RunFiles, SupervisorEnvironment, WorkspaceBackend,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, WorkspaceAccess,
-        WorkspaceCommand, actor_env,
+        WorkspaceCommand,
     },
-    naming::{
-        inbox_workspace_name, shell_join, supervisor_workspace_name, workspace_description,
-        workspace_group_name,
-    },
+    naming::{inbox_workspace_name, workspace_description, workspace_group_name},
     path_text,
     prompt::inbox_prompt,
     recording::RecordingBackend,
@@ -121,9 +116,6 @@ pub struct UpEnvironment {
     pub queue: Option<PathBuf>,
     /// `PATH`, copied into the agent so the supervisor finds what this shell finds.
     pub path: String,
-    /// `CMUX_SOCKET_PASSWORD`, if this shell exported it (non-empty); it is
-    /// then copied into the agent too.
-    pub socket_password: Option<String>,
     /// `XDG_CONFIG_HOME`, if this shell exported it (non-empty); it is then
     /// copied into the agent too, so the launchd-run supervisor reads the
     /// `config.toml` and `host.toml` this `up` read.
@@ -149,15 +141,12 @@ pub struct UpEnvironment {
 /// know it ignores it.
 pub const UP_RESTART_ENV: &str = "DAGQ_UP_RESTART";
 
-/// What `up` says when cmux does not admit a process from outside its
-/// terminals. The remedies are the operator's: cmux's CLI takes the password
-/// saved in its Settings on its own, or `CMUX_SOCKET_PASSWORD` from the
-/// shell that runs `up` (stored in the agent then).
-pub const DETACHED_CMUX_HINT: &str = "cmux refused a connection from outside its own terminals, \
-so the supervisor launchd starts could not reach it. Either save a socket password in cmux \
-Settings (its CLI uses it on its own), or export CMUX_SOCKET_PASSWORD before `up` (it is then \
-written into the LaunchAgent); or run `up --in-cmux`, which starts the supervisor inside a cmux \
-workspace without launchd and without any automatic restart";
+/// What `up --in-cmux` is refused with (ADR-t1433-4 decision 2): the mode
+/// is retired, and how a supervisor registered in it moves to launchd.
+pub const IN_CMUX_RETIRED: &str = "the in-cmux mode is retired: the supervisor calls no cmux and \
+runs only under launchd, so `up --in-cmux` starts nothing. Run `up` without --in-cmux (with the \
+other flags you give it); a supervisor already running in a cmux workspace moves to launchd with \
+`down --wait` and then `up` without --in-cmux";
 
 /// What `up` says when Claude Code has not trusted the repository: every
 /// run session would stop at the folder trust dialog, since run worktrees
@@ -326,9 +315,8 @@ pub struct UpOptions {
     /// the hold. Passed only when given: without it the supervisor holds
     /// at twice the host's logical cores (task 623).
     pub max_load: Option<f64>,
-    /// Start the supervisor inside the cmux workspace `[<repo>]supervisor`
-    /// instead of as a LaunchAgent: no launchd, no automatic restart, and no
-    /// out-of-cmux preflight to pass.
+    /// `up --in-cmux`, the retired mode: `up` refuses it before anything
+    /// else ([`IN_CMUX_RETIRED`]).
     pub in_cmux: bool,
     /// Refuse to wait for a supervisor of another version to drain. Only a
     /// replacement reads it (ADR-0014): with runs in flight `up` stops
@@ -370,8 +358,7 @@ pub const QUEUE_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(10);
 /// Ensure the supervisor and the inbox workspace exist and report the queue's open work. Preflight first (cmux, claude, the installed plugin without `--plugin-dir`, Claude Code's trust of
 /// the repository root, an initialized queue, the repository), then prune registrations whose process is gone, start
 /// the agent only when no live registration of this binary's version
-/// remains (after proving that cmux admits a process with the agent's
-/// environment) — draining and replacing a live supervisor of any other
+/// remains — draining and replacing a live supervisor of any other
 /// version — and open the inbox workspace only outside that session itself.
 /// A workspace recorded for a role `up` no longer opens (the maintainer
 /// ADR-0024 retired, the resident planner ADR-0041 decision 6 retired) is
@@ -391,6 +378,7 @@ pub fn up(
         options.parallel.is_none_or(|parallel| parallel >= 1),
         "parallel must be at least 1"
     );
+    ensure!(!options.in_cmux, IN_CMUX_RETIRED);
     let (cmux, launchd, processes) = (ports.cmux, ports.launchd, ports.processes);
     let db = ports
         .files
@@ -503,7 +491,7 @@ pub fn up(
     // them is for a run.
     let recording = RecordingBackend::over(cmux, queues, None, ports.load_average);
     let cmux: &dyn WorkspaceBackend = &recording;
-    let workspaces = QueueWorkspaces::new(cmux, &db, location.hash.clone(), &repository.root);
+    let workspaces = QueueWorkspaces::new(cmux, location.hash.clone(), &repository.root);
     let up = Up {
         location,
         db: &db,
@@ -580,7 +568,7 @@ pub fn up(
             supervisor
         }
         Some(_) => replace_supervisors(&up, &live)?,
-        None => start_supervisor(&up, &existing, false)?,
+        None => start_under_launchd(&up, &existing)?,
     };
     let supervisor = set_auto_update(queue, supervisor, &live, options.auto_update)?;
 
@@ -814,8 +802,8 @@ pub fn session_look(role: SessionRole) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// The actor of the session `role` has a single workspace for (the inbox,
-/// the in-cmux supervisor): its id is the role's name.
+/// The actor of the session `role` has a single workspace for (the
+/// inbox): its id is the role's name.
 pub fn session_actor(role: SessionRole) -> ActorContext {
     ActorContext::new(role.actor_role(), role.as_str())
 }
@@ -828,7 +816,6 @@ pub fn session_actor(role: SessionRole) -> ActorContext {
 /// `up`'s result, and the workspace opens outside it.
 pub struct QueueWorkspaces<'a> {
     cmux: &'a dyn WorkspaceBackend,
-    db: &'a Path,
     hash: String,
     group_name: String,
     group: OnceCell<Option<String>>,
@@ -836,32 +823,14 @@ pub struct QueueWorkspaces<'a> {
 }
 
 impl<'a> QueueWorkspaces<'a> {
-    pub fn new(
-        cmux: &'a dyn WorkspaceBackend,
-        db: &'a Path,
-        hash: String,
-        repo_root: &Path,
-    ) -> Self {
+    pub fn new(cmux: &'a dyn WorkspaceBackend, hash: String, repo_root: &Path) -> Self {
         Self {
             cmux,
-            db,
             hash,
             group_name: workspace_group_name(repo_root),
             group: OnceCell::new(),
             warnings: RefCell::new(Vec::new()),
         }
-    }
-
-    /// The tags of a workspace of `role` that belongs to no run: the
-    /// in-cmux supervisor's, which is not an AI actor the executor starts,
-    /// with the environment every actor's workspace has
-    /// ([`actor_env`]), its actor id being the role's.
-    pub fn tags(&self, role: SessionRole) -> Result<WorkspaceTags> {
-        Ok(WorkspaceTags {
-            env: actor_env(self.db, &session_actor(role), None, None)?,
-            description: self.description(role),
-            group: self.group(),
-        })
     }
 
     /// The description line of a workspace of `role` that belongs to no run.
@@ -913,31 +882,16 @@ fn recorded_workspace(
     Ok(None)
 }
 
-/// Start one supervisor in the mode this `up` was asked for. The mode of a
-/// supervisor being replaced does not decide it: `up --in-cmux` moves a
-/// launchd queue into a workspace and a plain `up` moves it back, and
-/// either way the old one has already been drained and its agent unloaded.
-fn start_supervisor(
-    up: &Up,
-    existing: &HashSet<LeaseToken>,
-    detached_proven: bool,
-) -> Result<Value> {
-    if up.options.in_cmux {
-        start_in_cmux(up, existing)
-    } else {
-        start_under_launchd(up, existing, detached_proven)
-    }
-}
-
 /// Drain every live supervisor of another build and start one of this
 /// binary's version in its place (ADR-0014), so that updating the fixed
 /// binary is `up` and nothing else. The stop is `down --wait`'s: unload the
 /// LaunchAgent (whose bootout carries the SIGTERM, and whose `KeepAlive`
-/// would otherwise restart the old binary at once), SIGINT an in-cmux
-/// supervisor, SIGTERM one launchd did not signal, then wait for each
-/// registration to go — the supervisor stops claiming, finishes the runs it
-/// holds and deregisters — and close the workspaces of the in-cmux ones
-/// before a new one could want the same name.
+/// would otherwise restart the old binary at once), SIGINT a supervisor an
+/// earlier binary registered in the retired in-cmux mode, SIGTERM one
+/// launchd did not signal, then wait for each registration to go — the
+/// supervisor stops claiming, finishes the runs it holds and deregisters —
+/// and close the workspaces of the in-cmux ones. The one started in their
+/// place runs under launchd, whatever mode they had (ADR-t1433-4).
 ///
 /// The drain is unbounded because a run is a Claude session: `--no-wait` is
 /// the way to ask for the replacement only if nothing is in flight, and it
@@ -955,7 +909,6 @@ fn replace_supervisors(up: &Up, live: &[SupervisorRegistration]) -> Result<Value
         workspaces,
         launchd,
         processes,
-        environment,
         options,
         ..
     } = *up;
@@ -986,17 +939,6 @@ fn replace_supervisors(up: &Up, live: &[SupervisorRegistration]) -> Result<Value
         if let Some(refusal) = no_wait_refusal(previous_version.as_deref(), &held) {
             bail!(refusal);
         }
-    }
-    // Settle what can refuse the new supervisor before the old one is
-    // touched: draining a working supervisor and then failing to start its
-    // replacement would leave the queue with nothing serving it. For
-    // launchd that is the out-of-cmux connection (not asked again below);
-    // for `--in-cmux` it is the recorded supervisor workspace.
-    if options.in_cmux {
-        ensure_supervisor_workspace_free(queue, cmux, live)?;
-    } else {
-        let spec = launch_agent_spec(location, up.db, &up.repository.root, environment, options)?;
-        prove_detached_cmux(cmux, &spec)?;
     }
     let replaced: Vec<Value> = live
         .iter()
@@ -1070,8 +1012,7 @@ once `status` shows it gone",
         }
     }
     // The drain is over, so every workspace of a replaced supervisor is
-    // ours to close; one left open would stop the next in-cmux supervisor
-    // from opening its own.
+    // ours to close: nothing runs in it any more.
     let closed = close_supervisor_workspaces(queue, cmux, live, live, Stop::SeenThrough);
     // Whatever survived the drain (an alive-but-silent supervisor `up`
     // neither reuses nor kills) belongs to another process, not to the one
@@ -1081,7 +1022,7 @@ once `status` shows it gone",
         .into_iter()
         .map(|registration| registration.token)
         .collect();
-    let mut started = start_supervisor(up, &existing, !options.in_cmux)?;
+    let mut started = start_under_launchd(up, &existing)?;
     let object = started
         .as_object_mut()
         .expect("a started supervisor is a JSON object");
@@ -1663,60 +1604,10 @@ and it goes on with its binary; see its log",
     Ok(Some(current.token.clone()))
 }
 
-/// Refuse, before anything is stopped, when the queue's recorded
-/// supervisor workspace is still open and this replacement will not close
-/// it. `up` prunes a dead registration without closing its workspace and
-/// cmux keeps a workspace open after its command exits, so the workspace of
-/// a crashed supervisor that is no longer registered at all can still be
-/// open. Finding that only after the drain would cost a working supervisor
-/// and leave the queue with nothing serving it.
-fn ensure_supervisor_workspace_free(
-    queue: &dyn Queue,
-    cmux: &dyn WorkspaceBackend,
-    live: &[SupervisorRegistration],
-) -> Result<()> {
-    let Some(id) = recorded_workspace(queue, cmux, SessionRole::Supervisor)? else {
-        return Ok(());
-    };
-    ensure!(
-        live.iter().any(|registration| {
-            registration.mode == Some(SupervisorMode::InCmux)
-                && registration.workspace_id.as_deref() == Some(id.as_str())
-        }),
-        "cmux workspace {id}, recorded as this queue's supervisor workspace, is still open but \
-belongs to no supervisor this `up` would drain, so the replacement could not open its own; read \
-its screen, then close it (`cmux workspace close {id}`) and run `up --in-cmux` again"
-    );
-    Ok(())
-}
-
-/// Ask cmux whether it admits a process carrying the agent's environment
-/// from outside its process tree, which is how the launchd-started
-/// supervisor will connect. Kept apart from the start so a replacement can
-/// settle the question before it drains a supervisor that works.
-fn prove_detached_cmux(cmux: &dyn WorkspaceBackend, spec: &LaunchAgentSpec) -> Result<()> {
-    cmux.preflight_detached(&spec.environment).map_err(|error| {
-        // Only a refusal has the password (or `--in-cmux`) as its remedy; a
-        // ping that could not be run or did not answer is its own error.
-        if error.is::<DetachedRefusal>() {
-            error.context(DETACHED_CMUX_HINT)
-        } else {
-            error.context(
-                "cmux could not be asked whether it admits a connection from outside its own terminals",
-            )
-        }
-    })
-}
-
-/// Write and load the LaunchAgent, after proving that cmux admits a
-/// process carrying its environment from outside cmux's process tree. A
-/// refusal stops `up` before launchd ever sees the agent, because
-/// `KeepAlive` would otherwise restart a supervisor that cannot work.
-fn start_under_launchd(
-    up: &Up,
-    existing: &HashSet<LeaseToken>,
-    detached_proven: bool,
-) -> Result<Value> {
+/// Write and load the LaunchAgent, the one way `up` starts a supervisor:
+/// the supervisor calls no cmux, so nothing about cmux is proven for it
+/// (ADR-t1433-4 decision 1).
+fn start_under_launchd(up: &Up, existing: &HashSet<LeaseToken>) -> Result<Value> {
     let Up {
         location,
         queue,
@@ -1731,9 +1622,6 @@ fn start_under_launchd(
         up.environment,
         options,
     )?;
-    if !detached_proven {
-        prove_detached_cmux(up.workspaces.cmux, &spec)?;
-    }
     launchd.install(&spec.label, &spec.plist, &spec.xml())?;
     let registration = wait_for_registration(up, existing).with_context(|| {
         format!(
@@ -1755,106 +1643,19 @@ fn start_under_launchd(
     }))
 }
 
-/// Run `supervise` inside its own cmux workspace instead: nothing about
-/// launchd is touched, and the supervisor is a child of a cmux terminal, so
-/// no socket password is needed. Nothing restarts it either.
-///
-/// cmux keeps a workspace open after its command exits, so a leftover
-/// `[<repo>]supervisor` may belong to a supervisor that crashed, or to
-/// one that is alive but no longer heartbeating (which `up` never reuses
-/// and never kills). Either way it is a person's to close, and `up`
-/// stops rather than open a second one or interfere with the first.
-fn start_in_cmux(up: &Up, existing: &HashSet<LeaseToken>) -> Result<Value> {
-    let Up {
-        location,
-        repository,
-        queue,
-        workspaces,
-        options,
-        ..
-    } = *up;
-    let cmux = workspaces.cmux;
-    let name = supervisor_workspace_name(&repository.root);
-    if let Some(id) = recorded_workspace(queue, cmux, SessionRole::Supervisor)? {
-        bail!(
-            "cmux workspace {id}, recorded as this queue's supervisor workspace, is still open \
-but no supervisor of this queue is registered and heartbeating; read its screen, then close it \
-(`cmux workspace close {id}`) and run `up --in-cmux` again"
-        );
-    }
-    let command = supervise_command(location, up.db, up.environment, options)?;
-    let workspace_id = cmux.create_named(
-        &name,
-        &repository.root,
-        &command,
-        &workspaces.tags(SessionRole::Supervisor)?,
-    )?;
-    // Recorded before the wait, so a supervisor that never registers still
-    // leaves its workspace where the next `up` finds it.
-    queue.register_session_workspace(SessionRole::Supervisor, &workspace_id)?;
-    let registration = wait_for_registration(up, existing).with_context(|| {
-        format!(
-            "supervisor did not register within {}s; read workspace {workspace_id} ({name:?}) \
-and close it before trying again",
-            options.startup_timeout.as_secs(),
-        )
-    })?;
-    queue
-        .set_supervisor_mode(
-            &registration.token,
-            SupervisorMode::InCmux,
-            Some(&workspace_id),
-        )
-        .with_context(|| {
-            format!("supervisor started in workspace {workspace_id} ({name:?}); close it by hand")
-        })?;
-    Ok(json!({
-        "outcome": "started",
-        "mode": SupervisorMode::InCmux.as_str(),
-        "version": VERSION,
-        "pid": registration.pid,
-        "token": registration.token,
-        "workspace_id": workspace_id,
-        "name": name,
-        "plist": Value::Null,
-        "log_dir": location.log_dir,
-    }))
-}
-
-/// The supervisor workspace's command: this binary running `supervise` on
-/// this queue, with the same arguments the LaunchAgent would carry. cmux
-/// types it into a login shell, so every argument is quoted on its own. The
-/// environment is the cmux terminal's, so nothing is set here.
-pub fn supervise_command(
-    location: &QueuePaths,
-    db: &Path,
-    environment: &UpEnvironment,
-    options: &UpOptions,
-) -> Result<String> {
-    Ok(shell_join(&supervise_arguments(
-        location,
-        db,
-        environment,
-        options,
-        SupervisorMode::InCmux,
-    )?))
-}
-
 /// `<this binary> --db <db> supervise [--parallel N] --log-dir <queue logs>
 /// --cmux <resolved> --claude <resolved> --codex <resolved or given> --mode
-/// <mode> [--plugin-dir <dir>]`:
-/// what keeps a supervisor of this queue going, in either mode. The
-/// executables are absolute so neither launchd's PATH nor the terminal's
-/// decides which ones run; the plugin directory is what the planners the
-/// runtime opens load. `--mode` is what its start mark records (ADR-0051
-/// decision 10): `up` writes the registration's mode only after it sees the
-/// registration.
+/// launchd [--plugin-dir <dir>]`:
+/// what the LaunchAgent keeps going. The executables are absolute so
+/// launchd's PATH does not decide which ones run; the plugin directory is
+/// what the planners the runtime opens load. `--mode` is what its start
+/// mark records (ADR-0051 decision 10): `up` writes the registration's
+/// mode only after it sees the registration.
 fn supervise_arguments(
     location: &QueuePaths,
     db: &Path,
     environment: &UpEnvironment,
     options: &UpOptions,
-    mode: SupervisorMode,
 ) -> Result<Vec<String>> {
     let mut arguments = vec![
         path_text(&environment.current_exe)?,
@@ -1870,7 +1671,7 @@ fn supervise_arguments(
         "--codex".into(),
         path_text(&options.codex)?,
         "--mode".into(),
-        mode.as_str().into(),
+        SupervisorMode::Launchd.as_str().into(),
     ];
     if options.no_claude {
         arguments.push("--no-claude".into());
@@ -2033,12 +1834,29 @@ fn set_auto_update(
     Ok(supervisor)
 }
 
-/// The registration the supervisor `up` has just started writes for
-/// itself. Tokens in `existing` were already registered when `up` looked,
-/// so they belong to another process: one of them may start heartbeating
-/// again mid-wait (an alive but silent supervisor `up` neither reuses nor
-/// kills), and taking it for ours would stamp this start's mode and
-/// workspace onto a supervisor that never ran in it.
+/// Which of `registrations` is the supervisor `up` has just started: the
+/// first that is fresh at `now` (its pid `alive`, its heartbeat within
+/// [`HEARTBEAT_TIMEOUT_SECS`]) and whose token is not in `existing`.
+/// Tokens in `existing` were already registered when `up` looked, so they
+/// belong to another process: one of them may start heartbeating again
+/// mid-wait (an alive but silent supervisor `up` neither reuses nor kills),
+/// and taking it for ours would stamp this start's mode onto a supervisor
+/// `up` did not start.
+fn started_registration<'a>(
+    registrations: &'a [SupervisorRegistration],
+    existing: &HashSet<LeaseToken>,
+    alive: &dyn Fn(u32) -> bool,
+    now: i64,
+) -> Option<&'a SupervisorRegistration> {
+    registrations.iter().find(|registration| {
+        !existing.contains(&registration.token)
+            && alive(registration.pid)
+            && now - registration.heartbeat_at <= HEARTBEAT_TIMEOUT_SECS
+    })
+}
+
+/// Wait until the supervisor `up` has just started registers itself
+/// ([`started_registration`]), up to `startup_timeout`.
 fn wait_for_registration(
     up: &Up,
     existing: &HashSet<LeaseToken>,
@@ -2051,11 +1869,14 @@ fn wait_for_registration(
     } = *up;
     let deadline = Instant::now() + options.startup_timeout;
     loop {
-        let now = up.clock.now();
-        if let Some(registration) = queue.supervisors()?.into_iter().find(|registration| {
-            !existing.contains(&registration.token) && fresh(registration, processes, now)
-        }) {
-            return Ok(registration);
+        let registrations = queue.supervisors()?;
+        if let Some(registration) = started_registration(
+            &registrations,
+            existing,
+            &|pid| processes.alive(pid),
+            up.clock.now(),
+        ) {
+            return Ok(registration.clone());
         }
         ensure!(Instant::now() < deadline, "no live supervisor registration");
         thread::sleep(options.poll);
@@ -2063,8 +1884,8 @@ fn wait_for_registration(
 }
 
 /// The agent definition: this binary running `supervise` on this queue from
-/// the repository root, with the caller's PATH (and exported socket
-/// password) and the queue's log directory.
+/// the repository root, with the caller's PATH (and exported
+/// `XDG_CONFIG_HOME`) and the queue's log directory.
 pub fn launch_agent_spec(
     location: &QueuePaths,
     db: &Path,
@@ -2075,17 +1896,10 @@ pub fn launch_agent_spec(
     Ok(LaunchAgentSpec {
         label: location.label.clone(),
         plist: location.launch_agent.clone(),
-        program_arguments: supervise_arguments(
-            location,
-            db,
-            environment,
-            options,
-            SupervisorMode::Launchd,
-        )?,
+        program_arguments: supervise_arguments(location, db, environment, options)?,
         working_directory: path_text(repo_root)?,
         environment: SupervisorEnvironment {
             path: environment.path.clone(),
-            socket_password: environment.socket_password.clone(),
             config_home: environment.config_home.clone(),
         },
         log: path_text(&location.log_dir.join(LAUNCHD_LOG_NAME))?,
@@ -2152,11 +1966,11 @@ pub struct DownOptions {
 
 /// Stop the queue's supervisors, whichever mode started them. The launchd
 /// agent is always unloaded (that is what makes a `launchd` supervisor stop
-/// without being restarted, and it also clears an agent left over from a
-/// queue that has since moved to `--in-cmux`), which delivers SIGTERM to
-/// the agent's own process; a supervisor started by hand gets the SIGTERM
-/// from here, and an `in_cmux` one gets a SIGINT, the signal its terminal
-/// would send. The runtime drains on either.
+/// without being restarted), which delivers SIGTERM to the agent's own
+/// process; a supervisor started by hand gets the SIGTERM from here, and an
+/// `in_cmux` one an earlier binary registered (ADR-t1433-4 decision 3)
+/// gets a SIGINT, the signal its terminal would send. The runtime drains
+/// on either.
 ///
 /// The cmux workspace of an `in_cmux` supervisor is closed once that
 /// supervisor's process is gone: after the drain under `--wait`, after the
@@ -2451,8 +2265,8 @@ pub struct LaunchAgentSpec {
     pub program_arguments: Vec<String>,
     pub working_directory: String,
     /// PATH of the shell that ran `up` (launchd's own is too small for
-    /// `cmux` and `claude`) and the socket password when that shell
-    /// exported it.
+    /// `claude` and the tools of a run) and `XDG_CONFIG_HOME` when that
+    /// shell exported it.
     pub environment: SupervisorEnvironment,
     pub log: String,
 }
@@ -2484,12 +2298,6 @@ impl LaunchAgentSpec {
             "\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>{}</string>\n",
             escape(&self.environment.path)
         ));
-        if let Some(password) = &self.environment.socket_password {
-            xml.push_str(&format!(
-                "\t\t<key>{SOCKET_PASSWORD_ENV}</key>\n\t\t<string>{}</string>\n",
-                escape(password)
-            ));
-        }
         if let Some(config_home) = &self.environment.config_home {
             xml.push_str(&format!(
                 "\t\t<key>{CONFIG_HOME_ENV}</key>\n\t\t<string>{}</string>\n",
@@ -2545,5 +2353,57 @@ mod tests {
         let unrecorded = no_wait_refusal(None, &held[..1]).unwrap();
         assert!(unrecorded.contains("version (unrecorded)"), "{unrecorded}");
         assert!(unrecorded.contains("1 run(s)"), "{unrecorded}");
+    }
+
+    fn registration(token: &str, pid: u32, heartbeat_at: i64) -> SupervisorRegistration {
+        SupervisorRegistration {
+            token: LeaseToken::new(token),
+            pid,
+            parallel: 2,
+            started_at: 0,
+            heartbeat_at,
+            mode: None,
+            workspace_id: None,
+            handoff_accepted: true,
+            handoff_binary: None,
+            auto_update: false,
+            max_waiting: None,
+            parallel_source: None,
+            max_waiting_source: None,
+            runtime_planners: None,
+            runtime_planners_source: None,
+            claim_spacing: None,
+            claim_spacing_source: None,
+            max_load: None,
+            providers: None,
+            binary_version: Some(VERSION.into()),
+        }
+    }
+
+    /// The supervisor `up` started is the first fresh registration it had
+    /// not seen before the start: a registration that was there already
+    /// (an alive but silent supervisor heartbeating again mid-wait) is
+    /// never taken for it, however fresh and early, and neither is a new
+    /// one whose pid is dead or whose heartbeat is stale.
+    #[test]
+    fn the_started_supervisor_is_the_first_fresh_registration_not_seen_before() {
+        const NOW: i64 = 1_000_000;
+        let alive = |pid: u32| pid != 3;
+        let existing: HashSet<LeaseToken> = [LeaseToken::new("silent")].into();
+        let registrations = [
+            // First in `started_at` order and fresh again, but seen before.
+            registration("silent", 1, NOW),
+            registration("dead", 3, NOW),
+            registration("stale", 4, NOW - HEARTBEAT_TIMEOUT_SECS - 1),
+            registration("started", 5, NOW - HEARTBEAT_TIMEOUT_SECS),
+            registration("later", 6, NOW),
+        ];
+        let found = started_registration(&registrations, &existing, &alive, NOW).unwrap();
+        assert_eq!(found.token, "started");
+        // Only the one seen before: nothing was started yet.
+        assert!(started_registration(&registrations[..1], &existing, &alive, NOW).is_none());
+        // Without it in `existing`, the silent one would be taken.
+        let found = started_registration(&registrations, &HashSet::new(), &alive, NOW).unwrap();
+        assert_eq!(found.token, "silent");
     }
 }

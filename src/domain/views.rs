@@ -266,7 +266,8 @@ pub struct SupervisorRegistration {
     /// `None` for a supervisor started by hand.
     pub mode: Option<SupervisorMode>,
     /// The cmux workspace `supervise` runs in, in [`SupervisorMode::InCmux`]
-    /// only; `down` closes it when the supervisor is gone.
+    /// only (written by an earlier binary; `up` writes none now); `down`
+    /// closes it when the supervisor is gone.
     pub workspace_id: Option<String>,
     /// The `dagq` version of the process, written by that process
     /// itself when it registers. `None` is a supervisor that registered

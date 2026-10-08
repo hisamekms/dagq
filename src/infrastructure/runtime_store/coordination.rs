@@ -114,7 +114,8 @@ impl SqliteQueue {
     /// Record how `up` started this supervisor, once its process has
     /// registered itself. Only `up` writes it, and only for a supervisor it
     /// started; the row's own process never does, so a supervisor started
-    /// by hand keeps `mode` unset. The workspace belongs to `in_cmux` mode.
+    /// by hand keeps `mode` unset. The workspace belongs to `in_cmux` mode,
+    /// which only an earlier binary wrote (ADR-t1433-4).
     pub fn set_supervisor_mode(
         &self,
         token: &LeaseToken,

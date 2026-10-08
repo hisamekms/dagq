@@ -57,8 +57,8 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 /// The variables of the starting process's environment the e2e is given
 /// by name: what cargo, rustup, Git and a shell need to find their tools,
 /// home and locale, the directory cmux's CLI reads its saved socket
-/// password from (`XDG_CONFIG_HOME`), and the e2e's own opt-ins (`DAGQ_E2E_LAUNCHD`,
-/// `DAGQ_E2E_WINDOWS`). `TMPDIR`, `CARGO_TARGET_DIR`, `DAGQ_E2E_CMUX`,
+/// password from (`XDG_CONFIG_HOME`), and the e2e's own opt-in
+/// (`DAGQ_E2E_WINDOWS`). `TMPDIR`, `CARGO_TARGET_DIR`, `DAGQ_E2E_CMUX`,
 /// `DAGQ_E2E_SKIP` and `DAGQ_E2E_RERUN` are the gate's own.
 ///
 /// No key of `dagq.toml` adds a name: a binary that does not know such a
@@ -80,7 +80,6 @@ pub const PASSED_ENV: &[&str] = &[
     "RUSTUP_TOOLCHAIN",
     "SDKROOT",
     "DEVELOPER_DIR",
-    "DAGQ_E2E_LAUNCHD",
     "DAGQ_E2E_WINDOWS",
 ];
 
@@ -1335,7 +1334,7 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
             "CMUX_WORKSPACE_ID",
             "CMUX_SOCKET_PASSWORD",
             "RUSTUP_TOOLCHAIN",
-            "DAGQ_E2E_LAUNCHD",
+            "DAGQ_E2E_WINDOWS",
         ] {
             assert!(passed(name), "{name}");
         }

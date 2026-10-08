@@ -103,7 +103,7 @@ pub struct AutoUpdateJob {
     pub e2e_command: Option<String>,
     /// How long that e2e may run.
     pub e2e_timeout: Duration,
-    /// What an in-cmux supervisor started again uses.
+    /// What a supervisor started again by `up` uses (see [`restarter`]).
     pub cmux: PathBuf,
     pub claude: PathBuf,
     /// The Codex CLI of the supervisor that started the job (ADR-t813-2).
@@ -127,8 +127,9 @@ fn e2e_log(build_log: &Path) -> PathBuf {
     build_log.with_file_name(format!("{stem}.e2e.log"))
 }
 
-/// The arguments of the `up` that starts an in-cmux supervisor again after
-/// an update's job, beside `--db`, `--in-cmux` and its own flags.
+/// The arguments of the `up` that starts a supervisor registered in the
+/// retired in-cmux mode again after an update's job, beside `--db` and its
+/// own flags.
 fn restart_arguments(
     cmux: &Path,
     claude: &Path,
@@ -149,10 +150,55 @@ fn restart_arguments(
     Ok(arguments)
 }
 
+/// How an update's job starts a supervisor it found gone again, decided
+/// from its registration alone ([`restart_of`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Restart {
+    /// Its LaunchAgent starts the binary in place again.
+    Launchd,
+    /// One an earlier binary registered in the retired in-cmux mode: close
+    /// its workspace, when one is recorded, and run the binary in place
+    /// with `arguments`, a plain `up` that starts it under launchd
+    /// (ADR-t1433-4).
+    Up {
+        close: Option<String>,
+        arguments: Vec<String>,
+    },
+}
+
+/// The restart of `registration` on the queue at `db`, with the job's own
+/// `up` flags `arguments`: launchd restarts its own; an in-cmux one is
+/// started by `up` with `--auto-update` only when it had it (a supervisor
+/// of a release has not, and outside dagq's source `up` refuses it,
+/// ADR-t614-1) and the values it took from flags (task 698), never with
+/// `--in-cmux`; one started by hand is not started again.
+fn restart_of(
+    registration: &SupervisorRegistration,
+    db: &str,
+    arguments: &[String],
+) -> Result<Restart> {
+    match registration.mode {
+        Some(SupervisorMode::Launchd) => Ok(Restart::Launchd),
+        Some(SupervisorMode::InCmux) => {
+            let mut up = vec!["--db".to_owned(), db.to_owned(), "up".to_owned()];
+            if registration.auto_update {
+                up.push("--auto-update".to_owned());
+            }
+            up.extend(registration.flag_arguments());
+            up.extend(arguments.iter().cloned());
+            Ok(Restart::Up {
+                close: registration.workspace_id.clone(),
+                arguments: up,
+            })
+        }
+        None => bail!(
+            "it was started by hand rather than by `up`, so it is not started again; start it the same way"
+        ),
+    }
+}
+
 /// Starts a supervisor an update's job found gone with the binary in
-/// place: launchd does for its own; an in-cmux one by `up --in-cmux`, with
-/// `--auto-update` only when it had it (a supervisor of a release has not,
-/// and outside dagq's source `up` refuses it, ADR-t614-1).
+/// place, as [`restart_of`] decides.
 fn restarter<'a>(
     db: &'a Path,
     cmux: &'a Path,
@@ -160,36 +206,21 @@ fn restarter<'a>(
     arguments: &'a [String],
 ) -> impl Fn(&SupervisorRegistration) -> Result<Value> + 'a {
     move |registration: &SupervisorRegistration| -> Result<Value> {
-        match registration.mode {
-            Some(SupervisorMode::Launchd) => Ok(json!({
+        match restart_of(registration, &path_text(db)?, arguments)? {
+            Restart::Launchd => Ok(json!({
                 "by": "launchd",
                 "note": "its LaunchAgent starts the binary in place again",
             })),
-            Some(SupervisorMode::InCmux) => {
-                if let Some(id) = &registration.workspace_id {
+            Restart::Up { close, arguments } => {
+                if let Some(id) = close {
                     let _ = Cmux {
                         executable: cmux.to_path_buf(),
                     }
-                    .close(id);
+                    .close(&id);
                 }
-                let mut up = vec![
-                    "--db".to_owned(),
-                    path_text(db)?,
-                    "up".to_owned(),
-                    "--in-cmux".to_owned(),
-                ];
-                if registration.auto_update {
-                    up.push("--auto-update".to_owned());
-                }
-                // Only the values it took from flags (task 698).
-                up.extend(registration.flag_arguments());
-                up.extend(arguments.iter().cloned());
-                let started = LocalBinaries.run(binary, &up)?;
-                Ok(json!({"by": "up --in-cmux", "up": started["supervisor"]}))
+                let started = LocalBinaries.run(binary, &arguments)?;
+                Ok(json!({"by": "up", "up": started["supervisor"]}))
             }
-            None => bail!(
-                "it was started by hand rather than by `up`, so it is not started again; start it the same way"
-            ),
         }
     }
 }
@@ -208,7 +239,7 @@ pub struct ReleaseUpdateJob {
     pub log: PathBuf,
     /// The cargo that installs the release.
     pub cargo: PathBuf,
-    /// What an in-cmux supervisor started again uses.
+    /// What a supervisor started again by `up` uses (see [`restarter`]).
     pub cmux: PathBuf,
     pub claude: PathBuf,
     /// The Codex CLI of the supervisor that started the job (ADR-t813-2).
@@ -1904,9 +1935,9 @@ same in one step",
     /// supervisors heartbeat on under it for `watch_timeout` and, when they
     /// do not, put the old binary back, start them again and ask the inbox
     /// (see [`update::install_watched`], ADR-0073 decisions 13 and 14).
-    /// `cmux` stops an in-cmux supervisor when a breaking migration needs
-    /// the drain; `executable` is the cmux an in-cmux supervisor is
-    /// started again with.
+    /// `cmux` closes the workspace of a supervisor registered in the retired
+    /// in-cmux mode when a breaking migration needs the drain;
+    /// `executable` is the cmux the `up` that starts one again is given.
     pub fn install(
         &self,
         location: &QueueLocation,
@@ -1956,10 +1987,10 @@ same in one step",
 
     /// The automatic update's job (see [`update::run`]): build
     /// `job.commit` in the queue's update checkout and put it in place of
-    /// `job.target`, handing the supervisor `job.token` over to it. An
-    /// in-cmux supervisor that is gone afterwards is started again with the
-    /// binary in place, through its `up --in-cmux --auto-update`; launchd
-    /// restarts one of its own.
+    /// `job.target`, handing the supervisor `job.token` over to it. A
+    /// supervisor registered in the retired in-cmux mode that is gone
+    /// afterwards is started again with the binary in place, through `up
+    /// --auto-update` under launchd; launchd restarts one of its own.
     pub fn auto_update(&self, location: &QueueLocation, job: &AutoUpdateJob) -> Result<Value> {
         let db = location
             .db
@@ -3703,4 +3734,86 @@ pub fn watch_in(
             .map(|notifier| notifier as &dyn crate::application::watch::AskNotifier),
         options,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::slot_limits::SettingSource;
+
+    fn registration(mode: Option<SupervisorMode>, auto_update: bool) -> SupervisorRegistration {
+        SupervisorRegistration {
+            token: LeaseToken::new("gone"),
+            pid: 1,
+            parallel: 3,
+            started_at: 0,
+            heartbeat_at: 0,
+            mode,
+            workspace_id: (mode == Some(SupervisorMode::InCmux)).then(|| "WS-SUPERVISOR".into()),
+            handoff_accepted: true,
+            handoff_binary: None,
+            auto_update,
+            max_waiting: None,
+            parallel_source: Some(SettingSource::Flag),
+            max_waiting_source: None,
+            runtime_planners: None,
+            runtime_planners_source: None,
+            claim_spacing: None,
+            claim_spacing_source: None,
+            max_load: None,
+            providers: None,
+            binary_version: Some("0.0.1".into()),
+        }
+    }
+
+    /// The update jobs' bring_back starts a gone supervisor an earlier
+    /// binary registered in the retired in-cmux mode by closing its
+    /// workspace and running the replaced binary's plain `up`, which starts
+    /// it under launchd (ADR-t1433-4): never `up --in-cmux`, with
+    /// `--auto-update` only when it had it, and with the flags it took from
+    /// its registration and the job's own. A launchd one is left to its
+    /// agent, and one started by hand is not started again.
+    #[test]
+    fn a_gone_in_cmux_supervisor_is_started_again_under_launchd() {
+        let job = ["--cmux".to_owned(), "/opt/cmux".to_owned()];
+        let up = |auto_update: &[&str]| {
+            [
+                &["--db", "/q/queue.db", "up"][..],
+                auto_update,
+                &["--parallel", "3", "--cmux", "/opt/cmux"],
+            ]
+            .concat()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        };
+        for (auto_update, flag) in [(true, &["--auto-update"][..]), (false, &[][..])] {
+            assert_eq!(
+                restart_of(
+                    &registration(Some(SupervisorMode::InCmux), auto_update),
+                    "/q/queue.db",
+                    &job
+                )
+                .unwrap(),
+                Restart::Up {
+                    close: Some("WS-SUPERVISOR".into()),
+                    arguments: up(flag),
+                }
+            );
+        }
+        assert_eq!(
+            restart_of(
+                &registration(Some(SupervisorMode::Launchd), true),
+                "/q/queue.db",
+                &job
+            )
+            .unwrap(),
+            Restart::Launchd
+        );
+        let by_hand = restart_of(&registration(None, true), "/q/queue.db", &job).unwrap_err();
+        assert!(
+            format!("{by_hand}").contains("started by hand"),
+            "{by_hand}"
+        );
+    }
 }

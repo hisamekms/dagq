@@ -105,7 +105,6 @@ fn up_without_a_plugin_dir_needs_the_installed_plugin() {
         }
         assert!(launchd.installs.lock().unwrap().is_empty());
         assert!(cmux.workspaces.lock().unwrap().is_empty());
-        assert_eq!(cmux.detached_preflights.lock().unwrap().len(), 0);
         let queue = SqliteQueue::open(&fixture.location.db).unwrap();
         assert!(queue.supervisors().unwrap().is_empty());
     }
@@ -198,12 +197,12 @@ fn a_restart_by_the_runtime_does_not_check_the_installed_plugin() {
     );
 
     let printed = dagq::infrastructure::binaries::LocalBinaries
-        .run(&binary, &["up".into(), "--in-cmux".into()])
+        .run(&binary, &["up".into(), "--auto-update".into()])
         .unwrap();
     assert_eq!(lifecycle::UP_RESTART_ENV, "DAGQ_UP_RESTART");
     assert_eq!(
         printed,
-        serde_json::json!({"restart": "1", "arguments": "up --in-cmux"})
+        serde_json::json!({"restart": "1", "arguments": "up --auto-update"})
     );
 }
 

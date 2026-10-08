@@ -25,8 +25,10 @@ related:
 
 # `status`
 
-> **予定**: inboxのwatcherの記録と表示（ADR-t906-1決定1の(1)）は、ADR-t906-1を置き換えた[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)が引き継ぐ。in-cmux modeの表示（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）は、後続のtaskが実装するまでの今の姿である。runはworkspaceを開かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+> **予定**: inboxのwatcherの記録と表示（ADR-t906-1決定1の(1)）は、ADR-t906-1を置き換えた[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)が引き継ぐ。runはworkspaceを開かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
 > taskのholdの`task_holds`とattentionは[taskのhold](task-hold.md)が持つ（未実装）。
+
+`mode`の`in_cmux`は、廃止（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）前に登録されたsupervisorにだけ出る。
 
 ユースケースはapplication層の`src/application/health.rs`の`status`（`doctor`・`recover`と、`status`と`watch`が使うattentionの導出`attention`も同じファイル）で、queueは`Queue`（`latest_event_id`・`latest_runs_in_progress`・`runs_with_pending_push`・`asks`を含む）、PIDの生死は`ProcessControl`、時刻は`Clock`から得る。入口は`compose::OneShot::status_for`（queueをpathから開く。自由関数の`compose::status_for`はsystemの`Generators`で呼ぶ）で、CLIは`src/main.rs`が開いて束縛を確かめたqueueを`OneShot::status_of`に渡し、queueを1回だけ開く。
 

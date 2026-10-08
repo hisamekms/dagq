@@ -41,8 +41,8 @@ pub struct UpdateSettings {
     /// heartbeat; `None` is the job's default (tests shorten it, task
     /// 1048).
     pub poll: Option<Duration>,
-    /// The cmux the job's `up` uses when it starts an in-cmux supervisor
-    /// again.
+    /// The cmux the job's `up` is given when it starts a supervisor
+    /// registered in the retired in-cmux mode again.
     pub cmux: Option<PathBuf>,
     /// The cargo the release update's job installs a release with
     /// (ADR-t618-1 decision 5); `None` is `cargo`. Tests give a stub.

@@ -139,77 +139,6 @@ pub(crate) fn workspace_listed(cmux: &Path, id: &str) -> bool {
     listed_workspace(cmux, id).is_some()
 }
 
-/// Wait until the workspace is listed and `accept` holds of its entry, and
-/// return the entry. A failed listing or a workspace not listed yet is "not
-/// yet"; past [`crate::WAIT_LIMIT`] the test fails with `what` and the last
-/// entry or failure.
-// Used only by the e2e case out under ADR-t1582-1; goes with task 1443.
-#[cfg(any())]
-pub(crate) fn wait_for_listed(
-    cmux: &Path,
-    id: &str,
-    what: &str,
-    accept: impl Fn(&Value) -> bool,
-) -> Value {
-    let deadline = Instant::now() + crate::WAIT_LIMIT;
-    loop {
-        let last = match try_listed_workspace(cmux, id) {
-            Ok(Some(listed)) if accept(&listed) => return listed,
-            Ok(Some(listed)) => listed.to_string(),
-            Ok(None) => "not listed".to_owned(),
-            Err(error) => format!("listing failed: {error:#}"),
-        };
-        assert!(
-            Instant::now() < deadline,
-            "workspace {id}: {what} within {:?}; last look: {last}",
-            crate::WAIT_LIMIT
-        );
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-/// cmux confirms a `workspace close` before the workspace leaves its
-/// listing, so "gone" is waited for rather than asserted on the first look.
-/// A failed listing is "not yet", like in `wait_for_listed`.
-// Used only by the e2e case out under ADR-t1582-1; goes with task 1443.
-#[cfg(any())]
-pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
-    let deadline = Instant::now() + crate::WAIT_LIMIT;
-    loop {
-        let last = match try_listed_workspace(cmux, id) {
-            Ok(None) => return,
-            Ok(Some(listed)) => listed.to_string(),
-            Err(error) => format!("listing failed: {error:#}"),
-        };
-        assert!(
-            Instant::now() < deadline,
-            "workspace {id} is still listed {:?} after it was closed; last look: {last}",
-            crate::WAIT_LIMIT
-        );
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-/// Run `cmux args` once: what it printed when it succeeded, else the whole
-/// output (status, stdout, stderr) for a wait to retry on and show when its
-/// deadline passes. Under load cmux can fail a call with `Command timed out`.
-// Used only by the e2e case out under ADR-t1582-1; goes with task 1443.
-#[cfg(any())]
-pub(crate) fn cmux_attempt(cmux: &Path, args: &[&str]) -> Result<String, String> {
-    match Command::new(cmux).args(args).bounded_output() {
-        Ok(output) if output.status.success() => {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        }
-        Ok(output) => Err(format!(
-            "cmux {args:?} failed ({}): stdout: {} stderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
-        Err(error) => Err(format!("cmux {args:?} could not run: {error}")),
-    }
-}
-
 /// Unpin and close a workspace, reporting the outcome on stderr under
 /// `who`. cmux refuses to close a pinned workspace (the inbox is pinned,
 /// ADR-0031), and a person may pin any other.
@@ -322,13 +251,6 @@ impl Drop for WorkspaceGuard {
             close_workspace(&self.cmux, id, "");
         }
     }
-}
-
-/// The queue's workspace group in `cmux --json workspace-group list`,
-/// found by its external ID (the queue hash).
-#[cfg(any())] // Goes with task 1443 (ADR-t1582-1).
-pub(crate) fn listed_group(cmux: &Path, external_id: &str) -> Option<Value> {
-    try_listed_group(cmux, external_id).unwrap_or_else(|error| panic!("{error:#}"))
 }
 
 /// Deletes the queue's workspace group and closes what is left in it (the

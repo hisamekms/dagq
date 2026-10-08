@@ -87,8 +87,9 @@ enum Command {
         /// Seconds the supervisor may take to come back under the new binary.
         #[arg(long, default_value_t = 1800)]
         handoff_timeout: u64,
-        /// cmux executable: stops an in-cmux supervisor for the drain, and its restart uses it, as
-        /// does the restart of an in-cmux supervisor after a failed watch (it closes its workspace).
+        /// cmux executable: closes the workspace of a supervisor registered in the retired in-cmux
+        /// mode when the drain or the restart after a failed watch stops it, and the `up` that
+        /// starts it again (under launchd) is given it.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         /// Claude Code executable the restarted supervisor uses after a drain, or after a failed
@@ -729,8 +730,9 @@ enum Command {
         /// exec'd this binary (ADR-0045 decision 10); set by the handoff.
         #[arg(long, hide = true)]
         handoff_token: Option<String>,
-        /// How `up` started this process (launchd or in_cmux), for its start mark (ADR-0051
-        /// decision 10); set by `up`.
+        /// How `up` started this process, for its start mark (ADR-0051 decision 10); set by
+        /// `up`, which gives `launchd`. `in_cmux` comes only from the argv of a supervisor an
+        /// earlier binary started in the retired in-cmux mode.
         #[arg(long, hide = true)]
         mode: Option<String>,
         /// Register with the automatic update on: build and install the runtime of every landing
@@ -1015,10 +1017,9 @@ enum Command {
         /// at twice the host's logical CPUs.
         #[arg(long)]
         max_load: Option<f64>,
-        /// Run the supervisor in the cmux workspace `[<repo>]supervisor`
-        /// instead of under launchd: no socket password needed, and nothing
-        /// restarts it if it stops.
-        #[arg(long)]
+        /// Retired: refused with the way to move a supervisor still running
+        /// in a cmux workspace to launchd (`down --wait`, then `up`).
+        #[arg(long, hide = true)]
         in_cmux: bool,
         /// Do not wait for a supervisor that cannot take a handoff to drain:
         /// stop with an error instead while it still leases a run, at any
@@ -1090,7 +1091,7 @@ enum Command {
         #[command(subcommand)]
         command: PlannerCommand,
     },
-    /// Stop the queue's supervisor: unload its launchd agent so it drains and is not restarted, or signal and close the workspace of an in-cmux one. Leaves the inbox and planner workspaces open.
+    /// Stop the queue's supervisor: unload its launchd agent so it drains and is not restarted, or signal and close the workspace of one registered in the retired in-cmux mode. Leaves the inbox and planner workspaces open.
     Down {
         /// Wait until the supervisor's registration is gone or its process exited.
         #[arg(long)]
@@ -1098,7 +1099,7 @@ enum Command {
         /// Kill the supervisor after the unload and drop its registration.
         #[arg(long, conflicts_with = "wait")]
         force: bool,
-        /// cmux executable, used to close an in-cmux supervisor's workspace.
+        /// cmux executable, used to close the workspace of a supervisor registered in the retired in-cmux mode.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -3790,7 +3791,7 @@ fn execute(cli: Cli) -> Result<Value> {
             auto_update,
         } => {
             use dagq::application::lifecycle::{QUEUE_ENV, ROLE_ENV, UpEnvironment, UpOptions};
-            use dagq::infrastructure::adapters::{SOCKET_PASSWORD_ENV, claude_global_config};
+            use dagq::infrastructure::adapters::claude_global_config;
             use dagq::infrastructure::{
                 adapters::{Cmux, SystemProcesses, executable},
                 launchd::Launchctl,
@@ -3799,9 +3800,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 role: env::var(ROLE_ENV).ok(),
                 queue: env::var_os(QUEUE_ENV).map(PathBuf::from),
                 path: env::var("PATH").context("PATH is unset")?,
-                socket_password: env::var(SOCKET_PASSWORD_ENV)
-                    .ok()
-                    .filter(|password| !password.is_empty()),
                 config_home: env::var(dagq::application::CONFIG_HOME_ENV)
                     .ok()
                     .filter(|home| !home.is_empty()),
@@ -4004,9 +4002,10 @@ fn execute(cli: Cli) -> Result<Value> {
                 adapters::{Cmux, SystemProcesses, executable},
                 launchd::Launchctl,
             };
-            // cmux is only needed to close an in-cmux supervisor's
-            // workspace, so a queue without one still goes down when cmux
-            // is not installed; the unresolved name then fails only there.
+            // cmux is only needed to close the workspace of a supervisor
+            // registered in the retired in-cmux mode, so a queue without one
+            // still goes down when cmux is not installed; the unresolved
+            // name then fails only there.
             one_shot.down(
                 &location,
                 &Cmux {

@@ -19,9 +19,7 @@ use super::{
     lifecycle::{Handed, hand_off, handoff_failures},
     path_text,
 };
-use crate::domain::{
-    HEARTBEAT_TIMEOUT_SECS, SupervisorMode, SupervisorRegistration, slot_limits::SettingSource,
-};
+use crate::domain::{HEARTBEAT_TIMEOUT_SECS, SupervisorRegistration, slot_limits::SettingSource};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -358,8 +356,9 @@ pub struct InstallOptions {
     /// the old one.
     pub allow_breaking: bool,
     /// Arguments of the `up` that starts the supervisor again after such a
-    /// drain, beside `--db`, `--parallel` and `--in-cmux` (taken from the
-    /// drained supervisor): `--cmux`, `--claude`, `--plugin-dir`.
+    /// drain, beside `--db` and `--parallel` (taken from the drained
+    /// supervisor): `--cmux`, `--claude`, `--plugin-dir`. The `up` starts
+    /// it under launchd whatever mode the drained one had (ADR-t1433-4).
     pub restart: Vec<String>,
     pub handoff_timeout: Duration,
     pub poll: Duration,
@@ -795,12 +794,6 @@ replaced, and `up` starts the old binary again"
             }
             if flagged(drained.parallel_source) {
                 arguments.extend(["--parallel".to_owned(), drained.parallel.to_string()]);
-            }
-            if live
-                .iter()
-                .any(|registration| registration.mode == Some(SupervisorMode::InCmux))
-            {
-                arguments.push("--in-cmux".to_owned());
             }
             // The drained supervisor's automatic update, wait limit and
             // limit of the runtime's planners carry over, so no second `up`

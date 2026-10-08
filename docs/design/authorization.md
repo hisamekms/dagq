@@ -219,7 +219,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 
 `supervise`と`auto-update`はruntimeの制御側（信頼する制御側。ADR-t728-1の決定2）のプロセスを始めるコマンドで、呼び出し元の環境で判定する:
 
-- `supervise`は`scheduler.supervise`を持つuser・inbox・supervisorだけが打てる。`up`はin-cmuxのsupervisorのworkspaceを`DAGQ_ROLE=supervisor`の環境で開き、launchdの登録は`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る。exec の引き継ぎ（`--handoff-token`）は同じ環境のまま自分をexecするので、同じroleで判定される。plannerは`supervise`を直接打てない（ADR-t728-1の決定7の表にschedulerは無い）。起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
+- `supervise`は`scheduler.supervise`を持つuser・inbox・supervisorだけが打てる。launchdのsupervisorは`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る（登録済みのin-cmuxのものは`DAGQ_ROLE=supervisor`で動く）。exec の引き継ぎ（`--handoff-token`）は同じ環境のまま自分をexecするので、同じroleで判定される。plannerは`supervise`を直接打てない（ADR-t728-1の決定7の表にschedulerは無い）。起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
 - `auto-update`は`install`と同じ`service.install`で、supervisorが自分の環境（`supervisor:<pid>`）で起動する。`install`と`auto-update`は新しいバイナリで`migrate --check`・`migrate`・使い捨てのqueueの`init`と`list`・`up`を子プロセスとして同じ環境のまま打つので、それを打つroleは`queue.admin`と`service.lifecycle`も持つ（supervisorに`queue.admin`を足したのはこのため）。人とinboxとplannerも`install`と同じ権限で打てる（手順の再現と復旧）。`observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる
 
 host実行ではこれも助言的で、`DAGQ_ROLE`を外せば誰でもuserになる（ADR-t728-1の決定6）。wrapperとhookをworkerの環境から分けて、信頼する制御側のwrapperのactor（`ActorRole::Wrapper`）として判定することは、queue service / brokerのgoal 38の後続にする。

@@ -73,6 +73,7 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
 関門が確かめるのはcmuxだけで、podmanの無さで流さないe2eは無い（[ADR-t2125-1](../../adr/2026-10-08-t2125-1-e2e-gate-checks-only-cmux-after-the-broker-removal.md)）。
 cmuxが答えないことは`unavailable`の理由にならない。
 そのときの後始末（`e2e_gate::clean_up_without_cmux`）はcmuxを呼ばず、関門のdirectoryをqueueのhashとともに残し、次にcmuxが答える関門がそのgroupとworkspaceを閉じて消す。
+launchdの`up` / `down`のe2eは、cmuxが答える関門で追加の環境変数なしに本文まで流れ、使い捨てのHOMEとLaunchAgentのlabelで動き、launchdを使えないhostでは落ちる（黙ってskipもpassもしない。[`up` / `down`](up-down.md)）。
 
 [ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2・3が決めたe2eの要否を、validatingが決めて記録する。e2eを流すのはworkerではなく、reviewのpassの後にruntimeがhostで流す工程で（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)。流し方は[着地の前のe2e](landing-e2e.md)）、workerのreceiptは`e2e`を裏付けない（`domain::required_of`が`e2e`を落とす）。そこで落ちたe2e（上限の内に終わり、流し直しても印で通らない）だけがrunを`needs_session`に戻し、上限切れや始められないe2eは変更のせいとせずruntimeが流し直す。
 

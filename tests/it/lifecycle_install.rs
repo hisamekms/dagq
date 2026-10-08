@@ -430,7 +430,9 @@ fn install_of_a_checkout_replaces_nothing_unless_its_e2e_passes() {
 /// A build with a breaking migration is refused without `--allow-breaking`
 /// and replaces nothing; with it, the supervisor is drained, the queue
 /// migrated, the binary replaced and `up` run with the drained supervisor's
-/// mode, parallelism, automatic update and wait limit. A rollback past a
+/// parallelism, automatic update and wait limit, without `--in-cmux` though
+/// the drained one was registered in that retired mode: it starts under
+/// launchd (ADR-t1433-4). A rollback past a
 /// breaking migration is refused, and so is one without a previous binary.
 #[test]
 fn install_drains_only_for_a_breaking_migration_when_allowed() {
@@ -477,16 +479,7 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     let db = fixture.location.db.to_str().unwrap();
     assert_eq!(
         binaries.up.lock().unwrap()[0],
-        [
-            "--db",
-            db,
-            "up",
-            "--parallel",
-            "4",
-            "--in-cmux",
-            "--cmux",
-            "/opt/cmux"
-        ]
+        ["--db", db, "up", "--parallel", "4", "--cmux", "/opt/cmux"]
     );
 
     // A drained supervisor with the automatic update, a wait limit and a
@@ -520,7 +513,6 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
                 "up",
                 "--parallel",
                 "4",
-                "--in-cmux",
                 "--auto-update",
                 "--max-waiting",
                 "2",
@@ -535,7 +527,6 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
                 "up",
                 "--parallel",
                 "4",
-                "--in-cmux",
                 "--auto-update",
                 "--max-waiting",
                 "6",
@@ -557,7 +548,7 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
         install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
         assert_eq!(
             binaries.up.lock().unwrap()[0],
-            ["--db", db, "up", "--in-cmux", "--auto-update"],
+            ["--db", db, "up", "--auto-update"],
             "{source:?}"
         );
     }
@@ -995,7 +986,7 @@ fn the_update_job_installs_watches_restores_and_asks() {
     );
 
     // The new binary dies after it took the handoff: back to the old one,
-    // and the gone in-cmux supervisor is started again.
+    // and the gone supervisor (registered in-cmux) is started again.
     let binaries = UpdateBinaries::new(dir, false, &[]);
     let report = thread::scope(|scope| {
         scope.spawn(|| take_and_heartbeat(&fixture, &processes, false));

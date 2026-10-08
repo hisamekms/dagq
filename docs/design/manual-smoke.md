@@ -111,7 +111,7 @@ task 1236 から worker の `dagq` はクライアントモードで動く（[Qu
 
 1. `which dagq` が `~/.local/bin/dagq` に解決し、`dagq --version` が確かめたい版であることを見る。固定バイナリの入れ替えが要るなら、[運用の開発文書](../development/operations.md)の「本番queueと固定バイナリ」のとおり人に報告してから行う。
 2. planner の session で task を 1 件登録する（`dagq add` に title・description・acceptance・`--verify`、docs だけなら `--paths`）。返った ID だけに `dagq ready` を打つ。
-3. supervisor が居なければ inbox か planner の session から `dagq up --in-cmux ...`（[運用の開発文書](../development/operations.md)の「`up`のコマンド」）。
+3. supervisor が居なければ inbox か planner の session から `dagq up ...`（[運用の開発文書](../development/operations.md)の「`up`のコマンド」）。
 4. 経過は `dagq show ID` と inbox の `watch` で見る。期待する流れ: claim → background の session wrapper（workspace なし）で worker が作業 → commit と receipt → validating → headless の review → pass なら終了の依頼・wrapper の停止 → `integrate`（rebase・検証・squash）→ push → task `completed`、run `integrated`。worker は非対話の turn で動くので（task 1437）、worker の画面は読まず、turn の要約は `dagq run log RUN --follow` で読む。
 5. 人の操作が要るのは、worker の `worker_question`、review の `concern`（`approve_landing` の ask）、`review by hand`、`push_failed` だけで、どれも inbox に届く。ask は inbox が `dagq answer` で答え、worker への答えは supervisor が次の turn として届ける（worker に打ち込まない）。それ以外で止まったら詰まりとして記録する。
 6. 着地した commit（`Dagq-Task` / `Dagq-Run` trailer）、`refs/dagq/runs/<run-id>`、worktree と branch の削除、`origin/main` への push を確かめ、所要時間と詰まりを残す。
@@ -573,7 +573,7 @@ dagq のソースでない repository で使えること（goal 52）は、stub 
 2. 使い捨て repository `dagq-smoke` を `git init -b master` で作り、`seed.txt` と `migrations/0001_x.sql`（中身は何でもよい）だけを commit する。`Cargo.toml`・`AGENTS.md`・`CLAUDE.md`・`dagq.toml` は置かず、`origin` も足さない。`git branch --list main` が空であることを見る。
 3. plugin を公式の手順で入れる: `claude plugin marketplace add hisamekms/dagq` と `claude plugin install claude-dagq@dagq --scope local`（使い捨て repository の中で打ち、その repository だけに入れる。user の scope の plugin を置き換えない）。`claude plugin list` に `claude-dagq@dagq` が入れた scope で出て、plugin の version がバイナリの version と major.minor で一致することを見る（食い違えば launcher が `{"warning": ...}` を stderr に出す。README の update の節）。
 4. repository の root で `claude` を一度起動して folder trust を承認し、`tq init` と `tq doctor` を打つ。`doctor` の `repository` が `branch: master`・`branch_source: master`・`remote: origin`・`remote_exists: false`・`push: true` で `error` が無いことを見る。
-5. 専用の cmux workspace で `tq up --in-cmux --claude ~/.local/bin/claude`（`--plugin-dir` も `--auto-update` も付けない。ソースでない repository の `--auto-update` は拒まれる）を打つ。`[dagq-smoke]supervisor` と `[dagq-smoke]inbox` が開き、出力の `repository` が 4 と同じで、preflight が installed の plugin を見つけて通ることを見る。
+5. cmux の terminal で `tq up --claude ~/.local/bin/claude`（`--plugin-dir` も `--auto-update` も付けない。ソースでない repository の `--auto-update` は拒まれる）を打つ。supervisor が LaunchAgent で起動し、`[dagq-smoke]inbox` が開き、出力の `repository` が 4 と同じで、preflight が installed の plugin を見つけて通ることを見る。
 6. inbox に「`smoke.txt` に 1 行足す task を 1 件、`--verify 'test -f seed.txt'` で」と頼み、inbox が計画の依頼を記録する（inbox を通さないなら `tq request add --text '...'`。`tq plan` は拒まれる）。supervisor が依頼に runtime の planner を立て、planner が AGENTS.md の無い repository で verify・paths・evidence を決めて `submit` し、plan review が pass して task が ready になり、supervisor が claim することを見る（plan review が concern なら inbox の `approve_plan` に `ready` と答える）。
 7. run が着地したら確かめる。
    - `tq show ID`: task `completed`、run `integrated`。

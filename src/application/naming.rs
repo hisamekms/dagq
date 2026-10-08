@@ -58,13 +58,6 @@ pub fn ask_notification_title(repo_root: &Path, ask: &Ask) -> String {
     )
 }
 
-/// `[<repo>]supervisor`: the workspace `up --in-cmux` runs `supervise`
-/// in when launchd cannot reach cmux (ADR-0011). The launchd mode has no
-/// workspace at all.
-pub fn supervisor_workspace_name(repo_root: &Path) -> String {
-    role_workspace_name(repo_root, SessionRole::Supervisor)
-}
-
 /// `[<repo>]inbox`: the session where a person answers the queue's asks,
 /// which `up` opens.
 pub fn inbox_workspace_name(repo_root: &Path) -> String {

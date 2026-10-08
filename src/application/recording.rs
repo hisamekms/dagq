@@ -10,7 +10,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
-use super::{QueueOpener, SessionWrappers, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags};
+use super::{QueueOpener, SessionWrappers, WorkspaceBackend, WorkspaceTags};
 use crate::domain::background_wrapper::{StopRoute, WrapperStop};
 use crate::domain::{EventKind, Reason, ReasonCode, RunId};
 
@@ -337,9 +337,6 @@ impl WorkspaceBackend for RecordingBackend<'_> {
     fn preflight(&self) -> Result<()> {
         self.inner.preflight()
     }
-    fn preflight_detached(&self, environment: &SupervisorEnvironment) -> Result<()> {
-        self.inner.preflight_detached(environment)
-    }
     fn close(&self, workspace_id: &str) -> Result<()> {
         let result = self.inner.close(workspace_id);
         self.recorded("close", Some(workspace_id), result)
@@ -598,9 +595,6 @@ mod tests {
 
     impl WorkspaceBackend for Backend {
         fn preflight(&self) -> Result<()> {
-            unimplemented!()
-        }
-        fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
             unimplemented!()
         }
         fn close(&self, _: &str) -> Result<()> {

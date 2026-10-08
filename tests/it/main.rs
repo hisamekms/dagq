@@ -50,7 +50,6 @@ mod language;
 mod lifecycle_cmux;
 mod lifecycle_down;
 mod lifecycle_handoff_stop;
-mod lifecycle_in_cmux;
 mod lifecycle_install;
 mod lifecycle_install_asks;
 mod lifecycle_install_watch;

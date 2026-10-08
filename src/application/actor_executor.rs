@@ -20,8 +20,8 @@
 //! (goal 38) would enforce the same spec. Nothing here names such a
 //! backend's details.
 //!
-//! What starts outside the executor is not an AI actor: the supervisor's own
-//! workspace (`up --in-cmux`), the session wrappers (which then start their
+//! What starts outside the executor is not an AI actor: the supervisor
+//! (under launchd), the session wrappers (which then start their
 //! agent here), the `observe` command the supervisor runs (whose agent
 //! starts here), and the stub agents of the tests.
 
@@ -396,8 +396,7 @@ pub trait ActorExecutor {
 /// whose `dagq` runs in client mode: [`client_role`]), its id, its run and task,
 /// the kind of span a session's hook records (the inbox's, a planner's by
 /// its origin), a planner's origin and id, and the model it starts with.
-/// Every workspace and headless job of an actor gets exactly this, and the
-/// in-cmux supervisor's workspace the same shape.
+/// Every workspace and headless job of an actor gets exactly this.
 pub fn actor_env(
     queue: &Path,
     actor: &ActorContext,
@@ -900,7 +899,7 @@ pub fn command_line(command: &CommandSpec) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::{Exit, SupervisorEnvironment};
+    use crate::application::Exit;
     use crate::domain::{CommitSha, NewTask, Task, task};
     use std::sync::Mutex;
 
@@ -1095,9 +1094,6 @@ mod tests {
 
     impl WorkspaceBackend for Fake {
         fn preflight(&self) -> Result<()> {
-            Ok(())
-        }
-        fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
             Ok(())
         }
         fn close(&self, _: &str) -> Result<()> {

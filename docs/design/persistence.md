@@ -209,7 +209,7 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 - `supervisor_token`は今そのrunを動かしているsupervisorで、claimしたsupervisorは`run_adopted`のeventに残る。
 - `integrate`は登録せずにleaseだけを持つので、`run_leases.token`から`supervisors`へ外部キーを張らない。
 - `supervisors`の行はそのプロセスの性質（`mode`・`binary_version`・引き継ぎの印）を持ち、行と寿命を共にする。
-  `binary_version`は登録するプロセス自身だけが書き、`mode`は`up`だけが書く（手で起動したsupervisorはnull）。
+  `binary_version`は登録するプロセス自身だけが書き、`mode`は`up`が`launchd`を書く（`in_cmux`は廃止前の登録）。
 - 登録の行を消すのは`supervise`自身の終了と`up`・`down`だけで、`status`・`doctor`・`recover`は消さない。
   heartbeatの失敗で終わるときは消さず、staleとして見える。
 - `recover`だけがtokenなしで未完了のrunを止め、同じトランザクションでleaseとプロセスを再検査する。

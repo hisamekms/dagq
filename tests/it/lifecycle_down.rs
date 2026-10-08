@@ -1,6 +1,7 @@
 //! `down` against fakes for launchd, cmux and process signals: every
 //! outcome in either mode (interrupted, drained, force-killed, not
-//! running), and the workspace of an in-cmux supervisor it closes.
+//! running), and the workspace it closes of an in-cmux supervisor an
+//! earlier binary registered (`up` starts none now, ADR-t1433-4).
 
 use crate::common;
 use dagq::domain::LeaseToken;
@@ -23,7 +24,8 @@ use std::{
     time::Duration,
 };
 
-/// An in-cmux supervisor has no service manager to signal it, so `down`
+/// An in-cmux supervisor (registered by an earlier binary) has no service
+/// manager to signal it, so `down`
 /// sends the SIGINT itself and closes its workspace once the process is
 /// gone: never while it drains, after the drain under `--wait`, and after
 /// the kill under `--force`.

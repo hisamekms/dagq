@@ -48,7 +48,7 @@ pluginのskill（`dagq-recover`の`reference/review-by-hand.md`、`dagq`の`refe
 | 置き場所 | 読むもの | 優先 |
 | --- | --- | --- |
 | repositoryの`dagq.toml`（main checkoutの作業ファイル。[Run environment](run-environment.md)と同じ） | そのqueueのsupervisor・`up`・`doctor`・`status` | 1 |
-| 利用者ごとの`$XDG_CONFIG_HOME/dagq/config.toml`（`XDG_CONFIG_HOME`が空か無ければ`~/.config/dagq/config.toml`） | その利用者の環境で動くdagq。supervisorは自分のprocessの`XDG_CONFIG_HOME` / `HOME`で読む。in-cmux modeでは`up`を打ったshellのenvを引き継ぎ、launchd modeでは`up`がshellの`XDG_CONFIG_HOME`（exportされていて空でなければ）をplistの環境に入れるので、どちらのmodeでも`up`のpreflightと同じファイルを読む（[up / down](up-down.md)のplist。`host.toml`も同じ）。pathはCLI（`main.rs`）が環境変数から決めて`SuperviseOptions`・`ObserveOptions`・`UpEnvironment`・`OneShot`の`user_config`に渡し、そこが`None`なら読まない（testは明示したpathだけを読み、testを走らせる人の設定に左右されない） | 2 |
+| 利用者ごとの`$XDG_CONFIG_HOME/dagq/config.toml`（`XDG_CONFIG_HOME`が空か無ければ`~/.config/dagq/config.toml`） | その利用者の環境で動くdagq。supervisorは自分のprocessの`XDG_CONFIG_HOME` / `HOME`で読む。`up`が起動するlaunchd modeのsupervisorは、`up`がshellの`XDG_CONFIG_HOME`（exportされていて空でなければ）をplistの環境に入れるので`up`のpreflightと同じファイルを読む（登録済みのin-cmuxのsupervisorは起動したshellのenvのまま）（[up / down](up-down.md)のplist。`host.toml`も同じ）。pathはCLI（`main.rs`）が環境変数から決めて`SuperviseOptions`・`ObserveOptions`・`UpEnvironment`・`OneShot`の`user_config`に渡し、そこが`None`なら読まない（testは明示したpathだけを読み、testを走らせる人の設定に左右されない） | 2 |
 
 | key | 型 | 既定 | 意味 |
 | --- | --- | --- | --- |

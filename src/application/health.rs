@@ -239,7 +239,8 @@ fn listed_runs(queue: &dyn Queue, leases: &[RunLease]) -> Result<Vec<TaskRun>> {
 /// they share its heartbeat. `stale` is a registration or lease that no
 /// working process stands behind: a dead pid or a heartbeat older than
 /// `HEARTBEAT_TIMEOUT_SECS`. `mode` is how `up` started it (`launchd`, or
-/// `in_cmux` with the `workspace_id` it runs in); a supervisor started by
+/// `in_cmux` with the `workspace_id` it runs in, which only an earlier
+/// binary started, ADR-t1433-4); a supervisor started by
 /// hand and an `integrate` process have none. Nothing here is deleted
 /// automatically.
 #[derive(Debug, Clone, Serialize)]

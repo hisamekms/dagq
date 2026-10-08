@@ -40,8 +40,9 @@ impl SqliteQueue {
 
     /// Forget the workspaces recorded for a role `up` no longer opens (the
     /// resident sessions ADR-0024 and ADR-0041 decision 6 retired: the
-    /// maintainer and the resident planner): only the in-cmux supervisor's
-    /// and the inbox's are kept. Returns how many were forgotten; the
+    /// maintainer and the resident planner): only the inbox's and the
+    /// supervisor's an earlier binary recorded for the retired in-cmux mode
+    /// (which `down` forgets as it closes it) are kept. Returns how many were forgotten; the
     /// workspaces themselves are a person's to close.
     pub fn forget_retired_session_workspaces(&self) -> Result<usize> {
         Ok(self.conn.execute(
