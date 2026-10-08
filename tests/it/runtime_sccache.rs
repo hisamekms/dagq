@@ -530,6 +530,7 @@ esac
             &WrapperProcesses,
             &SystemClock,
             None,
+            None,
         )
         .unwrap()
     };
@@ -865,6 +866,7 @@ fn the_supervisor_restarts_a_sandboxed_server_and_carries_a_failed_replacement_f
         &WrapperProcesses,
         &SystemClock,
         None,
+        None,
     )
     .unwrap();
     let attention = health["attention"]
@@ -922,6 +924,7 @@ fn the_supervisor_restarts_a_sandboxed_server_and_carries_a_failed_replacement_f
         &SqliteQueue::open(&db).unwrap(),
         &WrapperProcesses,
         &SystemClock,
+        None,
         None,
     )
     .unwrap();

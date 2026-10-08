@@ -53,6 +53,8 @@ related:
 - **名指したjobが飛んだsuccess**（[ADR-t2034-1](../../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）: `CiWatchConfig`の`required_jobs`があれば`success`の実行のjobsも読み、名指したjobが全部`success`の実行だけを緑とする（`domain::ci_watch::read_green`）。
   緑でない`success`は飛ばす実行に数え、次に成否の決まった実行が理由（`Undecided`）とともに引き受ける。
   - 名指したjobが無い: `ci_jobs_missing`で知らせ、名指したjobが揃った緑までinbox宛てのattention（`fix dagq.toml`）にする（`WatchState::jobs_missing_event`）。
+    設定がそのjobを名指さなくなれば（`required_jobs`から外す・空にする・`[ci_watch]`を外す）緑を待たずに消える。
+    一覧と状態は変えない（`WatchState::standing_jobs_missing`）。
   - jobsを読めない: その実行も後の実行も処理せず次の間隔で読み直し、実行ごとに上限まで続けば`ci_check_failed`を1回記録して飛ばす（`JobsUnread`）。
   - どれも緑と読まないので、既に落ちているtestの一覧は消えない。
     docsだけのpushで落ちたdocの検査の項目は、Rustのjobも流して通る実行で外れる。

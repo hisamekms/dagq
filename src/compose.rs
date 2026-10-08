@@ -1374,7 +1374,25 @@ impl OneShot {
         queue: &SqliteQueue,
         role: Option<SessionRole>,
     ) -> Result<Value> {
-        let mut status = health::status(queue, &SystemProcesses, &*self.generators.clock, role)?;
+        // `[ci_watch]` as read now: a `ci_jobs_missing` it no longer names
+        // is not an attention (ADR-t2034-1 decision 5). A bound repository
+        // whose main checkout is not found reads as unknown, which keeps it.
+        let ci_watch = match bound_main_checkout(queue) {
+            Ok(Some(Ok(checkout))) => crate::infrastructure::run_env::load_ci_watch(&checkout),
+            Ok(Some(Err(error))) | Err(error) => Err(error),
+            Ok(None) => Ok(None),
+        };
+        let ci_named_jobs = match &ci_watch {
+            Ok(config) => Some(config.as_ref().map_or(&[][..], |c| &c.required_jobs[..])),
+            Err(_) => None,
+        };
+        let mut status = health::status(
+            queue,
+            &SystemProcesses,
+            &*self.generators.clock,
+            role,
+            ci_named_jobs,
+        )?;
         add_sccache_diagnostics(queue, db, false, &mut status)?;
         let live_builds: Vec<String> = status["supervisors"]
             .as_array()
@@ -1390,7 +1408,7 @@ impl OneShot {
         )?;
         // The CI watch's state and list size (ADR-t1920-1); null until it
         // recorded anything.
-        let enabled = bound_ci_watch(queue).is_ok_and(|config| config.is_some());
+        let enabled = ci_watch.is_ok_and(|config| config.is_some());
         status["ci"] = crate::application::ci_watch::status(queue, enabled)?;
         if matches!(role, Some(SessionRole::Inbox | SessionRole::Planner)) {
             status["language"] = serde_json::to_value(self.language_report(queue)?)?;

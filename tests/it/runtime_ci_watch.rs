@@ -1067,3 +1067,65 @@ fn success_runs_without_their_named_jobs_are_not_read_green() {
     );
     backend.join();
 }
+
+/// ADR-t2034-1 decision 5: a `ci_jobs_missing` stands in `status` only
+/// while `[ci_watch]` names a missing job. Taken out of `required_jobs`,
+/// the key emptied or the table removed, it ends without a green run,
+/// leaving the list and the red state; named again, it stands again.
+#[test]
+fn a_setting_that_no_longer_names_the_missing_job_ends_its_attention() {
+    let (fixture, repo, db) = fixture();
+    let gh = watched_with(&fixture, &repo, "required_jobs = [\"rust\", \"linux\"]\n");
+    fs::write(gh.with_file_name("authed"), "").unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    drop(queue);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = options(&gh);
+    let red_sha = head(&repo);
+    let renamed = commit(&repo, "renamed");
+    let attention = |db: &Path| {
+        runtime::status(db).unwrap()["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["kind"] == "ci_jobs_missing")
+            .cloned()
+    };
+    runs(&gh, &[(1, "failure", &red_sha)]);
+    red(&gh, 1, &["runtime_claim::fails"], &[]);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    runs(&gh, &[(1, "failure", &red_sha), (2, "success", &renamed)]);
+    jobs(
+        &gh,
+        2,
+        &[("rust", "success"), ("linux (renamed)", "success")],
+    );
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(attention(&db).unwrap()["next"], "fix dagq.toml");
+
+    let setting = fs::read_to_string(repo.join("dagq.toml")).unwrap();
+    for fixed in [
+        setting.replace(
+            "required_jobs = [\"rust\", \"linux\"]",
+            "required_jobs = [\"rust\"]",
+        ),
+        setting.replace(
+            "required_jobs = [\"rust\", \"linux\"]",
+            "required_jobs = []",
+        ),
+        String::new(),
+    ] {
+        assert_ne!(fixed, setting);
+        fs::write(repo.join("dagq.toml"), fixed).unwrap();
+        assert_eq!(attention(&db), None);
+        let list = runtime::ci_failures(&db, None).unwrap();
+        assert_eq!(list["state"], "red");
+        assert_eq!(list["failures"][0]["name"], "dagq::it runtime_claim::fails");
+    }
+    fs::write(repo.join("dagq.toml"), &setting).unwrap();
+    assert_eq!(attention(&db).unwrap()["next"], "fix dagq.toml");
+    backend.join();
+}

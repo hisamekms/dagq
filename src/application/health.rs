@@ -331,12 +331,14 @@ const REASON_CHARS: usize = 300;
 /// or being revised (ADR-0041 decision 7) in plan review's order, and the
 /// newest event id (`cursor`) to `watch` from (ADR-0016), with `actors`,
 /// each AI actor's backend and enforcement ([`actor_executions`]), the
-/// worker's per provider once a supervisor can run Codex.
+/// worker's per provider once a supervisor can run Codex. `ci_named_jobs`
+/// is what [`attention`] reads `ci_jobs_missing` against.
 pub fn status(
     queue: &dyn Queue,
     control: &dyn ProcessControl,
     clock: &dyn Clock,
     role: Option<SessionRole>,
+    ci_named_jobs: Option<&[String]>,
 ) -> Result<Value> {
     // Read before the state it describes, so a transition in between is
     // seen again by `watch --after cursor` rather than missed.
@@ -420,7 +422,7 @@ pub fn status(
         "supervisors": supervisors,
         "runs": runs,
         "waiting": waiting,
-        "attention": attention(queue, &registrations, now, control)?
+        "attention": attention(queue, &registrations, now, control, ci_named_jobs)?
             .into_iter()
             .filter(|_| for_role(role))
             .collect::<Vec<_>>(),
@@ -1155,11 +1157,16 @@ fn update_failure_applied(
     )
 }
 
+/// What waits for a person. `ci_named_jobs` is the jobs `required_jobs`
+/// of `[ci_watch]` names now (empty without the table, `None` when
+/// `dagq.toml` cannot be read): a `ci_jobs_missing` stands only while it
+/// names a missing job ([`crate::domain::ci_watch::WatchState::standing_jobs_missing`]).
 pub fn attention(
     queue: &dyn Queue,
     registrations: &[SupervisorRegistration],
     now: i64,
     control: &dyn ProcessControl,
+    ci_named_jobs: Option<&[String]>,
 ) -> Result<Vec<Attention>> {
     let mut attention = supervisor_attention(&pulses(registrations, now, control));
     let no_claude = registrations.iter().any(|r| {
@@ -1404,9 +1411,10 @@ pub fn attention(
     }
     // `required_jobs` of `[ci_watch]` names a job the workflow's runs lack:
     // no success run reads green until a task fixes `dagq.toml` or the
-    // workflow (ADR-t2034-1 decision 5); a green run ends it.
-    if let Some(payload) =
-        crate::domain::ci_watch::WatchState::fold(&queue.ci_watch_events()?).jobs_missing
+    // workflow (ADR-t2034-1 decision 5); a green run ends it, and so does
+    // a setting that no longer names the missing jobs.
+    if let Some(payload) = crate::domain::ci_watch::WatchState::fold(&queue.ci_watch_events()?)
+        .standing_jobs_missing(ci_named_jobs)
     {
         attention.push(Attention {
             run_id: None,

@@ -593,8 +593,9 @@ pub struct WatchState {
     /// is written only while it is still the latest.
     pub last_event: Option<i64>,
     /// The payload of the latest [`CI_JOBS_MISSING`] while no green run
-    /// (which had every named job) was recorded after it: the attention
-    /// that stands.
+    /// (which had every named job) was recorded after it, kept until one
+    /// is; whether it stands as an attention is
+    /// [`Self::standing_jobs_missing`], against the setting read now.
     pub jobs_missing: Option<Value>,
 }
 
@@ -700,6 +701,28 @@ impl WatchState {
             conclusion: text("conclusion"),
             created_at: text("created_at"),
         });
+    }
+
+    /// The [`CI_JOBS_MISSING`] that stands as an attention against
+    /// `named`, the jobs `required_jobs` of `[ci_watch]` names now (empty
+    /// without the table; `None` when `dagq.toml` cannot be read, which
+    /// keeps it): [`Self::jobs_missing`] while `named` still names one of
+    /// its jobs. Once the setting names none of them (taken out of
+    /// `required_jobs`, the key emptied, the table removed) the
+    /// disagreement is fixed and no green run is waited for; the list and
+    /// the state are not touched, so nothing reads green by it.
+    pub fn standing_jobs_missing(&self, named: Option<&[String]>) -> Option<&Value> {
+        let payload = self.jobs_missing.as_ref()?;
+        let Some(named) = named else {
+            return Some(payload);
+        };
+        payload["jobs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|job| named.iter().any(|name| name == job))
+            .then_some(payload)
     }
 
     /// The [`CI_JOBS_MISSING`] payload for `run`, which lacks the named
@@ -2529,6 +2552,42 @@ mod tests {
             watch
                 .jobs_missing_event(&later, &linux, &config, "main")
                 .is_some()
+        );
+    }
+
+    /// A missing job stands while the setting names it (or cannot be
+    /// read), and no longer once it names none of the missing jobs, with
+    /// the list and the red state left as they were.
+    #[test]
+    fn a_missing_job_stands_only_while_the_setting_names_it() {
+        let told = json!({"jobs": ["linux", "macos"], "message": "no job linux, macos"});
+        let red = json!({
+            "run_id": 4,
+            "created_at": "2026-10-06T04:00:00Z",
+            "state": "red",
+            "added": ["dagq::it a::fails"],
+        });
+        let watch = WatchState::fold(&[
+            event(1, CI_CHECKED, red),
+            event(2, CI_JOBS_MISSING, told.clone()),
+        ]);
+        let names = |names: &[&str]| names.iter().map(|&n| n.to_owned()).collect::<Vec<_>>();
+        let rust_linux = names(&["rust", "linux"]);
+        let macos = names(&["macos"]);
+        let rust = names(&["rust"]);
+        assert_eq!(watch.standing_jobs_missing(None), Some(&told));
+        assert_eq!(watch.standing_jobs_missing(Some(&rust_linux)), Some(&told));
+        assert_eq!(watch.standing_jobs_missing(Some(&macos)), Some(&told));
+        // Taken out of required_jobs, the key emptied, the table removed.
+        assert_eq!(watch.standing_jobs_missing(Some(&rust)), None);
+        assert_eq!(watch.standing_jobs_missing(Some(&[])), None);
+        // The fold is the same: still red, the list kept.
+        assert_eq!(watch.state, Some(CiState::Red));
+        assert!(watch.failures.contains_key("dagq::it a::fails"));
+        assert!(watch.jobs_missing.is_some());
+        assert_eq!(
+            WatchState::default().standing_jobs_missing(Some(&rust)),
+            None
         );
     }
 }
