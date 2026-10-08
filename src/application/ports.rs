@@ -1834,11 +1834,14 @@ pub trait RunRecovery {
 pub trait RunCoordination {
     /// Refresh every lease `token` holds; how many there were.
     fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize>;
+    /// Register a supervisor with its slot limits and their sources in one
+    /// write, so `status` and a reader of the registration never see it
+    /// without them.
     fn register_supervisor(
         &mut self,
         token: &LeaseToken,
         pid: u32,
-        parallel: u32,
+        limits: crate::domain::slot_limits::SlotLimits,
         binary_version: &str,
     ) -> Result<SupervisorRegistration>;
     /// Whether a registration under `token` was removed.

@@ -70,6 +70,8 @@ fn start(
         let (db, repo, backend) = (db.to_path_buf(), repo.to_path_buf(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
+    // The registration carries the limits and their sources from the
+    // write that makes it visible, so `registered` can read it at once.
     wait_until(db, Duration::from_secs(30), |queue| {
         queue.supervisors().unwrap().len() == 1
     });

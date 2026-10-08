@@ -787,6 +787,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
                 .find(|registration| &registration.token == token)
                 .and_then(|registration| registration.binary_version);
             queue.resume_registration(token, pid, &layout.version)?;
+            // The limits this process resolved, over the ones the
+            // registration had before the exec.
+            queue.set_slot_limits(token, settings.limits)?;
             let previous = &previous_version;
             info!(
                 "supervisor {token} handed off: version {} (was {}), pid {pid}, parallel {parallel}, db {}, repository {}",
@@ -800,8 +803,10 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         None => {
             let token = ports.generators.ids.lease_token();
             // Registered before the first heartbeat so the loop is visible
-            // to `status` from its first second, runs or not.
-            queue.register_supervisor(&token, pid, parallel, &layout.version)?;
+            // to `status` from its first second, runs or not, with the
+            // limits in use and where each comes from (ADR-0062 decision 7,
+            // task 698) in the same write.
+            queue.register_supervisor(&token, pid, settings.limits, &layout.version)?;
             queue.accept_handoff(&token)?;
             if settings.update.register {
                 queue.set_auto_update(&token, true)?;
@@ -815,10 +820,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             token
         }
     };
-    // Next to `parallel` on the registration, for `status` (ADR-0062
-    // decision 7), with where each comes from (task 698); written again by
-    // the process an exec continues.
-    queue.set_slot_limits(&token, settings.limits)?;
     // For the time of the next claim `status` shows (ADR-t1479-1).
     queue.set_max_load(&token, settings.max_load)?;
     queue.set_supervisor_providers(&token, &layout.providers)?;
