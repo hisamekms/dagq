@@ -371,10 +371,9 @@ fn install_of_a_checkout_replaces_nothing_unless_its_e2e_passes() {
     // report names them and why.
     let without_podman = FakeBinaries::new(&[], true);
     *without_podman.e2e.lock().unwrap() = Some(E2eOutcome {
-        skipped: Some(dagq::application::install::E2eSkip {
-            tests: vec!["broker::".into()],
-            reason: "broker podman_missing".into(),
-        }),
+        skipped: Some(dagq::application::install::E2eSkip::podman(
+            "broker podman_missing",
+        )),
         ..e2e_passed(30)
     });
     let report =
@@ -382,7 +381,7 @@ fn install_of_a_checkout_replaces_nothing_unless_its_e2e_passes() {
     assert_eq!(report["e2e"]["status"], "passed", "{report}");
     assert_eq!(
         report["e2e"]["skipped"],
-        json!({"tests": ["broker::"], "reason": "broker podman_missing"}),
+        json!({"tests": ["broker::"], "reason": "podman could not be reached: broker podman_missing"}),
         "{report}"
     );
 
@@ -1213,16 +1212,16 @@ fn the_update_job_replaces_nothing_unless_the_build_passes_its_e2e() {
     replaced_nothing(&binaries);
     assert!(open_ask(&queue).question.contains("did not finish"));
 
-    // It could not start (no cmux).
-    let binaries =
-        UpdateBinaries::new(dir, false, &[]).with_e2e(Err("the e2e needs a running cmux".into()));
+    // It could not start (an unreadable `[run.env]`).
+    let binaries = UpdateBinaries::new(dir, false, &[])
+        .with_e2e(Err("read the [run.env] the e2e runs with".into()));
     let report = run_update_job(&fixture, &binaries, &processes, &restarted);
     assert_eq!(report["stage"], "e2e", "{report}");
     assert!(
         report["error"]
             .as_str()
             .unwrap()
-            .contains("the e2e could not start: the e2e needs a running cmux"),
+            .contains("the e2e could not start: read the [run.env] the e2e runs with"),
         "{report}"
     );
     replaced_nothing(&binaries);
@@ -1394,12 +1393,13 @@ fn the_update_job_passes_flaky_and_quarantined_e2e_and_fails_the_rest() {
     );
 }
 
-/// A build whose e2e passed with the podman tests not run (podman could
-/// not be reached, ADR-t1162-1) is installed, and the tests and the reason
-/// are named on `update_e2e_passed` and `update_installed` (its `message`
-/// too, which the inbox passes on): the swap does not pass them silently.
+/// A build whose e2e passed with the podman and the cmux tests not run
+/// (podman could not be reached, ADR-t1162-1; cmux did not answer,
+/// ADR-t2105-1) is installed, and the tests and the reasons are named on
+/// `update_e2e_passed` and `update_installed` (its `message` too, which the
+/// inbox passes on): the swap does not pass them silently.
 #[test]
-fn the_update_job_names_the_e2e_it_did_not_run_for_want_of_podman() {
+fn the_update_job_names_the_e2e_it_did_not_run_for_want_of_podman_or_cmux() {
     let fixture = fixture();
     let queue = auto_supervisor(&fixture);
     let processes = FakeProcesses::default();
@@ -1408,10 +1408,12 @@ fn the_update_job_names_the_e2e_it_did_not_run_for_want_of_podman() {
     let target = dir.join("bin").join("dagq");
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::write(&target, "old build").unwrap();
-    let skipped = dagq::application::install::E2eSkip {
-        tests: vec!["broker::".into()],
-        reason: "broker machine_failed: ssh: handshake failed".into(),
-    };
+    use dagq::application::install::{CMUX_E2E, E2eSkip};
+    let skipped = E2eSkip::joined([
+        E2eSkip::podman("broker machine_failed: ssh: handshake failed"),
+        E2eSkip::cmux("`cmux ping` failed: Access denied"),
+    ])
+    .unwrap();
     let binaries = UpdateBinaries::new(dir, false, &[]).with_e2e(Ok(E2eOutcome {
         skipped: Some(skipped),
         ..e2e_passed(150)
@@ -1421,9 +1423,11 @@ fn the_update_job_names_the_e2e_it_did_not_run_for_want_of_podman() {
         run_update_job(&fixture, &binaries, &processes, &restarted)
     });
     assert_eq!(report["outcome"], "installed", "{report}");
+    let tests = [&["broker::"], CMUX_E2E].concat();
     let expected = json!({
-        "tests": ["broker::"],
-        "reason": "broker machine_failed: ssh: handshake failed",
+        "tests": tests,
+        "reason": "podman could not be reached: broker machine_failed: ssh: handshake failed; \
+    cmux did not answer: `cmux ping` failed: Access denied",
     });
     assert_eq!(report["e2e_skipped"], expected, "{report}");
     let events = queue.update_events(10).unwrap();
@@ -1433,8 +1437,9 @@ fn the_update_job_names_the_e2e_it_did_not_run_for_want_of_podman() {
     assert_eq!(installed.payload["e2e_skipped"], expected);
     let message = installed.payload["message"].as_str().unwrap();
     assert!(
-        message.contains("the e2e did not run broker:: because podman could not be reached")
-            && message.contains("handshake failed"),
+        message.contains("the e2e did not run broker::, up_")
+            && message.contains("because podman could not be reached")
+            && message.contains("cmux did not answer"),
         "{message}"
     );
 }

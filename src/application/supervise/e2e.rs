@@ -12,7 +12,7 @@
 //! - Tests still fail after their rerun under no mark: the run is parked
 //!   for a resume (`run_e2e_failed`, code `e2e_failed`) that names the
 //!   failed tests and the logs.
-//! - It could not run or tell anything of the change (cmux not answering,
+//! - It could not run or tell anything of the change (it could not start,
 //!   an unreadable `[run.env]`, it or the rerun of its failed tests past
 //!   the timeout, a rerun that could not start), which is not the change's
 //!   fault (ADR-t1233-2 decision 3): `run_e2e_finished` (`outcome:
@@ -20,6 +20,9 @@
 //!   [`RunE2ePort::retry`] ([`run_e2e::RETRY_SECS`]), and from the
 //!   [`run_e2e::UNAVAILABLE_ATTENTION`]th in a row the inbox is told
 //!   (`attention: true`, `check the e2e host`).
+//! - When cmux does not answer (or podman cannot be reached), the e2e that
+//!   need it are not run and the rest decide (ADR-t2105-1, ADR-t1162-1);
+//!   the tests not run and why are on the `run_e2e_finished` (`skipped`).
 //! - The repository has no e2e the runtime knows: `run_e2e_finished`
 //!   (`outcome: not_configured`) and the run lands without it.
 //!
@@ -280,12 +283,7 @@ impl Supervisor<'_> {
             rerun_cut
         };
         if let Some(why) = cut {
-            let mut payload = base;
-            payload["secs"] = json!(outcome.secs);
-            payload["lock_wait_secs"] = json!(outcome.lock_wait_secs);
-            payload["timed_out"] = json!(outcome.timed_out);
-            payload["failed_tests"] = json!(outcome.failed_tests);
-            payload["cleanup"] = outcome.cleanup.clone();
+            let mut payload = ran_payload(base, &outcome);
             if let Some(rerun) = &outcome.rerun {
                 let mut value = json!({
                     "tests": rerun.tests,
@@ -344,15 +342,7 @@ impl Supervisor<'_> {
             &history,
             self.generators.clock.now(),
         );
-        let mut payload = base;
-        payload["secs"] = json!(outcome.secs);
-        payload["lock_wait_secs"] = json!(outcome.lock_wait_secs);
-        payload["timed_out"] = json!(outcome.timed_out);
-        payload["failed_tests"] = json!(outcome.failed_tests);
-        payload["cleanup"] = outcome.cleanup.clone();
-        if let Some(skipped) = &outcome.skipped {
-            payload["skipped"] = skipped.to_json();
-        }
+        let mut payload = ran_payload(base, &outcome);
         if let (Some(payload), Some(fields)) = (payload.as_object_mut(), verdict.fields.as_object())
         {
             payload.extend(fields.clone());
@@ -378,5 +368,51 @@ impl Supervisor<'_> {
         warn!(run_id = %run.id(), "run {}: its e2e failed, so it waits for a resume instead of landing: {reason}", run.id());
         self.queue.release_lease(run.id(), &self.token)?;
         Ok(Step::Done(Box::new(parked)))
+    }
+}
+
+/// The `run_e2e_finished` of an e2e that ran: `base` with how it went, and
+/// the tests it did not run and why (`skipped`), so a run does not land
+/// past them silently (ADR-t1162-1, ADR-t2105-1).
+fn ran_payload(base: Value, outcome: &E2eOutcome) -> Value {
+    let mut payload = base;
+    payload["secs"] = json!(outcome.secs);
+    payload["lock_wait_secs"] = json!(outcome.lock_wait_secs);
+    payload["timed_out"] = json!(outcome.timed_out);
+    payload["failed_tests"] = json!(outcome.failed_tests);
+    payload["cleanup"] = outcome.cleanup.clone();
+    if let Some(skipped) = &outcome.skipped {
+        payload["skipped"] = skipped.to_json();
+    }
+    payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::install::E2eSkip;
+
+    /// The tests an e2e did not run for want of cmux are named with why on
+    /// the run's `run_e2e_finished`; one that ran them all names none.
+    #[test]
+    fn the_e2e_event_names_the_tests_not_run() {
+        let skipped = E2eSkip::cmux("`cmux ping` failed: Access denied");
+        let outcome = E2eOutcome {
+            passed: true,
+            secs: 90,
+            cleanup: json!({"removed": false}),
+            skipped: Some(skipped.clone()),
+            ..Default::default()
+        };
+        let payload = ran_payload(json!({"attempt": 1}), &outcome);
+        assert_eq!(payload["attempt"], 1);
+        assert_eq!(payload["secs"], 90);
+        assert_eq!(payload["cleanup"], json!({"removed": false}));
+        assert_eq!(payload["skipped"], skipped.to_json());
+        let all = E2eOutcome {
+            skipped: None,
+            ..outcome
+        };
+        assert!(ran_payload(json!({}), &all).get("skipped").is_none());
     }
 }

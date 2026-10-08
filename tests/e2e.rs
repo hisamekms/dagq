@@ -8,7 +8,8 @@
 //! open the inbox, need a running cmux (ADR-t1433-1 decision 3): the others
 //! run on a host without one (named, as `--ignored --exact <name>`). All are
 //! ignored by default: `cargo test --locked --test e2e -- --ignored
-//! --nocapture`, which the e2e gates run whole, cmux included.
+//! --nocapture`, which the e2e gates run whole, cmux included when it
+//! answers `ping` (ADR-t2105-1).
 //!
 //! The launchd `up` / `down` test is temporarily off even under `--ignored`:
 //! no project runs the launchd mode now, and without a cmux socket password
@@ -383,7 +384,9 @@ fn fixture() -> Fixture {
 
 /// [`fixture`] with the running cmux pinged (it fails, never skips, without
 /// one), and the queue's workspace group cleaned up after it: for the
-/// `up` / `down` tests, which open the inbox's workspace.
+/// `up` / `down` tests, which open the inbox's workspace. A test that takes
+/// it is named in `dagq::application::install::CMUX_E2E`, which the e2e
+/// gates leave out when cmux does not answer (ADR-t2105-1).
 fn fixture_with_cmux() -> Fixture {
     let cmux = cmux_executable();
     let cmux_version = preflight(&cmux);

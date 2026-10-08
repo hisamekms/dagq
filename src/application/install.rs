@@ -98,7 +98,7 @@ pub trait Binaries {
     /// Run the e2e of `checkout` (ADR-t963-1 decision 1) with
     /// `CARGO_TARGET_DIR` set to `target_dir` when given, and clean up what
     /// it left in cmux and on disk; how it went. An error is an e2e that
-    /// could not start (no cmux, an unreadable `[run.env]`).
+    /// could not start (an unreadable `[run.env]`, the e2e lock).
     fn e2e(
         &self,
         checkout: &Path,
@@ -125,7 +125,9 @@ pub struct E2eSettings {
     /// How long it may run; past it the e2e is stopped and failed.
     pub timeout: Duration,
     /// The cmux the e2e drives (`DAGQ_E2E_CMUX`): pinged before it starts,
-    /// and the groups the e2e left in it are deleted after.
+    /// and the groups the e2e left in it are deleted after. When it does
+    /// not answer, the tests that need it ([`CMUX_E2E`]) are not run and
+    /// its cleanup is left to a later gate (ADR-t2105-1).
     pub cmux: Option<PathBuf>,
     /// The directory whose `dagq.toml` `[run.env]` the e2e runs with,
     /// expanded with `queue_dir`; `None` passes none.
@@ -174,9 +176,8 @@ impl E2eSettings {
     }
 }
 
-/// The e2e tests that need podman (dagq's machine) besides cmux: the
-/// `--skip` filters of the tests not run when podman cannot be reached
-/// (ADR-t1162-1).
+/// The e2e tests that need podman (dagq's machine): the `--skip` filters
+/// of the tests not run when podman cannot be reached (ADR-t1162-1).
 pub const PODMAN_E2E: &[&str] = &["broker::"];
 
 /// How the gate checks podman before the e2e (ADR-t1162-1).
@@ -192,15 +193,55 @@ pub struct PodmanCheck {
     pub reconnect: crate::application::broker::Reconnect,
 }
 
-/// The e2e tests the gate did not run, and why (ADR-t1162-1).
+/// The e2e tests that need a running cmux, the `up` / `down` ones that open
+/// the inbox's workspace (`fixture_with_cmux` of `tests/e2e.rs`): the
+/// `--skip` filters of the tests not run when cmux does not answer `ping`
+/// (ADR-t2105-1). The others need no cmux (ADR-t1433-1).
+pub const CMUX_E2E: &[&str] =
+    &["up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it"];
+
+/// The e2e tests the gate did not run, and why: those that need podman
+/// when it cannot be reached (ADR-t1162-1) and those that need cmux when it
+/// does not answer (ADR-t2105-1), one or both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct E2eSkip {
     /// The `--skip` filters of the tests not run.
     pub tests: Vec<String>,
+    /// Why, for each tool that could not be reached (`podman could not be
+    /// reached: ...`, `cmux did not answer: ...`), joined by `; `.
     pub reason: String,
 }
 
 impl E2eSkip {
+    /// The podman tests ([`PODMAN_E2E`]), not run because podman could not
+    /// be reached for `error`.
+    pub fn podman(error: &str) -> Self {
+        Self::of(PODMAN_E2E, format!("podman could not be reached: {error}"))
+    }
+
+    /// The cmux tests ([`CMUX_E2E`]), not run because cmux did not answer
+    /// `ping` for `error`.
+    pub fn cmux(error: &str) -> Self {
+        Self::of(CMUX_E2E, format!("cmux did not answer: {error}"))
+    }
+
+    fn of(tests: &[&str], reason: String) -> Self {
+        Self {
+            tests: tests.iter().map(|test| (*test).to_owned()).collect(),
+            reason,
+        }
+    }
+
+    /// `skips` as one: their tests and their reasons; `None` when there
+    /// is none.
+    pub fn joined(skips: impl IntoIterator<Item = Self>) -> Option<Self> {
+        skips.into_iter().reduce(|mut all, skip| {
+            all.tests.extend(skip.tests);
+            all.reason = format!("{}; {}", all.reason, skip.reason);
+            all
+        })
+    }
+
     pub fn to_json(&self) -> Value {
         json!({"tests": self.tests, "reason": self.reason})
     }
@@ -208,7 +249,7 @@ impl E2eSkip {
     /// A sentence for a person: which tests were not run and why.
     pub fn sentence(&self) -> String {
         format!(
-            "the e2e did not run {} because podman could not be reached: {}",
+            "the e2e did not run {} because {}",
             self.tests.join(", "),
             self.reason
         )
@@ -227,7 +268,7 @@ pub struct E2eOutcome {
     /// What was cleaned up after it (groups, processes, the directory).
     pub cleanup: Value,
     /// The tests not run because podman could not be reached
-    /// (ADR-t1162-1).
+    /// (ADR-t1162-1) or cmux did not answer (ADR-t2105-1).
     pub skipped: Option<E2eSkip>,
     /// The rerun of the failed tests by name (ADR-t1165-1); `None` when the
     /// e2e passed, ran past its timeout or named no failed test.
@@ -1083,6 +1124,56 @@ pub fn parse_version(output: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The podman and the cmux skips are named apart and as one, with the
+    /// tool each waited for (ADR-t1162-1, ADR-t2105-1).
+    #[test]
+    fn the_skipped_e2e_name_their_tests_and_why() {
+        assert_eq!(E2eSkip::joined([]), None);
+        let podman = E2eSkip::podman("broker podman_missing");
+        assert_eq!(podman.tests, ["broker::"]);
+        assert_eq!(
+            podman.sentence(),
+            "the e2e did not run broker:: because podman could not be reached: broker podman_missing"
+        );
+        let cmux = E2eSkip::cmux("`cmux ping` failed: Access denied");
+        assert_eq!(cmux.tests, CMUX_E2E);
+        let both = E2eSkip::joined([cmux.clone(), podman.clone()]).unwrap();
+        assert_eq!(both.tests, [CMUX_E2E, PODMAN_E2E].concat());
+        assert_eq!(
+            both.to_json(),
+            json!({
+                "tests": both.tests,
+                "reason": "cmux did not answer: `cmux ping` failed: Access denied; \
+            podman could not be reached: broker podman_missing",
+            })
+        );
+        assert_eq!(E2eSkip::joined([cmux.clone()]), Some(cmux));
+    }
+
+    /// Every e2e that takes the running cmux (`fixture_with_cmux()`) is
+    /// among the filters skipped when cmux does not answer, so the gate
+    /// never runs one that would fail for want of it (ADR-t2105-1).
+    #[test]
+    fn the_cmux_e2e_are_the_ones_that_take_the_running_cmux() {
+        let source = include_str!("../../tests/e2e.rs");
+        let mut taking = Vec::new();
+        let mut current = None;
+        for line in source.lines() {
+            if let Some(rest) = line.strip_prefix("fn ") {
+                current = rest.split('(').next();
+            } else if line.contains("fixture_with_cmux()") && !line.trim_start().starts_with("//") {
+                taking.extend(current);
+            }
+        }
+        assert!(!taking.is_empty(), "no e2e takes fixture_with_cmux()");
+        for test in taking {
+            assert!(
+                CMUX_E2E.iter().any(|filter| test.contains(filter)),
+                "{test} takes the running cmux but is not in CMUX_E2E"
+            );
+        }
+    }
 
     #[test]
     fn without_from_only_dagqs_source_is_built() {

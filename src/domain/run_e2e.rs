@@ -22,9 +22,10 @@ use super::{
 /// `run_e2e_finished`'s `outcome` of an e2e that passed (flaky tests and
 /// tests under a mark included).
 pub const PASSED: &str = "passed";
-/// `run_e2e_finished`'s `outcome` of an e2e that could not run (cmux did
-/// not answer, `[run.env]` could not be read, it could not start): not the
-/// change's fault, so the run waits and it is tried again.
+/// `run_e2e_finished`'s `outcome` of an e2e that could not run (`[run.env]`
+/// could not be read, it could not start, past its timeout): not the
+/// change's fault, so the run waits and it is tried again. A cmux that does
+/// not answer is not one: the e2e that need it are left out (ADR-t2105-1).
 pub const UNAVAILABLE: &str = "unavailable";
 /// `run_e2e_finished`'s `outcome` when the repository has no e2e command
 /// the runtime knows (not dagq's source, and no command given): the run

@@ -12,6 +12,13 @@
 //! worker's e2e gives its groups too. A run opens no workspace
 //! (ADR-t1433-3), so nothing of a run's is looked for in cmux.
 //!
+//! When cmux does not answer `ping` (none, or a socket that refuses a
+//! process outside its terminal), the gate runs every e2e but those that
+//! need it ([`CMUX_E2E`]) and says which and why, as for podman
+//! (ADR-t2105-1); its cleanups then call no cmux and keep each root with
+//! the queue hashes, for the next gate cmux answers to close what is left
+//! there ([`clean_up_without_cmux`]).
+//!
 //! The e2e runs code a worker wrote (`build.rs`, proc-macros, tests) on the
 //! host, so it is not given the environment of the process that starts it
 //! (the supervisor, or the shell of `install`): its environment is cleared
@@ -35,9 +42,9 @@ use std::{
 };
 
 use crate::application::broker::{self, MachineSpec, Reconnecting};
-use crate::application::install::{
-    E2eOutcome, E2eRerun, E2eSettings, E2eSkip, PODMAN_E2E, PodmanCheck,
-};
+#[cfg(doc)]
+use crate::application::install::CMUX_E2E;
+use crate::application::install::{E2eOutcome, E2eRerun, E2eSettings, E2eSkip, PodmanCheck};
 use crate::domain::e2e_quarantine::{self, QuarantineFile};
 use crate::infrastructure::adapters::unpiped_output_within;
 use crate::infrastructure::broker_podman::{FileLock, PodmanCli};
@@ -87,9 +94,10 @@ pub const PASSED_ENV: &[&str] = &[
 /// cmux's (`CMUX_*`, the socket the e2e's real cmux calls reach).
 pub const PASSED_PREFIXES: &[&str] = &["LC_", "CMUX_"];
 
-/// The one credential given: the password of cmux's socket, without which
-/// a cmux whose socket asks for it refuses every call of the e2e (the
-/// supervisor's launchd job is given it for the same reason).
+/// The one credential given: the password of cmux's socket, when the
+/// starting process has it (a person's shell running `install`), without
+/// which a cmux whose socket asks for it refuses the e2e's calls. A gate not
+/// given it runs without the e2e that need cmux (ADR-t2105-1).
 pub const CMUX_SOCKET_PASSWORD: &str = "CMUX_SOCKET_PASSWORD";
 
 /// The words that make a variable's name a credential's.
@@ -178,27 +186,34 @@ fn run_inheriting(
     let waiting = Instant::now();
     let _lock = settings.lock.as_deref().map(hold_lock).transpose()?;
     let lock_wait_secs = waiting.elapsed().as_secs();
-    if let Some(cmux) = &settings.cmux {
-        ping(cmux)?;
-    }
-    let skipped = settings.podman.as_ref().and_then(|check| {
-        podman_answers(check).err().map(|reason| E2eSkip {
-            tests: PODMAN_E2E.iter().map(|test| (*test).to_owned()).collect(),
-            reason,
-        })
-    });
+    // Why cmux does not answer, when it does not: the e2e that need it
+    // are not run and no cleanup calls it (ADR-t2105-1).
+    let unanswered = settings
+        .cmux
+        .as_deref()
+        .and_then(|cmux| ping(cmux).err().map(|error| format!("{error:#}")));
+    let cmux = CmuxReach::of(settings.cmux.as_deref(), unanswered.as_deref());
+    let skipped = E2eSkip::joined(unanswered.as_deref().map(E2eSkip::cmux).into_iter().chain(
+        settings.podman.as_ref().and_then(|check| {
+            podman_answers(check)
+                .err()
+                .map(|error| E2eSkip::podman(&error))
+        }),
+    ));
     fs::create_dir_all(&settings.scratch)
         .with_context(|| format!("create {}", settings.scratch.display()))?;
     // The e2e and its rerun may not start the sccache server
     // (ADR-t2086-1): looked at once its turn came, the guard beside its
     // fixtures.
     let sccache_wrapper_removed = guard_e2e(sccache, &settings.scratch, &mut env);
-    // What an earlier gate left when it was stopped before its cleanup; a
-    // gate still running (an install next to the automatic update's job)
-    // keeps its own.
+    // What an earlier gate left when it was stopped before its cleanup or
+    // kept for a cmux that answers (ADR-t2105-1), this process's earlier
+    // gates' included (the supervisor runs its runs' e2e in-process); a
+    // gate still running (an install next to the automatic update's job,
+    // another of this process) keeps its own.
     for earlier in subdirectories(&settings.scratch) {
-        if !owner(&earlier).is_some_and(alive) {
-            clean_up(&earlier, settings.cmux.as_deref());
+        if finished(&earlier) {
+            cmux.clean_up(&earlier);
         }
     }
     let first = pass(
@@ -211,6 +226,7 @@ fn run_inheriting(
             log: &settings.log,
             skipped: skipped.as_ref(),
             rerun: None,
+            cmux,
         },
     )?;
     let passed = !first.timed_out && first.success;
@@ -236,6 +252,7 @@ fn run_inheriting(
                 log: &rerun_log,
                 skipped: skipped.as_ref(),
                 rerun: Some(&failed),
+                cmux,
             },
         ) {
             Ok(again) => {
@@ -325,12 +342,43 @@ pub fn read_quarantine(checkout: &Path) -> QuarantineFile {
     }
 }
 
-/// One run of the e2e of the gate: where its output goes, the tests not run
-/// and, for the rerun, the tests to run by name.
+/// One run of the e2e of the gate: where its output goes, the tests not run,
+/// for the rerun the tests to run by name, and how its cleanup reaches cmux.
 struct Pass<'a> {
     log: &'a Path,
     skipped: Option<&'a E2eSkip>,
     rerun: Option<&'a [String]>,
+    cmux: CmuxReach<'a>,
+}
+
+/// How the gate's cleanups reach cmux (ADR-t2105-1).
+#[derive(Debug, Clone, Copy)]
+enum CmuxReach<'a> {
+    /// No cmux is given: nothing is looked for in one.
+    None,
+    /// It answered `ping`: its workspaces and groups are closed.
+    Answers(&'a Path),
+    /// It did not answer, for this reason: it is not called, and the root
+    /// is kept for a later gate ([`clean_up_without_cmux`]).
+    Unanswered(&'a str),
+}
+
+impl<'a> CmuxReach<'a> {
+    fn of(cmux: Option<&'a Path>, unanswered: Option<&'a str>) -> Self {
+        match (cmux, unanswered) {
+            (None, _) => Self::None,
+            (Some(_), Some(reason)) => Self::Unanswered(reason),
+            (Some(cmux), None) => Self::Answers(cmux),
+        }
+    }
+
+    fn clean_up(self, root: &Path) -> Value {
+        match self {
+            Self::None => clean_up(root, None),
+            Self::Answers(cmux) => clean_up(root, Some(cmux)),
+            Self::Unanswered(reason) => clean_up_without_cmux(root, reason),
+        }
+    }
 }
 
 /// How one run went.
@@ -363,6 +411,7 @@ fn pass(
     let root = settings
         .scratch
         .join(format!("{stamp}{kind}-{}", std::process::id()));
+    let _in_use = InUse::take(&root);
     fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     if let Some(dir) = how.log.parent() {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -465,7 +514,7 @@ fn pass(
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
-            clean_up(&root, settings.cmux.as_deref());
+            how.cmux.clean_up(&root);
             return Err(error).context("start the e2e");
         }
     };
@@ -495,7 +544,7 @@ fn pass(
     {
         let _ = file.read_to_string(&mut output);
     }
-    let cleanup = clean_up(&root, settings.cmux.as_deref());
+    let cleanup = how.cmux.clean_up(&root);
     let _ = writeln!(
         log,
         "== the {} {} after {secs}s; cleanup: {cleanup}",
@@ -593,17 +642,13 @@ pub fn passed_tests(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// `cmux ping`, or why the e2e cannot start.
+/// `cmux ping`, or why cmux does not answer.
 fn ping(cmux: &Path) -> Result<()> {
-    let output = bounded(Command::new(cmux).arg("ping")).with_context(|| {
-        format!(
-            "the e2e needs a running cmux, and {} did not run",
-            cmux.display()
-        )
-    })?;
+    let output = bounded(Command::new(cmux).arg("ping"))
+        .with_context(|| format!("{} did not run", cmux.display()))?;
     ensure!(
         output.status.success(),
-        "the e2e needs a running cmux, and `{} ping` failed ({}): {}",
+        "`{} ping` failed ({}): {}",
         cmux.display(),
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
@@ -677,6 +722,48 @@ fn stop_group(leader: &mut Child, grace: Duration) -> Option<ExitStatus> {
     ended.or_else(|| leader.wait().ok())
 }
 
+/// The roots of this process's gates that are running, which a gate of the
+/// same process does not clean up.
+static IN_USE: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// A root of this process's gate in use while this lives.
+struct InUse(PathBuf);
+
+impl InUse {
+    fn take(root: &Path) -> Self {
+        IN_USE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(root.to_path_buf());
+        Self(root.to_path_buf())
+    }
+}
+
+impl Drop for InUse {
+    fn drop(&mut self) {
+        let mut in_use = IN_USE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(at) = in_use.iter().position(|root| *root == self.0) {
+            in_use.swap_remove(at);
+        }
+    }
+}
+
+/// Whether the gate that made `dir` is done with it: its process is gone,
+/// or it is this process and no gate of it runs there.
+fn finished(dir: &Path) -> bool {
+    match owner(dir) {
+        Some(pid) if pid == std::process::id() => !IN_USE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|root| root == dir),
+        Some(pid) => !alive(pid),
+        None => true,
+    }
+}
+
 /// The pid of the gate that made `dir` (`<unix time>-<pid>`).
 fn owner(dir: &Path) -> Option<u32> {
     dir.file_name()?.to_str()?.rsplit_once('-')?.1.parse().ok()
@@ -709,18 +796,29 @@ pub fn queue_hashes(root: &Path) -> Vec<String> {
     hashes
 }
 
+/// The file in a gate's root naming the queue hashes whose cmux groups are
+/// still to be deleted, kept when the root is.
+const REMEMBERED_HASHES: &str = ".cleanup-queue-hashes.json";
+
+/// The queue hashes of `root`'s fixtures and those its
+/// [`REMEMBERED_HASHES`] names.
+fn hashes_to_clean(root: &Path) -> Vec<String> {
+    let mut hashes = queue_hashes(root);
+    if let Ok(bytes) = fs::read(root.join(REMEMBERED_HASHES))
+        && let Ok(saved) = serde_json::from_slice::<Vec<String>>(&bytes)
+    {
+        hashes.extend(saved);
+    }
+    hashes
+}
+
 /// Clean up what the e2e left under `root`: processes, cmux workspaces
 /// and groups, then the directory. On failure keep the root and queue
 /// hashes so the next gate can retry even after the fixtures are gone.
 pub fn clean_up(root: &Path, cmux: Option<&Path>) -> Value {
     let stopped = stop_processes_inside(root);
-    let mut hashes = queue_hashes(root);
-    let remembered = root.join(".cleanup-queue-hashes.json");
-    if let Ok(bytes) = fs::read(&remembered)
-        && let Ok(saved) = serde_json::from_slice::<Vec<String>>(&bytes)
-    {
-        hashes.extend(saved);
-    }
+    let mut hashes = hashes_to_clean(root);
+    let remembered = root.join(REMEMBERED_HASHES);
     let mut deleted = Vec::new();
     let mut closed = Vec::new();
     let mut errors = Vec::new();
@@ -781,6 +879,55 @@ pub fn clean_up(root: &Path, cmux: Option<&Path>) -> Value {
         "groups": deleted,
         "workspaces": closed,
         "removed": removed,
+        "errors": errors,
+    })
+}
+
+/// Clean up what the e2e left under `root` when cmux does not answer for
+/// `reason` (ADR-t2105-1), calling no cmux: stop the processes inside it,
+/// write its queue hashes and those it remembered to its
+/// [`REMEMBERED_HASHES`], then remove the rest of it. The root is kept
+/// (`removed` false, `cmux_left` the reason) for a later gate that cmux
+/// answers to find, close the workspaces that point inside it and the
+/// groups of those hashes, and remove it; when the hashes cannot be
+/// written, the root is kept whole.
+pub fn clean_up_without_cmux(root: &Path, reason: &str) -> Value {
+    let stopped = stop_processes_inside(root);
+    let mut hashes = hashes_to_clean(root);
+    hashes.sort();
+    hashes.dedup();
+    let mut errors = Vec::new();
+    match fs::create_dir_all(root).and_then(|()| {
+        fs::write(
+            root.join(REMEMBERED_HASHES),
+            serde_json::to_vec(&hashes).unwrap(),
+        )
+    }) {
+        Err(error) => errors.push(format!("remember cleanup queue hashes: {error}")),
+        Ok(()) => {
+            for entry in fs::read_dir(root).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if entry.file_name() == REMEMBERED_HASHES {
+                    continue;
+                }
+                let removed = if path.is_dir() && !path.is_symlink() {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+                if let Err(error) = removed {
+                    errors.push(format!("remove {}: {error}", path.display()));
+                }
+            }
+        }
+    }
+    json!({
+        "dir": root,
+        "processes": stopped,
+        "groups": [],
+        "workspaces": [],
+        "removed": false,
+        "cmux_left": reason,
         "errors": errors,
     })
 }
@@ -1749,7 +1896,8 @@ echo 'test result: FAILED. 0 passed; 2 failed'; exit 101";
     }
 
     /// An earlier gate's directory is cleaned up before the e2e unless its
-    /// gate still runs.
+    /// gate still runs: one of another live process, or one of this process
+    /// whose gate has not ended (ADR-t2105-1).
     #[test]
     fn a_gate_cleans_up_what_a_gone_gate_left_but_not_a_running_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -1757,12 +1905,19 @@ echo 'test result: FAILED. 0 passed; 2 failed'; exit 101";
         let settings = settings(dir, "exit 0", Duration::from_secs(30));
         // No pid is this large; this test's own is alive.
         let gone = settings.scratch.join("1-4000000000");
-        let running = settings.scratch.join(format!("1-{}", std::process::id()));
+        // The parent of this test's process is alive; a root of this
+        // process's own is in use only while its gate runs.
+        // SAFETY: getppid has no preconditions.
+        let parent = unsafe { libc::getppid() };
+        let running = settings.scratch.join(format!("1-{parent}"));
+        let own_done = settings.scratch.join(format!("2-{}", std::process::id()));
+        fs::create_dir_all(&own_done).unwrap();
         fs::create_dir_all(gone.join(".tmpA/data/dagq/q1")).unwrap();
         fs::create_dir_all(&running).unwrap();
         assert!(run(dir, None, &settings).unwrap().passed);
         assert!(!gone.exists());
         assert!(running.exists());
+        assert!(!own_done.exists());
         let calls = fs::read_to_string(dir.join("cmux-calls")).unwrap();
         assert!(calls.contains("workspace-group delete G-1"), "{calls}");
     }
@@ -1776,9 +1931,10 @@ echo 'test result: FAILED. 0 passed; 2 failed'; exit 101";
         let settings = settings(dir, "exit 0", Duration::from_secs(30));
         let current = settings.scratch.join("current-4000000000");
         let gone = settings.scratch.join("old-4000000000");
+        // SAFETY: getppid has no preconditions.
         let live = settings
             .scratch
-            .join(format!("live-{}", std::process::id()));
+            .join(format!("live-{}", unsafe { libc::getppid() }));
         for root in [&current, &gone, &live] {
             fs::create_dir_all(root).unwrap();
         }
@@ -1912,22 +2068,197 @@ echo 'test result: FAILED. 0 passed; 2 failed'; exit 101";
         assert!(!calls.contains("workspace-group delete"));
     }
 
-    /// Without a running cmux the e2e does not start: the gates run every
-    /// e2e, the `up` / `down` one that opens the inbox included, so a host
-    /// whose cmux does not answer passes none by running only the e2e that
-    /// need no cmux (ADR-t963-1 decision 1, ADR-t1233-2 decision 3,
-    /// ADR-t1433-1 decision 3).
+    /// A cmux that answers `ping` has every e2e run (none skipped) and a
+    /// failure fails; one that does not answer has only the e2e that need
+    /// cmux skipped (`--skip` through `DAGQ_E2E_SKIP`), named with the
+    /// reason in the outcome, its report and the log, beside podman's; the
+    /// rest still decide (ADR-t2105-1). Its cleanup calls no cmux and keeps
+    /// the root with the queue hash.
     #[test]
-    fn the_e2e_needs_a_running_cmux() {
+    fn cmux_that_does_not_answer_skips_only_the_cmux_e2e_and_says_so() {
+        use crate::application::install::CMUX_E2E;
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
-        let mut settings = settings(dir, "exit 0", Duration::from_secs(5));
-        settings.cmux = Some(fake_cmux(dir, true));
-        let error = run(dir, None, &settings).unwrap_err();
+        let command = "mkdir -p \"$TMPDIR/.tmpA/data/dagq/q1\"; echo \"skip [$DAGQ_E2E_SKIP]\"; \
+echo 'test e2e::a ... ok'";
+        let mut settings = settings(dir, command, Duration::from_secs(30));
+        let outcome = run(dir, None, &settings).unwrap();
+        assert!(outcome.passed && outcome.skipped.is_none(), "{outcome:?}");
         assert!(
-            format!("{error:#}").contains("needs a running cmux"),
-            "{error:#}"
+            fs::read_to_string(&settings.log)
+                .unwrap()
+                .contains("skip []")
         );
-        assert!(!settings.log.exists());
+        let failing = self::settings(
+            dir,
+            "echo 'test e2e::broken ... FAILED'; exit 101",
+            Duration::from_secs(30),
+        );
+        let outcome = run(dir, None, &failing).unwrap();
+        assert!(!outcome.passed && outcome.skipped.is_none(), "{outcome:?}");
+        fs::remove_file(dir.join("cmux-calls")).unwrap();
+        fs::remove_file(&settings.log).unwrap();
+
+        settings.cmux = Some(fake_cmux(dir, true));
+        let outcome = run(dir, None, &settings).unwrap();
+        assert!(outcome.passed, "{outcome:?}");
+        let skipped = outcome.skipped.clone().unwrap();
+        assert_eq!(skipped.tests, CMUX_E2E);
+        assert!(
+            skipped.reason.starts_with("cmux did not answer: ")
+                && skipped.reason.contains("no socket"),
+            "{skipped:?}"
+        );
+        let log = fs::read_to_string(&settings.log).unwrap();
+        assert!(
+            log.contains(&format!("skip [{}]", CMUX_E2E.join(" "))),
+            "{log}"
+        );
+        assert!(log.contains(&skipped.sentence()), "{log}");
+        assert_eq!(
+            outcome.report(&settings)["skipped"],
+            skipped.to_json(),
+            "{outcome:?}"
+        );
+        // Only the ping reached cmux; the root is kept with its hash.
+        assert_eq!(
+            fs::read_to_string(dir.join("cmux-calls")).unwrap(),
+            "ping\n"
+        );
+        assert_eq!(outcome.cleanup["removed"], false, "{outcome:?}");
+        assert!(
+            outcome.cleanup["cmux_left"]
+                .as_str()
+                .unwrap()
+                .contains("no socket"),
+            "{outcome:?}"
+        );
+        let root = PathBuf::from(outcome.cleanup["dir"].as_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(root.join(REMEMBERED_HASHES)).unwrap(),
+            r#"["q1"]"#
+        );
+        assert!(!root.join(".tmpA").exists());
+
+        // With podman cut too, both are named; a failure still fails.
+        settings.podman = Some(fake_podman(dir, true));
+        let outcome = run(dir, None, &settings).unwrap();
+        let skipped = outcome.skipped.unwrap();
+        assert_eq!(skipped.tests, [CMUX_E2E, &["broker::"]].concat());
+        assert!(
+            skipped.reason.contains("cmux did not answer")
+                && skipped.reason.contains("podman could not be reached"),
+            "{skipped:?}"
+        );
+        let mut failing = failing;
+        failing.cmux = Some(fake_cmux(dir, true));
+        let outcome = run(dir, None, &failing).unwrap();
+        assert!(!outcome.passed && outcome.skipped.is_some(), "{outcome:?}");
+        assert_eq!(outcome.failed_tests, ["e2e::broken"]);
+
+        // The next gate of this process that cmux answers closes the group
+        // of the kept root and removes it.
+        assert!(root.exists());
+        fs::remove_file(dir.join("cmux-calls")).unwrap();
+        let answering = self::settings(dir, "exit 0", Duration::from_secs(30));
+        assert!(run(dir, None, &answering).unwrap().passed);
+        assert!(!root.exists());
+        assert!(subdirectories(&answering.scratch).is_empty());
+        let calls = fs::read_to_string(dir.join("cmux-calls")).unwrap();
+        assert!(calls.contains("workspace-group delete G-1"), "{calls}");
+    }
+
+    /// A cleanup without cmux calls none, stops what runs inside the root,
+    /// keeps the root with the fixture's queue hash and the ones remembered
+    /// before, and says why (ADR-t2105-1); the next cleanup cmux answers
+    /// finds that root, deletes the groups of those hashes, closes the
+    /// workspace pointing inside it and removes it.
+    #[test]
+    fn a_cleanup_without_cmux_leaves_the_root_for_one_with_cmux() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let root = dir.join("scratch").join("1-4000000000");
+        fs::create_dir_all(root.join(".tmpA/data/dagq/q1")).unwrap();
+        fs::write(root.join(REMEMBERED_HASHES), r#"["q0"]"#).unwrap();
+        fs::write(root.join("stray"), "").unwrap();
+        // A process whose command line names the root, which ends by itself
+        // after the test process and is killed with its group on drop,
+        // should the cleanup miss it.
+        let sleeper = root.join("sleeper");
+        fs::write(&sleeper, while_the_test_runs()).unwrap();
+        let quote =
+            |path: &Path| crate::application::naming::shell_quote(&path.display().to_string());
+        let mut sleeping = group_leader(&format!("exec /bin/sh {}", quote(&sleeper)));
+        // Wait (with a limit) until the shell has become the sleeper.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !bounded(
+            Command::new("ps")
+                .args(["-ww", "-o", "command=", "-p"])
+                .arg(sleeping.leader.id().to_string()),
+        )
+        .is_ok_and(|ps| String::from_utf8_lossy(&ps.stdout).contains("sleeper"))
+        {
+            assert!(Instant::now() < deadline, "the sleeper did not start");
+            thread::sleep(Duration::from_millis(50));
+        }
+        let cmux = fake_cmux(dir, false);
+        let cleanup = clean_up_without_cmux(&root, "`cmux ping` failed: Access denied");
+        assert!(!dir.join("cmux-calls").exists(), "cmux was called");
+        assert_eq!(
+            cleanup["processes"],
+            json!([sleeping.leader.id()]),
+            "{cleanup}"
+        );
+        assert!(sleeping.stop(Duration::ZERO).is_some());
+        assert_eq!(cleanup["removed"], false);
+        assert_eq!(cleanup["cmux_left"], "`cmux ping` failed: Access denied");
+        assert_eq!(cleanup["errors"], json!([]));
+        assert!(root.exists());
+        assert_eq!(
+            fs::read_to_string(root.join(REMEMBERED_HASHES)).unwrap(),
+            r#"["q0","q1"]"#
+        );
+        assert_eq!(
+            fs::read_dir(&root).unwrap().count(),
+            1,
+            "only the hashes are kept"
+        );
+
+        let calls = dir.join("cmux-calls");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> {}\ncase \"$*\" in\n\
+*list-windows*) echo '[{{\"id\":\"W\"}}]' ;;\n\
+*'workspace list --window W') echo '{{\"workspaces\":[{{\"id\":\"inbox\"}},{{\"id\":\"other\"}}]}}' ;;\n\
+'workspace env inbox --json') echo {} ;;\n\
+'workspace env other --json') echo {} ;;\n\
+*'workspace-group list') echo '{{\"groups\":[{{\"id\":\"G0\",\"external_id\":\"q0\"}},\
+{{\"id\":\"G1\",\"external_id\":\"q1\"}},{{\"id\":\"PROD\",\"external_id\":\"production\"}}]}}' ;;\nesac\n",
+            quote(&calls),
+            crate::application::naming::shell_quote(
+                &json!({"env": {"DAGQ_QUEUE": root.join(".tmpA/data/dagq/q1/queue.db")}})
+                    .to_string()
+            ),
+            crate::application::naming::shell_quote(
+                &json!({"env": {"DAGQ_QUEUE": dir.join("data/dagq/production/queue.db")}})
+                    .to_string()
+            ),
+        );
+        // `settings` makes the fake cmux anew, so the script goes after.
+        let settings = settings(dir, "exit 0", Duration::from_secs(30));
+        fs::write(&cmux, script).unwrap();
+        assert!(run(dir, None, &settings).unwrap().passed);
+        assert!(!root.exists());
+        let calls = fs::read_to_string(calls).unwrap();
+        assert!(calls.contains("workspace close inbox"), "{calls}");
+        assert!(!calls.contains("workspace close other"), "{calls}");
+        for group in ["G0", "G1"] {
+            assert!(
+                calls.contains(&format!(
+                    "workspace-group delete {group} --close-workspaces"
+                )),
+                "{calls}"
+            );
+        }
+        assert!(!calls.contains("delete PROD"), "{calls}");
     }
 }

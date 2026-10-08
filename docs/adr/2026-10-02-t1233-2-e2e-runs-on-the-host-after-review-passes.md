@@ -9,6 +9,7 @@ accepted_on: 2026-10-02
 amended_by:
   - adr-t1433-1
   - adr-t1582-1
+  - adr-t2105-1
 amends:
   - adr-t963-1 decision 2
   - adr-t963-1 decision 5

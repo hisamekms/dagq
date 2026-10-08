@@ -484,9 +484,9 @@ fn e2e_gate(
         "cleanup": outcome.cleanup,
     });
     extend(&mut passed, &verdict.fields);
-    // The tests it did not run for want of podman go on to the
+    // The tests it did not run for want of podman or cmux go on to the
     // `update_installed` too, so the swap does not pass them silently
-    // (ADR-t1162-1).
+    // (ADR-t1162-1, ADR-t2105-1).
     if let Some(skipped) = &outcome.skipped {
         passed["skipped"] = skipped.to_json();
         job.e2e_skipped.replace(Some(skipped.clone()));

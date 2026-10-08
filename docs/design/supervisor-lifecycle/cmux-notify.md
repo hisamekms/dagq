@@ -38,4 +38,4 @@ supervisor・queue service・observerは`cmux notify`を呼ばず、askを開く
 通知は人への知らせで、inboxのClaudeのsessionを起こさない。
 watchが張られていないあいだは通知も出ないので、その後ろ盾は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)の層が持つ: watcherの記録（[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが待つときのsupervisorの`inbox_nudged`と`[push]`（[inboxへの知らせ](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）。
 supervisorはinboxの画面を読まず、どのterminalにも打ち込まず、`cmux notify`も送らない。
-supervisorの中でcmuxに触れるのは、着地の前のe2eの関門が前提として打つ`ping`とe2eの後始末だけ（[Review](review.md#着地の前のe2e)）。
+supervisorの中でcmuxに触れるのは、着地の前のe2eの関門が打つ`ping`（答えなければ実cmuxを要るe2eを外す）と、cmuxが答えたときのe2eの後始末だけ（[Review](review.md#着地の前のe2e)）。

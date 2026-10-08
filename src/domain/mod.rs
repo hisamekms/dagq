@@ -2002,8 +2002,8 @@ pub enum AttentionNext {
     /// log, and runs `up` again. It ends once the service runs again.
     QueueServiceStatus,
     /// The runtime's e2e of a run after its review could not run several
-    /// times in a row (cmux not answering, a `[run.env]` that cannot be
-    /// read: `run_e2e_finished` with `outcome: unavailable` and
+    /// times in a row (it could not start, a `[run.env]` that cannot be
+    /// read, past its timeout: `run_e2e_finished` with `outcome: unavailable` and
     /// `attention: true`, ADR-t1233-2 decision 3): a person reads its error
     /// and log and fixes the host. The supervisor keeps trying; it ends
     /// once the run's e2e runs.

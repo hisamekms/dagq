@@ -553,7 +553,7 @@ name = \"b\"\nreason = \"x\\ty\"\ntask = 3\nuntil = \"2024-02-29\"\n";
         let history = [
             event(
                 RUN_E2E_FINISHED,
-                json!({"outcome": "unavailable", "error": "no cmux"}),
+                json!({"outcome": "unavailable", "error": "the e2e could not start"}),
             ),
             event(RUN_E2E_FAILED, json!({"rerun": {"failed": ["b"]}})),
             event(
