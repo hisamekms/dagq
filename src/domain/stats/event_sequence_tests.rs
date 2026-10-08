@@ -519,6 +519,11 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
         first.as_object_mut().unwrap().remove("e2e"),
         Some(Value::Null)
     );
+    // No Execution recorded its context.
+    assert_eq!(
+        first.as_object_mut().unwrap().remove("context"),
+        Some(Value::Null)
+    );
     assert_eq!(
         first,
         json!({

@@ -233,9 +233,10 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 
 ## トークン数
 
-- 入口: runとgoalは`tokens`と`RunTokens`・`TokenSummary`、期間の集計は`executions`。
+- 入口: runとgoalは`tokens`と`RunTokens`・`TokenSummary`、期間の集計は`executions`、contextの大きさは`context`。
 - runとgoalの分はrunの区間が閉じたときの記録の和で、日には分けない。
 - 期間の集計（`execution_tokens`と`sessions`の`tokens`）は窓の中で終わったExecutionと区切りの和で、区間が閉じた日にまとめない（[Executionのトークン数](../execution-tokens.md#statsとkpiでの集約)）。
+- contextの大きさは、記録の無い・未計測・windowの分からないExecutionを0に混ぜず、欄ごとに件数を分ける。
 
 ## 重さの予測と実績
 

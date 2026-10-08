@@ -203,11 +203,17 @@ impl TimeSummary {
     }
 }
 
-/// Active time over open time, to three places; serialized as a number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A ratio to three places (active time over open time, a peak context
+/// over its window); serialized as a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ratio(i64);
 
 impl Ratio {
+    /// The ratio of `thousandths`.
+    pub(super) const fn thousandths_of(thousandths: i64) -> Self {
+        Self(thousandths)
+    }
+
     /// `part / whole`; `None` when `whole` is not positive.
     pub fn of(part: i64, whole: i64) -> Option<Self> {
         (whole > 0).then(|| Self((part * 1000 + whole / 2) / whole))
@@ -245,6 +251,13 @@ pub struct KindSessions {
     /// ([`super::executions`]); `stats` puts them in after counting the
     /// spans.
     pub tokens: ExecutionTotals,
+    /// How large the context of the same Executions grew, per provider:
+    /// the spreads of `peak_context`, its ratio to `context_window` and
+    /// `compactions` that their `turn_finished` or job's end recorded, and
+    /// the Executions without them ([`super::context::ContextStats`]); an
+    /// interactive span's cuts record none. `stats` puts them in with
+    /// `tokens`.
+    pub context: BTreeMap<String, super::context::ContextStats>,
     /// Its spans closed in the window per the model and effort their
     /// messages mostly used, `model effort` (task 579); spans that recorded
     /// none are not listed.

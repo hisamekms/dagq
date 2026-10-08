@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use super::{rfc3339_millis, timestamp_millis, tokens::Usd};
+use super::{context::RecordedContext, rfc3339_millis, timestamp_millis, tokens::Usd};
 use crate::domain::{
     GoalId, Provider, RunEvent, RunId, TaskId, event_kind,
     sessions::{
@@ -115,6 +115,9 @@ pub struct Execution {
     /// Its tokens per model; together they are `tokens`. What no model
     /// was named for is [`UNKNOWN`]'s.
     pub by_model: Vec<(String, Counts)>,
+    /// How large its context grew; `None` when its record has none
+    /// ([`super::context`]).
+    pub context: Option<RecordedContext>,
 }
 
 /// The actor of the event that ends an Execution, and its route; `None`
@@ -235,6 +238,7 @@ pub fn executions(events: &[RunEvent]) -> Vec<Execution> {
             goal_id: event.goal_id,
             tokens,
             by_model,
+            context: RecordedContext::of(payload),
         });
     }
     executions

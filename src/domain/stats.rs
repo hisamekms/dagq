@@ -19,6 +19,7 @@ pub mod asks;
 pub mod auto_repairs;
 pub mod cargo;
 pub mod conflicts;
+pub mod context;
 pub mod drafts;
 pub mod escalations;
 pub mod executions;
@@ -275,6 +276,11 @@ pub struct RunStats {
     /// The tokens its sessions used (task 199), all of them and per kind of
     /// session; null when none recorded them.
     pub tokens: Option<RunTokens>,
+    /// How large the context of its Executions grew, beside `tokens`: of
+    /// its own sessions' turns (`turn_finished`) and its jobs' ends,
+    /// whenever they ended ([`context::RunContext`]); null without an
+    /// Execution.
+    pub context: Option<context::RunContext>,
     /// The last weight plan review predicted for its task before it started
     /// (ADR-0079 decision 2), and where it fell among the latest
     /// predictions; null without one.
@@ -874,6 +880,8 @@ pub fn stats(
     }
 
     let spans = sessions::spans(events);
+    let all_executions = executions::executions(events);
+    let run_contexts = context::per_run(&context::records(&all_executions));
     let mut reviews: HashMap<&str, Vec<RunEvent>> = HashMap::new();
     for event in events.iter().filter(|event| {
         matches!(
@@ -905,6 +913,7 @@ pub fn stats(
                 .filter_map(|s| Some((s.kind.as_str(), s.tokens.as_ref()?))),
         );
         track.stats.session_spans = run_spans;
+        track.stats.context = run_contexts.get(&track.stats.run_id).cloned();
     }
     predictions::attach(
         events,
@@ -1171,7 +1180,7 @@ pub fn stats(
             .and_then(|event| timestamp_millis(&event.created_at))
     });
     let execution_tokens = executions::window(
-        &executions::executions(events),
+        &all_executions,
         tokens_from,
         window_until,
         |execution| match (execution.task_id, execution.goal_id) {
@@ -1179,10 +1188,16 @@ pub fn stats(
             (task_id, _) => counts(task_id),
         },
     );
+    let mut kind_contexts = context::by_kind(
+        &context::records(&execution_tokens.executions),
+        tokens_from,
+        window_until,
+    );
     for (kind, kind_sessions) in &mut sessions.by_kind {
         if let Some(actor) = execution_tokens.by_actor.get(kind) {
             kind_sessions.tokens = actor.totals.clone();
         }
+        kind_sessions.context = kind_contexts.remove(*kind).unwrap_or_default();
     }
     for (kind, routes) in &mut sessions.by_route {
         for (route, route_sessions) in routes.iter_mut() {
@@ -1191,6 +1206,13 @@ pub fn stats(
                 .iter()
                 .find(|((of, on), _)| of == kind && on == route)
                 .map(|(_, totals)| totals.clone())
+                .unwrap_or_default();
+            let route_records =
+                context::records(execution_tokens.executions.iter().filter(|execution| {
+                    execution.actor == *kind && execution.route == Some(route)
+                }));
+            route_sessions.context = context::by_kind(&route_records, tokens_from, window_until)
+                .remove(*kind)
                 .unwrap_or_default();
         }
     }
@@ -1954,6 +1976,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     sessions: BTreeMap::new(),
                     work_breakdown: None,
                     tokens: None,
+                    context: None,
                     prediction: None,
                     actual: RunActual::default(),
                     review_reasons: Vec::new(),
@@ -3395,6 +3418,106 @@ mod tests {
             tokens["by_actor"]["observer"]["by_provider"]["codex"]["executions"],
             1
         );
+    }
+
+    /// How large the context grew: a run has the largest peak and ratio of
+    /// its turns and jobs and their compactions together, and the window's
+    /// sessions per kind and provider have the spreads; a Codex review
+    /// whose rollout was missing is counted as missing, not as a 0 beside
+    /// the one that measured no compaction. A route has the context of its
+    /// kind's Executions on it.
+    #[test]
+    fn the_context_is_read_per_run_and_per_kind_and_provider() {
+        let tokens = json!({"input": 1, "output": 1, "cache_read": 0, "cache_creation": 0});
+        let ended = |id: i64, kind: &str, provider: &str, context: Value, secs: i64| {
+            let mut payload = json!({"provider": provider, "tokens": tokens,
+                                     "tokens_source": "model_usage", "tokens_by_model": []});
+            for (key, value) in context.as_object().unwrap() {
+                payload[key] = value.clone();
+            }
+            run_event(id, R1, kind, payload, secs)
+        };
+        let measured = |peak: i64, window: i64, compactions: i64| {
+            json!({"peak_context": peak, "context_window": window, "compactions": compactions,
+                   "context_reason": null})
+        };
+        let events = vec![
+            run_event(1, R1, "run_claimed", json!({}), T),
+            run_event(
+                2,
+                R1,
+                "session_opened",
+                json!({"kind": "worker", "route": "headless"}),
+                T + 5,
+            ),
+            ended(
+                3,
+                "turn_finished",
+                "claude",
+                measured(150_000, 200_000, 1),
+                T + 10,
+            ),
+            ended(
+                4,
+                "turn_finished",
+                "claude",
+                measured(50_000, 200_000, 0),
+                T + 20,
+            ),
+            ended(
+                5,
+                "review_finished",
+                "codex",
+                measured(80_000, 400_000, 0),
+                T + 30,
+            ),
+            ended(
+                6,
+                "review_finished",
+                "codex",
+                json!({"peak_context": null, "context_window": null, "compactions": null,
+                       "context_reason": "rollout_missing"}),
+                T + 40,
+            ),
+            run_event(7, R1, "run_integrated", json!({}), T + 50),
+        ];
+        let all = stats(
+            &events,
+            &HashMap::new(),
+            T + 100,
+            SlotSnapshot::default(),
+            &StatsQuery {
+                full: true,
+                ..StatsQuery::default()
+            },
+            &LiveSnapshot::default(),
+        );
+        let json = serde_json::to_value(&all).unwrap();
+        assert_eq!(
+            json["runs"][0]["context"],
+            json!({"executions": 4, "not_recorded": 0, "peak_context": 150_000,
+                   "peak_context_missing": 1, "window_ratio": 0.75, "window_ratio_missing": 1,
+                   "compactions": 1, "compactions_missing": 1})
+        );
+        let by_kind = &json["sessions"]["by_kind"];
+        assert_eq!(
+            by_kind["worker"]["context"]["claude"]["peak_context"],
+            json!({"count": 2, "median": 100_000, "p90": 150_000, "max": 150_000,
+                   "missing": 0, "missing_by_reason": {}})
+        );
+        let codex = &by_kind["review"]["context"]["codex"];
+        assert_eq!(codex["executions"], 2);
+        assert_eq!(
+            codex["compactions"],
+            json!({"count": 1, "median": 0, "p90": 0, "max": 0,
+                   "missing": 1, "missing_by_reason": {"rollout_missing": 1}})
+        );
+        assert_eq!(codex["window_ratio"]["max"], json!(0.2));
+        assert_eq!(by_kind["observer"]["context"], json!({}));
+        // A route has the context of its kind's Executions on it.
+        let headless = &json["sessions"]["by_route"]["worker"]["headless"]["context"];
+        assert_eq!(headless["claude"]["executions"], 2);
+        assert_eq!(headless["claude"], by_kind["worker"]["context"]["claude"]);
     }
 
     /// An inbox open across midnight (ADR-t1486-1 decision 3): each day's
