@@ -282,7 +282,7 @@ host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の
 
 ## 検査できる規則
 
-規則のIDは検査のscriptとreviewのsubagentが参照するので変えない。
+規則のIDは変えない。
 規則を変えるときはIDを足すか、古いIDを「廃止」と書いて残す。
 各規則の「検査」は、script（機械）で見るかreviewで見るかを書く。
 
@@ -343,7 +343,6 @@ host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の
 ### transactionの規則
 
 - **X1** 複数のcontextの状態を変える1つのtransactionは、上の一覧のIDを持つものだけ。
-  新しく要るときは同じ変更で一覧に足す。
   検査: review。
 - **X2** 境界の規則のためにtransactionを分けない。
   一覧のtransactionの述語（`WHERE status IN (...)`・`renew_lease`・`BEGIN IMMEDIATE`）を外へ出さない（ADR-0013決定9）。
@@ -351,7 +350,6 @@ host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の
 - **X3** 一覧のtransactionの中で、他のcontextの状態を変えるのは、そのcontextのinfrastructureが公開する関数（`infrastructure::sqlite::transition_task`など）を通す。
   SQLの文を書き写さない。
   検査: review。
-  今のT1・T2・T6はこの形になっていない（「[今の違反と行き先](#今の違反と行き先)」）。
 
 ### 検査の範囲
 
@@ -378,6 +376,7 @@ reviewで見る規則の行は、行き先をこの表の言葉で書く。
 | C3 | `Supervisor`と、`impl Supervisor`を持つ`supervise/`のsubmodule | submoduleが他のcontextの欄を変える | 残りの欄の分割 |
 | C4 | `Box<dyn Queue>`などを取るuse case（`application::lifecycle`・`health`・`supervise`ほか） | 要るportだけを取っていない | portの分割 |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | portの分割 |
+| C5 | `src/application/health.rs`の`attention`（`status`が呼ぶ）の`planner_question`のaskの分岐 | 観測と分析が計画管理の内部の`DraftPlannerStore::planner_answer_route`を読む | portの分割 |
 | C6 | `src/application/supervise/resume.rs`・`supervise/recheck.rs`・`supervise/recovery.rs`ほか | 判断に使うeventのpayloadを文字列のkeyで読む | 型付きの復元の値（`domain::run::payload`の形）へ |
 | X3・C1 | T1: `src/infrastructure/sqlite.rs`の`claim_task`（計画管理のstore）が`INSERT INTO task_runs`を書く | 計画管理のstoreが実行と着地の表をSQLで直接書く | 未登録（follow_up） |
 | X3・C1 | T2: `src/infrastructure/runtime_store/transitions.rs`の`finish_integration`が`UPDATE tasks SET status='completed'`を書く | 実行と着地のstoreが計画管理の表を`transition_task`を通さず書く | 未登録（follow_up） |
