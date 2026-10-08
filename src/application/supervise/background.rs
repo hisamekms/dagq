@@ -4,6 +4,7 @@
 //! wrapper waits for before it registers.
 
 use super::*;
+use crate::application::prompt::PromptBytes;
 use crate::domain::background_wrapper::{
     BACKGROUND_FLAG, BackgroundHandle, HeadlessWrapper, StopRoute, is_background, launch_of,
     session_log_name, wrapper_is_recorded,
@@ -80,20 +81,28 @@ impl Supervisor<'_> {
     /// record that cannot be made stops the wrapper, which nothing would
     /// find. Nothing for a handle that is not a background wrapper's (a
     /// test backend's).
-    pub(super) fn record_launch(&mut self, run: &TaskRun, handle: &str, log: &Path) -> Result<()> {
+    pub(super) fn record_launch(
+        &mut self,
+        run: &TaskRun,
+        handle: &str,
+        log: &Path,
+        prompt_bytes: Option<&PromptBytes>,
+    ) -> Result<()> {
         let Some(parsed) = BackgroundHandle::parse(handle) else {
             return Ok(());
         };
-        let recorded = self.queue.record_runtime_event(
-            run.id(),
-            EventKind::WrapperLaunched,
-            json!({
-                "pid": parsed.pid,
-                "start": parsed.start,
-                "workspace_id": handle,
-                "log": log.to_string_lossy(),
-            }),
-        );
+        let mut payload = json!({
+            "pid": parsed.pid,
+            "start": parsed.start,
+            "workspace_id": handle,
+            "log": log.to_string_lossy(),
+        });
+        if let Some(bytes) = prompt_bytes {
+            payload["prompt_bytes"] = json!(bytes);
+        }
+        let recorded =
+            self.queue
+                .record_runtime_event(run.id(), EventKind::WrapperLaunched, payload);
         if let Err(error) = recorded {
             return Err(match stop_session(self.cmux, handle, StopRoute::Unrecorded) {
                 Ok(()) => error.context(format!(

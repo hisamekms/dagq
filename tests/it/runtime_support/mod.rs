@@ -2073,7 +2073,9 @@ pub fn provision_under(repo: &Path, db: &Path, token: &str) -> TaskRun {
     let task = queue.show(run.task_id()).unwrap().task;
     fs::write(
         run_dir.join("prompt.txt"),
-        runtime::prompt(&task, &run, None, &[], &[], &[], None, &[]).unwrap(),
+        runtime::prompt(&task, &run, None, &[], &[], &[], None, &[])
+            .unwrap()
+            .text,
     )
     .unwrap();
     repository.create_worktree(&run).unwrap();

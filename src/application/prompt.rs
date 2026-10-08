@@ -487,14 +487,249 @@ pub(crate) fn local_checks(verify: &str) -> String {
     )
 }
 
-/// Text of `prompt.txt`. `goal` is the task's goal as it reads at claim
-/// time, `predecessors` the task's direct dependencies, `goal_predecessors`
-/// the goals it depends on (in the Predecessor section) and `siblings` the
-/// other tasks executing at claim time (`siblings_in_progress`), and
-/// `inherited` the run a retry carries over, if any. The Goal,
-/// Context, Predecessor and Sibling sections are always present, `none`
-/// when empty, so the prompt keeps one shape whether or not a task has a
-/// goal, a context, dependencies or company.
+/// The bytes the whole worker prompt (`prompt.txt`) takes at most, the
+/// language's instruction included (ADR-t2072-1, which brings ADR-t1566-1
+/// decisions 2 to 6 to the worker): of the 1,245 runs kept on the host on
+/// 2026-10-08 it took 16,109 bytes at the median, 28,065 at p90, 65,971 at
+/// p99 and 124,676 at most, of which the predecessors took up to 81,949,
+/// a run carried over 67,875 and a description 16,320. The limit is the
+/// sum of the sections' limits below (93,000 bytes), the fixed instructions
+/// (about 10,000) and the headings and notes of what was left out (about
+/// 4,000; the largest input of the unit test takes 103,869 bytes), with room
+/// for the resource broker's paragraph (about 1,400 bytes) and the
+/// language's instruction. A prompt at p99 is not cut as a whole; how much
+/// of each section is kept is said by its own limit.
+pub const WORKER_PROMPT_LIMIT: usize = 112_000;
+
+/// The bytes of the task's own title, description, acceptance,
+/// verification commands and declared paths: required material, cut only
+/// past these (said in `over_limit`). A description took 16,320 bytes at
+/// most on the host, an acceptance 2,742 and the verification commands 1,116.
+pub const WORKER_TITLE_BYTES: usize = 1_000;
+pub const WORKER_DESCRIPTION_BYTES: usize = 20_000;
+pub const WORKER_ACCEPTANCE_BYTES: usize = 8_000;
+pub const WORKER_VERIFY_BYTES: usize = 4_000;
+pub const WORKER_PATHS_BYTES: usize = 4_000;
+
+/// The bytes of the goal's title, description (3,135 at most on the
+/// host), acceptance (1,636) and constraints (1,250).
+pub const WORKER_GOAL_TITLE_BYTES: usize = 1_000;
+pub const WORKER_GOAL_DESCRIPTION_BYTES: usize = 6_000;
+pub const WORKER_GOAL_ACCEPTANCE_BYTES: usize = 4_000;
+pub const WORKER_GOAL_CONSTRAINTS_BYTES: usize = 4_000;
+
+/// The bytes of the task's context (2,750 at most on the host).
+pub const WORKER_CONTEXT_BYTES: usize = 6_000;
+
+/// The bytes of the direct predecessors' lines, in the order the queue
+/// gives them, and of one's summary: the rest of a summary is the message
+/// of its result commit. Of the 761 prompts with direct predecessors kept
+/// on the host on 2026-10-08, their lines took 3,514 bytes at the median,
+/// 13,665 at p90 and 81,882 at most; a summary took 2,121 at the median,
+/// 6,580 at p90, 10,433 at p95 and 42,806 at most, and the longest summary
+/// of a prompt 8,766 at p90. So the predecessors of a prompt at p90 are
+/// kept whole, and a summary is cut only past p95.
+pub const WORKER_PREDECESSORS_BYTES: usize = 16_000;
+pub const WORKER_PREDECESSOR_SUMMARY_BYTES: usize = 10_000;
+
+/// The count and bytes of the goals the task depended on (in the order the
+/// queue gives them) with their headings, and the bytes of their completed
+/// tasks' lines, the newest (the highest ID) first: a goal may hold
+/// hundreds of tasks.
+pub const WORKER_GOAL_PREDECESSORS: usize = 5;
+pub const WORKER_GOAL_PREDECESSORS_BYTES: usize = 4_000;
+pub const WORKER_GOAL_TASKS_BYTES: usize = 8_000;
+
+/// The bytes of the sibling tasks' lines, in ID order.
+pub const WORKER_SIBLINGS_BYTES: usize = 3_000;
+
+/// The bytes of a carried-over run's receipt summary and of the reason a
+/// person carried it over by hand.
+pub const WORKER_INHERITED_SUMMARY_BYTES: usize = 3_000;
+pub const WORKER_INHERITED_REASON_BYTES: usize = 1_000;
+
+/// How a worker reads a predecessor's whole summary or a left-out one: the
+/// landing commit's message holds the receipt's summary (ADR-t2072-1: only
+/// the worktree, git and the goal doc, never a `dagq` command).
+const PREDECESSOR_READ: &str = "`git log --grep '^Dagq-Task: <id>$'` in your worktree shows each one's landing commit, whose message holds its summary";
+
+/// One line of a predecessor (indented under a goal by `indent`), its
+/// summary cut to `summary` bytes, and whether it was cut. A line too long
+/// for its section is left out whole, as a long title is.
+fn predecessor_line(
+    indent: &str,
+    predecessor: &PredecessorSummary,
+    summary: usize,
+) -> (String, bool) {
+    // `(not landed)`: no commit holds it.
+    let read = if predecessor.result_commit.starts_with('(') {
+        NOT_READABLE.to_owned()
+    } else {
+        format!(
+            "`git show --no-patch {}` in your worktree prints the whole summary in its message",
+            predecessor.result_commit
+        )
+    };
+    let (summary, cut) = prompt_fit::cut_part(&predecessor.summary, summary, Keep::Start, &read);
+    (
+        format!(
+            "{indent}- task {}: {}; result commit {}; summary: {summary}\n",
+            predecessor.task_id, predecessor.title, predecessor.result_commit,
+        ),
+        cut,
+    )
+}
+
+/// The lines of `lines` [`prompt_fit::pick`] keeps, taken in `order`
+/// within `bytes`, in their own order, and the indices left out; counted
+/// in `fit` as section `name`.
+fn picked_lines(
+    fit: &mut Fit,
+    name: &'static str,
+    lines: &[(String, bool)],
+    order: impl IntoIterator<Item = usize>,
+    (count, bytes): (usize, usize),
+) -> (Vec<bool>, Vec<usize>) {
+    let sizes: Vec<usize> = lines.iter().map(|(line, _)| line.len()).collect();
+    let kept = prompt_fit::pick(&sizes, order, count, bytes);
+    let cuts: Vec<bool> = lines.iter().map(|(_, cut)| *cut).collect();
+    fit.picked(name, &kept, &cuts);
+    let left_out = (0..lines.len()).filter(|index| !kept[*index]).collect();
+    (kept, left_out)
+}
+
+/// The Predecessor section of the worker's prompt within its limits: the
+/// direct predecessors first, then the goals the task depended on with
+/// their completed tasks, the newest first.
+fn predecessors_section(
+    fit: &mut Fit,
+    predecessors: &[PredecessorSummary],
+    goal_predecessors: &[GoalPredecessorSummary],
+) -> String {
+    if predecessors.is_empty() && goal_predecessors.is_empty() {
+        return "Predecessor tasks: none\n".to_owned();
+    }
+    let mut text =
+        "Predecessor tasks (their changes are already in your base commit):\n".to_owned();
+    let lines: Vec<(String, bool)> = predecessors
+        .iter()
+        .map(|p| predecessor_line("", p, WORKER_PREDECESSOR_SUMMARY_BYTES))
+        .collect();
+    let (kept, left_out) = picked_lines(
+        fit,
+        "predecessors",
+        &lines,
+        0..lines.len(),
+        (usize::MAX, WORKER_PREDECESSORS_BYTES),
+    );
+    for ((line, _), kept) in lines.iter().zip(&kept) {
+        if *kept {
+            text.push_str(line);
+        }
+    }
+    if !left_out.is_empty() {
+        let ids: Vec<String> = left_out
+            .iter()
+            .map(|i| format!("task {}", predecessors[*i].task_id))
+            .collect();
+        text.push_str(&left_out_note("predecessor tasks", &ids, PREDECESSOR_READ));
+    }
+    fit.section("predecessors", &text);
+    let mut goals = String::new();
+    let headings: Vec<(String, bool)> = goal_predecessors
+        .iter()
+        .map(|goal| {
+            (
+                format!(
+                    "- goal {} (closed as achieved): {}; its completed tasks:\n",
+                    goal.goal_id, goal.title
+                ),
+                false,
+            )
+        })
+        .collect();
+    let (goal_kept, goals_left_out) = picked_lines(
+        fit,
+        "goal_predecessors",
+        &headings,
+        0..headings.len(),
+        (WORKER_GOAL_PREDECESSORS, WORKER_GOAL_PREDECESSORS_BYTES),
+    );
+    let tasks: Vec<(usize, &PredecessorSummary)> = goal_predecessors
+        .iter()
+        .enumerate()
+        .filter(|(g, _)| goal_kept[*g])
+        .flat_map(|(g, goal)| goal.tasks.iter().map(move |task| (g, task)))
+        .collect();
+    let task_lines: Vec<(String, bool)> = tasks
+        .iter()
+        .map(|(_, task)| predecessor_line("  ", task, WORKER_PREDECESSOR_SUMMARY_BYTES))
+        .collect();
+    let mut newest: Vec<usize> = (0..tasks.len()).collect();
+    newest.sort_by_key(|i| std::cmp::Reverse(tasks[*i].1.task_id));
+    let (task_kept, tasks_left_out) = picked_lines(
+        fit,
+        "goal_predecessors",
+        &task_lines,
+        newest,
+        (usize::MAX, WORKER_GOAL_TASKS_BYTES),
+    );
+    for (g, goal) in goal_predecessors.iter().enumerate() {
+        if !goal_kept[g] {
+            continue;
+        }
+        goals.push_str(&headings[g].0);
+        if goal.tasks.is_empty() {
+            goals.push_str("  - none\n");
+        }
+        for (i, (owner, _)) in tasks.iter().enumerate() {
+            if *owner == g && task_kept[i] {
+                goals.push_str(&task_lines[i].0);
+            }
+        }
+    }
+    if !goals_left_out.is_empty() {
+        let ids: Vec<String> = goals_left_out
+            .iter()
+            .map(|g| format!("goal {}", goal_predecessors[*g].goal_id))
+            .collect();
+        goals.push_str(&left_out_note(
+            "goals depended on",
+            &ids,
+            "their completed tasks' changes are in your base commit, and `git log` in your worktree shows each landing commit with its summary and its `Dagq-Task: <id>` line",
+        ));
+    }
+    if !tasks_left_out.is_empty() {
+        let ids: Vec<String> = tasks_left_out
+            .iter()
+            .map(|i| format!("task {}", tasks[*i].1.task_id))
+            .collect();
+        goals.push_str(&left_out_note(
+            "completed tasks of the goals",
+            &ids,
+            PREDECESSOR_READ,
+        ));
+    }
+    fit.section("goal_predecessors", &goals);
+    text.push_str(&goals);
+    text
+}
+
+/// Text of `prompt.txt` and what it takes. `goal` is the task's goal as
+/// it reads at claim time, `predecessors` the task's direct dependencies,
+/// `goal_predecessors` the goals it depends on (in the Predecessor section)
+/// and `siblings` the other tasks executing at claim time
+/// (`siblings_in_progress`), and `inherited` the run a retry carries over,
+/// if any. The Goal, Context, Predecessor and Sibling sections are always
+/// present, `none` when empty, so the prompt keeps one shape whether or
+/// not a task has a goal, a context, dependencies or company.
+///
+/// Each section is held to its limit (`WORKER_*`) within
+/// [`WORKER_PROMPT_LIMIT`] (ADR-t2072-1): what a list leaves out is counted
+/// and named with how the worker reads it in its worktree or with git. The
+/// task's own title, description, acceptance, verification commands and
+/// paths are never left out, only cut past their own limits and said in
+/// `over_limit`. Within the limits the text is the same as without them.
 ///
 /// The text is a snapshot at claim time and is never rewritten: a
 /// `goal edit` or a sibling's change made while the run works reaches only
@@ -509,77 +744,140 @@ pub fn prompt(
     siblings: &[Task],
     inherited: Option<&Inheritance>,
     e2e_paths: &[String],
-) -> Result<String> {
+) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
-    let inherited = inherited.map(Inheritance::section).unwrap_or_default();
+    let mut fit = Fit::new(WORKER_PROMPT_LIMIT);
+    let title = fit.required("task", task.title(), WORKER_TITLE_BYTES, NOT_READABLE);
+    let description = fit.required(
+        "task",
+        task.description(),
+        WORKER_DESCRIPTION_BYTES,
+        NOT_READABLE,
+    );
+    let acceptance = fit.required(
+        "task",
+        task.acceptance(),
+        WORKER_ACCEPTANCE_BYTES,
+        NOT_READABLE,
+    );
+    let verification = fit.required(
+        "task",
+        &serde_json::to_string_pretty(&task.verification_commands())?,
+        WORKER_VERIFY_BYTES,
+        NOT_READABLE,
+    );
+    for text in [&title, &description, &acceptance, &verification] {
+        fit.section("task", text);
+    }
+    let inherited = inherited
+        .map(|inherited| {
+            let summary = fit.text(
+                "inherited",
+                &inherited.summary,
+                WORKER_INHERITED_SUMMARY_BYTES,
+                Keep::Start,
+                &format!(
+                    "{NOT_READABLE}; `git log {base}..{head}` in your worktree shows its work, not this summary",
+                    base = inherited.base,
+                    head = inherited.head
+                ),
+            );
+            let reason = inherited.by_hand.as_ref().map(|(by, reason)| {
+                let reason = fit.text(
+                    "inherited",
+                    reason,
+                    WORKER_INHERITED_REASON_BYTES,
+                    Keep::Start,
+                    NOT_READABLE,
+                );
+                (by.clone(), reason)
+            });
+            let section = Inheritance {
+                summary,
+                by_hand: reason,
+                ..inherited.clone()
+            }
+            .section();
+            fit.section("inherited", &section);
+            section
+        })
+        .unwrap_or_default();
     let goal = match goal {
         None => "Goal: none, this task stands alone\n".to_owned(),
-        Some(goal) => format!(
-            "Goal (the higher-level problem this task and its sibling tasks solve together):\n\
-             Goal ID: {id}\nGoal title: {title}\nGoal description:\n{description}\n\
-             Goal acceptance:\n{acceptance}\nGoal constraints:\n{constraints}\n\
-             Goal doc: {doc}\n",
-            id = goal.id(),
-            title = goal.title(),
-            description = goal.description(),
-            acceptance = goal.acceptance(),
-            constraints = goal.constraints(),
-            doc = goal
-                .doc()
-                .map(|doc| format!(
-                    "{doc} (a path in the repository; read it for the full picture)"
-                ))
-                .unwrap_or_else(|| "none".to_owned()),
-        ),
+        Some(goal) => {
+            let read = goal.doc().map_or_else(
+                || NOT_READABLE.to_owned(),
+                |doc| format!("the goal doc {doc} in your worktree has the full picture"),
+            );
+            let mut text = |what: &str, max: usize| fit.text("goal", what, max, Keep::Start, &read);
+            let section = format!(
+                "Goal (the higher-level problem this task and its sibling tasks solve together):\n\
+                 Goal ID: {id}\nGoal title: {title}\nGoal description:\n{description}\n\
+                 Goal acceptance:\n{acceptance}\nGoal constraints:\n{constraints}\n\
+                 Goal doc: {doc}\n",
+                id = goal.id(),
+                title = text(goal.title(), WORKER_GOAL_TITLE_BYTES),
+                description = text(goal.description(), WORKER_GOAL_DESCRIPTION_BYTES),
+                acceptance = text(goal.acceptance(), WORKER_GOAL_ACCEPTANCE_BYTES),
+                constraints = text(goal.constraints(), WORKER_GOAL_CONSTRAINTS_BYTES),
+                doc = goal
+                    .doc()
+                    .map(|doc| format!(
+                        "{doc} (a path in the repository; read it for the full picture)"
+                    ))
+                    .unwrap_or_else(|| "none".to_owned()),
+            );
+            fit.section("goal", &section);
+            section
+        }
     };
     let context = if task.context().trim().is_empty() {
         "Context: none\n".to_owned()
     } else {
-        format!(
+        let context = format!(
             "Context (why this task exists and what to read first):\n{}\n",
-            task.context()
-        )
+            fit.text(
+                "context",
+                task.context(),
+                WORKER_CONTEXT_BYTES,
+                Keep::Start,
+                NOT_READABLE
+            )
+        );
+        fit.section("context", &context);
+        context
     };
-    let predecessors = if predecessors.is_empty() && goal_predecessors.is_empty() {
-        "Predecessor tasks: none\n".to_owned()
-    } else {
-        let mut text =
-            "Predecessor tasks (their changes are already in your base commit):\n".to_owned();
-        for predecessor in predecessors {
-            text.push_str(&format!(
-                "- task {}: {}; result commit {}; summary: {}\n",
-                predecessor.task_id,
-                predecessor.title,
-                predecessor.result_commit,
-                predecessor.summary
-            ));
-        }
-        for goal in goal_predecessors {
-            text.push_str(&format!(
-                "- goal {} (closed as achieved): {}; its completed tasks:\n",
-                goal.goal_id, goal.title
-            ));
-            if goal.tasks.is_empty() {
-                text.push_str("  - none\n");
-            }
-            for task in &goal.tasks {
-                text.push_str(&format!(
-                    "  - task {}: {}; result commit {}; summary: {}\n",
-                    task.task_id, task.title, task.result_commit, task.summary
-                ));
-            }
-        }
-        text
-    };
+    let predecessors = predecessors_section(&mut fit, predecessors, goal_predecessors);
     let siblings = if siblings.is_empty() {
         "Sibling tasks in progress: none\n".to_owned()
     } else {
         let mut text =
             "Sibling tasks in progress (other tasks executing now, each owning its own scope):\n"
                 .to_owned();
-        for other in siblings {
-            text.push_str(&format!("- task {}: {}\n", other.id(), other.title()));
+        let lines: Vec<(String, bool)> = siblings
+            .iter()
+            .map(|other| (format!("- task {}: {}\n", other.id(), other.title()), false))
+            .collect();
+        let (kept, left_out) = picked_lines(
+            &mut fit,
+            "siblings",
+            &lines,
+            0..lines.len(),
+            (usize::MAX, WORKER_SIBLINGS_BYTES),
+        );
+        for ((line, _), kept) in lines.iter().zip(&kept) {
+            if *kept {
+                text.push_str(line);
+            }
         }
+        if !left_out.is_empty() {
+            let ids: Vec<String> = left_out
+                .iter()
+                .map(|i| format!("task {}", siblings[*i].id()))
+                .collect();
+            text.push_str(&left_out_note("sibling tasks", &ids, NOT_READABLE));
+        }
+        fit.section("siblings", &text);
         text
     };
     let route = Route::of(run);
@@ -600,9 +898,15 @@ pub fn prompt(
     let paths = if task.paths().is_empty() {
         String::new()
     } else {
+        let declared = fit.required(
+            "paths",
+            &task.paths().join(", "),
+            WORKER_PATHS_BYTES,
+            NOT_READABLE,
+        );
+        fit.section("paths", &declared);
         format!(
-            "Paths you may change (globs from the repository root; `*` stays in one directory, `**` spans any depth): {}. A commit that changes any other path is not accepted: the run waits for a session to take it out. If the task needs another path, do not change it and do not run dagq ask: write the receipt with result failed and name in summary the paths it needs and what to change there (a running task's paths cannot change; the planner registers it again with wider paths).\n",
-            task.paths().join(", ")
+            "Paths you may change (globs from the repository root; `*` stays in one directory, `**` spans any depth): {declared}. A commit that changes any other path is not accepted: the run waits for a session to take it out. If the task needs another path, do not change it and do not run dagq ask: write the receipt with result failed and name in summary the paths it needs and what to change there (a running task's paths cannot change; the planner registers it again with wider paths).\n",
         )
     };
     // How the session ends a step and hears back: it ends its turn and
@@ -614,7 +918,7 @@ pub fn prompt(
         "end the turn",
         "end the turn with the question in your reply",
     );
-    Ok(format!(
+    let text = format!(
         "You are executing dagq task {task_id}, run {run_id}.\n\
          Work only in the assigned Git worktree.\n\
          {reading}\
@@ -645,16 +949,13 @@ pub fn prompt(
         review = review_line(route),
         acceptance_map = ACCEPTANCE_MAP,
         docs_check = DOCS_CHECK,
-        title = task.title(),
-        description = task.description(),
-        acceptance = task.acceptance(),
-        verification = serde_json::to_string_pretty(&task.verification_commands())?,
         local_checks = local_checks("above"),
         categories = follow_up_categories_line(),
         follow_up_proposal = FOLLOW_UP_PROPOSAL,
         topics = worker_question_topics_line(),
         ask_rules_first = ASK_RULES_FIRST,
-    ))
+    );
+    Ok(fit.finish(text))
 }
 
 /// The worker's prompt on `provider` before the task's values go in
@@ -764,7 +1065,8 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         std::slice::from_ref(&task),
         Some(&inherited),
         &[value("e2e path")],
-    )?;
+    )?
+    .text;
     // The other branch of each section: `none`, and a run a person carried
     // over by hand.
     let bare = Task::restore(TaskRecord {
@@ -778,7 +1080,7 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         by_hand: Some((value("by"), value("reason"))),
         ..inherited
     };
-    let empty = prompt(&bare, &run, None, &[], &[], &[], Some(&by_hand), &[])?;
+    let empty = prompt(&bare, &run, None, &[], &[], &[], Some(&by_hand), &[])?.text;
     Ok(format!("{full}\n{empty}"))
 }
 
@@ -3784,7 +4086,9 @@ const OPTIONAL_SECTIONS: usize = 6;
 /// and `revisit` are each one item, whichever of their parts or the whole
 /// was cut. The recovery job's `task`, the finding planner's `finding` and
 /// the planners' `answer` still count each cut field of their one item,
-/// so that item may count up to four (`answer`: two) times.
+/// so that item may count up to four (`answer`: two) times; so do the
+/// worker's `task`, `goal` and `inherited` (ADR-t2072-1), whose prompt's
+/// bytes are recorded on `wrapper_launched`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PromptBytes {
     pub total: usize,
@@ -3803,7 +4107,8 @@ pub struct PlanReviewPrompt {
 
 /// The prompt of a headless job or of a planner of the runtime's held to
 /// its limits, and what it takes (task 1571, ADR-t1566-1 decisions 4 to
-/// 6): goal review, run review, recovery job and the four planners'.
+/// 6): goal review, run review, recovery job and the four planners', and
+/// the worker's `prompt.txt` (ADR-t2072-1).
 #[derive(Debug, Clone)]
 pub struct FittedPrompt {
     pub text: String,
@@ -5117,7 +5422,8 @@ mod tests {
             None,
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .text;
         assert!(
             text.contains(&format!(
                 "Predecessor tasks (their changes are already in your base commit):\n\
@@ -5127,7 +5433,9 @@ mod tests {
             )),
             "{text}"
         );
-        let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None, &[])
+            .unwrap()
+            .text;
         assert!(alone.contains("Predecessor tasks: none\n"));
         assert!(!alone.contains("Carried over from run"));
     }
@@ -5144,7 +5452,9 @@ mod tests {
         let line = "E2E: do not run the e2e yourself.";
         let codex = run_on(Provider::Codex, WorkerMode::Headless);
         for worker in [&own_run, &codex] {
-            let text = prompt(&open, worker, None, &[], &[], &[], None, &e2e).unwrap();
+            let text = prompt(&open, worker, None, &[], &[], &[], None, &e2e)
+                .unwrap()
+                .text;
             assert!(text.contains(line), "{text}");
             for gone in [
                 "E2E evidence is decided by your diff",
@@ -5156,10 +5466,14 @@ mod tests {
                 assert!(!text.contains(gone), "{gone}: {text}");
             }
         }
-        let none = prompt(&open, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        let none = prompt(&open, &own_run, None, &[], &[], &[], None, &[])
+            .unwrap()
+            .text;
         assert!(!none.contains("E2E"), "{none}");
         let required = task_with_evidence(8, vec![EvidenceCheck::E2e]);
-        let text = prompt(&required, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        let text = prompt(&required, &own_run, None, &[], &[], &[], None, &[])
+            .unwrap()
+            .text;
         assert!(text.contains(line), "{text}");
         assert!(!text.contains("Required evidence"), "{text}");
 
@@ -5200,7 +5514,11 @@ mod tests {
             let worker = run_on(provider, WorkerMode::Headless);
             let mut texts = session_texts(&open, &worker);
             texts.extend(session_texts(&required, &worker));
-            texts.push(prompt(&open, &worker, None, &[], &[], &[], None, &e2e).unwrap());
+            texts.push(
+                prompt(&open, &worker, None, &[], &[], &[], None, &e2e)
+                    .unwrap()
+                    .text,
+            );
             for text in &texts {
                 let lower = text.to_lowercase();
                 for leak in ["cargo", "target/", "tests/e2e.rs", "--exact", "--ignored"] {
@@ -5250,7 +5568,9 @@ mod tests {
         let own_run = run(7, RunStatus::Claimed, None);
         let checks = "the repository's instructions (AGENTS.md or CLAUDE.md) ask a worker to run";
 
-        let worker = prompt(&verified, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        let worker = prompt(&verified, &own_run, None, &[], &[], &[], None, &[])
+            .unwrap()
+            .text;
         assert!(worker.contains(
             "Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):\n[\n  \"make gate\"\n]\n"
         ));
@@ -5281,7 +5601,8 @@ mod tests {
             Some(&inheritance),
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .text;
         let (before, carried) = retried.split_once("Carried over from run").unwrap();
         assert!(before.contains(checks));
         assert!(carried.contains("rerun your checks in the worktree as above"));
@@ -5300,7 +5621,8 @@ mod tests {
             Some(&by_hand),
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .text;
         let (_, carried) = retried.split_once("Carried over from run").unwrap();
         assert!(carried.contains(
             "inbox carried its work over by hand after it ended (the person chose retry_inherit)"
@@ -6300,8 +6622,11 @@ mod tests {
             let first = task(7, "first title", TaskStatus::InProgress);
             let second = task(7, "second title", TaskStatus::InProgress);
             let run = run_on(provider, WorkerMode::Headless);
-            let prompt_of =
-                |task: &Task| prompt(task, &run, None, &[], &[], &[], None, &[]).unwrap();
+            let prompt_of = |task: &Task| {
+                prompt(task, &run, None, &[], &[], &[], None, &[])
+                    .unwrap()
+                    .text
+            };
             assert_ne!(prompt_of(&first), prompt_of(&second));
             for value in ["first title", "second title"] {
                 assert!(!template.contains(value), "{value}");
@@ -6342,7 +6667,11 @@ mod tests {
     /// request, the revise, the receipt mismatch, the stale receipt, the
     /// nudge, an answer and a recovery job's instruction.
     fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
-        let mut texts = vec![prompt(task, run, None, &[], &[], &[], None, &[]).unwrap()];
+        let mut texts = vec![
+            prompt(task, run, None, &[], &[], &[], None, &[])
+                .unwrap()
+                .text,
+        ];
         for kind in [
             ResumeKind::Landing,
             ResumeKind::EvidenceMissing,
@@ -7472,9 +7801,12 @@ mod tests {
             None,
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .text;
         let alone_task = task(2, "alone", TaskStatus::InProgress);
-        let alone = prompt(&alone_task, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        let alone = prompt(&alone_task, &own_run, None, &[], &[], &[], None, &[])
+            .unwrap()
+            .text;
 
         assert!(
             grouped.contains(
@@ -8963,5 +9295,313 @@ mod tests {
         // What the largest input takes, for the limit's reason in
         // docs/design/supervisor-lifecycle/prompt.md.
         assert!(bytes.total > 60_000, "{bytes:?}");
+    }
+
+    /// A task of the worker's prompt with every field of its own `size`
+    /// bytes (in 3-byte characters), its goal and its context included.
+    fn worker_task(id: i64, size: usize, goal: Option<i64>) -> Task {
+        let text = |name: &str| format!("{name}{}", "あ".repeat(size / 3));
+        Task::restore(TaskRecord {
+            goal_priority: None,
+            id: TaskId::new(id),
+            title: text("title"),
+            description: text("description"),
+            acceptance: text("acceptance"),
+            verification_commands: vec![text("verify")],
+            required_evidence: vec![EvidenceCheck::Tests],
+            paths: (0..size / 20).map(|i| format!("src/p{i}/**")).collect(),
+            priority: Default::default(),
+            change: None,
+            status: TaskStatus::InProgress,
+            goal_id: goal.map(GoalId::new),
+            context: text("context"),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
+            named_mode: None,
+            wait_for_build: false,
+        })
+        .unwrap()
+    }
+
+    fn worker_goal(id: i64, size: usize) -> Goal {
+        let text = |name: &str| format!("{name}{}", "い".repeat(size / 3));
+        Goal::restore(GoalRecord {
+            priority: Default::default(),
+            tags: Vec::new(),
+            id: GoalId::new(id),
+            title: text("goal title"),
+            description: text("goal description"),
+            acceptance: text("goal acceptance"),
+            constraints: text("goal constraints"),
+            doc: Some("docs/plans/goal.md".into()),
+            status: GoalStatus::Open,
+            closed_at: None,
+            verdict: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    fn worker_predecessor(id: i64, size: usize) -> PredecessorSummary {
+        PredecessorSummary {
+            task_id: TaskId::new(id),
+            title: format!("predecessor {id} {}", "う".repeat(size / 3_000)),
+            result_commit: SHA.into(),
+            summary: format!("summary {id} {}", "え".repeat(size / 3)),
+        }
+    }
+
+    /// Material of the worker's prompt: `count` items in each list, each
+    /// text of about `size` bytes.
+    #[allow(clippy::type_complexity)]
+    fn worker_material(
+        count: i64,
+        size: usize,
+    ) -> (
+        Task,
+        Goal,
+        Vec<PredecessorSummary>,
+        Vec<GoalPredecessorSummary>,
+        Vec<Task>,
+        Inheritance,
+    ) {
+        // The first summary is long; the rest pack the section.
+        let predecessors = (1..=count)
+            .map(|id| worker_predecessor(id, if id == 1 { size } else { size.min(5_000) }))
+            .collect();
+        let goals = (1..=count)
+            .map(|g| GoalPredecessorSummary {
+                goal_id: GoalId::new(100 + g),
+                title: format!("goal {g} {}", "お".repeat(size / 3_000)),
+                tasks: (1..=count)
+                    .map(|t| worker_predecessor(1_000 * g + t, size.min(600)))
+                    .collect(),
+            })
+            .collect();
+        let siblings = (1..=count)
+            .map(|id| worker_task(10_000 + id, size.min(300), Some(1)))
+            .collect();
+        let inherited = Inheritance {
+            run_id: RunId::new(RUN).unwrap(),
+            base: CommitSha::try_from(SHA).unwrap(),
+            head: SHA.into(),
+            branch: Some("dagq/earlier".into()),
+            receipt_path: Some("/runs/earlier/receipt.json".into()),
+            summary: format!("inherited {}", "か".repeat(size / 3)),
+            by_hand: Some(("inbox".into(), format!("reason {}", "き".repeat(size / 3)))),
+        };
+        (
+            worker_task(9, size, Some(1)),
+            worker_goal(1, size),
+            predecessors,
+            goals,
+            siblings,
+            inherited,
+        )
+    }
+
+    /// The worker's prompt holds each section to its limit and the whole
+    /// to [`WORKER_PROMPT_LIMIT`] with the largest input (ADR-t2072-1):
+    /// what a list left out is counted and named with how to read it with
+    /// git or in the worktree, never with a `dagq` command, and the task's
+    /// own title, description, acceptance and verification are cut only
+    /// past their own limits, said in `over_limit`.
+    #[test]
+    fn the_worker_prompt_stays_within_its_limits_with_the_largest_input() {
+        let (task, goal, predecessors, goals, siblings, inherited) = worker_material(300, 400_000);
+        let own_run = run(9, RunStatus::Claimed, None);
+        let fitted = prompt(
+            &task,
+            &own_run,
+            Some(&goal),
+            &predecessors,
+            &goals,
+            &siblings,
+            Some(&inherited),
+            &[],
+        )
+        .unwrap();
+        let (text, bytes) = (&fitted.text, &fitted.bytes);
+        assert!(
+            text.len() <= WORKER_PROMPT_LIMIT - prompt_fit::LANGUAGE_ROOM,
+            "{}",
+            text.len()
+        );
+        // The resource broker's paragraph, added after the fit, fits too.
+        assert!(
+            text.len() + BROKER_REQUIRED.len() + prompt_fit::LANGUAGE_ROOM <= WORKER_PROMPT_LIMIT,
+            "{}",
+            text.len()
+        );
+        assert_eq!(bytes.total, text.len());
+        assert_eq!(bytes.limit, WORKER_PROMPT_LIMIT);
+        assert_eq!(bytes.sections.values().sum::<usize>(), text.len());
+        let over = bytes.over_limit.as_deref().unwrap();
+        assert!(!over.contains("past its limit"), "{over}");
+        for (what, max) in [
+            ("title", WORKER_TITLE_BYTES),
+            ("description", WORKER_DESCRIPTION_BYTES),
+            ("acceptance", WORKER_ACCEPTANCE_BYTES),
+            ("verify", WORKER_VERIFY_BYTES),
+        ] {
+            assert!(text.contains(&format!("{what}ああ")), "{what}");
+            assert!(over.contains(&format!("by its limit of {max}")), "{over}");
+        }
+        assert!(over.contains("paths: "), "{over}");
+        assert!(text.contains("Task title: titleあ"));
+        assert!(text.contains("Paths you may change"));
+        for section in [
+            "goal",
+            "context",
+            "predecessors",
+            "goal_predecessors",
+            "siblings",
+            "inherited",
+        ] {
+            assert!(bytes.omitted[section] > 0, "{section}: {bytes:?}");
+        }
+        for (what, read) in [
+            ("predecessor tasks", "`git log --grep '^Dagq-Task: <id>$'`"),
+            (
+                "goals depended on",
+                "`git log` in your worktree shows each landing commit",
+            ),
+            (
+                "completed tasks of the goals",
+                "`git log --grep '^Dagq-Task: <id>$'`",
+            ),
+            ("sibling tasks", NOT_READABLE),
+        ] {
+            let note = text
+                .lines()
+                .find(|line| line.contains(&format!(" {what} left out by")))
+                .unwrap_or_else(|| panic!("{what}"));
+            assert!(note.contains(read), "{note}");
+        }
+        assert!(text.contains(&format!(
+            "`git show --no-patch {SHA}` in your worktree prints the whole summary"
+        )));
+        assert!(text.contains("the goal doc docs/plans/goal.md in your worktree"));
+        assert!(text.contains(&format!(
+            "{NOT_READABLE}; `git log {SHA}..{SHA}` in your worktree shows its work, not this summary"
+        )));
+        for (at, _) in text.match_indices("left out by") {
+            let note = text[at..].split([']', ')']).next().unwrap();
+            assert!(!note.contains("dagq "), "{note}");
+        }
+        // The fixed instructions stay whole after the sections.
+        assert!(text.contains("Write a completion receipt to /runs/run/receipt.json"));
+        assert!(text.ends_with(headless_provider_line(Provider::Claude)));
+        // What the largest input takes, for the limit's reason.
+        assert!(bytes.total > 80_000, "{bytes:?}");
+    }
+
+    /// The direct predecessors are taken before the goals' tasks, and of
+    /// those the newest (the highest ID) first; each list keeps its own
+    /// order.
+    #[test]
+    fn the_worker_prompt_takes_direct_predecessors_first_and_goal_tasks_newest_first() {
+        let (task, _, predecessors, goals, _, _) = worker_material(30, 2_400);
+        let own_run = run(9, RunStatus::Claimed, None);
+        let text = prompt(
+            &task,
+            &own_run,
+            None,
+            &predecessors,
+            &goals[..1],
+            &[],
+            None,
+            &[],
+        )
+        .unwrap()
+        .text;
+        let ids: Vec<i64> = text
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("- task "))
+            .map(|rest| rest.split(':').next().unwrap().parse().unwrap())
+            .collect();
+        let direct: Vec<i64> = ids.iter().copied().filter(|id| *id < 1_000).collect();
+        let of_goal: Vec<i64> = ids.iter().copied().filter(|id| *id > 1_000).collect();
+        assert_eq!(direct, (1..=direct.len() as i64).collect::<Vec<_>>());
+        assert!(direct.len() < 30, "{direct:?}");
+        assert_eq!(*of_goal.last().unwrap(), 1_030, "{of_goal:?}");
+        assert!(of_goal.windows(2).all(|w| w[0] < w[1]), "{of_goal:?}");
+        assert!(of_goal.len() < 30 && of_goal[0] > 1_001, "{of_goal:?}");
+    }
+
+    /// Within its limits the worker's prompt is what it was without them:
+    /// every section whole and in its old form, nothing counted as left out.
+    #[test]
+    fn within_its_limits_the_worker_prompt_is_unchanged() {
+        let (task, goal, mut predecessors, goals, siblings, inherited) = worker_material(2, 600);
+        // A title longer than a list's title elsewhere stays whole.
+        predecessors[0].title = "長".repeat(300);
+        let own_run = run(9, RunStatus::Claimed, None);
+        let fitted = prompt(
+            &task,
+            &own_run,
+            Some(&goal),
+            &predecessors,
+            &goals,
+            &siblings,
+            Some(&inherited),
+            &[],
+        )
+        .unwrap();
+        let text = &fitted.text;
+        assert!(fitted.bytes.omitted.is_empty(), "{:?}", fitted.bytes);
+        assert_eq!(fitted.bytes.over_limit, None);
+        assert!(text.contains(&format!(
+            "Task title: {}\nDescription:\n{}\nAcceptance criteria:\n{}\n",
+            task.title(),
+            task.description(),
+            task.acceptance()
+        )));
+        assert!(text.contains(&format!(
+            "Goal ID: 1\nGoal title: {}\nGoal description:\n{}\nGoal acceptance:\n{}\nGoal constraints:\n{}\nGoal doc: docs/plans/goal.md (a path in the repository; read it for the full picture)\n",
+            goal.title(),
+            goal.description(),
+            goal.acceptance(),
+            goal.constraints()
+        )));
+        assert!(text.contains(&format!(
+            "Context (why this task exists and what to read first):\n{}\n",
+            task.context()
+        )));
+        let mut expected =
+            "Predecessor tasks (their changes are already in your base commit):\n".to_owned();
+        for p in &predecessors {
+            expected.push_str(&format!(
+                "- task {}: {}; result commit {}; summary: {}\n",
+                p.task_id, p.title, p.result_commit, p.summary
+            ));
+        }
+        for g in &goals {
+            expected.push_str(&format!(
+                "- goal {} (closed as achieved): {}; its completed tasks:\n",
+                g.goal_id, g.title
+            ));
+            for t in &g.tasks {
+                expected.push_str(&format!(
+                    "  - task {}: {}; result commit {}; summary: {}\n",
+                    t.task_id, t.title, t.result_commit, t.summary
+                ));
+            }
+        }
+        expected.push_str(
+            "Sibling tasks in progress (other tasks executing now, each owning its own scope):\n",
+        );
+        for s in &siblings {
+            expected.push_str(&format!("- task {}: {}\n", s.id(), s.title()));
+        }
+        expected.push_str(&inherited.section());
+        assert!(text.contains(&expected), "{text}");
+        assert!(text.contains(&format!(
+            "Paths you may change (globs from the repository root; `*` stays in one directory, `**` spans any depth): {}.",
+            task.paths().join(", ")
+        )));
+        assert!(!text.contains("left out by"), "{text}");
     }
 }

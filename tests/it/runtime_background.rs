@@ -87,6 +87,16 @@ fn a_background_headless_run_lands_without_a_workspace() {
         json!(BackgroundHandle::parse(handle).unwrap().pid)
     );
     assert_eq!(launches[0]["workspace_id"], handle);
+    // The worker's first turn records what its prompt takes (ADR-t2072-1).
+    let prompt = fs::read(Path::new(run.run_dir().unwrap()).join("prompt.txt")).unwrap();
+    let bytes = &launches[0]["prompt_bytes"];
+    assert_eq!(bytes["total"], json!(prompt.len()), "{bytes}");
+    assert_eq!(
+        bytes["limit"],
+        json!(dagq::application::prompt::WORKER_PROMPT_LIMIT)
+    );
+    assert!(bytes["sections"]["task"].as_u64().unwrap() > 0, "{bytes}");
+    assert_eq!(bytes["over_limit"], Value::Null, "{bytes}");
     let kinds = kinds(&detail);
     let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
     assert!(at("workspace_created") < at("wrapper_launched"));

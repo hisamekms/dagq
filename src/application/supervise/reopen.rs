@@ -442,7 +442,7 @@ impl Supervisor<'_> {
                 )),
             });
         }
-        self.record_launch(run, &workspace, &log)?;
+        self.record_launch(run, &workspace, &log, None)?;
         Ok(workspace)
     }
 

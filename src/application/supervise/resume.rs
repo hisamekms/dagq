@@ -445,7 +445,7 @@ impl Supervisor<'_> {
                 )),
             });
         }
-        self.record_launch(run, &workspace, &log)?;
+        self.record_launch(run, &workspace, &log, None)?;
         let now = self.generators.clock.monotonic();
         Ok(ResumeWatch {
             workspace: workspace.clone(),

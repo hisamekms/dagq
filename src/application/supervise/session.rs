@@ -3,9 +3,9 @@
 //! its `worker_question` asks.
 
 use super::*;
+use crate::application::prompt::PromptBytes;
 use crate::domain::EventKind;
 use crate::domain::e2e_quarantine;
-use crate::domain::language::with_instruction;
 
 impl Supervisor<'_> {
     /// Start the validation of `run` on a thread (see [`spawn_validation`]).
@@ -94,14 +94,15 @@ impl Supervisor<'_> {
     }
     /// Write `run`'s prompt (`prompt.txt` in `run_dir`) for its task, as
     /// its worker's route and provider take it; the branch it inherits, if
-    /// any. Written again when the run moves to the other provider
-    /// (ADR-t813-2), whose worker is told otherwise.
+    /// any, and what the prompt takes (ADR-t2072-1). Written again when the
+    /// run moves to the other provider (ADR-t813-2), whose worker is told
+    /// otherwise.
     pub(super) fn write_prompt(
         &mut self,
         task: &crate::domain::Task,
         run: &TaskRun,
         run_dir: &Path,
-    ) -> Result<Option<Inheritance>> {
+    ) -> Result<(Option<Inheritance>, PromptBytes)> {
         let predecessors: Vec<PredecessorSummary> = self
             .queue
             .predecessors(task.id())?
@@ -120,7 +121,7 @@ impl Supervisor<'_> {
         };
         let siblings = siblings_in_progress(task, self.queue.tasks_in_progress()?);
         let inherited = self.inheritance(run)?;
-        let mut text = prompt(
+        let mut fitted = prompt(
             task,
             run,
             goal.as_ref(),
@@ -138,7 +139,8 @@ impl Supervisor<'_> {
                 .files
                 .exists(&crate::application::broker_run::mcp_config_path(run_dir))
         {
-            text.push_str(
+            let before = fitted.text.len();
+            fitted.text.push_str(
                 if self
                     .files
                     .exists(&crate::application::broker_run::required_path(run_dir))
@@ -148,12 +150,16 @@ impl Supervisor<'_> {
                     crate::application::prompt::BROKER_TOOLS
                 },
             );
+            fitted
+                .bytes
+                .sections
+                .insert("broker", fitted.text.len() - before);
+            fitted.bytes.total = fitted.text.len();
         }
-        self.files.write(
-            &run_dir.join("prompt.txt"),
-            with_instruction(text, self.verifier.language().as_ref()).as_bytes(),
-        )?;
-        Ok(inherited)
+        let fitted = fitted.with_language(self.verifier.language().as_ref());
+        self.files
+            .write(&run_dir.join("prompt.txt"), fitted.text.as_bytes())?;
+        Ok((inherited, fitted.bytes))
     }
     /// Plan paths, create the run directory and worktree, and start the
     /// session wrapper in the background (ADR-t1433-3). Any error leaves
@@ -183,7 +189,7 @@ impl Supervisor<'_> {
         // before each turn.
         self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeWorker);
         let task = self.queue.show(run.task_id())?.task;
-        let inherited = self.write_prompt(&task, &run, &run_dir)?;
+        let (inherited, mut prompt_bytes) = self.write_prompt(&task, &run, &run_dir)?;
         if let Some(inherited) = &inherited {
             self.queue.record_runtime_event(
                 run.id(),
@@ -210,7 +216,7 @@ impl Supervisor<'_> {
         // them (ADR-t838-1).
         let granted = self.broker_grant_or_refuse(&run)?;
         if granted {
-            self.write_prompt(&task, &run, &run_dir)?;
+            prompt_bytes = self.write_prompt(&task, &run, &run_dir)?.1;
         }
         self.warn_ignored_wrapper_setting();
         let log = self.session_log(&run_dir, None, false);
@@ -255,7 +261,7 @@ impl Supervisor<'_> {
                 )),
             });
         }
-        self.record_launch(&run, &handle, &log)?;
+        self.record_launch(&run, &handle, &log, Some(&prompt_bytes))?;
         info!(task_id = %run.task_id(), run_id = %run.id(), "task {} running in the background as {}; run {}", run.task_id(), handle, run.id());
         Ok(SessionWatch {
             workspace: handle,

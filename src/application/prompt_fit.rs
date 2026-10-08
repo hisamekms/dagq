@@ -1,5 +1,6 @@
-//! Holding the prompts of the headless jobs and the runtime's planners to
-//! their limits (task 1571, ADR-t1566-1 decisions 4 to 6), as the plan
+//! Holding the prompts of the headless jobs, the runtime's planners and
+//! the worker (ADR-t2072-1) to their limits (task 1571, ADR-t1566-1
+//! decisions 4 to 6), as the plan
 //! review's (task 1561) and the observer's (task 1567) are: a section's
 //! items are chosen in a fixed order within its count and bytes, a long
 //! text or JSON value is cut to its bytes, and what was left out is

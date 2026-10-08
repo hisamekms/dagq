@@ -7,6 +7,7 @@ created: 2026-09-26
 scope: runtime
 related:
   - adr-t1566-1
+  - adr-t2072-1
   - adr-t1428-1
   - adr-t1942-2
   - adr-t1453-2
@@ -33,13 +34,13 @@ runtimeがagentに渡す文（workerの`prompt.txt`と依頼、headlessのjobと
 
 - workerが最初のcommitまでにqueueやdocs全体を読まずに済むよう、runに要る情報をclaimの時点でpromptに載せる。
 - runtimeはどのrepositoryでも動くので、検証・paths・ADRの規則のようなrepositoryの規則を持たず、sessionをrepositoryの指示（AGENTS.mdかCLAUDE.md）へ向ける。
-- headlessのjobのpromptは判断の材料だけを上限の中で載せ、残りは読む方法を示して取りに行かせる（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）。
+- headlessのjob・runtimeのplanner・workerのpromptは判断の材料だけを上限の中で載せ、残りは読む方法を示して取りに行かせる（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)、workerは[ADR-t2072-1](../../adr/2026-10-08-t2072-1-worker-prompts-and-next-turns-carry-decision-material-within-limits.md)）。
 
 ## 流れ
 
 ```text
 claim ──> prompt(task, run, goal, predecessors, goal_predecessors, siblings) ──> prompt.txt（1回だけ書く）
-            │
+            │                                          └─ 節ごとの上限 → wrapper_launchedのprompt_bytes
             ├─ task・検証・evidence・paths・e2eの行
             ├─ Goal / Context / Predecessor tasks / Sibling tasks（常に4節）
             ├─ 受け入れ条件の対応づけ → 文書の照合 → receiptの契約
@@ -100,6 +101,14 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   関門の印は着地の前のe2eがlanding branchのtreeから読み、promptには載せない。
 - Predecessor tasksにはtask依存に続けてgoal依存（[ADR-0038](../../adr/0038-task-depends-on-a-goal-until-it-is-achieved.md)）のgoalと、その完了したtaskを並べる。
   goalのtaskは多くなりうるので、summaryを短く切る（`GOAL_TASK_SUMMARY_CHARS`）。
+- 上限（[ADR-t2072-1](../../adr/2026-10-08-t2072-1-worker-prompts-and-next-turns-carry-decision-material-within-limits.md)）: 節ごとの上限は`WORKER_*`の定数、全体は`WORKER_PROMPT_LIMIT`で、値の理由はそのdoc commentが持つ。
+  依存元は直接の依存を先にもとの順で取り、goal依存の完了taskは新しい（IDの大きい）順に取り、兄弟taskはIDの順に取る。
+  省いた依存元と切ったsummaryは着地のcommitのmessageをgitで読ませ、切ったgoalの記述はgoalのdocで読ませる（docが無いgoalは読む方法が無いと書く）。
+  どこにも無いもの（兄弟task、taskの記述の切った残り、引き継いだrunのreceiptのsummaryと人が引き継いだ理由の切った残り）は読む方法が無いと書く。
+  taskのtitle・description・acceptance・verification commands・pathsは省かず、自分の上限を超えたときだけ切って`over_limit`に書く。
+  上限に当たらない入力では節は全文のまま載り、省いたことの注記は載らない。
+- 記録: claimのprovisionが`PromptBytes`（言語の指示とresource brokerの文を含む）を、workerの最初のturnを始める`wrapper_launched`の`prompt_bytes`に記録する。
+  providerの切り替えで書き直した`prompt.txt`は記録しない。
 - 落とし穴: 兄弟taskの一覧はclaimの順で非対称になる（同じpassで後にclaimしたtaskだけが先のtaskを知る）。
   理由は`siblings_in_progress`のdoc comment。
 - 落とし穴: `tests/e2e.rs`のstubはpromptの1行目とreceiptのpathの行だけを読むので、節を足してもstubは変わらない。
@@ -203,7 +212,8 @@ promptと固定の文字列には、dagqのrepositoryの規則（ADRの索引や
 
 supervisorが起動するheadlessのjobとruntimeのplannerのpromptの共通の方針で、[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)の決定に沿う。
 各jobの文書（[Headless job processes](headless-job-processes.md)、[Plan review](plan-review.md)、[Observer](observer.md)、[Goal review](goal-review.md)、[スループットの見直し](throughput-review.md)、[Review](review.md)、[復旧job](background-recovery-job.md)、[Session prompts](session-prompts.md)）はpromptの大きさと渡し方についてここを指す。
-workerの`prompt.txt`はこの方針の範囲に含めない。
+workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2072-1-worker-prompts-and-next-turns-carry-decision-material-within-limits.md)で同じ方針に入り、渡し方（決定1）だけは今の`prompt.txt`と非対話のturnのままにする。
+上限を持つのは今は初期promptだけで、次のturnの文（resume・revise・促し・askの答えなど）にはまだ上限が無く、表にも行が無い。
 
 - 渡し方（決定1）: 大きさに関係なくstdinで渡し、引数で渡さない。
   `AgentProvider::headless_command`と`review_command`がpromptを`CommandSpec::stdin`に持たせ、spawnerが本人だけが読める一時ファイルに書いてすぐunlinkし、子のstdinにする（[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）。
@@ -231,6 +241,7 @@ workerの`prompt.txt`はこの方針の範囲に含めない。
 | runのreview | `read_files` | `prompt.rs`の`review_prompt` | `RUN_REVIEW_*` |
 | 復旧job | `read_files` | `recovery_prompt`（`RecoveryMaterial`） | `RECOVERY_*` |
 | runtimeのplanner | plannerのrole | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt` | `RUNTIME_PLANNER_*`・`DRAFT_*`・`FINDING_*`・`REQUEST_*`・`PLANNER_*` |
+| workerの初期prompt | worktreeのファイル・git・goalのdoc | `prompt::prompt`（[上](#workerのprompt)） | `WORKER_PROMPT_LIMIT`・`WORKER_*` |
 
 ### plan reviewの上限
 
