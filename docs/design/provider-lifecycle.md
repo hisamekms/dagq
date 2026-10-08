@@ -194,7 +194,7 @@ runのsessionの区間は、閉じるときに作業の内訳（foregroundのtoo
 Claudeもtranscriptは読めるが、区間の数え方をproviderで分けないためstreamから取る。
 
 - 入口: `domain::turn::HeadlessSpan`、`infrastructure::sessions::close_headless`、turnのトークンは`TurnResult::tokens`、コストは`domain::turn::turn_own_cost`。
-- Codexの`turn.completed`の`usage`はthreadの累計なので、wrapperは前のturnの累計との差をそのturnの分にする（`TurnResult::tokens_cumulative`）。
+- Codexのturnのトークン数はthreadのrolloutから数え、数えられないときだけ`turn.completed`のthreadの累計と前のturnの累計との差に落とす（規則は[Executionのトークン数](execution-tokens.md#codexの数える元)）。
 - Claudeの`total_cost_usd`と`modelUsage`はsessionの累計なので、同じく差をturnの分にする（`TurnResult::cost_cumulative`、規則は[Executionのトークン数](execution-tokens.md#claudeの数える元)）。
   差を取る前に記録されたturnのcostは補正しないので、その期間のcostはresumeのあるrunを重ねて数える。
 - Codexの区間はmodelを区間に書かず、各turnの`turn_finished`の`model`に持つ。
@@ -253,7 +253,7 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - Codexの失敗は構造化されていないので文で分類する。
   裸の`429`はrequest idにも現れるので見ない。
   認証の失敗は再試行で直らないので最初の再試行で止め、利用上限は短いrate limitを乗り越えうるので再試行では止めない。
-- Codexの出力はmodelを持たないので、threadのrolloutを読み取りだけで開いてmodelを取る。
+- Codexの出力はmodelを持たないので、threadのrolloutを読み取りだけで開いてmodelを取る（トークン数も同じ）。
 - supervisorとwrapperはsandboxの外で動くので、run dirのファイルはlinkを辿らず、開いた記述子に対して読み書きする（`infrastructure::agent_dir::Directory`）。
   sandboxがworkerに止めていることをworkerの代わりにしないため。
 - Codexのsandboxは書き込みとsignalを止めるが隔離ではない（[Security](security.md#codexのworkerのsandbox)）。

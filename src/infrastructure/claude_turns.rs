@@ -279,6 +279,7 @@ impl TurnReader for ClaudeTurnReader {
             tokens_source: counted.source,
             tokens_reason: counted.reason,
             children: counted.children,
+            rollout: None,
             // Claude's session is the run's: a missing one is started
             // by `turn_session_exists` instead.
             session_missing: false,

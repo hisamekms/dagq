@@ -14,8 +14,11 @@
 //! `Rejected(` line on stderr. The JSONL does not name the model either:
 //! it is read from the thread's rollout, which Codex writes under its home
 //! (`sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`), whose
-//! `turn_context` records carry the `model` of each turn. The rollout is
-//! only read.
+//! `turn_context` records carry the `model` of each turn. The tokens of a
+//! turn are counted from the rollouts too ([`rollout_usage`]): the
+//! `token_usage_record` of each response, a child thread's (in a rollout of
+//! its own) included, which `turn.completed`'s thread total leaves out
+//! (docs/design/execution-tokens.md). The rollouts are only read.
 
 use std::{
     fs,
@@ -26,7 +29,10 @@ use std::{
 use serde_json::Value;
 
 use crate::application::{Exit, TurnReader};
-use crate::domain::tokens::{NO_RESULT, NO_USAGE, TokenSource, TokenUsage};
+use crate::domain::tokens::{
+    ROLLOUT_MISSING, ROLLOUT_TURN_MISSING, ROLLOUT_UNREADABLE, RolloutUsage,
+    TOKEN_USAGE_RECORD_MISSING, TokenSource, TokenUsage, UsageRecord,
+};
 use crate::domain::turn::{TurnCommand, TurnFailure, TurnResult, TurnSignal, shortened};
 use crate::domain::verify_failure::failed_tests;
 use crate::domain::worktime::SHELL_ITEM;
@@ -152,10 +158,9 @@ fn refused_by_sandbox(item: &Value) -> bool {
             || output.contains("cannot get process list"))
 }
 
-/// The rollout of `thread` among the [`ROLLOUT_DAYS`] latest day
-/// directories of `sessions` (`YYYY/MM/DD`), the latest first.
-fn rollout(sessions: &Path, thread: &str) -> Option<PathBuf> {
-    let suffix = format!("-{thread}.jsonl");
+/// The [`ROLLOUT_DAYS`] latest day directories of `sessions`
+/// (`YYYY/MM/DD`), the latest first.
+fn day_dirs(sessions: &Path) -> Vec<PathBuf> {
     let children = |dir: &Path| -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = fs::read_dir(dir)
             .into_iter()
@@ -171,16 +176,23 @@ fn rollout(sessions: &Path, thread: &str) -> Option<PathBuf> {
         .flat_map(|year| children(year))
         .flat_map(|month| children(&month))
         .take(ROLLOUT_DAYS)
-        .find_map(|day| {
-            fs::read_dir(&day)
-                .ok()?
-                .filter_map(|entry| Some(entry.ok()?.path()))
-                .find(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(&suffix))
-                })
-        })
+        .collect()
+}
+
+/// The rollout of `thread` among the [`day_dirs`] of `sessions`, the
+/// latest first.
+fn rollout(sessions: &Path, thread: &str) -> Option<PathBuf> {
+    let suffix = format!("-{thread}.jsonl");
+    day_dirs(sessions).into_iter().find_map(|day| {
+        fs::read_dir(&day)
+            .ok()?
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(&suffix))
+            })
+    })
 }
 
 /// The model the last turn of `thread` ran on: the `model` of the last
@@ -199,13 +211,7 @@ pub fn rollout_model(sessions: &Path, thread: &str, since: Option<i64>) -> Resul
         .filter(|line| line.contains("\"turn_context\""))
         .filter_map(|line| {
             let record: Value = serde_json::from_str(&line).ok()?;
-            let this_turn = since.is_none_or(|since| {
-                record["timestamp"]
-                    .as_str()
-                    .and_then(crate::domain::stats::rfc3339_millis)
-                    .is_some_and(|at| at >= since - TURN_CONTEXT_SKEW_MILLIS)
-            });
-            (record["type"] == "turn_context" && this_turn)
+            (record["type"] == "turn_context" && stamped_since(&record["timestamp"], since))
                 .then(|| record["payload"]["model"].as_str().map(str::to_owned))?
         })
         .last()
@@ -216,6 +222,179 @@ pub fn rollout_model(sessions: &Path, thread: &str, since: Option<i64>) -> Resul
             ),
             None => format!("the rollout {} names no model", path.display()),
         })
+}
+
+/// Whether a record stamped `stamp` (an RFC 3339 time) is of a turn that
+/// started at `since` (unix milliseconds, less
+/// [`TURN_CONTEXT_SKEW_MILLIS`]) or later; any is when `since` is `None`.
+fn stamped_since(stamp: &Value, since: Option<i64>) -> bool {
+    since.is_none_or(|since| {
+        stamp
+            .as_str()
+            .and_then(crate::domain::stats::rfc3339_millis)
+            .is_some_and(|at| at >= since - TURN_CONTEXT_SKEW_MILLIS)
+    })
+}
+
+/// What one rollout file says of the session `session`: the turns it says
+/// started (`task_started`, with their stamps), its `token_usage_record`s
+/// of the session, each with the model of the `turn_context` before it,
+/// and whether it has any `token_usage_record` at all.
+#[derive(Default)]
+struct RolloutFile {
+    started: Vec<(Value, String)>,
+    records: Vec<UsageRecord>,
+    has_records: bool,
+}
+
+fn read_rollout(path: &Path, session: &str) -> Result<RolloutFile, &'static str> {
+    let file = fs::File::open(path).map_err(|_| ROLLOUT_UNREADABLE)?;
+    let mut read = RolloutFile::default();
+    let mut model: Option<String> = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|_| ROLLOUT_UNREADABLE)?;
+        if ![
+            "\"turn_context\"",
+            "\"task_started\"",
+            "\"token_usage_record\"",
+        ]
+        .iter()
+        .any(|kind| line.contains(kind))
+        {
+            continue;
+        }
+        // A line Codex is still writing is not read.
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let payload = &record["payload"];
+        match record["type"].as_str() {
+            Some("turn_context") => model = payload["model"].as_str().map(str::to_owned),
+            Some("event_msg") if payload["type"] == "task_started" => {
+                if let Some(turn) = payload["turn_id"].as_str() {
+                    read.started
+                        .push((record["timestamp"].clone(), turn.to_owned()));
+                }
+            }
+            Some("token_usage_record") => {
+                read.has_records = true;
+                let (Some(thread), Some(tokens)) = (
+                    payload["thread_id"].as_str(),
+                    turn_tokens(&payload["usage"]),
+                ) else {
+                    continue;
+                };
+                if payload["session_id"].as_str().unwrap_or(thread) != session {
+                    continue;
+                }
+                let Some(root_turn) = payload["root_turn_id"]
+                    .as_str()
+                    .or_else(|| payload["turn_id"].as_str())
+                else {
+                    continue;
+                };
+                read.records.push(UsageRecord {
+                    thread_id: thread.to_owned(),
+                    root_turn_id: root_turn.to_owned(),
+                    response_id: payload["response_id"].as_str().map(str::to_owned),
+                    model: model.clone(),
+                    tokens,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(read)
+}
+
+/// The rollouts of the child threads of `thread` under `sessions`: those
+/// but `root` whose `session_meta` names `thread` as their session, among
+/// the files of the [`ROLLOUT_DAYS`] latest day directories written at
+/// `since` or later (every one when `since` is `None`). A child thread
+/// writes a rollout of its own while the root's turn runs, a child of an
+/// earlier turn appending to the one it started.
+fn child_rollouts(sessions: &Path, thread: &str, root: &Path, since: Option<i64>) -> Vec<PathBuf> {
+    let written_since = |path: &Path| {
+        since.is_none_or(|since| {
+            fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|at| i64::try_from(at.as_millis()).ok())
+                .is_some_and(|at| at >= since - TURN_CONTEXT_SKEW_MILLIS)
+        })
+    };
+    let child_of = |path: &Path| {
+        let Ok(file) = fs::File::open(path) else {
+            return false;
+        };
+        let mut first = String::new();
+        if BufReader::new(file).read_line(&mut first).is_err() {
+            return false;
+        }
+        serde_json::from_str::<Value>(&first).is_ok_and(|meta| {
+            meta["type"] == "session_meta"
+                && meta["payload"]["session_id"] == thread
+                && meta["payload"]["id"] != thread
+        })
+    };
+    day_dirs(sessions)
+        .into_iter()
+        .flat_map(|day| {
+            fs::read_dir(day)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| Some(entry.ok()?.path()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|path| {
+            path != root
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+                && written_since(path)
+                && child_of(path)
+        })
+        .collect()
+}
+
+/// What the rollouts under `sessions` say of the Execution of `thread`
+/// that started at `since` (unix milliseconds; `None`: every turn of the
+/// thread): the root turns its rollout says started since then
+/// (`task_started`), and the `token_usage_record`s of the thread's session
+/// made in them, its child threads' included. Else why they cannot be
+/// counted: [`ROLLOUT_MISSING`], [`ROLLOUT_UNREADABLE`],
+/// [`TOKEN_USAGE_RECORD_MISSING`] or [`ROLLOUT_TURN_MISSING`].
+pub fn rollout_usage(
+    sessions: &Path,
+    thread: &str,
+    since: Option<i64>,
+) -> Result<RolloutUsage, &'static str> {
+    let path = rollout(sessions, thread).ok_or(ROLLOUT_MISSING)?;
+    let root = read_rollout(&path, thread)?;
+    if !root.has_records {
+        return Err(TOKEN_USAGE_RECORD_MISSING);
+    }
+    let turns: Vec<String> = root
+        .started
+        .into_iter()
+        .filter(|(stamp, _)| stamped_since(stamp, since))
+        .map(|(_, turn)| turn)
+        .collect();
+    if turns.is_empty() {
+        return Err(ROLLOUT_TURN_MISSING);
+    }
+    let mut records = root.records;
+    for child in child_rollouts(sessions, thread, &path, since) {
+        records.extend(read_rollout(&child, thread)?.records);
+    }
+    records.retain(|record| turns.contains(&record.root_turn_id));
+    Ok(RolloutUsage {
+        thread_id: thread.to_owned(),
+        turns,
+        records,
+    })
 }
 
 impl CodexTurnReader {
@@ -248,6 +427,14 @@ impl CodexTurnReader {
             .as_deref()
             .ok_or("Codex's home is not known (neither CODEX_HOME nor HOME is set)")?;
         rollout_model(sessions, thread, self.since)
+    }
+
+    /// What the rollouts say of the turn's tokens, or why they cannot be
+    /// counted.
+    fn rollout_usage(&self) -> Result<RolloutUsage, &'static str> {
+        let thread = self.thread_id.as_deref().ok_or(ROLLOUT_MISSING)?;
+        let sessions = self.sessions.as_deref().ok_or(ROLLOUT_MISSING)?;
+        rollout_usage(sessions, thread, self.since)
     }
 
     fn text(value: &Value) -> Option<String> {
@@ -477,10 +664,21 @@ impl TurnReader for CodexTurnReader {
         });
         // Codex's output does not name the model: its rollout does.
         let model = self.model();
+        // The thread's running total, which the turn's tokens fall back to
+        // when its rollouts cannot be counted.
         let tokens = self
             .completed
             .as_ref()
             .and_then(|event| turn_tokens(&event["usage"]));
+        let rollout = self.rollout_usage();
+        // Why the rollouts could not be counted is said even when the
+        // fallback could not be read either: the rollouts are what the
+        // tokens are counted from.
+        let (tokens_source, tokens_reason) = match (&rollout, &tokens) {
+            (Ok(_), _) => (Some(TokenSource::UsageRecord), None),
+            (Err(why), Some(_)) => (Some(TokenSource::ThreadUsage), Some(*why)),
+            (Err(why), None) => (None, Some(*why)),
+        };
         TurnResult {
             result_seen: self.completed.is_some() || self.failed.is_some(),
             is_error,
@@ -495,18 +693,15 @@ impl TurnReader for CodexTurnReader {
                 .completed
                 .as_ref()
                 .map_or(Value::Null, |event| event["usage"].clone()),
-            tokens_source: tokens.is_some().then_some(TokenSource::ThreadUsage),
-            tokens_reason: match (&tokens, &self.completed) {
-                (Some(_), _) => None,
-                (None, Some(_)) => Some(NO_USAGE),
-                (None, None) => Some(NO_RESULT),
-            },
+            tokens_source,
+            tokens_reason,
             tokens,
             // `turn.completed` carries the thread's total so far, a
             // resumed thread's earlier turns included.
             tokens_cumulative: true,
             tokens_by_model: Vec::new(),
             children: None,
+            rollout: rollout.ok(),
             cost_cumulative: false,
             permission_denials: std::mem::take(&mut self.denials),
             session_missing: stderr.contains("no rollout found"),
@@ -518,7 +713,8 @@ impl TurnReader for CodexTurnReader {
 }
 
 /// The tokens of the thread so far from the `usage` of a `turn.completed`
-/// (the thread's running total, not the turn's own), in the kinds of
+/// (the thread's running total, not the turn's own), or of one response
+/// from that of a `token_usage_record`, in the kinds of
 /// Claude's: `input_tokens` counts the cached input too, so
 /// `input` is the rest and `cache_read` is `cached_input_tokens`;
 /// `cache_creation` is `cache_write_input_tokens`; `output` is
@@ -540,6 +736,7 @@ fn turn_tokens(usage: &Value) -> Option<TokenUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::tokens::ExecutionTokens;
     use serde_json::json;
 
     fn exit(code: i32) -> Exit {
@@ -863,6 +1060,246 @@ mod tests {
         );
         // A missing directory has no rollout.
         assert!(rollout_model(&dir.path().join("none"), "th-1", None).is_err());
+    }
+
+    /// A turn of a rollout: its id, its time and its responses' ids and
+    /// input tokens.
+    type RolloutTurn<'a> = (&'a str, &'a str, &'a [(&'a str, i64)]);
+
+    /// A rollout of the newer Codex: the session's meta, then for each
+    /// turn its `task_started`, its `turn_context` and a
+    /// `token_usage_record` per response, at the turn's time.
+    fn usage_rollout(path: &Path, thread: &str, session: &str, turns: &[RolloutTurn]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut lines =
+            vec![json!({"type": "session_meta", "payload": {"id": thread, "session_id": session}})];
+        for (turn, at, responses) in turns {
+            if thread == session {
+                lines.push(json!({"timestamp": at, "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": turn, "root_turn_id": turn}}));
+            }
+            lines.push(json!({"timestamp": at, "type": "turn_context", "payload": {"model": format!("gpt-{thread}")}}));
+            for (response, input) in *responses {
+                lines.push(json!({"timestamp": at, "type": "token_usage_record", "payload": {
+                    "thread_id": thread, "turn_id": format!("{thread}-{turn}"), "session_id": session,
+                    "root_turn_id": turn, "response_id": response,
+                    "usage": {"input_tokens": input, "cached_input_tokens": input / 2, "cache_write_input_tokens": 0,
+                              "output_tokens": 3, "reasoning_output_tokens": 1, "total_tokens": input + 3},
+                    // The running totals are not what is summed.
+                    "turn_token_usage": {"input_tokens": 999_999, "output_tokens": 999_999},
+                    "thread_token_usage": {"input_tokens": 999_999, "output_tokens": 999_999}}}));
+            }
+        }
+        let text: Vec<String> = lines.iter().map(Value::to_string).collect();
+        fs::write(path, text.join("\n") + "\n").unwrap();
+    }
+
+    fn at(text: &str) -> Option<i64> {
+        crate::domain::stats::rfc3339_millis(text)
+    }
+
+    /// The tokens of an Execution are the `token_usage_record`s of the root
+    /// turns that started since it did, its child threads' (in their own
+    /// rollouts, under the root's session) included and each response
+    /// once; another session's are not counted, nor an earlier turn's.
+    #[test]
+    fn a_turns_tokens_are_its_rollouts_records_with_its_child_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let day = sessions.join("2026/10/08");
+        usage_rollout(
+            &day.join("rollout-2026-10-08T01-00-00-root.jsonl"),
+            "root",
+            "root",
+            &[
+                ("t1", "2020-01-01T01:00:00.000Z", &[("r1", 100)]),
+                (
+                    "t2",
+                    "2020-01-01T02:00:00.000Z",
+                    &[("r2", 40), ("r2", 40), ("r3", 20)],
+                ),
+            ],
+        );
+        usage_rollout(
+            &day.join("rollout-2026-10-08T02-00-05-child.jsonl"),
+            "child",
+            "root",
+            &[("t2", "2020-01-01T02:00:05.000Z", &[("r2", 10)])],
+        );
+        usage_rollout(
+            &day.join("rollout-2026-10-08T02-00-06-other.jsonl"),
+            "other",
+            "other",
+            &[("t2", "2020-01-01T02:00:06.000Z", &[("r9", 1_000)])],
+        );
+        let line = |value: Value| value.to_string();
+        let mut reader =
+            CodexTurnReader::reading_since(Some(sessions.clone()), at("2020-01-01T02:00:00.000Z"));
+        reader.line(&line(
+            json!({"type": "thread.started", "thread_id": "root"}),
+        ));
+        reader.line(&line(
+            json!({"type": "turn.completed", "usage": {"input_tokens": 160, "output_tokens": 9}}),
+        ));
+        let result = reader.finish(Some(&exit(0)), "");
+        assert_eq!(result.tokens_source, Some(TokenSource::UsageRecord));
+        assert_eq!(result.tokens_reason, None);
+        let own = result.rollout.as_ref().unwrap().tokens(&[]);
+        // 40 + 20 of the root, 10 of the child; the cached half apart.
+        assert_eq!(
+            own.tokens.as_ref().map(TokenUsage::payload),
+            Some(
+                json!({"input": 35, "output": 9, "cache_read": 35, "cache_creation": 0, "messages": 1})
+            )
+        );
+        assert_eq!(own.children, Some(1));
+        assert_eq!(own.turns, ["t2"]);
+        let models: Vec<(&str, i64)> = own
+            .by_model
+            .iter()
+            .map(|m| (m.model.as_str(), m.input))
+            .collect();
+        assert_eq!(models, [("gpt-root", 30), ("gpt-child", 5)]);
+        // The thread's total is kept for a later turn that falls back.
+        assert_eq!(result.tokens.map(|t| t.input), Some(160));
+        // Every turn, when the Execution's start is not known.
+        let all = rollout_usage(&sessions, "root", None).unwrap();
+        assert_eq!(all.turns, ["t1", "t2"]);
+        assert_eq!(
+            all.tokens(&[]).tokens.map(|t| t.input + t.cache_read),
+            Some(170)
+        );
+    }
+
+    /// Each Execution of a thread that is resumed counts only its own
+    /// turns: by the turns that started since it did, and, when the start
+    /// cannot tell them apart (a wrapper that took over or started again),
+    /// by the turns the run's events say were counted.
+    #[test]
+    fn a_resumed_thread_counts_no_earlier_executions_turns_again() {
+        use crate::domain::{RunEvent, event_kind::TURN_FINISHED, turn::counted_rollout_turns};
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let path = sessions.join("2026/10/08/rollout-2026-10-08T01-00-00-th.jsonl");
+        let line = |value: Value| value.to_string();
+        let execution = |since: Option<i64>| {
+            let mut reader = CodexTurnReader::reading_since(Some(sessions.clone()), since);
+            reader.line(&line(json!({"type": "thread.started", "thread_id": "th"})));
+            reader.finish(Some(&exit(0)), "").rollout.unwrap()
+        };
+        let mut events: Vec<RunEvent> = Vec::new();
+        let record = |tokens: &ExecutionTokens, events: &mut Vec<RunEvent>| {
+            let mut payload = json!({"session_id": "th"});
+            tokens.record(&mut payload);
+            events.push(RunEvent {
+                id: crate::domain::EventId::new(events.len() as i64 + 1),
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: TURN_FINISHED.to_owned(),
+                payload,
+                created_at: String::new(),
+                actor: None,
+            });
+        };
+        let input =
+            |tokens: &ExecutionTokens| tokens.tokens.as_ref().map(|t| t.input + t.cache_read);
+        // The first Execution.
+        usage_rollout(
+            &path,
+            "th",
+            "th",
+            &[("t1", "2020-01-01T01:00:00.000Z", &[("r1", 100)])],
+        );
+        let first =
+            execution(at("2020-01-01T01:00:00.000Z")).tokens(&counted_rollout_turns(&events, "th"));
+        assert_eq!(input(&first), Some(100));
+        record(&first, &mut events);
+        // The resume appends its turn to the same rollout.
+        usage_rollout(
+            &path,
+            "th",
+            "th",
+            &[
+                ("t1", "2020-01-01T01:00:00.000Z", &[("r1", 100)]),
+                ("t2", "2020-01-01T03:00:00.000Z", &[("r2", 60)]),
+            ],
+        );
+        let second =
+            execution(at("2020-01-01T03:00:00.000Z")).tokens(&counted_rollout_turns(&events, "th"));
+        assert_eq!(input(&second), Some(60));
+        assert_eq!(second.turns, ["t2"]);
+        // A start that does not tell the turns apart: the events do, read
+        // by whichever wrapper reads them.
+        let again = execution(None).tokens(&counted_rollout_turns(&events, "th"));
+        assert_eq!(input(&again), Some(60));
+        record(&second, &mut events);
+        let third = execution(None).tokens(&counted_rollout_turns(&events, "th"));
+        assert_eq!(input(&third), Some(0), "nothing new: a measured 0");
+    }
+
+    /// A rollout that cannot be counted leaves the turn's tokens to its
+    /// `turn.completed`'s thread total, and says why; without one either,
+    /// nothing is counted.
+    #[test]
+    fn tokens_fall_back_to_the_thread_total_when_the_rollout_cannot_be_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let day = sessions.join("2026/10/08");
+        fs::create_dir_all(&day).unwrap();
+        // An older Codex's rollout, without token_usage_record.
+        write_rollout(&sessions, "2026/10/08", "old", &["gpt-6-astra"]);
+        // A rollout that cannot be read (a directory by its name).
+        fs::create_dir_all(day.join("rollout-2026-10-08T00-00-00-broken.jsonl")).unwrap();
+        // A rollout whose turns all started before the Execution did.
+        usage_rollout(
+            &day.join("rollout-2026-10-08T00-00-00-early.jsonl"),
+            "early",
+            "early",
+            &[("t1", "2020-01-01T00:00:00.000Z", &[("r1", 10)])],
+        );
+        let line = |value: Value| value.to_string();
+        let read = |sessions: Option<PathBuf>, thread: &str, completed: bool| {
+            let mut reader =
+                CodexTurnReader::reading_since(sessions, at("2020-01-01T05:00:00.000Z"));
+            reader.line(&line(
+                json!({"type": "thread.started", "thread_id": thread}),
+            ));
+            if completed {
+                reader.line(&line(json!({"type": "turn.completed", "usage": {"input_tokens": 30, "cached_input_tokens": 20, "output_tokens": 5}})));
+            }
+            reader.finish(Some(&exit(0)), "")
+        };
+        for (sessions, thread, why) in [
+            (Some(sessions.clone()), "none", ROLLOUT_MISSING),
+            (None, "old", ROLLOUT_MISSING),
+            (Some(sessions.clone()), "broken", ROLLOUT_UNREADABLE),
+            (Some(sessions.clone()), "old", TOKEN_USAGE_RECORD_MISSING),
+            (Some(sessions.clone()), "early", ROLLOUT_TURN_MISSING),
+        ] {
+            let result = read(sessions.clone(), thread, true);
+            assert_eq!(result.rollout, None, "{thread}");
+            assert_eq!(
+                result.tokens_source,
+                Some(TokenSource::ThreadUsage),
+                "{thread}"
+            );
+            assert_eq!(result.tokens_reason, Some(why), "{thread}");
+            assert!(result.tokens_cumulative);
+            assert_eq!(
+                result.tokens.map(|tokens| tokens.payload()),
+                Some(
+                    json!({"input": 10, "output": 5, "cache_read": 20, "cache_creation": 0, "messages": 1})
+                )
+            );
+            let result = read(sessions, thread, false);
+            assert_eq!(
+                (result.tokens, result.tokens_source),
+                (None, None),
+                "{thread}"
+            );
+            assert_eq!(result.tokens_reason, Some(why), "{thread}");
+        }
     }
 
     /// The reader keeps each command and tool the turn ran with when the

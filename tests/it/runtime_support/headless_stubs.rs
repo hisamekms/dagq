@@ -187,6 +187,12 @@ if [ -n "$REVIEW" ]; then
     SESSIONS={home}/sessions/$(date +%Y/%m/%d)
     mkdir -p "$SESSIONS"
     printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"%s","effort":"high"}}}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(cat {review_model})" >> "$SESSIONS/rollout-2026-09-29T00-00-00-codex-review-thread.jsonl"
+    # Its turn and the tokens of its one response, written twice.
+    NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+    printf '{{"timestamp":"%s","type":"event_msg","payload":{{"type":"task_started","turn_id":"review-turn-%s"}}}}\n' "$NOW" "$REVIEW_CALL" >> "$SESSIONS/rollout-2026-09-29T00-00-00-codex-review-thread.jsonl"
+    for _ in 1 2; do
+      printf '{{"timestamp":"%s","type":"token_usage_record","payload":{{"thread_id":"codex-review-thread","session_id":"codex-review-thread","turn_id":"review-turn-%s","root_turn_id":"review-turn-%s","response_id":"resp-%s","usage":{{"input_tokens":13,"cached_input_tokens":3,"output_tokens":4}}}}}}\n' "$NOW" "$REVIEW_CALL" "$REVIEW_CALL" "$REVIEW_CALL" >> "$SESSIONS/rollout-2026-09-29T00-00-00-codex-review-thread.jsonl"
+    done
   fi
   if [ -f {dir}/codex-review-failure.jsonl ]; then
     cat {dir}/codex-review-failure.jsonl
@@ -268,6 +274,17 @@ if [ -f {model} ]; then
   fi
   printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"%s","effort":"medium"}}}}
 ' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(cat {model})" >> "$ROLLOUT"
+  # A newer Codex's rollout: the turn, and the tokens of its one response
+  # (what the stub's thread total grows by), written twice.
+  if [ -f {usage_records} ]; then
+    NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+    printf '{{"timestamp":"%s","type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-%s"}}}}
+' "$NOW" "$TURN" >> "$ROLLOUT"
+    for _ in 1 2; do
+      printf '{{"timestamp":"%s","type":"token_usage_record","payload":{{"thread_id":"%s","session_id":"%s","turn_id":"turn-%s","root_turn_id":"turn-%s","response_id":"resp-%s","usage":{{"input_tokens":11,"cached_input_tokens":4,"output_tokens":5,"reasoning_output_tokens":2}}}}}}
+' "$NOW" "$THREAD" "$THREAD" "$TURN" "$TURN" "$TURN" >> "$ROLLOUT"
+    done
+  fi
 fi
 . {turns}
 [ -n "$ENDED" ] || result
@@ -276,6 +293,7 @@ fi
         db = "\"$STUB_DB\"",
         turns = "\"${0%/*}/turn.sh\"",
         model = "\"${0%/*}/codex-model\"",
+        usage_records = "\"${0%/*}/codex-usage-records\"",
         review_model = "\"${0%/*}/codex-review-model\"",
         home = "\"${0%/*}/codex-home\"",
         dir = "\"${0%/*}\"",

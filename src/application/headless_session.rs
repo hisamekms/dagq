@@ -51,9 +51,9 @@ use crate::domain::{
     tokens::{ExecutionTokens, ModelTokens, TokenSource, TokenUsage},
     turn::{
         LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSession,
-        TurnSignal, commands_path, exit_path, idle_marker, output_path, pending, renew_wall_marker,
-        request_path, request_to_take, session_name, taken_path, turn_own_cost, turn_own_models,
-        turns_dir,
+        TurnSignal, commands_path, counted_rollout_turns, exit_path, idle_marker, output_path,
+        pending, renew_wall_marker, request_path, request_to_take, session_name, taken_path,
+        thread_total_own, turn_own_cost, turn_own_models, turns_dir,
     },
     worker_model::WorkerSession,
 };
@@ -1152,10 +1152,13 @@ impl<'a> Turns<'a> {
     /// (`session_cost`); and the session's running totals, overall and per
     /// model, when the provider gives those instead. Claude's
     /// `modelUsage` (ADR-t1486-1): what the turn added to the totals the
-    /// session's last turn recorded ([`turn_own_models`]). Codex's thread
-    /// total: the total less the one the session's last turn recorded as
-    /// `tokens_total`, the whole total for a session's first (ADR-t813-2
-    /// decision 7).
+    /// session's last turn recorded ([`turn_own_models`]). Codex's
+    /// rollouts: their records of the turn's root turns but those the
+    /// thread's earlier turns counted ([`counted_rollout_turns`]), with the
+    /// thread's total kept as `tokens_total`. Codex's thread total when the
+    /// rollouts cannot be counted: the total less the one the session's
+    /// last turn recorded as `tokens_total`, the whole total for a
+    /// session's first (ADR-t813-2 decision 7).
     fn turn_tokens(
         &mut self,
         turn: u64,
@@ -1169,7 +1172,15 @@ impl<'a> Turns<'a> {
             source: result.tokens_source,
             reason: result.tokens_reason,
             children: result.children,
+            turns: Vec::new(),
         };
+        if let Some(rollout) = &result.rollout {
+            let counted = match result.session_id.as_deref() {
+                Some(session) => counted_rollout_turns(&self.events()?, session),
+                None => Vec::new(),
+            };
+            return Ok((rollout.tokens(&counted), result.tokens.clone(), Vec::new()));
+        }
         let Some(mut total) = result.tokens.clone().filter(|_| result.tokens_cumulative) else {
             if let Some(tokens) = own.tokens.as_mut().filter(|_| session_cost.is_some()) {
                 tokens.cost_usd = cost;
@@ -1188,23 +1199,13 @@ impl<'a> Turns<'a> {
             total.cost_usd = session_cost.or(total.cost_usd);
             return Ok((own, Some(total), result.tokens_by_model.clone()));
         }
-        let events = self.events()?;
-        let earlier = events
-            .iter()
-            .rev()
-            .filter(|e| {
-                e.kind == event_kind::TURN_FINISHED
-                    && result.session_id.is_some()
-                    && e.payload["session_id"].as_str() == result.session_id.as_deref()
-            })
-            .find_map(|e| TokenUsage::from_payload(&e.payload["tokens_total"]));
-        own.tokens = Some(earlier.map_or_else(
-            || TokenUsage {
+        own.tokens = Some(match result.session_id.as_deref() {
+            Some(session) => thread_total_own(&self.events()?, session, &total),
+            None => TokenUsage {
                 messages: 1,
                 ..total.clone()
             },
-            |earlier| total.since(&earlier),
-        ));
+        });
         Ok((own, Some(total), Vec::new()))
     }
 

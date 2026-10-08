@@ -20,7 +20,7 @@ use super::{
     DomainError, RunEvent,
     event_kind::{TURN_FINISHED, TURN_REQUESTED, TURN_STARTED},
     stats::timestamp_millis,
-    tokens::{ModelTokens, TokenSource, TokenUsage},
+    tokens::{ModelTokens, RolloutUsage, TokenSource, TokenUsage},
     transcript::Turn,
 };
 
@@ -556,6 +556,13 @@ pub struct TurnResult {
     /// says (Claude's `subagent_stats.spawned`, the turn's own).
     #[serde(skip)]
     pub children: Option<i64>,
+    /// What Codex's rollouts say of the turn, when they could be counted:
+    /// the turn's tokens are taken from them, less the root turns the
+    /// thread's earlier turns counted ([`counted_rollout_turns`]), and
+    /// `tokens` is only the thread's running total, kept for a later turn
+    /// whose rollout cannot be counted.
+    #[serde(skip)]
+    pub rollout: Option<RolloutUsage>,
     /// The turn resumed a session the agent does not have (Codex's `no
     /// rollout found`): it did nothing, and a new session is started.
     pub session_missing: bool,
@@ -729,6 +736,69 @@ pub fn turn_own_models(
         .find_map(|e| ModelTokens::from_payloads(&e.payload["tokens_total_by_model"]))
         .and_then(|earlier| ModelTokens::since(totals, &earlier))
         .unwrap_or_else(|| totals.to_vec())
+}
+
+/// The root turns of Codex's thread `session` whose tokens the session's
+/// turns counted (`tokens_turns`, ADR-t1486-1), which a turn that resumes
+/// the thread does not count again. They are read from the run's events
+/// only, so a wrapper that took over a run or started again finds what the
+/// one before it counted.
+pub fn counted_rollout_turns(events: &[RunEvent], session: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter(|e| e.kind == TURN_FINISHED && e.payload["session_id"].as_str() == Some(session))
+        .filter_map(|e| e.payload["tokens_turns"].as_array())
+        .flatten()
+        .filter_map(|turn| turn.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// The own tokens of a turn of Codex's thread `session` whose rollouts
+/// could not be counted, from `total`, the thread's running total
+/// (`turn.completed`, ADR-t813-2 decision 7): `total` less the total the
+/// session's last turn with one recorded (`tokens_total`) and the `tokens`
+/// of the session's turns after it that recorded no total (counted from
+/// the rollouts though their `turn.completed` was not read), so that none
+/// is counted twice; never below 0. Those turns' counts include their
+/// child threads, which `total` leaves out, so with child threads this
+/// may take too much. The whole `total` when nothing earlier
+/// was recorded.
+pub fn thread_total_own(events: &[RunEvent], session: &str, total: &TokenUsage) -> TokenUsage {
+    let mut earlier: Option<TokenUsage> = None;
+    let mut after = TokenUsage::default();
+    for event in events
+        .iter()
+        .rev()
+        .filter(|e| e.kind == TURN_FINISHED && e.payload["session_id"].as_str() == Some(session))
+    {
+        if let Some(recorded) = TokenUsage::from_payload(&event.payload["tokens_total"]) {
+            earlier = Some(recorded);
+            break;
+        }
+        if let Some(own) = TokenUsage::from_payload(&event.payload["tokens"]) {
+            after.input += own.input;
+            after.output += own.output;
+            after.cache_read += own.cache_read;
+            after.cache_creation += own.cache_creation;
+            after.messages += 1;
+        }
+    }
+    match earlier {
+        None if after.messages == 0 => TokenUsage {
+            messages: 1,
+            ..total.clone()
+        },
+        earlier => {
+            let earlier = earlier.unwrap_or_default();
+            total.since(&TokenUsage {
+                input: earlier.input + after.input,
+                output: earlier.output + after.output,
+                cache_read: earlier.cache_read + after.cache_read,
+                cache_creation: earlier.cache_creation + after.cache_creation,
+                ..TokenUsage::default()
+            })
+        }
+    }
 }
 
 /// The turns of a headless session span and the tokens they used, from
@@ -1449,6 +1519,79 @@ mod tests {
             started(3, true),
         ];
         assert_eq!(turn_own_cost(&older, 3, "s", 5.5), 1.5);
+    }
+
+    /// A Codex turn that falls back to the thread's total takes from it
+    /// the last recorded total and what the turns after it counted from
+    /// the rollouts without one.
+    #[test]
+    fn a_thread_total_less_what_earlier_turns_counted_is_the_turns_own() {
+        let finished = |session: &str, payload: Value| {
+            let mut payload = payload;
+            payload["session_id"] = json!(session);
+            RunEvent {
+                id: super::super::EventId::new(1),
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: TURN_FINISHED.to_owned(),
+                payload,
+                created_at: String::new(),
+                actor: None,
+            }
+        };
+        let usage = |input: i64| TokenUsage {
+            input,
+            output: input,
+            messages: 1,
+            ..TokenUsage::default()
+        };
+        let total = usage(100);
+        // Nothing earlier: the whole total.
+        assert_eq!(thread_total_own(&[], "th", &total), total);
+        let events = [
+            finished(
+                "th",
+                json!({"tokens_total": usage(30).payload(), "tokens": usage(30).payload()}),
+            ),
+            finished("other", json!({"tokens_total": usage(90).payload()})),
+            // Counted from the rollouts, its turn.completed not read.
+            finished(
+                "th",
+                json!({"tokens_total": null, "tokens": usage(20).payload()}),
+            ),
+        ];
+        assert_eq!(thread_total_own(&events, "th", &total).input, 50);
+        assert_eq!(thread_total_own(&events[..1], "th", &total).input, 70);
+        // Without a total before, the rollouts' counts alone; never below 0.
+        assert_eq!(thread_total_own(&events[2..], "th", &total).input, 80);
+        assert_eq!(thread_total_own(&events, "th", &usage(10)).input, 0);
+    }
+
+    /// The root turns a Codex thread's turns counted are read back from
+    /// their `turn_finished`: every turn of the thread's, no other
+    /// session's, whatever wrapper recorded them.
+    #[test]
+    fn the_rollout_turns_a_thread_counted_are_read_from_its_turns() {
+        let finished = |session: &str, turns: Value| RunEvent {
+            id: super::super::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: TURN_FINISHED.to_owned(),
+            payload: json!({"session_id": session, "tokens_turns": turns}),
+            created_at: String::new(),
+            actor: None,
+        };
+        let events = [
+            finished("th", json!(["a"])),
+            finished("other", json!(["x"])),
+            // A turn counted from its thread total names none.
+            finished("th", Value::Null),
+            finished("th", json!(["b", "c"])),
+        ];
+        assert_eq!(counted_rollout_turns(&events, "th"), ["a", "b", "c"]);
+        assert!(counted_rollout_turns(&events, "none").is_empty());
     }
 
     /// A resumed turn's tokens per model are what it added to the

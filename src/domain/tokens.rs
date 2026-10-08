@@ -88,8 +88,13 @@ pub enum TokenSource {
     /// fallback for an output without a `modelUsage` (an older Claude
     /// Code).
     ResultUsage,
-    /// Codex's `turn.completed`, the thread's running total.
+    /// Codex's `turn.completed`, the thread's running total, which leaves
+    /// the child threads out: the fallback for a rollout that could not be
+    /// counted.
     ThreadUsage,
+    /// The `token_usage_record`s of Codex's rollouts: one per response of
+    /// the root thread and of its child threads ([`RolloutUsage`]).
+    UsageRecord,
 }
 
 impl TokenSource {
@@ -98,6 +103,7 @@ impl TokenSource {
             Self::ModelUsage => "model_usage",
             Self::ResultUsage => "result_usage",
             Self::ThreadUsage => "thread_usage",
+            Self::UsageRecord => "token_usage_record",
         }
     }
 }
@@ -111,6 +117,20 @@ pub const NO_USAGE: &str = "no_usage";
 /// The `tokens_reason` of a Claude Execution whose result had no
 /// `modelUsage`: its tokens are its `usage`'s, without its subagents.
 pub const MODEL_USAGE_MISSING: &str = "model_usage_missing";
+/// The `tokens_reason` of a Codex Execution whose thread's rollout was not
+/// found (no thread named, Codex's home not known, no file): its tokens
+/// are its `turn.completed`'s, without the child threads, or not counted
+/// without one.
+pub const ROLLOUT_MISSING: &str = "rollout_missing";
+/// The same for a rollout (the thread's or a child thread's) that could
+/// not be read.
+pub const ROLLOUT_UNREADABLE: &str = "rollout_unreadable";
+/// The same for a thread's rollout without any `token_usage_record` (an
+/// older Codex).
+pub const TOKEN_USAGE_RECORD_MISSING: &str = "token_usage_record_missing";
+/// The same for a thread's rollout in which no turn started since the
+/// Execution did.
+pub const ROLLOUT_TURN_MISSING: &str = "rollout_turn_missing";
 
 /// One model's tokens in an Execution (an entry of Claude's `modelUsage`):
 /// the same kinds as [`TokenUsage`], and the cost when the provider gave
@@ -256,6 +276,10 @@ pub struct ExecutionTokens {
     /// The subagents (Claude's `subagent_stats.spawned`) or child threads
     /// the Execution started, when the provider says.
     pub children: Option<i64>,
+    /// The root turns of Codex's thread the tokens were counted from
+    /// (`tokens_turns`, [`RolloutUsage::tokens`]), which a later Execution
+    /// of the thread does not count again; empty for the other sources.
+    pub turns: Vec<String>,
 }
 
 impl ExecutionTokens {
@@ -280,6 +304,109 @@ impl ExecutionTokens {
         payload["tokens_source"] = json!(self.source.map(TokenSource::as_str));
         payload["tokens_reason"] = json!(self.reason);
         payload["children"] = json!(self.children);
+        if !self.turns.is_empty() {
+            payload["tokens_turns"] = json!(self.turns);
+        }
+    }
+}
+
+/// One `token_usage_record` of a Codex rollout: the tokens of one response
+/// (one call of the model) of a thread, in the kinds of [`TokenUsage`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UsageRecord {
+    pub thread_id: String,
+    /// The turn of the root thread the response was made in, a child
+    /// thread's included.
+    pub root_turn_id: String,
+    /// `None`: the record is counted on its own.
+    pub response_id: Option<String>,
+    /// The model of the thread's turn (its `turn_context`), when it names
+    /// one.
+    pub model: Option<String>,
+    pub tokens: TokenUsage,
+}
+
+/// What Codex's rollouts say of one Execution (ADR-t1486-1): the root
+/// thread, the turns of it that started since the Execution did, and the
+/// `token_usage_record`s of the root thread's session (its own and its
+/// child threads', whose `session_id` is the root thread's) made in those
+/// turns. A resumed thread goes on in the same session, so the session's
+/// records are not all the Execution's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RolloutUsage {
+    pub thread_id: String,
+    /// The root turns, in the order they started.
+    pub turns: Vec<String>,
+    pub records: Vec<UsageRecord>,
+}
+
+impl RolloutUsage {
+    /// The Execution's tokens: the records of its turns but those in
+    /// `counted` (the root turns the thread's earlier Executions counted),
+    /// each `(thread_id, response_id)` once. A record's `usage` is the
+    /// response's own, not a running total, so they are summed. The child
+    /// threads are those of the records counted. A turn without a record is
+    /// a measured 0, as is an Execution whose turns were all counted
+    /// before. A record whose rollout named no model before it is in
+    /// `tokens` and in no entry of `by_model`.
+    pub fn tokens(&self, counted: &[String]) -> ExecutionTokens {
+        let turns: Vec<String> = self
+            .turns
+            .iter()
+            .filter(|turn| !counted.contains(turn))
+            .cloned()
+            .collect();
+        let mut seen = HashSet::new();
+        let mut children = HashSet::new();
+        let mut total = TokenUsage {
+            messages: 1,
+            ..TokenUsage::default()
+        };
+        let mut by_model: Vec<ModelTokens> = Vec::new();
+        for record in &self.records {
+            if !turns.contains(&record.root_turn_id) {
+                continue;
+            }
+            if let Some(response) = &record.response_id
+                && !seen.insert((record.thread_id.as_str(), response.as_str()))
+            {
+                continue;
+            }
+            if record.thread_id != self.thread_id {
+                children.insert(record.thread_id.as_str());
+            }
+            let tokens = &record.tokens;
+            total.input += tokens.input;
+            total.output += tokens.output;
+            total.cache_read += tokens.cache_read;
+            total.cache_creation += tokens.cache_creation;
+            let Some(model) = &record.model else {
+                continue;
+            };
+            let at = match by_model.iter().position(|m| &m.model == model) {
+                Some(at) => at,
+                None => {
+                    by_model.push(ModelTokens {
+                        model: model.clone(),
+                        ..ModelTokens::default()
+                    });
+                    by_model.len() - 1
+                }
+            };
+            let entry = &mut by_model[at];
+            entry.input += tokens.input;
+            entry.output += tokens.output;
+            entry.cache_read += tokens.cache_read;
+            entry.cache_creation += tokens.cache_creation;
+        }
+        ExecutionTokens {
+            tokens: Some(total),
+            by_model,
+            source: Some(TokenSource::UsageRecord),
+            reason: None,
+            children: Some(children.len() as i64),
+            turns,
+        }
     }
 }
 
@@ -662,6 +789,98 @@ mod tests {
             cache_creation: counts[3],
             cost_usd: cost,
         }
+    }
+
+    fn usage_record(
+        thread: &str,
+        turn: &str,
+        response: &str,
+        model: &str,
+        counts: [i64; 3],
+    ) -> UsageRecord {
+        UsageRecord {
+            thread_id: thread.to_owned(),
+            root_turn_id: turn.to_owned(),
+            response_id: Some(response.to_owned()),
+            model: Some(model.to_owned()),
+            tokens: TokenUsage {
+                input: counts[0],
+                output: counts[1],
+                cache_read: counts[2],
+                messages: 1,
+                ..TokenUsage::default()
+            },
+        }
+    }
+
+    /// An Execution's tokens are the records of its root turns, the root
+    /// thread's and its child threads', each response once, summed per
+    /// model; a turn an earlier Execution counted is not counted again.
+    #[test]
+    fn a_codex_executions_tokens_are_its_turns_records_once_per_response() {
+        let rollout = RolloutUsage {
+            thread_id: "root".to_owned(),
+            turns: vec!["t1".to_owned(), "t2".to_owned()],
+            records: vec![
+                usage_record("root", "t1", "r1", "gpt-a", [10, 2, 30]),
+                usage_record("root", "t2", "r2", "gpt-a", [5, 1, 20]),
+                // The same response again: counted once.
+                usage_record("root", "t2", "r2", "gpt-a", [5, 1, 20]),
+                // The same response id of another thread is another one.
+                usage_record("child", "t2", "r2", "gpt-b", [3, 1, 0]),
+                usage_record("child", "t2", "r3", "gpt-b", [4, 2, 1]),
+                // Another turn's (an earlier Execution of the thread).
+                usage_record("root", "t0", "r0", "gpt-a", [100, 100, 100]),
+            ],
+        };
+        let all = rollout.tokens(&[]);
+        assert_eq!(
+            all.tokens.as_ref().map(TokenUsage::payload),
+            Some(
+                json!({"input": 22, "output": 6, "cache_read": 51, "cache_creation": 0, "messages": 1})
+            )
+        );
+        assert_eq!(all.source, Some(TokenSource::UsageRecord));
+        assert_eq!(all.reason, None);
+        assert_eq!(all.children, Some(1));
+        assert_eq!(
+            all.by_model,
+            [
+                model("gpt-a", [15, 3, 50, 0], None),
+                model("gpt-b", [7, 3, 1, 0], None),
+            ]
+        );
+        let mut payload = json!({});
+        all.record(&mut payload);
+        assert_eq!(payload["tokens_turns"], json!(["t1", "t2"]));
+        assert_eq!(payload["tokens_source"], "token_usage_record");
+        // A turn counted before is left out.
+        let later = rollout.tokens(&["t1".to_owned()]);
+        assert_eq!(
+            later.tokens.as_ref().map(TokenUsage::payload),
+            Some(
+                json!({"input": 12, "output": 4, "cache_read": 21, "cache_creation": 0, "messages": 1})
+            )
+        );
+        assert_eq!(later.turns, ["t2"]);
+        // A turn that made no response is a measured 0, not unmeasured.
+        let quiet = RolloutUsage {
+            thread_id: "root".to_owned(),
+            turns: vec!["t9".to_owned()],
+            records: Vec::new(),
+        }
+        .tokens(&[]);
+        assert_eq!(quiet.tokens, Some(ModelTokens::total(&[], None)));
+        assert_eq!(quiet.children, Some(0));
+        let mut zero = json!({});
+        quiet.record(&mut zero);
+        let mut unmeasured = json!({});
+        ExecutionTokens::unmeasured(ROLLOUT_MISSING).record(&mut unmeasured);
+        assert_eq!(zero["tokens"]["input"], 0);
+        assert_eq!(zero["tokens_reason"], Value::Null);
+        assert_eq!(unmeasured["tokens"], Value::Null);
+        assert_eq!(unmeasured["tokens_reason"], "rollout_missing");
+        assert_eq!(unmeasured.get("tokens_turns"), None);
     }
 
     /// A session's running totals per model less earlier ones are what was

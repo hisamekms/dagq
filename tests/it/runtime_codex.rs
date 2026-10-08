@@ -246,6 +246,18 @@ fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
     assert_eq!(finished["session_id"], REVIEW_THREAD);
     assert_eq!(finished["model"], REVIEW_MODEL);
     assert!(finished.get("model_unknown").is_none(), "{finished}");
+    // Its tokens are its rollout's response, counted once (ADR-t1486-1).
+    assert_eq!(
+        finished["tokens"],
+        json!({"input": 10, "output": 4, "cache_read": 3, "cache_creation": 0, "messages": 1}),
+        "{finished}"
+    );
+    assert_eq!(
+        finished["tokens_source"], "token_usage_record",
+        "{finished}"
+    );
+    assert_eq!(finished["tokens_by_model"][0]["model"], REVIEW_MODEL);
+    assert_eq!(finished["children"], 0);
     assert!(payloads(&detail, "review_failed").is_empty());
     let spans = review_spans(&detail);
     assert_eq!(spans.len(), 1, "{spans:?}");
@@ -757,6 +769,7 @@ fn a_codex_run_answers_and_revises_through_resumes_of_its_thread_and_lands() {
     let config = codex_config();
     let (dir, repo, db, backend, codex) = codex_fixture();
     set_codex_model(dir.path(), "gpt-test-codex");
+    fs::write(dir.path().join("codex-usage-records"), "").unwrap();
     set_turns(
         dir.path(),
         &format!(
@@ -916,12 +929,20 @@ esac"#
     // Each turn's own, in the runtime's kinds of token (ADR-t813-2
     // decision 7): what it added to the total, the cached input apart, the
     // reasoning in the output, no cost.
-    for turn in &turns {
+    // They are counted from the thread's rollout (ADR-t1486-1): each turn
+    // its own root turn's response once, none of an earlier turn's again
+    // although the resumes go on in the same rollout.
+    for (n, turn) in (1..).zip(&turns) {
         assert_eq!(turn["provider"], "codex");
         assert_eq!(
             turn["tokens"],
-            json!({"input": 7, "output": 5, "cache_read": 4, "cache_creation": 0, "messages": 1})
+            json!({"input": 7, "output": 5, "cache_read": 4, "cache_creation": 0, "messages": 1}),
+            "{turn}"
         );
+        assert_eq!(turn["tokens_source"], "token_usage_record", "{turn}");
+        assert_eq!(turn["tokens_reason"], Value::Null, "{turn}");
+        assert_eq!(turn["tokens_turns"], json!([format!("turn-{n}")]), "{turn}");
+        assert_eq!(turn["tokens_by_model"][0]["model"], "gpt-test-codex");
     }
     // Each turn records the model Codex used, read from the thread's
     // rollout (task 892).
@@ -1086,6 +1107,19 @@ esac"#
         "{}",
         turns[0]
     );
+    // No rollout: the stopped turn's tokens are not measured, and the
+    // next one's are its thread total, with no earlier total to take
+    // from it (ADR-t1486-1).
+    assert_eq!(turns[0]["tokens"], Value::Null, "{}", turns[0]);
+    assert_eq!(turns[0]["tokens_reason"], "rollout_missing");
+    assert_eq!(
+        turns[1]["tokens"],
+        json!({"input": 14, "output": 10, "cache_read": 8, "cache_creation": 0, "messages": 1}),
+        "{}",
+        turns[1]
+    );
+    assert_eq!(turns[1]["tokens_source"], "thread_usage");
+    assert_eq!(turns[1]["tokens_reason"], "rollout_missing");
     // The thread was named before the limit: it is resumed.
     let calls = stub_calls(&detail.runs[0]);
     assert_eq!(calls.len(), 2, "{calls:?}");

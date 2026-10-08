@@ -26,6 +26,7 @@ use crate::domain::{
     actor_model::ActorLaunch,
     headless_job::{JobAccess, JobFailure, JobSession},
     review_subagents::{AgentTool, AgentTools},
+    tokens::ExecutionTokens,
     turn::{TurnFailure, TurnSession},
 };
 
@@ -611,17 +612,17 @@ not started with its own"
             }
         }
     }
-    /// The thread `thread.started` names, and the model of the rollout's
-    /// `turn_context` written since the job started.
+    /// The thread `thread.started` names, the model of the rollout's
+    /// `turn_context` written since the job started, and the job's tokens
+    /// ([`job_tokens`]).
     fn job_session(&self, stdout: &str, since: Option<i64>) -> Option<JobSession> {
         let result = read_job(self.sessions_dir(), stdout, "", since);
         Some(JobSession {
             named: true,
+            tokens: Some(job_tokens(&result)),
             session_id: result.session_id,
             model: result.model,
             model_unknown: result.model_unknown,
-            // A job's tokens are not counted yet (ADR-t1486-1).
-            tokens: None,
         })
     }
     /// The failure of the turn the job was, as a worker's turn is read
@@ -636,6 +637,22 @@ not started with its own"
     }
     fn turn_session_from_output(&self) -> bool {
         true
+    }
+}
+
+/// The tokens of a job, one Execution in a thread of its own
+/// (ADR-t1486-1): its rollouts' records of the turns started since the job
+/// did; else its `turn.completed`'s thread total, which is the job's own,
+/// with why the rollouts could not be counted; else not counted, with why.
+fn job_tokens(result: &crate::domain::turn::TurnResult) -> ExecutionTokens {
+    match &result.rollout {
+        Some(rollout) => rollout.tokens(&[]),
+        None => ExecutionTokens {
+            tokens: result.tokens.clone(),
+            source: result.tokens_source,
+            reason: result.tokens_reason,
+            ..ExecutionTokens::default()
+        },
     }
 }
 
@@ -1012,6 +1029,96 @@ mod tests {
             codex.job_failure("", "error: 401 Unauthorized\n"),
             JobFailure::Authentication
         );
+    }
+
+    /// A job's tokens are its rollout's records, a child thread's
+    /// included, never 0 for a job that made responses; without a rollout
+    /// to count they are its `turn.completed`'s with why, and without that
+    /// either they are not measured (`null` and why), apart from a
+    /// measured 0.
+    #[test]
+    fn a_jobs_tokens_are_counted_from_its_rollout_and_fall_back_with_why() {
+        use serde_json::{Value, json};
+        let dir = tempfile::tempdir().unwrap();
+        let codex = Codex {
+            executable: "codex".into(),
+            home: Some(dir.path().to_owned()),
+        };
+        let line = |value: Value| format!("{value}\n");
+        let stdout = |thread: &str, completed: bool| {
+            let mut out = line(json!({"type": "thread.started", "thread_id": thread}));
+            if completed {
+                out += &line(
+                    json!({"type": "turn.completed", "usage": {"input_tokens": 9, "output_tokens": 1}}),
+                );
+            }
+            out
+        };
+        let day = dir.path().join("sessions/2026/10/08");
+        fs::create_dir_all(&day).unwrap();
+        let record = |thread: &str, response: &str, input: i64| {
+            line(json!({"type": "token_usage_record", "payload": {
+                "thread_id": thread, "session_id": "job", "turn_id": "x", "root_turn_id": "t1",
+                "response_id": response,
+                "usage": {"input_tokens": input, "cached_input_tokens": 0, "output_tokens": 2}}}))
+        };
+        let started = line(
+            json!({"timestamp": "2026-10-08T00:00:01.000Z", "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "t1"}}),
+        );
+        fs::write(
+            day.join("rollout-2026-10-08T00-00-00-job.jsonl"),
+            line(json!({"type": "session_meta", "payload": {"id": "job", "session_id": "job"}}))
+                + &started
+                + &line(json!({"timestamp": "2026-10-08T00:00:01.000Z", "type": "turn_context", "payload": {"model": "gpt-review"}}))
+                + &record("job", "r1", 100)
+                + &record("job", "r2", 50),
+        )
+        .unwrap();
+        fs::write(
+            day.join("rollout-2026-10-08T00-00-02-sub.jsonl"),
+            line(json!({"type": "session_meta", "payload": {"id": "sub", "session_id": "job"}}))
+                + &record("sub", "r1", 25),
+        )
+        .unwrap();
+        let tokens = |stdout: &str| {
+            let mut payload = json!({});
+            codex
+                .job_session(stdout, None)
+                .unwrap()
+                .record(&mut payload);
+            payload
+        };
+        let counted = tokens(&stdout("job", true));
+        assert_eq!(counted["tokens"]["input"], 175, "{counted}");
+        assert_eq!(counted["tokens"]["output"], 6, "{counted}");
+        assert_eq!(counted["tokens_source"], "token_usage_record");
+        assert_eq!(counted["tokens_reason"], Value::Null);
+        assert_eq!(counted["children"], 1);
+        assert_eq!(counted["tokens_by_model"][0]["model"], "gpt-review");
+        assert_eq!(counted["tokens_turns"], json!(["t1"]));
+        // No rollout: the job's own thread total.
+        let fallback = tokens(&stdout("gone", true));
+        assert_eq!(fallback["tokens"]["input"], 9, "{fallback}");
+        assert_eq!(fallback["tokens_source"], "thread_usage");
+        assert_eq!(fallback["tokens_reason"], "rollout_missing");
+        // Nor a turn.completed: not measured.
+        let unmeasured = tokens(&stdout("gone", false));
+        assert_eq!(unmeasured["tokens"], Value::Null, "{unmeasured}");
+        assert_eq!(unmeasured["tokens_source"], Value::Null);
+        assert_eq!(unmeasured["tokens_reason"], "rollout_missing");
+        // A job whose turn made no response is a measured 0.
+        fs::write(
+            day.join("rollout-2026-10-08T00-00-03-quiet.jsonl"),
+            line(json!({"type": "session_meta", "payload": {"id": "quiet", "session_id": "quiet"}}))
+                + &started
+                + &line(json!({"type": "token_usage_record", "payload": {"thread_id": "quiet", "session_id": "quiet",
+                    "root_turn_id": "t0", "response_id": "r0", "usage": {"input_tokens": 1, "output_tokens": 1}}})),
+        )
+        .unwrap();
+        let zero = tokens(&stdout("quiet", false));
+        assert_eq!(zero["tokens"]["input"], 0, "{zero}");
+        assert_eq!(zero["tokens_reason"], Value::Null);
     }
 
     fn run(worktree: &Path, run_dir: &Path) -> TaskRun {
