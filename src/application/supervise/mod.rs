@@ -1537,7 +1537,7 @@ impl Supervisor<'_> {
             self.tend_headless_jobs();
             // What the cleanup job removed is recorded before the disk is
             // read (task 405).
-            let ending = stopping || self.handoff.is_some();
+            let ending = cleanup::ends_cleanup(stopping, self.handoff.is_some());
             let held = self.held_runs();
             self.on_host(|host, env| host.poll_cleanup(env, &held, ending));
             // Every pass, draining or not, so a hold on landings ends as soon
@@ -2174,9 +2174,7 @@ impl Supervisor<'_> {
         let needed = self.on_host(|host, env| host.disk_needs(env))?.claim;
         // Short while a cleanup for room runs: wait for it without a hold
         // (task 405).
-        if self.host.disk.cleaning
-            && matches!((self.host.free, needed), (Some(free), Some(need)) if free < need)
-        {
+        if disk::claims_wait_for_cleanup(self.host.disk.cleaning, self.host.free, needed) {
             return Ok(true);
         }
         let hold = ClaimHold::judge(&HoldInputs {

@@ -157,6 +157,67 @@ impl CleanupWatch {
     pub(super) const fn deferred(&self) -> bool {
         self.deferred
     }
+    /// Take a request for the next job (see
+    /// [`HostOpsState::request_cleanup`]); whether it was taken: none is
+    /// once ending (a stop or a handoff).
+    fn take(&mut self, task: Option<TaskId>, disk: Option<DiskRequest>) -> bool {
+        if self.ending {
+            return false;
+        }
+        // For room while another job runs: that job counts for it, and the
+        // rest (the runs it did not pick, and the prune) follows. The build
+        // outputs of the runs nobody works on that wait for no answer (task
+        // 1289), which only a cleanup for room removes, go in that rest,
+        // which counts what it removes for room too; while the disk is
+        // short, nothing is held or asked for until it is done (task 1478).
+        // While a cleanup for room waits or runs, no other is added (task
+        // 1627).
+        if let Some(request) = disk {
+            add_disk_request(
+                self.job.as_mut().map(|job| (&mut job.disk, job.counted)),
+                &mut self.pending,
+                request,
+            );
+        }
+        if disk.is_none() || task.is_some() {
+            self.pending.add(task, None);
+        }
+        true
+    }
+    /// End the cleanup (see [`HostOpsState::end_cleanup`]): take no more
+    /// requests, let an ordinary job stop after its current worktree, and
+    /// keep only the [`ending_rest`] of what waits.
+    fn end(&mut self) {
+        self.ending = true;
+        if !self
+            .job
+            .as_ref()
+            .is_some_and(|job| for_room(job.disk, job.counted).is_some())
+        {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+        self.pending = ending_rest(std::mem::take(&mut self.pending));
+    }
+    /// Take requests again after [`Self::end`] (see
+    /// [`HostOpsState::resume_cleanup`]): whether it had ended, so every
+    /// ended run is to be asked for.
+    fn resume(&mut self) -> bool {
+        if !self.ending {
+            return false;
+        }
+        self.ending = false;
+        self.stop.store(false, Ordering::SeqCst);
+        true
+    }
+    /// Whether the failure to clean `path` is recorded: once per process,
+    /// and only logged when it fails again.
+    fn first_failure(&mut self, path: &str) -> bool {
+        if self.failed.iter().any(|failed| failed == path) {
+            return false;
+        }
+        self.failed.push(path.to_owned());
+        true
+    }
 }
 
 /// Whether cleanup may still free room; draining does not alter this decision.
@@ -164,9 +225,43 @@ fn disk_cleanup_pending(
     job: Option<(Option<DiskRequest>, Option<DiskRequest>)>,
     pending: &Request,
 ) -> bool {
-    job.is_some_and(|(disk, counted)| disk.is_some() || counted.is_some())
-        || pending.disk.is_some()
-        || pending.counted.is_some()
+    job.is_some_and(|(disk, counted)| for_room(disk, counted).is_some())
+        || for_room(pending.disk, pending.counted).is_some()
+}
+
+/// The cleanup for room a job or a request counts for: its own
+/// (`disk`), or the one another job took on whose rest it is (`counted`).
+/// Such a job goes to its last candidate through a stop or a handoff, and
+/// records `auto_repaired` once joined; an ordinary one does neither.
+const fn for_room(disk: Option<DiskRequest>, counted: Option<DiskRequest>) -> Option<DiskRequest> {
+    match disk {
+        Some(disk) => Some(disk),
+        None => counted,
+    }
+}
+
+/// Whether this pass ends the cleanup: a stop or a handoff does. A drain
+/// on a provisioning failure (claiming stopped, neither a stop nor a
+/// handoff) does not: the cleanup takes requests and its jobs go on as
+/// usual (task 1636).
+pub(super) const fn ends_cleanup(stopping: bool, handing_off: bool) -> bool {
+    stopping || handing_off
+}
+
+/// What waits for the next job once the cleanup ends (a stop or a
+/// handoff): only the rest of a cleanup for room another job took on
+/// (task 1426), which goes to every ended run with the prune and the runs
+/// nobody works on that wait for no answer; the rest is dropped.
+fn ending_rest(pending: Request) -> Request {
+    pending
+        .counted
+        .map_or_else(Request::default, |counted| Request {
+            all: true,
+            prune: true,
+            idle: true,
+            counted: Some(counted),
+            ..Request::default()
+        })
 }
 
 /// Take a cleanup for room on (task 1627): while one waits or runs (the
@@ -221,6 +316,62 @@ fn build_outputs_record(cleanup: WorktreeCleanup, paths: &[String], bytes: u64) 
         payload["ask_id"] = json!(ask);
     }
     (why, payload)
+}
+
+/// How a worktree went ([`Outcome::Worktree`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Removed {
+    missing: bool,
+    repaired: bool,
+    broken_git: bool,
+}
+
+/// The payload of `worktree_removed`: the reason is the task's status, and
+/// each of `removed`, the processes stopped and why they could not be
+/// listed is named only when there is one.
+fn worktree_record(
+    task_status: TaskStatus,
+    path: &str,
+    branch: &str,
+    bytes: u64,
+    removed: Removed,
+    stopped: &[Value],
+    unlisted: Option<&str>,
+) -> Value {
+    let reason = format!("task_{}", task_status.as_str());
+    let mut payload = json!({"path": path, "branch": branch, "bytes": bytes, "by": "supervisor", "reason": reason});
+    if removed.missing {
+        payload["worktree_missing"] = json!(true);
+    }
+    if removed.repaired {
+        payload["repaired"] = json!(true);
+    }
+    if removed.broken_git {
+        payload["broken_git"] = json!(true);
+    }
+    if !stopped.is_empty() {
+        payload["stopped_processes"] = json!(stopped);
+    }
+    if let Some(unlisted) = unlisted {
+        payload["processes_unlisted"] = json!(unlisted);
+    }
+    payload
+}
+
+/// The payload of what goes once a run's task is over beside its worktree
+/// (`scratchpad_removed`, `run_tmp_removed`): the reason is the task's
+/// status.
+fn task_over_record(task_status: TaskStatus, paths: &[String], bytes: u64) -> Value {
+    json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())})
+}
+
+/// The message and the payload of `cleanup_failed` for `what` (`worktree`,
+/// `scratchpad` or `run tmp`) at `path`.
+fn failed_record(what: &str, path: &str, error: &anyhow::Error) -> (String, Value) {
+    let message = format!("{what} {path} could not be cleaned: {error:#}");
+    let payload = reason_of_error(error, ReasonCode::Other)
+        .on(json!({"path": path, "message": message, "by": "supervisor"}));
+    (message, payload)
 }
 
 /// What the loop and the job share under one lock.
@@ -413,29 +564,8 @@ impl HostOpsState {
         task: Option<TaskId>,
         disk: Option<DiskRequest>,
     ) -> bool {
-        if self.cleanup.ending {
+        if !self.cleanup.take(task, disk) {
             return false;
-        }
-        // For room while another job runs: that job counts for it, and the
-        // rest (the runs it did not pick, and the prune) follows. The build
-        // outputs of the runs nobody works on that wait for no answer (task
-        // 1289), which only a cleanup for room removes, go in that rest,
-        // which counts what it removes for room too; while the disk is
-        // short, nothing is held or asked for until it is done (task 1478).
-        // While a cleanup for room waits or runs, no other is added (task
-        // 1627).
-        if let Some(request) = disk {
-            add_disk_request(
-                self.cleanup
-                    .job
-                    .as_mut()
-                    .map(|job| (&mut job.disk, job.counted)),
-                &mut self.cleanup.pending,
-                request,
-            );
-        }
-        if disk.is_none() || task.is_some() {
-            self.cleanup.pending.add(task, None);
         }
         self.start_cleanup(env, held);
         true
@@ -461,7 +591,7 @@ impl HostOpsState {
         lock_cleaning(&self.cleanup.cleaning).reserved.clear();
         self.cleanup.deferred = false;
         let cleaned = self.record_cleanup(env, outcomes);
-        if let Some(disk) = job.disk.or(job.counted) {
+        if let Some(disk) = for_room(job.disk, job.counted) {
             self.cleaned_for_disk(env, disk, &cleaned);
             // The next cleanup for room waits its interval from here, so
             // the pass after it judges the reading after it (task 1627).
@@ -474,25 +604,7 @@ impl HostOpsState {
     /// cleanup for room another job took on. No job is joined: a reading
     /// of the disk taken before stays the one of the cleanup in progress.
     pub(super) fn end_cleanup(&mut self) {
-        self.cleanup.ending = true;
-        if !self
-            .cleanup
-            .job
-            .as_ref()
-            .is_some_and(|job| job.disk.is_some() || job.counted.is_some())
-        {
-            self.cleanup.stop.store(true, Ordering::SeqCst);
-        }
-        let pending = std::mem::take(&mut self.cleanup.pending);
-        if let Some(counted) = pending.counted {
-            self.cleanup.pending = Request {
-                all: true,
-                prune: true,
-                idle: true,
-                counted: Some(counted),
-                ..Request::default()
-            };
-        }
+        self.cleanup.end();
     }
     /// A handoff withdrawn while this process drained, which goes back to
     /// claims (task 1427): requests are taken again, an ordinary job that
@@ -500,12 +612,9 @@ impl HostOpsState {
     /// at once, which picks up what the drain dropped. A job that stopped
     /// after its current worktree leaves the rest to that request.
     pub(super) fn resume_cleanup(&mut self, env: &mut PassEnv<'_>, held: &[RunId]) {
-        if !self.cleanup.ending {
-            return;
+        if self.cleanup.resume() {
+            self.request_cleanup(env, held, None, None);
         }
-        self.cleanup.ending = false;
-        self.cleanup.stop.store(false, Ordering::SeqCst);
-        self.request_cleanup(env, held, None, None);
     }
     /// Once the loop ended: wait for the job and whatever waits for the
     /// next one, and record what they did. After a stop, only the running
@@ -555,7 +664,7 @@ impl HostOpsState {
             cleaning: self.cleanup.cleaning.clone(),
             // A cleanup for room goes to its last candidate: it is not
             // stopped with ordinary cleanup.
-            stop: if request.disk.is_some() || request.counted.is_some() {
+            stop: if for_room(request.disk, request.counted).is_some() {
                 Arc::new(AtomicBool::new(false))
             } else {
                 self.cleanup.stop.clone()
@@ -601,28 +710,32 @@ impl HostOpsState {
                     stopped,
                     unlisted,
                 } => {
-                    let reason = format!("task_{}", task_status.as_str());
-                    let mut payload = json!({"path": path, "branch": branch, "bytes": bytes, "by": "supervisor", "reason": reason});
+                    let payload = worktree_record(
+                        task_status,
+                        &path,
+                        &branch,
+                        bytes,
+                        Removed {
+                            missing,
+                            repaired,
+                            broken_git,
+                        },
+                        &stopped,
+                        unlisted.as_deref(),
+                    );
                     if missing {
-                        payload["worktree_missing"] = json!(true);
                         info!(run_id = %run_id, task_id = %task_id, "task {task_id} is {}; the worktree {path} of run {run_id} was already gone: removed its branch {branch}", task_status.as_str());
                     } else {
                         info!(run_id = %run_id, task_id = %task_id, "task {task_id} is {}; removed worktree {path} and branch {branch} of run {run_id} ({bytes} bytes)", task_status.as_str());
                     }
-                    if repaired {
-                        payload["repaired"] = json!(true);
-                    }
                     if broken_git {
-                        payload["broken_git"] = json!(true);
                         info!(run_id = %run_id, "the worktree {path} of run {run_id} had a broken .git: removed its directory");
                     }
                     if !stopped.is_empty() {
                         info!(run_id = %run_id, "stopped {} process(es) running from the worktree {path} of run {run_id} before its removal", stopped.len());
-                        payload["stopped_processes"] = json!(stopped);
                     }
                     if let Some(unlisted) = unlisted {
                         warn!(run_id = %run_id, "the processes running from the worktree {path} of run {run_id} could not be listed before its removal: {unlisted}");
-                        payload["processes_unlisted"] = json!(unlisted);
                     }
                     cleaned.add(&run_id, bytes);
                     env.queue
@@ -639,7 +752,7 @@ impl HostOpsState {
                     env.queue.record_runtime_event(
                         &run_id,
                         EventKind::ScratchpadRemoved,
-                        json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())}),
+                        task_over_record(task_status, &paths, bytes),
                     )
                 }
                 Outcome::RunTmp {
@@ -653,7 +766,7 @@ impl HostOpsState {
                     env.queue.record_runtime_event(
                         &run_id,
                         EventKind::RunTmpRemoved,
-                        json!({"paths": [path], "bytes": bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())}),
+                        task_over_record(task_status, std::slice::from_ref(&path), bytes),
                     )
                 }
                 Outcome::Failed {
@@ -662,19 +775,14 @@ impl HostOpsState {
                     path,
                     error,
                 } => {
-                    if self.cleanup.failed.contains(&path) {
+                    if !self.cleanup.first_failure(&path) {
                         warn!(run_id = %run_id, "run {run_id}: {what} {path} still could not be cleaned: {error:#}");
                         continue;
                     }
-                    self.cleanup.failed.push(path.clone());
-                    let message = format!("{what} {path} could not be cleaned: {error:#}");
+                    let (message, payload) = failed_record(what, &path, &error);
                     warn!(run_id = %run_id, "run {run_id}: {message}");
-                    env.queue.record_runtime_event(
-                        &run_id,
-                        EventKind::CleanupFailed,
-                        reason_of_error(&error, ReasonCode::Other)
-                            .on(json!({"path": path, "message": message, "by": "supervisor"})),
-                    )
+                    env.queue
+                        .record_runtime_event(&run_id, EventKind::CleanupFailed, payload)
                 }
             };
             if let Err(error) = recorded {
@@ -765,7 +873,7 @@ fn clean_candidate(
     outcomes: &mut Vec<Outcome>,
 ) -> bool {
     let first = outcomes.len();
-    let runner = candidate.cleanup != WorktreeCleanup::Ended || remove_run_runner(ports, candidate);
+    let runner = !runner_goes(candidate.cleanup) || remove_run_runner(ports, candidate);
     match clean_worktree(ports, candidate, branches, pruned) {
         Ok(Some(outcome)) => outcomes.push(outcome),
         Ok(None) => {}
@@ -799,6 +907,13 @@ fn clean_candidate(
     )
 }
 
+/// Whether the job removes a candidate's runner: only an ended run's
+/// ([`WorktreeCleanup::Ended`]). A run in the middle (waiting for an
+/// answer, a landing or a resume) keeps it, as its session may go on.
+fn runner_goes(cleanup: WorktreeCleanup) -> bool {
+    cleanup == WorktreeCleanup::Ended
+}
+
 /// Remove the runner (the binary snapshot its session wrapper ran from)
 /// of an ended run nobody leases: no session of it runs, and a resume,
 /// which needs the lease, copies it again. The run stays reserved while
@@ -822,45 +937,58 @@ fn remove_run_runner(ports: &JobPorts, candidate: &EndedRunWorktree) -> bool {
     }
 }
 
-/// Remove the Claude Code scratchpads of an ended run whose task is over
-/// (task 1100): the directory named [`scratchpad_dir_name`] after its
-/// worktree, the cwd of its session, under each of the scratchpad roots.
-/// A run whose task goes on keeps them, as a resume may go on in them. A
-/// directory that is not there, or is a link, is left alone; nothing
-/// outside the directory is followed, and one gone before its removal
-/// (another supervisor's cleanup, or Claude Code's) is no failure. What
-/// was removed is pushed to `outcomes` with a failure under another root.
-fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
-    if !task_over(candidate.task_status)
-        || !Path::new(&candidate.worktree).starts_with(&ports.runs_dir)
-    {
-        return;
+/// The directories of an ended run's Claude Code scratchpads (task 1100):
+/// the one named [`scratchpad_dir_name`] after its worktree, the cwd of its
+/// session, under each of the scratchpad `roots`, once its task is over. A
+/// run whose task goes on keeps them, as a resume may go on in them, and
+/// so does a worktree outside the runs directory.
+fn scratchpad_dirs(
+    candidate: &EndedRunWorktree,
+    runs_dir: &Path,
+    roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    if !task_over(candidate.task_status) || !Path::new(&candidate.worktree).starts_with(runs_dir) {
+        return Vec::new();
     }
-    let Some(name) = scratchpad_dir_name(&candidate.worktree) else {
-        return;
+    scratchpad_dir_name(&candidate.worktree)
+        .map(|name| roots.iter().map(|root| root.join(&name)).collect())
+        .unwrap_or_default()
+}
+
+/// The temporary files directory ([`RUN_TMP_DIR`]) of an ended run, in its
+/// run directory, once its task is over (task 1290): the `TMPDIR` the
+/// runtime gave its Codex turns. A run whose task goes on keeps it, as a
+/// resume may go on in it; nothing else of the run directory goes.
+fn run_tmp_dir(candidate: &EndedRunWorktree, runs_dir: &Path) -> Option<PathBuf> {
+    task_over(candidate.task_status)
+        .then(|| runs_dir.join(candidate.run_id.as_str()).join(RUN_TMP_DIR))
+}
+
+/// Measure and remove the directory `dir`; its bytes, or `None` for no
+/// directory there, a link (left alone, nothing outside it is followed),
+/// or one gone before its removal (another supervisor's cleanup, or
+/// Claude Code's), which is no failure.
+fn remove_tree(files: &dyn RunFiles, dir: &Path) -> Result<Option<u64>> {
+    let Some(size) = files
+        .tree_size(dir)
+        .with_context(|| format!("measure {}", dir.display()))?
+    else {
+        return Ok(None);
     };
+    match files.remove_dir_all(dir) {
+        Ok(()) => Ok(Some(size)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(anyhow::Error::new(error).context(format!("remove {}", dir.display()))),
+    }
+}
+
+/// Remove the [`scratchpad_dirs`] of an ended run. What was removed is
+/// pushed to `outcomes` with a failure under another root.
+fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
     let mut paths = Vec::new();
     let mut bytes = 0;
-    for root in &ports.scratchpad_roots {
-        let dir = root.join(&name);
-        let removed = ports
-            .files
-            .tree_size(&dir)
-            .with_context(|| format!("measure {}", dir.display()))
-            .and_then(|size| {
-                // `None` for no directory there, and for a link.
-                let Some(size) = size else {
-                    return Ok(None);
-                };
-                match ports.files.remove_dir_all(&dir) {
-                    Ok(()) => Ok(Some(size)),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                    Err(error) => {
-                        Err(anyhow::Error::new(error).context(format!("remove {}", dir.display())))
-                    }
-                }
-            });
-        match removed {
+    for dir in scratchpad_dirs(candidate, &ports.runs_dir, &ports.scratchpad_roots) {
+        match remove_tree(&*ports.files, &dir) {
             Ok(Some(size)) => {
                 paths.push(dir.to_string_lossy().into_owned());
                 bytes += size;
@@ -884,39 +1012,13 @@ fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: 
     }
 }
 
-/// Remove the temporary files directory ([`RUN_TMP_DIR`]) of a run whose
-/// task is over (task 1290): the `TMPDIR` the runtime gave its Codex
-/// turns, in its run directory. A run whose task goes on keeps it, as a
-/// resume may go on in it. Only that directory goes, without following a
-/// link (one there is left alone) and nothing else of the run directory;
-/// one not there, or gone before its removal, is no failure.
+/// Remove the [`run_tmp_dir`] of an ended run.
 fn remove_run_tmp(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
-    if !task_over(candidate.task_status) {
+    let Some(dir) = run_tmp_dir(candidate, &ports.runs_dir) else {
         return;
-    }
-    let dir = ports
-        .runs_dir
-        .join(candidate.run_id.as_str())
-        .join(RUN_TMP_DIR);
-    let removed = ports
-        .files
-        .tree_size(&dir)
-        .with_context(|| format!("measure {}", dir.display()))
-        .and_then(|size| {
-            // `None` for no directory there, and for a link.
-            let Some(size) = size else {
-                return Ok(None);
-            };
-            match ports.files.remove_dir_all(&dir) {
-                Ok(()) => Ok(Some(size)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(error) => {
-                    Err(anyhow::Error::new(error).context(format!("remove {}", dir.display())))
-                }
-            }
-        });
+    };
     let path = dir.to_string_lossy().into_owned();
-    match removed {
+    match remove_tree(&*ports.files, &dir) {
         Ok(Some(bytes)) => outcomes.push(Outcome::RunTmp {
             run_id: candidate.run_id.clone(),
             task_status: candidate.task_status,
@@ -1455,6 +1557,333 @@ mod tests {
                 Some(2),
                 "{length:?}"
             );
+        }
+    }
+
+    /// A job that holds no thread's work: what it counts for is all a
+    /// test of the watch reads of it.
+    fn job(disk: Option<DiskRequest>, counted: Option<DiskRequest>) -> Job {
+        Job {
+            handle: thread::spawn(Vec::new),
+            disk,
+            counted,
+        }
+    }
+
+    /// A job for room, or the rest of one another job took on, counts for
+    /// room: it records `auto_repaired` once joined and goes to its last
+    /// candidate through a stop or a handoff. An ordinary job does neither,
+    /// so a run whose build outputs an ordinary sweep removed records no
+    /// `auto_repaired`.
+    #[test]
+    fn a_job_for_room_or_its_rest_counts_for_room_and_an_ordinary_one_does_not() {
+        let other = DiskRequest {
+            free: Some(3),
+            needed: None,
+        };
+        assert_eq!(for_room(None, None), None);
+        assert_eq!(for_room(Some(DISK), None), Some(DISK));
+        assert_eq!(for_room(None, Some(other)), Some(other));
+        // The job's own request is the reading it was asked at.
+        assert_eq!(for_room(Some(DISK), Some(other)), Some(DISK));
+    }
+
+    /// Only a stop or a handoff ends the cleanup. A drain on a provisioning
+    /// failure (claiming stopped, neither) does not: a request asked for
+    /// during it (a run that failed in the drain) is taken and waits for
+    /// the ordinary job running, which is not stopped (task 1636).
+    #[test]
+    fn only_a_stop_or_a_handoff_ends_the_cleanup() {
+        for (stopping, handing_off, ends) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            assert_eq!(ends_cleanup(stopping, handing_off), ends);
+            let mut watch = CleanupWatch {
+                job: Some(job(None, None)),
+                ..CleanupWatch::default()
+            };
+            if ends {
+                watch.end();
+            }
+            assert_eq!(watch.stop.load(Ordering::SeqCst), ends);
+            assert_eq!(watch.take(Some(TaskId::new(3)), None), !ends);
+            assert_eq!(watch.pending.tasks.is_empty(), ends);
+            assert!(watch.running());
+        }
+    }
+
+    /// Task 648 and task 1426: a stop or a handoff takes no more requests,
+    /// stops an ordinary job after its current worktree and drops what
+    /// waits, but a job for room or the rest of one runs to its last
+    /// candidate, and the rest of a cleanup for room another job took on
+    /// still waits for the next job: the drain's landings wait for it, so
+    /// too when the rest started (it waits) or finished (its job is not
+    /// joined yet) on the pass the handoff is read first.
+    #[test]
+    fn ending_keeps_only_the_rest_of_a_cleanup_for_room() {
+        let mut waiting = Request::default();
+        waiting.add(Some(TaskId::new(5)), None);
+        waiting.add(None, None);
+        let dropped = ending_rest(waiting);
+        assert!(dropped.is_empty() && dropped.disk.is_none() && dropped.counted.is_none());
+        assert!(!dropped.prune && !dropped.idle);
+        let mut rest = Request::default();
+        rest.add(Some(TaskId::new(5)), None);
+        rest.counted = Some(DISK);
+        let kept = ending_rest(rest);
+        assert!(kept.all && kept.prune && kept.idle);
+        assert!(kept.tasks.is_empty());
+        assert_eq!((kept.disk, kept.counted), (None, Some(DISK)));
+        // A pending request for room of its own is dropped with the rest.
+        assert!(
+            ending_rest(Request {
+                all: true,
+                disk: Some(DISK),
+                ..Request::default()
+            })
+            .is_empty()
+        );
+
+        for (job_disk, job_counted, stops) in [
+            (None, None, true),
+            (Some(DISK), None, false),
+            (None, Some(DISK), false),
+        ] {
+            let case = format!("{job_disk:?} {job_counted:?}");
+            let mut watch = CleanupWatch {
+                job: Some(job(job_disk, job_counted)),
+                ..CleanupWatch::default()
+            };
+            watch.pending.add(None, None);
+            watch.end();
+            assert!(watch.ending, "{case}");
+            assert_eq!(watch.stop.load(Ordering::SeqCst), stops, "{case}");
+            assert!(watch.pending.is_empty(), "{case}");
+            assert_eq!(watch.for_disk(), !stops, "{case}");
+            assert!(!watch.take(None, Some(DISK)), "{case}");
+            assert!(watch.pending.is_empty(), "{case}");
+        }
+        // An ordinary job that took on a cleanup for room: its rest waits
+        // through the end, and the cleanup stays one for room.
+        let mut watch = CleanupWatch {
+            job: Some(job(None, None)),
+            ..CleanupWatch::default()
+        };
+        assert!(watch.take(None, Some(DISK)));
+        assert_eq!(watch.pending.counted, Some(DISK));
+        watch.end();
+        assert!(!watch.stop.load(Ordering::SeqCst));
+        assert_eq!(watch.pending.counted, Some(DISK));
+        assert!(watch.pending.all && watch.pending.prune && watch.pending.idle);
+        assert!(watch.for_disk());
+        // That rest started on the pass the handoff is read first, or
+        // finished since (not joined yet): it still counts.
+        let watch = CleanupWatch {
+            job: Some(job(None, Some(DISK))),
+            ending: true,
+            ..CleanupWatch::default()
+        };
+        assert!(watch.for_disk());
+    }
+
+    /// Task 1427: a handoff withdrawn while draining takes requests again,
+    /// lets an ordinary job that has not seen the stop go on, and asks for
+    /// every ended run once, which picks up what the drain dropped. One
+    /// that never ended asks for nothing more.
+    #[test]
+    fn a_withdrawn_end_takes_requests_again_and_asks_for_every_ended_run() {
+        let mut watch = CleanupWatch {
+            job: Some(job(None, None)),
+            ..CleanupWatch::default()
+        };
+        assert!(!watch.resume());
+        assert!(watch.pending.is_empty());
+        watch.end();
+        assert!(watch.stop.load(Ordering::SeqCst));
+        assert!(watch.resume());
+        assert!(!watch.ending);
+        assert!(!watch.stop.load(Ordering::SeqCst));
+        assert!(!watch.resume());
+        assert!(watch.take(None, None));
+        assert!(watch.pending.all && !watch.pending.idle && !watch.pending.prune);
+        // Back to normal, a shortage asks for a cleanup for room, which
+        // the job running takes on.
+        assert!(watch.take(None, Some(DISK)));
+        assert!(watch.for_disk());
+        assert_eq!(watch.pending.counted, Some(DISK));
+    }
+
+    /// A request for some tasks' runs and one for every run merge; one for
+    /// room alone adds no task, one for room and a task adds both.
+    #[test]
+    fn a_request_is_taken_into_what_waits_for_the_next_job() {
+        let mut watch = CleanupWatch::default();
+        assert!(watch.take(Some(TaskId::new(1)), None));
+        assert!(watch.take(Some(TaskId::new(1)), None));
+        assert_eq!(watch.pending.tasks, [TaskId::new(1)]);
+        assert!(!watch.pending.all && !watch.for_disk());
+        assert!(watch.take(Some(TaskId::new(2)), Some(DISK)));
+        assert_eq!(watch.pending.tasks, [TaskId::new(1), TaskId::new(2)]);
+        assert_eq!(watch.pending.disk, Some(DISK));
+        assert!(watch.pending.all && watch.pending.prune && watch.pending.idle);
+        let mut watch = CleanupWatch::default();
+        assert!(watch.take(None, Some(DISK)));
+        assert!(watch.pending.tasks.is_empty());
+        assert!(watch.for_disk());
+    }
+
+    /// `worktree_removed`, `scratchpad_removed`, `run_tmp_removed` and
+    /// `cleanup_failed` as the job's outcomes record them: the reason is
+    /// the task's status, and each mark only when it applies.
+    #[test]
+    fn the_records_of_a_cleanup_keep_their_reasons_and_marks() {
+        let plain = worktree_record(
+            TaskStatus::Canceled,
+            "/runs/r/worktree",
+            "refs/heads/dagq/r",
+            42,
+            Removed::default(),
+            &[],
+            None,
+        );
+        assert_eq!(
+            plain,
+            json!({"path": "/runs/r/worktree", "branch": "refs/heads/dagq/r", "bytes": 42, "by": "supervisor", "reason": "task_canceled"})
+        );
+        let stopped = [json!({"pid": 7, "executable": "/runs/r/worktree/dagq", "killed": false})];
+        let marked = worktree_record(
+            TaskStatus::Completed,
+            "/runs/r/worktree",
+            "refs/heads/dagq/r",
+            0,
+            Removed {
+                missing: true,
+                repaired: true,
+                broken_git: true,
+            },
+            &stopped,
+            Some("ps failed"),
+        );
+        assert_eq!(marked["reason"], "task_completed");
+        assert_eq!(marked["worktree_missing"], true);
+        assert_eq!(marked["repaired"], true);
+        assert_eq!(marked["broken_git"], true);
+        assert_eq!(marked["stopped_processes"], json!(stopped));
+        assert_eq!(marked["processes_unlisted"], "ps failed");
+        for (removed, key) in [
+            (
+                Removed {
+                    missing: true,
+                    ..Removed::default()
+                },
+                "worktree_missing",
+            ),
+            (
+                Removed {
+                    repaired: true,
+                    ..Removed::default()
+                },
+                "repaired",
+            ),
+            (
+                Removed {
+                    broken_git: true,
+                    ..Removed::default()
+                },
+                "broken_git",
+            ),
+        ] {
+            let payload = worktree_record(TaskStatus::Completed, "p", "b", 0, removed, &[], None);
+            let marks: Vec<&str> = [
+                "worktree_missing",
+                "repaired",
+                "broken_git",
+                "stopped_processes",
+                "processes_unlisted",
+            ]
+            .into_iter()
+            .filter(|mark| payload.get(mark).is_some())
+            .collect();
+            assert_eq!(marks, [key]);
+        }
+
+        let tmp = task_over_record(TaskStatus::Canceled, &["/runs/r/tmp".to_owned()], 32_768);
+        assert_eq!(
+            tmp,
+            json!({"paths": ["/runs/r/tmp"], "bytes": 32_768, "by": "supervisor", "reason": "task_canceled"})
+        );
+        assert_eq!(
+            task_over_record(TaskStatus::Completed, &[], 0)["reason"],
+            "task_completed"
+        );
+
+        let error = anyhow::anyhow!("denied").context("remove /claude/x");
+        let (message, payload) = failed_record("scratchpad", "/claude/x", &error);
+        assert_eq!(
+            message,
+            "scratchpad /claude/x could not be cleaned: remove /claude/x: denied"
+        );
+        assert_eq!(
+            payload,
+            json!({"path": "/claude/x", "message": message, "by": "supervisor", "code": "other"})
+        );
+        // A path that fails again is recorded once per process.
+        let mut watch = CleanupWatch::default();
+        assert!(watch.first_failure("/claude/x"));
+        assert!(!watch.first_failure("/claude/x"));
+        assert!(watch.first_failure("/runs/r/tmp"));
+    }
+
+    /// Task 1289: only an ended run loses its runner; a run waiting for an
+    /// answer, or one nobody works on, keeps it for its session.
+    #[test]
+    fn only_an_ended_run_loses_its_runner() {
+        assert!(runner_goes(WorktreeCleanup::Ended));
+        assert!(!runner_goes(WorktreeCleanup::AwaitingAnswer(AskId::new(7))));
+        assert!(!runner_goes(WorktreeCleanup::Idle));
+    }
+
+    /// Task 1100 and task 1290: the scratchpads and the temporary files
+    /// directory of a run go once its task is over; a run whose task goes
+    /// on keeps them, and a worktree outside the runs directory has no
+    /// scratchpad looked for.
+    #[test]
+    fn the_scratchpads_and_the_tmp_dir_go_only_once_the_task_is_over() {
+        let runs = Path::new("/runs");
+        let roots = [PathBuf::from("/claude/a"), PathBuf::from("/claude/b")];
+        let name = scratchpad_dir_name("/runs/r/worktree").unwrap();
+        for status in [
+            TaskStatus::Draft,
+            TaskStatus::Submitted,
+            TaskStatus::Ready,
+            TaskStatus::InProgress,
+        ] {
+            let going_on = candidate("r", status);
+            assert!(
+                scratchpad_dirs(&going_on, runs, &roots).is_empty(),
+                "{status:?}"
+            );
+            assert_eq!(run_tmp_dir(&going_on, runs), None, "{status:?}");
+        }
+        for status in [TaskStatus::Completed, TaskStatus::Canceled] {
+            let over = candidate("r", status);
+            assert_eq!(
+                scratchpad_dirs(&over, runs, &roots),
+                [roots[0].join(&name), roots[1].join(&name)]
+            );
+            assert_eq!(
+                run_tmp_dir(&over, runs),
+                Some(PathBuf::from("/runs/r").join(RUN_TMP_DIR))
+            );
+            let elsewhere = EndedRunWorktree {
+                worktree: "/elsewhere/r/worktree".into(),
+                ..over.clone()
+            };
+            assert!(scratchpad_dirs(&elsewhere, runs, &roots).is_empty());
+            assert!(scratchpad_dirs(&over, runs, &[]).is_empty());
         }
     }
 

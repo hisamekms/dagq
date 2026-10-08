@@ -258,41 +258,41 @@ name = "runtime_claim_spacing::one_claim_per_pass_spaced_from_the_queues_latest_
 reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: spacing time judgment"
 task = 1707
 
-# 12.373s, class R
-[[test]]
-name = "runtime_cleanup::a_drain_on_a_provisioning_failure_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing"
-reason = "R 移し替えの予定（代表がある、goal 119 か 120）: drain/cleanup wiring variant; decision of ordering"
-task = 1707
-
 # 5.297s, class D
 [[test]]
 name = "runtime_cleanup::a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: skip_resume gated on cleanup"
-task = 1707
+reason = "D 移し替えの予定（判断を unit test へ、goal 100 の task 1557/1558 が supervise::resume を移した後）: skip_resume's own may_lease/defer guard, which no other test reaches"
+task = 1715
 
 # 30.822s, class R
 [[test]]
 name = "runtime_cleanup::a_withdrawn_handoff_resumes_the_cleanup"
-reason = "R 移し替えの予定（代表がある、goal 119 か 120）: handoff/drain wiring variant (37s); decisions of ordering"
-task = 1707
+reason = "B 境界（守る境界）: the supervisor's wiring of a handoff withdrawn while draining, at the take and replaced, back to the cleanup (one case each); the decisions are supervise::cleanup and supervise::disk unit tests"
+task = 1715
 
 # 28.091s, class B
 [[test]]
 name = "runtime_cleanup::draining_finishes_disk_cleanup_before_deciding_a_landing"
-reason = "B 境界（守る境界）: representative drain/handoff + cleanup wiring"
-task = 1707
+reason = "B 境界（守る境界）: representative drain/handoff + cleanup wiring (a stop and a handoff; the matrix's decisions are supervise::cleanup and domain::landing_hold unit tests)"
+task = 1715
 
 # 38.897s, class R
 [[test]]
 name = "runtime_cleanup::draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing"
-reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same drain wiring; pass ordering decisions (46s)"
-task = 1707
+reason = "B 境界（守る境界）: the drain waits for the rest of a cleanup for room before deciding a landing, a handoff while the first job, on the pass the rest starts and once it finished unjoined (pass order in mod.rs); the decisions are supervise::cleanup unit tests"
+task = 1715
 
 # 33.659s, class D
 [[test]]
 name = "runtime_cleanup::the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: disk ask/hold decision by readings (39s)"
-task = 1707
+reason = "B 境界（守る境界）: the claim and landing wiring while the rest of a cleanup for room runs, one reading; the readings are supervise::disk unit tests"
+task = 1715
+
+# 5.345s (task 1715's stress), class B
+[[test]]
+name = "runtime_cleanup::a_run_waiting_for_an_answer_is_a_candidate_unless_a_lease_or_a_session_holds_it"
+reason = "B 境界（守る境界）: SQLite, which runs a lease or a live session keeps out of the cleanup's candidates; its time is the review that leaves the run waiting for an answer"
+task = 1715
 
 # 5.450s, class B
 [[test]]

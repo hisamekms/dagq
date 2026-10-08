@@ -810,21 +810,19 @@ fn assert_kept_but_the_build_outputs(repo: &Path, run: &TaskRun) {
     assert!(run_dir.join("receipt.json").is_file());
 }
 
-/// Task 1289: the build outputs of a run waiting for a person's answer go
-/// on the cleanup's usual sweep, whatever the free space, recorded as
-/// `build_outputs_removed` with the reason `awaiting_answer` and the ask;
-/// not while a live lease or a live session holds the run. The worktree,
-/// its branch and uncommitted source, the receipt and the runner stay, and
-/// no `auto_repaired` is recorded.
+/// Task 1289: a run waiting for a person's answer, with no live lease and
+/// no live session, is a candidate of the cleanup's usual sweep
+/// (`awaiting_answer` and its ask); not while a live lease (a supervisor
+/// working on it, or a run waiting in its session, ADR-0071) or a live
+/// session holds it. The job's check of the run alone (task 1586) reads
+/// it as the list does through every case.
 #[test]
-fn the_build_outputs_of_a_run_waiting_for_an_answer_go_on_the_sweep() {
+fn a_run_waiting_for_an_answer_is_a_candidate_unless_a_lease_or_a_session_holds_it() {
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
     let queue = SqliteQueue::open(&db).unwrap();
     let raw = Connection::open(&db).unwrap();
-    // Task 1586: the cleanup job's check of the run alone reads it as the
-    // list does, through every case below.
     let candidate = |queue: &SqliteQueue| {
         let listed = queue
             .ended_run_worktrees()
@@ -834,12 +832,8 @@ fn the_build_outputs_of_a_run_waiting_for_an_answer_go_on_the_sweep() {
         assert_eq!(queue.ended_run_worktree(run.id()).unwrap(), listed);
         listed.map(|w| w.cleanup)
     };
-    assert_eq!(
-        candidate(&queue),
-        Some(dagq::application::WorktreeCleanup::AwaitingAnswer(ask.id))
-    );
-    // A live lease (a supervisor working on it, or a run waiting in its
-    // session, ADR-0071) or a live session keeps it out.
+    let awaiting = Some(dagq::application::WorktreeCleanup::AwaitingAnswer(ask.id));
+    assert_eq!(candidate(&queue), awaiting);
     raw.execute(
         "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,'live',?2,unixepoch()+100000)",
         rusqlite::params![run.id(), std::process::id()],
@@ -859,31 +853,7 @@ fn the_build_outputs_of_a_run_waiting_for_an_answer_go_on_the_sweep() {
         [run.id()],
     )
     .unwrap();
-    let runner = Path::new(run.run_dir().unwrap()).join("runner");
-    fs::write(&runner, "binary").unwrap();
-
-    let outcome = supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_kept_but_the_build_outputs(&repo, &run);
-    assert!(runner.is_file());
-    let removed = payloads_of(&queue, &run, "build_outputs_removed");
-    assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["reason"], "awaiting_answer");
-    assert_eq!(removed[0]["ask_id"], json!(ask.id));
-    assert_eq!(removed[0]["paths"].as_array().unwrap().len(), 2);
-    assert!(removed[0]["bytes"].as_u64().unwrap() >= 2 * 65536);
-    assert!(
-        queue
-            .all_events()
-            .unwrap()
-            .iter()
-            .all(|event| event.kind != "auto_repaired")
-    );
-    assert!(queue.read_ask(ask.id).unwrap().is_open());
-    assert_eq!(
-        queue.run(run.id()).unwrap().status(),
-        RunStatus::AwaitingIntegration
-    );
+    assert_eq!(candidate(&queue), awaiting);
 }
 
 /// Task 1289: an answer that comes while the cleanup clears the run's
@@ -944,80 +914,6 @@ fn a_landing_waits_for_the_cleanup_of_its_build_outputs() {
 
 const GIB: u64 = 1 << 30;
 
-/// The build outputs whose presence makes the idle-run test's disk short.
-static IDLE_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
-static IDLE_SHORT: AtomicBool = AtomicBool::new(false);
-
-fn short_while_idle_target(_: &Path) -> Option<u64> {
-    let target = IDLE_TARGET
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Some(
-        if IDLE_SHORT.load(Ordering::SeqCst) && target.as_ref().is_some_and(|dir| dir.exists()) {
-            1
-        } else {
-            4 * GIB
-        },
-    )
-}
-
-/// Task 1289: the build outputs of a run nobody works on that waits for no
-/// answer (here its ask closed unanswered) stay while there is room, and
-/// go only in a cleanup for disk space: `build_outputs_removed` with the
-/// reason `disk_space`, counted in `auto_repaired` (`disk_cleanup`).
-#[test]
-fn the_build_outputs_of_an_idle_run_go_only_for_disk_space() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue.answer(ask.id, "withdrawn").unwrap();
-    queue.close_ask(ask.id).unwrap();
-    let target = Path::new(run.worktree_path().unwrap()).join("target");
-    *IDLE_TARGET.lock().unwrap() = Some(target.clone());
-    assert_eq!(
-        queue
-            .ended_run_worktrees()
-            .unwrap()
-            .iter()
-            .find(|w| w.run_id == *run.id())
-            .map(|w| w.cleanup),
-        Some(dagq::application::WorktreeCleanup::Idle)
-    );
-    let options = SuperviseOptions {
-        disk: Some(DiskConfig {
-            min_free_bytes: Some(GIB),
-            ..DiskConfig::default()
-        }),
-        free_space: short_while_idle_target,
-        ..sweeping_options()
-    };
-    // Short: they go, for disk space.
-    IDLE_SHORT.store(true, Ordering::SeqCst);
-    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_kept_but_the_build_outputs(&repo, &run);
-    let removed = payloads_of(&queue, &run, "build_outputs_removed");
-    assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["reason"], "disk_space");
-    assert!(removed[0].get("ask_id").is_none());
-    let repaired: Vec<Value> = queue
-        .all_events()
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.kind == "auto_repaired")
-        .map(|event| event.payload)
-        .collect();
-    assert_eq!(repaired.len(), 1, "{repaired:?}");
-    assert_eq!(repaired[0]["repair"], "disk_cleanup");
-    assert_eq!(repaired[0]["bytes"], removed[0]["bytes"]);
-    assert_eq!(repaired[0]["detail"]["runs"], json!([run.id().as_str()]));
-    assert_eq!(
-        queue.run(run.id()).unwrap().status(),
-        RunStatus::AwaitingIntegration
-    );
-}
-
 /// The build outputs whose presence makes the skip test's disk short.
 static SKIP_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -1051,9 +947,11 @@ fn moved_on_counts(queue: &SqliteQueue, run: &TaskRun) -> Vec<usize> {
 /// is not moved on by `skip_resume` while a cleanup for disk space clears
 /// its build outputs: it stays `needs_session`, unleased, with no resume,
 /// validation or landing begun. Once the job has passed it, it is skipped
-/// without a session and lands. The build outputs are ignored, as a
+/// without a session. The build outputs are ignored, as a
 /// repository ignores its `target/`, so the worktree is clean and the
-/// guard met is the skip's, not the resume's.
+/// guard met is the skip's, not the resume's. The guard is `skip_resume`'s
+/// own call of `Cleaning::may_lease` in `supervise::resume`, which goal
+/// 100's tasks 1557/1558 move; its decision moves to a unit test with them.
 #[test]
 fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
     let (_dir, repo, db) = fixture();
@@ -1121,9 +1019,12 @@ fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
     assert_eq!(moved_on_counts(&queue, &run), before);
     assert!(target.join("debug/big").is_file());
 
+    // Once the job passed it, it is skipped without a session; that the
+    // skip then lands is runtime_resume's.
     files.open();
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        queue.run(run.id()).unwrap().status() == RunStatus::Integrated
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !payloads_of(queue, &run, "resume_skipped").is_empty()
+            && !payloads_of(queue, &run, "build_outputs_removed").is_empty()
     });
     stop.store(true, Ordering::SeqCst);
     let outcome = joined(supervisor, "the supervisor to finish").unwrap();
@@ -1144,50 +1045,6 @@ fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
     let removed = payloads_of(&queue, &run, "build_outputs_removed");
     assert_eq!(removed.len(), 1, "{removed:?}");
     assert_eq!(removed[0]["reason"], "disk_space");
-}
-
-/// Task 1290: the temporary files directory a run's Codex turns got as
-/// their `TMPDIR` (`tmp` in its run directory) stays while its task goes
-/// on, a resume may go on in it, and goes once the task is canceled,
-/// recorded as `run_tmp_removed` with its bytes; the rest of the run
-/// directory (the receipt, the logs) stays.
-#[test]
-fn a_runs_tmp_dir_goes_only_once_its_task_is_over() {
-    let (_dir, repo, db) = fixture();
-    let agent = "mkdir -p ../tmp/target/debug; head -c 32768 /dev/zero > ../tmp/target/debug/big; \
-         echo log > ../kept.log; "
-        .to_owned()
-        + BUILDING_AGENT;
-    let backend = TestWorkspace::new(&db, false, &agent);
-    supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let run_dir = PathBuf::from(run.run_dir().unwrap());
-    let tmp = run_dir.join("tmp");
-    // The run failed and its task goes on: its build outputs went, its
-    // temporary files stay.
-    assert_eq!(payloads_of(&queue, &run, "build_outputs_removed").len(), 1);
-    assert!(tmp.join("target/debug/big").is_file());
-    assert!(payloads_of(&queue, &run, "run_tmp_removed").is_empty());
-
-    queue
-        .transition(TaskId::new(1), TaskAction::Cancel)
-        .unwrap();
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
-    backend.join();
-    assert!(!tmp.exists());
-    let removed = payloads_of(&queue, &run, "run_tmp_removed");
-    assert_eq!(removed.len(), 1, "{removed:?}");
-    assert_eq!(removed[0]["paths"], json!([tmp.to_string_lossy()]));
-    assert!(
-        removed[0]["bytes"].as_u64().unwrap() >= 32768,
-        "{removed:?}"
-    );
-    assert_eq!(removed[0]["by"], "supervisor");
-    assert_eq!(removed[0]["reason"], "task_canceled");
-    assert!(run_dir.join("receipt.json").is_file());
-    assert!(run_dir.join("kept.log").is_file());
 }
 
 /// State belongs to the single matrix test below, including under cargo test.
@@ -1228,152 +1085,157 @@ fn drain_free_space(_: &Path) -> Option<u64> {
 }
 
 /// Task 648: stop and handoff both finish a disk cleanup, retain a landing
-/// lease until the fresh reading, then either land or return it. Ordinary
-/// cleanup still stops at the current worktree.
+/// lease until the fresh reading, then either land or return it. That an
+/// ordinary job stops at its current worktree on a stop or a handoff is
+/// `supervise::cleanup`'s unit tests (`only_a_stop_or_a_handoff_ends_the_cleanup`,
+/// `ending_keeps_only_the_rest_of_a_cleanup_for_room`) and, through the
+/// supervisor, `a_withdrawn_handoff_resumes_the_cleanup`'s replaced handoff.
 #[test]
 fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
-    for handoff in [false, true] {
-        for disk in [None, Some(false), Some(true)] {
-            let (_dir, repo, db) = fixture();
-            let mut queue = SqliteQueue::open(&db).unwrap();
-            add_ready_task(&mut queue, "second cleanup", &[]);
-            add_ready_task(&mut queue, "third cleanup", &[]);
-            let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
-            supervise(&db, &repo, &backend).unwrap();
-            backend.join();
-            let runs: Vec<_> = (1..=3)
-                .map(|id| queue.show(TaskId::new(id)).unwrap().runs[0].clone())
-                .collect();
-            let outputs: Vec<_> = runs
-                .iter()
-                .map(|run| {
-                    let target = Path::new(run.worktree_path().unwrap()).join("target");
-                    fs::create_dir_all(&target).unwrap();
-                    fs::write(target.join("left"), vec![0; 4096]).unwrap();
-                    target
-                })
-                .collect();
-            if disk.is_some() {
+    // A stop and a handoff, each with a disk cleanup: the matrix's
+    // decisions (which job ends after its current worktree, and whether the
+    // drained landing lands or gives its lease back) are the unit tests' of
+    // `supervise::cleanup` and `domain::landing_hold`.
+    for (handoff, disk) in [(false, Some(false)), (true, Some(true))] {
+        let (_dir, repo, db) = fixture();
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        add_ready_task(&mut queue, "second cleanup", &[]);
+        add_ready_task(&mut queue, "third cleanup", &[]);
+        let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+        supervise(&db, &repo, &backend).unwrap();
+        backend.join();
+        let runs: Vec<_> = (1..=3)
+            .map(|id| queue.show(TaskId::new(id)).unwrap().runs[0].clone())
+            .collect();
+        let outputs: Vec<_> = runs
+            .iter()
+            .map(|run| {
+                let target = Path::new(run.worktree_path().unwrap()).join("target");
+                fs::create_dir_all(&target).unwrap();
+                fs::write(target.join("left"), vec![0; 4096]).unwrap();
+                target
+            })
+            .collect();
+        if disk.is_some() {
+            queue
+                .transition(TaskId::new(3), TaskAction::Cancel)
+                .unwrap();
+            add_ready_task(&mut queue, "landing", &[]);
+        }
+        let files = GatedFiles::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        *DRAIN_DISK.lock().unwrap() = Some(DrainDisk {
+            db: db.clone(),
+            outputs: outputs.clone(),
+            enough: disk == Some(true),
+            stop: stop.clone(),
+            stop_requested: false,
+            stopping_passes: 0,
+        });
+        let options = files.options(SuperviseOptions {
+            stop: stop.clone(),
+            disk: Some(dagq::domain::disk::DiskConfig {
+                min_free_bytes: Some(1 << 30),
+                ..Default::default()
+            }),
+            free_space: drain_free_space,
+            ..supervise_options(1, false)
+        });
+        let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+        let supervisor = {
+            let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+            thread::spawn(move || {
+                let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
+                runtime::supervise_with_reviewer(
+                    &db,
+                    &repo,
+                    &*backend,
+                    &claude_stub(&db),
+                    &reviewer,
+                    Path::new(env!("CARGO_BIN_EXE_dagq")),
+                    &options,
+                )
+            })
+        };
+        let held = files.held();
+        let landing = disk.map(|_| {
+            wait_until(&db, common::STEP_LIMIT, |q| {
+                q.latest_event_of("landing_queued").unwrap().is_some()
+            });
+            queue.show(TaskId::new(4)).unwrap().runs[0].clone()
+        });
+        // Let check_disk promote the running job before asking to end.
+        let reads = DRAIN_READS.load(Ordering::SeqCst);
+        wait_until(&db, common::STEP_LIMIT, |_| {
+            DRAIN_READS.load(Ordering::SeqCst) >= reads + 3
+        });
+        if handoff {
+            let registration = queue.supervisors().unwrap().pop().unwrap();
+            assert!(
                 queue
-                    .transition(TaskId::new(3), TaskAction::Cancel)
-                    .unwrap();
-                add_ready_task(&mut queue, "landing", &[]);
-            }
-            let files = GatedFiles::default();
-            let stop = Arc::new(AtomicBool::new(false));
-            *DRAIN_DISK.lock().unwrap() = Some(DrainDisk {
-                db: db.clone(),
-                outputs: outputs.clone(),
-                enough: disk == Some(true),
-                stop: stop.clone(),
-                stop_requested: false,
-                stopping_passes: 0,
-            });
-            let options = files.options(SuperviseOptions {
-                stop: stop.clone(),
-                disk: Some(dagq::domain::disk::DiskConfig {
-                    min_free_bytes: Some(1 << 30),
-                    ..Default::default()
-                }),
-                free_space: drain_free_space,
-                ..supervise_options(1, false)
-            });
-            let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
-            let supervisor = {
-                let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-                thread::spawn(move || {
-                    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
-                    runtime::supervise_with_reviewer(
-                        &db,
-                        &repo,
-                        &*backend,
-                        &claude_stub(&db),
-                        &reviewer,
-                        Path::new(env!("CARGO_BIN_EXE_dagq")),
-                        &options,
-                    )
-                })
-            };
-            let held = files.held();
-            let landing = disk.map(|_| {
-                wait_until(&db, common::STEP_LIMIT, |q| {
-                    q.latest_event_of("landing_queued").unwrap().is_some()
-                });
-                queue.show(TaskId::new(4)).unwrap().runs[0].clone()
-            });
-            // Let check_disk promote the running job before asking to end.
-            let reads = DRAIN_READS.load(Ordering::SeqCst);
+                    .request_handoff(&registration.token, "/next/dagq")
+                    .unwrap()
+            );
+        } else {
+            DRAIN_DISK.lock().unwrap().as_mut().unwrap().stop_requested = true;
+        }
+        // Multiple full passes after the request, while cleanup is gated.
+        let reads = DRAIN_READS.load(Ordering::SeqCst);
+        if disk.is_some() || handoff {
             wait_until(&db, common::STEP_LIMIT, |_| {
-                DRAIN_READS.load(Ordering::SeqCst) >= reads + 3
+                DRAIN_READS.load(Ordering::SeqCst) >= reads + 4
             });
-            if handoff {
-                let registration = queue.supervisors().unwrap().pop().unwrap();
-                assert!(
-                    queue
-                        .request_handoff(&registration.token, "/next/dagq")
-                        .unwrap()
-                );
+        } else {
+            // With no slots a stop leaves the loop and joins the job.
+            wait_until(&db, common::STEP_LIMIT, |_| {
+                DRAIN_DISK.lock().unwrap().as_ref().unwrap().stopping_passes >= 2
+            });
+        }
+        assert!(!supervisor.is_finished());
+        if let Some(run) = &landing {
+            assert!(queue.run_lease(run.id()).unwrap().is_some());
+            assert_eq!(
+                queue.run(run.id()).unwrap().status(),
+                RunStatus::AwaitingIntegration
+            );
+            assert!(payloads_of(&queue, run, "integration_started").is_empty());
+        }
+        files.open();
+        let outcome = joined(supervisor, "the cleanup and drain to finish").unwrap();
+        backend.join();
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        for (run, output) in runs.iter().zip(&outputs) {
+            let cleaned = disk.is_some() || *output == held;
+            assert_eq!(
+                !output.exists(),
+                cleaned,
+                "handoff={handoff}, disk={disk:?}"
+            );
+            if disk.is_some() && run.task_id() == TaskId::new(3) {
+                assert_eq!(payloads_of(&queue, run, "worktree_removed").len(), 1);
             } else {
-                DRAIN_DISK.lock().unwrap().as_mut().unwrap().stop_requested = true;
-            }
-            // Multiple full passes after the request, while cleanup is gated.
-            let reads = DRAIN_READS.load(Ordering::SeqCst);
-            if disk.is_some() || handoff {
-                wait_until(&db, common::STEP_LIMIT, |_| {
-                    DRAIN_READS.load(Ordering::SeqCst) >= reads + 4
-                });
-            } else {
-                // With no slots a stop leaves the loop and joins the job.
-                wait_until(&db, common::STEP_LIMIT, |_| {
-                    DRAIN_DISK.lock().unwrap().as_ref().unwrap().stopping_passes >= 2
-                });
-            }
-            assert!(!supervisor.is_finished());
-            if let Some(run) = &landing {
-                assert!(queue.run_lease(run.id()).unwrap().is_some());
                 assert_eq!(
-                    queue.run(run.id()).unwrap().status(),
-                    RunStatus::AwaitingIntegration
+                    payloads_of(&queue, run, "build_outputs_removed").len(),
+                    if cleaned { 2 } else { 1 }
                 );
-                assert!(payloads_of(&queue, run, "integration_started").is_empty());
             }
-            files.open();
-            let outcome = joined(supervisor, "the cleanup and drain to finish").unwrap();
-            backend.join();
-            assert_eq!(outcome["errors"], json!([]), "{outcome}");
-            for (run, output) in runs.iter().zip(&outputs) {
-                let cleaned = disk.is_some() || *output == held;
-                assert_eq!(
-                    !output.exists(),
-                    cleaned,
-                    "handoff={handoff}, disk={disk:?}"
-                );
-                if disk.is_some() && run.task_id() == TaskId::new(3) {
-                    assert_eq!(payloads_of(&queue, run, "worktree_removed").len(), 1);
+        }
+        if let Some(run) = &landing {
+            assert!(queue.run_lease(run.id()).unwrap().is_none());
+            assert_eq!(
+                queue.run(run.id()).unwrap().status(),
+                if disk == Some(true) {
+                    RunStatus::Integrated
                 } else {
-                    assert_eq!(
-                        payloads_of(&queue, run, "build_outputs_removed").len(),
-                        if cleaned { 2 } else { 1 }
-                    );
+                    RunStatus::AwaitingIntegration
                 }
-            }
-            if let Some(run) = &landing {
-                assert!(queue.run_lease(run.id()).unwrap().is_none());
-                assert_eq!(
-                    queue.run(run.id()).unwrap().status(),
-                    if disk == Some(true) {
-                        RunStatus::Integrated
-                    } else {
-                        RunStatus::AwaitingIntegration
-                    }
-                );
-                let repair = queue.latest_event_of("auto_repaired").unwrap().unwrap();
-                assert_eq!(repair.payload["repair"], "disk_cleanup");
-                assert_eq!(
-                    repair.payload["detail"]["runs"].as_array().unwrap().len(),
-                    3
-                );
-            }
+            );
+            let repair = queue.latest_event_of("auto_repaired").unwrap().unwrap();
+            assert_eq!(repair.payload["repair"], "disk_cleanup");
+            assert_eq!(
+                repair.payload["detail"]["runs"].as_array().unwrap().len(),
+                3
+            );
         }
     }
 }
@@ -1382,7 +1244,6 @@ fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
 struct RestDrain {
     db: PathBuf,
     idle_target: PathBuf,
-    enough: bool,
     /// Ask for a handoff on the pass the rest of the cleanup starts, after
     /// the cleanup was polled and before the handoff is read: the reading
     /// once the first job's `auto_repaired` is recorded waits for the rest
@@ -1402,8 +1263,7 @@ struct AtRest {
 static REST_DRAIN: Mutex<Option<RestDrain>> = Mutex::new(None);
 static REST_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Short once a run waits to land, until the idle run's build outputs go
-/// (with `enough`; for ever without).
+/// Short once a run waits to land, until the idle run's build outputs go.
 fn rest_free_space(_: &Path) -> Option<u64> {
     REST_READS.fetch_add(1, Ordering::SeqCst);
     let state = REST_DRAIN
@@ -1413,7 +1273,7 @@ fn rest_free_space(_: &Path) -> Option<u64> {
     let state = state.as_mut()?;
     let queue = SqliteQueue::open(&state.db).unwrap();
     let queued = queue.latest_event_of("landing_queued").unwrap().is_some();
-    let short = queued && (!state.enough || state.idle_target.exists());
+    let short = queued && state.idle_target.exists();
     if state.handoff_at_rest.is_some() && queue.latest_event_of("auto_repaired").unwrap().is_some()
     {
         let at_rest = state.handoff_at_rest.take().unwrap();
@@ -1440,11 +1300,10 @@ fn rest_free_space(_: &Path) -> Option<u64> {
     Some(if short { 1 } else { 1 << 40 })
 }
 
-/// How the supervisor of the test below drains.
+/// When the supervisor of the test below is asked to hand off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Drain {
-    Stop,
-    /// Asked for while the first job is held.
+    /// While the first job is held.
     Handoff,
     /// Read first on the pass the rest of the cleanup starts.
     HandoffAtRest,
@@ -1463,219 +1322,201 @@ fn rest_passes(db: &Path, count: usize) {
 
 /// Task 1426: a cleanup for room asked for while an ordinary cleanup runs
 /// is taken on by that job, and its rest (`Request::counted`) is not
-/// dropped by a stop or a handoff: it runs after the job, to its last
-/// candidate, removing the build outputs of a run nobody works on that
-/// waits for no answer (`build_outputs_removed`, `disk_space`), counted in
+/// dropped by a handoff: it runs after the job, to its last candidate,
+/// removing the build outputs of a run nobody works on that waits for no
+/// answer (`build_outputs_removed`, `disk_space`), counted in
 /// `auto_repaired` (`disk_cleanup`). The run short of room to land keeps
-/// its lease until that rest is done, then lands on the reading after it,
-/// or, still short, gives the lease back and stays awaiting integration;
+/// its lease until that rest is done, then lands on the reading after it;
 /// so too when the handoff is read first on the pass the rest starts, and
 /// when the rest finished between that pass's reading and the handoff:
 /// the landing is decided on the next pass's reading, not the one before.
+/// The other cases (a stop, still short) differ only in the decisions of
+/// `supervise::cleanup::tests::ending_keeps_only_the_rest_of_a_cleanup_for_room`
+/// and `domain::landing_hold`'s unit tests.
 #[test]
 fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
     for drain in [
-        Drain::Stop,
         Drain::Handoff,
         Drain::HandoffAtRest,
         Drain::HandoffAfterRest,
     ] {
-        for enough in [true, false] {
-            if drain == Drain::HandoffAfterRest && !enough {
-                continue;
-            }
-            let (_dir, repo, db) = fixture();
-            let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
-            let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
-            let mut queue = SqliteQueue::open(&db).unwrap();
-            queue.answer(ask.id, "withdrawn").unwrap();
-            queue.close_ask(ask.id).unwrap();
-            // An ended run whose task goes on: the ordinary sweep's.
-            add_ready_task(&mut queue, "ended", &[]);
-            let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
-            supervise(&db, &repo, &building).unwrap();
-            building.join();
-            let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
-            assert_eq!(ended.status(), RunStatus::Failed);
-            let ended_target = Path::new(ended.worktree_path().unwrap()).join("target");
-            fs::create_dir_all(ended_target.join("debug")).unwrap();
-            fs::write(ended_target.join("debug/again"), vec![0u8; 4096]).unwrap();
-            let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
-            assert!(idle_target.join("debug/big").is_file());
-            let idle_head = git_out(&repo, &["rev-parse", idle.branch().unwrap()]);
-            assert_eq!(
-                queue
-                    .ended_run_worktree(idle.id())
-                    .unwrap()
-                    .unwrap()
-                    .cleanup,
-                dagq::application::WorktreeCleanup::Idle,
-            );
-            add_ready_task(&mut queue, "landing", &[]);
-            let rest = GatedFiles {
-                only: Some(idle_target.clone()),
-                ..GatedFiles::default()
-            };
-            // A worktree entry only a cleanup for room prunes.
-            let finished = (drain == Drain::HandoffAfterRest).then(|| {
-                let stale = repo.with_file_name("stale-worktree");
-                git_out(
-                    &repo,
-                    &[
-                        "worktree",
-                        "add",
-                        "-b",
-                        "stale-worktree",
-                        stale.to_str().unwrap(),
-                    ],
-                );
-                fs::remove_dir_all(&stale).unwrap();
-                let entry = repo.join(".git/worktrees/stale-worktree");
-                assert!(entry.is_dir());
-                entry
-            });
-            *REST_DRAIN.lock().unwrap() = Some(RestDrain {
-                db: db.clone(),
-                idle_target: idle_target.clone(),
-                enough,
-                handoff_at_rest: matches!(drain, Drain::HandoffAtRest | Drain::HandoffAfterRest)
-                    .then(|| AtRest {
-                        rest: rest.clone(),
-                        finished,
-                    }),
-            });
-            let files = GatedFiles {
-                then: Some(Box::new(rest.clone())),
-                ..GatedFiles::default()
-            };
-            let stop = Arc::new(AtomicBool::new(false));
-            let options = files.options(SuperviseOptions {
-                stop: stop.clone(),
-                disk: Some(DiskConfig {
-                    min_free_bytes: Some(GIB),
-                    ..DiskConfig::default()
-                }),
-                free_space: rest_free_space,
-                ..supervise_options(1, false)
-            });
-            let supervisor = {
-                let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-                thread::spawn(move || {
-                    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
-                    runtime::supervise_with_reviewer(
-                        &db,
-                        &repo,
-                        &*backend,
-                        &claude_stub(&db),
-                        &reviewer,
-                        Path::new(env!("CARGO_BIN_EXE_dagq")),
-                        &options,
-                    )
-                })
-            };
-            // The sweep's job, with room: the ended run only.
-            assert_eq!(files.held(), ended_target);
-            wait_until(&db, common::STEP_LIMIT, |q| {
-                q.latest_event_of("landing_queued").unwrap().is_some()
-            });
-            let landing = queue.show(TaskId::new(3)).unwrap().runs[0].clone();
-            // Short now: the held job takes on the cleanup for room.
-            rest_passes(&db, 3);
-            match drain {
-                Drain::Handoff => {
-                    let registration = queue.supervisors().unwrap().pop().unwrap();
-                    assert!(
-                        queue
-                            .request_handoff(&registration.token, "/next/dagq")
-                            .unwrap()
-                    );
-                }
-                Drain::Stop => stop.store(true, Ordering::SeqCst),
-                Drain::HandoffAtRest | Drain::HandoffAfterRest => {}
-            }
-            rest_passes(&db, 4);
-            let waits = |queue: &SqliteQueue| {
-                assert!(!supervisor.is_finished(), "{drain:?}, enough={enough}");
-                assert!(queue.run_lease(landing.id()).unwrap().is_some());
-                assert_eq!(
-                    queue.run(landing.id()).unwrap().status(),
-                    RunStatus::AwaitingIntegration
-                );
-                assert!(payloads_of(queue, &landing, "integration_started").is_empty());
-            };
-            waits(&queue);
-
-            // The job ends; the rest starts though the supervisor ends,
-            // and the landing waits for it too.
-            files.open();
-            assert_eq!(rest.held(), idle_target);
-            if drain != Drain::Stop && drain != Drain::Handoff {
-                wait_until(&db, common::STEP_LIMIT, |_| {
-                    REST_DRAIN
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .handoff_at_rest
-                        .is_none()
-                });
-            }
-            if drain != Drain::HandoffAfterRest {
-                rest_passes(&db, 4);
-                waits(&queue);
-                assert_eq!(
-                    payloads_of(&queue, &ended, "build_outputs_removed").len(),
-                    2
-                );
-                assert!(idle_target.join("debug/big").is_file());
-            }
-
-            rest.open();
-            let outcome = joined(supervisor, "the rest of the cleanup and the drain").unwrap();
-            backend.join();
-            assert_eq!(outcome["errors"], json!([]), "{outcome}");
-            assert_kept_but_the_build_outputs(&repo, &idle);
-            let removed = payloads_of(&queue, &idle, "build_outputs_removed");
-            assert_eq!(removed.len(), 1, "{removed:?}");
-            assert_eq!(removed[0]["reason"], "disk_space");
-            assert_eq!(removed[0]["paths"].as_array().unwrap().len(), 2);
-            assert!(removed[0]["bytes"].as_u64().unwrap() >= 2 * 65536);
-            assert_eq!(
-                git_out(&repo, &["rev-parse", idle.branch().unwrap()]),
-                idle_head
-            );
-            assert!(Path::new(idle.run_dir().unwrap()).is_dir());
-            assert_eq!(
-                queue.run(idle.id()).unwrap().status(),
-                RunStatus::AwaitingIntegration
-            );
-            let repaired: Vec<Value> = queue
-                .all_events()
+        let (_dir, repo, db) = fixture();
+        let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+        let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        queue.answer(ask.id, "withdrawn").unwrap();
+        queue.close_ask(ask.id).unwrap();
+        // An ended run whose task goes on: the ordinary sweep's.
+        add_ready_task(&mut queue, "ended", &[]);
+        let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
+        supervise(&db, &repo, &building).unwrap();
+        building.join();
+        let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+        assert_eq!(ended.status(), RunStatus::Failed);
+        let ended_target = Path::new(ended.worktree_path().unwrap()).join("target");
+        fs::create_dir_all(ended_target.join("debug")).unwrap();
+        fs::write(ended_target.join("debug/again"), vec![0u8; 4096]).unwrap();
+        let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
+        assert!(idle_target.join("debug/big").is_file());
+        let idle_head = git_out(&repo, &["rev-parse", idle.branch().unwrap()]);
+        assert_eq!(
+            queue
+                .ended_run_worktree(idle.id())
                 .unwrap()
-                .into_iter()
-                .filter(|event| event.kind == "auto_repaired")
-                .map(|event| event.payload)
-                .collect();
-            assert_eq!(repaired.len(), 2, "{repaired:?}");
-            assert_eq!(repaired[0]["repair"], "disk_cleanup");
-            assert_eq!(repaired[0]["detail"]["runs"], json!([ended.id().as_str()]));
-            assert_eq!(repaired[1]["repair"], "disk_cleanup");
-            assert_eq!(repaired[1]["bytes"], removed[0]["bytes"]);
-            assert_eq!(repaired[1]["detail"]["runs"], json!([idle.id().as_str()]));
-            assert!(queue.run_lease(landing.id()).unwrap().is_none());
+                .unwrap()
+                .cleanup,
+            dagq::application::WorktreeCleanup::Idle,
+        );
+        add_ready_task(&mut queue, "landing", &[]);
+        let rest = GatedFiles {
+            only: Some(idle_target.clone()),
+            ..GatedFiles::default()
+        };
+        // A worktree entry only a cleanup for room prunes.
+        let finished = (drain == Drain::HandoffAfterRest).then(|| {
+            let stale = repo.with_file_name("stale-worktree");
+            git_out(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "stale-worktree",
+                    stale.to_str().unwrap(),
+                ],
+            );
+            fs::remove_dir_all(&stale).unwrap();
+            let entry = repo.join(".git/worktrees/stale-worktree");
+            assert!(entry.is_dir());
+            entry
+        });
+        *REST_DRAIN.lock().unwrap() = Some(RestDrain {
+            db: db.clone(),
+            idle_target: idle_target.clone(),
+            handoff_at_rest: (drain != Drain::Handoff).then(|| AtRest {
+                rest: rest.clone(),
+                finished,
+            }),
+        });
+        let files = GatedFiles {
+            then: Some(Box::new(rest.clone())),
+            ..GatedFiles::default()
+        };
+        let options = files.options(SuperviseOptions {
+            disk: Some(DiskConfig {
+                min_free_bytes: Some(GIB),
+                ..DiskConfig::default()
+            }),
+            free_space: rest_free_space,
+            ..supervise_options(1, false)
+        });
+        let supervisor = {
+            let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+            thread::spawn(move || {
+                let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
+                runtime::supervise_with_reviewer(
+                    &db,
+                    &repo,
+                    &*backend,
+                    &claude_stub(&db),
+                    &reviewer,
+                    Path::new(env!("CARGO_BIN_EXE_dagq")),
+                    &options,
+                )
+            })
+        };
+        // The sweep's job, with room: the ended run only.
+        assert_eq!(files.held(), ended_target);
+        wait_until(&db, common::STEP_LIMIT, |q| {
+            q.latest_event_of("landing_queued").unwrap().is_some()
+        });
+        let landing = queue.show(TaskId::new(3)).unwrap().runs[0].clone();
+        // Short now: the held job takes on the cleanup for room.
+        rest_passes(&db, 3);
+        if drain == Drain::Handoff {
+            let registration = queue.supervisors().unwrap().pop().unwrap();
+            assert!(
+                queue
+                    .request_handoff(&registration.token, "/next/dagq")
+                    .unwrap()
+            );
+        }
+        rest_passes(&db, 4);
+        let waits = |queue: &SqliteQueue| {
+            assert!(!supervisor.is_finished(), "{drain:?}");
+            assert!(queue.run_lease(landing.id()).unwrap().is_some());
             assert_eq!(
                 queue.run(landing.id()).unwrap().status(),
-                if enough {
-                    RunStatus::Integrated
-                } else {
-                    RunStatus::AwaitingIntegration
-                },
-                "{drain:?}"
+                RunStatus::AwaitingIntegration
             );
-            if drain != Drain::Stop {
-                assert_eq!(outcome["outcome"], "handoff", "{outcome}");
-            }
+            assert!(payloads_of(queue, &landing, "integration_started").is_empty());
+        };
+        waits(&queue);
+
+        // The job ends; the rest starts though the supervisor ends, and
+        // the landing waits for it too.
+        files.open();
+        assert_eq!(rest.held(), idle_target);
+        if drain != Drain::Handoff {
+            wait_until(&db, common::STEP_LIMIT, |_| {
+                REST_DRAIN
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .handoff_at_rest
+                    .is_none()
+            });
         }
+        if drain != Drain::HandoffAfterRest {
+            rest_passes(&db, 4);
+            waits(&queue);
+            assert_eq!(
+                payloads_of(&queue, &ended, "build_outputs_removed").len(),
+                2
+            );
+            assert!(idle_target.join("debug/big").is_file());
+        }
+
+        rest.open();
+        let outcome = joined(supervisor, "the rest of the cleanup and the drain").unwrap();
+        backend.join();
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        assert_kept_but_the_build_outputs(&repo, &idle);
+        let removed = payloads_of(&queue, &idle, "build_outputs_removed");
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        assert_eq!(removed[0]["reason"], "disk_space");
+        assert_eq!(removed[0]["paths"].as_array().unwrap().len(), 2);
+        assert!(removed[0]["bytes"].as_u64().unwrap() >= 2 * 65536);
+        assert_eq!(
+            git_out(&repo, &["rev-parse", idle.branch().unwrap()]),
+            idle_head
+        );
+        assert!(Path::new(idle.run_dir().unwrap()).is_dir());
+        assert_eq!(
+            queue.run(idle.id()).unwrap().status(),
+            RunStatus::AwaitingIntegration
+        );
+        let repaired: Vec<Value> = queue
+            .all_events()
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "auto_repaired")
+            .map(|event| event.payload)
+            .collect();
+        assert_eq!(repaired.len(), 2, "{repaired:?}");
+        assert_eq!(repaired[0]["repair"], "disk_cleanup");
+        assert_eq!(repaired[0]["detail"]["runs"], json!([ended.id().as_str()]));
+        assert_eq!(repaired[1]["repair"], "disk_cleanup");
+        assert_eq!(repaired[1]["bytes"], removed[0]["bytes"]);
+        assert_eq!(repaired[1]["detail"]["runs"], json!([idle.id().as_str()]));
+        assert!(queue.run_lease(landing.id()).unwrap().is_none());
+        assert_eq!(
+            queue.run(landing.id()).unwrap().status(),
+            RunStatus::Integrated,
+            "{drain:?}"
+        );
+        assert_eq!(outcome["outcome"], "handoff", "{outcome}");
     }
 }
 
@@ -1740,11 +1581,14 @@ enum Withdrawal {
 /// worktree and nothing more is cleaned before the exec.
 #[test]
 fn a_withdrawn_handoff_resumes_the_cleanup() {
+    // Each way the handoff ends once; whether the room after it is enough
+    // is the disk's decision
+    // (`supervise::disk::tests::the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done`),
+    // and what a withdrawal does to the cleanup is
+    // `supervise::cleanup::tests::a_withdrawn_end_takes_requests_again_and_asks_for_every_ended_run`.
     for (withdrawal, enough) in [
-        (Withdrawal::WhileHeld, true),
         (Withdrawal::WhileHeld, false),
         (Withdrawal::AtTake, true),
-        (Withdrawal::AtTake, false),
         (Withdrawal::Replaced, true),
     ] {
         let case = format!("{withdrawal:?}, enough={enough}");
@@ -1978,444 +1822,183 @@ fn ride_passes(db: &Path, count: usize) {
     });
 }
 
-/// The free space of the test below while the rest of the cleanup for
-/// room runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WhileRest {
-    /// Short of what a claim and a landing need.
-    Short,
-    /// Room for a landing, short of what a claim needs.
-    LandingRoom,
-    /// Room for both.
-    Room,
-}
-
 /// Task 1478: while the rest of a cleanup for room another job took on
-/// (`Request::counted`) waits or runs, a disk short of what a claim or a
-/// landing needs opens no disk ask and records no `claim_held` or
-/// `landing_held`; a claim waits only while the disk is short of what a
-/// claim needs, a landing only while it is short of what a landing needs,
-/// and the side there is room for goes on without waiting for the rest.
-/// Once the rest recorded what it removed, the next reading decides: with
-/// room, the claim and the landing go on without an ask or a hold; still
-/// short, the one disk ask opens and the holds of the side short of room
-/// are recorded.
+/// (`Request::counted`) runs, a disk with room for a landing but short of
+/// what a claim needs opens no disk ask and records no `claim_held` or
+/// `landing_held`: the claim waits for the rest, and the landing, there
+/// being room for it, goes on without waiting. Once the rest recorded what
+/// it removed, the next reading, still short of a claim, opens the one
+/// disk ask and records the claims' hold, and no landing's. The other
+/// readings (short of both, room for both, enough after the rest) differ
+/// only in
+/// `supervise::disk::tests::the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done`.
 #[test]
 fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
-    const MID: u64 = 4 * GIB;
-    const PLENTY: u64 = 1 << 40;
-    for (during, enough) in [
-        (WhileRest::Short, true),
-        (WhileRest::Short, false),
-        (WhileRest::LandingRoom, true),
-        (WhileRest::LandingRoom, false),
-        (WhileRest::Room, true),
-    ] {
-        let case = format!("{during:?}, enough={enough}");
-        let (_dir, repo, db) = fixture();
-        let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
-        let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        queue.answer(ask.id, "withdrawn").unwrap();
-        queue.close_ask(ask.id).unwrap();
-        // An ended run whose task goes on: the ordinary sweep's.
-        add_ready_task(&mut queue, "ended", &[]);
-        let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
-        supervise(&db, &repo, &building).unwrap();
-        building.join();
-        let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
-        assert_eq!(ended.status(), RunStatus::Failed);
-        // A measured build: the claim's need follows it (far above MID),
-        // the landing's stays the least (a gibibyte).
-        assert!(!payloads_of(&queue, &ended, "build_outputs_removed").is_empty());
-        let ended_target = Path::new(ended.worktree_path().unwrap()).join("target");
-        fs::create_dir_all(ended_target.join("debug")).unwrap();
-        fs::write(ended_target.join("debug/again"), vec![0u8; 4096]).unwrap();
-        let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
-        assert!(idle_target.join("debug/big").is_file());
-        // The landing's and the claim's changes do not meet the idle run's
-        // or each other's: no landing recheck resumes a run.
-        let worker = |file: &str| {
-            format!(
-                "printf '{file}\\n' > {file} && git add {file} && git commit -q -m {file}; \
-                 receipt \"$(git rev-parse HEAD)\"; idle; await_exit"
-            )
-        };
-        backend.script_for(3, &worker("landing.txt"));
-        backend.script_for(4, &worker("claimed.txt"));
-        add_ready_task(&mut queue, "landing", &[]);
-        // Short of both once the landing is queued; from the rest on, as
-        // `during` says, and after it, as `enough` says.
-        let level = match during {
-            WhileRest::Short => 1,
-            WhileRest::LandingRoom => MID,
-            WhileRest::Room => PLENTY,
-        };
-        *RIDE.lock().unwrap() = Some(Ride {
-            db: db.clone(),
-            idle_target: idle_target.clone(),
-            during: 1,
-            after: if enough { PLENTY } else { level },
-        });
-        let rest = GatedFiles {
-            only: Some(idle_target.clone()),
-            ..GatedFiles::default()
-        };
-        let files = GatedFiles {
-            then: Some(Box::new(rest.clone())),
-            ..GatedFiles::default()
-        };
-        let stop = Arc::new(AtomicBool::new(false));
-        let options = files.options(SuperviseOptions {
-            stop: stop.clone(),
-            disk: Some(DiskConfig {
-                min_free_bytes: Some(GIB),
-                claim_factor: 100_000.0,
-                integrate_factor: 1.0,
-                ..DiskConfig::default()
-            }),
-            free_space: ride_free_space,
-            ..supervise_options(2, false)
-        });
-        let supervisor = {
-            let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-            thread::spawn(move || {
-                let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
-                runtime::supervise_with_reviewer(
-                    &db,
-                    &repo,
-                    &*backend,
-                    &claude_stub(&db),
-                    &reviewer,
-                    Path::new(env!("CARGO_BIN_EXE_dagq")),
-                    &options,
-                )
-            })
-        };
-        // The sweep's job, with room: the ended run only.
-        assert_eq!(files.held(), ended_target, "{case}");
-        wait_until(&db, common::STEP_LIMIT, |q| {
-            q.latest_event_of("landing_queued").unwrap().is_some()
-        });
-        let landing = queue.show(TaskId::new(3)).unwrap().runs[0].clone();
-        // Short of both now: the held job takes on the cleanup for room.
-        ride_passes(&db, 3);
-        files.open();
-        // The job ends, and its rest starts and is held on the idle run.
-        assert_eq!(rest.held(), idle_target, "{case}");
-        add_ready_task(&mut queue, "claim", &[]);
-        RIDE.lock().unwrap().as_mut().unwrap().during = level;
-        let disk_asks = |queue: &SqliteQueue| -> Vec<dagq::domain::Ask> {
-            queue
-                .asks(dagq::application::AskQuery {
-                    all: true,
-                    ..Default::default()
-                })
-                .unwrap()
-                .into_iter()
-                .filter(|ask| {
-                    ask.kind == AskKind::QueueHold && ask.subject.as_deref() == Some("disk")
-                })
-                .collect()
-        };
-        let events = |queue: &SqliteQueue, kind: &str| -> Vec<Value> {
-            queue
-                .all_events()
-                .unwrap()
-                .into_iter()
-                .filter(|event| event.kind == kind)
-                .map(|event| event.payload)
-                .filter(|payload| kind != "auto_repaired" || payload["repair"] == "disk_cleanup")
-                .collect()
-        };
-        let integrated = |_: &SqliteQueue, task: i64| {
-            SqliteQueue::open(&db)
-                .unwrap()
-                .show(TaskId::new(task))
-                .unwrap()
-                .runs
-                .iter()
-                .any(|run| run.status() == RunStatus::Integrated)
-        };
-        let claimed = |_: &SqliteQueue| {
-            !SqliteQueue::open(&db)
-                .unwrap()
-                .show(TaskId::new(4))
-                .unwrap()
-                .runs
-                .is_empty()
-        };
-        match during {
-            WhileRest::Short => {}
-            // The landing does not wait for the rest; the claim does.
-            WhileRest::LandingRoom => {
-                wait_until(&db, common::STEP_LIMIT, |queue| integrated(queue, 3));
-            }
-            // Neither waits for the rest.
-            WhileRest::Room => {
-                wait_until(&db, common::STEP_LIMIT, |queue| {
-                    integrated(queue, 3) && claimed(queue)
-                });
-            }
-        }
-        ride_passes(&db, 4);
-        // The rest is still held: nothing is asked for or held.
-        assert!(idle_target.join("debug/big").is_file(), "{case}");
-        assert!(disk_asks(&queue).is_empty(), "{case}");
-        assert!(events(&queue, "claim_held").is_empty(), "{case}");
-        assert!(events(&queue, "landing_held").is_empty(), "{case}");
-        assert_eq!(claimed(&queue), during == WhileRest::Room, "{case}");
-        if during == WhileRest::Short {
-            assert!(queue.run_lease(landing.id()).unwrap().is_some(), "{case}");
-            assert_eq!(
-                queue.run(landing.id()).unwrap().status(),
-                RunStatus::AwaitingIntegration,
-                "{case}"
-            );
-            assert!(payloads_of(&queue, &landing, "integration_started").is_empty());
-        }
-
-        rest.open();
-        wait_until(&db, common::STEP_LIMIT, |queue| {
-            events(queue, "auto_repaired").len() >= 2
-        });
-        let removed = payloads_of(&queue, &idle, "build_outputs_removed");
-        assert_eq!(removed.len(), 1, "{case}: {removed:?}");
-        assert_eq!(removed[0]["reason"], "disk_space");
-        let repaired = events(&queue, "auto_repaired");
-        assert_eq!(repaired[1]["repair"], "disk_cleanup", "{case}");
-        assert_eq!(repaired[1]["detail"]["runs"], json!([idle.id().as_str()]));
-        if enough {
-            wait_until(&db, common::STEP_LIMIT, |queue| {
-                integrated(queue, 3) && integrated(queue, 4)
-            });
-            assert!(disk_asks(&queue).is_empty(), "{case}");
-            assert!(events(&queue, "claim_held").is_empty(), "{case}");
-            assert!(events(&queue, "landing_held").is_empty(), "{case}");
-        } else {
-            wait_until(&db, common::STEP_LIMIT, |queue| {
-                !disk_asks(queue).is_empty() && !events(queue, "claim_held").is_empty()
-            });
-            ride_passes(&db, 4);
-            let asks = disk_asks(&queue);
-            assert_eq!(asks.len(), 1, "{case}: {asks:?}");
-            assert!(asks[0].is_open(), "{case}");
-            let held = events(&queue, "claim_held");
-            assert_eq!(held.len(), 1, "{case}: {held:?}");
-            assert_eq!(held[0]["reason"], "disk_space", "{case}");
-            assert!(!claimed(&queue), "{case}");
-            let landings = events(&queue, "landing_held");
-            if during == WhileRest::Short {
-                assert_eq!(landings.len(), 1, "{case}: {landings:?}");
-                assert_eq!(
-                    queue.run(landing.id()).unwrap().status(),
-                    RunStatus::AwaitingIntegration,
-                    "{case}"
-                );
-            } else {
-                assert!(landings.is_empty(), "{case}: {landings:?}");
-                assert!(integrated(&queue, 3), "{case}");
-            }
-        }
-        stop.store(true, Ordering::SeqCst);
-        let outcome = joined(supervisor, "the supervisor to stop").unwrap();
-        backend.join();
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    }
-}
-
-/// State of the test below of a drain on a provisioning failure.
-struct Unprovisioned {
-    db: PathBuf,
-    idle_target: PathBuf,
-    enough: bool,
-}
-
-static UNPROVISIONED: Mutex<Option<Unprovisioned>> = Mutex::new(None);
-static UNPROVISIONED_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Room until a run waits to land; then room for a claim but short of what
-/// a landing needs, until the idle run's build outputs go (with `enough`;
-/// for ever without).
-fn unprovisioned_free_space(_: &Path) -> Option<u64> {
-    UNPROVISIONED_READS.fetch_add(1, Ordering::SeqCst);
-    let state = UNPROVISIONED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let state = state.as_ref()?;
-    let queued = SqliteQueue::open(&state.db)
-        .unwrap()
-        .latest_event_of("landing_queued")
-        .unwrap()
-        .is_some();
-    Some(if queued && (!state.enough || state.idle_target.exists()) {
-        4 * GIB
-    } else {
-        1 << 40
-    })
-}
-
-/// Wait for `count` more readings of the free space: whole passes.
-fn unprovisioned_passes(db: &Path, count: usize) {
-    let reads = UNPROVISIONED_READS.load(Ordering::SeqCst);
-    wait_until(db, common::STEP_LIMIT, |_| {
-        UNPROVISIONED_READS.load(Ordering::SeqCst) >= reads + count
+    // Room for a landing (a gibibyte), short of a claim.
+    const LANDING_ROOM: u64 = 4 * GIB;
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.answer(ask.id, "withdrawn").unwrap();
+    queue.close_ask(ask.id).unwrap();
+    // An ended run whose task goes on: the ordinary sweep's.
+    add_ready_task(&mut queue, "ended", &[]);
+    let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &building).unwrap();
+    building.join();
+    let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+    assert_eq!(ended.status(), RunStatus::Failed);
+    // A measured build: the claim's need follows it (far above
+    // LANDING_ROOM), the landing's stays the least (a gibibyte).
+    assert!(!payloads_of(&queue, &ended, "build_outputs_removed").is_empty());
+    let ended_target = Path::new(ended.worktree_path().unwrap()).join("target");
+    fs::create_dir_all(ended_target.join("debug")).unwrap();
+    fs::write(ended_target.join("debug/again"), vec![0u8; 4096]).unwrap();
+    let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
+    assert!(idle_target.join("debug/big").is_file());
+    // The landing's and the claim's changes do not meet the idle run's or
+    // each other's: no landing recheck resumes a run.
+    let worker = |file: &str| {
+        format!(
+            "printf '{file}\\n' > {file} && git add {file} && git commit -q -m {file}; \
+             receipt \"$(git rev-parse HEAD)\"; idle; await_exit"
+        )
+    };
+    backend.script_for(3, &worker("landing.txt"));
+    backend.script_for(4, &worker("claimed.txt"));
+    add_ready_task(&mut queue, "landing", &[]);
+    // Short of both once the landing is queued; from the rest on, and
+    // after it, room for a landing only.
+    *RIDE.lock().unwrap() = Some(Ride {
+        db: db.clone(),
+        idle_target: idle_target.clone(),
+        during: 1,
+        after: LANDING_ROOM,
     });
-}
-
-/// Task 1482: an ordinary cleanup job takes on a cleanup for room, and its
-/// rest (`Request::counted`) runs after it. A supervisor whose claiming
-/// stops on a provisioning failure while that rest runs drains, neither
-/// stopping nor handing off: the run short of room to land keeps its lease
-/// until the rest is done, then lands on the reading after it, or, still
-/// short, gives the lease back and stays awaiting integration; the drain
-/// ends with the provisioning error.
-#[test]
-fn a_drain_on_a_provisioning_failure_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing()
-{
-    for enough in [true, false] {
-        let (_dir, repo, db) = fixture();
-        let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
-        let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
-        let mut queue = SqliteQueue::open(&db).unwrap();
-        queue.answer(ask.id, "withdrawn").unwrap();
-        queue.close_ask(ask.id).unwrap();
-        // An ended run whose task goes on: the ordinary sweep's.
-        add_ready_task(&mut queue, "ended", &[]);
-        let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
-        supervise(&db, &repo, &building).unwrap();
-        building.join();
-        let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
-        assert_eq!(ended.status(), RunStatus::Failed);
-        let ended_target = Path::new(ended.worktree_path().unwrap()).join("target");
-        fs::create_dir_all(ended_target.join("debug")).unwrap();
-        fs::write(ended_target.join("debug/again"), vec![0u8; 4096]).unwrap();
-        let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
-        assert!(idle_target.join("debug/big").is_file());
-        // The landing's change does not meet the idle run's: no landing
-        // recheck resumes it.
-        backend.script_for(
-            3,
-            "printf 'landing\\n' > landing.txt && git add landing.txt && \
-             git commit -q -m landing; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-        );
-        add_ready_task(&mut queue, "landing", &[]);
-        *UNPROVISIONED.lock().unwrap() = Some(Unprovisioned {
-            db: db.clone(),
-            idle_target: idle_target.clone(),
-            enough,
-        });
-        let rest = GatedFiles {
-            only: Some(idle_target.clone()),
-            ..GatedFiles::default()
-        };
-        let files = GatedFiles {
-            then: Some(Box::new(rest.clone())),
-            ..GatedFiles::default()
-        };
-        // A claim needs the least (a gibibyte), a landing far more than
-        // the free space once a run waits to land: a claim still goes on
-        // and meets the provisioning failure.
-        let options = files.options(SuperviseOptions {
-            disk: Some(DiskConfig {
-                min_free_bytes: Some(GIB),
-                claim_factor: 1.0,
-                integrate_factor: 1_000_000.0,
-                ..DiskConfig::default()
-            }),
-            free_space: unprovisioned_free_space,
-            ..supervise_options(2, false)
-        });
-        let supervisor = {
-            let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-            thread::spawn(move || {
-                let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
-                runtime::supervise_with_reviewer(
-                    &db,
-                    &repo,
-                    &*backend,
-                    &claude_stub(&db),
-                    &reviewer,
-                    Path::new(env!("CARGO_BIN_EXE_dagq")),
-                    &options,
-                )
+    let rest = GatedFiles {
+        only: Some(idle_target.clone()),
+        ..GatedFiles::default()
+    };
+    let files = GatedFiles {
+        then: Some(Box::new(rest.clone())),
+        ..GatedFiles::default()
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = files.options(SuperviseOptions {
+        stop: stop.clone(),
+        disk: Some(DiskConfig {
+            min_free_bytes: Some(GIB),
+            claim_factor: 100_000.0,
+            integrate_factor: 1.0,
+            ..DiskConfig::default()
+        }),
+        free_space: ride_free_space,
+        ..supervise_options(2, false)
+    });
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    // The sweep's job, with room: the ended run only.
+    assert_eq!(files.held(), ended_target);
+    wait_until(&db, common::STEP_LIMIT, |q| {
+        q.latest_event_of("landing_queued").unwrap().is_some()
+    });
+    // Short of both now: the held job takes on the cleanup for room.
+    ride_passes(&db, 3);
+    files.open();
+    // The job ends, and its rest starts and is held on the idle run.
+    assert_eq!(rest.held(), idle_target);
+    add_ready_task(&mut queue, "claim", &[]);
+    RIDE.lock().unwrap().as_mut().unwrap().during = LANDING_ROOM;
+    let disk_asks = |queue: &SqliteQueue| -> Vec<dagq::domain::Ask> {
+        queue
+            .asks(dagq::application::AskQuery {
+                all: true,
+                ..Default::default()
             })
-        };
-        // The sweep's job, with room: the ended run only.
-        assert_eq!(files.held(), ended_target, "enough={enough}");
-        wait_until(&db, common::STEP_LIMIT, |q| {
-            q.latest_event_of("landing_queued").unwrap().is_some()
-        });
-        let landing = queue.show(TaskId::new(3)).unwrap().runs[0].clone();
-        // Short of a landing now: the held job takes on the cleanup for
-        // room; once it ends, its rest starts and is held on the idle run.
-        unprovisioned_passes(&db, 3);
-        files.open();
-        assert_eq!(rest.held(), idle_target, "enough={enough}");
-        // The next claim fails to provision: claiming stops, and the
-        // supervisor drains while the rest is held.
-        backend.fail_tasks.lock().unwrap().push(TaskId::new(4));
-        add_ready_task(&mut queue, "unprovisioned", &[]);
-        wait_until(&db, common::STEP_LIMIT, |q| {
-            q.show(TaskId::new(4))
-                .unwrap()
-                .runs
-                .first()
-                .is_some_and(|run| run.last_error().is_some())
-        });
-        // The landing waits for the rest.
-        unprovisioned_passes(&db, 4);
-        assert!(!supervisor.is_finished(), "enough={enough}");
-        assert!(queue.run_lease(landing.id()).unwrap().is_some());
-        assert_eq!(
-            queue.run(landing.id()).unwrap().status(),
-            RunStatus::AwaitingIntegration
-        );
-        assert!(payloads_of(&queue, &landing, "integration_started").is_empty());
-        assert!(idle_target.join("debug/big").is_file());
-
-        rest.open();
-        let error = format!(
-            "{:#}",
-            joined(supervisor, "the rest of the cleanup and the drain").unwrap_err()
-        );
-        backend.join();
-        assert!(
-            error.contains("injected background launch failure"),
-            "{error}"
-        );
-        assert!(error.contains("claiming stopped"), "{error}");
-        assert_kept_but_the_build_outputs(&repo, &idle);
-        let removed = payloads_of(&queue, &idle, "build_outputs_removed");
-        assert_eq!(removed.len(), 1, "{removed:?}");
-        assert_eq!(removed[0]["reason"], "disk_space");
-        let repaired: Vec<Value> = queue
+            .unwrap()
+            .into_iter()
+            .filter(|ask| ask.kind == AskKind::QueueHold && ask.subject.as_deref() == Some("disk"))
+            .collect()
+    };
+    let events = |queue: &SqliteQueue, kind: &str| -> Vec<Value> {
+        queue
             .all_events()
             .unwrap()
             .into_iter()
-            .filter(|event| event.kind == "auto_repaired")
+            .filter(|event| event.kind == kind)
             .map(|event| event.payload)
-            .collect();
-        assert_eq!(repaired.len(), 2, "{repaired:?}");
-        assert_eq!(repaired[0]["detail"]["runs"], json!([ended.id().as_str()]));
-        assert_eq!(repaired[1]["repair"], "disk_cleanup");
-        assert_eq!(repaired[1]["bytes"], removed[0]["bytes"]);
-        assert_eq!(repaired[1]["detail"]["runs"], json!([idle.id().as_str()]));
-        assert!(queue.run_lease(landing.id()).unwrap().is_none());
-        assert_eq!(
-            queue.run(landing.id()).unwrap().status(),
-            if enough {
-                RunStatus::Integrated
-            } else {
-                RunStatus::AwaitingIntegration
-            },
-            "enough={enough}"
-        );
-        assert_eq!(
-            payloads_of(&queue, &landing, "integration_started").is_empty(),
-            !enough
-        );
-    }
+            .filter(|payload| kind != "auto_repaired" || payload["repair"] == "disk_cleanup")
+            .collect()
+    };
+    let integrated = |_: &SqliteQueue, task: i64| {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(task))
+            .unwrap()
+            .runs
+            .iter()
+            .any(|run| run.status() == RunStatus::Integrated)
+    };
+    let claimed = |_: &SqliteQueue| {
+        !SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(4))
+            .unwrap()
+            .runs
+            .is_empty()
+    };
+    // The landing does not wait for the rest; the claim does.
+    wait_until(&db, common::STEP_LIMIT, |queue| integrated(queue, 3));
+    ride_passes(&db, 4);
+    // The rest is still held: nothing is asked for or held.
+    assert!(idle_target.join("debug/big").is_file());
+    assert!(disk_asks(&queue).is_empty());
+    assert!(events(&queue, "claim_held").is_empty());
+    assert!(events(&queue, "landing_held").is_empty());
+    assert!(!claimed(&queue));
+
+    rest.open();
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        events(queue, "auto_repaired").len() >= 2
+    });
+    let removed = payloads_of(&queue, &idle, "build_outputs_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["reason"], "disk_space");
+    let repaired = events(&queue, "auto_repaired");
+    assert_eq!(repaired[1]["repair"], "disk_cleanup");
+    assert_eq!(repaired[1]["detail"]["runs"], json!([idle.id().as_str()]));
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !disk_asks(queue).is_empty() && !events(queue, "claim_held").is_empty()
+    });
+    ride_passes(&db, 4);
+    let asks = disk_asks(&queue);
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(asks[0].is_open());
+    let held = events(&queue, "claim_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["reason"], "disk_space");
+    assert!(!claimed(&queue));
+    let landings = events(&queue, "landing_held");
+    assert!(landings.is_empty(), "{landings:?}");
+    assert!(integrated(&queue, 3));
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
 }
 
 /// Task 1636: a drain on a provisioning failure (claiming stops, neither a

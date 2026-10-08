@@ -80,23 +80,23 @@ impl HostOpsState {
         self.apply_disk_answers(env, &unclosed)?;
         let needs = self.disk_needs(env)?;
         let free = self.free_bytes(env);
-        let short = |free: Option<u64>, need: Option<u64>| matches!((free, need), (Some(free), Some(need)) if free < need);
         let most = needs.claim.max(needs.landing);
-        if short(free, most) {
+        if short_of(free, most) {
             self.clean_for_disk(env, held, free, most, interval);
         }
         self.free = free;
-        // Short while the cleanup for room runs, or the rest of one another
-        // job took on (task 1478): the claims and landings short of room
-        // wait for it, and nothing is held or asked for yet.
-        self.disk.short = short(free, most);
-        let cleaning = self.disk.short && self.cleanup.for_disk();
-        self.disk.cleaning = cleaning;
-        self.disk.landing_short = short(free, needs.landing);
-        if cleaning {
+        let reading = read_disk(free, &needs, self.cleanup.for_disk());
+        self.disk.short = reading.short;
+        self.disk.cleaning = reading.cleaning;
+        self.disk.landing_short = reading.landing_short;
+        let Judged::Recorded {
+            ask,
+            landings: hold,
+        } = judge_reading(reading, free, &needs, !landings.is_empty())
+        else {
             return Ok(());
-        }
-        if short(free, most) {
+        };
+        if ask {
             let waiting: &[RunId] = if self.disk.landing_short {
                 landings
             } else {
@@ -118,15 +118,6 @@ impl HostOpsState {
         } else {
             self.disk.cleaned = None;
         }
-        let hold = if landings.is_empty() {
-            None
-        } else {
-            ClaimHold::judge(&HoldInputs {
-                free_bytes: free,
-                needed_bytes: needs.landing,
-                ..HoldInputs::default()
-            })
-        };
         env.record_hold(claim_hold::LANDINGS, hold.as_ref())?;
         Ok(())
     }
@@ -138,7 +129,7 @@ impl HostOpsState {
     /// reading after it decides the landings.
     pub(super) fn end_cleanup_for_handoff(&mut self) {
         self.end_cleanup();
-        self.disk.cleaning = self.disk.short && self.cleanup.for_disk();
+        self.disk.cleaning = cleaning(self.disk.short, self.cleanup.for_disk());
     }
     /// The free bytes of the queue's directory, where the run worktrees
     /// are; `None` when they cannot be read.
@@ -204,18 +195,7 @@ impl HostOpsState {
         );
         if let Err(error) = env.queue.record_queue_event(
             EventKind::AutoRepaired,
-            json!({
-                "repair": DISK_CLEANUP,
-                "layer": "runtime",
-                "conditions": {
-                    "free_bytes": request.free,
-                    "needed_bytes": request.needed,
-                    "free_bytes_after": after,
-                },
-                "detail": {"bytes": removed.bytes, "runs": removed.runs},
-                "bytes": removed.bytes,
-                "supervisor": env.token,
-            }),
+            disk_cleanup_record(request, removed, after, env.token),
         ) {
             warn!(error = %format_args!("{error:#}"), "the cleanup for disk space could not be recorded: {error:#}");
         }
@@ -292,6 +272,120 @@ impl HostOpsState {
     }
 }
 
+/// Free bytes short of a need; neither unknown is short.
+fn short_of(free: Option<u64>, need: Option<u64>) -> bool {
+    matches!((free, need), (Some(free), Some(need)) if free < need)
+}
+
+/// What a pass reads of the disk ([`read_disk`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Reading {
+    /// Short of what a claim or a landing needs.
+    pub(super) short: bool,
+    /// Short of what a landing's verification needs.
+    pub(super) landing_short: bool,
+    /// Short while a cleanup for room runs or waits to ([`cleaning`]):
+    /// nothing is held or asked for yet.
+    pub(super) cleaning: bool,
+}
+
+/// Read the free bytes against what a claim and a landing need, with
+/// `for_disk` whether a cleanup for room (or the rest of one another job
+/// took on) runs or waits to. Short and not cleaning, the pass asks (the
+/// disk ask) and records the landings' hold; with room it closes the ask.
+pub(super) fn read_disk(free: Option<u64>, needs: &DiskNeeds, for_disk: bool) -> Reading {
+    let short = short_of(free, needs.claim.max(needs.landing));
+    Reading {
+        short,
+        landing_short: short_of(free, needs.landing),
+        cleaning: cleaning(short, for_disk),
+    }
+}
+
+/// Short while the cleanup for room runs, or the rest of one another job
+/// took on (task 1478): the claims and landings short of room wait for
+/// it, and nothing is held or asked for until it is done.
+const fn cleaning(short: bool, for_disk: bool) -> bool {
+    short && for_disk
+}
+
+/// What a pass records of its [`Reading`] ([`judge_reading`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Judged {
+    /// Short while a cleanup for room runs or waits to: nothing is asked
+    /// for or held until it is done (task 1478).
+    Cleaning,
+    /// Judged: the disk ask is opened (or joined) when `ask`, and closed
+    /// once there is room otherwise; `landings` is the hold recorded on the
+    /// landings (`landing_held` / `landing_resumed`).
+    Recorded {
+        ask: bool,
+        landings: Option<ClaimHold>,
+    },
+}
+
+/// Judge a pass's reading: nothing while cleaning; otherwise ask when
+/// short, and hold the landings that wait (`landings_waiting`) while the
+/// free bytes are short of what a landing needs.
+pub(super) fn judge_reading(
+    reading: Reading,
+    free: Option<u64>,
+    needs: &DiskNeeds,
+    landings_waiting: bool,
+) -> Judged {
+    if reading.cleaning {
+        return Judged::Cleaning;
+    }
+    let landings = if landings_waiting {
+        ClaimHold::judge(&HoldInputs {
+            free_bytes: free,
+            needed_bytes: needs.landing,
+            ..HoldInputs::default()
+        })
+    } else {
+        None
+    };
+    Judged::Recorded {
+        ask: reading.short,
+        landings,
+    }
+}
+
+/// Whether the claims wait for a cleanup for room without a hold (task
+/// 405): it runs (`cleaning`) and the free bytes are short of what a claim
+/// needs. A claim there is room for goes on without waiting for it (task
+/// 1478).
+pub(super) fn claims_wait_for_cleanup(
+    cleaning: bool,
+    free: Option<u64>,
+    need: Option<u64>,
+) -> bool {
+    cleaning && short_of(free, need)
+}
+
+/// The payload of `auto_repaired` (`repair: disk_cleanup`) for a cleanup
+/// for room: the reading it was asked for at, the reading `after` it, and
+/// the bytes and runs it removed.
+fn disk_cleanup_record(
+    request: DiskRequest,
+    removed: &Cleaned,
+    after: Option<u64>,
+    token: &LeaseToken,
+) -> Value {
+    json!({
+        "repair": DISK_CLEANUP,
+        "layer": "runtime",
+        "conditions": {
+            "free_bytes": request.free,
+            "needed_bytes": request.needed,
+            "free_bytes_after": after,
+        },
+        "detail": {"bytes": removed.bytes, "runs": removed.runs},
+        "bytes": removed.bytes,
+        "supervisor": token,
+    })
+}
+
 /// Whether a pass short of room asks for a cleanup for room (task 1627):
 /// not while one waits or runs (`for_disk`, the rest of one another job
 /// took on included), and not until `interval` passed since the end of the
@@ -336,6 +430,179 @@ impl Cleaned {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::claim_hold::HoldReason;
+    use crate::domain::landing_hold::{self, LandingHold, LandingHoldInputs};
+
+    const GIB: u64 = 1 << 30;
+
+    /// A claim needs far more than a landing (a measured build), as the
+    /// cases below read.
+    const NEEDS: DiskNeeds = DiskNeeds {
+        largest_build: None,
+        claim: Some(100 * GIB),
+        landing: Some(GIB),
+    };
+
+    /// What a pass does with `free` free bytes while a cleanup for room
+    /// runs or waits (`for_disk`) or not, through the functions
+    /// `check_disk` and `hold_claims` call: whether the claims wait for it
+    /// without a hold, whether a claim is held (`claim_held`), how a
+    /// landing waiting outside a drain goes, whether its hold is recorded
+    /// (`landing_held`), and whether the disk ask is opened.
+    fn pass(free: u64, for_disk: bool) -> (bool, bool, LandingHold, bool, bool) {
+        let reading = read_disk(Some(free), &NEEDS, for_disk);
+        let waits = claims_wait_for_cleanup(reading.cleaning, Some(free), NEEDS.claim);
+        let claim_held = !waits
+            && ClaimHold::judge(&HoldInputs {
+                free_bytes: Some(free),
+                needed_bytes: NEEDS.claim,
+                ..HoldInputs::default()
+            })
+            .is_some();
+        let landing = landing_hold::judge(LandingHoldInputs {
+            landing_short: reading.landing_short,
+            disk_cleaning: reading.cleaning,
+            ..LandingHoldInputs::default()
+        });
+        let (landing_held, asks) = match judge_reading(reading, Some(free), &NEEDS, true) {
+            Judged::Cleaning => (false, false),
+            Judged::Recorded { ask, landings } => (landings.is_some(), ask),
+        };
+        (waits, claim_held, landing, landing_held, asks)
+    }
+
+    /// Task 1478: while the rest of a cleanup for room another job took on
+    /// waits or runs, a disk short of what a claim or a landing needs opens
+    /// no disk ask and records no `claim_held` or `landing_held`; a claim
+    /// waits only while short of what a claim needs, a landing only while
+    /// short of what a landing needs, and the side there is room for goes
+    /// on. Once it is done the next reading decides: with room, nothing is
+    /// held or asked; still short, the disk ask opens and the side short of
+    /// room is held.
+    #[test]
+    fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
+        use LandingHold::{Proceed, Wait};
+        let (short, landing_room, room) = (1, 4 * GIB, 1 << 40);
+        // While it runs.
+        assert_eq!(pass(short, true), (true, false, Wait, false, false));
+        assert_eq!(
+            pass(landing_room, true),
+            (true, false, Proceed, false, false)
+        );
+        assert_eq!(pass(room, true), (false, false, Proceed, false, false));
+        // Once done: enough, or still short.
+        assert_eq!(pass(room, false), (false, false, Proceed, false, false));
+        assert_eq!(pass(short, false), (false, true, Wait, true, true));
+        assert_eq!(
+            pass(landing_room, false),
+            (false, true, Proceed, false, true)
+        );
+    }
+
+    #[test]
+    fn a_reading_is_short_of_the_larger_need_and_cleaning_only_while_short() {
+        for (free, for_disk, short, landing_short, cleaning) in [
+            (None, true, false, false, false),
+            (Some(1), false, true, true, false),
+            (Some(1), true, true, true, true),
+            (Some(GIB - 1), true, true, true, true),
+            (Some(GIB), true, true, false, true),
+            (Some(100 * GIB - 1), false, true, false, false),
+            (Some(100 * GIB), true, false, false, false),
+        ] {
+            assert_eq!(
+                read_disk(free, &NEEDS, for_disk),
+                Reading {
+                    short,
+                    landing_short,
+                    cleaning
+                },
+                "{free:?} {for_disk}"
+            );
+        }
+        // No need known: never short.
+        let unknown = DiskNeeds::default();
+        assert!(!read_disk(Some(1), &unknown, true).short);
+        assert!(!claims_wait_for_cleanup(true, Some(1), None));
+        assert!(!claims_wait_for_cleanup(true, None, Some(1)));
+        assert!(!claims_wait_for_cleanup(false, Some(1), Some(2)));
+        assert!(claims_wait_for_cleanup(true, Some(1), Some(2)));
+    }
+
+    /// While cleaning nothing is recorded; judged, a short reading asks,
+    /// and the landings are held only while some wait and the free bytes
+    /// are short of what a landing needs.
+    #[test]
+    fn a_reading_is_recorded_only_once_no_cleanup_for_room_runs() {
+        let short = read_disk(Some(1), &NEEDS, true);
+        assert_eq!(
+            judge_reading(short, Some(1), &NEEDS, true),
+            Judged::Cleaning
+        );
+        let short = read_disk(Some(1), &NEEDS, false);
+        let Judged::Recorded { ask, landings } = judge_reading(short, Some(1), &NEEDS, true) else {
+            panic!("judged while cleaning");
+        };
+        assert!(ask);
+        assert_eq!(
+            landings.map(|hold| hold.reason),
+            Some(HoldReason::DiskSpace)
+        );
+        assert_eq!(
+            judge_reading(short, Some(1), &NEEDS, false),
+            Judged::Recorded {
+                ask: true,
+                landings: None
+            }
+        );
+        let landing_room = read_disk(Some(4 * GIB), &NEEDS, false);
+        assert_eq!(
+            judge_reading(landing_room, Some(4 * GIB), &NEEDS, true),
+            Judged::Recorded {
+                ask: true,
+                landings: None
+            }
+        );
+        let room = read_disk(Some(1 << 40), &NEEDS, true);
+        assert_eq!(
+            judge_reading(room, Some(1 << 40), &NEEDS, true),
+            Judged::Recorded {
+                ask: false,
+                landings: None
+            }
+        );
+    }
+
+    /// `auto_repaired` of a cleanup for room: the reading it was asked
+    /// at, the one after, and the bytes and runs it removed (each run
+    /// once, whatever it removed).
+    #[test]
+    fn a_cleanup_for_room_records_what_it_removed_and_the_readings() {
+        let run = RunId::new("idle").unwrap();
+        let mut removed = Cleaned::default();
+        removed.add(&run, 100);
+        removed.add(&run, 28);
+        let payload = disk_cleanup_record(
+            DiskRequest {
+                free: Some(1),
+                needed: Some(GIB),
+            },
+            &removed,
+            Some(4 * GIB),
+            &LeaseToken::new("t"),
+        );
+        assert_eq!(
+            payload,
+            json!({
+                "repair": "disk_cleanup",
+                "layer": "runtime",
+                "conditions": {"free_bytes": 1, "needed_bytes": GIB, "free_bytes_after": 4 * GIB},
+                "detail": {"bytes": 128, "runs": ["idle"]},
+                "bytes": 128,
+                "supervisor": "t",
+            })
+        );
+    }
 
     /// Task 1627: no cleanup for room is asked for while one waits or runs,
     /// whatever the time; with none, the first is asked for at once and the
