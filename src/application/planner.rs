@@ -43,7 +43,7 @@ use super::{
     path_text, planner_idle_marker,
     prompt::{Carried, FittedPrompt, runtime_planner_prompt},
     screen_idle::{self, MarkerState},
-    session::{OwnWorkspace, wrapper_refused},
+    session::wrapper_refused,
 };
 use crate::domain::{
     ActorContext, IdleProbe, PlannerCloseCode, PlannerId, PlannerOrigin, PlannerProbe,
@@ -377,10 +377,6 @@ pub struct PlannerWrapper<'a> {
     /// with its descendants, as a headless worker's.
     pub processes: &'a dyn ProcessControl,
     pub pid: u32,
-    /// The workspace the wrapper runs in, closed when the planner refuses
-    /// the wrapper and records no such workspace (task 806); `None`
-    /// outside cmux.
-    pub own_workspace: Option<OwnWorkspace<'a>>,
     /// The clock a headless planner's turns read their times on.
     pub clock: &'a dyn Clock,
 }
@@ -408,22 +404,12 @@ pub fn run_planner_session(
         files,
         processes,
         pid,
-        own_workspace,
         clock,
     } = ctx;
-    // A wrapper started for a planner already given up (its create
-    // reported failing although cmux made the workspace, task 806) closes
-    // the workspace nothing records.
+    // A wrapper started for a planner already closed, or with a session,
+    // is refused and ends.
     if let Err(error) = queue.register_planner_wrapper(id, pid) {
-        let recorded = |workspace: &str| -> Result<bool> {
-            Ok(queue.planner(id)?.workspace_id.as_deref() == Some(workspace))
-        };
-        return Err(wrapper_refused(
-            own_workspace.as_ref(),
-            recorded,
-            &format!("planner {id}"),
-            error,
-        ));
+        return Err(wrapper_refused(&format!("planner {id}"), error));
     }
     let planner = match queue.planner(id) {
         Ok(planner) => planner,

@@ -1,5 +1,5 @@
 //! The planners against fakes of the session wrappers (and of cmux only for
-//! `up` and a wrapper's own workspace): the prompt of the inbox, the
+//! `up`): the prompt of the inbox, the
 //! sessions the runtime's planners open and record, the planner the
 //! runtime opens for a proposal, how a planner session is judged, and the
 //! sweeps of planners that ended (a person's planner opened before
@@ -12,7 +12,7 @@ use common::lifecycle::*;
 use anyhow::{Result, bail};
 use dagq::{
     application::{
-        SessionWrappers, TaskStore, WorkspaceBackend, WorkspaceTags,
+        SessionWrappers, TaskStore,
         planner::{self, OpenedPlanner, PlannerLaunch},
     },
     domain::{
@@ -668,7 +668,6 @@ fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without
         &PlannerAgent { code: 3 },
         Some(Path::new("/plugins")),
         Some(("claude-opus-5-5", "high")),
-        None,
     )
     .unwrap();
     // The wrapper gave its agent the model and effort (ADR-0079 decision 7).
@@ -694,9 +693,8 @@ fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without
         .unwrap()
         .planner
         .id;
-    let error =
-        dagq::compose::planner_session_with_provider(&db, third_id, &NoPlanner, None, None, None)
-            .unwrap_err();
+    let error = dagq::compose::planner_session_with_provider(&db, third_id, &NoPlanner, None, None)
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("no planner session"),
         "{error:#}"
@@ -710,7 +708,6 @@ fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without
             &db,
             id,
             &PlannerAgent { code: 0 },
-            None,
             None,
             None,
         )
@@ -918,13 +915,12 @@ fn a_new_planner_does_not_take_the_idle_marker_an_old_database_left() {
     assert_eq!(views[0].idle_since, None);
 }
 
-/// Task 806, kept for a person's planner opened before `dagq plan` was
-/// abolished: a wrapper that starts in a workspace nothing records (its
-/// planner's record closed) closes its own workspace, while a wrapper
-/// refused in the workspace its planner records leaves it open.
+/// A person's planner's wrapper started as an older binary started it, in
+/// a workspace, is refused by a closed planner record and by a planner that
+/// has a session already, and ends without recording itself or calling
+/// cmux: the workspace it runs in is left to whatever opened it.
 #[test]
-fn a_wrapper_refused_in_a_workspace_nothing_records_closes_it() {
-    use dagq::application::session::OwnWorkspace;
+fn a_refused_planner_wrapper_records_nothing_and_closes_no_workspace() {
     let fixture = fixture();
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let planner = queue.open_planner(PlannerOrigin::Person, None).unwrap();
@@ -932,72 +928,34 @@ fn a_wrapper_refused_in_a_workspace_nothing_records_closes_it() {
     queue
         .close_planner(planner.id, Some("the workspace create failed"))
         .unwrap();
-
-    // cmux made the workspace although its create failed: its wrapper,
-    // refused by the closed record, closes it.
-    let late = FakeCmux::default();
-    let own = late
-        .create_named(
-            "[repo]planner#1",
-            &fixture.repo,
-            "wrapper",
-            &WorkspaceTags::default(),
-        )
-        .unwrap();
     let db = fixture.location.db.canonicalize().unwrap();
-    let error = dagq::compose::planner_session_with_provider(
-        &db,
-        PlannerId::new(1),
-        &NoPlanner,
-        None,
-        None,
-        Some(OwnWorkspace {
-            backend: &late,
-            id: own.clone(),
-        }),
-    )
-    .unwrap_err();
+    let error =
+        dagq::compose::planner_session_with_provider(&db, planner.id, &NoPlanner, None, None)
+            .unwrap_err();
     let text = format!("{error:#}");
     assert!(
         text.contains("already has a session or is closed"),
         "{text}"
     );
-    assert!(
-        text.contains(&format!(
-            "its workspace {own}, which nothing records, was closed"
-        )),
-        "{text}"
-    );
-    assert_eq!(*late.closed.lock().unwrap(), [own]);
-    assert_eq!(queue.planner(PlannerId::new(1)).unwrap().wrapper_pid, None);
+    assert!(!text.contains("workspace"), "{text}");
+    assert_eq!(queue.planner(planner.id).unwrap().wrapper_pid, None);
 
-    // A second wrapper in the workspace its planner records is refused and
-    // leaves the workspace to the planner.
-    let open = FakeCmux::default();
+    // A second wrapper of a planner with a session is refused and leaves
+    // the planner's record as it was.
     let opened = workspace_planner(&fixture, PlannerOrigin::Person).unwrap();
     let id = opened.planner.id;
     let workspace = opened.planner.workspace_id.unwrap();
-    open.open(&format!("[my repo]planner#{id}"), &fixture.repo, &workspace);
     queue.register_planner_wrapper(id, 4242).unwrap();
     queue.register_planner_agent(id, 4242, 4242).unwrap();
-    let error = dagq::compose::planner_session_with_provider(
-        &db,
-        id,
-        &NoPlanner,
-        None,
-        None,
-        Some(OwnWorkspace {
-            backend: &open,
-            id: workspace.clone(),
-        }),
-    )
-    .unwrap_err();
+    let error =
+        dagq::compose::planner_session_with_provider(&db, id, &NoPlanner, None, None).unwrap_err();
     assert!(
-        !format!("{error:#}").contains("nothing records"),
+        format!("{error:#}").contains("already has a session or is closed"),
         "{error:#}"
     );
-    assert!(open.closed.lock().unwrap().is_empty());
-    assert_eq!(open.workspaces.lock().unwrap()[0].2, workspace);
+    let planner = queue.planner(id).unwrap();
+    assert_eq!(planner.wrapper_pid, Some(4242));
+    assert_eq!(planner.workspace_id.as_deref(), Some(workspace.as_str()));
 }
 
 /// ADR-t1433-2 decision 5 (amending ADR-t1394-1 decisions 1, 7 and 9): the

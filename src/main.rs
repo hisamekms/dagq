@@ -1440,8 +1440,8 @@ enum Command {
         /// Reopen the session of a `needs_session` run the supervisor resumes.
         #[arg(long)]
         resume: bool,
-        /// The cmux a wrapper refused its session closes its own workspace
-        /// with (task 806).
+        /// Accepted from an older supervisor's argv and ignored: a wrapper
+        /// calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         /// Started by the supervisor in the background, without a
@@ -1477,8 +1477,8 @@ enum Command {
         #[arg(long, requires = "model")]
         effort: Option<String>,
 
-        /// The cmux a wrapper refused its session closes its own workspace
-        /// with (task 806).
+        /// Accepted from an older supervisor's argv and ignored: a wrapper
+        /// calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         /// The planner's agent runs one call per turn (ADR-t1394-2): the
@@ -4362,7 +4362,7 @@ fn execute(cli: Cli) -> Result<Value> {
             claude,
             codex,
             resume,
-            cmux,
+            cmux: _,
             background,
         } => dagq::compose::session(
             &db,
@@ -4371,7 +4371,6 @@ fn execute(cli: Cli) -> Result<Value> {
             &claude,
             &codex,
             resume,
-            &cmux,
             background,
         )?,
         Command::SessionEvent { event, .. } => {
@@ -4393,7 +4392,7 @@ fn execute(cli: Cli) -> Result<Value> {
             plugin_dir,
             model,
             effort,
-            cmux,
+            cmux: _,
             headless,
             background,
         } => dagq::compose::planner_session(
@@ -4402,7 +4401,6 @@ fn execute(cli: Cli) -> Result<Value> {
             &claude,
             plugin_dir.as_deref(),
             model.as_deref().zip(effort.as_deref()),
-            &cmux,
             dagq::compose::PlannerEntry {
                 headless,
                 background,
@@ -4887,6 +4885,76 @@ mod tests {
                     assert!(needs.contains(&capability), "{argv:?} needs {capability}");
                 }
             }
+        }
+    }
+
+    /// The wrapper argv an older supervisor or planner opener gives, without
+    /// `--background` and with `--cmux`, still parses into the wrapper's
+    /// command, which starts in a workspace as before.
+    #[test]
+    fn an_older_wrapper_argv_without_background_is_accepted() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(older_wrapper_argv_without_background_is_accepted)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn older_wrapper_argv_without_background_is_accepted() {
+        let session = [
+            "dagq", "session", "--run", "r1", "--lease", "l", "--claude", "/c", "--codex", "/x",
+            "--resume", "--cmux", "/m",
+        ];
+        let cli = Cli::try_parse_from(session).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Session {
+                resume: true,
+                background: false,
+                ..
+            }
+        ));
+        for planner in [
+            &[
+                "dagq",
+                "planner-session",
+                "--planner",
+                "1",
+                "--claude",
+                "/c",
+                "--cmux",
+                "/m",
+            ][..],
+            &[
+                "dagq",
+                "planner-session",
+                "--planner",
+                "1",
+                "--claude",
+                "/c",
+                "--model",
+                "m",
+                "--effort",
+                "e",
+                "--cmux",
+                "/m",
+                "--headless",
+            ][..],
+        ] {
+            let cli =
+                Cli::try_parse_from(planner).unwrap_or_else(|error| panic!("{planner:?}: {error}"));
+            assert!(
+                matches!(
+                    cli.command,
+                    Command::PlannerSession {
+                        planner: 1,
+                        background: false,
+                        ..
+                    }
+                ),
+                "{planner:?}"
+            );
         }
     }
 

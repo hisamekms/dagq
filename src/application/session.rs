@@ -18,8 +18,8 @@ use std::{
 };
 
 use super::headless_session::Turns;
-use super::{AgentProvider, ProcessControl, Queue, RunFiles, Spawner, WorkspaceBackend};
-use crate::domain::{ReasonCode, RunId, TaskRun, run::run_workspaces};
+use super::{AgentProvider, ProcessControl, Queue, RunFiles, Spawner};
+use crate::domain::{ReasonCode, RunId, TaskRun};
 use tracing::warn;
 
 /// How long the wrapper waits for the supervisor to record the workspace
@@ -80,62 +80,17 @@ impl WrapperStart {
 const EXIT_RECORD_ATTEMPTS: u32 = 3;
 const EXIT_RECORD_BACKOFF: Duration = Duration::from_millis(200);
 
-/// The cmux workspace a session wrapper runs in (`CMUX_WORKSPACE_ID`) and
-/// the backend that closes it, for a wrapper refused its session (task
-/// 806).
-pub struct OwnWorkspace<'a> {
-    pub backend: &'a dyn WorkspaceBackend,
-    pub id: String,
-}
-
 /// A wrapper refused its session (`session` names it) with `error`: the
-/// refusal is logged, and the wrapper's own workspace is closed when
-/// `recorded` says nothing records it for the session. Such a workspace is
-/// one cmux made although the create reported failing (a create that
-/// timed out, task 806), or opened for a session that ended before its
-/// wrapper started: nothing would ever find it to close it. A workspace
-/// the session records is left to whatever ends the session, and one
-/// whose record cannot be read is left too. The error says what became of
-/// the workspace.
-pub(crate) fn wrapper_refused(
-    own: Option<&OwnWorkspace<'_>>,
-    recorded: impl FnOnce(&str) -> Result<bool>,
-    session: &str,
-    error: anyhow::Error,
-) -> anyhow::Error {
-    let Some(own) = own else {
-        warn!(session, error = %format_args!("{error:#}"), "{session} refused its wrapper, which knows no workspace of its own: {error:#}");
-        return error;
-    };
-    let workspace = own.id.as_str();
-    match recorded(workspace) {
-        Ok(true) => {
-            warn!(session, workspace_id = workspace, error = %format_args!("{error:#}"), "{session} refused its wrapper; its workspace {workspace} is the session's and is left open: {error:#}");
-            error
-        }
-        Err(read) => {
-            warn!(session, workspace_id = workspace, error = %format_args!("{error:#}"), "{session} refused its wrapper; whether it records workspace {workspace} could not be read ({read:#}), so it is left open: {error:#}");
-            error
-        }
-        Ok(false) => match own.backend.close(workspace) {
-            Ok(()) => {
-                warn!(session, workspace_id = workspace, error = %format_args!("{error:#}"), "{session} refused its wrapper; closed its workspace {workspace}, which nothing records: {error:#}");
-                error.context(format!(
-                    "{session} refused this wrapper; its workspace {workspace}, which nothing records, was closed"
-                ))
-            }
-            Err(close) => {
-                warn!(session, workspace_id = workspace, error = %format_args!("{error:#}"), "{session} refused its wrapper; its workspace {workspace}, which nothing records, could not be closed ({close:#}): {error:#}");
-                error.context(format!(
-                    "{session} refused this wrapper; its workspace {workspace}, which nothing records, could not be closed: {close:#}"
-                ))
-            }
-        },
-    }
+/// refusal is logged and `error` returned. The wrapper ends without
+/// touching a workspace it may run in, which is left to whatever opened
+/// it.
+pub(crate) fn wrapper_refused(session: &str, error: anyhow::Error) -> anyhow::Error {
+    warn!(session, error = %format_args!("{error:#}"), "{session} refused its wrapper: {error:#}");
+    error
 }
 
 /// What the wrapper works with: the queue, the agent, how it is started,
-/// the run's files, this process's pid, and the workspace it runs in.
+/// the run's files, this process's pid, and where it was started.
 pub struct Session<'a> {
     pub queue: &'a mut dyn Queue,
     /// The queue's database, which the executor starts the agent on.
@@ -153,10 +108,6 @@ pub struct Session<'a> {
     pub processes: &'a dyn ProcessControl,
     pub files: &'a dyn RunFiles,
     pub pid: u32,
-    /// Closed when the run refuses this wrapper and records no such
-    /// workspace ([`wrapper_refused`]); `None` outside cmux and in the
-    /// background.
-    pub own_workspace: Option<OwnWorkspace<'a>>,
     /// Where the supervisor started this wrapper.
     pub start: WrapperStart,
     /// The sccache the wrapper's environment names as `RUSTC_WRAPPER` and
@@ -189,7 +140,6 @@ pub fn run_session(
         processes,
         files,
         pid,
-        own_workspace,
         start,
         sccache,
         clock,
@@ -202,21 +152,7 @@ pub fn run_session(
     };
     let run = match register(queue, id, token, pid, resume, start, own_start.as_deref()) {
         Ok(run) => run,
-        Err(error) => {
-            let recorded = |workspace: &str| -> Result<bool> {
-                let run = queue.run(id)?;
-                let events = queue.run_events(id)?;
-                Ok(run_workspaces(&run, &events)
-                    .iter()
-                    .any(|w| w.workspace_id == workspace))
-            };
-            return Err(wrapper_refused(
-                own_workspace.as_ref(),
-                recorded,
-                &format!("run {id}"),
-                error,
-            ));
-        }
+        Err(error) => return Err(wrapper_refused(&format!("run {id}"), error)),
     };
     let mut child_may_be_alive = false;
     // A headless worker runs one call per turn (ADR-t813-1).

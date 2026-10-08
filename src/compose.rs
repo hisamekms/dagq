@@ -38,7 +38,7 @@ use crate::{
         rebind::{self as rebinding, Rebind, RebindTarget},
         recording::{RecordingBackend, RecordingSessions},
         review::{self as reviewing, Review},
-        session::{self as wrapper, OwnWorkspace, Session, WrapperStart},
+        session::{self as wrapper, Session, WrapperStart},
         stats::{self as statistics, StatsSources},
         supervise::{self as supervisor, Heartbeat, Layout, LoopSettings, Ports, UpdateSettings},
         update,
@@ -3048,11 +3048,9 @@ pub fn ended_run_material(
     prompt::ended_run_material(&LocalRunFiles, detail, run, resumes, config, dir)
 }
 
-/// Run from cmux, not from a pipe; stdout must remain a terminal for Claude.
-/// `resume` reopens the session of a `needs_session` run the supervisor is
+/// The session wrapper of run `id`. `resume` reopens the session of a `needs_session` run the supervisor is
 /// resuming (ADR-0019) instead of starting the worker. A wrapper the run
-/// refuses closes its own workspace (`CMUX_WORKSPACE_ID`) through `cmux`
-/// when the run records no such workspace (task 806). Started in the
+/// refuses ends and leaves any workspace it runs in alone. Started in the
 /// background (`background`, ADR-t1404-1), it needs no terminal and has no
 /// workspace of its own ([`wrapper_entry`]).
 #[allow(clippy::too_many_arguments)]
@@ -3063,7 +3061,6 @@ pub fn session(
     claude: &Path,
     codex: &Path,
     resume: bool,
-    cmux: &Path,
     background: bool,
 ) -> Result<Value> {
     let start = wrapper_entry(background)?;
@@ -3094,9 +3091,6 @@ pub fn session(
             mode: WorkerMode::Headless,
         })
         .map(|adapter| adapter.agent);
-    let cmux = Cmux {
-        executable: cmux.into(),
-    };
     // A headless turn outlives a wrapper killed with its workspace, or sent
     // SIGTERM in the background, unless the wrapper stops it (ADR-t813-1
     // decision 3, ADR-t1404-1 decision 3).
@@ -3109,10 +3103,6 @@ pub fn session(
         other,
         &LocalSpawner,
         resume,
-        match start {
-            WrapperStart::Workspace => own_workspace(&cmux),
-            WrapperStart::Background => None,
-        },
         start,
         // The workspace's [run.env] is this process's environment, which
         // each turn inherits (ADR-t1215-1).
@@ -3147,15 +3137,6 @@ pub fn wrapper_entry(background: bool) -> Result<WrapperStart> {
         }
     }
     Ok(start)
-}
-
-/// The workspace this wrapper runs in, from cmux's `CMUX_WORKSPACE_ID`,
-/// closed through `cmux` when its session refuses the wrapper.
-fn own_workspace(cmux: &dyn WorkspaceBackend) -> Option<OwnWorkspace<'_>> {
-    std::env::var(lifecycle::CMUX_WORKSPACE_ENV)
-        .ok()
-        .filter(|id| !id.trim().is_empty())
-        .map(|id| OwnWorkspace { backend: cmux, id })
 }
 
 /// The session wrapper (`resume` for `session --resume`) with `provider`'s
@@ -3242,7 +3223,6 @@ pub fn session_in_background_as_with_processes(
         other,
         spawner,
         resume,
-        None,
         WrapperStart::Background,
         sccache,
         pid,
@@ -3260,7 +3240,6 @@ fn run_session(
     other: Option<&dyn AgentProvider>,
     spawner: &dyn Spawner,
     resume: bool,
-    own_workspace: Option<OwnWorkspace<'_>>,
     start: WrapperStart,
     sccache: Option<crate::domain::sccache::SccacheTarget>,
 ) -> Result<Value> {
@@ -3272,7 +3251,6 @@ fn run_session(
         other,
         spawner,
         resume,
-        own_workspace,
         start,
         sccache,
         std::process::id(),
@@ -3291,7 +3269,6 @@ fn run_session_as(
     other: Option<&dyn AgentProvider>,
     spawner: &dyn Spawner,
     resume: bool,
-    own_workspace: Option<OwnWorkspace<'_>>,
     start: WrapperStart,
     sccache: Option<crate::domain::sccache::SccacheTarget>,
     pid: u32,
@@ -3322,7 +3299,6 @@ fn run_session_as(
             processes,
             files: &LocalRunFiles,
             pid,
-            own_workspace,
             start,
             sccache: sccache
                 .map(|target| (target, &looker as &dyn crate::application::SccacheServer)),
@@ -3372,16 +3348,14 @@ pub fn planners(db: &Path, sessions: &dyn SessionWrappers, all: bool) -> Result<
 /// runtime's starts it with `--headless --background`, a process of its
 /// own with no terminal and no workspace (ADR-t1433-2). Without them it is
 /// a person's planner's wrapper, run from its cmux workspace: stdout must
-/// remain a terminal for Claude, and, refused, it closes its own workspace
-/// (`CMUX_WORKSPACE_ID`) through `cmux` when the planner records no such
-/// workspace (task 806).
+/// remain a terminal for Claude. A refused wrapper ends and leaves any
+/// workspace it runs in alone.
 pub fn planner_session(
     db: &Path,
     id: PlannerId,
     claude: &Path,
     plugin_dir: Option<&Path>,
     model: Option<(&str, &str)>,
-    cmux: &Path,
     entry: PlannerEntry,
 ) -> Result<Value> {
     // A headless planner's agent has no terminal (ADR-t1394-2); one started
@@ -3397,15 +3371,7 @@ pub fn planner_session(
     let provider = ClaudeCode {
         executable: claude.into(),
     };
-    let cmux = Cmux {
-        executable: cmux.into(),
-    };
-    let own = if entry.background {
-        None
-    } else {
-        own_workspace(&cmux)
-    };
-    planner_session_with_provider(db, id, &provider, plugin_dir, model, own)
+    planner_session_with_provider(db, id, &provider, plugin_dir, model)
 }
 
 /// How a planner's wrapper was started: for a headless planner
@@ -3417,15 +3383,13 @@ pub struct PlannerEntry {
     pub background: bool,
 }
 
-/// [`planner_session`] with any provider, in the working directory, in the
-/// workspace `own` (`None` knows none).
+/// [`planner_session`] with any provider, in the working directory.
 pub fn planner_session_with_provider(
     db: &Path,
     id: PlannerId,
     provider: &dyn AgentProvider,
     plugin_dir: Option<&Path>,
     model: Option<(&str, &str)>,
-    own: Option<OwnWorkspace<'_>>,
 ) -> Result<Value> {
     let mut queue =
         SqliteQueue::open(db)?.with_actor(crate::domain::actor::ActorContext::instance(
@@ -3442,7 +3406,6 @@ pub fn planner_session_with_provider(
             files: &LocalRunFiles,
             processes: &SystemProcesses,
             pid: std::process::id(),
-            own_workspace: own,
             clock: &crate::infrastructure::clock::SystemClock,
         },
         id,

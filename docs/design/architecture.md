@@ -225,9 +225,7 @@ hostの操作は`src/application/ports.rs`の2つのtraitに分かれる。
 cmuxを使うのはinboxだけ（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
 
 - `WorkspaceBackend`: inboxのworkspace（cmux）を開く・閉じる・在るかを見る・色と印・group・通知（`notify`）。
-  呼び手はinboxと`up` / `down`（`application::lifecycle`）と、inboxの中の`watch --role inbox`の通知。
-  古いbinaryがworkspaceで開いたsession wrapperとplannerのwrapperも、断られると自分の`CMUX_WORKSPACE_ID`のworkspaceを閉じる（`session::OwnWorkspace`、`compose::session`・`compose::planner_session`）。
-  この経路を消すのはfollow-upに任せている。
+  呼び手はinboxと`up` / `down`（`application::lifecycle`）と、inboxの中の`watch --role inbox`の通知だけ。
   実装は`infrastructure::adapters::Cmux`がcmuxのCLIを呼び、失敗は`application::recording::RecordingBackend`が記録する。
 - `SessionWrappers`: runとruntimeのplannerのsession wrapperを、workspaceなしのbackgroundのprocessとして起動（`launch_background`）・停止（`stop_background`）・生死確認（handleを渡した`exists`）し、supervisorが待つ長さを持つ。
   呼び手はsupervisor（`supervise::background`・`reopen`、起動は`actor_executor`経由）とruntimeのplanner（`application::planner`）。
