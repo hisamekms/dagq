@@ -170,7 +170,6 @@ fn answered_draft_planner(
         requests[0]["prompt"],
         format!("answer to ask {}: adopt", asked.id)
     );
-    assert!(backend.texts().is_empty(), "nothing typed");
     (planner.id, dir)
 }
 
@@ -220,7 +219,6 @@ fn a_planner_that_took_its_answer_in_a_turn_is_ended_even_when_the_ask_closed_la
         .unwrap();
     supervise(&fx, &backend, &reviewer, &clock, 20);
     assert!(exit_requested(&fx.db, planner));
-    assert!(backend.exits.lock().unwrap().is_empty(), "nothing typed");
 
     // Its session ends: the row closes.
     queue
@@ -289,7 +287,6 @@ fn a_revise_at_the_limit_names_its_holders_and_frees_a_place_past_the_timeout() 
     );
     // And the idle planner is asked to exit to free its place.
     assert!(exit_requested(&fx.db, planner));
-    assert!(backend.exits.lock().unwrap().is_empty(), "nothing typed");
     let released = events(&queue, "planner_released");
     assert_eq!(released.len(), 1, "{released:?}");
     assert_eq!(released[0]["planner_id"], json!(planner));

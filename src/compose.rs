@@ -25,8 +25,8 @@ use std::{
 use crate::{
     application::{
         AgentProvider, Generators, LaunchAgent, MainRemote, ProcessControl, QueueOpener,
-        Repository, RunFiles, Spawner, Verifier, WorkerAdapter, WorkerAdapters, WorkspaceBackend,
-        health,
+        Repository, RunFiles, SessionWrappers, Spawner, Verifier, WorkerAdapter, WorkerAdapters,
+        WorkspaceBackend, health,
         install::{self as installation, Binaries, InstallOptions},
         integrate::{self as integration, IntegrateTarget, Integration, Integrator},
         lifecycle::{
@@ -36,7 +36,7 @@ use crate::{
         planner::{self, PlannerProbes, PlannerWrapper},
         prompt,
         rebind::{self as rebinding, Rebind, RebindTarget},
-        recording::RecordingBackend,
+        recording::{RecordingBackend, RecordingSessions},
         review::{self as reviewing, Review},
         session::{self as wrapper, OwnWorkspace, Session, WrapperStart},
         stats::{self as statistics, StatsSources},
@@ -711,7 +711,7 @@ pub struct RunE2eOptions {
 pub fn supervise(
     db: &Path,
     repo: &Path,
-    cmux: &dyn WorkspaceBackend,
+    sessions: &dyn SessionWrappers,
     claude: &Path,
     runner: &Path,
     options: &SuperviseOptions,
@@ -719,7 +719,7 @@ pub fn supervise(
     let reviewer = ClaudeCode {
         executable: claude.into(),
     };
-    supervise_with_reviewer(db, repo, cmux, claude, &reviewer, runner, options)
+    supervise_with_reviewer(db, repo, sessions, claude, &reviewer, runner, options)
 }
 
 /// [`supervise`] with the provider of the headless review given apart
@@ -727,7 +727,7 @@ pub fn supervise(
 pub fn supervise_with_reviewer(
     db: &Path,
     repo: &Path,
-    cmux: &dyn WorkspaceBackend,
+    sessions: &dyn SessionWrappers,
     claude: &Path,
     reviewer: &dyn AgentProvider,
     runner: &Path,
@@ -1190,7 +1190,7 @@ pub fn supervise_with_reviewer(
         }),
         remote: Arc::new(repository.clone()),
         repository: Arc::new(repository),
-        cmux,
+        sessions,
         workers,
         reviewer,
         // The Codex a role's jobs run on (ADR-t1063-1): the one the Codex
@@ -1294,6 +1294,23 @@ pub fn supervise_with_reviewer(
 /// the supervisor whose slots are reported (`None` reports all of them).
 impl<'a> RecordingBackend<'a> {
     pub fn new(inner: &'a dyn WorkspaceBackend, db: PathBuf, token: Option<LeaseToken>) -> Self {
+        Self::over(
+            inner,
+            Arc::new(SqliteOpener {
+                db,
+                generators: clock::system(),
+                actor: None,
+            }),
+            token,
+            load_average,
+        )
+    }
+}
+
+/// The runtime's own constructor of the recording of the session wrappers,
+/// as [`RecordingBackend::new`] is of cmux's.
+impl<'a> RecordingSessions<'a> {
+    pub fn new(inner: &'a dyn SessionWrappers, db: PathBuf, token: Option<LeaseToken>) -> Self {
         Self::over(
             inner,
             Arc::new(SqliteOpener {
@@ -2235,8 +2252,8 @@ same in one step",
 
     /// `planners`: every planner not closed (with `all`, every one), with
     /// its state judged by [`planner::planner_views`].
-    pub fn planners(&self, db: &Path, cmux: &dyn WorkspaceBackend, all: bool) -> Result<Value> {
-        self.planners_of(&self.open_read_only(db)?, db, cmux, all)
+    pub fn planners(&self, db: &Path, sessions: &dyn SessionWrappers, all: bool) -> Result<Value> {
+        self.planners_of(&self.open_read_only(db)?, db, sessions, all)
     }
 
     /// [`Self::planners`] on `queue`, the queue at `db` the caller already
@@ -2245,7 +2262,7 @@ same in one step",
         &self,
         queue: &SqliteQueue,
         db: &Path,
-        cmux: &dyn WorkspaceBackend,
+        sessions: &dyn SessionWrappers,
         all: bool,
     ) -> Result<Value> {
         // Claude Code's signals only read what its hook shows.
@@ -2255,7 +2272,7 @@ same in one step",
         let views = planner::planner_views(
             queue,
             &PlannerProbes {
-                cmux,
+                sessions,
                 processes: &SystemProcesses,
                 files: &LocalRunFiles,
                 signals: &signals,
@@ -2274,7 +2291,7 @@ same in one step",
         &self,
         queue: &mut SqliteQueue,
         db: &Path,
-        cmux: &dyn WorkspaceBackend,
+        sessions: &dyn SessionWrappers,
         planner: PlannerId,
         words: &str,
     ) -> Result<Value> {
@@ -2282,7 +2299,7 @@ same in one step",
             executable: PathBuf::from("claude"),
         };
         let probes = PlannerProbes {
-            cmux,
+            sessions,
             processes: &SystemProcesses,
             files: &LocalRunFiles,
             signals: &signals,
@@ -3347,8 +3364,8 @@ pub fn review_in(
 }
 
 /// `planners` on the system clock: see [`OneShot::planners`].
-pub fn planners(db: &Path, cmux: &dyn WorkspaceBackend, all: bool) -> Result<Value> {
-    OneShot::system().planners(db, cmux, all)
+pub fn planners(db: &Path, sessions: &dyn SessionWrappers, all: bool) -> Result<Value> {
+    OneShot::system().planners(db, sessions, all)
 }
 
 /// The session wrapper of a planner (`planner-session`). A planner of the

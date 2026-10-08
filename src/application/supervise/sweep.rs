@@ -90,7 +90,7 @@ impl Supervisor<'_> {
             let id = workspace.workspace_id;
             let result = self.run_session_open(&id).and_then(|open| {
                 if open {
-                    stop_session(self.cmux, &id, closer.route())?;
+                    stop_session(self.sessions, &id, closer.route())?;
                 }
                 Ok(open)
             });
@@ -185,7 +185,7 @@ impl Supervisor<'_> {
     fn close_abandoned_planners(&mut self) {
         match planner::close_abandoned_planners(
             &*self.queue,
-            self.cmux,
+            self.sessions,
             &*self.processes,
             &*self.generators.clock,
         ) {
@@ -224,7 +224,7 @@ impl Supervisor<'_> {
                 continue;
             }
             let workspace = &candidate.workspace_id;
-            match stop_session(self.cmux, workspace, StopRoute::Sweep) {
+            match stop_session(self.sessions, workspace, StopRoute::Sweep) {
                 Ok(()) => {
                     info!(run_id = %candidate.run_id, "run {} is {}; stopped its background wrapper {workspace} that still ran", candidate.run_id, candidate.status.as_str());
                     self.queue.record_workspace_closed(

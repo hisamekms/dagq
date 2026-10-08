@@ -137,7 +137,6 @@ fn an_ask_notifies_nobody_where_it_is_opened() {
     let run_id = outcome["runs"][0]["id"].as_str().unwrap().to_owned();
     // The supervisor's own ask #1, of the failed stand-in review (task
     // 328), is opened without a notification.
-    assert!(backend.notifications.lock().unwrap().is_empty());
     let new_ask = |question: &str| NewAsk {
         recommendation: None,
         confidence: None,
@@ -162,7 +161,6 @@ fn an_ask_notifies_nobody_where_it_is_opened() {
     let again = runtime::ask(&db, new_ask("again")).unwrap();
     assert_eq!(again["created"], false);
     assert_eq!(again["id"], asked["id"]);
-    assert!(backend.notifications.lock().unwrap().is_empty());
     let opened: Vec<Value> = SqliteQueue::open(&db)
         .unwrap()
         .latest_events_of("ask_opened", 10)

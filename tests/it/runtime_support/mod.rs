@@ -14,14 +14,15 @@ pub use crate::common::{Bounded, WithoutActor, shell_path};
 pub use anyhow::{Result, bail, ensure};
 use dagq::domain::LeaseToken;
 use dagq::domain::background_wrapper::{BackgroundHandle, HeadlessWrapper};
+pub use dagq::domain::background_wrapper::{StopRoute, WrapperStop};
 pub use dagq::domain::headless_job::JobAccess;
 use dagq::infrastructure::background::BackgroundWrappers;
 pub use dagq::{
     VERSION,
     application::{
-        AgentProvider, Clock, CommandSpec, Exit, Generators, IdGenerator, MainRemote, Spawned,
-        Spawner, Streams, SupervisorEnvironment, TaskStore, WorkspaceBackend, WorkspaceTags,
-        dependency_graph,
+        AgentProvider, Clock, CommandSpec, Exit, Generators, IdGenerator, MainRemote,
+        SessionWrappers, Spawned, Spawner, Streams, SupervisorEnvironment, TaskStore,
+        WorkspaceTags, dependency_graph,
     },
     domain::{
         AskId, AskKind, CommitSha, EventId, EvidenceCheck, GoalEdit, GoalId, MAX_RESUME_ATTEMPTS,
@@ -495,8 +496,8 @@ pub struct TestSession {
 /// no workspace, ADR-t1433-3), with the agent script chosen per task, and
 /// records the stops per handle. A background session is open while the
 /// process its handle names lives with the start recorded in it, as the
-/// production backend tells it, whether or not it was stopped. Planner and
-/// inbox workspaces are only listed and closed.
+/// production backend tells it, whether or not it was stopped: the
+/// [`SessionWrappers`] of the supervisor, with no cmux (ADR-t1433-1).
 pub struct TestWorkspace {
     pub db: PathBuf,
     pub fail: bool,
@@ -517,16 +518,8 @@ pub struct TestWorkspace {
     /// registers (a reopen whose wrapper does not start).
     pub resume_no_session: bool,
     pub resume_timeout: Duration,
-    /// How often supervision attempted a screen read through this backend
-    /// (a worker has no screen, so none should).
-    pub captures: AtomicUsize,
     pub sessions: Mutex<Vec<(String, TestSession)>>,
     pub closed: Mutex<Vec<String>>,
-    /// `notify` calls as (title, body, workspace); the supervisor sends
-    /// none, `ask` one per new ask (ADR-0022).
-    pub notifications: Mutex<Vec<(String, String, Option<String>)>>,
-    /// Every `ensure_group` call, as (external ID, name).
-    pub groups: Mutex<Vec<(String, String)>>,
     /// Resumed-session script per task; a resume of any other task fails.
     pub resume_scripts: Mutex<HashMap<TaskId, String>>,
     /// `launch_background` calls (ADR-t1404-1): the directory, the command
@@ -537,24 +530,20 @@ pub struct TestWorkspace {
     /// handle, until their close stops them as it stops a background
     /// wrapper.
     pub stands: Stands,
-    /// `send_text` calls: the session and the text.
-    pub texts: Mutex<Vec<(String, String)>>,
-    /// `exists` (and the listing) fails, as asking about a session can.
+    /// `exists` fails, as asking about a session can.
     pub exists_fails: bool,
-    /// The sessions `exists` was asked about, in order, and how many times
-    /// every session was listed (`listed_workspace_ids`), so a test can
-    /// tell what the supervisor looked up.
+    /// The sessions `exists` was asked about, in order, so a test can tell
+    /// what the supervisor looked up.
     pub asked: Mutex<Vec<String>>,
-    pub listings: AtomicUsize,
-    /// Workspaces cmux lists although this backend did not open them (a
+    /// Workspaces reported open although this backend did not open them (a
     /// workspace from before ADR-t1433-3, a planner's), until they are
     /// closed. A background handle is never listed: it is open while its
     /// process lives ([`Self::stand_in`]).
     pub listed: Mutex<Vec<String>>,
-    /// `close` ends the session, as stopping a background wrapper does,
+    /// The stop ends the session, as stopping a background wrapper does,
     /// instead of requiring it gone.
     pub close_ends_session: bool,
-    /// `close` times out and leaves the session as it is.
+    /// The stop times out and leaves the session as it is.
     pub close_times_out: bool,
     /// The `claude` a headless run's wrapper calls for its turns
     /// ([`headless_claude`]); a headless run fails its wrapper without one.
@@ -590,18 +579,13 @@ impl TestWorkspace {
             no_session: false,
             resume_no_session: false,
             resume_timeout: Duration::from_secs(120),
-            captures: AtomicUsize::new(0),
             sessions: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
-            notifications: Mutex::new(Vec::new()),
-            groups: Mutex::new(Vec::new()),
             resume_scripts: Mutex::new(HashMap::new()),
             launched: Mutex::new(Vec::new()),
             stands: Stands::default(),
-            texts: Mutex::new(Vec::new()),
             exists_fails: false,
             asked: Mutex::new(Vec::new()),
-            listings: AtomicUsize::new(0),
             listed: Mutex::new(Vec::new()),
             close_ends_session: false,
             close_times_out: false,
@@ -613,7 +597,7 @@ impl TestWorkspace {
             wrapper_processes: None,
         }
     }
-    /// The workspaces cmux lists: those `list` named, less those closed.
+    /// The workspaces reported open: those `list` named, less those closed.
     fn listed_workspaces(&self) -> Result<Vec<String>> {
         ensure!(!self.exists_fails, "injected session list failure");
         let closed = self.closed();
@@ -629,7 +613,7 @@ impl TestWorkspace {
             .map_or(&SystemProcesses as &dyn ProcessControl, |p| p as _)
     }
 
-    /// Report the workspace `id` open as if cmux listed it. A background
+    /// Report the workspace `id` open, as an older binary's workspace. A background
     /// handle is open by its process alone, as the production backend
     /// tells it: start one with [`Self::stand_in`].
     pub fn list(&self, id: &str) {
@@ -655,9 +639,6 @@ impl TestWorkspace {
             .lock()
             .unwrap()
             .insert(TaskId::new(task_id), script.into());
-    }
-    pub fn texts(&self) -> Vec<(String, String)> {
-        self.texts.lock().unwrap().clone()
     }
 
     /// Agent script for one task; other tasks use the default script.
@@ -703,13 +684,7 @@ impl TestWorkspace {
     }
 }
 
-impl WorkspaceBackend for TestWorkspace {
-    fn preflight(&self) -> Result<()> {
-        Ok(())
-    }
-    fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
-        unreachable!("only up preflights the detached connection")
-    }
+impl SessionWrappers for TestWorkspace {
     fn launch_background(
         &self,
         cwd: &Path,
@@ -719,39 +694,10 @@ impl WorkspaceBackend for TestWorkspace {
     ) -> Result<String> {
         headless::launch_background(self, cwd, command, env, log)
     }
-    fn send_text(&self, workspace_id: &str, text: &str) -> Result<()> {
-        self.texts
-            .lock()
-            .unwrap()
-            .push((workspace_id.to_owned(), text.to_owned()));
-        bail!("a worker has no interactive input: {workspace_id}, {text}")
-    }
-    fn send_enter(&self, _: &str) -> Result<()> {
-        bail!("a worker has no interactive input")
-    }
-    fn send_key(&self, workspace_id: &str, key: &str) -> Result<()> {
-        bail!("a worker has no interactive input: {workspace_id}, {key}")
-    }
-    fn resume_prompt_delay(&self) -> Duration {
-        Duration::ZERO
-    }
-    fn submit_check_interval(&self) -> Duration {
-        Duration::from_millis(10)
-    }
-    fn resume_timeout(&self) -> Duration {
-        self.resume_timeout
-    }
-    fn capture(&self, _: &str) -> Result<String> {
-        self.captures.fetch_add(1, Ordering::SeqCst);
-        bail!("a worker has no screen")
-    }
-    fn retry_backoff(&self) -> Duration {
-        Duration::from_millis(10)
-    }
-    fn close(&self, workspace_id: &str) -> Result<()> {
+    fn stop_background(&self, workspace_id: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
         ensure!(
             !self.close_times_out,
-            "cmux close-workspace failed: Command timed out"
+            "background wrapper stop failed: Command timed out"
         );
         // The session must have exited (or died, its wrapper's pid gone)
         // before the supervisor stops its handle. A handle this backend did
@@ -810,29 +756,7 @@ impl WorkspaceBackend for TestWorkspace {
             .unwrap()
             .retain(|(handle, _)| handle != workspace_id);
         self.closed.lock().unwrap().push(workspace_id.into());
-        Ok(())
-    }
-
-    fn set_color(&self, _: &str, _: &str) -> Result<()> {
-        unreachable!("only up colors a workspace")
-    }
-    fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-        unreachable!("only up puts a status pill on a workspace")
-    }
-    fn pin(&self, _: &str) -> Result<()> {
-        unreachable!("only up pins a workspace")
-    }
-    fn send_exit(&self, workspace_id: &str) -> Result<()> {
-        bail!("a worker uses an exit request file: {workspace_id}")
-    }
-    fn exit_timeout(&self) -> Duration {
-        self.exit_timeout
-    }
-    fn registration_timeout(&self) -> Duration {
-        self.registration_timeout
-    }
-    fn reopen_interval(&self) -> Duration {
-        self.reopen_interval
+        Ok(None)
     }
     // A background session is open while the process its handle names
     // shows the start recorded in it, judged as the production backend
@@ -852,27 +776,20 @@ impl WorkspaceBackend for TestWorkspace {
             .iter()
             .any(|id| id == workspace_id))
     }
-    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        self.listings.fetch_add(1, Ordering::SeqCst);
-        self.listed_workspaces()
+    fn resume_timeout(&self) -> Duration {
+        self.resume_timeout
     }
-    fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
-        bail!("not used by the supervisor")
+    fn retry_backoff(&self) -> Duration {
+        Duration::from_millis(10)
     }
-    fn ensure_group(&self, external_id: &str, name: &str) -> Result<String> {
-        self.groups
-            .lock()
-            .unwrap()
-            .push((external_id.into(), name.into()));
-        Ok(format!("group-{external_id}"))
+    fn exit_timeout(&self) -> Duration {
+        self.exit_timeout
     }
-    fn notify(&self, title: &str, body: &str, workspace: Option<&str>) -> Result<()> {
-        self.notifications.lock().unwrap().push((
-            title.into(),
-            body.into(),
-            workspace.map(Into::into),
-        ));
-        Ok(())
+    fn registration_timeout(&self) -> Duration {
+        self.registration_timeout
+    }
+    fn reopen_interval(&self) -> Duration {
+        self.reopen_interval
     }
 }
 
@@ -1501,19 +1418,13 @@ fn run_agent_with_review_retry(
         assert!(!kinds.contains(&"workspace_closed"));
     }
     assert_eq!(kinds.contains(&"cleanup_failed"), close_fail);
-    // A run at rest is reported through `watch`, not a notification
-    // (ADR-0022), and the supervisor notifies nobody of its own asks: the
-    // inbox's watch does (ADR-t1433-1 decision 2).
-    let notifications = backend.notifications.lock().unwrap().clone();
-    assert!(notifications.is_empty(), "{notifications:?}");
-    // The run's wrapper ran in the background (task 1439): no workspace and
-    // no group; it started in the run's worktree with its output in the
-    // run dir, its environment carrying its role, actor id, run and task
+    // The run's wrapper ran in the background (task 1439): it started in
+    // the run's worktree with its output in the run dir, its environment
+    // carrying its role, actor id, run and task
     // (ADR-t728-1 decision 4), not the queue's path (its wrapper is named
     // the queue, and its worker the queue service: goal 82's stage (3)).
     // The handle's pid is the start the supervisor recorded and the
     // wrapper that registered and heartbeat under it.
-    assert!(backend.groups.lock().unwrap().is_empty());
     let launched = backend.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 1, "{launched:?}");
     assert_eq!(

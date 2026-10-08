@@ -183,7 +183,6 @@ fn a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_
     let handle = planner.workspace_id.clone().unwrap();
     assert!(is_background(&handle), "{handle}");
     // Started in the background, as a headless planner of the runtime's.
-    assert!(backend.texts().is_empty(), "nothing typed");
     let launched = backend.background.launched();
     assert_eq!(launched.len(), 1, "{launched:?}");
     let (launched_handle, command, env, log) = &launched[0];
@@ -237,7 +236,7 @@ fn a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_
     assert_eq!(closed.len(), 1, "{closed:?}");
     assert_eq!(closed[0]["code"], "runtime_exited", "{closed:?}");
     assert_eq!(closed[0]["planner_id"], planner.id.as_i64());
-    assert!(!dagq::application::WorkspaceBackend::exists(&backend, &handle).unwrap());
+    assert!(!dagq::application::SessionWrappers::exists(&backend, &handle).unwrap());
     let doctor = crate::common::cli::ok(&fx.db, &["doctor"]);
     assert_eq!(doctor["roles"]["runtime_planner"]["route"], "headless");
     assert_eq!(doctor["roles"]["runtime_planner"].get("route_source"), None);
@@ -309,8 +308,6 @@ say "turn $TURN""#,
         || !queue_events(&fx.db, "planner_closed").is_empty(),
         || diagnose_planner(&fx.db),
     );
-
-    assert!(backend.texts().is_empty(), "nothing typed");
     let turns = dir.join("turns");
     let request: Value =
         serde_json::from_str(&fs::read_to_string(turns.join("request-000001.taken.json")).unwrap())
@@ -404,7 +401,6 @@ fn the_old_route_key_is_ignored_and_the_runtimes_planner_runs_headless() {
         })
         .unwrap();
     supervise_with(&fx, &backend, &reviewer, &settings);
-    assert!(backend.texts().is_empty(), "nothing typed");
     let requests = crate::runtime_support::planner_turns::turn_requests(&fx.db, planner.id);
     assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(requests[0]["what"], "revise");
@@ -513,7 +509,7 @@ say "turn $TURN""#,
 /// agent's exit is closed as `runtime_exited`.
 #[test]
 fn the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited() {
-    use dagq::application::{ProcessControl, WorkspaceBackend, planner::close_abandoned_planners};
+    use dagq::application::{ProcessControl, SessionWrappers, planner::close_abandoned_planners};
     let fx = fixture();
     let queue = SqliteQueue::open(&fx.db).unwrap();
     // A parked wrapper: a real process that ends once the test's process
@@ -552,7 +548,12 @@ fn the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited()
     assert!(queue.planner(planner.id).unwrap().closed_at.is_none());
     // Its wrapper ended on its agent's exit: the row closes, as exited.
     queue.planner_exited(planner.id, wrapper, 0).unwrap();
-    backend.close(&handle).unwrap();
+    backend
+        .stop_background(
+            &handle,
+            dagq::domain::background_wrapper::StopRoute::Planner,
+        )
+        .unwrap();
     assert!(!backend.exists(&handle).unwrap());
     let closed = close_abandoned_planners(&queue, &backend, &processes, &*clock).unwrap();
     assert_eq!(closed, [planner.id]);
@@ -570,7 +571,7 @@ fn the_sweep_keeps_a_live_background_planner_and_closes_an_ended_one_as_exited()
 #[test]
 fn a_background_planner_with_a_late_heartbeat_is_alive_until_its_wrapper_is_gone() {
     use crate::common::cli;
-    use dagq::application::WorkspaceBackend;
+    use dagq::application::SessionWrappers;
     let fx = fixture();
     let queue = SqliteQueue::open(&fx.db).unwrap();
     // A parked wrapper: a real process that ends once the test's process
@@ -614,7 +615,12 @@ fn a_background_planner_with_a_late_heartbeat_is_alive_until_its_wrapper_is_gone
     assert_eq!(alive["alive"], true, "{alive}");
     assert_ne!(alive["state"], "lost", "{alive}");
     // Its wrapper is gone: the row reads closed, by the handle alone.
-    backend.close(&handle).unwrap();
+    backend
+        .stop_background(
+            &handle,
+            dagq::domain::background_wrapper::StopRoute::Planner,
+        )
+        .unwrap();
     let gone = view();
     assert_eq!(gone["state"], "closed", "{gone}");
     assert_eq!(gone["alive"], false, "{gone}");
@@ -675,7 +681,6 @@ say "turn $TURN""#,
         || !queue_events(&fx.db, "planner_closed").is_empty(),
         || diagnose_planner(&fx.db),
     );
-    assert!(backend.texts().is_empty(), "nothing typed");
     let turns = planners_dir(&fx.db)
         .join(planner.id.to_string())
         .join("turns");

@@ -151,13 +151,6 @@ fn a_headless_run_lands_after_its_first_turn() {
     assert!(position(&kinds, "review_finished") < position(&kinds, "exit_requested"));
     // The exit went to the session's turns, nothing to its terminal.
     assert!(run_dir.join("turns/exit").exists());
-    assert!(backend.texts().is_empty());
-
-    assert_eq!(
-        backend.captures.load(Ordering::SeqCst),
-        0,
-        "worker supervision never reads a screen"
-    );
     // The worker was told it runs headless.
     assert!(read_prompt(run).contains(runtime::HEADLESS_WORKER));
 }
@@ -218,7 +211,6 @@ esac"#
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "run_waiting_started") < position(&kinds, "run_waiting_ended"));
     assert!(position(&kinds, "run_waiting_ended") < position(&kinds, "ask_delivered"));
-    assert!(backend.texts().is_empty());
 }
 
 /// Acceptance (2): a review's revise goes to the same session as a resume;
@@ -267,7 +259,6 @@ esac"#,
     let requested = payloads(&detail, "turn_requested");
     assert_eq!(requested[0]["what"], "revise request", "{requested:?}");
     assert_eq!(reviewer.prompts().len(), 2);
-    assert!(backend.texts().is_empty());
     let finished = payloads(&detail, "turn_finished");
     assert_eq!(finished.len(), 2, "{finished:?}");
     let costs: Vec<f64> = finished

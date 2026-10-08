@@ -12,7 +12,8 @@
 //!
 //! [`HostActorExecutor`] is the only backend: it starts the actor as a
 //! process of this user on this host, through the [`AgentProvider`] (Claude
-//! Code) and the cmux [`WorkspaceBackend`]. On a host the spec is advisory
+//! Code), the background session wrappers ([`SessionWrappers`]) and the
+//! inbox's cmux [`WorkspaceBackend`]. On a host the spec is advisory
 //! (ADR-t728-1 decision 6): the capabilities, the workspace access and the
 //! limits are recorded and checked for consistency, but nothing isolates the
 //! process, which can reach whatever this user can. A sandboxed backend
@@ -33,8 +34,8 @@ use anyhow::{Context, Result, bail, ensure};
 
 use super::queue_service::ServiceAccess;
 use super::{
-    AgentProvider, CommandSpec, PlannerCommand, RunLog, Spawned, Spawner, Streams, TurnTarget,
-    WorkspaceBackend, WorkspaceTags,
+    AgentProvider, CommandSpec, PlannerCommand, RunLog, SessionWrappers, Spawned, Spawner, Streams,
+    TurnTarget, WorkspaceBackend, WorkspaceTags,
     lifecycle::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, QUEUE_ENV, SESSION_KIND_ENV},
     naming::shell_join,
     path_text,
@@ -441,12 +442,14 @@ pub fn actor_env(
 }
 
 /// Starts AI actors on this host, as processes of this user (advisory):
-/// workspaces through cmux, agents through the provider and the spawner.
+/// the inbox's workspace through cmux, the session wrappers in the
+/// background, agents through the provider and the spawner.
 /// Each part is given where the caller has it, and a program that needs a
 /// part the executor was not given is refused.
 pub struct HostActorExecutor<'a> {
     queue: &'a Path,
     workspaces: Option<&'a dyn WorkspaceBackend>,
+    sessions: Option<&'a dyn SessionWrappers>,
     provider: Option<&'a dyn AgentProvider>,
     spawner: Option<&'a dyn Spawner>,
     service: Option<&'a dyn ServiceAccess>,
@@ -462,6 +465,7 @@ impl<'a> HostActorExecutor<'a> {
         Self {
             queue,
             workspaces: None,
+            sessions: None,
             provider: None,
             spawner: None,
             service: None,
@@ -495,6 +499,12 @@ impl<'a> HostActorExecutor<'a> {
     /// Workspaces open through `workspaces`.
     pub fn with_workspaces(mut self, workspaces: &'a dyn WorkspaceBackend) -> Self {
         self.workspaces = Some(workspaces);
+        self
+    }
+
+    /// Session wrappers start in the background through `sessions`.
+    pub fn with_sessions(mut self, sessions: &'a dyn SessionWrappers) -> Self {
+        self.sessions = Some(sessions);
         self
     }
 
@@ -533,6 +543,11 @@ impl<'a> HostActorExecutor<'a> {
 
     fn workspaces(&self) -> Result<&'a dyn WorkspaceBackend> {
         self.workspaces.context("this executor opens no workspace")
+    }
+
+    fn sessions(&self) -> Result<&'a dyn SessionWrappers> {
+        self.sessions
+            .context("this executor starts no background session wrapper")
     }
 
     fn provider(&self) -> Result<&'a dyn AgentProvider> {
@@ -691,7 +706,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 run_env,
                 log,
             } => {
-                let cmux = self.workspaces()?;
+                let sessions = self.sessions()?;
                 // The worker's token, issued at the claim and the resume
                 // (ADR-t1233-4 decision 4); the wrapper hands its file to
                 // the agent. The wrapper itself opens the queue: it gets
@@ -702,7 +717,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let mut env = actor_env(self.queue, &actor, None, None)?;
                 env.extend(run_env);
                 // In the run's worktree, which the worker writes.
-                Ok(ActorHandle::Workspace(cmux.launch_background(
+                Ok(ActorHandle::Workspace(sessions.launch_background(
                     workspace.path(),
                     &wrapper,
                     &env,
@@ -741,7 +756,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
             } => {
                 let env = actor_env(self.queue, &actor, Some(planner), launch)?;
                 Ok(ActorHandle::Workspace(
-                    self.workspaces()?
+                    self.sessions()?
                         .launch_background(cwd, &wrapper, &env, log)?,
                 ))
             }
@@ -1090,13 +1105,7 @@ mod tests {
         }
     }
 
-    impl WorkspaceBackend for Fake {
-        fn preflight(&self) -> Result<()> {
-            Ok(())
-        }
-        fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
-            Ok(())
-        }
+    impl SessionWrappers for Fake {
         fn launch_background(
             &self,
             cwd: &Path,
@@ -1113,6 +1122,25 @@ mod tests {
                 },
             ));
             Ok("background:7:start".into())
+        }
+        fn stop_background(
+            &self,
+            _: &str,
+            _: crate::domain::background_wrapper::StopRoute,
+        ) -> Result<Option<crate::domain::background_wrapper::WrapperStop>> {
+            unreachable!()
+        }
+        fn exists(&self, _: &str) -> Result<bool> {
+            unreachable!()
+        }
+    }
+
+    impl WorkspaceBackend for Fake {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
+            Ok(())
         }
         fn send_text(&self, _: &str, _: &str) -> Result<()> {
             unreachable!()
@@ -1417,7 +1445,7 @@ mod tests {
         let run = provisioned_run(run_dir.path());
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
-            .with_workspaces(&fake)
+            .with_sessions(&fake)
             .with_provider(&fake)
             .with_spawner(&fake);
         let dir = Path::new("/q/job");
@@ -1472,7 +1500,11 @@ mod tests {
         assert_eq!(spec.task_id(), Some(TaskId::new(3)));
         assert_eq!(spec.workspace.path(), Path::new("/w"));
         let error = executor.spawn(spec).err().unwrap();
-        assert!(error.to_string().contains("opens no workspace"));
+        assert!(
+            error
+                .to_string()
+                .contains("starts no background session wrapper")
+        );
         let dir = Path::new("/q/job");
         let error = executor
             .spawn(ActorExecutionSpec::new(
@@ -1505,7 +1537,7 @@ mod tests {
         let run = claimed_run("r1");
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
-            .with_workspaces(&fake)
+            .with_sessions(&fake)
             .with_queue_service(&fake);
         for log in ["/r/session.log", "/r/session-resume-1.log"] {
             let handle = executor
@@ -1550,7 +1582,7 @@ mod tests {
     fn a_planners_wrapper_starts_in_the_background_with_the_planner_env() {
         let fake = Fake::default();
         let handle = HostActorExecutor::new(Path::new("/q/queue.db"))
-            .with_workspaces(&fake)
+            .with_sessions(&fake)
             .spawn(ActorExecutionSpec::new(
                 ActorContext::instance(ActorRole::Planner, 4),
                 WorkspaceAccess::Write("/repo".into()),

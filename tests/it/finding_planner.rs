@@ -602,7 +602,6 @@ fn a_planner_question_about_a_finding_reaches_its_planner_as_a_turn_and_undecide
         requests[0]["prompt"],
         format!("answer to ask {}: propose", asked.id)
     );
-    assert!(backend.texts().is_empty(), "nothing typed");
     assert!(queue.asks(Default::default()).unwrap().is_empty());
     assert!(!exit_requested(&fx.db, planner.id));
 

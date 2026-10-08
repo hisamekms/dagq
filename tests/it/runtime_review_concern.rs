@@ -62,7 +62,6 @@ fn a_high_land_lands_the_run_without_an_ask() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_landed_run(&detail.runs[0], &repo, &base);
     assert!(queue.asks(Default::default()).unwrap().is_empty());
-    assert!(backend.notifications.lock().unwrap().is_empty());
     // Reviewed once more with the same input after the unreadable verdict.
     let prompts = reviewer.prompts();
     assert_eq!(prompts.len(), 2);

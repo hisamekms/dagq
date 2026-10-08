@@ -217,7 +217,6 @@ say "turn $TURN""#,
     assert_eq!(closed.len(), 1, "{closed:?}");
     assert_eq!(closed[0]["code"], "runtime_exited");
     assert!(queue_events(&fx.db, "planner_unresponsive").is_empty());
-    assert!(backend.texts().is_empty(), "nothing typed");
 }
 
 /// Acceptance (ADR-t1394-2 decision 3): a headless planner's turn that runs
@@ -324,7 +323,6 @@ say "turn $TURN""#,
     assert_eq!(closed[0]["code"], "runtime_exited");
     assert_eq!(closed[0]["request_id"], request.as_i64());
     assert_eq!(queue.planners(true).unwrap().len(), 1, "no second planner");
-    assert!(backend.texts().is_empty(), "nothing typed");
 }
 
 /// Acceptance (ADR-t1394-2 decision 2 for a revise to a live planner): a
@@ -407,7 +405,6 @@ say "turn $TURN""#,
     assert_eq!(closed.len(), 1, "{closed:?}");
     assert_eq!(closed[0]["code"], "runtime_exited");
     assert_eq!(queue.planner(planner.id).unwrap().exit_code, Some(0));
-    assert!(backend.texts().is_empty(), "nothing typed");
 }
 
 /// Acceptance (ADR-t1394-2 decision 3, the sweep's path): a headless
@@ -417,7 +414,7 @@ say "turn $TURN""#,
 /// only the sweep can tell.
 #[test]
 fn the_sweep_tells_of_a_headless_planners_turn_stopped_at_its_limit_as_it_closes_it() {
-    use dagq::application::WorkspaceBackend;
+    use dagq::application::SessionWrappers;
     let fx = crate::plan_review::fixture();
     let queue = SqliteQueue::open(&fx.db).unwrap();
     let backend = PlanWorkspace::running();
@@ -447,7 +444,12 @@ fn the_sweep_tells_of_a_headless_planners_turn_stopped_at_its_limit_as_it_closes
             .to_string(),
     )
     .unwrap();
-    backend.close(&handle).unwrap();
+    backend
+        .stop_background(
+            &handle,
+            dagq::domain::background_wrapper::StopRoute::Planner,
+        )
+        .unwrap();
     queue.planner_exited(planner.id, wrapper, 1).unwrap();
     let reviewer = StubReviewer::new(&[]);
     let settings = dagq::runtime::SuperviseOptions {

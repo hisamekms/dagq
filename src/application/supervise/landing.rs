@@ -1113,11 +1113,11 @@ impl Supervisor<'_> {
     pub(super) fn close_session(&mut self, run: &TaskRun, session: &SessionRef) -> Result<TaskRun> {
         match session.resume {
             None if run.workspace_closed_at().is_none() && run.workspace_id().is_some() => {
-                close_workspace(&mut *self.queue, self.cmux, &self.token, run)
+                close_workspace(&mut *self.queue, self.sessions, &self.token, run)
             }
             None => Ok(run.clone()),
             Some(attempt) => {
-                match stop_run_session(self.cmux, &session.workspace, StopRoute::AfterReview) {
+                match stop_run_session(self.sessions, &session.workspace, StopRoute::AfterReview) {
                     Ok(()) => self.queue.record_runtime_event(
                         run.id(),
                         EventKind::WorkspaceClosed,

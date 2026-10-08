@@ -5,15 +5,15 @@ use super::*;
 
 /// A handle is open while its process lives with the start it names: a
 /// wrapper whose process ended is not open although nobody closed it, nor
-/// is a handle whose pid is dead or shows another start; a close stops the
+/// is a handle whose pid is dead or shows another start; a stop stops the
 /// process of a session the backend did not start.
 #[test]
-fn a_background_handle_is_open_while_its_process_lives_and_not_until_its_close() {
+fn a_background_handle_is_open_while_its_process_lives_and_not_until_its_stop() {
     let (_dir, _repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, "exit 0");
     let left = backend.stand_in();
     assert!(backend.exists(&left).unwrap());
-    backend.close(&left).unwrap();
+    backend.stop_background(&left, StopRoute::Sweep).unwrap();
     assert!(!backend.exists(&left).unwrap());
 
     // A wrapper's process that ended, never closed.

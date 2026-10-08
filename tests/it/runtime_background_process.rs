@@ -1,6 +1,6 @@
 //! Runtime tests of a headless worker's background wrapper (ADR-t1404-1)
-//! as real processes: the supervisor runs the production cmux adapter
-//! (over the test's stub `cmux`), which starts the real `dagq session
+//! as real processes: the supervisor runs the production session wrappers
+//! (`BackgroundSessions`), which start the real `dagq session
 //! --background` detached from it, and the wrapper runs its turns with the
 //! stub headless `claude`. The wrapper and its turn outlive a supervisor
 //! killed without a drain (one in a process of its own) and are adopted by
@@ -17,7 +17,7 @@ use dagq::domain::{
     background_wrapper::{BackgroundHandle, StopSignal, WrapperStop},
 };
 use dagq::infrastructure::{
-    adapters::{Cmux, SystemProcesses},
+    adapters::{BackgroundSessions, SystemProcesses},
     background::BackgroundWrappers,
 };
 use runtime_support::headless::*;
@@ -26,28 +26,6 @@ use runtime_support::*;
 /// The variable that makes [`child_supervisor`] supervise, with the queue,
 /// the repository and the stub `claude` as JSON.
 const CHILD: &str = "BACKGROUND_PROCESS_TEST_SUPERVISOR";
-
-/// The production cmux adapter over a stub `cmux` next to the queue at
-/// `db`, which answers `ping`, cannot list the workspaces (`list-windows`
-/// fails), and records every call in `calls`: the supervisor calls it for
-/// nothing (no preflight, ADR-t1433-1), and a background handle is served
-/// by the real `BackgroundWrappers` and never reaches it.
-fn cmux(db: &Path) -> Cmux {
-    let stub = cmux_stub(db);
-    if !stub.exists() {
-        fs::create_dir_all(stub.parent().unwrap()).unwrap();
-        crate::common::template::script(
-            &stub,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\ncase \"$1\" in ping) echo PONG ;; esac\ncase \"$*\" in *list-windows*) echo 'cmux: cannot list' >&2; exit 1 ;; esac\n",
-        );
-    }
-    Cmux { executable: stub }
-}
-
-/// The stub `cmux` of [`cmux`].
-fn cmux_stub(db: &Path) -> PathBuf {
-    db.parent().unwrap().join("background-cmux").join("cmux")
-}
 
 /// The handles of `kind`'s records of the run of task 2: the wrapper
 /// starts (`wrapper_launched`) or the turns (`turn_started`), each with
@@ -139,8 +117,8 @@ impl Drop for SupervisorProcess {
     }
 }
 
-/// Supervise the queue at `db` on a thread through the production cmux
-/// adapter, the wrappers' turns run by `claude`, with `reviewer` and
+/// Supervise the queue at `db` on a thread through the production session
+/// wrappers, the wrappers' turns run by `claude`, with `reviewer` and
 /// `stall`, until nothing is left to do.
 pub(crate) fn supervise_real(
     db: &Path,
@@ -158,7 +136,7 @@ pub(crate) fn supervise_real(
         runtime::supervise_with_reviewer(
             &db,
             &repo,
-            &cmux(&db),
+            &BackgroundSessions,
             &claude,
             &*reviewer,
             Path::new(env!("CARGO_BIN_EXE_dagq")),
@@ -174,8 +152,6 @@ pub(crate) fn background_fixture(turns: &str) -> (Fixture, PathBuf, PathBuf, Pat
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(dir.path(), turns);
     let claude = turns_only(dir.path(), &backend.headless.clone().unwrap());
-    // Made before any supervisor (a child's too) looks for it.
-    cmux(&db);
     let leftovers = Leftovers(db.clone());
     (dir, repo, db, claude, leftovers)
 }
@@ -230,7 +206,7 @@ fn child_supervisor() {
     runtime::supervise_with_reviewer(
         &db,
         &repo,
-        &cmux(&db),
+        &BackgroundSessions,
         &claude,
         &reviewer,
         Path::new(env!("CARGO_BIN_EXE_dagq")),
@@ -445,15 +421,15 @@ kill "$pid" 2>/dev/null
 }
 
 /// Acceptance: the supervisor's sweep stops the background session of an
-/// ended run without asking cmux (whose stub cannot list the workspaces).
+/// ended run through the production session wrappers, which call no cmux.
 /// The run opened a workspace before it, which the sweep's candidates keep
 /// (every workspace a run opened, closed or not): a workspace from before
-/// ADR-t1433-3 is left to a person, and cmux is not listed for it, while
-/// the background session, judged by its wrapper's process, is stopped:
-/// its wrapper and turn are stopped and the stop of its handle is
-/// recorded, with nothing recorded or asked of cmux for the workspace.
+/// ADR-t1433-3 is left to a person, while the background session, judged
+/// by its wrapper's process, is stopped: its wrapper and turn are stopped
+/// and the stop of its handle is recorded, with nothing recorded for the
+/// workspace.
 #[test]
-fn the_sweep_stops_an_ended_background_session_while_cmux_cannot_list() {
+fn the_sweep_stops_an_ended_background_session_and_leaves_an_earlier_workspace() {
     let (_dir, repo, db, claude, _leftovers) = background_fixture("say slow; sleep 120");
     let run = provision_under(&repo, &db, "owner");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -541,10 +517,6 @@ fn the_sweep_stops_an_ended_background_session_while_cmux_cannot_list() {
         "{stops:?}"
     );
     assert!(stops[0]["children_killed"].is_u64(), "{stops:?}");
-    // Nothing was asked of cmux: no stub call was recorded at all, so
-    // neither a listing nor the earlier workspace.
-    let calls = cmux_stub(&db).with_file_name("calls");
-    assert!(!calls.exists(), "{:?}", fs::read_to_string(&calls));
 }
 
 /// Stops, when a test ends (a failing one included), the wrapper and the
@@ -666,13 +638,13 @@ fn a_wrapper_that_ignores_sigterm_is_killed_with_its_turn() {
 
 /// Acceptance (task 1657): the stop of a background wrapper no run
 /// records (a planner's, one whose start was never recorded) goes through
-/// the supervisor's recording backend like a run's, and is recorded as the
+/// the supervisor's `RecordingSessions` like a run's, and is recorded as the
 /// queue's own `wrapper_stopped`, on no run, with its handle, pid, signal
 /// and route.
 #[test]
 fn the_stop_of_a_wrapper_no_run_records_is_the_queues_event() {
     use dagq::{
-        application::{WorkspaceBackend, recording::RecordingBackend},
+        application::{SessionWrappers, recording::RecordingSessions},
         domain::background_wrapper::StopRoute,
         infrastructure::runtime_store::SqliteOpener,
     };
@@ -681,11 +653,8 @@ fn the_stop_of_a_wrapper_no_run_records_is_the_queues_event() {
         dir.path(),
         "trap 'kill $!; exit 0' TERM; sleep 30 & echo $! > $TURN.tmp; mv $TURN.tmp $TURN; wait",
     );
-    let cmux = Cmux {
-        executable: dir.path().join("no-cmux"),
-    };
-    let recording = RecordingBackend::over(
-        &cmux,
+    let recording = RecordingSessions::over(
+        &BackgroundSessions,
         Arc::new(SqliteOpener {
             db: db.clone(),
             generators: clock::system(),
@@ -698,7 +667,7 @@ fn the_stop_of_a_wrapper_no_run_records_is_the_queues_event() {
     let stop = recording
         .stop_background(&handle.to_string(), StopRoute::Planner)
         .unwrap()
-        .expect("the cmux adapter tells how the stop ended");
+        .expect("the session wrappers tell how the stop ended");
     assert_ne!(stop.signal, StopSignal::Gone, "{stop:?}");
     assert!(!running(&handle));
     let recorded: Vec<(Option<String>, Value)> = Connection::open(&db)

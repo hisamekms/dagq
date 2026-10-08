@@ -1393,7 +1393,7 @@ impl StallWatch {
                 notice_step(
                     sv.notice_failures.get(run.id()),
                     closed.ask_id,
-                    sv.cmux.retry_backoff(),
+                    sv.sessions.retry_backoff(),
                     sv.generators.clock.monotonic(),
                 )
             });

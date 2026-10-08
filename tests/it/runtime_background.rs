@@ -57,7 +57,6 @@ fn a_background_headless_run_lands_without_a_workspace() {
     );
     let detail = detail(&db);
     let run = &detail.runs[0];
-    assert!(backend.groups.lock().unwrap().is_empty(), "no cmux group");
     let launched = backend.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 1, "{launched:?}");
     let launch = &launched[0];
@@ -103,8 +102,6 @@ fn a_background_headless_run_lands_without_a_workspace() {
     assert!(at("wrapper_launched") < at("wrapper_started"));
     assert!(at("wrapper_started") < at("turn_started"));
     assert!(backend.closed().contains(&handle.to_owned()));
-    assert!(backend.texts().is_empty());
-    assert_eq!(backend.captures.load(Ordering::SeqCst), 0);
 }
 
 /// Acceptance: a worker question is answered as the next turn of the same
@@ -157,7 +154,6 @@ esac"#
     // One background wrapper took both turns.
     assert_eq!(backend.launched.lock().unwrap().len(), 1);
     assert_eq!(payloads(&detail, "wrapper_launched").len(), 1);
-    assert!(backend.texts().is_empty());
 }
 
 /// Acceptance: a review's revise goes to the same background session as its
@@ -188,7 +184,6 @@ esac"#
     assert!(calls[1].starts_with(&format!("resume {} ", run.id())));
     assert_eq!(reviewer.prompts().len(), 2);
     assert_eq!(backend.launched.lock().unwrap().len(), 1);
-    assert!(backend.texts().is_empty());
 }
 
 /// Acceptance: a run parked `needs_session` is resumed by a new background
@@ -483,9 +478,12 @@ fn a_wrapper_without_a_terminal_or_workspace_registers_once_its_start_is_recorde
 #[test]
 fn a_turn_left_by_a_killed_background_wrapper_is_stopped_and_a_resumed_wrapper_registers() {
     use dagq::{
-        application::recording::RecordingBackend,
-        domain::turn::{TurnRequest, request_path},
-        infrastructure::{adapters::Cmux, runtime_store::SqliteOpener},
+        application::{SessionWrappers, recording::RecordingSessions},
+        domain::{
+            background_wrapper::StopRoute,
+            turn::{TurnRequest, request_path},
+        },
+        infrastructure::{adapters::BackgroundSessions, runtime_store::SqliteOpener},
     };
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(
@@ -520,13 +518,13 @@ esac"#,
     first.0.kill().unwrap();
     exited(&mut first, "the killed wrapper to be reaped");
     assert!(SystemProcesses.alive(turn));
-    let cmux = Cmux {
-        executable: dir.path().join("no-cmux"),
-    };
     let lost_id = lost.to_string();
-    assert!(!cmux.exists(&lost_id).unwrap(), "the wrapper is gone");
-    let recording = RecordingBackend::over(
-        &cmux,
+    assert!(
+        !BackgroundSessions.exists(&lost_id).unwrap(),
+        "the wrapper is gone"
+    );
+    let recording = RecordingSessions::over(
+        &BackgroundSessions,
         Arc::new(SqliteOpener {
             db: db.clone(),
             generators: clock::system(),
@@ -537,7 +535,9 @@ esac"#,
     )
     .stopping_left_turns(Arc::new(SystemProcesses));
     assert!(recording.exists(&lost_id).unwrap(), "the turn it left runs");
-    recording.close(&lost_id).unwrap();
+    recording
+        .stop_background(&lost_id, StopRoute::Close)
+        .unwrap();
     assert!(!SystemProcesses.alive(turn) || zombie(turn));
     // The close names no route of its own; the wrapper was gone and the
     // turn it left was killed (task 1657).

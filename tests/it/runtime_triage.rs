@@ -420,7 +420,6 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
     }
     assert!(ask.is_open());
     // The supervisor notifies nobody: the inbox's watch tells of the ask.
-    assert!(backend.notifications.lock().unwrap().is_empty());
     // The run is no attention: its ask is.
     let status = runtime::status(&db).unwrap();
     assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
@@ -558,7 +557,6 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
     // The supervisor notifies nobody: the inbox's watch tells of the ask.
-    assert!(backend.notifications.lock().unwrap().is_empty());
     // The stop of the wrapper left running failed: recorded, the session
     // kept, the ask still made. The wrapper that ended with its agent was
     // not stopped (its process is gone, as production tells it).
@@ -1353,7 +1351,6 @@ fn an_adopted_run_whose_concern_was_asked_waits_for_the_ask() {
         let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
         assert_eq!(outcome["errors"], json!([]), "{outcome}");
         assert!(reviewer.prompts().is_empty());
-        assert!(backend.notifications.lock().unwrap().is_empty());
         let detail = queue.show(TaskId::new(1)).unwrap();
         assert_eq!(adoption_events(&detail).len(), 1);
         assert_eq!(payloads(&detail, "ask_opened").len(), 1);

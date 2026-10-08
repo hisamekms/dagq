@@ -374,10 +374,6 @@ fn a_concern_sent_back_is_resumed_reviewed_again_and_landed() {
         "{}",
         ask.question
     );
-    // The ask was opened through `runtime::ask`, which notifies nobody:
-    // the inbox's watch does (ADR-t1433-1 decision 2).
-    let notified = backend.notifications.lock().unwrap().clone();
-    assert!(notified.is_empty(), "{notified:?}");
 
     queue
         .answer(ask.id, "send_back:  keep the change to the named file ")
@@ -798,10 +794,6 @@ fn a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person() {
         format!("Review output: {run_dir}/review-2.out, {run_dir}/review-2.err"),
     ] {
         assert!(ask.question.contains(&part), "{part} in {}", ask.question);
-    }
-    {
-        let notifications = backend.notifications.lock().unwrap().clone();
-        assert!(notifications.is_empty(), "{notifications:?}");
     }
     // The ask is the attention, and the only event that wakes the inbox.
     let status = runtime::status(&db).unwrap();

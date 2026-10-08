@@ -95,7 +95,7 @@ supervisor
 | sessionの終わりとrunの状態 | `domain::run::session_end_status` |
 | 待ちの最中の開き直し | `src/application/supervise/reopen.rs` |
 | backgroundの起動・停止・生死 | `src/infrastructure/background.rs`の`BackgroundWrappers`、`src/domain/background_wrapper.rs`、`src/application/supervise/background.rs` |
-| 停止の記録・残ったturnの停止 | `application::recording`の`RecordingBackend::stop_background`・`stopping_left_turns` |
+| 停止の記録・残ったturnの停止 | `application::recording`の`RecordingSessions::stop_background`・`stopping_left_turns` |
 | logを読むCLI | `src/application/session_log.rs` |
 | wrapperの入口と登録 | `compose::wrapper_entry`、`application::session`の`register`・`WrapperStart` |
 | runtimeのplannerのturn | `src/application/supervise/planner_turns.rs`、`application::planner::launch_planner` |
@@ -241,7 +241,7 @@ inboxと、廃止の前に人が開いたplannerは対象外。
 - **設定**（ADR-t1433-3決定2）: `[headless] wrapper`は読んで検査するが、workerにもruntimeのplannerにも効かない。
   `"workspace"`ならsupervisorはprocessごとに1回だけ警告する（`warn_ignored_wrapper_setting`）。
   拒まないのは、本番のsupervisorと固定バイナリの入れ替えの順で`dagq.toml`が読めなくならないため。
-- **起動**: `ActorProgram::RunSession`のwrapperのcommandを`WorkspaceBackend::launch_background`に渡す（`background::wrapper_command`、logのpathは`Supervisor::session_log`）。
+- **起動**: `ActorProgram::RunSession`のwrapperのcommandを`SessionWrappers::launch_background`に渡す（`background::wrapper_command`、logのpathは`Supervisor::session_log`）。
   logはworkerが書けるrun dirの中なので、shellにpathを開かせず、supervisorが新しいinodeで作った記述子を渡す。
   起動の直後に起動時刻を読めなければ起動の失敗で、`backend_call_failed`に残る（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)決定9の読み替え）。
 - **handleと記録**: 識別は`BackgroundHandle`（pidと起動時刻）で、runはこれをworkspaceのIDの代わりに記録し、続けて`wrapper_launched`を記録する。
@@ -264,7 +264,7 @@ inboxと、廃止の前に人が開いたplannerは対象外。
   wrapperが先に死んで残したturnは子孫として見つからないので、最後の`turn_started`の記録から止める（`stopping_left_turns`）。
   そのturnが生きている間、sessionは開いているとみなされ、後始末と掃除が停止に進む。
   ADR-t813-1決定5の「最後のturnの終わりにworkspaceをcloseする」は、wrapperの終わりを確かめて残りを止めることと読む。
-- **停止の記録**: 止めるたびに、止めた経路（`StopRoute`）とsignalを`wrapper_stopped`に記録する（`RecordingBackend::stop_background`）。
+- **停止の記録**: 止めるたびに、止めた経路（`StopRoute`）とsignalを`wrapper_stopped`に記録する（`RecordingSessions::stop_background`）。
   SIGTERMで終わったかSIGKILLまで要ったかを[評価](../../plans/headless-background-evaluation.md)の「processの残り」が数えるため。
   runの無いwrapper（planner）の停止はqueueのeventになる。
   記録できなくても停止の結果は変えない。

@@ -221,20 +221,20 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 **hostの操作のport**
 
-`WorkspaceBackend`（`src/application/ports.rs`）が次の2つの責務を持つ。
+hostの操作は`src/application/ports.rs`の2つのtraitに分かれる。
 cmuxを使うのはinboxだけ（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
 
-- inboxのworkspace（cmux）の操作: workspaceを開く・閉じる・在るかを見る・画面を読む・文字とkeyを送る。
-  所有する呼び手はinboxと`up` / `down`（`application::lifecycle`）と、inboxの中の`watch --role inbox`の通知（`notify`）。
-  `resume_timeout`ほかの待ちの長さもこのtraitにある。
-  実装は`infrastructure::adapters::Cmux`がcmuxのCLIを呼ぶ。
-- 非対話のrunとruntimeのplannerのsession wrapperを、workspaceなしのbackgroundのprocessとして扱う操作: 起動（`launch_background`）・停止（`stop_background`、`WrapperStop`を返す）・生死確認（handleを渡した`exists`）。
-  所有する呼び手はsupervisor（`supervise::background`・`reopen`、起動は`actor_executor`経由）とruntimeのplanner（`application::planner`）で、`stats`は最後のhandleの生死を`ProcessControl`で読むだけ。
-  supervisorの実装`BackgroundSessions`は`BackgroundWrappers`に委ねcmuxは拒む。
-  停止の記録（`wrapper_stopped`）は`application::recording::RecordingBackend`が書く。
-- 落とし穴: backgroundのhandle（`BackgroundHandle`）はworkspaceのIDと同じ引数で渡り、画面とkeyの操作は拒まれ、色と印は何もしない。
+- `WorkspaceBackend`: inboxのworkspace（cmux）を開く・閉じる・在るかを見る・色と印・group・通知（`notify`）。
+  呼び手はinboxと`up` / `down`（`application::lifecycle`）と、inboxの中の`watch --role inbox`の通知。
+  古いbinaryがworkspaceで開いたsession wrapperとplannerのwrapperも、断られると自分の`CMUX_WORKSPACE_ID`のworkspaceを閉じる（`session::OwnWorkspace`、`compose::session`・`compose::planner_session`）。
+  この経路を消すのはfollow-upに任せている。
+  実装は`infrastructure::adapters::Cmux`がcmuxのCLIを呼び、失敗は`application::recording::RecordingBackend`が記録する。
+- `SessionWrappers`: runとruntimeのplannerのsession wrapperを、workspaceなしのbackgroundのprocessとして起動（`launch_background`）・停止（`stop_background`）・生死確認（handleを渡した`exists`）し、supervisorが待つ長さを持つ。
+  呼び手はsupervisor（`supervise::background`・`reopen`、起動は`actor_executor`経由）とruntimeのplanner（`application::planner`）。
+  `stats`は生死を`ProcessControl`で読む。
+  実装は`infrastructure::adapters::BackgroundSessions`が`BackgroundWrappers`に委ね、cmuxの操作を持たない。
+  失敗と停止（`wrapper_stopped`）は`application::recording::RecordingSessions`が記録する。
 - 決定は[ADR-t1404-1](../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)、停止の流れと記録は[非対話のworker](supervisor-lifecycle/headless-worker.md#workspaceなしのbackgroundのwrapper)の「停止の記録」。
-- portを2つに分けたら、この項を分けた後のtraitの名前と分け方に直す（C7）。
 
 **許す依存の向き**
 

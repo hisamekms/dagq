@@ -39,7 +39,7 @@ pub(super) struct ReopenWatch {
     /// When a workspace was opened whose wrapper has not registered yet.
     opened: Option<Instant>,
     /// When this process last made an attempt: the next one waits
-    /// [`WorkspaceBackend::reopen_interval`] after it.
+    /// [`SessionWrappers::reopen_interval`] after it.
     last_attempt: Option<Instant>,
     /// The exit code the lost wrapper recorded (`None` for one that died):
     /// the session ends with it once no attempt is left.
@@ -206,7 +206,7 @@ impl Supervisor<'_> {
                 now,
                 opened,
                 lost.is_some(),
-                self.cmux.registration_timeout(),
+                self.sessions.registration_timeout(),
             ) {
                 return Ok(Reopen::Waiting);
             }
@@ -256,7 +256,7 @@ impl Supervisor<'_> {
             return Ok(Reopen::GiveUp);
         }
         let reopen = self.reopens.entry(run.id().clone()).or_default();
-        if attempt_waits(now, reopen.last_attempt, self.cmux.reopen_interval()) {
+        if attempt_waits(now, reopen.last_attempt, self.sessions.reopen_interval()) {
             return Ok(Reopen::Waiting);
         }
         reopen.last_attempt = Some(now);
@@ -329,7 +329,7 @@ impl Supervisor<'_> {
         attempt: Option<usize>,
     ) -> bool {
         match self.run_session_open(workspace) {
-            Ok(true) => match stop_session(self.cmux, workspace, StopRoute::Reopen) {
+            Ok(true) => match stop_session(self.sessions, workspace, StopRoute::Reopen) {
                 Ok(()) => {
                     if let Err(error) = self.queue.record_workspace_closed(
                         run.id(),
@@ -431,7 +431,7 @@ impl Supervisor<'_> {
                 .session_reopened(run.id(), &self.token, &workspace, attempt_no, repaired)
         {
             // Unrecorded, nothing would find the wrapper to stop it.
-            return Err(match stop_session(self.cmux, &workspace, StopRoute::Reopen) {
+            return Err(match stop_session(self.sessions, &workspace, StopRoute::Reopen) {
                 Ok(()) => error.context(format!(
                     "the reopened background wrapper {workspace} of run {} could not be recorded and was stopped",
                     run.id()

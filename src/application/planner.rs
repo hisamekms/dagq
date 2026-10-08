@@ -32,8 +32,8 @@ use std::{
 use tracing::warn;
 
 use super::{
-    AgentProvider, AgentSignals, Clock, PlannerCommand, ProcessControl, Queue, RunFiles, Spawner,
-    WorkspaceBackend,
+    AgentProvider, AgentSignals, Clock, PlannerCommand, ProcessControl, Queue, RunFiles,
+    SessionWrappers, Spawner,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
@@ -76,13 +76,13 @@ pub fn planner_dir(planners_dir: &Path, id: PlannerId) -> PathBuf {
 
 /// What opening a planner of the runtime's works with: the queue, the
 /// backend that starts its wrapper in the background
-/// ([`WorkspaceBackend::launch_background`]; no workspace is opened), the
+/// ([`SessionWrappers::launch_background`]; no workspace is opened), the
 /// files, the queue's database and `planners/` directory, the checkout the
 /// planner works in, and what its wrapper runs (this binary, the agent's
 /// executable, the plugin directory it loads).
 pub struct PlannerLaunch<'a> {
     pub queue: &'a dyn Queue,
-    pub backend: &'a dyn WorkspaceBackend,
+    pub backend: &'a dyn SessionWrappers,
     pub files: &'a dyn RunFiles,
     pub db: &'a Path,
     pub planners_dir: &'a Path,
@@ -320,7 +320,7 @@ fn start_wrapper(
     argv.push(BACKGROUND_FLAG.into());
     let log = dir.join(PLANNER_SESSION_LOG);
     HostActorExecutor::new(launch.db)
-        .with_workspaces(launch.backend)
+        .with_sessions(launch.backend)
         .spawn(ActorExecutionSpec::new(
             ActorContext::instance(crate::domain::ActorRole::Planner, planner.id),
             WorkspaceAccess::Write(launch.repo_root.to_path_buf()),
@@ -592,12 +592,12 @@ pub struct PlannerView {
     pub bundle: Option<crate::domain::DraftBundleView>,
 }
 
-/// What judging a planner reads: the backend for its background wrapper's
-/// handle (no cmux workspace is looked up or read, ADR-t1433-2 decisions 3
+/// What judging a planner reads: the session wrappers for its background
+/// wrapper's handle (no cmux workspace is looked up or read, ADR-t1433-2 decisions 3
 /// and 5), the processes for its wrapper, the files for its idle marker,
 /// the agent's signals for the marker, and the clock.
 pub struct PlannerProbes<'a> {
-    pub cmux: &'a dyn WorkspaceBackend,
+    pub sessions: &'a dyn SessionWrappers,
     pub processes: &'a dyn ProcessControl,
     pub files: &'a dyn RunFiles,
     pub signals: &'a dyn AgentSignals,
@@ -631,7 +631,7 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
             probe.workspace_listed = if retired_workspace(&planner) {
                 false
             } else {
-                probes.cmux.exists(workspace)?
+                probes.sessions.exists(workspace)?
             };
         }
         probe.wrapper_alive = planner
@@ -765,7 +765,7 @@ pub fn planner_views(
 /// the IDs closed.
 pub fn close_abandoned_planners(
     queue: &dyn Queue,
-    cmux: &dyn WorkspaceBackend,
+    sessions: &dyn SessionWrappers,
     processes: &dyn ProcessControl,
     clock: &dyn Clock,
 ) -> Result<Vec<PlannerId>> {
@@ -781,7 +781,7 @@ pub fn close_abandoned_planners(
         let workspace = planner.workspace_id.as_deref().unwrap_or_default();
         let background = is_background(workspace);
         // One that cannot be judged now is not given up.
-        let workspace_listed = background && cmux.exists(workspace).unwrap_or(true);
+        let workspace_listed = background && sessions.exists(workspace).unwrap_or(true);
         let probe = PlannerProbe {
             now,
             workspace_listed,

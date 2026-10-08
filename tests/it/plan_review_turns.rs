@@ -46,8 +46,8 @@ fn a_runtime_planner_an_older_binary_opened_in_a_workspace_is_closed_without_cmu
     let reviewer = StubReviewer::new(&[json!({
         "verdict": "revise", "reasons": ["split it"], "summary": "too big"
     })]);
-    // cmux still lists the old workspace; the runtime does not ask.
-    let backend = PlanWorkspace::listing(&["OLD"]);
+    // The old workspace is not asked of the session wrappers.
+    let backend = PlanWorkspace::default();
     supervise(&fx, &backend, &reviewer);
     supervise(&fx, &backend, &reviewer);
     assert!(queue.planner(old.id).unwrap().closed_at.is_some());
@@ -61,9 +61,12 @@ fn a_runtime_planner_an_older_binary_opened_in_a_workspace_is_closed_without_cmu
     assert_eq!(closes.len(), 1, "{closes:?}");
     assert_eq!(closes[0]["code"], "runtime_session_gone");
     assert_eq!(closes[0]["workspace_closed"], false);
-    assert!(backend.texts().is_empty(), "nothing typed");
-    assert!(backend.exits.lock().unwrap().is_empty());
     assert!(backend.closed().is_empty(), "no workspace closed");
+    assert!(
+        !backend.asked.lock().unwrap().iter().any(|id| id == "OLD"),
+        "{:?}",
+        backend.asked.lock().unwrap()
+    );
     // The revise went to a new planner of the runtime's, headless.
     let open = queue.planners(false).unwrap();
     assert_eq!(open.len(), 1, "{open:?}");

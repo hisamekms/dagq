@@ -573,7 +573,6 @@ fn a_planner_question_about_a_request_reaches_its_planner_or_a_new_one_and_three
         requests[0]["prompt"],
         format!("answer to ask {}: plan", asked.id)
     );
-    assert!(backend.texts().is_empty(), "nothing typed");
     assert!(queue.asks(Default::default()).unwrap().is_empty());
 
     // A question about the request names nothing else.

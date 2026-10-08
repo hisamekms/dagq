@@ -985,7 +985,6 @@ esac"#
         "{exclude}"
     );
     assert!(read_prompt(run).contains(runtime::HEADLESS_WORKER));
-    assert!(backend.texts().is_empty());
     assert_eq!(codex_config(), config, "~/.codex/config.toml is unchanged");
 }
 

@@ -347,7 +347,7 @@ impl Supervisor<'_> {
         for workspace in left {
             if self.run_session_open(&workspace.workspace_id)? {
                 info!(run_id = %run.id(), "run {}: stopping the resume wrapper {} left by an earlier attempt; its session has ended", run.id(), workspace.workspace_id);
-                stop_session(self.cmux, &workspace.workspace_id, StopRoute::Resume)?;
+                stop_session(self.sessions, &workspace.workspace_id, StopRoute::Resume)?;
                 self.queue.record_workspace_closed(
                     run.id(),
                     &workspace.workspace_id,
@@ -434,7 +434,7 @@ impl Supervisor<'_> {
             EventKind::WorkspaceCreated,
             json!({"workspace_id": workspace, "resume_attempt": attempt}),
         ) {
-            return Err(match stop_session(self.cmux, &workspace, StopRoute::Resume) {
+            return Err(match stop_session(self.sessions, &workspace, StopRoute::Resume) {
                 Ok(()) => error.context(format!(
                     "the resume's background wrapper {workspace} of run {} could not be recorded and was stopped",
                     run.id()
@@ -646,7 +646,7 @@ impl Supervisor<'_> {
         let closed = verdict.closed
             || !verdict.exit_timed_out
                 && !reviewed
-                && match stop_run_session(self.cmux, workspace, StopRoute::Resume) {
+                && match stop_run_session(self.sessions, workspace, StopRoute::Resume) {
                     Ok(()) => true,
                     Err(error) => {
                         warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: the resume's wrapper {workspace} could not be stopped: {error:#}", slot.run.id());
@@ -1161,13 +1161,8 @@ impl ResumeWatch {
         )
     }
 
-    /// Send the resolution request once the agent's input box has shown
-    /// ready on every screen read for `resume_prompt_delay` (task 285): a
-    /// request typed while Claude Code boots is lost. A box not ready
-    /// within the registration timeout of the agent is recorded as
-    /// `input_not_ready` and raised to the inbox once; the request still
-    /// goes when it gets ready, and past the resume timeout the session is
-    /// asked to exit like one that did not finish.
+    /// Send the resolution request once the session registered: it is
+    /// written as the session's next turn, and no screen is read.
     fn send_when_ready(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
         self.send_request(sv, run)
     }
@@ -1212,7 +1207,7 @@ impl ResumeWatch {
     ) -> Result<Option<ResumeVerdict>> {
         let processes = sv.queue.processes(run.id())?;
         let Some(wrapper) = processes.iter().find(|p| p.role == "wrapper") else {
-            let timeout = sv.cmux.registration_timeout();
+            let timeout = sv.sessions.registration_timeout();
             ensure!(
                 registration_pending(sv.generators.clock.monotonic(), self.startup, timeout),
                 "resumed session's wrapper did not register within {} seconds",
@@ -1270,7 +1265,7 @@ impl ResumeWatch {
         }
         if let Some(requested) = self.exit_requested {
             let now = sv.generators.clock.monotonic();
-            if let ExitWait::Waiting = exit_wait(now, requested, sv.cmux.exit_timeout()) {
+            if let ExitWait::Waiting = exit_wait(now, requested, sv.sessions.exit_timeout()) {
                 return Ok(None);
             }
             return Ok(Some(ResumeVerdict {
@@ -1415,11 +1410,11 @@ impl ResumeWatch {
             // A request to rewrite a stale receipt gets its own timeout.
             let stale_waits = self
                 .stale
-                .is_some_and(|n| !n.settled && !n.waited_out(&*sv.files, sv.cmux));
+                .is_some_and(|n| !n.settled && !n.waited_out(&*sv.files, sv.sessions));
             resume_deadline(
                 sv.generators.clock.monotonic(),
                 sent,
-                sv.cmux.resume_timeout(),
+                sv.sessions.resume_timeout(),
                 stale_waits,
             )
         });

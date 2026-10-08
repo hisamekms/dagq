@@ -116,7 +116,6 @@ fn a_sure_ready_concern_is_applied_as_a_pass_with_its_actions_and_counted() {
     let asks = queue.asks(Default::default()).unwrap();
     assert_eq!(asks.len(), 2, "{asks:?}");
     // The supervisor notifies nobody: the inbox's watch tells of each ask.
-    assert!(backend.notifications().is_empty());
     let sent_back = asks.iter().find(|a| a.task_id == Some(limited)).unwrap();
     assert_eq!(sent_back.kind, AskKind::ApprovePlan);
     assert_eq!(sent_back.recommendation.as_deref(), Some("send_back"));

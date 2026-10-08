@@ -2,8 +2,9 @@ use crate::infrastructure::git_binary::git_executable;
 use crate::{
     application::{
         AgentProvider, CommandSpec, DetachedRefusal, FileStamp, LandingBranchStamp, MainRemote,
-        PlannerCommand, PluginState, ProcessControl, Repository, SupervisorEnvironment, TurnReader,
-        TurnTarget, WorkspaceBackend, WorkspaceTags, execution::permission_deny,
+        PlannerCommand, PluginState, ProcessControl, Repository, SessionWrappers,
+        SupervisorEnvironment, TurnReader, TurnTarget, WorkspaceBackend, WorkspaceTags,
+        execution::permission_deny,
     },
     domain::{
         ActorRole, CommitSha, TaskId, TaskRun,
@@ -43,7 +44,7 @@ pub use crate::application::{
     },
     path_text,
 };
-use crate::domain::background_wrapper::{BackgroundHandle, StopRoute, WrapperStop, is_background};
+use crate::domain::background_wrapper::{BackgroundHandle, StopRoute, WrapperStop};
 use crate::domain::review_subagents::{AgentTool, AgentTools};
 use crate::domain::turn::TurnSession;
 use crate::infrastructure::claude_turns::{ClaudeTurnReader, HEADLESS_PERMISSION_MODE};
@@ -2793,35 +2794,15 @@ fn expect_pong(reply: &str) -> Result<()> {
     Ok(())
 }
 
-/// The background wrappers of this host (ADR-t1404-1), which the cmux
-/// backend serves the calls on a [`BackgroundHandle`] with.
+/// The background wrappers of this host (ADR-t1404-1), which
+/// [`BackgroundSessions`] serves its calls with.
 fn background_wrappers() -> super::background::BackgroundWrappers<'static> {
     super::background::BackgroundWrappers {
         processes: &SystemProcesses,
     }
 }
 
-/// A background wrapper has no terminal: `what` cannot be sent to it nor
-/// read from it (its requests go to its `turns/`, ADR-t813-1).
-fn refuse_background(workspace_id: &str, what: &str) -> Result<()> {
-    ensure!(
-        !is_background(workspace_id),
-        "the background wrapper {workspace_id} has no terminal for {what}"
-    );
-    Ok(())
-}
-
 impl WorkspaceBackend for Cmux {
-    fn launch_background(
-        &self,
-        cwd: &Path,
-        command: &str,
-        env: &[(String, String)],
-        log: &Path,
-    ) -> Result<String> {
-        background_wrappers().launch(cwd, command, env, log)
-    }
-
     fn preflight(&self) -> Result<()> {
         expect_pong(&output(Command::new(&self.executable).arg("ping"))?)
     }
@@ -2839,7 +2820,6 @@ impl WorkspaceBackend for Cmux {
     /// had [`paste_settle`] to take the paste in (an Enter in the middle of
     /// a long paste is taken as part of it, task 285).
     fn send_text(&self, workspace_id: &str, text: &str) -> Result<()> {
-        refuse_background(workspace_id, "text")?;
         let line = single_line(text);
         output(Command::new(&self.executable).args([
             "send",
@@ -2857,7 +2837,6 @@ impl WorkspaceBackend for Cmux {
     }
 
     fn send_key(&self, workspace_id: &str, key: &str) -> Result<()> {
-        refuse_background(workspace_id, "keys")?;
         output(Command::new(&self.executable).args([
             "send-key",
             "--workspace",
@@ -2869,7 +2848,6 @@ impl WorkspaceBackend for Cmux {
     }
 
     fn capture(&self, workspace_id: &str) -> Result<String> {
-        refuse_background(workspace_id, "a screen")?;
         output(Command::new(&self.executable).args([
             "read-screen",
             "--workspace",
@@ -2885,9 +2863,6 @@ impl WorkspaceBackend for Cmux {
     /// workspace is already gone, say) does not stop the close, whose own
     /// error is the one reported.
     fn close(&self, workspace_id: &str) -> Result<()> {
-        if let Some(handle) = BackgroundHandle::parse(workspace_id) {
-            return background_wrappers().stop(&handle).map(drop);
-        }
         let _ = self.workspace_action(workspace_id, &["unpin"]);
         let raw = output(
             Command::new(&self.executable)
@@ -2898,25 +2873,11 @@ impl WorkspaceBackend for Cmux {
         Ok(())
     }
 
-    /// The route is the recording's, not read here.
-    fn stop_background(&self, handle: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
-        let parsed = BackgroundHandle::parse(handle)
-            .with_context(|| format!("{handle} is not a background wrapper's handle"))?;
-        background_wrappers().stop(&parsed).map(Some)
-    }
-
     fn set_color(&self, workspace_id: &str, color: &str) -> Result<()> {
-        // A background wrapper has no sidebar entry to color.
-        if is_background(workspace_id) {
-            return Ok(());
-        }
         self.workspace_action(workspace_id, &["set-color", "--color", color])
     }
 
     fn set_status(&self, workspace_id: &str, key: &str, value: &str, icon: &str) -> Result<()> {
-        if is_background(workspace_id) {
-            return Ok(());
-        }
         output(Command::new(&self.executable).args([
             "set-status",
             key,
@@ -2930,15 +2891,11 @@ impl WorkspaceBackend for Cmux {
     }
 
     fn pin(&self, workspace_id: &str) -> Result<()> {
-        if is_background(workspace_id) {
-            return Ok(());
-        }
         self.workspace_action(workspace_id, &["pin"])
     }
 
     /// Type `/exit` at Claude's prompt exactly as a person would.
     fn send_exit(&self, workspace_id: &str) -> Result<()> {
-        refuse_background(workspace_id, "/exit")?;
         output(Command::new(&self.executable).args([
             "send",
             "--workspace",
@@ -2951,9 +2908,6 @@ impl WorkspaceBackend for Cmux {
     }
 
     fn exists(&self, workspace_id: &str) -> Result<bool> {
-        if let Some(handle) = BackgroundHandle::parse(workspace_id) {
-            return Ok(background_wrappers().alive(&handle));
-        }
         Ok(workspace_listed(&self.workspace_listing()?, workspace_id))
     }
 
@@ -3003,22 +2957,15 @@ impl WorkspaceBackend for Cmux {
     }
 }
 
-/// The sessions backend of the supervisor, the queue service and the
-/// reads that judge a session (`planners`, `stats`): this host's background
-/// wrappers (ADR-t1404-1), and no cmux (ADR-t1433-1 decision 1). Every call
-/// on a [`BackgroundHandle`] is served as [`Cmux`] serves it; a cmux
-/// workspace (one an older binary opened) is not looked up (`exists` says
-/// it is not open) nor closed, and every other cmux call is refused without
-/// running anything. Only `up` / `down` and the inbox's session use
-/// [`Cmux`].
+/// The session wrappers of the supervisor, the runtime's planners and the
+/// reads that judge a planner (`planners`, `planner request`): this host's
+/// background wrappers (ADR-t1404-1), and no cmux (ADR-t1433-1 decision 1).
+/// A session ID that is not a [`BackgroundHandle`] (a workspace an older
+/// binary opened) is not open and cannot be stopped. Only `up` / `down` and
+/// the inbox's session use [`Cmux`].
 pub struct BackgroundSessions;
 
-/// The refusal of a call that only cmux could make.
-fn no_cmux(what: &str) -> anyhow::Error {
-    anyhow::anyhow!("{what} needs cmux, which only the inbox uses (ADR-t1433-1)")
-}
-
-impl WorkspaceBackend for BackgroundSessions {
+impl SessionWrappers for BackgroundSessions {
     fn launch_background(
         &self,
         cwd: &Path,
@@ -3029,94 +2976,19 @@ impl WorkspaceBackend for BackgroundSessions {
         background_wrappers().launch(cwd, command, env, log)
     }
 
-    /// Nothing to ping: no cmux is called.
-    fn preflight(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
-        Err(no_cmux("a detached ping"))
-    }
-
-    fn call_timeout(&self) -> Duration {
-        OUTPUT_TIMEOUT
-    }
-
-    fn send_text(&self, workspace_id: &str, _: &str) -> Result<()> {
-        refuse_background(workspace_id, "text")?;
-        Err(no_cmux("typing into a workspace"))
-    }
-
-    fn send_enter(&self, workspace_id: &str) -> Result<()> {
-        refuse_background(workspace_id, "keys")?;
-        Err(no_cmux("a key"))
-    }
-
-    fn capture(&self, workspace_id: &str) -> Result<String> {
-        refuse_background(workspace_id, "a screen")?;
-        Err(no_cmux("reading a screen"))
-    }
-
-    fn close(&self, workspace_id: &str) -> Result<()> {
-        match BackgroundHandle::parse(workspace_id) {
-            Some(handle) => background_wrappers().stop(&handle).map(drop),
-            None => Err(no_cmux("closing a workspace")),
-        }
-    }
-
     fn stop_background(&self, handle: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
         let parsed = BackgroundHandle::parse(handle)
             .with_context(|| format!("{handle} is not a background wrapper's handle"))?;
         background_wrappers().stop(&parsed).map(Some)
     }
 
-    fn set_color(&self, workspace_id: &str, _: &str) -> Result<()> {
-        if is_background(workspace_id) {
-            return Ok(());
-        }
-        Err(no_cmux("a workspace's color"))
-    }
-
-    fn set_status(&self, workspace_id: &str, _: &str, _: &str, _: &str) -> Result<()> {
-        if is_background(workspace_id) {
-            return Ok(());
-        }
-        Err(no_cmux("a workspace's status pill"))
-    }
-
-    fn pin(&self, workspace_id: &str) -> Result<()> {
-        if is_background(workspace_id) {
-            return Ok(());
-        }
-        Err(no_cmux("pinning a workspace"))
-    }
-
-    fn send_exit(&self, workspace_id: &str) -> Result<()> {
-        refuse_background(workspace_id, "/exit")?;
-        Err(no_cmux("typing /exit"))
-    }
-
-    /// A background wrapper by its process; a cmux workspace is not looked
-    /// up and counts as not open.
-    fn exists(&self, workspace_id: &str) -> Result<bool> {
-        Ok(BackgroundHandle::parse(workspace_id)
+    fn exists(&self, handle: &str) -> Result<bool> {
+        Ok(BackgroundHandle::parse(handle)
             .is_some_and(|handle| background_wrappers().alive(&handle)))
     }
 
-    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        Err(no_cmux("listing the workspaces"))
-    }
-
-    fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
-        Err(no_cmux("opening a workspace"))
-    }
-
-    fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
-        Err(no_cmux("a workspace group"))
-    }
-
-    fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
-        Err(no_cmux("a notification"))
+    fn call_timeout(&self) -> Duration {
+        OUTPUT_TIMEOUT
     }
 }
 

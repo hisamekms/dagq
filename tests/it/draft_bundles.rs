@@ -444,7 +444,6 @@ fn a_question_about_any_draft_of_the_bundle_goes_to_its_planner() {
         requests[0]["prompt"],
         format!("answer to ask {}: keep_draft", asked.id)
     );
-    assert!(backend.texts().is_empty(), "nothing typed");
     assert_eq!(
         events(&mut queue, a[1], "planner_answer_claimed")[0]["planner_id"],
         planner.id.as_i64()

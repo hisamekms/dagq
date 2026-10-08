@@ -232,9 +232,6 @@ fn millis(time: SystemTime) -> i64 {
         })
 }
 
-/// The unfinished `run` with the write times of its idle marker, receipt
-/// and prompt-submit marker. A file that is not there, or a run without a
-/// directory, has none.
 /// Whether the wrapper of the session the run `run` opened last runs, when
 /// that session is a background wrapper's (ADR-t1404-1): its handle's pid
 /// shows the start the handle recorded, so a pid another process took is
@@ -254,6 +251,9 @@ fn background_alive(
     Some(handle.is(handle.pid, processes.start_identity(handle.pid).as_deref()))
 }
 
+/// The unfinished `run` with the write times of its idle marker, receipt
+/// and prompt-submit marker. A file that is not there, or a run without a
+/// directory, has none.
 fn live_run(run: &TaskRun, sources: &StatsSources<'_>) -> Result<LiveRun> {
     let modified = |path: &Path| {
         sources

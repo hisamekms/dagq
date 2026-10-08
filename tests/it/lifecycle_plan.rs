@@ -1,5 +1,6 @@
-//! The planners against fakes for cmux: the prompt of the inbox, the
-//! workspaces the runtime's planners open and record, the planner the
+//! The planners against fakes of the session wrappers (and of cmux only for
+//! `up` and a wrapper's own workspace): the prompt of the inbox, the
+//! sessions the runtime's planners open and record, the planner the
 //! runtime opens for a proposal, how a planner session is judged, and the
 //! sweeps of planners that ended (a person's planner opened before
 //! `dagq plan` was abolished included, ADR-t1394-1).
@@ -11,10 +12,14 @@ use common::lifecycle::*;
 use anyhow::{Result, bail};
 use dagq::{
     application::{
-        TaskStore, WorkspaceBackend, WorkspaceTags,
+        SessionWrappers, TaskStore, WorkspaceBackend, WorkspaceTags,
         planner::{self, OpenedPlanner, PlannerLaunch},
     },
-    domain::{NewTask, PlannerId, PlannerOrigin, SessionRole, TaskRun, actor_model::ModelRole},
+    domain::{
+        NewTask, PlannerId, PlannerOrigin, SessionRole, TaskRun,
+        actor_model::ModelRole,
+        background_wrapper::{StopRoute, WrapperStop},
+    },
     infrastructure::{
         adapters::{GitRepository, SystemProcesses, shell_quote},
         clock::SystemClock,
@@ -94,13 +99,8 @@ fn runner(fixture: &Fixture) -> PathBuf {
 /// (ADR-t1394-1), or one of the runtime's opened before the interactive
 /// route was retired (ADR-t1433-2). The runtime opens none any more, but
 /// still sweeps and closes such rows.
-fn workspace_planner(
-    fixture: &Fixture,
-    cmux: &FakeCmux,
-    origin: PlannerOrigin,
-) -> Result<OpenedPlanner> {
+fn workspace_planner(fixture: &Fixture, origin: PlannerOrigin) -> Result<OpenedPlanner> {
     let queue = SqliteQueue::open(&fixture.location.db)?;
-    let root = GitRepository::inspect(&fixture.repo)?.root;
     let planner = queue.open_planner(origin, None)?;
     let dir = planners_dir(fixture).join(planner.id.to_string());
     fs::create_dir_all(&dir)?;
@@ -109,12 +109,7 @@ fn workspace_planner(
         "You are a planner of the queue these tests open.\n",
     )?;
     fs::copy(runner(fixture), dir.join("runner"))?;
-    let workspace = cmux.create_named(
-        &format!("[my repo]planner#{}", planner.id),
-        &root,
-        "planner-session",
-        &WorkspaceTags::default(),
-    )?;
+    let workspace = format!("01234567-89ab-4def-8123-{:012x}", planner.id.as_i64());
     queue.planner_workspace_created(planner.id, &workspace)?;
     Ok(OpenedPlanner {
         planner: queue.planner(planner.id)?,
@@ -131,13 +126,15 @@ fn workspace_planner(
 type Launch = (PathBuf, String, Vec<(String, String)>, PathBuf);
 
 /// Starts a planner's session wrapper in the background the way the
-/// runtime does, and records each start: it opens no workspace, reads no
-/// screen and types nothing (ADR-t1433-2 decision 3), so every other call
-/// is refused. `exists` says whether a wrapper it started was not stopped.
+/// runtime does, and records each start, stop and liveness question: the
+/// session wrappers of a planner, with no cmux (ADR-t1433-2 decision 3).
+/// `exists` says whether a wrapper it started was not stopped.
 #[derive(Default)]
 struct Background {
     launched: Mutex<Vec<Launch>>,
     stopped: Mutex<Vec<String>>,
+    /// The handles `exists` was asked about, in order.
+    asked: Mutex<Vec<String>>,
     /// Starting a wrapper fails.
     fails: bool,
 }
@@ -148,55 +145,7 @@ impl Background {
     }
 }
 
-impl WorkspaceBackend for Background {
-    fn preflight(&self) -> Result<()> {
-        Ok(())
-    }
-    fn preflight_detached(&self, _: &dagq::application::SupervisorEnvironment) -> Result<()> {
-        Ok(())
-    }
-    fn send_text(&self, _: &str, _: &str) -> Result<()> {
-        bail!("a planner is not typed into")
-    }
-    fn send_enter(&self, _: &str) -> Result<()> {
-        bail!("a planner is not typed into")
-    }
-    fn capture(&self, _: &str) -> Result<String> {
-        bail!("a planner has no screen")
-    }
-    fn close(&self, workspace_id: &str) -> Result<()> {
-        self.stopped.lock().unwrap().push(workspace_id.to_owned());
-        Ok(())
-    }
-    fn set_color(&self, _: &str, _: &str) -> Result<()> {
-        bail!("a planner has no workspace")
-    }
-    fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-        bail!("a planner has no workspace")
-    }
-    fn pin(&self, _: &str) -> Result<()> {
-        bail!("a planner has no workspace")
-    }
-    fn send_exit(&self, _: &str) -> Result<()> {
-        bail!("a planner is not typed into")
-    }
-    fn exists(&self, workspace_id: &str) -> Result<bool> {
-        let started = (0..self.launched.lock().unwrap().len())
-            .any(|index| Self::handle(index) == workspace_id);
-        Ok(started
-            && !self
-                .stopped
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|id| id == workspace_id))
-    }
-    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        bail!("a planner has no workspace to list")
-    }
-    fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
-        bail!("a planner opens no workspace")
-    }
+impl SessionWrappers for Background {
     fn launch_background(
         &self,
         cwd: &Path,
@@ -212,11 +161,15 @@ impl WorkspaceBackend for Background {
         launched.push((cwd.into(), command.into(), env.to_vec(), log.into()));
         Ok(handle)
     }
-    fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
-        bail!("a planner has no workspace group")
+    fn stop_background(&self, handle: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
+        self.stopped.lock().unwrap().push(handle.to_owned());
+        Ok(None)
     }
-    fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
-        bail!("not used")
+    fn exists(&self, handle: &str) -> Result<bool> {
+        self.asked.lock().unwrap().push(handle.to_owned());
+        let started =
+            (0..self.launched.lock().unwrap().len()).any(|index| Self::handle(index) == handle);
+        Ok(started && !self.stopped.lock().unwrap().iter().any(|id| id == handle))
     }
 }
 
@@ -307,9 +260,10 @@ fn proposal(
 /// ([`planner::close_abandoned_planners`],
 /// [`planner::remove_unused_planner_runners`]), on the real processes: the
 /// IDs whose record it closed, or the first error.
-fn sweep(fixture: &Fixture, cmux: &dyn WorkspaceBackend) -> Result<Vec<PlannerId>> {
+fn sweep(fixture: &Fixture, sessions: &dyn SessionWrappers) -> Result<Vec<PlannerId>> {
     let queue = SqliteQueue::open(&fixture.location.db)?;
-    let closed = planner::close_abandoned_planners(&queue, cmux, &SystemProcesses, &SystemClock);
+    let closed =
+        planner::close_abandoned_planners(&queue, sessions, &SystemProcesses, &SystemClock);
     planner::remove_unused_planner_runners(
         &queue,
         &SystemProcesses,
@@ -639,8 +593,8 @@ fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without
     use dagq::application::planner::{PlannerProbes, planner_views};
     use dagq::domain::PlannerState;
     let fixture = fixture();
-    let cmux = FakeCmux::default();
-    let opened = workspace_planner(&fixture, &cmux, PlannerOrigin::Person).unwrap();
+    let sessions = Background::default();
+    let opened = workspace_planner(&fixture, PlannerOrigin::Person).unwrap();
     let id = opened.planner.id;
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let processes = FakeProcesses::default();
@@ -649,7 +603,7 @@ fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without
     };
     let planners = planners_dir(&fixture);
     let probes = PlannerProbes {
-        cmux: &cmux,
+        sessions: &sessions,
         processes: &processes,
         files: &LocalRunFiles,
         signals: &signals,
@@ -696,7 +650,7 @@ fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without
     assert!(!planners.join("1/runner").exists());
     assert!(planners.join("1/prompt.txt").is_file());
     // An agent that cannot start is recorded as an exit of 127.
-    let third_id = workspace_planner(&fixture, &cmux, PlannerOrigin::Person)
+    let third_id = workspace_planner(&fixture, PlannerOrigin::Person)
         .unwrap()
         .planner
         .id;
@@ -723,8 +677,8 @@ fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without
         .is_err()
     );
 
-    // A live, idle one in a workspace cmux lists reads `closed` too.
-    let second = workspace_planner(&fixture, &cmux, PlannerOrigin::Person).unwrap();
+    // A live, idle one in a workspace reads `closed` too.
+    let second = workspace_planner(&fixture, PlannerOrigin::Person).unwrap();
     let second_id = second.planner.id;
     queue.register_planner_wrapper(second_id, 4242).unwrap();
     queue.register_planner_agent(second_id, 4242, 4242).unwrap();
@@ -740,7 +694,7 @@ fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without
     assert_eq!(state(true).len(), 3);
 
     // `planners` reads the same through the real processes.
-    let listed = dagq::lifecycle::planners(&fixture.location.db, &cmux, true).unwrap();
+    let listed = dagq::lifecycle::planners(&fixture.location.db, &sessions, true).unwrap();
     let states: Vec<&str> = listed["planners"]
         .as_array()
         .unwrap()
@@ -753,11 +707,10 @@ fn a_persons_planners_wrapper_records_its_agent_and_its_row_reads_closed_without
         listed["planners"][0]["workspace_id"],
         json!(opened.planner.workspace_id)
     );
-    // Judging them called cmux for nothing: only the creates of the three
-    // workspaces this test made did.
-    assert_eq!(cmux.workspaces.lock().unwrap().len(), 3);
-    assert_eq!(cmux.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
-    assert!(cmux.closed.lock().unwrap().is_empty());
+    // Judging them asked nothing of the session wrappers: a row in a
+    // workspace is not a wrapper's.
+    assert!(sessions.asked.lock().unwrap().is_empty());
+    assert!(sessions.stopped.lock().unwrap().is_empty());
 }
 
 /// A pid no process has: a child that exited and was reaped.
@@ -771,22 +724,22 @@ fn dead_pid() -> u32 {
 /// Goal 54 (1): the sweep closes the record of a planner of the runtime's
 /// an older binary opened in a cmux workspace whose wrapper is dead or
 /// exited, so `planners` stops showing it. Its workspace is not looked up
-/// in cmux (ADR-t1433-2 decisions 3 and 5): one cmux still lists counts as
-/// gone, and a listing cmux would fail to give does not matter. A wrapper
+/// in cmux nor asked of the session wrappers (ADR-t1433-2 decisions 3 and
+/// 5): such a row counts as gone. A wrapper
 /// still alive, or one not registered within its startup time yet, keeps
 /// its row; a person's planner's row is left to `close_person_planners`.
 #[test]
 fn the_records_of_planners_whose_wrapper_is_gone_are_closed_without_listing_cmux() {
     let fixture = fixture();
-    let cmux = FakeCmux::default();
+    let sessions = Background::default();
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let open = |origin: PlannerOrigin| {
-        let opened = workspace_planner(&fixture, &cmux, origin).unwrap();
+        let opened = workspace_planner(&fixture, origin).unwrap();
         (opened.planner.id, opened.planner.workspace_id.unwrap())
     };
-    let (dead, dead_ws) = open(PlannerOrigin::Runtime);
-    let (exited, exited_ws) = open(PlannerOrigin::Runtime);
-    let (alive, alive_ws) = open(PlannerOrigin::Runtime);
+    let (dead, _) = open(PlannerOrigin::Runtime);
+    let (exited, _) = open(PlannerOrigin::Runtime);
+    let (alive, _) = open(PlannerOrigin::Runtime);
     let (listed, _) = open(PlannerOrigin::Runtime);
     let (person, _) = open(PlannerOrigin::Person);
     queue.register_planner_wrapper(person, dead_pid()).unwrap();
@@ -805,9 +758,6 @@ fn the_records_of_planners_whose_wrapper_is_gone_are_closed_without_listing_cmux
         .register_planner_agent(alive, std::process::id(), std::process::id())
         .unwrap();
     queue.register_planner_wrapper(listed, dead_pid()).unwrap();
-    for workspace in [&dead_ws, &exited_ws, &alive_ws] {
-        cmux.close(workspace).unwrap();
-    }
     let open_ids = || -> Vec<PlannerId> {
         queue
             .planners(false)
@@ -818,15 +768,11 @@ fn the_records_of_planners_whose_wrapper_is_gone_are_closed_without_listing_cmux
     };
 
     let (fresh, _) = open(PlannerOrigin::Runtime);
-    // A cmux whose listing fails is not asked.
-    let failing = FakeCmux {
-        list_fails: true,
-        ..FakeCmux::default()
-    };
-    assert_eq!(sweep(&fixture, &failing).unwrap(), [dead, exited, listed]);
-    assert_eq!(failing.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // A row in a workspace is not asked of the session wrappers.
+    assert_eq!(sweep(&fixture, &sessions).unwrap(), [dead, exited, listed]);
+    assert!(sessions.asked.lock().unwrap().is_empty());
     assert_eq!(open_ids(), [alive, person, fresh]);
-    assert!(sweep(&fixture, &cmux).unwrap().is_empty());
+    assert!(sweep(&fixture, &sessions).unwrap().is_empty());
     for id in [dead, exited, listed] {
         let planner = queue.planner(id).unwrap();
         assert!(planner.closed_at.is_some());
@@ -854,13 +800,13 @@ fn the_records_of_planners_whose_wrapper_is_gone_are_closed_without_listing_cmux
             "abandoned".to_owned()
         ))
     );
-    let shown: Vec<i64> =
-        dagq::lifecycle::planners(&fixture.location.db, &cmux, false).unwrap()["planners"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|planner| planner["id"].as_i64().unwrap())
-            .collect();
+    let shown: Vec<i64> = dagq::lifecycle::planners(&fixture.location.db, &sessions, false)
+        .unwrap()["planners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|planner| planner["id"].as_i64().unwrap())
+        .collect();
     assert_eq!(shown, [alive, person, fresh].map(PlannerId::as_i64));
     // Task 696: the runners of the planners whose wrapper is done went,
     // their row closed or not; a live wrapper's, and one not registered
@@ -918,7 +864,7 @@ fn a_new_planner_does_not_take_the_idle_marker_an_old_database_left() {
         executable: "claude".into(),
     };
     let probes = PlannerProbes {
-        cmux: &backend,
+        sessions: &backend,
         processes: &processes,
         files: &LocalRunFiles,
         signals: &signals,
@@ -987,9 +933,10 @@ fn a_wrapper_refused_in_a_workspace_nothing_records_closes_it() {
     // A second wrapper in the workspace its planner records is refused and
     // leaves the workspace to the planner.
     let open = FakeCmux::default();
-    let opened = workspace_planner(&fixture, &open, PlannerOrigin::Person).unwrap();
+    let opened = workspace_planner(&fixture, PlannerOrigin::Person).unwrap();
     let id = opened.planner.id;
     let workspace = opened.planner.workspace_id.unwrap();
+    open.open(&format!("[my repo]planner#{id}"), &fixture.repo, &workspace);
     queue.register_planner_wrapper(id, 4242).unwrap();
     queue.register_planner_agent(id, 4242, 4242).unwrap();
     let error = dagq::compose::planner_session_with_provider(
@@ -1021,10 +968,9 @@ fn a_wrapper_refused_in_a_workspace_nothing_records_closes_it() {
 #[test]
 fn every_open_row_of_a_persons_planner_is_closed_without_cmux() {
     let fixture = fixture();
-    let cmux = FakeCmux::default();
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let open = |origin: PlannerOrigin| {
-        let opened = workspace_planner(&fixture, &cmux, origin).unwrap();
+        let opened = workspace_planner(&fixture, origin).unwrap();
         (opened.planner.id, opened.planner.workspace_id.unwrap())
     };
     let (exited, exited_ws) = open(PlannerOrigin::Person);
@@ -1039,8 +985,6 @@ fn every_open_row_of_a_persons_planner_is_closed_without_cmux() {
     }
     queue.register_planner_wrapper(lost, dead_pid()).unwrap();
     queue.planner_exited(exited, me, 2).unwrap();
-    // The creates of the five workspaces are all cmux was asked for.
-    let made = cmux.calls.load(std::sync::atomic::Ordering::SeqCst);
     let open_ids = || -> Vec<PlannerId> {
         queue
             .planners(false)
@@ -1053,8 +997,6 @@ fn every_open_row_of_a_persons_planner_is_closed_without_cmux() {
     let closed = planner::close_person_planners(&queue).unwrap();
     assert_eq!(closed, [exited, lost, alive, unregistered]);
     assert_eq!(open_ids(), [runtime]);
-    assert_eq!(cmux.calls.load(std::sync::atomic::Ordering::SeqCst), made);
-    assert!(cmux.closed.lock().unwrap().is_empty());
     let mut closes: Vec<Value> = queue
         .latest_events_of("planner_closed", 10)
         .unwrap()

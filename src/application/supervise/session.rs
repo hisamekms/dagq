@@ -49,7 +49,7 @@ impl Supervisor<'_> {
     }
     /// The executor every AI actor the supervisor starts goes through: its
     /// session wrappers, the runs' and the planners', in the background
-    /// through the workspace backend, its agents through the review provider and
+    /// through [`SessionWrappers`](crate::application::SessionWrappers), its agents through the review provider and
     /// the spawner, on the queue's environment.
     pub(super) fn actors(&self) -> HostActorExecutor<'_> {
         self.actors_on(self.reviewer)
@@ -59,7 +59,7 @@ impl Supervisor<'_> {
     pub(super) fn actors_on<'s>(&'s self, agent: &'s dyn AgentProvider) -> HostActorExecutor<'s> {
         HostActorExecutor::new(&self.layout.db)
             .with_no_claude(self.no_claude)
-            .with_workspaces(self.cmux)
+            .with_sessions(self.sessions)
             .with_provider(agent)
             .with_spawner(self.spawner)
             .with_queue_service(self.service_access)
@@ -250,7 +250,7 @@ impl Supervisor<'_> {
         if let Err(error) = self.queue.workspace_created(run.id(), &self.token, &handle) {
             // Unrecorded, the wrapper would run on with nothing to find it
             // by, and its registration is refused (task 806).
-            return Err(match stop_session(self.cmux, &handle, StopRoute::Unrecorded) {
+            return Err(match stop_session(self.sessions, &handle, StopRoute::Unrecorded) {
                 Ok(()) => error.context(format!(
                     "the background wrapper {handle} of run {} could not be recorded and was stopped",
                     run.id()
@@ -458,7 +458,7 @@ impl SessionWatch {
         let waited_out = waited_out_after_receipt(
             sv.generators.clock.monotonic(),
             self.receipt_seen_at,
-            sv.cmux.resume_timeout(),
+            sv.sessions.resume_timeout(),
         );
         if self.receipt_seen
             && self.exit_requested.is_none()
@@ -470,7 +470,7 @@ impl SessionWatch {
                 // like background work after the receipt.
                 Some(idle)
                     if self.stale.is_some_and(|n| {
-                        !n.answered_by(idle.modified()) && !n.waited_out(&*sv.files, sv.cmux)
+                        !n.answered_by(idle.modified()) && !n.waited_out(&*sv.files, sv.sessions)
                     }) =>
                 {
                     None
@@ -538,7 +538,7 @@ impl SessionWatch {
                 WrapperPulse::Silent if self.exit_requested.is_none() => {
                     // The same single /exit a finished session gets,
                     // recorded before it is sent.
-                    let timeout = sv.cmux.exit_timeout();
+                    let timeout = sv.sessions.exit_timeout();
                     sv.queue.record_runtime_event(
                         run.id(),
                         EventKind::ExitRequested,
@@ -592,7 +592,7 @@ impl SessionWatch {
                 }
             }
         } else {
-            let timeout = sv.cmux.registration_timeout();
+            let timeout = sv.sessions.registration_timeout();
             ensure!(
                 registration_pending(sv.generators.clock.monotonic(), self.startup, timeout),
                 "wrapper did not register within {} seconds",

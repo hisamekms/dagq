@@ -13,7 +13,6 @@ use crate::runtime_support::*;
 
 use dagq::domain::{AskKind, DraftOrigin, NewAsk, PlannerId, PlannerOrigin};
 use serde_json::{Value, json};
-use std::sync::atomic::Ordering;
 
 /// Supervisor options for one pass with no sweep in it, so only the pass
 /// closes a planner.
@@ -100,20 +99,16 @@ fn the_supervisor_closes_every_open_row_of_a_persons_planner_without_cmux() {
     assert_eq!(recorded[2]["exit_code"], 0);
     // No cmux for them: nothing closed, listed, looked up, read or typed.
     assert!(backend.closed().is_empty(), "{:?}", backend.closed());
-    assert_eq!(backend.listings.load(Ordering::SeqCst), 0);
     let asked = backend.asked.lock().unwrap().clone();
     assert!(
         !asked.iter().any(|session| session.starts_with("W-")),
         "{asked:?}"
     );
-    assert_eq!(backend.captures.load(Ordering::SeqCst), 0);
-    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
 
     // Once closed it is not closed again.
     supervise_with(&db, &repo, &backend, &options()).unwrap();
     assert_eq!(closes().len(), 4);
     assert!(backend.closed().is_empty());
-    assert_eq!(backend.listings.load(Ordering::SeqCst), 0);
 
     // `events --kind` reads them.
     let read = common::cli::ok(&db, &["events", "--full", "--kind", "planner_closed"]);
@@ -164,9 +159,8 @@ fn a_planner_question_answer_of_a_persons_planner_is_carried_by_a_new_planner() 
         .ask;
     queue.answer(asked.id, "adopt").unwrap();
     let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
-    let backend = PlanWorkspace::listing(&["PW"]);
+    let backend = PlanWorkspace::default();
     crate::plan_review::supervise(&fx, &backend, &reviewer);
-    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert!(backend.closed().is_empty(), "{:?}", backend.closed());
     let closes = queue.latest_events_of("planner_closed", 10).unwrap();
     assert_eq!(closes.len(), 1, "{closes:?}");

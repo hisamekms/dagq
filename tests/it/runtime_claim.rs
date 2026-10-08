@@ -135,77 +135,45 @@ fn a_failed_workspace_close_is_recorded_before_the_cleanup_failure_with_its_code
     assert!(failures[0].id < cleanup.id);
 }
 
-/// A cmux whose first `capture_timeouts` screen reads and every `exists`
-/// time out, as cmux does under load; nothing else is called.
-struct TimingOutCmux {
-    capture_timeouts: AtomicUsize,
+/// Session wrappers whose first `exists_timeouts` liveness questions time
+/// out, as asking about a process can under load; nothing else is called.
+struct TimingOutSessions {
+    exists_timeouts: AtomicUsize,
 }
 
-impl WorkspaceBackend for TimingOutCmux {
-    fn preflight(&self) -> Result<()> {
+impl SessionWrappers for TimingOutSessions {
+    fn launch_background(
+        &self,
+        _: &Path,
+        _: &str,
+        _: &[(String, String)],
+        _: &Path,
+    ) -> Result<String> {
         unimplemented!()
     }
-    fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
+    fn stop_background(&self, _: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
         unimplemented!()
     }
-    fn send_text(&self, _: &str, _: &str) -> Result<()> {
-        unimplemented!()
-    }
-    fn send_enter(&self, _: &str) -> Result<()> {
-        unimplemented!()
-    }
-    fn capture(&self, _: &str) -> Result<String> {
-        let left = &self.capture_timeouts;
+    fn exists(&self, _: &str) -> Result<bool> {
+        let left = &self.exists_timeouts;
         if left
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
-            bail!("cmux read-screen failed: Command timed out");
+            bail!("background wrapper check failed: Command timed out");
         }
-        Ok("ready".into())
-    }
-    fn close(&self, _: &str) -> Result<()> {
-        unimplemented!()
-    }
-    fn set_color(&self, _: &str, _: &str) -> Result<()> {
-        unimplemented!()
-    }
-    fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-        unimplemented!()
-    }
-    fn pin(&self, _: &str) -> Result<()> {
-        unimplemented!()
-    }
-    fn send_exit(&self, _: &str) -> Result<()> {
-        unimplemented!()
-    }
-    fn exists(&self, _: &str) -> Result<bool> {
-        bail!("cmux list-workspaces failed: Command timed out")
-    }
-    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        unimplemented!()
-    }
-    fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
-        unimplemented!()
-    }
-    fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
-        unimplemented!()
-    }
-    fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
-        unimplemented!()
+        Ok(true)
     }
     fn retry_backoff(&self) -> Duration {
         Duration::from_millis(10)
     }
 }
 
-/// A timed-out effect-free call (`capture`, `exists`) is made again after
-/// a backoff doubled each time, and every failed attempt is recorded as
-/// `backend_call_failed` on the run whose workspace it was for, with its
-/// number of the backend's attempts and the backoff that followed it (none
-/// after the last) — moved from the interactive
-/// `failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats`
-/// that task 1437 deleted.
+/// A timed-out `exists`, a call that leaves nothing behind, is made again
+/// after a backoff doubled each time, and every failed attempt is recorded
+/// as `backend_call_failed` on the run whose session it was for, with its
+/// number of the port's attempts and the backoff that followed it (none
+/// after the last).
 #[test]
 fn timed_out_effect_free_calls_are_retried_with_a_doubling_backoff_each_attempt_recorded() {
     let (_dir, repo, db) = fixture();
@@ -214,11 +182,12 @@ fn timed_out_effect_free_calls_are_retried_with_a_doubling_backoff_each_attempt_
     queue
         .workspace_created(run.id(), &LeaseToken::new("owner"), "timing-out-ws")
         .unwrap();
-    let cmux = TimingOutCmux {
-        capture_timeouts: AtomicUsize::new(2),
+    let sessions = TimingOutSessions {
+        exists_timeouts: AtomicUsize::new(2),
     };
-    let recording = runtime::RecordingBackend::new(&cmux, db.clone(), None);
-    assert_eq!(recording.capture("timing-out-ws").unwrap(), "ready");
+    let recording = runtime::RecordingSessions::new(&sessions, db.clone(), None);
+    assert!(recording.exists("timing-out-ws").unwrap());
+    sessions.exists_timeouts.store(3, Ordering::SeqCst);
     assert!(recording.exists("timing-out-ws").is_err());
     let detail = queue.show(TaskId::new(1)).unwrap();
     let attempts: Vec<_> = backend_failures(&detail)
@@ -238,8 +207,8 @@ fn timed_out_effect_free_calls_are_retried_with_a_doubling_backoff_each_attempt_
     assert_eq!(
         attempts,
         [
-            (json!("capture"), json!(1), json!(3), json!(10)),
-            (json!("capture"), json!(2), json!(3), json!(20)),
+            (json!("exists"), json!(1), json!(3), json!(10)),
+            (json!("exists"), json!(2), json!(3), json!(20)),
             (json!("exists"), json!(1), json!(3), json!(10)),
             (json!("exists"), json!(2), json!(3), json!(20)),
             (json!("exists"), json!(3), json!(3), Value::Null),

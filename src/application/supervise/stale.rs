@@ -185,11 +185,11 @@ pub(super) fn nudge_stale_receipt(
 impl StaleNudge {
     /// The session did not answer the request within the resume timeout:
     /// the run goes on as before without waiting longer.
-    pub(super) fn waited_out(&self, files: &dyn RunFiles, cmux: &dyn WorkspaceBackend) -> bool {
+    pub(super) fn waited_out(&self, files: &dyn RunFiles, sessions: &dyn SessionWrappers) -> bool {
         files
             .now()
             .duration_since(self.at)
-            .is_ok_and(|waited| waited >= cmux.resume_timeout())
+            .is_ok_and(|waited| waited >= sessions.resume_timeout())
     }
 
     /// Whether the idle marker written at `idle` answers the request: written

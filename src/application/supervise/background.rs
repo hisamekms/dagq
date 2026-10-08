@@ -66,13 +66,13 @@ impl Supervisor<'_> {
     /// Whether the session `id` a run recorded still runs
     /// ([`run_session_open`]).
     pub(super) fn run_session_open(&self, id: &str) -> Result<bool> {
-        run_session_open(self.cmux, id)
+        run_session_open(self.sessions, id)
     }
 
     /// Whether the session `id` a run recorded is known to have ended
     /// ([`run_session_gone`]).
     pub(super) fn run_session_gone(&self, id: &str) -> Result<bool> {
-        run_session_gone(self.cmux, id)
+        run_session_gone(self.sessions, id)
     }
 
     /// Record `wrapper_launched` for the background wrapper `handle` of
@@ -104,7 +104,7 @@ impl Supervisor<'_> {
             self.queue
                 .record_runtime_event(run.id(), EventKind::WrapperLaunched, payload);
         if let Err(error) = recorded {
-            return Err(match stop_session(self.cmux, handle, StopRoute::Unrecorded) {
+            return Err(match stop_session(self.sessions, handle, StopRoute::Unrecorded) {
                 Ok(()) => error.context(format!(
                     "the start of the background wrapper {handle} of run {} could not be recorded, and it was stopped",
                     run.id()
@@ -226,7 +226,7 @@ const TURN_STOP_WAIT: Duration = Duration::from_secs(5);
 /// ADR-t1433-3, counts as not open: cmux is not asked for a run's session
 /// any more, and a person closes such a workspace in their own terminal
 /// (decision 3).
-pub(crate) fn run_session_open(sessions: &dyn WorkspaceBackend, id: &str) -> Result<bool> {
+pub(crate) fn run_session_open(sessions: &dyn SessionWrappers, id: &str) -> Result<bool> {
     if !is_background(id) {
         return Ok(false);
     }
@@ -240,7 +240,7 @@ pub(crate) fn run_session_open(sessions: &dyn WorkspaceBackend, id: &str) -> Res
 /// cmux and is not known to have ended: its wrapper's registration says
 /// whether it runs, and the exit asked is a file in the run dir that the
 /// wrapper reads wherever it runs.
-pub(crate) fn run_session_gone(sessions: &dyn WorkspaceBackend, id: &str) -> Result<bool> {
+pub(crate) fn run_session_gone(sessions: &dyn SessionWrappers, id: &str) -> Result<bool> {
     if !is_background(id) {
         return Ok(false);
     }
@@ -255,7 +255,7 @@ pub(crate) fn run_session_gone(sessions: &dyn WorkspaceBackend, id: &str) -> Res
 /// more, and a person closes the workspace in their own terminal
 /// (decision 3); it counts as stopped.
 pub(crate) fn stop_run_session(
-    sessions: &dyn WorkspaceBackend,
+    sessions: &dyn SessionWrappers,
     id: &str,
     route: StopRoute,
 ) -> Result<()> {
@@ -274,7 +274,7 @@ pub(crate) fn stop_run_session(
 /// (ADR-t1433-1), so a workspace an older binary opened is left to a
 /// person to close in their own terminal, and it counts as stopped.
 pub(crate) fn stop_session(
-    sessions: &dyn WorkspaceBackend,
+    sessions: &dyn SessionWrappers,
     id: &str,
     route: StopRoute,
 ) -> Result<()> {
@@ -289,12 +289,10 @@ pub(crate) fn stop_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::{SupervisorEnvironment, WorkspaceTags};
     use std::sync::Mutex;
 
-    /// A backend that records the `exists` and `close` it is asked, says a
-    /// session is open (ended with `ended`), and refuses every other call:
-    /// a run's session asks nothing else of it.
+    /// Session wrappers that record the `exists` and the stops they are
+    /// asked, say a session is open (ended with `ended`), and start none.
     #[derive(Default)]
     struct Sessions {
         calls: Mutex<Vec<String>>,
@@ -307,25 +305,15 @@ mod tests {
         }
     }
 
-    impl WorkspaceBackend for Sessions {
-        fn preflight(&self) -> Result<()> {
+    impl SessionWrappers for Sessions {
+        fn launch_background(
+            &self,
+            _: &Path,
+            _: &str,
+            _: &[(String, String)],
+            _: &Path,
+        ) -> Result<String> {
             unimplemented!()
-        }
-        fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
-            unimplemented!()
-        }
-        fn send_text(&self, _: &str, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn send_enter(&self, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn capture(&self, _: &str) -> Result<String> {
-            unimplemented!()
-        }
-        fn close(&self, id: &str) -> Result<()> {
-            self.calls.lock().unwrap().push(format!("close {id}"));
-            Ok(())
         }
         fn stop_background(
             &self,
@@ -338,33 +326,9 @@ mod tests {
                 .push(format!("stop {id} {}", route.as_str()));
             Ok(None)
         }
-        fn set_color(&self, _: &str, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn pin(&self, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn send_exit(&self, _: &str) -> Result<()> {
-            unimplemented!()
-        }
         fn exists(&self, id: &str) -> Result<bool> {
             self.calls.lock().unwrap().push(format!("exists {id}"));
             Ok(!self.ended)
-        }
-        fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-            unimplemented!()
-        }
-        fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
-            unimplemented!()
-        }
-        fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
-            unimplemented!()
-        }
-        fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
-            unimplemented!()
         }
     }
 

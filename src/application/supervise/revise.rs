@@ -428,7 +428,7 @@ impl ReviseWatch {
         Ok(revise_deadline(
             sv.generators.clock.monotonic(),
             self.sent,
-            sv.cmux.resume_timeout(),
+            sv.sessions.resume_timeout(),
         ))
     }
 }

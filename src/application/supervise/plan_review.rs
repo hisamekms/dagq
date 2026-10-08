@@ -1028,7 +1028,7 @@ impl Supervisor<'_> {
     /// The planners not closed, each judged by [`planner_view`].
     pub(super) fn planner_views(&self) -> Result<Vec<PlannerView>> {
         let probes = PlannerProbes {
-            cmux: self.cmux,
+            sessions: self.sessions,
             processes: &*self.processes,
             files: &*self.files,
             signals: self.signals,
@@ -1080,7 +1080,7 @@ impl Supervisor<'_> {
         self.warn_ignored_route_setting(&roles);
         PlannerLaunch {
             queue: &*self.queue,
-            backend: self.cmux,
+            backend: self.sessions,
             files: &*self.files,
             db: &layout.db,
             planners_dir: &layout.planners_dir,
@@ -1152,12 +1152,12 @@ impl Supervisor<'_> {
                 .iter()
                 .find(|(sent, _)| *sent == id)
                 .map(|(_, at)| at.elapsed());
-            let overdue = asked.is_some_and(|elapsed| elapsed > self.cmux.exit_timeout());
+            let overdue = asked.is_some_and(|elapsed| elapsed > self.sessions.exit_timeout());
             if self.planner_gone(view) || overdue {
                 if overdue {
                     warn!(
                         "planner {id} of the runtime did not exit within {} seconds of its exit request; its wrapper is stopped",
-                        self.cmux.exit_timeout().as_secs()
+                        self.sessions.exit_timeout().as_secs()
                     );
                 }
                 // Only a background wrapper is stopped: the runtime does
@@ -1166,9 +1166,9 @@ impl Supervisor<'_> {
                 if let Some(handle) = workspace
                     .as_deref()
                     .filter(|handle| crate::domain::background_wrapper::is_background(handle))
-                    && self.cmux.exists(handle)?
+                    && self.sessions.exists(handle)?
                 {
-                    stop_session(self.cmux, handle, StopRoute::Planner)?;
+                    stop_session(self.sessions, handle, StopRoute::Planner)?;
                     workspace_closed = true;
                 }
                 let (code, reason) = if retired_workspace(&view.planner) {
@@ -1183,7 +1183,7 @@ impl Supervisor<'_> {
                         PlannerCloseCode::RuntimeExitTimedOut,
                         format!(
                             "planner {id} of the runtime did not exit within {} seconds of its exit request",
-                            self.cmux.exit_timeout().as_secs()
+                            self.sessions.exit_timeout().as_secs()
                         ),
                     )
                 } else {

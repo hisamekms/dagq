@@ -1112,20 +1112,87 @@ pub struct WorkspaceTags {
     pub group: Option<String>,
 }
 
-/// The host's operations of two kinds (docs/design/architecture.md,
-/// "host運用"): the inbox's cmux workspace, which the inbox and `up` /
-/// `down` own (ADR-t1433-1), and the session wrappers of the headless runs
-/// and the runtime's planners started without a workspace as background
-/// processes, which the supervisor and the planner launch, stop and check
-/// ([`launch_background`](Self::launch_background),
-/// [`stop_background`](Self::stop_background), [`exists`](Self::exists);
-/// ADR-t1404-1) through `BackgroundSessions`, which refuses every cmux call. A background wrapper's handle goes where a workspace ID
-/// goes, so the calls on the screen and the keys refuse it and the
-/// sidebar's do nothing. It also carries, for now, the notification to a
-/// person ([`notify`](Self::notify), which only the inbox's `watch --role
-/// inbox` sends, for each new ask) and the waits of a resumed session
-/// ([`resume_timeout`](Self::resume_timeout) and the others, which the
-/// supervisor's session, revise, resume and stale sweep read).
+/// The session wrappers of the headless runs and the runtime's planners,
+/// started without a workspace as background processes of this host
+/// (ADR-t1404-1): the port of the supervisor, the runtime's planners and
+/// the reads that judge a planner (`planners`, `planner request`), which
+/// call no cmux (ADR-t1433-1 decision 1; the inbox's workspace is
+/// [`WorkspaceBackend`]'s). A wrapper is named by the handle its start
+/// returned, the pid and start time of its process (ADR-t1404-1 decision
+/// 2), recorded where a run or a planner records its session; any other
+/// session ID (a workspace an older binary opened) names no wrapper. Beside
+/// the start, the stop and the liveness, it carries the limits of one call
+/// and the waits the supervisor gives a wrapper.
+pub trait SessionWrappers {
+    /// Start the session wrapper `command` (a shell command line) in `cwd`
+    /// as a process detached from this one, with `env` in its environment
+    /// and its output in `log` (ADR-t1404-1 decision 1), and return the
+    /// [`BackgroundHandle`](crate::domain::background_wrapper::BackgroundHandle)
+    /// the run or the planner records as its session.
+    fn launch_background(
+        &self,
+        cwd: &std::path::Path,
+        command: &str,
+        env: &[(String, String)],
+        log: &std::path::Path,
+    ) -> Result<String>;
+    /// Stop the background wrapper `handle` names and what it started, and
+    /// say how it ended: SIGTERM, SIGKILL or already gone, and the SIGKILLs
+    /// sent to what it started (task 1657). `route` is the path of the
+    /// runtime that stops it, which the recording records with the stop as
+    /// `wrapper_stopped`; the adapter does not read it. A port that does
+    /// not tell how a stop ended says `None`, and nothing is recorded.
+    fn stop_background(
+        &self,
+        handle: &str,
+        route: crate::domain::background_wrapper::StopRoute,
+    ) -> Result<Option<crate::domain::background_wrapper::WrapperStop>>;
+    /// Whether the wrapper `handle` names still runs: its pid is alive with
+    /// the start time the handle recorded. Any other ID is not open.
+    fn exists(&self, handle: &str) -> Result<bool>;
+    /// How long one call may run before it is given up as failed; recorded
+    /// with every `backend_call_failed`.
+    fn call_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
+    /// How many times in all a call that timed out is made when making it
+    /// again is safe (a read; task 326).
+    fn call_attempts(&self) -> u32 {
+        3
+    }
+    /// The backoff before the first retry of a call that timed out,
+    /// doubled before each next one.
+    fn retry_backoff(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(2)
+    }
+    /// How long the session may take to exit after the request before the
+    /// supervisor stops waiting and leaves the run to a human.
+    fn exit_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(120)
+    }
+    /// How long the session's wrapper may take to register after its start
+    /// before the supervisor gives the run up.
+    fn registration_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(45)
+    }
+    /// How long after an attempt to open a headless run's lost session
+    /// again the supervisor makes the next one (task 1372).
+    fn reopen_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(60)
+    }
+    /// How long a resumed session may work on the resolution request
+    /// without going idle before the supervisor asks it to exit.
+    fn resume_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(3600)
+    }
+}
+
+/// The inbox's cmux workspace, which the inbox and `up` / `down` own
+/// (docs/design/architecture.md, "host運用"; ADR-t1433-1 decision 1): `up`
+/// opens, looks up, marks and closes the workspaces it keeps, and the
+/// inbox's `watch --role inbox` notifies a person. The session wrappers of
+/// the runs and the runtime's planners are [`SessionWrappers`]', which call
+/// no cmux.
 pub trait WorkspaceBackend {
     fn preflight(&self) -> Result<()>;
     /// Check that cmux accepts a connection from a process that is not a
@@ -1156,24 +1223,6 @@ pub trait WorkspaceBackend {
     /// pinned workspace is unpinned first, since cmux refuses to close one
     /// (ADR-0031); every close dagq makes goes through here.
     fn close(&self, workspace_id: &str) -> Result<()>;
-    /// Stop the background wrapper `handle` names and what it started, as
-    /// [`close`](Self::close) does, and say how it ended: SIGTERM, SIGKILL
-    /// or already gone, and the SIGKILLs sent to what it started (task
-    /// 1657). `route` is the path of the runtime that stops it, which the
-    /// recording backend records with the stop as `wrapper_stopped`; the
-    /// adapter does not read it. A backend that does not tell how a stop
-    /// ended closes the handle and says `None`, and nothing is recorded.
-    /// It is a method of its own, not a new return of `close`, because
-    /// `close` also closes the inbox's and the supervisor's workspaces, and
-    /// its callers and test backends have no stop to tell.
-    fn stop_background(
-        &self,
-        handle: &str,
-        route: crate::domain::background_wrapper::StopRoute,
-    ) -> Result<Option<crate::domain::background_wrapper::WrapperStop>> {
-        let _ = route;
-        self.close(handle).map(|()| None)
-    }
     /// Give the workspace a sidebar color: a cmux color name or `#RRGGBB`.
     fn set_color(&self, workspace_id: &str, color: &str) -> Result<()>;
     /// Show the status pill `key` with `value` and `icon` on the
@@ -1195,13 +1244,12 @@ pub trait WorkspaceBackend {
     /// people may rename (ADR-0026).
     fn exists(&self, workspace_id: &str) -> Result<bool>;
     /// The stable IDs of every workspace cmux lists, in all its windows:
-    /// one listing for many checks, as the supervisor's close of the
-    /// planners and session spans whose workspace is gone makes.
+    /// one listing for many checks.
     fn listed_workspace_ids(&self) -> Result<Vec<String>>;
     /// Open a workspace that is not tied to a run (the inbox and planner
     /// sessions, the in-cmux supervisor) and return its stable ID. A run's
     /// session has no workspace: its wrapper starts in the background
-    /// ([`launch_background`](Self::launch_background), ADR-t1433-3).
+    /// ([`SessionWrappers::launch_background`], ADR-t1433-3).
     fn create_named(
         &self,
         name: &str,
@@ -1209,25 +1257,6 @@ pub trait WorkspaceBackend {
         command: &str,
         tags: &WorkspaceTags,
     ) -> Result<String>;
-    /// Start the session wrapper `command` (a shell command line) in `cwd`
-    /// without a workspace, as a process detached from this one with `env`
-    /// in its environment and its output in `log` (ADR-t1404-1 decision
-    /// 1); the [`BackgroundHandle`](crate::domain::background_wrapper::BackgroundHandle)
-    /// the run records in place of a workspace ID. Every other call of the
-    /// backend takes that handle as a workspace: `exists` says whether the
-    /// wrapper runs, `close` stops it and what it started, and the screen
-    /// and the keys are refused. A backend without background processes
-    /// refuses.
-    fn launch_background(
-        &self,
-        cwd: &std::path::Path,
-        command: &str,
-        env: &[(String, String)],
-        log: &std::path::Path,
-    ) -> Result<String> {
-        let _ = (cwd, command, env, log);
-        anyhow::bail!("this workspace backend starts no background wrapper")
-    }
     /// The handle of the workspace group whose external ID is
     /// `external_id`, created under `name` when there is none yet; asking
     /// again returns the same group.
@@ -1254,37 +1283,6 @@ pub trait WorkspaceBackend {
     /// doubled before each next one.
     fn retry_backoff(&self) -> std::time::Duration {
         std::time::Duration::from_secs(2)
-    }
-    /// How long the session may take to exit after the request before the
-    /// supervisor stops waiting and leaves the run to a human.
-    fn exit_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(120)
-    }
-    /// How long the session's wrapper may take to register after the
-    /// workspace opens before the supervisor gives the run up.
-    fn registration_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(45)
-    }
-    /// How long after an attempt to open a headless run's lost session
-    /// again the supervisor makes the next one (task 1372): what stopped
-    /// the wrapper may be cmux itself, which needs time to come back.
-    fn reopen_interval(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(60)
-    }
-    /// How long a resumed session's agent may take, after it registered, to
-    /// be ready for the resolution request.
-    fn resume_prompt_delay(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(5)
-    }
-    /// How long a resumed session may work on the resolution request
-    /// without going idle before the supervisor asks it to exit.
-    fn resume_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(3600)
-    }
-    /// How long after a submit (and between the Enters sent again) the
-    /// screen is read for the text left in the input box.
-    fn submit_check_interval(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(1)
     }
 }
 

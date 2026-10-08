@@ -9,7 +9,7 @@
 //! Everything outside the process reaches the loop through ports: the
 //! queue ([`Queue`], a connection per thread from [`QueueOpener`]), Git
 //! ([`Repository`], [`MainRemote`]), the verification commands
-//! ([`Verifier`]), cmux ([`WorkspaceBackend`]), the agent
+//! ([`Verifier`]), the session wrappers ([`SessionWrappers`]), the agent
 //! ([`AgentProvider`]) and what it shows and writes ([`AgentSignals`]),
 //! the processes it starts ([`Spawner`]) and checks ([`ProcessControl`]),
 //! the run files ([`RunFiles`]) and the time and IDs ([`Generators`]).
@@ -52,8 +52,8 @@ use tracing::{error, info, warn};
 use super::{
     AgentProvider, AgentSignals, AskQuery, CommandSpec, Exhaustion, Generators, IdleHook,
     LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository, ResumeCandidate,
-    RunFiles, RunLog, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction, Validation, Verifier,
-    WorkerAdapters, WorkspaceBackend,
+    RunFiles, RunLog, SessionWrappers, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction,
+    Validation, Verifier, WorkerAdapters,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
         WorkspaceAccess,
@@ -70,7 +70,7 @@ use super::{
         recovery_prompt, resume_request, review_prompt, revise_mismatch_request, revise_request,
         siblings_in_progress, stale_receipt_nudge, stall_nudge,
     },
-    recording::{RecordingBackend, reason_of_error},
+    recording::{RecordingSessions, reason_of_error},
     tail, unix_seconds,
 };
 use crate::domain::{
@@ -401,7 +401,9 @@ pub struct Ports<'a> {
     pub repository: Arc<dyn Repository + Send + Sync>,
     pub remote: Arc<dyn MainRemote + Send + Sync>,
     pub verifier: Arc<dyn Verifier + Send + Sync>,
-    pub cmux: &'a dyn WorkspaceBackend,
+    /// The session wrappers of the runs and the runtime's planners, which
+    /// the supervisor starts, stops and checks without cmux (ADR-t1433-1).
+    pub sessions: &'a dyn SessionWrappers,
     /// The adapters of each worker (provider and mode) this binary runs
     /// (ADR-t813-2): every agent is checked before anything is claimed, the
     /// signals of Claude's headless adapter read every idle marker and the
@@ -858,8 +860,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         token.clone(),
         HeartbeatPolicy::supervisor(settings.heartbeat_interval),
     );
-    let cmux = RecordingBackend::over(
-        ports.cmux,
+    let sessions = RecordingSessions::over(
+        ports.sessions,
         ports.queues.clone(),
         Some(token.clone()),
         ports.load_average,
@@ -873,7 +875,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         repository: ports.repository.clone(),
         remote: ports.remote.clone(),
         verifier: ports.verifier.clone(),
-        cmux: &cmux,
+        sessions: &sessions,
         reviewer: ports.reviewer,
         codex_jobs: ports.codex_jobs,
         signals: claude.signals,
@@ -1036,7 +1038,7 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   `supervisor_file`, `supervisor_error`, `exec`, `handoff`, `draining`,
 ///   `stop_recorded`), the queue service, the update, the release, the
 ///   broker, sccache, the disk and its cleanup, the sweep, the host's load
-///   and metrics, `service_access`, `no_claude` and `cmux`.
+///   and metrics, `service_access`, `no_claude` and `sessions`.
 struct Supervisor<'a> {
     no_claude: bool,
     queue: Box<dyn Queue + Send>,
@@ -1046,7 +1048,7 @@ struct Supervisor<'a> {
     repository: Arc<dyn Repository + Send + Sync>,
     remote: Arc<dyn MainRemote + Send + Sync>,
     verifier: Arc<dyn Verifier + Send + Sync>,
-    cmux: &'a dyn WorkspaceBackend,
+    sessions: &'a dyn SessionWrappers,
     /// Starts the headless review of accepted runs (ADR-0027).
     reviewer: &'a dyn AgentProvider,
     /// Starts the headless jobs a role puts on Codex (ADR-t1063-1).
@@ -3058,7 +3060,9 @@ impl Supervisor<'_> {
         if let Some(workspace) = workspace {
             if session_may_live {
                 info!(run_id = %run.id(), "run {}: resume workspace {workspace} is kept; its session may still run", run.id());
-            } else if let Err(error) = stop_run_session(self.cmux, &workspace, StopRoute::Resume) {
+            } else if let Err(error) =
+                stop_run_session(self.sessions, &workspace, StopRoute::Resume)
+            {
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the resume's session {workspace} could not be stopped: {error:#}", run.id());
             }
         }
@@ -3870,12 +3874,12 @@ fn spawn_validation(
 /// nothing treats it as cleaned.
 fn close_workspace(
     queue: &mut dyn Queue,
-    cmux: &dyn WorkspaceBackend,
+    sessions: &dyn SessionWrappers,
     token: &LeaseToken,
     run: &TaskRun,
 ) -> Result<TaskRun> {
     let workspace = run.workspace_id().context("missing workspace")?;
-    match stop_run_session(cmux, workspace, StopRoute::AfterReview) {
+    match stop_run_session(sessions, workspace, StopRoute::AfterReview) {
         Ok(()) => queue.workspace_closed(run.id(), token),
         Err(error) => {
             let message = format!("session {workspace} could not be stopped: {error:#}");

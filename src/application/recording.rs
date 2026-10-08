@@ -1,6 +1,8 @@
-//! Every failed cmux call on record (task 109): [`RecordingBackend`] wraps
-//! a [`WorkspaceBackend`] and writes `backend_call_failed` with the load
-//! the call failed under. A call that timed out is made again after a
+//! Every failed call of the host's sessions on record (task 109):
+//! [`RecordingBackend`] wraps a [`WorkspaceBackend`] (cmux) and
+//! [`RecordingSessions`] a [`SessionWrappers`] (the background wrappers),
+//! and both write `backend_call_failed` with the load the call failed
+//! under. A call that timed out is made again after a
 //! backoff when making it again is safe (task 326).
 
 use crate::domain::LeaseToken;
@@ -8,7 +10,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
-use super::{QueueOpener, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags};
+use super::{QueueOpener, SessionWrappers, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags};
 use crate::domain::background_wrapper::{StopRoute, WrapperStop};
 use crate::domain::{EventKind, Reason, ReasonCode, RunId};
 
@@ -199,84 +201,31 @@ pub fn wrapper_stopped_payload(
     })
 }
 
-/// A [`WorkspaceBackend`] that records every failed or timed-out call as
-/// `backend_call_failed` before handing the error back unchanged, so the
-/// queue keeps how often cmux fails and under what load (task 109). The
-/// record is made here, in the application layer, and not in the cmux
-/// adapter (ADR-0013). A call made for a run (`create`, or any call on a
-/// workspace a run opened) is recorded on that run; one that belongs to no
-/// run (`up`'s workspaces, the queue's group, `down`'s close) without one.
-/// `token` is the supervisor whose slots are reported; `None` (`up`,
-/// `down`) reports every lease and supervisor. The record is written
-/// through its own connection, and a record that cannot be written is
-/// dropped: it must never hide the backend's error.
-pub struct RecordingBackend<'a> {
-    inner: &'a dyn WorkspaceBackend,
-    queues: Arc<dyn QueueOpener>,
-    token: Option<LeaseToken>,
-    /// The 1-minute load average, `None` where it cannot be read.
-    load_average: fn() -> Option<f64>,
-    /// Stops the turns background wrappers that died left running
-    /// ([`Self::stopping_left_turns`]); `None` leaves them.
-    left_turns: Option<Arc<dyn super::ProcessControl + Send + Sync>>,
+/// The limits of one call of a port: how long it may run, how many times
+/// in all a call that timed out is made when that is safe, and the backoff
+/// before the first retry.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    timeout: Duration,
+    attempts: u32,
+    backoff: Duration,
 }
 
-impl<'a> RecordingBackend<'a> {
-    /// `inner`, recording its failures through a connection `queues`
-    /// opens for each.
-    pub fn over(
-        inner: &'a dyn WorkspaceBackend,
-        queues: Arc<dyn QueueOpener>,
-        token: Option<LeaseToken>,
-        load_average: fn() -> Option<f64>,
-    ) -> Self {
-        Self {
-            inner,
-            queues,
-            token,
-            load_average,
-            left_turns: None,
-        }
-    }
+/// Where [`RecordingBackend`] and [`RecordingSessions`] record a failed
+/// call: through its own connection `queues` opens for each, with the
+/// slots of `token` (`None` reports every lease and supervisor) and the
+/// 1-minute load average (`None` where it cannot be read).
+struct Recorder {
+    queues: Arc<dyn QueueOpener>,
+    token: Option<LeaseToken>,
+    load_average: fn() -> Option<f64>,
+}
 
-    /// `self`, telling and stopping through `processes` the turn a
-    /// background session (ADR-t1404-1) left when its wrapper died: such a
-    /// session `exists` while its recorded turn runs, and its `close`
-    /// stops that turn after the wrapper (decision 3).
-    pub fn stopping_left_turns(
-        mut self,
-        processes: Arc<dyn super::ProcessControl + Send + Sync>,
-    ) -> Self {
-        self.left_turns = Some(processes);
-        self
-    }
-
-    /// The turn the background session `workspace_id` left running, with
-    /// the process control that stops it; `None` for a workspace, without
-    /// [`Self::stopping_left_turns`], or when none runs.
-    fn left_turn(
-        &self,
-        workspace_id: &str,
-    ) -> Option<(
-        &dyn super::ProcessControl,
-        crate::domain::background_wrapper::BackgroundHandle,
-    )> {
-        if !crate::domain::background_wrapper::is_background(workspace_id) {
-            return None;
-        }
-        let processes = self.left_turns.as_deref()?;
-        let queue = self.queues.open().ok()?;
-        // A run's session, else a headless planner's (ADR-t1394-2).
-        let turn = match queue.run_in_workspace(workspace_id).ok()? {
-            Some(run) => super::supervise::left_turn(&*queue, processes, &run, workspace_id)?,
-            None => super::supervise::left_planner_turn(&*queue, processes, workspace_id)?,
-        };
-        Some((processes as &dyn super::ProcessControl, turn))
-    }
-
+impl Recorder {
     /// A call that is made once.
     fn recorded<T>(
         &self,
+        limits: Limits,
         op: &str,
         workspace_id: Option<&str>,
         run_id: Option<&RunId>,
@@ -284,6 +233,7 @@ impl<'a> RecordingBackend<'a> {
     ) -> Result<T> {
         result.map_err(|error| {
             let _ = self.record(
+                limits,
                 op,
                 workspace_id,
                 run_id,
@@ -295,7 +245,7 @@ impl<'a> RecordingBackend<'a> {
     }
 
     /// `call`, made again after a backoff (doubled each time) up to the
-    /// backend's `call_attempts` in all while it fails with a timeout that
+    /// port's attempts in all while it fails with a timeout that
     /// `effect_free` says left nothing behind. `effect_free` is asked after
     /// the backoff, right before the call is made again, so that a call
     /// that got through late, during the backoff, is not made twice (task
@@ -304,13 +254,14 @@ impl<'a> RecordingBackend<'a> {
     /// it.
     fn retried<T>(
         &self,
+        limits: Limits,
         op: &str,
         workspace_id: &str,
         mut call: impl FnMut() -> Result<T>,
         effect_free: impl Fn() -> bool,
     ) -> Result<T> {
-        let attempts = self.inner.call_attempts().max(1);
-        let mut backoff = self.inner.retry_backoff();
+        let attempts = limits.attempts.max(1);
+        let mut backoff = limits.backoff;
         let mut number = 1;
         loop {
             let error = match call() {
@@ -329,7 +280,14 @@ impl<'a> RecordingBackend<'a> {
                 of: attempts,
                 retry_after: retry.then_some(backoff),
             };
-            let _ = self.record(op, Some(workspace_id), None, &format!("{error:#}"), attempt);
+            let _ = self.record(
+                limits,
+                op,
+                Some(workspace_id),
+                None,
+                &format!("{error:#}"),
+                attempt,
+            );
             if !retry {
                 return Err(BackendFailure::wrap(op, effect_free, error));
             }
@@ -352,6 +310,7 @@ impl<'a> RecordingBackend<'a> {
 
     fn record(
         &self,
+        limits: Limits,
         op: &str,
         workspace_id: Option<&str>,
         run_id: Option<&RunId>,
@@ -370,7 +329,7 @@ impl<'a> RecordingBackend<'a> {
             backend_failure_payload(
                 op,
                 workspace_id,
-                self.inner.call_timeout(),
+                limits.timeout,
                 error,
                 (self.load_average)(),
                 slots,
@@ -381,33 +340,71 @@ impl<'a> RecordingBackend<'a> {
     }
 }
 
+/// A [`WorkspaceBackend`] that records every failed or timed-out call as
+/// `backend_call_failed` before handing the error back unchanged, so the
+/// queue keeps how often cmux fails and under what load (task 109). The
+/// record is made here, in the application layer, and not in the cmux
+/// adapter (ADR-0013). A call on a workspace a run recorded is recorded on
+/// that run; one that belongs to no run (`up`'s workspaces, the queue's
+/// group, `down`'s close) without one. `token` is the supervisor whose
+/// slots are reported; `None` (`up`, `down`) reports every lease and
+/// supervisor. A record that cannot be written is dropped: it must never
+/// hide the backend's error.
+pub struct RecordingBackend<'a> {
+    inner: &'a dyn WorkspaceBackend,
+    recorder: Recorder,
+}
+
+impl<'a> RecordingBackend<'a> {
+    /// `inner`, recording its failures through a connection `queues`
+    /// opens for each.
+    pub fn over(
+        inner: &'a dyn WorkspaceBackend,
+        queues: Arc<dyn QueueOpener>,
+        token: Option<LeaseToken>,
+        load_average: fn() -> Option<f64>,
+    ) -> Self {
+        Self {
+            inner,
+            recorder: Recorder {
+                queues,
+                token,
+                load_average,
+            },
+        }
+    }
+
+    fn limits(&self) -> Limits {
+        Limits {
+            timeout: self.inner.call_timeout(),
+            attempts: self.inner.call_attempts(),
+            backoff: self.inner.retry_backoff(),
+        }
+    }
+
+    fn recorded<T>(&self, op: &str, workspace_id: Option<&str>, result: Result<T>) -> Result<T> {
+        self.recorder
+            .recorded(self.limits(), op, workspace_id, None, result)
+    }
+
+    fn retried<T>(
+        &self,
+        op: &str,
+        workspace_id: &str,
+        call: impl FnMut() -> Result<T>,
+        effect_free: impl Fn() -> bool,
+    ) -> Result<T> {
+        self.recorder
+            .retried(self.limits(), op, workspace_id, call, effect_free)
+    }
+}
+
 impl WorkspaceBackend for RecordingBackend<'_> {
     fn preflight(&self) -> Result<()> {
         self.inner.preflight()
     }
     fn preflight_detached(&self, environment: &SupervisorEnvironment) -> Result<()> {
         self.inner.preflight_detached(environment)
-    }
-    /// A run's wrapper that cannot be started is recorded as a failed call
-    /// on the run its environment names, as the workspace's create was
-    /// before ADR-t1433-3; a planner's, whose environment names no run, is
-    /// not recorded, as before.
-    fn launch_background(
-        &self,
-        cwd: &std::path::Path,
-        command: &str,
-        env: &[(String, String)],
-        log: &std::path::Path,
-    ) -> Result<String> {
-        let run = env
-            .iter()
-            .find(|(name, _)| name == crate::domain::actor::RUN_ID_ENV)
-            .and_then(|(_, id)| RunId::new(id.as_str()).ok());
-        let result = self.inner.launch_background(cwd, command, env, log);
-        match run {
-            Some(run) => self.recorded("launch_background", None, Some(&run), result),
-            None => result,
-        }
     }
     /// A text that timed out is typed again only while the screen shows no
     /// trace of it: one that got there is left to the submit check (task
@@ -421,18 +418,18 @@ impl WorkspaceBackend for RecordingBackend<'_> {
             // waited for, and the text is not typed again.
             || {
                 let screen = self.inner.capture(workspace_id);
-                self.recorded("capture", Some(workspace_id), None, screen)
+                self.recorded("capture", Some(workspace_id), screen)
                     .is_ok_and(|screen| !text_on_screen(&screen, text))
             },
         )
     }
     fn send_enter(&self, workspace_id: &str) -> Result<()> {
         let result = self.inner.send_enter(workspace_id);
-        self.recorded("send_enter", Some(workspace_id), None, result)
+        self.recorded("send_enter", Some(workspace_id), result)
     }
     fn send_key(&self, workspace_id: &str, key: &str) -> Result<()> {
         let result = self.inner.send_key(workspace_id, key);
-        self.recorded("send_key", Some(workspace_id), None, result)
+        self.recorded("send_key", Some(workspace_id), result)
     }
     fn capture(&self, workspace_id: &str) -> Result<String> {
         self.retried(
@@ -442,62 +439,26 @@ impl WorkspaceBackend for RecordingBackend<'_> {
             || true,
         )
     }
-    /// A background handle is stopped as [`Self::stop_background`] stops
-    /// it, named by no path of its own (`close`), so that no stop of a
-    /// wrapper goes unrecorded.
     fn close(&self, workspace_id: &str) -> Result<()> {
-        if crate::domain::background_wrapper::is_background(workspace_id) {
-            return self
-                .stop_background(workspace_id, StopRoute::Close)
-                .map(drop);
-        }
         let result = self.inner.close(workspace_id);
-        self.recorded("close", Some(workspace_id), None, result)
-    }
-    /// The wrapper is stopped, then the turn a wrapper that died left
-    /// running, and the stop is recorded as `wrapper_stopped` with `route`
-    /// on the run whose session it is, or as the queue's own event for a
-    /// planner's ([`wrapper_stopped_payload`], task 1657). A failed stop
-    /// of the wrapper is a failed `close` and records no `wrapper_stopped`;
-    /// a left turn that cannot be stopped fails the `close` after the
-    /// wrapper's stop is recorded. A record that cannot be written is
-    /// dropped.
-    fn stop_background(&self, handle: &str, route: StopRoute) -> Result<Option<WrapperStop>> {
-        let result = self.inner.stop_background(handle, route);
-        let stop = self.recorded("close", Some(handle), None, result)?;
-        let left_turn = self.left_turn(handle);
-        let left_turn_killed = left_turn.is_some();
-        let left = match left_turn {
-            Some((processes, turn)) => super::supervise::stop_left_turn(processes, &turn),
-            None => Ok(()),
-        };
-        // The wrapper's stop is recorded even when the turn it left could
-        // not be stopped, whose failure is then the close's.
-        if let Some(stop) = stop {
-            let _ = self.record_stop(
-                wrapper_stopped_payload(handle, stop, route, left_turn_killed),
-                handle,
-            );
-        }
-        self.recorded("close", Some(handle), None, left)?;
-        Ok(stop)
+        self.recorded("close", Some(workspace_id), result)
     }
     fn set_color(&self, workspace_id: &str, color: &str) -> Result<()> {
         let result = self.inner.set_color(workspace_id, color);
-        self.recorded("set_color", Some(workspace_id), None, result)
+        self.recorded("set_color", Some(workspace_id), result)
     }
     fn set_status(&self, workspace_id: &str, key: &str, value: &str, icon: &str) -> Result<()> {
         let result = self.inner.set_status(workspace_id, key, value, icon);
-        self.recorded("set_status", Some(workspace_id), None, result)
+        self.recorded("set_status", Some(workspace_id), result)
     }
     fn pin(&self, workspace_id: &str) -> Result<()> {
         let result = self.inner.pin(workspace_id);
-        self.recorded("pin", Some(workspace_id), None, result)
+        self.recorded("pin", Some(workspace_id), result)
     }
     /// Never made again: a second `/exit` could pick a dialog's option.
     fn send_exit(&self, workspace_id: &str) -> Result<()> {
         let result = self.inner.send_exit(workspace_id);
-        self.recorded("send_exit", Some(workspace_id), None, result)
+        self.recorded("send_exit", Some(workspace_id), result)
     }
     /// A `/exit` that timed out is typed again only while the screen, read
     /// once, shows it did not get there (`unsent`: the input box drawn, no
@@ -511,25 +472,22 @@ impl WorkspaceBackend for RecordingBackend<'_> {
             || self.inner.send_exit(workspace_id),
             || {
                 let screen = self.inner.capture(workspace_id);
-                self.recorded("capture", Some(workspace_id), None, screen)
+                self.recorded("capture", Some(workspace_id), screen)
                     .is_ok_and(|screen| unsent(&screen))
             },
         )
     }
-    /// A background session whose wrapper is gone still exists while the
-    /// turn it left runs, so that whatever closes it stops that turn.
     fn exists(&self, workspace_id: &str) -> Result<bool> {
-        let exists = self.retried(
+        self.retried(
             "exists",
             workspace_id,
             || self.inner.exists(workspace_id),
             || true,
-        )?;
-        Ok(exists || self.left_turn(workspace_id).is_some())
+        )
     }
     fn listed_workspace_ids(&self) -> Result<Vec<String>> {
         let result = self.inner.listed_workspace_ids();
-        self.recorded("listed_workspace_ids", None, None, result)
+        self.recorded("listed_workspace_ids", None, result)
     }
     fn create_named(
         &self,
@@ -539,15 +497,173 @@ impl WorkspaceBackend for RecordingBackend<'_> {
         tags: &WorkspaceTags,
     ) -> Result<String> {
         let result = self.inner.create_named(name, cwd, command, tags);
-        self.recorded("create_named", None, None, result)
+        self.recorded("create_named", None, result)
     }
     fn ensure_group(&self, external_id: &str, name: &str) -> Result<String> {
         let result = self.inner.ensure_group(external_id, name);
-        self.recorded("ensure_group", None, None, result)
+        self.recorded("ensure_group", None, result)
     }
     fn notify(&self, title: &str, body: &str, workspace: Option<&str>) -> Result<()> {
         let result = self.inner.notify(title, body, workspace);
-        self.recorded("notify", workspace, None, result)
+        self.recorded("notify", workspace, result)
+    }
+    fn call_timeout(&self) -> Duration {
+        self.inner.call_timeout()
+    }
+    fn call_attempts(&self) -> u32 {
+        self.inner.call_attempts()
+    }
+    fn retry_backoff(&self) -> Duration {
+        self.inner.retry_backoff()
+    }
+}
+
+/// The [`SessionWrappers`] of the supervisor and the runtime's planners,
+/// recording every failed or timed-out call as `backend_call_failed` (on
+/// the run whose session it is, or the run a start's environment names) and
+/// every stop that tells how it ended as `wrapper_stopped`, before handing
+/// back what the port returned, as [`RecordingBackend`] does for cmux.
+/// `token` is the supervisor whose slots are reported.
+pub struct RecordingSessions<'a> {
+    inner: &'a dyn SessionWrappers,
+    recorder: Recorder,
+    /// Stops the turns background wrappers that died left running
+    /// ([`Self::stopping_left_turns`]); `None` leaves them.
+    left_turns: Option<Arc<dyn super::ProcessControl + Send + Sync>>,
+}
+
+impl<'a> RecordingSessions<'a> {
+    /// `inner`, recording its failures through a connection `queues`
+    /// opens for each.
+    pub fn over(
+        inner: &'a dyn SessionWrappers,
+        queues: Arc<dyn QueueOpener>,
+        token: Option<LeaseToken>,
+        load_average: fn() -> Option<f64>,
+    ) -> Self {
+        Self {
+            inner,
+            recorder: Recorder {
+                queues,
+                token,
+                load_average,
+            },
+            left_turns: None,
+        }
+    }
+
+    /// `self`, telling and stopping through `processes` the turn a
+    /// background session (ADR-t1404-1) left when its wrapper died: such a
+    /// session `exists` while its recorded turn runs, and its stop stops
+    /// that turn after the wrapper (decision 3).
+    pub fn stopping_left_turns(
+        mut self,
+        processes: Arc<dyn super::ProcessControl + Send + Sync>,
+    ) -> Self {
+        self.left_turns = Some(processes);
+        self
+    }
+
+    fn limits(&self) -> Limits {
+        Limits {
+            timeout: self.inner.call_timeout(),
+            attempts: self.inner.call_attempts(),
+            backoff: self.inner.retry_backoff(),
+        }
+    }
+
+    /// The turn the background session `handle` left running, with the
+    /// process control that stops it; `None` for an ID that is not a
+    /// wrapper's handle, without [`Self::stopping_left_turns`], or when
+    /// none runs.
+    fn left_turn(
+        &self,
+        handle: &str,
+    ) -> Option<(
+        &dyn super::ProcessControl,
+        crate::domain::background_wrapper::BackgroundHandle,
+    )> {
+        if !crate::domain::background_wrapper::is_background(handle) {
+            return None;
+        }
+        let processes = self.left_turns.as_deref()?;
+        let queue = self.recorder.queues.open().ok()?;
+        // A run's session, else a headless planner's (ADR-t1394-2).
+        let turn = match queue.run_in_workspace(handle).ok()? {
+            Some(run) => super::supervise::left_turn(&*queue, processes, &run, handle)?,
+            None => super::supervise::left_planner_turn(&*queue, processes, handle)?,
+        };
+        Some((processes as &dyn super::ProcessControl, turn))
+    }
+}
+
+impl SessionWrappers for RecordingSessions<'_> {
+    /// A run's wrapper that cannot be started is recorded as a failed call
+    /// on the run its environment names; a planner's, whose environment
+    /// names no run, is not recorded.
+    fn launch_background(
+        &self,
+        cwd: &std::path::Path,
+        command: &str,
+        env: &[(String, String)],
+        log: &std::path::Path,
+    ) -> Result<String> {
+        let run = env
+            .iter()
+            .find(|(name, _)| name == crate::domain::actor::RUN_ID_ENV)
+            .and_then(|(_, id)| RunId::new(id.as_str()).ok());
+        let result = self.inner.launch_background(cwd, command, env, log);
+        match run {
+            Some(run) => {
+                self.recorder
+                    .recorded(self.limits(), "launch_background", None, Some(&run), result)
+            }
+            None => result,
+        }
+    }
+    /// The wrapper is stopped, then the turn a wrapper that died left
+    /// running, and the stop is recorded as `wrapper_stopped` with `route`
+    /// on the run whose session it is, or as the queue's own event for a
+    /// planner's ([`wrapper_stopped_payload`], task 1657). A failed stop
+    /// of the wrapper is a failed `close` and records no `wrapper_stopped`;
+    /// a left turn that cannot be stopped fails the `close` after the
+    /// wrapper's stop is recorded. A record that cannot be written is
+    /// dropped.
+    fn stop_background(&self, handle: &str, route: StopRoute) -> Result<Option<WrapperStop>> {
+        let limits = self.limits();
+        let result = self.inner.stop_background(handle, route);
+        let stop = self
+            .recorder
+            .recorded(limits, "close", Some(handle), None, result)?;
+        let left_turn = self.left_turn(handle);
+        let left_turn_killed = left_turn.is_some();
+        let left = match left_turn {
+            Some((processes, turn)) => super::supervise::stop_left_turn(processes, &turn),
+            None => Ok(()),
+        };
+        // The wrapper's stop is recorded even when the turn it left could
+        // not be stopped, whose failure is then the close's.
+        if let Some(stop) = stop {
+            let _ = self.recorder.record_stop(
+                wrapper_stopped_payload(handle, stop, route, left_turn_killed),
+                handle,
+            );
+        }
+        self.recorder
+            .recorded(limits, "close", Some(handle), None, left)?;
+        Ok(stop)
+    }
+    /// A background session whose wrapper is gone still exists while the
+    /// turn it left runs, so that whatever stops it stops that turn.
+    fn exists(&self, handle: &str) -> Result<bool> {
+        let exists = self.recorder.retried(
+            self.limits(),
+            "exists",
+            handle,
+            || self.inner.exists(handle),
+            || true,
+        )?;
+        Ok(exists || self.left_turn(handle).is_some())
     }
     fn call_timeout(&self) -> Duration {
         self.inner.call_timeout()
@@ -567,14 +683,8 @@ impl WorkspaceBackend for RecordingBackend<'_> {
     fn reopen_interval(&self) -> Duration {
         self.inner.reopen_interval()
     }
-    fn resume_prompt_delay(&self) -> Duration {
-        self.inner.resume_prompt_delay()
-    }
     fn resume_timeout(&self) -> Duration {
         self.inner.resume_timeout()
-    }
-    fn submit_check_interval(&self) -> Duration {
-        self.inner.submit_check_interval()
     }
 }
 
@@ -585,8 +695,10 @@ mod tests {
     use anyhow::{Context, anyhow, bail};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A cmux whose first `failures` calls fail with `error`, counting
-    /// every call it gets. Only `exists` and `close` are made through it.
+    /// A cmux and a port of background wrappers whose first `failures`
+    /// calls fail with `error`, counting every call it gets. Only `exists`,
+    /// `close` and the start of a wrapper (which it refuses) are made
+    /// through it.
     struct Backend {
         error: &'static str,
         failures: AtomicUsize,
@@ -667,6 +779,24 @@ mod tests {
         /// No sleep between attempts in a unit test.
         fn retry_backoff(&self) -> Duration {
             Duration::ZERO
+        }
+    }
+
+    impl SessionWrappers for Backend {
+        fn launch_background(
+            &self,
+            _: &Path,
+            _: &str,
+            _: &[(String, String)],
+            _: &Path,
+        ) -> Result<String> {
+            bail!("this test starts no background wrapper")
+        }
+        fn stop_background(&self, _: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
+            unimplemented!()
+        }
+        fn exists(&self, _: &str) -> Result<bool> {
+            unimplemented!()
         }
     }
 
@@ -788,7 +918,7 @@ mod tests {
     #[test]
     fn a_failed_background_launch_is_a_backend_failure_only_for_a_run() {
         let backend = Backend::failing("unused", 0);
-        let recording = recording(&backend);
+        let recording = RecordingSessions::over(&backend, Arc::new(NoQueue), None, || None);
         let launch = |env: &[(&str, &str)]| {
             let env: Vec<(String, String)> = env
                 .iter()

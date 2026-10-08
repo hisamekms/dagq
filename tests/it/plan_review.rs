@@ -16,12 +16,10 @@ use dagq::infrastructure::git_binary::git_executable;
 use common::Bounded;
 
 use anyhow::{Result, bail};
+use dagq::domain::background_wrapper::{StopRoute, WrapperStop};
 use dagq::domain::headless_job::JobAccess;
 use dagq::{
-    application::{
-        AgentProvider, CommandSpec, SupervisorEnvironment, TaskStore, WorkspaceBackend,
-        WorkspaceTags, planner_idle_marker,
-    },
+    application::{AgentProvider, CommandSpec, SessionWrappers, TaskStore, planner_idle_marker},
     domain::{
         AskKind, DraftOrigin, NewAsk, NewGoal, NewTask, PlannerOrigin, PlannerOwner, Priority,
         ProposalId, ProposalStatus, Submission, TaskAction, TaskEdit, TaskId, TaskRun, TaskStatus,
@@ -312,24 +310,15 @@ pub(crate) fn job_actors(db: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The backend as far as plan review uses it: the wrappers of the
-/// runtime's planners started in the background (ADR-t1404-1 decision 8,
-/// parked unless [`Self::running`]), and, for a person's planner opened
-/// before `dagq plan` was abolished, the workspaces cmux lists (the ones
-/// `listed`, until closed), texts typed into them, exits sent and
-/// notifications. It opens no workspace: the runtime opens none for a
-/// planner any more (ADR-t1433-2).
+/// The session wrappers as far as plan review uses them: the wrappers of
+/// the runtime's planners started in the background (ADR-t1404-1 decision
+/// 8, parked unless [`Self::running`]), and the stops. No other session ID
+/// is open: the runtime opens no workspace for a planner and calls no cmux
+/// (ADR-t1433-2).
 pub(crate) struct PlanWorkspace {
-    listed: Mutex<Vec<String>>,
-    texts: Mutex<Vec<(String, String)>>,
-    pub(crate) exits: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
-    notifications: Mutex<Vec<(String, String)>>,
-    /// What `capture` returns, or its failure; none is an empty screen
-    /// (no input box).
-    pub(crate) screen: Mutex<Option<Result<String, String>>>,
-    /// Fail text submission after recording the attempted call.
-    pub(crate) send_text_error: Option<String>,
+    /// The session IDs `exists` was asked about, in order.
+    pub(crate) asked: Mutex<Vec<String>>,
     /// The wrappers started in the background (ADR-t1404-1 decision 8).
     pub(crate) background: BackgroundWrappers,
 }
@@ -338,13 +327,8 @@ impl Default for PlanWorkspace {
     /// The runtime's planners' wrappers parked: the test plays them.
     fn default() -> Self {
         Self {
-            listed: Mutex::default(),
-            texts: Mutex::default(),
-            exits: Mutex::default(),
             closed: Mutex::default(),
-            notifications: Mutex::default(),
-            screen: Mutex::default(),
-            send_text_error: None,
+            asked: Mutex::default(),
             background: BackgroundWrappers::parked(),
         }
     }
@@ -358,14 +342,6 @@ impl PlanWorkspace {
             ..Self::default()
         }
     }
-    pub(crate) fn listing(workspaces: &[&str]) -> Self {
-        let backend = Self::default();
-        *backend.listed.lock().unwrap() = workspaces.iter().map(|w| (*w).to_owned()).collect();
-        backend
-    }
-    pub(crate) fn texts(&self) -> Vec<(String, String)> {
-        self.texts.lock().unwrap().clone()
-    }
     /// The handles of the wrappers started in the background, in order.
     pub(crate) fn launched(&self) -> Vec<String> {
         self.background
@@ -377,72 +353,9 @@ impl PlanWorkspace {
     pub(crate) fn closed(&self) -> Vec<String> {
         self.closed.lock().unwrap().clone()
     }
-    pub(crate) fn notifications(&self) -> Vec<(String, String)> {
-        self.notifications.lock().unwrap().clone()
-    }
 }
 
-impl WorkspaceBackend for PlanWorkspace {
-    fn preflight(&self) -> Result<()> {
-        Ok(())
-    }
-    fn preflight_detached(&self, _: &SupervisorEnvironment) -> Result<()> {
-        Ok(())
-    }
-    fn send_text(&self, workspace_id: &str, text: &str) -> Result<()> {
-        self.texts
-            .lock()
-            .unwrap()
-            .push((workspace_id.into(), text.into()));
-        if let Some(error) = &self.send_text_error {
-            bail!("{error}");
-        }
-        Ok(())
-    }
-    fn send_enter(&self, _: &str) -> Result<()> {
-        Ok(())
-    }
-    fn capture(&self, _: &str) -> Result<String> {
-        self.screen
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or_else(|| Ok(String::new()))
-            .map_err(anyhow::Error::msg)
-    }
-    fn close(&self, workspace_id: &str) -> Result<()> {
-        self.background.stop(workspace_id);
-        self.closed.lock().unwrap().push(workspace_id.into());
-        self.listed.lock().unwrap().retain(|w| w != workspace_id);
-        Ok(())
-    }
-    fn set_color(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-    fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-    fn pin(&self, _: &str) -> Result<()> {
-        Ok(())
-    }
-    fn send_exit(&self, workspace_id: &str) -> Result<()> {
-        self.exits.lock().unwrap().push(workspace_id.into());
-        Ok(())
-    }
-    fn listed_workspace_ids(&self) -> Result<Vec<String>> {
-        Ok(self.listed.lock().unwrap().clone())
-    }
-    fn exists(&self, workspace_id: &str) -> Result<bool> {
-        if dagq::domain::background_wrapper::is_background(workspace_id) {
-            return Ok(self.background.runs(workspace_id));
-        }
-        Ok(self
-            .listed
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|w| w == workspace_id))
-    }
+impl SessionWrappers for PlanWorkspace {
     fn launch_background(
         &self,
         cwd: &Path,
@@ -452,21 +365,14 @@ impl WorkspaceBackend for PlanWorkspace {
     ) -> Result<String> {
         self.background.launch(cwd, command, env, log)
     }
-    fn create_named(&self, name: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
-        bail!("plan review opens no workspace ({name}): a planner runs in the background")
+    fn stop_background(&self, handle: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
+        self.background.stop(handle);
+        self.closed.lock().unwrap().push(handle.into());
+        Ok(None)
     }
-    fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
-        Ok("GROUP".into())
-    }
-    fn notify(&self, title: &str, body: &str, _: Option<&str>) -> Result<()> {
-        self.notifications
-            .lock()
-            .unwrap()
-            .push((title.into(), body.into()));
-        Ok(())
-    }
-    fn submit_check_interval(&self) -> Duration {
-        Duration::from_millis(5)
+    fn exists(&self, handle: &str) -> Result<bool> {
+        self.asked.lock().unwrap().push(handle.into());
+        Ok(dagq::domain::background_wrapper::is_background(handle) && self.background.runs(handle))
     }
 }
 
@@ -793,7 +699,7 @@ fn a_revise_of_a_persons_planner_goes_to_a_new_planner_with_the_precedents_and_t
         "verdict": "revise", "reasons": [reason], "summary": "acceptance contradicts the description",
         "precedents": [earlier]
     })]);
-    let backend = PlanWorkspace::listing(&["PW"]);
+    let backend = PlanWorkspace::default();
     supervise(&fx, &backend, &reviewer);
     assert!(
         reviewer.prompts()[0].contains(&format!(
@@ -808,7 +714,6 @@ fn a_revise_of_a_persons_planner_goes_to_a_new_planner_with_the_precedents_and_t
     assert_eq!(status(&mut queue, task), TaskStatus::Draft);
     // The person's planner's row is closed without cmux: nothing typed into
     // its workspace, nothing closed.
-    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert!(backend.closed().is_empty(), "{:?}", backend.closed());
     let closes: Vec<Value> = queue
         .latest_events_of("planner_closed", 10)
@@ -874,7 +779,6 @@ fn a_revise_of_a_persons_planner_goes_to_a_new_planner_with_the_precedents_and_t
             .any(|e| e["kind"] == "planner_unresponsive" && e["next"] == "check the planner"),
         "{watched}"
     );
-    assert!(backend.texts().is_empty());
     assert_eq!(backend.launched().len(), 1, "the revise is not sent twice");
     assert_eq!(
         reviewer.prompts().len(),
@@ -1075,7 +979,6 @@ fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
         assert_eq!(finished["primary_code"], "task_overlap");
     }
     // The supervisor notifies nobody: the inbox's watch tells of each ask.
-    assert!(backend.notifications.lock().unwrap().is_empty());
     // Held for the person: not reviewed again.
     supervise(&fx, &backend, &reviewer);
     assert_eq!(reviewer.prompts().len(), 6);
@@ -1528,7 +1431,6 @@ fn a_ready_task_the_review_reopens_leaves_the_claim_for_a_planner() {
     fs::write(planner_idle_marker(&dir), "{}").unwrap();
     supervise(&fx, &backend, &passing);
     assert!(exit_requested(&fx.db, planners[0].id));
-    assert!(backend.exits.lock().unwrap().is_empty(), "nothing typed");
 }
 
 /// A reopened task whose proposal is withdrawn goes back to `draft` with
@@ -1750,7 +1652,6 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
     idle(&queue, &fx.db, planners[0].id);
     supervise(&fx, &backend, &reviewer);
     assert!(exit_requested(&fx.db, planners[0].id));
-    assert!(backend.exits.lock().unwrap().is_empty(), "nothing typed");
     queue
         .planner_exited(planners[0].id, std::process::id(), 0)
         .unwrap();
@@ -1821,7 +1722,6 @@ fn a_planner_question_answer_goes_to_its_planner_as_a_turn_or_is_carried_by_a_ne
         requests[0]["prompt"],
         format!("answer to ask {}: cancel", asked.id)
     );
-    assert!(backend.texts().is_empty());
     assert!(queue.asks(Default::default()).unwrap().is_empty());
     assert_eq!(events(&mut queue, first, "ask_delivered").len(), 1);
     assert_eq!(
@@ -2010,7 +1910,6 @@ fn a_planner_question_answer_another_supervisor_claimed_is_not_sent_again() {
     assert_eq!(events(&mut queue, draft, "ask_delivered").len(), 1);
     supervise(&fx, &backend, &reviewer);
     assert_eq!(turn_requests(&fx.db, planner.id).len(), 1);
-    assert!(backend.texts().is_empty());
 }
 
 /// Edits during a job are told from the others by the event ids of the
