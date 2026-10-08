@@ -306,10 +306,13 @@ impl SqliteQueue {
                 answer: Some(text.to_owned()),
                 ..ask.clone()
             };
-            payload["runtime_delivers"] = json!(
-                super::draft_planners::route_of(&tx, &answered)?
-                    != crate::application::PlannerAnswerRoute::Person
-            );
+            let delivers = super::draft_planners::route_of(&tx, &answered)?
+                != crate::application::PlannerAnswerRoute::Person;
+            payload["runtime_delivers"] = json!(delivers);
+            // A draft nobody works on is the inbox's to plan with the answer.
+            if !delivers && let Some(draft) = super::draft_planners::answer_draft(&tx, &answered)? {
+                payload[crate::domain::ANSWER_DRAFT_TASK_ID] = json!(draft);
+            }
         }
         if ask.kind == AskKind::ApprovePlan {
             // The supervisor readies, sends back or cancels the proposal as

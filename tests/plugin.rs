@@ -528,6 +528,7 @@ fn skills_split_the_roles_of_inbox_planner_and_recover() {
         "`push main`",
         "`triage by hand`",
         "`send the answer of ask <id> to the worker and close it`",
+        "`plan task <N> with the answer: …`",
         "`check the e2e host`",
         "`stop the dead landing's processes`",
         "`dagq service status`",
@@ -548,6 +549,12 @@ fn skills_split_the_roles_of_inbox_planner_and_recover() {
         assert!(recover.contains(section), "dagq-recover lacks {section}");
     }
     assert!(recover.contains("\"$DAGQ\" up"));
+    // A planner's answer about a draft goes to a planning request, never
+    // to a worker.
+    assert!(recover.contains("`plan task <N> with the answer: …`"));
+    let session =
+        fs::read_to_string(plugin_root().join("skills/dagq-recover/reference/session.md")).unwrap();
+    assert!(session.contains("request add --text '<the answer>' --ref task:<N> --ref ask:<id>`"));
     assert!(
         !recover.contains("--plugin-dir \"$CLAUDE_PLUGIN_ROOT\""),
         "dagq-recover must not pass the installed plugin's per-version cache to --plugin-dir"

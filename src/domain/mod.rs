@@ -1914,6 +1914,16 @@ pub enum AttentionNext {
     DeliverAnswer {
         ask_id: AskId,
     },
+    /// The answer of a `planner_question` about a draft that none of the
+    /// runtime's planners carries (`PlannerAnswerRoute::Person`): no worker
+    /// or planner works on the draft, so the inbox records the person's
+    /// answer as a planning request naming the draft and the ask (`request
+    /// add --ref task:N --ref ask:M`, ADR-t1394-1 decision 8) and closes the
+    /// ask.
+    PlanWithAnswer {
+        ask_id: AskId,
+        task_id: TaskId,
+    },
     /// Not a person's to act on: the supervisor holds the accepted run
     /// for its headless review and what follows from the verdict (ADR-0027).
     Reviewing,
@@ -2072,6 +2082,39 @@ pub enum AttentionNext {
     StopLandingProcesses,
 }
 
+impl AttentionNext {
+    /// What the inbox does with the answer of a `planner_question` that none
+    /// of the runtime's planners carries: plan the draft it is about with
+    /// it, or, about anything else (a task past its draft, a finding, a
+    /// request), read it and close it. Never "to the worker": a planner
+    /// asked it.
+    pub fn of_person_planner_answer(ask_id: AskId, draft: Option<TaskId>) -> Self {
+        match draft {
+            Some(task_id) => Self::PlanWithAnswer { ask_id, task_id },
+            None => Self::ReadAnswer { ask_id },
+        }
+    }
+
+    /// The task of a `planner_question` whose being a draft makes its
+    /// answer [`Self::PlanWithAnswer`]: the ask's task, unless the ask is
+    /// about a finding or a planning request (their answers go their own
+    /// ways).
+    pub fn planner_answer_task(ask: &Ask) -> Option<TaskId> {
+        if ask.kind != AskKind::PlannerQuestion
+            || ask.finding_id.is_some()
+            || ask.request_id.is_some()
+        {
+            return None;
+        }
+        ask.task_id
+    }
+}
+
+/// The key of a `planner_question`'s `ask_answered` that names the draft
+/// the answer is about when none of the runtime's planners carries it
+/// (`runtime_delivers: false`): [`AttentionNext::PlanWithAnswer`].
+pub const ANSWER_DRAFT_TASK_ID: &str = "draft_task_id";
+
 /// How many times the supervisor resumes one `needs_session` run (one
 /// `resume_started` each) before it leaves the run to a human (ADR-0019).
 pub const MAX_RESUME_ATTEMPTS: usize = 3;
@@ -2096,6 +2139,12 @@ impl fmt::Display for AttentionNext {
                 write!(
                     f,
                     "send the answer of ask {ask_id} to the worker and close it"
+                )
+            }
+            Self::PlanWithAnswer { ask_id, task_id } => {
+                write!(
+                    f,
+                    "plan task {task_id} with the answer: request add --ref task:{task_id} --ref ask:{ask_id}, then close ask {ask_id}"
                 )
             }
             Self::Reviewing => f.write_str("reviewing (runtime)"),
@@ -2500,21 +2549,34 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // A `propose` or `dismiss` answer the runtime applied to the ask's
         // finding (ADR-0044 decision 19).
         ("ask_answered", _) if payload.get("finding_applied").is_some() => None,
-        // The supervisor types the answer of a `worker_question` into the
-        // worker's terminal, and delivers that of a `planner_question` to its
-        // planner (ADR-0041 decision 13): to a planner of the runtime's as
-        // its next turn (ADR-t1433-2).
+        // The supervisor delivers the answer of a `worker_question` to the
+        // worker's session; one it does not deliver is the inbox's to send.
         ("ask_answered", _)
-            if matches!(
-                payload.get("kind").and_then(serde_json::Value::as_str),
-                Some(kind) if kind == AskKind::WorkerQuestion.as_str()
-                    || kind == AskKind::PlannerQuestion.as_str()
-            ) =>
+            if payload.get("kind").and_then(serde_json::Value::as_str)
+                == Some(AskKind::WorkerQuestion.as_str()) =>
         {
             match payload.get("runtime_delivers") {
                 Some(serde_json::Value::Bool(false)) => {
                     ask_id(payload).map(|ask_id| AttentionNext::DeliverAnswer { ask_id })
                 }
+                _ => None,
+            }
+        }
+        // The supervisor delivers the answer of a `planner_question` to a
+        // planner of the runtime's as its next turn (ADR-0041 decision 13,
+        // ADR-t1433-2); one none carries is the inbox's, never a worker's.
+        ("ask_answered", _)
+            if payload.get("kind").and_then(serde_json::Value::as_str)
+                == Some(AskKind::PlannerQuestion.as_str()) =>
+        {
+            match payload.get("runtime_delivers") {
+                Some(serde_json::Value::Bool(false)) => ask_id(payload).map(|ask_id| {
+                    let draft = payload
+                        .get(ANSWER_DRAFT_TASK_ID)
+                        .and_then(serde_json::Value::as_i64)
+                        .map(TaskId::new);
+                    AttentionNext::of_person_planner_answer(ask_id, draft)
+                }),
                 _ => None,
             }
         }
@@ -2769,6 +2831,52 @@ pub fn supervisor_attention(pulses: &[SupervisorPulse]) -> Vec<Attention> {
 mod attention_tests {
     use super::*;
     use serde_json::json;
+
+    /// Only a `planner_question` about a task (not a finding or a planning
+    /// request) names the task whose being a draft plans its answer.
+    #[test]
+    fn a_planner_answer_is_planned_only_for_the_task_it_asks_about() {
+        let ask = |kind, finding: Option<i64>, request: Option<i64>| Ask {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            id: AskId::new(5),
+            kind,
+            task_id: Some(TaskId::new(9)),
+            run_id: None,
+            question: "q".into(),
+            options: Vec::new(),
+            answer: Some("adopt".into()),
+            asked_by: "planner".into(),
+            reason_category: AskReason::Scope,
+            subject: None,
+            affected: Vec::new(),
+            created_at: 0,
+            answered_at: Some(1),
+            closed_at: None,
+            finding_id: finding.map(FindingId::new),
+            request_id: request.map(RequestId::new),
+            answered_by: None,
+            option_index: None,
+            answer_authority: None,
+            answer_approval: None,
+        };
+        assert_eq!(
+            AttentionNext::planner_answer_task(&ask(AskKind::PlannerQuestion, None, None)),
+            Some(TaskId::new(9))
+        );
+        for other in [
+            ask(AskKind::PlannerQuestion, Some(2), None),
+            ask(AskKind::PlannerQuestion, None, Some(3)),
+            ask(AskKind::WorkerQuestion, None, None),
+        ] {
+            assert_eq!(
+                AttentionNext::planner_answer_task(&other),
+                None,
+                "{other:?}"
+            );
+        }
+    }
 
     /// A recommendation (ADR-t451-1 decision 1) must be one of the ask's
     /// options once trimmed, those the runtime adds included; a blank one
@@ -3741,11 +3849,20 @@ mod attention_tests {
                 json!({"ask_id": 5, "kind": "planner_question", "runtime_delivers": true}),
                 None,
             ),
+            // A planner asked it: never "to the worker".
             (
                 "ask_answered",
                 json!({"ask_id": 5, "kind": "planner_question", "runtime_delivers": false}),
-                Some(DeliverAnswer {
+                Some(ReadAnswer {
                     ask_id: AskId::new(5),
+                }),
+            ),
+            (
+                "ask_answered",
+                json!({"ask_id": 5, "kind": "planner_question", "runtime_delivers": false, "draft_task_id": 9}),
+                Some(PlanWithAnswer {
+                    ask_id: AskId::new(5),
+                    task_id: TaskId::new(9),
                 }),
             ),
             ("ask_delivered", json!({"ask_id": 4}), None),
@@ -3991,6 +4108,27 @@ mod attention_tests {
             }
             .to_string(),
             "send the answer of ask 2 to the worker and close it"
+        );
+        assert_eq!(
+            PlanWithAnswer {
+                ask_id: AskId::new(2),
+                task_id: TaskId::new(7)
+            }
+            .to_string(),
+            "plan task 7 with the answer: request add --ref task:7 --ref ask:2, then close ask 2"
+        );
+        assert_eq!(
+            AttentionNext::of_person_planner_answer(AskId::new(2), Some(TaskId::new(7))),
+            PlanWithAnswer {
+                ask_id: AskId::new(2),
+                task_id: TaskId::new(7)
+            }
+        );
+        assert_eq!(
+            AttentionNext::of_person_planner_answer(AskId::new(2), None),
+            ReadAnswer {
+                ask_id: AskId::new(2)
+            }
         );
         assert_eq!(
             serde_json::to_value(RestartSupervisor).unwrap(),

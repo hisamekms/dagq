@@ -1260,6 +1260,21 @@ fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
     Ok(usize::try_from(count.max(0))?)
 }
 
+/// The draft a `planner_question` is about
+/// ([`crate::domain::AttentionNext::planner_answer_task`]), when its task is a draft: the
+/// `draft_task_id` of the answer none of the runtime's planners carries.
+pub(super) fn answer_draft(conn: &Connection, ask: &Ask) -> Result<Option<TaskId>> {
+    let Some(task_id) = crate::domain::AttentionNext::planner_answer_task(ask) else {
+        return Ok(None);
+    };
+    let status: Option<String> = conn
+        .query_row("SELECT status FROM tasks WHERE id=?1", [task_id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok((status.as_deref() == Some(TaskStatus::Draft.as_str())).then_some(task_id))
+}
+
 /// Where the answer of `ask` goes: the planner of the runtime's not closed
 /// that works on its task (opened for its bundle of drafts, or for its
 /// proposal);

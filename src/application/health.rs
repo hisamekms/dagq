@@ -18,7 +18,7 @@ use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS,
     LandingAnswer, ReasonCode, RunEvent, RunHistory, RunId, RunLease, RunProcess, RunStatus,
     SessionRole, SupervisorMode, SupervisorPulse, SupervisorRegistration, TaskId, TaskRun,
-    UPDATE_FAILED_OPTIONS, event_attention, event_kind, heartbeat_stale,
+    TaskStatus, UPDATE_FAILED_OPTIONS, event_attention, event_kind, heartbeat_stale,
     kpi::push::{KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS},
     queue_hold::{self, HoldJob},
     reason, recheck, run_attention, run_attention_of,
@@ -1793,10 +1793,16 @@ pub fn attention(
                 AttentionNext::DeliveringAnswer { ask_id: ask.id },
             )
         } else if ask.kind == AskKind::PlannerQuestion {
+            // A planner asked it: the inbox plans the draft it is about with
+            // the answer, or reads anything else (never "to the worker").
+            let draft = match AttentionNext::planner_answer_task(&ask) {
+                Some(task) if is_draft(queue, task)? => Some(task),
+                _ => None,
+            };
             (
                 "answered",
                 event_kind::ASK_ANSWERED,
-                AttentionNext::DeliverAnswer { ask_id: ask.id },
+                AttentionNext::of_person_planner_answer(ask.id, draft),
             )
         } else if ask.kind == AskKind::Stalled
             && ask.answer.as_deref().map(str::trim) == Some("wait")
@@ -1848,6 +1854,18 @@ pub fn attention(
         });
     }
     Ok(attention)
+}
+
+/// Whether `task` is a draft, read from the task store every context reads.
+fn is_draft(queue: &dyn Queue, task: TaskId) -> Result<bool> {
+    let page = queue.list(&super::TaskQuery {
+        status: super::StatusFilter::Only(vec![TaskStatus::Draft]),
+        goal_id: None,
+        limit: 1,
+        before: Some(task),
+        full: false,
+    })?;
+    Ok(page.tasks.first().is_some_and(|item| item.id == task))
 }
 
 #[cfg(test)]

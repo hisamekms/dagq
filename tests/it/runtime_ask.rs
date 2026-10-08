@@ -825,3 +825,109 @@ fn an_abandoned_run_is_recovered_and_triaged_by_the_supervisor() {
     let quiet = watch_for(&db, Some(cursor), Duration::from_millis(300));
     assert_eq!(quiet["events"], json!([]));
 }
+
+/// The answer of a `planner_question` none of the runtime's planners
+/// carries is the inbox's, never "to the worker": about a draft nobody
+/// works on, `status` and `watch` name the planning request that carries
+/// it (`request add --ref task:N --ref ask:M`); about a task past its
+/// draft, it is read and closed. A worker's answer keeps its own next.
+#[test]
+fn an_undelivered_planner_answer_is_planned_for_a_draft_and_never_sent_to_a_worker() {
+    use dagq::{
+        application::TaskStore,
+        domain::{AskKind, AskReason, NewAsk, NewTask, SessionRole, TaskAction, TaskId},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let mut queue = crate::common::template::queue(&db);
+    let mut add = |title: &str| {
+        queue
+            .add(NewTask {
+                title: title.into(),
+                description: String::new(),
+                acceptance: "a".into(),
+                verification_commands: Vec::new(),
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                priority: Default::default(),
+                change: None,
+                goal_id: None,
+                context: String::new(),
+                provider: None,
+                worker_mode: None,
+                wait_for_build: false,
+            })
+            .unwrap()
+            .id()
+    };
+    let draft = add("a person's draft");
+    let ready = add("a ready task");
+    queue.transition(ready, TaskAction::BypassReview).unwrap();
+    let ask_about = |queue: &mut dagq::infrastructure::sqlite::SqliteQueue, task: TaskId| {
+        queue
+            .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
+                topics: Vec::new(),
+                kind: AskKind::PlannerQuestion,
+                task_id: Some(task),
+                run_id: None,
+                question: "in the goal?".into(),
+                options: vec!["adopt".into(), "cancel".into(), "keep_draft".into()],
+                asked_by: "planner".into(),
+                reason_category: AskReason::Scope,
+                finding_id: None,
+                request_id: None,
+            })
+            .unwrap()
+            .ask
+            .id
+    };
+    let on_draft = ask_about(&mut queue, draft);
+    let on_ready = ask_about(&mut queue, ready);
+    let before = queue.latest_event_id().unwrap().as_i64();
+    queue.answer(on_draft, "adopt").unwrap();
+    queue.answer(on_ready, "adopt").unwrap();
+
+    let plan = format!(
+        "plan task {draft} with the answer: request add --ref task:{draft} --ref ask:{on_draft}, then close ask {on_draft}"
+    );
+    let read = format!("read the answer of ask {on_ready} and close it");
+    let woke = watch_role(
+        &db,
+        Some(before),
+        Duration::from_secs(20),
+        SessionRole::Inbox,
+    );
+    let nexts: Vec<&str> = woke["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "ask_answered")
+        .map(|e| e["next"].as_str().unwrap())
+        .collect();
+    assert!(nexts.contains(&plan.as_str()), "{woke}");
+    assert!(nexts.contains(&read.as_str()), "{woke}");
+    let status = runtime::status(&db).unwrap();
+    let next_of = |ask: dagq::domain::AskId| {
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["ask_id"] == ask.as_i64())
+            .map(|a| a["next"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    assert_eq!(next_of(on_draft), plan);
+    assert_eq!(next_of(on_ready), read);
+    assert!(
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| !a["next"].as_str().unwrap().contains("to the worker")),
+        "{status}"
+    );
+}

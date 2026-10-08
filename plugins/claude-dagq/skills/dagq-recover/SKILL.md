@@ -1,6 +1,6 @@
 ---
 name: dagq-recover
-description: What a person does by hand in a dagq queue, from the inbox or their own terminal, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or retry a failed push; answer a stalled ask, read a run's turns or a past stuck_exit or answer_prompt ask; bypass or resubmit a plan review; start, stop or update the runtime. Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", an answered stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
+description: What a person does by hand in a dagq queue, from the inbox or their own terminal, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or retry a failed push; answer a stalled ask, read a run's turns or a past stuck_exit or answer_prompt ask; bypass or resubmit a plan review; start, stop or update the runtime. Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", "plan task <N> with the answer", an answered stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
 ---
 
 # dagq: what a person does by hand
@@ -55,6 +55,8 @@ Attention `review by hand` (`review_failed`: the supervisor's headless review fa
 ## 7. A run's session: turns, stalls, undelivered answers
 
 Every run's session is headless in the background: no screen, no keys, nothing typed by hand (`run screen` and `run send` refuse every run; never `cmux`). Read what its turns did with `"$DAGQ" run log RUN [--follow]` (a planner's with `planner log ID`). The supervisor applies a `stalled` answer itself (`reference/stalled.md`); `send the answer of ask <id> to the worker and close it` and a past `stuck_exit` or `answer_prompt` ask: `reference/session.md` and `reference/stuck-exit.md`. Never `recover` such a run while a supervisor runs. What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
+
+`plan task <N> with the answer: …` has no worker to reach: a planning request carries the person's answer (`reference/session.md`, "An undelivered planner answer about a draft").
 
 ## 8. Bypass plan review; a failed plan or goal review
 

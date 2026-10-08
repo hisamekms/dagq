@@ -19,7 +19,7 @@ This session holds no state. After a restart, compaction or `/clear`, start agai
 "$DAGQ" status --role inbox
 ```
 
-`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). `reference/status.md` lists every field and `next`. If `inbox_guardrail.guardrail` is `false`, this inbox was opened without the settings that refuse `cmux`: tell the person, write your handoff, and have them close this inbox and open it again with `up` (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
+`asks` lists the open asks; `attention` has everything that waits, each with a fixed `next`; `cursor` is where the next `watch` starts. Handle open asks first (step 3), then the rest (step 4). If `inbox_guardrail.guardrail` is `false`, this inbox was opened without the settings that refuse `cmux`: tell the person, write your handoff, and have them close this inbox and open it again with `up` (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/up-down.md`, "Open the inbox again").
 
 ## 2. Watch in the background
 
@@ -50,7 +50,7 @@ Before showing an ask whose kind, options or effect is unclear, read `reference/
 
 Report each in a short list (task, status, `next`, gist of `last_error`); act with `dagq-recover` on the person's word. `(runtime)` needs nothing. Each `next` in full: `reference/status.md`.
 
-- `read the answer of ask <id> and close it` (`ask_answered`), `send the answer of ask <id> to the worker and close it`: carry it out (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md`), then `"$DAGQ" ask close <id>`.
+- `read the answer of ask <id> and close it` (`ask_answered`), `send the answer of ask <id> to the worker and close it`, `plan task <N> with the answer: …`: carry it out (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md`), then `"$DAGQ" ask close <id>`.
 - `triage by hand` (`triage_failed`), `recover by hand` (`recovery_failed`): `dagq-recover` section 4.
 - `goal review by hand` (`goal_review_failed`): on the person's word, `goal review ID` reruns it, or the person closes the goal (`dagq-recover` section 8).
 - `request a plan for …` (the draft, the finding, the waiting tasks, the follow-ups of goal G): a request on the person's word (`reference/status.md`).
