@@ -230,6 +230,12 @@ fn an_hour_no_rule_meets_is_reviewed_and_saved_but_not_told_to_the_inbox() {
             .unwrap()
             .contains("hourly review of the hour 2026-09-29T03")
     );
+    assert_eq!(
+        dry["prompt_bytes"]["total"],
+        dry["prompt"].as_str().unwrap().len()
+    );
+    assert_eq!(dry["prompt_bytes"]["limit"], PROMPT_LIMIT);
+    assert!(dry.get("prompt_limit").is_none());
     assert_eq!(queue_events(&db, "throughput_review_finished").len(), 1);
 }
 
@@ -315,11 +321,12 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
                "effort": null, "source": "default"})
     );
     // Its start and its finish record what its prompt took (ADR-t1566-1
-    // decision 6), in the observer's names.
+    // decision 6), as PromptBytes.
     let finished = &queue_events(&db, "throughput_review_finished")[0];
     for event in [&started[0], finished] {
-        assert_eq!(event["prompt_bytes"], prompt.len(), "{event}");
-        assert_eq!(event["prompt_limit"], PROMPT_LIMIT, "{event}");
+        assert_eq!(event["prompt_bytes"]["total"], prompt.len(), "{event}");
+        assert_eq!(event["prompt_bytes"]["limit"], PROMPT_LIMIT);
+        assert!(event.get("prompt_limit").is_none());
         assert!(event["input_bytes"].as_u64().unwrap() > 0, "{event}");
         assert_eq!(event["omitted_to_fit"], json!([]), "{event}");
     }
@@ -509,7 +516,9 @@ fn a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice() {
     let prompt =
         fs::read_to_string(PathBuf::from(error["dir"].as_str().unwrap()).join("prompt.md"))
             .unwrap();
-    assert_eq!(error["prompt_bytes"], prompt.len(), "{error}");
+    assert_eq!(error["prompt_bytes"]["total"], prompt.len(), "{error}");
+    assert_eq!(error["prompt_bytes"]["limit"], PROMPT_LIMIT);
+    assert!(error.get("prompt_limit").is_none());
     assert!(
         error["error"].as_str().unwrap().contains("start"),
         "{error}"
@@ -610,7 +619,9 @@ fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_
         let started = started.last().unwrap();
         assert_eq!(started["period"], done["period"]);
         for event in [started, &done] {
-            assert_eq!(event["prompt_bytes"], prompt.len(), "{event}");
+            assert_eq!(event["prompt_bytes"]["total"], prompt.len(), "{event}");
+            assert_eq!(event["prompt_bytes"]["limit"], PROMPT_LIMIT);
+            assert!(event.get("prompt_limit").is_none());
             assert!(event["input_bytes"].as_u64().unwrap() <= PROMPT_INPUT_LIMIT as u64);
         }
     }

@@ -26,10 +26,12 @@
 //! [`ThroughputReviewHost`]; [`crate::compose::throughput_review`] opens
 //! the queue and runs [`review`].
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+use super::prompt::PromptBytes;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
@@ -393,7 +395,7 @@ fn review_period<Q: Queue + EventReads>(
         period = period.label,
         "throughput review ({}) started with a prompt of {} bytes",
         options.mode.as_str(),
-        prompt_record["prompt_bytes"]
+        prompt_record["prompt_bytes"]["total"]
     );
     let clock = Instant::now();
     let started_ms = generators
@@ -823,11 +825,23 @@ fn timelines(
 pub struct ReviewPrompt {
     pub text: String,
     /// What the prompt took (ADR-t1566-1 decision 6), recorded on
-    /// `throughput_review_started` and `throughput_review_finished` in the
-    /// observer's names (task 1567): `prompt_bytes` (the whole prompt with
-    /// its language line) and `prompt_limit`, `input_bytes` (the summary of
-    /// the inputs, pretty JSON) and `input_limit`, and `omitted_to_fit`,
-    /// the parts [`DROP_ORDER`] left out (empty when none).
+    /// `throughput_review_started`, `throughput_review_finished` and the
+    /// dry run's output:
+    /// - `prompt_bytes`, a [`PromptBytes`]: `total` is the whole prompt with
+    ///   its language line (what `prompt.md` holds and stdin gets) and
+    ///   `limit` is [`PROMPT_LIMIT`]. Its sections sum to `total`:
+    ///   `instructions` (the procedure and the inputs' explanation, up to
+    ///   the opening JSON fence), `input` (the summary's pretty JSON and the
+    ///   closing fence, less the trailing whitespace the language line
+    ///   trims) and `language` (the language line and the blank line before
+    ///   it, 0 without one). `omitted` counts each name of `omitted_to_fit`
+    ///   once, not the items of a section as the other jobs do, and
+    ///   `over_limit` says why the prompt is still over [`PROMPT_LIMIT`]
+    ///   after [`DROP_ORDER`] (null when within it).
+    /// - `input_bytes`, the summary of the inputs as pretty JSON, and
+    ///   `input_limit`, [`PROMPT_INPUT_LIMIT`].
+    /// - `omitted_to_fit`, the parts [`DROP_ORDER`] left out (empty when
+    ///   none).
     pub record: Value,
 }
 
@@ -841,13 +855,46 @@ pub fn job_prompt(
     language: Option<&crate::domain::language::Language>,
 ) -> Result<ReviewPrompt> {
     let summary = prompt_input(input);
-    let text = crate::domain::language::with_instruction(
-        render_prompt(period, dagq, &summary, input_path)?,
-        language,
-    );
+    let (instructions, mut input_section) =
+        render_prompt_parts(period, dagq, &summary, input_path)?;
+    if language.is_some() {
+        input_section.truncate(input_section.trim_end().len());
+    }
+    let body = format!("{instructions}{input_section}");
+    let body_bytes = body.len();
+    let text = crate::domain::language::with_instruction(body, language);
+    let mut omitted = BTreeMap::new();
+    for path in DROP_ORDER {
+        let name = path.join(".");
+        if summary["omitted_to_fit"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|item| item.as_str() == Some(&name)))
+        {
+            // DROP_ORDER names are static and each dropped part counts once.
+            let key = match *path {
+                ["kpi", "latest"] => "kpi.latest",
+                ["kpi", "targets"] => "kpi.targets",
+                ["kpi", "periods"] => "kpi.periods",
+                [name] => name,
+                _ => unreachable!("DROP_ORDER has only one- or two-part paths"),
+            };
+            omitted.insert(key, 1);
+        }
+    }
+    let bytes = PromptBytes {
+        total: text.len(),
+        limit: PROMPT_LIMIT,
+        sections: BTreeMap::from([
+            ("instructions", instructions.len()),
+            ("input", input_section.len()),
+            ("language", text.len() - body_bytes),
+        ]),
+        omitted,
+        over_limit: (text.len() > PROMPT_LIMIT)
+            .then(|| "prompt still exceeds PROMPT_LIMIT after DROP_ORDER".to_owned()),
+    };
     let record = json!({
-        "prompt_bytes": text.len(),
-        "prompt_limit": PROMPT_LIMIT,
+        "prompt_bytes": bytes,
         "input_bytes": pretty_len(&summary),
         "input_limit": PROMPT_INPUT_LIMIT,
         "omitted_to_fit": summary.get("omitted_to_fit").cloned().unwrap_or_else(|| json!([])),
@@ -881,6 +928,16 @@ fn render_prompt(
     summary: &Value,
     input_path: &Path,
 ) -> Result<String> {
+    let (instructions, input) = render_prompt_parts(period, dagq, summary, input_path)?;
+    Ok(format!("{instructions}{input}"))
+}
+
+fn render_prompt_parts(
+    period: &Window,
+    dagq: &str,
+    summary: &Value,
+    input_path: &Path,
+) -> Result<(String, String)> {
     let cadence = match period.mode {
         ReviewMode::Hourly => hourly_cadence(&period.label, &summary["hourly"]["reasons"]),
         ReviewMode::Daily => format!(
@@ -902,7 +959,7 @@ fn render_prompt(
     } else {
         String::new()
     };
-    Ok(format!(
+    let instructions = format!(
         "You are the throughput review job of the dagq queue, started headless by the supervisor.\n\
          You read and explain; you change nothing. The queue refuses every command that changes state from your environment \
          (no notes, marks, findings, asks, tasks or goals); the supervisor saves what you print and passes your conclusion to the inbox.\n\
@@ -929,13 +986,14 @@ fn render_prompt(
          `kpi` for the other periods, strata and the host (`--period`, `--last`, `--area`, `--change`), `stats --since {start} --until {end} --full` for the runs, \
          `timeline RUN` for each of the longest runs, and `events --full` for the landings (`--kind run_integrated`) and anything else. \
          `omitted_to_fit`, when present, names what was left out to keep this prompt small; read it with the commands too:\n\
-         ```json\n{input}\n```\n",
+         ```json\n",
         procedure = procedure(),
         input_path = input_path.display(),
         start = millis_text(stats_from(period)),
         end = millis_text(period.end_ms),
-        input = serde_json::to_string_pretty(summary)?,
-    ))
+    );
+    let input = format!("{}\n```\n", serde_json::to_string_pretty(summary)?);
+    Ok((instructions, input))
 }
 
 /// The hourly review's part of the prompt (ADR-t1172-1 decision 2): an
@@ -1423,15 +1481,20 @@ mod tests {
         let record = &fitted.record;
         // The whole prompt, its language line included, is counted.
         assert!(fitted.text.ends_with(&language.instruction()));
-        assert_eq!(record["prompt_bytes"], fitted.text.len());
+        assert_eq!(record["prompt_bytes"]["total"], fitted.text.len());
         assert!(fitted.text.len() <= PROMPT_LIMIT, "{record}");
-        assert_eq!(record["prompt_limit"], PROMPT_LIMIT);
+        assert_eq!(record["prompt_bytes"]["limit"], PROMPT_LIMIT);
         let summary = prompt_input(&input);
         assert_eq!(record["input_bytes"], pretty_len(&summary));
         assert!(pretty_len(&summary) <= PROMPT_INPUT_LIMIT, "{record}");
         assert_eq!(record["input_limit"], PROMPT_INPUT_LIMIT);
         assert_eq!(record["omitted_to_fit"], json!(["stats", "kpi.latest"]));
         assert_eq!(record["omitted_to_fit"], summary["omitted_to_fit"]);
+        assert_eq!(
+            record["prompt_bytes"]["omitted"],
+            json!({"stats": 1, "kpi.latest": 1})
+        );
+        assert!(record.get("prompt_limit").is_none());
         // The text is the prompt the review renders, with the language.
         assert_eq!(
             fitted.text,
@@ -1450,6 +1513,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(small.record["omitted_to_fit"], json!([]));
-        assert_eq!(small.record["prompt_bytes"], small.text.len());
+        assert_eq!(small.record["prompt_bytes"]["total"], small.text.len());
+        assert_eq!(small.record["prompt_bytes"]["omitted"], json!({}));
+        for prompt in [&fitted, &small] {
+            let bytes = &prompt.record["prompt_bytes"];
+            assert!(bytes["over_limit"].is_null());
+            assert_eq!(
+                bytes["sections"]
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .map(|value| value.as_u64().unwrap())
+                    .sum::<u64>(),
+                prompt.text.len() as u64
+            );
+        }
+        let too_large = job_prompt(
+            &window,
+            "dagq",
+            &json!({"period": "x".repeat(PROMPT_LIMIT)}),
+            Path::new("/q/input.json"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            too_large.record["prompt_bytes"]["over_limit"]
+                .as_str()
+                .unwrap()
+                .contains("DROP_ORDER")
+        );
     }
 }

@@ -4531,6 +4531,9 @@ const OPTIONAL_SECTIONS: usize = 6;
 /// (ADR-t2072-1), whose prompt's bytes are recorded on `wrapper_launched`.
 /// A next-turn message's (ADR-t2072-1) are recorded on the
 /// `turn_requested` that wrote it, and each of its texts is one item.
+/// The throughput review's `omitted` is keyed not by its sections but by
+/// the names of the parts its `DROP_ORDER` left out, each counted once
+/// ([`ReviewPrompt::record`](crate::application::throughput_review::ReviewPrompt::record)).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PromptBytes {
     pub total: usize,
