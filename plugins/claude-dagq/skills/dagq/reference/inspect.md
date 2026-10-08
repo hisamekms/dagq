@@ -189,11 +189,11 @@ Next: while the task is `draft`, `submitted` or `ready`, widen its globs with `s
 ```sh
 "$DAGQ" goal list [--tag TAG]             # every goal by priority with its tags and task counts by status
 "$DAGQ" goal show ID                      # the goal, its tasks (id, title, status, priority), its latest events (--full: everything)
-"$DAGQ" set-goal TASK GOAL                # move a draft or ready task into an open goal
-"$DAGQ" set-goal TASK --none              # take a draft or ready task out of its goal
+"$DAGQ" set-goal TASK GOAL                # move a draft, submitted or ready task into an open goal
+"$DAGQ" set-goal TASK --none              # take a draft, submitted or ready task out of its goal
 "$DAGQ" goal edit ID --constraints "..."  # replace one or more fields (--title, --description, --acceptance, --constraints, --doc, --priority, --tag; --doc "" clears it, --no-tags removes the tags)
 "$DAGQ" goal close ID --verdict achieved  # or abandoned; see goal-close.md
 "$DAGQ" goal review ID                     # rearm the goal review after `goal review by hand` or a keep_open answer (person or inbox)
 ```
 
-`set-goal` follows the dependency rules: only a `draft` or `ready` task can be moved, and a closed goal accepts no task. Take an `in_progress` task back with `draft ID` only if its run is finished; a `completed` task keeps the goal it landed with. `goal edit` records the old and new fields in a `goal_updated` event; a run already claimed keeps the prompt it started with, and runs claimed afterwards see the new text. `goal edit --tag T` (repeatable) replaces every tag, from `[goals] tags` when `dagq.toml` lists them; a closed goal's tags and texts can still change, its priority cannot.
+`set-goal` follows the dependency rules: only a `draft`, `submitted` or `ready` task can be moved, and a closed goal accepts no task. Take an `in_progress` task back with `draft ID` only if its run is finished; a `completed` task keeps the goal it landed with. `goal edit` records the old and new fields in a `goal_updated` event; a run already claimed keeps the prompt it started with, and runs claimed afterwards see the new text. `goal edit --tag T` (repeatable) replaces every tag, from `[goals] tags` when `dagq.toml` lists them; a closed goal's tags and texts can still change, its priority cannot.
