@@ -1,3 +1,0 @@
-{"timestamp":"2026-10-02T02:01:00Z","type":"session_meta","payload":{"id":"T2","cwd":"{{REPO}}","originator":"codex_exec"}}
-{"timestamp":"2026-10-02T02:01:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"You are a subagent: look at the tests."}]}}
-{"timestamp":"2026-10-02T02:05:00Z","type":"token_usage_record","payload":{"thread_id":"T2","turn_id":"turn","session_id":"T1","root_turn_id":"turn","response_id":"resp_a","usage":{"input_tokens":50,"cached_input_tokens":10,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":1,"total_tokens":0}}}

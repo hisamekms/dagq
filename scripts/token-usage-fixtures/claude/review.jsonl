@@ -1,7 +1,0 @@
-{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-01T14:59:00Z","content":"You review run r1 of dagq task 1"}
-{"type":"user","isMeta":true,"timestamp":"2026-10-01T14:59:00Z","cwd":"{{REPO}}","message":{"role":"user","content":"meta, not the prompt"}}
-{"type":"user","timestamp":"2026-10-01T14:59:00Z","cwd":"{{REPO}}","message":{"role":"user","content":"<system-reminder>not the prompt</system-reminder>"}}
-{"type":"user","timestamp":"2026-10-01T14:59:00Z","cwd":"{{REPO}}","message":{"role":"user","content":[{"type":"text","text":"You review run r1 of dagq task 1 (t) before it lands."}]}}
-{"type":"assistant","requestId":"q1","timestamp":"2026-10-01T14:59:59Z","cwd":"{{REPO}}","message":{"id":"m1","role":"assistant","model":"claude-x","usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":100,"cache_creation_input_tokens":1000}}}
-{"type":"assistant","requestId":"q1","timestamp":"2026-10-01T14:59:59Z","cwd":"{{REPO}}","message":{"id":"m1","role":"assistant","model":"claude-x","usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":100,"cache_creation_input_tokens":1000}}}
-{"type":"assistant","requestId":"q2","timestamp":"2026-10-01T15:00:00Z","cwd":"{{REPO}}","message":{"id":"m2","role":"assistant","model":"claude-x","usage":{"input_tokens":20,"output_tokens":2,"cache_read_input_tokens":200,"cache_creation_input_tokens":2000}}}

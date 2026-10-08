@@ -34,14 +34,16 @@ FROM=2026-09-28T13:00:00Z; TO=2026-09-28T14:00:00Z
 - `claim_deferred`（衝突の多いファイルでの保留。reason は `hot_files`）の数と、`stats` の `claim_holds`（load などによる claim の保留。`by_reason.load_average` など、件数と秒）で、slot が空いていたのに claim されなかった時間を見る
 - resume と ask は、作業のやり直しと人待ちで slot が埋まっていたかを見る
 
-(トークン) トークン消費の増減を見るときは、`stats` の `sessions.by_kind.tokens` を使わない（session が閉じた日にまとめて数え、Claude の subagent と Codex の job の分が抜ける）。host の transcript と rollout を数える当面の script で、actor × JST の日と着地 1 件あたりを比べる:
+(トークン) トークン消費の増減は、`kpi` の `tokens` と `tokens_per_landing`（`actor=`・`provider=`・`model=` の層）を前の期間と並べ、印や時刻の前後は `--compare` で比べる。対象の時間の内訳は `stats` の `execution_tokens`（`by_actor`・`by_provider`・`by_model`）で読む:
 
 ```sh
-python3 scripts/token-usage.py --repo ~/ghq/github.com/hisamekms/dagq --dagq ~/.local/bin/dagq --since 2026-09-26 --until 2026-10-03   # --format json も出せる
+~/.local/bin/dagq kpi --period day --last 7 | jq '.periods[] | {label, tokens: .kpis.tokens, per_landing: .kpis.tokens_per_landing, unavailable}'   # 週は --period week
+~/.local/bin/dagq kpi --compare 'A..B,C..D'                  # 2 つの窓（印や時刻の前後も）
+~/.local/bin/dagq stats --since "$FROM" --until "$TO" | jq '.execution_tokens'
 ```
 
-- 日は JST、`--since` / `--until` はその両端を含む。queue の dir の既定は repository で打った `dagq locate` から求める。dagq が起動していない session（人が checkout で開いた session など）は合計に入れず、数だけを出す
-- この script と節は、恒久の記録（goal 95 の kpi / stats の Execution の軸、task 1494）が入ったら外す
+- 欄の意味と日への振り分けは plugin の dagq skill の [reference/kpi.md](../../../../plugins/claude-dagq/skills/dagq/reference/kpi.md) の Tokens と [reference/inspect.md](../../../../plugins/claude-dagq/skills/dagq/reference/inspect.md) の `execution_tokens` が持つ
+- 記録の始まりと欠けは `execution_tokens` の `recorded_from` と `coverage`（`--compare` では両側の `token_coverage`）で分かる。`kpi` の値が null（`not_recorded` / `partly_recorded`）の期間は記録の無い（途中から始まる）期間として比べない。`actor=` の層はその actor の記録の始まりで null になるので、`all` などが値を持っても actor ごとの `recorded_from` を確かめる
 
 (c) 結論を分ける。書くのは次のどれか（重なるなら全部）と、その根拠の数字:
 
