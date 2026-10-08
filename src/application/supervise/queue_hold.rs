@@ -105,20 +105,21 @@ impl Supervisor<'_> {
     fn apply_hold_answer(&mut self, ask: &Ask, answer: &str) -> Result<()> {
         for run in queue_hold::affected_runs(ask) {
             let Some(index) = self
+                .claim
                 .slots
                 .iter()
                 .position(|slot| slot.run.id().as_str() == run)
             else {
                 continue;
             };
-            let id = self.slots[index].run.id().clone();
+            let id = self.claim.slots[index].run.id().clone();
             if applied_to(&self.queue.run_events(&id)?, ask.id).is_some() {
                 continue;
             }
             // Recorded before the answer acts: a run given up has no lease,
             // and another supervisor closing the ask must not read it as
             // one nobody watched.
-            let outcome = hold_outcome(&self.slots[index].phase, answer);
+            let outcome = hold_outcome(&self.claim.slots[index].phase, answer);
             self.queue.record_runtime_event(
                 &id,
                 EventKind::HoldAnswerApplied,
@@ -144,10 +145,10 @@ impl Supervisor<'_> {
     /// `recover run` for the inbox). Throwing the work away is the
     /// answer's, a person's decision.
     fn hold_canceled(&mut self, ask: &Ask, index: usize) {
-        let mut slot = self.slots.remove(index);
+        let mut slot = self.claim.slots.release(index);
         stop_job(&mut slot);
         self.hold_continue.remove(slot.run.id());
-        self.loads.remove(slot.run.id());
+        self.claim.drop_load(slot.run.id());
         let message = format!(
             "a person answered `{CANCEL_AFFECTED}` to the {} ask {} that held the run: the supervisor gave it up",
             ask.reason_category.as_str(),

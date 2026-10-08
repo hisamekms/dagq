@@ -11,9 +11,7 @@ use super::*;
 use crate::domain::EventKind;
 use crate::domain::{
     Ask,
-    waiting::{
-        WaitCause, WaitCount, WaitPhase, WaitState, consumed_asks, deferred_asks, waits_for,
-    },
+    waiting::{WaitCause, WaitPhase, WaitState, consumed_asks, deferred_asks, waits_for},
 };
 
 /// The wait of one slot's run.
@@ -114,7 +112,7 @@ impl Phase {
     /// in a slot (ADR-0071 decision 15): the wait stopped them, and the
     /// time left before it is not carried over. `now` is the supervisor's
     /// monotonic clock.
-    fn restart_stage_clocks(&mut self, files: &dyn RunFiles, now: Instant) {
+    pub(super) fn restart_stage_clocks(&mut self, files: &dyn RunFiles, now: Instant) {
         match self {
             Phase::Revise(watch) => watch.sent = now,
             Phase::Resume(watch) => watch.restart_clocks(files.now(), now),
@@ -137,37 +135,13 @@ impl Supervisor<'_> {
     /// The slots in use: every run but the waiting ones and those waiting
     /// to go back (decision 5).
     pub(super) fn used_slots(&self) -> usize {
-        self.slots.iter().filter(|slot| !slot.out_of_slot()).count()
-    }
-
-    /// The runs in the slots that wait only for their landing turn
-    /// (ADR-t1591-1): `used_slots` counts them, and up to `parallel` of
-    /// them leave room for a light task.
-    pub(super) fn landing_queue(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|slot| slot.in_landing_queue())
-            .count()
-    }
-
-    /// The runs whose wait ended and that wait to go back to a slot.
-    pub(super) fn returning_runs(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|slot| slot.waiting.as_ref().is_some_and(|w| w.ended.is_some()))
-            .count()
+        self.claim.slots.used()
     }
 
     /// The runs held against `--max-waiting`: the waiting ones and those
     /// waiting to go back, whose sessions are open all the same.
     fn waiting_runs(&self) -> usize {
-        WaitCount::of(
-            self.slots
-                .iter()
-                .filter_map(|slot| slot.waiting.as_ref())
-                .map(|waiting| waiting.ended.is_some()),
-        )
-        .count()
+        self.claim.slots.waiting()
     }
 
     /// Move the runs in the slots that wait for a person into waits, the
@@ -175,29 +149,29 @@ impl Supervisor<'_> {
     /// the limit stays in its slot and records `run_waiting_deferred` once
     /// per ask.
     pub(super) fn start_waits(&mut self) {
-        if self.max_waiting == 0 {
+        if self.claim.max_waiting == 0 {
             return;
         }
         let mut candidates = Vec::new();
-        for index in 0..self.slots.len() {
-            match self.wait_candidate(&self.slots[index]) {
+        for index in 0..self.claim.slots.len() {
+            match self.wait_candidate(&self.claim.slots[index]) {
                 Ok(Some(ask)) => candidates.push((ask.id, ask.kind, ask.created_at, index)),
                 Ok(None) => {}
                 Err(error) => {
-                    let run = self.slots[index].run.id().clone();
+                    let run = self.claim.slots[index].run.id().clone();
                     warn!(run_id = %run, error = %format_args!("{error:#}"), "run {run}: whether it waits for a person could not be read: {error:#}");
                 }
             }
         }
         candidates.sort_by_key(|(id, _, _, _)| *id);
         for (id, kind, created_at, index) in candidates {
-            let result = if self.waiting_runs() < self.max_waiting {
+            let result = if self.waiting_runs() < self.claim.max_waiting {
                 self.start_wait(index, id, kind, created_at)
             } else {
                 self.defer_wait(index, id, kind)
             };
             if let Err(error) = result {
-                let run = self.slots[index].run.id().clone();
+                let run = self.claim.slots[index].run.id().clone();
                 warn!(run_id = %run, error = %format_args!("{error:#}"), "run {run}: its wait could not be recorded: {error:#}");
             }
         }
@@ -237,7 +211,7 @@ impl Supervisor<'_> {
 
     fn start_wait(&mut self, index: usize, id: AskId, kind: AskKind, asked_at: i64) -> Result<()> {
         let waiting = self.waiting_runs() + 1;
-        let slot = &self.slots[index];
+        let slot = &self.claim.slots[index];
         let phase = slot.wait_phase().context("the run left its phase")?;
         // The slot's copy can be older than the status (`starting`).
         let run = self.queue.run(slot.run.id())?;
@@ -250,25 +224,30 @@ impl Supervisor<'_> {
                 "phase": phase.as_str(),
                 "status": run.status().as_str(),
                 "waiting": waiting,
-                "limit": self.max_waiting,
+                "limit": self.claim.max_waiting,
             }),
         )?;
-        info!(run_id = %run.id(), ask_id = %id, "run {} waits for a person in its {} ask {id} outside the slots ({waiting} of {} waiting)", run.id(), kind.as_str(), self.max_waiting);
-        self.slots[index].waiting = Some(Waiting {
-            asks: vec![(id, kind)],
-            started_at: self.generators.clock.now(),
-            since: asked_since(asked_at).min(self.files.now()),
+        info!(run_id = %run.id(), ask_id = %id, "run {} waits for a person in its {} ask {id} outside the slots ({waiting} of {} waiting)", run.id(), kind.as_str(), self.claim.max_waiting);
+        let started_at = self.generators.clock.now();
+        let since = asked_since(asked_at).min(self.files.now());
+        self.claim.slots.leave_for(
+            index,
+            Waiting {
+                asks: vec![(id, kind)],
+                started_at,
+                since,
 
-            ended: None,
-        });
+                ended: None,
+            },
+        );
         Ok(())
     }
 
     fn defer_wait(&mut self, index: usize, id: AskId, kind: AskKind) -> Result<()> {
-        if self.slots[index].deferred.contains(&id) {
+        if self.claim.slots[index].deferred.contains(&id) {
             return Ok(());
         }
-        let run = self.slots[index].run.clone();
+        let run = self.claim.slots[index].run.clone();
         self.queue.record_runtime_event(
             run.id(),
             EventKind::RunWaitingDeferred,
@@ -276,11 +255,11 @@ impl Supervisor<'_> {
                 "ask_id": id,
                 "ask_kind": kind,
                 "waiting": self.waiting_runs(),
-                "limit": self.max_waiting,
+                "limit": self.claim.max_waiting,
             }),
         )?;
-        info!(run_id = %run.id(), ask_id = %id, "run {} waits for its {} ask {id} in its slot: {} runs wait already", run.id(), kind.as_str(), self.max_waiting);
-        self.slots[index].deferred.push(id);
+        info!(run_id = %run.id(), ask_id = %id, "run {} waits for its {} ask {id} in its slot: {} runs wait already", run.id(), kind.as_str(), self.claim.max_waiting);
+        self.claim.slots.defer_wait(index, id);
         Ok(())
     }
 
@@ -329,9 +308,7 @@ impl Supervisor<'_> {
         };
         let wrapper = wrapper.clone();
         // A reopened session's wrapper registered.
-        if let Some(reopen) = self.reopens.get_mut(run.id()) {
-            reopen.registered();
-        }
+        self.resume.reopen_registered(run.id());
         let silent = match &mut slot.phase {
             Phase::Session(watch) => &mut watch.silent,
             Phase::Exiting(_) => return Ok(Step::Continue),
@@ -523,7 +500,7 @@ impl Supervisor<'_> {
         slot.consumed.extend(waiting.asks.iter().map(|(id, _)| *id));
         waiting.ended = Some((now, cause));
         if cause.returns_at_once() {
-            // The slot is out of `self.slots` while it is watched.
+            // The slot is out of the slot table while it is watched.
             let used = self.used_slots() + 1;
             self.regain_slot(slot, used)?;
         }
@@ -551,10 +528,10 @@ impl Supervisor<'_> {
             EventKind::RunSlotRegained,
             json!({
                 "slot_wait_secs": now - ended_at,
-                "over_parallel": used > self.parallel,
+                "over_parallel": used > self.claim.parallel,
             }),
         )?;
-        info!(run_id = %run, "run {run} is back in a slot ({used} of {} used)", self.parallel);
+        info!(run_id = %run, "run {run} is back in a slot ({used} of {} used)", self.claim.parallel);
         Ok(())
     }
 
@@ -563,6 +540,7 @@ impl Supervisor<'_> {
     /// also while the supervisor drains, whose end waits for them.
     pub(super) fn return_waiting_runs(&mut self) {
         let mut returning: Vec<(i64, usize)> = self
+            .claim
             .slots
             .iter()
             .enumerate()
@@ -575,17 +553,14 @@ impl Supervisor<'_> {
             .collect();
         returning.sort_unstable();
         for (_, index) in returning {
-            if self.used_slots() >= self.parallel {
+            if self.used_slots() >= self.claim.parallel {
                 break;
             }
-            let Some(waiting) = self.slots[index].waiting.take() else {
+            let now = self.generators.clock.monotonic();
+            let Some(waiting) = self.claim.slots.regain(index, &*self.files, now) else {
                 continue;
             };
-            let now = self.generators.clock.monotonic();
-            self.slots[index]
-                .phase
-                .restart_stage_clocks(&*self.files, now);
-            let run = self.slots[index].run.id().clone();
+            let run = self.claim.slots[index].run.id().clone();
             let used = self.used_slots();
             if let Err(error) = self.record_regained(&run, &waiting, used) {
                 warn!(run_id = %run, error = %format_args!("{error:#}"), "run {run}: its return to a slot could not be recorded: {error:#}");
@@ -653,8 +628,8 @@ impl Supervisor<'_> {
     /// a wait (decision 11): a run that waits needs no free slot while the
     /// waits are under their limit.
     pub(super) fn adopts_as_waiting(&self, run: &RunId) -> Result<bool> {
-        Ok(self.max_waiting > 0
-            && self.waiting_runs() < self.max_waiting
+        Ok(self.claim.max_waiting > 0
+            && self.waiting_runs() < self.claim.max_waiting
             && WaitState::of(&self.queue.run_events(run)?).is_some_and(|s| s.ended.is_none()))
     }
 }

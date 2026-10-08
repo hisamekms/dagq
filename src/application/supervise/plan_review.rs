@@ -151,7 +151,7 @@ impl Supervisor<'_> {
             models.switchable(role),
             self.no_claude,
             self.queue_hold.is_some(),
-            self.fallback.jobs,
+            self.provider.fallback.jobs,
             |provider| self.job_unusable(provider),
         )
     }
@@ -511,7 +511,7 @@ impl Supervisor<'_> {
             history: crate::application::stats::conflict_history(&events, &|since| {
                 self.repository.main_history(since)
             }),
-            conflicts: self.conflicts,
+            conflicts: self.claim.conflicts,
             ..LiveSnapshot::default()
         };
         let stats = crate::domain::stats::stats(
@@ -657,7 +657,7 @@ impl Supervisor<'_> {
         let error = &failure.error;
         match failure.unusable {
             Some((provider, reason)) => {
-                let next = super::goal_review::again_on(self.fallback.jobs, provider);
+                let next = super::goal_review::again_on(self.provider.fallback.jobs, provider);
                 warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; {} cannot be used ({}), and the proposal is reviewed again {next}", job.proposal_id, job.attempt, provider.as_str(), reason.as_str());
             }
             None => {
@@ -812,7 +812,7 @@ impl Supervisor<'_> {
                 // Not listed, yet its session runs: it is not given up on
                 // that evidence; the timeout tells the inbox.
                 Some(view) if !self.planner_gone(view) => {}
-                _ if runtime_open < self.limits.runtime_planners.value => {
+                _ if runtime_open < self.claim.limits.runtime_planners.value => {
                     // A fix stopped at a question nobody answered yet is not
                     // started again without the answer; the answers given
                     // go with the revise to the same new planner

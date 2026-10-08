@@ -47,6 +47,7 @@ check-agents-md-size agents_md_too_big
 check-layer-deps layer_forbidden_reference
 check-layer-deps layer_stale_allow_item
 check-layer-deps context_reaches_loop_state
+check-layer-deps stage_reaches_other_context
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-doc-links doc_broken_link
@@ -86,6 +87,10 @@ violate_layer_stale_allow_item() {
 
 violate_context_reaches_loop_state() {
   echo "impl Supervisor<'_> { fn zz_scripts_root(&self) -> usize { self.slots.len() } }" >>src/application/supervise/report.rs
+}
+
+violate_stage_reaches_other_context() {
+  echo "fn zz_scripts_root(host: &super::contexts::HostOpsState) {}" >>src/application/supervise/stages.rs
 }
 
 violate_frontmatter_date_comment() {

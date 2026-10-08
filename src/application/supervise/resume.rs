@@ -67,7 +67,7 @@ impl Supervisor<'_> {
             }
             // Out of attempts: the run is retried with its branch carried
             // over, or a person decides, whether or not a slot is free.
-            if candidate.resumes.exhausted(self.resume_config) {
+            if candidate.resumes.exhausted(self.resume.config) {
                 if let Err(error) = self.exhaust_resumes(run, candidate.resumes) {
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its used-up resumes could not be handed to a person: {error:#}", run.id());
                 }
@@ -109,7 +109,7 @@ impl Supervisor<'_> {
             &self.token,
             &main,
             reason.as_deref(),
-            self.resume_config,
+            self.resume.config,
         )?;
         drop(guard);
         let Some((run, attempt)) = begun else {
@@ -126,7 +126,7 @@ impl Supervisor<'_> {
         match self.start_resume(&run, attempt, &request, run_env) {
             Ok(watch) => {
                 info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} resumed (attempt {attempt}; {} of at most {MAX_RESUME_ATTEMPTS} counted before it) in workspace {}", run.id(), run.task_id(), resumes.counted, watch.workspace);
-                self.slots.push(Slot::new(run, Phase::Resume(watch)));
+                self.claim.slots.admit(Slot::new(run, Phase::Resume(watch)));
             }
             Err(error) => {
                 let message = format!("run {} could not be resumed: {error:#}", run.id());
@@ -244,7 +244,7 @@ impl Supervisor<'_> {
         } else {
             Phase::Validating(Some(self.validate(run.clone())), None)
         };
-        self.slots.push(Slot::new(run, phase));
+        self.claim.slots.admit(Slot::new(run, phase));
         Ok(())
     }
     /// End a `needs_session` run whose resumes are used up (ADR-0047
@@ -267,7 +267,7 @@ impl Supervisor<'_> {
             return Ok(());
         }
         let last_error = run.last_error().map(str::to_owned).unwrap_or_default();
-        let resumed = resumed_text(resumes, self.resume_config);
+        let resumed = resumed_text(resumes, self.resume.config);
         let reason = format!(
             "{resumed} and still needs a session: {}",
             tail(&last_error, 500)
@@ -287,7 +287,7 @@ impl Supervisor<'_> {
             run.id(),
             &Exhaustion::Recover,
             &reason,
-            self.resume_config,
+            self.resume.config,
         )?
         else {
             return Ok(());
@@ -324,7 +324,7 @@ impl Supervisor<'_> {
         };
         let Some(failed) =
             self.queue
-                .exhaust_resumes(run.id(), &exhaustion, reason, self.resume_config)?
+                .exhaust_resumes(run.id(), &exhaustion, reason, self.resume.config)?
         else {
             return Ok(());
         };
@@ -743,7 +743,7 @@ impl Supervisor<'_> {
             )?,
             ResumeOutcome::Unresolved => {
                 payload["exhausted"] =
-                    json!(resumes_exhausted(&*self.queue, &id, self.resume_config));
+                    json!(resumes_exhausted(&*self.queue, &id, self.resume.config));
                 self.queue
                     .finish_resume(&id, &self.token, None, None, false, payload)?
             }

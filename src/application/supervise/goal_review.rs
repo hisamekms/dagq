@@ -82,7 +82,7 @@ impl Supervisor<'_> {
         let models = self.role_models(role);
         goal_review_route_of(
             models.launch(role),
-            (models.switchable(role), self.fallback.jobs),
+            (models.switchable(role), self.provider.fallback.jobs),
             self.no_claude || self.queue_hold.is_some(),
             |provider| self.job_unusable(provider),
         )
@@ -485,7 +485,7 @@ impl Supervisor<'_> {
         let error = &failure.error;
         match failure.unusable {
             Some((provider, reason)) => {
-                let next = again_on(self.fallback.jobs, provider);
+                let next = again_on(self.provider.fallback.jobs, provider);
                 warn!(error = %error, "goal {} goal review {} failed: {error}; {} cannot be used ({}), and the goal is reviewed again {next}", job.goal_id, job.attempt, provider.as_str(), reason.as_str());
             }
             None => {

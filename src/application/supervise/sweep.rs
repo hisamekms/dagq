@@ -219,7 +219,13 @@ impl Supervisor<'_> {
             .queue
             .ended_run_workspaces()?
             .into_iter()
-            .filter(|w| !self.slots.iter().any(|slot| *slot.run.id() == w.run_id))
+            .filter(|w| {
+                !self
+                    .claim
+                    .slots
+                    .iter()
+                    .any(|slot| *slot.run.id() == w.run_id)
+            })
             .collect();
         let mut closed_runs: Vec<RunId> = Vec::new();
         for candidate in candidates {

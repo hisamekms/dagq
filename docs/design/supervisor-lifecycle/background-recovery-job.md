@@ -31,7 +31,7 @@ worker の画面由来の `prompt_waiting`・`stuck_exit`、idle marker の対�
 
 ### CPU時間が伸びないプロセス<a id="cpu時間が伸びないプロセスidle_process"></a>
 
-`ProcessControl::list` が読む一覧を `Supervisor::process_sample` で全 run が共有する。間隔は閾値の10分の1、1〜60秒（test の秒未満の値も使う）。各 watch は1間隔待ってから標本を取り始め、新しい標本の run のプロセスを `domain::idle_process::CpuWatch` へ渡す。CPU 時間の伸びが経過時間の1%を超えれば進んだとし、子が進んでいる親は idle にしない。新しい子は最も近い祖先の進んだ時刻を引き継ぎ、pid の再使用や CPU 時間の減少は新しいプロセスとする。CPU 時間が読めないものは進んでいると扱う。session の起動から60秒以内に始まった agent の子の補助プロセスは除く。
+`ProcessControl::list` が読む一覧を `TriageState::process_sample` で全 run が共有する。間隔は閾値の10分の1、1〜60秒（test の秒未満の値も使う）。各 watch は1間隔待ってから標本を取り始め、新しい標本の run のプロセスを `domain::idle_process::CpuWatch` へ渡す。CPU 時間の伸びが経過時間の1%を超えれば進んだとし、子が進んでいる親は idle にしない。新しい子は最も近い祖先の進んだ時刻を引き継ぎ、pid の再使用や CPU 時間の減少は新しいプロセスとする。CPU 時間が読めないものは進んでいると扱う。session の起動から60秒以内に始まった agent の子の補助プロセスは除く。
 
 job に渡した idle の部分木は、進むか `wait` の再確認の時刻になるまで再び渡さない。facts は `idle_processes`（pid・ppid・command・elapsed_secs・idle_secs・cpu_ms・cpu_growth_ms・descendants・active_ms）、`threshold: idle_process_secs`・threshold_secs・progress_cpu_per_mille・phase。非対話の session と resume に残る監視を使い、対話の終了待ちの `exit_wait` は使わない。
 
@@ -78,7 +78,7 @@ ADR-t609-1より前のruntimeは、`stalled`以外のalertのjobの失敗を`rec
 - **行き先**（`Supervisor::recovery_route`）: alertのjobを始めるとき決め、`recovery_requested`の`launch`に書く。providerを書かない役割はClaudeで、queueのholdのあいだは始めない（alertは解けてから追い直す）。providerを書いた役割（`claude`を書いたものも）は使えるproviderで始め、Claudeのholdは`codex`のjobを止めない。`[provider_fallback] jobs = false`なら、使えない理由ではもう一方で始めず、控えが解けるまで待って同じproviderで始める（`--no-claude`による行き先は変わらない。[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。`--no-claude`で動かせるproviderが無ければjobを起動せず、jobの失敗と同じそのalertのask（`recovery_failed`、`the recovery job could not start: provider_disabled: …; handle this role manually`）にする。
 - **起動と検査**: Codexでは`codex exec --json`の読み取りだけのsandbox（queue serviceに届くjobのprofile）で、verdictは最終の`agent_message`から読み、上の「適用」と同じ検査（alertごとに許す操作、`confidence: high`の`repair`だけ、適用の直前の前提の再確認、alertごとの3回）を通る。jobはworktree・run directory・cmuxのworkspaceに書けず、`stop_processes`はruntimeがpidで行う。
 - **失敗**: 非0終了・timeout・読めないverdictは上の「jobの失敗」と同じそのalertのask（`recovery_failed`）にし、Claudeに回さない。providerが使えずに失敗した・起動しなかったjob（ログイン・使用量の上限・agentが起動しない）は、役割がproviderを書いていれば（ADR-t1063-1の決定4）そのproviderを控え（`provider_held`）、askを開かずに`recovery_finished`（`outcome: job_failed`、`escalated: false`、`error`、`provider_unusable`）だけを記録する。alertの次のjobは次の見張りで行き先のprovider（控えの間はもう一方、`jobs = false`なら控えが解けた後の同じprovider）で始まり（`idle_process`は渡したプロセスをもう一度alertにできるよう戻す）、alertの3回に数える。`--no-claude`で残るproviderが無ければ、次のjobは起動せずに理由付きのalertのaskになる。queueのhold askに加わるのはClaudeのjobの壁だけ（壁で止まったClaudeのjobは今までどおりaskにもしない）。
-- **記録**: `recovery_finished`（適用・escalate・失敗のどれでも）にCodexのthreadの`session_id`と`model`（読めなければ`model_unknown`）を書く。escalateの`recovery_finished`は`Escalation::record`が書くので、終わったjobのthreadとmodelは`Supervisor::live_job_ends`にrun・alert・attemptごとに置いてそこで載せる。`headless_jobs`の`provider`は`launch`のprovider。
+- **記録**: `recovery_finished`（適用・escalate・失敗のどれでも）にCodexのthreadの`session_id`と`model`（読めなければ`model_unknown`）を書く。escalateの`recovery_finished`は`Escalation::record`が書くので、終わったjobのthreadとmodelは`TriageState::live_job_ends`にrun・alert・attemptごとに置いてそこで載せる。`headless_jobs`の`provider`は`launch`のprovider。
 - **test**: `tests/it/recovery_codex.rs`（stalledのrunのjobの`resume`が適用されて着地すること、`confidence: low`の`repair`と失敗したjobが`recovery_failed`のaskになること、ログインで失敗したCodexのjobがaskを開かず次のjobがClaudeで動いて着地すること）と、`domain::actor_model`のunit test（`jobs`のon / offとCodex・Claudeを書いた・書かない役割の行き先）。
 
 ## 引き継ぎ

@@ -218,7 +218,7 @@ impl Supervisor<'_> {
         let models = self.role_models(role);
         provider::review_route(
             self.no_claude,
-            (models.switchable(role), self.fallback.jobs),
+            (models.switchable(role), self.provider.fallback.jobs),
             models.launch(role),
             self.queue_hold,
             |provider| self.job_unusable(provider),
@@ -1008,7 +1008,7 @@ impl Supervisor<'_> {
             .iter()
             .any(uses_automatic_inherit);
         let own_commits = head != *run.base_commit();
-        match decide_conflict(&history, !inherited && own_commits, self.resume_config) {
+        match decide_conflict(&history, !inherited && own_commits, self.resume.config) {
             ConflictDecision::RequestRebase => {}
             ConflictDecision::Inherit => {
                 // Recorded for the reader and an adopter, which goes on
@@ -1016,7 +1016,7 @@ impl Supervisor<'_> {
                 payload["exhausted"] = json!(true);
                 self.queue
                     .record_runtime_event(run.id(), EventKind::ConflictPrecheck, payload)?;
-                info!(run_id = %run.id(), "run {}: {why}, after {requested} conflict requests and {} conflict-only resumes (at most {} in all); landing, and a conflicting landing retries the task with the run's branch carried over", run.id(), resumes.conflict_only, self.resume_config.conflict_only_limit);
+                info!(run_id = %run.id(), "run {}: {why}, after {requested} conflict requests and {} conflict-only resumes (at most {} in all); landing, and a conflicting landing retries the task with the run's branch carried over", run.id(), resumes.conflict_only, self.resume.config.conflict_only_limit);
                 return Ok(land(session));
             }
             ConflictDecision::Ask => {
@@ -1033,7 +1033,7 @@ impl Supervisor<'_> {
                     };
                     format!(
                         "{why}, after {requested} conflict requests and {} conflict-only resumes (at most {} in all), and {cannot}",
-                        resumes.conflict_only, self.resume_config.conflict_only_limit
+                        resumes.conflict_only, self.resume.config.conflict_only_limit
                     )
                 };
                 // What an adopter asks, if it takes the run over before the ask.
@@ -1285,9 +1285,9 @@ impl Supervisor<'_> {
     /// A landing that fails to start is only noted by the caller, which goes on,
     /// and the run stays queued for a later pass.
     pub(super) fn start_approved_landings(&mut self, parallel: usize) -> Result<()> {
-        if self.run_env_missing
+        if self.landing.run_env_missing
             || self.observation.ci.held()
-            || self.landing_unresolved
+            || self.landing.unresolved
             || self.host.disk.landing_short
             || self.used_slots() >= parallel
             || !self
@@ -1336,7 +1336,7 @@ impl Supervisor<'_> {
             drop(guard);
             if let Some(run) = leased {
                 info!(run_id = %run.id(), "run {} runs its e2e before it lands as queued", run.id());
-                self.slots.push(Slot::new(run, Phase::AwaitingSlot));
+                self.claim.slots.admit(Slot::new(run, Phase::AwaitingSlot));
             }
             return Ok(());
         };
@@ -1344,8 +1344,9 @@ impl Supervisor<'_> {
         drop(guard);
         info!(run_id = %run.id(), "run {} lands onto main {main} as queued", run.id());
         let handle = self.spawn_landing(landing.clone(), RunStatus::AwaitingIntegration, main)?;
-        self.slots
-            .push(Slot::new(landing, Phase::Landing(Some(handle))));
+        self.claim
+            .slots
+            .admit(Slot::new(landing, Phase::Landing(Some(handle))));
         Ok(())
     }
     /// Review the runs recovered from a landing they may not land again
@@ -1389,7 +1390,7 @@ impl Supervisor<'_> {
             info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} is reviewed again: its landing was given up before it was approved or passed", run.id(), run.task_id());
             let session = self.session_of(&run)?;
             match self.start_review(&run, session) {
-                Ok(phase) => self.slots.push(Slot::new(run, phase)),
+                Ok(phase) => self.claim.slots.admit(Slot::new(run, phase)),
                 Err(error) => {
                     let message = format!("run {} could not be reviewed: {error:#}", run.id());
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{}", message);

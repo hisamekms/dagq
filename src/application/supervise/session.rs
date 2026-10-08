@@ -471,13 +471,13 @@ impl SessionWatch {
         // forgot its processes.
         let lost_exit = wrapper
             .is_none()
-            .then(|| sv.reopens.get(run.id()).and_then(|r| r.lost_exit()))
+            .then(|| sv.resume.reopens.get(run.id()).and_then(|r| r.lost_exit()))
             .flatten();
         // The receipt is read once the session ended, whatever order its
         // receipt and its exit were seen in: one a turn wrote before it
         // failed goes to validation (ADR-t1594-1).
         if let Some(code) = lost_exit {
-            sv.reopens.remove(run.id());
+            sv.resume.forget_reopen(run.id());
             self.end_exited(sv, run, false)?;
             let receipt = sv.files.is_file(&self.receipt_path);
             return sv
@@ -487,7 +487,7 @@ impl SessionWatch {
         }
         if let Some(wrapper) = wrapper {
             if wrapper.exited_at.is_some() {
-                sv.reopens.remove(run.id());
+                sv.resume.forget_reopen(run.id());
                 self.end_exited(sv, run, true)?;
                 let receipt = sv.files.is_file(&self.receipt_path);
                 return sv
@@ -530,8 +530,8 @@ impl SessionWatch {
                 WrapperPulse::Fresh => {
                     // A reopen is over once the run's wrapper lives in its
                     // slot (task 1372).
-                    if sv.reopens.get(run.id()).is_some_and(|r| r.settled()) {
-                        sv.reopens.remove(run.id());
+                    if sv.resume.reopens.get(run.id()).is_some_and(|r| r.settled()) {
+                        sv.resume.forget_reopen(run.id());
                     }
                     if self.exit_requested.is_none() {
                         // A silence that ended before any /exit is over:

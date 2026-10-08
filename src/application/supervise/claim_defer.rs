@@ -146,44 +146,48 @@ impl Supervisor<'_> {
     /// read of the values started with records them when the latest change
     /// on the queue moved elsewhere (ADR-t775-1).
     pub(super) fn reread_conflicts(&mut self) -> Result<()> {
-        let Some(read) = self.conflicts_file.clone() else {
+        let Some(read) = self.claim.conflicts_file.clone() else {
             return Ok(());
         };
-        let first = !std::mem::replace(&mut self.defer.start_checked, true);
+        let first = !std::mem::replace(&mut self.claim.defer.start_checked, true);
         let config = match read() {
             Ok(config) => {
-                self.conflicts_error = None;
+                self.claim.conflicts_error = None;
                 match config {
                     Some(config) => config,
                     None => {
-                        self.defer.confirm_conflicts(None, self.conflicts.config);
+                        self.claim
+                            .defer
+                            .confirm_conflicts(None, self.claim.conflicts.config);
                         return Ok(());
                     }
                 }
             }
             Err(error) => {
-                self.defer.confirm_conflicts(None, self.conflicts.config);
+                self.claim
+                    .defer
+                    .confirm_conflicts(None, self.claim.conflicts.config);
                 let message = format!("{error:#}");
-                if new_error(&mut self.conflicts_error, message.clone()) {
+                if new_error(&mut self.claim.conflicts_error, message.clone()) {
                     warn!(error = %message, "[conflicts] of dagq.toml not read: {message}; keeping the values in use");
                 }
                 return Ok(());
             }
         };
-        let from = self.conflicts.config;
+        let from = self.claim.conflicts.config;
         // Only while the file still holds them: values changed since the
         // start may already be another supervisor's latest `to`.
         if first && config == from {
             self.record_conflicts_at_start()?;
         }
-        let confirmed = self.defer.confirm_conflicts(Some(config), from);
+        let confirmed = self.claim.defer.confirm_conflicts(Some(config), from);
         if from == config {
-            self.conflicts.source = "file";
+            self.claim.conflicts.source = "file";
         }
         if !confirmed {
             return Ok(());
         }
-        self.conflicts = ConflictConfigReport {
+        self.claim.conflicts = ConflictConfigReport {
             config,
             source: "file",
         };
@@ -208,12 +212,12 @@ impl Supervisor<'_> {
     /// them is recorded (ADR-t775-1). The defaults started with for want
     /// of a readable file are not recorded.
     fn record_conflicts_at_start(&mut self) -> Result<()> {
-        if self.conflicts.source != "file" {
+        if self.claim.conflicts.source != "file" {
             return Ok(());
         }
         let last = self.queue.latest_queue_event(&[CONFLICTS_CONFIG_CHANGED])?;
         if let Some(mut payload) = conflicts_at_start(
-            self.conflicts.config,
+            self.claim.conflicts.config,
             last.as_ref().map(|event| &event.payload),
         ) {
             info!(
@@ -233,7 +237,7 @@ impl Supervisor<'_> {
     /// and the start and end of each deferral are recorded on its task.
     pub(super) fn claimable(&mut self, graph: &DependencyGraph) -> Result<Vec<TaskId>> {
         let now = self.generators.clock.now();
-        let max_secs = self.conflicts.config.defer_max_secs;
+        let max_secs = self.claim.conflicts.config.defer_max_secs;
         let (hot, in_flight) = self.hot_in_flight(now)?;
         // The runs that only wait for a person past the grace (ADR-t1484-1)
         // and the failed runs with no commit of their own (ADR-t1634-1) are
@@ -241,25 +245,25 @@ impl Supervisor<'_> {
         let counted = claim_defer::counted(
             &in_flight,
             now,
-            self.conflicts.config.waiting_owner_grace_secs,
+            self.claim.conflicts.config.waiting_owner_grace_secs,
         );
-        let latest = if self.defer.deferrals.is_none()
-            || self.defer.worker_deferrals.is_none()
-            || self.defer.build_deferrals.is_none()
+        let latest = if self.claim.defer.deferrals.is_none()
+            || self.claim.defer.worker_deferrals.is_none()
+            || self.claim.defer.build_deferrals.is_none()
         {
             self.queue.latest_task_events(&DEFERRAL_KINDS)?
         } else {
             Vec::new()
         };
-        let mut deferrals = match self.defer.deferrals.take() {
+        let mut deferrals = match self.claim.defer.deferrals.take() {
             Some(deferrals) => deferrals,
             None => deferrals_in_place(&latest),
         };
-        let mut worker_deferrals = match self.defer.worker_deferrals.take() {
+        let mut worker_deferrals = match self.claim.defer.worker_deferrals.take() {
             Some(deferrals) => deferrals,
             None => worker_deferrals_in_place(&latest),
         };
-        let mut build_deferrals = match self.defer.build_deferrals.take() {
+        let mut build_deferrals = match self.claim.defer.build_deferrals.take() {
             Some(deferrals) => deferrals,
             None => build_wait::deferrals_in_place(&latest),
         };
@@ -293,7 +297,7 @@ impl Supervisor<'_> {
                     let why = if self.stopped_by_fallback(worker) {
                         FALLBACK_OFF
                     } else {
-                        unavailable(worker, &self.workers).unwrap_or(PROVIDER_UNAVAILABLE)
+                        unavailable(worker, &self.claim.workers).unwrap_or(PROVIDER_UNAVAILABLE)
                     };
                     (worker, why)
                 })
@@ -388,14 +392,14 @@ impl Supervisor<'_> {
             ));
             false
         });
-        self.defer.worker_deferrals = Some(worker_deferrals);
+        self.claim.defer.worker_deferrals = Some(worker_deferrals);
         events.extend(build_wait::left(
             &mut build_deferrals,
             &candidates,
             now,
             &self.token,
         ));
-        self.defer.build_deferrals = Some(build_deferrals);
+        self.claim.defer.build_deferrals = Some(build_deferrals);
         deferrals.retain(|id, deferral| {
             if candidates.contains(id) {
                 return true;
@@ -403,7 +407,7 @@ impl Supervisor<'_> {
             events.extend(claim_defer::left(*deferral, now, &self.token).map(|event| (*id, event)));
             false
         });
-        self.defer.deferrals = Some(deferrals);
+        self.claim.defer.deferrals = Some(deferrals);
         for (id, (kind, payload)) in events {
             match kind {
                 EventKind::ClaimDeferred => warn!(
@@ -432,23 +436,26 @@ impl Supervisor<'_> {
     ) -> Option<Vec<build_wait::Landing>> {
         let build = self.layout.version.clone();
         let verdict = build_wait::judge(&build, landings, |landing, commit| {
-            if let Some(&contained) = self.defer.in_build.get(landing) {
+            if let Some(&contained) = self.claim.defer.in_build.get(landing) {
                 return Some(contained);
             }
             match self.repository.is_ancestor(landing, commit) {
                 Ok(contained) => {
-                    self.defer.in_build.insert(landing.to_owned(), contained);
+                    self.claim
+                        .defer
+                        .in_build
+                        .insert(landing.to_owned(), contained);
                     Some(contained)
                 }
                 Err(error) => {
-                    if self.defer.unreadable.insert(landing.to_owned()) {
+                    if self.claim.defer.unreadable.insert(landing.to_owned()) {
                         warn!(task_id = %task, error = %format_args!("{error:#}"), "whether build {build} contains {landing} could not be read: {error:#}; task {task} waits");
                     }
                     None
                 }
             }
         });
-        let (lacking, warn) = build_wait::claim_step(verdict, task, &mut self.defer.unjudged);
+        let (lacking, warn) = build_wait::claim_step(verdict, task, &mut self.claim.defer.unjudged);
         if warn {
             warn!(task_id = %task, "task {task} waits for a build that contains its dependencies' landings, and build {build} names no commit: claimed without the wait");
         }
@@ -459,6 +466,7 @@ impl Supervisor<'_> {
     /// both empty when no hotspot is alerted.
     fn hot_in_flight(&mut self, now: i64) -> Result<(Vec<String>, Vec<InFlight>)> {
         if self
+            .claim
             .defer
             .hot
             .as_ref()
@@ -475,25 +483,27 @@ impl Supervisor<'_> {
                     Vec::new()
                 }
             };
-            self.defer.hot = Some((now, hot));
-            self.defer.expected.clear();
-            self.defer.in_flight = None;
+            self.claim.defer.hot = Some((now, hot));
+            self.claim.defer.expected.clear();
+            self.claim.defer.in_flight = None;
         }
-        let hot = self.defer.hot.as_ref().map(|(_, hot)| hot.clone());
+        let hot = self.claim.defer.hot.as_ref().map(|(_, hot)| hot.clone());
         let hot = hot.unwrap_or_default();
         if hot.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
         if self
+            .claim
             .defer
             .in_flight
             .as_ref()
             .is_none_or(|(at, _)| now - at >= IN_FLIGHT_REFRESH_SECS)
         {
             let in_flight = self.runs_in_flight()?;
-            self.defer.in_flight = Some((now, in_flight));
+            self.claim.defer.in_flight = Some((now, in_flight));
         }
         let in_flight = self
+            .claim
             .defer
             .in_flight
             .as_ref()
@@ -569,7 +579,7 @@ impl Supervisor<'_> {
     /// for a task whose paths may have changed since (one under plan
     /// review).
     pub(super) fn expected_now(&mut self, task: TaskId) -> Result<Vec<String>> {
-        self.defer.expected.remove(&task);
+        self.claim.defer.expected.remove(&task);
         self.expected(task)
     }
 
@@ -577,7 +587,7 @@ impl Supervisor<'_> {
     /// or, when it declares none, the files its most related landed tasks
     /// changed (ADR-t1981-1).
     pub(super) fn expected(&mut self, task: TaskId) -> Result<Vec<String>> {
-        if let Some(files) = self.defer.expected.get(&task) {
+        if let Some(files) = self.claim.defer.expected.get(&task) {
             return Ok(files.clone());
         }
         let declared = self.queue.show(task)?.task.paths().to_vec();
@@ -603,7 +613,7 @@ impl Supervisor<'_> {
             }
         }
         let files = expected_files(&declared, &changed);
-        self.defer.expected.insert(task, files.clone());
+        self.claim.defer.expected.insert(task, files.clone());
         Ok(files)
     }
 }

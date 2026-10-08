@@ -267,10 +267,15 @@ impl Escalation {
         extra: Value,
     ) -> Result<()> {
         let mut payload = self.finished(alert, attempt, note, ask_id, extra);
-        if let Some(at) = sv.live_job_ends.iter().position(|(id, ended, number, _)| {
-            id == run.id() && *ended == alert && *number == attempt
-        }) {
-            let (_, _, _, end) = sv.live_job_ends.remove(at);
+        if let Some(at) = sv
+            .triage
+            .live_job_ends
+            .iter()
+            .position(|(id, ended, number, _)| {
+                id == run.id() && *ended == alert && *number == attempt
+            })
+        {
+            let (_, _, _, end) = sv.triage.live_job_ends.remove(at);
             // An alert past its jobs ran none: an end its last job left
             // (its escalation failed before this record) is dropped.
             if !matches!(self, Self::UsedUp(_)) {
@@ -741,7 +746,8 @@ impl RecoveryWatch {
                         )?;
                         return Ok(LiveStep::Pending);
                     }
-                    sv.live_job_ends
+                    sv.triage
+                        .live_job_ends
                         .push((run.id().clone(), alert, job.attempt, end));
                     return Ok(LiveStep::Escalate(
                         job.attempt,
@@ -810,7 +816,7 @@ impl RecoveryWatch {
         sv.queue
             .record_runtime_event(run.id(), EventKind::RecoveryFinished, finished)?;
         let next = end.unusable.map_or_else(String::new, |(provider, _)| {
-            super::goal_review::again_on(sv.fallback.jobs, provider)
+            super::goal_review::again_on(sv.provider.fallback.jobs, provider)
         });
         warn!(run_id = %run.id(), "run {}: recovery job {attempt} of {} failed: {error}; its provider cannot be used, and the next job starts {next}", run.id(), alert.as_str());
         Ok(())
@@ -927,6 +933,7 @@ fn process_sample(
     last: Option<SystemTime>,
 ) -> Option<(SystemTime, Vec<ProcessInfo>)> {
     if sv
+        .triage
         .process_sample
         .as_ref()
         .is_none_or(|(at, _)| at.elapsed() >= interval)
@@ -938,9 +945,10 @@ fn process_sample(
                 None
             }
         };
-        sv.process_sample = Some((Instant::now(), sample));
+        sv.triage.process_sample = Some((Instant::now(), sample));
     }
-    sv.process_sample
+    sv.triage
+        .process_sample
         .as_ref()
         .and_then(|(_, sample)| sample.as_ref())
         .filter(|(at, _)| Some(*at) != last)
@@ -1333,7 +1341,7 @@ fn check_live(
                             .to_owned(),
                     );
                 }
-                if resumes_exhausted(&*sv.queue, run.id(), sv.resume_config) {
+                if resumes_exhausted(&*sv.queue, run.id(), sv.resume.config) {
                     return Err("resume: the run's resumes are used up".to_owned());
                 }
             }
@@ -1363,7 +1371,8 @@ pub(super) fn apply_live(
     })?;
     // An escalation records the job's end with its `recovery_finished`.
     if applied.is_err() {
-        sv.live_job_ends
+        sv.triage
+            .live_job_ends
             .push((run.id().clone(), job.alert, job.attempt, end));
     }
     Ok(applied)

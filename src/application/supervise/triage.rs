@@ -550,7 +550,9 @@ impl Supervisor<'_> {
         match started {
             Ok(watch) => {
                 info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} ({}) recovery job {attempt} for {} started on {} (round {round})", run.id(), run.task_id(), run.status().as_str(), alert.as_str(), watch.job.provider.as_str());
-                self.slots.push(Slot::new(run, Phase::Recovery(watch)));
+                self.claim
+                    .slots
+                    .admit(Slot::new(run, Phase::Recovery(watch)));
             }
             Err((failed, spawned)) => {
                 let error = format!("the recovery job could not start: {failed:#}");
@@ -598,7 +600,7 @@ impl Supervisor<'_> {
             &detail,
             run,
             resumes,
-            self.resume_config,
+            self.resume.config,
             &dir,
         );
         let facts = events
@@ -881,7 +883,7 @@ impl Supervisor<'_> {
             RecoveryAction::Resume { instruction } => {
                 let resumes =
                     ResumeCount::of(&self.queue.run_events(run.id()).map_err(unreadable)?);
-                if resumes.exhausted(self.resume_config) {
+                if resumes.exhausted(self.resume.config) {
                     return Err(format!(
                         "its resumes are used up ({} counted of at most {MAX_RESUME_ATTEMPTS}, {} after conflicts only, {} of at most {KILL_ONLY_RESUME_LIMIT} after its session was killed)",
                         resumes.counted,
@@ -965,7 +967,7 @@ impl Supervisor<'_> {
     ) -> Result<TaskRun> {
         let note = escalation.note(run, alert, attempt);
         let exhausted =
-            ResumeCount::of(&self.queue.run_events(run.id())?).exhausted(self.resume_config);
+            ResumeCount::of(&self.queue.run_events(run.id())?).exhausted(self.resume.config);
         // Only a run whose `integrate` verification failed is offered the
         // verify fix (ADR-t883-1).
         let verify_failed = verification_failed(&self.queue.run_events(run.id())?);
@@ -1079,7 +1081,7 @@ impl Supervisor<'_> {
         let then = match end.unusable {
             Some((provider, _)) => format!(
                 "its provider cannot be used, and the next round starts {}",
-                super::goal_review::again_on(self.fallback.jobs, provider)
+                super::goal_review::again_on(self.provider.fallback.jobs, provider)
             ),
             None => "the run waits to be recovered by hand".to_owned(),
         };
@@ -1135,7 +1137,7 @@ impl Supervisor<'_> {
             Ok(status) => format!(", task {} is {}", run.task_id(), status.as_str()),
             Err(_) => String::new(),
         });
-        self.triaged.push(json!({
+        self.triage.triaged.push(json!({
             "run_id": run.id(),
             "task_id": run.task_id(),
             "status": run.status(),

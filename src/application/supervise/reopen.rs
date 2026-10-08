@@ -163,8 +163,8 @@ impl Supervisor<'_> {
         let Phase::Session(watch) = &mut slot.phase else {
             return Ok(Reopen::GiveUp);
         };
-        let known = self.reopens.contains_key(run.id());
-        let reopen = self.reopens.entry(run.id().clone()).or_default();
+        let known = self.resume.reopens.contains_key(run.id());
+        let reopen = self.resume.reopens.entry(run.id().clone()).or_default();
         if let Some(lost) = lost {
             reopen.exit_code = lost.exit_code;
         } else if !known {
@@ -183,7 +183,7 @@ impl Supervisor<'_> {
                 let workspace = watch.workspace.clone();
                 self.close_lost_workspace(&run, &workspace, None);
             }
-            if let Some(reopen) = self.reopens.get_mut(run.id()) {
+            if let Some(reopen) = self.resume.reopens.get_mut(run.id()) {
                 reopen.opened = None;
                 reopen.gave_up = true;
             }
@@ -200,7 +200,7 @@ impl Supervisor<'_> {
         lost: Option<&RunProcess>,
     ) -> Result<Reopen> {
         let now = self.generators.clock.monotonic();
-        let reopen = self.reopens.entry(run.id().clone()).or_default();
+        let reopen = self.resume.reopens.entry(run.id().clone()).or_default();
         if let Some(opened) = reopen.opened {
             if awaits_registration(
                 now,
@@ -230,7 +230,7 @@ impl Supervisor<'_> {
         // it. The session is opened again once the turn ended, which the
         // turn's limit bounds as the wrapper would have; past it, the run
         // goes to its recovery job, which may stop the turn's processes.
-        let reopen = self.reopens.entry(run.id().clone()).or_default();
+        let reopen = self.resume.reopens.entry(run.id().clone()).or_default();
         if let Some(agent) = processes
             .iter()
             .find(|p| p.role == "agent" && self.processes.alive(p.pid))
@@ -255,7 +255,7 @@ impl Supervisor<'_> {
             warn!(run_id = %run.id(), "the lost session of {} was opened again {attempts} times in a row; giving it up", run.id());
             return Ok(Reopen::GiveUp);
         }
-        let reopen = self.reopens.entry(run.id().clone()).or_default();
+        let reopen = self.resume.reopens.entry(run.id().clone()).or_default();
         if attempt_waits(now, reopen.last_attempt, self.sessions.reopen_interval()) {
             return Ok(Reopen::Waiting);
         }
@@ -304,7 +304,7 @@ impl Supervisor<'_> {
                 watch.workspace = workspace;
                 watch.startup = opened;
                 watch.silent = false;
-                if let Some(reopen) = self.reopens.get_mut(run.id()) {
+                if let Some(reopen) = self.resume.reopens.get_mut(run.id()) {
                     reopen.opened = Some(opened);
                 }
                 Ok(Reopen::Waiting)

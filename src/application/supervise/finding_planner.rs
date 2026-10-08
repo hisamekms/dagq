@@ -134,7 +134,7 @@ impl Supervisor<'_> {
                 }
             }
             PlannerAnswerRoute::NewPlanner
-                if *runtime_open < self.limits.runtime_planners.value =>
+                if *runtime_open < self.claim.limits.runtime_planners.value =>
             {
                 if let Some(workspace) = self.start_finding_planner(finding, Some(ask), 0)? {
                     *runtime_open += 1;
@@ -165,7 +165,7 @@ impl Supervisor<'_> {
         }
         let limit = self.max_improvement_proposals();
         for finding in findings {
-            if *runtime_open >= self.limits.runtime_planners.value {
+            if *runtime_open >= self.claim.limits.runtime_planners.value {
                 break;
             }
             match self.start_finding_planner(finding.id, None, limit) {

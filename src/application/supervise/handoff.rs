@@ -130,7 +130,7 @@ impl Supervisor<'_> {
             );
         }
         let mut kept = 0;
-        for mut slot in std::mem::take(&mut self.slots) {
+        for mut slot in self.claim.slots.take_all() {
             let run = slot.run.clone();
             // A live session's recovery job does not outlive this process;
             // its alert starts another once the run is rebuilt.
@@ -279,7 +279,7 @@ impl Supervisor<'_> {
                     // Kept as it was, even past the limit (ADR-0062
                     // decision 7).
                     self.restore_waiting(&mut slot, true)?;
-                    self.slots.push(slot);
+                    self.claim.slots.admit(slot);
                 }
                 Err(error) => {
                     let message = format!(

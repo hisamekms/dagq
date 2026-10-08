@@ -76,7 +76,7 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
 - IDと値: `domain::ids`・`domain::error`・`domain::reason`・`domain::views`・`domain::input`。
 - build識別子: `src/build_id.rs`（`build_id`）で、`build.rs`と共有する。
   domainと同じ扱いで、domainとapplicationが参照してよい（L1・L3の例外）。
-  使ってよいのはI/Oを持たない識別子の規則と`named_commit`だけで、gitを呼ぶ`emit`・`compute`はbuild scriptの側（`src/lib.rs`のdoc comment）。
+  gitを呼ぶ`emit`・`compute`はbuild scriptの側（`src/lib.rs`のdoc comment）。
 - 時刻とID生成: `application::ports`の`Clock`（壁時計と単調時計）・`IdGenerator`、実装は`infrastructure::clock`。
 - eventの記録: `RunLog::record_runtime_event`・`record_queue_event`と種類の`domain::event_kind::EventKind`。
 - 人への問い合わせ: `asks`表と`AskStore`（`infrastructure::asks`）。
@@ -245,7 +245,7 @@ contextを1つに決められず、分ける先を持つもの。
 | module | 混ざっているcontext | 分ける先 |
 | --- | --- | --- |
 | `application::ports`の`RunCoordination` | 実行と着地のleaseとprocessと、host運用のsupervisorの登録と引き継ぎ | portの分割（未登録、follow_up） |
-| `src/application/supervise/mod.rs`の`Supervisor` | 計画管理・実行と着地の欄とhost運用の残りの欄を持つ（C3） | contextごとに分ける |
+| `src/application/supervise/mod.rs`の`Supervisor` | 計画管理の欄と、実行と着地・host運用の残りの欄を持つ（C3） | contextごとに分ける |
 | `src/compose.rs` | 全てのcontextの組み立て | contextごとの組み立てのmodule |
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
 | `application::queue_reads` | 読み取りの入口で、各armが自分のcontextのportを読む | 未登録（follow_up） |
@@ -254,16 +254,17 @@ contextを1つに決められず、分ける先を持つもの。
 
 ## `Supervisor`の状態
 
-観測と分析と、host運用の更新・sccache・disk・後始末などは`supervise::contexts`の`ObservationState`・`HostOpsState`が持つ。
-変えるのはそのcontextのpassだけで、passは自分の状態と`PassEnv`と値を取り、ループは呼び出しと結果の適用だけを行う。
-host運用の登録・引き継ぎ・sweep・負荷の上限は`Supervisor`に残り、`sweep`・`handoff`・`inbox_nudge`とループが変える。
+観測と分析とhost運用の更新・disk・後始末などは`contexts`の`ObservationState`・`HostOpsState`が持ち、そのcontextのpassだけが変える。
+passは自分の状態と`PassEnv`と値を取り、ループは呼び出しと結果を適用するだけ。
+実行と着地は`stages`の工程ごとの状態と`E2eWaits`が持ち、工程のsubmoduleとループが変える。
+slotの集まりは`SlotTable`だけが変え、各工程と引き継ぎはその操作を呼ぶ。
+host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の遷移・工程をまたぐ欄は`Supervisor`に残る。
 
 ## 境界をまたぐtransaction
 
 複数のcontextの状態を1つの`BEGIN IMMEDIATE`のtransactionで変えてよいのは、この一覧のものだけ（ADR-t1545-1決定3）。
 原子性を守るための例外で、[Persistence](persistence.md)のclaimとlease・着地の規則を弱めない。
 一覧に足す・外す変更は同じ変更でこの表を直す。
-変える状態の細目は表のコードの関数が持つ。
 
 | ID | transaction | 書き手 | 主に変える状態 | 理由 | コード |
 | --- | --- | --- | --- | --- | --- |
@@ -352,7 +353,7 @@ host運用の登録・引き継ぎ・sweep・負荷の上限は`Supervisor`に�
 
 ### 検査の範囲
 
-- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に、C3を分けたcontextのsubmoduleに、C8を`src/application/ports/`のcontextのmoduleに当てる。
+- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に、C3を分けた状態のsubmoduleに、C8を`src/application/ports/`のcontextのmoduleに当てる。
   CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。
 - 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えず、testの中はL1・L3・L6・C3・C8だけで数える。
   細目（`use`の組の展開、testとする`cfg`の形と範囲、`--self-test`）はscriptの先頭のコメントが持つ。

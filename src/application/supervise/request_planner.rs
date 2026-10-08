@@ -112,7 +112,7 @@ impl Supervisor<'_> {
                 }
             }
             PlannerAnswerRoute::NewPlanner
-                if *runtime_open < self.limits.runtime_planners.value =>
+                if *runtime_open < self.claim.limits.runtime_planners.value =>
             {
                 if let Some(workspace) = self.start_request_planner(request, Some(ask))? {
                     *runtime_open += 1;
@@ -145,7 +145,7 @@ impl Supervisor<'_> {
     /// while the runtime's planners are below the limit.
     pub(super) fn open_request_planners(&mut self, runtime_open: &mut usize) -> Result<()> {
         for request in self.queue.planner_requests()? {
-            if *runtime_open >= self.limits.runtime_planners.value {
+            if *runtime_open >= self.claim.limits.runtime_planners.value {
                 break;
             }
             if self.start_request_planner(request.id, None)?.is_some() {

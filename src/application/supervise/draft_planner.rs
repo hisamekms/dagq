@@ -123,7 +123,7 @@ impl Supervisor<'_> {
                     }
                 }
                 PlannerAnswerRoute::NewPlanner
-                    if *runtime_open < self.limits.runtime_planners.value =>
+                    if *runtime_open < self.claim.limits.runtime_planners.value =>
                 {
                     // The drafts of its bundle that wait go with it.
                     let mut drafts = vec![task];
@@ -166,7 +166,7 @@ impl Supervisor<'_> {
     /// below the limit.
     pub(super) fn open_draft_planners(&mut self, runtime_open: &mut usize) -> Result<()> {
         for bundle in bundles(self.queue.planner_drafts()?) {
-            if *runtime_open >= self.limits.runtime_planners.value {
+            if *runtime_open >= self.claim.limits.runtime_planners.value {
                 break;
             }
             let drafts: Vec<TaskId> = bundle.iter().map(|target| target.task.id()).collect();

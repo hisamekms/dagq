@@ -9,8 +9,14 @@
 #
 # C3 counts in the files of $c3_files under src/application/supervise/ (the
 # submodules that own 観測と分析's and host運用's state): a reference to the
-# loop's struct `Supervisor` or its `Slot` and `Phase`, through which the
-# state of 実行と着地 is reached, is forbidden there, inside tests too.
+# loop's struct `Supervisor` or its `Slot` and `Phase`, or to the module
+# `stages`, its states or the e2e's `E2eWaits`, through which the state of
+# 実行と着地 is reached, is forbidden there, inside tests too. It also counts in the
+# files of $c3_stage_files (実行と着地's state by stage): a reference to
+# `Supervisor` or to the module `contexts` or its states (the other
+# contexts' state and the pass's view of the loop) is forbidden there.
+# Each name counts bare, through `super::` and through
+# `crate::application::supervise::`.
 #
 # C8 counts in the context modules of src/application/ports/ (every file
 # but mod.rs), outside their inline modules (where `super` is the file's own
@@ -55,8 +61,8 @@
 # itself on small fixtures in a temporary directory under ${TMPDIR:-target/}
 # (no violation, one not in the list, a stale item, an item without a task,
 # references only in comments and strings, nested block comments, the cfg
-# forms above, a test range inside an inline module, a C3 reference and the
-# C8 references)
+# forms above, a test range inside an inline module, the C3 references
+# of a split context and of a stage, and the C8 references)
 # and removes them.
 #
 # Exit 0 when every occurrence is allowed and no item is stale, 1 when an
@@ -70,6 +76,8 @@ c3_files="contexts ci_watch forecast observer push report throughput_review clea
 # Rule C8: each port module of src/application/ports/ and the modules it may
 # name, "module:allowed,allowed"; a port module not listed may name none.
 c8_ok="planning:shared execution:shared host:shared observation:shared,planning,execution,host shared:planning,execution,observation,host"
+# The submodules that hold 実行と着地's state by stage, checked by C3 too.
+c3_stage_files="stages"
 script=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -79,7 +87,7 @@ scan() {
   files=$(find src/domain src/application src/infrastructure -type f -name '*.rs' 2>/dev/null | LC_ALL=C sort)
   [ -n "$files" ] || return 0
   # shellcheck disable=SC2086
-  LC_ALL=C awk -v c3_files="$c3_files" -v c8_ok="$c8_ok" '
+  LC_ALL=C awk -v c3_files="$c3_files" -v c3_stage_files="$c3_stage_files" -v c8_ok="$c8_ok" '
 BEGIN {
   # The patterns per layer, "rule:pattern"; a pattern starting with ^
   # matches at the start of a path, otherwise anywhere in it. The rules that
@@ -100,6 +108,17 @@ BEGIN {
   for (i = 1; i <= n; i++) c3["src/application/supervise/" o[i] ".rs"] = 1
   n = split(c8_ok, o, " ")
   for (i = 1; i <= n; i++) { split(o[i], kv, ":"); c8[kv[1]] = "," kv[2] "," }
+  n = split(c3_stage_files, o, " ")
+  for (i = 1; i <= n; i++) c3s["src/application/supervise/" o[i] ".rs"] = 1
+  c3_names = c3_patterns("Supervisor Slot Phase stages ClaimState SlotTable LandingState ResumeState TriageState ProviderState E2eWaits")
+  c3s_names = c3_patterns("Supervisor contexts ObservationState HostOpsState PassEnv")
+}
+# c3_patterns prints the C3 patterns of each of the names: bare, through
+# super:: and through crate::application::supervise::.
+function c3_patterns(names,   m, i, nm, out) {
+  m = split(names, nm, " "); out = ""
+  for (i = 1; i <= m; i++) out = out " C3:^" nm[i] " C3:^super::" nm[i] " C3:^crate::application::supervise::" nm[i]
+  return substr(out, 2)
 }
 function load(lst, test,   m, i, it) {
   m = split(lst, it, " ")
@@ -122,7 +141,8 @@ function reset_file() {
   if (FILENAME ~ /^src\/application\/ports\/[a-z_]+\.rs$/ && FILENAME != "src/application/ports/mod.rs") {
     port = FILENAME; sub(/^.*\//, "", port); sub(/\.rs$/, "", port)
   }
-  if (FILENAME in c3) load("C3:^Supervisor C3:^super::Supervisor C3:^crate::application::supervise::Supervisor C3:^Slot C3:^super::Slot C3:^crate::application::supervise::Slot C3:^Phase C3:^super::Phase C3:^crate::application::supervise::Phase", 1)
+  if (FILENAME in c3) load(c3_names, 1)
+  if (FILENAME in c3s) load(c3s_names, 1)
 }
 function check(p, ln, t, dot,   i, hit, seg) {
   if (p == "") return
@@ -610,6 +630,26 @@ EOF
   echo 'use super::*; use super::super::ports::Clock;' >>"$tmp/ports/src/application/ports/observation.rs"
   expect 1 "C8: a port module globs the re-exports" "$tmp/ports" "src/application/ports/observation.rs:3: C8 forbids super::*"
   expect 1 "C8: a port module names ports through super::super" "$tmp/ports" "src/application/ports/observation.rs:3: C8 forbids super::super::ports"
+
+  base stage
+  mkdir -p "$tmp/stage/src/application/supervise"
+  cat >"$tmp/stage/src/application/supervise/stages.rs" <<'EOF2'
+//! A stage's state; Supervisor and contexts are named in a comment only.
+pub(super) struct SlotTable { slots: Vec<Slot> }
+impl SlotTable { fn admit(&mut self, slot: Slot) { self.slots.push(slot); } }
+EOF2
+  cat >"$tmp/stage/src/application/supervise/report.rs" <<'EOF2'
+pub(super) fn pass(state: &mut ReportWatch) {}
+EOF2
+  expect 0 "C3: a stage's file names only its own state and the slots" "$tmp/stage"
+  cat >>"$tmp/stage/src/application/supervise/stages.rs" <<'EOF2'
+fn cleaning(host: &super::contexts::HostOpsState) {}
+EOF2
+  expect 1 "C3: a stage's file reaches another context's state" "$tmp/stage" "src/application/supervise/stages.rs:4: C3 forbids super::contexts"
+  cat >>"$tmp/stage/src/application/supervise/report.rs" <<'EOF2'
+fn slots(claim: &ClaimState) -> usize { claim.slots.len() }
+EOF2
+  expect 1 "C3: a split context's file reaches a stage's state" "$tmp/stage" "src/application/supervise/report.rs:2: C3 forbids ClaimState"
 
   base infra
   cat >>"$tmp/infra/src/infrastructure/store.rs" <<'EOF'

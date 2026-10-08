@@ -7,7 +7,9 @@ use crate::domain::EventKind;
 use anyhow::Result;
 use tracing::{info, warn};
 
-use super::Supervisor;
+use super::stages::ClaimState;
+use crate::application::ports::{RunCoordination, RunLog};
+use crate::domain::LeaseToken;
 use crate::domain::light_slots::LightChanges;
 use crate::domain::slot_limits::{SlotLimits, supervisor_config_change};
 
@@ -19,8 +21,9 @@ fn names(light: &LightChanges) -> Vec<&str> {
         .collect()
 }
 
-impl Supervisor<'_> {
-    /// Read `[supervisor]` again. Values that differ from those in use
+impl ClaimState {
+    /// Read `[supervisor]` again, recording a change on `queue` and in
+    /// `token`'s registration. Values that differ from those in use
     /// replace them from this pass on, are written to the registration and
     /// recorded as `supervisor_config_changed`. A file that cannot be read
     /// or holds invalid values keeps those in use, warned of once per
@@ -32,7 +35,11 @@ impl Supervisor<'_> {
     /// `claim_spacing` spaces the next claim from the queue's latest one.
     /// `light_changes` (ADR-t1591-1) has no flag: it is read with every
     /// flag given too, and a change takes effect at the next claim.
-    pub(super) fn reread_slot_limits(&mut self) -> Result<()> {
+    pub(super) fn reread_limits(
+        &mut self,
+        queue: &(impl RunCoordination + RunLog + ?Sized),
+        token: &LeaseToken,
+    ) -> Result<()> {
         let Some(read) = self.supervisor_file.clone() else {
             return Ok(());
         };
@@ -70,9 +77,8 @@ impl Supervisor<'_> {
             self.light_changes = light;
         }
         if to == self.limits {
-            payload["supervisor"] = serde_json::json!(self.token);
-            self.queue
-                .record_queue_event(EventKind::SupervisorConfigChanged, payload)?;
+            payload["supervisor"] = serde_json::json!(token);
+            queue.record_queue_event(EventKind::SupervisorConfigChanged, payload)?;
             return Ok(());
         }
         info!(
@@ -86,13 +92,12 @@ impl Supervisor<'_> {
             self.limits.claim_spacing.value,
             to.claim_spacing.value
         );
-        self.queue.set_slot_limits(&self.token, to)?;
+        queue.set_slot_limits(token, to)?;
         self.limits = to;
         self.parallel = to.parallel.value;
         self.max_waiting = to.max_waiting.value;
-        payload["supervisor"] = serde_json::json!(self.token);
-        self.queue
-            .record_queue_event(EventKind::SupervisorConfigChanged, payload)?;
+        payload["supervisor"] = serde_json::json!(token);
+        queue.record_queue_event(EventKind::SupervisorConfigChanged, payload)?;
         Ok(())
     }
 }

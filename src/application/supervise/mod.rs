@@ -145,6 +145,7 @@ mod revise;
 mod sccache;
 mod session;
 mod slot_limits;
+mod stages;
 mod stale;
 mod stall;
 mod stall_recovery;
@@ -886,12 +887,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         reviewer: ports.reviewer,
         codex_jobs: ports.codex_jobs,
         signals: claude.signals,
-        workers: ports
-            .workers
-            .workers()
-            .into_iter()
-            .filter(|w| !settings.no_claude || w.provider != crate::domain::Provider::Claude)
-            .collect(),
         spawner: ports.spawner,
         service_access: ports.service_access,
         files: ports.files.clone(),
@@ -899,37 +894,18 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         review_material: ports.review_material,
         token,
         heartbeat,
-        slots: Vec::new(),
-        parallel: settings.limits.parallel.value,
-        max_waiting: settings.limits.max_waiting.value,
-        limits: settings.limits,
-        slot_flags: settings.slot_flags,
-        supervisor_file: ports.supervisor_file.clone(),
-        supervisor_error: None,
-        light_changes: settings.light_changes.clone(),
-        fallback: settings.provider_fallback,
-        fallback_file: ports.provider_fallback_file.clone(),
-        fallback_error: None,
         fresh_session: settings.fresh_session,
         fresh_session_file: ports.fresh_session_file.clone(),
         fresh_session_error: None,
         finished: Vec::new(),
         errors: Vec::new(),
-        claiming: true,
-        provisioning_error: None,
         last_sweep: None,
         last_turns: None,
-        process_sample: None,
-        live_job_ends: Vec::new(),
         sweep_failures: Vec::new(),
-        triaged: Vec::new(),
         generators: ports.generators.clone(),
         stall: settings.stall,
         wrapper_setting_warned: false,
         route_setting_warned: std::sync::atomic::AtomicBool::new(false),
-        conflicts: settings.conflicts,
-        conflicts_file: ports.conflicts_file.clone(),
-        conflicts_error: settings.conflicts_error.clone(),
         plan_review: None,
         goal_review: None,
         job_ends: JobEnds::default(),
@@ -937,34 +913,60 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         planner_exits: Vec::new(),
         handoff: None,
         exec: None,
-        run_env_missing: false,
-        landing_unresolved: false,
-        landing_recorded: None,
-        landing_stamp: None,
         queue_hold: None,
-        provider_holds: Vec::new(),
-        timer_finishes_held: Vec::new(),
-        moved: HashMap::new(),
         hold_continue: HashMap::new(),
-        reopens: HashMap::new(),
-        notice_failures: HashMap::new(),
         draining: false,
         stop_recorded: false,
         utc_offset: settings.utc_offset,
-        rechecks: recheck::Rechecks::default(),
         max_load: settings.max_load,
-        spaced_since: None,
         load_average: ports.load_average,
         host_versions: ports.host_versions,
         worker_plugin: ports.worker_plugin.clone(),
         max_improvement_proposals: ports.max_improvement_proposals.clone(),
-        loads: HashMap::new(),
-        defer: claim_defer::DeferWatch::default(),
-        resume_config: settings.resume,
-        retry_unreadable_review: settings.retry_unreadable_review,
-        run_e2e: ports.run_e2e.clone(),
-        e2e: e2e::E2eWaits::default(),
+        claim: stages::ClaimState {
+            slots: stages::SlotTable::default(),
+            workers: ports
+                .workers
+                .workers()
+                .into_iter()
+                .filter(|w| !settings.no_claude || w.provider != crate::domain::Provider::Claude)
+                .collect(),
+            parallel: settings.limits.parallel.value,
+            max_waiting: settings.limits.max_waiting.value,
+            limits: settings.limits,
+            slot_flags: settings.slot_flags,
+            supervisor_file: ports.supervisor_file.clone(),
+            supervisor_error: None,
+            light_changes: settings.light_changes.clone(),
+            spaced_since: None,
+            claiming: true,
+            provisioning_error: None,
+            loads: HashMap::new(),
+            defer: claim_defer::DeferWatch::default(),
+            conflicts: settings.conflicts,
+            conflicts_file: ports.conflicts_file.clone(),
+            conflicts_error: settings.conflicts_error.clone(),
+        },
+        landing: stages::LandingState {
+            retry_unreadable_review: settings.retry_unreadable_review,
+            ..stages::LandingState::default()
+        },
+        resume: stages::ResumeState {
+            config: settings.resume,
+            reopens: HashMap::new(),
+        },
+        triage: stages::TriageState::default(),
+        provider: stages::ProviderState {
+            fallback: settings.provider_fallback,
+            fallback_file: ports.provider_fallback_file.clone(),
+            fallback_error: None,
+            holds: Vec::new(),
+            timer_finishes_held: Vec::new(),
+            moved: HashMap::new(),
+        },
+        e2e: e2e::E2eWaits::new(ports.run_e2e.clone()),
 
+        notice_failures: HashMap::new(),
         observation: contexts::ObservationState::new(ports),
         host: contexts::HostOpsState::new(ports, settings),
     };
@@ -999,25 +1001,24 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   `utc_offset`, the connection, clocks and places every context reads.
 /// - planning: `plan_review`, `goal_review`, `planner_exits`,
 ///   `route_setting_warned` and `max_improvement_proposals`.
-/// - execution and landing: the slots and phases (`workers`, `slots`,
-///   `parallel`, `max_waiting`, `limits`, `slot_flags`, `light_changes`,
-///   `spaced_since`, `finished`, `errors`, `claiming`, `provisioning_error`,
-///   `triaged`, `stall`, `conflicts*`, `job_ends`, `live_job_ends`,
-///   `last_turns`, `run_env_missing`, `landing_*`,
-///   `run_e2e`, `e2e`, `queue_hold`, `provider_holds`,
-///   `timer_finishes_held`, `fallback*`, `fresh_session*`, `moved`, `hold_continue`,
-///   `reopens`, `notice_failures`, `rechecks`, `defer`, `loads`,
-///   `resume_config`, `retry_unreadable_review`, `review_material`,
-///   `wrapper_setting_warned`) and the adapters it uses (`repository`,
-///   `remote`, `verifier`, `reviewer`, `codex_jobs`, `signals`, `spawner`,
-///   `files`).
+/// - execution and landing: by stage ([`stages`]), the slot assignment
+///   `claim` (its slots change only through [`stages::SlotTable`]'s
+///   operations), `landing`, `resume`, `triage`, `provider` and `e2e`
+///   ([`e2e::E2eWaits`]), each changed by its stage's submodules; and on
+///   the loop, the steps of the slots' phases (each slot's [`Phase`] is
+///   held in the [`stages::SlotTable`]) and what spans the stages
+///   (`finished`, `errors`, `stall`, `notice_failures`, `job_ends`,
+///   `jobs_swept`, `last_turns`, `fresh_session*`, `queue_hold`,
+///   `hold_continue`, `review_material`, `wrapper_setting_warned`), with
+///   the adapters it uses (`repository`, `remote`, `verifier`, `reviewer`,
+///   `codex_jobs`, `signals`, `spawner`, `files`).
 /// - observation and analysis: `observation`
 ///   ([`contexts::ObservationState`]), changed only by its submodules
 ///   through their passes.
 /// - host operation: `host` ([`contexts::HostOpsState`]), changed only by
 ///   its submodules through their passes; and on the loop, the
-///   registration and handoff (`token`, `heartbeat`, `supervisor_file`,
-///   `supervisor_error`, `exec`, `handoff`, `draining`, `stop_recorded`),
+///   registration and handoff (`token`, `heartbeat`, `exec`, `handoff`,
+///   `draining`, `stop_recorded`),
 ///   the sweep (`last_sweep`, `sweep_failures`), the host's load
 ///   (`max_load`, `load_average`, `host_versions`), `service_access`,
 ///   `no_claude` and `sessions`.
@@ -1039,9 +1040,6 @@ struct Supervisor<'a> {
     /// inbox (no worker screen since task 1437, no planner's screen since
     /// ADR-t1433-2).
     signals: &'a dyn AgentSignals,
-    /// The workers this supervisor runs: a candidate whose worker is not
-    /// one of them is not claimed (ADR-t813-2).
-    workers: Vec<Worker>,
     spawner: &'a dyn Spawner,
     service_access: &'a dyn super::queue_service::ServiceAccess,
     files: Arc<dyn RunFiles>,
@@ -1050,34 +1048,6 @@ struct Supervisor<'a> {
         &'a dyn Fn(TaskId, Option<&crate::application::review::ReviewRange>) -> Result<Value>,
     token: LeaseToken,
     heartbeat: Heartbeat,
-    slots: Vec<Slot>,
-    /// `--parallel`: the slots in use (the runs not waiting) are held under
-    /// it, apart from a run a person moved (ADR-0062 decision 10).
-    parallel: usize,
-    /// `--max-waiting` (ADR-0062 decision 7).
-    max_waiting: usize,
-    /// `parallel`, `max_waiting` and `runtime_planners` with where each
-    /// comes from, as last resolved (task 698, task 941).
-    limits: SlotLimits,
-    /// The flags given; a value not given follows `[supervisor]`.
-    slot_flags: SlotFlags,
-    /// Reads `[supervisor]` again each pass; `None` keeps `limits`.
-    supervisor_file: Option<SupervisorFile>,
-    /// The error the last read of `[supervisor]` failed with, warned of
-    /// once until it changes or a read succeeds.
-    supervisor_error: Option<String>,
-    /// `[supervisor] light_changes` as last read (ADR-t1591-1): the tasks
-    /// claimed in the room the landing queue leaves.
-    light_changes: crate::domain::light_slots::LightChanges,
-    /// `[provider_fallback]` as last read (ADR-t1857-1): whether a worker
-    /// moves off a provider it cannot use.
-    fallback: crate::domain::provider_switch::ProviderFallback,
-    /// Reads `[provider_fallback]` again each pass; `None` keeps
-    /// `fallback`.
-    fallback_file: Option<ProviderFallbackFile>,
-    /// The error the last read of `[provider_fallback]` failed with,
-    /// warned of once until it changes or a read succeeds.
-    fallback_error: Option<String>,
     /// `[fresh_session]` as last read (ADR-t2080-1): past what context a
     /// worker's send-back or resume starts a new session.
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
@@ -1089,29 +1059,15 @@ struct Supervisor<'a> {
     fresh_session_error: Option<String>,
     finished: Vec<TaskRun>,
     errors: Vec<RunError>,
-    /// Cleared after a provisioning failure so an unavailable cmux or Git
-    /// does not burn through every candidate.
-    claiming: bool,
-    provisioning_error: Option<String>,
     /// When this process last swept the workspaces of ended runs
     /// (`LoopSettings::sweep_interval`); `None` until the first pass sweeps.
     last_sweep: Option<Instant>,
     /// When this process last recorded the transcript turns of the open
     /// session spans (ADR-0048 decision 8); `None` until the first pass.
     last_turns: Option<Instant>,
-    /// The latest listing of this user's processes for the `idle_process`
-    /// alert (task 469): when it was taken, and the listing with its wall
-    /// time, `None` when it failed. One listing serves every run.
-    process_sample: Option<(Instant, Option<ProcessSample>)>,
-    /// The ends of the live sessions' recovery jobs whose verdict a person
-    /// is asked about (run, alert, attempt), until the escalation records
-    /// its `recovery_finished` ([`recovery::Escalation::record`]).
-    live_job_ends: Vec<(RunId, RecoveryAlert, usize, recovery::JobEnd)>,
     /// The workspaces the sweep could not close: retried on every sweep,
     /// their `cleanup_failed` recorded once per process.
     sweep_failures: Vec<String>,
-    /// The runs this process triaged, with where each one went.
-    triaged: Vec<Value>,
     /// The clock and IDs `queue` also uses.
     generators: Generators,
     /// The host's time zone ([`LoopSettings::utc_offset`]): the local day
@@ -1126,15 +1082,6 @@ struct Supervisor<'a> {
     /// ignore, was warned of (ADR-t1433-2 decision 3). Set where a planner
     /// opens, which reads `[roles]` through `&self`.
     route_setting_warned: std::sync::atomic::AtomicBool,
-    /// The `[conflicts]` thresholds the plan review's hotspots and the
-    /// claims deferred on them are judged by, as last read (ADR-0080).
-    conflicts: crate::domain::stats::ConflictConfigReport,
-    /// Reads `[conflicts]` again each pass (ADR-0080); `None` keeps
-    /// `conflicts` as the options set it.
-    conflicts_file: Option<ConflictsFile>,
-    /// The error the last read of `[conflicts]` failed with, warned of
-    /// once until it changes or a read succeeds.
-    conflicts_error: Option<String>,
     /// The plan review job running now (ADR-0041 decision 11): one at a
     /// time, queue-wide, outside the run slots.
     plan_review: Option<plan_review::PlanReviewWatch>,
@@ -1155,79 +1102,38 @@ struct Supervisor<'a> {
     handoff: Option<String>,
     /// Set when the loop ended for that exec: the registration stays.
     exec: Option<String>,
-    /// A program `[run.env]` names did not resolve on this process's PATH
-    /// at the last claim pass (ADR-0049 decision 9): nothing is claimed and
-    /// no passed run lands until it does.
-    run_env_missing: bool,
-    /// The landing branch did not resolve at the top of this pass
-    /// (ADR-t615-1): nothing is claimed and no passed run lands until it
-    /// does.
-    landing_unresolved: bool,
-    /// The reason of the landing branch's hold this process last recorded
-    /// or found recorded (`Some(None)`: none); `None` before its first look
-    /// at the queue, or after a record that failed.
-    landing_recorded: Option<Option<&'static str>>,
-    /// The stamp of the landing branch's inputs taken before its last
-    /// resolution, and when (task 1078): a pass whose stamp is the same,
-    /// within [`LANDING_BRANCH_RECHECK`], keeps that resolution without
-    /// starting Git.
-    landing_stamp: Option<(crate::application::LandingBranchStamp, Instant)>,
     /// The open authentication or usage-limit ask read at the top of this
     /// pass (task 437): no new run is claimed and no headless job starts
     /// while it holds.
     queue_hold: Option<claim_hold::QueueHold>,
-    /// The providers held for the workers without an ask (ADR-t813-2
-    /// decision 6): Codex for any reason, Claude for an agent that did not
-    /// start. Their tasks run on the other provider meanwhile.
-    provider_holds: Vec<crate::domain::provider_switch::ProviderHold>,
-    /// The latest finishes of jobs on 観測と分析's timer whose provider
-    /// this supervisor held, so that none is held twice
-    /// ([`crate::domain::throughput_review::finishes_to_hold`]).
-    timer_finishes_held: Vec<EventId>,
-    /// The runs whose worker moved to the other provider in this step: the
-    /// slot's copy takes the new worker once the step returns.
-    moved: HashMap<RunId, Worker>,
     /// The held runs whose session gets the fixed text to go on, with the
     /// ask a person answered `done` (task 437).
     hold_continue: HashMap<RunId, AskId>,
-    /// The headless sessions lost during a wait that are opened again
-    /// (task 1372), by run.
-    reopens: HashMap<RunId, reopen::ReopenWatch>,
-    /// The notices of a question closed without its answer that could not
-    /// be sent, by run: tried again a bounded number of times (task 1372).
-    notice_failures: HashMap<RunId, stall::NoticeFailure>,
     /// This pass drains (a stop, a handoff, or claiming stopped after a
     /// provisioning failure): nothing may wait for the program to appear.
     draining: bool,
     /// Whether this process recorded `supervisor_draining` for its stop
     /// request (task 1277): once, on the first pass that saw it.
     stop_recorded: bool,
-    /// The landing recheck running and the one due (ADR-0068).
-    rechecks: recheck::Rechecks,
     /// `--max-load` (task 327).
     max_load: Option<f64>,
-    /// Since when, in Unix milliseconds, a claim this process would make
-    /// waits for the spacing after the queue's latest claim (ADR-t1479-1);
-    /// `None` while none waits.
-    spaced_since: Option<i64>,
     /// The 1-minute load average, and the host's versions a claim records.
     load_average: fn() -> Option<f64>,
     host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
     worker_plugin: Arc<dyn Fn(&Path) -> String + Send + Sync>,
     /// Reads the limit on the improvement proposals running.
     max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
-    /// The load samples of each held run's current interval (task 197).
-    loads: HashMap<RunId, LoadWindow>,
-    /// The claims deferred on conflict hotspots (ADR-0069).
-    defer: claim_defer::DeferWatch,
-    /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
-    /// decision 24).
-    resume_config: ResumeConfig,
-    retry_unreadable_review: bool,
-    /// Runs the e2e of the runs after their review (ADR-t1233-2).
-    run_e2e: Option<RunE2ePort>,
-    /// The runs waiting for the e2e, and when one that could not run is
-    /// tried again.
+    /// The notices of a question closed without its answer that could not
+    /// be sent, by run: tried again a bounded number of times (task 1372).
+    notice_failures: HashMap<RunId, stall::NoticeFailure>,
+    /// 実行と着地's state, by stage ([`stages`]).
+    claim: stages::ClaimState,
+    landing: stages::LandingState,
+    resume: stages::ResumeState,
+    triage: stages::TriageState,
+    provider: stages::ProviderState,
+    /// The e2e stage's state: its port, the runs waiting for the e2e, and
+    /// when one that could not run is tried again.
     e2e: e2e::E2eWaits,
     /// 観測と分析's state.
     observation: contexts::ObservationState,
@@ -1449,10 +1355,7 @@ impl Supervisor<'_> {
 
     /// The runs the slots hold, which a cleanup leaves alone.
     fn held_runs(&self) -> Vec<RunId> {
-        self.slots
-            .iter()
-            .map(|slot| slot.run.id().clone())
-            .collect()
+        self.claim.slots.runs()
     }
 
     /// Ask host運用 for the worktrees of ended runs to be cleaned, every
@@ -1572,7 +1475,7 @@ impl Supervisor<'_> {
             Some(binary) => Some(binary.clone()),
             None => self.queue.handoff_request(&self.token).ok().flatten(),
         };
-        let runs: Vec<&RunId> = self.slots.iter().map(|slot| slot.run.id()).collect();
+        let runs: Vec<&RunId> = self.claim.slots.iter().map(|slot| slot.run.id()).collect();
         let payload = json!({
             "supervisor": self.token,
             "pid": std::process::id(),
@@ -1604,7 +1507,7 @@ impl Supervisor<'_> {
                 // Supervisor-level failure: note it on every run and keep the
                 // leases and the registration; they go stale once this
                 // process is gone.
-                for slot in &self.slots {
+                for slot in self.claim.slots.iter() {
                     let _ = self.queue.record_runtime_error(
                         slot.run.id(),
                         &format!("{error:#}"),
@@ -1647,7 +1550,7 @@ impl Supervisor<'_> {
             // And `[supervisor]`: a change of `parallel`, `max_waiting` or
             // `runtime_planners` takes effect without a restart (task 698,
             // task 941).
-            self.reread_slot_limits()?;
+            self.claim.reread_limits(&*self.queue, &self.token)?;
             // And `[provider_fallback]`: turning the workers' fallback on
             // or off takes effect without a restart (ADR-t1857-1).
             self.reread_provider_fallback();
@@ -1660,6 +1563,7 @@ impl Supervisor<'_> {
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             let landings: Vec<RunId> = self
+                .claim
                 .slots
                 .iter()
                 .filter(|slot| matches!(slot.phase, Phase::AwaitingSlot))
@@ -1699,7 +1603,7 @@ impl Supervisor<'_> {
                     }
                 }
             }
-            self.draining = stopping || !self.claiming || self.handoff.is_some();
+            self.draining = stopping || !self.claim.claiming || self.handoff.is_some();
             // Before any new work, draining or not: a drain waits for them
             // (ADR-0062 decision 8).
             self.return_waiting_runs();
@@ -1725,10 +1629,10 @@ impl Supervisor<'_> {
                     // its current worktree, or all candidates for disk space (task 648),
                     // and the rest of a cleanup for room it took on (task 1426).
                     self.recheck_pass();
-                    if !self.rechecks.running()
+                    if !self.landing.rechecks.running()
                         && !self.host.handoff_waits()
                         && !self.observation.handoff_waits()
-                        && self.slots.iter().all(|slot| slot.phase.rebuildable())
+                        && self.claim.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
                         if self.queue.take_handoff(&self.token, &binary)? {
                             let runs = self.prepare_handoff();
@@ -1744,7 +1648,7 @@ impl Supervisor<'_> {
                                 "runs": self.finished,
                                 "handed_over": runs,
                                 "errors": self.errors,
-                                "triaged": self.triaged,
+                                "triaged": self.triage.triaged,
                             }));
                         }
                         // Not taken: withdrawn, or replaced by another
@@ -1760,7 +1664,7 @@ impl Supervisor<'_> {
                                     self.token
                                 );
                                 self.handoff = None;
-                                self.draining = !self.claiming;
+                                self.draining = !self.claim.claiming;
                                 self.resume_cleanup();
                             }
                         }
@@ -1791,11 +1695,11 @@ impl Supervisor<'_> {
             // The queue service looked at, started again or replaced
             // (ADR-t1233-4 decision 2); while it is down no new run and no
             // queue's job starts.
-            let working = !stopping && self.claiming;
+            let working = !stopping && self.claim.claiming;
             self.on_host(|host, env| host.queue_service_pass(env, working));
-            if self.claiming && !stopping {
-                self.fill_slots(self.parallel, options.sweep_interval)?;
-                self.sample_candidates(self.parallel);
+            if self.claim.claiming && !stopping {
+                self.fill_slots(self.claim.parallel, options.sweep_interval)?;
+                self.sample_candidates(self.claim.parallel);
             } else {
                 // A draining supervisor still frees the integration slot a
                 // dead landing holds: its own runs waiting to land, and so
@@ -1807,7 +1711,7 @@ impl Supervisor<'_> {
             let rechecked = self.recheck_pass();
             // A supervisor that stopped claiming is draining, not observing
             // nor starting plan reviews, nor updating itself.
-            let working = !stopping && self.claiming;
+            let working = !stopping && self.claim.claiming;
             self.on_observation(|observation, env| {
                 // Reaped on every pass, started only by a supervisor at work.
                 observation.report_pass(env, working);
@@ -1832,9 +1736,9 @@ impl Supervisor<'_> {
             self.reap_throughput_reviews(options);
             self.start_throughput_review(
                 options,
-                !stopping && self.claiming && self.host.service_up,
+                !stopping && self.claim.claiming && self.host.service_up,
             );
-            if !stopping && self.claiming {
+            if !stopping && self.claim.claiming {
                 // Its route decides on `--no-claude` and the hold as the
                 // throughput review's does (task 1223).
                 if self.host.service_up {
@@ -1852,10 +1756,10 @@ impl Supervisor<'_> {
             // 437), but one whose role names its provider may run on Codex
             // while Claude is held (ADR-t1063-1 decision 5). One in progress
             // is followed.
-            let starting = !stopping && self.claiming && self.host.service_up;
+            let starting = !stopping && self.claim.claiming && self.host.service_up;
             let mut progressed = self.plan_review_pass(options, starting);
             progressed |= self.goal_review_pass(starting);
-            if self.slots.is_empty() {
+            if self.claim.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space (with the rest of one another job
                 // took on) or one a triage or resume waits
@@ -1872,11 +1776,11 @@ impl Supervisor<'_> {
                     || self.host.release.running()
                     || self.plan_review.is_some()
                     || self.goal_review.is_some()
-                    || self.rechecks.running()
+                    || self.landing.rechecks.running()
                     || self.host.cleanup.for_disk()
                     || self.host.cleanup.deferred()
                     || rechecked;
-                if !job && !progressed && (options.once || stopping || !self.claiming) {
+                if !job && !progressed && (options.once || stopping || !self.claim.claiming) {
                     break;
                 }
                 thread::sleep(if job { options.tick } else { options.idle_poll });
@@ -1887,7 +1791,7 @@ impl Supervisor<'_> {
         }
         let held = self.held_runs();
         self.on_host(|host, env| host.finish_cleanup(env, &held));
-        if let Some(message) = &self.provisioning_error {
+        if let Some(message) = &self.claim.provisioning_error {
             bail!(
                 "{message}; claiming stopped and {} active run(s) were drained; inspect doctor before recovery",
                 self.finished.len()
@@ -1902,7 +1806,7 @@ impl Supervisor<'_> {
             "outcome": outcome,
             "runs": self.finished,
             "errors": self.errors,
-            "triaged": self.triaged,
+            "triaged": self.triage.triaged,
         }))
     }
     /// Adopt the runs other supervisors left behind, then claim and
@@ -1935,15 +1839,15 @@ impl Supervisor<'_> {
         // `[run.env]` like a claimed run, so it waits with the claims for a
         // missing program too (task 303).
         let resumes = if self.used_slots() < parallel
-            && !self.landing_unresolved
-            && !self.run_env_missing
+            && !self.landing.unresolved
+            && !self.landing.run_env_missing
             && !self.observation.ci.held()
         {
             self.resume_candidates()?
         } else {
             Vec::new()
         };
-        let recoveries = if self.used_slots() < parallel && !self.landing_unresolved {
+        let recoveries = if self.used_slots() < parallel && !self.landing.unresolved {
             self.triage_candidates()?
         } else {
             Vec::new()
@@ -1983,7 +1887,7 @@ impl Supervisor<'_> {
         // A wait for the claim spacing goes on only from one claim pass to
         // the next that reaches the spacing again (ADR-t1479-1): a hold or
         // a pass with no free slot or candidate ends it.
-        let spaced_since = self.spaced_since.take();
+        let spaced_since = self.claim.spaced_since.take();
         // A run claimed now would fail every cargo command (ADR-0049
         // decision 9; checked at the top of the pass); the runs in flight
         // and their reviews go on (resumes wait above). A queue service
@@ -1991,7 +1895,7 @@ impl Supervisor<'_> {
         // (ADR-t1233-4 decision 2).
         let mut claims = None;
         // Nor while the CI cannot be read (ADR-t1920-1 decision 2).
-        if !(self.run_env_missing || self.observation.ci.held() || self.landing_unresolved)
+        if !(self.landing.run_env_missing || self.observation.ci.held() || self.landing.unresolved)
             && self.host.service_up
         {
             // The runs in flight go on; only new claims wait (task 327).
@@ -2063,13 +1967,7 @@ impl Supervisor<'_> {
     }
     /// The room for the next claim (ADR-t1591-1).
     fn claim_room(&self, parallel: usize) -> ClaimRoom {
-        light_slots::claim_room(
-            self.used_slots(),
-            self.landing_queue(),
-            parallel,
-            self.returning_runs(),
-            !self.light_changes.is_empty(),
-        )
+        self.claim.room(parallel)
     }
     /// The effective priority of `task_id` in the line of the fill pass
     /// (ADR-t1850-1): the graph's, else (a task the graph read before it
@@ -2125,7 +2023,7 @@ impl Supervisor<'_> {
                     .queue
                     .candidates()?
                     .into_iter()
-                    .filter(|task| self.light_changes.admits(task.change(), task.paths()))
+                    .filter(|task| self.claim.light_changes.admits(task.change(), task.paths()))
                     .map(|task| task.id())
                     .collect();
                 order.retain(|id| light.contains(id));
@@ -2137,7 +2035,8 @@ impl Supervisor<'_> {
             // after the queue's latest claim, a light one too, and the next
             // pass judges the load again before it (ADR-t1479-1). The hold
             // itself returned above, before any claim.
-            let spacing = claim_spacing::in_effect(self.max_load, self.limits.claim_spacing.value);
+            let spacing =
+                claim_spacing::in_effect(self.max_load, self.claim.limits.claim_spacing.value);
             let now_ms = crate::application::unix_millis(self.generators.clock.system_time());
             if spacing.is_some() {
                 let last = self
@@ -2149,10 +2048,10 @@ impl Supervisor<'_> {
                         info!(
                             event = "claim_spaced",
                             "the next claim waits for the claim spacing of {}s after the latest claim",
-                            self.limits.claim_spacing.value
+                            self.claim.limits.claim_spacing.value
                         );
                     }
-                    self.spaced_since = Some(pass.spaced_since.unwrap_or(now_ms));
+                    self.claim.spaced_since = Some(pass.spaced_since.unwrap_or(now_ms));
                     return Ok(ClaimStep::Stop);
                 }
             }
@@ -2170,7 +2069,7 @@ impl Supervisor<'_> {
                 Ok(base) => base,
                 Err(error) => {
                     self.resolve_landing_branch();
-                    if self.landing_unresolved {
+                    if self.landing.unresolved {
                         info!(
                             event = "claim_landing_branch_unresolved",
                             "claim held after the landing branch stopped resolving during the pass"
@@ -2184,6 +2083,7 @@ impl Supervisor<'_> {
             let host = pass.host.get_or_insert_with(|| {
                 // Codex's version only when this supervisor runs Codex.
                 let codex = self
+                    .claim
                     .workers
                     .iter()
                     .any(|worker| worker.provider == crate::domain::Provider::Codex)
@@ -2217,15 +2117,15 @@ impl Supervisor<'_> {
                 ClaimOutcome::Claimed { run } => *run,
                 ClaimOutcome::NoReadyTask => return Ok(ClaimStep::Next),
             };
-            self.defer.claimed();
+            self.claim.defer.claimed();
             // The work interval starts at the claim, with its sample.
-            let mut window = LoadWindow::default();
-            window.add(attributes.load_avg);
-            self.loads.insert(run.id().clone(), window);
+            self.claim.start_load(run.id(), attributes.load_avg);
             match self.provision(&run) {
                 Ok(watch) => {
                     let run = self.queue.run(run.id())?;
-                    self.slots.push(Slot::new(run, Phase::Session(watch)));
+                    self.claim
+                        .slots
+                        .admit(Slot::new(run, Phase::Session(watch)));
                 }
                 Err(error) => {
                     let message = format!("run {} provisioning failed: {error:#}", run.id());
@@ -2235,8 +2135,8 @@ impl Supervisor<'_> {
                         message.clone(),
                         &reason_of_error(&error, ReasonCode::Other),
                     );
-                    self.claiming = false;
-                    self.provisioning_error = Some(message);
+                    self.claim.claiming = false;
+                    self.claim.provisioning_error = Some(message);
                     return Ok(ClaimStep::Stop);
                 }
             }
@@ -2314,7 +2214,7 @@ impl Supervisor<'_> {
                 }
             }
         }
-        self.run_env_missing = !check.missing().is_empty();
+        self.landing.run_env_missing = !check.missing().is_empty();
         Ok(())
     }
     /// Resolve the landing branch (ADR-t615-1) when it did not resolve at
@@ -2328,18 +2228,18 @@ impl Supervisor<'_> {
         // Only a resolution that succeeded is kept: one that failed, maybe
         // for a moment (a Git that did not start), is tried again at the
         // next pass, so the claims resume there once it resolves.
-        if let (Some(stamp), Some((last, at))) = (&stamp, &self.landing_stamp)
-            && !self.landing_unresolved
+        if let (Some(stamp), Some((last, at))) = (&stamp, &self.landing.stamp)
+            && !self.landing.unresolved
             && stamp == last
             && at.elapsed() < recheck
         {
             // A resolution kept after a record of its end that failed.
-            if self.landing_recorded != Some(None) {
+            if self.landing.recorded != Some(None) {
                 self.record_landing_hold(None);
             }
             return;
         }
-        self.landing_stamp = stamp.map(|stamp| (stamp, Instant::now()));
+        self.landing.stamp = stamp.map(|stamp| (stamp, Instant::now()));
         self.resolve_landing_branch();
     }
     /// Resolve the landing branch now and hold claims and landings while it
@@ -2351,17 +2251,17 @@ impl Supervisor<'_> {
     fn resolve_landing_branch(&mut self) {
         let error = match self.repository.landing_branch() {
             Ok(branch) => {
-                if self.landing_unresolved {
+                if self.landing.unresolved {
                     info!(branch = %branch.name, "the landing branch resolves again to {}; claiming and landing resume", branch.name);
                 }
-                self.landing_unresolved = false;
+                self.landing.unresolved = false;
                 None
             }
             Err(error) => {
-                if !self.landing_unresolved {
+                if !self.landing.unresolved {
                     warn!(error = %format_args!("{error:#}"), "{error:#}; no task is claimed and no run lands until it resolves");
                 }
-                self.landing_unresolved = true;
+                self.landing.unresolved = true;
                 Some(format!("{error:#}"))
             }
         };
@@ -2372,11 +2272,11 @@ impl Supervisor<'_> {
     fn record_landing_hold(&mut self, error: Option<String>) {
         use crate::domain::landing_branch::{LANDING_BRANCH_HOLD, UNRESOLVED_REASON};
         let reason = error.is_some().then_some(UNRESOLVED_REASON);
-        if self.landing_recorded == Some(reason) {
+        if self.landing.recorded == Some(reason) {
             return;
         }
         let hold = error.map(|error| (UNRESOLVED_REASON, json!({"error": error})));
-        self.landing_recorded = self
+        self.landing.recorded = self
             .with_env(|env| env.record_own_hold(LANDING_BRANCH_HOLD, hold))
             .then_some(reason);
     }
@@ -2443,7 +2343,7 @@ impl Supervisor<'_> {
         plugin: &str,
     ) -> BTreeMap<String, InstructionVersions> {
         instructions::by_provider(
-            self.workers.iter().map(|worker| worker.provider),
+            self.claim.workers.iter().map(|worker| worker.provider),
             |provider| crate::application::prompt::worker_template(provider).ok(),
             plugin,
             self.repository
@@ -2455,15 +2355,11 @@ impl Supervisor<'_> {
     /// (task 197); the windows of runs no slot holds any more are dropped.
     fn sample_load(&mut self) {
         let load = (self.load_average)();
-        let held: HashSet<&RunId> = self.slots.iter().map(|slot| slot.run.id()).collect();
-        self.loads.retain(|id, _| held.contains(id));
-        for id in held {
-            self.loads.entry(id.clone()).or_default().add(load);
-        }
+        self.claim.sample_load(load);
     }
     /// The load over the run's interval that ends now, and start the next.
     pub(super) fn take_load(&mut self, id: &RunId) -> LoadSummary {
-        self.loads.entry(id.clone()).or_default().take()
+        self.claim.take_load(id)
     }
     /// One pass over the slots; with `unsettled_only`, over the slots a
     /// handoff waits for (their validation or landing in progress) only.
@@ -2473,23 +2369,23 @@ impl Supervisor<'_> {
             self.start_waits();
         }
         let mut index = 0;
-        while index < self.slots.len() {
-            if unsettled_only && self.slots[index].phase.rebuildable() {
+        while index < self.claim.slots.len() {
+            if unsettled_only && self.claim.slots[index].phase.rebuildable() {
                 index += 1;
                 continue;
             }
-            let mut slot = self.slots.remove(index);
+            let mut slot = self.claim.slots.release(index);
             let stepped = if slot.out_of_slot() {
                 self.watch_waiting(&mut slot)
             } else {
                 self.step(&mut slot)
             };
-            if let Some(worker) = self.moved.remove(slot.run.id()) {
+            if let Some(worker) = self.provider.moved.remove(slot.run.id()) {
                 slot.run = slot.run.clone().running_on(worker);
             }
             match stepped {
                 Ok(Step::Continue) => {
-                    self.slots.insert(index, slot);
+                    self.claim.slots.put_back(index, slot);
                     index += 1;
                 }
                 Ok(Step::Done(run)) => {
@@ -2626,7 +2522,7 @@ impl Supervisor<'_> {
             }
         };
         self.record_session_turns(true);
-        let fallback_jobs = self.fallback.jobs;
+        let fallback_jobs = self.provider.fallback.jobs;
         self.on_observation(|observation, env| {
             observation.start_observer(env, mode, route, mark, fallback_jobs);
         });
@@ -2644,7 +2540,7 @@ impl Supervisor<'_> {
         else {
             return;
         };
-        let fallback_jobs = self.fallback.jobs;
+        let fallback_jobs = self.provider.fallback.jobs;
         self.on_observation(|observation, env| {
             observation.start_throughput_review(env, due, route, fallback_jobs);
         });
@@ -2811,7 +2707,7 @@ impl Supervisor<'_> {
     /// next step ([`Self::disown`]), and only a later pass may take the run
     /// like any other, never into a second slot (task 1361).
     fn in_slot(&self, id: &RunId) -> bool {
-        self.slots.iter().any(|slot| slot.run.id() == id)
+        self.claim.slots.holds(id)
     }
     /// Drop a slot whose lease another process holds now, writing nothing
     /// about the run: the new owner's record is the record.
@@ -2926,7 +2822,7 @@ impl Supervisor<'_> {
             "outcome": "error",
             "error": message,
             "workspace_id": workspace,
-            "exhausted": resumes_exhausted(&*self.queue, run.id(), self.resume_config),
+            "exhausted": resumes_exhausted(&*self.queue, run.id(), self.resume.config),
         }));
         if let Err(error) =
             self.queue
@@ -3009,10 +2905,10 @@ impl Supervisor<'_> {
                 // ([`crate::domain::landing_hold::judge`]).
                 match crate::domain::landing_hold::judge(
                     crate::domain::landing_hold::LandingHoldInputs {
-                        run_env_missing: self.run_env_missing,
+                        run_env_missing: self.landing.run_env_missing,
                         ci_held: self.observation.ci.held(),
                         ci_unreadable: self.observation.ci.unreadable(),
-                        landing_unresolved: self.landing_unresolved,
+                        landing_unresolved: self.landing.unresolved,
                         landing_short: self.host.disk.landing_short,
                         disk_cleaning: self.host.disk.cleaning,
                         draining: self.draining,
@@ -3343,7 +3239,7 @@ impl Supervisor<'_> {
                 // named.
                 let retry = landing::retries_review(
                     &outcome,
-                    self.retry_unreadable_review,
+                    self.landing.retry_unreadable_review,
                     retried,
                     matches!(self.review_route(), landing::ReviewRoute::Manual(_)),
                     not_moved,

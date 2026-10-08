@@ -134,7 +134,7 @@ impl Supervisor<'_> {
     /// when the recheck starts.
     pub(super) fn note_landed(&mut self, run: &TaskRun) {
         tracing::debug!(run_id = %run.id(), "run {} landed: a landing recheck is due", run.id());
-        self.rechecks.due = true;
+        self.landing.rechecks.due = true;
     }
 
     /// Apply the recheck that finished, and start one when this
@@ -145,11 +145,12 @@ impl Supervisor<'_> {
     pub(super) fn recheck_pass(&mut self) -> bool {
         let mut applied = false;
         if self
+            .landing
             .rechecks
             .running
             .as_ref()
             .is_some_and(|watch| watch.handle.as_ref().is_none_or(|h| h.is_finished()))
-            && let Some(mut watch) = self.rechecks.running.take()
+            && let Some(mut watch) = self.landing.rechecks.running.take()
         {
             let found = watch
                 .handle
@@ -162,7 +163,7 @@ impl Supervisor<'_> {
                 })
                 .unwrap_or_default();
             match self.apply_recheck(&watch, found) {
-                Ok(()) => self.rechecks.checked = Some(watch.main.clone()),
+                Ok(()) => self.landing.rechecks.checked = Some(watch.main.clone()),
                 Err(error) => {
                     warn!(error = %format_args!("{error:#}"), "the landing recheck against main {} could not be recorded: {error:#}", watch.main);
                 }
@@ -172,16 +173,16 @@ impl Supervisor<'_> {
             drop(watch);
             applied = true;
         }
-        self.rechecks.locked_out = false;
-        if self.rechecks.running.is_none() && !self.draining {
-            let due = std::mem::take(&mut self.rechecks.due);
+        self.landing.rechecks.locked_out = false;
+        if self.landing.rechecks.running.is_none() && !self.draining {
+            let due = std::mem::take(&mut self.landing.rechecks.due);
             match self.try_recheck(due) {
                 Ok(Start::Started | Start::Nothing) => {}
                 // A landing in progress, or another supervisor's recheck:
                 // the landing's recheck stays due for the next pass.
                 Ok(Start::Later { locked_out }) => {
-                    self.rechecks.due = due;
-                    self.rechecks.locked_out = due && locked_out;
+                    self.landing.rechecks.due = due;
+                    self.landing.rechecks.locked_out = due && locked_out;
                 }
                 Err(error) => {
                     warn!(error = %format_args!("{error:#}"), "the landing recheck could not start: {error:#}");
@@ -209,7 +210,7 @@ impl Supervisor<'_> {
     /// they land as they are.
     fn try_recheck(&mut self, due: bool) -> Result<Start> {
         let main = self.repository.main_head()?;
-        if !due && self.rechecks.checked.as_ref() == Some(&main) {
+        if !due && self.landing.rechecks.checked.as_ref() == Some(&main) {
             return Ok(Start::Nothing);
         }
         let mut targets = self.recheck_targets()?;
@@ -221,14 +222,14 @@ impl Supervisor<'_> {
         // that wait since, only those nobody leases are looked at. One this
         // supervisor holds to land had its passed review's conflict
         // precheck against main as it is (ADR-0027 decision 4).
-        if let Some((idle, before)) = &self.rechecks.idle
+        if let Some((idle, before)) = &self.landing.rechecks.idle
             && *idle == main
         {
             targets.retain(|target| {
                 !target.held && !before.contains(&(target.run_id.clone(), target.head.clone()))
             });
             if targets.is_empty() {
-                self.rechecks.idle = Some((main, seen));
+                self.landing.rechecks.idle = Some((main, seen));
                 return Ok(Start::Nothing);
             }
         }
@@ -240,13 +241,13 @@ impl Supervisor<'_> {
         {
             // This supervisor checked main as it is.
             if event.payload["supervisor"] == self.token.as_str() {
-                self.rechecks.checked = Some(main);
+                self.landing.rechecks.checked = Some(main);
                 return Ok(Start::Nothing);
             }
             // Another supervisor did: it could not see the runs this one
             // holds to land, which are checked below (`Checked::ByOther`).
             if !targets.iter().any(|target| target.held) {
-                self.rechecks.idle = Some((main, seen));
+                self.landing.rechecks.idle = Some((main, seen));
                 return Ok(Start::Nothing);
             }
         }
@@ -287,7 +288,7 @@ impl Supervisor<'_> {
             Checked::No => {}
         }
         if targets.is_empty() {
-            self.rechecks.idle = Some((main, seen));
+            self.landing.rechecks.idle = Some((main, seen));
             return Ok(Start::Nothing);
         }
         let landed = self.landing_at(&main)?;
@@ -341,7 +342,7 @@ impl Supervisor<'_> {
                 None => false,
                 Some(lease)
                     if lease.token == self.token
-                        && self.slots.iter().any(|slot| {
+                        && self.claim.slots.iter().any(|slot| {
                             slot.run.id() == run.id() && slot.phase.waits_to_land()
                         }) =>
                 {
@@ -408,7 +409,7 @@ impl Supervisor<'_> {
         };
         // A command whose program [run.env] cannot find would fail on every
         // run (ADR-0049 decision 9): only the merge is checked then.
-        let config = if self.run_env_missing {
+        let config = if self.landing.run_env_missing {
             RecheckConfig::default()
         } else {
             self.verifier.recheck_config()?
@@ -454,7 +455,7 @@ impl Supervisor<'_> {
                 targets,
             )
         });
-        self.rechecks.running = Some(RecheckWatch {
+        self.landing.rechecks.running = Some(RecheckWatch {
             landed,
             record_on,
             main,

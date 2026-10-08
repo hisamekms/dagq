@@ -48,25 +48,25 @@ impl Supervisor<'_> {
             self.no_claude,
             self.queue_hold
                 .and_then(|hold| SwitchReason::of_hold(hold.reason)),
-            provider_switch::own_hold(&self.provider_holds, provider),
+            provider_switch::own_hold(&self.provider.holds, provider),
         )
     }
 
     /// How this pass's claims run each worker a task may ask for.
     pub(super) fn routes(&self) -> Vec<WorkerRoute> {
         provider_switch::routes(
-            &self.workers,
+            &self.claim.workers,
             |provider| self.provider_held(provider),
-            self.fallback.workers,
+            self.provider.fallback.workers,
         )
     }
 
     /// Whether `worker` has no route only because `[provider_fallback]
     /// workers` is off (ADR-t1857-1).
     pub(super) fn stopped_by_fallback(&self, worker: Worker) -> bool {
-        !self.fallback.workers
+        !self.provider.fallback.workers
             && provider_switch::stopped_by_fallback(
-                &self.workers,
+                &self.claim.workers,
                 |provider| self.provider_held(provider),
                 worker,
             )
@@ -77,38 +77,38 @@ impl Supervisor<'_> {
     /// invalid value keeps the value in use, warned of once per error; so
     /// does a missing file, which may only be a checkout rewriting it.
     pub(super) fn reread_provider_fallback(&mut self) {
-        let Some(read) = self.fallback_file.clone() else {
+        let Some(read) = self.provider.fallback_file.clone() else {
             return;
         };
         let to = match read() {
             Ok(Some(to)) => to,
             Ok(None) => {
-                self.fallback_error = None;
+                self.provider.fallback_error = None;
                 return;
             }
             Err(error) => {
                 let message = format!("{error:#}");
-                if self.fallback_error.as_ref() != Some(&message) {
-                    warn!(error = %message, "[provider_fallback] of dagq.toml not read: {message}; keeping workers = {}, jobs = {}", self.fallback.workers, self.fallback.jobs);
-                    self.fallback_error = Some(message);
+                if self.provider.fallback_error.as_ref() != Some(&message) {
+                    warn!(error = %message, "[provider_fallback] of dagq.toml not read: {message}; keeping workers = {}, jobs = {}", self.provider.fallback.workers, self.provider.fallback.jobs);
+                    self.provider.fallback_error = Some(message);
                 }
                 return;
             }
         };
-        self.fallback_error = None;
-        if to != self.fallback {
+        self.provider.fallback_error = None;
+        if to != self.provider.fallback {
             info!(
                 "[provider_fallback] of dagq.toml changed: workers {} -> {}, jobs {} -> {}",
-                self.fallback.workers, to.workers, self.fallback.jobs, to.jobs
+                self.provider.fallback.workers, to.workers, self.provider.fallback.jobs, to.jobs
             );
-            self.fallback = to;
+            self.provider.fallback = to;
         }
     }
 
     /// Whether a headless worker of `provider` can take a run now: this
     /// supervisor has its adapters and it is not held.
     fn headless_usable(&self, provider: Provider) -> bool {
-        self.workers.contains(&Worker {
+        self.claim.workers.contains(&Worker {
             provider,
             mode: WorkerMode::Headless,
         }) && self.provider_held(provider).is_none()
@@ -124,7 +124,7 @@ impl Supervisor<'_> {
             latest.extend(self.queue.latest_events_of(kind, HOLD_EVENTS_READ)?);
         }
         latest.sort_by_key(|e| std::cmp::Reverse(e.id));
-        self.provider_holds = [Provider::Claude, Provider::Codex]
+        self.provider.holds = [Provider::Claude, Provider::Codex]
             .into_iter()
             .filter_map(|provider| {
                 latest
@@ -134,7 +134,7 @@ impl Supervisor<'_> {
             })
             .collect();
         let now = self.generators.clock.now();
-        for hold in self.provider_holds.clone() {
+        for hold in self.provider.holds.clone() {
             if hold.due(now) {
                 self.release_provider(hold.provider, "retry_due")?;
             }
@@ -153,7 +153,7 @@ impl Supervisor<'_> {
         run: Option<&RunId>,
         message: &str,
     ) -> Result<()> {
-        if self.provider_holds.iter().any(|h| h.provider == provider) {
+        if self.provider.holds.iter().any(|h| h.provider == provider) {
             return Ok(());
         }
         let now = self.generators.clock.now();
@@ -167,7 +167,7 @@ impl Supervisor<'_> {
         self.queue
             .record_queue_event(EventKind::ProviderHeld, payload)?;
         warn!(run_id = %run.map_or_else(String::new, ToString::to_string), "{} is held ({}): its workers and jobs go to the other provider until {}", provider.as_str(), reason.as_str(), hold.retry_at);
-        self.provider_holds.push(hold);
+        self.provider.holds.push(hold);
         Ok(())
     }
 
@@ -175,13 +175,14 @@ impl Supervisor<'_> {
     /// answered a hold ask).
     fn release_provider(&mut self, provider: Provider, why: &str) -> Result<()> {
         let Some(at) = self
-            .provider_holds
+            .provider
+            .holds
             .iter()
             .position(|hold| hold.provider == provider)
         else {
             return Ok(());
         };
-        let hold = self.provider_holds.remove(at);
+        let hold = self.provider.holds.remove(at);
         let mut payload = hold.released_payload(why);
         payload["supervisor"] = json!(self.token);
         self.queue
@@ -262,7 +263,7 @@ impl Supervisor<'_> {
         let request = started["request"].as_u64();
         // The call the failed turn made, to make again.
         let undelivered = request.and_then(|seq| self.taken_request(run, seq));
-        let fallback = self.fallback.workers;
+        let fallback = self.provider.fallback.workers;
         let may_switch = provider_switch::may_switch(&events);
         let other_usable = may_switch && self.headless_usable(to);
         let own_held = self.provider_held(from).is_some();
@@ -324,7 +325,7 @@ impl Supervisor<'_> {
                     "other": to,
                     "blocked": blocked,
                     "retry_at": self
-                        .provider_holds
+                        .provider.holds
                         .iter()
                         .find(|hold| hold.provider == from)
                         .map(|hold| hold.retry_at),
@@ -378,12 +379,12 @@ impl Supervisor<'_> {
             self.no_claude,
             from,
             reason,
-            self.workers.contains(&Worker {
+            self.claim.workers.contains(&Worker {
                 provider: to,
                 mode: WorkerMode::Headless,
             }),
             open_hold,
-            &self.provider_holds,
+            &self.provider.holds,
         ))
     }
 
@@ -423,7 +424,7 @@ impl Supervisor<'_> {
         )?;
         warn!(run_id = %run.id(), "run {} moved from {} to {} ({}, switch {count} of at most {MAX_PROVIDER_SWITCHES}): a new session goes on in its worktree", run.id(), run.actual_provider().as_str(), to.as_str(), reason.as_str());
         // The slot's copy of the run takes its new worker after this step.
-        self.moved.insert(run.id().clone(), worker);
+        self.provider.moved.insert(run.id().clone(), worker);
         // The new provider's worker is told as it takes it (Codex does no
         // subagent review, say).
         if let Some(run_dir) = moved.run_dir() {
@@ -584,10 +585,16 @@ impl Supervisor<'_> {
         unusable: Vec<observer::UnusableTimerJob>,
     ) -> Vec<observer::TimerJob> {
         let mut held = Vec::new();
-        for job in finishes_to_hold(unusable, &self.timer_finishes_held, |job| job.finish.event) {
-            self.timer_finishes_held.push(job.finish.event);
-            let over = self.timer_finishes_held.len().saturating_sub(HELD_FINISHES);
-            self.timer_finishes_held.drain(..over);
+        for job in finishes_to_hold(unusable, &self.provider.timer_finishes_held, |job| {
+            job.finish.event
+        }) {
+            self.provider.timer_finishes_held.push(job.finish.event);
+            let over = self
+                .provider
+                .timer_finishes_held
+                .len()
+                .saturating_sub(HELD_FINISHES);
+            self.provider.timer_finishes_held.drain(..over);
             let finish = &job.finish;
             if self
                 .hold_unusable(
@@ -635,7 +642,7 @@ impl Supervisor<'_> {
         if !held {
             return None;
         }
-        if self.fallback.jobs {
+        if self.provider.fallback.jobs {
             info!(
                 "{what}: {} cannot be used ({}); it starts again on the other provider",
                 provider.as_str(),
@@ -827,7 +834,7 @@ impl Supervisor<'_> {
             models.switchable(role),
             self.no_claude,
             self.queue_hold.is_some(),
-            self.fallback.jobs,
+            self.provider.fallback.jobs,
             unnamed,
             |provider| self.job_unusable(provider),
         )

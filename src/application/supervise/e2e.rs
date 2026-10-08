@@ -53,14 +53,25 @@ pub struct RunE2ePort {
     pub retry: Duration,
 }
 
-/// The runs waiting for the e2e, and when an e2e that could not run is
-/// tried again.
-#[derive(Default)]
+/// The e2e stage's state: how it runs the e2e, the runs waiting for it,
+/// and when an e2e that could not run is tried again.
 pub(super) struct E2eWaits {
+    /// Runs the e2e of the runs after their review (ADR-t1233-2).
+    port: Option<RunE2ePort>,
     /// The runs whose `run_e2e_waiting` was recorded for the wait now.
     waiting: HashSet<RunId>,
     /// When the e2e of a run that could not run is tried again.
     retry: HashMap<RunId, Instant>,
+}
+
+impl E2eWaits {
+    pub(super) fn new(port: Option<RunE2ePort>) -> Self {
+        Self {
+            port,
+            waiting: HashSet::new(),
+            retry: HashMap::new(),
+        }
+    }
 }
 
 /// The e2e of a run in progress on a thread.
@@ -117,7 +128,7 @@ impl Supervisor<'_> {
             .result_commit()
             .context("a run due its e2e has a result commit")?
             .clone();
-        let Some(port) = self.run_e2e.clone() else {
+        let Some(port) = self.e2e.port.clone() else {
             self.queue.record_runtime_event(
                 run.id(),
                 EventKind::RunE2eFinished,
@@ -136,6 +147,7 @@ impl Supervisor<'_> {
             return Ok(Some(Phase::AwaitingE2e));
         }
         if self
+            .claim
             .slots
             .iter()
             .any(|slot| matches!(slot.phase, Phase::E2e(_)))
@@ -200,7 +212,8 @@ impl Supervisor<'_> {
         error: String,
     ) -> Result<Step> {
         let retry = self
-            .run_e2e
+            .e2e
+            .port
             .as_ref()
             .map_or(Duration::from_secs(run_e2e::RETRY_SECS), |port| port.retry);
         let events = self.queue.run_events(run.id())?;
