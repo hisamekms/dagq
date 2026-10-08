@@ -20,7 +20,7 @@ dagq は cmux と Git worktree で依存関係付きの開発タスクを実行�
 - planner・inbox・人は `dagq list` と担当の `dagq show ID`、[docs/plans/current.md](docs/plans/current.md) の現在のステップと完了条件を読む（worker は読まない）
 - 人・inbox は `install`・`up` / `down`、host のツール（sccache・`d2`・TALA）、push と secret に、人・inbox・planner は `dagq.toml` と KPI の印に触る前に operations.md の該当の節（`up` は「`up`のコマンド」）を読む（planner は `up` / `down` / `install` を打たない）
 - inbox と planner は cmux を直接打たない（settings の `permissions.deny` の `Bash(cmux:*)`、ADR-t1228-2）
-- AGENTS.md に規則の本文を足さず、正本に書いてここには案内だけを置く。大きさの上限は `scripts/check-agents-md-size.sh` と CI が検査する（値と決め方は [documents.md](docs/development/documents.md) の「AGENTS.md」）
+- AGENTS.md には規則の本文を足さず案内だけを置く（大きさの上限と検査は [documents.md](docs/development/documents.md) の「AGENTS.md」）
 
 ## 役割と変更の範囲ごとの読む案内
 
@@ -44,11 +44,11 @@ runtime の plan review の prompt が名指す「plan review の部分」。[ta
 
 ### review
 
-run の review は差分の変更の範囲の規則で判定する。この repository の review の subagent は `.dagq/agents/` に定義し、`dagq.toml` の `[review.subagents.<agent>]` が path ごとに有効にする（仕組みは [review](docs/design/supervisor-lifecycle/review.md) の「reviewのsubagent」）。
+run の review は差分の変更の範囲の規則で判定する。review の subagent の定義は `.dagq/agents/`、path ごとの有効化は `dagq.toml`（仕組みは [review](docs/design/supervisor-lifecycle/review.md) の「reviewのsubagent」）。
 
 ### inbox と人
 
-inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recover` skill（inbox を開き直す手順は `reference/up-down.md` の「Open the inbox again」）。人が頼んだ計画は inbox が `dagq request add` で runtime の planner に移譲する（手順は `dagq-inbox` skill の `reference/requests.md`、仕組みは [plan-planners](docs/design/supervisor-lifecycle/plan-planners.md) の「inboxからの計画の依頼」）。着手と着地の報告と ask にして待つ規則は operations.md の「人への報告」。着地・review・triage・復旧 job・ask・待ちの仕組みは [review](docs/design/supervisor-lifecycle/review.md)・[triage](docs/design/supervisor-lifecycle/triage.md)・[background-recovery-job](docs/design/supervisor-lifecycle/background-recovery-job.md)・[ask](docs/design/supervisor-lifecycle/ask.md)・[waiting](docs/design/supervisor-lifecycle/waiting.md)、provider は dagq skill の `reference/provider.md` と [provider-lifecycle](docs/design/provider-lifecycle.md)。inbox と planner の起動と prompt は [session-prompts](docs/design/supervisor-lifecycle/session-prompts.md)、goal の close は [Goal review](docs/design/supervisor-lifecycle/goal-review.md)。background の run と planner の出力は `run log` / `planner log`（`dagq-inbox` skill の `reference/status.md` の「Watching a background session」）。人が dagq を通さず直接変えたときは local-checks.md の「人の手元の検証」。
+inbox は `dagq-inbox` skill に従い、復旧と手での操作は `dagq-recover` skill（inbox を開き直す手順は `reference/up-down.md` の「Open the inbox again」）。人が頼んだ計画は inbox が `dagq request add` で runtime の planner に移譲する（`dagq-inbox` skill の `reference/requests.md`）。着手と着地の報告と ask にして待つ規則は operations.md の「人への報告」。計画の依頼・着地・review・triage・復旧 job・ask・待ち・goal の close・inbox と planner の prompt の仕組みは [Supervisor lifecycle](docs/design/supervisor-lifecycle.md) の索引から辿る。provider は dagq skill の `reference/provider.md` と [provider-lifecycle](docs/design/provider-lifecycle.md)。background の run と planner の出力は `run log` / `planner log`（`dagq-inbox` skill の `reference/status.md`）。人が dagq を通さず直接変えたときは local-checks.md の「人の手元の検証」。
 
 ### observer
 
