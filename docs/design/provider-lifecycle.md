@@ -101,11 +101,12 @@ worker以外のheadless jobは、providerに権限の意図・promptの渡し方
   workerとplannerのturnは今もpromptを位置引数で渡す。
 - 引数の上限（`E2BIG`）とstdinを用意できない失敗はjobの入力かsupervisorの環境の問題なので、そのjobだけの失敗にしてproviderを控えない。
   実行ファイルが無いなどproviderそのものの起動の失敗は控える。
-- runのreviewを`headless_command`と別のportにするのは、reviewがrunに属し、run dirの設定・debug file・禁止するtoolを要るため。
+- runのreviewを`headless_command`と別のportにするのは、reviewがrunに属し、run dirの設定・debug fileと、workerのsessionが持つworktreeを変える道具の拒否を要るため。
 - Claudeのreviewは`--setting-sources ""`で、workerが変えられるworktreeの`.claude`・`.mcp.json`・`CLAUDE.md`とuserの設定を読まない（[ADR-t1470-1](../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)）。
   reviewの設定は`Stop` hookを持たない。
   reviewの間もworkerのsessionは開いていて、reviewがidle markerを書くとsupervisorのidle判定を誤らせるため。
 - Claudeの他のjobはdagqのsettingsを持たず、道具を`--allowedTools`で絞る。
+  予約の道具はreviewと同じく`--disallowedTools`で拒む（`PRINT_MODE_DENIED_TOOLS`、`src/infrastructure/adapters.rs`。拒む理由は定数のdoc comment）。
 - jobの子プロセスは`DAGQ_QUEUE`を持たず、queue serviceのsocketとjobのtokenでクライアントモードの`dagq`を使い、serviceがroleのpolicyで判定する（[Queue service](queue-service.md#クライアントモード)）。
 
 ### Codexのheadless job
