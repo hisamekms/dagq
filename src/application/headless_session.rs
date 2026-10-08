@@ -325,6 +325,16 @@ fn say(background: bool, text: &str) {
     }
 }
 
+/// The line [`say`] gives for a signal of a turn's output: what the agent
+/// said and the tools it called; nothing for the rest.
+fn summary(signal: &TurnSignal) -> Option<String> {
+    match signal {
+        TurnSignal::Started { .. } | TurnSignal::Unusable(..) => None,
+        TurnSignal::Said(text) => Some(text.clone()),
+        TurnSignal::Tool(tool) => Some(format!("→ {tool}")),
+    }
+}
+
 /// What the turns of [`Turns`]' owner are read and recorded through.
 impl<'a> Turns<'a> {
     /// The directory of its prompt, requests and turns: the run's, or the
@@ -883,10 +893,15 @@ impl<'a> Turns<'a> {
         self.started(turn, resume, on, request, Some(child.id()), limits)?;
         let (exit, stop, mut tail) =
             self.follow(run_dir, turn, on, child, reader, stdout, limits)?;
-        // What it wrote after the last look.
+        // What it wrote after the last look, said as what came before: a
+        // turn that exits between a look and the check of its exit leaves
+        // its last lines here.
         reader.stamp(now_millis(self.clock));
         for line in tail.read(self.files, stdout, true) {
             for signal in reader.line(&line) {
+                if let Some(line) = summary(&signal) {
+                    say(self.background, &line);
+                }
                 if let TurnSignal::Started {
                     session_id: Some(id),
                     ..
@@ -1270,10 +1285,8 @@ impl<'a> Turns<'a> {
                         None
                     };
                     stop = observed_stop(stop, &signal, expected);
-                    match signal {
-                        TurnSignal::Started { .. } | TurnSignal::Unusable(..) => {}
-                        TurnSignal::Said(text) => say(self.background, &text),
-                        TurnSignal::Tool(tool) => say(self.background, &format!("→ {tool}")),
+                    if let Some(line) = summary(&signal) {
+                        say(self.background, &line);
                     }
                 }
             }
@@ -1577,6 +1590,31 @@ mod tests {
         ] {
             assert_eq!(observed_stop(None, &signal, Some("auto")), None);
         }
+    }
+
+    #[test]
+    fn only_what_the_agent_said_and_its_tools_are_summarized() {
+        assert_eq!(
+            summary(&TurnSignal::Said("turn 1 submitted".into())).as_deref(),
+            Some("turn 1 submitted")
+        );
+        assert_eq!(
+            summary(&TurnSignal::Tool("Bash".into())).as_deref(),
+            Some("→ Bash")
+        );
+        let started = TurnSignal::Started {
+            session_id: Some("s".into()),
+            model: None,
+            permission_mode: None,
+        };
+        assert_eq!(summary(&started), None);
+        assert_eq!(
+            summary(&TurnSignal::Unusable(
+                TurnFailure::UsageLimit,
+                "limit".into()
+            )),
+            None
+        );
     }
 
     #[test]

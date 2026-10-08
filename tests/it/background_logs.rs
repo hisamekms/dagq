@@ -194,8 +194,18 @@ fn a_closed_background_planners_log_is_read_by_its_id() {
         .join(planner.id.to_string())
         .join("session.log");
     let written = fs::read_to_string(&log).unwrap();
-    assert!(written.contains("[dagq] turn 1 started"), "{written}");
-    assert!(written.contains("[dagq] turn 1 submitted"), "{written}");
+    // The turn says it submitted just before it exits, so the line is read
+    // after its exit as often as before.
+    assert!(
+        written.contains("[dagq] turn 1 started"),
+        "{}",
+        diagnose_planner(&fx.db)
+    );
+    assert!(
+        written.contains("[dagq] turn 1 submitted"),
+        "{}",
+        diagnose_planner(&fx.db)
+    );
     let id = planner.id.to_string();
     assert_eq!(printed(&fx.db, &["planner", "log", &id]), written);
     assert_eq!(

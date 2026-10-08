@@ -842,7 +842,13 @@ fn a_service_stops_once_the_test_process_that_started_it_is_gone() {
         waited(&format!("the {mode} probe's service stopped"), &mut || {
             service::probe(dir.path()).state.as_str() == "stopped"
         });
+        // The service's last line says why it stopped and is written before
+        // its lock is free, so its log has the reason once it looks stopped.
         let log = fs::read_to_string(service::log_path(dir.path())).unwrap();
-        assert!(log.contains("owner_gone"), "{mode}: {log}");
+        assert!(
+            log.contains("the queue service stopped: owner_gone"),
+            "{mode}: {:?}\n{log}",
+            service::probe(dir.path())
+        );
     }
 }

@@ -719,8 +719,11 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         let _ = fs::remove_file(dir.join(STATE_FILE));
         let _ = fs::remove_file(&socket);
     }
+    // Why, in the line's text (the service's log has the message only),
+    // said while the lock is held: a look that finds the service stopped
+    // (its lock free) finds why in its log too.
+    info!(pid, outcome, "the queue service stopped: {outcome}");
     drop(lock);
-    info!(pid, outcome, "the queue service stopped");
     Ok(json!({"outcome": outcome, "pid": pid, "served": served}))
 }
 
