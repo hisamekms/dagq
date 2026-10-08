@@ -740,3 +740,15 @@ task = 2123
 name = "runtime_handoff::a_resume_request_adopted_after_a_handoff_is_measured_and_cut_to_its_limit"
 reason = "B 境界（復旧と adopt・supervisor の配線）: handoff.json の無い引き継ぎで記録と resume-<attempt>.txt から adopt した未送信の resume の依頼を、生きている wrapper に測り直して切って送り、記録する。測り直しと切り方の判断は prompt.rs の unit test"
 task = 2123
+
+# 6.2s
+[[test]]
+name = "runtime_resume::a_landing_ask_of_an_earlier_run_is_closed_when_another_run_lands_the_task"
+reason = "B 境界（Git・SQLite・supervisor の配線）: 同じ task の 2 本の run を worker で作り、後の run を手の integrate で着地させ、前の run の approve_landing をその着地の経路が閉じる。閉じてよいかの判断は domain::ended_landing_ask_answer の unit test"
+task = 2077
+
+# 5.7s
+[[test]]
+name = "runtime_resume::a_landing_ask_is_closed_when_its_run_fails_on_used_up_resumes"
+reason = "B 境界（supervisor の配線・復旧）: sweep を最初の pass だけにし、resume を使い切って run を failed にした経路が approve_landing を閉じることを、実際の resume の session を 1 回通して確かめる。閉じてよいかの判断は domain::ended_landing_ask_answer の unit test"
+task = 2077

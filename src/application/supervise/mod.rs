@@ -2479,6 +2479,7 @@ impl Supervisor<'_> {
                     {
                         warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its workspaces could not all be closed: {error:#}", run.id());
                     }
+                    self.close_ended_landing_asks(Some(run.task_id()));
                     self.clean_task_worktrees(run.task_id());
                     self.finished.push(*run);
                 }

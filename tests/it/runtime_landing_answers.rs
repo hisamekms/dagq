@@ -247,7 +247,8 @@ fn approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once() {
 
 /// A `cancel` answer given while the only slot runs another task is
 /// applied on the next pass, as a `send_back` is: the run fails and its
-/// task is canceled while the other session still holds the slot.
+/// task is canceled while the other session still holds the slot, and no
+/// `approve_landing` ask of the task is left for the inbox.
 #[test]
 fn a_cancel_answer_is_applied_while_the_slot_is_taken() {
     let (fixture, repo, db) = fixture();
@@ -298,6 +299,13 @@ fn a_cancel_answer_is_applied_while_the_slot_is_taken() {
     assert_eq!(first.runs[0].status(), RunStatus::Failed);
     assert_eq!(first.task.status(), TaskStatus::Canceled);
     let mut queue = SqliteQueue::open(&db).unwrap();
+    let left: Vec<_> = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .filter(|ask| ask.kind == AskKind::ApproveLanding)
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
     assert_eq!(
         queue.show(TaskId::new(2)).unwrap().runs[0].status(),
         RunStatus::Integrated

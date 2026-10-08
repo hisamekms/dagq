@@ -130,6 +130,10 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
      人が`send_back: <理由>`で足した理由は、reviewの指摘より先に載る。
    - `cancel`はrunを`failed`にしてtaskを`cancel`する。
    - 答えの読み方は`domain::LandingAnswer::parse`の1つで、それ以外の答えはinboxが読んで人に返す。
+   - runが着地せずに終わると（runが`failed`、またはそのtaskが`completed`・`canceled`。`domain::ended_landing_ask_answer`）、その答えはもう当たらないので、runtimeがそのrunの閉じていない`approve_landing`のaskを閉じる（未回答なら終わり方を答えて`runtime_closed: true`、回答済みなら`ask_closed`）。
+     runを`failed`にするかtaskを終える経路（triage・resumeの使い切り・`cancel`の答え・別のrunの着地）がその場で閉じ、閉じ損ねたもの（手での操作など）はsupervisorの定期のsweep（`sweep_ended_runs`）が次の周回で閉じる。
+     taskが終わっていない間は、`interrupted`のrunと、`needs_session`など待ちに戻りうるrunのaskは閉じない（resumeの後に待ちに戻ったrunに答えを適用する）。
+     閉じた後に`failed`のrunが`decide`の`resume`で戻ったときは、次のreviewが人に聞くなら新しいaskを開く。
 7. **引き継ぎ**: review中のsupervisorが死ぬと、leaseがstaleになったrunを他のsupervisorがadoptし、最後の段のeventから続きを決める（`adopt.rs`）。
    - reviseか衝突の依頼の後なら、sessionが生きていればその待ちに戻る。
      記録の後・書く前に止まったときのため、依頼が`turns/`に届いているかを照合し、無ければ1回だけ書く（`domain::turn::adopted_delivery`）。

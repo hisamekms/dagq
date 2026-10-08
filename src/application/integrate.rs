@@ -2200,7 +2200,8 @@ fn commit_message(task: &Task, run: &TaskRun, receipt: &Receipt) -> Vec<String> 
 const LANDED_LANDING_ASK_CLOSED: &str = "the run was integrated; closed by the runtime";
 
 /// Close the `approve_landing` asks of the landed `run` nobody closed
-/// (task 425), and the `blocked` asks of the run or its task (task 329):
+/// (task 425), then those of the task's other runs, as the task is
+/// completed, and the `blocked` asks of the run or its task (task 329):
 /// whether it was landed by hand or by the supervisor, nobody needs to
 /// answer them any more. `main` already moved, so a failure is only
 /// reported.
@@ -2209,6 +2210,10 @@ fn close_landing_asks(queue: &mut dyn AskStore, run: &TaskRun) {
         (
             "approve_landing",
             queue.close_approve_landing_asks(run.id(), LANDED_LANDING_ASK_CLOSED),
+        ),
+        (
+            "earlier runs' approve_landing",
+            queue.close_ended_landing_asks(Some(run.task_id())),
         ),
         (
             "blocked",

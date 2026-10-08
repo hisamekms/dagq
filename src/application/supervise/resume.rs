@@ -293,6 +293,7 @@ impl Supervisor<'_> {
             return Ok(());
         };
         warn!(run_id = %failed.id(), task_id = %failed.task_id(), "run {} of task {} used up its resumes; it is failed and goes to the recovery job (resume_exhausted)", failed.id(), failed.task_id());
+        self.close_ended_landing_asks(Some(failed.task_id()));
         self.close_open_workspaces(&failed, WorkspaceCloser::Triage)?;
         Ok(())
     }

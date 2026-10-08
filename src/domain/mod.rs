@@ -569,6 +569,29 @@ impl LandingAnswer {
     }
 }
 
+/// The answer the runtime closes an `approve_landing` ask of a run with
+/// once the run ended without landing: the run is `failed` (a cancel
+/// fails it too), or its task is `completed` (another run landed) or
+/// `canceled`. No answer applies then, as only a run awaiting integration
+/// takes one; a `failed` run the triage resumes later is reviewed and
+/// asked afresh. `None` while neither holds: an `interrupted` run may be
+/// resumed, and a run back to waiting after a resume takes the answer.
+pub fn ended_landing_ask_answer(run: RunStatus, task: TaskStatus) -> Option<String> {
+    let task_ended = matches!(task, TaskStatus::Completed | TaskStatus::Canceled);
+    match (run == RunStatus::Failed, task_ended) {
+        (true, true) => Some(format!(
+            "the run ended (failed) and its task is {}; closed by the runtime",
+            task.as_str()
+        )),
+        (true, false) => Some("the run ended (failed); closed by the runtime".to_owned()),
+        (false, true) => Some(format!(
+            "the run's task ended ({}); closed by the runtime",
+            task.as_str()
+        )),
+        (false, false) => None,
+    }
+}
+
 /// The reason of a `send_back` answer (trimmed): `Some(None)` for a bare
 /// `send_back` or an empty reason after `send_back:`, `Some(Some(reason))`
 /// for `send_back: <reason>`, `None` for any other answer.
@@ -1613,6 +1636,42 @@ impl Default for PushReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_approve_landing_ask_is_closed_once_its_run_failed_or_its_task_ended() {
+        assert_eq!(
+            ended_landing_ask_answer(RunStatus::Failed, TaskStatus::InProgress).as_deref(),
+            Some("the run ended (failed); closed by the runtime")
+        );
+        assert_eq!(
+            ended_landing_ask_answer(RunStatus::Failed, TaskStatus::Canceled).as_deref(),
+            Some("the run ended (failed) and its task is canceled; closed by the runtime")
+        );
+        assert_eq!(
+            ended_landing_ask_answer(RunStatus::Interrupted, TaskStatus::Completed).as_deref(),
+            Some("the run's task ended (completed); closed by the runtime")
+        );
+        assert_eq!(
+            ended_landing_ask_answer(RunStatus::Failed, TaskStatus::Ready).as_deref(),
+            Some("the run ended (failed); closed by the runtime")
+        );
+        // A run that may still take the answer, or be resumed, keeps it.
+        for run in [
+            RunStatus::Running,
+            RunStatus::NeedsSession,
+            RunStatus::AwaitingIntegration,
+            RunStatus::Integrating,
+            RunStatus::Interrupted,
+        ] {
+            for task in [TaskStatus::InProgress, TaskStatus::Ready] {
+                assert_eq!(
+                    ended_landing_ask_answer(run, task),
+                    None,
+                    "{run:?} {task:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_landing_answer_is_one_of_the_options_and_send_back_may_carry_a_reason() {

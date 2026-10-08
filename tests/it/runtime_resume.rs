@@ -2090,3 +2090,204 @@ fn a_resumed_session_whose_wrapper_goes_silent_is_asked_to_exit_once_then_let_go
     fs::write(&held, "").unwrap();
     backend.join();
 }
+
+/// A run whose review asked a person (`approve_landing`, left open) and
+/// that was sent back to a session, with its counted resumes used up.
+fn sent_back_with_its_landing_ask_open(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+) -> (TaskRun, dagq::domain::Ask) {
+    let reviewer = TestReviewer::new(&[verdict("concern", &["a finding"], "first")]);
+    let outcome = supervise_reviewed(db, repo, backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    let ask = queue.asks(Default::default()).unwrap()[0].clone();
+    assert_eq!(ask.kind, AskKind::ApproveLanding);
+    queue
+        .decide_landing(
+            run.id(),
+            RunStatus::NeedsSession,
+            "sent back by hand",
+            dagq::domain::Reason::new(ReasonCode::SentBack).on(json!({})),
+        )
+        .unwrap();
+    (run, ask)
+}
+
+/// A run whose `approve_landing` ask is still open when its resumes are
+/// used up becomes `failed` (`resume_exhausted`), and the runtime closes
+/// the ask on that path: no answer applies to a run that is not awaiting
+/// integration, so it would only wait in the inbox. The runtime answers
+/// it (`runtime_closed`), and `asks` and `status --role inbox` no longer
+/// show it. The supervisor sweeps only on its first pass, before the last
+/// resume ends unresolved, so the path that failed the run closed the
+/// ask, not the sweep.
+#[test]
+fn a_landing_ask_is_closed_when_its_run_fails_on_used_up_resumes() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (run, ask) = sent_back_with_its_landing_ask_open(&db, &repo, &backend);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    // Still open while the run waits for a session.
+    assert!(queue.close_ended_landing_asks(None).unwrap().is_empty());
+    earlier_resumes(&mut queue, &run, MAX_RESUME_ATTEMPTS - 1);
+    // The last attempt does not resolve the run; it exits when asked to.
+    backend.resume_script_for(1, "await_message; idle; await_exit");
+    // No recovery job script: the round cannot start and waits for a person.
+    let reviewer = TestReviewer::new(&[]);
+    let options = SuperviseOptions {
+        sweep_interval: Duration::from_secs(3600),
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let finished = payloads(&detail, "resume_finished");
+    assert_eq!(finished.last().unwrap()["exhausted"], true, "{finished:?}");
+    // Closed after the last resume ended, so after the first pass's sweep.
+    let kinds = event_kinds(&detail);
+    let closed_at = detail
+        .events
+        .iter()
+        .position(|e| e.kind == "ask_answered" && e.payload["ask_id"] == ask.id.as_i64())
+        .expect("the ask was answered by the runtime");
+    let last_resume = kinds.iter().rposition(|k| *k == "resume_finished").unwrap();
+    assert!(last_resume < closed_at, "{kinds:?}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Failed);
+    assert_eq!(detail.task.status(), TaskStatus::InProgress);
+    let closed = queue.read_ask(ask.id).unwrap();
+    assert!(closed.closed_at.is_some(), "{closed:?}");
+    assert_eq!(
+        closed.answer.as_deref(),
+        Some("the run ended (failed); closed by the runtime")
+    );
+    assert_eq!(closed.answered_by.as_deref(), Some("runtime"));
+    let answered: Vec<_> = payloads(&detail, "ask_answered")
+        .into_iter()
+        .filter(|p| p["ask_id"] == ask.id.as_i64())
+        .collect();
+    assert_eq!(answered.len(), 1, "{answered:?}");
+    assert_eq!(answered[0]["runtime_closed"], true);
+    assert!(
+        !queue
+            .asks(Default::default())
+            .unwrap()
+            .iter()
+            .any(|open| open.id == ask.id)
+    );
+    let inbox = runtime::status_for(&db, Some(SessionRole::Inbox)).unwrap();
+    let shown = |items: &Value, key: &str| {
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item[key] == ask.id.as_i64())
+    };
+    assert!(!shown(&inbox["asks"], "id"), "{inbox}");
+    assert!(!shown(&inbox["attention"], "ask_id"), "{inbox}");
+}
+
+/// An answered `approve_landing` ask of a run that stays `interrupted`
+/// (the triage may resume it) is kept; once another run of the task lands
+/// and completes it, here by `integrate` by hand with no supervisor to
+/// sweep, the landing closes it (`ask_closed`): the answer is never
+/// applied.
+#[test]
+fn a_landing_ask_of_an_earlier_run_is_closed_when_another_run_lands_the_task() {
+    use dagq::domain::{AskReason, NewAsk};
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    let ask = queue
+        .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            kind: AskKind::ApproveLanding,
+            task_id: None,
+            run_id: Some(run.id().clone()),
+            question: "land it?".into(),
+            options: vec!["land".into(), "send_back".into(), "cancel".into()],
+            asked_by: "supervisor".into(),
+            reason_category: AskReason::Scope,
+            finding_id: None,
+            request_id: None,
+        })
+        .unwrap()
+        .ask;
+    queue.answer(ask.id, "land").unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='interrupted' WHERE id=?1",
+            [run.id().as_str()],
+        )
+        .unwrap();
+    // An interrupted run may still be resumed: its ask is kept.
+    assert!(queue.close_ended_landing_asks(None).unwrap().is_empty());
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
+    queue.transition(TaskId::new(1), TaskAction::Ready).unwrap();
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    // The new run awaits integration; the earlier run's ask is still kept.
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
+    assert_eq!(integrate(&db, 1, &repo).unwrap()["outcome"], "integrated");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert_eq!(detail.runs.len(), 2);
+    assert_eq!(detail.runs[0].status(), RunStatus::Interrupted);
+    assert_eq!(detail.runs[1].status(), RunStatus::Integrated);
+    let closed = queue.read_ask(ask.id).unwrap();
+    assert!(closed.closed_at.is_some(), "{closed:?}");
+    assert_eq!(closed.answer.as_deref(), Some("land"));
+    assert!(
+        payloads(&detail, "ask_closed")
+            .iter()
+            .any(|p| p["ask_id"] == ask.id.as_i64())
+    );
+    // The answer was not applied to the earlier run.
+    assert!(!detail.events.iter().any(
+        |e| e.kind == "integration_approved" && e.run_id.as_ref() == Some(detail.runs[0].id())
+    ));
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+}
+
+/// A run failed outside the supervisor's paths (here by hand) leaves its
+/// open `approve_landing` ask to the supervisor's sweep, which closes it
+/// on its next pass.
+#[test]
+fn the_sweep_closes_the_landing_ask_of_a_run_failed_by_hand() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("concern", &["a finding"], "first")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let ask = queue.asks(Default::default()).unwrap()[0].clone();
+    queue
+        .decide_landing(
+            run.id(),
+            RunStatus::Failed,
+            "failed by hand",
+            dagq::domain::Reason::new(ReasonCode::Cancelled).on(json!({})),
+        )
+        .unwrap();
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
+    let outcome = supervise_reviewed(&db, &repo, &backend, &TestReviewer::new(&[]));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let closed = queue.read_ask(ask.id).unwrap();
+    assert!(closed.closed_at.is_some(), "{closed:?}");
+    assert_eq!(
+        closed.answer.as_deref(),
+        Some("the run ended (failed); closed by the runtime")
+    );
+}

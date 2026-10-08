@@ -393,6 +393,7 @@ impl Supervisor<'_> {
             match self.queue.decide_triage(run.id(), ask.id, &answer, &reason) {
                 Ok(decided) => {
                     info!(run_id = %decided.id(), task_id = %decided.task_id(), ask_id = %ask.id, "run {} of task {}: {answer} as ask {} answered; the run is {}", decided.id(), decided.task_id(), ask.id, decided.status().as_str());
+                    self.close_ended_landing_asks(Some(decided.task_id()));
                     self.clean_task_worktrees(decided.task_id());
                 }
                 Err(error) => {
@@ -1124,6 +1125,7 @@ impl Supervisor<'_> {
         }
     }
     pub(super) fn note_triaged(&mut self, run: &TaskRun) {
+        self.close_ended_landing_asks(Some(run.task_id()));
         self.clean_task_worktrees(run.task_id());
         let task = self
             .queue

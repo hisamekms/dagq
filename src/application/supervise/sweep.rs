@@ -138,7 +138,9 @@ impl Supervisor<'_> {
     /// on every sweep) and the others go on. Worktrees, branches and run
     /// directories stay for a person.
     ///
-    /// The same pass asks for the disk of the ended runs to be freed
+    /// The same pass closes the `approve_landing` asks the paths that ended
+    /// their runs left open ([`Self::close_ended_landing_asks`]), asks for
+    /// the disk of the ended runs to be freed
     /// ([`Self::clean_ended_worktrees`]), which a job does off the loop,
     /// closes the rows of the planners whose workspace and wrapper are
     /// gone ([`Self::close_abandoned_planners`]), and removes the runners
@@ -152,6 +154,7 @@ impl Supervisor<'_> {
             return Ok(());
         }
         self.last_sweep = Some(Instant::now());
+        self.close_ended_landing_asks(None);
         self.clean_ended_worktrees(None);
         self.close_abandoned_planners();
         self.remove_unused_planner_runners();
@@ -301,6 +304,24 @@ impl Supervisor<'_> {
     /// [`Self::clean_ended_worktrees`] for `task` as one of its runs ends.
     pub(super) fn clean_task_worktrees(&mut self, task: TaskId) {
         self.clean_ended_worktrees(Some(task));
+    }
+    /// Close the `approve_landing` asks nobody closed of `task`'s runs, or
+    /// of all runs, whose run is `failed` or whose task is `completed` or
+    /// `canceled` ([`crate::domain::ended_landing_ask_answer`]): no answer
+    /// applies to them any more. Called where a run fails or its task
+    /// ends, and by the sweep for what those paths missed. A failure is
+    /// logged only; the next sweep tries again.
+    pub(super) fn close_ended_landing_asks(&mut self, task: Option<TaskId>) {
+        match self.queue.close_ended_landing_asks(task) {
+            Ok(closed) => {
+                for ask in closed {
+                    info!(ask_id = %ask.id, "closed approve_landing ask {} as its run ended without landing", ask.id);
+                }
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the approve_landing asks of ended runs could not be closed: {error:#}");
+            }
+        }
     }
     /// Record `cleanup_failed` for a session wrapper of the run that could
     /// not be stopped.

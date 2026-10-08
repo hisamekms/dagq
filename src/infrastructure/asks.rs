@@ -788,6 +788,41 @@ impl SqliteQueue {
         self.close_runtime_asks(run_id, AskKind::ApproveLanding, answer)
     }
 
+    /// Close every `approve_landing` ask nobody closed whose run ended
+    /// without landing, of `task`'s runs or of all: the answer
+    /// [`crate::domain::ended_landing_ask_answer`] gives for the run's and
+    /// its task's status, the way [`Self::close_stuck_exit_asks`] does. The
+    /// asks closed, oldest first.
+    pub fn close_ended_landing_asks(&mut self, task: Option<TaskId>) -> Result<Vec<Ask>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let unclosed: Vec<(AskId, String, String)> = tx
+            .prepare(
+                "SELECT a.id, r.status, t.status FROM asks a
+                 JOIN task_runs r ON r.id=a.run_id JOIN tasks t ON t.id=r.task_id
+                 WHERE a.kind=?1 AND a.closed_at IS NULL AND (?2 IS NULL OR r.task_id=?2)
+                 ORDER BY a.id",
+            )?
+            .query_map(params![AskKind::ApproveLanding.as_str(), task], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let now = self.generators.clock.now();
+        let mut closed = Vec::new();
+        for (id, run, task) in unclosed {
+            let Some(answer) = crate::domain::ended_landing_ask_answer(run.parse()?, task.parse()?)
+            else {
+                continue;
+            };
+            let ask = read_ask(&tx, id)?;
+            close_by_runtime(&tx, &ask, &answer, now)?;
+            closed.push(read_ask(&tx, id)?);
+        }
+        tx.commit()?;
+        Ok(closed)
+    }
+
     /// Close every `blocked` ask of the run, or of its task, nobody closed,
     /// the way [`Self::close_stuck_exit_asks`] does: the run was integrated
     /// and its task completed, so what the observer asked about is over
