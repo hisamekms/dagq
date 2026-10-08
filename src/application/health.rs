@@ -994,6 +994,27 @@ pub fn pulses(
         .collect()
 }
 
+/// The sections `status` adds for `role` beyond [`status`]'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusSections {
+    /// The `language` the prompt and the `SessionStart` hook of the inbox
+    /// and a planner carry (ADR-t616-2).
+    pub language: bool,
+    /// What the inbox watches: `inbox_guardrail` (ADR-t1228-2 decision 4),
+    /// `inbox_watcher` (ADR-t906-1) and `queue_service` (ADR-t1233-4); a
+    /// planner's `status` has none of them.
+    pub inbox: bool,
+}
+
+/// The sections of `status --role` for `role`; without a role, all but
+/// `language`.
+pub fn status_sections(role: Option<SessionRole>) -> StatusSections {
+    StatusSections {
+        language: matches!(role, Some(SessionRole::Inbox | SessionRole::Planner)),
+        inbox: matches!(role, None | Some(SessionRole::Inbox)),
+    }
+}
+
 /// Whether attention is for `role`: all of it is the inbox's
 /// ([`crate::domain::ATTENTION_ROLE`]), and without a role everything is
 /// shown. The supervisors' health follows the same rule: the person
@@ -1868,9 +1889,92 @@ fn is_draft(queue: &dyn Queue, task: TaskId) -> Result<bool> {
     Ok(page.tasks.first().is_some_and(|item| item.id == task))
 }
 
+/// `doctor`'s report of a queue that refuses this binary: when it was
+/// checked and why, beside the `schema` the caller adds.
+pub fn refused(now: i64, error: &anyhow::Error) -> Value {
+    json!({
+        "checked_at": now,
+        "error": format!("{error:#}"),
+    })
+}
+
+/// `doctor`'s `roles`: the provider, model and effort each role other than
+/// the worker's starts with, and where its provider comes from (`dagq.toml`
+/// or `default`), from the `[roles.*]` `read` (ADR-t1063-1 decisions 1 and
+/// 6), keyed by role. A file that could not be read adds `error`, and every
+/// role starts as before meanwhile.
+pub fn roles(read: Result<crate::domain::actor_model::RoleModels>) -> Value {
+    use crate::domain::actor_model::{ModelRole, RoleModels};
+    let (models, error) = match read {
+        Ok(models) => (models, None),
+        Err(error) => (RoleModels::default(), Some(format!("{error:#}"))),
+    };
+    let mut roles = serde_json::Map::new();
+    for role in ModelRole::ALL {
+        let (provider, source) = models.provider(role);
+        let launch = models.launch(role);
+        let mut entry = json!({
+            "provider": provider,
+            "source": source,
+            "model": launch.model,
+            "effort": launch.effort,
+        });
+        // The runtime's planners run headless only (ADR-t1433-2 decision
+        // 3): there is no route to choose, and `route` of the table is
+        // ignored.
+        if role == ModelRole::RuntimePlanner {
+            entry["route"] = json!(crate::domain::PlannerRoute::Headless);
+        }
+        roles.insert(role.as_str().to_owned(), entry);
+    }
+    if let Some(error) = error {
+        roles.insert("error".to_owned(), error.into());
+    }
+    Value::Object(roles)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `doctor`'s `roles` keys every role but the worker's, gives the
+    /// runtime's planner the headless route only, and keeps the defaults
+    /// with `error` when `[roles.*]` could not be read.
+    #[test]
+    fn doctor_roles_report_each_role_and_a_read_error() {
+        use crate::domain::actor_model::{ModelRole, RoleModels};
+        let read = roles(Ok(RoleModels::default()));
+        for role in ModelRole::ALL {
+            assert!(read[role.as_str()]["provider"].is_string(), "{read}");
+        }
+        assert_eq!(
+            read[ModelRole::RuntimePlanner.as_str()]["route"],
+            json!(crate::domain::PlannerRoute::Headless)
+        );
+        assert!(read.get("error").is_none());
+        let failed = roles(Err(anyhow::anyhow!("bad toml")));
+        assert_eq!(failed["error"], "bad toml");
+        for role in ModelRole::ALL {
+            assert_eq!(failed[role.as_str()], read[role.as_str()]);
+        }
+    }
+
+    #[test]
+    fn status_sections_follow_the_role() {
+        let of = |role| {
+            let sections = status_sections(role);
+            (sections.language, sections.inbox)
+        };
+        assert_eq!(of(None), (false, true));
+        assert_eq!(of(Some(SessionRole::Inbox)), (true, true));
+        assert_eq!(of(Some(SessionRole::Planner)), (true, false));
+    }
+
+    #[test]
+    fn a_refused_queue_reports_when_and_why() {
+        let report = refused(42, &anyhow::anyhow!("floor 9"));
+        assert_eq!(report, json!({"checked_at": 42, "error": "floor 9"}));
+    }
     use anyhow::Result;
 
     /// Pid 1 is alive, every other pid is dead.

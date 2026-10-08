@@ -28,7 +28,7 @@ related:
 runtime（`src/`と`crates/`）の責務を、レイヤーとコンテキスト（context）の2軸で分ける今の境界と、それを守る規則の正本。
 決めた理由は[ADR-t1545-1](../adr/2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md)（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)決定1をamends）が持つ。
 moduleの説明は[overview](overview.md)、集約は[Domain model](domain-model.md)、tableは[Persistence](persistence.md)、supervisorのループは[`supervise`](supervisor-lifecycle/supervise.md)が持つ。
-reviewのsubagentと禁止依存の検査のscriptは、この文書の規則のID（「[検査できる規則](#検査できる規則)」）と一覧（「[境界をまたぐtransaction](#境界をまたぐtransaction)」）を参照し、規則の本文を写さない（ADR-t1545-1決定4）。
+reviewのsubagentと検査のscriptは、この文書の規則のID（「[検査できる規則](#検査できる規則)」）と一覧（「[境界をまたぐtransaction](#境界をまたぐtransaction)」）を参照し、規則の本文を写さない（ADR-t1545-1決定4）。
 
 ### 全体の流れ
 
@@ -104,7 +104,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 
 **公開するport**
 
-- `TaskStore`の読み取りを全てのcontextに公開する。
+- `TaskStore`と`DraftPlannerStore`の`improvements`・`planner_findings`の読み取りを全てのcontextに公開する。
 - `TaskStore::claim`（と`RunTransitions::claim_for_supervisor_in_order`）は実行と着地だけに公開し、T1として扱う。
 - `DraftPlannerStore::register_follow_ups`を実行と着地に公開する（T7）。
 - `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・`RequestStore`・残りの`DraftPlannerStore`と`TaskStore`の書き込みは内部。
@@ -246,7 +246,6 @@ contextを1つに決められず、分ける先を持つもの。
 | --- | --- | --- |
 | `application::ports`の`RunCoordination` | 実行と着地のleaseとprocessと、host運用のsupervisorの登録と引き継ぎ | portの分割（未登録、follow_up） |
 | `src/application/supervise/mod.rs`の`Supervisor` | 計画管理の欄と、実行と着地・host運用の残りの欄を持つ（C3） | contextごとに分ける |
-| `src/compose.rs` | 全てのcontextの組み立て | contextごとの組み立てのmodule |
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
 | `application::queue_reads` | 読み取りの入口で、各armが自分のcontextのportを読む | 未登録（follow_up） |
 | `application::prompt` | workerのprompt（実行と着地）、inbox・plannerのprompt（計画管理）、observerとスループットの見直しのprompt（観測と分析） | 未登録（follow_up） |
@@ -309,11 +308,14 @@ host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の
 - **L6** `src/infrastructure`のコードは`crate::compose`とレイヤーの外のmoduleを参照しない。
   検査: script。
 - **L7** 起動部分（`src/compose.rs`とその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。
-  検査: review（組み立てをcontextごとのmoduleに分けた後にscript）。
+  検査: 時刻の読み取りはscript、残りはreview。
 - **L8** レイヤーの外のmodule（`view`）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。
   `build.rs`と共有する`build_id`・`migration_numbers`はレイヤーの外のmoduleに数えず、共有の部品としてL1・L3が名指す例外の範囲で参照してよい。
   新しいmoduleをレイヤーの外に足さない。
   検査: script（L1・L3・L6として）とreview。
+- **L9** `src/compose/`のcontextごとのmodule（`execution`・`planning`・`observation`・`host`）は互いと`supervisor`（ループ）を参照しない。
+  共有の配線は`src/compose.rs`に置き、外からは`crate::compose`の再公開だけを参照する。
+  検査: script。
 
 ### コンテキストの規則
 
@@ -353,20 +355,20 @@ host運用の登録・引き継ぎ・sweep・負荷の上限、slotの`Phase`の
 
 ### 検査の範囲
 
-- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6を`src/domain`・`src/application`・`src/infrastructure`の`.rs`に、C3を分けた状態のsubmoduleに、C8を`src/application/ports/`のcontextのmoduleに当てる。
+- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6・L9とL7の時計、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
   CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。
-- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えず、testの中はL1・L3・L6・C3・C8だけで数える。
-  細目（`use`の組の展開、testとする`cfg`の形と範囲、`--self-test`）はscriptの先頭のコメントが持つ。
+- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えず、testの中はL1・L3・L6・L9・C3・C8だけで数える。
+  細目はscriptの先頭のコメントが持つ。
 - SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
 - 許可の一覧は`.config/layer-deps-allow.txt`で、1行1項目の`規則 | path | 参照 | 行き先のtask | 理由`。
-  各欄の値・読まない行・落ちる条件（一覧に無い参照、もう無い項目など）は一覧の先頭のコメントが持つ。
+  各欄の値と落ちる条件は一覧の先頭のコメントが持つ。
 - 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置く（ADR-t1545-1決定4）。
   違反を直す変更は、同じ変更で一覧の項目と「[今の違反と行き先](#今の違反と行き先)」の行を消す。
 - 「検査: review」の規則と、境界を変えた差分がこの文書と許可の一覧を直しているかは、reviewのsubagent `architecture-boundaries`（[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が見て、scriptの規則は見ない。
 
 ## 今の違反と行き先
 
-scriptが検査する規則（L1・L2・L3・L4・L6）の行は、許可の一覧`.config/layer-deps-allow.txt`の項目と一致し、行き先のtaskは一覧の項目が持つ。
+scriptが検査する規則の行は、許可の一覧`.config/layer-deps-allow.txt`の項目と一致し、行き先のtaskは一覧の項目が持つ。
 reviewで見る規則の行は、行き先をこの表の言葉で書く。
 
 | 規則 | 場所 | 違反 | 行き先 |

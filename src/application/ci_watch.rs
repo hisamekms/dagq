@@ -297,6 +297,21 @@ pub fn known_failures<Q: RunLog + QueueRecords + ?Sized>(
     ))
 }
 
+/// What `status` takes from `[ci_watch]` as read now (`read`): the jobs it
+/// names, so a `ci_jobs_missing` it no longer names is not an attention
+/// (ADR-t2034-1 decision 5), `None` when it could not be read (unknown,
+/// which keeps the attention); and whether the watch is on, for
+/// [`status`]'s `enabled`.
+pub fn status_reading(read: &Result<Option<CiWatchConfig>>) -> (Option<&[String]>, bool) {
+    match read {
+        Ok(config) => (
+            Some(config.as_ref().map_or(&[][..], |c| &c.required_jobs[..])),
+            config.is_some(),
+        ),
+        Err(_) => (None, false),
+    }
+}
+
 /// `status`'s `ci`: null until the watch recorded anything.
 pub fn status<Q: RunLog + QueueRecords + ?Sized>(queue: &Q, enabled: bool) -> Result<Value> {
     let watch = WatchState::fold(&queue.ci_watch_events()?);
@@ -330,4 +345,30 @@ pub fn doctor<Q: RunLog + ?Sized>(
             .map(|event| json!({"kind": event.kind, "created_at": event.created_at, "payload": event.payload}))
     );
     Ok(Some(view))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A table names its jobs and turns the watch on, no table names none
+    /// and leaves it off, and a file that cannot be read names nothing
+    /// known (the attention stays) and leaves it off.
+    #[test]
+    fn status_reads_the_named_jobs_and_whether_the_watch_is_on() {
+        let config = CiWatchConfig {
+            workflow: "ci.yml".into(),
+            branch: None,
+            interval_secs: 60,
+            junit_artifacts: Vec::new(),
+            required_jobs: vec!["test".into()],
+        };
+        let named = Ok(Some(config));
+        assert_eq!(
+            status_reading(&named),
+            (Some(&["test".to_owned()][..]), true)
+        );
+        assert_eq!(status_reading(&Ok(None)), (Some(&[][..]), false));
+        assert_eq!(status_reading(&Err(anyhow::anyhow!("bad"))), (None, false));
+    }
 }

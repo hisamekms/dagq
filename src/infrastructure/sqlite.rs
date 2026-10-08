@@ -262,6 +262,28 @@ impl SqliteQueue {
         Ok(state.report())
     }
 
+    /// Apply the migrations this binary knows and the queue at `path`
+    /// lacks when every one of them is compatible, as the start of `up`
+    /// does (ADR-0045 decisions 5, 15): a supervisor and the wrappers of an
+    /// older binary go on with the migrated queue. A breaking one is refused
+    /// ([`SchemaState::refuse_breaking`]); `None` when there is no queue at
+    /// `path` yet or nothing is pending.
+    pub fn migrate_compatible(
+        path: &Path,
+        alive: Option<&dyn Fn(u32) -> bool>,
+        now: i64,
+    ) -> Result<Option<MigrationReport>> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let state = Self::schema(path)?;
+        if state.pending.is_empty() {
+            return Ok(None);
+        }
+        state.refuse_breaking()?;
+        Self::migrate(path, alive, now).map(Some)
+    }
+
     /// `dagq migrate`: applies the migrations this binary knows and the
     /// queue lacks, with `user_version` and the floor in one transaction.
     /// Before a breaking migration it refuses a queue in use — a
@@ -568,6 +590,28 @@ impl SchemaState {
     /// commands that only read open it.
     pub fn refuses_binary(&self) -> bool {
         self.floor > self.binary_schema_version
+    }
+
+    /// Refuse the pending migrations when any of them is breaking (ADR-0045
+    /// decisions 5, 15): a supervisor or run of the older binary could not
+    /// open the queue afterwards, so `up` and `install` apply only
+    /// compatible ones, and the error says the way to a breaking one.
+    pub fn refuse_breaking(&self) -> Result<()> {
+        let breaking: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|migration| !migration.compatible)
+            .map(|migration| migration.version.to_string())
+            .collect();
+        ensure!(
+            breaking.is_empty(),
+            "the queue needs breaking migration(s) {} before this binary can run it, and a \
+supervisor or run of the older binary could not open it afterwards: stop the supervisor \
+(`down --wait`), run `dagq migrate`, then `up`; or let `dagq install --allow-breaking` do the \
+same in one step",
+            breaking.join(", ")
+        );
+        Ok(())
     }
 }
 
@@ -3029,6 +3073,59 @@ pub(super) fn set_goal_in(
     }
     let result = read_task(conn, task_id)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod schema_state_tests {
+    use super::*;
+
+    fn state(pending: &[(i64, bool)]) -> SchemaState {
+        SchemaState {
+            schema_version: 1,
+            binary_schema_version: 3,
+            floor: 0,
+            pending: pending
+                .iter()
+                .map(|&(version, compatible)| SchemaMigration {
+                    version,
+                    compatible,
+                })
+                .collect(),
+            opens: true,
+        }
+    }
+
+    /// `up` and `install` apply pending migrations only when every one is
+    /// compatible; a breaking one is refused with its version and the way
+    /// to it.
+    #[test]
+    fn only_compatible_pending_migrations_pass() {
+        state(&[]).refuse_breaking().unwrap();
+        state(&[(2, true), (3, true)]).refuse_breaking().unwrap();
+        let error = state(&[(2, true), (3, false)])
+            .refuse_breaking()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("breaking migration(s) 3 "), "{error}");
+        assert!(error.contains("dagq install --allow-breaking"), "{error}");
+    }
+
+    /// With no queue yet, or a queue at this binary's schema, nothing is
+    /// migrated.
+    #[test]
+    fn nothing_is_migrated_without_a_queue_or_a_pending_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+        assert_eq!(
+            SqliteQueue::migrate_compatible(&path, None, 0).unwrap(),
+            None
+        );
+        SqliteQueue::init(&path).unwrap();
+        assert_eq!(
+            SqliteQueue::migrate_compatible(&path, None, 0).unwrap(),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

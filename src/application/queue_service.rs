@@ -33,6 +33,7 @@ use tracing::warn;
 use super::commands::dialogue::{Dialogue, DialogueStore, MarkChange};
 use super::commands::{DenialLog, Gate};
 use super::queue_reads::{BadRead, QueueRead};
+use crate::domain::EventKind;
 use crate::domain::queue_service::{
     API_VERSION, MIN_API_VERSION, Principal, ServiceErrorCode, ServiceRequest, ServiceResponse,
     ServiceState, UseCase, answers, run_holds_token,
@@ -597,6 +598,72 @@ pub fn ensure(control: &dyn QueueServiceControl, timeout: Duration) -> Result<Va
         "service": started,
         "replaced": replaced,
     }))
+}
+
+/// The queue service as `status`, `doctor` and `dagq service status` show
+/// it (ADR-t1233-4): `probe`, what a look at its record and its socket
+/// found, the API version this binary speaks, and the attention its latest
+/// event leaves standing (`queue_service_down`) when the queue's `log` can
+/// be read (`null` without one, `error` when the read fails).
+pub fn view(probe: &ServiceProbe, log: Option<&dyn super::RunLog>) -> Value {
+    use crate::domain::queue_service::QUEUE_SERVICE_ATTENTION_KINDS;
+    let mut view = serde_json::to_value(probe).unwrap_or(Value::Null);
+    view["client_api_version"] = json!(API_VERSION);
+    view["attention"] = match log.map(|log| log.latest_queue_event(&QUEUE_SERVICE_ATTENTION_KINDS))
+    {
+        None => Value::Null,
+        Some(Ok(latest)) => json!(latest.is_some_and(|event| {
+            crate::domain::queue_service::attention_stands(Some(event.kind.as_str()))
+        })),
+        Some(Err(error)) => json!({"error": format!("{error:#}")}),
+    };
+    view
+}
+
+/// `dagq service start`: [`ensure`] the service with `control`, recorded
+/// in `log` as `queue_service_started` (`by: service start`) unless one of
+/// this build already answered.
+pub fn start_by_hand(
+    log: &dyn super::RunLog,
+    control: &dyn QueueServiceControl,
+    timeout: Duration,
+) -> Result<Value> {
+    let report = ensure(control, timeout)?;
+    if report["outcome"] != "reused" {
+        log.record_queue_event(
+            EventKind::QueueServiceStarted,
+            json!({
+                "by": "service start",
+                "pid": report["service"]["pid"],
+                "build": report["service"]["build"],
+                "api_version": report["service"]["api_version"],
+                "socket": report["service"]["socket"],
+                "restart": false,
+                "replaced": report["replaced"],
+            }),
+        )?;
+    }
+    Ok(report)
+}
+
+/// `dagq service stop`: stop the queue's service with `control`, recorded
+/// in `log` as `queue_service_stopped` (`by: service stop`) when one ran. A
+/// supervisor at work starts it again at its next look.
+pub fn stop_by_hand(
+    log: &dyn super::RunLog,
+    control: &dyn QueueServiceControl,
+    timeout: Duration,
+) -> Result<Value> {
+    Ok(match control.stop(timeout)? {
+        Some(pid) => {
+            log.record_queue_event(
+                EventKind::QueueServiceStopped,
+                json!({"pid": pid, "by": "service stop"}),
+            )?;
+            json!({"outcome": "stopped", "pid": pid})
+        }
+        None => json!({"outcome": "not_running"}),
+    })
 }
 
 #[cfg(test)]

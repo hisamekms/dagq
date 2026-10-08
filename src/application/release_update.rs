@@ -410,9 +410,36 @@ pub fn resolve_version(index: &dyn ReleaseIndex, requested: Option<&str>) -> Res
         .ok_or_else(|| anyhow::anyhow!("crates.io lists no release of dagq"))
 }
 
+/// The builds that run now, from `status`'s `supervisors`: the
+/// `binary_version` of each one alive and not stale, which [`status`]
+/// takes as `live_builds`.
+pub fn live_builds(supervisors: &Value) -> Vec<String> {
+    supervisors
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|supervisor| supervisor["alive"] == true && supervisor["stale"] != true)
+        .filter_map(|supervisor| supervisor["binary_version"].as_str().map(str::to_owned))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the supervisors alive and not stale name the builds that run.
+    #[test]
+    fn live_builds_are_the_live_fresh_supervisors_versions() {
+        let supervisors = json!([
+            {"alive": true, "stale": false, "binary_version": "a"},
+            {"alive": true, "binary_version": "b"},
+            {"alive": true, "stale": true, "binary_version": "c"},
+            {"alive": false, "binary_version": "d"},
+            {"alive": true},
+        ]);
+        assert_eq!(live_builds(&supervisors), ["a", "b"]);
+        assert!(live_builds(&Value::Null).is_empty());
+    }
     use crate::domain::EventId;
 
     fn update(kind: &str, payload: Value) -> RunEvent {

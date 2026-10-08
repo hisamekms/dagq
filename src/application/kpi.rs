@@ -57,3 +57,28 @@ pub fn kpi(
     )
     .map_err(|error| anyhow!(error))
 }
+
+/// The improvement proposals running against `limit`, `[kpi]`'s
+/// `max_improvement_proposals` (ADR-0051 decision 25), and when they
+/// reached it, the findings waiting for a planner because of it.
+pub fn improvements(
+    store: &dyn super::DraftPlannerStore,
+    limit: usize,
+) -> Result<serde_json::Value> {
+    let improvements = store.improvements(limit)?;
+    let waiting: Vec<serde_json::Value> = if improvements.reached() {
+        store
+            .planner_findings()?
+            .iter()
+            .map(|finding| serde_json::json!({"finding_id": finding.id, "reason": "improvement_limit"}))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(serde_json::json!({
+        "running": improvements.running,
+        "limit": improvements.limit,
+        "reached": improvements.reached(),
+        "waiting": waiting,
+    }))
+}

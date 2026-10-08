@@ -162,11 +162,40 @@ impl ProviderCheck {
     pub fn usable(&self) -> bool {
         self.found && !self.modes.is_empty()
     }
+
+    /// Turn `provider` off among `checks` (`supervise --no-claude`): it keeps
+    /// its executable but has no mode, with the error `provider_disabled`, so
+    /// no worker of it starts.
+    pub fn disable(checks: &mut [ProviderCheck], provider: Provider) {
+        for check in checks.iter_mut().filter(|check| check.provider == provider) {
+            check.modes.clear();
+            check.error = Some("provider_disabled".into());
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--no-claude` leaves Claude's executable but no mode, so it is not
+    /// usable, and leaves Codex alone.
+    #[test]
+    fn a_disabled_provider_keeps_its_executable_and_runs_no_worker() {
+        let check = |provider| ProviderCheck {
+            provider,
+            executable: "/bin/x".into(),
+            found: true,
+            error: None,
+            modes: vec![WorkerMode::Headless],
+        };
+        let mut checks = vec![check(Provider::Claude), check(Provider::Codex)];
+        ProviderCheck::disable(&mut checks, Provider::Claude);
+        assert!(!checks[0].usable());
+        assert_eq!(checks[0].executable, "/bin/x");
+        assert_eq!(checks[0].error.as_deref(), Some("provider_disabled"));
+        assert_eq!(checks[1], check(Provider::Codex));
+    }
 
     #[test]
     fn a_task_without_a_worker_runs_claude_headless() {

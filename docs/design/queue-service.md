@@ -184,7 +184,7 @@ supervisorが起動し直せなかった（`start_failed`）か、上限に達�
 
 ## statusとdoctor
 
-`status`（`--role`なしと`--role inbox`）・`doctor`・`dagq service status`は`queue_service`を出す（`compose::queue_service_view`）。
+`status`（`--role`なしと`--role inbox`）・`doctor`・`dagq service status`は`queue_service`を出す（`application::queue_service::view`）。
 
 ```json
 {"state": "running", "socket": "<queue dir>/service/queue.sock", "pid": 4242, "build": "0.4.0-dev+abc", "api_version": 1, "min_api_version": 1, "build_matches": true, "started_at": 1790000000, "client_api_version": 1, "attention": false}

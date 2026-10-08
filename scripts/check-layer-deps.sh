@@ -1,8 +1,8 @@
 #!/bin/sh
 # Check the forbidden dependencies between the layers of the runtime, and
-# between the split contexts of the supervisor and of the ports. The rules
-# (their IDs L1, L2, L3, L4, L6, C3 and C8), what counts in short and the
-# allow list's place are in
+# between the split contexts of the supervisor, of the ports and of the
+# composition root. The rules (their IDs L1, L2, L3, L4, L6, L7, L9, C3 and
+# C8), what counts in short and the allow list's place are in
 # docs/design/architecture.md, sections "レイヤーの規則", "コンテキストの規則"
 # and "検査の範囲"; the allow list's format is in its own header
 # (.config/layer-deps-allow.txt); the details of what counts are here.
@@ -26,6 +26,16 @@
 # `crate::application::ports` path. So a port is named by
 # its module (`super::shared::Clock`), never through the re-exports of
 # mod.rs, and only from the modules the rule lets the file use.
+#
+# L7 counts in src/compose.rs and src/compose/ outside tests: a read of the
+# wall or the monotonic clock (SystemTime::now, Instant::now). L9 counts,
+# inside tests too, in the context modules of src/compose/
+# ($compose_contexts): a reference to another of $compose_modules
+# (`super::host`, `crate::compose::host`); and in every file under src/
+# outside src/compose.rs, src/compose/ and the three layers (src/main.rs,
+# runtime.rs, lifecycle.rs, view, ...): a reference to any of
+# $compose_modules (`dagq::compose::host`), the root's re-exports being the
+# way in.
 #
 # What counts is the path of a reference (`crate::application::timestamp`,
 # `std::time::SystemTime::now`), with a grouped `use crate::{a, b}` expanded
@@ -62,7 +72,8 @@
 # (no violation, one not in the list, a stale item, an item without a task,
 # references only in comments and strings, nested block comments, the cfg
 # forms above, a test range inside an inline module, the C3 references
-# of a split context and of a stage, and the C8 references)
+# of a split context and of a stage, the C8 references and the L7 and L9
+# references of the composition root)
 # and removes them.
 #
 # Exit 0 when every occurrence is allowed and no item is stale, 1 when an
@@ -78,16 +89,20 @@ c3_files="contexts ci_watch forecast observer push report throughput_review clea
 c8_ok="planning:shared execution:shared host:shared observation:shared,planning,execution,host shared:planning,execution,observation,host"
 # The submodules that hold 実行と着地's state by stage, checked by C3 too.
 c3_stage_files="stages"
+# The modules of src/compose/, and those of them that wire one context each
+# (rule L9); the rest (the supervisor loop's) may name the contexts.
+compose_modules="execution planning observation host supervisor"
+compose_contexts="execution planning observation host"
 script=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=$(cd "$(dirname "$0")/.." && pwd)
 
 # scan prints one line per occurrence: "rule<TAB>path<TAB>reference<TAB>line",
 # with paths relative to the tree's root.
 scan() {
-  files=$(find src/domain src/application src/infrastructure -type f -name '*.rs' 2>/dev/null | LC_ALL=C sort)
+  files=$(find src -type f -name '*.rs' 2>/dev/null | LC_ALL=C sort)
   [ -n "$files" ] || return 0
   # shellcheck disable=SC2086
-  LC_ALL=C awk -v c3_files="$c3_files" -v c3_stage_files="$c3_stage_files" -v c8_ok="$c8_ok" '
+  LC_ALL=C awk -v c3_files="$c3_files" -v c3_stage_files="$c3_stage_files" -v c8_ok="$c8_ok" -v compose_modules="$compose_modules" -v compose_contexts="$compose_contexts" '
 BEGIN {
   # The patterns per layer, "rule:pattern"; a pattern starting with ^
   # matches at the start of a path, otherwise anywhere in it. The rules that
@@ -112,6 +127,12 @@ BEGIN {
   for (i = 1; i <= n; i++) c3s["src/application/supervise/" o[i] ".rs"] = 1
   c3_names = c3_patterns("Supervisor Slot Phase stages ClaimState SlotTable LandingState ResumeState TriageState ProviderState E2eWaits")
   c3s_names = c3_patterns("Supervisor contexts ObservationState HostOpsState PassEnv")
+  prod["compose"] = "L7:SystemTime::now L7:Instant::now"
+  prod["compose.rs"] = prod["compose"]
+  n_cm = split(compose_modules, cm, " ")
+  n = split(compose_contexts, o, " ")
+  for (i = 1; i <= n; i++) compose_context[o[i]] = 1
+  for (i = 1; i <= n_cm; i++) outside_compose = outside_compose (i > 1 ? " " : "") "L9:compose::" cm[i]
 }
 # c3_patterns prints the C3 patterns of each of the names: bare, through
 # super:: and through crate::application::supervise::.
@@ -141,6 +162,11 @@ function reset_file() {
   if (FILENAME ~ /^src\/application\/ports\/[a-z_]+\.rs$/ && FILENAME != "src/application/ports/mod.rs") {
     port = FILENAME; sub(/^.*\//, "", port); sub(/\.rs$/, "", port)
   }
+  if (layer == "compose") {
+    module = FILENAME; sub(/^.*src\/compose\//, "", module); sub(/(\/.*|\.rs)$/, "", module)
+    if (module in compose_context)
+      for (i = 1; i <= n_cm; i++) if (cm[i] != module) load("L9:^super::" cm[i] " L9:compose::" cm[i], 1)
+  } else if (layer != "compose.rs" && layer != "domain" && layer != "application" && layer != "infrastructure") load(outside_compose, 1)
   if (FILENAME in c3) load(c3_names, 1)
   if (FILENAME in c3s) load(c3s_names, 1)
 }
@@ -344,7 +370,7 @@ check_tree() {
     BEGIN { n = split(ENVIRON["LAYER_DEPS_TESTS"], t, "\n") }
     $1 == "testmod" || $1 == "" { next }
     {
-      if ($1 == "L2" || $1 == "L4") {
+      if ($1 == "L2" || $1 == "L4" || $1 == "L7") {
         for (i = 1; i <= n; i++) {
           if (t[i] == "") continue
           if ($2 == t[i] || (substr(t[i], length(t[i])) == "/" && index($2, t[i]) == 1)) next
@@ -364,8 +390,8 @@ check_tree() {
         if (m < 5) { print me ": " show ":" i ": want rule | path | reference | task | reason" > "/dev/stderr"; bad = 1; continue }
         rule = trim(f[1]); path = trim(f[2]); r = trim(f[3]); task = trim(f[4])
         reason = f[5]; for (j = 6; j <= m; j++) reason = reason "|" f[j]; reason = trim(reason)
-        if (rule !~ /^(L[12346]|C[38])$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
-          print me ": " show ":" i ": want a rule (L1, L2, L3, L4, L6, C3, C8), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
+        if (rule !~ /^(L[123467]|L9|C[38])$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
+          print me ": " show ":" i ": want a rule (L1, L2, L3, L4, L6, L7, L9, C3, C8), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
         }
         k = rule "\t" path "\t" r
         if (k in item) { print me ": " show ":" i ": " rule " " path " " r " is listed twice" > "/dev/stderr"; bad = 1; continue }
@@ -650,6 +676,52 @@ EOF2
 fn slots(claim: &ClaimState) -> usize { claim.slots.len() }
 EOF2
   expect 1 "C3: a split context's file reaches a stage's state" "$tmp/stage" "src/application/supervise/report.rs:2: C3 forbids ClaimState"
+
+  base compose
+  mkdir -p "$tmp/compose/src/compose"
+  cat >"$tmp/compose/src/compose.rs" <<'EOF'
+mod host;
+mod observation;
+mod supervisor;
+pub use host::up;
+fn shared() { host::up(); }
+EOF
+  cat >"$tmp/compose/src/compose/host.rs" <<'EOF'
+//! See super::observation::status, named in a comment only.
+use super::{OneShot, shared};
+pub fn up() { let _ = "crate::compose::observation"; shared(); }
+EOF
+  cat >"$tmp/compose/src/compose/observation.rs" <<'EOF'
+pub fn status() { super::shared(); }
+EOF
+  cat >"$tmp/compose/src/compose/supervisor.rs" <<'EOF'
+use super::{host, observation::status};
+pub fn supervise() { host::up(); status(); }
+EOF
+  cat >"$tmp/compose/src/main.rs" <<'EOF'
+use dagq::compose::{self, up};
+fn main() { compose::status(); up(); }
+EOF
+  expect 0 "L9: the root and the supervisor loop name the contexts, the rest only the root" "$tmp/compose"
+  cat >>"$tmp/compose/src/compose/observation.rs" <<'EOF'
+use super::{host::up, OneShot};
+EOF
+  expect 1 "L9: a context module names another" "$tmp/compose" "src/compose/observation.rs:2: L9 forbids super::host"
+
+  base compose_outside
+  mkdir -p "$tmp/compose_outside/src/compose"
+  echo 'pub fn up() {}' >"$tmp/compose_outside/src/compose/host.rs"
+  echo 'fn main() { dagq::compose::host::up(); }' >"$tmp/compose_outside/src/main.rs"
+  expect 1 "L9: outside the composition root a submodule is named" "$tmp/compose_outside" "src/main.rs:1: L9 forbids compose::host"
+
+  base compose_clock
+  mkdir -p "$tmp/compose_clock/src/compose"
+  cat >"$tmp/compose_clock/src/compose/host.rs" <<'EOF'
+#[cfg(test)]
+fn fixture() { let _ = std::time::Instant::now(); }
+pub fn up() { let _ = std::time::SystemTime::now(); }
+EOF
+  expect 1 "L7: the composition reads the clock outside tests" "$tmp/compose_clock" "src/compose/host.rs:3: L7 forbids SystemTime::now"
 
   base infra
   cat >>"$tmp/infra/src/infrastructure/store.rs" <<'EOF'
