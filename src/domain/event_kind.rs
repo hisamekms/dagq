@@ -307,6 +307,7 @@ event_kinds! {
     SessionIdleObserved => "session_idle_observed",
     SessionOpened => "session_opened",
     SessionReopenFailed => "session_reopen_failed",
+    SessionTokens => "session_tokens",
     SessionTurns => "session_turns",
     StaleReceiptNudged => "stale_receipt_nudged",
     StaleReceiptResolved => "stale_receipt_resolved",
@@ -490,6 +491,7 @@ impl EventKind {
                 | RequestProposed
                 | RequestDeclined
                 | RequestPlannerExhausted
+                | SessionTokens
                 | SessionTurns
                 | SupervisorStarted
                 // A supervisor's stop request, recorded when its drain
@@ -879,6 +881,7 @@ pub const SESSION_OPENED: &str = EventKind::SessionOpened.as_str();
 /// during its wait (task 1372): `attempt`, `cause`, `error`, and the
 /// `workspace_id` it opened when there was one.
 pub const SESSION_REOPEN_FAILED: &str = EventKind::SessionReopenFailed.as_str();
+pub const SESSION_TOKENS: &str = EventKind::SessionTokens.as_str();
 pub const SESSION_TURNS: &str = EventKind::SessionTurns.as_str();
 pub const STALE_RECEIPT_NUDGED: &str = EventKind::StaleReceiptNudged.as_str();
 pub const STALE_RECEIPT_RESOLVED: &str = EventKind::StaleReceiptResolved.as_str();
@@ -1236,6 +1239,7 @@ mod tests {
             (EventKind::SessionIdleObserved, "session_idle_observed"),
             (EventKind::SessionOpened, "session_opened"),
             (EventKind::SessionReopenFailed, "session_reopen_failed"),
+            (EventKind::SessionTokens, "session_tokens"),
             (EventKind::SessionTurns, "session_turns"),
             (EventKind::StaleReceiptNudged, "stale_receipt_nudged"),
             (EventKind::StaleReceiptResolved, "stale_receipt_resolved"),

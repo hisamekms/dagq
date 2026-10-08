@@ -925,7 +925,7 @@ fn exited_work(work: &Value, kind: &str, attempt: &Value) -> Value {
 }
 
 /// The time now, in the form of `created_at`.
-fn now(conn: &Connection) -> Result<String> {
+pub(super) fn now(conn: &Connection) -> Result<String> {
     Ok(
         conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |r| {
             r.get(0)
@@ -1519,7 +1519,7 @@ fn judge_dagq_source(conn: &Connection) -> Result<bool> {
 
 /// The transcript of `span`, never read while `conn` holds a write
 /// transaction (task 543).
-fn read(conn: &Connection, span: &OpenSpan) -> Result<Transcript, Unreadable> {
+pub(super) fn read(conn: &Connection, span: &OpenSpan) -> Result<Transcript, Unreadable> {
     if !conn.is_autocommit() {
         return Err(Unreadable {
             code: TRANSCRIPT_NOT_READ_BEFORE,
@@ -1594,7 +1594,7 @@ fn span_closed_sql() -> String {
 }
 
 /// Whether the span opened by `opened` is closed.
-fn span_closed(conn: &Connection, opened: EventId) -> Result<bool> {
+pub(super) fn span_closed(conn: &Connection, opened: EventId) -> Result<bool> {
     Ok(conn.query_row(&span_closed_sql(), [opened], |r| r.get(0))?)
 }
 
@@ -1643,7 +1643,7 @@ const DEFERRED: &str = "deferred";
 
 /// The `active_unavailable` of a hook's `session_closed` whose transcript
 /// the supervisor has not taken in yet (task 655).
-const HOOK_INTAKE_PENDING: &str = "hook_intake_pending";
+pub(super) const HOOK_INTAKE_PENDING: &str = "hook_intake_pending";
 
 /// The query of the closed hook spans whose transcript the supervisor has
 /// not taken in yet, with when each closed (task 655). Its `NOT EXISTS`
@@ -1926,7 +1926,7 @@ pub(super) fn close_review(
 
 /// The open spans of [`HOOK_KINDS`], which the plugin's hook records on no
 /// run (ADR-0048 decision 6), oldest first.
-fn open_hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
+pub(super) fn open_hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
     let kinds = HOOK_KINDS.map(|kind| format!("'{kind}'")).join(",");
     open_spans(
         conn,
@@ -1957,7 +1957,7 @@ fn headless_planner_hook(conn: &Connection, hook: &SessionHook) -> Result<bool> 
 }
 
 /// The task the `session_opened` of `span` is on.
-fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<TaskId>> {
+pub(super) fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<TaskId>> {
     Ok(conn.query_row(
         "SELECT task_id FROM run_events WHERE id=?1",
         [span.opened_event_id],
@@ -2188,7 +2188,7 @@ fn proposal_goals(conn: &Connection, proposal: Option<i64>) -> Result<Vec<i64>> 
 }
 
 /// Insert a span event at `created_at`.
-fn insert_at(
+pub(super) fn insert_at(
     conn: &Connection,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
@@ -2213,14 +2213,14 @@ fn insert_at(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::domain::LeaseToken;
     use crate::infrastructure::git_binary::git_executable;
 
     thread_local! {
         /// The transcripts read on this thread.
-        pub(super) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(in crate::infrastructure) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         /// The transcripts analysed for a close on this thread.
         pub(super) static ANALYSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }

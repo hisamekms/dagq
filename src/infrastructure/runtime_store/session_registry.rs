@@ -203,6 +203,9 @@ impl SessionRegistry for SqliteQueue {
     fn record_session_turns(&self) -> Result<usize> {
         crate::infrastructure::sessions::record_open_turns(&self.conn)
     }
+    fn record_session_tokens(&self) -> Result<usize> {
+        crate::infrastructure::session_tokens::record_session_tokens(&self.conn)
+    }
     fn record_session_hook(
         &self,
         hook: &crate::domain::sessions::SessionHook,

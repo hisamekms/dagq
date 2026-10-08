@@ -2042,6 +2042,10 @@ pub trait SessionRegistry {
     /// still open, and finalize closed hook spans awaiting intake (ADR-0048
     /// decision 8); returns how many spans got turns or final measurements.
     fn record_session_turns(&self) -> Result<usize>;
+    /// Cut the tokens of the inbox and person's planner spans that are due
+    /// a cut: hourly while open, once at their close (ADR-t1486-1 decision
+    /// 3); returns how many cuts were recorded.
+    fn record_session_tokens(&self) -> Result<usize>;
     /// Record what the plugin's hook reported of an inbox or planner
     /// session (ADR-0048 decision 6): its span opened, gone on with or
     /// closed. Only the spans are written.

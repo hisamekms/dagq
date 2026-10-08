@@ -59,6 +59,16 @@ impl TokenUsage {
         }
     }
 
+    /// Whether every count is 0.
+    pub fn is_zero(&self) -> bool {
+        [
+            self.input,
+            self.output,
+            self.cache_read,
+            self.cache_creation,
+        ] == [0; 4]
+    }
+
     /// The `tokens` of a `session_closed`: the counts, and `cost_usd` only
     /// when there is one.
     pub fn payload(&self) -> Value {
@@ -92,6 +102,10 @@ pub enum TokenSource {
     /// the child threads out: the fallback for a rollout that could not be
     /// counted.
     ThreadUsage,
+    /// The assistant records of a Claude Code transcript, each message once
+    /// by its `message.id` ([`span_usage`]): the cuts of an interactive
+    /// session ([`SpanTotals`]).
+    Transcript,
     /// The `token_usage_record`s of Codex's rollouts: one per response of
     /// the root thread and of its child threads ([`RolloutUsage`]).
     UsageRecord,
@@ -104,6 +118,7 @@ impl TokenSource {
             Self::ResultUsage => "result_usage",
             Self::ThreadUsage => "thread_usage",
             Self::UsageRecord => "token_usage_record",
+            Self::Transcript => "transcript",
         }
     }
 }
@@ -612,6 +627,162 @@ pub fn span_usage(
         usage.cache_creation += message.counts[3];
     }
     Ok(usage)
+}
+
+/// The `model` of the messages of [`SpanTotals::by_model`] no record of
+/// which names a model.
+pub const MODEL_UNKNOWN: &str = "unknown";
+
+/// The tokens of an interactive session's span from its start to a cut of
+/// its transcript (ADR-t1486-1 decision 3): [`span_usage`]'s, and the same
+/// per model. A cut records them as its `tokens_total` and
+/// `tokens_total_by_model`, and its own tokens are what they added to the
+/// span's cut before ([`SpanTotals::since`]), so that the next cut, made by
+/// any supervisor, starts where the last one recorded and counts no message
+/// twice.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpanTotals {
+    pub tokens: TokenUsage,
+    /// Each message under the model its first record (in the transcript's
+    /// order) naming one names, a subagent's included, by model;
+    /// [`MODEL_UNKNOWN`] when none does. The cost of a model only when
+    /// every message of it has one.
+    pub by_model: Vec<ModelTokens>,
+}
+
+impl SpanTotals {
+    /// The totals of `records` from `start` to `end` (unix milliseconds,
+    /// `[start, end)`), the error of [`span_usage`] when its usage cannot
+    /// be read.
+    pub fn of(records: &[TranscriptRecord], start: i64, end: i64) -> Result<Self, &'static str> {
+        let tokens = span_usage(records, start, end)?;
+        // message → its counts and cost, and its model.
+        let mut messages: BTreeMap<String, (Message, Option<String>)> = BTreeMap::new();
+        for (at, record) in records.iter().enumerate() {
+            if !record.assistant || record.at < start || record.at >= end {
+                continue;
+            }
+            let key = record
+                .message_id
+                .clone()
+                .unwrap_or_else(|| format!("#{at}"));
+            let model = record.model.as_deref().filter(|m| *m != SYNTHETIC_MODEL);
+            let Some(usage) = &record.usage else {
+                if let Some((_, named)) = messages.get_mut(&key) {
+                    *named = named.take().or(model.map(str::to_owned));
+                }
+                continue;
+            };
+            let count = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
+            let counts = [
+                count("input_tokens"),
+                count("output_tokens"),
+                count("cache_read_input_tokens"),
+                count("cache_creation_input_tokens"),
+            ];
+            let (message, named) = messages.entry(key).or_default();
+            *named = named.take().or(model.map(str::to_owned));
+            for (kept, count) in message.counts.iter_mut().zip(counts) {
+                *kept = (*kept).max(count);
+            }
+            if record.cost_usd.is_some() {
+                message.cost = record.cost_usd;
+            }
+        }
+        // model → (its counts, its cost while every message has one).
+        let mut models: BTreeMap<String, ([i64; 4], Option<f64>)> = BTreeMap::new();
+        for (message, model) in messages.into_values() {
+            let entry = models
+                .entry(model.unwrap_or_else(|| MODEL_UNKNOWN.to_owned()))
+                .or_insert(([0; 4], Some(0.0)));
+            for (total, count) in entry.0.iter_mut().zip(message.counts) {
+                *total += count;
+            }
+            entry.1 = entry.1.zip(message.cost).map(|(total, cost)| total + cost);
+        }
+        let by_model = models
+            .into_iter()
+            .map(|(model, (counts, cost_usd))| ModelTokens {
+                model,
+                input: counts[0],
+                output: counts[1],
+                cache_read: counts[2],
+                cache_creation: counts[3],
+                cost_usd,
+            })
+            .collect();
+        Ok(Self { tokens, by_model })
+    }
+
+    /// The totals a cut's payload recorded (`tokens_total` and
+    /// `tokens_total_by_model`); `None` when it recorded none.
+    pub fn from_payload(payload: &Value) -> Option<Self> {
+        Some(Self {
+            tokens: TokenUsage::from_payload(&payload["tokens_total"])?,
+            by_model: ModelTokens::from_payloads(&payload["tokens_total_by_model"])?,
+        })
+    }
+
+    /// Put them into a cut's payload as `tokens_total` and
+    /// `tokens_total_by_model`.
+    pub fn record(&self, payload: &mut Value) {
+        payload["tokens_total"] = self.tokens.payload();
+        payload["tokens_total_by_model"] = self.by_model.iter().map(ModelTokens::payload).collect();
+    }
+
+    /// The tokens of the cut these totals are to, after the span's cut
+    /// before with `earlier` (none: the cut is the span's first): each
+    /// count less the earlier one, never below 0, per model the models
+    /// that added nothing left out. A message whose records the earlier cut
+    /// split adds only what it grew by.
+    pub fn since(&self, earlier: Option<&Self>) -> ExecutionTokens {
+        let Some(earlier) = earlier else {
+            return ExecutionTokens {
+                tokens: Some(self.tokens.clone()),
+                by_model: self.by_model.clone(),
+                source: Some(TokenSource::Transcript),
+                ..ExecutionTokens::default()
+            };
+        };
+        let less = |now: i64, then: i64| (now - then).max(0);
+        let cost = |now: Option<f64>, then: Option<f64>| match (now, then) {
+            (Some(now), Some(then)) => Some((((now - then) * 1e6).round() / 1e6).max(0.0)),
+            _ => None,
+        };
+        let tokens = TokenUsage {
+            input: less(self.tokens.input, earlier.tokens.input),
+            output: less(self.tokens.output, earlier.tokens.output),
+            cache_read: less(self.tokens.cache_read, earlier.tokens.cache_read),
+            cache_creation: less(self.tokens.cache_creation, earlier.tokens.cache_creation),
+            messages: less(self.tokens.messages, earlier.tokens.messages),
+            cost_usd: cost(self.tokens.cost_usd, earlier.tokens.cost_usd),
+        };
+        let by_model = self
+            .by_model
+            .iter()
+            .filter_map(|total| {
+                let before = earlier.by_model.iter().find(|e| e.model == total.model);
+                let Some(before) = before else {
+                    return Some(total.clone());
+                };
+                let own = ModelTokens {
+                    model: total.model.clone(),
+                    input: less(total.input, before.input),
+                    output: less(total.output, before.output),
+                    cache_read: less(total.cache_read, before.cache_read),
+                    cache_creation: less(total.cache_creation, before.cache_creation),
+                    cost_usd: cost(total.cost_usd, before.cost_usd),
+                };
+                own.counts().iter().any(|count| *count > 0).then_some(own)
+            })
+            .collect();
+        ExecutionTokens {
+            tokens: Some(tokens),
+            by_model,
+            source: Some(TokenSource::Transcript),
+            ..ExecutionTokens::default()
+        }
+    }
 }
 
 /// The model Claude Code names for a message it made up itself (an API
@@ -1522,5 +1693,127 @@ mod tests {
         assert_eq!(span_usage(&text, 0, 10_000), Err(USAGE_UNSUPPORTED));
         let none = records(&[line(1, json!({"message": {"id": "a", "content": []}}))]);
         assert_eq!(span_usage(&none, 0, 10_000), Err(USAGE_UNSUPPORTED));
+    }
+
+    /// A span's totals to a cut are `span_usage`'s, and per model sum to
+    /// them, each message under its model (a subagent's included, one
+    /// naming none under `unknown`). Cut after cut, each cut's own tokens
+    /// are what the totals grew by: a message whose records a cut splits
+    /// adds only what it grew by after it, so the cuts together are the
+    /// span's tokens to the last cut, each message counted once.
+    #[test]
+    fn cuts_count_each_message_once_however_its_records_are_split() {
+        let opus = Some("claude-opus-5-5");
+        let haiku = Some("claude-haiku-4-5");
+        let lines = [
+            // Before the span.
+            record_at(500, Some("early"), opus, None, Some((1, 1)), None, false),
+            // "a" grows across the first cut (at 2_000).
+            record_at(1_000, Some("a"), opus, None, Some((10, 1)), None, false),
+            record_at(3_000, Some("a"), opus, None, Some((10, 40)), None, false),
+            record_at(1_500, Some("s"), haiku, None, Some((4, 4)), None, true),
+            record_at(2_500, None, None, None, Some((2, 2)), None, false),
+            record_at(4_000, Some("b"), opus, None, Some((5, 5)), None, false),
+        ];
+        let records = records_of(&lines);
+        let start = 1_000;
+        let cuts = [2_000, 3_500, 5_000];
+        let totals: Vec<SpanTotals> = cuts
+            .iter()
+            .map(|&cut| SpanTotals::of(&records, start, cut).unwrap())
+            .collect();
+        for (total, &cut) in totals.iter().zip(&cuts) {
+            assert_eq!(total.tokens, span_usage(&records, start, cut).unwrap());
+            let by_model = ModelTokens::total(&total.by_model, None);
+            assert_eq!(
+                [by_model.input, by_model.output, by_model.cache_read],
+                [
+                    total.tokens.input,
+                    total.tokens.output,
+                    total.tokens.cache_read
+                ]
+            );
+        }
+        assert_eq!(
+            totals[2].by_model,
+            vec![
+                model("claude-haiku-4-5", [4, 4, 12, 0], None),
+                model("claude-opus-5-5", [15, 45, 45, 0], None),
+                model(MODEL_UNKNOWN, [2, 2, 6, 0], None),
+            ]
+        );
+        let mut before: Option<&SpanTotals> = None;
+        let mut own = Vec::new();
+        for total in &totals {
+            let cut = total.since(before);
+            assert_eq!(cut.source, Some(TokenSource::Transcript));
+            own.push(cut);
+            before = Some(total);
+        }
+        let tokens = |at: usize| own[at].tokens.clone().unwrap();
+        // The first cut has "a" with 1 output and the subagent's message.
+        assert_eq!((tokens(0).input, tokens(0).output), (14, 5));
+        // The second has the rest of "a" and the message without an id.
+        assert_eq!((tokens(1).input, tokens(1).output), (2, 41));
+        assert_eq!(
+            own[1].by_model,
+            vec![
+                model("claude-opus-5-5", [0, 39, 0, 0], None),
+                model(MODEL_UNKNOWN, [2, 2, 6, 0], None),
+            ]
+        );
+        assert_eq!((tokens(2).input, tokens(2).output), (5, 5));
+        let sum = |pick: fn(&TokenUsage) -> i64| (0..3).map(|at| pick(&tokens(at))).sum::<i64>();
+        let whole = span_usage(&records, start, 5_000).unwrap();
+        assert_eq!(
+            [sum(|t| t.input), sum(|t| t.output), sum(|t| t.cache_read)],
+            [whole.input, whole.output, whole.cache_read]
+        );
+        // A cut with nothing new is a measured 0.
+        let again = totals[2].since(Some(&totals[2]));
+        assert!(again.tokens.as_ref().is_some_and(TokenUsage::is_zero));
+        assert!(!tokens(2).is_zero());
+        assert!(again.by_model.is_empty());
+        // The totals read back from a cut's payload.
+        let mut payload = json!({});
+        totals[1].record(&mut payload);
+        assert_eq!(SpanTotals::from_payload(&payload), Some(totals[1].clone()));
+        assert_eq!(SpanTotals::from_payload(&json!({"tokens": null})), None);
+    }
+
+    /// A model's cost is kept only while every message of it has one, and
+    /// a cut's cost is what it grew by.
+    #[test]
+    fn a_cuts_cost_is_what_its_totals_grew_by() {
+        let opus = Some("claude-opus-5-5");
+        let records = records_of(&[
+            record_at(
+                1_000,
+                Some("a"),
+                opus,
+                None,
+                Some((1, 1)),
+                Some(0.25),
+                false,
+            ),
+            record_at(2_000, Some("b"), opus, None, Some((1, 1)), Some(0.5), false),
+            record_at(
+                3_000,
+                Some("c"),
+                Some("claude-haiku-4-5"),
+                None,
+                Some((1, 1)),
+                None,
+                false,
+            ),
+        ]);
+        let first = SpanTotals::of(&records, 0, 1_500).unwrap();
+        let second = SpanTotals::of(&records, 0, 4_000).unwrap();
+        assert_eq!(first.by_model[0].cost_usd, Some(0.25));
+        assert_eq!(second.by_model[0].cost_usd, None);
+        assert_eq!(second.by_model[1].cost_usd, Some(0.75));
+        let cut = second.since(Some(&first));
+        assert_eq!(cut.tokens.unwrap().cost_usd, None);
+        assert_eq!(cut.by_model[1].cost_usd, Some(0.5));
     }
 }

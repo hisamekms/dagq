@@ -2774,7 +2774,10 @@ impl Supervisor<'_> {
     }
     /// Record the finished transcript turns of the open session spans, and
     /// the remaining turns and measurements of the hook spans closed
-    /// without them (ADR-t655-1), when [`SESSION_TURNS_INTERVAL`] passed
+    /// without them (ADR-t655-1), and the token cuts of the inbox and
+    /// person's planner spans that are due one (ADR-t1486-1 decision 3:
+    /// due by the time of their last cut, so the cuts stay hourly across
+    /// restarts), when [`SESSION_TURNS_INTERVAL`] passed
     /// since the last time (at once with `now`). A failure is logged only: it changes no run (ADR-0048
     /// decision 10), and the next time reads the transcripts again.
     fn record_session_turns(&mut self, now: bool) {
@@ -2792,6 +2795,13 @@ impl Supervisor<'_> {
             Ok(spans) => info!("recorded the transcript turns of {spans} session span(s)"),
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "transcript turns could not be recorded: {error:#}")
+            }
+        }
+        match self.queue.record_session_tokens() {
+            Ok(0) => {}
+            Ok(cuts) => info!("recorded {cuts} token cut(s) of interactive session spans"),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the tokens of interactive session spans could not be cut: {error:#}")
             }
         }
     }

@@ -53,6 +53,7 @@ pub mod runtime_store;
 pub mod sccache;
 pub mod schema;
 pub mod search;
+mod session_tokens;
 mod sessions;
 pub mod sql_ids;
 pub mod sqlite;

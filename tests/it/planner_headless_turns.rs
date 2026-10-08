@@ -76,7 +76,8 @@ fn taken(db: &Path, id: PlannerId) -> Vec<Value> {
 fn a_request_written_during_a_turn_at_the_usage_limit_waits_for_the_retry_of_that_turn() {
     let fx = headless_fixture(
         r#"case "$TURN" in
-1) "$DAGQ" --db "$DB" ask --kind planner_question --because scope --task 2 --question "in the goal?" --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
+1) "$DAGQ" --db "$DB" ask --kind planner_question --because scope --task 2 --question "in the goal?" --cmux true >> "$RUN_DIR/ask.log" 2>&1
+  await_file "$RUN_DIR/answered" ;;
 2) await_file "$RUN_DIR/turns/request-000002.json"
   fail "Claude AI usage limit reached|1790535600" ;;
 *) case "$PROMPT" in *"a request for you"*) "$DAGQ" --db "$DB" cancel 2 >> "$RUN_DIR/cancel.log" 2>&1 ;; esac ;;
@@ -110,8 +111,12 @@ say "turn $TURN""#,
         || open_ask(AskKind::PlannerQuestion).is_some(),
         || diagnose_planner(&fx.db),
     );
+    // The question's turn goes on until it is answered: a planner idle
+    // with only its question open would be ended for the answer's wait
+    // (ADR-t1704-1), and the answer would go to a new planner.
     let asked = open_ask(AskKind::PlannerQuestion).unwrap();
     queue.answer(asked.id, "keep it").unwrap();
+    fs::write(planners_dir(&fx.db).join("1").join("answered"), "").unwrap();
     // The answer's turn runs; the inbox hands a follow-up meanwhile.
     supervise_until(
         &fx,

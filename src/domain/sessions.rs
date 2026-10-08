@@ -14,6 +14,10 @@ pub const SESSION_CLOSED: &str = super::event_kind::SESSION_CLOSED;
 /// The transcript's turns of a span, recorded while it is open and when it
 /// closes (ADR-0048 decision 8).
 pub const SESSION_TURNS: &str = super::event_kind::SESSION_TURNS;
+/// A cut of the tokens of an interactive session's span (ADR-t1486-1
+/// decision 3): its own tokens since the span's cut before, the span's
+/// totals to it, and `at`, the time it cuts at ([`TOKEN_CUT_KINDS`]).
+pub const SESSION_TOKENS: &str = super::event_kind::SESSION_TOKENS;
 
 pub const WORKER: &str = "worker";
 pub const RESUME: &str = "resume";
@@ -498,6 +502,30 @@ fn job(kind: &str, payload: &Value, cwd: Option<&str>) -> SpanChange {
 /// decision 6): the sessions the runtime does not start headless.
 pub const HOOK_KINDS: [&str; 3] = [RUNTIME_PLANNER, INBOX, PLANNER];
 
+/// The kinds of span whose tokens the supervisor cuts while it is open and
+/// when it closes (ADR-t1486-1 decision 3): the interactive sessions the
+/// runtime opens, the inbox and a person's planner, which the plugin's hook
+/// records. Every other session's tokens are its Executions'.
+pub const TOKEN_CUT_KINDS: [&str; 2] = [INBOX, PLANNER];
+
+/// How long after a span opened, or after its last cut, the supervisor
+/// cuts its tokens again while it is open: an hour.
+pub const TOKEN_CUT_INTERVAL_MS: i64 = 60 * 60 * 1000;
+
+/// How long after a span closed the supervisor still makes its cut at the
+/// close: a week. A span closed longer before (one closed before the cuts
+/// were recorded, or while no supervisor ran that long) gets none: its
+/// tokens after its last cut (all of them, without a cut) are only in its
+/// tokens at the close, its `session_closed`'s `tokens`, or for a close the
+/// hook made the final `session_turns`' `tokens`.
+pub const TOKEN_CUT_CLOSED_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Whether a span open since `since` (its open or its last cut, unix
+/// milliseconds) is due a cut at `now`.
+pub fn token_cut_due(since: i64, now: i64) -> bool {
+    now - since >= TOKEN_CUT_INTERVAL_MS
+}
+
 /// The workspace variable holding what the runtime started a planner's
 /// agent with (an [`super::actor_model::ActorLaunch`] as JSON), which the
 /// hook copies into the span's `launch`.
@@ -735,6 +763,17 @@ pub fn inferred_hook_closes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A span is due a cut an hour after its open or last cut, not a
+    /// millisecond before.
+    #[test]
+    fn a_cut_is_due_an_hour_after_the_last() {
+        let since = 1_000;
+        assert!(!token_cut_due(since, since + TOKEN_CUT_INTERVAL_MS - 1));
+        assert!(token_cut_due(since, since + TOKEN_CUT_INTERVAL_MS));
+        assert!(token_cut_due(since, since + 2 * TOKEN_CUT_INTERVAL_MS));
+        assert!(!token_cut_due(since, since));
+    }
 
     fn span(id: i64, payload: Value) -> OpenSpan {
         OpenSpan {

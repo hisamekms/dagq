@@ -32,6 +32,7 @@ Executionは`claude -p` / `codex exec`の1回の呼び出しで、非対話のtu
 | rolloutの場所 | `Codex::sessions_dir` |
 | turnの分（累計との差、前のturnが数えたturn） | `domain::turn::turn_own_models`・`turn_own_cost`・`counted_rollout_turns`、`headless_session.rs`の`turn_tokens` |
 | jobの終わりへの記録 | `AgentProvider::job_session`（Codexは`codex.rs`の`job_tokens`）、`domain::headless_job::JobSession::record` |
+| 対話のsessionの区切り | `infrastructure::session_tokens`、`domain::tokens::SpanTotals`、`domain::sessions::TOKEN_CUT_KINDS`と間隔の定数 |
 
 ## 記録の形
 
@@ -138,10 +139,48 @@ worker や job の context が大きくなりすぎていないかを読むた�
   - `peak_context`は範囲の`token_count`の`last_token_usage.input_tokens`（cachedを含む）の最大、`context_window`は`model_context_window`、`compactions`は範囲の`compacted`の数。
   - rolloutが無い・読めない、または範囲が決まらない（`token_usage_record`の無い旧形式、今回のturnが無い）ときは、0にせず`null`とトークン数と同じ理由にする。
 
+## 対話のsessionの区切り
+
+inboxと人が開いたplannerの区間（hookが記録する対話のsession）はExecutionを持たないので、supervisorがtranscriptを区切って`session_tokens`に記録する（ADR-t1486-1決定3）。
+runtimeのplannerはturnのExecutionで数えるので区切らない。
+
+- 開いている区間は、開いてから、または前の区切りから1時間たつと区切る。
+  判定は記録した区切りの時刻で行うので、supervisorの入れ替えや再起動の後も間隔は変わらない。
+  間隔の判定はturnの取り込みと同じ周期（`SESSION_TURNS_INTERVAL`）で行うので、区切りの間は1時間よりその周期の分まで長くなる。
+  何も足さない区切り（使わなかった間）は書かないので、使われていない区間は周期ごとにtranscriptを読み直す。
+- 閉じた区間は、閉じた時刻を区切りの時刻にして1回だけ区切る（`final: true`）。
+  supervisorがtranscriptから`inferred`に閉じた区間はtranscriptの最後のレコードで終わり、`session_closed`と同じくそのレコードまで数える。
+  hookが閉じた区間（`inferred`を含む）は、最終の`session_turns`と同じく閉じた時刻の前まで数える。
+  開いている間の区切りより前には戻さない。
+  hookの`SessionEnd`は閉じるだけでtranscriptを読まず、閉じたときの区切りはsupervisorが後で作る。
+  閉じてから区切りの窓（`TOKEN_CUT_CLOSED_WINDOW_MS`）を過ぎた区間は区切らない。
+  区切りの無い区間のトークン数は閉じたときの区間のトークン数（下の節）だけが持ち、開いている間の区切りのある区間では最後の区切りの後の分が区切りに入らない。
+  transcriptが読めない・usageを数えられないときは、開いている区間は次の周期に回し、閉じた区間は未計測の区切りを1回書く。
+- 区切りは区間の開始から区切りの時刻までの累計（`tokens_total`・`tokens_total_by_model`）を持ち、区切りの分はその累計から前の区切りの累計を引いたもの。
+  前の位置は記録した区切りの時刻と累計で、supervisorの記憶に持たない。
+  1つのmessageのレコードが区切りをまたいでも、後の区切りは増えた分だけを足すので、どのmessageも1回だけ数える。
+- 数え方は閉じたときの区間のトークン数と同じ（`message.id`ごとに1回、sidechainも数える）で、modelごとの内訳はmessageを最初にmodelを名乗るレコードのmodelに入れる。
+- transcriptの読み取りと解析は書き込みのロックの外で済ませ、ロックの中では区間の区切りを読み直して引き算と書き込みだけをする。
+  別のsupervisorが先に同じ時刻まで区切っていれば書かない。
+
+### 閉じたときの区間のトークン数との関係
+
+閉じたときの区間のトークン数は、閉じるときにtranscriptを読んだ区間では`session_closed`の`tokens`にある。
+hookが閉じた区間では`session_closed`は`tokens`を持たず（`active_unavailable`が`hook_intake_pending`）、supervisorの取り込みが後で書く最終の`session_turns`（`final: true`）の`tokens`にある（[provider-lifecycle](provider-lifecycle.md#transcriptと稼働時間)）。
+`stats`の区間の`tokens`もこの順で読む（`domain::stats::sessions`）。
+
+閉じたときの区切りまでの区切りの合計は、閉じたときの区間のトークン数と同じmessageを数える。
+区切りは同じトークン数を区切りの時刻で分けたもので、別の消費ではない。
+日やactorで足すときは、inboxと人のplannerの区間について区切りだけを足し、`session_closed`の`tokens`も最終の`session_turns`の`tokens`も足さない。
+区切りの無い区間（区切りが入る前に閉じたもの）だけは閉じたときの区間のトークン数で読む。
+
 ## 今の穴
 
 - 子のthreadのrolloutはExecutionが始まった後に更新されたファイルから探すので、ファイルの更新時刻が書き換えられると見落とす。
 - 累計に落としたturnが前のturnのrolloutから数えた分を引くとき、その分は子のthreadを含み累計は含まないので、子のthreadがあれば引きすぎうる（0は下回らない）。
-- hookの区間（inbox・人のplanner）は閉じた後にだけ記録するので、長く開いたinboxは閉じた日にまとめて数えられる。
+- 閉じてから区切りの窓のうちにsupervisorが動かなかった区間は、最後の区切りの後の分が区切りに入らない。
+- 閉じたときにtranscriptが読めない・usageを数えられない区間は閉じたときの区切りが未計測になり、開いている間の区切りがあれば最後の区切りの後の分が区切りに入らない。
+  区切りのある区間は区切りだけを足すので、閉じたときの区間のトークン数でも補わない。
+- `stats`はまだ区切りを読まず、inboxと人のplannerのトークン数を閉じた日にまとめて数える。
 - streamの`assistant`の`usage`は生成を始めた時点の途中の値なので、トークン数には使わない（`peak_context`は入力側だけなので使う）。
 - Codexのturnの最初の`token_count`が前のExecutionの最後の呼び出しの`last_token_usage`を持ち越すと、その間にcompactionがあったとき`peak_context`を大きく読みうる。
