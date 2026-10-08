@@ -1174,9 +1174,13 @@ enum Phase {
     /// stays open, and the review starts once nothing holds. `retried` is
     /// whether the review that waits is the one retry of the review
     /// ([`ReviewWatch::retried`]): it stays one across the wait.
+    /// `subagents` are the required subagents of a review that waits for
+    /// the held provider that runs them, its route aside (ADR-t1847-1);
+    /// none when its route holds it.
     ReviewHeld {
         session: Option<SessionRef>,
         retried: bool,
+        subagents: Vec<String>,
     },
     /// The live session fixes what a `revise` verdict named (ADR-0027
     /// decision 2).
@@ -3139,8 +3143,12 @@ impl Supervisor<'_> {
                 slot.run = run;
                 Ok(Step::Continue)
             }
-            Phase::ReviewHeld { session, retried } => {
-                if !matches!(self.review_route(), landing::ReviewRoute::Wait(_)) {
+            Phase::ReviewHeld {
+                session,
+                retried,
+                subagents,
+            } => {
+                if !self.review_held_waits(subagents) {
                     let (session, retried) = (session.take(), *retried);
                     let run = self.queue.run(slot.run.id())?;
                     slot.phase = self.resume_review(&run, session, retried)?;
@@ -3182,7 +3190,11 @@ impl Supervisor<'_> {
                 {
                     info!(run_id = %run.id(), "run {} review {attempt} stopped at the {} wall; it waits for the hold ask with its session open", run.id(), wall.as_str());
                     let retried = watch.retried;
-                    slot.phase = Phase::ReviewHeld { session, retried };
+                    slot.phase = Phase::ReviewHeld {
+                        session,
+                        retried,
+                        subagents: Vec::new(),
+                    };
                     slot.run = run;
                     return Ok(Step::Continue);
                 }

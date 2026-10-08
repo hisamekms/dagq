@@ -10,6 +10,7 @@ use crate::runtime_support;
 
 use runtime_support::*;
 use sha2::{Digest, Sha256};
+use std::sync::atomic::AtomicBool;
 
 /// What the main checkout commits: `design` reviews `change.txt` (the
 /// stand-in worker's change); `unused` matches nothing and has no
@@ -911,4 +912,188 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
     println!("{narrow}");
     assert!(line(&narrow, "OUTSIDE:").contains("DENIED"), "{narrow}");
     assert!(!narrow.contains("far away"), "{narrow}");
+}
+
+/// Main with `[roles.review]` naming Codex, which runs no review
+/// subagents, and `design` required for `change.txt`.
+fn codex_review_with_design(repo: &Path) {
+    commit_on_main(
+        repo,
+        &format!("[roles.review]\nprovider = 'codex'\n{CONFIG}"),
+        Some(MAIN_DEFINITION),
+    );
+}
+
+/// A Codex review that requires `design` while the usage-limit hold ask
+/// holds Claude, the provider that runs it (ADR-t1847-1): the review
+/// waits with its session open, no `review_started`, `review_failed` or
+/// `approve_landing` ask, no event pass after pass, and its run is not in
+/// the ask's `affected`. Answered `answer`, the run is not given up (no
+/// `hold_canceled`, its lease kept), and once the ask closed the review
+/// starts on Claude, its launch saying it moved off Codex for its
+/// subagents.
+fn a_review_waits_for_the_held_provider_that_runs_its_subagents(answer: &str) {
+    let (dir, repo, db) = fixture();
+    codex_review_with_design(&repo);
+    let codex = headless_codex(dir.path(), &db);
+    let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stop: stop.clone(),
+        codex,
+        codex_home: Some(dir.path().join(CODEX_HOME)),
+        ..supervise_options(1, false)
+    };
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            let reviewer = TestReviewer::new(&[design_passes()]);
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        queue
+            .show(TaskId::new(1))
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.run_dir().is_some())
+    });
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+    let ask = open_hold_ask(
+        &db,
+        dagq::domain::AskReason::Cost,
+        Some(dagq::domain::queue_hold::USAGE_LIMIT_SUBJECT),
+    );
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        queue.run(run.id()).unwrap().status() == RunStatus::AwaitingIntegration
+    });
+    // Its review has been decided and the validation's events recorded.
+    await_passes(&passes, SOME_PASSES);
+    let detail = || {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap()
+    };
+    let waiting = detail();
+    for kind in ["review_started", "review_failed", "runtime_error"] {
+        assert!(payloads(&waiting, kind).is_empty(), "{kind}");
+    }
+    await_passes(&passes, SOME_PASSES);
+    assert_eq!(
+        detail().events.len(),
+        waiting.events.len(),
+        "the wait recorded events"
+    );
+    let asks = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(Default::default())
+        .unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].id, ask.id);
+    assert!(
+        !asks[0]
+            .affected
+            .iter()
+            .any(|entry| entry == run.id().as_str()),
+        "{:?}",
+        asks[0].affected
+    );
+
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(ask.id, answer)
+        .unwrap();
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !payloads(&queue.show(TaskId::new(1)).unwrap(), "review_started").is_empty()
+    });
+    let reviewed = detail();
+    let started = payloads(&reviewed, "review_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["launch"]["provider"], "claude");
+    assert_eq!(started[0]["launch"]["switched_from"], "codex");
+    assert_eq!(
+        started[0]["launch"]["switch_reason"],
+        "subagents_unsupported"
+    );
+    assert!(payloads(&reviewed, "runtime_error").is_empty());
+    assert!(payloads(&reviewed, "review_failed").is_empty());
+    let queue = SqliteQueue::open(&db).unwrap();
+    assert!(queue.run_lease(run.id()).unwrap().is_some());
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+}
+
+/// [`a_review_waits_for_the_held_provider_that_runs_its_subagents`]
+/// answered `done`.
+#[test]
+fn a_review_waiting_for_its_subagents_starts_after_done() {
+    a_review_waits_for_the_held_provider_that_runs_its_subagents("done");
+}
+
+/// [`a_review_waits_for_the_held_provider_that_runs_its_subagents`]
+/// answered `cancel_affected`: the run, not in `affected`, is not given
+/// up.
+#[test]
+fn a_review_waiting_for_its_subagents_starts_after_cancel_affected() {
+    a_review_waits_for_the_held_provider_that_runs_its_subagents("cancel_affected");
+}
+
+/// Under `--no-claude` no provider here runs the subagents a Codex review
+/// requires: it fails to the person as before (ADR-t1453-1 decision 8),
+/// `review_failed` saying `subagents_unsupported`, with an
+/// `approve_landing` ask, and no review job.
+#[test]
+fn under_no_claude_a_review_no_provider_can_run_fails_to_the_person() {
+    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    codex_review_with_design(&repo);
+    set_turns(dir.path(), FINISH);
+    let options = SuperviseOptions {
+        codex,
+        no_claude: true,
+        codex_home: Some(dir.path().join(CODEX_HOME)),
+        ..supervise_options(1, true)
+    };
+    let reviewer = TestReviewer::new(&[]);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(payloads(&detail, "review_started").is_empty());
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("subagents_unsupported: "),
+        "{failed:?}"
+    );
+    assert!(reviewer.prompts().is_empty());
+    assert_eq!(landing_ask(&db).run_id.as_ref(), Some(detail.runs[0].id()));
 }

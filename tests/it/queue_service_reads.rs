@@ -115,18 +115,22 @@ fn clock_fields(use_case: UseCase) -> Vec<(&'static [&'static str], bool)> {
         UseCase::Stats => vec![
             (&["host", "until"][..], true),
             (&["landing_utilization", "window_secs"], true),
+            (&["execution_tokens", "until"], true),
         ],
         // Every period of `kpi`: only the one not over yet moves.
-        UseCase::Kpi => vec![(
-            &[
-                "periods",
-                "*",
-                "details",
-                "landing_utilization",
-                "window_secs",
-            ][..],
-            true,
-        )],
+        UseCase::Kpi => vec![
+            (
+                &[
+                    "periods",
+                    "*",
+                    "details",
+                    "landing_utilization",
+                    "window_secs",
+                ][..],
+                true,
+            ),
+            (&["periods", "*", "details", "tokens", "until"], true),
+        ],
         UseCase::Status => vec![(&["checked_at"][..], true)],
         UseCase::Forecast => vec![(&["at"][..], true), (&["seed"], false)],
         // A gap still open ends now.

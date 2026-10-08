@@ -49,28 +49,49 @@ pub(super) fn subagents_unsupported(provider: Provider, required: &[String]) -> 
     )
 }
 
+/// Where a review that requires the subagents `required` goes
+/// ([`subagent_launch_of`]).
+#[derive(Debug, PartialEq)]
+pub(super) enum SubagentLaunch {
+    /// Start on this launch.
+    Launch(ActorLaunch),
+    /// Wait in [`Phase::ReviewHeld`]: the provider that runs them can run
+    /// the review but is held now; why.
+    Wait(String),
+    /// Fail to the person: no provider here can run them; why.
+    Fail(String),
+}
+
 /// The launch of a review that requires the subagents `required`
-/// (ADR-t1453-1 decision 8), given whether a provider's agent runs review
-/// subagents (`runs`) and whether it can be used now (`usable`): `launch`
-/// when its provider runs them; else the other provider's when that one
-/// runs the review role, can be used and runs them, with why it was
-/// switched (no hold: the provider itself can be used); else why neither
-/// can, for the person.
+/// (ADR-t1453-1 decision 8, ADR-t1847-1), given whether a provider's agent
+/// runs review subagents (`runs`) and why it cannot be used now, if it
+/// cannot (`unusable`): `launch` when its provider runs them; else the
+/// other provider's when that one runs the review role and runs them,
+/// with why it was switched (no hold: the provider itself can be used),
+/// or a wait while that one is held; else why none can, for the person.
 pub(super) fn subagent_launch_of(
     launch: ActorLaunch,
     required: &[String],
     runs: impl Fn(Provider) -> bool,
-    usable: impl Fn(Provider) -> bool,
-) -> std::result::Result<ActorLaunch, String> {
+    unusable: impl Fn(Provider) -> Option<SwitchReason>,
+) -> SubagentLaunch {
     if runs(launch.provider) {
-        return Ok(launch);
+        return SubagentLaunch::Launch(launch);
     }
     let other = launch.provider.other();
-    if crate::domain::actor_model::runs_on(ModelRole::Review, other) && usable(other) && runs(other)
-    {
-        return Ok(launch.switched(other, SwitchReason::SubagentsUnsupported));
+    if !crate::domain::actor_model::runs_on(ModelRole::Review, other) || !runs(other) {
+        return SubagentLaunch::Fail(subagents_unsupported(launch.provider, required));
     }
-    Err(subagents_unsupported(launch.provider, required))
+    match unusable(other) {
+        None => SubagentLaunch::Launch(launch.switched(other, SwitchReason::SubagentsUnsupported)),
+        Some(reason) => SubagentLaunch::Wait(format!(
+            "the review requires the subagents {}, which {} cannot run, and {}, which runs them, cannot be used now ({})",
+            required.join(", "),
+            launch.provider.as_str(),
+            other.as_str(),
+            reason.as_str()
+        )),
+    }
 }
 
 /// A review job that started: its process and its stdout and stderr.
@@ -333,7 +354,11 @@ impl Supervisor<'_> {
             ReviewRoute::Start(launch, switchable) => (launch, switchable),
             ReviewRoute::Wait(why) => {
                 info!(run_id = %run.id(), "run {}: its review waits: {why}", run.id());
-                return Ok(Phase::ReviewHeld { session, retried });
+                return Ok(Phase::ReviewHeld {
+                    session,
+                    retried,
+                    subagents: Vec::new(),
+                });
             }
             ReviewRoute::Manual(error) => {
                 (self.review_material)(run.task_id(), None)?;
@@ -365,14 +390,23 @@ impl Supervisor<'_> {
             .flat_map(|s| s.agents.iter().map(|a| a.name.clone()))
             .collect();
         // A provider that cannot run the required subagents does not start
-        // the review: the other one does, or a person reviews it
-        // (ADR-t1453-1 decision 8). Nothing is skipped silently.
+        // the review: the other one does, it waits while that one is held
+        // (ADR-t1847-1), or a person reviews it (ADR-t1453-1 decision 8).
+        // Nothing is skipped silently.
         let launch = if required.is_empty() {
             launch
         } else {
             match self.subagent_launch(launch, &required) {
-                Ok(launch) => launch,
-                Err(error) => {
+                SubagentLaunch::Launch(launch) => launch,
+                SubagentLaunch::Wait(why) => {
+                    info!(run_id = %run.id(), "run {}: its review waits: {why}", run.id());
+                    return Ok(Phase::ReviewHeld {
+                        session,
+                        retried,
+                        subagents: required,
+                    });
+                }
+                SubagentLaunch::Fail(error) => {
                     return self.unstarted_review_failed(run, session, attempt, retried, error);
                 }
             }
@@ -510,15 +544,9 @@ impl Supervisor<'_> {
             },
         )))
     }
-    /// The launch of a review that requires the subagents `required`
-    /// (ADR-t1453-1 decision 8): `launch` when its provider can run them,
-    /// else the other provider's when that one can run them and be used,
-    /// with why it was switched; else why neither can, for the person.
-    fn subagent_launch(
-        &self,
-        launch: ActorLaunch,
-        required: &[String],
-    ) -> std::result::Result<ActorLaunch, String> {
+    /// Where a review that requires the subagents `required` goes from
+    /// `launch` ([`subagent_launch_of`]).
+    fn subagent_launch(&self, launch: ActorLaunch, required: &[String]) -> SubagentLaunch {
         subagent_launch_of(
             launch,
             required,
@@ -526,8 +554,22 @@ impl Supervisor<'_> {
                 self.job_agent(provider)
                     .is_some_and(|agent| agent.runs_review_subagents())
             },
-            |provider| self.job_unusable(provider).is_none(),
+            |provider| self.job_unusable(provider),
         )
+    }
+    /// Whether a review in [`Phase::ReviewHeld`] still waits: its route
+    /// waits, or it waits for the provider that runs its required
+    /// `subagents` (none when the route held it), which is held still. A
+    /// review that goes to the person does not wait.
+    pub(super) fn review_held_waits(&self, subagents: &[String]) -> bool {
+        match self.review_route() {
+            ReviewRoute::Wait(_) => true,
+            ReviewRoute::Start(launch, _) if !subagents.is_empty() => matches!(
+                self.subagent_launch(launch, subagents),
+                SubagentLaunch::Wait(_)
+            ),
+            ReviewRoute::Start(..) | ReviewRoute::Manual(_) => false,
+        }
     }
     /// The review's required subagents from the landing branch's commit
     /// ([`snapshot_subagents`]); the range is the receipt's, read only when
@@ -1630,7 +1672,14 @@ pub(super) fn held_review(
     retried: bool,
 ) -> std::result::Result<(Phase, &str), Option<SessionRef>> {
     match route {
-        ReviewRoute::Wait(why) => Ok((Phase::ReviewHeld { session, retried }, why)),
+        ReviewRoute::Wait(why) => Ok((
+            Phase::ReviewHeld {
+                session,
+                retried,
+                subagents: Vec::new(),
+            },
+            why,
+        )),
         ReviewRoute::Start(..) | ReviewRoute::Manual(_) => Err(session),
     }
 }
@@ -2095,12 +2144,14 @@ mod tests {
             let Phase::ReviewHeld {
                 session: Some(session),
                 retried: kept,
+                subagents,
             } = held
             else {
                 panic!("not held with its session");
             };
             assert_eq!(session.workspace, "w1");
             assert_eq!(kept, retried);
+            assert!(subagents.is_empty());
             let again = retries_review(&exited, true, kept, false, false);
             assert_eq!(again, (!retried).then_some(RetryCause::JobFailed));
         }
@@ -2398,39 +2449,59 @@ mod tests {
 
     /// A review that requires subagents its provider cannot run starts on
     /// the other provider when that one runs them and can be used, its
-    /// launch saying from which and why, and holds nothing; with neither,
-    /// it fails to the person with why (ADR-t1453-1 decision 8).
+    /// launch saying from which and why, and holds nothing; waits while
+    /// that one is only held (ADR-t1847-1); with no provider that runs
+    /// them, it fails to the person with why (ADR-t1453-1 decision 8).
     #[test]
-    fn a_review_whose_provider_cannot_run_its_agents_moves_or_fails() {
+    fn a_review_whose_provider_cannot_run_its_agents_moves_waits_or_fails() {
         use crate::domain::actor_model::RoleModels;
         let required = ["design".to_owned(), "tests".to_owned()];
         let mut models = RoleModels::default();
         models.entry(ModelRole::Review).provider = Some(Provider::Codex);
         let codex = models.launch(ModelRole::Review);
         let claude_runs = |provider: Provider| provider == Provider::Claude;
+        let usable = |_: Provider| None;
         // `[roles.review]` names Codex, which runs no review subagents: it
         // starts on Claude, its launch saying why.
-        let moved = subagent_launch_of(codex.clone(), &required, claude_runs, |_| true).unwrap();
+        let SubagentLaunch::Launch(moved) =
+            subagent_launch_of(codex.clone(), &required, claude_runs, usable)
+        else {
+            panic!("the review moves to Claude");
+        };
         assert_eq!(moved.provider, Provider::Claude);
         assert_eq!(moved.to_value()["switched_from"], "codex");
         assert_eq!(moved.to_value()["switch_reason"], SUBAGENTS_UNSUPPORTED);
         // On a provider that runs them it starts as it is.
         let claude = ActorLaunch::default_of(ModelRole::Review);
         assert_eq!(
-            subagent_launch_of(claude.clone(), &required, claude_runs, |_| true),
-            Ok(claude.clone())
+            subagent_launch_of(claude.clone(), &required, claude_runs, usable),
+            SubagentLaunch::Launch(claude.clone())
         );
-        // Claude cannot be used: the Codex review fails to the person.
-        assert_eq!(
-            subagent_launch_of(codex, &required, claude_runs, |provider| {
-                provider != Provider::Claude
-            }),
-            Err(subagents_unsupported(Provider::Codex, &required))
-        );
+        // Claude is only held (the hold ask, or its own hold): the Codex
+        // review waits for it, saying why.
+        for reason in [SwitchReason::UsageLimit, SwitchReason::Authentication] {
+            assert_eq!(
+                subagent_launch_of(codex.clone(), &required, claude_runs, |provider| {
+                    (provider == Provider::Claude).then_some(reason)
+                }),
+                SubagentLaunch::Wait(format!(
+                    "the review requires the subagents design, tests, which codex cannot run, and claude, which runs them, cannot be used now ({})",
+                    reason.as_str()
+                ))
+            );
+        }
+        // No Claude here (`--no-claude`): the Codex review fails to the
+        // person, held or not.
+        for held in [None, Some(SwitchReason::Disabled)] {
+            assert_eq!(
+                subagent_launch_of(codex.clone(), &required, |_| false, |_| held),
+                SubagentLaunch::Fail(subagents_unsupported(Provider::Codex, &required))
+            );
+        }
         // No provider runs them.
         assert_eq!(
-            subagent_launch_of(claude, &required, |_| false, |_| true).unwrap_err(),
-            "subagents_unsupported: the review requires the subagents design, tests, which claude cannot run, and no other provider that can run them can be used"
+            subagent_launch_of(claude, &required, |_| false, usable),
+            SubagentLaunch::Fail("subagents_unsupported: the review requires the subagents design, tests, which claude cannot run, and no other provider that can run them can be used".to_owned())
         );
     }
 
@@ -2455,13 +2526,14 @@ mod tests {
             panic!("the review starts on Codex");
         };
         assert_eq!(codex.provider, Provider::Codex);
-        let moved = subagent_launch_of(
+        let SubagentLaunch::Launch(moved) = subagent_launch_of(
             codex,
             &required,
             |provider| provider == Provider::Claude,
-            |_| true,
-        )
-        .unwrap();
+            |_| None,
+        ) else {
+            panic!("the review moves to Claude");
+        };
         assert_eq!(moved.provider, Provider::Claude);
         assert_eq!(
             moved.switch_reason,

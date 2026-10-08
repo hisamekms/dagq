@@ -182,7 +182,9 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 - **Codexとproviderの切り替え**: Codexはsubagentを動かさない（`runs_review_subagents`）。
   必須のagentのあるreviewは、行き先が動かせなければ、もう一方が使えてsubagentも動かせるときだけ切り替える（`subagent_launch_of`、`switch_reason: subagents_unsupported`）。
   これは能力による選択なので控えにせず、`[provider_fallback] jobs = false`でも切り替える。
-  切り替え先が無ければ、起動せずにreviewの失敗にする。
+  もう一方がreviewの役割とsubagentを動かせて控え（queueの控えのask・`ProviderHold`）で今使えないだけなら、起動も失敗もせず`Phase::ReviewHeld`で待ち、控えが解けたpassで起動する（[ADR-t1847-1](../../adr/2026-10-08-t1847-1-review-waits-while-the-provider-that-runs-its-subagents-is-held.md)）。
+  待ちの`ReviewHeld`は必須のagentを持ち、routeが待たなくなっても動かせるproviderが控え中のあいだは待ち続ける（`Supervisor::review_held_waits`）。
+  動かせるproviderのagentがこのsupervisorに無い（`--no-claude`など）か、そのproviderがreviewの役割を動かせないときだけ、起動せずにreviewの失敗にする。
 - **結果のそろいの検査**: 選ばれた全てのagentにちょうど1件の完了した判定が無いverdictは、読めないverdictと同じく1回だけやり直し、なおそろわなければreviewの失敗にする（`domain::review_subagents::incomplete`）。
 - **判定ごとの行き先**: 親とagentごとの判定を着地・差し戻し・人の判断に直し、最も重いものを取る（`ReviewVerdict::route`、`domain::review_subagents::destination`）。
   agentが決めた差し戻しは理由を合わせた1回のreviseにし、人の判断なら問いに親が軽かったことを載せる（`act_on_agents`）。

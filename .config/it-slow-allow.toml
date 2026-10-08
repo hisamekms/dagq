@@ -752,3 +752,15 @@ task = 2077
 name = "runtime_resume::a_landing_ask_is_closed_when_its_run_fails_on_used_up_resumes"
 reason = "B 境界（supervisor の配線・復旧）: sweep を最初の pass だけにし、resume を使い切って run を failed にした経路が approve_landing を閉じることを、実際の resume の session を 1 回通して確かめる。閉じてよいかの判断は domain::ended_landing_ask_answer の unit test"
 task = 2077
+
+# 7.0s
+[[test]]
+name = "review_subagents::a_review_waiting_for_its_subagents_starts_after_done"
+reason = "B 境界（SQLite・supervisor の配線）: 実際の worker の session と hold の ask を通し、subagent を動かす Claude を待つ review が pass をまたいで event を積まず、done の後に Claude で起動することを確かめる。待つ・起動する・失敗するの判断は supervise::landing の unit test"
+task = 1847
+
+# 7.0s
+[[test]]
+name = "review_subagents::a_review_waiting_for_its_subagents_starts_after_cancel_affected"
+reason = "B 境界（SQLite・supervisor の配線）: hold の ask の cancel_affected の適用が affected に無い待つ run を手放さず、ask が閉じた後に Claude で review を起動することを確かめる。判断は supervise::landing の unit test"
+task = 1847
