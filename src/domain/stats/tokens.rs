@@ -1,15 +1,11 @@
-//! The tokens of `stats` (task 199): what the Claude sessions used, from
-//! the `tokens` their `session_closed` recorded
+//! The tokens of the runs in `stats` (task 199): what the Claude sessions
+//! used, from the `tokens` their `session_closed` recorded
 //! ([`crate::domain::tokens`]), per run (and per kind of session in it),
-//! as totals and medians per goal, kind of task and overall, and per kind
-//! of session over the window.
+//! as totals and medians per goal, kind of task and overall.
 //!
-//! A session's tokens count when it closes, so a session open for long
-//! (the inbox that stays) lands days of tokens in the window of the day it
-//! closed: these totals do not compare per day or per actor. What they
-//! leave out (subagents of headless turns, Codex's jobs, the threads a
-//! Codex worker spawns) and the record per execution that replaces them
-//! are ADR-t1486-1's.
+//! A session's tokens count when it closes, so these do not compare per
+//! day or per actor: the window's tokens per actor are its Executions'
+//! ([`super::executions`], ADR-t1486-1).
 
 use std::collections::BTreeMap;
 
@@ -24,9 +20,13 @@ use super::{Summary, median};
 pub struct Usd(i64);
 
 impl Usd {
-    fn of(value: &Value) -> Option<Self> {
+    pub(super) fn of(value: &Value) -> Option<Self> {
         #[allow(clippy::cast_possible_truncation)]
         value.as_f64().map(|usd| Self((usd * 1e6).round() as i64))
+    }
+
+    pub(super) const fn plus(self, other: Self) -> Self {
+        Self(self.0 + other.0)
     }
 }
 

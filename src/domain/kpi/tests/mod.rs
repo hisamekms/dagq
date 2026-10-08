@@ -24,6 +24,7 @@ mod plan_kpis;
 mod queue_kpis;
 mod review_kpis;
 mod strata;
+mod tokens;
 mod trial_strata;
 
 /// The events of a queue, built in time order.

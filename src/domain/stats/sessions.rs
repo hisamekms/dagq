@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use super::{Summary, landing::p90, median, rfc3339_millis, timestamp_millis, tokens::TokenTotals};
+use super::{
+    Summary, executions::ExecutionTotals, landing::p90, median, rfc3339_millis, timestamp_millis,
+};
 use crate::domain::{
     EventId, GoalId, RunEvent, RunId, TaskId,
     sessions::{HOOK_KINDS, INFERRED, KINDS, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS},
@@ -238,9 +240,11 @@ pub struct KindSessions {
     pub inferred: usize,
     /// Spans closed without their active time.
     pub active_unavailable: usize,
-    /// The tokens of its spans closed in the window that recorded them
-    /// (task 199).
-    pub tokens: TokenTotals,
+    /// The tokens of its Executions (and an interactive span's cuts) that
+    /// ended in the window, whenever their spans close
+    /// ([`super::executions`]); `stats` puts them in after counting the
+    /// spans.
+    pub tokens: ExecutionTotals,
     /// Its spans closed in the window per the model and effort their
     /// messages mostly used, `model effort` (task 579); spans that recorded
     /// none are not listed.
@@ -461,9 +465,6 @@ impl Tally {
         }
         if unavailable {
             sessions.active_unavailable += 1;
-        }
-        if closed_in_window && let Some(tokens) = &span.tokens {
-            sessions.tokens.add(tokens);
         }
         if closed_in_window && let Some(model) = &span.model {
             *sessions.models.entry(model.clone()).or_default() += 1;

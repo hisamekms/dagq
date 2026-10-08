@@ -14,6 +14,8 @@ related:
   - adr-t1233-1
   - design-provider-lifecycle
   - design-supervisor-lifecycle-headless-worker
+  - design-supervisor-lifecycle-stats
+  - design-supervisor-lifecycle-kpi
 ---
 
 # Executionのトークン数
@@ -33,6 +35,7 @@ Executionは`claude -p` / `codex exec`の1回の呼び出しで、非対話のtu
 | turnの分（累計との差、前のturnが数えたturn） | `domain::turn::turn_own_models`・`turn_own_cost`・`counted_rollout_turns`、`headless_session.rs`の`turn_tokens` |
 | jobの終わりへの記録 | `AgentProvider::job_session`（Codexは`codex.rs`の`job_tokens`）、`domain::headless_job::JobSession::record` |
 | 対話のsessionの区切り | `infrastructure::session_tokens`、`domain::tokens::SpanTotals`、`domain::sessions::TOKEN_CUT_KINDS`と間隔の定数 |
+| 日・週×actor×provider×modelへの集約 | `domain::stats::executions`、`domain::kpi::window`の`Context::token_kpis`（下の[statsとkpiでの集約](#statsとkpiでの集約)） |
 
 ## 記録の形
 
@@ -172,7 +175,32 @@ hookが閉じた区間では`session_closed`は`tokens`を持たず（`active_un
 閉じたときの区切りまでの区切りの合計は、閉じたときの区間のトークン数と同じmessageを数える。
 区切りは同じトークン数を区切りの時刻で分けたもので、別の消費ではない。
 日やactorで足すときは、inboxと人のplannerの区間について区切りだけを足し、`session_closed`の`tokens`も最終の`session_turns`の`tokens`も足さない。
-区切りの無い区間（区切りが入る前に閉じたもの）だけは閉じたときの区間のトークン数で読む。
+`stats`と`kpi`の期間の集計（`domain::stats::executions`）もそうしていて、区切りの無い区間（区切りが入る前に閉じたもの）は閉じたときの区間のトークン数でも補わず、期間の集計に入らない。
+
+## statsとkpiでの集約
+
+`stats`の期間の集計と`kpi`は、Executionと対話のsessionの区切りの記録を同じ関数（`domain::stats::executions`）で窓に集める（ADR-t1486-1決定1・3）。
+taskとrunへの集約は区間の`tokens`で行い（[stats](supervisor-lifecycle/stats.md#トークン数)）、日とactorには分けない。
+
+- 窓に入れるのは窓の中で終わったExecutionと、区切りの時刻が窓の中の区切りで、eventを書いた時刻ではない。
+  日をまたいで開いた区間は区切りごとの日に入り、閉じた日にまとめない。
+  `stats`の窓は`--since`の時刻（無ければ窓の始まりのeventの時刻）から`host`の窓の終わりまでで、`kpi`は期間の窓の`stats`を期間の時刻で呼ぶ。
+- actorはsupervisorが起動した区間のkindで、runのturnはそのrunで最後に開いたworker・resume・reviseの区間のkind、runtimeのplannerのturnは`runtime_planner`、jobはそのkind、区切りは区間のkind。
+  復旧のjobは`recovery_finished`だけを数え、同じjobの`triage_*`は数えない。
+- providerはeventの`provider`、無ければ`tokens_source`の元（区切りはClaude Code）。
+  modelは`tokens_by_model`の内訳で、内訳の無いExecutionは`model`の欄（無ければ`unknown`）、内訳に入らない残りは`unknown`に入れる。
+- `sessions`のkindごと・経路ごとの`tokens`は、同じ窓のactorごと・経路（turnは`headless`、区切りは`interactive`）ごとの和。
+- 記録の形より前の記録（`tokens_source`の無いturnや、トークン数の無いjobの終わり）と、区間が閉じたときの`tokens`は混ぜない。
+  記録の始まりは`recorded_from`（全体・actor・providerごと）で、窓のうち記録のある分は`coverage`が示す。
+- `kpi`の`tokens`と`tokens_per_landing`は`--by`によらず`all`・`actor=`・`provider=`・`model=`と3つを掛けた`cross:actor=…|model=…|provider=…`の層を出す（`--cross`の交差層には足さない）。
+  Executionはactorとproviderの層には丸ごと、modelの層にはmodelごとの分で入る。
+  記録が窓の全体を覆わない期間は値をnull（0でも判定する一部でもない）にして理由を`unavailable`に入れ、内訳は`details.tokens`に写す。
+  `actor=`の層はそのactorの`coverage`でも同じにする。
+- `--area` / `--change`との組み方: runに属するExecution（workerのturn・review・復旧のjob）だけがtaskの`change=`とrunの`area=`（着地していないrunは`unknown`）の層に入り、`tokens_per_landing`の分母はその層の着地。
+  runを持たないExecution（plan review・goal review・observer・見直し・plannerのturn・区切り）はこの2つの層に入らず、ほかの層の分母は`all`の着地。
+- `--compare`は`strata`に同じ層の前後を並べ、`before` / `after`の`token_coverage`が窓ごとの`coverage`を示す。
+- 記録は計測用で助言的で、課金・認可・上限の判断に使わない（ADR-t1486-1決定6）。
+  目標を置いても判断の材料にとどめる。
 
 ## 今の穴
 
@@ -181,6 +209,9 @@ hookが閉じた区間では`session_closed`は`tokens`を持たず（`active_un
 - 閉じてから区切りの窓のうちにsupervisorが動かなかった区間は、最後の区切りの後の分が区切りに入らない。
 - 閉じたときにtranscriptが読めない・usageを数えられない区間は閉じたときの区切りが未計測になり、開いている間の区切りがあれば最後の区切りの後の分が区切りに入らない。
   区切りのある区間は区切りだけを足すので、閉じたときの区間のトークン数でも補わない。
-- `stats`はまだ区切りを読まず、inboxと人のplannerのトークン数を閉じた日にまとめて数える。
+- 区切りの無い区間（区切りの窓のうちにsupervisorが区切らなかったもの）のトークン数は、`stats`と`kpi`の期間の集計に入らない。
+- jobの終わりのeventが`provider`を持たず、トークン数も数えられなかったjobは、`stats`と`kpi`でproviderが`unknown`になる。
+- 記録を書かないjobの終わり（止めた復旧のjob、捨てたplan review、sessionの無いreviewの失敗）は、記録の形より前のものと同じく数えない（`unmeasured`にも入らない）。
+- `kpi`の`all`・`provider=`・`model=`の層は全体の`coverage`で判定するので、actorごとに記録の始まりが違うと、始まりの遅いactorの記録より前の分は欠けたまま値になる（`actor=`の層と`details.tokens`の`recorded_from`で分かる）。
 - streamの`assistant`の`usage`は生成を始めた時点の途中の値なので、トークン数には使わない（`peak_context`は入力側だけなので使う）。
 - Codexのturnの最初の`token_count`が前のExecutionの最後の呼び出しの`last_token_usage`を持ち越すと、その間にcompactionがあったとき`peak_context`を大きく読みうる。

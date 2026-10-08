@@ -281,6 +281,7 @@ mod tests {
                 unavailable: BTreeMap::new(),
                 routes: BTreeMap::new(),
                 planner_routes: BTreeMap::new(),
+                ..WindowKpis::default()
             },
             marks: marks
                 .iter()

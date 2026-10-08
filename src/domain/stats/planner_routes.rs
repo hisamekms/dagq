@@ -13,8 +13,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    EventId, RunEvent, TaskId, asks::UNKNOWN, sessions::INTERACTIVE, sessions::TimeSummary,
-    timestamp_millis, tokens::TokenTotals,
+    EventId, RunEvent, TaskId, asks::UNKNOWN, executions::ExecutionTotals, sessions::INTERACTIVE,
+    sessions::TimeSummary, timestamp_millis,
 };
 use crate::domain::{
     event_kind::{
@@ -56,9 +56,9 @@ pub struct PlannerRouteHealth {
     pub turn_outcomes: BTreeMap<String, i64>,
     /// By `failure`, for the turns that had one.
     pub turn_failures: BTreeMap<String, i64>,
-    /// The tokens of its `runtime_planner` sessions closed in the window:
-    /// `stats`' `sessions.by_route.runtime_planner`'s.
-    pub tokens: TokenTotals,
+    /// The tokens of its `runtime_planner` sessions' Executions that ended
+    /// in the window: `stats`' `sessions.by_route.runtime_planner`'s.
+    pub tokens: ExecutionTotals,
 }
 
 /// The planners' health per route of the events with `after < id <= upto`
@@ -211,7 +211,7 @@ pub fn planner_routes(
         }
     }
     for (route, sessions) in tokens.into_iter().flatten() {
-        if sessions.tokens != TokenTotals::default() {
+        if sessions.tokens != ExecutionTotals::default() {
             routes.entry(route.clone()).or_default().tokens = sessions.tokens.clone();
         }
     }
@@ -407,10 +407,10 @@ mod tests {
         let tokens = BTreeMap::from([(
             HEADLESS_ROUTE.to_owned(),
             KindSessions {
-                tokens: TokenTotals {
-                    sessions: 1,
+                tokens: ExecutionTotals {
+                    executions: 1,
                     input: 10,
-                    ..TokenTotals::default()
+                    ..ExecutionTotals::default()
                 },
                 ..KindSessions::default()
             },

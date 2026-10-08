@@ -112,6 +112,31 @@ pub enum TokenSource {
 }
 
 impl TokenSource {
+    /// Every source, for reading a `tokens_source` back ([`Self::of`]).
+    /// Written by hand: a source added to the enum and not listed here is
+    /// read back as none (`unknown` in `stats`), which no compile or test
+    /// catches.
+    const ALL: [Self; 5] = [
+        Self::ModelUsage,
+        Self::ResultUsage,
+        Self::ThreadUsage,
+        Self::Transcript,
+        Self::UsageRecord,
+    ];
+
+    /// The source a `tokens_source` names; `None` for any other text.
+    pub fn of(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|source| source.as_str() == text)
+    }
+
+    /// The provider whose output the tokens are read from.
+    pub const fn provider(self) -> super::Provider {
+        match self {
+            Self::ModelUsage | Self::ResultUsage | Self::Transcript => super::Provider::Claude,
+            Self::ThreadUsage | Self::UsageRecord => super::Provider::Codex,
+        }
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ModelUsage => "model_usage",
@@ -1221,6 +1246,24 @@ mod tests {
         assert_eq!(ModelTokens::from_payloads(&payloads), Some(totals.to_vec()));
         assert_eq!(ModelTokens::from_payloads(&json!([{"model": "x"}])), None);
         assert_eq!(ModelTokens::from_payloads(&Value::Null), None);
+    }
+
+    /// A recorded `tokens_source` reads back as its source, which names
+    /// the provider whose output it was; other text is none.
+    #[test]
+    fn a_token_source_reads_back_with_its_provider() {
+        for source in TokenSource::ALL {
+            assert_eq!(TokenSource::of(source.as_str()), Some(source));
+        }
+        assert_eq!(
+            TokenSource::of("transcript").map(TokenSource::provider),
+            Some(super::super::Provider::Claude)
+        );
+        assert_eq!(
+            TokenSource::of("token_usage_record").map(TokenSource::provider),
+            Some(super::super::Provider::Codex)
+        );
+        assert_eq!(TokenSource::of("usage"), None);
     }
 
     /// An Execution that used nothing records a 0 that was measured; one

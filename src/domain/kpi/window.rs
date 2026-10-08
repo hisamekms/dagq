@@ -18,9 +18,14 @@ use crate::domain::{
     marks::{self, Mark},
     plan_quality::plan_quality,
     stats::{
-        self, Cursor, LiveSnapshot, RunStats, SlotSnapshot, StatsQuery, ask_seen::seen_waits,
-        asks::human_waits, landing::PHASES, landing_utilization::landing_utilization,
-        measures::verification_durations, timestamp_millis,
+        self, Cursor, LiveSnapshot, RunStats, SlotSnapshot, StatsQuery,
+        ask_seen::seen_waits,
+        asks::human_waits,
+        executions::{Coverage, ExecutionTotals},
+        landing::PHASES,
+        landing_utilization::landing_utilization,
+        measures::verification_durations,
+        timestamp_millis,
     },
     waiting::{RUN_SLOT_REGAINED, RUN_WAITING_STARTED},
 };
@@ -39,6 +44,8 @@ const NO_SAMPLES: &str = "no_samples";
 const NO_HOST_RECORDS: &str = "no_host_records";
 const NO_CORES: &str = "no_cores";
 const NO_LANDINGS: &str = "no_landings";
+/// The records began in the window: what ended before them is not in it.
+const PARTLY_RECORDED: &str = "partly_recorded";
 
 /// One window's KPIs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -62,6 +69,10 @@ pub struct WindowKpis {
     /// (ADR-t1394-2 decision 4); not a KPI.
     #[serde(skip)]
     pub planner_routes: BTreeMap<String, crate::domain::stats::planner_routes::PlannerRouteHealth>,
+    /// How much of the window the records of the tokens cover, for a
+    /// comparison's sides.
+    #[serde(skip)]
+    pub token_coverage: Coverage,
 }
 
 /// A run's hold on a slot: from its claim to its end, without the waits
@@ -354,17 +365,17 @@ impl<'a> Context<'a> {
             .map_or(UNKNOWN, TaskChange::as_str)
     }
 
-    /// What `stats` derives for the runs that finished after `after` up
-    /// to `upto`, every one of them.
-    fn stats(&self, after: Option<EventId>, upto: Option<EventId>) -> stats::Stats {
+    /// What `stats` derives for the runs that finished after `since` up
+    /// to `until`, every one of them.
+    fn stats(&self, since: Option<Cursor>, until: Option<Cursor>) -> stats::Stats {
         let mut stats = stats::stats(
             self.events,
             self.goals,
             self.now,
             SlotSnapshot::default(),
             &StatsQuery {
-                since: after.map(Cursor::Event),
-                until: upto.map(Cursor::Event),
+                since,
+                until,
                 goal_id: self.goal_id,
                 full: true,
             },
@@ -574,7 +585,10 @@ impl<'a> Context<'a> {
         let events = self.events;
         let after = Cursor::Time(start).event_id(events);
         let upto = Cursor::Time(end).event_id(events);
-        let stats = self.stats(Some(after), Some(upto));
+        // By the times, not their events: the cuts of the interactive
+        // sessions count by the time they cut at, which the window's last
+        // event may precede.
+        let stats = self.stats(Some(Cursor::Time(start)), Some(Cursor::Time(end)));
         let in_window =
             |event: &&RunEvent| event.id > after && event.id <= upto && self.counts(event.task_id);
         let mut kpis: Kpis<Measure> = BTreeMap::new();
@@ -911,6 +925,22 @@ impl<'a> Context<'a> {
         }
         details.insert("jobs", json(&stats.jobs));
 
+        // The tokens of the Executions (ADR-t1486-1) that ended in the
+        // window, as `stats`' `execution_tokens` counts them.
+        let token_coverage = self.token_kpis(&stats, axes, &landed, &mut put);
+        match token_coverage {
+            Coverage::Full => {}
+            Coverage::Partial => {
+                unavailable.insert("tokens", PARTLY_RECORDED);
+                unavailable.insert("tokens_per_landing", PARTLY_RECORDED);
+            }
+            Coverage::None => {
+                unavailable.insert("tokens", NOT_RECORDED);
+                unavailable.insert("tokens_per_landing", NOT_RECORDED);
+            }
+        }
+        details.insert("tokens", json(&stats.execution_tokens));
+
         // The quality of the plans (ADR-0079 decision 7): split by the
         // judging plan review session's model and effort and by the
         // proposal's features.
@@ -1100,7 +1130,109 @@ impl<'a> Context<'a> {
             unavailable,
             routes: stats.worker_routes.clone(),
             planner_routes: stats.planner_routes.clone(),
+            token_coverage,
         }
+    }
+
+    /// The tokens of the window's Executions into `put` (ADR-t1486-1):
+    /// `tokens`, their total over the Executions counted (`n`), and
+    /// `tokens_per_landing`, that over the landings (`n`), in `all`, per
+    /// `actor=`, `provider=` and `model=`, per the three together, and for
+    /// the Executions of a run per its task's `change=` and its `area=`.
+    /// `tokens` grows with the work and has no better direction;
+    /// `tokens_per_landing` is better lower. An Execution counts whole in its actor
+    /// and provider and per its models in the strata of a model. Unless the
+    /// records cover the whole window (`Coverage::Full`; an actor's stratum
+    /// by its own records) both are null, not 0 nor a part to be judged
+    /// against: what ended before the records began is not in them.
+    /// Returns the coverage.
+    fn token_kpis(
+        &self,
+        stats: &stats::Stats,
+        axes: &[Axis],
+        landed: &impl Fn(&str) -> usize,
+        put: &mut impl FnMut(&str, &str, Measure),
+    ) -> Coverage {
+        let tokens = &stats.execution_tokens;
+        let escape = |value: &str| {
+            value
+                .replace('%', "%25")
+                .replace('|', "%7C")
+                .replace('=', "%3D")
+        };
+        let mut strata: BTreeMap<String, ExecutionTotals> = BTreeMap::new();
+        strata.insert(ALL.to_owned(), ExecutionTotals::default());
+        for execution in &tokens.executions {
+            let counts = execution.tokens.as_ref();
+            let mut whole = vec![
+                ALL.to_owned(),
+                format!("actor={}", execution.actor),
+                format!("provider={}", execution.provider),
+            ];
+            if execution.run_id.is_some() && axes.contains(&Axis::Change) {
+                whole.push(format!("change={}", self.change_of(execution.task_id)));
+            }
+            if let (Some(run), Some(areas)) = (&execution.run_id, self.areas)
+                && axes.contains(&Axis::Area)
+            {
+                match areas.get(run).filter(|areas| !areas.is_empty()) {
+                    Some(areas) => whole.extend(areas.iter().map(|area| format!("area={area}"))),
+                    None => whole.push(format!("area={UNKNOWN}")),
+                }
+            }
+            for stratum in whole {
+                strata.entry(stratum).or_default().add(counts);
+            }
+            for (model, counts) in &execution.by_model {
+                let crossed = format!(
+                    "cross:actor={}|model={}|provider={}",
+                    escape(execution.actor),
+                    escape(model),
+                    escape(&execution.provider)
+                );
+                for stratum in [format!("model={model}"), crossed] {
+                    strata.entry(stratum).or_default().add(Some(counts));
+                }
+            }
+            if counts.is_none() {
+                let crossed = format!(
+                    "cross:actor={}|model={UNKNOWN}|provider={}",
+                    escape(execution.actor),
+                    escape(&execution.provider)
+                );
+                for stratum in [format!("model={UNKNOWN}"), crossed] {
+                    strata.entry(stratum).or_default().add(None);
+                }
+            }
+        }
+        let covered = |stratum: &str| {
+            let coverage = stratum
+                .strip_prefix("actor=")
+                .and_then(|actor| tokens.by_actor.get(actor))
+                .map_or(tokens.coverage, |actor| actor.coverage);
+            tokens.coverage == Coverage::Full && coverage == Coverage::Full
+        };
+        for (stratum, totals) in &strata {
+            let recorded = covered(stratum);
+            // Null when nothing was recorded, or nothing recorded could be
+            // counted; a counted 0 is 0.
+            let value = (recorded && (totals.executions == 0 || totals.measured() > 0))
+                .then(|| float(totals.total));
+            put("tokens", stratum, Measure::total(value, totals.measured()));
+            // The landings of the same change or area; of all of them for
+            // the strata no run is split by.
+            let landings = if stratum.starts_with("change=") || stratum.starts_with("area=") {
+                landed(stratum)
+            } else {
+                landed(ALL)
+            };
+            let mut per_landing = Measure::ratio(value.unwrap_or(0.0), landings);
+            if value.is_none() {
+                per_landing.value = None;
+            }
+            put("tokens_per_landing", stratum, per_landing);
+        }
+        tokens.coverage
     }
 
     /// The forecast's errors (ADR-0070 decision 4) over the snapshots of

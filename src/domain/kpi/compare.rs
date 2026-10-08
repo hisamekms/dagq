@@ -19,7 +19,7 @@ use super::{
 use crate::domain::{
     host_metrics::HostSummary,
     marks::{self, DERIVED_PREFIX, MARK_RETRACTED, Mark, SUPERVISOR_STARTED, SUPERVISOR_STOPPED},
-    stats::{Cursor, timestamp_millis},
+    stats::{Cursor, executions::Coverage, timestamp_millis},
 };
 
 /// One side of a comparison.
@@ -34,6 +34,9 @@ pub struct WindowSpan {
     /// The host's load in it, as a period's `host` (task 872).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<HostSummary>,
+    /// How much of it the records of the tokens cover (`full`, `partial`,
+    /// `none`): a side before the records has no `tokens` to compare.
+    pub token_coverage: Coverage,
 }
 
 /// The change split at, when `--compare` names a mark or a time.
@@ -288,12 +291,13 @@ pub(super) fn compare(
     }
     axes.sort_unstable();
     let windows = [before, after].map(|(start, end)| context.window(start, end, &axes));
-    let span = |(start, end): (i64, i64), runs: usize| WindowSpan {
+    let span = |(start, end): (i64, i64), window: &super::WindowKpis| WindowSpan {
         start: marks::utc_text(start),
         end: marks::utc_text(end),
         partial: end > now_ms,
-        runs,
+        runs: window.runs,
         host: context.host.map(|host| host.between(start, end)),
+        token_coverage: window.token_coverage,
     };
     let empty = Measure::default();
     let after_partial = after.1 > now_ms;
@@ -330,8 +334,8 @@ pub(super) fn compare(
     let area_summary = summarize(&strata, "area", &query.areas);
     Ok(Comparison {
         split,
-        before: span(before, windows[0].runs),
-        after: span(after, windows[1].runs),
+        before: span(before, &windows[0]),
+        after: span(after, &windows[1]),
         confounders,
         overlapping,
         strata,

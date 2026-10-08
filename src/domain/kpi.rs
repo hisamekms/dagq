@@ -567,6 +567,9 @@ pub fn direction(kpi: &str) -> Option<Direction> {
         // How many jobs ran, and the share of each verdict (goal 73): what
         // the jobs said, neither better higher nor lower.
         _ if kpi.starts_with("job.count.") || kpi.starts_with("job.verdict.") => None,
+        // How many tokens were used grows with the work done: per landing
+        // is the one better lower (ADR-t1486-1).
+        "tokens" => None,
         // The forecast's errors (ADR-0070 decision 4): only the size of
         // the error is better lower; the ratio and the rates have a target
         // range instead.

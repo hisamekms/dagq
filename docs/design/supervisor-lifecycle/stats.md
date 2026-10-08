@@ -7,6 +7,7 @@ created: 2026-09-26
 scope: runtime
 related:
   - adr-t1486-1
+  - design-execution-tokens
   - adr-t655-1
   - adr-t639-1
   - design-supervisor-lifecycle
@@ -232,10 +233,9 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 
 ## トークン数
 
-- 入口: `tokens`と`RunTokens`・`TokenSummary`、記録の書き方は[provider-lifecycle](../provider-lifecycle.md)。
-- 区間が閉じたときの記録を足すので、長く開いた区間（常駐のinbox）は閉じた日の窓にまとめて入り、日ごと・actorごとには比べられない。
-  ほかの数えない分と、実行ごとの記録への置き換えは[ADR-t1486-1](../../adr/2026-10-04-t1486-1-supervisor-records-token-usage-per-execution.md)と[Executionのトークン数](../execution-tokens.md#今の穴)が持つ。
-- runを持たないobserverとplan reviewのトークン数は期間の集計のsessionのkindごとで読む。
+- 入口: runとgoalは`tokens`と`RunTokens`・`TokenSummary`、期間の集計は`executions`。
+- runとgoalの分はrunの区間が閉じたときの記録の和で、日には分けない。
+- 期間の集計（`execution_tokens`と`sessions`の`tokens`）は窓の中で終わったExecutionと区切りの和で、区間が閉じた日にまとめない（[Executionのトークン数](../execution-tokens.md#statsとkpiでの集約)）。
 
 ## 重さの予測と実績
 

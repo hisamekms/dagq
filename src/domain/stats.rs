@@ -21,6 +21,7 @@ pub mod cargo;
 pub mod conflicts;
 pub mod drafts;
 pub mod escalations;
+pub mod executions;
 pub mod failed_tests;
 pub mod follow_up_categories;
 pub mod jobs;
@@ -560,6 +561,14 @@ pub struct Stats {
     /// `--goal`, only that goal's runs' sessions and its proposals' plan
     /// reviews.
     pub sessions: Sessions,
+    /// The tokens of the Executions (ADR-t1486-1) and the interactive
+    /// sessions' cuts that ended in the window in time (from `--since`'s
+    /// time, else its start event's, to the end of `host`'s window), per
+    /// actor (kind of session), provider and model, with when the records
+    /// start ([`executions`]). `sessions`' tokens per kind and route are
+    /// these. With `--goal`, only that goal's runs', proposals' and goal
+    /// reviews'.
+    pub execution_tokens: executions::ExecutionStats,
     /// The runs that waited for a person outside the slots (ADR-0062
     /// decision 13) in the same window as `backend_failures`.
     pub waiting: super::waiting::WaitingStats,
@@ -1136,7 +1145,7 @@ pub fn stats(
         &live.history,
         live.conflicts,
     );
-    let sessions = sessions::by_kind(
+    let mut sessions = sessions::by_kind(
         &spans,
         events,
         SessionWindow {
@@ -1150,6 +1159,41 @@ pub fn stats(
             Some(goal) => span.goal_ids.contains(&goal),
         },
     );
+    // The tokens per Execution (ADR-t1486-1), by when each ended (a cut by
+    // its time): from `--since`'s time, else the window's start event's,
+    // to the end of the window of `host`. The sessions per kind and route
+    // read theirs from them, so that a span open for days spreads its
+    // tokens over the days it used them.
+    let tokens_from = cursor_ms(&query.since).or_else(|| {
+        events
+            .iter()
+            .find(|event| event.id == window_start)
+            .and_then(|event| timestamp_millis(&event.created_at))
+    });
+    let execution_tokens = executions::window(
+        &executions::executions(events),
+        tokens_from,
+        window_until,
+        |execution| match (execution.task_id, execution.goal_id) {
+            (None, Some(goal)) => query.goal_id.is_none_or(|only| only == goal),
+            (task_id, _) => counts(task_id),
+        },
+    );
+    for (kind, kind_sessions) in &mut sessions.by_kind {
+        if let Some(actor) = execution_tokens.by_actor.get(kind) {
+            kind_sessions.tokens = actor.totals.clone();
+        }
+    }
+    for (kind, routes) in &mut sessions.by_route {
+        for (route, route_sessions) in routes.iter_mut() {
+            route_sessions.tokens = execution_tokens
+                .by_route
+                .iter()
+                .find(|((of, on), _)| of == kind && on == route)
+                .map(|(_, totals)| totals.clone())
+                .unwrap_or_default();
+        }
+    }
     // The planners' tokens are those of `sessions`, whose window is theirs.
     let planner_routes = planner_routes::planner_routes(
         events,
@@ -1249,6 +1293,7 @@ pub fn stats(
         verification_failures,
         failed_tests,
         sessions,
+        execution_tokens,
         waiting,
         worker_routes,
         planner_routes,
@@ -3231,8 +3276,9 @@ mod tests {
     }
 
     /// The tokens (task 199): a run sums its sessions', per kind too; goals,
-    /// kinds and overall total them with medians; the window's sessions
-    /// per kind have theirs, the observer's included.
+    /// kinds and overall total them with medians. The window's sessions per
+    /// kind have their Executions' (ADR-t1486-1), not what the spans
+    /// recorded when they closed.
     #[test]
     fn tokens_are_summed_per_run_and_per_kind_of_session() {
         let span = |id: i64, run: Option<&str>, kind: &str, tokens: Value, secs: i64| {
@@ -3278,6 +3324,29 @@ mod tests {
         events.extend(span(10, Some(R2), "review", Value::Null, T + 600).map(r2));
         events.push(r2(run_event(12, R2, "run_integrated", json!({}), T + 800)));
         events.extend(span(13, None, "observer", tokens(5, 5), T + 900));
+        // The Executions: a worker's turn and an observer's job.
+        let mut turn = tokens(3, 4);
+        turn["cost_usd"] = json!(0.5);
+        events.push(r2(run_event(
+            15,
+            R2,
+            "turn_finished",
+            json!({"provider": "claude", "tokens": turn, "tokens_source": "model_usage",
+                   "tokens_by_model": []}),
+            T + 950,
+        )));
+        events.push(RunEvent {
+            task_id: None,
+            run_id: None,
+            ..run_event(
+                16,
+                R1,
+                "observe_finished",
+                json!({"outcome": "succeeded", "tokens": tokens(5, 5),
+                       "tokens_source": "token_usage_record", "tokens_by_model": []}),
+                T + 960,
+            )
+        });
         let goals = HashMap::from([
             (TaskId::new(1), Some(GoalId::new(5))),
             (TaskId::new(2), Some(GoalId::new(5))),
@@ -3315,11 +3384,91 @@ mod tests {
         );
         assert_eq!(json["goals"][0]["tokens"], *overall);
         let by_kind = &json["sessions"]["by_kind"];
-        assert_eq!(by_kind["worker"]["tokens"]["input"], 40);
-        assert_eq!(by_kind["worker"]["tokens"]["cost_sessions"], 1);
-        assert_eq!(by_kind["review"]["tokens"]["sessions"], 1);
+        assert_eq!(by_kind["worker"]["tokens"]["input"], 3);
+        assert_eq!(by_kind["worker"]["tokens"]["cost_executions"], 1);
+        assert_eq!(by_kind["review"]["tokens"]["executions"], 0);
         assert_eq!(by_kind["observer"]["tokens"]["output"], 5);
-        assert_eq!(by_kind["triage"]["tokens"]["sessions"], 0);
+        assert_eq!(by_kind["triage"]["tokens"]["executions"], 0);
+        let tokens = &json["execution_tokens"];
+        assert_eq!(tokens["total"], 7 + 1100 + 10 + 1100);
+        assert_eq!(
+            tokens["by_actor"]["observer"]["by_provider"]["codex"]["executions"],
+            1
+        );
+    }
+
+    /// An inbox open across midnight (ADR-t1486-1 decision 3): each day's
+    /// window has the tokens of the cuts made for its hours, the close's
+    /// cut written later counts on the day it cuts at, and the tokens the
+    /// span recorded when it closed are not added on the day it closed.
+    #[test]
+    fn a_sessions_tokens_count_on_the_days_of_its_cuts_not_the_day_it_closed() {
+        let queue_event = |id: i64, kind: &str, payload: Value, created_at: &str| RunEvent {
+            task_id: None,
+            run_id: None,
+            created_at: created_at.to_owned(),
+            ..event(id, 1, kind, payload)
+        };
+        let cut = |input: i64, at: &str, last: bool| {
+            json!({"opened_event_id": 1, "kind": "inbox", "at": at, "final": last,
+                   "tokens": {"input": input, "output": 0, "cache_read": 0, "cache_creation": 0,
+                              "messages": 1},
+                   "tokens_source": "transcript", "tokens_by_model": []})
+        };
+        let events = [
+            queue_event(
+                1,
+                "session_opened",
+                json!({"kind": "inbox"}),
+                "2027-01-14T20:00:00.000Z",
+            ),
+            queue_event(
+                2,
+                "session_tokens",
+                cut(10, "2027-01-14T23:30:00.000Z", false),
+                "2027-01-14T23:30:05.000Z",
+            ),
+            queue_event(
+                3,
+                "session_tokens",
+                cut(20, "2027-01-15T00:45:00.000Z", false),
+                "2027-01-15T00:45:05.000Z",
+            ),
+            queue_event(
+                4,
+                "session_closed",
+                json!({"opened_event_id": 1, "reason": "exited",
+                               "tokens": {"input": 1000, "output": 0, "cache_read": 0,
+                                          "cache_creation": 0, "messages": 9}}),
+                "2027-01-15T01:00:00.000Z",
+            ),
+            // The close's cut, made at the supervisor's next pass.
+            queue_event(
+                5,
+                "session_tokens",
+                cut(5, "2027-01-15T01:00:00.000Z", true),
+                "2027-01-15T01:10:00.000Z",
+            ),
+        ];
+        let day = |since: &str, until: &str| {
+            let stats = stats(
+                &events,
+                &HashMap::new(),
+                T + 86_400,
+                SlotSnapshot::default(),
+                &StatsQuery {
+                    since: Some(Cursor::Time(timestamp_millis(since).unwrap())),
+                    until: Some(Cursor::Time(timestamp_millis(until).unwrap())),
+                    ..StatsQuery::default()
+                },
+                &LiveSnapshot::default(),
+            );
+            let inbox = &stats.sessions.by_kind["inbox"];
+            assert_eq!(inbox.count, 1);
+            (inbox.tokens.input, inbox.tokens.executions)
+        };
+        assert_eq!(day("2027-01-14T00:00:00Z", "2027-01-15T00:00:00Z"), (10, 1));
+        assert_eq!(day("2027-01-15T00:00:00Z", "2027-01-16T00:00:00Z"), (25, 2));
     }
 
     /// The Claude sessions (ADR-0048): per run whole, per goal and overall
@@ -3553,7 +3702,9 @@ mod tests {
             queue_event(
                 next + 2,
                 "turn_finished",
-                json!({"planner_id": 1, "outcome": "succeeded"}),
+                json!({"planner_id": 1, "outcome": "succeeded", "provider": "claude",
+                       "tokens": {"input": 7, "output": 3, "cache_read": 0, "cache_creation": 0, "messages": 1},
+                       "tokens_source": "model_usage", "tokens_by_model": []}),
             ),
             queue_event(
                 next + 3,
