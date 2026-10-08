@@ -14,7 +14,13 @@
 //! and [`record_claimed`] only.
 
 use super::*;
+use crate::domain::pre_claim::{self, SlotClass};
 use crate::domain::run_phase::{self, Attempt, PhaseChange};
+use std::collections::BTreeSet;
+
+/// How many of the queue's latest records of each `slots_full_*` a process
+/// reads to find what its token left open.
+const SLOTS_FULL_READ: usize = 256;
 
 /// The slots, each holding one run and its phase. Which slots there are
 /// changes only through these operations: a stage admits a run, releases
@@ -222,7 +228,9 @@ impl Slot {
     pub(super) fn note_phase<L: PhaseLog + ?Sized>(&mut self, cause: &str, log: &L) {
         let phase = self.recorded_phase();
         let started = self.phase.attempt();
-        self.track.note(self.run.id(), phase, started, cause, log);
+        let blocked_by = self.blocked_by.as_ref().map(ToString::to_string);
+        self.track
+            .note(self.run.id(), phase, started, blocked_by, cause, log);
     }
 }
 
@@ -253,6 +261,7 @@ impl PhaseTrack {
         id: &RunId,
         phase: run_phase::Phase,
         started: Option<Attempt>,
+        blocked_by: Option<String>,
         cause: &str,
         log: &L,
     ) {
@@ -271,16 +280,14 @@ impl PhaseTrack {
         if started.is_some() {
             self.attempt = started;
         }
-        let change = PhaseChange::new(phase, self.attempt.unwrap_or(Attempt::FIRST), cause);
+        let change = PhaseChange::new(phase, self.attempt.unwrap_or(Attempt::FIRST), cause)
+            .blocked_by(blocked_by);
         if change.repeats(self.last.as_ref()) {
             return;
         }
         match log.record_phase(id, &change) {
             Ok(()) => {
-                self.last = Some(run_phase::Recorded {
-                    phase: phase.name().to_owned(),
-                    attempt: change.attempt,
-                });
+                self.last = Some(change.recorded());
             }
             Err(error) => {
                 warn!(run_id = %id, error = %format_args!("{error:#}"), "run {id}: could not record its phase {}: {error:#}", phase.name());
@@ -378,6 +385,9 @@ pub(super) struct ClaimState {
     /// The error the last read of `[conflicts]` failed with, warned of
     /// once until it changes or a read succeeds.
     pub(super) conflicts_error: Option<String>,
+    /// The classes whose slots-full interval this supervisor's token has
+    /// open (ADR-t1662-1 decision 6); `None` until read from its records.
+    pub(super) slots_full: Option<BTreeSet<SlotClass>>,
 }
 
 impl ClaimState {
@@ -390,6 +400,55 @@ impl ClaimState {
             self.slots.returning(),
             !self.light_changes.is_empty(),
         )
+    }
+
+    /// Record where the slots of a class fill up or free again, as the
+    /// supervisor `token` with `parallel` slots finds them at the end of
+    /// its claim pass ([`pre_claim::slots_full_changes`]); the classes it
+    /// left open are read once from its records, which a process that took
+    /// its token over goes on from. A record that fails is warned of and
+    /// tried again on the next pass.
+    pub(super) fn note_slots_full(
+        &mut self,
+        log: &dyn RunLog,
+        token: &LeaseToken,
+        parallel: usize,
+    ) {
+        let mut open = match self.slots_full.take() {
+            Some(open) => open,
+            None => {
+                let records = [
+                    crate::domain::event_kind::SLOTS_FULL_STARTED,
+                    crate::domain::event_kind::SLOTS_FULL_ENDED,
+                ]
+                .into_iter()
+                .map(|kind| log.latest_events_of(kind, SLOTS_FULL_READ))
+                .collect::<Result<Vec<_>>>();
+                match records {
+                    Ok(records) => pre_claim::open_slots_full(&records.concat(), token.as_str()),
+                    Err(error) => {
+                        warn!(error = %format_args!("{error:#}"), "the supervisor's slots-full records could not be read: {error:#}");
+                        BTreeSet::new()
+                    }
+                }
+            }
+        };
+        let full = pre_claim::full_classes(self.room(parallel), !self.light_changes.is_empty());
+        for (kind, class) in pre_claim::slots_full_changes(&open, &full) {
+            let payload = pre_claim::slots_full_payload(token, class, self.slots.used(), parallel);
+            match log.record_queue_event(kind, payload) {
+                Ok(_) if kind == EventKind::SlotsFullStarted => {
+                    open.insert(class);
+                }
+                Ok(_) => {
+                    open.remove(&class);
+                }
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "could not record {kind} for the {} slots: {error:#}", class.as_str());
+                }
+            }
+        }
+        self.slots_full = Some(open);
     }
 
     /// Start the load window of `run`, claimed now, with its sample.
@@ -591,6 +650,7 @@ mod tests {
             conflicts: crate::domain::stats::ConflictConfigReport::default(),
             conflicts_file: None,
             conflicts_error: None,
+            slots_full: None,
         }
     }
 
@@ -829,7 +889,7 @@ mod tests {
             let id = self.slot.run.id().clone();
             self.slot
                 .track
-                .note(&id, phase, started, "test", &self.records);
+                .note(&id, phase, started, None, "test", &self.records);
         }
 
         /// Through validation, review and the exit to the landing queue.
@@ -945,6 +1005,7 @@ mod tests {
             &id,
             P::Resume,
             Some(Attempt::of(AttemptKind::Resume, 1)),
+            None,
             "resume_started",
             &flow.records,
         );
@@ -995,9 +1056,14 @@ mod tests {
         // The landing's own slot.
         flow.slot = Slot::new(run, Phase::Landing(None));
         let id = flow.slot.run.id().clone();
-        flow.slot
-            .track
-            .note(&id, P::Landing, None, "integration_started", &flow.records);
+        flow.slot.track.note(
+            &id,
+            P::Landing,
+            None,
+            None,
+            "integration_started",
+            &flow.records,
+        );
         flow.records.land(&id, EventKind::PushFinished);
         assert_eq!(
             flow.records.covered(),
@@ -1085,11 +1151,16 @@ mod tests {
         let id = adopted.run.id().clone();
         adopted
             .track
-            .note(&id, P::Revise, None, "run_adopted", &flow.records);
+            .note(&id, P::Revise, None, None, "run_adopted", &flow.records);
         assert_eq!(flow.records.phases().len(), before);
-        adopted
-            .track
-            .note(&id, P::Validating, None, "conflict_resolved", &flow.records);
+        adopted.track.note(
+            &id,
+            P::Validating,
+            None,
+            None,
+            "conflict_resolved",
+            &flow.records,
+        );
         assert_eq!(flow.records.phases().last().unwrap().1, "conflict2");
         assert_eq!(
             adopted.track.attempt(),
@@ -1109,5 +1180,30 @@ mod tests {
         assert_eq!(slot.recorded_phase(), P::Waiting);
         slot.waiting = Some(waiting(Some(1)));
         assert_eq!(slot.recorded_phase(), P::Returning);
+    }
+
+    /// A run in the landing queue records the run its look found holding
+    /// the landing slot, and again when another one holds it.
+    #[test]
+    fn the_landing_queue_names_the_run_that_held_the_landing_slot() {
+        let records = Records::default();
+        let mut slot = slot("r1");
+        slot.landing_turn = true;
+        let holders = || -> Vec<Option<String>> {
+            records
+                .events
+                .borrow()
+                .iter()
+                .map(|event| event.payload["blocked_by"].as_str().map(str::to_owned))
+                .collect()
+        };
+        for holder in ["r0", "r0", "r2"] {
+            slot.blocked_by = Some(RunId::new(holder).unwrap());
+            slot.note_phase("landing_turn", &records);
+        }
+        assert_eq!(holders(), [Some("r0".to_owned()), Some("r2".to_owned())]);
+        slot.landing_turn = false;
+        slot.note_phase("observed", &records);
+        assert_eq!(holders().last(), Some(&None));
     }
 }

@@ -18,6 +18,7 @@
 //! `*_authorized` writes compare it right after the transaction opens and
 //! refuse without writing when it changed. Writers that are not authorized
 //! per command (the supervisor's landing, draft planners) skip the check.
+use crate::domain::claim_facts;
 use crate::domain::event_kind::{self, EventKind};
 use std::{
     collections::BTreeMap,
@@ -2396,6 +2397,9 @@ pub(super) fn claim_task(
             // The versions of the instructions the run's worker reads
             // (goal 113), of its own provider among the supervisor's.
             crate::domain::instructions::settle(&mut attributes, run.actual_provider().as_str());
+            // Where the task stood in the supervisor's line, and its
+            // priority then (ADR-t1662-1 decision 6).
+            claim_facts::settle(&mut attributes, task.id());
             payload.extend(attributes);
             payload.insert("provider_version".to_owned(), version);
         }
@@ -2409,11 +2413,63 @@ pub(super) fn claim_task(
             if inherited {
                 payload.insert("escalation_inherited".to_owned(), json!(true));
             }
+            if let Some(ready_at) = task_ready_at(tx, task.id())? {
+                payload.insert("ready_at".to_owned(), json!(ready_at));
+            }
+            // Last: the open set of the claim's attributes, from the
+            // fields above (ADR-t1662-1 decisions 21 to 26).
+            let attributes = claim_facts::attributes(payload);
+            payload.insert(
+                claim_facts::ATTRIBUTES.to_owned(),
+                serde_json::Value::Object(attributes),
+            );
         }
         payload
     })?;
     let run = run.relocated(runs_dir);
     Ok(ClaimOutcome::Claimed { run: Box::new(run) })
+}
+
+/// When `task` became claimable ([`claim_facts::ready_at`]): its latest
+/// move to `ready` (its creation when it never moved there), the
+/// completions of the tasks it depends on and the closes of the goals it
+/// depends on.
+fn task_ready_at(conn: &Connection, task: TaskId) -> Result<Option<String>> {
+    let own: Option<String> = conn.query_row(
+        "SELECT COALESCE(
+             (SELECT MAX(created_at) FROM run_events WHERE task_id=?1 AND kind=?2
+                AND json_extract(payload,'$.to')='ready'),
+             (SELECT MIN(created_at) FROM run_events WHERE task_id=?1 AND kind=?3))",
+        params![
+            task,
+            event_kind::TASK_STATUS_CHANGED,
+            EventKind::TaskCreated.as_str()
+        ],
+        |row| row.get(0),
+    )?;
+    let mut prerequisites: Vec<String> = conn
+        .prepare(
+            "SELECT MAX(e.created_at) FROM task_dependencies d
+               JOIN run_events e ON e.task_id = d.predecessor_id
+              WHERE d.task_id=?1 AND e.kind=?2 AND json_extract(e.payload,'$.to')='completed'
+              GROUP BY d.predecessor_id",
+        )?
+        .query_map(params![task, event_kind::TASK_STATUS_CHANGED], |row| {
+            row.get(0)
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    prerequisites.extend(
+        conn.prepare(
+            "SELECT g.closed_at FROM task_goal_dependencies d JOIN goals g ON g.id = d.goal_id
+              WHERE d.task_id=?1 AND g.closed_at IS NOT NULL",
+        )?
+        .query_map([task], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?,
+    );
+    Ok(
+        claim_facts::ready_at(own.as_deref(), prerequisites.iter().map(String::as_str))
+            .map(str::to_owned),
+    )
 }
 
 /// What the trial chooses a claim's worker session from: every

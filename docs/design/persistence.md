@@ -70,7 +70,6 @@ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（
 - 時刻とIDは`SqliteQueue`が持つ`Generators`（`Clock`と`IdGenerator`）から取り、SQLの`now`で作らない。
 - schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`、場所は`src/infrastructure/location.rs`が持つ。
 - runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く（下の「Queue location」）。
-- queue serviceのsocket・lock・tokenもDBに置かない（下の「queue service」）。
 
 ## 不変条件
 
@@ -105,20 +104,20 @@ proposals              -- plan reviewに出したgoalとtaskの束。memberは�
 plan_reviews           -- plan review job 1つに1行。未完了は1行まで（部分unique index）
 goal_reviews           -- goal review job 1つに1行。未完了は1行まで（indexでなくBEGIN IMMEDIATEの中の検査）
 headless_jobs          -- headless jobのプロセス。始めたsupervisorが消えた後に別のsupervisorが止めるため
-planners               -- plannerのsession 1つに1行。workspace_idはruntimeのplannerならbackgroundのwrapperのhandle、人のplannerと古い行はcmux workspace。answer_wait_atは人の答えだけを待って終わる行（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)）
+planners               -- plannerのsession 1つに1行。workspace_idはruntimeのplannerならbackgroundのwrapperのhandle、人のplannerと古い行はcmux workspace。answer_wait_atは人の答えだけを待って終わる行（ADR-t1704-1）
 plan_requests          -- inboxが記録した計画の依頼。text / note / refsは記録の後に書き換えない（言い直しは新しい依頼）
 plan_request_proposals -- 依頼から出たproposal
 draft_origins          -- runtimeやjobが作ったdraftの出どころと材料（JSON object）。1つのdraftに1回だけ書く
-draft_reopens          -- plan reviewがreopenしたtaskのproposalを取り下げたときの出どころ（originを広げずに別の表にした）
+draft_reopens          -- plan reviewがreopenしたtaskのproposalを取り下げたときの出どころ
 draft_revisits         -- draftの再検討の時刻（ADR-t1540-1）。使ったときにopened_atを書く
 draft_bundles          -- 束のplanner（同じきっかけのdraftを1人のplannerが持つ。ADR-t807-1）
 draft_bundle_members   -- 束のdraftと、plannerを閉じたときに決めた結末。outcomeのnullはplannerが生きている
-follow_up_judgements   -- follow-upの所属の判断と訂正。追記だけ（[所属の判断](follow-up-membership.md)）
+follow_up_judgements   -- follow-upの所属の判断と訂正。追記だけ（follow-up-membership.md）
 asks                   -- 人に答えを求める相談。answered_byの値は書いた者のroleで、権限の出どころはanswer_authorityが別に持つ（Authorization）
 findings               -- observerの検出。同じ問題の閉じていない行は1つ（部分unique index）
 search_index           -- 全文検索の索引（FTS5）。triggerが保つ
 landed_commits         -- 着地したcommit。run_integratedのeventからtriggerが書く
-binary_updates         -- 使っていない（自動更新の経過はrun_eventsのupdate_*とaskが持つ）
+binary_updates         -- 使っていない（自動更新の経過はupdate_*のevent）
 ```
 
 ## 集約の読み書き
@@ -210,8 +209,10 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 - `integrate`は登録せずにleaseだけを持つので、`run_leases.token`から`supervisors`へ外部キーを張らない。
 - `supervisors`の行はそのプロセスの性質（`mode`・`binary_version`・引き継ぎの印）を持ち、行と寿命を共にする。
   `binary_version`は登録するプロセス自身だけが書き、`mode`は`up`が`launchd`を書く（`in_cmux`は廃止前の登録）。
-- 登録の行を消すのは`supervise`自身の終了と`up`・`down`だけで、`status`・`doctor`・`recover`は消さない。
-  heartbeatの失敗で終わるときは消さず、staleとして見える。
+- 登録の行を消すのは`supervise`自身の終了と`up`・`down`の掃除（`prune_supervisor`）だけで、どちらも同じトランザクションで`supervisor_stopped`を書く。
+  heartbeatか停止の記録に失敗したときは消さず、staleとして次の掃除に任せる。
+  `status`・`doctor`・`recover`は消さない。
+- 生存の証拠は`SUPERVISOR_ALIVE_INTERVAL_SECS`ごとの`supervisor_alive`に残り、その記録の失敗はheartbeatを止めない。
 - `recover`だけがtokenなしで未完了のrunを止め、同じトランザクションでleaseとプロセスを再検査する。
 - 着地（`integrate`）は自分のtokenでlease行を持ち、`integrating`から出る遷移はどれもそのlease行を要する。
   Gitの操作はトランザクションの外で行い、mainを進める前のエラーではrunを元のstatusに戻す。
@@ -237,7 +238,7 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
 ## Transactions and constraints
 
 - `BEGIN IMMEDIATE`で状態の変更・依存グラフの検証・claimを直列化する。
-  ロックの待ちは最大5秒で、超えればerrorとして呼び出し元へ返す。
+  ロックの待ちは最大5秒で、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#supervise)）。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
 - queue全体の実行枠は無く、同時に動くrunの数は`supervise --parallel`が決める。

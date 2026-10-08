@@ -75,6 +75,10 @@ reviewとe2eを終えて着地の順番を待つだけのrun（着地待ち）�
 - `claim_held`: 控え始めたとき、または別の理由で控え直したとき。payloadは`reason`、`value`（判定した値。loadなら1分のload average）、`threshold`（`--max-load`）、`message`、`supervisor`、認証か利用上限の控えなら`ask_id`
 - `claim_resumed`: 控えが終わったとき。payloadは終わった控えの`reason`と`supervisor`
 
+2つのeventはclaimの前の待ちの区間も兼ねる（[計測](../measurement.md)の「claimの前」）。
+区間の行は`claim_held`を書いたsupervisorに属し、下の`stats`と同じ規則（`domain::claim_hold::hold_spans`）で終わり、終わりを書いたsupervisorを`ended_by`に残す。
+supervisorのslotが全部埋まった区間は、そのsupervisorだけが書く`slots_full_started` / `slots_full_ended`が持つ。
+
 supervisorのlogにも`claim_held`はwarn、`claim_resumed`はinfoで出る。
 
 ## `status`と`stats`

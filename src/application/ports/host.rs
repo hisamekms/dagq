@@ -439,8 +439,6 @@ pub trait SupervisorRegistry {
         limits: crate::domain::slot_limits::SlotLimits,
         binary_version: &str,
     ) -> Result<SupervisorRegistration>;
-    /// Whether a registration under `token` was removed.
-    fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool>;
     /// Remove the registration under `token` and record the queue event of
     /// `kind` with the payload `stopped` builds from the removed row, in one
     /// transaction; `false`, recording nothing, when there was no row.

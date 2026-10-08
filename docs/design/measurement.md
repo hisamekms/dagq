@@ -29,7 +29,7 @@ related:
 
 # 計測
 
-> **一部だけ実装済み（2026-10-09）**: 「区間とタグ」のrunの工程の記録（`run_phase_changed`）と「終端」は実装済みで、今の姿を書く。
+> **一部だけ実装済み（2026-10-09）**: 「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」と「runの比較の軸」の記録は実装済みで、今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[`stats`](supervisor-lifecycle/stats.md)（着地待ちの内訳・作業の内訳）・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)・[hostの負荷](supervisor-lifecycle/host-metrics.md)が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
@@ -114,13 +114,42 @@ taskは`completed`（そのrunのpushの終わり）か`canceled`で閉じる（
 
 ### claimの前
 
-taskの台帳は`task_created`から始まる。claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重ねて読む（ADR-t1662-1決定6）。
+taskの台帳は`task_created`から始まる。
+claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重ねて読む（ADR-t1662-1決定6）。
 
-- 区間のevent: `slots_full_started` / `slots_full_ended`、`claim_held` / `claim_resumed`、`claim_deferred` / `deferral_ended`（queueのevent。台帳のqueueの行に畳む）。
-- `run_claimed`に足す欄: `ready_at`（taskがclaimできるようになった時刻）・`candidate_rank`（claimの時の候補の中の順位、1から）・`candidates`（候補数）。
-- 着地slotの待ちの区間には`blocked_by`（その間に着地slotを握っていたrunのid）を持つ。
+- **区間の行**: `domain::pre_claim::pre_claim_intervals`がeventの列と今の時刻だけから`PreClaimInterval`の行を作り、StateStoreを読まない。
+  どの区間も始まりを書いた1つのsupervisorに属し、終わりは下の規則で1通りに決まる。
+- **`slots_full`**: supervisorのfill passは、始めと終わりに自分のslotを見て、classの枠が全部埋まれば`slots_full_started`を、空けば`slots_full_ended`を書く（`domain::pre_claim::slots_full_payload`）。
+  classは`heavy`と`light`で（`SlotClass`）、classごとに別の区間になる。
+  slotはsupervisorごとなので他のsupervisorは書きも閉じもせず、別のsupervisorの`supervisor_started`でも閉じない。
+  execの引き継ぎは同じtokenの続きで、開いた区間を自分の記録から読み直して続ける。
+  終わりを書かずに止まったsupervisorの区間は、下の「supervisorの一生」の終わりで閉じる。
+- **`claim_hold`**: 既存の`claim_held` / `claim_resumed`（queue共通の控え）が区間の始まりと終わりを兼ねる。
+  終わりは`stats`の`claim_holds`と同じ規則（`domain::claim_hold::hold_spans`）で、どのsupervisorが書いた終わりでも閉じ、書いたsupervisorの停止でも閉じる。
+  控えはqueueの全てのsupervisorのclaimを止めるので、taskに重ねるときは区間のsupervisorに依らずqueueの待ちとして読む。
+- **`claim_deferral`**: 既存の`claim_deferred` / `claim_deferral_ended`（taskの控え）が区間の始まりと終わりを兼ねる。
+  終わりは`stats`の`claim_deferrals`の`by_end`と同じ規則（`domain::claim_defer::deferral_spans`）。
+- **`run_claimed`の欄**: claimはtaskがreadyになった時刻と、claimの判断で並べた候補の中の位置と優先度を書く（`domain::claim_facts`）。
+  supervisorは候補ごとの値をclaimに渡し、claimは取ったtaskの値だけを残す。
+- **`blocked_by`**: 着地の順番だけを待つ間の`run_phase_changed`（工程`landing_queue`）は、そのとき着地slotを握っていたrunを`blocked_by`に持ち、握るrunが変われば記録し直す。
 - 予定・未実装: readyのtaskのhold（[taskのhold](supervisor-lifecycle/task-hold.md)）は、`task_held`から`task_released`までをtaskの区間に重ねて読む。
   runを持つtaskでは、holdをかけた時刻ではなく、走っていた工程が終わって待ちに入った時刻（工程`held`）から解除までを分析から除く。
+
+### supervisorの一生
+
+supervisorの生存と停止の証拠はEventStoreに残し、一生の終わりはeventだけから決める（`domain::supervisor_life::supervisor_life_end`）。
+
+- **停止**: 登録の行が消える全ての経路（自分の停止と`up`・`down`の掃除）は、同じtransactionで同じtokenの`supervisor_stopped`を書く。
+  記録に失敗すれば行は残り、次の掃除に任せる（[persistence](persistence.md#runtime-ownership)）。
+- **生存**: heartbeatを書くsupervisorは、`SUPERVISOR_ALIVE_INTERVAL_SECS`ごとに`supervisor_alive`を1つ書く。
+  毎回のheartbeatをeventにしないのはeventの量を抑えるためで、死んだ時刻の誤差は後の掃除の`last_heartbeat_at`で直る。
+  記録の失敗はwarnにしてheartbeatを止めない。
+- **終わりの規則**: そのtokenの`supervisor_stopped`があればその時刻（`last_heartbeat_at`があればそれとの早い方）で終わる（`stopped`）。
+  無ければそのtokenを`supervisor`に持つ最後のeventを最後の証拠とし、今がそれより`SUPERVISOR_ALIVE_INTERVAL_SECS` + `HEARTBEAT_TIMEOUT_SECS`より後ならその時刻で終わる（`silent`）。
+  後で掃除の`supervisor_stopped`が届けば`last_heartbeat_at`で畳み直す。
+  どちらでもなければ生きている。
+- 停止のeventの無いstaleな登録は`silent`で閉じて掃除の後に直り、`supervisor_alive`の無い前のbuildのtokenも同じ規則で最後のeventで閉じる。
+- kpiの`supervisor_lives`は今もsupervisorsの表を読み、この規則へ移すのは段2。
 
 ## 台帳の形
 
@@ -169,9 +198,11 @@ stats・kpi・reportの全ての欄（hostの欄と、run・taskを持たない`
 
 claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）に持ち、記録・台帳・`kpi --by <キー>`と`--compare`はキーを知らずに運ぶ（ADR-t1662-1決定21〜26）。
 
+- 記録（実装済み）: claimは`run_claimed`の他の欄を書いた後に、その欄から`domain::claim_facts::attributes`で組を作る。
+  キーと元の欄の対応は同じmoduleの表`KEYS`だけが持ち、新しいキーはそこに足す。
 - キーは`^[a-z][a-z0-9_.]{0,63}$`、値は文字列で256 byteまで、1つのrunに64キーまで（予定の値）。
-- claimの属性のキー: `build`・`claude_version`・`codex`・`rustc_release`・`rustc_host`・`parallel`・`slots`・`load_avg`・`requested_provider`・`claim_provider`・`route`・`claim_model`・`effort`・`trial_group`。
 - 予約名（派生の軸。属性のキーにしない）: `provider`・`claude`・`model`・`group`・`slot`・`load`・`toolchain`・`change`・`area`・`nature`。kpiが今の`axis_value`と同じ規則で作る。
+  組を作る関数は予約名のキーを入れない（`claim_facts::RESERVED`）。
 - 読み取りの優先: 層のキーが予約名なら派生の値、それ以外は属性の値、無ければ`unknown`。
 
 ## 送る口

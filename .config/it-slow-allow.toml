@@ -764,3 +764,9 @@ task = 1847
 name = "review_subagents::a_review_waiting_for_its_subagents_starts_after_cancel_affected"
 reason = "B 境界（SQLite・supervisor の配線）: hold の ask の cancel_affected の適用が affected に無い待つ run を手放さず、ask が閉じた後に Claude で review を起動することを確かめる。判断は supervise::landing の unit test"
 task = 1847
+
+# 7.8s
+[[test]]
+name = "runtime_claim::the_claim_records_its_slots_its_line_and_its_attributes"
+reason = "B 境界（SQLite・supervisor の配線）: 1 slot の supervisor が 2 本の run を claim から着地まで通し、slot が埋まって空くまでの slots_full_* の 1 組と、run_claimed の順位・候補数・goal の優先度・属性の組が実際の claim の transaction で記録されることを確かめる（ADR-t1410-1 の代表の 1 本）。区間・順位・組の判断は domain::pre_claim・claim_facts の unit test"
+task = 1664

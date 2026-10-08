@@ -31,7 +31,7 @@
 //!   `prompt_cleared`, `screen_*`, `idle_inferred`, `input_not_ready`,
 //!   `known_dialog_unanswered`) and of the run environment
 //!   (`run_env_changed`, `run_env_program_*`). Named in full too: `worker_mode_converted`, `supervision_finished`,
-//!   `agent_started`, `approve_withheld`, `stale_receipt_*`,
+//!   `agent_started`, `approve_withheld`, `stale_receipt_*`, `slots_full_*`,
 //!   `queue_hold_applied`, `usage_limited`, `auth_required`,
 //!   `conflicts_config_changed`, `first_commit_observed`,
 //!   `migration_renumbered`, `job_restarted`, `runtime_error` and
@@ -313,11 +313,14 @@ event_kinds! {
     SubmitResent => "submit_resent",
     SubmitRetried => "submit_retried",
     SubmitUnconfirmed => "submit_unconfirmed",
+    SlotsFullEnded => "slots_full_ended",
+    SlotsFullStarted => "slots_full_started",
     SupervisionFinished => "supervision_finished",
     SupervisorConfigChanged => "supervisor_config_changed",
     SupervisorDraining => "supervisor_draining",
     SupervisorHandedOff => "supervisor_handed_off",
     SupervisorHeartbeatRetried => "supervisor_heartbeat_retried",
+    SupervisorAlive => "supervisor_alive",
     SupervisorStarted => "supervisor_started",
     SupervisorStopped => "supervisor_stopped",
     TaskCreated => "task_created",
@@ -488,6 +491,13 @@ impl EventKind {
                 | SessionTokens
                 | SessionTurns
                 | SupervisorStarted
+                // A supervisor's evidence of life, every
+                // `SUPERVISOR_ALIVE_INTERVAL_SECS` (ADR-t1662-1 decision 6).
+                | SupervisorAlive
+                // A supervisor's slots full and free again, for the waits
+                // before a claim (ADR-t1662-1 decision 6).
+                | SlotsFullStarted
+                | SlotsFullEnded
                 // A supervisor's stop request, recorded when its drain
                 // begins (task 1277).
                 | SupervisorDraining
@@ -893,6 +903,18 @@ pub const TASK_PATHS_CHANGED: &str = EventKind::TaskPathsChanged.as_str();
 pub const TASK_PRIORITY_CHANGED: &str = EventKind::TaskPriorityChanged.as_str();
 pub const TASK_REOPENED: &str = EventKind::TaskReopened.as_str();
 pub const TASK_STATUS_CHANGED: &str = EventKind::TaskStatusChanged.as_str();
+/// A supervisor's slots of one class (`heavy` or `light`) all full
+/// (`supervisor`, `class`, `running`, `slots`), recorded by that supervisor
+/// when its pass first finds them so ([`super::pre_claim`]).
+pub const SLOTS_FULL_STARTED: &str = EventKind::SlotsFullStarted.as_str();
+/// The same supervisor's pass found a slot of the class free again
+/// (`supervisor`, `class`, `running`, `slots`).
+pub const SLOTS_FULL_ENDED: &str = EventKind::SlotsFullEnded.as_str();
+/// A supervisor's evidence of life (`supervisor`), from its heartbeat at
+/// most every [`super::supervisor_life::SUPERVISOR_ALIVE_INTERVAL_SECS`].
+pub const SUPERVISOR_ALIVE: &str = EventKind::SupervisorAlive.as_str();
+/// A supervisor's stop, recorded with the removal of its registration.
+pub const SUPERVISOR_STOPPED: &str = EventKind::SupervisorStopped.as_str();
 pub const TASK_SUBMITTED: &str = EventKind::TaskSubmitted.as_str();
 pub const TASK_WEIGHT_PREDICTED: &str = EventKind::TaskWeightPredicted.as_str();
 /// A throughput review ended (ADR-t996-1): `mode`, `period`, `outcome`
@@ -1233,6 +1255,8 @@ mod tests {
             (EventKind::SubmitResent, "submit_resent"),
             (EventKind::SubmitRetried, "submit_retried"),
             (EventKind::SubmitUnconfirmed, "submit_unconfirmed"),
+            (EventKind::SlotsFullEnded, "slots_full_ended"),
+            (EventKind::SlotsFullStarted, "slots_full_started"),
             (EventKind::SupervisionFinished, "supervision_finished"),
             (
                 EventKind::SupervisorConfigChanged,
@@ -1244,6 +1268,7 @@ mod tests {
                 EventKind::SupervisorHeartbeatRetried,
                 "supervisor_heartbeat_retried",
             ),
+            (EventKind::SupervisorAlive, "supervisor_alive"),
             (EventKind::SupervisorStarted, "supervisor_started"),
             (EventKind::SupervisorStopped, "supervisor_stopped"),
             (EventKind::TaskCreated, "task_created"),

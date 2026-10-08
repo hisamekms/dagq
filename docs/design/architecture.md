@@ -127,7 +127,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 - table: `task_runs`・`run_leases`・`run_processes`・`session_workspaces`。
 - ファイル: queueのdirの`runs/<run-id>/`（`RunFiles`）とrunのworktree。
-- eventの種類: `run_*`・`lease_*`・`claim_*`・`worktree_*`・`workspace_*`・`wrapper_*`・`session_*`・`turn_*`・`review_*`・`revise_*`・`resume_*`・`triage_*`・`recovery_*`・`integration_*`・`landing_*`・`provider_*`・`push_*`・`run_phase_changed`ほか。
+- eventの種類: `run_*`・`lease_*`・`claim_*`・`slots_full_*`・`worktree_*`・`workspace_*`・`wrapper_*`・`session_*`・`turn_*`・`review_*`・`revise_*`・`resume_*`・`triage_*`・`recovery_*`・`integration_*`・`landing_*`・`provider_*`・`push_*`・`run_phase_changed`ほか。
 
 **判断**（domain）: `domain::run`（`TaskRun`と遷移、`run::history`・`run::payload`）を中心に、receipt・review・resume・復旧・claimの控え・slot・待ち・stall・e2e・着地の保留・backgroundのwrapperの各module。
 

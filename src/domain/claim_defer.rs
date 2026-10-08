@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 use super::{
     Ask, AskKind, EventId, LeaseToken, RunEvent, RunStatus, TaskId,
+    claim_hold::{HoldSpan, SpanEnd},
     event_kind::{LEASE_ACQUIRED, LEASE_RELEASED},
     scope::glob_matches,
     stats::timestamp_millis,
@@ -549,8 +550,8 @@ pub struct ClaimDeferrals {
 
 /// Aggregate the deferrals of `events` (ascending id) that started with
 /// `after < id <= upto` on a task `counts` accepts; `end_ms` ends one still
-/// open. A deferral ends at the next `claim_deferral_ended` of its task or
-/// at its `run_claimed`; `deferred` is the queue's now either way.
+/// open. A deferral ends as [`deferral_spans`] reads it; `deferred` is the
+/// queue's now either way.
 pub fn claim_deferrals(
     events: &[RunEvent],
     after: EventId,
@@ -559,10 +560,18 @@ pub fn claim_deferrals(
     counts: impl Fn(Option<TaskId>) -> bool,
 ) -> ClaimDeferrals {
     let mut stats = ClaimDeferrals::default();
-    let mut open: BTreeMap<TaskId, (&RunEvent, i64)> = BTreeMap::new();
-    let close = |stats: &mut ClaimDeferrals, (event, start): (&RunEvent, i64), end, why: &str| {
+    for span in deferral_spans(events) {
+        let event = span.start;
+        let start = span.start_ms.unwrap_or(end_ms);
+        let (end, why) = match &span.end {
+            Some(end) => (end.at_ms.unwrap_or(end_ms), end.why.as_str()),
+            None => {
+                stats.deferred.extend(OpenDeferral::of(event));
+                (end_ms, ENDED_OPEN)
+            }
+        };
         if event.id <= after || event.id > upto || !counts(event.task_id) {
-            return;
+            continue;
         }
         let secs = (i64::min(end, end_ms) - start).max(0) / 1000;
         stats.count += 1;
@@ -580,42 +589,59 @@ pub fn claim_deferrals(
         {
             *stats.by_file.entry(file.to_owned()).or_default() += 1;
         }
-    };
+    }
+    stats
+}
+
+/// A deferral ended by the next `claim_deferred` of its task.
+pub const ENDED_SUPERSEDED: &str = "superseded";
+/// A deferral ended by its task's `run_claimed`.
+pub const ENDED_CLAIMED: &str = "claimed";
+/// `stats`' `by_end` of a deferral still open.
+pub const ENDED_OPEN: &str = "open";
+
+/// The deferrals of `events` (ascending id): those that ended, in the
+/// order they ended, then those still open, by task. One ends at the next
+/// `claim_deferred` of its task ([`ENDED_SUPERSEDED`]), at its
+/// `claim_deferral_ended` (its `why`) or at its task's `run_claimed`
+/// ([`ENDED_CLAIMED`]), whichever supervisor recorded it. The one rule
+/// `stats` ([`claim_deferrals`]) and the waits before a claim
+/// ([`super::pre_claim::pre_claim_intervals`]) read the deferrals by.
+pub fn deferral_spans(events: &[RunEvent]) -> Vec<HoldSpan<'_>> {
+    let mut spans = Vec::new();
+    let mut open: BTreeMap<TaskId, HoldSpan<'_>> = BTreeMap::new();
     for event in events {
         let Some(task) = event.task_id else {
             continue;
         };
-        let at = || timestamp_millis(&event.created_at).unwrap_or(end_ms);
-        match event.kind.as_str() {
-            CLAIM_DEFERRED => {
-                if let Some(held) = open.remove(&task) {
-                    close(&mut stats, held, at(), "superseded");
-                }
-                open.insert(task, (event, at()));
-            }
-            CLAIM_DEFERRAL_ENDED => {
-                if let Some(held) = open.remove(&task) {
-                    close(
-                        &mut stats,
-                        held,
-                        at(),
-                        text(event, "why").unwrap_or("unknown"),
-                    );
-                }
-            }
-            "run_claimed" => {
-                if let Some(held) = open.remove(&task) {
-                    close(&mut stats, held, at(), "claimed");
-                }
-            }
-            _ => {}
+        let why = match event.kind.as_str() {
+            CLAIM_DEFERRED => ENDED_SUPERSEDED,
+            CLAIM_DEFERRAL_ENDED => text(event, "why").unwrap_or("unknown"),
+            "run_claimed" => ENDED_CLAIMED,
+            _ => continue,
+        };
+        let at_ms = timestamp_millis(&event.created_at);
+        if let Some(mut held) = open.remove(&task) {
+            held.end = Some(SpanEnd {
+                event,
+                at_ms,
+                why: why.to_owned(),
+            });
+            spans.push(held);
+        }
+        if event.kind == CLAIM_DEFERRED {
+            open.insert(
+                task,
+                HoldSpan {
+                    start: event,
+                    start_ms: at_ms,
+                    end: None,
+                },
+            );
         }
     }
-    for (_, held) in open {
-        stats.deferred.extend(OpenDeferral::of(held.0));
-        close(&mut stats, held, end_ms, "open");
-    }
-    stats
+    spans.extend(open.into_values());
+    spans
 }
 
 fn text<'e>(event: &'e RunEvent, key: &str) -> Option<&'e str> {

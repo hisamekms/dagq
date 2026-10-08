@@ -5,6 +5,7 @@
 //! that ends the interval). Versions, counts and loads are domain values;
 //! no path goes in (ADR-0032's classification of the records).
 
+use super::claim_facts::CandidateFacts;
 use super::instructions::InstructionVersions;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -86,6 +87,17 @@ pub struct ClaimAttributes {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub instructions: BTreeMap<String, InstructionVersions>,
+    /// How many candidates the claim lined up; left out for a claim
+    /// outside the supervisor's line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<usize>,
+    /// Each candidate's [`CandidateFacts`], by its task ID; left out when
+    /// empty. The claim keeps its own task's ([`super::claim_facts::settle`]).
+    #[serde(
+        rename = "candidates_by_task",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub by_task: BTreeMap<String, CandidateFacts>,
 }
 
 /// The spacing a claim was made under (ADR-t1479-1).
@@ -268,6 +280,8 @@ mod tests {
             spacing: None,
             light_room: None,
             instructions: BTreeMap::new(),
+            candidates: None,
+            by_task: BTreeMap::new(),
         };
         assert_eq!(
             serde_json::to_value(&attributes).unwrap(),

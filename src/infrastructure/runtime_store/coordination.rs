@@ -130,10 +130,11 @@ impl SqliteQueue {
         Ok(())
     }
 
-    /// Remove the registration on a graceful exit. Leases are untouched; a
-    /// missing row (already removed, or never written) is not an error, so a
-    /// crashed supervisor's row is only ever removed by `up`, `down --force`
-    /// or a person.
+    /// Remove the registration of `token` without recording its stop, for
+    /// fixtures that stand for a row gone without one. The runtime removes
+    /// a registration only with the record of its stop
+    /// ([`Self::prune_supervisor`]). Leases are untouched; a missing row is
+    /// not an error.
     pub fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool> {
         Ok(self
             .conn
@@ -833,9 +834,6 @@ impl SupervisorRegistry for SqliteQueue {
     ) -> Result<SupervisorRegistration> {
         SqliteQueue::register_supervisor_with_limits(self, token, pid, limits, binary_version)
     }
-    fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool> {
-        SqliteQueue::deregister_supervisor(self, token)
-    }
     fn prune_supervisor(
         &self,
         token: &LeaseToken,
@@ -1097,6 +1095,46 @@ mod tests {
         );
 
         assert!(stops(&queue).is_empty());
+    }
+
+    /// A supervisor's own stop goes through the same port as a prune: the
+    /// row goes with the record of its stop, and a record that fails keeps
+    /// the row, stale, for the next prune.
+    #[test]
+    fn a_supervisors_own_stop_is_recorded_with_its_removal_or_keeps_its_row() {
+        use crate::application::SupervisorRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let token = LeaseToken::new("own");
+        queue.register_supervisor(&token, 1, 1, "0.0.1").unwrap();
+        let own = json!({"supervisor": "own", "dagq_version": "0.0.1", "outcome": "stopped"});
+        queue
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_events BEFORE INSERT ON run_events
+                 BEGIN SELECT RAISE(ABORT, 'record failed'); END",
+            )
+            .unwrap();
+
+        let stop = |queue: &SqliteQueue| {
+            SupervisorRegistry::prune_supervisor(
+                queue,
+                &token,
+                EventKind::SupervisorStopped,
+                &|_| own.clone(),
+            )
+        };
+        assert!(stop(&queue).is_err());
+        assert_eq!(registered(&queue), ["own"]);
+        assert!(stops(&queue).is_empty());
+
+        queue
+            .conn
+            .execute_batch("DROP TRIGGER fail_events")
+            .unwrap();
+        assert!(stop(&queue).unwrap());
+        assert!(registered(&queue).is_empty());
+        assert_eq!(stops(&queue), [own]);
     }
 
     #[test]

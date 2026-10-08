@@ -1697,3 +1697,73 @@ fn status_and_doctor_measure_to_the_injected_clock() {
     let doctor = one_shot.doctor(&db, false, None).unwrap();
     assert_eq!(doctor["checked_at"], 1_042, "{doctor}");
 }
+
+/// The claim pass records where its slots fill up and free again, and the
+/// claim records where the task stood in the line, how many stood in it,
+/// when the task became ready, the priority it was claimed at (here its
+/// goal's) and the claim's attributes as an open set (ADR-t1662-1
+/// decision 6).
+#[test]
+fn the_claim_records_its_slots_its_line_and_its_attributes() {
+    use dagq::domain::{GoalId, NewGoal};
+    let (_dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let goal: GoalId = queue
+        .add_goal(NewGoal {
+            title: "measured".into(),
+            priority: Some(Priority::High),
+            ..Default::default()
+        })
+        .unwrap()
+        .id();
+    let in_goal = |queue: &mut SqliteQueue, title: &str| {
+        let task = add_ready_task(queue, title, &[]);
+        queue.set_goal(task, Some(goal)).unwrap();
+        task
+    };
+    let first = in_goal(&mut queue, "first");
+    let second = in_goal(&mut queue, "second");
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    supervise_with(&db, &repo, &backend, &supervise_options(1, true)).unwrap();
+
+    let events = SqliteQueue::open(&db).unwrap().all_events().unwrap();
+    let claimed = |task: TaskId| {
+        events
+            .iter()
+            .find(|event| event.kind == "run_claimed" && event.task_id == Some(task))
+            .unwrap()
+    };
+    let (first, second) = (claimed(first), claimed(second));
+    for (claim, rank, candidates) in [(first, 1, 2), (second, 1, 1)] {
+        let payload = &claim.payload;
+        assert_eq!(payload["candidate_rank"], rank, "{payload}");
+        assert_eq!(payload["candidates"], candidates, "{payload}");
+        assert_eq!(payload["priority"], "high", "{payload}");
+        assert_eq!(payload["priority_source"], "goal", "{payload}");
+        assert_eq!(payload["effective_priority"], "high", "{payload}");
+        assert!(payload["ready_at"].is_string(), "{payload}");
+        assert!(payload.get("candidates_by_task").is_none(), "{payload}");
+        let attributes = &payload["attributes"];
+        assert_eq!(
+            attributes["claim_provider"], payload["provider"],
+            "{payload}"
+        );
+        assert_eq!(attributes["build"], payload["dagq_version"], "{payload}");
+        assert_eq!(attributes["priority_source"], "goal", "{payload}");
+        assert!(attributes.get("provider").is_none(), "{payload}");
+    }
+    // The slot filled with the first claim and freed before the second.
+    let between: Vec<&str> = events
+        .iter()
+        .filter(|event| event.id > first.id && event.id < second.id)
+        .filter(|event| event.kind.starts_with("slots_full_"))
+        .map(|event| event.kind.as_str())
+        .collect();
+    assert_eq!(between, ["slots_full_started", "slots_full_ended"]);
+    let started = events
+        .iter()
+        .find(|event| event.kind == "slots_full_started")
+        .unwrap();
+    assert_eq!(started.payload["class"], "heavy");
+    assert_eq!(started.payload["slots"], 1);
+}

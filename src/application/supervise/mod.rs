@@ -651,6 +651,9 @@ fn beat(
     let mut queue: Option<Box<dyn Queue + Send>> = None;
     let mut written = Instant::now();
     let mut streak: Option<BusyStreak> = None;
+    // The evidence of life before the first `supervisor_alive` is the
+    // supervisor's start, recorded just before.
+    let mut alive = Instant::now();
     loop {
         let started = Instant::now();
         let attempt = match &mut queue {
@@ -665,6 +668,27 @@ fn beat(
                     bail!("{lost}");
                 }
                 written = started;
+                // A resident supervisor's evidence of life on the events
+                // (ADR-t1662-1 decision 6); one that fails is tried again
+                // after the interval, and stops neither the heartbeat nor
+                // the supervisor.
+                if policy.registered
+                    && crate::domain::supervisor_life::alive_due(
+                        i64::try_from(alive.elapsed().as_secs()).unwrap_or(i64::MAX),
+                    )
+                    && let Some(queue) = &queue
+                {
+                    match queue.record_queue_event(
+                        EventKind::SupervisorAlive,
+                        json!({"supervisor": token}),
+                    ) {
+                        Ok(_) => alive = started,
+                        Err(error) => {
+                            alive = started;
+                            warn!(error = %format_args!("{error:#}"), "the supervisor's evidence of life could not be recorded: {error:#}");
+                        }
+                    }
+                }
                 if let Some(streak) = streak.take() {
                     let secs = streak.since.elapsed().as_secs_f64();
                     info!(
@@ -945,6 +969,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             loads: HashMap::new(),
             defer: claim_defer::DeferWatch::default(),
             conflicts: settings.conflicts,
+            slots_full: None,
             conflicts_file: ports.conflicts_file.clone(),
             conflicts_error: settings.conflicts_error.clone(),
         },
@@ -1158,6 +1183,9 @@ struct Slot {
     /// it waits only for its landing turn (ADR-t1591-1): its last look
     /// found another run landing.
     landing_turn: bool,
+    /// In the landing turn, the run its last look found holding the
+    /// landing slot, which its record of the landing queue names.
+    blocked_by: Option<RunId>,
     /// What the slot keeps of its run's recorded phases.
     track: stages::PhaseTrack,
 }
@@ -1459,10 +1487,12 @@ impl Supervisor<'_> {
         self.handoff = Some(now);
     }
 
-    /// Drive the loop, then remove this process's registration: it is about
-    /// to exit, whether it drained its runs, ran out of work, or failed on
-    /// a claim or provisioning. Only a heartbeat failure keeps the row (the
-    /// database may be unreachable), and it goes stale with the leases.
+    /// Drive the loop, then remove this process's registration with the
+    /// record of its stop: it is about to exit, whether it drained its
+    /// runs, ran out of work, or failed on a claim or provisioning. A
+    /// heartbeat failure (the database may be unreachable) or a stop that
+    /// could not be recorded keeps the row, which goes stale with the
+    /// leases for the next `up` or `down` to prune.
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
         self.host.host_metrics.finish();
@@ -1495,15 +1525,18 @@ impl Supervisor<'_> {
                 "dagq_version": self.layout.version,
                 "outcome": if result.is_ok() { "stopped" } else { "failed" },
             });
-            if let Err(error) = self
-                .queue
-                .record_queue_event(EventKind::SupervisorStopped, stopped)
-            {
-                warn!(error = %format_args!("{error:#}"), "the supervisor's stop could not be recorded: {error:#}");
-            }
+            // The stop is recorded in the transaction that removes the
+            // registration (ADR-t1662-1 decision 6): a record that fails
+            // keeps the row, which goes stale for the next `up` or `down`
+            // to prune.
             self.heartbeat.stop();
-            if let Err(error) = self.queue.deregister_supervisor(&self.token) {
-                warn!(error = %format_args!("{error:#}"), "supervisor registration could not be removed: {error:#}");
+            if let Err(error) =
+                self.queue
+                    .prune_supervisor(&self.token, EventKind::SupervisorStopped, &|_| {
+                        stopped.clone()
+                    })
+            {
+                warn!(error = %format_args!("{error:#}"), "the supervisor's stop could not be recorded, and its registration is left for the next prune: {error:#}");
             }
             // After the deregistration, so the last of the supervisors a
             // `down` stops sees no other one left.
@@ -1897,6 +1930,10 @@ impl Supervisor<'_> {
             warn!(error = %format_args!("{error:#}"), "a run recovered from its landing could not start its review: {error:#}");
         }
         self.apply_triage_answers()?;
+        // A slot the runs freed since the last pass ends the wait for one
+        // before anything takes it again (ADR-t1662-1 decision 6).
+        self.claim
+            .note_slots_full(&*self.queue, &self.token, parallel);
         // Resumes and triage read the landing branch: they wait with the
         // claims until it resolves (ADR-t615-1). A resumed session gets
         // `[run.env]` like a claimed run, so it waits with the claims for a
@@ -2026,6 +2063,9 @@ impl Supervisor<'_> {
                 }
             }
         }
+        // The slots as the pass leaves them.
+        self.claim
+            .note_slots_full(&*self.queue, &self.token, parallel);
         Ok(())
     }
     /// The room for the next claim (ADR-t1591-1).
@@ -2163,10 +2203,21 @@ impl Supervisor<'_> {
                 .plugin
                 .get_or_insert_with(|| (self.worker_plugin)(&self.layout.main_checkout))
                 .clone();
+            // The line as the claim takes it, with each candidate's
+            // priority as the order compared it (ADR-t1662-1 decision 6).
+            let by_task = crate::domain::claim_facts::candidate_facts(&order, |id| {
+                graph
+                    .tasks
+                    .iter()
+                    .find(|node| node.id == id)
+                    .map(|node| (node.priority, node.priority_source, node.effective_priority))
+            });
             let attributes = ClaimAttributes {
                 spacing,
                 light_room: (room == ClaimRoom::LightOnly).then_some(true),
                 instructions: self.instruction_versions(&base, &plugin),
+                candidates: Some(order.len()),
+                by_task,
                 ..self.claim_attributes(parallel, host)
             };
             let run = match self.queue.claim_for_supervisor_in_order(
@@ -2395,6 +2446,8 @@ impl Supervisor<'_> {
             spacing: None,
             light_room: None,
             instructions: BTreeMap::new(),
+            candidates: None,
+            by_task: BTreeMap::new(),
         }
     }
     /// The versions of the instructions a worker on each of this
@@ -2988,6 +3041,7 @@ impl Supervisor<'_> {
                 // Judged again on each look: only the landing of another run
                 // keeps it in the landing queue (ADR-t1591-1).
                 slot.landing_turn = false;
+                slot.blocked_by = None;
                 // Its verification would fail on the missing program, an
                 // unreadable CI, an unresolved landing branch or short disk:
                 // the run stays awaiting integration, leased, and the
@@ -3039,14 +3093,12 @@ impl Supervisor<'_> {
                     slot.transition(phase, "e2e_due", &*self.queue);
                     return Ok(Step::Continue);
                 }
-                if !self
-                    .queue
-                    .runs_with_status(RunStatus::Integrating)?
-                    .is_empty()
+                if let Some(landing) = self.queue.runs_with_status(RunStatus::Integrating)?.first()
                 {
                     // Reviewed and its e2e done, it waits only for its
                     // landing turn (ADR-t1591-1).
                     slot.landing_turn = true;
+                    slot.blocked_by = Some(landing.id().clone());
                     return Ok(Step::Continue);
                 }
                 let current = self.queue.run(slot.run.id())?;
@@ -3064,12 +3116,11 @@ impl Supervisor<'_> {
                     Ok(run) => run,
                     // An `integrate` took the slot since the check: try again later.
                     Err(_)
-                        if !self
-                            .queue
-                            .runs_with_status(RunStatus::Integrating)?
-                            .is_empty() =>
+                        if let Some(landing) =
+                            self.queue.runs_with_status(RunStatus::Integrating)?.first() =>
                     {
                         slot.landing_turn = true;
+                        slot.blocked_by = Some(landing.id().clone());
                         return Ok(Step::Continue);
                     }
                     Err(error) => return Err(error),

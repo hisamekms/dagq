@@ -239,6 +239,9 @@ pub struct PhaseChange {
     pub phase: Phase,
     pub attempt: Attempt,
     pub cause: String,
+    /// In [`Phase::LandingQueue`], the run that held the landing slot
+    /// meanwhile (ADR-t1662-1 decision 6), when the supervisor saw one.
+    pub blocked_by: Option<String>,
 }
 
 impl PhaseChange {
@@ -247,33 +250,62 @@ impl PhaseChange {
             phase,
             attempt,
             cause: cause.into(),
+            blocked_by: None,
         }
     }
 
-    /// The payload `{phase, blocker, holds, attempt, cause, v}`.
+    /// The change with `blocked_by` as the run that holds the landing
+    /// slot, kept only in [`Phase::LandingQueue`].
+    pub fn blocked_by(mut self, run: Option<String>) -> Self {
+        self.blocked_by = run.filter(|_| self.phase == Phase::LandingQueue);
+        self
+    }
+
+    /// The payload `{phase, blocker, holds, attempt, cause, v}`, and
+    /// `blocked_by` when there is one.
     pub fn payload(&self) -> Value {
         let tags = self.phase.tags();
-        json!({
+        let mut payload = json!({
             "phase": self.phase.name(),
             "blocker": tags.blocker,
             "holds": tags.holds,
             "attempt": self.attempt,
             "cause": self.cause,
             "v": RULES_VERSION,
+        });
+        if let Some(run) = &self.blocked_by {
+            payload["blocked_by"] = json!(run);
+        }
+        payload
+    }
+
+    /// Whether it records the same phase, attempt and landing slot's
+    /// holder as `recorded`.
+    pub fn repeats(&self, recorded: Option<&Recorded>) -> bool {
+        recorded.is_some_and(|r| {
+            r.phase == self.phase.name()
+                && r.attempt == self.attempt
+                && r.blocked_by == self.blocked_by
         })
     }
 
-    /// Whether it records the same phase and attempt as `recorded`.
-    pub fn repeats(&self, recorded: Option<&Recorded>) -> bool {
-        recorded.is_some_and(|r| r.phase == self.phase.name() && r.attempt == self.attempt)
+    /// What this change records, as [`Recorded::of`] reads it back.
+    pub fn recorded(&self) -> Recorded {
+        Recorded {
+            phase: self.phase.name().to_owned(),
+            attempt: self.attempt,
+            blocked_by: self.blocked_by.clone(),
+        }
     }
 }
 
-/// What a recorded `run_phase_changed` says of the phase and attempt.
+/// What a recorded `run_phase_changed` says of the phase, the attempt and
+/// the landing slot's holder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recorded {
     pub phase: String,
     pub attempt: Attempt,
+    pub blocked_by: Option<String>,
 }
 
 impl Recorded {
@@ -283,6 +315,7 @@ impl Recorded {
         Some(Self {
             phase: payload["phase"].as_str()?.to_owned(),
             attempt: serde_json::from_value(payload["attempt"].clone()).unwrap_or(Attempt::FIRST),
+            blocked_by: payload["blocked_by"].as_str().map(str::to_owned),
         })
     }
 }
@@ -399,6 +432,26 @@ mod tests {
         }
     }
 
+    /// The landing queue names the run that held the landing slot; a new
+    /// holder is a new record, and no other phase keeps one.
+    #[test]
+    fn the_landing_queue_records_who_held_the_landing_slot() {
+        let held = |run: &str| {
+            PhaseChange::new(Phase::LandingQueue, Attempt::FIRST, "landing_turn")
+                .blocked_by(Some(run.to_owned()))
+        };
+        let first = held("r1");
+        assert_eq!(first.payload()["blocked_by"], "r1");
+        let recorded = Recorded::of(&first.payload()).unwrap();
+        assert_eq!(recorded, first.recorded());
+        assert!(held("r1").repeats(Some(&recorded)));
+        assert!(!held("r2").repeats(Some(&recorded)));
+        let worker =
+            PhaseChange::new(Phase::Worker, Attempt::FIRST, "x").blocked_by(Some("r1".into()));
+        assert_eq!(worker.blocked_by, None);
+        assert!(worker.payload().get("blocked_by").is_none());
+    }
+
     #[test]
     fn a_push_ends_the_run_or_leaves_it_to_a_person() {
         assert_eq!(
@@ -466,6 +519,7 @@ mod tests {
             Some(Recorded {
                 phase: "resume".into(),
                 attempt: Attempt::of(AttemptKind::Resume, 1),
+                blocked_by: None,
             })
         );
         assert_eq!(last_recorded(&events[2..]), None);

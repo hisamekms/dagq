@@ -318,6 +318,8 @@ mod tests {
             }),
             light_room: Some(true),
             instructions: Default::default(),
+            candidates: None,
+            by_task: Default::default(),
         })
         .unwrap();
         // What the claim itself adds beside the attributes.

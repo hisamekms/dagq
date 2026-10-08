@@ -433,10 +433,25 @@ pub fn holds_of(
     counts: impl Fn(Option<TaskId>) -> bool,
 ) -> ClaimHolds {
     let mut stats = ClaimHolds::default();
-    let mut open: Option<(&RunEvent, i64)> = None;
-    let close = |stats: &mut ClaimHolds, (event, start): (&RunEvent, i64), end: i64| {
+    for span in hold_spans(kinds, events) {
+        let event = span.start;
+        let start = span.start_ms.unwrap_or(end_ms);
+        let end = span
+            .end
+            .as_ref()
+            .map_or(end_ms, |end| end.at_ms.unwrap_or(end_ms));
+        if span.end.is_none() {
+            let number = |key: &str| event.payload.get(key).and_then(Value::as_f64);
+            stats.held = Some(OpenHold {
+                reason: text(event, "reason").unwrap_or("unknown").to_owned(),
+                supervisor: text(event, "supervisor").map(str::to_owned),
+                since: event.created_at.clone(),
+                value: number("value"),
+                threshold: number("threshold"),
+            });
+        }
         if event.id <= after || event.id > upto || !counts(event.task_id) {
-            return;
+            continue;
         }
         // A hold that ends after the window counts to the window's end.
         let secs = (end.min(end_ms) - start).max(0) / 1000;
@@ -446,45 +461,79 @@ pub fn holds_of(
         entry.secs += secs;
         stats.count += 1;
         stats.secs += secs;
-    };
-    for event in events {
-        let at = || timestamp_millis(&event.created_at).unwrap_or(end_ms);
-        match event.kind.as_str() {
-            kind if kind == kinds.held => {
-                if let Some(held) = open.take() {
-                    close(&mut stats, held, at());
-                }
-                open = Some((event, at()));
-            }
-            kind if kind == kinds.resumed => {
-                if let Some(held) = open.take() {
-                    close(&mut stats, held, at());
-                }
-            }
-            "supervisor_stopped"
-                if open.is_some_and(|(held, _)| {
-                    text(held, "supervisor") == text(event, "supervisor")
-                }) =>
-            {
-                if let Some(held) = open.take() {
-                    close(&mut stats, held, at());
-                }
-            }
-            _ => {}
-        }
-    }
-    if let Some(held) = open {
-        let number = |key: &str| held.0.payload.get(key).and_then(Value::as_f64);
-        stats.held = Some(OpenHold {
-            reason: text(held.0, "reason").unwrap_or("unknown").to_owned(),
-            supervisor: text(held.0, "supervisor").map(str::to_owned),
-            since: held.0.created_at.clone(),
-            value: number("value"),
-            threshold: number("threshold"),
-        });
-        close(&mut stats, held, end_ms);
     }
     stats
+}
+
+/// One hold of `kinds` as [`hold_spans`] reads it: the `held` event that
+/// started it and its time, and how it ended (none while it is open).
+#[derive(Debug, Clone)]
+pub struct HoldSpan<'e> {
+    pub start: &'e RunEvent,
+    /// The time of `start`, `None` when it cannot be read.
+    pub start_ms: Option<i64>,
+    pub end: Option<SpanEnd<'e>>,
+}
+
+/// How a span ended: the event that ended it, its time (`None` when it
+/// cannot be read) and why ([`ENDED_REPLACED`], [`ENDED_RESUMED`],
+/// [`ENDED_SUPERVISOR_GONE`], or for a deferral the ends of
+/// [`super::claim_defer::deferral_spans`]).
+#[derive(Debug, Clone)]
+pub struct SpanEnd<'e> {
+    pub event: &'e RunEvent,
+    pub at_ms: Option<i64>,
+    pub why: String,
+}
+
+/// A hold ended by the next hold (another reason, or another supervisor's).
+pub const ENDED_REPLACED: &str = "replaced";
+/// A hold ended by its `resumed` event, whoever recorded it.
+pub const ENDED_RESUMED: &str = "resumed";
+/// A hold ended by the stop of the supervisor that recorded it.
+pub const ENDED_SUPERVISOR_GONE: &str = "supervisor_gone";
+
+/// The holds of `kinds` in `events` (ascending id), in the order they
+/// started: one ends at the next `held` (it is replaced) or `resumed` of
+/// `kinds`, whichever supervisor recorded it, or at the
+/// `supervisor_stopped` of the supervisor that recorded it. The one rule
+/// `stats` ([`holds_of`]) and the waits before a claim
+/// ([`super::pre_claim::pre_claim_intervals`]) read the holds by.
+pub fn hold_spans(kinds: HoldKinds, events: &[RunEvent]) -> Vec<HoldSpan<'_>> {
+    let mut spans: Vec<HoldSpan<'_>> = Vec::new();
+    let mut open: Option<HoldSpan<'_>> = None;
+    for event in events {
+        let at_ms = timestamp_millis(&event.created_at);
+        let why = match event.kind.as_str() {
+            kind if kind == kinds.held => ENDED_REPLACED,
+            kind if kind == kinds.resumed => ENDED_RESUMED,
+            "supervisor_stopped"
+                if open.as_ref().is_some_and(|held| {
+                    text(held.start, "supervisor") == text(event, "supervisor")
+                }) =>
+            {
+                ENDED_SUPERVISOR_GONE
+            }
+            _ => continue,
+        };
+        if let Some(mut held) = open.take() {
+            held.end = Some(SpanEnd {
+                event,
+                at_ms,
+                why: why.to_owned(),
+            });
+            spans.push(held);
+        }
+        if event.kind == kinds.held {
+            open = Some(HoldSpan {
+                start: event,
+                start_ms: at_ms,
+                end: None,
+            });
+        }
+    }
+    spans.extend(open);
+    spans
 }
 
 fn text<'e>(event: &'e RunEvent, key: &str) -> Option<&'e str> {

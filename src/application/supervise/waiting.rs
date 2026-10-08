@@ -36,6 +36,7 @@ impl Slot {
             consumed: Vec::new(),
             deferred: Vec::new(),
             landing_turn: false,
+            blocked_by: None,
             track: super::stages::PhaseTrack::default(),
         }
     }

@@ -91,6 +91,8 @@ supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[
 
 - `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る。workerを動かせないtaskの`claim_deferred`は`reason`（`provider_unavailable` / `mode_unavailable` / `provider_fallback_off`）、`provider`、`worker_mode`、`message`、`supervisor`。`provider_fallback_off`の`message`は、頼んだproviderが今使えず`[provider_fallback] workers`がfalseなのでもう一方のproviderで始めず、そのproviderが使えるようになるまでclaimしないと言う。buildを待つtaskの`claim_deferred`は`reason: not_in_build`、`build`（そのsupervisorのbuild識別子）、`missing`（`[{task_id, commit}]`、含まない依存先の着地）、`message`、`supervisor`
 - `claim_deferral_ended`（taskのevent）: `reason`、`why`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`。`owner_waiting` / `no_commit` / `expired`はhotspotの控えだけ、workerとbuildの控えは`cleared` / `not_candidate`だけ）、`deferred_secs`、`supervisor`。logにinfoで出る
+- 2つのeventはclaimの前の待ちのうちtaskの控えの区間の始まりと終わりを兼ねる（[計測](../measurement.md)の「claimの前」）。
+  区間は下の`stats`の`by_end`と同じ規則（`domain::claim_defer::deferral_spans`）で、どのsupervisorの記録でも終わり、終わりを書いたsupervisorを`ended_by`に残す。
 
 ## `status`と`stats`
 
