@@ -260,7 +260,7 @@ paths = ["src/infrastructure/adapters.rs", "src/infrastructure/process.rs", "src
 
 [review.subagents.design-consistency]
 # runtime の挙動を変える差分と design の文書を変える差分にだけ当てる。当たる path は repository の設定に任されている（ADR-t1942-2 決定4）。
-# migrations・docs/development・plugins・tests・dagq.toml はそれぞれの agent が、残りは receipt-evidence と worker の照合が見る。
+# migrations・plugins・tests・dagq.toml はそれぞれの agent が、docs/development と残りは receipt-evidence と worker の文書の照合が見る。
 paths = ["src/**", "crates/**", "docs/design/**"]
 
 [review.subagents.test-rules]
