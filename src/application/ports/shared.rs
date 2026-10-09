@@ -30,6 +30,10 @@ use std::{
 pub struct CommandSpec {
     program: OsString,
     args: Vec<OsString>,
+    /// Start from an empty environment instead of the starter's, before
+    /// [`Self::envs`] are applied: a process given only what its caller
+    /// narrowed (a review's program job, ADR-t1895-2 decision 6).
+    env_clear: bool,
     /// In the order given; `None` removes the variable.
     envs: Vec<(OsString, Option<OsString>)>,
     current_dir: Option<PathBuf>,
@@ -115,6 +119,18 @@ impl CommandSpec {
             self.args.drain(at..at + 2);
         }
         at.is_some()
+    }
+
+    /// See [`Self::get_env_clear`].
+    pub fn env_clear(&mut self) -> &mut Self {
+        self.env_clear = true;
+        self
+    }
+
+    /// Whether the process inherits nothing of the starter's environment,
+    /// only the changes given.
+    pub fn get_env_clear(&self) -> bool {
+        self.env_clear
     }
 
     /// The process does not inherit `key`.

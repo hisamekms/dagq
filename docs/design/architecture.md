@@ -146,7 +146,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - `application::inherit`の`InheritStore`・`CarriedBranches`を計画管理の`ready --inherit`に公開する（T10）。
 - `RunCoordination`の読み取りを全てのcontextに公開する。
 - 計画管理に`JobDesk`と`DeferWatch`の見込みのファイルを、host運用のsweepにwrapperの停止を公開する。
-- `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`の残りは内部。
+- `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`（reviewのprogramのjobの実行のbackend）は内部。
 
 **許す依存の向き**
 
@@ -230,7 +230,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 | module | port |
 | --- | --- |
 | `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`・`PlanningRecords` |
-| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`SessionRegistry`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier` |
+| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`SessionRegistry`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend` |
 | `observation`（観測と分析） | `EventReads`・`ObserverLog`・`MarkLog`・`QueueRecords` |
 | `host`（host運用） | `QueueOpener`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry` |
 | `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`Queue` |

@@ -4,9 +4,16 @@
 //! process that took the pid later, and a job's timeout stops what the job
 //! started too, whatever the job's kind (an agent's or a program's).
 use crate::runtime_support;
-use dagq::application::supervise::{JobEnds, JobFailed, JobPorts, JobSubject, start_program_job};
+use dagq::application::review_programs::SnapshotProgram;
+use dagq::application::supervise::{
+    JobEnds, JobFailed, JobPorts, JobSubject, PROGRAM_OUTPUT_TAIL, ProgramEnd, start_program_job,
+    start_review_program,
+};
+use dagq::domain::review_programs::{ProgramRun, ReviewProgram};
 use dagq::domain::{EventKind, LeaseToken};
 use dagq::infrastructure::adapters::SystemProcesses;
+use dagq::infrastructure::review_programs::HostPrograms;
+use std::ffi::OsString;
 
 use runtime_support::*;
 
@@ -411,4 +418,168 @@ fn a_program_job_is_recorded_and_its_timeout_stops_what_it_started() {
         )
     };
     assert_eq!(rows, [row("fmt", "ended"), row("slow", "stopped")]);
+}
+
+/// Poll the program job `job` until it ends, at most 20 seconds.
+fn program_ended(job: &mut dagq::application::supervise::HeadlessJob) -> ProgramEnd {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(end) = job.poll_program(&LocalRunFiles).unwrap() {
+            return end;
+        }
+        assert!(Instant::now() < deadline, "the program job never ended");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A program review runs on the host as a program job (ADR-t1895-2): in
+/// the run's worktree, from the script's text at the landing branch's
+/// commit (not the worktree's copy), with only the narrowed environment
+/// (no cmux socket password, no `CMUX_*`, nothing that reaches the queue
+/// service or a broker); its end gives the exit status and the end of its
+/// output, and one past its time limit is stopped with its process group.
+#[test]
+fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db).unwrap();
+    let ends = JobEnds::default();
+    let token = LeaseToken::new("program-supervisor");
+    let ports = JobPorts {
+        store: &queue,
+        processes: Arc::new(SystemProcesses),
+        supervisor_token: &token,
+        clock: &SystemClock,
+        ends: &ends,
+    };
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(worktree.join("scripts")).unwrap();
+    fs::write(
+        worktree.join("scripts/check.sh"),
+        "#!/bin/sh\necho the worker's check\n",
+    )
+    .unwrap();
+    let run_dir = dir.path().join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+    let scratch = dir.path().join("scratch");
+    let mut inherited: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(name, _)| name == "PATH" || name == "HOME")
+        .collect();
+    for (name, value) in [
+        ("CMUX_SOCKET_PASSWORD", "socket-password"),
+        ("CMUX_SOCKET_PATH", "/tmp/cmux.sock"),
+        ("DAGQ_SERVICE_SOCKET", "/q/service.sock"),
+        ("DAGQ_SERVICE_CREDENTIAL_FILE", "/q/credential"),
+        ("DAGQ_BROKER_URL", "http://127.0.0.1:1"),
+        ("DAGQ_BROKER_TOKEN_FILE", "/q/broker-token"),
+        ("DAGQ_QUEUE", "/q/queue.db"),
+        ("GH_TOKEN", "gh"),
+        ("LC_ALL", "C"),
+    ] {
+        inherited.push((name.into(), value.into()));
+    }
+    let backend = HostPrograms::inheriting(inherited);
+    let run = RunId::new("run-1").unwrap();
+    let start = |name: &str, run_as: ProgramRun, script: Option<&str>, timeout: Option<u64>| {
+        let program = SnapshotProgram {
+            program: ReviewProgram {
+                name: name.to_owned(),
+                run: run_as,
+                paths: vec!["**".to_owned()],
+                timeout_secs: timeout,
+            },
+            matched: vec!["a".to_owned()],
+            script: script.map(str::to_owned),
+        };
+        start_review_program(
+            &ports,
+            &process::LocalSpawner,
+            &backend,
+            &program,
+            &worktree,
+            (&run_dir, &scratch),
+            (&run, 1),
+            Duration::from_secs(60),
+        )
+        .unwrap()
+    };
+    let mut check = start(
+        "check",
+        ProgramRun::Script {
+            path: "scripts/check.sh".to_owned(),
+            args: vec!["arg".to_owned()],
+        },
+        Some("#!/bin/sh\necho main\\'s check \"$1\"; pwd -P; env | sort; echo oops >&2; exit 3\n"),
+        None,
+    );
+    let end = program_ended(&mut check);
+    assert_eq!(end.exit.as_ref().and_then(|exit| exit.code), Some(3));
+    let mut lines = end.stdout_tail.lines();
+    assert_eq!(lines.next(), Some("main's check arg"));
+    assert_eq!(
+        lines.next().map(PathBuf::from),
+        Some(worktree.canonicalize().unwrap())
+    );
+    let names: Vec<&str> = lines
+        .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+        .collect();
+    // What the shell itself exports aside.
+    let shells = ["PWD", "OLDPWD", "SHLVL", "_"];
+    for name in names.iter().filter(|name| !shells.contains(name)) {
+        assert!(["PATH", "HOME", "LC_ALL"].contains(name), "{name} given");
+    }
+    assert!(names.contains(&"LC_ALL"), "{names:?}");
+    assert_eq!(end.stderr_tail, "oops\n");
+    // Past its own limit: stopped with what it started in its group.
+    let pid_file = dir.path().join("child.pid");
+    let mut slow = start(
+        "slow",
+        ProgramRun::Command(vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "seq 1 2000; (sleep 120 & echo $! > {}); sleep 120",
+                shell_path(&pid_file)
+            ),
+        ]),
+        None,
+        Some(3),
+    );
+    let end = program_ended(&mut slow);
+    assert_eq!(end.exit, None);
+    assert_eq!(end.stdout_tail.len(), PROGRAM_OUTPUT_TAIL);
+    assert!(
+        end.stdout_tail.ends_with("1999\n2000\n"),
+        "{}",
+        end.stdout_tail
+    );
+    let child: u32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running(child) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !running(child),
+        "the program's grandchild {child} outlived its group"
+    );
+    assert!(ends.write(&queue).is_empty());
+    let outcomes: Vec<(String, Option<String>)> = Connection::open(&db)
+        .unwrap()
+        .prepare("SELECT label, outcome FROM headless_jobs ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        outcomes,
+        [
+            ("check".to_owned(), Some("ended".to_owned())),
+            ("slow".to_owned(), Some("stopped".to_owned()))
+        ]
+    );
 }

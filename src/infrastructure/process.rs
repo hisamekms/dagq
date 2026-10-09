@@ -15,6 +15,9 @@ use crate::application::{CommandSpec, Exit, Spawned, Spawner, StdinUnprepared, S
 pub fn command(spec: &CommandSpec) -> Command {
     let mut command = Command::new(spec.get_program());
     command.args(spec.get_args());
+    if spec.get_env_clear() {
+        command.env_clear();
+    }
     for (key, value) in spec.get_envs() {
         match value {
             Some(value) => command.env(key, value),

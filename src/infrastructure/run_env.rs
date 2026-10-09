@@ -36,7 +36,9 @@
 //! resume in a new session past a context of that many tokens
 //! (ADR-t2080-1).
 //! `[review.jobs]` sets the timeout of each kind of job of a run's review
-//! (ADR-t1895-1 decision 1).
+//! (ADR-t1895-1 decision 1). `[review.programs.<name>]` names a program
+//! review, what it runs and the globs that require it (ADR-t1895-2); the
+//! review reads it from the landing branch's commit.
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -68,6 +70,7 @@ use crate::{
         provider_switch::ProviderFallback,
         recheck::RecheckConfig,
         resume::ResumeConfig,
+        review_programs::{self, ProgramRun, ReviewProgram},
         review_subagents::{self, ReviewSubagent},
         run_env::{RunEnvCheck, RunEnvProgram},
         scope::{dedup_globs, validate_path_globs},
@@ -144,6 +147,17 @@ const REVIEW_SUBAGENTS_PREFIX: &str = "review.subagents.";
 const REVIEW_SUBAGENTS_TABLE: &str = "review.subagents";
 /// The one key of `[review.subagents.<agent>]`.
 const REVIEW_SUBAGENT_PATHS: &str = "paths";
+/// `[review.programs.<name>]`: a program review (ADR-t1895-2), one table
+/// per program; its keys are [`REVIEW_PROGRAM_KEYS`].
+const REVIEW_PROGRAMS_PREFIX: &str = "review.programs.";
+/// What [`parse_config`] calls the current table while in a
+/// `[review.programs.*]`.
+const REVIEW_PROGRAMS_TABLE: &str = review_programs::SECTION;
+/// The keys of `[review.programs.<name>]`: `command` (an array, the
+/// program and its arguments) or `script` (a repository path) with an
+/// optional `args` array, `paths` (the globs, required) and an optional
+/// `timeout_secs`; what each means is on [`ReviewProgram`].
+const REVIEW_PROGRAM_KEYS: [&str; 5] = ["command", "script", "args", "paths", "timeout_secs"];
 /// `[headless]`: `wrapper`, where a headless session's wrapper runs
 /// (ADR-t1404-1 decision 7).
 const HEADLESS_TABLE: &str = "headless";
@@ -266,6 +280,9 @@ pub struct Config {
     /// `[review.subagents.<agent>]` in file order (ADR-t1453-1 decision
     /// 1); empty without any.
     pub review_subagents: Vec<ReviewSubagent>,
+    /// `[review.programs.<name>]` in file order (ADR-t1895-2); empty
+    /// without any.
+    pub review_programs: Vec<ReviewProgram>,
     /// `[headless] wrapper` (ADR-t1404-1 decision 7); `None` without it,
     /// which is the default, a workspace.
     pub headless_wrapper: Option<HeadlessWrapper>,
@@ -320,6 +337,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // The line of the `[review.subagents.<agent>]` header whose `paths`
     // is not read yet.
     let mut subagent_open: Option<usize> = None;
+    // The `[review.programs.<name>]` being read, finished at the next
+    // table or the end of the file.
+    let mut program_open: Option<ProgramTable> = None;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (index, raw) in text.lines().enumerate() {
         let number = index + 1;
@@ -339,6 +359,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     "{CONFIG_FILE_NAME}:{line}: [{REVIEW_SUBAGENTS_PREFIX}{}] has no {REVIEW_SUBAGENT_PATHS}",
                     config.review_subagents.last().expect("an open agent").name
                 );
+            }
+            if let Some(open) = program_open.take() {
+                config.review_programs.push(open.finish()?);
             }
             if kpi
                 .header(name)
@@ -391,13 +414,40 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 table = Some(REVIEW_SUBAGENTS_TABLE);
                 continue;
             }
+            if name == REVIEW_PROGRAMS_TABLE || name.starts_with(REVIEW_PROGRAMS_PREFIX) {
+                let program = name
+                    .strip_prefix(REVIEW_PROGRAMS_PREFIX)
+                    .map(|program| parse_key(program.trim()))
+                    .transpose()
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?
+                    .unwrap_or_default();
+                ensure!(
+                    !program.is_empty(),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] names no program; write [{REVIEW_PROGRAMS_PREFIX}<name>]"
+                );
+                ensure!(
+                    review_subagents::valid_agent_name(&program),
+                    "{CONFIG_FILE_NAME}:{number}: program {program:?} of [{name}] is not kebab-case (lowercase letters and digits joined by -)"
+                );
+                ensure!(
+                    config.review_programs.iter().all(|p| p.name != program),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
+                );
+                program_open = Some(ProgramTable {
+                    line: number,
+                    name: program,
+                    ..ProgramTable::default()
+                });
+                table = Some(REVIEW_PROGRAMS_TABLE);
+                continue;
+            }
             if RETIRED_TABLES.contains(&name) {
                 table = Some(RETIRED_TABLE);
                 continue;
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -434,6 +484,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
             .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: expected KEY = value"))?;
         let key = key.trim();
         match table {
+            Some(REVIEW_PROGRAMS_TABLE) => program_open
+                .as_mut()
+                .expect("a [review.programs.*] table names its program")
+                .entry(number, key, rest.trim())?,
             Some(REVIEW_SUBAGENTS_TABLE) => {
                 let agent = config
                     .review_subagents
@@ -1008,6 +1062,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
             ),
         }
     }
+    if let Some(open) = program_open {
+        config.review_programs.push(open.finish()?);
+    }
     if let Some(line) = subagent_open {
         bail!(
             "{CONFIG_FILE_NAME}:{line}: [{REVIEW_SUBAGENTS_PREFIX}{}] has no {REVIEW_SUBAGENT_PATHS}",
@@ -1050,6 +1107,104 @@ pub fn parse_config(text: &str) -> Result<Config> {
         );
     }
     Ok(config)
+}
+
+/// A `[review.programs.<name>]` as read so far: its header's line and
+/// name and each key's value, checked whole by [`Self::finish`].
+#[derive(Default)]
+struct ProgramTable {
+    line: usize,
+    name: String,
+    keys: Vec<String>,
+    command: Option<Vec<String>>,
+    script: Option<String>,
+    args: Option<Vec<String>>,
+    paths: Option<Vec<String>>,
+    timeout_secs: Option<u64>,
+}
+
+impl ProgramTable {
+    /// Read `key = rest` of line `number`.
+    fn entry(&mut self, number: usize, key: &str, rest: &str) -> Result<()> {
+        ensure!(
+            REVIEW_PROGRAM_KEYS.contains(&key),
+            "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_PROGRAMS_PREFIX}{}]; the keys are {}",
+            self.name,
+            REVIEW_PROGRAM_KEYS.join(", ")
+        );
+        ensure!(
+            !self.keys.iter().any(|existing| existing == key),
+            "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+        );
+        self.keys.push(key.to_owned());
+        let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+        match key {
+            "command" => {
+                let command = parse_string_array(rest).with_context(with)?;
+                ensure!(
+                    command
+                        .first()
+                        .is_some_and(|program| !program.trim().is_empty()),
+                    "{CONFIG_FILE_NAME}:{number}: {key} of [{REVIEW_PROGRAMS_PREFIX}{}] names no program",
+                    self.name
+                );
+                self.command = Some(command);
+            }
+            "script" => {
+                let path = parse_string(rest).with_context(with)?;
+                review_programs::check_script_path(&path)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(with)?;
+                self.script = Some(path);
+            }
+            "args" => self.args = Some(parse_string_array(rest).with_context(with)?),
+            "paths" => {
+                let globs = parse_string_array(rest).with_context(with)?;
+                ensure!(
+                    !globs.is_empty(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} of [{REVIEW_PROGRAMS_PREFIX}{}] names no glob",
+                    self.name
+                );
+                validate_path_globs(&globs).with_context(with)?;
+                self.paths = Some(dedup_globs(&globs));
+            }
+            _ => {
+                let secs = parse_positive(rest, "number of seconds").with_context(with)?;
+                self.timeout_secs = Some(u64::try_from(secs).with_context(with)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// The program the table names: `paths` and one of `command` and
+    /// `script` are required, and `args` goes with `script` only.
+    fn finish(self) -> Result<ReviewProgram> {
+        let Self { line, name, .. } = &self;
+        let table = format!("{CONFIG_FILE_NAME}:{line}: [{REVIEW_PROGRAMS_PREFIX}{name}]");
+        let run = match (self.command, self.script) {
+            (Some(command), None) => {
+                ensure!(
+                    self.args.is_none(),
+                    "{table} has args without script; put the arguments in command"
+                );
+                ProgramRun::Command(command)
+            }
+            (None, Some(path)) => ProgramRun::Script {
+                path,
+                args: self.args.unwrap_or_default(),
+            },
+            (Some(_), Some(_)) => bail!("{table} has both command and script; give one"),
+            (None, None) => bail!("{table} has neither command nor script"),
+        };
+        Ok(ReviewProgram {
+            run,
+            paths: self
+                .paths
+                .with_context(|| format!("{table} has no paths"))?,
+            timeout_secs: self.timeout_secs,
+            name: self.name,
+        })
+    }
 }
 
 /// A key as written: bare, or a TOML string (`"src-domain"`).
@@ -1740,6 +1895,9 @@ impl Verifier for ShellVerifier {
     fn review_subagents_in(&self, text: &str) -> Result<Vec<ReviewSubagent>> {
         Ok(parse_config(text)?.review_subagents)
     }
+    fn review_programs_in(&self, text: &str) -> Result<Vec<ReviewProgram>> {
+        Ok(parse_config(text)?.review_programs)
+    }
     fn headless_wrapper_setting(&self) -> Result<Option<HeadlessWrapper>> {
         load_headless_wrapper_setting(&self.checkout)
     }
@@ -1956,6 +2114,127 @@ mod tests {
             1
         );
         assert!(verifier.review_subagents_in("[nope]\n").is_err());
+    }
+
+    /// `[review.programs.<name>]` names a program review: a command or a
+    /// repository script with its arguments, the globs that require it and
+    /// an optional time limit (ADR-t1895-2). A mistake in it is an error
+    /// naming the line; a file without the table, as every older one, reads
+    /// as before with no program.
+    #[test]
+    fn parses_the_review_programs() {
+        let config = parse_config(
+            "[review.programs.fmt]\ncommand = [\"cargo\", \"fmt\", '--check'] # fast\npaths = [\"src/**\", \"src/**\"]\n\
+             [review.programs.\"links\"]\nscript = \"scripts/check-links.sh\"\nargs = [\"--quiet\"]\npaths = ['docs/**']\ntimeout_secs = 30\n\
+             [run.env]\nA = \"1\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.review_programs,
+            [
+                ReviewProgram {
+                    name: "fmt".to_owned(),
+                    run: ProgramRun::Command(vec![
+                        "cargo".to_owned(),
+                        "fmt".to_owned(),
+                        "--check".to_owned()
+                    ]),
+                    paths: vec!["src/**".to_owned()],
+                    timeout_secs: None,
+                },
+                ReviewProgram {
+                    name: "links".to_owned(),
+                    run: ProgramRun::Script {
+                        path: "scripts/check-links.sh".to_owned(),
+                        args: vec!["--quiet".to_owned()],
+                    },
+                    paths: vec!["docs/**".to_owned()],
+                    timeout_secs: Some(30),
+                },
+            ]
+        );
+        assert_eq!(config.run_env, pairs(&[("A", "1")]));
+        for text in [
+            "",
+            "[run.env]\nA = \"1\"\n[review.subagents.a]\npaths = [\"x\"]\n",
+        ] {
+            assert!(parse_config(text).unwrap().review_programs.is_empty());
+        }
+        for (text, error) in [
+            (
+                "[review.programs]\n",
+                "dagq.toml:1: [review.programs] names no program",
+            ),
+            (
+                "[review.programs.Fmt]\n",
+                "dagq.toml:1: program \"Fmt\" of [review.programs.Fmt] is not kebab-case",
+            ),
+            (
+                "[review.programs.a]\ncommand = [\"x\"]\npaths = [\"a\"]\n[review.programs.a]\n",
+                "dagq.toml:4: [review.programs.a] is defined twice",
+            ),
+            (
+                "[review.programs.a]\nglobs = [\"a\"]\n",
+                "dagq.toml:2: unknown key globs in [review.programs.a]; the keys are command, script, args, paths, timeout_secs",
+            ),
+            (
+                "[review.programs.a]\npaths = [\"a\"]\npaths = [\"b\"]\n",
+                "dagq.toml:3: paths is defined twice",
+            ),
+            (
+                "[review.programs.a]\ncommand = []\n",
+                "dagq.toml:2: command of [review.programs.a] names no program",
+            ),
+            (
+                "[review.programs.a]\nscript = \"/bin/sh\"\n",
+                "dagq.toml:2: value of script",
+            ),
+            (
+                "[review.programs.a]\nscript = \"scripts/*.sh\"\n",
+                "dagq.toml:2: value of script",
+            ),
+            (
+                "[review.programs.a]\ncommand = [\"x\"]\npaths = []\n",
+                "dagq.toml:3: paths of [review.programs.a] names no glob",
+            ),
+            (
+                "[review.programs.a]\ncommand = [\"x\"]\ntimeout_secs = 0\n",
+                "dagq.toml:3: value of timeout_secs",
+            ),
+            (
+                "[review.programs.a]\ncommand = [\"x\"]\n[run.env]\n",
+                "dagq.toml:1: [review.programs.a] has no paths",
+            ),
+            (
+                "[review.programs.a]\npaths = [\"a\"]\n",
+                "dagq.toml:1: [review.programs.a] has neither command nor script",
+            ),
+            (
+                "[review.programs.a]\ncommand = [\"x\"]\nscript = \"s.sh\"\npaths = [\"a\"]\n",
+                "dagq.toml:1: [review.programs.a] has both command and script",
+            ),
+            (
+                "[review.programs.a]\ncommand = [\"x\"]\nargs = [\"y\"]\npaths = [\"a\"]\n",
+                "dagq.toml:1: [review.programs.a] has args without script",
+            ),
+        ] {
+            let found = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(found.contains(error), "{text}: {found}");
+        }
+        let verifier = ShellVerifier {
+            checkout: PathBuf::from("/nonexistent"),
+            db: PathBuf::from("/nonexistent/queue.db"),
+            user_config: None,
+            verification_timeout: Duration::from_secs(1),
+        };
+        assert_eq!(
+            verifier
+                .review_programs_in("[review.programs.a]\ncommand = [\"x\"]\npaths = [\"a\"]\n")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(verifier.review_programs_in("[nope]\n").is_err());
     }
 
     /// `[e2e] paths` names the globs whose change requires e2e

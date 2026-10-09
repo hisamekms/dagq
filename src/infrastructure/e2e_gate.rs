@@ -22,7 +22,9 @@
 //! host, so it is not given the environment of the process that starts it
 //! (the supervisor, or the shell of `install`): its environment is cleared
 //! and only [`PASSED_ENV`] and [`PASSED_PREFIXES`] of it are given back,
-//! never a credential ([`credential`]), with the `[run.env]` and the gate's
+//! never a credential ([`credential`]) but cmux's socket password, through
+//! the narrowing the review's program job shares
+//! ([`super::passed_env`]), with the `[run.env]` and the gate's
 //! own over them (ADR-t1233-2's Consequences). The log names what was
 //! passed, never the values.
 
@@ -45,6 +47,8 @@ use crate::application::install::CMUX_E2E;
 use crate::application::install::{E2eOutcome, E2eRerun, E2eSettings, E2eSkip};
 use crate::domain::e2e_quarantine::{self, QuarantineFile};
 use crate::infrastructure::adapters::unpiped_output_within;
+use crate::infrastructure::passed_env::PassedEnv;
+pub use crate::infrastructure::passed_env::credential;
 
 /// How long one cmux call of the gate (`ping`, a group's listing or
 /// deletion) and the `ps` of the cleanup may take.
@@ -93,33 +97,18 @@ pub const PASSED_PREFIXES: &[&str] = &["LC_", "CMUX_"];
 /// given it runs without the e2e that need cmux (ADR-t2105-1).
 pub const CMUX_SOCKET_PASSWORD: &str = "CMUX_SOCKET_PASSWORD";
 
-/// The words that make a variable's name a credential's.
-const CREDENTIAL_WORDS: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "KEY"];
-
-/// The credentials named without one of [`CREDENTIAL_WORDS`].
-const CREDENTIAL_NAMES: &[&str] = &[
-    "SSH_AUTH_SOCK",
-    "SSH_ASKPASS",
-    "GIT_ASKPASS",
-    "SUDO_ASKPASS",
-];
-
-/// Whether `name` names a credential, which the e2e is never given from
-/// the starting process, though it be passed by name or prefix.
-pub fn credential(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    CREDENTIAL_NAMES.contains(&upper.as_str())
-        || CREDENTIAL_WORDS.iter().any(|word| upper.contains(word))
-}
+/// What the e2e is given of the starting process's environment: the
+/// common narrowing (ADR-t1895-2 decision 6) with [`PASSED_ENV`],
+/// [`PASSED_PREFIXES`] and the one exception [`CMUX_SOCKET_PASSWORD`].
+const GATE_ENV: PassedEnv<'static> = PassedEnv {
+    names: PASSED_ENV,
+    prefixes: PASSED_PREFIXES,
+    exceptions: &[CMUX_SOCKET_PASSWORD],
+};
 
 /// Whether the starting process's `name` is given to the e2e.
 pub fn passed(name: &str) -> bool {
-    name == CMUX_SOCKET_PASSWORD
-        || ((PASSED_ENV.contains(&name)
-            || PASSED_PREFIXES
-                .iter()
-                .any(|prefix| name.starts_with(prefix)))
-            && !credential(name))
+    GATE_ENV.passes(name)
 }
 
 /// What of `inherited` the e2e is given, as [`passed`] says; a name that is
@@ -127,10 +116,7 @@ pub fn passed(name: &str) -> bool {
 fn passed_env(
     inherited: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> BTreeMap<OsString, OsString> {
-    inherited
-        .into_iter()
-        .filter(|(name, _)| name.to_str().is_some_and(passed))
-        .collect()
+    GATE_ENV.filter(inherited)
 }
 
 /// Run the e2e of `checkout` as the module says; an error is an e2e that

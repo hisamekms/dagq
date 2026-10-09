@@ -171,7 +171,8 @@ pub use self::handoff::SUPERVISOR_HANDED_OFF;
 pub(crate) use self::headless::{lock_waiting, provider_failure, write_request};
 pub use self::host_metrics::HostMetricsPort;
 pub use self::jobs::{
-    HeadlessJob, JobEnds, JobFailed, JobPorts, JobSubject, record_job, start_program_job,
+    HeadlessJob, JobEnds, JobFailed, JobPorts, JobSubject, PROGRAM_OUTPUT_TAIL, ProgramEnd,
+    record_job, start_program_job, start_review_program,
 };
 pub use self::queue_service::{
     QUEUE_SERVICE_INTERVAL, QUEUE_SERVICE_RESTART_WINDOW, QUEUE_SERVICE_RESTARTS,

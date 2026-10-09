@@ -1597,6 +1597,16 @@ pub trait Verifier {
         let _ = text;
         Ok(Vec::new())
     }
+    /// The program reviews (`[review.programs.<name>]`, ADR-t1895-2) of
+    /// `text`, a whole `dagq.toml` as committed; `Err` when it cannot be
+    /// parsed. None by default.
+    fn review_programs_in(
+        &self,
+        text: &str,
+    ) -> Result<Vec<crate::domain::review_programs::ReviewProgram>> {
+        let _ = text;
+        Ok(Vec::new())
+    }
     /// `[headless] wrapper` as `dagq.toml` writes it, `None` without the
     /// key: only to tell that a worker and a planner of the runtime's
     /// ignore `"workspace"` (ADR-t1433-3 decision 2, ADR-t1433-2 decision
@@ -1626,4 +1636,24 @@ pub trait Verifier {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<Exit>;
+}
+
+/// Where a run review's program jobs run (ADR-t1895-2 decision 5), one
+/// implementation per backend of the review's actor: the command that runs
+/// a program against the run's worktree. Today the host
+/// (`infrastructure::review_programs::HostPrograms`); a backend decided but
+/// not implemented is an error to start, never the host instead.
+pub trait ReviewProgramBackend: Send + Sync {
+    /// The command that runs `program` with the run's `worktree` as its
+    /// working directory and an environment narrowed to what a read-only
+    /// check needs, no credential among it (decision 6). What it needs
+    /// written first (a script's committed text) goes under `scratch`, a
+    /// directory of the attempt the runtime owns, outside the worktree and
+    /// the run's directory, which the worker can write.
+    fn command(
+        &self,
+        program: &super::super::review_programs::SnapshotProgram,
+        worktree: &Path,
+        scratch: &Path,
+    ) -> Result<CommandSpec>;
 }

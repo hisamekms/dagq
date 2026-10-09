@@ -52,7 +52,7 @@ e2eはworkerが流さず、reviewがpassしたrun（`land`の答え・jobの`lan
 - **引き継ぎ**: 流している段は組み立て直せないので、handoffは終わるのを待ち、始まっていないrunは組み立て直せる待ちの段に置く。
 - **環境**（ADR-t1233-2のConsequences）: この工程はworkerが書いたコードをhostで動かすので、起こしたprocessのenvを消し、許す名前と`[run.env]`と関門が置くものだけを渡す。
   資格情報は許す名前に当たっても渡さず、例外はcmuxのsocketのpasswordだけ。
-  許す名前・接頭辞・資格情報の判定と理由は`e2e_gate.rs`の`PASSED_ENV`・`PASSED_PREFIXES`・`credential`が持つ。
+  許す名前・接頭辞と理由は`e2e_gate.rs`の`PASSED_ENV`・`PASSED_PREFIXES`、絞り方と資格情報の判定はprogramのreviewと共通の`passed_env.rs`の`PassedEnv`・`credential`が持つ。
   落とし穴: 許す名前が足りない版が着地して固定バイナリが入れ替わると、runのe2eが始められず`check the e2e host`が続くか、道具が見つからず`e2e_failed`でworkerに返り、自動更新の関門も落ちうる。
   そのときはlogの`== the env passed`の行とe2eの出力で足りない名前を見て、`dagq install --rollback`で戻し、許す名前を足すtaskを登録する。
 - **見え方**: `stats`の`land_phases`の`e2e_wait`と`e2e`（[Stats](stats.md)）、`timeline`の空白の理由（[Timeline](timeline.md)）。
