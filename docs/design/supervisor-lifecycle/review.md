@@ -201,14 +201,17 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 [ADR-t1895-2](../../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)の部品。
 reviewの段への接続（落ちたらagentを動かさず差し戻す）はまだ無く、今のreviewはprogramを動かさない。
 
-- **snapshot**: 試行ごとにlanding branchの今のcommitのtreeから`[review.programs.<name>]`（書式は[Run environment](run-environment.md)）と、`script`ならその中身を読み、範囲の変えたpathで選ぶ（`application::review_programs::snapshot_programs`）。
+- **snapshot**: 試行ごとにlanding branchの今のcommitのtreeから`[review.programs.<name>]`（書式は[Run environment](run-environment.md)）とその`script`の中身を読み、範囲の変えたpathで選ぶ（`application::review_programs::snapshot_programs`）。
   worktreeとmain checkoutのファイルは読まず、workerが変えた設定やscriptは着地するまで効かない。
-  scriptは読んだ中身をworkerが書けない場所に書き出して実行する（`command`がrepositoryのfileを名指せばworktreeの版が動く）。
+  scriptは読んだ中身をworkerが書けない場所に書き出して実行する。
+  programは`script`でだけ名指し、外のツールはscriptから`exec`する（理由は`ReviewProgram`）。
+  scriptがcwdから別のscriptを呼べばworktreeの版が動き、runtimeは検出しない。
 - **流す場所**: `ReviewProgramBackend`のportで、今の実装はhost（`infrastructure::review_programs::HostPrograms`）。
   cwdはrunのworktreeで、`start_review_program`がprogramのjobとして起動する。
 - **env**: 起動元のenvを消し、e2eの関門と共通の部品（`passed_env::PassedEnv`）で絞る。
   資格情報の除外は常に効き、programのjobは例外もcmuxの接頭辞も持たない。
   cmuxのsocketのpassword・`CMUX_*`・queue serviceとbrokerに届く`DAGQ_*`は渡らない。
+  `PATH`からは空・相対の項目と、runのworktree・run dir・main checkoutとその下を指す項目を除く（`review_programs::narrowed_path`）。
 - **結果**: `HeadlessJob::poll_program`が終了のstatusとstdout・stderrの末尾を返す。
   時間の上限（programの`timeout_secs`、無ければ`[review.jobs]`）を超えればprocess groupごと止め、statusは無い。
 

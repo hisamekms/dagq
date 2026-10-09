@@ -70,7 +70,7 @@ use crate::{
         provider_switch::ProviderFallback,
         recheck::RecheckConfig,
         resume::ResumeConfig,
-        review_programs::{self, ProgramRun, ReviewProgram},
+        review_programs::{self, ReviewProgram},
         review_subagents::{self, ReviewSubagent},
         run_env::{RunEnvCheck, RunEnvProgram},
         scope::{dedup_globs, validate_path_globs},
@@ -153,11 +153,11 @@ const REVIEW_PROGRAMS_PREFIX: &str = "review.programs.";
 /// What [`parse_config`] calls the current table while in a
 /// `[review.programs.*]`.
 const REVIEW_PROGRAMS_TABLE: &str = review_programs::SECTION;
-/// The keys of `[review.programs.<name>]`: `command` (an array, the
-/// program and its arguments) or `script` (a repository path) with an
-/// optional `args` array, `paths` (the globs, required) and an optional
-/// `timeout_secs`; what each means is on [`ReviewProgram`].
-const REVIEW_PROGRAM_KEYS: [&str; 5] = ["command", "script", "args", "paths", "timeout_secs"];
+/// The keys of `[review.programs.<name>]`: `script` (a repository path,
+/// required) with an optional `args` array, `paths` (the globs, required)
+/// and an optional `timeout_secs`; what each means is on
+/// [`ReviewProgram`].
+const REVIEW_PROGRAM_KEYS: [&str; 4] = ["script", "args", "paths", "timeout_secs"];
 /// `[headless]`: `wrapper`, where a headless session's wrapper runs
 /// (ADR-t1404-1 decision 7).
 const HEADLESS_TABLE: &str = "headless";
@@ -1116,7 +1116,6 @@ struct ProgramTable {
     line: usize,
     name: String,
     keys: Vec<String>,
-    command: Option<Vec<String>>,
     script: Option<String>,
     args: Option<Vec<String>>,
     paths: Option<Vec<String>>,
@@ -1126,6 +1125,11 @@ struct ProgramTable {
 impl ProgramTable {
     /// Read `key = rest` of line `number`.
     fn entry(&mut self, number: usize, key: &str, rest: &str) -> Result<()> {
+        ensure!(
+            key != "command",
+            "{CONFIG_FILE_NAME}:{number}: [{REVIEW_PROGRAMS_PREFIX}{}] has command, which is not read: write the program as a repository script with script (and args), which runs from the landing branch's commit and execs an outside tool",
+            self.name
+        );
         ensure!(
             REVIEW_PROGRAM_KEYS.contains(&key),
             "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_PROGRAMS_PREFIX}{}]; the keys are {}",
@@ -1139,17 +1143,6 @@ impl ProgramTable {
         self.keys.push(key.to_owned());
         let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
         match key {
-            "command" => {
-                let command = parse_string_array(rest).with_context(with)?;
-                ensure!(
-                    command
-                        .first()
-                        .is_some_and(|program| !program.trim().is_empty()),
-                    "{CONFIG_FILE_NAME}:{number}: {key} of [{REVIEW_PROGRAMS_PREFIX}{}] names no program",
-                    self.name
-                );
-                self.command = Some(command);
-            }
             "script" => {
                 let path = parse_string(rest).with_context(with)?;
                 review_programs::check_script_path(&path)
@@ -1176,28 +1169,15 @@ impl ProgramTable {
         Ok(())
     }
 
-    /// The program the table names: `paths` and one of `command` and
-    /// `script` are required, and `args` goes with `script` only.
+    /// The program the table names: `script` and `paths` are required.
     fn finish(self) -> Result<ReviewProgram> {
         let Self { line, name, .. } = &self;
         let table = format!("{CONFIG_FILE_NAME}:{line}: [{REVIEW_PROGRAMS_PREFIX}{name}]");
-        let run = match (self.command, self.script) {
-            (Some(command), None) => {
-                ensure!(
-                    self.args.is_none(),
-                    "{table} has args without script; put the arguments in command"
-                );
-                ProgramRun::Command(command)
-            }
-            (None, Some(path)) => ProgramRun::Script {
-                path,
-                args: self.args.unwrap_or_default(),
-            },
-            (Some(_), Some(_)) => bail!("{table} has both command and script; give one"),
-            (None, None) => bail!("{table} has neither command nor script"),
-        };
         Ok(ReviewProgram {
-            run,
+            script: self
+                .script
+                .with_context(|| format!("{table} has no script"))?,
+            args: self.args.unwrap_or_default(),
             paths: self
                 .paths
                 .with_context(|| format!("{table} has no paths"))?,
@@ -2116,15 +2096,17 @@ mod tests {
         assert!(verifier.review_subagents_in("[nope]\n").is_err());
     }
 
-    /// `[review.programs.<name>]` names a program review: a command or a
-    /// repository script with its arguments, the globs that require it and
-    /// an optional time limit (ADR-t1895-2). A mistake in it is an error
-    /// naming the line; a file without the table, as every older one, reads
-    /// as before with no program.
+    /// `[review.programs.<name>]` names a program review: a repository
+    /// script with its arguments, the globs that require it and an
+    /// optional time limit (ADR-t1895-2). A mistake in it is an error
+    /// naming the line; `command`, which would name a program the worker's
+    /// worktree can supply, is one that says to write a script; a file
+    /// without the table, as every older one, reads as before with no
+    /// program.
     #[test]
     fn parses_the_review_programs() {
         let config = parse_config(
-            "[review.programs.fmt]\ncommand = [\"cargo\", \"fmt\", '--check'] # fast\npaths = [\"src/**\", \"src/**\"]\n\
+            "[review.programs.fmt]\nscript = \"scripts/fmt.sh\" # fast\npaths = [\"src/**\", \"src/**\"]\n\
              [review.programs.\"links\"]\nscript = \"scripts/check-links.sh\"\nargs = [\"--quiet\"]\npaths = ['docs/**']\ntimeout_secs = 30\n\
              [run.env]\nA = \"1\"\n",
         )
@@ -2134,20 +2116,15 @@ mod tests {
             [
                 ReviewProgram {
                     name: "fmt".to_owned(),
-                    run: ProgramRun::Command(vec![
-                        "cargo".to_owned(),
-                        "fmt".to_owned(),
-                        "--check".to_owned()
-                    ]),
+                    script: "scripts/fmt.sh".to_owned(),
+                    args: Vec::new(),
                     paths: vec!["src/**".to_owned()],
                     timeout_secs: None,
                 },
                 ReviewProgram {
                     name: "links".to_owned(),
-                    run: ProgramRun::Script {
-                        path: "scripts/check-links.sh".to_owned(),
-                        args: vec!["--quiet".to_owned()],
-                    },
+                    script: "scripts/check-links.sh".to_owned(),
+                    args: vec!["--quiet".to_owned()],
                     paths: vec!["docs/**".to_owned()],
                     timeout_secs: Some(30),
                 },
@@ -2170,20 +2147,24 @@ mod tests {
                 "dagq.toml:1: program \"Fmt\" of [review.programs.Fmt] is not kebab-case",
             ),
             (
-                "[review.programs.a]\ncommand = [\"x\"]\npaths = [\"a\"]\n[review.programs.a]\n",
+                "[review.programs.a]\nscript = \"s.sh\"\npaths = [\"a\"]\n[review.programs.a]\n",
                 "dagq.toml:4: [review.programs.a] is defined twice",
             ),
             (
                 "[review.programs.a]\nglobs = [\"a\"]\n",
-                "dagq.toml:2: unknown key globs in [review.programs.a]; the keys are command, script, args, paths, timeout_secs",
+                "dagq.toml:2: unknown key globs in [review.programs.a]; the keys are script, args, paths, timeout_secs",
             ),
             (
                 "[review.programs.a]\npaths = [\"a\"]\npaths = [\"b\"]\n",
                 "dagq.toml:3: paths is defined twice",
             ),
             (
-                "[review.programs.a]\ncommand = []\n",
-                "dagq.toml:2: command of [review.programs.a] names no program",
+                "[review.programs.a]\ncommand = [\"cargo\", \"fmt\"]\npaths = [\"a\"]\n",
+                "dagq.toml:2: [review.programs.a] has command, which is not read: write the program as a repository script with script",
+            ),
+            (
+                "[review.programs.a]\nscript = \"s.sh\"\ncommand = [\"x\"]\npaths = [\"a\"]\n",
+                "dagq.toml:3: [review.programs.a] has command",
             ),
             (
                 "[review.programs.a]\nscript = \"/bin/sh\"\n",
@@ -2194,28 +2175,24 @@ mod tests {
                 "dagq.toml:2: value of script",
             ),
             (
-                "[review.programs.a]\ncommand = [\"x\"]\npaths = []\n",
+                "[review.programs.a]\nscript = \"s.sh\"\npaths = []\n",
                 "dagq.toml:3: paths of [review.programs.a] names no glob",
             ),
             (
-                "[review.programs.a]\ncommand = [\"x\"]\ntimeout_secs = 0\n",
+                "[review.programs.a]\nscript = \"s.sh\"\ntimeout_secs = 0\n",
                 "dagq.toml:3: value of timeout_secs",
             ),
             (
-                "[review.programs.a]\ncommand = [\"x\"]\n[run.env]\n",
+                "[review.programs.a]\nscript = \"s.sh\"\n[run.env]\n",
                 "dagq.toml:1: [review.programs.a] has no paths",
             ),
             (
                 "[review.programs.a]\npaths = [\"a\"]\n",
-                "dagq.toml:1: [review.programs.a] has neither command nor script",
+                "dagq.toml:1: [review.programs.a] has no script",
             ),
             (
-                "[review.programs.a]\ncommand = [\"x\"]\nscript = \"s.sh\"\npaths = [\"a\"]\n",
-                "dagq.toml:1: [review.programs.a] has both command and script",
-            ),
-            (
-                "[review.programs.a]\ncommand = [\"x\"]\nargs = [\"y\"]\npaths = [\"a\"]\n",
-                "dagq.toml:1: [review.programs.a] has args without script",
+                "[review.programs.a]\nargs = [\"y\"]\npaths = [\"a\"]\n",
+                "dagq.toml:1: [review.programs.a] has no script",
             ),
         ] {
             let found = format!("{:#}", parse_config(text).unwrap_err());
@@ -2229,7 +2206,7 @@ mod tests {
         };
         assert_eq!(
             verifier
-                .review_programs_in("[review.programs.a]\ncommand = [\"x\"]\npaths = [\"a\"]\n")
+                .review_programs_in("[review.programs.a]\nscript = \"s.sh\"\npaths = [\"a\"]\n")
                 .unwrap()
                 .len(),
             1

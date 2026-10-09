@@ -333,7 +333,7 @@ pub fn start_review_program(
     let name = &program.program.name;
     let stem = format!("review-program-{attempt}-{name}");
     let command = backend
-        .command(program, worktree, &scratch.join(&stem))
+        .command(program, worktree, output, &scratch.join(&stem))
         .with_context(|| format!("prepare the review program {name}"))?;
     let timeout = program
         .program

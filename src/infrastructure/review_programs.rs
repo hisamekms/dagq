@@ -3,20 +3,22 @@
 //! its working directory and the narrowed environment of
 //! [`PROGRAM_ENV`]. A script runs from a copy of its text at the landing
 //! branch's commit written under the attempt's scratch directory, never
-//! from the worktree, so a worker's change to it does not run.
+//! from the worktree, and the `PATH` it is given names neither the run's
+//! worktree and directory nor the main checkout ([`narrowed_path`]), so a
+//! worker's change to the script or a program put there does not run.
 
 use anyhow::{Context, Result};
 use std::{
-    ffi::OsString,
+    env,
+    ffi::{OsStr, OsString},
     fs,
     io::Write,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use super::passed_env::PassedEnv;
 use crate::application::{CommandSpec, ReviewProgramBackend, review_programs::SnapshotProgram};
-use crate::domain::review_programs::ProgramRun;
 
 /// What a program job is given of the supervisor's environment: what a
 /// shell and the format checkers of cargo and rustup need to find their
@@ -45,28 +47,28 @@ pub const PROGRAM_ENV: PassedEnv<'static> = PassedEnv {
 };
 
 /// Runs the program jobs on the host, given the environment of `inherited`
-/// narrowed by [`PROGRAM_ENV`].
+/// narrowed by [`PROGRAM_ENV`] and its `PATH` by [`narrowed_path`] with
+/// `repository`, the main checkout's root, among what it leaves out.
 pub struct HostPrograms {
+    repository: PathBuf,
     inherited: Vec<(OsString, OsString)>,
 }
 
 impl HostPrograms {
     /// With this process's environment.
-    pub fn new() -> Self {
-        Self::inheriting(std::env::vars_os())
+    pub fn new(repository: impl Into<PathBuf>) -> Self {
+        Self::inheriting(repository, env::vars_os())
     }
 
     /// With `inherited` as the starting process's environment.
-    pub fn inheriting(inherited: impl IntoIterator<Item = (OsString, OsString)>) -> Self {
+    pub fn inheriting(
+        repository: impl Into<PathBuf>,
+        inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Self {
         Self {
+            repository: repository.into(),
             inherited: inherited.into_iter().collect(),
         }
-    }
-}
-
-impl Default for HostPrograms {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -75,32 +77,62 @@ impl ReviewProgramBackend for HostPrograms {
         &self,
         program: &SnapshotProgram,
         worktree: &Path,
+        run_dir: &Path,
         scratch: &Path,
     ) -> Result<CommandSpec> {
-        let mut command = match &program.program.run {
-            ProgramRun::Command(argv) => {
-                let (name, args) = argv
-                    .split_first()
-                    .context("the program's command names no program")?;
-                let mut command = CommandSpec::new(name);
-                command.args(args);
-                command
-            }
-            ProgramRun::Script { path, args } => {
-                let text = program.script.as_deref().with_context(|| {
-                    format!("the script {path} was not read from the landing branch")
-                })?;
-                let mut command = CommandSpec::new(write_script(scratch, path, text)?);
-                command.args(args);
-                command
-            }
-        };
-        command
-            .env_clear()
-            .envs(PROGRAM_ENV.filter(self.inherited.iter().cloned()))
-            .current_dir(worktree);
+        let path = &program.program.script;
+        let mut command = CommandSpec::new(write_script(scratch, path, &program.script)?);
+        command.args(&program.program.args);
+        let mut given = PROGRAM_ENV.filter(self.inherited.iter().cloned());
+        if let Some(value) = given.remove(OsStr::new("PATH"))
+            && let Some(narrowed) = narrowed_path(&value, &[worktree, run_dir, &self.repository])
+        {
+            given.insert("PATH".into(), narrowed);
+        }
+        command.env_clear().envs(given).current_dir(worktree);
         Ok(command)
     }
+}
+
+/// `path`, a `PATH`'s value, without the entries that could name a program
+/// the worker put there: an empty or relative one (found from the working
+/// directory, the run's worktree) and one in or under one of `roots` (the
+/// run's worktree and directory and the main checkout), as written or with
+/// its links resolved. `None` when no entry is left: an empty `PATH` would
+/// search the working directory, and none makes a shell use its default.
+pub fn narrowed_path(path: &OsStr, roots: &[&Path]) -> Option<OsString> {
+    let roots: Vec<PathBuf> = roots
+        .iter()
+        .flat_map(|root| [Some(lexical(root)), root.canonicalize().ok()])
+        .flatten()
+        .collect();
+    let kept: Vec<PathBuf> = env::split_paths(path)
+        .filter(|entry| {
+            entry.is_absolute()
+                && ![Some(lexical(entry)), entry.canonicalize().ok()]
+                    .iter()
+                    .flatten()
+                    .any(|form| roots.iter().any(|root| form.starts_with(root)))
+        })
+        .collect();
+    (!kept.is_empty()).then(|| env::join_paths(kept).expect("the entries came from one PATH"))
+}
+
+/// An absolute `path` with its `.` and `..` resolved by their words, not
+/// the file system, so `/runs/r/worktree/../worktree/bin` is under
+/// `/runs/r/worktree`.
+fn lexical(path: &Path) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+    resolved
 }
 
 /// Write the committed `text` of the script `path` to a new `scratch`
@@ -140,18 +172,18 @@ fn write_script(scratch: &Path, path: &str, text: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::domain::review_programs::ReviewProgram;
-    use std::ffi::OsStr;
 
-    fn snapshot(run: ProgramRun, script: Option<&str>) -> SnapshotProgram {
+    fn snapshot(text: &str) -> SnapshotProgram {
         SnapshotProgram {
             program: ReviewProgram {
                 name: "check".to_owned(),
-                run,
+                script: "scripts/check.sh".to_owned(),
+                args: vec!["--quiet".to_owned()],
                 paths: vec!["**".to_owned()],
                 timeout_secs: None,
             },
             matched: vec!["a".to_owned()],
-            script: script.map(str::to_owned),
+            script: text.to_owned(),
         }
     }
 
@@ -180,6 +212,17 @@ mod tests {
         .to_vec()
     }
 
+    fn command(inherited: Vec<(OsString, OsString)>, scratch: &Path, text: &str) -> CommandSpec {
+        HostPrograms::inheriting("/repo", inherited)
+            .command(
+                &snapshot(text),
+                Path::new("/runs/r/worktree"),
+                Path::new("/runs/r"),
+                scratch,
+            )
+            .unwrap()
+    }
+
     /// A program job is given no credential (ADR-t1895-2 decision 6): not
     /// cmux's socket password or any `CMUX_*`, which the e2e gate is given,
     /// nor what reaches the queue service or a broker, though the
@@ -188,16 +231,7 @@ mod tests {
     #[test]
     fn a_program_job_is_given_no_credential_and_no_cmux_or_queue() {
         let scratch = tempfile::tempdir().unwrap();
-        let command = HostPrograms::inheriting(inherited())
-            .command(
-                &snapshot(
-                    ProgramRun::Command(vec!["cargo".to_owned(), "fmt".to_owned()]),
-                    None,
-                ),
-                Path::new("/runs/r/worktree"),
-                scratch.path(),
-            )
-            .unwrap();
+        let command = command(inherited(), scratch.path(), "#!/bin/sh\n");
         assert!(command.get_env_clear());
         let given: Vec<&OsStr> = command.get_envs().map(|(name, _)| name).collect();
         assert_eq!(given, ["HOME", "LC_ALL", "PATH", "TMPDIR"]);
@@ -213,36 +247,79 @@ mod tests {
         ] {
             assert!(!PROGRAM_ENV.passes(name), "{name}");
         }
-        assert_eq!(command.get_program(), "cargo");
-        assert_eq!(command.get_args().collect::<Vec<_>>(), ["fmt"]);
         assert_eq!(
             command.get_current_dir(),
             Some(Path::new("/runs/r/worktree"))
         );
     }
 
+    /// The `PATH` a program job is given keeps the absolute entries
+    /// outside the worker's reach and leaves out an empty or relative one
+    /// and one in or under the run's worktree, the run's directory or the
+    /// main checkout, as written, through `..`, or through a link; with
+    /// nothing left the job is given no `PATH`.
+    #[test]
+    fn a_program_jobs_path_names_nothing_the_worker_can_write() {
+        let root = tempfile::tempdir().unwrap();
+        let run_dir = root.path().join("runs/r");
+        let worktree = run_dir.join("worktree");
+        let repository = root.path().join("repo");
+        let host = root.path().join("host/bin");
+        for dir in [&worktree.join("bin"), &repository.join("bin"), &host] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(worktree.join("bin"), &link).unwrap();
+        let entries = [
+            "/usr/bin".to_owned(),
+            String::new(),
+            ".".to_owned(),
+            "bin".to_owned(),
+            "./target/debug".to_owned(),
+            worktree.display().to_string(),
+            worktree.join("bin").display().to_string(),
+            run_dir.join("tools").display().to_string(),
+            repository.join("bin").display().to_string(),
+            root.path().join("host/../repo/bin").display().to_string(),
+            format!("{}/../worktree/bin", worktree.display()),
+            link.display().to_string(),
+            host.display().to_string(),
+            "/bin".to_owned(),
+        ];
+        let path = OsString::from(entries.join(":"));
+        let narrowed = narrowed_path(&path, &[&worktree, &run_dir, &repository]).unwrap();
+        assert_eq!(
+            narrowed,
+            OsString::from(format!("/usr/bin:{}:/bin", host.display()))
+        );
+        assert_eq!(
+            narrowed_path(OsStr::new(".::bin"), &[&worktree, &run_dir]),
+            None
+        );
+        let mut without = inherited();
+        without.retain(|(name, _)| name != "PATH");
+        without.push(("PATH".into(), ".:/runs/r/worktree/bin:/repo/x".into()));
+        let scratch = tempfile::tempdir().unwrap();
+        let given = command(without, scratch.path(), "#!/bin/sh\n");
+        assert!(given.get_envs().all(|(name, _)| name != "PATH"));
+        let given = command(inherited(), scratch.path(), "#!/bin/sh\n");
+        assert!(
+            given
+                .get_envs()
+                .any(|(name, value)| name == "PATH" && value == Some(OsStr::new("/usr/bin:/bin")))
+        );
+    }
+
     /// A script runs from its committed text written under the scratch
     /// directory, executable, with its arguments; what an earlier attempt
     /// left there is replaced, and a link put in the scratch's place is
-    /// removed, never followed. One whose text was not read is an error.
+    /// removed, never followed.
     #[test]
     fn a_script_runs_from_its_committed_text_outside_the_worktree() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let scratch = root.path().join("review-program-1-check");
-        let run = ProgramRun::Script {
-            path: "scripts/check.sh".to_owned(),
-            args: vec!["--quiet".to_owned()],
-        };
-        let write = |text: &str| {
-            HostPrograms::inheriting(inherited())
-                .command(
-                    &snapshot(run.clone(), Some(text)),
-                    Path::new("/runs/r/worktree"),
-                    &scratch,
-                )
-                .unwrap()
-        };
+        let write = |text: &str| command(inherited(), &scratch, text);
         let file = scratch.join("check.sh");
         let command = write("#!/bin/sh\necho first\n");
         assert_eq!(command.get_program(), file.as_os_str());
@@ -264,11 +341,6 @@ mod tests {
         assert_eq!(
             fs::read_to_string(elsewhere.join("check.sh")).unwrap(),
             "kept"
-        );
-        assert!(
-            HostPrograms::inheriting(inherited())
-                .command(&snapshot(run, None), Path::new("/w"), &scratch)
-                .is_err()
         );
     }
 }

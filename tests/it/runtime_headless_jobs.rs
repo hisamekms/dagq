@@ -9,7 +9,7 @@ use dagq::application::supervise::{
     JobEnds, JobFailed, JobPorts, JobSubject, PROGRAM_OUTPUT_TAIL, ProgramEnd, start_program_job,
     start_review_program,
 };
-use dagq::domain::review_programs::{ProgramRun, ReviewProgram};
+use dagq::domain::review_programs::ReviewProgram;
 use dagq::domain::{EventKind, LeaseToken};
 use dagq::infrastructure::adapters::SystemProcesses;
 use dagq::infrastructure::review_programs::HostPrograms;
@@ -484,18 +484,19 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
     ] {
         inherited.push((name.into(), value.into()));
     }
-    let backend = HostPrograms::inheriting(inherited);
+    let backend = HostPrograms::inheriting(dir.path().join("repo"), inherited);
     let run = RunId::new("run-1").unwrap();
-    let start = |name: &str, run_as: ProgramRun, script: Option<&str>, timeout: Option<u64>| {
+    let start = |name: &str, args: &[&str], script: &str, timeout: Option<u64>| {
         let program = SnapshotProgram {
             program: ReviewProgram {
                 name: name.to_owned(),
-                run: run_as,
+                script: "scripts/check.sh".to_owned(),
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
                 paths: vec!["**".to_owned()],
                 timeout_secs: timeout,
             },
             matched: vec!["a".to_owned()],
-            script: script.map(str::to_owned),
+            script: script.to_owned(),
         };
         start_review_program(
             &ports,
@@ -511,11 +512,8 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
     };
     let mut check = start(
         "check",
-        ProgramRun::Script {
-            path: "scripts/check.sh".to_owned(),
-            args: vec!["arg".to_owned()],
-        },
-        Some("#!/bin/sh\necho main\\'s check \"$1\"; pwd -P; env | sort; echo oops >&2; exit 3\n"),
+        &["arg"],
+        "#!/bin/sh\necho main\\'s check \"$1\"; pwd -P; env | sort; echo oops >&2; exit 3\n",
         None,
     );
     let end = program_ended(&mut check);
@@ -540,15 +538,11 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
     let pid_file = dir.path().join("child.pid");
     let mut slow = start(
         "slow",
-        ProgramRun::Command(vec![
-            "/bin/sh".to_owned(),
-            "-c".to_owned(),
-            format!(
-                "seq 1 2000; (sleep 120 & echo $! > {}); sleep 120",
-                shell_path(&pid_file)
-            ),
-        ]),
-        None,
+        &[],
+        &format!(
+            "#!/bin/sh\nseq 1 2000; (sleep 120 & echo $! > {}); sleep 120\n",
+            shell_path(&pid_file)
+        ),
         Some(3),
     );
     let end = program_ended(&mut slow);
@@ -587,5 +581,141 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
             ("check".to_owned(), Some("ended".to_owned())),
             ("slow".to_owned(), Some("stopped".to_owned()))
         ]
+    );
+}
+
+/// What a program review runs is the landing branch's (ADR-t1895-2
+/// decision 2), whatever the worker did: the run's worktree changed the
+/// committed script and put a program of the name the script calls on
+/// every `PATH` entry it could reach (the working directory, the
+/// worktree, the run's directory, the main checkout), yet the job runs
+/// the script as main has it, which finds the program in the host's
+/// directory.
+#[test]
+fn a_review_program_runs_the_landing_branchs_script_not_the_worktrees() {
+    use dagq::application::review::ReviewRange;
+    use dagq::application::review_programs::snapshot_programs;
+    use dagq::infrastructure::adapters::GitRepository;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let executable = |path: &Path, text: &str| {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "t@example.com"]);
+    git(&repo, &["config", "user.name", "t"]);
+    fs::write(
+        repo.join("dagq.toml"),
+        "[review.programs.check]\nscript = \"scripts/check.sh\"\nargs = [\"src\"]\npaths = [\"src/**\"]\n",
+    )
+    .unwrap();
+    executable(
+        &repo.join("scripts/check.sh"),
+        "#!/bin/sh\necho \"main's check $1\"\nexec tool\n",
+    );
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "main"]);
+    let main = git_out(&repo, &["rev-parse", "HEAD"]);
+    let run_dir = dir.path().join("runs/r");
+    let worktree = run_dir.join("worktree");
+    fs::create_dir_all(&run_dir).unwrap();
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    executable(
+        &worktree.join("scripts/check.sh"),
+        "#!/bin/sh\necho \"the worker's check\"\n",
+    );
+    fs::create_dir_all(worktree.join("src")).unwrap();
+    fs::write(worktree.join("src/a.rs"), "fn a() {}\n").unwrap();
+    git(&worktree, &["add", "."]);
+    git(&worktree, &["commit", "-q", "-m", "work"]);
+    let head = git_out(&worktree, &["rev-parse", "HEAD"]);
+    let host = dir.path().join("host");
+    let mut path = Vec::new();
+    for (place, who) in [
+        (worktree.clone(), "the worktree's"),
+        (worktree.join("bin"), "the worktree's bin's"),
+        (run_dir.join("bin"), "the run directory's"),
+        (repo.join("bin"), "the main checkout's"),
+        (host.clone(), "the host's"),
+    ] {
+        executable(
+            &place.join("tool"),
+            &format!("#!/bin/sh\necho \"{who} tool\"\n"),
+        );
+        if place != worktree {
+            path.push(place.display().to_string());
+        }
+    }
+    path.insert(0, ".".to_owned());
+    path.insert(1, String::new());
+    path.push("/usr/bin:/bin".to_owned());
+
+    let repository = GitRepository::inspect(&repo).unwrap();
+    let parse = |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_programs);
+    let range = |_: &dagq::domain::CommitSha| {
+        Ok(ReviewRange {
+            base: main.clone(),
+            head: head.clone(),
+        })
+    };
+    let snapshot = snapshot_programs(&repository, &parse, &range)
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.commit, main);
+    let [program] = snapshot.programs.as_slice() else {
+        panic!("{:?}", snapshot.programs);
+    };
+
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db).unwrap();
+    let ends = JobEnds::default();
+    let token = LeaseToken::new("program-supervisor");
+    let ports = JobPorts {
+        store: &queue,
+        processes: Arc::new(SystemProcesses),
+        supervisor_token: &token,
+        clock: &SystemClock,
+        ends: &ends,
+    };
+    let backend = HostPrograms::inheriting(
+        &repo,
+        [(OsString::from("PATH"), OsString::from(path.join(":")))],
+    );
+    let mut job = start_review_program(
+        &ports,
+        &process::LocalSpawner,
+        &backend,
+        program,
+        &worktree,
+        (&run_dir, &dir.path().join("scratch")),
+        (&RunId::new("run-1").unwrap(), 1),
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let end = program_ended(&mut job);
+    assert_eq!(
+        end.exit.as_ref().and_then(|exit| exit.code),
+        Some(0),
+        "{}",
+        end.stderr_tail
+    );
+    assert_eq!(end.stdout_tail, "main's check src\nthe host's tool\n");
+    git(
+        &repo,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
     );
 }

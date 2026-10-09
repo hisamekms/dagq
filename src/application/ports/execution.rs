@@ -1651,16 +1651,19 @@ pub trait Verifier {
 /// (`infrastructure::review_programs::HostPrograms`); a backend decided but
 /// not implemented is an error to start, never the host instead.
 pub trait ReviewProgramBackend: Send + Sync {
-    /// The command that runs `program` with the run's `worktree` as its
-    /// working directory and an environment narrowed to what a read-only
-    /// check needs, no credential among it (decision 6). What it needs
-    /// written first (a script's committed text) goes under `scratch`, a
-    /// directory of the attempt the runtime owns, outside the worktree and
-    /// the run's directory, which the worker can write.
+    /// The command that runs `program`'s script with the run's `worktree`
+    /// as its working directory and an environment narrowed to what a
+    /// read-only check needs, no credential among it (decision 6), whose
+    /// `PATH` finds no program in the worktree, `run_dir` (the run's
+    /// directory) or the main checkout (decision 2). The script's
+    /// committed text is written first under `scratch`, a directory of the
+    /// attempt the runtime owns, outside the worktree and the run's
+    /// directory, which the worker can write.
     fn command(
         &self,
         program: &super::super::review_programs::SnapshotProgram,
         worktree: &Path,
+        run_dir: &Path,
         scratch: &Path,
     ) -> Result<CommandSpec>;
 }

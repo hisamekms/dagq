@@ -11,31 +11,27 @@ use super::scope::{glob_matches, validate_path_globs};
 /// The configuration's section of the program reviews.
 pub const SECTION: &str = "review.programs";
 
-/// What a program review runs, against the run's worktree as its working
-/// directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProgramRun {
-    /// `command = ["prog", "arg", ...]`: a program found on the job's
-    /// `PATH` (or named by its path) with its arguments. A path into the
-    /// repository here runs the worktree's file, which the worker can
-    /// change; a repository script is named with `script` instead.
-    Command(Vec<String>),
-    /// `script = "scripts/check.sh"` with `args = [...]`: a script of the
-    /// repository, its text taken from the landing branch's commit and run
-    /// from a copy outside the worktree, so a worker's change to it has
-    /// no effect until it lands. It is executed as it is, so it starts
-    /// with its interpreter's `#!` line.
-    Script { path: String, args: Vec<String> },
-}
-
-/// One `[review.programs.<name>]`: the program's name, what it runs, the
-/// globs that make it required (each once, in the order written), and
-/// `timeout_secs`, its own time limit in seconds, which without the key
-/// is `[review.jobs] program_timeout_secs`'s.
+/// One `[review.programs.<name>]`: the program's name, the script it
+/// runs, the globs that make it required (each once, in the order
+/// written), and `timeout_secs`, its own time limit in seconds, which
+/// without the key is `[review.jobs] program_timeout_secs`'s.
+///
+/// `script = "scripts/check.sh"` with `args = [...]` is a script of the
+/// repository, its text taken from the landing branch's commit and run
+/// from a copy outside the worktree against the worktree as its working
+/// directory, so a worker's change to it has no effect until it lands
+/// (ADR-t1895-2 decision 2). It is executed as it is, so it starts with
+/// its interpreter's `#!` line; an outside tool (cargo, a linter) is
+/// `exec`ed from it. There is no form that runs a program named by the
+/// configuration: whether such a program, or a file an interpreter is
+/// given, is the worktree's cannot be told from its words. Another
+/// repository script the script calls by a path from its working
+/// directory is the worktree's, which nothing here prevents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewProgram {
     pub name: String,
-    pub run: ProgramRun,
+    pub script: String,
+    pub args: Vec<String>,
     pub paths: Vec<String>,
     pub timeout_secs: Option<u64>,
 }
@@ -85,7 +81,8 @@ mod tests {
     fn program(name: &str, paths: &[&str]) -> ReviewProgram {
         ReviewProgram {
             name: name.to_owned(),
-            run: ProgramRun::Command(vec!["true".to_owned()]),
+            script: "scripts/check.sh".to_owned(),
+            args: Vec::new(),
             paths: paths.iter().map(|p| (*p).to_owned()).collect(),
             timeout_secs: None,
         }

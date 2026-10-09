@@ -10,17 +10,17 @@ use anyhow::{Context, Result};
 use super::Repository;
 use super::review::{CONFIG_FILE, ReviewRange};
 use crate::domain::CommitSha;
-use crate::domain::review_programs::{self, ProgramRun, ReviewProgram};
+use crate::domain::review_programs::{self, ReviewProgram};
 
 /// One program a review attempt runs, as the landing branch's commit has
-/// it: its configuration, the changed paths that required it, and for a
-/// script ([`ProgramRun::Script`]) the script's text at that commit, which
-/// is what runs whatever the run's worktree holds.
+/// it: its configuration, the changed paths that required it, and its
+/// script's text at that commit, which is what runs whatever the run's
+/// worktree holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotProgram {
     pub program: ReviewProgram,
     pub matched: Vec<String>,
-    pub script: Option<String>,
+    pub script: String,
 }
 
 /// The program reviews of one attempt read from the landing branch's
@@ -67,20 +67,16 @@ pub fn snapshot_programs(
     let changed = repository.changed_paths(&from, &range.head)?;
     let mut programs = Vec::new();
     for selected in review_programs::select(&configured, &changed) {
-        let script = match &selected.program.run {
-            ProgramRun::Command(_) => None,
-            ProgramRun::Script { path, .. } => Some(
-                repository
-                    .file_in(&commit, path)
-                    .with_context(|| format!("read {path} in the landing branch's commit {commit}"))?
-                    .with_context(|| {
-                        format!(
-                            "the review program {} that {CONFIG_FILE} names runs {path}, which is not in the landing branch's commit {commit}",
-                            selected.program.name
-                        )
-                    })?,
-            ),
-        };
+        let path = &selected.program.script;
+        let script = repository
+            .file_in(&commit, path)
+            .with_context(|| format!("read {path} in the landing branch's commit {commit}"))?
+            .with_context(|| {
+                format!(
+                    "the review program {} that {CONFIG_FILE} names runs {path}, which is not in the landing branch's commit {commit}",
+                    selected.program.name
+                )
+            })?;
         programs.push(SnapshotProgram {
             program: selected.program,
             matched: selected.matched,
@@ -104,6 +100,7 @@ mod tests {
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
     const CONFIG: &str = "the committed dagq.toml";
     const SCRIPT: &str = "#!/bin/sh\necho main's check\n";
+    const FMT: &str = "#!/bin/sh\nexec cargo fmt --check\n";
 
     /// A repository whose landing branch is at [`SHA`] and holds `files`
     /// there only, and whose reviewed range changes `changed`. The run's
@@ -236,31 +233,21 @@ mod tests {
         }
     }
 
-    /// `fmt` runs a command on `src/**`; `links` runs the script
+    /// `fmt` runs the script `scripts/fmt.sh` on `src/**`; `links` runs
     /// `scripts/links.sh` on `docs/**`. A config of `bad` does not parse;
     /// any other names no program.
     fn parse(text: &str) -> Result<Vec<ReviewProgram>> {
-        let program = |name: &str, run: ProgramRun, glob: &str| ReviewProgram {
+        let program = |name: &str, script: &str, args: &[&str], glob: &str| ReviewProgram {
             name: name.to_owned(),
-            run,
+            script: script.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             paths: vec![glob.to_owned()],
             timeout_secs: None,
         };
         match text {
             CONFIG => Ok(vec![
-                program(
-                    "fmt",
-                    ProgramRun::Command(vec!["cargo".to_owned(), "fmt".to_owned()]),
-                    "src/**",
-                ),
-                program(
-                    "links",
-                    ProgramRun::Script {
-                        path: "scripts/links.sh".to_owned(),
-                        args: vec!["--quiet".to_owned()],
-                    },
-                    "docs/**",
-                ),
+                program("fmt", "scripts/fmt.sh", &[], "src/**"),
+                program("links", "scripts/links.sh", &["--quiet"], "docs/**"),
             ]),
             "bad" => anyhow::bail!("dagq.toml:1: [review.programs.fmt] has no paths"),
             _ => Ok(Vec::new()),
@@ -291,7 +278,11 @@ mod tests {
     #[test]
     fn the_programs_and_scripts_are_read_from_the_landing_branchs_commit() {
         let found = snapshot(
-            vec![(CONFIG_FILE, CONFIG), ("scripts/links.sh", SCRIPT)],
+            vec![
+                (CONFIG_FILE, CONFIG),
+                ("scripts/fmt.sh", FMT),
+                ("scripts/links.sh", SCRIPT),
+            ],
             &["docs/a.md", "src/b.rs", "docs/c.md"],
         )
         .unwrap()
@@ -305,17 +296,20 @@ mod tests {
         assert_eq!(
             read,
             [
-                ("fmt", vec!["src/b.rs".to_owned()], None),
+                ("fmt", vec!["src/b.rs".to_owned()], FMT.to_owned()),
                 (
                     "links",
                     vec!["docs/a.md".to_owned(), "docs/c.md".to_owned()],
-                    Some(SCRIPT.to_owned())
+                    SCRIPT.to_owned()
                 ),
             ]
         );
-        let only_src = snapshot(vec![(CONFIG_FILE, CONFIG)], &["src/b.rs"])
-            .unwrap()
-            .unwrap();
+        let only_src = snapshot(
+            vec![(CONFIG_FILE, CONFIG), ("scripts/fmt.sh", FMT)],
+            &["src/b.rs"],
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(only_src.programs.len(), 1);
     }
 
