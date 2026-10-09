@@ -224,7 +224,6 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
   `queue_cli`のjob（observer・スループットの見直し）はファイルを読めないので、jobのdirのファイルを読む方法にしない。
   `read_files`のjob（runのreview・復旧job）は意図として`dagq`を打てないので、省いてよいのはworktreeとrun directoryのファイルにあるものだけ。
   落とし穴: Codexのreviewはsandboxの都合で読むコマンドを打てても、promptはそれを読む方法にしない。
-  読むだけの`dagq`のコマンドの一覧（`PLAN_REVIEW_READS`・`GOAL_REVIEW_READS`・`PLANNER_READS`）は、そのjobかplannerのroleで打てることをtestが確かめる。
 - 上限と選ぶ順（決定4）: 節ごとの件数かbyteの上限と全体の上限を持ち、超えたときに残す順は決まった規則で決める。
 - 省いたことの明示（決定5）: 節ごとに省いた件数・IDと読む方法をpromptに書く。
 - 記録（決定6）: jobごとにpromptのbyte数をeventに記録し、上限をtestで確かめる。
@@ -237,10 +236,11 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 | goal review | `read_files_and_queue_cli` | `goal_review_prompt` | `GOAL_REVIEW_*` |
 | スループットの見直し | `queue_cli` | `src/application/throughput_review.rs`の`review_prompt`（[スループットの見直し](throughput-review.md)） | そのmoduleの`PROMPT_LIMIT`・`PROMPT_INPUT_LIMIT` |
 | runのreview | `read_files` | `prompt.rs`の`review_prompt` | `RUN_REVIEW_*` |
+| agentのjob（[下](#agentのjobの上限)） | `read_files`を定義の道具に狭める | `agent_job::build` | `AGENT_JOB_*` |
 | 復旧job | `read_files` | `recovery_prompt`（`RecoveryMaterial`） | `RECOVERY_*` |
 | runtimeのplanner | plannerのrole | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt` | `RUNTIME_PLANNER_*`・`DRAFT_*`・`FINDING_*`・`REQUEST_*`・`PLANNER_*` |
 | workerの初期prompt | worktreeのファイル・git・goalのdoc | `prompt::prompt`（[上](#workerのprompt)） | `WORKER_PROMPT_LIMIT`・`WORKER_*` |
-| workerの次のturnの文 | worktreeとrun directoryのファイル・git | `resume_request`・`revise_request`・`revise_mismatch_request`・`stale_receipt_nudge`・`stall_nudge`・`answer_text`・`recovery_instruction`・`closed_question_notice`・`continue_text`・`restored_request`・`handoff_text`、supervisorの`retry_text`・`switch_text`（[下](#次のturnの文の上限)） | `RESUME_*`・`REVISE_*`・`PROVIDER_*`・`UNDELIVERED_REQUEST_BYTES`・`NEXT_TURN_*`・`HANDOFF_*`（taskのpathsと検証は`WORKER_*`） |
+| workerの次のturnの文 | worktreeとrun directoryのファイル・git | `resume_request`・`revise_request`ほか、supervisorの`retry_text`・`switch_text`（[下](#次のturnの文の上限)） | `RESUME_*`・`REVISE_*`・`PROVIDER_*`・`UNDELIVERED_REQUEST_BYTES`・`NEXT_TURN_*`・`HANDOFF_*`（taskのpathsと検証は`WORKER_*`） |
 
 ### plan reviewの上限
 
@@ -251,6 +251,12 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 - 約束: 必須の節（指示と検査とverdictの形、proposalのtaskの全文、予想するファイル、goal、`lint`、言語の指示）は省かない。
   必須の節だけで上限を超えるときだけ、大きいものから読むだけの`dagq`の案内に替え、jobのdirのファイルには退避しない。
 - 落とし穴: 上限はagentの文脈のためのもので、stdinで渡す今は`ARG_MAX`の制約ではない。
+
+### agentのjobの上限
+
+- 入口は`agent_job::build`と`AGENT_JOB_*`で、agentのevalとrunのreviewのagentのjobが共有する（[Agent eval](../agent-eval.md)）。
+- stdinで渡し、権限の意図は読み取りだけで、読む方法は材料のファイルと変更のtreeのファイルだけ。
+- 定義の節は切らず、上限を超える定義ではjobを起動しない（[ADR-t1869-1](../../adr/2026-10-09-t1869-1-agent-jobs-carry-the-whole-definition-and-do-not-start-over-the-limit.md)）。
 
 ### 次のturnの文の上限
 
@@ -282,12 +288,12 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 - 切り方: 長い文は先頭を残して切り、省いたbyte数と読む方法の注記を付ける。
   JSONの項目は長い文字列から切り、それでも入らなければIDと読む方法だけの行にする。
 - 読む方法: 読めるファイルにも打てるコマンドにも無いもの（復旧jobのalertの事実・プロセス・過去のverdict、読めなかった依頼の参照）は、読む方法が無いと書き、読めない場所に退避しない。
-- 前のplannerからの引き継ぎ: 人の答えだけを待って終わったplanner（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3）の後に立つruntimeのplannerの4種類のprompt（`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt`）は、元の質問とanswerを`answer`の節に、前のplannerのnoteと、それが作った・編集したまだdraftのtaskを`handover`の節に載せる。
+- 前のplannerからの引き継ぎ: 人の答えだけを待って終わったplanner（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3）の後に立つruntimeのplannerの4種類のpromptは、元の質問とanswerを`answer`の節に、前のplannerのnoteと、それが作った・編集したまだdraftのtaskを`handover`の節に載せる。
   材料はsupervisorがqueueの記録（前のplannerのactorのnoteと、それが作った・編集したまだdraftのtask）から集める（sessionはresumeしない）。
   `handover`はnoteを新しい順に取って1件ずつ切り、draftの行はその後に新しい順に取り、どちらも節の上限の中に収める（値と理由は定数のdoc comment）。
   reviseのplannerの`answer`は運ぶanswerを古い順に節の上限の中で取り、1件を1回数える。
   4種類の全体の上限は、`handover`（reviseのplannerは`answer`も）の分だけ大きくして節の上限の和を収める。
-  省いたnoteはeventのIDと`dagq events --full --all --after <ID - 1> --limit 1`、省いたdraftは`dagq show ID --full`、省いたanswerは`dagq asks --all`で読むと書く。
+  省いたnote・draft・answerは、plannerが打てる読むだけの`dagq`で読むと書く（コマンドは組み立ての関数が持つ）。
   どのplannerの文面も、質問で止まる前に決められることを決め、draftの編集とnoteを残すように言う。
 - 必須の節: goal reviewのgoal、runのreviewのacceptance、復旧jobのtaskの記述と検証、draftのdescription、findingの見立ては省かず、自分の上限で切って`over_limit`に書く。
 - 不変条件: 節の上限の和は全体の上限（言語の指示の分の空きを除く）に収まるように決める。

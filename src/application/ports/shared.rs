@@ -3,7 +3,9 @@
 //! asks, and [`Queue`], the whole queue as one connection, which names the
 //! store ports of every context.
 
-use super::execution::{RunCoordination, RunLog, RunRecovery, RunTransitions, SessionRegistry};
+use super::execution::{
+    EvalRounds, RunCoordination, RunLog, RunRecovery, RunTransitions, SessionRegistry,
+};
 use super::host::{HeadlessJobStore, InboxWatchLog, SupervisorRegistry};
 use super::observation::QueueRecords;
 use super::planning::{
@@ -491,6 +493,7 @@ pub trait Queue:
     + GoalReviewStore
     + HeadlessJobStore
     + InboxWatchLog
+    + EvalRounds
 {
 }
 
@@ -511,6 +514,7 @@ impl<
         + GoalReviewStore
         + HeadlessJobStore
         + InboxWatchLog
+        + EvalRounds
         + ?Sized,
 > Queue for T
 {

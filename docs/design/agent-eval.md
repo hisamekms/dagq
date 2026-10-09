@@ -1,8 +1,8 @@
 ---
 id: design-agent-eval
 type: design
-title: agentのeval（定義とケースの置き場・ケースの欄・patchの共有・採点・漏れの検査・CLI・event・費用の上限と既定値・evalの枠・採用の判定・productionのケースと見張り・道具の宣言とproviderごとの変換・本番と共有する起動経路・programのreviewの当て方）
-status: draft
+title: agentのeval（定義とケースの置き場・ケースの欄・採点・漏れの検査・依頼と認可・記録・費用の上限・hold-outの1回の制限・evalの枠・本番と共有する起動経路・道具の宣言・採用の判定・productionのケース・programのreview）
+status: current
 created: 2026-10-06
 scope: runtime
 related:
@@ -18,15 +18,22 @@ related:
   - design-supervisor-lifecycle-run-environment
   - design-queue-service
   - design-authorization
+  - design-supervisor-lifecycle-prompt
+  - design-supervisor-lifecycle-headless-job-processes
+  - adr-t1869-1
 ---
 
 # agentのeval
 
-> **一部だけ実装（2026-10-07）**: この文書はagentの定義とeval（goal 125）の今の予定で、実装したのは定義のpath（`.dagq/agents/<name>/AGENT.md`）と、名指すagentの定義の有無と複数の役割の検査（`dagq doctor`の`agents`。task 1866）と、下の「道具の宣言」の宣言の検査とproviderごとの変換の関数（task 1873。どの起動にもまだ当たらない）と、下の「ケースの欄」の読み手・「採点」・「漏れの検査」の関数（evalのコマンドからはまだ呼ばれない）だけ。
-> 今動いているreviewのagent（親のreview jobの中のsubagent）は[Review](supervisor-lifecycle/review.md#reviewのsubagent)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、この文書はそれらを変えない。
-> 後続のtask（1867〜1874）が実装したら、この注記と各節を今の姿に直す。
+reviewのagentが正しく判定しているかを、規則コードごとの陽性・陰性のケースと閾値で測る仕組み。
+誰か（人・inbox・plannerか、自分のrunのdevだけはworker）がqueueに依頼を記録し、supervisorがlanding branchの定義とケースで1周を実行して、成績をeventに記録する。
+workerもjobもLLMのCLIを直接打たない。
+1周の中のケースごとの1回は、本番のrunのreviewのagentのjobと同じ起動経路で、測るagentの1本のjobだけを起動する。
 
-決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。ここはpath・欄・コマンド・event・数値・設定のkeyの予定を持つ。名前と数値は実装のtaskが確かめて決め、変えたらここを直す。
+> **一部は予定**: 「採用の判定」「productionのケースと見張り」「programのreviewの当て方」の節はまだ実装していない予定で、名前と数値は実装が決める。
+> ほかの節は今の姿で、欄・flag・既定値の意味は定義のそばのdoc commentが持つ。
+
+決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、定義を切らない例外は[ADR-t1869-1](../adr/2026-10-09-t1869-1-agent-jobs-carry-the-whole-definition-and-do-not-start-over-the-limit.md)、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。
 
 ## 定義とケースの置き場
 
@@ -95,7 +102,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - `disputed`のケースとその実行は主の指標から外し、含めた値は別に返す。
 - 閾値: 判定と規則コードのrecall・precisionの4つがすべて閾値以上で、errorが無いときだけ通る。
   値なしは下回ったと数える。
-  閾値の値は下の「費用の上限と既定値」の`[eval] threshold`。
+  閾値の値は`[eval]`の設定（`EvalConfig`のdoc comment）。
   規則コードごとの値も返すが、採用の判断はagentの値で行う。
 
 ## 漏れの検査
@@ -108,53 +115,53 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   ケース固有の語でも規則の語なら漏れにしない。
 - 漏れ: 規則の語でないケース固有の語が、1つの語として定義に現れたもの。
 
-## CLI
+## 依頼と認可
 
-- `dagq agent eval <agent> [--split dev|holdout|production] [--k N] [--cases <set>] [--rerun]`: evalの依頼を記録する（queue serviceのユースケース。実行はsupervisor）。`--split`の既定は`dev`。`--k`はケースの`k`を上書きする。`--cases`はproductionの集合（下の`dagq agent cases`が返すid）か、devの一部のケースのidの並び。`--rerun`は同じキーのhold-outの2回目以降の明示の指定で、人と人の言葉を受けたinboxだけが使える。返すのは依頼のid。
-- `dagq agent evals [--agent <agent>] [--limit N]`: evalの依頼と周の一覧（状態・split・成績の要約）。
-- `dagq agent evals show <id>`: 1つの周の成績（判定と規則コードのrecall・precision・ケースごとの判定・失敗したケースのidとagentの理由・費用と出所・programで止まったケース・complete / incompleteと理由）。
-- `dagq agent cases production <agent> [--since <date>]`: 本番のreviewのeventと差分からproductionのケースの集合を作る依頼（ラベルのjobの起動と集合の作成はsupervisor）。作った集合はqueue側に置き、idを返す。
-- 認可（[Authorization](authorization.md)のPolicyに足す予定）: `agent eval --split dev`はworker（自分のrunの分）・人・inbox・planner、`--split holdout|production`と`agent cases production`は人・inbox・planner、`--rerun`は人とinbox、`agent evals`の読み取りはworker（自分のrunの依頼の分）・人・inbox・planner・observer。ケースのラベルの変更と`disputed`の解除はコマンドを持たず、人とinbox・plannerがtaskで行う。
+- 入口: `dagq agent eval <agent>`が依頼を記録し、`dagq agent results`と`dagq agent result <id>`が周を読む。
+  どれもqueue serviceのユースケースで（[Queue service](queue-service.md)）、client modeのworkerも使える。
+  use caseは`application::agent_eval`の`AgentEvals`、flagの意味はCLIの定義（`AgentCommand`）が持つ。
+- 依頼は記録するだけで、実行はsupervisorが行う。
+  supervisorは依頼を実行するだけで、自分では依頼しない。
+- 依頼の認可と実行を分ける: devはworker（自分のrunの分）・人・inbox・planner、hold-outとproductionは人・inbox・planner、同じキーの再実行は人とinboxだけができる。
+  読み取りはworkerには自分のrunの分だけを見せる。
+  capabilityの表は[Authorization](authorization.md)が持ち、要るcapabilityは`domain::authorization::eval_request_needs`が決める。
+- ケースのラベルの変更と`disputed`の解除はコマンドを持たず、人とinbox・plannerがtaskで行う。
 
-## event
+## 記録と成績の作り直し
 
-| event | いつ | 主な欄 |
-|---|---|---|
-| `agent_eval_requested` | 依頼を記録した | `eval_id`・`agent`・`split`・`k`・`cases`（集合のidかケースのid）・`rerun`・`requested_by`（actor）・`run_id`（workerの依頼と着地の前のdev） |
-| `agent_eval_refused` | 周を起動しなかった | `eval_id`・`reason`（`over_run_limit` / `over_cost_limit` / `cost_unknown` / `holdout_used` / `unauthorized`）・`estimate`（見積もりがあれば） |
-| `agent_eval_started` | 周を起動した | `eval_id`・`agent`・`split`・`provider`・`definition_commit`（landing branchのcommit）・`definition_digest`・`case_set_digest`・`planned_runs`・`estimate`（`per_run_usd`・`per_run_source`（`recent_max` / `provider_default`）・`total_usd`）・`reserved_usd` |
-| `agent_eval_finished` | 周が終わった | `eval_id`・`outcome`（`complete` / `incomplete`）・`incomplete_reason`（`cost_limit` / `program_failed` / `job_failed`）・`scores`（`verdict_recall`・`verdict_precision`・`codes_recall`・`codes_precision`・`runs`・`errors`）・`passed`（4つとも閾値以上で、`complete`のときだけ`true`）・`failed_cases`（idとagentの理由）・`program_stopped`（`count`と`case_ids`）・`cost`（`spent_usd`と実行ごとの`source`（`actual` / `converted` / `estimated`）の内訳）・`definition_digest`・`case_set_digest` |
-| `agent_eval_watch_due` | 見張りの時期が来た（finding） | `agent`・`definition_digest`・`new_reviews`・`since`（前回の見張り） |
+- 依頼・周の開始と拒否・providerを待つこと・実行ごとの開始と終わり・成績は、全てqueueのeventで、周の状態はeventだけから作り直す（`domain::agent_eval::record`）。
+  別の表を持たず、supervisorが入れ替わっても同じ状態を読む。
+- 欄の意味はそのmoduleのdoc commentと、成績を作る`application::agent_eval::finished`のdoc commentが持つ。
+- 成績は判定と規則コードのrecall・precision、閾値との比較、失敗したケースとagentの理由、回数、費用とその出所、定義とケースの集合のdigest、completeかincompleteかを持つ。
+  incompleteの周は閾値を超えてもpassに数えない。
+- 版ごとの成績はeventだけが持ち、repositoryに置かない。
 
-- hold-outの1回の制限は、`agent_eval_started`の（`agent`・`definition_digest`・`case_set_digest`）と`split: holdout`の組がすでにあるかで判定する（別の状態を持たない）。`case_set_digest`は流すケースのidの並びと、参照するpatchの内容のhashから作る。
-- 閾値を下回った`holdout` / `production`の`agent_eval_finished`はobserverのfindingにする。`agent_eval_watch_due`のfindingは[Finding planners](supervisor-lifecycle/finding-planners.md)の経路でruntimeのplannerを開き、plannerが`agent cases production`と`agent eval --split holdout --cases <set>`を依頼する。
-- 版ごとの成績はこのeventだけが持ち、repositoryに置かない。
+## 費用の上限
 
-## 費用の上限と既定値
+- 入口: `domain::agent_eval::round`の`estimate`・`may_start_next`・`run_cost`、設定は`dagq.toml`の`[eval]`と`[eval.providers.<provider>]`（keyと既定値は`EvalConfig`・`ProviderCost`のdoc comment）。
+- 不変条件: 周は起動の前に見積もり（予定の実行の数 × 1回の見込み）、回数か見積もりが上限を超えれば起動せず理由を記録する。
+  起動した周は見積もりを予約として記録し、次の実行の前に、使った額と実行中の見込みと次の1回の見込みの和が上限を超えるなら新しい実行を起動せず、incompleteで閉じる。
+- 使った額は実行ごとに確定する: providerが返す金額、返さないproviderはtokenに単価を掛けた額、どちらも無く終わった実行はその見込み。
+- 落とし穴: 金額を返さずtokenの単価も無いproviderの周は、既定の見込みがあっても使った額を確定できないので起動しない。
+  1回の見込みが無い周も起動しない。
+- 上限なしで流す経路は持たない。
 
-`dagq.toml`の`[eval]`と`[eval.providers.<provider>]`（予定のkey。旧バイナリは知らない表で全体を読めなくなるので、このrepositoryに足すのは固定バイナリが対応した後）。
+## hold-outの1回の制限
 
-| key | 既定 | 意味 |
-|---|---|---|
-| `[eval] max_runs` | 120 | 1周の実行（ケース × k）の回数の上限 |
-| `[eval] max_cost_usd` | 30 | 1周の金額の上限（USD） |
-| `[eval] concurrency` | 4 | 1周の中のproviderのprocessの同時数（Spikeの並列4） |
-| `[eval] threshold` | 0.9 | 判定と規則コードのrecall・precisionの閾値（4つとも） |
-| `[eval] recent_runs` | 20 | 1回の見込みに使う、同じagentとproviderの直近の実績の回数（その最大を使う） |
-| `[eval.watch] interval_days` | 7 | 見張りの間隔（前回の見張りから） |
-| `[eval.watch] new_reviews` | 10 | 見張りの時期にする、前回からの新しい本番のreviewの件数（agentごと。間隔とどちらか先に来たほう） |
-| `[eval.providers.<provider>] default_run_usd` | claude: 0.40、codex: なし | 実績の無いときの1回の見込み（ClaudeはSpikeの実測の1回$0.20の2倍） |
-| `[eval.providers.<provider>] input_usd_per_mtok`・`cached_input_usd_per_mtok`・`output_usd_per_mtok` | なし | 金額を返さないproviderのtokenの単価（入力・cache・出力。100万tokenあたりのUSD） |
-
-- 見積もり: 予定の実行の数（ケースの`k`の和）× 1回の見込み。1回の見込みは直近の`recent_runs`回の実績の最大、無ければ`default_run_usd`。どちらも無ければ`cost_unknown`。
-- 使った額: Claudeは結果の`total_cost_usd`（`actual`）、Codexはtokenに単価を掛けた額（`converted`）。単価が無いproviderは周を起動しない（`cost_unknown`）。金額もtokenも返さずに終わった実行は、その実行の見込みを数える（`estimated`）。
-- 実行中: 次の実行を起動する前に、`spent + 実行中の見込み + 次の1回の見込み > max_cost_usd`なら起動せず、実行中のものを待って`incomplete`（`cost_limit`）で閉じる。
+- キーはagent・定義のdigest・ケースの集合のdigest（流すケースのidと参照するpatchの内容から作る）で、hold-outとproductionの周に当てる（`holdout_refusal`・`case_set_digest`）。
+- 判定はeventに記録した開始した周のキーから読み、別の状態を持たない。
+- 2回目以降は人の明示の再実行（`--rerun`）だけで流せ、同じ定義でもケースの集合が違えば初回になる。
 
 ## evalの枠
 
-- evalはrunのslotを使わない。claim・着地の順・superviseの回ごとのrunの本数は変わらず、本番のreviewはrunのslotの中で動いてevalを待たない。
-- queueごとに同時に1周だけ流す。1周の中の同時数は`[eval] concurrency`。
-- 待っている周の順: 着地の前のdev（下）を先に、依頼は`agent_eval_requested`の古い順。流れている周は止めない。
+- evalはrunのslotを使わず、claim・着地の順・superviseの回ごとのrunの本数を変えない。
+  本番のreviewはrunのslotの中で動き、evalを待たない。
+- queueごとに同時に1周だけ流す（流れている周は開始があって終わりの無いもので、eventから読む）。
+  周の持ち主はそれを始めたか引き取ったsupervisorで（そのtokenをeventに書く）、同じqueueのほかのsupervisorは持ち主が生きている間は触らない。
+  周の開始と引き取りはそれぞれ1つの書き込みのtransactionで、2つのsupervisorが同じ周を始めることも引き取ることもない（`EvalRounds`）。
+  1周の中のproviderのprocessの同時数は設定の上限まで。
+- 待っている周は、着地の前のdevを先に、依頼の古い順に流し（`round::next_round`）、流れている周は止めない。
+- evalのjobはrunのreviewのjobの同時実行の上限に数えない。
 
 ## 採用の判定（着地の前のdev）
 
@@ -171,24 +178,39 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 
 ## 道具の宣言
 
-実装済み（task 1873）。今の姿の詳細は[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「道具の宣言」が持つ。
+今の姿の詳細は[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「道具の宣言」が持つ。
 
 - frontmatterの`tools`: runtimeが持つ道具の一覧の名前のリスト（`tools: [read, grep]`か、1行に1つの`- read`）。無ければ役割の既定（reviewは`read`・`grep`・`glob`）。`tools: []`は道具を持たない宣言。
 - runtimeの道具の一覧（`domain::review_subagents::AgentTool::ALL`）: `read`（fileを読む）・`grep`（中身を探す）・`glob`（pathを探す）・`shell`（コマンド）・`edit`・`write`。reviewの役割が許すのは`read`・`grep`・`glob`だけで、`shell`・`edit`・`write`と一覧に無い名前とリストでない`tools`は定義の誤りにする（`AgentTools::declared`）。誤りの定義を選んだreviewはsnapshotが誤りにしてADR-t1453-1決定6の経路でpassにせず、`dagq doctor`の`agents`の`errors`にも出す。
-- providerごとの変換（ADR-t1895-1の独立のagentのjobの起動の設定を作る関数。evalのagentのjobにも本番のrunのreviewのagentのjobにも使える）:
+- providerごとの変換（ADR-t1895-1の独立のagentのjobの起動の設定を作る関数。agentのjobの起動、`AgentProvider::agent_job_command`が使う）:
   - Claude（`infrastructure::adapters::claude_agent_job_tool_args`）: jobの起動の引数の`--allowedTools`に宣言した道具（`read`→`Read`、`grep`→`Grep`、`glob`→`Glob`、`shell`→`Bash`、`edit`→`Edit`・`NotebookEdit`、`write`→`Write`）を並べ、`--disallowedTools`に一覧の残りを並べる。reviewの既定は今のreviewと同じ`Read,Grep,Glob`と`Bash,Edit,Write,NotebookEdit`。予約の道具の拒否（`PRINT_MODE_DENIED_TOOLS`）、`--setting-sources ""`とreviewの`--settings`（ADR-t1470-1）はjobの起動の側が持ち、変換は触らない。
   - Codex（`infrastructure::codex::agent_job_tools_config`）: Codexはfileを読む・探す・pathを探すのもshellのコマンドで行うので、`read`・`grep`・`glob`・`shell`のどれかを宣言したjobには何も足さず（read-onlyのsandboxがコマンドを読み取りに留める）、どれも宣言しないjobには`-c features.shell_tool=false`と`-c features.unified_exec=false`（codex-cli 0.160.0の`[features]`）を足してshellを外す。`--sandbox read-only`・jobのpermission profile・worktreeのprojectの`untrusted`（ADR-t1570-1）は変えず、狭めるだけ。このためCodexでは`read`だけの宣言と`read`・`grep`・`glob`の宣言は同じ設定になる。
 - 当てないもの: 親のjobの中のsubagentの渡し方（Claudeの`--agents`のJSONの`tools`は`SUBAGENT_TOOLS`のまま、Codexの`-c agents.<name>.*`）と`subagents_unsupported`。全体のreviewのjobは定義を持たないので対象にしない。
 
 ## evalが本番と共有する起動経路
 
-- evalのケースごとの1回は、本番のrunのreviewのagentのjobと同じ経路で、測るagentの1本のjobだけを起動する: task 1896の共通のjobの経路（起動・時間の上限・記録）、task 1903のagentのjobのpromptの組み立て（snapshotが返した定義をそのまま持たせる）、task 1873の道具の変換、行き先のproviderは`[roles.review]`。起動の引数・prompt・時間の上限の詳細は[Review](supervisor-lifecycle/review.md)が持ち、ここに写さない。
-- ケースのtreeは`base_commit`にpatchを当てた使い捨てのworktree（queueのdata dirの下）で、jobのcwdとreviewの差分の範囲（`<base_commit>...<patchを当てたcommit>`）にする。
-- 使わないもの: 全体のreviewのjob、親のjobの中のsubagent（`--agents`・Codexの`runs_review_subagents`・能力による切り替え）、eval専用の起動の組み立て。
+- ケースごとの1回は、本番のrunのreviewのagentのjobと同じ経路で、測るagentの1本のjobだけを起動する。
+  経路はheadlessのjobの共通の経路（起動・時間の上限・やり直し・記録・引き継ぎ。[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、1本のagentのjobの組み立て（`application::agent_job::build`、[Prompt](supervisor-lifecycle/prompt.md#agentのjobの上限)）、上の「道具の宣言」の変換、行き先のproviderは`[roles.review]`。
+  eval専用の起動の組み立ては作らない。
+- 実行の入口は`application::supervise::agent_eval`。
+- ケースのtreeは`base_commit`にpatchを当ててcommitした使い捨てのworktreeで、queueのdata dirの`agent-evals/`の下に周ごとに置く。
+  jobのcwdはそのtreeで、材料のファイル（commitの一覧と全文の差分`<base_commit>...<patchを当てたcommit>`）はケースのdirの材料だけのdirに書く。
+  Claudeのjobが読めるのはtreeとそのdirだけで（`--add-dir`）、同じケースのほかの実行の出力は読めない。
+  Codexのjobはread-onlyのsandboxのshellで読むので、treeの外（ほかの実行の出力やcommitに残るケースの一覧）も読めてしまう: 道具の宣言で読み取りを狭めても、読める場所はsandboxが決める。
+  ケースのdirは番号で名付け、promptにもpathにもケースのidと期待を出さない。
+  treeの作業ファイルからはevalのケースの一覧とpatchの置き場を消す（commitには残る）ので、Claudeのjobは自分の期待を読めない。
+- providerのloginか使用量の上限で止まった実行は、providerを控えて同じ実行を待たせ、やり直しに数えない。
+- 起動を止めたsupervisor（drain・stop・serviceの停止）は、流れている実行が終われば周を手放し、次に動くsupervisorがeventから読み直す。
+- providerを切り替えない: 成績・1回の見込み・tokenの換算がproviderごとで、切り替えると別のproviderの成績が混ざるため。
+  `[roles.review]`のproviderが控え中か`--no-claude`で使えない間は、新しい実行を起動せず理由を記録して待ち、流れている実行は止めない。
+- supervisorの再起動: 持ち主が居なくなった周だけを引き取り、前のsupervisorのevalのjobは引き継ぎで子孫ごと止めて記録し、周をeventから読み直して、終わっていない実行をその見込みで使った額に数えてから費用の上限の判定を通して起動し直す。
+  走っているprocessを引き継いで続ける形にはしない。
+- 使わないもの: 全体のreviewのjob、親のjobの中のsubagent（`--agents`・Codexの`runs_review_subagents`・能力による切り替え）。
 
 ## programのreviewの当て方
 
-- evalは各ケースに本番のreviewと同じ段を当てる。landing branchのcommitのprogramの一覧（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[Review](supervisor-lifecycle/review.md)と[Run environment](supervisor-lifecycle/run-environment.md)がtask 1896・1897の実装と一緒に持ち、ここに写さない）を、ケースのtreeに対して先に流す。
+- evalは各ケースに本番のreviewと同じ段を当てる。
+  landing branchのcommitのprogramの一覧（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[Review](supervisor-lifecycle/review.md)と[Run environment](supervisor-lifecycle/run-environment.md)がその実装と一緒に持ち、ここに写さない）を、ケースのtreeに対して先に流す。
 - programが落ちたケースはagentに渡さず、agentの成績の分母から外し、`agent_eval_finished`の`program_stopped`に数とidを記録する。
 - programの起動の失敗・時間切れのケースがあれば、周を`incomplete`（`program_failed`）にし、`passed`を`false`にする。
-- programが受け持った規則コードをagentの`expected`から外す整理は、定義を移す後続のtask（goal 153の1901とgoal 125の定義の取り込み）が行う。
+- programが受け持った規則コードをagentの`expected`から外す整理は、定義を移す後続のtaskが行う。

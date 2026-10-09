@@ -101,6 +101,13 @@ string_enum!(UseCase {
     // A section of an observation's whole input, as `dagq observe --input`
     // prints it: what the observer's prompt left out (task 1567).
     ObserveInput => "observe_input",
+    // The eval of an agent (ADR-t1728-1 decisions 5 and 6): a request of a
+    // round, which the supervisor runs, as `dagq agent eval` records it,
+    // and the rounds and one round read back, as `dagq agent results` and
+    // `dagq agent result` print them; a worker's on its own run only.
+    AgentEval => "agent_eval",
+    AgentResults => "agent_results",
+    AgentResult => "agent_result",
 });
 
 impl UseCase {
@@ -149,6 +156,9 @@ impl UseCase {
             ("lint", _) => Self::Lint,
             ("observe", _) if has("--history") => Self::ObserveHistory,
             ("observe", _) if has("--input") => Self::ObserveInput,
+            ("agent", Some("eval")) => Self::AgentEval,
+            ("agent", Some("results")) => Self::AgentResults,
+            ("agent", Some("result")) => Self::AgentResult,
             _ => return None,
         })
     }

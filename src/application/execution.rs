@@ -307,6 +307,12 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("finding dismiss", &[C::FindingDismiss]),
     ("ci failures", &[C::CiRead]),
     ("request add", &[C::RequestRecord]),
+    (
+        "agent eval",
+        &[C::EvalRequest, C::EvalRequestHeldOut, C::EvalRerun],
+    ),
+    ("agent results", &[C::EvalRead]),
+    ("agent result", &[C::EvalRead]),
     ("request decline", &[C::RequestDecline]),
     ("ask", &[C::AskOpen, C::FindingAsk, C::AskClose]),
     ("ask close", &[C::AskClose]),

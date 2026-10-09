@@ -107,6 +107,7 @@ use crate::domain::{
 use contexts::{HostOpsState, ObservationState, PassEnv, PlanningEnv, PlanningState};
 
 mod adopt;
+mod agent_eval;
 mod background;
 mod ci_watch;
 mod claim_defer;
@@ -406,6 +407,9 @@ pub struct Layout {
     pub plan_reviews_dir: PathBuf,
     /// `goal-reviews/` of the queue: one directory per goal review job.
     pub goal_reviews_dir: PathBuf,
+    /// `agent-evals/` of the queue: one directory per round of the eval of
+    /// an agent (ADR-t1728-1).
+    pub agent_evals_dir: PathBuf,
 }
 
 impl Layout {
@@ -950,6 +954,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         generators: ports.generators.clone(),
         stall: settings.stall,
         wrapper_setting_warned: false,
+        agent_eval: None,
         job_ends: JobEnds::default(),
         jobs_swept: false,
         queue_hold: None,
@@ -1049,6 +1054,7 @@ type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 ///   held in the [`stages::SlotTable`]) and what spans the stages
 ///   (`finished`, `errors`, `stall`, `notice_failures`, `job_ends`,
 ///   `jobs_swept`, `last_turns`, `fresh_session*`, `review_jobs`,
+///   `agent_eval`,
 ///   `queue_hold`, `hold_continue`, `review_material`, `wrapper_setting_warned`), with
 ///   the adapters it uses (`repository`, `remote`, `verifier`, `reviewer`,
 ///   `codex_jobs`, `signals`, `spawner`, `files`). The providers' holds and
@@ -1114,6 +1120,9 @@ struct Supervisor<'a> {
     /// Whether `[headless] wrapper = "workspace"`, which a worker ignores,
     /// was warned of (ADR-t1433-3 decision 2).
     wrapper_setting_warned: bool,
+    /// The round of the eval of an agent this process runs (ADR-t1728-1
+    /// decision 9): one at a time, queue-wide, outside the run slots.
+    agent_eval: Option<agent_eval::EvalRound>,
     /// The ends of this process's headless jobs still to be written: the
     /// outcomes of their `headless_jobs` rows (task 443), and the jobs
     /// abandoned, written as `headless_job_stopped` with their Execution.
@@ -1553,6 +1562,7 @@ impl Supervisor<'_> {
     /// and the slots' jobs ([`HeadlessJob::abandon`]).
     fn abandon_jobs(&mut self) {
         self.planning.abandon_jobs();
+        self.abandon_agent_eval();
         self.claim.slots.abandon_jobs();
     }
     fn drive(&mut self, options: &LoopSettings) -> Result<Value> {
@@ -1768,6 +1778,7 @@ impl Supervisor<'_> {
                             planning.plan_review_pass(env, options, false);
                             planning.goal_review_pass(env, false);
                         });
+                        self.agent_eval_pass(false);
                         self.tick(true);
                         thread::sleep(options.tick);
                         continue;
@@ -1844,10 +1855,13 @@ impl Supervisor<'_> {
             // while Claude is held (ADR-t1063-1 decision 5). One in progress
             // is followed.
             let starting = !stopping && self.claim.claiming && self.host.service_up;
-            let progressed = self.on_planning(|planning, env| {
+            let mut progressed = self.on_planning(|planning, env| {
                 let reviewed = planning.plan_review_pass(env, options, starting);
                 planning.goal_review_pass(env, starting) | reviewed
             });
+            // The eval's rounds (ADR-t1728-1 decision 9): outside the run
+            // slots, one at a time, started only by a supervisor at work.
+            progressed |= self.agent_eval_pass(starting);
             if self.claim.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space (with the rest of one another job
@@ -1864,6 +1878,7 @@ impl Supervisor<'_> {
                 let job = self.observation.busy(options.once && !stopping)
                     || self.host.release.running()
                     || self.planning.busy()
+                    || self.agent_eval_busy()
                     || self.landing.rechecks.running()
                     || self.host.cleanup.for_disk()
                     || self.host.cleanup.deferred()

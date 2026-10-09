@@ -533,6 +533,12 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    // ADR-t1728-1.
+    /// Ask for an eval of a review agent, which the supervisor runs, or read the rounds.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     // ADR-t1920-1.
     /// The landing branch's CI as the supervisor's [ci_watch] reads it.
     Ci {
@@ -1676,6 +1682,46 @@ enum RequestCommand {
     },
 }
 
+/// The splits of an agent's cases (`.dagq/agents/<agent>/evals/<split>.json`).
+const SPLITS: [&str; 3] = ["dev", "holdout", "production"];
+
+#[derive(Subcommand, Clone)]
+enum AgentCommand {
+    /// Ask for one round of the agent's eval: the supervisor runs it on the landing branch's
+    /// definition and cases, one job of the agent per run of a case, and records its scores.
+    /// A worker asks for dev of its own run only; holdout and production are a person's, the
+    /// inbox's or a planner's. Prints the eval's id.
+    Eval {
+        /// The agent: `.dagq/agents/<agent>/`.
+        agent: String,
+        /// The cases' split.
+        #[arg(long, default_value = "dev", value_parser = SPLITS)]
+        split: String,
+        /// Each case's runs, over the case list's own k.
+        #[arg(long)]
+        k: Option<u32>,
+        /// Only these cases of the split, by id (comma-separated or repeated).
+        #[arg(long, value_delimiter = ',')]
+        cases: Vec<String>,
+        /// Run a holdout or production set again on the same definition: a person's only, or
+        /// the inbox's at a person's word.
+        #[arg(long)]
+        rerun: bool,
+    },
+    /// List the rounds of the eval, newest first, with their status and scores (a worker's
+    /// own run's only). Prints {"evals"}.
+    Results {
+        /// Only this agent's.
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// One round of the eval whole: its request, its start or refusal, each run and its
+    /// scores (a worker's own run's only).
+    Result { id: i64 },
+}
+
 #[derive(Subcommand, Clone)]
 enum ServiceCommand {
     /// Report whether the queue service runs and answers, its pid, build, API version and
@@ -2176,6 +2222,17 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             },
         ),
         Command::Mark { .. } => queue(C::MarkWrite),
+        Command::Agent { command } => match command {
+            AgentCommand::Eval { split, rerun, .. } => {
+                dagq::domain::authorization::eval_request_needs(split != "dev", *rerun)
+                    .into_iter()
+                    .map(|capability| (capability, Resource::AgentEval { run: None }))
+                    .collect()
+            }
+            AgentCommand::Results { .. } | AgentCommand::Result { .. } => {
+                one(C::EvalRead, Resource::AgentEval { run: None })
+            }
+        },
         Command::Request { command } => match command {
             RequestCommand::Add { .. } => queue(C::RequestRecord),
             RequestCommand::Decline { id, .. } => one(
@@ -2366,6 +2423,14 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
     })
 }
 
+/// The split `--split` names.
+fn split_named(name: &str) -> Result<dagq::domain::agent_eval::Split> {
+    dagq::domain::agent_eval::Split::ALL
+        .into_iter()
+        .find(|split| split.as_str() == name)
+        .with_context(|| format!("unknown split {name}"))
+}
+
 /// The commands that only read the queue. They open it on a read-only
 /// connection (ADR-0045 decision 18).
 fn reads_only(command: &Command) -> bool {
@@ -2420,6 +2485,9 @@ fn authorized_in_application(command: &Command) -> bool {
         // The planning requests (ADR-t1394-1), with the planner a decline
         // needs read from the queue.
         Command::Request { .. } => true,
+        // The eval's requests and reads (ADR-t1728-1), with the run a
+        // worker's request is on and the round a read names.
+        Command::Agent { .. } => true,
         // The runtime operations, authorized in `execute` before they run
         // (task 734).
         _ => operation(command, |_| None).is_some(),
@@ -2787,6 +2855,24 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
             }
             (UseCase::Ask, params)
         }
+        Command::Agent { command } => match command {
+            AgentCommand::Eval {
+                agent,
+                split,
+                k,
+                cases,
+                rerun,
+            } => (
+                UseCase::AgentEval,
+                json!({"agent": agent, "split": split, "k": k,
+                       "cases": (!cases.is_empty()).then_some(cases), "rerun": rerun}),
+            ),
+            AgentCommand::Results { agent, limit } => (
+                UseCase::AgentResults,
+                json!({"agent": agent, "limit": limit}),
+            ),
+            AgentCommand::Result { id } => (UseCase::AgentResult, json!({"id": id})),
+        },
         Command::Proposal {
             command: ProposalCommand::List { all },
         } => (UseCase::ProposalList, json!({"all": all})),
@@ -3638,6 +3724,27 @@ fn execute(cli: Cli) -> Result<Value> {
             dagq::application::commands::requests::Requests::new(&mut queue, &actor, &StaticPolicy)
                 .decline(RequestId::new(id), &reason)?,
         )?,
+        Command::Agent { command } => {
+            let evals =
+                dagq::application::agent_eval::AgentEvals::new(&queue, &actor, &StaticPolicy);
+            match command {
+                AgentCommand::Eval {
+                    agent,
+                    split,
+                    k,
+                    cases,
+                    rerun,
+                } => evals.request(&dagq::application::agent_eval::EvalRequest {
+                    agent,
+                    split: split_named(&split)?,
+                    k,
+                    cases: (!cases.is_empty()).then_some(cases),
+                    rerun,
+                })?,
+                AgentCommand::Results { agent, limit } => evals.list(agent.as_deref(), limit)?,
+                AgentCommand::Result { id } => evals.show(id)?,
+            }
+        }
         Command::Requests { id: Some(id), .. } => {
             json!({"requests": [queue.plan_request(RequestId::new(id))?]})
         }
@@ -4772,6 +4879,13 @@ mod tests {
             ("ci failures", &[]),
             ("ci failures", &["--task", "1"]),
             ("request add", &["--text", "plan it", "--ref", "task:1"]),
+            ("agent eval", &["adr-rules"]),
+            (
+                "agent eval",
+                &["adr-rules", "--split", "holdout", "--rerun"],
+            ),
+            ("agent results", &["--agent", "adr-rules"]),
+            ("agent result", &["1"]),
             ("request decline", &["1", "--reason", "r"]),
             (
                 "ask",

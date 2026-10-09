@@ -26,6 +26,10 @@ pub struct TestReviewer {
     /// a wrapper that did not end with its agent), which the backend stops
     /// on its close, so the round's end has a wrapper to stop.
     pub leave_running: Option<(PathBuf, Stands)>,
+    /// Scripts of the agent jobs of the eval (ADR-t1728-1), each run with
+    /// `/bin/sh -c` in the case's tree (the last one repeats); without
+    /// one, an agent job cannot start.
+    pub agent_jobs: Mutex<Vec<String>>,
 }
 
 impl TestReviewer {
@@ -40,7 +44,13 @@ impl TestReviewer {
             runs_subagents: true,
             handed: Mutex::new(Vec::new()),
             leave_running: None,
+            agent_jobs: Mutex::new(Vec::new()),
         }
+    }
+    /// See `agent_jobs`.
+    pub fn with_agent_jobs(self, scripts: &[String]) -> Self {
+        *self.agent_jobs.lock().unwrap() = scripts.to_vec();
+        self
     }
     /// See `leave_running`.
     pub fn leaving_sessions_running(mut self, db: &Path, backend: &TestWorkspace) -> Self {
@@ -130,6 +140,22 @@ impl AgentProvider for TestReviewer {
             .current_dir(run.worktree_path().unwrap())
             .arg("-c")
             .arg(script);
+        Ok(command)
+    }
+    fn agent_job_command(&self, job: &dagq::application::AgentJobLaunch) -> Result<CommandSpec> {
+        let mut scripts = self.agent_jobs.lock().unwrap();
+        ensure!(!scripts.is_empty(), "the test reviewer runs no agent job");
+        let script = if scripts.len() > 1 {
+            scripts.remove(0)
+        } else {
+            scripts[0].clone()
+        };
+        let mut command = CommandSpec::new("/bin/sh");
+        command
+            .current_dir(&job.cwd)
+            .arg("-c")
+            .arg(script)
+            .stdin(job.prompt.as_str());
         Ok(command)
     }
     fn runs_review_subagents(&self) -> bool {

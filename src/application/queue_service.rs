@@ -47,7 +47,7 @@ use crate::domain::{
 
 /// The queue as one use case of the service reads and changes it, written
 /// as the principal's actor.
-pub trait ServiceQueue: DialogueStore {
+pub trait ServiceQueue: DialogueStore + super::agent_eval::EvalStore {
     /// Task `id` as `dagq show` prints it: the whole detail with `full`,
     /// else its view with the last `events` events.
     fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value>;
@@ -320,6 +320,38 @@ struct FindingStatusParams {
     covered_by: Option<i64>,
 }
 
+/// `agent_eval`'s params: those of `dagq agent eval`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentEvalParams {
+    agent: String,
+    #[serde(default)]
+    split: Option<String>,
+    #[serde(default)]
+    k: Option<u32>,
+    #[serde(default)]
+    cases: Option<Vec<String>>,
+    #[serde(default)]
+    rerun: bool,
+}
+
+/// `agent_results`' params: those of `dagq agent results`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentResultsParams {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `agent_result`'s params: those of `dagq agent result`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentResultParams {
+    id: i64,
+}
+
 /// Authorize reading the whole queue: every role reads it in goal 82
 /// (ADR-t1233-5 decision 3), and the policy is still asked, on the
 /// service's side, as it would be for a narrower one.
@@ -368,6 +400,32 @@ fn run(
         | UseCase::Lint
         | UseCase::ObserveHistory
         | UseCase::ObserveInput => unreachable!("a read is answered above"),
+        UseCase::AgentEval => {
+            let p: AgentEvalParams = params(use_case, raw)?;
+            let name = p.split.as_deref().unwrap_or("dev");
+            let split = crate::domain::agent_eval::Split::ALL
+                .into_iter()
+                .find(|split| split.as_str() == name)
+                .ok_or_else(|| BadParams(format!("agent_eval's split: unknown {name}")))?;
+            super::agent_eval::AgentEvals::new(&*store.0, actor, &StaticPolicy).request(
+                &super::agent_eval::EvalRequest {
+                    agent: p.agent,
+                    split,
+                    k: p.k,
+                    cases: p.cases,
+                    rerun: p.rerun,
+                },
+            )
+        }
+        UseCase::AgentResults => {
+            let p: AgentResultsParams = params(use_case, raw)?;
+            super::agent_eval::AgentEvals::new(&*store.0, actor, &StaticPolicy)
+                .list(p.agent.as_deref(), p.limit.unwrap_or(20))
+        }
+        UseCase::AgentResult => {
+            let p: AgentResultParams = params(use_case, raw)?;
+            super::agent_eval::AgentEvals::new(&*store.0, actor, &StaticPolicy).show(p.id)
+        }
         UseCase::Ask => {
             let p: AskParams = params(use_case, raw)?;
             let ask = NewAsk {
@@ -743,6 +801,19 @@ mod tests {
         }
     }
 
+    /// The eval's events are kept in the log, each as its kind and
+    /// payload; none is read back.
+    impl crate::application::agent_eval::EvalStore for Queue {
+        fn record_eval_event(&self, kind: EventKind, payload: Value) -> Result<EventId> {
+            let mut log = self.log.lock().unwrap();
+            log.push(json!({"eval_event": kind.as_str(), "payload": payload}));
+            Ok(EventId::new(i64::try_from(log.len()).unwrap()))
+        }
+        fn eval_events(&self) -> Result<Vec<RunEvent>> {
+            Ok(Vec::new())
+        }
+    }
+
     impl ServiceQueue for Queue {
         fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value> {
             Ok(json!({"id": id, "full": full, "events": events}))
@@ -871,6 +942,78 @@ mod tests {
         assert_eq!(
             ended.log.lock().unwrap().pop().unwrap()["reason"],
             "run_ended"
+        );
+    }
+
+    /// The eval through the service (ADR-t1728-1 decision 6): a worker
+    /// asks for a dev round on its own run and reads its run's rounds; a
+    /// hold-out, a production round and a rerun are refused it and
+    /// recorded; a review job asks for none.
+    #[test]
+    fn a_worker_asks_for_its_runs_dev_eval_only() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let response = service.handle(&request(
+            Some("worker"),
+            UseCase::AgentEval,
+            json!({"agent": "adr-rules", "k": 2}),
+        ));
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.result.unwrap()["split"], "dev");
+        let recorded = backend.log.lock().unwrap().pop().unwrap();
+        assert_eq!(recorded["eval_event"], "agent_eval_requested");
+        assert_eq!(recorded["payload"]["run_id"], "r1");
+        assert_eq!(recorded["payload"]["requested_by"], "worker");
+        assert_eq!(recorded["payload"]["k"], 2);
+        for params in [
+            json!({"agent": "adr-rules", "split": "holdout"}),
+            json!({"agent": "adr-rules", "split": "production"}),
+            json!({"agent": "adr-rules", "rerun": true}),
+        ] {
+            let response =
+                service.handle(&request(Some("worker"), UseCase::AgentEval, params.clone()));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{params}"
+            );
+            let denial = backend.log.lock().unwrap().pop().unwrap();
+            assert_eq!(denial["event"], "authorization_denied", "{params}");
+            assert_eq!(denial["resource"]["kind"], "agent_eval");
+        }
+        let response = service.handle(&request(
+            Some("worker"),
+            UseCase::AgentResults,
+            json!({"agent": "adr-rules"}),
+        ));
+        assert_eq!(response.result, Some(json!({"evals": []})));
+        let response = service.handle(&request(
+            Some("review"),
+            UseCase::AgentEval,
+            json!({"agent": "adr-rules"}),
+        ));
+        assert_eq!(code(&response), Some(ServiceErrorCode::AuthorizationDenied));
+        let response = service.handle(&request(
+            Some("worker"),
+            UseCase::AgentEval,
+            json!({"agent": "Not Kebab"}),
+        ));
+        assert_eq!(code(&response), Some(ServiceErrorCode::Failed));
+        assert_eq!(
+            UseCase::of_command(&["agent", "eval", "adr-rules"]),
+            Some(UseCase::AgentEval)
+        );
+        assert_eq!(
+            UseCase::of_command(&["agent", "results"]),
+            Some(UseCase::AgentResults)
+        );
+        assert_eq!(
+            UseCase::of_command(&["agent", "result", "3"]),
+            Some(UseCase::AgentResult)
         );
     }
 

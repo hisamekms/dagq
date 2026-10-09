@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod agent_dir;
+mod agent_evals;
 pub mod asks;
 pub mod background;
 pub mod binaries;

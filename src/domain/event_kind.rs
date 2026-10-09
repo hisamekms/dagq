@@ -24,7 +24,8 @@
 //!   `turn_*`, `review_*`, `revise_*`, `resume_*`, `triage_*`,
 //!   `recovery_*`, `integration_*`, `landing_*`, `conflict_*`,
 //!   `concern_*`, `exit_*`, `stall_*`, `provider_*`, `hold_*`, `submit_*`
-//!   (typing into a session), `push_*` (the landing's push), and the
+//!   (typing into a session), `push_*` (the landing's push), `agent_eval_*`
+//!   (the eval of a review agent, ADR-t1728-1), and the
 //!   kinds of receipts and validation (`receipt_observed`,
 //!   `validation_finished`, `verification_command`, `scope_violation`,
 //!   `evidence_missing`), of the screen (`prompt_waiting`,
@@ -78,6 +79,14 @@ macro_rules! event_kinds {
 }
 
 event_kinds! {
+    AgentEvalFinished => "agent_eval_finished",
+    AgentEvalRefused => "agent_eval_refused",
+    AgentEvalRequested => "agent_eval_requested",
+    AgentEvalRunFinished => "agent_eval_run_finished",
+    AgentEvalRunStarted => "agent_eval_run_started",
+    AgentEvalStarted => "agent_eval_started",
+    AgentEvalTakenUp => "agent_eval_taken_up",
+    AgentEvalWaiting => "agent_eval_waiting",
     AgentStarted => "agent_started",
     ApproveWithheld => "approve_withheld",
     AskAnswered => "ask_answered",
@@ -399,6 +408,16 @@ impl EventKind {
         matches!(
             self,
             BackendCallFailed
+                // The eval of an agent (ADR-t1728-1): its requests, rounds,
+                // runs and scores, by `eval_id`.
+                | AgentEvalRequested
+                | AgentEvalRefused
+                | AgentEvalWaiting
+                | AgentEvalStarted
+                | AgentEvalTakenUp
+                | AgentEvalRunStarted
+                | AgentEvalRunFinished
+                | AgentEvalFinished
                 // A command the authorizer refused (ADR-t728-1 decision 5).
                 | AuthorizationDenied
                 | ObserveStarted
@@ -1014,6 +1033,14 @@ mod tests {
     #[test]
     fn each_kind_writes_the_text_it_always_wrote() {
         let table = [
+            (EventKind::AgentEvalFinished, "agent_eval_finished"),
+            (EventKind::AgentEvalRefused, "agent_eval_refused"),
+            (EventKind::AgentEvalRequested, "agent_eval_requested"),
+            (EventKind::AgentEvalRunFinished, "agent_eval_run_finished"),
+            (EventKind::AgentEvalRunStarted, "agent_eval_run_started"),
+            (EventKind::AgentEvalStarted, "agent_eval_started"),
+            (EventKind::AgentEvalTakenUp, "agent_eval_taken_up"),
+            (EventKind::AgentEvalWaiting, "agent_eval_waiting"),
             (EventKind::AgentStarted, "agent_started"),
             (EventKind::ApproveWithheld, "approve_withheld"),
             (EventKind::AskAnswered, "ask_answered"),

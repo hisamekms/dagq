@@ -824,6 +824,15 @@ impl DenialLog for ServiceSqlite {
     }
 }
 
+impl crate::application::agent_eval::EvalStore for ServiceSqlite {
+    fn record_eval_event(&self, kind: EventKind, payload: Value) -> Result<crate::domain::EventId> {
+        crate::application::agent_eval::EvalStore::record_eval_event(&self.queue, kind, payload)
+    }
+    fn eval_events(&self) -> Result<Vec<RunEvent>> {
+        crate::application::agent_eval::EvalStore::eval_events(&self.queue)
+    }
+}
+
 impl DialogueStore for ServiceSqlite {
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.queue.read_ask(id)

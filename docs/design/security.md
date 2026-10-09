@@ -76,6 +76,10 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 - 終わったrunの残ったworkspaceの片付けの`workspace.cleanup`（`run close-workspaces`）もuserとinboxだけが持ち、ほかのroleは`authorization_denied`で拒まれる。runtimeはrunのworkspaceを開かなくなったので、認可を通った後も理由を示して拒み（ADR-t1433-3の決定3、task 1440）、過去に作られて残ったrunのworkspaceは人が自分のterminalで閉じる。supervisorは終わったrunに残ったbackgroundのwrapperを自分の掃除で止め、このcapabilityを持たない
 - 開いている非対話のruntimeのplannerへの続きの依頼の`planner.request`（`planner request`。[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）はuserとinboxだけが持つ。表のsessionの列はこれも含まない（plannerは自分のplannerへのものも拒まれる）。plannerを閉じるCLIは無い
 - 計画の依頼の`request.record`（`request add`）はuserとinboxだけが持ち（inboxの記録は人の言葉の代行、[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3）、`request.decline`（`request decline`）はplannerだけが、自分が立てられた依頼にだけ持つ（決定6）。依頼に紐づく`planner_question`（`ask --request`）も、plannerは自分が立てられた依頼にだけ開ける（task 1564）。拒否は`authorization_denied`に残る
+- agentのevalの依頼（`agent eval`、[Agent eval](agent-eval.md)）は、devの`eval.request`をuser・inbox・plannerと自分のrunのworkerが、hold-outとproductionの`eval.request_held_out`をuser・inbox・plannerが、同じキーの再実行の`eval.rerun`をuserとinboxだけが持つ。
+  結果を読む`eval.read`はuser・inbox・planner・observer・supervisorと自分のrunのworkerが持つ。
+  supervisorは依頼を実行するだけで依頼のcapabilityを持たず、jobは何も持たない。
+  workerはLLMのCLIを打たず、evalのjobはsupervisorだけが起動する。
 - 予約のcapability（`reserved.filesystem_read`・`reserved.filesystem_write`・`reserved.network`・`reserved.secret_read`）は誰にも与えない。sandboxのbackendが強制するときの名前
 
 この表と`StaticPolicy`は全roleのallowとdenyをunit test（`src/domain/authorization.rs`）が網羅する。表を変えるときは先にコードを変え、この表と[Authorization](authorization.md#policy)の表を合わせる。

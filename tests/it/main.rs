@@ -11,6 +11,7 @@ mod runtime_support;
 
 mod actor_model;
 mod agent_eval;
+mod agent_eval_rounds;
 mod background_logs;
 mod cli_actor;
 mod cli_areas;

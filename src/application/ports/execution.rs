@@ -156,6 +156,63 @@ pub enum PluginState {
     Missing,
 }
 
+/// The launch of an agent job (ADR-t1895-1, ADR-t1728-1 decision 5): one
+/// agent's own headless job, whose prompt carries its definition and asks
+/// for one verdict of the shape of a review agent's result. Built by
+/// [`crate::application::agent_job::build`] for the eval of an agent; a
+/// run's review starts the same job for each of its agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentJobLaunch {
+    /// Where the job runs and reads the change's files: the tree of the
+    /// change (an eval case's worktree).
+    pub cwd: std::path::PathBuf,
+    /// The job's own directory, outside `cwd`: its settings and its debug
+    /// file.
+    pub dir: std::path::PathBuf,
+    /// The material file the job reads (the commits and the full diff),
+    /// outside `cwd`.
+    pub material: std::path::PathBuf,
+    /// The prompt, given on standard input, never as an argument.
+    pub prompt: String,
+    /// The tools the definition declares, or the role's default
+    /// (ADR-t1728-2), which the provider turns into its own: Claude Code's
+    /// `--allowedTools` and `--disallowedTools`, Codex's features on top of
+    /// its read-only sandbox.
+    pub tools: crate::domain::review_subagents::AgentTools,
+}
+
+/// The rounds of the eval as supervisors own them (ADR-t1728-1 decision
+/// 9): one round runs per queue at once, and each running round has one
+/// owner, the supervisor whose token its latest `agent_eval_started` or
+/// `agent_eval_taken_up` names. Each change is one write transaction, so
+/// two supervisors on one queue (ADR-0054 decision 3) never both start or
+/// take up a round. Internal to execution and landing: only the
+/// supervisor's rounds use it.
+pub trait EvalRounds {
+    /// Record `kind`, `agent_eval_started` (its `payload` names the owner
+    /// as `supervisor`) or `agent_eval_refused`, for the waiting round
+    /// `eval_id`, unless it was started or refused already or, for a
+    /// start, another round of the queue started and has not finished:
+    /// `false` then, and nothing is recorded.
+    fn settle_eval_round(
+        &self,
+        eval_id: i64,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<bool>;
+    /// Make `token` the owner of the running round `eval_id`
+    /// (`agent_eval_taken_up`), only while it has not finished and its
+    /// owner is gone or `token` itself
+    /// ([`crate::domain::agent_eval::round::owner_gone`]; `alive` says
+    /// whether a registered owner's process lives): `false` otherwise.
+    fn take_up_eval_round(
+        &self,
+        eval_id: i64,
+        token: &str,
+        alive: &dyn Fn(u32) -> bool,
+    ) -> Result<bool>;
+}
+
 /// Provider-specific CLI construction is kept outside supervisor orchestration.
 pub trait AgentProvider {
     fn preflight(&self) -> Result<()>;
@@ -261,6 +318,17 @@ pub trait AgentProvider {
         prompt: &str,
         access: crate::domain::headless_job::JobAccess,
     ) -> Result<CommandSpec>;
+    /// An agent job ([`AgentJobLaunch`]): a non-interactive agent in
+    /// `job.cwd` with `job.prompt` on its standard input, allowed only the
+    /// reads of [`crate::domain::headless_job::JobAccess::ReadFiles`]
+    /// narrowed to the declared tools, loading nothing of the tree it runs
+    /// in (ADR-t1470-1, ADR-t1570-1), whose reply
+    /// ([`AgentProvider::job_reply`]) is the verdict JSON. No subagent is
+    /// given it. A provider without one refuses.
+    fn agent_job_command(&self, job: &AgentJobLaunch) -> Result<CommandSpec> {
+        let _ = job;
+        anyhow::bail!("this provider has no agent job")
+    }
     /// Whether this provider's review job can run the review's required
     /// subagents (ADR-t1453-1 decision 8): one that cannot is not started
     /// for a review that requires them. None can by default.
@@ -1504,6 +1572,30 @@ pub trait Repository {
     /// Add the run's worktree on its new branch from its base commit; Git's
     /// output.
     fn create_worktree(&self, run: &TaskRun) -> Result<String>;
+    /// The tree of an eval's case (ADR-t1728-1 decision 4) at `path`, a
+    /// worktree without a branch: `base` checked out detached, the patch
+    /// file `patch` applied and committed on top; the commit's SHA, the
+    /// head of the change `<base>...<head>`. A tree left at `path` is
+    /// removed first. No hook of the repository runs. `hidden` (relative
+    /// paths, one `*` segment matching a directory's entries) is then
+    /// removed from the working tree, not from the commit: what the job
+    /// must not read there (the eval's own cases and patches).
+    fn add_case_tree(
+        &self,
+        path: &Path,
+        base: &str,
+        patch: &Path,
+        hidden: &[&str],
+    ) -> Result<CommitSha> {
+        let _ = (path, base, patch, hidden);
+        anyhow::bail!("this repository cannot make an eval case's tree")
+    }
+    /// Remove the case's tree at `path` ([`Self::add_case_tree`]); one
+    /// already gone is not an error.
+    fn remove_case_tree(&self, path: &Path) -> Result<()> {
+        let _ = path;
+        anyhow::bail!("this repository cannot remove an eval case's tree")
+    }
     /// The paths `git merge-tree` finds conflicting between two commits,
     /// without touching a worktree; empty when they merge cleanly.
     fn merge_conflicts(&self, main: &str, head: &str) -> Result<Vec<String>>;
@@ -1636,6 +1728,12 @@ pub trait Verifier {
         &self,
     ) -> Result<Option<crate::domain::background_wrapper::HeadlessWrapper>> {
         Ok(None)
+    }
+    /// `[eval]` and `[eval.providers.<provider>]` of `dagq.toml`
+    /// (ADR-t1728-1), each key's default where unset; the default without
+    /// the file.
+    fn eval_config(&self) -> Result<crate::domain::agent_eval::round::EvalConfig> {
+        Ok(Default::default())
     }
     /// The model and effort of the roles other than the worker
     /// (`[roles.<role>]` of `dagq.toml`, ADR-0079 decision 7); none by

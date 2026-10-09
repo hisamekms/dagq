@@ -126,7 +126,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 **所有する状態**
 
 - table: `task_runs`・`run_leases`・`run_processes`・`session_workspaces`。
-- ファイル: queueのdirの`runs/<run-id>/`（`RunFiles`）・`recheck/`とrunのworktree。
+- ファイル: queueのdirの`runs/<run-id>/`（`RunFiles`）・`recheck/`・`agent-evals/`とrunのworktree。
 
 **判断**（domain）: `domain::run`（`TaskRun`と遷移、`run::history`・`run::payload`）を中心に、receipt・review・resume・復旧・claimの控え・slot・待ち・stall・e2e・着地の保留・backgroundのwrapperの各module。
 
@@ -145,10 +145,11 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
   解決できなければ見張りは確かめず着地先の保留に任せる。
 - `Repository`のmainの履歴を読む読み取り専用の操作を観測と分析に公開する。
 - `application::inherit`の`InheritStore`・`CarriedBranches`を計画管理の`ready --inherit`に公開する（T10）。
+- `EvalStore`（`application::agent_eval`）を、`AgentEvals`を通してCLIとqueue serviceに公開する（書くのは依頼だけ）。
 - `RunCoordination`の読み取りを全てのcontextに公開する。
 - 計画管理に`JobDesk`と`DeferWatch`の見込みのファイルを、host運用のsweepにwrapperの停止を公開する。
 - recheckのlockの中で`recheck/target`を消す`recheck::clear_target`をhost運用の空き容量の掃除に公開する。
-- `RunTransitions`・`RunRecovery`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`（reviewのprogramのjobの実行のbackend）は内部。
+- `RunTransitions`・`RunRecovery`・`EvalRounds`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`（reviewのprogramのjobの実行のbackend）は内部。
 
 **許す依存の向き**
 
@@ -235,7 +236,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 | module | port |
 | --- | --- |
 | `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`・`PlanningRecords` |
-| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`SessionRegistry`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend` |
+| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`EvalRounds`・`SessionRegistry`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend` |
 | `observation`（観測と分析） | `EventReads`・`ObserverLog`・`MarkLog`・`QueueRecords` |
 | `host`（host運用） | `QueueOpener`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry`・`InboxWatchLog` |
 | `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`Queue` |
@@ -356,9 +357,8 @@ host運用の登録と引き継ぎは`handoff::Registration`が持ち、その�
 ### 検査の範囲
 
 - scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6・L9とL7の時計、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
-  CIが流し、`src/`を変えるtaskのverifyに付ける（[taskの登録](../development/task-registration.md)の「推奨の組み合わせ」）。
-- 数えるのは参照のpathで、コメント・docのlink・文字列の中は数えず、testの中はL1・L3・L6・L9・C3・C8だけで数える。
-  細目はscriptの先頭のコメントが持つ。
+  CIと`src/`を変えるtaskのverifyが流す。
+- 数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
 - SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
 - 許可の一覧は`.config/layer-deps-allow.txt`で、1行1項目の`規則 | path | 参照 | 行き先のtask | 理由`。
   各欄の値と落ちる条件は一覧の先頭のコメントが持つ。

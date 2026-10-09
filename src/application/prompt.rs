@@ -3484,6 +3484,29 @@ pub const RUN_REVIEW_TITLE_BYTES: usize = 1_000;
 pub const RUN_REVIEW_ACCEPTANCE_BYTES: usize = 8_000;
 pub const RUN_REVIEW_SUBAGENTS_BYTES: usize = 8_000;
 
+/// The bytes the whole prompt of an agent job takes at most, the
+/// language's instruction included (ADR-t1566-1 decision 4): one agent's
+/// definition, the lines that say where the change is, and the
+/// instructions with the verdict's schema. The job of the eval of an agent
+/// and that of an agent of a run's review are the same job and share it.
+/// The run review's own limit, which the definitions are far within (8
+/// review agents of at most 2,529 bytes, 9,382 together).
+pub const AGENT_JOB_PROMPT_LIMIT: usize = 32_000;
+/// The bytes of the definition in an agent job's prompt at most. A
+/// definition is never cut (ADR-t1869-1): one past this is an error of the
+/// job's assembly, and no job starts for it. Over six times today's
+/// largest definition.
+pub const AGENT_JOB_DEFINITION_BYTES: usize = 16_000;
+/// The bytes of the lines that say where the change is (its base and head
+/// commits and the material file's path, about 300 bytes): cut from their
+/// end past this, as any section that is not the definition.
+pub const AGENT_JOB_MATERIAL_BYTES: usize = 2_000;
+/// The bytes of the agent job's own instructions and its verdict's schema
+/// with the agent's name (about 2,000 bytes): cut past this. With the
+/// definition, the material and the language's room the sections stay
+/// within [`AGENT_JOB_PROMPT_LIMIT`].
+pub const AGENT_JOB_INSTRUCTIONS_BYTES: usize = 6_000;
+
 /// What the headless reviewer is asked (ADR-0023 decision 2, ADR-0027
 /// decision 2 as ADR-t451-1 decision 3 amends it): where the material is,
 /// the task's acceptance, the verdict schema, where `revise` ends and

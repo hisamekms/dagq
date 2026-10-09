@@ -20,7 +20,9 @@ use std::{
     process::Command,
 };
 
-use crate::application::{AgentProvider, CommandSpec, RUN_TMP_DIR, TurnReader, TurnTarget};
+use crate::application::{
+    AgentJobLaunch, AgentProvider, CommandSpec, RUN_TMP_DIR, TurnReader, TurnTarget,
+};
 use crate::domain::{
     TaskRun,
     actor_model::ActorLaunch,
@@ -346,9 +348,8 @@ pub const SHELL_FEATURES: [&str; 2] = ["shell_tool", "unified_exec"];
 /// turned off ([`SHELL_FEATURES`] `=false`). These only add features off:
 /// the read-only sandbox, the permission profile and the run's review's
 /// [`distrust_config`] (ADR-t1570-1) stay as its launch gives them, so a
-/// declared `edit` or `write` writes nothing (no role allows one yet). No
-/// launch is given them yet: the eval's agent job (task 1869) and the
-/// run's review's (task 1903) will be.
+/// declared `edit` or `write` writes nothing (no role allows one yet).
+/// [`Codex::agent_job_command`] gives them to an agent job.
 pub fn agent_job_tools_config(tools: &AgentTools) -> Vec<String> {
     let runs_commands = [
         AgentTool::Read,
@@ -441,6 +442,19 @@ impl AgentProvider for Codex {
     /// one that requires none is as before.
     fn runs_review_subagents(&self) -> bool {
         false
+    }
+    /// A [`headless_command`](AgentProvider::headless_command) of
+    /// [`JobAccess::ReadFiles`] in the change's tree, with the tree
+    /// distrusted ([`distrust_config`], ADR-t1570-1) and the declared tools'
+    /// features ([`agent_job_tools_config`], ADR-t1728-2) as `-c`: the
+    /// read-only sandbox (or the job's permission profile) stays as it is.
+    fn agent_job_command(&self, job: &AgentJobLaunch) -> Result<CommandSpec> {
+        let mut command = self.headless_command(&job.cwd, &job.prompt, JobAccess::ReadFiles)?;
+        command.arg("-c").arg(distrust_config(&job.cwd)?);
+        for config in agent_job_tools_config(&job.tools) {
+            command.arg("-c").arg(config);
+        }
+        Ok(command)
     }
     /// A [`headless_command`](AgentProvider::headless_command) in the
     /// run's worktree with [`distrust_config`] as `-c`: the worker's
@@ -1445,5 +1459,50 @@ mod tests {
         {
             assert!(reaching.contains(&config), "{config} in {reaching:?}");
         }
+    }
+
+    /// The agent job's launch (ADR-t1728-1 decision 5): a read-only
+    /// headless job in the change's tree with its prompt on standard input
+    /// and in no argument, the tree distrusted (ADR-t1570-1) and the
+    /// declared tools' features only narrowing it.
+    #[test]
+    fn an_agent_job_is_a_read_only_job_narrowed_by_its_tools() {
+        use crate::domain::review_subagents::AgentRole;
+        let dir = tempfile::tempdir().unwrap();
+        let codex = Codex::new("/bin/codex".into());
+        let launch = |tools: AgentTools| AgentJobLaunch {
+            cwd: dir.path().to_owned(),
+            dir: dir.path().join("job"),
+            material: dir.path().join("material.md"),
+            prompt: "PROMPT-TEXT".into(),
+            tools,
+        };
+        let args = |command: &CommandSpec| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let reads = codex
+            .agent_job_command(&launch(AgentRole::Review.default_tools()))
+            .unwrap();
+        let mut expected = codex
+            .headless_command(dir.path(), "PROMPT-TEXT", JobAccess::ReadFiles)
+            .unwrap();
+        expected.arg("-c").arg(distrust_config(dir.path()).unwrap());
+        assert_eq!(args(&reads), args(&expected));
+        assert_eq!(reads.get_stdin(), Some("PROMPT-TEXT"));
+        assert!(!args(&reads).iter().any(|arg| arg.contains("PROMPT-TEXT")));
+        assert!(
+            args(&reads)
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", JOB_SANDBOX])
+        );
+        let none = codex
+            .agent_job_command(&launch(AgentTools::new([])))
+            .unwrap();
+        let none = args(&none);
+        assert_eq!(none[..args(&expected).len()], args(&expected)[..]);
+        assert!(none.contains(&"features.shell_tool=false".to_owned()));
     }
 }

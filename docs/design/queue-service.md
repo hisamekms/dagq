@@ -88,6 +88,7 @@ serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`�
 | `finding_record` | `dagq finding record`と同じ: `kind`・対象を1つ（`task`・`run`・`goal`か`queue: true`）・`subject`（既定は空）・`summary`・`detail`・`impact`・`evidence`（eventのidの配列）・`propose` | `dagq finding record`の出力（findingと`created`・`changed`） | `finding.record`（対象）。tokenを発行するAI actorのうち今のpolicyで持つのはobserverとinboxで、plannerとworkerとjobには無い。同じ種類・対象・subjectのopenかproposedのfindingへの合流（新しい根拠で回数と根拠を足し、新しいものが無ければ何も書かない）と根拠の検査は、CLIと同じ`record_finding`の1つのtransaction。`by`はprincipalのもの |
 | `finding_resolve` | `id`・`reason` | `dagq finding resolve`の出力 | `finding.resolve`。今のpolicyで持つのはobserver・inbox・plannerで、workerとjobには無い。`by`はprincipalのもの |
 | `finding_dismiss` | `id`・`reason`・`covered_by`（任意。`--covered-by`のtask ID。下の「CIの見張り」） | `dagq finding dismiss`の出力 | `finding.dismiss`。observerには無い（ADR-t1222-1決定2）。今のpolicyでこれを持つのはinboxとplannerで、workerとjobには無い |
+| `agent_eval`・`agent_results`・`agent_result` | `dagq agent eval`・`results`・`result`のoption | そのコマンドの出力 | `eval.*`。[Agent eval](agent-eval.md) |
 | 読み取り（`list`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`marks`・`search`・`related`・`findings`・`goal_show`など） | そのコマンドのoption | そのコマンドの出力 | `queue.read`（queue）。全role。[読み取りのユースケース](#読み取りのユースケース) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（`kind: blocked`と`finding_id`。capabilityは`finding.ask`）で送る。findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。そのため`observe_finished`の件数と、observer自身のeventを数えない判定（[Observer](supervisor-lifecycle/observer.md)の0、`SqliteQueue::events_besides`）は、CLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
@@ -125,7 +126,7 @@ queue全体の読み取り（ADR-t1233-5決定1〜3）。1つの読み取りの�
 
 ### 読み取りのroleとworkerが打つコマンド
 
-promptとskillが打たせるdagqのコマンドと、行き先のユースケース。jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くことを`application::prompt`のunit test（`every_dagq_command_a_job_s_prompt_names_is_a_use_case_of_the_queue_service`）が、それぞれの読み取りがserviceでもCLIと同じJSONを返すことを`tests/it/queue_service_reads.rs`が確かめる。
+promptとskillが打たせるdagqのコマンドと、行き先のユースケース。jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くことを`application::prompt`のunit testが、それぞれの読み取りがserviceでもCLIと同じJSONを返すことを`tests/it/queue_service_reads.rs`が確かめる。
 
 | 呼び出し元 | どこが言うか | コマンド |
 | --- | --- | --- |

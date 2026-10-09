@@ -12,6 +12,7 @@ amends:
   - adr-0047 decision 43
 amended_by:
   - adr-t2072-1
+  - adr-t1869-1
 owners:
   - hisamekms
 tags:

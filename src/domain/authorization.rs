@@ -71,6 +71,14 @@ string_enum!(Capability {
     // A follow-up request handed to a headless planner of the runtime's
     // as its next turn, by its planner id (ADR-t1533-1).
     PlannerRequest => "planner.request",
+    // The eval of an agent (ADR-t1728-1 decision 6): asking for a dev
+    // round, for a hold-out or production round, running a held-out set
+    // again, and reading the rounds and their scores. Running a round is
+    // the supervisor's `scheduler.supervise`, never a request of its own.
+    EvalRequest => "eval.request",
+    EvalRequestHeldOut => "eval.request_held_out",
+    EvalRerun => "eval.rerun",
+    EvalRead => "eval.read",
     // Scheduler transitions and the service.
     Supervise => "scheduler.supervise",
     RunRecover => "run.recover",
@@ -91,7 +99,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 54] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -129,6 +137,10 @@ impl Capability {
         Self::ScreenRead,
         Self::ScreenSend,
         Self::PlannerRequest,
+        Self::EvalRequest,
+        Self::EvalRequestHeldOut,
+        Self::EvalRerun,
+        Self::EvalRead,
         Self::Supervise,
         Self::RunRecover,
         Self::WorkspaceCleanup,
@@ -203,6 +215,12 @@ pub enum Resource {
         id: RequestId,
         planner: Option<PlannerId>,
     },
+    /// The eval of an agent (ADR-t1728-1): a round to ask for or to read,
+    /// with the run it was asked for (a worker's own), `None` for one
+    /// asked outside a run.
+    AgentEval {
+        run: Option<RunId>,
+    },
     /// A resource the caller named but could not read (such as a malformed
     /// run id): no owner can match it.
     Unresolved,
@@ -249,6 +267,7 @@ impl Resource {
             Self::Request { id, planner } => {
                 json!({"kind": "request", "id": id, "planner": planner})
             }
+            Self::AgentEval { run } => json!({"kind": "agent_eval", "run": run}),
             Self::Unresolved => json!({"kind": "unresolved"}),
         }
     }
@@ -392,6 +411,10 @@ const USER: &[Capability] = &[
     C::ScreenRead,
     C::ScreenSend,
     C::PlannerRequest,
+    C::EvalRequest,
+    C::EvalRequestHeldOut,
+    C::EvalRerun,
+    C::EvalRead,
     C::Supervise,
     C::RunRecover,
     C::WorkspaceCleanup,
@@ -404,7 +427,8 @@ const USER: &[Capability] = &[
 /// The planner's authority as it is (ADR-t728-1 decision 7): goals, tasks
 /// before they start, its proposals, notes, marks, resolving and dismissing
 /// findings, its
-/// questions and, at a person's word, `up` / `down` / `install`. No run,
+/// questions, the eval's rounds of any split (never `--rerun`, ADR-t1728-1
+/// decision 7) and, at a person's word, `up` / `down` / `install`. No run,
 /// no landing, no `ready`, no answer.
 const PLANNER: &[Capability] = &[
     C::QueueRead,
@@ -427,6 +451,9 @@ const PLANNER: &[Capability] = &[
     C::FindingDismiss,
     C::PlannerOpen,
     C::RequestDecline,
+    C::EvalRequest,
+    C::EvalRequestHeldOut,
+    C::EvalRead,
     C::ServiceLifecycle,
     C::BinaryInstall,
     C::QueueAdmin,
@@ -434,13 +461,17 @@ const PLANNER: &[Capability] = &[
 
 /// A worker reads, asks, notes, and runs and records its session, on its
 /// own run: the runtime's wrapper and hooks run in the worker's
-/// environment (task 734).
+/// environment (task 734). Of the eval it asks for a dev round and reads
+/// the rounds of its run only (ADR-t1728-1 decision 6): it never runs an
+/// LLM's CLI itself.
 const WORKER: &[Capability] = &[
     C::QueueRead,
     C::AskOpen,
     C::NoteWrite,
     C::SessionRun,
     C::SessionRecord,
+    C::EvalRequest,
+    C::EvalRead,
 ];
 
 /// A review job reads; its verdict comes back as data on its own run.
@@ -460,12 +491,15 @@ const OBSERVER: &[Capability] = &[
     C::FindingRecord,
     C::FindingResolve,
     C::FindingAsk,
+    C::EvalRead,
 ];
 
 /// The supervisor's transitions. It asks the integrator to land
 /// (ADR-t728-2) and applies answers without writing them. Its automatic
 /// update checks, migrates and probes queues with the new binary as
-/// `install` does (task 734).
+/// `install` does (task 734). It runs the eval's rounds that were asked
+/// for (`scheduler.supervise`) and reads them, and asks for none itself
+/// (ADR-t1728-1 decision 6).
 const SUPERVISOR: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
@@ -484,6 +518,7 @@ const SUPERVISOR: &[Capability] = &[
     C::FindingDismiss,
     C::ObserveRun,
     C::PlannerOpen,
+    C::EvalRead,
     C::Supervise,
     C::RunRecover,
     C::ServiceLifecycle,
@@ -555,7 +590,8 @@ fn worker_owns(actor: &ActorContext, resource: &Resource) -> bool {
     match resource {
         Resource::Run { id, .. }
         | Resource::Ask { run: Some(id), .. }
-        | Resource::NewAsk { run: Some(id), .. } => id == own,
+        | Resource::NewAsk { run: Some(id), .. }
+        | Resource::AgentEval { run: Some(id) } => id == own,
         Resource::Task { id, .. }
         | Resource::NewAsk {
             run: None,
@@ -596,6 +632,22 @@ fn planner_permits(actor: &ActorContext, capability: Capability, resource: &Reso
         } => planner.is_some_and(|id| actor.actor_id() == format!("planner:{id}")),
         _ => true,
     }
+}
+
+/// The capabilities a request of an eval needs (ADR-t1728-1 decisions 6
+/// and 7): a dev round [`C::EvalRequest`], a hold-out or production round
+/// [`C::EvalRequestHeldOut`], and `--rerun` of a held-out set
+/// [`C::EvalRerun`] as well.
+pub fn eval_request_needs(held_out: bool, rerun: bool) -> Vec<Capability> {
+    let mut needs = vec![if held_out {
+        C::EvalRequestHeldOut
+    } else {
+        C::EvalRequest
+    }];
+    if rerun {
+        needs.push(C::EvalRerun);
+    }
+    needs
 }
 
 /// What holds a priority: a task (its own, or the goal's it takes) or a
@@ -1276,6 +1328,68 @@ mod tests {
             assert_eq!(allowed(&actor, C::AskAnswer, &ask), answers, "{role_:?}");
             assert_eq!(allowed(&actor, C::AskClose, &ask), closes, "{role_:?}");
         }
+    }
+
+    /// The eval's requests and reads (ADR-t1728-1 decisions 6 and 7): a
+    /// worker asks for a dev round and reads the rounds of its own run;
+    /// the user, the inbox and a planner ask for every split; only the
+    /// user and the inbox run a held-out set again; the supervisor asks for
+    /// none (it runs them) and reads them.
+    #[test]
+    fn the_evals_requests_are_split_by_role_and_a_worker_keeps_to_its_run() {
+        let worker = ActorContext::worker(&run("r1"), TaskId::new(1));
+        let own = Resource::AgentEval {
+            run: Some(run("r1")),
+        };
+        let other = Resource::AgentEval {
+            run: Some(run("r2")),
+        };
+        let unrun = Resource::AgentEval { run: None };
+        let may = |actor: &ActorContext, needs: Vec<Capability>, on: &Resource| {
+            needs.into_iter().all(|need| allowed(actor, need, on))
+        };
+        assert!(may(&worker, eval_request_needs(false, false), &own));
+        assert!(!may(&worker, eval_request_needs(false, false), &other));
+        assert!(!may(&worker, eval_request_needs(false, false), &unrun));
+        for (held_out, rerun) in [(true, false), (false, true), (true, true)] {
+            assert!(!may(&worker, eval_request_needs(held_out, rerun), &own));
+        }
+        assert!(allowed(&worker, C::EvalRead, &own));
+        assert!(!allowed(&worker, C::EvalRead, &other));
+        assert!(!allowed(&worker, C::EvalRead, &unrun));
+        for role_ in [ActorRole::User, ActorRole::Inbox, ActorRole::Planner] {
+            let actor = role(role_);
+            for held_out in [false, true] {
+                assert!(
+                    may(&actor, eval_request_needs(held_out, false), &unrun),
+                    "{role_:?}"
+                );
+            }
+            assert!(allowed(&actor, C::EvalRead, &unrun), "{role_:?}");
+            let reruns = role_ != ActorRole::Planner;
+            assert_eq!(
+                may(&actor, eval_request_needs(true, true), &unrun),
+                reruns,
+                "{role_:?}"
+            );
+        }
+        let supervisor = role(ActorRole::Supervisor);
+        for (held_out, rerun) in [(true, false), (true, true), (false, true)] {
+            let error = eval_request_needs(held_out, rerun)
+                .into_iter()
+                .find_map(|need| StaticPolicy.authorize(&supervisor, need, &unrun).err())
+                .expect("refused");
+            assert_eq!(error.reason, DenyReason::NotGranted);
+        }
+        assert!(allowed(&supervisor, C::EvalRead, &unrun));
+        assert!(allowed(&supervisor, C::Supervise, &Resource::Queue));
+        for role_ in JOBS {
+            assert!(!may(&role(role_), eval_request_needs(false, false), &unrun));
+        }
+        assert_eq!(
+            own.record(),
+            serde_json::json!({"kind": "agent_eval", "run": "r1"})
+        );
     }
 
     #[test]

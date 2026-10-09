@@ -179,6 +179,20 @@ impl ActorContext {
         Self::instance(ActorRole::ReviewJob, format_args!("{run}:{attempt}"))
     }
 
+    /// The agent job of run `run` (from 0) of the case at `index` of the
+    /// eval `eval` (ADR-t1728-1): a review job's role with no run, so that
+    /// it reads and submits nothing of the queue.
+    pub fn agent_eval_job(
+        eval: impl std::fmt::Display,
+        index: usize,
+        run: impl std::fmt::Display,
+    ) -> Self {
+        Self::instance(
+            ActorRole::ReviewJob,
+            format_args!("agent-eval:{eval}:{index}:{run}"),
+        )
+    }
+
     /// The recovery job `attempt` of `alert` on `run`.
     pub fn recovery_job(run: &RunId, alert: &str, attempt: impl std::fmt::Display) -> Self {
         Self::instance(

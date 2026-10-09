@@ -569,7 +569,10 @@ impl QueueRead {
             | UseCase::ProposalShow
             | UseCase::FindingRecord
             | UseCase::FindingResolve
-            | UseCase::FindingDismiss => return Ok(None),
+            | UseCase::FindingDismiss
+            | UseCase::AgentEval
+            | UseCase::AgentResults
+            | UseCase::AgentResult => return Ok(None),
         };
         read.check()?;
         Ok(Some(read))

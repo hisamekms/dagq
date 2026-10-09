@@ -22,10 +22,6 @@ path = "docs/design/README.md"
 tasks = 2
 
 [[doc]]
-path = "docs/design/agent-eval.md"
-tasks = 8
-
-[[doc]]
 path = "docs/design/authorization.md"
 size = 49549
 line = 2281

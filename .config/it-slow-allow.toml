@@ -788,3 +788,9 @@ task = 1979
 name = "live_alerts::a_supervisor_records_its_baseline_and_an_idle_alert_from_start_to_end"
 reason = "境界（supervisorの配線）: 実 supervisor の周回が今の判定の記録を queue に書くこと（起動の後の基準 1 回と、headless の run が stalled の ask を待つ間の idle_without_receipt の始まりと、答えの turn の receipt の後の終わり）を実 process と SQLite で確かめる。記録と畳みの判断は domain::live_alerts の unit test"
 task = 1908
+
+# 5.2s (median of a stress run under the host's load)
+[[test]]
+name = "agent_eval_rounds::a_running_round_takes_no_run_slot_and_holds_no_review"
+reason = "B 境界（supervisor の配線）: 1 slot の supervisor で eval の周が走っている間に次の run が claim されて review が始まり、2 本とも着地することを実 process で確かめる（eval の周を run の slot の外で回す配線の代表の 1 本）。周の順と同時数の判断は domain::agent_eval::round の unit test"
+task = 1869

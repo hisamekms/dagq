@@ -17,33 +17,6 @@ use std::ffi::OsString;
 
 use runtime_support::*;
 
-/// The start of `pid`'s process as the runtime reads it.
-fn process_start(pid: u32) -> String {
-    let out = Command::new("ps")
-        .env("LC_ALL", "C")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .bounded_output()
-        .unwrap();
-    String::from_utf8(out.stdout).unwrap().trim().to_owned()
-}
-
-/// Start `script` under `sh` as a process whose parent is gone, the way a
-/// job outlives the supervisor that started it; its pid.
-fn orphan(script: &str) -> u32 {
-    let out = Command::new("/bin/sh")
-        .args([
-            "-c",
-            &format!("/bin/sh -c '{script}' </dev/null >/dev/null 2>&1 & echo $!"),
-        ])
-        .bounded_output()
-        .unwrap();
-    String::from_utf8(out.stdout)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap()
-}
-
 /// The processes whose parent is `pid`.
 fn children(pid: u32) -> Vec<u32> {
     let out = Command::new("ps")

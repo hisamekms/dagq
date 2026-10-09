@@ -151,6 +151,11 @@ pub enum HeadlessProgram<'a> {
         prompt: &'a str,
         access: JobAccess,
     },
+    /// One agent's own job (ADR-t1895-1, [`crate::application::agent_job`]):
+    /// a review job's reads narrowed to the agent's declared tools, in the
+    /// change's tree; the eval of an agent starts it for each run of a
+    /// case.
+    AgentJob(&'a crate::application::AgentJobLaunch),
 }
 
 /// What to start for the actor.
@@ -247,7 +252,7 @@ impl ActorProgram<'_> {
             | Self::PlannerSession { .. } => &[ActorRole::Planner],
             Self::NamedWorkspace { .. } => &[ActorRole::Inbox],
             Self::Headless {
-                program: HeadlessProgram::Review { .. },
+                program: HeadlessProgram::Review { .. } | HeadlessProgram::AgentJob(_),
                 ..
             } => &[ActorRole::ReviewJob],
             Self::Headless {
@@ -835,6 +840,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         prompt,
                         access,
                     } => provider.headless_command(cwd, prompt, access)?,
+                    HeadlessProgram::AgentJob(job) => provider.agent_job_command(job)?,
                 };
                 if let Some(session_id) = session_id {
                     provider.assign_session_id(&mut command, session_id);

@@ -56,6 +56,7 @@ use crate::{
     domain::{
         ChangeSet, GoalTag, TagSet, TaskChange,
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
+        agent_eval::round::{EvalConfig, ProviderCost},
         areas::AreaMap,
         background_wrapper::HeadlessWrapper,
         ci_watch::{CiWatchConfig, DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS},
@@ -184,7 +185,16 @@ const CI_WATCH_TABLE: &str = "ci_watch";
 /// `[landing_verification]`: the command `integrate` runs in place of
 /// some of a task's (ADR-t1925-1 decision 4).
 const LANDING_VERIFICATION_TABLE: &str = landing_verification::TABLE;
-const TABLES: [&str; 21] = [
+/// `[eval]`: the limits of a round of the eval of an agent (ADR-t1728-1
+/// decisions 8 and 9); its keys are on [`EvalConfig`].
+const EVAL_TABLE: &str = "eval";
+/// `[eval.providers.<provider>]`: one provider's estimate and prices of a
+/// run; its keys are on [`ProviderCost`].
+const EVAL_PROVIDERS_PREFIX: &str = "eval.providers.";
+/// What [`parse_config`] calls the current table while in a
+/// `[eval.providers.*]`.
+const EVAL_PROVIDER_TABLE: &str = "eval.providers";
+const TABLES: [&str; 22] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -206,6 +216,7 @@ const TABLES: [&str; 21] = [
     REVIEW_JOBS_TABLE,
     CI_WATCH_TABLE,
     LANDING_VERIFICATION_TABLE,
+    EVAL_TABLE,
 ];
 /// The keys of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -300,6 +311,9 @@ pub struct Config {
     /// `[landing_verification]` (ADR-t1925-1 decision 4); `None` without
     /// the table, which runs a task's commands as registered.
     pub landing_verification: Option<LandingVerification>,
+    /// `[eval]` and `[eval.providers.<provider>]` (ADR-t1728-1), each key's
+    /// default where unset.
+    pub eval: EvalConfig,
 }
 
 /// Parse the whole file.
@@ -330,6 +344,12 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
+    let mut eval_keys: Vec<String> = Vec::new();
+    // The provider of the `[eval.providers.<provider>]` being read, those
+    // read, and the keys of the current one.
+    let mut eval_provider: Option<crate::domain::Provider> = None;
+    let mut eval_providers_seen: Vec<crate::domain::Provider> = Vec::new();
+    let mut eval_provider_keys: Vec<String> = Vec::new();
     let mut kpi = KpiTables::default();
     let mut areas: Option<Vec<(String, Vec<String>)>> = None;
     let mut e2e_paths_seen: Option<usize> = None;
@@ -441,13 +461,29 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 table = Some(REVIEW_PROGRAMS_TABLE);
                 continue;
             }
+            if let Some(name) = name.strip_prefix(EVAL_PROVIDERS_PREFIX) {
+                let provider: crate::domain::Provider = name.parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "{CONFIG_FILE_NAME}:{number}: unknown provider [{EVAL_PROVIDERS_PREFIX}{name}]; the providers are claude, codex"
+                    )
+                })?;
+                ensure!(
+                    !eval_providers_seen.contains(&provider),
+                    "{CONFIG_FILE_NAME}:{number}: [{EVAL_PROVIDERS_PREFIX}{name}] is defined twice"
+                );
+                eval_providers_seen.push(provider);
+                eval_provider = Some(provider);
+                eval_provider_keys.clear();
+                table = Some(EVAL_PROVIDER_TABLE);
+                continue;
+            }
             if RETIRED_TABLES.contains(&name) {
                 table = Some(RETIRED_TABLE);
                 continue;
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -650,6 +686,70 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.fresh_session.peak_context_above =
                     Some(u64::try_from(tokens).with_context(with)?);
                 fresh_session_keys.push(key.to_owned());
+            }
+            Some(EVAL_TABLE) => {
+                ensure!(
+                    EvalConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{EVAL_TABLE}]; the keys are {}",
+                    EvalConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !eval_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let eval = &mut config.eval;
+                match key {
+                    "max_runs" => {
+                        eval.max_runs = u32::try_from(
+                            parse_positive(rest.trim(), "number of runs").with_context(with)?,
+                        )
+                        .with_context(with)?;
+                    }
+                    "concurrency" => {
+                        eval.concurrency = usize::try_from(
+                            parse_positive(rest.trim(), "number of processes")
+                                .with_context(with)?,
+                        )
+                        .with_context(with)?;
+                    }
+                    "recent_runs" => {
+                        eval.recent_runs = usize::try_from(
+                            parse_positive(rest.trim(), "number of runs").with_context(with)?,
+                        )
+                        .with_context(with)?;
+                    }
+                    "max_cost_usd" => {
+                        eval.max_cost_usd =
+                            parse_positive_number(rest.trim()).with_context(with)?;
+                    }
+                    _ => {
+                        let threshold = parse_positive_number(rest.trim()).with_context(with)?;
+                        ensure!(
+                            threshold <= 1.0,
+                            "{CONFIG_FILE_NAME}:{number}: {key} must be at most 1, not {threshold}"
+                        );
+                        eval.threshold = threshold;
+                    }
+                }
+                eval_keys.push(key.to_owned());
+            }
+            Some(EVAL_PROVIDER_TABLE) => {
+                let provider = eval_provider.expect("[eval.providers.*] names its provider");
+                ensure!(
+                    ProviderCost::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{EVAL_PROVIDERS_PREFIX}{}]; the keys are {}",
+                    provider.as_str(),
+                    ProviderCost::KEYS.join(", ")
+                );
+                ensure!(
+                    !eval_provider_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let dollars = parse_positive_number(rest.trim()).with_context(with)?;
+                config.eval.provider_mut(provider).set(key, dollars);
+                eval_provider_keys.push(key.to_owned());
             }
             Some(REVIEW_JOBS_TABLE) => {
                 ensure!(
@@ -1468,6 +1568,21 @@ pub fn load_review_jobs(root: &Path) -> Result<Option<JobTimeouts>> {
     ))
 }
 
+/// `[eval]` and `[eval.providers.<provider>]` of the `dagq.toml` in `root`
+/// (ADR-t1728-1), `None` when there is no file; no table or no key keeps
+/// each default.
+pub fn load_eval_config(root: &Path) -> Result<Option<EvalConfig>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .eval,
+    ))
+}
+
 /// `[ci_watch]` of the `dagq.toml` in `root` (ADR-t1920-1); no file or
 /// no table is none, which watches nothing.
 pub fn load_ci_watch(root: &Path) -> Result<Option<CiWatchConfig>> {
@@ -1883,6 +1998,9 @@ impl Verifier for ShellVerifier {
     }
     fn role_models(&self) -> Result<RoleModels> {
         load_role_models(&self.checkout)
+    }
+    fn eval_config(&self) -> Result<EvalConfig> {
+        Ok(load_eval_config(&self.checkout)?.unwrap_or_default())
     }
 
     fn language(&self) -> Option<crate::domain::language::Language> {
@@ -3197,6 +3315,50 @@ LITERAL = 'no \n escapes # here'
         );
     }
 
+    /// `[eval]` and `[eval.providers.<provider>]` set the eval's limits
+    /// and a provider's estimate and prices; an unset key keeps its
+    /// default, and a key, a value or a provider out of range is an error.
+    #[test]
+    fn parses_the_evals_limits_and_its_providers_prices() {
+        let eval = |text: &str| parse_config(text).map(|config| config.eval);
+        assert_eq!(eval("").unwrap(), EvalConfig::default());
+        let read = eval(
+            "[eval]\nmax_runs = 60\nmax_cost_usd = 12.5\nconcurrency = 2\nthreshold = 0.8\nrecent_runs = 5\n\
+             [eval.providers.codex]\ninput_usd_per_mtok = 1.25\noutput_usd_per_mtok = 10\ndefault_run_usd = 0.3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                read.max_runs,
+                read.max_cost_usd,
+                read.concurrency,
+                read.threshold,
+                read.recent_runs
+            ),
+            (60, 12.5, 2, 0.8, 5)
+        );
+        let codex = read.provider(crate::domain::Provider::Codex);
+        assert!(codex.converts());
+        assert_eq!(codex.default_run_usd, Some(0.3));
+        // Claude keeps its default estimate.
+        assert_eq!(
+            read.provider(crate::domain::Provider::Claude)
+                .default_run_usd,
+            Some(crate::domain::agent_eval::round::DEFAULT_CLAUDE_RUN_USD)
+        );
+        for wrong in [
+            "[eval]\nthreshold = 1.5\n",
+            "[eval]\nmax_runs = 0\n",
+            "[eval]\nlimit = 3\n",
+            "[eval]\nmax_runs = 3\nmax_runs = 4\n",
+            "[eval.providers.gemini]\ndefault_run_usd = 1\n",
+            "[eval.providers.codex]\nprice = 1\n",
+            "[eval.providers.codex]\n[eval.providers.codex]\n",
+        ] {
+            assert!(eval(wrong).is_err(), "{wrong}");
+        }
+    }
+
     /// `[review.jobs]` sets each kind's timeout in whole seconds above
     /// 0; a kind without its key keeps the provider's review timeout.
     #[test]
@@ -3534,7 +3696,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>] and [kpi]"
             ),
             "{error}"
         );

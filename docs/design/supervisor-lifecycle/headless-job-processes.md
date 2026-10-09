@@ -36,6 +36,8 @@ task 443。supervisorが起動するheadlessのjob（runのreview、終わった
   `kind`も`provider`もCHECKの無いTEXTなので、値を足してもmigrationは要らない。
   行はjobのstdoutの置き場（`stdout`）も持ち、止めた側がjobのExecutionを読む（下の引き継ぎ）。
   古い行と古いバイナリが書く行はnullで、そのExecutionは未計測になる。
+- agentのevalのjob（[Agent eval](../agent-eval.md)）は`agent`のjobで、runのreviewの段のagentのjobと同じ時間の上限とやり直しで動き、`kind`を`agent_eval`にしてrunのreviewのjobと取り違えない。
+  runを持たず、`label`がagent・周・ケース・回を示す（`headless_job::AGENT_EVAL`のdoc comment）。
 - jobの時間の上限（`Supervisor::job_timeout`）: runのreviewの段のjobは種類ごとの`[review.jobs]`の値（[Run environment](run-environment.md)）、無ければ`agent`はjobを動かすproviderの`AgentProvider::review_timeout`、`program`はreviewerのそれ。
   ほかのjob（復旧job・plan review・goal review）は`[review.jobs]`を読まず、reviewerの`review_timeout`。
 - jobの終わりで`ended_at`と`outcome`を書く: 自分で終わったjob（exitを読んだ）は`ended`、自分のsupervisorが止めたjob（timeout、見るのをやめたslot、handoffの前）は`stopped`。jobが終わる場所はqueueを持たないので、終わりは`JobEnds`に積み、次のpassの先頭（と、ループを抜けた直後）に書く。終わりを読む前に捨てられたjob（途中のerror、失敗したループ）は`Drop`で止めて`stopped`にするので、走ったまま見られなくなるjobは無い。
@@ -71,6 +73,8 @@ jobのpromptの渡し方（大きさに関係なくファイルかstdin）、載
   読めなければ未計測で、同じjobの終わりのeventが既にExecutionを持てば足さない。
   `gone`と`not_the_job`も、行を閉じた後に同じくExecutionを読み、記録するものがあるときだけ止めずに`headless_job_stopped`（`descendants`と`killed`は空）を書く（`close_taken_over`）。
 - 判断は`kind`と`provider`を見ないので、`program`のjob（`review_program`）も`agent`のjobと同じ判断で止め、`headless_job_stopped`の`kind`と`label`がその種類とプログラムを示す。
+- evalのjob（`agent_eval`）も同じ判断で止め、runを持たないので`headless_job_stopped`をqueueのeventに記録する。
+  止めた後は、そのsupervisorが周をeventから読み直し、終わっていない実行を起動し直す（[Agent eval](../agent-eval.md#evalが本番と共有する起動経路)）。
 - その後で、adoptしたrunのreviewや復旧job、`begin_plan_review` / `begin_goal_review`が`interrupted`にした行のやり直しが新しいjobを立てるので、同じ入力のjobは1つだけが走る。
 
 ## test

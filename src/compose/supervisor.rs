@@ -43,7 +43,10 @@ use crate::{
         },
         clock,
         codex::Codex,
-        location::{QueueLocation, goal_reviews_dir, plan_reviews_dir, planners_dir, runs_dir},
+        location::{
+            QueueLocation, agent_evals_dir, goal_reviews_dir, plan_reviews_dir, planners_dir,
+            runs_dir,
+        },
         process::LocalSpawner,
         run_env::{
             ShellVerifier, load_conflict_config, load_disk_config, load_fresh_session,
@@ -601,6 +604,7 @@ pub fn supervise_with_reviewer(
             .transpose()?,
         plan_reviews_dir: plan_reviews_dir(&db),
         goal_reviews_dir: goal_reviews_dir(&db),
+        agent_evals_dir: agent_evals_dir(&db),
         db: db.clone(),
     };
     let review_db = db.clone();

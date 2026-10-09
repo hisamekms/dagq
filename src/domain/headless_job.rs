@@ -22,6 +22,11 @@ pub const GOAL_REVIEW: &str = "goal_review";
 /// `headless_jobs.kind` of a program job of a run's review stage
 /// (ADR-t1895-1 decision 1); its `label` names the program.
 pub const REVIEW_PROGRAM: &str = "review_program";
+/// `headless_jobs.kind` of an agent job of the eval of an agent
+/// (ADR-t1728-1 decision 5): the same job as a run's review's agent job,
+/// told apart from it; its `label` is `<agent>:<eval id>:<case>:<run>` and
+/// its `attempt` the run of the case, from 0.
+pub const AGENT_EVAL: &str = "agent_eval";
 /// `headless_jobs.provider` of a job no provider runs (a program job): the
 /// column is the provider of an agent job only.
 pub const NO_PROVIDER: &str = "none";

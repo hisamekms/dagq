@@ -1,9 +1,9 @@
 use crate::infrastructure::git_binary::git_executable;
 use crate::{
     application::{
-        AgentProvider, CommandSpec, FileStamp, LandingBranchStamp, MainRemote, PlannerCommand,
-        PluginState, ProcessControl, Repository, SessionWrappers, TurnReader, TurnTarget,
-        WorkspaceBackend, WorkspaceTags, execution::permission_deny,
+        AgentJobLaunch, AgentProvider, CommandSpec, FileStamp, LandingBranchStamp, MainRemote,
+        PlannerCommand, PluginState, ProcessControl, Repository, SessionWrappers, TurnReader,
+        TurnTarget, WorkspaceBackend, WorkspaceTags, execution::permission_deny,
     },
     domain::{
         ActorRole, CommitSha, TaskId, TaskRun,
@@ -41,6 +41,29 @@ use crate::domain::review_subagents::{AgentTool, AgentTools};
 use crate::domain::turn::TurnSession;
 use crate::infrastructure::claude_turns::{ClaudeTurnReader, HEADLESS_PERMISSION_MODE};
 use crate::infrastructure::run_env::load_repository_config;
+
+/// The paths under `root` that `pattern` names: itself, or with one `*`
+/// segment, that segment replaced by each entry of its directory; only
+/// those that exist.
+fn expand_one_star(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    let Some((before, after)) = pattern.split_once("/*/") else {
+        let path = root.join(pattern);
+        return if path.exists() {
+            vec![path]
+        } else {
+            Vec::new()
+        };
+    };
+    let Ok(entries) = fs::read_dir(root.join(before)) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path().join(after)))
+        .filter(|path| path.exists())
+        .collect();
+    found.sort();
+    found
+}
 
 pub fn executable(path: &Path) -> Result<PathBuf> {
     let candidate = if path.components().count() > 1 || path.is_absolute() {
@@ -2276,6 +2299,87 @@ impl GitRepository {
         Ok(())
     }
 
+    /// `git worktree add --detach` of `base` at `path`, then `git apply`
+    /// of `patch` and a commit of it there, every command with no hook
+    /// (`core.hooksPath=/dev/null`) and the commit with dagq's own name;
+    /// then `hidden` (paths relative to the tree, a `*` matching one
+    /// directory's entries) is removed from the working tree only.
+    pub fn add_case_tree(
+        &self,
+        path: &Path,
+        base: &str,
+        patch: &Path,
+        hidden: &[&str],
+    ) -> Result<CommitSha> {
+        self.remove_case_tree(path)?;
+        let git = |dir: &Path| {
+            let mut command = Command::new(&self.git);
+            command
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "core.hooksPath=/dev/null"]);
+            command
+        };
+        output(
+            git(&self.root)
+                .args(["worktree", "add", "--detach", "--force"])
+                .arg(path)
+                .arg(base),
+        )?;
+        output(git(path).args(["apply", "--whitespace=nowarn"]).arg(patch))?;
+        output(git(path).args(["add", "--all"]))?;
+        output(git(path).args([
+            "-c",
+            "user.name=dagq",
+            "-c",
+            "user.email=dagq@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--no-verify",
+            "--allow-empty",
+            "--message",
+            "dagq agent eval case",
+        ]))?;
+        let head = self.head(path)?;
+        for pattern in hidden {
+            for found in expand_one_star(path, pattern) {
+                if found.is_dir() {
+                    fs::remove_dir_all(&found)
+                } else {
+                    fs::remove_file(&found)
+                }
+                .with_context(|| format!("remove {}", found.display()))?;
+            }
+        }
+        Ok(head)
+    }
+
+    /// `git worktree remove --force` of `path`, its directory removed if
+    /// that left it, then `git worktree prune`.
+    pub fn remove_case_tree(&self, path: &Path) -> Result<()> {
+        if path.exists() {
+            let _ = output(
+                Command::new(&self.git)
+                    .arg("-C")
+                    .arg(&self.root)
+                    .args(["worktree", "remove", "--force"])
+                    .arg(path),
+            );
+            if path.exists() {
+                fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))?;
+            }
+        }
+        output(
+            Command::new(&self.git)
+                .arg("-C")
+                .arg(&self.root)
+                .args(["worktree", "prune"]),
+        )?;
+        Ok(())
+    }
+
     /// Remove a run's worktree and branch. Administered from the main
     /// working tree, since `root` may be the worktree being removed. A
     /// branch already gone is left at that.
@@ -2578,6 +2682,18 @@ impl Repository for GitRepository {
     }
     fn remove_worktree_and_branch(&self, worktree: &Path, branch: &str) -> Result<()> {
         GitRepository::remove_worktree_and_branch(self, worktree, branch)
+    }
+    fn add_case_tree(
+        &self,
+        path: &Path,
+        base: &str,
+        patch: &Path,
+        hidden: &[&str],
+    ) -> Result<CommitSha> {
+        GitRepository::add_case_tree(self, path, base, patch, hidden)
+    }
+    fn remove_case_tree(&self, path: &Path) -> Result<()> {
+        GitRepository::remove_case_tree(self, path)
     }
     fn branches(&self) -> Result<Vec<String>> {
         GitRepository::branches(self)
@@ -3350,6 +3466,38 @@ impl AgentProvider for ClaudeCode {
             .stdin(prompt);
         Ok(command)
     }
+    /// `claude -p` in the change's tree with `claude-agent-job-settings.json`
+    /// of the job's directory (a review job's: no hook), its debug file
+    /// there, and that directory and the material's added, so the job
+    /// reads its material. Its
+    /// tools are those its definition declares
+    /// ([`claude_agent_job_tool_args`], ADR-t1728-2), each other one
+    /// refused, with [`PRINT_MODE_DENIED_TOOLS`]; it loads no setting
+    /// sources of the tree (`--setting-sources ""`, ADR-t1470-1) and is
+    /// given no subagent. The prompt is its standard input.
+    fn agent_job_command(&self, job: &AgentJobLaunch) -> Result<CommandSpec> {
+        let settings = job.dir.join("claude-agent-job-settings.json");
+        write_settings(&settings, ActorRole::ReviewJob, &job.dir)?;
+        let mut command = CommandSpec::new(&self.executable);
+        command
+            .current_dir(&job.cwd)
+            .args(["-p", "--output-format", "stream-json", "--verbose"])
+            .arg("--debug-file")
+            .arg(job.dir.join("claude-agent-job.log"))
+            .arg("--add-dir")
+            .arg(&job.dir);
+        if let Some(material) = job.material.parent().filter(|dir| *dir != job.dir) {
+            command.arg("--add-dir").arg(material);
+        }
+        command
+            .arg("--settings")
+            .arg(&settings)
+            .args(agent_job_tool_args_with_denied(&job.tools))
+            .arg("--setting-sources")
+            .arg("")
+            .stdin(job.prompt.as_str());
+        Ok(command)
+    }
     fn runs_review_subagents(&self) -> bool {
         true
     }
@@ -3589,9 +3737,8 @@ const CLAUDE_AGENT_TOOLS: [(&str, AgentTool); 7] = [
 /// `Bash,Edit,Write,NotebookEdit`, before the [`PRINT_MODE_DENIED_TOOLS`]
 /// its launch refuses too); no tool allowed leaves
 /// `--allowedTools` out. Only the tools: the job's `--setting-sources ""`
-/// and its settings (ADR-t1470-1) stay its launch's. No launch is given
-/// them yet: the eval's agent job (task 1869) and the run's review's
-/// (task 1903) will be.
+/// and its settings (ADR-t1470-1) stay its launch's
+/// ([`ClaudeCode::agent_job_command`]).
 pub fn claude_agent_job_tool_args(tools: &AgentTools) -> Vec<String> {
     let allowed: Vec<&str> = tools
         .tools()
@@ -3614,6 +3761,18 @@ pub fn claude_agent_job_tool_args(tools: &AgentTools) -> Vec<String> {
     }
     if !disallowed.is_empty() {
         args.extend(["--disallowedTools".to_owned(), disallowed.join(",")]);
+    }
+    args
+}
+
+/// [`claude_agent_job_tool_args`] with [`PRINT_MODE_DENIED_TOOLS`] among
+/// the refused tools, as every print-mode job refuses them.
+fn agent_job_tool_args_with_denied(tools: &AgentTools) -> Vec<String> {
+    let mut args = claude_agent_job_tool_args(tools);
+    let denied = PRINT_MODE_DENIED_TOOLS.join(",");
+    match args.iter().position(|arg| arg == "--disallowedTools") {
+        Some(at) => args[at + 1] = format!("{},{denied}", args[at + 1]),
+        None => args.extend(["--disallowedTools".to_owned(), denied]),
     }
     args
 }
@@ -5208,6 +5367,94 @@ mod tests {
                 "--allowedTools",
                 "Read,Grep,Glob,Bash,Edit,NotebookEdit,Write"
             ]
+        );
+    }
+
+    /// The agent job's launch (ADR-t1728-1 decision 5, ADR-t1895-1): its
+    /// prompt is its standard input and in no argument; its tools are the
+    /// declared ones with every other refused and the print mode's refused
+    /// tools; it loads no setting source and is given no subagent
+    /// (`--agents`, `Agent`), and its settings have no hook.
+    #[test]
+    fn an_agent_job_starts_with_its_prompt_on_stdin_and_only_its_declared_tools() {
+        use crate::domain::review_subagents::{AgentRole, AgentTool, AgentTools};
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("run-0")).unwrap();
+        let claude = ClaudeCode {
+            executable: PathBuf::from("claude"),
+        };
+        let launch = |tools: AgentTools| AgentJobLaunch {
+            cwd: dir.path().join("tree"),
+            dir: dir.path().join("run-0"),
+            material: dir.path().join("material.md"),
+            prompt: "PROMPT-TEXT review the change".into(),
+            tools,
+        };
+        let command = claude
+            .agent_job_command(&launch(AgentRole::Review.default_tools()))
+            .unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(command.get_stdin(), Some("PROMPT-TEXT review the change"));
+        assert!(
+            args.iter().all(|arg| !arg.contains("PROMPT-TEXT")),
+            "{args:?}"
+        );
+        let after = |flag: &str| {
+            args.iter()
+                .position(|arg| arg == flag)
+                .map(|at| args[at + 1].clone())
+        };
+        assert_eq!(after("--allowedTools").as_deref(), Some("Read,Grep,Glob"));
+        assert_eq!(
+            after("--disallowedTools").as_deref(),
+            Some("Bash,Edit,Write,NotebookEdit,ScheduleWakeup,CronCreate")
+        );
+        assert_eq!(after("--setting-sources").as_deref(), Some(""));
+        assert_eq!(after("-p"), Some("--output-format".to_owned()));
+        assert!(
+            !args.iter().any(|arg| arg == "--agents" || arg == "Agent"),
+            "{args:?}"
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(dir.path().join("tree").as_path())
+        );
+        // It reads its directory and the material's.
+        let added: Vec<&String> = args
+            .iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| *flag == "--add-dir")
+            .map(|(_, dir)| dir)
+            .collect();
+        assert_eq!(
+            added,
+            [
+                &dir.path().join("run-0").display().to_string(),
+                &dir.path().display().to_string()
+            ]
+        );
+        let settings: Value = serde_json::from_str(
+            &fs::read_to_string(dir.path().join("run-0/claude-agent-job-settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings.get("hooks"), None);
+        // A narrower declaration refuses the reads it leaves out.
+        let narrow = claude
+            .agent_job_command(&launch(AgentTools::new([AgentTool::Read])))
+            .unwrap();
+        let args: Vec<String> = narrow
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"Read".to_owned()), "{args:?}");
+        assert!(
+            args.contains(
+                &"Bash,Edit,Write,NotebookEdit,Grep,Glob,ScheduleWakeup,CronCreate".to_owned()
+            ),
+            "{args:?}"
         );
     }
 
