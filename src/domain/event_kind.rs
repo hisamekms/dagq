@@ -43,7 +43,8 @@
 //!   CI watch's `ci_*`.
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
 //!   `queue_service_*`, `sccache_*`, `inbox_*`, the cleanup's
-//!   `build_outputs_removed`, `scratchpad_removed` and `run_tmp_removed`,
+//!   `build_outputs_removed`, `build_cache_removed`, `scratchpad_removed`
+//!   and `run_tmp_removed`,
 //!   `backend_call_failed`, `headless_job_stopped` and
 //!   `provider_executable_relocated` (named in full: the start of an AI
 //!   actor, `application::actor_executor`, writes it, though `provider_*`
@@ -89,6 +90,7 @@ event_kinds! {
     AuthorizationDenied => "authorization_denied",
     AutoRepaired => "auto_repaired",
     BackendCallFailed => "backend_call_failed",
+    BuildCacheRemoved => "build_cache_removed",
     BuildOutputsRemoved => "build_outputs_removed",
     CandidatesSampled => "candidates_sampled",
     CiCheckFailed => "ci_check_failed",
@@ -549,6 +551,10 @@ impl EventKind {
                 | UsageLimited
                 // The cleanup for the disk (task 377) is about no run.
                 | AutoRepaired
+                // A build cache of the queue's directory that cleanup
+                // cleared, or could not; a run's failure is on the run.
+                | BuildCacheRemoved
+                | CleanupFailed
                 // The stop of a gone supervisor's plan or goal review (task
                 // 443).
                 | HeadlessJobStopped
@@ -629,6 +635,10 @@ pub const AUTH_REQUIRED: &str = EventKind::AuthRequired.as_str();
 pub const AUTHORIZATION_DENIED: &str = EventKind::AuthorizationDenied.as_str();
 pub const AUTO_REPAIRED: &str = EventKind::AutoRepaired.as_str();
 pub const BACKEND_CALL_FAILED: &str = EventKind::BackendCallFailed.as_str();
+/// A cleanup for room cleared a build cache of the queue's directory, a
+/// queue event: which (`cache`, `update` or `recheck`), its `paths`, the
+/// `bytes` it took, `by` and `reason` (`disk_space`).
+pub const BUILD_CACHE_REMOVED: &str = EventKind::BuildCacheRemoved.as_str();
 pub const BUILD_OUTPUTS_REMOVED: &str = EventKind::BuildOutputsRemoved.as_str();
 pub const CLEANUP_FAILED: &str = EventKind::CleanupFailed.as_str();
 /// What the runtime made of a review's `concern` (ADR-t451-1 decision 3):
@@ -989,6 +999,7 @@ mod tests {
             (EventKind::AuthorizationDenied, "authorization_denied"),
             (EventKind::AutoRepaired, "auto_repaired"),
             (EventKind::BackendCallFailed, "backend_call_failed"),
+            (EventKind::BuildCacheRemoved, "build_cache_removed"),
             (EventKind::BuildOutputsRemoved, "build_outputs_removed"),
             (EventKind::CandidatesSampled, "candidates_sampled"),
             (EventKind::CiCheckFailed, "ci_check_failed"),

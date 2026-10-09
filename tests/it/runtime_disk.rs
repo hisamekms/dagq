@@ -4,7 +4,9 @@
 use crate::runtime_support;
 use dagq::domain::EventKind;
 
+use dagq::application::update;
 use dagq::domain::{Ask, AskReason, disk::DiskConfig};
+use dagq::infrastructure::run_files::LocalRunFiles;
 use runtime_support::*;
 use std::sync::atomic::AtomicBool;
 
@@ -348,13 +350,39 @@ fn short_while_scratchpad(_: &Path) -> Option<u64> {
 /// scratchpad and run `TMPDIR` to the largest build is the unit tests' of
 /// `domain::disk::run_size` and `DiskConfig::needs`, read from the queue
 /// as in `a_persons_integrate_counts_the_scratchpads_in_a_runs_size`.
+///
+/// The build caches of the queue's directory go only in the cleanup for
+/// room, and only the one whose lock is free: the recheck's target is
+/// cleared and counted, and recorded in `build_cache_removed`, while the
+/// update's target, whose lock the update holds ([`update::hold_target`]),
+/// stays. What else their directories hold stays. Which caches there are,
+/// and that a cache in use, missing or a link is left, are the unit tests
+/// of `supervise::cleanup`.
 #[test]
 fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
     const SCRATCH: usize = 1 << 20;
     let (dir, repo, db) = fixture();
+    let queue_dir = db.parent().unwrap().to_path_buf();
+    let caches = [
+        queue_dir.join("update/target/release/big"),
+        queue_dir.join("recheck/target/debug/big"),
+    ];
+    let kept = [
+        queue_dir.join("update/release/bin/dagq"),
+        queue_dir.join("update/staged/dagq"),
+        queue_dir.join("update/checkout/Cargo.toml"),
+        queue_dir.join("recheck/worktree/Cargo.toml"),
+    ];
+    for file in caches.iter().chain(&kept) {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, vec![0u8; SCRATCH]).unwrap();
+    }
     let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
     supervise(&db, &repo, &backend).unwrap();
     backend.join();
+    // An ordinary cleanup leaves them.
+    assert!(caches.iter().all(|file| file.is_file()));
+    assert!(queue_events(&db, "build_cache_removed").is_empty());
     let first = {
         let mut queue = SqliteQueue::open(&db).unwrap();
         queue
@@ -386,9 +414,24 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
         scratchpad_roots: Some(vec![root.clone()]),
         ..supervise_options(1, true)
     };
+    let updating =
+        update::hold_target(&LocalRunFiles, &update::UpdatePaths::under(&queue_dir)).unwrap();
     supervise_with(&db, &repo, &backend, &options).unwrap();
     backend.join();
+    drop(updating);
     assert!(!scratchpad.exists());
+    assert!(caches[0].is_file(), "the update's target is in use");
+    assert!(!caches[1].exists());
+    assert!(queue_dir.join("recheck/target").is_dir());
+    assert!(kept.iter().all(|file| file.is_file()));
+    let cleared = queue_events(&db, "build_cache_removed");
+    assert_eq!(cleared.len(), 1, "{cleared:?}");
+    let recheck_target = queue_dir.join("recheck/target").canonicalize().unwrap();
+    assert_eq!(cleared[0]["cache"], "recheck");
+    assert_eq!(cleared[0]["paths"], json!([recheck_target]));
+    assert_eq!(cleared[0]["reason"], "disk_space");
+    let cache_bytes = cleared[0]["bytes"].as_u64().unwrap();
+    assert!(cache_bytes >= SCRATCH as u64, "{cache_bytes}");
     let removed = queue_events(&db, "scratchpad_removed");
     assert_eq!(removed.len(), 1, "{removed:?}");
     let scratched = removed[0]["bytes"].as_u64().unwrap();
@@ -406,9 +449,10 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
     assert_eq!(repaired[0]["repair"], "disk_cleanup");
     assert_eq!(
         repaired[0]["bytes"].as_u64().unwrap(),
-        worktree[0]["bytes"].as_u64().unwrap() + scratched + tmp_bytes
+        worktree[0]["bytes"].as_u64().unwrap() + scratched + tmp_bytes + cache_bytes
     );
     assert_eq!(repaired[0]["detail"]["runs"], json!([first.id().as_str()]));
+    assert_eq!(repaired[0]["detail"]["caches"], json!([recheck_target]));
     assert_eq!(repaired[0]["layer"], "runtime");
     assert_eq!(repaired[0]["conditions"]["free_bytes"], 1);
     let needed = repaired[0]["conditions"]["needed_bytes"].as_u64().unwrap();

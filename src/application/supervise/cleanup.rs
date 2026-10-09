@@ -37,8 +37,16 @@
 //! [`WorktreeCleanup`]): of one waiting for a person's answer on every
 //! cleanup, of any other only in a cleanup for disk space. The loop leaves
 //! such a run reserved by the job before it lands, reviews or resumes it.
+//!
+//! A cleanup for disk space, and the rest of one, also clears the build
+//! caches of the queue's directory ([`BUILD_CACHES`]): the target
+//! directories of the automatic update and of the landing recheck, which
+//! are built again (sccache shares the compiles). Each only while its lock
+//! is free ([`clear_build_cache`]): the job holds it while it clears, so
+//! what builds there waits, and leaves a cache in use for the next cleanup.
 
 use super::*;
+use crate::application::update::{self, UpdatePaths};
 use crate::application::{EndedRunWorktree, RUN_TMP_DIR, WorktreeCleanup};
 use crate::domain::EventKind;
 use crate::domain::disk::worktree_executables;
@@ -68,6 +76,8 @@ struct Request {
     /// The build outputs of the runs nobody works on that wait for no
     /// answer ([`WorktreeCleanup::Idle`]) go too (for disk space).
     idle: bool,
+    /// The [`BUILD_CACHES`] are cleared too (for disk space).
+    caches: bool,
     /// What is removed counts for room as `auto_repaired`: the rest of a
     /// cleanup for room that another job took on. While the disk is short,
     /// nothing is held or asked for until it is done, but a claim or a
@@ -87,6 +97,7 @@ impl Request {
             self.all = true;
             self.prune = true;
             self.idle = true;
+            self.caches = true;
             // The first reading is the one the shortage was found at.
             self.disk = self.disk.or(disk);
         }
@@ -250,8 +261,9 @@ pub(super) const fn ends_cleanup(stopping: bool, handing_off: bool) -> bool {
 
 /// What waits for the next job once the cleanup ends (a stop or a
 /// handoff): only the rest of a cleanup for room another job took on
-/// (task 1426), which goes to every ended run with the prune and the runs
-/// nobody works on that wait for no answer; the rest is dropped.
+/// (task 1426), which goes to every ended run with the prune, the runs
+/// nobody works on that wait for no answer and the build caches; the rest
+/// is dropped.
 fn ending_rest(pending: Request) -> Request {
     pending
         .counted
@@ -259,6 +271,7 @@ fn ending_rest(pending: Request) -> Request {
             all: true,
             prune: true,
             idle: true,
+            caches: true,
             counted: Some(counted),
             ..Request::default()
         })
@@ -267,10 +280,10 @@ fn ending_rest(pending: Request) -> Request {
 /// Take a cleanup for room on (task 1627): while one waits or runs (the
 /// rest of one another job took on included), nothing is added, as it is
 /// the one the next reading follows. An ordinary job running takes it on
-/// (`disk`, the job's), and its rest, every ended run with the prune and
-/// the runs nobody works on that wait for no answer, waits for the next
-/// job, counted for room (task 1289, task 1478). With no job running it
-/// waits for the next. So one cleanup for room runs as one job, or as the
+/// (`disk`, the job's), and its rest, every ended run with the prune, the
+/// runs nobody works on that wait for no answer and the build caches,
+/// waits for the next job, counted for room (task 1289, task 1478). With no
+/// job running it waits for the next. So one cleanup for room runs as one job, or as the
 /// job it rode on and its rest: no rest follows a rest.
 fn add_disk_request(
     job: Option<(&mut Option<DiskRequest>, Option<DiskRequest>)>,
@@ -286,6 +299,7 @@ fn add_disk_request(
         pending.add(None, None);
         pending.prune = true;
         pending.idle = true;
+        pending.caches = true;
         pending.counted = Some(request);
         return;
     }
@@ -450,6 +464,88 @@ fn pick_candidates(
         .collect()
 }
 
+/// A build cache of the queue's directory: a target directory something
+/// builds into under its owner's lock, which the cleanup for room clears
+/// through its owner ([`Self::clear_under_lock`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildCache {
+    /// The automatic update's target (host operation's own).
+    Update,
+    /// The landing recheck's target, which the recheck publishes.
+    Recheck,
+}
+
+/// The build caches a cleanup for room clears. Their owners clear the
+/// target alone: the rest of their directories (the update's release,
+/// staged build and checkout, the recheck's scratch worktree) stays.
+const BUILD_CACHES: [BuildCache; 2] = [BuildCache::Update, BuildCache::Recheck];
+
+impl BuildCache {
+    /// `build_cache_removed`'s `cache`.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Recheck => "recheck",
+        }
+    }
+    /// Run `clear` on the target of the queue at `queue_dir` under its
+    /// owner's lock, taken without waiting ([`update::clear_target`],
+    /// [`super::recheck::clear_target`]): `None` with no target, or while
+    /// it is in use.
+    fn clear_under_lock<R>(
+        self,
+        files: &dyn RunFiles,
+        queue_dir: &Path,
+        clear: impl FnOnce(&Path) -> R,
+    ) -> Result<Option<R>> {
+        match self {
+            Self::Update => update::clear_target(files, &UpdatePaths::under(queue_dir), clear),
+            Self::Recheck => super::recheck::clear_target(files, queue_dir, clear),
+        }
+    }
+}
+
+/// Clear what `cache`'s target directory holds, keeping the directory:
+/// nothing when there is none (nothing built there, or a link, which is
+/// not followed), and nothing while it is in use (the next cleanup tries
+/// again). Its owner's lock is held until the target is cleared, so
+/// nothing starts to build there meanwhile. The target is measured before
+/// it goes. A lock that cannot be taken fails at the cache's directory.
+fn clear_build_cache(files: &dyn RunFiles, queue_dir: &Path, cache: BuildCache) -> Option<Outcome> {
+    let cleared = cache.clear_under_lock(files, queue_dir, |target| {
+        let removed = remove_tree(files, target);
+        // Only its contents go: what builds there next finds it.
+        if matches!(removed, Ok(Some(_)))
+            && let Err(error) = files.create_dir_all(target)
+        {
+            warn!(
+                "the build cache {} could not be made again: {error}",
+                target.display()
+            );
+        }
+        (target.to_string_lossy().into_owned(), removed)
+    });
+    match cleared {
+        Ok(None) | Ok(Some((_, Ok(None)))) => None,
+        Ok(Some((path, Ok(Some(bytes))))) => Some(Outcome::BuildCache {
+            name: cache.name(),
+            path,
+            bytes,
+        }),
+        Ok(Some((path, Err(error)))) => Some(Outcome::CacheFailed { path, error }),
+        Err(error) => Some(Outcome::CacheFailed {
+            path: queue_dir.join(cache.name()).to_string_lossy().into_owned(),
+            error,
+        }),
+    }
+}
+
+/// The payload of `build_cache_removed`: which cache, its target and the
+/// bytes it took.
+fn build_cache_record(name: &str, path: &str, bytes: u64) -> Value {
+    json!({"cache": name, "paths": [path], "bytes": bytes, "by": "supervisor", "reason": BUILD_OUTPUTS_DISK_SPACE})
+}
+
 /// What the job did to one worktree.
 enum Outcome {
     /// The build outputs of a run whose task goes on, and why
@@ -505,6 +601,14 @@ enum Outcome {
         path: String,
         error: anyhow::Error,
     },
+    /// A build cache of the queue's directory cleared ([`clear_build_cache`]).
+    BuildCache {
+        name: &'static str,
+        path: String,
+        bytes: u64,
+    },
+    /// A build cache that could not be cleared.
+    CacheFailed { path: String, error: anyhow::Error },
 }
 
 /// `build_outputs_removed`'s `reason`: the run ended
@@ -548,6 +652,9 @@ struct JobPorts {
     prune: bool,
     /// Where Claude Code keeps the sessions' scratchpads (task 1100).
     scratchpad_roots: Vec<PathBuf>,
+    /// The queue's directory, whose [`BUILD_CACHES`] the job clears (for
+    /// disk space).
+    caches: Option<PathBuf>,
 }
 
 impl HostOpsState {
@@ -706,6 +813,12 @@ impl HostOpsState {
             },
             prune: request.prune,
             scratchpad_roots: (self.scratchpad_roots)(),
+            caches: env
+                .layout
+                .db
+                .parent()
+                .filter(|_| request.caches)
+                .map(Path::to_path_buf),
         };
         let handle = spawn_traced(move || run_job(&ports, candidates));
         self.cleanup.job = Some(Job {
@@ -819,6 +932,29 @@ impl HostOpsState {
                     env.queue
                         .record_runtime_event(&run_id, EventKind::CleanupFailed, payload)
                 }
+                Outcome::BuildCache { name, path, bytes } => {
+                    info!(
+                        "the free disk space was short: cleared the {name} build cache {path} ({bytes} bytes)"
+                    );
+                    cleaned.add_cache(&path, bytes);
+                    env.queue
+                        .record_queue_event(
+                            EventKind::BuildCacheRemoved,
+                            build_cache_record(name, &path, bytes),
+                        )
+                        .map(drop)
+                }
+                Outcome::CacheFailed { path, error } => {
+                    if !self.cleanup.first_failure(&path) {
+                        warn!("the build cache {path} still could not be cleared: {error:#}");
+                        continue;
+                    }
+                    let (message, payload) = failed_record("build cache", &path, &error);
+                    warn!("{message}");
+                    env.queue
+                        .record_queue_event(EventKind::CleanupFailed, payload)
+                        .map(drop)
+                }
             };
             if let Err(error) = recorded {
                 warn!(error = %format_args!("{error:#}"), "the cleanup of an ended run's worktree could not be recorded: {error:#}");
@@ -854,6 +990,14 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
         && let Err(error) = ports.repository.prune_worktrees()
     {
         warn!(error = %format_args!("{error:#}"), "git worktree prune failed: {error:#}");
+    }
+    let mut outcomes = outcomes;
+    if let Some(queue_dir) = &ports.caches {
+        outcomes.extend(
+            BUILD_CACHES
+                .iter()
+                .filter_map(|cache| clear_build_cache(&*ports.files, queue_dir, *cache)),
+        );
     }
     outcomes
 }
@@ -1355,6 +1499,224 @@ mod tests {
         free: Some(1),
         needed: Some(2),
     };
+
+    /// Only a cleanup for room and the rest of one clear the build caches:
+    /// an ordinary cleanup, of every ended run or of a task's, does not,
+    /// and the rest a stop or a handoff keeps does only when it is the rest
+    /// of a cleanup for room.
+    #[test]
+    fn only_a_cleanup_for_room_and_its_rest_clear_the_build_caches() {
+        let mut ordinary = Request::default();
+        ordinary.add(None, None);
+        ordinary.add(Some(TaskId::new(1)), None);
+        assert!(!ordinary.caches);
+        let mut room = Request::default();
+        room.add(None, Some(DISK));
+        assert!(room.caches);
+        // Taken on by an ordinary job running: its rest clears them.
+        let (mut disk, mut rest) = (None, Request::default());
+        add_disk_request(Some((&mut disk, None)), &mut rest, DISK);
+        assert!(rest.caches && rest.counted == Some(DISK));
+        assert!(ending_rest(rest).caches);
+        let mut task = Request::default();
+        task.add(Some(TaskId::new(1)), None);
+        assert!(!ending_rest(task).caches);
+    }
+
+    /// The files of one build cache: whether its target is a directory,
+    /// whether its lock is held elsewhere, what it measures, and what was
+    /// done to it.
+    #[derive(Default)]
+    struct CacheFiles {
+        dir: bool,
+        busy: bool,
+        size: Option<u64>,
+        fails: bool,
+        lock_fails: bool,
+        done: Mutex<Vec<String>>,
+    }
+
+    impl CacheFiles {
+        fn did(&self, what: &str, path: &Path) {
+            self.done
+                .lock()
+                .unwrap()
+                .push(format!("{what} {}", path.display()));
+        }
+        fn done(&self) -> Vec<String> {
+            self.done.lock().unwrap().clone()
+        }
+    }
+
+    impl RunFiles for CacheFiles {
+        fn create_dir_all(&self, dir: &Path) -> std::io::Result<()> {
+            self.did("create", dir);
+            Ok(())
+        }
+        fn create_new_dir(&self, _: &Path) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn write(&self, _: &Path, _: &[u8]) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn copy(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn read(&self, _: &Path) -> std::io::Result<Vec<u8>> {
+            unimplemented!()
+        }
+        fn read_to_string(&self, _: &Path) -> std::io::Result<String> {
+            unimplemented!()
+        }
+        fn try_lock(&self, path: &Path) -> std::io::Result<Option<Box<dyn std::any::Any + Send>>> {
+            self.did("lock", path);
+            if self.lock_fails {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            Ok((!self.busy).then(|| Box::new(()) as Box<dyn std::any::Any + Send>))
+        }
+        fn modified(&self, _: &Path) -> std::io::Result<std::time::SystemTime> {
+            unimplemented!()
+        }
+        fn read_stamped(&self, _: &Path) -> Result<Option<(std::time::SystemTime, Vec<u8>)>> {
+            unimplemented!()
+        }
+        fn is_file(&self, _: &Path) -> bool {
+            unimplemented!()
+        }
+        fn is_dir(&self, _: &Path) -> bool {
+            self.dir
+        }
+        fn exists(&self, _: &Path) -> bool {
+            unimplemented!()
+        }
+        fn read_dir(&self, _: &Path) -> std::io::Result<Vec<PathBuf>> {
+            unimplemented!()
+        }
+        fn rename(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn remove_file(&self, _: &Path) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn tree_size(&self, dir: &Path) -> std::io::Result<Option<u64>> {
+            self.did("measure", dir);
+            Ok(self.size)
+        }
+        fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()> {
+            self.did("remove", dir);
+            if self.fails {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            Ok(())
+        }
+        fn append_line(&self, _: &Path, _: &str) -> std::io::Result<()> {
+            unimplemented!()
+        }
+        fn canonicalize(&self, _: &Path) -> std::io::Result<PathBuf> {
+            unimplemented!()
+        }
+        fn write_fenced(&self, _: &Path, _: &str, _: &str, _: &Path) -> Result<()> {
+            unimplemented!()
+        }
+        fn now(&self) -> std::time::SystemTime {
+            unimplemented!()
+        }
+    }
+
+    /// A build cache is cleared only when there is a directory and its
+    /// owner's lock is free: the update's target under the update lock, the
+    /// recheck's under the recheck lock, measured, removed and made again
+    /// empty under it, and nothing else of their directories. One in use, a
+    /// link (not measured) and a missing one are left with no outcome; one
+    /// that cannot be removed is a failure of its target, and a lock that
+    /// cannot be taken one of the cache's directory.
+    #[test]
+    fn a_build_cache_is_cleared_only_while_its_lock_is_free() {
+        let q = Path::new("/q");
+        for (cache, name, lock, target) in [
+            (
+                BuildCache::Update,
+                "update",
+                "/q/update/lock",
+                "/q/update/target",
+            ),
+            (
+                BuildCache::Recheck,
+                "recheck",
+                "/q/recheck/lock",
+                "/q/recheck/target",
+            ),
+        ] {
+            let free = CacheFiles {
+                dir: true,
+                size: Some(7),
+                ..CacheFiles::default()
+            };
+            assert!(matches!(
+                clear_build_cache(&free, q, cache),
+                Some(Outcome::BuildCache { name: n, ref path, bytes: 7 }) if n == name && path == target
+            ));
+            assert_eq!(
+                free.done(),
+                [
+                    format!("lock {lock}"),
+                    format!("measure {target}"),
+                    format!("remove {target}"),
+                    format!("create {target}"),
+                ]
+            );
+            let busy = CacheFiles {
+                dir: true,
+                busy: true,
+                size: Some(7),
+                ..CacheFiles::default()
+            };
+            assert!(clear_build_cache(&busy, q, cache).is_none());
+            assert_eq!(busy.done(), [format!("lock {lock}")]);
+            let missing = CacheFiles::default();
+            assert!(clear_build_cache(&missing, q, cache).is_none());
+            assert!(missing.done().is_empty());
+            let link = CacheFiles {
+                dir: true,
+                ..CacheFiles::default()
+            };
+            assert!(clear_build_cache(&link, q, cache).is_none());
+            assert_eq!(
+                link.done(),
+                [format!("lock {lock}"), format!("measure {target}")]
+            );
+            let failing = CacheFiles {
+                dir: true,
+                size: Some(7),
+                fails: true,
+                ..CacheFiles::default()
+            };
+            assert!(matches!(
+                clear_build_cache(&failing, q, cache),
+                Some(Outcome::CacheFailed { ref path, .. }) if path == target
+            ));
+            let unlockable = CacheFiles {
+                dir: true,
+                lock_fails: true,
+                ..CacheFiles::default()
+            };
+            assert!(matches!(
+                clear_build_cache(&unlockable, q, cache),
+                Some(Outcome::CacheFailed { ref path, .. }) if path == &format!("/q/{name}")
+            ));
+        }
+    }
+
+    /// `build_cache_removed` names the cache, its target and its bytes,
+    /// for disk space.
+    #[test]
+    fn a_cleared_build_cache_is_recorded_for_disk_space() {
+        assert_eq!(
+            build_cache_record("recheck", "/q/recheck/target", 9),
+            json!({"cache": "recheck", "paths": ["/q/recheck/target"], "bytes": 9, "by": "supervisor", "reason": "disk_space"})
+        );
+    }
 
     #[test]
     fn cleanup_requests_merge_tasks_and_all_without_selecting_idle_runs() {

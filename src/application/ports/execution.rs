@@ -71,6 +71,13 @@ pub trait RunFiles: Send + Sync {
         let _ = path;
         Ok(Some(Box::new(())))
     }
+    /// Take an exclusive lock on `path` (created if missing) as
+    /// [`Self::try_lock`] does, but wait while another holder has it. A
+    /// store with nothing to share between processes grants it at once.
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn std::any::Any + Send>> {
+        let _ = path;
+        Ok(Box::new(()))
+    }
     /// When the file was last written.
     fn modified(&self, path: &Path) -> io::Result<SystemTime>;
     /// The modification time and the bytes of one open file, so both

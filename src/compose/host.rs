@@ -784,18 +784,22 @@ impl OneShot {
             .queue_dir
             .join("logs")
             .join(format!("install-release-{version}.log"));
-        let binary = installation::release_binary(
-            &LocalBinaries,
-            &crate::infrastructure::binaries::CargoInstaller {
-                program: cargo.to_path_buf(),
-            },
-            &version,
-            &options.target,
-            &paths.release,
-            &paths.target,
-            &log,
-        )
-        .with_context(|| format!("install release {version}"))?;
+        // The queue's update lock, held while cargo uses `paths.target`.
+        let binary = update::hold_target(&LocalRunFiles, &paths)
+            .and_then(|_target| {
+                installation::release_binary(
+                    &LocalBinaries,
+                    &crate::infrastructure::binaries::CargoInstaller {
+                        program: cargo.to_path_buf(),
+                    },
+                    &version,
+                    &options.target,
+                    &paths.release,
+                    &paths.target,
+                    &log,
+                )
+            })
+            .with_context(|| format!("install release {version}"))?;
         let mut report = self.install(
             location,
             cmux,

@@ -33,7 +33,7 @@ pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const DISK_ENOUGH_CLOSED: &str = "the free disk space is enough again; closed by the runtime";
 
 /// The question of the disk ask; the runs whose landing waits follow it.
-const DISK_QUESTION: &str = "The free disk space of the queue's directory stays below what the runs need, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR of the recent runs, times [disk] claim_factor / integrate_factor of dagq.toml). No new run is claimed and no run lands until there is room; the runs in flight go on. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
+const DISK_QUESTION: &str = "The free disk space of the queue's directory stays below what the runs need, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR of the recent runs, times [disk] claim_factor / integrate_factor of dagq.toml). No new run is claimed and no run lands until there is room; the runs in flight go on. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
 
 /// What the supervisor knows of the disk between passes.
 #[derive(Debug, Default)]
@@ -190,9 +190,10 @@ impl HostOpsState {
         }
         let after = self.free_bytes(env);
         info!(
-            "the free disk space was short: removed {} bytes of what {} ended run(s) left",
+            "the free disk space was short: removed {} bytes of what {} ended run(s) left and {} build cache(s)",
             removed.bytes,
-            removed.runs.len()
+            removed.runs.len(),
+            removed.caches.len()
         );
         if let Err(error) = env.queue.record_queue_event(
             EventKind::AutoRepaired,
@@ -346,14 +347,15 @@ pub(super) fn claims_wait_for_cleanup(
 
 /// The payload of `auto_repaired` (`repair: disk_cleanup`) for a cleanup
 /// for room: the reading it was asked for at, the reading `after` it, and
-/// the bytes and runs it removed.
+/// the bytes and runs it removed, and the build caches it cleared when it
+/// cleared any.
 fn disk_cleanup_record(
     request: DiskRequest,
     removed: &Cleaned,
     after: Option<u64>,
     token: &LeaseToken,
 ) -> Value {
-    json!({
+    let mut record = json!({
         "repair": DISK_CLEANUP,
         "layer": "runtime",
         "conditions": {
@@ -364,7 +366,11 @@ fn disk_cleanup_record(
         "detail": {"bytes": removed.bytes, "runs": removed.runs},
         "bytes": removed.bytes,
         "supervisor": token,
-    })
+    });
+    if !removed.caches.is_empty() {
+        record["detail"]["caches"] = json!(removed.caches);
+    }
+    record
 }
 
 /// Whether a pass short of room asks for a cleanup for room (task 1627):
@@ -458,6 +464,8 @@ fn is_disk_ask(ask: &Ask) -> bool {
 pub(super) struct Cleaned {
     pub(super) bytes: u64,
     pub(super) runs: Vec<RunId>,
+    /// The build caches of the queue's directory it cleared, by path.
+    pub(super) caches: Vec<String>,
 }
 
 impl Cleaned {
@@ -467,6 +475,13 @@ impl Cleaned {
             if !self.runs.contains(run) {
                 self.runs.push(run.clone());
             }
+        }
+    }
+    /// A build cache of no run cleared at `path`.
+    pub(super) fn add_cache(&mut self, path: &str, bytes: u64) {
+        if bytes > 0 {
+            self.bytes += bytes;
+            self.caches.push(path.to_owned());
         }
     }
 }
@@ -646,6 +661,24 @@ mod tests {
                 "supervisor": "t",
             })
         );
+        // A cleared build cache adds its bytes and is named; one that took
+        // nothing is not.
+        removed.add_cache("/q/update/target", 1000);
+        removed.add_cache("/q/recheck/target", 0);
+        let payload = disk_cleanup_record(
+            DiskRequest {
+                free: Some(1),
+                needed: Some(GIB),
+            },
+            &removed,
+            None,
+            &LeaseToken::new("t"),
+        );
+        assert_eq!(payload["bytes"], 1128);
+        assert_eq!(
+            payload["detail"],
+            json!({"bytes": 1128, "runs": ["idle"], "caches": ["/q/update/target"]})
+        );
     }
 
     /// Task 1627: no cleanup for room is asked for while one waits or runs,
@@ -763,6 +796,10 @@ mod tests {
             question.contains(
                 "the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs"
             ),
+            "{question}"
+        );
+        assert!(
+            question.contains("the target directories of the automatic update and the landing recheck when neither runs"),
             "{question}"
         );
         assert!(

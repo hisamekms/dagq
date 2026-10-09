@@ -376,6 +376,21 @@ impl RunFiles for LocalRunFiles {
             Err(error)
         }
     }
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn std::any::Any + Send>> {
+        use std::os::fd::AsRawFd;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        // SAFETY: flock on a descriptor this function owns; it blocks until
+        // the lock is free, and the lock goes with the file when the guard
+        // drops or the process ends.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(Box::new(file));
+        }
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// Scan the bounded snapshot through the same file descriptor used for
@@ -422,6 +437,31 @@ mod tests {
         drop(guard);
         assert!(files.try_lock(&path).unwrap().is_some());
         assert!(files.try_lock(&dir.path().join("none/lock")).is_err());
+    }
+
+    /// A waiting lock is taken only once the holder's guard drops, and
+    /// keeps a lock taken without waiting out while it is held.
+    #[test]
+    fn a_waiting_lock_is_taken_once_the_holder_drops_its_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let held = LocalRunFiles.try_lock(&path).unwrap().expect("a free lock");
+        let (sender, taken) = std::sync::mpsc::channel();
+        let waiter = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let guard = LocalRunFiles.lock(&path).unwrap();
+                sender.send(()).unwrap();
+                guard
+            })
+        };
+        assert!(taken.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(held);
+        taken.recv_timeout(Duration::from_secs(30)).unwrap();
+        let guard = waiter.join().unwrap();
+        assert!(LocalRunFiles.try_lock(&path).unwrap().is_none());
+        drop(guard);
+        assert!(LocalRunFiles.try_lock(&path).unwrap().is_some());
     }
 
     #[test]

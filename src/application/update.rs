@@ -102,6 +102,9 @@ pub struct UpdatePaths {
     /// `<queue dir>/update/e2e`: where the gate's e2e makes its fixtures
     /// (ADR-t963-1 decision 1).
     pub e2e: PathBuf,
+    /// `<queue dir>/update/lock`: held while `target` is used
+    /// ([`hold_target`]).
+    pub lock: PathBuf,
 }
 
 impl UpdatePaths {
@@ -113,8 +116,57 @@ impl UpdatePaths {
             staged: root.join("staged").join("dagq"),
             release: root.join("release"),
             e2e: root.join("e2e"),
+            lock: root.join("lock"),
         }
     }
+}
+
+/// Wait for the queue's update lock ([`UpdatePaths::lock`]) and hold it
+/// until the guard drops. Whatever builds into `target` holds it while it
+/// does: the automatic update's job (its build, its e2e and the swap of
+/// what it built), the release update's and `install --release`'s `cargo
+/// install`. So one of them, of any supervisor or CLI of the queue, uses
+/// `target` at a time, and the cleanup for room, which clears `target`
+/// only through [`clear_target`], never clears it under them; while it
+/// clears, they wait.
+pub fn hold_target(
+    files: &dyn RunFiles,
+    paths: &UpdatePaths,
+) -> Result<Box<dyn std::any::Any + Send>> {
+    if let Some(dir) = paths.lock.parent() {
+        files
+            .create_dir_all(dir)
+            .with_context(|| format!("create {}", dir.display()))?;
+    }
+    files
+        .lock(&paths.lock)
+        .with_context(|| format!("lock {}", paths.lock.display()))
+}
+
+/// Run `clear` on `paths.target` only while nothing builds there: the
+/// update lock is taken without waiting and held until `clear` returns, so
+/// a [`hold_target`] meanwhile waits. `None` with no target directory, or
+/// while something holds the lock. The cleanup for room clears the target
+/// through it.
+pub fn clear_target<R>(
+    files: &dyn RunFiles,
+    paths: &UpdatePaths,
+    clear: impl FnOnce(&Path) -> R,
+) -> Result<Option<R>> {
+    if !files.is_dir(&paths.target) {
+        return Ok(None);
+    }
+    let Some(_lock) = files
+        .try_lock(&paths.lock)
+        .with_context(|| format!("lock {}", paths.lock.display()))?
+    else {
+        tracing::info!(
+            "the update target {} is in use: left for the next cleanup",
+            paths.target.display()
+        );
+        return Ok(None);
+    };
+    Ok(Some(clear(&paths.target)))
 }
 
 /// Record one step of the automatic update: the queue event `kind` with
@@ -495,6 +547,11 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         e2e_skipped: Default::default(),
     };
     let paths = &options.paths;
+    // Held until the job ends: the binary put in place is built in `target`.
+    let _target = match hold_target(ports.files, paths) {
+        Ok(guard) => guard,
+        Err(error) => return failed(queue, &job, "build", &error, json!({})),
+    };
     let built = ports
         .binaries
         .checkout(&options.repository, &paths.checkout, &options.commit)
@@ -669,15 +726,18 @@ pub fn run_release(
     if options.plugin_only {
         return plugin_only(queue, &job, &options.version, step);
     }
-    let installed = install::release_binary(
-        ports.binaries,
-        installer,
-        &options.version,
-        &options.target,
-        &options.paths.release,
-        &options.paths.target,
-        &options.log,
-    );
+    // The binary goes to `release`: `target` is used only while cargo runs.
+    let installed = hold_target(ports.files, &options.paths).and_then(|_target| {
+        install::release_binary(
+            ports.binaries,
+            installer,
+            &options.version,
+            &options.target,
+            &options.paths.release,
+            &options.paths.target,
+            &options.log,
+        )
+    });
     let binary = match installed {
         Ok(binary) => binary,
         Err(error) => return failed(queue, &job, "build", &error, json!({})),

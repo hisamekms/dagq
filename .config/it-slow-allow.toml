@@ -776,3 +776,9 @@ task = 1664
 name = "runtime_headless_jobs::an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs"
 reason = "B 境界（SQLite・プロセス・復旧とadopt）: 死んだ supervisor の review と review_program の job の process を headless_jobs の行から adopt の前に止め、pid の再利用と生きている supervisor の行には触らず、adopter の review だけが走って着地することを実 process で確かめる。止めるかどうかの判断は domain::headless_job の unit test"
 task = 1896
+
+# 5.348s
+[[test]]
+name = "runtime_disk::a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding"
+reason = "境界（supervisorの配線・ファイル・flock）: the job of a real cleanup for room removes a canceled run's worktree, scratchpad and TMPDIR and the queue dir's build cache whose lock is free, leaves the one whose lock the update holds, and records them; it runs a supervisor twice (a run that builds, then the cleanup and a claim)"
+task = 1979

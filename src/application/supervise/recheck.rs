@@ -26,8 +26,44 @@ use crate::domain::sccache::{CheckReason, GuardLook};
 const RECHECK_DIR: &str = "recheck";
 
 /// The lock file in [`RECHECK_DIR`] the queue's supervisors share: one
-/// recheck at a time uses the scratch worktree and the target.
+/// recheck at a time uses the scratch worktree and the target, and the
+/// cleanup for room clears the target only under it ([`clear_target`]).
 const RECHECK_LOCK: &str = "lock";
+
+/// The recheck's one target directory in [`RECHECK_DIR`], its
+/// `CARGO_TARGET_DIR`.
+const RECHECK_TARGET: &str = "target";
+
+/// Run `clear` on the recheck's target directory of the queue at
+/// `queue_dir` only while no recheck uses it: the recheck lock is taken
+/// without waiting and held until `clear` returns, so no recheck starts
+/// meanwhile (it tries again on a later pass, as when another
+/// supervisor's recheck holds the lock). `None` with no target directory,
+/// or while a recheck holds the lock. Published to host operation's
+/// cleanup for room, which clears the target through it.
+pub(super) fn clear_target<R>(
+    files: &dyn RunFiles,
+    queue_dir: &Path,
+    clear: impl FnOnce(&Path) -> R,
+) -> Result<Option<R>> {
+    let dir = queue_dir.join(RECHECK_DIR);
+    let target = dir.join(RECHECK_TARGET);
+    if !files.is_dir(&target) {
+        return Ok(None);
+    }
+    let lock = dir.join(RECHECK_LOCK);
+    let Some(_lock) = files
+        .try_lock(&lock)
+        .with_context(|| format!("lock {}", lock.display()))?
+    else {
+        info!(
+            "the recheck target {} is in use: left for the next cleanup",
+            target.display()
+        );
+        return Ok(None);
+    };
+    Ok(Some(clear(&target)))
+}
 
 /// How many of the latest `landing_recheck_finished` tell who checked a
 /// main already.
@@ -802,7 +838,7 @@ fn recheck_env(
     env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
     env.push((
         "CARGO_TARGET_DIR".to_owned(),
-        path_text(&dir.join("target"))?,
+        path_text(&dir.join(RECHECK_TARGET))?,
     ));
     look.apply(&mut env);
     Ok(env)
