@@ -44,6 +44,9 @@ pub enum Operation {
     AutoUpdate,
     Up,
     Down,
+    /// `dagq inbox`: the inbox opened in the caller's terminal
+    /// (ADR-t2159-1 decision 2), with `up`'s capability.
+    OpenInbox,
     /// `service start`, `service stop` and `service serve`: the queue
     /// service, with the service's capability (ADR-t1233-4 decision 1).
     QueueService,
@@ -97,7 +100,9 @@ impl Operation {
         match self {
             Self::Init | Self::Migrate | Self::Rebind => (C::QueueAdmin, Resource::Queue),
             Self::Install | Self::AutoUpdate => (C::BinaryInstall, Resource::Queue),
-            Self::Up | Self::Down | Self::QueueService => (C::ServiceLifecycle, Resource::Queue),
+            Self::Up | Self::Down | Self::OpenInbox | Self::QueueService => {
+                (C::ServiceLifecycle, Resource::Queue)
+            }
             Self::Plan => (C::PlannerOpen, Resource::Queue),
             Self::Supervise => (C::Supervise, Resource::Queue),
             Self::Observe => (C::ObserveRun, Resource::Queue),
@@ -182,6 +187,7 @@ mod tests {
             Operation::AutoUpdate,
             Operation::Up,
             Operation::Down,
+            Operation::OpenInbox,
             Operation::Plan,
             Operation::Supervise,
             Operation::Observe,

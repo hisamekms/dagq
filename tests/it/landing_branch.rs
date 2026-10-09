@@ -156,13 +156,12 @@ fn a_branch_named_in_dagq_toml_is_where_runs_land() {
 /// before starting a supervisor, one that resolves none.
 #[test]
 fn up_checks_the_landing_branch_on_master() {
-    use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up, up};
+    use common::lifecycle::{FakeLaunchd, FakeProcesses, fixture, try_up, up};
     let fixture = fixture();
     git(&fixture.repo, &["branch", "-m", "main", "master"]);
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(
         report["repository"],
@@ -174,12 +173,8 @@ fn up_checks_the_landing_branch_on_master() {
 
     let other = common::lifecycle::fixture();
     git(&other.repo, &["branch", "-m", "main", "feature"]);
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&other.location.db);
-    let error = format!(
-        "{:#}",
-        try_up(&other, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&other, &launchd, &processes).unwrap_err());
     assert!(
         error.contains("cannot resolve the landing branch")
             && error.contains("[repository]")
@@ -201,17 +196,13 @@ fn up_checks_the_landing_branch_on_master() {
 /// it exists, whose HEAD names the guessed landing branch.
 #[test]
 fn up_and_doctor_check_the_configured_push_remote() {
-    use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up, up};
+    use common::lifecycle::{FakeLaunchd, FakeProcesses, fixture, try_up, up};
     let fixture = fixture();
     let config = fixture.repo.join("dagq.toml");
     fs::write(&config, "[repository]\nremote = \"upstream\"\n").unwrap();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(
         error.contains("the remote upstream")
             && error.contains("[repository]")
@@ -223,7 +214,7 @@ fn up_and_doctor_check_the_configured_push_remote() {
         "[repository]\nremote = \"upstream\"\npush = false\n",
     )
     .unwrap();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(
         report["repository"],
@@ -248,7 +239,7 @@ fn up_and_doctor_check_the_configured_push_remote() {
             "refs/remotes/upstream/trunk",
         ],
     );
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(
         report["repository"],
         json!({
@@ -259,10 +250,7 @@ fn up_and_doctor_check_the_configured_push_remote() {
     );
 
     fs::write(&config, "[repository]\nremote = \"bad name\"\n").unwrap();
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(error.contains("not a valid remote name"), "{error}");
 }
 

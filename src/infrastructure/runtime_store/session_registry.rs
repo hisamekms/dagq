@@ -38,19 +38,17 @@ impl SqliteQueue {
         )? == 1)
     }
 
-    /// Forget the workspaces recorded for a role `up` no longer opens (the
-    /// resident sessions ADR-0024 and ADR-0041 decision 6 retired: the
-    /// maintainer and the resident planner): only the inbox's and the
-    /// supervisor's an earlier binary recorded for the retired in-cmux mode
-    /// (which `down` forgets as it closes it) are kept. Returns how many were forgotten; the
-    /// workspaces themselves are a person's to close.
+    /// Forget the workspaces recorded for a role `up` no longer opens: the
+    /// inbox's (a person opens it with `dagq inbox`, ADR-t2159-1 decision
+    /// 2) and the retired resident sessions' (ADR-0024, ADR-0041 decision
+    /// 6). Only the supervisor's an earlier binary recorded for the retired
+    /// in-cmux mode is kept, which `down` forgets as it stops it. Returns
+    /// how many were forgotten; the workspaces themselves are a person's to
+    /// close.
     pub fn forget_retired_session_workspaces(&self) -> Result<usize> {
         Ok(self.conn.execute(
-            "DELETE FROM session_workspaces WHERE role NOT IN (?1,?2)",
-            params![
-                SessionRole::Supervisor.as_str(),
-                SessionRole::Inbox.as_str()
-            ],
+            "DELETE FROM session_workspaces WHERE role != ?1",
+            params![SessionRole::Supervisor.as_str()],
         )?)
     }
 }

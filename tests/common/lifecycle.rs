@@ -1,4 +1,4 @@
-//! The fixture and the fakes for launchd, cmux and process signals for the
+//! The fixture and the fakes for launchd and process signals for the
 //! lifecycle tests (`tests/lifecycle_*.rs`).
 
 use super::Bounded;
@@ -8,7 +8,7 @@ use dagq::infrastructure::git_binary::git_executable;
 use anyhow::{Result, bail};
 use dagq::{
     VERSION,
-    application::{AgentState, LaunchAgent, ProcessControl, WorkspaceBackend, WorkspaceTags},
+    application::{AgentState, LaunchAgent, ProcessControl},
     domain::{SupervisorMode, recovery::ProcessInfo},
     infrastructure::{location::QueueLocation, sqlite::SqliteQueue},
     lifecycle::{self, DownOptions, UpEnvironment, UpOptions},
@@ -19,10 +19,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::Mutex,
     thread,
     time::Duration,
 };
@@ -72,8 +69,8 @@ pub fn fixture() -> Fixture {
 pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.0\\n'\n",
     );
 
-    let cmux = dir.path().join("cmux-stub");
-    crate::common::template::script(&cmux, "#!/bin/sh\nprintf 'PONG\\n'\n");
+    // Only passed on to the supervisor's command line: no cmux is there.
+    let cmux = dir.path().join("cmux-absent");
 
     // Claude Code has accepted the folder trust dialog at the repository root.
     let claude_config = dir.path().join("claude.json");
@@ -250,160 +247,10 @@ impl ProcessControl for FakeProcesses {
     }
 }
 
-/// The inbox's named workspace, the only cmux workspace `up` opens.
-#[derive(Default)]
-pub struct FakeCmux {
-    pub calls: AtomicUsize,
-    pub workspaces: Mutex<Vec<(String, PathBuf, String, String)>>,
-    pub closed: Mutex<Vec<String>>,
-    /// The tags each workspace was opened with, in `workspaces` order.
-    pub tags: Mutex<Vec<WorkspaceTags>>,
-    /// Every `ensure_group` call, as (external ID, name).
-    pub groups: Mutex<Vec<(String, String)>>,
-    /// `workspace-group create` fails.
-    pub group_fails: bool,
-    /// Every color, status pill and pin call, as (call, workspace, what).
-    pub looks: Mutex<Vec<(String, String, String)>>,
-    /// cmux refuses every color, status pill and pin call.
-    pub look_fails: bool,
-    /// `workspace create` fails.
-    pub create_fails: bool,
-    /// `workspace create` reports failing although cmux makes the
-    /// workspace, as a create that timed out does (task 806).
-    pub create_times_out: bool,
-    /// Workspaces created so far, so a UUID is never handed out twice.
-    pub created: AtomicUsize,
-}
-
-impl FakeCmux {
-    /// Rename a workspace the way a person would in cmux's sidebar.
-    pub fn rename(&self, id: &str, title: &str) {
-        for workspace in self.workspaces.lock().unwrap().iter_mut() {
-            if workspace.2 == id {
-                workspace.0 = title.into();
-            }
-        }
-    }
-
-    pub fn look(&self, call: &str, id: &str, what: String) -> Result<()> {
-        self.looks
-            .lock()
-            .unwrap()
-            .push((call.into(), id.into(), what));
-        if self.look_fails {
-            bail!("{call} refused")
-        }
-        Ok(())
-    }
-
-    /// The look calls made on `id`, in order.
-    pub fn looks_of(&self, id: &str) -> Vec<(String, String)> {
-        self.looks
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, workspace, _)| workspace == id)
-            .map(|(call, _, what)| (call.clone(), what.clone()))
-            .collect()
-    }
-
-    /// An open workspace put there directly, the way one opened by an
-    /// earlier process is: nothing registers for it.
-    pub fn open(&self, name: &str, cwd: &Path, id: &str) {
-        self.workspaces.lock().unwrap().push((
-            name.into(),
-            cwd.into(),
-            id.into(),
-            "supervise".into(),
-        ));
-        self.tags.lock().unwrap().push(WorkspaceTags::default());
-    }
-}
-
-impl WorkspaceBackend for FakeCmux {
-    fn preflight(&self) -> Result<()> {
-        Ok(())
-    }
-    fn close(&self, workspace_id: &str) -> Result<()> {
-        self.closed.lock().unwrap().push(workspace_id.to_owned());
-        let mut workspaces = self.workspaces.lock().unwrap();
-        let Some(index) = workspaces
-            .iter()
-            .position(|(_, _, id, _)| id == workspace_id)
-        else {
-            bail!("no such workspace: {workspace_id}")
-        };
-        workspaces.remove(index);
-        self.tags.lock().unwrap().remove(index);
-        Ok(())
-    }
-    fn set_color(&self, workspace_id: &str, color: &str) -> Result<()> {
-        self.look("set-color", workspace_id, color.into())
-    }
-    fn set_status(&self, workspace_id: &str, key: &str, value: &str, icon: &str) -> Result<()> {
-        self.look("set-status", workspace_id, format!("{key}={value} {icon}"))
-    }
-    fn pin(&self, workspace_id: &str) -> Result<()> {
-        self.look("pin", workspace_id, String::new())
-    }
-    fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
-        bail!("up does not notify")
-    }
-    fn exists(&self, workspace_id: &str) -> Result<bool> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self
-            .workspaces
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(_, _, id, _)| id == workspace_id))
-    }
-    fn ensure_group(&self, external_id: &str, name: &str) -> Result<String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.groups
-            .lock()
-            .unwrap()
-            .push((external_id.into(), name.into()));
-        if self.group_fails {
-            bail!("workspace-group create failed")
-        }
-        Ok(format!("group-{external_id}"))
-    }
-    fn create_named(
-        &self,
-        name: &str,
-        cwd: &Path,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if self.create_fails {
-            bail!("workspace create failed")
-        }
-        let mut workspaces = self.workspaces.lock().unwrap();
-        let id = format!(
-            "01234567-89ab-4def-8123-{:012x}",
-            self.created.fetch_add(1, Ordering::SeqCst)
-        );
-        workspaces.push((name.into(), cwd.into(), id.clone(), command.into()));
-        self.tags.lock().unwrap().push(tags.clone());
-        if self.create_times_out {
-            bail!("Error: Command timed out")
-        }
-        Ok(id)
-    }
-}
-
-pub fn up(
-    fixture: &Fixture,
-    cmux: &FakeCmux,
-    launchd: &FakeLaunchd,
-    processes: &FakeProcesses,
-) -> Value {
+pub fn up(fixture: &Fixture, launchd: &FakeLaunchd, processes: &FakeProcesses) -> Value {
     lifecycle::up(
         &fixture.location,
         &fixture.repo,
-        cmux,
         launchd,
         processes,
         &fixture.environment,
@@ -414,14 +261,12 @@ pub fn up(
 
 pub fn try_up(
     fixture: &Fixture,
-    cmux: &FakeCmux,
     launchd: &FakeLaunchd,
     processes: &FakeProcesses,
 ) -> Result<Value> {
     lifecycle::up(
         &fixture.location,
         &fixture.repo,
-        cmux,
         launchd,
         processes,
         &fixture.environment,
@@ -475,7 +320,6 @@ pub fn backend_failures(fixture: &Fixture) -> Vec<dagq::domain::RunEvent> {
 
 pub fn down(
     fixture: &Fixture,
-    cmux: &FakeCmux,
     launchd: &FakeLaunchd,
     processes: &FakeProcesses,
     wait: bool,
@@ -483,7 +327,6 @@ pub fn down(
 ) -> Value {
     lifecycle::down(
         &fixture.location,
-        cmux,
         launchd,
         processes,
         &DownOptions {

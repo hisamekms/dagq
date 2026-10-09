@@ -1,19 +1,20 @@
-//! `up` and `down`: the cold start and the stop of one queue's runtime. `up`
-//! makes sure a supervisor is resident (as a launchd LaunchAgent, restarted
-//! after any exit) and that the inbox's Claude session has a cmux
-//! workspace, and reports the queue's open work. Planners are not resident:
-//! the runtime opens one when there is planning to do ([`super::planner`],
-//! ADR-t1394-1). `down` unloads the agent so the
-//! supervisor drains and is not restarted. Both are idempotent: a second
-//! `up` reuses what the first one started.
+//! `up`, `down` and `inbox`: the cold start and the stop of one queue's
+//! runtime, and the inbox a person opens in their own terminal. `up` makes
+//! sure a supervisor is resident (as a launchd LaunchAgent, restarted
+//! after any exit) and reports the queue's open work; it opens no inbox
+//! and calls no cmux (ADR-t2159-1 decision 3): `dagq inbox` starts the
+//! inbox's agent in the foreground of the terminal it is typed in
+//! (decision 2). Planners are not resident: the runtime opens one when
+//! there is planning to do ([`super::planner`], ADR-t1394-1). `down`
+//! unloads the agent so the supervisor drains and is not restarted. Both
+//! are idempotent: a second `up` reuses what the first one started.
 //!
-//! The supervisor calls no cmux, so `up` starts it under launchd only and
-//! asks cmux nothing on its behalf: cmux is checked from the shell that
-//! runs `up` for the inbox's workspace alone. The in-cmux mode is retired
-//! (ADR-t1433-4): `up --in-cmux` is refused, and a supervisor some earlier
-//! binary registered in that mode is still handed over, replaced and
-//! stopped (its SIGINT and the close of its workspace) until a person
-//! moves it to launchd with `down --wait` and `up`.
+//! The in-cmux mode is retired (ADR-t1433-4): `up --in-cmux` is refused,
+//! and a supervisor some earlier binary registered in that mode is still
+//! handed over, replaced and stopped (its SIGINT) until a person moves it
+//! to launchd with `down --wait` and `up`. Its cmux workspace, and the
+//! inbox's an earlier `up` opened, are a person's to close: dagq only
+//! forgets their records (ADR-t2159-1 decision 6).
 //!
 //! A supervisor is only reused while it runs this binary's own build.
 //! Every registration carries the `binary_version` its process recorded,
@@ -22,21 +23,18 @@
 //! pid and token), or drains one that cannot take a handoff before
 //! starting one of its own in its place (ADR-0045 decisions 10, 15).
 //!
-//! The use cases reach the queue, cmux, launchd, processes, Claude Code and
-//! the files through [`Ports`]; the entry points in [`crate::compose`]
-//! build the adapters.
+//! The use cases reach the queue, launchd, processes, Claude Code and the
+//! files through [`Ports`]; the entry points in [`crate::compose`] build
+//! the adapters.
 use super::{
-    AgentProvider, CONFIG_HOME_ENV, Clock, LaunchAgent, ProcessControl, QueueOpener,
+    AgentProvider, CONFIG_HOME_ENV, Clock, CommandSpec, LaunchAgent, ProcessControl, QueueOpener,
     RunCoordination, RunFiles, RunLog, RunRecovery, SessionRegistry, SupervisorEnvironment,
-    SupervisorRegistry, WorkspaceBackend,
+    SupervisorRegistry,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, WorkspaceAccess,
-        WorkspaceCommand,
     },
-    naming::{inbox_workspace_name, workspace_description, workspace_group_name},
     path_text,
     prompt::inbox_prompt,
-    recording::RecordingBackend,
 };
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
@@ -52,7 +50,6 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
-    cell::{OnceCell, RefCell},
     collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
@@ -60,13 +57,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Set in the environment of every workspace of a queue (`--env`, which
-/// every shell of the workspace inherits): the role the workspace plays, so
-/// that `up`, run from inside the inbox session (the plugin skill calls
-/// it), does not open a second one, and the plugin's hook knows the session
-/// however it was started (ADR-0026).
+/// Set in the environment of every session of a queue: the role the
+/// session plays, so that `dagq inbox` typed inside the inbox opens no
+/// second one (ADR-t2159-1 decision 2), and the plugin's hook knows the
+/// session however it was started.
 pub const ROLE_ENV: &str = crate::domain::actor::ROLE_ENV;
-/// The queue database the workspace belongs to.
+/// The queue database the session belongs to.
 pub const QUEUE_ENV: &str = "DAGQ_QUEUE";
 /// `DAGQ_ROLE` of a run's session wrapper (and of its resumes').
 pub const WORKER_ROLE: &str = ActorRole::Worker.as_str();
@@ -80,8 +76,8 @@ pub use crate::domain::actor::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, SESSION_KIND_
 /// a person's planner's workspace owns the proposals it submits (a planner
 /// of the runtime's has none: its record's background handle owns them).
 pub const CMUX_WORKSPACE_ENV: &str = "CMUX_WORKSPACE_ID";
-/// `DAGQ_ROLE` of the session where a person answers the queue's asks. `up`
-/// opens its workspace `[<repo>]inbox`.
+/// `DAGQ_ROLE` of the session where a person answers the queue's asks: a
+/// person opens it in their own terminal with `dagq inbox`.
 pub const INBOX_ROLE: &str = ActorRole::Inbox.as_str();
 /// `DAGQ_ROLE` of the periodic observer job (ADR-0024 decision 4). The CLI
 /// refuses every command that changes queue state from this environment,
@@ -226,9 +222,28 @@ the dagq skills its prompt names. Install it with `{add}` and `{install}`{enable
     )
 }
 
-/// Where the queue `up` and `down` work on lives: its database, its hash
-/// (the external ID of its workspace group), and the LaunchAgent label,
-/// plist and log directory of its supervisor.
+/// Check the Claude Code at `executable` (`agent`) before `dagq <command>`
+/// starts what loads the plugin from `cwd`: the agent's own preflight,
+/// then, unless `plugin_dir` is given or `check_plugin` is off,
+/// [`require_installed_plugin`] for the inbox. `up` and `dagq inbox` run
+/// the same check (ADR-t617-2 decisions 1, 4).
+pub fn require_agent(
+    agent: &dyn AgentProvider,
+    executable: &Path,
+    plugin_dir: Option<&Path>,
+    cwd: &Path,
+    command: &str,
+    check_plugin: bool,
+) -> Result<()> {
+    agent.preflight()?;
+    if check_plugin && plugin_dir.is_none() {
+        require_installed_plugin(agent, executable, cwd, "inbox", command)?;
+    }
+    Ok(())
+}
+
+/// Where the queue `up` and `down` work on lives: its database, its hash,
+/// and the LaunchAgent label, plist and log directory of its supervisor.
 #[derive(Debug, Clone)]
 pub struct QueuePaths {
     pub db: PathBuf,
@@ -255,20 +270,16 @@ pub struct RepositoryPaths {
 }
 
 /// What `up` and `down` reach the outside through. `queues` opens the
-/// queue at a database path as their ports (once for the use case), and
-/// `recording_queues` as the whole queue 実行と着地's [`RecordingBackend`]
-/// records each failed cmux call through;
+/// queue at a database path as their ports (once for the use case);
 /// `inspect_repository` finds the repository containing a checkout;
 /// `trusts_repository(config, root)` reads Claude Code's global config for
-/// the folder trust of `root`.
+/// the folder trust of `root`. Neither reaches cmux (ADR-t2159-1 decision 1).
 pub struct Ports<'a> {
-    pub cmux: &'a dyn WorkspaceBackend,
     pub launchd: &'a dyn LaunchAgent,
     pub processes: &'a dyn ProcessControl,
     pub files: &'a dyn RunFiles,
     pub clock: &'a dyn Clock,
     pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener<dyn LifecycleQueue + Send>>,
-    pub recording_queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener>,
     pub inspect_repository: &'a dyn Fn(&Path) -> Result<RepositoryPaths>,
     pub trusts_repository: &'a dyn Fn(&Path, &Path) -> Result<bool>,
     /// `run_env_programs(checkout, db, path)` checks the programs the
@@ -283,9 +294,6 @@ pub struct Ports<'a> {
     /// `dagq.toml` in `checkout` over the user's `config.toml`, or the
     /// mistake in either (ADR-t616-2).
     pub resolve_language: &'a ResolveLanguage,
-    pub load_average: fn() -> Option<f64>,
-    /// The agent of the sessions `up` opens (the inbox), given `--claude`.
-    pub agent: &'a dyn Fn(&Path) -> Box<dyn AgentProvider>,
     /// `queue_service(db, executable)`: the control of the queue's
     /// service, started from `executable` (ADR-t1233-4 decision 1). The
     /// service calls no cmux (ADR-t1433-1).
@@ -328,10 +336,10 @@ pub struct UpOptions {
     /// but bounds the drain by `startup_timeout` rather than waiting for a
     /// supervisor that turns out not to stop.
     pub no_wait: bool,
-    /// Passed to the inbox's `claude` as `--plugin-dir`.
+    /// Passed to the supervisor, whose planners load it with `--plugin-dir`.
     pub plugin_dir: Option<PathBuf>,
-    /// Resolved executables; the agent runs the supervisor with these, and
-    /// the inbox workspace starts this `claude`.
+    /// Resolved executables; the agent runs the supervisor with these. The
+    /// cmux is only passed on for the supervisor's older command line.
     pub cmux: PathBuf,
     pub claude: PathBuf,
     /// The Codex CLI the supervisor's Codex workers start (ADR-t813-2),
@@ -359,17 +367,20 @@ pub struct UpOptions {
 /// How long `up` waits for the queue's service to answer.
 pub const QUEUE_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Ensure the supervisor and the inbox workspace exist and report the queue's open work. Preflight first (cmux, claude, the installed plugin without `--plugin-dir`, Claude Code's trust of
-/// the repository root, an initialized queue, the repository), then prune registrations whose process is gone, start
-/// the agent only when no live registration of this binary's version
-/// remains — draining and replacing a live supervisor of any other
-/// version — and open the inbox workspace only outside that session itself.
-/// A workspace recorded for a role `up` no longer opens (the maintainer
-/// ADR-0024 retired, the resident planner ADR-0041 decision 6 retired) is
-/// forgotten; the workspace itself is left for a person to close.
+/// Ensure the supervisor exists and report the queue's open work.
+/// Preflight first ([`require_agent`]: claude and the installed plugin
+/// without `--plugin-dir`; Claude Code's trust of the repository root, an
+/// initialized queue, the repository), then prune registrations whose
+/// process is gone, start the agent only when no live registration of
+/// this binary's version remains — draining and replacing a live
+/// supervisor of any other version. `up` opens no inbox (ADR-t2159-1
+/// decision 3): its result says to open it with `dagq inbox`. The
+/// workspaces an earlier binary recorded (the inbox's, the retired
+/// maintainer's and resident planner's) are forgotten without cmux; the
+/// workspaces themselves are left for a person to close.
 ///
-/// `claude` is the Claude Code the inbox session starts, whose preflight
-/// `up` runs.
+/// `claude` is the Claude Code the supervisor's sessions and the inbox
+/// start, whose preflight `up` runs.
 pub fn up(
     ports: &Ports,
     claude: &dyn AgentProvider,
@@ -383,22 +394,24 @@ pub fn up(
         "parallel must be at least 1"
     );
     ensure!(!options.in_cmux, IN_CMUX_RETIRED);
-    let (cmux, launchd, processes) = (ports.cmux, ports.launchd, ports.processes);
+    let (launchd, processes) = (ports.launchd, ports.processes);
     let db = ports
         .files
         .canonicalize(&location.db)
         .context("queue must already be initialized")?;
     let repository = (ports.inspect_repository)(repo)?;
-    cmux.preflight()?;
+    // A restart by the runtime is not a person's `up`, and starts what ran
+    // before without the plugin's check.
     if !options.no_claude {
-        claude.preflight()?;
-    }
-    // Without --plugin-dir the inbox loads the plugin the user installed
-    // (ADR-t617-2 decisions 1, 4). A restart by the runtime is not a
-    // person's `up`, and starts what ran before.
-    if !options.no_claude && options.plugin_dir.is_none() && !environment.restart {
-        require_installed_plugin(claude, &options.claude, &repository.root, "inbox", "up")
-            .map_err(|error| anyhow::anyhow!("{error:#}; the supervisor was not started"))?;
+        require_agent(
+            claude,
+            &options.claude,
+            options.plugin_dir.as_deref(),
+            &repository.root,
+            "up",
+            !environment.restart,
+        )
+        .map_err(|error| anyhow::anyhow!("{error:#}; the supervisor was not started"))?;
     }
     // Claude Code keys trust by the main checkout even for a linked
     // worktree, and `up` may run from any worktree of the repository; the
@@ -449,16 +462,13 @@ pub fn up(
             auto_update_refused(trust_root)
         );
     }
-    let plugin_dir = options
-        .plugin_dir
-        .as_deref()
-        .map(|dir| {
-            ports
-                .files
-                .canonicalize(dir)
-                .with_context(|| format!("plugin directory {}", dir.display()))
-        })
-        .transpose()?;
+    // The supervisor's planners load it; one that is not there stops `up`.
+    if let Some(dir) = &options.plugin_dir {
+        ports
+            .files
+            .canonicalize(dir)
+            .with_context(|| format!("plugin directory {}", dir.display()))?;
+    }
     let queue = (ports.queues)(&db).open()?;
     let queue = &*queue;
     // The queue's service before the supervisor, of this binary's build
@@ -490,22 +500,11 @@ pub fn up(
     } else {
         None
     };
-    // Every workspace call from here on is recorded when it fails; none of
-    // them is for a run.
-    let recording = RecordingBackend::over(
-        cmux,
-        (ports.recording_queues)(&db),
-        None,
-        ports.load_average,
-    );
-    let cmux: &dyn WorkspaceBackend = &recording;
-    let workspaces = QueueWorkspaces::new(cmux, location.hash.clone(), &repository.root);
     let up = Up {
         location,
         db: &db,
         repository: &repository,
         queue,
-        workspaces: &workspaces,
         launchd,
         processes,
         clock: ports.clock,
@@ -554,8 +553,8 @@ pub fn up(
         .iter()
         .any(|registration| registration.binary_version.as_deref() != Some(VERSION));
     // A handoff some supervisors failed does not stop `up` short: the
-    // others serve under this build, and they get `--auto-update` and the
-    // inbox all the same before `up` fails naming the ones that did not.
+    // others serve under this build, and they get `--auto-update` all the
+    // same before `up` fails naming the ones that did not.
     let mut handoff_failure = None;
     let supervisor = match live.first() {
         // Whoever started it recorded the mode; a supervisor started by
@@ -580,25 +579,13 @@ pub fn up(
     };
     let supervisor = set_auto_update(queue, supervisor, &live, options.auto_update)?;
 
-    let sessions = Sessions {
-        queue,
-        workspaces: &workspaces,
-        environment,
-        files: ports.files,
-        db: &db,
-        root: &repository.root,
-        agent: &*(ports.agent)(&options.claude),
-        plugin_dir: plugin_dir.as_deref(),
-    };
+    // The workspaces an earlier `up` opened are a person's to close; their
+    // records go without a call to cmux (ADR-t2159-1 decision 6).
     let retired_sessions = queue.forget_retired_session_workspaces()?;
     let inbox = if options.no_claude {
         json!({"outcome": "skipped", "reason": "provider_disabled", "next": "use a manually opened inbox"})
     } else {
-        sessions.open(
-            SessionRole::Inbox,
-            inbox_workspace_name(&repository.root),
-            || inbox_session_prompt(&db, language.as_ref()),
-        )?
+        json!({"outcome": "not_opened", "next": INBOX_NEXT})
     };
 
     let mut report = json!({
@@ -606,7 +593,6 @@ pub fn up(
         "inbox": inbox,
         "retired_sessions": retired_sessions,
         "pruned_supervisors": pruned,
-        "warnings": workspaces.take_warnings(),
         "doctor": open_work(queue, processes, ports.clock)?,
         "repository": landing,
         "language": language,
@@ -624,8 +610,12 @@ pub fn up(
     }
 }
 
+/// What `up` says of the inbox it does not open (ADR-t2159-1 decision 3).
+pub const INBOX_NEXT: &str = "open the inbox with `dagq inbox` in your own terminal (any terminal \
+or IDE, in the repository); it starts the inbox's agent there in the foreground";
+
 /// The error of an `up` whose handoff some or all of the supervisors did
-/// not take: `up` still set `--auto-update` and opened the inbox, and
+/// not take: `up` still set `--auto-update`, and
 /// `report` is what it reports, with the supervisor's outcome
 /// `partially_handed_off` (or `handoff_failed` when none took it) and each
 /// supervisor's result in `replaced`, for the command to print beside the
@@ -651,9 +641,9 @@ impl PartialHandoff {
     }
 }
 
-/// The queue's ports `up` and `down` reach: the supervisors'
-/// registrations and handoffs, the runs they lease, the events, and the
-/// inbox's workspace.
+/// The queue's ports `up`, `down` and `dagq inbox` reach: the
+/// supervisors' registrations and handoffs, the runs they lease, the
+/// events, and the workspaces an earlier binary recorded.
 pub trait LifecycleQueue:
     SupervisorRegistry + RunCoordination + RunRecovery + RunLog + SessionRegistry
 {
@@ -670,7 +660,6 @@ struct Up<'a, Q: ?Sized> {
     db: &'a Path,
     repository: &'a RepositoryPaths,
     queue: &'a Q,
-    workspaces: &'a QueueWorkspaces<'a>,
     launchd: &'a dyn LaunchAgent,
     processes: &'a dyn ProcessControl,
     clock: &'a dyn Clock,
@@ -678,229 +667,10 @@ struct Up<'a, Q: ?Sized> {
     options: &'a UpOptions,
 }
 
-/// The Claude sessions `up` keeps a workspace open for: the inbox (ADR-0022,
-/// ADR-0041 decision 6). Each is opened the same way: skipped
-/// when `up` runs inside that very session of this queue (its `DAGQ_ROLE`
-/// and `DAGQ_QUEUE`), reused while its recorded UUID is still listed, and
-/// otherwise created and recorded in `session_workspaces`.
-struct Sessions<'a, Q: ?Sized> {
-    queue: &'a Q,
-    workspaces: &'a QueueWorkspaces<'a>,
-    environment: &'a UpEnvironment,
-    files: &'a dyn RunFiles,
-    db: &'a Path,
-    root: &'a Path,
-    /// The agent of the sessions, on `up`'s `--claude`.
-    agent: &'a dyn AgentProvider,
-    plugin_dir: Option<&'a Path>,
-}
-
-impl<Q: SessionRegistry + RunLog + ?Sized> Sessions<'_, Q> {
-    /// Open the workspace of `role`'s agent with `prompt` as its first
-    /// message, through the actor executor like every AI actor.
-    fn open(
-        &self,
-        role: SessionRole,
-        name: String,
-        prompt: impl FnOnce() -> Result<String>,
-    ) -> Result<Value> {
-        let inside = self.environment.role.as_deref() == Some(role.as_str())
-            && self
-                .environment
-                .queue
-                .as_deref()
-                .and_then(|queue| self.files.canonicalize(queue).ok())
-                .is_some_and(|queue| queue == self.db);
-        let cmux = self.workspaces.cmux;
-        if inside {
-            // The session `up` runs in is most likely the recorded one; an
-            // `up` from it is how an older binary's workspace gets its look.
-            if let Some(id) = self.queue.session_workspace(role)?
-                && matches!(cmux.exists(&id), Ok(true))
-            {
-                self.mark(role, &id);
-            }
-            return Ok(json!({"outcome": "skipped", "workspace_id": Value::Null, "name": name}));
-        }
-        if let Some(id) = recorded_workspace(self.queue, cmux, role)? {
-            self.mark(role, &id);
-            let mut report = json!({"outcome": "reused", "workspace_id": id, "name": name});
-            if role == SessionRole::Inbox {
-                // `up` does not start a reused inbox again (its
-                // conversation stays): it keeps the guardrail it was opened
-                // with, or none (ADR-t1228-2 decision 4).
-                let opened = self
-                    .queue
-                    .latest_event_of(EventKind::InboxOpened.as_str())?;
-                let view = super::inbox_guardrail::judge(
-                    Some(&id),
-                    opened.as_ref().map(|event| &event.payload),
-                );
-                report["guardrail"] = view["guardrail"].clone();
-                if let Some(next) = view.get("next") {
-                    report["next"] = next.clone();
-                }
-            }
-            return Ok(report);
-        }
-        let id = HostActorExecutor::new(self.db)
-            .with_workspaces(cmux)
-            .with_provider(self.agent)
-            .spawn(ActorExecutionSpec::new(
-                session_actor(role),
-                WorkspaceAccess::Write(self.root.to_path_buf()),
-                ActorProgram::NamedWorkspace {
-                    name: &name,
-                    cwd: self.root,
-                    command: WorkspaceCommand::Agent {
-                        prompt: prompt()?,
-                        plugin_dir: self.plugin_dir,
-                    },
-                    launch: None,
-                    description: self.workspaces.description(role),
-                    group: self.workspaces.group(),
-                },
-            ))?
-            .workspace()?;
-        self.queue.register_session_workspace(role, &id)?;
-        let mut report = json!({"outcome": "created", "workspace_id": id, "name": name});
-        if role == SessionRole::Inbox {
-            // Whether this inbox refuses raw cmux (ADR-t1228-2 decision 4):
-            // `status` and `doctor` judge the recorded inbox by it.
-            let settings = self
-                .agent
-                .inbox_settings(self.db.parent().unwrap_or(Path::new(".")));
-            let guardrail = settings.is_some();
-            self.queue.record_queue_event(
-                EventKind::InboxOpened,
-                json!({"workspace_id": id, "guardrail": guardrail, "settings": settings}),
-            )?;
-            report["guardrail"] = json!(guardrail);
-        }
-        self.mark(role, &id);
-        Ok(report)
-    }
-
-    /// Color the workspace, put the role's status pill on it and pin it
-    /// (ADR-0031). Every `up` does it again, so a workspace an older `up`
-    /// opened gets it too. None of it is worth failing `up` for: what cmux
-    /// refuses is a warning in `up`'s result.
-    fn mark(&self, role: SessionRole, id: &str) {
-        let Some((color, icon)) = session_look(role) else {
-            return;
-        };
-        let cmux = self.workspaces.cmux;
-        for (what, result) in [
-            ("color", cmux.set_color(id, color)),
-            (
-                "status pill",
-                cmux.set_status(id, ROLE_STATUS_KEY, role.as_str(), icon),
-            ),
-            ("pin", cmux.pin(id)),
-        ] {
-            if let Err(error) = result {
-                self.workspaces.warnings.borrow_mut().push(format!(
-                    "cmux could not set the {what} of the {} workspace {id}: {error:#}",
-                    role.as_str()
-                ));
-            }
-        }
-    }
-}
-
-/// The key of the status pill a session workspace carries: dagq's own, so
-/// it never replaces another tool's pill (Claude Code's `claude_code`).
-pub const ROLE_STATUS_KEY: &str = "dagq_role";
-
-/// How the sidebar tells the inbox apart at a glance (ADR-0031): the
-/// workspace's cmux color and the SF Symbol of its role pill (cmux
-/// workspaces have no icon of their own). Amber for the inbox, where
-/// things wait for a person. Other roles keep cmux's defaults.
-pub fn session_look(role: SessionRole) -> Option<(&'static str, &'static str)> {
-    match role {
-        SessionRole::Inbox => Some(("Amber", "tray")),
-        _ => None,
-    }
-}
-
-/// The actor of the session `role` has a single workspace for (the
-/// inbox): its id is the role's name.
+/// The actor of the session `role` has a single instance of (the inbox):
+/// its id is the role's name.
 pub fn session_actor(role: SessionRole) -> ActorContext {
     ActorContext::new(role.actor_role(), role.as_str())
-}
-
-/// What every workspace `up` opens for a queue carries (ADR-0026): its role
-/// and queue in the environment, the description line, and the queue's
-/// workspace group. The group is made when the first workspace needs it
-/// (cmux opens an anchor workspace with it), so an `up` that reuses
-/// everything touches no group. A group cmux cannot make is a warning in
-/// `up`'s result, and the workspace opens outside it.
-pub struct QueueWorkspaces<'a> {
-    cmux: &'a dyn WorkspaceBackend,
-    hash: String,
-    group_name: String,
-    group: OnceCell<Option<String>>,
-    warnings: RefCell<Vec<String>>,
-}
-
-impl<'a> QueueWorkspaces<'a> {
-    pub fn new(cmux: &'a dyn WorkspaceBackend, hash: String, repo_root: &Path) -> Self {
-        Self {
-            cmux,
-            hash,
-            group_name: workspace_group_name(repo_root),
-            group: OnceCell::new(),
-            warnings: RefCell::new(Vec::new()),
-        }
-    }
-
-    /// The description line of a workspace of `role` that belongs to no run.
-    pub fn description(&self, role: SessionRole) -> Option<String> {
-        Some(workspace_description(role, &self.hash, None, None))
-    }
-
-    /// What cmux refused so far (the group), for the caller's result.
-    pub fn take_warnings(&self) -> Vec<String> {
-        self.warnings.take()
-    }
-
-    /// The queue's workspace group, made on the first ask.
-    pub fn group(&self) -> Option<String> {
-        self.group
-            .get_or_init(
-                || match self.cmux.ensure_group(&self.hash, &self.group_name) {
-                    Ok(group) => Some(group),
-                    Err(error) => {
-                        self.warnings.borrow_mut().push(format!(
-                            "cmux workspace group {:?} (external ID {}) could not be made, so the \
-workspace opens outside it: {error:#}",
-                            self.group_name, self.hash
-                        ));
-                        None
-                    }
-                },
-            )
-            .clone()
-    }
-}
-
-/// The workspace the queue recorded for `role`, while cmux still lists it.
-/// A recorded UUID cmux no longer lists (the workspace was closed, or cmux
-/// restarted) is forgotten, so the caller opens a new one. The title is
-/// never consulted: people rename workspaces (ADR-0026).
-fn recorded_workspace(
-    queue: &(impl SessionRegistry + ?Sized),
-    cmux: &dyn WorkspaceBackend,
-    role: SessionRole,
-) -> Result<Option<String>> {
-    let Some(id) = queue.session_workspace(role)? else {
-        return Ok(None);
-    };
-    if cmux.exists(&id)? {
-        return Ok(Some(id));
-    }
-    queue.remove_session_workspace(role)?;
-    Ok(None)
 }
 
 /// Drain every live supervisor of another build and start one of this
@@ -911,8 +681,9 @@ fn recorded_workspace(
 /// earlier binary registered in the retired in-cmux mode, SIGTERM one
 /// launchd did not signal, then wait for each registration to go — the
 /// supervisor stops claiming, finishes the runs it holds and deregisters —
-/// and close the workspaces of the in-cmux ones. The one started in their
-/// place runs under launchd, whatever mode they had (ADR-t1433-4).
+/// and forget the records of the in-cmux ones' workspaces, which a person
+/// closes (ADR-t2159-1 decision 6). The one started in their place runs
+/// under launchd, whatever mode they had (ADR-t1433-4).
 ///
 /// The drain is unbounded because a run is a Claude session: `--no-wait` is
 /// the way to ask for the replacement only if nothing is in flight, and it
@@ -930,7 +701,6 @@ fn replace_supervisors(
     let Up {
         location,
         queue,
-        workspaces,
         launchd,
         processes,
         options,
@@ -939,7 +709,6 @@ fn replace_supervisors(
     // The version reported as replaced is an outdated one, not merely the
     // first: a mixed set is drained whole, but naming a version that
     // matched would read as if nothing had been out of date.
-    let cmux = workspaces.cmux;
     let previous_version = live
         .iter()
         .find(|registration| registration.binary_version.as_deref() != Some(VERSION))
@@ -1023,8 +792,7 @@ once `status` shows it gone",
     // The drain can also end because the process died with its row intact
     // (launchd's `ExitTimeOut` SIGKILL, or the heartbeat failure that keeps
     // the row on purpose because the database may be unreachable). Those
-    // rows go the way `down --force` drops them, so none is left pointing
-    // at the workspace closed just below.
+    // rows go the way `down --force` drops them.
     let surviving: Vec<LeaseToken> = queue
         .supervisors()?
         .into_iter()
@@ -1035,9 +803,7 @@ once `status` shows it gone",
             prune_supervisor(queue, registration)?;
         }
     }
-    // The drain is over, so every workspace of a replaced supervisor is
-    // ours to close: nothing runs in it any more.
-    let closed = close_supervisor_workspaces(queue, cmux, live, live, Stop::SeenThrough);
+    let left = forget_supervisor_workspaces(queue, live);
     // Whatever survived the drain (an alive-but-silent supervisor `up`
     // neither reuses nor kills) belongs to another process, not to the one
     // started below.
@@ -1053,7 +819,7 @@ once `status` shows it gone",
     object.insert("outcome".into(), json!("restarted"));
     object.insert("previous_version".into(), json!(previous_version));
     object.insert("replaced".into(), json!(replaced));
-    object.insert("supervisor_workspaces".into(), json!(closed));
+    object.insert("supervisor_workspaces".into(), json!(left));
     Ok(started)
 }
 
@@ -1941,11 +1707,127 @@ pub fn launch_agent_spec(
 }
 
 /// The inbox's first message: `inbox_prompt` with the instruction of
-/// `language` (ADR-t616-2). The role and queue are the workspace's own
-/// `--env` (ADR-0026), not a prefix of its command, so a `claude` started
-/// again in that workspace still has them.
+/// `language` (ADR-t616-2). The role and queue are the environment of the
+/// command `dagq inbox` starts, not a prefix of it.
 pub fn inbox_session_prompt(db: &Path, language: Option<&Language>) -> Result<String> {
     Ok(with_instruction(inbox_prompt(db)?, language))
+}
+
+/// What `dagq inbox` is refused with inside the inbox (ADR-t2159-1
+/// decision 2), whatever queue `DAGQ_QUEUE` names: an inbox does not open
+/// another inbox in its terminal.
+pub const INBOX_INSIDE_REFUSED: &str = "dagq inbox is refused inside an inbox (DAGQ_ROLE=inbox): \
+an inbox does not open another one in its terminal. Run `dagq inbox` in a terminal without \
+DAGQ_ROLE; to open this queue's inbox again, end this one first";
+
+/// What `dagq inbox` reaches the outside through: the queue's events at a
+/// database path (the one port it records `inbox_opened` through), the
+/// files, the repository containing a checkout, and the language of its
+/// `dagq.toml` over the user's `config.toml`.
+pub struct InboxPorts<'a> {
+    pub files: &'a dyn RunFiles,
+    pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener<dyn RunLog + Send>>,
+    pub inspect_repository: &'a dyn Fn(&Path) -> Result<RepositoryPaths>,
+    pub resolve_language: &'a ResolveLanguage,
+}
+
+/// What `dagq inbox` is given: the plugin directory the inbox loads
+/// (`--plugin-dir`; without it the installed plugin, which is checked) and
+/// the executable of its agent as given (`--claude`).
+#[derive(Debug, Clone)]
+pub struct InboxOptions {
+    pub plugin_dir: Option<PathBuf>,
+    pub agent: PathBuf,
+}
+
+/// The agent `dagq inbox` starts: its provider, which `inbox_opened`
+/// records, and the adapter that makes its command.
+pub struct InboxAgent<'a> {
+    pub provider: crate::domain::Provider,
+    pub agent: &'a dyn AgentProvider,
+}
+
+/// `dagq inbox` (ADR-t2159-1 decision 2): the command that runs the
+/// inbox's agent, for the caller to start in the foreground of its own
+/// terminal (it execs it). Refused inside an inbox ([`INBOX_INSIDE_REFUSED`])
+/// before anything is read or recorded. Then the same check of the agent
+/// and the plugin as `up` ([`require_agent`]), the provider's
+/// [`AgentProvider::inbox_command`] (its settings, the plugin directory and
+/// [`inbox_session_prompt`]) through the actor executor, in the
+/// repository's main checkout with the inbox's `DAGQ_ROLE` and
+/// `DAGQ_QUEUE`; and, before it is returned, `inbox_opened` with whether
+/// the settings went with it, which `status` and `doctor` judge the
+/// inbox's guardrail by ([`super::inbox_guardrail::judge`]). Its payload
+/// is `guardrail` (whether the provider has the settings,
+/// [`AgentProvider::inbox_settings`]), `settings` (their path or null) and
+/// `provider`; an inbox opened this way has no workspace.
+pub fn inbox(
+    ports: &InboxPorts,
+    started: &InboxAgent,
+    db: &Path,
+    repo: &Path,
+    environment: &UpEnvironment,
+    options: &InboxOptions,
+) -> Result<CommandSpec> {
+    ensure!(
+        environment.role.as_deref() != Some(INBOX_ROLE),
+        INBOX_INSIDE_REFUSED
+    );
+    let agent = started.agent;
+    let db = ports
+        .files
+        .canonicalize(db)
+        .context("queue must already be initialized")?;
+    let repository = (ports.inspect_repository)(repo)?;
+    let checkout = match &repository.checkout {
+        Ok(checkout) => checkout.clone(),
+        Err(error) => bail!("{error}; the inbox was not opened"),
+    };
+    require_agent(
+        agent,
+        &options.agent,
+        options.plugin_dir.as_deref(),
+        &checkout,
+        "inbox",
+        true,
+    )
+    .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
+    let language = (ports.resolve_language)(&checkout, environment.user_config.as_deref())
+        .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
+    let plugin_dir = options
+        .plugin_dir
+        .as_deref()
+        .map(|dir| {
+            ports
+                .files
+                .canonicalize(dir)
+                .with_context(|| format!("plugin directory {}", dir.display()))
+        })
+        .transpose()?;
+    let queue = (ports.queues)(&db).open()?;
+    let command = HostActorExecutor::new(&db)
+        .with_provider(agent)
+        .spawn(ActorExecutionSpec::new(
+            session_actor(SessionRole::Inbox),
+            WorkspaceAccess::Write(checkout.clone()),
+            ActorProgram::Foreground {
+                cwd: &checkout,
+                prompt: inbox_session_prompt(&db, language.as_ref())?,
+                plugin_dir: plugin_dir.as_deref(),
+                launch: None,
+            },
+        ))?
+        .foreground()?;
+    let settings = agent.inbox_settings(db.parent().unwrap_or(Path::new(".")));
+    queue.record_queue_event(
+        EventKind::InboxOpened,
+        json!({
+            "guardrail": settings.is_some(),
+            "settings": settings,
+            "provider": started.provider.as_str(),
+        }),
+    )?;
+    Ok(command)
 }
 
 /// What a person looks at first after `up`: unfinished runs with whether their
@@ -2006,27 +1888,16 @@ pub struct DownOptions {
 /// gets a SIGINT, the signal its terminal would send. The runtime drains
 /// on either.
 ///
-/// The cmux workspace of an `in_cmux` supervisor is closed once that
-/// supervisor's process is gone: after the drain under `--wait`, after the
-/// kill under `--force`, or straight away when it had already exited.
-/// Closing it earlier would cut the drain short, so the default (which
-/// returns while the supervisor drains) leaves it open and says so; a
-/// person closes it or runs `down --wait`. The inbox and planner
-/// workspaces are never touched.
+/// `down` closes no cmux workspace (ADR-t2159-1 decision 3): the one an
+/// `in_cmux` supervisor runs in is reported `left_open` for a person to
+/// close, and its record in `session_workspaces` is forgotten without a
+/// call to cmux. The inbox is the person's own terminal.
 pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Result<Value> {
     let (launchd, processes) = (ports.launchd, ports.processes);
     let queue = (ports.queues)(&location.db).open()?;
     let queue = &*queue;
-    let recording = RecordingBackend::over(
-        ports.cmux,
-        (ports.recording_queues)(&location.db),
-        None,
-        ports.load_average,
-    );
-    let cmux: &dyn WorkspaceBackend = &recording;
-    // Every registration is considered for the workspace close, whichever
-    // path this `down` takes: the rule is the same for all of them, and a
-    // queue can hold supervisors of both modes at once.
+    // Every registration's workspace is reported, whichever path this
+    // `down` takes: a queue can hold supervisors of both modes at once.
     let registrations = queue.supervisors()?;
     let mut live = Vec::new();
     let mut dead = Vec::new();
@@ -2104,14 +1975,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "outcome": "not_running",
             "launch_agent_unloaded": unloaded,
             "pruned_supervisors": pruned,
-            "supervisor_workspaces": close_supervisor_workspaces(
-                queue,
-                cmux,
-                &registrations,
-                &live,
-                // Nothing is alive to drain, so every workspace is ours.
-                Stop::SeenThrough,
-            ),
+            "supervisor_workspaces": forget_supervisor_workspaces(queue, &registrations),
         });
         if let Some(queue_service) = stop_service(true) {
             report["queue_service"] = queue_service;
@@ -2136,8 +2000,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             processes.kill(registration.pid)?;
             prune_supervisor(queue, registration)?;
         }
-        // The dead ones go too, so no row is left pointing at a workspace
-        // this call has just closed.
+        // The dead ones go too.
         for registration in &dead {
             prune_supervisor(queue, registration)?;
             pruned.push(json!({"token": registration.token, "pid": registration.pid}));
@@ -2148,13 +2011,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "pids": pids,
             "launch_agent_unloaded": unloaded,
             "pruned_supervisors": pruned,
-            "supervisor_workspaces": close_supervisor_workspaces(
-                queue,
-                cmux,
-                &registrations,
-                &live,
-                Stop::SeenThrough,
-            ),
+            "supervisor_workspaces": forget_supervisor_workspaces(queue, &registrations),
         });
         if let Some(queue_service) = stop_service(true) {
             report["queue_service"] = queue_service;
@@ -2181,13 +2038,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "pid": pid,
             "pids": pids,
             "launch_agent_unloaded": unloaded,
-            "supervisor_workspaces": close_supervisor_workspaces(
-                queue,
-                cmux,
-                &registrations,
-                &live,
-                Stop::SeenThrough,
-            ),
+            "supervisor_workspaces": forget_supervisor_workspaces(queue, &registrations),
         });
         if !pruned.is_empty() {
             report["pruned_supervisors"] = json!(pruned);
@@ -2202,13 +2053,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         "pid": pid,
         "pids": pids,
         "launch_agent_unloaded": unloaded,
-        "supervisor_workspaces": close_supervisor_workspaces(
-            queue,
-            cmux,
-            &registrations,
-            &live,
-            Stop::Pending,
-        ),
+        "supervisor_workspaces": forget_supervisor_workspaces(queue, &registrations),
     });
     if !pruned.is_empty() {
         report["pruned_supervisors"] = json!(pruned);
@@ -2219,72 +2064,27 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     Ok(report)
 }
 
-/// Whether this `down` saw the stop through, which decides what may be
-/// done to an `in_cmux` supervisor's workspace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stop {
-    /// `--wait` waited for the drain, or `--force` killed it: the
-    /// supervisor is not going to do any more work, so its workspace is
-    /// closed whatever its pid still looks like.
-    SeenThrough,
-    /// The default `down` returned while the supervisor drains. Closing
-    /// the workspace would end that drain, so only one that had already
-    /// exited before `down` ran is closed.
-    Pending,
-}
-
-/// Close the cmux workspace of every `in_cmux` registration this `down` is
-/// done with, and report the ones left to a running drain. A close that
-/// cmux refuses is reported, not raised: the supervisor is already
-/// stopped, which is what `down` was asked to do.
-///
-/// The `Pending` case uses the registrations classified as live before
-/// anything was signalled. After a SIGKILL a PID check would be useless:
-/// `kill(2)` returns before the target is reaped, so `kill(pid, 0)` still
-/// succeeds for a process that is already dying.
-fn close_supervisor_workspaces(
+/// What became of the cmux workspace of every `in_cmux` registration among
+/// `registrations`: each is `left_open` for a person to close, since dagq
+/// closes no cmux workspace (ADR-t2159-1 decisions 3, 6), and the
+/// supervisor's record in `session_workspaces` is forgotten without a call
+/// to cmux. Forgetting it is tidiness only, so a failure is not raised:
+/// the supervisor's stop is what was asked for.
+fn forget_supervisor_workspaces(
     queue: &(impl SessionRegistry + ?Sized),
-    cmux: &dyn WorkspaceBackend,
     registrations: &[SupervisorRegistration],
-    live: &[SupervisorRegistration],
-    stop: Stop,
 ) -> Vec<Value> {
+    let _ = queue.remove_session_workspace(SessionRole::Supervisor);
     registrations
         .iter()
         .filter(|registration| registration.mode == Some(SupervisorMode::InCmux))
         .filter_map(|registration| {
             let id = registration.workspace_id.as_deref()?;
-            if stop == Stop::Pending && live.iter().any(|r| r.token == registration.token) {
-                return Some(json!({
-                    "workspace_id": id,
-                    "outcome": "left_open",
-                    "reason": format!(
-                        "supervisor pid {} is still draining; `down --wait` closes it",
-                        registration.pid
-                    ),
-                }));
-            }
-            Some(match cmux.close(id) {
-                Ok(()) => {
-                    // The record goes with the workspace. Forgetting it is
-                    // tidiness only: `up` drops a UUID cmux no longer lists.
-                    if queue
-                        .session_workspace(SessionRole::Supervisor)
-                        .ok()
-                        .flatten()
-                        .as_deref()
-                        == Some(id)
-                    {
-                        let _ = queue.remove_session_workspace(SessionRole::Supervisor);
-                    }
-                    json!({"workspace_id": id, "outcome": "closed"})
-                }
-                Err(error) => json!({
-                    "workspace_id": id,
-                    "outcome": "close_failed",
-                    "reason": format!("{error:#}"),
-                }),
-            })
+            Some(json!({
+                "workspace_id": id,
+                "outcome": "left_open",
+                "reason": "dagq closes no cmux workspace: a person closes it",
+            }))
         })
         .collect()
 }

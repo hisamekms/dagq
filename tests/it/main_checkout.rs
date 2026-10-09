@@ -173,26 +173,22 @@ fn a_separate_git_dir_repository_reads_only_its_main_worktree() {
 /// stops before starting anything.
 #[test]
 fn up_in_a_separate_git_dir_repository_trusts_the_main_worktree() {
-    use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up, up};
+    use common::lifecycle::{FakeLaunchd, FakeProcesses, fixture, try_up, up};
     let mut fixture = fixture();
     let (main, run) = separate_git_dir(fixture._dir.path());
     trust_only(&fixture, &main);
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
 
     fixture.repo = run;
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(
         error.contains("--separate-git-dir") && error.contains("the supervisor was not started"),
         "{error}"
     );
 
     fixture.repo = main;
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(report["repository"]["branch"], "trunk", "{report}");
 }
@@ -203,18 +199,14 @@ fn up_in_a_separate_git_dir_repository_trusts_the_main_worktree() {
 /// `dagq.toml`.
 #[test]
 fn a_bare_repository_stops_up_supervise_integrate_and_doctor() {
-    use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up};
+    use common::lifecycle::{FakeLaunchd, FakeProcesses, fixture, try_up};
     let mut fixture = fixture();
     let (bare, worktree) = bare_with_worktree(fixture._dir.path(), &fixture.repo.clone());
     trust_only(&fixture, &worktree);
     fixture.repo = worktree.clone();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(
         error.contains("is bare")
             && error.contains("clone that is not bare")

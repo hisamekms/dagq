@@ -1,45 +1,34 @@
-//! Whether the inbox `up` recorded was opened with the guardrail that
-//! refuses raw `cmux` (ADR-t1228-2 decision 4): the one judgment `status`
-//! and `doctor` show as `inbox_guardrail`. `up` writes `inbox_opened` when
-//! it opens the inbox's workspace, with the workspace and whether the
-//! settings went with it. An inbox `up` reuses keeps whatever it was
-//! opened with, and one opened before the record existed has none, so it
-//! counts as without the guardrail. A `claude` typed again in the
-//! workspace is not seen (the guardrail's limit).
+//! Whether the inbox was opened with its guardrail settings (ADR-t2159-1
+//! decisions 2 and 5): the one judgment `status` and `doctor` show as
+//! `inbox_guardrail`. `dagq inbox` writes `inbox_opened` before it starts
+//! the inbox's agent, with whether the settings went with it; the newest
+//! one is the inbox judged. An inbox opened by hand, or a `claude` typed
+//! again in the inbox's terminal, is not seen (the guardrail's limit).
 
 use serde_json::{Value, json};
 
 /// What a person does to get an inbox with the guardrail: the procedure is
 /// in the `dagq-recover` skill's `reference/up-down.md`.
-pub const REOPEN: &str = "write the inbox's handoff, then close the inbox (a person, in a terminal without DAGQ_ROLE) and open it again with `dagq up`; see the dagq-recover skill's reference/up-down.md";
+pub const REOPEN: &str = "write the inbox's handoff, then end the inbox and open it again with `dagq inbox` in a terminal without DAGQ_ROLE; see the dagq-recover skill's reference/up-down.md";
 
-/// The guardrail of the inbox recorded as `recorded` (its workspace), by
-/// the payload of the newest `inbox_opened`: `guardrail` is `null` when no
-/// inbox is recorded, `true` when the newest open of that workspace had the
-/// guardrail, and `false` otherwise, with why (`reason`) and `next`.
-pub fn judge(recorded: Option<&str>, opened: Option<&Value>) -> Value {
-    let Some(workspace) = recorded else {
-        return json!({"workspace_id": null, "guardrail": null});
-    };
-    let same = opened.filter(|payload| payload["workspace_id"].as_str() == Some(workspace));
-    match same {
+/// The guardrail of the inbox by `opened`, the payload of the newest
+/// `inbox_opened`: `guardrail` is `true` when it had the settings, `false`
+/// with why (`reason`) and `next` when it had none, and `null` with
+/// `reason: no_record` when no inbox was ever recorded opened.
+pub fn judge(opened: Option<&Value>) -> Value {
+    match opened {
         Some(payload) if payload["guardrail"] == true => json!({
-            "workspace_id": workspace,
             "guardrail": true,
             "settings": payload["settings"],
+            "provider": payload["provider"],
         }),
-        Some(_) => json!({
-            "workspace_id": workspace,
+        Some(payload) => json!({
             "guardrail": false,
+            "provider": payload["provider"],
             "reason": "opened_without_guardrail",
             "next": REOPEN,
         }),
-        None => json!({
-            "workspace_id": workspace,
-            "guardrail": false,
-            "reason": "no_record",
-            "next": REOPEN,
-        }),
+        None => json!({"guardrail": null, "reason": "no_record"}),
     }
 }
 
@@ -49,39 +38,37 @@ mod tests {
 
     #[test]
     fn an_inbox_opened_with_the_settings_has_the_guardrail() {
-        let opened = json!({"workspace_id": "w1", "guardrail": true, "settings": "/q/claude-inbox-settings.json"});
-        let view = judge(Some("w1"), Some(&opened));
+        let opened = json!({"guardrail": true, "settings": "/q/claude-inbox-settings.json", "provider": "claude"});
+        let view = judge(Some(&opened));
         assert_eq!(view["guardrail"], true);
         assert_eq!(view["settings"], "/q/claude-inbox-settings.json");
+        assert_eq!(view["provider"], "claude");
         assert!(view.get("next").is_none());
     }
 
     #[test]
-    fn an_inbox_without_a_record_of_its_open_has_none_and_says_to_reopen() {
-        // Opened before the record existed, or the record is of another
-        // workspace (an earlier inbox).
-        for opened in [None, Some(json!({"workspace_id": "w0", "guardrail": true}))] {
-            let view = judge(Some("w1"), opened.as_ref());
-            assert_eq!(view["guardrail"], false);
-            assert_eq!(view["reason"], "no_record");
-            assert_eq!(view["next"], REOPEN);
-        }
-        assert!(REOPEN.contains("dagq up") && REOPEN.contains("up-down.md"));
-    }
-
-    #[test]
-    fn an_inbox_opened_without_the_settings_has_none() {
-        let opened = json!({"workspace_id": "w1", "guardrail": false, "settings": null});
-        let view = judge(Some("w1"), Some(&opened));
+    fn an_inbox_opened_without_the_settings_has_none_and_says_to_reopen() {
+        let opened = json!({"guardrail": false, "settings": null, "provider": "codex"});
+        let view = judge(Some(&opened));
         assert_eq!(view["guardrail"], false);
         assert_eq!(view["reason"], "opened_without_guardrail");
         assert_eq!(view["next"], REOPEN);
+        assert!(REOPEN.contains("dagq inbox") && REOPEN.contains("without DAGQ_ROLE"));
     }
 
     #[test]
-    fn no_recorded_inbox_has_nothing_to_judge() {
-        let view = judge(None, None);
+    fn the_newest_open_is_judged_whatever_workspace_an_earlier_up_recorded() {
+        // An inbox an earlier `up` opened recorded its workspace; the
+        // record is judged the same.
+        let opened = json!({"workspace_id": "w1", "guardrail": true, "settings": "/q/s.json"});
+        assert_eq!(judge(Some(&opened))["guardrail"], true);
+    }
+
+    #[test]
+    fn no_record_of_an_open_has_nothing_to_judge() {
+        let view = judge(None);
         assert_eq!(view["guardrail"], Value::Null);
+        assert_eq!(view["reason"], "no_record");
         assert!(view.get("next").is_none());
     }
 }

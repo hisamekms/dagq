@@ -35,7 +35,7 @@ use anyhow::{Context, Result, bail, ensure};
 use super::queue_service::ServiceAccess;
 use super::{
     AgentProvider, CommandSpec, PlannerCommand, RunLog, SessionWrappers, Spawned, Spawner, Streams,
-    TurnTarget, WorkspaceBackend, WorkspaceTags,
+    TurnTarget,
     lifecycle::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, QUEUE_ENV, SESSION_KIND_ENV},
     naming::shell_join,
     path_text,
@@ -119,16 +119,6 @@ pub enum SessionAgent<'a> {
     },
 }
 
-/// What a workspace not tied to a run runs.
-pub enum WorkspaceCommand<'a> {
-    /// The agent itself with `prompt` as its first message, loading
-    /// `plugin_dir`: the inbox.
-    Agent {
-        prompt: String,
-        plugin_dir: Option<&'a Path>,
-    },
-}
-
 /// What a headless job runs.
 pub enum HeadlessProgram<'a> {
     /// The review of an accepted run (ADR-0027), allowed what `access`
@@ -172,15 +162,17 @@ pub enum ActorProgram<'a> {
         run_env: Vec<(String, String)>,
         log: &'a Path,
     },
-    /// A workspace of its own: the inbox. `launch` names the model its
-    /// agent starts with.
-    NamedWorkspace {
-        name: &'a str,
+    /// The inbox's agent in the terminal of the person who opens it
+    /// (ADR-t2159-1 decision 2): with `prompt` as its first message,
+    /// loading `plugin_dir`, in `cwd` with the actor's environment. Nothing
+    /// is started: its handle is the command for the caller to start in
+    /// its own terminal's foreground. `launch` names the model its agent
+    /// starts with.
+    Foreground {
         cwd: &'a Path,
-        command: WorkspaceCommand<'a>,
+        prompt: String,
+        plugin_dir: Option<&'a Path>,
         launch: Option<&'a ActorLaunch>,
-        description: Option<String>,
-        group: Option<String>,
     },
     /// The session wrapper `wrapper` (`planner-session --headless`) of a
     /// planner of the runtime's, which runs its agent one call per turn
@@ -229,7 +221,7 @@ impl ActorProgram<'_> {
                 SessionAgent::Turn { run, .. } => run.actual_provider(),
                 SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. } => Provider::Claude,
             },
-            Self::NamedWorkspace { launch, .. }
+            Self::Foreground { launch, .. }
             | Self::PlannerSession { launch, .. }
             | Self::Headless { launch, .. } => {
                 launch.map_or(Provider::Claude, |launch| launch.provider)
@@ -250,7 +242,7 @@ impl ActorProgram<'_> {
                 ..
             }
             | Self::PlannerSession { .. } => &[ActorRole::Planner],
-            Self::NamedWorkspace { .. } => &[ActorRole::Inbox],
+            Self::Foreground { .. } => &[ActorRole::Inbox],
             Self::Headless {
                 program: HeadlessProgram::Review { .. } | HeadlessProgram::AgentJob(_),
                 ..
@@ -370,20 +362,30 @@ pub enum ActorHandle {
     Workspace(String),
     /// The process it is.
     Process(Box<dyn Spawned>),
+    /// The command the caller starts in its own terminal's foreground
+    /// ([`ActorProgram::Foreground`]).
+    Foreground(CommandSpec),
 }
 
 impl ActorHandle {
     pub fn workspace(self) -> Result<String> {
         match self {
             Self::Workspace(id) => Ok(id),
-            Self::Process(_) => bail!("the actor was started as a process, not in a workspace"),
+            _ => bail!("the actor was not started in a workspace"),
         }
     }
 
     pub fn process(self) -> Result<Box<dyn Spawned>> {
         match self {
             Self::Process(process) => Ok(process),
-            Self::Workspace(_) => bail!("the actor was started in a workspace, not as a process"),
+            _ => bail!("the actor was not started as a process"),
+        }
+    }
+
+    pub fn foreground(self) -> Result<CommandSpec> {
+        match self {
+            Self::Foreground(command) => Ok(command),
+            _ => bail!("the actor is not one to start in the foreground"),
         }
     }
 }
@@ -446,13 +448,12 @@ pub fn actor_env(
 }
 
 /// Starts AI actors on this host, as processes of this user (advisory):
-/// the inbox's workspace through cmux, the session wrappers in the
-/// background, agents through the provider and the spawner.
+/// the session wrappers in the background, agents through the provider and
+/// the spawner, and the inbox's command for its caller's terminal.
 /// Each part is given where the caller has it, and a program that needs a
 /// part the executor was not given is refused.
 pub struct HostActorExecutor<'a> {
     queue: &'a Path,
-    workspaces: Option<&'a dyn WorkspaceBackend>,
     sessions: Option<&'a dyn SessionWrappers>,
     provider: Option<&'a dyn AgentProvider>,
     spawner: Option<&'a dyn Spawner>,
@@ -468,7 +469,6 @@ impl<'a> HostActorExecutor<'a> {
     pub fn new(queue: &'a Path) -> Self {
         Self {
             queue,
-            workspaces: None,
             sessions: None,
             provider: None,
             spawner: None,
@@ -500,12 +500,6 @@ impl<'a> HostActorExecutor<'a> {
         self
     }
 
-    /// Workspaces open through `workspaces`.
-    pub fn with_workspaces(mut self, workspaces: &'a dyn WorkspaceBackend) -> Self {
-        self.workspaces = Some(workspaces);
-        self
-    }
-
     /// Session wrappers start in the background through `sessions`.
     pub fn with_sessions(mut self, sessions: &'a dyn SessionWrappers) -> Self {
         self.sessions = Some(sessions);
@@ -529,10 +523,6 @@ impl<'a> HostActorExecutor<'a> {
     pub fn with_queue_service(mut self, service: &'a dyn ServiceAccess) -> Self {
         self.service = Some(service);
         self
-    }
-
-    fn workspaces(&self) -> Result<&'a dyn WorkspaceBackend> {
-        self.workspaces.context("this executor opens no workspace")
     }
 
     fn sessions(&self) -> Result<&'a dyn SessionWrappers> {
@@ -714,28 +704,21 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     log,
                 )?))
             }
-            ActorProgram::NamedWorkspace {
-                name,
+            ActorProgram::Foreground {
                 cwd,
-                command: WorkspaceCommand::Agent { prompt, plugin_dir },
+                prompt,
+                plugin_dir,
                 launch,
-                description,
-                group,
             } => {
-                let command = command_line(&self.provider()?.inbox_command(
+                let mut command = self.provider()?.inbox_command(
                     &prompt,
                     plugin_dir,
                     self.queue.parent().unwrap_or(Path::new(".")),
-                )?)?;
-                let tags = WorkspaceTags {
-                    env: actor_env(self.queue, &actor, None, launch)?,
-                    description,
-                    group,
-                };
-                Ok(ActorHandle::Workspace(
-                    self.workspaces()?
-                        .create_named(name, cwd, &command, &tags)?,
-                ))
+                )?;
+                command
+                    .current_dir(cwd)
+                    .envs(actor_env(self.queue, &actor, None, launch)?);
+                Ok(ActorHandle::Foreground(command))
             }
             ActorProgram::PlannerSession {
                 cwd,
@@ -905,7 +888,7 @@ pub fn command_line(command: &CommandSpec) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::Exit;
+    use crate::application::{Exit, WorkspaceTags};
     use crate::domain::{CommitSha, NewTask, Task, task};
     use std::sync::Mutex;
 
@@ -1094,47 +1077,6 @@ mod tests {
             unreachable!()
         }
         fn exists(&self, _: &str) -> Result<bool> {
-            unreachable!()
-        }
-    }
-
-    impl WorkspaceBackend for Fake {
-        fn preflight(&self) -> Result<()> {
-            Ok(())
-        }
-        fn close(&self, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn set_color(&self, _: &str, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn pin(&self, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn exists(&self, _: &str) -> Result<bool> {
-            unreachable!()
-        }
-        fn create_named(
-            &self,
-            name: &str,
-            _: &Path,
-            command: &str,
-            tags: &WorkspaceTags,
-        ) -> Result<String> {
-            self.workspaces.lock().unwrap().push((
-                name.to_owned(),
-                command.to_owned(),
-                tags.clone(),
-            ));
-            Ok("w-named".into())
-        }
-        fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
-            unreachable!()
-        }
-        fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
             unreachable!()
         }
     }
@@ -1559,37 +1501,40 @@ mod tests {
     }
 
     #[test]
-    fn the_inbox_runs_its_agent_as_the_command_of_its_workspace() {
+    fn the_inbox_is_its_agents_command_for_the_callers_terminal() {
         let fake = Fake::default();
-        let id = HostActorExecutor::new(Path::new("/q/queue.db"))
-            .with_workspaces(&fake)
+        let command = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_provider(&fake)
             .spawn(ActorExecutionSpec::new(
                 ActorContext::new(ActorRole::Inbox, "inbox"),
                 WorkspaceAccess::Write("/repo".into()),
-                ActorProgram::NamedWorkspace {
-                    name: "[repo]inbox",
+                ActorProgram::Foreground {
                     cwd: Path::new("/repo"),
-                    command: WorkspaceCommand::Agent {
-                        prompt: "You are the inbox".into(),
-                        plugin_dir: Some(Path::new("/p")),
-                    },
+                    prompt: "You are the inbox".into(),
+                    plugin_dir: Some(Path::new("/p")),
                     launch: None,
-                    description: Some("d".into()),
-                    group: None,
                 },
             ))
             .unwrap()
-            .workspace()
+            .foreground()
             .unwrap();
-        assert_eq!(id, "w-named");
-        let made = fake.workspaces.lock().unwrap();
-        assert_eq!(made[0].0, "[repo]inbox");
         assert_eq!(
-            made[0].1,
+            command_line(&command).unwrap(),
             "'/opt/claude' '--plugin-dir' '/p' '--' 'You are the inbox'"
         );
-        assert_eq!(made[0].2.env[0], ("DAGQ_ROLE".into(), "inbox".into()));
+        assert_eq!(command.get_current_dir(), Some(Path::new("/repo")));
+        assert_eq!(
+            env_of(&command),
+            pairs(&[
+                ("DAGQ_ROLE", "inbox"),
+                ("DAGQ_QUEUE", "/q/queue.db"),
+                ("DAGQ_ACTOR_ID", "inbox"),
+                ("DAGQ_SESSION_KIND", "inbox"),
+            ])
+        );
+        // Nothing was started.
+        assert!(fake.spawned.lock().unwrap().is_empty());
+        assert!(fake.workspaces.lock().unwrap().is_empty());
     }
 
     #[test]

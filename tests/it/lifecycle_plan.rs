@@ -1,5 +1,5 @@
-//! The planners against fakes of the session wrappers (and of cmux only for
-//! `up`): the prompt of the inbox, the
+//! The planners against fakes of the session wrappers: the prompt of the
+//! inbox, the
 //! sessions the runtime's planners open and record, the planner the
 //! runtime opens for a proposal, how a planner session is judged, and the
 //! sweeps of planners that ended (a person's planner opened before
@@ -381,10 +381,9 @@ fn each_runtime_planner_starts_its_wrapper_in_the_background_without_a_workspace
     );
     // No planner is a session workspace of `up`'s.
     assert_eq!(queue.session_workspace(SessionRole::Planner).unwrap(), None);
-    // `up` opens the inbox and leaves the planners alone.
-    let cmux = FakeCmux::default();
+    // `up` leaves the planners alone.
     let launchd = FakeLaunchd::new(&fixture.location.db);
-    let report = up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+    let report = up(&fixture, &launchd, &FakeProcesses::default());
     assert_eq!(report.get("planner"), None, "{report}");
     assert_eq!(queue.planners(false).unwrap().len(), 2);
 

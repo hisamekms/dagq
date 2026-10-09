@@ -1,7 +1,7 @@
-//! `down` against fakes for launchd, cmux and process signals: every
-//! outcome in either mode (interrupted, drained, force-killed, not
-//! running), and the workspace it closes of an in-cmux supervisor an
-//! earlier binary registered (`up` starts none now, ADR-t1433-4).
+//! `down` against fakes for launchd and process signals: every outcome in
+//! either mode (interrupted, drained, force-killed, not running), and the
+//! workspace of an in-cmux supervisor an earlier binary registered (`up`
+//! starts none now, ADR-t1433-4), which `down` leaves to a person.
 
 use crate::common;
 use dagq::domain::LeaseToken;
@@ -11,7 +11,7 @@ use common::lifecycle::*;
 use anyhow::Result;
 use dagq::{
     VERSION,
-    application::{ProcessControl, WorkspaceBackend, WorkspaceTags},
+    application::ProcessControl,
     domain::{SessionRole, SupervisorMode, recovery::ProcessInfo},
     infrastructure::sqlite::SqliteQueue,
     lifecycle::{self, DownOptions},
@@ -24,65 +24,67 @@ use std::{
     time::Duration,
 };
 
-/// An in-cmux supervisor (registered by an earlier binary) has no service
-/// manager to signal it, so `down`
-/// sends the SIGINT itself and closes its workspace once the process is
-/// gone: never while it drains, after the drain under `--wait`, and after
-/// the kill under `--force`.
-#[test]
-fn down_interrupts_an_in_cmux_supervisor_and_closes_its_workspace_once_it_is_gone() {
-    let fixture = fixture();
-    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
-    let pid = std::process::id();
-    let cmux = FakeCmux::default();
-    let workspace = cmux
-        .create_named(
-            "[my repo]supervisor",
-            &fixture.repo,
-            "supervise",
-            &WorkspaceTags::default(),
-        )
-        .unwrap();
+/// Register a supervisor of the retired in-cmux mode, as an earlier binary
+/// did, in `workspace`, with the workspace's record in `session_workspaces`.
+fn in_cmux_supervisor(queue: &mut SqliteQueue, token: &str, pid: u32, workspace: &str) {
     queue
-        .register_supervisor(&LeaseToken::new("in-cmux"), pid, 2, VERSION)
+        .register_supervisor(&LeaseToken::new(token), pid, 2, VERSION)
         .unwrap();
     queue
         .set_supervisor_mode(
-            &LeaseToken::new("in-cmux"),
+            &LeaseToken::new(token),
             SupervisorMode::InCmux,
-            Some(&workspace),
+            Some(workspace),
         )
         .unwrap();
     queue
-        .register_session_workspace(SessionRole::Supervisor, &workspace)
+        .register_session_workspace(SessionRole::Supervisor, workspace)
         .unwrap();
+}
+
+/// What `down` reports of an in-cmux supervisor's workspace: left open for
+/// a person to close (ADR-t2159-1 decision 3).
+fn left_open(workspace: &str) -> serde_json::Value {
+    json!([{
+        "workspace_id": workspace,
+        "outcome": "left_open",
+        "reason": "dagq closes no cmux workspace: a person closes it",
+    }])
+}
+
+/// An in-cmux supervisor (registered by an earlier binary) has no service
+/// manager to signal it, so `down` sends the SIGINT itself, as before; it
+/// closes no cmux workspace (ADR-t2159-1 decisions 3 and 6): the one the
+/// supervisor ran in is reported left open whether `down` returns while it
+/// drains or waits for the drain, and its record is forgotten. No cmux is
+/// on the fixture's path, so none could be called.
+#[test]
+fn down_interrupts_an_in_cmux_supervisor_and_leaves_its_workspace_to_a_person() {
+    let fixture = fixture();
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let pid = std::process::id();
+    let workspace = "01234567-89ab-4def-8123-0000000000aa";
+    in_cmux_supervisor(&mut queue, "in-cmux", pid, workspace);
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
 
-    // Default: SIGINT and return, leaving the workspace open so the drain
-    // is not cut short.
-    let report = down(&fixture, &cmux, &launchd, &processes, false, false);
+    // Default: SIGINT and return while it drains.
+    let report = down(&fixture, &launchd, &processes, false, false);
     assert_eq!(report["outcome"], "draining", "{report}");
     assert_eq!(report["pid"], pid);
     assert_eq!(report["launch_agent_unloaded"], false);
     assert_eq!(processes.interrupted.lock().unwrap().as_slice(), &[pid]);
     assert!(processes.terminated.lock().unwrap().is_empty());
+    assert_eq!(report["supervisor_workspaces"], left_open(workspace));
     assert_eq!(
-        report["supervisor_workspaces"],
-        json!([{
-            "workspace_id": workspace,
-            "outcome": "left_open",
-            "reason": format!(
-                "supervisor pid {pid} is still draining; `down --wait` closes it"
-            ),
-        }])
+        queue.session_workspace(SessionRole::Supervisor).unwrap(),
+        None
     );
-    assert!(cmux.closed.lock().unwrap().is_empty());
 
-    // `--wait` waits for the drain, then closes the workspace it left.
-    // The supervisor deregisters at the end of its drain and only then
-    // exits, so its pid is still reported alive when the wait returns; the
-    // close must not depend on that.
+    // `--wait` waits for the drain; the workspace is still the person's.
+    queue
+        .register_session_workspace(SessionRole::Supervisor, workspace)
+        .unwrap();
     let processes = FakeProcesses::default();
     let db = fixture.location.db.clone();
     let report = thread::scope(|scope| {
@@ -93,112 +95,50 @@ fn down_interrupts_an_in_cmux_supervisor_and_closes_its_workspace_once_it_is_gon
                 .deregister_supervisor(&LeaseToken::new("in-cmux"))
                 .unwrap();
         });
-        down(&fixture, &cmux, &launchd, &processes, true, false)
+        down(&fixture, &launchd, &processes, true, false)
     });
     assert_eq!(report["outcome"], "stopped", "{report}");
     assert_eq!(report["pid"], pid);
     assert_eq!(processes.interrupted.lock().unwrap().as_slice(), &[pid]);
-    assert_eq!(
-        report["supervisor_workspaces"],
-        json!([{"workspace_id": workspace, "outcome": "closed"}])
-    );
-    assert_eq!(
-        cmux.closed.lock().unwrap().as_slice(),
-        std::slice::from_ref(&workspace)
-    );
-    assert!(cmux.workspaces.lock().unwrap().is_empty());
-    assert!(processes.alive(pid), "the fake never reaped the pid");
-    // The supervisor removed its own row at the end of the drain, and the
-    // record of its workspace went with the close.
+    assert_eq!(report["supervisor_workspaces"], left_open(workspace));
     assert!(queue.supervisors().unwrap().is_empty());
     assert_eq!(
         queue.session_workspace(SessionRole::Supervisor).unwrap(),
         None
     );
+    assert!(backend_failures(&fixture).is_empty());
 }
 
-/// `--force` kills the in-cmux supervisor, drops its registration and
-/// closes its workspace in one go; a close cmux refuses is reported
-/// instead of failing the stop that already happened.
+/// `--force` kills the in-cmux supervisor after its SIGINT and drops its
+/// registration; its workspace is left to a person all the same.
 #[test]
-fn down_force_kills_an_in_cmux_supervisor_and_closes_or_reports_its_workspace() {
+fn down_force_kills_an_in_cmux_supervisor_and_leaves_its_workspace_to_a_person() {
     let fixture = fixture();
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
-    let cmux = FakeCmux::default();
-    let workspace = cmux
-        .create_named(
-            "[my repo]supervisor",
-            &fixture.repo,
-            "supervise",
-            &WorkspaceTags::default(),
-        )
-        .unwrap();
-    queue
-        .register_supervisor(&LeaseToken::new("in-cmux"), pid, 2, VERSION)
-        .unwrap();
-    queue
-        .set_supervisor_mode(
-            &LeaseToken::new("in-cmux"),
-            SupervisorMode::InCmux,
-            Some(&workspace),
-        )
-        .unwrap();
+    let workspace = "01234567-89ab-4def-8123-0000000000ab";
+    in_cmux_supervisor(&mut queue, "in-cmux", pid, workspace);
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = down(&fixture, &cmux, &launchd, &processes, false, true);
+    let report = down(&fixture, &launchd, &processes, false, true);
     assert_eq!(report["outcome"], "killed", "{report}");
     assert_eq!(processes.interrupted.lock().unwrap().as_slice(), &[pid]);
     assert_eq!(processes.killed.lock().unwrap().as_slice(), &[pid]);
-    assert_eq!(
-        report["supervisor_workspaces"],
-        json!([{"workspace_id": workspace, "outcome": "closed"}])
-    );
+    assert_eq!(report["supervisor_workspaces"], left_open(workspace));
     assert!(queue.supervisors().unwrap().is_empty());
-
-    // cmux refusing the close (the workspace is already gone) leaves the
-    // reason in the report; the supervisor is stopped either way.
-    queue
-        .register_supervisor(&LeaseToken::new("again"), pid, 2, VERSION)
-        .unwrap();
-    queue
-        .set_supervisor_mode(
-            &LeaseToken::new("again"),
-            SupervisorMode::InCmux,
-            Some(&workspace),
-        )
-        .unwrap();
-    let processes = FakeProcesses::default();
-    let report = down(&fixture, &cmux, &launchd, &processes, false, true);
-    assert_eq!(report["outcome"], "killed", "{report}");
     assert_eq!(
-        report["supervisor_workspaces"][0]["outcome"], "close_failed",
-        "{report}"
+        queue.session_workspace(SessionRole::Supervisor).unwrap(),
+        None
     );
-    assert_eq!(
-        report["supervisor_workspaces"][0]["reason"],
-        format!("no such workspace: {workspace}")
-    );
-    assert!(queue.supervisors().unwrap().is_empty());
-    // The refused close is recorded without a run (task 109).
-    let failures = backend_failures(&fixture);
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert_eq!(failures[0].run_id, None);
-    assert_eq!(failures[0].payload["op"], "close");
-    assert_eq!(failures[0].payload["workspace_id"], json!(workspace));
-    assert_eq!(
-        failures[0].payload["error"],
-        format!("no such workspace: {workspace}")
-    );
+    assert!(backend_failures(&fixture).is_empty());
 }
 
 #[test]
 fn down_reports_not_running_without_a_live_registration_and_still_unloads_the_agent() {
     let fixture = fixture();
     let launchd = FakeLaunchd::new(&fixture.location.db);
-    let cmux = FakeCmux::default();
     let processes = FakeProcesses::default();
-    let report = down(&fixture, &cmux, &launchd, &processes, false, false);
+    let report = down(&fixture, &launchd, &processes, false, false);
     assert_eq!(
         report,
         json!({"outcome": "not_running", "launch_agent_unloaded": false,
@@ -213,7 +153,7 @@ fn down_reports_not_running_without_a_live_registration_and_still_unloads_the_ag
         .unwrap();
     processes.dead.lock().unwrap().insert(dead);
     launchd.load(None);
-    let report = down(&fixture, &cmux, &launchd, &processes, true, false);
+    let report = down(&fixture, &launchd, &processes, true, false);
     assert_eq!(
         report,
         json!({"outcome": "not_running", "launch_agent_unloaded": true,
@@ -236,7 +176,7 @@ fn down_reports_not_running_without_a_live_registration_and_still_unloads_the_ag
     assert!(processes.killed.lock().unwrap().is_empty());
     // The dead row is `up`'s to prune; only `down --force` removes it too.
     assert_eq!(queue.supervisors().unwrap().len(), 1);
-    let report = down(&fixture, &cmux, &launchd, &processes, false, true);
+    let report = down(&fixture, &launchd, &processes, false, true);
     assert_eq!(
         report,
         json!({"outcome": "not_running", "launch_agent_unloaded": false,
@@ -278,20 +218,12 @@ fn down_prunes_reused_pids_without_signalling_them() {
                 .register_supervisor(&LeaseToken::new(token), pid, 1, VERSION)
                 .unwrap();
         }
-        let cmux = FakeCmux::default();
-        let workspace = cmux
-            .create_named(
-                "[my repo]supervisor",
-                &fixture.repo,
-                "supervise",
-                &WorkspaceTags::default(),
-            )
-            .unwrap();
+        let workspace = "01234567-89ab-4def-8123-0000000000ac";
         queue
             .set_supervisor_mode(
                 &LeaseToken::new("foreign"),
                 SupervisorMode::InCmux,
-                Some(&workspace),
+                Some(workspace),
             )
             .unwrap();
         let registered_at = 1_700_000_000;
@@ -320,7 +252,7 @@ fn down_prunes_reused_pids_without_signalling_them() {
             listed(silent, now - registered_at as u64 + 60),
         ]);
         let launchd = FakeLaunchd::new(&fixture.location.db);
-        let report = down(&fixture, &cmux, &launchd, &processes, false, force);
+        let report = down(&fixture, &launchd, &processes, false, force);
         assert_eq!(
             report["outcome"],
             if force { "killed" } else { "draining" },
@@ -342,10 +274,7 @@ fn down_prunes_reused_pids_without_signalling_them() {
         assert!(processes.interrupted.lock().unwrap().is_empty());
         let expected_kills = if force { vec![silent, fresh] } else { vec![] };
         assert_eq!(*processes.killed.lock().unwrap(), expected_kills);
-        assert_eq!(
-            report["supervisor_workspaces"],
-            json!([{"workspace_id": workspace, "outcome": "closed"}])
-        );
+        assert_eq!(report["supervisor_workspaces"], left_open(workspace));
         let tokens: Vec<_> = queue
             .supervisors()
             .unwrap()
@@ -378,7 +307,6 @@ fn down_signals_a_silent_supervisor_when_process_listing_fails() {
     let processes = FakeProcesses::default(); // list() fails
     let report = down(
         &fixture,
-        &FakeCmux::default(),
         &FakeLaunchd::new(&fixture.location.db),
         &processes,
         false,
@@ -391,22 +319,14 @@ fn down_signals_a_silent_supervisor_when_process_listing_fails() {
 
 /// A queue can hold supervisors of both modes at once: the launchd one is
 /// left to the bootout's SIGTERM, the in-cmux one is interrupted here, and
-/// only the in-cmux one has a workspace to close.
+/// only the in-cmux one has a workspace, which is left to a person.
 #[test]
 fn down_stops_a_launchd_and_an_in_cmux_supervisor_in_one_call() {
     let fixture = fixture();
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let agent_pid = std::process::id();
     let in_cmux_pid = dead_pid(); // any pid the fake treats as alive
-    let cmux = FakeCmux::default();
-    let workspace = cmux
-        .create_named(
-            "[my repo]supervisor",
-            &fixture.repo,
-            "supervise",
-            &WorkspaceTags::default(),
-        )
-        .unwrap();
+    let workspace = "01234567-89ab-4def-8123-0000000000ad";
     queue
         .register_supervisor(&LeaseToken::new("agent"), agent_pid, 4, VERSION)
         .unwrap();
@@ -420,14 +340,14 @@ fn down_stops_a_launchd_and_an_in_cmux_supervisor_in_one_call() {
         .set_supervisor_mode(
             &LeaseToken::new("in-cmux"),
             SupervisorMode::InCmux,
-            Some(&workspace),
+            Some(workspace),
         )
         .unwrap();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     launchd.load(Some(agent_pid));
     let processes = FakeProcesses::default();
 
-    let report = down(&fixture, &cmux, &launchd, &processes, false, true);
+    let report = down(&fixture, &launchd, &processes, false, true);
     assert_eq!(report["outcome"], "killed", "{report}");
     assert_eq!(report["pids"], json!([agent_pid, in_cmux_pid]));
     assert_eq!(report["launch_agent_unloaded"], true);
@@ -438,10 +358,7 @@ fn down_stops_a_launchd_and_an_in_cmux_supervisor_in_one_call() {
         processes.interrupted.lock().unwrap().as_slice(),
         &[in_cmux_pid]
     );
-    assert_eq!(
-        report["supervisor_workspaces"],
-        json!([{"workspace_id": workspace, "outcome": "closed"}])
-    );
+    assert_eq!(report["supervisor_workspaces"], left_open(workspace));
     assert!(queue.supervisors().unwrap().is_empty());
 }
 
@@ -454,10 +371,9 @@ fn down_unloads_the_agent_and_returns_while_the_supervisor_drains() {
         .register_supervisor(&LeaseToken::new("resident"), pid, 4, VERSION)
         .unwrap();
     let launchd = FakeLaunchd::new(&fixture.location.db);
-    let cmux = FakeCmux::default();
     launchd.load(Some(pid));
     let processes = FakeProcesses::default();
-    let report = down(&fixture, &cmux, &launchd, &processes, false, false);
+    let report = down(&fixture, &launchd, &processes, false, false);
     assert_eq!(
         report,
         json!({"outcome": "draining", "pid": pid, "pids": [pid],
@@ -476,7 +392,7 @@ fn down_unloads_the_agent_and_returns_while_the_supervisor_drains() {
     assert_eq!(queue.supervisors().unwrap().len(), 1);
 
     // A supervisor started by hand has no agent: it gets the SIGTERM directly.
-    let report = down(&fixture, &cmux, &launchd, &processes, false, false);
+    let report = down(&fixture, &launchd, &processes, false, false);
     assert_eq!(report["outcome"], "draining");
     assert_eq!(report["launch_agent_unloaded"], false);
     assert_eq!(processes.terminated.lock().unwrap().as_slice(), &[pid]);
@@ -489,14 +405,14 @@ fn down_unloads_the_agent_and_returns_while_the_supervisor_drains() {
         .unwrap();
     launchd.load(Some(pid));
     let processes = FakeProcesses::default();
-    let report = down(&fixture, &cmux, &launchd, &processes, false, false);
+    let report = down(&fixture, &launchd, &processes, false, false);
     assert_eq!(report["outcome"], "draining");
     assert_eq!(report["pids"], json!([pid, by_hand]));
     assert_eq!(processes.terminated.lock().unwrap().as_slice(), &[by_hand]);
     // When launchd cannot say which process is the agent's, nobody is signalled.
     launchd.load(None);
     let processes = FakeProcesses::default();
-    down(&fixture, &cmux, &launchd, &processes, false, false);
+    down(&fixture, &launchd, &processes, false, false);
     assert!(processes.terminated.lock().unwrap().is_empty());
 }
 
@@ -509,7 +425,6 @@ fn down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died()
         .register_supervisor(&LeaseToken::new("resident"), pid, 4, VERSION)
         .unwrap();
     let launchd = FakeLaunchd::new(&fixture.location.db);
-    let cmux = FakeCmux::default();
     launchd.load(Some(pid));
     let processes = FakeProcesses::default();
     // The supervisor deregisters itself at the end of its drain.
@@ -521,7 +436,7 @@ fn down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died()
             .deregister_supervisor(&LeaseToken::new("resident"))
             .unwrap();
     });
-    let report = down(&fixture, &cmux, &launchd, &processes, true, false);
+    let report = down(&fixture, &launchd, &processes, true, false);
     {
         let _waiting = common::within(common::STEP_LIMIT, "the drain thread to return");
         drain.join().unwrap();
@@ -558,7 +473,6 @@ fn down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died()
     }
     let report = lifecycle::down(
         &fixture.location,
-        &cmux,
         &launchd,
         &DiesLater {
             polls: AtomicUsize::new(0),
@@ -588,10 +502,9 @@ fn down_force_kills_after_the_unload_and_drops_the_registration() {
         .register_supervisor(&LeaseToken::new("resident"), pid, 4, VERSION)
         .unwrap();
     let launchd = FakeLaunchd::new(&fixture.location.db);
-    let cmux = FakeCmux::default();
     launchd.load(Some(pid));
     let processes = FakeProcesses::default();
-    let report = down(&fixture, &cmux, &launchd, &processes, false, true);
+    let report = down(&fixture, &launchd, &processes, false, true);
     assert_eq!(
         report,
         json!({"outcome": "killed", "pid": pid, "pids": [pid],

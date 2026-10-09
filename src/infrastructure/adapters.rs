@@ -3523,9 +3523,9 @@ impl AgentProvider for ClaudeCode {
     /// `claude --settings <queue dir>/claude-inbox-settings.json
     /// [--plugin-dir <dir>] -- <prompt>`: the settings are only the
     /// inbox's `permissions.deny` ([`inbox_settings`], ADR-t1228-2 decision
-    /// 3), written again at each open. The inbox's workspace keeps its role
-    /// and queue in its own environment (ADR-0026), so a `claude` started
-    /// again there still has them, though not the settings (decision 4).
+    /// 3), written again at each open. `dagq inbox` gives it the inbox's
+    /// role and queue in its environment; a `claude` a person starts again
+    /// in that terminal has neither them nor the settings.
     fn inbox_command(
         &self,
         prompt: &str,
@@ -3625,7 +3625,7 @@ impl AgentProvider for ClaudeCode {
     }
 }
 
-/// The settings file of the inbox `up` opens, in the queue's directory
+/// The settings file of the inbox `dagq inbox` opens, in the queue's directory
 /// (ADR-t1228-2 decision 3).
 pub const INBOX_SETTINGS: &str = "claude-inbox-settings.json";
 

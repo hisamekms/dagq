@@ -1,7 +1,8 @@
-//! `up` without `--plugin-dir` loads the claude-dagq plugin the user
+//! `up` without `--plugin-dir` relies on the claude-dagq plugin the user
 //! installed, so it makes sure `claude plugin list --json` shows it enabled
-//! before opening anything, and says how to install it otherwise
-//! (ADR-t617-2 decision 4). With `--plugin-dir` it does not ask. `plan`
+//! before starting anything, and says how to install it otherwise
+//! (ADR-t617-2 decision 4); `dagq inbox` checks the same
+//! (`lifecycle_inbox`). With `--plugin-dir` it does not ask. `plan`
 //! opens nothing any more (ADR-t1394-1), so it asks nothing either.
 
 use crate::common;
@@ -80,13 +81,9 @@ fn up_without_a_plugin_dir_needs_the_installed_plugin() {
             Some(listed) => list_plugins(&fixture, listed),
             None => remove_listing(&fixture),
         }
-        let cmux = FakeCmux::default();
         let launchd = FakeLaunchd::new(&fixture.location.db);
         let processes = FakeProcesses::default();
-        let message = format!(
-            "{:#}",
-            try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-        );
+        let message = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
         assert!(message.starts_with(reason), "{listed:?}: {message}");
         assert!(
             message.contains("the inbox session would start"),
@@ -104,18 +101,16 @@ fn up_without_a_plugin_dir_needs_the_installed_plugin() {
             );
         }
         assert!(launchd.installs.lock().unwrap().is_empty());
-        assert!(cmux.workspaces.lock().unwrap().is_empty());
         let queue = SqliteQueue::open(&fixture.location.db).unwrap();
         assert!(queue.supervisors().unwrap().is_empty());
     }
 
     list_plugins(&fixture, ENABLED);
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
-    assert_eq!(report["inbox"]["outcome"], "created", "{report}");
+    assert_eq!(report["inbox"]["outcome"], "not_opened", "{report}");
     let call = plugin_call(&fixture).unwrap();
     let root = fixture.repo.canonicalize().unwrap();
     assert_eq!(
@@ -123,12 +118,6 @@ fn up_without_a_plugin_dir_needs_the_installed_plugin() {
         format!("plugin list --json\n{}\n", root.display()),
         "{call}"
     );
-    let workspaces = cmux.workspaces.lock().unwrap();
-    let inbox = workspaces
-        .iter()
-        .find(|workspace| workspace.0.ends_with("inbox"))
-        .unwrap();
-    assert!(!inbox.3.contains("--plugin-dir"), "{}", inbox.3);
 }
 
 /// With `--plugin-dir`, `up` does not ask for the installed plugins.
@@ -136,10 +125,9 @@ fn up_without_a_plugin_dir_needs_the_installed_plugin() {
 fn up_with_a_plugin_dir_does_not_check_the_installed_plugin() {
     let fixture = fixture();
     assert!(fixture.options.plugin_dir.is_some());
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(plugin_call(&fixture), None);
 }
@@ -183,10 +171,9 @@ fn a_restart_by_the_runtime_does_not_check_the_installed_plugin() {
     let mut fixture = fixture();
     fixture.options.plugin_dir = None;
     fixture.environment.restart = true;
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(plugin_call(&fixture), None);
 

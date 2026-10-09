@@ -1,5 +1,5 @@
 //! `up` replacing a supervisor of another version or build against fakes
-//! for launchd, cmux and process signals: the drain and restart in either
+//! for launchd and process signals: the drain and restart in either
 //! mode, the `--no-wait` refusal, the reuse of this binary's own version,
 //! the handoff without a drain, and the migrations `up` applies or refuses.
 
@@ -88,7 +88,6 @@ fn up_drains_and_replaces_a_launchd_supervisor_of_another_version() {
             .set_supervisor_mode(&LeaseToken::new("old"), SupervisorMode::Launchd, None)
             .unwrap();
         set_binary_version(&fixture.location.db, "old", previous);
-        let cmux = FakeCmux::default();
         let launchd = FakeLaunchd::new(&fixture.location.db);
         // The agent is loaded and its process is the registered one, so
         // launchd's bootout carries the SIGTERM and `up` sends none.
@@ -108,7 +107,7 @@ fn up_drains_and_replaces_a_launchd_supervisor_of_another_version() {
                     .deregister_supervisor(&LeaseToken::new("old"))
                     .unwrap();
             });
-            up(&fixture, &cmux, &launchd, &processes)
+            up(&fixture, &launchd, &processes)
         });
 
         let supervisor = &report["supervisor"];
@@ -127,21 +126,14 @@ fn up_drains_and_replaces_a_launchd_supervisor_of_another_version() {
                 "version": previous,
             }])
         );
-        // No in-cmux supervisor was replaced, so nothing was closed.
+        // No in-cmux supervisor was replaced, so no workspace is reported.
         assert_eq!(supervisor["supervisor_workspaces"], json!([]));
         // The old agent went before the new one was written, and the
         // SIGTERM bootout already delivered was not repeated.
         assert_eq!(launchd.uninstalls.lock().unwrap().len(), 1);
         assert_eq!(launchd.installs.lock().unwrap().len(), 1);
-        // Only the inbox's workspace was opened: none for the supervisor.
-        let names: Vec<String> = cmux
-            .workspaces
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|w| w.0.clone())
-            .collect();
-        assert_eq!(names, ["[my repo]inbox"]);
+        // No inbox is opened (ADR-t2159-1 decision 3).
+        assert_eq!(report["inbox"]["outcome"], "not_opened", "{report}");
         assert!(processes.terminated.lock().unwrap().is_empty());
         assert!(processes.interrupted.lock().unwrap().is_empty());
         assert!(processes.killed.lock().unwrap().is_empty());
@@ -168,7 +160,6 @@ fn up_terminates_a_replaced_supervisor_that_launchd_did_not_signal() {
         .register_supervisor(&LeaseToken::new("by-hand"), pid, 1, VERSION)
         .unwrap();
     set_binary_version(&fixture.location.db, "by-hand", Some("0.0.1"));
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
 
@@ -182,7 +173,7 @@ fn up_terminates_a_replaced_supervisor_that_launchd_did_not_signal() {
                 .deregister_supervisor(&LeaseToken::new("by-hand"))
                 .unwrap();
         });
-        up(&fixture, &cmux, &launchd, &processes)
+        up(&fixture, &launchd, &processes)
     });
     assert_eq!(report["supervisor"]["outcome"], "restarted", "{report}");
     // It had no mode of its own, and the replacement reports it as such.
@@ -193,18 +184,18 @@ fn up_terminates_a_replaced_supervisor_that_launchd_did_not_signal() {
 
 /// A supervisor an earlier binary registered in the retired in-cmux mode
 /// (ADR-t1433-4 decision 3) is drained the way `down` stops one: SIGINT,
-/// wait for the drain, close its workspace. The one started in its place
-/// runs under launchd, and no supervisor workspace is opened or recorded.
+/// wait for the drain. Its workspace is left for a person to close and its
+/// record forgotten, without cmux (ADR-t2159-1 decision 6). The one
+/// started in its place runs under launchd, and no supervisor workspace is
+/// opened or recorded.
 #[test]
 fn up_drains_a_registered_in_cmux_supervisor_and_starts_one_under_launchd() {
     let fixture = fixture();
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
-    let cmux = FakeCmux::default();
     // The workspace the replaced supervisor runs in, as the earlier
     // binary's `up` opened and recorded it.
     let workspace = "01234567-89ab-4def-8123-0000000000ff".to_owned();
-    cmux.open("[my repo]supervisor", &fixture.repo, &workspace);
     queue
         .register_session_workspace(SessionRole::Supervisor, &workspace)
         .unwrap();
@@ -233,7 +224,7 @@ fn up_drains_a_registered_in_cmux_supervisor_and_starts_one_under_launchd() {
                 .deregister_supervisor(&LeaseToken::new("old"))
                 .unwrap();
         });
-        up(&fixture, &cmux, &launchd, &processes)
+        up(&fixture, &launchd, &processes)
     });
 
     let supervisor = &report["supervisor"];
@@ -246,21 +237,15 @@ fn up_drains_a_registered_in_cmux_supervisor_and_starts_one_under_launchd() {
     assert_eq!(processes.interrupted.lock().unwrap().as_slice(), &[pid]);
     assert!(processes.terminated.lock().unwrap().is_empty());
     assert_eq!(
-        supervisor["supervisor_workspaces"],
-        json!([{"workspace_id": workspace, "outcome": "closed"}])
+        supervisor["supervisor_workspaces"][0]["workspace_id"],
+        workspace.as_str(),
+        "{report}"
     );
-    // Its workspace was closed and forgotten, and none was opened.
     assert_eq!(
-        cmux.closed.lock().unwrap().as_slice(),
-        std::slice::from_ref(&workspace)
+        supervisor["supervisor_workspaces"][0]["outcome"], "left_open",
+        "{report}"
     );
-    assert!(
-        cmux.workspaces
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|w| w.0 != "[my repo]supervisor" || w.2 == workspace)
-    );
+    // Its workspace is forgotten.
     assert_eq!(
         queue.session_workspace(SessionRole::Supervisor).unwrap(),
         None
@@ -295,15 +280,11 @@ fn up_no_wait_refuses_to_replace_while_runs_are_in_flight() {
         .unwrap();
     set_binary_version(&fixture.location.db, "old", Some("0.0.1"));
     let run_id = claim_a_run(&fixture, &mut queue, "old");
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     launchd.load(Some(pid));
     let processes = FakeProcesses::default();
 
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(error.contains("1 run(s) are still in flight"), "{error}");
     assert!(error.contains(&run_id), "{error}");
     assert!(
@@ -315,7 +296,6 @@ fn up_no_wait_refuses_to_replace_while_runs_are_in_flight() {
     assert!(launchd.installs.lock().unwrap().is_empty());
     assert!(processes.terminated.lock().unwrap().is_empty());
     assert!(processes.interrupted.lock().unwrap().is_empty());
-    assert!(cmux.workspaces.lock().unwrap().is_empty());
     let registrations = queue.supervisors().unwrap();
     assert_eq!(registrations.len(), 1);
     assert_eq!(registrations[0].token, "old");
@@ -339,7 +319,7 @@ fn up_no_wait_refuses_to_replace_while_runs_are_in_flight() {
                 .deregister_supervisor(&LeaseToken::new("old"))
                 .unwrap();
         });
-        up(&fixture, &cmux, &launchd, &processes)
+        up(&fixture, &launchd, &processes)
     });
     assert_eq!(report["supervisor"]["outcome"], "restarted", "{report}");
     assert_eq!(report["supervisor"]["previous_version"], "0.0.1");
@@ -448,16 +428,12 @@ fn up_no_wait_refuses_while_a_replaced_supervisor_leases_a_run_at_any_stage() {
             [],
         )
         .unwrap();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     launchd.load(Some(pid));
     let processes = FakeProcesses::default();
     let before = queue_rows(&fixture.location.db);
 
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(error.contains("5 run(s) are still in flight"), "{error}");
     for id in &held_ids {
         assert!(error.contains(id.as_str()), "{error}");
@@ -472,8 +448,6 @@ fn up_no_wait_refuses_while_a_replaced_supervisor_leases_a_run_at_any_stage() {
     assert!(processes.terminated.lock().unwrap().is_empty());
     assert!(processes.interrupted.lock().unwrap().is_empty());
     assert!(processes.killed.lock().unwrap().is_empty());
-    assert!(cmux.workspaces.lock().unwrap().is_empty());
-    assert!(cmux.closed.lock().unwrap().is_empty());
 
     // The held runs come to rest and give their leases back; the rest stay
     // as they were and do not stop the replacement.
@@ -501,7 +475,7 @@ fn up_no_wait_refuses_while_a_replaced_supervisor_leases_a_run_at_any_stage() {
                     .unwrap();
             }
         });
-        up(&fixture, &cmux, &launchd, &processes)
+        up(&fixture, &launchd, &processes)
     });
     assert_eq!(report["supervisor"]["outcome"], "restarted", "{report}");
     let replaced: Vec<&str> = report["supervisor"]["replaced"]
@@ -533,12 +507,11 @@ fn up_reuses_a_supervisor_of_this_binary_version() {
     queue
         .set_supervisor_mode(&LeaseToken::new("live"), SupervisorMode::Launchd, None)
         .unwrap();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     launchd.load(Some(pid));
     let processes = FakeProcesses::default();
 
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     let supervisor = &report["supervisor"];
     assert_eq!(supervisor["outcome"], "reused", "{report}");
     assert_eq!(supervisor["token"], "live");
@@ -573,17 +546,13 @@ fn up_no_wait_gives_up_on_a_supervisor_that_does_not_stop() {
         .set_supervisor_mode(&LeaseToken::new("wedged"), SupervisorMode::Launchd, None)
         .unwrap();
     set_binary_version(&fixture.location.db, "wedged", Some("0.0.1"));
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     launchd.load(Some(pid));
     let processes = FakeProcesses::default();
 
     // Nothing ever removes the registration, the way a loop wedged on a
     // hung cmux or git call keeps its row while its heartbeat runs on.
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(error.contains("did not stop within"), "{error}");
     assert!(error.contains("wedged"), "{error}");
     assert!(error.contains(&format!("pid {pid}")), "{error}");
@@ -597,8 +566,7 @@ fn up_no_wait_gives_up_on_a_supervisor_that_does_not_stop() {
 /// A supervisor can die with its row intact: launchd's `ExitTimeOut`
 /// SIGKILL, or the heartbeat failure the runtime deliberately leaves the
 /// row for. The replacement drops those rows, so none is left pointing at
-/// the workspace of a registered in-cmux supervisor it has just closed (the
-/// next `down` would retry that close and report `close_failed`).
+/// the workspace of a registered in-cmux supervisor it has just let go.
 #[test]
 fn up_drops_the_row_of_a_replaced_supervisor_that_died_without_deregistering() {
     let fixture = fixture();
@@ -606,9 +574,7 @@ fn up_drops_the_row_of_a_replaced_supervisor_that_died_without_deregistering() {
     // A pid of its own, so killing it does not also kill the supervisor
     // the fake launchd registers (which runs as this process).
     let pid = 424_242;
-    let cmux = FakeCmux::default();
     let workspace = "01234567-89ab-4def-8123-0000000000bb".to_owned();
-    cmux.open("[my repo]supervisor", &fixture.repo, &workspace);
     queue
         .register_supervisor(&LeaseToken::new("killed"), pid, 2, VERSION)
         .unwrap();
@@ -631,15 +597,14 @@ fn up_drops_the_row_of_a_replaced_supervisor_that_died_without_deregistering() {
             // It dies without removing its own row.
             processes.dead.lock().unwrap().insert(pid);
         });
-        up(&fixture, &cmux, &launchd, &processes)
+        up(&fixture, &launchd, &processes)
     });
     assert_eq!(report["supervisor"]["outcome"], "restarted", "{report}");
     assert_eq!(
-        report["supervisor"]["supervisor_workspaces"],
-        json!([{"workspace_id": workspace, "outcome": "closed"}])
+        report["supervisor"]["supervisor_workspaces"][0]["outcome"], "left_open",
+        "{report}"
     );
-    // Only the started supervisor is left; no row points at the workspace
-    // this `up` closed.
+    // Only the started supervisor is left; no row points at the workspace.
     let registrations = queue.supervisors().unwrap();
     assert_eq!(registrations.len(), 1, "{registrations:?}");
     assert_ne!(registrations[0].token, "killed");
@@ -687,14 +652,13 @@ fn up_hands_a_supervisor_of_another_build_over_without_draining_it() {
         // A run in review or waiting to land, which `--no-wait` refuses
         // on the drain path, does not stop the handoff either.
         let review = run_at(&fixture, &mut queue, "awaiting_integration", Some("old"));
-        let cmux = FakeCmux::default();
         let launchd = FakeLaunchd::new(&fixture.location.db);
         let processes = FakeProcesses::default();
 
         auto_update(&mut fixture);
         let report = thread::scope(|scope| {
             scope.spawn(|| take_the_handoff(&fixture, &processes, "old", VERSION));
-            up(&fixture, &cmux, &launchd, &processes)
+            up(&fixture, &launchd, &processes)
         });
         let supervisor = &report["supervisor"];
         assert_eq!(supervisor["outcome"], "restarted", "{report}");
@@ -715,7 +679,6 @@ fn up_hands_a_supervisor_of_another_build_over_without_draining_it() {
         assert!(processes.interrupted.lock().unwrap().is_empty());
         assert!(launchd.uninstalls.lock().unwrap().is_empty());
         assert!(launchd.installs.lock().unwrap().is_empty());
-        assert!(cmux.closed.lock().unwrap().is_empty());
         let registrations = queue.supervisors().unwrap();
         assert_eq!(registrations.len(), 1);
         assert_eq!(registrations[0].binary_version.as_deref(), Some(VERSION));
@@ -749,14 +712,10 @@ fn up_reports_a_handoff_that_did_not_happen() {
         "<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/bin/dagq</string>\n",
     )
     .unwrap();
-    let cmux = FakeCmux::default();
     let processes = FakeProcesses::default();
     let error = thread::scope(|scope| {
         scope.spawn(|| take_the_handoff(&fixture, &processes, "old", "0.0.1"));
-        format!(
-            "{:#}",
-            try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-        )
+        format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err())
     });
     assert!(error.contains("came back as 0.0.1"), "{error}");
     assert!(
@@ -767,10 +726,7 @@ fn up_reports_a_handoff_that_did_not_happen() {
     // Nobody takes the request, and the supervisor stops heartbeating.
     let mut fixture = fixture;
     fixture.options.handoff_timeout = Duration::from_millis(200);
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(error.contains("did not take the handoff"), "{error}");
     // The request is withdrawn, so the supervisor does not exec that path later.
     assert_eq!(
@@ -1002,7 +958,6 @@ fn up_names_the_supervisors_that_did_not_take_the_handoff() {
     let mut fixture = fixture();
     auto_update(&mut fixture);
     let queue = two_handoff_supervisors(&fixture);
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     let error = thread::scope(|scope| {
@@ -1024,7 +979,7 @@ fn up_names_the_supervisors_that_did_not_take_the_handoff() {
                 .deregister_supervisor(&LeaseToken::new("second"))
                 .unwrap();
         });
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+        try_up(&fixture, &launchd, &processes).unwrap_err()
     });
     let partial = lifecycle::PartialHandoff::of(&error).expect("the report beside the error");
     let error = format!("{error:#}");
@@ -1059,13 +1014,7 @@ fn up_names_the_supervisors_that_did_not_take_the_handoff() {
         .unwrap();
     assert_eq!(second["previous_token"], "second", "{report}");
     assert_eq!(second["error"], Value::Null, "{report}");
-    assert!(
-        matches!(
-            report["inbox"]["outcome"].as_str(),
-            Some("created" | "reused")
-        ),
-        "{report}"
-    );
+    assert_eq!(report["inbox"]["outcome"], "not_opened", "{report}");
 
     let registrations = queue.supervisors().unwrap();
     let second = registrations
@@ -1089,7 +1038,6 @@ fn up_finishes_its_steps_when_no_supervisor_takes_the_handoff() {
     let mut fixture = fixture();
     auto_update(&mut fixture);
     let queue = two_handoff_supervisors(&fixture);
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     let error = thread::scope(|scope| {
@@ -1106,7 +1054,7 @@ fn up_finishes_its_steps_when_no_supervisor_takes_the_handoff() {
                 .resume_registration(&LeaseToken::new("second"), SECOND_PID, "0.0.1")
                 .unwrap();
         });
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+        try_up(&fixture, &launchd, &processes).unwrap_err()
     });
     let partial = lifecycle::PartialHandoff::of(&error).expect("the report beside the error");
     let error = format!("{error:#}");
@@ -1122,13 +1070,7 @@ fn up_finishes_its_steps_when_no_supervisor_takes_the_handoff() {
     assert_eq!(report["supervisor"]["auto_update"], true, "{report}");
     let replaced = report["supervisor"]["replaced"].as_array().unwrap();
     assert!(replaced.iter().all(|r| r["error"].is_string()), "{report}");
-    assert!(
-        matches!(
-            report["inbox"]["outcome"].as_str(),
-            Some("created" | "reused")
-        ),
-        "{report}"
-    );
+    assert_eq!(report["inbox"]["outcome"], "not_opened", "{report}");
     assert!(auto_update_of(&queue, "first"));
     assert!(auto_update_of(&queue, "second"));
 }
@@ -1170,7 +1112,6 @@ fn up_drains_a_supervisor_whose_agent_starts_another_binary() {
         "<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/elsewhere/dagq</string>\n",
     )
     .unwrap();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     launchd.load(Some(std::process::id()));
     let processes = FakeProcesses::default();
@@ -1184,7 +1125,7 @@ fn up_drains_a_supervisor_whose_agent_starts_another_binary() {
                 .deregister_supervisor(&LeaseToken::new("old"))
                 .unwrap();
         });
-        up(&fixture, &cmux, &launchd, &processes)
+        up(&fixture, &launchd, &processes)
     });
     assert_eq!(report["supervisor"]["outcome"], "restarted", "{report}");
     assert_eq!(report["supervisor"].get("handoff"), None, "{report}");
@@ -1230,13 +1171,9 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
     let db = &fixture.location.db;
     // The queue as the binary before the handoff columns left it.
     queue_at_schema(db, 30);
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(db);
     let processes = FakeProcesses::default();
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     // The breaking ones after 0031, however many came since (ADR-0067
     // decision 4).
     let breaking: Vec<String> = dagq::infrastructure::schema::MIGRATIONS
@@ -1258,7 +1195,7 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
     assert_eq!(version, 30);
     // Migrated, it starts.
     SqliteQueue::migrate(db, None, 0).unwrap();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(report["migrated"], Value::Null, "{report}");
 
@@ -1283,22 +1220,18 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
     // above has no registration left to reuse.
     let fixture = common::lifecycle::fixture();
     let db = &fixture.location.db;
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(db);
     let processes = FakeProcesses::default();
     queue_at_schema(db, auto_update as usize - 1);
     if breaking_after.is_empty() {
-        let report = up(&fixture, &cmux, &launchd, &processes);
+        let report = up(&fixture, &launchd, &processes);
         assert_eq!(
             report["migrated"]["applied"][0]["version"], auto_update,
             "{report}"
         );
         assert_eq!(report["supervisor"]["auto_update"], false, "{report}");
     } else {
-        let error = format!(
-            "{:#}",
-            try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-        );
+        let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
         assert!(
             error.contains(&format!(
                 "breaking migration(s) {} ",
@@ -1307,7 +1240,7 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
             "{error}"
         );
         SqliteQueue::migrate(db, None, 0).unwrap();
-        let report = up(&fixture, &cmux, &launchd, &processes);
+        let report = up(&fixture, &launchd, &processes);
         assert_eq!(report["migrated"], Value::Null, "{report}");
         assert_eq!(report["supervisor"]["auto_update"], false, "{report}");
     }
@@ -1316,10 +1249,7 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
         .unwrap()
         .execute_batch("PRAGMA user_version = 24;")
         .unwrap();
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(error.contains("breaking migration(s) 25"), "{error}");
     assert!(error.contains("install --allow-breaking"), "{error}");
 }

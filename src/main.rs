@@ -1033,7 +1033,7 @@ enum Command {
         #[arg(long, hide = true)]
         unavailable: Option<String>,
     },
-    /// Start the queue's runtime: a launchd-resident supervisor and the inbox's cmux workspace. Idempotent; a live supervisor of another build is handed over to this binary without waiting for its sessions (or drained when it cannot take a handoff), after the queue's compatible migrations. Opens no planner (the runtime does) and forgets the resident planner's record.
+    /// Start the queue's runtime: a launchd-resident supervisor. Idempotent; a live supervisor of another build is handed over to this binary without waiting for its sessions (or drained when it cannot take a handoff), after the queue's compatible migrations. Opens no inbox (`dagq inbox` does, in your own terminal) and no planner (the runtime does), and forgets the workspaces an earlier binary recorded.
     Up {
         /// Never start Claude. Run workers on Codex and handle unsupported roles manually.
         #[arg(long)]
@@ -1076,13 +1076,13 @@ enum Command {
         /// progress first).
         #[arg(long, default_value_t = 1800)]
         handoff_timeout: u64,
-        /// Claude Code plugin directory the inbox session loads (`claude --plugin-dir`).
+        /// Claude Code plugin directory the runtime's planners load (`claude --plugin-dir`).
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
         /// Checkout of the repository; defaults to the working directory.
         #[arg(long)]
         repo: Option<PathBuf>,
-        /// cmux executable; a bare name is resolved on PATH.
+        /// cmux executable, accepted for older command lines: `up` calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         /// Claude Code executable; a bare name is resolved on PATH.
@@ -1101,6 +1101,27 @@ enum Command {
         /// an `up` without it turns it off.
         #[arg(long)]
         auto_update: bool,
+    },
+    // ADR-t2159-1 decision 2.
+    /// Open the queue's inbox in this terminal: start the inbox's agent (Claude Code with the
+    /// inbox's settings, the plugin and the inbox's prompt, DAGQ_ROLE=inbox and DAGQ_QUEUE) in the
+    /// foreground in place of this process, from the repository's main checkout, after recording
+    /// inbox_opened. Refused inside an inbox (DAGQ_ROLE=inbox), whatever queue.
+    Inbox {
+        /// Claude Code plugin directory the inbox loads (`claude --plugin-dir`); without it the
+        /// installed claude-dagq plugin, which must be enabled.
+        #[arg(long)]
+        plugin_dir: Option<PathBuf>,
+        /// Checkout of the repository; defaults to the working directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Claude Code executable; a bare name is resolved on PATH.
+        #[arg(long, default_value = "claude")]
+        claude: PathBuf,
+        /// Codex CLI, accepted beside --claude: the inbox's provider is Claude Code, as Codex has
+        /// no inbox session.
+        #[arg(long, default_value = "codex")]
+        codex: PathBuf,
     },
     // ADR-t1394-1.
     /// Refused: planners a person opens were abolished. Ask the inbox for a plan instead; it
@@ -1142,7 +1163,7 @@ enum Command {
         #[command(subcommand)]
         command: PlannerCommand,
     },
-    /// Stop the queue's supervisor: unload its launchd agent so it drains and is not restarted, or signal and close the workspace of one registered in the retired in-cmux mode. Leaves the inbox and planner workspaces open.
+    /// Stop the queue's supervisor: unload its launchd agent so it drains and is not restarted, or signal one registered in the retired in-cmux mode. Closes no cmux workspace (a person closes the one such a supervisor ran in) and leaves the inbox alone.
     Down {
         /// Wait until the supervisor's registration is gone or its process exited.
         #[arg(long)]
@@ -1150,7 +1171,7 @@ enum Command {
         /// Kill the supervisor after the unload and drop its registration.
         #[arg(long, conflicts_with = "wait")]
         force: bool,
-        /// cmux executable, used to close the workspace of a supervisor registered in the retired in-cmux mode.
+        /// cmux executable, accepted for older command lines: `down` calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
@@ -2136,6 +2157,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::ReleaseUpdate { .. }
         | Command::Up { .. }
         | Command::Down { .. }
+        | Command::Inbox { .. }
         | Command::Service {
             command:
                 ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
@@ -2334,6 +2356,7 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         Command::AutoUpdate { .. } | Command::ReleaseUpdate { .. } => Operation::AutoUpdate,
         Command::Up { .. } => Operation::Up,
         Command::Down { .. } => Operation::Down,
+        Command::Inbox { .. } => Operation::OpenInbox,
         Command::Service {
             command:
                 ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
@@ -3071,10 +3094,7 @@ fn execute(cli: Cli) -> Result<Value> {
     } = cli.command
     {
         use dagq::application::install::{E2eGate, E2eSettings, InstallOptions, Source};
-        use dagq::infrastructure::{
-            adapters::{Cmux, executable},
-            launchd::Launchctl,
-        };
+        use dagq::infrastructure::{adapters::executable, launchd::Launchctl};
         let source = match (rollback, from) {
             (true, _) => Source::Rollback,
             // Replaced by the release's binary below.
@@ -3138,9 +3158,6 @@ fn execute(cli: Cli) -> Result<Value> {
         if let Some(release) = release {
             return one_shot.install_release(
                 &location,
-                &Cmux {
-                    executable: cmux.clone(),
-                },
                 &cmux,
                 &Launchctl { uid: current_uid() },
                 &dagq::infrastructure::release_update::CurlIndex::default(),
@@ -3152,9 +3169,6 @@ fn execute(cli: Cli) -> Result<Value> {
         }
         return one_shot.install(
             &location,
-            &Cmux {
-                executable: cmux.clone(),
-            },
             &cmux,
             &Launchctl { uid: current_uid() },
             &options,
@@ -3167,6 +3181,31 @@ fn execute(cli: Cli) -> Result<Value> {
     // `rebind` is the one command that runs on a queue bound elsewhere.
     if let Command::Rebind { repo } = cli.command {
         return one_shot.rebind(&db, &checkout(repo));
+    }
+    // `dagq inbox` opens the queue itself and puts the inbox's agent in
+    // this process's place, in the foreground of its terminal (ADR-t2159-1
+    // decision 2); only a failed start comes back.
+    if let Command::Inbox {
+        plugin_dir,
+        repo,
+        claude,
+        codex: _,
+    } = cli.command
+    {
+        let command = one_shot.inbox(
+            &location,
+            &checkout(repo),
+            &up_environment()?,
+            &dagq::lifecycle::InboxOptions {
+                plugin_dir,
+                agent: claude,
+            },
+        )?;
+        let error = dagq::infrastructure::process::exec(&command);
+        return Err(anyhow::Error::new(error).context(format!(
+            "start the inbox's agent {}",
+            command.get_program().to_string_lossy()
+        )));
     }
     // `doctor` reports the schema even of a queue this binary cannot open
     // (ADR-0045 decision 5), so it opens the queue itself.
@@ -3289,6 +3328,7 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Install { .. }
         | Command::Doctor { .. }
         | Command::Ci { .. }
+        | Command::Inbox { .. }
         | Command::Service { .. } => {
             unreachable!()
         }
@@ -3968,27 +4008,12 @@ fn execute(cli: Cli) -> Result<Value> {
             codex,
             auto_update,
         } => {
-            use dagq::application::lifecycle::{QUEUE_ENV, ROLE_ENV, UpEnvironment, UpOptions};
-            use dagq::infrastructure::adapters::claude_global_config;
+            use dagq::application::lifecycle::UpOptions;
             use dagq::infrastructure::{
-                adapters::{Cmux, SystemProcesses, executable},
+                adapters::{SystemProcesses, executable},
                 launchd::Launchctl,
             };
-            let environment = UpEnvironment {
-                role: env::var(ROLE_ENV).ok(),
-                queue: env::var_os(QUEUE_ENV).map(PathBuf::from),
-                path: env::var("PATH").context("PATH is unset")?,
-                config_home: env::var(dagq::application::CONFIG_HOME_ENV)
-                    .ok()
-                    .filter(|home| !home.is_empty()),
-                current_exe: env::current_exe()?,
-                claude_config: claude_global_config(
-                    env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-                    env::var("HOME").ok().as_deref(),
-                ),
-                user_config: dagq::infrastructure::language::user_config_file(),
-                restart: env::var_os(dagq::lifecycle::UP_RESTART_ENV).is_some(),
-            };
+            let environment = up_environment()?;
             let options = UpOptions {
                 no_claude,
                 parallel,
@@ -3998,7 +4023,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 in_cmux,
                 no_wait,
                 plugin_dir,
-                cmux: executable(&cmux)?,
+                // Only passed on to the supervisor's command line: a host
+                // without cmux goes up all the same (ADR-t2159-1).
+                cmux: executable(&cmux).unwrap_or(cmux),
                 claude: if no_claude {
                     claude
                 } else {
@@ -4014,9 +4041,6 @@ fn execute(cli: Cli) -> Result<Value> {
             one_shot.up(
                 &location,
                 &checkout(repo),
-                &Cmux {
-                    executable: options.cmux.clone(),
-                },
                 &Launchctl { uid: current_uid() },
                 &SystemProcesses,
                 &environment,
@@ -4174,21 +4198,17 @@ fn execute(cli: Cli) -> Result<Value> {
                 }
             }
         }
-        Command::Down { wait, force, cmux } => {
+        // `--cmux` is accepted and ignored: `down` closes no cmux workspace
+        // (ADR-t2159-1 decision 3).
+        Command::Down {
+            wait,
+            force,
+            cmux: _,
+        } => {
             use dagq::application::lifecycle::DownOptions;
-            use dagq::infrastructure::{
-                adapters::{Cmux, SystemProcesses, executable},
-                launchd::Launchctl,
-            };
-            // cmux is only needed to close the workspace of a supervisor
-            // registered in the retired in-cmux mode, so a queue without one
-            // still goes down when cmux is not installed; the unresolved
-            // name then fails only there.
+            use dagq::infrastructure::{adapters::SystemProcesses, launchd::Launchctl};
             one_shot.down(
                 &location,
-                &Cmux {
-                    executable: executable(&cmux).unwrap_or(cmux),
-                },
                 &Launchctl { uid: current_uid() },
                 &SystemProcesses,
                 &DownOptions {
@@ -4489,6 +4509,26 @@ fn install_telemetry(command: &Command, location: &QueueLocation) {
         None => Telemetry::stderr(),
     };
     telemetry.install();
+}
+
+/// What `up` and `dagq inbox` read from the environment of the process.
+fn up_environment() -> Result<dagq::lifecycle::UpEnvironment> {
+    use dagq::application::lifecycle::{QUEUE_ENV, ROLE_ENV};
+    Ok(dagq::lifecycle::UpEnvironment {
+        role: env::var(ROLE_ENV).ok(),
+        queue: env::var_os(QUEUE_ENV).map(PathBuf::from),
+        path: env::var("PATH").context("PATH is unset")?,
+        config_home: env::var(dagq::application::CONFIG_HOME_ENV)
+            .ok()
+            .filter(|home| !home.is_empty()),
+        current_exe: env::current_exe()?,
+        claude_config: dagq::infrastructure::adapters::claude_global_config(
+            env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+            env::var("HOME").ok().as_deref(),
+        ),
+        user_config: dagq::infrastructure::language::user_config_file(),
+        restart: env::var_os(dagq::lifecycle::UP_RESTART_ENV).is_some(),
+    })
 }
 
 fn current_uid() -> u32 {
@@ -4816,6 +4856,7 @@ mod tests {
             ),
             ("up", &[]),
             ("down", &[]),
+            ("inbox", &[]),
             ("service start", &[]),
             ("service stop", &[]),
             ("service serve", &[]),

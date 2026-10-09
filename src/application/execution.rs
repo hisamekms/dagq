@@ -262,6 +262,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("release-update", &[C::BinaryInstall]),
     ("up", &[C::ServiceLifecycle]),
     ("down", &[C::ServiceLifecycle]),
+    ("inbox", &[C::ServiceLifecycle]),
     ("service start", &[C::ServiceLifecycle]),
     ("service stop", &[C::ServiceLifecycle]),
     ("service serve", &[C::ServiceLifecycle]),

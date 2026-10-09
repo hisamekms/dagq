@@ -8,6 +8,7 @@ scope: runtime
 related:
   - design-supervisor-lifecycle-task-hold
   - adr-t1228-2
+  - adr-t2159-1
   - design-supervisor-lifecycle
   - adr-0014
   - adr-0017
@@ -61,7 +62,11 @@ related:
 
 `--role planner`以外の`status`は`inbox_watcher`も返す（[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)）: `{state（alive / absent）, watching, last_seen_at, absent_secs, grace_secs}`。`watch --role inbox`がqueueのディレクトリの`inbox-watchers/`に残した記録を`application::inbox_watcher::judge`で判定したもので、heartbeatの新しさで決まり、記録のpidのprocessが居ない・開始時刻が合わない記録はheartbeatが新しくても数えない（`--until-attention`のtimeoutの無いwatchはheartbeatだけで判定する。閾値と猶予は[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）。入口は`OneShot::status_of`で、時刻は`OneShot`の`Clock`（testはfakeのclockを渡す）。pluginのStop hookは`watching`が0のinboxのturnの終わりを止める（[plugin integration](../plugin-integration.md)）。
 
-`--role planner`以外の`status`は`inbox_guardrail`も返す（[ADR-t1228-2](../../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)決定4）: `up`が記録したinbox（`session_workspaces`の`inbox`行）が`permissions.deny`に`Bash(cmux:*)`を持つsettingsで開かれたか。最新の`inbox_opened`と比べる`application::inbox_guardrail::judge`の結果で、`{workspace_id, guardrail: true, settings}`、`{workspace_id, guardrail: false, reason（no_record / opened_without_guardrail）, next}`、行が無ければ`{workspace_id: null, guardrail: null}`。`next`は引き継ぎの後にinboxを閉じて`up`で開き直すこと。欄の意味と限界は[`up` / `down`](up-down.md)。
+`--role planner`以外の`status`は`inbox_guardrail`も返す（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定2・5）: inboxがguardrailのsettingsで開かれたか。
+判定は`dagq inbox`が起動の前に残す最新の`inbox_opened`による（欄の形は`application::inbox_guardrail::judge`のdoc comment）。
+guardrailが無ければ、引き継ぎの後に`DAGQ_ROLE`の無いterminalでinboxを終えて`dagq inbox`で開き直すよう案内する。
+記録が無ければ判定しない。
+欄の意味と限界は[`dagq inbox`](up-down.md#dagq-inbox)。
 
 `--role planner`以外の`status`は、queue serviceの`queue_service`も返す（`application::queue_service::view`。`doctor`と`dagq service status`も同じ）: `state`（`running`・`stopped`・`unreachable`）・`socket`・`pid`・`build`・`api_version`・`min_api_version`・`build_matches`・`started_at`・`client_api_version`・`attention`（`queue_service_down`が立っているか）。socketに`hello`を1回打つだけで、serviceを起動も停止もしない（[Queue service](../queue-service.md#statusとdoctor)）。
 

@@ -17,7 +17,7 @@ use std::{
 };
 
 use common::cli::{invoke, ok};
-use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses};
+use common::lifecycle::{FakeLaunchd, FakeProcesses};
 use dagq::{
     application::{RunLog, TaskStore},
     domain::{
@@ -452,7 +452,6 @@ fn up_starts_the_service_and_down_stops_it() {
     fixture.options.queue_service = true;
     fixture.environment.current_exe =
         common::service::owned_executable(fixture.location.db.parent().unwrap());
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     let db = fixture.location.db.clone();
@@ -464,10 +463,10 @@ fn up_starts_the_service_and_down_stops_it() {
     }
     let _down = Down(db.clone());
 
-    let first = common::lifecycle::up(&fixture, &cmux, &launchd, &processes);
+    let first = common::lifecycle::up(&fixture, &launchd, &processes);
     assert_eq!(first["queue_service"]["outcome"], "started", "{first}");
     assert_eq!(first["queue_service"]["service"]["state"], "running");
-    let second = common::lifecycle::up(&fixture, &cmux, &launchd, &processes);
+    let second = common::lifecycle::up(&fixture, &launchd, &processes);
     assert_eq!(second["queue_service"]["outcome"], "reused", "{second}");
     let queue = SqliteQueue::open(&db).unwrap();
     let started = queue
@@ -478,7 +477,7 @@ fn up_starts_the_service_and_down_stops_it() {
 
     // The supervisor `up` registered is this process: `down` drains it,
     // leaves the service to the drain, and a `--force` stops both.
-    let draining = common::lifecycle::down(&fixture, &cmux, &launchd, &processes, false, false);
+    let draining = common::lifecycle::down(&fixture, &launchd, &processes, false, false);
     assert_eq!(
         draining["queue_service"]["outcome"], "left_to_the_drain",
         "{draining}"
@@ -488,7 +487,7 @@ fn up_starts_the_service_and_down_stops_it() {
         .unwrap()
         .unwrap();
     assert_eq!(asked.payload["by"], "down");
-    let forced = common::lifecycle::down(&fixture, &cmux, &launchd, &processes, false, true);
+    let forced = common::lifecycle::down(&fixture, &launchd, &processes, false, true);
     assert_eq!(forced["queue_service"]["outcome"], "stopped", "{forced}");
     assert_eq!(
         service::probe(db.parent().unwrap()).state,
@@ -500,7 +499,7 @@ fn up_starts_the_service_and_down_stops_it() {
         .unwrap();
     assert_eq!(stopped.payload["by"], "down");
     // Nothing more is said of a service that does not run.
-    let again = common::lifecycle::down(&fixture, &cmux, &launchd, &processes, false, false);
+    let again = common::lifecycle::down(&fixture, &launchd, &processes, false, false);
     assert!(again.get("queue_service").is_none(), "{again}");
 }
 

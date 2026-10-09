@@ -42,6 +42,14 @@ pub fn command(spec: &CommandSpec) -> Command {
     command
 }
 
+/// Put `spec` in this process's place (unix exec), keeping its terminal
+/// and its standard streams: what `dagq inbox` does with the inbox's agent.
+/// Returns only when the exec failed.
+pub fn exec(spec: &CommandSpec) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    command(spec).exec()
+}
+
 /// The standard input of `spec`: its own text
 /// ([`CommandSpec::get_stdin`]) from a file of its own, which is unlinked
 /// at once and so goes with the process, or nothing. A file and not a pipe,

@@ -65,7 +65,7 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
 
 ## runtimeが流すe2e
 
-[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定3で、実cmuxを要るe2eはinboxを開く`up` / `down`のtestだけで、ほかのe2eの本文はcmuxを使わない（[testの制約](../../development/testing.md#e2e)）。
+実cmuxを要るe2eは無く、e2eの本文はcmuxを使わない（`up`はinboxを開かない。[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7、[testの制約](../../development/testing.md#e2e)）。
 切り分け: cmuxの要らないe2eは、cmuxの無いhostでも名前で絞って手で流せる（`cargo test --locked --test e2e -- --ignored --exact <名前>`）。
 関門（自動更新と`install`の関門。[Auto-update](auto-update.md)の「e2eの関門」。[着地の前のe2e](landing-e2e.md)）は、e2eの前に`cmux ping`を打ち、cmuxが答えれば全部のe2eを流す。
 答えないとき（cmuxが無い、socketが拒む）だけ、実cmuxを要るe2e（`application::install::CMUX_E2E`の`--skip`のfilter）を流さず、残りで判定する（[ADR-t2105-1](../../adr/2026-10-08-t2105-1-e2e-gate-skips-cmux-e2e-only-when-cmux-does-not-answer.md)）。

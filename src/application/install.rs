@@ -163,10 +163,10 @@ impl E2eSettings {
     }
 }
 
-/// The e2e tests that need a running cmux, the `up` / `down` ones that open
-/// the inbox's workspace (`fixture_with_cmux` of `tests/e2e.rs`): the
-/// `--skip` filters of the tests not run when cmux does not answer `ping`
-/// (ADR-t2105-1). The others need no cmux (ADR-t1433-1).
+/// The `--skip` filters of the e2e tests not run when cmux does not answer
+/// `ping` (ADR-t2105-1). No e2e takes the running cmux any more: `up` opens
+/// no inbox (ADR-t2159-1 decisions 3 and 7), so the one named here runs
+/// without it too.
 pub const CMUX_E2E: &[&str] =
     &["up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it"];
 
@@ -984,11 +984,12 @@ denied",
         );
     }
 
-    /// Every e2e that takes the running cmux (`fixture_with_cmux()`) is
-    /// among the filters skipped when cmux does not answer, so the gate
-    /// never runs one that would fail for want of it (ADR-t2105-1).
+    /// An e2e that took the running cmux (`fixture_with_cmux()`) would have
+    /// to be among the filters skipped when cmux does not answer, so the
+    /// gate never ran one that would fail for want of it (ADR-t2105-1). None
+    /// takes it now (ADR-t2159-1 decision 7).
     #[test]
-    fn the_cmux_e2e_are_the_ones_that_take_the_running_cmux() {
+    fn no_e2e_takes_the_running_cmux_outside_the_cmux_e2e() {
         let source = include_str!("../../tests/e2e.rs");
         let mut taking = Vec::new();
         let mut current = None;
@@ -999,7 +1000,6 @@ denied",
                 taking.extend(current);
             }
         }
-        assert!(!taking.is_empty(), "no e2e takes fixture_with_cmux()");
         for test in taking {
             assert!(
                 CMUX_E2E.iter().any(|filter| test.contains(filter)),

@@ -59,14 +59,12 @@ impl Default for CiWatchOptions {
     }
 }
 
-/// Whether the inbox `up` recorded was opened with the guardrail that
-/// refuses raw `cmux` ([`crate::application::inbox_guardrail::judge`]), by
-/// its newest `inbox_opened`.
+/// Whether the inbox was opened with its guardrail settings
+/// ([`crate::application::inbox_guardrail::judge`]), by the newest
+/// `inbox_opened`.
 fn inbox_guardrail(queue: &SqliteQueue) -> Result<Value> {
-    let recorded = queue.session_workspace(SessionRole::Inbox)?;
     let opened = queue.latest_event_of(EventKind::InboxOpened.as_str())?;
     Ok(crate::application::inbox_guardrail::judge(
-        recorded.as_deref(),
         opened.as_ref().map(|event| &event.payload),
     ))
 }
@@ -835,8 +833,8 @@ impl OneShot {
                 if let Some(agents) = doctor_agents(&queue)? {
                     report["agents"] = agents;
                 }
-                // Whether the recorded inbox refuses raw cmux (ADR-t1228-2
-                // decision 4).
+                // Whether the inbox was opened with its guardrail settings
+                // (ADR-t2159-1 decision 5).
                 report["inbox_guardrail"] = inbox_guardrail(&queue)?;
                 report["language"] = serde_json::to_value(self.language_report(&queue)?)?;
                 report

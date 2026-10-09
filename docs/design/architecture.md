@@ -375,7 +375,7 @@ reviewで見る規則の行は、行き先をこの表の言葉で書く。
 | --- | --- | --- | --- |
 | L5 | `src/application`の`Instant::now` | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
 | L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | 許可の一覧の項目 |
-| C4 | `integrate`・`session`・`headless_session`・`session_log`・`screen`・`recording`（`lifecycle`も）・`supervise`のループと工程（計画管理・sweep）・`planner`・`planner_request` | 全体の`Queue`を取る | portの分割 |
+| C4 | `integrate`・`session`・`headless_session`・`session_log`・`screen`・`recording`・`supervise`のループと工程（計画管理・sweep）・`planner`・`planner_request` | 全体の`Queue`を取る | portの分割 |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | portの分割 |
 | C5 | `src/application/health.rs`の`attention` | 計画管理の内部の`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`を読む | portの分割 |
 | C5 | `src/application/lifecycle.rs` | host運用が実行と着地の内部の`RunRecovery`を読む | portの分割 |

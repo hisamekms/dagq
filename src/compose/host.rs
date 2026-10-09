@@ -18,11 +18,12 @@ use std::{
 
 use crate::{
     application::{
-        AgentProvider, HostOpsQueue, LaunchAgent, ProcessControl, QueueOpener, WorkspaceBackend,
+        AgentProvider, CommandSpec, HostOpsQueue, LaunchAgent, ProcessControl, QueueOpener, RunLog,
+        WorkspaceBackend,
         install::{self as installation, Binaries, InstallOptions},
         lifecycle::{
-            self, DownOptions, LifecycleQueue, Ports as LifecyclePorts, QueuePaths,
-            RepositoryPaths, UpEnvironment, UpOptions,
+            self, DownOptions, InboxAgent, InboxOptions, InboxPorts, LifecycleQueue,
+            Ports as LifecyclePorts, QueuePaths, RepositoryPaths, UpEnvironment, UpOptions,
         },
         rebind::{self as rebinding, Rebind, RebindTarget},
         recording::RecordingBackend,
@@ -259,11 +260,10 @@ impl<'a> RecordingBackend<'a> {
     }
 }
 
-/// The inbox workspace's command as `up` opens it: `claude` with the
-/// inbox's settings (written under the queue's directory, ADR-t1228-2
-/// decision 3), its prompt (see [`lifecycle::inbox_session_prompt`]) and
-/// the plugin directory, made by the provider the executor starts the
-/// inbox with.
+/// The inbox's command `dagq inbox` starts, on one line: `claude`
+/// with the inbox's settings (written under the queue's directory), its
+/// prompt (see [`lifecycle::inbox_session_prompt`]) and the plugin
+/// directory, made by the provider the executor starts the inbox with.
 pub fn inbox_command(
     db: &Path,
     claude: &Path,
@@ -350,32 +350,32 @@ fn trace_command(command: &str, result: &Result<Value>) {
 pub fn up(
     location: &QueueLocation,
     repo: &Path,
-    cmux: &dyn WorkspaceBackend,
     launchd: &dyn LaunchAgent,
     processes: &dyn ProcessControl,
     environment: &UpEnvironment,
     options: &UpOptions,
 ) -> Result<Value> {
-    OneShot::system().up(
-        location,
-        repo,
-        cmux,
-        launchd,
-        processes,
-        environment,
-        options,
-    )
+    OneShot::system().up(location, repo, launchd, processes, environment, options)
 }
 
 /// `down` on the system clock: see [`OneShot::down`].
 pub fn down(
     location: &QueueLocation,
-    cmux: &dyn WorkspaceBackend,
     launchd: &dyn LaunchAgent,
     processes: &dyn ProcessControl,
     options: &DownOptions,
 ) -> Result<Value> {
-    OneShot::system().down(location, cmux, launchd, processes, options)
+    OneShot::system().down(location, launchd, processes, options)
+}
+
+/// `dagq inbox` on the system clock: see [`OneShot::inbox`].
+pub fn inbox(
+    location: &QueueLocation,
+    repo: &Path,
+    environment: &UpEnvironment,
+    options: &InboxOptions,
+) -> Result<CommandSpec> {
+    OneShot::system().inbox(location, repo, environment, options)
 }
 
 /// The programs the `[run.env]` of the `dagq.toml` in `checkout` names,
@@ -518,7 +518,6 @@ impl OneShot {
         &self,
         location: &QueueLocation,
         repo: &Path,
-        cmux: &dyn WorkspaceBackend,
         launchd: &dyn LaunchAgent,
         processes: &dyn ProcessControl,
         environment: &UpEnvironment,
@@ -529,9 +528,8 @@ impl OneShot {
         };
         let migrated = self.migrate_compatible(&location.db, processes)?;
         let queues = |db: &Path| self.lifecycle_queues(db);
-        let recording_queues = |db: &Path| self.queues(db);
         let result = lifecycle::up(
-            &self.lifecycle_ports(cmux, launchd, processes, &queues, &recording_queues),
+            &self.lifecycle_ports(launchd, processes, &queues),
             &claude,
             &queue_paths(location),
             repo,
@@ -568,15 +566,13 @@ impl OneShot {
     pub fn down(
         &self,
         location: &QueueLocation,
-        cmux: &dyn WorkspaceBackend,
         launchd: &dyn LaunchAgent,
         processes: &dyn ProcessControl,
         options: &DownOptions,
     ) -> Result<Value> {
         let queues = |db: &Path| self.lifecycle_queues(db);
-        let recording_queues = |db: &Path| self.queues(db);
         let result = lifecycle::down(
-            &self.lifecycle_ports(cmux, launchd, processes, &queues, &recording_queues),
+            &self.lifecycle_ports(launchd, processes, &queues),
             &queue_paths(location),
             options,
         );
@@ -584,18 +580,54 @@ impl OneShot {
         result
     }
 
+    /// `dagq inbox`: see [`lifecycle::inbox`], with Claude Code at
+    /// `options.agent` (found again by its name when the path given is
+    /// gone) as the inbox's agent. Returns the command for the caller to
+    /// exec.
+    pub fn inbox(
+        &self,
+        location: &QueueLocation,
+        repo: &Path,
+        environment: &UpEnvironment,
+        options: &InboxOptions,
+    ) -> Result<CommandSpec> {
+        let claude = ClaudeCode {
+            executable: crate::infrastructure::adapters::claude_at_entry(&options.agent)
+                .unwrap_or_else(|_| options.agent.clone()),
+        };
+        let queues = |db: &Path| self.event_queues(db);
+        lifecycle::inbox(
+            &InboxPorts {
+                files: &LocalRunFiles,
+                queues: &queues,
+                inspect_repository: &inspect_repository,
+                resolve_language: &|checkout, user_config| {
+                    crate::infrastructure::language::resolve_language(Some(checkout), user_config)
+                },
+            },
+            &InboxAgent {
+                provider: crate::domain::Provider::Claude,
+                agent: &claude,
+            },
+            &location.db,
+            repo,
+            environment,
+            &InboxOptions {
+                agent: claude.executable.clone(),
+                ..options.clone()
+            },
+        )
+    }
+
     /// `install`: replace the fixed binary and hand the queue's supervisor
     /// over to it (see [`installation::install`]), then watch the
     /// supervisors heartbeat on under it for `watch_timeout` and, when they
     /// do not, put the old binary back, start them again and ask the inbox
     /// (see [`update::install_watched`], ADR-0073 decisions 13 and 14).
-    /// `cmux` closes the workspace of a supervisor registered in the retired
-    /// in-cmux mode when a breaking migration needs the drain;
     /// `executable` is the cmux the `up` that starts one again is given.
     pub fn install(
         &self,
         location: &QueueLocation,
-        cmux: &dyn WorkspaceBackend,
         executable: &Path,
         launchd: &dyn LaunchAgent,
         options: &InstallOptions,
@@ -612,7 +644,6 @@ impl OneShot {
         let down = || {
             self.down(
                 location,
-                cmux,
                 launchd,
                 &SystemProcesses,
                 &DownOptions {
@@ -771,7 +802,6 @@ impl OneShot {
     pub fn install_release(
         &self,
         location: &QueueLocation,
-        cmux: &dyn WorkspaceBackend,
         executable: &Path,
         launchd: &dyn LaunchAgent,
         index: &dyn crate::application::release_update::ReleaseIndex,
@@ -804,7 +834,6 @@ impl OneShot {
             .with_context(|| format!("install release {version}"))?;
         let mut report = self.install(
             location,
-            cmux,
             executable,
             launchd,
             &InstallOptions {
@@ -827,17 +856,19 @@ impl OneShot {
         }
     }
 
-    /// The whole queue at a path, as the record of `up`'s and `down`'s
-    /// failed cmux calls opens it.
-    fn queues(&self, db: &Path) -> Arc<dyn QueueOpener> {
-        Arc::new(self.opener(db))
-    }
-
     /// The queue at a path as the ports `up` and `down` take.
     fn lifecycle_queues(&self, db: &Path) -> Arc<dyn QueueOpener<dyn LifecycleQueue + Send>> {
         Arc::new(SqlitePorts {
             opener: self.opener(db),
             keep: |queue| -> Box<dyn LifecycleQueue + Send> { Box::new(queue) },
+        })
+    }
+
+    /// The queue at a path as its events, the one port `dagq inbox` takes.
+    fn event_queues(&self, db: &Path) -> Arc<dyn QueueOpener<dyn RunLog + Send>> {
+        Arc::new(SqlitePorts {
+            opener: self.opener(db),
+            keep: |queue| -> Box<dyn RunLog + Send> { Box::new(queue) },
         })
     }
 
@@ -854,20 +885,16 @@ impl OneShot {
     /// local files and Claude Code's global config for the folder trust.
     fn lifecycle_ports<'a>(
         &'a self,
-        cmux: &'a dyn WorkspaceBackend,
         launchd: &'a dyn LaunchAgent,
         processes: &'a dyn ProcessControl,
         queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener<dyn LifecycleQueue + Send>>,
-        recording_queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener>,
     ) -> LifecyclePorts<'a> {
         LifecyclePorts {
-            cmux,
             launchd,
             processes,
             files: &LocalRunFiles,
             clock: &*self.generators.clock,
             queues,
-            recording_queues,
             inspect_repository: &inspect_repository,
             trusts_repository: &claude_trusts_repository,
             run_env_programs: &up_run_env_programs,
@@ -876,12 +903,6 @@ impl OneShot {
             },
             resolve_language: &|checkout, user_config| {
                 crate::infrastructure::language::resolve_language(Some(checkout), user_config)
-            },
-            load_average,
-            agent: &|claude| {
-                Box::new(ClaudeCode {
-                    executable: claude.to_owned(),
-                })
             },
             queue_service: &|db, executable| {
                 Box::new(

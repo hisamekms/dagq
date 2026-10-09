@@ -349,8 +349,9 @@ pub trait AgentProvider {
         anyhow::bail!("this provider cannot run the review's subagents")
     }
     /// The agent of the inbox (ADR-0022): an interactive agent with
-    /// `prompt` as its first message that loads `plugin_dir`, run as the
-    /// command of its workspace. Its settings, if the provider has a way
+    /// `prompt` as its first message that loads `plugin_dir`, which `dagq
+    /// inbox` starts in the foreground of a person's terminal (ADR-t2159-1
+    /// decision 2). Its settings, if the provider has a way
     /// to give them, are only the inbox's denials (ADR-t1228-2 decision 3),
     /// written under `queue_dir`: no hook, no idle marker, the prompt
     /// suggestions as they are (a person works in it). A provider without
@@ -365,9 +366,9 @@ pub trait AgentProvider {
         anyhow::bail!("this provider has no inbox session")
     }
     /// The settings file [`AgentProvider::inbox_command`] writes under
-    /// `queue_dir` and starts the inbox with, which refuse raw `cmux`
-    /// (ADR-t1228-2 decisions 3 and 6); `None` for a provider whose inbox
-    /// has no such guardrail. `up` records whether there is one, and
+    /// `queue_dir` and starts the inbox with, the inbox's denials
+    /// (ADR-t2159-1 decision 5); `None` for a provider whose inbox has no
+    /// such guardrail. `dagq inbox` records whether there is one, and
     /// `status` and `doctor` show it.
     fn inbox_settings(&self, queue_dir: &std::path::Path) -> Option<std::path::PathBuf> {
         let _ = queue_dir;
@@ -1187,7 +1188,8 @@ pub trait SessionRegistry {
     fn register_session_workspace(&self, role: SessionRole, workspace_id: &str) -> Result<()>;
     /// Forget the workspace of `role`; `false` when none was recorded.
     fn remove_session_workspace(&self, role: SessionRole) -> Result<bool>;
-    /// Forget the workspaces recorded for a role `up` no longer opens.
+    /// Forget the workspaces recorded for a role `up` no longer opens (all
+    /// but the retired in-cmux supervisor's), without a call to cmux.
     fn forget_retired_session_workspaces(&self) -> Result<usize>;
     /// Record a new planner session (ADR-0041 decisions 1, 6) before its
     /// workspace opens.

@@ -9,7 +9,7 @@ use crate::common;
 
 use common::{
     Bounded, WithoutActor,
-    lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, git, try_up},
+    lifecycle::{FakeLaunchd, FakeProcesses, fixture, git, try_up},
 };
 use dagq::infrastructure::sqlite::SqliteQueue;
 use std::{fs, path::Path, process::Command};
@@ -80,17 +80,13 @@ fn install_without_from_builds_only_dagqs_source() {
 fn up_auto_update_needs_dagqs_source() {
     let mut fixture = fixture();
     fixture.options.auto_update = true;
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     for package in [None, Some("myapp")] {
         if let Some(package) = package {
             manifest(&fixture.repo, package);
         }
-        let error = format!(
-            "{:#}",
-            try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-        );
+        let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
         assert!(
             error.contains("--auto-update")
                 && error.contains("is not dagq's source")
@@ -108,7 +104,7 @@ fn up_auto_update_needs_dagqs_source() {
     }
 
     manifest(&fixture.repo, "dagq");
-    let report = try_up(&fixture, &cmux, &launchd, &processes).unwrap();
+    let report = try_up(&fixture, &launchd, &processes).unwrap();
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(report["supervisor"]["auto_update"], true, "{report}");
 }

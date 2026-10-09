@@ -1,9 +1,9 @@
-//! `up` against fakes for launchd, cmux and process signals: the idempotent
+//! `up` against fakes for launchd and process signals: the idempotent
 //! start in launchd mode (and the refusal of the retired in-cmux mode), the
 //! preflights (the `[run.env]` programs, Claude Code's folder trust), the
-//! pruning of dead registrations, the runs it reports, and the inbox
-//! workspace decisions and its look. The real launchd and cmux path is
-//! `tests/e2e.rs`.
+//! pruning of dead registrations, the runs it reports, and the inbox it
+//! does not open (ADR-t2159-1 decision 3). No cmux is on the fixture's
+//! path. The real launchd path is `tests/e2e.rs`.
 
 use crate::common;
 use dagq::domain::LeaseToken;
@@ -11,17 +11,16 @@ use dagq::domain::LeaseToken;
 use common::lifecycle::*;
 use dagq::domain::recovery::ProcessInfo;
 
-use anyhow::{Result, bail};
 use dagq::{
     VERSION,
-    application::{TaskStore, WorkspaceBackend, WorkspaceTags},
+    application::TaskStore,
     domain::{NewTask, SessionRole, TaskAction},
     infrastructure::{adapters::GitRepository, location::QueueLocation, sqlite::SqliteQueue},
     lifecycle::{self, INBOX_ROLE, PLANNER_ROLE},
 };
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::{fs, path::Path, sync::atomic::Ordering, time::Duration};
+use std::{fs, time::Duration};
 
 /// A program the `[run.env]` of `dagq.toml` names that the PATH of `up`
 /// does not find stops `up` before it starts a supervisor (ADR-0049
@@ -36,13 +35,9 @@ fn up_refuses_a_run_env_program_its_path_does_not_find() {
         "[run.env]\nRUSTC_WRAPPER = 'sccache'\n",
     )
     .unwrap();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(
         error.contains("RUSTC_WRAPPER = \"sccache\"")
             && error.contains("PATH: /usr/bin:/bin")
@@ -60,7 +55,7 @@ fn up_refuses_a_run_env_program_its_path_does_not_find() {
     crate::common::template::script(&tool, "#!/bin/sh\n");
 
     fixture.environment.path = format!("{}:/usr/bin:/bin", bin.display());
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(
         report["run_env"]["programs"][0]["resolved"],
@@ -89,14 +84,12 @@ fn up_starts_with_the_removed_brokers_tables_left_in_place() {
     )
     .unwrap();
     fixture.environment.path = format!("{}:/nonexistent", bin.display());
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     let report = dagq::compose::OneShot::system()
         .up(
             &fixture.location,
             &fixture.repo,
-            &cmux,
             &launchd,
             &processes,
             &fixture.environment,
@@ -108,51 +101,42 @@ fn up_starts_with_the_removed_brokers_tables_left_in_place() {
 }
 
 /// A mistake in the language stops `up` before it starts anything; a
-/// language set is in `up`'s report and the inbox's first prompt
-/// (ADR-t616-2).
+/// language set is in `up`'s report (ADR-t616-2). The inbox's prompt gets
+/// it from `dagq inbox` (`lifecycle_inbox`).
 #[test]
-fn up_refuses_a_wrong_language_and_gives_the_inbox_a_right_one() {
+fn up_refuses_a_wrong_language_and_reports_a_right_one() {
     let mut fixture = fixture();
     let config = fixture.repo.parent().unwrap().join("config.toml");
     fs::write(&config, "[language]\ntag = 'ja_JP'\n").unwrap();
     fixture.environment.user_config = Some(config.clone());
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(
         error.contains("config.toml:2")
             && error.contains("BCP 47")
             && error.contains("the supervisor was not started"),
         "{error}"
     );
-    assert!(cmux.workspaces.lock().unwrap().is_empty());
+    assert!(launchd.installs.lock().unwrap().is_empty());
 
     fs::write(&config, "[language]\ntag = 'ja'\n").unwrap();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(
         report["language"],
         json!({"tag": "ja", "source": "user"}),
         "{report}"
     );
-    let workspaces = cmux.workspaces.lock().unwrap();
-    let inbox = &workspaces[0].3;
-    assert!(inbox.contains("You are the inbox of"), "{inbox}");
-    assert!(inbox.contains("BCP 47 tag `ja`"), "{inbox}");
 }
 
 #[test]
-fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
+fn up_starts_the_agent_once_and_reuses_it_after_and_opens_no_inbox() {
     let fixture = fixture();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     let root = GitRepository::inspect(&fixture.repo).unwrap().root;
 
-    let first = up(&fixture, &cmux, &launchd, &processes);
+    let first = up(&fixture, &launchd, &processes);
     assert_eq!(first["supervisor"]["outcome"], "started", "{first}");
     assert_eq!(first["supervisor"]["mode"], "launchd");
     assert_eq!(first["supervisor"]["workspace_id"], Value::Null);
@@ -165,8 +149,8 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
         first["supervisor"]["log_dir"],
         json!(fixture.location.log_dir)
     );
-    // The one resident session is the inbox (ADR-0041 decision 6): `up`
-    // opens no planner, and the report names no other session.
+    // `up` opens no planner (ADR-0041 decision 6) and no inbox
+    // (ADR-t2159-1 decision 3), and the report names no other session.
     let keys: Vec<&String> = first.as_object().unwrap().keys().collect();
     assert_eq!(
         keys,
@@ -179,9 +163,14 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
             "repository",
             "retired_sessions",
             "supervisor",
-            "warnings"
         ]
     );
+    assert_eq!(
+        first["inbox"],
+        json!({"outcome": "not_opened", "next": lifecycle::INBOX_NEXT}),
+        "{first}"
+    );
+    assert!(lifecycle::INBOX_NEXT.contains("`dagq inbox`"));
     // What the preflight resolved (ADR-t615-1).
     assert_eq!(
         first["repository"],
@@ -272,82 +261,20 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
     )));
     drop(installs);
 
-    // Each session workspace: repository root as cwd, role and queue in
-    // the workspace's own environment (not a prefix of the command), the
-    // plugin directory and the prompt on the command, the queue's group, and
-    // its UUID recorded in the queue.
-    let hash = fixture.location.hash();
-    assert_eq!(
-        *cmux.groups.lock().unwrap(),
-        vec![(hash.clone(), "[my repo]".to_owned())]
-    );
-    assert_eq!(first["warnings"], json!([]));
-    let workspaces = cmux.workspaces.lock().unwrap();
-    assert_eq!(workspaces.len(), 1);
+    // Nothing of the inbox is recorded: a person opens it.
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    assert_eq!(queue.session_workspace(SessionRole::Inbox).unwrap(), None);
     assert_eq!(queue.session_workspace(SessionRole::Planner).unwrap(), None);
-    let tags = cmux.tags.lock().unwrap();
-    for (index, (key, role, opening)) in [("inbox", SessionRole::Inbox, "You are the inbox of")]
-        .into_iter()
-        .enumerate()
-    {
-        let (name, cwd, id, command) = &workspaces[index];
-        assert_eq!(name, &format!("[my repo]{key}"));
-        assert_eq!(cwd, &root);
-        assert_eq!(
-            first[key],
-            json!({"outcome": "created", "workspace_id": id, "name": name, "guardrail": true})
-        );
-        assert!(
-            command.starts_with(&format!("'{}'", fixture.options.claude.display())),
-            "{command}"
-        );
-        assert!(command.contains("'--plugin-dir'"), "{command}");
-        assert!(command.contains(opening), "{command}");
-        assert!(!command.contains("DAGQ_"), "{command}");
-        assert_eq!(
-            tags[index],
-            WorkspaceTags {
-                env: vec![
-                    ("DAGQ_ROLE".into(), key.into()),
-                    ("DAGQ_QUEUE".into(), db.to_str().unwrap().into()),
-                    // The actor it is (ADR-t728-1 decision 4).
-                    ("DAGQ_ACTOR_ID".into(), key.into()),
-                    // The kind of the span the plugin's hook records (ADR-0048).
-                    ("DAGQ_SESSION_KIND".into(), key.into()),
-                ],
-                description: Some(format!("dagq role={key} queue={hash}")),
-                group: Some(format!("group-{hash}")),
-            }
-        );
-        assert_eq!(
-            queue.session_workspace(role).unwrap().as_deref(),
-            Some(id.as_str())
-        );
-    }
-    drop(tags);
-    drop(workspaces);
+    assert!(queue.latest_event_of("inbox_opened").unwrap().is_none());
 
-    // A person renames the inbox workspace; it is still the one.
-    let inbox_id = first["inbox"]["workspace_id"].as_str().unwrap();
-    cmux.rename(inbox_id, "my own title");
-    let second = up(&fixture, &cmux, &launchd, &processes);
+    let second = up(&fixture, &launchd, &processes);
     assert_eq!(second["supervisor"]["outcome"], "reused", "{second}");
     assert_eq!(second["supervisor"]["mode"], "launchd");
     assert_eq!(second["supervisor"]["pid"], json!(std::process::id()));
-    assert_eq!(second["inbox"]["outcome"], "reused", "{second}");
-    assert_eq!(
-        second["inbox"]["workspace_id"],
-        first["inbox"]["workspace_id"]
-    );
-    assert_eq!(second["inbox"]["name"], first["inbox"]["name"]);
-    assert_eq!(second["inbox"]["guardrail"], true, "{second}");
+    assert_eq!(second["inbox"], first["inbox"], "{second}");
     assert_eq!(second["pruned_supervisors"], json!([]));
     assert_eq!(launchd.installs.lock().unwrap().len(), 1);
     assert!(launchd.uninstalls.lock().unwrap().is_empty());
-    assert_eq!(cmux.workspaces.lock().unwrap().len(), 1);
-    // Reusing everything asks for no group.
-    assert_eq!(cmux.groups.lock().unwrap().len(), 1);
     assert_eq!(
         SqliteQueue::open(&fixture.location.db)
             .unwrap()
@@ -358,118 +285,9 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
     );
 }
 
-/// `up` opens the inbox with settings of `permissions.deny` only, which
-/// refuse raw cmux, under the queue's directory, records that it did, and
-/// `status` and `doctor` say whether the recorded inbox has them: an inbox
-/// with no record of its open (one from before) has none, with the way to
-/// open it again (ADR-t1228-2 decisions 3 and 4).
-#[test]
-fn up_opens_the_inbox_with_the_cmux_guardrail_and_status_shows_whether_it_has_it() {
-    let fixture = fixture();
-    let cmux = FakeCmux::default();
-    let launchd = FakeLaunchd::new(&fixture.location.db);
-    let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(report["inbox"]["outcome"], "created", "{report}");
-    assert_eq!(report["inbox"]["guardrail"], true, "{report}");
-    let id = report["inbox"]["workspace_id"].as_str().unwrap().to_owned();
-
-    // Under the queue's directory, as `up` names it (canonical).
-    let settings = fixture
-        .location
-        .db
-        .canonicalize()
-        .unwrap()
-        .with_file_name("claude-inbox-settings.json");
-    let command = cmux.workspaces.lock().unwrap()[0].3.clone();
-    assert!(
-        command.contains(&format!("'--settings' {}", common::shell_path(&settings))),
-        "{command}"
-    );
-    assert!(command.contains("'--plugin-dir'"), "{command}");
-    let written: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
-    // Only `permissions.deny`: no hook, no idle marker, no suggestion
-    // setting, no autoMode.
-    assert_eq!(
-        written.as_object().unwrap().keys().collect::<Vec<_>>(),
-        ["permissions"]
-    );
-    assert_eq!(
-        written["permissions"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .collect::<Vec<_>>(),
-        ["deny"]
-    );
-    let deny: Vec<&str> = written["permissions"]["deny"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|rule| rule.as_str().unwrap())
-        .collect();
-    for rule in [
-        "Bash(cmux:*)",
-        "Bash(DAGQ_ROLE=*)",
-        "Bash(unset DAGQ_ACTOR_ID*)",
-        // The inbox's role is refused what its policy does not grant.
-        "Bash(dagq request decline:*)",
-    ] {
-        assert!(deny.contains(&rule), "{rule}: {deny:?}");
-    }
-    assert!(!deny.contains(&"Bash(dagq answer:*)"), "{deny:?}");
-
-    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
-    let opened = queue.latest_event_of("inbox_opened").unwrap().unwrap();
-    assert_eq!(opened.payload["workspace_id"], id.as_str());
-    assert_eq!(opened.payload["guardrail"], true);
-    assert_eq!(opened.payload["settings"], settings.to_str().unwrap());
-    let status = dagq::compose::status_for(&fixture.location.db, Some(SessionRole::Inbox)).unwrap();
-    assert_eq!(
-        status["inbox_guardrail"]["workspace_id"],
-        id.as_str(),
-        "{status}"
-    );
-    assert_eq!(status["inbox_guardrail"]["guardrail"], true, "{status}");
-    let doctor = dagq::compose::doctor(&fixture.location.db, false).unwrap();
-    assert_eq!(doctor["inbox_guardrail"]["guardrail"], true, "{doctor}");
-
-    // An inbox recorded with no record of its open: opened before the
-    // guardrail, so it has none and says how to open it again.
-    queue
-        .register_session_workspace(SessionRole::Inbox, "older-inbox")
-        .unwrap();
-    let status = dagq::compose::status_for(&fixture.location.db, Some(SessionRole::Inbox)).unwrap();
-    let guardrail = &status["inbox_guardrail"];
-    assert_eq!(guardrail["guardrail"], false, "{status}");
-    assert_eq!(guardrail["reason"], "no_record", "{status}");
-    assert!(
-        guardrail["next"].as_str().unwrap().contains("dagq up"),
-        "{status}"
-    );
-
-    // `up` keeps such an inbox, still listed, as it is (its conversation
-    // stays) and reports that it has no guardrail, with the way to reopen.
-    cmux.workspaces.lock().unwrap().push((
-        "[my repo]inbox".into(),
-        fixture.repo.clone(),
-        "older-inbox".into(),
-        "claude".into(),
-    ));
-    let again = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(again["inbox"]["outcome"], "reused", "{again}");
-    assert_eq!(again["inbox"]["workspace_id"], "older-inbox", "{again}");
-    assert_eq!(again["inbox"]["guardrail"], false, "{again}");
-    assert!(
-        again["inbox"]["next"].as_str().unwrap().contains("dagq up"),
-        "{again}"
-    );
-}
-
 #[test]
 fn up_fails_when_the_started_supervisor_never_registers() {
     let fixture = fixture();
-    let cmux = FakeCmux::default();
     let mut launchd = FakeLaunchd::new(&fixture.location.db);
     launchd.registers_on_install = false;
     let mut options = fixture.options.clone();
@@ -477,7 +295,6 @@ fn up_fails_when_the_started_supervisor_never_registers() {
     let error = lifecycle::up(
         &fixture.location,
         &fixture.repo,
-        &cmux,
         &launchd,
         &FakeProcesses::default(),
         &fixture.environment,
@@ -487,9 +304,8 @@ fn up_fails_when_the_started_supervisor_never_registers() {
     let message = format!("{error:#}");
     assert!(message.contains("did not register within 0s"), "{message}");
     assert!(message.contains("launchd.log"), "{message}");
-    // The agent stays loaded for inspection; no session workspace was opened.
+    // The agent stays loaded for inspection.
     assert!(*launchd.loaded.lock().unwrap());
-    assert!(cmux.workspaces.lock().unwrap().is_empty());
 }
 
 /// `up` may run from a linked worktree: trust is still read at the main
@@ -510,10 +326,9 @@ fn up_from_a_linked_worktree_checks_the_trust_of_the_main_checkout() {
         ],
     );
     fixture.repo = worktree;
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let result = up(&fixture, &cmux, &launchd, &processes);
+    let result = up(&fixture, &launchd, &processes);
     assert_eq!(result["supervisor"]["outcome"], "started", "{result}");
 }
 
@@ -550,13 +365,9 @@ fn up_fails_when_claude_code_has_not_trusted_the_repository() {
                 }
             }
         }
-        let cmux = FakeCmux::default();
         let launchd = FakeLaunchd::new(&fixture.location.db);
         let processes = FakeProcesses::default();
-        let message = format!(
-            "{:#}",
-            try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-        );
+        let message = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
         assert!(
             message.starts_with(&format!(
                 "Claude Code has not trusted the repository {}",
@@ -566,19 +377,14 @@ fn up_fails_when_claude_code_has_not_trusted_the_repository() {
         );
         assert!(message.contains("Yes, I trust this folder"), "{message}");
         assert!(launchd.installs.lock().unwrap().is_empty());
-        assert!(cmux.workspaces.lock().unwrap().is_empty());
     }
 
     // A config that cannot be parsed is an error of its own, not a trust verdict.
     fixture.environment.claude_config = Some(config.clone());
     fs::write(&config, "not json").unwrap();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let message = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let message = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(message.contains("parse Claude Code config"), "{message}");
 }
 
@@ -589,13 +395,9 @@ fn up_fails_when_claude_code_has_not_trusted_the_repository() {
 fn up_refuses_the_in_cmux_mode_with_the_way_to_launchd_and_touches_nothing() {
     let mut fixture = fixture();
     fixture.options.in_cmux = true;
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let message = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let message = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert_eq!(message, lifecycle::IN_CMUX_RETIRED);
     assert!(message.contains("the in-cmux mode is retired"), "{message}");
     assert!(
@@ -605,8 +407,6 @@ fn up_refuses_the_in_cmux_mode_with_the_way_to_launchd_and_touches_nothing() {
     assert!(launchd.installs.lock().unwrap().is_empty());
     assert!(launchd.uninstalls.lock().unwrap().is_empty());
     assert!(!fixture.location.launch_agent.exists());
-    assert_eq!(cmux.calls.load(Ordering::SeqCst), 0);
-    assert!(cmux.workspaces.lock().unwrap().is_empty());
     assert!(
         SqliteQueue::open(&fixture.location.db)
             .unwrap()
@@ -617,23 +417,19 @@ fn up_refuses_the_in_cmux_mode_with_the_way_to_launchd_and_touches_nothing() {
 }
 
 /// The launchd supervisor calls no cmux, so `up` starts it without asking
-/// cmux anything on its behalf and gives it no cmux socket password: with
-/// no inbox to open, cmux is not called at all past `up`'s own ping, and
-/// the agent carries no `CMUX_*` variable (ADR-t1433-4 decision 1).
+/// cmux anything and gives it no cmux socket password: the agent carries no
+/// `CMUX_*` variable (ADR-t1433-4 decision 1, ADR-t2159-1 decision 1).
 #[test]
 fn up_starts_the_launchd_supervisor_with_no_cmux_check_or_password() {
     let mut fixture = fixture();
     fixture.options.no_claude = true;
     fixture.options.plugin_dir = None;
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(report["supervisor"]["mode"], "launchd", "{report}");
     assert_eq!(report["supervisor"]["workspace_id"], Value::Null);
-    assert_eq!(cmux.calls.load(Ordering::SeqCst), 0);
-    assert!(cmux.groups.lock().unwrap().is_empty());
     let installs = launchd.installs.lock().unwrap();
     assert_eq!(installs.len(), 1);
     assert!(!installs[0].2.contains("CMUX_"), "{}", installs[0].2);
@@ -667,10 +463,9 @@ fn up_starts_the_launchd_supervisor_with_no_cmux_check_or_password() {
 fn up_stores_the_exported_config_home_in_the_plist() {
     let mut fixture = fixture();
     fixture.environment.config_home = Some("/home/u/my config & <co>".into());
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     let installs = launchd.installs.lock().unwrap();
     assert_eq!(installs.len(), 1);
@@ -729,11 +524,10 @@ fn up_prunes_dead_registrations_and_keeps_live_ones_and_leases() {
     let leases_before = queue.run_leases().unwrap();
     assert_eq!(leases_before.len(), 1);
 
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     processes.dead.lock().unwrap().extend(dead);
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     let pruned = report["pruned_supervisors"].as_array().unwrap();
     assert_eq!(pruned.len(), 2, "{report}");
     assert_eq!(pruned[0], json!({"token": "dead-1", "pid": dead[0]}));
@@ -767,7 +561,7 @@ fn up_prunes_dead_registrations_and_keeps_live_ones_and_leases() {
         .unwrap()
         .execute("UPDATE supervisors SET heartbeat_at=1700000000", [])
         .unwrap();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(report["pruned_supervisors"], json!([]));
     assert_eq!(queue.supervisors().unwrap().len(), 2);
@@ -793,14 +587,13 @@ fn up_does_not_mistake_a_silent_supervisor_for_the_one_it_started() {
         .unwrap()
         .execute("UPDATE supervisors SET heartbeat_at=1700000000", [])
         .unwrap();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd {
         heartbeats_existing_on_install: true,
         ..FakeLaunchd::new(&fixture.location.db)
     };
     let processes = FakeProcesses::default();
 
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(report["supervisor"]["mode"], "launchd");
     assert_ne!(report["supervisor"]["token"], "silent", "{report}");
@@ -867,12 +660,11 @@ fn up_prunes_rows_whose_pid_is_dead_or_taken_by_another_process() {
         cpu_ms: None,
     };
 
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     processes.dead.lock().unwrap().insert(dead);
     // The listing fails: only the dead pid goes.
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(
         report["pruned_supervisors"],
         json!([{"token": "dead-unversioned", "pid": dead}]),
@@ -896,7 +688,7 @@ fn up_prunes_rows_whose_pid_is_dead_or_taken_by_another_process() {
         listed(younger, 60),
         listed(silent, now - registered_at as u64 + 60),
     ]);
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(
         report["pruned_supervisors"],
         json!([
@@ -987,7 +779,6 @@ fn up_reports_runs_that_wait_for_a_person_or_the_supervisor() {
     processes.dead.lock().unwrap().insert(dead);
     let report = up(
         &fixture,
-        &FakeCmux::default(),
         &FakeLaunchd::new(&fixture.location.db),
         &processes,
     );
@@ -1006,46 +797,36 @@ fn up_reports_runs_that_wait_for_a_person_or_the_supervisor() {
 }
 
 /// A workspace the queue recorded for a role `up` no longer opens (the
-/// maintainer ADR-0024 retired, the resident planner ADR-0041 decision 6
-/// retired) is forgotten by `up`, which opens only the inbox; the
-/// workspaces themselves are left open for a person to close. A session of
-/// a role `up` does not open (a worker's) skips nothing.
+/// inbox's an earlier `up` opened, ADR-t2159-1 decision 6; the maintainer
+/// ADR-0024 retired, the resident planner ADR-0041 decision 6 retired) is
+/// forgotten by `up` without cmux; the workspaces themselves are left open
+/// for a person to close. Only the supervisor's record of the retired
+/// in-cmux mode is kept, for `down`.
 #[test]
-fn up_forgets_the_retired_and_the_resident_planner_workspaces_and_opens_only_the_inbox() {
+fn up_forgets_the_inbox_and_the_retired_workspaces_and_opens_no_session() {
     let mut fixture = fixture();
     fixture.environment.role = Some("worker".into());
     fixture.environment.queue = Some(fixture.location.db.clone());
-    let cmux = FakeCmux::default();
-    let retired = "01234567-89ab-4def-8123-0000000000ee";
-    let planner = "01234567-89ab-4def-8123-0000000000ef";
-    cmux.open("[my repo]retired", &fixture.repo, retired);
-    cmux.open("[my repo]planner", &fixture.repo, planner);
     let raw = Connection::open(&fixture.location.db).unwrap();
     raw.execute(
-        "INSERT INTO session_workspaces(role,workspace_id) VALUES ('retired',?1),('planner',?2)",
-        [retired, planner],
+        "INSERT INTO session_workspaces(role,workspace_id) VALUES ('retired',?1),('planner',?2),
+             ('inbox',?3),('supervisor',?4)",
+        [
+            "01234567-89ab-4def-8123-0000000000ee",
+            "01234567-89ab-4def-8123-0000000000ef",
+            "01234567-89ab-4def-8123-0000000000f0",
+            "01234567-89ab-4def-8123-0000000000f1",
+        ],
     )
     .unwrap();
     drop(raw);
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started");
-    assert_eq!(report["inbox"]["outcome"], "created", "{report}");
+    assert_eq!(report["inbox"]["outcome"], "not_opened", "{report}");
     assert_eq!(report.get("planner"), None, "{report}");
-    assert_eq!(report["retired_sessions"], 2, "{report}");
-    let names: Vec<String> = cmux
-        .workspaces
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|workspace| workspace.0.clone())
-        .collect();
-    assert_eq!(
-        names,
-        ["[my repo]retired", "[my repo]planner", "[my repo]inbox"]
-    );
-    assert!(cmux.closed.lock().unwrap().is_empty());
+    assert_eq!(report["retired_sessions"], 3, "{report}");
     let raw = Connection::open(&fixture.location.db).unwrap();
     let roles: Vec<String> = raw
         .prepare("SELECT role FROM session_workspaces ORDER BY role")
@@ -1054,7 +835,7 @@ fn up_forgets_the_retired_and_the_resident_planner_workspaces_and_opens_only_the
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(roles, ["inbox"]);
+    assert_eq!(roles, ["supervisor"]);
     // Forgetting is idempotent.
     assert_eq!(
         SqliteQueue::open(&fixture.location.db)
@@ -1063,101 +844,40 @@ fn up_forgets_the_retired_and_the_resident_planner_workspaces_and_opens_only_the
             .unwrap(),
         0
     );
-    let second = up(&fixture, &cmux, &launchd, &processes);
+    let second = up(&fixture, &launchd, &processes);
     assert_eq!(second["retired_sessions"], 0, "{second}");
 }
 
-/// Inside the inbox session of this queue, `up` skips that workspace; the
-/// role of a session of another queue does not count. From a planner
-/// session `up` opens the inbox and no planner.
+/// `up` opens no inbox from any session, the inbox's own of this queue or
+/// of another included, nor a planner: it says to open the inbox with
+/// `dagq inbox`. One fixture: the first `up` starts the supervisor and the
+/// others reuse it, each from another session's environment.
 #[test]
-fn up_skips_the_inbox_inside_its_own_session() {
+fn up_opens_no_inbox_from_any_session() {
     let mut fixture = fixture();
-    fixture.environment.role = Some(INBOX_ROLE.into());
-    fixture.environment.queue = Some(fixture.location.db.clone());
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(
-        report["inbox"],
-        json!({"outcome": "skipped", "workspace_id": null, "name": "[my repo]inbox"})
-    );
+    let this = fixture.location.db.clone();
+    let other = fixture._dir.path().join("elsewhere.db");
+    for (role, queue) in [
+        (INBOX_ROLE, this.clone()),
+        (INBOX_ROLE, other),
+        (PLANNER_ROLE, this),
+    ] {
+        fixture.environment.role = Some(role.into());
+        fixture.environment.queue = Some(queue.clone());
+        let report = up(&fixture, &launchd, &processes);
+        assert_eq!(
+            report["inbox"],
+            json!({"outcome": "not_opened", "next": lifecycle::INBOX_NEXT}),
+            "{role} {queue:?}: {report}"
+        );
+        assert_eq!(report.get("planner"), None, "{report}");
+    }
+    assert_eq!(launchd.installs.lock().unwrap().len(), 1);
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
     assert_eq!(queue.session_workspace(SessionRole::Inbox).unwrap(), None);
-    assert!(cmux.workspaces.lock().unwrap().is_empty());
-
-    // A second `up` from the same session still skips it.
-    let second = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(second["inbox"]["outcome"], "skipped", "{second}");
-    assert!(cmux.workspaces.lock().unwrap().is_empty());
-
-    // From an inbox session of another queue, this queue's inbox is opened.
-    fixture.environment.queue = Some(fixture._dir.path().join("elsewhere.db"));
-    let third = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(third["inbox"]["outcome"], "created", "{third}");
-    assert_eq!(cmux.workspaces.lock().unwrap().len(), 1);
-
-    // A planner session is not skipped for anything: it opens no planner.
-    let mut fixture = self::fixture();
-    fixture.environment.role = Some(PLANNER_ROLE.into());
-    fixture.environment.queue = Some(fixture.location.db.clone());
-    let cmux = FakeCmux::default();
-    let launchd = FakeLaunchd::new(&fixture.location.db);
-    let report = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(report["inbox"]["outcome"], "created", "{report}");
-    assert_eq!(report.get("planner"), None, "{report}");
-    assert_eq!(cmux.workspaces.lock().unwrap().len(), 1);
-}
-
-/// An inbox workspace that was closed is forgotten and opened again under
-/// a new UUID, and `down` closes no session's workspace.
-#[test]
-fn up_reopens_a_closed_inbox_and_down_leaves_the_sessions_open() {
-    let fixture = fixture();
-    let cmux = FakeCmux::default();
-    let launchd = FakeLaunchd::new(&fixture.location.db);
-    let processes = FakeProcesses::default();
-    let first = up(&fixture, &cmux, &launchd, &processes);
-    let inbox = first["inbox"]["workspace_id"].as_str().unwrap().to_owned();
-    cmux.close(&inbox).unwrap();
-
-    let second = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(second["inbox"]["outcome"], "created", "{second}");
-    let reopened = second["inbox"]["workspace_id"].as_str().unwrap();
-    assert_ne!(reopened, inbox);
-    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
-    assert_eq!(
-        queue
-            .session_workspace(SessionRole::Inbox)
-            .unwrap()
-            .as_deref(),
-        Some(reopened)
-    );
-
-    // The supervisor is gone; `down` closes no workspace.
-    processes
-        .dead
-        .lock()
-        .unwrap()
-        .insert(first["supervisor"]["pid"].as_u64().unwrap() as u32);
-    let report = down(&fixture, &cmux, &launchd, &processes, false, false);
-    assert_eq!(report["outcome"], "not_running", "{report}");
-    assert_eq!(cmux.closed.lock().unwrap().as_slice(), [inbox]);
-    let names: Vec<String> = cmux
-        .workspaces
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|workspace| workspace.0.clone())
-        .collect();
-    assert_eq!(names, ["[my repo]inbox"]);
-    assert!(
-        queue
-            .session_workspace(SessionRole::Inbox)
-            .unwrap()
-            .is_some()
-    );
+    assert!(queue.latest_event_of("inbox_opened").unwrap().is_none());
 }
 
 /// `up` and `down` record what they did through tracing (ADR-0033
@@ -1167,7 +887,6 @@ fn up_reopens_a_closed_inbox_and_down_leaves_the_sessions_open() {
 fn up_and_down_record_what_they_did_through_tracing() {
     use dagq::infrastructure::telemetry::Telemetry;
     let fixture = fixture();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     let (telemetry, captured) = Telemetry::capture();
@@ -1178,19 +897,18 @@ fn up_and_down_record_what_they_did_through_tracing() {
     let _second = tracing::Dispatch::new(tracing_subscriber::registry());
     tracing::callsite::rebuild_interest_cache();
     let (first, report) = telemetry.in_scope(|| {
-        let first = up(&fixture, &cmux, &launchd, &processes);
+        let first = up(&fixture, &launchd, &processes);
         processes
             .dead
             .lock()
             .unwrap()
             .insert(first["supervisor"]["pid"].as_u64().unwrap() as u32);
-        let report = down(&fixture, &cmux, &launchd, &processes, false, false);
+        let report = down(&fixture, &launchd, &processes, false, false);
         let mut options = fixture.options.clone();
         options.claude = fixture._dir.path().join("missing-claude");
         lifecycle::up(
             &fixture.location,
             &fixture.repo,
-            &cmux,
             &launchd,
             &processes,
             &fixture.environment,
@@ -1209,7 +927,7 @@ fn up_and_down_record_what_they_did_through_tracing() {
     assert_eq!(records[0]["message"], "dagq up finished: started");
     assert_eq!(records[0]["fields"]["command"], "up");
     assert_eq!(records[0]["fields"]["outcome"], "started");
-    assert_eq!(records[0]["fields"]["inbox"], "created");
+    assert_eq!(records[0]["fields"]["inbox"], "not_opened");
     let traced: Value =
         serde_json::from_str(records[0]["fields"]["report"].as_str().unwrap()).unwrap();
     assert_eq!(traced, first);
@@ -1231,179 +949,19 @@ fn up_and_down_record_what_they_did_through_tracing() {
     );
 }
 
-/// A group cmux cannot make does not stop `up`: the workspace opens outside
-/// it and the result says why.
+/// `up` requires Claude Code and an initialized queue, and no cmux: the
+/// fixture's PATH and `--cmux` name none, and the supervisor starts.
 #[test]
-fn up_warns_and_goes_on_when_the_workspace_group_cannot_be_made() {
+fn up_requires_claude_and_an_initialized_queue_but_no_cmux() {
     let fixture = fixture();
-    let cmux = FakeCmux {
-        group_fails: true,
-        ..FakeCmux::default()
-    };
+    assert!(!fixture.options.cmux.exists());
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(report["inbox"]["outcome"], "created", "{report}");
-    assert_eq!(cmux.tags.lock().unwrap()[0].group, None);
-    let warnings = report["warnings"].as_array().unwrap();
-    assert_eq!(warnings.len(), 1, "{report}");
-    let warning = warnings[0].as_str().unwrap();
-    assert!(
-        warning.contains("workspace-group create failed"),
-        "{warning}"
-    );
-    assert!(warning.contains(&fixture.location.hash()), "{warning}");
-    // The failed call is in the queue, on no run and no task (task 109).
-    let failures = backend_failures(&fixture);
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    let failure = &failures[0];
-    assert_eq!((failure.task_id, failure.run_id.as_ref()), (None, None));
-    assert_eq!(failure.payload["op"], "ensure_group");
-    assert_eq!(failure.payload["workspace_id"], Value::Null);
-    assert_eq!(failure.payload["timeout_secs"], 30);
-    assert_eq!(failure.payload["error"], "workspace-group create failed");
-    assert!(failure.payload["load_avg"].is_f64() || failure.payload["load_avg"].is_null());
-    assert!(failure.payload["slots"].is_i64());
-    assert!(failure.payload.get("parallel").is_some());
-}
-
-/// `up` colors the inbox Amber, puts a `dagq_role` pill with the role's
-/// icon on it and pins it (ADR-0031), on the
-/// workspace it creates and again on the one it reuses, addressed by the
-/// recorded UUID.
-#[test]
-fn up_colors_labels_and_pins_the_inbox_on_every_up() {
-    let mut fixture = fixture();
-    let cmux = FakeCmux::default();
-    let launchd = FakeLaunchd::new(&fixture.location.db);
-    let processes = FakeProcesses::default();
-    let look = |color: &str, pill: &str| {
-        vec![
-            ("set-color".to_owned(), color.to_owned()),
-            ("set-status".to_owned(), pill.to_owned()),
-            ("pin".to_owned(), String::new()),
-        ]
-    };
-    let inbox_look = look("Amber", "dagq_role=inbox tray");
-
-    let first = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(first["warnings"], json!([]), "{first}");
-    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
-    let recorded = |role| queue.session_workspace(role).unwrap().unwrap();
-    let inbox = recorded(SessionRole::Inbox);
-    assert_eq!(first["inbox"]["workspace_id"], inbox.as_str());
-    assert_eq!(cmux.looks_of(&inbox), inbox_look);
-
-    let second = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(second["inbox"]["outcome"], "reused", "{second}");
-    assert_eq!(
-        cmux.looks_of(&inbox),
-        [inbox_look.clone(), inbox_look.clone()].concat()
-    );
-
-    // From inside the inbox, `up` skips opening it but still marks the
-    // recorded workspace, so one an older binary opened gets its look.
-    fixture.environment.role = Some(INBOX_ROLE.into());
-    fixture.environment.queue = Some(fixture.location.db.clone());
-    let third = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(third["inbox"]["outcome"], "skipped", "{third}");
-    assert_eq!(
-        cmux.looks_of(&inbox),
-        [inbox_look.clone(), inbox_look.clone(), inbox_look].concat()
-    );
-}
-
-/// A color, pill or pin cmux refuses does not stop `up`: the workspaces
-/// are still created and recorded, each refusal is a warning naming what
-/// could not be set, and the failed call is recorded like any other.
-#[test]
-fn up_warns_and_goes_on_when_cmux_refuses_the_look() {
-    let fixture = fixture();
-    let cmux = FakeCmux {
-        look_fails: true,
-        ..FakeCmux::default()
-    };
-    let launchd = FakeLaunchd::new(&fixture.location.db);
-    let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
-    assert_eq!(report["inbox"]["outcome"], "created", "{report}");
-    let warnings: Vec<&str> = report["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|warning| warning.as_str().unwrap())
-        .collect();
-    assert_eq!(warnings.len(), 3, "{report}");
-    let inbox = report["inbox"]["workspace_id"].as_str().unwrap();
-    assert_eq!(
-        warnings[0],
-        format!("cmux could not set the color of the inbox workspace {inbox}: set-color refused")
-    );
-    assert!(
-        warnings[1].contains("status pill of the inbox"),
-        "{}",
-        warnings[1]
-    );
-    assert!(warnings[2].contains("pin of the inbox"), "{}", warnings[2]);
-    let ops: Vec<Value> = backend_failures(&fixture)
-        .iter()
-        .map(|failure| failure.payload["op"].clone())
-        .collect();
-    assert_eq!(ops, ["set_color", "set_status", "pin"]);
-}
-
-#[test]
-fn up_requires_cmux_claude_and_an_initialized_queue() {
-    let fixture = fixture();
-    let launchd = FakeLaunchd::new(&fixture.location.db);
-    let processes = FakeProcesses::default();
-    struct NoCmux;
-    impl WorkspaceBackend for NoCmux {
-        fn preflight(&self) -> Result<()> {
-            bail!("cmux ping failed")
-        }
-        fn close(&self, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn set_color(&self, _: &str, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn pin(&self, _: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn exists(&self, _: &str) -> Result<bool> {
-            unreachable!()
-        }
-        fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
-            unreachable!()
-        }
-        fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
-            unreachable!()
-        }
-        fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
-            unreachable!()
-        }
-    }
-    let error = lifecycle::up(
-        &fixture.location,
-        &fixture.repo,
-        &NoCmux,
-        &launchd,
-        &processes,
-        &fixture.environment,
-        &fixture.options,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("cmux ping failed"));
     let mut options = fixture.options.clone();
     options.claude = fixture._dir.path().join("missing-claude");
     let error = lifecycle::up(
         &fixture.location,
         &fixture.repo,
-        &FakeCmux::default(),
         &launchd,
         &processes,
         &fixture.environment,
@@ -1416,7 +974,6 @@ fn up_requires_cmux_claude_and_an_initialized_queue() {
     let error = lifecycle::up(
         &uninitialized,
         &fixture.repo,
-        &FakeCmux::default(),
         &launchd,
         &processes,
         &fixture.environment,
@@ -1425,6 +982,10 @@ fn up_requires_cmux_claude_and_an_initialized_queue() {
     .unwrap_err();
     assert!(format!("{error:#}").contains("queue must already be initialized"));
     assert!(launchd.installs.lock().unwrap().is_empty());
+
+    let report = up(&fixture, &launchd, &processes);
+    assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
+    assert_eq!(report["inbox"]["outcome"], "not_opened", "{report}");
 }
 
 /// `up --max-load` reaches the supervisor it starts (task 577): a given
@@ -1437,9 +998,8 @@ fn up_passes_max_load_to_the_supervisor_only_when_given() {
     let launchd_arguments = |max_load: Option<f64>| {
         let mut fixture = fixture();
         fixture.options.max_load = max_load;
-        let cmux = FakeCmux::default();
         let launchd = FakeLaunchd::new(&fixture.location.db);
-        up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+        up(&fixture, &launchd, &FakeProcesses::default());
         let installs = launchd.installs.lock().unwrap();
         installs[0].2.clone()
     };
@@ -1473,9 +1033,8 @@ fn up_passes_parallel_and_max_waiting_only_when_given() {
         let mut fixture = fixture();
         fixture.options.parallel = parallel;
         fixture.options.max_waiting = max_waiting;
-        let cmux = FakeCmux::default();
         let launchd = FakeLaunchd::new(&fixture.location.db);
-        up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+        up(&fixture, &launchd, &FakeProcesses::default());
         let installs = launchd.installs.lock().unwrap();
         installs[0].2.clone()
     };
@@ -1500,9 +1059,8 @@ fn up_passes_runtime_planners_only_when_given() {
     let launchd_arguments = |runtime_planners: Option<u16>| {
         let mut fixture = fixture();
         fixture.options.runtime_planners = runtime_planners;
-        let cmux = FakeCmux::default();
         let launchd = FakeLaunchd::new(&fixture.location.db);
-        up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+        up(&fixture, &launchd, &FakeProcesses::default());
         let installs = launchd.installs.lock().unwrap();
         installs[0].2.clone()
     };
@@ -1522,9 +1080,8 @@ fn no_claude_up_needs_no_claude_plugin_or_trust_and_opens_no_inbox() {
     fixture.options.claude = fixture.repo.join("missing-claude");
     fixture.options.plugin_dir = None;
     fixture.environment.claude_config = None;
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
-    let report = up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+    let report = up(&fixture, &launchd, &FakeProcesses::default());
     assert_eq!(report["supervisor"]["outcome"], "started");
     assert_eq!(report["inbox"]["outcome"], "skipped");
     assert_eq!(report["inbox"]["reason"], "provider_disabled");
@@ -1538,15 +1095,11 @@ fn no_claude_up_needs_no_claude_plugin_or_trust_and_opens_no_inbox() {
 #[test]
 fn no_claude_up_refuses_to_reuse_a_supervisor_with_another_policy() {
     let mut fixture = fixture();
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    up(&fixture, &cmux, &launchd, &processes);
+    up(&fixture, &launchd, &processes);
     fixture.options.no_claude = true;
-    let error = format!(
-        "{:#}",
-        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-    );
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
     assert!(error.contains("different --no-claude policy"), "{error}");
     assert_eq!(launchd.installs.lock().unwrap().len(), 1);
 }
@@ -1574,10 +1127,9 @@ fn up_registers_the_supervisor_with_the_provider_links_not_their_versions() {
         dagq::infrastructure::codex::codex_at_entry(&bin.join("codex")).unwrap();
     assert_eq!(fixture.options.claude, bin.join("claude"));
     assert_eq!(fixture.options.codex, bin.join("codex"));
-    let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
-    let report = up(&fixture, &cmux, &launchd, &processes);
+    let report = up(&fixture, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     let installs = launchd.installs.lock().unwrap();
     let contents = &installs[0].2;
