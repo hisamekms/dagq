@@ -24,6 +24,11 @@
 //!   stopped without its end or one stopped at a provider's wall, which is
 //!   run again but whose cost counts as spent, with `retry` for the one
 //!   retry of a non-zero exit).
+//! - `agent_eval_case_checked`: a case's program reviews ended its check
+//!   before its agent (`case`, and `outcome`, `program` and `failure` of
+//!   [`super::programs::CaseCheck`], with `programs`, those that ran, and
+//!   the ends of the output of the one that stopped or failed it).
+//!   Recorded once per case that needs a program.
 //! - `agent_eval_finished`: the round's scores (see
 //!   `application::agent_eval::finish`).
 
@@ -32,6 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 
 use super::Split;
+use super::programs::CaseCheck;
 use super::round::{RoundKey, RunCost, Waiting, held_out};
 use crate::domain::{EventKind, Provider};
 
@@ -183,6 +189,9 @@ pub struct Round {
     /// The started payload as recorded.
     pub started_payload: Option<Value>,
     pub runs: Vec<RunRecord>,
+    /// What each case's program reviews said, by case id, for the cases
+    /// whose check ended.
+    pub checks: BTreeMap<String, CaseCheck>,
     pub finished: Option<Value>,
     /// The supervisor that runs it: the `supervisor` of its latest start
     /// or take-up; `None` before it started, or for one recorded without.
@@ -228,7 +237,8 @@ impl Round {
             .collect()
     }
 
-    /// The runs it plans that did not end yet, in order.
+    /// The runs it plans that did not end yet, in order: none of a case a
+    /// program stopped, whose agent never runs.
     pub fn left(&self) -> Vec<(String, u32)> {
         let done = self.done();
         self.started
@@ -237,6 +247,7 @@ impl Round {
             .unwrap_or_default()
             .into_iter()
             .filter(|run| !done.contains(run))
+            .filter(|(case, _)| !matches!(self.checks.get(case), Some(CaseCheck::Stopped { .. })))
             .collect()
     }
 
@@ -261,7 +272,7 @@ impl Round {
 }
 
 /// The kinds of the eval's events.
-pub const KINDS: [EventKind; 8] = [
+pub const KINDS: [EventKind; 9] = [
     EventKind::AgentEvalRequested,
     EventKind::AgentEvalRefused,
     EventKind::AgentEvalWaiting,
@@ -269,6 +280,7 @@ pub const KINDS: [EventKind; 8] = [
     EventKind::AgentEvalTakenUp,
     EventKind::AgentEvalRunStarted,
     EventKind::AgentEvalRunFinished,
+    EventKind::AgentEvalCaseChecked,
     EventKind::AgentEvalFinished,
 ];
 
@@ -291,6 +303,7 @@ pub fn rounds<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -
                         started_payload: None,
                         owner: None,
                         runs: Vec::new(),
+                        checks: BTreeMap::new(),
                         finished: None,
                     },
                 );
@@ -341,6 +354,10 @@ pub fn rounds<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -
                 })
             {
                 record.end = Some(end);
+            }
+        } else if kind == EventKind::AgentEvalCaseChecked {
+            if let Some(check) = CaseCheck::read(payload) {
+                round.checks.insert(case, check);
             }
         } else if kind == EventKind::AgentEvalFinished {
             round.finished = Some(payload.clone());
@@ -567,6 +584,44 @@ mod tests {
         );
         assert_eq!(rounds[0].retried(), BTreeSet::from([("a".to_owned(), 0)]));
         assert!(rounds[0].left().contains(&("a".to_owned(), 0)));
+    }
+
+    /// A case a program stopped is read back from its check, and none of
+    /// its runs is left: a supervisor that takes the round up never starts
+    /// its agent.
+    #[test]
+    fn a_case_a_program_stopped_leaves_no_run() {
+        let mut stopped = CaseCheck::Stopped {
+            program: "fmt".to_owned(),
+        }
+        .record();
+        stopped["eval_id"] = json!(1);
+        stopped["case"] = json!("a");
+        let events = [
+            (
+                1,
+                EventKind::AgentEvalRequested.as_str(),
+                request("x", Split::Dev),
+            ),
+            (
+                2,
+                EventKind::AgentEvalStarted.as_str(),
+                started(1, "claude", "d"),
+            ),
+            (3, EventKind::AgentEvalCaseChecked.as_str(), stopped),
+        ];
+        let rounds = rounds(
+            events
+                .iter()
+                .map(|(id, kind, payload)| (*id, *kind, payload)),
+        );
+        assert_eq!(
+            rounds[0].checks.get("a"),
+            Some(&CaseCheck::Stopped {
+                program: "fmt".to_owned()
+            })
+        );
+        assert_eq!(rounds[0].left(), vec![("b".to_owned(), 0)]);
     }
 
     #[test]

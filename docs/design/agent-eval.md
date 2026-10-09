@@ -30,7 +30,7 @@ reviewのagentが正しく判定しているかを、規則コードごとの陽
 workerもjobもLLMのCLIを直接打たない。
 1周の中のケースごとの1回は、本番のrunのreviewのagentのjobと同じ起動経路で、測るagentの1本のjobだけを起動する。
 
-> **一部は予定**: 「採用の判定」「productionのケースと見張り」「programのreviewの当て方」の節はまだ実装していない予定で、名前と数値は実装が決める。
+> **一部は予定**: 「採用の判定」「productionのケースと見張り」の節はまだ実装していない予定で、名前と数値は実装が決める。
 > ほかの節は今の姿で、欄・flag・既定値の意味は定義のそばのdoc commentが持つ。
 
 決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、定義を切らない例外は[ADR-t1869-1](../adr/2026-10-09-t1869-1-agent-jobs-carry-the-whole-definition-and-do-not-start-over-the-limit.md)、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。
@@ -209,8 +209,13 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 
 ## programのreviewの当て方
 
-- evalは各ケースに本番のreviewと同じ段を当てる。
-  landing branchのcommitのprogramの一覧（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[Review](supervisor-lifecycle/review.md)と[Run environment](supervisor-lifecycle/run-environment.md)がその実装と一緒に持ち、ここに写さない）を、ケースのtreeに対して先に流す。
-- programが落ちたケースはagentに渡さず、agentの成績の分母から外し、`agent_eval_finished`の`program_stopped`に数とidを記録する。
-- programの起動の失敗・時間切れのケースがあれば、周を`incomplete`（`program_failed`）にし、`passed`を`false`にする。
+- evalは各ケースに本番のreviewと同じ段を当てる（判断は`domain::agent_eval::programs`）。
+  周の定義とケースを読むlanding branchのcommitから、programの一覧とscriptを読み（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[Review](supervisor-lifecycle/review.md#プログラムのreview)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、ここに写さない）、pathがケースの差分に当たるものを、ケースのtreeをcwdに設定の順に流す。
+  ケースのpatchがscriptや設定を変えても、流れるのはcommitの中身である。
+- programはケースの1回の枠の中でagentのjobの前に1本ずつ流し、周の同時数の上限を超えない。
+  providerの費用には数えない。
+  全部exit 0ならagentのjobを起動する。
+- 1本でも0以外で終わったケースは、残りのprogramとagentを起動せず、agentの成績の分母から外し、`agent_eval_finished`の`program_stopped`に数とケースのidと落ちたprogramを記録する。
+- programの起動の失敗（reviewのactorのbackendがPodmanのときを含む）か時間切れのケースがあれば、新しい実行を起動せず、周を`incomplete`（`program_failed`）で閉じ、`passed`を`false`にする。
+- ケースごとのprogramの結果は`agent_eval_case_checked`に記録し、周を引き取ったsupervisorは止まったケースのagentを起動しない。
 - programが受け持った規則コードをagentの`expected`から外す整理は、定義を移す後続のtaskが行う。

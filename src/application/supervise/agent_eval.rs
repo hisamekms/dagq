@@ -21,14 +21,29 @@
 //! estimate counts as spent), reads the round back from its events and
 //! starts the runs left. A round starts in one write transaction too, so
 //! two supervisors never both start one.
+//!
+//! Before a case's first agent job, the case gets the program reviews a
+//! run's review gets (ADR-t1728-1 (i)): those the round's commit
+//! configures whose paths the case's change touches, read with their
+//! scripts at that commit (never from the case's tree, whatever its patch
+//! changes), run one after another in the slot of the case's run, against
+//! the case's tree, on the backend of the review's actor
+//! ([`crate::application::review_programs::ProgramBackends`]). They spend
+//! nothing of the provider's. Once each exits 0 the agent job starts; a
+//! case one of them rejects never reaches the agent and is out of its
+//! scores; one that could not start or ran past its time closes the round
+//! incomplete, and no run starts after it.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::jobs::{HeadlessJob, JobFailed, JobSubject};
+use super::jobs::{HeadlessJob, JobFailed, JobSubject, ProgramEnd, start_program_against};
 use super::*;
 use crate::application::agent_eval::{Incomplete, finished as finished_payload};
 use crate::application::agent_job::{self, AgentJob};
+use crate::application::review::CONFIG_FILE;
+use crate::application::review_programs::{SnapshotProgram, programs_at, required_programs};
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
+use crate::domain::agent_eval::programs::{self, CaseCheck, ProgramFailure, Step};
 use crate::domain::agent_eval::record::{self, Round};
 use crate::domain::agent_eval::round::{
     ProviderCost, ProviderWait, Refusal, RefusalReason, RoundKey, case_set_digest,
@@ -39,6 +54,7 @@ use crate::domain::agent_eval::{
     Case, EVALS_DIR, PATCH_DIR, PATCH_EXTENSION, Split, patch_hash, read_agent_cases,
 };
 use crate::domain::headless_job::JobKind;
+use crate::domain::review_programs::ReviewProgram;
 use crate::domain::review_subagents::{
     AgentRole as ToolRole, AgentTools, DEFINITION_DIR, find_definition,
 };
@@ -74,6 +90,15 @@ pub(super) struct EvalRound {
     waiting: Option<ProviderWait>,
     /// `agent-evals/<id>/`.
     dir: PathBuf,
+    /// The landing branch's commit its definition, cases and program
+    /// reviews are read from.
+    commit: String,
+    /// The program reviews the commit configures, or why they did not
+    /// read, which fails every case that runs.
+    programs: std::result::Result<Vec<ReviewProgram>, String>,
+    /// What each case's program reviews said, by case id, once its check
+    /// ended.
+    checks: BTreeMap<String, CaseCheck>,
 }
 
 /// The tree of one case: `base` with the patch committed as `head`.
@@ -85,11 +110,33 @@ struct CaseTree {
     material: PathBuf,
 }
 
-/// One run of a case in progress.
+/// One run of a case in progress: its agent job, or, before it, one of
+/// the case's program jobs.
 struct EvalJob {
     case: String,
     round: u32,
     job: HeadlessJob,
+    /// The case's program reviews when `job` is one of them.
+    checking: Option<CaseChecking>,
+}
+
+/// The program reviews of a case under way.
+struct CaseChecking {
+    /// The programs the case needs, in the configured order.
+    selected: Vec<SnapshotProgram>,
+    /// How each that ran ended ([`programs::step`]).
+    ended: Vec<Option<bool>>,
+    /// The end of the latest that ran.
+    last: Option<ProgramEnd>,
+}
+
+impl CaseChecking {
+    fn names(&self) -> Vec<String> {
+        self.selected
+            .iter()
+            .map(|program| program.program.name.clone())
+            .collect()
+    }
 }
 
 /// What the case's tree leaves out of its working tree (not its commit):
@@ -490,6 +537,7 @@ impl Supervisor<'_> {
                 return Ok(true);
             }
         };
+        let programs = self.eval_programs(&commit);
         let started = self.queue.settle_eval_round(
             round.id,
             EventKind::AgentEvalStarted,
@@ -554,8 +602,20 @@ impl Supervisor<'_> {
             cost_limited: false,
             waiting: None,
             dir: self.layout.agent_evals_dir.join(round.id.to_string()),
+            commit,
+            programs,
+            checks: BTreeMap::new(),
         });
         Ok(true)
+    }
+
+    /// The program reviews `commit` configures, or why they do not read.
+    fn eval_programs(&self, commit: &str) -> std::result::Result<Vec<ReviewProgram>, String> {
+        let verifier = &self.verifier;
+        programs_at(&*self.repository, commit, &|text| {
+            verifier.review_programs_in(text)
+        })
+        .map_err(|error| format!("{error:#}"))
     }
 
     /// Take up `round`, which a gone supervisor left running: its runs
@@ -636,6 +696,9 @@ impl Supervisor<'_> {
             cost_limited: false,
             waiting: None,
             dir: self.layout.agent_evals_dir.join(round.id.to_string()),
+            programs: self.eval_programs(&started.definition_commit),
+            commit: started.definition_commit.clone(),
+            checks: round.checks.clone(),
         });
         Ok(())
     }
@@ -652,7 +715,7 @@ impl Supervisor<'_> {
     }
 
     fn start_eval_runs_of(&mut self, round: &mut EvalRound) -> Result<bool> {
-        if round.cost_limited || round.left.is_empty() {
+        if round.cost_limited || round.left.is_empty() || programs::any_failed(&round.checks) {
             return Ok(false);
         }
         match self.eval_wait(round.provider) {
@@ -680,13 +743,215 @@ impl Supervisor<'_> {
                 round.cost_limited = true;
                 break;
             }
-            let Some((case, run)) = round.left.pop_front() else {
+            // A run of a case whose programs run now waits for them.
+            let Some((case, run)) = round
+                .left
+                .iter()
+                .position(|(case, _)| {
+                    !round
+                        .running
+                        .iter()
+                        .any(|job| job.checking.is_some() && &job.case == case)
+                })
+                .and_then(|next| round.left.remove(next))
+            else {
                 break;
             };
-            self.start_eval_run(round, &case, run)?;
+            match round.checks.get(&case) {
+                Some(CaseCheck::Passed) => self.start_eval_run(round, &case, run)?,
+                Some(_) => {}
+                None => self.check_case(round, &case, run)?,
+            }
             progressed = true;
+            if programs::any_failed(&round.checks) {
+                break;
+            }
         }
         Ok(progressed)
+    }
+
+    /// Start the program reviews of `case` before its run `run`: those the
+    /// round's commit configures whose paths the case's change touches,
+    /// each script read at that commit. A case that needs none goes to its
+    /// agent at once.
+    fn check_case(&mut self, round: &mut EvalRound, case: &str, run: u32) -> Result<()> {
+        let index = round
+            .cases
+            .iter()
+            .position(|known| known.id == case)
+            .context("a case of the round")?;
+        if self.case_tree(round, index).is_err() {
+            // The run cannot start: its own start records why.
+            return self.start_eval_run(round, case, run);
+        }
+        let selected = match &round.programs {
+            Ok(configured) if configured.is_empty() => Ok(Vec::new()),
+            Ok(configured) => {
+                let tree = &round.trees[case];
+                self.repository
+                    .changed_paths(&tree.base, &tree.head)
+                    .and_then(|changed| {
+                        required_programs(&*self.repository, &round.commit, configured, &changed)
+                    })
+                    .map_err(|error| format!("{error:#}"))
+            }
+            Err(error) => Err(error.clone()),
+        };
+        match selected {
+            Ok(selected) => self.go_on_checking(
+                round,
+                case,
+                run,
+                CaseChecking {
+                    selected,
+                    ended: Vec::new(),
+                    last: None,
+                },
+            ),
+            Err(detail) => {
+                let check = CaseCheck::Failed {
+                    program: CONFIG_FILE.to_owned(),
+                    failure: ProgramFailure::StartFailed,
+                };
+                self.record_check(round, case, &check, &[], None, Some(detail))
+            }
+        }
+    }
+
+    /// The next step of `case`'s program reviews ([`programs::step`]):
+    /// start its next program, or end its check, starting its run `run`'s
+    /// agent job when every program exited 0.
+    fn go_on_checking(
+        &mut self,
+        round: &mut EvalRound,
+        case: &str,
+        run: u32,
+        checking: CaseChecking,
+    ) -> Result<()> {
+        let names = checking.names();
+        let ran = &names[..checking.ended.len().min(names.len())];
+        let step = programs::step(&names, &checking.ended);
+        // Another case's program failed meanwhile: nothing more starts.
+        let halted = programs::any_failed(&round.checks);
+        match step {
+            Step::Done(CaseCheck::Passed) => {
+                if !names.is_empty() {
+                    self.record_check(round, case, &CaseCheck::Passed, ran, None, None)?;
+                }
+                round.checks.insert(case.to_owned(), CaseCheck::Passed);
+                if halted || self.eval_wait(round.provider).is_some() {
+                    // The run waits with the round's others: for the
+                    // provider, or for none, as the round closes.
+                    round.left.push_front((case.to_owned(), run));
+                    return Ok(());
+                }
+                self.start_eval_run(round, case, run)
+            }
+            Step::Done(check) => {
+                self.record_check(round, case, &check, ran, checking.last.as_ref(), None)
+            }
+            Step::Run(_) if halted => {
+                round.left.push_front((case.to_owned(), run));
+                Ok(())
+            }
+            Step::Run(name) => {
+                let program = &checking.selected[checking.ended.len()];
+                match self.start_case_program(round, case, run, program) {
+                    Ok(job) => {
+                        round.running.push(EvalJob {
+                            case: case.to_owned(),
+                            round: run,
+                            job,
+                            checking: Some(checking),
+                        });
+                        Ok(())
+                    }
+                    Err(error) => {
+                        warn!(error = %format_args!("{error:#}"), "agent eval {}: the program {name} of case {case} could not start: {error:#}", round.id);
+                        let check = CaseCheck::Failed {
+                            program: name,
+                            failure: ProgramFailure::StartFailed,
+                        };
+                        let mut ran = ran.to_vec();
+                        ran.push(program.program.name.clone());
+                        self.record_check(
+                            round,
+                            case,
+                            &check,
+                            &ran,
+                            None,
+                            Some(format!("{error:#}")),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Start `program` against `case`'s tree as a program job before its
+    /// run `run`, on the backend of the review's actor, its output and
+    /// what it runs in the case's directory.
+    fn start_case_program(
+        &self,
+        round: &EvalRound,
+        case: &str,
+        run: u32,
+        program: &SnapshotProgram,
+    ) -> Result<HeadlessJob> {
+        let tree = &round.trees[case];
+        let name = &program.program.name;
+        let subject = JobSubject::eval_program(
+            format!("{}:{}:{case}:{name}", round.agent, round.id),
+            usize::try_from(run).unwrap_or(usize::MAX),
+        );
+        let timeout = self.job_timeout(&subject);
+        start_program_against(
+            &self.job_ports(),
+            self.spawner,
+            self.programs,
+            program,
+            &tree.tree,
+            (&tree.dir, &tree.dir.join("programs")),
+            (&format!("program-{run}-{name}"), subject),
+            timeout,
+        )
+    }
+
+    /// Record `check`, the end of `case`'s program reviews, with the
+    /// programs that ran, the end of the one that stopped or failed it and
+    /// why it failed; a case it stops has none of its runs left.
+    fn record_check(
+        &self,
+        round: &mut EvalRound,
+        case: &str,
+        check: &CaseCheck,
+        ran: &[String],
+        end: Option<&ProgramEnd>,
+        detail: Option<String>,
+    ) -> Result<()> {
+        info!(
+            "agent eval {}: the programs of case {case}: {}",
+            round.id,
+            check.record()
+        );
+        let mut payload = check.record();
+        payload["eval_id"] = json!(round.id);
+        payload["case"] = json!(case);
+        payload["programs"] = json!(ran);
+        if let Some(end) = end {
+            payload["exit"] = json!(end.exit.as_ref().map(ToString::to_string));
+            payload["stdout_tail"] = json!(end.stdout_tail);
+            payload["stderr_tail"] = json!(end.stderr_tail);
+        }
+        if let Some(detail) = detail {
+            payload["detail"] = json!(detail);
+        }
+        self.record_eval(EventKind::AgentEvalCaseChecked, payload)?;
+        if matches!(check, CaseCheck::Stopped { .. }) {
+            round.left.retain(|(left, _)| left != case);
+        }
+        round.checks.insert(case.to_owned(), check.clone());
+        Ok(())
     }
 
     /// Make the case's tree, material and directory once.
@@ -833,6 +1098,7 @@ impl Supervisor<'_> {
                     case: case.to_owned(),
                     round: run,
                     job,
+                    checking: None,
                 });
             }
             Err(error) => {
@@ -871,7 +1137,21 @@ impl Supervisor<'_> {
         let agent = self.job_agent(round.provider).unwrap_or(self.reviewer);
         let mut progressed = false;
         let mut index = 0;
+        let mut checked = Vec::new();
         while index < round.running.len() {
+            if round.running[index].checking.is_some() {
+                let ended = match round.running[index].job.poll_program(&*self.files) {
+                    Ok(None) => {
+                        index += 1;
+                        continue;
+                    }
+                    Ok(Some(end)) => Ok(end),
+                    Err(error) => Err(error),
+                };
+                checked.push((round.running.remove(index), ended));
+                progressed = true;
+                continue;
+            }
             let end = match round.running[index].job.poll_end(&*self.files, agent) {
                 Ok(Some(end)) => end,
                 Ok(None) => {
@@ -947,6 +1227,34 @@ impl Supervisor<'_> {
             round.spent_usd += cost.usd;
             progressed = true;
         }
+        for (run, ended) in checked {
+            let mut checking = run.checking.expect("a program job");
+            match ended {
+                Ok(end) => {
+                    checking
+                        .ended
+                        .push(end.exit.as_ref().map(|exit| exit.success));
+                    checking.last = Some(end);
+                    self.go_on_checking(round, &run.case, run.round, checking)?;
+                }
+                Err(error) => {
+                    let name = checking.selected[checking.ended.len()].program.name.clone();
+                    let check = CaseCheck::Failed {
+                        program: name,
+                        failure: ProgramFailure::StartFailed,
+                    };
+                    let ran = checking.names()[..=checking.ended.len()].to_vec();
+                    self.record_check(
+                        round,
+                        &run.case,
+                        &check,
+                        &ran,
+                        None,
+                        Some(format!("{error:#}")),
+                    )?;
+                }
+            }
+        }
         Ok(progressed)
     }
 
@@ -956,7 +1264,10 @@ impl Supervisor<'_> {
     /// removed.
     fn finish_round(&mut self) -> Result<bool> {
         let done = self.agent_eval.as_ref().is_some_and(|round| {
-            round.running.is_empty() && (round.left.is_empty() || round.cost_limited)
+            round.running.is_empty()
+                && (round.left.is_empty()
+                    || round.cost_limited
+                    || programs::any_failed(&round.checks))
         });
         if !done {
             return Ok(false);
@@ -967,7 +1278,8 @@ impl Supervisor<'_> {
             .iter()
             .find(|read| read.id == round.id)
             .context("the round read back")?;
-        let incomplete = (!round.left.is_empty()).then_some(Incomplete::CostLimit);
+        let incomplete =
+            Incomplete::of(programs::any_failed(&round.checks), !round.left.is_empty());
         let payload = finished_payload(recorded, &round.cases, incomplete);
         info!(
             "agent eval {} of {} finished: {} (passed {})",

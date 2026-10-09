@@ -672,6 +672,7 @@ pub fn supervise_with_reviewer(
             pid,
         )),
     };
+    let host_programs = crate::infrastructure::review_programs::HostPrograms::new(&main_checkout);
     let ports = Ports {
         queues: Arc::new(opener()),
         observation_queues: Arc::new(SqlitePorts {
@@ -699,6 +700,12 @@ pub fn supervise_with_reviewer(
             .as_ref()
             .map(|codex| codex as &dyn AgentProvider),
         spawner: &LocalSpawner,
+        // Every actor runs on the host until a backend is configured
+        // (`ExecutionConfig`).
+        programs: crate::application::review_programs::ProgramBackends::new(
+            &host_programs,
+            crate::application::execution::ExecutionConfig::default(),
+        ),
         service_access: &crate::infrastructure::queue_service::SystemServiceAccess,
         files: options.files.as_ref().map_or_else(
             || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,

@@ -10,6 +10,7 @@
 //! the providers' holds to 計画管理's jobs.
 
 use super::*;
+use crate::application::review_programs::ProgramBackends;
 use crate::domain::EventKind;
 use crate::domain::headless_job::{JobFailure, JobKind, JobStop};
 use crate::domain::provider_switch::SwitchReason;
@@ -254,6 +255,24 @@ impl JobSubject {
             ..Self::review(JobKind::Program, run, attempt)
         }
     }
+
+    /// A program job of a case of an agent's eval (ADR-t1728-1 (i)),
+    /// labelled `label`, under the review stage's program timeout as a
+    /// run's review's program job; `attempt` is the case's run it goes
+    /// before.
+    pub(super) fn eval_program(label: String, attempt: usize) -> Self {
+        Self {
+            kind: crate::domain::headless_job::AGENT_EVAL_PROGRAM,
+            job: JobKind::Program,
+            review_stage: true,
+            label: Some(label),
+            run_id: None,
+            proposal_id: None,
+            goal_id: None,
+            attempt,
+            provider: crate::domain::actor_model::ROLE_PROVIDER,
+        }
+    }
 }
 
 /// What every headless job starts through, whatever its kind: where its
@@ -354,19 +373,20 @@ pub fn start_program_job(
 pub const PROGRAM_OUTPUT_TAIL: usize = 4000;
 
 /// Start the program review `program` of `run`'s review `attempt` as a
-/// program job against `worktree` (ADR-t1895-2): `backend` makes its
-/// command (the host's, or another backend's of the review's actor), its
-/// output goes under `output` (the run's directory) and what it runs is
-/// written under `scratch`, each by attempt and name, and it is stopped
-/// with its group past the program's own `timeout_secs`, or `timeout`
-/// without one. `scratch` is a directory the runtime owns, outside what
-/// the worker can write (not the run's directory): a script written where
-/// the worker can replace it would run the worker's text.
+/// program job against `worktree` (ADR-t1895-2) on the backend of the
+/// review's actor ([`ProgramBackends::backend`]: the host's adapter, or
+/// the error of one not implemented, which starts nothing). Its output
+/// goes under `output` (the run's directory) and what it runs is written
+/// under `scratch`, each by attempt and name, and it is stopped with its
+/// group past the program's own `timeout_secs`, or `timeout` without one.
+/// `scratch` is a directory the runtime owns, outside what the worker can
+/// write (not the run's directory): a script written where the worker can
+/// replace it would run the worker's text.
 #[allow(clippy::too_many_arguments)]
 pub fn start_review_program(
     ports: &JobPorts<'_>,
     spawner: &dyn Spawner,
-    backend: &dyn crate::application::ReviewProgramBackend,
+    backends: &ProgramBackends<'_>,
     program: &crate::application::review_programs::SnapshotProgram,
     worktree: &Path,
     (output, scratch): (&Path, &Path),
@@ -374,9 +394,41 @@ pub fn start_review_program(
     timeout: Duration,
 ) -> Result<HeadlessJob> {
     let name = &program.program.name;
-    let stem = format!("review-program-{attempt}-{name}");
+    start_program_against(
+        ports,
+        spawner,
+        backends,
+        program,
+        worktree,
+        (output, scratch),
+        (
+            &format!("review-program-{attempt}-{name}"),
+            JobSubject::review_program(run, attempt, name),
+        ),
+        timeout,
+    )
+}
+
+/// Start `program` as a program job against `worktree` about `subject`,
+/// its files named by `stem` ([`start_review_program`], and a case of an
+/// agent's eval).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn start_program_against(
+    ports: &JobPorts<'_>,
+    spawner: &dyn Spawner,
+    backends: &ProgramBackends<'_>,
+    program: &crate::application::review_programs::SnapshotProgram,
+    worktree: &Path,
+    (output, scratch): (&Path, &Path),
+    (stem, subject): (&str, JobSubject),
+    timeout: Duration,
+) -> Result<HeadlessJob> {
+    let name = &program.program.name;
+    let backend = backends
+        .backend()
+        .with_context(|| format!("start the review program {name}"))?;
     let command = backend
-        .command(program, worktree, output, &scratch.join(&stem))
+        .command(program, worktree, output, &scratch.join(stem))
         .with_context(|| format!("prepare the review program {name}"))?;
     let timeout = program
         .program
@@ -390,7 +442,7 @@ pub fn start_review_program(
             output.join(format!("{stem}.out")),
             output.join(format!("{stem}.err")),
         ),
-        JobSubject::review_program(run, attempt, name),
+        subject,
         timeout,
     )
 }
@@ -952,7 +1004,7 @@ impl Supervisor<'_> {
     }
 
     /// The ports this supervisor's jobs start through ([`JobPorts`]).
-    fn job_ports(&self) -> JobPorts<'_> {
+    pub(super) fn job_ports(&self) -> JobPorts<'_> {
         JobPorts {
             store: &*self.queue,
             processes: self.processes.clone(),

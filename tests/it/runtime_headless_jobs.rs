@@ -4,7 +4,8 @@
 //! process that took the pid later, and a job's timeout stops what the job
 //! started too, whatever the job's kind (an agent's or a program's).
 use crate::runtime_support;
-use dagq::application::review_programs::SnapshotProgram;
+use dagq::application::execution::ExecutionConfig;
+use dagq::application::review_programs::{ProgramBackends, SnapshotProgram};
 use dagq::application::supervise::{
     JobEnds, JobFailed, JobPorts, JobSubject, PROGRAM_OUTPUT_TAIL, ProgramEnd, start_program_job,
     start_review_program,
@@ -473,7 +474,8 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
     ] {
         inherited.push((name.into(), value.into()));
     }
-    let backend = HostPrograms::inheriting(dir.path().join("repo"), inherited);
+    let host = HostPrograms::inheriting(dir.path().join("repo"), inherited);
+    let backend = ProgramBackends::new(&host, ExecutionConfig::default());
     let run = RunId::new("run-1").unwrap();
     let start = |name: &str, args: &[&str], script: &str, timeout: Option<u64>| {
         let program = SnapshotProgram {
@@ -680,10 +682,11 @@ fn a_review_program_runs_the_landing_branchs_script_not_the_worktrees() {
         clock: &SystemClock,
         ends: &ends,
     };
-    let backend = HostPrograms::inheriting(
+    let host = HostPrograms::inheriting(
         &repo,
         [(OsString::from("PATH"), OsString::from(path.join(":")))],
     );
+    let backend = ProgramBackends::new(&host, ExecutionConfig::default());
     let mut job = start_review_program(
         &ports,
         &process::LocalSpawner,

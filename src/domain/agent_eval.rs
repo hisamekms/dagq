@@ -11,6 +11,7 @@ use std::fmt;
 use serde_json::{Map, Value};
 
 pub mod leak;
+pub mod programs;
 pub mod record;
 pub mod review;
 pub mod round;

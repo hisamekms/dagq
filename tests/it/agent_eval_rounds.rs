@@ -567,3 +567,188 @@ fn a_running_round_takes_no_run_slot_and_holds_no_review() {
     assert_eq!(scores[0]["eval_id"], id);
     assert_eq!(scores[0]["outcome"], "complete", "{scores:?}");
 }
+
+/// A case's program reviews run before its agent (ADR-t1728-1 (i)), each
+/// read with its script from the landing branch's commit and run against
+/// the case's tree: a case one of them rejects reaches no agent, is out of
+/// the agent's scores and is named with the program in the round's
+/// `program_stopped`, though its patch rewrites the script to pass; a
+/// program whose paths a case does not touch does not run for it, and a
+/// case each of whose programs passes goes to its agent.
+#[test]
+fn a_case_a_program_rejects_reaches_no_agent_and_is_out_of_the_scores() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture();
+    let scripts = fx.repo.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    for (name, text) in [
+        // Passes in a case's tree only: the patch's files are there.
+        ("intree.sh", "#!/bin/sh\ntest -e notes.txt -o -e bad.txt\n"),
+        ("never.sh", "#!/bin/sh\nexit 1\n"),
+        (
+            "nobad.sh",
+            "#!/bin/sh\necho bad.txt is not allowed >&2\nexit 1\n",
+        ),
+    ] {
+        let path = scripts.join(name);
+        fs::write(&path, text).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let config = fx.repo.join("dagq.toml");
+    let mut text = fs::read_to_string(&config).unwrap_or_default();
+    text.push_str(concat!(
+        "\n[review.programs.intree]\nscript = \"scripts/intree.sh\"\npaths = [\"**\"]\n",
+        "\n[review.programs.never]\nscript = \"scripts/never.sh\"\npaths = [\"nothing/**\"]\n",
+        "\n[review.programs.nobad]\nscript = \"scripts/nobad.sh\"\npaths = [\"bad.txt\"]\n",
+    ));
+    fs::write(&config, text).unwrap();
+    git(&fx.repo, &["add", "."]);
+    git(&fx.repo, &["commit", "-q", "-m", "programs"]);
+    let base = git_out(&fx.repo, &["rev-parse", "HEAD"]);
+
+    let notes = "diff --git a/notes.txt b/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hello\n";
+    // Adds bad.txt and rewrites the script that rejects it to pass.
+    let bad = concat!(
+        "diff --git a/bad.txt b/bad.txt\nnew file mode 100644\n--- /dev/null\n+++ b/bad.txt\n@@ -0,0 +1 @@\n+bad\n",
+        "diff --git a/scripts/nobad.sh b/scripts/nobad.sh\n--- a/scripts/nobad.sh\n+++ b/scripts/nobad.sh\n",
+        "@@ -1,3 +1,3 @@\n #!/bin/sh\n echo bad.txt is not allowed >&2\n-exit 1\n+exit 0\n",
+    );
+    let patches = fx.repo.join(".dagq/agent-cases/patches");
+    fs::create_dir_all(&patches).unwrap();
+    let mut hashes = Vec::new();
+    for patch in [notes, bad] {
+        let hash = format!("{:x}", Sha256::digest(patch.as_bytes()));
+        fs::write(patches.join(format!("{hash}.patch")), patch).unwrap();
+        hashes.push(hash);
+    }
+    let case = |id: &str, patch: &str, verdict: &str, codes: &[&str]| {
+        json!({"id": id, "source": "handmade", "made_by": "test", "base_commit": base,
+               "patch": patch, "review": {"input": {}, "expected": {"verdict": verdict, "codes": codes}}})
+    };
+    let dir = fx.repo.join(".dagq/agents/demo/evals");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.parent().unwrap().join("AGENT.md"), DEFINITION).unwrap();
+    let list = json!({"agent": "demo", "role": "review", "codes": ["D-1"], "k": 1, "cases": [
+        case("needs-d1", &hashes[0], "violation", &["D-1"]),
+        case("has-bad", &hashes[1], "clean", &[]),
+    ]});
+    fs::write(dir.join("dev.json"), list.to_string()).unwrap();
+    git(&fx.repo, &["add", "."]);
+    git(&fx.repo, &["commit", "-q", "-m", "agents"]);
+
+    let id = common::cli::ok(&fx.db, &["agent", "eval", "demo"])["eval_id"]
+        .as_i64()
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let agent = EvalAgent::new(out.path(), &[violation()]);
+    let outcome = supervise(&fx, &agent);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    // Only the case whose programs passed reached the agent.
+    let launches = agent.launches();
+    assert_eq!(launches.len(), 1, "{launches:?}");
+    let run_started = events(&fx.db, EventKind::AgentEvalRunStarted);
+    assert_eq!(run_started.len(), 1);
+    assert_eq!(run_started[0]["case"], "needs-d1");
+
+    let checked = events(&fx.db, EventKind::AgentEvalCaseChecked);
+    let of = |case: &str| {
+        checked
+            .iter()
+            .find(|check| check["case"] == case)
+            .unwrap_or_else(|| panic!("no check of {case}: {checked:?}"))
+    };
+    assert_eq!(checked.len(), 2, "{checked:?}");
+    let passed = of("needs-d1");
+    assert_eq!(passed["eval_id"], id);
+    assert_eq!(passed["outcome"], "passed", "{passed}");
+    assert_eq!(passed["programs"], json!(["intree"]), "never does not run");
+    let stopped = of("has-bad");
+    assert_eq!(stopped["outcome"], "stopped", "{stopped}");
+    assert_eq!(stopped["program"], "nobad");
+    assert_eq!(stopped["programs"], json!(["intree", "nobad"]));
+    assert!(
+        stopped["stderr_tail"]
+            .as_str()
+            .unwrap()
+            .contains("bad.txt is not allowed"),
+        "the landing branch's script ran: {stopped}"
+    );
+
+    let scores = events(&fx.db, EventKind::AgentEvalFinished);
+    assert_eq!(scores.len(), 1);
+    let scores = &scores[0];
+    assert_eq!(scores["outcome"], "complete", "{scores}");
+    assert_eq!(scores["passed"], true, "{scores}");
+    assert_eq!(scores["runs"], 1);
+    assert_eq!(scores["failed_cases"], json!([]), "{scores}");
+    assert_eq!(
+        scores["program_stopped"],
+        json!({"count": 1, "cases": [{"id": "has-bad", "program": "nobad"}]})
+    );
+    assert_eq!(scores["cost"]["spent_usd"], 0.25, "programs spend nothing");
+
+    // Recorded as the eval's program jobs, apart from its agent jobs.
+    let labels: Vec<Option<String>> = Connection::open(&fx.db)
+        .unwrap()
+        .prepare("SELECT label FROM headless_jobs WHERE kind='agent_eval_program' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let mut labels: Vec<String> = labels.into_iter().flatten().collect();
+    labels.sort();
+    assert_eq!(
+        labels,
+        [
+            format!("demo:{id}:has-bad:intree"),
+            format!("demo:{id}:has-bad:nobad"),
+            format!("demo:{id}:needs-d1:intree"),
+        ]
+    );
+    assert_eq!(eval_jobs(&fx.db).len(), 1);
+}
+
+/// A case's program that cannot start (its script's `#!` line names no
+/// interpreter there is) leaves the case's violations unknown: no agent job
+/// starts, the case's check is recorded as failed, and the round closes
+/// incomplete (`program_failed`) and does not pass (ADR-t1728-1 (i)).
+#[test]
+fn a_program_that_cannot_start_closes_the_round_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture();
+    let scripts = fx.repo.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    let script = scripts.join("noexec.sh");
+    fs::write(&script, "#!/nonexistent/interpreter\nexit 0\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = fx.repo.join("dagq.toml");
+    let mut text = fs::read_to_string(&config).unwrap_or_default();
+    text.push_str("\n[review.programs.noexec]\nscript = \"scripts/noexec.sh\"\npaths = [\"**\"]\n");
+    fs::write(&config, text).unwrap();
+    git(&fx.repo, &["add", "."]);
+    git(&fx.repo, &["commit", "-q", "-m", "programs"]);
+    commit_agents(&fx.repo);
+    let id = common::cli::ok(&fx.db, &["agent", "eval", "demo"])["eval_id"]
+        .as_i64()
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let agent = EvalAgent::new(out.path(), &[violation(), clean()]);
+    let outcome = supervise(&fx, &agent);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    assert!(agent.launches().is_empty(), "no agent job starts");
+    assert!(events(&fx.db, EventKind::AgentEvalRunStarted).is_empty());
+    let checked = events(&fx.db, EventKind::AgentEvalCaseChecked);
+    assert_eq!(checked.len(), 1, "nothing starts after it: {checked:?}");
+    assert_eq!(checked[0]["eval_id"], id);
+    assert_eq!(checked[0]["outcome"], "failed", "{}", checked[0]);
+    assert_eq!(checked[0]["program"], "noexec");
+    assert_eq!(checked[0]["failure"], "start_failed");
+    let scores = events(&fx.db, EventKind::AgentEvalFinished);
+    assert_eq!(scores.len(), 1);
+    assert_eq!(scores[0]["outcome"], "incomplete", "{}", scores[0]);
+    assert_eq!(scores[0]["incomplete_reason"], "program_failed");
+    assert_eq!(scores[0]["passed"], false);
+}

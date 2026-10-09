@@ -447,6 +447,10 @@ pub struct Ports<'a> {
     /// (ADR-t1063-1); `None` when this supervisor found no Codex that runs.
     pub codex_jobs: Option<&'a dyn AgentProvider>,
     pub spawner: &'a dyn Spawner,
+    /// Where the program jobs of a review run, by the backend of the
+    /// review's actor (ADR-t1895-2 decision 5): an eval's case's program
+    /// reviews (ADR-t1728-1 (i)).
+    pub programs: crate::application::review_programs::ProgramBackends<'a>,
     /// The queue service's tokens and socket, which the workers and the
     /// jobs are given instead of the queue's path (goal 82's stage (3)).
     pub service_access: &'a dyn super::queue_service::ServiceAccess,
@@ -938,6 +942,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         codex_jobs: ports.codex_jobs,
         signals: claude.signals,
         spawner: ports.spawner,
+        programs: &ports.programs,
         service_access: ports.service_access,
         files: ports.files.clone(),
         processes: ports.processes.clone(),
@@ -1092,6 +1097,8 @@ struct Supervisor<'a> {
     /// ADR-t1433-2).
     signals: &'a dyn AgentSignals,
     spawner: &'a dyn Spawner,
+    /// Where the program jobs of a review run ([`Ports::programs`]).
+    programs: &'a crate::application::review_programs::ProgramBackends<'a>,
     service_access: &'a dyn super::queue_service::ServiceAccess,
     files: Arc<dyn RunFiles>,
     processes: Arc<dyn ProcessControl + Send + Sync>,

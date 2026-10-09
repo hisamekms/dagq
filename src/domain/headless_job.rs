@@ -27,6 +27,11 @@ pub const REVIEW_PROGRAM: &str = "review_program";
 /// told apart from it; its `label` is `<agent>:<eval id>:<case>:<run>` and
 /// its `attempt` the run of the case, from 0.
 pub const AGENT_EVAL: &str = "agent_eval";
+/// `headless_jobs.kind` of a program job of a case of the eval of an agent
+/// (ADR-t1728-1 (i)), run before the case's agent job as a run's review's
+/// program job is; its `label` is `<agent>:<eval id>:<case>:<program>` and
+/// its `attempt` the run of the case it goes before.
+pub const AGENT_EVAL_PROGRAM: &str = "agent_eval_program";
 /// `headless_jobs.provider` of a job no provider runs (a program job): the
 /// column is the provider of an agent job only.
 pub const NO_PROVIDER: &str = "none";

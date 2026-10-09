@@ -79,6 +79,7 @@ macro_rules! event_kinds {
 }
 
 event_kinds! {
+    AgentEvalCaseChecked => "agent_eval_case_checked",
     AgentEvalFinished => "agent_eval_finished",
     AgentEvalRefused => "agent_eval_refused",
     AgentEvalRequested => "agent_eval_requested",
@@ -417,6 +418,7 @@ impl EventKind {
                 | AgentEvalTakenUp
                 | AgentEvalRunStarted
                 | AgentEvalRunFinished
+                | AgentEvalCaseChecked
                 | AgentEvalFinished
                 // A command the authorizer refused (ADR-t728-1 decision 5).
                 | AuthorizationDenied
@@ -1033,6 +1035,7 @@ mod tests {
     #[test]
     fn each_kind_writes_the_text_it_always_wrote() {
         let table = [
+            (EventKind::AgentEvalCaseChecked, "agent_eval_case_checked"),
             (EventKind::AgentEvalFinished, "agent_eval_finished"),
             (EventKind::AgentEvalRefused, "agent_eval_refused"),
             (EventKind::AgentEvalRequested, "agent_eval_requested"),

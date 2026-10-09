@@ -12,6 +12,7 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use super::commands::{DenialLog, Gate};
+use crate::domain::agent_eval::programs;
 use crate::domain::agent_eval::record::{self, Request, Round};
 use crate::domain::agent_eval::review::{self, Metric, Metrics, ReviewOutcome, ReviewRun};
 use crate::domain::agent_eval::round::held_out;
@@ -232,10 +233,14 @@ fn detail(round: &Round) -> Value {
 /// A round a supervisor took up whose definition or cases no longer read
 /// at the commit it started on ends with the runs it has
 /// (`cases_unreadable`).
+/// A program review of a case could not start or ran past its time, so
+/// whether the case breaks its check is not known (`program_failed`,
+/// ADR-t1728-1 (i)); no run starts after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Incomplete {
     CostLimit,
     CasesUnreadable,
+    ProgramFailed,
 }
 
 impl Incomplete {
@@ -243,6 +248,20 @@ impl Incomplete {
         match self {
             Self::CostLimit => "cost_limit",
             Self::CasesUnreadable => "cases_unreadable",
+            Self::ProgramFailed => "program_failed",
+        }
+    }
+
+    /// Why a round that ends now is incomplete: a program that could not
+    /// tell (`program_failed`) over runs left for its dollars
+    /// (`cost_limit`); `None` when every run it planned ended.
+    pub fn of(program_failed: bool, runs_left: bool) -> Option<Self> {
+        if program_failed {
+            Some(Self::ProgramFailed)
+        } else if runs_left {
+            Some(Self::CostLimit)
+        } else {
+            None
         }
     }
 }
@@ -263,8 +282,12 @@ fn metrics(metrics: &Metrics) -> Value {
 /// code's in `per_code`); `passed` only for a complete round all four of
 /// whose values reach it; the failed cases with the agent's reasons; the
 /// dollars spent by where they came from; and the definition's and the
-/// cases' digests. `incomplete` says why it ended before every run.
-pub fn finished(round: &Round, cases: &[Case], incomplete: Option<Incomplete>) -> Value {
+/// cases' digests. `incomplete` says why it ended before every run. The
+/// cases a program review stopped are out of the agent's scores and
+/// counted in `program_stopped` with each one's id and program
+/// ([`programs::stopped_record`]).
+pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete>) -> Value {
+    let cases = &programs::scored_cases(all_cases, &round.checks);
     let started = round.started.as_ref();
     let threshold = started.map_or(crate::domain::agent_eval::DEFAULT_THRESHOLD, |s| {
         s.threshold
@@ -272,6 +295,12 @@ pub fn finished(round: &Round, cases: &[Case], incomplete: Option<Incomplete>) -
     let ended: Vec<(&str, u32, Option<&Value>)> = round
         .runs
         .iter()
+        .filter(|run| {
+            !matches!(
+                round.checks.get(&run.case),
+                Some(programs::CaseCheck::Stopped { .. })
+            )
+        })
         .filter_map(|run| {
             let end = run.end.as_ref().filter(|end| !end.abandoned)?;
             Some((run.case.as_str(), run.round, end.result.as_ref()))
@@ -329,6 +358,7 @@ pub fn finished(round: &Round, cases: &[Case], incomplete: Option<Incomplete>) -
             "code": code.code, "recall": code.recall, "precision": code.precision, "meets": code.meets,
         })).collect::<Vec<_>>(),
         "failed_cases": failed_cases,
+        "program_stopped": programs::stopped_record(all_cases, &round.checks),
         "runs": runs.len(),
         "cost": {"spent_usd": round.spent_usd(), "by_source": by_source},
         "definition_digest": started.map(|s| &s.definition_digest),
@@ -491,5 +521,98 @@ mod tests {
         assert_eq!(failed[1]["id"], "clean-one");
         assert_eq!(failed[1]["reasons"][0][0]["text"], "notes look odd");
         assert!(!scores["below"].as_array().unwrap().is_empty());
+    }
+
+    /// A case a program review stopped is out of the agent's scores (its
+    /// judgment and codes, its failed cases) and named in
+    /// `program_stopped` with the program (ADR-t1728-1 (i)).
+    #[test]
+    fn a_case_a_program_stopped_is_out_of_the_scores_and_named() {
+        let mut stopped = round(&[(
+            "needs-d1",
+            verdict("revise", &["D-1"], "adds notes.txt"),
+            json!({"usd": 0.25, "source": "actual"}),
+        )]);
+        stopped.checks.insert(
+            "clean-one".to_owned(),
+            programs::CaseCheck::Stopped {
+                program: "fmt".to_owned(),
+            },
+        );
+        stopped
+            .checks
+            .insert("needs-d1".to_owned(), programs::CaseCheck::Passed);
+        let scores = finished(&stopped, &cases(), None);
+        assert_eq!(scores["outcome"], "complete");
+        assert_eq!(scores["passed"], true, "{scores}");
+        assert_eq!(scores["runs"], 1);
+        assert_eq!(scores["failed_cases"], json!([]), "{scores}");
+        assert_eq!(
+            scores["program_stopped"],
+            json!({"count": 1, "cases": [{"id": "clean-one", "program": "fmt"}]})
+        );
+        // A judgment recorded on a stopped case counts for nothing; the
+        // same judgment on a case no program stopped counts against it.
+        let judged = |stopped: bool| {
+            let mut judged = round(&[
+                (
+                    "needs-d1",
+                    verdict("revise", &["D-1"], "adds notes.txt"),
+                    json!({"usd": 0.25, "source": "actual"}),
+                ),
+                (
+                    "clean-one",
+                    verdict("concern", &["D-1"], "notes look odd"),
+                    json!({"usd": 0.25, "source": "actual"}),
+                ),
+            ]);
+            if stopped {
+                judged.checks.insert(
+                    "clean-one".to_owned(),
+                    programs::CaseCheck::Stopped {
+                        program: "fmt".to_owned(),
+                    },
+                );
+            }
+            finished(&judged, &cases(), None)
+        };
+        let scores = judged(true);
+        assert_eq!(
+            (scores["passed"].clone(), scores["runs"].clone()),
+            (json!(true), json!(1)),
+            "{scores}"
+        );
+        let scores = judged(false);
+        assert_eq!(scores["program_stopped"]["count"], 0);
+        assert_eq!(scores["passed"], false, "{scores}");
+        assert_eq!(scores["failed_cases"][0]["id"], "clean-one", "{scores}");
+    }
+
+    /// A program that could not run or ran past its time closes the round
+    /// as `program_failed`, which never passes even with every value over
+    /// the threshold; it goes before the dollars' limit.
+    #[test]
+    fn a_program_that_failed_closes_the_round_incomplete() {
+        assert_eq!(Incomplete::of(true, true), Some(Incomplete::ProgramFailed));
+        assert_eq!(Incomplete::of(true, false), Some(Incomplete::ProgramFailed));
+        assert_eq!(Incomplete::of(false, true), Some(Incomplete::CostLimit));
+        assert_eq!(Incomplete::of(false, false), None);
+        let perfect = round(&[
+            (
+                "needs-d1",
+                verdict("revise", &["D-1"], "adds notes.txt"),
+                json!({"usd": 0.25, "source": "actual"}),
+            ),
+            (
+                "clean-one",
+                verdict("pass", &[], "fine"),
+                json!({"usd": 0.25, "source": "actual"}),
+            ),
+        ]);
+        let scores = finished(&perfect, &cases(), Some(Incomplete::ProgramFailed));
+        assert_eq!(scores["outcome"], "incomplete");
+        assert_eq!(scores["incomplete_reason"], "program_failed");
+        assert_eq!(scores["passed"], false);
+        assert!(scores["below"].as_array().unwrap().is_empty(), "{scores}");
     }
 }

@@ -3,14 +3,50 @@
 //! committed tree when the attempt starts, never from the run's worktree
 //! or the main checkout's files (decision 2). The programs then run as
 //! program jobs ([`super::supervise::start_review_program`]) against the
-//! run's worktree.
+//! run's worktree, on the backend of the review's actor
+//! ([`ProgramBackends`]). The eval of an agent reads and runs a case's
+//! programs the same way, at the commit its round reads its cases from
+//! (ADR-t1728-1 (i)).
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
-use super::Repository;
+use super::execution::{ExecutionConfig, ExecutorBackend};
 use super::review::{CONFIG_FILE, ReviewRange};
-use crate::domain::CommitSha;
+use super::{Repository, ReviewProgramBackend};
 use crate::domain::review_programs::{self, ReviewProgram};
+use crate::domain::{ActorRole, CommitSha};
+
+/// The backends a program job can run on, and which the review's actor
+/// (`ExecutionConfig::backend_of(ActorRole::ReviewJob)`) runs on: a
+/// program job is placed where the review's jobs are (ADR-t1895-2
+/// decision 5), never chosen apart from them.
+pub struct ProgramBackends<'a> {
+    /// The host's: the program a process of this user on this host.
+    pub host: &'a dyn ReviewProgramBackend,
+    pub config: ExecutionConfig,
+}
+
+impl<'a> ProgramBackends<'a> {
+    pub fn new(host: &'a dyn ReviewProgramBackend, config: ExecutionConfig) -> Self {
+        Self { host, config }
+    }
+
+    /// The backend the review's actor runs on. One that is only a reserved
+    /// name (`podman`) is the error of the program job's start and runs
+    /// nothing: never the host instead (fail closed).
+    pub fn backend(&self) -> Result<&'a dyn ReviewProgramBackend> {
+        match self.config.backend_of(ActorRole::ReviewJob) {
+            ExecutorBackend::Host => Ok(self.host),
+            other => {
+                other.ensure_implemented()?;
+                bail!(
+                    "no program job runs on the {} executor backend",
+                    other.as_str()
+                )
+            }
+        }
+    }
+}
 
 /// One program a review attempt runs, as the landing branch's commit has
 /// it: its configuration, the changed paths that required it, and its
@@ -34,6 +70,56 @@ pub struct ProgramSnapshot {
     pub programs: Vec<SnapshotProgram>,
 }
 
+/// The program reviews `dagq.toml` configures in `commit`'s tree, as
+/// `parse` reads them: none when the commit has no `dagq.toml` or one
+/// without `[review.programs.*]`; `Err` when the file cannot be read or
+/// parsed.
+pub fn programs_at(
+    repository: &dyn Repository,
+    commit: &str,
+    parse: &dyn Fn(&str) -> Result<Vec<ReviewProgram>>,
+) -> Result<Vec<ReviewProgram>> {
+    let Some(text) = repository
+        .file_in(commit, CONFIG_FILE)
+        .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
+    else {
+        return Ok(Vec::new());
+    };
+    parse(&text)
+        .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))
+}
+
+/// The programs of `configured` the paths `changed` require
+/// ([`review_programs::select`]), each with its script read in `commit`'s
+/// tree, whatever the tree they run against holds. `Err` when a selected
+/// script is not in the commit.
+pub fn required_programs(
+    repository: &dyn Repository,
+    commit: &str,
+    configured: &[ReviewProgram],
+    changed: &[String],
+) -> Result<Vec<SnapshotProgram>> {
+    let mut programs = Vec::new();
+    for selected in review_programs::select(configured, changed) {
+        let path = &selected.program.script;
+        let script = repository
+            .file_in(commit, path)
+            .with_context(|| format!("read {path} in the landing branch's commit {commit}"))?
+            .with_context(|| {
+                format!(
+                    "the review program {} that {CONFIG_FILE} names runs {path}, which is not in the landing branch's commit {commit}",
+                    selected.program.name
+                )
+            })?;
+        programs.push(SnapshotProgram {
+            program: selected.program,
+            matched: selected.matched,
+            script,
+        });
+    }
+    Ok(programs)
+}
+
 /// Read the program reviews from the landing branch's committed tree and
 /// select those the paths `<base>...<head>` changes require, each script
 /// read at the same commit. `Ok(None)` when the landing branch has no
@@ -49,14 +135,7 @@ pub fn snapshot_programs(
 ) -> Result<Option<ProgramSnapshot>> {
     let main = repository.main_head()?;
     let commit = main.to_string();
-    let Some(text) = repository
-        .file_in(&commit, CONFIG_FILE)
-        .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
-    else {
-        return Ok(None);
-    };
-    let configured = parse(&text)
-        .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))?;
+    let configured = programs_at(repository, &commit, parse)?;
     if configured.is_empty() {
         return Ok(None);
     }
@@ -65,24 +144,7 @@ pub fn snapshot_programs(
         .merge_base(&range.base, &range.head)?
         .map_or_else(|| range.base.clone(), CommitSha::into_string);
     let changed = repository.changed_paths(&from, &range.head)?;
-    let mut programs = Vec::new();
-    for selected in review_programs::select(&configured, &changed) {
-        let path = &selected.program.script;
-        let script = repository
-            .file_in(&commit, path)
-            .with_context(|| format!("read {path} in the landing branch's commit {commit}"))?
-            .with_context(|| {
-                format!(
-                    "the review program {} that {CONFIG_FILE} names runs {path}, which is not in the landing branch's commit {commit}",
-                    selected.program.name
-                )
-            })?;
-        programs.push(SnapshotProgram {
-            program: selected.program,
-            matched: selected.matched,
-            script,
-        });
-    }
+    let programs = required_programs(repository, &commit, &configured, &changed)?;
     Ok(Some(ProgramSnapshot {
         commit,
         range,
@@ -357,5 +419,112 @@ mod tests {
             )),
             "{error}"
         );
+    }
+
+    /// A case of an eval reads its programs and their scripts at the
+    /// round's commit, by the paths its change touches: a script or a
+    /// `dagq.toml` its patch changes in its tree is never what runs
+    /// (ADR-t1728-1 (i)); the fake fails any read at another commit.
+    #[test]
+    fn a_cases_programs_are_read_at_the_rounds_commit_whatever_its_patch_changes() {
+        let repository = Committed {
+            files: vec![
+                (CONFIG_FILE, CONFIG),
+                ("scripts/fmt.sh", FMT),
+                ("scripts/links.sh", SCRIPT),
+            ],
+            changed: Vec::new(),
+        };
+        let configured = programs_at(&repository, SHA, &parse).unwrap();
+        assert_eq!(configured.len(), 2);
+        // The case's patch rewrote the script and the configuration.
+        let changed = ["src/b.rs", "scripts/fmt.sh", CONFIG_FILE].map(str::to_owned);
+        let required = required_programs(&repository, SHA, &configured, &changed).unwrap();
+        assert_eq!(required.len(), 1, "links matches no changed path");
+        assert_eq!(required[0].program.name, "fmt");
+        assert_eq!(required[0].script, FMT);
+        let none = Committed {
+            files: Vec::new(),
+            changed: Vec::new(),
+        };
+        assert!(programs_at(&none, SHA, &parse).unwrap().is_empty());
+    }
+
+    /// A program backend that counts the commands it was asked for.
+    #[derive(Default)]
+    struct Counting(std::sync::atomic::AtomicUsize);
+
+    impl ReviewProgramBackend for Counting {
+        fn command(
+            &self,
+            _: &SnapshotProgram,
+            worktree: &Path,
+            _: &Path,
+            _: &Path,
+        ) -> Result<crate::application::CommandSpec> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut command = crate::application::CommandSpec::new("/bin/true");
+            command.current_dir(worktree);
+            Ok(command)
+        }
+    }
+
+    fn a_program() -> SnapshotProgram {
+        SnapshotProgram {
+            program: ReviewProgram {
+                name: "fmt".to_owned(),
+                script: "scripts/fmt.sh".to_owned(),
+                args: Vec::new(),
+                paths: vec!["**".to_owned()],
+                timeout_secs: None,
+            },
+            matched: vec!["a".to_owned()],
+            script: FMT.to_owned(),
+        }
+    }
+
+    /// With the review's actor on the host, a program job's command comes
+    /// from the host's adapter.
+    #[test]
+    fn a_review_on_the_host_runs_its_programs_with_the_hosts_adapter() {
+        let host = Counting::default();
+        let backends = ProgramBackends::new(&host, ExecutionConfig::default());
+        let dir = Path::new("/w");
+        let command = backends
+            .backend()
+            .unwrap()
+            .command(&a_program(), dir, dir, dir)
+            .unwrap();
+        assert_eq!(command.get_current_dir(), Some(dir));
+        assert_eq!(host.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// With the review's actor on podman, by its own setting or the
+    /// default's, the program job's start is an error and the host's
+    /// adapter is never asked: no program runs on the host instead.
+    #[test]
+    fn a_review_on_podman_is_an_error_and_never_runs_on_the_host() {
+        let host = Counting::default();
+        for config in [
+            ExecutionConfig {
+                backend: ExecutorBackend::Host,
+                actors: vec![(ActorRole::ReviewJob, ExecutorBackend::Podman)],
+            },
+            ExecutionConfig {
+                backend: ExecutorBackend::Podman,
+                actors: Vec::new(),
+            },
+        ] {
+            let backends = ProgramBackends::new(&host, config);
+            let error = format!("{:#}", backends.backend().err().unwrap());
+            assert!(error.contains("podman"), "{error}");
+        }
+        assert_eq!(host.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Another actor's backend does not move the review's programs.
+        let other = ExecutionConfig {
+            backend: ExecutorBackend::Host,
+            actors: vec![(ActorRole::Worker, ExecutorBackend::Podman)],
+        };
+        assert!(ProgramBackends::new(&host, other).backend().is_ok());
     }
 }
