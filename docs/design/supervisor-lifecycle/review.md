@@ -86,7 +86,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 | reviseの回数と衝突の試行 | `src/domain/run/history.rs`の`decide_revise`・`decide_conflict`・`RunHistory::round_revise_attempts` |
 | askとその答え | `landing.rs`の`ask_approve_landing`・`apply_landing_answers`・`start_approved_landings`、`src/domain/mod.rs`の`LandingAnswer` |
 | 引き継ぎ | `src/application/supervise/adopt.rs`（`adopted_start`・`adopted_concern`・`backfill_sent_back_concern`）、`src/domain/turn.rs`の`adopted_delivery` |
-| reviewのprompt | `src/application/prompt.rs`の`review_prompt`とその定数 |
+| reviewのprompt | `src/application/prompt/`の`review_prompt`とその定数 |
 | reviewのsubagent | `src/application/review.rs`（`snapshot_subagents`・`check_agents`）、`src/domain/review_subagents.rs` |
 | 着地の前のe2e | [着地の前のe2e](landing-e2e.md) |
 

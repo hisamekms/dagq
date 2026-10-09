@@ -587,12 +587,18 @@ fn lock_held(queue_dir: &Path) -> bool {
 pub type ServiceReads =
     Arc<dyn Fn(&mut SqliteQueue, &Path, &QueueRead) -> Result<Value> + Send + Sync>;
 
+/// How the service shows a task without `--full`: as the command line
+/// shows it (`compose::service_detail`), given by the composition root, so
+/// the infrastructure does not shape the output itself (architecture L6).
+pub type ServiceDetail = fn(&crate::domain::TaskDetail, usize) -> Value;
+
 /// How `dagq service serve` runs.
 #[derive(Clone)]
 pub struct ServeOptions {
     pub db: PathBuf,
     pub generators: Generators,
     pub reads: ServiceReads,
+    pub detail: ServiceDetail,
     /// Set by SIGINT or SIGTERM: the service stops accepting and exits.
     pub stop: Arc<AtomicBool>,
     /// How often the loop looks for a connection or a stop.
@@ -680,6 +686,7 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         queue_dir: queue_dir.clone(),
         generators: options.generators.clone(),
         reads: options.reads.clone(),
+        detail: options.detail,
     });
     let mut served = 0u64;
     let mut checked = Instant::now();
@@ -765,6 +772,7 @@ pub struct SqliteServiceBackend {
     pub queue_dir: PathBuf,
     pub generators: Generators,
     pub reads: ServiceReads,
+    pub detail: ServiceDetail,
 }
 
 impl SqliteServiceBackend {
@@ -791,6 +799,7 @@ impl ServiceBackend for SqliteServiceBackend {
             queue,
             db: self.db.clone(),
             reads: self.reads.clone(),
+            detail: self.detail,
         }))
     }
 
@@ -808,6 +817,7 @@ struct ServiceSqlite {
     queue: SqliteQueue,
     db: PathBuf,
     reads: ServiceReads,
+    detail: ServiceDetail,
 }
 
 impl ServiceSqlite {
@@ -878,7 +888,7 @@ impl ServiceQueue for ServiceSqlite {
         Ok(if full {
             serde_json::to_value(detail)?
         } else {
-            crate::view::task_detail(&detail, events)
+            (self.detail)(&detail, events)
         })
     }
 

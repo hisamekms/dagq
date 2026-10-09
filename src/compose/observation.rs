@@ -382,6 +382,12 @@ pub fn service_reads() -> crate::infrastructure::queue_service::ServiceReads {
     })
 }
 
+/// How the queue service shows a task without `--full`: as the command
+/// line shows it.
+pub fn service_detail() -> crate::infrastructure::queue_service::ServiceDetail {
+    crate::view::task_detail
+}
+
 /// The host's side of a read of the queue at `db`.
 struct HostReads<'a> {
     db: &'a Path,

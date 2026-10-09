@@ -30,7 +30,7 @@ related:
 # Prompt
 
 runtimeがagentに渡す文（workerの`prompt.txt`と依頼、headlessのjobとruntimeのplannerのprompt）の組み立て方の地図。
-文面そのものは`src/application/prompt.rs`の定数と組み立ての関数が持ち、この文書は節の目的・組み立ての順・約束だけを書く。
+文面そのものは`src/application/prompt/`の定数と組み立ての関数が持ち、この文書は節の目的・組み立ての順・約束だけを書く。
 
 ## 目的
 
@@ -59,7 +59,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 
 ## 責務と境界
 
-- `src/application/prompt.rs`: 全てのpromptと依頼の文面と組み立て。
+- `src/application/prompt/`: 全てのpromptと依頼の文面と組み立て。
   queueもファイルも直接は読まず、呼び出し側が集めた材料（`PlanReviewMaterial`・`RecoveryMaterial`など）を文にする。
 - `src/application/prompt_fit.rs`: 節ごとの件数とbyteの上限、切り方、省いたことの注記、`PromptBytes`の集計。
 - 材料を集めるのはsupervisorとapplicationの各use case（claim、plan review、復旧job、plannerの起動）で、queueの読み取りは`TaskStore`の読み取り専用の操作を使う。
@@ -235,7 +235,7 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 | observer | `queue_cli` | `src/application/observer/input.rs`（[Observer](observer.md#promptの入力の上限と選ぶ順)） | そのmoduleの`PROMPT_LIMIT` |
 | goal review | `read_files_and_queue_cli` | `goal_review_prompt` | `GOAL_REVIEW_*` |
 | スループットの見直し | `queue_cli` | `src/application/throughput_review.rs`の`review_prompt`（[スループットの見直し](throughput-review.md)） | そのmoduleの`PROMPT_LIMIT`・`PROMPT_INPUT_LIMIT` |
-| runのreview | `read_files` | `prompt.rs`の`review_prompt` | `RUN_REVIEW_*` |
+| runのreview | `read_files` | `prompt::run_review`の`review_prompt` | `RUN_REVIEW_*` |
 | agentのjob（[下](#agentのjobの上限)） | `read_files`を定義の道具に狭める | `agent_job::build` | `AGENT_JOB_*` |
 | 復旧job | `read_files` | `recovery_prompt`（`RecoveryMaterial`） | `RECOVERY_*` |
 | runtimeのplanner | plannerのrole | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt` | `RUNTIME_PLANNER_*`・`DRAFT_*`・`FINDING_*`・`REQUEST_*`・`PLANNER_*` |
@@ -244,7 +244,7 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 
 ### plan reviewの上限
 
-- 入口: `src/application/prompt.rs`の`PLAN_REVIEW_PROMPT_LIMIT`から並ぶ定数と、`plan_review_prompt`の省いてよい節の取り方。
+- 入口: `src/application/prompt/`の`PLAN_REVIEW_PROMPT_LIMIT`から並ぶ定数と、`plan_review_prompt`の省いてよい節の取り方。
   仕組み（必須の節の替え方、選ぶ順、省いたことの書き方）は[Plan review](plan-review.md)の4の「上限と選ぶ順」が持つ。
 - 値の理由と本番の大きさは各定数のdoc commentが持つ。
 - 約束: 省いてよい節は、全体の残りを依存と重複の判断に直接効くものから取り、CLIの一覧で代えやすい要約を最後にする。
@@ -280,7 +280,7 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 
 ### goal review・runのreview・復旧job・runtimeのplannerの上限
 
-- 入口: 値は`src/application/prompt.rs`の各jobの定数（`GOAL_REVIEW_*`・`RUN_REVIEW_*`・`RECOVERY_*`・`RUNTIME_PLANNER_*`・`DRAFT_*`・`FINDING_*`・`REQUEST_*`・`PLANNER_*`）、仕組みは`src/application/prompt_fit.rs`（`pick`・`cut`・`shrink`・`Fit`）。
+- 入口: 値は`src/application/prompt/`の各jobの定数（`GOAL_REVIEW_*`・`RUN_REVIEW_*`・`RECOVERY_*`・`RUNTIME_PLANNER_*`・`DRAFT_*`・`FINDING_*`・`REQUEST_*`・`PLANNER_*`）、仕組みは`src/application/prompt_fit.rs`（`pick`・`cut`・`shrink`・`Fit`）。
   値の理由と本番の大きさは各定数のdoc commentが持つ。
 - 選ぶ順: 一覧の節は決まった順で取り、入らない項目は飛ばして次を試し（1件の巨大な項目が残りを隠さない）、残したものはもとの順で載せる。
   多くの節は新しい順に取り、goal reviewのtaskは着地したものを先に、復旧jobの依存先は今のbuildが含まないか言えないものを先に取る。
@@ -303,4 +303,4 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
   省いた件数（`omitted`）は節ごとに、省いた項目と残して切った項目を数える。
   この節のjobとplannerの節は1件を1回だけ数える。
   単位と、欄ごとに数えるworkerの初期promptの節は`PromptBytes`のdoc commentが持つ。
-- 上限を確かめるunit testは`src/application/prompt.rs`の「最も大きな入力でも上限に収まる」test群で、eventの記録は各jobの`tests/it`のmoduleが確かめる。
+- 上限を確かめるunit testは`src/application/prompt/`の「最も大きな入力でも上限に収まる」test群で、eventの記録は各jobの`tests/it`のmoduleが確かめる。

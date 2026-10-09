@@ -33,8 +33,8 @@ ADR-t616-1の時点（2026-09-27）で英語に直す対象だったもので、
 | 場所 | 文字列（今） | 用途 |
 | --- | --- | --- |
 | `src/application/integrate.rs`の`register_follow_ups` | `follow_up proposed by the receipt of run {run_id} of task {id} ({title})` | follow_upのdraftの`context` |
-| `src/application/prompt.rs`の`draft_planner_prompt` | `follow-up draft (proposed by the receipt of run {} of task {})`、`goal gap draft (proposed by the judgment of goal {})` | runtimeのplannerが`--context`の冒頭に書く見出し |
-| `src/application/prompt.rs`の`finding_planner_prompt` | `from finding {id} ({kind})` | 同上（findingから作るtask） |
+| `src/application/prompt/`の`draft_planner_prompt` | `follow-up draft (proposed by the receipt of run {} of task {})`、`goal gap draft (proposed by the judgment of goal {})` | runtimeのplannerが`--context`の冒頭に書く見出し |
+| `src/application/prompt/`の`finding_planner_prompt` | `from finding {id} ({kind})` | 同上（findingから作るtask） |
 | `src/domain/kpi/push.rs` | `target breach`、`landings`、`breaches`、`missed N period(s) in a row (since …)`、`target`、`and`、`Breaches:`、`Missed (1 period):`、`Resolved:`、`open asks: {open_asks}`、`report: {html}`、区切りの`, ` | KPIの目標割れと日次のまとめのpushのメッセージ |
 
 pluginのskill（`dagq-recover`の`reference/review-by-hand.md`、`dagq`の`reference/goal-close.md`）はfollow_upのcontextの文言を引用しているので、合わせて英語の文言にした（古い日本語の文言の記録が残ることも書いた）。`tests/it/related.rs`は古い文言の形のcontextを入力の例に使うが、読むのはtaskの番号だけなので変えていない。

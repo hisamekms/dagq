@@ -101,7 +101,7 @@ TOP_DOC_DIRS = ("docs/design", "docs/design/supervisor-lifecycle")
 MAP_LIMIT = 30720
 
 # M4: the head of the first user message of a conversation, as the runtime
-# writes it (src/application/prompt.rs: the worker's prompt and the run
+# writes it (src/application/prompt/: the worker's prompt and the run
 # review's prompt). Any other conversation (recovery, triage, a resumed turn
 # in a new transcript) is not counted.
 WORKER_PREFIX = "You are executing dagq task "

@@ -212,7 +212,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 **操作**
 
 - application: `application::lifecycle`（`up`・`down`）・`install`・`update`・`queue_service`・`sccache`・`actor_executor`・`execution`ほかと、`application::supervise`の同名のsubmoduleと`disk`・`cleanup`・`sweep`・`handoff`・`inbox_nudge`。
-- infrastructure: `launchd`・`binaries`・`queue_service`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`の`SupervisorRegistry`、`runtime_store::run_log`の`InboxWatchLog`。
+- infrastructure: `launchd`・`binaries`・`queue_service`（`show`の整形はcomposeが注入）・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`の`SupervisorRegistry`、`runtime_store::run_log`の`InboxWatchLog`。
 
 **公開するport**
 
@@ -244,6 +244,18 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 `EventStore`・`StateStore`のportは`shared`、論理ストアは[計測](measurement.md#ssotとビュー)。
 `RunLog`は利用側を書き換えないために残す`RunReads`と`EventStore`の別名。
 
+## promptとhealthのmodule
+
+親が`pub use`で再公開し、間の依存はscriptで見ない。
+
+| module | context | 主な関数 |
+| --- | --- | --- |
+| `prompt::worker`・`requests`・`run_review` | 実行と着地 | `prompt`・`resume_request`・`recovery_prompt` |
+| `prompt::planners`・`plan_review` | 計画管理 | `inbox_prompt`・`plan_review_prompt` |
+| `health::runs` | 実行と着地 | `recover` |
+| `health::report`・`attention` | 観測と分析 | `status`・`attention` |
+| `health::host` | host運用 | `supervisors`・`roles` |
+
 ## 混在しているmodule
 
 contextを1つに決められず、分ける先を持つもの。
@@ -251,8 +263,6 @@ contextを1つに決められず、分ける先を持つもの。
 | module | 混ざっているcontext | 分ける先 |
 | --- | --- | --- |
 | `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
-| `application::prompt` | workerのprompt（実行と着地）、inbox・plannerのprompt（計画管理）、observerとスループットの見直しのprompt（観測と分析） | 未登録（follow_up） |
-| `application::health` | `status`・`doctor`とattention（観測と分析）、`recover`（実行と着地）、`doctor`のhostの部分（host運用） | 未登録（follow_up） |
 
 ## `Supervisor`の状態
 
@@ -374,10 +384,9 @@ reviewで見る規則の行は、行き先をこの表の言葉で書く。
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
 | L5 | `src/application`の`Instant::now` | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
-| L6 | `src/infrastructure/queue_service.rs`（`crate::view::task_detail`） | infrastructureがレイヤーの外を呼ぶ | 許可の一覧の項目 |
 | C4 | `integrate`・`session`・`headless_session`・`session_log`・`screen`・`recording`・`supervise`のループと工程（計画管理・sweep）・`planner`・`planner_request` | 全体の`Queue`を取る | portの分割 |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | portの分割 |
-| C5 | `src/application/health.rs`の`attention` | 計画管理の内部の`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`を読む | portの分割 |
+| C5 | `health::attention` | 計画管理の内部の`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`を読む | portの分割 |
 | C5 | `src/application/lifecycle.rs` | host運用が実行と着地の内部の`RunRecovery`を読む | portの分割 |
 | C6 | `src/application/supervise/resume.rs`・`supervise/recheck.rs`・`supervise/recovery.rs`ほか | 判断に使うeventのpayloadを文字列のkeyで読む | 型付きの復元の値（`domain::run::payload`の形）へ |
 | X3・C1 | T1: `src/infrastructure/sqlite.rs`の`claim_task`（計画管理のstore）が`INSERT INTO task_runs`を書く | 計画管理のstoreが実行と着地の表をSQLで直接書く | 未登録（follow_up） |

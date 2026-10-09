@@ -3235,6 +3235,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     db: db.clone(),
                     generators: generators.clone(),
                     reads: dagq::compose::service_reads(),
+                    detail: dagq::compose::service_detail(),
                     stop: install_stop_signal()?,
                     poll: Duration::from_millis(50),
                     owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
