@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{EventKind, RunEvent, RunHistory, RunStatus, event_kind};
+use super::{EventKind, RecoveredLanding, RunEvent, RunHistory, RunStatus, event_kind};
 
 /// The version of the recording rules a `run_phase_changed` was written by
 /// (its `v`): raised when what a phase or a tag means changes.
@@ -237,6 +237,27 @@ impl Phase {
     pub fn after_landing(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
         let queued = RunHistory::from_events(events).queued_approval().is_some();
         Self::at_rest(status, queued)
+    }
+
+    /// The phase a recovery (`run_recovered`, already among the run's
+    /// `events`) leaves the run in, by the status it left the run in. A run
+    /// awaiting integration whose landing was given up and not moved on
+    /// from ([`RunHistory::recovered_landing`]) is in the phase that
+    /// recovery set, however often it is recovered again: one it lands
+    /// again waits for its landing turn, one it reviews again waits for a
+    /// slot to come back to. Any other run is [`Self::at_rest`] by its
+    /// status and whether an `approve_landing` answer queued it to land.
+    pub fn after_recovery(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+        let history = RunHistory::from_events(events);
+        match history.recovered_landing() {
+            Some(RecoveredLanding::Land(_)) if status == RunStatus::AwaitingIntegration => {
+                Some(Self::LandingQueue)
+            }
+            Some(RecoveredLanding::Review(_)) if status == RunStatus::AwaitingIntegration => {
+                Some(Self::Returning)
+            }
+            _ => Self::at_rest(status, history.queued_approval().is_some()),
+        }
     }
 }
 
@@ -507,6 +528,145 @@ mod tests {
         assert_eq!(after(RunStatus::NeedsSession), Some(Phase::NeedsSession));
         assert_eq!(after(RunStatus::Failed), Some(Phase::Ended));
         assert_eq!(after(RunStatus::Integrated), None);
+    }
+
+    fn recovered(id: i64, previous: RunStatus) -> RunEvent {
+        event(
+            id,
+            event_kind::RUN_RECOVERED,
+            json!({"previous_status": previous, "status": "awaiting_integration"}),
+        )
+    }
+
+    /// A landing given up: the run lands again, waiting for its landing
+    /// turn, when it was approved (by a `land` answer, whose queue the
+    /// landing's start consumed, or by a person's `integrate`) or its
+    /// review lets it land; it is reviewed again, waiting for a slot,
+    /// otherwise.
+    #[test]
+    fn a_recovered_landing_lands_again_or_returns_for_its_review() {
+        let started = event(10, event_kind::INTEGRATION_STARTED, json!({}));
+        let after = |before: Vec<RunEvent>| {
+            let mut events = before;
+            events.push(started.clone());
+            events.push(recovered(11, RunStatus::Integrating));
+            Phase::after_recovery(RunStatus::AwaitingIntegration, &events)
+        };
+        let land_answer = event(
+            1,
+            event_kind::INTEGRATION_APPROVED,
+            json!({"ask_id": 3, "answer": "land"}),
+        );
+        let integrate = event(1, event_kind::INTEGRATION_APPROVED, json!({}));
+        let passed = event(1, event_kind::REVIEW_FINISHED, json!({"verdict": "pass"}));
+        for landable in [land_answer, integrate, passed] {
+            assert_eq!(
+                after(vec![landable.clone()]),
+                Some(Phase::LandingQueue),
+                "{landable:?}"
+            );
+        }
+        let revise = event(1, event_kind::REVIEW_FINISHED, json!({"verdict": "revise"}));
+        for unlandable in [vec![], vec![revise]] {
+            assert_eq!(after(unlandable), Some(Phase::Returning));
+        }
+        assert_eq!(Phase::Returning.tags(), Phase::LandingQueue.tags());
+    }
+
+    /// A run recovered again before anything moved on from its given-up
+    /// landing stays in the phase the first recovery set, so nothing new
+    /// is recorded: its approval's queue is gone, yet it does not wait for
+    /// a person, and one to review does not join the landing queue.
+    #[test]
+    fn a_second_recovery_keeps_the_phase_of_the_first() {
+        let resume = Attempt::of(AttemptKind::Resume, 2);
+        for (before, phase) in [
+            (
+                event(
+                    1,
+                    event_kind::INTEGRATION_APPROVED,
+                    json!({"ask_id": 3, "answer": "land"}),
+                ),
+                Phase::LandingQueue,
+            ),
+            (event(1, "ask_closed", json!({})), Phase::Returning),
+        ] {
+            let mut events = vec![
+                before,
+                event(2, event_kind::INTEGRATION_STARTED, json!({})),
+                recovered(3, RunStatus::Integrating),
+            ];
+            assert_eq!(
+                Phase::after_recovery(RunStatus::AwaitingIntegration, &events),
+                Some(phase)
+            );
+            events.push(event(
+                4,
+                event_kind::RUN_PHASE_CHANGED,
+                PhaseChange::new(phase, resume, event_kind::RUN_RECOVERED).payload(),
+            ));
+            events.push(recovered(5, RunStatus::AwaitingIntegration));
+            assert_eq!(
+                Phase::after_recovery(RunStatus::AwaitingIntegration, &events),
+                Some(phase),
+                "{}",
+                phase.name()
+            );
+            assert_eq!(
+                next_change(&events, phase, event_kind::RUN_RECOVERED),
+                None,
+                "{}",
+                phase.name()
+            );
+        }
+    }
+
+    /// A recovery with no given-up landing left to act on rests the run by
+    /// its status and an `approve_landing` answer's queue.
+    #[test]
+    fn a_recovery_without_a_landing_given_up_rests_the_run() {
+        let approved = event(
+            1,
+            event_kind::INTEGRATION_APPROVED,
+            json!({"ask_id": 3, "answer": "land"}),
+        );
+        let after = |status, events: &[RunEvent]| Phase::after_recovery(status, events);
+        let from_awaiting = recovered(2, RunStatus::AwaitingIntegration);
+        assert_eq!(
+            after(
+                RunStatus::AwaitingIntegration,
+                &[approved.clone(), from_awaiting.clone()]
+            ),
+            Some(Phase::LandingQueue)
+        );
+        assert_eq!(
+            after(
+                RunStatus::AwaitingIntegration,
+                std::slice::from_ref(&from_awaiting)
+            ),
+            Some(Phase::LandingAnswer)
+        );
+        assert_eq!(
+            after(
+                RunStatus::NeedsSession,
+                std::slice::from_ref(&from_awaiting)
+            ),
+            Some(Phase::NeedsSession)
+        );
+        assert_eq!(
+            after(RunStatus::Interrupted, &[recovered(2, RunStatus::Running)]),
+            Some(Phase::Ended)
+        );
+        // A review taken up after the given-up landing consumed it.
+        let consumed = [
+            recovered(1, RunStatus::Integrating),
+            event(2, event_kind::REVIEW_STARTED, json!({})),
+            from_awaiting,
+        ];
+        assert_eq!(
+            after(RunStatus::AwaitingIntegration, &consumed),
+            Some(Phase::LandingAnswer)
+        );
     }
 
     /// The next change goes on in the attempt last recorded and is `None`

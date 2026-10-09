@@ -72,7 +72,7 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
   記録の失敗はwarnだけで、runの工程の判断は待たない。
   人の`integrate`の着地は`Integrator`が書く: integration slotを取った所で`landing`を、mainが動く前にslotを返した所（検査の拒否・エラー・`needs_session`・hold・`failed`）でrunが戻ったstatusの工程を書く。
   supervisorの着地はslotが書く。
-  storeは`run_integrated`と同じtransactionで`push`を、`recover`と放置のrunの回収は`run_recovered`と同じtransactionでstatusの工程（`interrupted`は`ended`、やめた着地は`landing_queue`）を書く。
+  storeは`run_integrated`と同じtransactionで`push`を、`recover`と放置のrunの回収は`run_recovered`と同じtransactionでstatusの工程（`interrupted`は`ended`、やめた着地は`landing_queue`、reviewし直すなら`returning`）を書く。
 - **タグ**: `blocker`は`queue`（slotや着地の順番の空き待ち）・`ai`（agentが動いている）・`compute`（build・test・検証の計算）・`human`（人の答え）・`runtime`（dagq自身の処理と見張りの間隔）・`external`（GitHub・remote・providerのAPIなど外のサービス）・`infra`（実行環境の用意・故障・資源の不足。ADR-t1662-3決定5）。`holds`は`worker_slot`・`landing_slot`・`none`で、slotの数え方（着地の順番だけを待つrunと人の答えを待つrunはslotの外）に従う。
 - **`Phase::tags()`**: 記録の工程の定義（`domain::run_phase`）の隣で網羅的な`match`がタグを返す。
   supervisorの工程も網羅的な`match`で記録の工程に対応し、どちらも工程を足して書き忘れるとコンパイルが止まる。
@@ -103,7 +103,7 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 | `needs_session` | resumeを待つ | queue | none |
 | `push` | `run_integrated`の後のpush | external | supervisorのslotが持つ間は`worker_slot`、人の`integrate`は`none` |
 | `push_pending` | `push_failed`の後 | human | none |
-| `ended` | 終わり（`cause`が`pushed`・`push_skipped`・`failed`・`canceled`・`run_recovered`など） | runtime | none |
+| `ended` | 終わり（`cause`は下の「終端」） | runtime | none |
 
 予定・未実装: taskのholdで走っていた工程が終わり待ちに入った後の工程`held`（human・none）。
 

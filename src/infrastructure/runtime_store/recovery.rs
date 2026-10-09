@@ -268,13 +268,13 @@ impl SqliteQueue {
         Reason::new(ReasonCode::Orphaned).apply_to(&mut report);
         run_event(&tx, id, EventKind::RunRecovered, report)?;
         // An interrupted run ends; a landing given up waits to land or be
-        // reviewed again, which the supervisor takes up on its own.
-        let queued = run_events_of(&tx, id).is_ok_and(|events| {
-            let history = crate::domain::RunHistory::from_events(&events);
-            history.queued_approval().is_some() || history.recovered_landing().is_some()
-        });
-        if let Some(phase) = run_phase::Phase::at_rest(run.status(), queued) {
-            phase_event(&tx, id, phase, EventKind::RunRecovered)?;
+        // reviewed again, which the supervisor takes up on its own. A run
+        // recovered again stays where it was, recorded once.
+        let events = run_events_of(&tx, id)?;
+        if let Some(change) = run_phase::Phase::after_recovery(run.status(), &events)
+            .and_then(|phase| run_phase::next_change(&events, phase, event_kind::RUN_RECOVERED))
+        {
+            run_event(&tx, id, EventKind::RunPhaseChanged, change.payload())?;
         }
         // No session of it is stalled any more (ADR-0047 decision 30).
         end_stalled_detections(&tx, id, STALL_RECOVERED_CLOSED, self.generators.clock.now())?;

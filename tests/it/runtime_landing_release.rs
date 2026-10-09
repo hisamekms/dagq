@@ -8,7 +8,7 @@
 use crate::runtime_support;
 use dagq::application::ProcessControl;
 use dagq::domain::landing_release::{GRACE_SECS, UNLISTED_SECS};
-use dagq::domain::{EventKind, LeaseToken};
+use dagq::domain::{EventKind, LeaseToken, run_phase};
 use dagq::infrastructure::adapters::SystemProcesses;
 use std::sync::atomic::Ordering;
 use std::time::{Instant, UNIX_EPOCH};
@@ -57,11 +57,24 @@ fn dead_landing(verdict: Option<&str>) -> (Fixture, PathBuf, PathBuf, TaskRun, T
     queue
         .begin_integration(run.id(), &LeaseToken::new("crashed"), &sha(&main))
         .unwrap();
+    // The phase its landing recorded as it started.
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunPhaseChanged,
+            landing_phase(run_phase::Attempt::FIRST),
+        )
+        .unwrap();
     Connection::open(&db)
         .unwrap()
         .execute("UPDATE run_leases SET heartbeat_at=0, pid=?1", [dead_pid()])
         .unwrap();
     (fixture, repo, db, run, backend)
+}
+
+/// The `run_phase_changed` of a landing started in `attempt`.
+fn landing_phase(attempt: run_phase::Attempt) -> Value {
+    run_phase::PhaseChange::new(run_phase::Phase::Landing, attempt, "integration_started").payload()
 }
 
 fn verdict_json(decision: &str) -> String {
@@ -73,6 +86,63 @@ fn repairs<'a>(detail: &'a dagq::domain::TaskDetail, repair: &str) -> Vec<&'a Va
     payloads(detail, "auto_repaired")
         .into_iter()
         .filter(|p| p["repair"] == repair)
+        .collect()
+}
+
+/// The run's recorded phases, oldest first: each one's phase, cause and
+/// attempt.
+fn phases(detail: &dagq::domain::TaskDetail) -> Vec<(&str, &str, &Value)> {
+    detail
+        .events
+        .iter()
+        .filter(|e| e.kind == "run_phase_changed")
+        .map(|e| {
+            (
+                e.payload["phase"].as_str().unwrap(),
+                e.payload["cause"].as_str().unwrap(),
+                &e.payload["attempt"],
+            )
+        })
+        .collect()
+}
+
+/// The phase each recovery recorded, written with its `run_recovered`
+/// in one transaction (the event right after it): `None` for a recovery
+/// that recorded none.
+fn recovery_phases(detail: &dagq::domain::TaskDetail) -> Vec<Option<&str>> {
+    let events = &detail.events;
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.kind == "run_recovered")
+        .map(|(i, _)| {
+            events
+                .get(i + 1)
+                .filter(|e| e.kind == "run_phase_changed")
+                .map(|e| {
+                    assert_eq!(e.payload["cause"], "run_recovered");
+                    e.payload["phase"].as_str().unwrap()
+                })
+        })
+        .collect()
+}
+
+/// The phases recorded from the landing the supervisor died in on: the
+/// name of each.
+fn phases_from_dead_landing(detail: &dagq::domain::TaskDetail) -> Vec<&str> {
+    let recovered = detail
+        .events
+        .iter()
+        .position(|e| e.kind == "run_recovered")
+        .unwrap();
+    let landing = detail.events[..recovered]
+        .iter()
+        .rposition(|e| e.kind == "run_phase_changed" && e.payload["phase"] == "landing")
+        .unwrap_or_else(|| panic!("{:?}", phases(detail)));
+    detail.events[landing..]
+        .iter()
+        .filter(|e| e.kind == "run_phase_changed")
+        .map(|e| e.payload["phase"].as_str().unwrap())
         .collect()
 }
 
@@ -107,6 +177,12 @@ fn a_passed_run_whose_landing_died_is_released_and_lands_again() {
     );
     assert_eq!(payloads(&detail, "integration_started").len(), 2);
     assert!(payloads(&detail, "review_started").len() == 1);
+    // It waited for its landing turn once, then landed.
+    assert_eq!(recovery_phases(&detail), [Some("landing_queue")]);
+    assert_eq!(
+        phases_from_dead_landing(&detail),
+        ["landing", "landing_queue", "landing", "push", "ended"]
+    );
     // Task 2 landed after it, its slot free again.
     let second = queue.show(TaskId::new(2)).unwrap();
     assert_eq!(second.runs[0].status(), RunStatus::Integrated);
@@ -149,6 +225,15 @@ fn a_run_neither_approved_nor_passed_is_reviewed_again_once_its_landing_died() {
     );
     // The concern's review, then the one after the release.
     assert_eq!(payloads(&detail, "review_started").len(), 2);
+    // It waited for a slot to be reviewed in once, not for a landing turn.
+    assert_eq!(recovery_phases(&detail), [Some("returning")]);
+    let from_dead = phases_from_dead_landing(&detail);
+    assert_eq!(
+        from_dead[..3],
+        ["landing", "returning", "review"],
+        "{from_dead:?}"
+    );
+    assert!(!from_dead.contains(&"landing_queue"), "{from_dead:?}");
     assert_eq!(reviewer.prompts().len(), 2);
     assert_eq!(
         queue.show(TaskId::new(2)).unwrap().runs[0].status(),
@@ -433,6 +518,70 @@ fn a_passed_run_a_person_recovered_from_its_landing_is_queued_to_land() {
     assert!(repairs(&detail, "landing_released").is_empty());
     assert_eq!(reviewer.prompts().len(), 1);
     assert!(queue.asks(Default::default()).unwrap().is_empty());
+}
+
+/// A person's `recover` records, with its `run_recovered`, the phase the
+/// given-up landing leaves the run in, in the attempt last recorded:
+/// `phase`, for the run `approved` by a person's `integrate` or not.
+/// Recovering it again (a second `recover`, or a supervisor's release of a
+/// run another one gave back first) records nothing more.
+fn recovered_twice_records_once(approved: bool, phase: &str) {
+    let resume = json!({"kind": "resume", "n": 2});
+    let (_dir, _repo, db, run, _backend) = dead_landing(None);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    if approved {
+        queue
+            .record_runtime_event(run.id(), EventKind::IntegrationApproved, json!({}))
+            .unwrap();
+    }
+    // It was landing in its second resume.
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunPhaseChanged,
+            landing_phase(run_phase::Attempt::of(run_phase::AttemptKind::Resume, 2)),
+        )
+        .unwrap();
+    runtime::recover(&db, run.id()).unwrap();
+    // A supervisor leased it to review or land it again and died
+    // before it started.
+    queue
+        .lease_for_review(run.id(), &LeaseToken::new("died"))
+        .unwrap()
+        .unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE run_leases SET heartbeat_at=0, pid=?1", [dead_pid()])
+        .unwrap();
+    let recovered = runtime::recover(&db, run.id()).unwrap();
+    assert_eq!(recovered["run"]["status"], "awaiting_integration");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let previous: Vec<&Value> = payloads(&detail, "run_recovered")
+        .iter()
+        .map(|p| &p["previous_status"])
+        .collect();
+    assert_eq!(
+        previous,
+        [&json!("integrating"), &json!("awaiting_integration")]
+    );
+    assert_eq!(recovery_phases(&detail), [Some(phase), None]);
+    let last = *phases(&detail).last().unwrap();
+    assert_eq!(last, (phase, "run_recovered", &resume));
+    assert_eq!(phases_from_dead_landing(&detail), ["landing", phase]);
+}
+
+/// A landing given up after a person's `integrate` approved it waits for
+/// its landing turn, recorded once.
+#[test]
+fn an_approved_recovered_landing_waits_in_the_landing_queue_recorded_once() {
+    recovered_twice_records_once(true, "landing_queue");
+}
+
+/// A landing given up before anything let it land waits for a slot to be
+/// reviewed in, recorded once, and never joins the landing queue.
+#[test]
+fn an_unapproved_recovered_landing_returns_for_its_review_recorded_once() {
+    recovered_twice_records_once(false, "returning");
 }
 
 /// A landing that moved main before its supervisor died is not landed a

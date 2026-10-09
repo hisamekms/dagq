@@ -794,3 +794,15 @@ task = 1908
 name = "agent_eval_rounds::a_running_round_takes_no_run_slot_and_holds_no_review"
 reason = "B 境界（supervisor の配線）: 1 slot の supervisor で eval の周が走っている間に次の run が claim されて review が始まり、2 本とも着地することを実 process で確かめる（eval の周を run の slot の外で回す配線の代表の 1 本）。周の順と同時数の判断は domain::agent_eval::round の unit test"
 task = 1869
+
+# 6.3s (stress under the host's load)
+[[test]]
+name = "runtime_landing_release::a_passed_run_whose_landing_died_is_released_and_lands_again"
+reason = "境界（復旧とsupervisorの配線）: 実 supervisor の release_dead_landing が死んだ着地を recover_run で戻し、run_recovered と同じ transaction の landing_queue を経て着地し直すことを実 process・Git・SQLite で確かめる代表の 1 本。回収の工程の判断は domain::run_phase の unit test"
+task = 2210
+
+# 6.7s (stress under the host's load)
+[[test]]
+name = "runtime_landing_release::a_run_neither_approved_nor_passed_is_reviewed_again_once_its_landing_died"
+reason = "境界（復旧とsupervisorの配線）: 実 supervisor の release_dead_landing が未承認の死んだ着地を recover_run で戻し、returning を経て review_recovered_runs の review にかけて着地させることを実 process・Git・SQLite で確かめる代表の 1 本。回収の工程の判断は domain::run_phase の unit test"
+task = 2210
