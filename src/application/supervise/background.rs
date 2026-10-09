@@ -150,7 +150,7 @@ pub(super) fn wrapper_command(mut args: Vec<String>) -> String {
 /// it outlives a wrapper that died (killed, say) without stopping it;
 /// whatever stops the session stops such a turn by this record.
 pub(crate) fn left_turn(
-    queue: &dyn Queue,
+    queue: &dyn EventStore,
     processes: &dyn ProcessControl,
     run: &RunId,
     handle: &str,
@@ -167,7 +167,7 @@ pub(crate) fn left_turn(
 /// that name it (ADR-t1394-2), not a run's; a planner whose row closed is
 /// found too, so a close after it still stops the turn.
 pub(crate) fn left_planner_turn(
-    queue: &dyn Queue,
+    queue: &dyn crate::application::SessionRegistry,
     processes: &dyn ProcessControl,
     handle: &str,
 ) -> Option<BackgroundHandle> {

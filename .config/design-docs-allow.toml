@@ -109,7 +109,6 @@ tasks = 21
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/backend-call-failures.md"
-line = 1597
 tasks = 10
 
 [[doc]]

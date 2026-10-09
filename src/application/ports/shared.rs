@@ -5,7 +5,8 @@
 //! names the store ports of every context.
 
 use super::execution::{
-    EvalRounds, RunCoordination, RunReads, RunRecovery, RunTransitions, SessionRegistry,
+    EvalRounds, RecordingQueue, RunCoordination, RunReads, RunRecovery, RunTransitions,
+    SessionRegistry,
 };
 use super::host::{HeadlessJobStore, HostOpsQueue, InboxWatchLog, SupervisorRegistry};
 use super::observation::{ObservationQueue, QueueRecords};
@@ -625,7 +626,7 @@ impl<
 /// [`InboxWatchLog`], [`EvalRounds`]). A use case that needs only some of
 /// it takes those ports instead, and a context that keeps a connection
 /// open takes it as its set of ports ([`ObservationQueue`],
-/// [`HostOpsQueue`]), which `Queue` upcasts to.
+/// [`HostOpsQueue`], [`RecordingQueue`]), which `Queue` upcasts to.
 pub trait Queue:
     StateStore
     + EventStore
@@ -634,6 +635,7 @@ pub trait Queue:
     + EvalRounds
     + ObservationQueue
     + HostOpsQueue
+    + RecordingQueue
 {
 }
 

@@ -10,7 +10,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, thread, time::Duration};
 
-use super::{QueueOpener, SessionWrappers, WorkspaceBackend, WorkspaceTags};
+use super::{QueueOpener, RecordingQueue, SessionWrappers, WorkspaceBackend, WorkspaceTags};
 use crate::domain::background_wrapper::{StopRoute, WrapperStop};
 use crate::domain::{EventKind, Reason, ReasonCode, RunId};
 
@@ -155,13 +155,25 @@ struct Limits {
 }
 
 /// Where [`RecordingBackend`] and [`RecordingSessions`] record a failed
-/// call: through its own connection `queues` opens for each, with the
-/// slots of `token` (`None` reports every lease and supervisor) and the
-/// 1-minute load average (`None` where it cannot be read).
+/// call: through its own connection `queues` opens for each, as the ports
+/// recording reaches, with the slots of `token` (`None` reports every lease
+/// and supervisor) and the 1-minute load average (`None` where it cannot be
+/// read).
 struct Recorder {
-    queues: Arc<dyn QueueOpener>,
+    queues: Arc<dyn QueueOpener<dyn RecordingQueue + Send>>,
     token: Option<LeaseToken>,
     load_average: fn() -> Option<f64>,
+}
+
+/// The connections of the whole queue an opener gives, as the ports
+/// recording reaches: what [`RecordingBackend`], which is given the whole
+/// queue, records through.
+struct AsRecordingQueue(Arc<dyn QueueOpener>);
+
+impl QueueOpener<dyn RecordingQueue + Send> for AsRecordingQueue {
+    fn open(&self) -> Result<Box<dyn RecordingQueue + Send>> {
+        Ok(self.0.open()?)
+    }
 }
 
 impl Recorder {
@@ -303,7 +315,7 @@ impl<'a> RecordingBackend<'a> {
         Self {
             inner,
             recorder: Recorder {
-                queues,
+                queues: Arc::new(AsRecordingQueue(queues)),
                 token,
                 load_average,
             },
@@ -401,10 +413,10 @@ pub struct RecordingSessions<'a> {
 
 impl<'a> RecordingSessions<'a> {
     /// `inner`, recording its failures through a connection `queues`
-    /// opens for each.
+    /// opens for each, which reaches only the ports recording takes.
     pub fn over(
         inner: &'a dyn SessionWrappers,
-        queues: Arc<dyn QueueOpener>,
+        queues: Arc<dyn QueueOpener<dyn RecordingQueue + Send>>,
         token: Option<LeaseToken>,
         load_average: fn() -> Option<f64>,
     ) -> Self {
@@ -554,7 +566,6 @@ impl SessionWrappers for RecordingSessions<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::Queue;
     use anyhow::{Context, anyhow, bail};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -641,7 +652,11 @@ mod tests {
             unimplemented!()
         }
         fn exists(&self, _: &str) -> Result<bool> {
-            unimplemented!()
+            self.call().map(|()| true)
+        }
+        /// No sleep between attempts in a unit test.
+        fn retry_backoff(&self) -> Duration {
+            Duration::ZERO
         }
     }
 
@@ -649,8 +664,8 @@ mod tests {
     /// that only what it hands back and how often it calls are checked.
     struct NoQueue;
 
-    impl QueueOpener for NoQueue {
-        fn open(&self) -> Result<Box<dyn Queue + Send>> {
+    impl<P: ?Sized> QueueOpener<P> for NoQueue {
+        fn open(&self) -> Result<Box<P>> {
             bail!("no queue")
         }
     }
@@ -793,6 +808,62 @@ mod tests {
             "{error:#}"
         );
         assert_eq!(backend.calls(), 0);
+    }
+
+    /// The recording of the session wrappers records each failed attempt
+    /// of a session's call on the run whose session it is, and a failed
+    /// start on the run its environment names, with the slots of its
+    /// supervisor, through only the ports it takes (no SQLite).
+    #[test]
+    fn a_failed_session_call_is_recorded_on_its_run_with_its_supervisors_slots() {
+        use crate::application::port_fakes::SessionRecords;
+        const TIMEOUT: &str = "background wrapper check failed: Command timed out";
+        let records = SessionRecords {
+            runs: [("background:7:start".to_owned(), RunId::new("r1").unwrap())].into(),
+            slots: (2, Some(4)),
+            ..SessionRecords::default()
+        };
+        let token = LeaseToken::new("supervisor");
+        let backend = Backend::failing(TIMEOUT, 1);
+        let recording = RecordingSessions::over(
+            &backend,
+            Arc::new(records.clone()),
+            Some(token.clone()),
+            || Some(1.5),
+        );
+        assert!(SessionWrappers::exists(&recording, "background:7:start").unwrap());
+        let env = [(crate::domain::actor::RUN_ID_ENV.to_owned(), "r2".to_owned())];
+        recording
+            .launch_background(Path::new("/w"), "wrapper", &env, Path::new("/r/log"))
+            .unwrap_err();
+
+        let failures = records.failures.lock().unwrap();
+        let runs: Vec<_> = failures.iter().map(|(run, _)| run.clone()).collect();
+        assert_eq!(
+            runs,
+            [
+                Some(RunId::new("r1").unwrap()),
+                Some(RunId::new("r2").unwrap())
+            ]
+        );
+        let (_, exists) = &failures[0];
+        assert_eq!(exists["op"], "exists");
+        assert_eq!(exists["code"], "backend_timeout");
+        assert_eq!(exists["workspace_id"], "background:7:start");
+        assert_eq!(
+            (&exists["attempt"], &exists["max_attempts"]),
+            (&json!(1), &json!(3))
+        );
+        assert_eq!(
+            (&exists["slots"], &exists["parallel"]),
+            (&json!(2), &json!(4))
+        );
+        assert_eq!(exists["load_avg"], 1.5);
+        assert_eq!(failures[1].1["op"], "launch_background");
+        assert_eq!(
+            *records.slots_of.lock().unwrap(),
+            [Some(token.clone()), Some(token)]
+        );
     }
 
     #[test]

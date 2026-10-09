@@ -26,8 +26,8 @@ use std::{
 
 use crate::{
     application::{
-        AgentProvider, Generators, HostOpsQueue, ObservationQueue, ProcessControl, RunFiles,
-        SessionWrappers,
+        AgentProvider, Generators, HostOpsQueue, ObservationQueue, ProcessControl, RecordingQueue,
+        RunFiles, SessionWrappers,
         review::{self as reviewing},
         supervise::{self as supervisor, Layout, LoopSettings, Ports, UpdateSettings},
     },
@@ -682,6 +682,10 @@ pub fn supervise_with_reviewer(
         host_queues: Arc::new(SqlitePorts {
             opener: opener(),
             keep: |queue| -> Box<dyn HostOpsQueue + Send> { Box::new(queue) },
+        }),
+        recording_queues: Arc::new(SqlitePorts {
+            opener: opener(),
+            keep: |queue| -> Box<dyn RecordingQueue + Send> { Box::new(queue) },
         }),
         verifier: Arc::new(ShellVerifier {
             checkout: main_checkout.clone(),

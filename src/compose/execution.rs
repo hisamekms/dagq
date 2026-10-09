@@ -17,7 +17,8 @@ use std::{
 
 use crate::{
     application::{
-        AgentProvider, MainRemote, ProcessControl, Repository, SessionWrappers, Spawner, health,
+        AgentProvider, MainRemote, ProcessControl, RecordingQueue, Repository, SessionWrappers,
+        Spawner, health,
         integrate::{self as integration, IntegrateTarget, Integration, Integrator},
         prompt,
         recording::RecordingSessions,
@@ -37,7 +38,7 @@ use crate::{
         process::LocalSpawner,
         run_env::{ShellVerifier, load_disk_config},
         run_files::LocalRunFiles,
-        runtime_store::SqliteOpener,
+        runtime_store::{SqliteOpener, SqlitePorts},
         sqlite::SqliteQueue,
         transcripts::ClaudeTranscripts,
     },
@@ -73,10 +74,13 @@ impl<'a> RecordingSessions<'a> {
     pub fn new(inner: &'a dyn SessionWrappers, db: PathBuf, token: Option<LeaseToken>) -> Self {
         Self::over(
             inner,
-            Arc::new(SqliteOpener {
-                db,
-                generators: clock::system(),
-                actor: None,
+            Arc::new(SqlitePorts {
+                opener: SqliteOpener {
+                    db,
+                    generators: clock::system(),
+                    actor: None,
+                },
+                keep: |queue| -> Box<dyn RecordingQueue + Send> { Box::new(queue) },
             }),
             token,
             load_average,

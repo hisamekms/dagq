@@ -429,6 +429,9 @@ pub struct Ports<'a> {
     pub observation_queues: Arc<dyn QueueOpener<dyn crate::application::ObservationQueue + Send>>,
     /// The connections of host運用's jobs off the loop, as its ports.
     pub host_queues: Arc<dyn QueueOpener<dyn crate::application::HostOpsQueue + Send>>,
+    /// The connections the recording of the session wrappers records the
+    /// failed calls and the stops through, as its ports.
+    pub recording_queues: Arc<dyn QueueOpener<dyn crate::application::RecordingQueue + Send>>,
     pub repository: Arc<dyn Repository + Send + Sync>,
     pub remote: Arc<dyn MainRemote + Send + Sync>,
     pub verifier: Arc<dyn Verifier + Send + Sync>,
@@ -924,7 +927,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     );
     let sessions = RecordingSessions::over(
         ports.sessions,
-        ports.queues.clone(),
+        ports.recording_queues.clone(),
         Some(token.clone()),
         ports.load_average,
     )

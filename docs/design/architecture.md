@@ -149,7 +149,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - `RunCoordination`の読み取りを全てのcontextに公開する。
 - 計画管理に`JobDesk`と`DeferWatch`の見込みのファイルを、host運用のsweepにwrapperの停止を公開する。
 - recheckのlockの中で`recheck/target`を消す`recheck::clear_target`をhost運用の空き容量の掃除に公開する。
-- `RunTransitions`・`RunRecovery`・`EvalRounds`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`（reviewのprogramのjobの実行のbackend）は内部。
+- `RunTransitions`・`RunRecovery`・`EvalRounds`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`（reviewのprogramのjobのbackend）・`RecordingQueue`は内部。
 
 **許す依存の向き**
 
@@ -235,7 +235,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 | module | port |
 | --- | --- |
 | `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`・`PlanningRecords` |
-| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`EvalRounds`・`SessionRegistry`・`RunReads`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend` |
+| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`EvalRounds`・`SessionRegistry`・`RunReads`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend`・`RecordingQueue` |
 | `observation`（観測と分析） | `ObserverLog`・`MarkLog`・`QueueRecords`・`ObservationQueue` |
 | `host`（host運用） | `QueueOpener`・`HostOpsQueue`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry`・`InboxWatchLog` |
 | `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`EventStore`・`StateStore`・`Queue` |
@@ -384,11 +384,12 @@ reviewで見る規則の行は、行き先をこの表の言葉で書く。
 | 規則 | 場所 | 違反 | 行き先 |
 | --- | --- | --- | --- |
 | L5 | `src/application`の`Instant::now` | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
-| C4 | `integrate`・`session`・`headless_session`・`session_log`・`screen`・`recording`・`supervise`のループと工程（計画管理・sweep）・`planner`・`planner_request` | 全体の`Queue`を取る | portの分割 |
+| C4 | `integrate`・`session`・`headless_session`・`session_log`・`screen`・`supervise`のループと工程（計画管理・sweep）・`planner`・`planner_request` | 全体の`Queue`を取る | portの分割 |
+| C4 | `recording`の`RecordingBackend` | 全体の`QueueOpener`を取る | 消す |
 | C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | portの分割 |
 | C5 | `health::attention` | 計画管理の内部の`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`を読む | portの分割 |
-| C5 | `src/application/lifecycle.rs` | host運用が実行と着地の内部の`RunRecovery`を読む | portの分割 |
-| C6 | `src/application/supervise/resume.rs`・`supervise/recheck.rs`・`supervise/recovery.rs`ほか | 判断に使うeventのpayloadを文字列のkeyで読む | 型付きの復元の値（`domain::run::payload`の形）へ |
-| X3・C1 | T1: `src/infrastructure/sqlite.rs`の`claim_task`（計画管理のstore）が`INSERT INTO task_runs`を書く | 計画管理のstoreが実行と着地の表をSQLで直接書く | 未登録（follow_up） |
-| X3・C1 | T2: `src/infrastructure/runtime_store/transitions.rs`の`finish_integration`が`UPDATE tasks SET status='completed'`を書く | 実行と着地のstoreが計画管理の表を`transition_task`を通さず書く | 未登録（follow_up） |
+| C5 | `lifecycle` | host運用が実行と着地の内部の`RunRecovery`を読む | portの分割 |
+| C6 | `supervise`の`resume`・`recheck`・`recovery`ほか | 判断に使うeventのpayloadを文字列のkeyで読む | 型付きの復元の値（`domain::run::payload`の形）へ |
+| X3・C1 | T1: `sqlite.rs`の`claim_task`（計画管理のstore）が`INSERT INTO task_runs`を書く | 計画管理のstoreが実行と着地の表をSQLで直接書く | 未登録（follow_up） |
+| X3・C1 | T2: `runtime_store/transitions.rs`の`finish_integration`が`UPDATE tasks SET status='completed'`を書く | 実行と着地のstoreが計画管理の表を`transition_task`を通さず書く | 未登録（follow_up） |
 | X3・C1 | T6: `src/infrastructure/finding_planners.rs`（`settle_findings`ほか）が`UPDATE findings`を書く | 計画管理のstoreが観測と分析の表を`infrastructure::findings`を通さず書く | 未登録（follow_up） |

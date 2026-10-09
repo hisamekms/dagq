@@ -1343,6 +1343,16 @@ pub trait RunLog: RunReads + EventStore {}
 
 impl<T: RunReads + EventStore + ?Sized> RunLog for T {}
 
+/// The ports of the queue the recording of the session wrappers
+/// ([`crate::application::recording::RecordingSessions`]) reaches: the run
+/// a session belongs to and its events, the slots held when a call failed,
+/// and the planners whose turns a wrapper that died left running.
+/// [`super::shared::Queue`] has it as a supertrait, so a connection of the
+/// whole queue upcasts to it.
+pub trait RecordingQueue: RunLog + RunCoordination + SessionRegistry {}
+
+impl<T: RunLog + RunCoordination + SessionRegistry + ?Sized> RecordingQueue for T {}
+
 /// One file's identity and change times as [`Repository::landing_branch_stamp`]
 /// reads them; `None` in [`LandingBranchStamp`] is a file that is not there.
 #[derive(Debug, Clone, PartialEq, Eq)]

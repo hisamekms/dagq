@@ -478,12 +478,15 @@ fn a_wrapper_without_a_terminal_or_workspace_registers_once_its_start_is_recorde
 #[test]
 fn a_turn_left_by_a_killed_background_wrapper_is_stopped_and_a_resumed_wrapper_registers() {
     use dagq::{
-        application::{SessionWrappers, recording::RecordingSessions},
+        application::{RecordingQueue, SessionWrappers, recording::RecordingSessions},
         domain::{
             background_wrapper::StopRoute,
             turn::{TurnRequest, request_path},
         },
-        infrastructure::{adapters::BackgroundSessions, runtime_store::SqliteOpener},
+        infrastructure::{
+            adapters::BackgroundSessions,
+            runtime_store::{SqliteOpener, SqlitePorts},
+        },
     };
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(
@@ -525,10 +528,13 @@ esac"#,
     );
     let recording = RecordingSessions::over(
         &BackgroundSessions,
-        Arc::new(SqliteOpener {
-            db: db.clone(),
-            generators: clock::system(),
-            actor: None,
+        Arc::new(SqlitePorts {
+            opener: SqliteOpener {
+                db: db.clone(),
+                generators: clock::system(),
+                actor: None,
+            },
+            keep: |queue| -> Box<dyn RecordingQueue + Send> { Box::new(queue) },
         }),
         None,
         || None,

@@ -644,9 +644,9 @@ fn a_wrapper_that_ignores_sigterm_is_killed_with_its_turn() {
 #[test]
 fn the_stop_of_a_wrapper_no_run_records_is_the_queues_event() {
     use dagq::{
-        application::{SessionWrappers, recording::RecordingSessions},
+        application::{RecordingQueue, SessionWrappers, recording::RecordingSessions},
         domain::background_wrapper::StopRoute,
-        infrastructure::runtime_store::SqliteOpener,
+        infrastructure::runtime_store::{SqliteOpener, SqlitePorts},
     };
     let (dir, _repo, db) = fixture();
     let (_, handle, _, _guard) = wrapper_with_turn(
@@ -655,10 +655,13 @@ fn the_stop_of_a_wrapper_no_run_records_is_the_queues_event() {
     );
     let recording = RecordingSessions::over(
         &BackgroundSessions,
-        Arc::new(SqliteOpener {
-            db: db.clone(),
-            generators: clock::system(),
-            actor: None,
+        Arc::new(SqlitePorts {
+            opener: SqliteOpener {
+                db: db.clone(),
+                generators: clock::system(),
+                actor: None,
+            },
+            keep: |queue| -> Box<dyn RecordingQueue + Send> { Box::new(queue) },
         }),
         None,
         || None,
