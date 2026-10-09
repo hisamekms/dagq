@@ -27,6 +27,7 @@ related:
   - adr-t1895-1
   - adr-t1895-2
   - adr-t1428-1
+  - design-supervisor-lifecycle-review-programs
 ---
 
 # Review (supervisor)
@@ -43,6 +44,7 @@ validationを通ったrunを、着地の前にheadlessのreview jobで判定し�
 
 ```text
 validationを通ったrun（awaiting_integration。supervisorがleaseとslotを持ち、workerのsessionは開いたまま）
+  → 0 プログラムのreview: 落ちたら4（agentは起動しない）、起動の失敗・時間切れは失敗
   → 1 開始: review.mdとpromptを書く
   → 2 headless実行: 行き先のproviderで読み取りだけのjob
   → 3 verdict: 読めない・非0の終了は同じ入力で1回だけやり直す
@@ -69,7 +71,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 ### 不変条件
 
 - passでないreviewのrunは、人の`land`の答えか、jobの確かな`land`の推奨なしには着地しない（`domain::concern::lets_land`）。
-- 1つのreviewのやり直しは原因（読めないverdict・非0の終了）を合わせて1回まで。
+- 1つのreviewのやり直しは原因（プログラムのreviewの失敗・読めないverdict・非0の終了）を合わせて1回まで。
 - reviseは回（区切りの後）ごとに2回まで（[ADR-0050](../../adr/0050-revise-count-scope-per-review-round.md)）、回の中の3回目のreviseと`send_back`は人に聞く。
 - 依頼（revise・衝突の解消）はeventを記録してから`turns/`に書くので、二重には書かない。
 - 1つのrunに開いた`approve_landing`のaskは1つ。
@@ -198,22 +200,10 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 
 ## プログラムのreview<a id="プログラムのreview"></a>
 
-[ADR-t1895-2](../../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)の部品。
-reviewの段への接続（落ちたらagentを動かさず差し戻す）はまだ無く、runのreviewはprogramを動かさない。
-
-- **snapshot**: 試行ごとにlanding branchの今のcommitのtreeから`[review.programs.<name>]`（書式は[Run environment](run-environment.md)）とその`script`の中身を読み、範囲の変えたpathで選ぶ（`review_programs::snapshot_programs`）。
-  worktreeとmain checkoutのファイルは読まず、workerが変えた設定やscriptは着地まで効かない。
-  scriptは読んだ中身をworkerが書けない場所に書き出して実行する。
-  programは`script`でだけ名指す（理由は`ReviewProgram`）。
-  cwdから呼ぶscriptとツールがcwdで読む設定（`rust-toolchain.toml`・`.cargo/config.toml`）はworkerの選んだ版が効きえ、runtimeは検出しない（integrateのverifyも同じ）。
-- **流す場所**: reviewのactor（`ReviewJob`）のbackendで`ProgramBackends`が`ReviewProgramBackend`の実装を選ぶ。
-  hostは`HostPrograms`、未実装のPodmanは起動の失敗にしhostに戻さない（fail closed）。
-  cwdはrunのworktreeで、jobは`start_review_program`が起動する。
-- **env**: 起動元のenvを消し、e2eの関門と共通の部品（`passed_env::PassedEnv`）で絞る。
-  資格情報の除外は常に効き、例外を持たず、cmuxのsocketのpassword・`CMUX_*`・queue serviceとbrokerに届く`DAGQ_*`は渡らない。
-  `PATH`からは空・相対の項目と、runのworktree・run dir・main checkoutとその下を指す項目を除く（`review_programs::narrowed_path`）。
-- **結果**: `HeadlessJob::poll_program`が終了のstatusとstdout・stderrの末尾を返す。
-  上限（programの`timeout_secs`、無ければ`[review.jobs]`）を超えればprocess groupごと止め、statusは無い。
+段の先頭で、landing branchの設定が挙げpathが差分に当たるprogramを、agentのjobの前に1本ずつ流す（[ADR-t1895-2](../../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)）。
+1本が落ちればagentを起動せずworkerに差し戻し、起動の失敗と時間切れはreviewの失敗にする。
+testを含まない速い形式の検査だけで、testを含む検証は`integrate`の1回のまま（[Validation](validation.md)）で二重にしない。
+流れ・記録・読む元・envは[プログラムのreview](review-programs.md)が持つ。
 
 ## 着地の前のe2e
 

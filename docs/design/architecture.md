@@ -126,7 +126,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 **所有する状態**
 
 - table: `task_runs`・`run_leases`・`run_processes`・`session_workspaces`。
-- ファイル: queueのdirの`runs/<run-id>/`（`RunFiles`）・`recheck/`・`agent-evals/`とrunのworktree。
+- ファイル: queueのdirの`runs/<run-id>/`（`RunFiles`）・`recheck/`・`agent-evals/`・`review-programs/`とrunのworktree。
 
 **判断**（domain）: `domain::run`（`TaskRun`と遷移、`run::history`・`run::payload`）を中心に、receipt・review・resume・復旧・claimの控え・slot・待ち・stall・e2e・着地の保留・backgroundのwrapperの各module。
 
@@ -149,7 +149,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - `RunCoordination`の読み取りを全てのcontextに公開する。
 - 計画管理に`JobDesk`と`DeferWatch`の見込みのファイルを、host運用のsweepにwrapperの停止を公開する。
 - recheckのlockの中で`recheck/target`を消す`recheck::clear_target`をhost運用の空き容量の掃除に公開する。
-- `RunTransitions`・`RunRecovery`・`EvalRounds`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`（reviewのprogramのjobのbackend）・`RecordingQueue`は内部。
+- `RunTransitions`・`RunRecovery`・`EvalRounds`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`・`RecordingQueue`は内部。
 
 **許す依存の向き**
 

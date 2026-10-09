@@ -754,6 +754,20 @@ fn review_job_before(
         .and_then(|event| review_job(run, event))
 }
 
+/// The last `review_programs_finished` before event `before` that rejected
+/// the run, when it came after `review`, the last `review_finished`
+/// before it: the program review sent the revise that followed.
+fn programs_rejected_after<'a>(
+    history: &RunHistory<'a>,
+    before: EventId,
+    review: Option<&RunEvent>,
+) -> Option<&'a RunEvent> {
+    history
+        .last_before(before, event_kind::REVIEW_PROGRAMS_FINISHED)
+        .filter(|programs| programs.payload["outcome"] == "rejected")
+        .filter(|programs| review.is_none_or(|review| review.id < programs.id))
+}
+
 /// The verdict of the last `review_finished` before event `before`: the
 /// pass a conflict precheck followed, or the revise a `revise_unsent` did.
 pub(super) fn passed_before(history: &RunHistory<'_>, before: EventId) -> Option<ReviewVerdict> {
@@ -960,7 +974,26 @@ fn review_resumption(
             // decision 7) is asked with their reasons, as the
             // supervisor that could not send it asked.
             let review = history.last_before(anchor.id, event_kind::REVIEW_FINISHED);
-            if let Some(review) = review.filter(|r| agents_decided(&r.payload))
+            if let Some(rejected) = programs_rejected_after(history, anchor.id, review) {
+                // A revise a program review sent (ADR-t1895-2 decision 3)
+                // is asked with its reason, not an earlier review's.
+                let program = rejected.payload["program"].as_str().unwrap_or("?");
+                Some(AfterExit::Ask {
+                    why: unsent.error.map(str::to_owned),
+                    decision: ReviewDecision::Revise,
+                    recommendation: None,
+                    confidence: None,
+                    reason_category: None,
+                    reasons: rejected.payload["reason"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .into_iter()
+                        .collect(),
+                    summary: format!("the review program {program} rejected the change"),
+                    requested_by: review_job(run, rejected),
+                    sent_back: None,
+                })
+            } else if let Some(review) = review.filter(|r| agents_decided(&r.payload))
                 && let Ok(verdict) = verdict_of(review)
             {
                 let why = unsent
@@ -1532,6 +1565,47 @@ mod tests {
         match resumption(&unsent, true, false) {
             ReviewResumption::Exit(AfterExit::Ask { why, .. }) => {
                 assert_eq!(why.as_deref(), Some("no session"));
+            }
+            _ => panic!("not an ask"),
+        }
+        // One a program review sent is asked with its reason, not with
+        // the verdict of the review before it.
+        let rejected = event(
+            2,
+            event_kind::REVIEW_PROGRAMS_FINISHED,
+            json!({"attempt": 2, "outcome": "rejected", "program": "links", "reason": "a broken link"}),
+        );
+        let unsent_programs = [
+            pass(1),
+            rejected.clone(),
+            event(3, event_kind::REVISE_UNSENT, json!({"error": "no session"})),
+        ];
+        match resumption(&unsent_programs, true, false) {
+            ReviewResumption::Exit(AfterExit::Ask {
+                decision,
+                reasons,
+                requested_by,
+                ..
+            }) => {
+                assert_eq!(decision, ReviewDecision::Revise);
+                assert_eq!(reasons, ["a broken link"]);
+                assert!(requested_by.is_some());
+            }
+            _ => panic!("not an ask"),
+        }
+        // A review after the program review is the one the revise was.
+        let reviewed_after = [
+            rejected,
+            event(
+                3,
+                event_kind::REVIEW_FINISHED,
+                json!({"verdict": "revise", "reasons": ["agent"], "summary": "s", "attempt": 2}),
+            ),
+            event(4, event_kind::REVISE_UNSENT, json!({"error": "no session"})),
+        ];
+        match resumption(&reviewed_after, true, false) {
+            ReviewResumption::Exit(AfterExit::Ask { reasons, .. }) => {
+                assert_eq!(reasons, ["agent"]);
             }
             _ => panic!("not an ask"),
         }

@@ -377,7 +377,8 @@ pub const PROGRAM_OUTPUT_TAIL: usize = 4000;
 /// review's actor ([`ProgramBackends::backend`]: the host's adapter, or
 /// the error of one not implemented, which starts nothing). Its output
 /// goes under `output` (the run's directory) and what it runs is written
-/// under `scratch`, each by attempt and name, and it is stopped with its
+/// under `scratch`, each by `attempt` (the run's review's round of program
+/// reviews) and name, and it is stopped with its
 /// group past the program's own `timeout_secs`, or `timeout` without one.
 /// `scratch` is a directory the runtime owns, outside what the worker can
 /// write (not the run's directory): a script written where the worker can
@@ -1327,6 +1328,53 @@ pub(super) struct ReviewWatch {
     /// a review that requires none.
     pub(super) required: Vec<String>,
     pub(super) job: HeadlessJob,
+}
+
+/// The program reviews of a run's review that run before its agents
+/// (ADR-t1895-2), one program job at a time.
+pub(super) struct ProgramsWatch {
+    pub(super) programs: ReviewPrograms,
+    /// The job of the program at `programs.outcomes.len()`.
+    pub(super) job: HeadlessJob,
+}
+
+/// Where a run's program reviews are: what they go before and run, and how
+/// the programs that ran ended.
+pub(super) struct ReviewPrograms {
+    pub(super) session: Option<SessionRef>,
+    /// The review attempt they go before: the next `review_started`'s.
+    pub(super) attempt: usize,
+    /// Which run of the run's program reviews this is, from 1 (one per
+    /// `review_programs_started`): their jobs and output files are numbered
+    /// by it, so a run after a revise or a retry keeps the earlier output.
+    pub(super) round: usize,
+    /// Whether this is their one retry after a program that could not
+    /// start or ran past its time; it is the review's one retry
+    /// ([`ReviewWatch::retried`]) for the agents' review after them too.
+    pub(super) retried: bool,
+    pub(super) snapshot: crate::application::review_programs::ProgramSnapshot,
+    /// How each program that ran ended, in order.
+    pub(super) outcomes: Vec<crate::domain::review_programs::ProgramOutcome>,
+    /// What the worker or the person reads of the last program that did
+    /// not pass: the reason it is sent back with, or why it failed.
+    pub(super) detail: Option<String>,
+}
+
+impl ReviewPrograms {
+    /// What the watch holds, for the step after its program ended. The
+    /// session stays in the watch too until the step replaces it, so an
+    /// error before that still finds the session to ask to exit.
+    pub(super) fn take(&mut self) -> Self {
+        Self {
+            session: self.session.clone(),
+            attempt: self.attempt,
+            round: self.round,
+            retried: self.retried,
+            snapshot: self.snapshot.clone(),
+            outcomes: std::mem::take(&mut self.outcomes),
+            detail: self.detail.take(),
+        }
+    }
 }
 
 /// How a headless review ended.

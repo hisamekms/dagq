@@ -15,7 +15,9 @@
 
 use serde::Serialize;
 
-use super::{RunEvent, RunStatus, run_e2e, stats::timestamp_millis, waiting::WaitState};
+use super::{
+    RunEvent, RunStatus, event_kind, run_e2e, stats::timestamp_millis, waiting::WaitState,
+};
 
 /// The step a listed run is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -31,7 +33,8 @@ pub enum Phase {
     Validate,
     /// Validated and accepted, its review not started yet.
     Validated,
-    /// It is reviewed: the review job runs (`review_started`), or, after a
+    /// It is reviewed: its program reviews run (`review_programs_started`),
+    /// the review job runs (`review_started`), or, after a
     /// `review_retried`, runs again on the other provider or waits for one.
     Review,
     /// Its live session fixes a `revise` verdict (`revise_requested`).
@@ -75,7 +78,9 @@ impl Phase {
                 (payload["status"] == RunStatus::Validating.as_str()).then_some(Self::Validate)
             }
             "validation_finished" => (payload["accepted"] == true).then_some(Self::Validated),
-            "review_started" | "review_retried" => Some(Self::Review),
+            event_kind::REVIEW_PROGRAMS_STARTED | "review_started" | "review_retried" => {
+                Some(Self::Review)
+            }
             "revise_requested" => Some(Self::Revise),
             "conflict_precheck" if payload["requested"] == true => Some(Self::ConflictFix),
             // A precheck that found no conflict moves nothing.
@@ -350,6 +355,71 @@ mod tests {
                 Some(P::E2e),
                 Some(P::LandingQueue),
                 Some(P::Integrating),
+            ]
+        );
+    }
+
+    /// The program reviews before the agents' review are the review: their
+    /// start puts the run in it, their ends move nothing, and a program
+    /// that rejects the run sends it to the revise as the agents' verdict
+    /// does.
+    #[test]
+    fn the_program_reviews_are_the_review_phase() {
+        use Phase as P;
+        use RunStatus as S;
+        let steps = [
+            (
+                "validation_finished",
+                json!({"accepted": true}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::REVIEW_PROGRAMS_STARTED,
+                json!({}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::REVIEW_PROGRAM_FINISHED,
+                json!({"outcome": "rejected"}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::REVIEW_PROGRAMS_FINISHED,
+                json!({"outcome": "rejected"}),
+                S::AwaitingIntegration,
+            ),
+            ("revise_requested", json!({}), S::AwaitingIntegration),
+            ("revise_finished", json!({}), S::Validating),
+            (
+                "validation_finished",
+                json!({"accepted": true}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::REVIEW_PROGRAMS_STARTED,
+                json!({}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::REVIEW_PROGRAMS_FINISHED,
+                json!({"outcome": "passed"}),
+                S::AwaitingIntegration,
+            ),
+            ("review_started", json!({}), S::AwaitingIntegration),
+        ];
+        assert_eq!(
+            phases(&steps),
+            [
+                Some(P::Validated),
+                Some(P::Review),
+                Some(P::Review),
+                Some(P::Review),
+                Some(P::Revise),
+                Some(P::Validate),
+                Some(P::Validated),
+                Some(P::Review),
+                Some(P::Review),
+                Some(P::Review),
             ]
         );
     }

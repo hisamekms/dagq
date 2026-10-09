@@ -50,6 +50,11 @@ impl Supervisor<'_> {
                     info!(run_id = %run.id(), "run {}: review {} stopped for the handoff; it is reviewed again", run.id(), watch.attempt);
                     None
                 }
+                Phase::ReviewPrograms(watch) => {
+                    watch.job.abandon();
+                    info!(run_id = %run.id(), "run {}: the program reviews before review {} stopped for the handoff; it is reviewed again", run.id(), watch.programs.attempt);
+                    None
+                }
                 Phase::Recovery(watch) => {
                     watch.job.abandon();
                     info!(run_id = %run.id(), "run {}: recovery round {} stopped for the handoff; it is taken again", run.id(), watch.round);

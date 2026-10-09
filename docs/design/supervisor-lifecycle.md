@@ -67,7 +67,9 @@ ready task (dependencies completed)
   → running                          │
   → completion receipt, session idle │ (the session stays open)
   → validate receipt, commit, clean state (own thread)
-  → awaiting_integration: headless review (claude -p, or codex exec --json read-only when
+  → awaiting_integration: program reviews from the landing branch's [review.programs], one at a time
+      first non-zero exit → revise (no agent starts); start failure / timeout → review failed
+  → headless review (claude -p, or codex exec --json read-only when
     [roles.review] says provider = "codex") → verdict
       pass    → exit request → close workspace → land (single slot, push)
       revise  → fixed request to the live session → rewritten receipt
@@ -289,6 +291,7 @@ live worker alert (stalled, idle_process)
 ## Review (supervisor)
 
 - [Review (supervisor)](supervisor-lifecycle/review.md)
+- [プログラムのreview](supervisor-lifecycle/review-programs.md)
 - [着地の前のe2e](supervisor-lifecycle/landing-e2e.md)
 
 ## Triage (supervisor)

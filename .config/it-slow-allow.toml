@@ -806,3 +806,8 @@ task = 1980
 name = "runtime_integrate::verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree"
 reason = "境界（Git・プロセス・supervisorの配線）: 先の着地の後に実 Git の rebase がきれいに当たり、rebase 後の検証コマンドの実 process が落ちた run を needs_session にして rebase 後の tree を worktree に残すことを確かめる代表の 1 本。本文の変更は task の欄（execution_class）を足した NewTask の literal だけ。検証の失敗の分類の判断は application::integrate の unit test"
 task = 1488
+
+[[test]]
+name = "review_programs::a_rejecting_program_sends_the_worker_back_before_any_agent_and_a_passing_set_goes_on"
+reason = "B 境界（守る境界）: supervisor wiring of program jobs over Git and processes, through a revise and a second review"
+task = 1900

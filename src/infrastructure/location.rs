@@ -26,6 +26,9 @@ pub const PLAN_REVIEWS_DIR_NAME: &str = "plan-reviews";
 pub const GOAL_REVIEWS_DIR_NAME: &str = "goal-reviews";
 /// The eval's directory next to the database (ADR-t1728-1).
 pub const AGENT_EVALS_DIR_NAME: &str = "agent-evals";
+/// The directory beside the database where the program reviews of the
+/// runs' reviews keep the scripts they run ([`review_programs_dir`]).
+pub const REVIEW_PROGRAMS_DIR_NAME: &str = "review-programs";
 /// Supervisor logs (`supervisor-<started_at>-<pid>.log`, `launchd.log`).
 pub const LOGS_DIR_NAME: &str = "logs";
 /// LaunchAgent labels are `com.dagq.<queue hash>`.
@@ -192,6 +195,16 @@ pub fn agent_evals_dir(db: &Path) -> PathBuf {
     QueueLocation::explicit(db)
         .queue_dir
         .join(AGENT_EVALS_DIR_NAME)
+}
+
+/// `review-programs/` next to the database: one directory per run, where
+/// the program reviews of its review write the scripts they run from the
+/// landing branch's commit, outside what the run's worker can write
+/// (ADR-t1895-2 decision 2).
+pub fn review_programs_dir(db: &Path) -> PathBuf {
+    QueueLocation::explicit(db)
+        .queue_dir
+        .join(REVIEW_PROGRAMS_DIR_NAME)
 }
 
 /// The canonical form of `path` when it exists, else of its nearest existing

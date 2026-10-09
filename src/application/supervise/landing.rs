@@ -6,8 +6,9 @@ use super::*;
 use crate::application::job_start_failure;
 use crate::application::prompt::{PromptBytes, REVIEW_ACCESS};
 use crate::application::review::{
-    SubagentSnapshot, review_range_at, review_subagents_prompt, snapshot_subagents,
+    ReviewRange, SubagentSnapshot, review_range_at, review_subagents_prompt, snapshot_subagents,
 };
+use crate::application::review_programs::{ProgramSnapshot, snapshot_programs};
 use crate::domain::ActorContext;
 use crate::domain::AskConfidence;
 use crate::domain::EventKind;
@@ -19,6 +20,9 @@ use crate::domain::concern::{
 };
 use crate::domain::headless_job::{JobKind, JobSession};
 use crate::domain::provider_switch::SwitchReason;
+use crate::domain::review_programs::{
+    self as programs, AfterFailure, ProgramOutcome, ProgramsStep,
+};
 use crate::domain::review_reason;
 use crate::domain::review_subagents::{AgentDefinition, Destination, VerdictRoute};
 use crate::domain::worker_model::{self, Escalation};
@@ -197,17 +201,327 @@ impl Supervisor<'_> {
             )
         }))
     }
-    /// Record `review_started` and start the headless review of an accepted
-    /// run whose session stays open (ADR-0027 decision 1): write
-    /// `review.md`, then run the reviewer's command with the task's
-    /// acceptance and the verdict schema. A review that cannot even start
-    /// is a failed one.
+    /// Review an accepted run whose session stays open (ADR-0027 decision
+    /// 1): first its program reviews ([`Self::start_review_programs`]),
+    /// then, once they all pass, record `review_started` and start the
+    /// headless review: write `review.md`, then run the reviewer's command
+    /// with the task's acceptance and the verdict schema. A review that
+    /// cannot even start is a failed one.
     pub(super) fn start_review(
         &mut self,
         run: &TaskRun,
         session: Option<SessionRef>,
     ) -> Result<Phase> {
-        self.resume_review(run, session, false)
+        self.start_review_programs(run, session, false)
+    }
+    /// Start the program reviews of `run`'s next review (ADR-t1895-2):
+    /// those the landing branch's commit configures whose paths the
+    /// reviewed range changes, each script read at that commit, run one
+    /// program job at a time in the configured order against the run's
+    /// worktree. A review that needs none (no `[review.programs.*]`, or no
+    /// program whose paths the range touches) goes to its agents at once
+    /// and records nothing of them. `retried` is whether this is their one
+    /// retry, after a program that could not be read, start or finish.
+    fn start_review_programs(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        retried: bool,
+    ) -> Result<Phase> {
+        let events = self.queue.run_events(run.id())?;
+        let history = RunHistory::from_events(&events);
+        let attempt = history.review_attempts() + 1;
+        let round = history.count(event_kind::REVIEW_PROGRAMS_STARTED) + 1;
+        let snapshot = match self.review_programs(run) {
+            Ok(Some(snapshot)) if !snapshot.programs.is_empty() => snapshot,
+            Ok(_) => return self.resume_review(run, session, retried),
+            Err(error) => {
+                let error = format!("the review's programs could not be read: {error:#}");
+                return self.review_programs_failed(run, (session, attempt, retried), None, error);
+            }
+        };
+        let selected: Vec<Value> = snapshot
+            .programs
+            .iter()
+            .map(|selected| {
+                json!({
+                    "name": selected.program.name,
+                    "script": selected.program.script,
+                    "matched": selected.matched,
+                })
+            })
+            .collect();
+        self.queue.record_runtime_event(
+            run.id(),
+            EventKind::ReviewProgramsStarted,
+            json!({
+                "attempt": attempt,
+                "round": round,
+                "retried": retried,
+                "commit": snapshot.commit,
+                "base": snapshot.range.base,
+                "head": snapshot.range.head,
+                "programs": selected,
+            }),
+        )?;
+        info!(run_id = %run.id(), "run {}: {} program review(s) before review {attempt}", run.id(), snapshot.programs.len());
+        self.go_on_with_programs(
+            run,
+            ReviewPrograms {
+                session,
+                attempt,
+                round,
+                retried,
+                snapshot,
+                outcomes: Vec::new(),
+                detail: None,
+            },
+        )
+    }
+    /// The program reviews of `run`'s review from the landing branch's
+    /// commit ([`snapshot_programs`]), selected by the receipt's range as
+    /// the subagents are; `None` without `[review.programs.*]`.
+    fn review_programs(&self, run: &TaskRun) -> Result<Option<ProgramSnapshot>> {
+        snapshot_programs(
+            &*self.repository,
+            &|text| self.verifier.review_programs_in(text),
+            &|main| self.receipt_range(run, main),
+        )
+    }
+    /// The next step of `run`'s program reviews ([`programs::step`]): start
+    /// the next program; once every one exited 0, go on to the agents'
+    /// review; at the first that exited non-zero, send the worker back with
+    /// its output, starting no other program and no agent (ADR-t1895-2
+    /// decision 3); at the first that could not start or finish, fail as a
+    /// review does (decision 4).
+    fn go_on_with_programs(&mut self, run: &TaskRun, mut state: ReviewPrograms) -> Result<Phase> {
+        loop {
+            let step = programs::step(state.snapshot.programs.len(), &state.outcomes);
+            let name = |index: usize| state.snapshot.programs[index].program.name.clone();
+            match step {
+                ProgramsStep::Run(index) => match self.start_run_program(run, &state, index) {
+                    Ok(job) => {
+                        return Ok(Phase::ReviewPrograms(ProgramsWatch {
+                            programs: state,
+                            job,
+                        }));
+                    }
+                    Err(error) => {
+                        let name = name(index);
+                        let error = format!("the review program {name} could not start: {error:#}");
+                        warn!(run_id = %run.id(), "run {}: {error}", run.id());
+                        self.queue.record_runtime_event(
+                            run.id(),
+                            EventKind::ReviewProgramFinished,
+                            json!({
+                                "attempt": state.attempt,
+                                "round": state.round,
+                                "program": name,
+                                "outcome": ProgramOutcome::StartFailed.as_str(),
+                                "exit": null,
+                                "duration_secs": 0,
+                                "stdout_tail": null,
+                                "stderr_tail": null,
+                                "error": error,
+                            }),
+                        )?;
+                        state.outcomes.push(ProgramOutcome::StartFailed);
+                        state.detail = Some(error);
+                    }
+                },
+                ProgramsStep::Passed => {
+                    self.record_programs_finished(run, state.attempt, "passed", None, None, None)?;
+                    info!(run_id = %run.id(), "run {}: its program reviews passed; its agents review it", run.id());
+                    return self.resume_review(run, state.session, state.retried);
+                }
+                ProgramsStep::Rejected(index) => {
+                    let name = name(index);
+                    let reason = state.detail.take().unwrap_or_else(|| {
+                        format!("the review program {name} rejected the change")
+                    });
+                    self.record_programs_finished(
+                        run,
+                        state.attempt,
+                        "rejected",
+                        Some(&name),
+                        None,
+                        Some(&reason),
+                    )?;
+                    info!(run_id = %run.id(), "run {}: the review program {name} rejected it; it goes back to its worker and no agent reviews it", run.id());
+                    let verdict = ReviewVerdict {
+                        verdict: ReviewDecision::Revise,
+                        reasons: vec![reason],
+                        reason_codes: Vec::new(),
+                        summary: format!("the review program {name} rejected the change"),
+                        recommendation: None,
+                        confidence: None,
+                        reason_category: None,
+                        agents: Vec::new(),
+                    };
+                    let job = ActorContext::review_job(run.id(), state.attempt);
+                    return self.send_revise(run, state.session, verdict, &job, None);
+                }
+                ProgramsStep::Failed(index, _) => {
+                    let name = name(index);
+                    let error = state
+                        .detail
+                        .take()
+                        .unwrap_or_else(|| format!("the review program {name} failed"));
+                    return self.review_programs_failed(
+                        run,
+                        (state.session, state.attempt, state.retried),
+                        Some(&name),
+                        error,
+                    );
+                }
+            }
+        }
+    }
+    /// Record `review_programs_finished` of the program reviews before
+    /// review `attempt`, ended `outcome` at `program`: why they `failed`
+    /// and whether they run again, or the `reason` the worker is sent back
+    /// with.
+    fn record_programs_finished(
+        &mut self,
+        run: &TaskRun,
+        attempt: usize,
+        outcome: &str,
+        program: Option<&str>,
+        failed: Option<(&str, bool)>,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.queue.record_runtime_event(
+            run.id(),
+            EventKind::ReviewProgramsFinished,
+            json!({
+                "attempt": attempt,
+                "outcome": outcome,
+                "program": program,
+                "again": failed.is_some_and(|(_, again)| again),
+                "error": failed.map(|(error, _)| error),
+                "reason": reason,
+            }),
+        )?;
+        Ok(())
+    }
+    /// The program reviews before review `attempt` failed with `error`, at
+    /// `program` (none when they could not be read): they run once more
+    /// from their first program unless this is their retry, and then the
+    /// review fails to the person without an agent's job, as one that
+    /// could not start (ADR-t1895-2 decision 4). The worker is not sent
+    /// back.
+    fn review_programs_failed(
+        &mut self,
+        run: &TaskRun,
+        (session, attempt, retried): (Option<SessionRef>, usize, bool),
+        program: Option<&str>,
+        error: String,
+    ) -> Result<Phase> {
+        let again = programs::after_failure(retried) == AfterFailure::Again;
+        self.record_programs_finished(
+            run,
+            attempt,
+            "failed",
+            program,
+            Some((&error, again)),
+            None,
+        )?;
+        if again {
+            warn!(run_id = %run.id(), error = %error, "run {}: its program reviews failed: {error}; running them once more", run.id());
+            return self.start_review_programs(run, session, true);
+        }
+        // No agent's job ran before this attempt, so none of its output
+        // is named, whatever the programs' retry.
+        self.unstarted_review_failed(run, session, attempt, false, error)
+    }
+    /// Go on from the program at `programs.outcomes.len()`, which ended
+    /// as `end` after `duration_secs`, its time limit `timeout_secs`:
+    /// record `review_program_finished` and take the next step.
+    pub(super) fn review_program_ended(
+        &mut self,
+        run: &TaskRun,
+        mut state: ReviewPrograms,
+        end: &ProgramEnd,
+        (duration_secs, timeout_secs): (u64, u64),
+    ) -> Result<Phase> {
+        let name = state.snapshot.programs[state.outcomes.len()]
+            .program
+            .name
+            .clone();
+        let outcome = ProgramOutcome::of_exit(end.exit.as_ref().map(|exit| exit.success));
+        let exit = end.exit.as_ref().map(ToString::to_string);
+        let error = (outcome == ProgramOutcome::TimedOut).then(|| {
+            let output = self.program_output(run, state.round, &name);
+            format!(
+                "the review program {name} did not finish within {timeout_secs} seconds and was stopped; its output is in {output}.out and .err"
+            )
+        });
+        self.queue.record_runtime_event(
+            run.id(),
+            EventKind::ReviewProgramFinished,
+            json!({
+                "attempt": state.attempt,
+                "round": state.round,
+                "program": name,
+                "outcome": outcome.as_str(),
+                "exit": exit,
+                "duration_secs": duration_secs,
+                "stdout_tail": end.stdout_tail,
+                "stderr_tail": end.stderr_tail,
+                "error": error,
+            }),
+        )?;
+        state.detail = match outcome {
+            ProgramOutcome::Rejected => Some(programs::rejection_reason(
+                &name,
+                exit.as_deref().unwrap_or("no exit status"),
+                &end.stdout_tail,
+                &end.stderr_tail,
+            )),
+            _ => error,
+        };
+        state.outcomes.push(outcome);
+        self.go_on_with_programs(run, state)
+    }
+    /// Start the program at `index` of `state`'s programs as a program job
+    /// against the run's worktree, its output in the run's directory and
+    /// its script in the run's directory of `review-programs/`, which the
+    /// worker cannot write.
+    fn start_run_program(
+        &self,
+        run: &TaskRun,
+        state: &ReviewPrograms,
+        index: usize,
+    ) -> Result<HeadlessJob> {
+        let program = &state.snapshot.programs[index];
+        let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
+        let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        anyhow::ensure!(
+            self.files.is_dir(&worktree),
+            "the run's worktree {} is gone",
+            worktree.display()
+        );
+        let scratch = self.layout.review_programs_dir.join(run.id().as_str());
+        let subject = JobSubject::review_program(run.id(), state.round, &program.program.name);
+        let timeout = self.job_timeout(&subject);
+        start_review_program(
+            &self.job_ports(),
+            self.spawner,
+            self.programs,
+            program,
+            &worktree,
+            (&run_dir, &scratch),
+            (run.id(), state.round),
+            timeout,
+        )
+    }
+    /// Where the program `name` of the program reviews' `round` writes its
+    /// output, without the `.out` / `.err` of its stdout and stderr.
+    fn program_output(&self, run: &TaskRun, round: usize, name: &str) -> String {
+        let stem = format!("review-program-{round}-{name}");
+        run.run_dir().map_or(stem.clone(), |dir| {
+            Path::new(dir).join(&stem).display().to_string()
+        })
     }
     /// Start the review of `run`, or wait in [`Phase::ReviewHeld`] while
     /// its route waits, keeping `retried`: a review that waited starts
@@ -571,21 +885,23 @@ impl Supervisor<'_> {
     /// ([`snapshot_subagents`]); the range is the receipt's, read only when
     /// agents are configured.
     pub(super) fn review_subagents(&self, run: &TaskRun) -> Result<Option<SubagentSnapshot>> {
-        let range = |main: &CommitSha| {
-            let receipt_path = Path::new(run.receipt_path().context("missing receipt path")?);
-            let receipt = Receipt::parse(
-                &self
-                    .files
-                    .read_to_string(receipt_path)
-                    .with_context(|| format!("read receipt {}", receipt_path.display()))?,
-            )?;
-            review_range_at(&*self.repository, run, &receipt, main)
-        };
         snapshot_subagents(
             &*self.repository,
             &|text| self.verifier.review_subagents_in(text),
-            &range,
+            &|main| self.receipt_range(run, main),
         )
+    }
+    /// The range `run`'s review reads with the landing branch at `main`:
+    /// from its receipt's commit ([`review_range_at`]).
+    fn receipt_range(&self, run: &TaskRun, main: &CommitSha) -> Result<ReviewRange> {
+        let receipt_path = Path::new(run.receipt_path().context("missing receipt path")?);
+        let receipt = Receipt::parse(
+            &self
+                .files
+                .read_to_string(receipt_path)
+                .with_context(|| format!("read receipt {}", receipt_path.display()))?,
+        )?;
+        review_range_at(&*self.repository, run, &receipt, main)
     }
     /// Write the review's material and prompt, held to its limits (task
     /// 1571): the prompt and what it takes, which `review_started` records.

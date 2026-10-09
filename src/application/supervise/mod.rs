@@ -412,6 +412,10 @@ pub struct Layout {
     /// `agent-evals/` of the queue: one directory per round of the eval of
     /// an agent (ADR-t1728-1).
     pub agent_evals_dir: PathBuf,
+    /// `review-programs/` of the queue: one directory per run, where the
+    /// program reviews of its review write the scripts they run, outside
+    /// what its worker can write (ADR-t1895-2 decision 2).
+    pub review_programs_dir: PathBuf,
 }
 
 impl Layout {
@@ -1205,6 +1209,9 @@ enum Phase {
         Option<thread::JoinHandle<Result<Validation>>>,
         Option<SessionRef>,
     ),
+    /// The program reviews of an accepted run, one program job at a time
+    /// before its agents' review (ADR-t1895-2); its session stays open.
+    ReviewPrograms(ProgramsWatch),
     /// The headless review of an accepted run (ADR-0023 decision 2).
     Review(ReviewWatch),
     /// An accepted run whose review waits for the authentication or
@@ -1257,7 +1264,7 @@ impl Phase {
         match self {
             Phase::Session(_) => Recorded::Worker,
             Phase::Validating(..) => Recorded::Validating,
-            Phase::Review(_) => Recorded::Review,
+            Phase::ReviewPrograms(_) | Phase::Review(_) => Recorded::Review,
             Phase::ReviewHeld { .. } => Recorded::ReviewHeld,
             Phase::Revise(_) => Recorded::Revise,
             Phase::Exiting(_) => Recorded::Exiting,
@@ -3373,6 +3380,25 @@ impl Supervisor<'_> {
                 }
                 Ok(Step::Continue)
             }
+            Phase::ReviewPrograms(watch) => {
+                let Some(end) = watch.job.poll_program(&*self.files)? else {
+                    return Ok(Step::Continue);
+                };
+                let ran = (
+                    watch.job.started.elapsed().as_secs(),
+                    watch.job.timeout.as_secs(),
+                );
+                let programs = watch.programs.take();
+                let run = self.queue.run(slot.run.id())?;
+                let next = self.review_program_ended(&run, programs, &end, ran)?;
+                slot.run = run;
+                slot.transition(
+                    next,
+                    EventKind::ReviewProgramFinished.as_str(),
+                    &*self.queue,
+                );
+                Ok(Step::Continue)
+            }
             Phase::Review(watch) => {
                 let provider = self.job_agent(watch.job.provider).with_context(|| {
                     format!("no {} runs on this supervisor", watch.job.provider.as_str())
@@ -3753,6 +3779,7 @@ impl Supervisor<'_> {
 fn stop_job(slot: &mut Slot) {
     match &mut slot.phase {
         Phase::Review(watch) => watch.job.abandon(),
+        Phase::ReviewPrograms(watch) => watch.job.abandon(),
         Phase::Recovery(watch) => watch.job.abandon(),
         _ => stop_recovery(slot),
     }
@@ -3765,6 +3792,11 @@ fn open_session(phase: &Phase) -> Option<(&str, bool)> {
     match phase {
         Phase::Validating(_, Some(session)) => Some((&session.workspace, false)),
         Phase::Review(watch) => watch
+            .session
+            .as_ref()
+            .map(|session| (session.workspace.as_str(), false)),
+        Phase::ReviewPrograms(watch) => watch
+            .programs
             .session
             .as_ref()
             .map(|session| (session.workspace.as_str(), false)),

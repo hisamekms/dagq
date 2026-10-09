@@ -16,6 +16,7 @@ use serde::ser::SerializeMap;
 use serde_json::Value;
 
 use super::{RunEvent, Summary, median, payload_status};
+use crate::domain::event_kind;
 
 /// The phases, in the order a landing goes through them.
 pub const PHASES: [&str; 11] = [
@@ -356,7 +357,9 @@ impl LandClock {
             Some(RESUME)
         } else {
             match kind {
-                "review_started" | "review_retried" => Some(REVIEW),
+                event_kind::REVIEW_PROGRAMS_STARTED | "review_started" | "review_retried" => {
+                    Some(REVIEW)
+                }
                 "review_finished" | "validation_finished" => Some(EXIT),
                 "review_failed" => Some(ASK),
                 "revise_requested" => Some(REVISE),
@@ -676,6 +679,67 @@ mod tests {
                 ("revise", 260),
                 ("rebase", 1),
                 ("verify", 49),
+            ])
+        );
+    }
+
+    /// The program reviews before the agents' review count as `review`,
+    /// not as the `exit` the validation left the run in: a program that
+    /// rejects the run counts until its revise, and those that pass until
+    /// the agents' verdict.
+    #[test]
+    fn the_program_reviews_count_as_the_review() {
+        let (spent, _) = phases(
+            &[
+                (
+                    event_kind::REVIEW_PROGRAMS_STARTED,
+                    json!({"attempt": 1}),
+                    2,
+                ),
+                (
+                    event_kind::REVIEW_PROGRAM_FINISHED,
+                    json!({"outcome": "rejected"}),
+                    12,
+                ),
+                (
+                    event_kind::REVIEW_PROGRAMS_FINISHED,
+                    json!({"outcome": "rejected"}),
+                    13,
+                ),
+                ("revise_requested", json!({"attempt": 1}), 14),
+                ("revise_finished", json!({"attempt": 1}), 100),
+                (
+                    "validation_finished",
+                    json!({"status": "awaiting_integration"}),
+                    110,
+                ),
+                (
+                    event_kind::REVIEW_PROGRAMS_STARTED,
+                    json!({"attempt": 1}),
+                    111,
+                ),
+                (
+                    event_kind::REVIEW_PROGRAMS_FINISHED,
+                    json!({"outcome": "passed"}),
+                    121,
+                ),
+                ("review_started", json!({"attempt": 1}), 121),
+                ("review_finished", json!({"verdict": "pass"}), 151),
+                ("landing_queued", json!({}), 160),
+                ("integration_started", json!({}), 160),
+                ("integration_rebased", json!({}), 161),
+                ("run_integrated", json!({}), 200),
+            ],
+            9999,
+        );
+        assert_eq!(
+            spent,
+            map(&[
+                ("exit", 2 + 1 + 9),
+                ("review", 12 + 40),
+                ("revise", 96),
+                ("rebase", 1),
+                ("verify", 39),
             ])
         );
     }

@@ -38,7 +38,7 @@ related:
 `progress`は`{phase, since, elapsed_secs, slot}`で、runのstatusもschemaも増やさず既存のイベントから導く（`domain::run_progress::Progress::of`。`stats`の`watched_phase`はsessionの監視専用なので使わない）。`phase`は工程を始めるイベントの最後のもの（前から順に畳むので、後の工程が前の工程を置き換える）で、次のどれか。
 
 - `claim`（`run_claimed`）、`session`（`agent_started`）、`validate`（`supervision_finished`、`revise_finished` / `conflict_resolved`、`status: validating`の`resume_finished`）、`validated`（受け入れた`validation_finished`の後、reviewの始まる前）
-- `review`（`review_started`。`review_retried`の後はもう一方のproviderで流し直すか、providerが使えるまで待つ）、`revise`（`revise_requested`）、`conflict_fix`（`requested: true`の`conflict_precheck`）、`exit`（`exit_requested` / `exit_retried`）
+- `review`（`review_programs_started`・`review_started`。`review_retried`の後はもう一方のproviderで流し直すか、providerが使えるまで待つ）、`revise`（`revise_requested`）、`conflict_fix`（`requested: true`の`conflict_precheck`）、`exit`（`exit_requested` / `exit_retried`）
 - `landing_queue`（着地待ち。`landing_queued`と、`passed` / `not_configured`の`run_e2e_finished`）、`e2e_waiting`（`run_e2e_waiting`）、`e2e`（`run_e2e_started`）、`e2e_retry_wait`（`outcome: unavailable`の`run_e2e_finished`。hostでの流し直し待ち）、`integrating`（`integration_started`）
 - `resume`（`resume_started`。resumeしたsessionのagentの`agent_started`では変わらない）、`recovery`（`triage_started`）
 

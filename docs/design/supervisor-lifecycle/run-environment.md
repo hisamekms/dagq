@@ -61,7 +61,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[review.jobs]`はrunのreviewの段のjobの種類ごとの時間の上限で（ADR-t1895-1決定1、`JobTimeouts`）、`agent_timeout_secs`・`program_timeout_secs`（正の整数の秒）を持つ。
   他のjobに効かず（evalのケースのprogramのjobはreviewの段に数える）、無いkeyは今の上限（既定600秒。[Headless job processes](headless-job-processes.md#記録)）。
   supervisorが起動時に読む。
-- `[review.programs.<name>]`はreviewのprogramのjobで（[Review](review.md#プログラムのreview)）、必須の`script`（と任意の`args`）、必須の`paths`、任意の`timeout_secs`を持つ（意味は`ReviewProgram`）。
+- `[review.programs.<name>]`はreviewのprogramのjobで（[プログラムのreview](review-programs.md)）、必須の`script`（と任意の`args`）、必須の`paths`、任意の`timeout_secs`を持つ（意味は`ReviewProgram`）。
   `<name>`はkebab-caseで、表の重複・知らないkey・keyの欠けは行番号付きのエラーにする。
   `command`は`script`で書くよう告げるエラーにする。
   読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`（`Verifier::review_programs_in`）。

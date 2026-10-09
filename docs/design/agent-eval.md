@@ -210,7 +210,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 ## programのreviewの当て方
 
 - evalは各ケースに本番のreviewと同じ段を当てる（判断は`domain::agent_eval::programs`）。
-  周の定義とケースを読むlanding branchのcommitから、programの一覧とscriptを読み（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[Review](supervisor-lifecycle/review.md#プログラムのreview)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、ここに写さない）、pathがケースの差分に当たるものを、ケースのtreeをcwdに設定の順に流す。
+  周の定義とケースを読むlanding branchのcommitから、programの一覧とscriptを読み（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[プログラムのreview](supervisor-lifecycle/review-programs.md)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、ここに写さない）、pathがケースの差分に当たるものを、ケースのtreeをcwdに設定の順に流す。
   ケースのpatchがscriptや設定を変えても、流れるのはcommitの中身である。
 - programはケースの1回の枠の中でagentのjobの前に1本ずつ流し、周の同時数の上限を超えない。
   providerの費用には数えない。

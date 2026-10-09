@@ -15,6 +15,7 @@ related:
   - adr-t2125-1
   - adr-t1925-1
   - adr-t1487-1
+  - design-supervisor-lifecycle-review-programs
 ---
 
 # Validation
@@ -38,6 +39,10 @@ related:
 結果は`validation_finished`イベント（`status`、`result_commit`、`reason`、receiptの内容、7で外れたときだけ`scope_violation`と`allowed_paths`、8で欠けたときだけ`evidence_missing`、e2eの要否が分かったときは`e2e_requirement`、`receipt_observed`からこの検証までのload averageの`load_avg_mean` / `load_avg_max`（task 197。[`supervise`](supervise.md)の7））と`task_runs.result_commit`/`last_error`に保存する。4以降で拒否した場合もcommitは確認済みなので`result_commit`を残す。成功しても`awaiting_integration`はTaskを`in_progress`のまま保持し、着地まで依存taskを解放しない。
 
 その後: `awaiting_integration`のrunは[Review](review.md#review-supervisor)に進む（leaseとsessionはそのまま）。`integration_approved`のあるrun（`integrate`が呼ばれた後にresumeしたrun）はreviewを待たずに終了の依頼→close→着地する（ADR-0027の決定3）。`needs_session`（宣言外のパス、evidenceかSpikeの結果の欠落）は終了の依頼→closeしてleaseを外す。`failed`は終了を依頼し、workspaceは調査のため閉じずにleaseを外す。
+
+reviewの段の順は、先頭の[プログラムのreview](review-programs.md)、その後のagentのreview、passの後の[着地の前のe2e](landing-e2e.md)である。
+プログラムのreviewはtestを含まない速い形式の検査で、validatingと同じくtaskのverifyのコマンドを流さない。
+testを含む検証は下の着地の検証（`integrate`のrebase後の1回）だけで、プログラムのreviewとは二重にしない。
 
 ## 着地の検証
 

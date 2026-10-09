@@ -89,6 +89,7 @@ mod queue_tasks;
 mod recovery_codex;
 mod related;
 mod request_planner;
+mod review_programs;
 mod review_subagents;
 mod runtime_actor_env;
 mod runtime_adopt;

@@ -59,10 +59,12 @@ taskを1つずつ待たせるtaskのhold（予定・未実装）は、この控�
 supervisorは毎pass（drainの途中も）、ディスクの確認（`check_disk`）の次に`Supervisor::check_queue_hold`でqueueのcloseされていない対象のaskを読み、回答済みのものを適用してから、openなものの最初の1件を`queue_hold`（`claim_hold::QueueHold`: 理由、`ask_id`、`affected`の数）として持つ。持っている間:
 
 - **claim**: `ClaimHold::judge`は`HoldInputs.queue_hold`（どのworkerにも経路が無いときだけ渡す。上の「providerごとの控え」）をディスクとloadより先に判定し、`claim_held`（`reason`が`authentication` / `usage_limit`、`value`がaskの`affected`の数、`threshold`が0、`ask_id`、`message`）を記録してclaimしない。askが閉じるか回答されると次のpassで`claim_resumed`になる（記録の規則と`status`の`claim_hold`・`stats`の`claim_holds.by_reason`は[claimを控える](claim-hold.md)と同じ）
-- **review**: 受理されたrunのreviewは`Phase::ReviewHeld`で待ち、sessionは開いたまま、`review_started`を書かない（`start_review` / `retry_review`が入口で`review_route`に聞く。`provider`を書いたreviewが`review_route`で待つのは、そのproviderと切り替え先の両方が使えないときだけ）。
+- **review**: 受理されたrunのreviewは、先頭の[プログラムのreview](review-programs.md)をproviderを使わないので控えの間も流し、それが全部通った後のagentのreviewだけが`Phase::ReviewHeld`で待つ。
+  プログラムのreviewで落ちたrunは`ReviewHeld`に入らずworkerに差し戻され、起動の失敗と時間切れはreviewの失敗になる。
+  待つ間sessionは開いたまま、`review_started`を書かない（agentのreviewを始める`resume_review`が入口で`review_route`に聞く。`start_review`はプログラムのreviewの後にそれを呼び、`retry_review`も同じ。`provider`を書いたreviewが`review_route`で待つのは、そのproviderと切り替え先の両方が使えないときだけ）。
   必須のsubagentを持つreviewは、行き先のproviderが使えてもsubagentを動かせず、動かせるClaudeが控え中なら、同じく`ReviewHeld`で待つ（[Review](review.md#reviewのsubagent)）。
-  控えが解けたpass（起きる判断は`Supervisor::review_held_waits`で、`review_route`と待っている必須のsubagentの両方を見る）で`start_review`が始める。
-  引き継ぎとadoptは`awaiting_integration`のreviewの無いrunを`start_review`で組み立て直すので、同じく待つ
+  控えが解けたpass（起きる判断は`Supervisor::review_held_waits`で、`review_route`と待っている必須のsubagentの両方を見る）で`resume_review`がagentのreviewを始め、プログラムのreviewは流し直さない。
+  引き継ぎとadoptは`awaiting_integration`のreviewの無いrunを`start_review`で組み立て直すので、プログラムのreviewから流し直し、agentのreviewは同じく待つ
 - **復旧job**: `[roles.recovery]`に`provider`を書かない復旧jobは、終わったrunのtriage（行き先の`Supervisor::recovery_route`が待つので`triage_candidates`が候補を出さない）を始めない。生きているsessionのalertの復旧job（`RecoveryWatch::start`）も始めず、alertは控えが解けた後のpassでまた拾う。`provider = "codex"`の復旧jobは上の「providerを書いた役割のjob」のとおり控えの間もCodexで始まる（task 1225）（長く走るbackgroundのalertは、`seen`を進める前に判定するので失われない）
 - **plan review・goal review・observer**: 起動しない（`plan_review_pass`に`starting: false`。goal reviewは`goal_review_pass`に控えによらず`starting`を渡し、`PlanningState::goal_review_route`が`provider`を書かない役割を控えの間は起動しない。observerはqueue serviceが居れば控えによらず`start_observer_when_due`を呼び、行き先の`Supervisor::job_start_route`が`provider`を書かない役割を控えの間は起動しない。task 1223）。走っているjobは最後まで追う。`[roles.goal_review]`・`[roles.observer]`に`provider`を書いたgoal review・observerは、上の「providerを書いた役割のjob」のとおり控えの間も使えるproviderで起動する（`provider = "codex"`のobserverはClaudeの控えの間もCodexで起動する）
 - 走っているrunはleaseとsessionを持ったまま進む。着地（`integrate`）はClaudeを使わないので控えない

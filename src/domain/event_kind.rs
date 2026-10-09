@@ -279,6 +279,9 @@ event_kinds! {
     ReviewFailed => "review_failed",
     ReviewFinished => "review_finished",
     ReviewOutcome => "review_outcome",
+    ReviewProgramFinished => "review_program_finished",
+    ReviewProgramsFinished => "review_programs_finished",
+    ReviewProgramsStarted => "review_programs_started",
     ReviewRetried => "review_retried",
     ReviewStarted => "review_started",
     ReviseFinished => "revise_finished",
@@ -885,6 +888,27 @@ pub const REVIEW_FINISHED: &str = EventKind::ReviewFinished.as_str();
 /// What a person's answer to the `approve_landing` ask of a concern says
 /// of the review's findings (ADR-t947-1 decision 4).
 pub const REVIEW_OUTCOME: &str = EventKind::ReviewOutcome.as_str();
+/// The program reviews of a run's review started, before its agents
+/// (ADR-t1895-2): the review `attempt` they go before, their `round` (which
+/// run of the run's program reviews, from 1, that numbers their jobs and
+/// output files), whether they are the review's one `retried` run, and the landing branch's `commit`, the
+/// reviewed range's `base` and `head` and the `programs` it selected
+/// (`name`, `script`, `matched`), in the order they run.
+pub const REVIEW_PROGRAMS_STARTED: &str = EventKind::ReviewProgramsStarted.as_str();
+/// One program review of a run ended: its `attempt`, `round`, `program`,
+/// `outcome`
+/// (`domain::review_programs::ProgramOutcome`), `exit` (its status as
+/// text, null when it did not exit), `duration_secs`, the ends of its
+/// output (`stdout_tail`, `stderr_tail`) and, for one that did not pass by
+/// its exit, `error`.
+pub const REVIEW_PROGRAM_FINISHED: &str = EventKind::ReviewProgramFinished.as_str();
+/// A run's program reviews ended: their `attempt`, `outcome` (`passed`:
+/// the agents' review starts; `rejected`: the worker is sent back;
+/// `failed`: the review failed), the `program` that ended them (null when
+/// all passed), `again` (a failure the program reviews run once more for),
+/// `error` (why a failed one failed) and `reason` (what a rejected one
+/// sends the worker back with).
+pub const REVIEW_PROGRAMS_FINISHED: &str = EventKind::ReviewProgramsFinished.as_str();
 pub const REVIEW_RETRIED: &str = EventKind::ReviewRetried.as_str();
 pub const REVIEW_STARTED: &str = EventKind::ReviewStarted.as_str();
 pub const REVISE_FINISHED: &str = EventKind::ReviseFinished.as_str();
@@ -1268,6 +1292,12 @@ mod tests {
             (EventKind::ReviewFailed, "review_failed"),
             (EventKind::ReviewFinished, "review_finished"),
             (EventKind::ReviewOutcome, "review_outcome"),
+            (EventKind::ReviewProgramFinished, "review_program_finished"),
+            (
+                EventKind::ReviewProgramsFinished,
+                "review_programs_finished",
+            ),
+            (EventKind::ReviewProgramsStarted, "review_programs_started"),
             (EventKind::ReviewRetried, "review_retried"),
             (EventKind::ReviewStarted, "review_started"),
             (EventKind::ReviseFinished, "revise_finished"),

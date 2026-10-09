@@ -74,6 +74,125 @@ pub fn select(configured: &[ReviewProgram], changed: &[String]) -> Vec<SelectedP
         .collect()
 }
 
+/// How one program of a run's review ended: the `outcome` of
+/// `review_program_finished`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramOutcome {
+    /// It exited 0: the change passes its check.
+    Passed,
+    /// It exited non-zero: the change breaks its check, which the worker
+    /// fixes (ADR-t1895-2 decision 3).
+    Rejected,
+    /// It ran past its time and was stopped with its process group.
+    TimedOut,
+    /// It did not start: its backend refused it, or its process could not
+    /// be spawned.
+    StartFailed,
+}
+
+impl ProgramOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Rejected => "rejected",
+            Self::TimedOut => "timed_out",
+            Self::StartFailed => "start_failed",
+        }
+    }
+
+    /// The outcome of a program whose process ended as `exit` says:
+    /// `Some(success)` for an exit, `None` for one stopped past its time.
+    pub const fn of_exit(exit: Option<bool>) -> Self {
+        match exit {
+            Some(true) => Self::Passed,
+            Some(false) => Self::Rejected,
+            None => Self::TimedOut,
+        }
+    }
+}
+
+/// Where a run's program reviews go, given how many programs the review
+/// needs and how those that ran ended, in the configured order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramsStep {
+    /// Start the program at this index next.
+    Run(usize),
+    /// Every program exited 0 (or none was needed): the agents' review
+    /// starts.
+    Passed,
+    /// The program at this index exited non-zero: the worker is sent back
+    /// with its output, and neither the programs after it nor an agent run.
+    Rejected(usize),
+    /// The program at this index could not start or ran past its time:
+    /// the review failed, not the worker (ADR-t1895-2 decision 4), and no
+    /// program after it runs.
+    Failed(usize, ProgramOutcome),
+}
+
+/// The next [`ProgramsStep`] of the `selected` programs a review needs,
+/// `outcomes` those that ended, in order: the first that did not pass
+/// ends the step, else the next not run yet runs.
+pub fn step(selected: usize, outcomes: &[ProgramOutcome]) -> ProgramsStep {
+    for (index, outcome) in outcomes.iter().enumerate() {
+        match outcome {
+            ProgramOutcome::Passed => {}
+            ProgramOutcome::Rejected => return ProgramsStep::Rejected(index),
+            failed => return ProgramsStep::Failed(index, *failed),
+        }
+    }
+    if outcomes.len() < selected {
+        ProgramsStep::Run(outcomes.len())
+    } else {
+        ProgramsStep::Passed
+    }
+}
+
+/// What a program review that [`ProgramsStep::Failed`] leads to: as a
+/// review whose job failed, it runs once more from its first program,
+/// unless it is that one retry already; then the review fails to a person
+/// (`review_failed` and the `approve_landing` ask). It never sends the
+/// worker back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterFailure {
+    Again,
+    ReviewFailed,
+}
+
+pub const fn after_failure(retried: bool) -> AfterFailure {
+    if retried {
+        AfterFailure::ReviewFailed
+    } else {
+        AfterFailure::Again
+    }
+}
+
+/// The most of a rejecting program's output the reason sent to the worker
+/// carries, from its end.
+pub const REASON_OUTPUT_TAIL: usize = 2000;
+
+/// The reason a worker is sent back with when the program `name` exited
+/// with `exit` (its status as text): the end of its stdout and stderr,
+/// [`REASON_OUTPUT_TAIL`] bytes at most, or that it printed nothing.
+pub fn rejection_reason(name: &str, exit: &str, stdout: &str, stderr: &str) -> String {
+    let output = [stdout.trim_end(), stderr.trim_end()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut start = output.len().saturating_sub(REASON_OUTPUT_TAIL);
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    let output = &output[start..];
+    if output.is_empty() {
+        format!("the review program {name} rejected the change ({exit}) and printed nothing")
+    } else {
+        format!(
+            "the review program {name} rejected the change ({exit}); the end of its output:\n{output}"
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +237,68 @@ mod tests {
             ]
         );
         assert!(select(&configured, &[]).is_empty());
+    }
+
+    /// The programs run one at a time in order while each exits 0, and the
+    /// review goes on to its agents once all did (or none was needed).
+    #[test]
+    fn the_programs_run_in_order_and_all_passing_goes_on_to_the_agents() {
+        use ProgramOutcome::Passed;
+        assert_eq!(step(0, &[]), ProgramsStep::Passed);
+        assert_eq!(step(3, &[]), ProgramsStep::Run(0));
+        assert_eq!(step(3, &[Passed]), ProgramsStep::Run(1));
+        assert_eq!(step(3, &[Passed, Passed]), ProgramsStep::Run(2));
+        assert_eq!(step(3, &[Passed, Passed, Passed]), ProgramsStep::Passed);
+        assert_eq!(ProgramOutcome::of_exit(Some(true)), Passed);
+    }
+
+    /// The first program that exits non-zero stops the step there: no
+    /// program after it runs and the worker is sent back.
+    #[test]
+    fn the_first_rejecting_program_stops_the_rest_and_sends_the_worker_back() {
+        use ProgramOutcome::{Passed, Rejected};
+        assert_eq!(ProgramOutcome::of_exit(Some(false)), Rejected);
+        assert_eq!(step(3, &[Rejected]), ProgramsStep::Rejected(0));
+        assert_eq!(step(3, &[Passed, Rejected]), ProgramsStep::Rejected(1));
+    }
+
+    /// A program that could not start or ran past its time fails the
+    /// review, never the worker: no program after it runs, the program
+    /// review runs once more from its first program, and a failed retry
+    /// fails the review to a person.
+    #[test]
+    fn a_start_failure_or_a_timeout_fails_the_review_once_more_then_to_a_person() {
+        use ProgramOutcome::{Passed, StartFailed, TimedOut};
+        assert_eq!(ProgramOutcome::of_exit(None), TimedOut);
+        for failed in [TimedOut, StartFailed] {
+            assert_eq!(step(3, &[failed]), ProgramsStep::Failed(0, failed));
+            assert_eq!(step(3, &[Passed, failed]), ProgramsStep::Failed(1, failed));
+        }
+        assert_eq!(after_failure(false), AfterFailure::Again);
+        assert_eq!(after_failure(true), AfterFailure::ReviewFailed);
+        assert_eq!(
+            [Passed, ProgramOutcome::Rejected, TimedOut, StartFailed].map(ProgramOutcome::as_str),
+            ["passed", "rejected", "timed_out", "start_failed"]
+        );
+    }
+
+    /// The worker reads the program's name, its exit and the end of its
+    /// output, cut on a character boundary.
+    #[test]
+    fn the_reason_names_the_program_its_exit_and_the_end_of_its_output() {
+        assert_eq!(
+            rejection_reason("links", "exit status: 1", "a\nbroken link\n", "oops\n"),
+            "the review program links rejected the change (exit status: 1); the end of its output:\na\nbroken link\noops"
+        );
+        assert_eq!(
+            rejection_reason("links", "exit status: 2", "", "\n"),
+            "the review program links rejected the change (exit status: 2) and printed nothing"
+        );
+        let long = format!("{}末尾", "é".repeat(REASON_OUTPUT_TAIL));
+        let reason = rejection_reason("p", "exit status: 1", &long, "");
+        let output = reason.split_once("output:\n").unwrap().1;
+        assert!(output.len() <= REASON_OUTPUT_TAIL, "{}", output.len());
+        assert!(output.ends_with("末尾"));
     }
 
     /// A script names one repository file.
