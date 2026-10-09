@@ -2,7 +2,7 @@
 //! [`crate::domain::kpi::kpi`] derives the KPIs from. Reads only.
 use anyhow::{Result, anyhow};
 
-use super::{Queue, areas::AreaReader};
+use super::{PlanningRecords, RunLog, SupervisorRegistry, areas::AreaReader};
 use crate::domain::kpi::{HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive};
 
 /// Where the host is: the time zone at `now` (seconds east of UTC) and the
@@ -20,7 +20,7 @@ pub struct Host {
 /// window when `host_metrics` reads it (task 872; `kpi` and the reports do,
 /// the breach check and the observer do not).
 pub fn kpi(
-    queue: &dyn Queue,
+    queue: &(impl PlanningRecords + SupervisorRegistry + RunLog + ?Sized),
     now: i64,
     host: Host,
     config: &KpiConfig,

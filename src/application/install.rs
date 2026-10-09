@@ -15,7 +15,7 @@
 //! is read through [`QueueOpener`]; [`crate::compose`] builds the adapters.
 
 use super::{
-    Clock, ProcessControl, Queue, QueueOpener, RunFiles,
+    Clock, HostOpsQueue, ProcessControl, QueueOpener, RunFiles, SupervisorRegistry,
     lifecycle::{Handed, hand_off, handoff_failures},
     path_text,
 };
@@ -366,13 +366,13 @@ pub struct InstallOptions {
     pub e2e: E2eGate,
 }
 
-pub struct Ports<'a> {
+pub struct Ports<'a, P: ?Sized> {
     pub binaries: &'a dyn Binaries,
     pub files: &'a dyn RunFiles,
     pub processes: &'a dyn ProcessControl,
     pub clock: &'a dyn Clock,
-    /// Opens the queue at a database path.
-    pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener>,
+    /// Opens the queue at a database path, as host運用's ports `P`.
+    pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener<P>>,
     /// `down --wait` on the queue, for a breaking migration's drain.
     pub down: &'a dyn Fn() -> Result<Value>,
 }
@@ -388,7 +388,11 @@ pub fn previous_path(target: &Path) -> PathBuf {
 /// the queue at `db`'s live supervisors over to it (see the module). `db`
 /// is `None`, or names no file, outside a queue: then only the binary is
 /// replaced.
-pub fn install(ports: &Ports, db: Option<&Path>, options: &InstallOptions) -> Result<Value> {
+pub fn install(
+    ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
+    db: Option<&Path>,
+    options: &InstallOptions,
+) -> Result<Value> {
     let Ports {
         binaries, files, ..
     } = *ports;
@@ -519,7 +523,7 @@ backups/ directory next to it"
         binaries.migrate(&source, db)?
     };
     let queue = (ports.queues)(db).open()?;
-    let live = live_supervisors(ports, &*queue)?;
+    let live = live_supervisors(ports.clock, ports.processes, &*queue)?;
     let (takes, cannot): (Vec<_>, Vec<_>) = live
         .into_iter()
         .partition(|registration| registration.handoff_accepted);
@@ -746,7 +750,7 @@ impl HandoffFailed {
 /// again with the new binary's `up`, in the mode and with the parallelism
 /// the drained one had.
 fn install_breaking(
-    ports: &Ports,
+    ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
     db: &Path,
     source: &Path,
     version: &str,
@@ -756,7 +760,7 @@ fn install_breaking(
     let binaries = ports.binaries;
     let live = {
         let queue = (ports.queues)(db).open()?;
-        live_supervisors(ports, &*queue)?
+        live_supervisors(ports.clock, ports.processes, &*queue)?
     };
     let drained = if live.is_empty() {
         Value::Null
@@ -847,13 +851,17 @@ again"
 /// The registrations whose process lives and heartbeats: the ones a
 /// replacement asks (a silent one cannot pick the request up, ADR-0045
 /// decision 16).
-fn live_supervisors(ports: &Ports, queue: &dyn Queue) -> Result<Vec<SupervisorRegistration>> {
-    let now = ports.clock.now();
+fn live_supervisors(
+    clock: &dyn Clock,
+    processes: &dyn ProcessControl,
+    queue: &(impl SupervisorRegistry + ?Sized),
+) -> Result<Vec<SupervisorRegistration>> {
+    let now = clock.now();
     Ok(queue
         .supervisors()?
         .into_iter()
         .filter(|registration| {
-            ports.processes.alive(registration.pid)
+            processes.alive(registration.pid)
                 && now - registration.heartbeat_at <= HEARTBEAT_TIMEOUT_SECS
         })
         .collect())
@@ -870,6 +878,88 @@ pub fn parse_version(output: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::port_fakes::SupervisorsAndEvents;
+    use crate::domain::{LeaseToken, SupervisorMode};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// The clock at `secs` after the epoch.
+    struct At(i64);
+
+    impl Clock for At {
+        fn system_time(&self) -> SystemTime {
+            UNIX_EPOCH + Duration::from_secs(self.0.unsigned_abs())
+        }
+
+        fn monotonic(&self) -> std::time::Instant {
+            std::time::Instant::now()
+        }
+    }
+
+    /// Pid 1 is alive, every other pid is dead.
+    struct OnlyOne;
+
+    impl ProcessControl for OnlyOne {
+        fn alive(&self, pid: u32) -> bool {
+            pid == 1
+        }
+        fn terminate(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn interrupt(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn kill(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn registration(token: &str, pid: u32, heartbeat_at: i64) -> SupervisorRegistration {
+        SupervisorRegistration {
+            token: LeaseToken::new(token),
+            pid,
+            parallel: 2,
+            started_at: 0,
+            heartbeat_at,
+            mode: Some(SupervisorMode::Launchd),
+            workspace_id: None,
+            handoff_accepted: true,
+            handoff_binary: None,
+            auto_update: false,
+            max_waiting: None,
+            parallel_source: None,
+            max_waiting_source: None,
+            runtime_planners: None,
+            runtime_planners_source: None,
+            claim_spacing: None,
+            claim_spacing_source: None,
+            max_load: None,
+            providers: None,
+            binary_version: Some("1.0.0".into()),
+        }
+    }
+
+    /// A replacement asks only the registrations whose process lives and
+    /// whose heartbeat is at most the timeout old: one heartbeating just
+    /// at the timeout is live, one a second past it is silent, and a dead
+    /// pid is never live, read from the registrations' port alone.
+    #[test]
+    fn live_supervisors_are_the_alive_ones_heartbeating_within_the_timeout() {
+        let now = 10_000;
+        let queue = SupervisorsAndEvents {
+            registrations: vec![
+                registration("at-timeout", 1, now - HEARTBEAT_TIMEOUT_SECS),
+                registration("past-timeout", 1, now - HEARTBEAT_TIMEOUT_SECS - 1),
+                registration("dead", 2, now),
+            ],
+            ..SupervisorsAndEvents::default()
+        };
+        let live = live_supervisors(&At(now), &OnlyOne, &queue).unwrap();
+        let tokens: Vec<&str> = live
+            .iter()
+            .map(|registration| registration.token.as_str())
+            .collect();
+        assert_eq!(tokens, ["at-timeout"]);
+    }
 
     /// The cmux skip names its tests and why, with the tool it waited for
     /// (ADR-t2105-1).

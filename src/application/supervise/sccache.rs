@@ -46,7 +46,7 @@ pub(super) struct SccacheWatch {
 impl HostOpsState {
     /// Look at the server every [`LOOK_INTERVAL`], draining or not: the
     /// first look is the start's.
-    pub(super) fn sccache_pass(&mut self, pass: &mut PassEnv<'_>) {
+    pub(super) fn sccache_pass(&mut self, pass: &mut HostEnv<'_>) {
         if self.sccache_port.is_none() {
             return;
         }
@@ -64,7 +64,7 @@ impl HostOpsState {
     /// without a port or a `[run.env]` whose `RUSTC_WRAPPER` is sccache.
     pub(super) fn ensure_sccache(
         &mut self,
-        pass: &mut PassEnv<'_>,
+        pass: &mut HostEnv<'_>,
         reason: CheckReason,
     ) -> ServerCheck {
         let Some(SccachePort(server)) = self.sccache_port.clone() else {
@@ -265,7 +265,7 @@ impl HostOpsState {
     /// Record `sccache_server_start_failed` unless the latest of the
     /// server's events is the same failure, so a start retried every
     /// [`RETRY_AFTER`] is recorded once until it changes.
-    fn record_start_failure(&mut self, pass: &mut PassEnv<'_>, payload: Value) {
+    fn record_start_failure(&mut self, pass: &mut HostEnv<'_>, payload: Value) {
         warn!(error = %payload["error"], "the sccache server could not be started: {}", payload["error"]);
         let latest = pass.queue.latest_queue_event(&[
             crate::domain::sccache::SCCACHE_SERVER_STARTED,
@@ -291,7 +291,7 @@ impl HostOpsState {
     /// started ([`Self::ensure_sccache`]), then the guard made in `dir`.
     pub(super) fn sccache_look(
         &mut self,
-        pass: &mut PassEnv<'_>,
+        pass: &mut HostEnv<'_>,
         reason: CheckReason,
         dir: &Path,
     ) -> GuardLook {
@@ -311,7 +311,7 @@ impl HostOpsState {
 /// `RUSTC_WRAPPER` out of the process `fields` name (its `job`, and its
 /// `attempt` when it has one), with the port and the `reason`.
 pub(super) fn record_wrapper_removed(
-    pass: &PassEnv<'_>,
+    pass: &PassEnv<'_, impl RunLog + ?Sized>,
     run: &RunId,
     look: &GuardLook,
     fields: Value,

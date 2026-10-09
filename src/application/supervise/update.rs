@@ -87,13 +87,13 @@ pub(super) struct UpdateWatch {
 impl HostOpsState {
     /// One look at main for the automatic update; what fails is logged and
     /// looked at again on the next pass.
-    pub(super) fn auto_update_pass(&mut self, env: &mut PassEnv<'_>, options: &LoopSettings) {
+    pub(super) fn auto_update_pass(&mut self, env: &mut HostEnv<'_>, options: &LoopSettings) {
         if let Err(error) = self.auto_update(env, options) {
             warn!(error = %format_args!("{error:#}"), "automatic update: {error:#}");
         }
     }
 
-    fn auto_update(&mut self, env: &mut PassEnv<'_>, options: &LoopSettings) -> Result<()> {
+    fn auto_update(&mut self, env: &mut HostEnv<'_>, options: &LoopSettings) -> Result<()> {
         if let Some(job) = self.update.job.as_mut()
             && let Some(exit) = job.try_wait()?
         {
@@ -206,7 +206,7 @@ impl HostOpsState {
     /// A job that died before it recorded how it ended (killed, a reboot):
     /// record `update_failed` for its commit and ask the inbox, so the
     /// update is neither lost nor retried on its own.
-    fn job_interrupted(&mut self, env: &mut PassEnv<'_>, step: &RunEvent) -> Result<()> {
+    fn job_interrupted(&mut self, env: &mut HostEnv<'_>, step: &RunEvent) -> Result<()> {
         let commit = step_commit(step).unwrap_or_default().to_owned();
         let question = format!(
             "The automatic update's job for main's {} (pid {}) ended without recording how, at \
@@ -241,7 +241,7 @@ to wait for the next landing that changes the runtime.",
     /// Close the answered `update_failed` asks: `retry` asks the next look
     /// to build main's head again, `skip` waits for the next landing. Any
     /// other answer is left for the inbox to read.
-    fn apply_update_answers(&mut self, env: &mut PassEnv<'_>) -> Result<()> {
+    fn apply_update_answers(&mut self, env: &mut HostEnv<'_>) -> Result<()> {
         let updates = env.queue.update_events(UPDATE_HISTORY)?;
         for ask in env.queue.update_answers(&AskKind::UpdateFailed)? {
             // The failure of a release's job is the release pass's, and
@@ -275,7 +275,7 @@ to wait for the next landing that changes the runtime.",
     /// output in the queue's `logs/`, and record `update_started`.
     fn start_update_job(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         head: &str,
         base: Option<&str>,
         options: &LoopSettings,

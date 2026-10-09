@@ -28,8 +28,8 @@ use serde_json::{Value, json};
 
 use crate::{
     application::{
-        AgentProvider, AgentSignals, AskQuery, Generators, ObserverLog, Queue, RunLog,
-        dependency_graph, lifecycle::OBSERVER_ROLE,
+        AgentProvider, AgentSignals, AskQuery, AskStore, Generators, ObserverLog, QueueRecords,
+        RunLog, TaskStore, dependency_graph, lifecycle::OBSERVER_ROLE,
     },
     domain::{
         ActorContext, ActorRole, AskId, CONSECUTIVE_FAILURES, EventId, FindingQuery, NewHold,
@@ -151,7 +151,7 @@ pub struct ObserverEnvironment<'a, Q: ?Sized> {
 /// (a Codex one is read by `provider`'s `job_failure`); they must belong to
 /// `provider` when it is Claude's. `db` is the queue's canonical path,
 /// which names its directory.
-pub fn observe<Q: Queue + ObserverLog>(
+pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskStore>(
     queue: &mut Q,
     db: &Path,
     provider: &dyn AgentProvider,
@@ -523,7 +523,7 @@ fn merge(payload: &mut Value, extra: &Value) {
 /// Add the observer to the hold ask of `wall`, or open it (the inbox's
 /// watch notifies the person of a new one), and record `auth_required` or
 /// `usage_limited` on the queue when it joined. Returns the ask's ID.
-fn hold_wall(queue: &mut dyn Queue, wall: Wall) -> Result<AskId> {
+fn hold_wall(queue: &mut (impl AskStore + RunLog + ?Sized), wall: Wall) -> Result<AskId> {
     let hold = NewHold::wall(wall, None, Some(HoldJob::Observer));
     let outcome = crate::application::ask::hold(queue, hold)?.0;
     if outcome.joined {
@@ -648,7 +648,7 @@ fn new_alerts(last: &Value, alerts: &[Value]) -> bool {
 /// threshold with time alone records no event), record a skipped
 /// `observe_finished` without starting anything, and return its payload.
 fn skip(
-    queue: &(impl Queue + ObserverLog),
+    queue: &(impl AskStore + ObserverLog + RunLog + ?Sized),
     mode: ObserveMode,
     since: Option<EventId>,
     alerts: &[Value],

@@ -4,7 +4,8 @@
 //! the headless jobs, and the supervisors' registrations and the repository
 //! binding.
 
-use super::shared::{Queue, StdinUnprepared};
+use super::execution::RunLog;
+use super::shared::{AskStore, Queue, StdinUnprepared};
 use crate::domain::{
     EventKind, GoalId, LeaseToken, ProposalId, RunId, SupervisorMode, SupervisorRegistration,
 };
@@ -16,9 +17,10 @@ use std::{
 
 /// Opens connections to the queue: the supervisor's own, and one for each
 /// thread that works beside its loop (the heartbeat, validations,
-/// landings).
-pub trait QueueOpener: Send + Sync {
-    fn open(&self) -> Result<Box<dyn Queue + Send>>;
+/// landings). `P` is what a connection reaches: the whole [`Queue`] by
+/// default, or the ports a use case takes.
+pub trait QueueOpener<P: ?Sized = dyn Queue + Send>: Send + Sync {
+    fn open(&self) -> Result<Box<P>>;
 }
 
 /// One command of an update of the installed dagq plugin and what it
@@ -537,6 +539,16 @@ pub trait SupervisorRegistry {
         workspace_id: Option<&str>,
     ) -> Result<()>;
 }
+
+/// The ports of the queue host運用's passes of the supervisor, their jobs,
+/// `install` and the automatic update reach: the supervisors'
+/// registrations and handoffs, the runs and their events 実行と着地
+/// publishes to every context, the asks of the updates, the disk and the
+/// inbox, and the inbox's watcher. [`Queue`] has it as a supertrait, so
+/// the loop's connection upcasts to it.
+pub trait HostOpsQueue: SupervisorRegistry + InboxWatchLog + RunLog + AskStore {}
+
+impl<T: SupervisorRegistry + InboxWatchLog + RunLog + AskStore + ?Sized> HostOpsQueue for T {}
 
 #[cfg(test)]
 mod tests {

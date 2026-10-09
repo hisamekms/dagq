@@ -159,7 +159,7 @@ impl ObservationState {
     /// [`crate::domain::provider_switch::ProviderHold`], Claude's hold ask
     /// or, for an agent that did not start, its `ProviderHold`). Once it is
     /// held the observation is due again ([`Self::timer_job_due_again`]).
-    fn observer_unusable(env: &PassEnv<'_>, job: &ObserverJob) -> Option<UnusableTimerJob> {
+    fn observer_unusable(env: &ObservationEnv<'_>, job: &ObserverJob) -> Option<UnusableTimerJob> {
         let finished = match env.queue.latest_events_of(OBSERVE_FINISHED, FINISH_EVENTS) {
             Ok(finished) => finished,
             Err(error) => {
@@ -198,7 +198,7 @@ impl ObservationState {
     /// The observation due now, if none runs ([`due_observation`]).
     pub(super) fn observer_due(
         &self,
-        env: &PassEnv<'_>,
+        env: &ObservationEnv<'_>,
         options: &LoopSettings,
     ) -> Result<Option<ObserveMode>> {
         if self.observer.is_some() || options.observe_interval.is_zero() {
@@ -221,7 +221,7 @@ impl ObservationState {
     /// `fallback_jobs` is `[provider_fallback] jobs`.
     pub(super) fn start_observer(
         &mut self,
-        env: &PassEnv<'_>,
+        env: &ObservationEnv<'_>,
         mode: ObserveMode,
         route: JobStartRoute,
         mark: EventId,
@@ -298,7 +298,7 @@ impl ObservationState {
     /// Kill the observer still running and the processes it started (its
     /// agent and that agent's Bash), so none outlives this supervisor or
     /// runs on unwatched after its exec; `why` ends the log line.
-    pub(super) fn stop_observer(&mut self, env: &PassEnv<'_>, why: &str) {
+    pub(super) fn stop_observer(&mut self, env: &ObservationEnv<'_>, why: &str) {
         let Some(ObserverJob {
             mode, mut child, ..
         }) = self.observer.take()
@@ -325,7 +325,7 @@ impl ObservationState {
     /// record. The finish of one that found its provider unusable, for
     /// 実行と着地 to hold that provider ([`Self::observer_unusable`]); it
     /// is due again once held ([`Self::timer_job_due_again`]).
-    pub(super) fn poll_observer(&mut self, env: &PassEnv<'_>) -> Option<UnusableTimerJob> {
+    pub(super) fn poll_observer(&mut self, env: &ObservationEnv<'_>) -> Option<UnusableTimerJob> {
         let job = self.observer.as_mut()?;
         let mode = job.mode;
         match job.child.try_wait() {

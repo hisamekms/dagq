@@ -36,6 +36,8 @@ pub mod observer;
 pub mod planner;
 pub mod planner_handoff;
 pub mod planner_request;
+#[cfg(test)]
+pub(crate) mod port_fakes;
 mod ports;
 pub mod prompt;
 mod prompt_fit;

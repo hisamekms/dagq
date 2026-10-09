@@ -104,7 +104,9 @@ use crate::domain::{
     worker::Worker,
     worker_model::{WorkerSession, WorkerTrial},
 };
-use contexts::{HostOpsState, ObservationState, PassEnv, PlanningEnv, PlanningState};
+use contexts::{
+    HostEnv, HostOpsState, ObservationEnv, ObservationState, PassEnv, PlanningEnv, PlanningState,
+};
 
 mod adopt;
 mod agent_eval;
@@ -423,6 +425,10 @@ impl Layout {
 /// The ports the supervisor works through, and where it works.
 pub struct Ports<'a> {
     pub queues: Arc<dyn QueueOpener>,
+    /// The connections of 観測と分析's jobs off the loop, as its ports.
+    pub observation_queues: Arc<dyn QueueOpener<dyn crate::application::ObservationQueue + Send>>,
+    /// The connections of host運用's jobs off the loop, as its ports.
+    pub host_queues: Arc<dyn QueueOpener<dyn crate::application::HostOpsQueue + Send>>,
     pub repository: Arc<dyn Repository + Send + Sync>,
     pub remote: Arc<dyn MainRemote + Send + Sync>,
     pub verifier: Arc<dyn Verifier + Send + Sync>,
@@ -1366,7 +1372,6 @@ impl Supervisor<'_> {
         (
             PassEnv {
                 queue: &mut *self.queue,
-                queues: &self.queues,
                 generators: &self.generators,
                 layout: self.layout,
                 processes: &self.processes,
@@ -1385,19 +1390,19 @@ impl Supervisor<'_> {
     /// Run `pass` of 観測と分析 on its state.
     fn on_observation<R>(
         &mut self,
-        pass: impl FnOnce(&mut contexts::ObservationState, &mut PassEnv<'_>) -> R,
+        pass: impl FnOnce(&mut contexts::ObservationState, &mut ObservationEnv<'_>) -> R,
     ) -> R {
-        let (mut env, observation, _) = self.split();
-        pass(observation, &mut env)
+        let (env, observation, _) = self.split();
+        pass(observation, &mut env.observation())
     }
 
     /// Run `pass` of host運用 on its state.
     fn on_host<R>(
         &mut self,
-        pass: impl FnOnce(&mut contexts::HostOpsState, &mut PassEnv<'_>) -> R,
+        pass: impl FnOnce(&mut contexts::HostOpsState, &mut HostEnv<'_>) -> R,
     ) -> R {
-        let (mut env, _, host) = self.split();
-        pass(host, &mut env)
+        let (env, _, host) = self.split();
+        pass(host, &mut env.host())
     }
 
     /// Run `pass` of 計画管理 on its state, with 実行と着地's jobs and
@@ -1410,7 +1415,6 @@ impl Supervisor<'_> {
         let mut env = contexts::PlanningEnv {
             pass: PassEnv {
                 queue: &mut *self.queue,
-                queues: &self.queues,
                 generators: &self.generators,
                 layout: self.layout,
                 processes: &self.processes,
@@ -1467,7 +1471,10 @@ impl Supervisor<'_> {
         self.request_cleanup(None);
         self.on_planning(|planning, env| planning.sweep_planners(env));
         let held = self.held_runs();
-        self.on_host(|host, env| host.sweep.sweep_ended_sessions(env, &held))
+        // The sweep closes 実行と着地's asks and stalled detections of the
+        // runs it stops, so it takes the loop's whole queue.
+        let (mut env, _, host) = self.split();
+        host.sweep.sweep_ended_sessions(&mut env, &held)
     }
 
     /// Ask host運用 for the worktrees of ended runs to be cleaned, every
@@ -1822,7 +1829,7 @@ impl Supervisor<'_> {
             // watcher's changes are recorded either way (task 1021).
             let reports = self.observation.reports.clone();
             if let Some((config, message)) =
-                self.with_env(|env| inbox_nudge::inbox_nudge_pass(env, reports.as_ref()))
+                self.on_host(|_, env| inbox_nudge::inbox_nudge_pass(env, reports.as_ref()))
             {
                 self.observation.queue_pushes(config, vec![message]);
             }

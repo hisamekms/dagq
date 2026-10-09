@@ -1,9 +1,9 @@
 //! `status`, `doctor` and `recover` (ADR-0016, ADR-0024 decision 3): how
 //! the supervisors and the unfinished runs stand, what waits for a person
 //! (`attention`), and the recovery of an orphaned run. A run's health is
-//! its lease, its registered processes and its files. Everything reads the
-//! queue through [`Queue`]; liveness comes through [`ProcessControl`] and
-//! the files through [`RunFiles`].
+//! its lease, its registered processes and its files. Each function reads
+//! the queue through the store ports it needs; liveness comes through
+//! [`ProcessControl`] and the files through [`RunFiles`].
 
 use crate::domain::LeaseToken;
 use anyhow::{Result, ensure};
@@ -12,7 +12,11 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path};
 
 use super::execution::{ActorExecution, actor_executions};
-use super::{AskQuery, Clock, PlannerAnswerRoute, ProcessControl, Queue, RunFiles, TRIAGE_ASKER};
+use super::{
+    AskQuery, AskStore, Clock, DraftPlannerStore, GoalReviewStore, PlanReviewStore,
+    PlannerAnswerRoute, ProcessControl, QueueRecords, RunCoordination, RunFiles, RunLog,
+    RunRecovery, SessionRegistry, SupervisorRegistry, TRIAGE_ASKER, TaskStore,
+};
 use crate::domain::worker::ProviderCheck;
 use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS,
@@ -210,8 +214,8 @@ fn progress_lease(lease: Option<&LeaseHealth>) -> Lease {
 /// cleaned up). A finished or cancelled run nobody leases and an earlier
 /// attempt of a retried task are history and are left out. The selection
 /// is the listing's own: the automatic recovery, adoption and `stats` keep
-/// [`Queue::active_runs`].
-fn listed_runs(queue: &dyn Queue, leases: &[RunLease]) -> Result<Vec<TaskRun>> {
+/// [`RunLog::active_runs`].
+fn listed_runs(queue: &(impl RunLog + ?Sized), leases: &[RunLease]) -> Result<Vec<TaskRun>> {
     let mut runs = queue.active_runs()?;
     let listed = |runs: &[TaskRun], id: &RunId| runs.iter().any(|run| run.id() == id);
     for run in queue.latest_runs_in_progress()? {
@@ -335,7 +339,19 @@ const REASON_CHARS: usize = 300;
 /// worker's per provider once a supervisor can run Codex. `ci_named_jobs`
 /// is what [`attention`] reads `ci_jobs_missing` against.
 pub fn status(
-    queue: &dyn Queue,
+    queue: &(
+         impl AskStore
+         + DraftPlannerStore
+         + GoalReviewStore
+         + PlanReviewStore
+         + QueueRecords
+         + RunCoordination
+         + SupervisorRegistry
+         + RunLog
+         + SessionRegistry
+         + TaskStore
+         + ?Sized
+     ),
     control: &dyn ProcessControl,
     clock: &dyn Clock,
     role: Option<SessionRole>,
@@ -497,7 +513,7 @@ fn provider_checks(
 /// claims for the CI watch or a landing branch that does not resolve
 /// `ci_watch_hold` / `landing_branch_hold`.
 fn slots_and_waits(
-    queue: &dyn Queue,
+    queue: &(impl RunLog + ?Sized),
     health: Vec<SupervisorHealth>,
     registrations: &[SupervisorRegistration],
     leases: &[RunLease],
@@ -800,7 +816,7 @@ fn held(
 /// ([`actor_executions`]: the host, advisory, not sandboxed; a Codex
 /// worker confined). Reads only.
 pub fn doctor(
-    queue: &dyn Queue,
+    queue: &(impl RunCoordination + SupervisorRegistry + RunLog + ?Sized),
     control: &dyn ProcessControl,
     files: &dyn RunFiles,
     clock: &dyn Clock,
@@ -876,7 +892,7 @@ pub fn doctor(
 /// 236). Never reruns, never deletes the worktree or workspace, leaves the
 /// task `in_progress`, and does not touch any other run.
 pub fn recover(
-    queue: &mut dyn Queue,
+    queue: &mut (impl RunCoordination + RunLog + RunRecovery + ?Sized),
     control: &dyn ProcessControl,
     files: &dyn RunFiles,
     clock: &dyn Clock,
@@ -1152,7 +1168,7 @@ pub fn compact_event(event: &RunEvent) -> Value {
 /// `ask`: one with the automatic update for a build's failure, one of a
 /// release build for a release's job's (ADR-t618-1).
 fn update_failure_applied(
-    queue: &dyn Queue,
+    queue: &(impl AskStore + RunLog + ?Sized),
     registrations: &[SupervisorRegistration],
     ask: &crate::domain::Ask,
     now: i64,
@@ -1184,7 +1200,19 @@ fn update_failure_applied(
 /// `dagq.toml` cannot be read): a `ci_jobs_missing` stands only while it
 /// names a missing job ([`crate::domain::ci_watch::WatchState::standing_jobs_missing`]).
 pub fn attention(
-    queue: &dyn Queue,
+    queue: &(
+         impl AskStore
+         + DraftPlannerStore
+         + GoalReviewStore
+         + PlanReviewStore
+         + QueueRecords
+         + RunCoordination
+         + SupervisorRegistry
+         + RunLog
+         + SessionRegistry
+         + TaskStore
+         + ?Sized
+     ),
     registrations: &[SupervisorRegistration],
     now: i64,
     control: &dyn ProcessControl,
@@ -1878,7 +1906,7 @@ pub fn attention(
 }
 
 /// Whether `task` is a draft, read from the task store every context reads.
-fn is_draft(queue: &dyn Queue, task: TaskId) -> Result<bool> {
+fn is_draft(queue: &(impl TaskStore + ?Sized), task: TaskId) -> Result<bool> {
     let page = queue.list(&super::TaskQuery {
         status: super::StatusFilter::Only(vec![TaskStatus::Draft]),
         goal_id: None,

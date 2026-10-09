@@ -62,7 +62,7 @@ impl ReportWatch {
 impl ObservationState {
     /// Reap the report job once it ended; start one when the local day
     /// changed since the reports were last found written.
-    pub(super) fn report_pass(&mut self, env: &mut PassEnv<'_>, start: bool) {
+    pub(super) fn report_pass(&mut self, env: &mut ObservationEnv<'_>, start: bool) {
         let Some(port) = self.reports.clone() else {
             return;
         };
@@ -109,7 +109,7 @@ impl ObservationState {
         if self.report.checked == Some(day) {
             return;
         }
-        let queues = env.queues.clone();
+        let queues = self.queues.clone();
         let files = env.files.clone();
         let token = env.token.clone();
         let job = spawn_traced(move || -> Result<ReportJob> {

@@ -66,7 +66,7 @@ impl HostOpsState {
     /// supervisor claims, from the same reading.
     pub(super) fn check_disk(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         interval: Duration,
         landings: &[RunId],
         held: &[RunId],
@@ -134,14 +134,14 @@ impl HostOpsState {
     }
     /// The free bytes of the queue's directory, where the run worktrees
     /// are; `None` when they cannot be read.
-    pub(super) fn free_bytes(&self, env: &PassEnv<'_>) -> Option<u64> {
+    pub(super) fn free_bytes(&self, env: &HostEnv<'_>) -> Option<u64> {
         (self.free_space)(&env.layout.runs_dir)
             .or_else(|| env.layout.db.parent().and_then(self.free_space))
     }
     /// What a claim and a landing need, read again every
     /// [`NEEDS_INTERVAL`] from the latest `build_outputs_removed`,
     /// `scratchpad_removed` and `run_tmp_removed`.
-    pub(super) fn disk_needs(&mut self, env: &mut PassEnv<'_>) -> Result<DiskNeeds> {
+    pub(super) fn disk_needs(&mut self, env: &mut HostEnv<'_>) -> Result<DiskNeeds> {
         if let Some((at, needs)) = self.disk.needs
             && at.elapsed() < NEEDS_INTERVAL
         {
@@ -158,7 +158,7 @@ impl HostOpsState {
     /// [`Self::cleaned_for_disk`] follows.
     fn clean_for_disk(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         held: &[RunId],
         free: Option<u64>,
         needed: Option<u64>,
@@ -181,7 +181,7 @@ impl HostOpsState {
     /// freed something, with the free bytes read again.
     pub(super) fn cleaned_for_disk(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         request: DiskRequest,
         removed: &Cleaned,
     ) {
@@ -207,7 +207,7 @@ impl HostOpsState {
     /// [`disk_ask_step`]; `None` opens it with no run).
     fn ask_for_disk(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         free: Option<u64>,
         needs: &DiskNeeds,
         joining: Vec<Option<RunId>>,
@@ -239,7 +239,7 @@ impl HostOpsState {
     /// Close the answered disk asks: `done` (a person freed the disk)
     /// cleans and checks again at once and may ask again; `wait` leaves
     /// the queue waiting without asking again.
-    fn apply_disk_answers(&mut self, env: &mut PassEnv<'_>, unclosed: &[Ask]) -> Result<()> {
+    fn apply_disk_answers(&mut self, env: &mut HostEnv<'_>, unclosed: &[Ask]) -> Result<()> {
         for ask in unclosed.iter().filter(|ask| ask.answered_at.is_some()) {
             let answer = ask.answer.as_deref().unwrap_or_default().trim().to_owned();
             env.queue.close_ask(ask.id)?;

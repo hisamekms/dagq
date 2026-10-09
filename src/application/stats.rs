@@ -13,7 +13,10 @@ use std::{
 
 use anyhow::Result;
 
-use super::{AgentSignals, ProcessControl, Queue, RunFiles, StatusFilter, TaskQuery};
+use super::{
+    AgentSignals, PlanningRecords, ProcessControl, QueueRecords, RunCoordination, RunFiles, RunLog,
+    StatusFilter, SupervisorRegistry, TaskQuery, TaskStore,
+};
 use crate::domain::{
     GoalStatus, RunId, RunStatus, SupervisorPulse, TaskRun, TaskStatus,
     host_metrics::HostSummary,
@@ -96,7 +99,15 @@ pub fn conflict_config(file: Option<ConflictConfig>) -> ConflictConfigReport {
 /// the processes of their background wrappers through `processes` (its pid
 /// and the start its handle recorded; no cmux, no heartbeat). Reads only.
 pub fn stats(
-    queue: &dyn Queue,
+    queue: &(
+         impl PlanningRecords
+         + QueueRecords
+         + RunCoordination
+         + SupervisorRegistry
+         + RunLog
+         + TaskStore
+         + ?Sized
+     ),
     processes: &dyn ProcessControl,
     now: i64,
     query: &StatsQuery,
@@ -170,7 +181,7 @@ impl StatsSources<'_> {
 /// the processes and `sources`: what a supervisor's pass records
 /// (docs/design/measurement.md "今の判定の記録").
 pub fn live_inputs(
-    queue: &dyn Queue,
+    queue: &(impl TaskStore + PlanningRecords + SupervisorRegistry + RunCoordination + RunLog + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
     events: &[crate::domain::RunEvent],
@@ -191,7 +202,7 @@ pub fn live_inputs(
 /// which are alive) less the runs executing, and the candidates and ready
 /// tasks.
 fn slot_snapshot(
-    queue: &dyn Queue,
+    queue: &(impl TaskStore + PlanningRecords + SupervisorRegistry + RunCoordination + RunLog + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
 ) -> Result<SlotSnapshot> {
@@ -282,7 +293,7 @@ fn stall_config(
 /// whether their background wrapper runs, and each one's position in the
 /// list of every run.
 fn live_runs(
-    queue: &dyn Queue,
+    queue: &(impl RunLog + ?Sized),
     processes: &dyn ProcessControl,
     events: &[crate::domain::RunEvent],
     sources: &LiveSources<'_>,

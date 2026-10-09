@@ -95,7 +95,7 @@ me=check-layer-deps
 c3_files="contexts ci_watch main_log forecast live_alerts observer push report throughput_review cleanup disk host_metrics queue_service release sccache update sweep handoff inbox_nudge plan_review goal_review request_planner draft_planner finding_planner planner_turns"
 # Rule C8: each port module of src/application/ports/ and the modules it may
 # name, "module:allowed,allowed"; a port module not listed may name none.
-c8_ok="planning:shared execution:shared host:shared observation:shared,planning,execution,host shared:planning,execution,observation,host"
+c8_ok="planning:shared execution:shared host:shared,execution observation:shared,planning,execution,host shared:planning,execution,observation,host"
 # The submodules that hold 実行と着地's state by stage, checked by C3 too.
 c3_stage_files="stages"
 # The modules of src/compose/ that are not a context module (rule L9): the

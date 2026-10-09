@@ -11,7 +11,7 @@ use super::AskStore;
 use crate::domain::{AskOutcome, HoldOutcome, NewAsk, NewHold};
 
 /// Register `ask`. A repeated ask returns the open one (`created: false`).
-pub fn ask(queue: &mut dyn AskStore, ask: NewAsk) -> Result<Value> {
+pub fn ask(queue: &mut (impl AskStore + ?Sized), ask: NewAsk) -> Result<Value> {
     let outcome = queue.ask(ask)?;
     Ok(serde_json::to_value(&outcome)?)
 }
@@ -20,7 +20,7 @@ pub fn ask(queue: &mut dyn AskStore, ask: NewAsk) -> Result<Value> {
 /// run to the open one (ADR-0047 decision 42). Only a new ask is an
 /// `ask_opened` for the inbox's watch to notify; a run that joins it
 /// notifies nobody.
-pub fn hold(queue: &mut dyn AskStore, hold: NewHold) -> Result<(HoldOutcome, Value)> {
+pub fn hold(queue: &mut (impl AskStore + ?Sized), hold: NewHold) -> Result<(HoldOutcome, Value)> {
     let outcome = queue.hold(hold)?;
     let mut value = serde_json::to_value(AskOutcome {
         ask: outcome.ask.clone(),

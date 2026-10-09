@@ -17,6 +17,7 @@
 //! after it (`handoff_slots`).
 
 use super::*;
+use crate::application::SupervisorRegistry;
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use serde::Deserialize;
@@ -95,7 +96,12 @@ impl Registration {
     /// its timeout, and the observer reads the stop behind the claims and
     /// resumes it holds. A failed write is only logged and tried again on
     /// the next pass.
-    pub(super) fn record_stop_request(&mut self, queue: &dyn Queue, build: &str, runs: &[RunId]) {
+    pub(super) fn record_stop_request(
+        &mut self,
+        queue: &(impl SupervisorRegistry + RunLog + ?Sized),
+        build: &str,
+        runs: &[RunId],
+    ) {
         let handoff = match &self.handoff {
             Some(binary) => Some(binary.clone()),
             None => queue.handoff_request(&self.token).ok().flatten(),
@@ -129,7 +135,12 @@ impl Registration {
     /// fails keeps the row, which goes stale for the next `up` or `down` to
     /// prune. Whether the loop ended so; an exec, or a lost heartbeat,
     /// keeps the registration.
-    pub(super) fn deregister(&mut self, queue: &dyn Queue, version: &str, ok: bool) -> bool {
+    pub(super) fn deregister(
+        &mut self,
+        queue: &(impl SupervisorRegistry + ?Sized),
+        version: &str,
+        ok: bool,
+    ) -> bool {
         if self.exec.is_some() || self.heartbeat.check().is_err() {
             return false;
         }

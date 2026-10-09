@@ -13,7 +13,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::{
-    AskQuery, Queue,
+    AskQuery, AskStore, PlanningRecords, QueueRecords, RunLog, SupervisorRegistry,
     report::{self, ReportSetup, Written},
 };
 use crate::domain::kpi::{
@@ -74,7 +74,7 @@ pub struct BreachCheck {
 /// 18). A start is marked `pushed` while `push` sends breaches and the
 /// local day's limit allows.
 pub fn check_breaches(
-    queue: &dyn Queue,
+    queue: &(impl PlanningRecords + QueueRecords + SupervisorRegistry + RunLog + ?Sized),
     setup: &ReportSetup,
     push: Option<&PushConfig>,
     now: i64,
@@ -131,7 +131,7 @@ pub fn check_breaches(
 /// recorded as pushed, then the summary of the latest day and of the
 /// latest week written (older ones a backfill wrote are not pushed).
 pub fn messages(
-    queue: &dyn Queue,
+    queue: &(impl AskStore + ?Sized),
     push: &PushConfig,
     target: &PushTarget,
     breaches: &BreachCheck,
@@ -209,7 +209,7 @@ pub fn request(push: &PushConfig, target: &PushTarget, message: &PushMessage) ->
 /// `kpi_push_abandoned` unless one already waits for a person. Returns
 /// whether the message is to be tried again.
 pub fn record_attempt(
-    queue: &dyn Queue,
+    queue: &(impl QueueRecords + RunLog + ?Sized),
     push: &PushConfig,
     message: &PushMessage,
     attempt: usize,

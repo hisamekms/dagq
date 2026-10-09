@@ -67,7 +67,7 @@ impl ReleaseWatch {
 impl HostOpsState {
     /// Reap the look once it ended; start one on the first pass and every
     /// [`RELEASE_LOOK`] after, when `start`.
-    pub(super) fn release_pass(&mut self, env: &mut PassEnv<'_>, start: bool) {
+    pub(super) fn release_pass(&mut self, env: &mut HostEnv<'_>, start: bool) {
         let Some(port) = self.release_port.clone() else {
             return;
         };
@@ -105,7 +105,7 @@ impl HostOpsState {
             return;
         }
         let now = env.generators.clock.now();
-        let queues = env.queues.clone();
+        let queues = self.queues.clone();
         let token = env.token.clone();
         self.release.job = Some(spawn_traced(move || {
             let queue = queues.open()?;
@@ -126,7 +126,7 @@ impl HostOpsState {
 impl HostOpsState {
     /// One look at what the release update has to do; what fails is logged
     /// and looked at again on the next pass.
-    pub(super) fn release_update_pass(&mut self, env: &mut PassEnv<'_>, options: &LoopSettings) {
+    pub(super) fn release_update_pass(&mut self, env: &mut HostEnv<'_>, options: &LoopSettings) {
         if let Err(error) = self.release_update(env, options) {
             warn!(error = %format_args!("{error:#}"), "release update: {error:#}");
         }
@@ -136,7 +136,7 @@ impl HostOpsState {
     /// host does not turn `release` off: apply the answers, report a job
     /// that died, then start a job or ask as [`release_update::next_action`]
     /// says. One job of the update runs at a time, whichever started it.
-    fn release_update(&mut self, env: &mut PassEnv<'_>, options: &LoopSettings) -> Result<()> {
+    fn release_update(&mut self, env: &mut HostEnv<'_>, options: &LoopSettings) -> Result<()> {
         if let Some(job) = self.release.install.as_mut()
             && let Some(exit) = job.try_wait()?
         {
@@ -263,7 +263,7 @@ impl HostOpsState {
     /// `plugin_only` of its `ask_opened`, or of the `update_failed` that
     /// opened it), whatever build applies it; for an ask opened before that
     /// was recorded, whether its release is the build `current`.
-    fn apply_release_answers(&mut self, env: &mut PassEnv<'_>, current: &str) -> Result<()> {
+    fn apply_release_answers(&mut self, env: &mut HostEnv<'_>, current: &str) -> Result<()> {
         for ask in env.queue.update_answers(&AskKind::ApproveRelease)? {
             let answer = ask.answer.as_deref().map(str::trim).unwrap_or_default();
             let Some(version) = ask.subject.clone() else {
@@ -308,7 +308,7 @@ impl HostOpsState {
 
     fn record_release_answer(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         kind: EventKind,
         ask: crate::domain::AskId,
         answer: &str,
@@ -333,7 +333,7 @@ impl HostOpsState {
     /// older release still open.
     fn open_release_ask(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         version: &str,
         current: &str,
     ) -> Result<()> {
@@ -365,7 +365,7 @@ next release asks again.",
     /// (ADR-t618-2 decision 4).
     fn open_plugin_ask(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         version: &str,
         plugin: &str,
     ) -> Result<()> {
@@ -396,7 +396,7 @@ sessions open now keep the plugin they started with, so reopen them afterwards t
     /// lost nor tried again on its own.
     fn release_job_interrupted(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         step: &RunEvent,
         version: &str,
     ) -> Result<()> {
@@ -457,7 +457,7 @@ leave it (the next release asks again).",
     /// `logs/`, and record `update_started`.
     fn start_release_job(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         version: &str,
         current: &str,
         options: &LoopSettings,

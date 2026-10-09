@@ -77,7 +77,7 @@ impl ObservationState {
     /// left running, or another supervisor's).
     fn due_throughput_review(
         &self,
-        env: &PassEnv<'_>,
+        env: &ObservationEnv<'_>,
         offset: i64,
         now: i64,
     ) -> Result<Option<(ReviewMode, String)>> {
@@ -111,7 +111,7 @@ impl ObservationState {
     /// ([`Self::start_throughput_review`]).
     pub(super) fn reap_throughput_reviews(
         &mut self,
-        env: &PassEnv<'_>,
+        env: &ObservationEnv<'_>,
         options: &LoopSettings,
     ) -> Vec<observer::UnusableTimerJob> {
         let mut unusable = self.reap_handed_over_reviews(env, options);
@@ -143,7 +143,7 @@ impl ObservationState {
     /// failure to read the schedule is logged.
     pub(super) fn throughput_review_due(
         &self,
-        env: &PassEnv<'_>,
+        env: &ObservationEnv<'_>,
         options: &LoopSettings,
         start: bool,
     ) -> Option<DueReview> {
@@ -172,7 +172,7 @@ impl ObservationState {
     /// retried for that period in this process.
     pub(super) fn start_throughput_review(
         &mut self,
-        env: &PassEnv<'_>,
+        env: &ObservationEnv<'_>,
         due: DueReview,
         route: JobStartRoute,
         fallback_jobs: bool,
@@ -265,7 +265,7 @@ impl ObservationState {
     /// a review finished or was killed at its timeout.
     fn reap_handed_over_reviews(
         &mut self,
-        env: &PassEnv<'_>,
+        env: &ObservationEnv<'_>,
         options: &LoopSettings,
     ) -> Vec<observer::UnusableTimerJob> {
         let mut unusable = Vec::new();
@@ -322,7 +322,7 @@ impl ObservationState {
     /// `RUNNING_MS`. A handoff does not stop it: the review goes on under
     /// the exec'd process, records its own finish, and its start keeps the
     /// next process from starting it again.
-    pub(super) fn stop_throughput_review(&mut self, env: &PassEnv<'_>, why: &str) {
+    pub(super) fn stop_throughput_review(&mut self, env: &ObservationEnv<'_>, why: &str) {
         let Some(ReviewJob {
             mode,
             period,
@@ -352,7 +352,10 @@ impl ObservationState {
     /// as a worker's or another job's failure does; once it is held the
     /// period is due again ([`Self::review_due_again`]; ADR-t1063-1
     /// decisions 4 and 5, ADR-t1857-1).
-    fn review_unusable(env: &PassEnv<'_>, job: &ReviewJob) -> Option<observer::UnusableTimerJob> {
+    fn review_unusable(
+        env: &ObservationEnv<'_>,
+        job: &ReviewJob,
+    ) -> Option<observer::UnusableTimerJob> {
         let finished = match env
             .queue
             .latest_events_of(THROUGHPUT_REVIEW_FINISHED, HANDED_OVER_EVENTS)

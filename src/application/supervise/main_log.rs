@@ -82,7 +82,7 @@ impl ObservationState {
     /// Record what moved of main's history since the record's reach. A
     /// queue that cannot be read or written is warned of, and a later pass
     /// tries again: a commit recorded twice is folded once.
-    pub(super) fn main_log_pass(&mut self, env: &mut PassEnv<'_>) {
+    pub(super) fn main_log_pass(&mut self, env: &mut ObservationEnv<'_>) {
         let now = env.generators.clock.now();
         // Read without starting Git.
         let stamp = env.repository.landing_branch_stamp();

@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::report::local_day;
-use super::{ProcessControl, Queue, WaitFor, dependency_graph};
+use super::{
+    PlanningRecords, ProcessControl, QueueRecords, RunLog, SupervisorRegistry, TaskStore, WaitFor,
+    dependency_graph,
+};
 use crate::domain::{
     ClaimRank, EventId, GoalId, GoalStatus, RunEvent, SupervisorPulse, TaskId, TaskStatus,
     forecast::{
@@ -39,7 +42,7 @@ pub struct ForecastQuery {
 /// change drawing from the whole distribution below `min_samples` landed
 /// runs, narrowed to `query` after the whole queue is simulated.
 pub fn forecast(
-    queue: &dyn Queue,
+    queue: &(impl PlanningRecords + SupervisorRegistry + RunLog + TaskStore + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
     min_samples: usize,
@@ -50,7 +53,7 @@ pub fn forecast(
 
 /// [`forecast`], with the latest event ID the history was read through.
 fn forecast_through(
-    queue: &dyn Queue,
+    queue: &(impl PlanningRecords + SupervisorRegistry + RunLog + TaskStore + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
     min_samples: usize,
@@ -174,7 +177,7 @@ pub struct Pending {
 /// Before the first snapshot only the daily one: the history is no
 /// trigger. `None` when there is none.
 pub fn pending(
-    queue: &dyn Queue,
+    queue: &(impl RunLog + ?Sized),
     now: i64,
     utc_offset: fn(i64) -> i64,
     checked: Option<i64>,
@@ -241,7 +244,7 @@ pub enum SnapshotOutcome {
 /// as one `forecast_recorded` by `supervisor` when [`decide`] keeps any of
 /// `pending`'s triggers.
 pub fn record_snapshot(
-    queue: &dyn Queue,
+    queue: &(impl PlanningRecords + QueueRecords + SupervisorRegistry + RunLog + TaskStore + ?Sized),
     processes: &dyn ProcessControl,
     supervisor: &LeaseToken,
     now: i64,

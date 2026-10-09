@@ -16,6 +16,7 @@
 
 use super::*;
 use crate::application::inbox_watcher::{self, InboxWatcher, WatcherState};
+use crate::application::{AskStore, InboxWatchLog};
 use crate::domain::event_kind::EventKind as Kind;
 use crate::domain::kpi::push::{PushConfig, PushMessage, inbox_watch_message};
 
@@ -67,7 +68,7 @@ pub(super) type NudgePush = (PushConfig, PushMessage);
 /// any. An error is logged and looked at again on a later pass; it holds up
 /// nothing else.
 pub(super) fn inbox_nudge_pass(
-    env: &mut PassEnv<'_>,
+    env: &mut HostEnv<'_>,
     reports: Option<&ReportPort>,
 ) -> Option<NudgePush> {
     let now = env.generators.clock.now();
@@ -91,7 +92,11 @@ pub(super) fn inbox_nudge_pass(
 /// Record the watcher's state unless the latest record holds it: the
 /// queue's write transaction compares, so a second supervisor and the
 /// process after an exec do not record the same change again.
-fn record_watcher_change(queue: &dyn Queue, watcher: &InboxWatcher, now: i64) -> Result<()> {
+fn record_watcher_change(
+    queue: &(impl InboxWatchLog + ?Sized),
+    watcher: &InboxWatcher,
+    now: i64,
+) -> Result<()> {
     let kind = match watcher.state {
         WatcherState::Alive => Kind::InboxWatcherReturned,
         WatcherState::Absent => Kind::InboxWatcherAbsent,
@@ -114,7 +119,7 @@ fn record_watcher_change(queue: &dyn Queue, watcher: &InboxWatcher, now: i64) ->
 /// [`RECORDED`]), `at`, `open_asks` and `waiting_asks` (counts only),
 /// `absent_secs`, and `push_error` when `[push]` could not be read.
 fn nudge_inbox(
-    queue: &dyn Queue,
+    queue: &(impl AskStore + InboxWatchLog + ?Sized),
     reports: Option<&ReportPort>,
     watcher: &InboxWatcher,
     now: i64,

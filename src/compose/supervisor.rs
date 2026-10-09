@@ -26,7 +26,8 @@ use std::{
 
 use crate::{
     application::{
-        AgentProvider, Generators, ProcessControl, RunFiles, SessionWrappers,
+        AgentProvider, Generators, HostOpsQueue, ObservationQueue, ProcessControl, RunFiles,
+        SessionWrappers,
         review::{self as reviewing},
         supervise::{self as supervisor, Layout, LoopSettings, Ports, UpdateSettings},
     },
@@ -54,7 +55,7 @@ use crate::{
             load_supervisor_config,
         },
         run_files::LocalRunFiles,
-        runtime_store::SqliteOpener,
+        runtime_store::{SqliteOpener, SqlitePorts},
         transcripts::ClaudeTranscripts,
     },
 };
@@ -662,15 +663,24 @@ pub fn supervise_with_reviewer(
         .ci_watch
         .as_ref()
         .map(|settings| observation::ci_watch_port(&db, &main_checkout, settings));
+    // The supervisor's own transitions (ADR-t728-1 decision 4).
+    let opener = || SqliteOpener {
+        db: db.clone(),
+        generators: generators.clone(),
+        actor: Some(crate::domain::actor::ActorContext::instance(
+            crate::domain::actor::ActorRole::Supervisor,
+            pid,
+        )),
+    };
     let ports = Ports {
-        // The supervisor's own transitions (ADR-t728-1 decision 4).
-        queues: Arc::new(SqliteOpener {
-            db: db.clone(),
-            generators: generators.clone(),
-            actor: Some(crate::domain::actor::ActorContext::instance(
-                crate::domain::actor::ActorRole::Supervisor,
-                pid,
-            )),
+        queues: Arc::new(opener()),
+        observation_queues: Arc::new(SqlitePorts {
+            opener: opener(),
+            keep: |queue| -> Box<dyn ObservationQueue + Send> { Box::new(queue) },
+        }),
+        host_queues: Arc::new(SqlitePorts {
+            opener: opener(),
+            keep: |queue| -> Box<dyn HostOpsQueue + Send> { Box::new(queue) },
         }),
         verifier: Arc::new(ShellVerifier {
             checkout: main_checkout.clone(),

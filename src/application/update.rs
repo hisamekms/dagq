@@ -23,7 +23,8 @@
 //! it; the job's own output goes to the queue's `logs/`.
 
 use super::{
-    Clock, InstalledPlugin, ProcessControl, Queue, QueueOpener, RunFiles, SupervisorRegistry,
+    AskStore, Clock, HostOpsQueue, InstalledPlugin, ProcessControl, QueueOpener, RunFiles, RunLog,
+    SupervisorRegistry,
     install::{self, Binaries, E2eGate, E2eSettings, InstallOptions, Source, previous_path},
     lifecycle,
 };
@@ -172,7 +173,7 @@ pub fn clear_target<R>(
 /// Record one step of the automatic update: the queue event `kind` with
 /// `commit` (the main commit it is about) in its payload.
 pub fn record(
-    queue: &dyn Queue,
+    queue: &(impl RunLog + ?Sized),
     kind: EventKind,
     commit: Option<&str>,
     mut payload: Value,
@@ -286,7 +287,11 @@ pub fn settled_failures(
 /// answers them [`UPDATE_INSTALLED_ANSWER`]. A person's install's asks
 /// are not the job's to close (ADR-0073 decision 14). Nothing here fails
 /// the swap, which is recorded already: what goes wrong is a warning.
-fn close_settled_failures(ports: &JobPorts, queue: &mut dyn Queue, installed: &str) {
+fn close_settled_failures(
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    queue: &mut (impl AskStore + RunLog + ?Sized),
+    installed: &str,
+) {
     let closed = (|| -> Result<()> {
         let open: Vec<crate::domain::AskId> = queue
             .asks(super::AskQuery {
@@ -509,13 +514,13 @@ pub struct JobOptions {
     pub pid: u32,
 }
 
-pub struct JobPorts<'a> {
+pub struct JobPorts<'a, P: ?Sized> {
     pub binaries: &'a dyn Binaries,
     pub files: &'a dyn RunFiles,
     pub processes: &'a dyn ProcessControl,
     pub clock: &'a dyn Clock,
-    /// Opens the queue at a database path.
-    pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener>,
+    /// Opens the queue at a database path, as host運用's ports `P`.
+    pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener<P>>,
     /// Start the supervisor of this registration again with the binary
     /// in place, after it died or was stopped (ADR-0045 decision 13);
     /// what was done.
@@ -530,9 +535,13 @@ pub struct JobPorts<'a> {
 /// (see the module). Every outcome is an `update_*` event and the
 /// value returned: `installed`, `awaiting_approval` or `failed`; an error
 /// is only a queue that could not be written.
-pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
+pub fn run(
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    db: &Path,
+    options: &JobOptions,
+) -> Result<Value> {
     let mut queue = (ports.queues)(db).open()?;
-    let queue: &mut dyn Queue = &mut *queue;
+    let queue = &mut *queue;
     let job = Job {
         subject: Subject::Commit(&options.commit),
         token: Some(&options.token),
@@ -575,7 +584,7 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
 }
 
 /// Record `update_built` for `binary`.
-fn record_built(queue: &dyn Queue, job: &Job, binary: &Path) -> Result<EventId> {
+fn record_built(queue: &(impl RunLog + ?Sized), job: &Job, binary: &Path) -> Result<EventId> {
     job.subject.record(
         queue,
         EventKind::UpdateBuilt,
@@ -589,8 +598,8 @@ fn record_built(queue: &dyn Queue, job: &Job, binary: &Path) -> Result<EventId> 
 /// whose value is returned. Nothing is replaced then, a breaking build
 /// included.
 fn e2e_gate(
-    ports: &JobPorts,
-    queue: &mut dyn Queue,
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    queue: &mut (impl AskStore + RunLog + ?Sized),
     job: &Job,
     options: &JobOptions,
 ) -> Result<Option<Value>> {
@@ -701,14 +710,14 @@ pub struct ReleaseJobOptions {
 /// asks, and leaves the binary in place. With `options.plugin_only`, the
 /// plugin is all the job updates.
 pub fn run_release(
-    ports: &JobPorts,
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
     installer: &dyn install::ReleaseInstaller,
     plugin: Option<&dyn InstalledPlugin>,
     db: &Path,
     options: &ReleaseJobOptions,
 ) -> Result<Value> {
     let mut queue = (ports.queues)(db).open()?;
-    let queue: &mut dyn Queue = &mut *queue;
+    let queue = &mut *queue;
     let job = Job {
         subject: Subject::Release(&options.version),
         token: Some(&options.token),
@@ -806,7 +815,12 @@ fn plugin_outcome(step: PluginStep) -> (Option<Value>, Option<String>, Option<an
 /// The job that only brings the installed plugin to `version`, which the
 /// binary is already (ADR-t618-2 decision 4): `update_installed` with
 /// `plugin_only`, or `update_failed` at the `plugin` stage.
-fn plugin_only(queue: &mut dyn Queue, job: &Job, version: &str, step: PluginStep) -> Result<Value> {
+fn plugin_only(
+    queue: &mut (impl AskStore + RunLog + ?Sized),
+    job: &Job,
+    version: &str,
+    step: PluginStep,
+) -> Result<Value> {
     let (plugin, message, error) = plugin_outcome(step);
     if let Some(error) = error {
         return failed(
@@ -855,7 +869,12 @@ enum Subject<'a> {
 
 impl Subject<'_> {
     /// Record the step `kind` with what it is about in its payload.
-    fn record(self, queue: &dyn Queue, kind: EventKind, mut payload: Value) -> Result<EventId> {
+    fn record(
+        self,
+        queue: &(impl RunLog + ?Sized),
+        kind: EventKind,
+        mut payload: Value,
+    ) -> Result<EventId> {
         match self {
             Self::Commit(commit) => record(queue, kind, Some(commit), payload),
             Self::Release(version) => {
@@ -932,8 +951,8 @@ struct Job<'a> {
 /// the supervisors take it and put the old binary back when none does; once
 /// it is in place and taken, do the `plugin` step.
 fn put_in_place(
-    ports: &JobPorts,
-    queue: &mut dyn Queue,
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    queue: &mut (impl AskStore + SupervisorRegistry + RunLog + ?Sized),
     db: &Path,
     job: &Job,
     binary: &Path,
@@ -1070,8 +1089,8 @@ enum Settled {
 /// that failed before any handoff is its own error, unchanged.
 #[allow(clippy::too_many_arguments)]
 fn settle(
-    ports: &JobPorts,
-    queue: &mut dyn Queue,
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    queue: &mut (impl AskStore + SupervisorRegistry + RunLog + ?Sized),
     job: &Job,
     registered: &[SupervisorRegistration],
     before: Option<&SupervisorRegistration>,
@@ -1321,7 +1340,7 @@ pub const WATCH_TIMEOUT: Duration = Duration::from_secs(60);
 /// over, or the drain of a breaking migration (`up` starts the
 /// supervisor), nothing is watched.
 pub fn install_watched(
-    ports: &JobPorts,
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
     down: &dyn Fn() -> Result<Value>,
     db: Option<&Path>,
     options: &InstallOptions,
@@ -1373,7 +1392,7 @@ pub fn install_watched(
         _ => {}
     }
     let mut queue = (ports.queues)(db).open()?;
-    let queue: &mut dyn Queue = &mut *queue;
+    let queue = &mut *queue;
     let registered = registered_since(registered, queue.supervisors()?, &installed);
     let staged = UpdatePaths::under(db.parent().unwrap_or(Path::new("."))).staged;
     let job = Job {
@@ -1431,7 +1450,7 @@ pub fn install_watched(
 }
 
 fn registration(
-    queue: &dyn SupervisorRegistry,
+    queue: &(impl SupervisorRegistry + ?Sized),
     token: &LeaseToken,
 ) -> Result<Option<SupervisorRegistration>> {
     Ok(queue
@@ -1456,7 +1475,11 @@ fn registered_before<'a>(
 /// Check a build that waits for a person as `install` would (its version
 /// and a start on a throwaway queue) and keep a copy of it, so a later
 /// build in the target does not replace what the person is asked about.
-fn stage(ports: &JobPorts, binary: &Path, staged: &Path) -> Result<String> {
+fn stage(
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    binary: &Path,
+    staged: &Path,
+) -> Result<String> {
     let version = ports.binaries.version(binary)?;
     ports.binaries.probe(binary)?;
     if let Some(dir) = staged.parent() {
@@ -1549,8 +1572,8 @@ fn stopping(supervisor: &Value) -> bool {
 /// Every supervisor is watched to its end, so the outcome of one does not
 /// decide another's.
 fn watch(
-    ports: &JobPorts,
-    queue: &dyn Queue,
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    queue: &(impl SupervisorRegistry + ?Sized),
     handed: &[(LeaseToken, u32)],
     version: &str,
     handoff_from: i64,
@@ -1595,7 +1618,7 @@ fn watch(
 /// One look at `watched`: done once it heartbeats on under `version`, an
 /// error when it cannot any more.
 fn observe(
-    ports: &JobPorts,
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
     registrations: &[SupervisorRegistration],
     watched: &mut Watched,
     version: &str,
@@ -1646,7 +1669,11 @@ fn observe(
 /// Put the replaced binary back at the target, only when `.previous` is the
 /// build the supervisor ran before (ADR-0045 decision 13): a `.previous`
 /// of another build was not put there by this update.
-fn restore(ports: &JobPorts, job: &Job, previous_version: Option<&str>) -> Value {
+fn restore(
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    job: &Job,
+    previous_version: Option<&str>,
+) -> Value {
     let previous = previous_path(job.target);
     let kept = ports.binaries.version(&previous).ok();
     if kept.is_none() || kept.as_deref() != previous_version {
@@ -1674,8 +1701,8 @@ fn restore(ports: &JobPorts, job: &Job, previous_version: Option<&str>) -> Value
 /// it serves under now (another one when its pid registered again), or
 /// `before`'s. What was found and done.
 fn bring_back(
-    ports: &JobPorts,
-    queue: &dyn Queue,
+    ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+    queue: &(impl SupervisorRegistry + RunLog + ?Sized),
     before: Option<&SupervisorRegistration>,
     serving: Option<&LeaseToken>,
 ) -> Result<Value> {
@@ -1730,7 +1757,7 @@ fn job_log(job: &Job) -> String {
 /// Record `update_failed` and open the `update_failed` ask with what
 /// failed and what became of the binary and the supervisor.
 fn failed(
-    queue: &mut dyn Queue,
+    queue: &mut (impl AskStore + RunLog + ?Sized),
     job: &Job,
     stage: &str,
     error: &anyhow::Error,
@@ -1851,7 +1878,7 @@ now, `up` starts one.",
 /// naming the command that drains and installs it. The command starts the
 /// supervisor again as the drained one ran, so no `up` follows it.
 fn awaiting_approval(
-    queue: &mut dyn Queue,
+    queue: &mut (impl AskStore + RunLog + ?Sized),
     db: &Path,
     job: &Job,
     version: &str,

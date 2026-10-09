@@ -81,7 +81,7 @@ impl CiWatchState {
 impl ObservationState {
     /// Read `[ci_watch]` again, reap the check that ended and start the one
     /// that is due, then record where the hold for the watch changed.
-    pub(super) fn ci_watch_pass(&mut self, env: &mut PassEnv<'_>) {
+    pub(super) fn ci_watch_pass(&mut self, env: &mut ObservationEnv<'_>) {
         let Some(port) = self.ci_watch_port.clone() else {
             return;
         };
@@ -93,7 +93,7 @@ impl ObservationState {
     /// ([`hold_reason`]) differs from the one this process last recorded,
     /// against its own latest on the queue; a pass that changes nothing
     /// reads nothing.
-    fn record_ci_watch_hold(&mut self, env: &mut PassEnv<'_>) {
+    fn record_ci_watch_hold(&mut self, env: &mut ObservationEnv<'_>) {
         let reason = hold_reason(self.ci.config.is_some(), self.ci.available);
         if self.ci.recorded == Some(reason) {
             return;
@@ -109,7 +109,7 @@ impl ObservationState {
         }
     }
 
-    fn ci_watch_step(&mut self, env: &mut PassEnv<'_>, port: &CiWatchPort) {
+    fn ci_watch_step(&mut self, env: &mut ObservationEnv<'_>, port: &CiWatchPort) {
         match (port.file)() {
             Ok(config) => {
                 if config != self.ci.config {
@@ -167,7 +167,7 @@ impl ObservationState {
             }
         };
         self.ci.started = Some(now);
-        let queues = env.queues.clone();
+        let queues = self.queues.clone();
         let token = env.token.clone();
         let build = env.layout.version.clone();
         let jobs_unread = self.ci.jobs_unread.clone();
@@ -186,7 +186,7 @@ impl ObservationState {
     }
 
     /// Take the answer of the check that ended.
-    fn reap_ci_check(&mut self, env: &mut PassEnv<'_>) {
+    fn reap_ci_check(&mut self, env: &mut ObservationEnv<'_>) {
         let Some(job) = self.ci.job.take() else {
             return;
         };

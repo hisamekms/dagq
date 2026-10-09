@@ -23,7 +23,7 @@ impl LiveAlertWatch {
     /// baseline again.
     pub(super) fn pass(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut ObservationEnv<'_>,
         signals: &dyn AgentSignals,
         interval: Duration,
     ) {
@@ -54,7 +54,7 @@ impl LiveAlertWatch {
 /// them, or why they could not be read. The thresholds are the
 /// supervisors' (`stall_config_loaded`), which every supervisor records as
 /// it starts.
-fn observe(env: &PassEnv<'_>, signals: &dyn AgentSignals, now: i64) -> Observation {
+fn observe(env: &ObservationEnv<'_>, signals: &dyn AgentSignals, now: i64) -> Observation {
     let read = || -> Result<Observation> {
         let events = env.queue.all_events()?;
         let no_file = || Ok(None);

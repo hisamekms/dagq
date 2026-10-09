@@ -906,7 +906,6 @@ impl Supervisor<'_> {
         (
             PassEnv {
                 queue: &mut *self.queue,
-                queues: &self.queues,
                 generators: &self.generators,
                 layout: self.layout,
                 processes: &self.processes,

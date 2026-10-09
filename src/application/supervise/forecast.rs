@@ -51,7 +51,7 @@ impl ForecastWatch {
 impl ObservationState {
     /// Reap the snapshot job once it ended; with `start`, look for the
     /// triggers when it is time and start a job when there are any.
-    pub(super) fn forecast_pass(&mut self, env: &mut PassEnv<'_>, start: bool) {
+    pub(super) fn forecast_pass(&mut self, env: &mut ObservationEnv<'_>, start: bool) {
         let Some(port) = self.forecasts.clone() else {
             return;
         };
@@ -122,7 +122,7 @@ impl ObservationState {
                 return;
             }
         };
-        let queues = env.queues.clone();
+        let queues = self.queues.clone();
         let processes = env.processes.clone();
         let token = env.token.clone();
         self.forecast.job = Some(spawn_traced(move || {
@@ -134,7 +134,7 @@ impl ObservationState {
 /// The snapshot job: the forecast at `now` recorded for `pending`, with
 /// the event ID its triggers were read through.
 fn snapshot(
-    queues: &dyn QueueOpener,
+    queues: &dyn QueueOpener<dyn crate::application::ObservationQueue + Send>,
     processes: &dyn ProcessControl,
     port: &ForecastPort,
     token: &LeaseToken,

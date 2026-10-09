@@ -644,7 +644,7 @@ struct JobPorts {
     files: Arc<dyn RunFiles>,
     processes: Arc<dyn ProcessControl + Send + Sync>,
     repository: Arc<dyn Repository + Send + Sync>,
-    queues: Arc<dyn QueueOpener>,
+    queues: Arc<dyn QueueOpener<dyn crate::application::HostOpsQueue + Send>>,
     runs_dir: PathBuf,
     repo_root: PathBuf,
     cleaning: Arc<Mutex<Cleaning>>,
@@ -701,7 +701,7 @@ impl HostOpsState {
     /// retried on the next sweep, and the others go on.
     pub(super) fn request_cleanup(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut HostEnv<'_>,
         held: &[RunId],
         task: Option<TaskId>,
         disk: Option<DiskRequest>,
@@ -717,7 +717,7 @@ impl HostOpsState {
     /// current worktree (all candidates for disk space) and start nothing
     /// more but the rest of a cleanup for room another job took on, which
     /// goes to its last candidate too (task 1426).
-    pub(super) fn poll_cleanup(&mut self, env: &mut PassEnv<'_>, held: &[RunId], ending: bool) {
+    pub(super) fn poll_cleanup(&mut self, env: &mut HostEnv<'_>, held: &[RunId], ending: bool) {
         if ending {
             self.end_cleanup();
         }
@@ -753,7 +753,7 @@ impl HostOpsState {
     /// has not seen the stop yet goes on, and every ended run is asked for
     /// at once, which picks up what the drain dropped. A job that stopped
     /// after its current worktree leaves the rest to that request.
-    pub(super) fn resume_cleanup(&mut self, env: &mut PassEnv<'_>, held: &[RunId]) {
+    pub(super) fn resume_cleanup(&mut self, env: &mut HostEnv<'_>, held: &[RunId]) {
         if self.cleanup.resume() {
             self.request_cleanup(env, held, None, None);
         }
@@ -762,7 +762,7 @@ impl HostOpsState {
     /// next one, and record what they did. After a stop, only the running
     /// job and the rest of a cleanup for room it took on remain; ordinary
     /// cleanup stops after its current worktree.
-    pub(super) fn finish_cleanup(&mut self, env: &mut PassEnv<'_>, held: &[RunId]) {
+    pub(super) fn finish_cleanup(&mut self, env: &mut HostEnv<'_>, held: &[RunId]) {
         while let Some(job) = &self.cleanup.job {
             while !job.handle.is_finished() {
                 thread::sleep(Duration::from_millis(20));
@@ -772,7 +772,7 @@ impl HostOpsState {
     }
     /// Start a job for what waits, unless one runs: the candidates are
     /// picked here, on the loop, less the runs a slot holds.
-    fn start_cleanup(&mut self, env: &mut PassEnv<'_>, held: &[RunId]) {
+    fn start_cleanup(&mut self, env: &mut HostEnv<'_>, held: &[RunId]) {
         if self.cleanup.job.is_some() || self.cleanup.pending.is_empty() {
             return;
         }
@@ -800,7 +800,7 @@ impl HostOpsState {
             files: env.files.clone(),
             processes: env.processes.clone(),
             repository: env.repository.clone(),
-            queues: env.queues.clone(),
+            queues: self.queues.clone(),
             runs_dir: env.layout.runs_dir.clone(),
             repo_root: env.layout.repo_root.clone(),
             cleaning: self.cleanup.cleaning.clone(),
@@ -828,7 +828,7 @@ impl HostOpsState {
         });
     }
     /// Record the events of what the job did; what it removed.
-    fn record_cleanup(&mut self, env: &mut PassEnv<'_>, outcomes: Vec<Outcome>) -> Cleaned {
+    fn record_cleanup(&mut self, env: &mut HostEnv<'_>, outcomes: Vec<Outcome>) -> Cleaned {
         let mut cleaned = Cleaned::default();
         for outcome in outcomes {
             let recorded = match outcome {

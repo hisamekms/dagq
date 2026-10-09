@@ -2,7 +2,10 @@
 //! "portのmodule"): the reads of the queue's events and records, the
 //! observer's log and the marks.
 
-use super::execution::RunLog;
+use super::execution::{RunCoordination, RunLog};
+use super::host::SupervisorRegistry;
+use super::planning::{PlanningRecords, TaskStore};
+use super::shared::AskStore;
 use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, TaskId};
 use anyhow::Result;
 
@@ -127,4 +130,33 @@ pub trait QueueRecords {
     /// The `ci_failure` findings `task` fixes (linked to its proposal, or
     /// dismissed as covered by it).
     fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<crate::domain::FindingId>>;
+}
+
+/// The ports of the queue 観測と分析's passes of the supervisor and their
+/// jobs reach: the tasks and the records of the planning tables, the runs,
+/// their leases and the supervisors read, its own records and findings,
+/// and the asks a finding holds by. [`super::shared::Queue`] has it as a
+/// supertrait, so the loop's connection upcasts to it.
+pub trait ObservationQueue:
+    TaskStore
+    + PlanningRecords
+    + SupervisorRegistry
+    + RunCoordination
+    + RunLog
+    + QueueRecords
+    + AskStore
+{
+}
+
+impl<
+    T: TaskStore
+        + PlanningRecords
+        + SupervisorRegistry
+        + RunCoordination
+        + RunLog
+        + QueueRecords
+        + AskStore
+        + ?Sized,
+> ObservationQueue for T
+{
 }

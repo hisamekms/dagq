@@ -15,7 +15,7 @@ use super::update::{
     UPDATE_ANSWERED, UPDATE_DROPPED, UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_RETRY, UPDATE_STARTED,
     step_release,
 };
-use super::{InstalledPlugin, Queue};
+use super::{InstalledPlugin, RunLog};
 use crate::domain::release_update::{
     RELEASE_CHECK_KINDS, RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig, check_due, is_newer,
     is_release_build, latest_release,
@@ -47,7 +47,7 @@ pub trait ReleaseIndex: Send + Sync {
 /// `release = "off"`, or a look by any supervisor within the interval).
 #[allow(clippy::too_many_arguments)]
 pub fn check(
-    queue: &dyn Queue,
+    queue: &(impl RunLog + ?Sized),
     index: &dyn ReleaseIndex,
     plugin: Option<&dyn InstalledPlugin>,
     config: &ReleaseUpdateConfig,
@@ -122,7 +122,7 @@ pub fn check(
 /// whether a build that looks runs (a live supervisor's `binary_version`,
 /// else this binary's), and the last looks.
 pub fn status(
-    queue: &dyn Queue,
+    queue: &(impl RunLog + ?Sized),
     config: &ReleaseUpdateConfig,
     live_builds: &[String],
 ) -> Result<Value> {

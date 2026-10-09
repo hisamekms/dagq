@@ -26,8 +26,9 @@
 //! the files through [`Ports`]; the entry points in [`crate::compose`]
 //! build the adapters.
 use super::{
-    AgentProvider, CONFIG_HOME_ENV, Clock, LaunchAgent, ProcessControl, Queue, QueueOpener,
-    RunFiles, SupervisorEnvironment, WorkspaceBackend,
+    AgentProvider, CONFIG_HOME_ENV, Clock, LaunchAgent, ProcessControl, QueueOpener,
+    RunCoordination, RunFiles, RunLog, RunRecovery, SessionRegistry, SupervisorEnvironment,
+    SupervisorRegistry, WorkspaceBackend,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, WorkspaceAccess,
         WorkspaceCommand,
@@ -253,8 +254,10 @@ pub struct RepositoryPaths {
     pub dagq_source: bool,
 }
 
-/// What `up` and `down` reach the outside through. `queues` opens the queue at a database
-/// path (once for the use case, and again for each recorded cmux failure);
+/// What `up` and `down` reach the outside through. `queues` opens the
+/// queue at a database path as their ports (once for the use case), and
+/// `recording_queues` as the whole queue 実行と着地's [`RecordingBackend`]
+/// records each failed cmux call through;
 /// `inspect_repository` finds the repository containing a checkout;
 /// `trusts_repository(config, root)` reads Claude Code's global config for
 /// the folder trust of `root`.
@@ -264,7 +267,8 @@ pub struct Ports<'a> {
     pub processes: &'a dyn ProcessControl,
     pub files: &'a dyn RunFiles,
     pub clock: &'a dyn Clock,
-    pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener>,
+    pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener<dyn LifecycleQueue + Send>>,
+    pub recording_queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener>,
     pub inspect_repository: &'a dyn Fn(&Path) -> Result<RepositoryPaths>,
     pub trusts_repository: &'a dyn Fn(&Path, &Path) -> Result<bool>,
     /// `run_env_programs(checkout, db, path)` checks the programs the
@@ -455,9 +459,8 @@ pub fn up(
                 .with_context(|| format!("plugin directory {}", dir.display()))
         })
         .transpose()?;
-    let queues = (ports.queues)(&db);
-    let queue = queues.open()?;
-    let queue: &dyn Queue = &*queue;
+    let queue = (ports.queues)(&db).open()?;
+    let queue = &*queue;
     // The queue's service before the supervisor, of this binary's build
     // (ADR-t1233-4 decision 1): one that does not start stops `up`.
     let queue_service = if options.queue_service {
@@ -489,7 +492,12 @@ pub fn up(
     };
     // Every workspace call from here on is recorded when it fails; none of
     // them is for a run.
-    let recording = RecordingBackend::over(cmux, queues, None, ports.load_average);
+    let recording = RecordingBackend::over(
+        cmux,
+        (ports.recording_queues)(&db),
+        None,
+        ports.load_average,
+    );
     let cmux: &dyn WorkspaceBackend = &recording;
     let workspaces = QueueWorkspaces::new(cmux, location.hash.clone(), &repository.root);
     let up = Up {
@@ -643,12 +651,25 @@ impl PartialHandoff {
     }
 }
 
+/// The queue's ports `up` and `down` reach: the supervisors'
+/// registrations and handoffs, the runs they lease, the events, and the
+/// inbox's workspace.
+pub trait LifecycleQueue:
+    SupervisorRegistry + RunCoordination + RunRecovery + RunLog + SessionRegistry
+{
+}
+
+impl<T: SupervisorRegistry + RunCoordination + RunRecovery + RunLog + SessionRegistry + ?Sized>
+    LifecycleQueue for T
+{
+}
+
 /// One `up`'s settled inputs, shared by the ways it starts a supervisor.
-struct Up<'a> {
+struct Up<'a, Q: ?Sized> {
     location: &'a QueuePaths,
     db: &'a Path,
     repository: &'a RepositoryPaths,
-    queue: &'a dyn Queue,
+    queue: &'a Q,
     workspaces: &'a QueueWorkspaces<'a>,
     launchd: &'a dyn LaunchAgent,
     processes: &'a dyn ProcessControl,
@@ -662,8 +683,8 @@ struct Up<'a> {
 /// when `up` runs inside that very session of this queue (its `DAGQ_ROLE`
 /// and `DAGQ_QUEUE`), reused while its recorded UUID is still listed, and
 /// otherwise created and recorded in `session_workspaces`.
-struct Sessions<'a> {
-    queue: &'a dyn Queue,
+struct Sessions<'a, Q: ?Sized> {
+    queue: &'a Q,
     workspaces: &'a QueueWorkspaces<'a>,
     environment: &'a UpEnvironment,
     files: &'a dyn RunFiles,
@@ -674,7 +695,7 @@ struct Sessions<'a> {
     plugin_dir: Option<&'a Path>,
 }
 
-impl Sessions<'_> {
+impl<Q: SessionRegistry + RunLog + ?Sized> Sessions<'_, Q> {
     /// Open the workspace of `role`'s agent with `prompt` as its first
     /// message, through the actor executor like every AI actor.
     fn open(
@@ -868,7 +889,7 @@ workspace opens outside it: {error:#}",
 /// restarted) is forgotten, so the caller opens a new one. The title is
 /// never consulted: people rename workspaces (ADR-0026).
 fn recorded_workspace(
-    queue: &dyn Queue,
+    queue: &(impl SessionRegistry + ?Sized),
     cmux: &dyn WorkspaceBackend,
     role: SessionRole,
 ) -> Result<Option<String>> {
@@ -902,7 +923,10 @@ fn recorded_workspace(
 /// old-binary one in that state is left running beside the new supervisor
 /// and reported `stale`; stopping it stays a person's call
 /// (ADR-0014's Consequences).
-fn replace_supervisors(up: &Up, live: &[SupervisorRegistration]) -> Result<Value> {
+fn replace_supervisors(
+    up: &Up<impl LifecycleQueue + ?Sized>,
+    live: &[SupervisorRegistration],
+) -> Result<Value> {
     let Up {
         location,
         queue,
@@ -1063,7 +1087,11 @@ to drain them, or wait for them to finish",
 /// does not change the agent's `ProgramArguments`, so a supervisor whose
 /// agent names another binary is drained and started again by `up`, which
 /// rewrites the agent (ADR-0045 decision 12).
-fn takes_handoff(up: &Up, files: &dyn RunFiles, live: &[SupervisorRegistration]) -> bool {
+fn takes_handoff(
+    up: &Up<impl LifecycleQueue + ?Sized>,
+    files: &dyn RunFiles,
+    live: &[SupervisorRegistration],
+) -> bool {
     if !live
         .iter()
         .all(|registration| registration.handoff_accepted)
@@ -1097,7 +1125,7 @@ fn takes_handoff(up: &Up, files: &dyn RunFiles, live: &[SupervisorRegistration])
 /// ones that did not take it, for `up` to fail with once it has done the
 /// rest.
 fn hand_off_supervisors(
-    up: &Up,
+    up: &Up<impl LifecycleQueue + ?Sized>,
     live: &[SupervisorRegistration],
 ) -> Result<(Value, Option<String>)> {
     let handed = hand_off(
@@ -1218,7 +1246,7 @@ pub const HANDOFF_GRACE: Duration = Duration::from_secs(30);
 /// only a queue that could not be read or written.
 #[allow(clippy::too_many_arguments)]
 pub fn hand_off(
-    queue: &dyn Queue,
+    queue: &(impl SupervisorRegistry + RunLog + ?Sized),
     processes: &dyn ProcessControl,
     clock: &dyn Clock,
     live: &[SupervisorRegistration],
@@ -1287,7 +1315,7 @@ pub fn hand_off(
 /// the timeout (it was still asked when the wait ran out).
 #[allow(clippy::too_many_arguments)]
 fn wait_for_handoff(
-    queue: &dyn Queue,
+    queue: &(impl SupervisorRegistry + RunLog + ?Sized),
     processes: &dyn ProcessControl,
     clock: &dyn Clock,
     live: &[SupervisorRegistration],
@@ -1378,7 +1406,7 @@ const DRAINING_LOOKED_AT: usize = 64;
 /// (`supervisor_draining`, task 1277). A stop wins over a handoff and a
 /// draining supervisor ends without exec'ing, so one that recorded it,
 /// before or after it was asked, never takes the handoff.
-fn stopping_supervisors(queue: &dyn Queue) -> Result<HashSet<LeaseToken>> {
+fn stopping_supervisors(queue: &(impl RunLog + ?Sized)) -> Result<HashSet<LeaseToken>> {
     Ok(queue
         .latest_events_of(EventKind::SupervisorDraining.as_str(), DRAINING_LOOKED_AT)?
         .iter()
@@ -1404,7 +1432,7 @@ struct Stops {
 
 impl Stops {
     fn around(
-        queue: &dyn Queue,
+        queue: &(impl RunLog + ?Sized),
         read: impl FnOnce() -> Result<(i64, Vec<SupervisorRegistration>)>,
     ) -> Result<Self> {
         let before = stopping_supervisors(queue)?;
@@ -1438,7 +1466,7 @@ deregisters, then `up` starts it with the binary in place",
 /// the request.
 #[allow(clippy::too_many_arguments)]
 fn look_again(
-    queue: &dyn Queue,
+    queue: &(impl SupervisorRegistry + RunLog + ?Sized),
     processes: &dyn ProcessControl,
     clock: &dyn Clock,
     handed: &mut [Handed],
@@ -1607,7 +1635,10 @@ and it goes on with its binary; see its log",
 /// Write and load the LaunchAgent, the one way `up` starts a supervisor:
 /// the supervisor calls no cmux, so nothing about cmux is proven for it
 /// (ADR-t1433-4 decision 1).
-fn start_under_launchd(up: &Up, existing: &HashSet<LeaseToken>) -> Result<Value> {
+fn start_under_launchd(
+    up: &Up<impl LifecycleQueue + ?Sized>,
+    existing: &HashSet<LeaseToken>,
+) -> Result<Value> {
     let Up {
         location,
         queue,
@@ -1729,7 +1760,10 @@ pub fn auto_update_refused(checkout: &Path) -> String {
 /// removed meanwhile (it recorded its own stop) is not recorded again. The
 /// heartbeat is read from the row as it is removed, as `registration` may
 /// be from before a drain.
-fn prune_supervisor(queue: &dyn Queue, registration: &SupervisorRegistration) -> Result<()> {
+fn prune_supervisor(
+    queue: &(impl SupervisorRegistry + ?Sized),
+    registration: &SupervisorRegistration,
+) -> Result<()> {
     queue.prune_supervisor(
         &registration.token,
         EventKind::SupervisorStopped,
@@ -1798,7 +1832,7 @@ fn fresh(registration: &SupervisorRegistration, processes: &dyn ProcessControl, 
 /// registered with it already, from `supervise --auto-update`). Reported
 /// as the supervisor's `auto_update`.
 fn set_auto_update(
-    queue: &dyn Queue,
+    queue: &(impl SupervisorRegistry + ?Sized),
     mut supervisor: Value,
     live: &[SupervisorRegistration],
     enabled: bool,
@@ -1858,7 +1892,7 @@ fn started_registration<'a>(
 /// Wait until the supervisor `up` has just started registers itself
 /// ([`started_registration`]), up to `startup_timeout`.
 fn wait_for_registration(
-    up: &Up,
+    up: &Up<impl LifecycleQueue + ?Sized>,
     existing: &HashSet<LeaseToken>,
 ) -> Result<SupervisorRegistration> {
     let Up {
@@ -1918,7 +1952,7 @@ pub fn inbox_session_prompt(db: &Path, language: Option<&Language>) -> Result<St
 /// lease still has a live, heartbeating owner, and the runs that wait for
 /// review (`awaiting_integration`) or a resumed session (`needs_session`).
 fn open_work(
-    queue: &dyn Queue,
+    queue: &(impl RunCoordination + RunLog + ?Sized),
     processes: &dyn ProcessControl,
     clock: &dyn Clock,
 ) -> Result<Value> {
@@ -1981,10 +2015,14 @@ pub struct DownOptions {
 /// workspaces are never touched.
 pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Result<Value> {
     let (launchd, processes) = (ports.launchd, ports.processes);
-    let queues = (ports.queues)(&location.db);
-    let queue = queues.open()?;
-    let queue: &dyn Queue = &*queue;
-    let recording = RecordingBackend::over(ports.cmux, queues, None, ports.load_average);
+    let queue = (ports.queues)(&location.db).open()?;
+    let queue = &*queue;
+    let recording = RecordingBackend::over(
+        ports.cmux,
+        (ports.recording_queues)(&location.db),
+        None,
+        ports.load_average,
+    );
     let cmux: &dyn WorkspaceBackend = &recording;
     // Every registration is considered for the workspace close, whichever
     // path this `down` takes: the rule is the same for all of them, and a
@@ -2205,7 +2243,7 @@ enum Stop {
 /// `kill(2)` returns before the target is reaped, so `kill(pid, 0)` still
 /// succeeds for a process that is already dying.
 fn close_supervisor_workspaces(
-    queue: &dyn Queue,
+    queue: &(impl SessionRegistry + ?Sized),
     cmux: &dyn WorkspaceBackend,
     registrations: &[SupervisorRegistration],
     live: &[SupervisorRegistration],
@@ -2353,6 +2391,40 @@ mod tests {
         let unrecorded = no_wait_refusal(None, &held[..1]).unwrap();
         assert!(unrecorded.contains("version (unrecorded)"), "{unrecorded}");
         assert!(unrecorded.contains("1 run(s)"), "{unrecorded}");
+    }
+
+    /// A handoff reads the stop requests from the events alone: the
+    /// supervisors that recorded `supervisor_draining` before the
+    /// registrations were read, and those that recorded it while they were
+    /// read, apart; events of other kinds are not stops.
+    #[test]
+    fn the_stops_around_a_look_are_the_draining_events_before_and_after_it() {
+        let queue = crate::application::port_fakes::SupervisorsAndEvents::default();
+        queue
+            .record_queue_event(
+                EventKind::SupervisorDraining,
+                json!({"supervisor": "early"}),
+            )
+            .unwrap();
+        queue
+            .record_queue_event(
+                EventKind::SupervisorStarted,
+                json!({"supervisor": "started"}),
+            )
+            .unwrap();
+        let stops = Stops::around(&queue, || {
+            queue
+                .record_queue_event(EventKind::SupervisorDraining, json!({"supervisor": "late"}))?;
+            Ok((7, vec![registration("late", 1, 7)]))
+        })
+        .unwrap();
+        assert_eq!(stops.before, HashSet::from([LeaseToken::new("early")]));
+        assert_eq!(
+            stops.after,
+            HashSet::from([LeaseToken::new("early"), LeaseToken::new("late")])
+        );
+        assert_eq!(stops.now, 7);
+        assert_eq!(stops.registrations.len(), 1);
     }
 
     fn registration(token: &str, pid: u32, heartbeat_at: i64) -> SupervisorRegistration {

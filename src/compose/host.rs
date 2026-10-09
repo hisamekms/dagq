@@ -18,11 +18,11 @@ use std::{
 
 use crate::{
     application::{
-        AgentProvider, LaunchAgent, ProcessControl, QueueOpener, WorkspaceBackend,
+        AgentProvider, HostOpsQueue, LaunchAgent, ProcessControl, QueueOpener, WorkspaceBackend,
         install::{self as installation, Binaries, InstallOptions},
         lifecycle::{
-            self, DownOptions, Ports as LifecyclePorts, QueuePaths, RepositoryPaths, UpEnvironment,
-            UpOptions,
+            self, DownOptions, LifecycleQueue, Ports as LifecyclePorts, QueuePaths,
+            RepositoryPaths, UpEnvironment, UpOptions,
         },
         rebind::{self as rebinding, Rebind, RebindTarget},
         recording::RecordingBackend,
@@ -38,7 +38,7 @@ use crate::{
         clock,
         location::{QueueLocation, REPOSITORY_FILE_NAME, data_home},
         run_files::LocalRunFiles,
-        runtime_store::SqliteOpener,
+        runtime_store::{SqliteOpener, SqlitePorts},
         sqlite::SqliteQueue,
     },
 };
@@ -528,9 +528,10 @@ impl OneShot {
             executable: options.claude.clone(),
         };
         let migrated = self.migrate_compatible(&location.db, processes)?;
-        let queues = |db: &Path| self.queues(db);
+        let queues = |db: &Path| self.lifecycle_queues(db);
+        let recording_queues = |db: &Path| self.queues(db);
         let result = lifecycle::up(
-            &self.lifecycle_ports(cmux, launchd, processes, &queues),
+            &self.lifecycle_ports(cmux, launchd, processes, &queues, &recording_queues),
             &claude,
             &queue_paths(location),
             repo,
@@ -572,9 +573,10 @@ impl OneShot {
         processes: &dyn ProcessControl,
         options: &DownOptions,
     ) -> Result<Value> {
-        let queues = |db: &Path| self.queues(db);
+        let queues = |db: &Path| self.lifecycle_queues(db);
+        let recording_queues = |db: &Path| self.queues(db);
         let result = lifecycle::down(
-            &self.lifecycle_ports(cmux, launchd, processes, &queues),
+            &self.lifecycle_ports(cmux, launchd, processes, &queues, &recording_queues),
             &queue_paths(location),
             options,
         );
@@ -599,7 +601,7 @@ impl OneShot {
         options: &InstallOptions,
         watch_timeout: Duration,
     ) -> Result<Value> {
-        let queues = |db: &Path| self.queues(db);
+        let queues = |db: &Path| self.host_queues(db);
         // A supervisor gone after a failed watch is started again with the
         // binary in place, as after the automatic update's.
         let db = location
@@ -648,7 +650,7 @@ impl OneShot {
             .db
             .canonicalize()
             .context("queue must already be initialized")?;
-        let queues = |db: &Path| self.queues(db);
+        let queues = |db: &Path| self.host_queues(db);
         let restart_arguments = restart_arguments(
             &job.cmux,
             &job.claude,
@@ -715,7 +717,7 @@ impl OneShot {
             .db
             .canonicalize()
             .context("queue must already be initialized")?;
-        let queues = |db: &Path| self.queues(db);
+        let queues = |db: &Path| self.host_queues(db);
         let restart_arguments = restart_arguments(
             &job.cmux,
             &job.claude,
@@ -816,13 +818,34 @@ impl OneShot {
         Ok(report)
     }
 
-    /// The queue at a path, as `up` and `down` open it, writing through
-    /// these generators.
-    fn queues(&self, db: &Path) -> Arc<dyn QueueOpener> {
-        Arc::new(SqliteOpener {
+    /// The queue at a path, writing through these generators.
+    fn opener(&self, db: &Path) -> SqliteOpener {
+        SqliteOpener {
             db: db.to_path_buf(),
             generators: self.generators.clone(),
             actor: None,
+        }
+    }
+
+    /// The whole queue at a path, as the record of `up`'s and `down`'s
+    /// failed cmux calls opens it.
+    fn queues(&self, db: &Path) -> Arc<dyn QueueOpener> {
+        Arc::new(self.opener(db))
+    }
+
+    /// The queue at a path as the ports `up` and `down` take.
+    fn lifecycle_queues(&self, db: &Path) -> Arc<dyn QueueOpener<dyn LifecycleQueue + Send>> {
+        Arc::new(SqlitePorts {
+            opener: self.opener(db),
+            keep: |queue| -> Box<dyn LifecycleQueue + Send> { Box::new(queue) },
+        })
+    }
+
+    /// The queue at a path as the ports `install` and the update jobs take.
+    fn host_queues(&self, db: &Path) -> Arc<dyn QueueOpener<dyn HostOpsQueue + Send>> {
+        Arc::new(SqlitePorts {
+            opener: self.opener(db),
+            keep: |queue| -> Box<dyn HostOpsQueue + Send> { Box::new(queue) },
         })
     }
 
@@ -834,7 +857,8 @@ impl OneShot {
         cmux: &'a dyn WorkspaceBackend,
         launchd: &'a dyn LaunchAgent,
         processes: &'a dyn ProcessControl,
-        queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener>,
+        queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener<dyn LifecycleQueue + Send>>,
+        recording_queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener>,
     ) -> LifecyclePorts<'a> {
         LifecyclePorts {
             cmux,
@@ -843,6 +867,7 @@ impl OneShot {
             files: &LocalRunFiles,
             clock: &*self.generators.clock,
             queues,
+            recording_queues,
             inspect_repository: &inspect_repository,
             trusts_repository: &claude_trusts_repository,
             run_env_programs: &up_run_env_programs,

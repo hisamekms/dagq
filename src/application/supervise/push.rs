@@ -57,7 +57,7 @@ impl ObservationState {
 
     /// Record the message sent once its command ended; start the next due
     /// message when `start`.
-    pub(super) fn push_pass(&mut self, env: &mut PassEnv<'_>, start: bool) {
+    pub(super) fn push_pass(&mut self, env: &mut ObservationEnv<'_>, start: bool) {
         let Some(port) = self.reports.clone() else {
             return;
         };

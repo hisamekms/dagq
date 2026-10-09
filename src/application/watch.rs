@@ -206,7 +206,7 @@ fn well_formed(time: &str) -> bool {
 /// `gap_secs` with their reasons (`domain::timeline`), the time since the
 /// last event of a run that still moves on read from `clock`.
 pub fn timeline_in(
-    queue: &(impl RunLog + EventReads),
+    queue: &(impl RunLog + EventReads + ?Sized),
     run: &RunId,
     gap_secs: i64,
     full: bool,

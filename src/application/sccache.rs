@@ -381,7 +381,7 @@ pub fn removed_payload(at: i64, by: &str, port: u16, why: &str, fields: Value) -
 /// for the wrapper, the supervisor and integrate; a failure to record is
 /// only logged, as the process runs either way.
 pub fn record_wrapper_removed(
-    queue: &dyn RunLog,
+    queue: &(impl RunLog + ?Sized),
     run: &crate::domain::RunId,
     at: i64,
     by: &str,

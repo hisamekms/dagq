@@ -6,8 +6,8 @@
 use super::execution::{
     EvalRounds, RunCoordination, RunLog, RunRecovery, RunTransitions, SessionRegistry,
 };
-use super::host::{HeadlessJobStore, InboxWatchLog, SupervisorRegistry};
-use super::observation::QueueRecords;
+use super::host::{HeadlessJobStore, HostOpsQueue, InboxWatchLog, SupervisorRegistry};
+use super::observation::{ObservationQueue, QueueRecords};
 use super::planning::{
     DraftPlannerStore, GoalReviewStore, PlanRequestStore, PlanReviewStore, PlanningRecords,
     TaskStore,
@@ -475,7 +475,9 @@ pub struct AskQuery {
 }
 
 /// The queue a use case works on: its tasks and goals, its runs and its
-/// asks. A use case that needs only some of it takes those ports instead.
+/// asks. A use case that needs only some of it takes those ports instead,
+/// and a context that keeps a connection open takes it as its set of ports
+/// ([`ObservationQueue`], [`HostOpsQueue`]), which `Queue` upcasts to.
 pub trait Queue:
     TaskStore
     + RunTransitions
@@ -494,6 +496,8 @@ pub trait Queue:
     + HeadlessJobStore
     + InboxWatchLog
     + EvalRounds
+    + ObservationQueue
+    + HostOpsQueue
 {
 }
 

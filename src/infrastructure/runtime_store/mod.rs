@@ -518,15 +518,36 @@ pub struct SqliteOpener {
     pub actor: Option<crate::domain::actor::ActorContext>,
 }
 
-impl crate::application::QueueOpener for SqliteOpener {
-    fn open(&self) -> Result<Box<dyn crate::application::Queue + Send>> {
+impl SqliteOpener {
+    /// One connection, as [`crate::application::QueueOpener::open`] and
+    /// [`SqlitePorts`] open it.
+    fn connect(&self) -> Result<SqliteQueue> {
         let mut queue = SqliteQueue::open(&self.db)
             .map_err(super::sqlite::tag_busy)?
             .with_generators(self.generators.clone());
         if let Some(actor) = &self.actor {
             queue = queue.with_actor(actor.clone());
         }
-        Ok(Box::new(queue))
+        Ok(queue)
+    }
+}
+
+impl crate::application::QueueOpener for SqliteOpener {
+    fn open(&self) -> Result<Box<dyn crate::application::Queue + Send>> {
+        Ok(Box::new(self.connect()?))
+    }
+}
+
+/// Opens the connections of `opener` as only the ports `P` a use case
+/// takes: `keep` boxes each as `P`.
+pub struct SqlitePorts<P: ?Sized> {
+    pub opener: SqliteOpener,
+    pub keep: fn(SqliteQueue) -> Box<P>,
+}
+
+impl<P: ?Sized> crate::application::QueueOpener<P> for SqlitePorts<P> {
+    fn open(&self) -> Result<Box<P>> {
+        self.opener.connect().map(self.keep)
     }
 }
 

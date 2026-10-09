@@ -71,7 +71,7 @@ pub(super) struct QueueServiceWatch {
 impl HostOpsState {
     /// Look at the service ([`Self::look_at_queue_service`]) and keep
     /// whether new claims and jobs may start in `service_up`.
-    pub(super) fn queue_service_pass(&mut self, env: &mut PassEnv<'_>, working: bool) {
+    pub(super) fn queue_service_pass(&mut self, env: &mut HostEnv<'_>, working: bool) {
         self.service_up = self.look_at_queue_service(env, working);
     }
 
@@ -79,7 +79,7 @@ impl HostOpsState {
     /// needed, and say whether new claims and jobs may start: always
     /// without a port, else whether the service runs. `working` is false
     /// while the supervisor drains or hands off: it only answers.
-    fn look_at_queue_service(&mut self, env: &mut PassEnv<'_>, working: bool) -> bool {
+    fn look_at_queue_service(&mut self, env: &mut HostEnv<'_>, working: bool) -> bool {
         let Some(port) = self.queue_service_port.clone() else {
             return true;
         };
@@ -177,7 +177,7 @@ impl HostOpsState {
 
     /// At the end of a drain: stop the service when `down` asked this
     /// supervisor to and no other supervisor of the queue runs.
-    pub(super) fn stop_queue_service_after_down(&mut self, env: &mut PassEnv<'_>) {
+    pub(super) fn stop_queue_service_after_down(&mut self, env: &mut HostEnv<'_>) {
         let Some(port) = self.queue_service_port.clone() else {
             return;
         };
@@ -244,7 +244,7 @@ impl HostOpsState {
         }
     }
 
-    fn queue_service_attention_stands(&mut self, env: &mut PassEnv<'_>) -> bool {
+    fn queue_service_attention_stands(&mut self, env: &mut HostEnv<'_>) -> bool {
         match env.queue.latest_queue_event(&QUEUE_SERVICE_ATTENTION_KINDS) {
             Ok(latest) => latest.is_some_and(|event| event.kind == QUEUE_SERVICE_DOWN),
             Err(error) => {
@@ -255,7 +255,7 @@ impl HostOpsState {
     }
 
     /// The attention `queue_service_down`, unless it already stands.
-    fn queue_service_down(&mut self, env: &mut PassEnv<'_>, reason: &str, message: &str) {
+    fn queue_service_down(&mut self, env: &mut HostEnv<'_>, reason: &str, message: &str) {
         if self.queue_service_attention_stands(env) {
             return;
         }
@@ -266,7 +266,7 @@ impl HostOpsState {
         );
     }
 
-    fn record_queue_service(&mut self, env: &mut PassEnv<'_>, kind: EventKind, mut payload: Value) {
+    fn record_queue_service(&mut self, env: &mut HostEnv<'_>, kind: EventKind, mut payload: Value) {
         payload["supervisor"] = json!(env.token);
         if let Err(error) = env.queue.record_queue_event(kind, payload) {
             warn!(error = %format_args!("{error:#}"), "the queue service's {kind} could not be recorded: {error:#}");

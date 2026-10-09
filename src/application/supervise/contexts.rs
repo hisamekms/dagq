@@ -7,13 +7,15 @@
 //! calls them and applies what they return.
 
 use super::*;
+use crate::application::{HostOpsQueue, ObservationQueue, SupervisorRegistry};
 
 /// What a pass of a context reads and calls of the loop: the parts every
-/// context shares (the queue, the clock, the places) and the adapters,
-/// borrowed apart from the context's own state.
-pub(super) struct PassEnv<'s> {
-    pub(super) queue: &'s mut (dyn Queue + Send),
-    pub(super) queues: &'s Arc<dyn QueueOpener>,
+/// context shares (the queue's connection, the clock, the
+/// places) and the adapters, borrowed apart from the context's own state.
+/// The connection is the loop's whole queue until [`PassEnv::observation`]
+/// or [`PassEnv::host`] keeps the ports `Q` of the context.
+pub(super) struct PassEnv<'s, Q: ?Sized = dyn Queue + Send> {
+    pub(super) queue: &'s mut Q,
     pub(super) generators: &'s Generators,
     pub(super) layout: &'s Layout,
     pub(super) processes: &'s Arc<dyn ProcessControl + Send + Sync>,
@@ -53,7 +55,73 @@ impl PassEnv<'_> {
     ) -> Result<T> {
         requested_by_job(self, |env| &*env.queue, job, apply)
     }
+}
 
+/// 観測と分析's [`PassEnv`]: the loop's connection as its ports.
+pub(super) type ObservationEnv<'s> = PassEnv<'s, dyn ObservationQueue + Send>;
+
+/// host運用's [`PassEnv`]: the loop's connection as its ports.
+pub(super) type HostEnv<'s> = PassEnv<'s, dyn HostOpsQueue + Send>;
+
+impl<'s> PassEnv<'s> {
+    /// This environment with the connection as 観測と分析's ports.
+    pub(super) fn observation(self) -> ObservationEnv<'s> {
+        let PassEnv {
+            queue,
+            generators,
+            layout,
+            processes,
+            files,
+            repository,
+            verifier,
+            spawner,
+            sessions,
+            token,
+        } = self;
+        PassEnv {
+            queue,
+            generators,
+            layout,
+            processes,
+            files,
+            repository,
+            verifier,
+            spawner,
+            sessions,
+            token,
+        }
+    }
+
+    /// This environment with the connection as host運用's ports.
+    pub(super) fn host(self) -> HostEnv<'s> {
+        let PassEnv {
+            queue,
+            generators,
+            layout,
+            processes,
+            files,
+            repository,
+            verifier,
+            spawner,
+            sessions,
+            token,
+        } = self;
+        PassEnv {
+            queue,
+            generators,
+            layout,
+            processes,
+            files,
+            repository,
+            verifier,
+            spawner,
+            sessions,
+            token,
+        }
+    }
+}
+
+impl<Q: SupervisorRegistry + RunLog + ?Sized> PassEnv<'_, Q> {
     /// Record `kinds`' held or resumed event when `hold` differs from the
     /// hold in place on the queue (task 327); whether it holds.
     pub(super) fn record_hold(
@@ -130,6 +198,8 @@ impl PassEnv<'_> {
 pub(super) struct ObservationState {
     /// The observer job running now: one at a time, outside the run slots.
     pub(super) observer: Option<observer::ObserverJob>,
+    /// Opens the connections of the context's jobs off the loop.
+    pub(super) queues: Arc<dyn QueueOpener<dyn ObservationQueue + Send>>,
     /// When this process last launched each observation, so one that dies
     /// before it records anything is not relaunched on every pass.
     pub(super) observers_launched: Vec<(ObserveMode, Instant)>,
@@ -168,6 +238,7 @@ impl ObservationState {
     pub(super) fn new(ports: &Ports<'_>) -> Self {
         Self {
             observer: None,
+            queues: ports.observation_queues.clone(),
             observers_launched: Vec::new(),
             observer_again: None,
             throughput_review: throughput_review::ThroughputReviewWatch::default(),
@@ -212,7 +283,7 @@ impl ObservationState {
     /// tries again.
     pub(super) fn record_candidates(
         &mut self,
-        env: &mut PassEnv<'_>,
+        env: &mut ObservationEnv<'_>,
         sample: Result<CandidatesSample>,
     ) {
         let result = sample.and_then(|sample| {
@@ -238,6 +309,8 @@ impl ObservationState {
 /// disk's reading ([`HostOpsState::free`], [`disk::DiskWatch`]), the
 /// sccache server's look and the load.
 pub(super) struct HostOpsState {
+    /// Opens the connections of the context's jobs off the loop.
+    pub(super) queues: Arc<dyn QueueOpener<dyn HostOpsQueue + Send>>,
     /// Records the host's load; `None` records none (task 516).
     pub(super) host_metrics_port: Option<HostMetricsPort>,
     /// The sample job of the host's load.
@@ -283,6 +356,7 @@ pub(super) struct HostOpsState {
 impl HostOpsState {
     pub(super) fn new(ports: &Ports<'_>, settings: &LoopSettings) -> Self {
         Self {
+            queues: ports.host_queues.clone(),
             host_metrics_port: ports.host_metrics.clone(),
             host_metrics: host_metrics::HostMetricsWatch::default(),
             queue_service_port: ports.queue_service.clone(),
