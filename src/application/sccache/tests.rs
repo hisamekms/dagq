@@ -128,16 +128,6 @@ impl RunLog for MemoryLog {
     ) -> Result<Vec<RunEvent>> {
         unreachable!("sccache reads queue events only")
     }
-    fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
-        unreachable!("sccache reads queue events only")
-    }
-    fn record_inbox_watcher_change(
-        &self,
-        kind: EventKind,
-        payload: serde_json::Value,
-    ) -> Result<bool> {
-        unreachable!("sccache reads queue events only")
-    }
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
         Ok(self
             .events

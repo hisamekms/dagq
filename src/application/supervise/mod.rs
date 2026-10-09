@@ -4023,16 +4023,6 @@ mod tests {
         ) -> Result<Vec<RunEvent>> {
             unreachable!("requested_by_job writes queue events only")
         }
-        fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn record_inbox_watcher_change(
-            &self,
-            kind: EventKind,
-            payload: serde_json::Value,
-        ) -> Result<bool> {
-            unreachable!("requested_by_job writes queue events only")
-        }
         fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
             unreachable!("requested_by_job writes queue events only")
         }

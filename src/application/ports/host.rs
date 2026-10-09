@@ -430,6 +430,30 @@ pub trait HeadlessJobStore {
     ) -> Result<Vec<HeadlessJobRecord>>;
 }
 
+/// The records of the inbox's watcher and of the backstop for an inbox
+/// without one, which host運用's `supervise::inbox_nudge` writes: queue
+/// events (on no task, goal or run) whose comparison and write share one
+/// write transaction, so a second supervisor and the process after an exec
+/// make neither twice (docs/design/architecture.md, "host運用").
+pub trait InboxWatchLog {
+    /// Record `inbox_nudged` with `payload` unless one with the same
+    /// `absent_since` and `attempt` is recorded (ADR-t1433-5 decision 1
+    /// (3)), in one write transaction: `false` when another supervisor
+    /// recorded it first. Only the claimer nudges the inbox.
+    fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool>;
+    /// Record `kind` (`inbox_watcher_absent` or `inbox_watcher_returned`;
+    /// any other is refused) with `payload` unless the latest of the two
+    /// is already `kind` or its `at` is later than `payload`'s, in one
+    /// write transaction (task 1021): `false` when the state did not
+    /// change, another supervisor recorded the change first, or the
+    /// judgment is older than the recorded one.
+    fn record_inbox_watcher_change(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<bool>;
+}
+
 /// The supervisors' registrations, their handoffs and settings, and the
 /// repository the queue is bound to: the coordination state of host運用
 /// (ADR-0032's second kind). Its reads (`supervisors`, `handoff_request`,

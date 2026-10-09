@@ -1,5 +1,6 @@
 //! Runs and events as read, and events recorded outside a transition
-//! ([`RunLog`]).
+//! ([`RunLog`]), and the records of the inbox's watcher
+//! ([`InboxWatchLog`], host運用's).
 
 use super::*;
 
@@ -137,7 +138,7 @@ impl SqliteQueue {
 
     /// Record `inbox_nudged` with `payload` unless one with the same
     /// `absent_since` and `attempt` is recorded, in one write transaction
-    /// (ADR-t906-1 decision 1 (3)): `false` when another supervisor
+    /// (ADR-t1433-5 decision 1 (3)): `false` when another supervisor
     /// recorded it first, and only the claimer nudges.
     pub fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
         let kind = EventKind::InboxNudged;
@@ -856,6 +857,20 @@ fn ended_run_worktree_sql() -> String {
     format!("{ENDED_RUN_WORKTREES} AND r.id=?3")
 }
 
+/// The [`InboxWatchLog`] port over the inherent methods above.
+impl InboxWatchLog for SqliteQueue {
+    fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
+        SqliteQueue::claim_inbox_nudge(self, payload)
+    }
+    fn record_inbox_watcher_change(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<bool> {
+        SqliteQueue::record_inbox_watcher_change(self, kind, payload)
+    }
+}
+
 /// The [`RunLog`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl RunLog for SqliteQueue {
@@ -933,16 +948,6 @@ impl RunLog for SqliteQueue {
     }
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
         SqliteQueue::record_queue_event(self, kind, payload)
-    }
-    fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
-        SqliteQueue::claim_inbox_nudge(self, payload)
-    }
-    fn record_inbox_watcher_change(
-        &self,
-        kind: EventKind,
-        payload: serde_json::Value,
-    ) -> Result<bool> {
-        SqliteQueue::record_inbox_watcher_change(self, kind, payload)
     }
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
         SqliteQueue::latest_event_of(self, kind)

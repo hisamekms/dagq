@@ -209,13 +209,14 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 **操作**
 
 - application: `application::lifecycle`（`up`・`down`）・`install`・`update`・`queue_service`・`sccache`・`actor_executor`・`execution`ほかと、`application::supervise`の同名のsubmoduleと`disk`・`cleanup`・`sweep`・`handoff`・`inbox_nudge`。
-- infrastructure: `launchd`・`binaries`・`queue_service`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`の`SupervisorRegistry`。
+- infrastructure: `launchd`・`binaries`・`queue_service`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`の`SupervisorRegistry`、`runtime_store::run_log`の`InboxWatchLog`。
 
 **公開するport**
 
 - `SupervisorRegistry`を実行と着地のループに、その読み取りを全てのcontextに公開する。
 - 空きdiskとsccacheの読み取り（`HostOpsState`）と`CleanupWatch::cleaning`・`defer`・`ensure_sccache`・`sccache_look`を実行と着地に公開する。
 - `HeadlessJobStore`（jobのprocessの台帳）を、jobを起動する各contextに公開する。
+- `InboxWatchLog`（inboxのwatcherの変化と不在の後ろ盾のqueue eventを、比較と書き込みを1つのwrite transactionで書く）は内部。
 - `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、actorの起動（`actor_executor`）を他のcontextに公開する。
 - `AuditFiles`とCIの見張りのpreflightは内部。
 
@@ -234,7 +235,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 | `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`・`PlanningRecords` |
 | `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`SessionRegistry`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend` |
 | `observation`（観測と分析） | `EventReads`・`ObserverLog`・`MarkLog`・`QueueRecords` |
-| `host`（host運用） | `QueueOpener`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry` |
+| `host`（host運用） | `QueueOpener`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry`・`InboxWatchLog` |
 | `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`Queue` |
 
 `shared`は複数のcontextが同じ意味で使うportだけを持つ。

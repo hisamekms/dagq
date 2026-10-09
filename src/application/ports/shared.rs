@@ -4,7 +4,7 @@
 //! store ports of every context.
 
 use super::execution::{RunCoordination, RunLog, RunRecovery, RunTransitions, SessionRegistry};
-use super::host::{HeadlessJobStore, SupervisorRegistry};
+use super::host::{HeadlessJobStore, InboxWatchLog, SupervisorRegistry};
 use super::observation::QueueRecords;
 use super::planning::{
     DraftPlannerStore, GoalReviewStore, PlanRequestStore, PlanReviewStore, PlanningRecords,
@@ -490,6 +490,7 @@ pub trait Queue:
     + PlanReviewStore
     + GoalReviewStore
     + HeadlessJobStore
+    + InboxWatchLog
 {
 }
 
@@ -509,6 +510,7 @@ impl<
         + PlanReviewStore
         + GoalReviewStore
         + HeadlessJobStore
+        + InboxWatchLog
         + ?Sized,
 > Queue for T
 {

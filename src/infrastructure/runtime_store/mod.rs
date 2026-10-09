@@ -22,8 +22,9 @@ use super::{
     },
 };
 use crate::application::{
-    AskStore, Generators, HeartbeatWrite, PlanningRecords, QueueRecords, RunCoordination, RunLog,
-    RunRecovery, RunTransitions, SessionRegistry, SupervisorRegistry, timestamp, unix_seconds,
+    AskStore, Generators, HeartbeatWrite, InboxWatchLog, PlanningRecords, QueueRecords,
+    RunCoordination, RunLog, RunRecovery, RunTransitions, SessionRegistry, SupervisorRegistry,
+    timestamp, unix_seconds,
 };
 use crate::domain::slot_limits::{SettingSource, SlotLimits};
 use crate::domain::worker_model::{self, WorkerTrial};
