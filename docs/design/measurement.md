@@ -20,6 +20,7 @@ related:
   - design-persistence
   - design-queue-service
   - design-supervisor-lifecycle-stats
+  - design-main-history
   - design-supervisor-lifecycle-first-commit
   - design-supervisor-lifecycle-timeline
   - design-supervisor-lifecycle-kpi
@@ -44,7 +45,7 @@ related:
 | 論理ストア | 中身 | 区分 | 今のアダプタ |
 | --- | --- | --- | --- |
 | StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表（`tasks`・`goals`・`task_runs`・`asks`・`proposals`・`planners`・`run_leases`・`supervisors`ほか） |
-| EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
+| EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・mainの履歴・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
 | SessionStepStore | sessionのstep（turn・tool・コマンドのshape）。`(session_id, seq)`で重複を除き、抜けを残す。90日 | SSOT | 未実装（queue.dbの新しい表の予定） |
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | 未実装（queue.dbの新しい表の予定）。今はsupervisorが`host/metrics-YYYYMMDD.csv`に書くだけ |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | 未実装（queue.dbの新しい表の予定） |

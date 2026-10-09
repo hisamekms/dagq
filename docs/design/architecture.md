@@ -143,6 +143,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
 - 着地先のbranchの解決（`Repository::landing_branch`）を観測と分析のCIの見張りに公開する。
   解決できなければ見張りは確かめず着地先の保留に任せる。
+- `Repository`のmainの履歴を読む読み取り専用の操作を観測と分析に公開する。
 - `application::inherit`の`InheritStore`・`CarriedBranches`を計画管理の`ready --inherit`に公開する（T10）。
 - `RunCoordination`の読み取りを全てのcontextに公開する。
 - 計画管理に`JobDesk`と`DeferWatch`の見込みのファイルを、host運用のsweepにwrapperの停止を公開する。
@@ -168,12 +169,13 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - table: `findings`。
 - ファイル: queueのdirの日次のKPIのreportとKPIのpushの待ち。
 - event: `live_alert_*`（supervisorが書く今の判定の記録。[計測](measurement.md#今の判定の記録)）。
+- event: mainのfirst-parentの履歴の記録（`main_*`、[mainの履歴の記録](main-history.md)）。runtimeの制御は読まない。
 
 **判断**（domain）: `domain::stats`・`kpi`・`forecast`とその下、`live_alerts`・`marks`・`timeline`・`throughput_review`・`finding`・`ci_watch`ほか。
 
 **操作**
 
-- application: `application::stats`・`kpi`・`forecast`・`report`・`observer`・`watch`・`throughput_review`・`ci_watch`・`queue_reads::observation`（`status`も）ほかと、`application::supervise`の同名のsubmodule。
+- application: `application::stats`・`kpi`・`forecast`・`report`・`observer`・`watch`・`throughput_review`・`ci_watch`・`main_log`・`queue_reads::observation`（`status`も）ほかと、`application::supervise`の同名のsubmodule。
 - infrastructure: `findings`・`observer`・`throughput_review`・`runtime_store::queue_records`・`kpi_*`・`transcripts`・`ci_watch`・`ci_watch_store`ほか。
 
 **公開するport**

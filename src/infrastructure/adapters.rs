@@ -1632,7 +1632,29 @@ impl GitRepository {
     /// followed), and the paths main has now: what `conflict_hotspots`
     /// counts landings and tells deleted and renamed files by.
     pub fn main_history(&self, since: i64) -> Result<MainHistory> {
-        let branch = self.landing_branch()?.reference();
+        let head = self.main_head()?;
+        Ok(MainHistory {
+            commits: self.main_commits(head.as_str(), None, since)?,
+            paths: self.tree_paths(head.as_str())?.into_iter().collect(),
+        })
+    }
+
+    /// The commits of `head`'s first-parent line after `after` (none of
+    /// those `after` reaches) whose time is `since` (unix seconds) or
+    /// later, oldest first, each with its full ID, its committer's time
+    /// and the paths it changed against its first parent (renames
+    /// followed): the reader of main's history the supervisor records and
+    /// [`Self::main_history`] share.
+    pub fn main_commits(
+        &self,
+        head: &str,
+        after: Option<&str>,
+        since: i64,
+    ) -> Result<Vec<MainCommit>> {
+        let range = match after {
+            Some(after) => format!("{after}..{head}"),
+            None => head.to_owned(),
+        };
         let log = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
             "log",
             "-z",
@@ -1641,26 +1663,66 @@ impl GitRepository {
             "--diff-merges=first-parent",
             "-M",
             "--name-status",
-            "--format=%x01%ct",
+            "--format=%x01%H %ct",
             &format!("--max-age={}", since.max(0)),
-            &branch,
+            &range,
             "--",
         ]))?;
+        Ok(parse_main_log(&log))
+    }
+
+    /// Whether `commit` is on the first-parent line of `head` (it or one
+    /// of the first parents `head` reaches): the oldest commit of
+    /// `commit..head` on that line has `commit` as its first parent.
+    pub fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
+        if !self.has_commit(commit)? || !self.is_ancestor(commit, head)? {
+            return Ok(false);
+        }
+        let log = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+            "log",
+            "--first-parent",
+            "--format=%P",
+            &format!("{commit}..{head}"),
+            "--",
+        ]))?;
+        Ok(match log.lines().rfind(|line| !line.is_empty()) {
+            None => true,
+            Some(parents) => parents.split(' ').next() == Some(commit),
+        })
+    }
+
+    /// Whether the object store has the commit `commit`.
+    pub fn has_commit(&self, commit: &str) -> Result<bool> {
+        let (status, _, stderr) = capture(
+            Command::new(&self.git).arg("-C").arg(&self.root).args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{commit}^{{commit}}"),
+            ]),
+            Duration::from_secs(30),
+        )?;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!("git rev-parse failed ({status}): {stderr}"),
+        }
+    }
+
+    /// Every file path of `commit`'s tree.
+    pub fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
         let tree = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
             "ls-tree",
             "-r",
             "--name-only",
             "-z",
-            &branch,
+            commit,
         ]))?;
-        Ok(MainHistory {
-            commits: parse_main_log(&log),
-            paths: tree
-                .split('\0')
-                .filter(|path| !path.is_empty())
-                .map(str::to_owned)
-                .collect(),
-        })
+        Ok(tree
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     /// The paths each of `commits` changed against its first parent
@@ -2314,9 +2376,14 @@ fn parse_main_log(log: &str) -> Vec<MainCommit> {
     let mut commits: Vec<MainCommit> = Vec::new();
     let mut fields = log.split('\0').map(|field| field.trim_start_matches('\n'));
     while let Some(field) = fields.next() {
-        if let Some(at) = field.strip_prefix('\u{1}') {
-            if let Ok(at) = at.trim().parse() {
+        if let Some(header) = field.strip_prefix('\u{1}') {
+            if let Some((sha, Ok(at))) = header
+                .trim()
+                .split_once(' ')
+                .map(|(sha, at)| (sha, at.parse()))
+            {
                 commits.push(MainCommit {
+                    sha: sha.to_owned(),
                     at,
                     changes: Vec::new(),
                 });
@@ -2415,6 +2482,18 @@ impl Repository for GitRepository {
     }
     fn main_history(&self, since: i64) -> Result<MainHistory> {
         GitRepository::main_history(self, since)
+    }
+    fn main_commits(&self, head: &str, after: Option<&str>, since: i64) -> Result<Vec<MainCommit>> {
+        GitRepository::main_commits(self, head, after, since)
+    }
+    fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
+        GitRepository::tree_paths(self, commit)
+    }
+    fn has_commit(&self, commit: &str) -> Result<bool> {
+        GitRepository::has_commit(self, commit)
+    }
+    fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
+        GitRepository::on_first_parent_line(self, commit, head)
     }
     fn current_branch(&self, worktree: &Path) -> Result<Option<String>> {
         GitRepository::current_branch(self, worktree)
@@ -4590,7 +4669,7 @@ mod tests {
                 .commits
                 .is_empty()
         );
-        let copied = parse_main_log("\u{1}5\0\nC75\0a\0b\0M\0c\0\u{1}x\0\nM\0d\0\nR100\0e");
+        let copied = parse_main_log("\u{1}s 5\0\nC75\0a\0b\0M\0c\0\u{1}s x\0\nM\0d\0\nR100\0e");
         assert_eq!(copied.len(), 1);
         assert_eq!(copied[0].changes.len(), 3);
         assert_eq!(copied[0].changes[0].path, "b");
@@ -4602,6 +4681,100 @@ mod tests {
         commit(&[&["add", "a\"b.txt"]]);
         let quoted = git.main_history(0).unwrap();
         assert_eq!(quoted.commits[4].changes[0].path, "a\"b.txt");
+    }
+
+    /// The record of main the supervisor keeps folds back to what the
+    /// readers of Git give from the same history: the first record from a
+    /// second before the earliest event, a later one, and one after a
+    /// force push, with its renames, deletions, paths and each commit's
+    /// changed files as the areas read them.
+    #[test]
+    fn the_record_of_main_folds_to_what_git_reads() {
+        use crate::application::main_log::{Recorded, records};
+        use crate::domain::RunEvent;
+        use crate::domain::stats::main_log::{MainReading, Reach, fold_main_log};
+        let (dir, git) = committed_repository();
+        let commit = |args: &[&[&str]]| {
+            for step in args {
+                assert!(git_in(dir.path(), step).status.success(), "{step:?}");
+            }
+            assert!(
+                git_in(dir.path(), &["commit", "-q", "-m", "c"])
+                    .status
+                    .success()
+            );
+        };
+        let mut events: Vec<RunEvent> = Vec::new();
+        let pass = |events: &mut Vec<RunEvent>, now: i64| {
+            let reach = events
+                .iter()
+                .rev()
+                .find(|event| event.kind == "main_observed")
+                .and_then(Reach::of);
+            let recorded = Recorded {
+                reach,
+                reading: MainReading::Readable,
+            };
+            for (kind, payload) in records(&recorded, now, &|| Ok(Some(1000)), &git) {
+                assert_ne!(kind.as_str(), "main_read_failed", "{payload}");
+                events.push(RunEvent {
+                    id: crate::domain::EventId::new(events.len() as i64 + 1),
+                    task_id: None,
+                    goal_id: None,
+                    run_id: None,
+                    kind: kind.as_str().to_owned(),
+                    payload,
+                    created_at: crate::domain::marks::utc_text(now * 1000),
+                    actor: None,
+                });
+            }
+        };
+        let matches_git = |events: &[RunEvent]| {
+            let log = fold_main_log(events);
+            assert_eq!(log.history, git.main_history(0).unwrap());
+            let shas: Vec<String> = log.history.commits.iter().map(|c| c.sha.clone()).collect();
+            let landed = git.landed_changes(&shas).unwrap();
+            for sha in &shas {
+                let mut files = landed[sha].clone();
+                files.sort();
+                assert_eq!(log.changed[sha], files, "{sha}");
+            }
+        };
+        fs::write(dir.path().join("keep.txt"), "k\n").unwrap();
+        commit(&[&["add", "keep.txt"]]);
+        pass(&mut events, 2_000_000_000);
+        assert_eq!(fold_main_log(&events).history.commits.len(), 2);
+        matches_git(&events);
+        commit(&[&["mv", "change.txt", "moved.txt"]]);
+        commit(&[&["rm", "-q", "keep.txt"]]);
+        pass(&mut events, 2_000_000_100);
+        matches_git(&events);
+        // A force push: main drops its last commit for another.
+        assert!(
+            git_in(dir.path(), &["reset", "-q", "--hard", "HEAD~1"])
+                .status
+                .success()
+        );
+        fs::write(dir.path().join("other.txt"), "o\n").unwrap();
+        commit(&[&["add", "other.txt"]]);
+        pass(&mut events, 2_000_000_200);
+        assert!(events.iter().any(|event| event.kind == "main_rewritten"));
+        matches_git(&events);
+        // A merge that keeps the head recorded only as its second parent
+        // leaves the first-parent line: recorded again, not appended.
+        for step in [
+            &["checkout", "-q", "-b", "side", "HEAD~1"][..],
+            &["commit", "-q", "--allow-empty", "-m", "s"],
+            &["merge", "-q", "--no-ff", "-m", "m", "main"],
+            &["branch", "-f", "main", "side"],
+            &["checkout", "-q", "main"],
+        ] {
+            assert!(git_in(dir.path(), step).status.success(), "{step:?}");
+        }
+        pass(&mut events, 2_000_000_300);
+        let rewrites = events.iter().filter(|e| e.kind == "main_rewritten").count();
+        assert_eq!(rewrites, 2);
+        matches_git(&events);
     }
 
     /// The supervisor's `status` leaves the index as it found it, where a

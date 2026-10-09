@@ -40,8 +40,8 @@
 //! - observation and analysis: `observation`, `observe_*`, `finding_*`
 //!   (but `finding_planner_*`), `mark_*`, `forecast_recorded`, `kpi_*`,
 //!   `live_alert_*` (the record of `stats`' judgments of now),
-//!   `report_written`, `throughput_review_*`, `candidates_sampled` and the
-//!   CI watch's `ci_*`.
+//!   `report_written`, `throughput_review_*`, `candidates_sampled`, the
+//!   CI watch's `ci_*` and the record of main's history `main_*`.
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
 //!   `queue_service_*`, `sccache_*`, `inbox_*`, the cleanup's
 //!   `build_outputs_removed`, `build_cache_removed`, `scratchpad_removed`
@@ -198,6 +198,12 @@ event_kinds! {
     LiveAlertInputChanged => "live_alert_input_changed",
     LiveAlertReached => "live_alert_reached",
     LiveAlertStarted => "live_alert_started",
+    MainCommitsRecorded => "main_commits_recorded",
+    MainObserved => "main_observed",
+    MainPathsRecorded => "main_paths_recorded",
+    MainReadFailed => "main_read_failed",
+    MainReadRecovered => "main_read_recovered",
+    MainRewritten => "main_rewritten",
     MarkRecorded => "mark_recorded",
     MarkRetracted => "mark_retracted",
     MigrationRenumbered => "migration_renumbered",
@@ -520,6 +526,14 @@ impl EventKind {
                 | SccacheServerRestartFailed
                 | SccacheServerStarted
                 | SccacheServerStartFailed
+                // The supervisor's record of main's first-parent history
+                // (docs/design/main-history.md).
+                | MainCommitsRecorded
+                | MainObserved
+                | MainPathsRecorded
+                | MainReadFailed
+                | MainReadRecovered
+                | MainRewritten
                 | MarkRecorded
                 | MarkRetracted
                 // The KPI report the supervisor wrote (ADR-0051 decision 20).
@@ -1141,6 +1155,12 @@ mod tests {
             (EventKind::LiveAlertStarted, "live_alert_started"),
             (EventKind::LeaseAcquired, "lease_acquired"),
             (EventKind::LeaseReleased, "lease_released"),
+            (EventKind::MainCommitsRecorded, "main_commits_recorded"),
+            (EventKind::MainObserved, "main_observed"),
+            (EventKind::MainPathsRecorded, "main_paths_recorded"),
+            (EventKind::MainReadFailed, "main_read_failed"),
+            (EventKind::MainReadRecovered, "main_read_recovered"),
+            (EventKind::MainRewritten, "main_rewritten"),
             (EventKind::MarkRecorded, "mark_recorded"),
             (EventKind::MarkRetracted, "mark_retracted"),
             (EventKind::MigrationRenumbered, "migration_renumbered"),

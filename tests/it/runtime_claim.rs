@@ -1767,3 +1767,64 @@ fn the_claim_records_its_slots_its_line_and_its_attributes() {
     assert_eq!(started.payload["class"], "heavy");
     assert_eq!(started.payload["slots"], 1);
 }
+
+/// The supervisor records main's history as it moves
+/// (docs/design/main-history.md): the commit a person's
+/// `integrate` put on main is recorded once by the pass after the landing,
+/// and passes with main at rest record no commit.
+#[test]
+fn the_supervisor_records_the_landed_commit_once() {
+    let (_dir, repo, db, _run) = awaiting_run();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = supervise_options(1, true);
+    let recorded = |db: &Path| -> Vec<(i64, String)> {
+        let events = SqliteQueue::open(db).unwrap().all_events().unwrap();
+        events
+            .iter()
+            .filter(|event| event.kind == "main_commits_recorded")
+            .flat_map(|event| {
+                event.payload["commits"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|commit| {
+                        (
+                            event.id.as_i64(),
+                            commit["sha"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    // The runs' supervisor took the base already.
+    let before = recorded(&db);
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    // Nothing more to claim: the landing's dependent is canceled.
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(2), TaskAction::Cancel)
+        .unwrap();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    let events = SqliteQueue::open(&db).unwrap().all_events().unwrap();
+    let landing = events
+        .iter()
+        .find(|event| event.kind == "run_integrated")
+        .unwrap();
+    let landed = landing.payload["commit"].as_str().unwrap();
+    let after = recorded(&db);
+    let new: Vec<&(i64, String)> = after[before.len()..].iter().collect();
+    assert_eq!(new.len(), 1, "{after:?}");
+    assert_eq!(new[0].1, landed);
+    assert!(new[0].0 > landing.id.as_i64());
+    let observed = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "main_observed")
+        .unwrap();
+    assert_eq!(observed.payload["head"], landed);
+    // Main at rest: the next passes record no commit.
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(recorded(&db), after);
+}

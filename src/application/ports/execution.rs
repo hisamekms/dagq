@@ -1406,6 +1406,34 @@ pub trait Repository {
         let _ = since;
         anyhow::bail!("this repository keeps no history")
     }
+    /// The commits of main's first-parent line at `head` after `after`
+    /// (none `after` reaches) from `since` (unix seconds), oldest first,
+    /// each with its ID, its committer's time and the paths it changed:
+    /// what the supervisor records of main's history.
+    fn main_commits(
+        &self,
+        head: &str,
+        after: Option<&str>,
+        since: i64,
+    ) -> Result<Vec<crate::domain::stats::conflicts::MainCommit>> {
+        let _ = (head, after, since);
+        anyhow::bail!("this repository keeps no history")
+    }
+    /// Every file path of `commit`'s tree.
+    fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
+        let _ = commit;
+        anyhow::bail!("this repository cannot list committed files")
+    }
+    /// Whether the repository has the commit `commit`.
+    fn has_commit(&self, commit: &str) -> Result<bool> {
+        let _ = commit;
+        anyhow::bail!("this repository keeps no history")
+    }
+    /// Whether `commit` is on the first-parent line of `head`.
+    fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
+        let _ = (commit, head);
+        anyhow::bail!("this repository keeps no history")
+    }
     /// Symbolic HEAD of a worktree (`refs/heads/...`), `None` when detached.
     fn current_branch(&self, worktree: &Path) -> Result<Option<String>>;
     fn head(&self, worktree: &Path) -> Result<CommitSha>;

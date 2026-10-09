@@ -146,7 +146,9 @@ pub struct MainChange {
 /// One commit on main's first-parent line: one landing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MainCommit {
-    /// Unix seconds of the commit.
+    /// The commit's full ID.
+    pub sha: String,
+    /// Unix seconds of the commit (its committer's time).
     pub at: i64,
     pub changes: Vec<MainChange>,
 }
@@ -249,6 +251,28 @@ pub fn earliest_conflict(events: &[RunEvent]) -> Option<i64> {
         .min()
 }
 
+/// The window of the events with `after < id <= upto` in unix
+/// milliseconds, from its first event to its last.
+pub fn window_span(
+    events: &[RunEvent],
+    after: EventId,
+    upto: EventId,
+) -> (Option<i64>, Option<i64>) {
+    let times = events
+        .iter()
+        .filter(|event| event.id > after && event.id <= upto)
+        .filter_map(|event| timestamp_millis(&event.created_at));
+    times.fold(
+        (None, None),
+        |(start, end): (Option<i64>, Option<i64>), at| {
+            (
+                Some(start.map_or(at, |start| start.min(at))),
+                Some(end.map_or(at, |end| end.max(at))),
+            )
+        },
+    )
+}
+
 /// Aggregate the conflict events with `after < id <= upto` whose task
 /// `counts` accepts, against `history`.
 pub fn conflict_hotspots(
@@ -263,12 +287,7 @@ pub fn conflict_hotspots(
         .iter()
         .filter(|event| event.id > after && event.id <= upto)
         .collect();
-    // The window in unix milliseconds, from its first event to its last.
-    let times: Vec<i64> = window
-        .iter()
-        .filter_map(|event| timestamp_millis(&event.created_at))
-        .collect();
-    let (start, end) = (times.iter().min().copied(), times.iter().max().copied());
+    let (start, end) = window_span(events, after, upto);
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
     let mut tallies: BTreeMap<&str, Tally> = BTreeMap::new();
     let mut count = 0;
@@ -437,7 +456,11 @@ mod tests {
     }
 
     fn commit(secs: i64, changes: Vec<MainChange>) -> MainCommit {
-        MainCommit { at: secs, changes }
+        MainCommit {
+            sha: format!("c{secs}"),
+            at: secs,
+            changes,
+        }
     }
 
     fn events() -> Vec<RunEvent> {

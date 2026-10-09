@@ -92,7 +92,7 @@ set -eu
 
 me=check-layer-deps
 # The submodules of src/application/supervise/ that rule C3 is checked on.
-c3_files="contexts ci_watch forecast live_alerts observer push report throughput_review cleanup disk host_metrics queue_service release sccache update sweep handoff inbox_nudge plan_review goal_review request_planner draft_planner finding_planner planner_turns"
+c3_files="contexts ci_watch main_log forecast live_alerts observer push report throughput_review cleanup disk host_metrics queue_service release sccache update sweep handoff inbox_nudge plan_review goal_review request_planner draft_planner finding_planner planner_turns"
 # Rule C8: each port module of src/application/ports/ and the modules it may
 # name, "module:allowed,allowed"; a port module not listed may name none.
 c8_ok="planning:shared execution:shared host:shared observation:shared,planning,execution,host shared:planning,execution,observation,host"

@@ -73,9 +73,10 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 - domain（`src/domain/stats.rs`と、集計ごとのmoduleを置く`src/domain/stats/`）が全ての数え方を持ち、I/Oを持たない。
   この地図は集計のmoduleを名前だけで指す。
   入力はeventの全件、task→goalの対応、今の時刻、supervisorの空きslotの観測（`SlotSnapshot`）、走っているrunの観測（`LiveSnapshot`）。
-- application（`src/application/stats.rs`）はqueueと外の情報源（`StatsSources`: run directory、idle marker、`[stall]`・`[conflicts]`、mainの履歴）を読んで渡すだけで、判断を足さない。
+- application（`src/application/stats.rs`）はqueueと外の情報源（`StatsSources`）を読んで渡すだけで、判断を足さない。
 - `stats`は何も書かない。
-  hostの負荷はqueueのディレクトリの`host/`を、衝突の多いファイルの着地数はmainのgitの履歴を読むだけ。
+  hostの負荷はqueueのdirの`host/`を、衝突の多いファイルの着地数とareaはmainのgitの履歴を読む。
+  supervisorが記録する同じ履歴（[mainの履歴の記録](../main-history.md)）はまだ読まない。
 - 記録を書くのは各工程（supervisor・`integrate`・hook・job）で、記録の欄の意味は書く側の型と文書が持つ。
 - [kpi](kpi.md)・[完了見込み](#完了見込み)・plan reviewの衝突の多いファイルはdomainの関数を直接呼び、同じ規則を読む。
 

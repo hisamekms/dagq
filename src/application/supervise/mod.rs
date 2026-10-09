@@ -130,6 +130,7 @@ mod inbox_nudge;
 mod jobs;
 mod landing;
 mod live_alerts;
+mod main_log;
 mod observer;
 mod plan_review;
 mod planner_turns;
@@ -1625,6 +1626,9 @@ impl Supervisor<'_> {
                     .live_alerts
                     .pass(env, signals, options.live_alert_interval)
             });
+            // And main's history, recorded as it moves for the measurement,
+            // draining and handing off too.
+            self.on_observation(|observation, env| observation.main_log_pass(env));
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             let landings: Vec<RunId> = self

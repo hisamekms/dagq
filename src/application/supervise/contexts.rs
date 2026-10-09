@@ -160,6 +160,8 @@ pub(super) struct ObservationState {
     pub(super) ci: ci_watch::CiWatchState,
     /// The record of `stats`' judgments of now.
     pub(super) live_alerts: live_alerts::LiveAlertWatch,
+    /// The record of main's history.
+    pub(super) main_log: main_log::MainLogWatch,
 }
 
 impl ObservationState {
@@ -178,6 +180,7 @@ impl ObservationState {
             ci_watch_port: ports.ci_watch.clone(),
             ci: ci_watch::CiWatchState::default(),
             live_alerts: live_alerts::LiveAlertWatch::default(),
+            main_log: main_log::MainLogWatch::default(),
         }
     }
 

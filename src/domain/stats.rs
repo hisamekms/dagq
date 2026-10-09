@@ -29,6 +29,7 @@ pub mod jobs;
 pub mod landing;
 pub mod landing_utilization;
 pub mod landing_waits;
+pub mod main_log;
 pub mod measures;
 pub mod planner_routes;
 pub mod predictions;
@@ -2472,6 +2473,7 @@ mod tests {
         let live = LiveSnapshot {
             history: History::Read(MainHistory {
                 commits: vec![MainCommit {
+                    sha: "c".into(),
                     at: T + 15,
                     changes: vec![MainChange {
                         path: "hot.rs".into(),
