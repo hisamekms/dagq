@@ -120,7 +120,7 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 - `awaiting_integration`の起点は最初に`awaiting_integration`になった時刻で、着地の失敗で戻っても変えない。
 - `ask_unanswered`は、その後にrun（かそのtaskのrun）が着地したaskを数えない。
 - `task_failed`はpageに関係なく全runで数え、最後に失敗したrunが対象に入るときに出す。
-- slotのalertは`claim_held`・`claim_deferred`・`idle_slots`の順に1つだけ出し、`stats`を読んだ時点の観測で判定して時間帯の履歴を持たない（`SlotSnapshot`のdoc comment）。
+- slotのalertは`claim_held`・`claim_deferred`・`idle_slots`の順に1つだけ出し、`stats`を読んだ時点の観測で判定する（`SlotSnapshot`のdoc comment）。
   着地の順番を待つrunは埋まったslotに数え、人の答えを待つrunは数えない（[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)決定13、[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）。
   着地待ちが空けた軽い枠（[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)）と、draftのgoalのreadyのtaskは数えない。
 - `claim_deferred`は控えの理由を問わず数える（[claimを控える（衝突の多いファイル）](claim-defer.md)、[ADR-t1632-1](../../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
@@ -128,7 +128,6 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 ## running alerts
 
 - 入口: `RunningAlert`と`running_alerts`、markerとwrapperの生死を読むのは`application::stats::stats`。
-- `--since`に関係なく毎回出す。
 - 見ているsessionは、workerのsession・resume中のsession・送ったreviseのsessionのどれかで、それ以外のrunは見ない。
 - `idle_without_receipt`で`nudged`も`asked`もfalseなら、supervisorの検知の漏れを示す（[receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)）。
 - `long_background`は観測だけで、復旧jobを起動しない。
@@ -137,7 +136,7 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 - `workspace_mismatch`はcmuxに聞かず、runの最後のsessionのbackgroundのwrapperをpidと記録した起動時刻で見る（pidを別のprocessが継げば死んでいる。[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定2・10、[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
   heartbeatの古さは生死に使わない（[wrapperが黙ったsession](silent-wrapper.md)の側）。
   古いバイナリのworkspaceのsessionは判定せず、`workspace_check`が数を出す。
-  `stats --cmux`は受けて無視する。
+- slotのalert・running alert・`workspace_check`の入力はsupervisorが記録し、eventだけから畳める（[計測](../measurement.md#今の判定の記録)）。
 
 ## 閾値ごとの検知
 

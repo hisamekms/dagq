@@ -945,6 +945,7 @@ pub mod landing_verification;
 pub mod language;
 pub mod light_slots;
 pub mod lint;
+pub mod live_alerts;
 pub mod marks;
 pub mod measure;
 pub mod plan_quality;

@@ -5,7 +5,7 @@
 //! checks compare each as a [`Duration`] ([`StallConfig::threshold`]).
 use std::{collections::HashMap, time::Duration};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::RunEvent;
@@ -34,7 +34,7 @@ pub const STALL_CONFIG_LOADED: &str = super::event_kind::STALL_CONFIG_LOADED;
 
 /// One background task an idle marker lists as `running`: its ID and what
 /// it runs, as the agent described it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundTask {
     pub id: String,
     pub description: String,

@@ -5,7 +5,11 @@
 //! the processes of the runs' background wrappers (no cmux, ADR-t1433-1);
 //! and main's Git history for `conflict_hotspots`.
 
-use std::{collections::HashSet, path::Path, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::SystemTime,
+};
 
 use anyhow::Result;
 
@@ -13,12 +17,14 @@ use super::{AgentSignals, ProcessControl, Queue, RunFiles, StatusFilter, TaskQue
 use crate::domain::{
     GoalStatus, RunId, RunStatus, SupervisorPulse, TaskRun, TaskStatus,
     host_metrics::HostSummary,
+    live_alerts::LiveInputs,
     stall::{BackgroundTask, IDLE_LOG, StallConfig, background_first_seen},
     stats::{
         ConflictConfig, ConflictConfigReport, History, LiveRun, LiveSnapshot, SlotSnapshot,
         StallConfigReport, Stats, StatsQuery,
         conflicts::{MainHistory, earliest_conflict},
-        stats as aggregate, timestamp_millis, with_areas, with_changes, without_cargo_measures,
+        outlier_thresholds, stats as aggregate, timestamp_millis, with_areas, with_changes,
+        without_cargo_measures,
     },
 };
 
@@ -98,6 +104,97 @@ pub fn stats(
 ) -> Result<Stats> {
     let events = queue.all_events()?;
     let goals = queue.task_goals()?;
+    let snapshot = slot_snapshot(queue, processes, now)?;
+    let config = stall_config(&events, sources.config_file)?;
+    let (runs, _) = live_runs(queue, processes, &events, &sources.live())?;
+    let live = LiveSnapshot {
+        runs,
+        config,
+        history: conflict_history(&events, sources.history),
+        conflicts: conflict_config((sources.conflicts_file)()?),
+        draft_origins: queue.draft_origins()?,
+        utc_offset_secs: sources.utc_offset_secs,
+    };
+    let mut stats = aggregate(&events, &goals, now, snapshot, query, &live);
+    let titles = queue.task_titles()?;
+    for run in &mut stats.runs {
+        run.title = titles.get(&run.task_id).cloned();
+    }
+    with_changes(&mut stats, &queue.task_changes()?);
+    // Only the listed runs' landings are read from Git.
+    let listed: HashSet<&RunId> = stats.runs.iter().map(|run| &run.run_id).collect();
+    let landings: Vec<crate::domain::RunEvent> = events
+        .iter()
+        .filter(|event| {
+            event.kind == "run_integrated"
+                && event
+                    .run_id
+                    .as_ref()
+                    .is_some_and(|run| listed.contains(run))
+        })
+        .cloned()
+        .collect();
+    let areas = sources.areas.run_areas(&landings);
+    with_areas(&mut stats, areas.as_ref());
+    if !sources.dagq_source {
+        without_cargo_measures(&mut stats);
+    }
+    if let Some(read) = sources.host_metrics {
+        let (from, until) = stats.window_ms;
+        stats.host = Some(read(from.div_euclid(1000), until.div_euclid(1000)));
+    }
+    Ok(stats)
+}
+
+/// What the judgments of now read outside the queue: the run directories'
+/// markers through `files` and `signals`, and the `[stall]` of `dagq.toml`
+/// (`None` when there is no file).
+pub struct LiveSources<'a> {
+    pub files: &'a dyn RunFiles,
+    pub signals: &'a dyn AgentSignals,
+    pub config_file: &'a dyn Fn() -> Result<Option<StallConfig>>,
+}
+
+impl StatsSources<'_> {
+    fn live(&self) -> LiveSources<'_> {
+        LiveSources {
+            files: self.files,
+            signals: self.signals,
+            config_file: self.config_file,
+        }
+    }
+}
+
+/// Everything `stats`' judgments of now read besides the events
+/// ([`crate::domain::live_alerts::judge`]), read at `now` from the queue,
+/// the processes and `sources`: what a supervisor's pass records
+/// (docs/design/measurement.md "今の判定の記録").
+pub fn live_inputs(
+    queue: &dyn Queue,
+    processes: &dyn ProcessControl,
+    now: i64,
+    events: &[crate::domain::RunEvent],
+    sources: &LiveSources<'_>,
+) -> Result<LiveInputs> {
+    let (runs, positions) = live_runs(queue, processes, events, sources)?;
+    let outliers = outlier_thresholds(events, &queue.task_goals()?, &runs);
+    Ok(LiveInputs {
+        slots: slot_snapshot(queue, processes, now)?,
+        config: stall_config(events, sources.config_file)?,
+        runs,
+        outliers,
+        positions,
+    })
+}
+
+/// The queue's slots at `now`: the live supervisors' (`processes` telling
+/// which are alive) less the runs executing, and the candidates and ready
+/// tasks.
+fn slot_snapshot(
+    queue: &dyn Queue,
+    processes: &dyn ProcessControl,
+    now: i64,
+) -> Result<SlotSnapshot> {
     let registrations = queue.supervisors()?;
     let slots: i64 = registrations
         .iter()
@@ -150,18 +247,25 @@ pub fn stats(
         .filter(|goal| goal.status == GoalStatus::Draft)
         .map(|goal| goal.tasks.ready)
         .sum();
-    let ready = ready.saturating_sub(ready_in_draft_goals);
-    let snapshot = SlotSnapshot {
+    Ok(SlotSnapshot {
         free_slots: slots - executing,
         candidates: queue.candidates()?.len(),
-        ready,
-    };
-    let config = match StallConfig::loaded(&events) {
+        ready: ready.saturating_sub(ready_in_draft_goals),
+    })
+}
+
+/// The thresholds of the running alerts: the latest supervisor's, else
+/// the file's, else the defaults.
+fn stall_config(
+    events: &[crate::domain::RunEvent],
+    config_file: &dyn Fn() -> Result<Option<StallConfig>>,
+) -> Result<StallConfigReport> {
+    Ok(match StallConfig::loaded(events) {
         Some(config) => StallConfigReport {
             config,
             source: "supervisor",
         },
-        None => match (sources.config_file)()? {
+        None => match config_file()? {
             Some(config) => StallConfigReport {
                 config,
                 source: "file",
@@ -171,51 +275,30 @@ pub fn stats(
                 source: "default",
             },
         },
-    };
-    let all_runs = queue.all_runs()?;
+    })
+}
+
+/// The queue's runs not finished yet, in its order, with their markers and
+/// whether their background wrapper runs, and each one's position in the
+/// list of every run.
+fn live_runs(
+    queue: &dyn Queue,
+    processes: &dyn ProcessControl,
+    events: &[crate::domain::RunEvent],
+    sources: &LiveSources<'_>,
+) -> Result<(Vec<LiveRun>, HashMap<RunId, usize>)> {
     let mut runs = Vec::new();
-    for run in all_runs.iter().filter(|run| !finished(run.status())) {
+    let mut positions = HashMap::new();
+    for (position, run) in queue.all_runs()?.iter().enumerate() {
+        if finished(run.status()) {
+            continue;
+        }
         let mut live = live_run(run, sources)?;
-        live.background_alive = background_alive(&events, run.id(), run.workspace_id(), processes);
+        live.background_alive = background_alive(events, run.id(), run.workspace_id(), processes);
+        positions.insert(run.id().clone(), position);
         runs.push(live);
     }
-    let live = LiveSnapshot {
-        runs,
-        config,
-        history: conflict_history(&events, sources.history),
-        conflicts: conflict_config((sources.conflicts_file)()?),
-        draft_origins: queue.draft_origins()?,
-        utc_offset_secs: sources.utc_offset_secs,
-    };
-    let mut stats = aggregate(&events, &goals, now, snapshot, query, &live);
-    let titles = queue.task_titles()?;
-    for run in &mut stats.runs {
-        run.title = titles.get(&run.task_id).cloned();
-    }
-    with_changes(&mut stats, &queue.task_changes()?);
-    // Only the listed runs' landings are read from Git.
-    let listed: HashSet<&RunId> = stats.runs.iter().map(|run| &run.run_id).collect();
-    let landings: Vec<crate::domain::RunEvent> = events
-        .iter()
-        .filter(|event| {
-            event.kind == "run_integrated"
-                && event
-                    .run_id
-                    .as_ref()
-                    .is_some_and(|run| listed.contains(run))
-        })
-        .cloned()
-        .collect();
-    let areas = sources.areas.run_areas(&landings);
-    with_areas(&mut stats, areas.as_ref());
-    if !sources.dagq_source {
-        without_cargo_measures(&mut stats);
-    }
-    if let Some(read) = sources.host_metrics {
-        let (from, until) = stats.window_ms;
-        stats.host = Some(read(from.div_euclid(1000), until.div_euclid(1000)));
-    }
-    Ok(stats)
+    Ok((runs, positions))
 }
 
 fn finished(status: RunStatus) -> bool {
@@ -254,7 +337,7 @@ fn background_alive(
 /// The unfinished `run` with the write times of its idle marker, receipt
 /// and prompt-submit marker. A file that is not there, or a run without a
 /// directory, has none.
-fn live_run(run: &TaskRun, sources: &StatsSources<'_>) -> Result<LiveRun> {
+fn live_run(run: &TaskRun, sources: &LiveSources<'_>) -> Result<LiveRun> {
     let modified = |path: &Path| {
         sources
             .files
@@ -309,7 +392,7 @@ fn live_run(run: &TaskRun, sources: &StatsSources<'_>) -> Result<LiveRun> {
 /// the hook wrote one) is timed from the marker. `None` when the log shows
 /// none earlier than the marker.
 fn background_since(
-    sources: &StatsSources<'_>,
+    sources: &LiveSources<'_>,
     log: &Path,
     at: i64,
     tasks: &[BackgroundTask],

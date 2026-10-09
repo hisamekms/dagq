@@ -56,6 +56,7 @@ mod lifecycle_install_watch;
 mod lifecycle_plan;
 mod lifecycle_replace;
 mod lifecycle_up;
+mod live_alerts;
 mod location;
 mod main_checkout;
 mod observer_codex;

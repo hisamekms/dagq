@@ -29,7 +29,7 @@ related:
 
 # 計測
 
-> **一部だけ実装済み（2026-10-09）**: 「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」と「runの比較の軸」の記録は実装済みで、今の姿を書く。
+> **一部だけ実装済み（2026-10-09）**: 「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録は実装済みで、今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[`stats`](supervisor-lifecycle/stats.md)（着地待ちの内訳・作業の内訳）・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)・[hostの負荷](supervisor-lifecycle/host-metrics.md)が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
@@ -44,7 +44,7 @@ related:
 | 論理ストア | 中身 | 区分 | 今のアダプタ |
 | --- | --- | --- | --- |
 | StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表（`tasks`・`goals`・`task_runs`・`asks`・`proposals`・`planners`・`run_leases`・`supervisors`ほか） |
-| EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・queueの出来事・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
+| EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
 | SessionStepStore | sessionのstep（turn・tool・コマンドのshape）。`(session_id, seq)`で重複を除き、抜けを残す。90日 | SSOT | 未実装（queue.dbの新しい表の予定） |
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | 未実装（queue.dbの新しい表の予定）。今はsupervisorが`host/metrics-YYYYMMDD.csv`に書くだけ |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | 未実装（queue.dbの新しい表の予定） |
@@ -152,6 +152,26 @@ supervisorの生存と停止の証拠はEventStoreに残し、一生の終わり
   どちらでもなければ生きている。
 - 停止のeventの無いstaleな登録は`silent`で閉じて掃除の後に直り、`supervisor_alive`の無い前のbuildのtokenも同じ規則で最後のeventで閉じる。
 - kpiの`supervisor_lives`は今もsupervisorsの表を読み、この規則へ移すのは段2。
+
+### 今の判定の記録
+
+statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run dirのmarker・processを入力に今を判定するので、supervisorの周回がその入力を観測してEventStoreに記録し、統計はeventだけから同じ値を作れる（`domain::live_alerts`、`application::supervise::live_alerts`）。
+
+- **観測**: どのsupervisorも`OBSERVE_INTERVAL_SECS`（60秒）ごとに、自分のslotやleaseに限らずqueue全体をstatsと同じ読み方で読み、statsと同じ判定の関数（`live_alerts::judge`）で判定する。
+  警告の鍵は判定・種類・run・理由で、leaseの持ち主を含めないので、leaseが移っても何も書かない。
+- **判定の入力と警告の開閉**: 入力はslot（空き・候補・ready）・閾値とその出どころ・未完了のrunごとの離散の時刻と値（警告でないrunも）で、経過で伸びる長さは持たない。
+  開閉のeventは警告がいつ立ち消えたかの記録で、値の再現には使わない。
+- **記録**（流れはsupervisorのtokenごと）: 起動の後の最初の成功した観測が`live_alert_baseline`（全ての入力と開いた警告で、入力の版1）。
+  入力の値が変わった対象ごとに`live_alert_input_changed`（その対象の今の値の全体で、版を1つ進める）。
+  警告の鍵の集合が変わったときだけ`live_alert_started`・`live_alert_ended`。
+  `REACH_INTERVAL_SECS`（300秒）ごとと、観測の失敗の始まり・成功への戻りに`live_alert_reached`（成否・失敗の理由・その時の入力の版）。
+  書けなかった記録の後は基準からやり直す。
+- **畳み**: `live_alerts::fold`はeventと窓の終わりだけから、窓の終わりまでの最後に成功した観測が`GRACE_SECS`（900秒、到達点の3回分）以内の流れのうち最も新しい1つ（同じ時刻はevent idの大きい方）を選ぶ。
+  その流れの基準と入力の更新を版の順に当てた入力を、窓の終わりで`judge`に渡す。
+  流れどうしは足さない。
+- **観測が無い**: 選べる流れが無いときの理由は、基準が無い・記録の欠け（到達点が確かめた版に入力の記録が届かない）・supervisorの停止（全ての流れの`supervisor_life_end`）・観測の失敗・到達点が古い。
+  `supervisor_alive`は理由の区別にだけ使う。
+- runtimeの制御はこの記録を読まず、statsはまだ今の観測を直接読む。
 
 ## 台帳の形
 

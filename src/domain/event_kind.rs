@@ -39,6 +39,7 @@
 //!   kept only so old records are read.
 //! - observation and analysis: `observation`, `observe_*`, `finding_*`
 //!   (but `finding_planner_*`), `mark_*`, `forecast_recorded`, `kpi_*`,
+//!   `live_alert_*` (the record of `stats`' judgments of now),
 //!   `report_written`, `throughput_review_*`, `candidates_sampled` and the
 //!   CI watch's `ci_*`.
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
@@ -192,6 +193,11 @@ event_kinds! {
     LandingResumed => "landing_resumed",
     LeaseAcquired => "lease_acquired",
     LeaseReleased => "lease_released",
+    LiveAlertBaseline => "live_alert_baseline",
+    LiveAlertEnded => "live_alert_ended",
+    LiveAlertInputChanged => "live_alert_input_changed",
+    LiveAlertReached => "live_alert_reached",
+    LiveAlertStarted => "live_alert_started",
     MarkRecorded => "mark_recorded",
     MarkRetracted => "mark_retracted",
     MigrationRenumbered => "migration_renumbered",
@@ -540,6 +546,14 @@ impl EventKind {
                 | SupervisorConfigChanged
                 | LandingHeld
                 | LandingResumed
+                // A supervisor's record of `stats`' judgments of now: the
+                // inputs, the alerts' starts and ends and how far its
+                // observation reached (ADR-t1662-2 decision 5).
+                | LiveAlertBaseline
+                | LiveAlertInputChanged
+                | LiveAlertStarted
+                | LiveAlertEnded
+                | LiveAlertReached
                 // The answer of an authentication or usage-limit ask
                 // applied (task 437).
                 | QueueHoldApplied
@@ -1120,6 +1134,11 @@ mod tests {
                 "landing_recheck_finished",
             ),
             (EventKind::LandingResumed, "landing_resumed"),
+            (EventKind::LiveAlertBaseline, "live_alert_baseline"),
+            (EventKind::LiveAlertEnded, "live_alert_ended"),
+            (EventKind::LiveAlertInputChanged, "live_alert_input_changed"),
+            (EventKind::LiveAlertReached, "live_alert_reached"),
+            (EventKind::LiveAlertStarted, "live_alert_started"),
             (EventKind::LeaseAcquired, "lease_acquired"),
             (EventKind::LeaseReleased, "lease_released"),
             (EventKind::MarkRecorded, "mark_recorded"),

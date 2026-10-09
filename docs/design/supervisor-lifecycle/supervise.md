@@ -57,7 +57,7 @@ slotの集まりは`SlotTable`だけが変え、残りは`Supervisor`が持つ�
    続けて`[provider_fallback]`を読み直し、`workers`が変われば以後のclaimの経路とturnの壁の判定に、`jobs`が変われば以後のheadlessのjobの行き先と失敗の後の扱いに使う（logにinfoを出す。
    [Run environment](run-environment.md)の`[provider_fallback]`、[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。
    続けて`[fresh_session]`を読み直し、変わった閾値を新しいsessionの判定（`next_session`）に使う（[Run environment](run-environment.md)）。
-   続けて`[ci_watch]`を読み直し、CIの確かめを受け取り・始める（下の「CIの見張り」）。
+   続けて`[ci_watch]`を読み直し、CIの確かめを受け取り・始め（下の「CIの見張り」）、間隔が過ぎていれば今の判定を記録する（[計測](../measurement.md#今の判定の記録)）。
 
 ループ（1秒ごと）: 各passの先頭で、待ちの終わったrunを新しい仕事より先にslotへ戻し（drain中も）、各tickの先頭で人の答えを待つrunを待ちに移す（[人の答えを待つrun](waiting.md)）。待ちのrunのslotは下の監視の代わりにsessionへ何も送らない見張りだけを受ける。workerのsessionはclaimでもresumeでも非対話で、supervisorは依頼をrun directoryに書き、workerの画面を読まず打ち込まない（対話のworkerのrunは廃止した。[非対話のworker](headless-worker.md)）。
 
@@ -79,7 +79,6 @@ slotの集まりは`SlotTable`だけが変え、残りは`Supervisor`が持つ�
 14. active runも走っているobserverもなく、`--once`か停止要求（下記）か、provisioning失敗でclaimを止めていればループを抜ける（走っているobserverもrunと同じく待つ）。それ以外はactive runがない間2秒ごとに（runかjobがある間は1秒のtickごとに）`candidates`を見る。testはhiddenの`--idle-poll-ms`と`--tick-ms`でこの間隔を短くする（引き継ぎの要求を早く拾うため）。
     ループを抜けたら（claimやGitのエラーで抜ける場合も含む）自分の登録の削除と`supervisor_stopped`の記録を1つのトランザクションで行う。
     heartbeat失敗で終わるときと記録に失敗したときは消さず、staleとして次の`up`・`down`の掃除（同じく1つのトランザクション）に任せる。
-    heartbeatは`SUPERVISOR_ALIVE_INTERVAL_SECS`ごとに`supervisor_alive`も記録し、その失敗はheartbeatを止めない。
 
 結果は`{"outcome": "finished" | "stopped", "runs": [休止したrun], "errors": [{run_id, task_id, message}], "triaged": [{run_id, task_id, status}]}`（`triaged`はこのプロセスがtriageを終えたrunとその後のstatus）。SIGINT/SIGTERMは1回目でclaimを止めてactive runの終了を待ち（graceful drain）、2回目で既定の動作（即終了）になる。即終了した（killされた）supervisorのleaseはPIDが死んだ時点で（遅くともheartbeatの30秒で）staleになり、wrapperが生きているrunは次のfill passで別のsupervisorが引き継ぐ（5）。登録はPIDが死んだ時点から`stale`として`status`/`doctor`に残る。`status` / `doctor` / `recover` / `integrate`は登録を消さず、次の`up`がPIDの死んだ登録だけを消す（[`up` / `down`](up-down.md#up--down)）。
 

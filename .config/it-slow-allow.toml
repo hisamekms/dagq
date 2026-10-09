@@ -782,3 +782,9 @@ task = 1896
 name = "runtime_disk::a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding"
 reason = "境界（supervisorの配線・ファイル・flock）: the job of a real cleanup for room removes a canceled run's worktree, scratchpad and TMPDIR and the queue dir's build cache whose lock is free, leaves the one whose lock the update holds, and records them; it runs a supervisor twice (a run that builds, then the cleanup and a claim)"
 task = 1979
+
+# 6.9 to 8.3s (stress of 5 under the host's load)
+[[test]]
+name = "live_alerts::a_supervisor_records_its_baseline_and_an_idle_alert_from_start_to_end"
+reason = "境界（supervisorの配線）: 実 supervisor の周回が今の判定の記録を queue に書くこと（起動の後の基準 1 回と、headless の run が stalled の ask を待つ間の idle_without_receipt の始まりと、答えの turn の receipt の後の終わり）を実 process と SQLite で確かめる。記録と畳みの判断は domain::live_alerts の unit test"
+task = 1908

@@ -158,6 +158,8 @@ pub(super) struct ObservationState {
     /// Watches the landing branch's CI (ADR-t1920-1).
     pub(super) ci_watch_port: Option<CiWatchPort>,
     pub(super) ci: ci_watch::CiWatchState,
+    /// The record of `stats`' judgments of now.
+    pub(super) live_alerts: live_alerts::LiveAlertWatch,
 }
 
 impl ObservationState {
@@ -175,6 +177,7 @@ impl ObservationState {
             push: push::PushWatch::default(),
             ci_watch_port: ports.ci_watch.clone(),
             ci: ci_watch::CiWatchState::default(),
+            live_alerts: live_alerts::LiveAlertWatch::default(),
         }
     }
 

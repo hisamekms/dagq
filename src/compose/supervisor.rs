@@ -118,6 +118,10 @@ pub struct SuperviseOptions {
     /// ([`supervisor::CLEANUP_INTERVAL`]); tests shorten it (task
     /// 1627).
     pub disk_cleanup_interval: Duration,
+    /// Least time between two observations of `stats`' judgments of now
+    /// ([`crate::domain::live_alerts::OBSERVE_INTERVAL_SECS`]); tests
+    /// shorten it.
+    pub live_alert_interval: Duration,
     /// The clock and IDs of everything the supervisor records; tests fix them.
     pub generators: Generators,
     /// The thresholds of the stalled-session checks; `None` reads `[stall]`
@@ -296,6 +300,9 @@ impl SuperviseOptions {
             heartbeat_interval: supervisor::HEARTBEAT_INTERVAL,
             sweep_interval: SWEEP_INTERVAL,
             disk_cleanup_interval: supervisor::CLEANUP_INTERVAL,
+            live_alert_interval: Duration::from_secs(
+                crate::domain::live_alerts::OBSERVE_INTERVAL_SECS.unsigned_abs(),
+            ),
             generators: clock::system(),
             stall: None,
             conflicts: None,
@@ -379,6 +386,7 @@ impl SuperviseOptions {
             heartbeat_interval: self.heartbeat_interval,
             sweep_interval: self.sweep_interval,
             disk_cleanup_interval: self.disk_cleanup_interval,
+            live_alert_interval: self.live_alert_interval,
             stall,
             conflicts,
             conflicts_error: None,

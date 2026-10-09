@@ -129,6 +129,7 @@ mod idle;
 mod inbox_nudge;
 mod jobs;
 mod landing;
+mod live_alerts;
 mod observer;
 mod plan_review;
 mod planner_turns;
@@ -313,6 +314,10 @@ pub struct LoopSettings {
     /// another job took on included) to the next one
     /// ([`CLEANUP_INTERVAL`]; tests shorten it, task 1627).
     pub disk_cleanup_interval: Duration,
+    /// Least time between two observations of `stats`' judgments of now
+    /// ([`crate::domain::live_alerts::OBSERVE_INTERVAL_SECS`]; tests
+    /// shorten it).
+    pub live_alert_interval: Duration,
     /// The thresholds of the stalled-session checks (ADR-0043 decision 4),
     /// recorded as `stall_config_loaded` when the loop starts.
     pub stall: StallConfig,
@@ -1612,6 +1617,14 @@ impl Supervisor<'_> {
             // And `[ci_watch]`, whose check is reaped and started off the
             // loop, draining and handing off too (ADR-t1920-1).
             self.on_observation(|observation, env| observation.ci_watch_pass(env));
+            // And the record of `stats`' judgments of now, draining and
+            // handing off too, which nothing here reads back.
+            let signals = self.signals;
+            self.on_observation(|observation, env| {
+                observation
+                    .live_alerts
+                    .pass(env, signals, options.live_alert_interval)
+            });
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             let landings: Vec<RunId> = self

@@ -5,7 +5,7 @@
 //! snapshot of the supervisors' free slots.
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
@@ -202,9 +202,10 @@ pub struct StatsQuery {
 /// waiting for a person does not. The light room a landing queue leaves
 /// (ADR-t1591-1) is not free here, and the ready tasks of a draft goal
 /// wait for `goal ready`, not for a predecessor, so they are left out of
-/// `ready`. It is read once per `stats`: the slot alerts keep no history
-/// of the hours slots stood free.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// `ready`. It is read once per `stats`, which keeps no history of the
+/// hours slots stood free; when a slot alert started and ended is in the
+/// supervisors' record of the judgments of now ([`super::live_alerts`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotSnapshot {
     pub free_slots: i64,
     pub candidates: usize,
@@ -831,7 +832,7 @@ pub fn stats(
         .into_iter()
         .filter(|alert| alert.task_id.is_none_or(in_goal))
         .collect();
-    let workspace_check = workspace_check(events, live);
+    let workspace_check = workspace_check(events, &live.runs);
     let mut first_event: HashMap<&str, EventId> = HashMap::new();
     for event in events {
         if let Some(run_id) = &event.run_id {
@@ -1250,43 +1251,11 @@ pub fn stats(
             ask_id: None,
         });
     }
-    // Slots left free while claims are held are that hold's, not idle ones.
-    if slots.free_slots > 0 && claim_holds.held.is_some() {
-        alerts.push(Alert {
-            kind: "claim_held",
-            task_id: None,
-            run_id: None,
-            value: slots.free_slots,
-            threshold: 0,
-            path: None,
-            phase: None,
-            ask_id: None,
-        });
-    } else if slots.free_slots > 0 && !claim_deferrals.deferred.is_empty() {
-        // Slots left free while candidates wait on a conflict hotspot
-        // (ADR-0069): `value` is the tasks deferred.
-        alerts.push(Alert {
-            kind: "claim_deferred",
-            task_id: None,
-            run_id: None,
-            value: claim_deferrals.deferred.len() as i64,
-            threshold: 0,
-            path: None,
-            phase: None,
-            ask_id: None,
-        });
-    } else if slots.free_slots > 0 && slots.candidates == 0 && slots.ready > 0 {
-        alerts.push(Alert {
-            kind: "idle_slots",
-            task_id: None,
-            run_id: None,
-            value: slots.free_slots,
-            threshold: 0,
-            path: None,
-            phase: None,
-            ask_id: None,
-        });
-    }
+    alerts.extend(slot_alert(
+        slots,
+        claim_holds.held.is_some(),
+        claim_deferrals.deferred.len(),
+    ));
 
     Stats {
         runs: finished.into_iter().map(|track| track.stats).collect(),
@@ -1338,6 +1307,35 @@ pub fn stats(
     }
 }
 
+/// The slot alert of `slots`, at most one: `claim_held` while claims are
+/// held (`held`), else `claim_deferred` while `deferred` tasks wait on a
+/// conflict hotspot (ADR-0069; `value` is the tasks deferred), else
+/// `idle_slots` while no candidate is left but tasks are ready. Free slots
+/// while claims are held or deferred are that hold's, not idle ones.
+pub fn slot_alert(slots: SlotSnapshot, held: bool, deferred: usize) -> Option<Alert> {
+    let (kind, value) = if slots.free_slots <= 0 {
+        return None;
+    } else if held {
+        ("claim_held", slots.free_slots)
+    } else if deferred > 0 {
+        ("claim_deferred", deferred as i64)
+    } else if slots.candidates == 0 && slots.ready > 0 {
+        ("idle_slots", slots.free_slots)
+    } else {
+        return None;
+    };
+    Some(Alert {
+        kind,
+        task_id: None,
+        run_id: None,
+        value,
+        threshold: 0,
+        path: None,
+        phase: None,
+        ask_id: None,
+    })
+}
+
 /// The session the supervisor watches for a run in `status` now, by its
 /// events: `session` (the worker's own, from its latest `agent_started`),
 /// `resume` (a `resume_started` with no end yet) or `revise` (a
@@ -1386,9 +1384,8 @@ fn watched_phase(status: RunStatus, events: &[&RunEvent]) -> Option<(&'static st
 /// How many runs in flight last opened a session in the background, whose
 /// wrapper `running_alerts` judges, and how many in a workspace an older
 /// binary opened, which nothing looks up.
-fn workspace_check(events: &[RunEvent], live: &LiveSnapshot) -> WorkspaceCheck {
-    let judged = live
-        .runs
+pub fn workspace_check(events: &[RunEvent], runs: &[LiveRun]) -> WorkspaceCheck {
+    let judged = runs
         .iter()
         .filter(|run| {
             crate::domain::background_wrapper::last_session(
@@ -1402,21 +1399,35 @@ fn workspace_check(events: &[RunEvent], live: &LiveSnapshot) -> WorkspaceCheck {
         .count();
     WorkspaceCheck::Wrappers {
         judged,
-        unjudged: live.runs.len() - judged,
+        unjudged: runs.len() - judged,
     }
 }
 
 /// The alerts about runs still in flight (ADR-0043 decision 5), judged at
-/// `now` (unix seconds) on `live`.
+/// `now` (unix seconds) on `live`, the `running_outlier` threshold of each
+/// run from the work medians of `tracks` ([`outlier_thresholds_of`]).
 fn running_alerts(
     events: &[RunEvent],
     tracks: &[Track],
     now: i64,
     live: &LiveSnapshot,
 ) -> Vec<RunningAlert> {
-    let now_ms = now * 1000;
-    let config = &live.config.config;
-    let asks = open_asks(events);
+    let outliers = outlier_thresholds_of(tracks, &live.runs);
+    judge_running_alerts(events, now, &live.runs, &live.config.config, &outliers)
+}
+
+/// The `running_outlier` threshold of each of `runs` that has one: twice
+/// the median work of the finished runs of its task's goal (`goals` maps a
+/// task to its goal), when that median is above zero.
+pub fn outlier_thresholds(
+    events: &[RunEvent],
+    goals: &HashMap<TaskId, Option<GoalId>>,
+    runs: &[LiveRun],
+) -> HashMap<RunId, i64> {
+    outlier_thresholds_of(&self::runs(events, goals), runs)
+}
+
+fn outlier_thresholds_of(tracks: &[Track], runs: &[LiveRun]) -> HashMap<RunId, i64> {
     // The work medians over every finished run, per goal.
     let mut works: HashMap<Option<GoalId>, Vec<i64>> = HashMap::new();
     for track in tracks
@@ -1431,8 +1442,31 @@ fn running_alerts(
         .into_iter()
         .filter_map(|(goal, mut works)| Some((goal, median(&mut works)?)))
         .collect();
+    runs.iter()
+        .filter_map(|run| {
+            let track = tracks.iter().find(|t| t.stats.run_id == run.run_id)?;
+            let median = *medians.get(&track.stats.goal_id)?;
+            (median > 0).then(|| (run.run_id.clone(), median * WORK_MEDIAN_FACTOR))
+        })
+        .collect()
+}
+
+/// The alerts about `runs` still in flight (ADR-0043 decision 5), judged
+/// at `now` (unix seconds) by `config`, each run's `running_outlier`
+/// threshold taken from `outliers`: what `stats` lists as
+/// `running_alerts`, and what the supervisor's record of them
+/// ([`super::live_alerts`]) judges and folds again.
+pub fn judge_running_alerts(
+    events: &[RunEvent],
+    now: i64,
+    runs: &[LiveRun],
+    config: &StallConfig,
+    outliers: &HashMap<RunId, i64>,
+) -> Vec<RunningAlert> {
+    let now_ms = now * 1000;
+    let asks = open_asks(events);
     let mut alerts = Vec::new();
-    for run in &live.runs {
+    for run in runs {
         let run_events: Vec<&RunEvent> = events
             .iter()
             .filter(|event| event.run_id.as_ref() == Some(&run.run_id))
@@ -1519,20 +1553,21 @@ fn running_alerts(
             }
         }
         if run.status == RunStatus::Running
-            && let Some(track) = tracks.iter().find(|t| t.stats.run_id == run.run_id)
-            && let Some(claimed) = track.claimed
-            && let Some(&median) = medians.get(&track.stats.goal_id)
-            && median > 0
+            && let Some(claimed) = run_events
+                .iter()
+                .filter(|event| event.kind == super::event_kind::RUN_CLAIMED)
+                .find_map(|event| timestamp_millis(&event.created_at))
+            && let Some(&threshold) = outliers.get(&run.run_id)
         {
             let running = (now_ms - claimed) / 1000;
-            if running > median * WORK_MEDIAN_FACTOR {
+            if running > threshold {
                 let mut alert = RunningAlert::new(
                     "running_outlier",
                     Some(run.task_id),
                     Some(run.run_id.clone()),
                 );
                 alert.value = Some(running);
-                alert.threshold = Some(median * WORK_MEDIAN_FACTOR);
+                alert.threshold = Some(threshold);
                 alerts.push(alert);
             }
         }

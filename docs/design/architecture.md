@@ -167,8 +167,9 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 - table: `findings`。
 - ファイル: queueのdirの日次のKPIのreportとKPIのpushの待ち。
+- event: `live_alert_*`（supervisorが書く今の判定の記録。[計測](measurement.md#今の判定の記録)）。
 
-**判断**（domain）: `domain::stats`・`kpi`・`forecast`とその下、`marks`・`timeline`・`throughput_review`・`finding`・`ci_watch`ほか。
+**判断**（domain）: `domain::stats`・`kpi`・`forecast`とその下、`live_alerts`・`marks`・`timeline`・`throughput_review`・`finding`・`ci_watch`ほか。
 
 **操作**
 
