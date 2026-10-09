@@ -33,7 +33,7 @@ Executionは`claude -p` / `codex exec`の1回の呼び出しで、非対話のtu
 | Codexのrolloutの読み | `codex_turns::rollout_usage`、`domain::tokens::RolloutUsage::tokens` |
 | rolloutの場所 | `Codex::sessions_dir` |
 | turnの分（累計との差、前のturnが数えたturn） | `domain::turn::turn_own_models`・`turn_own_cost`・`counted_rollout_turns`、`headless_session.rs`の`turn_tokens` |
-| jobの終わりへの記録 | `AgentProvider::job_session`（Codexは`codex.rs`の`job_tokens`）、`domain::headless_job::JobSession::record` |
+| jobの終わりへの記録 | `AgentProvider::job_session`（Codexは`codex.rs`の`job_tokens`）、`domain::headless_job::JobSession::record`、死んだsupervisorのjobは`supervise::jobs`の`taken_over_end` |
 | 対話のsessionの区切り | `infrastructure::session_tokens`、`domain::tokens::SpanTotals`、`domain::sessions::TOKEN_CUT_KINDS`と間隔の定数 |
 | 日・週×actor×provider×modelへの集約 | `domain::stats::executions`、`domain::kpi::window`の`Context::token_kpis`（下の[statsとkpiでの集約](#statsとkpiでの集約)） |
 
@@ -55,10 +55,11 @@ turnの`turn_finished`とjobの終わりのeventは、providerによらず同じ
 | `context_reason` | `peak_context`か`compactions`を数えられなかった理由 |
 
 - 正常な0は`tokens`の各数が0のobjectで、未計測は`tokens`が`null`で`tokens_reason`を持つ。
-- 見張りが止めた復旧のjobの`recovery_finished`、捨てたplan reviewとproposalが先に進んだplan reviewの`plan_review_discarded`、handoff・slotの見張りの終わり・ループの終わり・dropで他の終わりのeventを書かずに止めた自分のjobの`headless_job_stopped`（jobの`kind`でactorを決める）、前のsupervisorのreviewを引き継いだ側が書く`review_failed`も、agentを起動したjobの終わりとしてこの欄を持ち、providerの読みが出力からトークン数を返さなければ未計測にする。
+- 見張りが止めた復旧のjobの`recovery_finished`、捨てたplan reviewとproposalが先に進んだplan reviewの`plan_review_discarded`、handoff・slotの見張りの終わり・ループの終わり・dropで他の終わりのeventを書かずに止めた自分のjobの`headless_job_stopped`（jobの`kind`でactorを決める）、前のsupervisorのreviewを引き継いだ側が書く`review_failed`、死んだsupervisorのjobを止めた側が書く`headless_job_stopped`も、agentを起動したjobの終わりとしてこの欄を持ち、providerの読みが出力からトークン数を返さなければ未計測にする。
   引き継いだ側は、前のreviewの開始の後の終わりのeventが既にこの欄を持てば足さない。
-  agentを起動していない終わり（起動の前に失敗したreviewなど）はExecutionではなく、この欄を持たない。
-  死んだsupervisorのjobを止めた側の`headless_job_stopped`もこの欄を持たない（[今の穴](#今の穴)）。
+  止めた側は、`headless_jobs`の行が持つstdoutの置き場を行の`provider`で読み、置き場が無い（古い行）・読めなければ未計測にする。
+  同じjobの終わりのevent（その`kind`の終わりか`headless_job_stopped`で、同じrun・proposal・goalと`attempt`のもの）がjobの開始の後に既にこの欄を持てば足さない（`domain::headless_job::JobOn`）。
+  agentを起動していない終わり（起動の前に失敗したreview、`program`のjobなど）はExecutionではなく、この欄を持たない。
 - 非対話の区間は`tokens`が`null`のturnを足さない。
 - 親とsubagentごとの内訳は記録しない（ADR-t1486-1決定7）。
 - contextの欄も、正常な0（compactionの無いExecution）と未計測（`null`と`context_reason`）を分ける。
@@ -215,7 +216,7 @@ taskとrunへの集約は区間の`tokens`で行い（[stats](supervisor-lifecyc
   区切りのある区間は区切りだけを足すので、閉じたときの区間のトークン数でも補わない。
 - 区切りの無い区間（区切りの窓のうちにsupervisorが区切らなかったもの）のトークン数は、`stats`と`kpi`の期間の集計に入らない。
 - jobの終わりのeventが`provider`を持たず、トークン数も数えられなかったjobは、`stats`と`kpi`でproviderが`unknown`になる。
-- 死んだsupervisorのjobを別のsupervisorが止めたとき（その`headless_job_stopped`）は、止めた側が前のjobの出力を読まないので、そのExecutionを数えない（`unmeasured`にも入らない）。
+- 死んだsupervisorのjobのうち、別のsupervisorが見たときに既に終わっていたもの（`headless_jobs`の`gone`）と、pidが別のprocessになったか起動時刻が読めず止めなかったもの（`not_the_job`、jobがまだ走っていることもある）は、終わりのeventを書かずに行を閉じるだけなので、前のsupervisorが終わりを書いていなければそのExecutionを数えない（`unmeasured`にも入らない）。
 - `kpi`の`all`・`provider=`・`model=`の層は全体の`coverage`で判定するので、actorごとに記録の始まりが違うと、始まりの遅いactorの記録より前の分は欠けたまま値になる（`actor=`の層と`details.tokens`の`recorded_from`で分かる）。
 - streamの`assistant`の`usage`は生成を始めた時点の途中の値なので、トークン数には使わない（`peak_context`は入力側だけなので使う）。
 - Codexのturnの最初の`token_count`が前のExecutionの最後の呼び出しの`last_token_usage`を持ち越すと、その間にcompactionがあったとき`peak_context`を大きく読みうる。

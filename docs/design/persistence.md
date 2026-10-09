@@ -103,7 +103,7 @@ goals                  -- goal 1つに1行。acceptance_versionはacceptanceの�
 proposals              -- plan reviewに出したgoalとtaskの束。memberは表を持たず、tasks / goalsのproposal_idが今の所属を指す
 plan_reviews           -- plan review job 1つに1行。未完了は1行まで（部分unique index）
 goal_reviews           -- goal review job 1つに1行。未完了は1行まで（indexでなくBEGIN IMMEDIATEの中の検査）
-headless_jobs          -- headless jobのプロセス。始めたsupervisorが消えた後に別のsupervisorが止めるため
+headless_jobs          -- headless jobのプロセスと出力。始めたsupervisorが消えた後に別のsupervisorが止め、Executionを数えるため
 planners               -- plannerのsession 1つに1行。workspace_idはruntimeのplannerならbackgroundのwrapperのhandle、人のplannerと古い行はcmux workspace。answer_wait_atは人の答えだけを待って終わる行（ADR-t1704-1）
 plan_requests          -- inboxが記録した計画の依頼。text / note / refsは記録の後に書き換えない（言い直しは新しい依頼）
 plan_request_proposals -- 依頼から出たproposal
@@ -294,7 +294,6 @@ migrationを足すtaskの規則は[migrations.md](../development/migrations.md)�
   通常の操作は存在しないDBを暗黙に作らない。
 - `application_id`でdagqのDBを見分け、他のアプリのDBは書き換えずに拒む。
 - schemaの版は適用したmigrationの数（`PRAGMA user_version`）で、`migrations/`の`NNNN_<name>.sql`を置くだけで`build.rs`が一覧に足す（[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)）。
-  並行するrunが同じ番号を足したときは`integrate`がrebaseの後に振り直す。
 - リリース済みのmigrationは中身も名前も変えない（[ADR-t614-2](../adr/2026-09-27-t614-2-released-migrations-are-immutable.md)、検査は`scripts/check-migration-numbers.sh`）。
 - queueを開いただけではmigrateしない。
   migrationを適用するのは空のファイルに最新のschemaを作る`init`と`dagq migrate`だけ（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)）。

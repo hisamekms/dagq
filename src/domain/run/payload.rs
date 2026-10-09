@@ -218,6 +218,27 @@ pub struct AttemptOf {
     pub attempt: Option<u64>,
 }
 
+/// The event that ends a headless job (`review_finished`,
+/// `plan_review_discarded`, `headless_job_stopped`, ...), as a supervisor
+/// that stops a gone one's job reads it to tell whether that job's
+/// Execution was recorded already.
+#[derive(Debug, Default, Deserialize)]
+pub struct JobEnd<'a> {
+    /// The `headless_jobs.kind` a `headless_job_stopped` names.
+    #[serde(default, borrow, deserialize_with = "typed")]
+    pub kind: Option<&'a str>,
+    #[serde(default, deserialize_with = "typed")]
+    pub attempt: Option<u64>,
+    #[serde(default, deserialize_with = "typed")]
+    pub proposal_id: Option<i64>,
+    #[serde(default, deserialize_with = "typed")]
+    pub goal_id: Option<i64>,
+    /// Whether it records the Execution (ADR-t1486-1): `tokens_source` is
+    /// there, even `null` (not measured).
+    #[serde(default, rename = "tokens_source", deserialize_with = "present")]
+    pub execution: bool,
+}
+
 /// `stall_resolved`: how one detection of the stall watch ended.
 #[derive(Debug, Default, Deserialize)]
 pub struct StallResolved<'a> {

@@ -23,6 +23,11 @@ use std::sync::Mutex;
 /// before SIGKILL.
 const TAKEOVER_GRACE: Duration = Duration::from_secs(5);
 
+/// How many of the newest events of each kind that ends a job a supervisor
+/// that stops a gone one's job with no run reads, to tell whether one
+/// ended it with its Execution already.
+const TAKEOVER_ENDS_READ: usize = 50;
+
 /// The ends of this process's headless jobs not written to the queue yet:
 /// each `headless_jobs` row's outcome, and the jobs stopped with no event
 /// to end them ([`HeadlessJob::abandon`]). A job ends where no queue is at
@@ -101,6 +106,54 @@ pub(super) fn abandoned_end(
     });
     crate::domain::headless_job::JobSession::record_execution(session, &mut payload);
     payload
+}
+
+/// The `headless_job_stopped` of `job`, a gone supervisor's job this one
+/// stopped, with the processes it signalled (`descendants`) and killed:
+/// with the Execution its agent was (ADR-t1486-1) when `ran` is `Some`,
+/// `session` or not measured; without for a program job or one an event
+/// ended with its Execution already.
+pub(super) fn taken_over_end(
+    job: &HeadlessJobRecord,
+    (descendants, killed): (Vec<u32>, Vec<u32>),
+    ran: Option<Option<&crate::domain::headless_job::JobSession>>,
+) -> Value {
+    let mut payload = json!({
+        "headless_job_id": job.id,
+        "kind": job.kind,
+        "label": job.label,
+        "run_id": job.run_id,
+        "proposal_id": job.proposal_id,
+        "goal_id": job.goal_id,
+        "attempt": job.attempt,
+        "pid": job.pid,
+        "process_start": job.process_start,
+        "descendants": descendants,
+        "killed": killed,
+        "supervisor": job.supervisor_token,
+        "started_at": job.started_at,
+    });
+    if job.provider != headless_job::NO_PROVIDER {
+        payload["provider"] = json!(job.provider);
+    }
+    if let Some(session) = ran {
+        crate::domain::headless_job::JobSession::record_execution(session, &mut payload);
+    }
+    payload
+}
+
+/// What `agent` (the provider of `job`'s row) reads out of the stdout the
+/// row names of the session and Execution of `job`, a gone supervisor's
+/// job; `None` when the row names no stdout or it cannot be read.
+pub(super) fn taken_over_session(
+    agent: &dyn AgentProvider,
+    files: &dyn RunFiles,
+    job: &HeadlessJobRecord,
+) -> Option<crate::domain::headless_job::JobSession> {
+    let stdout = files.read_to_string(job.stdout.as_ref()?).ok()?;
+    // The row's start is in unix seconds; the provider reads from
+    // milliseconds.
+    agent.job_session(&stdout, Some(job.started_at * 1000))
 }
 
 /// What a headless job is about, for its `headless_jobs` row and its
@@ -195,6 +248,7 @@ pub fn record_job(
         pid,
         process_start: ports.processes.start_identity(pid),
         supervisor_token: ports.supervisor_token.clone(),
+        stdout: Some(stdout.clone()),
     };
     let record = match ports.store.record_headless_job(&new) {
         Ok(id) => Some((ports.ends.clone(), id)),
@@ -1008,9 +1062,11 @@ impl Supervisor<'_> {
 
     /// Stop the job of a gone supervisor when its pid still runs the job's
     /// process (the same start), with its descendants: SIGTERM, then
-    /// SIGKILL after [`TAKEOVER_GRACE`]; record `headless_job_stopped`. A
-    /// pid that runs another process now, or whose start cannot be told, is
-    /// never signalled.
+    /// SIGKILL after [`TAKEOVER_GRACE`]; record `headless_job_stopped` with
+    /// the Execution of its agent ([`Self::taken_over_execution`]). A pid
+    /// that runs another process now, or whose start cannot be told, is
+    /// never signalled, and a job found gone is not recorded as an
+    /// Execution.
     fn take_over_job(&mut self, job: &HeadlessJobRecord) -> Result<()> {
         // A heartbeat gone stale while its process lives (every heartbeat
         // is old right after the host wakes from sleep) is waited for: that
@@ -1051,22 +1107,9 @@ impl Supervisor<'_> {
                 {
                     return Ok(());
                 }
-                let (descendants, killed) = self.stop_tree(job.pid, job.process_start.as_deref());
-                let payload = json!({
-                    "headless_job_id": job.id,
-                    "kind": job.kind,
-                    "label": job.label,
-                    "run_id": job.run_id,
-                    "proposal_id": job.proposal_id,
-                    "goal_id": job.goal_id,
-                    "attempt": job.attempt,
-                    "pid": job.pid,
-                    "process_start": job.process_start,
-                    "descendants": descendants,
-                    "killed": killed,
-                    "supervisor": job.supervisor_token,
-                    "started_at": job.started_at,
-                });
+                let stopped = self.stop_tree(job.pid, job.process_start.as_deref());
+                let ran = self.taken_over_execution(job);
+                let payload = taken_over_end(job, stopped, ran.as_ref().map(Option::as_ref));
                 info!(
                     "stopped the headless {} job {} (pid {}, attempt {}) that supervisor {} left running",
                     job.kind, job.id, job.pid, job.attempt, job.supervisor_token
@@ -1090,6 +1133,45 @@ impl Supervisor<'_> {
             }
         };
         self.queue.end_headless_job(job.id, outcome).map(|_| ())
+    }
+
+    /// The Execution of the agent of `job`, a gone supervisor's job this
+    /// one stopped (ADR-t1486-1), as the provider of its row reads it out
+    /// of the stdout the row names: `Some(None)` (not measured) when the
+    /// row names none or it cannot be read; `None` when it is a program
+    /// job, or an event already ended it with its Execution.
+    fn taken_over_execution(
+        &self,
+        job: &HeadlessJobRecord,
+    ) -> Option<Option<crate::domain::headless_job::JobSession>> {
+        let provider = job.provider.parse::<Provider>().ok()?;
+        let on = headless_job::JobOn {
+            kind: &job.kind,
+            run_id: job.run_id.as_ref(),
+            proposal_id: job.proposal_id,
+            goal_id: job.goal_id,
+            attempt: job.attempt,
+            started_at: job.started_at,
+        };
+        let ends = match &job.run_id {
+            Some(run) => self.queue.run_events(run),
+            None => on
+                .ending_kinds()
+                .into_iter()
+                .try_fold(Vec::new(), |mut all, kind| {
+                    all.extend(self.queue.latest_events_of(kind, TAKEOVER_ENDS_READ)?);
+                    Ok(all)
+                }),
+        };
+        match ends {
+            Ok(ends) if on.execution_recorded(&ends) => return None,
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the ends of headless job {} could not be read; its Execution is recorded: {error:#}", job.id);
+            }
+        }
+        let agent = self.job_agent(provider).unwrap_or(self.reviewer);
+        Some(taken_over_session(agent, &*self.files, job))
     }
 
     /// SIGTERM `pid` (whose process started at `start`) and its
@@ -1679,5 +1761,149 @@ mod tests {
         assert_eq!(started_at_ms(&clock), Some(1_700_000_000_123));
         let before = At(std::time::UNIX_EPOCH - Duration::from_secs(1));
         assert_eq!(started_at_ms(&before), None);
+    }
+
+    /// The `headless_job_stopped` of a gone supervisor's job this one
+    /// stopped says what it stopped and records the job's Execution under
+    /// the provider of its row: the tokens its stdout gave, or not
+    /// measured when its stdout was unknown, unreadable or gave none. A
+    /// program job, or one an end recorded already, gets none.
+    #[test]
+    fn a_taken_over_jobs_end_records_its_execution() {
+        use crate::domain::{
+            headless_job::JobSession,
+            tokens::{ExecutionTokens, TokenSource, TokenUsage},
+        };
+        let job = HeadlessJobRecord {
+            id: 9,
+            kind: headless_job::REVIEW.into(),
+            label: None,
+            run_id: Some(RunId::new("r1").unwrap()),
+            proposal_id: None,
+            goal_id: None,
+            attempt: 2,
+            provider: "codex".into(),
+            pid: 40,
+            process_start: Some("Sun Sep 27 10:00:00 2026".into()),
+            supervisor_token: LeaseToken::new("gone"),
+            supervisor_pid: None,
+            started_at: 1_700_000_000,
+            stdout: Some(PathBuf::from("/runs/r1/review-2.out")),
+        };
+        let measured = JobSession {
+            tokens: Some(ExecutionTokens {
+                tokens: Some(TokenUsage {
+                    input: 30,
+                    output: 5,
+                    ..TokenUsage::default()
+                }),
+                source: Some(TokenSource::UsageRecord),
+                ..ExecutionTokens::default()
+            }),
+            ..JobSession::default()
+        };
+        let end = taken_over_end(&job, (vec![41], vec![41]), Some(Some(&measured)));
+        assert_eq!(end["headless_job_id"], 9);
+        assert_eq!(end["kind"], "review");
+        assert_eq!(end["descendants"], json!([41]));
+        assert_eq!(end["supervisor"], "gone");
+        assert_eq!(end["provider"], "codex");
+        assert_eq!(end["tokens"]["input"], 30);
+        assert_eq!(end["tokens_source"], "token_usage_record");
+        for session in [None, Some(JobSession::default())] {
+            let end = taken_over_end(&job, (vec![], vec![]), Some(session.as_ref()));
+            assert!(end["tokens"].is_null(), "{end}");
+            assert!(end.get("tokens_source").is_some(), "{end}");
+            assert_eq!(end["tokens_reason"], "tokens_not_read");
+        }
+        // Recorded already: no second Execution.
+        let end = taken_over_end(&job, (vec![], vec![]), None);
+        assert!(end.get("tokens_source").is_none(), "{end}");
+        let program = HeadlessJobRecord {
+            kind: headless_job::REVIEW_PROGRAM.into(),
+            provider: headless_job::NO_PROVIDER.into(),
+            ..job
+        };
+        let end = taken_over_end(&program, (vec![], vec![]), None);
+        assert!(end.get("provider").is_none(), "{end}");
+        assert!(end.get("tokens_source").is_none(), "{end}");
+    }
+
+    /// A provider whose job's output is the number of input tokens it
+    /// used, read from when the job started.
+    struct Counting(Mutex<Option<i64>>);
+
+    impl AgentProvider for Counting {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn review_command(
+            &self,
+            _: &TaskRun,
+            _: &str,
+            _: crate::domain::headless_job::JobAccess,
+        ) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn job_session(
+            &self,
+            stdout: &str,
+            since: Option<i64>,
+        ) -> Option<crate::domain::headless_job::JobSession> {
+            use crate::domain::tokens::{ExecutionTokens, TokenSource, TokenUsage};
+            *self.0.lock().unwrap() = since;
+            Some(crate::domain::headless_job::JobSession {
+                tokens: Some(ExecutionTokens {
+                    tokens: Some(TokenUsage {
+                        input: stdout.trim().parse().ok()?,
+                        ..TokenUsage::default()
+                    }),
+                    source: Some(TokenSource::UsageRecord),
+                    ..ExecutionTokens::default()
+                }),
+                ..crate::domain::headless_job::JobSession::default()
+            })
+        }
+    }
+
+    /// The supervisor that stops a gone one's job reads its Execution out
+    /// of the stdout its row names, with the row's provider, from when the
+    /// row started (milliseconds); a row that names no stdout, or one that
+    /// cannot be read, gives none, which its end records as not measured.
+    #[test]
+    fn a_taken_over_jobs_session_is_read_from_the_stdout_its_row_names() {
+        let files = MemoryFiles::default();
+        let out = PathBuf::from("/runs/r1/review-2.out");
+        files.put(&out, std::time::SystemTime::UNIX_EPOCH, "42\n");
+        let job = HeadlessJobRecord {
+            id: 9,
+            kind: headless_job::REVIEW.into(),
+            label: None,
+            run_id: Some(RunId::new("r1").unwrap()),
+            proposal_id: None,
+            goal_id: None,
+            attempt: 2,
+            provider: "codex".into(),
+            pid: 40,
+            process_start: None,
+            supervisor_token: LeaseToken::new("gone"),
+            supervisor_pid: None,
+            started_at: 1_700_000_000,
+            stdout: Some(out),
+        };
+        let agent = Counting(Mutex::new(None));
+        let session = taken_over_session(&agent, &files, &job).unwrap();
+        let mut end = json!({});
+        crate::domain::headless_job::JobSession::record_execution(Some(&session), &mut end);
+        assert_eq!(end["tokens"]["input"], 42);
+        assert_eq!(end["tokens_source"], "token_usage_record");
+        assert_eq!(*agent.0.lock().unwrap(), Some(1_700_000_000_000));
+        for stdout in [None, Some(PathBuf::from("/runs/r1/missing.out"))] {
+            let job = HeadlessJobRecord {
+                stdout,
+                ..job.clone()
+            };
+            assert!(taken_over_session(&agent, &files, &job).is_none());
+        }
     }
 }

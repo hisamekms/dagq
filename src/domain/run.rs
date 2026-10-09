@@ -22,7 +22,7 @@ pub use history::{
     ReviseDecision, RunHistory, after_validation, decide_conflict, decide_revise, run_attention_of,
 };
 pub use payload::{
-    AskOpened, AttemptOf, AutoRepaired, ConcernDecided, ConflictPrecheck, NewStallNudged,
+    AskOpened, AttemptOf, AutoRepaired, ConcernDecided, ConflictPrecheck, JobEnd, NewStallNudged,
     NewStallResolved, RecoveryRecord, ReviewFinished, ReviseRequested, ReviseUnsent, StallNudged,
     StallResolved, TurnRequested, restore as restore_payload, review_verdict,
 };

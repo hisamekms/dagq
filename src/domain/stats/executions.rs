@@ -806,7 +806,8 @@ mod tests {
     /// review whose proposal moved on and for an adopted review's
     /// `review_failed` count as Executions: measured, in the executions
     /// and the sums; not measured, in `unmeasured`. A takeover's
-    /// `headless_job_stopped` records no Execution and is not counted.
+    /// `headless_job_stopped` with no Execution (written before it
+    /// recorded one) is not counted.
     #[test]
     fn jobs_stopped_moved_on_or_adopted_count_as_executions() {
         use crate::domain::{
@@ -873,7 +874,8 @@ mod tests {
                 ended(measured(), json!({"code": "job_failed", "adopted": true})),
                 at,
             ),
-            // A gone supervisor's job stopped by a takeover.
+            // A gone supervisor's job stopped by a takeover, before it
+            // recorded the Execution.
             event(
                 11,
                 run,
@@ -912,6 +914,93 @@ mod tests {
         assert_eq!(
             (&json["executions"], &json["unmeasured"], &json["total"]),
             (&json!(10), &json!(5), &json!(60))
+        );
+    }
+
+    /// The `headless_job_stopped` a supervisor writes for a gone one's job
+    /// it stopped counts as that job's Execution by its kind and the
+    /// provider of its row: measured, in the executions and the sums; not
+    /// measured (its stdout unknown or unreadable), in `unmeasured`. A
+    /// program job's records none and is not counted.
+    #[test]
+    fn a_taken_over_jobs_end_counts_as_its_execution() {
+        let run = Some("r1");
+        let at = "2026-10-01T09:00:00Z";
+        let taken_over = |kind: &str, provider: &str, execution: Value| {
+            let mut payload = json!({"headless_job_id": 7, "kind": kind, "pid": 4,
+                                     "descendants": [5], "killed": [], "provider": provider,
+                                     "supervisor": "gone", "started_at": 1_790_845_200});
+            if let (Some(payload), Some(execution)) =
+                (payload.as_object_mut(), execution.as_object())
+            {
+                payload.extend(execution.clone());
+            }
+            payload
+        };
+        let measured = json!({"tokens": tokens(30, 5), "tokens_source": "token_usage_record",
+                              "tokens_by_model": [], "model": "gpt-5"});
+        let unmeasured = json!({"tokens": null, "tokens_source": null,
+                                "tokens_reason": "tokens_not_read", "tokens_by_model": []});
+        let events = vec![
+            event(
+                1,
+                run,
+                "headless_job_stopped",
+                taken_over("review", "codex", measured.clone()),
+                at,
+            ),
+            event(
+                2,
+                None,
+                "headless_job_stopped",
+                taken_over("plan_review", "claude", unmeasured),
+                at,
+            ),
+            event(
+                3,
+                run,
+                "headless_job_stopped",
+                taken_over("recovery", "claude", measured),
+                at,
+            ),
+            event(
+                4,
+                run,
+                "headless_job_stopped",
+                taken_over("review_program", "none", json!({})),
+                at,
+            ),
+        ];
+        let all = executions(&events);
+        let read: Vec<(&str, &str)> = all.iter().map(|e| (e.actor, e.provider.as_str())).collect();
+        assert_eq!(
+            read,
+            [
+                ("review", "codex"),
+                ("plan_review", "claude"),
+                ("triage", "claude")
+            ]
+        );
+        let day = millis("2026-10-01T00:00:00Z");
+        let stats = window(&all, Some(day), day + DAY, |_| true);
+        assert_eq!(
+            (
+                stats.totals.executions,
+                stats.totals.unmeasured,
+                stats.totals.total
+            ),
+            (3, 1, 70)
+        );
+        let review = &stats.by_actor["review"].totals;
+        assert_eq!(
+            (review.executions, review.unmeasured, review.total),
+            (1, 0, 35)
+        );
+        // `kpi`'s `details.tokens` is this window as `stats` prints it.
+        let json = serde_json::to_value(&stats).unwrap();
+        assert_eq!(
+            (&json["executions"], &json["unmeasured"], &json["total"]),
+            (&json!(3), &json!(1), &json!(70))
         );
     }
 }

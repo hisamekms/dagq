@@ -291,6 +291,79 @@ pub fn takeover(alive: bool, recorded: Option<&str>, now: Option<&str>) -> Takeo
     }
 }
 
+/// The job of a gone supervisor another one stops: what it ran on, to
+/// tell the events that ended it already.
+#[derive(Debug, Clone, Copy)]
+pub struct JobOn<'a> {
+    /// Its `headless_jobs.kind`.
+    pub kind: &'a str,
+    pub run_id: Option<&'a super::RunId>,
+    pub proposal_id: Option<super::ProposalId>,
+    pub goal_id: Option<super::GoalId>,
+    /// Its attempt: an end that names another is another job's.
+    pub attempt: usize,
+    /// When its row was written, unix seconds.
+    pub started_at: i64,
+}
+
+impl JobOn<'_> {
+    /// The kinds of the events besides `headless_job_stopped` that end a
+    /// job of this kind with its Execution (ADR-t1486-1); none for a kind
+    /// that starts no agent.
+    fn end_kinds(&self) -> &'static [&'static str] {
+        use super::event_kind as k;
+        match self.kind {
+            REVIEW => &[k::REVIEW_FINISHED, k::REVIEW_FAILED, k::REVIEW_RETRIED],
+            RECOVERY => &[k::RECOVERY_FINISHED],
+            PLAN_REVIEW => &[
+                k::PLAN_REVIEW_FINISHED,
+                k::PLAN_REVIEW_FAILED,
+                k::PLAN_REVIEW_DISCARDED,
+            ],
+            GOAL_REVIEW => &[k::GOAL_REVIEW_FINISHED, k::GOAL_REVIEW_FAILED],
+            _ => &[],
+        }
+    }
+
+    /// The kinds of event [`Self::execution_recorded`] looks among: the
+    /// ends of this kind of job and `headless_job_stopped`.
+    pub fn ending_kinds(&self) -> Vec<&'static str> {
+        let mut kinds = self.end_kinds().to_vec();
+        kinds.push(super::event_kind::HEADLESS_JOB_STOPPED);
+        kinds
+    }
+
+    /// Whether one of `events` ended this job with its Execution recorded
+    /// (`tokens_source`), so that the supervisor that stops it does not
+    /// count it again: an end of its kind, on its run (else its proposal,
+    /// else its goal), of its attempt when the end names one, written no
+    /// earlier than the job started.
+    pub fn execution_recorded(&self, events: &[super::RunEvent]) -> bool {
+        events.iter().any(|event| {
+            let end: super::run::JobEnd<'_> = super::run::restore_payload(&event.payload);
+            let ends = if event.kind == super::event_kind::HEADLESS_JOB_STOPPED {
+                end.kind == Some(self.kind)
+            } else {
+                self.end_kinds().contains(&event.kind.as_str())
+            };
+            let on = match (self.run_id, self.proposal_id, self.goal_id) {
+                (Some(run), _, _) => event.run_id.as_ref() == Some(run),
+                (None, Some(proposal), _) => end.proposal_id == Some(proposal.as_i64()),
+                (None, None, Some(goal)) => {
+                    event.goal_id == Some(goal) || end.goal_id == Some(goal.as_i64())
+                }
+                (None, None, None) => true,
+            };
+            let attempt = end
+                .attempt
+                .is_none_or(|attempt| attempt == self.attempt as u64);
+            let since = super::stats::timestamp_millis(&event.created_at)
+                .is_some_and(|at| at >= self.started_at * 1000);
+            ends && on && attempt && since && end.execution
+        })
+    }
+}
+
 /// The descendants of `root` in `all` (children first, then theirs), not
 /// `root` itself.
 pub fn descendants(all: &[ProcessInfo], root: u32) -> Vec<u32> {
@@ -535,5 +608,128 @@ mod tests {
         for wall in [Wall::Authentication, Wall::UsageLimit] {
             assert_eq!(JobFailure::of_wall(wall).wall(), Some(wall));
         }
+    }
+
+    fn ending(
+        id: i64,
+        run: Option<&str>,
+        kind: &str,
+        payload: serde_json::Value,
+        at: &str,
+    ) -> crate::domain::RunEvent {
+        crate::domain::RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: run.map(|run| crate::domain::RunId::new(run).unwrap()),
+            kind: kind.to_owned(),
+            payload,
+            created_at: at.to_owned(),
+            actor: None,
+        }
+    }
+
+    /// A job a supervisor stops after its own is gone is counted again
+    /// only when no end of it recorded its Execution: an end of its kind
+    /// on its run (or proposal) since it started, with `tokens_source`.
+    /// An end before its start, on another run or proposal, of another
+    /// kind or attempt, or with no Execution leaves it to be counted.
+    #[test]
+    fn a_taken_over_job_is_counted_once() {
+        use serde_json::json;
+        let run = crate::domain::RunId::new("r1").unwrap();
+        // 2026-10-01T09:00:00Z
+        let started_at = 1_790_845_200;
+        let review = JobOn {
+            kind: REVIEW,
+            run_id: Some(&run),
+            proposal_id: None,
+            goal_id: None,
+            attempt: 2,
+            started_at,
+        };
+        let after = "2026-10-01T09:05:00Z";
+        let counted = json!({"tokens": null, "tokens_source": null});
+        assert!(review.execution_recorded(&[ending(
+            1,
+            Some("r1"),
+            "review_failed",
+            counted.clone(),
+            after
+        )]));
+        assert!(review.execution_recorded(&[ending(
+            1,
+            Some("r1"),
+            "headless_job_stopped",
+            json!({"kind": "review", "tokens_source": "model_usage"}),
+            after
+        )]));
+        for left in [
+            ending(
+                1,
+                Some("r1"),
+                "review_failed",
+                counted.clone(),
+                "2026-10-01T08:59:59Z",
+            ),
+            ending(1, Some("r2"), "review_failed", counted.clone(), after),
+            ending(
+                1,
+                Some("r1"),
+                "review_failed",
+                json!({"code": "job_failed"}),
+                after,
+            ),
+            ending(1, Some("r1"), "recovery_finished", counted.clone(), after),
+            // The end of the attempt before, written in the second the job
+            // started.
+            ending(
+                1,
+                Some("r1"),
+                "review_retried",
+                json!({"attempt": 1, "tokens_source": null}),
+                "2026-10-01T09:00:00.300Z",
+            ),
+            ending(
+                1,
+                Some("r1"),
+                "headless_job_stopped",
+                json!({"kind": "recovery", "tokens_source": null}),
+                after,
+            ),
+        ] {
+            assert!(
+                !review.execution_recorded(std::slice::from_ref(&left)),
+                "{left:?}"
+            );
+        }
+        let plan_review = JobOn {
+            kind: PLAN_REVIEW,
+            run_id: None,
+            proposal_id: Some(crate::domain::ProposalId::new(4)),
+            goal_id: None,
+            attempt: 1,
+            started_at,
+        };
+        let on = |proposal: i64| {
+            ending(
+                1,
+                None,
+                "plan_review_discarded",
+                json!({"proposal_id": proposal, "tokens_source": null}),
+                after,
+            )
+        };
+        assert!(plan_review.execution_recorded(&[on(4)]));
+        assert!(!plan_review.execution_recorded(&[on(5)]));
+        assert_eq!(
+            plan_review.ending_kinds(),
+            [
+                "plan_review_finished",
+                "plan_review_failed",
+                "plan_review_discarded",
+                "headless_job_stopped"
+            ]
+        );
     }
 }

@@ -383,6 +383,9 @@ pub struct NewHeadlessJob {
     /// [`ProcessControl::start_identity`] of `pid` just after the start.
     pub process_start: Option<String>,
     pub supervisor_token: LeaseToken,
+    /// The file its stdout goes to, where a supervisor that stops it after
+    /// its own is gone reads its agent's Execution (ADR-t1486-1).
+    pub stdout: Option<std::path::PathBuf>,
 }
 
 /// An unfinished `headless_jobs` row of a supervisor that is gone.
@@ -404,6 +407,8 @@ pub struct HeadlessJobRecord {
     /// The pid of that supervisor's registration, when it has one left.
     pub supervisor_pid: Option<u32>,
     pub started_at: i64,
+    /// [`NewHeadlessJob::stdout`]; `None` for a row written without it.
+    pub stdout: Option<std::path::PathBuf>,
 }
 
 /// The processes of the supervisor's headless jobs (task 443).

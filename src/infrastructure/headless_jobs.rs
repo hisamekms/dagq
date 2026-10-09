@@ -19,8 +19,8 @@ impl HeadlessJobStore for SqliteQueue {
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO headless_jobs(kind, label, run_id, proposal_id, goal_id, attempt, pid,
-                                       process_start, supervisor_token, started_at, provider)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                       process_start, supervisor_token, started_at, provider, stdout)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 job.kind,
                 job.label,
@@ -33,7 +33,10 @@ impl HeadlessJobStore for SqliteQueue {
                 job.supervisor_token,
                 now,
                 job.provider
-                    .map_or(headless_job::NO_PROVIDER, Provider::as_str)
+                    .map_or(headless_job::NO_PROVIDER, Provider::as_str),
+                job.stdout
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -64,7 +67,7 @@ impl HeadlessJobStore for SqliteQueue {
             .prepare(
                 "SELECT j.id, j.kind, j.label, j.run_id, j.proposal_id, j.goal_id, j.attempt,
                         j.pid, j.process_start, j.supervisor_token, j.started_at, s.pid,
-                        j.provider
+                        j.provider, j.stdout
                  FROM headless_jobs j
                  LEFT JOIN supervisors s ON s.token = j.supervisor_token
                  WHERE j.ended_at IS NULL
@@ -87,6 +90,9 @@ impl HeadlessJobStore for SqliteQueue {
                     started_at: r.get(10)?,
                     supervisor_pid: r.get(11)?,
                     provider: r.get(12)?,
+                    stdout: r
+                        .get::<_, Option<String>>(13)?
+                        .map(std::path::PathBuf::from),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
@@ -110,6 +116,7 @@ mod tests {
             pid,
             process_start: Some("Sun Sep 27 10:00:00 2026".into()),
             supervisor_token: token.clone(),
+            stdout: Some("/runs/run-1/review-2.out".into()),
         }
     }
 
@@ -259,6 +266,38 @@ mod tests {
                 row(codex, "review", "codex", None),
                 row(program, "review_program", "none", Some("check-docs")),
                 row(program + 1, "goal_review", "claude", None),
+            ]
+        );
+    }
+
+    /// A job's stdout reads back with its row, for the supervisor that
+    /// stops it to read its Execution; a row written without one (by an
+    /// older binary, or before the column) reads as none.
+    #[test]
+    fn a_job_records_where_its_stdout_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let token = LeaseToken::new("me");
+        queue.record_headless_job(&job(&token, 10)).unwrap();
+        queue
+            .conn
+            .execute(
+                "INSERT INTO headless_jobs(kind, attempt, pid, supervisor_token, started_at)
+                 VALUES ('goal_review', 1, 11, 'me', 0)",
+                [],
+            )
+            .unwrap();
+        let stdouts: Vec<_> = queue
+            .orphaned_headless_jobs(&token, true)
+            .unwrap()
+            .into_iter()
+            .map(|j| j.stdout)
+            .collect();
+        assert_eq!(
+            stdouts,
+            vec![
+                Some(std::path::PathBuf::from("/runs/run-1/review-2.out")),
+                None
             ]
         );
     }

@@ -88,7 +88,8 @@ fn job_rows(db: &Path) -> Vec<JobRow> {
 /// A supervisor died while the review of its run ran (the stub job never
 /// ends). The supervisor that adopts the run stops that job, the process
 /// the job started with it, before it starts its own review, and records
-/// `headless_job_stopped` with the pid, the kind and the run, and a
+/// `headless_job_stopped` with the pid, the kind, the run and the job's
+/// Execution, and a
 /// program job of the review (ADR-t1895-1 decision 1) the same way; only
 /// its own review runs then, and the run lands. A row of the dead
 /// supervisor whose
@@ -199,6 +200,11 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     assert_eq!(stopped[0]["attempt"], 1);
     assert_eq!(stopped[0]["supervisor"], "dead-supervisor");
     assert_eq!(stopped[0]["descendants"], json!([old_child]));
+    // The review's Execution is recorded, not measured: its row names no
+    // stdout. The program job ran no agent and records none.
+    assert!(stopped[0]["tokens"].is_null(), "{}", stopped[0]);
+    assert!(stopped[0].get("tokens_source").is_some(), "{}", stopped[0]);
+    assert!(stopped[1].get("tokens_source").is_none(), "{}", stopped[1]);
     // The old job was stopped before the adopter's review started, and only
     // that one review ran.
     let at = |kind: &str, attempt: i64| {
