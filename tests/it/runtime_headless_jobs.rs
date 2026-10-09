@@ -94,7 +94,8 @@ fn job_rows(db: &Path) -> Vec<JobRow> {
 /// its own review runs then, and the run lands. A row of the dead
 /// supervisor whose
 /// pid runs another process now (a pid used again) is closed without a
-/// signal, and one whose process is gone is only closed.
+/// signal, and one whose process is gone is closed, each with the
+/// Execution of its agent.
 #[test]
 fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     let (_dir, repo, db) = fixture();
@@ -139,15 +140,15 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     };
     // Another process that took the pid of a job of the dead supervisor.
     let other = orphan("sleep 120");
-    let insert = |kind: &str, pid: u32, start: &str| {
+    let insert = |kind: &str, attempt: i64, pid: u32, start: &str| {
         conn.execute(
             "INSERT INTO headless_jobs(kind, run_id, attempt, pid, process_start, supervisor_token, started_at)
-             VALUES (?1, ?2, 1, ?3, ?4, 'dead-supervisor', unixepoch())",
-            rusqlite::params![kind, run.id(), pid, start],
+             VALUES (?1, ?2, ?3, ?4, ?5, 'dead-supervisor', unixepoch())",
+            rusqlite::params![kind, run.id(), attempt, pid, start],
         )
         .unwrap();
     };
-    insert("review", old_job, &process_start(old_job));
+    insert("review", 1, old_job, &process_start(old_job));
     let program_job = orphan("sleep 120 & wait");
     conn.execute(
         "INSERT INTO headless_jobs(kind, label, run_id, attempt, pid, process_start, supervisor_token, started_at, provider)
@@ -155,8 +156,10 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
         rusqlite::params![run.id(), program_job, process_start(program_job)],
     )
     .unwrap();
-    insert("recovery", other, "Thu Jan  1 00:00:00 1970");
-    insert("recovery", u32::MAX / 2, "Thu Jan  1 00:00:00 1970");
+    insert("recovery", 1, other, "Thu Jan  1 00:00:00 1970");
+    // Another attempt: an end of the same job (kind, run and attempt)
+    // with its Execution would leave this one none to record.
+    insert("recovery", 2, u32::MAX / 2, "Thu Jan  1 00:00:00 1970");
     // A supervisor whose heartbeat went stale while its process lives (a
     // host that just woke up): its job is left to it.
     let asleep = orphan("sleep 120");
@@ -190,7 +193,7 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_landed(&repo, &detail.runs[0], "test task", &base);
     let stopped = payloads(&detail, "headless_job_stopped");
-    assert_eq!(stopped.len(), 2, "{:?}", event_kinds(&detail));
+    assert_eq!(stopped.len(), 4, "{:?}", event_kinds(&detail));
     assert_eq!(stopped[1]["pid"], program_job);
     assert_eq!(stopped[1]["kind"], "review_program");
     assert_eq!(stopped[1]["label"], "fmt");
@@ -205,6 +208,19 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     assert!(stopped[0]["tokens"].is_null(), "{}", stopped[0]);
     assert!(stopped[0].get("tokens_source").is_some(), "{}", stopped[0]);
     assert!(stopped[1].get("tokens_source").is_none(), "{}", stopped[1]);
+    // The recovery jobs not the job and gone were not stopped, and their
+    // ends record their Executions, not measured.
+    for (end, outcome, pid) in [
+        (&stopped[2], "not_the_job", other),
+        (&stopped[3], "gone", u32::MAX / 2),
+    ] {
+        assert_eq!(end["outcome"], outcome, "{end}");
+        assert_eq!(end["pid"], pid, "{end}");
+        assert_eq!(end["kind"], "recovery", "{end}");
+        assert_eq!(end["descendants"], json!([]), "{end}");
+        assert!(end["tokens"].is_null(), "{end}");
+        assert!(end.get("tokens_source").is_some(), "{end}");
+    }
     // The old job was stopped before the adopter's review started, and only
     // that one review ran.
     let at = |kind: &str, attempt: i64| {

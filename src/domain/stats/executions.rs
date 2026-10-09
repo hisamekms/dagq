@@ -1003,4 +1003,79 @@ mod tests {
             (&json!(3), &json!(1), &json!(70))
         );
     }
+
+    /// The `headless_job_stopped` a supervisor writes for a gone one's job
+    /// it found gone or not the job, which it did not stop, counts as that
+    /// job's Execution as a stopped one's does: measured, in the executions
+    /// and the sums; not measured, in `unmeasured`.
+    #[test]
+    fn a_gone_or_not_the_jobs_end_counts_as_its_execution() {
+        let run = Some("r1");
+        let at = "2026-10-01T09:00:00Z";
+        let closed = |kind: &str, outcome: &str, execution: Value| {
+            let mut payload = json!({"headless_job_id": 7, "kind": kind, "pid": 4,
+                                     "descendants": [], "killed": [], "provider": "claude",
+                                     "outcome": outcome, "supervisor": "gone",
+                                     "started_at": 1_790_845_200});
+            if let (Some(payload), Some(execution)) =
+                (payload.as_object_mut(), execution.as_object())
+            {
+                payload.extend(execution.clone());
+            }
+            payload
+        };
+        let measured = json!({"tokens": tokens(30, 5), "tokens_source": "model_usage",
+                              "tokens_by_model": []});
+        let unmeasured = json!({"tokens": null, "tokens_source": null,
+                                "tokens_reason": "tokens_not_read", "tokens_by_model": []});
+        let events = vec![
+            event(
+                1,
+                run,
+                "headless_job_stopped",
+                closed("review", "gone", measured.clone()),
+                at,
+            ),
+            event(
+                2,
+                run,
+                "headless_job_stopped",
+                closed("recovery", "gone", unmeasured.clone()),
+                at,
+            ),
+            event(
+                3,
+                None,
+                "headless_job_stopped",
+                closed("plan_review", "not_the_job", measured),
+                at,
+            ),
+            event(
+                4,
+                run,
+                "headless_job_stopped",
+                closed("review", "not_the_job", unmeasured),
+                at,
+            ),
+        ];
+        let all = executions(&events);
+        let read: Vec<&str> = all.iter().map(|e| e.actor).collect();
+        assert_eq!(read, ["review", "triage", "plan_review", "review"]);
+        let day = millis("2026-10-01T00:00:00Z");
+        let stats = window(&all, Some(day), day + DAY, |_| true);
+        assert_eq!(
+            (
+                stats.totals.executions,
+                stats.totals.unmeasured,
+                stats.totals.total
+            ),
+            (4, 2, 70)
+        );
+        // `kpi`'s `details.tokens` is this window as `stats` prints it.
+        let json = serde_json::to_value(&stats).unwrap();
+        assert_eq!(
+            (&json["executions"], &json["unmeasured"], &json["total"]),
+            (&json!(4), &json!(2), &json!(70))
+        );
+    }
 }

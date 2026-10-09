@@ -65,17 +65,17 @@ jobのpromptの渡し方（大きさに関係なくファイルかstdin）、載
 
 - supervisorはループの各passの先頭で（claim・adopt・triage・plan review・goal reviewがjobを立てる前に）、`orphaned_headless_jobs(token, own)`を読む。自分以外のtokenの未完了の行のうち、そのsupervisorが登録に無いか、heartbeatが`HEARTBEAT_TIMEOUT_SECS`（30秒）より古いものが対象。プロセスの起動の直後（execの後なら`rebuild_own_runs`の前）の1回だけは、自分のtokenの未完了の行も対象にする（execされたプロセスは前のbinaryのjobを知らない。handoffはexecの前にjobを止めるので、普通はもう居ない）。
 - 登録が残っていてheartbeatだけが古く、そのpidが生きているsupervisor（sleepから戻った直後のhostでは全員のheartbeatが古い）の行は、そのpassでは触らない（登録の無い行と、自分と同じpidの登録（in-processのtest）はこの検査をしない）。supervisorのpidが別のプロセスに再利用されていると、その行は閉じられないまま残る。
-- 行ごとに`domain::headless_job::takeover`で決める。pidが生きていなければ`gone`で閉じるだけ。生きていて、今の`start_identity`が記録した`process_start`と同じなら、そのjobのプロセスとして止める。違う（pidが別のプロセスに再利用された）か、どちらかの起動時刻が読めなければ、signalを送らずに`not_the_job`で閉じる。
+- 行ごとに`domain::headless_job::takeover`で決める。pidが生きていなければsignalを送らずに`gone`で閉じる。生きていて、今の`start_identity`が記録した`process_start`と同じなら、そのjobのプロセスとして止める。違う（pidが別のプロセスに再利用された）か、どちらかの起動時刻が読めなければ、signalを送らずに`not_the_job`で閉じる。
 - 止める前に行を`taken_over`で閉じる（`end_headless_job`が閉じたときだけ進むので、同時に引き継ぐ2つのsupervisorの片方だけがsignalを送る）。止め方（`stop_tree`）: 子孫とそれぞれの起動時刻を集め、jobと子孫にSIGTERMを送り、5秒（`TAKEOVER_GRACE`）まで消えるのを待ち（自分の子なら`reap`する）、残ったものにSIGKILLを送る。どちらのsignalも、そのpidの起動時刻が集めたときと同じときだけ送る（待つ間にpidが再利用されても触らない）。待ちはループの中で行うので、1行ごとに最大5秒passが止まる。`headless_job_stopped`（`headless_job_id`、`kind`、`label`、`run_id`、`proposal_id`、`goal_id`、`attempt`、`pid`、`process_start`、`descendants`、`killed`、`supervisor`、`started_at`、`agent`のjobは`provider`とExecution）を、runのjobならそのrunに、plan review / goal reviewならqueueのevent（`EventKind::is_queue`）に記録する（記録の失敗はlogだけ）。
 - `agent`のjobの`headless_job_stopped`は、止めた後に行の`stdout`を行の`provider`で読んだExecutionを持つ（`Supervisor::taken_over_execution`。[Executionのトークン数](../execution-tokens.md#記録の形)）。
   読めなければ未計測で、同じjobの終わりのeventが既にExecutionを持てば足さない。
-  `gone`と`not_the_job`はeventを書かず、Executionも記録しない。
+  `gone`と`not_the_job`も、行を閉じた後に同じくExecutionを読み、記録するものがあるときだけ止めずに`headless_job_stopped`（`descendants`と`killed`は空）を書く（`close_taken_over`）。
 - 判断は`kind`と`provider`を見ないので、`program`のjob（`review_program`）も`agent`のjobと同じ判断で止め、`headless_job_stopped`の`kind`と`label`がその種類とプログラムを示す。
 - その後で、adoptしたrunのreviewや復旧job、`begin_plan_review` / `begin_goal_review`が`interrupted`にした行のやり直しが新しいjobを立てるので、同じ入力のjobは1つだけが走る。
 
 ## test
 
-`tests/it/runtime_headless_jobs.rs`: 死んだsupervisorのreviewの途中のrun（終わらないstubのjobとその子を`headless_jobs`に記録）を別のsupervisorがadoptすると、自分のreviewを立てる前に前のjobとその子を止めて`headless_job_stopped`を残し、reviewは1回だけ走って着地すること、pidが別のプロセスになった行はsignalを送らずに`not_the_job`、プロセスの無い行は`gone`で閉じ、heartbeatが古くてもpidの生きているsupervisorの行は触らないこと。timeoutしたreviewのbackgroundの子が残らず、行が`stopped`になること。表の読み書きは`src/infrastructure/headless_jobs.rs`、判定と子孫の辿り方は`src/domain/headless_job.rs`、起動時刻の読み方は`src/infrastructure/adapters.rs`のunit test。
+`tests/it/runtime_headless_jobs.rs`: 死んだsupervisorのreviewの途中のrun（終わらないstubのjobとその子を`headless_jobs`に記録）を別のsupervisorがadoptすると、自分のreviewを立てる前に前のjobとその子を止めて`headless_job_stopped`を残し、reviewは1回だけ走って着地すること、pidが別のプロセスになった行はsignalを送らずに`not_the_job`、プロセスの無い行は`gone`で閉じて、どちらもagentのjobはExecutionを持つ`headless_job_stopped`を残し、heartbeatが古くてもpidの生きているsupervisorの行は触らないこと。timeoutしたreviewのbackgroundの子が残らず、行が`stopped`になること。表の読み書きは`src/infrastructure/headless_jobs.rs`、判定と子孫の辿り方は`src/domain/headless_job.rs`、起動時刻の読み方は`src/infrastructure/adapters.rs`のunit test。
 timeoutしたreviewの上限は`[review.jobs] agent_timeout_secs`から読む（providerの上限より短く置く）。
 死んだsupervisorの`review_program`の行も、同じadoptで`agent`のjobと同じく止めること。
 `program`のjobが`review_program`・プログラムの名前・`provider`の`none`で記録され、終われば`ended`、timeoutなら子孫から外れた孫も含めてprocess groupごと止まって`stopped`になること。

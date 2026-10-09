@@ -24,8 +24,9 @@ use std::sync::Mutex;
 const TAKEOVER_GRACE: Duration = Duration::from_secs(5);
 
 /// How many of the newest events of each kind that ends a job a supervisor
-/// that stops a gone one's job with no run reads, to tell whether one
-/// ended it with its Execution already.
+/// that closes a gone one's job with no run (stopped, found gone or not
+/// the job) reads, to tell whether one ended it with its Execution
+/// already.
 const TAKEOVER_ENDS_READ: usize = 50;
 
 /// The ends of this process's headless jobs not written to the queue yet:
@@ -109,7 +110,8 @@ pub(super) fn abandoned_end(
 }
 
 /// The `headless_job_stopped` of `job`, a gone supervisor's job this one
-/// stopped, with the processes it signalled (`descendants`) and killed:
+/// stopped or found gone or not the job ([`close_taken_over`]), with the
+/// processes it signalled (`descendants`) and killed:
 /// with the Execution its agent was (ADR-t1486-1) when `ran` is `Some`,
 /// `session` or not measured; without for a program job or one an event
 /// ended with its Execution already.
@@ -140,6 +142,47 @@ pub(super) fn taken_over_end(
         crate::domain::headless_job::JobSession::record_execution(session, &mut payload);
     }
     payload
+}
+
+/// Close the row of `job`, a gone supervisor's job judged `judged`, with
+/// `end` (the row's outcome; `false` when another supervisor closed it
+/// first, which then records its end), and give the `headless_job_stopped`
+/// to record: the job is closed first, so of two supervisors taking over
+/// at once only one signals it, then `stop`ped only when its pid runs its
+/// process ([`Takeover::Stop`]), and its agent's Execution read
+/// (`execution`, as [`taken_over_end`] takes it). A job found gone or not
+/// the job (its pid runs another process, or its start cannot be told) is
+/// never stopped and gets an end only for an Execution to record; that of
+/// a job not the job, which may run still, is its output so far.
+pub(super) fn close_taken_over(
+    job: &HeadlessJobRecord,
+    judged: Takeover,
+    end: impl FnOnce(&'static str) -> Result<bool>,
+    stop: impl FnOnce() -> (Vec<u32>, Vec<u32>),
+    execution: impl FnOnce() -> Option<Option<crate::domain::headless_job::JobSession>>,
+) -> Result<Option<Value>> {
+    let outcome = match judged {
+        Takeover::Gone => headless_job::GONE,
+        Takeover::NotTheJob => headless_job::NOT_THE_JOB,
+        Takeover::Stop => headless_job::TAKEN_OVER,
+    };
+    if !end(outcome)? {
+        return Ok(None);
+    }
+    let stopped = if judged == Takeover::Stop {
+        stop()
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let ran = execution();
+    if judged != Takeover::Stop && ran.is_none() {
+        return Ok(None);
+    }
+    let mut payload = taken_over_end(job, stopped, ran.as_ref().map(Option::as_ref));
+    // The row's outcome, to tell a job stopped (`taken_over`) from one
+    // closed with no signal (`gone`, `not_the_job`).
+    payload["outcome"] = json!(outcome);
+    Ok(Some(payload))
 }
 
 /// What `agent` (the provider of `job`'s row) reads out of the stdout the
@@ -1060,13 +1103,14 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Stop the job of a gone supervisor when its pid still runs the job's
+    /// Close the row of a gone supervisor's job by what its pid runs now
+    /// ([`close_taken_over`]): stop it when its pid still runs the job's
     /// process (the same start), with its descendants: SIGTERM, then
-    /// SIGKILL after [`TAKEOVER_GRACE`]; record `headless_job_stopped` with
-    /// the Execution of its agent ([`Self::taken_over_execution`]). A pid
-    /// that runs another process now, or whose start cannot be told, is
-    /// never signalled, and a job found gone is not recorded as an
-    /// Execution.
+    /// SIGKILL after [`TAKEOVER_GRACE`]. A pid that runs another process
+    /// now, or whose start cannot be told, is never signalled. Record
+    /// `headless_job_stopped` with the Execution of its agent
+    /// ([`Self::taken_over_execution`]); a job found gone or not the job
+    /// gets one only to record that Execution.
     fn take_over_job(&mut self, job: &HeadlessJobRecord) -> Result<()> {
         // A heartbeat gone stale while its process lives (every heartbeat
         // is old right after the host wakes from sleep) is waited for: that
@@ -1084,59 +1128,54 @@ impl Supervisor<'_> {
         } else {
             None
         };
-        let outcome = match takeover(alive, job.process_start.as_deref(), start.as_deref()) {
-            Takeover::Gone => headless_job::GONE,
-            Takeover::NotTheJob => {
-                info!(
-                    "headless {} job {} of supervisor {}: pid {} runs another process now (started {}, the job's {}); it is left alone",
-                    job.kind,
-                    job.id,
-                    job.supervisor_token,
-                    job.pid,
-                    start.as_deref().unwrap_or("unknown"),
-                    job.process_start.as_deref().unwrap_or("unknown")
-                );
-                headless_job::NOT_THE_JOB
-            }
-            Takeover::Stop => {
-                // Closed first, so of two supervisors taking over at once
-                // only one signals the job.
-                if !self
-                    .queue
-                    .end_headless_job(job.id, headless_job::TAKEN_OVER)?
-                {
-                    return Ok(());
-                }
+        let judged = takeover(alive, job.process_start.as_deref(), start.as_deref());
+        if judged == Takeover::NotTheJob {
+            info!(
+                "headless {} job {} of supervisor {}: pid {} runs another process now (started {}, the job's {}); it is left alone",
+                job.kind,
+                job.id,
+                job.supervisor_token,
+                job.pid,
+                start.as_deref().unwrap_or("unknown"),
+                job.process_start.as_deref().unwrap_or("unknown")
+            );
+        }
+        let payload = close_taken_over(
+            job,
+            judged,
+            |outcome| self.queue.end_headless_job(job.id, outcome),
+            || {
                 let stopped = self.stop_tree(job.pid, job.process_start.as_deref());
-                let ran = self.taken_over_execution(job);
-                let payload = taken_over_end(job, stopped, ran.as_ref().map(Option::as_ref));
                 info!(
                     "stopped the headless {} job {} (pid {}, attempt {}) that supervisor {} left running",
                     job.kind, job.id, job.pid, job.attempt, job.supervisor_token
                 );
-                let recorded = match &job.run_id {
-                    Some(run) => self.queue.record_runtime_event(
-                        run,
-                        EventKind::HeadlessJobStopped,
-                        payload.clone(),
-                    ),
-                    None => Err(anyhow!("no run")),
-                };
-                if recorded.is_err()
-                    && let Err(error) = self
-                        .queue
-                        .record_queue_event(EventKind::HeadlessJobStopped, payload)
-                {
-                    warn!(error = %format_args!("{error:#}"), "the stop of headless job {} could not be recorded: {error:#}", job.id);
-                }
-                return Ok(());
-            }
+                stopped
+            },
+            || self.taken_over_execution(job),
+        )?;
+        let Some(payload) = payload else {
+            return Ok(());
         };
-        self.queue.end_headless_job(job.id, outcome).map(|_| ())
+        let recorded = match &job.run_id {
+            Some(run) => {
+                self.queue
+                    .record_runtime_event(run, EventKind::HeadlessJobStopped, payload.clone())
+            }
+            None => Err(anyhow!("no run")),
+        };
+        if recorded.is_err()
+            && let Err(error) = self
+                .queue
+                .record_queue_event(EventKind::HeadlessJobStopped, payload)
+        {
+            warn!(error = %format_args!("{error:#}"), "the end of headless job {} could not be recorded: {error:#}", job.id);
+        }
+        Ok(())
     }
 
     /// The Execution of the agent of `job`, a gone supervisor's job this
-    /// one stopped (ADR-t1486-1), as the provider of its row reads it out
+    /// one closed (ADR-t1486-1), as the provider of its row reads it out
     /// of the stdout the row names: `Some(None)` (not measured) when the
     /// row names none or it cannot be read; `None` when it is a program
     /// job, or an event already ended it with its Execution.
@@ -1827,6 +1866,120 @@ mod tests {
         let end = taken_over_end(&program, (vec![], vec![]), None);
         assert!(end.get("provider").is_none(), "{end}");
         assert!(end.get("tokens_source").is_none(), "{end}");
+    }
+
+    /// A gone supervisor's agent job found gone, or not the job (its pid
+    /// runs another process, or its start cannot be told), is closed with
+    /// its outcome and never stopped, and its end records its Execution:
+    /// the tokens its output gave, or not measured. One whose Execution an
+    /// end recorded already, or a program job (no provider to read it),
+    /// gets no end; nor does a row another supervisor closed first, which
+    /// is neither stopped nor read.
+    #[test]
+    fn a_gone_or_not_the_jobs_end_records_its_execution_and_is_not_stopped() {
+        use crate::domain::{
+            headless_job::JobSession,
+            tokens::{ExecutionTokens, TokenSource, TokenUsage},
+        };
+        use std::cell::{Cell, RefCell};
+        let job = HeadlessJobRecord {
+            id: 9,
+            kind: headless_job::RECOVERY.into(),
+            label: None,
+            run_id: Some(RunId::new("r1").unwrap()),
+            proposal_id: None,
+            goal_id: None,
+            attempt: 1,
+            provider: "claude".into(),
+            pid: 40,
+            process_start: Some("Sun Sep 27 10:00:00 2026".into()),
+            supervisor_token: LeaseToken::new("gone"),
+            supervisor_pid: None,
+            started_at: 1_700_000_000,
+            stdout: Some(PathBuf::from("/runs/r1/recovery-1.out")),
+        };
+        let measured = JobSession {
+            tokens: Some(ExecutionTokens {
+                tokens: Some(TokenUsage {
+                    input: 30,
+                    output: 5,
+                    ..TokenUsage::default()
+                }),
+                source: Some(TokenSource::ModelUsage),
+                ..ExecutionTokens::default()
+            }),
+            ..JobSession::default()
+        };
+        let close = |judged: Takeover,
+                     closed: bool,
+                     ran: Option<Option<JobSession>>|
+         -> (Option<Value>, Vec<&'static str>, bool) {
+            let ends = RefCell::new(Vec::new());
+            let stopped = Cell::new(false);
+            let payload = close_taken_over(
+                &job,
+                judged,
+                |outcome| {
+                    ends.borrow_mut().push(outcome);
+                    Ok(closed)
+                },
+                || {
+                    stopped.set(true);
+                    (vec![41], vec![])
+                },
+                || ran,
+            )
+            .unwrap();
+            (payload, ends.into_inner(), stopped.get())
+        };
+        for (judged, outcome) in [
+            (Takeover::Gone, headless_job::GONE),
+            (Takeover::NotTheJob, headless_job::NOT_THE_JOB),
+        ] {
+            let (end, ends, stopped) = close(judged, true, Some(Some(measured.clone())));
+            let end = end.expect("an end with the Execution");
+            assert_eq!(ends, [outcome]);
+            assert!(!stopped, "{outcome}: stop_tree was called");
+            assert_eq!(end["outcome"], outcome);
+            assert_eq!(end["headless_job_id"], 9);
+            assert_eq!(end["kind"], "recovery");
+            assert_eq!(end["provider"], "claude");
+            assert_eq!(end["descendants"], json!([]));
+            assert_eq!(end["killed"], json!([]));
+            assert_eq!(end["tokens"]["input"], 30);
+            assert_eq!(end["tokens_source"], "model_usage");
+            for session in [None, Some(JobSession::default())] {
+                let (end, _, stopped) = close(judged, true, Some(session));
+                let end = end.expect("an end, not measured");
+                assert!(!stopped, "{outcome}: stop_tree was called");
+                assert!(end["tokens"].is_null(), "{end}");
+                assert!(end.get("tokens_source").is_some(), "{end}");
+                assert_eq!(end["tokens_reason"], "tokens_not_read");
+            }
+            // Recorded already, or a program job: the row is only closed.
+            let (end, ends, stopped) = close(judged, true, None);
+            assert!(end.is_none(), "{end:?}");
+            assert_eq!(ends, [outcome]);
+            assert!(!stopped);
+            // Closed by another supervisor first: no end, nothing read.
+            let (end, _, stopped) = close(judged, false, Some(Some(measured.clone())));
+            assert!(end.is_none(), "{end:?}");
+            assert!(!stopped);
+        }
+        assert!(headless_job::NO_PROVIDER.parse::<Provider>().is_err());
+        // A job its pid still runs is stopped, and its end records its
+        // Execution or, recorded already, none.
+        let (end, ends, stopped) = close(Takeover::Stop, true, Some(Some(measured)));
+        let end = end.unwrap();
+        assert_eq!(ends, [headless_job::TAKEN_OVER]);
+        assert!(stopped);
+        assert_eq!(end["outcome"], "taken_over");
+        assert_eq!(end["descendants"], json!([41]));
+        assert_eq!(end["tokens"]["input"], 30);
+        let (end, _, _) = close(Takeover::Stop, true, None);
+        assert!(end.unwrap().get("tokens_source").is_none());
+        let (end, _, stopped) = close(Takeover::Stop, false, None);
+        assert!(end.is_none() && !stopped);
     }
 
     /// A provider whose job's output is the number of input tokens it

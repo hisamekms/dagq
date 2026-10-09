@@ -268,7 +268,7 @@ impl JobSession {
 /// gone supervisor, from what `ps` says of the pid now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Takeover {
-    /// The pid runs no process: the row is only closed.
+    /// The pid runs no process: the row is closed, with no signal.
     Gone,
     /// The pid runs the job's process (the same start): it and its
     /// descendants are stopped.
