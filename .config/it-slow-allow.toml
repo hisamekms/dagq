@@ -321,8 +321,8 @@ task = 1707
 # 5.628s, class D
 [[test]]
 name = "runtime_evidence::the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_none"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: e2e need from diff paths; pure"
-task = 1707
+reason = "B 境界（守る境界）: supervisor wiring that reads [e2e] paths of the main checkout's dagq.toml and the git diff into validation_finished; the judgement is in domain::validation unit tests"
+task = 1718
 
 # 5.087s, class R
 [[test]]
@@ -378,17 +378,11 @@ name = "runtime_integrate::a_refused_renumbering_commit_is_undone_and_needs_a_se
 reason = "B 境界（守る境界）: git commit refusal and undo"
 task = 1707
 
-# 5.224s, the median of 5 stress runs at load 15-18 (task 1632 only added a field to its NewTask literal), class D
-[[test]]
-name = "runtime_landing_answers::a_land_answer_is_applied_while_another_run_integrates"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: integration slot rule"
-task = 1632
-
 # 5.943s, class D
 [[test]]
 name = "runtime_landing_answers::a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: answer application vs slot ordering"
-task = 1707
+reason = "B 境界（守る境界）: supervisor wiring that applies the answer to SQLite while a slot is held and lands the queued run before the next claim; the judgement is in supervise::landing unit tests"
+task = 1718
 
 # 9.576s, class D
 [[test]]
@@ -531,26 +525,20 @@ task = 1707
 # 5.317s, class D
 [[test]]
 name = "runtime_stale_receipt::a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: nudge on resume phase"
-task = 1707
-
-# 6.099s, class D
-[[test]]
-name = "runtime_stale_receipt::a_resumed_session_that_leaves_the_old_receipt_ends_its_attempt_as_before"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: attempt outcome unresolved"
-task = 1707
+reason = "B 境界（守る境界）: supervisor wiring that types the rewrite request once into a resumed session and lands the rewritten receipt; the judgement is in supervise::stale unit tests"
+task = 1718
 
 # 6.768s, class D
 [[test]]
 name = "runtime_stale_receipt::a_stale_receipt_left_during_a_wait_is_unchanged"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: outcome judgement across wait"
-task = 1707
+reason = "B 境界（守る境界）: supervisor wiring of a stale request across a wait outside the slot and the return; the outcome judgement is in supervise::stale unit tests, the clock restart is resume.rs (goal 100 task 1557/1558)"
+task = 1718
 
 # 5.873s, class D
 [[test]]
 name = "runtime_stale_receipt::a_stale_receipt_rewritten_during_a_wait_is_rewritten"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: outcome judgement across wait"
-task = 1707
+reason = "B 境界（守る境界）: supervisor wiring of the resume's clock restart on the return from a wait (resume.rs restart_clocks, goal 100 task 1557/1558 owns its move), which keeps when the request was typed; the outcome judgement is in supervise::stale unit tests"
+task = 1718
 
 # 5.627s, class B
 [[test]]

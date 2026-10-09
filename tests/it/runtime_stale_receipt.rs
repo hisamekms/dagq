@@ -118,20 +118,6 @@ fn a_stale_receipt_left_as_it_is_goes_on_as_before() {
     );
 }
 
-/// A session whose receipt already names its HEAD is not asked.
-#[test]
-fn a_receipt_for_the_head_is_not_asked_to_be_rewritten() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert!(nudges(&detail.runs[0]).is_empty());
-    assert!(payloads(&detail, "stale_receipt_nudged").is_empty());
-}
-
 /// Task 205 itself: the resumed session rebased onto main (a clean head on
 /// top of it) and went idle with the receipt still naming the old commit.
 /// Asked once, it rewrites the receipt and the attempt resolves the run,
@@ -177,38 +163,12 @@ fn a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once() 
 const RESOLVES_ON_THE_SECOND_ATTEMPT: &str = "await_message; mark=\"$(dirname \"$RECEIPT\")/attempted\"\n\
     if [ -f \"$mark\" ]; then receipt \"$(git rev-parse HEAD)\"; else : > \"$mark\"; resolve; fi";
 
-/// A resumed session that answers the request without rewriting the receipt
-/// ends its attempt as before (unresolved); the next attempt is asked anew
-/// only if it leaves a stale receipt again, which this one does not.
-#[test]
-fn a_resumed_session_that_leaves_the_old_receipt_ends_its_attempt_as_before() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let (_run, first_landed) = parked_conflict(&repo, &db, &backend);
-    backend.resume_script_for(2, &on_nudge(":", RESOLVES_ON_THE_SECOND_ATTEMPT));
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert_eq!(nudges(&detail.runs[0]).len(), 1);
-    assert_eq!(
-        payloads(&detail, "stale_receipt_resolved"),
-        [&json!({"phase": "resume", "attempt": 1, "outcome": "unchanged"})]
-    );
-    let finished = payloads(&detail, "resume_finished");
-    assert_eq!(finished.len(), 2, "{:?}", event_kinds(&detail));
-    assert_eq!(finished[0]["outcome"], "unresolved");
-    assert_eq!(finished[1]["outcome"], "resolved");
-}
-
 /// A resumed session asked to rewrite its stale receipt that asks a
 /// `worker_question` right after the request and waits for the answer
 /// outside its slot. `rewrite` says whether it rewrites the receipt during
 /// that wait; left as it was, the attempt ends unresolved and the next one
-/// resolves the run. Returns the `stale_receipt_resolved` payloads of the run.
-fn stale_request_across_a_wait(rewrite: bool) -> Vec<Value> {
+/// resolves the run. Returns the run's events once it landed.
+fn stale_request_across_a_wait(rewrite: bool) -> dagq::domain::TaskDetail {
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -283,29 +243,35 @@ esac"#
         settled_ms < 60_000,
         "settled {settled_ms} ms after the answer"
     );
-    payloads(&detail, "stale_receipt_resolved")
-        .into_iter()
-        .cloned()
-        .collect()
+    detail
 }
 
 /// A receipt rewritten while the run waited for the answer to its
 /// question counts as `rewritten` once it is back in its slot: the return
-/// restarts the request's clock (ADR-0071 decision 15), but the outcome is
-/// judged from when the request was typed.
+/// restarts the request's clock (ADR-0071 decision 15) but not when it was
+/// typed, from which the outcome is judged (`stale::tests`). This keeps the
+/// wiring of that restart in the resume.
 #[test]
 fn a_stale_receipt_rewritten_during_a_wait_is_rewritten() {
+    let detail = stale_request_across_a_wait(true);
     assert_eq!(
-        stale_request_across_a_wait(true),
-        [json!({"phase": "resume", "attempt": 1, "outcome": "rewritten"})]
+        payloads(&detail, "stale_receipt_resolved"),
+        [&json!({"phase": "resume", "attempt": 1, "outcome": "rewritten"})]
     );
 }
 
-/// A receipt left as it was across the wait stays `unchanged`.
+/// A receipt left as it was across the wait stays `unchanged`: the attempt
+/// ends unresolved without being asked again, and the next attempt
+/// resolves the run.
 #[test]
 fn a_stale_receipt_left_during_a_wait_is_unchanged() {
+    let detail = stale_request_across_a_wait(false);
     assert_eq!(
-        stale_request_across_a_wait(false),
-        [json!({"phase": "resume", "attempt": 1, "outcome": "unchanged"})]
+        payloads(&detail, "stale_receipt_resolved"),
+        [&json!({"phase": "resume", "attempt": 1, "outcome": "unchanged"})]
     );
+    let finished = payloads(&detail, "resume_finished");
+    assert_eq!(finished.len(), 2, "{:?}", event_kinds(&detail));
+    assert_eq!(finished[0]["outcome"], "unresolved");
+    assert_eq!(finished[1]["outcome"], "resolved");
 }

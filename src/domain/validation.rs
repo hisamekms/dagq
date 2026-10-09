@@ -718,6 +718,59 @@ mod tests {
         assert!(rejection.scope_violation.is_empty());
     }
 
+    /// A required check the receipt reports as `failed` is missing
+    /// evidence, which parks the run for a session to add it, not a
+    /// failure; the same receipt for a task that does not require it fails.
+    #[test]
+    fn a_required_check_reported_failed_is_missing_evidence() {
+        let receipt = serde_json::json!({
+            "run_id": "r1",
+            "result": "succeeded",
+            "commit": HEAD,
+            "tests": {"status": "failed", "evidence_or_reason": "a test failed"},
+            "e2e": {"status": "not_applicable", "evidence_or_reason": "no cmux"},
+            "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+            "summary": "done",
+        })
+        .to_string();
+        let world = World {
+            receipt: Some(receipt),
+            ..sound()
+        };
+        let (asked, verdict) = run(&world, &[EvidenceCheck::Tests], &[]);
+        assert_eq!(asked, ALL[..5]);
+        let parked = rejection(verdict);
+        assert_eq!(parked.code, ReasonCode::EvidenceMissing);
+        assert_eq!(parked.evidence_missing, [EvidenceCheck::Tests]);
+        assert_eq!(parked.reason, "evidence missing: tests");
+        assert_eq!(parked.commit, Some(sha(HEAD)));
+        let (_, verdict) = run(&world, &[], &[]);
+        assert_eq!(rejection(verdict).code, ReasonCode::EvidenceFailed);
+    }
+
+    /// A receipt with the required `tests` evidence is accepted as it would
+    /// be without a requirement, and a task's `e2e` asks no evidence of it:
+    /// it is recorded as the task's requirement for the runtime to run.
+    #[test]
+    fn required_evidence_present_is_accepted_and_the_task_e2e_recorded() {
+        let world = World {
+            receipt: Some(receipt_text("r1", "succeeded", "not_applicable")),
+            ..sound()
+        };
+        let ((asked, verdict), requirement) = run_with_e2e(
+            &world,
+            &[EvidenceCheck::E2e, EvidenceCheck::Tests],
+            &[],
+            &[],
+        );
+        assert_eq!(asked, ALL[..5]);
+        assert_eq!(verdict, Judgement::Accept(sha(HEAD)));
+        assert_eq!(
+            serde_json::to_value(requirement.unwrap()).unwrap(),
+            serde_json::json!({"required": true, "source": "task"})
+        );
+    }
+
     #[test]
     fn the_receipt_is_handed_on_only_when_it_parsed() {
         let id = RunId::new("r1").unwrap();

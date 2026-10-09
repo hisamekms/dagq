@@ -114,87 +114,6 @@ fn missing_required_evidence_parks_the_run_for_a_resumed_session() {
     assert_eq!(landed["outcome"], "integrated", "{landed}");
 }
 
-/// A required check the receipt reports as `failed` is missing evidence
-/// too: the run waits for a session instead of failing, and a resume that
-/// reruns the check brings it to `awaiting_integration`.
-#[test]
-fn a_required_check_reported_failed_parks_the_run_instead_of_failing_it() {
-    let (_dir, repo, db) = evidence_fixture(&[EvidenceCheck::Tests]);
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        &format!(
-            "{RECEIPT_TESTS}commit work; receipt_tests \"$(git rev-parse HEAD)\" failed 'a test failed'"
-        ),
-    );
-    backend.resume_script_for(
-        2,
-        &format!(
-            "{RECEIPT_TESTS}await_message; receipt_tests \"$(git rev-parse HEAD)\" passed 'tests: 5 passed'; idle; await_exit"
-        ),
-    );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(2))
-        .unwrap();
-    let validated = payloads(&detail, "validation_finished");
-    assert_eq!(validated[0]["status"], "needs_session");
-    assert_eq!(validated[0]["reason"], "evidence missing: tests");
-    assert_eq!(
-        payloads(&detail, "evidence_missing"),
-        [
-            &json!({"code": "evidence_missing", "checks": ["tests"], "reason": "evidence missing: tests"})
-        ]
-    );
-    assert_eq!(
-        payloads(&detail, "resume_finished")[0]["outcome"],
-        "resolved"
-    );
-    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-}
-
-/// With the required evidence in the first receipt, validation accepts the
-/// run as it would without a requirement. A task's `e2e` is no evidence
-/// the receipt backs: the runtime runs it after the review (ADR-t1233-2).
-#[test]
-fn required_evidence_present_in_the_receipt_awaits_integration() {
-    let (_dir, repo, db) = evidence_fixture(&[EvidenceCheck::E2e, EvidenceCheck::Tests]);
-    let backend = TestWorkspace::new(
-        &db,
-        false,
-        &format!(
-            "{RECEIPT_TESTS}commit work; receipt_tests \"$(git rev-parse HEAD)\" passed 'tests: 3 passed'"
-        ),
-    );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(2))
-        .unwrap();
-    let run = &detail.runs[0];
-    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-    let prompt = read_prompt(run);
-    assert!(prompt.contains("Required evidence: tests ("), "{prompt}");
-    assert!(prompt.contains("E2E: do not run the e2e"), "{prompt}");
-    assert!(!event_kinds(&detail).contains(&"evidence_missing"));
-    let validated = payloads(&detail, "validation_finished");
-    assert!(
-        !validated[0]
-            .as_object()
-            .unwrap()
-            .contains_key("evidence_missing")
-    );
-    assert_eq!(
-        validated[0]["e2e_requirement"],
-        json!({"required": true, "source": "task"})
-    );
-}
-
 /// A resumed session that comes back without the evidence has not resolved
 /// the run: every attempt is `unresolved`, and once the resumes are used up
 /// the run is `failed` and goes to its recovery job (`resume_exhausted`),
@@ -262,56 +181,46 @@ fn with_e2e_paths(repo: &Path, globs: &str) {
     git(repo, &["commit", "-q", "-m", "e2e paths"]);
 }
 
-/// Whether a run needs the e2e is read from its diff against `[e2e]
-/// paths` and from its task (ADR-t963-1 decision 2) and recorded with its
-/// validation, but no receipt backs it: the runtime runs it after the
-/// review (ADR-t1233-2). A receipt reporting `e2e` `not_applicable` is
-/// accepted at once whether the run needs it or not, and the worker is
-/// told not to run it.
+/// Whether a run needs the e2e is read from its diff against the `[e2e]
+/// paths` of the main checkout's `dagq.toml` (ADR-t963-1 decision 2) and
+/// recorded with its validation, but no receipt backs it: the runtime runs
+/// it after the review (ADR-t1233-2). A receipt reporting `e2e`
+/// `not_applicable` is accepted at once, and the worker is told not to run
+/// it. A diff outside the paths and a task's own `e2e` are judged by
+/// `domain::validation`'s unit tests.
 #[test]
 fn the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_none() {
-    for (paths, evidence, requirement) in [
-        (
-            "[\"change.txt\", 'tests/e2e.rs']",
-            Vec::new(),
-            json!({"required": true, "source": "paths", "paths": ["change.txt"]}),
+    let (_dir, repo, db) = evidence_fixture(&[]);
+    with_e2e_paths(&repo, "[\"change.txt\", 'tests/e2e.rs']");
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "{RECEIPT_TESTS}commit work; receipt_tests \"$(git rev-parse HEAD)\" passed 'tests: 3 passed'"
         ),
-        ("[\"src/**\"]", Vec::new(), json!({"required": false})),
-        (
-            "[\"src/**\"]",
-            vec![EvidenceCheck::E2e],
-            json!({"required": true, "source": "task"}),
-        ),
-    ] {
-        let (_dir, repo, db) = evidence_fixture(&evidence);
-        with_e2e_paths(&repo, paths);
-        let backend = TestWorkspace::new(
-            &db,
-            false,
-            &format!(
-                "{RECEIPT_TESTS}commit work; receipt_tests \"$(git rev-parse HEAD)\" passed 'tests: 3 passed'"
-            ),
-        );
-        let outcome = supervise(&db, &repo, &backend).unwrap();
-        backend.join();
-        assert_eq!(outcome["errors"], json!([]), "{outcome}");
-        let detail = SqliteQueue::open(&db)
-            .unwrap()
-            .show(TaskId::new(2))
-            .unwrap();
-        let run = &detail.runs[0];
-        let prompt = read_prompt(run);
-        assert!(prompt.contains("E2E: do not run the e2e"), "{prompt}");
-        assert!(!prompt.contains("E2E evidence"), "{prompt}");
-        assert!(!prompt.contains("Required evidence:"), "{prompt}");
-        let validated = payloads(&detail, "validation_finished");
-        assert_eq!(validated.len(), 1, "{paths}");
-        assert_eq!(validated[0]["status"], "awaiting_integration");
-        assert_eq!(validated[0]["e2e_requirement"], requirement, "{paths}");
-        assert!(!event_kinds(&detail).contains(&"evidence_missing"));
-        assert!(!event_kinds(&detail).contains(&"resume_started"));
-        assert_eq!(run.status(), RunStatus::AwaitingIntegration);
-    }
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    let run = &detail.runs[0];
+    let prompt = read_prompt(run);
+    assert!(prompt.contains("E2E: do not run the e2e"), "{prompt}");
+    assert!(!prompt.contains("E2E evidence"), "{prompt}");
+    assert!(!prompt.contains("Required evidence:"), "{prompt}");
+    let validated = payloads(&detail, "validation_finished");
+    assert_eq!(validated.len(), 1);
+    assert_eq!(validated[0]["status"], "awaiting_integration");
+    assert_eq!(
+        validated[0]["e2e_requirement"],
+        json!({"required": true, "source": "paths", "paths": ["change.txt"]})
+    );
+    assert!(!event_kinds(&detail).contains(&"evidence_missing"));
+    assert!(!event_kinds(&detail).contains(&"resume_started"));
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
 }
 
 /// A fixture whose only ready task declares `paths` (ADR-0029).
@@ -413,25 +322,6 @@ fn a_change_outside_the_declared_paths_parks_the_run_for_a_resumed_session() {
         git_out(&repo, &["show", "--name-only", "--format=", "main"]).trim(),
         "docs/a.md"
     );
-}
-
-/// A run that changes only declared paths is validated and landed as if
-/// the task declared none.
-#[test]
-fn a_change_inside_the_declared_paths_awaits_integration_and_lands() {
-    let (_dir, repo, db) = scope_fixture(&["*.txt"]);
-    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let outcome = supervise(&db, &repo, &backend).unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(2))
-        .unwrap();
-    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
-    assert!(!event_kinds(&detail).contains(&"scope_violation"));
-    let landed = integrate(&db, 2, &repo).unwrap();
-    assert_eq!(landed["outcome"], "integrated", "{landed}");
 }
 
 /// Validation diffs from where the branch forked from the current main,

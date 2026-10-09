@@ -282,43 +282,9 @@ fn open_question(queue: &mut SqliteQueue) -> AskId {
 
 /// A session that asks a question during its revise and goes on to rewrite
 /// its receipt and go idle is judged by the rewritten receipt without the
-/// question's close (task 583): the run lands.
-#[test]
-fn a_receipt_rewritten_after_an_open_question_is_judged() {
-    let (_dir, repo, db) = fixture();
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(TestWorkspace::new(
-        &db,
-        false,
-        &asks_after_revise(
-            "printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
-             receipt \"$(git rev-parse HEAD)\"",
-            ":",
-        ),
-    ));
-    let reviewer = Arc::new(TestReviewer::new(&[
-        verdict("revise", &["add a line"], "one gap"),
-        verdict("pass", &[], "fixed"),
-    ]));
-    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
-    let outcome = joined(supervisor, "the supervisor thread to return");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "test task", &base);
-    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
-    let kinds = event_kinds(&detail);
-    assert!(
-        position(&kinds, "revise_requested") < position(&kinds, "ask_opened"),
-        "{kinds:?}"
-    );
-    open_question(&mut queue);
-}
-
-/// A receipt rewritten after an open question that names another commit
-/// is judged too, as a mismatch, without the question's close (task 583):
-/// the session is asked to fix it, and the run lands on the fixed receipt.
+/// question's close (task 583): one that names another commit is judged a
+/// mismatch, the session is asked to fix it, and the run lands on the
+/// fixed receipt.
 #[test]
 fn a_mismatched_receipt_rewritten_after_an_open_question_is_judged() {
     let (_dir, repo, db) = fixture();
@@ -347,6 +313,11 @@ fn a_mismatched_receipt_rewritten_after_an_open_question_is_judged() {
     assert_eq!(rejected.len(), 1, "{rejected:?}");
     assert_eq!(rejected[0]["code"], "commit_mismatch", "{}", rejected[0]);
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
+    let kinds = event_kinds(&detail);
+    assert!(
+        position(&kinds, "revise_requested") < position(&kinds, "ask_opened"),
+        "{kinds:?}"
+    );
     open_question(&mut queue);
 }
 

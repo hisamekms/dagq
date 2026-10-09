@@ -1301,20 +1301,11 @@ impl Supervisor<'_> {
             };
             let answer = ask.answer.as_deref().unwrap_or_default().trim().to_owned();
             let run = self.queue.run(&run_id)?;
-            let Some(action) = LandingAnswer::parse(&answer) else {
+            let Some((action, cause)) = landing_answer_to_apply(&answer, run.status(), || {
+                Ok(self.queue.run_lease(&run_id)?.is_some())
+            })?
+            else {
                 continue;
-            };
-            if run.status() != RunStatus::AwaitingIntegration
-                || self.queue.run_lease(&run_id)?.is_some()
-            {
-                continue;
-            }
-            // The phase the answer moves the run to: queued to land, sent
-            // back for a resume, or ended by the cancel.
-            let cause = match &action {
-                LandingAnswer::Land => EventKind::IntegrationApproved.as_str(),
-                LandingAnswer::SendBack(_) => "sent_back",
-                LandingAnswer::Cancel => "canceled",
             };
             match self.apply_landing_answer(&run, ask.id, &answer, action) {
                 Ok(()) => self.record_rest(run.id(), None, cause),
@@ -1338,16 +1329,16 @@ impl Supervisor<'_> {
     /// A landing that fails to start is only noted by the caller, which goes on,
     /// and the run stays queued for a later pass.
     pub(super) fn start_approved_landings(&mut self, parallel: usize) -> Result<()> {
-        if self.landing.run_env_missing
+        let held = self.landing.run_env_missing
             || self.observation.ci.held()
             || self.landing.unresolved
-            || self.host.disk.landing_short
-            || self.used_slots() >= parallel
-            || !self
+            || self.host.disk.landing_short;
+        if approved_landing_waits(held, self.used_slots(), parallel, || {
+            Ok(!self
                 .queue
                 .runs_with_status(RunStatus::Integrating)?
-                .is_empty()
-        {
+                .is_empty())
+        })? {
             return Ok(());
         }
         let mut queued = Vec::new();
@@ -1364,8 +1355,7 @@ impl Supervisor<'_> {
                 queued.push((approval, run));
             }
         }
-        queued.sort_by_key(|(approval, _)| *approval);
-        let Some((_, run)) = queued.into_iter().next() else {
+        let Some(run) = first_to_land(queued) else {
             return Ok(());
         };
         let e2e = self.e2e_due(&run)?.is_some();
@@ -1585,6 +1575,52 @@ impl Supervisor<'_> {
         )?;
         Ok(())
     }
+}
+
+/// The answer of an `approve_landing` ask a pass applies now, with the
+/// phase it moves the run to (queued to land, sent back for a resume, or
+/// ended by the cancel): one [`LandingAnswer::parse`] reads, of a run
+/// awaiting integration that nobody leases (`leased`, read only then).
+/// The slots and the integration slot do not matter (task 949); any other
+/// answer is left to the inbox.
+pub(super) fn landing_answer_to_apply(
+    answer: &str,
+    status: RunStatus,
+    leased: impl FnOnce() -> Result<bool>,
+) -> Result<Option<(LandingAnswer, &'static str)>> {
+    let Some(action) = LandingAnswer::parse(answer) else {
+        return Ok(None);
+    };
+    if status != RunStatus::AwaitingIntegration || leased()? {
+        return Ok(None);
+    }
+    let cause = match &action {
+        LandingAnswer::Land => EventKind::IntegrationApproved.as_str(),
+        LandingAnswer::SendBack(_) => "sent_back",
+        LandingAnswer::Cancel => "canceled",
+    };
+    Ok(Some((action, cause)))
+}
+
+/// Whether a run queued to land waits on this pass: a hold of the landing
+/// (`held`: a missing `[run.env]` program, the CI hold, an unresolved
+/// landing branch or short disk space), no free slot (`used` of
+/// `parallel`), or another run integrating (`integrating`, read only when
+/// nothing before it waits).
+pub(super) fn approved_landing_waits(
+    held: bool,
+    used: usize,
+    parallel: usize,
+    integrating: impl FnOnce() -> Result<bool>,
+) -> Result<bool> {
+    Ok(held || used >= parallel || integrating()?)
+}
+
+/// The run of the oldest of `queued`, each with the event that queued it
+/// to land: approved runs land in the order they were approved.
+pub(super) fn first_to_land<R>(mut queued: Vec<(EventId, R)>) -> Option<R> {
+    queued.sort_by_key(|(approval, _)| *approval);
+    queued.into_iter().next().map(|(_, run)| run)
 }
 
 /// The `approve_landing` ask `verdict` leads to once the session exited,
@@ -2024,6 +2060,83 @@ mod tests {
                 actor: None,
             })
             .collect()
+    }
+
+    /// The answers a pass applies at once, whatever the slots (task 949):
+    /// `land`, `send_back` (with the person's reason) and `cancel`, each
+    /// with the phase it moves the run to, of a run awaiting integration
+    /// that nobody leases. Any other answer is the inbox's; a run in
+    /// another status or leased waits, its lease read only when the answer
+    /// applies.
+    #[test]
+    fn a_landing_answer_is_applied_to_an_unleased_run_awaiting_integration() {
+        let apply = |answer: &str, status: RunStatus, leased: bool| {
+            landing_answer_to_apply(answer, status, || Ok(leased)).unwrap()
+        };
+        let waiting = RunStatus::AwaitingIntegration;
+        assert_eq!(
+            apply("land", waiting, false),
+            Some((LandingAnswer::Land, "integration_approved"))
+        );
+        assert_eq!(
+            apply("send_back: add a test", waiting, false),
+            Some((
+                LandingAnswer::SendBack(Some("add a test".to_owned())),
+                "sent_back"
+            ))
+        );
+        assert_eq!(
+            apply("cancel", waiting, false),
+            Some((LandingAnswer::Cancel, "canceled"))
+        );
+        assert_eq!(apply("land it", waiting, false), None);
+        assert_eq!(apply("land", waiting, true), None);
+        for status in [
+            RunStatus::Running,
+            RunStatus::Integrating,
+            RunStatus::Failed,
+        ] {
+            assert_eq!(apply("land", status, false), None, "{status:?}");
+        }
+        let unread = || -> Result<bool> { panic!("the lease is read") };
+        assert_eq!(
+            landing_answer_to_apply("why?", waiting, unread).unwrap(),
+            None
+        );
+        assert_eq!(
+            landing_answer_to_apply("land", RunStatus::Running, unread).unwrap(),
+            None
+        );
+    }
+
+    /// A run a `land` answer queued waits while the only slot runs
+    /// another task, while another run integrates, or under a hold of the
+    /// landing; it starts once a slot is free and nothing integrates.
+    #[test]
+    fn an_approved_run_waits_for_a_slot_and_the_integration_slot() {
+        let waits = |held: bool, used: usize, integrating: bool| {
+            approved_landing_waits(held, used, 1, || Ok(integrating)).unwrap()
+        };
+        assert!(!waits(false, 0, false));
+        assert!(waits(false, 1, false));
+        assert!(waits(false, 0, true));
+        assert!(waits(true, 0, false));
+        let unread = || -> Result<bool> { panic!("the integrating runs are read") };
+        assert!(approved_landing_waits(true, 0, 1, unread).unwrap());
+        assert!(approved_landing_waits(false, 4, 4, unread).unwrap());
+    }
+
+    /// Approved runs land oldest approval first, whatever order the runs
+    /// are read in.
+    #[test]
+    fn the_oldest_approval_lands_first() {
+        let queued = vec![
+            (EventId::new(9), "approved last"),
+            (EventId::new(3), "approved first"),
+            (EventId::new(5), "approved second"),
+        ];
+        assert_eq!(first_to_land(queued), Some("approved first"));
+        assert_eq!(first_to_land::<&str>(Vec::new()), None);
     }
 
     /// The tail every failed review's ask ends with.
