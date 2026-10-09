@@ -147,10 +147,12 @@ pub struct StubSpawner {
 impl Spawner for StubSpawner {
     fn spawn(&self, spec: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
         // A worker's `dagq` goes to the queue's service, which the
-        // supervisor keeps running in production (goal 82's stage (3)).
-        if spec
-            .get_envs()
-            .any(|(key, value)| key == "DAGQ_SERVICE_SOCKET" && value.is_some())
+        // supervisor keeps running in production (goal 82's stage (3)). A
+        // headless stub's turn starts it on its first `dagq` instead.
+        if !is_headless_stub(spec.get_program())
+            && spec
+                .get_envs()
+                .any(|(key, value)| key == "DAGQ_SERVICE_SOCKET" && value.is_some())
         {
             common::service::serve_with(&self.db, &fake_cmux_dir(&self.db).join("cmux"));
         }

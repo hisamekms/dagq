@@ -383,6 +383,9 @@ pub(crate) fn options(runtime_planners: usize, planner_timeout: Duration) -> Sup
         generators: clock::system(),
         runtime_planners: Some(runtime_planners),
         planner_timeout,
+        // No Codex unless a test gives its stub: the host's `codex` is not
+        // these tests', and each supervise would run its `--version`.
+        codex: PathBuf::from("/nonexistent/codex"),
         update: dagq::application::supervise::UpdateSettings {
             cmux: Some(PathBuf::from("/usr/bin/true")),
             ..Default::default()

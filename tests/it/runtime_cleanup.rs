@@ -505,9 +505,12 @@ impl Drop for Detached {
 }
 
 /// Start `command` detached (its parent gone, as a test's child left
-/// behind), in `cwd`; its pid.
+/// behind), in `cwd`; its pid. It inherits no actor's or client mode's
+/// variables: a `dagq --db` of a worker's environment would refuse its
+/// queue and end at once, not run until it is stopped.
 fn detached(command: &str, cwd: &Path, pid_file: &Path) -> u32 {
     let status = Command::new("sh")
+        .without_actor_env()
         .arg("-c")
         .arg(format!(
             "{command} </dev/null >/dev/null 2>&1 & echo $! > {}",

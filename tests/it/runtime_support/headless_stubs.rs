@@ -30,6 +30,71 @@ fn stub_env(db: &Path, test_pid: u32) -> [(&str, String); 2] {
     ]
 }
 
+/// The file names of the headless stubs, whose turns start the queue's
+/// service themselves when they first run `dagq` ([`client_dagq`]).
+const HEADLESS_STUBS: [&str; 2] = ["claude-headless", "codex-headless"];
+
+/// Whether `program` is a stub of [`headless_claude`] or [`headless_codex`].
+pub fn is_headless_stub(program: &std::ffi::OsStr) -> bool {
+    Path::new(program)
+        .file_name()
+        .is_some_and(|name| HEADLESS_STUBS.iter().any(|stub| name == *stub))
+}
+
+/// The `$DAGQ` of the headless stubs in `dir` (`dagq-client` there), on
+/// `db` made by the process `test_pid`: the tests' `dagq`, but a
+/// client-mode call (a worker's or a job's turn) first starts the queue's
+/// service with the fake cmux, as [`common::service::serve`] does, unless
+/// a stub's call already did; turns that call it at once take turns
+/// under a lock (a directory beside the marker, given up after 30
+/// seconds), since a second `service start` that finds the first's
+/// service not answering yet stops it. Most turns run no `dagq`, so the service is
+/// started only for those that do, instead of before every turn; the
+/// fixture's drop stops it ([`common::service::unserve`]), and it stops by
+/// itself once `test_pid` is gone. It starts the service from `/`, as the
+/// test process would, so that the service runs from no run's worktree
+/// (the idle-process watch counts what does as the run's). Its values are in its sidecar, so that
+/// its script, like the stubs', is the same for every test.
+fn client_dagq(dir: &Path, db: &Path, test_pid: u32) {
+    let unset: String = common::actor::ACTOR_ENV
+        .into_iter()
+        .chain(common::actor::TURN_ENV)
+        .map(|name| format!(" -u {name}"))
+        .collect();
+    let script = format!(
+        r#"#!/bin/sh
+if [ -n "${{{socket}:-}}" ] && [ ! -e "$STARTED" ]; then
+  n=0
+  until mkdir "$STARTED.lock" 2>/dev/null; do
+    n=$((n + 1)); [ "$n" -lt 600 ] || exit 1; sleep 0.05
+  done
+  if [ ! -e "$STARTED" ]; then
+    ( cd / && env{unset} {owner}="$STUB_TEST_PID" "$TESTS_DAGQ" --db "$STUB_DB" service start --cmux "$CMUX" >/dev/null ) || {{ rmdir "$STARTED.lock"; exit 1; }}
+    : > "$STARTED"
+  fi
+  rmdir "$STARTED.lock"
+fi
+exec "$TESTS_DAGQ" "$@"
+"#,
+        socket = dagq::domain::queue_service::SOCKET_ENV,
+        owner = dagq::domain::queue_service::OWNER_PID_ENV,
+    );
+    let [(_, stub_db), (_, pid)] = stub_env(db, test_pid);
+    let started = common::service::started_by_a_stub(db);
+    let cmux = fake_cmux_dir(db).join("cmux");
+    crate::common::template::script_env(
+        &dir.join("dagq-client"),
+        script,
+        &[
+            ("STUB_DB", &stub_db),
+            ("STUB_TEST_PID", &pid),
+            ("TESTS_DAGQ", env!("CARGO_BIN_EXE_dagq")),
+            ("STARTED", started.to_str().unwrap()),
+            ("CMUX", cmux.to_str().unwrap()),
+        ],
+    );
+}
+
 /// Write the stub `path` with `script` and the sidecar of [`stub_env`].
 fn stub_script(path: &Path, script: String, db: &Path, test_pid: u32) {
     let env = stub_env(db, test_pid);
@@ -66,6 +131,7 @@ pub fn headless_claude(dir: &Path, db: &Path) -> PathBuf {
 /// than with the test's (task 1580).
 pub fn headless_claude_of(dir: &Path, db: &Path, test_pid: u32) -> PathBuf {
     let stub = dir.join("claude-headless");
+    client_dagq(dir, db, test_pid);
     let script = format!(
         r#"#!/bin/sh
 MODE=; SESSION=; RUN_DIR=; PERMISSION=; PROMPT=
@@ -113,7 +179,7 @@ ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question -
 . {turns}
 [ -n "$RESULTED" ] || result
 "#,
-        dagq = shell_join(&[env!("CARGO_BIN_EXE_dagq").to_owned()]),
+        dagq = "\"${0%/*}/dagq-client\"",
         db = "\"$STUB_DB\"",
         turns = "\"${0%/*}/turn.sh\"",
         watchdog = HEADLESS_WATCHDOG,
@@ -155,6 +221,7 @@ ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question -
 pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
     let test_pid = std::process::id();
     let stub = dir.join("codex-headless");
+    client_dagq(dir, db, test_pid);
     let script = format!(
         r#"#!/bin/sh
 MODE=start; THREAD=; PROMPT=; ROOTS=; REVIEW=
@@ -295,7 +362,7 @@ fi
 . {turns}
 [ -n "$ENDED" ] || result
 "#,
-        dagq = shell_join(&[env!("CARGO_BIN_EXE_dagq").to_owned()]),
+        dagq = "\"${0%/*}/dagq-client\"",
         db = "\"$STUB_DB\"",
         turns = "\"${0%/*}/turn.sh\"",
         model = "\"${0%/*}/codex-model\"",

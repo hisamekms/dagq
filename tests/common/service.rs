@@ -1,8 +1,9 @@
 //! The queue service a test's workers and jobs reach (goal 82's stage
 //! (3)): their `dagq` runs in client mode with the service's socket and a
 //! token, never the queue's path, so a test whose stub agent runs `dagq`
-//! starts the queue's service first ([`serve`]) and stops it when done
-//! ([`Served`], or [`unserve`]). A service also stops itself within seconds
+//! starts the queue's service first ([`serve`]), or the stub starts it on
+//! its first `dagq` ([`started_by_a_stub`]), and the test stops it when
+//! done ([`Served`], or [`unserve`]). A service also stops itself within seconds
 //! of its queue's directory going away, and one a test started within
 //! seconds of the test's process going ([`OwnedByTest`]): a timeout's
 //! `process::exit` or a SIGKILL skips the drops and leaves the directory
@@ -100,9 +101,18 @@ pub fn serve(db: &Path) {
     serve_with(db, &stub);
 }
 
-/// Stop the service [`serve`] started for the queue at `db`, if it did.
+/// The file a test's stub writes beside the queue at `db` once it started
+/// the queue's service itself (the runtime tests' headless stubs start it on
+/// their first client-mode `dagq`).
+pub fn started_by_a_stub(db: &Path) -> PathBuf {
+    db.with_file_name("queue-service-started-by-a-stub")
+}
+
+/// Stop the service [`serve`] or a stub ([`started_by_a_stub`]) started for
+/// the queue at `db`, if one did.
 pub fn unserve(db: &Path) {
-    if served().remove(db) {
+    let by_a_stub = std::fs::remove_file(started_by_a_stub(db)).is_ok();
+    if served().remove(db) || by_a_stub {
         let _ = dagq(db, &["service", "stop"]);
     }
 }
