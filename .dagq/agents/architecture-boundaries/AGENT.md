@@ -9,6 +9,6 @@ tools: [read, grep, glob]
 - C3: `Supervisor`の欄を変えるsubmoduleの適合性 — [docs/design/architecture.md「コンテキストの規則」](../../../docs/design/architecture.md#コンテキストの規則)。
 - X1・X2・X3: 境界をまたぐtransactionの適合性 — [docs/design/architecture.md「transactionの規則」](../../../docs/design/architecture.md#transactionの規則)と[「境界をまたぐtransaction」](../../../docs/design/architecture.md#境界をまたぐtransaction)。
 - C4・C7: 新しいuse caseとportの取り方の適合性 — [docs/design/architecture.md「コンテキストの規則」](../../../docs/design/architecture.md#コンテキストの規則)。
-- C8のうちscriptが見ない部分（`shared`が他のcontextを名指すのが`Queue`のためだけか、`host`が`execution`を名指すのが`HostOpsQueue`の`RunLog`だけか、再公開を通す名指し）とportの置き場 — [docs/design/architecture.md「コンテキストの規則」](../../../docs/design/architecture.md#コンテキストの規則)と[「portのmodule」](../../../docs/design/architecture.md#portのmodule)。
+- C8のうちscriptが見ない部分（`shared`が他のcontextを名指すのが`Queue`・`StateStore`のためだけか、`host`が`execution`を名指すのが`HostOpsQueue`の`RunLog`だけか、再公開を通す名指し）とportの置き場 — [docs/design/architecture.md「コンテキストの規則」](../../../docs/design/architecture.md#コンテキストの規則)と[「portのmodule」](../../../docs/design/architecture.md#portのmodule)。
 - L5・C6: 状態の判断が時刻と観測（eventのpayload）を値で受けるかの適合性 — [docs/design/architecture.md「レイヤーの規則」](../../../docs/design/architecture.md#レイヤーの規則)と[「コンテキストの規則」](../../../docs/design/architecture.md#コンテキストの規則)。
 - 境界の記録: 違反を足す・直す差分の[「今の違反と行き先」](../../../docs/design/architecture.md#今の違反と行き先)の行と許可の一覧の項目、新しいportとtransactionの所有と公開の記載の適合性（designの文書の一般の対応はdesign-consistencyが見る） — [docs/design/architecture.md「検査の範囲」](../../../docs/design/architecture.md#検査の範囲)。

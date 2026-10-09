@@ -10,7 +10,7 @@ pub use crate::application::health::compact_event;
 use crate::{
     application::health::{for_role, pulses, supervisors},
     application::{
-        AskStore, Clock, EventReads, ProcessControl, RunCoordination, RunLog, SessionRegistry,
+        AskStore, Clock, EventStore, ProcessControl, RunCoordination, RunLog, SessionRegistry,
         SupervisorRegistry, WorkspaceBackend,
     },
     domain::{
@@ -74,7 +74,7 @@ struct Read {
 /// `all` and without kinds in the filter, only the attention events for
 /// `role`.
 fn read_events(
-    queue: &dyn EventReads,
+    queue: &dyn EventStore,
     query: &EventsQuery,
     upto: EventId,
     role: Option<SessionRole>,
@@ -149,7 +149,7 @@ pub struct EventsQuery {
 
 /// `events` with its filters and `--full`: the events after `query.after`
 /// that the query keeps, oldest first, and the cursor to continue from.
-pub fn events_in(queue: &(impl RunLog + EventReads), query: &EventsQuery) -> Result<Value> {
+pub fn events_in(queue: &impl EventStore, query: &EventsQuery) -> Result<Value> {
     let upto = queue.latest_event_id()?;
     let Read { events, cursor, .. } = read_events(queue, query, upto, None)?;
     Ok(json!({"events": events, "cursor": cursor}))
@@ -206,7 +206,7 @@ fn well_formed(time: &str) -> bool {
 /// `gap_secs` with their reasons (`domain::timeline`), the time since the
 /// last event of a run that still moves on read from `clock`.
 pub fn timeline_in(
-    queue: &(impl RunLog + EventReads + ?Sized),
+    queue: &(impl RunLog + ?Sized),
     run: &RunId,
     gap_secs: i64,
     full: bool,
@@ -300,7 +300,7 @@ pub struct WatchOptions {
 /// 2): the watch runs in the inbox's session, so the notification needs
 /// nothing of the supervisor's. One that fails is only warned of.
 pub fn watch(
-    queue: &(impl RunLog + RunCoordination + SupervisorRegistry + EventReads),
+    queue: &(impl RunLog + RunCoordination + SupervisorRegistry),
     clock: &dyn Clock,
     control: &dyn ProcessControl,
     mut record: Option<&mut dyn WatchRecord>,
@@ -442,12 +442,82 @@ pub trait WatchRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::EventKind;
 
     /// Events in memory, read as the queue reads them: in the range, of
     /// the filter's kinds, at most `limit`.
     struct Events(Vec<RunEvent>);
 
-    impl EventReads for Events {
+    #[allow(unused_variables)]
+    impl EventStore for Events {
+        fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+            unreachable!("update_events is not what the test reaches")
+        }
+        fn all_events(&self) -> Result<Vec<RunEvent>> {
+            unreachable!("all_events is not what the test reaches")
+        }
+        fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
+            unreachable!("latest_task_events is not what the test reaches")
+        }
+        fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
+            unreachable!("run_events is not what the test reaches")
+        }
+        fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
+            unreachable!("has_run_event is not what the test reaches")
+        }
+        fn record_runtime_event(
+            &self,
+            id: &RunId,
+            kind: EventKind,
+            payload: serde_json::Value,
+        ) -> Result<()> {
+            unreachable!("record_runtime_event is not what the test reaches")
+        }
+        fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
+            unreachable!("last_observe is not what the test reaches")
+        }
+        fn latest_event_id(&self) -> Result<EventId> {
+            unreachable!("latest_event_id is not what the test reaches")
+        }
+        fn record_backend_failure(
+            &self,
+            run: Option<&RunId>,
+            payload: serde_json::Value,
+        ) -> Result<()> {
+            unreachable!("record_backend_failure is not what the test reaches")
+        }
+        fn record_queue_event(
+            &self,
+            kind: EventKind,
+            payload: serde_json::Value,
+        ) -> Result<EventId> {
+            unreachable!("record_queue_event is not what the test reaches")
+        }
+        fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
+            unreachable!("latest_event_of is not what the test reaches")
+        }
+        fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
+            unreachable!("latest_events_of is not what the test reaches")
+        }
+        fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
+            unreachable!("latest_queue_event is not what the test reaches")
+        }
+        fn latest_events_by_supervisor(
+            &self,
+            kinds: &[&str],
+            supervisors: &[&str],
+        ) -> Result<Vec<RunEvent>> {
+            unreachable!("latest_events_by_supervisor is not what the test reaches")
+        }
+        fn events_of_between(
+            &self,
+            kinds: &[&str],
+            after: EventId,
+            upto: EventId,
+            limit: usize,
+        ) -> Result<Vec<RunEvent>> {
+            unreachable!("events_of_between is not what the test reaches")
+        }
         fn events_between(
             &self,
             after: EventId,

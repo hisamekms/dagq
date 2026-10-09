@@ -11,7 +11,7 @@
 use crate::common;
 use crate::runtime_support;
 
-use dagq::application::RunLog;
+use dagq::application::EventStore;
 use dagq::domain::provider_switch::{ProviderHold, SwitchReason};
 use dagq::domain::{AskReason, EventKind, Provider};
 use runtime_support::*;
@@ -767,7 +767,7 @@ fn a_no_claude_live_run_with_codex_held_asks_a_person_and_starts_no_recovery_job
         .unwrap()
         .as_secs() as i64;
     let hold = ProviderHold::new(Provider::Codex, SwitchReason::Authentication, now);
-    RunLog::record_queue_event(
+    EventStore::record_queue_event(
         &SqliteQueue::open(&db).unwrap(),
         EventKind::ProviderHeld,
         hold.held_payload(None),

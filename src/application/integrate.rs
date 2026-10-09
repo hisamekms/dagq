@@ -26,8 +26,9 @@ use std::{
 use tracing::{info, warn};
 
 use super::{
-    AskStore, Clock, FollowUpRegistration, IdGenerator, Landing, MainRemote, ProcessControl, Queue,
-    QueueRecords, Repository, RunFiles, RunLog, Verifier, path_text, reason_of_error, tail,
+    AskStore, Clock, EventStore, FollowUpRegistration, IdGenerator, Landing, MainRemote,
+    ProcessControl, Queue, QueueRecords, Repository, RunFiles, RunLog, Verifier, path_text,
+    reason_of_error, tail,
 };
 use crate::domain::{
     ActorContext, ActorRole, AuthorizationError, Authorizer, Capability, Resource, StaticPolicy,
@@ -853,7 +854,11 @@ fn push_main(
 
 /// Record the phase the push's outcome `kind` ends the landed run in
 /// ([`run_phase::Phase::after_push`]), in the run's attempt.
-fn record_push_phase<Q: RunLog + ?Sized>(queue: &Q, run_id: &RunId, kind: EventKind) -> Result<()> {
+fn record_push_phase<Q: EventStore + ?Sized>(
+    queue: &Q,
+    run_id: &RunId,
+    kind: EventKind,
+) -> Result<()> {
     let (phase, cause) = run_phase::Phase::after_push(kind);
     let attempt = run_phase::last_recorded(&queue.run_events(run_id)?)
         .map_or(run_phase::Attempt::FIRST, |recorded| recorded.attempt);
@@ -870,7 +875,7 @@ fn record_push_phase<Q: RunLog + ?Sized>(queue: &Q, run_id: &RunId, kind: EventK
 /// the slot back. This closes the landing's phase. A landing the
 /// supervisor asked for records nothing here: the supervisor records the
 /// run's phases from its slot, which took the slot and lets it go.
-fn record_landing_left<Q: RunLog + ?Sized>(
+fn record_landing_left<Q: EventStore + ?Sized>(
     queue: &Q,
     requester: &ActorContext,
     run: &TaskRun,
@@ -887,7 +892,7 @@ fn record_landing_left<Q: RunLog + ?Sized>(
 /// Record the phase `phase` decides from the run's events, which `cause`
 /// moved it to, in the attempt last recorded, unless it repeats the last
 /// record. A failure is only warned of: the landing goes on either way.
-fn record_phase<Q: RunLog + ?Sized>(
+fn record_phase<Q: EventStore + ?Sized>(
     queue: &Q,
     run_id: &RunId,
     cause: EventKind,
@@ -2397,7 +2402,7 @@ fn remove_landed_worktree(queue: &mut dyn Queue, repository: &dyn Repository, ru
 /// How many more counted resumes the run has (ADR-0047 decision 24: a
 /// resume of a run parked only by a conflict after its review passed is
 /// not counted); unreadable events leave none.
-fn resumes_left<Q: RunLog + ?Sized>(queue: &Q, id: &RunId) -> usize {
+fn resumes_left<Q: EventStore + ?Sized>(queue: &Q, id: &RunId) -> usize {
     queue.run_events(id).map_or(0, |events| {
         RunHistory::from_events(&events).resumes().left()
     })
@@ -2407,8 +2412,9 @@ fn resumes_left<Q: RunLog + ?Sized>(queue: &Q, id: &RunId) -> usize {
 mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
-    use crate::application::{EndedRunWorkspace, EndedRunWorktree};
-    use crate::domain::{EventId, Provider, RunEvent, RunRecord, TaskRecord, TaskStatus};
+    use crate::domain::{
+        EventFilter, EventId, Provider, RunEvent, RunRecord, TaskRecord, TaskStatus,
+    };
     use std::cell::RefCell;
 
     const BASE: &str = "1111111111111111111111111111111111111111";
@@ -2842,7 +2848,7 @@ mod tests {
         assert_eq!(commit_error_gist(&long), format!("{}…", "é".repeat(500)));
     }
 
-    /// The run log alone, for a use case that reads only it: a test double
+    /// The event store alone, for a use case that reads only it: a test double
     /// implements this one port, not the whole queue. It keeps the
     /// `run_phase_changed` payloads recorded.
     struct EventsOnly {
@@ -2860,29 +2866,14 @@ mod tests {
     }
 
     #[allow(unused_variables)]
-    impl RunLog for EventsOnly {
+    impl EventStore for EventsOnly {
         fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn active_runs(&self) -> Result<Vec<TaskRun>> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn all_runs(&self) -> Result<Vec<TaskRun>> {
             unreachable!("resumes_left reads only the run's events")
         }
         fn all_events(&self) -> Result<Vec<RunEvent>> {
             unreachable!("resumes_left reads only the run's events")
         }
         fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn run(&self, id: &RunId) -> Result<TaskRun> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
             unreachable!("resumes_left reads only the run's events")
         }
         fn run_events(&self, _id: &RunId) -> Result<Vec<RunEvent>> {
@@ -2903,28 +2894,10 @@ mod tests {
             self.phases.borrow_mut().push(payload);
             Ok(())
         }
-        fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn ended_run_worktree(&self, _: &RunId) -> Result<Option<EndedRunWorktree>> {
-            unreachable!("resumes_left reads only the run's events")
-        }
         fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
             unreachable!("resumes_left reads only the run's events")
         }
         fn latest_event_id(&self) -> Result<EventId> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
-            unreachable!("resumes_left reads only the run's events")
-        }
-        fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
             unreachable!("resumes_left reads only the run's events")
         }
         fn record_backend_failure(
@@ -2965,6 +2938,15 @@ mod tests {
             limit: usize,
         ) -> Result<Vec<RunEvent>> {
             unreachable!("resumes_left reads only the run's events")
+        }
+        fn events_between(
+            &self,
+            after: EventId,
+            upto: EventId,
+            filter: &EventFilter,
+            limit: usize,
+        ) -> Result<Vec<RunEvent>> {
+            unreachable!("events_between is not what the test reaches")
         }
     }
 

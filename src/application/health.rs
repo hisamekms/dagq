@@ -214,7 +214,7 @@ fn progress_lease(lease: Option<&LeaseHealth>) -> Lease {
 /// cleaned up). A finished or cancelled run nobody leases and an earlier
 /// attempt of a retried task are history and are left out. The selection
 /// is the listing's own: the automatic recovery, adoption and `stats` keep
-/// [`RunLog::active_runs`].
+/// [`RunReads::active_runs`].
 fn listed_runs(queue: &(impl RunLog + ?Sized), leases: &[RunLease]) -> Result<Vec<TaskRun>> {
     let mut runs = queue.active_runs()?;
     let listed = |runs: &[TaskRun], id: &RunId| runs.iter().any(|run| run.id() == id);

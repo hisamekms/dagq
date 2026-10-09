@@ -37,7 +37,7 @@ use serde_json::{Value, json};
 
 use crate::{
     application::{
-        AgentProvider, AgentSignals, AskQuery, AskStore, EventReads, Generators, RunLog,
+        AgentProvider, AgentSignals, AskQuery, AskStore, Generators, RunLog,
         observer::HeadlessAgent,
     },
     domain::{
@@ -234,7 +234,7 @@ pub struct ThroughputReviewEnvironment<'a, Q: ?Sized> {
 /// agent headless on `provider` (the provider of the launch), save what it
 /// printed and tell the inbox. `db` is the queue's canonical path, which
 /// names its directory.
-pub fn review<Q: AskStore + EventReads + RunLog>(
+pub fn review<Q: AskStore + RunLog>(
     queue: &mut Q,
     db: &Path,
     provider: &dyn AgentProvider,
@@ -288,7 +288,7 @@ pub fn review<Q: AskStore + EventReads + RunLog>(
 }
 
 /// Prepare and execute a known period; retain context for preparation errors.
-fn review_period<Q: AskStore + EventReads + RunLog>(
+fn review_period<Q: AskStore + RunLog>(
     queue: &mut Q,
     db: &Path,
     provider: &dyn AgentProvider,
@@ -598,10 +598,7 @@ fn report<Q: RunLog>(
 /// The landings (`run_integrated`) from the start of what the review of
 /// `period` compares with to its end: the hours the rules read, or the
 /// period before as long as this one. Each with its unix milliseconds.
-fn landings(
-    queue: &(impl EventReads + RunLog + ?Sized),
-    period: &Window,
-) -> Result<Vec<(i64, RunEvent)>> {
+fn landings(queue: &(impl RunLog + ?Sized), period: &Window) -> Result<Vec<(i64, RunEvent)>> {
     let from = match period.mode {
         ReviewMode::Hourly => {
             period.end_ms - HOUR_MS * i64::try_from(LOOKBACK_HOURS + 1).unwrap_or(i64::MAX)
@@ -628,7 +625,7 @@ fn landings(
 /// The review's input: the landings, the rules' judgment, the workers'
 /// health and the disk's free space, `kpi`, `stats`, the claim deferrals,
 /// the asks and the timelines of the longest runs that landed. A part that does not read is its `{"error": ...}`.
-fn gather<Q: AskStore + EventReads + RunLog>(
+fn gather<Q: AskStore + RunLog>(
     queue: &Q,
     db: &Path,
     sources: &dyn ThroughputReviewSources<Q>,
@@ -744,7 +741,7 @@ fn stats_from(period: &Window) -> i64 {
 
 /// The events of `kinds` in `[from, to)` counted by their payload's `key`.
 fn counted(
-    queue: &(impl EventReads + RunLog + ?Sized),
+    queue: &(impl RunLog + ?Sized),
     kinds: &[&str],
     from: i64,
     to: i64,
@@ -771,11 +768,7 @@ fn counted(
 }
 
 /// The asks opened in `[from, to)` by kind, and the open ones by kind.
-fn asks(
-    queue: &(impl AskStore + EventReads + RunLog + ?Sized),
-    from: i64,
-    to: i64,
-) -> Result<Value> {
+fn asks(queue: &(impl AskStore + RunLog + ?Sized), from: i64, to: i64) -> Result<Value> {
     let opened = counted(queue, &[ASK_OPENED], from, to, "kind")?;
     let mut open = serde_json::Map::new();
     let asks = queue.asks(AskQuery {
@@ -792,7 +785,7 @@ fn asks(
 /// The timelines of the [`TIMELINES`] runs that landed in the period and
 /// took the longest from their first event to their landing.
 fn timelines(
-    queue: &(impl AskStore + EventReads + RunLog + ?Sized),
+    queue: &(impl AskStore + RunLog + ?Sized),
     generators: &Generators,
     landed: &[&(i64, RunEvent)],
 ) -> Result<Value> {

@@ -43,7 +43,7 @@ use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
     QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe, ServiceQueue,
 };
-use crate::application::{Exit, Generators, RunLog, RunNotFound, Spawned, TaskStore};
+use crate::application::{EventStore, Exit, Generators, RunNotFound, RunReads, Spawned, TaskStore};
 use crate::domain::queue_service::{
     API_VERSION, LOCK_FILE, LOG_FILE, MAX_REQUEST_BYTES, OWNER_PID_ENV, Principal, SERVICE_DIR,
     SOCKET_FILE, STATE_FILE, ServiceErrorCode, ServiceRequest, ServiceResponse, ServiceState,
@@ -798,7 +798,7 @@ impl ServiceBackend for SqliteServiceBackend {
         let queue = SqliteQueue::open(&self.db)?
             .with_generators(self.generators.clone())
             .with_actor(Self::own_actor());
-        RunLog::record_queue_event(&queue, EventKind::QueueServiceUnauthenticated, payload)
+        EventStore::record_queue_event(&queue, EventKind::QueueServiceUnauthenticated, payload)
             .map(drop)
     }
 }
@@ -820,7 +820,8 @@ impl ServiceSqlite {
 
 impl DenialLog for ServiceSqlite {
     fn record_denial(&self, payload: Value) -> Result<()> {
-        RunLog::record_queue_event(&self.queue, EventKind::AuthorizationDenied, payload).map(drop)
+        EventStore::record_queue_event(&self.queue, EventKind::AuthorizationDenied, payload)
+            .map(drop)
     }
 }
 
@@ -882,7 +883,7 @@ impl ServiceQueue for ServiceSqlite {
     }
 
     fn run_status(&self, id: &RunId) -> Result<Option<RunStatus>> {
-        match RunLog::run(&self.queue, id) {
+        match RunReads::run(&self.queue, id) {
             Ok(run) => Ok(Some(run.status())),
             Err(error) if error.downcast_ref::<RunNotFound>().is_some() => Ok(None),
             Err(error) => Err(error),

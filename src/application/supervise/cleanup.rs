@@ -19,7 +19,7 @@
 //! disk space, and the rest of a cleanup for room another job took on
 //! (task 1426); ordinary cleanup ends after its current worktree and the
 //! next sweep picks up the rest. That check reads the run alone
-//! ([`RunLog::ended_run_worktree`], task 1586), not every ended run again.
+//! ([`RunReads::ended_run_worktree`], task 1586), not every ended run again.
 //!
 //! A run the job found nothing left of ([`nothing_left`]) is settled
 //! ([`Cleaning::settled`]): the next sweeps leave it out of their

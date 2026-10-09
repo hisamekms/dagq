@@ -2,7 +2,7 @@
 //! [`crate::domain::kpi::kpi`] derives the KPIs from. Reads only.
 use anyhow::{Result, anyhow};
 
-use super::{PlanningRecords, RunLog, SupervisorRegistry, areas::AreaReader};
+use super::{EventStore, PlanningRecords, SupervisorRegistry, areas::AreaReader};
 use crate::domain::kpi::{HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive};
 
 /// Where the host is: the time zone at `now` (seconds east of UTC) and the
@@ -18,9 +18,13 @@ pub struct Host {
 /// The KPIs `query` asks for, at the unix second `now`, judged by `config`,
 /// the landed runs' areas read by `areas`, with the host's load of each
 /// window when `host_metrics` reads it (task 872; `kpi` and the reports do,
-/// the breach check and the observer do not).
+/// the breach check and the observer do not). The KPIs come from the
+/// [`EventStore`]; the [`PlanningRecords`] and [`SupervisorRegistry`] reads
+/// are what they still join from the StateStore (the tasks' goals and
+/// changes, the drafts' origins and the supervisors' heartbeats) until the
+/// ledger replaces them (ADR-t1662-2 D1).
 pub fn kpi(
-    queue: &(impl PlanningRecords + SupervisorRegistry + RunLog + ?Sized),
+    queue: &(impl EventStore + PlanningRecords + SupervisorRegistry + ?Sized),
     now: i64,
     host: Host,
     config: &KpiConfig,

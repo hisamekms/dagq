@@ -52,10 +52,10 @@ use std::{
 use tracing::{error, info, warn};
 
 use super::{
-    AgentProvider, AgentSignals, AskQuery, CommandSpec, Exhaustion, Generators, IdleHook,
-    LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository, ResumeCandidate,
-    RunFiles, RunLog, SessionWrappers, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction,
-    Validation, Verifier, WorkerAdapters,
+    AgentProvider, AgentSignals, AskQuery, CommandSpec, EventStore, Exhaustion, Generators,
+    IdleHook, LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository,
+    ResumeCandidate, RunFiles, RunLog, SessionWrappers, Spawned, Spawner, Streams, TRIAGE_ASKER,
+    TriageAction, Validation, Verifier, WorkerAdapters,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
         WorkspaceAccess,
@@ -3938,7 +3938,7 @@ fn role_models_of(
 /// afterwards, whatever `apply` returned (task 783).
 fn requested_by_job<S: ?Sized, T>(
     state: &mut S,
-    log: impl Fn(&S) -> &dyn RunLog,
+    log: impl Fn(&S) -> &dyn EventStore,
     job: &ActorContext,
     apply: impl FnOnce(&mut S) -> Result<T>,
 ) -> Result<T> {
@@ -3955,12 +3955,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        application::{EndedRunWorkspace, EndedRunWorktree},
-        domain::actor::ActorContext,
-    };
+    use crate::domain::{EventFilter, actor::ActorContext};
 
-    /// A run log that keeps the requester [`RunLog::request_as`] sets, the
+    /// An event store that keeps the requester [`EventStore::request_as`] sets, the
     /// calls in their order, and the kind of each queue event with the
     /// requester it was written under. That the SQLite store writes the
     /// requester as the event's `actor.requested_by` is the store's own test
@@ -3973,29 +3970,14 @@ mod tests {
     }
 
     #[allow(unused_variables)]
-    impl RunLog for Requests {
+    impl EventStore for Requests {
         fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn active_runs(&self) -> Result<Vec<TaskRun>> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn all_runs(&self) -> Result<Vec<TaskRun>> {
             unreachable!("requested_by_job writes queue events only")
         }
         fn all_events(&self) -> Result<Vec<RunEvent>> {
             unreachable!("requested_by_job writes queue events only")
         }
         fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn run(&self, id: &RunId) -> Result<TaskRun> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
             unreachable!("requested_by_job writes queue events only")
         }
         fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
@@ -4012,28 +3994,10 @@ mod tests {
         ) -> Result<()> {
             unreachable!("requested_by_job writes queue events only")
         }
-        fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn ended_run_worktree(&self, _: &RunId) -> Result<Option<EndedRunWorktree>> {
-            unreachable!("requested_by_job writes queue events only")
-        }
         fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
             unreachable!("requested_by_job writes queue events only")
         }
         fn latest_event_id(&self) -> Result<EventId> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
-            unreachable!("requested_by_job writes queue events only")
-        }
-        fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
             unreachable!("requested_by_job writes queue events only")
         }
         fn record_backend_failure(
@@ -4091,6 +4055,15 @@ mod tests {
                 .push(format!("restore_request {previous:?}"));
             self.requested_by.replace(previous);
         }
+        fn events_between(
+            &self,
+            after: EventId,
+            upto: EventId,
+            filter: &EventFilter,
+            limit: usize,
+        ) -> Result<Vec<RunEvent>> {
+            unreachable!("events_between is not what the test reaches")
+        }
     }
 
     #[test]
@@ -4098,7 +4071,7 @@ mod tests {
         let mut log = Requests::default();
         let outer = ActorContext::review_job(&RunId::new("r1").unwrap(), 1);
         let inner = ActorContext::review_job(&RunId::new("r2").unwrap(), 3);
-        fn run_log(log: &Requests) -> &dyn RunLog {
+        fn run_log(log: &Requests) -> &dyn EventStore {
             log
         }
         let result: Result<()> = requested_by_job(&mut log, run_log, &outer, |log| {
@@ -4142,7 +4115,7 @@ mod tests {
     fn a_failed_apply_still_gives_the_previous_requester_back() {
         let mut log = Requests::default();
         let job = ActorContext::review_job(&RunId::new("r1").unwrap(), 2);
-        fn run_log(log: &Requests) -> &dyn RunLog {
+        fn run_log(log: &Requests) -> &dyn EventStore {
             log
         }
         let result: Result<()> = requested_by_job(&mut log, run_log, &job, |_| {

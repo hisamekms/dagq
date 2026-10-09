@@ -1,6 +1,6 @@
 use super::*;
-use crate::application::{EndedRunWorkspace, EndedRunWorktree};
-use crate::domain::{EventId, RunEvent, RunId, RunStatus, TaskRun};
+use crate::application::{EndedRunWorkspace, EndedRunWorktree, EventStore, RunReads};
+use crate::domain::{EventFilter, EventId, RunEvent, RunId, RunStatus, TaskRun};
 use std::cell::RefCell;
 
 #[derive(Default)]
@@ -18,20 +18,11 @@ impl MemoryLog {
     }
 }
 #[allow(unused_variables)]
-impl RunLog for MemoryLog {
-    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-        unreachable!("sccache reads queue events only")
-    }
+impl RunReads for MemoryLog {
     fn active_runs(&self) -> Result<Vec<TaskRun>> {
         unreachable!("sccache reads queue events only")
     }
     fn all_runs(&self) -> Result<Vec<TaskRun>> {
-        unreachable!("sccache reads queue events only")
-    }
-    fn all_events(&self) -> Result<Vec<RunEvent>> {
-        unreachable!("sccache reads queue events only")
-    }
-    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         unreachable!("sccache reads queue events only")
     }
     fn run(&self, id: &RunId) -> Result<TaskRun> {
@@ -41,6 +32,37 @@ impl RunLog for MemoryLog {
         unreachable!("sccache reads queue events only")
     }
     fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
+        unreachable!("sccache reads queue events only")
+    }
+    fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
+        unreachable!("sccache reads queue events only")
+    }
+    fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
+        unreachable!("sccache reads queue events only")
+    }
+    fn ended_run_worktree(&self, _: &RunId) -> Result<Option<EndedRunWorktree>> {
+        unreachable!("sccache reads queue events only")
+    }
+    fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
+        unreachable!("sccache reads queue events only")
+    }
+    fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
+        unreachable!("sccache reads queue events only")
+    }
+    fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
+        unreachable!("sccache reads queue events only")
+    }
+}
+
+#[allow(unused_variables)]
+impl EventStore for MemoryLog {
+    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+        unreachable!("sccache reads queue events only")
+    }
+    fn all_events(&self) -> Result<Vec<RunEvent>> {
+        unreachable!("sccache reads queue events only")
+    }
+    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         unreachable!("sccache reads queue events only")
     }
     fn run_events(&self, _id: &RunId) -> Result<Vec<RunEvent>> {
@@ -69,28 +91,10 @@ impl RunLog for MemoryLog {
         });
         Ok(())
     }
-    fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
-        unreachable!("sccache reads queue events only")
-    }
-    fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
-        unreachable!("sccache reads queue events only")
-    }
-    fn ended_run_worktree(&self, _: &RunId) -> Result<Option<EndedRunWorktree>> {
-        unreachable!("sccache reads queue events only")
-    }
     fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
         unreachable!("sccache reads queue events only")
     }
     fn latest_event_id(&self) -> Result<EventId> {
-        unreachable!("sccache reads queue events only")
-    }
-    fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
-        unreachable!("sccache reads queue events only")
-    }
-    fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
-        unreachable!("sccache reads queue events only")
-    }
-    fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
         unreachable!("sccache reads queue events only")
     }
     fn record_backend_failure(
@@ -145,6 +149,15 @@ impl RunLog for MemoryLog {
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
         unreachable!("sccache reads queue events only")
+    }
+    fn events_between(
+        &self,
+        after: EventId,
+        upto: EventId,
+        filter: &EventFilter,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        unreachable!("events_between is not what the test reaches")
     }
 }
 

@@ -14,8 +14,8 @@ use std::{
 use anyhow::Result;
 
 use super::{
-    AgentSignals, PlanningRecords, ProcessControl, QueueRecords, RunCoordination, RunFiles, RunLog,
-    StatusFilter, SupervisorRegistry, TaskQuery, TaskStore,
+    AgentSignals, EventStore, PlanningRecords, ProcessControl, RunCoordination, RunFiles, RunLog,
+    RunReads, StatusFilter, SupervisorRegistry, TaskQuery, TaskStore,
 };
 use crate::domain::{
     GoalStatus, RunId, RunStatus, SupervisorPulse, TaskRun, TaskStatus,
@@ -98,13 +98,18 @@ pub fn conflict_config(file: Option<ConflictConfig>) -> ConflictConfigReport {
 /// unfinished runs' directories through `sources`, and `workspace_mismatch`
 /// the processes of their background wrappers through `processes` (its pid
 /// and the start its handle recorded; no cmux, no heartbeat). Reads only.
+/// The times come from the [`EventStore`]; the other ports are what the
+/// judgments of now and the joins still read from the StateStore (the
+/// slots, the leases, the unfinished runs, the ready tasks and the tasks'
+/// goals, titles, changes and drafts' origins) until the ledger replaces
+/// them (ADR-t1662-2 D1).
 pub fn stats(
     queue: &(
-         impl PlanningRecords
-         + QueueRecords
+         impl EventStore
+         + PlanningRecords
          + RunCoordination
          + SupervisorRegistry
-         + RunLog
+         + RunReads
          + TaskStore
          + ?Sized
      ),
@@ -202,7 +207,7 @@ pub fn live_inputs(
 /// which are alive) less the runs executing, and the candidates and ready
 /// tasks.
 fn slot_snapshot(
-    queue: &(impl TaskStore + PlanningRecords + SupervisorRegistry + RunCoordination + RunLog + ?Sized),
+    queue: &(impl EventStore + TaskStore + SupervisorRegistry + RunCoordination + RunReads + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
 ) -> Result<SlotSnapshot> {
@@ -293,7 +298,7 @@ fn stall_config(
 /// whether their background wrapper runs, and each one's position in the
 /// list of every run.
 fn live_runs(
-    queue: &(impl RunLog + ?Sized),
+    queue: &(impl RunReads + ?Sized),
     processes: &dyn ProcessControl,
     events: &[crate::domain::RunEvent],
     sources: &LiveSources<'_>,

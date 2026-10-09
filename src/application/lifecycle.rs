@@ -2167,6 +2167,7 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::EventStore;
 
     #[test]
     fn no_wait_refuses_only_while_a_replaced_supervisor_leases_a_run() {

@@ -9,8 +9,8 @@ use anyhow::Result;
 use std::cell::RefCell;
 
 /// The supervisors' registrations ([`SupervisorRegistry::supervisors`]) and
-/// the queue's events ([`RunLog::latest_events_of`],
-/// [`RunLog::record_queue_event`]), newest last.
+/// the queue's events ([`EventStore::latest_events_of`],
+/// [`EventStore::record_queue_event`]), newest last.
 #[derive(Default)]
 pub(crate) struct SupervisorsAndEvents {
     pub(crate) registrations: Vec<SupervisorRegistration>,
@@ -18,21 +18,12 @@ pub(crate) struct SupervisorsAndEvents {
 }
 
 #[allow(unused_variables)]
-impl RunLog for SupervisorsAndEvents {
-    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-        unreachable!("update_events is not what the test reaches")
-    }
+impl RunReads for SupervisorsAndEvents {
     fn active_runs(&self) -> Result<Vec<TaskRun>> {
         unreachable!("active_runs is not what the test reaches")
     }
     fn all_runs(&self) -> Result<Vec<TaskRun>> {
         unreachable!("all_runs is not what the test reaches")
-    }
-    fn all_events(&self) -> Result<Vec<RunEvent>> {
-        unreachable!("all_events is not what the test reaches")
-    }
-    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
-        unreachable!("latest_task_events is not what the test reaches")
     }
     fn run(&self, id: &RunId) -> Result<TaskRun> {
         unreachable!("run is not what the test reaches")
@@ -42,6 +33,37 @@ impl RunLog for SupervisorsAndEvents {
     }
     fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
         unreachable!("next_awaiting_integration is not what the test reaches")
+    }
+    fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
+        unreachable!("ended_run_workspaces is not what the test reaches")
+    }
+    fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
+        unreachable!("ended_run_worktrees is not what the test reaches")
+    }
+    fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>> {
+        unreachable!("ended_run_worktree is not what the test reaches")
+    }
+    fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
+        unreachable!("latest_runs_in_progress is not what the test reaches")
+    }
+    fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
+        unreachable!("runs_with_pending_push is not what the test reaches")
+    }
+    fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
+        unreachable!("run_in_workspace is not what the test reaches")
+    }
+}
+
+#[allow(unused_variables)]
+impl EventStore for SupervisorsAndEvents {
+    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+        unreachable!("update_events is not what the test reaches")
+    }
+    fn all_events(&self) -> Result<Vec<RunEvent>> {
+        unreachable!("all_events is not what the test reaches")
+    }
+    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
+        unreachable!("latest_task_events is not what the test reaches")
     }
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
         unreachable!("run_events is not what the test reaches")
@@ -57,29 +79,11 @@ impl RunLog for SupervisorsAndEvents {
     ) -> Result<()> {
         unreachable!("record_runtime_event is not what the test reaches")
     }
-    fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
-        unreachable!("ended_run_workspaces is not what the test reaches")
-    }
-    fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
-        unreachable!("ended_run_worktrees is not what the test reaches")
-    }
-    fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>> {
-        unreachable!("ended_run_worktree is not what the test reaches")
-    }
     fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
         unreachable!("last_observe is not what the test reaches")
     }
     fn latest_event_id(&self) -> Result<EventId> {
         unreachable!("latest_event_id is not what the test reaches")
-    }
-    fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
-        unreachable!("latest_runs_in_progress is not what the test reaches")
-    }
-    fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
-        unreachable!("runs_with_pending_push is not what the test reaches")
-    }
-    fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
-        unreachable!("run_in_workspace is not what the test reaches")
     }
     fn record_backend_failure(
         &self,
@@ -135,6 +139,15 @@ impl RunLog for SupervisorsAndEvents {
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
         unreachable!("events_of_between is not what the test reaches")
+    }
+    fn events_between(
+        &self,
+        after: EventId,
+        upto: EventId,
+        filter: &EventFilter,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        unreachable!("events_between is not what the test reaches")
     }
 }
 

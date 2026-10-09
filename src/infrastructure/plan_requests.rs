@@ -519,7 +519,7 @@ fn link_request(
 /// What the request commands record a refusal on: the queue itself.
 impl crate::application::commands::DenialLog for SqliteQueue {
     fn record_denial(&self, payload: serde_json::Value) -> Result<()> {
-        crate::application::RunLog::record_queue_event(
+        crate::application::EventStore::record_queue_event(
             self,
             EventKind::AuthorizationDenied,
             payload,

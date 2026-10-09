@@ -30,7 +30,7 @@ related:
 
 # 計測
 
-> **一部だけ実装済み（2026-10-09）**: 「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録は実装済みで、今の姿を書く。
+> **一部だけ実装済み（2026-10-09）**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録は実装済みで、今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[`stats`](supervisor-lifecycle/stats.md)（着地待ちの内訳・作業の内訳）・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)・[hostの負荷](supervisor-lifecycle/host-metrics.md)が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
@@ -41,6 +41,7 @@ related:
 ## SSOTとビュー
 
 計測が扱う記録の論理ストアと材料の区分（ADR-t1662-2決定1・2）。SSOTは消えてはいけない正本、ビューはSSOTから作り直せるもの、材料は消えてよく台帳と統計が読まないもの。計測の層（台帳と統計）はEventStore・SessionStepStore・NodeSampleStoreだけを読み、StateStoreを読まない（D1）。
+論理ストアのportは`application::ports`の`shared`の`EventStore`と`StateStore`（状態の狭いportの束で、use caseは取らない）で、ほかは`observation`に置く。
 
 | 論理ストア | 中身 | 区分 | 今のアダプタ |
 | --- | --- | --- | --- |
@@ -50,10 +51,10 @@ related:
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | 未実装（queue.dbの新しい表の予定）。今はsupervisorが`host/metrics-YYYYMMDD.csv`に書くだけ |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | 未実装（queue.dbの新しい表の予定） |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
-| （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`。台帳と統計は読まない（取り込んだ値はEventStoreかSessionStepStoreに入る） |
+| （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`（取り込んだ値はEventStoreかSessionStepStoreに入る） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`（`it-coverage-map.json`の1ファイル）、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`。着地の検証は下の「着地の検証の対応表のcache」から読む |
 | agentのevalの記録 | evalの依頼・周・実行と費用・成績（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`で、周の状態と成績はこれだけから作り直す（`domain::agent_eval::record`）。queueのdirの`agent-evals/`は材料 |
-| 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | `scripts/landing-it.sh`がGitHub Actionsのartifact `it-coverage-map`から取り、新しいrunが無ければ取り直さない。置き場はqueueの外の`${XDG_CACHE_HOME:-$HOME/.cache}/dagq/landing-it/<run id>/`で、消えてもartifactから取り直せる。台帳と統計は読まない |
+| 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | `scripts/landing-it.sh`がGitHub Actionsのartifact `it-coverage-map`から取り、新しいrunが無ければ取り直さない。置き場はqueueの外の`${XDG_CACHE_HOME:-$HOME/.cache}/dagq/landing-it/<run id>/`で、消えてもartifactから取り直せる |
 
 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。
 `docs/plans/`の1回きりや週次の見直しの測定の出力（scriptとCSV）はこの表に足さず、そのplansの文書が区分（SSOT・ビュー・材料）と作り直せる範囲を持つ。
@@ -145,7 +146,6 @@ supervisorの生存と停止の証拠はEventStoreに残し、一生の終わり
 - **停止**: 登録の行が消える全ての経路（自分の停止と`up`・`down`の掃除）は、同じtransactionで同じtokenの`supervisor_stopped`を書く。
   記録に失敗すれば行は残り、次の掃除に任せる（[persistence](persistence.md#runtime-ownership)）。
 - **生存**: heartbeatを書くsupervisorは、`SUPERVISOR_ALIVE_INTERVAL_SECS`ごとに`supervisor_alive`を1つ書く。
-  毎回のheartbeatをeventにしないのはeventの量を抑えるためで、死んだ時刻の誤差は後の掃除の`last_heartbeat_at`で直る。
   記録の失敗はwarnにしてheartbeatを止めない。
 - **終わりの規則**: そのtokenの`supervisor_stopped`があればその時刻（`last_heartbeat_at`があればそれとの早い方）で終わる（`stopped`）。
   無ければそのtokenを`supervisor`に持つ最後のeventを最後の証拠とし、今がそれより`SUPERVISOR_ALIVE_INTERVAL_SECS` + `HEARTBEAT_TIMEOUT_SECS`より後ならその時刻で終わる（`silent`）。

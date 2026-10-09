@@ -3,11 +3,11 @@
 //! `timeline`, `stats`, `kpi`, `forecast`, `notes`, `marks`, `findings` and
 //! `observe --history|--input`.
 //!
-//! Each read takes the observation context's ports ([`EventReads`],
-//! [`ObserverLog`], [`QueueRecords`]) and only the reads the other
-//! contexts open to every context: the execution context's [`RunLog`]
-//! (the events and the marks) and the planning context's [`TaskStore`]
-//! (the notes).
+//! Each read takes the observation context's ports ([`ObserverLog`],
+//! [`QueueRecords`]), the shared [`EventStore`], and
+//! only the reads the other contexts open to every context: the execution
+//! context's runs ([`RunLog`] for the events, the timeline and the marks)
+//! and the planning context's [`TaskStore`] (the notes).
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -18,7 +18,7 @@ use super::{
 };
 use crate::application::forecast::ForecastQuery;
 use crate::application::{
-    Clock, EventReads, ObserverLog, QueueRecords, RunLog, TaskStore, observer, watch,
+    Clock, EventStore, ObserverLog, QueueRecords, RunLog, TaskStore, observer, watch,
 };
 use crate::domain::kpi::KpiQuery;
 use crate::domain::stats::StatsQuery;
@@ -55,13 +55,13 @@ pub fn status<Q: ?Sized>(
 }
 
 /// `events`.
-pub fn events(queue: &(impl RunLog + EventReads), read: &EventsRead) -> Result<Value> {
+pub fn events(queue: &impl EventStore, read: &EventsRead) -> Result<Value> {
     watch::events_in(queue, &events_query(read)?)
 }
 
 /// `timeline`: one run's events in spans, its gaps measured on the
 /// queue's clock.
-pub fn timeline<Q: RunLog + EventReads>(
+pub fn timeline<Q: RunLog>(
     queue: &Q,
     sources: &(impl ObservationSources<Q> + ?Sized),
     read: &TimelineRead,

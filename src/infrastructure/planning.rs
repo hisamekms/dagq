@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::sqlite::{SqliteQueue, read_task};
 use crate::application::commands::planning::{Dependency, PlanningStore};
-use crate::application::{GoalReviewStore, RunLog, TaskStore};
+use crate::application::{EventStore, GoalReviewStore, TaskStore};
 use crate::domain::{
     FindingId, Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal,
     ProposalId, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
@@ -24,7 +24,7 @@ impl PlanningStore for SqliteQueue {
     }
 
     fn record_denial(&self, payload: Value) -> Result<()> {
-        RunLog::record_queue_event(self, EventKind::AuthorizationDenied, payload).map(drop)
+        EventStore::record_queue_event(self, EventKind::AuthorizationDenied, payload).map(drop)
     }
 
     fn add(&mut self, task: NewTask) -> Result<Task> {

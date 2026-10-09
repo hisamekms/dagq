@@ -112,7 +112,7 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        application::RunLog,
+        application::EventStore,
         domain::actor::{ActorContext, ActorRole},
         infrastructure::sqlite::SqliteQueue,
     };

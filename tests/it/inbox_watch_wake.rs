@@ -5,12 +5,12 @@
 //! no rule, is no attention at all (ADR-t1172-1): no watch returns it.
 
 use crate::common::{self, cli::*};
-use dagq::{application::RunLog, domain::EventKind, infrastructure::sqlite::SqliteQueue};
+use dagq::{application::EventStore, domain::EventKind, infrastructure::sqlite::SqliteQueue};
 use serde_json::{Value, json};
 use std::path::Path;
 
 fn record(db: &Path, kind: EventKind, payload: Value) -> i64 {
-    RunLog::record_queue_event(&SqliteQueue::open(db).unwrap(), kind, payload)
+    EventStore::record_queue_event(&SqliteQueue::open(db).unwrap(), kind, payload)
         .unwrap()
         .as_i64()
 }

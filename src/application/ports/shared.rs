@@ -1,10 +1,11 @@
 //! The ports every context uses (docs/design/architecture.md, section
 //! "portのmodule"): the clock and the IDs, the start of a process, the
-//! asks, and [`Queue`], the whole queue as one connection, which names the
-//! store ports of every context.
+//! asks, the logical stores [`EventStore`] and [`StateStore`]
+//! (ADR-t1662-2), and [`Queue`], the whole queue as one connection, which
+//! names the store ports of every context.
 
 use super::execution::{
-    EvalRounds, RunCoordination, RunLog, RunRecovery, RunTransitions, SessionRegistry,
+    EvalRounds, RunCoordination, RunReads, RunRecovery, RunTransitions, SessionRegistry,
 };
 use super::host::{HeadlessJobStore, HostOpsQueue, InboxWatchLog, SupervisorRegistry};
 use super::observation::{ObservationQueue, QueueRecords};
@@ -14,7 +15,8 @@ use super::planning::{
 };
 use crate::application::{timestamp, unix_seconds};
 use crate::domain::{
-    Ask, AskId, AskKind, AskOutcome, LeaseToken, NewAsk, RunId, SessionRole, TaskId,
+    Ask, AskId, AskKind, AskOutcome, EventFilter, EventId, EventKind, LeaseToken, NewAsk, RunEvent,
+    RunId, SessionRole, TaskId,
 };
 use anyhow::Result;
 use std::{
@@ -474,26 +476,160 @@ pub struct AskQuery {
     pub role: Option<SessionRole>,
 }
 
-/// The queue a use case works on: its tasks and goals, its runs and its
-/// asks. A use case that needs only some of it takes those ports instead,
-/// and a context that keeps a connection open takes it as its set of ports
-/// ([`ObservationQueue`], [`HostOpsQueue`]), which `Queue` upcasts to.
-pub trait Queue:
+/// The EventStore of ADR-t1662-2: what happened, appended only and read
+/// back in each run's order, on a run, a task, a goal or the queue itself.
+/// A state change records its event with the change in the same
+/// transaction of [`StateStore`]'s ports (D1); this port appends the events
+/// that change no state. The measurement layer reads only this store.
+pub trait EventStore {
+    /// The latest `limit` steps of the automatic update (its `update_*`
+    /// queue events), newest first in their jobs' order: each job's
+    /// `update_started` behind the steps the job wrote before it
+    /// ([`crate::domain::in_job_order`]).
+    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>>;
+    /// The latest `limit` events of the e2e gates, newest first: the
+    /// automatic update's (`update_e2e_passed`, `update_failed`) and the
+    /// runtime's e2e of the runs (`run_e2e_finished`, `run_e2e_failed`,
+    /// ADR-t1233-2 decision 5), for a marked test failing in a row.
+    fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+        self.update_events(limit)
+    }
+    /// Every run event, oldest first, for `stats`.
+    fn all_events(&self) -> Result<Vec<RunEvent>>;
+    /// Per task, its newest event of one of `kinds` (ADR-0069).
+    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>>;
+    fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>>;
+    fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool>;
+    fn record_runtime_event(
+        &self,
+        id: &RunId,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<()>;
+    /// When an observation of `mode` last started or finished.
+    fn last_observe(&self, mode: &str) -> Result<Option<i64>>;
+    /// The newest `run_events` id, 0 for an empty queue.
+    fn latest_event_id(&self) -> Result<EventId>;
+    /// Record `backend_call_failed`, on `run` when the call was for one.
+    fn record_backend_failure(&self, run: Option<&RunId>, payload: serde_json::Value)
+    -> Result<()>;
+    /// Record an event of the queue itself, on no task, goal or run.
+    fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
+    /// The newest event of `kind`, on whatever task, goal or run.
+    fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>>;
+    /// The newest `limit` events of `kind`, on whatever task, goal or run,
+    /// newest first.
+    fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>>;
+    /// The newest event of the queue itself (on no run) of one of `kinds`.
+    fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>>;
+    /// For each of `supervisors`, the newest event of one of `kinds` whose
+    /// payload names it as its `supervisor`, however many the others
+    /// recorded since; one with none has no entry.
+    fn latest_events_by_supervisor(
+        &self,
+        kinds: &[&str],
+        supervisors: &[&str],
+    ) -> Result<Vec<RunEvent>>;
+    /// The events of one of `kinds` with `after < id <= upto`, oldest
+    /// first, at most `limit`.
+    fn events_of_between(
+        &self,
+        kinds: &[&str],
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>>;
+    /// Events with `after < id <= upto` that `filter` keeps, oldest first,
+    /// at most `limit`, for `events`, `timeline` and `watch`. A pure read.
+    fn events_between(
+        &self,
+        after: EventId,
+        upto: EventId,
+        filter: &EventFilter,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>>;
+    /// Record `requester`, a headless job whose verdict the caller
+    /// applies, as `requested_by` on the events written until it is
+    /// replaced (ADR-t728-1 decision 1, task 730), and return
+    /// the `requested_by` it replaces, for the caller to put back with
+    /// [`EventStore::restore_request`] so a nested request does not clear
+    /// the outer one (task 783). A store that records no actors ignores it
+    /// and returns `None`.
+    fn request_as(
+        &self,
+        _requester: Option<&crate::domain::actor::ActorContext>,
+    ) -> Option<String> {
+        None
+    }
+    /// Put back the `requested_by` [`EventStore::request_as`] returned. A
+    /// store that records no actors ignores it.
+    fn restore_request(&self, _previous: Option<String>) {}
+    /// Record `actor` as the actor of the events written from now on and
+    /// return the one it replaces, for the [`crate::application::integrate::Integrator`]
+    /// to write the landing as itself (ADR-t728-2). A store that records no
+    /// actors ignores it and returns `None`.
+    fn act_as(
+        &self,
+        _actor: crate::domain::actor::ActorContext,
+    ) -> Option<crate::domain::actor::ActorContext> {
+        None
+    }
+}
+
+/// The StateStore of ADR-t1662-2: the current state of the tasks and
+/// goals, the planners' records, the runs, their leases and sessions, the
+/// supervisors and the asks, as the narrow ports of the contexts that own
+/// them. It adds no method: a use case takes the narrow ports it reads,
+/// never this bundle. A port that changes state records its event in the
+/// same transaction (D1).
+pub trait StateStore:
     TaskStore
+    + PlanningRecords
+    + PlanRequestStore
+    + DraftPlannerStore
+    + PlanReviewStore
+    + GoalReviewStore
+    + RunReads
     + RunTransitions
     + RunRecovery
     + RunCoordination
-    + SupervisorRegistry
     + SessionRegistry
-    + RunLog
-    + QueueRecords
-    + PlanningRecords
-    + AskStore
-    + DraftPlannerStore
-    + PlanRequestStore
-    + PlanReviewStore
-    + GoalReviewStore
+    + SupervisorRegistry
     + HeadlessJobStore
+    + AskStore
+{
+}
+
+impl<
+    T: TaskStore
+        + PlanningRecords
+        + PlanRequestStore
+        + DraftPlannerStore
+        + PlanReviewStore
+        + GoalReviewStore
+        + RunReads
+        + RunTransitions
+        + RunRecovery
+        + RunCoordination
+        + SessionRegistry
+        + SupervisorRegistry
+        + HeadlessJobStore
+        + AskStore
+        + ?Sized,
+> StateStore for T
+{
+}
+
+/// The queue a use case works on: its [`StateStore`], its [`EventStore`]
+/// and the records the contexts keep in its events ([`QueueRecords`],
+/// [`InboxWatchLog`], [`EvalRounds`]). A use case that needs only some of
+/// it takes those ports instead, and a context that keeps a connection
+/// open takes it as its set of ports ([`ObservationQueue`],
+/// [`HostOpsQueue`]), which `Queue` upcasts to.
+pub trait Queue:
+    StateStore
+    + EventStore
+    + QueueRecords
     + InboxWatchLog
     + EvalRounds
     + ObservationQueue
@@ -501,25 +637,4 @@ pub trait Queue:
 {
 }
 
-impl<
-    T: TaskStore
-        + RunTransitions
-        + RunRecovery
-        + RunCoordination
-        + SupervisorRegistry
-        + SessionRegistry
-        + RunLog
-        + QueueRecords
-        + PlanningRecords
-        + AskStore
-        + DraftPlannerStore
-        + PlanRequestStore
-        + PlanReviewStore
-        + GoalReviewStore
-        + HeadlessJobStore
-        + InboxWatchLog
-        + EvalRounds
-        + ?Sized,
-> Queue for T
-{
-}
+impl<T: StateStore + EventStore + QueueRecords + InboxWatchLog + EvalRounds + ?Sized> Queue for T {}

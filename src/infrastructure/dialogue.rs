@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::sqlite::SqliteQueue;
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
-use crate::application::{RunLog, TaskStore, marks};
+use crate::application::{EventStore, TaskStore, marks};
 use crate::domain::{
     Answerer, Ask, AskId, Finding, FindingId, FindingOutcome, FindingStatus, NewAsk, NewFinding,
     NewNote, PlannerId, RequestId, RunEvent,
@@ -25,7 +25,8 @@ pub struct DialogueQueue<'a> {
 
 impl DenialLog for DialogueQueue<'_> {
     fn record_denial(&self, payload: Value) -> Result<()> {
-        RunLog::record_queue_event(&*self.queue, EventKind::AuthorizationDenied, payload).map(drop)
+        EventStore::record_queue_event(&*self.queue, EventKind::AuthorizationDenied, payload)
+            .map(drop)
     }
 }
 

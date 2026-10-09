@@ -1,5 +1,5 @@
 //! Runs and events as read, and events recorded outside a transition
-//! ([`RunLog`]), and the records of the inbox's watcher
+//! ([`RunReads`], [`EventStore`]), and the records of the inbox's watcher
 //! ([`InboxWatchLog`], host運用's).
 
 use super::*;
@@ -29,7 +29,7 @@ impl SqliteQueue {
     }
 
     /// The latest `limit` events of the e2e gates, newest first (see
-    /// [`crate::application::RunLog::e2e_gate_events`]).
+    /// [`crate::application::EventStore::e2e_gate_events`]).
     pub fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         use crate::domain::event_kind::{RUN_E2E_FAILED, RUN_E2E_FINISHED};
         let kinds = [
@@ -871,26 +871,14 @@ impl InboxWatchLog for SqliteQueue {
     }
 }
 
-/// The [`RunLog`] port over the inherent methods above, which callers
+/// The [`RunReads`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
-impl RunLog for SqliteQueue {
-    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-        SqliteQueue::update_events(self, limit)
-    }
-    fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-        SqliteQueue::e2e_gate_events(self, limit)
-    }
+impl RunReads for SqliteQueue {
     fn active_runs(&self) -> Result<Vec<TaskRun>> {
         SqliteQueue::active_runs(self)
     }
     fn all_runs(&self) -> Result<Vec<TaskRun>> {
         SqliteQueue::all_runs(self)
-    }
-    fn all_events(&self) -> Result<Vec<RunEvent>> {
-        SqliteQueue::all_events(self)
-    }
-    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
-        SqliteQueue::latest_task_events(self, kinds)
     }
     fn run(&self, id: &RunId) -> Result<TaskRun> {
         SqliteQueue::run(self, id)
@@ -900,6 +888,42 @@ impl RunLog for SqliteQueue {
     }
     fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
         SqliteQueue::next_awaiting_integration(self)
+    }
+    fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
+        SqliteQueue::ended_run_workspaces(self)
+    }
+    fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
+        SqliteQueue::ended_run_worktrees(self)
+    }
+    fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>> {
+        SqliteQueue::ended_run_worktree(self, id)
+    }
+    fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
+        SqliteQueue::latest_runs_in_progress(self)
+    }
+    fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
+        SqliteQueue::runs_with_pending_push(self)
+    }
+    fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
+        SqliteQueue::run_in_workspace(self, workspace_id)
+    }
+}
+
+/// The [`EventStore`] port over the inherent methods above, in the same
+/// `run_events` table and transactions as the state the other ports
+/// change (ADR-t1662-2 D1).
+impl EventStore for SqliteQueue {
+    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+        SqliteQueue::update_events(self, limit)
+    }
+    fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+        SqliteQueue::e2e_gate_events(self, limit)
+    }
+    fn all_events(&self) -> Result<Vec<RunEvent>> {
+        SqliteQueue::all_events(self)
+    }
+    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
+        SqliteQueue::latest_task_events(self, kinds)
     }
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
         SqliteQueue::run_events(self, id)
@@ -915,29 +939,11 @@ impl RunLog for SqliteQueue {
     ) -> Result<()> {
         SqliteQueue::record_runtime_event(self, id, kind, payload)
     }
-    fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
-        SqliteQueue::ended_run_workspaces(self)
-    }
-    fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
-        SqliteQueue::ended_run_worktrees(self)
-    }
-    fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>> {
-        SqliteQueue::ended_run_worktree(self, id)
-    }
     fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
         SqliteQueue::last_observe(self, mode)
     }
     fn latest_event_id(&self) -> Result<EventId> {
         SqliteQueue::latest_event_id(self)
-    }
-    fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
-        SqliteQueue::latest_runs_in_progress(self)
-    }
-    fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
-        SqliteQueue::runs_with_pending_push(self)
-    }
-    fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
-        SqliteQueue::run_in_workspace(self, workspace_id)
     }
     fn record_backend_failure(
         &self,
@@ -989,6 +995,15 @@ impl RunLog for SqliteQueue {
         self.actors.set(actor);
         Some(previous)
     }
+    fn events_between(
+        &self,
+        after: EventId,
+        upto: EventId,
+        filter: &EventFilter,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        SqliteQueue::events_between(self, after, upto, filter, limit)
+    }
 }
 
 /// Insert an event of the queue itself in the open transaction `tx`, with
@@ -1003,18 +1018,6 @@ pub(super) fn queue_event(tx: &Connection, kind: EventKind, payload: &Value) -> 
     // The observer's session span (ADR-0048).
     crate::infrastructure::sessions::follow(tx, id, None, None, kind, payload)?;
     Ok(id)
-}
-
-impl crate::application::EventReads for SqliteQueue {
-    fn events_between(
-        &self,
-        after: EventId,
-        upto: EventId,
-        filter: &EventFilter,
-        limit: usize,
-    ) -> Result<Vec<RunEvent>> {
-        SqliteQueue::events_between(self, after, upto, filter, limit)
-    }
 }
 
 impl crate::application::ObserverLog for SqliteQueue {

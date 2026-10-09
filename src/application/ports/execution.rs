@@ -3,7 +3,7 @@
 //! sessions, the run log, the agent and its turns, the run's files, Git
 //! and the verification.
 
-use super::shared::{CommandSpec, Exit};
+use super::shared::{CommandSpec, EventStore, Exit};
 use crate::domain::{
     AskId, ClaimOutcome, CommitSha, EventId, EventKind, LeaseToken, PlannerId, PlannerOrigin,
     PlannerSession, ProposalId, Reason, RunEvent, RunId, RunLease, RunPlan, RunProcess, RunStatus,
@@ -1304,41 +1304,18 @@ impl fmt::Display for RunNotFound {
 
 impl std::error::Error for RunNotFound {}
 
-/// Runs and their events as read (ADR-0032's third kind), and the events
-/// recorded outside a run transition.
-pub trait RunLog {
-    /// The latest `limit` steps of the automatic update (its `update_*`
-    /// queue events), newest first in their jobs' order: each job's
-    /// `update_started` behind the steps the job wrote before it
-    /// ([`crate::domain::in_job_order`]).
-    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>>;
-    /// The latest `limit` events of the e2e gates, newest first: the
-    /// automatic update's (`update_e2e_passed`, `update_failed`) and the
-    /// runtime's e2e of the runs (`run_e2e_finished`, `run_e2e_failed`,
-    /// ADR-t1233-2 decision 5), for a marked test failing in a row.
-    fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-        self.update_events(limit)
-    }
+/// The runs as read (ADR-0032's third kind): the run rows of the
+/// [`StateStore`](super::shared::StateStore), which a run's transitions
+/// change with their events in one transaction.
+pub trait RunReads {
     fn active_runs(&self) -> Result<Vec<TaskRun>>;
     /// Every run of the queue, oldest first.
     fn all_runs(&self) -> Result<Vec<TaskRun>>;
-    /// Every run event, oldest first, for `stats`.
-    fn all_events(&self) -> Result<Vec<RunEvent>>;
-    /// Per task, its newest event of one of `kinds` (ADR-0069).
-    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>>;
     /// Returns [`RunNotFound`] only when the lookup succeeded with no row.
     fn run(&self, id: &RunId) -> Result<TaskRun>;
     fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>>;
     /// The run awaiting integration longest, by validation time.
     fn next_awaiting_integration(&self) -> Result<Option<TaskRun>>;
-    fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>>;
-    fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool>;
-    fn record_runtime_event(
-        &self,
-        id: &RunId,
-        kind: EventKind,
-        payload: serde_json::Value,
-    ) -> Result<()>;
     /// The sessions of the ended runs the triage does not take, for the
     /// supervisor's sweep.
     fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>>;
@@ -1348,10 +1325,6 @@ pub trait RunLog {
     /// Run `id` as [`Self::ended_run_worktrees`] would list it, read alone
     /// (task 1586); `None` when it would not be listed.
     fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>>;
-    /// When an observation of `mode` last started or finished.
-    fn last_observe(&self, mode: &str) -> Result<Option<i64>>;
-    /// The newest `run_events` id, 0 for an empty queue.
-    fn latest_event_id(&self) -> Result<EventId>;
     /// The latest run of every `in_progress` task, oldest first.
     fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>>;
     /// The `integrated` runs whose push of `main` failed after the latest
@@ -1359,62 +1332,16 @@ pub trait RunLog {
     fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>>;
     /// The run whose workspace is `workspace_id`, the latest one first.
     fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>>;
-    /// Record `backend_call_failed`, on `run` when the call was for one.
-    fn record_backend_failure(&self, run: Option<&RunId>, payload: serde_json::Value)
-    -> Result<()>;
-    /// Record an event of the queue itself, on no task, goal or run.
-    fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
-    /// The newest event of `kind`, on whatever task, goal or run.
-    fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>>;
-    /// The newest `limit` events of `kind`, on whatever task, goal or run,
-    /// newest first.
-    fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>>;
-    /// The newest event of the queue itself (on no run) of one of `kinds`.
-    fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>>;
-    /// For each of `supervisors`, the newest event of one of `kinds` whose
-    /// payload names it as its `supervisor`, however many the others
-    /// recorded since; one with none has no entry.
-    fn latest_events_by_supervisor(
-        &self,
-        kinds: &[&str],
-        supervisors: &[&str],
-    ) -> Result<Vec<RunEvent>>;
-    /// The events of one of `kinds` with `after < id <= upto`, oldest
-    /// first, at most `limit`.
-    fn events_of_between(
-        &self,
-        kinds: &[&str],
-        after: EventId,
-        upto: EventId,
-        limit: usize,
-    ) -> Result<Vec<RunEvent>>;
-    /// Record `requester`, a headless job whose verdict the caller
-    /// applies, as `requested_by` on the events written until it is
-    /// replaced (ADR-t728-1 decision 1, task 730), and return
-    /// the `requested_by` it replaces, for the caller to put back with
-    /// [`RunLog::restore_request`] so a nested request does not clear the
-    /// outer one (task 783). A store that records no actors ignores it and
-    /// returns `None`.
-    fn request_as(
-        &self,
-        _requester: Option<&crate::domain::actor::ActorContext>,
-    ) -> Option<String> {
-        None
-    }
-    /// Put back the `requested_by` [`RunLog::request_as`] returned. A store
-    /// that records no actors ignores it.
-    fn restore_request(&self, _previous: Option<String>) {}
-    /// Record `actor` as the actor of the events written from now on and
-    /// return the one it replaces, for the [`crate::application::integrate::Integrator`]
-    /// to write the landing as itself (ADR-t728-2). A store that records no
-    /// actors ignores it and returns `None`.
-    fn act_as(
-        &self,
-        _actor: crate::domain::actor::ActorContext,
-    ) -> Option<crate::domain::actor::ActorContext> {
-        None
-    }
 }
+
+/// The runs and the events together: a name for [`RunReads`] and the
+/// [`EventStore`], kept so the use cases that took the run log need not be
+/// rewritten at once (docs/design/architecture.md, section "portのmodule").
+/// It adds no method; a use case that reads only events takes
+/// [`EventStore`], and one that reads only runs takes [`RunReads`].
+pub trait RunLog: RunReads + EventStore {}
+
+impl<T: RunReads + EventStore + ?Sized> RunLog for T {}
 
 /// One file's identity and change times as [`Repository::landing_branch_stamp`]
 /// reads them; `None` in [`LandingBranchStamp`] is a file that is not there.

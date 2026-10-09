@@ -77,7 +77,7 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
   domainと同じ扱いで、domainとapplicationが参照してよい（L1・L3の例外）。
   gitを呼ぶ`emit`・`compute`はbuild scriptの側（`src/lib.rs`のdoc comment）。
 - 時刻とID生成: `application::ports`の`Clock`（壁時計と単調時計）・`IdGenerator`、実装は`infrastructure::clock`。
-- eventの記録: `RunLog::record_runtime_event`・`record_queue_event`と種類の`domain::event_kind::EventKind`。
+- eventの記録: `EventStore`の`record_runtime_event`・`record_queue_event`と種類の`domain::event_kind::EventKind`。
 - 人への問い合わせ: `asks`表と`AskStore`（`infrastructure::asks`）。
   読み取りは`queue_reads::shared`。
   askを開くのと、answerを自分の状態に適用するのは、そのaskの`kind`を持つcontextが行う（例: `worker_question`は実行と着地、`plan_review`は計画管理、`update`はhost運用）。
@@ -113,7 +113,7 @@ goal・task・proposalと、その検査と採否（plan review・goal review・
 **許す依存の向き**
 
 - 実行と着地の状態（`task_runs`・`run_leases`・`run_processes`）を書かない。
-  runの結果は`RunLog`の読み取りとeventで読む。
+  runの結果は`RunReads`とeventで読む。
   `ready --inherit`は実行と着地の`InheritStore`を呼ぶ（T10）。
 - 観測と分析の`findings`を書くのはfindingのproposalの採否（T6）だけ。
 
@@ -137,7 +137,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **公開するport**
 
-- `RunLog`の読み取りを全てのcontextに公開する。
+- `RunReads`を全てのcontextに公開する。
 - `Verifier`の環境とprogramの読み取りをhost運用の診断に公開する。
   検証コマンドの実行は内部。
 - `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
@@ -189,7 +189,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
   控えるのは実行と着地の`supervise::provider`で、同じ終わりを1回だけ控える（[Provider lifecycle](provider-lifecycle.md)）。
 - `watch`の`AskNotifier`を所有し、実装`application::watch::InboxNotifier`は実行と着地の`SessionRegistry::session_workspace`でinboxのworkspaceを読み、host運用の`WorkspaceBackend::notify`で送る。
 - KPIのpushの行き先（`reports`）をhost運用の`inbox_nudge`に公開する。
-- `ObserverLog`・`EventReads`・`ObservationQueue`は内部。
+- `ObserverLog`・`ObservationQueue`は内部。
 
 **許す依存の向き**
 
@@ -219,9 +219,8 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - `SupervisorRegistry`を実行と着地のループに、その読み取りを全てのcontextに公開する。
 - 空きdiskとsccacheの読み取り（`HostOpsState`）と`CleanupWatch::cleaning`・`defer`・`ensure_sccache`・`sccache_look`を実行と着地に公開する。
 - `HeadlessJobStore`（jobのprocessの台帳）を、jobを起動する各contextに公開する。
-- `InboxWatchLog`（inboxのwatcherの変化と不在の後ろ盾のqueue eventを、比較と書き込みを1つのwrite transactionで書く）は内部。
 - `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、actorの起動（`actor_executor`）を他のcontextに公開する。
-- `AuditFiles`・CIの見張りのpreflight・`HostOpsQueue`・`LifecycleQueue`は内部。
+- `InboxWatchLog`・`AuditFiles`・CIの見張りのpreflight・`HostOpsQueue`・`LifecycleQueue`は内部。
 
 **許す依存の向き**
 
@@ -236,12 +235,14 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 | module | port |
 | --- | --- |
 | `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`・`PlanningRecords` |
-| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`EvalRounds`・`SessionRegistry`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend` |
-| `observation`（観測と分析） | `EventReads`・`ObserverLog`・`MarkLog`・`QueueRecords`・`ObservationQueue` |
+| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`EvalRounds`・`SessionRegistry`・`RunReads`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend` |
+| `observation`（観測と分析） | `ObserverLog`・`MarkLog`・`QueueRecords`・`ObservationQueue` |
 | `host`（host運用） | `QueueOpener`・`HostOpsQueue`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry`・`InboxWatchLog` |
-| `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`Queue` |
+| `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`EventStore`・`StateStore`・`Queue` |
 
 `shared`は複数のcontextが同じ意味で使うportだけを持つ。
+`EventStore`・`StateStore`のportは`shared`、論理ストアは[計測](measurement.md#ssotとビュー)。
+`RunLog`は利用側を書き換えないために残す`RunReads`と`EventStore`の別名。
 
 ## 混在しているmodule
 
@@ -340,7 +341,7 @@ host運用の登録と引き継ぎは`handoff::Registration`が持ち、その�
 - **C7** 新しいportは、どのcontextが所有し、どのcontextに公開するかをこの文書の該当の節に足してから置く。
   検査: review。
 - **C8** `src/application/ports/`のmoduleは自分と`shared`のportだけを、moduleのpath（`super::shared::Clock`）で名指す。
-  例外は他のcontextを読む観測と分析、`Queue`の`shared`、`RunLog`を組に名指す`host`。
+  例外は他のcontextを読む観測と分析、`Queue`・`StateStore`の`shared`、`RunLog`を組に名指す`host`。
   検査: script（例外の中身と`crate::application::X`を通す名指しはreview）。
 
 ### transactionの規則
@@ -360,8 +361,7 @@ host運用の登録と引き継ぎは`handoff::Registration`が持ち、その�
   CIと`src/`を変えるtaskのverifyが流す。
 - 数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
 - SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
-- 許可の一覧は`.config/layer-deps-allow.txt`で、1行1項目の`規則 | path | 参照 | 行き先のtask | 理由`。
-  各欄の値と落ちる条件は一覧の先頭のコメントが持つ。
+- 許可の一覧は`.config/layer-deps-allow.txt`で、形式と落ちる条件は一覧の先頭のコメントが持つ。
 - 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置く（ADR-t1545-1決定4）。
   違反を直す変更は、同じ変更で一覧の項目と「[今の違反と行き先](#今の違反と行き先)」の行を消す。
 - 「検査: review」の規則と、境界を変えた差分がこの文書と許可の一覧を直しているかは、reviewのsubagent `architecture-boundaries`（[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が見て、scriptの規則は見ない。

@@ -436,7 +436,8 @@ pub trait HeadlessJobStore {
 /// without one, which host運用's `supervise::inbox_nudge` writes: queue
 /// events (on no task, goal or run) whose comparison and write share one
 /// write transaction, so a second supervisor and the process after an exec
-/// make neither twice (docs/design/architecture.md, "host運用").
+/// make neither twice. Internal to host運用 (docs/design/architecture.md,
+/// "host運用").
 pub trait InboxWatchLog {
     /// Record `inbox_nudged` with `payload` unless one with the same
     /// `absent_since` and `attempt` is recorded (ADR-t1433-5 decision 1

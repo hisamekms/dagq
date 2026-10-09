@@ -19,7 +19,7 @@ use std::{
 use common::cli::{invoke, ok};
 use common::lifecycle::{FakeLaunchd, FakeProcesses};
 use dagq::{
-    application::{RunLog, TaskStore},
+    application::{EventStore, RunReads, TaskStore},
     domain::{
         ActorContext, ClaimOutcome, TaskAction, TaskRun,
         queue_service::{API_VERSION, Principal, ServiceErrorCode, ServiceRequest, UseCase},
@@ -390,7 +390,7 @@ fn the_supervisor_starts_the_service_and_holds_its_claims_while_it_is_down() {
     }
     let _stop = Stop(control.clone());
     let runs = || {
-        RunLog::all_runs(&SqliteQueue::open(&db).unwrap())
+        RunReads::all_runs(&SqliteQueue::open(&db).unwrap())
             .unwrap()
             .len()
     };
@@ -597,7 +597,7 @@ fn supervisor_token(db: &Path) -> String {
 }
 
 fn request_stop(db: &Path, tokens: &[&str]) {
-    RunLog::record_queue_event(
+    EventStore::record_queue_event(
         &SqliteQueue::open(db).unwrap(),
         dagq::domain::EventKind::QueueServiceStopRequested,
         json!({"supervisors": tokens, "by": "down"}),

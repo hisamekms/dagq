@@ -1,26 +1,13 @@
 //! The ports of 観測と分析 (docs/design/architecture.md, section
-//! "portのmodule"): the reads of the queue's events and records, the
-//! observer's log and the marks.
+//! "portのmodule"): the reads of the queue's records, the observer's log
+//! and the marks, over the [`EventStore`] in [`super::shared`].
 
 use super::execution::{RunCoordination, RunLog};
 use super::host::SupervisorRegistry;
 use super::planning::{PlanningRecords, TaskStore};
-use super::shared::AskStore;
+use super::shared::{AskStore, EventStore};
 use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, TaskId};
 use anyhow::Result;
-
-/// The events `events`, `timeline` and `watch` read past a cursor.
-pub trait EventReads {
-    /// Events with `after < id <= upto` that `filter` keeps, oldest first,
-    /// at most `limit`. A pure read.
-    fn events_between(
-        &self,
-        after: EventId,
-        upto: EventId,
-        filter: &crate::domain::EventFilter,
-        limit: usize,
-    ) -> Result<Vec<RunEvent>>;
-}
 
 /// What one role wrote in a window ([`ObserverLog::written_by`]): finding
 /// ids it recorded, updated and closed (resolved or dismissed), its
@@ -62,7 +49,7 @@ pub trait ObserverLog {
 
 /// What the mark commands read and record (ADR-0051 decision 12): the
 /// queue's events, to resolve `--at` and list the marks, and a new event
-/// of the queue itself. Every [`RunLog`] is one.
+/// of the queue itself. Every [`EventStore`] is one.
 pub trait MarkLog {
     /// Every event of the queue, oldest first.
     fn events(&self) -> Result<Vec<RunEvent>>;
@@ -70,7 +57,7 @@ pub trait MarkLog {
     fn record_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
 }
 
-impl<T: RunLog + ?Sized> MarkLog for T {
+impl<T: EventStore + ?Sized> MarkLog for T {
     fn events(&self) -> Result<Vec<RunEvent>> {
         self.all_events()
     }

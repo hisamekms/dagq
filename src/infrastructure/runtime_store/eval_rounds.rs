@@ -158,7 +158,7 @@ mod tests {
     use super::*;
 
     fn requested(queue: &SqliteQueue) -> i64 {
-        crate::application::RunLog::record_queue_event(
+        crate::application::EventStore::record_queue_event(
             queue,
             EventKind::AgentEvalRequested,
             json!({"agent": "demo", "split": "dev"}),
@@ -196,7 +196,7 @@ mod tests {
                 )
                 .unwrap()
         );
-        crate::application::RunLog::record_queue_event(
+        crate::application::EventStore::record_queue_event(
             &queue,
             EventKind::AgentEvalFinished,
             json!({"eval_id": first}),
@@ -246,7 +246,7 @@ mod tests {
                 // Now "me", alive, owns it: another supervisor cannot take it.
                 assert!(!queue.take_up_eval_round(id, "other", &alive).unwrap());
             }
-            crate::application::RunLog::record_queue_event(
+            crate::application::EventStore::record_queue_event(
                 &queue,
                 EventKind::AgentEvalFinished,
                 json!({"eval_id": id}),
