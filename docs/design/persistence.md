@@ -254,7 +254,7 @@ schemaが安定したと人が決めるまで、SQLiteのCHECK制約を使わな
 
 - 対象はCHECKだけで、NOT NULL・UNIQUE・主キー・外部キー・DEFAULTはDBに残す。
 - 規則の置き場所: 値の一覧はdomainの型（`string_enum!`）、型で表せない規則は書き込みのportが書く前に検査し、破れていれば書かずにerrorにする（`src/domain/write_rules.rs`）。
-- 読むとき: askとeventのkind、taskの`change`は知らない値を寛容に読む。
+- 読むとき: askとeventのkind、taskの`change`と`execution_class`は知らない値を寛容に読む（区分の追加を互換にするため）。
   それ以外の列で規則の外の値を読むと、その読み込みはerrorで止まり（fail closed）、DBの行はその場で直さない。
 - 値を足すとき: kindの列への追加はmigrationを要さない。
   読む側がfail closedの列への追加は、古いバイナリが読めないので非互換の宣言のmigrationで下限を上げる（表は作り直さない）。

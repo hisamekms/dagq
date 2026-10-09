@@ -110,10 +110,21 @@ pub fn finish_validation(run: TaskRun, validation: &Validation) -> Result<Record
         ));
     } else if status == RunStatus::NeedsSession {
         let mut payload = json!({
-            "code": ReasonCode::EvidenceMissing,
+            "code": if validation.evidence_missing.is_empty()
+                && !validation.spike_result_missing.is_empty()
+            {
+                ReasonCode::SpikeResultMissing
+            } else {
+                ReasonCode::EvidenceMissing
+            },
             "checks": validation.evidence_missing,
             "reason": validation.reason,
         });
+        // A Spike's result the receipt lacks (ADR-t1487-1 decision 3),
+        // under the same kind: its resume asks the session to write it.
+        if !validation.spike_result_missing.is_empty() {
+            payload["spike_result"] = json!(validation.spike_result_missing);
+        }
         // Why `e2e` was required (ADR-t963-1 decision 2), when it was.
         if let Some(e2e) = validation
             .e2e_requirement
@@ -340,6 +351,7 @@ mod tests {
             code: None,
             receipt: Value::Null,
             evidence_missing,
+            spike_result_missing: Vec::new(),
             allowed_paths: if scope_violation.is_empty() {
                 Vec::new()
             } else {
@@ -437,6 +449,30 @@ mod tests {
         assert_eq!(
             events[1].payload,
             json!({"code": "evidence_missing", "checks": ["e2e"], "reason": "why"})
+        );
+    }
+
+    #[test]
+    fn a_park_for_a_spike_result_records_it_under_evidence_missing() {
+        let mut parked = validation(false, vec![], vec![]);
+        parked.spike_result_missing = vec!["spike_result.verdict".into()];
+        let (run_, events) = finish_validation(run(RunStatus::Validating), &parked).unwrap();
+        assert_eq!(run_.status(), RunStatus::NeedsSession);
+        assert_eq!(
+            kinds(&events),
+            [
+                event_kind::VALIDATION_FINISHED,
+                event_kind::EVIDENCE_MISSING
+            ]
+        );
+        assert_eq!(
+            events[1].payload,
+            json!({
+                "code": "spike_result_missing",
+                "checks": [],
+                "spike_result": ["spike_result.verdict"],
+                "reason": "why",
+            })
         );
     }
 

@@ -38,7 +38,9 @@ use crate::domain::{
     ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus, Task,
     TaskId, TaskRun,
     disk::{DiskConfig, gib},
-    event_kind, evidence_missing_reason, heartbeat_stale,
+    event_kind,
+    execution_class::missing_spike_result,
+    heartbeat_stale,
     landing_branch::{
         DEFAULT_REMOTE, LandingBranch, RemoteSource, RepositoryConfig, missing_remote,
     },
@@ -62,6 +64,9 @@ pub struct Rejection {
     /// The task's required checks the receipt does not back, when that is
     /// all that is wrong: the run waits for a session instead of failing.
     pub evidence_missing: Vec<EvidenceCheck>,
+    /// The fields of a Spike's result the receipt lacks (ADR-t1487-1
+    /// decision 3), likewise.
+    pub spike_result_missing: Vec<String>,
     /// The changed paths outside the task's `paths` (ADR-0029), when the
     /// run is otherwise sound: it waits for a session to take them out.
     pub scope_violation: Vec<String>,
@@ -105,7 +110,8 @@ pub fn check_receipt(
         receipt_path,
     )
     .with_e2e_paths(e2e_paths)
-    .with_task_e2e(task.required_evidence().contains(&EvidenceCheck::E2e));
+    .with_task_e2e(task.required_evidence().contains(&EvidenceCheck::E2e))
+    .with_spike(task.execution_class().is_spike());
     let worktree =
         || -> Result<&Path> { Ok(Path::new(run.worktree_path().context("missing worktree")?)) };
     loop {
@@ -131,6 +137,7 @@ pub fn check_receipt(
                     commit: rejection.commit,
                     receipt: facts.into_receipt(),
                     evidence_missing: rejection.evidence_missing,
+                    spike_result_missing: rejection.spike_result_missing,
                     scope_violation: rejection.scope_violation,
                 }));
             }
@@ -171,6 +178,33 @@ pub fn check_receipt(
             }
         }
     }
+}
+
+/// What the receipt `integrate` reads before landing lacks: the code, the
+/// reason and the payload of the park, with the missing checks in `checks`
+/// and, for a Spike, the fields of its result in `spike_result`
+/// (ADR-t1487-1 decision 3), so that the next resume asks for them; none
+/// when it lacks nothing.
+fn landing_gaps(
+    receipt: &Receipt,
+    required: &[EvidenceCheck],
+    task: &Task,
+) -> Option<(ReasonCode, String, Value)> {
+    let missing = receipt.missing_evidence(required);
+    let spike_missing = if task.execution_class().is_spike() {
+        missing_spike_result(receipt.spike_result())
+    } else {
+        Vec::new()
+    };
+    if missing.is_empty() && spike_missing.is_empty() {
+        return None;
+    }
+    let (code, reason) = validation::missing_reason(&missing, &spike_missing);
+    let mut payload = json!({"checks": missing});
+    if !spike_missing.is_empty() {
+        payload["spike_result"] = json!(spike_missing);
+    }
+    Some((code, reason, payload))
 }
 
 /// Which run `integrate` lands.
@@ -1112,6 +1146,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                     provider: None,
                     worker_mode: None,
                     wait_for_build: false,
+                    execution_class: Default::default(),
                 });
             FollowUpRegistration {
                 index,
@@ -1264,13 +1299,8 @@ fn land(
     }
     // A resumed session may have come back without the evidence it was
     // asked for; `checks` tells the next resume to ask for it again.
-    let missing = receipt.missing_evidence(&required);
-    if !missing.is_empty() {
-        return defer(
-            ReasonCode::EvidenceMissing.into(),
-            evidence_missing_reason(&missing),
-            json!({"checks": missing}),
-        );
+    if let Some((code, reason, payload)) = landing_gaps(&receipt, &required, task) {
+        return defer(code.into(), reason, payload);
     }
     // The receipt read here is the one that lands (or the one a session
     // rewrote after resolving), so it is recorded whatever happens next: the
@@ -2593,7 +2623,11 @@ mod tests {
     }
 
     fn task_requiring(paths: &[&str], required: &[EvidenceCheck]) -> Task {
-        Task::restore(TaskRecord {
+        Task::restore(task_record(paths, required)).unwrap()
+    }
+
+    fn task_record(paths: &[&str], required: &[EvidenceCheck]) -> TaskRecord {
+        TaskRecord {
             goal_priority: None,
             id: TaskId::new(7),
             title: "  land the change  ".to_owned(),
@@ -2612,8 +2646,8 @@ mod tests {
             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
             named_mode: None,
             wait_for_build: false,
-        })
-        .unwrap()
+            execution_class: Default::default(),
+        }
     }
 
     fn run(dir: &Path) -> TaskRun {
@@ -2770,6 +2804,49 @@ mod tests {
             panic!("the receipt backs no e2e the task asks for");
         };
         assert!(accepted.e2e_requirement.required);
+    }
+
+    /// The receipt read before landing: a Spike's without its result waits
+    /// for a session that writes it, with the fields under `spike_result`;
+    /// an implementation's is not asked for one (ADR-t1487-1 decision 3).
+    #[test]
+    fn a_landing_spike_receipt_without_its_result_is_left_to_a_session() {
+        let receipt = |result: Option<Value>| {
+            let mut text = json!({
+                "run_id": "r", "result": "succeeded", "commit": HEAD,
+                "tests": {"status": "passed", "evidence_or_reason": "ran"},
+                "e2e": {"status": "not_applicable", "evidence_or_reason": "runtime"},
+                "subagent_review": {"status": "passed", "evidence_or_reason": "ok"},
+            });
+            if let Some(result) = result {
+                text["spike_result"] = result;
+            }
+            Receipt::parse(&text.to_string()).unwrap()
+        };
+        let spike = Task::restore(TaskRecord {
+            execution_class: crate::domain::ExecutionClass::Spike,
+            ..task_record(&[], &[])
+        })
+        .unwrap();
+        let implementation = task_requiring(&[], &[]);
+        assert!(landing_gaps(&receipt(None), &[], &implementation).is_none());
+        let (code, reason, payload) = landing_gaps(&receipt(None), &[], &spike).unwrap();
+        assert_eq!(code, ReasonCode::SpikeResultMissing);
+        assert_eq!(reason, "spike result missing: spike_result");
+        assert_eq!(
+            payload,
+            json!({"checks": [], "spike_result": ["spike_result"]})
+        );
+        let complete = json!({
+            "verdict": "does_not_hold", "grounds": "g", "evidence": "e",
+            "conditions": {"commit": HEAD, "tools": "t", "provider": "p", "environment": "e"},
+        });
+        assert!(landing_gaps(&receipt(Some(complete.clone())), &[], &spike).is_none());
+        let (code, _, payload) =
+            landing_gaps(&receipt(Some(complete)), &[EvidenceCheck::E2e], &spike).unwrap();
+        assert_eq!(code, ReasonCode::EvidenceMissing);
+        // `checks` is what the next resume reads to ask again.
+        assert_eq!(payload, json!({"checks": ["e2e"]}));
     }
 
     /// A Codex worker has no subagent: its receipt reports subagent_review

@@ -199,6 +199,13 @@ enum Command {
         /// `claim_deferrals` (reason not_in_build).
         #[arg(long)]
         wait_for_build: bool,
+        // ADR-t1487-1.
+        /// Whether the run implements (implementation) or investigates a premise of the plan by
+        /// experiment, prototype, build or measurement (spike), independent of --change. A
+        /// spike's receipt must carry its result (`spike_result`), or validation parks the run
+        /// as needs_session (spike_result_missing). Omitted: implementation.
+        #[arg(long, value_parser = EXECUTION_CLASSES)]
+        execution_class: Option<String>,
     },
     /// List one page of tasks, newest first: unfinished ones unless --status or --all says otherwise.
     /// Prints {"tasks", "next", "total"}; pass `next` to --before for the following page (null: none).
@@ -419,6 +426,10 @@ enum Command {
         /// Withdraw --wait-for-build: claim it as soon as its dependencies are completed.
         #[arg(long, group = "field")]
         no_wait_for_build: bool,
+        /// Whether the run implements or investigates (`add --execution-class`): implementation
+        /// or spike.
+        #[arg(long, group = "field", value_parser = EXECUTION_CLASSES)]
+        execution_class: Option<String>,
     },
     // ADR-t1639-1, ADR-t1850-1.
     /// Give a draft, submitted, ready or in-progress task a priority of its own (`add --priority`),
@@ -1580,6 +1591,9 @@ const PRIORITIES: [&str; 5] = ["interrupt", "urgent", "high", "normal", "low"];
 
 /// The providers a task's worker may run on (ADR-t813-2 decision 1).
 const PROVIDERS: [&str; 2] = ["claude", "codex"];
+
+/// The execution classes of a task (ADR-t1487-1 decision 1).
+const EXECUTION_CLASSES: [&str; 2] = ["implementation", "spike"];
 
 use reads::{parse_kpi_area, parse_kpi_change};
 
@@ -3369,6 +3383,7 @@ fn execute(cli: Cli) -> Result<Value> {
             headless,
             interactive,
             wait_for_build,
+            execution_class,
         } => serde_json::to_value(
             planning!().add(NewTask {
                 title,
@@ -3393,6 +3408,11 @@ fn execute(cli: Cli) -> Result<Value> {
                     _ => None,
                 },
                 wait_for_build,
+                execution_class: execution_class
+                    .as_deref()
+                    .map(str::parse)
+                    .transpose()?
+                    .unwrap_or_default(),
             })?,
         )?,
         Command::Show { id, full, events } => {
@@ -3597,6 +3617,7 @@ fn execute(cli: Cli) -> Result<Value> {
             interactive,
             wait_for_build,
             no_wait_for_build,
+            execution_class,
         } => {
             // A list flag replaces the list; its --no- flag empties it.
             let replaced =
@@ -3622,6 +3643,7 @@ fn execute(cli: Cli) -> Result<Value> {
                         _ => None,
                     },
                     wait_for_build: (wait_for_build || no_wait_for_build).then_some(wait_for_build),
+                    execution_class: execution_class.as_deref().map(str::parse).transpose()?,
                 },
             )?)?
         }

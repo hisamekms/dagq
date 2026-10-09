@@ -167,7 +167,8 @@ fn graph_reports_unfinished_dependencies_releases_and_the_critical_chain() {
         tasks[1],
         serde_json::json!({
             "id": 2, "status": "ready", "priority": "normal", "priority_source": "default",
-            "priority_by": "ai", "effective_priority": "normal", "title": "root", "goal_id": null,
+            "priority_by": "ai", "effective_priority": "normal",
+            "execution_class": "implementation", "title": "root", "goal_id": null,
             "depends_on": [], "goal_dependencies": [], "blocks": [3], "unblocks": 2,
             "ready_after": [],
         })

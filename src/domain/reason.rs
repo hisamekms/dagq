@@ -60,6 +60,7 @@ reason_codes! {
     WorkerFailed => "worker_failed": "the receipt reports the run as failed",
     EvidenceFailed => "evidence_failed": "the receipt reports a check the task does not require as failed",
     EvidenceMissing => "evidence_missing": "the receipt does not back a check the task requires",
+    SpikeResultMissing => "spike_result_missing": "the receipt of a Spike's run lacks its result (spike_result: the verdict, its grounds, where the evidence is, the conditions it was taken under) or holds it in the wrong shape",
     CommitMismatch => "commit_mismatch": "the receipt's commit is not the run branch's new head on top of its base",
     WorktreeDirty => "worktree_dirty": "the worktree has uncommitted changes",
     ScopeViolation => "scope_violation": "the diff changes paths outside the task's --paths",

@@ -44,6 +44,7 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap()
         .id();

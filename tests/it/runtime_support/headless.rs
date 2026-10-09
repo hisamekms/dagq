@@ -33,6 +33,7 @@ pub fn headless_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBu
             provider: Some(Provider::Claude),
             worker_mode: Some(WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     assert_eq!(task.id(), TASK);

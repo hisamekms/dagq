@@ -3863,6 +3863,7 @@ fn spawn_validation(
                 code: None,
                 receipt: serde_json::to_value(accepted.receipt)?,
                 evidence_missing: Vec::new(),
+                spike_result_missing: Vec::new(),
                 scope_violation: Vec::new(),
                 allowed_paths: Vec::new(),
                 e2e_requirement: Some(accepted.e2e_requirement),
@@ -3881,6 +3882,7 @@ fn spawn_validation(
                         .transpose()?
                         .unwrap_or(Value::Null),
                     evidence_missing: rejection.evidence_missing,
+                    spike_result_missing: rejection.spike_result_missing,
                     allowed_paths: if rejection.scope_violation.is_empty() {
                         Vec::new()
                     } else {

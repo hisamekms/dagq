@@ -666,6 +666,7 @@ mod tests {
             provider: None,
             worker_mode: None,
             wait_for_build: false,
+            execution_class: Default::default(),
         }
     }
 

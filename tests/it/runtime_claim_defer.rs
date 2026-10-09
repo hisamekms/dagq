@@ -32,6 +32,7 @@ fn add_task(queue: &mut SqliteQueue, title: &str, paths: &[&str], priority: Prio
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue
@@ -97,6 +98,7 @@ fn hot_fixture() -> (Fixture, PathBuf, PathBuf) {
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap()
         .id();

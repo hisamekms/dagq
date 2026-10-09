@@ -133,6 +133,7 @@ fn verified_task(
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap()
 }
@@ -157,6 +158,7 @@ fn task_with_evidence(id: i64, required_evidence: Vec<EvidenceCheck>) -> Task {
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap()
 }
@@ -327,6 +329,56 @@ fn the_worker_and_resume_prompts_leave_the_e2e_to_the_runtime() {
         assert!(!resumed.contains("Codex worker E2E"), "{resumed}");
         assert!(!resumed.contains("E2E marks"), "{resumed}");
     }
+}
+
+/// ADR-t1487-1 decisions 3 and 4: only a Spike's run is told how to
+/// write its result and that the limit is its own to keep.
+#[test]
+fn only_a_spike_prompt_asks_for_the_spike_result() {
+    let implementation = task_with_evidence(7, Vec::new());
+    let spike = Task::restore(TaskRecord {
+        goal_priority: None,
+        id: TaskId::new(7),
+        title: "work".into(),
+        description: String::new(),
+        acceptance: String::new(),
+        verification_commands: Vec::new(),
+        required_evidence: Vec::new(),
+        paths: Vec::new(),
+        priority: Default::default(),
+        change: None,
+        status: TaskStatus::InProgress,
+        goal_id: None,
+        context: String::new(),
+        created_at: String::new(),
+        updated_at: String::new(),
+        worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
+        named_mode: None,
+        wait_for_build: false,
+        execution_class: crate::domain::ExecutionClass::Spike,
+    })
+    .unwrap();
+    let worker = run_on(Provider::Claude, WorkerMode::Headless);
+    let text = |task: &Task| {
+        prompt(task, &worker, None, &[], &[], &[], None, &[])
+            .unwrap()
+            .text
+    };
+    let spike = text(&spike);
+    assert!(spike.contains(SPIKE_LINES), "{spike}");
+    for verdict in ["holds", "does_not_hold", "unresolved"] {
+        assert!(spike.contains(verdict), "{verdict}");
+    }
+    assert!(spike.contains("which the runtime does not enforce"));
+    // Before the receipt contract, with the evidence lines.
+    assert!(spike.find(SPIKE_LINES) < spike.find("Write a completion receipt"));
+    let implementation = text(&implementation);
+    assert!(!implementation.contains("spike_result"), "{implementation}");
+    assert!(
+        worker_template(Provider::Claude)
+            .unwrap()
+            .contains(SPIKE_LINES)
+    );
 }
 
 /// Goal 52 acceptance (3): what the runtime tells a worker of building,
@@ -521,6 +573,7 @@ fn long_task(id: i64, status: TaskStatus, paths: &[&str]) -> Task {
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap()
 }
@@ -964,6 +1017,7 @@ fn sized_task(id: i64, status: TaskStatus, bytes: usize) -> Task {
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap()
 }
@@ -1565,6 +1619,7 @@ fn headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit() {
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap();
     for provider in [Provider::Claude, Provider::Codex] {
@@ -1930,6 +1985,7 @@ fn a_path_outside_the_scope_is_a_failed_receipt_and_asks_follow_the_repository_r
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap();
     let texts = session_texts(&scoped, &run_on(Provider::Claude, WorkerMode::Headless));
@@ -2558,6 +2614,7 @@ fn grouped_task(id: i64, title: &str, goal: Option<i64>, context: &str) -> Task 
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap()
 }
@@ -2903,6 +2960,7 @@ fn big_task(id: i64, bytes: usize) -> Task {
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap()
 }
@@ -3661,6 +3719,7 @@ fn task_sized(id: i64, title: usize, description: usize, context: usize) -> Task
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap()
 }
@@ -3724,6 +3783,7 @@ fn recovery_task_counts_once_whichever_fields_are_cut() {
             worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
             named_mode: None,
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
         recovery_prompt(
@@ -4464,6 +4524,7 @@ fn worker_task(id: i64, size: usize, goal: Option<i64>) -> Task {
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap()
 }
@@ -4764,6 +4825,7 @@ fn task_with_lists(paths: Vec<String>, verification_commands: Vec<String>) -> Ta
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     })
     .unwrap()
 }

@@ -149,6 +149,7 @@ mod runtime_sccache;
 mod runtime_session;
 mod runtime_slot_limits;
 mod runtime_slot_order;
+mod runtime_spike;
 mod runtime_stale_receipt;
 mod runtime_stall_end;
 mod runtime_sweep;

@@ -786,3 +786,142 @@ fn add_evidence_is_stored_and_shown() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("coverage"));
 }
+
+/// ADR-t1487-1 decision 1: `add --execution-class spike` names a Spike, a
+/// task added without one implements; `show`, `list`, `candidates` and
+/// `graph` (json and d2) print the class, `edit` changes
+/// it while the task is a draft or submitted and records the change, and
+/// refuses it once the task is ready.
+#[test]
+fn the_execution_class_is_added_shown_edited_and_drawn() {
+    let (_dir, db) = queue();
+    // High, so the near-term diagram draws both.
+    let spike = ok(
+        &db,
+        &[
+            "add",
+            "measure it",
+            "--execution-class",
+            "spike",
+            "--priority",
+            "high",
+        ],
+    );
+    assert_eq!(spike["execution_class"], "spike");
+    let plain = ok(
+        &db,
+        &[
+            "add",
+            "build it",
+            "--change",
+            "measure",
+            "--priority",
+            "high",
+        ],
+    );
+    assert_eq!(plain["execution_class"], "implementation");
+    let (spike, plain) = (spike["id"].to_string(), plain["id"].to_string());
+    assert_eq!(
+        ok(&db, &["show", &spike])["task"]["execution_class"],
+        "spike"
+    );
+    assert_eq!(
+        ok(&db, &["show", &plain])["task"]["execution_class"],
+        "implementation"
+    );
+    let classes = |listed: &Value| -> Vec<(i64, String)> {
+        listed["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|task| {
+                (
+                    task["id"].as_i64().unwrap(),
+                    task["execution_class"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let expected = vec![(2, "implementation".to_owned()), (1, "spike".to_owned())];
+    assert_eq!(classes(&ok(&db, &["list"])), expected);
+    assert_eq!(classes(&ok(&db, &["list", "--full"])), expected);
+    assert!(
+        !invoke(&db, &["add", "x", "--execution-class", "measure"])
+            .status
+            .success()
+    );
+
+    // A draft is edited to the other class and back, recorded as a change.
+    let edited = ok(&db, &["edit", &plain, "--execution-class", "spike"]);
+    assert_eq!(edited["execution_class"], "spike");
+    let event = ok(&db, &["show", &plain, "--full"])["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["kind"] == "task_edited")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        event["payload"]["from"],
+        json!({"execution_class": "implementation"})
+    );
+    assert_eq!(event["payload"]["to"], json!({"execution_class": "spike"}));
+    ok(
+        &db,
+        &["edit", &plain, "--execution-class", "implementation"],
+    );
+
+    // A submitted task still is.
+    let submitted = submit_from(&db, Some("W-1"), None, &[&spike, &plain]);
+    assert!(
+        submitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&submitted.stderr)
+    );
+    ok(
+        &db,
+        &["edit", &spike, "--execution-class", "implementation"],
+    );
+    let back = ok(&db, &["edit", &spike, "--execution-class", "spike"]);
+    assert_eq!(back["status"], "submitted");
+    assert_eq!(back["execution_class"], "spike");
+
+    // Once ready (claimable), the class is fixed.
+    for id in [&spike, &plain] {
+        ok(&db, &["ready", id, "--bypass-review"]);
+    }
+    assert!(
+        !invoke(
+            &db,
+            &["edit", &spike, "--execution-class", "implementation"]
+        )
+        .status
+        .success()
+    );
+    let candidates = ok(&db, &["candidates"])["candidates"].clone();
+    let by_id = |tasks: &Value, id: i64| -> String {
+        tasks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == id)
+            .unwrap_or_else(|| panic!("{id}: {tasks}"))["execution_class"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(by_id(&candidates, 1), "spike");
+    assert_eq!(by_id(&candidates, 2), "implementation");
+    let graph = ok(&db, &["graph"]);
+    assert_eq!(by_id(&graph["tasks"], 1), "spike");
+    assert_eq!(by_id(&graph["tasks"], 2), "implementation");
+    let d2 = invoke(&db, &["graph", "--format", "d2"]);
+    assert!(
+        d2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&d2.stderr)
+    );
+    let source = String::from_utf8(d2.stdout).unwrap();
+    assert!(source.contains("#1 spike\\nmeasure it"), "{source}");
+    assert!(source.contains("#2\\nbuild it"), "{source}");
+}

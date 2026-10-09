@@ -922,6 +922,7 @@ pub mod e2e_quarantine;
 mod error;
 pub mod event_kind;
 pub use event_kind::EventKind;
+pub mod execution_class;
 pub mod exit;
 pub mod finding;
 pub mod follow_up;
@@ -1004,6 +1005,7 @@ pub use authorization::{AuthorizationError, Authorizer, Capability, Resource, St
 pub use change::{ChangeSet, TaskChange};
 pub use error::DomainError;
 use error::require;
+pub use execution_class::ExecutionClass;
 pub use finding::{
     DISMISS_OPTION, Finding, FindingAnswer, FindingOutcome, FindingQuery, FindingStatus,
     FindingTarget, FindingUpdate, FindingView, Impact, ImprovementLimit, MAX_FINDING_PLANNERS,
@@ -1838,6 +1840,7 @@ mod tests {
             provider: None,
             worker_mode: None,
             wait_for_build: false,
+            execution_class: Default::default(),
         };
         assert_eq!(
             task.validate().unwrap_err().to_string(),
@@ -1875,6 +1878,7 @@ mod tests {
             provider: None,
             worker_mode: None,
             wait_for_build: false,
+            execution_class: Default::default(),
         };
         assert_eq!(
             task.required_evidence(),

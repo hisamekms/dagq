@@ -35,6 +35,7 @@ fn add_task(
             provider,
             worker_mode: mode,
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue

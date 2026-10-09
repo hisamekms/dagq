@@ -1096,6 +1096,7 @@ pub fn prompt(
         )
     };
     evidence.push_str(&e2e_line(task, e2e_paths));
+    evidence.push_str(spike_lines(task));
     // The declared scope (ADR-0029): changing anything else parks the run.
     let paths = if task.paths().is_empty() {
         String::new()
@@ -1201,8 +1202,14 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         },
         named_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     };
-    let task = Task::restore(record())?;
+    // A Spike, so the full prompt carries its section (ADR-t1487-1); the
+    // bare one below is an implementation.
+    let task = Task::restore(TaskRecord {
+        execution_class: crate::domain::ExecutionClass::Spike,
+        ..record()
+    })?;
     let run = TaskRun::restore(RunRecord {
         id: RunId::new(RUN)?,
         task_id: task.id(),
@@ -1285,6 +1292,22 @@ pub fn worker_template(provider: Provider) -> Result<String> {
     let empty = prompt(&bare, &run, None, &[], &[], &[], Some(&by_hand), &[])?.text;
     Ok(format!("{full}\n{empty}"))
 }
+
+/// What the worker's prompt says to a Spike's run (ADR-t1487-1 decisions
+/// 2-4): a negative or unresolved verdict is a result, the limit in the
+/// description is the agent's to keep (the runtime adds no timebox), a
+/// premise of the worker's route holds only when checked on it, and the
+/// receipt's `spike_result` validation requires. Empty for an
+/// implementation's run.
+fn spike_lines(task: &Task) -> &'static str {
+    if task.execution_class().is_spike() {
+        SPIKE_LINES
+    } else {
+        ""
+    }
+}
+
+pub(super) const SPIKE_LINES: &str = "Spike: this task is a Spike (execution class spike). It settles a question the plan depends on by experiment, prototype, build or measurement; its answer is the deliverable, so a negative or unresolved verdict is a result, not a failure: write result succeeded with the verdict the evidence supports, and failed only when you could not investigate at all. Keep within the limit (time, attempts) the description gives: it is an instruction to you, which the runtime does not enforce; at the limit, stop and report what you found, unresolved if it does not settle the question. A premise about permissions, headless runs or the provider holds only when you checked it on this run's own route (not a planner's, a subagent's or a person's terminal). Commit the evidence the description asks for where it says, or name where it is. Do not put the next step in follow_ups or start it yourself: write it into grounds, and a planner decides from the result. The receipt must also carry spike_result, or the run waits for a session to add it: \"spike_result\":{\"verdict\":\"holds, does_not_hold or unresolved\",\"grounds\":\"why the evidence gives this verdict, and what it means for the plan\",\"evidence\":\"where the evidence is (a committed path, a log, the receipt)\",\"conditions\":{\"commit\":\"the commit examined\",\"tools\":\"the tools and their versions\",\"provider\":\"the provider and route it ran on\",\"environment\":\"the OS, machine and settings\"},\"spent\":\"the time and attempts used against the limit\"}. Every field but spent must be non-blank.\n";
 
 /// What the worker's prompt says of the e2e (ADR-t1233-2 decision 1): the
 /// runtime runs it on the host after the review passes, so the worker does

@@ -5,8 +5,8 @@
 use serde::Serialize;
 
 use super::{
-    DomainError, EvidenceCheck, GoalId, NewTask, Priority, PrioritySource, Provider, TaskChange,
-    TaskEdit, TaskId, TaskRecord, TaskStatus, base_priority,
+    DomainError, EvidenceCheck, ExecutionClass, GoalId, NewTask, Priority, PrioritySource,
+    Provider, TaskChange, TaskEdit, TaskId, TaskRecord, TaskStatus, base_priority,
     plan_request::{PriorityBy, RecordedOrigin},
     require,
     scope::{dedup_globs, validate_path_globs},
@@ -145,6 +145,10 @@ pub struct Task {
     /// declared.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     wait_for_build: bool,
+    /// Whether its run implements or investigates a premise of the plan
+    /// (ADR-t1487-1 decision 1), independent of `change`; a Spike's
+    /// receipt must carry its result.
+    execution_class: ExecutionClass,
     /// The provider and mode its worker runs on (ADR-t813-2 decision 1,
     /// ADR-t1340-1): Claude headless unless it asks for another; shown as
     /// `provider` and `worker_mode`, resolved.
@@ -193,6 +197,7 @@ impl Task {
             origin: RecordedOrigin::UNKNOWN,
             change: new.change,
             wait_for_build: new.wait_for_build,
+            execution_class: new.execution_class,
             title: new.title,
             description: new.description,
             acceptance: new.acceptance,
@@ -235,6 +240,7 @@ impl Task {
             origin: RecordedOrigin::UNKNOWN,
             change: record.change,
             wait_for_build: record.wait_for_build,
+            execution_class: record.execution_class,
             worker: record.worker,
             named_mode: record.named_mode,
             status: record.status,
@@ -333,6 +339,11 @@ impl Task {
     /// its dependencies (ADR-t1632-1).
     pub fn wait_for_build(&self) -> bool {
         self.wait_for_build
+    }
+
+    /// Whether its run implements or investigates (ADR-t1487-1).
+    pub fn execution_class(&self) -> ExecutionClass {
+        self.execution_class
     }
 
     pub fn worker(&self) -> Worker {
@@ -575,6 +586,9 @@ pub fn edit(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
     if let Some(wait) = edit.wait_for_build {
         task.wait_for_build = wait;
     }
+    if let Some(class) = edit.execution_class {
+        task.execution_class = class;
+    }
     task.worker = task.worker.with(edit.provider, edit.worker_mode)?;
     // A new provider without a mode goes back to its default; a mode given
     // is named. Neither keeps what the task named.
@@ -731,6 +745,7 @@ mod tests {
             provider: None,
             worker_mode: None,
             wait_for_build: false,
+            execution_class: Default::default(),
         }
     }
 
@@ -754,6 +769,7 @@ mod tests {
             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
             named_mode: None,
             wait_for_build: false,
+            execution_class: Default::default(),
         }
     }
 
@@ -1354,10 +1370,13 @@ mod tests {
                 provider: None,
                 worker_mode: None,
                 wait_for_build: Some(true),
+                execution_class: Some(ExecutionClass::Spike),
             },
         )
         .unwrap();
         assert!(edited.wait_for_build());
+        assert_eq!(edited.execution_class(), ExecutionClass::Spike);
+        assert_eq!(kept.execution_class(), ExecutionClass::Implementation);
         // Shown only when declared (ADR-t1632-1).
         assert_eq!(
             serde_json::to_value(&edited).unwrap()["wait_for_build"],

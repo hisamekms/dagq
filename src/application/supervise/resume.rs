@@ -14,6 +14,17 @@ fn resume_required(task: &Task, run: &TaskRun) -> Vec<EvidenceCheck> {
     required_of(task.required_evidence(), run.actual_provider())
 }
 
+/// Whether `receipt` backs the `required` checks and, for a Spike's run
+/// (`spike`), carries its result (ADR-t1487-1 decision 3): what validation
+/// and the landing ask of it, so a receipt short of either has not
+/// resolved the run.
+fn backs_demands(receipt: &Receipt, required: &[EvidenceCheck], spike: bool) -> bool {
+    receipt.missing_evidence(required).is_empty()
+        && (!spike
+            || crate::domain::execution_class::missing_spike_result(receipt.spike_result())
+                .is_empty())
+}
+
 impl Supervisor<'_> {
     /// The `needs_session` runs to resume with attempts left (ADR-0019
     /// decision 1), oldest first: a run with a lease that is not stale, or
@@ -202,6 +213,7 @@ impl Supervisor<'_> {
             run_id: run.id(),
             receipt: &receipt,
             required: &resume_required(&task, run),
+            spike: task.execution_class().is_spike(),
             head: &head,
             main,
             clean,
@@ -498,6 +510,7 @@ impl Supervisor<'_> {
             exit_requested: None,
 
             required_evidence: resume_required(&task, run),
+            spike: task.execution_class().is_spike(),
             approved: self
                 .queue
                 .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?,
@@ -609,6 +622,7 @@ impl Supervisor<'_> {
             start: None,
             exit_requested,
             required_evidence: resume_required(&task, run),
+            spike: task.execution_class().is_spike(),
             approved,
             silent: false,
             exit_for_silence,
@@ -802,6 +816,8 @@ pub(super) struct SkipFacts<'a> {
     pub(super) receipt: &'a Receipt,
     /// The checks its receipt must back ([`resume_required`]).
     pub(super) required: &'a [EvidenceCheck],
+    /// Its task is a Spike, whose receipt must carry the result.
+    pub(super) spike: bool,
     /// The head of its worktree.
     pub(super) head: &'a CommitSha,
     pub(super) main: &'a CommitSha,
@@ -821,7 +837,7 @@ pub(super) fn skips_resume(facts: &SkipFacts<'_>) -> bool {
     facts.unresolved_since_park
         && receipt.run_id() == facts.run_id.as_str()
         && receipt.result() == ReceiptResult::Succeeded
-        && receipt.missing_evidence(facts.required).is_empty()
+        && backs_demands(receipt, facts.required, facts.spike)
         && receipt.names_commit(facts.head.as_str())
         && facts.head != facts.main
         && facts.clean
@@ -975,6 +991,9 @@ pub(super) struct ResumeWatch {
     /// The task's required checks: a rewritten receipt still without them
     /// has not resolved the run.
     pub(super) required_evidence: Vec<EvidenceCheck>,
+    /// Its task is a Spike: a rewritten receipt without the result has
+    /// not resolved the run either.
+    pub(super) spike: bool,
     /// Its integrate was called: resolved, it exits and lands without a
     /// review; otherwise it stays open for validation and review.
     pub(super) approved: bool,
@@ -1078,6 +1097,7 @@ pub(super) fn resume_outcome(
     receipt: Option<&Receipt>,
     run_id: &RunId,
     required: &[EvidenceCheck],
+    spike: bool,
     head: Option<&CommitSha>,
 ) -> ResumeOutcome {
     match receipt {
@@ -1087,7 +1107,7 @@ pub(super) fn resume_outcome(
         ),
         Some(receipt)
             if head.is_some_and(|head| receipt.names_commit(head.as_str()))
-                && receipt.missing_evidence(required).is_empty() =>
+                && backs_demands(receipt, required, spike) =>
         {
             ResumeOutcome::Resolved
         }
@@ -1248,6 +1268,7 @@ impl ResumeWatch {
             rewritten_receipt(files, &self.receipt_path, self.started_at).as_ref(),
             run.id(),
             &self.required_evidence,
+            self.spike,
             head,
         )
     }
@@ -1617,6 +1638,7 @@ mod tests {
             run_id: &run,
             receipt: &resolved,
             required: &[],
+            spike: false,
             head: &head,
             main: &main,
             clean: true,
@@ -1705,6 +1727,43 @@ mod tests {
             required: &[EvidenceCheck::SubagentReview],
             ..base
         }));
+        // A Spike's receipt must carry its result too (ADR-t1487-1).
+        assert!(!skips_resume(&SkipFacts {
+            spike: true,
+            ..base
+        }));
+        let with_result = spike_receipt(&head);
+        assert!(skips_resume(&SkipFacts {
+            receipt: &with_result,
+            spike: true,
+            ..base
+        }));
+    }
+
+    /// [`receipt`] of run `r` with a complete `spike_result`.
+    fn spike_receipt(commit: &CommitSha) -> Receipt {
+        let mut text: Value =
+            serde_json::from_str(&receipt_text("r", "succeeded", commit, false)).unwrap();
+        text["spike_result"] = json!({
+            "verdict": "unresolved", "grounds": "g", "evidence": "e",
+            "conditions": {"commit": commit, "tools": "t", "provider": "p", "environment": "e"},
+        });
+        Receipt::parse(&text.to_string()).unwrap()
+    }
+
+    /// A resumed Spike's rewritten receipt resolves the run only with its
+    /// result (ADR-t1487-1 decision 3).
+    #[test]
+    fn a_spike_resume_resolves_only_with_its_result() {
+        let run = RunId::new("r").unwrap();
+        let head = sha('b');
+        let bare = receipt("r", "succeeded", &head, false);
+        let full = spike_receipt(&head);
+        let outcome =
+            |receipt: &Receipt, spike| resume_outcome(Some(receipt), &run, &[], spike, Some(&head));
+        assert_eq!(outcome(&bare, true), ResumeOutcome::Unresolved);
+        assert_eq!(outcome(&bare, false), ResumeOutcome::Resolved);
+        assert_eq!(outcome(&full, true), ResumeOutcome::Resolved);
     }
 
     /// The used-up reason and ask say how the run was resumed: the counted
@@ -1843,6 +1902,7 @@ mod tests {
                     rewritten_receipt(&files, path, started).as_ref(),
                     &run,
                     required,
+                    false,
                     head,
                 )
             };

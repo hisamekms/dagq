@@ -272,6 +272,7 @@ mod tests {
             worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
             named_mode: None,
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap()
     }

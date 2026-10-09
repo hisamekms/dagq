@@ -35,6 +35,12 @@ pub struct Receipt {
     /// a person.
     #[serde(skip_serializing_if = "Option::is_none")]
     follow_ups: Option<Value>,
+    /// A Spike's result (ADR-t1487-1 decision 3): the verdict, its
+    /// grounds, where the evidence is and the conditions it was taken
+    /// under. Kept as written; validation checks its shape only for the
+    /// run of a Spike ([`super::execution_class::missing_spike_result`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spike_result: Option<Value>,
 }
 
 /// One of the receipt's `tests`, `e2e` and `subagent_review` claims.
@@ -58,6 +64,8 @@ struct ReceiptFile {
     summary: String,
     #[serde(default)]
     follow_ups: Option<Value>,
+    #[serde(default)]
+    spike_result: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +116,7 @@ impl Receipt {
             subagent_review: file.subagent_review.into(),
             summary: file.summary,
             follow_ups: file.follow_ups,
+            spike_result: file.spike_result,
         })
     }
 
@@ -147,6 +156,10 @@ impl Receipt {
 
     pub fn follow_ups(&self) -> Option<&Value> {
         self.follow_ups.as_ref()
+    }
+
+    pub fn spike_result(&self) -> Option<&Value> {
+        self.spike_result.as_ref()
     }
 
     pub fn into_follow_ups(self) -> Option<Value> {

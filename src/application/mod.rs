@@ -68,8 +68,8 @@ pub use recording::reason_of_error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
-    EvidenceCheck, GoalId, GoalStatus, GoalVerdict, Priority, PrioritySource, RunId, RunStatus,
-    Task, TaskChange, TaskId, TaskStatus, plan_request::PriorityBy,
+    EvidenceCheck, ExecutionClass, GoalId, GoalStatus, GoalVerdict, Priority, PrioritySource,
+    RunId, RunStatus, Task, TaskChange, TaskId, TaskStatus, plan_request::PriorityBy,
 };
 
 /// Which task statuses `list` returns.
@@ -139,6 +139,8 @@ pub struct TaskListItem {
     pub priority_by: PriorityBy,
     /// The kind of change it declares (ADR-t980-1); null without one.
     pub change: Option<TaskChange>,
+    /// Whether it implements or investigates (ADR-t1487-1 decision 1).
+    pub execution_class: ExecutionClass,
     /// The provider and mode of its worker (ADR-t813-2), shown as
     /// `provider` and `worker_mode`.
     #[serde(flatten)]
@@ -206,6 +208,7 @@ impl TaskListItem {
             priority_source: task.priority_source(),
             priority_by: task.priority_by(),
             change: task.change().cloned(),
+            execution_class: task.execution_class(),
             worker: task.worker(),
             title: task.title().to_owned(),
             goal_id: task.goal_id(),
@@ -229,6 +232,8 @@ pub struct GraphTask {
     pub priority_source: PrioritySource,
     /// Who set `priority` (ADR-t1975-1 decision 2).
     pub priority_by: PriorityBy,
+    /// Whether it implements or investigates (ADR-t1487-1 decision 1).
+    pub execution_class: ExecutionClass,
     pub title: String,
     pub goal_id: Option<GoalId>,
     /// Status of the task's goal; a draft goal's tasks are not candidates.
@@ -287,6 +292,8 @@ pub struct GraphNode {
     /// The priority the claim order compares: the highest of its own and
     /// those of the ready tasks that wait for it (see [`ClaimRank`]).
     pub effective_priority: Priority,
+    /// Whether it implements or investigates (ADR-t1487-1 decision 1).
+    pub execution_class: ExecutionClass,
     pub title: String,
     pub goal_id: Option<GoalId>,
     /// Status of the task's goal, present only for a task in a goal.
@@ -467,6 +474,7 @@ pub fn dependency_graph(input: GraphInput, goal_id: Option<GoalId>) -> Dependenc
                 .map(|dependency| dependency.goal_id)
                 .collect(),
             id: task.id,
+            execution_class: task.execution_class,
             status: task.status,
             priority: task.priority,
             priority_source: task.priority_source,
@@ -529,6 +537,7 @@ mod tests {
             priority: Priority::Normal,
             priority_source: PrioritySource::Default,
             priority_by: crate::domain::plan_request::PriorityBy::Ai,
+            execution_class: ExecutionClass::Implementation,
             title: format!("task {id}"),
             goal_id: goal_id.map(GoalId::new),
             goal_status: goal_id.map(|_| GoalStatus::Open),
@@ -846,6 +855,7 @@ mod tests {
                 worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
                 named_mode: None,
                 wait_for_build: false,
+                execution_class: Default::default(),
             })
             .unwrap()
         };

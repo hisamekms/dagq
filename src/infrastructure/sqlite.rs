@@ -1675,7 +1675,7 @@ impl TaskStore for SqliteQueue {
                 "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
                  verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
                  worker_provider=?10, worker_mode=?11, change=?12, wait_for_build=?13,
-                 updated_at=?8 WHERE id=?9",
+                 execution_class=?14, updated_at=?8 WHERE id=?9",
                 params![
                     new.title(),
                     new.description(),
@@ -1690,6 +1690,7 @@ impl TaskStore for SqliteQueue {
                     new.stored_worker_mode().map(WorkerMode::as_str),
                     new.change().map(TaskChange::as_str),
                     new.wait_for_build(),
+                    new.execution_class().as_str(),
                 ],
             )?;
             event(
@@ -1712,7 +1713,7 @@ impl TaskStore for SqliteQueue {
 
 /// The fields `dagq edit` replaces, as the task JSON names them; `task_edited`
 /// records the ones that changed.
-const EDITABLE_TASK_FIELDS: [&str; 11] = [
+const EDITABLE_TASK_FIELDS: [&str; 12] = [
     "title",
     "description",
     "acceptance",
@@ -1724,6 +1725,7 @@ const EDITABLE_TASK_FIELDS: [&str; 11] = [
     "provider",
     "worker_mode",
     "wait_for_build",
+    "execution_class",
 ];
 
 /// `error` with [`crate::application::QueueBusy`] as its context when a
@@ -1787,8 +1789,8 @@ pub(super) fn insert_task(
             "INSERT INTO tasks(id, title, description, acceptance, verification_commands, status, goal_id,
                                context, required_evidence, paths, priority, created_at,
                                updated_at, worker_provider, worker_mode, change, wait_for_build,
-                               priority_by, origin, origin_kind, origin_request_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                               priority_by, origin, origin_kind, origin_request_id, execution_class)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
             params![id, task.title(), task.description(), task.acceptance(),
                 serde_json::to_string(task.verification_commands())?, task.status().as_str(),
                 task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
@@ -1797,7 +1799,8 @@ pub(super) fn insert_task(
                 task.worker().provider.as_str(), task.stored_worker_mode().map(WorkerMode::as_str),
                 task.change().map(TaskChange::as_str), task.wait_for_build(),
                 priority_by.map(PriorityBy::as_str), origin.origin.as_str(),
-                origin.kind.map(|kind| kind.as_str()), origin.request_id],
+                origin.kind.map(|kind| kind.as_str()), origin.request_id,
+                task.execution_class().as_str()],
         )?;
     event(
         tx,
@@ -2161,6 +2164,7 @@ fn read_graph_input(conn: &Connection) -> Result<GraphInput> {
                 priority: task.priority(),
                 priority_source: task.priority_source(),
                 priority_by: task.priority_by(),
+                execution_class: task.execution_class(),
                 goal_id: task.goal_id(),
                 title: task.into_title(),
             })
@@ -2936,6 +2940,12 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
             .and_then(|change| change.parse().ok()),
         // Any value but 0 is declared (ADR-t1632-1); the column has no CHECK.
         wait_for_build: row.get::<_, i64>("wait_for_build")? != 0,
+        // A class this binary does not know reads as `implementation`
+        // (ADR-t1487-1); the column has no CHECK.
+        execution_class: row
+            .get::<_, String>("execution_class")?
+            .parse()
+            .unwrap_or_default(),
         // NULL is the provider's default (Claude, headless: ADR-t1340-1): a
         // task that names no mode, and one from before the worker existed;
         // the columns' CHECK keeps any other value out.
@@ -3439,6 +3449,7 @@ mod persons_priority_tests {
             provider: None,
             worker_mode: None,
             wait_for_build: false,
+            execution_class: Default::default(),
         }
     }
 

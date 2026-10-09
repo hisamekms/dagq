@@ -445,6 +445,7 @@ mod tests {
                 provider: None,
                 worker_mode: None,
                 wait_for_build: false,
+                execution_class: Default::default(),
             },
             "2026-09-28T00:00:00.000Z".into(),
         )

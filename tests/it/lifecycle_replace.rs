@@ -51,6 +51,7 @@ fn claim_a_run(fixture: &Fixture, queue: &mut SqliteQueue, token: &str) -> Strin
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue

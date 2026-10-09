@@ -214,6 +214,7 @@ fn register_gaps(
                 provider: None,
                 worker_mode: None,
                 wait_for_build: false,
+                execution_class: Default::default(),
             },
             stamp,
             crate::domain::plan_request::Creator::Draft(

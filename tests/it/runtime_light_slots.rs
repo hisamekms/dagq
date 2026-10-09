@@ -29,6 +29,7 @@ fn add_task(db: &Path, title: &str, change: &str, paths: &[&str], priority: Prio
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue

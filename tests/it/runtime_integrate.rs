@@ -414,6 +414,7 @@ fn add_file_task(
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue
@@ -1012,6 +1013,7 @@ fn add_ready_task_in(
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue
@@ -1277,6 +1279,7 @@ fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree(
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap()
         .id();
@@ -1911,6 +1914,7 @@ fn add_script_task(
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue

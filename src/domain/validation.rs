@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use super::{
     CommitSha, DomainError, EvidenceCheck, ReasonCode, Receipt, RunId, evidence_missing_reason,
+    execution_class::{missing_spike_result, spike_result_missing_reason},
     measure::LoadSummary,
     scope::{glob_matches, out_of_scope, scope_violation_reason},
 };
@@ -91,6 +92,10 @@ pub struct Validation {
     pub receipt: serde_json::Value,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub evidence_missing: Vec<EvidenceCheck>,
+    /// The fields of a Spike's result its receipt lacks (ADR-t1487-1
+    /// decision 3); never set for an implementation's run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spike_result_missing: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub scope_violation: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -107,10 +112,12 @@ pub struct Validation {
 
 impl Validation {
     /// Whether a rejection parks the run for a session instead of failing
-    /// it: only required evidence is missing, or the diff leaves the
-    /// task's paths.
+    /// it: only required evidence or a Spike's result is missing, or the
+    /// diff leaves the task's paths.
     pub fn resumable(&self) -> bool {
-        !self.evidence_missing.is_empty() || !self.scope_violation.is_empty()
+        !self.evidence_missing.is_empty()
+            || !self.spike_result_missing.is_empty()
+            || !self.scope_violation.is_empty()
     }
 }
 
@@ -180,6 +187,9 @@ pub struct ReceiptFacts<'a> {
     pub required: &'a [EvidenceCheck],
     /// The task asks for the e2e (`add --evidence e2e`).
     pub task_e2e: bool,
+    /// The task is a Spike: its receipt must carry the result
+    /// (ADR-t1487-1 decision 3).
+    pub spike: bool,
     pub paths: &'a [String],
     pub e2e_paths: &'a [String],
     pub receipt_path: &'a str,
@@ -205,6 +215,7 @@ impl<'a> ReceiptFacts<'a> {
             base,
             required,
             task_e2e: false,
+            spike: false,
             paths,
             e2e_paths: &[],
             receipt_path,
@@ -226,6 +237,12 @@ impl<'a> ReceiptFacts<'a> {
     /// With whether the task asks for the e2e (`add --evidence e2e`).
     pub fn with_task_e2e(mut self, task_e2e: bool) -> Self {
         self.task_e2e = task_e2e;
+        self
+    }
+
+    /// With whether the task is a Spike (ADR-t1487-1 decision 3).
+    pub fn with_spike(mut self, spike: bool) -> Self {
+        self.spike = spike;
         self
     }
 
@@ -265,6 +282,8 @@ pub struct Rejection {
     /// The task's required checks the receipt does not back, when that is
     /// all that is wrong: the run waits for a session instead of failing.
     pub evidence_missing: Vec<EvidenceCheck>,
+    /// The fields of a Spike's result the receipt lacks, likewise.
+    pub spike_result_missing: Vec<String>,
     /// The changed paths outside the task's `paths` (ADR-0029), when the
     /// run is otherwise sound: it waits for a session to take them out.
     pub scope_violation: Vec<String>,
@@ -286,6 +305,7 @@ fn reject(code: ReasonCode, reason: String, commit: Option<&CommitSha>) -> Judge
         code,
         commit: commit.cloned(),
         evidence_missing: Vec::new(),
+        spike_result_missing: Vec::new(),
         scope_violation: Vec::new(),
     })
 }
@@ -396,21 +416,54 @@ pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
                 code: ReasonCode::ScopeViolation,
                 commit: Some(head.clone()),
                 evidence_missing: Vec::new(),
+                spike_result_missing: Vec::new(),
                 scope_violation: outside,
             });
         }
     }
     let missing = receipt.missing_evidence(facts.required);
-    if !missing.is_empty() {
+    let spike_missing = if facts.spike {
+        missing_spike_result(receipt.spike_result())
+    } else {
+        Vec::new()
+    };
+    if !missing.is_empty() || !spike_missing.is_empty() {
+        let (code, reason) = missing_reason(&missing, &spike_missing);
         return Judgement::Reject(Rejection {
-            reason: evidence_missing_reason(&missing),
-            code: ReasonCode::EvidenceMissing,
+            reason,
+            code,
             commit: Some(head.clone()),
             evidence_missing: missing,
+            spike_result_missing: spike_missing,
             scope_violation: Vec::new(),
         });
     }
     Judgement::Accept(head.clone())
+}
+
+/// The code and the reason of a park for what the receipt lacks: the
+/// required checks, then a Spike's result. The code is `evidence_missing`
+/// when a check is missing, else `spike_result_missing`; the reason names
+/// both.
+pub fn missing_reason(evidence: &[EvidenceCheck], spike: &[String]) -> (ReasonCode, String) {
+    match (evidence.is_empty(), spike.is_empty()) {
+        (false, true) => (
+            ReasonCode::EvidenceMissing,
+            evidence_missing_reason(evidence),
+        ),
+        (true, _) => (
+            ReasonCode::SpikeResultMissing,
+            spike_result_missing_reason(spike),
+        ),
+        (false, false) => (
+            ReasonCode::EvidenceMissing,
+            format!(
+                "{}; {}",
+                evidence_missing_reason(evidence),
+                spike_result_missing_reason(spike)
+            ),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -472,6 +525,17 @@ mod tests {
         paths: &[String],
         e2e_paths: &[String],
     ) -> ((Vec<Fact>, Judgement), Option<E2eRequirement>) {
+        run_as(world, required, paths, e2e_paths, false)
+    }
+
+    /// [`run_with_e2e`] for a Spike's run when `spike`.
+    fn run_as(
+        world: &World,
+        required: &[EvidenceCheck],
+        paths: &[String],
+        e2e_paths: &[String],
+        spike: bool,
+    ) -> ((Vec<Fact>, Judgement), Option<E2eRequirement>) {
         let id = RunId::new("r1").unwrap();
         let base = sha(BASE);
         // As the supervisor gives them: the receipt backs the task's checks
@@ -479,7 +543,8 @@ mod tests {
         let checks = super::super::required_of(required, crate::domain::Provider::Claude);
         let mut facts = ReceiptFacts::new(&id, &base, &checks, paths, "/runs/r1/receipt.json")
             .with_e2e_paths(e2e_paths)
-            .with_task_e2e(required.contains(&EvidenceCheck::E2e));
+            .with_task_e2e(required.contains(&EvidenceCheck::E2e))
+            .with_spike(spike);
         let mut asked = Vec::new();
         loop {
             match judge(&facts) {
@@ -797,6 +862,7 @@ mod tests {
                 code: None,
                 receipt: serde_json::Value::Null,
                 evidence_missing,
+                spike_result_missing: Vec::new(),
                 scope_violation,
                 allowed_paths: Vec::new(),
                 e2e_requirement: None,
@@ -805,6 +871,82 @@ mod tests {
         assert!(!validation(Vec::new(), Vec::new()).resumable());
         assert!(validation(vec![EvidenceCheck::E2e], Vec::new()).resumable());
         assert!(validation(Vec::new(), vec!["x".into()]).resumable());
+        let mut spike = validation(Vec::new(), Vec::new());
+        spike.spike_result_missing = vec!["spike_result".into()];
+        assert!(spike.resumable());
+    }
+
+    /// A Spike's receipt: [`receipt_text`] with `spike_result`.
+    fn spike_world(result: Option<serde_json::Value>) -> World {
+        let mut receipt: serde_json::Value =
+            serde_json::from_str(&receipt_text("r1", "succeeded", "passed")).unwrap();
+        if let Some(result) = result {
+            receipt["spike_result"] = result;
+        }
+        World {
+            receipt: Some(receipt.to_string()),
+            ..sound()
+        }
+    }
+
+    fn spike_result(verdict: &str) -> serde_json::Value {
+        serde_json::json!({
+            "verdict": verdict,
+            "grounds": "measured twice",
+            "evidence": "docs/plans/spike.md",
+            "conditions": {
+                "commit": HEAD,
+                "tools": "cargo 1.90",
+                "provider": "claude headless worker",
+                "environment": "macOS arm64",
+            },
+        })
+    }
+
+    #[test]
+    fn a_spike_without_its_result_is_rejected_last_for_a_session() {
+        let ((asked, verdict), _) = run_as(&spike_world(None), &[], &[], &[], true);
+        assert_eq!(asked, ALL[..5]);
+        let missing = rejection(verdict);
+        assert_eq!(missing.code, ReasonCode::SpikeResultMissing);
+        assert_eq!(missing.spike_result_missing, ["spike_result"]);
+        assert_eq!(missing.reason, "spike result missing: spike_result");
+        assert!(missing.evidence_missing.is_empty());
+        assert_eq!(missing.commit, Some(sha(HEAD)));
+        // Missing evidence as well: the code is the evidence's, the reason
+        // names both.
+        let mut partial = spike_result("holds");
+        partial["grounds"] = serde_json::json!("");
+        let ((_, verdict), _) = run_as(
+            &spike_world(Some(partial)),
+            &[EvidenceCheck::SubagentReview],
+            &[],
+            &[],
+            true,
+        );
+        let both = rejection(verdict);
+        assert_eq!(both.code, ReasonCode::EvidenceMissing);
+        assert_eq!(both.evidence_missing, [EvidenceCheck::SubagentReview]);
+        assert_eq!(both.spike_result_missing, ["spike_result.grounds"]);
+        assert_eq!(
+            both.reason,
+            "evidence missing: subagent_review; spike result missing: spike_result.grounds"
+        );
+    }
+
+    #[test]
+    fn a_spike_with_any_verdict_and_its_fields_is_accepted() {
+        for verdict in ["holds", "does_not_hold", "unresolved"] {
+            let world = spike_world(Some(spike_result(verdict)));
+            let ((_, judged), _) = run_as(&world, &[], &[], &[], true);
+            assert_eq!(judged, Judgement::Accept(sha(HEAD)), "{verdict}");
+        }
+    }
+
+    #[test]
+    fn an_implementation_is_never_asked_for_a_spike_result() {
+        let ((_, verdict), _) = run_as(&spike_world(None), &[], &[], &[], false);
+        assert_eq!(verdict, Judgement::Accept(sha(HEAD)));
     }
 
     fn globs(values: &[&str]) -> Vec<String> {

@@ -31,6 +31,7 @@ fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue
@@ -586,6 +587,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue
@@ -858,6 +860,7 @@ fn an_undelivered_planner_answer_is_planned_for_a_draft_and_never_sent_to_a_work
                 provider: None,
                 worker_mode: None,
                 wait_for_build: false,
+                execution_class: Default::default(),
             })
             .unwrap()
             .id()

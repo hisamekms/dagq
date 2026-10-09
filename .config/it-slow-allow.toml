@@ -800,3 +800,9 @@ task = 2210
 name = "runtime_cleanup::a_waiting_runs_build_outputs_go_for_room_and_its_answer_waits_for_the_cleanup"
 reason = "境界（supervisorの配線・プロセス・SQLite）: 実 supervisor の slot の待ち（ADR-0071）の run を空き容量のための掃除の job が予約して消し、そのあいだ答えが待ちを終えず、通り過ぎた後に答えが届いて worker の turn がビルドし直すことを、実 process の一覧と SQLite で確かめる。候補の選びと動いているものの判定は supervise::cleanup の unit test"
 task = 1980
+
+# 5.9 to 7.6s (stress of 5 under the host's load)
+[[test]]
+name = "runtime_integrate::verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree"
+reason = "境界（Git・プロセス・supervisorの配線）: 先の着地の後に実 Git の rebase がきれいに当たり、rebase 後の検証コマンドの実 process が落ちた run を needs_session にして rebase 後の tree を worktree に残すことを確かめる代表の 1 本。本文の変更は task の欄（execution_class）を足した NewTask の literal だけ。検証の失敗の分類の判断は application::integrate の unit test"
+task = 1488

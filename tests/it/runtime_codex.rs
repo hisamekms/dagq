@@ -45,6 +45,7 @@ pub(crate) fn codex_fixture() -> (Fixture, PathBuf, PathBuf, TestWorkspace, Path
             provider: Some(Provider::Codex),
             worker_mode: Some(WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     assert_eq!(task.id(), TASK);

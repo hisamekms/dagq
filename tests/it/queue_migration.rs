@@ -11,8 +11,8 @@ use dagq::{
     application::TaskStore,
     domain::search::{SearchKind, SearchQuery},
     domain::{
-        EventId, EvidenceCheck, GoalId, GoalStatus, Priority, RunId, RunStatus, SupervisorMode,
-        TaskAction, TaskChange, TaskId, TaskStatus,
+        EventId, EvidenceCheck, ExecutionClass, GoalId, GoalStatus, Priority, RunId, RunStatus,
+        SupervisorMode, TaskAction, TaskChange, TaskId, TaskStatus,
     },
     infrastructure::{
         schema::{MIGRATIONS, floor_for},
@@ -1190,6 +1190,60 @@ fn migration_adding_the_task_change_keeps_older_tasks_without_one() {
     );
 }
 
+/// ADR-t1487-1 decision 1: the execution class is an addition. The tasks
+/// of an older queue implement after the migration, which raises no floor;
+/// an older binary's insert leaves them implementing, and a value this
+/// binary does not know reads as `implementation`.
+#[test]
+fn migration_adding_the_execution_class_keeps_older_tasks_implementing() {
+    // Found by its statement, not its number, which a landing may change.
+    let at = MIGRATIONS
+        .iter()
+        .position(|migration| migration.contains("ALTER TABLE tasks ADD COLUMN execution_class"))
+        .unwrap();
+    let before = i64::try_from(at).unwrap();
+    assert_eq!(floor_for(before + 1), floor_for(before));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.db");
+    let raw = Connection::open(&path).unwrap();
+    for migration in &MIGRATIONS[..at] {
+        raw.execute_batch(migration).unwrap();
+    }
+    raw.execute_batch(&format!(
+        "PRAGMA application_id = 1129599281; PRAGMA user_version = {before};
+         INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor});
+         INSERT INTO tasks(title,description,acceptance,verification_commands,status)
+         VALUES ('older','','','[]','draft');",
+        floor = floor_for(before),
+    ))
+    .unwrap();
+    drop(raw);
+    SqliteQueue::migrate(&path, None, 0).unwrap();
+    let mut queue = SqliteQueue::open(&path).unwrap();
+    let class = |queue: &mut SqliteQueue, id: i64| {
+        queue.show(TaskId::new(id)).unwrap().task.execution_class()
+    };
+    assert_eq!(class(&mut queue, 1), ExecutionClass::Implementation);
+    let mut spike = new_task("measure");
+    spike.execution_class = ExecutionClass::Spike;
+    assert_eq!(
+        queue.add(spike).unwrap().execution_class(),
+        ExecutionClass::Spike
+    );
+    let raw = Connection::open(&path).unwrap();
+    raw.execute(
+        "INSERT INTO tasks(title,description,acceptance,verification_commands,status)
+         VALUES ('older binary','','','[]','draft')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(class(&mut queue, 3), ExecutionClass::Implementation);
+    raw.execute("UPDATE tasks SET execution_class='research' WHERE id=3", [])
+        .unwrap();
+    assert_eq!(class(&mut queue, 3), ExecutionClass::Implementation);
+    assert_eq!(class(&mut queue, 2), ExecutionClass::Spike);
+}
+
 /// Task 325: the answerer and the chosen option of an ask are additions.
 /// An ask answered before the migration reads with both null (unknown),
 /// shown as null in its JSON, and an older binary's answer that names
@@ -1805,6 +1859,7 @@ fn migration_to_goal_priority_keeps_every_tasks_priority_and_the_claim_order() {
                     priority: Priority::from_i64(*priority).unwrap(),
                     priority_source: PrioritySource::Task,
                     priority_by: dagq::domain::plan_request::PriorityBy::Ai,
+                    execution_class: Default::default(),
                     title: String::new(),
                     goal_id: goal.map(GoalId::new),
                     goal_status: goal.map(|_| GoalStatus::Open),

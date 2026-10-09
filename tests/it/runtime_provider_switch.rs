@@ -50,6 +50,7 @@ fn add_task(db: &Path, provider: Provider, dependencies: &[TaskId]) -> TaskId {
             provider: Some(provider),
             worker_mode: Some(WorkerMode::Headless),
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue

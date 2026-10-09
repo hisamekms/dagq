@@ -220,6 +220,7 @@ fn the_reports_carry_the_dependency_diagram_or_why_not() {
                 provider: None,
                 worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
                 wait_for_build: false,
+                execution_class: Default::default(),
             })
             .unwrap()
             .id()

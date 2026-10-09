@@ -42,7 +42,7 @@ related:
 
 ## d2のソース（`Diagram::to_d2`）
 
-枠（`goal_<ID>` / `goal_none`。containerにせず、`label.near: top-left`の見出しを持つ矩形）を先に書いて箱の背後にし、次に箱（`t<ID>`、label `#ID` と題の2行）、辺、凡例（`legend_0`〜`legend_3`と`legend_note_0` / `legend_note_1`。凡例と`no goal`の見出しは英語の固定の文字列で、taskとgoalの題は利用者が書いたまま）を書く。どの形も`top` / `left`（枠と箱は`width` / `height`も）で固定する。文字列はd2のdouble-quoteで、`"`・`\`・`$`をescapeし、制御文字を落とす。
+枠（`goal_<ID>` / `goal_none`。containerにせず、`label.near: top-left`の見出しを持つ矩形）を先に書いて箱の背後にし、次に箱（`t<ID>`、label `#ID`（Spikeは`#ID spike`）と題の2行）、辺、凡例（`legend_0`〜`legend_3`と`legend_note_0` / `legend_note_1`。凡例と`no goal`の見出しは英語の固定の文字列で、taskとgoalの題は利用者が書いたまま）を書く。どの形も`top` / `left`（枠と箱は`width` / `height`も）で固定する。文字列はd2のdouble-quoteで、`"`・`\`・`$`をescapeし、制御文字を落とす。
 
 - **色**（`Tone`、fill / stroke）: `in_progress` `#dbeafe` / `#1d4ed8`、`interrupt`と`urgent` `#fee2e2` / `#b91c1c`、`high` `#fef3c7` / `#b45309`、`normal`以下 `#f3f4f6` / `#6b7280`。判定は`in_progress`を先に、次に`effective_priority`。枠は`#fafafa` / `#9ca3af`の破線。
 - **辺**: taskの前提は`t<前> -> t<後>`、goalの前提は`goal_<ID> -> t<後>`。`critical`の鎖の隣り合う2つを結ぶ辺（goalの辺は、そのgoalの描いたtaskから鎖が続くとき）は`#dc2626`の太さ4、他は`#6b7280`の太さ1。

@@ -6,8 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CommitSha, DomainError, EvidenceCheck, GoalId, GoalStatus, GoalTag, GoalVerdict, Priority,
-    Provider, RunId, RunStatus, TaskChange, TaskId, TaskStatus, require, scope,
+    CommitSha, DomainError, EvidenceCheck, ExecutionClass, GoalId, GoalStatus, GoalTag,
+    GoalVerdict, Priority, Provider, RunId, RunStatus, TaskChange, TaskId, TaskStatus, require,
+    scope,
     worker::{Worker, WorkerMode},
 };
 
@@ -51,6 +52,10 @@ pub struct NewTask {
     /// commits of every task it depends on (ADR-t1632-1).
     #[serde(default)]
     pub wait_for_build: bool,
+    /// Whether its run implements or investigates (ADR-t1487-1 decision
+    /// 1); none given is `implementation`.
+    #[serde(default)]
+    pub execution_class: ExecutionClass,
 }
 
 impl NewTask {
@@ -188,6 +193,9 @@ pub struct TaskEdit {
     /// contains the dependencies' landings (ADR-t1632-1).
     #[serde(default)]
     pub wait_for_build: Option<bool>,
+    /// A new execution class (ADR-t1487-1 decision 1).
+    #[serde(default)]
+    pub execution_class: Option<ExecutionClass>,
 }
 
 impl TaskEdit {
@@ -204,6 +212,7 @@ impl TaskEdit {
             && self.provider.is_none()
             && self.worker_mode.is_none()
             && self.wait_for_build.is_none()
+            && self.execution_class.is_none()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -218,6 +227,7 @@ impl TaskEdit {
             && self.provider.is_none()
             && self.worker_mode.is_none()
             && self.wait_for_build.is_none()
+            && self.execution_class.is_none()
     }
 
     /// The rules of [`NewTask::validate`] for the fields it replaces.
@@ -257,6 +267,7 @@ pub struct TaskRecord {
     pub goal_priority: Option<Priority>,
     pub change: Option<TaskChange>,
     pub wait_for_build: bool,
+    pub execution_class: ExecutionClass,
     pub worker: Worker,
     /// The mode the store keeps: none is the provider's default.
     pub named_mode: Option<WorkerMode>,

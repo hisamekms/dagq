@@ -26,6 +26,7 @@ fn add_waiting_task(queue: &mut SqliteQueue, title: &str, dependencies: &[TaskId
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: true,
+            execution_class: Default::default(),
         })
         .unwrap();
     queue

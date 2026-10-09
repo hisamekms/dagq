@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use super::{DependencyGraph, GraphNode, WaitFor};
-use crate::domain::{GoalId, Priority, TaskId, TaskStatus};
+use crate::domain::{ExecutionClass, GoalId, Priority, TaskId, TaskStatus};
 
 /// Horizontal distance between the left edges of two adjacent columns.
 pub const COLUMN_WIDTH: i64 = 300;
@@ -95,6 +95,8 @@ const FRAME_FILL: &str = "#fafafa";
 const FRAME_STROKE: &str = "#9ca3af";
 /// What a startable task's label starts with.
 pub const STARTABLE_MARK: &str = "▶ ";
+/// What follows the ID in a Spike's label (ADR-t1487-1).
+pub const SPIKE_MARK: &str = " spike";
 
 /// The tasks to draw, each with why: (i) in progress, (ii) an effective
 /// priority of `high` or above, (iii) on the critical chain, and (iv) what
@@ -166,6 +168,8 @@ pub struct PlacedTask {
     pub tone: Tone,
     /// No dependency is left: the task is a claim candidate.
     pub startable: bool,
+    /// Its execution class (ADR-t1487-1): a Spike's label names it.
+    pub execution_class: ExecutionClass,
     pub column: usize,
     pub left: i64,
     pub top: i64,
@@ -367,6 +371,7 @@ pub fn layout(
                     reason: chosen[id],
                     tone: Tone::of(node),
                     startable: candidates.contains(id),
+                    execution_class: node.execution_class,
                     column: columns[id],
                     left: column_left(columns[id]),
                     top: lane_top + HEADER_HEIGHT + row_of[id] * ROW_HEIGHT,
@@ -531,11 +536,16 @@ impl Diagram {
         for task in &self.tasks {
             let (fill, stroke) = task.tone.colors();
             let mark = if task.startable { STARTABLE_MARK } else { "" };
+            let class = if task.execution_class.is_spike() {
+                SPIKE_MARK
+            } else {
+                ""
+            };
             let title = fit(&task.title, NODE_WIDTH - 24);
             out.push_str(&format!(
                 "{key}: {{\n  label: {label}\n  shape: rectangle\n  top: {top}\n  left: {left}\n  width: {NODE_WIDTH}\n  height: {NODE_HEIGHT}\n  style.fill: \"{fill}\"\n  style.stroke: \"{stroke}\"\n  style.font-size: {FONT_SIZE}\n{bold}}}\n",
                 key = task_key(task.id),
-                label = quoted(&format!("{mark}#{}\n{title}", task.id)),
+                label = quoted(&format!("{mark}#{}{class}\n{title}", task.id)),
                 top = task.top,
                 left = task.left,
                 bold = if task.startable {
@@ -606,6 +616,7 @@ mod tests {
             priority_source: crate::domain::PrioritySource::Default,
             priority_by: crate::domain::plan_request::PriorityBy::Ai,
             effective_priority: Priority::Normal,
+            execution_class: Default::default(),
             title: format!("task {id}"),
             goal_id: goal.map(GoalId::new),
             goal_status: None,
@@ -913,6 +924,19 @@ mod tests {
         // Frames come before the boxes, so they are drawn behind them.
         assert!(d2.find("goal_none: {").unwrap() < d2.find("t1: {").unwrap());
         assert_eq!(quoted("a\u{7}b\nc"), "\"ab\\nc\"");
+    }
+
+    #[test]
+    fn a_spike_label_names_its_class_after_the_id() {
+        let mut graph = graph();
+        graph.tasks[2].execution_class = ExecutionClass::Spike;
+        let titles = BTreeMap::new();
+        let diagram = near_term(&graph, &titles);
+        let spike = diagram.tasks.iter().find(|task| task.id == TaskId::new(3));
+        assert_eq!(spike.unwrap().execution_class, ExecutionClass::Spike);
+        let d2 = diagram.to_d2();
+        assert!(d2.contains(r##"label: "#3 spike\ntask 3""##), "{d2}");
+        assert!(d2.contains(&format!("label: \"{STARTABLE_MARK}#1\\ntask 1\"")));
     }
 
     /// Whether `text` has a Hiragana, Katakana or CJK ideograph character.

@@ -365,6 +365,7 @@ fn the_watch_records_runs_files_one_finding_per_failure_set_and_keeps_the_list()
             provider: None,
             worker_mode: None,
             wait_for_build: false,
+            execution_class: Default::default(),
         })
         .unwrap();
     // A closed task covers nothing (task 1 was canceled above).

@@ -13,6 +13,7 @@ related:
   - adr-t803-1
   - adr-t947-3
   - adr-t1504-2
+  - adr-t1487-1
 ---
 
 # Receipt and session exit
@@ -73,3 +74,15 @@ idleはwrapperのidle markerだけで判じる。
 - **workerへの見せ方**: workerのprompt（[prompt](prompt.md)）のreceiptの例は`follow_ups`の要素に`membership_proposal`を持ち、`FOLLOW_UP_PROPOSAL`（`src/application/prompt/`）が、descriptionに問題と根拠を書くこと、`membership_proposal`の3つの欄の意味、提案に留めて自分で判断も移動もしないことを1段落で言う。resumeの解消依頼とreviseの依頼は手順5の`ACCEPTANCE_REMAP`の後に`FOLLOW_UP_PROPOSAL_AGAIN`（同じことの短い形）を足す。
 - **plannerへの見せ方**: runtimeのplannerのpromptはfollow_upのdraftごとの節に`Membership proposal (the worker's; where you start, not a judgement): <JSON>`（無ければ`(none)`）の行を載せ、提案を起点に所属を判断して記録する手順を持つ（[Draft planners](draft-planners.md#所属の判断)）。
 - **test**: `src/domain/receipt.rs`の`a_follow_up_with_or_without_a_membership_proposal_is_accepted`が欄つき・欄なし・形の違う値のreceiptの受理を、`src/domain/follow_up.rs`の`a_membership_proposal_is_kept_as_written_or_null`が記録する値を、`tests/it/runtime_integrate.rs`の`integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once`が`follow_up_registered`（登録したものと飛ばしたもの）と`show`の`origin.material`の`membership_proposal`を、`src/application/prompt/`の`every_worker_text_that_writes_a_receipt_proposes_follow_up_membership`がworker・resume・reviseのpromptを確かめる。
+
+## Spikeの結果
+
+[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定3・4のとおり、実行区分（`add --execution-class`、`domain::execution_class`）が`spike`のtaskのrunは、結果をreceiptの`spike_result`に書く。
+欄とその意味は`domain::execution_class`のdoc comment、workerへの指示は`prompt::SPIKE_LINES`が持つ。
+
+- 検査するのはSpikeのrunだけで、実装の区分のrunの`spike_result`は受理を変えない。
+- 見るのは欄がそろっていることだけで、根拠が判定を支えるかは判じない。
+  否定的な結果と未解決は欠けではなく、成功のreceiptで返す。
+- 上限（時間・回数）はagentへの指示で、runtimeは強制しない（止めるのは既存のturnとrunの上限だけ）。
+- 欠けの扱いは要求evidenceと同じで、[Validation](validation.md)の9のとおり`needs_session`にしてresumeが書き足させる。
+- receiptは書いたまま`validation_finished`と`integration_receipt`に残るので、結果を読む側はそこから読む。

@@ -85,7 +85,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   - 手元で流す検証: `local_checks`。
   - 依存元の行: `PredecessorSummary::from_predecessor`と`GoalPredecessorSummary::from_goal_predecessor`、取得は`TaskStore::predecessors`と`TaskStore::goal_predecessors`。
   - 兄弟taskの行: `siblings_in_progress`。
-  - e2eの行: `e2e_line`。
+  - e2eとSpikeの行: `e2e_line`・`spike_lines`。
   - follow_upの種類と所属の提案: `follow_up_categories_line`・`FOLLOW_UP_PROPOSAL`。
   - askの手順と分類コード: `ASK_RULES_FIRST`・`worker_question_topics_line`。
   - 要るevidence: `domain::required_of`。

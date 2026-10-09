@@ -267,10 +267,10 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 ### receiptの検証（`domain::validation`）
 
-- 受理か拒否かは純粋関数`validation::judge`が決め、次に要る事実を1つずつ求める。
+- 受理か拒否かは純粋な`validation::judge`が決め、次に要る事実を1つずつ求める。
   applicationの`integrate::check_receipt`は求められた事実だけをrun filesとGitから集めて渡し直す。
-- 判定の順と各拒否の理由のコードは`judge`と`Fact`のdoc commentが持つ。
-- `Validation::resumable()`（evidenceの欠けかscopeの違反だけ）が`needs_session`か`failed`かを決める。
+- 判定の順と拒否の理由のコードは`judge`と`Fact`のdoc commentが持つ。
+- 拒否のうち`needs_session`は要求evidenceかSpikeの結果の欠けかscopeの違反（`Validation::resumable()`）。
 - 検証コマンドはvalidatingでは流さず、`integrate`がrebase後に1回だけ流す（[Validation](supervisor-lifecycle/validation.md)）。
 
 ### runの履歴（`RunHistory`）

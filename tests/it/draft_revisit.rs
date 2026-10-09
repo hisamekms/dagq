@@ -209,6 +209,7 @@ fn a_persons_draft_gets_a_planner_only_at_its_revisit_time() {
         provider: None,
         worker_mode: None,
         wait_for_build: false,
+        execution_class: Default::default(),
     };
     let revisited = queue.add(mine("revisit me")).unwrap().id();
     let left = queue.add(mine("leave me")).unwrap().id();

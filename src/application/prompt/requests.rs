@@ -184,7 +184,7 @@ pub(crate) fn resume_request(
     fit.section("verify", &verify);
     let mut lines = route.opening(match request.kind {
         ResumeKind::EvidenceMissing => format!(
-            "dagq: the supervisor's validation of run {} (task {}) found required evidence missing from the receipt, so the run is needs_session.",
+            "dagq: the supervisor's validation of run {} (task {}) found required evidence missing from the receipt (or, for a Spike, its spike_result), so the run is needs_session.",
             run.id(),
             task.id()
         ),
@@ -250,7 +250,7 @@ pub(crate) fn resume_request(
     let checks = local_checks(&verify);
     if request.kind == ResumeKind::EvidenceMissing {
         lines.push(
-            "1. Run the checks the reason names as missing and write their evidence into the receipt."
+            "1. Run the checks the reason names as missing and write their evidence into the receipt; write the spike_result fields it names as missing, as the task's prompt describes them."
                 .to_owned(),
         );
         lines.push(format!("2. If that changes files, commit them. {checks}"));
