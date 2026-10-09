@@ -146,6 +146,28 @@ impl Supervisor<'_> {
         self.claim.slots.waiting()
     }
 
+    /// The headless runs waiting outside the slots now (not those waiting
+    /// to go back), which a cleanup for disk space may take the build
+    /// outputs of once their turn is over ([`cleanup::WaitingRun`]).
+    pub(super) fn waiting_worktrees(&self) -> Vec<cleanup::WaitingRun> {
+        self.claim
+            .slots
+            .iter()
+            .filter(|slot| slot.run.worker_mode() == crate::domain::worker::WorkerMode::Headless)
+            .filter_map(|slot| {
+                let waiting = slot.waiting.as_ref().filter(|w| w.ended.is_none())?;
+                Some(cleanup::WaitingRun {
+                    run_id: slot.run.id().clone(),
+                    task_id: slot.run.task_id(),
+                    status: slot.run.status(),
+                    worktree: slot.run.worktree_path()?.to_owned(),
+                    branch: slot.run.branch().map(str::to_owned),
+                    asks: waiting.asks.iter().map(|(id, _)| *id).collect(),
+                })
+            })
+            .collect()
+    }
+
     /// Move the runs in the slots that wait for a person into waits, the
     /// oldest ask first, while the limit allows (decision 7); a run past
     /// the limit stays in its slot and records `run_waiting_deferred` once
@@ -281,6 +303,12 @@ impl Supervisor<'_> {
             return Ok(Step::Disowned);
         }
         if !slot.waiting_now() {
+            return Ok(Step::Continue);
+        }
+        // A cleanup for disk space removes its build outputs: the wait
+        // holds still until it passed the run, so no answer ends it, and
+        // no turn or reopened session starts in the worktree meanwhile.
+        if cleanup::lock_cleaning(&self.host.cleanup.cleaning()).reserved(slot.run.id()) {
             return Ok(Step::Continue);
         }
         let run = slot.run.clone();

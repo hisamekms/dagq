@@ -63,6 +63,33 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 - **組み立て直し**（`restore_waiting`）: execの引き継ぎ（[Handoff](handoff.md)）とadopt（[`supervise`](supervise.md)の5）でslotを組み立てた後、runのイベントから`consumed`（終わった待ちのask）、`deferred`、今の待ち（`WaitState::of`: 最新の`run_waiting_started`の後に`run_waiting_ended`が無ければ待ち、`run_waiting_ended`の後に`run_slot_regained`が無ければ戻り待ち）を戻す。待ちに入った時刻はイベントから取り、`run_waiting_started`を記録し直さない。組み立て直したphaseが待てないもの（例えばreviewからやり直すrun）なら`phase_changed`で終えてslotに戻す。引き継ぎは上限を超えていても待ちのまま戻す（上限を下回るまで新しい待ちを入れない）。
 - **adopt**: `adopt_stale_runs`は空きslotの判定を先頭の打ち切りではなくrunごとに行い、イベントの上で待っているrunは待ちの数が上限未満ならslotの空きを要さずに待ちとして引き継ぐ。上限に空きが無ければ今のとおりslotの空きを待って引き継ぎ、待ちを`phase_changed`で終えてslotのrunとして扱う（そのaskでまた待ちに入れる）。
 
+## 空き容量のための掃除
+
+待ちのrunはsupervisorのleaseとslotを持ち、wrapperのheartbeatも続くので、終わったrunと誰も作業していないrunの掃除（`ended_run_worktrees`と`start_cleanup`のslotの除外。[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)）の候補にならない。
+そのため答えを何時間も待つあいだ、worktreeの`target/`は空きが尽きても残った（2026-10-06のrun d9e44747は`resume`の段の`worker_question`の答えを約8.7時間待ち、12Gを持ち続けて、claimと着地が約5.8時間止まった）。
+今は空き容量のための掃除（[空き容量を確かめる](disk-space.md)の「判定と掃除」、`Request::idle`の立つjob）だけが、待ちのrunのビルド成果物も消す。
+空きが足りる通常の掃除では消さない（答えはすぐ来ることもあり、作り直しの時間を払わない）。
+
+- 渡し方: queueの一覧はleaseを持つrunを返さないので、leaseを持つsupervisorが、自分のslotの待ちの最中（戻り待ちでない）の非対話のrunを`Supervisor::waiting_worktrees`で掃除に渡す（`cleanup::Held`）。
+- 選び方（loopの上、`cleanup::waiting_candidate`）: runの最新のturnのevent（`turn_requested`・`turn_started`・`turn_finished`）が`turn_finished`で、待ちが持つaskのうち答えも閉じも無いものがあるrunだけを候補にする。
+  候補の`WorktreeCleanup::Waiting`はそのaskを持つ。
+  待ちはturnの終わりより先に始まりうるので、待ちの始まりではなくturnのeventで見る。
+- 消す前（jobの上、予約のlockの中、`cleanup::still_waiting`）: runのstatusが選んだときと同じで、何も動いていないことを確かめ直す。
+  sessionのwrapperと最後のturnのagentのpidは、選んだときにrunのevent（最新の`wrapper_started`と`turn_started`）から取る（`cleanup::session_pids`）。
+  jobのqueueの接続はhost運用のport（`HostOpsQueue`）でleaseと`run_processes`を読まないので、leaseは確かめ直さない: leaseはこの生きているprocessがheartbeatし続けるので、jobのあいだに他のsupervisorが取ることはない。
+  動いているとみなすのは、生きている最後のturnのagentと、worktreeで働くかwrapperの下にあるprocess（turnが残したcommandやビルド、cargoも）と、実行ファイルがworktreeの下にあるprocess（`target/`のtestやbuild script）で、processの一覧が読めないときも動いているとみなす（`cleanup::worktree_busy`）。
+  待ちのrunはjobの候補の先頭に置き、他のrunの掃除のあいだ答えを待たせない。
+  wrapperはturnの間をrun_dirの`runner`から待つだけなので数えない。
+- 消している間: jobが通り過ぎるまでrunは予約され、`watch_waiting`は予約されたrunの待ちを何もせずに続ける。
+  答えが来ても待ちは終わらず、答えの配送（slotに戻った後の`deliver_answers`）も次のturnも、wrapperを失ったsessionの開き直しも始まらない。
+  jobが通り過ぎた後の見張りが答えを見て待ちを終え、いつもの順でslotに戻して答えを届ける。
+- 消すもの: 他の終わっていないrunと同じビルド成果物だけで、ソース・未commitの変更・receipt・run_dir・`runner`は残す。
+  `build_outputs_removed`の`reason`は`disk_space`で、待ちのaskの`ask_id`を足す（`awaiting_answer`はleaseの無いrunのもの）。
+  消した`bytes`とrunは`auto_repaired`（`disk_cleanup`）に数える。
+- 消した後: workerの次のturnがsccacheでビルドし直して続く。
+  workerのpromptには消したことを書かない: ビルドの成果物はいつ作り直してもよく、cargoが無いものを作り直すので、workerが知らなくても手順は変わらない。
+- 触れないもの: turnかcommandが動いているrun、slotに居るrun（着地・validating・review、待ちから戻るのを待つrunも）、対話の経路のrun。
+
 ## 登録と見せ方
 
 - `supervise --max-waiting N`（0で待ちを使わない。明示が無ければ`dagq.toml`の`[supervisor] max_waiting`、それも無ければ4。[Run environment](run-environment.md)の`[supervisor]`、task 698）と`up --max-waiting N`（明示されたときだけ`supervise`の引数に足す）。supervisorは登録（と引き継ぎの取り戻し、`[supervisor]`の読み直しで変わったとき）に`supervisors.max_waiting`（schema v37、互換の列。[persistence](../persistence.md)）と出どころの`max_waiting_source`を書く。

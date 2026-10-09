@@ -37,6 +37,12 @@
 //! [`WorktreeCleanup`]): of one waiting for a person's answer on every
 //! cleanup, of any other only in a cleanup for disk space. The loop leaves
 //! such a run reserved by the job before it lands, reviews or resumes it.
+//! A cleanup for disk space also takes those of the runs the supervisor
+//! itself leases that wait outside its slots for an answer (ADR-0071),
+//! once their turn is over and nothing runs for them
+//! ([`WorktreeCleanup::Waiting`]): the slots offer them ([`Held`]), and
+//! their waits hold still while the job has them reserved, so no answer is
+//! delivered and no turn starts in a worktree being cleaned.
 //!
 //! A cleanup for disk space, and the rest of one, also clears the build
 //! caches of the queue's directory ([`BUILD_CACHES`]): the target
@@ -47,9 +53,11 @@
 
 use super::*;
 use crate::application::update::{self, UpdatePaths};
-use crate::application::{EndedRunWorktree, RUN_TMP_DIR, WorktreeCleanup};
+use crate::application::{EndedRunWorktree, HostOpsQueue, RUN_TMP_DIR, WorktreeCleanup};
 use crate::domain::EventKind;
-use crate::domain::disk::worktree_executables;
+use crate::domain::disk::{ProcessExecutable, worktree_executables};
+use crate::domain::event_kind;
+use crate::domain::recovery::{ProcessInfo, run_processes};
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -63,6 +71,28 @@ pub(super) struct DiskRequest {
     pub(super) needed: Option<u64>,
 }
 
+/// What the slots hold, which a cleanup leaves alone (`runs`), but for
+/// the runs of `waiting` a cleanup for disk space may take.
+#[derive(Debug, Default)]
+pub(super) struct Held {
+    pub(super) runs: Vec<RunId>,
+    pub(super) waiting: Vec<WaitingRun>,
+}
+
+/// A run the supervisor leases that waits outside its slots for a
+/// person's answer (ADR-0071), as its slot holds it: what a cleanup for
+/// disk space needs to take its build outputs ([`waiting_candidate`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WaitingRun {
+    pub(super) run_id: RunId,
+    pub(super) task_id: TaskId,
+    pub(super) status: RunStatus,
+    pub(super) worktree: String,
+    pub(super) branch: Option<String>,
+    /// The asks the wait holds, oldest first.
+    pub(super) asks: Vec<AskId>,
+}
+
 /// What a cleanup is asked for: every ended run, or only some tasks'.
 #[derive(Debug, Default)]
 struct Request {
@@ -74,7 +104,9 @@ struct Request {
     /// `git worktree prune` after the worktrees (for disk space).
     prune: bool,
     /// The build outputs of the runs nobody works on that wait for no
-    /// answer ([`WorktreeCleanup::Idle`]) go too (for disk space).
+    /// answer ([`WorktreeCleanup::Idle`]), and of the runs the slots offer
+    /// that wait for an answer with no turn running
+    /// ([`WorktreeCleanup::Waiting`]), go too (for disk space).
     idle: bool,
     /// The [`BUILD_CACHES`] are cleared too (for disk space).
     caches: bool,
@@ -107,7 +139,7 @@ impl Request {
     }
     fn wants(&self, candidate: &EndedRunWorktree) -> bool {
         (self.all || self.tasks.contains(&candidate.task_id))
-            && (self.idle || candidate.cleanup != WorktreeCleanup::Idle)
+            && (self.idle || !for_room_only(candidate.cleanup))
     }
 }
 
@@ -306,6 +338,13 @@ fn add_disk_request(
     pending.add(None, Some(request));
 }
 
+/// Whether only a cleanup for disk space removes what a candidate left:
+/// the build outputs of a run nobody works on that waits for no answer, or
+/// of one this supervisor leases that waits outside its slots.
+const fn for_room_only(cleanup: WorktreeCleanup) -> bool {
+    matches!(cleanup, WorktreeCleanup::Idle | WorktreeCleanup::Waiting(_))
+}
+
 fn task_over(status: TaskStatus) -> bool {
     matches!(status, TaskStatus::Completed | TaskStatus::Canceled)
 }
@@ -324,9 +363,13 @@ fn build_outputs_record(cleanup: WorktreeCleanup, paths: &[String], bytes: u64) 
             format!(", waiting for the answer to ask {ask}"),
         ),
         WorktreeCleanup::Idle => (BUILD_OUTPUTS_DISK_SPACE, ", for disk space".to_owned()),
+        WorktreeCleanup::Waiting(ask) => (
+            BUILD_OUTPUTS_DISK_SPACE,
+            format!(", waiting outside its slot for the answer to ask {ask}, for disk space"),
+        ),
     };
     let mut payload = json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": reason});
-    if let WorktreeCleanup::AwaitingAnswer(ask) = cleanup {
+    if let WorktreeCleanup::AwaitingAnswer(ask) | WorktreeCleanup::Waiting(ask) = cleanup {
         payload["ask_id"] = json!(ask);
     }
     (why, payload)
@@ -401,6 +444,12 @@ pub(super) struct Cleaning {
 }
 
 impl Cleaning {
+    /// Whether the job has `run` reserved: a waiting run's wait holds
+    /// still meanwhile ([`Supervisor::watch_waiting`]), so no answer goes
+    /// to its session and no turn starts while its build outputs go.
+    pub(super) fn reserved(&self, run: &RunId) -> bool {
+        self.reserved.contains(run)
+    }
     /// The loop is about to lease `run`: `false` while the job has it
     /// reserved, which the loop leaves for a later pass. Otherwise the run
     /// is no longer settled, as it may get a worktree again.
@@ -462,6 +511,66 @@ fn pick_candidates(
         .filter(|w| !in_slot(&w.run_id))
         .filter(|w| !settled.contains_key(&w.run_id))
         .collect()
+}
+
+/// The candidate a waiting run is to a cleanup for disk space
+/// ([`WorktreeCleanup::Waiting`]): only once its last turn finished after
+/// the last one requested ([`turn_idle`]), for the oldest ask its wait
+/// holds that is still `open`. Its task goes on, as the run is leased.
+fn waiting_candidate(
+    run: &WaitingRun,
+    events: &[RunEvent],
+    open: impl Fn(AskId) -> bool,
+) -> Option<EndedRunWorktree> {
+    if !turn_idle(events) {
+        return None;
+    }
+    let ask = run.asks.iter().copied().find(|ask| open(*ask))?;
+    Some(EndedRunWorktree {
+        run_id: run.run_id.clone(),
+        task_id: run.task_id,
+        status: run.status,
+        task_status: TaskStatus::InProgress,
+        worktree: run.worktree.clone(),
+        branch: run.branch.clone(),
+        cleanup: WorktreeCleanup::Waiting(ask),
+    })
+}
+
+/// Whether no turn of the run runs nor is about to: of its turn events
+/// the latest is `turn_finished`. One requested and not started, or
+/// started and not finished (its wrapper may have died in it), is not.
+fn turn_idle(events: &[RunEvent]) -> bool {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                event_kind::TURN_REQUESTED | event_kind::TURN_STARTED | event_kind::TURN_FINISHED
+            )
+        })
+        .max_by_key(|event| event.id)
+        .is_some_and(|event| event.kind == event_kind::TURN_FINISHED)
+}
+
+/// Whether something runs for a waiting run in its `worktree`, besides
+/// its session's `wrapper` waiting between turns and the `agent` of its
+/// last turn: a process working in the worktree or under the wrapper (a
+/// turn, or a command or build a turn left, cargo included;
+/// [`run_processes`] of the recovery job, from `listed`), or one whose
+/// executable is under the worktree wherever it works (a test or build
+/// script from `target/`, [`worktree_executables`]). Never `except` (the
+/// supervisor) nor what it runs or runs under.
+fn worktree_busy(
+    listed: &[ProcessInfo],
+    executables: &[ProcessExecutable],
+    wrapper: Option<u32>,
+    agent: Option<u32>,
+    worktree: &Path,
+    except: u32,
+) -> bool {
+    !run_processes(listed, worktree, wrapper, agent, except).is_empty()
+        || !worktree_executables(executables, worktree, except).is_empty()
 }
 
 /// A build cache of the queue's directory: a target directory something
@@ -648,6 +757,9 @@ struct JobPorts {
     runs_dir: PathBuf,
     repo_root: PathBuf,
     cleaning: Arc<Mutex<Cleaning>>,
+    /// The session's processes of each waiting candidate, as its events
+    /// named them when it was picked ([`session_pids`]).
+    waiting: HashMap<RunId, SessionPids>,
     stop: Arc<AtomicBool>,
     prune: bool,
     /// Where Claude Code keeps the sessions' scratchpads (task 1100).
@@ -692,7 +804,9 @@ impl HostOpsState {
     /// run of a task that goes on, with no lease and no live session, go
     /// too (task 1289): on every cleanup while an ask of it waits for an
     /// answer (`reason: awaiting_answer`, with its `ask_id`), else only in
-    /// a cleanup for disk space (`reason: disk_space`).
+    /// a cleanup for disk space (`reason: disk_space`). A cleanup for disk
+    /// space takes the build outputs of the waiting runs `held` offers too
+    /// (`reason: disk_space`, with the `ask_id` the wait holds).
     ///
     /// `bytes` is what the removed files took on disk. Only a worktree
     /// under the run directory is touched, never the checkout the
@@ -702,7 +816,7 @@ impl HostOpsState {
     pub(super) fn request_cleanup(
         &mut self,
         env: &mut HostEnv<'_>,
-        held: &[RunId],
+        held: &Held,
         task: Option<TaskId>,
         disk: Option<DiskRequest>,
     ) -> bool {
@@ -717,7 +831,7 @@ impl HostOpsState {
     /// current worktree (all candidates for disk space) and start nothing
     /// more but the rest of a cleanup for room another job took on, which
     /// goes to its last candidate too (task 1426).
-    pub(super) fn poll_cleanup(&mut self, env: &mut HostEnv<'_>, held: &[RunId], ending: bool) {
+    pub(super) fn poll_cleanup(&mut self, env: &mut HostEnv<'_>, held: &Held, ending: bool) {
         if ending {
             self.end_cleanup();
         }
@@ -753,7 +867,7 @@ impl HostOpsState {
     /// has not seen the stop yet goes on, and every ended run is asked for
     /// at once, which picks up what the drain dropped. A job that stopped
     /// after its current worktree leaves the rest to that request.
-    pub(super) fn resume_cleanup(&mut self, env: &mut HostEnv<'_>, held: &[RunId]) {
+    pub(super) fn resume_cleanup(&mut self, env: &mut HostEnv<'_>, held: &Held) {
         if self.cleanup.resume() {
             self.request_cleanup(env, held, None, None);
         }
@@ -762,7 +876,7 @@ impl HostOpsState {
     /// next one, and record what they did. After a stop, only the running
     /// job and the rest of a cleanup for room it took on remain; ordinary
     /// cleanup stops after its current worktree.
-    pub(super) fn finish_cleanup(&mut self, env: &mut HostEnv<'_>, held: &[RunId]) {
+    pub(super) fn finish_cleanup(&mut self, env: &mut HostEnv<'_>, held: &Held) {
         while let Some(job) = &self.cleanup.job {
             while !job.handle.is_finished() {
                 thread::sleep(Duration::from_millis(20));
@@ -771,8 +885,11 @@ impl HostOpsState {
         }
     }
     /// Start a job for what waits, unless one runs: the candidates are
-    /// picked here, on the loop, less the runs a slot holds.
-    fn start_cleanup(&mut self, env: &mut HostEnv<'_>, held: &[RunId]) {
+    /// picked here, on the loop, less the runs a slot holds. A cleanup for
+    /// disk space also takes the waiting runs the slots offer whose turn
+    /// is over ([`waiting_candidate`]); the job reserves them as any other,
+    /// which holds their waits still until it passed them.
+    fn start_cleanup(&mut self, env: &mut HostEnv<'_>, held: &Held) {
         if self.cleanup.job.is_some() || self.cleanup.pending.is_empty() {
             return;
         }
@@ -784,13 +901,27 @@ impl HostOpsState {
                 return;
             }
         };
+        let (waiting, waiting_pids): (Vec<_>, HashMap<_, _>) = if request.idle {
+            waiting_candidates(&*env.queue, &held.waiting)
+                .into_iter()
+                .map(|(candidate, pids)| {
+                    let run = candidate.run_id.clone();
+                    (candidate, (run, pids))
+                })
+                .unzip()
+        } else {
+            (Vec::new(), HashMap::new())
+        };
         let mut cleaning = lock_cleaning(&self.cleanup.cleaning);
-        let candidates = pick_candidates(
+        // The waiting runs first: their waits hold still until the job
+        // passed them, so an answer waits for theirs alone.
+        let mut candidates = waiting;
+        candidates.extend(pick_candidates(
             listed,
             &request,
-            |run| held.contains(run),
+            |run| held.runs.contains(run),
             &mut cleaning.settled,
-        );
+        ));
         if candidates.is_empty() && !request.prune {
             return;
         }
@@ -804,6 +935,7 @@ impl HostOpsState {
             runs_dir: env.layout.runs_dir.clone(),
             repo_root: env.layout.repo_root.clone(),
             cleaning: self.cleanup.cleaning.clone(),
+            waiting: waiting_pids,
             // A cleanup for room goes to its last candidate: it is not
             // stopped with ordinary cleanup.
             stop: if for_room(request.disk, request.counted).is_some() {
@@ -980,7 +1112,10 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
         &ports.cleaning,
         &ports.stop,
         candidates,
-        |run| queue.ended_run_worktree(run),
+        |candidate| match candidate.cleanup {
+            WorktreeCleanup::Waiting(_) => still_waiting(&*queue, ports, candidate),
+            _ => queue.ended_run_worktree(&candidate.run_id),
+        },
         |candidate, outcomes| {
             clean_candidate(ports, candidate, &mut branches, &mut pruned, outcomes)
         },
@@ -1012,7 +1147,7 @@ fn pass_candidates(
     cleaning: &Mutex<Cleaning>,
     stop: &AtomicBool,
     candidates: Vec<EndedRunWorktree>,
-    mut recheck: impl FnMut(&RunId) -> Result<Option<EndedRunWorktree>>,
+    mut recheck: impl FnMut(&EndedRunWorktree) -> Result<Option<EndedRunWorktree>>,
     mut clean: impl FnMut(&EndedRunWorktree, &mut Vec<Outcome>) -> bool,
 ) -> Vec<Outcome> {
     let mut outcomes = Vec::new();
@@ -1022,7 +1157,7 @@ fn pass_candidates(
         }
         let still = {
             let _cleaning = lock_cleaning(cleaning);
-            match recheck(&candidate.run_id) {
+            match recheck(&candidate) {
                 Ok(now) => now.as_ref() == Some(&candidate),
                 Err(error) => {
                     warn!(run_id = %candidate.run_id, error = %format_args!("{error:#}"), "run {}: its worktree was not cleaned, the queue could not be read: {error:#}", candidate.run_id);
@@ -1039,6 +1174,106 @@ fn pass_candidates(
     }
     lock_cleaning(cleaning).reserved.clear();
     outcomes
+}
+
+/// The waiting runs of `waiting` a cleanup for disk space takes
+/// ([`waiting_candidate`]), read on the loop: a run whose events or asks
+/// cannot be read is left for the next cleanup.
+fn waiting_candidates(
+    queue: &(dyn HostOpsQueue + Send),
+    waiting: &[WaitingRun],
+) -> Vec<(EndedRunWorktree, SessionPids)> {
+    waiting
+        .iter()
+        .filter_map(|run| {
+            // The slot's copy of the run may be older than its status.
+            let read = queue
+                .run(&run.run_id)
+                .and_then(|now| Ok((now.status(), queue.run_events(&run.run_id)?)))
+                .inspect_err(|error| warn!(run_id = %run.run_id, error = %format_args!("{error:#}"), "run {}: whether a turn of it runs could not be read for the cleanup for disk space: {error:#}", run.run_id))
+                .ok()?;
+            let (status, events) = read;
+            let run = WaitingRun {
+                status,
+                ..run.clone()
+            };
+            let candidate = waiting_candidate(&run, &events, |ask| {
+                queue
+                    .read_ask(ask)
+                    .is_ok_and(|ask| ask.answered_at.is_none() && ask.closed_at.is_none())
+            })?;
+            Some((candidate, session_pids(&events)))
+        })
+        .collect()
+}
+
+/// The processes of a waiting run's session: the pid of its wrapper (the
+/// latest `wrapper_started`) and of the agent of its last turn (the latest
+/// `turn_started`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SessionPids {
+    wrapper: Option<u32>,
+    agent: Option<u32>,
+}
+
+/// The [`SessionPids`] a run's `events` name. The loop reopens no session
+/// and starts no turn of a run the job has reserved, so they stay the
+/// session's while the job passes it.
+fn session_pids(events: &[RunEvent]) -> SessionPids {
+    let latest = |kind: &str| {
+        events
+            .iter()
+            .filter(|event| event.kind == kind)
+            .max_by_key(|event| event.id)
+            .and_then(|event| event.payload["pid"].as_u64())
+            .and_then(|pid| u32::try_from(pid).ok())
+    };
+    SessionPids {
+        wrapper: latest(event_kind::WRAPPER_STARTED),
+        agent: latest(event_kind::TURN_STARTED),
+    }
+}
+
+/// A waiting candidate as the job finds it again under the lock: its
+/// status is the same, the agent of its last turn is gone, and nothing
+/// else runs for it ([`worktree_busy`]). The loop delivers no answer and
+/// starts no turn while the job has it reserved, so it stays so while its
+/// build outputs go. The lease is the loop's: this live process keeps
+/// heartbeating it, so no other supervisor takes the run meanwhile.
+fn still_waiting(
+    queue: &(dyn HostOpsQueue + Send),
+    ports: &JobPorts,
+    candidate: &EndedRunWorktree,
+) -> Result<Option<EndedRunWorktree>> {
+    let run = &candidate.run_id;
+    if queue.run(run)?.status() != candidate.status {
+        return Ok(None);
+    }
+    let SessionPids { wrapper, agent } = ports.waiting.get(run).copied().unwrap_or_default();
+    let worktree = Path::new(&candidate.worktree);
+    let resolved = ports
+        .files
+        .canonicalize(worktree)
+        .unwrap_or_else(|_| worktree.to_path_buf());
+    // A turn's agent still alive is a turn that runs; a listing that
+    // cannot be read counts as something running.
+    let busy = agent.is_some_and(|agent| ports.processes.alive(agent))
+        || match (ports.processes.list(), ports.processes.executables()) {
+            (Ok(listed), Ok(executables)) => worktree_busy(
+                &listed,
+                &executables,
+                wrapper,
+                agent,
+                &resolved,
+                std::process::id(),
+            ),
+            _ => true,
+        };
+    if busy {
+        info!(run_id = %run, "run {run} waits for an answer, but something runs for it: its build outputs stay");
+        return Ok(None);
+    }
+    Ok(Some(candidate.clone()))
 }
 
 /// Clean one candidate: its runner, worktree or build outputs, scratchpads
@@ -1740,14 +1975,20 @@ mod tests {
         };
         let idle = EndedRunWorktree {
             cleanup: WorktreeCleanup::Idle,
+            ..run.clone()
+        };
+        let waiting = EndedRunWorktree {
+            cleanup: WorktreeCleanup::Waiting(AskId::new(8)),
             ..run
         };
         assert!(request.wants(&awaiting));
         assert!(!request.wants(&idle));
+        assert!(!request.wants(&waiting));
         request.add(None, None);
         assert!(request.all);
         assert!(request.wants(&other));
         assert!(!request.wants(&idle));
+        assert!(!request.wants(&waiting));
         assert!(!request.prune);
         assert!(request.disk.is_none());
         request.add(Some(TaskId::new(1)), Some(DISK));
@@ -1760,6 +2001,7 @@ mod tests {
         );
         assert!(request.all && request.prune && request.idle);
         assert!(request.wants(&idle));
+        assert!(request.wants(&waiting));
         assert_eq!(request.disk, Some(DISK));
         assert_eq!(request.counted, None);
         let mut disk_only = Request::default();
@@ -2298,12 +2540,17 @@ mod tests {
                 ", waiting for the answer to ask 7",
             ),
             (WorktreeCleanup::Idle, "disk_space", ", for disk space"),
+            (
+                WorktreeCleanup::Waiting(AskId::new(7)),
+                "disk_space",
+                ", waiting outside its slot for the answer to ask 7, for disk space",
+            ),
         ] {
             let (suffix, payload) = build_outputs_record(cleanup, &paths, 42);
             assert_eq!(suffix, why);
             let mut expected =
                 json!({"paths": paths, "bytes": 42, "by": "supervisor", "reason": reason});
-            if cleanup == WorktreeCleanup::AwaitingAnswer(AskId::new(7)) {
+            if let WorktreeCleanup::AwaitingAnswer(_) | WorktreeCleanup::Waiting(_) = cleanup {
                 expected["ask_id"] = json!(7);
             }
             assert_eq!(payload, expected);
@@ -2385,6 +2632,200 @@ mod tests {
         let long = format!("/{}", "a".repeat(SCRATCHPAD_NAME_MAX));
         assert_eq!(scratchpad_dir_name(&long), None);
         assert!(scratchpad_dir_name(&long[..SCRATCHPAD_NAME_MAX]).is_some());
+    }
+
+    fn turn_event(id: i64, kind: &str) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: Some(TaskId::new(1)),
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload: json!({}),
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    /// A run waiting outside its slot is a candidate of a cleanup for room
+    /// only once its last turn finished after the last one requested, for
+    /// the oldest ask its wait holds that is still open; its task goes on,
+    /// so only its build outputs go, its runner stays and it is no
+    /// candidate of an ordinary cleanup.
+    #[test]
+    fn a_waiting_run_is_a_candidate_only_once_its_turn_is_over_and_an_ask_is_open() {
+        let run = WaitingRun {
+            run_id: RunId::new("w".to_owned()).unwrap(),
+            task_id: TaskId::new(4),
+            status: RunStatus::NeedsSession,
+            worktree: "/runs/w/worktree".to_owned(),
+            branch: Some("refs/heads/dagq/w".to_owned()),
+            asks: vec![AskId::new(5), AskId::new(6)],
+        };
+        use event_kind::{TURN_FINISHED as F, TURN_REQUESTED as Q, TURN_STARTED as S};
+        let open = |ask: AskId| ask != AskId::new(5);
+        for (events, idle) in [
+            (vec![], false),
+            (vec![(1, Q)], false),
+            (vec![(1, Q), (2, S)], false),
+            (vec![(1, Q), (2, S), (3, F)], true),
+            // The wait began before the turn that asked ended.
+            (
+                vec![(1, Q), (2, S), (4, F), (3, "run_waiting_started")],
+                true,
+            ),
+            (vec![(1, Q), (2, S), (3, F), (4, Q)], false),
+            (vec![(1, Q), (2, S), (3, F), (4, Q), (5, S)], false),
+            // Read out of order, the latest by id is the one.
+            (vec![(3, F), (1, Q), (2, S)], true),
+        ] {
+            let events: Vec<RunEvent> = events
+                .into_iter()
+                .map(|(id, kind)| turn_event(id, kind))
+                .collect();
+            assert_eq!(turn_idle(&events), idle, "{events:?}");
+            let picked = waiting_candidate(&run, &events, open);
+            assert_eq!(picked.is_some(), idle, "{events:?}");
+            if let Some(picked) = picked {
+                assert_eq!(
+                    picked,
+                    EndedRunWorktree {
+                        run_id: run.run_id.clone(),
+                        task_id: TaskId::new(4),
+                        status: RunStatus::NeedsSession,
+                        task_status: TaskStatus::InProgress,
+                        worktree: run.worktree.clone(),
+                        branch: run.branch.clone(),
+                        cleanup: WorktreeCleanup::Waiting(AskId::new(6)),
+                    }
+                );
+                assert!(for_room_only(picked.cleanup));
+                assert!(!runner_goes(picked.cleanup));
+                assert!(!task_over(picked.task_status));
+            }
+        }
+        let finished = [turn_event(1, S), turn_event(2, F)];
+        assert_eq!(waiting_candidate(&run, &finished, |_| false), None);
+    }
+
+    /// Something runs for a waiting run while a process works in its
+    /// worktree (cargo too) or under its wrapper, or runs from its
+    /// worktree's `target/` wherever it works; the wrapper waiting between
+    /// turns, the agent of its last turn, the supervisor and what runs
+    /// elsewhere are nothing.
+    #[test]
+    fn a_waiting_run_is_busy_while_something_works_in_its_worktree_or_under_its_wrapper() {
+        let listed = |pid, ppid, cwd: &str| ProcessInfo {
+            pid,
+            ppid,
+            elapsed_secs: 1,
+            command: String::new(),
+            cwd: Some(cwd.to_owned()),
+            cpu_ms: None,
+        };
+        let exe = |pid, ppid, executable: &str| ProcessExecutable {
+            pid,
+            ppid,
+            executable: Some(executable.to_owned()),
+        };
+        let worktree = Path::new("/runs/w/worktree");
+        let (wrapper, agent, supervisor) = (10, 11, 99);
+        let quiet = vec![
+            listed(wrapper, 1, "/runs/w/worktree"),
+            listed(agent, wrapper, "/runs/w/worktree"),
+            listed(supervisor, 1, "/repo"),
+            listed(98, supervisor, "/runs/w/worktree"),
+            listed(30, 1, "/elsewhere"),
+        ];
+        let executables = [
+            exe(30, 1, "/usr/bin/cargo"),
+            exe(wrapper, 1, "/runs/w/runner"),
+        ];
+        let busy = |listed: &[ProcessInfo], executables: &[ProcessExecutable]| {
+            worktree_busy(
+                listed,
+                executables,
+                Some(wrapper),
+                Some(agent),
+                worktree,
+                supervisor,
+            )
+        };
+        assert!(!busy(&quiet, &executables));
+        // Only as named: unnamed, they work in the worktree.
+        assert!(worktree_busy(
+            &quiet,
+            &executables,
+            None,
+            None,
+            worktree,
+            supervisor
+        ));
+        let cargo = [quiet.clone(), vec![listed(40, 1, "/runs/w/worktree/src")]].concat();
+        assert!(busy(&cargo, &executables));
+        let under_wrapper = [quiet.clone(), vec![listed(41, wrapper, "/elsewhere")]].concat();
+        assert!(busy(&under_wrapper, &executables));
+        let test = [
+            executables.to_vec(),
+            vec![exe(42, 1, "/runs/w/worktree/target/debug/deps/it-0123")],
+        ]
+        .concat();
+        assert!(busy(&quiet, &test));
+    }
+
+    /// A waiting run's session is its latest wrapper and the agent of its
+    /// latest turn, as their events name them.
+    #[test]
+    fn a_waiting_runs_session_is_its_latest_wrapper_and_turn_agent() {
+        let event = |id, kind: &str, pid: Value| RunEvent {
+            payload: json!({ "pid": pid }),
+            ..turn_event(id, kind)
+        };
+        assert_eq!(session_pids(&[]), SessionPids::default());
+        let events = [
+            event(1, event_kind::WRAPPER_STARTED, json!(10)),
+            event(2, event_kind::TURN_STARTED, json!(11)),
+            event(3, event_kind::TURN_FINISHED, json!(null)),
+            event(5, event_kind::TURN_STARTED, json!(13)),
+            event(4, event_kind::WRAPPER_STARTED, json!(12)),
+            event(6, event_kind::AGENT_STARTED, json!(14)),
+        ];
+        assert_eq!(
+            session_pids(&events),
+            SessionPids {
+                wrapper: Some(12),
+                agent: Some(13),
+            }
+        );
+    }
+
+    /// The job reserves a waiting run it picked as any other: the wait
+    /// holds still while it is reserved, and not once it passed the run.
+    #[test]
+    fn a_picked_waiting_run_is_reserved_until_the_job_passed_it() {
+        let waiting = EndedRunWorktree {
+            cleanup: WorktreeCleanup::Waiting(AskId::new(6)),
+            ..candidate("w", TaskStatus::InProgress)
+        };
+        let run = waiting.run_id.clone();
+        let cleaning = Mutex::new(Cleaning {
+            reserved: vec![run.clone()],
+            ..Cleaning::default()
+        });
+        let stop = AtomicBool::new(false);
+        let mut seen = Vec::new();
+        pass_candidates(
+            &cleaning,
+            &stop,
+            vec![waiting.clone()],
+            |picked| Ok(Some(picked.clone())),
+            |picked, _| {
+                seen.push(lock_cleaning(&cleaning).reserved(&picked.run_id));
+                false
+            },
+        );
+        assert_eq!(seen, [true]);
+        assert!(!lock_cleaning(&cleaning).reserved(&run));
     }
 
     /// An ended run of task `task` whose task is `task_status`.
@@ -2526,9 +2967,9 @@ mod tests {
                 cleaning,
                 &stop,
                 picked,
-                |run| {
-                    reads.push(run.clone());
-                    Ok(runs.iter().find(|w| w.run_id == *run).cloned())
+                |picked| {
+                    reads.push(picked.run_id.clone());
+                    Ok(runs.iter().find(|w| w.run_id == picked.run_id).cloned())
                 },
                 // The first M have nothing left once passed.
                 |candidate, _| runs[..M].contains(candidate),
@@ -2561,7 +3002,7 @@ mod tests {
             &cleaning,
             &stop,
             picked.clone(),
-            |run| match run.as_str() {
+            |picked| match picked.run_id.as_str() {
                 "leased" => Ok(None),
                 "moved" => Ok(Some(EndedRunWorktree {
                     task_status: TaskStatus::Canceled,
@@ -2571,7 +3012,7 @@ mod tests {
                     stop.store(true, Ordering::SeqCst);
                     Err(anyhow::anyhow!("busy"))
                 }
-                _ => Ok(picked.iter().find(|w| w.run_id == *run).cloned()),
+                _ => Ok(Some(picked.clone())),
             },
             |candidate, _| {
                 cleaned.push(candidate.run_id.as_str().to_owned());

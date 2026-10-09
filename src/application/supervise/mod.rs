@@ -1455,6 +1455,15 @@ impl Supervisor<'_> {
         self.claim.slots.runs()
     }
 
+    /// The runs the slots hold, which a cleanup leaves alone, but for the
+    /// waiting ones it may take for disk space ([`Self::waiting_worktrees`]).
+    fn cleanup_held(&self) -> cleanup::Held {
+        cleanup::Held {
+            runs: self.held_runs(),
+            waiting: self.waiting_worktrees(),
+        }
+    }
+
     /// The sweep of what ended runs left, when host運用's
     /// [`sweep::SweepWatch`] says it is due: in the same pass the
     /// `approve_landing` asks the paths that ended their runs left open are
@@ -1480,14 +1489,14 @@ impl Supervisor<'_> {
     /// Ask host運用 for the worktrees of ended runs to be cleaned, every
     /// such run's or only `task`'s ([`contexts::HostOpsState::request_cleanup`]).
     pub(super) fn request_cleanup(&mut self, task: Option<TaskId>) {
-        let held = self.held_runs();
+        let held = self.cleanup_held();
         self.on_host(|host, env| host.request_cleanup(env, &held, task, None));
     }
 
     /// A handoff withdrawn while this process drained: the cleanup goes
     /// back to normal ([`contexts::HostOpsState::resume_cleanup`]).
     fn resume_cleanup(&mut self) {
-        let held = self.held_runs();
+        let held = self.cleanup_held();
         self.on_host(|host, env| host.resume_cleanup(env, &held));
     }
 
@@ -1537,7 +1546,7 @@ impl Supervisor<'_> {
         // A loop that ended on an error lets the cleanup job end after its
         // current worktree (all candidates for disk space), recording its work.
         if result.is_err() {
-            let held = self.held_runs();
+            let held = self.cleanup_held();
             self.on_host(|host, env| {
                 host.poll_cleanup(env, &held, true);
                 host.finish_cleanup(env, &held);
@@ -1608,7 +1617,7 @@ impl Supervisor<'_> {
             // What the cleanup job removed is recorded before the disk is
             // read (task 405).
             let ending = cleanup::ends_cleanup(stopping, self.registration.handoff.is_some());
-            let held = self.held_runs();
+            let held = self.cleanup_held();
             self.on_host(|host, env| host.poll_cleanup(env, &held, ending));
             // Every pass, draining or not, so a hold on landings ends as soon
             // as the program is found (ADR-0049 decision 9).
@@ -1655,7 +1664,7 @@ impl Supervisor<'_> {
                 .filter(|slot| matches!(slot.phase, Phase::AwaitingSlot))
                 .map(|slot| slot.run.id().clone())
                 .collect();
-            let held = self.held_runs();
+            let held = self.cleanup_held();
             self.on_host(|host, env| {
                 host.check_disk(env, options.disk_cleanup_interval, &landings, &held)
             })?;
@@ -1899,7 +1908,7 @@ impl Supervisor<'_> {
             self.tick(false);
             thread::sleep(options.tick);
         }
-        let held = self.held_runs();
+        let held = self.cleanup_held();
         self.on_host(|host, env| host.finish_cleanup(env, &held));
         if let Some(message) = &self.claim.provisioning_error {
             bail!(

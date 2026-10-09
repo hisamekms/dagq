@@ -69,7 +69,7 @@ impl HostOpsState {
         env: &mut HostEnv<'_>,
         interval: Duration,
         landings: &[RunId],
-        held: &[RunId],
+        held: &super::cleanup::Held,
     ) -> Result<()> {
         let unclosed: Vec<Ask> = env
             .queue
@@ -159,7 +159,7 @@ impl HostOpsState {
     fn clean_for_disk(
         &mut self,
         env: &mut HostEnv<'_>,
-        held: &[RunId],
+        held: &super::cleanup::Held,
         free: Option<u64>,
         needed: Option<u64>,
         interval: Duration,

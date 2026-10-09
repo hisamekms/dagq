@@ -27,7 +27,7 @@ related:
 - 対象: run（`awaiting_integration`か`needs_session`）のtaskが`completed` / `canceled`でなく、slotに無く、leaseが1つも無く（staleなleaseも有るものとして扱い、触らない）、生きているsession（`run_processes`の`exited_at`がnullで`heartbeat_at`が`HEARTBEAT_TIMEOUT_SECS`より新しい行）が無いもの（`ended_run_worktrees`が`cleanup`の`AwaitingAnswer` / `Idle`として返す）。着地の列に並んだrun、`approve_landing`を待つrun、resumeを待つ`needs_session`のrun、`integration_held`で人を待つrunなど
 - **人の答えを待つrun**（`AwaitingAnswer`）: runに開いていて答えの無いask（`approve_landing`・`decide`など。いちばん古いもの）がある。答えまで何時間も待つので（task 1059のrunはask 250で16時間待った）、空きの多少によらず、jobの通常の周回（上の契機のどれでも）で消す。`build_outputs_removed`の`reason`は`awaiting_answer`で、`ask_id`を足す
 - **それ以外**（`Idle`）: すぐ使われうるので通常は残し、空き容量のための掃除（[空き容量を確かめる](disk-space.md)の「判定と掃除」）のjobのときだけ消す。`reason`は`disk_space`で、そのjobの`auto_repaired`（`disk_cleanup`）の`bytes`と`runs`に数える
-- 消さないもの: leaseかslotを持つrun（作業中・validating・review・resume・integrate・着地の前のe2e）と、ADR-0071の待ちのrun（leaseとsessionを持ったまま答えを待つ）。worktree・branch・commit・receipt・run_dir・未commitの変更（ソース）は残し、`runner`も消さない（上の`runner`の項は終わったrunだけ）
+- 消さないもの: leaseかslotを持つrun（作業中・validating・review・resume・integrate・着地の前のe2e）。ただしADR-0071の待ちのrun（leaseとsessionを持ったまま答えを待つ）のうちturnの終わったものは、空き容量のための掃除だけが、leaseを持つsupervisorから受け取ってビルド成果物を消す（[人の答えを待つrun](waiting.md)の「空き容量のための掃除」）。worktree・branch・commit・receipt・run_dir・未commitの変更（ソース）は残し、`runner`も消さない（上の`runner`の項は終わったrunだけ）
 - 消している最中: jobが通り過ぎるまでrunは予約され、loopはleaseを取る前（resumeの`begin_resume`とresumeの要らないrunを進める`skip_resume`、着地の列からの`begin_integration`と着地の前のe2eの`lease_for_e2e`、着地をやり直せないrunのreviewの`lease_for_review`）に予約のlockを取り、予約されたrunはその周回は取らない（次の節）。消した後に着地やresumeが始まれば、検証とworkerがsccacheでビルドし直して進む。人が打つ`integrate`はこの予約を見ない
 - 空きの見積もり（直近の`build_outputs_removed`の`bytes`の最大値）は、`reason`を問わずどの記録も数える（どれも1 runのビルドの大きさなので）
 

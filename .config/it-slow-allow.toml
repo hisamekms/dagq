@@ -806,3 +806,9 @@ task = 2210
 name = "runtime_landing_release::a_run_neither_approved_nor_passed_is_reviewed_again_once_its_landing_died"
 reason = "境界（復旧とsupervisorの配線）: 実 supervisor の release_dead_landing が未承認の死んだ着地を recover_run で戻し、returning を経て review_recovered_runs の review にかけて着地させることを実 process・Git・SQLite で確かめる代表の 1 本。回収の工程の判断は domain::run_phase の unit test"
 task = 2210
+
+# 3.5 to 7.2s (stress of 5 under the host's load)
+[[test]]
+name = "runtime_cleanup::a_waiting_runs_build_outputs_go_for_room_and_its_answer_waits_for_the_cleanup"
+reason = "境界（supervisorの配線・プロセス・SQLite）: 実 supervisor の slot の待ち（ADR-0071）の run を空き容量のための掃除の job が予約して消し、そのあいだ答えが待ちを終えず、通り過ぎた後に答えが届いて worker の turn がビルドし直すことを、実 process の一覧と SQLite で確かめる。候補の選びと動いているものの判定は supervise::cleanup の unit test"
+task = 1980

@@ -2262,3 +2262,209 @@ fn the_pass_after_a_long_cleanup_for_room_asks_and_holds() {
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
 }
+
+/// A worker that builds, asks a `worker_question` and ends its turn; the
+/// turn of the answer writes whether its build outputs were still there,
+/// builds again and commits. Git ignores `target/`, as the repositories
+/// that build do.
+const BUILDING_ASKING_AGENT: &str = r#"
+mkdir -p "$(git rev-parse --git-common-dir)/info"
+printf 'target/\n' >> "$(git rev-parse --git-common-dir)/info/exclude"
+case "$PROMPT" in
+"answer to ask "*)
+  if [ -e target/debug/big ]; then echo kept; else echo rebuilt; fi > built.txt
+  mkdir -p target/debug; head -c 65536 /dev/zero > target/debug/big
+  git add built.txt
+  git commit -q -m built
+  receipt "$(git rev-parse HEAD)" ;;
+*) mkdir -p target/debug; head -c 65536 /dev/zero > target/debug/big
+  "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70 ;;
+esac
+"#;
+
+/// The system's processes, but for what runs under the stub session's
+/// wrapper (its watchdog's `sleep`), which a real wrapper waiting between
+/// turns does not run.
+#[derive(Clone, Default)]
+struct StubWrapperHidden(Arc<Mutex<Option<u32>>>);
+
+impl ProcessControl for StubWrapperHidden {
+    fn alive(&self, pid: u32) -> bool {
+        SystemProcesses.alive(pid)
+    }
+    fn terminate(&self, pid: u32) -> Result<()> {
+        SystemProcesses.terminate(pid)
+    }
+    fn interrupt(&self, pid: u32) -> Result<()> {
+        SystemProcesses.interrupt(pid)
+    }
+    fn kill(&self, pid: u32) -> Result<()> {
+        SystemProcesses.kill(pid)
+    }
+    fn kill_group(&self, leader: u32) -> Result<()> {
+        SystemProcesses.kill_group(leader)
+    }
+    fn reap(&self, pid: u32) {
+        SystemProcesses.reap(pid)
+    }
+    fn list(&self) -> Result<Vec<dagq::domain::recovery::ProcessInfo>> {
+        let all = SystemProcesses.list()?;
+        let Some(wrapper) = *self.0.lock().unwrap() else {
+            return Ok(all);
+        };
+        let under = dagq::domain::headless_job::descendants(&all, wrapper);
+        Ok(all
+            .into_iter()
+            .filter(|p| !under.contains(&p.pid))
+            .collect())
+    }
+    fn executables(&self) -> Result<Vec<dagq::domain::disk::ProcessExecutable>> {
+        SystemProcesses.executables()
+    }
+    fn start_identity(&self, pid: u32) -> Option<String> {
+        SystemProcesses.start_identity(pid)
+    }
+    fn started_at(&self, pid: u32) -> Option<i64> {
+        SystemProcesses.started_at(pid)
+    }
+    fn descendants(&self, pid: u32) -> Vec<u32> {
+        SystemProcesses.descendants(pid)
+    }
+}
+
+/// Whether the waiting run's test reads the free space as short.
+static WAITING_SHORT: AtomicBool = AtomicBool::new(false);
+
+fn short_while_waiting(_: &Path) -> Option<u64> {
+    Some(if WAITING_SHORT.load(Ordering::SeqCst) {
+        1
+    } else {
+        4 << 30
+    })
+}
+
+/// A run the supervisor leases that waits outside its slot for the answer
+/// to its `worker_question`, its turn over, loses its build outputs in a
+/// cleanup for room: `build_outputs_removed` (`reason: disk_space`, its
+/// `ask_id`) on the run, its bytes and the run in `auto_repaired`
+/// (`disk_cleanup`); its sources, receipt path and runner stay. The answer
+/// that arrives while the job has the run reserved ends no wait, and
+/// nothing is delivered nor any turn started, until the job passed it; the
+/// worker then builds again and goes on. Which waiting runs a cleanup
+/// takes (a turn running or asked for, no ask open, something running for
+/// it, an ordinary cleanup) is the unit tests' of `supervise::cleanup`.
+#[test]
+fn a_waiting_runs_build_outputs_go_for_room_and_its_answer_waits_for_the_cleanup() {
+    let (_dir, repo, db) = fixture();
+    WAITING_SHORT.store(false, Ordering::SeqCst);
+    let backend = Arc::new(TestWorkspace::new(&db, false, BUILDING_ASKING_AGENT));
+    let files = GatedFiles::default();
+    let processes = StubWrapperHidden::default();
+    let options = files.options(SuperviseOptions {
+        disk: Some(DiskConfig {
+            min_free_bytes: Some(1 << 30),
+            ..DiskConfig::default()
+        }),
+        free_space: short_while_waiting,
+        processes: Some(runtime::ProcessesPort(Arc::new(processes.clone()))),
+        ..supervise_options(1, true)
+    });
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    // The run waits, and the turn that asked is over.
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        queue
+            .show(TaskId::new(1))
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| {
+                let kinds: Vec<String> = queue
+                    .run_events(run.id())
+                    .unwrap()
+                    .into_iter()
+                    .map(|e| e.kind)
+                    .collect();
+                kinds.iter().any(|k| k == "run_waiting_started")
+                    && kinds
+                        .iter()
+                        .rfind(|k| {
+                            ["turn_requested", "turn_started", "turn_finished"]
+                                .contains(&k.as_str())
+                        })
+                        .is_some_and(|k| k == "turn_finished")
+            })
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let ask = queue
+        .asks(AskQuery::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.run_id.as_ref() == Some(run.id()) && ask.kind == AskKind::WorkerQuestion)
+        .unwrap()
+        .id;
+    let target = Path::new(run.worktree_path().unwrap()).join("target");
+    let runner = Path::new(run.run_dir().unwrap()).join("runner");
+    assert!(target.join("debug/big").is_file());
+    *processes.0.lock().unwrap() = queue
+        .processes(run.id())
+        .unwrap()
+        .into_iter()
+        .find(|p| p.role == "wrapper")
+        .map(|p| p.pid);
+    WAITING_SHORT.store(true, Ordering::SeqCst);
+    assert_eq!(files.held(), target);
+    // Answered while the job holds the run: the wait holds still.
+    queue.answer(ask, "blue").unwrap();
+    await_passes(&passes, 2);
+    assert!(payloads_of(&queue, &run, "run_waiting_ended").is_empty());
+    assert!(payloads_of(&queue, &run, "ask_delivered").is_empty());
+    assert!(payloads_of(&queue, &run, "turn_requested").is_empty());
+    assert!(payloads_of(&queue, &run, "build_outputs_removed").is_empty());
+
+    WAITING_SHORT.store(false, Ordering::SeqCst);
+    files.open();
+    let outcome = joined(supervisor, "the supervisor to finish").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The first; a later cleanup may remove what it built again.
+    let removed = payloads_of(&queue, &run, "build_outputs_removed");
+    assert!(!removed.is_empty(), "{removed:?}");
+    let bytes = removed[0]["bytes"].as_u64().unwrap();
+    assert!(bytes >= 65536, "{bytes}");
+    assert_eq!(
+        removed[0],
+        json!({"paths": [target.to_string_lossy()], "bytes": bytes, "by": "supervisor", "reason": "disk_space", "ask_id": ask})
+    );
+    let repaired: Vec<Value> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "auto_repaired" && e.payload["repair"] == "disk_cleanup")
+        .map(|e| e.payload)
+        .collect();
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["bytes"].as_u64(), Some(bytes));
+    assert_eq!(repaired[0]["detail"]["runs"], json!([run.id().as_str()]));
+    // The answer went once the build outputs were gone (the job records
+    // them once joined, maybe after the wait ended), and the worker built
+    // again and went on.
+    assert_eq!(payloads_of(&queue, &run, "ask_delivered").len(), 1);
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    let worktree = Path::new(run.worktree_path().unwrap());
+    assert_eq!(
+        fs::read_to_string(worktree.join("built.txt")).unwrap(),
+        "rebuilt\n"
+    );
+    assert!(runner.is_file());
+    assert!(
+        Path::new(run.run_dir().unwrap())
+            .join("receipt.json")
+            .is_file()
+    );
+}

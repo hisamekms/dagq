@@ -753,6 +753,12 @@ pub enum WorktreeCleanup {
     /// waiting for a resume): its build outputs go only in a cleanup for
     /// disk space (task 1289).
     Idle,
+    /// A run the supervisor itself leases, waiting outside its slots
+    /// (ADR-0071) for a person's answer to this ask, its oldest one the
+    /// wait holds open, with no turn running: no listing of the queue
+    /// returns it, the supervisor offers it to a cleanup for disk space
+    /// alone, which removes its build outputs while the wait holds still.
+    Waiting(AskId),
 }
 
 /// A `needs_session` run as the supervisor judges it for a resume.
