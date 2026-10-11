@@ -227,11 +227,17 @@ fn register_gaps(
             "criterion": gap.criterion,
             "summary": summary,
         });
-        conn.execute(
-            "INSERT INTO draft_origins(task_id, origin, material, created_at)
-             VALUES (?1, 'goal_gap', ?2, ?3)",
-            params![task.id(), material.to_string(), now],
-        )?;
+        ensure!(
+            super::draft_planners::insert_draft_origin(
+                conn,
+                task.id(),
+                crate::domain::follow_up::DraftOrigin::GoalGap,
+                &material,
+                now,
+            )?,
+            "task {} already has an origin",
+            task.id()
+        );
         added.push(task.id());
     }
     Ok(added)

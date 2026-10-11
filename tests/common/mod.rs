@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 pub mod actor;
+pub mod attributes;
 pub mod cli;
 pub mod lifecycle;
 pub mod queue;

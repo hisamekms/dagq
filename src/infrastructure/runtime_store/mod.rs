@@ -59,6 +59,7 @@ pub fn lease_is_stale(lease: &RunLease, now: i64) -> bool {
 }
 
 mod ask_store;
+mod attributes;
 mod coordination;
 mod eval_rounds;
 mod ledger;
@@ -90,8 +91,29 @@ fn supervised_run(conn: &Connection, id: &RunId, token: &LeaseToken) -> Result<O
 /// Save what a domain command made of a run read with [`stored_run`].
 /// `status=from` (the status the command started from) and, when given,
 /// `supervisor_token=token` only detect a concurrent change: the domain
-/// decided the move. Whether a row was updated.
+/// decided the move. Whether a row was updated. The record the domain
+/// gives a move into or out of the unfinished statuses
+/// ([`run::unfinished_change`]) is written in the same transaction.
 fn save_run(
+    conn: &Connection,
+    run: &TaskRun,
+    from: RunStatus,
+    token: Option<&LeaseToken>,
+) -> Result<bool> {
+    let saved = save_run_row(conn, run, from, token)?;
+    if saved && let Some(change) = run::unfinished_change(from, run.status()) {
+        event(
+            conn,
+            run.task_id(),
+            Some(run.id()),
+            change.kind,
+            change.payload,
+        )?;
+    }
+    Ok(saved)
+}
+
+fn save_run_row(
     conn: &Connection,
     run: &TaskRun,
     from: RunStatus,

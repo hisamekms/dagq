@@ -241,6 +241,15 @@ fn gaps_become_drafts_of_the_open_goal_and_a_review_waits_for_them() {
     assert_eq!(origin, DraftOrigin::GoalGap);
     assert_eq!(material["goal_id"], goal.as_i64());
     assert_eq!(material["summary"], "the docs are missing");
+    // Recorded with the row, for the measurement's fold of the origins.
+    let recorded = queue
+        .show(gap)
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|event| event.kind == "draft_origin_recorded")
+        .map(|event| event.payload);
+    assert_eq!(recorded, Some(json!({"origin": "goal_gap"})));
 
     // The draft keeps the goal from review; so do unchanged tasks.
     assert!(queue.goal_review_candidates().unwrap().is_empty());

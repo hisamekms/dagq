@@ -14,7 +14,7 @@ use super::{
 };
 
 mod history;
-mod payload;
+pub(crate) mod payload;
 mod recorded;
 
 pub use history::{
@@ -29,7 +29,7 @@ pub use payload::{
 pub use recorded::{
     NewRunEvent, Recorded, end_session, finish_validation, record_e2e_park,
     record_exhausted_resumes, record_gone_session_park, record_landing_decision, record_live_park,
-    record_recheck_park, resume_finished,
+    record_recheck_park, resume_finished, unfinished_change,
 };
 
 /// A run of a task. `Serialize` is the JSON the CLI prints; there is no

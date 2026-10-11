@@ -125,6 +125,40 @@ pub(super) fn draft_planned(conn: &Connection, task: TaskId, now: i64) -> Result
     )?)
 }
 
+/// Record where the draft `task` came from in `draft_origins`, unless it
+/// has an origin already, with `draft_origin_recorded` in the same
+/// transaction (the measurement folds it, `domain::ledger::attributes`).
+/// Every writer of `draft_origins` goes through here. Whether it was
+/// recorded.
+pub(super) fn insert_draft_origin(
+    conn: &Connection,
+    task: TaskId,
+    origin: DraftOrigin,
+    material: &Value,
+    created_at: i64,
+) -> Result<bool> {
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO draft_origins(task_id, origin, material, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            task,
+            origin.as_str(),
+            serde_json::to_string(material)?,
+            created_at
+        ],
+    )? == 1;
+    if inserted {
+        event(
+            conn,
+            task,
+            None,
+            EventKind::DraftOriginRecorded,
+            json!({"origin": origin.as_str()}),
+        )?;
+    }
+    Ok(inserted)
+}
+
 impl SqliteQueue {
     pub fn register_follow_ups(
         &mut self,
@@ -177,16 +211,17 @@ impl SqliteQueue {
                     "index": entry.index, "category": entry.category,
                     "membership_proposal": entry.membership_proposal,
                 });
-                tx.execute(
-                    "INSERT INTO draft_origins(task_id, origin, material, created_at)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
+                ensure!(
+                    insert_draft_origin(
+                        &tx,
                         created.id(),
-                        DraftOrigin::FollowUp.as_str(),
-                        serde_json::to_string(&material)?,
-                        self.generators.clock.now()
-                    ],
-                )?;
+                        DraftOrigin::FollowUp,
+                        &material,
+                        self.generators.clock.now(),
+                    )?,
+                    "task {} already has an origin",
+                    created.id()
+                );
                 added.push(RegisteredFollowUp {
                     task_id: created.id(),
                     title: created.title().to_owned(),
@@ -245,17 +280,9 @@ impl SqliteQueue {
             "task {task} is {}, not a draft",
             status.as_str()
         );
-        let inserted = tx.execute(
-            "INSERT OR IGNORE INTO draft_origins(task_id, origin, material, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                task,
-                origin.as_str(),
-                serde_json::to_string(material)?,
-                self.generators.clock.now()
-            ],
-        )?;
-        ensure!(inserted == 1, "task {task} already has an origin");
+        let inserted =
+            insert_draft_origin(&tx, task, origin, material, self.generators.clock.now())?;
+        ensure!(inserted, "task {task} already has an origin");
         tx.commit()?;
         Ok(())
     }

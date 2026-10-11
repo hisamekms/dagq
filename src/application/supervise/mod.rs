@@ -1682,6 +1682,11 @@ impl Supervisor<'_> {
                     .live_alerts
                     .pass(env, signals, options.live_alert_interval)
             });
+            // And the comparison of the attributes the measurement folds
+            // with the state, on the first pass and then at its interval,
+            // which writes a baseline of what an older binary changed
+            // without its records.
+            self.on_observation(|observation, env| observation.attributes_baseline.pass(env));
             // And main's history, recorded as it moves for the measurement,
             // draining and handing off too.
             self.on_observation(|observation, env| observation.main_log_pass(env));

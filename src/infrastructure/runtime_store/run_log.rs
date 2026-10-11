@@ -955,6 +955,9 @@ impl EventStore for SqliteQueue {
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
         SqliteQueue::record_queue_event(self, kind, payload)
     }
+    fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
+        SqliteQueue::record_attributes_baseline(self)
+    }
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
         SqliteQueue::latest_event_of(self, kind)
     }

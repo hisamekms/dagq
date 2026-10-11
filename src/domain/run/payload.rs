@@ -49,12 +49,23 @@ impl<T> Lenient<T> {
 
 /// A key whose value is of type `T`; absent when the key is missing,
 /// `null` or of another type.
-fn typed<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn typed<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
     Ok(Option::<Lenient<T>>::deserialize(deserializer)?.and_then(Lenient::typed))
+}
+
+/// A key that may be `null` to clear a value: `None` (with
+/// `#[serde(default)]`) when the key is missing, `Some(None)` when it is
+/// `null` or of another type, `Some(Some(value))` when it is of type `T`.
+pub(crate) fn nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    typed::<D, T>(deserializer).map(Some)
 }
 
 /// A key whose value is a JSON object, read as `T`; absent when it is

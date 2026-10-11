@@ -7,6 +7,7 @@
 //! a run), which keeps the values `stats` gave it once. Measurement only:
 //! no decision of the runtime reads it.
 
+pub mod attributes;
 pub mod fold;
 pub mod read;
 

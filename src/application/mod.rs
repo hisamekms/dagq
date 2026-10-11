@@ -277,6 +277,57 @@ pub struct GraphInput {
     pub candidates: Vec<TaskId>,
 }
 
+impl GraphInput {
+    /// The same read from the attributes folded from the EventStore
+    /// (`domain::ledger::attributes`): what the measurement draws the
+    /// graph from without the state tables.
+    pub fn folded(attributes: &crate::domain::ledger::attributes::Attributes) -> Self {
+        let tasks = attributes
+            .tasks
+            .iter()
+            .filter(|(_, task)| {
+                matches!(
+                    task.status,
+                    TaskStatus::Draft
+                        | TaskStatus::Submitted
+                        | TaskStatus::Ready
+                        | TaskStatus::InProgress
+                )
+            })
+            .map(|(&id, task)| {
+                let (priority, priority_source, priority_by) = attributes.base_priority(task);
+                GraphTask {
+                    id,
+                    status: task.status,
+                    priority,
+                    priority_source,
+                    priority_by,
+                    execution_class: task.execution_class,
+                    title: task.title.clone(),
+                    goal_id: task.goal_id,
+                    goal_status: task
+                        .goal_id
+                        .and_then(|goal| attributes.goals.get(&goal))
+                        .map(|goal| goal.status),
+                    depends_on: task.depends_on.iter().copied().collect(),
+                    goal_dependencies: task
+                        .goal_dependencies
+                        .iter()
+                        .map(|&goal_id| GraphGoalDependency {
+                            goal_id,
+                            verdict: attributes.goals.get(&goal_id).and_then(|goal| goal.verdict),
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        Self {
+            tasks,
+            candidates: attributes.candidates(),
+        }
+    }
+}
+
 /// An unfinished task as `graph` shows it (ADR-0040 decision 4).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GraphNode {

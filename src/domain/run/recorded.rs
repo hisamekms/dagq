@@ -34,6 +34,21 @@ impl NewRunEvent {
 /// A run after a transition, with the events it records.
 pub type Recorded = (TaskRun, Vec<NewRunEvent>);
 
+/// The record of a saved transition from `from` to `to` that crosses into
+/// or out of the unfinished statuses ([`RunStatus::is_unfinished`], those
+/// that keep the task from the candidates): `run_unfinished_changed` with
+/// `unfinished` (whether `to` is one), `from` and `to`; none when both are
+/// on the same side. Every transition the store saves records it,
+/// whatever command made it, for the measurement's fold of the candidates.
+pub fn unfinished_change(from: RunStatus, to: RunStatus) -> Option<NewRunEvent> {
+    (from.is_unfinished() != to.is_unfinished()).then(|| {
+        NewRunEvent::new(
+            EventKind::RunUnfinishedChanged,
+            json!({"unfinished": to.is_unfinished(), "from": from, "to": to}),
+        )
+    })
+}
+
 /// Put the run's new `status` and `reason` into a caller's `payload`.
 fn with_status_and_reason(mut payload: Value, run: &TaskRun, reason: &str) -> Value {
     payload["status"] = json!(run.status());
@@ -306,6 +321,39 @@ mod tests {
     };
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A move out of the unfinished statuses and one back into them are
+    /// recorded with the side it ends on; a move that stays on one side,
+    /// unfinished or finished, records nothing.
+    #[test]
+    fn only_a_move_across_the_unfinished_statuses_is_recorded() {
+        let left = unfinished_change(RunStatus::Integrating, RunStatus::Integrated).unwrap();
+        assert_eq!(left.kind, EventKind::RunUnfinishedChanged);
+        assert_eq!(
+            left.payload,
+            json!({"unfinished": false, "from": "integrating", "to": "integrated"})
+        );
+        assert_eq!(
+            unfinished_change(RunStatus::Claimed, RunStatus::Failed)
+                .unwrap()
+                .payload["unfinished"],
+            false
+        );
+        assert_eq!(
+            unfinished_change(RunStatus::Failed, RunStatus::NeedsSession)
+                .unwrap()
+                .payload,
+            json!({"unfinished": true, "from": "failed", "to": "needs_session"})
+        );
+        for (from, to) in [
+            (RunStatus::Running, RunStatus::Validating),
+            (RunStatus::AwaitingIntegration, RunStatus::NeedsSession),
+            (RunStatus::Failed, RunStatus::Interrupted),
+            (RunStatus::Integrating, RunStatus::Integrating),
+        ] {
+            assert_eq!(unfinished_change(from, to), None, "{from:?} -> {to:?}");
+        }
+    }
 
     fn sha() -> CommitSha {
         CommitSha::parse(SHA, "commit").unwrap()

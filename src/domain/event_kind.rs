@@ -41,6 +41,7 @@
 //! - observation and analysis: `observation`, `observe_*`, `finding_*`
 //!   (but `finding_planner_*`), `mark_*`, `forecast_recorded`, `kpi_*`,
 //!   `live_alert_*` (the record of `stats`' judgments of now),
+//!   `attributes_baseline` (the baseline of the attributes it folds),
 //!   `report_written`, `throughput_review_*`, `candidates_sampled`, the
 //!   CI watch's `ci_*` and the record of main's history `main_*`.
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
@@ -97,6 +98,7 @@ event_kinds! {
     AskOpened => "ask_opened",
     AskRequestTaken => "ask_request_taken",
     AskUpdated => "ask_updated",
+    AttributesBaseline => "attributes_baseline",
     AuthRequired => "auth_required",
     AuthorizationDenied => "authorization_denied",
     AutoRepaired => "auto_repaired",
@@ -130,6 +132,7 @@ event_kinds! {
     DependencyRemoved => "dependency_removed",
     DependencyStranded => "dependency_stranded",
     DraftAdopted => "draft_adopted",
+    DraftOriginRecorded => "draft_origin_recorded",
     DraftPlannerExhausted => "draft_planner_exhausted",
     DraftPlannerOpened => "draft_planner_opened",
     DraftPlannerSettled => "draft_planner_settled",
@@ -309,6 +312,7 @@ event_kinds! {
     RunRecovered => "run_recovered",
     RunSlotRegained => "run_slot_regained",
     RunTmpRemoved => "run_tmp_removed",
+    RunUnfinishedChanged => "run_unfinished_changed",
     RunWaitingAskAdded => "run_waiting_ask_added",
     RunWaitingDeferred => "run_waiting_deferred",
     RunWaitingEnded => "run_waiting_ended",
@@ -600,6 +604,9 @@ impl EventKind {
                 | LiveAlertStarted
                 | LiveAlertEnded
                 | LiveAlertReached
+                // The mark of the baseline of the attributes the
+                // measurement folds (its tasks' and goals' are on them).
+                | AttributesBaseline
                 // The answer of an authentication or usage-limit ask
                 // applied (task 437).
                 | QueueHoldApplied
@@ -689,6 +696,11 @@ pub const ASK_OPENED: &str = EventKind::AskOpened.as_str();
 /// that the events of a queue that has them are still read.
 pub const ASK_REQUEST_TAKEN: &str = EventKind::AskRequestTaken.as_str();
 pub const ASK_UPDATED: &str = EventKind::AskUpdated.as_str();
+/// The values of a task's or goal's attributes that the measurement folds
+/// (`domain::ledger::attributes`), written for one whose records do not
+/// give what the state holds; on the queue, with no target, the mark of
+/// the baseline (`tasks` and `goals`, how many it covers).
+pub const ATTRIBUTES_BASELINE: &str = EventKind::AttributesBaseline.as_str();
 pub const AUTH_REQUIRED: &str = EventKind::AuthRequired.as_str();
 /// A state-changing command the [`super::Authorizer`] refused (ADR-t728-1
 /// decision 5): a queue event whose actor is the refused caller.
@@ -719,6 +731,9 @@ pub const DEPENDENCY_REMOVED: &str = EventKind::DependencyRemoved.as_str();
 /// `cause` (`approve_withheld` or `goal_abandoned`). The inbox's attention.
 pub const DEPENDENCY_STRANDED: &str = EventKind::DependencyStranded.as_str();
 pub const DRAFT_ADOPTED: &str = EventKind::DraftAdopted.as_str();
+/// A draft's origin (`draft_origins`) recorded, in the same transaction:
+/// `origin`.
+pub const DRAFT_ORIGIN_RECORDED: &str = EventKind::DraftOriginRecorded.as_str();
 pub const DRAFT_PLANNER_EXHAUSTED: &str = EventKind::DraftPlannerExhausted.as_str();
 pub const DRAFT_PLANNER_OPENED: &str = EventKind::DraftPlannerOpened.as_str();
 pub const DRAFT_PLANNER_SETTLED: &str = EventKind::DraftPlannerSettled.as_str();
@@ -748,6 +763,7 @@ pub const FOLLOW_UP_REGISTERED: &str = EventKind::FollowUpRegistered.as_str();
 pub const GOAL_CLOSED: &str = EventKind::GoalClosed.as_str();
 pub const GOAL_CREATED: &str = EventKind::GoalCreated.as_str();
 pub const GOAL_DECIDED: &str = EventKind::GoalDecided.as_str();
+pub const GOAL_REOPENED: &str = EventKind::GoalReopened.as_str();
 pub const GOAL_DEPENDENCY_ADDED: &str = EventKind::GoalDependencyAdded.as_str();
 pub const GOAL_DEPENDENCY_REMOVED: &str = EventKind::GoalDependencyRemoved.as_str();
 pub const GOAL_REVIEW_FAILED: &str = EventKind::GoalReviewFailed.as_str();
@@ -966,6 +982,10 @@ pub const RUN_RECOVERED: &str = EventKind::RunRecovered.as_str();
 /// runtime gave an ended run whose task is over (`paths`, `bytes`, `by`,
 /// `reason`, as `scratchpad_removed`; task 1290).
 pub const RUN_TMP_REMOVED: &str = EventKind::RunTmpRemoved.as_str();
+/// A run's status moved into or out of the statuses that keep its task
+/// from the candidates ([`super::RunStatus::is_unfinished`]), in the same
+/// transaction: `unfinished`, `from`, `to`.
+pub const RUN_UNFINISHED_CHANGED: &str = EventKind::RunUnfinishedChanged.as_str();
 pub const SCOPE_VIOLATION: &str = EventKind::ScopeViolation.as_str();
 /// The supervisor removed the Claude Code scratchpads of an ended run
 /// whose task is over (`paths`, `bytes`, `by`, `reason`; task 1100).
@@ -1104,6 +1124,7 @@ mod tests {
             (EventKind::AskOpened, "ask_opened"),
             (EventKind::AskRequestTaken, "ask_request_taken"),
             (EventKind::AskUpdated, "ask_updated"),
+            (EventKind::AttributesBaseline, "attributes_baseline"),
             (EventKind::AuthRequired, "auth_required"),
             (EventKind::AuthorizationDenied, "authorization_denied"),
             (EventKind::AutoRepaired, "auto_repaired"),
@@ -1152,6 +1173,7 @@ mod tests {
             (EventKind::DependencyRemoved, "dependency_removed"),
             (EventKind::DependencyStranded, "dependency_stranded"),
             (EventKind::DraftAdopted, "draft_adopted"),
+            (EventKind::DraftOriginRecorded, "draft_origin_recorded"),
             (EventKind::DraftPlannerExhausted, "draft_planner_exhausted"),
             (EventKind::DraftPlannerOpened, "draft_planner_opened"),
             (EventKind::DraftPlannerSettled, "draft_planner_settled"),
@@ -1358,6 +1380,7 @@ mod tests {
             (EventKind::RunRecovered, "run_recovered"),
             (EventKind::RunSlotRegained, "run_slot_regained"),
             (EventKind::RunTmpRemoved, "run_tmp_removed"),
+            (EventKind::RunUnfinishedChanged, "run_unfinished_changed"),
             (EventKind::RunWaitingAskAdded, "run_waiting_ask_added"),
             (EventKind::RunWaitingDeferred, "run_waiting_deferred"),
             (EventKind::RunWaitingEnded, "run_waiting_ended"),

@@ -38,7 +38,7 @@ impl TaskStatusCounts {
 }
 
 /// One row of `goal list`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalSummary {
     pub id: GoalId,
     pub title: String,

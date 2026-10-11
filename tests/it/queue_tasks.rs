@@ -426,9 +426,9 @@ fn clearing_an_own_priority_records_the_change_of_its_source() {
         changes,
         [
             serde_json::json!({"from": "normal", "to": "normal", "from_source": "task",
-                "to_source": "goal"}),
+                "to_source": "goal", "own": null, "own_by": null}),
             serde_json::json!({"from": "normal", "to": "normal", "from_source": "goal",
-                "to_source": "task"}),
+                "to_source": "task", "own": "normal", "own_by": "human"}),
         ]
     );
 }
@@ -468,7 +468,7 @@ fn priority_is_stored_changed_while_editable_and_checked_on_read() {
         changes,
         [
             serde_json::json!({"from": "urgent", "to": "low", "from_source": "task",
-            "to_source": "task"})
+            "to_source": "task", "own": "low", "own_by": "human"})
         ]
     );
     // In progress, it orders the next resume and recovery job of its run

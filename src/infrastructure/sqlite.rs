@@ -1420,8 +1420,11 @@ impl TaskStore for SqliteQueue {
             &tx,
             goal_id,
             EventKind::GoalUpdated,
+            // `new` keeps the setter of the priority before the edit; who
+            // set it is the stored one (for the measurement's fold).
             json!({"old": old_json, "new": new, "old_acceptance_version": old_version,
-                "new_acceptance_version": super::follow_up_membership::acceptance_version(&tx, goal_id)?}),
+                "new_acceptance_version": super::follow_up_membership::acceptance_version(&tx, goal_id)?,
+                "priority_by": priority_by.as_str()}),
         )?;
         let result = read_goal(&tx, goal_id)?;
         tx.commit()?;
@@ -1802,12 +1805,18 @@ pub(super) fn insert_task(
                 origin.kind.map(|kind| kind.as_str()), origin.request_id,
                 task.execution_class().as_str()],
         )?;
+    // The attributes the measurement folds (`domain::ledger::attributes`)
+    // as stored: its own priority and who set it, none to inherit.
     event(
         tx,
         id,
         None,
         EventKind::TaskCreated,
-        json!({"goal_id": task.goal_id()}),
+        json!({"goal_id": task.goal_id(), "status": task.status(), "title": task.title(),
+            "change": task.change().map(TaskChange::as_str),
+            "execution_class": task.execution_class().as_str(),
+            "priority": task.own_priority(),
+            "priority_by": priority_by.map(PriorityBy::as_str)}),
     )?;
     // Inserted after the task, which is in its goal already, so the
     // cycle checks see the goal's wait for it (ADR-0038).
@@ -2859,8 +2868,10 @@ pub(super) fn change_priority(
             priority_by.map(PriorityBy::as_str)
         ],
     )?;
+    // The own priority and who set it as stored, for the measurement's fold.
     let mut payload = json!({"from": from, "to": task.priority(),
-        "from_source": from_source, "to_source": task.priority_source()});
+        "from_source": from_source, "to_source": task.priority_source(),
+        "own": task.own_priority(), "own_by": priority_by.map(PriorityBy::as_str)});
     if let Some(by) = by {
         payload["by"] = json!(by);
     }
@@ -3121,7 +3132,9 @@ pub(super) fn set_goal_in(
             None,
             EventKind::TaskPriorityChanged,
             json!({"from": from_priority, "to": task.priority(), "from_source": from_source,
-                "to_source": task.priority_source(), "kept_on_move": true}),
+                "to_source": task.priority_source(), "kept_on_move": true,
+                "own": task.own_priority(),
+                "own_by": task.own_priority_by().map(PriorityBy::as_str)}),
         )?;
     }
     if from != task.goal_id() {
@@ -3515,7 +3528,8 @@ mod persons_priority_tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&kept).unwrap(),
             json!({"from": "interrupt", "to": "interrupt", "from_source": "goal",
-                "to_source": "task", "kept_on_move": true})
+                "to_source": "task", "kept_on_move": true, "own": "interrupt",
+                "own_by": "human"})
         );
         // A person's move, as a follow_up's judge or a correct_goal answer
         // passes it, takes the goal's.

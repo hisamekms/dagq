@@ -1098,6 +1098,40 @@ fn a_correction_after_achieved_keeps_the_history_and_asks_a_person() {
     );
 }
 
+/// The measurement's fold of the attributes (docs/design/attribute-records.md)
+/// from a baseline of a queue whose records carry none:
+/// through a follow-up registered from a run (its draft origin), its move
+/// by a judgement, the goal's close as achieved, a released task's claim
+/// and the goal reopened by the answer of the correction, the fold gives
+/// what the store reads.
+#[test]
+fn the_fold_of_the_attributes_follows_a_reopen_after_the_baseline() {
+    use crate::common::attributes::assert_folded_matches_state;
+    use dagq::application::GoalReviewStore;
+    let mut l = landed();
+    // The records as a binary before them leaves them.
+    Connection::open(l.dir.path().join("queue.db"))
+        .unwrap()
+        .execute_batch(
+            "UPDATE run_events SET payload=json_object('goal_id', json_extract(payload,'$.goal_id'))
+             WHERE kind='task_created';
+             UPDATE run_events SET payload=json_remove(payload,'$.goal.priority_by')
+             WHERE kind='goal_created';",
+        )
+        .unwrap();
+    assert_eq!(l.q.record_attributes_baseline().unwrap(), Some((1, 2)));
+    assert_folded_matches_state(&mut l.q);
+    let follow_up = l.follow_up("missed requirement");
+    assert_folded_matches_state(&mut l.q);
+    let (ask, ..) = l.corrected_after_achieved(follow_up);
+    assert_folded_matches_state(&mut l.q);
+    l.q.answer(ask.id, "reopen").unwrap();
+    let decided = l.q.decide_correction(ask.id).unwrap().unwrap();
+    assert_eq!(decided["moved"], true);
+    assert!(!l.q.show_goal(l.source).unwrap().closed);
+    assert_folded_matches_state(&mut l.q);
+}
+
 /// ADR-t1504-2 decision 9: the supervisor applies each answer of the
 /// `correct_goal` ask in one transaction and keeps the history; another
 /// answer is left for the inbox.

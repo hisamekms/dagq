@@ -230,6 +230,8 @@ pub(super) struct ObservationState {
     pub(super) ci: ci_watch::CiWatchState,
     /// The record of `stats`' judgments of now.
     pub(super) live_alerts: live_alerts::LiveAlertWatch,
+    /// The baseline of the attributes the measurement folds.
+    pub(super) attributes_baseline: live_alerts::AttributesBaseline,
     /// The record of main's history.
     pub(super) main_log: main_log::MainLogWatch,
 }
@@ -251,6 +253,7 @@ impl ObservationState {
             ci_watch_port: ports.ci_watch.clone(),
             ci: ci_watch::CiWatchState::default(),
             live_alerts: live_alerts::LiveAlertWatch::default(),
+            attributes_baseline: live_alerts::AttributesBaseline::default(),
             main_log: main_log::MainLogWatch::default(),
         }
     }

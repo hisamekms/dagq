@@ -516,6 +516,14 @@ pub trait EventStore {
     -> Result<()>;
     /// Record an event of the queue itself, on no task, goal or run.
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
+    /// Record the baseline of the attributes the measurement folds
+    /// (`attributes_baseline`) for the tasks and goals whose records fold
+    /// to other values than the state holds, compared and written in one
+    /// transaction: how many tasks and goals, none when every one agrees.
+    /// A store without the state tables has none to record.
+    fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
+        Ok(None)
+    }
     /// The newest event of `kind`, on whatever task, goal or run.
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>>;
     /// The newest `limit` events of `kind`, on whatever task, goal or run,

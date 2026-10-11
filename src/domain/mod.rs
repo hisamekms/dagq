@@ -94,6 +94,24 @@ string_enum!(RunStatus {
     Interrupted => "interrupted",
 });
 
+impl RunStatus {
+    /// Whether a run in this status keeps its task from the candidates and
+    /// from another claim: the store's ready query and its check of an
+    /// unfinished run name the same statuses.
+    pub const fn is_unfinished(self) -> bool {
+        matches!(
+            self,
+            Self::Claimed
+                | Self::Starting
+                | Self::Running
+                | Self::Validating
+                | Self::AwaitingIntegration
+                | Self::Integrating
+                | Self::NeedsSession
+        )
+    }
+}
+
 // The agent a worker session runs on (ADR-0004, ADR-t813-2 decision 1):
 // a task chooses one, `claude` when it names none.
 string_enum!(Provider {
