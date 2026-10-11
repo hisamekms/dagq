@@ -15,6 +15,11 @@ type, an event with hunks of two types, one without merge_base, one whose main
 is not an object, one with a path the three ends merge cleanly (partial) and
 one with only such a path (irreproducible), added and deleted files, an event
 mixing docs/ and src/, an event id in both files and the period's two ends.
+M6 reads review_finished events written as two files: one primary docs_drift
+event per kind, a text matching the budget and architecture.md kinds,
+docs_drift on the second reason, missing reason_codes, docs_drift only past the
+primary code, an event id in both files, the period's two ends and a run with
+several events.
 """
 
 import importlib.util
@@ -306,6 +311,80 @@ def check_m5(base, repo):
     return files
 
 
+def check_m6(base):
+    def review(id, run, at, reasons, codes, primary=None, **payload):
+        payload = {"verdict": "revise", "reasons": reasons, "primary_code": primary, "reason_category": None,
+                   **({} if codes is None else {"reason_codes": codes}), **payload}
+        return {"id": id, "run_id": run, "kind": "review_finished", "created_at": at, "payload": payload}
+
+    dd = "docs_drift"
+    first = [
+        review(1, "r1", "2026-10-01T00:00:00.000Z", ["Cut a section to fit the Budget of check-design-docs."],
+               [[dd]], dd),  # budget, on the period's start
+        review(2, "r1", "2026-10-01T01:00:00.000Z", ["Write one sentence per line in the new section."],
+               [[dd]], dd),  # one sentence per line; r1 again
+        review(3, "r2", "2026-10-01T02:00:00.000Z", ["The design doc has a copy of the struct."], [[dd]], dd),
+        review(4, "r3", "2026-10-01T03:00:00.000Z", ["docs/design/architecture.md does not show the module."],
+               [[dd]], dd),  # architecture.md
+        review(5, "r4", "2026-10-01T04:00:00.000Z", ["queue.md STILL SAYS the old flag."], [[dd]], dd),  # stale
+        review(6, "r5", "2026-10-01T05:00:00.000Z", ["Rename the heading."], [[dd]], dd),  # other
+        # Budget and architecture.md: budget comes first.
+        review(7, "r6", "2026-10-01T06:00:00.000Z", ["architecture.md is over its 予算."], [[dd]], dd),
+        # docs_drift on the second reason: that text (stale), not the first (copy).
+        review(8, "r7", "2026-10-01T07:00:00.000Z", ["A field list is wrong.", "The doc is outdated."],
+               [["acceptance_gap"], [dd, "test_gap"]], dd),
+        # No reason_codes: the first text (copy).
+        review(9, "r8", "2026-10-01T08:00:00.000Z", ["Duplicates the code.", "Budget."], None, dd),
+        # Another primary code with docs_drift later: only in the "any" count.
+        review(10, "r9", "2026-10-01T09:00:00.000Z", ["Fails a test.", "Stale doc."],
+               [["test_gap"], [dd]], "test_gap"),
+    ]
+    second = [
+        review(1, "r1", "2026-10-01T00:00:00.000Z", ["Stale."], [[dd]], dd),  # same id: the first read wins
+        review(11, "r9", "2026-09-30T23:59:59.999Z", ["Stale."], [[dd]], dd),  # before the period
+        review(12, "r10", "2026-10-03T00:00:00.000Z", ["Stale."], [[dd]], dd),  # on the period's end
+        review(13, "r10", "2026-10-02T00:00:00.000Z", [], [], None, verdict="pass"),  # a pass
+        {"id": 14, "run_id": "r11", "kind": "run_started", "created_at": "2026-10-02T00:00:00.000Z",
+         "payload": {"primary_code": dd}},
+    ]
+    files = []
+    for n, events in enumerate((first, second)):
+        files.append(os.path.join(base, f"events-review-{n}.json"))
+        with open(files[-1], "w") as f:
+            json.dump({"cursor": 99, "events": events} if n == 0 else events, f)
+    out = run("--since", "2026-10-01", "--until", "2026-10-03", "--metrics", "m6", "--review-events", *files)
+    if not out:
+        return None
+    m = out["m6"]
+    # 11 events in the period over 10 runs (r1 has two).
+    check("m6 events and runs", (m["review_events"], m["runs"]), (11, 10))
+    check("m6 primary", m["primary_docs_drift"], {"events": 9, "per_run": 0.9})
+    check("m6 any", m["any_docs_drift"], {"events": 9, "per_run": 0.9})
+    check("m6 kinds", {k: v["events"] for k, v in m["kinds"].items()},
+          {"budget": 2, "one_sentence_per_line": 1, "copy": 2, "architecture_boundary": 1, "stale": 2,
+           "other": 1})
+    check("m6 share", m["kinds"]["budget"]["share"], 0.2222)
+    out = run("--since", "2026-10-01", "--until", "2026-10-03", "--metrics", "m6")
+    if out:
+        check("m6 without review events", out["m6"], None)
+    return files
+
+
+def check_drift_rules():
+    spec = importlib.util.spec_from_file_location("docs_metrics", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    kind, text = module.drift_kind, module.drift_text
+    check("drift budget over architecture.md", kind("architecture.md exceeds the byte allow list"), "budget")
+    check("drift 1文1行", kind("1文1行にする"), "one_sentence_per_line")
+    check("drift 書き写し", kind("欄を書き写している"), "copy")
+    check("drift copy over stale", kind("a stale copy of the enum"), "copy")
+    check("drift 古い", kind("古い記述が残る"), "stale")
+    check("drift other", kind(""), "other")
+    check("drift text past reasons", text({"reasons": ["a"], "reason_codes": [["x"], ["docs_drift"]]}), "a")
+    check("drift text without reasons", text({"reason_codes": [["docs_drift"]]}), "")
+
+
 def check_hunk_rules():
     spec = importlib.util.spec_from_file_location("docs_metrics", SCRIPT)
     module = importlib.util.module_from_spec(spec)
@@ -333,6 +412,11 @@ def main():
         m5_repo = os.path.join(base, "m5")
         os.makedirs(m5_repo)
         events = check_m5(base, m5_repo) or []
+        check_drift_rules()
+        reviews = check_m6(base) or []
+        m6 = subprocess.run([sys.executable, SCRIPT, "--since", "2026-10-01", "--until", "2026-10-03",
+                             "--metrics", "m6", "--review-events", *reviews], capture_output=True, text=True)
+        check("markdown has M6", "## M6" in m6.stdout and "| budget | 2 | 0.2222 |" in m6.stdout, True)
         out = subprocess.run([sys.executable, SCRIPT, "--repo", repo, "--since", "2026-10-01",
                               "--until", "2026-10-03", "--stats", os.path.join(FIXTURES, "stats.json"),
                               "--claude-projects", os.path.join(FIXTURES, "projects")],

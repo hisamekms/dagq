@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Count the docs metrics of goal 159 (tasks 1946 and 1966) for a period [since, until).
+"""Count the docs metrics of goal 159 (tasks 1946, 1966 and 2289) for a period [since, until).
 
 Read-only: it reads main's Git history, a `dagq stats --since` JSON file,
 Claude Code's transcripts and `dagq events --full` JSON files, and prints JSON
@@ -72,6 +72,20 @@ and the baseline are in docs/plans/docs-slim.md; the weekly procedure is in
     others are not; 5 every line starts with `|`; 3 every line starts with
     `- `, `* ` or `<number>. ` after its indent; 4 any other hunk.
   - Shares of the types are over the classified events.
+- M6 run reviews sent back for docs_drift, from `dagq events --full --kind
+  review_finished` JSON files (--review-events; one per event id over every
+  file, `created_at` in [since, until)):
+  - The events, and their runs (distinct `run_id`, the per-run denominator).
+  - Primary docs_drift: the payload's `primary_code` is docs_drift; count and
+    per run.
+  - Any docs_drift: some list of `reason_codes` holds docs_drift; count and
+    per run.
+  - Kinds of the primary docs_drift events (DRIFT_KINDS): the reason text of
+    the first `reason_codes` entry holding docs_drift (the `reasons` item at
+    that index; the first item of `reasons` when `reason_codes` is missing or
+    the index has no text), lowercased, takes the first kind one of whose
+    keywords it contains, else `other`. Shares are over the primary docs_drift
+    events.
 """
 
 import argparse
@@ -138,6 +152,24 @@ HUNK_ORDER = (1, 2, 5, 3, 4)
 # The order an event's type is chosen by, the heaviest (the hardest to merge
 # by a rule) first.
 EVENT_ORDER = (4, 5, 3, 2, 1)
+# M6: the payload of review_finished (2026-10-12: judge_review in
+# src/application/supervise/landing.rs records `reasons`, `reason_codes` (each
+# reason's codes, in the order of `reasons`) and `primary_code` (the first code
+# of the first reason, src/domain/review_reason.rs)).
+REVIEW_KIND = "review_finished"
+DOCS_DRIFT = "docs_drift"
+# The kinds of a docs_drift reason, tried in this order; the first whose
+# keyword is in the lowercased text wins. docs/plans/docs-slim.md lists the
+# same keywords in the same order.
+DRIFT_KINDS = (
+    ("budget", ("budget", "予算", "check-design-docs", "allow list", "byte")),
+    ("one_sentence_per_line", ("one sentence", "1文1行", "one line per sentence", "per line", "line length")),
+    ("copy", ("copied", "copies", "copy of", "書き写", "transcri", "field list", "duplicat")),
+    ("architecture_boundary", ("architecture.md",)),
+    ("stale", ("stale", "still says", "still describes", "no longer", "outdated", "out of date", "古い",
+               "still names", "still lists", "does not record", "doesn't record", "missing", "not updated")),
+)
+DRIFT_OTHER = "other"
 DATE_LINE = re.compile(r"(updated|last_verified|created):")
 LIST_LINE = re.compile(r"\s*([-*] |\d+\. )")
 
@@ -720,6 +752,56 @@ def m5(repo, paths, since, until):
     }
 
 
+# --- M6 -------------------------------------------------------------------
+
+
+def drift_text(payload):
+    """The reason text of the first reason whose codes hold docs_drift, or the
+    first reason when the codes are missing or that index has no text."""
+    reasons = payload.get("reasons")
+    reasons = reasons if isinstance(reasons, list) else []
+    codes = payload.get("reason_codes")
+    if isinstance(codes, list):
+        for index, item in enumerate(codes):
+            if isinstance(item, list) and DOCS_DRIFT in item:
+                if index < len(reasons) and isinstance(reasons[index], str):
+                    return reasons[index]
+                break
+    return reasons[0] if reasons and isinstance(reasons[0], str) else ""
+
+
+def drift_kind(text):
+    """The first kind of DRIFT_KINDS with a keyword in the lowercased text."""
+    text = text.lower()
+    return next((kind for kind, words in DRIFT_KINDS if any(word in text for word in words)), DRIFT_OTHER)
+
+
+def m6(paths, since, until):
+    events, runs, primary, any_drift = 0, set(), 0, 0
+    kinds = {kind: 0 for kind, _ in DRIFT_KINDS} | {DRIFT_OTHER: 0}
+    for event in load_events(paths):
+        at = event.get("created_at")
+        if event.get("kind") != REVIEW_KIND or not isinstance(at, str) or not since <= parse_time(at) < until:
+            continue
+        payload = event.get("payload") or {}
+        events += 1
+        if event.get("run_id") is not None:
+            runs.add(event["run_id"])
+        codes = payload.get("reason_codes")
+        if isinstance(codes, list) and any(isinstance(c, list) and DOCS_DRIFT in c for c in codes):
+            any_drift += 1
+        if payload.get("primary_code") == DOCS_DRIFT:
+            primary += 1
+            kinds[drift_kind(drift_text(payload))] += 1
+    return {
+        "review_events": events,
+        "runs": len(runs),
+        "primary_docs_drift": {"events": primary, "per_run": ratio(primary, len(runs))},
+        "any_docs_drift": {"events": any_drift, "per_run": ratio(any_drift, len(runs))},
+        "kinds": {kind: {"events": n, "share": ratio(n, primary)} for kind, n in kinds.items()},
+    }
+
+
 # --- output ---------------------------------------------------------------
 
 
@@ -787,6 +869,16 @@ def markdown(out):
             + table(["type", "events", "share", "hunks"],
                     [[name, t["events"], t["share"], m["hunks"][name]] for name, t in m["types"].items()]
                     + [["total", m["classified"], None, m["hunks"]["total"]]]))
+    if out.get("m6"):
+        m = out["m6"]
+        p, a = m["primary_docs_drift"], m["any_docs_drift"]
+        parts.append("## M6 run reviews sent back for docs_drift\n\n" + table(
+            ["review_finished", "runs", "primary docs_drift", "per run", "any docs_drift", "per run"],
+            [[m["review_events"], m["runs"], p["events"], p["per_run"], a["events"], a["per_run"]]])
+            + "\n\nKinds of the primary docs_drift events (shares over them)\n\n"
+            + table(["kind", "events", "share"],
+                    [[name, k["events"], k["share"]] for name, k in m["kinds"].items()]
+                    + [["total", p["events"], None]]))
     return "\n\n".join(parts) + "\n"
 
 
@@ -802,8 +894,11 @@ def main():
     parser.add_argument("--events", nargs="+", action="extend", default=[],
                         help="files with the JSON of `dagq events --full --kind ...` (M5); "
                              "an event id in several files counts once")
-    parser.add_argument("--metrics", default="m1,m2,m3,m4,m5",
-                        help="comma-separated metrics; M3, M4 and M5 also need their input")
+    parser.add_argument("--review-events", nargs="+", action="extend", default=[],
+                        help="files with the JSON of `dagq events --full --kind review_finished` (M6); "
+                             "an event id in several files counts once")
+    parser.add_argument("--metrics", default="m1,m2,m3,m4,m5,m6",
+                        help="comma-separated metrics; M3, M4, M5 and M6 also need their input")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     args = parser.parse_args()
     if args.input:
@@ -817,7 +912,7 @@ def main():
         sys.exit("docs-metrics: --since must be before --until")
     wanted = set(args.metrics.split(","))
     out = {"since": iso(since), "until": iso(until), "ref": args.ref,
-           "m1": None, "m2": None, "m3": None, "m4": None, "m5": None}
+           "m1": None, "m2": None, "m3": None, "m4": None, "m5": None, "m6": None}
     if "m1" in wanted:
         out["m1"] = m1(args.repo, args.ref, since, until)
     if "m2" in wanted:
@@ -828,6 +923,8 @@ def main():
         out["m4"] = m4(os.path.expanduser(args.claude_projects), since, until)
     if "m5" in wanted and args.events:
         out["m5"] = m5(args.repo, args.events, since, until)
+    if "m6" in wanted and args.review_events:
+        out["m6"] = m6(args.review_events, since, until)
     if args.format == "json":
         json.dump(out, sys.stdout, indent=2, ensure_ascii=False)
         print()

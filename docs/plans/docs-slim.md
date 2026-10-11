@@ -1,7 +1,7 @@
 ---
 id: plan-docs-slim
 type: plan
-title: docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）の定義と基準値
+title: docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）・docs_drift の差し戻し（M6）の定義と基準値
 status: active
 created: 2026-10-07
 owners:
@@ -17,7 +17,7 @@ related:
 # docs/design の4指標の定義と基準値
 
 goal 159（request 44）の再発防止の4（計測）と、段4の前後比較の基準。
-4指標と M5（docs だけの衝突の件数と種類の内訳、request 46）は `scripts/docs-metrics.py` が数え、`scripts/docs-metrics-test.py` が fixture（`scripts/docs-metrics-fixtures/`）で確かめる。
+4指標と M5（docs だけの衝突の件数と種類の内訳、request 46）と M6（run の review の docs_drift の差し戻し、request 102）は `scripts/docs-metrics.py` が数え、`scripts/docs-metrics-test.py` が fixture（`scripts/docs-metrics-fixtures/`）で確かめる。
 毎週の見直しで流して基準値と前週と並べる手順は `.claude/skills/throughput-review/reference/weekly.md` の「docs の4指標」が持つ。
 KPI（runtime）にしないのは、M4 が runtime の持たない会話記録を読み、M1・M2 は git で足りるため。
 
@@ -25,7 +25,8 @@ KPI（runtime）にしないのは、M4 が runtime の持たない会話記録�
 
 ```sh
 python3 scripts/docs-metrics.py --since 2026-09-29T00:00:00Z --until 2026-10-06T00:00:00Z \
-  --stats stats.json --claude-projects ~/.claude/projects --events events-*.json --format json
+  --stats stats.json --claude-projects ~/.claude/projects --events events-*.json \
+  --review-events events-review-*.json --format json
 ```
 
 - 期間は `--since` と `--until`（UTC、`[since, until)` の半開区間。日付だけなら 00:00Z）。
@@ -33,7 +34,8 @@ python3 scripts/docs-metrics.py --since 2026-09-29T00:00:00Z --until 2026-10-06T
 - M3 は `--stats` に `dagq stats --since <since>` の JSON を保存したファイルを渡す（script は queue を読まない）。
 - M4 は `--claude-projects` に Claude Code の会話記録の dir（`~/.claude/projects`）を渡す。
 - M5 は `--events` に `dagq events --full --kind ...` の JSON を保存したファイル（複数可。頁送りの各頁）を渡し、`--repo` の git の object を読む。
-- `--stats`・`--claude-projects`・`--events` を省くと M3・M4・M5 は `null`。`--metrics m1,m2` で選べる。`--format` は `markdown`（既定）か `json`。
+- M6 は `--review-events` に `dagq events --full --kind review_finished` の JSON を保存したファイル（複数可。頁送りの各頁）を渡す。
+- `--stats`・`--claude-projects`・`--events`・`--review-events` を省くと M3・M4・M5・M6 は `null`。`--metrics m1,m2` で選べる。`--format` は `markdown`（既定）か `json`。
 
 ## 定義
 
@@ -99,6 +101,27 @@ task 1957 の前後比較に足す、request 46 の衝突の種類の内訳（ta
 - **割合の分母**: 種類ごとの event の割合は分類済みの event の数で割る。再現不可は分母に入れず件数を別に出す。塊の数は種類ごとと合計を出す。
 - 規則は request 46 の値に合わせて調整しない（proposal 739 の revise 1）。
 
+### M6 run の review の docs_drift の差し戻し
+
+task 1957 の前後比較に足す、docs の差し戻しで run の時間を使うことそのものの指標（request 102）。
+
+- **kind と欄**: `review_finished` の payload の `primary_code`（主な理由の code。最初の理由の最初の code）・`reason_codes`（`reasons` と同じ順の、理由ごとの code の配列の配列）・`reasons`（理由の文の配列）と、event の `run_id`。
+  2026-10-12 の `src/application/supervise/landing.rs` の `judge_review` と `src/domain/review_reason.rs` で確かめ、script の `REVIEW_KIND` と `DOCS_DRIFT` が持つ。
+  `reason_category` は実記録の多くが null なので使わない。
+- **重複の除き方**: 入力の全てのファイルを通して event ID が同じものは1件（最初に読んだもの）。
+- **期間**: event の `created_at`（UTC）が `[since, until)` に入るもの。
+- **分母**: 期間の `review_finished` の event の `run_id` の異なる数（run の数）。同じ run の複数の review は event では別に数え、run では1つ。
+- **出す値**: `review_finished` の event の数と run の数、主な理由が docs_drift（`primary_code` が `docs_drift`）の event の数と run あたりの値（÷ run の数）、`reason_codes` のどれかの理由に `docs_drift` を含む event の数と run あたりの値。
+- **種類**: 主な理由が docs_drift の event について、`reason_codes` で `docs_drift` を含む最初の理由の文（その添字の `reasons`。`reason_codes` が無いか、その添字の文が無ければ `reasons` の最初の文）を小文字にし、次の順で最初にキーワードを含む種類にする（script の `DRIFT_KINDS` が同じ一覧と順を持つ）。
+  1. 予算（`budget`。予算に収めるための削除）: `budget`・`予算`・`check-design-docs`・`allow list`・`byte`
+  2. 1文1行（`one_sentence_per_line`）: `one sentence`・`1文1行`・`one line per sentence`・`per line`・`line length`
+  3. 書き写し（`copy`）: `copied`・`copies`・`copy of`・`書き写`・`transcri`・`field list`・`duplicat`
+  4. architecture.md の境界の記録（`architecture_boundary`）: `architecture.md`
+  5. 古い記述（`stale`）: `stale`・`still says`・`still describes`・`no longer`・`outdated`・`out of date`・`古い`・`still names`・`still lists`・`does not record`・`doesn't record`・`missing`・`not updated`
+  6. その他（`other`）: どれにも当たらないもの（件数を必ず出す）
+- **割合の分母**: 種類ごとの割合は主な理由が docs_drift の event の数で割る。
+- 規則は request 102 で planner が決めたもので、下の参考の値に合わせて調整しない。
+
 ## 基準値
 
 ### M1（script、base `f56a5580`）
@@ -161,10 +184,18 @@ request 46（2026-10-06、人の session）が数えた docs の衝突 135件の
 script の基準の期間 `[2026-09-29, 2026-10-06)` の値は、worker が本番の queue を読まないので task 1957 が同じ script で求める。
 request 46 の値との差（件数と種類の違い）と理由（分類の規則・再現の仕方・対象の kind の違い）も task 1957 がここに書く。
 
+### M6（参考の値: inbox の手元の概算）
+
+request 102（2026-10-11、inbox がその場で数えた値）: goal 159 の段の着地 2026-10-07T07:15Z の前と後の `review_finished` で、主な理由が docs_drift の event は 110件・0.51/run から 103件・0.55/run。
+最初の理由の分類で、古い記述 84→45、予算 4→16、architecture.md の境界 10→16、1文1行 1→6、書き写し 6→8。
+期間も分類の手順もこの script と別なので、上の定義と比べられる基準値ではない。
+script の前後の期間の値は task 1957 が同じ script で求めてここに書く。
+
 ## 保存
 
-週次の見直しは script の JSON の出力を `~/.local/share/dagq-hostmetrics/docs-slim/<since>_<until>.json`（UTC の日付）に、M5 の入力の events の JSON を同じ dir の `events-<since>_<until>-<頁>.json` に保存し、前週と基準値はそこから読む。
+週次の見直しは script の JSON の出力を `~/.local/share/dagq-hostmetrics/docs-slim/<since>_<until>.json`（UTC の日付）に、M5 の入力の events の JSON を同じ dir の `events-<since>_<until>-<頁>.json` に、M6 の入力の `review_finished` の events の JSON を `events-review-<since>_<until>-<頁>.json` に保存し、前週と基準値はそこから読む。
 Claude Code は既定で30日より古い会話記録を消すので、基準の期間の M4 は 2026-10-28 より前に流して保存する。
 
 区分: 保存する JSON は入力から `scripts/docs-metrics.py` で作り直せるビュー。
 入力の main の git の履歴は SSOT、`dagq stats --since` と衝突の event の `dagq events --full` の JSON は EventStore から作り直せるビュー、Claude Code の会話記録は材料で、会話記録が消えた期間は作り直せない。
+M6 の入力の `dagq events --full --kind review_finished` の JSON は EventStore から作り直せるビュー、M6 の出力（script の JSON の `m6`）は入力から作り直せるビューで、入力の JSON か EventStore の該当の期間の event が残る限り同じ表を作り直せる。
