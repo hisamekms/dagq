@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::domain::{
-    EventId, FindingId, FindingStatus, GoalId, Impact, RunEvent, RunId, TaskId,
+    EventId, Finding, FindingId, FindingStatus, GoalId, Impact, RunEvent, RunId, TaskId,
     kpi::{KpiConfig, KpiInput, KpiQuery, KpiSettings, Target, kpi},
     stats::Cursor,
 };
@@ -212,8 +212,8 @@ fn report_with_host(
         },
     )
     .unwrap();
-    let findings: Vec<Finding> = (1..=12)
-        .map(|id| finding(id, &format!("work <slow> {id}")))
+    let findings: Vec<_> = (1..=12)
+        .map(|id| finding(id, &format!("work <slow> {id}")).attributes())
         .collect();
     Report::new(
         kpi,

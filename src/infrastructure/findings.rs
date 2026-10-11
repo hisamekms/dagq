@@ -1,8 +1,10 @@
 //! Findings (ADR-0044 decision 18) as `findings` rows. Recording one, and
 //! every change to it, also writes a run event (`finding_recorded`,
 //! `finding_updated`, `finding_status_changed`) on the finding's target, or
-//! on nothing for a finding on the queue.
+//! on nothing for a finding on the queue, with the attributes the
+//! measurement folds after the change ([`finding_event`]).
 use crate::domain::event_kind::EventKind;
+use crate::domain::ledger::findings as findings_fold;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::json;
@@ -352,13 +354,25 @@ fn resolve_target(
 }
 
 /// A finding's event, on its target (a run's on the run and its task), or
-/// on nothing for the queue.
+/// on nothing for the queue. A record of a change of the finding
+/// ([`RECORDS_VALUES`]) also carries its attributes as `finding` holds them
+/// now (`domain::ledger::findings`, docs/design/attribute-records.md), so
+/// `finding` is the finding after the change, and the record is written in
+/// the transaction that changes the row. Every path that changes a row
+/// records through here: the creation and the merge ([`record_in`]), a
+/// resolve or dismissal ([`set_status_covered_in`]), and in
+/// `finding_planners` the submission that makes it proposed
+/// (`link_findings`), the end of its proposal (`SqliteQueue::settle_findings`)
+/// and a person's `propose` answer (`apply_answer`).
 pub(super) fn finding_event(
     conn: &Connection,
     finding: &Finding,
     kind: EventKind,
-    payload: serde_json::Value,
+    mut payload: serde_json::Value,
 ) -> Result<()> {
+    if RECORDS_VALUES.contains(&kind) {
+        payload[findings_fold::VALUES] = serde_json::to_value(finding.attributes())?;
+    }
     crate::domain::check_event_target(kind, finding.task_id, finding.goal_id)?;
     crate::domain::write_rules::check_run_has_task(finding.task_id, finding.run_id.as_ref())?;
     conn.execute(
@@ -374,6 +388,13 @@ pub(super) fn finding_event(
     )?;
     Ok(())
 }
+
+/// The events of a change of a finding, which carry its attributes.
+const RECORDS_VALUES: [EventKind; 3] = [
+    EventKind::FindingRecorded,
+    EventKind::FindingUpdated,
+    EventKind::FindingStatusChanged,
+];
 
 /// The evidence events that still exist, in the finding's order.
 fn evidence_events(

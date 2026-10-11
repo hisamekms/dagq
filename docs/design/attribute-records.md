@@ -1,7 +1,7 @@
 ---
 id: design-attribute-records
 type: design
-title: taskとgoalの属性の記録（stats・kpi・reportが読む属性をEventStoreから畳む）
+title: taskとgoalとfindingの属性の記録（stats・kpi・reportが読む属性をEventStoreから畳む）
 status: current
 created: 2026-10-11
 scope: runtime
@@ -12,7 +12,7 @@ related:
   - adr-t1662-2
 ---
 
-# taskとgoalの属性の記録
+# taskとgoalとfindingの属性の記録
 
 `stats`・`kpi`・`report`が状態の表から読むtaskとgoalの属性（`task_goals`・`task_titles`・`task_changes`・`draft_origins`・`list_goals`・`graph_input`）を、計測の層がEventStoreだけから作れるよう、状態の変更と同じtransactionで新しい値をeventに書く（[計測](measurement.md)の「SSOTとビュー」、ADR-t1662-2）。
 畳むのは`domain::ledger::attributes::fold`で、eventと窓の終わりだけを読み、StateStoreを読まない。
@@ -43,6 +43,17 @@ runtimeの制御はこの畳みを使わず、読み手を移すのは段3（[�
 
 未完了の状態は`RunStatus::is_unfinished`で、storeのready queryと同じ集合。
 
+## findingの属性
+
+`report`が`findings`の表から読むfindingの属性（`findings_open`と一覧の並びと欄）も同じ形で記録する。
+不変条件: findingの行を変える経路はどれも、同じtransactionで書く変更のevent（`finding_recorded`・`finding_updated`・`finding_status_changed`）に変更の後の属性の全体を載せ、何も変えない記録は何も書かない。
+入口は`infrastructure::findings::finding_event`（経路の一覧と載せる値はそのdoc commentと`FindingAttributes`）。
+畳むのは`domain::ledger::findings::fold`で、未決着の一覧は`findings`の既定の一覧と同じ順になり、`Report::new`はどちらからも同じ件数と行を作る。
+
+| 項目 | 変更の元のevent | 基準 |
+| --- | --- | --- |
+| findingの属性の全体（`FindingAttributes`） | 変更の3種のeventの後のものが勝つ | `finding_baseline` |
+
 ## 基準と照合
 
 - 記録より前のbinaryが作ったtaskとgoalと、記録より古いbinary（互換のmigrationの後も動く、claimのときに写したrunnerなど）が記録を書かずに変えたものは、eventが状態の値を持たない。
@@ -54,6 +65,8 @@ runtimeの制御はこの畳みを使わず、読み手を移すのは段3（[�
 - 1回の照合はtaskとgoalの基準を書いた後に、組を閉じるqueueの印（対象の無い`attributes_baseline`）を1つ書く。
   畳む関数は組の印が窓にあるときだけ組の基準を取り、組の一部だけを窓に入れない。
   最初の印より前に終わる窓は`Folded::BeforeBaseline`として区別し、後の組の印より前に終わる窓はその組の前の値を返す。
+- findingは`SqliteQueue::record_findings_baseline`が同じ周回で同じように照合し、決着したものを含む全てのfindingのうち食い違うものに`finding_baseline`を書いて、組を閉じるqueueの印を1つ書く。
+  窓の契約（組を丸ごと取るか取らないか、最初の印より前は`BeforeBaseline`）はtaskとgoalの基準と同じ。
 - migrationにしない: 互換のmigrationは`run_events`への挿入とそれを書くtriggerを許さず（`schema::compatibility_violations`）、非互換にすると使用中のsupervisorとrunがある間`migrate`が止まるため。
 
 ## 落とし穴

@@ -1056,9 +1056,9 @@ pub use error::DomainError;
 use error::require;
 pub use execution_class::ExecutionClass;
 pub use finding::{
-    DISMISS_OPTION, Finding, FindingAnswer, FindingOutcome, FindingQuery, FindingStatus,
-    FindingTarget, FindingUpdate, FindingView, Impact, ImprovementLimit, MAX_FINDING_PLANNERS,
-    NewFinding, PROPOSE_OPTION, improvement_running,
+    DISMISS_OPTION, Finding, FindingAnswer, FindingAttributes, FindingOutcome, FindingQuery,
+    FindingStatus, FindingTarget, FindingUpdate, FindingView, Impact, ImprovementLimit,
+    MAX_FINDING_PLANNERS, NewFinding, PROPOSE_OPTION, improvement_running,
 };
 pub use follow_up::{
     BundleKey, BundleKeyKind, DraftOrigin, DraftOutcome, DraftRevisit, DraftTarget,

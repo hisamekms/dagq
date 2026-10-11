@@ -168,7 +168,7 @@ fn make_with(
     let findings: Vec<_> = queue
         .findings(&FindingQuery::default())?
         .into_iter()
-        .map(|view| view.finding)
+        .map(|view| view.finding.attributes())
         .collect();
     Ok(Report::new(
         kpi,

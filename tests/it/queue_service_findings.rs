@@ -53,6 +53,12 @@ fn shape(event: &Value) -> Value {
     for field in ["finding_id", "id", "subject"] {
         payload.as_object_mut().unwrap().remove(field);
     }
+    // The finding's values after the change: its own id, subject and time.
+    if let Some(values) = payload.get_mut("finding").and_then(Value::as_object_mut) {
+        for field in ["id", "subject", "last_seen_at"] {
+            values.remove(field);
+        }
+    }
     payload
 }
 

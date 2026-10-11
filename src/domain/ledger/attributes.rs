@@ -16,7 +16,6 @@ use self::payload::{
     GoalUpdated, OriginRecorded, PriorityChanged, StatusChanged, TaskEdited, TaskRecord,
     UnfinishedChanged, restore,
 };
-use super::super::stats::timestamp_millis;
 use super::super::{
     DraftOrigin, ExecutionClass, GoalId, GoalStatus, GoalSummary, GoalTag, GoalVerdict, Priority,
     PrioritySource, RunEvent, RunId, TaskChange, TaskId, TaskStatus, TaskStatusCounts,
@@ -117,39 +116,16 @@ pub const KINDS: &[&str] = &[
 /// records' times. A window that ends before the first mark is
 /// [`Folded::BeforeBaseline`]. Reads nothing but `events`.
 pub fn fold(events: &[RunEvent], window_end: Option<i64>) -> Folded {
-    let end_ms = window_end.map(|end| end * 1000);
-    let within = |event: &RunEvent| {
-        end_ms.is_none_or(|end| timestamp_millis(&event.created_at).is_some_and(|at| at <= end))
-    };
     let is_mark = |event: &RunEvent| {
         event.kind == event_kind::ATTRIBUTES_BASELINE
             && event.task_id.is_none()
             && event.goal_id.is_none()
     };
-    if events
-        .iter()
-        .find(|event| is_mark(event))
-        .is_some_and(|mark| !within(mark))
-    {
+    let Some(taken) = super::baseline::taken(events, window_end, is_mark, is_baseline) else {
         return Folded::BeforeBaseline;
-    }
-    // Whether the mark that closes each baseline record's group is in the
-    // window (a record with no mark after it stands alone).
-    let mut taken = vec![true; events.len()];
-    let mut closing: Option<bool> = None;
-    for (index, event) in events.iter().enumerate().rev() {
-        if is_mark(event) {
-            closing = Some(within(event));
-        } else if event.kind == event_kind::ATTRIBUTES_BASELINE {
-            taken[index] = closing.unwrap_or_else(|| within(event));
-        }
-    }
+    };
     let mut attributes = Attributes::default();
-    for (event, _) in events
-        .iter()
-        .zip(&taken)
-        .filter(|(event, taken)| **taken && (within(event) || is_baseline(event)))
-    {
+    for (event, _) in events.iter().zip(&taken).filter(|(_, taken)| **taken) {
         match event.task_id {
             Some(task) => attributes.apply_task(task, event),
             None => {

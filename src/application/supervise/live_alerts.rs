@@ -65,22 +65,37 @@ pub(super) struct AttributesBaseline {
 impl AttributesBaseline {
     /// On the first pass of the process and then every
     /// [`crate::domain::ledger::attributes::RECONCILE_INTERVAL_SECS`], write
-    /// the baseline of the tasks and goals whose records do not give what
-    /// the state holds (made or changed by a binary before the record).
-    /// One that cannot be written is warned of and tried again at the next
-    /// interval.
+    /// the baseline of the tasks, goals and findings whose records do not
+    /// give what the state holds (made or changed by a binary before the
+    /// record). One that cannot be written is warned of and tried again at
+    /// the next interval; the findings' are tried when the tasks' and
+    /// goals' could not be.
     pub(super) fn pass(&mut self, env: &mut ObservationEnv<'_>) {
         let now = env.generators.clock.monotonic();
         let at = now.saturating_duration_since(*self.origin.get_or_insert(now));
         let queue = &*env.queue;
-        match self.step(at, || queue.record_attributes_baseline()) {
-            Some(Ok(Some((tasks, goals)))) => {
-                info!(tasks, goals, "recorded the baseline of the attributes");
+        let Some(findings) = self.step(at, || {
+            match queue.record_attributes_baseline() {
+                Ok(Some((tasks, goals))) => {
+                    info!(tasks, goals, "recorded the baseline of the attributes");
+                }
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "the baseline of the attributes could not be written: {error:#}");
+                }
+                Ok(None) => {}
             }
-            Some(Err(error)) => {
-                warn!(error = %format_args!("{error:#}"), "the baseline of the attributes could not be written: {error:#}");
+            queue.record_findings_baseline()
+        }) else {
+            return;
+        };
+        match findings {
+            Ok(Some(findings)) => {
+                info!(findings, "recorded the baseline of the findings");
             }
-            Some(Ok(None)) | None => {}
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the baseline of the findings could not be written: {error:#}");
+            }
+            Ok(None) => {}
         }
     }
 

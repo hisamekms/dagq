@@ -144,6 +144,7 @@ event_kinds! {
     ExitRequested => "exit_requested",
     ExitRetried => "exit_retried",
     ExitUnsent => "exit_unsent",
+    FindingBaseline => "finding_baseline",
     FindingPlannerExhausted => "finding_planner_exhausted",
     FindingPlannerOpened => "finding_planner_opened",
     FindingRecorded => "finding_recorded",
@@ -446,6 +447,9 @@ impl EventKind {
                 | FindingRecorded
                 | FindingUpdated
                 | FindingStatusChanged
+                // A finding's baseline for the measurement on the queue,
+                // and the mark that closes a baseline.
+                | FindingBaseline
                 // A finding's planners and the answers to their questions,
                 // for a finding on the queue (ADR-0044 decision 19).
                 | FindingPlannerOpened
@@ -752,6 +756,12 @@ pub const EXIT_REQUEST_TIMED_OUT: &str = EventKind::ExitRequestTimedOut.as_str()
 /// `unreadable`) and what it will `send`, recorded before it is sent.
 pub const EXIT_RETRIED: &str = EventKind::ExitRetried.as_str();
 pub const EXIT_UNSENT: &str = EventKind::ExitUnsent.as_str();
+/// The attributes the report reads of a finding (`finding`, a
+/// [`super::FindingAttributes`]), written on its target for one whose
+/// records do not give what the state holds; on the queue without
+/// `finding`, the mark that closes the baseline (`findings`, how many it
+/// covers). `domain::ledger::findings` folds it.
+pub const FINDING_BASELINE: &str = EventKind::FindingBaseline.as_str();
 pub const FINDING_PLANNER_EXHAUSTED: &str = EventKind::FindingPlannerExhausted.as_str();
 pub const FINDING_PLANNER_OPENED: &str = EventKind::FindingPlannerOpened.as_str();
 pub const FINDING_RECORDED: &str = EventKind::FindingRecorded.as_str();
@@ -1189,6 +1199,7 @@ mod tests {
                 EventKind::FindingPlannerExhausted,
                 "finding_planner_exhausted",
             ),
+            (EventKind::FindingBaseline, "finding_baseline"),
             (EventKind::FindingPlannerOpened, "finding_planner_opened"),
             (EventKind::FindingRecorded, "finding_recorded"),
             (EventKind::FindingStatusChanged, "finding_status_changed"),

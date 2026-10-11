@@ -459,6 +459,25 @@ fn findings_on_a_run_or_a_goal_ride_on_their_target() {
         (Some(task.id()), Some(run.id().clone()), None)
     );
     assert_eq!(on_run.finding.detail, "long");
+    // Its record carries the run and the run's task as the row holds them.
+    let recorded = queue
+        .show(task.id())
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|event| event.kind == "finding_recorded" && event.run_id.as_ref() == Some(run.id()))
+        .unwrap();
+    assert_eq!(
+        recorded.payload["finding"],
+        serde_json::to_value(on_run.finding.attributes()).unwrap()
+    );
+    assert_eq!(
+        (
+            recorded.payload["finding"]["run_id"].as_str(),
+            recorded.payload["finding"]["task_id"].as_i64()
+        ),
+        (Some(run.id().as_str()), Some(task.id().as_i64()))
+    );
     let on_goal = queue
         .record_finding(finding(FindingTarget::Goal(goal.id())))
         .unwrap();

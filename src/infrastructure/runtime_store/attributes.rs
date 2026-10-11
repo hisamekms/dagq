@@ -1,8 +1,9 @@
-//! The baseline of the attributes the measurement folds
-//! (`domain::ledger::attributes`, docs/design/attribute-records.md): a
-//! task or goal whose records do not give what the state tables hold (one
-//! a binary before the record made or changed) gets its values now, read
-//! and written in one transaction.
+//! The baselines of the attributes the measurement folds
+//! (`domain::ledger::attributes` and `domain::ledger::findings`,
+//! docs/design/attribute-records.md): a task, goal or finding whose
+//! records do not give what the state tables hold (one a binary before the
+//! record made or changed) gets its values now, read and written in one
+//! transaction.
 
 use std::collections::BTreeMap;
 
@@ -10,13 +11,15 @@ use anyhow::Result;
 use rusqlite::{Connection, TransactionBehavior};
 use serde_json::{Value, json};
 
+use super::super::findings::{finding_event, finding_row};
 use super::super::sqlite::{SqliteQueue, event, event_row, goal_event, read_goal};
 use super::run_log::queue_event;
 use crate::domain::ledger::attributes::{
     Attributes, Folded, GoalAttributes, KINDS, TaskAttributes, fold,
 };
+use crate::domain::ledger::findings;
 use crate::domain::plan_request::PriorityBy;
-use crate::domain::{EventKind, GoalId, Priority, RunId, RunStatus, TaskId};
+use crate::domain::{EventKind, Finding, GoalId, Priority, RunEvent, RunId, RunStatus, TaskId};
 
 impl SqliteQueue {
     /// Compare what the records fold to with what the state tables hold,
@@ -66,6 +69,78 @@ impl SqliteQueue {
     }
 }
 
+impl SqliteQueue {
+    /// Compare the findings the records fold to with the `findings` rows,
+    /// and write `finding_baseline` with the row's attributes on every
+    /// finding that differs, settled ones too, then the queue's mark that
+    /// closes the group: how many findings, none when every one agrees.
+    /// The comparison is read first without the write lock and made again
+    /// inside the write. Idempotent: after it the records agree.
+    pub fn record_findings_baseline(&self) -> Result<Option<usize>> {
+        {
+            let read =
+                rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
+            let differ = differing_findings(&read)?;
+            read.commit()?;
+            if differ.is_empty() {
+                return Ok(None);
+            }
+        }
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let differ = differing_findings(&tx)?;
+        if differ.is_empty() {
+            return Ok(None);
+        }
+        for finding in &differ {
+            finding_event(
+                &tx,
+                finding,
+                EventKind::FindingBaseline,
+                json!({
+                    "finding_id": finding.id,
+                    (findings::VALUES): finding.attributes(),
+                }),
+            )?;
+        }
+        // The mark closes the group, as the attributes' does.
+        queue_event(
+            &tx,
+            EventKind::FindingBaseline,
+            &json!({"findings": differ.len()}),
+        )?;
+        tx.commit()?;
+        Ok(Some(differ.len()))
+    }
+}
+
+/// The findings whose folded attributes differ from their row's, as
+/// stored.
+fn differing_findings(conn: &Connection) -> Result<Vec<Finding>> {
+    let folded = match findings::fold(&events_of(conn, findings::KINDS)?, None) {
+        findings::Folded::Findings(folded) => folded,
+        findings::Folded::BeforeBaseline => findings::Findings::default(),
+    };
+    let rows: Vec<Finding> = conn
+        .prepare("SELECT * FROM findings ORDER BY id")?
+        .query_map([], finding_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| folded.findings.get(&row.id) != Some(&row.attributes()))
+        .collect())
+}
+
+/// The events of `kinds`, ascending id.
+fn events_of(conn: &Connection, kinds: &[&str]) -> Result<Vec<RunEvent>> {
+    let marks = vec!["?"; kinds.len()].join(",");
+    Ok(conn
+        .prepare(&format!(
+            "SELECT * FROM run_events WHERE kind IN ({marks}) ORDER BY id"
+        ))?
+        .query_map(rusqlite::params_from_iter(kinds), event_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 type Differing = (
     BTreeMap<TaskId, TaskAttributes>,
     BTreeMap<GoalId, GoalAttributes>,
@@ -74,14 +149,7 @@ type Differing = (
 /// The tasks and goals whose folded attributes differ from the state's,
 /// with the state's.
 fn differing(conn: &Connection) -> Result<Differing> {
-    let marks = vec!["?"; KINDS.len()].join(",");
-    let events = conn
-        .prepare(&format!(
-            "SELECT * FROM run_events WHERE kind IN ({marks}) ORDER BY id"
-        ))?
-        .query_map(rusqlite::params_from_iter(KINDS), event_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let folded = match fold(&events, None) {
+    let folded = match fold(&events_of(conn, KINDS)?, None) {
         Folded::Attributes(attributes) => attributes,
         Folded::BeforeBaseline => Attributes::default(),
     };

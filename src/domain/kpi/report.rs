@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use serde::Serialize;
 
 use super::{DAY_MS, Kpi, Period, date};
-use crate::domain::{Finding, marks, stats::timestamp_millis};
+use crate::domain::{FindingAttributes, marks, stats::timestamp_millis};
 
 mod html;
 mod svg;
@@ -143,13 +143,14 @@ pub struct Report {
 
 impl Report {
     /// The report of the latest period `kpi` lists; `findings` are the
-    /// unsettled ones in the order `findings` lists them.
+    /// unsettled ones in the order `findings` lists them (the store's, or
+    /// those `domain::ledger::findings` folds).
     pub fn new(
         kpi: Kpi,
         period: Period,
         generated_at_ms: i64,
         build: &str,
-        findings: &[Finding],
+        findings: &[FindingAttributes],
         diagram: DiagramSection,
     ) -> Self {
         let latest = kpi.periods.last();

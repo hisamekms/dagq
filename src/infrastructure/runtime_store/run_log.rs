@@ -958,6 +958,9 @@ impl EventStore for SqliteQueue {
     fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
         SqliteQueue::record_attributes_baseline(self)
     }
+    fn record_findings_baseline(&self) -> Result<Option<usize>> {
+        SqliteQueue::record_findings_baseline(self)
+    }
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
         SqliteQueue::latest_event_of(self, kind)
     }

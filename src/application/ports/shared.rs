@@ -524,6 +524,14 @@ pub trait EventStore {
     fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
         Ok(None)
     }
+    /// Record the baseline of the findings' attributes the measurement
+    /// folds (`finding_baseline`) for the findings whose records fold to
+    /// other values than their rows, compared and written in one
+    /// transaction: how many findings, none when every one agrees. A store
+    /// without the state tables has none to record.
+    fn record_findings_baseline(&self) -> Result<Option<usize>> {
+        Ok(None)
+    }
     /// The newest event of `kind`, on whatever task, goal or run.
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>>;
     /// The newest `limit` events of `kind`, on whatever task, goal or run,

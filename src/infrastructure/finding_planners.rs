@@ -258,9 +258,10 @@ impl SqliteQueue {
                     params![current.id, to.as_str(), reason, now],
                 )?;
             }
+            let after = read_finding(&tx, current.id)?;
             finding_event(
                 &tx,
-                &current,
+                &after,
                 EventKind::FindingStatusChanged,
                 json!({
                     "finding_id": current.id,
@@ -522,7 +523,7 @@ pub(super) fn link_findings(
         )?;
         finding_event(
             conn,
-            &current,
+            &read_finding(conn, id)?,
             EventKind::FindingStatusChanged,
             json!({
                 "finding_id": id,

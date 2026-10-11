@@ -101,6 +101,57 @@ pub struct Finding {
     pub updated_at: i64,
 }
 
+impl Finding {
+    /// The attributes a report reads of it ([`FindingAttributes`]).
+    pub fn attributes(&self) -> FindingAttributes {
+        FindingAttributes {
+            id: self.id,
+            target: self.target.clone(),
+            task_id: self.task_id,
+            run_id: self.run_id.clone(),
+            goal_id: self.goal_id,
+            kind: self.kind.clone(),
+            subject: self.subject.clone(),
+            summary: self.summary.clone(),
+            impact: self.impact,
+            status: self.status,
+            occurrences: self.occurrences,
+            last_seen_at: self.last_seen_at,
+        }
+    }
+}
+
+/// What the report orders and lists of a finding (`findings_open` and its
+/// lines): the values every change of a finding records in its event
+/// (`finding`), so that the measurement folds them from the EventStore
+/// (`domain::ledger::findings`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FindingAttributes {
+    pub id: FindingId,
+    /// `run`, `task`, `goal` or `queue`.
+    pub target: String,
+    pub task_id: Option<TaskId>,
+    pub run_id: Option<RunId>,
+    pub goal_id: Option<GoalId>,
+    pub kind: String,
+    pub subject: String,
+    pub summary: String,
+    pub impact: Impact,
+    pub status: FindingStatus,
+    pub occurrences: i64,
+    pub last_seen_at: i64,
+}
+
+impl FindingAttributes {
+    /// [`by_impact`] on the attributes.
+    pub fn by_impact(a: &Self, b: &Self) -> Ordering {
+        impact_order(
+            (a.impact, a.occurrences, a.last_seen_at, a.id),
+            (b.impact, b.occurrences, b.last_seen_at, b.id),
+        )
+    }
+}
+
 /// A finding to record: a new one, or an occurrence of an existing one.
 #[derive(Debug, Clone)]
 pub struct NewFinding {
@@ -307,12 +358,19 @@ pub fn check_covered_by(finding: &Finding, task_closed: bool) -> Result<(), Doma
 /// `findings` order: the larger impact first, then more occurrences, then
 /// the latest seen, then the newest.
 pub fn by_impact(a: &Finding, b: &Finding) -> Ordering {
-    b.impact
-        .rank()
-        .cmp(&a.impact.rank())
-        .then(b.occurrences.cmp(&a.occurrences))
-        .then(b.last_seen_at.cmp(&a.last_seen_at))
-        .then(b.id.cmp(&a.id))
+    impact_order(
+        (a.impact, a.occurrences, a.last_seen_at, a.id),
+        (b.impact, b.occurrences, b.last_seen_at, b.id),
+    )
+}
+
+/// [`by_impact`] on (impact, occurrences, last seen, id).
+fn impact_order(a: (Impact, i64, i64, FindingId), b: (Impact, i64, i64, FindingId)) -> Ordering {
+    b.0.rank()
+        .cmp(&a.0.rank())
+        .then(b.1.cmp(&a.1))
+        .then(b.2.cmp(&a.2))
+        .then(b.3.cmp(&a.3))
 }
 
 /// Which findings `findings` lists: the unsettled ones (`open`,

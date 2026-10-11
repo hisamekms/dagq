@@ -168,7 +168,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 - table: `findings`・`ledger_rows`（runtimeの制御は読まない）。
 - ファイル: queueのdirの日次のKPIのreportとKPIのpushの待ち。
-- event（runtimeの制御は読まない）: `live_alert_*`（[今の判定](measurement.md#今の判定の記録)）・`main_*`（mainのfirst-parentの[履歴](main-history.md)）・`attributes_baseline`（[taskとgoalの属性](attribute-records.md)の基準）。
+- event（runtimeの制御は読まない）: `live_alert_*`（[今の判定](measurement.md#今の判定の記録)）・`main_*`（mainのfirst-parentの[履歴](main-history.md)）・`attributes_baseline`・`finding_baseline`（[属性](attribute-records.md)の基準）。
 
 **判断**（domain）: `domain::stats`・`kpi`・`forecast`とその下、`live_alerts`・`marks`・`timeline`・`throughput_review`・`finding`・`ci_watch`ほか。
 

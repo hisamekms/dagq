@@ -40,6 +40,7 @@ mod cli_version;
 mod draft_bundles;
 mod draft_revisit;
 mod finding_planner;
+mod finding_records;
 mod goal_review;
 mod goal_review_codex;
 mod inbox_nudge;
