@@ -39,9 +39,11 @@ const PARKING: [&str; 10] = [
     event_kind::RUN_E2E_FAILED,
 ];
 
-/// The first five of [`PARKING`], any landing recheck failure and the
+/// The first five of [`PARKING`], the landing recheck's failures and the
 /// runtime's failed e2e: what parks a run that a resumed session may have
-/// resolved already.
+/// resolved already. A recheck failure the host kept from judging the code
+/// ([`recheck::RecordedFailure::skipped`]) parks nothing, and
+/// [`RunHistory::unresolved_since_park`] passes it over.
 const RESOLVABLE_PARKING: [&str; 7] = [
     event_kind::INTEGRATION_DEFERRED,
     event_kind::INTEGRATION_ERROR,
@@ -405,11 +407,18 @@ impl<'a> RunHistory<'a> {
     /// validation (not a person's `send_back`) and the last of those parking events,
     /// `resume_finished` and `resume_skipped` is a `resume_finished` with
     /// `outcome: unresolved`: a session ran after the parking, and may
-    /// have resolved the run although it was not judged so.
+    /// have resolved the run although it was not judged so. A recheck
+    /// whose command failed on the host ([`recheck::SKIPPED`]) parks
+    /// nothing and is not read.
     pub fn unresolved_since_park(&self) -> bool {
-        let parked = self.last_of(&RESOLVABLE_PARKING);
-        let last = self.events.iter().rev().find(|e| {
+        let parking = |e: &RunEvent| {
             RESOLVABLE_PARKING.contains(&e.kind.as_str())
+                && !(e.kind == event_kind::LANDING_RECHECK_FAILED
+                    && recheck::RecordedFailure::restore(e).skipped())
+        };
+        let parked = self.events.iter().rev().find(|e| parking(e));
+        let last = self.events.iter().rev().find(|e| {
+            parking(e)
                 || e.kind == event_kind::RESUME_FINISHED
                 || e.kind == event_kind::RESUME_SKIPPED
         });
@@ -1188,6 +1197,17 @@ mod tests {
         assert!(unresolved(vec![
             event(1, "landing_recheck_failed", json!({})),
             finished(2, "unresolved")
+        ]));
+        // A recheck the host kept from judging the code parked nothing.
+        assert!(!unresolved(vec![
+            event(1, "landing_recheck_failed", json!({"action": "skipped"})),
+            event(2, "session_gone_parked", json!({})),
+            finished(3, "unresolved")
+        ]));
+        assert!(unresolved(vec![
+            deferred(1),
+            event(2, "landing_recheck_failed", json!({"action": "skipped"})),
+            finished(3, "unresolved")
         ]));
     }
 

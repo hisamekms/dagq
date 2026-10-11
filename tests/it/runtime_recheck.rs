@@ -226,7 +226,7 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
     fs::write(repo.join("b.txt"), "b\n").unwrap();
     fs::write(
         repo.join("dagq.toml"),
-        "[recheck]\ncommand = 'echo \"target=$CARGO_TARGET_DIR\"; if [ -f a.txt ]; then test -f b.txt; fi'\n",
+        "[recheck]\ncommand = 'echo \"target=$CARGO_TARGET_DIR\"; if [ -f a.txt ]; then test -f b.txt || { echo error[E0063]: missing_b; exit 1; }; fi'\n",
     )
     .unwrap();
     git(&repo, &["add", "."]);
@@ -263,6 +263,7 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
     assert_eq!(found["action"], "resumed");
     assert_eq!(found["head"], json!(waiting.result_commit().unwrap()));
     assert_eq!(found["exit_code"], 1);
+    assert_eq!(found["class"], "build_error");
     assert!(found.get("conflicts").is_none());
     let recheck_dir = fs::canonicalize(dir.path()).unwrap().join("recheck");
     let tail = found["output_tail"].as_str().unwrap();
@@ -295,7 +296,7 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
     assert_eq!(status["landing_recheck"]["check_failed"], 1);
     assert_eq!(
         status["landing_recheck"]["command"],
-        "echo \"target=$CARGO_TARGET_DIR\"; if [ -f a.txt ]; then test -f b.txt; fi"
+        "echo \"target=$CARGO_TARGET_DIR\"; if [ -f a.txt ]; then test -f b.txt || { echo error[E0063]: missing_b; exit 1; }; fi"
     );
 }
 
@@ -921,4 +922,148 @@ fn another_supervisors_recheck_of_main_leaves_the_run_held_for_its_e2e_to_check(
         fs::read_to_string(repo.join("change.txt")).unwrap(),
         "resolved by the resumed session\n"
     );
+}
+
+/// The real integration hold survives a later recheck's host failure,
+/// including its last_error and the inbox attention that reports the hold.
+#[test]
+fn an_integration_held_run_is_not_resumed_by_a_full_disk_recheck() {
+    let (_dir, repo, db) = fixture();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [json!(["kill -TERM $$"]).to_string()],
+        )
+        .unwrap();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let before = run_of(&db, 1).unwrap();
+    assert!(has_event(&db, 1, "integration_held"));
+    move_main(
+        &repo,
+        "dagq.toml",
+        "[recheck]\ncommand = 'echo No space left on device; exit 1'\n",
+    );
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_environmental_recheck(&db, "disk_full");
+    let after = run_of(&db, 1).unwrap();
+    assert_eq!(after.result_commit(), before.result_commit());
+    assert_eq!(after.last_error(), before.last_error());
+    assert_eq!(events_of(&db, after.id(), "integration_held").len(), 1);
+    assert!(
+        runtime::status(&db).unwrap()["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["run_id"] == after.id().as_str() && a["kind"] == "integration_held")
+    );
+}
+
+/// A verifier's deadline is recorded as timeout, rather than Finding::Error.
+#[test]
+fn a_recheck_command_cut_off_by_its_deadline_is_an_environmental_failure() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("concern", &["a person should look"], "unsure")]);
+    supervise_reviewed(&db, &repo, &backend, &reviewer);
+    // Outlives the deadline, and ends once the test (the shell's parent)
+    // is gone or after a minute, however the test ends.
+    move_main(
+        &repo,
+        "dagq.toml",
+        "[recheck]\ncommand = 'i=0; while [ $i -lt 600 ] && kill -0 $PPID 2>/dev/null; do sleep 0.1; i=$((i+1)); done'\n",
+    );
+    let mut options = supervise_options(4, true);
+    options.verification_timeout = Duration::from_millis(20);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_environmental_recheck(&db, "timeout");
+    let waiting = run_of(&db, 1).unwrap();
+    let found = events_of(&db, waiting.id(), "landing_recheck_failed");
+    assert!(
+        found[0]["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("limit and was killed")
+    );
+    assert_eq!(
+        runtime::status(&db).unwrap()["landing_recheck"]["errors"],
+        0
+    );
+    let ask = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(Default::default())
+        .unwrap()[0]
+        .clone();
+    assert!(
+        ask.question
+            .contains("The host kept the command from judging the code")
+    );
+    assert!(!ask.question.contains("The supervisor resumes"));
+}
+
+fn assert_environmental_recheck(db: &Path, class: &str) {
+    let run = run_of(db, 1).unwrap();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert!(events_of(db, run.id(), "resume_started").is_empty());
+    let found = events_of(db, run.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["action"], "skipped");
+    assert_eq!(found[0]["class"], class);
+    assert_eq!(found[0]["status"], "awaiting_integration");
+    assert!(Path::new(found[0]["log_path"].as_str().unwrap()).is_file());
+    assert!(!found[0]["evidence"].as_str().unwrap().is_empty());
+    let status = runtime::status(db).unwrap();
+    let counts = &status["landing_recheck"];
+    assert_eq!(counts["environment"], 1, "{counts}");
+    assert_eq!(counts["resumed"], 0);
+    assert_eq!(counts["held"], 0);
+    assert_eq!(counts["check_failed"], 0);
+}
+
+/// A slot retains its lease and can land after its e2e: the skipped
+/// finding must not become a held finding that park_held_by_recheck uses.
+#[test]
+fn a_slot_run_with_a_killed_recheck_is_not_parked_before_landing() {
+    let (dir, repo, db) = fixture();
+    crate::runtime_e2e::with_e2e_paths(&repo, "[\"e2e.txt\"]");
+    let mut config = fs::read_to_string(repo.join("dagq.toml")).unwrap();
+    config.push_str("\n[recheck]\ncommand = 'kill -TERM $$'\n");
+    move_main(&repo, "dagq.toml", &config);
+    let backend = Arc::new(TestWorkspace::new(&db, false, E2E_AGENT));
+    let reviewer = Arc::new(TestReviewer::new(&[verdict(
+        "pass",
+        &[],
+        "meets the acceptance",
+    )]));
+    let release = dir.path().join("e2e-release");
+    let supervisor = supervising_with(&db, &repo, &backend, &reviewer, held_e2e(&release));
+    wait_until(&db, Duration::from_secs(60), |_| {
+        has_event(&db, 1, "run_e2e_started")
+    });
+    move_main(&repo, "other.txt", "unrelated change\n");
+    wait_until(&db, Duration::from_secs(60), |_| {
+        runtime::status(&db).unwrap()["landing_recheck"]["environment"] == 1
+    });
+    assert_environmental_recheck(&db, "killed");
+    let run = run_of(&db, 1).unwrap();
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .run_lease(run.id())
+            .unwrap()
+            .is_some()
+    );
+    fs::write(&release, "").unwrap();
+    let outcome = joined(supervisor, "the supervisor to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = run_of(&db, 1).unwrap();
+    assert_eq!(run.status(), RunStatus::Integrated);
+    assert!(events_of(&db, run.id(), "resume_started").is_empty());
+    assert_eq!(events_of(&db, run.id(), "landing_recheck_failed").len(), 1);
 }

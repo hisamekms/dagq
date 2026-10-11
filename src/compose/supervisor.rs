@@ -78,6 +78,10 @@ pub struct SuperviseOptions {
     /// unrelated to review retries can skip the second headless job.
     /// No CLI or repository setting overrides this policy.
     pub retry_unreadable_review: bool,
+    /// How long one verification command (integrate's, the landing
+    /// recheck's) may run in all ([`VERIFICATION_TIMEOUT`]); tests shorten
+    /// it to reach the limit.
+    pub verification_timeout: Duration,
     /// Upper bound on runs executing at once (`supervise --parallel`);
     /// `None` follows `[supervisor] parallel` of the main checkout's
     /// `dagq.toml`, read again each pass, else 4 (task 698).
@@ -290,6 +294,7 @@ impl SuperviseOptions {
         Self {
             no_claude: false,
             retry_unreadable_review: true,
+            verification_timeout: VERIFICATION_TIMEOUT,
             parallel: Some(parallel),
             max_waiting: None,
             once,
@@ -692,7 +697,7 @@ pub fn supervise_with_reviewer(
             checkout: main_checkout.clone(),
             db: db.clone(),
             user_config: options.user_config.clone(),
-            verification_timeout: VERIFICATION_TIMEOUT,
+            verification_timeout: options.verification_timeout,
         }),
         // No part of the container runtime is built yet (goal 38): a target
         // set to it waits.

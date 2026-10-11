@@ -452,6 +452,10 @@ pub struct LandingRechecks {
     /// Runs that merged cleanly but failed the recheck's command
     /// (`verification_failed`): the conflicts Git does not see.
     pub check_failures: i64,
+    /// Runs whose recheck command failed on the host (`action: skipped`,
+    /// ADR-t639-1): they say nothing of the code, so they are neither
+    /// `check_failures` nor `resumed`, and stay listed in `runs`.
+    pub environment: i64,
     /// Findings that parked their run for a resume, at once or, for a run
     /// held in a slot, when it would have landed.
     pub resumed: i64,
@@ -1671,7 +1675,9 @@ fn landing_rechecks(
     upto: EventId,
     counts: impl Fn(Option<TaskId>) -> bool,
 ) -> LandingRechecks {
-    use super::recheck::{LANDING_RECHECK_FAILED, LANDING_RECHECK_FINISHED, RESUMED};
+    use super::recheck::{
+        FailedAction, LANDING_RECHECK_FAILED, LANDING_RECHECK_FINISHED, RecordedFailure,
+    };
     let mut rechecks = LandingRechecks::default();
     for event in events
         .iter()
@@ -1683,15 +1689,18 @@ fn landing_rechecks(
                 rechecks.runs_checked += event.payload["checked"].as_i64().unwrap_or(0);
             }
             LANDING_RECHECK_FAILED => {
-                if event.payload["action"] == RESUMED {
+                let recorded = RecordedFailure::restore(event);
+                if recorded.action == Some(FailedAction::Resumed) {
                     rechecks.resumed += 1;
                 }
-                if event.payload["repeat"] == true {
+                if recorded.repeat == Some(true) {
                     continue;
                 }
-                let code = event.payload["code"].as_str().unwrap_or_default();
+                let code = recorded.code.unwrap_or_default();
                 if code == "rebase_conflict" {
                     rechecks.conflicts += 1;
+                } else if recorded.skipped() {
+                    rechecks.environment += 1;
                 } else {
                     rechecks.check_failures += 1;
                 }
@@ -2419,14 +2428,24 @@ mod tests {
                 T,
             ),
             queue_event(5, json!({"checked": 1})),
+            // The host failed the command: no check failure, no resume.
+            run_event(
+                6,
+                R1,
+                "landing_recheck_failed",
+                json!({"code": "verification_failed", "action": "skipped", "class": "disk_full"}),
+                T,
+            ),
         ];
-        let all = landing_rechecks(&events, EventId::new(0), EventId::new(5), |_| true);
+        let all = landing_rechecks(&events, EventId::new(0), EventId::new(6), |_| true);
         assert_eq!(all.rechecks, 2);
         assert_eq!(all.runs_checked, 4);
         assert_eq!(all.conflicts, 1);
         assert_eq!(all.check_failures, 1);
+        assert_eq!(all.environment, 1);
         assert_eq!(all.resumed, 2);
-        assert_eq!(all.runs.len(), 2);
+        assert_eq!(all.runs.len(), 3);
+        assert_eq!(all.runs[2].action, "skipped");
         assert_eq!(all.runs[0].landed_task_id, Some(9));
         assert_eq!(all.runs[1].action, "held");
         let window = landing_rechecks(&events, EventId::new(1), EventId::new(3), |_| true);

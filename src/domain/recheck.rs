@@ -5,14 +5,19 @@
 //! for one found still landing. The supervisor runs the checks; this
 //! module is the record.
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::run::payload::{restore, typed};
+use super::verify_failure::VerifyFailure;
 use super::{CommitSha, ReasonCode, RunEvent, RunId, TaskId, scope::glob_matches};
 
 /// A run the recheck found no longer landing on main (ADR-0068 decision
 /// 3). Its `action` says what followed: [`RESUMED`] (it was parked for a
-/// resume in the same transaction) or [`HELD`] (a session or the landing
-/// holds it; it is parked when it would land).
+/// resume in the same transaction), [`HELD`] (a session or the landing
+/// holds it; it is parked when it would land) or [`SKIPPED`] (the host
+/// kept the command from judging the code, ADR-t639-1: the run stays
+/// awaiting integration, neither parked nor held).
 pub const LANDING_RECHECK_FAILED: &str = super::event_kind::LANDING_RECHECK_FAILED;
 
 /// A run the recheck found still landing on main (ADR-t1311-1): the main
@@ -33,6 +38,11 @@ pub const RESUMED: &str = "resumed";
 /// `action` of a failure recorded on a run this supervisor holds in a slot
 /// (waiting for the landing slot, or for its session's `/exit`).
 pub const HELD: &str = "held";
+
+/// `action` of a failure the recheck's command met on the host
+/// ([`RecheckFailure::is_environmental`]): nothing followed, and the run
+/// keeps waiting to land as it was.
+pub const SKIPPED: &str = "skipped";
 
 /// `command_skipped` of a clean finding whose run's diff touches none of
 /// `[recheck] paths` (ADR-t2032-1): the recheck had a command and did not
@@ -73,16 +83,26 @@ pub struct Landed {
 pub enum RecheckFailure {
     /// `git merge-tree` finds these paths conflicting.
     Conflict { paths: Vec<String> },
-    /// The tree merged cleanly, but the recheck's command failed on it.
+    /// The tree merged cleanly, but the recheck's command failed on it,
+    /// for the class `failure` reads from its exit and its log.
     CheckFailed {
         command: String,
         exit_code: i32,
         log_path: String,
         output_tail: String,
+        failure: VerifyFailure,
     },
 }
 
 impl RecheckFailure {
+    /// Whether the command failed on the host rather than on the code
+    /// ([`super::verify_failure::FailureClass::is_environmental`],
+    /// ADR-t639-1): such a finding says nothing of whether the run lands,
+    /// so it neither resumes nor holds the run.
+    pub fn is_environmental(&self) -> bool {
+        matches!(self, Self::CheckFailed { failure, .. } if failure.class.is_environmental())
+    }
+
     /// A conflict is the landing's `rebase_conflict`, a failed command its
     /// `verification_failed` (ADR-0034's codes, ADR-0068 decision 3).
     pub const fn code(&self) -> ReasonCode {
@@ -112,7 +132,9 @@ impl RecheckFailure {
         }
     }
 
-    /// The payload of [`LANDING_RECHECK_FAILED`], without its `action`.
+    /// The payload of [`LANDING_RECHECK_FAILED`], without its `action`. A
+    /// failed command's carries its `class` and `evidence` beside its log
+    /// ([`VerifyFailure`]), which tell a host failure from a code failure.
     /// `landed_run_id` and `landed_task_id` are null when main moved
     /// without a dagq landing.
     pub fn payload(&self, landed: Option<&Landed>, main: &CommitSha, head: &CommitSha) -> Value {
@@ -130,11 +152,14 @@ impl RecheckFailure {
                 exit_code,
                 log_path,
                 output_tail,
+                failure,
             } => {
                 payload["command"] = json!(command);
                 payload["exit_code"] = json!(exit_code);
                 payload["log_path"] = json!(log_path);
                 payload["output_tail"] = json!(output_tail);
+                payload["class"] = json!(failure.class);
+                payload["evidence"] = json!(failure.evidence);
             }
         }
         payload
@@ -194,6 +219,14 @@ pub fn ask_note(reason: &str, resumed: bool) -> String {
     format!("{ASK_NOTE_PREFIX}{reason}. {next}")
 }
 
+/// The paragraph a failure on the host puts in the run's open asks: what
+/// the command met, and that the run keeps waiting to land as it was.
+pub fn skipped_ask_note(reason: &str) -> String {
+    format!(
+        "{ASK_NOTE_PREFIX}{reason}. The host kept the command from judging the code: the run is not resumed and keeps waiting to land."
+    )
+}
+
 /// The paragraph a clean finding puts in the run's open asks
 /// (ADR-t1311-1): the main's short commit, that the run still lands there
 /// cleanly, and whether a command was run on it.
@@ -220,6 +253,48 @@ pub fn noted_question(question: &str, note: &str) -> String {
         .filter(|paragraph| !paragraph.trim_start().starts_with(ASK_NOTE_PREFIX))
         .collect();
     format!("{}\n\n{note}", kept.join("\n\n").trim_end())
+}
+
+/// What a recorded [`LANDING_RECHECK_FAILED`] says followed the finding,
+/// from its `action`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailedAction {
+    /// [`RESUMED`].
+    Resumed,
+    /// [`HELD`].
+    Held,
+    /// [`SKIPPED`].
+    Skipped,
+}
+
+/// A recorded [`LANDING_RECHECK_FAILED`] restored as the typed values the
+/// readers of other contexts decide by. It never refuses a payload: a
+/// missing key, `null` or a value of another type (an older writer) reads
+/// as absent, as `payload["key"]` reads it.
+#[derive(Debug, Default, Deserialize)]
+pub struct RecordedFailure<'a> {
+    /// What followed the finding.
+    #[serde(default, deserialize_with = "typed")]
+    pub action: Option<FailedAction>,
+    /// [`RecheckFailure::code`] as recorded.
+    #[serde(default, borrow, deserialize_with = "typed")]
+    pub code: Option<&'a str>,
+    /// `true` on a held run's parking, which repeats its finding.
+    #[serde(default, deserialize_with = "typed")]
+    pub repeat: Option<bool>,
+}
+
+impl<'a> RecordedFailure<'a> {
+    pub fn restore(event: &'a RunEvent) -> Self {
+        restore(&event.payload)
+    }
+
+    /// Whether the host kept the command from judging the code
+    /// ([`SKIPPED`]): the finding parked and held nothing.
+    pub fn skipped(&self) -> bool {
+        self.action == Some(FailedAction::Skipped)
+    }
 }
 
 /// Whether the event parked its run for a session.
@@ -380,6 +455,12 @@ mod tests {
             exit_code: 101,
             log_path: "/r/recheck.log".into(),
             output_tail: "error[E0063]".into(),
+            failure: crate::domain::verify_failure::classify(
+                "cargo check",
+                Some(101),
+                None,
+                "error[E0063]: missing field",
+            ),
         };
         assert_eq!(failure.code(), ReasonCode::VerificationFailed);
         let reason = failure.reason(Some(&landed()), &main);
@@ -392,6 +473,41 @@ mod tests {
         assert_eq!(payload["code"], "verification_failed");
         assert_eq!(payload["exit_code"], 101);
         assert_eq!(payload["output_tail"], "error[E0063]");
+        assert_eq!(payload["class"], "build_error");
+        assert!(!failure.is_environmental());
+    }
+
+    /// Only the host's classes skip the resume and the hold; a conflict
+    /// never does.
+    #[test]
+    fn only_a_failure_on_the_host_is_skipped() {
+        use crate::domain::verify_failure::FailureClass;
+        let sha = CommitSha::parse("a".repeat(40), "commit").unwrap();
+        for (class, environmental) in [
+            (FailureClass::DiskFull, true),
+            (FailureClass::Killed, true),
+            (FailureClass::Timeout, true),
+            (FailureClass::BuildError, false),
+            (FailureClass::TestFailure, false),
+            (FailureClass::Unknown, false),
+        ] {
+            let failure = RecheckFailure::CheckFailed {
+                command: "check".into(),
+                exit_code: 1,
+                log_path: "/log".into(),
+                output_tail: String::new(),
+                failure: VerifyFailure {
+                    class,
+                    evidence: "evidence".into(),
+                },
+            };
+            assert_eq!(failure.is_environmental(), environmental, "{class:?}");
+            let payload = failure.payload(None, &sha, &sha);
+            assert_eq!(payload["class"], json!(class));
+            assert_eq!(payload["evidence"], "evidence");
+        }
+        assert!(!RecheckFailure::Conflict { paths: vec![] }.is_environmental());
+        assert!(skipped_ask_note("found").contains("keeps waiting to land"));
     }
 
     #[test]
@@ -478,6 +594,44 @@ mod tests {
         assert!(parks(&resumed));
         assert!(!parks(&events[0]));
         assert!(held_against(&[held("m", "h"), resumed], "m", "h").is_none());
+        // A failure on the host neither parks nor holds the run.
+        let skipped = event(json!({"action": SKIPPED, "main": "m", "head": "h"}));
+        assert!(!parks(&skipped));
+        assert!(held_against(&[held("m", "h"), skipped], "m", "h").is_none());
+    }
+
+    /// The typed reading of a recorded failure names what followed it, and
+    /// reads an older or broken payload's keys as absent.
+    #[test]
+    fn a_recorded_failure_is_restored_as_typed_values() {
+        let recorded = event(json!({
+            "action": SKIPPED,
+            "code": "verification_failed",
+            "repeat": true,
+        }));
+        let failure = RecordedFailure::restore(&recorded);
+        assert_eq!(failure.action, Some(FailedAction::Skipped));
+        assert!(failure.skipped());
+        assert_eq!(failure.code, Some("verification_failed"));
+        assert_eq!(failure.repeat, Some(true));
+        for (action, typed) in [(RESUMED, FailedAction::Resumed), (HELD, FailedAction::Held)] {
+            let failure = event(json!({"action": action}));
+            let failure = RecordedFailure::restore(&failure);
+            assert_eq!(failure.action, Some(typed));
+            assert!(!failure.skipped());
+        }
+        for payload in [
+            json!({}),
+            json!({"action": "other", "code": 3, "repeat": "yes"}),
+            json!(null),
+        ] {
+            let older = event(payload);
+            let failure = RecordedFailure::restore(&older);
+            assert_eq!(failure.action, None);
+            assert_eq!(failure.code, None);
+            assert_eq!(failure.repeat, None);
+            assert!(!failure.skipped());
+        }
     }
 
     fn integrated(run: Option<&str>, payload: Value) -> RunEvent {

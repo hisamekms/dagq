@@ -10,16 +10,19 @@
 //! there are none, ADR-t2032-1).
 //! A run found no longer landing is parked for a resume at once, whatever
 //! asks it waits on; a run this supervisor holds in a slot is parked when
-//! it would land. A run found still landing records that (ADR-t1311-1).
-//! Either way the run's open asks show the latest finding.
+//! it would land. A command that failed on the host (a full disk, a kill,
+//! its time limit; ADR-t639-1) judges nothing: the run keeps waiting to
+//! land, neither parked nor held. A run found still landing records that
+//! (ADR-t1311-1). Either way the run's open asks show the latest finding.
 
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::recheck::{
     self, CheckedBy, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED, Landed, RecheckConfig,
-    RecheckFailure,
+    RecheckFailure, SKIPPED,
 };
 use crate::domain::sccache::{CheckReason, GuardLook};
+use crate::domain::verify_failure::{self, CommandTimedOut};
 
 /// Where the recheck keeps its scratch worktree and its target directory,
 /// under the queue's directory.
@@ -175,6 +178,10 @@ struct Tally {
     command_skipped: u64,
     conflicts: u64,
     check_failed: u64,
+    /// Of the failed commands, those that failed on the host
+    /// ([`RecheckFailure::is_environmental`]): counted apart from
+    /// `check_failed`, they resumed and held nothing.
+    environment: u64,
     errors: u64,
     resumed: u64,
     held: u64,
@@ -197,22 +204,26 @@ impl Tally {
         self.errors += 1;
     }
 
-    /// A run found no longer landing for `failure`, and the `action` its
-    /// record took ([`recheck::RESUMED`] or [`HELD`]); `None` when it was
+    /// A run found no longer landing for `failure`, or whose command
+    /// failed on the host, and the `action` its record took
+    /// ([`recheck::RESUMED`], [`HELD`] or [`SKIPPED`]); `None` when it was
     /// not recorded (the run moved on, or the record failed).
     fn failed(&mut self, run_id: &RunId, failure: &RecheckFailure, action: Option<&'static str>) {
         self.checked += 1;
         match failure {
             RecheckFailure::Conflict { .. } => self.conflicts += 1,
+            RecheckFailure::CheckFailed { .. } if failure.is_environmental() => {
+                self.environment += 1;
+            }
             RecheckFailure::CheckFailed { .. } => self.check_failed += 1,
         }
         let Some(action) = action else {
             return;
         };
-        if action == HELD {
-            self.held += 1;
-        } else {
-            self.resumed += 1;
+        match action {
+            HELD => self.held += 1,
+            SKIPPED => {}
+            _ => self.resumed += 1,
         }
         self.failed_runs.push(json!({
             "run_id": run_id,
@@ -255,6 +266,7 @@ impl Tally {
             "command_skipped": self.command_skipped,
             "conflicts": self.conflicts,
             "check_failed": self.check_failed,
+            "environment": self.environment,
             "errors": self.errors,
             "resumed": self.resumed,
             "held": self.held,
@@ -733,9 +745,12 @@ impl Supervisor<'_> {
     /// Record `failure` on the run (ADR-0068 decisions 3 and 4): a run
     /// nobody leases is parked for a resume in the same transaction; one
     /// this supervisor holds in a slot records it as held and is parked
-    /// when it would land. Either way its open asks get the finding. `None`
-    /// when the run moved on since it was checked (another head, another
-    /// status, or a lease of another process).
+    /// when it would land. A command that failed on the host does neither
+    /// (ADR-t639-1): the finding is recorded as [`SKIPPED`] and the run
+    /// keeps waiting to land as it was, held by integrate's control of a
+    /// host failure or not. Every way its open asks get the finding.
+    /// `None` when the run moved on since it was checked (another head,
+    /// another status, or a lease of another process).
     fn record_recheck_failure(
         &mut self,
         watch: &RecheckWatch,
@@ -750,7 +765,27 @@ impl Supervisor<'_> {
         }
         let reason = failure.reason(watch.landed.as_ref(), &watch.main);
         let mut payload = failure.payload(watch.landed.as_ref(), &watch.main, &target.head);
-        let action = match self.queue.run_lease(run.id())? {
+        let lease = self.queue.run_lease(run.id())?;
+        if failure.is_environmental() {
+            if lease.is_some_and(|lease| lease.token != self.registration.token) {
+                return Ok(None);
+            }
+            payload["action"] = json!(SKIPPED);
+            payload["reason"] = json!(reason);
+            payload["status"] = json!(run.status());
+            self.queue
+                .record_runtime_event(run.id(), EventKind::LandingRecheckFailed, payload)?;
+            warn!(run_id = %run.id(), "run {}: {reason}; the host kept the command from judging the code, so the run keeps waiting to land", run.id());
+            let note = recheck::skipped_ask_note(&reason);
+            for ask in self
+                .queue
+                .note_on_asks(run.id(), &note, LANDING_RECHECK_FAILED)?
+            {
+                info!(run_id = %run.id(), ask_id = %ask.id, "run {}: the landing recheck's finding was added to its {} ask {}", run.id(), ask.kind.as_str(), ask.id);
+            }
+            return Ok(Some(SKIPPED));
+        }
+        let action = match lease {
             None => match self
                 .queue
                 .park_rechecked(run.id(), None, &reason, payload)?
@@ -901,18 +936,35 @@ fn recheck_run(
     let log = target
         .run_dir
         .join(format!("recheck-{}.log", &main.as_str()[..12]));
-    let exit = verifier.run_to_log(command, &scratch, &env, &log)?;
-    if exit.success {
-        return Ok(Finding::Clean {
-            skipped_by_paths: false,
-        });
-    }
-    let output = files.read_to_string(&log).unwrap_or_default();
+    let (code, signal, timed_out) = match verifier.run_to_log(command, &scratch, &env, &log) {
+        Ok(exit) if exit.success => {
+            return Ok(Finding::Clean {
+                skipped_by_paths: false,
+            });
+        }
+        Ok(exit) => (exit.code, exit.signal, None),
+        Err(error) => match error.downcast_ref::<CommandTimedOut>() {
+            // Killed at the limit (SIGKILL): integrate's `timeout`.
+            Some(timed_out) => (None, Some(9), Some(*timed_out)),
+            None => return Err(error),
+        },
+    };
+    // Lossy: a log cut off by a kill or a full disk may end mid-character,
+    // and its marks still count.
+    let output = files
+        .read(&log)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let failure = match timed_out {
+        Some(timed_out) => timed_out.failure(),
+        None => verify_failure::classify(command, code, signal, &output),
+    };
     Ok(Finding::Failed(RecheckFailure::CheckFailed {
         command: command.to_owned(),
-        exit_code: exit.code.unwrap_or(128),
+        exit_code: code.unwrap_or(128),
         log_path: path_text(&log)?,
         output_tail: tail(&output, 2000).to_owned(),
+        failure,
     }))
 }
 
@@ -1215,20 +1267,34 @@ mod tests {
         let conflict = RecheckFailure::Conflict {
             paths: vec!["change.txt".into()],
         };
-        let check = RecheckFailure::CheckFailed {
+        let check = |class| RecheckFailure::CheckFailed {
             command: "exit 1".into(),
             exit_code: 1,
             log_path: "/r/log".into(),
             output_tail: String::new(),
+            failure: verify_failure::VerifyFailure {
+                class,
+                evidence: String::new(),
+            },
         };
-        let (r1, r2, r3) = (
+        let (r1, r2, r3, r4) = (
             RunId::new("r1").unwrap(),
             RunId::new("r2").unwrap(),
             RunId::new("r3").unwrap(),
+            RunId::new("r4").unwrap(),
         );
         tally.failed(&r1, &conflict, Some(recheck::RESUMED));
-        tally.failed(&r2, &check, Some(HELD));
+        tally.failed(
+            &r2,
+            &check(verify_failure::FailureClass::TestFailure),
+            Some(HELD),
+        );
         tally.failed(&r3, &conflict, None);
+        tally.failed(
+            &r4,
+            &check(verify_failure::FailureClass::DiskFull),
+            Some(SKIPPED),
+        );
         let landed = Landed {
             run_id: RunId::new("landed").unwrap(),
             task_id: crate::domain::TaskId::new(2),
@@ -1251,13 +1317,15 @@ mod tests {
                 "failed_runs": [
                     {"run_id": "r1", "code": "rebase_conflict", "action": "resumed"},
                     {"run_id": "r2", "code": "verification_failed", "action": "held"},
+                    {"run_id": "r4", "code": "verification_failed", "action": "skipped"},
                 ],
                 "supervisor": "me",
-                "checked": 6,
+                "checked": 7,
                 "clean": 2,
                 "command_skipped": 1,
                 "conflicts": 2,
                 "check_failed": 1,
+                "environment": 1,
                 "errors": 1,
                 "resumed": 1,
                 "held": 1,
