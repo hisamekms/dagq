@@ -17,8 +17,8 @@ use super::update::{
 };
 use super::{InstalledPlugin, RunLog};
 use crate::domain::release_update::{
-    RELEASE_CHECK_KINDS, RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig, check_due, is_newer,
-    is_release_build, latest_release,
+    RELEASE_CHECK_KINDS, RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig, acts_on_releases,
+    check_due, is_newer, is_release_build, latest_release,
 };
 use crate::domain::{LeaseToken, RunEvent};
 
@@ -56,7 +56,7 @@ pub fn check(
     first_pass: bool,
     supervisor: &LeaseToken,
 ) -> Result<Option<(&'static str, Value)>> {
-    if !is_release_build(current) || config.release == ReleaseMode::Off {
+    if !acts_on_releases(config, current) {
         return Ok(None);
     }
     let last = queue.latest_queue_event(&RELEASE_CHECK_KINDS)?;
@@ -73,14 +73,49 @@ pub fn check(
         Some(event) if event.kind == RELEASE_CHECKED => Some(event),
         _ => queue.latest_queue_event(&[RELEASE_CHECKED])?,
     };
-    let previous_etag = previous
-        .as_ref()
-        .and_then(|event| event.payload["etag"].as_str().map(str::to_owned));
-    let found = match index.fetch(previous_etag.as_deref()) {
-        Ok(IndexFetch::NotModified) => match &previous {
+    let fetched = index
+        .fetch(etag_of(previous.as_ref()).as_deref())
+        .map_err(|error| format!("{error:#}"));
+    let (kind, payload) = look_record(
+        previous.as_ref(),
+        fetched,
+        // Unread, only the binary decides (ADR-t618-2 decision 4).
+        || plugin.and_then(|plugin| plugin.version().ok().flatten()),
+        current,
+        now,
+        supervisor,
+    );
+    queue.record_queue_event(kind, payload.clone())?;
+    Ok(Some((kind.as_str(), payload)))
+}
+
+/// The `ETag` a look sends as `If-None-Match`: the one of the last
+/// `release_checked` (`previous`).
+pub fn etag_of(previous: Option<&RunEvent>) -> Option<String> {
+    previous.and_then(|event| event.payload["etag"].as_str().map(str::to_owned))
+}
+
+/// What a look of the supervisor of build `current` records at `now`
+/// with what the index gave (`fetched`): `release_checked` with the
+/// latest release, the version of the installed plugin (`plugin`, read
+/// only then) and the `ETag`; to a `304 Not Modified` the last
+/// `release_checked` (`previous`) stands, marked `not_modified`. An index
+/// that cannot be read or parsed, or a `304` to no `ETag`, is
+/// `release_check_failed` with its error.
+pub fn look_record(
+    previous: Option<&RunEvent>,
+    fetched: Result<IndexFetch, String>,
+    plugin: impl FnOnce() -> Option<String>,
+    current: &str,
+    now: i64,
+    supervisor: &LeaseToken,
+) -> (EventKind, Value) {
+    let previous_etag = etag_of(previous);
+    let found = match fetched {
+        Ok(IndexFetch::NotModified) => match previous {
             Some(event) if previous_etag.is_some() => Ok((
                 event.payload["latest"].as_str().map(str::to_owned),
-                previous_etag.clone(),
+                previous_etag,
                 true,
             )),
             _ => Err("the index answered 304 Not Modified to no ETag".to_owned()),
@@ -88,16 +123,15 @@ pub fn check(
         Ok(IndexFetch::Fetched { body, etag }) => {
             latest_release(&body).map(|latest| (latest, etag, false))
         }
-        Err(error) => Err(format!("{error:#}")),
+        Err(error) => Err(error),
     };
-    let (kind, payload) = match found {
+    match found {
         Ok((latest, etag, not_modified)) => (
             EventKind::ReleaseChecked,
             json!({
                 "latest": latest,
                 "current": current,
-                // Unread, only the binary decides (ADR-t618-2 decision 4).
-                "plugin": plugin.and_then(|plugin| plugin.version().ok().flatten()),
+                "plugin": plugin(),
                 "checked_at": now,
                 "etag": etag,
                 "not_modified": not_modified,
@@ -113,9 +147,7 @@ pub fn check(
                 "supervisor": supervisor,
             }),
         ),
-    };
-    queue.record_queue_event(kind, payload.clone())?;
-    Ok(Some((kind.as_str(), payload)))
+    }
 }
 
 /// `status`'s `release_update` of `queue` with the host's `config`:
@@ -460,6 +492,96 @@ mod tests {
             kind,
             json!({"source": "release", "release": version, "answer": answer}),
         )
+    }
+
+    const INDEX: &str = r#"{"name":"dagq","vers":"0.3.0","deps":[],"cksum":"a","features":{},"yanked":false}
+{"name":"dagq","vers":"0.5.0","deps":[],"cksum":"b","features":{},"yanked":true}
+{"name":"dagq","vers":"0.4.0","deps":[],"cksum":"c","features":{},"yanked":false}"#;
+
+    /// A look records the latest release with its `ETag` and the plugin's
+    /// version; past the interval it sends that `ETag`, and a `304` keeps
+    /// the last result; an index that cannot be read is recorded with its
+    /// error, and the plugin is not read then.
+    #[test]
+    fn a_look_records_the_latest_release_or_why_it_could_not() {
+        let token = LeaseToken::new("me");
+        let (kind, checked) = look_record(
+            None,
+            Ok(IndexFetch::Fetched {
+                body: INDEX.to_owned(),
+                etag: Some("\"e1\"".to_owned()),
+            }),
+            || Some("0.3.0".to_owned()),
+            "0.3.0",
+            100,
+            &token,
+        );
+        assert_eq!(kind, EventKind::ReleaseChecked);
+        assert_eq!(
+            checked,
+            json!({
+                "latest": "0.4.0",
+                "current": "0.3.0",
+                "plugin": "0.3.0",
+                "checked_at": 100,
+                "etag": "\"e1\"",
+                "not_modified": false,
+                "supervisor": "me",
+            })
+        );
+        let previous = update(RELEASE_CHECKED, checked);
+        assert_eq!(etag_of(Some(&previous)).as_deref(), Some("\"e1\""));
+        assert_eq!(etag_of(None), None);
+        let (kind, kept) = look_record(
+            Some(&previous),
+            Ok(IndexFetch::NotModified),
+            || None,
+            "0.3.0",
+            200,
+            &token,
+        );
+        assert_eq!(kind, EventKind::ReleaseChecked);
+        assert_eq!(kept["latest"], "0.4.0");
+        assert_eq!(kept["etag"], "\"e1\"");
+        assert_eq!(kept["not_modified"], true);
+        assert_eq!(kept["checked_at"], 200);
+        // A 304 to no ETag is an error.
+        let (kind, odd) = look_record(
+            None,
+            Ok(IndexFetch::NotModified),
+            || None,
+            "0.3.0",
+            1,
+            &token,
+        );
+        assert_eq!(kind, EventKind::ReleaseCheckFailed);
+        assert_eq!(
+            odd["error"],
+            "the index answered 304 Not Modified to no ETag"
+        );
+        let (kind, failed) = look_record(
+            Some(&previous),
+            Err("curl: (6) Could not resolve host: index.crates.io".to_owned()),
+            || panic!("the plugin is read only for a look that found the index"),
+            "0.3.0",
+            300,
+            &token,
+        );
+        assert_eq!(kind, EventKind::ReleaseCheckFailed);
+        assert_eq!(
+            failed,
+            json!({
+                "error": "curl: (6) Could not resolve host: index.crates.io",
+                "current": "0.3.0",
+                "checked_at": 300,
+                "supervisor": "me",
+            })
+        );
+        // A failed look leaves nothing to ask about.
+        assert_eq!(
+            next_action(ReleaseMode::Ask, "0.3.0", None, &[], &[]),
+            ReleaseAction::Nothing
+        );
     }
 
     #[test]

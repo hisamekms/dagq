@@ -384,12 +384,6 @@ name = "runtime_landing_answers::a_land_answer_is_applied_while_the_slot_is_take
 reason = "B 境界（守る境界）: supervisor wiring that applies the answer to SQLite while a slot is held and lands the queued run before the next claim; the judgement is in supervise::landing unit tests"
 task = 1718
 
-# 9.576s, class D
-[[test]]
-name = "runtime_landing_release::a_process_that_outlives_its_stop_is_the_inboxs_once"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: attention once decision (10.7s)"
-task = 1707
-
 # 6.024s, class D
 [[test]]
 name = "runtime_light_slots::a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it"

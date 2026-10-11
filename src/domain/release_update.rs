@@ -64,6 +64,14 @@ pub fn is_release_build(build: &str) -> bool {
     !build.contains(['-', '+']) && parse_version(build).is_some()
 }
 
+/// Whether a supervisor of build `current` acts on releases with the
+/// host's `config`: a release build (ADR-t618-1 decision 1) whose host
+/// does not turn `release` off. A development build neither looks nor
+/// applies the answers, which are left for a supervisor that does.
+pub fn acts_on_releases(config: &ReleaseUpdateConfig, current: &str) -> bool {
+    is_release_build(current) && config.release != ReleaseMode::Off
+}
+
 /// `X.Y.Z` as numbers; `None` for anything else (a pre-release, build
 /// metadata, fewer or more parts).
 fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
@@ -296,6 +304,21 @@ mod tests {
         };
         assert_eq!(status(&off, true, None, None)["state"], "off");
         assert_eq!(status(&off, true, None, None)["mode"], "off");
+    }
+
+    /// Only a release build whose host does not turn `release` off looks
+    /// and applies the answers, in `ask` and `auto` alike.
+    #[test]
+    fn only_a_release_build_with_release_on_acts() {
+        let config = |release| ReleaseUpdateConfig {
+            release,
+            ..ReleaseUpdateConfig::default()
+        };
+        for mode in [ReleaseMode::Ask, ReleaseMode::Auto] {
+            assert!(acts_on_releases(&config(mode), "0.3.0"));
+            assert!(!acts_on_releases(&config(mode), "0.4.0-dev+abc"));
+        }
+        assert!(!acts_on_releases(&config(ReleaseMode::Off), "0.3.0"));
     }
 
     #[test]

@@ -16,7 +16,7 @@
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::recheck::{
-    self, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED, Landed, RecheckConfig,
+    self, CheckedBy, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED, Landed, RecheckConfig,
     RecheckFailure,
 };
 use crate::domain::sccache::{CheckReason, GuardLook};
@@ -69,11 +69,197 @@ pub(super) fn clear_target<R>(
 /// main already.
 const CHECKED_LOOKBACK: usize = 20;
 
-/// Who checked a main already.
-enum Checked {
-    No,
-    ByThis,
-    ByOther,
+/// What this process and the latest `landing_recheck_finished` say of a
+/// recheck of main before the queue's recheck lock is taken
+/// ([`look_before_lock`]).
+#[derive(Debug)]
+enum Look {
+    /// This supervisor checked main as it is: remembered as checked.
+    Checked,
+    /// Nothing to check: remembered with the runs that wait now, so that a
+    /// run that starts waiting later is looked at.
+    Idle,
+    /// These runs are checked, unless the lock or the runs' own records say
+    /// otherwise.
+    Check(Vec<Target>),
+}
+
+/// Whether main is the one this process last checked, and no landing of
+/// its own made a recheck `due`: an unmoved main costs no query.
+fn unmoved(due: bool, rechecks: &Rechecks, main: &CommitSha) -> bool {
+    !due && rechecks.checked.as_ref() == Some(main)
+}
+
+/// Whether to check main, given whether this supervisor's landing made a
+/// recheck `due`, what `rechecks` remembers, the runs that wait to land
+/// (`targets`), the latest `landing_recheck_finished` of the queue
+/// (`finished`, read only when no landing is due and what this process
+/// remembers does not settle it) and this supervisor's `token` (ADR-t1310-1), once main
+/// moved ([`unmoved`]). A main looked at before with nothing to check is
+/// looked at for the runs that started waiting since and nobody leases
+/// (one this supervisor holds to land had its passed review's conflict
+/// precheck against main as it is, ADR-0027 decision 4); a main this
+/// supervisor checked is settled, and one another supervisor checked is
+/// settled unless this one holds runs to land, which that one could not
+/// see. No other supervisor's registration counts: none is elected.
+fn look_before_lock(
+    due: bool,
+    rechecks: &Rechecks,
+    main: &CommitSha,
+    mut targets: Vec<Target>,
+    finished: impl FnOnce() -> Result<Option<RunEvent>>,
+    token: &str,
+) -> Result<Look> {
+    if let Some((idle, before)) = &rechecks.idle
+        && idle == main
+    {
+        targets.retain(|target| {
+            !target.held && !before.contains(&(target.run_id.clone(), target.head.clone()))
+        });
+        if targets.is_empty() {
+            return Ok(Look::Idle);
+        }
+    }
+    if !due
+        && let Some(event) = finished()?
+        && event.payload["main"] == main.as_str()
+    {
+        if event.payload["supervisor"] == token {
+            return Ok(Look::Checked);
+        }
+        if !targets.iter().any(|target| target.held) {
+            return Ok(Look::Idle);
+        }
+    }
+    Ok(Look::Check(targets))
+}
+
+/// The runs a recheck checks under the queue's lock, of `targets` each
+/// with whether it is settled already (its head contains main, or was
+/// judged against it, [`recheck::judged_against`]), and who checked main
+/// already: none when this supervisor did (a move seen before its own
+/// landing's step was read), and only those this one holds in its slots
+/// when another did.
+fn left_to_check(targets: Vec<(Target, bool)>, checked: CheckedBy) -> Vec<Target> {
+    targets
+        .into_iter()
+        .filter(|(target, settled)| {
+            !settled
+                && match checked {
+                    CheckedBy::This => false,
+                    CheckedBy::Other => target.held,
+                    CheckedBy::No => true,
+                }
+        })
+        .map(|(target, _)| target)
+        .collect()
+}
+
+/// Where `landing_recheck_finished` goes: the run of the dagq landing
+/// that moved main, or, when none did, the first run checked.
+fn record_on(landed: Option<&Landed>, targets: &[Target]) -> RunId {
+    match landed {
+        Some(landed) => landed.run_id.clone(),
+        None => targets[0].run_id.clone(),
+    }
+}
+
+/// The counts of one recheck's findings, and the runs found no longer
+/// landing with what followed, for its `landing_recheck_finished`.
+#[derive(Debug, Default)]
+struct Tally {
+    checked: u64,
+    clean: u64,
+    /// Of `clean`, the runs whose diff touched none of `[recheck] paths`,
+    /// so the command was not run on them (ADR-t2032-1).
+    command_skipped: u64,
+    conflicts: u64,
+    check_failed: u64,
+    errors: u64,
+    resumed: u64,
+    held: u64,
+    failed_runs: Vec<Value>,
+}
+
+impl Tally {
+    /// A run found still landing.
+    fn clean(&mut self, skipped_by_paths: bool) {
+        self.checked += 1;
+        self.clean += 1;
+        if skipped_by_paths {
+            self.command_skipped += 1;
+        }
+    }
+
+    /// A run Git or the command could not judge.
+    fn error(&mut self) {
+        self.checked += 1;
+        self.errors += 1;
+    }
+
+    /// A run found no longer landing for `failure`, and the `action` its
+    /// record took ([`recheck::RESUMED`] or [`HELD`]); `None` when it was
+    /// not recorded (the run moved on, or the record failed).
+    fn failed(&mut self, run_id: &RunId, failure: &RecheckFailure, action: Option<&'static str>) {
+        self.checked += 1;
+        match failure {
+            RecheckFailure::Conflict { .. } => self.conflicts += 1,
+            RecheckFailure::CheckFailed { .. } => self.check_failed += 1,
+        }
+        let Some(action) = action else {
+            return;
+        };
+        if action == HELD {
+            self.held += 1;
+        } else {
+            self.resumed += 1;
+        }
+        self.failed_runs.push(json!({
+            "run_id": run_id,
+            "code": failure.code(),
+            "action": action,
+        }));
+    }
+
+    /// The payload of `landing_recheck_finished` against `main` after the
+    /// dagq landing `landed` (`None` when main moved without one), with
+    /// `command`, how long it took and the supervisor that ran it.
+    fn finished(
+        &self,
+        main: &CommitSha,
+        landed: Option<&Landed>,
+        command: Option<&str>,
+        duration_secs: u64,
+        supervisor: &LeaseToken,
+    ) -> Value {
+        let mut payload = json!({
+            "main": main,
+            "landed_run_id": landed.map(|l| &l.run_id),
+            "landed_task_id": landed.map(|l| l.task_id),
+            "command": command,
+            "duration_secs": duration_secs,
+            "failed_runs": self.failed_runs,
+            "supervisor": supervisor,
+        });
+        if let (Some(payload), Value::Object(counts)) = (payload.as_object_mut(), self.counts()) {
+            payload.extend(counts);
+        }
+        payload
+    }
+
+    /// The counts alone, as the log shows them.
+    fn counts(&self) -> Value {
+        json!({
+            "checked": self.checked,
+            "clean": self.clean,
+            "command_skipped": self.command_skipped,
+            "conflicts": self.conflicts,
+            "check_failed": self.check_failed,
+            "errors": self.errors,
+            "resumed": self.resumed,
+            "held": self.held,
+        })
+    }
 }
 
 /// What came of trying to start a recheck.
@@ -246,47 +432,34 @@ impl Supervisor<'_> {
     /// they land as they are.
     fn try_recheck(&mut self, due: bool) -> Result<Start> {
         let main = self.repository.main_head()?;
-        if !due && self.landing.rechecks.checked.as_ref() == Some(&main) {
+        if unmoved(due, &self.landing.rechecks, &main) {
             return Ok(Start::Nothing);
         }
-        let mut targets = self.recheck_targets()?;
+        let targets = self.recheck_targets()?;
         let seen: Vec<(RunId, CommitSha)> = targets
             .iter()
             .map(|target| (target.run_id.clone(), target.head.clone()))
             .collect();
-        // Looked at this main before with nothing to check: of the runs
-        // that wait since, only those nobody leases are looked at. One this
-        // supervisor holds to land had its passed review's conflict
-        // precheck against main as it is (ADR-0027 decision 4).
-        if let Some((idle, before)) = &self.landing.rechecks.idle
-            && *idle == main
-        {
-            targets.retain(|target| {
-                !target.held && !before.contains(&(target.run_id.clone(), target.head.clone()))
-            });
-            if targets.is_empty() {
-                self.landing.rechecks.idle = Some((main, seen));
-                return Ok(Start::Nothing);
-            }
-        }
-        if !due
-            && let Some(event) = self
-                .queue
-                .latest_event_of(recheck::LANDING_RECHECK_FINISHED)?
-            && event.payload["main"] == main.as_str()
-        {
-            // This supervisor checked main as it is.
-            if event.payload["supervisor"] == self.registration.token.as_str() {
+        let queue = &self.queue;
+        let finished = || queue.latest_event_of(recheck::LANDING_RECHECK_FINISHED);
+        let targets = match look_before_lock(
+            due,
+            &self.landing.rechecks,
+            &main,
+            targets,
+            finished,
+            self.registration.token.as_str(),
+        )? {
+            Look::Checked => {
                 self.landing.rechecks.checked = Some(main);
                 return Ok(Start::Nothing);
             }
-            // Another supervisor did: it could not see the runs this one
-            // holds to land, which are checked below (`Checked::ByOther`).
-            if !targets.iter().any(|target| target.held) {
+            Look::Idle => {
                 self.landing.rechecks.idle = Some((main, seen));
                 return Ok(Start::Nothing);
             }
-        }
+            Look::Check(targets) => targets,
+        };
         let dir = self.recheck_dir()?;
         self.files.create_dir_all(&dir)?;
         let Some(lock) = self.files.try_lock(&dir.join(RECHECK_LOCK))? else {
@@ -302,27 +475,25 @@ impl Supervisor<'_> {
         {
             return Ok(Start::Later { locked_out: false });
         }
-        let mut left = Vec::with_capacity(targets.len());
+        let mut judged = Vec::with_capacity(targets.len());
         for target in targets {
-            if !self
+            let settled = self
                 .repository
                 .is_ancestor(main.as_str(), target.head.as_str())
                 .unwrap_or(false)
-                && !self.prechecked(&target, &main)?
-            {
-                left.push(target);
-            }
+                || recheck::judged_against(
+                    &self.queue.run_events(&target.run_id)?,
+                    main.as_str(),
+                    target.head.as_str(),
+                );
+            judged.push((target, settled));
         }
-        let mut targets = left;
-        match self.checked_against(&main)? {
-            // This supervisor checked it already (a move seen before its
-            // own landing's step was read).
-            Checked::ByThis => targets.clear(),
-            // Another supervisor did: the runs it could not see, those
-            // this one holds in its slots, are left.
-            Checked::ByOther => targets.retain(|target| target.held),
-            Checked::No => {}
-        }
+        let finished = self
+            .queue
+            .latest_events_of(recheck::LANDING_RECHECK_FINISHED, CHECKED_LOOKBACK)?;
+        let checked =
+            recheck::checked_by(&finished, main.as_str(), self.registration.token.as_str());
+        let targets = left_to_check(judged, checked);
         if targets.is_empty() {
             self.landing.rechecks.idle = Some((main, seen));
             return Ok(Start::Nothing);
@@ -343,21 +514,12 @@ impl Supervisor<'_> {
             .join(RECHECK_DIR))
     }
 
-    /// The dagq landing whose commit `main` is: the newest `run_integrated`,
-    /// when it landed that commit.
+    /// The dagq landing whose commit `main` is ([`recheck::landing_at`]).
     fn landing_at(&self, main: &CommitSha) -> Result<Option<Landed>> {
-        let Some(event) = self
+        let latest = self
             .queue
-            .latest_event_of(EventKind::RunIntegrated.as_str())?
-        else {
-            return Ok(None);
-        };
-        let (Some(run_id), Some(task_id)) = (event.run_id, event.task_id) else {
-            return Ok(None);
-        };
-        Ok((event.payload["result_commit"] == main.as_str()
-            || event.payload["commit"] == main.as_str())
-        .then_some(Landed { run_id, task_id }))
+            .latest_event_of(EventKind::RunIntegrated.as_str())?;
+        Ok(recheck::landing_at(latest.as_ref(), main.as_str()))
     }
 
     /// The runs a recheck looks at (ADR-0068 decision 1): those awaiting
@@ -396,42 +558,6 @@ impl Supervisor<'_> {
         Ok(targets)
     }
 
-    /// Whether the run's head was judged against `main` already: by its
-    /// passed review's conflict precheck (ADR-0027 decision 4), by its
-    /// landing that parked it, or by a recheck, failed or clean. What that
-    /// found is handled (a request to the session, an ask, a resume, or a
-    /// landing that parks the run), and is not judged again.
-    fn prechecked(&self, target: &Target, main: &CommitSha) -> Result<bool> {
-        use crate::domain::event_kind::{CONFLICT_PRECHECK, INTEGRATION_DEFERRED};
-        Ok(self.queue.run_events(&target.run_id)?.iter().any(|event| {
-            matches!(
-                event.kind.as_str(),
-                CONFLICT_PRECHECK
-                    | INTEGRATION_DEFERRED
-                    | LANDING_RECHECK_FAILED
-                    | LANDING_RECHECK_CLEAN
-            ) && event.payload["main"] == main.as_str()
-                && event.payload["head"] == target.head.as_str()
-        }))
-    }
-
-    /// Who checked `main` already, from the recent `landing_recheck_finished`.
-    fn checked_against(&self, main: &CommitSha) -> Result<Checked> {
-        let mut checked = Checked::No;
-        for event in self
-            .queue
-            .latest_events_of(recheck::LANDING_RECHECK_FINISHED, CHECKED_LOOKBACK)?
-            .into_iter()
-            .filter(|event| event.payload["main"] == main.as_str())
-        {
-            if event.payload["supervisor"] == self.registration.token.as_str() {
-                return Ok(Checked::ByThis);
-            }
-            checked = Checked::ByOther;
-        }
-        Ok(checked)
-    }
-
     fn start(
         &mut self,
         landed: Option<Landed>,
@@ -439,10 +565,7 @@ impl Supervisor<'_> {
         targets: Vec<Target>,
         lock: Box<dyn std::any::Any + Send>,
     ) -> Result<()> {
-        let record_on = match &landed {
-            Some(landed) => landed.run_id.clone(),
-            None => targets[0].run_id.clone(),
-        };
+        let record_on = record_on(landed.as_ref(), &targets);
         // A command whose program [run.env] cannot find would fail on every
         // run (ADR-0049 decision 9): only the merge is checked then.
         let config = if self.landing.run_env_missing {
@@ -507,26 +630,11 @@ impl Supervisor<'_> {
     /// run (and its open asks), and `landing_recheck_finished` with the counts on the run
     /// whose landing it followed (or the first run it checked).
     fn apply_recheck(&mut self, watch: &RecheckWatch, found: Vec<(Target, Finding)>) -> Result<()> {
-        let mut counts = json!({
-            "checked": found.len(),
-            "clean": 0,
-            // Of `clean`, the runs whose diff touched none of `[recheck]
-            // paths`, so the command was not run on them (ADR-t2032-1).
-            "command_skipped": 0,
-            "conflicts": 0,
-            "check_failed": 0,
-            "errors": 0,
-            "resumed": 0,
-            "held": 0,
-        });
-        let mut failed_runs = Vec::new();
+        let mut tally = Tally::default();
         for (target, finding) in found {
             let failure = match finding {
                 Finding::Clean { skipped_by_paths } => {
-                    bump(&mut counts, "clean");
-                    if skipped_by_paths {
-                        bump(&mut counts, "command_skipped");
-                    }
+                    tally.clean(skipped_by_paths);
                     match self.record_recheck_clean(watch, &target, skipped_by_paths) {
                         Ok(true) => {}
                         Ok(false) => {
@@ -539,51 +647,36 @@ impl Supervisor<'_> {
                     continue;
                 }
                 Finding::Error(error) => {
-                    bump(&mut counts, "errors");
+                    tally.error();
                     warn!(run_id = %target.run_id, error = %error, "run {}: the landing recheck against main {} could not judge it: {error}", target.run_id, watch.main);
                     continue;
                 }
                 Finding::Failed(failure) => failure,
             };
-            bump(
-                &mut counts,
-                match failure {
-                    RecheckFailure::Conflict { .. } => "conflicts",
-                    RecheckFailure::CheckFailed { .. } => "check_failed",
-                },
-            );
-            match self.record_recheck_failure(watch, &target, &failure) {
-                Ok(Some(action)) => {
-                    bump(&mut counts, action);
-                    failed_runs.push(json!({
-                        "run_id": target.run_id,
-                        "code": failure.code(),
-                        "action": action,
-                    }));
-                }
+            let action = match self.record_recheck_failure(watch, &target, &failure) {
+                Ok(Some(action)) => Some(action),
                 Ok(None) => {
                     info!(run_id = %target.run_id, "run {}: the landing recheck found it no longer landing on main {}, but it moved on meanwhile", target.run_id, watch.main);
+                    None
                 }
                 Err(error) => {
                     warn!(run_id = %target.run_id, error = %format_args!("{error:#}"), "run {}: the landing recheck's finding could not be recorded: {error:#}", target.run_id);
+                    None
                 }
-            }
+            };
+            tally.failed(&target.run_id, &failure, action);
         }
-        let mut payload = json!({
-            "main": watch.main,
-            "landed_run_id": watch.landed.as_ref().map(|l| &l.run_id),
-            "landed_task_id": watch.landed.as_ref().map(|l| l.task_id),
-            "command": watch.command,
-            "duration_secs": watch.started.elapsed().as_secs(),
-            "failed_runs": failed_runs,
-            "supervisor": self.registration.token,
-        });
-        if let (Some(payload), Some(counts)) = (payload.as_object_mut(), counts.as_object()) {
-            payload.extend(counts.clone());
-        }
+        let payload = tally.finished(
+            &watch.main,
+            watch.landed.as_ref(),
+            watch.command.as_deref(),
+            watch.started.elapsed().as_secs(),
+            &self.registration.token,
+        );
         info!(
-            "landing recheck against main {} finished: {counts}",
-            watch.main
+            "landing recheck against main {} finished: {}",
+            watch.main,
+            tally.counts()
         );
         self.queue.record_runtime_event(
             &watch.record_on,
@@ -730,10 +823,6 @@ impl Supervisor<'_> {
         }
         Ok(parked)
     }
-}
-
-fn bump(counts: &mut Value, key: &str) {
-    counts[key] = json!(counts[key].as_u64().unwrap_or(0) + 1);
 }
 
 /// Check each target against `main`, one after another (ADR-0068 decision
@@ -892,5 +981,292 @@ mod tests {
                 ("CARGO_TARGET_DIR", "/q/recheck/target"),
             ])
         );
+    }
+
+    fn sha(c: char) -> CommitSha {
+        CommitSha::parse(c.to_string().repeat(40), "commit").unwrap()
+    }
+
+    fn target(run: &str, head: char, held: bool) -> Target {
+        Target {
+            run_id: RunId::new(run).unwrap(),
+            head: sha(head),
+            run_dir: PathBuf::from(format!("/runs/{run}")),
+            held,
+        }
+    }
+
+    fn finished(main: &CommitSha, supervisor: &str) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: recheck::LANDING_RECHECK_FINISHED.to_owned(),
+            payload: json!({"main": main, "supervisor": supervisor}),
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    /// The latest `landing_recheck_finished` of a look that must not read
+    /// it.
+    fn unread() -> Result<Option<RunEvent>> {
+        unreachable!("the finished recheck is read")
+    }
+
+    fn runs(targets: &[Target]) -> Vec<&str> {
+        targets.iter().map(|t| t.run_id.as_str()).collect()
+    }
+
+    fn checks(look: Look) -> Vec<String> {
+        match look {
+            Look::Check(targets) => runs(&targets).into_iter().map(str::to_owned).collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Main that moved since the last finished recheck (a direct
+    /// `integrate`, a push outside dagq, a landing before this supervisor
+    /// started) is checked on the next pass, whatever other supervisor is
+    /// registered: the decision reads no registration.
+    #[test]
+    fn a_main_that_moved_since_the_last_recheck_is_checked() {
+        let main = sha('a');
+        let none = Rechecks::default();
+        let waiting = vec![target("r1", 'b', false)];
+        assert!(!unmoved(false, &none, &main));
+        assert_eq!(
+            checks(
+                look_before_lock(false, &none, &main, waiting.clone(), || Ok(None), "me").unwrap()
+            ),
+            ["r1"]
+        );
+        let earlier = finished(&sha('c'), "me");
+        assert_eq!(
+            checks(
+                look_before_lock(
+                    false,
+                    &none,
+                    &main,
+                    waiting.clone(),
+                    || Ok(Some(earlier.clone())),
+                    "me"
+                )
+                .unwrap()
+            ),
+            ["r1"]
+        );
+        let by_other = finished(&sha('c'), "another");
+        assert_eq!(
+            checks(
+                look_before_lock(
+                    false,
+                    &none,
+                    &main,
+                    waiting,
+                    || Ok(Some(by_other.clone())),
+                    "me"
+                )
+                .unwrap()
+            ),
+            ["r1"]
+        );
+    }
+
+    /// A main already checked is not checked again, pass after pass and
+    /// supervisor after supervisor: this process remembers it, this
+    /// supervisor's finished recheck settles it, and another supervisor's
+    /// settles it unless this one holds runs to land. This supervisor's
+    /// own landing makes it due whatever was checked.
+    #[test]
+    fn a_main_already_checked_is_not_checked_again() {
+        let main = sha('a');
+        let checked = Rechecks {
+            checked: Some(main.clone()),
+            ..Rechecks::default()
+        };
+        assert!(unmoved(false, &checked, &main));
+        assert!(!unmoved(true, &checked, &main));
+        assert!(!unmoved(false, &checked, &sha('c')));
+        let none = Rechecks::default();
+        let waiting = vec![target("r1", 'b', false)];
+        let mine = finished(&main, "me");
+        assert!(matches!(
+            look_before_lock(
+                false,
+                &none,
+                &main,
+                waiting.clone(),
+                || Ok(Some(mine.clone())),
+                "me"
+            )
+            .unwrap(),
+            Look::Checked
+        ));
+        let other = finished(&main, "another");
+        assert!(matches!(
+            look_before_lock(
+                false,
+                &none,
+                &main,
+                waiting.clone(),
+                || Ok(Some(other.clone())),
+                "me"
+            )
+            .unwrap(),
+            Look::Idle
+        ));
+        let held = vec![target("r1", 'b', false), target("r2", 'c', true)];
+        assert_eq!(
+            checks(
+                look_before_lock(false, &none, &main, held, || Ok(Some(other.clone())), "me")
+                    .unwrap()
+            ),
+            ["r1", "r2"]
+        );
+        // A due recheck does not read the finished one, nor does a look
+        // that what this process remembers settles.
+        assert_eq!(
+            checks(look_before_lock(true, &none, &main, waiting, unread, "me").unwrap()),
+            ["r1"]
+        );
+    }
+
+    /// A main looked at with nothing to check settles only the runs that
+    /// waited then: a run that starts waiting later is checked against the
+    /// same main by the same supervisor, unless this one holds it to land.
+    #[test]
+    fn a_run_that_starts_waiting_after_main_moved_is_checked() {
+        let main = sha('a');
+        let idle = Rechecks {
+            idle: Some((main.clone(), vec![(RunId::new("r1").unwrap(), sha('b'))])),
+            ..Rechecks::default()
+        };
+        let same = vec![target("r1", 'b', false)];
+        assert!(matches!(
+            look_before_lock(false, &idle, &main, same, unread, "me").unwrap(),
+            Look::Idle
+        ));
+        let later = vec![
+            target("r1", 'b', false),
+            target("r2", 'c', false),
+            target("r3", 'd', true),
+        ];
+        assert_eq!(
+            checks(
+                look_before_lock(false, &idle, &main, later.clone(), || Ok(None), "me").unwrap()
+            ),
+            ["r2"]
+        );
+        // A new head of the same run is looked at too.
+        let rebased = vec![target("r1", 'e', false)];
+        assert_eq!(
+            checks(look_before_lock(false, &idle, &main, rebased, || Ok(None), "me").unwrap()),
+            ["r1"]
+        );
+        // Idle on another main settles nothing.
+        assert_eq!(
+            checks(look_before_lock(false, &idle, &sha('f'), later, || Ok(None), "me").unwrap()),
+            ["r1", "r2", "r3"]
+        );
+    }
+
+    /// Under the lock, the runs whose head contains main or was judged
+    /// against it are left out, and so is every run when this supervisor
+    /// checked main, or all but those it holds when another one did.
+    #[test]
+    fn the_runs_left_to_check_under_the_lock() {
+        let judged = || {
+            vec![
+                (target("r1", 'b', false), false),
+                (target("r2", 'c', false), true),
+                (target("r3", 'd', true), false),
+            ]
+        };
+        assert_eq!(runs(&left_to_check(judged(), CheckedBy::No)), ["r1", "r3"]);
+        assert_eq!(runs(&left_to_check(judged(), CheckedBy::Other)), ["r3"]);
+        assert!(left_to_check(judged(), CheckedBy::This).is_empty());
+    }
+
+    /// `landing_recheck_finished` goes on the run whose landing moved main,
+    /// or on the first run checked when no dagq landing did.
+    #[test]
+    fn the_finished_recheck_goes_on_the_landing_or_the_first_run() {
+        let targets = [target("r1", 'b', false), target("r2", 'c', false)];
+        let landed = Landed {
+            run_id: RunId::new("landed").unwrap(),
+            task_id: crate::domain::TaskId::new(2),
+        };
+        assert_eq!(record_on(Some(&landed), &targets).as_str(), "landed");
+        assert_eq!(record_on(None, &targets).as_str(), "r1");
+    }
+
+    /// `landing_recheck_finished` counts every finding, the clean ones
+    /// skipped by `[recheck] paths` among them, and lists the failures
+    /// recorded with what followed; a failure not recorded (the run moved
+    /// on) is counted but not listed.
+    #[test]
+    fn the_finished_recheck_counts_its_findings() {
+        let mut tally = Tally::default();
+        tally.clean(false);
+        tally.clean(true);
+        tally.error();
+        let conflict = RecheckFailure::Conflict {
+            paths: vec!["change.txt".into()],
+        };
+        let check = RecheckFailure::CheckFailed {
+            command: "exit 1".into(),
+            exit_code: 1,
+            log_path: "/r/log".into(),
+            output_tail: String::new(),
+        };
+        let (r1, r2, r3) = (
+            RunId::new("r1").unwrap(),
+            RunId::new("r2").unwrap(),
+            RunId::new("r3").unwrap(),
+        );
+        tally.failed(&r1, &conflict, Some(recheck::RESUMED));
+        tally.failed(&r2, &check, Some(HELD));
+        tally.failed(&r3, &conflict, None);
+        let landed = Landed {
+            run_id: RunId::new("landed").unwrap(),
+            task_id: crate::domain::TaskId::new(2),
+        };
+        let main = sha('a');
+        assert_eq!(
+            tally.finished(
+                &main,
+                Some(&landed),
+                Some("exit 1"),
+                3,
+                &LeaseToken::new("me")
+            ),
+            json!({
+                "main": main,
+                "landed_run_id": "landed",
+                "landed_task_id": 2,
+                "command": "exit 1",
+                "duration_secs": 3,
+                "failed_runs": [
+                    {"run_id": "r1", "code": "rebase_conflict", "action": "resumed"},
+                    {"run_id": "r2", "code": "verification_failed", "action": "held"},
+                ],
+                "supervisor": "me",
+                "checked": 6,
+                "clean": 2,
+                "command_skipped": 1,
+                "conflicts": 2,
+                "check_failed": 1,
+                "errors": 1,
+                "resumed": 1,
+                "held": 1,
+            })
+        );
+        let none = Tally::default().finished(&main, None, None, 0, &LeaseToken::new("me"));
+        assert_eq!(none["landed_run_id"], Value::Null);
+        assert_eq!(none["landed_task_id"], Value::Null);
+        assert_eq!(none["checked"], 0);
+        assert_eq!(none["failed_runs"], json!([]));
     }
 }

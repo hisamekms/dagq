@@ -23,7 +23,7 @@ use crate::application::update::{
 };
 use crate::domain::EventKind;
 use crate::domain::release_update::{
-    RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig, is_release_build,
+    RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig, acts_on_releases, is_release_build,
 };
 use crate::domain::{APPROVE_RELEASE_OPTIONS, AskKind, RunEvent, UPDATE_FAILED_OPTIONS};
 
@@ -160,7 +160,7 @@ impl HostOpsState {
             return Ok(());
         }
         let config = (port.config)();
-        if config.release == ReleaseMode::Off {
+        if !acts_on_releases(&config, &port.current) {
             return Ok(());
         }
         self.apply_release_answers(env, &port.current)?;
@@ -168,27 +168,19 @@ impl HostOpsState {
             return Ok(());
         }
         let updates = env.queue.update_events(UPDATE_HISTORY)?;
-        if let Some(step) = latest_job_step(&updates) {
+        // Each job's pid is reaped just before it is looked at.
+        let working = |step: &RunEvent| {
             if let Some(pid) = job_pid(step) {
                 env.processes.reap(pid);
             }
-            if in_progress(step, &**env.processes) {
-                return Ok(());
-            }
-        }
-        // A job of a release that died, even when a build of the automatic
-        // update ran after it.
-        if let Some(step) = latest_job_step_of(&updates, true)
-            && JOB_STEPS.contains(&step.kind.as_str())
-        {
-            if let Some(pid) = job_pid(step) {
-                env.processes.reap(pid);
-            }
-            if !in_progress(step, &**env.processes)
-                && let Some(version) = step_release(step)
-            {
+            in_progress(step, &**env.processes)
+        };
+        match job_look(&updates, working) {
+            JobLook::Running => return Ok(()),
+            JobLook::Interrupted(step, version) => {
                 return self.release_job_interrupted(env, step, version);
             }
+            JobLook::None => {}
         }
         let checked = env.queue.latest_queue_event(&[RELEASE_CHECKED])?;
         let read = |key: &str| {
@@ -337,25 +329,8 @@ impl HostOpsState {
         version: &str,
         current: &str,
     ) -> Result<()> {
-        let question = format!(
-            "dagq {version} is released on crates.io (https://crates.io/crates/dagq/{version}); \
-this queue's supervisor runs {current}. Answer `install` to have the supervisor install it with \
-`cargo install --locked dagq@{version}` under the queue's update/release directory and put it in \
-place of its binary {} as `dagq install` does: the queue's compatible migrations are applied and \
-the supervisor is handed over without stopping the runs, and the binary it replaced is kept as \
-<name>.previous. A release that brings a breaking migration is not installed: it asks again \
-(`approve_update`), since it needs the supervisor drained. Answer `skip` to leave {version}; the \
-next release asks again.",
-            env.layout.runner.display()
-        );
-        let ask = env.queue.open_update_ask(
-            AskKind::ApproveRelease,
-            &question,
-            APPROVE_RELEASE_OPTIONS,
-            UPDATE_ASKER,
-            Some(version),
-            json!({"plugin_only": false}),
-        )?;
+        let ask = release_ask(version, current, &env.layout.runner);
+        let ask = open(env, ask)?;
         info!(ask_id = %ask.id, "release update: {version} is out; ask {} opened", ask.id);
         Ok(())
     }
@@ -369,24 +344,7 @@ next release asks again.",
         version: &str,
         plugin: &str,
     ) -> Result<()> {
-        let question = format!(
-            "The {name} plugin installed in Claude Code is {plugin}, older than dagq {version} that \
-this queue's supervisor runs. Answer `install` to have the supervisor bring only the plugin to the \
-release with `claude {}` and `claude {}` (the binary is not touched); the inbox and planner \
-sessions open now keep the plugin they started with, so reopen them afterwards to load it. Answer \
-`skip` to leave the plugin as it is; the next release asks again.",
-            lifecycle::PLUGIN_UPDATE_ARGUMENTS[0].join(" "),
-            lifecycle::PLUGIN_UPDATE_ARGUMENTS[1].join(" "),
-            name = lifecycle::DAGQ_PLUGIN,
-        );
-        let ask = env.queue.open_update_ask(
-            AskKind::ApproveRelease,
-            &question,
-            APPROVE_RELEASE_OPTIONS,
-            UPDATE_ASKER,
-            Some(version),
-            json!({"plugin_only": true}),
-        )?;
+        let ask = open(env, plugin_ask(version, plugin))?;
         info!(ask_id = %ask.id, "release update: the plugin {plugin} is older than {version}; ask {} opened", ask.id);
         Ok(())
     }
@@ -400,50 +358,12 @@ sessions open now keep the plugin they started with, so reopen them afterwards t
         step: &RunEvent,
         version: &str,
     ) -> Result<()> {
-        let plugin_only = step.payload["plugin_only"] == true;
-        let question = if plugin_only {
-            format!(
-                "The job that brings the {} plugin to release {version} (pid {}) ended without \
-recording how, at its {}; the binary was not touched. Its logs are in the queue's logs/ directory. \
-Answer `retry` to update the plugin again at the supervisor's next check, or `skip` to leave it.",
-                lifecycle::DAGQ_PLUGIN,
-                job_pid(step).unwrap_or_default(),
-                step.kind
-            )
-        } else {
-            format!(
-                "The job that installs release {version} (pid {}) ended without recording how, at \
-its {}; nothing tells whether the binary was replaced. Its logs are in the queue's logs/ directory. \
-Answer `retry` to install release {version} at the next check of a supervisor running an older \
-build. A supervisor already on that release or newer records `update_dropped` instead; any older \
-plugin is handled separately by auto mode or a plugin approval. Answer `skip` to \
-leave it (the next release asks again).",
-                job_pid(step).unwrap_or_default(),
-                step.kind
-            )
-        };
-        let ask = env.queue.open_update_ask(
-            AskKind::UpdateFailed,
-            &question,
-            UPDATE_FAILED_OPTIONS,
-            UPDATE_ASKER,
-            None,
-            json!({"plugin_only": plugin_only}),
-        )?;
+        let ask = open(env, interrupted_ask(step, version))?;
         record(
             &*env.queue,
             EventKind::UpdateFailed,
             None,
-            json!({
-                "stage": if plugin_only { "plugin" } else { "interrupted" },
-                "interrupted": true,
-                "plugin_only": plugin_only,
-                "after": step.kind,
-                "ask_id": ask.id,
-                "supervisor": env.token,
-                "source": RELEASE_SOURCE,
-                "release": version,
-            }),
+            interrupted_failure(step, version, ask.id, env.token),
         )?;
         warn!(
             "release update: the job for {version} was interrupted; ask {} opened",
@@ -539,5 +459,327 @@ leave it (the next release asks again).",
         );
         self.release.install = Some(job);
         Ok(())
+    }
+}
+
+/// What the release update's jobs say before it acts.
+#[derive(Debug)]
+enum JobLook<'a> {
+    /// The latest job step of any update is of a job still working: one
+    /// job runs at a time, whichever started it.
+    Running,
+    /// The latest job step of a release's job is of a job that died
+    /// before recording how it ended, even when a build of the automatic
+    /// update ran after it: its step and release.
+    Interrupted(&'a RunEvent, &'a str),
+    None,
+}
+
+/// [`JobLook`] of the update events `updates`, newest first, with whether
+/// a step is of a job still working (`in_progress`): asked of the latest
+/// job step, then, unless it works, of the latest release step that is a
+/// job step.
+fn job_look<'a>(updates: &'a [RunEvent], in_progress: impl Fn(&RunEvent) -> bool) -> JobLook<'a> {
+    if latest_job_step(updates).is_some_and(&in_progress) {
+        return JobLook::Running;
+    }
+    match latest_job_step_of(updates, true) {
+        Some(step) if JOB_STEPS.contains(&step.kind.as_str()) && !in_progress(step) => {
+            step_release(step).map_or(JobLook::None, |version| JobLook::Interrupted(step, version))
+        }
+        _ => JobLook::None,
+    }
+}
+
+/// An ask of the release update, as [`RunLog::open_update_ask`] opens it.
+#[derive(Debug, PartialEq)]
+struct UpdateAsk {
+    kind: AskKind,
+    question: String,
+    options: &'static [&'static str],
+    subject: Option<String>,
+    details: Value,
+}
+
+/// Open `ask` as the release update's.
+fn open(env: &mut HostEnv<'_>, ask: UpdateAsk) -> Result<crate::domain::Ask> {
+    env.queue.open_update_ask(
+        ask.kind,
+        &ask.question,
+        ask.options,
+        UPDATE_ASKER,
+        ask.subject.as_deref(),
+        ask.details,
+    )
+}
+
+/// The `approve_release` ask about `version`, for a supervisor of build
+/// `current` whose binary is `runner` (ADR-t618-1 decision 4).
+fn release_ask(version: &str, current: &str, runner: &Path) -> UpdateAsk {
+    let question = format!(
+        "dagq {version} is released on crates.io (https://crates.io/crates/dagq/{version}); \
+this queue's supervisor runs {current}. Answer `install` to have the supervisor install it with \
+`cargo install --locked dagq@{version}` under the queue's update/release directory and put it in \
+place of its binary {} as `dagq install` does: the queue's compatible migrations are applied and \
+the supervisor is handed over without stopping the runs, and the binary it replaced is kept as \
+<name>.previous. A release that brings a breaking migration is not installed: it asks again \
+(`approve_update`), since it needs the supervisor drained. Answer `skip` to leave {version}; the \
+next release asks again.",
+        runner.display()
+    );
+    UpdateAsk {
+        kind: AskKind::ApproveRelease,
+        question,
+        options: APPROVE_RELEASE_OPTIONS,
+        subject: Some(version.to_owned()),
+        details: json!({"plugin_only": false}),
+    }
+}
+
+/// The `approve_release` ask about bringing the installed plugin, at
+/// `plugin`, to `version`, the release the binary is already (ADR-t618-2
+/// decision 4).
+fn plugin_ask(version: &str, plugin: &str) -> UpdateAsk {
+    let question = format!(
+        "The {name} plugin installed in Claude Code is {plugin}, older than dagq {version} that \
+this queue's supervisor runs. Answer `install` to have the supervisor bring only the plugin to the \
+release with `claude {}` and `claude {}` (the binary is not touched); the inbox and planner \
+sessions open now keep the plugin they started with, so reopen them afterwards to load it. Answer \
+`skip` to leave the plugin as it is; the next release asks again.",
+        lifecycle::PLUGIN_UPDATE_ARGUMENTS[0].join(" "),
+        lifecycle::PLUGIN_UPDATE_ARGUMENTS[1].join(" "),
+        name = lifecycle::DAGQ_PLUGIN,
+    );
+    UpdateAsk {
+        kind: AskKind::ApproveRelease,
+        question,
+        options: APPROVE_RELEASE_OPTIONS,
+        subject: Some(version.to_owned()),
+        details: json!({"plugin_only": true}),
+    }
+}
+
+/// The `update_failed` ask about the job of release `version` that died
+/// at `step` without recording how it ended.
+fn interrupted_ask(step: &RunEvent, version: &str) -> UpdateAsk {
+    let plugin_only = step.payload["plugin_only"] == true;
+    let question = if plugin_only {
+        format!(
+            "The job that brings the {} plugin to release {version} (pid {}) ended without \
+recording how, at its {}; the binary was not touched. Its logs are in the queue's logs/ directory. \
+Answer `retry` to update the plugin again at the supervisor's next check, or `skip` to leave it.",
+            lifecycle::DAGQ_PLUGIN,
+            job_pid(step).unwrap_or_default(),
+            step.kind
+        )
+    } else {
+        format!(
+            "The job that installs release {version} (pid {}) ended without recording how, at \
+its {}; nothing tells whether the binary was replaced. Its logs are in the queue's logs/ directory. \
+Answer `retry` to install release {version} at the next check of a supervisor running an older \
+build. A supervisor already on that release or newer records `update_dropped` instead; any older \
+plugin is handled separately by auto mode or a plugin approval. Answer `skip` to \
+leave it (the next release asks again).",
+            job_pid(step).unwrap_or_default(),
+            step.kind
+        )
+    };
+    UpdateAsk {
+        kind: AskKind::UpdateFailed,
+        question,
+        options: UPDATE_FAILED_OPTIONS,
+        subject: None,
+        details: json!({"plugin_only": plugin_only}),
+    }
+}
+
+/// The `update_failed` of the job of release `version` that died at
+/// `step`, recorded with its ask `ask` by `supervisor`.
+fn interrupted_failure(
+    step: &RunEvent,
+    version: &str,
+    ask: crate::domain::AskId,
+    supervisor: &LeaseToken,
+) -> Value {
+    let plugin_only = step.payload["plugin_only"] == true;
+    json!({
+        "stage": if plugin_only { "plugin" } else { "interrupted" },
+        "interrupted": true,
+        "plugin_only": plugin_only,
+        "after": step.kind,
+        "ask_id": ask,
+        "supervisor": supervisor,
+        "source": RELEASE_SOURCE,
+        "release": version,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::update::{UPDATE_FAILED, UPDATE_STARTED};
+    use crate::domain::{AskId, EventId};
+
+    fn step(kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    fn started(pid: u32) -> RunEvent {
+        step(
+            UPDATE_STARTED,
+            json!({"pid": pid, "source": RELEASE_SOURCE, "release": "0.4.0"}),
+        )
+    }
+
+    fn release_of(look: JobLook<'_>) -> Option<(&str, &str)> {
+        match look {
+            JobLook::Interrupted(step, version) => Some((step.kind.as_str(), version)),
+            JobLook::Running => Some(("running", "")),
+            JobLook::None => None,
+        }
+    }
+
+    /// A release's job that died without recording how it ended is
+    /// reported, even when a step of the automatic update came after it;
+    /// once its `update_failed` is recorded it is neither reported nor
+    /// started again. A job still working, of either update, holds the
+    /// release update back.
+    #[test]
+    fn a_release_job_that_died_is_reported_once_and_a_live_one_waits() {
+        let alive = |pids: &'static [u32]| {
+            move |step: &RunEvent| {
+                JOB_STEPS.contains(&step.kind.as_str())
+                    && job_pid(step).is_some_and(|pid| pids.contains(&pid))
+            }
+        };
+        // Newest first.
+        let died = [
+            step(
+                UPDATE_FAILED,
+                json!({"stage": "build", "commit": "abc", "ask_id": 0}),
+            ),
+            started(7),
+        ];
+        assert_eq!(
+            release_of(job_look(&died, alive(&[]))),
+            Some((UPDATE_STARTED, "0.4.0"))
+        );
+        assert_eq!(
+            release_of(job_look(&died[1..], alive(&[7]))),
+            Some(("running", ""))
+        );
+        // An automatic update's job still working.
+        let auto = [
+            step(UPDATE_STARTED, json!({"pid": 8, "commit": "abc"})),
+            started(7),
+        ];
+        assert_eq!(
+            release_of(job_look(&auto, alive(&[8]))),
+            Some(("running", ""))
+        );
+        let reported = [
+            step(
+                UPDATE_FAILED,
+                json!({"stage": "interrupted", "interrupted": true, "after": UPDATE_STARTED, "ask_id": 3, "source": RELEASE_SOURCE, "release": "0.4.0"}),
+            ),
+            died[0].clone(),
+            started(7),
+        ];
+        assert_eq!(release_of(job_look(&reported, alive(&[]))), None);
+        assert_eq!(release_of(job_look(&[], alive(&[]))), None);
+    }
+
+    /// The ask about a new release names it, the build that runs and the
+    /// command that installs it; the ask about the plugin alone says the
+    /// binary is not touched. Both are `approve_release` with the options
+    /// `install` and `skip`, about their release, recording what they are
+    /// for.
+    #[test]
+    fn the_release_and_plugin_asks_say_what_install_does() {
+        let ask = release_ask("0.4.0", "0.3.0", Path::new("/bin/dagq"));
+        assert_eq!(ask.kind, AskKind::ApproveRelease);
+        assert_eq!(ask.options, ["install", "skip"]);
+        assert_eq!(ask.subject.as_deref(), Some("0.4.0"));
+        assert_eq!(ask.details, json!({"plugin_only": false}));
+        assert!(
+            ask.question.starts_with(
+                "dagq 0.4.0 is released on crates.io (https://crates.io/crates/dagq/0.4.0); this queue's supervisor runs 0.3.0."
+            ) && ask.question.contains("`cargo install --locked dagq@0.4.0`")
+                && ask.question.contains("in place of its binary /bin/dagq"),
+            "{}",
+            ask.question
+        );
+        let ask = plugin_ask("0.4.0", "0.3.0");
+        assert_eq!(ask.kind, AskKind::ApproveRelease);
+        assert_eq!(ask.options, ["install", "skip"]);
+        assert_eq!(ask.subject.as_deref(), Some("0.4.0"));
+        assert_eq!(ask.details, json!({"plugin_only": true}));
+        assert!(
+            ask.question
+                .starts_with("The claude-dagq plugin installed in Claude Code is 0.3.0, older than dagq 0.4.0")
+                && ask.question.contains(
+                    "`claude plugin marketplace update dagq` and `claude plugin update claude-dagq@dagq` (the binary is not touched)"
+                ),
+            "{}",
+            ask.question
+        );
+    }
+
+    /// The job that died is the inbox's through `update_failed` (stage
+    /// `interrupted`, or `plugin` for the plugin alone) and its ask, which
+    /// names the release, the pid and the step it died at.
+    #[test]
+    fn an_interrupted_job_is_reported_with_its_release() {
+        let binary = started(7);
+        let ask = interrupted_ask(&binary, "0.4.0");
+        assert_eq!(ask.kind, AskKind::UpdateFailed);
+        assert_eq!(ask.options, UPDATE_FAILED_OPTIONS);
+        assert_eq!(ask.subject, None);
+        assert_eq!(ask.details, json!({"plugin_only": false}));
+        assert!(
+            ask.question.starts_with(
+                "The job that installs release 0.4.0 (pid 7) ended without recording how, at its update_started;"
+            ) && ask.question.contains("records `update_dropped` instead"),
+            "{}",
+            ask.question
+        );
+        assert_eq!(
+            interrupted_failure(&binary, "0.4.0", AskId::new(3), &LeaseToken::new("me")),
+            json!({
+                "stage": "interrupted",
+                "interrupted": true,
+                "plugin_only": false,
+                "after": "update_started",
+                "ask_id": 3,
+                "supervisor": "me",
+                "source": "release",
+                "release": "0.4.0",
+            })
+        );
+        let plugin = step(
+            UPDATE_STARTED,
+            json!({"pid": 9, "source": RELEASE_SOURCE, "release": "0.4.0", "plugin_only": true}),
+        );
+        let ask = interrupted_ask(&plugin, "0.4.0");
+        assert_eq!(ask.details, json!({"plugin_only": true}));
+        assert!(
+            ask.question.starts_with(
+                "The job that brings the claude-dagq plugin to release 0.4.0 (pid 9) ended without recording how"
+            ),
+            "{}",
+            ask.question
+        );
+        let failure = interrupted_failure(&plugin, "0.4.0", AskId::new(4), &LeaseToken::new("me"));
+        assert_eq!(failure["stage"], "plugin");
+        assert_eq!(failure["plugin_only"], true);
     }
 }

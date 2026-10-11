@@ -240,6 +240,64 @@ pub fn held_against<'a>(events: &'a [RunEvent], main: &str, head: &str) -> Optio
         })
 }
 
+/// The dagq landing whose commit `main` is, from the newest
+/// `run_integrated` (`latest_integrated`): when it landed that commit
+/// (`result_commit` or `commit`). `None` when main moved without a dagq
+/// landing, or since one.
+pub fn landing_at(latest_integrated: Option<&RunEvent>, main: &str) -> Option<Landed> {
+    let event = latest_integrated?;
+    let (Some(run_id), Some(task_id)) = (event.run_id.clone(), event.task_id) else {
+        return None;
+    };
+    (event.payload["result_commit"] == main || event.payload["commit"] == main)
+        .then_some(Landed { run_id, task_id })
+}
+
+/// Whether the run's `head` was judged against `main` already, from its
+/// `events`: by its passed review's conflict precheck (ADR-0027 decision
+/// 4), by its landing that parked it, or by a recheck, failed or clean.
+/// What that found is handled, and is not judged again.
+pub fn judged_against(events: &[RunEvent], main: &str, head: &str) -> bool {
+    use super::event_kind::{CONFLICT_PRECHECK, INTEGRATION_DEFERRED};
+    events.iter().any(|event| {
+        matches!(
+            event.kind.as_str(),
+            CONFLICT_PRECHECK
+                | INTEGRATION_DEFERRED
+                | LANDING_RECHECK_FAILED
+                | LANDING_RECHECK_CLEAN
+        ) && event.payload["main"] == main
+            && event.payload["head"] == head
+    })
+}
+
+/// Who checked a main already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckedBy {
+    No,
+    /// The supervisor that asks.
+    This,
+    /// Another supervisor: it could not see the runs this one holds to
+    /// land.
+    Other,
+}
+
+/// Who checked `main` already, from the recent `landing_recheck_finished`
+/// (`finished`) and the token of the supervisor that asks.
+pub fn checked_by(finished: &[RunEvent], main: &str, supervisor: &str) -> CheckedBy {
+    let mut checked = CheckedBy::No;
+    for event in finished
+        .iter()
+        .filter(|event| event.payload["main"] == main)
+    {
+        if event.payload["supervisor"] == supervisor {
+            return CheckedBy::This;
+        }
+        checked = CheckedBy::Other;
+    }
+    checked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +478,86 @@ mod tests {
         assert!(parks(&resumed));
         assert!(!parks(&events[0]));
         assert!(held_against(&[held("m", "h"), resumed], "m", "h").is_none());
+    }
+
+    fn integrated(run: Option<&str>, payload: Value) -> RunEvent {
+        RunEvent {
+            run_id: run.map(|run| RunId::new(run).unwrap()),
+            task_id: run.map(|_| TaskId::new(7)),
+            kind: "run_integrated".to_owned(),
+            ..event(payload)
+        }
+    }
+
+    /// A recheck names the dagq landing main is at when it starts, whatever
+    /// made it due (a direct `integrate` too), and none when main moved
+    /// without one or since one.
+    #[test]
+    fn the_recheck_names_the_landing_main_is_at() {
+        let main = "a".repeat(40);
+        let landed = Some(Landed {
+            run_id: RunId::new("landed-run").unwrap(),
+            task_id: TaskId::new(7),
+        });
+        let by_result = integrated(Some("landed-run"), json!({"result_commit": main}));
+        assert_eq!(landing_at(Some(&by_result), &main), landed);
+        let by_commit = integrated(Some("landed-run"), json!({"commit": main}));
+        assert_eq!(landing_at(Some(&by_commit), &main), landed);
+        // Main moved since, outside dagq.
+        assert_eq!(landing_at(Some(&by_result), &"b".repeat(40)), None);
+        assert_eq!(landing_at(None, &main), None);
+        let no_run = integrated(None, json!({"result_commit": main}));
+        assert_eq!(landing_at(Some(&no_run), &main), None);
+    }
+
+    /// A run's head judged against main already, by its precheck, its
+    /// landing's deferral or a recheck, is not checked again; one judged
+    /// against another main or with another head is.
+    #[test]
+    fn a_head_judged_against_main_is_not_judged_again() {
+        let (main, head) = ("m1", "h1");
+        for kind in [
+            "conflict_precheck",
+            "integration_deferred",
+            LANDING_RECHECK_FAILED,
+            LANDING_RECHECK_CLEAN,
+        ] {
+            let judged = RunEvent {
+                kind: kind.to_owned(),
+                ..event(json!({"main": main, "head": head}))
+            };
+            assert!(
+                judged_against(std::slice::from_ref(&judged), main, head),
+                "{kind}"
+            );
+            assert!(
+                !judged_against(std::slice::from_ref(&judged), "m2", head),
+                "{kind}"
+            );
+            assert!(!judged_against(&[judged], main, "h2"), "{kind}");
+        }
+        let other = RunEvent {
+            kind: "review_finished".to_owned(),
+            ..event(json!({"main": main, "head": head}))
+        };
+        assert!(!judged_against(&[other], main, head));
+    }
+
+    /// The recent `landing_recheck_finished` of a main tell whether this
+    /// supervisor checked it, another did, or nobody did; this one's own
+    /// check wins over another's.
+    #[test]
+    fn who_checked_a_main_is_read_from_the_finished_rechecks() {
+        let finished = |main: &str, supervisor: &str| RunEvent {
+            kind: LANDING_RECHECK_FINISHED.to_owned(),
+            ..event(json!({"main": main, "supervisor": supervisor}))
+        };
+        assert_eq!(checked_by(&[], "m", "me"), CheckedBy::No);
+        let events = [finished("other-main", "me")];
+        assert_eq!(checked_by(&events, "m", "me"), CheckedBy::No);
+        let events = [finished("m", "another")];
+        assert_eq!(checked_by(&events, "m", "me"), CheckedBy::Other);
+        let events = [finished("m", "another"), finished("m", "me")];
+        assert_eq!(checked_by(&events, "m", "me"), CheckedBy::This);
     }
 }
