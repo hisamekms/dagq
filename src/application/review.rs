@@ -10,7 +10,7 @@ use super::{
     Repository, RunFiles, TaskStore, fenced, integrate::integrate_logs, or_none, path_text,
 };
 use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewSubagent};
-use crate::domain::{CommitSha, Goal, Receipt, RunStatus, Task, TaskId, TaskRun};
+use crate::domain::{CommitSha, Goal, Provider, Receipt, RunStatus, Task, TaskId, TaskRun};
 use sha2::{Digest, Sha256};
 
 /// What `review` reads and writes through.
@@ -180,6 +180,9 @@ pub struct SnapshotAgent {
     pub definition: String,
     pub digest: String,
     pub tools: AgentTools,
+    /// The provider its `[review.subagents.<agent>]` names
+    /// ([`ReviewSubagent::provider`]).
+    pub provider: Option<Provider>,
 }
 
 /// The review's subagents read from the landing branch's commit `commit`
@@ -269,7 +272,12 @@ pub fn snapshot_subagents(
                 selected.name
             )
         })?;
+        let provider = configured
+            .iter()
+            .find(|agent| agent.name == selected.name)
+            .and_then(|agent| agent.provider);
         agents.push(SnapshotAgent {
+            provider,
             digest: format!("{:x}", Sha256::digest(definition.as_bytes())),
             tools,
             name: selected.name,
@@ -472,7 +480,7 @@ fn review_markdown(
 mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
-    use crate::domain::{Provider, RunId, RunRecord, TaskRecord, TaskStatus};
+    use crate::domain::{RunId, RunRecord, TaskRecord, TaskStatus};
     use serde_json::json;
 
     const SHA: &str = "1111111111111111111111111111111111111111";
@@ -716,6 +724,7 @@ mod tests {
     fn parse(text: &str) -> Result<Vec<ReviewSubagent>> {
         let agent = |name: &str, paths: &[&str]| ReviewSubagent {
             name: name.to_owned(),
+            provider: None,
             paths: paths.iter().map(|p| (*p).to_owned()).collect(),
         };
         match text {

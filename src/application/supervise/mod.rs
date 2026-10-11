@@ -1214,14 +1214,21 @@ enum Phase {
     ReviewPrograms(ProgramsWatch),
     /// The headless review of an accepted run (ADR-0023 decision 2).
     Review(ReviewWatch),
-    /// An accepted run whose review waits for the authentication or
-    /// usage-limit ask that holds the queue's jobs (task 437); its session
-    /// stays open, and the review starts once nothing holds. `retried` is
+    /// An accepted run whose review waits as a whole: none of its jobs can
+    /// start, its whole review's waiting for the authentication or
+    /// usage-limit ask that holds the queue's jobs (task 437) or for a held
+    /// provider, and so each agent's that names its own provider. Its
+    /// session stays open, and the review starts once one of them can.
+    /// `retried` is
     /// whether the review that waits is the one retry of the review
     /// ([`ReviewWatch::retried`]): it stays one across the wait.
     ReviewHeld {
         session: Option<SessionRef>,
         retried: bool,
+        /// The providers its selected agents name, read when it was held:
+        /// the wait ends once the job of one of them can start, as well as
+        /// once its whole review's can.
+        providers: Vec<Provider>,
     },
     /// The live session fixes what a `revise` verdict named (ADR-0027
     /// decision 2).
@@ -3362,8 +3369,12 @@ impl Supervisor<'_> {
                 slot.transition(next, EventKind::ValidationFinished.as_str(), &*self.queue);
                 Ok(Step::Continue)
             }
-            Phase::ReviewHeld { session, retried } => {
-                if !self.review_held_waits() {
+            Phase::ReviewHeld {
+                session,
+                retried,
+                providers,
+            } => {
+                if !self.review_held_waits(providers) {
                     let (session, retried) = (session.take(), *retried);
                     let run = self.queue.run(slot.run.id())?;
                     let review = self.resume_review(&run, session, retried)?;

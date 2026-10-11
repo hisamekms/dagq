@@ -70,7 +70,8 @@ ready task (dependencies completed)
   → awaiting_integration: program reviews from the landing branch's [review.programs], one at a time
       first non-zero exit → revise (no agent starts); start failure / timeout → review failed
   → headless review (claude -p, or codex exec --json read-only when
-    [roles.review] says provider = "codex") → verdict
+    [roles.review] says provider = "codex"; an agent's job on its
+    [review.subagents.<agent>] provider when set) → verdict
       pass    → exit request → close workspace → land (single slot, push)
       revise  → fixed request to the live session → rewritten receipt
                 → validate → review again (at most MAX_REVISE_ATTEMPTS revises a round)

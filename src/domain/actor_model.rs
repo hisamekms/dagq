@@ -248,6 +248,34 @@ impl RoleModels {
             None => ActorLaunch::default_of(role),
         }
     }
+
+    /// What a job of `role` that `provider` is named for starts with: the
+    /// review agent whose `[review.subagents.<agent>]` names its provider.
+    /// On the provider `[roles.<role>]` gives, with that table's model and
+    /// effort ([`Self::launch`]); on the other, with that provider's
+    /// default and the table's effort, since a model is the provider's own
+    /// name. Its source, [`LaunchSource::Subagent`] (recorded as
+    /// `review.subagents`), says the provider came from the agent's table,
+    /// not `[roles.<role>]` (`dagq.toml`) or the default. Such
+    /// a job names its provider, so it moves off it or waits for it as a
+    /// role that names its provider does ([`job_route`] with `switchable`).
+    pub fn agent_launch(&self, role: ModelRole, provider: Provider) -> ActorLaunch {
+        let launch = self.launch(role);
+        let launch = if launch.provider == provider {
+            launch
+        } else {
+            ActorLaunch {
+                provider,
+                model: (provider == Provider::Claude).then(|| OPUS.to_owned()),
+                effort: Some(launch.effort.unwrap_or_else(|| MEDIUM.to_owned())),
+                ..ActorLaunch::default_of(role)
+            }
+        };
+        ActorLaunch {
+            source: LaunchSource::Subagent,
+            ..launch
+        }
+    }
 }
 
 /// Where a headless job of a role starts (ADR-t1063-1 decisions 4 and 5).
@@ -389,10 +417,18 @@ pub fn job_wait_text(provider: Provider, reason: SwitchReason, fallback: bool) -
     }
 }
 
+// Where a launch's provider, model and effort came from: `default`,
+// nothing given (the provider's default, which the session's close names);
+// `dagq.toml`, the role's `[roles.<role>]`; `revise_escalation`, one effort
+// step up for a revise ([`ActorLaunch::escalated`]); `review.subagents`, the
+// provider a review agent's `[review.subagents.<agent>]` names
+// ([`RoleModels::agent_launch`]), kept when the job moves off it
+// ([`ActorLaunch::switched`]).
 string_enum!(LaunchSource {
     Default => "default",
     Config => "dagq.toml",
     ReviseEscalation => "revise_escalation",
+    Subagent => "review.subagents",
 });
 
 /// The provider, model and effort a session was started with, and where
@@ -454,10 +490,18 @@ impl ActorLaunch {
 
     /// This launch moved to `to` because its provider cannot be used for
     /// `reason`: started there with that provider's default, since a model
-    /// (and its effort) is the provider's own name.
+    /// (and its effort) is the provider's own name. A launch whose provider
+    /// a review agent's table named ([`LaunchSource::Subagent`]) keeps that
+    /// source, so its record still says where the provider it moved from
+    /// came from; any other is the default's.
     pub fn switched(self, to: Provider, reason: SwitchReason) -> Self {
+        let source = match self.source {
+            LaunchSource::Subagent => LaunchSource::Subagent,
+            _ => LaunchSource::Default,
+        };
         Self {
             provider: to,
+            source,
             switched_from: Some(self.provider),
             switch_reason: Some(reason),
             ..Self::default_of(self.role)
@@ -535,6 +579,71 @@ pub const fn records_unusable(provider: Provider, switchable: bool, fallback: bo
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// An agent that names its provider starts there, its source the
+    /// agent's table: with `[roles.review]`'s model and effort when that
+    /// table names the same provider, else with the provider's default
+    /// model and the table's effort; nothing else of `[roles.review]`
+    /// changes, and a table that names nothing gives the defaults.
+    #[test]
+    fn an_agent_starts_on_the_provider_it_names_with_what_its_role_gives_there() {
+        let role = ModelRole::Review;
+        let mut models = RoleModels::default();
+        let codex = models.agent_launch(role, Provider::Codex);
+        assert_eq!(
+            (codex.provider, codex.model, codex.effort.as_deref()),
+            (Provider::Codex, None, Some(MEDIUM))
+        );
+        assert_eq!(codex.source, LaunchSource::Subagent);
+        let claude = models.agent_launch(role, Provider::Claude);
+        assert_eq!(
+            (claude.provider, claude.source),
+            (Provider::Claude, LaunchSource::Subagent)
+        );
+        assert_eq!(claude.to_value()["source"], "review.subagents");
+        let table = models.entry(role);
+        table.provider = Some(Provider::Claude);
+        table.model = Some("claude-sonnet-5-5".to_owned());
+        table.effort = Some("high".to_owned());
+        let same = models.agent_launch(role, Provider::Claude);
+        assert_eq!(
+            (same.model.as_deref(), same.effort.as_deref()),
+            (Some("claude-sonnet-5-5"), Some("high"))
+        );
+        let other = models.agent_launch(role, Provider::Codex);
+        assert_eq!(
+            (
+                other.provider,
+                other.model.as_deref(),
+                other.effort.as_deref()
+            ),
+            (Provider::Codex, None, Some("high"))
+        );
+        assert_eq!(models.launch(role).source, LaunchSource::Config);
+        assert_eq!(
+            ActorLaunch::recorded(&json!({"launch": other.to_value()}), role),
+            other
+        );
+        // Moved off the provider it names, it still says the agent's table
+        // named that provider; a role's launch moved is the default's.
+        let moved = other.switched(Provider::Claude, SwitchReason::UsageLimit);
+        assert_eq!(
+            (moved.provider, moved.source, moved.switched_from),
+            (
+                Provider::Claude,
+                LaunchSource::Subagent,
+                Some(Provider::Codex)
+            )
+        );
+        assert_eq!(moved.to_value()["source"], "review.subagents");
+        assert_eq!(
+            models
+                .launch(role)
+                .switched(Provider::Codex, SwitchReason::UsageLimit)
+                .source,
+            LaunchSource::Default
+        );
+    }
 
     /// A Codex job on its timer of a role that names its provider records
     /// that Codex cannot be used, on or off; a Claude one only with the

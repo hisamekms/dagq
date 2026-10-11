@@ -147,8 +147,11 @@ const REVIEW_SUBAGENTS_PREFIX: &str = "review.subagents.";
 /// What [`parse_config`] calls the current table while in a
 /// `[review.subagents.*]`.
 const REVIEW_SUBAGENTS_TABLE: &str = "review.subagents";
-/// The one key of `[review.subagents.<agent>]`.
+/// The required key of `[review.subagents.<agent>]`.
 const REVIEW_SUBAGENT_PATHS: &str = "paths";
+/// The optional key of `[review.subagents.<agent>]`: the provider of the
+/// agent's job ([`ReviewSubagent::provider`]).
+const REVIEW_SUBAGENT_PROVIDER: &str = "provider";
 /// `[review.programs.<name>]`: a program review (ADR-t1895-2), one table
 /// per program; its keys are [`REVIEW_PROGRAM_KEYS`].
 const REVIEW_PROGRAMS_PREFIX: &str = "review.programs.";
@@ -360,6 +363,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // The line of the `[review.subagents.<agent>]` header whose `paths`
     // is not read yet.
     let mut subagent_open: Option<usize> = None;
+    // The keys of the current `[review.subagents.<agent>]` read.
+    let mut subagent_keys: Vec<String> = Vec::new();
     // The `[review.programs.<name>]` being read, finished at the next
     // table or the end of the file.
     let mut program_open: Option<ProgramTable> = None;
@@ -432,8 +437,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.review_subagents.push(ReviewSubagent {
                     name: agent,
                     paths: Vec::new(),
+                    provider: None,
                 });
                 subagent_open = Some(number);
+                subagent_keys.clear();
                 table = Some(REVIEW_SUBAGENTS_TABLE);
                 continue;
             }
@@ -533,15 +540,29 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     .last_mut()
                     .expect("a [review.subagents.*] table names its agent");
                 ensure!(
-                    key == REVIEW_SUBAGENT_PATHS,
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_SUBAGENTS_PREFIX}{}]; the key is {REVIEW_SUBAGENT_PATHS}",
+                    key == REVIEW_SUBAGENT_PATHS || key == REVIEW_SUBAGENT_PROVIDER,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_SUBAGENTS_PREFIX}{}]; the keys are {REVIEW_SUBAGENT_PATHS} and {REVIEW_SUBAGENT_PROVIDER}",
                     agent.name
                 );
                 ensure!(
-                    subagent_open.take().is_some(),
+                    !subagent_keys.iter().any(|existing| existing == key),
                     "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
                 );
+                subagent_keys.push(key.to_owned());
                 let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                if key == REVIEW_SUBAGENT_PROVIDER {
+                    // A provider this binary does not know is a mistake of
+                    // the configuration, so the review that reads it does
+                    // not pass (ADR-t1453-1 decision 4).
+                    let provider = parse_string(rest.trim())
+                        .with_context(with)?
+                        .parse::<crate::domain::Provider>()
+                        .map_err(|error| anyhow::anyhow!("{error}"))
+                        .with_context(with)?;
+                    agent.provider = Some(provider);
+                    continue;
+                }
+                subagent_open = None;
                 let globs = parse_string_array(rest.trim()).with_context(with)?;
                 ensure!(
                     !globs.is_empty(),
@@ -2114,6 +2135,65 @@ mod tests {
         assert!(load_area_map(dir.path()).is_err());
     }
 
+    /// `[review.subagents.<agent>] provider` names the provider of the
+    /// agent's job, before or after its paths; an agent without it is read
+    /// as before (`None`, where `[roles.review]` sends the review), and a
+    /// provider this binary does not know is refused with its line, so the
+    /// review that reads it does not pass (ADR-t1453-1 decision 4).
+    #[test]
+    fn an_agent_may_name_the_provider_of_its_job() {
+        let config = parse_config(
+            "[review.subagents.a]\nprovider = \"codex\" # its own\npaths = [\"src/**\"]\n\
+             [review.subagents.b]\npaths = [\"docs/**\"]\nprovider = 'claude'\n\
+             [review.subagents.c]\npaths = [\"tests/**\"]\n",
+        )
+        .unwrap();
+        let providers: Vec<_> = config
+            .review_subagents
+            .iter()
+            .map(|agent| (agent.name.as_str(), agent.provider))
+            .collect();
+        assert_eq!(
+            providers,
+            [
+                ("a", Some(crate::domain::Provider::Codex)),
+                ("b", Some(crate::domain::Provider::Claude)),
+                ("c", None),
+            ]
+        );
+        for (text, expected) in [
+            (
+                "[review.subagents.a]\npaths = [\"a\"]\nprovider = \"gemini\"\n",
+                "dagq.toml:3: value of provider: ",
+            ),
+            (
+                "[review.subagents.a]\npaths = [\"a\"]\nprovider = codex\n",
+                "dagq.toml:3: value of provider",
+            ),
+            (
+                "[review.subagents.a]\nprovider = \"codex\"\nprovider = \"claude\"\npaths = [\"a\"]\n",
+                "dagq.toml:3: provider is defined twice",
+            ),
+            (
+                "[review.subagents.a]\nprovider = \"codex\"\n",
+                "dagq.toml:1: [review.subagents.a] has no paths",
+            ),
+            (
+                "[review.subagents.a]\nprovider = \"codex\"\n[run.env]\n",
+                "dagq.toml:1: [review.subagents.a] has no paths",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let unknown = format!(
+            "{:#}",
+            parse_config("[review.subagents.a]\npaths = [\"a\"]\nprovider = \"gemini\"\n")
+                .unwrap_err()
+        );
+        assert!(unknown.contains("gemini"), "{unknown}");
+    }
+
     /// `[review.subagents.<agent>] paths` names the globs that make a
     /// review's subagent required (ADR-t1453-1 decision 1); a mistake in
     /// it is refused with its line.
@@ -2131,10 +2211,12 @@ mod tests {
                 ReviewSubagent {
                     name: "design-consistency".into(),
                     paths: vec!["src/**".into(), "docs/design/**".into()],
+                    provider: None,
                 },
                 ReviewSubagent {
                     name: "migrations".into(),
                     paths: vec!["migrations/*.sql".into()],
+                    provider: None,
                 },
             ]
         );
@@ -2143,7 +2225,7 @@ mod tests {
         for (text, expected) in [
             (
                 "[review.subagents.a]\nglobs = [\"a\"]\n",
-                "dagq.toml:2: unknown key globs in [review.subagents.a]; the key is paths",
+                "dagq.toml:2: unknown key globs in [review.subagents.a]; the keys are paths and provider",
             ),
             (
                 "[review.subagents.a]\npaths = [\"a\"]\npaths = [\"b\"]\n",

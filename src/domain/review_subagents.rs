@@ -30,12 +30,21 @@ pub const REVIEW_SECTION: &str = "review.subagents";
 /// agent named in two of them is a mistake ([`config_problems`]).
 pub const ROLE_SECTIONS: &[&str] = &[REVIEW_SECTION];
 
-/// One `[review.subagents.<agent>]`: the agent's name and the globs that
-/// make it required, each once, in the order written.
+/// One `[review.subagents.<agent>]`: the agent's name, the globs that
+/// make it required, each once, in the order written, and the provider its
+/// job runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewSubagent {
     pub name: String,
     pub paths: Vec<String>,
+    /// `provider` (`"claude"` or `"codex"`, at most once in the table): the
+    /// agent's job runs on it and moves off it or waits for it as a job
+    /// whose role names its provider does (ADR-t1063-1 decisions 4 and 5,
+    /// ADR-t1857-1); `None` runs it where `[roles.review]` sends the
+    /// review. Any other value is a mistake of the whole `dagq.toml`, so a
+    /// review that reads it from the landing branch does not pass
+    /// (ADR-t1453-1 decision 4).
+    pub provider: Option<super::Provider>,
 }
 
 /// An agent a review needs, with the changed paths that made it so, in
@@ -610,6 +619,7 @@ mod tests {
     fn agent(name: &str, paths: &[&str]) -> ReviewSubagent {
         ReviewSubagent {
             name: name.to_owned(),
+            provider: None,
             paths: strings(paths),
         }
     }

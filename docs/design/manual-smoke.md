@@ -552,7 +552,7 @@ file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を�
 
 ## run の review の実 CLI の確認<a id="runのreviewの実cliの確認"></a>
 
-run の review の job が worktree の設定と agent を読まず（[ADR-t1470-1](../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)）deny と宣言した道具に限られることは、argv・settings・道具の変換を変えたときに人が `DAGQ_REAL_CLAUDE=<claude> cargo test --locked --test it -- --ignored --exact review_subagents::the_real_claude_review_jobs_keep_their_limits` で確かめる。
+run の review の job が worktree の設定と agent を読まず（[ADR-t1470-1](../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)）deny と宣言した道具に限られることは、argv・settings・道具の変換を変えたときに人が ignored の IT `review_subagents::the_real_claude_review_jobs_keep_their_limits` で確かめる（流し方と確かめる項目はその doc comment）。
 
 ## 他の repository のスモーク
 

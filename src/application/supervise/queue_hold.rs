@@ -2,9 +2,11 @@
 //! `queue_hold` asks (ADR-0047 decision 42, task 437). Every pass reads the
 //! queue's open ones: while one is open no new run is claimed (the
 //! `claim_held` of [`HoldReason::Authentication`] or
-//! [`HoldReason::UsageLimit`]) and no headless job starts (reviews wait in
-//! [`Phase::ReviewHeld`], and a job of a review in progress that stopped at
-//! the hold waits in its review, the other jobs' answers kept; the recovery
+//! [`HoldReason::UsageLimit`]) and no headless job starts on Claude
+//! (reviews none of whose jobs can start wait in [`Phase::ReviewHeld`], a
+//! review agent's job that names another provider starting nonetheless,
+//! and a job of a review in progress that stopped at the hold waits in its
+//! review, the other jobs' answers kept; the recovery
 //! jobs, the plan and goal reviews and the observer are not started); the
 //! runs in flight keep their leases.
 //! An answer the ask offered is applied here: `done` types

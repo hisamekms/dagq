@@ -85,7 +85,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
-| reviewの始まりと行き先 | `src/application/supervise/landing.rs`の`Supervisor::begin_review`・`prepare_review`・`review_route`・`after_unusable`、`src/application/supervise/provider.rs`の`review_route`・`review_moves` |
+| reviewの始まりと行き先 | `src/application/supervise/landing.rs`の`Supervisor::begin_review`・`prepare_review`・`review_route`・`review_job_route`・`after_unusable`、`src/application/supervise/provider.rs`の`review_route`・`review_moves` |
 | jobの起動・終わり・やり直し・判定 | `landing.rs`の`Supervisor::tend_review`・`start_review_jobs`・`review_job_ended`・`judge_review`、`src/application/supervise/jobs.rs`の`ReviewWatch`・`ReviewJob`、`src/domain/review_jobs.rs` |
 | verdictごとの進め方 | `landing.rs`の`act_on_verdict`・`act_on_concern`・`act_on_agents`・`send_revise`・`precheck` |
 | reviseと衝突の待ち | `src/application/supervise/revise.rs`の`ReviseWatch`・`Fix` |
@@ -165,10 +165,10 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 
 - 行き先は`Supervisor::review_route`が、reviewを始めるときと、jobを1本起動するたびにjobごとに決める。
   `provider`を書かないreviewはClaudeで動き、控えの間は待つ。
-- `provider = "codex"`のreviewは、全体のreviewとagentのjobを`codex exec --json`の読み取りだけのjobで動かす（permission profileは[Queue service](../queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)、選び方は[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)）。
+- `provider = "codex"`のreviewは、全体のreviewと`provider`を書かないagentのjobを`codex exec --json`の読み取りだけのjobで動かす（permission profileは[Queue service](../queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)、選び方は[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)）。
   worktreeのprojectを信頼せず、workerが置ける`.codex/config.toml`と`.codex/rules`を読まない（[ADR-t1570-1](../../adr/2026-10-04-t1570-1-codex-run-review-distrusts-the-worktree-project.md)）。
 - `provider`を書いたreviewのjobは、使えないproviderを避けてもう一方で起動し（開始の`launch`に`switched_from`・`switch_reason`）、起動の後に使えないと分かったら控えて（`ProviderHold`）そのjobだけもう一方で起動し直す（`domain::actor_model::job_route`、`after_unusable`）。
-  どのjobも始まる前に両方が使えなければ`Phase::ReviewHeld`で待ち、途中のjobは他のjobの答えを保ったまま待つ。
+  どのjobも起動できなければ`Phase::ReviewHeld`で待ち（`held_review`）、起動できないjobは他のjobの答えを保ったままreviewの中で待つ。
   Claudeのloginと利用上限は控えのaskに加わり、控えるのは実際に失敗したproviderだけである。
 - 引数・envの大きさとstdinの一時ファイルによる起動の失敗は、providerの問題でないので控えも切り替えもせずjobの答えの無い終わりにする。
 - `[provider_fallback] jobs = false`（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）では、使えないことを理由にもう一方を選ばず、そのjobは失敗したproviderの控えが解けるのを待って同じproviderで起動し直す（reviewの失敗にしない）。
@@ -179,7 +179,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 [ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)と[ADR-t1895-1](../../adr/2026-10-06-t1895-1-review-stage-runs-agent-and-program-jobs-in-a-fixed-shape.md)の実装。
 変えたpathに応じて必須のagentを選び、全体のreviewのjobと並べて、agentごとに1本ずつの独立のjobとして動かす。
 
-- **設定**: `dagq.toml`の`[review.subagents.<agent>] paths`（書式は[Run environment](run-environment.md)）と、定義のファイル（`domain::review_subagents::find_definition`、[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
+- **設定**: `dagq.toml`の`[review.subagents.<agent>] paths`と任意の`provider`（書式は[Run environment](run-environment.md)）と、定義のファイル（`domain::review_subagents::find_definition`、[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
   設定の誤りは`dagq doctor`の`agents`（`application::review::check_agents`）が出す。
 - **道具の宣言**: 定義のfrontmatterの`tools`はruntimeの道具の一覧から選び、役割の許可を超えれば誤りにする（`AgentTools`、[ADR-t1728-2](../../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)）。
   宣言はagentのjobの起動に当たり、宣言の無い定義は役割の既定の読み取りだけの道具になる。
@@ -191,6 +191,8 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   起動は`AgentProvider::agent_job_command`で、道具の変換は宣言から（Claudeはjob自身の引数、Codexは今のreviewのread-onlyのsandboxとjobのpermission profileに足す設定）。
   agentのjobはqueueを読む道具を持たず、`[run.env]`とsccacheの扱いは全体のreviewのjobと同じである。
   providerの能力でjobを切り替えることはなく、Codexでもagentのjobを動かす。
+- **agentのjobのprovider**<a id="agentのjobのprovider"></a>: `provider`を書いたagentのjobはそのproviderで起動し（`Supervisor::review_job_route`）、上の「reviewのprovider」の`provider`を書いたjobの切り替えと待ちの規則をそのjobだけに当てる。
+  書かないagentと全体のreviewのjobは`[roles.review]`に従う。
 - **結果のそろいの検査**: agentのjobの答えは、そのagentのちょうど1件の完了した判定でなければ読めない答えで（`domain::review_jobs::agent_result`）、全体のreviewのverdictはagentの結果を持てない（`agents`を持つverdictは`ReviewVerdict::parse`が読めない答えにする）。
 - **判定ごとの行き先**: 全体のreviewとagentごとの判定を着地・差し戻し・人の判断に直し、最も重いものを取る（`ReviewVerdict::route`、`domain::review_subagents::destination`）。
   記録と問いでは全体のreviewの判定を`parent`と呼ぶ。

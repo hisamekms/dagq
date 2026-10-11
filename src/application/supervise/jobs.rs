@@ -1332,6 +1332,10 @@ pub(super) struct ReviewWatch {
 /// One agent job of a run's review.
 pub(super) struct ReviewJob {
     pub(super) id: ReviewJobId,
+    /// The provider an agent's `[review.subagents.<agent>]` names, which
+    /// it runs on instead of where `[roles.review]` sends the review; `None`
+    /// for the whole review's and an agent that names none.
+    pub(super) provider: Option<Provider>,
     /// What starts it.
     pub(super) input: ReviewJobInput,
     /// Whether it ran once more already, or starts as its run once more.
@@ -1361,8 +1365,9 @@ pub(super) enum ReviewJobState {
     /// Not started yet: it waits for the limit of jobs at once or for a
     /// provider it can use (why, once known, so a wait is logged once).
     Waiting(Option<String>),
-    /// Its process runs; `switchable` when `[roles.review]` names its
-    /// provider, so one it cannot use moves it (ADR-t1207-1).
+    /// Its process runs; `switchable` when `[roles.review]`, or the
+    /// agent's `[review.subagents.<agent>]`, names its provider, so one it
+    /// cannot use moves it or waits for it (ADR-t1207-1, ADR-t1857-1).
     Running { job: HeadlessJob, switchable: bool },
     /// It answered.
     Answered(ReviewAnswer),
@@ -1838,6 +1843,7 @@ mod tests {
         // A review's whole job and an agent's run; a third waits.
         let review_job = |id: ReviewJobId, state: ReviewJobState| ReviewJob {
             id,
+            provider: None,
             input: ReviewJobInput::Whole {
                 prompt: String::new(),
                 prompt_bytes: crate::application::prompt::PromptBytes::default(),

@@ -1271,6 +1271,490 @@ fn with_the_fallback_off_an_agents_job_waits_for_its_provider_and_lands() {
     );
 }
 
+/// `[roles.review]` names no provider (the whole review runs on Claude);
+/// `design` names Codex for its job and `tests` names none, both
+/// required for `change.txt`; `extra` goes before them.
+fn design_on_codex(repo: &Path, extra: &str) {
+    fs::create_dir_all(repo.join(".dagq/agents/tests")).unwrap();
+    fs::write(repo.join(".dagq/agents/tests/AGENT.md"), TESTS_DEFINITION).unwrap();
+    git(repo, &["add", ".dagq/agents/tests/AGENT.md"]);
+    commit_on_main(
+        repo,
+        &format!(
+            "{extra}[review.subagents.design]\npaths = [\"change.txt\"]\nprovider = \"codex\"\n\
+             [review.subagents.tests]\npaths = [\"change.txt\"]\n"
+        ),
+        Some(MAIN_DEFINITION),
+    );
+}
+
+/// Each `review_job_started`'s agent with its launch's provider, source
+/// and `switched_from`, in order.
+fn job_launches(detail: &dagq::domain::TaskDetail) -> Vec<(Value, Value, Value, Value)> {
+    payloads(detail, "review_job_started")
+        .iter()
+        .map(|job| {
+            (
+                job["agent"].clone(),
+                job["launch"]["provider"].clone(),
+                job["launch"]["source"].clone(),
+                job["launch"]["switched_from"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// An agent whose `[review.subagents.<agent>]` names Codex runs its job on
+/// Codex while the whole review's job and the agent that names no provider
+/// run where `[roles.review]` sends the review (Claude); each job's start
+/// records its launch's provider and where it came from, and the run lands.
+#[test]
+fn an_agent_that_names_codex_runs_its_job_on_codex_and_the_others_on_the_roles_provider() {
+    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    design_on_codex(&repo, "");
+    set_turns(dir.path(), FINISH);
+    let options = SuperviseOptions {
+        codex,
+        codex_home: Some(dir.path().join(CODEX_HOME)),
+        ..supervise_options(1, true)
+    };
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
+        .with_review_agents(&[("tests", vec![agent_says("tests", "pass", &[])])]);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(
+        job_launches(&detail),
+        [
+            (Value::Null, json!("claude"), json!("default"), Value::Null),
+            (
+                json!("design"),
+                json!("codex"),
+                json!("review.subagents"),
+                Value::Null
+            ),
+            (
+                json!("tests"),
+                json!("claude"),
+                json!("default"),
+                Value::Null
+            ),
+        ]
+    );
+    let args = fs::read_to_string(dir.path().join("codex-agent-args.log")).unwrap();
+    assert!(args.starts_with("design "), "{args}");
+    assert!(!args.contains("\ntests "), "{args}");
+    let launches = reviewer.launches();
+    assert_eq!(launches.len(), 1, "only tests' job ran on Claude");
+    assert!(launches[0].prompt.contains(TESTS_DEFINITION));
+    let finished = payloads(&detail, "review_finished");
+    assert_eq!(finished[0]["agents"][0]["summary"], "codex agent passed");
+    assert_eq!(finished[0]["agents"][1]["summary"], "tests looked");
+}
+
+/// With the fallback on, the job of the agent that names Codex stops at
+/// Codex's usage limit: Codex alone is held and that job alone starts again
+/// on Claude, its launch saying it moved from Codex and still that the
+/// agent's table named its provider; the run lands.
+#[test]
+fn an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_came_from() {
+    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    design_on_codex(&repo, "");
+    set_turns(dir.path(), FINISH);
+    fs::write(
+        dir.path().join("codex-agent-design-failure.jsonl"),
+        "{\"type\":\"error\",\"message\":\"unexpected status 429 Too Many Requests: You have hit your usage limit. Try again later.\"}\n",
+    )
+    .unwrap();
+    let options = SuperviseOptions {
+        codex,
+        codex_home: Some(dir.path().join(CODEX_HOME)),
+        ..supervise_options(1, true)
+    };
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
+        .with_review_agents(&[
+            ("tests", vec![agent_says("tests", "pass", &[])]),
+            ("design", vec![agent_says("design", "pass", &[])]),
+        ]);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    let subagent = || json!("review.subagents");
+    assert_eq!(
+        job_launches(&detail),
+        [
+            (Value::Null, json!("claude"), json!("default"), Value::Null),
+            (json!("design"), json!("codex"), subagent(), Value::Null),
+            (
+                json!("tests"),
+                json!("claude"),
+                json!("default"),
+                Value::Null
+            ),
+            (json!("design"), json!("claude"), subagent(), json!("codex")),
+        ]
+    );
+    let moved = payloads(&detail, "review_job_started")[3]["launch"].clone();
+    assert_eq!(moved["switch_reason"], "usage_limit", "{moved}");
+    let held: Vec<Value> = SqliteQueue::open(&db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "provider_held")
+        .map(|event| event.payload["provider"].clone())
+        .collect();
+    assert_eq!(held, [json!("codex")]);
+    assert!(payloads(&detail, "review_failed").is_empty());
+}
+
+/// With `[provider_fallback] jobs = false`, the job of the agent that
+/// names Codex stops at Codex's usage limit: Codex alone is held and the
+/// job waits for it, not moving to Claude, while the whole review's job
+/// and the other agent's answer on Claude; the review is not judged until
+/// the hold ends and the job starts on Codex again and answers, and the
+/// run lands.
+#[test]
+fn with_the_fallback_off_an_agent_that_names_codex_waits_alone_and_the_review_lands() {
+    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    design_on_codex(&repo, "[provider_fallback]\njobs = false\n");
+    set_turns(dir.path(), FINISH);
+    fs::write(
+        dir.path().join("codex-agent-design-failure.jsonl"),
+        "{\"type\":\"error\",\"message\":\"unexpected status 429 Too Many Requests: You have hit your usage limit. Try again later.\"}\n",
+    )
+    .unwrap();
+    let options = SuperviseOptions {
+        codex,
+        codex_home: Some(dir.path().join(CODEX_HOME)),
+        ..supervise_options(1, true)
+    };
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
+        .with_review_agents(&[("tests", vec![agent_says("tests", "pass", &[])])]);
+    let supervisor = {
+        let (db, repo) = (db.clone(), repo.clone());
+        thread::spawn(move || {
+            let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+            (outcome, reviewer.launches().len())
+        })
+    };
+    // The others answer while Codex is held for design's job.
+    let answered = |detail: &dagq::domain::TaskDetail| {
+        payloads(detail, "review_job_finished")
+            .iter()
+            .filter(|end| end["outcome"] == "answered")
+            .map(|end| end["agent"].clone())
+            .collect::<Vec<_>>()
+    };
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        let detail = queue.show(TASK).unwrap();
+        let held = queue
+            .all_events()
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "provider_held");
+        held && answered(&detail).len() == 2
+    });
+    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(answered(&detail), [Value::Null, json!("tests")]);
+    assert!(payloads(&detail, "review_finished").is_empty());
+    let held = SqliteQueue::open(&db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == "provider_held")
+        .unwrap();
+    assert_eq!(held.payload["provider"], "codex");
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            dagq::domain::EventKind::ProviderReleased,
+            json!({"provider": "codex", "reason": "usage_limit",
+                   "since": held.payload["since"], "why": "retry_due"}),
+        )
+        .unwrap();
+    let (outcome, claude_agent_jobs) = joined(supervisor, "the supervisor to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(claude_agent_jobs, 1, "only tests' job ran on Claude");
+    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    let subagent = || json!("review.subagents");
+    assert_eq!(
+        job_launches(&detail),
+        [
+            (Value::Null, json!("claude"), json!("default"), Value::Null),
+            (json!("design"), json!("codex"), subagent(), Value::Null),
+            (
+                json!("tests"),
+                json!("claude"),
+                json!("default"),
+                Value::Null
+            ),
+            (json!("design"), json!("codex"), subagent(), Value::Null),
+        ]
+    );
+    let ends: Vec<(Value, Value)> = payloads(&detail, "review_job_finished")
+        .iter()
+        .map(|end| (end["agent"].clone(), end["outcome"].clone()))
+        .collect();
+    assert!(ends.contains(&(json!("design"), json!("held"))), "{ends:?}");
+    assert_eq!(
+        ends.last(),
+        Some(&(json!("design"), json!("answered"))),
+        "{ends:?}"
+    );
+    assert!(payloads(&detail, "review_failed").is_empty());
+    let held_providers: Vec<Value> = SqliteQueue::open(&db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "provider_held")
+        .map(|event| event.payload["provider"].clone())
+        .collect();
+    assert!(
+        held_providers.iter().all(|p| p == "codex"),
+        "{held_providers:?}"
+    );
+}
+
+/// A hold that is there before the review begins holds only the jobs that
+/// need its provider. `[roles.review]` names Codex, `[provider_fallback]
+/// jobs = false`, and Codex is held (its login) while the worker works;
+/// `design` names Claude. The review begins anyway: `design`'s job runs on
+/// Claude and answers while the whole review's job waits for Codex, the
+/// review is not judged meanwhile, and once Codex's hold ends the whole
+/// review's job starts on Codex, not moved, and the run lands.
+#[test]
+fn a_hold_before_the_review_begins_holds_only_the_jobs_of_its_provider() {
+    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    use dagq::domain::provider_switch::{ProviderHold, SwitchReason};
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    commit_on_main(
+        &repo,
+        "[roles.review]\nprovider = 'codex'\n[provider_fallback]\njobs = false\n\
+         [review.subagents.design]\npaths = [\"change.txt\"]\nprovider = \"claude\"\n",
+        Some(MAIN_DEFINITION),
+    );
+    // The worker's turn finishes only once Codex is held.
+    let gate = dir.path().join("codex-held");
+    set_turns(
+        dir.path(),
+        &format!("{}; {FINISH}", crate::common::await_path(&gate)),
+    );
+    let options = SuperviseOptions {
+        codex,
+        codex_home: Some(dir.path().join(CODEX_HOME)),
+        ..supervise_options(1, true)
+    };
+    let reviewer = TestReviewer::new(&[])
+        .with_review_agents(&[("design", vec![agent_says("design", "pass", &[])])]);
+    let supervisor = {
+        let (db, repo) = (db.clone(), repo.clone());
+        thread::spawn(move || {
+            let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+            (outcome, reviewer.launches().len())
+        })
+    };
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        queue
+            .show(TASK)
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.status() == RunStatus::Running)
+    });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let hold = ProviderHold::new(
+        dagq::domain::Provider::Codex,
+        SwitchReason::Authentication,
+        now,
+    );
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            dagq::domain::EventKind::ProviderHeld,
+            hold.held_payload(None),
+        )
+        .unwrap();
+    fs::write(&gate, "").unwrap();
+    // design answers on Claude while the whole review waits for Codex.
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        payloads(&queue.show(TASK).unwrap(), "review_job_finished")
+            .iter()
+            .any(|end| end["agent"] == "design" && end["outcome"] == "answered")
+    });
+    let waiting = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(payloads(&waiting, "review_started").len(), 1);
+    assert_eq!(
+        job_launches(&waiting),
+        [(
+            json!("design"),
+            json!("claude"),
+            json!("review.subagents"),
+            Value::Null
+        )]
+    );
+    assert!(payloads(&waiting, "review_finished").is_empty());
+    let held = SqliteQueue::open(&db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == "provider_held")
+        .unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            dagq::domain::EventKind::ProviderReleased,
+            json!({"provider": "codex", "reason": "authentication",
+                   "since": held.payload["since"], "why": "retry_due"}),
+        )
+        .unwrap();
+    let (outcome, claude_agent_jobs) = joined(supervisor, "the supervisor to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(claude_agent_jobs, 1, "only design's job ran on Claude");
+    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(
+        job_launches(&detail),
+        [
+            (
+                json!("design"),
+                json!("claude"),
+                json!("review.subagents"),
+                Value::Null
+            ),
+            (Value::Null, json!("codex"), json!("dagq.toml"), Value::Null),
+        ]
+    );
+    assert!(payloads(&detail, "review_failed").is_empty());
+}
+
+/// Claude held before the review begins, the whole review's job waits
+/// while an agent that names Codex proceeds, and once Claude's hold ends
+/// its first start on Claude takes the session id `review_started` named:
+/// the review's span names that session from its open to its close.
+/// `[roles.review]` names Claude and `[provider_fallback] jobs = false`;
+/// Claude is held (its agent did not start) while the worker works.
+#[test]
+fn a_whole_review_that_waited_for_claude_starts_in_the_session_its_span_names() {
+    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    use dagq::domain::provider_switch::{ProviderHold, SwitchReason};
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    commit_on_main(
+        &repo,
+        "[roles.review]\nprovider = 'claude'\n[provider_fallback]\njobs = false\n\
+         [review.subagents.design]\npaths = [\"change.txt\"]\nprovider = \"codex\"\n",
+        Some(MAIN_DEFINITION),
+    );
+    // The worker's turn finishes only once Claude is held.
+    let gate = dir.path().join("claude-held");
+    set_turns(
+        dir.path(),
+        &format!("{}; {FINISH}", crate::common::await_path(&gate)),
+    );
+    let options = SuperviseOptions {
+        codex,
+        codex_home: Some(dir.path().join(CODEX_HOME)),
+        ..supervise_options(1, true)
+    };
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let supervisor = {
+        let (db, repo) = (db.clone(), repo.clone());
+        thread::spawn(move || {
+            let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+            (outcome, reviewer.prompts().len())
+        })
+    };
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        queue
+            .show(TASK)
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.status() == RunStatus::Running)
+    });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let hold = ProviderHold::new(
+        dagq::domain::Provider::Claude,
+        SwitchReason::LaunchFailed,
+        now,
+    );
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            dagq::domain::EventKind::ProviderHeld,
+            hold.held_payload(None),
+        )
+        .unwrap();
+    fs::write(&gate, "").unwrap();
+    // design answers on Codex while the whole review waits for Claude.
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        payloads(&queue.show(TASK).unwrap(), "review_job_finished")
+            .iter()
+            .any(|end| end["agent"] == "design" && end["outcome"] == "answered")
+    });
+    let waiting = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(
+        job_launches(&waiting),
+        [(
+            json!("design"),
+            json!("codex"),
+            json!("review.subagents"),
+            Value::Null
+        )]
+    );
+    assert!(payloads(&waiting, "review_finished").is_empty());
+    let session_id = payloads(&waiting, "review_started")[0]["session_id"]
+        .as_str()
+        .expect("a review whose whole job will run on Claude names its session")
+        .to_owned();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            dagq::domain::EventKind::ProviderReleased,
+            hold.released_payload("retry_due"),
+        )
+        .unwrap();
+    let (outcome, claude_reviews) = joined(supervisor, "the supervisor to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(claude_reviews, 1, "the whole review ran on Claude once");
+    let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    let started = payloads(&detail, "review_job_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[1]["agent"], Value::Null);
+    assert_eq!(started[1]["launch"]["provider"], "claude");
+    assert_eq!(started[1]["session_id"], json!(session_id));
+    // The review's one span names the session the whole job ran in.
+    let reviews = |kind: &str| -> Vec<Value> {
+        payloads(&detail, kind)
+            .into_iter()
+            .filter(|span| span["kind"] == "review")
+            .cloned()
+            .collect()
+    };
+    let opened = reviews("session_opened");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(opened[0]["session_id"], json!(session_id));
+    let closed = reviews("session_closed");
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    assert_eq!(closed[0]["reason"], "job_finished");
+}
+
 /// Commit an eval of `design` on main: one dev case adding `notes.txt`,
 /// its patch, and the case list, at a base commit that holds them.
 fn commit_design_eval(repo: &Path) {
