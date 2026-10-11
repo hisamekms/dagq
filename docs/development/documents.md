@@ -164,6 +164,8 @@ pluginの`dagq-planner`の`SKILL.md`の「Where your authority ends」と`dagq`�
 
 pluginとrepositoryの規則・値・経緯の受け持ちは[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1の表、runtimeとの境界は決定5。検査する記述の一覧は[棚卸し](../plans/agents-slim-inventory.md)「4. pluginの固有の記述の項目」。固有の印（このrepositoryのtest・coverageのコマンド、`tests/it`、日付、hook・`bin`を含むpluginの全ファイルでは「fixed binary」・dagqのADRの番号（`ADR-NNNN`・`ADR-tN-N`。規則は番号でなく言葉で書く）・task・goal・askの番号の逸話、`docs/design/`・`docs/plans/`のpathと「design docs」への参照、pluginのdirectoryを出る相対リンクなど）の戻りは`tests/plugin.rs`の`no_skill_carries_this_repository_s_rules`が検査し、印の語の一覧はそのtestが持つ。
 
+runtimeの汎用性（言語・道具・外への宛先・hostで流すコマンド・cache・資源の値をruntimeに固定しないこと）は[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)と[taskの登録](task-registration.md)の「runtimeの汎用性」が持つ。
+
 ## workerの文書の照合
 
 workerはreceiptの前に、受け入れ条件の対応づけ（[手元の検証](local-checks.md)の「受け入れ条件の対応づけ」）に続けて、workerのpromptが指示する文書の照合（仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「文書の照合」、[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)・[ADR-t1942-2](../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)）を行う。このrepositoryで差分と照合する文書は、taskが名指す文書と、変えた挙動を説明する`docs/design/`・pluginのskillとreference・AGENTS.md・`docs/development/`・ADRの索引（`docs/adr/INDEX.md`、無ければ`sh scripts/adr-index.sh`で作る。生成物なので直さず、ずれはADRのfrontmatterで直す）で、`summary`に更新したpath・節か不要の理由を書く。taskのpathsの外のずれは`docs_drift`のfollow_upにする。

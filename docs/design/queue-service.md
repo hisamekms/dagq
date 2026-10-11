@@ -29,7 +29,7 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 今の段（段(2)・(3)）: serviceがあり、`hello`・`ask`・`show`・`note`と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（Codexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）のユースケースを答える。**worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。supervisor・session wrapperとhook・inbox・planner・人のCLIはDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
 
 名前: この文書の「broker」はqueueのbroker（段(4)、未実装）のこと。
-queueのbrokerはserviceと同じ`up` / `down` / execの引き継ぎで動くhostのプロセスで、宛先はservice・`api.anthropic.com`・crates.ioに限る（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)ほか）。
+queueのbrokerはserviceと同じ`up` / `down` / execの引き継ぎで動くhostのプロセスで、宛先はservice・`api.anthropic.com`・`dagq.toml`のregistryに限る（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)ほか）。
 fs・process・git・packageを仲介するresource brokerは置かない（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）。
 
 ## 置き場所と形

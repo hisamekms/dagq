@@ -16,6 +16,7 @@ related:
   - adr-t2113-3
   - adr-t2114-2
   - adr-t2114-4
+  - adr-t2257-1
   - plan-headless-worker-spike
 ---
 
@@ -293,7 +294,7 @@ worker・resume と integrate の verification の build と test が通る、da
 
 ### 結果が決める ADR の決定
 
-ADR-t2113-1 決定6（machine の資源は通る最小を測って決め、決めた値は design に書く）。
+ADR-t2257-1 決定6（ADR-t2113-1 決定6 を amends）。測った通る最小の値は、この repository を動かす host の `host.toml` の推奨値として docs に書き、runtime の既定にしない。
 
 ### 前提と後片付け
 
@@ -354,7 +355,7 @@ test が落ちたら `$SPIKE/m/logs/<label>-test.log` から落ちた test の�
 
 ### 満たさないときに人が決めること
 
-host の中で通る組が無いか、通る最小の組が host に残す資源（人の作業と host の run）を圧迫するときは、machine の大きさ・同時に container で動かす run の数・container にする適用先の範囲のどれを変えるかを人が決め、ADR-t2113-1 決定6 の amends に残す。
+host の中で通る組が無いか、通る最小の組が host に残す資源（人の作業と host の run）を圧迫するときは、machine の大きさ・同時に container で動かす run の数・container にする適用先の範囲のどれを変えるかを人が決め、ADR-t2257-1 決定6 の amends に残す。
 
 ## (d) sccache の local の disk cache の同時の書き込み
 
@@ -431,5 +432,5 @@ grep -i -l 'error' "$SPIKE"/m/logs/sccache-*.server.log
 | --- | --- | --- | --- |
 | (a) | 規約で許されない、または通常の応答・SSE・分類が broker の側の手当てで直せない | API key に替えるか（費用がサブスクリプションから従量に移ることの受け入れを含む）。利用上限が未確認のまま進むか | ADR-t2114-2 の amends か置き換え |
 | (b) | どちらの clone の作り方も目安を超える | 推奨の形のままにするか次善の形を採るか、目安を変えるか | ADR-t2113-2 の amends（次善を採るなら ADR-t2113-3 決定1 の amends も） |
-| (c) | host の中で通る組が無い、または通る最小が host を圧迫する | machine の大きさ・同時の container の数・container にする適用先の範囲 | ADR-t2113-1 決定6 の amends |
+| (c) | host の中で通る組が無い、または通る最小が host を圧迫する | machine の大きさ・同時の container の数・container にする適用先の範囲 | ADR-t2257-1 決定6 の amends |
 | (d) | 同時の書き込みの error・build の失敗・上限が効かない | 種から複写する形か 1 つの server に寄せる形か | ADR-t2114-4 決定5 の amends |

@@ -128,9 +128,8 @@ serverを確かめられないもの、guardを作れなかったものはwrappe
 supervisorが始めるものの前の確認は、居ないserverをsupervisorが起動する機会でもある。
 wrapperのturnの前・人の`integrate`・e2eのgateの確認とguardはportを見るだけで起動しない。
 runtimeの外からの起動までは防げず、下の検知が扱う。
-container（`--network none`）の中のserverは未実装である。
-決まった形では、supervisorがcontainerの中にserverを起動し、guardはcontainerの中のloopbackのportを確かめる（[ADR-t2114-4](../../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
-そのcacheはworker・resumeのcontainerだけが共有し、hostのserverのcacheはcontainerにmountせず、integrateのverificationは保護されたcacheが無ければcacheなしでcompileする。
+containerの中のserverは未実装で、`[run.env]`がsccacheを名指すときだけsupervisorがcontainerの中に起動し、guardはその中のloopbackを確かめる（[ADR-t2114-4](../../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)・[ADR-t2257-1](../../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
+workerのcacheのdirは`dagq.toml`が与え、queueごとにworker・resumeだけが共有し、hostのcacheはmountせず、verificationは保護されたcacheが無ければcacheなしにする。
 
 ### 外部serverと失敗の偏り
 

@@ -13,6 +13,8 @@ supersedes:
   - adr-t827-4
   - adr-t838-1
   - adr-t840-1
+amended_by:
+  - adr-t2257-1
 owners:
   - hisamekms
 tags:

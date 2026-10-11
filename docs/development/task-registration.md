@@ -1,7 +1,7 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、固定バイナリを待つ宣言、依存の付け方、負荷の下で落ちるtestを直すtask、ADRを書くtask、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、固定バイナリを待つ宣言、依存の付け方、負荷の下で落ちるtestを直すtask、ADRを書くtask、runtimeの汎用性、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
 owners:
@@ -20,6 +20,7 @@ related:
   - adr-t1504-2
   - adr-t1591-1
   - adr-t1480-1
+  - adr-t2257-1
   - development-local-checks
   - development-testing
   - development-migrations
@@ -150,6 +151,15 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 - 番号付きの決定を複数持つADRの一部を変える（`amends`）か、丸ごと置き換えるかを、ADRを書くtaskのplannerがdescriptionに書き、plan reviewが見る（下の「plan reviewが当てはめる規則」）。選び方は[文書の規則](documents.md)の「ADR」。
 - 決定と実装が明らかなものは、ADRと実装を1 taskにする（[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)決定12）。
 
+## runtimeの汎用性
+
+dagqは外部のprojectで使い、このrepositoryはdogfoodingしているだけなので、runtimeはこのrepositoryの開発の事情を決まりや既定値にしない（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定1）。
+
+- runtimeのtaskが、言語・道具（Rust・cargo・cargo-nextest・sccacheなど）・外への宛先（package registryなど）・hostで流すコマンド（e2e・OSに固有のtest）・compileのcache・資源の値をruntimeに固定していれば、設定に出す形にする。
+  runtimeは仕組みと、どのprojectにも通じる既定（無ければ使わない・拒む側）を持ち、projectに固有の値は`dagq.toml`、hostに固有の値は`host.toml`で受ける。
+- このrepositoryの値は、その設定のdogfoodingの値として登録する: `dagq.toml`に置く値はconfigのtask（新しいkeyは固定バイナリが読めるようになってから。上の「固定バイナリがtask Xを含んでから行うtask」）、`host.toml`の推奨値はdocsのtaskにする。
+- pluginの汎用性は[文書の規則](documents.md)の「pluginの汎用性」が持つ。
+
 ## plan reviewが当てはめる規則
 
 この repository のplan review jobは、proposalのtaskに次を当てはめる（読む文書はAGENTS.mdの「plan review」が名指す）。
@@ -162,6 +172,7 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 - 測定のtask（changeが`measure`のtaskと、受け入れ条件に測定を含むtask）は、周回数（と交互に流すか）、表の列、値の計算式（何を何で割るか、待ちを引くときの区間）、証拠の所在（文書の節・CSV・script・コマンドと時刻の区切り）をacceptanceかdescriptionに書くこと（測定の形に当たらない項目、例えば1回だけ読む測定の周回数は、当たらない理由を書く）。条件の範囲を「同じ形のもの」で広げるtaskは、範囲を決めるgrepか一覧を書くこと。欠けていれば`revise`（workerはこれらを根拠に受け入れ条件の各項目を対応づける。[ADR-t1420-1](../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
 - ADRの索引（`docs/adr/INDEX.md`、無ければ`sh scripts/adr-index.sh`で作る。[文書の規則](documents.md)の「ADR」）と、taskが名指すADRと`docs/design/`の文書を読み、`accepted`のADRの決定と矛盾するtaskは`concern`にする（`superseded`なら`superseded_by`を辿る）。
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
+- runtimeのtaskが上の「runtimeの汎用性」のとおり、言語・道具・外への宛先・hostで流すコマンド・cache・資源の値をruntimeに固定せず設定で受けること。固定していれば`revise`にし、設定に出す形と、このrepositoryの値を`dagq.toml`かdocsのdogfoodingの値として登録する形に直させる（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
 - 挙動や仕様を変えるtaskは、関連文書（[文書の規則](documents.md)の「workerの文書の照合」が挙げる文書）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
 - 負荷の下で落ちるtestのtaskが上の「負荷の下で落ちるtestを直すtask」を満たすこと。acceptanceかdescriptionが高い負荷の下での再現を求めるtaskは`revise`にする（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。ただし人がapprove_planのaskにreadyと答えて認めたtask（ask 323のtask 1360・1361、ask 304のtask 1344）は例外として保ち、`revise`にしない。plan reviewは自分で新しい例外を作らない（決定(e)）。
 - 優先度と所属は由来で分けて見る（[ADR-t1971-1](../adr/2026-10-07-t1971-1-plan-review-keeps-human-origin-priority-and-membership-and-ai-tasks-inherit-goal-priority.md)）。由来はproposal単位でなく、runtimeがgoal・taskの作成時に記録した由来で見る（[ADR-t1975-1](../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)決定5〜7。由来が`unknown`の既存の行は人間由来と同じく扱う）。人間由来のtaskとgoalの優先度と所属は自分で変えず（`lower_priority`を付けない）、疑いがあれば`concern`にする。由来を問わず、人の出どころ（`human`）の優先度（taskの個別の指定と、taskが継ぐgoalの優先度）はactionで変えず（付けても適用されず記録だけが残る）、疑いがあれば`concern`にする（同決定3）。人の言葉に優先度の無い新しいgoalにplannerが付けた段は下のAI由来のgoalと同じ目安で見てよいが、外れていれば`revise`にする。
