@@ -17,6 +17,7 @@ related:
   - adr-0040
   - adr-0027
   - adr-0050
+  - adr-t2256-1
   - adr-t803-1
   - adr-t947-1
   - adr-t1233-2
@@ -49,7 +50,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   → 2 headless実行: 全体のreviewとagentごとの読み取りだけのjobを上限の中で並列に
   → 3 判定: 全jobがそろってから。答えの無いjobはそのjobだけ1回やり直す
        pass    → 5 衝突の事前判定 → 終了の依頼とclose → 着地の前のe2e → 着地
-       revise  → 4 reviseの往復（回に2回まで）→ validationからやり直す
+       revise  → 4 reviseの往復（回ごとの上限まで）→ validationからやり直す
        concern → AIが決めるconcern: land（passと同じ道）/ send_back（4と同じ道）/ ask
        失敗・打ち切り → approve_landingのask → 6 askの回答（land / send_back / cancel）
   supervisorが替わったら 7 引き継ぎ、reviseの待ちの間の質問は 8
@@ -74,7 +75,8 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 - やり直しはjobごとに1回まで、プログラムのreviewをやり直したreviewのjobはやり直さない。
 - 全jobが終わるまで判定せず、答えの無いjobが残れば`pass`にしない。
 - AIのjobが他のjobの判定をまとめることはない。
-- reviseは回（区切りの後）ごとに2回まで（[ADR-0050](../../adr/0050-revise-count-scope-per-review-round.md)）、回の中の3回目のreviseと`send_back`は人に聞く。
+- reviseは回（区切りの後）ごとに`MAX_REVISE_ATTEMPTS`回まで生きているsessionに返し、concernの`send_back`もこれに数える（[ADR-0050](../../adr/0050-revise-count-scope-per-review-round.md)、上限は[ADR-t2256-1](../../adr/2026-10-11-t2256-1-raise-the-run-review-revise-limit-and-decouple-plan-review.md)）。
+  上限に達した後のreviseとconcernの`send_back`は`approve_landing`のask（`revise_limit`）にし、concernのほかの判断は上限に依らない。
 - 依頼（revise・衝突の解消）はeventを記録してから`turns/`に書くので、二重には書かない。
 - 1つのrunに開いた`approve_landing`のaskは1つ。
 - e2eはhostで同時に1本だけ流れる。

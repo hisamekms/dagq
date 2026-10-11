@@ -186,7 +186,7 @@ fn asks_of_a_run_are_attention_for_the_inbox_until_closed() {
     queue.close_ask(failed_review[0].id).unwrap();
     let before = queue.latest_event_id().unwrap().as_i64();
     // A `decide` ask: the supervisor applies an `approve_landing` answer
-    // itself (see a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it).
+    // itself (see a_review_past_the_revise_limit_that_does_not_pass_asks_a_person_and_land_lands_it).
     let new_ask = |question: &str| NewAsk {
         recommendation: None,
         confidence: None,

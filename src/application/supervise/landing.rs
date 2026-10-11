@@ -3012,7 +3012,7 @@ mod tests {
     #[test]
     fn a_revise_past_its_limit_asks_with_the_count_of_revises() {
         let why = revise_limit_why(MAX_REVISE_ATTEMPTS);
-        assert_eq!(why, "the review still asks for changes after 2 revises");
+        assert_eq!(why, "the review still asks for changes after 3 revises");
         assert_eq!(
             landing_question(
                 &run(),
@@ -3023,7 +3023,7 @@ mod tests {
                 (None, None),
             ),
             format!(
-                "The supervisor's review of run r1 (task 1) returned revise (the review still asks for changes after 2 revises): not yet\
+                "The supervisor's review of run r1 (task 1) returned revise (the review still asks for changes after 3 revises): not yet\
                  \n- still short\nReview material: {DIR}/review.md{LANDING_TAIL}"
             )
         );
@@ -3094,26 +3094,40 @@ mod tests {
         assert_eq!(landing_ask_reason(None), AskReason::Scope);
     }
 
-    /// A send_back the runtime would apply past the round's two revises asks
-    /// with the count of the round's revises.
+    /// A send_back the runtime would apply past the round's three revises
+    /// asks with the count of the round's revises; before the third one the
+    /// review's revise still goes to the live session.
     #[test]
     fn a_send_back_past_the_revise_limit_asks_with_the_count_of_revises() {
-        let round = events(&[
-            event_kind::REVIEW_STARTED,
-            event_kind::REVISE_REQUESTED,
-            event_kind::REVISE_FINISHED,
-            event_kind::REVIEW_STARTED,
+        let mut kinds = vec![event_kind::REVIEW_STARTED];
+        for _ in 0..2 {
+            kinds.extend([
+                event_kind::REVISE_REQUESTED,
+                event_kind::REVISE_FINISHED,
+                event_kind::REVIEW_STARTED,
+            ]);
+        }
+        let two = events(&kinds);
+        assert_eq!(
+            decide_revise(&RunHistory::from_events(&two)),
+            ReviseDecision::Request {
+                attempt: 3,
+                round: 3
+            }
+        );
+        kinds.extend([
             event_kind::REVISE_REQUESTED,
             event_kind::REVISE_FINISHED,
             event_kind::REVIEW_STARTED,
         ]);
+        let round = events(&kinds);
         let history = RunHistory::from_events(&round);
         assert_eq!(decide_revise(&history), ReviseDecision::Ask);
         let verdict = concern(Some("send_back"), Some("high"));
         let why = concern_escalation(&verdict, EscalatedBecause::ReviseLimit, &history);
         assert_eq!(
             why.as_deref(),
-            Some("the review recommends send_back after 2 revises")
+            Some("the review recommends send_back after 3 revises")
         );
         let question = landing_question(
             &run(),
@@ -3125,7 +3139,7 @@ mod tests {
         );
         assert!(
             question.starts_with(
-                "The supervisor's review of run r1 (task 1) returned concern (the review recommends send_back after 2 revises): judged"
+                "The supervisor's review of run r1 (task 1) returned concern (the review recommends send_back after 3 revises): judged"
             ),
             "{question}"
         );

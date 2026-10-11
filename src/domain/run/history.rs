@@ -941,12 +941,11 @@ mod tests {
     fn revises_stop_at_the_limit() {
         let decide = |k: &[&str]| decide_revise(&RunHistory::from_events(&kinds(k)));
         let request = |attempt, round| ReviseDecision::Request { attempt, round };
-        assert_eq!(decide(&[]), request(1, 1));
-        assert_eq!(decide(&["revise_requested"]), request(2, 2));
-        assert_eq!(
-            decide(&["revise_requested", "revise_requested"]),
-            ReviseDecision::Ask
-        );
+        let sent = |n: usize| vec!["revise_requested"; n];
+        for n in 0..MAX_REVISE_ATTEMPTS {
+            assert_eq!(decide(&sent(n)), request(n + 1, n + 1));
+        }
+        assert_eq!(decide(&sent(MAX_REVISE_ATTEMPTS)), ReviseDecision::Ask);
         // A revise withdrawn before it was typed does not count, but its
         // number is not reused.
         assert_eq!(
@@ -954,64 +953,64 @@ mod tests {
             request(3, 2)
         );
         // Events that are not boundaries leave the round going on.
-        assert_eq!(
-            decide(&[
-                "revise_requested",
-                "revise_finished",
-                "review_started",
-                "resume_skipped",
-                "revise_requested",
-            ]),
-            ReviseDecision::Ask
+        let mut spread = sent(MAX_REVISE_ATTEMPTS);
+        spread.splice(
+            1..1,
+            ["revise_finished", "review_started", "resume_skipped"],
         );
+        assert_eq!(decide(&spread), ReviseDecision::Ask);
     }
 
     #[test]
     fn revises_are_counted_again_after_a_boundary() {
-        let two = || {
-            vec![
-                event(1, "revise_requested", json!({"attempt": 1})),
-                event(2, "revise_requested", json!({"attempt": 2})),
-            ]
+        let revises = |from: usize, n: usize| -> Vec<RunEvent> {
+            (from..from + n)
+                .map(|i| event(i as i64 + 1, "revise_requested", json!({"attempt": i + 1})))
+                .collect()
         };
+        let full = || revises(0, MAX_REVISE_ATTEMPTS);
         let decide = |events: &[RunEvent]| decide_revise(&RunHistory::from_events(events));
         let boundaries = [
             ("resume_started", json!({"attempt": 1})),
             ("conflict_resolved", json!({})),
             ("landing_decided", json!({"status": "needs_session"})),
         ];
+        let used = MAX_REVISE_ATTEMPTS;
         for (kind, payload) in boundaries {
-            let mut events = two();
+            let mut events = full();
             assert_eq!(decide(&events), ReviseDecision::Ask);
-            events.push(event(3, kind, payload.clone()));
-            // A new round: revise 1 of it, numbered after the run's two.
-            assert_eq!(
-                decide(&events),
-                ReviseDecision::Request {
-                    attempt: 3,
-                    round: 1
-                },
-                "{kind}"
-            );
-            events.push(event(4, "revise_requested", json!({"attempt": 3})));
-            assert_eq!(
-                decide(&events),
-                ReviseDecision::Request {
-                    attempt: 4,
-                    round: 2
-                },
-                "{kind}"
-            );
-            events.push(event(5, "revise_requested", json!({"attempt": 4})));
+            events.push(event(used as i64 + 1, kind, payload.clone()));
+            // A new round: its revises are numbered after the run's earlier
+            // ones, up to the limit again.
+            for round in 1..=MAX_REVISE_ATTEMPTS {
+                assert_eq!(
+                    decide(&events),
+                    ReviseDecision::Request {
+                        attempt: used + round,
+                        round
+                    },
+                    "{kind}"
+                );
+                let attempt = used + round;
+                events.push(event(
+                    (used + 1 + round) as i64,
+                    "revise_requested",
+                    json!({"attempt": attempt}),
+                ));
+            }
             assert_eq!(decide(&events), ReviseDecision::Ask, "{kind}");
             let history = RunHistory::from_events(&events);
-            assert_eq!(history.revise_attempts(), 4);
-            assert_eq!(history.round_revise_attempts(), 2);
+            assert_eq!(history.revise_attempts(), 2 * MAX_REVISE_ATTEMPTS);
+            assert_eq!(history.round_revise_attempts(), MAX_REVISE_ATTEMPTS);
         }
         // A landing decision that does not send the run back (a person's
         // `land`) is no boundary.
-        let mut events = two();
-        events.push(event(3, "landing_decided", json!({"status": "failed"})));
+        let mut events = full();
+        events.push(event(
+            used as i64 + 1,
+            "landing_decided",
+            json!({"status": "failed"}),
+        ));
         assert_eq!(decide(&events), ReviseDecision::Ask);
     }
 

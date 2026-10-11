@@ -282,10 +282,12 @@ impl PlanReviewVerdict {
     }
 }
 
-/// How many times plan review sends one proposal back to its planner; a
-/// later review that does not pass is a `concern` (ADR-0041 decision 11,
-/// the same bound as a run's review).
-pub const MAX_PLAN_REVISES: u32 = super::MAX_REVISE_ATTEMPTS as u32;
+/// How many times plan review sends one proposal back to its planner over
+/// the proposal's whole life; a later review that does not pass is a
+/// `concern` (ADR-0047 decision 11). It does not follow a run's review
+/// bound (`MAX_REVISE_ATTEMPTS`): ADR-t2256-1 keeps the planner's round
+/// trips short.
+pub const MAX_PLAN_REVISES: u32 = 2;
 
 /// The options of the `approve_plan` ask a `concern` opens, which the
 /// supervisor applies once answered (ADR-0041 decision 11).

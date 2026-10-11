@@ -251,12 +251,16 @@ pub(crate) fn assert_raised_by_revise(requested: &Value, backend: &TestWorkspace
     assert_eq!(escalations["by_reason"], json!({"revise": 1}));
 }
 
-/// Each of two revises raised the live session a step: high, then xhigh.
+/// Each of three revises raised the live session a step up to the top:
+/// high, then xhigh, where the third stays.
 pub(crate) fn assert_revises_raised(detail: &dagq::domain::TaskDetail, backend: &TestWorkspace) {
     let efforts: Vec<&Value> = payloads(detail, "revise_requested")
         .iter()
         .map(|p| &p["effort"])
         .collect();
-    assert_eq!(efforts, [&json!("high"), &json!("xhigh")]);
-    assert_eq!(revise_efforts(backend), ["/effort high", "/effort xhigh"]);
+    assert_eq!(efforts, [&json!("high"), &json!("xhigh"), &json!("xhigh")]);
+    assert_eq!(
+        revise_efforts(backend),
+        ["/effort high", "/effort xhigh", "/effort xhigh"]
+    );
 }

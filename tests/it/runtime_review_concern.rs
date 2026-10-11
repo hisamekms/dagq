@@ -190,7 +190,7 @@ fn a_high_send_back_revises_the_live_session() {
     );
     let texts = session_texts(&detail.runs[0]);
     assert_eq!(texts.len(), 1);
-    assert!(texts[0].contains("(revise 1 of 2)"), "{}", texts[0]);
+    assert!(texts[0].contains("(revise 1 of 3)"), "{}", texts[0]);
     assert_eq!(reviewer.prompts().len(), 2);
 }
 

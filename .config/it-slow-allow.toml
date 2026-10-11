@@ -919,3 +919,15 @@ task = 1903
 name = "review_subagents::the_real_claude_review_jobs_keep_their_limits"
 reason = "B 境界（プロセス）: 実 Claude Code の process が dagq の全体の review と agent の job の argv では worktree の settings と agents を読まず、settings の deny と宣言した道具に限られることを、それぞれの対照との実の呼び出しで確かめる。argv の組み立ては infrastructure::adapters の unit test"
 task = 2251
+
+# 6.0s
+[[test]]
+name = "runtime_review::a_review_past_the_revise_limit_that_does_not_pass_asks_a_person_and_land_lands_it"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 生きている session に回の上限まで revise を返した後の review の send_back が、終了の依頼と close の後に approve_landing の ask になり、その land の答えで着地することを実際の supervisor と worker の session で確かめる。上限の判断は domain::run::history と supervise::landing の unit test"
+task = 2256
+
+# 5.3s
+[[test]]
+name = "runtime_job_verdicts::a_revise_past_its_limit_is_asked_at_the_review_jobs_request"
+reason = "B 境界（SQLite・supervisor の配線）: 生きている session との revise の往復を回の上限まで実際に経た後の revise の approve_landing の ask を、supervisor がその review の job の依頼（requested_by）として記録することを確かめる。上限の判断は domain::run::history の unit test"
+task = 2256

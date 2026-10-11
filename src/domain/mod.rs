@@ -556,10 +556,13 @@ impl ReviewVerdict {
     }
 }
 
-/// How many times the supervisor sends a `revise` verdict back to the live
-/// session of one run; a later review that does not pass is a `concern`
-/// (ADR-0027 decision 2).
-pub const MAX_REVISE_ATTEMPTS: usize = 2;
+/// How many times the supervisor sends a `revise` verdict, or a `concern`'s
+/// `send_back` it applies, back to the live session of one run in a review
+/// round (ADR-0027 decision 2, counted per round by ADR-0050, the value
+/// from ADR-t2256-1). Past it, a `revise` and such a `send_back` are asked
+/// of a person (`approve_landing`, `revise_limit`); a `concern`'s other
+/// decisions do not depend on it (ADR-t451-1 decision 3).
+pub const MAX_REVISE_ATTEMPTS: usize = 3;
 
 /// The options of the `approve_landing` ask a `concern` opens, which the
 /// supervisor acts on once answered (ADR-0027, ADR-0022 decision 3).
