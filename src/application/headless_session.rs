@@ -130,7 +130,15 @@ pub(super) struct Turns<'a> {
     pub(super) background: bool,
     /// The clock the turns' stamps and the recorded times are read on.
     pub(super) clock: &'a dyn Clock,
+    /// Reads where `dagq.toml` puts the worker, before each turn of a run:
+    /// a worker set to the container is refused there and never started on
+    /// the host, a run started on the host before the change too, and so is
+    /// a turn whose read fails (goal 38). `None` for a planner.
+    pub(super) runtimes: Option<&'a RuntimesFile>,
 }
+
+/// Reads the runtimes of the main checkout's `dagq.toml` (goal 38).
+pub type RuntimesFile = dyn Fn() -> Result<crate::domain::container_runtime::RuntimeConfig>;
 
 /// The session of the provider a run is on, as its events since its
 /// worker's session last started anew say: since it moved to that provider
@@ -818,6 +826,15 @@ impl<'a> Turns<'a> {
             .with_events(events);
         if let Some(service) = self.queue_service {
             executor = executor.with_queue_service(service);
+        }
+        // A file that cannot be read may set the worker to the container:
+        // the turn is not started, on the host or anywhere (fail closed).
+        if let (TurnOwner::Run(_), Some(read)) = (&self.owner, self.runtimes) {
+            let runtimes = read().context(
+                "the runtimes of dagq.toml could not be read; dagq refuses to start the worker's turn rather than run it on the host",
+            )?;
+            executor =
+                executor.with_config(super::execution::ExecutionConfig::of_runtimes(&runtimes));
         }
         let spawned = executor
             .spawn(ActorExecutionSpec::new(

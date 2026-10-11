@@ -333,6 +333,10 @@ fn run_session_as(
         ps: "ps".into(),
         dagq: dagq.map(Path::to_path_buf),
     };
+    // Read again before each turn (goal 38).
+    let bound =
+        crate::infrastructure::run_env::BoundRuntimes::new(crate::compose::bound_checkout(&queue));
+    let runtimes = move || bound.read();
     wrapper::run_session(
         Session {
             queue: &mut queue,
@@ -348,6 +352,7 @@ fn run_session_as(
             sccache: sccache
                 .map(|target| (target, &looker as &dyn crate::application::SccacheServer)),
             clock: &crate::infrastructure::clock::SystemClock,
+            runtimes: &runtimes,
         },
         id,
         token,
@@ -454,6 +459,8 @@ impl OneShot {
             queue: &mut queue,
             repository: &repository,
             verifier: &verifier,
+            // No part of the container runtime is built yet (goal 38).
+            container: &crate::infrastructure::container_runtime::UnbuiltContainer,
             remote,
             files: &LocalRunFiles,
             common_dir: &common_dir,

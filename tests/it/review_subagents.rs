@@ -986,10 +986,15 @@ fn the_real_claude_review_jobs_keep_their_limits() {
             .args(&args)
             .current_dir(command.get_current_dir().unwrap())
             .env_remove("CLAUDECODE")
-            .stdin(fs::File::open(input).unwrap());
+            .stdin(fs::File::open(input).unwrap())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // Killed when the test ends early, and by its pid when the wait
+        // below times out and the process exits without the drops.
+        let job = crate::common::KillOnDrop::new(process.spawn().unwrap(), "the real Claude job");
         let output = {
             let _waiting = crate::common::within(Duration::from_secs(300), "the real Claude job");
-            process.output().unwrap()
+            job.wait_with_output().unwrap()
         };
         assert!(output.status.success(), "{output:?}");
         let stdout = String::from_utf8_lossy(&output.stdout);

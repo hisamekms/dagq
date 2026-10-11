@@ -124,6 +124,8 @@ event_kinds! {
     ConflictReceiptRejected => "conflict_receipt_rejected",
     ConflictResolved => "conflict_resolved",
     ConflictsConfigChanged => "conflicts_config_changed",
+    ContainerRuntimeAvailable => "container_runtime_available",
+    ContainerRuntimeUnavailable => "container_runtime_unavailable",
     DependencyAdded => "dependency_added",
     DependencyRemoved => "dependency_removed",
     DependencyStranded => "dependency_stranded",
@@ -453,6 +455,10 @@ impl EventKind {
                 | PlannerAnswerClaimed
                 | RunEnvProgramMissing
                 | RunEnvProgramFound
+                // Whether the container runtime a target is set to can be
+                // used (goal 38, ADR-t2113-1 decision 4).
+                | ContainerRuntimeUnavailable
+                | ContainerRuntimeAvailable
                 // The supervisor's watch of the landing branch's CI
                 // (ADR-t1920-1).
                 | CiChecked
@@ -1133,6 +1139,14 @@ mod tests {
             (
                 EventKind::ConflictsConfigChanged,
                 "conflicts_config_changed",
+            ),
+            (
+                EventKind::ContainerRuntimeAvailable,
+                "container_runtime_available",
+            ),
+            (
+                EventKind::ContainerRuntimeUnavailable,
+                "container_runtime_unavailable",
             ),
             (EventKind::DependencyAdded, "dependency_added"),
             (EventKind::DependencyRemoved, "dependency_removed"),

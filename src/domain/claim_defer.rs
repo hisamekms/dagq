@@ -320,7 +320,11 @@ pub enum Decision {
 /// Judge one candidate: `interrupt` for a task of interrupt priority,
 /// `overlap` of its files with the runs [`counted`], `left_out` why they
 /// meet only runs left out ([`left_out`]), `deferral` the one in place
-/// (updated here), `now` in unix seconds.
+/// (updated here), `now` in unix seconds. A deferral's `claim_deferred`
+/// holds the `reason` (`hot_files`), the overlapping `files` and `runs`,
+/// the limit `max_secs`, the log's `message` and the `supervisor`; its
+/// `claim_deferral_ended` the `reason`, the `why`, its `deferred_secs` and
+/// the `supervisor`.
 pub fn decide(
     interrupt: bool,
     overlap: Option<Overlap>,
@@ -426,15 +430,31 @@ pub fn worker_deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, (String
 }
 
 /// The `claim_deferred` of a task whose worker this supervisor cannot run
-/// (ADR-t813-2): `reason` from [`super::worker::unavailable`]. It lasts
+/// (ADR-t813-2): `reason` from [`super::worker::unavailable`], or from
+/// [`super::container_runtime::worker_deferral`] for the worker's runtime
+/// (goal 38), where `worker` (its `provider` in the payload) is the one the
+/// task's route goes to, the one the container does not run. It lasts
 /// until the supervisor can run the worker or the task leaves the
-/// candidates; it has no limit.
+/// candidates; it has no limit. The payload holds the `reason`, the
+/// worker's `provider` and `worker_mode`, the log's `message` and the
+/// `supervisor`.
 pub fn worker_deferred(
     reason: &str,
     worker: super::worker::Worker,
     token: &LeaseToken,
 ) -> (EventKind, Value) {
-    let message = if reason == super::worker::FALLBACK_OFF {
+    use super::container_runtime::{CONTAINER_PROVIDER, CONTAINER_UNAVAILABLE};
+    let message = if reason == CONTAINER_UNAVAILABLE {
+        format!(
+            "dagq.toml sets the worker's runtime to the container, which cannot be used now ({reason}): not claimed until it can, never on the host instead"
+        )
+    } else if reason == CONTAINER_PROVIDER {
+        format!(
+            "dagq.toml sets the worker's runtime to the container, which runs no {} worker ({reason}): not claimed while the task would run on {}",
+            worker.provider.as_str(),
+            worker.provider.as_str()
+        )
+    } else if reason == super::worker::FALLBACK_OFF {
         format!(
             "{} cannot be used now and [provider_fallback] workers is false, so the {} {} worker does not start on the other provider ({reason}): not claimed until {} can be used again",
             worker.provider.as_str(),
@@ -462,8 +482,11 @@ pub fn worker_deferred(
 }
 
 /// The end of a deferral for the worker: `why` is `cleared` (the
-/// supervisor can run it now) or `not_candidate`. The wait for a build
-/// ends the same way ([`super::build_wait::ended`]).
+/// supervisor can run it now), `not_candidate`, or `reason_changed` (it is
+/// still deferred, for another reason: [`worker_step`]). The wait for a build
+/// ends the same way ([`super::build_wait::ended`]). The payload holds the
+/// deferral's `reason`, the `why`, its `deferred_secs` and the
+/// `supervisor`.
 pub fn worker_deferral_ended(
     reason: &str,
     why: &str,
@@ -480,6 +503,52 @@ pub fn worker_deferral_ended(
             "supervisor": token,
         }),
     )
+}
+
+/// What [`worker_step`] did with a candidate's deferral for its worker.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkerStep {
+    /// Deferred, with the events to record (none while the same reason
+    /// holds): the candidate is passed over.
+    Deferred(Vec<(EventKind, Value)>),
+    /// The deferral ended (`why: cleared`): the candidate goes on.
+    Cleared((EventKind, Value)),
+    /// Not deferred, and none was in place.
+    Open,
+}
+
+/// The deferral of `task` for its worker, given why it cannot run now
+/// (`reason`: the worker named and why, `None` when it can) and the
+/// deferrals in place (`in_place`, the reason and since when), which it
+/// updates. The first deferral records [`worker_deferred`]; while the
+/// same reason holds nothing more is recorded; a different reason (the
+/// worker's runtime changed, say) ends the one in place
+/// (`why: reason_changed`) and records the new one; and a candidate the
+/// worker can run again ends it (`why: cleared`).
+pub fn worker_step(
+    reason: Option<(super::worker::Worker, &str)>,
+    in_place: &mut HashMap<TaskId, (String, i64)>,
+    task: TaskId,
+    now: i64,
+    token: &LeaseToken,
+) -> WorkerStep {
+    match (reason, in_place.get(&task)) {
+        (Some((worker, why)), Some((was, since))) if why != was.as_str() => {
+            let ended = worker_deferral_ended(was, "reason_changed", *since, now, token);
+            in_place.insert(task, (why.to_owned(), now));
+            WorkerStep::Deferred(vec![ended, worker_deferred(why, worker, token)])
+        }
+        (Some(_), Some(_)) => WorkerStep::Deferred(Vec::new()),
+        (Some((worker, why)), None) => {
+            in_place.insert(task, (why.to_owned(), now));
+            WorkerStep::Deferred(vec![worker_deferred(why, worker, token)])
+        }
+        (None, Some(_)) => {
+            let (why, since) = in_place.remove(&task).expect("a deferral in place");
+            WorkerStep::Cleared(worker_deferral_ended(&why, "cleared", since, now, token))
+        }
+        (None, None) => WorkerStep::Open,
+    }
 }
 
 /// Why the claim is deferred, for the log and the event.
@@ -1337,5 +1406,79 @@ mod tests {
         let latest = [event(4, 1, CLAIM_DEFERRAL_ENDED, ended, "00:05")];
         assert!(worker_deferrals_in_place(&latest).is_empty());
         assert!(deferrals_in_place(&latest).is_empty());
+    }
+
+    /// A deferral for the worker is recorded once, told again with its new
+    /// reason when the reason changes (the worker's runtime set to the
+    /// container, say), and ended once the worker can run.
+    #[test]
+    fn a_worker_deferral_is_recorded_once_renewed_on_a_new_reason_and_cleared() {
+        use crate::domain::{
+            Provider,
+            container_runtime::CONTAINER_UNAVAILABLE,
+            worker::{PROVIDER_UNAVAILABLE, Worker, WorkerMode},
+        };
+        let worker = Worker {
+            provider: Provider::Codex,
+            mode: WorkerMode::Headless,
+        };
+        let token = LeaseToken::new("t");
+        let task = TaskId::new(7);
+        let mut in_place = HashMap::new();
+        let WorkerStep::Deferred(first) = worker_step(
+            Some((worker, PROVIDER_UNAVAILABLE)),
+            &mut in_place,
+            task,
+            100,
+            &token,
+        ) else {
+            panic!("deferred")
+        };
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, EventKind::ClaimDeferred);
+        assert_eq!(first[0].1["reason"], PROVIDER_UNAVAILABLE);
+        // The same reason records nothing more.
+        assert_eq!(
+            worker_step(
+                Some((worker, PROVIDER_UNAVAILABLE)),
+                &mut in_place,
+                task,
+                110,
+                &token
+            ),
+            WorkerStep::Deferred(Vec::new())
+        );
+        // A new reason ends the one in place and records itself.
+        let WorkerStep::Deferred(renewed) = worker_step(
+            Some((worker, CONTAINER_UNAVAILABLE)),
+            &mut in_place,
+            task,
+            130,
+            &token,
+        ) else {
+            panic!("deferred")
+        };
+        assert_eq!(renewed[0].0, EventKind::ClaimDeferralEnded);
+        assert_eq!(renewed[0].1["reason"], PROVIDER_UNAVAILABLE);
+        assert_eq!(renewed[0].1["why"], "reason_changed");
+        assert_eq!(renewed[0].1["deferred_secs"], 30);
+        assert_eq!(renewed[1].0, EventKind::ClaimDeferred);
+        assert_eq!(renewed[1].1["reason"], CONTAINER_UNAVAILABLE);
+        assert_eq!(in_place[&task], (CONTAINER_UNAVAILABLE.to_owned(), 130));
+        // Runnable again: ended, counted from the new reason.
+        let WorkerStep::Cleared((kind, payload)) =
+            worker_step(None, &mut in_place, task, 150, &token)
+        else {
+            panic!("cleared")
+        };
+        assert_eq!(kind, EventKind::ClaimDeferralEnded);
+        assert_eq!(payload["why"], "cleared");
+        assert_eq!(payload["reason"], CONTAINER_UNAVAILABLE);
+        assert_eq!(payload["deferred_secs"], 20);
+        assert!(in_place.is_empty());
+        assert_eq!(
+            worker_step(None, &mut in_place, task, 160, &token),
+            WorkerStep::Open
+        );
     }
 }

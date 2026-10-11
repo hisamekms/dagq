@@ -84,6 +84,11 @@ impl Supervisor<'_> {
                 }
                 continue;
             }
+            // Nor on a container that cannot be used or does not reach its
+            // provider: it waits, never on the host (goal 38).
+            if self.container_deferral(run.actual_provider()).is_some() {
+                continue;
+            }
             ready.push(candidate);
         }
         Ok(ready)

@@ -694,6 +694,9 @@ pub fn supervise_with_reviewer(
             user_config: options.user_config.clone(),
             verification_timeout: VERIFICATION_TIMEOUT,
         }),
+        // No part of the container runtime is built yet (goal 38): a target
+        // set to it waits.
+        container: Arc::new(crate::infrastructure::container_runtime::UnbuiltContainer),
         remote: Arc::new(repository.clone()),
         repository: Arc::new(repository),
         sessions,

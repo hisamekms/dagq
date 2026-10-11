@@ -60,6 +60,7 @@ supervisor
   動くのはClaudeとCodex（Codexの固有の点は[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。
 - supervisorは依頼と終了の依頼を書くだけで、turnを起動しない。
   turnを起動し、記録するのはwrapperだけ。
+  workerをcontainerに置く設定か読めない設定では、wrapperはturnを起動しない（[Container runtime](../container-runtime.md#fail-closedの境界)）。
   wrapperが死んで残したturnと、turnの外に切り離されたprocessは、supervisorの停止と復旧jobが止める。
 - wrapperは誰のturnかを`TurnOwner`（runかplanner）で持ち、違いはそこに閉じる。
 - e2eはworkerのturnで流さず、要るrunにはreviewのpassの後にruntimeがhostで流す（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[着地の前のe2e](landing-e2e.md)）。
@@ -103,6 +104,7 @@ supervisor
 ## 経路の全体
 
 - 最初のturnは`prompt.txt`をpromptにしてsessionを始め、後のturnはsupervisorの依頼を1つずつ取って同じsessionをresumeする。
+  各turnの前にwrapperはworkerのruntimeを読み直し（`RuntimesFile`）、拒めばerrorで終わりrunは失敗する。
   Claudeはsessionの名前をrunのidにし、Codexは出力で名乗ったthreadのidを`turn_session_identified`として記録して、それをresumeする。
 - 依頼を待つ間、agentのprocessは無く、wrapperはheartbeatを続ける。
 - 答え・revise・resume・催促のどれも`deliver::submit`が`request_turn`で`turns/`に書く。

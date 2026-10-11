@@ -148,6 +148,12 @@ fn doctor_roles(queue: &SqliteQueue) -> Value {
     })
 }
 
+/// `runtime` of `[roles.worker]` and `[roles.verification]` of the
+/// `dagq.toml` of the bound main checkout (goal 38).
+fn runtimes_of(queue: &SqliteQueue) -> Result<crate::domain::container_runtime::RuntimeConfig> {
+    crate::infrastructure::run_env::BoundRuntimes::new(bound_checkout(queue)).read()
+}
+
 /// `doctor`'s `agents`: see [`crate::application::review::check_agents`],
 /// read from the landing branch of the checkout `queue` is bound to; none
 /// for a queue bound to none or a landing branch without agents, and
@@ -749,6 +755,7 @@ impl OneShot {
             ci_named_jobs,
         )?;
         add_sccache_diagnostics(queue, db, false, &mut status)?;
+        health::add_runtimes(&mut status, queue, &SystemProcesses, runtimes_of(queue))?;
         let live_builds = crate::application::release_update::live_builds(&status["supervisors"]);
         status["release_update"] = crate::application::release_update::status(
             queue,
@@ -830,6 +837,7 @@ impl OneShot {
                 }
                 add_sccache_diagnostics(&queue, db, true, &mut report)?;
                 report["roles"] = doctor_roles(&queue);
+                health::add_runtimes(&mut report, &queue, &SystemProcesses, runtimes_of(&queue))?;
                 // The means the CI watch reads GitHub with (ADR-t1920-1).
                 if let Some(ci_watch) = doctor_ci_watch(&queue)? {
                     report["ci_watch"] = ci_watch;

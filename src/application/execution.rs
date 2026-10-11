@@ -3,12 +3,15 @@
 //! [`EnforcementLevel`] it gives, as `status` and `doctor` show them, and
 //! the Claude Code `permissions.deny` rules made from the role's policy.
 //!
-//! `host` is the only backend: the actor is a process of this user, and
-//! the runtime's checks are advisory, not a sandbox. `podman` is only a
-//! reserved name: an actor configured for it is refused (fail closed) and
-//! never started on the host instead. The configuration is the shape of a
-//! later `[security] backend` and `[actors.<role>] backend`; nothing reads
-//! it from a file yet, so every actor runs on the host.
+//! An actor runs on the host: a process of this user, and the runtime's
+//! checks are advisory, not a sandbox. The worker (with its resume) and the
+//! verification of `integrate` may be set to the container instead (goal
+//! 38, [`RuntimeConfig`] read from `dagq.toml`): `status` and `doctor` show
+//! each target's runtime ([`runtime_executions`]). While the container
+//! cannot be used, what is set to it waits and never runs on the host
+//! instead (ADR-t2113-1 decision 4; the supervisor and `integrate` ask
+//! their `ContainerRuntime` port); an actor started directly on a backend
+//! that is not built is refused ([`ExecutorBackend::ensure_implemented`]).
 //!
 //! The worker's row also names each provider its supervisors run it on,
 //! once a Codex worker can run (ADR-t813-3 decision 7): the Claude worker
@@ -22,6 +25,7 @@ use crate::domain::{
     ActorRole, Provider, TrustLevel,
     actor::{ACTOR_ID_ENV, ROLE_ENV, RUN_ID_ENV, TASK_ID_ENV},
     authorization::{Capability, grants},
+    container_runtime::{Runtime, RuntimeConfig, RuntimeTarget},
     worker::{ProviderCheck, WorkerMode},
 };
 
@@ -32,25 +36,33 @@ pub enum ExecutorBackend {
     /// Processes of this user on this host.
     #[default]
     Host,
-    /// Containers (goal 38). Reserved: selecting it is refused until it
-    /// exists, never run on the host instead.
-    Podman,
+    /// A container per run (goal 38). Its parts are later tasks': nothing
+    /// is started on it yet, and never on the host instead.
+    Container,
+}
+
+impl From<Runtime> for ExecutorBackend {
+    fn from(runtime: Runtime) -> Self {
+        match runtime {
+            Runtime::Host => Self::Host,
+            Runtime::Container => Self::Container,
+        }
+    }
 }
 
 impl ExecutorBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Host => "host",
-            Self::Podman => "podman",
+            Self::Container => "container",
         }
     }
 
     /// The backend a configuration names; an unknown name is refused.
     pub fn parse(name: &str) -> Result<Self> {
-        match name {
-            "host" => Ok(Self::Host),
-            "podman" => Ok(Self::Podman),
-            other => bail!("unknown executor backend {other:?} (host or podman)"),
+        match name.parse::<Runtime>() {
+            Ok(runtime) => Ok(runtime.into()),
+            Err(_) => bail!("unknown executor backend {name:?} (host or container)"),
         }
     }
 
@@ -58,17 +70,17 @@ impl ExecutorBackend {
     pub const fn enforcement(self) -> EnforcementLevel {
         match self {
             Self::Host => EnforcementLevel::Advisory,
-            Self::Podman => EnforcementLevel::Sandbox,
+            Self::Container => EnforcementLevel::Sandbox,
         }
     }
 
-    /// Refuse a backend that is only a reserved name (fail closed): the
-    /// actor is not started, on it or on the host.
+    /// Refuse a backend nothing can start an actor on yet (fail closed):
+    /// the actor is not started, on it or on the host.
     pub fn ensure_implemented(self) -> Result<()> {
         match self {
             Self::Host => Ok(()),
-            Self::Podman => bail!(
-                "the podman executor backend is reserved and not implemented; \
+            Self::Container => bail!(
+                "the container executor is not built yet; \
                  dagq refuses to start the actor rather than run it on the host"
             ),
         }
@@ -116,9 +128,9 @@ impl EnforcementLevel {
     }
 }
 
-/// The backend of each actor: `backend` for all (a later `[security]
-/// backend`) and the overrides of some roles (a later `[actors.<role>]
-/// backend`). The default runs every actor on the host.
+/// The backend of each actor: `backend` for all and the overrides of
+/// some roles. The default runs every actor on the host;
+/// [`Self::of_runtimes`] puts the worker where `dagq.toml` sets it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecutionConfig {
     pub backend: ExecutorBackend,
@@ -126,6 +138,14 @@ pub struct ExecutionConfig {
 }
 
 impl ExecutionConfig {
+    /// The worker where `runtimes` sets it, every other actor on the host.
+    pub fn of_runtimes(runtimes: &RuntimeConfig) -> Self {
+        Self {
+            backend: ExecutorBackend::Host,
+            actors: vec![(ActorRole::Worker, runtimes.worker.into())],
+        }
+    }
+
     /// The backend `role` runs on: its override, else the default.
     pub fn backend_of(&self, role: ActorRole) -> ExecutorBackend {
         self.actors
@@ -135,7 +155,8 @@ impl ExecutionConfig {
     }
 
     /// Each AI actor with its backend and enforcement, as `status` and
-    /// `doctor` show them. A backend that is not implemented is refused.
+    /// `doctor` show them: a backend that is not built is shown as set,
+    /// as nothing is started on it.
     /// `checks` are the providers the registered supervisors resolved:
     /// when one of them can run a Codex worker, the worker's row lists
     /// each usable provider with its own enforcement (`providers`);
@@ -145,7 +166,6 @@ impl ExecutionConfig {
         ai_actor_roles()
             .map(|role| {
                 let backend = self.backend_of(role);
-                backend.ensure_implemented()?;
                 let enforcement = backend.enforcement();
                 let providers = if role == ActorRole::Worker {
                     workers
@@ -239,6 +259,34 @@ pub struct ProviderExecution {
 /// provider confined.
 pub fn actor_executions(checks: &[ProviderCheck]) -> Result<Vec<ActorExecution>> {
     ExecutionConfig::default().profiles(checks)
+}
+
+/// Where one target runs and how far that holds it, as `status` and
+/// `doctor` show it: the host advisory, the container a sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeExecution {
+    pub target: RuntimeTarget,
+    pub runtime: Runtime,
+    pub enforcement: EnforcementLevel,
+    pub sandboxed: bool,
+}
+
+/// Each target of `config` ([`RuntimeTarget::ALL`]) with its runtime and
+/// enforcement.
+pub fn runtime_executions(config: &RuntimeConfig) -> Vec<RuntimeExecution> {
+    RuntimeTarget::ALL
+        .into_iter()
+        .map(|target| {
+            let runtime = config.of(target);
+            let enforcement = ExecutorBackend::from(runtime).enforcement();
+            RuntimeExecution {
+                target,
+                runtime,
+                enforcement,
+                sandboxed: enforcement.is_sandbox(),
+            }
+        })
+        .collect()
 }
 
 use Capability as C;
@@ -445,7 +493,7 @@ mod tests {
         assert!(!EnforcementLevel::Confined.is_sandbox());
         // An isolating backend holds both providers.
         assert_eq!(
-            EnforcementLevel::of_worker(ExecutorBackend::Podman, Provider::Codex),
+            EnforcementLevel::of_worker(ExecutorBackend::Container, Provider::Codex),
             EnforcementLevel::Sandbox
         );
         assert_eq!(
@@ -488,39 +536,67 @@ mod tests {
     }
 
     #[test]
-    fn podman_is_refused_and_never_falls_back_to_the_host() {
+    fn the_container_is_never_started_and_never_falls_back_to_the_host() {
         assert_eq!(
-            ExecutorBackend::parse("podman").unwrap(),
-            ExecutorBackend::Podman
+            ExecutorBackend::parse("container").unwrap(),
+            ExecutorBackend::Container
         );
+        assert!(ExecutorBackend::parse("podman").is_err());
         assert_eq!(
             ExecutorBackend::parse("host").unwrap(),
             ExecutorBackend::Host
         );
         assert!(ExecutorBackend::parse("docker").is_err());
         assert_eq!(
-            ExecutorBackend::Podman.enforcement(),
+            ExecutorBackend::Container.enforcement(),
             EnforcementLevel::Sandbox
         );
-        let error = ExecutorBackend::Podman
+        let error = ExecutorBackend::Container
             .ensure_implemented()
             .unwrap_err()
             .to_string();
-        assert!(error.contains("not implemented"), "{error}");
-        // For every actor, or for one: the whole view is refused rather
-        // than shown as the host.
-        let all = ExecutionConfig {
-            backend: ExecutorBackend::Podman,
-            actors: Vec::new(),
-        };
-        assert!(all.profiles(&[]).is_err());
+        assert!(error.contains("not built"), "{error}");
+        // `status` and `doctor` show a backend set to the container as it
+        // is set, never as the host.
         let one = ExecutionConfig {
             backend: ExecutorBackend::Host,
-            actors: vec![(ActorRole::Worker, ExecutorBackend::Podman)],
+            actors: vec![(ActorRole::Worker, ExecutorBackend::Container)],
         };
-        assert_eq!(one.backend_of(ActorRole::Worker), ExecutorBackend::Podman);
+        assert_eq!(
+            one.backend_of(ActorRole::Worker),
+            ExecutorBackend::Container
+        );
         assert_eq!(one.backend_of(ActorRole::Planner), ExecutorBackend::Host);
-        assert!(one.profiles(&[]).is_err());
+        let worker = one
+            .profiles(&[])
+            .unwrap()
+            .into_iter()
+            .find(|p| p.role == ActorRole::Worker)
+            .unwrap();
+        assert_eq!(worker.backend, ExecutorBackend::Container);
+        assert_eq!(worker.enforcement, EnforcementLevel::Sandbox);
+        assert!(worker.sandboxed);
+        // Every target runs where `dagq.toml` sets it; the default is the
+        // host.
+        let runtimes = RuntimeConfig {
+            worker: Runtime::Container,
+            verification: Runtime::Host,
+        };
+        assert_eq!(ExecutionConfig::of_runtimes(&runtimes), one);
+        assert_eq!(
+            serde_json::to_value(runtime_executions(&runtimes)).unwrap(),
+            serde_json::json!([
+                {"target": "worker", "runtime": "container",
+                 "enforcement": "sandbox", "sandboxed": true},
+                {"target": "verification", "runtime": "host",
+                 "enforcement": "advisory", "sandboxed": false},
+            ])
+        );
+        assert!(
+            runtime_executions(&RuntimeConfig::default())
+                .iter()
+                .all(|row| row.runtime == Runtime::Host && !row.sandboxed)
+        );
         assert_eq!(
             EnforcementLevel::Sandbox.as_str(),
             "sandbox",

@@ -119,6 +119,8 @@ pub struct Session<'a> {
     )>,
     /// The clock the wrapper's turns read their times on.
     pub clock: &'a dyn super::Clock,
+    /// Reads where `dagq.toml` puts the worker, before each turn (goal 38).
+    pub runtimes: &'a super::headless_session::RuntimesFile,
 }
 
 /// Wrap the agent of run `id` under the lease `token` until it exits; the
@@ -143,6 +145,7 @@ pub fn run_session(
         start,
         sccache,
         clock,
+        runtimes,
     } = ctx;
     // A background wrapper finds its start among the run's records by its
     // pid and the start the system shows for it (ADR-t1404-1 decision 2).
@@ -171,6 +174,7 @@ pub fn run_session(
         sccache: sccache.as_ref().map(|(target, server)| (target, *server)),
         background: start == WrapperStart::Background,
         clock,
+        runtimes: Some(runtimes),
     }
     .drive(&mut child_may_be_alive);
     match result {

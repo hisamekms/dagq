@@ -116,7 +116,10 @@ roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説�
 - プロセス: 他のactorのプロセスにsignalを送れる（`pkill`・`killall`を拒むのもguardrail）
 - 古いバイナリへの戻し: 判定は呼ばれたバイナリのpolicyで決まるので、固定バイナリを戻すと、未知の`DAGQ_ROLE`を拒まない（task 729より前の）バイナリへ戻すと、新しいバイナリが起動したjobのroleを制限しない窓ができる（[Authorization](authorization.md#固定バイナリを戻したときの窓)）
 
-`status`と`doctor`は`actors`に、AI actorごとの`backend: host`・`enforcement: advisory`・`sandboxed: false`を出し、隔離していないことを実行時にも明示する（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。Codexのworkerを動かせるsupervisorが居るときは、workerの行の`providers`がCodexを`enforcement: confined`・`sandboxed: false`で出す（下の「Codexのworkerのsandbox」）。ActorExecutorのspec（workspace・capability・timeout）もhostでは記録と整合の検査だけで、プロセスはこのユーザーにできることを全てできる。
+`status`と`doctor`は`actors`に、AI actorごとの`backend: host`・`enforcement: advisory`・`sandboxed: false`を出し、隔離していないことを実行時にも明示する（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。
+`dagq.toml`がworkerかintegrateのverificationをcontainerにしたときは、`runtimes`が適用先ごとのruntimeとenforcement（containerは`sandbox`）を出し、workerの行の`backend`もそれに従う（[Container runtime](container-runtime.md)）。
+hostのworkerでCodexを動かせるsupervisorが居るときは、workerの行の`providers`がCodexを`enforcement: confined`・`sandboxed: false`で出す（下の「Codexのworkerのsandbox」）。
+ActorExecutorのspec（workspace・capability・timeout）もhostでは記録と整合の検査だけで、プロセスはこのユーザーにできることを全てできる。
 
 
 ### Codexのworkerのsandbox
@@ -150,9 +153,12 @@ inboxは全てのaskにanswerでき、`dagq-recover`の手作業（`integrate`�
 
 capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`StaticPolicy`）はbackendを替えても変えない。sandboxやserviceは、同じ模型の上に強制の点を足すだけで、模型を作り直さない（ADR-t728-1の決定6）。
 
-1. **Podman（draftのgoal 38）**: `ExecutorBackend::Podman`は予約の名前で、今は`ensure_implemented`がerrorにし、選ばれたactorを起動しない（hostに黙って戻さない。fail closed）。
-   reviewのprogramのjobもreviewのactorのbackendで流す場所を選び、Podmanならjobの起動の失敗にしてhostで流さない（[プログラムのreview](supervisor-lifecycle/review-programs.md)）。
-   最初に隔離するのは、最も広いworktreeを持ち信頼しないworkerで、`[actors.worker] backend = "podman"`の形で選ぶ。containerはrunのworktreeとrun dirだけをmountし（例外はbrokerへのrunのunix socketと、compileのcache。[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)・[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。予約のcapability（filesystem・network・secret）はこのbackendが強制する。
+1. **container**: `dagq.toml`がworker（resumeを含む）とintegrateのverificationの適用先ごとにhostかcontainerを選ぶ（[Container runtime](container-runtime.md)）。
+   containerの部品はまだ無く、containerを選んだ適用先はclaim・resume・verificationを控えてattentionで知らせ、hostに黙って戻さない（fail closed、[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)決定4）。
+   `ExecutorBackend::Container`へactorを直接起動する経路は`ensure_implemented`がerrorにする。
+   reviewのprogramのjobもreviewのactorのbackendで流す場所を選び、containerならjobの起動の失敗にしてhostで流さない（[プログラムのreview](supervisor-lifecycle/review-programs.md)）。
+   containerはrunのworktreeとrun dirだけをmountし（例外はbrokerへのrunのunix socketと、compileのcache。[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)・[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。
+   予約のcapability（filesystem・network・secret）はこのbackendが強制する。
    containerで動かすのは信頼しないコードを走らせるworker・resumeとintegrateのverificationだけで、読むだけのheadlessのjobの隔離はOSのsandboxにする（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)）。
    containerのrunにはhostのgitの共通dirをmountせず、runごとのcloneを渡す（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）
 2. **queue service / broker（goal 82・goal 38）**: DBの直接操作とenvの偽装を塞ぐには、AI actorがqueueのファイルに触れず、制御側のserviceにだけ依頼する形にする。serviceと、workerとjobのdagqのクライアントモード（unix socket・APIのversion・tokenによるprincipalとservice側の判定・`ask`・`show`・`note`・findingと読み取り、claim・resume・jobの起動でのtokenの発行）はある（[Queue service](queue-service.md)、ADR-t1233-1・ADR-t1233-4・ADR-t1233-5）。host構成ではtokenのfileも同じユーザーが読めるので、助言的であることは変わらない（ADR-t1233-4決定5）。serviceは起動した制御側が発行した資格（actor idとrunに紐づくもの）でactorを識別し、`DAGQ_ROLE`を信用しない。判定は今と同じapplicationの境界（`Planning`・`Dialogue`・`Operation`・`Integrator`）で行い、wrapperとhookをworkerの環境から分けてwrapperのactorとして判定する

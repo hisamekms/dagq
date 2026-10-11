@@ -123,7 +123,6 @@ tasks = 1
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/claim-defer.md"
-line = 1431
 tasks = 6
 
 [[doc]]

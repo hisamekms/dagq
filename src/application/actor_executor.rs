@@ -1782,7 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn an_actor_configured_for_podman_is_refused_not_run_on_the_host() {
+    fn an_actor_configured_for_the_container_is_refused_not_run_on_the_host() {
         let run = claimed_run("r1");
         let fake = Fake::default();
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
@@ -1791,7 +1791,7 @@ mod tests {
             .with_queue_service(&fake)
             .with_config(ExecutionConfig {
                 backend: ExecutorBackend::Host,
-                actors: vec![(ActorRole::Worker, ExecutorBackend::Podman)],
+                actors: vec![(ActorRole::Worker, ExecutorBackend::Container)],
             });
         let error = executor
             .spawn(ActorExecutionSpec::new(
@@ -1805,8 +1805,8 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(error.contains("podman"), "{error}");
-        assert!(error.contains("not implemented"), "{error}");
+        assert!(error.contains("container"), "{error}");
+        assert!(error.contains("not built"), "{error}");
         assert!(fake.spawned.lock().unwrap().is_empty());
         // The roles it does not name still run on the host.
         let dir = tempfile::tempdir().unwrap();

@@ -31,8 +31,8 @@ impl<'a> ProgramBackends<'a> {
         Self { host, config }
     }
 
-    /// The backend the review's actor runs on. One that is only a reserved
-    /// name (`podman`) is the error of the program job's start and runs
+    /// The backend the review's actor runs on. One nothing can start a job
+    /// on (the container) is the error of the program job's start and runs
     /// nothing: never the host instead (fail closed).
     pub fn backend(&self) -> Result<&'a dyn ReviewProgramBackend> {
         match self.config.backend_of(ActorRole::ReviewJob) {
@@ -499,31 +499,31 @@ mod tests {
         assert_eq!(host.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    /// With the review's actor on podman, by its own setting or the
+    /// With the review's actor on the container, by its own setting or the
     /// default's, the program job's start is an error and the host's
     /// adapter is never asked: no program runs on the host instead.
     #[test]
-    fn a_review_on_podman_is_an_error_and_never_runs_on_the_host() {
+    fn a_review_on_the_container_is_an_error_and_never_runs_on_the_host() {
         let host = Counting::default();
         for config in [
             ExecutionConfig {
                 backend: ExecutorBackend::Host,
-                actors: vec![(ActorRole::ReviewJob, ExecutorBackend::Podman)],
+                actors: vec![(ActorRole::ReviewJob, ExecutorBackend::Container)],
             },
             ExecutionConfig {
-                backend: ExecutorBackend::Podman,
+                backend: ExecutorBackend::Container,
                 actors: Vec::new(),
             },
         ] {
             let backends = ProgramBackends::new(&host, config);
             let error = format!("{:#}", backends.backend().err().unwrap());
-            assert!(error.contains("podman"), "{error}");
+            assert!(error.contains("container"), "{error}");
         }
         assert_eq!(host.0.load(std::sync::atomic::Ordering::SeqCst), 0);
         // Another actor's backend does not move the review's programs.
         let other = ExecutionConfig {
             backend: ExecutorBackend::Host,
-            actors: vec![(ActorRole::Worker, ExecutorBackend::Podman)],
+            actors: vec![(ActorRole::Worker, ExecutorBackend::Container)],
         };
         assert!(ProgramBackends::new(&host, other).backend().is_ok());
     }

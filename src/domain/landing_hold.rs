@@ -1,7 +1,8 @@
 //! Whether a run whose review passed starts its landing now, waits for it
 //! leased, or (in a supervisor that drains or hands off) goes back to a
 //! person awaiting integration: a missing program of `[run.env]` (ADR-0049
-//! decision 9), a CI that cannot be read (ADR-t1920-1 decision 2), an
+//! decision 9), a container the verification is set to that cannot be used
+//! (goal 38, never the host instead), a CI that cannot be read (ADR-t1920-1 decision 2), an
 //! unresolved landing branch (ADR-t615-1) or short free disk space (task
 //! 377) hold its landing. A drain hands a run back only for a hold that
 //! does not end by itself: not for a shortage a cleanup is still curing
@@ -11,6 +12,8 @@
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LandingHoldInputs {
     pub run_env_missing: bool,
+    /// The verification is set to a container that cannot be used.
+    pub container_held: bool,
     /// `[ci_watch]` is set and this process has no answer yet or the last
     /// one found the means missing.
     pub ci_held: bool,
@@ -38,6 +41,7 @@ pub enum LandingHold {
 /// See the module's documentation.
 pub const fn judge(inputs: LandingHoldInputs) -> LandingHold {
     let held = inputs.run_env_missing
+        || inputs.container_held
         || inputs.ci_held
         || inputs.landing_unresolved
         || inputs.landing_short;
@@ -49,6 +53,8 @@ pub const fn judge(inputs: LandingHoldInputs) -> LandingHold {
     }
     if inputs.run_env_missing {
         LandingHold::HandBack("a program [run.env] names is missing")
+    } else if inputs.container_held {
+        LandingHold::HandBack("the container its verification is set to cannot be used")
     } else if inputs.ci_unreadable {
         LandingHold::HandBack("the CI [ci_watch] watches cannot be read")
     } else if inputs.landing_unresolved {
@@ -94,6 +100,13 @@ mod tests {
                     ..Default::default()
                 },
                 "a program [run.env] names is missing",
+            ),
+            (
+                LandingHoldInputs {
+                    container_held: true,
+                    ..Default::default()
+                },
+                "the container its verification is set to cannot be used",
             ),
             (
                 LandingHoldInputs {

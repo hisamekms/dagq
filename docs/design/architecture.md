@@ -132,12 +132,12 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 
 **操作**
 
-- application: `application::supervise`のループとslot（`mod.rs`）と工程のsubmodule、`application::session`・`headless_session`・`integrate`・`review`・`recording`ほか。
+- application: `application::supervise`のループとslotと工程のsubmodule、`application::session`・`headless_session`・`integrate`・`review`・`recording`ほか。
 - infrastructure: `runtime_store`の`transitions`・`recovery`・`session_registry`・`run_log`と`coordination`の`RunCoordination`、`adapters`（`GitRepository`・`ClaudeCode`）・`claude`・`codex`・`run_files`・`process`・`background`ほか。
 
 **公開するport**
 
-- `RunReads`を全てのcontextに公開する。
+- `RunReads`と`RunCoordination`の読み取りを全てのcontextに公開する。
 - `Verifier`の環境とprogramの読み取りをhost運用の診断に公開する。
   検証コマンドの実行は内部。
 - `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
@@ -146,10 +146,9 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 - `Repository`のmainの履歴を読む読み取り専用の操作を観測と分析に公開する。
 - `application::inherit`の`InheritStore`・`CarriedBranches`を計画管理の`ready --inherit`に公開する（T10）。
 - `EvalStore`（`application::agent_eval`）を、`AgentEvals`を通してCLIとqueue serviceに公開する（書くのは依頼だけ）。
-- `RunCoordination`の読み取りを全てのcontextに公開する。
 - 計画管理に`JobDesk`と`DeferWatch`の見込みのファイルを、host運用のsweepにwrapperの停止を公開する。
 - recheckのlockの中で`recheck/target`を消す`recheck::clear_target`をhost運用の空き容量の掃除に公開する。
-- `RunTransitions`・`RunRecovery`・`EvalRounds`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`・`RecordingQueue`は内部。
+- `RunTransitions`・`RunRecovery`・`EvalRounds`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`・`RecordingQueue`・`ContainerRuntime`・wrapperの`RuntimesFile`は内部。
 
 **許す依存の向き**
 
@@ -235,7 +234,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 | module | port |
 | --- | --- |
 | `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`・`PlanningRecords` |
-| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`EvalRounds`・`SessionRegistry`・`RunReads`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend`・`RecordingQueue` |
+| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`EvalRounds`・`SessionRegistry`・`RunReads`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend`・`RecordingQueue`・`ContainerRuntime` |
 | `observation`（観測と分析） | `ObserverLog`・`MarkLog`・`QueueRecords`・`LedgerStore`・`ObservationQueue` |
 | `host`（host運用） | `QueueOpener`・`HostOpsQueue`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry`・`InboxWatchLog` |
 | `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`EventStore`・`StateStore`・`Queue` |

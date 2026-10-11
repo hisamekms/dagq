@@ -106,7 +106,8 @@ turnの`turn_finished`とjobの終わりのeventは、providerによらず同じ
   `turn.completed`も無ければ`tokens`は`null`（未計測）で、理由はrolloutのものを書く。
   rolloutにturnがあり応答が無いとき、今回のturnが全て前に数えたものだったときは計測した0である。
 - rolloutの場所は`Codex::sessions_dir`の1か所で、turnもjobもそこから読む。
-  今はCodexのhome（`supervise --codex-home`、`$CODEX_HOME`、`~/.codex`の順）の`sessions`で、podmanのbackend（まだ無い）では、制御側が終わった後に読めるrun dirの下をここが指す（ADR-t1233-1）。
+  今はCodexのhome（`supervise --codex-home`、`$CODEX_HOME`、`~/.codex`の順）の`sessions`である。
+  Codexのworkerはcontainerで動かさない（[Container runtime](container-runtime.md#fail-closedの境界)）。
 
 ### 本番のrolloutで確かめたこと
 

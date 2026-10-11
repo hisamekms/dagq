@@ -51,7 +51,8 @@ impl Supervisor<'_> {
     /// The executor every AI actor the supervisor starts goes through: its
     /// session wrappers, the runs' and the planners', in the background
     /// through [`SessionWrappers`](crate::application::SessionWrappers), its agents through the review provider and
-    /// the spawner, on the queue's environment.
+    /// the spawner, on the queue's environment. A worker set to the
+    /// container is refused there (goal 38): nothing starts it on the host.
     pub(super) fn actors(&self) -> HostActorExecutor<'_> {
         self.actors_on(self.reviewer)
     }
@@ -65,6 +66,9 @@ impl Supervisor<'_> {
             .with_spawner(self.spawner)
             .with_queue_service(self.service_access)
             .with_events(&*self.queue)
+            .with_config(crate::application::execution::ExecutionConfig::of_runtimes(
+                &self.landing.runtimes,
+            ))
     }
     /// What `run` inherits from an earlier run of its task that was retried
     /// with its branch carried over (ADR-0047 decision 24): the latest such

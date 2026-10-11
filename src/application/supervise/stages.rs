@@ -488,6 +488,11 @@ pub(super) struct LandingState {
     /// at the last claim pass (ADR-0049 decision 9): nothing is claimed and
     /// no passed run lands until it does.
     pub(super) run_env_missing: bool,
+    /// Where `dagq.toml` set the worker and the verification at the last
+    /// look (goal 38), and which of those set to the container could not
+    /// be used: their claims, resumes or landings wait meanwhile.
+    pub(super) runtimes: crate::domain::container_runtime::RuntimeConfig,
+    pub(super) container: crate::domain::container_runtime::ContainerCheck,
     /// The landing branch did not resolve at the top of this pass
     /// (ADR-t615-1): nothing is claimed and no passed run lands until it
     /// does.

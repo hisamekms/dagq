@@ -65,11 +65,20 @@ supervisorは控えの状態（taskごとの始まりと上限を過ぎたか）
 
 ## workerを動かせないtask
 
-supervisorは、どのproviderでも動かせないworker（providerと経路の組）のtaskをclaimせずに飛ばす（ADR-t813-2。task 814・818）。hotspotの判定より先に、`Queue::candidates`のtaskの`worker`にこのpassの経路（`Supervisor::routes`、`domain::provider_switch::routes`: 自分のadapterの表と2つのproviderの控えから決める。[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）があるかを見る（全workerに経路があるときは読まない）。そのproviderが使えなくても、もう一方の非対話で動かせるtaskは控えずにそちらでclaimする。ただし`dagq.toml`の`[provider_fallback] workers = false`のときは、頼んだproviderが使えない（実行ファイルが無い・起動できない・認証・利用上限）taskはもう一方で動かせても経路が無く、控えて頼んだproviderの控えが解けるのを待つ（実行ファイルが無いときは解ける控えが無く、その実行ファイルを持つsupervisorが動くまで控えたまま。[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。例外は`--no-claude`で、Claudeを頼んだtaskはoffでもCodexでclaimする（[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」）。
+supervisorは、どのproviderでも動かせないworker（providerと経路の組）のtaskと、`dagq.toml`が選んだruntimeで動かせないworkerのtaskをclaimせずに飛ばす（ADR-t813-2）。
+hotspotの判定より先に、`Queue::candidates`のtaskの`worker`にこのpassの経路（`Supervisor::routes`、`domain::provider_switch::routes`: 自分のadapterの表と2つのproviderの控えから決める。[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）があるかを見る（workerがhostで動き、全workerに経路があるときは読まない）。
+そのproviderが使えなくても、もう一方の非対話で動かせるtaskは控えずにそちらでclaimする。
+ただし`dagq.toml`の`[provider_fallback] workers = false`のときは、頼んだproviderが使えない（実行ファイルが無い・起動できない・認証・利用上限）taskはもう一方で動かせても経路が無く、控えて頼んだproviderの控えが解けるのを待つ（実行ファイルが無いときは解ける控えが無く、その実行ファイルを持つsupervisorが動くまで控えたまま。[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。
+例外は`--no-claude`で、Claudeを頼んだtaskはoffでもCodexでclaimする（[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」）。
 
-- 理由は`provider_unavailable`（そのproviderが使えず、もう一方でも動かせない）か`mode_unavailable`（providerの組はあるがその経路の組が無い）か`provider_fallback_off`（そのproviderが使えず、もう一方では動かせるが`[provider_fallback] workers`がfalse）。最初に飛ばしたときだけ`claim_deferred`（`domain::claim_defer::worker_deferred`）を書く
+- 理由は、そのproviderが使えない・その経路の組が無い・切り替えを止める設定・containerが使えない・containerが届かないproviderへの経路のどれかで、値と意味は`domain::claim_defer::worker_deferred`と各理由の定数のdoc commentが持つ。
+  最初に飛ばしたときと理由が変わったときだけ`claim_deferred`を書く
 - 両方のproviderが使えない（Claudeの控えのaskが開き、Codexが無いか控えられている）passは、控えのaskが新しいclaimを止める（`claim_held`）が、その前に候補をこの判定にかけ、`provider_unavailable`の控えを記録する（`status`の`claim_deferrals`に出る）
-- 上限は無く、hotspotの控えと違って`defer_max_secs`で期限切れにならない。表にそのworkerが入ったsupervisorは`claim_deferral_ended`（`why: cleared`）を書いてclaimし、候補から外れたtaskは`why: not_candidate`で終える
+- `dagq.toml`がworkerをcontainerで動かすときは、providerの経路より先にcontainerを見る（`Supervisor::container_deferral`、[Container runtime](../container-runtime.md)）。
+  containerが使えなければ全ての候補を、使えてもCodexに経路が向く候補を控え、hostでは動かさない。
+  控えの途中で理由が変われば、前の控えを終えて新しい理由で記録し直す（`domain::claim_defer::worker_step`）。
+- 上限は無く、hotspotの控えと違って`defer_max_secs`で期限切れにならない。
+  そのworkerを動かせるようになったsupervisor（表にそのworkerが入り、runtimeがcontainerならそれが使えて経路のproviderに届く）が`claim_deferral_ended`を書いてclaimし、候補から外れたtaskの控えも終える（終わり方の値は`worker_deferral_ended`のdoc comment）
 - 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`worker_deferrals_in_place`）。hotspotの控え（`deferrals_in_place`）は`reason`が`hot_files`のもの（`reason`の無い古いeventを含む）だけを読む
 - 同じpassで`claim_for_supervisor_in_order`にも経路の一覧を渡し、順に無いtaskを取る後戻りでも経路の無いworkerのtaskは取らない。経路がもう一方のproviderなら、runはそのproviderの非対話で始まり、`provider_switched`（`phase: start`）を記録する
 
@@ -89,8 +98,15 @@ supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[
 
 ## 記録
 
-- `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る。workerを動かせないtaskの`claim_deferred`は`reason`（`provider_unavailable` / `mode_unavailable` / `provider_fallback_off`）、`provider`、`worker_mode`、`message`、`supervisor`。`provider_fallback_off`の`message`は、頼んだproviderが今使えず`[provider_fallback] workers`がfalseなのでもう一方のproviderで始めず、そのproviderが使えるようになるまでclaimしないと言う。buildを待つtaskの`claim_deferred`は`reason: not_in_build`、`build`（そのsupervisorのbuild識別子）、`missing`（`[{task_id, commit}]`、含まない依存先の着地）、`message`、`supervisor`
-- `claim_deferral_ended`（taskのevent）: `reason`、`why`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`。`owner_waiting` / `no_commit` / `expired`はhotspotの控えだけ、workerとbuildの控えは`cleared` / `not_candidate`だけ）、`deferred_secs`、`supervisor`。logにinfoで出る
+- `claim_deferred`（taskのevent）: 控えの始まりで、控えた理由を持つ。
+  supervisorのlogにwarnで出る。
+  hotspotの控えは重なったhotspotと進行中のrunと上限を持つ（欄は`domain::claim_defer::decide`のdoc comment）。
+  workerを動かせないtaskの`claim_deferred`は、控えの始まりと理由が変わったときに書き、その理由と経路のworkerを持つ（欄は`domain::claim_defer::worker_deferred`のdoc comment）。
+  `provider_fallback_off`の`message`は、頼んだproviderが今使えず`[provider_fallback] workers`がfalseなのでもう一方のproviderで始めず、そのproviderが使えるようになるまでclaimしないと言う。
+  buildを待つtaskの`claim_deferred`は、そのsupervisorのbuildと、それが含まない依存先の着地を持つ（欄は`domain::build_wait::deferred`のdoc comment）
+- `claim_deferral_ended`（taskのevent）: 控えの終わりで、どう終わったかを持つ（欄は`worker_deferral_ended`・`build_wait::ended`などのdoc comment）。
+  logにinfoで出る。
+  人だけを待つrun・commitの無いrun・期限で終わるのはhotspotの控えだけで、workerの控えは理由が変わったときにも終わり、新しい理由の`claim_deferred`が続く（`worker_step`）
 - 2つのeventはclaimの前の待ちのうちtaskの控えの区間の始まりと終わりを兼ねる（[計測](../measurement.md)の「claimの前」）。
   区間は下の`stats`の`by_end`と同じ規則（`domain::claim_defer::deferral_spans`）で、どのsupervisorの記録でも終わり、終わりを書いたsupervisorを`ended_by`に残す。
 
@@ -103,4 +119,4 @@ supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[
   `held`はclaimを止める条件を順に混ぜずに出す（`application::health::claim_holds`）: 生きたsupervisorが居なければ`no_supervisor`、生きたsupervisor（か名の無いもの）の最新の記録が保留を示す`claim_held`・`run_env_program_missing`、生きたsupervisorごとに自分の最新の記録が保留を示す`ci_watch_held`・`landing_branch_unresolved`、待っているclaim spacing。
   CLIはこれらの条件も判定し直さず、supervisorが記録しない条件は出さない。
   控えが閉じるのはsupervisorが次に判定したときだけで、`fill_slots`はslotが無いpassとclaimを止めているpass（両方のproviderが使えないpassを除く）では判定せず、hotspotの入力もcacheするので、その間は前の判定の控えが開いたまま出る（遅れの上限は無い）。
-- `stats`: `claim_deferrals`に、windowの中で始まった控えの`count`と`secs`、終わり方ごとの`by_end: {<why>: {count, secs}}`（`cleared` / `owner_waiting` / `no_commit` / `expired` / `not_candidate`、`claim_deferral_ended`の前にclaimされた`claimed`、まだ終わっていない`open`、同じtaskの`claim_deferred`で置き換わった`superseded`）、hotspotごとの控えた回数`by_file`、今の控え`deferred`を出す。控えは次の`claim_deferral_ended`かそのtaskの`run_claimed`で終わり、まだ終わっていない控えはwindowの終わりまでを数える。空きslotがあり控えているtaskがあれば、alert `claim_deferred`（`value`は控えているtaskの数）を`idle_slots`の代わりに出す（[`stats`](stats.md)）
+- `stats`: `claim_deferrals`に、windowの中で始まった控えの`count`と`secs`、終わり方ごとの`by_end`（`claim_deferral_ended`の`why`のどれでも、claimで終わったもの・まだ終わっていないもの・同じtaskの次の`claim_deferred`で置き換わったものも、`domain::claim_defer::deferral_spans`）、hotspotごとの控えた回数`by_file`、今の控え`deferred`を出す。控えは次の`claim_deferral_ended`かそのtaskの`run_claimed`で終わり、まだ終わっていない控えはwindowの終わりまでを数える。空きslotがあり控えているtaskがあれば、alert `claim_deferred`（`value`は控えているtaskの数）を`idle_slots`の代わりに出す（[`stats`](stats.md)）

@@ -218,6 +218,6 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   providerの費用には数えない。
   全部exit 0ならagentのjobを起動する。
 - 1本でも0以外で終わったケースは、残りのprogramとagentを起動せず、agentの成績の分母から外し、`agent_eval_finished`の`program_stopped`に数とケースのidと落ちたprogramを記録する。
-- programの起動の失敗（reviewのactorのbackendがPodmanのときを含む）か時間切れのケースがあれば、新しい実行を起動せず、周を`incomplete`（`program_failed`）で閉じ、`passed`を`false`にする。
+- programの起動の失敗（reviewのactorのbackendがcontainerのときを含む）か時間切れのケースがあれば、新しい実行を起動せず、周を`incomplete`（`program_failed`）で閉じ、`passed`を`false`にする。
 - ケースごとのprogramの結果は`agent_eval_case_checked`に記録し、周を引き取ったsupervisorは止まったケースのagentを起動しない。
 - programが受け持った規則コードをagentの`expected`から外す整理は、定義を移す後続のtaskが行う。

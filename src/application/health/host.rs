@@ -177,6 +177,31 @@ pub fn refused(now: i64, error: &anyhow::Error) -> Value {
     })
 }
 
+/// `status`'s and `doctor`'s `runtimes`, and their `actors` with the
+/// worker where `read` puts it (goal 38): each target (the worker with its
+/// resume, the verification of `integrate`) with the runtime `dagq.toml`
+/// sets and how far that holds it, the host advisory and the container a
+/// sandbox ([`runtime_executions`](crate::application::execution::runtime_executions)).
+/// A file that could not be read shows `error` in place of the targets, and
+/// `actors` as the host's.
+pub fn add_runtimes(
+    report: &mut Value,
+    queue: &(impl SupervisorRegistry + ?Sized),
+    control: &dyn ProcessControl,
+    read: Result<crate::domain::container_runtime::RuntimeConfig>,
+) -> Result<()> {
+    use crate::application::execution::{ExecutionConfig, runtime_executions};
+    let (config, runtimes) = match read {
+        Ok(config) => (config, serde_json::to_value(runtime_executions(&config))?),
+        Err(error) => (Default::default(), json!({"error": format!("{error:#}")})),
+    };
+    report["runtimes"] = runtimes;
+    let checks = provider_checks(&queue.supervisors()?, control);
+    report["actors"] =
+        serde_json::to_value(ExecutionConfig::of_runtimes(&config).profiles(&checks)?)?;
+    Ok(())
+}
+
 /// `doctor`'s `roles`: the provider, model and effort each role other than
 /// the worker's starts with, and where its provider comes from (`dagq.toml`
 /// or `default`), from the `[roles.*]` `read` (ADR-t1063-1 decisions 1 and

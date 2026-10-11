@@ -945,6 +945,7 @@ pub mod claim_facts;
 pub mod claim_hold;
 pub mod claim_spacing;
 pub mod concern;
+pub mod container_runtime;
 pub mod disk;
 pub mod e2e_quarantine;
 mod error;
@@ -2060,7 +2061,9 @@ pub enum AttentionNext {
     /// person fixes the remote or has a task take the table out. Or its
     /// `required_jobs` names a job the workflow's runs lack
     /// (`ci_jobs_missing`, ADR-t2034-1): a task fixes `dagq.toml` or the
-    /// workflow.
+    /// workflow. Or a runtime it sets to the container cannot be used
+    /// (`container_runtime_unavailable`, goal 38): what it holds waits
+    /// until the container can be used or a task sets it back to the host.
     FixDagqToml,
     /// Stop the faulty server on the host; let the supervisor start its
     /// replacement so the recorded start clears restart-failure attention.
@@ -2260,6 +2263,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::REQUEST_PLANNER_EXHAUSTED,
     event_kind::DEPENDENCY_STRANDED,
     run_env::RUN_ENV_PROGRAM_MISSING,
+    container_runtime::CONTAINER_RUNTIME_UNAVAILABLE,
     ci_watch::CI_WATCH_UNAVAILABLE,
     ci_watch::CI_JOBS_MISSING,
     sccache::RESTART_FAILED,
@@ -2519,6 +2523,10 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         (event_kind::LANDING_RELEASE_STUCK, _) => Some(AttentionNext::StopLandingProcesses),
         (sccache::RESTART_FAILED, _) => Some(AttentionNext::CheckSccache),
         (run_env::RUN_ENV_PROGRAM_MISSING, _) => Some(AttentionNext::InstallTool),
+        // A target set to the container that cannot be used waits, never on
+        // the host (ADR-t2113-1 decision 4): the container is made usable,
+        // or a task sets the runtime back to the host.
+        (container_runtime::CONTAINER_RUNTIME_UNAVAILABLE, _) => Some(AttentionNext::FixDagqToml),
         // The means to read the CI went away (ADR-t1920-1 decision 2); its
         // return is no attention.
         (ci_watch::CI_WATCH_UNAVAILABLE, _) => Some(ci_watch::Unavailable::next_of(
@@ -3729,6 +3737,12 @@ mod attention_tests {
                 json!({"variable": "RUSTC_WRAPPER", "value": "sccache", "path": "/bin"}),
                 None,
             ),
+            (
+                "container_runtime_unavailable",
+                json!({"targets": [{"target": "worker", "reason": "x"}], "message": "m"}),
+                Some(FixDagqToml),
+            ),
+            ("container_runtime_available", json!({}), None),
             (
                 "ci_watch_unavailable",
                 json!({"reason": "gh_missing"}),

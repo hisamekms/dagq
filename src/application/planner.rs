@@ -459,6 +459,7 @@ pub fn run_planner_session(
             pid,
             resume: false,
             sccache: None,
+            runtimes: None,
             background,
             clock,
         }

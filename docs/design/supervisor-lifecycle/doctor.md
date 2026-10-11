@@ -41,6 +41,12 @@ doctorも、supervisorとqueue serviceもcmuxを呼ばない（[ADR-t1433-1](../
 
 cmux workspaceの存在は確認しない（cmuxなしで動く）。IDを見てユーザーが`cmux workspace list`で確認する。
 
+## 実行の場所
+
+`runtimes`（既定の出力にも出す）は、`dagq.toml`が選んだ適用先（workerとintegrateのverification）ごとのruntimeとenforcementで、`actors`のworkerの行の`backend`もそれに従う（`health::add_runtimes`）。
+`dagq.toml`が読めなければ`runtimes`は`error`だけを持ち、`actors`はhostのまま出す。
+containerが使えるかはsupervisorのattentionが知らせ、doctorは問わない（[Container runtime](../container-runtime.md)）。
+
 ## CIの見張り（ADR-t1920-1）
 
 [ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)（task 1921）。結びついたcheckoutの`dagq.toml`に`[ci_watch]`があれば`ci_watch`の欄に`config`（読んだ表）・`gh`（`doctor`のPATHで解決したpathかnull）・`authenticated`（`gh auth status --hostname github.com`が0で終わるか）・`repo`（`<owner>/<name>`かnull）・`supervisor_last`（最後の`ci_watch_unavailable` / `ci_watch_available`の`{kind, created_at, payload}`かnull）を出す。ファイルが読めなければ`{error}`、表が無ければ欄を出さない。状態は変えない。

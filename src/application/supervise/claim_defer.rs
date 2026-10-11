@@ -11,7 +11,10 @@
 //! with no commit of its own does not hold them back at all (ADR-t1634-1).
 //! A task that waits for a build containing its dependencies' landings is
 //! passed over while this supervisor's own build lacks one (ADR-t1632-1;
-//! the judgement is [`crate::domain::build_wait`]).
+//! the judgement is [`crate::domain::build_wait`]). A worker set to a
+//! container that cannot be used, or that would run on a provider the
+//! container does not reach, is passed over like one this supervisor cannot
+//! run (goal 38, [`Supervisor::container_deferral`]).
 use crate::domain::EventKind;
 use std::collections::{HashMap, HashSet};
 
@@ -23,10 +26,11 @@ use crate::application::DependencyGraph;
 use crate::domain::{
     Priority, RunId, TaskId, build_wait,
     claim_defer::{
-        self, DEFERRAL_KINDS, Decision, Deferral, InFlight, RELATED_TASKS, deferrals_in_place,
-        expected_files, failed_without_commit, owner_waiting_since, worker_deferral_ended,
-        worker_deferrals_in_place, worker_deferred,
+        self, DEFERRAL_KINDS, Decision, Deferral, InFlight, RELATED_TASKS, WorkerStep,
+        deferrals_in_place, expected_files, failed_without_commit, owner_waiting_since,
+        worker_deferral_ended, worker_deferrals_in_place, worker_step,
     },
+    container_runtime::{CONTAINER_UNAVAILABLE, Runtime},
     provider_switch::route_of,
     stats::{
         ConflictConfig, ConflictConfigReport,
@@ -234,7 +238,8 @@ impl Supervisor<'_> {
     }
 
     /// The candidates of `graph` this pass may claim, in its order: those
-    /// whose worker this supervisor cannot run (ADR-t813-2) and those whose
+    /// whose worker this supervisor cannot run (ADR-t813-2) or its runtime
+    /// cannot run (goal 38), and those whose
     /// files meet a run in flight on a hotspot are passed over (ADR-0069),
     /// and the start and end of each deferral are recorded on its task.
     pub(super) fn claimable(&mut self, graph: &DependencyGraph) -> Result<Vec<TaskId>> {
@@ -272,12 +277,13 @@ impl Supervisor<'_> {
         // The tasks that wait for the build and the landings they wait for
         // (ADR-t1632-1); none is read unless one declares it.
         let waits = self.queue.build_waits()?;
-        // Every worker runs here, on its own provider or the other one: no
-        // candidate is read for its worker (ADR-t813-2).
+        // Every worker runs here, on its own provider or the other one, and
+        // on the host: no candidate is read for its worker (ADR-t813-2).
         let routes = self.routes();
-        let workers: HashMap<TaskId, Worker> = if Worker::ALL
-            .iter()
-            .all(|worker| route_of(&routes, *worker).is_some())
+        let workers: HashMap<TaskId, Worker> = if self.landing.runtimes.worker == Runtime::Host
+            && Worker::ALL
+                .iter()
+                .all(|worker| route_of(&routes, *worker).is_some())
         {
             HashMap::new()
         } else {
@@ -292,41 +298,44 @@ impl Supervisor<'_> {
         for &id in &graph.candidates {
             let mut worker_cleared = false;
             let reason = workers.get(&id).and_then(|&worker| {
-                route_of(&routes, worker).is_none().then(|| {
-                    // Held rather than missing, it is its provider that
-                    // cannot be used; with the other one usable, it is the
-                    // fallback turned off that keeps it here (ADR-t1857-1).
-                    let why = if self.stopped_by_fallback(worker) {
-                        FALLBACK_OFF
-                    } else {
-                        unavailable(worker, &self.claim.workers).unwrap_or(PROVIDER_UNAVAILABLE)
-                    };
-                    (worker, why)
-                })
+                let route = route_of(&routes, worker);
+                // The container the worker is set to first: one that cannot
+                // be used holds every worker; one that can holds the
+                // provider it would run on and does not reach (goal 38).
+                let provider = route.map_or(worker.provider, |route| route.actual.provider);
+                match (route, self.container_deferral(provider)) {
+                    (_, Some(CONTAINER_UNAVAILABLE)) => Some((worker, CONTAINER_UNAVAILABLE)),
+                    (None, _) => {
+                        // Held rather than missing, it is its provider that
+                        // cannot be used; with the other one usable, it is the
+                        // fallback turned off that keeps it here (ADR-t1857-1).
+                        let why = if self.stopped_by_fallback(worker) {
+                            FALLBACK_OFF
+                        } else {
+                            unavailable(worker, &self.claim.workers).unwrap_or(PROVIDER_UNAVAILABLE)
+                        };
+                        Some((worker, why))
+                    }
+                    // Named by the worker it would run as.
+                    (Some(route), why) => why.map(|why| (route.actual, why)),
+                }
             });
-            match (reason, worker_deferrals.get(&id)) {
-                (Some(_), Some(_)) => continue,
-                (Some((worker, why)), None) => {
-                    events.push((id, worker_deferred(why, worker, &self.registration.token)));
-                    worker_deferrals.insert(id, (why.to_owned(), now));
+            match worker_step(
+                reason,
+                &mut worker_deferrals,
+                id,
+                now,
+                &self.registration.token,
+            ) {
+                WorkerStep::Deferred(step) => {
+                    events.extend(step.into_iter().map(|event| (id, event)));
                     continue;
                 }
-                (None, Some(_)) => {
-                    if let Some((why, since)) = worker_deferrals.remove(&id) {
-                        events.push((
-                            id,
-                            worker_deferral_ended(
-                                &why,
-                                "cleared",
-                                since,
-                                now,
-                                &self.registration.token,
-                            ),
-                        ));
-                    }
+                WorkerStep::Cleared(event) => {
+                    events.push((id, event));
                     worker_cleared = true;
                 }
-                (None, None) => {}
+                WorkerStep::Open => {}
             }
             // Before the hotspots: a task this build cannot serve waits
             // whatever its files meet, interrupt or not.

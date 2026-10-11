@@ -226,6 +226,9 @@ pub struct Integration<'a> {
     pub queue: &'a mut dyn Queue,
     pub repository: &'a dyn Repository,
     pub verifier: &'a dyn Verifier,
+    /// Whether the container the verification may be set to can be used
+    /// (goal 38).
+    pub container: &'a dyn super::ContainerRuntime,
     pub remote: Option<&'a dyn MainRemote>,
     pub files: &'a dyn RunFiles,
     pub common_dir: &'a str,
@@ -672,6 +675,7 @@ fn land_integrating(
             queue,
             repository,
             ctx.verifier,
+            ctx.container,
             ctx.load_average,
             ctx.files,
             ctx.retry_disk.as_ref(),
@@ -1196,6 +1200,7 @@ fn land(
     queue: &mut dyn Queue,
     repository: &dyn Repository,
     verifier: &dyn Verifier,
+    container: &dyn super::ContainerRuntime,
     load_average: fn() -> Option<f64>,
     files: &dyn RunFiles,
     retry_disk: Option<&RetryDisk<'_>>,
@@ -1438,6 +1443,12 @@ fn land(
     let mut run_env = if commands.is_empty() {
         Vec::new()
     } else {
+        // Set to the container, the commands do not run on the host instead
+        // (goal 38, ADR-t2113-1 decision 4): stop before them, so the run
+        // goes back without using a resume.
+        if let Some(message) = container_refusal(&*queue, verifier, container)? {
+            bail!("{message}");
+        }
         // A program [run.env] names that cannot be executed would fail
         // every command: stop before them, like an unreadable dagq.toml,
         // so the run goes back without using a resume (ADR-0049 decision 9).
@@ -1683,6 +1694,48 @@ fn landing_env<Q: RunLog + QueueRecords + ?Sized>(
         &path_text(&path)?,
         fix_run,
     ))
+}
+
+/// Why the verification commands do not start, when `dagq.toml` sets the
+/// verification to the container: one that cannot be used says why, and
+/// one that can has no executor of the verification here yet. `None` on
+/// the host. A refusal records `container_runtime_unavailable` as the
+/// supervisor does, where the queue's latest one does not say it already,
+/// so the inbox is told without a supervisor too.
+fn container_refusal(
+    queue: &dyn EventStore,
+    verifier: &dyn Verifier,
+    container: &dyn super::ContainerRuntime,
+) -> Result<Option<String>> {
+    use crate::domain::container_runtime::{
+        CONTAINER_RUNTIME_KINDS, ContainerCheck, Runtime, RuntimeTarget,
+    };
+    let runtimes = verifier.runtimes()?;
+    if runtimes.verification == Runtime::Host {
+        return Ok(None);
+    }
+    let mut check = ContainerCheck::of(&runtimes, |target| container.availability(target));
+    if check.why(RuntimeTarget::Verification).is_none() {
+        check.unavailable.push((
+            RuntimeTarget::Verification,
+            "this dagq does not run the verification in a container yet".to_owned(),
+        ));
+    }
+    let why = check
+        .why(RuntimeTarget::Verification)
+        .unwrap_or_default()
+        .to_owned();
+    let last = queue.latest_queue_event(&CONTAINER_RUNTIME_KINDS)?;
+    if let Some((kind, mut payload)) =
+        check.transition(last.as_ref().map(|e| (e.kind.as_str(), &e.payload)))
+    {
+        payload["by"] = json!("integrate");
+        queue.record_queue_event(kind, payload)?;
+    }
+    Ok(Some(format!(
+        "dagq.toml sets the verification's runtime to the container, which cannot run it: {why}; \
+no verification command runs on the host instead"
+    )))
 }
 
 /// Put into `env`, the `[run.env]` of the verification commands, what the

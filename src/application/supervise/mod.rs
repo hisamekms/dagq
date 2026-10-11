@@ -114,6 +114,7 @@ mod background;
 mod ci_watch;
 mod claim_defer;
 mod cleanup;
+mod container;
 mod contexts;
 mod deliver;
 mod disk;
@@ -439,6 +440,9 @@ pub struct Ports<'a> {
     pub repository: Arc<dyn Repository + Send + Sync>,
     pub remote: Arc<dyn MainRemote + Send + Sync>,
     pub verifier: Arc<dyn Verifier + Send + Sync>,
+    /// Whether the container runtime can run what `dagq.toml` sets to it
+    /// (goal 38): asked every pass for each such target.
+    pub container: Arc<dyn crate::application::ContainerRuntime + Send + Sync>,
     /// The session wrappers of the runs and the runtime's planners, which
     /// the supervisor starts, stops and checks without cmux (ADR-t1433-1).
     pub sessions: &'a dyn SessionWrappers,
@@ -944,6 +948,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         repository: ports.repository.clone(),
         remote: ports.remote.clone(),
         verifier: ports.verifier.clone(),
+        container: ports.container.clone(),
         sessions: &sessions,
         reviewer: ports.reviewer,
         codex_jobs: ports.codex_jobs,
@@ -1094,6 +1099,8 @@ struct Supervisor<'a> {
     repository: Arc<dyn Repository + Send + Sync>,
     remote: Arc<dyn MainRemote + Send + Sync>,
     verifier: Arc<dyn Verifier + Send + Sync>,
+    /// Whether the container runtime can be used ([`Ports::container`]).
+    container: Arc<dyn crate::application::ContainerRuntime + Send + Sync>,
     sessions: &'a dyn SessionWrappers,
     /// Starts the headless review of accepted runs (ADR-0027).
     reviewer: &'a dyn AgentProvider,
@@ -1642,6 +1649,9 @@ impl Supervisor<'_> {
             // Every pass, draining or not, so a hold on landings ends as soon
             // as the program is found (ADR-0049 decision 9).
             self.check_run_env_programs()?;
+            // And the container the worker or the verification is set to
+            // (goal 38): what it holds waits, never on the host.
+            self.check_container_runtime()?;
             // And the sccache server, which no process given [run.env]
             // may start (ADR-t1215-1, ADR-t2086-1).
             self.on_host(|host, env| host.sccache_pass(env));
@@ -3116,6 +3126,7 @@ impl Supervisor<'_> {
                 match crate::domain::landing_hold::judge(
                     crate::domain::landing_hold::LandingHoldInputs {
                         run_env_missing: self.landing.run_env_missing,
+                        container_held: self.verification_container_held(),
                         ci_held: self.observation.ci.held(),
                         ci_unreadable: self.observation.ci.unreadable(),
                         landing_unresolved: self.landing.unresolved,

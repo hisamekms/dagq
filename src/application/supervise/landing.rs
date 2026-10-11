@@ -94,6 +94,7 @@ impl Supervisor<'_> {
         let repository = self.repository.clone();
         let remote = self.remote.clone();
         let verifier = self.verifier.clone();
+        let container = self.container.clone();
         let processes = self.processes.clone();
         let files = self.files.clone();
         let pid = self.layout.pid;
@@ -123,6 +124,7 @@ impl Supervisor<'_> {
                     queue: &mut *queue,
                     repository: &*repository,
                     verifier: &*verifier,
+                    container: &*container,
                     remote: push.then_some(&*remote as &dyn MainRemote),
                     files: &*files,
                     common_dir: &common_dir,
@@ -2031,6 +2033,7 @@ impl Supervisor<'_> {
     /// and the run stays queued for a later pass.
     pub(super) fn start_approved_landings(&mut self, parallel: usize) -> Result<()> {
         let held = self.landing.run_env_missing
+            || self.verification_container_held()
             || self.observation.ci.held()
             || self.landing.unresolved
             || self.host.disk.landing_short;

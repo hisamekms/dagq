@@ -1575,6 +1575,18 @@ pub struct DiffNumbers {
     pub deletions: u64,
 }
 
+/// Whether the container runtime can run a target now (goal 38): the
+/// dagq machine, the image, the queue's broker, the relay and the
+/// long-lived token it needs, each a later task's part to answer for. A
+/// target set to the container that cannot be used waits, never on the
+/// host (ADR-t2113-1 decision 4).
+pub trait ContainerRuntime {
+    fn availability(
+        &self,
+        target: crate::domain::container_runtime::RuntimeTarget,
+    ) -> crate::domain::container_runtime::Availability;
+}
+
 /// Runs a task's verification commands for `integrate` (ADR-0023
 /// decision 1) with the `[run.env]` of the repository (ADR-0023 decision 3).
 pub trait Verifier {
@@ -1614,6 +1626,12 @@ pub trait Verifier {
     /// default.
     fn ci_watch_config(&self) -> Result<Option<crate::domain::ci_watch::CiWatchConfig>> {
         Ok(None)
+    }
+    /// Where the worker and the verification of `integrate` run
+    /// (`runtime` of `[roles.worker]` and `[roles.verification]` of
+    /// `dagq.toml`, goal 38); the host by default.
+    fn runtimes(&self) -> Result<crate::domain::container_runtime::RuntimeConfig> {
+        Ok(Default::default())
     }
     /// The limited trial of the worker's model (`[worker.trial]` of
     /// `dagq.toml`, ADR-0079 decision 4); off by default.

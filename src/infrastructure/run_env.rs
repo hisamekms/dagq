@@ -15,7 +15,9 @@
 //! is still checked when the file is parsed and is otherwise ignored. `[worker.trial]` turns on the limited trial of the worker's model
 //! (ADR-0079 decision 4). `[roles.<role>]` holds the provider, model and effort
 //! of a session other than the worker's (ADR-0079 decision 7, ADR-t1063-1
-//! decision 1). `[supervisor]`
+//! decision 1), and `runtime`, where a role runs: `[roles.worker]` and
+//! `[roles.verification]` hold only it (goal 38,
+//! [`crate::domain::container_runtime::RuntimeConfig`]). `[supervisor]`
 //! holds `parallel`, `max_waiting`, `runtime_planners` and `claim_spacing`
 //! of a supervisor started without the flags (task 698, task 941,
 //! ADR-t1479-1). `[areas]` maps the
@@ -61,6 +63,7 @@ use crate::{
         areas::AreaMap,
         background_wrapper::HeadlessWrapper,
         ci_watch::{CiWatchConfig, DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS},
+        container_runtime::{RUNTIME_KEY, Runtime, RuntimeConfig, RuntimeTarget, refuse_container},
         disk::DiskConfig,
         exit::ExitConfig,
         fresh_session::FreshSessionConfig,
@@ -283,6 +286,9 @@ pub struct Config {
     pub worker_trial: WorkerTrial,
     /// `[roles.<role>]`, none by default (ADR-0079 decision 7).
     pub roles: RoleModels,
+    /// `runtime` of `[roles.worker]` and `[roles.verification]` (goal 38),
+    /// the host where unset.
+    pub runtimes: RuntimeConfig,
     /// `[supervisor]`, each key it sets (task 698).
     pub supervisor: SupervisorConfig,
     /// `[areas]` (ADR-t980-1); `None` without the table.
@@ -349,6 +355,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut landing: Option<(usize, Option<Vec<String>>, Option<String>)> = None;
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
+    // `[roles.worker]` or `[roles.verification]` being read in place of a
+    // role of [`ModelRole`], and those read.
+    let mut runtime_target: Option<RuntimeTarget> = None;
+    let mut targets_seen: Vec<RuntimeTarget> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
     let mut eval_keys: Vec<String> = Vec::new();
     // The provider of the `[eval.providers.<provider>]` being read, those
@@ -399,10 +409,28 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 continue;
             }
             if let Some(name) = name.strip_prefix(ROLES_PREFIX) {
+                role_keys.clear();
+                table = Some(ROLES_TABLE);
+                if let Ok(target) = name.parse::<RuntimeTarget>() {
+                    ensure!(
+                        !targets_seen.contains(&target),
+                        "{CONFIG_FILE_NAME}:{number}: [{ROLES_PREFIX}{name}] is defined twice"
+                    );
+                    targets_seen.push(target);
+                    runtime_target = Some(target);
+                    role = None;
+                    continue;
+                }
+                runtime_target = None;
                 let parsed: ModelRole = name.parse().map_err(|_| {
                     anyhow::anyhow!(
                         "{CONFIG_FILE_NAME}:{number}: unknown role [{ROLES_PREFIX}{name}]; the roles are {}",
-                        ModelRole::ALL.map(ModelRole::as_str).join(", ")
+                        ModelRole::ALL
+                            .map(ModelRole::as_str)
+                            .into_iter()
+                            .chain(RuntimeTarget::ALL.map(RuntimeTarget::as_str))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )
                 })?;
                 ensure!(
@@ -411,8 +439,6 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 );
                 roles_seen.push(parsed);
                 role = Some(parsed);
-                role_keys.clear();
-                table = Some(ROLES_TABLE);
                 continue;
             }
             if name == REVIEW_SUBAGENTS_TABLE || name.starts_with(REVIEW_SUBAGENTS_PREFIX) {
@@ -984,18 +1010,42 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 repository.branch = Some(value);
             }
             Some(ROLES_TABLE) => {
-                let role = role.expect("a [roles.*] table names its role");
-                ensure!(
-                    RoleModel::KEYS.contains(&key),
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{ROLES_PREFIX}{}]; the keys are {}",
-                    role.as_str(),
-                    RoleModel::KEYS.join(", ")
-                );
                 ensure!(
                     !role_keys.iter().any(|existing| existing == key),
                     "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
                 );
                 role_keys.push(key.to_owned());
+                if let Some(target) = runtime_target {
+                    ensure!(
+                        key == RUNTIME_KEY,
+                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{ROLES_PREFIX}{}]; its only key is {RUNTIME_KEY}",
+                        target.as_str()
+                    );
+                    let runtime = parse_runtime(rest.trim())
+                        .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                    config.runtimes.set(target, runtime);
+                    continue;
+                }
+                let role = role.expect("a [roles.*] table names its role");
+                if key == RUNTIME_KEY {
+                    // Only the worker and the verification run untrusted
+                    // code; the jobs and the planners stay on the host
+                    // (ADR-t2113-3 decisions 2 and 3).
+                    let runtime = parse_runtime(rest.trim())
+                        .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                    ensure!(
+                        runtime == Runtime::Host,
+                        "{CONFIG_FILE_NAME}:{number}: {}",
+                        refuse_container(&format!("[{ROLES_PREFIX}{}]", role.as_str()))
+                    );
+                    continue;
+                }
+                ensure!(
+                    RoleModel::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{ROLES_PREFIX}{}]; the keys are {}, {RUNTIME_KEY}",
+                    role.as_str(),
+                    RoleModel::KEYS.join(", ")
+                );
                 let table = config.roles.entry(role);
                 if key == crate::domain::actor_model::ROUTE_KEY {
                     // The route of the runtime's planners is not chosen
@@ -1715,6 +1765,53 @@ pub fn load_role_models(root: &Path) -> Result<RoleModels> {
         .roles)
 }
 
+/// `runtime` of `[roles.worker]` and `[roles.verification]` of the
+/// `dagq.toml` in `root` (goal 38); no file is the host for both.
+pub fn load_runtimes(root: &Path) -> Result<RuntimeConfig> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(RuntimeConfig::default());
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .runtimes)
+}
+
+/// The runtimes of the main checkout a queue is bound to (goal 38), read
+/// again on each [`Self::read`]: `checkout` is the binding as resolved. A
+/// queue bound to no checkout runs every target on the host; a binding
+/// that could not be resolved is an error of every read, so a caller that
+/// must not run on the host by mistake (the wrapper's turn) refuses.
+pub struct BoundRuntimes {
+    checkout: std::result::Result<Option<PathBuf>, String>,
+}
+
+impl BoundRuntimes {
+    pub fn new(checkout: Result<Option<PathBuf>>) -> Self {
+        Self {
+            checkout: checkout.map_err(|error| format!("{error:#}")),
+        }
+    }
+
+    /// The runtimes as the checkout's `dagq.toml` sets them now
+    /// ([`load_runtimes`]).
+    pub fn read(&self) -> Result<RuntimeConfig> {
+        match &self.checkout {
+            Ok(Some(checkout)) => load_runtimes(checkout),
+            Ok(None) => Ok(RuntimeConfig::default()),
+            Err(error) => bail!("the checkout the queue is bound to could not be found: {error}"),
+        }
+    }
+}
+
+/// `"host"` or `"container"`.
+fn parse_runtime(text: &str) -> Result<Runtime> {
+    let value = parse_string(text)?;
+    value
+        .parse::<Runtime>()
+        .map_err(|_| anyhow::anyhow!("unknown runtime {value:?} (\"host\" or \"container\")"))
+}
+
 /// `[worker.trial]` of the `dagq.toml` in `root` (ADR-0079 decision 4);
 /// no file, no table or no key is the default, which is off.
 pub fn load_worker_trial(root: &Path) -> Result<WorkerTrial> {
@@ -2006,6 +2103,9 @@ impl Verifier for ShellVerifier {
 
     fn worker_trial(&self) -> Result<WorkerTrial> {
         load_worker_trial(&self.checkout)
+    }
+    fn runtimes(&self) -> Result<RuntimeConfig> {
+        load_runtimes(&self.checkout)
     }
     fn landing_verification(&self) -> Result<Option<LandingVerification>> {
         load_landing_verification(&self.checkout)
@@ -2632,6 +2732,93 @@ LITERAL = 'no \n escapes # here'
                 ("LITERAL", "no \\n escapes # here"),
             ])
         );
+    }
+
+    /// `runtime` of `[roles.worker]` and `[roles.verification]` picks the
+    /// host or the container, the host when unset; a container anywhere
+    /// else is refused with why (goal 38, ADR-t2113-3 decisions 1 to 3).
+    /// Reading the file is the integration tests' (`runtime_container`).
+    #[test]
+    fn the_worker_and_the_verification_choose_their_runtime_and_no_other_role_a_container() {
+        use crate::domain::actor_model::ModelRole;
+        assert_eq!(parse_config("").unwrap().runtimes, RuntimeConfig::default());
+        assert_eq!(
+            parse_config(
+                "[roles.worker]
+[roles.verification]
+"
+            )
+            .unwrap()
+            .runtimes,
+            RuntimeConfig::default()
+        );
+        let config = parse_config(
+            "[roles.worker]\nruntime = \"container\" # isolated\n[roles.verification]\nruntime = 'host'\n[roles.review]\nruntime = \"host\"\nprovider = 'codex'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.runtimes,
+            RuntimeConfig {
+                worker: Runtime::Container,
+                verification: Runtime::Host,
+            }
+        );
+        // `runtime = "host"` gives the role nothing else.
+        assert_eq!(
+            config.roles.provider(ModelRole::Review).0,
+            crate::domain::Provider::Codex
+        );
+        let config = parse_config("[roles.verification]\nruntime = 'container'\n").unwrap();
+        assert_eq!(config.runtimes.verification, Runtime::Container);
+        assert_eq!(config.runtimes.worker, Runtime::Host);
+        for role in ModelRole::ALL {
+            let text = format!("[roles.{}]\nruntime = 'container'\n", role.as_str());
+            let error = format!("{:#}", parse_config(&text).unwrap_err());
+            assert!(
+                error.contains("only for [roles.worker] and [roles.verification]")
+                    && error.contains(&format!("[roles.{}]", role.as_str())),
+                "{text:?}: {error}"
+            );
+        }
+        for (text, expected) in [
+            // The inbox is no role of the file at all.
+            (
+                "[roles.inbox]\nruntime = 'container'",
+                "unknown role [roles.inbox]",
+            ),
+            (
+                "[roles.worker]\nruntime = 'podman'",
+                "unknown runtime \"podman\"",
+            ),
+            (
+                "[roles.worker]\nprovider = 'claude'",
+                "its only key is runtime",
+            ),
+            (
+                "[roles.worker]\nruntime = 'host'\nruntime = 'host'",
+                "is defined twice",
+            ),
+            ("[roles.worker]\n[roles.worker]", "is defined twice"),
+            ("[roles.review]\nruntime = 'docker'", "unknown runtime"),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+    }
+
+    /// A queue bound to no checkout reads the host for every target; a
+    /// binding that could not be resolved fails every read (goal 38).
+    #[test]
+    fn the_bound_runtimes_are_the_host_without_a_checkout_and_fail_without_its_binding() {
+        assert_eq!(
+            BoundRuntimes::new(Ok(None)).read().unwrap(),
+            RuntimeConfig::default()
+        );
+        let bound = BoundRuntimes::new(Err(anyhow::anyhow!("repository moved")));
+        for _ in 0..2 {
+            let error = format!("{:#}", bound.read().unwrap_err());
+            assert!(error.contains("repository moved"), "{error}");
+        }
     }
 
     #[test]

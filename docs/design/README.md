@@ -21,7 +21,8 @@ tags:
 - [Persistence](persistence.md)
 - [Follow-up membership judgements](follow-up-membership.md)（所属の分類と必須の欄・acceptanceの版・出どころと深さ・所属の変更と人のadopt・旧schemaの移行）
 - [Authorization](authorization.md)
-- [Security](security.md)（信頼の区分・actorとcapability・host実行は助言的で隔離ではないこと・Podmanとqueue serviceへの道筋）
+- [Security](security.md)（信頼の区分・actorとcapability・host実行は助言的で隔離ではないこと・containerとqueue serviceへの道筋）
+- [Container runtime](container-runtime.md)（workerとintegrateのverificationをhostかcontainerで動かす適用先・使えないときのfail closedの境界・設定の読み込みと「使えるか」のportへの入口・後続の部品の置き場）
 - [Queue service](queue-service.md)（hostで動きqueue DBを開くservice。unix socket・APIのversion・tokenによるprincipalとservice側の認可・ask・show・noteのユースケース・`up`・`down`・supervisorによる起動と停止・落ちたときのattention。goal 82）
 - [Supervisor lifecycle](supervisor-lifecycle.md)（目次。各節は[`supervisor-lifecycle/`](supervisor-lifecycle/)の下の別のファイルにある）
 - [Provider lifecycle](provider-lifecycle.md)

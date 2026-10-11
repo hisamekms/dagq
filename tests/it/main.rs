@@ -109,6 +109,7 @@ mod runtime_client_mode;
 mod runtime_codex;
 mod runtime_codex_ask;
 mod runtime_codex_work;
+mod runtime_container;
 mod runtime_disk;
 mod runtime_e2e;
 mod runtime_evidence;

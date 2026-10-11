@@ -399,6 +399,30 @@ pub fn attention(
             next: AttentionNext::InstallTool,
         });
     }
+    // A target dagq.toml sets to the container cannot be used: its claims,
+    // resumes or landings wait, never on the host, until the container can
+    // be used or a task sets it back to the host (goal 38).
+    if let Some(event) =
+        queue.latest_queue_event(&crate::domain::container_runtime::CONTAINER_RUNTIME_KINDS)?
+        && event.kind == crate::domain::container_runtime::CONTAINER_RUNTIME_UNAVAILABLE
+    {
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "unavailable".into(),
+            kind: event.kind,
+            last_error: event
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::FixDagqToml,
+        });
+    }
     // The CI the supervisor watches cannot be read: its claims and
     // landings wait until a person installs or logs in `gh`, or fixes
     // `dagq.toml` (ADR-t1920-1 decision 2).
