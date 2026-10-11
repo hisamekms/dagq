@@ -852,34 +852,53 @@ fn the_reviews_of_two_runs_share_the_limit_of_jobs_at_once() {
     assert_eq!(reviews, 2);
 }
 
-/// The argv dagq gives the whole review, run on the real Claude Code
-/// (ADR-t1470-1). Real Claude is not run by the automated tests
-/// (AGENTS.md: manual smoke), so this is ignored and runs only when a
-/// person (or a worker) names the executable:
-/// `DAGQ_REAL_CLAUDE=~/.local/bin/claude cargo test --locked --test it -- --ignored --exact review_subagents::the_real_claude_review_loads_no_worktree_settings`.
-/// It builds the command with `ClaudeCode::review_command` as the
-/// supervisor does, then checks with Haiku that the worktree's
-/// `.claude/settings.json` is not loaded: its `SessionStart` hook writes
-/// no marker, which it does for the same review with the default setting
-/// sources (the control).
+/// The argv dagq gives the run's review jobs, run on the real Claude
+/// Code: the whole review's (`ClaudeCode::review_command`) and an agent's
+/// (`ClaudeCode::agent_job_command`, with its declared tools turned into
+/// Claude Code's, and without MCP servers), each built as the supervisor
+/// builds it but for the model and the session id. Real Claude is
+/// not run by the automated tests (AGENTS.md: manual smoke), so this is
+/// ignored and runs only when a person names the executable:
+/// `DAGQ_REAL_CLAUDE=~/.local/bin/claude cargo test --locked --test it -- --ignored --exact review_subagents::the_real_claude_review_jobs_keep_their_limits`.
+/// With Haiku, in a worktree whose `.claude/settings.json` has a
+/// `SessionStart` hook that writes a marker and whose `.claude/agents`
+/// defines an agent, it checks that
+/// 1. neither job loads the worktree's settings: no marker
+///    (ADR-t1470-1);
+/// 2. the agent's job is given none of the worktree's agents: its
+///    `init` event lists none;
+/// 3. the `permissions.deny` of the job's `--settings` holds in the
+///    agent's job: given the shell, the command the deny names is
+///    refused (its `result` event lists the denial) and does not run;
+/// 4. the agent's job has only its declared tools, here the review's
+///    default reads: Claude Code lists no writing tool and the file it is
+///    told to write is not there (ADR-t1728-2).
+///
+/// Each has a control the property fails in, so a check that passes
+/// proves the argv and not the test: for 1 the whole review and for 1, 2
+/// and 4 the agent's job with the default setting sources (and, for 4,
+/// `write` declared) load the marker, list the agent and write the file;
+/// for 3 the same job with the deny emptied runs the command.
 #[test]
 #[ignore = "runs the real Claude Code; see the doc comment"]
-fn the_real_claude_review_loads_no_worktree_settings() {
-    use dagq::application::AgentProvider;
+fn the_real_claude_review_jobs_keep_their_limits() {
+    use dagq::application::{AgentJobLaunch, AgentProvider, CommandSpec};
+    use dagq::domain::review_subagents::{AgentRole, AgentTool, AgentTools};
     use dagq::infrastructure::adapters::ClaudeCode;
+    const PLANTED_AGENT: &str = "planted-reviewer";
     let executable = std::env::var_os("DAGQ_REAL_CLAUDE")
         .expect("name the real Claude Code executable in DAGQ_REAL_CLAUDE");
     let claude = ClaudeCode {
         executable: executable.into(),
     };
     let dir = tempfile::tempdir().unwrap();
-    // One review: its worktree (with the planted settings) and its run
-    // directory.
-    let review = |name: &str| -> (String, PathBuf) {
+    // One review's worktree, with the planted settings and agent, and its
+    // run directory; the marker the settings' hook writes.
+    let review = |name: &str| -> (PathBuf, PathBuf, PathBuf) {
         let root = dir.path().join(name);
         let worktree = root.join("worktree");
         let run_dir = root.join("run");
-        fs::create_dir_all(worktree.join(".claude")).unwrap();
+        fs::create_dir_all(worktree.join(".claude/agents")).unwrap();
         fs::create_dir_all(&run_dir).unwrap();
         git(&worktree, &["init", "-q"]);
         fs::write(worktree.join("a.txt"), "hello\n").unwrap();
@@ -892,7 +911,67 @@ fn the_real_claude_review_loads_no_worktree_settings() {
             .to_string(),
         )
         .unwrap();
-        let run = TaskRun::restore(dagq::domain::RunRecord {
+        fs::write(
+            worktree.join(format!(".claude/agents/{PLANTED_AGENT}.md")),
+            format!(
+                "---\nname: {PLANTED_AGENT}\ndescription: planted by the worktree\n---\nReview.\n"
+            ),
+        )
+        .unwrap();
+        (worktree, run_dir, marker)
+    };
+    // Run `command` with Haiku, `--setting-sources` dropped for a
+    // control; its reply, its `init` event and its `result` event.
+    let run = |mut command: CommandSpec, control: bool, input: &Path| -> (String, Value, Value) {
+        claude.select_model(&mut command, "claude-haiku-4-5-20251001", "low");
+        let mut args: Vec<std::ffi::OsString> = command.get_args().map(Into::into).collect();
+        let at = args.iter().position(|a| a == "--setting-sources").unwrap();
+        assert_eq!(args[at + 1], "");
+        if control {
+            args.drain(at..=at + 1);
+        }
+        // The prompt is the job's standard input.
+        fs::write(input, command.get_stdin().unwrap()).unwrap();
+        let mut process = std::process::Command::new(command.get_program());
+        process
+            .args(&args)
+            .current_dir(command.get_current_dir().unwrap())
+            .env_remove("CLAUDECODE")
+            .stdin(fs::File::open(input).unwrap());
+        let output = {
+            let _waiting = crate::common::within(Duration::from_secs(300), "the real Claude job");
+            process.output().unwrap()
+        };
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let events: Vec<Value> = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect();
+        let event = |kind: &str| {
+            events
+                .iter()
+                .rfind(|event| {
+                    event["type"] == kind && (kind != "system" || event["subtype"] == "init")
+                })
+                .unwrap_or_else(|| panic!("no {kind} event in {stdout}"))
+                .clone()
+        };
+        (claude.job_reply(&stdout), event("system"), event("result"))
+    };
+    let names = |init: &Value, key: &str| -> Vec<String> {
+        init[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|name| name.as_str().map(str::to_owned))
+            .collect()
+    };
+
+    // The whole review.
+    let whole = |name: &str, control: bool| {
+        let (worktree, run_dir, marker) = review(name);
+        let task_run = TaskRun::restore(dagq::domain::RunRecord {
             id: RunId::new("0d8e3f1a-7c1b-4e35-9a11-3f6d2c9b8e47").unwrap(),
             task_id: TaskId::new(1),
             status: RunStatus::AwaitingIntegration,
@@ -913,53 +992,133 @@ fn the_real_claude_review_loads_no_worktree_settings() {
             created_at: String::new(),
         })
         .unwrap();
-        let mut command = claude
+        let command = claude
             .review_command(
-                &run,
+                &task_run,
                 "Reply with the single word OK.",
                 runtime::REVIEW_ACCESS,
             )
             .unwrap();
-        claude.select_model(&mut command, "claude-haiku-4-5-20251001", "low");
-        let mut args: Vec<std::ffi::OsString> = command.get_args().map(Into::into).collect();
-        // The control is the review as it was before ADR-t1470-1: with
-        // the default setting sources.
-        if name == "control" {
-            let at = args.iter().position(|a| a == "--setting-sources").unwrap();
-            assert_eq!(args[at + 1], "");
-            args.drain(at..=at + 1);
-        }
-        // The prompt is the review's standard input (task 1560).
-        let input = run_dir.join(format!("{name}-prompt.txt"));
-        fs::write(&input, command.get_stdin().unwrap()).unwrap();
-        let mut process = std::process::Command::new(command.get_program());
-        process
-            .args(&args)
-            .current_dir(command.get_current_dir().unwrap())
-            .env_remove("CLAUDECODE")
-            .stdin(fs::File::open(&input).unwrap());
-        let output = {
-            let _waiting =
-                crate::common::within(Duration::from_secs(300), "the real Claude review");
-            process.output().unwrap()
-        };
-        assert!(output.status.success(), "{output:?}");
-        // The review prints its result as JSON: the reply is its `result`.
-        (
-            claude.job_reply(&String::from_utf8_lossy(&output.stdout)),
-            marker,
-        )
+        let (reply, ..) = run(command, control, &run_dir.join("prompt.txt"));
+        (reply, marker)
     };
-
-    let (control, marker) = review("control");
+    let (reply, marker) = whole("whole-control", true);
     assert!(
         marker.is_file(),
-        "with the default setting sources the worktree's settings load (the control): {control}"
+        "with the default setting sources the worktree's settings load (the control): {reply}"
     );
-    let (plain, marker) = review("plain");
+    let (reply, marker) = whole("whole", false);
     assert!(
         !marker.is_file(),
-        "the worktree's settings were loaded: {plain}"
+        "the whole review loaded the worktree's settings: {reply}"
+    );
+
+    // An agent's job, as the run's review launches it: in the worktree,
+    // its directory and the material in the run directory.
+    let agent = |name: &str, tools: AgentTools, prompt: &str| {
+        let (worktree, run_dir, marker) = review(name);
+        let job_dir = run_dir.join("review-1-agents/design");
+        fs::create_dir_all(&job_dir).unwrap();
+        let material = run_dir.join("review.md");
+        fs::write(&material, "# Review\n").unwrap();
+        let launch = AgentJobLaunch {
+            cwd: worktree.clone(),
+            dir: job_dir.clone(),
+            material,
+            prompt: prompt.to_owned(),
+            tools,
+        };
+        let mut command = claude.agent_job_command(&launch).unwrap();
+        claude.without_mcp(&mut command);
+        (command, worktree, job_dir, marker)
+    };
+    let written = "written.txt";
+    let write_prompt = format!(
+        "Use the Write tool once to create the file `{written}` in the current directory \
+         containing `x`. If it is refused or missing, do not try another way. Then reply OK."
+    );
+    // 1, 2 and 4.
+    let reads = AgentRole::Review.default_tools();
+    let (command, worktree, job_dir, marker) = agent("agent", reads, &write_prompt);
+    let (reply, init, _) = run(command, false, &job_dir.join("prompt.txt"));
+    assert!(
+        !marker.is_file(),
+        "the agent's job loaded the worktree's settings: {reply}"
+    );
+    assert!(
+        !names(&init, "agents").contains(&PLANTED_AGENT.to_owned()),
+        "the worktree's agent was given: {init}"
+    );
+    let tools = names(&init, "tools");
+    for tool in ["Write", "Edit", "NotebookEdit", "Bash"] {
+        assert!(!tools.contains(&tool.to_owned()), "{tool} in {tools:?}");
+    }
+    assert!(
+        !worktree.join(written).exists(),
+        "the agent's job wrote: {reply}"
+    );
+    // Their control.
+    let writes = AgentTools::new([AgentTool::Read, AgentTool::Write]);
+    let (command, worktree, job_dir, marker) = agent("agent-control", writes, &write_prompt);
+    let (reply, init, _) = run(command, true, &job_dir.join("prompt.txt"));
+    assert!(
+        marker.is_file(),
+        "the control loads the worktree's settings: {reply}"
+    );
+    assert!(
+        names(&init, "agents").contains(&PLANTED_AGENT.to_owned()),
+        "the control is given the worktree's agent: {init}"
+    );
+    assert!(
+        worktree.join(written).is_file(),
+        "the control writes: {reply}"
+    );
+
+    // 3: a command `permissions.deny` refuses (the identity rules), with
+    // the shell declared so that only the deny can refuse it.
+    let ran = "shell-ran";
+    let shell_prompt = format!(
+        "Run exactly this one command once with the Bash tool: \
+         `export DAGQ_ROLE=worker && touch {}`. If it is refused, do not retry it \
+         or run anything else. Then reply OK.",
+        shell_path(ran)
+    );
+    let shell = || AgentTools::new([AgentTool::Read, AgentTool::Shell]);
+    let (command, worktree, job_dir, _) = agent("deny", shell(), &shell_prompt);
+    let settings: Value = serde_json::from_str(
+        &fs::read_to_string(job_dir.join("claude-agent-job-settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        names(&settings["permissions"], "deny").contains(&"Bash(export DAGQ_ROLE*)".to_owned()),
+        "{settings}"
+    );
+    let (reply, _, result) = run(command, false, &job_dir.join("prompt.txt"));
+    assert!(
+        !worktree.join(ran).exists(),
+        "the deny did not hold: {reply}"
+    );
+    // The job did try the command and was refused, not just left it.
+    let denials = result["permission_denials"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    assert!(
+        denials
+            .into_iter()
+            .any(|denial| denial["tool_name"] == "Bash"),
+        "the command was not refused: {result}"
+    );
+    // Its control: the same job with the deny emptied.
+    let (command, worktree, job_dir, _) = agent("deny-control", shell(), &shell_prompt);
+    let settings = job_dir.join("claude-agent-job-settings.json");
+    let mut emptied: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+    emptied["permissions"]["deny"] = json!([]);
+    fs::write(&settings, emptied.to_string()).unwrap();
+    let (reply, ..) = run(command, false, &job_dir.join("prompt.txt"));
+    assert!(
+        worktree.join(ran).is_file(),
+        "the control runs the command: {reply}"
     );
 }
 
