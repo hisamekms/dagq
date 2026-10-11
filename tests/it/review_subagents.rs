@@ -389,19 +389,22 @@ fn a_review_without_required_agents_is_unchanged() {
     assert!(!material.contains("subagent"), "{material}");
 }
 
-/// The attempt's range is fixed once, with the landing branch's commit
-/// the agents are read from, and review.md shows that range: a session
-/// rebased the run onto main B, which touched `late.txt`; the agents are
-/// selected from B...head (only `design`), then main moves to C, which is
-/// not an ancestor of the head. Found afresh, the material's range would
-/// fall back to the run's base A and show `late.txt`, which `late` must
-/// review but was not selected for.
+/// The range starts at the merge base of the current main and the
+/// receipt's commit: a session rebased the run from main A onto main B,
+/// which touched `late.txt`, and main then moved on to C, which touched
+/// `c.txt` and configured the program reviews. Main is no ancestor of the
+/// head, yet the range is B...head: review.md's commits and diff, the
+/// agents and the programs selected and the range `review_started`
+/// records and the agent's job is told hold the run's change only, not
+/// B's or C's. The range fixed with the snapshot is the one review.md
+/// shows, and one that does not end at the receipt's commit is refused.
 #[test]
-fn the_material_shows_the_range_its_agents_were_selected_from() {
+fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
     use dagq::application::review::{review_range_at, snapshot_subagents};
+    use dagq::application::review_programs::snapshot_programs;
     use dagq::infrastructure::adapters::GitRepository;
     let (dir, repo, db) = fixture();
-    let config = format!("{CONFIG}[review.subagents.late]\npaths = [\"late.txt\"]\n");
+    let config = format!("{CONFIG}[review.subagents.late]\npaths = [\"late.txt\", \"c.txt\"]\n");
     let a = commit_on_main(&repo, &config, Some(MAIN_DEFINITION));
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     supervise(&db, &repo, &backend).unwrap();
@@ -414,7 +417,7 @@ fn the_material_shows_the_range_its_agents_were_selected_from() {
     // Main moves to B; the session rebases its head onto B.
     fs::write(repo.join("late.txt"), "late\n").unwrap();
     git(&repo, &["add", "late.txt"]);
-    git(&repo, &["commit", "-q", "-m", "b"]);
+    git(&repo, &["commit", "-q", "-m", "other task b"]);
     let b = git_out(&repo, &["rev-parse", "main"]);
     let rebasing = dir.path().join("rebasing");
     git(
@@ -437,39 +440,85 @@ fn the_material_shows_the_range_its_agents_were_selected_from() {
     let receipt =
         dagq::domain::Receipt::parse(&fs::read_to_string(run.receipt_path().unwrap()).unwrap())
             .unwrap();
+    // Main moves on to C, which is not an ancestor of the head.
+    fs::create_dir_all(repo.join("scripts")).unwrap();
+    for name in ["late", "change"] {
+        let script = format!("scripts/{name}.sh");
+        fs::write(repo.join(&script), "#!/bin/sh\nexit 0\n").unwrap();
+        git(&repo, &["add", &script]);
+    }
+    fs::write(repo.join("c.txt"), "c\n").unwrap();
+    git(&repo, &["add", "c.txt"]);
+    let c = commit_on_main(
+        &repo,
+        &format!(
+            "{config}[review.programs.late]\nscript = \"scripts/late.sh\"\npaths = [\"late.txt\", \"c.txt\"]\n\
+             [review.programs.change]\nscript = \"scripts/change.sh\"\npaths = [\"change.txt\"]\n"
+        ),
+        None,
+    );
 
     let repository = GitRepository::inspect(&repo).unwrap();
+    let range = |main: &CommitSha| review_range_at(&repository, &run, &receipt, main);
     let parse =
         |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_subagents);
-    let range = |main: &CommitSha| review_range_at(&repository, &run, &receipt, main);
     let snapshot = snapshot_subagents(&repository, &parse, &range)
         .unwrap()
         .unwrap();
-    assert_eq!(snapshot.commit, b);
+    assert_eq!(snapshot.commit, c);
     assert_eq!(snapshot.range.base, b);
     assert_eq!(snapshot.range.head, rebased);
+    assert_eq!(snapshot.event_value()["base"], json!(b));
     let selected: Vec<_> = snapshot.agents.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(selected, ["design"]);
+    assert_eq!(snapshot.agents[0].matched, ["change.txt"]);
+    // The agent's job is told the change is B to the receipt's commit, as
+    // the review builds it from the snapshot.
+    let agent = &snapshot.agents[0];
+    let job_dir = dir.path().join("agent-job");
+    let built = dagq::application::agent_job::build(&dagq::application::agent_job::AgentJob {
+        agent: &agent.name,
+        definition: &agent.definition,
+        tools: &agent.tools,
+        base: &snapshot.range.base,
+        head: &snapshot.range.head,
+        material: &job_dir.join("review.md"),
+        cwd: &rebasing,
+        dir: &job_dir,
+        language: None,
+    })
+    .unwrap();
+    let prompt = &built.prompt.text;
+    assert!(
+        prompt.contains(&format!("the commits from {b} to {rebased},")),
+        "{prompt}"
+    );
+    let parse = |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_programs);
+    let programs = snapshot_programs(&repository, &parse, &range)
+        .unwrap()
+        .unwrap();
+    assert_eq!(programs.range, snapshot.range);
+    let selected: Vec<_> = programs
+        .programs
+        .iter()
+        .map(|p| (p.program.name.as_str(), p.matched.clone()))
+        .collect();
+    assert_eq!(selected, [("change", vec!["change.txt".to_owned()])]);
 
-    // Main moves on to C, which is not an ancestor of the head.
-    fs::write(repo.join("c.txt"), "c\n").unwrap();
-    git(&repo, &["add", "c.txt"]);
-    git(&repo, &["commit", "-q", "-m", "c"]);
     let material = |outcome: Value| {
         let text = fs::read_to_string(outcome["path"].as_str().unwrap()).unwrap();
         (outcome["base"].as_str().unwrap().to_owned(), text)
     };
     let (base, text) = material(runtime::review(&db, TaskId::new(1)).unwrap());
-    assert_eq!(
-        base, a,
-        "found afresh, the range falls back to the run's base"
-    );
-    assert!(text.contains("late.txt"), "{text}");
-    let (base, text) =
-        material(dagq::compose::review_in(&db, TaskId::new(1), Some(&snapshot.range)).unwrap());
-    assert_eq!(base, b);
+    assert_eq!(base, b, "found afresh, the range starts at the merge base");
     assert!(text.contains(&format!("- base: {b}")), "{text}");
-    assert!(!text.contains("late.txt"), "{text}");
+    assert!(text.contains("change.txt"), "{text}");
+    for other in ["late.txt", "c.txt", "other task b", "review subagents"] {
+        assert!(!text.contains(other), "{other}: {text}");
+    }
+    let (base, fixed) =
+        material(dagq::compose::review_in(&db, TaskId::new(1), Some(&snapshot.range)).unwrap());
+    assert_eq!((base, fixed), (b.clone(), text));
     // A range that does not end at the receipt's commit is refused.
     let wrong = dagq::application::review::ReviewRange {
         base: b.clone(),

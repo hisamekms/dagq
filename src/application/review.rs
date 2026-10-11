@@ -27,10 +27,9 @@ pub struct Review<'a> {
 /// session to `<run_dir>/review.md` (temporary file, then rename) and report
 /// where it is with the size of the diff (ADR-0016, decision 7). The file holds the
 /// task, its goal, the receipt, the commits, the diffstat and the full diff
-/// `<base>...<head>`, `base` being the run's base commit and `head` the
-/// receipt's commit. When a session already rebased `head` onto the current
-/// `main`, `base` is that `main` instead, so the review does not repeat
-/// what other tasks landed meanwhile. The diff itself is never returned, so the caller
+/// `<base>...<head>`, `head` being the receipt's commit and `base` where
+/// the run's own commits start ([`range_base`]), so the review does not
+/// repeat what other tasks landed while the run took in a main. The diff itself is never returned, so the caller
 /// hands the path to a subagent instead of reading it. `range`, when
 /// given, is the attempt's range already fixed ([`SubagentSnapshot::range`])
 /// and is used as it is, so that the material shows the diff its required
@@ -129,8 +128,8 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
 }
 
 /// The range `<base>...<head>` a review of `run` reads (see [`review`]):
-/// `head` is the receipt's commit, `base` the run's base commit, or the
-/// current `main` when a session already rebased `head` onto it.
+/// `head` is the receipt's commit, `base` its [`range_base`] with the
+/// current `main`.
 pub fn review_range(
     repository: &dyn Repository,
     run: &TaskRun,
@@ -149,12 +148,35 @@ pub fn review_range_at(
     main: &CommitSha,
 ) -> Result<ReviewRange> {
     let head = receipt.commit().to_ascii_lowercase();
-    let base = if main != run.base_commit() && repository.is_ancestor(main.as_str(), &head)? {
-        main.to_string()
-    } else {
-        run.base_commit().to_string()
-    };
+    let base = range_base(repository, run, main, &head)?;
     Ok(ReviewRange { base, head })
+}
+
+/// Where `run`'s own commits up to `head` start: the merge base of `main`,
+/// the landing branch's commit, and `head`, found as the declared paths'
+/// check and `integrate` find it. A run that took in other tasks'
+/// landings by a rebase or a merge onto any main since its claim starts
+/// after them; one that took in none starts at its base commit. The run's
+/// base commit when the two have no merge base.
+pub fn range_base(
+    repository: &dyn Repository,
+    run: &TaskRun,
+    main: &CommitSha,
+    head: &str,
+) -> Result<String> {
+    Ok(repository
+        .merge_base(main.as_str(), head)?
+        .map_or_else(|| run.base_commit().to_string(), CommitSha::into_string))
+}
+
+/// `git log --oneline` of `run`'s own commits in its worktree
+/// `worktree`, from their [`range_base`] with the landing branch's
+/// current commit: what a new session of the run is handed as its work so
+/// far, without the commits of other tasks it took in.
+pub fn run_commits(repository: &dyn Repository, run: &TaskRun, worktree: &Path) -> Result<String> {
+    let head = repository.head(worktree)?;
+    let base = range_base(repository, run, &repository.main_head()?, head.as_str())?;
+    repository.log_oneline(&base, head.as_str())
 }
 
 /// The range `<base>...<head>` of one review attempt.
@@ -512,6 +534,11 @@ mod tests {
     }
 
     fn run() -> TaskRun {
+        run_on(SHA)
+    }
+
+    /// A run claimed on the base commit `base`.
+    fn run_on(base: &str) -> TaskRun {
         TaskRun::restore(RunRecord {
             id: RunId::new(RUN).unwrap(),
             task_id: TaskId::new(7),
@@ -519,7 +546,7 @@ mod tests {
             requested_provider: Provider::Claude,
             actual_provider: Provider::Claude,
             worker_mode: crate::domain::worker::WorkerMode::Headless,
-            base_commit: CommitSha::try_from(SHA).unwrap(),
+            base_commit: CommitSha::try_from(base).unwrap(),
             branch: None,
             worktree_path: None,
             workspace_id: None,
@@ -586,10 +613,15 @@ mod tests {
 
     /// A repository whose landing branch is at [`SHA`] and holds `files`
     /// there only, and whose reviewed range changes `changed`: what
-    /// [`snapshot_subagents`] reads, with nothing else.
+    /// [`snapshot_subagents`] reads, with nothing else. `merge_bases`
+    /// gives the merge base of each pair of commits it has one for, and
+    /// `head` a worktree's commit, for the range's base.
+    #[derive(Default)]
     struct Committed {
         files: Vec<(&'static str, &'static str)>,
         changed: Vec<String>,
+        merge_bases: Vec<(&'static str, &'static str, &'static str)>,
+        head: Option<&'static str>,
     }
 
     impl Repository for Committed {
@@ -608,8 +640,12 @@ mod tests {
                 .find(|(name, _)| *name == path)
                 .map(|(_, text)| (*text).to_owned()))
         }
-        fn merge_base(&self, _: &str, _: &str) -> Result<Option<CommitSha>> {
-            Ok(None)
+        fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
+            Ok(self
+                .merge_bases
+                .iter()
+                .find(|(x, y, _)| (*x, *y) == (a, b))
+                .map(|(_, _, base)| CommitSha::try_from(*base).unwrap()))
         }
         fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
             assert_eq!((from, to), ("base", "head"));
@@ -619,7 +655,7 @@ mod tests {
             unreachable!()
         }
         fn head(&self, _: &Path) -> Result<CommitSha> {
-            unreachable!()
+            Ok(CommitSha::try_from(self.head.unwrap()).unwrap())
         }
         fn is_ancestor(&self, _: &str, _: &str) -> Result<bool> {
             unreachable!()
@@ -701,8 +737,8 @@ mod tests {
         fn landed_task_ids(&self, _: &str, _: &str) -> Result<Vec<TaskId>> {
             unreachable!()
         }
-        fn log_oneline(&self, _: &str, _: &str) -> Result<String> {
-            unreachable!()
+        fn log_oneline(&self, base: &str, head: &str) -> Result<String> {
+            Ok(format!("{base}..{head}"))
         }
         fn diff_stat(&self, _: &str, _: &str) -> Result<String> {
             unreachable!()
@@ -744,6 +780,7 @@ mod tests {
         let repository = Committed {
             files,
             changed: changed.iter().map(|p| (*p).to_owned()).collect(),
+            ..Committed::default()
         };
         let range = |main: &CommitSha| {
             assert_eq!(main.as_str(), SHA);
@@ -803,7 +840,7 @@ mod tests {
             check_agents(
                 &Committed {
                     files,
-                    changed: Vec::new(),
+                    ..Committed::default()
                 },
                 &parse,
             )
@@ -881,7 +918,7 @@ mod tests {
                     (".dagq/agents/design/AGENT.md", SHELL),
                     (".dagq/agents/unused/AGENT.md", READS),
                 ],
-                changed: Vec::new(),
+                ..Committed::default()
             },
             &parse,
         )
@@ -970,6 +1007,89 @@ mod tests {
                 "the review subagent design that dagq.toml names has no definition .dagq/agents/design/AGENT.md in the landing branch's commit {SHA}"
             )),
             "{error}"
+        );
+    }
+    const CLAIMED: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const MIDWAY: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const HEAD: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+    /// The base of the range from `main` ([`SHA`]) to [`HEAD`] of a run
+    /// claimed on [`CLAIMED`], in a repository where their merge base is
+    /// `merge_base`.
+    fn base_with(merge_base: Option<&'static str>) -> String {
+        let repository = Committed {
+            merge_bases: merge_base
+                .map(|base| (SHA, HEAD, base))
+                .into_iter()
+                .collect(),
+            ..Committed::default()
+        };
+        range_base(
+            &repository,
+            &run_on(CLAIMED),
+            &CommitSha::try_from(SHA).unwrap(),
+            HEAD,
+        )
+        .unwrap()
+    }
+
+    /// The range starts at the merge base of the current main and the
+    /// head: a run rebased onto a main that moved on since starts at that
+    /// midway main, so other tasks' commits before it are not the run's;
+    /// one not rebased starts at its base commit, one rebased onto the
+    /// current main at that main, as before; without a merge base, at the
+    /// run's base commit.
+    #[test]
+    fn the_range_starts_at_the_merge_base_of_the_current_main_and_the_head() {
+        assert_eq!(base_with(Some(MIDWAY)), MIDWAY);
+        assert_eq!(base_with(Some(CLAIMED)), CLAIMED);
+        assert_eq!(base_with(Some(SHA)), SHA);
+        assert_eq!(base_with(None), CLAIMED);
+        let receipt = Receipt::parse(
+            &json!({
+                "run_id": RUN,
+                "result": "succeeded",
+                "commit": HEAD.to_ascii_uppercase(),
+                "tests": {"status": "passed", "evidence_or_reason": "unit"},
+                "e2e": {"status": "not_applicable", "evidence_or_reason": "none"},
+                "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+                "summary": "done",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let repository = Committed {
+            merge_bases: vec![(SHA, HEAD, MIDWAY)],
+            ..Committed::default()
+        };
+        assert_eq!(
+            review_range_at(
+                &repository,
+                &run_on(CLAIMED),
+                &receipt,
+                &CommitSha::try_from(SHA).unwrap()
+            )
+            .unwrap(),
+            ReviewRange {
+                base: MIDWAY.to_owned(),
+                head: HEAD.to_owned(),
+            }
+        );
+    }
+
+    /// A new session of a run rebased onto a midway main is handed the
+    /// commits from that main to its worktree's head, not those of other
+    /// tasks since its claim.
+    #[test]
+    fn a_handoff_shows_the_runs_own_commits_only() {
+        let repository = Committed {
+            merge_bases: vec![(SHA, HEAD, MIDWAY)],
+            head: Some(HEAD),
+            ..Committed::default()
+        };
+        assert_eq!(
+            run_commits(&repository, &run_on(CLAIMED), Path::new("/worktree")).unwrap(),
+            format!("{MIDWAY}..{HEAD}")
         );
     }
 }

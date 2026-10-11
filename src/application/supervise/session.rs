@@ -774,8 +774,8 @@ impl Supervisor<'_> {
     }
 
     /// The handoff prompt of a new session of `run`'s worker
-    /// ([`handoff_text`]): its commits and its worktree's changes as git
-    /// shows them, the summary of the receipt it wrote last, `review` and
+    /// ([`handoff_text`]): its own commits (`review::run_commits`) and its
+    /// worktree's changes as git shows them, the summary of the receipt it wrote last, `review` and
     /// the `request` it would have been sent (with the file that holds it
     /// whole). What git cannot show is said, not an error: the session
     /// reads it in its worktree. The language's instruction is added here
@@ -796,13 +796,7 @@ impl Supervisor<'_> {
             warn!(run_id = %run.id(), "the {what} of {} could not be read for its handoff: {error:#}", run.id());
             format!("(could not be read: run `git {what}` in your worktree)")
         };
-        let commits = self
-            .repository
-            .head(worktree)
-            .and_then(|head| {
-                self.repository
-                    .log_oneline(run.base_commit().as_str(), head.as_str())
-            })
+        let commits = crate::application::review::run_commits(&*self.repository, run, worktree)
             .unwrap_or_else(|error| unread("log", error));
         let changes = self
             .repository

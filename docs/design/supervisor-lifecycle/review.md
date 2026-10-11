@@ -186,7 +186,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 - **snapshot**: 必須のagentと定義は、試行ごとにlanding branchの今のcommitのtreeから読む（`snapshot_subagents`）。
   workerがrun branchで設定や定義を変えても、選ばれるagentは変わらない。
 - **選び方**: reviewする範囲の変えたpath（renameは旧と新の両方）を各agentのglobに照らし、当たったagentを設定の順に1回だけ選ぶ（`domain::review_subagents::select`）。
-  範囲は試行ごとに1回決め、`review.md`も同じ範囲で書くので、途中でmainが進んでも選んだ差分と資料の差分は食い違わない。
+  範囲（基点は[review](review-command.md)）は試行ごとに1回決め、`review.md`も同じ範囲で書くので、mainが進んでも選んだ差分と資料は食い違わない。
 - **agentのjob**: snapshotが返した定義の本文をそのままpromptに持ち、定義のpathは書かず、1つのverdictを返させる（`application::agent_job::build`、evalと同じ組み立て）。
   起動は`AgentProvider::agent_job_command`で、道具の変換は宣言から（Claudeはjob自身の引数、Codexは今のreviewのread-onlyのsandboxとjobのpermission profileに足す設定）。
   agentのjobはqueueを読む道具を持たず、`[run.env]`とsccacheの扱いは全体のreviewのjobと同じである。
