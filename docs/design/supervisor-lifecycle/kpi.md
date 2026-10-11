@@ -80,7 +80,7 @@ related:
 ### workerが読んだ指示の版
 
 workerのrunの`run_claimed`は、workerが読んだ指示（promptの雛形・plugin・repositoryの指示の文書）の版をhashで持つ（対象は[Prompt](prompt.md#workerが読んだ指示の版)）。
-今の`--by`の軸にはなく、runの台帳ができた後に同じ記録から`--by <キー>`で読む。
+今の`--by`の軸にはなく、kpiがrunの台帳を読むようになった後に同じ記録から`--by <キー>`で読む。
 
 ### 軸を掛け合わせる `--cross`
 

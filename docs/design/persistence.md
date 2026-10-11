@@ -83,7 +83,7 @@ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（
 ## 表
 
 表ごとの役割と、列についてコードから読めない約束。
-列の型と既定値は`migrations/*.sql`と、行を読む関数（`task_row`・`ask_row`など）が持つ。
+列の型と既定値は`migrations/*.sql`が持つ。
 
 ```text
 tasks                  -- task 1つに1行。priorityのnullは所属goalの優先度を継ぐ。worker_modeのnullはproviderの既定（ADR-t1340-1）、
@@ -117,6 +117,7 @@ asks                   -- 人に答えを求める相談。answered_byの値は�
 findings               -- observerの検出。同じ問題の閉じていない行は1つ（部分unique index）
 search_index           -- 全文検索の索引（FTS5）。triggerが保つ
 landed_commits         -- 着地したcommit。run_integratedのeventからtriggerが書く
+ledger_rows            -- 計測の台帳（ビュー）
 binary_updates         -- 使っていない（自動更新の経過はupdate_*のevent）
 ```
 

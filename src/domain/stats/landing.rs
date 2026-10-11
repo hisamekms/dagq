@@ -11,8 +11,8 @@
 //! and the `landing_queue` phase by what queued the run (`via`, task 949).
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Serialize;
 use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{RunEvent, Summary, median, payload_status};
@@ -91,14 +91,14 @@ pub struct LandPhases {
 }
 
 /// One `via`'s share of a run's `landing_queue` phase.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViaSecs {
     pub via: String,
     pub secs: i64,
 }
 
 /// One verification command's share of a run's `verify` phase.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSecs {
     pub command: String,
     /// How many times it ran over the run's attempts.
@@ -128,6 +128,25 @@ impl Serialize for LandPhases {
         map.serialize_entry("verify_commands", &self.verify_commands)?;
         map.serialize_entry("landing_queue_via", &self.landing_queue_via)?;
         map.end()
+    }
+}
+
+/// Reads back what [`Serialize`] wrote (the ledger's legacy rows keep it
+/// as JSON); a phase that is not there reads as 0.
+impl<'de> Deserialize<'de> for LandPhases {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = serde_json::Map::<String, Value>::deserialize(deserializer)?;
+        let mut phases = Self::default();
+        for (index, name) in PHASES.iter().enumerate() {
+            phases.secs[index] = map.get(*name).and_then(Value::as_i64).unwrap_or(0);
+        }
+        phases.push = map.get("push").and_then(Value::as_i64);
+        let list = |key: &str| map.get(key).cloned().unwrap_or(Value::Array(Vec::new()));
+        phases.verify_commands =
+            serde_json::from_value(list("verify_commands")).map_err(serde::de::Error::custom)?;
+        phases.landing_queue_via =
+            serde_json::from_value(list("landing_queue_via")).map_err(serde::de::Error::custom)?;
+        Ok(phases)
     }
 }
 

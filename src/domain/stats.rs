@@ -1973,6 +1973,17 @@ fn seconds_between(from: Option<i64>, to: Option<i64>) -> Option<i64> {
     Some((to? - from?) / 1000)
 }
 
+/// Each run of `events` as `stats` measures it, in order of its first
+/// event, without its goal: the per-run values (`work`, `validate`,
+/// `wait_to_land`, `land_phases`, `startup` and the measures) the ledger
+/// freezes into a legacy row.
+pub fn run_stats(events: &[RunEvent]) -> Vec<RunStats> {
+    runs(events, &HashMap::new())
+        .into_iter()
+        .map(|track| track.stats)
+        .collect()
+}
+
 /// Group the run events by run, in order of each run's first event.
 fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Track> {
     let mut order: Vec<RunId> = Vec::new();

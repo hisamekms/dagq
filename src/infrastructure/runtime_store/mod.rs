@@ -61,6 +61,7 @@ pub fn lease_is_stale(lease: &RunLease, now: i64) -> bool {
 mod ask_store;
 mod coordination;
 mod eval_rounds;
+mod ledger;
 mod planning_records;
 mod queue_records;
 mod recovery;

@@ -16,6 +16,7 @@ use serde_json::Value;
 use super::{Intervals, RunStats, cargo::CargoOnly, intervals, median_f64, tokens::TokenTotals};
 use crate::domain::{
     EventId, RunEvent, TaskId,
+    after_claim::AfterClaimTrack,
     measure::{load_band, load_band_order},
 };
 
@@ -205,27 +206,21 @@ pub(super) struct MeasureTrack {
     turn_started: Option<i64>,
     turn_millis: i64,
     turn_millis_by_provider: BTreeMap<String, i64>,
-    /// The claim's `provider`, and the `to` of the last `provider_switched`
-    /// (which may come before the claim: a move at the claim is recorded
-    /// first).
-    claim_provider: Option<String>,
-    switched_to: Option<String>,
-    /// The model the first Codex turn that named one read.
-    codex_model: Option<String>,
+    /// The provider it worked on, by the rule the ledger shares.
+    after_claim: AfterClaimTrack,
 }
 
 impl MeasureTrack {
     pub(super) fn observe(&mut self, event: &RunEvent) {
         let payload = &event.payload;
         let text = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_owned);
+        let turn_provider = self.after_claim.observe(event);
         let measures = &mut self.measures;
         match event.kind.as_str() {
             "run_claimed" if !self.claimed => {
                 self.claimed = true;
-                measures.on_codex |= payload["provider"] == "codex";
                 measures.dagq_version = text("dagq_version");
                 measures.claude_version = text("claude_version");
-                self.claim_provider = text("provider");
                 measures.provider = text("requested_provider").or_else(|| text("provider"));
                 measures.route = text("worker_mode");
                 measures.codex_version = text("codex_version");
@@ -239,25 +234,12 @@ impl MeasureTrack {
                 measures.worker_effort = text("effort");
                 measures.trial_group = text("group");
             }
-            "provider_switched" => {
-                measures.provider_switches += 1;
-                self.switched_to = text("to");
-                measures.on_codex |= payload["to"] == "codex";
-            }
+            "provider_switched" => measures.provider_switches += 1,
             "turn_started" => self.turn_started = super::timestamp_millis(&event.created_at),
             "turn_finished" => {
                 // A turn recorded without its provider ran on the one the
                 // run was on then.
-                let provider = text("provider")
-                    .or_else(|| self.switched_to.clone())
-                    .or_else(|| self.claim_provider.clone())
-                    .unwrap_or_else(|| super::asks::UNKNOWN.to_owned());
-                if provider == "codex" {
-                    measures.on_codex = true;
-                    if self.codex_model.is_none() {
-                        self.codex_model = text("model");
-                    }
-                }
+                let provider = turn_provider.unwrap_or_default();
                 let failed = payload["outcome"] != "succeeded";
                 let millis = match (
                     self.turn_started.take(),
@@ -318,7 +300,9 @@ impl MeasureTrack {
     }
 
     pub(super) fn finish(mut self) -> RunMeasures {
-        self.measures.actual_provider = self.switched_to.take().or(self.claim_provider.take());
+        let after_claim = self.after_claim.facts();
+        self.measures.actual_provider = after_claim.last_provider;
+        self.measures.on_codex = after_claim.on_codex;
         // A run that worked on Codex is a Codex run: not a run of the host's
         // Claude Code, not in the trial, and of the model Codex used rather
         // than the claim's (the step's Claude model, the Claude model it
@@ -326,7 +310,7 @@ impl MeasureTrack {
         if self.measures.on_codex {
             self.measures.claude_version = None;
             self.measures.trial_group = None;
-            self.measures.worker_model = self.codex_model.take();
+            self.measures.worker_model = after_claim.codex_model;
         }
         let mean = (self.verify_weight > 0.0)
             .then(|| (self.verify_sum / self.verify_weight * 100.0).round() / 100.0);

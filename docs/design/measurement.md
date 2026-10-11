@@ -30,7 +30,7 @@ related:
 
 # 計測
 
-> **一部だけ実装済み（2026-10-09）**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録は実装済みで、今の姿を書く。
+> **一部だけ実装済み（2026-10-09）**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、runとtaskの台帳と「畳む関数」は実装済みで、今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[`stats`](supervisor-lifecycle/stats.md)（着地待ちの内訳・作業の内訳）・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)・[hostの負荷](supervisor-lifecycle/host-metrics.md)が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
@@ -49,7 +49,7 @@ related:
 | EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・mainの履歴・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
 | SessionStepStore | sessionのstep（turn・tool・コマンドのshape）。`(session_id, seq)`で重複を除き、抜けを残す。90日 | SSOT | 未実装（queue.dbの新しい表の予定） |
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | 未実装（queue.dbの新しい表の予定）。今はsupervisorが`host/metrics-YYYYMMDD.csv`に書くだけ |
-| LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | 未実装（queue.dbの新しい表の予定） |
+| LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows`（今はrunとtaskの行。作る係は未実装） |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`（取り込んだ値はEventStoreかSessionStepStoreに入る） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`（`it-coverage-map.json`の1ファイル）、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`。着地の検証は下の「着地の検証の対応表のcache」から読む |
@@ -77,7 +77,8 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 - **タグ**: `blocker`は`queue`（slotや着地の順番の空き待ち）・`ai`（agentが動いている）・`compute`（build・test・検証の計算）・`human`（人の答え）・`runtime`（dagq自身の処理と見張りの間隔）・`external`（GitHub・remote・providerのAPIなど外のサービス）・`infra`（実行環境の用意・故障・資源の不足。ADR-t1662-3決定5）。`holds`は`worker_slot`・`landing_slot`・`none`で、slotの数え方（着地の順番だけを待つrunと人の答えを待つrunはslotの外）に従う。
 - **`Phase::tags()`**: 記録の工程の定義（`domain::run_phase`）の隣で網羅的な`match`がタグを返す。
   supervisorの工程も網羅的な`match`で記録の工程に対応し、どちらも工程を足して書き忘れるとコンパイルが止まる。
-- **unattributed**（予定）: 区間の列に当たらない時間（記録の抜け）はunattributedの区間として出す。KPIは所要時間に対する割合を見張り、2%以上を目標割れにする。
+- **unattributed**: 区間の列に当たらない時間（記録の抜け）はunattributedの区間として出す。
+  KPIは所要時間に対する割合を見張り、2%以上を目標割れにする（予定）。
 - **物差し**: 所要時間（区間の和）と、slotを握った時間（`holds`が`none`でない区間の和）。
 
 工程とタグ:
@@ -112,7 +113,7 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 
 `run_integrated`の後は工程`push`（`run_integrated`と同じtransactionで記録）で、pushの結果の記録と同じ所で、`push_finished`（`already_delivered`を含む）か`push_skipped`なら`ended`（`cause`は`pushed`・`push_skipped`）を、`push_failed`なら`push_pending`（`blocker: human`）を記録する。
 人の`integrate`も同じ`Integrator`を通るので同じ記録になる。
-`push_pending`を同じremote・branchへの後の`push_finished`で閉じるのは畳む関数（予定）で、人が手で打った`git push`はeventが無いので次の`push_finished`まで`push_pending`のまま。
+`push_pending`を同じremote・branchへの後の`push_finished`で閉じるのは畳む関数で、人が手で打った`git push`はeventが無いので次の`push_finished`まで`push_pending`のまま。
 着地しないrunは`ended`（`cause`は失敗のstatus・`canceled`・`run_recovered`など）で閉じ、`failed`のrunを復旧jobが動かせば次の工程に移る。
 taskは`completed`（そのrunのpushの終わり）か`canceled`で閉じる（ADR-t1662-1決定16）。
 
@@ -176,28 +177,42 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
 
 ## 台帳の形
 
-台帳は対象ごとに1行（ADR-t1662-1決定10）。区切りの値は列、フローで形が変わるものはJSON。全ての行が共通に持つ列:
+台帳は対象ごとに1行（ADR-t1662-1決定10）。
+区切りの値は列、フローで形が変わるものはJSON。
+行は`domain::ledger::LedgerRow`、表は`ledger_rows`（列の意味はmigrationのコメント）。
+全ての行が共通に持つもの:
 
 | 列 | 中身 |
 | --- | --- |
 | `kind` | `run`・`task`・`session`・`queue`・`node` |
 | `key` | 対象のid（runはrun id、taskはtask id、sessionは対象の種類とid、queueは時間の区切り、nodeはnodeのidと時間の区切り） |
-| `ledger_v` | 畳み方の版。上がったら作り直す（旧方式の行を除く） |
-| `inputs_through` | 畳んだ入力の到達点（EventStoreのevent idと、stepとnodeのsampleの受けた順のid） |
+| `ledger_v` | 畳み方の版（`ledger::LEDGER_V`）。上がったら作り直す（旧方式の行を除く。`ledger::rebuilds`） |
+| `inputs_through` | 畳んだ入力の到達点のJSON object（今はEventStoreのevent idの`events`。stepとnodeは同じobjectにキーを足す） |
 | `final` | 確定の印（下の「台帳を作る係」） |
-| `legacy` | 旧方式の行だけ。旧方式の印と、今のstatsのrunごとの値（`work`・`validate`・`wait_to_land`・`land_phases`・`startup`）、属性の組とclaimの後の事実のJSON。一度だけ書いて凍結する |
+| `legacy` | 旧方式の印と、今のstatsのrunごとの値（`work`・`validate`・`wait_to_land`・`land_phases`・`startup`）。一度だけ書き、storeは上書きしない |
 
-種類ごとの列とJSON（予定）:
-
-- **run**: 列は`task_id`・`claimed_at`・`first_commit_at`・`receipt_at`・`integrated_at`・`ended_at`（pushの終わり）・`outcome`・`duration_secs`・`slot_secs`・`unattributed_secs`、タグごとの合計（`blocker_<値>_secs`・`holds_<値>_secs`）、Executionのtokenの列（入力・出力・cacheの読み書き。集約はtask 1494）。JSONは`intervals`（区間の列: `phase`・`blocker`・`holds`・`attempt`・`start`・`end`・`cause`・`blocked_by`・`resources`）・`steps`（stepの要約）・`sessions`（runの上のsessionとjobの項目）・`attributes`（claimの属性）・`after_claim`（claimの後の事実）・`change`・`area`・`nature`。
-- **task**: 列は`created_at`・`ready_at`・`first_claimed_at`・`ended_at`・`outcome`（`completed`・`canceled`）・`runs`・`duration_secs`。JSONは`intervals`（claimの前の待ちとrunごとの区間）と重ねたqueueの区間の要約。
-- **session**: runを持たない対象（runtimeのplanner・plan review・goal review・throughput review・observerのjob・inboxと人の対話の区切り）のsessionとjobの1回。列は`target_kind`・`target_id`・`started_at`・`ended_at`・`duration_secs`と、runの行と同じExecutionのtokenの列（対話のsessionは区切りごとの行）。JSONは`steps`の要約と`sessions`の項目。
-- **queue**: run・task・sessionに属さないqueue全体の区間と出来事（`slots_full`・`claim_held`・`claim_deferred`、着地slotの使用、`update_installed`・providerの切り替えなど）を時間の区切りごとに。
-- **node**: nodeの資源の時系列を時間の区切りで畳んだもの（load averageの平均と最大・CPU・メモリ・swap・ファイルシステムの空き）。今のstatsの`host`、kpiの`host`・`cpu_per_landing`・`load_per_core`・`health.disk`、reportのhostの値の置き場（task 1685・1686）。
+- **run**（実装済み）: 区間の列・タグごとの合計・claimの属性の組（キーを知らずにそのまま）・claimの後の事実。
+  旧方式のrunの組は`RunMeasures`から作る。
+  予定: Executionのtokenの列（集約はtask 1494）・`steps`・`sessions`・`change`・`area`・`nature`。
+- **task**（実装済み）: 区間の列と重ねたsupervisor単位の区間。
+  旧方式のrunを持つtaskは旧方式の行。
+- **session**（予定）: runを持たない対象（runtimeのplanner・plan review・goal review・throughput review・observerのjob・inboxと人の対話の区切り）のsessionとjobの1回。
+  列は`target_kind`・`target_id`・`started_at`・`ended_at`・`duration_secs`と、runの行と同じExecutionのtokenの列（対話のsessionは区切りごとの行）。
+  JSONは`steps`の要約と`sessions`の項目。
+- **queue**（予定）: run・task・sessionに属さないqueue全体の区間と出来事（`slots_full`・`claim_held`・`claim_deferred`、着地slotの使用、`update_installed`・providerの切り替えなど）を時間の区切りごとに。
+- **node**（予定）: nodeの資源の時系列を時間の区切りで畳んだもの（load averageの平均と最大・CPU・メモリ・swap・ファイルシステムの空き）。
+  今のstatsの`host`、kpiの`host`・`cpu_per_landing`・`load_per_core`・`health.disk`、reportのhostの値の置き場（task 1685・1686）。
 
 ## 畳む関数
 
-区間の列を作る関数は1つで（ADR-t1662-1決定2）、台帳を作る係と、走っているrunを見る読み手（`status`・`timeline`・`forecast`）が共有する。入力はEventStoreのeventの列（とstep・nodeのsample）で、出力は区間の列・タグごとの合計・unattributed・claimの後の事実。同じ入力からは同じ出力を返す。claimの後の事実（最後のprovider・Codexで作業したか・最初のCodexの`turn_finished`のmodel）は、`run_claimed`の`provider`・`provider_switched`の`to`・`turn_finished`の`provider`と`model`から、今の`domain::stats::measures::MeasureTrack`と同じ規則で作る（task 1666。既存の出力との一致をunit testの条件にする）。
+区間の列を作る関数は1つで（ADR-t1662-1決定2）、台帳を作る係と、走っているrunを見る読み手（`status`・`timeline`・`forecast`）が共有する（`domain::ledger::fold`）。
+入力はEventStoreのeventと、それから作るclaimの前の区間の行・今の時刻だけで、同じ入力からは同じ出力を返す。
+
+- **run**: 境目は`run_phase_changed`だけ。
+  最後の記録が`ended`なら閉じ、`push_pending`なら後の`push_finished`で閉じ、ほかは今の時刻まで畳んで終わりを持たない（確定していない）。
+  `run_phase_changed`無しで終わったrunは旧方式。
+- **task**: statusの移りを工程にし、runの間はそのrunの区間を差し込み、readyの間は`ready_at`で依存の待ちを分けてsupervisor単位の区間を重ねる。
+- **claimの後の事実**は`domain::after_claim`が作り、statsの`MeasureTrack`も同じものを使う。
 
 置き換える今の組み立て（段3で撤去）: `domain::stats::landing::LandClock`、`application::supervise`の`Phase`、`domain::run_progress::Phase`、`domain::forecast::Phase`、timelineの空白の理由。
 
@@ -212,6 +227,7 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
 ## 共通の読み取り関数
 
 stats・kpi・reportの全ての欄（hostの欄と、run・taskを持たない`jobs`・`sessions`などの集計を含む）は、5種類の行を今のstatsの窓と絞り込み（`--since`・`--until`・`--full`・`--goal`）で選んで返す1つの関数だけから作る。新しい行は区間から、旧方式の行は`legacy`から、同じ名前と形の値を返す。
+今あるのは1つの行を読む`domain::ledger::read::read`で、窓で選ぶ入口は予定。
 
 - 今の`work`・`wait_to_land`・`land_phases`・`startup`は、段3の後の1期間は台帳から同じ名前で作り、その後廃止する。`startup`は`first_commit`に改名する。1期間の長さは段3のtaskが決める。
 - kpiの`phase.<工程>`と`land_phase.<工程>`も同じ1期間は同じ名前で作り、その後はタグごとの値と`phase.first_commit`に置き換える。hostの設定の`[kpi.targets."phase.startup"]`は`phase.first_commit`に読み替える（ADR-t1662-1が[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)決定1をamends）。

@@ -14,7 +14,7 @@ tags:
 
 - [Overview](overview.md)
 - [Architecture](architecture.md)（レイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸の境界。contextごとの所有する状態・判断・操作・公開するport・依存の向き、境界をまたぐtransactionの一覧、検査できる規則と今の違反。ADR-t1545-1）
-- [計測](measurement.md)（計測の作り直しの予定。冒頭の「SSOTとビュー」が記録の論理ストアと材料の区分を持ち、計測の層のストアと共有の記録を足すtaskはそこに区分を書く。区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類。ADR-t1662-1〜3、まだ実装は無いdraft）
+- [計測](measurement.md)（計測の作り直し。冒頭の「SSOTとビュー」が記録の論理ストアと材料の区分を持ち、計測の層のストアと共有の記録を足すtaskはそこに区分を書く。区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類。ADR-t1662-1〜3、一部だけ実装済みのdraft）
 - [mainの履歴の記録](main-history.md)（supervisorが記録するmainのfirst-parentの履歴の流れ・commitの時刻と観測したheadと到達時刻の区別・到達点の間隔と猶予・取り込みの範囲・畳む関数と欠測の理由）
 - [agentのeval](agent-eval.md)（agentの定義とケースの置き場`.dagq/agents/<name>/`・ケースの欄とpatchの共有・採点と漏れの検査・queue serviceのユースケースとしての依頼と認可・eventだけから作り直す記録・費用の上限・hold-outの1回の制限・runのslotを使わないevalの枠・本番のagentのjobと共有する起動経路・道具の宣言とproviderごとの変換。ADR-t1728-1・2、ADR-t1869-1。着地の前の採用の判定・productionのケースと見張り・programのreviewの当て方は予定）
 - [Domain model](domain-model.md)

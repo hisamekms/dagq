@@ -6,6 +6,7 @@ use super::execution::{RunCoordination, RunLog};
 use super::host::SupervisorRegistry;
 use super::planning::{PlanningRecords, TaskStore};
 use super::shared::{AskStore, EventStore};
+use crate::domain::ledger::{LedgerKind, LedgerRow};
 use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, TaskId};
 use anyhow::Result;
 
@@ -65,6 +66,22 @@ impl<T: EventStore + ?Sized> MarkLog for T {
     fn record_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
         self.record_queue_event(kind, payload)
     }
+}
+
+/// The ledger (ADR-t1662-1 decisions 10 to 13, ADR-t1662-2): one row per
+/// measured object of each [`LedgerKind`], a view folded from the
+/// [`EventStore`] by [`crate::domain::ledger`]. Readers go through this
+/// port and [`crate::domain::ledger::read::read`] only, and no decision of
+/// the runtime (claim, slot, resume, landing) reads it.
+pub trait LedgerStore {
+    /// Write `row` in place of the row of the same kind and key, unless
+    /// that one is legacy (frozen once written); `false` then. Writing the
+    /// same row again leaves one row.
+    fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool>;
+    /// The row of `kind` and `key`, if there is one.
+    fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
+    /// Every row of `kind`, by key.
+    fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>>;
 }
 
 /// What reports read and record of the queue as a whole: the findings,

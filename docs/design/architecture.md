@@ -28,7 +28,7 @@ related:
 runtime（src/）の責務を、レイヤーとコンテキスト（context）の2軸で分ける今の境界と、それを守る規則の正本。
 決めた理由は[ADR-t1545-1](../adr/2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md)（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)決定1をamends）が持つ。
 moduleの説明は[overview](overview.md)、集約は[Domain model](domain-model.md)、tableは[Persistence](persistence.md)、supervisorのループは[`supervise`](supervisor-lifecycle/supervise.md)が持つ。
-reviewのsubagentと検査のscriptは、この文書の規則のID（「[検査できる規則](#検査できる規則)」）と一覧（「[境界をまたぐtransaction](#境界をまたぐtransaction)」）を参照し、規則の本文を写さない（ADR-t1545-1決定4）。
+reviewのsubagentと検査のscriptは、この文書の規則のIDと一覧（下の「検査できる規則」「境界をまたぐtransaction」）を参照し、本文を写さない（ADR-t1545-1決定4）。
 
 ### 全体の流れ
 
@@ -163,11 +163,11 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 ## 観測と分析
 
 起きたことを読み、数え、予測し、知らせること（events・watch・stats・KPI・forecast・印・observer・スループットの見直し・CIの見張り）。
-新しいportと台帳の係をこのcontextに置く計測の作り直しは[計測](measurement.md)が持つ（ADR-t1662-2決定6）。
+計測のportと台帳の係は[計測](measurement.md)が持つ（ADR-t1662-2決定6）。
 
 **所有する状態**
 
-- table: `findings`。
+- table: `findings`・`ledger_rows`（runtimeの制御は読まない）。
 - ファイル: queueのdirの日次のKPIのreportとKPIのpushの待ち。
 - event: `live_alert_*`（supervisorが書く今の判定の記録。[計測](measurement.md#今の判定の記録)）。
 - event: mainのfirst-parentの履歴の記録（`main_*`、[mainの履歴の記録](main-history.md)）。runtimeの制御は読まない。
@@ -177,7 +177,7 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
 **操作**
 
 - application: `application::stats`・`kpi`・`forecast`・`report`・`observer`・`watch`・`throughput_review`・`ci_watch`・`main_log`・`queue_reads::observation`（`status`も）ほかと、`application::supervise`の同名のsubmodule。
-- infrastructure: `findings`・`observer`・`throughput_review`・`runtime_store::queue_records`・`kpi_*`・`transcripts`・`ci_watch`・`ci_watch_store`ほか。
+- infrastructure: `findings`・`observer`・`throughput_review`・`runtime_store::queue_records`・`runtime_store::ledger`・`kpi_*`・`transcripts`・`ci_watch`・`ci_watch_store`ほか。
 
 **公開するport**
 
@@ -189,12 +189,12 @@ taskをrunにして動かし、検証し、mainへ着地させること（claim�
   控えるのは実行と着地の`supervise::provider`で、同じ終わりを1回だけ控える（[Provider lifecycle](provider-lifecycle.md)）。
 - `watch`の`AskNotifier`を所有し、実装`application::watch::InboxNotifier`は実行と着地の`SessionRegistry::session_workspace`でinboxのworkspaceを読み、host運用の`WorkspaceBackend::notify`で送る。
 - KPIのpushの行き先（`reports`）をhost運用の`inbox_nudge`に公開する。
-- `ObserverLog`・`ObservationQueue`は内部。
+- `ObserverLog`・`ObservationQueue`・`LedgerStore`は内部（台帳は`ledger::read`で読む）。
 
 **許す依存の向き**
 
 - 他のcontextの状態とeventを読むだけで、そのtableを書かず、操作（claim・遷移・answerの適用）を呼ばない（ADR-t1545-1決定2）。
-- 書くのは自分の種類のeventと`findings`と、findingに紐づく`blocked`のask（共有の部品）だけ。
+- 書くのは自分の種類のeventと`findings`・`ledger_rows`と、findingに紐づく`blocked`のask（共有の部品）だけ。
 
 **境界をまたぐtransaction**: 無い（T6はこのcontextの`findings`を計画管理が書くもの）。
 
@@ -236,7 +236,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 | --- | --- |
 | `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`・`PlanningRecords` |
 | `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`EvalRounds`・`SessionRegistry`・`RunReads`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend`・`RecordingQueue` |
-| `observation`（観測と分析） | `ObserverLog`・`MarkLog`・`QueueRecords`・`ObservationQueue` |
+| `observation`（観測と分析） | `ObserverLog`・`MarkLog`・`QueueRecords`・`LedgerStore`・`ObservationQueue` |
 | `host`（host運用） | `QueueOpener`・`HostOpsQueue`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry`・`InboxWatchLog` |
 | `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`EventStore`・`StateStore`・`Queue` |
 
@@ -370,7 +370,7 @@ host運用の登録と引き継ぎは`handoff::Registration`が持ち、その�
 - scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6・L9とL7の時計、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
   CIと`src/`を変えるtaskのverifyが流す。
 - 数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
-- SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない（trigger自体は計画管理が所有する）。
+- SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない。
 - 許可の一覧は`.config/layer-deps-allow.txt`で、形式と落ちる条件は一覧の先頭のコメントが持つ。
 - 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置く（ADR-t1545-1決定4）。
   違反を直す変更は、同じ変更で一覧の項目と「[今の違反と行き先](#今の違反と行き先)」の行を消す。
