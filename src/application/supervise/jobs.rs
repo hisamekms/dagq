@@ -14,6 +14,7 @@ use crate::application::review_programs::ProgramBackends;
 use crate::domain::EventKind;
 use crate::domain::headless_job::{JobFailure, JobKind, JobStop};
 use crate::domain::provider_switch::SwitchReason;
+use crate::domain::review_jobs::{self, ReviewJobId};
 use crate::{
     application::{Clock, CommandSpec, Exit, HeadlessJobRecord, HeadlessJobStore, NewHeadlessJob},
     domain::headless_job::{Takeover, takeover},
@@ -684,7 +685,7 @@ fn started_at_ms(clock: &dyn crate::application::Clock) -> Option<i64> {
 /// of its provider's agent (`agent`, the reviewer's without one) and of the
 /// reviewer.
 fn timeout_of(
-    review_jobs: &crate::domain::headless_job::JobTimeouts,
+    review_jobs: &crate::domain::headless_job::ReviewJobs,
     reviewer: &dyn AgentProvider,
     agent: Option<&dyn AgentProvider>,
     stage: Option<JobKind>,
@@ -708,7 +709,7 @@ pub(super) struct JobDesk<'s> {
     pub(super) no_claude: bool,
     pub(super) job_ends: &'s JobEnds,
     /// `[review.jobs]` as read at the start.
-    pub(super) review_jobs: crate::domain::headless_job::JobTimeouts,
+    pub(super) review_jobs: crate::domain::headless_job::ReviewJobs,
     pub(super) provider: &'s mut stages::ProviderState,
     pub(super) queue_hold: &'s mut Option<claim_hold::QueueHold>,
 }
@@ -1037,7 +1038,7 @@ impl Supervisor<'_> {
     }
 
     /// How long a job about `subject` may run
-    /// ([`crate::domain::headless_job::JobTimeouts::job_timeout`]).
+    /// ([`crate::domain::headless_job::ReviewJobs::job_timeout`]).
     pub(super) fn job_timeout(&self, subject: &JobSubject) -> Duration {
         self.timeout_of(
             subject.review_stage.then_some(subject.job),
@@ -1238,6 +1239,7 @@ impl Supervisor<'_> {
         let provider = job.provider.parse::<Provider>().ok()?;
         let on = headless_job::JobOn {
             kind: &job.kind,
+            label: job.label.as_deref(),
             run_id: job.run_id.as_ref(),
             proposal_id: job.proposal_id,
             goal_id: job.goal_id,
@@ -1307,27 +1309,116 @@ impl Supervisor<'_> {
     }
 }
 
-/// The headless review in progress, with its output in `review-N.out` /
-/// `review-N.err` in the run directory.
+/// The agent jobs of a run's review in progress (ADR-t1895-1 decisions 2
+/// to 5): its whole review's job and each selected agent's, each waiting,
+/// running, answered or missed, with their output in the run directory
+/// ([`ReviewJobId::output`]).
 pub(super) struct ReviewWatch {
     pub(super) session: Option<SessionRef>,
     pub(super) attempt: usize,
-    /// Whether this review is the retry of one whose stdout held no
-    /// readable verdict or whose job exited non-zero: it is not retried
-    /// again for either cause ([`super::landing::retries_review`]). The
+    /// Whether this review is the retry of its program reviews (they could
+    /// not start or ran past their time): it is the review's one retry, so
+    /// none of its jobs runs once more ([`review_jobs::runs_again`]). The
     /// supervisor alone holds this, so a review it adopts counts afresh. A
-    /// wait (`Phase::ReviewHeld`) keeps it: a retry that waits records
-    /// `review_retried` before the wait, and the review after the wait
-    /// starts as the retry, so it is not retried again either.
+    /// wait (`Phase::ReviewHeld`) keeps it.
     pub(super) retried: bool,
-    /// Whether `[roles.review]` names its provider: a provider that cannot
-    /// be used then moves the review to the other (ADR-t1207-1).
-    pub(super) switchable: bool,
-    /// The review's required subagents (ADR-t1453-1): the verdict must
-    /// carry the completed result of each and of no other agent; none for
-    /// a review that requires none.
-    pub(super) required: Vec<String>,
-    pub(super) job: HeadlessJob,
+    /// When the review's jobs were first started, for its duration.
+    pub(super) started: Instant,
+    /// Its jobs: the whole review's first, then the agents' in their
+    /// configured order.
+    pub(super) jobs: Vec<ReviewJob>,
+}
+
+/// One agent job of a run's review.
+pub(super) struct ReviewJob {
+    pub(super) id: ReviewJobId,
+    /// What starts it.
+    pub(super) input: ReviewJobInput,
+    /// Whether it ran once more already, or starts as its run once more.
+    pub(super) again: bool,
+    pub(super) state: ReviewJobState,
+    /// The session of its last run that ended, without its tokens (its
+    /// `review_job_finished` holds its Execution): the whole review's names
+    /// the review's end and span.
+    pub(super) session: Option<crate::domain::headless_job::JobSession>,
+}
+
+/// What starts a job of a review: the whole review's prompt (and the
+/// session id `review_started` named for its first start on Claude), or
+/// an agent's job as `application::agent_job::build` built it from the
+/// definition the landing branch's snapshot returned.
+pub(super) enum ReviewJobInput {
+    Whole {
+        prompt: String,
+        prompt_bytes: crate::application::prompt::PromptBytes,
+        session_id: Option<String>,
+    },
+    Agent(crate::application::agent_job::BuiltAgentJob),
+}
+
+/// Where a job of a review is.
+pub(super) enum ReviewJobState {
+    /// Not started yet: it waits for the limit of jobs at once or for a
+    /// provider it can use (why, once known, so a wait is logged once).
+    Waiting(Option<String>),
+    /// Its process runs; `switchable` when `[roles.review]` names its
+    /// provider, so one it cannot use moves it (ADR-t1207-1).
+    Running { job: HeadlessJob, switchable: bool },
+    /// It answered.
+    Answered(ReviewAnswer),
+    /// It gave no answer and will not run again: why, with where its
+    /// output is, and whether a run of it wrote output (none did when it
+    /// never started or no provider was left).
+    Missed { why: String, ran: bool },
+}
+
+/// What a job of a review answered.
+pub(super) enum ReviewAnswer {
+    Whole(ReviewVerdict),
+    Agent(crate::domain::review_subagents::AgentResult),
+}
+
+impl ReviewAnswer {
+    /// The judgment it gave.
+    pub(super) fn decision(&self) -> Option<crate::domain::ReviewDecision> {
+        match self {
+            Self::Whole(verdict) => Some(verdict.verdict),
+            Self::Agent(result) => result.verdict,
+        }
+    }
+}
+
+impl ReviewWatch {
+    /// How many of its jobs' processes run now, which the limit of jobs at
+    /// once counts.
+    pub(super) fn running(&self) -> usize {
+        self.jobs
+            .iter()
+            .filter(|job| matches!(job.state, ReviewJobState::Running { .. }))
+            .count()
+    }
+
+    /// Stop every job that runs with no event to end it
+    /// ([`HeadlessJob::abandon`]): the supervisor stops watching the
+    /// review.
+    pub(super) fn abandon(&mut self) {
+        for job in &mut self.jobs {
+            if let ReviewJobState::Running { job, .. } = &mut job.state {
+                job.abandon();
+            }
+        }
+    }
+
+    /// Where the review stands from its jobs' ([`review_jobs::standing`]).
+    pub(super) fn standing(&self) -> review_jobs::ReviewStanding {
+        review_jobs::standing(self.jobs.iter().map(|job| match &job.state {
+            ReviewJobState::Waiting(_) | ReviewJobState::Running { .. } => {
+                review_jobs::JobStanding::Open
+            }
+            ReviewJobState::Answered(_) => review_jobs::JobStanding::Answered,
+            ReviewJobState::Missed { why, .. } => review_jobs::JobStanding::Missed(why),
+        }))
+    }
 }
 
 /// The program reviews of a run's review that run before its agents
@@ -1377,29 +1468,6 @@ impl ReviewPrograms {
     }
 }
 
-/// How a headless review ended.
-pub(super) enum ReviewEnd {
-    Verdict(ReviewVerdict),
-    /// The job ended well but its stdout held no readable verdict JSON
-    /// (task 328), or a verdict without the completed results of its
-    /// required subagents (ADR-t1453-1 decision 6): worth one more review
-    /// with the same input.
-    Unreadable(String),
-    /// The job itself failed: it exited non-zero or timed out.
-    Failed(JobFailed),
-}
-
-impl ReviewEnd {
-    /// Why a review that gave no verdict failed; `None` for a verdict.
-    pub(super) fn error(&self) -> Option<&str> {
-        match self {
-            Self::Verdict(_) => None,
-            Self::Unreadable(error) => Some(error),
-            Self::Failed(failed) => Some(failed.error()),
-        }
-    }
-}
-
 /// How a headless job ended without a reply, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobFailed {
@@ -1428,36 +1496,6 @@ impl JobFailed {
         match self {
             Self::Exited(error) | Self::TimedOut(error) => error,
         }
-    }
-}
-
-impl ReviewWatch {
-    /// `Some` once the review ended: its verdict, or why there is none.
-    pub(super) fn poll(
-        &mut self,
-        files: &dyn RunFiles,
-        provider: &dyn AgentProvider,
-    ) -> Result<Option<ReviewEnd>> {
-        Ok(self
-            .job
-            .poll_end(files, provider)?
-            .map(|output| match output {
-                Ok(stdout) => match ReviewVerdict::parse(&stdout) {
-                    Ok(verdict) => review_end(verdict, &self.required),
-                    Err(error) => ReviewEnd::Unreadable(error),
-                },
-                Err(error) => ReviewEnd::Failed(error),
-            }))
-    }
-}
-
-/// How a review whose stdout held `verdict` ended: as its verdict when it
-/// carries the completed results of exactly the `required` agents, else
-/// as an unreadable one, which is never a pass (ADR-t1453-1 decision 6).
-pub(super) fn review_end(verdict: ReviewVerdict, required: &[String]) -> ReviewEnd {
-    match crate::domain::review_subagents::incomplete(required, &verdict.agents) {
-        None => ReviewEnd::Verdict(verdict),
-        Some(why) => ReviewEnd::Unreadable(why),
     }
 }
 
@@ -1797,11 +1835,32 @@ mod tests {
         let files = MemoryFiles::default();
         let ends = JobEnds::default();
         let run = super::super::recovery::test_run(RunStatus::AwaitingIntegration, None);
-        let mut review = job(&files, true, "");
-        review.unended = Some((
-            ends.clone(),
-            JobSubject::run(headless_job::REVIEW, run.id(), 1),
-        ));
+        // A review's whole job and an agent's run; a third waits.
+        let review_job = |id: ReviewJobId, state: ReviewJobState| ReviewJob {
+            id,
+            input: ReviewJobInput::Whole {
+                prompt: String::new(),
+                prompt_bytes: crate::application::prompt::PromptBytes::default(),
+                session_id: None,
+            },
+            again: false,
+            state,
+            session: None,
+        };
+        let running = |label: Option<&str>| {
+            let mut job = job(&files, true, "");
+            job.unended = Some((
+                ends.clone(),
+                JobSubject {
+                    label: label.map(str::to_owned),
+                    ..JobSubject::run(headless_job::REVIEW, run.id(), 1)
+                },
+            ));
+            ReviewJobState::Running {
+                job,
+                switchable: false,
+            }
+        };
         let mut slots = super::super::stages::SlotTable::default();
         slots.admit(Slot::new(
             run.clone(),
@@ -1809,16 +1868,31 @@ mod tests {
                 session: None,
                 attempt: 1,
                 retried: false,
-                switchable: false,
-                required: Vec::new(),
-                job: review,
+                started: Instant::now(),
+                jobs: vec![
+                    review_job(ReviewJobId::Whole, running(None)),
+                    review_job(ReviewJobId::Agent("design".into()), running(Some("design"))),
+                    review_job(
+                        ReviewJobId::Agent("tests".into()),
+                        ReviewJobState::Waiting(None),
+                    ),
+                ],
             }),
         ));
         slots.admit(Slot::new(run, Phase::AwaitingSlot));
         slots.abandon_jobs();
         let (_, handed) = ends.take();
-        assert_eq!(handed.len(), 1);
-        assert_eq!(handed[0].subject.kind, headless_job::REVIEW);
+        let labels: Vec<_> = handed
+            .iter()
+            .map(|job| (job.subject.kind, job.subject.label.clone()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                (headless_job::REVIEW, None),
+                (headless_job::REVIEW, Some("design".to_owned()))
+            ]
+        );
         // The slot dropped later hands nothing again.
         drop(slots);
         assert!(ends.take().1.is_empty());

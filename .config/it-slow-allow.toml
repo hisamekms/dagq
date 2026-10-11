@@ -735,18 +735,6 @@ name = "runtime_resume::a_landing_ask_is_closed_when_its_run_fails_on_used_up_re
 reason = "B 境界（supervisor の配線・復旧）: sweep を最初の pass だけにし、resume を使い切って run を failed にした経路が approve_landing を閉じることを、実際の resume の session を 1 回通して確かめる。閉じてよいかの判断は domain::ended_landing_ask_answer の unit test"
 task = 2077
 
-# 7.0s
-[[test]]
-name = "review_subagents::a_review_waiting_for_its_subagents_starts_after_done"
-reason = "B 境界（SQLite・supervisor の配線）: 実際の worker の session と hold の ask を通し、subagent を動かす Claude を待つ review が pass をまたいで event を積まず、done の後に Claude で起動することを確かめる。待つ・起動する・失敗するの判断は supervise::landing の unit test"
-task = 1847
-
-# 7.0s
-[[test]]
-name = "review_subagents::a_review_waiting_for_its_subagents_starts_after_cancel_affected"
-reason = "B 境界（SQLite・supervisor の配線）: hold の ask の cancel_affected の適用が affected に無い待つ run を手放さず、ask が閉じた後に Claude で review を起動することを確かめる。判断は supervise::landing の unit test"
-task = 1847
-
 # 7.8s
 [[test]]
 name = "runtime_claim::the_claim_records_its_slots_its_line_and_its_attributes"
@@ -805,3 +793,123 @@ task = 1488
 name = "review_programs::a_rejecting_program_sends_the_worker_back_before_any_agent_and_a_passing_set_goes_on"
 reason = "B 境界（守る境界）: supervisor wiring of program jobs over Git and processes, through a revise and a second review"
 task = 1900
+
+# 5.3s
+[[test]]
+name = "review_subagents::uncommitted_main_checkout_edits_are_not_used"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: main の checkout の未 commit の設定と定義を使わず、landing branch の commit から agent を選んで job に渡すことを実際の Git と supervisor の review で確かめる。選び方は application::review の unit test"
+task = 1903
+
+# 5.5s
+[[test]]
+name = "review_subagents::a_selected_agent_without_its_definition_fails_the_review"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 定義の無い agent が job を起動せずに review_failed と approve_landing の ask になり、doctor の agents も同じ誤りを出すことを実際の queue と Git で確かめる"
+task = 1903
+
+# 5.2s
+[[test]]
+name = "review_subagents::a_definition_declaring_a_tool_beyond_the_reads_fails_the_review"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 役割を超える道具の宣言が job を起動せずに review を失敗させ、doctor も同じ誤りを出すことを実際の queue と Git で確かめる。宣言の判断は domain::review_subagents の unit test"
+task = 1903
+
+# 6.0s
+[[test]]
+name = "review_subagents::a_review_without_required_agents_is_unchanged"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 設定はあるが差分が agent を選ばない review が全体の review の job 1 本だけで着地することを実際の supervisor で確かめる"
+task = 1903
+
+# 6.3s
+[[test]]
+name = "review_subagents::a_review_runs_its_whole_review_and_each_agent_as_jobs_side_by_side"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 全体と agent ごとの job が上限の中で並列に起動し、headless_jobs の行が label で分かれ、snapshot の定義が prompt に渡って着地することを実際のプロセスと queue で確かめる（ADR-t1895-1）。判定のまとめと上限は domain::review_jobs の unit test"
+task = 1903
+
+# 6.5s
+[[test]]
+name = "review_subagents::an_agent_that_never_answers_fails_the_review_and_no_other_job_runs_again"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 答えない agent の job だけが 1 回やり直され、他の job の答えを保ったまま review_failed と approve_landing の ask になることを実際のプロセスと queue で確かめる。やり直しとそろいの判断は domain::review_jobs の unit test"
+task = 1903
+
+# 8.0s
+[[test]]
+name = "review_subagents::the_agents_send_backs_go_back_in_one_revise_with_each_agents_reasons"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: agent ごとの差し戻しが 1 回の revise として生きている session に届き、直した後の review で着地することを実際の worker の session で確かめる。行き先の判断は supervise::landing の unit test"
+task = 1903
+
+# 9.4s
+[[test]]
+name = "review_subagents::the_reviews_of_two_runs_share_the_limit_of_jobs_at_once"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 2 本の run の review の job が [review.jobs] concurrency を共有して 1 本ずつ走ることを、実際の 2 つの slot と headless の job の event で確かめる。上限の判断は domain::review_jobs の unit test"
+task = 1903
+
+# 6.0s
+[[test]]
+name = "review_subagents::a_codex_review_runs_its_whole_review_and_its_agents_on_codex"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: Codex の review が全体と agent の job を Codex の read-only の job で起動し、能力による切り替えを通らずに着地することを stub の codex のプロセスで確かめる"
+task = 1903
+
+# 5.8s
+[[test]]
+name = "review_subagents::with_the_fallback_off_an_agents_job_waits_for_its_provider_and_lands"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: fallback off で使えない Codex の agent の job が控えを待ち、控えが解けた後に同じ provider で起動して着地することを stub の codex と queue の控えの event で確かめる。行き先の判断は supervise::landing の unit test"
+task = 1903
+
+# 6.3s
+[[test]]
+name = "review_subagents::the_eval_and_a_review_start_an_agents_job_the_one_way_within_their_own_limits"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: eval の周と run の review が同じ agent の job の起動を共有し、互いの同時実行の枠を使わないことを実際の supervisor の eval と review のプロセスで確かめる（ADR-t1728-1 (e)）"
+task = 1903
+
+# 5.2s
+[[test]]
+name = "runtime_codex::no_claude_run_uses_a_read_only_codex_review_and_lands"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: Codex の review の job の thread と model と Execution が review_job_finished と span と stats に載ることを stub の codex の rollout で確かめる"
+task = 1903
+
+# 5.9s
+[[test]]
+name = "runtime_codex::a_codex_review_whose_codex_does_not_start_moves_to_claude"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 起動しない Codex が控えられ、その job が同じ pass で Claude で起動して着地することを実際の executable の消失で確かめる"
+task = 1903
+
+# 5.7s
+[[test]]
+name = "runtime_codex::a_codex_review_at_its_usage_limit_holds_codex_and_moves_to_claude"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 利用上限の Codex の job が Codex を控え、その job だけが Claude に移って着地することを stub の codex の出力と queue の控えで確かめる"
+task = 1903
+
+# 5.7s
+[[test]]
+name = "runtime_headless_jobs::an_adopter_stops_the_whole_and_agent_jobs_a_dead_supervisor_left_and_reviews_with_all"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 復旧と adopt: 死んだ supervisor の全体と agent の job の行を label で見分けて子孫ごと止め、全ての job で review を立て直すことを実際のプロセスと headless_jobs で確かめる"
+task = 1903
+
+# 6.3s
+[[test]]
+name = "runtime_headless_jobs::a_timed_out_review_stops_the_processes_it_started"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: timeout した review の job とそのやり直しが起動したプロセスを残さず、行が stopped になることを実際のプロセスで確かめる"
+task = 1903
+
+# 8.9s
+[[test]]
+name = "runtime_resume::an_unapproved_run_resolved_by_an_earlier_resume_is_validated_without_a_session"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: session の無い resume の後の validation と review の流れを実際の supervisor で確かめる"
+task = 1903
+
+# 6.4s
+[[test]]
+name = "runtime_review::a_review_that_exits_non_zero_once_is_reviewed_again_and_lands"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 非 0 で終わった review の job が同じ review の中で 1 回やり直されて着地することを実際のプロセスで確かめる。やり直しの判断は domain::review_jobs の unit test"
+task = 1903
+
+# 5.9s
+[[test]]
+name = "runtime_review::a_timed_out_review_job_runs_once_more_then_fails"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: timeout した review の job が 1 回やり直され、なお止まれば review_failed と approve_landing の ask になることを実際のプロセスの timeout で確かめる"
+task = 1903
+
+# 5.9s
+[[test]]
+name = "runtime_queue_hold_detect::reviews_stopped_at_a_login_join_one_ask_and_review_again_after_done"
+reason = "B 境界（SQLite・プロセス・supervisor の配線）: 2 本の run の review の job が login の切れで止まって 1 つの認証の ask に加わり、done の後にその job だけが同じ review の中で起動し直して着地することを、実際の worker の session と hold の ask で確かめる。控えと行き先の判断は supervise::landing の unit test"
+task = 1903

@@ -1144,9 +1144,11 @@ fn adopted_review_failed(
     ran: impl FnOnce() -> Option<Option<crate::domain::headless_job::JobSession>>,
 ) -> Value {
     let ends_review = |event: &RunEvent| match event.kind.as_str() {
-        event_kind::REVIEW_FINISHED | event_kind::REVIEW_FAILED | event_kind::REVIEW_RETRIED => {
-            true
-        }
+        // Each job of the review records its own Execution at its end.
+        event_kind::REVIEW_JOB_FINISHED
+        | event_kind::REVIEW_FINISHED
+        | event_kind::REVIEW_FAILED
+        | event_kind::REVIEW_RETRIED => true,
         event_kind::HEADLESS_JOB_STOPPED => event.payload["kind"] == headless_job::REVIEW,
         _ => false,
     };

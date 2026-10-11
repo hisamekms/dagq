@@ -210,7 +210,12 @@ ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question -
 /// read-only`) logs its arguments and actor and prints the reply of its
 /// call (`codex-review-<call>.jsonl`, else a review's `pass`) instead,
 /// and writes the model of `codex-review-model` to its thread's rollout
-/// when there is one; with `codex-review-failure.jsonl` it prints that
+/// when there is one. A read-only job whose prompt (its standard input)
+/// is an agent job's answers for that agent instead: the reply of its call
+/// (`codex-agent-<agent>-<call>.jsonl`, else the agent's `pass`), logging
+/// its arguments to `codex-agent-args.log`; with
+/// `codex-agent-<agent>-failure.jsonl` it prints that once and fails. A
+/// review's job with `codex-review-failure.jsonl` prints that
 /// and fails, and with `codex-review-hang` it runs a command in a process
 /// group of its own until it is stopped (or the test process or the
 /// stub's directory is gone). A job sources `codex-review-hook.sh` when
@@ -224,7 +229,7 @@ pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
     client_dagq(dir, db, test_pid);
     let script = format!(
         r#"#!/bin/sh
-MODE=start; THREAD=; PROMPT=; ROOTS=; REVIEW=
+MODE=start; THREAD=; PROMPT=; ROOTS=; REVIEW=; AGENT=
 ARGS=
 for arg in "$@"; do ARGS="$ARGS $arg|"; done
 [ "$1" = --version ] && {{ echo "codex-cli 0.46.0"; exit 0; }}
@@ -241,6 +246,27 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ "$MODE" = resume ]; then THREAD=$1; PROMPT=$2; else PROMPT=$1; fi
+if [ -n "$REVIEW" ]; then
+  INPUT=$(cat)
+  AGENT=$(printf '%s\n' "$INPUT" | sed -n 's/^You are the review agent `\([a-z0-9-]*\)`.*/\1/p' | head -n 1)
+fi
+if [ -n "$AGENT" ]; then
+  printf '%s %s\n' "$AGENT" "$ARGS" >> {dir}/codex-agent-args.log
+  AGENT_CALL=$(( $(grep -c "^$AGENT " {dir}/codex-agent-args.log) ))
+  printf '{{"type":"thread.started","thread_id":"codex-agent-%s"}}\n{{"type":"turn.started"}}\n' "$AGENT"
+  if [ -f {dir}/codex-agent-$AGENT-failure.jsonl ]; then
+    cat {dir}/codex-agent-$AGENT-failure.jsonl
+    rm -f {dir}/codex-agent-$AGENT-failure.jsonl
+    exit 1
+  fi
+  if [ -f {dir}/codex-agent-$AGENT-$AGENT_CALL.jsonl ]; then
+    cat {dir}/codex-agent-$AGENT-$AGENT_CALL.jsonl
+  else
+    printf '{{"type":"item.completed","item":{{"id":"agent","type":"agent_message","text":"{{\\"agent\\":\\"%s\\",\\"status\\":\\"completed\\",\\"verdict\\":\\"pass\\",\\"reasons\\":[],\\"summary\\":\\"codex agent passed\\"}}"}}}}\n' "$AGENT"
+  fi
+  printf '{{"type":"turn.completed","usage":{{"input_tokens":10,"output_tokens":2}}}}\n'
+  exit 0
+fi
 if [ -n "$REVIEW" ]; then
   printf '%s\n' "$ARGS" >> {dir}/codex-review-args.log
   printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> {dir}/codex-review-actors.log

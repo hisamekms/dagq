@@ -227,11 +227,159 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     assert_ne!(token, "dead-supervisor");
 }
 
-/// A review that times out is stopped with what it started: the process
-/// its shell left in the background does not outlive the job, and the
-/// job's row is closed as stopped. Its timeout is `[review.jobs]
-/// agent_timeout_secs` of the repository's `dagq.toml`, not the provider's
-/// (ADR-t1895-1 decision 1).
+/// A supervisor died while its run's review ran its whole review's job and
+/// the agent `design`'s (ADR-t1895-1). The adopter tells the two from their
+/// `headless_jobs` rows (the kind, the run and the label: none for the
+/// whole review, the agent's name for its job), stops each with what it
+/// started and records each `headless_job_stopped` with its Execution, all
+/// before it starts its own review, which runs the whole review and the
+/// agent again as one job each, with nothing of the old jobs kept; the run
+/// lands.
+#[test]
+fn an_adopter_stops_the_whole_and_agent_jobs_a_dead_supervisor_left_and_reviews_with_all() {
+    let (_dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[review.subagents.design]\npaths = [\"change.txt\"]\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".dagq/agents/design")).unwrap();
+    fs::write(
+        repo.join(".dagq/agents/design/AGENT.md"),
+        "Check the design.\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml", ".dagq/agents/design/AGENT.md"]);
+    git(&repo, &["commit", "-q", "-m", "an agent"]);
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
+    let idle = run.idle_marker_path().unwrap();
+    wait_until(&db, Duration::from_secs(20), |_| idle.is_file());
+    let head = git_out(
+        Path::new(run.worktree_path().unwrap()),
+        &["rev-parse", "HEAD"],
+    );
+    let conn = Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE task_runs SET status='awaiting_integration', result_commit=?2 WHERE id=?1",
+        rusqlite::params![run.id(), head],
+    )
+    .unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    for (kind, payload) in [
+        (
+            EventKind::ValidationFinished,
+            json!({"status": "awaiting_integration"}),
+        ),
+        (EventKind::ReviewStarted, json!({"attempt": 1})),
+        (
+            EventKind::ReviewJobStarted,
+            json!({"attempt": 1, "agent": null}),
+        ),
+        (
+            EventKind::ReviewJobStarted,
+            json!({"attempt": 1, "agent": "design"}),
+        ),
+    ] {
+        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+    }
+    // Each old job never ends and has a process of its own.
+    let old = |label: Option<&str>| {
+        let job = orphan("sleep 120 & wait");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(&child) = children(job).first() {
+                break child;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the old job's child never started"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        conn.execute(
+            "INSERT INTO headless_jobs(kind, label, run_id, attempt, pid, process_start, supervisor_token, started_at)
+             VALUES ('review', ?1, ?2, 1, ?3, ?4, 'dead-supervisor', unixepoch())",
+            rusqlite::params![label, run.id(), job, process_start(job)],
+        )
+        .unwrap();
+        (job, child)
+    };
+    let (whole, whole_child) = old(None);
+    let (design, design_child) = old(Some("design"));
+    age_lease(&db, &run, 31);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")])
+        .with_review_agents(&[("design", vec![agent_says("design", "pass", &[])])]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    for pid in [whole, whole_child, design, design_child] {
+        assert!(!running(pid), "{pid} outlived the takeover");
+    }
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_landed(&repo, &detail.runs[0], "test task", &base);
+    let stopped = payloads(&detail, "headless_job_stopped");
+    let jobs: Vec<(Value, Value, Value)> = stopped
+        .iter()
+        .map(|end| {
+            (
+                end["pid"].clone(),
+                end["label"].clone(),
+                end["outcome"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        jobs,
+        [
+            (json!(whole), Value::Null, json!("taken_over")),
+            (json!(design), json!("design"), json!("taken_over")),
+        ]
+    );
+    for end in &stopped {
+        assert_eq!(end["kind"], "review", "{end}");
+        assert_eq!(end["attempt"], 1, "{end}");
+        assert!(end.get("tokens_source").is_some(), "{end}");
+    }
+    // Both were stopped before the adopter's review started, which ran
+    // the whole review and the agent once each.
+    let kinds = event_kinds(&detail);
+    let last_stop = kinds
+        .iter()
+        .rposition(|k| *k == "headless_job_stopped")
+        .unwrap();
+    let restarted = detail
+        .events
+        .iter()
+        .position(|e| e.kind == "review_started" && e.payload["attempt"] == 2)
+        .unwrap();
+    assert!(last_stop < restarted, "{kinds:?}");
+    let started: Vec<(Value, Value)> = payloads(&detail, "review_job_started")
+        .iter()
+        .map(|job| (job["attempt"].clone(), job["agent"].clone()))
+        .collect();
+    assert_eq!(
+        started,
+        [
+            (json!(1), Value::Null),
+            (json!(1), json!("design")),
+            (json!(2), Value::Null),
+            (json!(2), json!("design")),
+        ]
+    );
+    assert_eq!(reviewer.prompts().len(), 1);
+    assert_eq!(reviewer.launches().len(), 1);
+    let finished = payloads(&detail, "review_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["attempt"], 2);
+}
+
+/// A review job that times out is stopped with what it started: the
+/// process its shell left in the background does not outlive the job, and
+/// the job's row is closed as stopped, for its run once more too. Its
+/// timeout is `[review.jobs] agent_timeout_secs` of the repository's
+/// `dagq.toml`, not the provider's (ADR-t1895-1 decision 1).
 #[test]
 fn a_timed_out_review_stops_the_processes_it_started() {
     let (_dir, repo, db) = fixture();
@@ -246,18 +394,19 @@ fn a_timed_out_review_stops_the_processes_it_started() {
     // Beside the queue, whose own name has a quote.
     let pid_file = db.parent().unwrap().join("review-child.pid");
     let mut reviewer = TestReviewer::new(&[format!(
-        "sleep 120 & echo $! > {}; wait",
+        "sleep 120 & echo $! >> {}; wait",
         shell_path(&pid_file)
     )]);
     // The provider's own timeout is far longer.
     reviewer.timeout = Duration::from_secs(60);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let child: u32 = fs::read_to_string(&pid_file)
+    let children: Vec<u32> = fs::read_to_string(&pid_file)
         .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+        .lines()
+        .map(|line| line.trim().parse().unwrap())
+        .collect();
+    assert_eq!(children.len(), 2, "the job and its run once more");
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(1))
@@ -270,16 +419,20 @@ fn a_timed_out_review_stops_the_processes_it_started() {
             .contains("did not finish within 1 seconds"),
         "{failed:?}"
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while running(child) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
+    for child in children {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running(child) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!running(child), "the review's child {child} outlived it");
     }
-    assert!(!running(child), "the review's child {child} outlived it");
     let rows = job_rows(&db);
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].0, "review");
-    assert_eq!(rows[0].2, 1);
-    assert_eq!(rows[0].5.as_deref(), Some("stopped"));
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row.0, "review");
+        assert_eq!(row.2, 1);
+        assert_eq!(row.5.as_deref(), Some("stopped"));
+    }
 }
 
 /// A program job's `headless_jobs` row: kind, label, provider, outcome,

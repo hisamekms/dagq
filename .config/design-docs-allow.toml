@@ -41,9 +41,9 @@ tasks = 6
 
 [[doc]]
 path = "docs/design/manual-smoke.md"
-size = 120371
-line = 1641
-tasks = 72
+size = 111446
+line = 1373
+tasks = 70
 
 [[doc]]
 path = "docs/design/measurement.md"
@@ -92,9 +92,9 @@ tasks = 6
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/actor-model.md"
-size = 33708
-line = 3367
-tasks = 66
+size = 32930
+line = 1807
+tasks = 44
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/ask.md"
@@ -186,7 +186,7 @@ tasks = 13
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/headless-job-processes.md"
-line = 1125
+line = 1111
 tasks = 10
 
 [[doc]]
@@ -292,8 +292,8 @@ tasks = 3
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/queue-hold.md"
-line = 3217
-tasks = 25
+line = 1616
+tasks = 19
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/rebind.md"
@@ -325,14 +325,14 @@ line = 1604
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/roles.md"
-line = 2012
+line = 1752
 tasks = 18
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/run-environment.md"
-size = 53410
-line = 3559
-tasks = 65
+size = 53375
+line = 3131
+tasks = 2
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/run-workspaces.md"
@@ -374,8 +374,8 @@ tasks = 13
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/status.md"
-size = 34852
-line = 8752
+size = 32873
+line = 8523
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/supervise.md"

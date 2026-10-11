@@ -93,28 +93,56 @@ pub enum JobStop {
     TimedOut,
 }
 
+/// The agent jobs of runs' reviews that run at once by default, when
+/// `[review.jobs] concurrency` is not set: the value the measure of the
+/// reviews before their agents ran as jobs of their own recommends
+/// (`docs/plans/review-parallel-jobs-measure.md`, its 5th section). At 10
+/// the end of a review waited for this limit by 78 seconds at the 90th
+/// percentile, against at most 25 jobs at once with no limit.
+pub const DEFAULT_REVIEW_JOB_CONCURRENCY: usize = 10;
+
 /// `[review.jobs]` of `dagq.toml`: the timeout of each kind of job of a
-/// run's review stage, in seconds. A kind without a key keeps the
-/// timeout of the provider's review ([`JobTimeouts::of`]).
+/// run's review stage, in seconds, and how many of the reviews' agent jobs
+/// run at once. A kind without a key keeps the timeout of the provider's
+/// review ([`ReviewJobs::of`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct JobTimeouts {
+pub struct ReviewJobs {
     /// `agent_timeout_secs`, a whole number above 0.
     pub agent: Option<u64>,
     /// `program_timeout_secs`, a whole number above 0.
     pub program: Option<u64>,
+    /// `concurrency`, a whole number above 0: how many agent jobs of runs'
+    /// reviews (each review's whole job and its agents' jobs) one
+    /// supervisor runs at once, all its runs' reviews together. A job past
+    /// it waits and starts as one ends. Program jobs, which run one at a
+    /// time before a review's agent jobs, and the eval's agent jobs, which
+    /// `[eval] concurrency` bounds, are not counted. Read once when the
+    /// supervisor starts; without it, [`DEFAULT_REVIEW_JOB_CONCURRENCY`].
+    pub concurrency: Option<u64>,
 }
 
-impl JobTimeouts {
+impl ReviewJobs {
     /// The keys of `[review.jobs]`, the agent's first.
-    pub const KEYS: [&'static str; 2] = ["agent_timeout_secs", "program_timeout_secs"];
+    pub const KEYS: [&'static str; 3] =
+        ["agent_timeout_secs", "program_timeout_secs", "concurrency"];
 
-    /// Set the key `key` (one of [`Self::KEYS`]) to `secs`.
-    pub fn set(&mut self, key: &str, secs: u64) {
+    /// Set the key `key` (one of [`Self::KEYS`]) to `value`.
+    pub fn set(&mut self, key: &str, value: u64) {
         if key == Self::KEYS[0] {
-            self.agent = Some(secs);
+            self.agent = Some(value);
+        } else if key == Self::KEYS[1] {
+            self.program = Some(value);
         } else {
-            self.program = Some(secs);
+            self.concurrency = Some(value);
         }
+    }
+
+    /// How many agent jobs of runs' reviews run at once
+    /// ([`Self::concurrency`]).
+    pub fn concurrency(self) -> usize {
+        self.concurrency
+            .and_then(|limit| usize::try_from(limit).ok())
+            .unwrap_or(DEFAULT_REVIEW_JOB_CONCURRENCY)
     }
 
     /// The timeout of a `kind` job of a run's review: its key's, else
@@ -307,6 +335,9 @@ pub fn takeover(alive: bool, recorded: Option<&str>, now: Option<&str>) -> Takeo
 pub struct JobOn<'a> {
     /// Its `headless_jobs.kind`.
     pub kind: &'a str,
+    /// Its `headless_jobs.label`: of a run's review, the agent its job is
+    /// of (none for the whole review's).
+    pub label: Option<&'a str>,
     pub run_id: Option<&'a super::RunId>,
     pub proposal_id: Option<super::ProposalId>,
     pub goal_id: Option<super::GoalId>,
@@ -323,7 +354,12 @@ impl JobOn<'_> {
     fn end_kinds(&self) -> &'static [&'static str] {
         use super::event_kind as k;
         match self.kind {
-            REVIEW => &[k::REVIEW_FINISHED, k::REVIEW_FAILED, k::REVIEW_RETRIED],
+            REVIEW => &[
+                k::REVIEW_JOB_FINISHED,
+                k::REVIEW_FINISHED,
+                k::REVIEW_FAILED,
+                k::REVIEW_RETRIED,
+            ],
             RECOVERY => &[k::RECOVERY_FINISHED],
             PLAN_REVIEW => &[
                 k::PLAN_REVIEW_FINISHED,
@@ -352,9 +388,19 @@ impl JobOn<'_> {
         events.iter().any(|event| {
             let end: super::run::JobEnd<'_> = super::run::restore_payload(&event.payload);
             let ends = if event.kind == super::event_kind::HEADLESS_JOB_STOPPED {
-                end.kind == Some(self.kind)
+                end.kind == Some(self.kind) && end.label == self.label
+            } else if event.kind == super::event_kind::REVIEW_JOB_FINISHED {
+                // One job of a review among its others of the attempt. An
+                // end after which the job starts again (once more, or
+                // after a provider it could not use) is an earlier run's,
+                // whose row is another: it is not this row's end, though
+                // written in the second this one started.
+                let restarted = end.runs_again == Some(true) || end.outcome == Some("held");
+                self.kind == REVIEW && end.agent == self.label && !restarted
             } else {
-                self.end_kinds().contains(&event.kind.as_str())
+                // An attempt's end names no job of its: the whole review's,
+                // the one job a review ran before its agents ran as jobs.
+                self.end_kinds().contains(&event.kind.as_str()) && self.label.is_none()
             };
             let on = match (self.run_id, self.proposal_id, self.goal_id) {
                 (Some(run), _, _) => event.run_id.as_ref() == Some(run),
@@ -452,14 +498,18 @@ mod tests {
         assert!(JobKind::Agent.retries(JobStop::Exited));
         assert!(!JobKind::Program.retries(JobStop::Exited));
         let default = std::time::Duration::from_secs(600);
-        let none = JobTimeouts::default();
+        let none = ReviewJobs::default();
         assert_eq!(none.of(JobKind::Agent, default), default);
         assert_eq!(none.of(JobKind::Program, default), default);
-        let mut set = JobTimeouts::default();
+        let mut set = ReviewJobs::default();
         set.set("program_timeout_secs", 30);
         assert_eq!(set.of(JobKind::Program, default).as_secs(), 30);
         assert_eq!(set.of(JobKind::Agent, default), default);
         set.set("agent_timeout_secs", 900);
+        assert_eq!(set.of(JobKind::Agent, default).as_secs(), 900);
+        assert_eq!(none.concurrency(), DEFAULT_REVIEW_JOB_CONCURRENCY);
+        set.set("concurrency", 3);
+        assert_eq!(set.concurrency(), 3);
         assert_eq!(set.of(JobKind::Agent, default).as_secs(), 900);
     }
 
@@ -469,7 +519,7 @@ mod tests {
         let (provider, reviewer) = (secs(120), secs(600));
         // Without `[review.jobs]`: the review's agent job keeps its
         // provider's, a program job and any other job the reviewer's.
-        let none = JobTimeouts::default();
+        let none = ReviewJobs::default();
         assert_eq!(
             none.job_timeout(Some(JobKind::Agent), provider, reviewer),
             provider
@@ -481,9 +531,10 @@ mod tests {
         assert_eq!(none.job_timeout(None, provider, reviewer), reviewer);
         // With it: each kind of the stage gets its key's; a job outside
         // the stage (the recovery job, a plan or goal review) does not.
-        let set = JobTimeouts {
+        let set = ReviewJobs {
             agent: Some(900),
             program: Some(30),
+            concurrency: None,
         };
         assert_eq!(
             set.job_timeout(Some(JobKind::Agent), provider, reviewer),
@@ -495,9 +546,10 @@ mod tests {
         );
         assert_eq!(set.job_timeout(None, provider, reviewer), reviewer);
         // One key alone leaves the other kind at its default.
-        let program = JobTimeouts {
+        let program = ReviewJobs {
             agent: None,
             program: Some(30),
+            concurrency: Some(2),
         };
         assert_eq!(
             program.job_timeout(Some(JobKind::Agent), provider, reviewer),
@@ -652,6 +704,7 @@ mod tests {
         let started_at = 1_790_845_200;
         let review = JobOn {
             kind: REVIEW,
+            label: None,
             run_id: Some(&run),
             proposal_id: None,
             goal_id: None,
@@ -713,8 +766,57 @@ mod tests {
                 "{left:?}"
             );
         }
+        // A run's review runs a job per agent beside its whole review's in
+        // one attempt: each job's own end counts, another job's does not,
+        // and an attempt's end, which names no job, is the whole review's.
+        let design = JobOn {
+            label: Some("design"),
+            ..review
+        };
+        let job_end = |agent: Option<&str>| {
+            ending(
+                1,
+                Some("r1"),
+                "review_job_finished",
+                json!({"attempt": 2, "agent": agent, "tokens_source": null}),
+                after,
+            )
+        };
+        assert!(design.execution_recorded(&[job_end(Some("design"))]));
+        // The end of the run before this one, which started it again.
+        for restarted in [json!({"runs_again": true}), json!({"outcome": "held"})] {
+            let mut end = job_end(Some("design"));
+            for (key, value) in restarted.as_object().unwrap() {
+                end.payload[key] = value.clone();
+            }
+            assert!(!design.execution_recorded(&[end]));
+        }
+        assert!(!design.execution_recorded(&[job_end(Some("tests"))]));
+        assert!(!design.execution_recorded(&[job_end(None)]));
+        assert!(review.execution_recorded(&[job_end(None)]));
+        assert!(!review.execution_recorded(&[job_end(Some("design"))]));
+        assert!(!design.execution_recorded(&[ending(
+            1,
+            Some("r1"),
+            "review_failed",
+            counted.clone(),
+            after
+        )]));
+        let stopped = |label: Option<&str>| {
+            ending(
+                1,
+                Some("r1"),
+                "headless_job_stopped",
+                json!({"kind": "review", "label": label, "tokens_source": null}),
+                after,
+            )
+        };
+        assert!(design.execution_recorded(&[stopped(Some("design"))]));
+        assert!(!design.execution_recorded(&[stopped(None)]));
+        assert!(!review.execution_recorded(&[stopped(Some("design"))]));
         let plan_review = JobOn {
             kind: PLAN_REVIEW,
+            label: None,
             run_id: None,
             proposal_id: Some(crate::domain::ProposalId::new(4)),
             goal_id: None,

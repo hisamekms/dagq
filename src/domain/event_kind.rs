@@ -278,6 +278,8 @@ event_kinds! {
     ReviewBypassed => "review_bypassed",
     ReviewFailed => "review_failed",
     ReviewFinished => "review_finished",
+    ReviewJobFinished => "review_job_finished",
+    ReviewJobStarted => "review_job_started",
     ReviewOutcome => "review_outcome",
     ReviewProgramFinished => "review_program_finished",
     ReviewProgramsFinished => "review_programs_finished",
@@ -885,6 +887,25 @@ pub const RELEASE_CHECK_FAILED: &str = EventKind::ReleaseCheckFailed.as_str();
 pub const REVIEW_BYPASSED: &str = EventKind::ReviewBypassed.as_str();
 pub const REVIEW_FAILED: &str = EventKind::ReviewFailed.as_str();
 pub const REVIEW_FINISHED: &str = EventKind::ReviewFinished.as_str();
+/// One agent job of a run's review started (ADR-t1895-1 decision 2): the
+/// review `attempt`, the `agent` it is of (null for the whole review),
+/// `again` (its one run once more), its `launch` (the provider, and
+/// `switched_from` / `switch_reason` when it moved off one it could not
+/// use), its `session_id` when the runtime names it (Claude), its
+/// `output` (the stem of its `.out` and `.err` in the run directory) and
+/// `prompt_bytes`.
+pub const REVIEW_JOB_STARTED: &str = EventKind::ReviewJobStarted.as_str();
+/// One agent job of a run's review ended: the review `attempt`, its
+/// `agent` (null for the whole review), `again` (whether it was its one
+/// run once more), `outcome` (`answered`, a
+/// `domain::review_jobs::JobMiss`, or `held` for a provider it could not
+/// use, which it waits for or moves off without counting as its run once
+/// more), `runs_again` (it starts once more), the `verdict` of an answer,
+/// `error`, `provider`, `duration_secs` and, for a job whose agent ran,
+/// its Execution (ADR-t1486-1). The review is judged once every job
+/// answered (`review_finished`), and fails once every job ended with one
+/// that gave no answer (`review_failed`).
+pub const REVIEW_JOB_FINISHED: &str = EventKind::ReviewJobFinished.as_str();
 /// What a person's answer to the `approve_landing` ask of a concern says
 /// of the review's findings (ADR-t947-1 decision 4).
 pub const REVIEW_OUTCOME: &str = EventKind::ReviewOutcome.as_str();
@@ -1291,6 +1312,8 @@ mod tests {
             (EventKind::ReviewBypassed, "review_bypassed"),
             (EventKind::ReviewFailed, "review_failed"),
             (EventKind::ReviewFinished, "review_finished"),
+            (EventKind::ReviewJobFinished, "review_job_finished"),
+            (EventKind::ReviewJobStarted, "review_job_started"),
             (EventKind::ReviewOutcome, "review_outcome"),
             (EventKind::ReviewProgramFinished, "review_program_finished"),
             (

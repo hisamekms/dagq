@@ -49,6 +49,10 @@ Run `status` in `runs` (latest last): `claimed`, `starting`, `running`, `validat
 
 Useful run fields: `branch` (`dagq/<run-id>`), `worktree_path`, `workspace_id` (cmux), `result_commit`, `last_error`, and with `show ID --full` also `run_dir` (prompt, logs, `receipt.json`, `integrate-<attempt>-verify-N.log`, one set per integrate attempt), `receipt_path`, `workspace_closed_at`.
 
+## A run's review (`events --run RUN`)
+
+A review is `review_started` (one per attempt; `subagents` lists the agents the diff selected), then a `review_job_started` / `review_job_finished` pair per job: the whole review (`agent: null`) and each selected agent (`agent: <name>`). The jobs start side by side, within `[review.jobs] concurrency` agent jobs at once across all the supervisor's reviews; a job past it waits. A job's end has `outcome` (`answered` with its `verdict`; `held` when its provider could not be used and it waits for it or moves to the other; or a miss: `unreadable`, `job_failed`, `timed_out`, `start_failed`), `runs_again` (a miss runs that job once more, once), `output` (its `.out` / `.err` in the run dir) and that job's tokens. The review is judged only once every job ended: `review_finished` has the whole review's verdict, `agents` (each agent's result) and `route` (`destination` is the heaviest of the judgments, `parent` the whole review's), or `review_failed` when a job never answered.
+
 ## Runs waiting for a person (outside the slots)
 
 A run whose live session only waits for a person leaves its `--parallel` slot so another task is claimed: a `worker_question` or `stalled` ask while the worker works, and a `worker_question` during a review's send-back or a resume (a past `exit` wait held a `stuck_exit` or `answer_prompt` ask of the retired interactive session). It keeps its lease, session and status.

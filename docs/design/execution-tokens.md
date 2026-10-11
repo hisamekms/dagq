@@ -59,6 +59,8 @@ turnの`turn_finished`とjobの終わりのeventは、providerによらず同じ
   引き継いだ側は、前のreviewの開始の後の終わりのeventが既にこの欄を持てば足さない。
   死んだsupervisorのjobを閉じた側は、`headless_jobs`の行が持つstdoutの置き場を行の`provider`で読み、置き場が無い（古い行）・読めなければ未計測にする。
   同じjobの終わりのevent（その`kind`の終わりか`headless_job_stopped`で、同じrun・proposal・goalと`attempt`のもの）がjobの開始の後に既にこの欄を持てば足さない（`domain::headless_job::JobOn`）。
+  runのreviewは1つの`attempt`に全体のreviewとagentごとのjobを持つので、行の`label`とeventの`agent`（`headless_job_stopped`なら`label`）が同じものだけを同じjobとし、jobを起動し直した`review_job_finished`（`runs_again`か`outcome: held`）はそのjobの終わりに数えない（[Headless job processes](supervisor-lifecycle/headless-job-processes.md#引き継ぎ)）。
+- runのreviewではjobごとの`review_job_finished`がこの欄を持ち、全てのjobの後の`review_finished`・`review_failed`は全体のreviewのsessionを写すだけで持たない。
   agentを起動していない終わり（起動の前に失敗したreview、`program`のjobなど）はExecutionではなく、この欄を持たない。
 - 非対話の区間は`tokens`が`null`のturnを足さない。
 - 親とsubagentごとの内訳は記録しない（ADR-t1486-1決定7）。

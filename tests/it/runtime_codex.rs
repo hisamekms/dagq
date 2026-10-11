@@ -207,7 +207,7 @@ fn assert_thread_without_model(end: &Value, span: &Value) {
 /// A Codex review's end records its thread and the model of its rollout
 /// as a goal or plan review's does (ADR-t1063-1 decision 6): its
 /// `review_finished`, its span's `session_closed` and `stats`'s jobs by
-/// model.
+/// model; its job's `review_job_finished` holds the job's Execution.
 #[test]
 fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
     let (dir, repo, db, backend, codex) = codex_fixture();
@@ -247,6 +247,15 @@ fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
     assert_eq!(finished["session_id"], REVIEW_THREAD);
     assert_eq!(finished["model"], REVIEW_MODEL);
     assert!(finished.get("model_unknown").is_none(), "{finished}");
+    // The review's end names the session, not the Execution, which its
+    // job's end holds.
+    assert!(finished.get("tokens_source").is_none(), "{finished}");
+    let job_ends = payloads(&detail, "review_job_finished");
+    assert_eq!(job_ends.len(), 1, "{job_ends:?}");
+    let finished = job_ends[0];
+    assert!(finished["agent"].is_null(), "{finished}");
+    assert_eq!(finished["outcome"], "answered");
+    assert_eq!(finished["session_id"], REVIEW_THREAD);
     // Its tokens are its rollout's response, counted once (ADR-t1486-1).
     assert_eq!(
         finished["tokens"],
@@ -345,7 +354,7 @@ fn no_claude_codex_review_revise_reaches_the_worker_and_passes() {
 }
 
 /// Under `--no-claude` a Codex review whose job fails (a general failure,
-/// not one that holds Codex) is reviewed once more on Codex (task 1984);
+/// not one that holds Codex) runs that job once more on Codex (task 1984);
 /// when that fails too it asks a person, and Claude never starts.
 #[test]
 fn no_claude_codex_review_failure_asks_without_starting_claude() {
@@ -385,23 +394,27 @@ fn no_claude_codex_review_failure_asks_without_starting_claude() {
     // closed when the job ended.
     assert_eq!(failed[0]["session_id"], REVIEW_THREAD);
     assert_eq!(failed[0]["model"], REVIEW_MODEL);
-    assert_eq!(failed[0]["attempt"], 2);
-    let retried = payloads(&detail, "review_retried");
-    assert_eq!(retried.len(), 1, "{retried:?}");
-    assert_eq!(retried[0]["cause"], "job_failed");
-    assert_eq!(retried[0]["session_id"], REVIEW_THREAD);
-    let spans = review_spans(&detail);
-    assert_eq!(spans.len(), 2, "{spans:?}");
-    for span in &spans {
-        assert_eq!(span["session_id"], REVIEW_THREAD);
-        assert_eq!(span["model"], REVIEW_MODEL);
+    assert_eq!(failed[0]["attempt"], 1);
+    assert!(payloads(&detail, "review_retried").is_empty());
+    let ends = payloads(&detail, "review_job_finished");
+    assert_eq!(ends.len(), 2, "{ends:?}");
+    for end in &ends {
+        assert_eq!(end["outcome"], "job_failed");
+        assert_eq!(end["session_id"], REVIEW_THREAD);
     }
+    assert_eq!(ends[0]["runs_again"], true);
+    assert_eq!(ends[1]["runs_again"], false);
+    let spans = review_spans(&detail);
+    assert_eq!(spans.len(), 1, "{spans:?}");
+    assert_eq!(spans[0]["session_id"], REVIEW_THREAD);
+    assert_eq!(spans[0]["model"], REVIEW_MODEL);
     let jobs = &common::cli::ok(&db, &["stats", "--full"])["jobs"]["review"];
-    // The stats count the review's end, as before the retry.
+    // The stats count the review's end once.
     assert_eq!(jobs["by_model"][REVIEW_MODEL]["failed"], 1, "{jobs}");
     let started = payloads(&detail, "review_started");
-    assert_eq!(started.len(), 2);
-    for started in started {
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0]["launch"]["provider"], "codex");
+    for started in payloads(&detail, "review_job_started") {
         assert_eq!(started["launch"]["provider"], "codex");
     }
     assert!(reviewer.prompts().is_empty());
@@ -410,8 +423,9 @@ fn no_claude_codex_review_failure_asks_without_starting_claude() {
 }
 
 /// A Codex that passed the supervisor's preflight but does not start for
-/// the review, while Claude may run: Codex is held and the review starts
-/// again on Claude (ADR-t1063-1 decisions 4 and 5); the run lands.
+/// the review, while Claude may run: Codex is held and the review's job
+/// starts on Claude in the same pass (ADR-t1063-1 decisions 4 and 5); the
+/// run lands.
 #[test]
 fn a_codex_review_whose_codex_does_not_start_moves_to_claude() {
     use std::os::unix::fs::PermissionsExt;
@@ -461,13 +475,19 @@ fn a_codex_review_whose_codex_does_not_start_moves_to_claude() {
         .show(TaskId::new(1))
         .unwrap();
     let started = payloads(&detail, "review_started");
-    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started.len(), 1, "{started:?}");
     assert_eq!(started[0]["launch"]["provider"], "codex");
-    assert_eq!(started[1]["launch"]["provider"], "claude");
-    assert_eq!(started[1]["launch"]["switch_reason"], "executable_missing");
-    let retried = payloads(&detail, "review_retried");
-    assert_eq!(retried.len(), 1, "{retried:?}");
-    assert_eq!(retried[0]["provider"], "codex");
+    let jobs = payloads(&detail, "review_job_started");
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(jobs[0]["launch"]["provider"], "claude");
+    assert_eq!(jobs[0]["launch"]["switched_from"], "codex");
+    assert_eq!(jobs[0]["launch"]["switch_reason"], "executable_missing");
+    let ends = payloads(&detail, "review_job_finished");
+    assert_eq!(ends.len(), 2, "{ends:?}");
+    assert_eq!(ends[0]["outcome"], "held");
+    assert_eq!(ends[0]["provider"], "codex");
+    assert_eq!(ends[1]["outcome"], "answered");
+    assert!(payloads(&detail, "review_retried").is_empty());
     assert!(payloads(&detail, "review_failed").is_empty());
     let held = queue_events(&db, "provider_held");
     assert_eq!(held.len(), 1, "{held:?}");
@@ -651,8 +671,9 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
 }
 
 /// A Codex review at its usage limit, while Claude may run: Codex is held
-/// without an ask (ADR-t1063-1 decision 5), and the review starts again
-/// on Claude (decision 4), recorded as `review_retried`; the run lands.
+/// without an ask (ADR-t1063-1 decision 5), and the review's job starts
+/// again on Claude (decision 4), its start saying from which provider and
+/// why; the run lands.
 #[test]
 fn a_codex_review_at_its_usage_limit_holds_codex_and_moves_to_claude() {
     let (dir, repo, db, backend, codex) = codex_fixture();
@@ -685,22 +706,24 @@ fn a_codex_review_at_its_usage_limit_holds_codex_and_moves_to_claude() {
     assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
     assert_eq!(reviewer.prompts().len(), 1, "Claude reviewed the run");
     let detail = detail(&db);
-    let started = payloads(&detail, "review_started");
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    let started = payloads(&detail, "review_job_started");
     assert_eq!(started.len(), 2, "{started:?}");
     assert_eq!(started[0]["launch"]["provider"], "codex");
     assert_eq!(started[1]["launch"]["provider"], "claude");
     assert_eq!(started[1]["launch"]["switched_from"], "codex");
     assert_eq!(started[1]["launch"]["switch_reason"], "usage_limit");
-    let retried = payloads(&detail, "review_retried");
-    assert_eq!(retried.len(), 1, "{retried:?}");
-    assert_eq!(retried[0]["provider"], "codex");
-    assert_eq!(retried[0]["switch_reason"], "usage_limit");
-    // The Codex review that moved names its thread on its end and its
-    // span; the Claude review's span keeps its own session.
+    assert!(payloads(&detail, "review_retried").is_empty());
+    let ends = payloads(&detail, "review_job_finished");
+    assert_eq!(ends.len(), 2, "{ends:?}");
+    assert_eq!(ends[0]["outcome"], "held");
+    assert_eq!(ends[0]["provider"], "codex");
+    assert_eq!(ends[0]["switch_reason"], "usage_limit");
+    // The Codex job that moved names its thread on its end; the review's
+    // span names the job that answered, on Claude.
+    assert_eq!(ends[0]["session_id"], REVIEW_THREAD);
     let spans = review_spans(&detail);
-    assert_eq!(spans.len(), 2, "{spans:?}");
-    assert_thread_without_model(retried[0], spans[0]);
-    assert_eq!(spans[1]["session_id"], started[1]["session_id"]);
+    assert_eq!(spans.len(), 1, "{spans:?}");
     assert!(payloads(&detail, "review_failed").is_empty());
     let held = queue_events(&db, "provider_held");
     assert_eq!(held.len(), 1, "{held:?}");
@@ -751,6 +774,10 @@ fn no_claude_unreadable_codex_review_at_its_limit_fails_with_its_output() {
     assert_eq!(result["runs"][0]["status"], "awaiting_integration");
     let detail = detail(&db);
     assert!(payloads(&detail, "review_retried").is_empty());
+    let ends = payloads(&detail, "review_job_finished");
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0]["outcome"], "unreadable");
+    assert_eq!(ends[0]["runs_again"], false);
     let failed = payloads(&detail, "review_failed");
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0]["code"], "job_failed");

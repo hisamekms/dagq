@@ -30,6 +30,13 @@ pub struct TestReviewer {
     /// `/bin/sh -c` in the case's tree (the last one repeats); without
     /// one, an agent job cannot start.
     pub agent_jobs: Mutex<Vec<String>>,
+    /// Scripts of the agent jobs of runs' reviews (ADR-t1895-1), by the
+    /// agent their prompt names, each run with `/bin/sh -c` in the
+    /// worktree (an agent's last one repeats); an agent without them takes
+    /// `agent_jobs`'.
+    pub review_agents: Mutex<Vec<(String, Vec<String>)>>,
+    /// Each agent job's launch as it started, the eval's and the reviews'.
+    pub launches: Mutex<Vec<dagq::application::AgentJobLaunch>>,
 }
 
 impl TestReviewer {
@@ -45,7 +52,21 @@ impl TestReviewer {
             handed: Mutex::new(Vec::new()),
             leave_running: None,
             agent_jobs: Mutex::new(Vec::new()),
+            review_agents: Mutex::new(Vec::new()),
+            launches: Mutex::new(Vec::new()),
         }
+    }
+    /// See `review_agents`.
+    pub fn with_review_agents(self, scripts: &[(&str, Vec<String>)]) -> Self {
+        *self.review_agents.lock().unwrap() = scripts
+            .iter()
+            .map(|(agent, scripts)| ((*agent).to_owned(), scripts.clone()))
+            .collect();
+        self
+    }
+    /// See `launches`.
+    pub fn launches(&self) -> Vec<dagq::application::AgentJobLaunch> {
+        self.launches.lock().unwrap().clone()
     }
     /// See `agent_jobs`.
     pub fn with_agent_jobs(self, scripts: &[String]) -> Self {
@@ -143,7 +164,23 @@ impl AgentProvider for TestReviewer {
         Ok(command)
     }
     fn agent_job_command(&self, job: &dagq::application::AgentJobLaunch) -> Result<CommandSpec> {
-        let mut scripts = self.agent_jobs.lock().unwrap();
+        self.launches.lock().unwrap().push(job.clone());
+        let named = job
+            .prompt
+            .lines()
+            .find_map(|line| line.strip_prefix("You are the review agent `"))
+            .and_then(|rest| rest.split('`').next())
+            .map(str::to_owned);
+        let mut by_agent = self.review_agents.lock().unwrap();
+        let mine = by_agent
+            .iter_mut()
+            .find(|(agent, _)| Some(agent) == named.as_ref())
+            .map(|(_, scripts)| scripts);
+        let mut eval = self.agent_jobs.lock().unwrap();
+        let scripts = match mine {
+            Some(scripts) => scripts,
+            None => &mut *eval,
+        };
         ensure!(!scripts.is_empty(), "the test reviewer runs no agent job");
         let script = if scripts.len() > 1 {
             scripts.remove(0)
@@ -189,6 +226,20 @@ impl AgentProvider for TestReviewer {
 /// A reviewer script whose review cannot start: `review_command` fails, so
 /// no job runs and writes `review-N.out` / `.err`.
 pub const UNSTARTABLE_REVIEW: &str = "<unstartable review>";
+
+/// A script of an agent job of a run's review: `agent`'s one completed
+/// result of `decision` for `reasons`.
+pub fn agent_says(agent: &str, decision: &str, reasons: &[&str]) -> String {
+    agent_answers(
+        json!({"agent": agent, "status": "completed", "verdict": decision,
+                         "reasons": reasons, "summary": format!("{agent} looked")}),
+    )
+}
+
+/// A script of an agent job that prints `result` as it is.
+pub fn agent_answers(result: Value) -> String {
+    format!("printf '%s\\n' '{result}'")
+}
 
 /// A reviewer script that prints the verdict JSON.
 pub fn verdict(decision: &str, reasons: &[&str], summary: &str) -> String {

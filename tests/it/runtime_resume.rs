@@ -511,7 +511,7 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
                 **k,
                 "validation_finished"
                     | "review_started"
-                    | "review_retried"
+                    | "review_job_finished"
                     | "exit_requested"
                     | "session_exited"
                     | "workspace_closed"
@@ -525,8 +525,8 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
         [
             "validation_finished",
             "review_started",
-            "review_retried",
-            "review_started",
+            "review_job_finished",
+            "review_job_finished",
             "exit_requested",
             "session_exited",
             "workspace_closed",
@@ -741,21 +741,21 @@ fn an_unapproved_run_resolved_by_an_earlier_resume_is_validated_without_a_sessio
                 "resume_skipped"
                     | "validation_finished"
                     | "review_started"
-                    | "review_retried"
+                    | "review_job_finished"
                     | "review_failed"
             )
         })
         .copied()
         .collect();
-    // The unreadable verdict is reviewed once more (task 328).
+    // The job of the unreadable verdict runs once more (task 328).
     assert_eq!(
         after,
         [
             "resume_skipped",
             "validation_finished",
             "review_started",
-            "review_retried",
-            "review_started",
+            "review_job_finished",
+            "review_job_finished",
             "review_failed"
         ]
     );

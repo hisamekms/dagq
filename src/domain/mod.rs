@@ -968,6 +968,7 @@ pub mod recovery;
 pub mod related;
 pub mod release_update;
 pub mod resume;
+pub mod review_jobs;
 pub mod review_programs;
 pub mod review_reason;
 pub mod review_subagents;

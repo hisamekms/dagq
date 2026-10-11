@@ -3,13 +3,17 @@
 //! queue's open ones: while one is open no new run is claimed (the
 //! `claim_held` of [`HoldReason::Authentication`] or
 //! [`HoldReason::UsageLimit`]) and no headless job starts (reviews wait in
-//! [`Phase::ReviewHeld`]; the recovery jobs, the plan and goal reviews and
-//! the observer are not started); the runs in flight keep their leases.
+//! [`Phase::ReviewHeld`], and a job of a review in progress that stopped at
+//! the hold waits in its review, the other jobs' answers kept; the recovery
+//! jobs, the plan and goal reviews and the observer are not started); the
+//! runs in flight keep their leases.
 //! An answer the ask offered is applied here: `done` types
 //! [`queue_hold::CONTINUE_TEXT`] into each held session this supervisor
 //! watches (checked like every typed text, ADR-0047 decision 31) and
 //! starts again the jobs that failed around the hold; `cancel_affected`
-//! gives the held runs this supervisor watches up as an abandon does.
+//! gives the held runs this supervisor watches up as an abandon does; a
+//! review in progress is not given up, and its waiting job starts again
+//! once nothing holds.
 //! Every supervisor applies an answer to the held runs in its own slots,
 //! once each (`hold_answer_applied`, task 754), and the ask closes, with
 //! `queue_hold_applied`, once no run in it waits for a live supervisor to

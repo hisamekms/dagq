@@ -75,7 +75,7 @@ ready task (dependencies completed)
       revise  → fixed request to the live session → rewritten receipt
                 → validate → review again (at most 2 revises)
       concern / 3rd non-pass → exit request → close → approve_landing ask
-      unreadable / non-zero  → review once more (review_retried; once per review)
+      no answer from a job   → that job once more (review_job_finished; once per job)
       review failed          → review span closed → exit request → close → approve_landing ask + review_failed
   → release run lease               ─┘
   → integrate (by hand, one at a time, FIFO by validation):

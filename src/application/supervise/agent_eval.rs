@@ -162,19 +162,6 @@ fn refusal(reason: RefusalReason, detail: String) -> Refusal {
     }
 }
 
-/// The agent's result in a job's reply: the reply as one JSON object, or
-/// the object between its first `{` and its last `}` (a reply in a fenced
-/// block); `None` when neither reads.
-fn agent_result(reply: &str) -> Option<Value> {
-    let reply = reply.trim();
-    let parsed = serde_json::from_str::<Value>(reply).ok().or_else(|| {
-        let start = reply.find('{')?;
-        let end = reply.rfind('}')?;
-        serde_json::from_str(reply.get(start..=end)?).ok()
-    })?;
-    parsed.is_object().then_some(parsed)
-}
-
 impl Supervisor<'_> {
     /// Run the eval's rounds for one pass: start a round when none runs
     /// and `starting` (or read back the one a gone supervisor left), reap
@@ -1174,7 +1161,7 @@ impl Supervisor<'_> {
             let cost = run_cost(tokens, &round.prices, round.per_run_usd);
             let key = (run.case.clone(), run.round);
             let (result, error, again) = match end {
-                Ok(reply) => match agent_result(&reply) {
+                Ok(reply) => match agent_job::read_reply(&reply) {
                     Some(result) => (Some(result), None, false),
                     None => (
                         None,
@@ -1288,22 +1275,5 @@ impl Supervisor<'_> {
         self.record_eval(EventKind::AgentEvalFinished, payload)?;
         self.remove_case_trees(round.id, round.cases.len());
         Ok(true)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_agents_result_is_read_bare_or_out_of_a_fence() {
-        let result = json!({"agent": "a", "status": "completed", "verdict": "pass"});
-        assert_eq!(agent_result(&result.to_string()), Some(result.clone()));
-        assert_eq!(
-            agent_result(&format!("Here it is:\n```json\n{result}\n```\n")),
-            Some(result)
-        );
-        assert_eq!(agent_result("no verdict"), None);
-        assert_eq!(agent_result("[1, 2]"), None);
     }
 }

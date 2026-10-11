@@ -135,9 +135,13 @@ fn actor_of(
         event_kind::TURN_FINISHED if event.payload["planner_id"].is_i64() => {
             Some((RUNTIME_PLANNER, Some(HEADLESS_ROUTE)))
         }
-        event_kind::REVIEW_FINISHED | event_kind::REVIEW_FAILED | event_kind::REVIEW_RETRIED => {
-            job(REVIEW)
-        }
+        // Each agent job of a review records its own (ADR-t1895-1); a
+        // review's end recorded its one job's before its agents ran as
+        // jobs.
+        event_kind::REVIEW_JOB_FINISHED
+        | event_kind::REVIEW_FINISHED
+        | event_kind::REVIEW_FAILED
+        | event_kind::REVIEW_RETRIED => job(REVIEW),
         // A recovery job also records its tokens on its `triage_*`, which
         // are not counted again.
         event_kind::RECOVERY_FINISHED => job(TRIAGE),

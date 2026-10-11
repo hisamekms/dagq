@@ -46,7 +46,7 @@ impl Supervisor<'_> {
             stop_recovery(&mut slot);
             let snapshot = match &mut slot.phase {
                 Phase::Review(watch) => {
-                    watch.job.abandon();
+                    watch.abandon();
                     info!(run_id = %run.id(), "run {}: review {} stopped for the handoff; it is reviewed again", run.id(), watch.attempt);
                     None
                 }

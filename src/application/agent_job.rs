@@ -89,6 +89,22 @@ fn schema(agent: &str) -> String {
     )
 }
 
+/// An agent job's reply as one JSON object: the reply as it is, or the
+/// object between its first `{` and its last `}` (a reply in a fenced
+/// block); `None` when neither reads. The eval and a run's review read an
+/// agent job's verdict this one way.
+pub fn read_reply(reply: &str) -> Option<serde_json::Value> {
+    let reply = reply.trim();
+    let parsed = serde_json::from_str::<serde_json::Value>(reply)
+        .ok()
+        .or_else(|| {
+            let start = reply.find('{')?;
+            let end = reply.rfind('}')?;
+            serde_json::from_str(reply.get(start..=end)?).ok()
+        })?;
+    parsed.is_object().then_some(parsed)
+}
+
 /// Whether `definition` fits the agent job's prompt whole
 /// ([`AGENT_JOB_DEFINITION_BYTES`]); the eval checks it before a round
 /// starts.
@@ -298,6 +314,20 @@ mod tests {
         ));
         assert!(prompt.text.contains("check the ADRs"));
         assert_eq!(sections_sum(&prompt.bytes), prompt.text.len());
+    }
+
+    /// An agent job's reply is read bare or out of a fence, by the eval
+    /// and a run's review alike; anything but one object is none.
+    #[test]
+    fn an_agents_reply_is_read_bare_or_out_of_a_fence() {
+        let result = serde_json::json!({"agent": "a", "status": "completed", "verdict": "pass"});
+        assert_eq!(read_reply(&result.to_string()), Some(result.clone()));
+        assert_eq!(
+            read_reply(&format!("Here it is:\n```json\n{result}\n```\n")),
+            Some(result)
+        );
+        assert_eq!(read_reply("no verdict"), None);
+        assert_eq!(read_reply("[1, 2]"), None);
     }
 
     /// The prompt says the change and the schema, and nothing of what a

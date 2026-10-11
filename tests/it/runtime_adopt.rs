@@ -622,7 +622,9 @@ fn integrating_run_with_a_stale_lease_is_not_adopted() {
     let asks = queue.asks(Default::default()).unwrap();
     assert_eq!(asks.len(), 1);
     assert_eq!(asks[0].kind, AskKind::ApproveLanding);
-    assert_eq!(payloads(&detail, "review_started").len(), 2);
+    // Its one review ran its job once more after the unreadable verdict.
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert_eq!(payloads(&detail, "review_job_started").len(), 2);
 }
 
 /// Two supervisors with free slots find the same stale lease at once: the

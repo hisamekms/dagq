@@ -2,11 +2,13 @@
 //! its verdict, the conflict precheck, the `approve_landing` ask and the
 //! landing itself (ADR-0023, ADR-0027).
 
+use super::jobs::{ReviewAnswer, ReviewJob, ReviewJobInput, ReviewJobState};
 use super::*;
+use crate::application::agent_job::{self, AgentJob};
 use crate::application::job_start_failure;
 use crate::application::prompt::{PromptBytes, REVIEW_ACCESS};
 use crate::application::review::{
-    ReviewRange, SubagentSnapshot, review_range_at, review_subagents_prompt, snapshot_subagents,
+    ReviewRange, SubagentSnapshot, review_range_at, snapshot_subagents,
 };
 use crate::application::review_programs::{ProgramSnapshot, snapshot_programs};
 use crate::domain::ActorContext;
@@ -18,13 +20,13 @@ use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
-use crate::domain::headless_job::{JobKind, JobSession};
-use crate::domain::provider_switch::SwitchReason;
+use crate::domain::headless_job::{JobKind, JobSession, JobStop};
+use crate::domain::review_jobs::{self, JobMiss, ReviewJobId};
 use crate::domain::review_programs::{
     self as programs, AfterFailure, ProgramOutcome, ProgramsStep,
 };
 use crate::domain::review_reason;
-use crate::domain::review_subagents::{AgentDefinition, Destination, VerdictRoute};
+use crate::domain::review_subagents::{Destination, VerdictRoute};
 use crate::domain::worker_model::{self, Escalation};
 
 /// The answer the supervisor closes an earlier, unclosed `approve_landing`
@@ -38,65 +40,6 @@ const STALE_LANDING_ASK_CLOSED: &str =
 /// `provider_disabled` and its ask says no review agent ran.
 pub(super) const REVIEW_PROVIDER_DISABLED: &str =
     "provider_disabled: Claude is disabled by --no-claude";
-
-/// How the error of a review begins when no provider that can be used can
-/// run its required subagents (ADR-t1453-1 decision 8).
-pub(super) const SUBAGENTS_UNSUPPORTED: &str = "subagents_unsupported";
-
-/// Why a review that requires the subagents `required` did not start on
-/// `provider`, which cannot run them, nor on another provider.
-pub(super) fn subagents_unsupported(provider: Provider, required: &[String]) -> String {
-    format!(
-        "{SUBAGENTS_UNSUPPORTED}: the review requires the subagents {}, which {} cannot run, and no other provider that can run them can be used",
-        required.join(", "),
-        provider.as_str()
-    )
-}
-
-/// Where a review that requires the subagents `required` goes
-/// ([`subagent_launch_of`]).
-#[derive(Debug, PartialEq)]
-pub(super) enum SubagentLaunch {
-    /// Start on this launch.
-    Launch(ActorLaunch),
-    /// Wait in [`Phase::ReviewHeld`]: the provider that runs them can run
-    /// the review but is held now; why.
-    Wait(String),
-    /// Fail to the person: no provider here can run them; why.
-    Fail(String),
-}
-
-/// The launch of a review that requires the subagents `required`
-/// (ADR-t1453-1 decision 8, ADR-t1847-1), given whether a provider's agent
-/// runs review subagents (`runs`) and why it cannot be used now, if it
-/// cannot (`unusable`): `launch` when its provider runs them; else the
-/// other provider's when that one runs the review role and runs them,
-/// with why it was switched (no hold: the provider itself can be used),
-/// or a wait while that one is held; else why none can, for the person.
-pub(super) fn subagent_launch_of(
-    launch: ActorLaunch,
-    required: &[String],
-    runs: impl Fn(Provider) -> bool,
-    unusable: impl Fn(Provider) -> Option<SwitchReason>,
-) -> SubagentLaunch {
-    if runs(launch.provider) {
-        return SubagentLaunch::Launch(launch);
-    }
-    let other = launch.provider.other();
-    if !crate::domain::actor_model::runs_on(ModelRole::Review, other) || !runs(other) {
-        return SubagentLaunch::Fail(subagents_unsupported(launch.provider, required));
-    }
-    match unusable(other) {
-        None => SubagentLaunch::Launch(launch.switched(other, SwitchReason::SubagentsUnsupported)),
-        Some(reason) => SubagentLaunch::Wait(format!(
-            "the review requires the subagents {}, which {} cannot run, and {}, which runs them, cannot be used now ({})",
-            required.join(", "),
-            launch.provider.as_str(),
-            other.as_str(),
-            reason.as_str()
-        )),
-    }
-}
 
 /// A review job that started: its process and its stdout and stderr.
 type StartedReview = (Box<dyn Spawned>, PathBuf, PathBuf);
@@ -432,7 +375,7 @@ impl Supervisor<'_> {
         }
         // No agent's job ran before this attempt, so none of its output
         // is named, whatever the programs' retry.
-        self.unstarted_review_failed(run, session, attempt, false, error)
+        self.unstarted_review_failed(run, session, attempt, error)
     }
     /// Go on from the program at `programs.outcomes.len()`, which ended
     /// as `end` after `duration_secs`, its time limit `timeout_secs`:
@@ -559,103 +502,21 @@ impl Supervisor<'_> {
             |provider| self.job_unusable(provider),
         )
     }
-    /// Move review `attempt` off `unusable`, the provider that could not
-    /// run it and is held now (ADR-t1063-1 decisions 4 and 5): record
-    /// `review_retried` with the provider and why, then start the review
-    /// on the other provider, or wait with the session open while neither
-    /// can be used. `Err` gives the session back when the review does not
-    /// move: under `--no-claude` with no provider left, or when the route
-    /// still sends it to the same provider (its hold was not written), so
-    /// that it fails to the person instead of starting there again.
-    pub(super) fn move_review(
-        &mut self,
-        run: &TaskRun,
-        session: Option<SessionRef>,
-        attempt: usize,
-        // Why the attempt failed, and what its job said of its session.
-        (error, job_session): (&str, Option<&JobSession>),
-        (provider, reason): (Provider, SwitchReason),
-        retried: bool,
-    ) -> Result<std::result::Result<Phase, Option<SessionRef>>> {
-        let route = self.review_route();
-        if !provider::review_moves(&route, provider) {
-            return Ok(Err(session));
-        }
-        let mut retried_event = json!({
-            "attempt": attempt,
-            "error": error,
-            "provider": provider.as_str(),
-            "switch_reason": reason.as_str(),
-        });
-        // The job that ran on Codex names its thread and model (task 1339).
-        if let Some(job_session) = job_session {
-            job_session.record(&mut retried_event);
-        }
-        self.queue
-            .record_runtime_event(run.id(), EventKind::ReviewRetried, retried_event)?;
-        Ok(Ok(match held_review(&route, session, retried) {
-            Ok((held, why)) => {
-                warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}); the review waits: {why}", run.id(), provider.as_str(), reason.as_str());
-                held
-            }
-            Err(session) => {
-                warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}); reviewing it on the other provider", run.id(), provider.as_str(), reason.as_str());
-                self.begin_review(run, session, retried)?
-            }
-        }))
-    }
-    /// Review the run once more with the same input after review `attempt`
-    /// printed no readable verdict (task 328) or its job exited non-zero
-    /// (task 1984), as `cause` says: record `review_retried` with why, then
-    /// start the next review, whose own failure is not retried again. While
-    /// the review's route waits, the next review waits in
-    /// [`Phase::ReviewHeld`] as the retry, `review_retried` already
-    /// recorded, and starts as the retry once the wait ends.
-    ///
-    /// The event's `cause` says which retry it is: `"unreadable"` after a
-    /// verdict that could not be read (no verdict JSON, or one lacking the
-    /// results of its required subagents), `"job_failed"` after a job that
-    /// exited non-zero. The `review_retried` of a review moved off a
-    /// provider that cannot be used ([`Self::move_review`]) has no `cause`:
-    /// its `switch_reason` says why instead.
-    pub(super) fn retry_review(
-        &mut self,
-        run: &TaskRun,
-        session: Option<SessionRef>,
-        attempt: usize,
-        (error, cause): (&str, RetryCause),
-        job_session: Option<&JobSession>,
-    ) -> Result<Phase> {
-        let mut retried_event = json!({
-            "attempt": attempt,
-            "error": error,
-            "cause": cause.as_str(),
-        });
-        // The job that ran on Codex names its thread and model (task 1339).
-        if let Some(job_session) = job_session {
-            job_session.record(&mut retried_event);
-        }
-        self.queue
-            .record_runtime_event(run.id(), EventKind::ReviewRetried, retried_event)?;
-        let what = match cause {
-            RetryCause::Unreadable => "printed no readable verdict",
-            RetryCause::JobFailed => "failed",
-        };
-        warn!(run_id = %run.id(), error = %error, "run {} review {attempt} {what}: {error}; reviewing it once more", run.id());
-        self.resume_review(run, session, true)
-    }
     /// Start the next review attempt of `run` (one more than its recorded
     /// reviews) where [`Self::review_route`] sends it: it waits in
     /// [`Phase::ReviewHeld`] while no provider can be used, and goes to
-    /// the person when none is left. The required subagents are read from
-    /// the landing branch before `review_started`, and a review whose
-    /// subagents cannot be read or run fails to the person without a job,
-    /// never passing on fewer checks. `retried` is whether this attempt is
-    /// the one retry of the review.
+    /// the person when none is left. The agents its range selects are read
+    /// from the landing branch before `review_started`, and a review whose
+    /// agents or prompts cannot be read or made fails to the person without
+    /// a job, never passing on fewer checks. Then its whole review's job and
+    /// each selected agent's job start side by side, within the limit of
+    /// agent jobs at once every run's review shares
+    /// ([`Self::go_on_with_review`]). `retried` is whether this attempt is
+    /// the retry of its program reviews, after which no job runs once more.
     pub(super) fn begin_review(
         &mut self,
         run: &TaskRun,
-        mut session: Option<SessionRef>,
+        session: Option<SessionRef>,
         retried: bool,
     ) -> Result<Phase> {
         let attempt =
@@ -664,15 +525,11 @@ impl Supervisor<'_> {
             Some(_) => session_alive(self, run.id())?,
             None => false,
         };
-        let (launch, switchable) = match self.review_route() {
-            ReviewRoute::Start(launch, switchable) => (launch, switchable),
+        let launch = match self.review_route() {
+            ReviewRoute::Start(launch, _) => launch,
             ReviewRoute::Wait(why) => {
                 info!(run_id = %run.id(), "run {}: its review waits: {why}", run.id());
-                return Ok(Phase::ReviewHeld {
-                    session,
-                    retried,
-                    subagents: Vec::new(),
-                });
+                return Ok(Phase::ReviewHeld { session, retried });
             }
             ReviewRoute::Manual(error) => {
                 (self.review_material)(run.task_id(), None)?;
@@ -688,7 +545,7 @@ impl Supervisor<'_> {
                 )));
             }
         };
-        // The required subagents, from the landing branch's commit
+        // The selected agents, from the landing branch's commit
         // (ADR-t1453-1 decisions 3 and 4). When they cannot be known the
         // review cannot pass: it fails to the person with why.
         let subagents = match self.review_subagents(run) {
@@ -696,38 +553,12 @@ impl Supervisor<'_> {
             Err(snapshot) => {
                 let error =
                     format!("the review's required subagents could not be read: {snapshot:#}");
-                return self.unstarted_review_failed(run, session, attempt, retried, error);
+                return self.unstarted_review_failed(run, session, attempt, error);
             }
         };
-        let required: Vec<String> = subagents
-            .iter()
-            .flat_map(|s| s.agents.iter().map(|a| a.name.clone()))
-            .collect();
-        // A provider that cannot run the required subagents does not start
-        // the review: the other one does, it waits while that one is held
-        // (ADR-t1847-1), or a person reviews it (ADR-t1453-1 decision 8).
-        // Nothing is skipped silently.
-        let launch = if required.is_empty() {
-            launch
-        } else {
-            match self.subagent_launch(launch, &required) {
-                SubagentLaunch::Launch(launch) => launch,
-                SubagentLaunch::Wait(why) => {
-                    info!(run_id = %run.id(), "run {}: its review waits: {why}", run.id());
-                    return Ok(Phase::ReviewHeld {
-                        session,
-                        retried,
-                        subagents: required,
-                    });
-                }
-                SubagentLaunch::Fail(error) => {
-                    return self.unstarted_review_failed(run, session, attempt, retried, error);
-                }
-            }
-        };
-        // The job's Claude session id (ADR-0048 decision 4); Codex names
-        // its thread itself, which the review's end records (ADR-t1063-1
-        // decision 6), as a goal review's does.
+        // The Claude session id of the whole review's first job (ADR-0048
+        // decision 4); Codex names its thread itself, which the job's end
+        // records (ADR-t1063-1 decision 6).
         let session_id = (launch.provider == crate::domain::Provider::Claude)
             .then(|| self.generators.ids.uuid());
         let mut started = json!({
@@ -740,90 +571,64 @@ impl Supervisor<'_> {
         if let Some(subagents) = &subagents {
             started["subagents"] = subagents.event_value();
         }
-        // What its prompt takes (task 1571, ADR-t1566-1 decision 6).
+        // What the whole review's prompt takes (task 1571, ADR-t1566-1
+        // decision 6); each agent job's start records its own.
         let prepared = self.prepare_review(run, attempt, subagents.as_ref());
-        if let Ok((_, prompt_bytes)) = &prepared {
-            started["prompt_bytes"] = json!(prompt_bytes);
+        if let Ok(prepared) = &prepared {
+            started["prompt_bytes"] = json!(prepared.whole.1);
         }
         self.queue
             .record_runtime_event(run.id(), EventKind::ReviewStarted, started)?;
-        let spawned = match prepared {
-            Ok((prompt, _)) => self.spawn_review(
-                run,
-                (attempt, &prompt),
-                session_id.as_deref(),
-                &launch,
-                subagents.as_ref(),
-            ),
-            Err(error) => Err(error),
-        };
-        let error = match spawned {
-            Ok(Ok((child, stdout, stderr))) => {
-                info!(run_id = %run.id(), "run {} review {attempt} started on {} (session {})", run.id(), launch.provider.as_str(), if live { "kept open" } else { "ended" });
-                let job = self.headless_job(
-                    "review",
-                    child,
-                    stdout,
-                    stderr,
-                    JobSubject {
-                        provider: launch.provider,
-                        ..JobSubject::review(JobKind::Agent, run.id(), attempt)
-                    },
-                );
-                return Ok(Phase::Review(ReviewWatch {
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            // Its own preparation failed: no job was tried.
+            Err(error) => {
+                let error = format!("the headless review could not start: {error:#}");
+                warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
+                self.close_review_session(run, None);
+                return Ok(Phase::Exiting(ExitWatch::new(
                     session,
-                    attempt,
-                    retried,
-                    switchable,
-                    required,
-                    job,
-                }));
-            }
-            // Its provider did not start: one that `[roles.review]` names
-            // is held, and the review starts again where the route sends it
-            // (ADR-t1063-1 decisions 4 and 5); under `--no-claude` with no
-            // provider left, it fails to the person below.
-            Ok(Err(started)) => {
-                let error = format!("the headless review could not start: {started:#}");
-                if let Some(unusable) = self.job_provider_failed(
-                    launch.provider,
-                    job_start_failure(&started),
-                    (&error, &error),
-                    &HoldJob::Review(run.id().clone()),
-                    switchable,
-                ) {
-                    match self.move_review(
-                        run,
-                        session,
+                    AfterExit::ReviewFailed {
                         attempt,
-                        (&error, None),
-                        unusable,
-                        retried,
-                    )? {
-                        Ok(phase) => return Ok(phase),
-                        Err(back) => session = back,
-                    }
-                }
-                error
+                        error,
+                        duration_secs: 0,
+                        // No job ran, so no output is named (task 426).
+                        output: None,
+                        session: None,
+                    },
+                )));
             }
-            // Its own preparation failed: no provider was tried.
-            Err(prepared) => format!("the headless review could not start: {prepared:#}"),
         };
-        warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
-        self.close_review_session(run, None);
-        Ok(Phase::Exiting(ExitWatch::new(
-            session,
-            AfterExit::ReviewFailed {
-                attempt,
-                error,
-                duration_secs: 0,
-                // No job ran, so this attempt wrote no output; a retry
-                // follows a job that ran and printed an unreadable verdict
-                // (task 426).
-                output: unstarted_review_output(retried, attempt),
-                session: None,
+        let (prompt, prompt_bytes) = prepared.whole;
+        let mut jobs = vec![ReviewJob {
+            id: ReviewJobId::Whole,
+            input: ReviewJobInput::Whole {
+                prompt,
+                prompt_bytes,
+                session_id,
             },
-        )))
+            again: false,
+            state: ReviewJobState::Waiting(None),
+            session: None,
+        }];
+        jobs.extend(prepared.agents.into_iter().map(|(agent, built)| ReviewJob {
+            id: ReviewJobId::Agent(agent),
+            input: ReviewJobInput::Agent(built),
+            again: false,
+            state: ReviewJobState::Waiting(None),
+            session: None,
+        }));
+        info!(run_id = %run.id(), "run {} review {attempt}: {} job(s), the whole review and {} agent(s) (session {})", run.id(), jobs.len(), jobs.len() - 1, if live { "kept open" } else { "ended" });
+        self.go_on_with_review(
+            run,
+            ReviewWatch {
+                session,
+                attempt,
+                retried,
+                started: self.generators.clock.monotonic(),
+                jobs,
+            },
+        )
     }
     /// Fail review `attempt`, which did not start, to the person with
     /// `error` (`review_failed` and the `approve_landing` ask once the
@@ -833,7 +638,6 @@ impl Supervisor<'_> {
         run: &TaskRun,
         session: Option<SessionRef>,
         attempt: usize,
-        retried: bool,
         error: String,
     ) -> Result<Phase> {
         warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
@@ -849,39 +653,535 @@ impl Supervisor<'_> {
                 attempt,
                 error,
                 duration_secs: 0,
-                output: unstarted_review_output(retried, attempt),
+                output: None,
                 session: None,
             },
         )))
     }
-    /// Where a review that requires the subagents `required` goes from
-    /// `launch` ([`subagent_launch_of`]).
-    fn subagent_launch(&self, launch: ActorLaunch, required: &[String]) -> SubagentLaunch {
-        subagent_launch_of(
-            launch,
-            required,
-            |provider| {
-                self.job_agent(provider)
-                    .is_some_and(|agent| agent.runs_review_subagents())
-            },
-            |provider| self.job_unusable(provider),
-        )
-    }
     /// Whether a review in [`Phase::ReviewHeld`] still waits: its route
-    /// waits, or it waits for the provider that runs its required
-    /// `subagents` (none when the route held it), which is held still. A
-    /// review that goes to the person does not wait.
-    pub(super) fn review_held_waits(&self, subagents: &[String]) -> bool {
-        match self.review_route() {
-            ReviewRoute::Wait(_) => true,
-            ReviewRoute::Start(launch, _) if !subagents.is_empty() => matches!(
-                self.subagent_launch(launch, subagents),
-                SubagentLaunch::Wait(_)
-            ),
-            ReviewRoute::Start(..) | ReviewRoute::Manual(_) => false,
+    /// waits. A review that goes to the person does not wait.
+    pub(super) fn review_held_waits(&self) -> bool {
+        matches!(self.review_route(), ReviewRoute::Wait(_))
+    }
+    /// How many agent jobs of the reviews of the runs in the slots run now,
+    /// the slot this pass stepped aside (it is out of the table while it
+    /// steps): the limit of jobs at once counts them all
+    /// ([`review_jobs::startable`]). The eval's jobs are not among them.
+    pub(super) fn review_jobs_running(&self) -> usize {
+        self.claim
+            .slots
+            .iter()
+            .map(|slot| match &slot.phase {
+                Phase::Review(watch) => watch.running(),
+                _ => 0,
+            })
+            .sum()
+    }
+    /// Go on with the review of `run` in `watch` from where it stands
+    /// ([`Self::tend_review`]): the next phase, or the review still.
+    pub(super) fn go_on_with_review(
+        &mut self,
+        run: &TaskRun,
+        mut watch: ReviewWatch,
+    ) -> Result<Phase> {
+        let elsewhere = self.review_jobs_running();
+        Ok(match self.tend_review(run, &mut watch, elsewhere)? {
+            Some(next) => next,
+            None => Phase::Review(watch),
+        })
+    }
+    /// One pass over the jobs of `run`'s review in `watch`, `elsewhere`
+    /// the agent jobs of the other runs' reviews that run now: reap the
+    /// jobs that ended ([`Self::review_job_ended`]), start those that
+    /// wait while the limit of jobs at once leaves room and a provider can
+    /// run them ([`Self::start_review_jobs`]), and once every job ended,
+    /// judge the review ([`Self::judge_review`]) or, when one gave no
+    /// answer, fail it to the person, never passing it on fewer judgments
+    /// (ADR-t1895-1 decision 5). `None` while a job waits or runs.
+    pub(super) fn tend_review(
+        &mut self,
+        run: &TaskRun,
+        watch: &mut ReviewWatch,
+        elsewhere: usize,
+    ) -> Result<Option<Phase>> {
+        let (attempt, retried) = (watch.attempt, watch.retried);
+        for job in &mut watch.jobs {
+            let ReviewJobState::Running { job: running, .. } = &mut job.state else {
+                continue;
+            };
+            let agent = self.job_agent(running.provider).with_context(|| {
+                format!("no {} runs on this supervisor", running.provider.as_str())
+            })?;
+            let Some(end) = running.poll_end(&*self.files, agent)? else {
+                continue;
+            };
+            let ReviewJobState::Running {
+                job: ended,
+                switchable,
+            } = std::mem::replace(&mut job.state, ReviewJobState::Waiting(None))
+            else {
+                unreachable!("the job runs");
+            };
+            self.review_job_ended(run, (attempt, retried), job, (ended, switchable), end)?;
+        }
+        self.start_review_jobs(run, watch, elsewhere)?;
+        match watch.standing() {
+            review_jobs::ReviewStanding::Open => Ok(None),
+            review_jobs::ReviewStanding::Answered => self.judge_review(run, watch).map(Some),
+            review_jobs::ReviewStanding::Missed(errors) => {
+                let error = review_jobs_error(&errors);
+                warn!(run_id = %run.id(), error = %error, "run {} review {attempt} failed: {error}; a person is asked", run.id());
+                let session = whole_session(watch);
+                self.close_review_session(run, session.as_ref());
+                // The ask names the whole review's output when its job ran
+                // and gave no answer; each missed job's error names its own.
+                let whole_ran = watch.jobs.iter().any(|job| {
+                    job.id == ReviewJobId::Whole
+                        && matches!(job.state, ReviewJobState::Missed { ran: true, .. })
+                });
+                Ok(Some(Phase::Exiting(ExitWatch::new(
+                    watch.session.clone(),
+                    AfterExit::ReviewFailed {
+                        attempt,
+                        error,
+                        duration_secs: watch.started.elapsed().as_secs(),
+                        output: whole_ran.then_some(attempt),
+                        session,
+                    },
+                ))))
+            }
         }
     }
-    /// The review's required subagents from the landing branch's commit
+    /// Go on from `job` of review `attempt` of `run`, whose process
+    /// `ended` (`switchable` as it started) and gave `end`: record
+    /// `review_job_finished` with its Execution, and keep its answer, put
+    /// it back to wait (for a provider it could not use, which is held, or
+    /// as its one run once more) or give up on it. `retried` is whether the
+    /// review is its program reviews' retry.
+    fn review_job_ended(
+        &mut self,
+        run: &TaskRun,
+        (attempt, retried): (usize, bool),
+        job: &mut ReviewJob,
+        (ended, switchable): (HeadlessJob, bool),
+        end: std::result::Result<String, JobFailed>,
+    ) -> Result<()> {
+        let agent = self
+            .job_agent(ended.provider)
+            .with_context(|| format!("no {} runs on this supervisor", ended.provider.as_str()))?;
+        let duration_secs = ended.started.elapsed().as_secs();
+        let stdout = self.files.read_to_string(&ended.stdout).unwrap_or_default();
+        // A provider that names its session itself (Codex) says its thread
+        // and model in its output (ADR-t1063-1 decision 6); Claude's gives
+        // the job's tokens only (ADR-t1486-1).
+        let job_session = agent.job_session(&stdout, ended.started_at);
+        let output = job.id.output(attempt, job.again);
+        let mut finished = json!({
+            "attempt": attempt,
+            "agent": job.id.agent(),
+            "again": job.again,
+            "provider": ended.provider,
+            "duration_secs": duration_secs,
+            "output": output,
+        });
+        crate::domain::headless_job::JobSession::record_execution(
+            job_session.as_ref(),
+            &mut finished,
+        );
+        // The whole review's session, which the review's end and its span
+        // name, whatever this run gave.
+        job.session = job_session.map(identity_of);
+        let (miss, error) = match end {
+            Ok(reply) => match read_answer(&job.id, &reply) {
+                Ok(answer) => {
+                    finished["outcome"] = json!("answered");
+                    finished["verdict"] = json!(answer.decision());
+                    info!(run_id = %run.id(), "run {} review {attempt}: {} answered {}", run.id(), job.id.describe(), answer.decision().map_or("nothing", ReviewDecision::as_str));
+                    job.state = ReviewJobState::Answered(answer);
+                    return self.record_review_job_finished(run, finished);
+                }
+                Err(error) => (JobMiss::Unreadable, error),
+            },
+            Err(failed) => (
+                match failed.stop() {
+                    JobStop::Exited => JobMiss::Exited,
+                    JobStop::TimedOut => JobMiss::TimedOut,
+                },
+                failed.into_error(),
+            ),
+        };
+        // A job stopped at a login that ran out or the usage limit is no
+        // failure of the run: it joins the hold ask and waits with the
+        // review's other jobs kept (task 438).
+        let wall = self.job_wall(&ended);
+        let hold = HoldJob::Review(run.id().clone());
+        if let Some(wall) = wall
+            && self.raise_job_wall(wall, &hold, &error)
+        {
+            info!(run_id = %run.id(), "run {} review {attempt}: {} stopped at the {} wall; it waits for the hold ask", run.id(), job.id.describe(), wall.as_str());
+            finished["outcome"] = json!("held");
+            finished["error"] = json!(error);
+            return self.record_review_job_finished(run, finished);
+        }
+        // Another provider that cannot be used (Codex's login, usage limit
+        // or start) is held, and a job whose role names its provider starts
+        // again where the route sends it (ADR-t1063-1 decisions 4 and 5,
+        // ADR-t1857-1).
+        let mut unusable = wall.is_some();
+        if ended.provider != Provider::Claude {
+            let said = format!("{error}\n{stdout}");
+            let failure = self.job_failure(&ended);
+            if let Some((provider, reason)) = self.job_provider_failed(
+                ended.provider,
+                failure,
+                (&error, &said),
+                &hold,
+                switchable,
+            ) {
+                match after_unusable(self.review_route(), provider) {
+                    AfterUnusable::Fail => unusable = true,
+                    AfterUnusable::Start(..) | AfterUnusable::Wait(_) => {
+                        warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}) for {}; it starts again where its route sends it", run.id(), provider.as_str(), reason.as_str(), job.id.describe());
+                        finished["outcome"] = json!("held");
+                        finished["error"] = json!(error);
+                        finished["switch_reason"] = json!(reason.as_str());
+                        return self.record_review_job_finished(run, finished);
+                    }
+                }
+            }
+        }
+        finished["outcome"] = json!(miss.as_str());
+        finished["error"] = json!(error);
+        let again = self.missed_review_job(run, (attempt, retried), job, miss, &error, unusable);
+        finished["runs_again"] = json!(again);
+        self.record_review_job_finished(run, finished)
+    }
+    /// Put `job` of review `attempt`, which `missed` with `error`, back to
+    /// wait as its one run once more when it runs again
+    /// ([`review_jobs::runs_again`]), else give up on it with why and where
+    /// its output is; whether it runs again. A job whose provider was
+    /// found unusable and that did not move off it (`unusable`) is not run
+    /// again: that failure is the provider's, and goes to the person.
+    fn missed_review_job(
+        &mut self,
+        run: &TaskRun,
+        (attempt, retried): (usize, bool),
+        job: &mut ReviewJob,
+        missed: JobMiss,
+        error: &str,
+        unusable: bool,
+    ) -> bool {
+        let manual = matches!(self.review_route(), ReviewRoute::Manual(_));
+        let again = !unusable
+            && review_jobs::runs_again(
+                self.landing.retry_unreadable_review,
+                job.again,
+                retried,
+                manual,
+            );
+        if again {
+            warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} {}: {error}; it runs once more", run.id(), job.id.describe(), missed.as_str());
+            job.again = true;
+            job.state = ReviewJobState::Waiting(None);
+            return true;
+        }
+        let path = |again: bool| {
+            let stem = job.id.output(attempt, again);
+            run.run_dir().map_or(stem.clone(), |dir| {
+                Path::new(dir).join(&stem).display().to_string()
+            })
+        };
+        // Where the output of the run that missed is, or of the run before
+        // when this one could not start.
+        let (why, ran) = match (missed, job.again) {
+            (JobMiss::StartFailed, false) => (format!("{}: {error}", job.id.describe()), false),
+            (JobMiss::StartFailed, true) => (
+                format!(
+                    "{}: {error}; its earlier run's output is in {}.out and .err",
+                    job.id.describe(),
+                    path(false)
+                ),
+                true,
+            ),
+            (_, again) => (
+                format!(
+                    "{}: {error}; its output is in {}.out and .err",
+                    job.id.describe(),
+                    path(again)
+                ),
+                true,
+            ),
+        };
+        job.state = ReviewJobState::Missed { why, ran };
+        false
+    }
+    /// Record `review_job_finished` of a job of `run`'s review.
+    fn record_review_job_finished(&mut self, run: &TaskRun, finished: Value) -> Result<()> {
+        self.queue
+            .record_runtime_event(run.id(), EventKind::ReviewJobFinished, finished)?;
+        Ok(())
+    }
+    /// Start the jobs of `run`'s review that wait, in order, while the
+    /// limit of agent jobs at once (`[review.jobs] concurrency`, which
+    /// `elsewhere`, the other reviews' running jobs, shares) leaves room and
+    /// [`Self::review_route`] sends them to a provider: each job goes where
+    /// the route sends it when it starts, so one may run on a provider its
+    /// review's other jobs could not use. While the route waits, the job
+    /// waits; with no provider left (`--no-claude`), it gives no answer and
+    /// the review goes to the person.
+    fn start_review_jobs(
+        &mut self,
+        run: &TaskRun,
+        watch: &mut ReviewWatch,
+        elsewhere: usize,
+    ) -> Result<()> {
+        let limit = self.review_jobs.concurrency();
+        let (attempt, retried) = (watch.attempt, watch.retried);
+        for index in 0..watch.jobs.len() {
+            if !matches!(watch.jobs[index].state, ReviewJobState::Waiting(_)) {
+                continue;
+            }
+            if review_jobs::startable(limit, elsewhere + watch.running(), 1) == 0 {
+                let why = format!("{limit} agent jobs of the reviews run at once");
+                note_review_job_wait(run, attempt, &mut watch.jobs[index], why);
+                continue;
+            }
+            match self.review_route() {
+                ReviewRoute::Wait(why) => {
+                    note_review_job_wait(run, attempt, &mut watch.jobs[index], why)
+                }
+                ReviewRoute::Manual(error) => {
+                    warn!(run_id = %run.id(), "run {} review {attempt}: {} cannot run: {error}", run.id(), watch.jobs[index].id.describe());
+                    watch.jobs[index].state = ReviewJobState::Missed {
+                        why: error,
+                        ran: false,
+                    };
+                }
+                ReviewRoute::Start(launch, switchable) => {
+                    let job = &mut watch.jobs[index];
+                    self.start_review_job(run, (attempt, retried), job, launch, switchable)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Start `job` of review `attempt` of `run` on `launch` and record
+    /// `review_job_started`. A start its provider failed holds that
+    /// provider when `[roles.review]` names it (`switchable`), and the job
+    /// starts at once where the route sends it then, or waits for it
+    /// (ADR-t1063-1 decisions 4 and 5, ADR-t1857-1); any other failure to
+    /// start is a miss ([`Self::missed_review_job`]).
+    fn start_review_job(
+        &mut self,
+        run: &TaskRun,
+        (attempt, retried): (usize, bool),
+        job: &mut ReviewJob,
+        mut launch: ActorLaunch,
+        mut switchable: bool,
+    ) -> Result<()> {
+        loop {
+            let output = job.id.output(attempt, job.again);
+            // The whole review's Claude session id `review_started` named,
+            // or a new one for its later starts; an agent job is given none,
+            // as the eval's is not.
+            let session_id = match &mut job.input {
+                ReviewJobInput::Whole { session_id, .. }
+                    if launch.provider == crate::domain::Provider::Claude =>
+                {
+                    Some(
+                        session_id
+                            .take()
+                            .unwrap_or_else(|| self.generators.ids.uuid()),
+                    )
+                }
+                _ => None,
+            };
+            let spawned =
+                self.spawn_review_job(run, attempt, job, &output, session_id.as_deref(), &launch);
+            let error = match spawned {
+                Ok(Ok((child, stdout, stderr))) => {
+                    let started = self.headless_job(
+                        "review",
+                        child,
+                        stdout,
+                        stderr,
+                        JobSubject {
+                            provider: launch.provider,
+                            label: job.id.agent().map(str::to_owned),
+                            ..JobSubject::review(JobKind::Agent, run.id(), attempt)
+                        },
+                    );
+                    let prompt_bytes = match &job.input {
+                        ReviewJobInput::Whole { prompt_bytes, .. } => json!(prompt_bytes),
+                        ReviewJobInput::Agent(built) => json!(built.prompt.bytes),
+                    };
+                    // Watched before its start is recorded, so a failed
+                    // record leaves no job running unwatched.
+                    job.state = ReviewJobState::Running {
+                        job: started,
+                        switchable,
+                    };
+                    self.queue.record_runtime_event(
+                        run.id(),
+                        EventKind::ReviewJobStarted,
+                        json!({
+                            "attempt": attempt,
+                            "agent": job.id.agent(),
+                            "again": job.again,
+                            "launch": launch.to_value(),
+                            "session_id": session_id,
+                            "output": output,
+                            "prompt_bytes": prompt_bytes,
+                        }),
+                    )?;
+                    info!(run_id = %run.id(), "run {} review {attempt}: {} started on {}", run.id(), job.id.describe(), launch.provider.as_str());
+                    return Ok(());
+                }
+                Ok(Err(started)) => {
+                    let error = format!("it could not start: {started:#}");
+                    if let Some((provider, reason)) = self.job_provider_failed(
+                        launch.provider,
+                        job_start_failure(&started),
+                        (&error, &error),
+                        &HoldJob::Review(run.id().clone()),
+                        switchable,
+                    ) {
+                        let next = after_unusable(self.review_route(), provider);
+                        if !matches!(next, AfterUnusable::Fail) {
+                            warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}) for {}", run.id(), provider.as_str(), reason.as_str(), job.id.describe());
+                            self.record_review_job_finished(
+                                run,
+                                json!({
+                                    "attempt": attempt,
+                                    "agent": job.id.agent(),
+                                    "again": job.again,
+                                    "provider": provider,
+                                    "outcome": "held",
+                                    "error": error,
+                                    "switch_reason": reason.as_str(),
+                                    "duration_secs": 0,
+                                    "output": output,
+                                }),
+                            )?;
+                        }
+                        match next {
+                            AfterUnusable::Start(next, next_switchable) => {
+                                launch = next;
+                                switchable = next_switchable;
+                                continue;
+                            }
+                            AfterUnusable::Wait(why) => {
+                                note_review_job_wait(run, attempt, job, why);
+                                return Ok(());
+                            }
+                            AfterUnusable::Fail => {
+                                self.start_missed(
+                                    run,
+                                    (attempt, retried),
+                                    job,
+                                    &output,
+                                    &error,
+                                    true,
+                                )?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    error
+                }
+                // Its own preparation failed: no provider was tried.
+                Err(prepared) => format!("it could not start: {prepared:#}"),
+            };
+            return self.start_missed(run, (attempt, retried), job, &output, &error, false);
+        }
+    }
+    /// Record that `job`, writing to `output`, could not start with
+    /// `error`, and run it once more or give up on it
+    /// ([`Self::missed_review_job`]).
+    fn start_missed(
+        &mut self,
+        run: &TaskRun,
+        (attempt, retried): (usize, bool),
+        job: &mut ReviewJob,
+        output: &str,
+        error: &str,
+        unusable: bool,
+    ) -> Result<()> {
+        warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} {error}", run.id(), job.id.describe());
+        let mut finished = json!({
+            "attempt": attempt,
+            "agent": job.id.agent(),
+            "again": job.again,
+            "outcome": JobMiss::StartFailed.as_str(),
+            "error": error,
+            "duration_secs": 0,
+            "output": output,
+        });
+        let again = self.missed_review_job(
+            run,
+            (attempt, retried),
+            job,
+            JobMiss::StartFailed,
+            error,
+            unusable,
+        );
+        finished["runs_again"] = json!(again);
+        self.record_review_job_finished(run, finished)
+    }
+    /// Judge `run`'s review once every job of `watch` answered: the whole
+    /// review's verdict beside each agent's result
+    /// ([`review_jobs::assemble`]), recorded as `review_finished` with where
+    /// the heaviest of their judgments sends the run, and gone on with
+    /// ([`Self::act_on_verdict`]).
+    fn judge_review(&mut self, run: &TaskRun, watch: &ReviewWatch) -> Result<Phase> {
+        let attempt = watch.attempt;
+        let mut whole = None;
+        let mut agents = Vec::new();
+        for job in &watch.jobs {
+            if let ReviewJobState::Answered(answer) = &job.state {
+                match answer {
+                    ReviewAnswer::Whole(verdict) => whole = Some(verdict.clone()),
+                    ReviewAnswer::Agent(result) => agents.push(result.clone()),
+                }
+            }
+        }
+        let verdict = review_jobs::assemble(whole.context("the whole review's verdict")?, agents);
+        let run = self.queue.run(run.id())?;
+        let job = ActorContext::review_job(run.id(), attempt);
+        let mut finished = json!({
+            "verdict": verdict.verdict,
+            "reasons": verdict.reasons,
+            "reason_codes": verdict.recorded_codes(),
+            "primary_code": verdict.primary_code(),
+            "summary": verdict.summary,
+            "duration_secs": watch.started.elapsed().as_secs(),
+            "attempt": attempt,
+            "recommendation": verdict.recommendation,
+            "confidence": verdict.confidence,
+            "reason_category": verdict.reason_category,
+        });
+        // Each agent's result, and where they and the whole review send the
+        // run (ADR-t1453-1 decisions 5 and 7); a review with no agent
+        // records as before.
+        if !verdict.agents.is_empty() {
+            let revise_left = self.revise_left(run.id())?;
+            finished["agents"] = json!(verdict.agents);
+            finished["route"] = verdict.route(revise_left).event_value();
+        }
+        // The whole review's session, which its span names; each job's
+        // Execution is on its `review_job_finished`.
+        if let Some(session) = whole_session(watch) {
+            session.record(&mut finished);
+        }
+        let session = watch.session.clone();
+        self.for_job(&job, |sv| {
+            sv.queue
+                .record_runtime_event(run.id(), EventKind::ReviewFinished, finished)?;
+            info!(run_id = %run.id(), "run {} review {attempt}: {} ({})", run.id(), verdict.verdict.as_str(), verdict.summary);
+            sv.act_on_verdict(&run, session, verdict, &job, attempt)
+        })
+    }
+    /// The agents' review's range from the landing branch's commit
     /// ([`snapshot_subagents`]); the range is the receipt's, read only when
     /// agents are configured.
     pub(super) fn review_subagents(&self, run: &TaskRun) -> Result<Option<SubagentSnapshot>> {
@@ -903,14 +1203,18 @@ impl Supervisor<'_> {
         )?;
         review_range_at(&*self.repository, run, &receipt, main)
     }
-    /// Write the review's material and prompt, held to its limits (task
-    /// 1571): the prompt and what it takes, which `review_started` records.
+    /// Write the review's material and its jobs' prompts, held to their
+    /// limits: the whole review's prompt and what it takes (task 1571),
+    /// which `review_started` records, and each selected agent's job built
+    /// from the definition the landing branch's snapshot returned
+    /// ([`agent_job::build`], the eval's own assembly), its prompt in its
+    /// own directory of the run's.
     pub(super) fn prepare_review(
         &mut self,
         run: &TaskRun,
         attempt: usize,
         subagents: Option<&SubagentSnapshot>,
-    ) -> Result<(String, PromptBytes)> {
+    ) -> Result<PreparedReview> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         // The attempt's range as its agents were selected from it, so that
         // review.md shows the diff that selected them even when main moved
@@ -921,40 +1225,64 @@ impl Supervisor<'_> {
             .context("review wrote no path")?
             .to_owned();
         let task = self.queue.show(run.task_id())?.task;
-        // The selected agents and their definitions go to the job beside
-        // review.md; a review that needs none reads as before.
-        let mut required = None;
-        if let Some(snapshot) = subagents.filter(|s| !s.agents.is_empty()) {
-            let input = run_dir.join(format!("review-subagents-{attempt}.json"));
-            self.files.write(
-                &input,
-                serde_json::to_string_pretty(&snapshot.job_input())?.as_bytes(),
-            )?;
-            required = Some(review_subagents_prompt(snapshot, &input));
-        }
-        let fitted = review_prompt(&task, run, &path, required.as_deref())
-            .with_language(self.verifier.language().as_ref());
+        let language = self.verifier.language();
+        let fitted = review_prompt(&task, run, &path, None).with_language(language.as_ref());
         self.files.write(
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
             fitted.text.as_bytes(),
         )?;
-        Ok((fitted.text, fitted.bytes))
+        let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        let mut agents = Vec::new();
+        for (snapshot, agent) in subagents
+            .iter()
+            .flat_map(|snapshot| snapshot.agents.iter().map(move |agent| (snapshot, agent)))
+        {
+            let dir = run_dir
+                .join(format!("review-{attempt}-agents"))
+                .join(&agent.name);
+            self.files
+                .create_dir_all(&dir)
+                .with_context(|| format!("create {}", dir.display()))?;
+            let built = agent_job::build(&AgentJob {
+                agent: &agent.name,
+                definition: &agent.definition,
+                tools: &agent.tools,
+                base: &snapshot.range.base,
+                head: &snapshot.range.head,
+                material: Path::new(&path),
+                cwd: &worktree,
+                dir: &dir,
+                language: language.as_ref(),
+            })
+            .with_context(|| format!("the job of the agent {}", agent.name))?;
+            self.files
+                .write(&dir.join("prompt.txt"), built.prompt.text.as_bytes())?;
+            agents.push((agent.name.clone(), built));
+        }
+        Ok(PreparedReview {
+            whole: (fitted.text, fitted.bytes),
+            agents,
+        })
     }
-    /// Start the job of review `attempt` with `prompt` on `launch`'s
-    /// provider. The outer error is the review's own preparation, the
-    /// inner one the start of its provider's process: only the latter says
-    /// whether the provider can be used (ADR-t1063-1 decision 4).
-    pub(super) fn spawn_review(
+    /// Start `job` of review `attempt` writing to `output` (its stem in the
+    /// run directory) on `launch`'s provider: the whole review's job
+    /// through `AgentProvider::review_command`, an agent's through
+    /// `AgentProvider::agent_job_command` as the eval starts it. The outer
+    /// error is the job's own preparation, the inner one the start of its
+    /// provider's process: only the latter says whether the provider can be
+    /// used (ADR-t1063-1 decision 4).
+    fn spawn_review_job(
         &mut self,
         run: &TaskRun,
-        (attempt, prompt): (usize, &str),
+        attempt: usize,
+        job: &ReviewJob,
+        output: &str,
         session_id: Option<&str>,
         launch: &ActorLaunch,
-        subagents: Option<&SubagentSnapshot>,
     ) -> Result<Result<StartedReview>> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
-        let stdout = run_dir.join(format!("review-{attempt}.out"));
-        let stderr = run_dir.join(format!("review-{attempt}.err"));
+        let stdout = run_dir.join(format!("{output}.out"));
+        let stderr = run_dir.join(format!("{output}.err"));
         let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
         // A worktree that is gone is the run's, not its provider's: its
         // spawn would read as a missing executable.
@@ -975,37 +1303,37 @@ impl Supervisor<'_> {
             self.record_wrapper_removed(
                 run.id(),
                 &look,
-                json!({"job": "review", "attempt": attempt}),
+                json!({"job": "review", "attempt": attempt, "agent": job.id.agent()}),
             );
         }
-        // Each required agent's definition as committed on the landing
-        // branch, for the provider to hand its job.
-        let definitions: Vec<AgentDefinition> = subagents
-            .iter()
-            .flat_map(|s| &s.agents)
-            .map(|agent| AgentDefinition::read(&agent.name, &agent.definition))
-            .collect();
         let started = (|| {
             let agent = self.job_agent(launch.provider).with_context(|| {
                 format!("no {} runs on this supervisor", launch.provider.as_str())
             })?;
-            // Like the observer's job: the CLI knows the review by its role
-            // and allows it only reads of this queue.
+            let program = match &job.input {
+                // Like the observer's job: the CLI knows the review by its
+                // role and allows it only reads of this queue.
+                ReviewJobInput::Whole { prompt, .. } => HeadlessProgram::Review {
+                    run,
+                    prompt,
+                    access: REVIEW_ACCESS,
+                    subagents: &[],
+                },
+                // One agent's own job, given no way to read the queue, as
+                // the eval's is.
+                ReviewJobInput::Agent(built) => HeadlessProgram::AgentJob(&built.launch),
+            };
+            let without_mcp = matches!(job.input, ReviewJobInput::Agent(_));
             self.actors_on(agent)
                 .spawn(
                     ActorExecutionSpec::new(
                         ActorContext::review_job(run.id(), attempt),
                         WorkspaceAccess::Read(worktree),
                         ActorProgram::Headless {
-                            program: HeadlessProgram::Review {
-                                run,
-                                prompt,
-                                access: REVIEW_ACCESS,
-                                subagents: &definitions,
-                            },
+                            program,
                             session_id,
                             launch: Some(launch),
-                            without_mcp: false,
+                            without_mcp,
                             env,
                             without_env,
                             streams: Streams::Files {
@@ -1996,53 +2324,6 @@ fn revise_limit_why(revises: usize) -> String {
     format!("the review still asks for changes after {revises} revises")
 }
 
-/// Why a review is reviewed once more with the same input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RetryCause {
-    /// Its stdout held no readable verdict (task 328).
-    Unreadable,
-    /// Its job exited non-zero (task 1984).
-    JobFailed,
-}
-
-impl RetryCause {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Unreadable => "unreadable",
-            Self::JobFailed => "job_failed",
-        }
-    }
-}
-
-/// Why a review that ended as `outcome` is reviewed once more with the
-/// same input, if it is: stdout without a readable verdict (task 328) or a
-/// job that exited non-zero (task 1984), while the retry is on (`retry`),
-/// when the review was not itself a retry (`retried`, one retry per review
-/// for either cause) and a provider is left to review it (`manual`: the
-/// `--no-claude` route that gives it to a person). A job stopped at the
-/// timeout is not reviewed again: another review would spend the timeout
-/// once more on a job that did not end. Nor is a non-zero exit of a job
-/// whose provider was found unusable and that did not move off it
-/// (`unusable`, after `move_review`): that failure is the provider's, not
-/// a passing one, and goes to the person as before.
-pub(super) fn retries_review(
-    outcome: &ReviewEnd,
-    retry: bool,
-    retried: bool,
-    manual: bool,
-    unusable: bool,
-) -> Option<RetryCause> {
-    let cause = match outcome {
-        ReviewEnd::Unreadable(_) => RetryCause::Unreadable,
-        // A run's review is an agent job.
-        ReviewEnd::Failed(failed) if !unusable && JobKind::Agent.retries(failed.stop()) => {
-            RetryCause::JobFailed
-        }
-        ReviewEnd::Failed(_) | ReviewEnd::Verdict(_) => return None,
-    };
-    (retry && !retried && !manual).then_some(cause)
-}
-
 /// The phase of a review that waits on `route`, with why, when the route
 /// waits: [`Phase::ReviewHeld`] keeping whether the review is the retry
 /// (`retried`), so that the review that starts after the wait is the retry
@@ -2054,24 +2335,108 @@ pub(super) fn held_review(
     retried: bool,
 ) -> std::result::Result<(Phase, &str), Option<SessionRef>> {
     match route {
-        ReviewRoute::Wait(why) => Ok((
-            Phase::ReviewHeld {
-                session,
-                retried,
-                subagents: Vec::new(),
-            },
-            why,
-        )),
+        ReviewRoute::Wait(why) => Ok((Phase::ReviewHeld { session, retried }, why)),
         ReviewRoute::Start(..) | ReviewRoute::Manual(_) => Err(session),
     }
 }
 
-/// The attempt whose output the ask of review `attempt` names when that
-/// review could not start, so wrote none (task 426): the review before,
-/// when this one was its retry (after an unreadable verdict or a non-zero
-/// exit); else none.
-fn unstarted_review_output(retried: bool, attempt: usize) -> Option<usize> {
-    retried.then(|| attempt - 1)
+/// What a review prepared for its jobs ([`Supervisor::prepare_review`]):
+/// the whole review's prompt and what it takes, and each selected agent's
+/// job by the agent's name, in their configured order.
+pub(super) struct PreparedReview {
+    pub(super) whole: (String, PromptBytes),
+    pub(super) agents: Vec<(String, agent_job::BuiltAgentJob)>,
+}
+
+/// Where a job of a review goes once the provider it `failed` on was found
+/// unusable and held, as the review's route reads then
+/// ([`provider::review_moves`]): it starts on the provider the route
+/// sends it to (the other, with `switched_from` and `switch_reason`, when
+/// `[provider_fallback] jobs` is on), or waits (for either, or with the
+/// fallback off for the one that failed, once its hold ends); it gives no
+/// answer when the route still sends it to the provider that failed (the
+/// hold was not written) or to the person (`--no-claude`).
+#[derive(Debug)]
+pub(super) enum AfterUnusable {
+    Start(ActorLaunch, bool),
+    Wait(String),
+    Fail,
+}
+
+/// [`AfterUnusable`] of a job on `failed` under `route`.
+pub(super) fn after_unusable(route: ReviewRoute, failed: Provider) -> AfterUnusable {
+    if !provider::review_moves(&route, failed) {
+        return AfterUnusable::Fail;
+    }
+    match route {
+        ReviewRoute::Start(launch, switchable) => AfterUnusable::Start(launch, switchable),
+        ReviewRoute::Wait(why) => AfterUnusable::Wait(why),
+        ReviewRoute::Manual(_) => AfterUnusable::Fail,
+    }
+}
+
+/// What the job `id` of a review answered in its `reply`, as its provider
+/// read it out: the whole review's verdict, which names no agent's result,
+/// or the one completed result of the agent, read as the eval reads an
+/// agent job's ([`agent_job::read_reply`]); else why it is unreadable.
+fn read_answer(id: &ReviewJobId, reply: &str) -> std::result::Result<ReviewAnswer, String> {
+    match id {
+        ReviewJobId::Whole => {
+            let verdict = ReviewVerdict::parse(reply)?;
+            match review_jobs::whole_unreadable(&verdict) {
+                None => Ok(ReviewAnswer::Whole(verdict)),
+                Some(why) => Err(why),
+            }
+        }
+        ReviewJobId::Agent(agent) => {
+            review_jobs::agent_result(agent, agent_job::read_reply(reply)).map(ReviewAnswer::Agent)
+        }
+    }
+}
+
+/// `session` without its tokens: what the review's end names of the whole
+/// review's job (its span reads the session and model), whose Execution
+/// its `review_job_finished` holds.
+fn identity_of(session: JobSession) -> JobSession {
+    JobSession {
+        tokens: None,
+        ..session
+    }
+}
+
+/// The session of the last run of the whole review's job of `watch`.
+fn whole_session(watch: &ReviewWatch) -> Option<JobSession> {
+    watch
+        .jobs
+        .iter()
+        .find(|job| job.id == ReviewJobId::Whole)
+        .and_then(|job| job.session.clone())
+}
+
+/// Keep `job` of review `attempt` of `run` waiting for `why`, logged once
+/// for each reason it waits for.
+fn note_review_job_wait(run: &TaskRun, attempt: usize, job: &mut ReviewJob, why: String) {
+    if matches!(&job.state, ReviewJobState::Waiting(Some(known)) if *known == why) {
+        return;
+    }
+    info!(run_id = %run.id(), "run {} review {attempt}: {} waits: {why}", run.id(), job.id.describe());
+    job.state = ReviewJobState::Waiting(Some(why));
+}
+
+/// The error of a review whose jobs `errors` gave no answer: each job's
+/// why, or the `--no-claude` one alone (`review_failed` records it as
+/// `provider_disabled`: no review agent ran).
+fn review_jobs_error(errors: &[String]) -> String {
+    if let Some(disabled) = errors
+        .iter()
+        .find(|error| error.starts_with(REVIEW_PROVIDER_DISABLED))
+    {
+        return disabled.clone();
+    }
+    format!(
+        "the review's jobs did not all give an answer: {}",
+        errors.join("; ")
+    )
 }
 
 /// The question of the `approve_landing` ask of `run` whose review returned
@@ -2475,15 +2840,13 @@ mod tests {
     }
 
     /// A review that could not start wrote no output, so its ask names none
-    /// of its own (task 426): none at all for a first review, the earlier
-    /// review's when it was the retry of an unreadable verdict.
+    /// (task 426); one that names an earlier review's output says it is
+    /// that review's.
     #[test]
     fn a_review_that_could_not_start_names_no_output_of_its_own() {
         let error =
             "the headless review could not start: the test reviewer cannot start this review";
-        assert_eq!(unstarted_review_output(false, 1), None);
-        assert_eq!(unstarted_review_output(true, 2), Some(1));
-        let first = failed_review_question(&run(), 1, unstarted_review_output(false, 1), error);
+        let first = failed_review_question(&run(), 1, None, error);
         assert_eq!(
             first,
             format!(
@@ -2492,7 +2855,7 @@ mod tests {
             )
         );
         assert!(!first.contains("Review output"), "{first}");
-        let retry = failed_review_question(&run(), 2, unstarted_review_output(true, 2), error);
+        let retry = failed_review_question(&run(), 2, Some(1), error);
         assert_eq!(
             retry,
             format!(
@@ -2517,79 +2880,75 @@ mod tests {
         );
     }
 
-    /// A verdict that cannot be read and a job that exited non-zero are
-    /// reviewed once more, each with its cause: not a job stopped at the
-    /// timeout, not a retry itself (one retry per review for either cause),
-    /// not with the retry off, and not when no provider is left to review
-    /// it (`--no-claude`). A verdict is acted on, retried or not.
+    /// Each job's reply is read as its own answer: the whole review's
+    /// verdict, which names no agent's result (decision 4), and an agent's
+    /// one completed result, bare or out of a fence as the eval reads it;
+    /// anything else is unreadable, which runs the job once more and is
+    /// never acted on as a verdict.
     #[test]
-    fn an_unreadable_verdict_or_a_non_zero_exit_is_reviewed_again_once() {
-        let unreadable = || ReviewEnd::Unreadable("the review printed no verdict JSON".into());
-        let exited = || {
-            ReviewEnd::Failed(JobFailed::Exited(
-                "the headless review exited with exit status: 1: (none)".into(),
-            ))
+    fn a_jobs_reply_is_read_as_its_own_answer() {
+        let whole = read_answer(
+            &ReviewJobId::Whole,
+            r#"{"verdict": "pass", "reasons": [], "summary": "ok"}"#,
+        )
+        .unwrap();
+        assert!(matches!(whole, ReviewAnswer::Whole(_)));
+        assert_eq!(whole.decision(), Some(ReviewDecision::Pass));
+        let Err(why) = read_answer(&ReviewJobId::Whole, "no verdict") else {
+            panic!("a reply without a verdict was read");
         };
-        let timed_out = || {
-            ReviewEnd::Failed(JobFailed::TimedOut(
-                "the headless review did not finish within 1 seconds".into(),
-            ))
-        };
-        let pass = || {
-            ReviewEnd::Verdict(verdict(
-                json!({"verdict": "pass", "reasons": [], "summary": "ok"}),
-            ))
-        };
-        for (end, cause) in [
-            (unreadable as fn() -> ReviewEnd, RetryCause::Unreadable),
-            (exited, RetryCause::JobFailed),
-        ] {
-            assert_eq!(
-                retries_review(&end(), true, false, false, false),
-                Some(cause)
-            );
-            for (retry, retried, manual) in [
-                (true, true, false),
-                (false, false, false),
-                (true, false, true),
-                (false, true, true),
-            ] {
-                assert_eq!(retries_review(&end(), retry, retried, manual, false), None);
-            }
-        }
-        // A provider found unusable that the review did not move off: its
-        // non-zero exit goes to the person; an unreadable verdict is retried
-        // as before.
-        assert_eq!(retries_review(&exited(), true, false, false, true), None);
-        assert_eq!(
-            retries_review(&unreadable(), true, false, false, true),
-            Some(RetryCause::Unreadable)
+        assert!(
+            why.starts_with("the review printed no verdict JSON"),
+            "{why}"
         );
-        for retry in [false, true] {
-            for retried in [false, true] {
-                for manual in [false, true] {
-                    for unusable in [false, true] {
-                        let decide =
-                            |end: ReviewEnd| retries_review(&end, retry, retried, manual, unusable);
-                        assert_eq!(decide(timed_out()), None);
-                        assert_eq!(decide(pass()), None);
-                    }
-                }
-            }
+        let Err(why) = read_answer(
+            &ReviewJobId::Whole,
+            r#"{"verdict": "pass", "reasons": [], "summary": "ok",
+                "agents": [{"agent": "design", "status": "completed", "verdict": "pass", "summary": "ok"}]}"#,
+        ) else {
+            panic!("the whole review answered for an agent");
+        };
+        assert!(why.contains("which this review does not require"), "{why}");
+        let design = ReviewJobId::Agent("design".into());
+        let fenced = "Done.\n```json\n{\"agent\": \"design\", \"status\": \"completed\", \"verdict\": \"revise\", \"reasons\": [{\"text\": \"stale map\", \"codes\": []}], \"summary\": \"s\"}\n```";
+        let answer = read_answer(&design, fenced).unwrap();
+        let ReviewAnswer::Agent(result) = &answer else {
+            panic!("an agent's answer");
+        };
+        assert_eq!(result.reasons, ["stale map"]);
+        assert_eq!(answer.decision(), Some(ReviewDecision::Revise));
+        for reply in [
+            "nothing",
+            r#"{"agent": "tests", "status": "completed", "verdict": "pass"}"#,
+            r#"{"agent": "design", "status": "failed"}"#,
+        ] {
+            assert!(read_answer(&design, reply).is_err(), "{reply}");
         }
-        assert_eq!(RetryCause::Unreadable.as_str(), "unreadable");
-        assert_eq!(RetryCause::JobFailed.as_str(), "job_failed");
+    }
+
+    /// The error of a review whose jobs did not all answer names each
+    /// one's why; `--no-claude`'s stands alone, so that `review_failed`
+    /// records it as `provider_disabled`.
+    #[test]
+    fn a_review_whose_jobs_did_not_all_answer_names_each() {
+        assert_eq!(
+            review_jobs_error(&["the agent design: timed out".to_owned()]),
+            "the review's jobs did not all give an answer: the agent design: timed out"
+        );
+        let disabled = format!("{REVIEW_PROVIDER_DISABLED} and codex cannot be used (usage_limit)");
+        assert_eq!(
+            review_jobs_error(&["the whole review: x".to_owned(), disabled.clone()]),
+            disabled
+        );
     }
 
     /// A review that waits keeps whether it is the retry (task 2013): the
-    /// held phase carries `retried`, so the review that starts after the
-    /// wait is not retried again when it was the retry, and is retried once
-    /// when it was not. A route that does not wait gives the session back.
+    /// held phase carries `retried`, so no job of the review that starts
+    /// after the wait runs once more when it was its programs' retry, and
+    /// each may once when it was not. A route that does not wait gives the
+    /// session back.
     #[test]
     fn a_held_review_keeps_whether_it_is_the_retry() {
-        let exited = ReviewEnd::Failed(JobFailed::Exited(
-            "the headless review exited with exit status: 1: (none)".into(),
-        ));
         let wait = ReviewRoute::Wait("the hold ask holds Claude".into());
         for retried in [false, true] {
             let session = Some(SessionRef {
@@ -2603,16 +2962,14 @@ mod tests {
             let Phase::ReviewHeld {
                 session: Some(session),
                 retried: kept,
-                subagents,
             } = held
             else {
                 panic!("not held with its session");
             };
             assert_eq!(session.workspace, "w1");
             assert_eq!(kept, retried);
-            assert!(subagents.is_empty());
-            let again = retries_review(&exited, true, kept, false, false);
-            assert_eq!(again, (!retried).then_some(RetryCause::JobFailed));
+            // A review that was its programs' retry runs no job once more.
+            assert_eq!(review_jobs::runs_again(true, false, kept, false), !retried);
         }
         let manual = ReviewRoute::Manual("no provider".into());
         let Err(Some(session)) = held_review(
@@ -2809,42 +3166,6 @@ mod tests {
         assert!(!question.contains("recommends"), "{question}");
     }
 
-    /// A verdict without the completed result of each required agent is
-    /// never acted on as a verdict: it is the unreadable one, retried once
-    /// and then failed to a person (ADR-t1453-1 decision 6); one of a
-    /// review that requires none and names none reads as before.
-    #[test]
-    fn a_verdict_lacking_its_agents_results_is_unreadable() {
-        use super::super::jobs::review_end;
-        let required = vec!["design".to_owned()];
-        let pass = || verdict(json!({"verdict": "pass", "reasons": [], "summary": "ok"}));
-        let end = review_end(pass(), &required);
-        let ReviewEnd::Unreadable(why) = &end else {
-            panic!("a pass without its agent's result was acted on");
-        };
-        assert!(why.ends_with("no result of design"), "{why}");
-        assert_eq!(
-            retries_review(&end, true, false, false, false),
-            Some(RetryCause::Unreadable)
-        );
-        assert_eq!(retries_review(&end, true, true, false, false), None);
-        assert!(matches!(review_end(pass(), &[]), ReviewEnd::Verdict(_)));
-        let failed = verdict(json!({"verdict": "pass", "reasons": [], "summary": "ok",
-            "agents": [{"agent": "design", "status": "failed"}]}));
-        assert!(matches!(
-            review_end(failed.clone(), &required),
-            ReviewEnd::Unreadable(_)
-        ));
-        // A repository without agents does not take a result it never asked for.
-        assert!(matches!(review_end(failed, &[]), ReviewEnd::Unreadable(_)));
-        let whole = verdict(json!({"verdict": "pass", "reasons": [], "summary": "ok",
-            "agents": [{"agent": "design", "status": "completed", "verdict": "pass", "summary": "ok"}]}));
-        assert!(matches!(
-            review_end(whole, &required),
-            ReviewEnd::Verdict(_)
-        ));
-    }
-
     /// What a review whose agents decide where it goes applies and asks
     /// with: the reasons of the judgments that go there, each agent's
     /// named, a discard over a scope, and each judgment that asks in why.
@@ -2900,104 +3221,99 @@ mod tests {
             agents_escalation(&scope, &route, false),
             "a person decides: the subagent design returned concern recommending nothing (no confidence, scope); the review's own verdict pass was lighter"
         );
-        assert_eq!(
-            subagents_unsupported(Provider::Codex, &["design".to_owned(), "lint".to_owned()]),
-            "subagents_unsupported: the review requires the subagents design, lint, which codex cannot run, and no other provider that can run them can be used"
-        );
     }
 
-    /// A review that requires subagents its provider cannot run starts on
-    /// the other provider when that one runs them and can be used, its
-    /// launch saying from which and why, and holds nothing; waits while
-    /// that one is only held (ADR-t1847-1); with no provider that runs
-    /// them, it fails to the person with why (ADR-t1453-1 decision 8).
+    /// Each job of a review goes by the review's route on its own
+    /// (ADR-t1895-1 decision 7, ADR-t1857-1): a job whose provider failed
+    /// moves to the other one with the fallback on, its launch saying from
+    /// which and why; waits for that one with it off; and gives no answer
+    /// when the route still sends it there (its hold was not written) or to
+    /// the person. `--no-claude` comes first, with the fallback off too, and
+    /// only the provider that failed is held: Codex's failure holds Codex,
+    /// Claude's login or usage limit raises the hold ask and holds nothing
+    /// of its own, and neither holds the other provider. No job is moved
+    /// for what a provider can run.
     #[test]
-    fn a_review_whose_provider_cannot_run_its_agents_moves_waits_or_fails() {
+    fn a_review_job_moves_waits_or_fails_as_its_route_and_fallback_say() {
         use crate::domain::actor_model::RoleModels;
-        let required = ["design".to_owned(), "tests".to_owned()];
+        use crate::domain::headless_job::JobFailure;
+        use crate::domain::provider_switch::SwitchReason;
         let mut models = RoleModels::default();
         models.entry(ModelRole::Review).provider = Some(Provider::Codex);
-        let codex = models.launch(ModelRole::Review);
-        let claude_runs = |provider: Provider| provider == Provider::Claude;
-        let usable = |_: Provider| None;
-        // `[roles.review]` names Codex, which runs no review subagents: it
-        // starts on Claude, its launch saying why.
-        let SubagentLaunch::Launch(moved) =
-            subagent_launch_of(codex.clone(), &required, claude_runs, usable)
+        let switchable = models.switchable(ModelRole::Review);
+        let route = |no_claude: bool, fallback: bool, held: Option<Provider>| {
+            super::provider::review_route(
+                no_claude,
+                (switchable, fallback),
+                models.launch(ModelRole::Review),
+                None,
+                |provider| match (provider, no_claude) {
+                    (Provider::Claude, true) => Some(SwitchReason::Disabled),
+                    _ => (held == Some(provider)).then_some(SwitchReason::UsageLimit),
+                },
+            )
+        };
+        // Codex's usage limit holds Codex alone (ProviderHold) and no wall.
+        assert_eq!(
+            super::jobs::job_failure_route(Provider::Codex, JobFailure::UsageLimit, true),
+            (None, Some((SwitchReason::UsageLimit, true)))
+        );
+        // Claude's raises the hold ask and writes no ProviderHold.
+        let (wall, unusable) =
+            super::jobs::job_failure_route(Provider::Claude, JobFailure::UsageLimit, true);
+        assert!(wall.is_some());
+        assert_eq!(unusable, Some((SwitchReason::UsageLimit, false)));
+        // On: it moves to Claude, which is not held, the launch saying why.
+        let AfterUnusable::Start(moved, true) =
+            after_unusable(route(false, true, Some(Provider::Codex)), Provider::Codex)
         else {
-            panic!("the review moves to Claude");
+            panic!("the job moves to Claude");
         };
         assert_eq!(moved.provider, Provider::Claude);
         assert_eq!(moved.to_value()["switched_from"], "codex");
-        assert_eq!(moved.to_value()["switch_reason"], SUBAGENTS_UNSUPPORTED);
-        // On a provider that runs them it starts as it is.
-        let claude = ActorLaunch::default_of(ModelRole::Review);
+        assert_eq!(moved.to_value()["switch_reason"], "usage_limit");
+        // Off: it waits for Codex, saying so.
+        let AfterUnusable::Wait(why) =
+            after_unusable(route(false, false, Some(Provider::Codex)), Provider::Codex)
+        else {
+            panic!("the job waits for Codex");
+        };
+        assert!(why.contains("[provider_fallback] jobs is false"), "{why}");
+        // Once Codex's hold ends, it starts on Codex again, not switched.
+        let ReviewRoute::Start(again, true) = route(false, false, None) else {
+            panic!("the job starts on Codex");
+        };
         assert_eq!(
-            subagent_launch_of(claude.clone(), &required, claude_runs, usable),
-            SubagentLaunch::Launch(claude.clone())
+            (again.provider, again.switched_from),
+            (Provider::Codex, None)
         );
-        // Claude is only held (the hold ask, or its own hold): the Codex
-        // review waits for it, saying why.
-        for reason in [SwitchReason::UsageLimit, SwitchReason::Authentication] {
-            assert_eq!(
-                subagent_launch_of(codex.clone(), &required, claude_runs, |provider| {
-                    (provider == Provider::Claude).then_some(reason)
-                }),
-                SubagentLaunch::Wait(format!(
-                    "the review requires the subagents design, tests, which codex cannot run, and claude, which runs them, cannot be used now ({})",
-                    reason.as_str()
-                ))
-            );
+        // The hold was not written: the route still sends it to Codex.
+        assert!(matches!(
+            after_unusable(route(false, true, None), Provider::Codex),
+            AfterUnusable::Fail
+        ));
+        // `--no-claude`, on or off: no provider is left, the person reviews.
+        for fallback in [true, false] {
+            let ReviewRoute::Manual(error) = route(true, fallback, Some(Provider::Codex)) else {
+                panic!("no provider is left");
+            };
+            assert!(error.starts_with(REVIEW_PROVIDER_DISABLED), "{error}");
+            assert!(matches!(
+                after_unusable(
+                    route(true, fallback, Some(Provider::Codex)),
+                    Provider::Codex
+                ),
+                AfterUnusable::Fail
+            ));
         }
-        // No Claude here (`--no-claude`): the Codex review fails to the
-        // person, held or not.
-        for held in [None, Some(SwitchReason::Disabled)] {
-            assert_eq!(
-                subagent_launch_of(codex.clone(), &required, |_| false, |_| held),
-                SubagentLaunch::Fail(subagents_unsupported(Provider::Codex, &required))
-            );
-        }
-        // No provider runs them.
-        assert_eq!(
-            subagent_launch_of(claude, &required, |_| false, usable),
-            SubagentLaunch::Fail("subagents_unsupported: the review requires the subagents design, tests, which claude cannot run, and no other provider that can run them can be used".to_owned())
-        );
-    }
-
-    /// With `[provider_fallback] jobs` off a review that requires
-    /// subagents its provider cannot run still starts on the other
-    /// provider: a choice by ability, not a provider that cannot be used
-    /// (ADR-t1453-1 decision 8, ADR-t1857-1).
-    #[test]
-    fn with_the_fallback_off_a_review_still_moves_for_its_agents() {
-        use crate::domain::actor_model::RoleModels;
-        let required = ["design".to_owned()];
-        let mut models = RoleModels::default();
-        models.entry(ModelRole::Review).provider = Some(Provider::Codex);
-        let route = super::provider::review_route(
-            false,
-            (models.switchable(ModelRole::Review), false),
-            models.launch(ModelRole::Review),
-            None,
-            |_| None,
-        );
-        let ReviewRoute::Start(codex, true) = route else {
-            panic!("the review starts on Codex");
+        // `--no-claude` with a usable Codex starts there, even off.
+        let ReviewRoute::Start(codex, _) = route(true, false, None) else {
+            panic!("Codex runs it");
         };
         assert_eq!(codex.provider, Provider::Codex);
-        let SubagentLaunch::Launch(moved) = subagent_launch_of(
-            codex,
-            &required,
-            |provider| provider == Provider::Claude,
-            |_| None,
-        ) else {
-            panic!("the review moves to Claude");
-        };
-        assert_eq!(moved.provider, Provider::Claude);
-        assert_eq!(
-            moved.switch_reason,
-            Some(SwitchReason::SubagentsUnsupported)
-        );
+        // A Codex review starts on Codex, whatever its agents: nothing
+        // moves it for what a provider can run.
+        assert!(codex.switch_reason.is_none());
     }
 
     /// The verdict is lighter than an agent's judgment (ADR-t1453-1

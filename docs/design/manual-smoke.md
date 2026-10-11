@@ -552,7 +552,11 @@ file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を�
 
 ## review の subagent の実 CLI の確認<a id="reviewのsubagentの実cliの確認"></a>
 
-必須の review の subagent を Claude に渡す argv（[Review](supervisor-lifecycle/review.md#reviewのsubagent)、[ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md) 決定 8）を実 Claude Code で確かめる。queue も cmux も使わず、test が一時 directory の使い捨ての Git repository で `ClaudeCode::review_command` と `review_subagents` の argv をそのまま実行する（model は Haiku、1 回 5 呼び出しで約 1 分）。worker が流してもよい。Claude Code を更新したときと、review の argv・settings を変えたときに流す。
+親の review job の中で subagent を動かす argv（`ClaudeCode::review_subagents`、[ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md) 決定 8）を実 Claude Code で確かめる。
+本番の run の review はこの argv を使わず、agent ごとの独立の job を`AgentProvider::agent_job_command`で起動する（[Review](supervisor-lifecycle/review.md#reviewのsubagent)）ので、この確認は残っている`review_subagents`の argv だけに当たる。
+queue も cmux も使わず、test が一時 directory の使い捨ての Git repository で `ClaudeCode::review_command` と `review_subagents` の argv をそのまま実行する（model は Haiku、1 回 5 呼び出しで約 1 分）。
+worker が流してもよい。
+`review_subagents`か全体の review の argv・settings を変えたときに流す。
 
 ```sh
 DAGQ_REAL_CLAUDE=~/.local/bin/claude cargo test --locked --test it -- --ignored --exact \

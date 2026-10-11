@@ -36,7 +36,8 @@ fn open_holds(db: &Path) -> Vec<dagq::domain::Ask> {
 /// Two reviews that stop at a login that ran out are no `review_failed`:
 /// both join one authentication ask, listed as jobs, each records
 /// `auth_required` with `job: review` on its run, and the runs wait with
-/// their sessions open. `done` starts the reviews again and the runs land.
+/// their sessions open. `done` starts each review's job that stopped again,
+/// in the same review, and the runs land.
 #[test]
 fn reviews_stopped_at_a_login_join_one_ask_and_review_again_after_done() {
     let (dir, repo, db) = fixture();
@@ -137,7 +138,13 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
     for task in [1, 2] {
         let detail = detail(task);
         assert_eq!(detail.task.status(), TaskStatus::Completed, "{task}");
-        assert_eq!(payloads(&detail, "review_started").len(), 2);
+        assert_eq!(payloads(&detail, "review_started").len(), 1);
+        let outcomes: Vec<&Value> = payloads(&detail, "review_job_finished")
+            .iter()
+            .map(|end| &end["outcome"])
+            .collect();
+        assert_eq!(outcomes, [&json!("held"), &json!("answered")], "{task}");
+        assert_eq!(payloads(&detail, "review_job_started").len(), 2);
     }
     assert_eq!(reviewer.prompts().len(), 4);
     let applied = queue_events(&db, "queue_hold_applied");

@@ -284,7 +284,7 @@ pub struct LoopSettings {
     pub fresh_session: crate::domain::fresh_session::FreshSessionConfig,
     /// `[review.jobs]` at the start (ADR-t1895-1 decision 1): the timeout
     /// of each kind of job of a run's review.
-    pub review_jobs: crate::domain::headless_job::JobTimeouts,
+    pub review_jobs: crate::domain::headless_job::ReviewJobs,
     /// Exit when no run is active and no task can be claimed, instead of
     /// polling for new work.
     pub once: bool,
@@ -1118,7 +1118,7 @@ struct Supervisor<'a> {
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
     /// `[review.jobs]` as read at the start: the timeout of each kind of
     /// job of a run's review ([`Self::job_timeout`]).
-    review_jobs: crate::domain::headless_job::JobTimeouts,
+    review_jobs: crate::domain::headless_job::ReviewJobs,
     /// Reads `[fresh_session]` again each pass; `None` keeps
     /// `fresh_session`.
     fresh_session_file: Option<FreshSessionFile>,
@@ -1219,13 +1219,9 @@ enum Phase {
     /// stays open, and the review starts once nothing holds. `retried` is
     /// whether the review that waits is the one retry of the review
     /// ([`ReviewWatch::retried`]): it stays one across the wait.
-    /// `subagents` are the required subagents of a review that waits for
-    /// the held provider that runs them, its route aside (ADR-t1847-1);
-    /// none when its route holds it.
     ReviewHeld {
         session: Option<SessionRef>,
         retried: bool,
-        subagents: Vec<String>,
     },
     /// The live session fixes what a `revise` verdict named (ADR-0027
     /// decision 2).
@@ -3366,12 +3362,8 @@ impl Supervisor<'_> {
                 slot.transition(next, EventKind::ValidationFinished.as_str(), &*self.queue);
                 Ok(Step::Continue)
             }
-            Phase::ReviewHeld {
-                session,
-                retried,
-                subagents,
-            } => {
-                if !self.review_held_waits(subagents) {
+            Phase::ReviewHeld { session, retried } => {
+                if !self.review_held_waits() {
                     let (session, retried) = (session.take(), *retried);
                     let run = self.queue.run(slot.run.id())?;
                     let review = self.resume_review(&run, session, retried)?;
@@ -3400,175 +3392,14 @@ impl Supervisor<'_> {
                 Ok(Step::Continue)
             }
             Phase::Review(watch) => {
-                let provider = self.job_agent(watch.job.provider).with_context(|| {
-                    format!("no {} runs on this supervisor", watch.job.provider.as_str())
-                })?;
-                let Some(outcome) = watch.poll(&*self.files, provider)? else {
+                // The other runs' reviews' jobs share the limit of jobs at
+                // once with this one's.
+                let elsewhere = self.review_jobs_running();
+                let run = slot.run.clone();
+                let Some(next) = self.tend_review(&run, watch, elsewhere)? else {
                     return Ok(Step::Continue);
                 };
-                let attempt = watch.attempt;
-                let duration_secs = watch.job.started.elapsed().as_secs();
-                // A provider that names its session itself (Codex) says its
-                // thread and model in its output and rollout: the review's
-                // end records them, as a goal or plan review's does
-                // (ADR-t1063-1 decision 6); Claude's output gives the job's
-                // tokens only (ADR-t1486-1).
-                let job_session = provider.job_session(
-                    &self
-                        .files
-                        .read_to_string(&watch.job.stdout)
-                        .unwrap_or_default(),
-                    watch.job.started_at,
-                );
-                // Kept in the phase until it is replaced (task 237).
-                let session = watch.session.clone();
-                let run = self.queue.run(slot.run.id())?;
-                // A review stopped at a login that ran out or the usage
-                // limit is no failure of the run: it joins the hold ask and
-                // waits, its session open, until the hold ends (task 438).
-                let wall = outcome.error().and_then(|_| self.job_wall(&watch.job));
-                if let Some(error) = outcome.error()
-                    && let Some(wall) = wall
-                    && self.raise_job_wall(wall, &HoldJob::Review(run.id().clone()), error)
-                {
-                    info!(run_id = %run.id(), "run {} review {attempt} stopped at the {} wall; it waits for the hold ask with its session open", run.id(), wall.as_str());
-                    let retried = watch.retried;
-                    slot.run = run;
-                    slot.transition(
-                        Phase::ReviewHeld {
-                            session,
-                            retried,
-                            subagents: Vec::new(),
-                        },
-                        "review_held",
-                        &*self.queue,
-                    );
-                    return Ok(Step::Continue);
-                }
-                // Another provider that cannot be used (Codex's login, usage
-                // limit or start) is held, and a review whose role names its
-                // provider starts again where the route sends it: on Claude
-                // when Claude may run (ADR-t1063-1 decisions 4 and 5). Under
-                // `--no-claude` it fails to the person below (ADR-t1207-1).
-                let retried = watch.retried;
-                let mut session = session;
-                // Whether the job's provider was found unusable and the
-                // review did not move off it (`move_review` gave it back, or
-                // the wall's hold could not be written).
-                let mut not_moved = wall.is_some();
-                if let Some(error) = outcome.error()
-                    && watch.job.provider != Provider::Claude
-                {
-                    let stdout = self
-                        .files
-                        .read_to_string(&watch.job.stdout)
-                        .unwrap_or_default();
-                    let said = format!("{error}\n{stdout}");
-                    let failure = self.job_failure(&watch.job);
-                    if let Some(unusable) = self.job_provider_failed(
-                        watch.job.provider,
-                        failure,
-                        (error, &said),
-                        &HoldJob::Review(run.id().clone()),
-                        watch.switchable,
-                    ) {
-                        match self.move_review(
-                            &run,
-                            session,
-                            attempt,
-                            (error, job_session.as_ref()),
-                            unusable,
-                            retried,
-                        )? {
-                            Ok(phase) => {
-                                slot.run = run;
-                                slot.transition(phase, "review_moved", &*self.queue);
-                                return Ok(Step::Continue);
-                            }
-                            Err(back) => {
-                                session = back;
-                                not_moved = true;
-                            }
-                        }
-                    }
-                }
-                // An unreadable verdict or a non-zero exit is reviewed once
-                // more (tasks 328 and 1984); with no provider left to review
-                // it again (`--no-claude`) it fails as it is, its output
-                // named.
-                let retry = landing::retries_review(
-                    &outcome,
-                    self.landing.retry_unreadable_review,
-                    retried,
-                    matches!(self.review_route(), landing::ReviewRoute::Manual(_)),
-                    not_moved,
-                );
-                let next = match outcome {
-                    ReviewEnd::Verdict(verdict) => {
-                        let job = ActorContext::review_job(run.id(), attempt);
-                        let mut finished = json!({
-                            "verdict": verdict.verdict,
-                            "reasons": verdict.reasons,
-                            "reason_codes": verdict.recorded_codes(),
-                            "primary_code": verdict.primary_code(),
-                            "summary": verdict.summary,
-                            "duration_secs": duration_secs,
-                            "attempt": attempt,
-                            "recommendation": verdict.recommendation,
-                            "confidence": verdict.confidence,
-                            "reason_category": verdict.reason_category,
-                        });
-                        // Each required agent's result, and where they and
-                        // the verdict send the run (ADR-t1453-1 decisions
-                        // 5 and 7); a review that requires none records as
-                        // before.
-                        if !verdict.agents.is_empty() {
-                            let revise_left = self.revise_left(run.id())?;
-                            finished["agents"] = json!(verdict.agents);
-                            finished["route"] = verdict.route(revise_left).event_value();
-                        }
-                        if let Some(job_session) = &job_session {
-                            job_session.record(&mut finished);
-                        }
-                        self.for_job(&job, |sv| {
-                            sv.queue.record_runtime_event(
-                                run.id(),
-                                EventKind::ReviewFinished,
-                                finished,
-                            )?;
-                            info!(run_id = %run.id(), "run {} review {attempt}: {} ({})", run.id(), verdict.verdict.as_str(), verdict.summary);
-                            sv.act_on_verdict(&run, session, verdict, &job, attempt)
-                        })?
-                    }
-                    outcome @ (ReviewEnd::Unreadable(_) | ReviewEnd::Failed(_))
-                        if let Some(cause) = retry =>
-                    {
-                        let error = outcome.error().unwrap_or_default();
-                        self.retry_review(
-                            &run,
-                            session,
-                            attempt,
-                            (error, cause),
-                            job_session.as_ref(),
-                        )?
-                    }
-                    ReviewEnd::Unreadable(error)
-                    | ReviewEnd::Failed(JobFailed::Exited(error) | JobFailed::TimedOut(error)) => {
-                        warn!(run_id = %run.id(), error = %error, "run {} review {attempt} failed: {error}; a person is asked", run.id());
-                        self.close_review_session(&run, job_session.as_ref());
-                        Phase::Exiting(ExitWatch::new(
-                            session,
-                            AfterExit::ReviewFailed {
-                                attempt,
-                                error,
-                                duration_secs,
-                                output: Some(attempt),
-                                session: job_session,
-                            },
-                        ))
-                    }
-                };
-                slot.run = run;
+                slot.run = self.queue.run(run.id())?;
                 slot.transition(next, EventKind::ReviewFinished.as_str(), &*self.queue);
                 Ok(Step::Continue)
             }
@@ -3778,7 +3609,7 @@ impl Supervisor<'_> {
 /// ([`HeadlessJob::abandon`]).
 fn stop_job(slot: &mut Slot) {
     match &mut slot.phase {
-        Phase::Review(watch) => watch.job.abandon(),
+        Phase::Review(watch) => watch.abandon(),
         Phase::ReviewPrograms(watch) => watch.job.abandon(),
         Phase::Recovery(watch) => watch.job.abandon(),
         _ => stop_recovery(slot),

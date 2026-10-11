@@ -235,7 +235,7 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 | observer | `queue_cli` | `src/application/observer/input.rs`（[Observer](observer.md#promptの入力の上限と選ぶ順)） | そのmoduleの`PROMPT_LIMIT` |
 | goal review | `read_files_and_queue_cli` | `goal_review_prompt` | `GOAL_REVIEW_*` |
 | スループットの見直し | `queue_cli` | `src/application/throughput_review.rs`の`review_prompt`（[スループットの見直し](throughput-review.md)） | そのmoduleの`PROMPT_LIMIT`・`PROMPT_INPUT_LIMIT` |
-| runのreview | `read_files` | `prompt::run_review`の`review_prompt` | `RUN_REVIEW_*` |
+| runの全体のreview | `read_files` | `prompt::run_review`の`review_prompt` | `RUN_REVIEW_*` |
 | agentのjob（[下](#agentのjobの上限)） | `read_files`を定義の道具に狭める | `agent_job::build` | `AGENT_JOB_*` |
 | 復旧job | `read_files` | `recovery_prompt`（`RecoveryMaterial`） | `RECOVERY_*` |
 | runtimeのplanner | plannerのrole | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt` | `RUNTIME_PLANNER_*`・`DRAFT_*`・`FINDING_*`・`REQUEST_*`・`PLANNER_*` |

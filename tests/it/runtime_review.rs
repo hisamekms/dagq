@@ -718,18 +718,18 @@ fn integrate_by_hand_closes_the_landing_and_blocked_asks_of_the_run() {
     assert!(closed_of_task.run_id.is_none());
 }
 
-/// A headless review whose job exits non-zero is reviewed once more with
-/// the same input (task 1984); when that one exits non-zero too, the run
-/// exits and closes the session, and in the step that records
-/// `review_failed` opens an `approve_landing` ask with the failure and where
-/// the review material and the last review's output are (task 328). The ask carries no
-/// recommendation and no `concern_decided` is recorded (ADR-t451-1). The
-/// ask, not the failure, is the attention, and its answer is applied by the
-/// supervisor: here `cancel` fails the run and cancels the task. Which ends
-/// are reviewed again and the ask's text for each are
-/// `landing::tests::an_unreadable_verdict_or_a_non_zero_exit_is_reviewed_again_once` and
-/// `landing::tests::a_failed_review_that_ran_names_its_own_output`; the
-/// timeout is `a_timed_out_review_is_not_reviewed_again`.
+/// A headless review whose job exits non-zero runs that job once more with
+/// the same input (task 1984, ADR-t1895-1 decision 5); when that one exits
+/// non-zero too, the run exits and closes the session, and in the step that
+/// records `review_failed` opens an `approve_landing` ask with the failure
+/// and where the review material and the job's output are (task 328). The
+/// ask carries no recommendation and no `concern_decided` is recorded
+/// (ADR-t451-1). The ask, not the failure, is the attention, and its answer
+/// is applied by the supervisor: here `cancel` fails the run and cancels
+/// the task. Which misses run once more is
+/// `domain::review_jobs::tests::a_job_that_missed_runs_once_more_only_once`,
+/// the ask's text `landing::tests::a_failed_review_that_ran_names_its_own_output`;
+/// the timeout is `a_timed_out_review_job_runs_once_more_then_fails`.
 #[test]
 fn a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person() {
     let expected = "exited with exit status: 3: broken";
@@ -752,25 +752,34 @@ fn a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person() {
     let kinds = event_kinds(&detail);
     assert!(!kinds.contains(&"review_finished"), "{kinds:?}");
     assert!(!kinds.contains(&"concern_decided"), "{kinds:?}");
-    // The job that exited non-zero is reviewed once more with the same
-    // prompt, and that retry's own failure is not retried again.
+    // The job that exited non-zero runs once more with the same prompt in
+    // the same review, and that run's own failure does not run it again.
     let prompts = reviewer.prompts();
     assert_eq!(prompts.len(), 2);
     assert_eq!(prompts[0], prompts[1]);
-    assert_eq!(payloads(&detail, "review_started").len(), 2);
-    let retried = payloads(&detail, "review_retried");
-    assert_eq!(retried.len(), 1, "{kinds:?}");
-    assert_eq!(retried[0]["attempt"], 1);
-    assert_eq!(retried[0]["cause"], "job_failed");
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert!(payloads(&detail, "review_retried").is_empty(), "{kinds:?}");
+    let ends = payloads(&detail, "review_job_finished");
+    let outcomes: Vec<_> = ends
+        .iter()
+        .map(|end| (&end["again"], &end["outcome"], &end["runs_again"]))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (&json!(false), &json!("job_failed"), &json!(true)),
+            (&json!(true), &json!("job_failed"), &json!(false)),
+        ]
+    );
     assert!(
-        retried[0]["error"].as_str().unwrap().contains(expected),
-        "{retried:?}"
+        ends[0]["error"].as_str().unwrap().contains(expected),
+        "{ends:?}"
     );
     assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
     assert!(position(&kinds, "ask_opened") < position(&kinds, "review_failed"));
     let failed = payloads(&detail, "review_failed");
     assert_eq!(failed.len(), 1);
-    assert_eq!(failed[0]["attempt"], 2);
+    assert_eq!(failed[0]["attempt"], 1);
     assert_eq!(failed[0]["code"], "job_failed");
     assert_eq!(failed[0]["status"], "awaiting_integration");
     let error = failed[0]["error"].as_str().unwrap();
@@ -788,10 +797,11 @@ fn a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person() {
     assert_eq!(ask.confidence, None);
     let run_dir = run.run_dir().unwrap();
     for part in [
-        "failed and gave no verdict (review 2): ".to_owned(),
+        "failed and gave no verdict (review 1): ".to_owned(),
         expected.to_owned(),
+        format!("its output is in {run_dir}/review-1.again.out and .err"),
         format!("Review material: {run_dir}/review.md"),
-        format!("Review output: {run_dir}/review-2.out, {run_dir}/review-2.err"),
+        format!("Review output: {run_dir}/review-1.out, {run_dir}/review-1.err"),
     ] {
         assert!(ask.question.contains(&part), "{part} in {}", ask.question);
     }
@@ -826,9 +836,10 @@ fn a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person() {
     assert_eq!(reviewer.prompts().len(), 2);
 }
 
-/// A review whose job exits non-zero once is reviewed again with the same
-/// input (task 1984): `review_retried` says why, the next attempt starts,
-/// and its `pass` lands the run with no `review_failed` and no ask.
+/// A review whose job exits non-zero once runs that job again with the
+/// same input (task 1984): its `review_job_finished` says why, the job
+/// starts once more in the same review, and its `pass` lands the run with
+/// no `review_failed` and no ask.
 #[test]
 fn a_review_that_exits_non_zero_once_is_reviewed_again_and_lands() {
     let (_dir, repo, db) = fixture();
@@ -850,35 +861,41 @@ fn a_review_that_exits_non_zero_once_is_reviewed_again_and_lands() {
     let prompts = reviewer.prompts();
     assert_eq!(prompts.len(), 2);
     assert_eq!(prompts[0], prompts[1]);
-    let retried = payloads(&detail, "review_retried");
-    assert_eq!(retried.len(), 1, "{kinds:?}");
-    assert_eq!(retried[0]["attempt"], 1);
-    assert_eq!(retried[0]["cause"], "job_failed");
+    let ends = payloads(&detail, "review_job_finished");
+    assert_eq!(ends.len(), 2, "{kinds:?}");
+    assert_eq!(ends[0]["attempt"], 1);
+    assert_eq!(ends[0]["outcome"], "job_failed");
+    assert_eq!(ends[0]["runs_again"], true);
     assert!(
-        retried[0]["error"]
+        ends[0]["error"]
             .as_str()
             .unwrap()
             .contains("exited with exit status: 1: flaky"),
-        "{retried:?}"
+        "{ends:?}"
     );
-    let started = payloads(&detail, "review_started");
-    assert_eq!(started.len(), 2);
-    assert_eq!(started[1]["attempt"], 2);
+    assert_eq!(ends[1]["outcome"], "answered");
+    assert_eq!(ends[1]["verdict"], "pass");
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    let jobs = payloads(&detail, "review_job_started");
+    let again: Vec<_> = jobs.iter().map(|job| &job["again"]).collect();
+    assert_eq!(again, [&json!(false), &json!(true)]);
+    assert_eq!(jobs[1]["output"], "review-1.again");
     let finished = payloads(&detail, "review_finished");
     assert_eq!(finished.len(), 1);
-    assert_eq!(finished[0]["attempt"], 2);
+    assert_eq!(finished[0]["attempt"], 1);
     assert_eq!(finished[0]["verdict"], "pass");
-    assert!(position(&kinds, "review_retried") < position(&kinds, "review_finished"));
+    assert!(position(&kinds, "review_job_finished") < position(&kinds, "review_finished"));
     assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
 }
 
-/// A review that was already the retry stays the retry across a wait
-/// (task 2013): review 1 exits non-zero and is reviewed once more; review
-/// 2 stops at a login that ran out and waits with the hold ask; after
-/// `done`, review 3 starts as that retry (its attempt follows the wait),
-/// so its own non-zero exit is not retried again but fails to the person
-/// with `review_failed` and the `approve_landing` ask. Which phase each
-/// wait keeps is `landing::tests::a_held_review_keeps_whether_it_is_the_retry`.
+/// A job that already ran once more stays that run across a wait (task
+/// 2013): its first run exits non-zero and it runs once more; that run
+/// stops at a login that ran out and waits with the hold ask, which does
+/// not count as a run; after `done` it starts again as its run once more,
+/// so its own non-zero exit does not run it again but fails the review to
+/// the person with `review_failed` and the `approve_landing` ask, all in
+/// the one review. Which phase a review's wait keeps is
+/// `landing::tests::a_held_review_keeps_whether_it_is_the_retry`.
 #[test]
 fn a_retried_review_that_waited_at_a_wall_and_fails_again_asks_a_person() {
     let (_dir, repo, db) = fixture();
@@ -926,15 +943,26 @@ fn a_retried_review_that_waited_at_a_wall_and_fails_again_asks_a_person() {
     assert_eq!(reviewer.prompts().len(), 3, "{kinds:?}");
     let started = payloads(&detail, "review_started");
     let attempts: Vec<&Value> = started.iter().map(|p| &p["attempt"]).collect();
-    assert_eq!(attempts, [&json!(1), &json!(2), &json!(3)]);
-    let retried = payloads(&detail, "review_retried");
-    assert_eq!(retried.len(), 1, "{kinds:?}");
-    assert_eq!(retried[0]["attempt"], 1);
-    assert_eq!(retried[0]["cause"], "job_failed");
+    assert_eq!(attempts, [&json!(1)]);
+    let ends = payloads(&detail, "review_job_finished");
+    let outcomes: Vec<_> = ends
+        .iter()
+        .map(|end| (&end["again"], &end["outcome"]))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (&json!(false), &json!("job_failed")),
+            (&json!(true), &json!("held")),
+            (&json!(true), &json!("job_failed")),
+        ],
+        "{kinds:?}"
+    );
+    assert_eq!(ends[2]["runs_again"], false);
     assert!(!kinds.contains(&"review_finished"), "{kinds:?}");
     let failed = payloads(&detail, "review_failed");
     assert_eq!(failed.len(), 1, "{kinds:?}");
-    assert_eq!(failed[0]["attempt"], 3);
+    assert_eq!(failed[0]["attempt"], 1);
     assert_eq!(failed[0]["code"], "job_failed");
     assert!(
         failed[0]["error"]
@@ -953,10 +981,11 @@ fn a_retried_review_that_waited_at_a_wall_and_fails_again_asks_a_person() {
     assert_eq!(failed[0]["ask_id"], json!(landing[0].id));
 }
 
-/// A review stopped at its timeout is not reviewed again (task 1984): it
-/// fails to the person at once, with one `approve_landing` ask.
+/// A review job stopped at its timeout runs once more like any job that
+/// gave no answer (ADR-t1895-1 decision 5); stopped again, the review
+/// fails to the person with one `approve_landing` ask.
 #[test]
-fn a_timed_out_review_is_not_reviewed_again() {
+fn a_timed_out_review_job_runs_once_more_then_fails() {
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let mut reviewer = TestReviewer::new(&["sleep 30".to_owned()]);
@@ -967,9 +996,20 @@ fn a_timed_out_review_is_not_reviewed_again() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
-    assert_eq!(reviewer.prompts().len(), 1);
+    assert_eq!(reviewer.prompts().len(), 2);
     assert_eq!(payloads(&detail, "review_started").len(), 1);
     assert!(payloads(&detail, "review_retried").is_empty(), "{kinds:?}");
+    let outcomes: Vec<_> = payloads(&detail, "review_job_finished")
+        .iter()
+        .map(|end| (end["outcome"].clone(), end["runs_again"].clone()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (json!("timed_out"), json!(true)),
+            (json!("timed_out"), json!(false))
+        ]
+    );
     let failed = payloads(&detail, "review_failed");
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0]["attempt"], 1);
@@ -986,15 +1026,14 @@ fn a_timed_out_review_is_not_reviewed_again() {
     assert_eq!(failed[0]["ask_id"], json!(asks[0].id));
 }
 
-/// A failed review's span ends with its job (task 541), before the
+/// A failed review's span ends with its jobs (task 541), before the
 /// session is asked to exit; `review_failed` and its ask still follow the
-/// exit. Here review 1 prints no readable
-/// verdict, so it is reviewed once more with the same input (task 328),
-/// and that review cannot start: both spans are closed as `job_finished`,
-/// and the ask names only the output of review 1, the one that ran (task
-/// 426). Which ends are reviewed again and the ask's text for each are
-/// `landing::tests::an_unreadable_verdict_or_a_non_zero_exit_is_reviewed_again_once` and
-/// `landing::tests::a_review_that_could_not_start_names_no_output_of_its_own`.
+/// exit. Here the review's job prints no readable verdict, so it runs once
+/// more with the same input (task 328), and that run cannot start: the
+/// review's one span is closed as `job_finished`, and the ask names only
+/// the output of the run that ran (task 426). Which misses run once more
+/// is `domain::review_jobs::tests::a_job_that_missed_runs_once_more_only_once`,
+/// the ask's text `landing::tests::a_failed_review_that_ran_names_its_own_output`.
 #[test]
 fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
     let (_dir, repo, db) = fixture();
@@ -1020,23 +1059,24 @@ fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
     let prompts = reviewer.prompts();
     assert_eq!(prompts.len(), 2);
     assert_eq!(prompts[0], prompts[1]);
-    let retried = payloads(&detail, "review_retried");
-    assert_eq!(retried.len(), 1);
-    assert_eq!(retried[0]["attempt"], 1);
+    let ends = payloads(&detail, "review_job_finished");
+    assert_eq!(ends.len(), 2);
+    assert_eq!(ends[0]["attempt"], 1);
     assert!(
-        retried[0]["error"]
+        ends[0]["error"]
             .as_str()
             .unwrap()
             .contains("the review printed no verdict JSON"),
-        "{retried:?}"
+        "{ends:?}"
     );
-    assert_eq!(retried[0]["cause"], "unreadable");
+    assert_eq!(ends[0]["outcome"], "unreadable");
+    assert_eq!(ends[1]["outcome"], "start_failed");
     let reviews_closed: Vec<_> = detail
         .events
         .iter()
         .filter(|e| e.kind == "session_closed" && e.payload["kind"] == "review")
         .collect();
-    assert_eq!(reviews_closed.len(), 2);
+    assert_eq!(reviews_closed.len(), 1);
     assert!(
         reviews_closed
             .iter()
@@ -1049,7 +1089,7 @@ fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
             .iter()
             .filter(|p| p["kind"] == "review")
             .count(),
-        2
+        1
     );
     let closed = reviews_closed.last().unwrap();
     let failed = event("review_failed");
@@ -1062,27 +1102,26 @@ fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
     let asks = queue.asks(Default::default()).unwrap();
     assert_eq!(asks.len(), 1, "{asks:?}");
     assert_eq!(failed.payload["ask_id"], asks[0].id.as_i64());
-    assert_eq!(failed.payload["attempt"], 2);
+    assert_eq!(failed.payload["attempt"], 1);
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "ask_opened") < position(&kinds, "review_failed"));
-    // The review that could not start wrote nothing and is not named; the
-    // one before it ran and is.
+    // The run that could not start wrote nothing and is not named; the one
+    // before it ran and is.
     let run_dir = detail.runs[0].run_dir().unwrap();
     let question = &asks[0].question;
     for part in [
-        "failed and gave no verdict (review 2): ".to_owned(),
-        "the headless review could not start".to_owned(),
+        "failed and gave no verdict (review 1): ".to_owned(),
+        "the whole review: it could not start".to_owned(),
         "the test reviewer cannot start this review".to_owned(),
+        format!("its earlier run's output is in {run_dir}/review-1.out and .err"),
         format!("Review material: {run_dir}/review.md"),
-        format!(
-            "Review output of the earlier review 1: {run_dir}/review-1.out, {run_dir}/review-1.err"
-        ),
+        format!("Review output: {run_dir}/review-1.out, {run_dir}/review-1.err"),
     ] {
         assert!(question.contains(&part), "{part} in {question}");
     }
     assert!(Path::new(&format!("{run_dir}/review-1.out")).exists());
-    assert!(!Path::new(&format!("{run_dir}/review-2.out")).exists());
-    assert!(!question.contains("review-2."), "{question}");
+    assert!(!Path::new(&format!("{run_dir}/review-1.again.out")).exists());
+    assert!(!question.contains("review-1.again"), "{question}");
 }
 
 /// A revise whose rewritten receipt does not name the clean worktree HEAD

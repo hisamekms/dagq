@@ -44,9 +44,9 @@ fn landing_ask(queue: &SqliteQueue, run: &TaskRun) -> dagq::domain::Ask {
 /// A `land` of high confidence and no reason lands like a pass: the
 /// session exits right before the landing, no ask opens, and stats counts
 /// it among the judgements made without an `approve_landing`. Here the
-/// first review prints no readable verdict (an unescaped quote), so the run
-/// is reviewed once more with the same input (task 328) and the verdict of
-/// that retry is acted on as any other.
+/// review's job first prints no readable verdict (an unescaped quote), so
+/// it runs once more with the same input (task 328) and the verdict of that
+/// run is acted on as any other.
 #[test]
 fn a_high_land_lands_the_run_without_an_ask() {
     let (_dir, repo, db) = fixture();
@@ -66,32 +66,33 @@ fn a_high_land_lands_the_run_without_an_ask() {
     let prompts = reviewer.prompts();
     assert_eq!(prompts.len(), 2);
     assert_eq!(prompts[0], prompts[1]);
-    let retried = payloads(&detail, "review_retried");
-    assert_eq!(retried.len(), 1);
-    assert_eq!(retried[0]["attempt"], 1);
+    let ends = payloads(&detail, "review_job_finished");
+    assert_eq!(ends.len(), 2);
+    assert_eq!(ends[0]["attempt"], 1);
+    assert_eq!(ends[0]["outcome"], "unreadable");
     assert!(
-        retried[0]["error"]
+        ends[0]["error"]
             .as_str()
             .unwrap()
             .contains("the review printed no verdict JSON"),
-        "{retried:?}"
+        "{ends:?}"
     );
     assert!(payloads(&detail, "review_failed").is_empty());
     assert_eq!(
         concern_decided(&detail),
         [
-            json!({"attempt": 2, "recommendation": "land", "confidence": "high",
+            json!({"attempt": 1, "recommendation": "land", "confidence": "high",
                 "reason_category": null, "applied": true, "escalated_because": null})
         ]
     );
     let finished = payloads(&detail, "review_finished");
     assert_eq!(finished.len(), 1);
-    assert_eq!(finished[0]["attempt"], 2);
+    assert_eq!(finished[0]["attempt"], 1);
     assert_eq!(finished[0]["recommendation"], "land");
     assert_eq!(finished[0]["confidence"], "high");
     let kinds = event_kinds(&detail);
     for (earlier, later) in [
-        ("review_retried", "review_finished"),
+        ("review_job_finished", "review_finished"),
         ("review_finished", "concern_decided"),
         ("concern_decided", "exit_requested"),
         ("exit_requested", "workspace_closed"),

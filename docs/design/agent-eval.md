@@ -161,7 +161,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   周の開始と引き取りはそれぞれ1つの書き込みのtransactionで、2つのsupervisorが同じ周を始めることも引き取ることもない（`EvalRounds`）。
   1周の中のproviderのprocessの同時数は設定の上限まで。
 - 待っている周は、着地の前のdevを先に、依頼の古い順に流し（`round::next_round`）、流れている周は止めない。
-- evalのjobはrunのreviewのjobの同時実行の上限に数えない。
+- evalのjobはrunのreviewのjobの同時実行の上限（`ReviewJobs::concurrency`）に数えず、runのreviewのjobはevalの枠に数えない。
 
 ## 採用の判定（着地の前のdev）
 
@@ -185,13 +185,16 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - providerごとの変換（ADR-t1895-1の独立のagentのjobの起動の設定を作る関数。agentのjobの起動、`AgentProvider::agent_job_command`が使う）:
   - Claude（`infrastructure::adapters::claude_agent_job_tool_args`）: jobの起動の引数の`--allowedTools`に宣言した道具（`read`→`Read`、`grep`→`Grep`、`glob`→`Glob`、`shell`→`Bash`、`edit`→`Edit`・`NotebookEdit`、`write`→`Write`）を並べ、`--disallowedTools`に一覧の残りを並べる。reviewの既定は今のreviewと同じ`Read,Grep,Glob`と`Bash,Edit,Write,NotebookEdit`。予約の道具の拒否（`PRINT_MODE_DENIED_TOOLS`）、`--setting-sources ""`とreviewの`--settings`（ADR-t1470-1）はjobの起動の側が持ち、変換は触らない。
   - Codex（`infrastructure::codex::agent_job_tools_config`）: Codexはfileを読む・探す・pathを探すのもshellのコマンドで行うので、`read`・`grep`・`glob`・`shell`のどれかを宣言したjobには何も足さず（read-onlyのsandboxがコマンドを読み取りに留める）、どれも宣言しないjobには`-c features.shell_tool=false`と`-c features.unified_exec=false`（codex-cli 0.160.0の`[features]`）を足してshellを外す。`--sandbox read-only`・jobのpermission profile・worktreeのprojectの`untrusted`（ADR-t1570-1）は変えず、狭めるだけ。このためCodexでは`read`だけの宣言と`read`・`grep`・`glob`の宣言は同じ設定になる。
-- 当てないもの: 親のjobの中のsubagentの渡し方（Claudeの`--agents`のJSONの`tools`は`SUBAGENT_TOOLS`のまま、Codexの`-c agents.<name>.*`）と`subagents_unsupported`。全体のreviewのjobは定義を持たないので対象にしない。
+- 当てないもの: 親のjobの中のsubagentの渡し方（Claudeの`--agents`のJSONの`tools`は`SUBAGENT_TOOLS`のまま、Codexの`-c agents.<name>.*`）。
+  全体のreviewのjobは定義を持たないので対象にしない。
 
 ## evalが本番と共有する起動経路
 
 - ケースごとの1回は、本番のrunのreviewのagentのjobと同じ経路で、測るagentの1本のjobだけを起動する。
   経路はheadlessのjobの共通の経路（起動・時間の上限・やり直し・記録・引き継ぎ。[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、1本のagentのjobの組み立て（`application::agent_job::build`、[Prompt](supervisor-lifecycle/prompt.md#agentのjobの上限)）、上の「道具の宣言」の変換、行き先のproviderは`[roles.review]`。
   eval専用の起動の組み立ては作らない。
+- 本番のrunのreviewのagentのjob（`Supervisor::prepare_review`）も同じ組み立て・`AgentProvider::agent_job_command`・1つのverdictの読み取り（`agent_job::read_reply`）を使う。
+  同じ定義・provider・道具の宣言ならargvは一致し、違うのはstdinのpromptの材料の行だけである。
 - 実行の入口は`application::supervise::agent_eval`。
 - ケースのtreeは`base_commit`にpatchを当ててcommitした使い捨てのworktreeで、queueのdata dirの`agent-evals/`の下に周ごとに置く。
   jobのcwdはそのtreeで、材料のファイル（commitの一覧と全文の差分`<base_commit>...<patchを当てたcommit>`）はケースのdirの材料だけのdirに書く。

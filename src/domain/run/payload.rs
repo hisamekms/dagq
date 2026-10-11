@@ -227,6 +227,19 @@ pub struct JobEnd<'a> {
     /// The `headless_jobs.kind` a `headless_job_stopped` names.
     #[serde(default, borrow, deserialize_with = "typed")]
     pub kind: Option<&'a str>,
+    /// The `headless_jobs.label` a `headless_job_stopped` names.
+    #[serde(default, borrow, deserialize_with = "typed")]
+    pub label: Option<&'a str>,
+    /// The agent a `review_job_finished` names (none for the whole
+    /// review's job).
+    #[serde(default, borrow, deserialize_with = "typed")]
+    pub agent: Option<&'a str>,
+    /// Whether a `review_job_finished` starts its job once more.
+    #[serde(default, deserialize_with = "typed")]
+    pub runs_again: Option<bool>,
+    /// A `review_job_finished`'s outcome (`held` starts the job again).
+    #[serde(default, borrow, deserialize_with = "typed")]
+    pub outcome: Option<&'a str>,
     #[serde(default, deserialize_with = "typed")]
     pub attempt: Option<u64>,
     #[serde(default, deserialize_with = "typed")]

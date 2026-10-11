@@ -36,7 +36,8 @@
 //! resume in a new session past a context of that many tokens
 //! (ADR-t2080-1).
 //! `[review.jobs]` sets the timeout of each kind of job of a run's review
-//! (ADR-t1895-1 decision 1). `[review.programs.<name>]` names a program
+//! (ADR-t1895-1 decision 1) and how many of the reviews' agent jobs run at
+//! once. `[review.programs.<name>]` names a program
 //! review, what it runs and the globs that require it (ADR-t1895-2); the
 //! review reads it from the landing branch's commit.
 //! The file is parsed by
@@ -63,7 +64,7 @@ use crate::{
         disk::DiskConfig,
         exit::ExitConfig,
         fresh_session::FreshSessionConfig,
-        headless_job::JobTimeouts,
+        headless_job::ReviewJobs,
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
         landing_verification::{self, LandingVerification},
@@ -172,7 +173,8 @@ const PROVIDER_FALLBACK_TABLE: &str = "provider_fallback";
 /// [`FreshSessionConfig`].
 const FRESH_SESSION_TABLE: &str = "fresh_session";
 /// `[review.jobs]`: the timeout of each kind of job of a run's review
-/// (ADR-t1895-1 decision 1); its keys are on [`JobTimeouts`].
+/// (ADR-t1895-1 decision 1) and how many agent jobs of the reviews run at
+/// once; its keys are on [`ReviewJobs`].
 const REVIEW_JOBS_TABLE: &str = "review.jobs";
 /// `[ci_watch]`: the landing branch's CI the supervisor watches
 /// (ADR-t1920-1). `workflow` (a non-blank string) is required; `branch`
@@ -303,8 +305,9 @@ pub struct Config {
     /// `[fresh_session]` (ADR-t2080-1); no key starts no new session.
     pub fresh_session: FreshSessionConfig,
     /// `[review.jobs]` (ADR-t1895-1 decision 1); a kind without its key
-    /// keeps the provider's review timeout.
-    pub review_jobs: JobTimeouts,
+    /// keeps the provider's review timeout, and no `concurrency` keeps
+    /// its default.
+    pub review_jobs: ReviewJobs,
     /// `[ci_watch]` (ADR-t1920-1); `None` without the table, which watches
     /// nothing.
     pub ci_watch: Option<CiWatchConfig>,
@@ -753,19 +756,24 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             Some(REVIEW_JOBS_TABLE) => {
                 ensure!(
-                    JobTimeouts::KEYS.contains(&key),
+                    ReviewJobs::KEYS.contains(&key),
                     "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_JOBS_TABLE}]; the keys are {}",
-                    JobTimeouts::KEYS.join(", ")
+                    ReviewJobs::KEYS.join(", ")
                 );
                 ensure!(
                     !review_jobs_keys.iter().any(|existing| existing == key),
                     "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
                 );
                 let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
-                let secs = parse_positive(rest.trim(), "number of seconds").with_context(with)?;
+                let what = if key == "concurrency" {
+                    "number of jobs"
+                } else {
+                    "number of seconds"
+                };
+                let value = parse_positive(rest.trim(), what).with_context(with)?;
                 config
                     .review_jobs
-                    .set(key, u64::try_from(secs).with_context(with)?);
+                    .set(key, u64::try_from(value).with_context(with)?);
                 review_jobs_keys.push(key.to_owned());
             }
             Some(CI_WATCH_TABLE) => {
@@ -1556,7 +1564,7 @@ pub fn load_fresh_session(root: &Path) -> Result<Option<FreshSessionConfig>> {
 /// `[review.jobs]` of the `dagq.toml` in `root` (ADR-t1895-1 decision
 /// 1), `None` when there is no file; no table or no key keeps each kind's
 /// timeout the provider's review timeout.
-pub fn load_review_jobs(root: &Path) -> Result<Option<JobTimeouts>> {
+pub fn load_review_jobs(root: &Path) -> Result<Option<ReviewJobs>> {
     let path = root.join(CONFIG_FILE_NAME);
     let Some(text) = read_config(&path)? else {
         return Ok(None);
@@ -3360,26 +3368,34 @@ LITERAL = 'no \n escapes # here'
     }
 
     /// `[review.jobs]` sets each kind's timeout in whole seconds above
-    /// 0; a kind without its key keeps the provider's review timeout.
+    /// 0 and the agent jobs at once in whole jobs above 0; a kind without
+    /// its key keeps the provider's review timeout, and no `concurrency`
+    /// keeps its default.
     #[test]
-    fn parses_the_timeouts_of_the_review_jobs_table() {
+    fn parses_the_timeouts_and_the_concurrency_of_the_review_jobs_table() {
         let jobs = |text: &str| parse_config(text).unwrap().review_jobs;
-        assert_eq!(jobs(""), JobTimeouts::default());
-        assert_eq!(jobs("[review.jobs]\n"), JobTimeouts::default());
+        assert_eq!(jobs(""), ReviewJobs::default());
+        assert_eq!(jobs("[review.jobs]\n"), ReviewJobs::default());
         assert_eq!(
             jobs("[review.jobs]\nprogram_timeout_secs = 120 # seconds\n"),
-            JobTimeouts {
+            ReviewJobs {
                 agent: None,
                 program: Some(120),
+                concurrency: None,
             }
         );
         assert_eq!(
             jobs("[review.jobs]\nagent_timeout_secs = 1_800\nprogram_timeout_secs = 60\n"),
-            JobTimeouts {
+            ReviewJobs {
                 agent: Some(1800),
                 program: Some(60),
+                concurrency: None,
             }
         );
+        // How many agent jobs run at once, a whole number of jobs.
+        let limited = jobs("[review.jobs]\nconcurrency = 4\n");
+        assert_eq!((limited.concurrency, limited.concurrency()), (Some(4), 4));
+        assert_eq!(jobs("").concurrency(), 10);
         // Beside `[review.subagents.<agent>]`, as its own table.
         assert_eq!(
             jobs("[review.subagents.docs]\npaths = [\"docs/**\"]\n[review.jobs]\nagent_timeout_secs = 5\n")
@@ -3397,7 +3413,11 @@ LITERAL = 'no \n escapes # here'
             ),
             (
                 "[review.jobs]\ntimeout = 1\n",
-                "dagq.toml:2: unknown key timeout in [review.jobs]; the keys are agent_timeout_secs, program_timeout_secs",
+                "dagq.toml:2: unknown key timeout in [review.jobs]; the keys are agent_timeout_secs, program_timeout_secs, concurrency",
+            ),
+            (
+                "[review.jobs]\nconcurrency = 0\n",
+                "must be a positive number of jobs",
             ),
             (
                 "[review.jobs]\nagent_timeout_secs = 1\nagent_timeout_secs = 2\n",

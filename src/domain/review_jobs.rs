@@ -1,0 +1,357 @@
+//! The agent jobs of a run's review (ADR-t1895-1 decisions 2 to 5 and 7).
+//! Once its program reviews pass, a review runs its whole review as one
+//! job and each agent its paths selected as a job of its own, side by side
+//! within the supervisor's limit of agent jobs at once, which every run's
+//! review shares. It judges only once every job ended: a job that gave no
+//! answer runs once more on its own, one that gives none again fails the
+//! review (never a pass), and once each answered, the heaviest of their
+//! judgments decides where the run goes, by the machine
+//! ([`super::review_subagents::route`]). No AI job joins the judgments.
+//!
+//! These are the decisions; `application::supervise::landing` starts,
+//! waits for and records the jobs.
+
+use serde_json::Value;
+
+use super::ReviewVerdict;
+use super::review_subagents::{AgentResult, incomplete};
+
+/// Which job of a review: its whole review (the acceptance and the
+/// documents), or one selected agent's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewJobId {
+    Whole,
+    Agent(String),
+}
+
+impl ReviewJobId {
+    /// The agent the job is of; `None` for the whole review. Its
+    /// `headless_jobs` row's `label` and its events' `agent` are this.
+    pub fn agent(&self) -> Option<&str> {
+        match self {
+            Self::Whole => None,
+            Self::Agent(agent) => Some(agent),
+        }
+    }
+
+    /// How a log line or an error names it.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Whole => "the whole review".to_owned(),
+            Self::Agent(agent) => format!("the agent {agent}"),
+        }
+    }
+
+    /// The stem of its output files in the run directory (`.out` and
+    /// `.err` follow) for review `attempt`: `review-<attempt>` for the
+    /// whole review, as before its agents ran as jobs, and
+    /// `review-<attempt>-agent-<agent>` for an agent's; its run once more
+    /// (`again`) adds `.again`, which no agent's name holds, so it keeps
+    /// the first run's output.
+    pub fn output(&self, attempt: usize, again: bool) -> String {
+        let stem = match self {
+            Self::Whole => format!("review-{attempt}"),
+            Self::Agent(agent) => format!("review-{attempt}-agent-{agent}"),
+        };
+        if again { format!("{stem}.again") } else { stem }
+    }
+}
+
+/// How a run of a review job ended without an answer to judge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobMiss {
+    /// It ended but its reply held no readable verdict: no JSON, a broken
+    /// one, an unknown field, or (an agent's) not its one completed result.
+    Unreadable,
+    /// Its process exited non-zero.
+    Exited,
+    /// It did not end within its timeout and was stopped.
+    TimedOut,
+    /// Its process could not start, for a reason that is not its
+    /// provider's (that one moves or waits instead).
+    StartFailed,
+}
+
+impl JobMiss {
+    /// What `review_job_finished` records as its `outcome`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreadable => "unreadable",
+            Self::Exited => "job_failed",
+            Self::TimedOut => "timed_out",
+            Self::StartFailed => "start_failed",
+        }
+    }
+}
+
+/// Whether a job that missed runs once more with the same input
+/// (ADR-t1895-1 decision 5): only while the retry is on (`retry`, off only
+/// in tests), when neither the job ran once more already (`job_again`) nor
+/// the review is itself the retry of its program reviews (`review_retried`,
+/// one retry per review across its stages), and while a provider can run
+/// it (`manual`: `--no-claude` left none, so a person reviews it). Every
+/// kind of miss counts alike: a job that could not start, timed out, exited
+/// non-zero or gave no readable answer.
+pub const fn runs_again(retry: bool, job_again: bool, review_retried: bool, manual: bool) -> bool {
+    retry && !job_again && !review_retried && !manual
+}
+
+/// How many of `waiting` jobs start now when `running` agent jobs of the
+/// supervisor's reviews run and at most `limit` may run at once
+/// (`[review.jobs] concurrency`): the rest wait for a job to end.
+pub fn startable(limit: usize, running: usize, waiting: usize) -> usize {
+    waiting.min(limit.saturating_sub(running))
+}
+
+/// Where one job of a review stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStanding<'a> {
+    /// It waits to start or runs.
+    Open,
+    /// It gave an answer to judge.
+    Answered,
+    /// It gave none and will not run again; why.
+    Missed(&'a str),
+}
+
+/// Where a review stands from its jobs'.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewStanding {
+    /// A job waits or runs: nothing is judged yet.
+    Open,
+    /// Every job answered: the review is judged.
+    Answered,
+    /// Every job ended and these gave no answer (why each): the review
+    /// fails to a person and does not pass.
+    Missed(Vec<String>),
+}
+
+/// Where a review whose jobs stand as `jobs` stands: open while any job is
+/// (whatever the others gave), else failed when any missed, else answered.
+pub fn standing<'a>(jobs: impl IntoIterator<Item = JobStanding<'a>>) -> ReviewStanding {
+    let mut missed = Vec::new();
+    for job in jobs {
+        match job {
+            JobStanding::Open => return ReviewStanding::Open,
+            JobStanding::Answered => {}
+            JobStanding::Missed(why) => missed.push(why.to_owned()),
+        }
+    }
+    if missed.is_empty() {
+        ReviewStanding::Answered
+    } else {
+        ReviewStanding::Missed(missed)
+    }
+}
+
+/// The result of `agent`'s job from its reply, read as one JSON object
+/// (`reply`, none when it held none): the one completed result of that
+/// agent with a judgment, else why it is unreadable.
+pub fn agent_result(agent: &str, reply: Option<Value>) -> Result<AgentResult, String> {
+    let reply = reply.ok_or_else(|| format!("the agent {agent} printed no verdict JSON"))?;
+    let result: AgentResult = serde_json::from_value(reply)
+        .map_err(|error| format!("the agent {agent} printed no readable verdict: {error}"))?;
+    match incomplete(&[agent.to_owned()], std::slice::from_ref(&result)) {
+        None => Ok(result),
+        Some(why) => Err(why),
+    }
+}
+
+/// Why the whole review's `verdict` is unreadable, if it is: it judges
+/// alone and names no agent's result (decision 4).
+pub fn whole_unreadable(verdict: &ReviewVerdict) -> Option<String> {
+    incomplete(&[], &verdict.agents)
+}
+
+/// The verdict a review is judged by once every job answered: the whole
+/// review's own (`whole`) beside each agent's result (`agents`, in their
+/// configured order), so that the heaviest of their judgments decides
+/// where the run goes ([`ReviewVerdict::route`]) and the reasons of every
+/// judgment that sends it back go in one revise.
+pub fn assemble(whole: ReviewVerdict, agents: Vec<AgentResult>) -> ReviewVerdict {
+    ReviewVerdict { agents, ..whole }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::ReviewDecision;
+    use crate::domain::review_subagents::Destination;
+    use serde_json::json;
+
+    fn whole(decision: &str, reasons: &[&str]) -> ReviewVerdict {
+        ReviewVerdict::parse(
+            &json!({"verdict": decision, "reasons": reasons, "summary": "whole"}).to_string(),
+        )
+        .unwrap()
+    }
+
+    fn agent(name: &str, decision: &str, reasons: &[&str]) -> AgentResult {
+        agent_result(
+            name,
+            Some(json!({"agent": name, "status": "completed", "verdict": decision,
+                        "reasons": reasons.iter().map(|r| json!({"text": r, "codes": []})).collect::<Vec<_>>(),
+                        "summary": format!("{name} looked")})),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_job_is_named_by_its_agent_and_writes_its_own_output() {
+        let design = ReviewJobId::Agent("design".into());
+        assert_eq!(ReviewJobId::Whole.agent(), None);
+        assert_eq!(design.agent(), Some("design"));
+        assert_eq!(ReviewJobId::Whole.output(2, false), "review-2");
+        assert_eq!(ReviewJobId::Whole.output(2, true), "review-2.again");
+        assert_eq!(design.output(2, false), "review-2-agent-design");
+        assert_eq!(design.output(2, true), "review-2-agent-design.again");
+        assert_eq!(design.describe(), "the agent design");
+    }
+
+    /// Any miss runs once more, once per job, with the retry on, when the
+    /// review is not its programs' retry and a provider is left.
+    #[test]
+    fn a_job_that_missed_runs_once_more_only_once() {
+        assert!(runs_again(true, false, false, false));
+        assert!(!runs_again(true, true, false, false), "its one run again");
+        assert!(!runs_again(true, false, true, false), "the review's retry");
+        assert!(!runs_again(true, false, false, true), "no provider left");
+        assert!(!runs_again(false, false, false, false), "retry off");
+        let kinds = [
+            JobMiss::Unreadable,
+            JobMiss::Exited,
+            JobMiss::TimedOut,
+            JobMiss::StartFailed,
+        ];
+        let outcomes: Vec<_> = kinds.iter().map(|miss| miss.as_str()).collect();
+        assert_eq!(
+            outcomes,
+            ["unreadable", "job_failed", "timed_out", "start_failed"]
+        );
+    }
+
+    /// The jobs past the limit wait; the limit counts every review's
+    /// running jobs, so one review's jobs leave less room for another's.
+    #[test]
+    fn jobs_past_the_limit_wait_and_the_reviews_share_it() {
+        assert_eq!(startable(10, 0, 3), 3);
+        assert_eq!(startable(2, 0, 3), 2);
+        assert_eq!(startable(2, 1, 3), 1);
+        assert_eq!(startable(2, 2, 3), 0);
+        assert_eq!(startable(2, 5, 3), 0, "a lowered limit starts none");
+        // Two reviews of three jobs each under a limit of 4: the first
+        // starts 3, the second the 1 left, and its other 2 wait.
+        let first = startable(4, 0, 3);
+        let second = startable(4, first, 3);
+        assert_eq!((first, second), (3, 1));
+        assert_eq!(startable(4, first + second - 1, 2), 1, "one ended");
+    }
+
+    /// Nothing is judged while any job is open, even one that missed
+    /// already; once all ended, any miss fails the review with each why.
+    #[test]
+    fn a_review_is_judged_only_once_every_job_ended() {
+        use JobStanding::{Answered, Missed, Open};
+        assert_eq!(standing([Answered, Open]), ReviewStanding::Open);
+        assert_eq!(standing([Missed("a"), Open]), ReviewStanding::Open);
+        assert_eq!(standing([Answered, Answered]), ReviewStanding::Answered);
+        assert_eq!(
+            standing([
+                Missed("whole: no verdict"),
+                Answered,
+                Missed("design: timed out")
+            ]),
+            ReviewStanding::Missed(vec![
+                "whole: no verdict".to_owned(),
+                "design: timed out".to_owned()
+            ])
+        );
+    }
+
+    /// An agent's reply is its one completed result with a judgment, of
+    /// that agent; anything else is unreadable, so retried, never a pass.
+    #[test]
+    fn an_agents_reply_is_its_one_completed_result() {
+        let result = agent("design", "revise", &["the map is stale"]);
+        assert_eq!(result.verdict, Some(ReviewDecision::Revise));
+        assert_eq!(result.reasons, ["the map is stale"]);
+        for (reply, error) in [
+            (None, "printed no verdict JSON"),
+            (
+                Some(json!({"verdict": "pass"})),
+                "printed no readable verdict",
+            ),
+            (
+                Some(json!({"agent": "other", "status": "completed", "verdict": "pass"})),
+                "no result of design",
+            ),
+            (
+                Some(json!({"agent": "design", "status": "failed"})),
+                "design did not complete",
+            ),
+            (
+                Some(json!({"agent": "design", "status": "completed"})),
+                "design gave no verdict",
+            ),
+            (
+                Some(
+                    json!({"agent": "design", "status": "completed", "verdict": "pass", "extra": 1}),
+                ),
+                "printed no readable verdict",
+            ),
+        ] {
+            let got = agent_result("design", reply).unwrap_err();
+            assert!(got.contains(error), "{got}");
+        }
+        assert!(whole_unreadable(&whole("pass", &[])).is_none());
+        let mut naming = whole("pass", &[]);
+        naming.agents = vec![result];
+        assert!(
+            whole_unreadable(&naming)
+                .unwrap()
+                .contains("does not require")
+        );
+    }
+
+    /// The judgments are taken one by one and the heaviest wins: an
+    /// agent's send-back under the whole review's pass sends the run back,
+    /// its reasons beside the others' that send it back; an ask outweighs
+    /// both. No judgment is folded into another's (decision 4).
+    #[test]
+    fn the_heaviest_judgment_of_the_jobs_decides() {
+        let assembled = assemble(
+            whole("pass", &[]),
+            vec![
+                agent("design", "revise", &["stale map"]),
+                agent("tests", "pass", &[]),
+            ],
+        );
+        assert_eq!(assembled.verdict, ReviewDecision::Pass);
+        let route = assembled.route(true);
+        assert_eq!(route.destination, Destination::SendBack);
+        assert_eq!(route.parent, Destination::Land);
+        let deciding: Vec<_> = route.deciding().iter().map(|a| a.agent.clone()).collect();
+        assert_eq!(deciding, ["design"]);
+        let concern = assemble(
+            whole("revise", &["acceptance 2 unmet"]),
+            vec![
+                agent_result(
+                    "design",
+                    Some(
+                        json!({"agent": "design", "status": "completed", "verdict": "concern",
+                            "reasons": [], "summary": "scope", "recommendation": "land",
+                            "confidence": "high", "reason_category": "scope"}),
+                    ),
+                )
+                .unwrap(),
+            ],
+        );
+        assert_eq!(concern.route(true).destination, Destination::Ask);
+        assert_eq!(
+            assemble(whole("pass", &[]), Vec::new())
+                .route(true)
+                .destination,
+            Destination::Land
+        );
+    }
+}
