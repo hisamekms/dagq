@@ -28,6 +28,8 @@ goal 89 の task 1407 の測定。[ADR-t1404-1](../adr/2026-10-03-t1404-1-headle
 3. background を workspace に戻す基準の案（turn の失敗・process の残り・adopt の失敗）。戻すかどうかは人が決める
 4. 重なる変更の読み方
 
+切り替えから 1 週間後の窓を同じ物差しで読んだ結果（task 1409）は「5. 後の窓の評価」にある。
+
 測って書くだけで、runtime も設定も queue の状態も変えていない。物差しは [zero-based-headless-readiness](zero-based-headless-readiness.md)（task 1369）の E1・E3 と群の分け方を使い、`workspace` を閉じた記録の数え方だけを下の「E3 の数え方」のとおり広げた。
 
 ## 読んだ範囲と方法
@@ -361,6 +363,138 @@ jq -c '.compare.confounders[] | select(.kind == "mark_recorded") | {at, label, p
 - **自動更新と引き継ぎ**: runtime の着地ごとに supervisor が exec で入れ替わる（窓に 697 回の `supervisor_handed_off`）。切り替えの印の前後に引き継ぎが続くと、`kpi` は印を重なった変更にまとめる（`split.separable: false`）ので、`kpi` は窓を時刻で明示して読む（[headless-default-evaluation](headless-default-evaluation.md) の 3 と同じ）。引き継ぎは C5 で「またいだ turn」として数えるので、増えること自体は評価の標本になる
 - **load と並列数**: cmux の時間切れは load に強く依る（基準の窓で load_avg の最大 166）。`dagq.toml` の `[supervisor] parallel` と `[run.env]` の並列度、host の他の load が変わったら、C1 は load の帯ごとに比べ、`dagq kpi --compare` の confounders の印を並べて読む
 - **途中で設定を変えた run**: 印の時点で走っていた run は workspace のまま終わり、その resume は起動の時点の設定で background になりうる。群は「background の wrapper を 1 回でも起動した run」を `-bg` にするので、印の直後の数時間は両方の形を持つ run が混ざる。本数が少なければ、窓を印の 1 時間後から始めて比べてもよい（そのときは基準の窓も同じだけ後ろにずらさない。基準は切り替えの前で閉じている）
+
+## 5. 後の窓の評価（2026-10-04T04:09:32Z〜2026-10-11T04:09:32Z）
+
+この節は background の退行の確認として書く。2026-10-03 の人の決定（goal 92、ADR-t1433-3）で workspace の経路は無くなることになり（実際に消えたのは下の「重なる変更」の task 1440 の commit）、3 の表の「workspace に戻す」と、ADR-t1404-1 決定 7 の「runtime の既定を変える」の選択肢は閉じた。したがって 3 の表の「戻す基準」は、当たれば background の経路の直しを決める印として読み、戻すかどうかの判断には使わない。
+
+### 窓と入力
+
+- 印: 82010「headless wrapper background」（`at` = 2026-10-04T04:09:32.520Z。最初の `wrapper_launched` の event 82004）
+- 窓: `F=2026-10-04T04:09:32Z`、`T=2026-10-11T04:09:32Z`（F + 7 日）。下の min_samples の claim・turn・引き継ぎをまたいだ turn・resume・待ちは 7 日で満たした。止める経路のうち `triage`・`sweep`・`stop_processes` は 7 日で 0 回で、T を延ばしても集まらない: 2026-10-09T09:56:06Z の後は窓の終わりまで claim が 0（下の「重なる変更」の load と parallel）で、読んだ時点（2026-10-11T05:58Z）までに claim は 1 件だけだった。そこで T は延ばさず、その経路を「判定しない」とした（2 の min_samples の言う、planner が task を選んで印を付けるか使い捨ての queue のスモークで人が確かめる手当ては receipt の follow_up に回した）
+- 計装の開始 I（「wrapper_stopped の計装の開始」）: task 1657 の着地 commit `9b110cf8` を祖先に持つ最初の `update_installed` が 2026-10-06T03:28:54.765Z（event 110728、commit `9b110cf8`）、その version への最初の `supervisor_handed_off` が 2026-10-06T03:28:52.538Z（event 110721）で、遅い方の **I=2026-10-06T03:28:54.765Z**。窓の最初の `wrapper_stopped` は 2026-10-06T03:32:58Z
+- 群ごとの run 数（窓の中で claim された run）
+
+| 群 | run | 最初の claim | 最後の claim | 読んだ時点の状態 |
+|---|---|---|---|---|
+| `claude-headless-bg` | 342 | 2026-10-04T04:09:32Z | 2026-10-09T09:56:06Z | 2 群の合計で `integrated` 364・`failed` 24・走っている 1 |
+| `codex-fallback-bg` | 47 | 2026-10-05T08:11:01Z | 2026-10-05T11:07:35Z | （同上） |
+| `claude-headless`・`claude-interactive`・`codex-task` | 0 | — | — | — |
+
+窓の全ての run が background の wrapper を起動した。workspace の wrapper の非対話の run も、対話の run も窓に無い（下の「重なる変更」）。
+
+### 使ったコマンドと 2 との差
+
+2 の「窓の event を集め、群を付ける」・C1〜C5・「wrapper_stopped の計装の開始」・「kpi の前後比較」のコマンドを、`F`・`T`・`I` と印 ID 82010 を入れてそのまま流した。差は次だけ:
+
+- `I` の 1 の `git log ... main` は、main の先頭と同じ commit（`4621c279`）にいる worktree の `HEAD` で流した
+- min_samples の止める経路（`triage`・`sweep`・`stop_processes`）を満たさないまま T を延ばさなかった（上の「窓と入力」）
+- kpi の `B` は `2026-09-25T15:30:00Z..2026-10-04T04:09:32Z`、`A` は `2026-10-04T04:09:32Z..2026-10-11T04:09:32Z`
+- 1 件ずつ読むために次を足した（どれも `tagged.json` か `dagq events --run <run> --all --full` を読むだけ）
+
+```sh
+# -bg の run の cmux の失敗の中身（C1 の claude-headless-bg が 0 でなかった）
+jq -c 'map(select(.kind=="backend_call_failed" and (.g|test("-bg$")))) | group_by(.run_id)
+  | map({run: .[0].run_id[0:8], task: .[0].task_id, n: length, first: (map(.created_at)|min), last: (map(.created_at)|max), error: .[0].payload.error})' tagged.json
+# 閉じた記録（workspace_closed・wrapper_stopped・resume_finished の workspace_closed）の無い background の session
+jq -c 'map(select(.g|test("-bg$"))) | (map(select(.kind=="workspace_closed" or .kind=="wrapper_stopped"
+    or (.kind=="resume_finished" and .payload.workspace_closed==true)) | .payload.workspace_id) | unique) as $x
+  | map(select(.kind=="workspace_created" and (.payload.workspace_id | IN($x[]) | not))) | map({run: .run_id[0:8], ws: .payload.workspace_id})' tagged.json
+# 同じ run で前の wrapper の閉じた記録より先に次の wrapper が起動したもの（二重の wrapper の候補）
+jq -c 'map(select(.g|test("-bg$")) | select((.kind | IN("wrapper_launched","workspace_closed","wrapper_stopped")) or (.kind=="resume_finished" and .payload.workspace_closed==true)))
+  | group_by(.run_id) | map(. as $r | ($r | map(select(.kind=="wrapper_launched")) | sort_by(.id)) as $l
+    | [range(0; $l|length) as $i | $l[$i] as $a
+       | ($r | map(select(.kind != "wrapper_launched" and .payload.workspace_id == $a.payload.workspace_id)) | sort_by(.id) | .[0].id // 1e12) as $end
+       | select($i+1 < ($l|length) and $l[$i+1].id < $end) | {run: $a.run_id[0:8], ws: $a.payload.workspace_id}]) | flatten' tagged.json
+# 閉じた記録の無い session と二重の wrapper の候補の run を 1 つずつ読む（session_exited・exit_requested は ev.json に集めていない）
+dagq events --run <run> --all --full --limit 5000 | jq -r '.events | sort_by(.id)[]
+  | select(.kind | IN("wrapper_launched","exit_requested","session_exited","wrapper_heartbeat_expired","resume_finished","wrapper_stopped","workspace_closed","run_adopted"))
+  | "\(.created_at) \(.kind) \(.payload.workspace_id // "") \(.payload.error // "")"'
+# 人か inbox の host の確認と、人が出力を追えなかった報告の記録を探す
+dagq search --kind note --limit 8 'process の残り'; dagq search --kind note --limit 8 '"run log"'
+```
+
+### C1〜C5 の値
+
+| 項目 | 基準値（Claude 非対話 44 run） | 後の窓の値（`claude-headless-bg` 342 run。括弧は `codex-fallback-bg` 47 run） | 計算式（分子/分母） | min_samples を満たしたか |
+|---|---|---|---|---|
+| C1 `-bg` の run の cmux の失敗 | 0（workspace の run の workspace） | **7,042**（0）。全て `capture`/`backend_failed`・`exhausted` で、2 run（task 1437 の run `3d21d841` 6,920（2026-10-04T08:04:14Z〜13:12:12Z）、task 1591 の run `3c5a55c1` 122（08:04:14Z〜08:06:31Z））。error は「the background wrapper background:… has no terminal for a screen」 | `backend_call_failed` のうち `-bg` の run のもの | 標本の数に依らない（0 が期待） |
+| C1 run の無い workspace / workspace を持たない呼び出し | 244（`exists` 166、`capture` 76）/ 91 | 64（`exists`/`backend_timeout` 48、`capture` 16）/ 20（`listed_workspace_ids` 19、`ensure_group` 1） | 件数（7 日） | — |
+| C1 日ごと（全体）と load_avg の最大 | 1,004 件、load 最大 166 | 10-04 7,067（うち上の 7,042）、10-05 46、10-07 13、ほかの日 0。load 最大 119（10-04） | 件数 | — |
+| C2 cmux の workspace の数 | 57（44 / 13） | **0**。`workspace_created` 621 は全て `background:<pid>:<起動時刻>` の background の session の記録 | `workspace_created` のうち `background:` で始まらないもの | — |
+| C2 background の session と閉じた記録の無い数 | — | 525 session（最初 342 / resume 183）のうち 11（`failed` 5・`integrated` 5・走っている 1）（96 session のうち 11） | `workspace_closed`・`wrapper_stopped`・`resume_finished` の `workspace_closed: true` の無い session / session | — |
+| C2 寿命の合計 / 中央値 | 19.4 h / 1,002 秒 | 267.7 h / 992 秒（26.2 h / 337 秒） | 閉じたものだけ | — |
+| C3 claim→最初の turn 中央値 / p90 / 最大 | 3 / 4 / 15 秒 | **1 / 3 / 17 秒**（1 / 1 / 2） | `run_claimed` → 最初の `turn_started`（始まりは `wrapper_launched`） | 342 run ≥ 40 |
+| C3 claim→`wrapper_launched` / →`wrapper_started` / →最初の turn | 1 / 2 / 0（workspace の作成） | 1 / 0 / 0（中央値） | 同上 | 同上 |
+| C4 待ち | 0 回（標本なし） | 7 回、64,021 秒（最大 15,110、全て `answered`）（1 回、31,252 秒）。抱えたのは wrapper の process だけで workspace は 0 | `run_waiting_ended` の数と `waited_secs` の和 | 7 ≥ 3 |
+| C5 turn の結末 | 74 turn: `succeeded` 71、`stopped`/`other` 3 | 850 turn: `succeeded` 825、`failed`/`usage_limit` 10、**`failed`/`launch` 9**、`failed`/`other` 3、`stopped`/`other` 2、`failed`/`sandbox` 1（126 turn: `succeeded` 122、`usage_limit` 3、`other` 1） | `turn_finished` の outcome/failure | 850 ≥ 70 |
+| C5 `wrapper_heartbeat_expired` | 3（2 run） | 4（全て task 2161 の run `d2cf121b`、2026-10-10、heartbeat_age 408〜1,020 秒）（0） | 件数 / run | 342 ≥ 40 |
+| C5 `run_adopted` / `session_reopen_failed` | 0 / 0 | 4（全て `wrapper.alive: true`）/ 0（0 / 0） | 件数 | — |
+| C5 引き継ぎをまたいだ turn | 28 turn（延べ 80 回）、`succeeded` 26・`stopped` 2 | 251 turn（延べ 945 回）、`succeeded` 250・`stopped` 1（15 turn、`succeeded` 14・`failed` 1） | `turn_started` と次の `turn_finished` の間の `supervisor_handed_off` | 251 ≥ 20 |
+| C5 復旧 job | `failed` 2、`resume_exhausted` 2、`idle_process` 1、`stalled` 1 | `failed` 10、`resume_exhausted` 9（`failed` 15）。`failed` の理由は agent の `failed` の receipt・commit が無い・sandbox で、wrapper を見失ったものは無い | `recovery_requested` の `alert` | — |
+| C5 I より後の `wrapper_stopped`（`route/signal`） | —（計装の前） | `after_review/gone` 338、`resume/gone` 18（`after_review/gone` 12、`resume/gone` 2）。ほかに planner の `planner/sigterm` 1。`sigkill`・`left_turn_killed`・`children_killed > 0` は 0 | `wrapper_stopped` の `route/signal` | `after_review` 350 ≥ 20。`triage`・`sweep`・`stop_processes` は 0（満たさない） |
+| C5 I より前の未計装の停止 | — | 147（71） | `background:` の `workspace_closed` で I より前のもの | 率に入れない |
+| C5 `needs_session` の resume の session | resume の workspace 13 | 183（49） | resume の `workspace_created` | 183 ≥ 5 |
+
+kpi の前後比較（`dagq kpi --compare "$B,$A" --by provider --by route --cross`、全体）: `phase.startup` の中央値 665→658 秒（`improved`）、`phase.work` 953→830 秒（`improved`）、`failed_rate` 0.119→0.062（`improved`）、`first_pass_rate` 0.628→0.408（`worsened`）、`backend_failures_per_run` 1.654→18.319（`worsened`、上の 7,042 件による）。`dagq kpi --compare 82010 --area runtime` は `split.separable: true` で、窓の後ろの印は 123128 の 1 つ（下の「重なる変更」）。
+
+### 戻す基準の行ごとの判定
+
+| 3 の行 | 判定 | 根拠の値 |
+|---|---|---|
+| turn の失敗（率） | 当たらない | `usage_limit`・`authentication` を除く `succeeded` 以外が 15/850（1.8%）で 8% 以下（基準 3/74、4%） |
+| turn の失敗（`failure: launch` が 2 件以上） | **当たる** | 9 件（3 run × 3 回。同じ時刻に run を持たない planner の wrapper も 3 件）。下の「launch の失敗の読み方」 |
+| process の残り（掃除の `sweep` の `signal` が `gone` 以外か、host の確認で見つかった） | 判定しない（event の範囲に限れば当たらない） | event: I より後の `route: sweep` の `wrapper_stopped` が 0 件（min_samples は 1 回以上で、実際は 0 回）。host の確認は「未確認」（下の「C5 の process の残り」）。event に出ない残りを無しと断定しない |
+| process の残り（I より後の `after_review` の強制の停止が 5% を超える） | 当たらない | 強制の停止 0/350（0%）。350 件全てが `gone`（`exit_requested` の後に wrapper が自分で終わっていた） |
+| adopt の失敗（引き継ぎか `run_adopted` の後に `-bg` の wrapper を見失って run が `interrupted`・`failed`） | 当たらない | `run_adopted` 4 件は全て `wrapper.alive: true` で引き継いだ。`interrupted` の run は 0、`failed` 24 の復旧 job の理由に wrapper の見失いは無い |
+| adopt の失敗（同じ run に 2 つの wrapper が登録された） | 判定しない | 前の wrapper の閉じた記録より先に次の wrapper が起動した 9 件のうち 6 件は前の wrapper が `session_exited` で終わっている。残る 3 件（下の launch の失敗の 3 run の wrapper pid 14134・61154・38949）は `resume_finished` が「resumed session's wrapper heartbeat expired; session may still be alive」で終わった後、3 秒〜26 分後に次の wrapper が起動しており、前の wrapper がその時点で生きていたかの記録（`wrapper_stopped` か host の確認）が無い |
+| adopt の失敗（引き継ぎをまたいだ `-bg` の turn の `succeeded` 以外が 10% を超える） | 当たらない | 1/251（0.4%） |
+| heartbeat の途絶え（100 run あたり 7 件を超える） | 当たらない | 4/342（1.2 件 / 100 run）。同じ時刻の cmux の時間切れは無い（10-10 は `backend_call_failed` 0）。launch の失敗の 3 run の resume の heartbeat の途絶え（`resume_finished` の error、3 件）を足しても 7/342（2.0 件） |
+| startup（`-bg` の p90 が 30 秒を超える） | 当たらない | p90 3 秒 |
+| 人が出力を追えない（`dagq run log` で追えなかった報告が 1 件） | 当たらない | `dagq search --kind note '"run log"'` が 0 件で、窓に報告の記録が無い |
+
+### launch の失敗の読み方
+
+9 件は task 1861（run `01881c1c`）・task 1442（run `9eea1f21`）・task 1962（run `e2f02d00`）の 3 run が、2026-10-07T13:19:27Z・13:29:28Z・13:39:30Z に同時に `the agent could not be started: launch agent: No such file or directory (os error 2)` になったもの。3 run は 13:06〜13:13Z に resume の wrapper を起動して最初の turn を `usage_limit` で終え、queue の hold の答え（13:19:26Z の `hold_answer_applied`）の後の `continue` と、その後の 2 回の `provider retry` が同じ wrapper の中で起動に失敗した。間に 13:12:55Z の自動更新（`update_installed`、commit `a4cb6a33`）と 13:18:42Z の supervisor の入れ替わり（`run_adopted`、wrapper は生きていた）がある。claim に記録された Claude の CLI の版は 2026-10-07 に 2.1.289 から 2.1.292 に変わっており（その版での最初の claim は 14:39:28Z）、長く生きた wrapper が起動の時点に解決した agent の program か cwd がその間に無くなった可能性があるが、event からは因果を確かめられない（推定）。同じ 3 つの時刻に、13:10Z に起動した runtime の planner の wrapper（`wrapper:planner:1367`、run を持たないので群 `none`）も同じ `failure: launch` を 3 回出しており（event 125327・125370・125392）、worker の run に限らない host の側の変化（Claude の CLI の入れ替わりなど）が、その前に起動して生きていた wrapper に共通に効いたと読める。3 run は 13:42Z に heartbeat の途絶えで resume が終わり、次の resume で新しい wrapper を起動して turn が通り、着地した。workspace の wrapper も run の間は同じく長く生きるので、background に固有の不具合かは分からない。
+
+### C1 の `-bg` の失敗の読み方
+
+7,042 件は cmux の呼び出しではなく、background の backend が画面の読み取り（`capture`）を「terminal が無い」と拒んだ記録（`op: capture`、`code: backend_failed`）。run `3d21d841` の wrapper には 10-04T08:04Z〜13:12Z の 5 時間、約 2.6 秒ごとに、run `3c5a55c1` の wrapper には 08:04Z〜08:06Z の約 2 分に `capture` が打たれた。打った側は event に無い。`capture` の経路は 2026-10-05T23:56Z に着地した workspace の経路の除去（下の「重なる変更」の commit `e6b318de`、`run screen` も消した）の後に無くなり、窓の 10-05 以降の `-bg` の失敗は 0。cmux の呼び出しとしての `-bg` の失敗は 0、`-bg` の run の cmux の workspace も 0。
+
+### C5 の process の残り（event と host の確認を分ける）
+
+- **event で数えた値**: I より後の `wrapper_stopped` は `-bg` の run で 370 件（`after_review` 350、`resume` 20）、全て `signal: gone`、`left_turn_killed` 0、`children_killed > 0` 0。掃除が終わった run の wrapper を止めた `route: sweep` は 0 件で、`triage`・`stop_processes`（`auto_repaired` の `processes`）の停止も 0 件。閉じた記録の無い background の session は 22（`claude-headless-bg` 11、`codex-fallback-bg` 11）で、うち 18 は `exit_requested`（2 件は無し）の後の `session_exited` で wrapper が終わっている（上の「使ったコマンドと 2 との差」の `dagq events --run` で 1 run ずつ読んだ。失敗の receipt で終わった session と、途中で次の resume に代わった session の経路は `wrapper_stopped`・`workspace_closed` を残さない。18 のうち 12 は読んだ時点で `failed`、6 は `integrated` の run の途中の session）。走っている run の 1 を除く 3 は上の pid 14134・61154・38949 で、wrapper が終わった記録が無い
+- **host の確認**: 「未確認」。C5 の `ps` のコマンドを、印 82010 より後に人か inbox が流した記録は、`dagq search --kind note`（「process の残り」「ps 残り」「wrapper ps」「background wrapper 残」、2026-10-11T06:08Z ごろ）で見つからなかった（note 65105 は切り替えの前の 2026-10-02 の調べ）。worker は host を見ないので流していない。上の pid 14134・61154・38949 を含め、event に現れない process の残りは「無し」と断定しない
+
+### 重なる変更
+
+- **task 1440 の commit `e6b318de`（workspace の経路の除去）**: 2026-10-05T23:56:05Z の `update_installed` から効いた。それより前も印 82010 から全ての run が background で起動しており（窓に workspace の非対話の run は 0）、群の比較には効かない。効いたのは C1 の `capture` の拒否の経路が無くなったことで、7,042 件を後の窓の水準に数えない。窓の中に workspace の wrapper の対照が無いので、比較は全て切り替えの前の基準値とだけ行った
+- **goal 92 の cmux の縮小**: 対話の run が窓に 0 で、`claude-interactive` の対照は無い。C1 の run の無い workspace（244→64）と workspace を持たない呼び出し（91→20）の減りは、inbox と planner の workspace が減ったことと load の低さ（下）によるもので、worker の切り替えの効果に数えない。cmux の調子の対照として読めるのはこの run の無い workspace の失敗だけ
+- **印 123128（着地の検証を unit test と選んだ IT にした、2026-10-07T10:27:40Z）**: 着地の検証と resume の回数（衝突だけの resume、`conflict_resume_uncounted` 113）と kpi の `first_pass_rate`（0.628→0.408）に効きうる。wrapper の起動・停止・引き継ぎには触れないので、3 の行の判定には使っていない。`first_pass_rate` の悪化は 3 の行に無く、この節では原因を判定しない
+- **自動更新の引き継ぎ**: 窓に `supervisor_handed_off` 499 件、`update_installed` 183 件（基準の窓は 697 件・236 件）。引き継ぎをまたいだ turn は 251 で、標本として数えた。launch の失敗は自動更新と supervisor の入れ替わりの直後に起きたが、`run_adopted` で wrapper は生きたまま引き継がれており、引き継ぎで wrapper を失ったのではない
+- **load と parallel**: 窓の全ての claim が `parallel: 3`。claim の時の load_avg は中央値 6.6、最大 37、`backend_call_failed` の load_avg の最大は 119（基準の窓は 166）で、基準より負荷が低い。2026-10-09T09:56:06Z から窓の終わりまで claim が 0 で（`claim_held` の `load_average`（`--max-load 16`）と、走っている run とファイルが重なる `claim_deferred`）、run の標本は実質 5.2 日分。2026-10-05T08:11Z〜11:07Z は Codex フォールバック（47 run）。Claude の CLI の版は窓の中で 2.1.288 から 2.1.295 に変わった
+
+### 結論
+
+**退行あり（turn の失敗: `failure: launch`）**。3 の表のうち当たる行は「turn の失敗（`failure: launch` が 2 件以上）」の 1 つで、1 回の出来事（2026-10-07T13:19〜13:39Z、3 run、同じ wrapper の中の再試行）による。ほかに判定しない行が 2 つ残る:
+
+- process の残り（掃除と host の確認）: `route: sweep` の `wrapper_stopped` が 0 件（要る数 1 回以上）、host の確認の記録が無い
+- adopt の失敗（二重の wrapper）: pid 14134・61154・38949 の wrapper が終わった記録（`wrapper_stopped` か host の確認）が無い
+
+`workspace に戻す` と `既定を変える` は人の決定（goal 92、ADR-t1433-3）で閉じているので、この結論は background の経路の直しを決める材料として使う。
+
+### 測定の入力と出力の区分と作り直せる範囲
+
+| 区分 | もの | 作り直せる範囲 |
+|---|---|---|
+| SSOT | queue の event（窓 `F`〜`T` を `--since`/`--until` で閉じた `ev.json`・`ho.json`）と git の履歴（task 1657 の commit `9b110cf8` と `e6b318de` の祖先関係） | 同じ窓で 2 のコマンドを流せば、C1〜C5 の event の件数・時間・I は後で同じ値になる |
+| ビュー | この節の C1〜C5 の表と行ごとの判定（`tagged.json` から jq で計算） | SSOT から再集計できる。保存した出力は持たない |
+| 材料（読んだ時点で変わるもの） | `dagq stats --full` の run の状態（`status.json`。C2 の閉じた記録の無い数の状態の内訳と run の状態の数）: 2026-10-11T05:59Z ごろ取得 | 走っている run（`538060c0`）が終わると内訳が変わる |
+| 材料 | kpi の 2 つの比較: 2026-10-11T06:01:55Z 取得。入力は `--compare "2026-09-25T15:30:00Z..2026-10-04T04:09:32Z,2026-10-04T04:09:32Z..2026-10-11T04:09:32Z" --by provider --by route --cross` と `--compare 82010 --area runtime` | kpi の定義・目標と印（取り消し・追加）が変わると値と confounders が変わる |
+| 材料 | `dagq status` の出力（C5 の `live.txt`）と host の `ps` | 取得していない（worker は流さない）。確認記録の所在は無し（上の「host の確認」） |
+| 材料 | 人か inbox の確認記録の探索（`dagq search --kind note`）: 2026-10-11T06:08Z ごろ | 後で note が足されると結果が変わる |
+
+どの材料も固定バイナリ `~/.local/bin/dagq`（`0.4.0-dev+4621c279`）で、状態を変えないコマンドだけを worker の session のクライアントモードで取得した。取得した出力（`ev.json`・`tagged.json`・`status.json`・kpi の JSON）は run の作業用の directory に置いただけで保存していない。値の記録はこの節の表だけで、SSOT から作り直せない材料の値はこの節の数字を正とする。
 
 ## 取れない項目と要る記録
 
