@@ -48,7 +48,7 @@ related:
 - 後続のtaskはADRを`ADR-t<ID>-<N>`で参照する（日付を含めないので着地前から書ける）。今どうなっているかを指すときは`docs/design/`の文書かコードを、なぜそうしたかを指すときはADRを指す（決定4、ADR-t1942-1がamends）。
 - 既存の4桁のADR（0001〜、IDは`adr-NNNN`）と、登録済みのtaskが予約した4桁の番号はそのまま使い、振り直さない。新しく登録するADRのtaskは新しい形にする。
 - 例外: 予約した4桁の番号がmainですでに埋まっていたら（`integrate`の`check-adr-numbers.sh`が重複で落ちてresumeされたときも同じ）、番号の衝突は人が要る理由（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定41）に当たらないので、workerは`dagq ask`にせず、自分のtaskのIDの新しい形（上の1つ目）にファイル名とfrontmatterの`id`を書き直す。自分の変更の中の参照も合わせ、元の番号と新しいIDをreceiptの`summary`に書く。
-- `scripts/check-adr-numbers.sh`（CIも実行する）が検出するものはscriptの冒頭のcommentが持つ。scriptの名前は登録済みのtaskのverifyが使うので変えない。
+- `scripts/check-adr-numbers.sh`（CIと、差分がそのpathに当たるrunの[プログラムのreview](../design/supervisor-lifecycle/review-programs.md)も実行する。どのscriptを挙げるかは`dagq.toml`の`[review.programs]`）が検出するものはscriptの冒頭のcommentが持つ。scriptの名前は登録済みのtaskのverifyが使うので変えない。
 
 ## design
 
@@ -105,7 +105,7 @@ related:
   - 1行の1,024 byteは、1文1行で日本語の約340字で、これを超える1文は分ける。
   - AGENTS.mdの上限（下の「AGENTS.md」）と同じく行数では測らずbyteで測り、今の値に余裕を足すのではなく、書き直しの後に収まるべき大きさで決めた。
 - 検査のscriptは`scripts/check-design-docs.sh`で、この節の予算の値と下の「検査の境界」を当てはめ、超えた文書・行・値と上限を出して落ちる。
-  CIも実行し、`docs/design/`を変えうるtaskのverifyにも付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
+  CIとrunのプログラムのreview（`dagq.toml`の`[review.programs]`に挙げたとき）も実行し、`docs/design/`を変えうるtaskのverifyにも付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
 - 上限を超える既存の文書は、許可の一覧`.config/design-docs-allow.toml`に、文書ごとに超えている指標の今の値（大きさのbyte数・最も長い行のbyte数・task番号の数）を書き、その値を上限として増えないように止める。
   一覧の値は下げるか消すだけにする。
   新しい文書を一覧に足さず、文書を増やすために値を引き上げない（検査は一覧をbaseの一覧と比べ、足した行・値と上げた値を誤りにする）。
@@ -146,9 +146,9 @@ frontmatterは[frontmatter仕様](../frontmatter.md)に従う。
 
 ADR以外の文書（design・development・plans、`docs/README.md`・`docs/frontmatter.md`・`docs/adr/README.md`も）のfrontmatterは`updated`と`last_verified`を持たない。文書を変えるtaskがこの行を書き換えると、同じ文書を変える2つのtaskが内容が重ならなくてもこの行で衝突するためで、経緯は[ADR-t1964-1](../adr/2026-10-07-t1964-1-non-adr-docs-drop-updated-and-last-verified.md)。いつ・どのtaskが変えたかは`git log -- <path>`で辿る。
 
-`created`とADRの`updated`の行は`YYYY-MM-DD`の日付だけを書き、行末にどのtaskが何を変えたかのコメント（`# task N`など）を書かない。どのtaskが変えたかはgitの履歴（着地のcommitの`Dagq-Task` trailer）が持つ。既存の文書（ADRも含む。決定と本文に触れないのでappend-onlyに当たらない）の日付の行にコメントがあれば、日付の値を変えずにコメントだけを消してよい。経緯は[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)。`scripts/check-frontmatter-dates.sh`はfrontmatterの日付の行（frontmatter仕様が持たせるもの）にコメントがあれば、ファイルと行を出して落ちる検査で、CIが実行する（docsを変えるtaskのverifyへの足し方は[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
+`created`とADRの`updated`の行は`YYYY-MM-DD`の日付だけを書き、行末にどのtaskが何を変えたかのコメント（`# task N`など）を書かない。どのtaskが変えたかはgitの履歴（着地のcommitの`Dagq-Task` trailer）が持つ。既存の文書（ADRも含む。決定と本文に触れないのでappend-onlyに当たらない）の日付の行にコメントがあれば、日付の値を変えずにコメントだけを消してよい。経緯は[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)。`scripts/check-frontmatter-dates.sh`はfrontmatterの日付の行（frontmatter仕様が持たせるもの）にコメントがあれば、ファイルと行を出して落ちる検査で、CIとrunのプログラムのreview（`dagq.toml`の`[review.programs]`に挙げたとき）が実行する（docsを変えるtaskのverifyへの足し方は[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
 
-`scripts/check-doc-frontmatter.sh`はADR以外の`docs/`の文書のfrontmatter（必須のkey、typeとstatusの値、idの形と重複、`updated`と`last_verified`の行が無いこと（ADR-t1964-1））を、`scripts/check-doc-links.sh`は`docs/`とrootの`.md`の相対リンクが実在のファイルかdirectoryを指すことを検査し、違反のファイルと理由を出して落ちる。どちらもCIが実行し、`docs/`を変えるtaskのverifyに付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。検査の範囲と例外（ADRのfrontmatterを見ないこと、append-onlyのADRから削除済みの`docs/journal/`と`docs/design/broker.md`へのリンク）はscriptの冒頭のcommentが持つ。
+`scripts/check-doc-frontmatter.sh`はADR以外の`docs/`の文書のfrontmatter（必須のkey、typeとstatusの値、idの形と重複、`updated`と`last_verified`の行が無いこと（ADR-t1964-1））を、`scripts/check-doc-links.sh`は`docs/`とrootの`.md`の相対リンクが実在のファイルかdirectoryを指すことを検査し、違反のファイルと理由を出して落ちる。どちらもCIとrunのプログラムのreview（`dagq.toml`の`[review.programs]`に挙げたとき）が実行し、`docs/`を変えるtaskのverifyに付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。検査の範囲と例外（ADRのfrontmatterを見ないこと、append-onlyのADRから削除済みの`docs/journal/`と`docs/design/broker.md`へのリンク）はscriptの冒頭のcommentが持つ。
 
 ## 権限の表を写す文書
 
@@ -174,7 +174,7 @@ workerはreceiptの前に、受け入れ条件の対応づけ（[手元の検証
 ## AGENTS.md
 
 - AGENTS.mdは概要・役割と変更の範囲ごとの読む案内・本番queueと開発環境の境界・開始時の短い制約・検証と文書の規則への参照だけを持つ（[ADR-t1453-2](../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)決定1・3）。規則の本文はAGENTS.mdに足さず、その正本（`docs/development/`の該当の文書、実装は`docs/design/`、経緯はADRと`docs/plans/`、設定値は`dagq.toml`）に書き、AGENTS.mdには読む案内が要るときだけ参照の1行を足す。
-- 上限は9,216 byte（9 KiB）。`scripts/check-agents-md-size.sh`がAGENTS.mdのbyte数（`wc -c`）を測り、上限を超えればbyte数と上限を出してexit 1にし、CIも実行する。行数では測らない（日本語の1行は長く、行数が大きさを表さない。ADR-t1453-2決定6）。
+- 上限は9,216 byte（9 KiB）。`scripts/check-agents-md-size.sh`がAGENTS.mdのbyte数（`wc -c`）を測り、上限を超えればbyte数と上限を出してexit 1にし、CIとrunのプログラムのreview（`dagq.toml`の`[review.programs]`に挙げたとき）も実行する。行数では測らない（日本語の1行は長く、行数が大きさを表さない。ADR-t1453-2決定6）。
 - 決め方: 組み直した後（task 1461、2026-10-04）のAGENTS.mdは8,340 byte。余裕は876 byte（約10%）で、案内の参照の行を2〜3行足せるが、規則の本文の節を足せば超える大きさにした。候補の4〜8 KiBは、どれも今の案内（役割と変更の範囲ごとに読む文書の名指し）が入らない（8 KiB＝8,192 byteでも148 byte足りない）。
 - 上限を上げるのは、案内（読む文書の名指し）が増えて規則の本文を正本へ移してもなお超えるときだけで、同じ変更でこの節の値と決め方、scriptの`limit`を直す。
 
