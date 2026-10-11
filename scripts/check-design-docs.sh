@@ -252,7 +252,12 @@ END {
     }
   }
   if (bad) {
-    print me ": the budgets and how to fix: docs/development/documents.md, section design (split the document or move the details to doc comments next to the definitions; an allow-list item may only go down or out)" > "/dev/stderr"
+    print me ": how to fix, in this order:" > "/dev/stderr"
+    print "  1. delete only task and goal numbers and history, facts written elsewhere too, and lists the code shows (fields, flags, defaults, test, function and module names)" > "/dev/stderr"
+    print "  2. move a detail the code shows and nothing else writes to a doc comment next to its definition (the map line may point there)" > "/dev/stderr"
+    print "  3. if it still does not fit, split the document (the new one keeps the map budget and the old one links to it by a relative link)" > "/dev/stderr"
+    print "  4. do not delete a map line nothing else writes (entry points, promises and pitfalls the code does not show, rules); before deleting, check where the same fact stays (a document or a doc comment)" > "/dev/stderr"
+    print "  an allow-list item may only go down or out; the budgets and details: docs/development/documents.md, section design" > "/dev/stderr"
     exit 1
   }
   printf "%s: %d documents under docs/design, %d in %s: ok\n", me, nd, nh, allowname
@@ -392,6 +397,10 @@ self_test() {
   has case_hash_plural_counted "$d/tasks-counted.md:11: 2 task number(s)"
   has after_the_fence_counted "$d/tasks-counted.md:16: 1 task number(s)"
   has total "$d/tasks-counted.md: 7 task numbers in the body, over the budget of 0"
+  has how_to_fix_doc_comment "move a detail the code shows and nothing else writes to a doc comment next to its definition"
+  has how_to_fix_split "split the document"
+  has how_to_fix_keep_map_lines "do not delete a map line nothing else writes"
+  has how_to_fix_documents_md "docs/development/documents.md, section design"
   lacks fence_not_counted "$d/tasks-counted.md:13:"
   fresh
   cp "$fixtures/frontmatter-trailing-space.md" "$fixtures/frontmatter-unclosed.md" "$r/$d/"
@@ -422,6 +431,7 @@ self_test() {
   : >"$r/$d/overview.md" && pad "$r/$d/overview.md" 16385
   check sizes_one_byte_over 1
   has map_over "$d/map.md: 30721 bytes without the frontmatter, over the budget of 30720 bytes"
+  has how_to_fix_on_size "do not delete a map line nothing else writes"
   has concept_over "$d/overview.md: 16385 bytes without the frontmatter, over the budget of 16384 bytes"
   lacks nested_overview_is_a_map "$d/sub/overview.md"
   fresh
@@ -441,6 +451,7 @@ self_test() {
   has ascii_line_over "$d/lines.md:2: a line of 1025 bytes, over the budget of 1024 bytes"
   has multibyte_line_over "$d/lines.md:3: a line of 1026 bytes, over the budget of 1024 bytes"
   has fence_line_over "$d/lines.md:5: a line of 1025 bytes, over the budget of 1024 bytes"
+  has how_to_fix_on_line "move a detail the code shows and nothing else writes to a doc comment"
 
   # (i) The allow list against the tree.
   fresh
