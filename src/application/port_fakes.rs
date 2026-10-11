@@ -554,3 +554,134 @@ impl SessionRegistry for SessionRecords {
         unreachable!("close_review_session is not what the test reaches")
     }
 }
+
+/// The runs ([`RunReads::active_runs`], [`RunReads::run`]) and their events
+/// ([`EventStore::run_events`], counting the reads per run); the queue has
+/// no event of its own.
+#[derive(Default)]
+pub(crate) struct RunsAndEvents {
+    pub(crate) active: Vec<TaskRun>,
+    pub(crate) runs: Vec<TaskRun>,
+    pub(crate) events: std::collections::HashMap<RunId, Vec<RunEvent>>,
+    pub(crate) event_reads: RefCell<std::collections::HashMap<RunId, usize>>,
+}
+
+#[allow(unused_variables)]
+impl RunReads for RunsAndEvents {
+    fn active_runs(&self) -> Result<Vec<TaskRun>> {
+        Ok(self.active.clone())
+    }
+    fn all_runs(&self) -> Result<Vec<TaskRun>> {
+        unreachable!("all_runs is not what the test reaches")
+    }
+    fn run(&self, id: &RunId) -> Result<TaskRun> {
+        self.active
+            .iter()
+            .chain(&self.runs)
+            .find(|run| run.id() == id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no run {id}"))
+    }
+    fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>> {
+        unreachable!("runs_with_status is not what the test reaches")
+    }
+    fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
+        unreachable!("next_awaiting_integration is not what the test reaches")
+    }
+    fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
+        unreachable!("ended_run_workspaces is not what the test reaches")
+    }
+    fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
+        unreachable!("ended_run_worktrees is not what the test reaches")
+    }
+    fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>> {
+        unreachable!("ended_run_worktree is not what the test reaches")
+    }
+    fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
+        Ok(Vec::new())
+    }
+    fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
+        unreachable!("runs_with_pending_push is not what the test reaches")
+    }
+    fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
+        unreachable!("run_in_workspace is not what the test reaches")
+    }
+}
+
+#[allow(unused_variables)]
+impl EventStore for RunsAndEvents {
+    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+        unreachable!("update_events is not what the test reaches")
+    }
+    fn all_events(&self) -> Result<Vec<RunEvent>> {
+        unreachable!("all_events is not what the test reaches")
+    }
+    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
+        unreachable!("latest_task_events is not what the test reaches")
+    }
+    fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
+        *self.event_reads.borrow_mut().entry(id.clone()).or_default() += 1;
+        Ok(self.events.get(id).cloned().unwrap_or_default())
+    }
+    fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
+        unreachable!("has_run_event is not what the test reaches")
+    }
+    fn record_runtime_event(
+        &self,
+        id: &RunId,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        unreachable!("record_runtime_event is not what the test reaches")
+    }
+    fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
+        unreachable!("last_observe is not what the test reaches")
+    }
+    fn latest_event_id(&self) -> Result<EventId> {
+        unreachable!("latest_event_id is not what the test reaches")
+    }
+    fn record_backend_failure(
+        &self,
+        run: Option<&RunId>,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        unreachable!("record_backend_failure is not what the test reaches")
+    }
+    fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
+        unreachable!("record_queue_event is not what the test reaches")
+    }
+    fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
+        Ok(None)
+    }
+    fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
+        unreachable!("latest_events_of is not what the test reaches")
+    }
+    fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
+        Ok(None)
+    }
+    fn latest_events_by_supervisor(
+        &self,
+        kinds: &[&str],
+        supervisors: &[&str],
+    ) -> Result<Vec<RunEvent>> {
+        Ok(Vec::new())
+    }
+    fn events_of_between(
+        &self,
+        kinds: &[&str],
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        unreachable!("events_of_between is not what the test reaches")
+    }
+    fn events_between(
+        &self,
+        after: EventId,
+        upto: EventId,
+        filter: &EventFilter,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        unreachable!("events_between is not what the test reaches")
+    }
+}

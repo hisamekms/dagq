@@ -55,39 +55,8 @@ pub fn status(
     let now = clock.now();
     let registrations = queue.supervisors()?;
     let leases = queue.run_leases()?;
-    let runs = listed_runs(queue, &leases)?
-        .into_iter()
-        .map(|run| {
-            let lease = leases
-                .iter()
-                .find(|l| l.run_id == *run.id())
-                .map(|l| lease_health(l, now, control));
-            let events = queue.run_events(run.id())?;
-            let mut entry = json!({
-                "run_id": run.id(),
-                "task_id": run.task_id(),
-                "status": run.status(),
-                "workspace_id": run.workspace_id(),
-                "worktree_path": run.worktree_path(),
-                "lease": lease,
-                // What it does now and how it uses its slot (goal 98).
-                "progress": Progress::of(run.status(), progress_lease(lease.as_ref()), &events, now),
-            });
-            let events = queue.run_events(run.id())?;
-            // Why it waits or failed (ADR-0034), for a run that has an error.
-            if let Some(code) = reason::run_error_code(&run, &events) {
-                entry["last_error_code"] = json!(code);
-            }
-            // A session in the background: its wrapper's pid and its log
-            // (`run log`, ADR-t1404-1 decision 6).
-            if let Some(session) =
-                crate::domain::background_wrapper::current_background_session(&events)
-            {
-                entry["background"] = json!(session);
-            }
-            Ok(entry)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let (runs, supervisors, waiting) =
+        runs_slots_and_waits(queue, control, &registrations, &leases, now)?;
     let asks = queue
         .asks(AskQuery {
             open: true,
@@ -119,13 +88,6 @@ pub fn status(
             entry
         })
         .collect::<Vec<_>>();
-    let (supervisors, waiting) = slots_and_waits(
-        queue,
-        supervisors(&registrations, &leases, now, control),
-        &registrations,
-        &leases,
-        now,
-    )?;
     Ok(json!({
         "checked_at": now,
         "supervisors": supervisors,
@@ -171,10 +133,70 @@ pub fn status(
     }))
 }
 
+/// `status`'s `runs`, `supervisors` and `waiting`. Each listed run's
+/// events are read once and shared by its entry in `runs` and its slot or
+/// wait in [`slots_and_waits`]; every leased run is listed
+/// ([`listed_runs`]).
+pub(super) fn runs_slots_and_waits(
+    queue: &(impl RunLog + ?Sized),
+    control: &dyn ProcessControl,
+    registrations: &[SupervisorRegistration],
+    leases: &[RunLease],
+    now: i64,
+) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>)> {
+    let listed = listed_runs(queue, leases)?;
+    let mut events = HashMap::with_capacity(listed.len());
+    for run in &listed {
+        events.insert(run.id().clone(), queue.run_events(run.id())?);
+    }
+    let runs = listed
+        .iter()
+        .map(|run| {
+            let lease = leases
+                .iter()
+                .find(|l| l.run_id == *run.id())
+                .map(|l| lease_health(l, now, control));
+            let events = &events[run.id()];
+            let mut entry = json!({
+                "run_id": run.id(),
+                "task_id": run.task_id(),
+                "status": run.status(),
+                "workspace_id": run.workspace_id(),
+                "worktree_path": run.worktree_path(),
+                "lease": lease,
+                // What it does now and how it uses its slot (goal 98).
+                "progress": Progress::of(run.status(), progress_lease(lease.as_ref()), events, now),
+            });
+            // Why it waits or failed (ADR-0034), for a run that has an error.
+            if let Some(code) = reason::run_error_code(run, events) {
+                entry["last_error_code"] = json!(code);
+            }
+            // A session in the background: its wrapper's pid and its log
+            // (`run log`, ADR-t1404-1 decision 6).
+            if let Some(session) =
+                crate::domain::background_wrapper::current_background_session(events)
+            {
+                entry["background"] = json!(session);
+            }
+            entry
+        })
+        .collect();
+    let (supervisors, waiting) = slots_and_waits(
+        queue,
+        supervisors(registrations, leases, now, control),
+        registrations,
+        leases,
+        &events,
+        now,
+    )?;
+    Ok((runs, supervisors, waiting))
+}
+
 /// Each registered supervisor's `slots` (`used` of `parallel`) and
 /// `waiting` (`count` of `limit`, with the `returning` among them), and the
 /// runs that wait for a person or for a slot to go back to (ADR-0071
-/// decision 12), from the leases and the run events. `used` counts the
+/// decision 12), from the leases and the run events (`events` by run, read
+/// here for a leased run not in it). `used` counts the
 /// leased runs that do not wait, landing ones included (ADR-t610-1), less
 /// `landing_queue`: those that wait only for their landing turn, up to
 /// `parallel` (ADR-t1591-1). A heavy task is claimed while `used` and
@@ -193,6 +215,7 @@ pub(super) fn slots_and_waits(
     health: Vec<SupervisorHealth>,
     registrations: &[SupervisorRegistration],
     leases: &[RunLease],
+    events: &HashMap<RunId, Vec<RunEvent>>,
     now: i64,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
     let mut waiting = Vec::new();
@@ -204,11 +227,18 @@ pub(super) fn slots_and_waits(
     for lease in leases {
         let run = queue.run(&lease.run_id)?;
         let entry = counts.entry(lease.token.as_str()).or_default();
-        let events = queue.run_events(run.id())?;
+        let read;
+        let events = match events.get(run.id()) {
+            Some(events) => events,
+            None => {
+                read = queue.run_events(run.id())?;
+                &read
+            }
+        };
         // The same wait as the run's `progress.slot` in `runs` ([`crate::domain::run_progress::SlotUse`]).
-        let Some(state) = WaitState::of(&events) else {
+        let Some(state) = WaitState::of(events) else {
             entry.0 += 1;
-            if crate::domain::run_progress::in_landing_queue(run.status(), &events) {
+            if crate::domain::run_progress::in_landing_queue(run.status(), events) {
                 entry.1 += 1;
             }
             continue;

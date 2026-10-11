@@ -192,6 +192,59 @@ mod tests {
         );
     }
 
+    fn run_at(id: &str, created_at: &str) -> TaskRun {
+        TaskRun::restore(crate::domain::RunRecord {
+            id: RunId::new(id).unwrap(),
+            task_id: TaskId::new(7),
+            status: RunStatus::Running,
+            requested_provider: crate::domain::Provider::Claude,
+            actual_provider: crate::domain::Provider::Claude,
+            worker_mode: crate::domain::worker::Worker::default_mode(
+                crate::domain::Provider::Claude,
+            ),
+            base_commit: crate::domain::CommitSha::parse("a".repeat(40), "commit").unwrap(),
+            branch: None,
+            worktree_path: None,
+            workspace_id: None,
+            receipt_path: None,
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: None,
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: created_at.to_owned(),
+        })
+        .unwrap()
+    }
+
+    /// `status`'s `runs` and `slots_and_waits` share each run's events:
+    /// a listed run, a leased one and a run leased but not active are each
+    /// read once. `attention`, which reads its own runs' events, is outside
+    /// [`runs_slots_and_waits`] and not counted.
+    #[test]
+    fn status_runs_and_slots_read_each_runs_events_once() {
+        let now = 1_000;
+        let queue = crate::application::port_fakes::RunsAndEvents {
+            active: vec![run_at("r1", "1"), run_at("r2", "2")],
+            runs: vec![run_at("r3", "3")],
+            ..Default::default()
+        };
+        let registrations = [registration("a", 1, now)];
+        let leases = [lease("r1", "a", 1, now), lease("r3", "a", 1, now)];
+        let (runs, supervisors, waiting) =
+            runs_slots_and_waits(&queue, &OnlyOne, &registrations, &leases, now).unwrap();
+        let ids: Vec<_> = runs.iter().map(|run| run["run_id"].clone()).collect();
+        assert_eq!(ids, [json!("r1"), json!("r2"), json!("r3")]);
+        assert_eq!(supervisors[0]["slots"]["used"], 2);
+        assert!(waiting.is_empty());
+        let reads = queue.event_reads.borrow();
+        for id in ["r1", "r2", "r3"] {
+            assert_eq!(reads.get(&RunId::new(id).unwrap()), Some(&1), "{id}");
+        }
+        assert_eq!(reads.len(), 3);
+    }
+
     #[test]
     fn held_names_the_recorded_holds_and_a_waiting_spacing_after_no_supervisor() {
         let record = RunEvent {
