@@ -329,7 +329,7 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 - 理由のコード（`ReasonCode`）とは別の集合で、どれも失敗ではなく「そのproviderが使えない」ことを言う。
 - 控えの長さは`SwitchReason::hold_secs`で、利用上限の文が解ける時刻を言えばそれを優先する。
 - 失敗したtestやturnでは切り替えず、使えないと安全に判定できるときだけ切り替える。
-- 必須のreviewのsubagentを動かせない行き先は、reviewの起動の理由にだけ入りproviderは控えない（動かせる側の控えは待つ。[Review](supervisor-lifecycle/review.md#reviewのsubagent)）。
+- 過去のreviewの`launch`の`subagents_unsupported`は集合に無く、`ActorLaunch::recorded`は無いものとして読む。
 
 ## headless jobの種類・権限の意図・失敗（`JobKind`・`JobAccess`・`JobFailure`）
 

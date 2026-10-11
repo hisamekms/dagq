@@ -913,3 +913,9 @@ task = 1903
 name = "runtime_queue_hold_detect::reviews_stopped_at_a_login_join_one_ask_and_review_again_after_done"
 reason = "B 境界（SQLite・プロセス・supervisor の配線）: 2 本の run の review の job が login の切れで止まって 1 つの認証の ask に加わり、done の後にその job だけが同じ review の中で起動し直して着地することを、実際の worker の session と hold の ask で確かめる。控えと行き先の判断は supervise::landing の unit test"
 task = 1903
+
+# 7.3s, ignored (runs only with DAGQ_REAL_CLAUDE)
+[[test]]
+name = "review_subagents::the_real_claude_review_loads_no_worktree_settings"
+reason = "B 境界（プロセス）: 実 Claude Code の process が dagq の全体の review の argv では worktree の .claude/settings.json を読まないことを、対照の review と 2 回の実の呼び出しで確かめる。argv の組み立ては infrastructure::adapters の unit test"
+task = 1904

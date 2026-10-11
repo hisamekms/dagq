@@ -436,13 +436,6 @@ impl AgentProvider for Codex {
     fn relocated_executable(&self) -> Option<PathBuf> {
         relocated(&self.executable, CODEX_NAME, executable)
     }
-    /// Codex's sub-agents are not known to run in `exec`, to keep its
-    /// sandbox or to ignore the worktree's `.codex` (ADR-t1453-1 decision
-    /// 8): a review that requires subagents is not started on Codex, and
-    /// one that requires none is as before.
-    fn runs_review_subagents(&self) -> bool {
-        false
-    }
     /// A [`headless_command`](AgentProvider::headless_command) of
     /// [`JobAccess::ReadFiles`] in the change's tree, with the tree
     /// distrusted ([`distrust_config`], ADR-t1570-1) and the declared tools'
@@ -1361,13 +1354,6 @@ mod tests {
         for command in [&first, &resumed] {
             assert!(!args(command).contains(&distrust), "{:?}", args(command));
         }
-        // Codex runs no review subagents (ADR-t1453-1 decision 8): it says
-        // so, refuses them, and its review command is as before.
-        assert!(!codex.runs_review_subagents());
-        let mut handed = review.clone();
-        let agent = crate::domain::review_subagents::AgentDefinition::read("design", "Check it.\n");
-        assert!(codex.review_subagents(&mut handed, &[agent]).is_err());
-        assert_eq!(handed, review);
         assert!(codex.turn_session_from_output());
         assert!(codex.turn_reader().is_ok());
         assert!(Codex::new("/nonexistent/codex".into()).preflight().is_err());

@@ -932,7 +932,6 @@ fn prompts_take_the_rules_from_the_repository_in_order() {
         &task(7, "work", TaskStatus::InProgress),
         &run(7, RunStatus::Succeeded, Some(SHA)),
         "/r/review.md",
-        None,
     )
     .text;
     let order = "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, ";
@@ -1735,13 +1734,7 @@ fn every_worker_text_that_writes_a_receipt_maps_the_acceptance_once() {
         assert!(text.len() <= 600, "{}", text.len());
         assert!(!text.contains("cargo") && !text.contains('`'), "{text}");
     }
-    let review = review_prompt(
-        &task,
-        &run_on(Provider::Claude, WorkerMode::Headless),
-        "r",
-        None,
-    )
-    .text;
+    let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r").text;
     assert!(!review.contains(ACCEPTANCE_MAP) && !review.contains(ACCEPTANCE_REMAP));
 }
 
@@ -1861,13 +1854,7 @@ fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
     ] {
         assert!(!DOCS_CHECK.contains(word), "{word}");
     }
-    let review = review_prompt(
-        &task,
-        &run_on(Provider::Claude, WorkerMode::Headless),
-        "r",
-        None,
-    )
-    .text;
+    let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r").text;
     assert!(!review.contains(DOCS_CHECK));
     assert!(!review.contains("the documents you checked against the diff"));
 }
@@ -1879,13 +1866,7 @@ fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
 #[test]
 fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-    let review = review_prompt(
-        &task,
-        &run_on(Provider::Codex, WorkerMode::Headless),
-        "r",
-        None,
-    )
-    .text;
+    let review = review_prompt(&task, &run_on(Provider::Codex, WorkerMode::Headless), "r").text;
     assert_eq!(review.matches(REVIEW_DOCS_CHECK).count(), 1, "{review}");
     assert!(review.contains(&format!(
             "Do not change any file.\n{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}\nAcceptance criteria of the task:"
@@ -1944,13 +1925,7 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
 #[test]
 fn the_review_prompt_names_the_repositorys_instructions() {
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-    let review = review_prompt(
-        &task,
-        &run_on(Provider::Claude, WorkerMode::Headless),
-        "r",
-        None,
-    )
-    .text;
+    let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r").text;
     let material = "Read the worktree if you need more. Do not change any file.\n";
     assert!(
         review.contains(&format!("{material}{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}")),
@@ -3041,26 +3016,20 @@ fn a_goal_review_prompt_of_many_large_tasks_stays_within_its_limits() {
     }
 }
 
-/// The run review of a task whose title, acceptance and required
-/// subagents are huge stays within [`RUN_REVIEW_PROMPT_LIMIT`] and
+/// The run review of a task whose title and acceptance are huge stays
+/// within [`RUN_REVIEW_PROMPT_LIMIT`] and
 /// names where in the review material the acceptance is whole.
 #[test]
 fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
     let task = big_task(7, 100_000);
-    let subagents = format!(
-        "\nRequired review subagents: ... in /runs/run/review-subagents-1.json\n{}{}",
-        big("- agent (changed: src/a.rs)\n", 50_000),
-        super::super::review::SUBAGENTS_INSTRUCTION
-    );
     let fitted = review_prompt(
         &task,
         &run_on(Provider::Claude, WorkerMode::Headless),
         "/runs/run/review.md",
-        Some(&subagents),
     );
     within(&fitted, RUN_REVIEW_PROMPT_LIMIT);
     let bytes = &fitted.bytes;
-    for section in ["title", "acceptance", "subagents"] {
+    for section in ["title", "acceptance"] {
         assert_eq!(bytes.omitted.get(section), Some(&1), "{section}: {bytes:?}");
     }
     assert!(
@@ -3073,24 +3042,11 @@ fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
     assert!(fitted.text.contains(
         "read it whole in the review material at /runs/run/review.md, its section Acceptance"
     ));
-    assert!(fitted.text.contains("in /runs/run/review-subagents-1.json"));
-    assert!(
-        fitted
-            .text
-            .contains("every agent and the paths that selected it are in the file the list names")
-    );
-    // How to run the agents and report them is never cut.
-    assert!(
-        fitted
-            .text
-            .ends_with(super::super::review::SUBAGENTS_INSTRUCTION)
-    );
     // A small task is not cut.
     let small = review_prompt(
         &task_with_evidence(7, Vec::new()),
         &run_on(Provider::Claude, WorkerMode::Headless),
         "r",
-        None,
     );
     assert!(
         small.bytes.omitted.is_empty() && small.bytes.over_limit.is_none(),

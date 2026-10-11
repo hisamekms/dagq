@@ -37,10 +37,6 @@ string_enum!(SwitchReason {
     Authentication => "authentication",
     UsageLimit => "usage_limit",
     LaunchFailed => "launch_failed",
-    // A review that requires subagents its provider cannot run
-    // (ADR-t1453-1 decision 8): the provider itself can be used, so it is
-    // not held.
-    SubagentsUnsupported => "subagents_unsupported",
 });
 
 impl SwitchReason {
@@ -66,16 +62,15 @@ impl SwitchReason {
 
     /// Whether this says the provider cannot be used (missing, not
     /// started, a login, a usage limit): the moves a fallback turned off
-    /// stops (ADR-t1857-1). `--no-claude` (a person's ban, ADR-t1204-1) and
-    /// a review's need of subagents (a choice by ability, ADR-t1453-1
-    /// decision 8) still move.
+    /// stops (ADR-t1857-1). `--no-claude` (a person's ban, ADR-t1204-1)
+    /// still moves.
     pub const fn unusable(self) -> bool {
         match self {
             Self::ExecutableMissing
             | Self::LaunchFailed
             | Self::Authentication
             | Self::UsageLimit => true,
-            Self::Disabled | Self::SubagentsUnsupported => false,
+            Self::Disabled => false,
         }
     }
 
@@ -86,9 +81,8 @@ impl SwitchReason {
     /// text says ends then instead ([`reset_at`]).
     pub const fn hold_secs(self) -> i64 {
         match self {
-            // Policy, never a timed provider hold; nor is a review's need
-            // of subagents (ADR-t1453-1 decision 8).
-            Self::Disabled | Self::SubagentsUnsupported => 0,
+            // Policy, never a timed provider hold.
+            Self::Disabled => 0,
             Self::UsageLimit => 1800,
             Self::Authentication => 900,
             Self::LaunchFailed | Self::ExecutableMissing => 600,
@@ -406,10 +400,9 @@ pub const fn wall_of(reason: SwitchReason) -> Option<Wall> {
     match reason {
         SwitchReason::UsageLimit => Some(Wall::UsageLimit),
         SwitchReason::Authentication => Some(Wall::Authentication),
-        SwitchReason::Disabled
-        | SwitchReason::LaunchFailed
-        | SwitchReason::ExecutableMissing
-        | SwitchReason::SubagentsUnsupported => None,
+        SwitchReason::Disabled | SwitchReason::LaunchFailed | SwitchReason::ExecutableMissing => {
+            None
+        }
     }
 }
 
@@ -794,10 +787,8 @@ mod tests {
             routes(&Worker::ALL, none, false),
             routes(&Worker::ALL, none, true)
         );
-        // A ban and a need of subagents are not a provider that cannot be
-        // used.
+        // A ban is not a provider that cannot be used.
         assert!(!SwitchReason::Disabled.unusable());
-        assert!(!SwitchReason::SubagentsUnsupported.unusable());
     }
 
     /// `--no-claude` (a person's ban) sends a Claude task to Codex whether
@@ -1041,7 +1032,6 @@ mod tests {
             SwitchReason::Disabled,
             SwitchReason::LaunchFailed,
             SwitchReason::ExecutableMissing,
-            SwitchReason::SubagentsUnsupported,
         ] {
             assert_eq!(wall_of(reason), None, "{reason:?}");
         }

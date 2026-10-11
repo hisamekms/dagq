@@ -412,12 +412,14 @@ string_enum!(ReviewDecision {
     Concern => "concern",
 });
 
-/// What the headless review prints on stdout: one JSON object. Each item
-/// of its `reasons` is a text, or a text with its reason codes
-/// (ADR-t947-1): `reasons` keeps the texts and `reason_codes` each item's
-/// codes, empty for an item without them.
+/// A run review's verdict: what the whole review's job prints on stdout,
+/// one JSON object, with each agent job's result beside it once the review
+/// assembled them ([`review_jobs::assemble`]), as `review_finished` records
+/// it. Each item of its `reasons` is a text, or a text with its reason
+/// codes (ADR-t947-1): `reasons` keeps the texts and `reason_codes` each
+/// item's codes, empty for an item without them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "PrintedReviewVerdict")]
+#[serde(from = "RecordedReviewVerdict")]
 pub struct ReviewVerdict {
     pub verdict: ReviewDecision,
     pub reasons: Vec<String>,
@@ -436,12 +438,16 @@ pub struct ReviewVerdict {
     /// `scope` nor `discard`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_category: Option<concern::ConcernReason>,
-    /// The results of the review's required subagents (ADR-t1453-1
-    /// decision 5), one per agent; none for a review that requires none.
+    /// The results of the review's agent jobs (ADR-t1895-1), one per
+    /// agent; none for a review that selected none, and never the whole
+    /// review's own, which judges alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<review_subagents::AgentResult>,
 }
 
+/// What the whole review prints ([`ReviewVerdict::parse`]): its own
+/// judgment only, so a field it does not know (an `agents` array among
+/// them) makes it unreadable.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrintedReviewVerdict {
@@ -454,6 +460,14 @@ struct PrintedReviewVerdict {
     confidence: Option<String>,
     #[serde(default)]
     reason_category: Option<String>,
+}
+
+/// A verdict as `review_finished` recorded it: the whole review's with
+/// the agents' results the review assembled beside it.
+#[derive(Deserialize)]
+struct RecordedReviewVerdict {
+    #[serde(flatten)]
+    printed: PrintedReviewVerdict,
     #[serde(default)]
     agents: Vec<review_subagents::AgentResult>,
 }
@@ -477,7 +491,16 @@ impl From<PrintedReviewVerdict> for ReviewVerdict {
             reason_category: concern
                 .then(|| concern::reason(printed.reason_category.as_deref()))
                 .flatten(),
-            agents: printed.agents,
+            agents: Vec::new(),
+        }
+    }
+}
+
+impl From<RecordedReviewVerdict> for ReviewVerdict {
+    fn from(recorded: RecordedReviewVerdict) -> Self {
+        Self {
+            agents: recorded.agents,
+            ..recorded.printed.into()
         }
     }
 }
@@ -527,7 +550,8 @@ impl ReviewVerdict {
     /// outermost `{...}` in it (a model may wrap the object in a fence or
     /// a sentence).
     pub fn parse(stdout: &str) -> Result<Self, String> {
-        parse_json_object(stdout)
+        parse_json_object::<PrintedReviewVerdict>(stdout)
+            .map(Self::from)
             .map_err(|error| format!("the review printed no verdict JSON: {error}"))
     }
 }

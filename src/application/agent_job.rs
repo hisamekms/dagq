@@ -356,8 +356,7 @@ mod tests {
             assert!(!prompt.contains(word), "{word} in {prompt}");
         }
         assert!(!prompt.contains("dagq "), "no queue command: {prompt}");
-        // One agent's own job: nothing of a review job's subagents.
-        assert!(!prompt.contains(crate::application::review::SUBAGENTS_INSTRUCTION));
+        // One agent's own job: it runs no subagent.
         assert!(!prompt.contains("subagent"), "{prompt}");
     }
 }

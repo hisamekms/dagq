@@ -33,7 +33,7 @@ taskを1つずつ待たせるtaskのhold（予定・未実装）は、この控�
 - **worker の turn**: 非対話の turn の authentication / usage_limit を provider_wall が読む。使えるもう一方の provider があれば次の turn から切り替え、使えなければ hold の ask で待つ。worker の画面からの検知は廃止した。
 - **headless jobの出力**: 失敗したjob（exit非0・時間切れ・読めないverdict。verdictが読めて適用に失敗したものは読まない）のstdoutとstderr（Claudeのobserverは`output.out`と`output.err`を改行でつなぐ）を起動したproviderが分類する（Codexのobserverは役割がproviderを書いたときだけ`AgentProvider::job_failure`で読み、askには入れず`provider_unusable`にする。task 1223、[Observer](observer.md#codexで動かす)）。Claude Codeでは`AgentSignals::job_failure`（中は`job_wall`）が行ごとに読み、JSONの行は`result` / `error` / `message`の文字列も読む（先頭の`Error: `は除く）。成功したjobの出力は読まない（作業の中で文言を引用しても壁にしない）。見つかればjobをaskに足し（`Supervisor::raise_job_wall`、observerは`observer::hold_wall`）、`auth_required` / `usage_limited`（`job`、`entry`、`error`の末尾、`ask_id`）をjobのrunに、runの無いjob（plan review・goal review・observer）はqueueに書く。askの控えはそのpassから効く（同じpassで後から始まるはずのplan review・goal reviewも始めない）。jobごとの扱い:
   - review: `review_failed`も`approve_landing`のaskも作らず、`Phase::ReviewHeld`でsessionを開いたまま待ち、控えが解けたpassでreviewをやり直す。`affected`に載るのはrunではなくreviewのjobなので、`cancel_affected`でもrunは手放さず、askが閉じた後にreviewをやり直す。
-    必須のsubagentを動かせるClaudeを待って`ReviewHeld`に居るreview（Codexに回ったもの。[Review](review.md#reviewのsubagent)、[ADR-t1847-1](../../adr/2026-10-08-t1847-1-review-waits-while-the-provider-that-runs-its-subagents-is-held.md)）は、askを開いたjobではなく控えを読んで待つだけなので`affected`にrunもjobも載らず、同じく`cancel_affected`でも手放さず、askが閉じた後に起動する
+    起動の前に行き先（`review_route`）が控えを読んで`ReviewHeld`に居るreview（[Review](review.md#reviewのprovider)）は、askを開いたjobを持たず控えを読んで待つだけなので`affected`にrunもjobも載らず、同じく`cancel_affected`でも手放さず、askが閉じた後に起動する
   - 終わったrunの復旧job: 従来どおり`triage_failed`を書くが、askに居る間は`triage by hand`のattentionにしない。`done`が`job_restarted`で起動し直す
   - 生きているsessionの復旧job: そのalertのask（ADR-t609-1）を開かず、失敗も記録しない。控えが解けた後のpassでalertの次のjobが始まる
   - plan review・goal review: 従来どおり`plan_review_failed` / `goal_review_failed`を書くが、askに居る間は`plan review by hand` / `goal review by hand`のattentionにしない。`done`が出し直す・rearmする
@@ -89,7 +89,7 @@ answerがaskのoptionsのどれか（`queue_hold::applies`）なら、`answer`�
 
 - **`done`**（`hold_outcome`が`continued`）: 生きているsessionを見ている段（`Phase::Session` / `Revise` / `Resume`、`Phase::holds_live_session`）に居るrunを`hold_continue`に入れ（`continued`）、そのsessionの監視（`SessionWatch::continue_after_hold`。workerのsessionではwrapperが生きていて終了の依頼の前、receiptが無いとき、reviseとresumeでは答えの配送と同じ位置で、送った後はその段の時間切れを数え直す）が決まった文面`queue_hold::CONTINUE_TEXT`を1回送る。送信は`submit`が次のturnの依頼としてrun dirの`turns/`に書く（入力欄の確認・Enterの送り直し・`StartCheck`による取り込みの確認（ADR-0047の決定31）は、対話のworkerとともにtask 1437で撤去した）。送ったらrunに`hold_continue_sent`（`ask_id`、`workspace_id`、`submitted`）を書き、stallの計時は送った時刻からやり直す。送れなかったらlogだけ残し、stallの促しが続きを頼む。receiptの後やreview・exitの段に進んだrunには送らない（`moved_on`）
 - **`cancel_affected`**（`hold_outcome`が`released`、`Supervisor::hold_canceled`）: 生きているsessionの段（`Session` / `Revise` / `Resume`）かreviewの待ち（`ReviewHeld`）に居るrunを、slotから外してheadless jobを止め、`abandon`と同じく手放す（`released`）: `runtime_error`（`message`、コード`hold_canceled`、`lease_released: true`）を書いてleaseを返す。statusは変えず、sessionとworktreeは残る。inboxには`recover run`のattentionとして出る（成果を捨てるかどうかは、この答えを選んだ人の判断で、`recover`の手順で決める）。自分で先へ進んだrun（validation・review・着地の途中）はもう止まっていないので手放さない（`moved_on`）。
-  答えを当てるのは`affected`に載ったrunだけなので、`affected`に載らずに`ReviewHeld`で待つrun（必須のsubagentを動かせるproviderを待つreview）は手放さず、askが閉じて控えが解けた後のpassでreviewを起動する
+  答えを当てるのは`affected`に載ったrunだけなので、`affected`に載らずに`ReviewHeld`で待つrun（起動の前に行き先が控えを読んで待つreview）は手放さず、askが閉じて控えが解けた後のpassでreviewを起動する
 
 ### askを閉じる
 

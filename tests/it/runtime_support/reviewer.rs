@@ -16,11 +16,6 @@ pub struct TestReviewer {
     /// The model and effort each job was given (ADR-0079 decision 7), in
     /// order; a job started as before gives none.
     pub models: Mutex<Vec<(String, String)>>,
-    /// Whether its reviews can run the review's subagents (ADR-t1453-1).
-    pub runs_subagents: bool,
-    /// The subagents each review that required them was handed, by name
-    /// and description, in order.
-    pub handed: Mutex<Vec<Vec<(String, String)>>>,
     /// The queue and the backend's stands: as each recovery job starts, the
     /// run it recovers gets a session still running (a process standing for
     /// a wrapper that did not end with its agent), which the backend stops
@@ -48,8 +43,6 @@ impl TestReviewer {
             triages: Mutex::new(Vec::new()),
             triage_prompts: Mutex::new(Vec::new()),
             models: Mutex::new(Vec::new()),
-            runs_subagents: true,
-            handed: Mutex::new(Vec::new()),
             leave_running: None,
             agent_jobs: Mutex::new(Vec::new()),
             review_agents: Mutex::new(Vec::new()),
@@ -77,10 +70,6 @@ impl TestReviewer {
     pub fn leaving_sessions_running(mut self, db: &Path, backend: &TestWorkspace) -> Self {
         self.leave_running = Some((db.to_owned(), backend.stands.clone()));
         self
-    }
-    /// The subagents each review was handed (see `handed`).
-    pub fn handed(&self) -> Vec<Vec<(String, String)>> {
-        self.handed.lock().unwrap().clone()
     }
     pub fn models(&self) -> Vec<(String, String)> {
         self.models.lock().unwrap().clone()
@@ -194,23 +183,6 @@ impl AgentProvider for TestReviewer {
             .arg(script)
             .stdin(job.prompt.as_str());
         Ok(command)
-    }
-    fn runs_review_subagents(&self) -> bool {
-        self.runs_subagents
-    }
-    fn review_subagents(
-        &self,
-        _: &mut CommandSpec,
-        agents: &[dagq::domain::review_subagents::AgentDefinition],
-    ) -> Result<()> {
-        ensure!(self.runs_subagents, "the test reviewer runs no subagents");
-        self.handed.lock().unwrap().push(
-            agents
-                .iter()
-                .map(|a| (a.name.clone(), a.description.clone()))
-                .collect(),
-        );
-        Ok(())
     }
     fn review_timeout(&self) -> Duration {
         self.timeout

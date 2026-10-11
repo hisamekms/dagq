@@ -550,22 +550,11 @@ file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を�
 
 2026-10-01 の結果: 別 queue で実 Codex 0.159.2 の worker と review を実行し、task 2 の review が `pass`、run `ca586e69-4833-43c2-a269-f7d90fa2152f` が `908060719bbc3f599cbb061fe1e130827472595e` として main に着地・push した。最初の task 1 は実行側のホスト権限制約で Codex review の app-server 初期化が拒まれ、`review_failed` と ask になった。権限付きでの再試験は成功し、試験用の cmux group は削除した。
 
-## review の subagent の実 CLI の確認<a id="reviewのsubagentの実cliの確認"></a>
+## run の review の実 CLI の確認<a id="runのreviewの実cliの確認"></a>
 
-親の review job の中で subagent を動かす argv（`ClaudeCode::review_subagents`、[ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md) 決定 8）を実 Claude Code で確かめる。
-本番の run の review はこの argv を使わず、agent ごとの独立の job を`AgentProvider::agent_job_command`で起動する（[Review](supervisor-lifecycle/review.md#reviewのsubagent)）ので、この確認は残っている`review_subagents`の argv だけに当たる。
-queue も cmux も使わず、test が一時 directory の使い捨ての Git repository で `ClaudeCode::review_command` と `review_subagents` の argv をそのまま実行する（model は Haiku、1 回 5 呼び出しで約 1 分）。
-worker が流してもよい。
-`review_subagents`か全体の review の argv・settings を変えたときに流す。
-
-```sh
-DAGQ_REAL_CLAUDE=~/.local/bin/claude cargo test --locked --test it -- --ignored --exact \
-  review_subagents::the_real_claude_review_runs_its_subagents_without_the_worktrees_settings --nocapture
-```
-
-確かめること（test が assert する）: worktree の `.claude/settings.json` の `SessionStart` の hook が、既定の setting sources の review（対照。argv から `--setting-sources ""` を除いたもの）では動き、dagq の argv の review では subagent の有無に依らず動かないこと（ADR-t1470-1）。Agent の tool が渡した `checker` だけを受け、worktree の `.claude/agents` を受けないこと。review の `--settings` の deny が親と subagent の両方に効くこと（deny を外すと読める）。2 つ目の `--allowedTools Agent` が 1 つ目の `Read,Grep,Glob` を置き換えないこと（1 つ目を外すと worktree の外の file が拒まれる）。答えは model の出力の行なので、まれに model が subagent の返事を要約して落ちる。そのときは流し直し、出力の行を見て判断する。
-
-2026-10-03 の結果: Claude Code 2.1.288 で通った（task 1455）。出力は `TYPES: checker, claude, Explore, general-purpose, Plan, statusline-setup`、`SECRET: DENIED`、`OUTSIDE: far away`、`CHECKER: A=hello S=DENIED O=far away`。deny を外すと `S=classified`、1 つ目の `--allowedTools` を外すと `O=DENIED` になった。最初の 1 回は model が CHECKER を `hello` に要約して落ち、prompt を直してから通った。
+全体の review は worktree の設定を読まない（[ADR-t1470-1](../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)）。
+実 Claude Code でこれを確かめる入口は ignored の integration test `review_subagents::the_real_claude_review_loads_no_worktree_settings` で、流し方と確かめることはその doc comment が持つ。
+全体の review の argv・settings を変えたときに流す。
 
 ## 他の repository のスモーク
 

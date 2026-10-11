@@ -14,7 +14,7 @@
 use serde_json::Value;
 
 use super::ReviewVerdict;
-use super::review_subagents::{AgentResult, incomplete};
+use super::review_subagents::{AgentResult, COMPLETED};
 
 /// Which job of a review: its whole review (the acceptance and the
 /// documents), or one selected agent's.
@@ -151,16 +151,21 @@ pub fn agent_result(agent: &str, reply: Option<Value>) -> Result<AgentResult, St
     let reply = reply.ok_or_else(|| format!("the agent {agent} printed no verdict JSON"))?;
     let result: AgentResult = serde_json::from_value(reply)
         .map_err(|error| format!("the agent {agent} printed no readable verdict: {error}"))?;
-    match incomplete(&[agent.to_owned()], std::slice::from_ref(&result)) {
-        None => Ok(result),
-        Some(why) => Err(why),
+    if result.agent != agent {
+        Err(format!(
+            "the agent {agent} printed no result of {agent} but one of {}",
+            result.agent
+        ))
+    } else if result.status != COMPLETED {
+        Err(format!(
+            "the agent {agent} did not complete ({})",
+            result.status
+        ))
+    } else if result.verdict.is_none() {
+        Err(format!("the agent {agent} gave no verdict"))
+    } else {
+        Ok(result)
     }
-}
-
-/// Why the whole review's `verdict` is unreadable, if it is: it judges
-/// alone and names no agent's result (decision 4).
-pub fn whole_unreadable(verdict: &ReviewVerdict) -> Option<String> {
-    incomplete(&[], &verdict.agents)
 }
 
 /// The verdict a review is judged by once every job answered: the whole
@@ -283,7 +288,7 @@ mod tests {
             ),
             (
                 Some(json!({"agent": "other", "status": "completed", "verdict": "pass"})),
-                "no result of design",
+                "printed no result of design but one of other",
             ),
             (
                 Some(json!({"agent": "design", "status": "failed"})),
@@ -303,14 +308,11 @@ mod tests {
             let got = agent_result("design", reply).unwrap_err();
             assert!(got.contains(error), "{got}");
         }
-        assert!(whole_unreadable(&whole("pass", &[])).is_none());
-        let mut naming = whole("pass", &[]);
-        naming.agents = vec![result];
-        assert!(
-            whole_unreadable(&naming)
-                .unwrap()
-                .contains("does not require")
-        );
+        // The whole review judges alone: a verdict naming an agent's
+        // result is unreadable.
+        let naming = json!({"verdict": "pass", "reasons": [], "summary": "whole",
+                            "agents": [{"agent": "design", "status": "completed", "verdict": "pass"}]});
+        assert!(ReviewVerdict::parse(&naming.to_string()).is_err());
     }
 
     /// The judgments are taken one by one and the heaviest wins: an

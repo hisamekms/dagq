@@ -189,7 +189,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   起動は`AgentProvider::agent_job_command`で、道具の変換は宣言から（Claudeはjob自身の引数、Codexは今のreviewのread-onlyのsandboxとjobのpermission profileに足す設定）。
   agentのjobはqueueを読む道具を持たず、`[run.env]`とsccacheの扱いは全体のreviewのjobと同じである。
   providerの能力でjobを切り替えることはなく、Codexでもagentのjobを動かす。
-- **結果のそろいの検査**: agentのjobの答えは、そのagentのちょうど1件の完了した判定でなければ読めない答えで（`domain::review_jobs::agent_result`）、全体のreviewのverdictはagentの結果を持てない（`domain::review_jobs::whole_unreadable`）。
+- **結果のそろいの検査**: agentのjobの答えは、そのagentのちょうど1件の完了した判定でなければ読めない答えで（`domain::review_jobs::agent_result`）、全体のreviewのverdictはagentの結果を持てない（`agents`を持つverdictは`ReviewVerdict::parse`が読めない答えにする）。
 - **判定ごとの行き先**: 全体のreviewとagentごとの判定を着地・差し戻し・人の判断に直し、最も重いものを取る（`ReviewVerdict::route`、`domain::review_subagents::destination`）。
   記録と問いでは全体のreviewの判定を`parent`と呼ぶ。
   差し戻しは判定ごとの理由をagentの名前を付けて並べた1回のreviseにし、人の判断なら問いに全体のreviewが軽かったことを載せる（`act_on_agents`）。

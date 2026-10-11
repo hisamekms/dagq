@@ -1226,7 +1226,7 @@ impl Supervisor<'_> {
             .to_owned();
         let task = self.queue.show(run.task_id())?.task;
         let language = self.verifier.language();
-        let fitted = review_prompt(&task, run, &path, None).with_language(language.as_ref());
+        let fitted = review_prompt(&task, run, &path).with_language(language.as_ref());
         self.files.write(
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
             fitted.text.as_bytes(),
@@ -1317,7 +1317,6 @@ impl Supervisor<'_> {
                     run,
                     prompt,
                     access: REVIEW_ACCESS,
-                    subagents: &[],
                 },
                 // One agent's own job, given no way to read the queue, as
                 // the eval's is.
@@ -2381,13 +2380,7 @@ pub(super) fn after_unusable(route: ReviewRoute, failed: Provider) -> AfterUnusa
 /// agent job's ([`agent_job::read_reply`]); else why it is unreadable.
 fn read_answer(id: &ReviewJobId, reply: &str) -> std::result::Result<ReviewAnswer, String> {
     match id {
-        ReviewJobId::Whole => {
-            let verdict = ReviewVerdict::parse(reply)?;
-            match review_jobs::whole_unreadable(&verdict) {
-                None => Ok(ReviewAnswer::Whole(verdict)),
-                Some(why) => Err(why),
-            }
-        }
+        ReviewJobId::Whole => ReviewVerdict::parse(reply).map(ReviewAnswer::Whole),
         ReviewJobId::Agent(agent) => {
             review_jobs::agent_result(agent, agent_job::read_reply(reply)).map(ReviewAnswer::Agent)
         }
@@ -2714,8 +2707,10 @@ mod tests {
         .unwrap()
     }
 
+    /// A verdict as a review assembles and records it, its agents'
+    /// results beside the whole review's.
     fn verdict(json: Value) -> ReviewVerdict {
-        ReviewVerdict::parse(&json.to_string()).unwrap()
+        serde_json::from_value(json).unwrap()
     }
 
     fn concern(recommendation: Option<&str>, confidence: Option<&str>) -> ReviewVerdict {
@@ -2908,7 +2903,7 @@ mod tests {
         ) else {
             panic!("the whole review answered for an agent");
         };
-        assert!(why.contains("which this review does not require"), "{why}");
+        assert!(why.contains("unknown field `agents`"), "{why}");
         let design = ReviewJobId::Agent("design".into());
         let fenced = "Done.\n```json\n{\"agent\": \"design\", \"status\": \"completed\", \"verdict\": \"revise\", \"reasons\": [{\"text\": \"stale map\", \"codes\": []}], \"summary\": \"s\"}\n```";
         let answer = read_answer(&design, fenced).unwrap();

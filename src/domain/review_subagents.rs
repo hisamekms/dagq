@@ -165,10 +165,6 @@ pub fn select(configured: &[ReviewSubagent], changed: &[String]) -> Vec<Selected
 /// (`failed`, or what a job made up) is a result the review lacks.
 pub const COMPLETED: &str = "completed";
 
-/// The tools a review subagent may use, whatever its definition says: the
-/// review job's own reads (ADR-t1453-1 decision 2).
-pub const SUBAGENT_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
-
 /// A tool an agent may declare in its definition's frontmatter
 /// (ADR-t1728-2): the runtime's list, whose names a definition picks from;
 /// it cannot name a command. Each provider's own tools for it are the
@@ -455,44 +451,6 @@ impl From<PrintedAgentResult> for AgentResult {
     }
 }
 
-/// Why `results` are not the completed results of exactly the agents
-/// `required` (ADR-t1453-1 decision 6): agents without a result, results
-/// that did not complete or gave no judgment, results of agents not
-/// required and an agent's second result. `None` when they are; a review
-/// that requires no agent must name none, so a verdict of a repository
-/// without agents reads as before.
-pub fn incomplete(required: &[String], results: &[AgentResult]) -> Option<String> {
-    let mut problems = Vec::new();
-    for agent in required {
-        let mine: Vec<&AgentResult> = results.iter().filter(|r| &r.agent == agent).collect();
-        match mine.as_slice() {
-            [] => problems.push(format!("no result of {agent}")),
-            [result] if result.status != COMPLETED => {
-                problems.push(format!("{agent} did not complete ({})", result.status));
-            }
-            [result] if result.verdict.is_none() => {
-                problems.push(format!("{agent} gave no verdict"));
-            }
-            [_] => {}
-            _ => problems.push(format!("{} results of {agent}", mine.len())),
-        }
-    }
-    for result in results {
-        if !required.contains(&result.agent) {
-            problems.push(format!(
-                "a result of {}, which this review does not require",
-                result.agent
-            ));
-        }
-    }
-    (!problems.is_empty()).then(|| {
-        format!(
-            "the verdict lacks the completed results of the review's required subagents: {}",
-            problems.join("; ")
-        )
-    })
-}
-
 /// Where a judgment of a review sends the run (ADR-t1453-1 decision 7),
 /// lightest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -589,7 +547,7 @@ impl VerdictRoute {
 
 /// [`VerdictRoute`] of a verdict whose decision and concern fields are
 /// `parent` and whose agents gave `results` (all completed, see
-/// [`incomplete`]); `revise_left` says whether the round has a revise left.
+/// [`super::review_jobs::agent_result`]); `revise_left` says whether the round has a revise left.
 pub fn route(
     parent: (
         ReviewDecision,
@@ -638,52 +596,6 @@ pub fn route(
         destination,
         parent,
         agents,
-    }
-}
-
-/// An agent's definition as a provider is handed it (ADR-t1453-1
-/// decision 2): its name, the frontmatter's `description`, and the body
-/// (its checks and the documents it refers to) as its prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentDefinition {
-    pub name: String,
-    pub description: String,
-    pub prompt: String,
-}
-
-impl AgentDefinition {
-    /// Read `text`, the committed definition: a `---` frontmatter with
-    /// `description`, then the body. Without a frontmatter or a
-    /// description, the description names the agent and the whole text is
-    /// the prompt.
-    pub fn read(name: &str, text: &str) -> Self {
-        let fallback = || format!("The review subagent {name}");
-        let normalized = text.replace("\r\n", "\n");
-        let parsed = split_frontmatter(&normalized).map(|(front, body)| {
-            let description = front.lines().find_map(|line| {
-                line.strip_prefix("description:").map(|value| {
-                    value
-                        .trim()
-                        .trim_matches(|c| c == '"' || c == '\'')
-                        .to_owned()
-                })
-            });
-            (description, body.trim_start_matches('\n').to_owned())
-        });
-        match parsed {
-            Some((description, body)) => Self {
-                name: name.to_owned(),
-                description: description
-                    .filter(|d| !d.is_empty())
-                    .unwrap_or_else(fallback),
-                prompt: body,
-            },
-            None => Self {
-                name: name.to_owned(),
-                description: fallback(),
-                prompt: text.to_owned(),
-            },
-        }
     }
 }
 
@@ -841,17 +753,19 @@ mod tests {
         );
     }
 
+    /// A verdict as `review_finished` records it, the agents' results
+    /// beside the whole review's.
     fn verdict(json: serde_json::Value) -> super::super::ReviewVerdict {
-        super::super::ReviewVerdict::parse(&json.to_string()).unwrap()
+        serde_json::from_value(json).unwrap()
     }
 
     fn completed(agent: &str, decision: &str) -> serde_json::Value {
         json!({"agent": agent, "status": "completed", "verdict": decision, "reasons": [], "summary": "ok"})
     }
 
-    /// The verdict reads its agents' results when it has them, reads as
-    /// before without, and a field an agent's result does not know makes
-    /// it unreadable, as the verdict's own do.
+    /// A recorded verdict reads its agents' results when it has them and
+    /// reads as before without; a field an agent's result does not know
+    /// makes it unreadable.
     #[test]
     fn a_verdict_reads_its_agents_results() {
         let with = verdict(json!({
@@ -899,67 +813,10 @@ mod tests {
             json!({"verdict": "pass", "reasons": [], "summary": "ok", "agents": {"design": "pass"}}),
         ] {
             assert!(
-                super::super::ReviewVerdict::parse(&bad.to_string()).is_err(),
+                serde_json::from_value::<super::super::ReviewVerdict>(bad.clone()).is_err(),
                 "{bad}"
             );
         }
-    }
-
-    /// Only the completed results of exactly the required agents make a
-    /// verdict whole (ADR-t1453-1 decision 6).
-    #[test]
-    fn a_verdict_lacking_a_required_result_is_incomplete() {
-        let required = strings(&["design", "lint"]);
-        let results = |values: Vec<serde_json::Value>| {
-            verdict(json!({"verdict": "pass", "reasons": [], "summary": "ok", "agents": values}))
-                .agents
-        };
-        assert_eq!(
-            incomplete(
-                &required,
-                &results(vec![
-                    completed("lint", "pass"),
-                    completed("design", "revise")
-                ])
-            ),
-            None
-        );
-        let why = |values| incomplete(&required, &results(values)).unwrap();
-        assert!(why(vec![completed("design", "pass")]).ends_with(": no result of lint"));
-        let failed = why(vec![
-            completed("design", "pass"),
-            json!({"agent": "lint", "status": "failed", "summary": "timed out"}),
-        ]);
-        assert!(
-            failed.ends_with(": lint did not complete (failed)"),
-            "{failed}"
-        );
-        let silent = why(vec![
-            completed("design", "pass"),
-            json!({"agent": "lint", "status": "completed"}),
-        ]);
-        assert!(silent.ends_with(": lint gave no verdict"), "{silent}");
-        let twice = why(vec![
-            completed("design", "pass"),
-            completed("lint", "pass"),
-            completed("lint", "pass"),
-        ]);
-        assert!(twice.ends_with(": 2 results of lint"), "{twice}");
-        let unknown = why(vec![
-            completed("design", "pass"),
-            completed("lint", "pass"),
-            completed("other", "pass"),
-        ]);
-        assert!(
-            unknown.ends_with(": a result of other, which this review does not require"),
-            "{unknown}"
-        );
-        // A review that requires none must name none; naming none is whole.
-        assert_eq!(incomplete(&[], &[]), None);
-        assert!(incomplete(&[], &results(vec![completed("design", "pass")])).is_some());
-        assert!(why(vec![]).starts_with(
-            "the verdict lacks the completed results of the review's required subagents: no result of design; no result of lint"
-        ));
     }
 
     /// The review goes to the heaviest of where its judgments go, each
@@ -1059,21 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn a_definition_reads_its_description_and_body() {
-        let read = AgentDefinition::read(
-            "design",
-            "---\r\ntitle: x\r\ndescription: \"Checks the design\"\r\n---\r\n\r\nCheck it.\r\n",
-        );
-        assert_eq!(read.description, "Checks the design");
-        assert_eq!(read.prompt, "Check it.\n");
-        let empty = AgentDefinition::read("design", "---\ndescription:\n---");
-        assert_eq!(empty.description, "The review subagent design");
-        assert_eq!(empty.prompt, "");
-        let plain = AgentDefinition::read("design", "---not a frontmatter\n");
-        assert_eq!(plain.description, "The review subagent design");
-        assert_eq!(plain.prompt, "---not a frontmatter\n");
-        let open = AgentDefinition::read("design", "---\ndescription: d\nno end\n");
-        assert_eq!(open.prompt, "---\ndescription: d\nno end\n");
+    fn a_destination_is_named() {
         assert_eq!(Destination::SendBack.as_str(), "send_back");
     }
 

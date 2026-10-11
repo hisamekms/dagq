@@ -3498,28 +3498,6 @@ impl AgentProvider for ClaudeCode {
             .stdin(job.prompt.as_str());
         Ok(command)
     }
-    fn runs_review_subagents(&self) -> bool {
-        true
-    }
-    /// `--agents <json>` with each definition (its `description`, its body
-    /// as the `prompt`, and only the review's reads as its `tools`) and
-    /// `--allowedTools Agent` so the review can start them (ADR-t1453-1
-    /// decision 8). The review's `--setting-sources ""`
-    /// ([`AgentProvider::review_command`], ADR-t1470-1), its `--settings`
-    /// and its `--disallowedTools`, which reach the subagents too, stay.
-    fn review_subagents(
-        &self,
-        command: &mut CommandSpec,
-        agents: &[crate::domain::review_subagents::AgentDefinition],
-    ) -> Result<()> {
-        command.option_args([
-            "--agents".to_owned(),
-            claude_review_agents(agents)?,
-            "--allowedTools".to_owned(),
-            "Agent".to_owned(),
-        ]);
-        Ok(())
-    }
     /// `claude --settings <queue dir>/claude-inbox-settings.json
     /// [--plugin-dir <dir>] -- <prompt>`: the settings are only the
     /// inbox's `permissions.deny` ([`inbox_settings`], ADR-t1228-2 decision
@@ -3775,29 +3753,6 @@ fn agent_job_tool_args_with_denied(tools: &AgentTools) -> Vec<String> {
         None => args.extend(["--disallowedTools".to_owned(), denied]),
     }
     args
-}
-
-/// The `--agents` JSON of the review's subagents: each definition's
-/// `description` and body (`prompt`), allowed only
-/// [`SUBAGENT_TOOLS`](crate::domain::review_subagents::SUBAGENT_TOOLS)
-/// whatever the definition says.
-pub fn claude_review_agents(
-    agents: &[crate::domain::review_subagents::AgentDefinition],
-) -> Result<String> {
-    let map: serde_json::Map<String, serde_json::Value> = agents
-        .iter()
-        .map(|agent| {
-            (
-                agent.name.clone(),
-                serde_json::json!({
-                    "description": agent.description,
-                    "prompt": agent.prompt,
-                    "tools": crate::domain::review_subagents::SUBAGENT_TOOLS,
-                }),
-            )
-        })
-        .collect();
-    Ok(serde_json::to_string(&map)?)
 }
 
 /// Claude Code's tools the review of `access` is refused outright: it
@@ -5458,74 +5413,41 @@ mod tests {
         );
     }
 
-    /// A review that requires subagents hands Claude their definitions as
-    /// `--agents`, allowed only the reads, and lets the review start them
-    /// with `Agent` (ADR-t1453-1 decision 8). With or without them the
-    /// review loads no setting sources, so the worktree's `.claude/agents`
-    /// and `.claude/settings.json` are not read (ADR-t1470-1 decision 1),
-    /// and the review's settings and refusals stay.
+    /// The review loads no setting sources, so the worktree's
+    /// `.claude/agents` and `.claude/settings.json` are not read
+    /// (ADR-t1470-1 decision 1), keeps its settings and refusals, and is
+    /// given no agent to start: each agent of a review runs as a job of
+    /// its own (ADR-t1895-1).
     #[test]
-    fn the_review_hands_claude_its_subagents_and_no_worktree_settings() {
-        use crate::domain::review_subagents::AgentDefinition;
+    fn the_review_loads_no_worktree_settings_and_starts_no_agent() {
         let dir = tempfile::tempdir().unwrap();
         let run = run_in(dir.path());
         let claude = ClaudeCode {
             executable: "/bin/claude".into(),
         };
-        assert!(claude.runs_review_subagents());
-        let plain = claude
+        let command = claude
             .review_command(&run, "review it", crate::application::prompt::REVIEW_ACCESS)
             .unwrap();
-        let mut command = plain.clone();
-        let agents = [
-            AgentDefinition::read(
-                "design",
-                "---\ndescription: design checks\n---\nCheck it.\n",
-            ),
-            AgentDefinition::read("plain", "No frontmatter.\n"),
-        ];
-        claude.review_subagents(&mut command, &agents).unwrap();
-        let args = |command: &CommandSpec| -> Vec<String> {
-            command
-                .get_args()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect()
-        };
-        let before = args(&plain);
-        let after = args(&command);
-        assert_eq!(after[..before.len()], before[..]);
         assert_eq!(command.get_stdin(), Some("review it"));
-        let added = &after[before.len()..];
-        assert_eq!(added[0], "--agents");
-        assert_eq!(added[2..], ["--allowedTools", "Agent"]);
-        let handed: Value = serde_json::from_str(&added[1]).unwrap();
-        assert_eq!(
-            handed,
-            serde_json::json!({
-                "design": {"description": "design checks", "prompt": "Check it.\n", "tools": ["Read", "Grep", "Glob"]},
-                "plain": {"description": "The review subagent plain", "prompt": "No frontmatter.\n", "tools": ["Read", "Grep", "Glob"]},
-            })
-        );
-        // Both load no setting sources and keep the review's own settings
-        // and refusals, which reach the subagents.
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
         let run_dir = dir.path().join("run");
         let settings = run_dir.join("claude-review-settings.json");
-        for args in [&before, &after] {
-            for pair in [
-                ["--setting-sources", ""],
-                ["--settings", &settings.to_string_lossy()],
-                ["--allowedTools", "Read,Grep,Glob"],
-                [
-                    "--disallowedTools",
-                    "Bash,Edit,Write,NotebookEdit,ScheduleWakeup,CronCreate",
-                ],
-            ] {
-                assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
-            }
+        for pair in [
+            ["--setting-sources", ""],
+            ["--settings", &settings.to_string_lossy()],
+            ["--allowedTools", "Read,Grep,Glob"],
+            [
+                "--disallowedTools",
+                "Bash,Edit,Write,NotebookEdit,ScheduleWakeup,CronCreate",
+            ],
+        ] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
         }
-        // Without subagents nothing of them is in the command.
         for absent in ["--agents", "Agent"] {
-            assert!(!before.iter().any(|arg| arg == absent), "{absent}");
+            assert!(!args.iter().any(|arg| arg == absent), "{absent}");
         }
     }
 

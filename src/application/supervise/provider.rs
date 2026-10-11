@@ -1212,9 +1212,10 @@ mod tests {
                 Some(UnusableHold::Held)
             );
         }
-        for reason in [SwitchReason::Disabled, SwitchReason::SubagentsUnsupported] {
-            assert_eq!(unusable_hold(Provider::Claude, reason, false), None);
-        }
+        assert_eq!(
+            unusable_hold(Provider::Claude, SwitchReason::Disabled, false),
+            None
+        );
     }
 
     fn describe(route: &ReviewRoute) -> String {

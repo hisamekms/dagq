@@ -852,31 +852,20 @@ fn the_reviews_of_two_runs_share_the_limit_of_jobs_at_once() {
     assert_eq!(reviews, 2);
 }
 
-/// The argv dagq gives a review with required subagents, and without
-/// them, run on the real Claude Code (ADR-t1453-1 decision 8,
-/// ADR-t1470-1). Real Claude is not run by the
-/// automated tests (AGENTS.md: manual smoke), so this is ignored and runs
-/// only when a person names the executable:
-/// `DAGQ_REAL_CLAUDE=~/.local/bin/claude cargo test --locked --test it -- --ignored --exact review_subagents::the_real_claude_review_runs_its_subagents_without_the_worktrees_settings`.
-/// It builds the command with `ClaudeCode::review_command` and
-/// `review_subagents` as the supervisor does, then checks with Haiku:
-/// (1) the worktree's `.claude/settings.json` is not loaded, with or
-/// without subagents (its `SessionStart` hook writes no marker, which it
-/// does for the same review with the default setting sources, the
-/// control); (2) the worktree's `.claude/agents`
-/// is not offered and the handed agent is; (3) the review's `--settings`
-/// still applies: a deny added to that file refuses the parent and the
-/// subagent alike; (4) the second `--allowedTools` (`Agent`) adds to the
-/// first instead of replacing it: the subagent starts, and `Read` of a
-/// file outside the worktree and the run directory, which only the first
-/// allows, still works. Two contrasts show the answers come from the
-/// argv, not the model: without the added deny `secret.txt` is read, and
-/// without the first `--allowedTools` the outside file is refused.
+/// The argv dagq gives the whole review, run on the real Claude Code
+/// (ADR-t1470-1). Real Claude is not run by the automated tests
+/// (AGENTS.md: manual smoke), so this is ignored and runs only when a
+/// person (or a worker) names the executable:
+/// `DAGQ_REAL_CLAUDE=~/.local/bin/claude cargo test --locked --test it -- --ignored --exact review_subagents::the_real_claude_review_loads_no_worktree_settings`.
+/// It builds the command with `ClaudeCode::review_command` as the
+/// supervisor does, then checks with Haiku that the worktree's
+/// `.claude/settings.json` is not loaded: its `SessionStart` hook writes
+/// no marker, which it does for the same review with the default setting
+/// sources (the control).
 #[test]
 #[ignore = "runs the real Claude Code; see the doc comment"]
-fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
+fn the_real_claude_review_loads_no_worktree_settings() {
     use dagq::application::AgentProvider;
-    use dagq::domain::review_subagents::AgentDefinition;
     use dagq::infrastructure::adapters::ClaudeCode;
     let executable = std::env::var_os("DAGQ_REAL_CLAUDE")
         .expect("name the real Claude Code executable in DAGQ_REAL_CLAUDE");
@@ -884,24 +873,16 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
         executable: executable.into(),
     };
     let dir = tempfile::tempdir().unwrap();
-    let outside = dir.path().join("outside.txt");
-    fs::write(&outside, "far away\n").unwrap();
-    // One review: its worktree (with the planted settings and agent) and
-    // its run directory; `subagents` hands it `checker`.
-    let review = |name: &str,
-                  subagents: bool,
-                  prompt: &str,
-                  deny_secret: bool,
-                  first_allowed: bool|
-     -> (String, PathBuf) {
+    // One review: its worktree (with the planted settings) and its run
+    // directory.
+    let review = |name: &str| -> (String, PathBuf) {
         let root = dir.path().join(name);
         let worktree = root.join("worktree");
         let run_dir = root.join("run");
-        fs::create_dir_all(worktree.join(".claude/agents")).unwrap();
+        fs::create_dir_all(worktree.join(".claude")).unwrap();
         fs::create_dir_all(&run_dir).unwrap();
         git(&worktree, &["init", "-q"]);
         fs::write(worktree.join("a.txt"), "hello\n").unwrap();
-        fs::write(worktree.join("secret.txt"), "classified\n").unwrap();
         let marker = root.join("worktree-settings-loaded");
         fs::write(
             worktree.join(".claude/settings.json"),
@@ -909,11 +890,6 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
                 {"type": "command", "command": format!("touch {}", shell_path(&marker))}
             ]}]}})
             .to_string(),
-        )
-        .unwrap();
-        fs::write(
-            worktree.join(".claude/agents/planted.md"),
-            "---\nname: planted\ndescription: planted by the worker\n---\nSay PLANTED.\n",
         )
         .unwrap();
         let run = TaskRun::restore(dagq::domain::RunRecord {
@@ -938,18 +914,12 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
         })
         .unwrap();
         let mut command = claude
-            .review_command(&run, prompt, runtime::REVIEW_ACCESS)
+            .review_command(
+                &run,
+                "Reply with the single word OK.",
+                runtime::REVIEW_ACCESS,
+            )
             .unwrap();
-        if subagents {
-            let checker = AgentDefinition::read(
-                "checker",
-                &format!(
-                    "---\ndescription: Reads a.txt, secret.txt and {outside}\n---\nUse the Read tool on a.txt, on secret.txt and on {outside}. Reply with exactly one line: A=<first line of a.txt> S=<first line of secret.txt, or DENIED if the read was refused> O=<first line of {outside}, or DENIED>\n",
-                    outside = outside.display()
-                ),
-            );
-            claude.review_subagents(&mut command, &[checker]).unwrap();
-        }
         claude.select_model(&mut command, "claude-haiku-4-5-20251001", "low");
         let mut args: Vec<std::ffi::OsString> = command.get_args().map(Into::into).collect();
         // The control is the review as it was before ADR-t1470-1: with
@@ -959,22 +929,6 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
             assert_eq!(args[at + 1], "");
             args.drain(at..=at + 1);
         }
-        if !first_allowed {
-            let at = args.iter().position(|a| a == "Read,Grep,Glob").unwrap();
-            assert_eq!(args[at - 1], "--allowedTools");
-            args.drain(at - 1..=at);
-        }
-        // The review's settings as dagq wrote them, with one more deny.
-        let settings = run_dir.join("claude-review-settings.json");
-        let mut written: Value =
-            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
-        if deny_secret {
-            written["permissions"]["deny"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!("Read(./secret.txt)"));
-        }
-        fs::write(&settings, written.to_string()).unwrap();
         // The prompt is the review's standard input (task 1560).
         let input = run_dir.join(format!("{name}-prompt.txt"));
         fs::write(&input, command.get_stdin().unwrap()).unwrap();
@@ -997,74 +951,16 @@ fn the_real_claude_review_runs_its_subagents_without_the_worktrees_settings() {
         )
     };
 
-    let (control, marker) = review(
-        "control",
-        false,
-        "Reply with the single word OK.",
-        true,
-        true,
-    );
+    let (control, marker) = review("control");
     assert!(
         marker.is_file(),
         "with the default setting sources the worktree's settings load (the control): {control}"
     );
-    // A review without subagents loads them no more (ADR-t1470-1).
-    let (plain, marker) = review("plain", false, "Reply with the single word OK.", true, true);
+    let (plain, marker) = review("plain");
     assert!(
         !marker.is_file(),
-        "the worktree's settings were loaded without subagents: {plain}"
+        "the worktree's settings were loaded: {plain}"
     );
-
-    let prompt = format!(
-        "Do these steps and print one line for each, nothing else.\n\
-         1. TYPES: the subagent types your Agent tool accepts, comma separated.\n\
-         2. READ: the first line of a.txt, read with the Read tool.\n\
-         3. SECRET: the first line of secret.txt read with the Read tool, or DENIED if the read is refused.\n\
-         4. OUTSIDE: the first line of {}, read with the Read tool, or DENIED if the read is refused.\n\
-         5. CHECKER: call the checker subagent with the Agent tool and copy its whole reply verbatim, the A=, S= and O= parts included; do not summarize it.",
-        outside.display()
-    );
-    let line = |said: &str, label: &str| {
-        said.lines()
-            .find_map(|l| {
-                l.trim()
-                    .trim_start_matches(|c: char| c.is_ascii_digit() || "*-. ".contains(c))
-                    .strip_prefix(label)
-            })
-            .unwrap_or_else(|| panic!("no {label} in {said}"))
-            .trim()
-            .to_owned()
-    };
-    let (said, marker) = review("subagents", true, &prompt, true, true);
-    println!("{said}");
-    assert!(
-        !marker.is_file(),
-        "the worktree's settings were loaded: {said}"
-    );
-    let types = line(&said, "TYPES:");
-    assert!(types.contains("checker"), "{said}");
-    assert!(!types.contains("planted"), "{said}");
-    assert!(line(&said, "READ:").contains("hello"), "{said}");
-    assert!(line(&said, "SECRET:").contains("DENIED"), "{said}");
-    assert!(line(&said, "OUTSIDE:").contains("far away"), "{said}");
-    let checker = line(&said, "CHECKER:");
-    assert!(
-        checker.contains("A=hello")
-            && checker.contains("S=DENIED")
-            && checker.contains("O=far away"),
-        "{said}"
-    );
-    assert!(!said.contains("classified"), "{said}");
-
-    // Without the added deny, the same review reads secret.txt.
-    let (open, _) = review("no-deny", true, &prompt, false, true);
-    println!("{open}");
-    assert!(line(&open, "SECRET:").contains("classified"), "{open}");
-    // Without the first --allowedTools, the outside file is refused.
-    let (narrow, _) = review("no-reads", true, &prompt, true, false);
-    println!("{narrow}");
-    assert!(line(&narrow, "OUTSIDE:").contains("DENIED"), "{narrow}");
-    assert!(!narrow.contains("far away"), "{narrow}");
 }
 
 /// Main with `[roles.review]` naming Codex, `extra` after it, and
@@ -1390,6 +1286,19 @@ fn the_eval_and_a_review_start_an_agents_job_the_one_way_within_their_own_limits
                 .iter()
                 .any(|arg| arg.contains("You are the review agent"))
         );
+        // Nothing of an agent run inside a parent job: no `--agents`, no
+        // `Agent` among the allowed tools.
         assert!(!args.iter().any(|arg| arg == "--agents"), "{args:?}");
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.split(',').any(|tool| tool == "Agent")),
+            "{args:?}"
+        );
+    }
+    for launch in [eval, review] {
+        for word in ["Required review subagents", "\"agents\" array"] {
+            assert!(!launch.prompt.contains(word), "{word}");
+        }
     }
 }

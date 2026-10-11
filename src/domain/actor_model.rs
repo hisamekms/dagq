@@ -417,8 +417,23 @@ pub struct ActorLaunch {
     pub escalation_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switched_from: Option<Provider>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "known_switch_reason"
+    )]
     pub switch_reason: Option<SwitchReason>,
+}
+
+/// A recorded `switch_reason` this binary knows; one it does not reads as
+/// none, so the rest of its launch still reads. Past reviews recorded
+/// `subagents_unsupported`, a move to Claude by ability that no review
+/// makes any more; their events keep the value as stored.
+fn known_switch_reason<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SwitchReason>, D::Error> {
+    let recorded = Option::<String>::deserialize(deserializer)?;
+    Ok(recorded.and_then(|reason| reason.parse().ok()))
 }
 
 impl ActorLaunch {
@@ -596,6 +611,31 @@ mod tests {
         assert_eq!(
             ActorLaunch::recorded(&json!({"launch": 3}), ModelRole::Recovery),
             ActorLaunch::default_of(ModelRole::Recovery)
+        );
+    }
+
+    /// A past review moved to Claude by ability recorded
+    /// `switch_reason: subagents_unsupported`: its launch still reads, its
+    /// provider, model and the provider it left as recorded, the reason as
+    /// none.
+    #[test]
+    fn a_past_launch_with_a_reason_no_longer_known_still_reads() {
+        let payload = json!({"launch": {
+            "role": "review", "provider": "claude", "model": "claude-opus-5-5",
+            "effort": "high", "source": "dagq.toml",
+            "switched_from": "codex", "switch_reason": "subagents_unsupported",
+        }});
+        let launch = ActorLaunch::recorded(&payload, ModelRole::Review);
+        assert_eq!(launch.provider, Provider::Claude);
+        assert_eq!(launch.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(launch.switched_from, Some(Provider::Codex));
+        assert_eq!(launch.switch_reason, None);
+        let known = json!({"launch": ActorLaunch::default_of(ModelRole::Review)
+            .switched(Provider::Codex, SwitchReason::Disabled)
+            .to_value()});
+        assert_eq!(
+            ActorLaunch::recorded(&known, ModelRole::Review).switch_reason,
+            Some(SwitchReason::Disabled)
         );
     }
 

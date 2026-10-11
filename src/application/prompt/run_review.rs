@@ -8,11 +8,10 @@ use super::*;
 /// it took 6,385 bytes at the median, 10,218 at p90 and 18,535 at most.
 pub const RUN_REVIEW_PROMPT_LIMIT: usize = 32_000;
 
-/// The bytes of the task's title, of its acceptance (1,544 at most in
-/// production) and of the required subagents' list in the review prompt.
+/// The bytes of the task's title and of its acceptance (1,544 at most in
+/// production) in the review prompt.
 pub const RUN_REVIEW_TITLE_BYTES: usize = 1_000;
 pub const RUN_REVIEW_ACCEPTANCE_BYTES: usize = 8_000;
-pub const RUN_REVIEW_SUBAGENTS_BYTES: usize = 8_000;
 
 /// The bytes the whole prompt of an agent job takes at most, the
 /// language's instruction included (ADR-t1566-1 decision 4): one agent's
@@ -41,18 +40,11 @@ pub const AGENT_JOB_INSTRUCTIONS_BYTES: usize = 6_000;
 /// decision 2 as ADR-t451-1 decision 3 amends it): where the material is,
 /// the task's acceptance, the verdict schema, where `revise` ends and
 /// `concern` begins, and how a concern is judged and when it reaches a
-/// person; then the required subagents (`subagents`, from
-/// [`crate::application::review::review_subagents_prompt`]), when there are any. The
-/// title, the acceptance and the subagents are held to their limits and
+/// person. The title and the acceptance are held to their limits and
 /// the whole to [`RUN_REVIEW_PROMPT_LIMIT`]; what is cut says where in
 /// the worktree or the run directory the job reads it whole (task 1571,
 /// ADR-t1566-1 decision 3).
-pub fn review_prompt(
-    task: &Task,
-    run: &TaskRun,
-    review_path: &str,
-    subagents: Option<&str>,
-) -> FittedPrompt {
+pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> FittedPrompt {
     let mut fit = Fit::new(RUN_REVIEW_PROMPT_LIMIT);
     let material = format!("read it whole in the review material at {review_path}");
     let title = fit.text(
@@ -70,28 +62,7 @@ pub fn review_prompt(
         &format!("{material}, its section Acceptance"),
     );
     fit.section("acceptance", &acceptance);
-    // The list of agents is held to its limit; how to run them and report
-    // their results is never cut.
-    let subagents = subagents.map_or_else(String::new, |text| {
-        let instruction = crate::application::review::SUBAGENTS_INSTRUCTION;
-        let list = text.strip_suffix(instruction).unwrap_or(text);
-        let mut kept = fit.text(
-            "subagents",
-            list,
-            RUN_REVIEW_SUBAGENTS_BYTES - instruction.len(),
-            Keep::Start,
-            "every agent and the paths that selected it are in the file the list names",
-        );
-        if kept.len() != list.len() {
-            kept.push('\n');
-        }
-        if list.len() != text.len() {
-            kept.push_str(instruction);
-        }
-        fit.section("subagents", &kept);
-        kept
-    });
-    let mut text = format!(
+    let text = format!(
         "You review run {run_id} of dagq task {task_id} ({title}) before it lands.\n\
          Read the review material at {review_path}: the task, its goal, the receipt, the commits and the full diff. Read the worktree if you need more. Do not change any file.\n\
          {rules}\n\
@@ -113,7 +84,6 @@ pub fn review_prompt(
         codes = reason_codes_section(review_reason::REVIEW_CODES),
         rules = REVIEW_RULES,
     );
-    text.push_str(&subagents);
     fit.finish(text)
 }
 

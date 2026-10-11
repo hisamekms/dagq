@@ -185,8 +185,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - providerごとの変換（ADR-t1895-1の独立のagentのjobの起動の設定を作る関数。agentのjobの起動、`AgentProvider::agent_job_command`が使う）:
   - Claude（`infrastructure::adapters::claude_agent_job_tool_args`）: jobの起動の引数の`--allowedTools`に宣言した道具（`read`→`Read`、`grep`→`Grep`、`glob`→`Glob`、`shell`→`Bash`、`edit`→`Edit`・`NotebookEdit`、`write`→`Write`）を並べ、`--disallowedTools`に一覧の残りを並べる。reviewの既定は今のreviewと同じ`Read,Grep,Glob`と`Bash,Edit,Write,NotebookEdit`。予約の道具の拒否（`PRINT_MODE_DENIED_TOOLS`）、`--setting-sources ""`とreviewの`--settings`（ADR-t1470-1）はjobの起動の側が持ち、変換は触らない。
   - Codex（`infrastructure::codex::agent_job_tools_config`）: Codexはfileを読む・探す・pathを探すのもshellのコマンドで行うので、`read`・`grep`・`glob`・`shell`のどれかを宣言したjobには何も足さず（read-onlyのsandboxがコマンドを読み取りに留める）、どれも宣言しないjobには`-c features.shell_tool=false`と`-c features.unified_exec=false`（codex-cli 0.160.0の`[features]`）を足してshellを外す。`--sandbox read-only`・jobのpermission profile・worktreeのprojectの`untrusted`（ADR-t1570-1）は変えず、狭めるだけ。このためCodexでは`read`だけの宣言と`read`・`grep`・`glob`の宣言は同じ設定になる。
-- 当てないもの: 親のjobの中のsubagentの渡し方（Claudeの`--agents`のJSONの`tools`は`SUBAGENT_TOOLS`のまま、Codexの`-c agents.<name>.*`）。
-  全体のreviewのjobは定義を持たないので対象にしない。
+- 当てないもの: 全体のreviewのjobは定義を持たないので対象にしない。
 
 ## evalが本番と共有する起動経路
 
@@ -208,7 +207,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   `[roles.review]`のproviderが控え中か`--no-claude`で使えない間は、新しい実行を起動せず理由を記録して待ち、流れている実行は止めない。
 - supervisorの再起動: 持ち主が居なくなった周だけを引き取り、前のsupervisorのevalのjobは引き継ぎで子孫ごと止めて記録し、周をeventから読み直して、終わっていない実行をその見込みで使った額に数えてから費用の上限の判定を通して起動し直す。
   走っているprocessを引き継いで続ける形にはしない。
-- 使わないもの: 全体のreviewのjob、親のjobの中のsubagent（`--agents`・Codexの`runs_review_subagents`・能力による切り替え）。
+- 使わないもの: 全体のreviewのjob。
 
 ## programのreviewの当て方
 

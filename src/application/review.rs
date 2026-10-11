@@ -210,23 +210,6 @@ impl SubagentSnapshot {
             })).collect::<Vec<_>>(),
         })
     }
-
-    /// What the review job reads (`review-subagents-<attempt>.json`): the
-    /// event's value with each definition's text.
-    pub fn job_input(&self) -> Value {
-        json!({
-            "commit": self.commit,
-            "base": self.range.base,
-            "head": self.range.head,
-            "agents": self.agents.iter().map(|agent| json!({
-                "agent": agent.name,
-                "paths": agent.matched,
-                "definition": agent.definition_path,
-                "digest": agent.digest,
-                "text": agent.definition,
-            })).collect::<Vec<_>>(),
-        })
-    }
 }
 
 /// Read the review's subagents from the landing branch's committed tree,
@@ -356,32 +339,6 @@ pub fn check_agents(
         json!({"commit": commit, "agents": agents, "errors": errors}),
     ))
 }
-
-/// What the review's prompt adds when its range requires agents: the
-/// agents, the paths that selected each, and where their definitions as
-/// committed on the landing branch are (`input`).
-pub fn review_subagents_prompt(snapshot: &SubagentSnapshot, input: &Path) -> String {
-    let mut out = format!(
-        "\nRequired review subagents: the changes of this review require the agents below. Their definitions, as committed on the landing branch at {commit}, are in {input} (one entry per agent, its text under \"text\").\n",
-        commit = snapshot.commit,
-        input = input.display(),
-    );
-    for agent in &snapshot.agents {
-        out.push_str(&format!(
-            "- {name} (changed: {paths})\n",
-            name = agent.name,
-            paths = agent.matched.join(", "),
-        ));
-    }
-    out.push_str(SUBAGENTS_INSTRUCTION);
-    out
-}
-
-/// How the review runs its required subagents and reports their results
-/// (ADR-t1453-1 decisions 5 and 6), after the list of agents.
-pub const SUBAGENTS_INSTRUCTION: &str = "Each of these agents is given to you as a subagent of the same name with that definition. Besides your own review, run every one of them as a subagent on this review's changes, wait until all of them have finished, and fold their findings into your one verdict. Your verdict must not be lighter than any agent's (pass < revise < concern), and it keeps each agent's reasons, recommendation, confidence and reason_category. Do not skip an agent: one that could not run or finish is reported as failed, and the review does not pass then.
-Add to the verdict JSON an \"agents\" array with exactly one entry per agent above and no other: {\"agent\": \"<name>\", \"status\": \"completed\" or \"failed\", \"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [...], \"summary\": \"...\"}, and for a concern also \"recommendation\", \"confidence\" and \"reason_category\" as in the verdict.
-";
 
 /// Write `text` and then the full diff `<base>...<head>` as a fenced block to
 /// `temporary`. Git streams the diff to the file `diff` first, as raw bytes
@@ -932,7 +889,7 @@ mod tests {
     /// The review's subagents as the landing branch's commit has them
     /// (ADR-t1453-1 decisions 3 and 4): those the range's paths select,
     /// with the committed definition and its digest; the snapshot the
-    /// event records and the job reads, and what the prompt adds.
+    /// event records.
     #[test]
     fn the_committed_config_selects_the_agents_the_range_requires() {
         let found = snapshot(
@@ -949,26 +906,12 @@ mod tests {
             "agent": "design", "paths": ["change.txt"],
             "definition": ".dagq/agents/design/AGENT.md", "digest": digest}]});
         assert_eq!(found.event_value(), expected);
-        let mut input = expected;
-        input["agents"][0]["text"] = json!(DEFINITION);
-        assert_eq!(found.job_input(), input);
-        let prompt = review_subagents_prompt(&found, Path::new("/runs/r/review-subagents-1.json"));
-        for part in [
-            "Required review subagents: ".to_owned(),
-            format!(
-                "committed on the landing branch at {SHA}, are in /runs/r/review-subagents-1.json"
-            ),
-            "- design (changed: change.txt)\n".to_owned(),
-            SUBAGENTS_INSTRUCTION.to_owned(),
-        ] {
-            assert!(prompt.contains(&part), "{part} in {prompt}");
-        }
     }
 
     /// Without `[review.subagents]` on the landing branch (no `dagq.toml`,
     /// or one without the table) the review is as before: no snapshot, so
-    /// no `subagents` in `review_started`, no job input and no word of
-    /// subagents in the prompt or the material. With the table but a range
+    /// no `subagents` in `review_started` and no word of subagents in the
+    /// prompt or the material. With the table but a range
     /// it does not select, the snapshot records the empty selection.
     #[test]
     fn a_review_without_required_agents_reads_as_before() {
@@ -986,8 +929,7 @@ mod tests {
             json!({"commit": SHA, "base": "base", "head": "head", "agents": []})
         );
         let prompt =
-            crate::application::prompt::review_prompt(&task(""), &run(), "/runs/r/review.md", None)
-                .text;
+            crate::application::prompt::review_prompt(&task(""), &run(), "/runs/r/review.md").text;
         assert!(!prompt.contains("subagent"), "{prompt}");
         let material = material(&task(""));
         assert!(!material.contains("subagent"), "{material}");

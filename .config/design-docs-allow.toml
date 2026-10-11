@@ -41,9 +41,9 @@ tasks = 6
 
 [[doc]]
 path = "docs/design/manual-smoke.md"
-size = 111446
+size = 109427
 line = 1373
-tasks = 70
+tasks = 69
 
 [[doc]]
 path = "docs/design/measurement.md"
