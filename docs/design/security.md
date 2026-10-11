@@ -63,7 +63,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 | integrator | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | ○ |
 
 - review-jobとrecovery-jobの`review.submit` / `triage.submit`は自分のrunだけのcapabilityだが、CLIのコマンドは無く、verdictはsupervisorがデータとして読む。jobの環境には`DAGQ_RUN_ID`が無いので、今は持ち主が分からず拒まれる
-- observerの`queue.export`（`graph --out`・`report`）は—。`ci.read`（`ci failures`、[CI watch](supervisor-lifecycle/ci-watch.md)）はuser・inbox・planner・observer・supervisorが持つ。4つのjob・worker・wrapper・integratorは`watch`も`queue.export`も`ci.read`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`・`ci failures`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる（task 859）。読み取り（`queue.read`）は全roleが持つ
+- observerの`queue.export`（`graph --out`・`report`）は—。`ci.read`（`ci failures`、[CI watch](supervisor-lifecycle/ci-watch.md)）はuser・inbox・planner・observer・supervisorが持つ。headlessのjob（review・recovery・plan review・goal review・throughput review、一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）・worker・wrapper・integratorは`watch`も`queue.export`も`ci.read`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`・`ci failures`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる（task 859）。読み取り（`queue.read`）は全roleが持つ
 - `judge-follow-up`（`follow_up.judge`）はuser・inbox・plannerだけが全状態のfollow_upに記録でき、worker・job・supervisorは拒む。所属変更はdraft/readyだけ。表のplannerのtask変更の例外はこの判断の記録だけである。
 - draftの再検討の時刻（`revisit`、[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）は計画の列の`task.write`に含める（許すroleと拒むroleが開始前のtaskの変更と同じなので、新しいcapabilityにしない）。user・inbox・plannerが付け・変え・外し、worker・observer・job・supervisorは拒む。plannerは`draft_planner_exhausted`のあるdraftに付けられない（人・inboxが付けたものだけがplannerの上限を越えて1回立つため）
 - user・inboxの計画権限には、最新runが終了し生きているrunの無い`in_progress` taskの`--verify` / `--no-verify`だけを直す`task.verify_edit`も含む（ADR-t883-1）。planner・worker・jobは持たない。
@@ -100,7 +100,7 @@ roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説�
 
 - worker: `integrate`・`answer`・`ask close`・`ready`・`cancel`・計画系の全て・`request add`・`request decline`・`recover`・`review`・`supervise`・`observe`・`plan`・`up`・`down`・`install`・`auto-update`・`init`・`migrate`・`rebind`・`finding`・`mark`、自分のrun以外への`ask`・`note`・`session`・`session-event`
 - planner: `ready`（`--bypass-review`・`--inherit`を含む）・`goal ready`・`goal review`・`request add`・他の依頼の`request decline`と`ask --request`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run log`・`run send`・`planner screen`・`planner log`・`planner send`・`planner request`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、draft以外と上限に達したdraftの`revisit`、他のplannerのproposalの取り下げ
-- 4つのjob: 状態を変える全て（`reviewer may not change queue state`）
+- headlessのjob: 状態を変える全て（`reviewer may not change queue state`）
 - observer: `finding record`・`finding resolve`・findingに紐づく`blocked`のask以外の全て（`observer may not change queue state`）
 - inbox: 人（user）と同じで、拒まれるのは誰にも与えない着地の実行・pushと予約だけ
 

@@ -136,11 +136,11 @@ userとinboxだけに与えるcapabilityを1つ足し、ほかのroleは拒む�
 
 `judge-follow-up`は`follow_up.judge`をtask resourceで判定し、user・inbox・plannerだけに許す。taskの状態による制限は無く、submitted以降の訂正も記録できる（所属を動かすのはdraft/readyだけ。[所属の判断](follow-up-membership.md)）。
 
-policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く。`in_progress`のtaskの`set-priority`もuserとinboxだけ）は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・4つのjob・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
+policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く。`in_progress`のtaskの`set-priority`もuserとinboxだけ）は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・headlessのjob（review・recovery・plan review・goal review・throughput review、一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
 
 拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。payloadは`role`・`capability`・`reason`（上の理由）・`resource`（`kind`と`id`、taskなら`status`、proposalなら`owner`、依頼なら`planner`。開くask（`new_ask`）はidの代わりに`ask_kind`・`run`・`task`を持ち、`--request`付きなら`request`と依頼の`planner`も持つ）。記録に失敗しても拒否は拒否のまま返す。observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
 
-CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、`error`はobserverなら`observer may not change queue state`、4つのjob（と`reviewer`）なら`reviewer may not change queue state`（今までの文言）、それ以外は`<role> may not <capability> (<reason>)`。
+CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、`error`はobserverなら`observer may not change queue state`、headlessのjob（と`reviewer`）なら`reviewer may not change queue state`（今までの文言）、それ以外は`<role> may not <capability> (<reason>)`。
 
 ### 対話と記録のコマンド（application）
 
@@ -165,7 +165,7 @@ CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、
 | `request add` | `request.record` | queue。userとinboxだけが持つ（inboxの記録は人の言葉の代行で、`requested_by`とeventのactorが`inbox`）。planner・worker・observer・全てのjob・supervisor・wrapper・integratorは拒む |
 | `request decline ID` | `request.decline` | `Request`（id、その依頼の閉じていないruntimeのplanner）。capabilityを持たないroleは依頼を読む前に拒み、plannerはその依頼のplanner自身でなければ`not on this resource`で拒む |
 
-`asked_by`・noteとfindingの`by`・markの`by`は、呼び出し元が渡した値ではなく`Dialogue`がactorから入れる（roleの名前、userは`human`。綴りは今までどおり）。answerはuserとinboxだけで（[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)の決定4）、worker・4つのjob・observer・planner・supervisor・wrapper・integratorは`ask.answer`を、worker・4つのjob・observer・planner・wrapper・integratorは`ask.close`を持たない（supervisorは閉じられる）。
+`asked_by`・noteとfindingの`by`・markの`by`は、呼び出し元が渡した値ではなく`Dialogue`がactorから入れる（roleの名前、userは`human`。綴りは今までどおり）。answerはuserとinboxだけで（[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)の決定4）、worker・headlessのjob・observer・planner・supervisor・wrapper・integratorは`ask.answer`を、worker・headlessのjob・observer・planner・wrapper・integratorは`ask.close`を持たない（supervisorは閉じられる）。
 
 #### answerの権限の出どころと承認の分類
 
@@ -212,7 +212,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 - `run close-workspaces`（`workspace.cleanup`）を通すのはuserとinboxだけ（ADR-t1228-1の決定7）で、plannerとsupervisorを含むほかのroleは`authorization_denied`で拒む。通ったuserとinboxにも、runtimeはrunのworkspaceを開かず、runのbackgroundのwrapperは自分で止めることを理由に拒み（引数は受け付けて使わない。ADR-t1433-3の決定3）、何も閉じず記録しない。過去に作られて残ったrunのworkspaceは人が自分のterminalで閉じる。supervisorは終わったrunに残ったwrapperを自分の掃除（[Run workspaces](supervisor-lifecycle/run-workspaces.md)）で止める
 - `run screen`は`screen.read`を通った後、どのrunにも画面を読まずに理由と`run log RUN [--follow]`を示して拒む（ADR-t1433-3の決定4）
 - plannerの権限は`up`・`down`・`inbox`・`install`・`init`・`migrate`・`rebind`・`plan`と、自分のplannerの`planner-session`と`session-event`を許す（ADR-t728-1の決定7のとおり今の権限のまま）。plannerはruntimeだけが立て、人が頼む相手ではないので（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）、`up`・`down`・`inbox`・`install`は使わない（打つのはinboxか人の`DAGQ_ROLE`の無いterminal。[Roles](supervisor-lifecycle/roles.md)）。`plan`は権限の判定を通っても誰が打っても何も開かず、inboxへの依頼の案内（`PLAN_REFUSED`）で失敗する。`integrate`・`recover`・`review`・`supervise`・`observe`・`session`は拒む
-- worker・4つのjob・observerは`integrate`・`recover`・`install`・`auto-update`・`up`・`down`・`inbox`・`init`・`migrate`・`rebind`・`plan`・`supervise`・`observe`・`review`を拒む。workerは自分のrunの`session`と`session-event`だけを打てる。別のrunのもの、inboxやplannerのspanを名乗るもの（`DAGQ_SESSION_KIND`）、`planner-session`は拒む
+- worker・headlessのjob・observerは`integrate`・`recover`・`install`・`auto-update`・`up`・`down`・`inbox`・`init`・`migrate`・`rebind`・`plan`・`supervise`・`observe`・`review`を拒む。workerは自分のrunの`session`と`session-event`だけを打てる。別のrunのもの、inboxやplannerのspanを名乗るもの（`DAGQ_SESSION_KIND`）、`planner-session`は拒む
 - 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。errorの形は計画系と同じ
 - 生の`cmux`はこのpolicyの外にある（dagqのCLIを通らない）。inboxとplannerには、Claudeのsettingsの`permissions.deny`の`Bash(cmux:*)`（`permission_deny(Inbox|Planner)`の最後の規則）を置き、上の`run` / `planner`のCLIを使わせる（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。これは**guardrailであってenforcementではない**: hostの判定は助言的なまま（ADR-t728-1決定6）で、絶対pathやscriptからの`cmux`は通り、`dagq inbox`を通さずに開いたinboxと`claude`を打ち直したsessionには効かない。拒むのはあくまでCLIの判定で、cmuxを拒んだことでCLIの権限は変わらない。workerとjobの`cmux`は拒まない（隔離が扱う）。Codexのinboxは同じ趣旨をCodexの手段で持たせ、無ければguardrailが無いと[Security](security.md#判定の場所)に書く（決定6。今のinboxはClaudeだけ）。settingsの場所・中身と`status` / `doctor`の`inbox_guardrail`は[`up` / `down`](supervisor-lifecycle/up-down.md)と[Security](security.md)が持つ
 
@@ -242,7 +242,7 @@ queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、�
 
 ### ほかのコマンド（CLIの入口）
 
-上の3つ以外のコマンド（読み取り・`watch`・`graph --out`・`report`・`ci failures`）は状態を変えない。これらはroleを問わず（default deny）`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す。拒んだときだけ、runtimeの操作と同じ`src/infrastructure/denials.rs`の`QueueDenials`（判定の後でだけqueueを開く）で`authorization_denied`を、拒まれた呼び出し元をactorにして記録する（payloadは計画系と同じ`role`・`capability`・`reason`・`resource`）。queueが無い・このバイナリが開けないときは記録せず、拒否は拒否のまま返す。通った読み取りは今までどおりqueueを読み取り専用で開き、書かない（ADR-0073決定5・7・18）。読み取り（`queue.read`）は全roleが持つ。`watch`（`queue.watch`）はuser・inbox・planner・supervisor・observer、`graph --out`と`report`（`queue.export`）はuser・inbox・planner・supervisorだけが持ち、`ci failures`（`ci.read`）はuser・inbox・planner・observer・supervisorだけが持ち、worker・wrapper・integratorと4つのjob（と旧値`reviewer`）のそれらは拒まれる。observerとjobの拒否のerrorの文は以前の`observer_access` / `reviewer_access`のもの（`observer may not change queue state`など）のまま。
+上の3つ以外のコマンド（読み取り・`watch`・`graph --out`・`report`・`ci failures`）は状態を変えない。これらはroleを問わず（default deny）`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す。拒んだときだけ、runtimeの操作と同じ`src/infrastructure/denials.rs`の`QueueDenials`（判定の後でだけqueueを開く）で`authorization_denied`を、拒まれた呼び出し元をactorにして記録する（payloadは計画系と同じ`role`・`capability`・`reason`・`resource`）。queueが無い・このバイナリが開けないときは記録せず、拒否は拒否のまま返す。通った読み取りは今までどおりqueueを読み取り専用で開き、書かない（ADR-0073決定5・7・18）。読み取り（`queue.read`）は全roleが持つ。`watch`（`queue.watch`）はuser・inbox・planner・supervisor・observer、`graph --out`と`report`（`queue.export`）はuser・inbox・planner・supervisorだけが持ち、`ci failures`（`ci.read`）はuser・inbox・planner・observer・supervisorだけが持ち、worker・wrapper・integratorとheadlessのjob（と旧値`reviewer`）のそれらは拒まれる。observerとjobの拒否のerrorの文は以前の`observer_access` / `reviewer_access`のもの（`observer may not change queue state`など）のまま。
 
 ## Claudeのpermissions.deny（guardrail）
 

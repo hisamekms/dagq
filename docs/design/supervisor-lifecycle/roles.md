@@ -22,7 +22,7 @@ related:
 - **inbox**: 人に届くものすべての窓口になるsession。openなask（worker・supervisor・job・observerの質問）を人に見せてanswerを書き戻し、それ以外のattentionを人に知らせ、人の指示があるときだけ`dagq-recover` skillの手順（`up` / `down`、手でのreviewと`integrate`、`recover`。workerのrunへの`run send`とplannerへの`planner send`はどれにも拒まれ（ADR-t1433-2）、workerとplannerへの答えは`answer`で記録する）を実行する。人が頼んだ計画は人の言葉のまま`request add`で計画の依頼として記録し、runtimeのplannerに移譲する（[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）。唯一の常駐sessionで、人が自分のterminalで打つ`dagq inbox`が`DAGQ_ROLE=inbox`で、`inbox_prompt`付きでその前面に起動する（`up`は開かない。[`dagq inbox`](up-down.md#dagq-inbox)、[Session prompts](session-prompts.md#session-prompts)）。
 - **observer**: supervisorのtimerが起動するheadlessのjob（`DAGQ_ROLE=observer`、workspaceは持たない）。stats・閉じていないfinding・直近のnote・openなask・graphを読み、findingの記録と更新（`finding record` / `finding resolve`）と、findingに紐づく`blocked`のask（`ask --kind blocked --finding`）だけを書く。note・goal（draftを含む）・taskは書かず、run・task・goalの状態も変えない（[Observer](observer.md#observer)、[Overview](../overview.md)の用語集）。
 
-役割はこの5つ（ADR-0044の決定1。ADR-0024の決定1を引き継ぐ）で、review・recovery（triage）・plan review・goal reviewのjobはsupervisorが起動するheadlessのjob（workspaceは持たない）。runtimeの中で人が打つ`/exit`や復旧は「人（person）」と書き、inboxのsessionか人の`DAGQ_ROLE`の無いterminalから打つ（`src/`に`operator`も退役した役割名も残らない）。
+役割はこの5つ（ADR-0044の決定1。ADR-0024の決定1を引き継ぐ）で、review・recovery（triage）・plan review・goal review・throughput reviewのjob（一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）はsupervisorが起動するheadlessのjob（workspaceは持たない）。runtimeの中で人が打つ`/exit`や復旧は「人（person）」と書き、inboxのsessionか人の`DAGQ_ROLE`の無いterminalから打つ（`src/`に`operator`も退役した役割名も残らない）。
 
 ## Actors
 
@@ -95,7 +95,7 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 - 旧値`reviewer`（入れ替え前のバイナリが起動したjob）は移行の間だけ`review-job`として読む。
 - `DAGQ_ACTOR_ID`が無ければ（それより前に開いたsession）actor idは`DAGQ_ROLE`の値。
 - 計画系のコマンド（`add`・`submit`・`ready`・`cancel`・`goal close`など）は全てのroleについてapplicationの層が判定し、拒んだ試みを`authorization_denied`に記録する（task 732、[Authorization](../authorization.md#計画系のコマンドapplication)）。対話と記録のコマンド（`ask`・`answer`・`note`・`mark`・`finding`。task 733）と、runtimeの操作系のコマンド（`integrate`・`recover`・`review`・`up`・`down`・`install`・`auto-update`・`supervise`・`observe`・`plan`・`init`・`migrate`・`rebind`と内部の`session`・`session-event`・`planner-session`。task 734、[Authorization](../authorization.md#runtimeの操作系のコマンドapplication)）も同じ。runtimeのwrapperとhookはworkerの環境のまま打つので、workerは自分のrunの`session`と`session-event`だけを打てる。
-- 4つのjob（と`reviewer`）は今までのreviewerと同じ読み取りだけの制限を受け、状態を変えるコマンドは`reviewer may not change queue state`で拒まれる。observerの制限（findingの記録・解決と、findingに紐づく`blocked`のaskだけ）も変わらない。判定は`StaticPolicy`（[Authorization](../authorization.md)）で、どのjobにもCLIの書き込みを与えない。
+- headlessのjob（と`reviewer`）は今までのreviewerと同じ読み取りだけの制限を受け、状態を変えるコマンドは`reviewer may not change queue state`で拒まれる。observerの制限（findingの記録・解決と、findingに紐づく`blocked`のaskだけ）も変わらない。判定は`StaticPolicy`（[Authorization](../authorization.md)）で、どのjobにもCLIの書き込みを与えない。
 - noteの`by`・markの`by`・findingの`recorded_by`と状態変更の`by`・askの`asked_by`は`ActorContext::written_by`（roleの名前、userは`human`）、answerの`answered_by`は`ActorContext::answered_by`（roleの名前、userは`person`）から作り、書かれる値は型を入れる前と同じ。
 
 ### eventのactor
