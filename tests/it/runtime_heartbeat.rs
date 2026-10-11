@@ -164,6 +164,11 @@ fn a_busy_heartbeat_is_tried_again_and_its_failures_are_recorded() {
 fn busy_writes_that_would_let_the_leases_go_stale_stop_the_supervisor() {
     let _test = common::test();
     let (_dir, db, queue) = registered();
+    // A subscriber of its own: a heartbeat thread with none, first at the
+    // busy WARN while another test's is the only dispatcher registered,
+    // makes tracing cache the WARN as unheard, and that test
+    // (`a_busy_heartbeat_is_tried_again...`) would never count it.
+    let _subscriber = tracing::subscriber::set_default(tracing_subscriber::registry());
     // The leases would go stale a second after the last write: the next
     // write must start within 1s - 50ms - 100ms of it.
     let heartbeat = start(&db, policy(Duration::from_secs(1)));
@@ -208,17 +213,4 @@ fn a_registration_gone_from_the_queue_stops_the_supervisor() {
     let error = format!("{:#}", heartbeat.check().unwrap_err());
     assert!(error.contains("registration is gone"), "{error}");
     leases.check().unwrap();
-}
-
-#[test]
-fn the_supervisor_policy_retries_until_the_leases_would_go_stale() {
-    let policy = HeartbeatPolicy::supervisor(Duration::from_secs(2));
-    assert_eq!(policy.stale_after, Duration::from_secs(30));
-    assert_eq!(policy.attempt, Duration::from_secs(5));
-    assert!(policy.retries(true, Duration::ZERO));
-    assert!(policy.retries(true, Duration::from_secs(22)));
-    assert!(!policy.retries(true, Duration::from_secs(23)));
-    // A failure that does not pass is not tried again.
-    assert!(!policy.retries(false, Duration::ZERO));
-    assert!(!HeartbeatPolicy::leases(Duration::from_secs(2)).registered);
 }

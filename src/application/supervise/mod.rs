@@ -4026,4 +4026,17 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn the_supervisor_policy_retries_until_the_leases_would_go_stale() {
+        let policy = HeartbeatPolicy::supervisor(Duration::from_secs(2));
+        assert_eq!(policy.stale_after, Duration::from_secs(30));
+        assert_eq!(policy.attempt, Duration::from_secs(5));
+        assert!(policy.retries(true, Duration::ZERO));
+        assert!(policy.retries(true, Duration::from_secs(22)));
+        assert!(!policy.retries(true, Duration::from_secs(23)));
+        // A failure that does not pass is not tried again.
+        assert!(!policy.retries(false, Duration::ZERO));
+        assert!(!HeartbeatPolicy::leases(Duration::from_secs(2)).registered);
+    }
 }
