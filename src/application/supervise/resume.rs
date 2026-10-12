@@ -2,6 +2,7 @@
 //! resume, the resolution request and the [`ResumeWatch`] of the session.
 
 use super::*;
+use crate::application::run_git;
 use crate::domain::EventKind;
 use crate::domain::{
     ParkCause, RunEvent, Task, required_of,
@@ -189,8 +190,7 @@ impl Supervisor<'_> {
         if !unresolved_since_park {
             return Ok(None);
         }
-        let (Some(worktree), Some(receipt_path)) = (&run.worktree_path(), &run.receipt_path())
-        else {
+        let (Some(_), Some(receipt_path)) = (&run.worktree_path(), &run.receipt_path()) else {
             return Ok(None);
         };
         let Some(receipt) = self
@@ -202,14 +202,11 @@ impl Supervisor<'_> {
             return Ok(None);
         };
         let task = self.queue.show(run.task_id())?.task;
-        let worktree = Path::new(worktree);
-        let Ok(head) = self.repository.head(worktree) else {
+        let Ok(run_git::SessionHead { head, clean }) =
+            run_git::session_head(&*self.repository, run)
+        else {
             return Ok(None);
         };
-        let clean = self
-            .repository
-            .status(worktree)
-            .is_ok_and(|status| status.trim().is_empty());
         let main_is_ancestor = self
             .repository
             .is_ancestor(main.as_str(), head.as_str())
@@ -338,7 +335,11 @@ impl Supervisor<'_> {
         let Some(head) = carried_head(run, &*self.files, &*self.repository)? else {
             return Ok(None);
         };
-        keep_carried_head(&*self.repository, run.id(), &head)?;
+        keep_carried_head(
+            &*crate::application::run_git::for_run(&*self.repository, run)?,
+            run.id(),
+            &head,
+        )?;
         Ok(Some(head))
     }
     /// Retry the task of a run whose resumes were used up on conflicts
@@ -434,6 +435,9 @@ impl Supervisor<'_> {
         );
         let task = self.queue.show(run.task_id())?.task;
         let landed = landed_since(&mut *self.queue, &*self.repository, run, &request.main)?;
+        // A clone reaches main only through its bundle (ADR-t2179-1
+        // decision 6).
+        run_git::hand_main(&*self.repository, run, &request.main)?;
         let message = resume_request(&task, run, request, &landed)?
             .with_language(self.verifier.language().as_ref());
         self.write_reason_file(request, &message)?;
@@ -1348,7 +1352,7 @@ impl ResumeWatch {
             );
             return Ok(None);
         };
-        let worktree = Path::new(run.worktree_path().context("missing worktree")?);
+        run.worktree_path().context("missing worktree")?;
         if wrapper.exited_at.is_some() {
             // It exited during the retries of its /exit: they repaired it.
             let _workspace = self.workspace.clone();
@@ -1360,11 +1364,9 @@ impl ResumeWatch {
             if let Some(nudge) = &mut self.stale {
                 nudge.settle(sv, run, RESUME_PHASE, Some(self.attempt), "run_ended")?;
             }
-            let head = sv.repository.head(worktree).ok();
-            let clean = sv
-                .repository
-                .status(worktree)
-                .is_ok_and(|status| status.trim().is_empty());
+            let read = run_git::session_head(&*sv.repository, run).ok();
+            let head = read.as_ref().map(|read| read.head.clone());
+            let clean = read.is_some_and(|read| read.clean);
             return Ok(Some(ResumeVerdict {
                 kind: self.verdict(&*sv.files, run, head.as_ref().filter(|_| clean)),
                 head,
@@ -1403,7 +1405,7 @@ impl ResumeWatch {
             }
             return Ok(Some(ResumeVerdict {
                 kind: ResumeOutcome::Unresolved,
-                head: sv.repository.head(worktree).ok(),
+                head: run_git::head(&*sv.repository, run).ok(),
                 exit_timed_out: true,
                 live: false,
                 closed: false,
@@ -1469,8 +1471,7 @@ impl ResumeWatch {
         // worktree: a receipt rewritten after this read is judged
         // at the next poll, never as idle without it.
         let idle = sv.session_idle(&self.idle_marker)?;
-        let head = sv.repository.head(worktree)?;
-        let clean = sv.repository.status(worktree)?.trim().is_empty();
+        let run_git::SessionHead { head, clean } = run_git::session_head(&*sv.repository, run)?;
         // Resolved (or failed) and idle after the receipt; or idle
         // after the request with no such receipt, which a session
         // that could not resolve it (or stopped at a question)

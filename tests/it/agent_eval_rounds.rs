@@ -85,7 +85,7 @@ impl AgentProvider for EvalAgent {
     fn headless_command(&self, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
         bail!("no other job runs in these tests")
     }
-    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
         unreachable!("no run is reviewed in these tests")
     }
     fn agent_job_command(&self, job: &AgentJobLaunch) -> Result<CommandSpec> {

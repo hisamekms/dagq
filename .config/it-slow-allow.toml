@@ -1077,3 +1077,9 @@ task = 1493
 name = "runtime_spike_replan::the_investigation_limit_holds_a_new_goal_s_spike_until_an_investigation_ends"
 reason = "B 境界（SQLite・supervisor の配線・CLI）: max_spikes と max_investigations を dagq.toml から読んだ supervisor が、Spike の上限と調査中の計画の上限の控えを claim_deferred に記録して枠を実装に渡し、candidates・graph がその記録を出し、着地と依頼の却下で調査が終わった pass に控えた Spike を claim することを、実際の worker の session と integrate で確かめる。上限の判断は domain::investigation と domain::claim_order の unit test"
 task = 1493
+
+# 6.0〜7.4s (stress 5 under the host's load of other runs, task 2179)
+[[test]]
+name = "runtime_clone::nothing_a_worker_plants_in_its_clone_runs_on_the_control_side"
+reason = "B 境界（Git・プロセス）: workerがcloneのconfig・hooks・attributesに仕込んだプログラムが、実のgitでの取り込み・receiptの検証・着地用のworktreeでのreviewの起動・integrateの着地と片付け・headの読みのどれでも走らないことを、印のファイルで確かめる。上書きの組み立ては domain::run_clone の unit test"
+task = 2179

@@ -454,13 +454,13 @@ impl AgentProvider for Codex {
     /// `.codex` does not reach its review (ADR-t1570-1).
     fn review_command(
         &self,
-        run: &TaskRun,
+        _: &TaskRun,
+        tree: &Path,
         prompt: &str,
         access: JobAccess,
     ) -> Result<CommandSpec> {
-        let worktree = Path::new(run.worktree_path().context("missing worktree")?);
-        let mut command = self.headless_command(worktree, prompt, access)?;
-        command.arg("-c").arg(distrust_config(worktree)?);
+        let mut command = self.headless_command(tree, prompt, access)?;
+        command.arg("-c").arg(distrust_config(tree)?);
         Ok(command)
     }
     /// `-m <model>` for a model of Codex's (a claim's Claude model is left
@@ -849,7 +849,12 @@ mod tests {
             .headless_command(dir.path(), &prompt, JobAccess::ReadFilesAndQueueCli)
             .unwrap();
         let review = codex
-            .review_command(&run(&worktree, &run_dir), &prompt, JobAccess::ReadFiles)
+            .review_command(
+                &run(&worktree, &run_dir),
+                &worktree,
+                &prompt,
+                JobAccess::ReadFiles,
+            )
             .unwrap();
         for command in [job, review] {
             let (args, stdin) = stub_agent::run(&command, dir.path());
@@ -1287,7 +1292,12 @@ mod tests {
                 .contains(RULES_PATH)
         );
         let review = codex
-            .review_command(&run, "p", JobAccess::ReadFiles)
+            .review_command(
+                &run,
+                Path::new(run.worktree_path().unwrap()),
+                "p",
+                JobAccess::ReadFiles,
+            )
             .unwrap();
         assert_eq!(review.get_current_dir(), Some(worktree.as_path()));
         // The review is a job in the worktree, which it is told to

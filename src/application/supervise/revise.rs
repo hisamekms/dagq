@@ -387,9 +387,8 @@ impl ReviseWatch {
             _ => false,
         };
         if idle_after_receipt {
-            let worktree = Path::new(run.worktree_path().context("missing worktree")?);
-            let head = sv.repository.head(worktree)?;
-            let clean = sv.repository.status(worktree)?.trim().is_empty();
+            let crate::application::run_git::SessionHead { head, clean } =
+                crate::application::run_git::session_head(&*sv.repository, run)?;
             let parsed = sv
                 .files
                 .read_to_string(receipt)

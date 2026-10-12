@@ -50,17 +50,17 @@ pub(super) fn stale_receipt(sv: &Supervisor<'_>, run: &TaskRun) -> Option<StaleR
         .read_to_string(Path::new(run.receipt_path()?))
         .ok()
         .and_then(|text| Receipt::parse(&text).ok())?;
-    let worktree = Path::new(run.worktree_path()?);
+    run.worktree_path()?;
     let base = run.base_commit();
+    let read = std::cell::OnceCell::new();
+    let read = || {
+        read.get_or_init(|| crate::application::run_git::session_head(&*sv.repository, run).ok())
+    };
     stale_receipt_of(
         &receipt,
         run,
-        || sv.repository.head(worktree).ok(),
-        || {
-            sv.repository
-                .status(worktree)
-                .is_ok_and(|status| status.trim().is_empty())
-        },
+        || read().as_ref().map(|read| read.head.clone()),
+        || read().as_ref().is_some_and(|read| read.clean),
         |head| {
             sv.repository
                 .is_ancestor(base.as_str(), head.as_str())

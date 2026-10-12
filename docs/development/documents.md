@@ -40,7 +40,7 @@ related:
 - 置き換えは後継を`accepted`にする変更と同じ変更で行い、古いADRの`superseded_on`は後継の`accepted_on`と同じ日にする。`proposed`の後継は何も置き換えない（`supersedes`に予定のIDを書いてよいが、古いADRの状態は後継がacceptedになるまで変えない）。
 - ADRの索引は各ADRのfrontmatterから`scripts/adr-index.sh`が生成するgitignoreした`docs/adr/INDEX.md`で、commitしない（[ADR-t1967-1](../adr/2026-10-07-t1967-1-adr-index-generated-from-frontmatter.md)）。状態と後継の正本はfrontmatterの欄（`status`・`accepted_on`・`superseded_by`・`superseded_on`・`deprecated_on`）で、ADRを足す・状態を変える変更は欄だけを直し、索引も[ADRの案内](../adr/README.md)も書き換えない。
 - 索引を読む前に、無ければ`sh scripts/adr-index.sh`で作る（あれば何もしない。`--force`で作り直し、`--stdout`はファイルに書かず出す。CIは`--stdout`で全てのADRを読めることを確かめる）。表は有効なADRと置き換え・廃止のADRの2つで、4桁の行の後ろに`accepted_on`の順で並ぶ。
-- cloneの後に1回`git config core.hooksPath .githooks`を打つ。`.githooks/post-checkout`がcheckoutと`git worktree add`（dagqのrunのworktreeも）のたびに、`.githooks/post-merge`がmerge（着地でmain checkoutを進めるfast-forwardも）のたびに`sh scripts/adr-index.sh --force`を打ち、失敗してもgitの操作を止めない。hookが無い環境や、自分の変更でADRを足した・状態を変えたworktreeでは`--force`で作り直してから読む。このrepositoryのhostへの設定は人かinboxが行い、workerはhostのgitの設定を変えない。
+- cloneの後に1回`git config core.hooksPath .githooks`を打つ。`.githooks/post-checkout`がcheckoutと`git worktree add`（dagqのrunのworktreeも）のたびに、`.githooks/post-merge`がmerge（着地でmain checkoutを進めるfast-forwardも）のたびに`sh scripts/adr-index.sh --force`を打ち、失敗してもgitの操作を止めない。containerで動くrunの着地では、制御側のgitがhookを走らせない（[ADR-t2179-1](../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定8）ので、着地用のworktreeの作成でもmain checkoutを進めるfast-forwardでも索引は作り直されない。hookが無い環境や、自分の変更でADRを足した・状態を変えたworktree、containerのrunが着地した後のmain checkoutでは`--force`で作り直してから読む。このrepositoryのhostへの設定は人かinboxが行い、workerはhostのgitの設定を変えない。
 
 ## ADRのID
 

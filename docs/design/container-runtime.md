@@ -17,6 +17,7 @@ related:
   - adr-t2114-3
   - adr-t2114-4
   - adr-t2173-1
+  - adr-t2179-1
   - adr-t2257-1
   - design-security
   - design-supervisor-lifecycle-run-environment
@@ -167,10 +168,32 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
   attentionが立つ間は`RelayGate`がcontainerを使えないと答え、新しいrunを控える（上の「fail closedの境界」）。
 - 実物のmachineで流すtestは`#[ignore]`で、関門に数えない。
 
+## git
+
+containerで動くrunは、hostのgitの共通dirを共有しない独立したclone（`<queue dir>/clones/<run>`）で働く（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)決定1・3、[ADR-t2179-1](../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)）。
+runのworktreeのpathにcloneを記録したrunがcontainerのrunで（`TaskRun::in_container`）、hostのrunはworktreeのまま変わらない。
+制御側の読み方と扱い方の分かれ目は`application::run_git`の1か所にあり、呼び出し元はcloneのpathをgitに渡さない。
+adapterもcloneのpathでのgitを拒む。
+
+- cloneの作成: provisioningで制御側が`file://`のURLでbase commitを取り込み（hard linkもalternatesも無い）、run branchをcheckoutし、cloneの`refs/remotes/dagq/main`と制御側のrun branchをbaseに置く。
+  remote・credential helper・上流の資格情報は置かない。
+- 事実: containerの中のexecutorがturnの終わりにrun dirへ書くrun branchのbundleと状態のファイルから読む（綴りと形は`domain::run_clone`）。
+  headが要るたびに、bundleを制御側だけの写しにして`bundle list-heads`で1本のrun branchを確かめ、制御側のrun branchだけへ取り込む。
+  読めない・食い違うものはsessionに返す。
+- 着地・review・e2e: 制御側だけの`<queue dir>/landing/<run>`の着地用のworktree（検証が受け入れたcommitをdetachedで置く）で動く。
+  どのmachineとcontainerのmountにも入らず、作れないときは着地せず人を待つ。
+- main: rebaseを求めうる要求をsessionに渡す前に、制御側がmainのbundleをrun dirに書き、executorがcloneの`refs/remotes/dagq/main`へ取り込む。
+  要求と差し戻しの理由はそのrefを名指す。
+- hookとdriver: containerのrunのcommitを扱う制御側のgitは、hookを無いpathに向け、制御側のconfigの全scopeが定義するfilter・diff・mergeのdriverをプログラムを走らせないものに上書きして走る。
+  着地用のworktreeで起こすプロセスにも同じ上書きをenvで渡し、上書きが効くと確かめられなければ着地しない。
+- run dirのファイル: symlinkを辿らずに読み書きする。
+- 片付け: worktreeと同じ契機で、clone・着地用のworktree・制御側のrun branch・run dirのbundleと状態のファイルを、gitを使わずsymlinkを辿らずに消す。
+
 ## 後続の部品の置き場
 
 次の部品が揃ったら、それぞれが`ContainerRuntime`の答えを埋める。
 どれかが欠ければ使えないと答え、上の境界のまま控える。
 
-- runごとのcloneとbundleの取り込み（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）、containerの中のsccache（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
+- containerの中のsccache（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
+- containerの中のexecutorがturnの終わりに書くrun branchのbundleと状態のファイル、turnの始めのmainのbundleの取り込み（上の「git」）。
 - worker・resumeとverificationのcontainerの実行（`ExecutorBackend::Container`の実装）。

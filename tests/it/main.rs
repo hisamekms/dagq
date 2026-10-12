@@ -116,6 +116,7 @@ mod runtime_claim_spacing;
 mod runtime_claim_worker;
 mod runtime_cleanup;
 mod runtime_client_mode;
+mod runtime_clone;
 mod runtime_codex;
 mod runtime_codex_ask;
 mod runtime_codex_work;

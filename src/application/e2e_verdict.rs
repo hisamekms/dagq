@@ -176,6 +176,7 @@ mod tests {
             log: "/q/logs/update-1-abc.e2e.log".into(),
             utc_offset_secs: 9 * 3600,
             lock: None,
+            git_env: Vec::new(),
         }
     }
 

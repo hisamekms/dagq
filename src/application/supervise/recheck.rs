@@ -295,6 +295,9 @@ pub(super) struct Target {
     run_dir: PathBuf,
     /// Held in a slot of this supervisor to land (not waiting unleased).
     held: bool,
+    /// A run in a container, whose commits the git of the recheck handles
+    /// guarded (ADR-t2179-1 decision 8).
+    in_container: bool,
 }
 
 /// What the recheck found for one run.
@@ -565,6 +568,7 @@ impl Supervisor<'_> {
                 head: head.clone(),
                 run_dir: PathBuf::from(run_dir),
                 held,
+                in_container: run.in_container(),
             });
         }
         Ok(targets)
@@ -902,6 +906,13 @@ fn recheck_run(
     look: &GuardLook,
     target: &Target,
 ) -> Result<Finding> {
+    let guarded;
+    let repository = if target.in_container {
+        guarded = repository.guarded()?;
+        &*guarded
+    } else {
+        repository
+    };
     let tree = match repository.merged_tree(main.as_str(), target.head.as_str())? {
         Ok(tree) => tree,
         Err(paths) => return Ok(Finding::Failed(RecheckFailure::Conflict { paths })),
@@ -1048,6 +1059,7 @@ mod tests {
             head: sha(head),
             run_dir: PathBuf::from(format!("/runs/{run}")),
             held,
+            in_container: false,
         }
     }
 

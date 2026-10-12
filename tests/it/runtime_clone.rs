@@ -1,0 +1,1428 @@
+//! Runtime tests: a run in a container works in a clone of its own, which
+//! the control side runs no git and no program in (ADR-t2113-2,
+//! ADR-t2179-1). The container is faked: the test makes the worker's
+//! commits in the clone and writes the run branch's bundle and the run's
+//! state file as the container's executor would, with real git. What the
+//! supervisor does around them (the claim, the validation, the review, the
+//! resume) goes through the queue and the same application functions.
+use crate::runtime_support;
+
+use crate::common::service::OwnedByTest;
+use dagq::application::{CloneFacts, integrate::check_receipt, run_git};
+use dagq::domain::{
+    ClaimOutcome, LeaseToken, RunPlan, podman_machine::MachineMounts, provider_switch::WorkerRoute,
+    run_clone, validation::Validation, worker::Worker,
+};
+use dagq::infrastructure::location::runs_dir;
+use runtime_support::*;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+/// A run claimed as the supervisor claims one for a worker set to the
+/// container, its clone made by the control side.
+struct ContainerRun {
+    task: TaskId,
+    run: TaskRun,
+    token: LeaseToken,
+    clone: PathBuf,
+    run_dir: PathBuf,
+    base: String,
+}
+
+impl ContainerRun {
+    fn branch(&self) -> String {
+        format!("dagq/{}", self.run.id())
+    }
+
+    fn reload(&mut self, db: &Path) {
+        self.run = SqliteQueue::open(db).unwrap().run(self.run.id()).unwrap();
+    }
+}
+
+/// Claim `task` at main's head in `repo` and make its clone, as the
+/// supervisor provisions a run whose worker runs in the container.
+fn claim_in_container(db: &Path, repo: &Path, task: TaskId) -> ContainerRun {
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let common_dir = GitRepository::inspect(repo).unwrap().common_dir;
+    queue.bind_repository(common_dir.to_str().unwrap()).unwrap();
+    let base = git_out(repo, &["rev-parse", "main"]);
+    let token = LeaseToken::new(format!("container-{task}"));
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor_in_order(
+            &sha(&base),
+            &token,
+            &[task],
+            None,
+            &Default::default(),
+            &WorkerRoute::direct(&[Worker::CLAUDE_HEADLESS]),
+        )
+        .unwrap()
+    else {
+        panic!("task {task} was not claimed")
+    };
+    let runs = runs_dir(db);
+    let run_dir = runs.join(run.id().as_str());
+    let clone = run_clone::clone_path(&runs, run.id());
+    fs::create_dir_all(&run_dir).unwrap();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+    queue
+        .plan_run(
+            run.id(),
+            &token,
+            &RunPlan {
+                repo_path: text(repo),
+                run_dir: text(&run_dir),
+                branch: format!("dagq/{}", run.id()),
+                worktree_path: text(&clone),
+                receipt_path: text(&run_dir.join("receipt.json")),
+                log_path: text(&run_dir.join("log")),
+            },
+        )
+        .unwrap();
+    queue
+        .workspace_created(run.id(), &token, "background:1:1")
+        .unwrap();
+    let run = queue.run(run.id()).unwrap();
+    assert!(run.in_container());
+    GitRepository::inspect(repo)
+        .unwrap()
+        .create_clone(&run, None)
+        .unwrap();
+    ContainerRun {
+        task,
+        run,
+        token,
+        clone,
+        run_dir,
+        base,
+    }
+}
+
+/// Git in the clone, as the worker and the executor run it in the
+/// container: nothing the worker planted in its configuration is read.
+fn in_clone(clone: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+        ])
+        .arg("-C")
+        .arg(clone)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "worker")
+        .env("GIT_AUTHOR_EMAIL", "worker@example.invalid")
+        .env("GIT_COMMITTER_NAME", "worker")
+        .env("GIT_COMMITTER_EMAIL", "worker@example.invalid")
+        .bounded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} in the clone: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// The worker writes `files` and commits them on the run branch; the head.
+fn commit(run: &ContainerRun, files: &[(&str, &str)], message: &str) -> String {
+    for (path, text) in files {
+        let path = run.clone.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+    }
+    in_clone(&run.clone, &["add", "--all"]);
+    in_clone(&run.clone, &["commit", "-q", "-m", message]);
+    in_clone(&run.clone, &["rev-parse", "HEAD"])
+}
+
+/// The end of a turn as the container's executor ends it: the run branch's
+/// bundle on top of the base (none without a new commit) and the run's
+/// state, in the run directory.
+fn turn_end(run: &ContainerRun) {
+    let head = in_clone(&run.clone, &["rev-parse", "HEAD"]);
+    let bundle = run.run_dir.join(run_clone::RUN_BUNDLE_FILE);
+    let _ = fs::remove_file(&bundle);
+    if head != run.base {
+        in_clone(
+            &run.clone,
+            &[
+                "bundle",
+                "create",
+                "-q",
+                bundle.to_str().unwrap(),
+                &format!("refs/heads/{}", run.branch()),
+                &format!("^{}", run.base),
+            ],
+        );
+    }
+    write_state(
+        run,
+        Some(&format!("refs/heads/{}", run.branch())),
+        &head,
+        "",
+    );
+}
+
+fn write_state(run: &ContainerRun, branch: Option<&str>, head: &str, status: &str) {
+    fs::write(
+        run.run_dir.join(run_clone::RUN_STATE_FILE),
+        json!({"branch": branch, "head": head, "status": status, "rebase_in_progress": false})
+            .to_string(),
+    )
+    .unwrap();
+}
+
+fn write_receipt(run: &ContainerRun, commit: &str) {
+    fs::write(
+        run.run_dir.join("receipt.json"),
+        json!({
+            "run_id": run.run.id(),
+            "result": "succeeded",
+            "commit": commit,
+            "tests": {"status": "passed", "evidence_or_reason": "unit"},
+            "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
+            "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+            "summary": "done",
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// The receipt's validation as the supervisor's, through the same check.
+fn check(db: &Path, repo: &Path, run: &ContainerRun) -> Result<CommitSha, (ReasonCode, String)> {
+    let task = SqliteQueue::open(db).unwrap().show(run.task).unwrap().task;
+    let run = SqliteQueue::open(db).unwrap().run(run.run.id()).unwrap();
+    match check_receipt(
+        &GitRepository::inspect(repo).unwrap(),
+        &LocalRunFiles,
+        &task,
+        &run,
+        &[],
+    )
+    .unwrap()
+    {
+        Ok(accepted) => Ok(accepted.commit),
+        Err(rejection) => Err((rejection.code, rejection.reason)),
+    }
+}
+
+/// The session went idle after its receipt: validate it and, accepted,
+/// leave the run awaiting integration with no lease, for a person's
+/// integrate.
+fn validate(db: &Path, repo: &Path, run: &mut ContainerRun) -> CommitSha {
+    let mut queue = SqliteQueue::open(db).unwrap();
+    if queue.run(run.run.id()).unwrap().status() != RunStatus::Validating {
+        queue
+            .finish_supervision_live(run.run.id(), &run.token)
+            .unwrap();
+    }
+    let commit = check(db, repo, run).unwrap_or_else(|why| panic!("rejected: {why:?}"));
+    queue
+        .finish_validation(
+            run.run.id(),
+            &run.token,
+            &Validation {
+                accepted: true,
+                result_commit: Some(commit.clone()),
+                reason: None,
+                code: None,
+                receipt: serde_json::from_str(
+                    &fs::read_to_string(run.run_dir.join("receipt.json")).unwrap(),
+                )
+                .unwrap(),
+                evidence_missing: Vec::new(),
+                spike_result_missing: Vec::new(),
+                scope_violation: Vec::new(),
+                allowed_paths: Vec::new(),
+                e2e_requirement: None,
+                load: Default::default(),
+            },
+        )
+        .unwrap();
+    queue.release_lease(run.run.id(), &run.token).unwrap();
+    run.reload(db);
+    assert_eq!(run.run.status(), RunStatus::AwaitingIntegration);
+    commit
+}
+
+/// A process the control side starts in the run's landing worktree (the
+/// review's job or program, the e2e) with the environment it gets there;
+/// like an agent's CLI, it runs git in its working directory. With a
+/// global git configuration `global`, the control side that starts it
+/// reads that configuration too ([`guard_env_in_child`]).
+fn start_in_tree(repo: &Path, run: &ContainerRun, global: Option<&Path>) -> PathBuf {
+    let repository = GitRepository::inspect(repo).unwrap();
+    let tree = run_git::review_tree(&repository, &run.run).unwrap();
+    let env = match global {
+        None => run_git::tree_env(&repository, &run.run, &tree).unwrap(),
+        Some(global) => guard_env_in_child(repo, &tree, global),
+    };
+    let extra: Vec<(&str, &Path)> = global
+        .map(|g| ("GIT_CONFIG_GLOBAL", g))
+        .into_iter()
+        .collect();
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(
+            "git status --porcelain >/dev/null; git diff HEAD~1 >/dev/null; \
+             git log -p -1 >/dev/null; git diff --stat HEAD~1 >/dev/null; exit 0",
+        )
+        .current_dir(&tree)
+        .envs(env)
+        .envs(extra)
+        .bounded_output()
+        .unwrap();
+    assert!(output.status.success());
+    tree
+}
+
+/// Where [`guard_env_child_process`] reads what to do.
+const GUARD_ENV_FOR: &str = "DAGQ_TEST_GUARD_ENV_FOR";
+
+/// The guard's environment for a process in `tree`, as a control side
+/// whose global git configuration is `global` makes it: read in another
+/// process of this test binary that has that configuration
+/// ([`guard_env_child_process`]), since this one cannot change its own.
+fn guard_env_in_child(repo: &Path, tree: &Path, global: &Path) -> Vec<(String, String)> {
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "runtime_clone::guard_env_child_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(
+            GUARD_ENV_FOR,
+            format!("{}\n{}", repo.display(), tree.display()),
+        )
+        .env("GIT_CONFIG_GLOBAL", global)
+        .bounded_output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find_map(|line| line.split_once("guard-env: ").map(|(_, env)| env))
+        .unwrap_or_else(|| panic!("{stdout}{}", String::from_utf8_lossy(&output.stderr)));
+    serde_json::from_str(line).unwrap()
+}
+
+/// Not a test of its own: the other process of [`guard_env_in_child`],
+/// which prints the guard's environment when it is asked to and does
+/// nothing otherwise.
+#[test]
+fn guard_env_child_process() {
+    let Ok(asked) = std::env::var(GUARD_ENV_FOR) else {
+        return;
+    };
+    let (repo, tree) = asked.split_once('\n').unwrap();
+    let env = GitRepository::inspect(Path::new(repo))
+        .unwrap()
+        .guard_env_in(Path::new(tree))
+        .unwrap();
+    println!("guard-env: {}", serde_json::to_string(&env).unwrap());
+}
+
+/// A script that leaves a mark named by its first argument in `marks`,
+/// and otherwise does what git asks of the program it stands for (a clean
+/// or smudge filter passes its input through, a textconv prints its file)
+/// so a git that runs it goes on.
+fn marker(dir: &Path, marks: &Path) -> PathBuf {
+    let script = dir.join("mark");
+    common::template::script(
+        &script,
+        format!(
+            "#!/bin/sh\nmkdir -p '{marks}'\n: > '{marks}'/\"${{1:-unnamed}}\"\n\
+             case \"$1\" in\n*-clean|*-smudge|clean|smudge) cat ;;\n\
+             *-textconv|textconv) cat \"$2\" ;;\nesac\nexit 0\n",
+            marks = marks.display(),
+        ),
+    );
+    script
+}
+
+fn marks(dir: &Path) -> Vec<String> {
+    let mut found: Vec<String> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
+use crate::common;
+
+/// AC 1: the clone shares no object file with the repository (no hard
+/// link, no alternates), names no remote and holds no credential helper.
+#[test]
+fn a_container_runs_clone_shares_no_object_and_reaches_no_upstream() {
+    let (_fixture, repo, db) = fixture();
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/upstream.git",
+        ],
+    );
+    git(&repo, &["config", "credential.helper", "store"]);
+    let run = claim_in_container(&db, &repo, TaskId::new(1));
+    let git_dir = run.clone.join(".git");
+    assert!(git_dir.is_dir(), "the clone has its own git directory");
+    assert!(!git_dir.join("objects/info/alternates").exists());
+    let inodes = |dir: &Path| -> HashMap<(u64, u64), PathBuf> {
+        let mut found = HashMap::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = fs::symlink_metadata(&path).unwrap();
+                if meta.is_dir() {
+                    pending.push(path);
+                } else {
+                    found.insert((meta.dev(), meta.ino()), path);
+                }
+            }
+        }
+        found
+    };
+    let control = inodes(&repo.join(".git/objects"));
+    let cloned = inodes(&git_dir.join("objects"));
+    assert!(!cloned.is_empty());
+    for (inode, path) in &cloned {
+        assert!(
+            !control.contains_key(inode),
+            "{} shares its file with {}",
+            path.display(),
+            control[inode].display()
+        );
+        assert_eq!(fs::metadata(path).unwrap().nlink(), 1, "{}", path.display());
+    }
+    let config = fs::read_to_string(git_dir.join("config")).unwrap();
+    assert!(!config.contains("[remote"), "{config}");
+    assert!(!config.contains("credential"), "{config}");
+    assert!(!config.contains("example.invalid/upstream"), "{config}");
+    assert_eq!(in_clone(&run.clone, &["remote"]), "");
+    // The run branch at the base, main's ref beside it, the control side's
+    // run branch at the base too.
+    assert_eq!(
+        in_clone(&run.clone, &["symbolic-ref", "HEAD"]),
+        format!("refs/heads/{}", run.branch())
+    );
+    assert_eq!(in_clone(&run.clone, &["rev-parse", "HEAD"]), run.base);
+    assert_eq!(
+        in_clone(&run.clone, &["rev-parse", run_clone::CLONE_MAIN_REF]),
+        run.base
+    );
+    assert_eq!(in_clone(&run.clone, &["status", "--porcelain"]), "");
+    assert_eq!(git_out(&repo, &["rev-parse", &run.branch()]), run.base);
+}
+
+/// AC 3 and 7: a worker's commit goes from the bundle through the
+/// receipt's validation, the review in the landing worktree and the
+/// landing's checks to main, and everything the run left goes.
+#[test]
+fn a_container_run_lands_from_its_bundle_through_its_landing_worktree() {
+    let (_fixture, repo, db) = fixture();
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let head = commit(&run, &[("feature.txt", "feature\n")], "feature");
+    turn_end(&run);
+    write_receipt(&run, &head);
+    // Before validation nothing of the run's commit is in the repository.
+    assert_eq!(git_out(&repo, &["rev-parse", &run.branch()]), run.base);
+    assert_eq!(validate(&db, &repo, &mut run).as_str(), head);
+    assert_eq!(git_out(&repo, &["rev-parse", &run.branch()]), head);
+    // The run's facts as the supervisor reads them between turns.
+    let repository = GitRepository::inspect(&repo).unwrap();
+    assert_eq!(run_git::head(&repository, &run.run).unwrap().as_str(), head);
+    assert_eq!(
+        run_git::session_head(&repository, &run.run).unwrap(),
+        run_git::SessionHead {
+            head: sha(&head),
+            clean: true
+        }
+    );
+    // The review's processes work in the landing worktree.
+    let tree = start_in_tree(&repo, &run, None);
+    assert_eq!(Some(tree.clone()), run.run.landing_path());
+    assert_eq!(git_out(&tree, &["rev-parse", "HEAD"]), head);
+    let outcome = integrate(&db, run.task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(
+        git_out(&repo, &["show", "main:feature.txt"]),
+        "feature",
+        "the worker's change is on main"
+    );
+    assert!(repo.join("feature.txt").exists());
+    // Landed, the run leaves nothing.
+    assert!(!run.clone.exists());
+    assert!(!tree.exists());
+    assert!(git_out(&repo, &["branch", "--list", &run.branch()]).is_empty());
+    for name in [
+        run_clone::RUN_BUNDLE_FILE,
+        run_clone::RUN_STATE_FILE,
+        run_clone::MAIN_BUNDLE_FILE,
+    ] {
+        assert!(!run.run_dir.join(name).exists(), "{name}");
+    }
+    assert!(!git_out(&repo, &["worktree", "list"]).contains("landing"));
+}
+
+/// AC 3: the receipt's checks hold for a container run as for a host one,
+/// and a bundle or state file that cannot be used sends the run back to
+/// its session, never read from the clone instead.
+#[test]
+fn a_container_runs_receipt_is_checked_from_its_bundle_and_state() {
+    let (_fixture, repo, db) = fixture();
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    SqliteQueue::open(&db)
+        .unwrap()
+        .finish_supervision_live(run.run.id(), &run.token)
+        .unwrap();
+    run.reload(&db);
+    #[track_caller]
+    fn rejected_in(db: &Path, repo: &Path, run: &ContainerRun) -> (ReasonCode, String) {
+        match check(db, repo, run) {
+            Ok(commit) => panic!("accepted {commit}"),
+            Err(rejection) => rejection,
+        }
+    }
+    macro_rules! rejected {
+        ($run:expr) => {
+            rejected_in(&db, &repo, $run)
+        };
+    }
+    // No receipt, no commit, no bundle: as on the host.
+    assert_eq!(rejected!(&run).0, ReasonCode::ReceiptMissing);
+    write_receipt(&run, &run.base);
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch, "{reason}");
+    assert!(reason.contains("state file"), "{reason}");
+    assert_eq!(run.run.base_commit().as_str(), run.base);
+    turn_end(&run);
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("no commit was made"), "{reason}");
+
+    let head = commit(&run, &[("feature.txt", "feature\n")], "feature");
+    write_receipt(&run, &head);
+    // A commit the bundle does not carry yet: the state still names the
+    // last turn's head.
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("receipt commit"), "{reason}");
+    // The state names a head the bundle does not hold.
+    turn_end(&run);
+    write_state(
+        &run,
+        Some(&format!("refs/heads/{}", run.branch())),
+        &run.base,
+        "",
+    );
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("names"), "{reason}");
+    // Uncommitted work and another branch, as the state says.
+    turn_end(&run);
+    write_state(
+        &run,
+        Some(&format!("refs/heads/{}", run.branch())),
+        &head,
+        "?? notes.txt\n",
+    );
+    assert_eq!(rejected!(&run).0, ReasonCode::WorktreeDirty);
+    write_state(&run, Some("refs/heads/other"), &head, "");
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("refs/heads/other"), "{reason}");
+    // A bundle with another ref beside the run branch.
+    turn_end(&run);
+    let bundle = run.run_dir.join(run_clone::RUN_BUNDLE_FILE);
+    in_clone(&run.clone, &["branch", "extra"]);
+    in_clone(
+        &run.clone,
+        &[
+            "bundle",
+            "create",
+            "-q",
+            bundle.to_str().unwrap(),
+            &format!("refs/heads/{}", run.branch()),
+            "refs/heads/extra",
+            &format!("^{}", run.base),
+        ],
+    );
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("2 refs"), "{reason}");
+    assert!(git_out(&repo, &["branch", "--list", "extra"]).is_empty());
+    // A bundle that is gone, a symlink, or not a bundle.
+    fs::remove_file(&bundle).unwrap();
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("missing"), "{reason}");
+    let elsewhere = run.run_dir.join("elsewhere.bundle");
+    in_clone(
+        &run.clone,
+        &[
+            "bundle",
+            "create",
+            "-q",
+            elsewhere.to_str().unwrap(),
+            &format!("refs/heads/{}", run.branch()),
+            &format!("^{}", run.base),
+        ],
+    );
+    symlink(&elsewhere, &bundle).unwrap();
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("symlink"), "{reason}");
+    fs::remove_file(&bundle).unwrap();
+    fs::write(&bundle, "not a bundle").unwrap();
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("bundle"), "{reason}");
+    // A bundle whose base the repository does not have: history of its own.
+    in_clone(&run.clone, &["checkout", "-q", "--orphan", "alone"]);
+    in_clone(&run.clone, &["commit", "-q", "-m", "alone"]);
+    let alone = in_clone(&run.clone, &["rev-parse", "HEAD"]);
+    in_clone(
+        &run.clone,
+        &["commit", "-q", "--allow-empty", "-m", "on top"],
+    );
+    in_clone(&run.clone, &["branch", "-f", &run.branch(), "HEAD"]);
+    in_clone(
+        &run.clone,
+        &[
+            "bundle",
+            "create",
+            "-q",
+            bundle.to_str().unwrap(),
+            &format!("refs/heads/{}", run.branch()),
+            &format!("^{alone}"),
+        ],
+    );
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("imported"), "{reason}");
+    in_clone(&run.clone, &["branch", "-f", &run.branch(), &head]);
+    in_clone(&run.clone, &["checkout", "-q", &run.branch()]);
+    // A state file that is a symlink is not read either.
+    turn_end(&run);
+    let state = run.run_dir.join(run_clone::RUN_STATE_FILE);
+    let real = run.run_dir.join("state-elsewhere.json");
+    fs::rename(&state, &real).unwrap();
+    symlink(&real, &state).unwrap();
+    let (code, reason) = rejected!(&run);
+    assert_eq!(code, ReasonCode::CommitMismatch);
+    assert!(reason.contains("symlink"), "{reason}");
+    fs::remove_file(&state).unwrap();
+    // Sound again, it is accepted with the imported commit.
+    turn_end(&run);
+    assert_eq!(check(&db, &repo, &run).unwrap().as_str(), head);
+}
+
+/// AC 3: the paths, the evidence, a Spike's result and the e2e decide the
+/// container run's receipt as the host's.
+#[test]
+fn a_container_runs_paths_evidence_and_e2e_are_judged_as_on_the_host() {
+    let (_fixture, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let task = queue
+        .add(NewTask {
+            paths: vec!["src/**".into()],
+            required_evidence: vec![EvidenceCheck::SubagentReview],
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
+            ..common::queue::new_task("scoped")
+        })
+        .unwrap()
+        .id();
+    queue.transition(task, TaskAction::BypassReview).unwrap();
+    let mut run = claim_in_container(&db, &repo, task);
+    SqliteQueue::open(&db)
+        .unwrap()
+        .finish_supervision_live(run.run.id(), &run.token)
+        .unwrap();
+    run.reload(&db);
+    let head = commit(&run, &[("outside.txt", "x\n")], "outside");
+    turn_end(&run);
+    write_receipt(&run, &head);
+    // The receipt's subagent review is not_applicable: required, it is
+    // missing; the path outside the task's comes first.
+    let (code, _) = check(&db, &repo, &run).unwrap_err();
+    assert_eq!(code, ReasonCode::ScopeViolation);
+    in_clone(&run.clone, &["rm", "-q", "outside.txt"]);
+    let head = commit(&run, &[("src/inside.rs", "x\n")], "inside");
+    turn_end(&run);
+    write_receipt(&run, &head);
+    let (code, _) = check(&db, &repo, &run).unwrap_err();
+    assert_eq!(code, ReasonCode::EvidenceMissing);
+    let mut receipt: Value =
+        serde_json::from_str(&fs::read_to_string(run.run_dir.join("receipt.json")).unwrap())
+            .unwrap();
+    receipt["subagent_review"] = json!({"status": "passed", "evidence_or_reason": "reviewed"});
+    fs::write(run.run_dir.join("receipt.json"), receipt.to_string()).unwrap();
+    assert_eq!(check(&db, &repo, &run).unwrap().as_str(), head);
+    // Whether the e2e is required is read from the imported diff.
+    let task = SqliteQueue::open(&db).unwrap().show(task).unwrap().task;
+    let current = SqliteQueue::open(&db).unwrap().run(run.run.id()).unwrap();
+    let accepted = check_receipt(
+        &GitRepository::inspect(&repo).unwrap(),
+        &LocalRunFiles,
+        &task,
+        &current,
+        &["src/**".to_owned()],
+    )
+    .unwrap()
+    .unwrap_or_else(|rejection| panic!("{}", rejection.reason));
+    assert!(
+        accepted.e2e_requirement.required,
+        "{:?}",
+        accepted.e2e_requirement
+    );
+}
+
+/// The landing directory, the queue's directory and the landing worktree's
+/// path of `run`.
+fn landing_paths(db: &Path, run: &ContainerRun) -> (PathBuf, PathBuf, PathBuf) {
+    let tree = run.run.landing_path().unwrap();
+    let landing = tree.parent().unwrap().to_path_buf();
+    (runs_dir(db).parent().unwrap().to_path_buf(), landing, tree)
+}
+
+/// AC 5: the landing worktree is the control side's alone, outside every
+/// directory the machine mounts; something at its path, a symlink or a file
+/// on the way to it or a landing directory others may write keeps the run
+/// from landing and waits for a person; a sound landing directory is
+/// shared by the runs' landing worktrees.
+#[test]
+fn a_landing_worktree_is_made_only_in_the_control_sides_own_directory() {
+    let (_fixture, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let second = add_ready_task(&mut queue, "second", &[]);
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let (queue_dir, landing, tree) = landing_paths(&db, &run);
+    let mounts = MachineMounts::of_queue(&queue_dir);
+    for dir in mounts.dirs() {
+        assert!(
+            !tree.starts_with(dir) && !dir.starts_with(&tree),
+            "{}",
+            dir.display()
+        );
+    }
+    let head = commit(&run, &[("feature.txt", "feature\n")], "feature");
+    turn_end(&run);
+    write_receipt(&run, &head);
+    validate(&db, &repo, &mut run);
+    let held = |why: &str| {
+        let outcome = integrate(&db, run.task.as_i64(), &repo).unwrap();
+        assert_eq!(outcome["outcome"], "held", "{why}: {outcome}");
+        let current = SqliteQueue::open(&db).unwrap().run(run.run.id()).unwrap();
+        assert_eq!(current.status(), RunStatus::AwaitingIntegration, "{why}");
+        assert!(
+            current
+                .last_error()
+                .unwrap_or_default()
+                .contains("not landed"),
+            "{why}: {:?}",
+            current.last_error()
+        );
+        assert_eq!(git_out(&repo, &["rev-parse", "main"]), run.base, "{why}");
+    };
+    // Something at the landing worktree's path.
+    fs::create_dir_all(&landing).unwrap();
+    fs::set_permissions(&landing, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&tree, "a file").unwrap();
+    held("a file at the path");
+    fs::remove_file(&tree).unwrap();
+    fs::create_dir(&tree).unwrap();
+    held("a directory at the path");
+    fs::remove_dir(&tree).unwrap();
+    let elsewhere = queue_dir.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    symlink(&elsewhere, &tree).unwrap();
+    held("a symlink at the path");
+    fs::remove_file(&tree).unwrap();
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    // On the way to it: the landing directory a symlink, or a file.
+    fs::remove_dir(&landing).unwrap();
+    symlink(&elsewhere, &landing).unwrap();
+    held("a symlinked landing directory");
+    fs::remove_file(&landing).unwrap();
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    fs::write(&landing, "a file").unwrap();
+    held("a file for the landing directory");
+    fs::remove_file(&landing).unwrap();
+    // A landing directory its group may write.
+    fs::create_dir(&landing).unwrap();
+    fs::set_permissions(&landing, fs::Permissions::from_mode(0o770)).unwrap();
+    held("a landing directory its group writes");
+    fs::set_permissions(&landing, fs::Permissions::from_mode(0o700)).unwrap();
+    // The queue's directory and a sound landing directory there already
+    // are not refused, and two runs land one after the other under it.
+    let outcome = integrate(&db, run.task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    let mut next = claim_in_container(&db, &repo, second);
+    let head = commit(&next, &[("second.txt", "second\n")], "second");
+    turn_end(&next);
+    write_receipt(&next, &head);
+    validate(&db, &repo, &mut next);
+    let outcome = integrate(&db, next.task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(git_out(&repo, &["show", "main:second.txt"]), "second");
+    assert_eq!(
+        fs::metadata(&landing).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+/// AC 5: what the worker does to the run directory and the clone while
+/// its session lives through the review changes neither the landing
+/// worktree nor what lands, and no symlink it plants has the control side
+/// write or read elsewhere; a resume's new commit lands from a landing
+/// worktree made anew.
+#[test]
+fn what_the_worker_writes_during_the_review_does_not_reach_the_landing() {
+    let (_fixture, repo, db) = fixture();
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let head = commit(&run, &[("feature.txt", "reviewed\n")], "reviewed");
+    turn_end(&run);
+    write_receipt(&run, &head);
+    validate(&db, &repo, &mut run);
+    let tree = start_in_tree(&repo, &run, None);
+    // The live session goes on: a new commit, a new bundle and state, and a
+    // symlink where main's bundle goes, to a file of the host.
+    let host_file = run.run_dir.parent().unwrap().join("host-file");
+    fs::write(&host_file, "the host's\n").unwrap();
+    let later = commit(&run, &[("feature.txt", "after the review\n")], "later");
+    turn_end(&run);
+    let main_bundle = run.run_dir.join(run_clone::MAIN_BUNDLE_FILE);
+    symlink(&host_file, &main_bundle).unwrap();
+    // A commit on main makes the control side hand main to the clone.
+    fs::write(repo.join("main.txt"), "main\n").unwrap();
+    git(&repo, &["add", "main.txt"]);
+    git(&repo, &["commit", "-q", "-m", "main moved"]);
+    let main = git_out(&repo, &["rev-parse", "main"]);
+    let repository = GitRepository::inspect(&repo).unwrap();
+    run_git::hand_main(&repository, &run.run, &sha(&main)).unwrap();
+    assert_eq!(fs::read_to_string(&host_file).unwrap(), "the host's\n");
+    assert!(
+        !fs::symlink_metadata(&main_bundle)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    // Reading the facts again leaves the landing worktree as it was.
+    assert_eq!(
+        run_git::head(&repository, &run.run).unwrap().as_str(),
+        later
+    );
+    assert_eq!(git_out(&tree, &["rev-parse", "HEAD"]), head);
+    let outcome = integrate(&db, run.task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(git_out(&repo, &["show", "main:feature.txt"]), "reviewed");
+    assert_eq!(fs::read_to_string(&host_file).unwrap(), "the host's\n");
+}
+
+/// AC 5 and 6: a container run whose landing conflicts goes back to its
+/// session naming the clone's main ref, gets main's bundle, rebases on it
+/// in the clone, and its new commit lands from a landing worktree made
+/// anew.
+#[test]
+fn a_conflicting_container_run_rebases_on_mains_bundle_and_lands_again() {
+    let (_fixture, repo, db) = fixture();
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let head = commit(&run, &[("shared.txt", "the run's\n")], "run");
+    turn_end(&run);
+    write_receipt(&run, &head);
+    validate(&db, &repo, &mut run);
+    let tree = start_in_tree(&repo, &run, None);
+    fs::write(repo.join("shared.txt"), "main's\n").unwrap();
+    git(&repo, &["add", "shared.txt"]);
+    git(&repo, &["commit", "-q", "-m", "main's"]);
+    let main = git_out(&repo, &["rev-parse", "main"]);
+    let outcome = integrate(&db, run.task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    let reason = outcome["reason"].as_str().unwrap();
+    assert!(reason.contains("shared.txt"), "{reason}");
+    assert!(
+        reason.contains(&format!(
+            "git rebase {}, which holds {main}",
+            run_clone::CLONE_MAIN_REF
+        )),
+        "{reason}"
+    );
+    // The landing worktree's rebase was given up.
+    assert_eq!(git_out(&tree, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_out(&tree, &["status", "--porcelain"]), "");
+    // Before the resume, the control side hands main to the clone, whose
+    // executor fetches it into the clone's main ref.
+    let repository = GitRepository::inspect(&repo).unwrap();
+    run.reload(&db);
+    run_git::hand_main(&repository, &run.run, &sha(&main)).unwrap();
+    let bundle = run.run_dir.join(run_clone::MAIN_BUNDLE_FILE);
+    in_clone(
+        &run.clone,
+        &[
+            "fetch",
+            "-q",
+            bundle.to_str().unwrap(),
+            &format!("+refs/heads/main:{}", run_clone::CLONE_MAIN_REF),
+        ],
+    );
+    assert_eq!(
+        in_clone(&run.clone, &["rev-parse", run_clone::CLONE_MAIN_REF]),
+        main
+    );
+    // The resumed worker rebases onto it and resolves the conflict.
+    let rebase = Command::new("git")
+        .arg("-C")
+        .arg(&run.clone)
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "rebase",
+            run_clone::CLONE_MAIN_REF,
+        ])
+        .bounded_output()
+        .unwrap();
+    assert!(!rebase.status.success());
+    fs::write(run.clone.join("shared.txt"), "both\n").unwrap();
+    in_clone(&run.clone, &["add", "shared.txt"]);
+    let resolved = Command::new("git")
+        .arg("-C")
+        .arg(&run.clone)
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.editor=true"])
+        .args(["rebase", "--continue"])
+        .env("GIT_EDITOR", "true")
+        .bounded_output()
+        .unwrap();
+    assert!(
+        resolved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    let head = in_clone(&run.clone, &["rev-parse", "HEAD"]);
+    turn_end(&run);
+    write_receipt(&run, &head);
+    let skipped = SqliteQueue::open(&db)
+        .unwrap()
+        .skip_resume(run.run.id(), &run.token, &sha(&head), &sha(&main), false)
+        .unwrap();
+    assert!(skipped.is_some());
+    validate(&db, &repo, &mut run);
+    // The new validation took the old landing worktree away.
+    assert!(!tree.exists());
+    let new_tree = start_in_tree(&repo, &run, None);
+    assert_eq!(git_out(&new_tree, &["rev-parse", "HEAD"]), head);
+    let outcome = integrate(&db, run.task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(git_out(&repo, &["show", "main:shared.txt"]), "both");
+}
+
+/// AC 4: whatever the worker writes into the clone's configuration, hooks
+/// and attributes, the control side's reading, validation, landing, review,
+/// head reads and cleanup run none of it.
+#[test]
+fn nothing_a_worker_plants_in_its_clone_runs_on_the_control_side() {
+    let (fixture, repo, db) = fixture();
+    let dir = fixture.dir.path().to_path_buf();
+    let marks_dir = dir.join("marks");
+    let mark = marker(&dir, &marks_dir);
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let head = commit(
+        &run,
+        &[
+            ("feature.txt", "feature\n"),
+            (
+                ".gitattributes",
+                "* filter=planted diff=planted merge=planted\n",
+            ),
+        ],
+        "feature",
+    );
+    turn_end(&run);
+    write_receipt(&run, &head);
+    // Planted after the turn, as a worker may at any time.
+    let m = |name: &str| format!("{} {name}", mark.display());
+    let included = dir.join("included.gitconfig");
+    fs::write(
+        &included,
+        format!(
+            "[core]\n\tfsmonitor = {}\n\tsshCommand = {}\n",
+            m("include-fsmonitor"),
+            m("ssh")
+        ),
+    )
+    .unwrap();
+    let hooks = dir.join("planted-hooks");
+    fs::create_dir(&hooks).unwrap();
+    let git_dir = run.clone.join(".git");
+    fs::create_dir_all(git_dir.join("hooks")).unwrap();
+    for hook in [
+        "post-checkout",
+        "post-merge",
+        "post-rewrite",
+        "reference-transaction",
+        "pre-commit",
+        "post-commit",
+        "pre-rebase",
+        "post-index-change",
+    ] {
+        for (dir, name) in [
+            (&hooks, format!("hookspath-{hook}")),
+            (&git_dir.join("hooks"), format!("hooks-{hook}")),
+        ] {
+            common::template::script(&dir.join(hook), format!("#!/bin/sh\n{}\n", m(&name)));
+        }
+    }
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(git_dir.join("config"))
+        .unwrap();
+    use std::io::Write as _;
+    write!(
+        config,
+        "[core]\n\tfsmonitor = {fs}\n\thooksPath = {hooks}\n\tpager = {pager}\n\
+         [filter \"planted\"]\n\tclean = {clean}\n\tsmudge = {smudge}\n\tprocess = {process}\n\trequired = true\n\
+         [diff \"planted\"]\n\ttextconv = {textconv}\n\tcommand = {command}\n\
+         [merge \"planted\"]\n\tdriver = {driver}\n\
+         [diff]\n\texternal = {external}\n\
+         [include]\n\tpath = {included}\n",
+        fs = m("fsmonitor"),
+        hooks = hooks.display(),
+        pager = m("pager"),
+        clean = m("clean"),
+        smudge = m("smudge"),
+        process = m("process"),
+        textconv = m("textconv"),
+        command = m("command"),
+        driver = m("driver"),
+        external = m("external"),
+        included = included.display(),
+    )
+    .unwrap();
+    fs::create_dir_all(git_dir.join("info")).unwrap();
+    fs::write(
+        git_dir.join("info/attributes"),
+        "* filter=planted diff=planted\n",
+    )
+    .unwrap();
+    // Every way the control side reads the run.
+    validate(&db, &repo, &mut run);
+    let repository = GitRepository::inspect(&repo).unwrap();
+    run_git::head(&repository, &run.run).unwrap();
+    run_git::session_head(&repository, &run.run).unwrap();
+    run_git::status(&repository, &run.run).unwrap();
+    run_git::rebase_in_progress(&repository, &run.run).unwrap();
+    dagq::application::review::run_commits(&repository, &run.run).unwrap();
+    dagq::application::inherit::carried_head(&run.run, &LocalRunFiles, &repository).unwrap();
+    // The review's job and program and the e2e in the landing worktree.
+    start_in_tree(&repo, &run, None);
+    // The clone path itself is refused to git, whoever asks.
+    assert!(repository.head(&run.clone).is_err());
+    assert!(repository.status(&run.clone).is_err());
+    assert!(repository.tracks(&run.clone, "feature.txt").is_err());
+    let outcome = integrate(&db, run.task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert!(!run.clone.exists());
+    assert_eq!(marks(&marks_dir), Vec::<String>::new());
+    // The marker is live: git that reads such a configuration runs it.
+    let proof = dir.join("proof");
+    fs::create_dir(&proof).unwrap();
+    git(&proof, &["init", "-q", "--template="]);
+    git(&proof, &["config", "core.fsmonitor", &m("proof")]);
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&proof)
+        .arg("status")
+        .bounded_output();
+    assert_eq!(marks(&marks_dir), ["proof"]);
+}
+
+/// Configuration of `scope` that defines the drivers `name` names, each
+/// marking `name-<key>` when it runs.
+fn drivers(name: &str, mark: &Path) -> String {
+    let m = |key: &str| format!("{} {name}-{key}", mark.display());
+    format!(
+        "[filter \"{name}\"]\n\tclean = {}\n\tsmudge = {}\n\tprocess = {}\n\
+         [diff \"{name}\"]\n\ttextconv = {}\n\tcommand = {}\n\
+         [merge \"{name}\"]\n\tdriver = {}\n",
+        m("clean"),
+        m("smudge"),
+        m("process"),
+        m("textconv"),
+        m("command"),
+        m("driver"),
+    )
+}
+
+/// The worker's change that names the tracked hooks and the drivers the
+/// control side's configuration defines: `.githooks` with every hook
+/// calling `scripts/hook.sh`, and `.gitattributes` selecting the
+/// repository's and the global configuration's drivers.
+fn tracked_hooks(mark: &Path) -> Vec<(String, String)> {
+    let mut files = vec![
+        (
+            "scripts/hook.sh".to_owned(),
+            format!("#!/bin/sh\n{} tracked-$1\n", mark.display()),
+        ),
+        (
+            ".gitattributes".to_owned(),
+            "*.r filter=repo diff=repo merge=repo\n*.g filter=glob diff=glob merge=glob\n"
+                .to_owned(),
+        ),
+        ("a.r".to_owned(), "repo\n".to_owned()),
+        ("a.g".to_owned(), "glob\n".to_owned()),
+    ];
+    for hook in [
+        "post-checkout",
+        "post-merge",
+        "post-rewrite",
+        "reference-transaction",
+        "pre-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+        "pre-rebase",
+        "pre-push",
+    ] {
+        files.push((
+            format!(".githooks/{hook}"),
+            format!("#!/bin/sh\nsh \"$(git rev-parse --show-toplevel)/scripts/hook.sh\" {hook}\n"),
+        ));
+    }
+    files
+}
+
+/// The repository as this one is set up: `core.hooksPath=.githooks`, and
+/// drivers in the repository's and the global configuration.
+fn configure_drivers(repo: &Path, dir: &Path, mark: &Path) -> PathBuf {
+    git(repo, &["config", "core.hooksPath", ".githooks"]);
+    let config = repo.join(".git/config");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&drivers("repo", mark));
+    fs::write(&config, text).unwrap();
+    let global = dir.join("global.gitconfig");
+    fs::write(&global, drivers("glob", mark)).unwrap();
+    global
+}
+
+/// `dagq integrate` of `task` in another process whose global git
+/// configuration is `global`.
+fn integrate_with_global(db: &Path, repo: &Path, task: TaskId, global: &Path) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .owned_by_test()
+        .env("GIT_CONFIG_GLOBAL", global)
+        .arg("--db")
+        .arg(db)
+        .args(["integrate", &task.to_string(), "--no-push", "--repo"])
+        .arg(repo)
+        .current_dir(repo)
+        .bounded_output()
+        .unwrap();
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "integrate: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+/// The test's own git in the main checkout, as a person's: none of the
+/// repository's hooks and drivers, which would mark.
+fn git_unfiltered(repo: &Path, args: &[&str]) {
+    let mut all = vec![
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "filter.repo.clean=",
+        "-c",
+        "filter.repo.smudge=",
+        "-c",
+        "filter.repo.process=",
+    ];
+    all.extend_from_slice(args);
+    git(repo, &all);
+}
+
+/// A repository that is dagq's source, whose migrations are renumbered on
+/// landing (ADR-0067 decision 3).
+fn migration_source(repo: &Path) {
+    fs::write(repo.join("Cargo.toml"), "[package]\nname = \"dagq\"\n").unwrap();
+    fs::create_dir(repo.join("migrations")).unwrap();
+    fs::write(repo.join("migrations/0001_first.sql"), "-- first\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "first migration"]);
+}
+
+/// AC 4: the tracked hooks and the drivers the control side's
+/// configuration defines (the repository's and the global), selected by a
+/// container run's commit, run in none of the import, the validation, the
+/// landing worktree, the rebase (and its abort on a conflict), the
+/// renumbering of a migration, main's fast-forward, the cleanup and the
+/// review's processes in the landing worktree.
+#[test]
+fn a_container_runs_commit_runs_no_tracked_hook_and_no_driver_on_the_control_side() {
+    let (fixture, repo, db) = fixture();
+    let dir = fixture.dir.path().to_path_buf();
+    let marks_dir = dir.join("marks");
+    let mark = marker(&dir, &marks_dir);
+    migration_source(&repo);
+    let global = configure_drivers(&repo, &dir, &mark);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let conflicting = add_ready_task(&mut queue, "conflicting", &[]);
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let mut files = tracked_hooks(&mark);
+    files.push(("migrations/0002_run.sql".into(), "-- run\n".into()));
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let head = commit(&run, &files, "hooks and drivers");
+    turn_end(&run);
+    write_receipt(&run, &head);
+    // Main takes the migration's number meanwhile.
+    fs::write(repo.join("migrations/0002_main.sql"), "-- main\n").unwrap();
+    git_unfiltered(&repo, &["add", "migrations"]);
+    git_unfiltered(&repo, &["commit", "-q", "-m", "main's migration"]);
+    validate(&db, &repo, &mut run);
+    start_in_tree(&repo, &run, Some(&global));
+    let outcome = integrate_with_global(&db, &repo, run.task, &global);
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(
+        git_out(&repo, &["show", "main:migrations/0003_run.sql"]),
+        "-- run"
+    );
+    assert!(repo.join(".githooks/post-merge").exists());
+    assert!(!run.clone.exists());
+    assert_eq!(marks(&marks_dir), Vec::<String>::new());
+
+    // A run whose landing conflicts on a file whose merge driver the
+    // repository defines: the rebase stops and is given up, and still no
+    // hook or driver runs.
+    let mut next = claim_in_container(&db, &repo, conflicting);
+    let head = commit(
+        &next,
+        &[("a.r", "the run's\n"), ("a.g", "the run's\n")],
+        "conflicting",
+    );
+    turn_end(&next);
+    write_receipt(&next, &head);
+    fs::write(repo.join("a.r"), "main's\n").unwrap();
+    git_unfiltered(&repo, &["add", "a.r"]);
+    git_unfiltered(&repo, &["commit", "-q", "-m", "main's a.r"]);
+    validate(&db, &repo, &mut next);
+    start_in_tree(&repo, &next, Some(&global));
+    let outcome = integrate_with_global(&db, &repo, next.task, &global);
+    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    assert!(
+        outcome["reason"].as_str().unwrap().contains("a.r"),
+        "{outcome}"
+    );
+    assert_eq!(marks(&marks_dir), Vec::<String>::new());
+    // The cleanup at the run's end runs none either.
+    let repository = GitRepository::inspect(&repo).unwrap();
+    next.reload(&db);
+    run_git::remove(&repository, &next.run, &next.branch()).unwrap();
+    assert!(!next.clone.exists());
+    assert_eq!(marks(&marks_dir), Vec::<String>::new());
+}
+
+/// AC 4: the same commit landed from a run on the host runs the tracked
+/// hooks as before: the test above is not passing for want of a hook that
+/// could run.
+#[test]
+fn a_host_runs_landing_of_the_same_commit_runs_the_tracked_hooks() {
+    let (fixture, repo, db) = fixture();
+    let dir = fixture.dir.path().to_path_buf();
+    let marks_dir = dir.join("marks");
+    let mark = marker(&dir, &marks_dir);
+    git(&repo, &["config", "core.hooksPath", ".githooks"]);
+    let global = dir.join("global.gitconfig");
+    fs::write(&global, "").unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let common_dir = GitRepository::inspect(&repo).unwrap().common_dir;
+    queue.bind_repository(common_dir.to_str().unwrap()).unwrap();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let token = LeaseToken::new("host");
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor_in_order(
+            &sha(&base),
+            &token,
+            &[TaskId::new(1)],
+            None,
+            &Default::default(),
+            &WorkerRoute::direct(&[Worker::CLAUDE_HEADLESS]),
+        )
+        .unwrap()
+    else {
+        panic!("not claimed")
+    };
+    let runs = runs_dir(&db);
+    let run_dir = runs.join(run.id().as_str());
+    let worktree = run_dir.join("worktree");
+    fs::create_dir_all(&run_dir).unwrap();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+    queue
+        .plan_run(
+            run.id(),
+            &token,
+            &RunPlan {
+                repo_path: text(&repo),
+                run_dir: text(&run_dir),
+                branch: format!("dagq/{}", run.id()),
+                worktree_path: text(&worktree),
+                receipt_path: text(&run_dir.join("receipt.json")),
+                log_path: text(&run_dir.join("log")),
+            },
+        )
+        .unwrap();
+    queue
+        .workspace_created(run.id(), &token, "background:1:1")
+        .unwrap();
+    let run = queue.run(run.id()).unwrap();
+    assert!(!run.in_container());
+    GitRepository::inspect(&repo)
+        .unwrap()
+        .create_worktree(&run)
+        .unwrap();
+    for (path, body) in tracked_hooks(&mark) {
+        let path = worktree.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(
+        &worktree,
+        &["-c", "core.hooksPath=/dev/null", "add", "--all"],
+    );
+    git(
+        &worktree,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-q",
+            "-m",
+            "hooks",
+        ],
+    );
+    let head = git_out(&worktree, &["rev-parse", "HEAD"]);
+    fs::write(repo.join("main.txt"), "main\n").unwrap();
+    git(
+        &repo,
+        &["-c", "core.hooksPath=/dev/null", "add", "main.txt"],
+    );
+    git(
+        &repo,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-q",
+            "-m",
+            "main moved",
+        ],
+    );
+    fs::write(
+        run_dir.join("receipt.json"),
+        json!({
+            "run_id": run.id(),
+            "result": "succeeded",
+            "commit": head,
+            "tests": {"status": "passed", "evidence_or_reason": "unit"},
+            "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
+            "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+            "summary": "done",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    queue.finish_supervision_live(run.id(), &token).unwrap();
+    queue
+        .finish_validation(
+            run.id(),
+            &token,
+            &Validation {
+                accepted: true,
+                result_commit: Some(sha(&head)),
+                reason: None,
+                code: None,
+                receipt: serde_json::from_str(
+                    &fs::read_to_string(run_dir.join("receipt.json")).unwrap(),
+                )
+                .unwrap(),
+                evidence_missing: Vec::new(),
+                spike_result_missing: Vec::new(),
+                scope_violation: Vec::new(),
+                allowed_paths: Vec::new(),
+                e2e_requirement: None,
+                load: Default::default(),
+            },
+        )
+        .unwrap();
+    queue.release_lease(run.id(), &token).unwrap();
+    let _ = fs::remove_dir_all(&marks_dir);
+    let outcome = integrate_with_global(&db, &repo, TaskId::new(1), &global);
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    let found = marks(&marks_dir);
+    assert!(
+        found.iter().any(|mark| mark.starts_with("tracked-")),
+        "a tracked hook ran on the host's landing: {found:?}"
+    );
+}
+
+/// AC 7: removing what a container run left follows no symlink the worker
+/// planted, in its clone or its run directory, and runs no git in the
+/// clone.
+#[test]
+fn a_container_runs_cleanup_follows_no_symlink_the_worker_planted() {
+    let (fixture, repo, db) = fixture();
+    let dir = fixture.dir.path().to_path_buf();
+    let kept = dir.join("host-dir");
+    fs::create_dir(&kept).unwrap();
+    fs::write(kept.join("keep.txt"), "keep\n").unwrap();
+    let kept_file = dir.join("host-file");
+    fs::write(&kept_file, "keep\n").unwrap();
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let head = commit(&run, &[("feature.txt", "x\n")], "feature");
+    turn_end(&run);
+    write_receipt(&run, &head);
+    validate(&db, &repo, &mut run);
+    start_in_tree(&repo, &run, None);
+    symlink(&kept, run.clone.join("into-host")).unwrap();
+    symlink(&kept_file, run.clone.join("host-file")).unwrap();
+    fs::remove_file(run.run_dir.join(run_clone::RUN_STATE_FILE)).unwrap();
+    symlink(&kept_file, run.run_dir.join(run_clone::RUN_STATE_FILE)).unwrap();
+    symlink(&kept, run.run_dir.join(run_clone::MAIN_BUNDLE_FILE)).unwrap();
+    let repository = GitRepository::inspect(&repo).unwrap();
+    run_git::remove(&repository, &run.run, &run.branch()).unwrap();
+    assert!(!run.clone.exists());
+    assert!(!run.run.landing_path().unwrap().exists());
+    assert!(git_out(&repo, &["branch", "--list", &run.branch()]).is_empty());
+    for name in [
+        run_clone::RUN_STATE_FILE,
+        run_clone::MAIN_BUNDLE_FILE,
+        run_clone::RUN_BUNDLE_FILE,
+    ] {
+        assert!(
+            fs::symlink_metadata(run.run_dir.join(name)).is_err(),
+            "{name}"
+        );
+    }
+    assert_eq!(fs::read_to_string(kept.join("keep.txt")).unwrap(), "keep\n");
+    assert_eq!(fs::read_to_string(&kept_file).unwrap(), "keep\n");
+    // Again, with everything gone already: nothing to do.
+    run_git::remove(&repository, &run.run, &run.branch()).unwrap();
+    let facts: Option<CloneFacts> = None;
+    assert!(facts.is_none());
+}

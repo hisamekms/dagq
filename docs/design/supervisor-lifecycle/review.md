@@ -107,13 +107,14 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    Claudeのreviewは`--setting-sources ""`とsettingsの`autoMemoryEnabled: false`で、worktreeの`.claude/`・`.mcp.json`・`CLAUDE.md`・auto memoryとuserの設定を読まない（[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)）。
    そのためpromptが、worktreeのrootのinstructionsとそれが名指す文書を読んで判定するよう1文で求める（未実装の変更は[built-in](review-builtin.md)）。
    reviewのsettingsは`Stop` hookを持たない（生きているworkerのsessionのidle markerを書かないため）。
+   containerのrunは着地用のworktreeで動く（[Container runtime](../container-runtime.md#git)）。
    どのjobもreviewの段のjobの共通の経路（[Headless job processes](headless-job-processes.md#記録)）を`agent`の種類（`JobKind::Agent`）として通り、起動の記録・timeoutの停止・引き継ぎは`program`の種類のjobと同じである。
    時間の上限は種類ごとで、`[review.jobs]`（[Run environment](run-environment.md)）が無ければjobを動かすproviderの`AgentProvider::review_timeout`。
-   同時に動くagentのjobは、このsupervisorの全てのrunのreviewを合わせて上限（`ReviewJobs::concurrency`）までで、超えるjobは待ち、他のjobが終わってから起動する（`domain::review_jobs::startable`）。
+   同時に動くagentのjobは、このsupervisorの全てのrunのreviewを合わせて上限（`ReviewJobs::concurrency`）までで、超えるjobは待ち、他のjobが終わってから起動する。
    evalのjobはこの上限に数えず、reviewのjobはevalの枠に数えない（[Agent eval](../agent-eval.md)）。
    jobごとの開始と終わりは`review_job_started`・`review_job_finished`で、jobのExecutionは終わりが持つ。
-3. **判定**: 全てのjobが終わるまで判定しない（`domain::review_jobs::standing`）。
-   答えの無いjob（起動の失敗・非0の終了・時間切れ・読めないverdict）はそのjobだけ同じ入力で1回やり直し、他のjobの答えは保つ（`domain::review_jobs::runs_again`）。
+3. **判定**: 全てのjobが終わるまで判定しない。
+   答えの無いjob（起動の失敗・非0の終了・時間切れ・読めないverdict）はそのjobだけ同じ入力で1回やり直し、他のjobの答えは保つ。
    なお答えが無ければ`pass`にせず、全jobの終わりを待ってreviewの失敗にする。
    全てのjobが答えれば、全体のreviewのverdictにagentごとの結果を並べて`review_finished`を記録し、判定ごとに最も重い行き先を機械で取る（`domain::review_jobs::assemble`、下の「判定ごとの行き先」）。
    やり直しの使い方はjobごとにsupervisorの状態（`ReviewJob::again`）が持ち、待ちを挟んでも保つ。

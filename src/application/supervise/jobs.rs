@@ -390,7 +390,7 @@ pub fn start_review_program(
     spawner: &dyn Spawner,
     backends: &ProgramBackends<'_>,
     program: &crate::application::review_programs::SnapshotProgram,
-    worktree: &Path,
+    (worktree, env): (&Path, &[(String, String)]),
     (output, scratch): (&Path, &Path),
     (run, attempt): (&RunId, usize),
     timeout: Duration,
@@ -401,7 +401,7 @@ pub fn start_review_program(
         spawner,
         backends,
         program,
-        worktree,
+        (worktree, env),
         (output, scratch),
         (
             &format!("review-program-{attempt}-{name}"),
@@ -412,15 +412,16 @@ pub fn start_review_program(
 }
 
 /// Start `program` as a program job against `worktree` about `subject`,
-/// its files named by `stem` ([`start_review_program`], and a case of an
-/// agent's eval).
+/// with `env` on top of what its backend sets (the guard of a container
+/// run's landing worktree, ADR-t2179-1 decision 8), its files named by
+/// `stem` ([`start_review_program`], and a case of an agent's eval).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_program_against(
     ports: &JobPorts<'_>,
     spawner: &dyn Spawner,
     backends: &ProgramBackends<'_>,
     program: &crate::application::review_programs::SnapshotProgram,
-    worktree: &Path,
+    (worktree, env): (&Path, &[(String, String)]),
     (output, scratch): (&Path, &Path),
     (stem, subject): (&str, JobSubject),
     timeout: Duration,
@@ -429,9 +430,12 @@ pub(super) fn start_program_against(
     let backend = backends
         .backend()
         .with_context(|| format!("start the review program {name}"))?;
-    let command = backend
+    let mut command = backend
         .command(program, worktree, output, &scratch.join(stem))
         .with_context(|| format!("prepare the review program {name}"))?;
+    for (key, value) in env {
+        command.env(key, value);
+    }
     let timeout = program
         .program
         .timeout_secs
@@ -1590,6 +1594,7 @@ mod tests {
         fn review_command(
             &self,
             _: &TaskRun,
+            _: &Path,
             _: &str,
             _: crate::domain::headless_job::JobAccess,
         ) -> Result<CommandSpec> {
@@ -1615,6 +1620,7 @@ mod tests {
         fn review_command(
             &self,
             _: &TaskRun,
+            _: &Path,
             _: &str,
             _: crate::domain::headless_job::JobAccess,
         ) -> Result<CommandSpec> {
@@ -2172,6 +2178,7 @@ mod tests {
         fn review_command(
             &self,
             _: &TaskRun,
+            _: &Path,
             _: &str,
             _: crate::domain::headless_job::JobAccess,
         ) -> Result<CommandSpec> {

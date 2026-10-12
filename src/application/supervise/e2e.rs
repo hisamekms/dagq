@@ -164,12 +164,16 @@ impl Supervisor<'_> {
         }
         self.e2e.waiting.remove(run.id());
         self.e2e.retry.remove(run.id());
-        let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        // A container run's e2e runs in its landing worktree, its git
+        // guarded (ADR-t2179-1 decisions 5 and 8); running the tree's code
+        // on the host stays the e2e's exception (ADR-t2113-3 decision 3).
+        let worktree = crate::application::run_git::review_tree(&*self.repository, run)?;
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         let now = self.generators.clock.now();
         let settings = E2eSettings {
             log: run_dir.join(format!("e2e-{}.log", due.attempt)),
             utc_offset_secs: (self.utc_offset)(now),
+            git_env: crate::application::run_git::tree_env(&*self.repository, run, &worktree)?,
             ..port.settings.clone()
         };
         self.queue.record_runtime_event(

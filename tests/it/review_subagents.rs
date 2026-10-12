@@ -1049,6 +1049,7 @@ fn the_real_claude_review_jobs_keep_their_limits() {
         let command = claude
             .review_command(
                 &task_run,
+                Path::new(task_run.worktree_path().unwrap()),
                 "Reply with the single word OK.",
                 runtime::REVIEW_ACCESS,
             )

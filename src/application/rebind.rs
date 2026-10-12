@@ -110,6 +110,9 @@ pub fn rebind<Q: RunCoordination + SupervisorRegistry + RunLog + ?Sized>(
     let worktrees = queue
         .all_runs()?
         .into_iter()
+        // A container run's clone is no worktree of the repository, and no
+        // git runs in it (ADR-t2179-1 decision 7).
+        .filter(|run| !run.in_container())
         .filter_map(|run| {
             let path = PathBuf::from(run.worktree_path()?);
             Some((run.id().clone(), path))

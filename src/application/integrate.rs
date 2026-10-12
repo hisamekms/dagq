@@ -26,9 +26,9 @@ use std::{
 use tracing::{info, warn};
 
 use super::{
-    AskStore, Clock, EventStore, FollowUpRegistration, IdGenerator, Landing, MainRemote,
-    ProcessControl, Queue, QueueRecords, Repository, RunFiles, RunLog, Verifier, path_text,
-    reason_of_error, tail,
+    AskStore, Clock, CloneFacts, EventStore, FollowUpRegistration, IdGenerator, Landing,
+    MainRemote, ProcessControl, Queue, QueueRecords, Repository, RunFiles, RunLog, Verifier,
+    path_text, reason_of_error, tail,
 };
 use crate::domain::{
     ActorContext, ActorRole, AuthorizationError, Authorizer, Capability, Resource, StaticPolicy,
@@ -115,6 +115,14 @@ pub fn check_receipt(
     .with_spike(task.execution_class().is_spike());
     let worktree =
         || -> Result<&Path> { Ok(Path::new(run.worktree_path().context("missing worktree")?)) };
+    // A run in a container is read from its bundle and state file, never
+    // with git in its clone (ADR-t2179-1 decisions 1 to 4), once per
+    // validation; a landing worktree an earlier validation's commit left
+    // goes first, as the landing is of the commit accepted now.
+    let mut clone: Option<CloneFacts> = None;
+    if run.in_container() {
+        repository.remove_landing_worktree(run)?;
+    }
     loop {
         let fact = match validation::judge(&facts) {
             Judgement::Need(fact) => fact,
@@ -153,20 +161,37 @@ pub fn check_receipt(
                 facts.receipt = Some(ReceiptFile::of(text.as_deref()));
             }
             Fact::CheckedOut => {
-                let worktree = worktree()?;
                 let branch = run.branch().context("missing branch")?;
+                let current = if run.in_container() {
+                    match clone_of(repository, run, &mut clone)? {
+                        Ok(clone) => clone.state.branch.clone(),
+                        Err(why) => return Ok(Err(back_to_session(facts, why))),
+                    }
+                } else {
+                    repository.current_branch(worktree()?)?
+                };
                 facts.checked_out = Some(CheckedOut {
                     branch: branch.to_owned(),
-                    current: repository.current_branch(worktree)?,
+                    current,
                 });
             }
-            Fact::Head => facts.head = Some(repository.head(worktree()?)?),
+            Fact::Head => {
+                facts.head = Some(match &clone {
+                    Some(clone) => clone.head.clone(),
+                    None => repository.head(worktree()?)?,
+                });
+            }
             Fact::Descends => {
                 let head = facts.head.as_ref().context("no head to check")?;
                 facts.descends =
                     Some(repository.is_ancestor(run.base_commit().as_str(), head.as_str())?);
             }
-            Fact::Status => facts.status = Some(repository.status(worktree()?)?),
+            Fact::Status => {
+                facts.status = Some(match &clone {
+                    Some(clone) => clone.state.status.clone(),
+                    None => repository.status(worktree()?)?,
+                });
+            }
             // The diff starts where the branch forked from the current main,
             // not at the base commit: a resumed session that rebased carries
             // what other tasks landed since, which is not its change.
@@ -178,6 +203,53 @@ pub fn check_receipt(
                 facts.changes = Some(repository.changed_paths(fork.as_str(), head.as_str())?);
             }
         }
+    }
+}
+
+/// The facts of `run`, a run in a container, read once into `clone`: the
+/// head imported from its bundle and its state file. `Ok(Err(why))` is a
+/// bundle or state file that is missing or cannot be read or imported, or
+/// a state whose `HEAD` is not the bundle's head: the session's to put
+/// right, never read with git in the clone instead.
+fn clone_of<'a>(
+    repository: &dyn Repository,
+    run: &TaskRun,
+    clone: &'a mut Option<CloneFacts>,
+) -> Result<std::result::Result<&'a CloneFacts, String>> {
+    if clone.is_none() {
+        let facts = match repository.clone_facts(run)? {
+            Ok(facts) => facts,
+            Err(why) => {
+                return Ok(Err(format!(
+                    "{why}; the container writes the run branch's bundle and the run's state at the end of each turn, so end the turn with the work committed on the run branch"
+                )));
+            }
+        };
+        if facts.state.head() != facts.head {
+            return Ok(Err(format!(
+                "the run's state names {} as HEAD, but the run branch's bundle holds {}; commit on the run branch and end the turn so that both are written again",
+                facts.state.head(),
+                facts.head
+            )));
+        }
+        *clone = Some(facts);
+    }
+    Ok(Ok(clone.as_ref().expect("read above")))
+}
+
+/// The rejection that sends a container run whose bundle or state cannot
+/// be used back to its session, like a receipt that does not name the
+/// head (ADR-t2179-1 decision 4).
+fn back_to_session(facts: ReceiptFacts<'_>, reason: String) -> Rejection {
+    Rejection {
+        e2e_requirement: facts.e2e_requirement(),
+        reason,
+        code: ReasonCode::CommitMismatch,
+        commit: None,
+        receipt: facts.into_receipt(),
+        evidence_missing: Vec::new(),
+        spike_result_missing: Vec::new(),
+        scope_violation: Vec::new(),
     }
 }
 
@@ -661,7 +733,14 @@ fn land_integrating(
     } = request;
     let previous = *previous;
     let queue = &mut *ctx.queue;
-    let repository = ctx.repository;
+    // The git that handles a container run's commits runs none of their
+    // hooks and drivers (ADR-t2179-1 decision 8); one that cannot be kept
+    // from it lands nothing.
+    let guarded = super::run_git::for_run(ctx.repository, run);
+    let repository: &dyn Repository = match &guarded {
+        Ok(repository) => &**repository,
+        Err(_) => ctx.repository,
+    };
     let task = queue.show(run.task_id())?.task;
     // Every event of the landing, the push and the follow-ups carries the run.
     let _span =
@@ -677,6 +756,9 @@ fn land_integrating(
     // `[repository] branch` of the main checkout's dagq.toml, and the
     // fast-forward and the push still go to the branch this landing began on.
     let landed = repository.landing_branch().and_then(|onto| {
+        if let Err(error) = &guarded {
+            return Ok((onto, unguarded(run, error)));
+        }
         let verdict = land(
             queue,
             repository,
@@ -1234,7 +1316,19 @@ fn land(
     )? {
         return landed_before(queue, repository, files, task, run, main, commit, parent);
     }
-    let worktree = Path::new(run.worktree_path().context("missing worktree")?);
+    // A run in a container lands in the control side's landing worktree,
+    // with the commit its receipt's validation accepted, never in its
+    // clone (ADR-t2179-1 decision 5).
+    let landing_tree;
+    let worktree = if run.in_container() {
+        landing_tree = match super::run_git::landing_tree(repository, run)? {
+            Ok(tree) => tree,
+            Err(why) => return Ok(no_landing_worktree(run, &why)),
+        };
+        landing_tree.as_path()
+    } else {
+        Path::new(run.worktree_path().context("missing worktree")?)
+    };
     ensure!(
         files.is_dir(worktree),
         "worktree {} is missing",
@@ -1243,7 +1337,9 @@ fn land(
     // A worktree whose queue directory moved is still found through its own
     // `.git` file, but the repository's record of it points at the old path
     // until repaired, and removing it after landing would fail (ADR-0017).
-    repository.repair_worktree(worktree)?;
+    if !run.in_container() {
+        repository.repair_worktree(worktree)?;
+    }
     let branch = run.branch().context("missing branch")?;
     // The landing branch's name, for the reasons a resumed session reads.
     let onto = &landing_branch.name;
@@ -1258,7 +1354,10 @@ fn land(
         )?;
     }
     let expected_ref = format!("refs/heads/{branch}");
+    // A landing worktree holds the accepted commit detached; the clone's
+    // branch was the validation's to check.
     match repository.current_branch(worktree)? {
+        _ if run.in_container() => (),
         Some(current) if current == expected_ref => (),
         current => {
             return defer(
@@ -1356,10 +1455,18 @@ fn land(
         if repository.rebase_in_progress(worktree)? {
             repository.rebase_abort(worktree)?;
         }
+        // A run in a container rebases onto the ref main's bundle reaches
+        // its clone as (ADR-t2179-1 decision 6).
+        let target = super::run_git::rebase_target(run, main);
+        let target = if run.in_container() {
+            format!("{target}, which holds {main}")
+        } else {
+            target
+        };
         return defer(
             ReasonCode::RebaseConflict.into(),
             format!(
-                "rebase onto {onto} {main} conflicted in {}; resolve it in the worktree (git rebase {main}), rerun your checks, and rewrite the receipt with the new head",
+                "rebase onto {onto} {main} conflicted in {}; resolve it in the worktree (git rebase {target}), rerun your checks, and rewrite the receipt with the new head",
                 if conflicts.is_empty() {
                     "the run branch".to_owned()
                 } else {
@@ -1686,7 +1793,7 @@ fn landed_before(
         .worktree_path()
         .map(Path::new)
         .filter(|worktree| files.is_dir(worktree))
-        .and_then(|worktree| repository.head(worktree).ok())
+        .and_then(|_| super::run_git::head(repository, run).ok())
         .unwrap_or_else(|| commit.clone());
     Ok(Verdict::Landed(
         Landing {
@@ -1702,6 +1809,34 @@ fn landed_before(
         },
         receipt.and_then(Receipt::into_follow_ups),
     ))
+}
+
+/// The verdict on a container run whose landing worktree cannot be made
+/// (ADR-t2179-1 decision 5): it does not land and waits for a person, as
+/// nothing the session does would make it.
+fn no_landing_worktree(run: &TaskRun, why: &str) -> Verdict {
+    Verdict::Held {
+        reason: format!(
+            "run {} was not landed: {why}; see to the queue's landing directory, then land it with dagq integrate {}; no session is resumed",
+            run.id(),
+            run.task_id()
+        ),
+        detail: Reason::new(ReasonCode::GitFailed).on(json!({"landing_worktree": why})),
+    }
+}
+
+/// The verdict on a container run whose commits the control side's git
+/// cannot be kept from running the hooks and drivers of (ADR-t2179-1
+/// decision 8): it does not land and waits for a person.
+fn unguarded(run: &TaskRun, error: &anyhow::Error) -> Verdict {
+    Verdict::Held {
+        reason: format!(
+            "run {} was not landed: {error:#}; see to the git configuration, then land it with dagq integrate {}; no session is resumed",
+            run.id(),
+            run.task_id()
+        ),
+        detail: Reason::new(ReasonCode::GitFailed).on(json!({"guard": format!("{error:#}")})),
+    }
 }
 
 /// The variables the landing's own command gets (ADR-t1925-1 decision
@@ -2510,7 +2645,7 @@ fn remove_landed_worktree(queue: &mut dyn Queue, repository: &dyn Repository, ru
     let (Some(worktree), Some(branch)) = (&run.worktree_path(), &run.branch()) else {
         return;
     };
-    let recorded = match repository.remove_worktree_and_branch(Path::new(worktree), branch) {
+    let recorded = match super::run_git::remove(repository, run, branch) {
         Ok(()) => queue.record_runtime_event(
             run.id(),
             EventKind::WorktreeRemoved,
@@ -2788,6 +2923,39 @@ mod tests {
 
     /// Where the run's files are in [`MemoryFiles`].
     const DIR: &str = "/runs/run";
+
+    /// A container run whose commits the repository's git cannot be kept
+    /// from running the hooks and drivers of, or whose landing worktree
+    /// cannot be made, lands nothing and waits for a person: held, not sent
+    /// to its session (ADR-t2179-1 decisions 5 and 8). A run on the host
+    /// takes the repository as it is.
+    #[test]
+    fn a_container_run_that_cannot_be_guarded_or_given_a_landing_worktree_is_held() {
+        let container = run_on(
+            Path::new("/q/clones/run"),
+            RunStatus::Integrating,
+            Provider::Claude,
+        );
+        assert!(container.in_container());
+        let repository = FakeRepository::sound();
+        let error = match super::super::run_git::for_run(&repository, &container) {
+            Ok(_) => panic!("a repository that cannot guard its git guarded it"),
+            Err(error) => error,
+        };
+        for verdict in [
+            unguarded(&container, &error),
+            no_landing_worktree(&container, "/q/landing/run is there already"),
+        ] {
+            let Verdict::Held { reason, detail } = verdict else {
+                panic!("not held")
+            };
+            assert!(reason.contains("was not landed"), "{reason}");
+            assert!(reason.contains("no session is resumed"), "{reason}");
+            assert_eq!(detail["code"], "git_failed");
+        }
+        let host = run(Path::new(DIR));
+        assert!(super::super::run_git::for_run(&repository, &host).is_ok());
+    }
 
     fn write_receipt(files: &MemoryFiles, dir: &Path, tests: &str) {
         let receipt = json!({

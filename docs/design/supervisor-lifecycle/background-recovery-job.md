@@ -97,6 +97,13 @@ receiptの形式は`src/domain/views.rs`の`Receipt`で、promptとREADMEに同�
 
 workerのrunはすべて非対話で（[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)、task 815。task 1437から対話のrunは無い）、画面・ダイアログ・`/exit`に由来するalert（`prompt_waiting`・`stuck_exit`）と`answer_known_dialog`・`close_and_proceed`はどのrunにも出ない。その代わりの`stalled`（理由`turn_without_receipt` / `permission_denied`、操作は`send_instruction`・`stop_processes`・`resume`・`wait`）と、turnの失敗・停止で終わったrunの`failed`（`retry`・`retry_inherit`・`resume`・`wait`）の扱いは[非対話のworker](headless-worker.md#復旧jobのalertと操作決定9)にある。復旧jobは画面の代わりに最後のturnの要約を読む。
 
+## 後片付けの境界と約束
+
+containerで動くrunの後片付けは、worktreeのrunと同じ契機で、clone・制御側のrun branch・着地用のworktree・run dirのrun branchのbundleと状態のファイル・mainのbundleに及ぶ（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定7）。
+約束は2つで、cloneではgitを走らせず、workerが置いたsymlinkの先（hostのファイルとdir）を消さない。
+復旧jobとtriageがrunのheadと状態を読むのもcloneではなくbundleと状態のファイルからで、読めなければその旨を事実として渡す。
+片付ける物の列挙と手順は`supervise::cleanup`の`clean_clone`と`application::run_git::remove`のdoc commentが持つ。
+
 ## taskのhold（予定・未実装）
 
 holdの開いたtaskの生きているrunには、holdの待ちに入った後は新しいalertのjobを起動しない（holdの待ちはstall・idleの検知の対象にしない）。

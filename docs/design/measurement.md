@@ -40,7 +40,7 @@ related:
 ## SSOTとビュー
 
 計測が扱う記録の論理ストアと材料の区分（ADR-t1662-2決定1・2）。SSOTは消えてはいけない正本、ビューはSSOTから作り直せるもの、材料は消えてよく台帳と統計が読まないもの。計測の層（台帳と統計）はEventStore・SessionStepStore・NodeSampleStoreだけを読み、StateStoreを読まない（D1）。
-論理ストアのportは`application::ports`の`shared`の`EventStore`と`StateStore`（状態の狭いportの束で、use caseは取らない）で、ほかは`observation`に置く。
+論理ストアのportは`application::ports`の`shared`の`EventStore`と`StateStore`で、ほかは`observation`に置く。
 
 | 論理ストア | 中身 | 区分 | 今のアダプタ |
 | --- | --- | --- | --- |
@@ -55,6 +55,9 @@ related:
 | agentのevalの記録 | evalの依頼・周・実行と費用・成績（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`で、周の状態と成績はこれだけから作り直す（`domain::agent_eval::record`）。queueのdirの`agent-evals/`は材料 |
 | queueのbrokerの記録 | 動いているbrokerが起動ごとに書き、probeとrelayの見張りが読む自分の記録（欄は`BrokerRecord`） | 材料 | `<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる） |
 | runのrelayの記録 | 開いたrunのrelay（containerを起動し直す材料。欄は`RelaySpec`）で、relayの見張りが読む | 材料 | `<queue dir>/relay/<run>.json`（寿命はrunのrelayを開いてから閉じるまで） |
+| run branchのbundle | containerのrunのrun branch 1本 | 材料 | run dir。executorが書き制御側が取り込む。cloneから作り直せる |
+| runの状態のファイル | containerのrunのHEADとstatus（workerの申告） | 材料 | run dir。executorが書き検証と復旧が読む。次のturnが書き直す |
+| mainのbundle | 今のmain 1本 | 材料 | run dir。制御側が書きexecutorが読む。mainから作り直せる |
 | 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | `scripts/landing-it.sh`がGitHub Actionsのartifact `it-coverage-map`から取り、新しいrunが無ければ取り直さない。置き場はqueueの外の`${XDG_CACHE_HOME:-$HOME/.cache}/dagq/landing-it/<run id>/`で、消えてもartifactから取り直せる |
 
 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。
@@ -302,4 +305,3 @@ profileの無い言語の雛形は同梱し、`dagq init`が案として出す�
 ## 段と後続のtask
 
 段0（ADR 3本とこの文書）→段1（`run_phase_changed`・claimの前の区間・`run_claimed`の欄・`blocked_by`の記録）→段2（ストアのport・台帳と畳む関数・1週間の並走比較。差は`docs/plans/`に説明する）→段3（読み手を台帳と畳む関数へ移し`LandClock`を撤去）。
-sessionのstep・TelemetrySink・runごとの資源・`environment_attached`は別のgoal（goal B）が持つ。

@@ -570,6 +570,7 @@ impl dagq::application::AgentProvider for PlannerAgent {
     fn review_command(
         &self,
         _: &TaskRun,
+        _: &Path,
         _: &str,
         _: dagq::domain::headless_job::JobAccess,
     ) -> Result<dagq::application::CommandSpec> {
@@ -614,6 +615,7 @@ impl dagq::application::AgentProvider for NoPlanner {
     fn review_command(
         &self,
         _: &TaskRun,
+        _: &Path,
         _: &str,
         _: dagq::domain::headless_job::JobAccess,
     ) -> Result<dagq::application::CommandSpec> {

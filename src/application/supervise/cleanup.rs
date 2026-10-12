@@ -1457,6 +1457,9 @@ fn clean_worktree(
     pruned: &mut bool,
 ) -> Result<Option<Outcome>> {
     let worktree = Path::new(&candidate.worktree);
+    if crate::domain::run_clone::is_clone_path(worktree) {
+        return clean_clone(ports, candidate, branches);
+    }
     if !safe_worktree(worktree, &ports.runs_dir, &ports.repo_root) {
         return Ok(None);
     }
@@ -1630,6 +1633,57 @@ fn stop_worktree_processes(
             json!({"pid": process.pid, "executable": process.executable, "killed": killed})
         })
         .collect())
+}
+
+/// Clean one ended container run's clone (ADR-t2179-1 decision 7): once
+/// its task is over, the clone (removed as files, with no git run in it
+/// and no symlink followed), its landing worktree, the control side's run
+/// branch and the bundles and state file of its directory go together. A
+/// clone has no build output to take while the task goes on: that is in a
+/// volume of the dagq machine, and nothing in the clone is read.
+fn clean_clone(
+    ports: &JobPorts,
+    candidate: &EndedRunWorktree,
+    branches: &mut Option<Vec<String>>,
+) -> Result<Option<Outcome>> {
+    let (true, Some(branch)) = (
+        task_over(candidate.task_status),
+        candidate.branch.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let clone = Path::new(&candidate.worktree);
+    let missing = !ports.files.is_dir(clone);
+    if missing {
+        let listed = match branches {
+            Some(listed) => listed,
+            None => branches.insert(ports.repository.branches()?),
+        };
+        let short = branch.trim_start_matches("refs/heads/");
+        if !listed.iter().any(|listed| listed == short) {
+            return Ok(None);
+        }
+        listed.retain(|listed| listed != short);
+    }
+    let bytes = ports
+        .files
+        .tree_size(clone)
+        .with_context(|| format!("measure {}", clone.display()))?
+        .unwrap_or(0);
+    ports.repository.remove_clone(clone, branch)?;
+    Ok(Some(Outcome::Worktree {
+        run_id: candidate.run_id.clone(),
+        task_id: candidate.task_id,
+        task_status: candidate.task_status,
+        path: candidate.worktree.clone(),
+        branch: branch.to_owned(),
+        bytes,
+        missing,
+        repaired: false,
+        broken_git: false,
+        stopped: Vec::new(),
+        unlisted: None,
+    }))
 }
 
 /// How [`remove_worktree`] removed a worktree.

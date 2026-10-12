@@ -72,7 +72,7 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
     )?;
     let checkout = run
         .repo_path()
-        .or(run.worktree_path())
+        .or(run.worktree_path().filter(|_| !run.in_container()))
         .context("run has no repository path")?;
     let repository = open_repository(Path::new(checkout))?;
     let ReviewRange { base, head } = match range {
@@ -169,12 +169,12 @@ pub fn range_base(
         .map_or_else(|| run.base_commit().to_string(), CommitSha::into_string))
 }
 
-/// `git log --oneline` of `run`'s own commits in its worktree
-/// `worktree`, from their [`range_base`] with the landing branch's
-/// current commit: what a new session of the run is handed as its work so
-/// far, without the commits of other tasks it took in.
-pub fn run_commits(repository: &dyn Repository, run: &TaskRun, worktree: &Path) -> Result<String> {
-    let head = repository.head(worktree)?;
+/// `git log --oneline` of `run`'s own commits up to its head
+/// ([`super::run_git::head`]), from their [`range_base`] with the landing
+/// branch's current commit: what a new session of the run is handed as
+/// its work so far, without the commits of other tasks it took in.
+pub fn run_commits(repository: &dyn Repository, run: &TaskRun) -> Result<String> {
+    let head = super::run_git::head(repository, run)?;
     let base = range_base(repository, run, &repository.main_head()?, head.as_str())?;
     repository.log_oneline(&base, head.as_str())
 }
@@ -539,7 +539,11 @@ mod tests {
 
     /// A run claimed on the base commit `base`.
     fn run_on(base: &str) -> TaskRun {
-        TaskRun::restore(RunRecord {
+        TaskRun::restore(record_on(base)).unwrap()
+    }
+
+    fn record_on(base: &str) -> RunRecord {
+        RunRecord {
             id: RunId::new(RUN).unwrap(),
             task_id: TaskId::new(7),
             status: RunStatus::AwaitingIntegration,
@@ -558,8 +562,7 @@ mod tests {
             last_error: None,
             workspace_closed_at: None,
             created_at: String::new(),
-        })
-        .unwrap()
+        }
     }
 
     fn material(task: &Task) -> String {
@@ -1089,7 +1092,15 @@ mod tests {
             ..Committed::default()
         };
         assert_eq!(
-            run_commits(&repository, &run_on(CLAIMED), Path::new("/worktree")).unwrap(),
+            run_commits(
+                &repository,
+                &TaskRun::restore(RunRecord {
+                    worktree_path: Some("/worktree".into()),
+                    ..record_on(CLAIMED)
+                })
+                .unwrap()
+            )
+            .unwrap(),
             format!("{MIDWAY}..{HEAD}")
         );
     }

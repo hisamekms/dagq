@@ -1,4 +1,6 @@
 use crate::infrastructure::git_binary::git_executable;
+
+mod run_clones;
 use crate::{
     application::{
         AgentJobLaunch, AgentProvider, CommandSpec, FileStamp, LandingBranchStamp, MainRemote,
@@ -1225,6 +1227,10 @@ pub struct GitRepository {
     /// ([`main_checkout_of`]), or why the repository has none.
     checkout: std::result::Result<PathBuf, String>,
     git: PathBuf,
+    /// The guard of every git this repository runs, when it handles a
+    /// container run's commits ([`Repository::guarded`], ADR-t2179-1
+    /// decision 8); `None` runs git as the repository is configured.
+    guard: Option<std::sync::Arc<run_clones::Guard>>,
 }
 
 impl GitRepository {
@@ -1247,7 +1253,20 @@ impl GitRepository {
             common_dir,
             checkout,
             git,
+            guard: None,
         })
+    }
+
+    /// A git command of this repository: guarded when the repository is
+    /// ([`run_clones::Guard`]), with no `-c` of a parent process either
+    /// way taking precedence over that guard.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.git);
+        if let Some(guard) = &self.guard {
+            command.env_remove("GIT_CONFIG_PARAMETERS");
+            command.envs(guard.env());
+        }
+        command
     }
 
     /// The main checkout ([`main_checkout_of`]), whose `dagq.toml` dagq
@@ -1271,7 +1290,7 @@ impl GitRepository {
         })?;
         if let Some(name) = &config.branch {
             let (status, _, _) = capture(
-                Command::new(&self.git).args(["check-ref-format", "--branch", name]),
+                self.command().args(["check-ref-format", "--branch", name]),
                 Duration::from_secs(30),
             )?;
             ensure!(
@@ -1283,7 +1302,7 @@ impl GitRepository {
         if let Some(name) = &config.remote {
             // Git's own test of a remote name.
             let (status, _, _) = capture(
-                Command::new(&self.git)
+                self.command()
                     .args(["check-ref-format", &format!("refs/remotes/{name}/test")]),
                 Duration::from_secs(30),
             )?;
@@ -1432,7 +1451,7 @@ impl GitRepository {
 
     /// `git -C <root>`.
     fn git_root(&self) -> Command {
-        let mut command = Command::new(&self.git);
+        let mut command = self.command();
         command.arg("-C").arg(&self.root);
         command
     }
@@ -1443,7 +1462,7 @@ impl GitRepository {
     /// the session's own `git add` / `rebase --continue` fail on the lock
     /// or have its index overwritten by a stale one.
     fn read_worktree(&self, worktree: &Path) -> Command {
-        let mut command = Command::new(&self.git);
+        let mut command = self.command();
         command
             .env("GIT_OPTIONAL_LOCKS", "0")
             .arg("-C")
@@ -1504,6 +1523,7 @@ impl GitRepository {
 
     /// Symbolic HEAD of a worktree, or None when detached.
     pub fn current_branch(&self, worktree: &Path) -> Result<Option<String>> {
+        run_clones::refuse_clone(worktree)?;
         let (status, stdout, stderr) = capture(
             self.read_worktree(worktree)
                 .args(["symbolic-ref", "--quiet", "HEAD"]),
@@ -1517,6 +1537,7 @@ impl GitRepository {
     }
 
     pub fn head(&self, worktree: &Path) -> Result<CommitSha> {
+        run_clones::refuse_clone(worktree)?;
         object_id(
             &output(
                 self.read_worktree(worktree)
@@ -1528,7 +1549,7 @@ impl GitRepository {
 
     pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
         let (status, _, stderr) = capture(
-            Command::new(&self.git).arg("-C").arg(&self.root).args([
+            self.command().arg("-C").arg(&self.root).args([
                 "merge-base",
                 "--is-ancestor",
                 ancestor,
@@ -1547,7 +1568,7 @@ impl GitRepository {
     /// they share no history.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
         let (status, stdout, stderr) = capture(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(&self.root)
                 .args(["merge-base", a, b]),
@@ -1580,7 +1601,7 @@ impl GitRepository {
         head: &str,
     ) -> Result<std::result::Result<String, Vec<String>>> {
         let (status, stdout, stderr) = capture(
-            Command::new(&self.git).arg("-C").arg(&self.root).args([
+            self.command().arg("-C").arg(&self.root).args([
                 "merge-tree",
                 "--write-tree",
                 "--name-only",
@@ -1625,13 +1646,13 @@ impl GitRepository {
                 fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))?;
             }
             output(
-                Command::new(&self.git)
+                self.command()
                     .arg("-C")
                     .arg(&self.root)
                     .args(["worktree", "prune"]),
             )?;
             output(
-                Command::new(&self.git)
+                self.command()
                     .arg("-C")
                     .arg(&self.root)
                     .args(["worktree", "add", "--detach", "--force"])
@@ -1641,17 +1662,12 @@ impl GitRepository {
             return Ok(());
         }
         output(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(path)
                 .args(["checkout", "--detach", "--force", "--quiet", commit]),
         )?;
-        output(
-            Command::new(&self.git)
-                .arg("-C")
-                .arg(path)
-                .args(["clean", "-ffdxq"]),
-        )?;
+        output(self.command().arg("-C").arg(path).args(["clean", "-ffdxq"]))?;
         Ok(())
     }
 
@@ -1683,7 +1699,7 @@ impl GitRepository {
             Some(after) => format!("{after}..{head}"),
             None => head.to_owned(),
         };
-        let log = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let log = review_output(self.command().arg("-C").arg(&self.root).args([
             "log",
             "-z",
             "--first-parent",
@@ -1706,7 +1722,7 @@ impl GitRepository {
         if !self.has_commit(commit)? || !self.is_ancestor(commit, head)? {
             return Ok(false);
         }
-        let log = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let log = review_output(self.command().arg("-C").arg(&self.root).args([
             "log",
             "--first-parent",
             "--format=%P",
@@ -1722,7 +1738,7 @@ impl GitRepository {
     /// Whether the object store has the commit `commit`.
     pub fn has_commit(&self, commit: &str) -> Result<bool> {
         let (status, _, stderr) = capture(
-            Command::new(&self.git).arg("-C").arg(&self.root).args([
+            self.command().arg("-C").arg(&self.root).args([
                 "rev-parse",
                 "--verify",
                 "--quiet",
@@ -1739,7 +1755,7 @@ impl GitRepository {
 
     /// Every file path of `commit`'s tree.
     pub fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
-        let tree = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let tree = review_output(self.command().arg("-C").arg(&self.root).args([
             "ls-tree",
             "-r",
             "--name-only",
@@ -1762,7 +1778,7 @@ impl GitRepository {
         let mut changes = HashMap::new();
         for batch in commits.chunks(LANDED_BATCH) {
             let log = review_output(
-                Command::new(&self.git)
+                self.command()
                     .arg("-C")
                     .arg(&self.root)
                     .args([
@@ -1785,6 +1801,7 @@ impl GitRepository {
 
     /// Porcelain status including untracked files; empty means clean.
     pub fn status(&self, worktree: &Path) -> Result<String> {
+        run_clones::refuse_clone(worktree)?;
         output(self.read_worktree(worktree).args([
             "status",
             "--porcelain",
@@ -1794,7 +1811,7 @@ impl GitRepository {
 
     pub fn create_worktree(&self, run: &TaskRun) -> Result<String> {
         output(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(&self.root)
                 .args(["worktree", "add", "-b"])
@@ -1807,6 +1824,7 @@ impl GitRepository {
     /// Whether a `git rebase` was left half-done in the worktree (by a
     /// crashed landing or an unfinished session).
     pub fn rebase_in_progress(&self, worktree: &Path) -> Result<bool> {
+        run_clones::refuse_clone(worktree)?;
         let paths = output(self.read_worktree(worktree).args([
             "rev-parse",
             "--git-path",
@@ -1818,8 +1836,9 @@ impl GitRepository {
     }
 
     pub fn rebase_abort(&self, worktree: &Path) -> Result<()> {
+        run_clones::refuse_clone(worktree)?;
         output(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(worktree)
                 .args(["rebase", "--abort"]),
@@ -1831,8 +1850,9 @@ impl GitRepository {
     /// conflict (or any other rebase failure) with the rebase still in
     /// progress if Git left one; the caller decides whether to abort it.
     pub fn rebase(&self, worktree: &Path, onto: &str) -> Result<std::result::Result<(), String>> {
+        run_clones::refuse_clone(worktree)?;
         let (status, stdout, stderr) = capture(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(worktree)
                 .env("GIT_TERMINAL_PROMPT", "0")
@@ -1850,6 +1870,7 @@ impl GitRepository {
     /// `diff-files`, since porcelain `git diff` writes a refreshed index
     /// back even under `GIT_OPTIONAL_LOCKS=0`.
     pub fn conflicted_files(&self, worktree: &Path) -> Result<Vec<String>> {
+        run_clones::refuse_clone(worktree)?;
         Ok(output(self.read_worktree(worktree).args([
             "diff-files",
             "--name-only",
@@ -1863,7 +1884,7 @@ impl GitRepository {
     /// `git log --oneline <base>..<head>`: the commits a run added. Messages
     /// that are not UTF-8 are read lossily.
     pub fn log_oneline(&self, base: &str, head: &str) -> Result<String> {
-        review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        review_output(self.command().arg("-C").arg(&self.root).args([
             "log",
             "--oneline",
             "--no-decorate",
@@ -1875,7 +1896,7 @@ impl GitRepository {
     /// The task IDs in the `Dagq-Task` trailers of `<base>..<head>`, oldest
     /// landing first: the tasks `integrate` put on `main` since `base`.
     pub fn landed_task_ids(&self, base: &str, head: &str) -> Result<Vec<TaskId>> {
-        let text = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let text = review_output(self.command().arg("-C").arg(&self.root).args([
             "log",
             "--reverse",
             "--format=%(trailers:key=Dagq-Task,valueonly)",
@@ -1903,7 +1924,7 @@ impl GitRepository {
         head: &str,
         run: &str,
     ) -> Result<Option<(CommitSha, CommitSha)>> {
-        let text = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let text = review_output(self.command().arg("-C").arg(&self.root).args([
             "log",
             "--first-parent",
             "--format=%H%x1f%P%x1f%(trailers:key=Dagq-Run,valueonly)%x1e",
@@ -1930,7 +1951,7 @@ impl GitRepository {
     /// `git diff <args> <base>...<head>`: the change since the merge base,
     /// without color, external diff drivers or textconv filters.
     fn diff_since(&self, base: &str, head: &str, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.git);
+        let mut command = self.command();
         command
             .arg("-C")
             .arg(&self.root)
@@ -1971,7 +1992,7 @@ impl GitRepository {
     /// `to` (`git diff --name-only --no-renames`): both sides of a rename,
     /// never quoted.
     pub fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
-        let names = output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let names = output(self.command().arg("-C").arg(&self.root).args([
             "diff",
             "--name-only",
             "-z",
@@ -1992,7 +2013,7 @@ impl GitRepository {
     /// The paths `to` adds over `from` (`git diff --diff-filter=A
     /// --no-renames`), never quoted.
     pub fn added_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
-        let names = output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let names = output(self.command().arg("-C").arg(&self.root).args([
             "diff",
             "--name-only",
             "-z",
@@ -2010,7 +2031,7 @@ impl GitRepository {
     /// The paths of the files directly in `directory` of `commit`'s tree,
     /// never quoted; none when the directory is not there.
     pub fn paths_in(&self, commit: &str, directory: &str) -> Result<Vec<String>> {
-        let names = output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let names = output(self.command().arg("-C").arg(&self.root).args([
             "ls-tree",
             "--name-only",
             "-z",
@@ -2033,7 +2054,7 @@ impl GitRepository {
             return Ok(Vec::new());
         }
         let (status, stdout, stderr) = capture(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(&self.root)
                 // The paths are names, not patterns.
@@ -2081,15 +2102,16 @@ impl GitRepository {
         to: &str,
         paragraphs: &[String],
     ) -> Result<std::result::Result<CommitSha, String>> {
+        run_clones::refuse_clone(worktree)?;
         output(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(worktree)
                 .args(["mv", "--", from, to]),
         )?;
         // The worktree was clean before the move, so the index holds the
         // rename alone.
-        let mut commit = Command::new(&self.git);
+        let mut commit = self.command();
         commit
             .arg("-C")
             .arg(worktree)
@@ -2110,7 +2132,7 @@ impl GitRepository {
         // commit left HEAD where it was, so resetting to it undoes the move
         // alone.
         output(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(worktree)
                 .args(["reset", "-q", "--hard", "HEAD"]),
@@ -2124,15 +2146,13 @@ impl GitRepository {
     }
 
     pub fn tree_of(&self, commit: &str) -> Result<String> {
-        Ok(
-            output(Command::new(&self.git).arg("-C").arg(&self.root).args([
-                "rev-parse",
-                "--verify",
-                &format!("{commit}^{{tree}}"),
-            ]))?
-            .trim()
-            .to_owned(),
-        )
+        Ok(output(self.command().arg("-C").arg(&self.root).args([
+            "rev-parse",
+            "--verify",
+            &format!("{commit}^{{tree}}"),
+        ]))?
+        .trim()
+        .to_owned())
     }
 
     /// One commit with `tree` on top of `parent`; `paragraphs` become the
@@ -2143,7 +2163,7 @@ impl GitRepository {
         parent: &str,
         paragraphs: &[String],
     ) -> Result<CommitSha> {
-        let mut command = Command::new(&self.git);
+        let mut command = self.command();
         command
             .arg("-C")
             .arg(&self.root)
@@ -2155,17 +2175,18 @@ impl GitRepository {
     }
 
     pub fn update_ref(&self, name: &str, value: &str) -> Result<()> {
-        output(Command::new(&self.git).arg("-C").arg(&self.root).args([
-            "update-ref",
-            name,
-            value,
-        ]))?;
+        output(
+            self.command()
+                .arg("-C")
+                .arg(&self.root)
+                .args(["update-ref", name, value]),
+        )?;
         Ok(())
     }
 
     pub fn ref_exists(&self, name: &str) -> Result<Option<CommitSha>> {
         let (status, stdout, stderr) = capture(
-            Command::new(&self.git).arg("-C").arg(&self.root).args([
+            self.command().arg("-C").arg(&self.root).args([
                 "rev-parse",
                 "--verify",
                 "--quiet",
@@ -2183,7 +2204,7 @@ impl GitRepository {
     /// `git worktree list --porcelain` as (path, block) pairs, the main
     /// working tree first.
     fn worktrees(&self) -> Result<Vec<(PathBuf, String)>> {
-        let listing = output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let listing = output(self.command().arg("-C").arg(&self.root).args([
             "worktree",
             "list",
             "--porcelain",
@@ -2232,7 +2253,7 @@ impl GitRepository {
         match self.checkout_of(branch)? {
             Some(checkout) => {
                 output(
-                    Command::new(&self.git)
+                    self.command()
                         .arg("-C")
                         .arg(&checkout)
                         .env("GIT_TERMINAL_PROMPT", "0")
@@ -2255,6 +2276,7 @@ impl GitRepository {
     /// Point the repository's record of a linked worktree back at `worktree`
     /// after the directory moved (`git worktree repair`); a no-op otherwise.
     pub fn repair_worktree(&self, worktree: &Path) -> Result<()> {
+        run_clones::refuse_clone(worktree)?;
         let primary = self.primary_worktree()?;
         output(&mut self.repair_worktree_command(&primary, worktree)).with_context(|| {
             format!(
@@ -2267,7 +2289,7 @@ impl GitRepository {
 
     // Cleanup reads repair's English stderr in `may_remove_broken`.
     fn repair_worktree_command(&self, primary: &Path, worktree: &Path) -> Command {
-        let mut command = Command::new(&self.git);
+        let mut command = self.command();
         command
             .env("LC_ALL", "C")
             .arg("-C")
@@ -2280,7 +2302,7 @@ impl GitRepository {
     // Keep the locale override on remove and repair only: other Git output
     // (including paths and commit messages) retains the caller's locale.
     fn remove_worktree_command(&self, primary: &Path, worktree: &Path) -> Command {
-        let mut command = Command::new(&self.git);
+        let mut command = self.command();
         command
             .env("LC_ALL", "C")
             .arg("-C")
@@ -2295,7 +2317,7 @@ impl GitRepository {
     pub fn prune_worktrees(&self) -> Result<()> {
         let primary = self.primary_worktree()?;
         output(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(&primary)
                 .args(["worktree", "prune"]),
@@ -2318,7 +2340,7 @@ impl GitRepository {
     ) -> Result<CommitSha> {
         self.remove_case_tree(path)?;
         let git = |dir: &Path| {
-            let mut command = Command::new(&self.git);
+            let mut command = self.command();
             command
                 .arg("-C")
                 .arg(dir)
@@ -2366,7 +2388,7 @@ impl GitRepository {
     pub fn remove_case_tree(&self, path: &Path) -> Result<()> {
         if path.exists() {
             let _ = output(
-                Command::new(&self.git)
+                self.command()
                     .arg("-C")
                     .arg(&self.root)
                     .args(["worktree", "remove", "--force"])
@@ -2377,7 +2399,7 @@ impl GitRepository {
             }
         }
         output(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(&self.root)
                 .args(["worktree", "prune"]),
@@ -2389,6 +2411,7 @@ impl GitRepository {
     /// working tree, since `root` may be the worktree being removed. A
     /// branch already gone is left at that.
     pub fn remove_worktree_and_branch(&self, worktree: &Path, branch: &str) -> Result<()> {
+        run_clones::refuse_clone(worktree)?;
         let primary = self.primary_worktree()?;
         output(&mut self.remove_worktree_command(&primary, worktree))?;
         self.delete_branch_from(&primary, branch)
@@ -2396,7 +2419,7 @@ impl GitRepository {
 
     /// The local branches, by their short name.
     pub fn branches(&self) -> Result<Vec<String>> {
-        let listed = output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+        let listed = output(self.command().arg("-C").arg(&self.root).args([
             "for-each-ref",
             "--format=%(refname)",
             "refs/heads/",
@@ -2419,7 +2442,7 @@ impl GitRepository {
     fn delete_branch_from(&self, primary: &Path, branch: &str) -> Result<()> {
         let reference = format!("refs/heads/{}", branch.trim_start_matches("refs/heads/"));
         let (status, _, _) = capture(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(primary)
                 .args(["show-ref", "--verify", "--quiet", &reference]),
@@ -2427,7 +2450,7 @@ impl GitRepository {
         )?;
         if status.success() {
             output(
-                Command::new(&self.git)
+                self.command()
                     .arg("-C")
                     .arg(primary)
                     .args(["branch", "-D", branch]),
@@ -2438,8 +2461,9 @@ impl GitRepository {
 
     /// Whether Git tracks any file at or under `path` in `worktree`.
     pub fn tracks(&self, worktree: &Path, path: &str) -> Result<bool> {
+        run_clones::refuse_clone(worktree)?;
         let listed = output(
-            Command::new(&self.git)
+            self.command()
                 .arg("-C")
                 .arg(worktree)
                 .args(["ls-files", "--"])
@@ -2561,7 +2585,11 @@ impl crate::application::inherit::CarriedBranches for RunRepositories {
     fn keep(&self, run: &TaskRun, head: &CommitSha) -> Result<()> {
         let repository = Self::of(run)?
             .with_context(|| format!("run {} has no repository to keep {head} in", run.id()))?;
-        crate::application::inherit::keep_carried_head(&repository, run.id(), head)
+        crate::application::inherit::keep_carried_head(
+            &*crate::application::run_git::for_run(&repository, run)?,
+            run.id(),
+            head,
+        )
     }
 }
 
@@ -2729,6 +2757,37 @@ impl Repository for GitRepository {
     fn create_worktree(&self, run: &TaskRun) -> Result<String> {
         GitRepository::create_worktree(self, run)
     }
+    fn create_clone(&self, run: &TaskRun, carried: Option<&str>) -> Result<String> {
+        GitRepository::create_clone(self, run, carried)
+    }
+    fn clone_facts(
+        &self,
+        run: &TaskRun,
+    ) -> Result<std::result::Result<crate::application::CloneFacts, String>> {
+        GitRepository::clone_facts(self, run)
+    }
+    fn landing_worktree(
+        &self,
+        run: &TaskRun,
+        commit: &CommitSha,
+    ) -> Result<std::result::Result<PathBuf, String>> {
+        GitRepository::landing_worktree(self, run, commit)
+    }
+    fn remove_landing_worktree(&self, run: &TaskRun) -> Result<()> {
+        GitRepository::remove_landing_worktree(self, run)
+    }
+    fn hand_main(&self, run: &TaskRun, main: &CommitSha) -> Result<()> {
+        GitRepository::hand_main(self, run, main)
+    }
+    fn remove_clone(&self, clone: &Path, branch: &str) -> Result<()> {
+        GitRepository::remove_clone(self, clone, branch)
+    }
+    fn guarded(&self) -> Result<Box<dyn Repository + Send + Sync>> {
+        Ok(Box::new(self.guarded_repository()?))
+    }
+    fn guard_env(&self, cwd: &Path) -> Result<Vec<(String, String)>> {
+        self.guard_env_in(cwd)
+    }
     fn merge_conflicts(&self, main: &str, head: &str) -> Result<Vec<String>> {
         GitRepository::merge_conflicts(self, main, head)
     }
@@ -2755,7 +2814,7 @@ impl MainRemote for GitRepository {
 
     fn has_remote(&self, remote: &str) -> Result<bool> {
         let remotes = output(
-            Command::new(&self.git)
+            self.command()
                 .current_dir(&self.common_dir)
                 .arg("--git-dir")
                 .arg(&self.common_dir)
@@ -2774,7 +2833,7 @@ impl MainRemote for GitRepository {
     ) -> Result<()> {
         let reference = branch.reference();
         let (status, stdout, stderr) = capture(
-            Command::new(&self.git)
+            self.command()
                 .current_dir(&self.common_dir)
                 .arg("--git-dir")
                 .arg(&self.common_dir)
@@ -2799,7 +2858,7 @@ impl MainRemote for GitRepository {
     ) -> Result<bool> {
         let reference = branch.reference();
         let (status, stdout, stderr) = capture(
-            Command::new(&self.git)
+            self.command()
                 .current_dir(&self.common_dir)
                 .arg("--git-dir")
                 .arg(&self.common_dir)
@@ -2820,7 +2879,7 @@ impl MainRemote for GitRepository {
         let head = object_id(head, "remote branch head")?;
         let has_object = |sha: &CommitSha| -> Result<bool> {
             let (status, _, stderr) = capture(
-                Command::new(&self.git)
+                self.command()
                     .current_dir(&self.common_dir)
                     .arg("--git-dir")
                     .arg(&self.common_dir)
@@ -2837,7 +2896,7 @@ impl MainRemote for GitRepository {
             // Fetch into the object store without touching FETCH_HEAD, which
             // other landings may be using at the same time.
             let (status, _, stderr) = capture(
-                Command::new(&self.git)
+                self.command()
                     .current_dir(&self.common_dir)
                     .arg("--git-dir")
                     .arg(&self.common_dir)
@@ -2861,7 +2920,7 @@ impl MainRemote for GitRepository {
             );
         }
         let (status, _, stderr) = capture(
-            Command::new(&self.git)
+            self.command()
                 .current_dir(&self.common_dir)
                 .arg("--git-dir")
                 .arg(&self.common_dir)
@@ -3433,6 +3492,7 @@ impl AgentProvider for ClaudeCode {
     fn review_command(
         &self,
         run: &TaskRun,
+        tree: &Path,
         prompt: &str,
         access: JobAccess,
     ) -> Result<CommandSpec> {
@@ -3446,7 +3506,7 @@ impl AgentProvider for ClaudeCode {
         )?;
         let mut command = CommandSpec::new(&self.executable);
         command
-            .current_dir(run.worktree_path().context("missing worktree")?)
+            .current_dir(tree)
             .args(["-p", "--output-format", "stream-json", "--verbose"])
             .arg("--debug-file")
             .arg(run_dir.join("claude-review.log"))
@@ -3987,6 +4047,7 @@ mod tests {
             common_dir: "/repo/.git".into(),
             checkout: Ok("/repo".into()),
             git: "/unused/git".into(),
+            guard: None,
         };
         let primary = Path::new("/primary checkout");
         let worktree = Path::new("/runs/run/worktree");
@@ -5232,7 +5293,12 @@ mod tests {
             executable: "/bin/claude".into(),
         };
         let command = claude
-            .review_command(&run, "review it", crate::application::prompt::REVIEW_ACCESS)
+            .review_command(
+                &run,
+                Path::new(run.worktree_path().unwrap()),
+                "review it",
+                crate::application::prompt::REVIEW_ACCESS,
+            )
             .unwrap();
         let args: Vec<_> = command
             .get_args()
@@ -5275,7 +5341,12 @@ mod tests {
         // A review that may run the queue CLI keeps `Bash(dagq:*)` and is
         // refused only the edits and the tools that schedule a prompt.
         let command = claude
-            .review_command(&run, "p", JobAccess::ReadFilesAndQueueCli)
+            .review_command(
+                &run,
+                Path::new(run.worktree_path().unwrap()),
+                "p",
+                JobAccess::ReadFilesAndQueueCli,
+            )
             .unwrap();
         let args: Vec<_> = command.get_args().collect();
         assert!(args.contains(&std::ffi::OsStr::new("Read,Grep,Glob,Bash(dagq:*)")));
@@ -5436,7 +5507,12 @@ mod tests {
             executable: "/bin/claude".into(),
         };
         let command = claude
-            .review_command(&run, "review it", crate::application::prompt::REVIEW_ACCESS)
+            .review_command(
+                &run,
+                Path::new(run.worktree_path().unwrap()),
+                "review it",
+                crate::application::prompt::REVIEW_ACCESS,
+            )
             .unwrap();
         assert_eq!(command.get_stdin(), Some("review it"));
         let args: Vec<String> = command
@@ -5479,7 +5555,12 @@ mod tests {
             .headless_command(dir.path(), &prompt, JobAccess::ReadFilesAndQueueCli)
             .unwrap();
         let review = claude
-            .review_command(&run, &prompt, crate::application::prompt::REVIEW_ACCESS)
+            .review_command(
+                &run,
+                Path::new(run.worktree_path().unwrap()),
+                &prompt,
+                crate::application::prompt::REVIEW_ACCESS,
+            )
             .unwrap();
         for command in [job, review] {
             let (args, stdin) = stub_agent::run(&command, dir.path());
@@ -5603,7 +5684,9 @@ mod tests {
             JobAccess::QueueCli,
             JobAccess::ReadFilesAndQueueCli,
         ] {
-            let review = claude.review_command(&run, "p", access).unwrap();
+            let review = claude
+                .review_command(&run, Path::new(run.worktree_path().unwrap()), "p", access)
+                .unwrap();
             let job = claude
                 .headless_command(Path::new("/tmp/job"), "p", access)
                 .unwrap();
@@ -5716,7 +5799,12 @@ mod tests {
         let run = run_in(dir.path());
         fs::create_dir_all(run.run_dir().unwrap()).unwrap();
         claude
-            .review_command(&run, "review", crate::application::prompt::REVIEW_ACCESS)
+            .review_command(
+                &run,
+                Path::new(run.worktree_path().unwrap()),
+                "review",
+                crate::application::prompt::REVIEW_ACCESS,
+            )
             .unwrap();
         let review =
             deny_of(&Path::new(run.run_dir().unwrap()).join("claude-review-settings.json"));

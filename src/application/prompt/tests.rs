@@ -164,7 +164,11 @@ fn task_with_evidence(id: i64, required_evidence: Vec<EvidenceCheck>) -> Task {
 }
 
 fn run(task_id: i64, status: RunStatus, result_commit: Option<&str>) -> TaskRun {
-    TaskRun::restore(RunRecord {
+    TaskRun::restore(run_record(task_id, status, result_commit)).unwrap()
+}
+
+fn run_record(task_id: i64, status: RunStatus, result_commit: Option<&str>) -> RunRecord {
+    RunRecord {
         id: RunId::new(RUN).unwrap(),
         task_id: TaskId::new(task_id),
         status,
@@ -183,8 +187,7 @@ fn run(task_id: i64, status: RunStatus, result_commit: Option<&str>) -> TaskRun 
         last_error: None,
         workspace_closed_at: None,
         created_at: String::new(),
-    })
-    .unwrap()
+    }
 }
 
 #[test]
@@ -441,6 +444,51 @@ fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
         ] {
             assert!(resumed.contains(step), "{step}: {resumed}");
         }
+    }
+}
+
+/// A run in a container is asked to rebase onto the clone's ref main's
+/// bundle reaches it as, never onto a commit its clone may not hold
+/// (ADR-t2179-1 decision 6); a run on the host onto main's commit.
+#[test]
+fn a_container_runs_resume_names_the_clones_main_ref() {
+    let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+    let host = run(7, RunStatus::NeedsSession, None);
+    let container = TaskRun::restore(RunRecord {
+        worktree_path: Some(format!("/q/clones/{RUN}")),
+        ..run_record(7, RunStatus::NeedsSession, None)
+    })
+    .unwrap();
+    assert!(container.in_container());
+    for kind in [
+        ResumeKind::Landing,
+        ResumeKind::Precheck,
+        ResumeKind::SentBack,
+        ResumeKind::Triage,
+        ResumeKind::E2e,
+        ResumeKind::SessionGone,
+        ResumeKind::ScopeViolation,
+    ] {
+        let request = ResumeRequest {
+            main: CommitSha::try_from(SHA).unwrap(),
+            branch: "main".into(),
+            reason: "why".into(),
+            kind,
+            reason_file: None,
+            known_failures: None,
+        };
+        let text = resume_request(&task, &container, &request, &[])
+            .unwrap()
+            .text;
+        assert!(
+            text.contains(crate::domain::run_clone::CLONE_MAIN_REF),
+            "{kind:?}: {text}"
+        );
+        let text = resume_request(&task, &host, &request, &[]).unwrap().text;
+        assert!(
+            !text.contains(crate::domain::run_clone::CLONE_MAIN_REF),
+            "{kind:?}: {text}"
+        );
     }
 }
 

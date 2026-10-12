@@ -275,7 +275,7 @@ impl AgentProvider for StubReviewer {
         }
         Ok(command)
     }
-    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
         unreachable!("no run is reviewed in these tests")
     }
     fn review_timeout(&self) -> Duration {

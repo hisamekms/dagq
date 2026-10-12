@@ -1167,17 +1167,19 @@ pub(super) fn git_facts(
 ) -> Result<(String, String, Option<String>)> {
     let worktree = run.worktree_path().map(Path::new);
     let status = match worktree {
-        Some(worktree) if sv.files.is_dir(worktree) => sv
-            .repository
-            .status(worktree)
-            .unwrap_or_else(|error| format!("(unreadable: {error:#})")),
+        Some(worktree) if sv.files.is_dir(worktree) => {
+            crate::application::run_git::status(&*sv.repository, run)
+                .unwrap_or_else(|error| format!("(unreadable: {error:#})"))
+        }
         _ => "(no worktree)".to_owned(),
     };
     let head = match worktree {
-        Some(worktree) if sv.files.is_dir(worktree) => sv.repository.head(worktree).map_or_else(
-            |error| format!("(unreadable: {error:#})"),
-            |h| h.to_string(),
-        ),
+        Some(worktree) if sv.files.is_dir(worktree) => {
+            crate::application::run_git::head(&*sv.repository, run).map_or_else(
+                |error| format!("(unreadable: {error:#})"),
+                |h| h.to_string(),
+            )
+        }
         _ => "(no worktree)".to_owned(),
     };
     let receipt = run

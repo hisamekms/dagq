@@ -108,8 +108,13 @@ impl Supervisor<'_> {
         if !health.recoverable {
             return Ok(());
         }
-        // Children of the dead landing (its verification) outlive it.
-        let Some(worktree) = run.worktree_path().map(Path::new) else {
+        // Children of the dead landing (its verification) outlive it, in
+        // the landing worktree of a container run (ADR-t2179-1 decision 5).
+        let landing = run.landing_path();
+        let Some(worktree) = landing
+            .as_deref()
+            .or_else(|| run.worktree_path().map(Path::new))
+        else {
             return Ok(());
         };
         let listed = self.processes.list().map(|all| {
@@ -871,7 +876,9 @@ impl Supervisor<'_> {
             .filter(|path| self.files.is_dir(path));
         let head = match (run.result_commit(), worktree) {
             (Some(commit), _) => commit.to_string(),
-            (None, Some(worktree)) => self.repository.head(worktree)?.to_string(),
+            (None, Some(_)) => {
+                crate::application::run_git::head(&*self.repository, run)?.to_string()
+            }
             (None, None)
                 if !self
                     .queue

@@ -139,6 +139,10 @@ pub struct E2eSettings {
     /// automatic update's gate, `install`'s and the runtime's e2e of the
     /// runs take the same one ([`e2e_lock_path`]); `None` takes none.
     pub lock: Option<PathBuf>,
+    /// Variables the e2e runs with on top of its `[run.env]`: the guard of
+    /// the git of a container run's landing worktree (ADR-t2179-1 decision
+    /// 8); none otherwise.
+    pub git_env: Vec<(String, String)>,
 }
 
 /// The host's e2e lock of the queues under `queue_dir`'s parent, dagq's

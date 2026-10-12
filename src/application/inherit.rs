@@ -37,9 +37,9 @@ pub fn carried_head(
     let head = match (run.result_commit(), run.worktree_path().map(Path::new)) {
         (Some(commit), _) => Some(commit.clone()),
         (None, Some(worktree))
-            if files.is_dir(worktree) && !repository.rebase_in_progress(worktree)? =>
+            if files.is_dir(worktree) && !super::run_git::rebase_in_progress(repository, run)? =>
         {
-            Some(repository.head(worktree)?)
+            Some(super::run_git::head(repository, run)?)
         }
         _ => None,
     };

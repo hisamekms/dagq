@@ -596,6 +596,7 @@ pub(super) fn run_e2e_port(
                     .then(|| installation::e2e_lock_path(&queue_dir))
                     .flatten()
             }),
+            git_env: Vec::new(),
         },
         run: Arc::new(|worktree, settings| {
             crate::infrastructure::e2e_gate::run(worktree, None, settings)

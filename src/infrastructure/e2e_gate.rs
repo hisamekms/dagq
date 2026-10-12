@@ -160,6 +160,7 @@ fn run_inheriting(
         .context("read the [run.env] the e2e runs with")?,
         None => Vec::new(),
     };
+    env.extend(settings.git_env.iter().cloned());
     // The host's one e2e at a time (ADR-t1233-2 decision 4), held until
     // this returns.
     let waiting = Instant::now();
@@ -1223,6 +1224,7 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
             log: dir.join("logs").join("e2e.log"),
             utc_offset_secs: 0,
             lock: None,
+            git_env: Vec::new(),
         }
     }
 

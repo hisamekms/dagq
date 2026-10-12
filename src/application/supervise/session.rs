@@ -188,11 +188,20 @@ impl Supervisor<'_> {
         let state_dir = &self.layout.runs_dir;
         let paths = RunPaths::new(state_dir, claimed.id());
         let run_dir = paths.run_dir.clone();
+        // A worker set to the container works in a clone of its own, not a
+        // worktree of this repository (ADR-t2113-2 decision 1).
+        let workplace = if self.landing.runtimes.worker
+            == crate::domain::container_runtime::Runtime::Container
+        {
+            crate::domain::run_clone::clone_path(state_dir, claimed.id())
+        } else {
+            paths.worktree.clone()
+        };
         let plan = RunPlan {
             repo_path: path_text(&self.layout.repo_root)?,
             run_dir: path_text(&run_dir)?,
             branch: format!("dagq/{}", claimed.id()),
-            worktree_path: path_text(&paths.worktree)?,
+            worktree_path: path_text(&workplace)?,
             receipt_path: path_text(&paths.receipt)?,
             log_path: path_text(&paths.log)?,
         };
@@ -224,7 +233,14 @@ impl Supervisor<'_> {
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
         self.prepare_turns(&run, &run_dir)?;
-        let git_output = self.repository.create_worktree(&run)?;
+        let git_output = if run.in_container() {
+            let carried = inherited
+                .as_ref()
+                .map(|inherited| format!("refs/dagq/runs/{}", inherited.run_id));
+            self.repository.create_clone(&run, carried.as_deref())?
+        } else {
+            self.repository.create_worktree(&run)?
+        };
         self.files
             .write(&run_dir.join("worktree-create.txt"), git_output.as_bytes())?;
         self.queue.record_runtime_event(
@@ -252,7 +268,7 @@ impl Supervisor<'_> {
             .actors()
             .spawn(ActorExecutionSpec::new(
                 ActorContext::worker(run.id(), run.task_id()),
-                WorkspaceAccess::Write(paths.worktree.clone()),
+                WorkspaceAccess::Write(workplace.clone()),
                 ActorProgram::RunSession {
                     run: &run,
                     wrapper: command,
@@ -666,10 +682,10 @@ impl SessionWatch {
         if self.first_commit_seen {
             return Ok(());
         }
-        let Some(worktree) = run.worktree_path() else {
+        if run.worktree_path().is_none() {
             return Ok(());
-        };
-        let head = match sv.repository.head(Path::new(worktree)) {
+        }
+        let head = match crate::application::run_git::head(&*sv.repository, run) {
             Ok(head) => head,
             Err(error) => {
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "HEAD of {} could not be read for its first commit: {error:#}", run.id());
@@ -835,16 +851,14 @@ impl Supervisor<'_> {
         review: Option<(&str, Option<&Path>)>,
         (request, request_file): (&str, Option<&Path>),
     ) -> Result<FittedPrompt> {
-        let worktree = Path::new(run.worktree_path().context("missing worktree")?);
+        run.worktree_path().context("missing worktree")?;
         let unread = |what: &str, error: anyhow::Error| {
             warn!(run_id = %run.id(), "the {what} of {} could not be read for its handoff: {error:#}", run.id());
             format!("(could not be read: run `git {what}` in your worktree)")
         };
-        let commits = crate::application::review::run_commits(&*self.repository, run, worktree)
+        let commits = crate::application::review::run_commits(&*self.repository, run)
             .unwrap_or_else(|error| unread("log", error));
-        let changes = self
-            .repository
-            .status(worktree)
+        let changes = crate::application::run_git::status(&*self.repository, run)
             .unwrap_or_else(|error| unread("status", error));
         let receipt = run
             .receipt_path()

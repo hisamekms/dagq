@@ -897,7 +897,7 @@ impl Supervisor<'_> {
             self.spawner,
             self.programs,
             program,
-            &tree.tree,
+            (&tree.tree, &[]),
             (&tree.dir, &tree.dir.join("programs")),
             (&format!("program-{run}-{name}"), subject),
             timeout,

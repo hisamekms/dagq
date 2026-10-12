@@ -201,8 +201,26 @@ impl TaskRun {
         self.branch.as_deref()
     }
 
+    /// Where the run works: its worktree on the host, or, for a run in a
+    /// container, its clone ([`Self::in_container`]), which the control
+    /// side never runs git or a program in (ADR-t2179-1 decision 1).
     pub fn worktree_path(&self) -> Option<&str> {
         self.worktree_path.as_deref()
+    }
+
+    /// Whether the run works in a container: its workplace is a clone of
+    /// its own (`<queue dir>/clones/<run id>`) rather than a worktree, as
+    /// planned when it was claimed.
+    pub fn in_container(&self) -> bool {
+        self.worktree_path
+            .as_deref()
+            .is_some_and(|path| super::run_clone::is_clone_path(std::path::Path::new(path)))
+    }
+
+    /// The landing worktree of a run in a container, beside its clone
+    /// (`<queue dir>/landing/<run id>`); `None` for a run on the host.
+    pub fn landing_path(&self) -> Option<std::path::PathBuf> {
+        super::run_clone::landing_of(std::path::Path::new(self.worktree_path.as_deref()?))
     }
 
     pub fn workspace_id(&self) -> Option<&str> {
@@ -260,9 +278,15 @@ impl TaskRun {
         let resolve = |stored: Option<String>, path: &std::path::Path| {
             stored.map(|_| path.to_string_lossy().into_owned())
         };
+        // A container run's clone stays a clone (ADR-t2179-1).
+        let workplace = if self.in_container() {
+            super::run_clone::clone_path(runs_dir, &self.id)
+        } else {
+            paths.worktree.clone()
+        };
         Self {
             run_dir: resolve(self.run_dir, &paths.run_dir),
-            worktree_path: resolve(self.worktree_path, &paths.worktree),
+            worktree_path: resolve(self.worktree_path, &workplace),
             receipt_path: resolve(self.receipt_path, &paths.receipt),
             log_path: resolve(self.log_path, &paths.log),
             ..self
@@ -1324,6 +1348,26 @@ mod tests {
         assert_eq!(
             moved.idle_marker_path().unwrap(),
             std::path::Path::new("/moved/r1/idle.json")
+        );
+        assert!(!moved.in_container());
+        assert_eq!(moved.landing_path(), None);
+    }
+
+    #[test]
+    fn a_container_runs_clone_and_landing_worktree_move_with_its_queue() {
+        let plan = RunPlan {
+            worktree_path: "/q/clones/r1".into(),
+            ..plan()
+        };
+        let run = start_provisioning(run(RunStatus::Claimed), &plan).unwrap();
+        assert!(run.in_container());
+        let moved = run.relocated(std::path::Path::new("/moved/runs"));
+        assert!(moved.in_container());
+        assert_eq!(moved.worktree_path(), Some("/moved/clones/r1"));
+        assert_eq!(moved.run_dir(), Some("/moved/runs/r1"));
+        assert_eq!(
+            moved.landing_path().unwrap(),
+            std::path::Path::new("/moved/landing/r1")
         );
     }
 }

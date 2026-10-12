@@ -69,3 +69,7 @@ related:
 消す契機は、supervisorのslotが終わったとき（`integrated`・`failed`・`interrupted`）、triageが終わったとき、triageの`decide` askとlandingの`approve_landing` askのanswer（`cancel`を含む）を適用したとき（そのtaskのrunだけ）と、上の掃除と同じ回（`sweep_ended_runs`。終わったrunに残ったbackgroundのwrapperを止めるのと同じ回で、全runを見直す）。手での`integrate`は着地したrunのworktreeを自分で消し、手での`recover`・人の`ready` / `cancel`・supervisorの外で終わったrunは次の掃除が拾う。失敗は`cleanup_failed`（`path`、`message`、`by: supervisor`）にして残りを続け、次の掃除で再び試す（supervisorのプロセスごとにworktreeあたり1回だけ記録する）。
 
 runのsessionの停止（backgroundのwrapperのhandleの`stop_background`。停止ごとに`wrapper_stopped`も記録する。cmuxを呼ばない。[Run workspaces](run-workspaces.md#run-workspaces)）の成否は`task_runs.workspace_closed_at`で表す。nullは「止めたことを確かめていない」で、停止の失敗だけでなく、wrapperを止めた後にDBへ書けなかった場合も含む。停止の失敗は`cleanup_failed`イベントと`last_error`に残るが、run状態は変えない。止めていないsessionをcleaned扱いにせず、再試行は`doctor`/`recover`で扱う。
+
+## containerのrunのclone
+
+containerで動くrunのclone（[Container runtime](../container-runtime.md#git)）はworktreeと同じ契機で、gitを走らせずsymlinkを辿らずに消え、ビルド成果物の掃除は当てない（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定7、手順は`supervise::cleanup`の`clean_clone`）。

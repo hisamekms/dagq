@@ -209,7 +209,6 @@ tasks = 5
 path = "docs/design/supervisor-lifecycle/integrate.md"
 size = 42841
 line = 11174
-tasks = 27
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/kpi.md"

@@ -1030,6 +1030,7 @@ pub mod review_programs;
 pub mod review_reason;
 pub mod review_subagents;
 pub mod run;
+pub mod run_clone;
 pub mod run_e2e;
 pub mod run_env;
 pub mod run_phase;

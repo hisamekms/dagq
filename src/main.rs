@@ -3266,6 +3266,7 @@ fn execute(cli: Cli) -> Result<Value> {
                         generators.clock.now(),
                     ),
                     lock: dagq::application::install::e2e_lock_path(&location.queue_dir),
+                    git_env: Vec::new(),
                 })
             }
             Source::Checkout(_) if skip_e2e => E2eGate::Skip,

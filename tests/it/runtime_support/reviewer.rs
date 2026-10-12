@@ -129,7 +129,8 @@ impl AgentProvider for TestReviewer {
     }
     fn review_command(
         &self,
-        run: &TaskRun,
+        _: &TaskRun,
+        tree: &Path,
         prompt: &str,
         access: JobAccess,
     ) -> Result<CommandSpec> {
@@ -146,10 +147,7 @@ impl AgentProvider for TestReviewer {
             "the test reviewer cannot start this review"
         );
         let mut command = CommandSpec::new("/bin/sh");
-        command
-            .current_dir(run.worktree_path().unwrap())
-            .arg("-c")
-            .arg(script);
+        command.current_dir(tree).arg("-c").arg(script);
         Ok(command)
     }
     fn agent_job_command(&self, job: &dagq::application::AgentJobLaunch) -> Result<CommandSpec> {

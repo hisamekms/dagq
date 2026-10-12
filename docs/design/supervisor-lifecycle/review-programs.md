@@ -73,7 +73,7 @@ eventはrunのeventとして`events --run`と`timeline`（`--full`で欄）に�
   cwdから呼ぶscriptとツールがcwdで読む設定（`rust-toolchain.toml`・`.cargo/config.toml`）はworkerの選んだ版が効きえ、runtimeは検出しない（integrateのverifyも同じ）。
 - **流す場所**: reviewのactor（`ReviewJob`）のbackendで`ProgramBackends`が`ReviewProgramBackend`の実装を選ぶ。
   hostは`HostPrograms`、containerは起動の失敗にしhostに戻さない（fail closed）。
-  cwdはrunのworktreeである。
+  cwdはrunのworktree（containerのrunでは着地用のworktreeで、gitのhookとdriverを止めるenvを持つ。[Container runtime](../container-runtime.md#git)）である。
 - **env**: 起動元のenvを消し、e2eの関門と共通の部品（`passed_env::PassedEnv`）で絞る。
   資格情報の除外は常に効き、例外を持たず、cmuxのsocketのpassword・`CMUX_*`・queue serviceとbrokerに届く`DAGQ_*`は渡らない。
   `PATH`からは空・相対の項目と、runのworktree・run dir・main checkoutとその下を指す項目を除く（`review_programs::narrowed_path`）。

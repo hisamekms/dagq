@@ -2,6 +2,7 @@
 //! a revise, a receipt that does not match, a stall (execution and landing).
 
 use super::*;
+use crate::application::run_git::rebase_target;
 
 /// What the resolution request tells a resumed session.
 pub(crate) struct ResumeRequest {
@@ -267,37 +268,37 @@ pub(crate) fn resume_request(
     } else if request.kind == ResumeKind::ScopeViolation {
         lines.push(format!(
             "1. Take the changes to the paths the reason names out of the run branch: restore each to its state at git merge-base HEAD {} (delete the ones that did not exist there) and commit; if the task cannot be done without them, write the receipt with result failed and say which paths it needs.",
-            request.main
+            rebase_target(run, &request.main)
         ));
         lines.push(format!("2. {checks}"));
     } else if request.kind == ResumeKind::SentBack {
         lines.push(format!(
             "1. Fix the findings in the reason and commit; if {branch} moved, git rebase {} first.",
-            request.main
+            rebase_target(run, &request.main)
         ));
         lines.push(format!("2. {checks}"));
     } else if request.kind == ResumeKind::Triage {
         lines.push(format!(
             "1. Do what the reason asks in this worktree and commit; if {branch} moved, git rebase {} first.",
-            request.main
+            rebase_target(run, &request.main)
         ));
         lines.push(format!("2. {checks}"));
     } else if request.kind == ResumeKind::E2e {
         lines.push(format!(
             "1. Read the logs the reason names and fix the e2e tests that failed (each failed once more on its rerun by name) and commit; if {branch} moved, git rebase {} first. You may run a failed test by name to reproduce it, the way the repository's instructions (AGENTS.md or CLAUDE.md) say, but not the whole e2e: the runtime runs it again after the review.",
-            request.main
+            rebase_target(run, &request.main)
         ));
         lines.push(format!("2. {checks}"));
     } else if request.kind == ResumeKind::SessionGone {
         lines.push(format!(
             "1. Settle what the reason says holds the run in this worktree (finish or abort a rebase in progress, wait for the answer to an open worker_question, or commit the work the head holds) and commit; if {branch} moved, git rebase {} first.",
-            request.main
+            rebase_target(run, &request.main)
         ));
         lines.push(format!("2. {checks}"));
     } else {
         lines.push(format!(
             "1. In this worktree run git rebase {} and resolve the conflicts.",
-            request.main
+            rebase_target(run, &request.main)
         ));
         // Only integrate's deferral can name a failed verification command;
         // the precheck's reason is always a conflict.

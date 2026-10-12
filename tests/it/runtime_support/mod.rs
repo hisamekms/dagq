@@ -466,7 +466,7 @@ impl AgentProvider for TestProvider {
     fn wait_interval(&self) -> Duration {
         TEST_TICK
     }
-    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
         unreachable!("sessions do not review")
     }
     // `headless_command` keeps the default refusal: a run's provider has no
@@ -864,7 +864,7 @@ impl AgentProvider for HeadlessProvider {
     fn preflight(&self) -> Result<()> {
         Ok(())
     }
-    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
         unreachable!("sessions do not review")
     }
     fn wait_interval(&self) -> Duration {

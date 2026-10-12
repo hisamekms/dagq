@@ -747,6 +747,7 @@ impl OneShot {
             log: e2e_log(&job.log),
             utc_offset_secs: clock::local_utc_offset(self.generators.clock.now()),
             lock: installation::e2e_lock_path(&location.queue_dir),
+            git_env: Vec::new(),
         };
         update::run(
             &update::JobPorts {

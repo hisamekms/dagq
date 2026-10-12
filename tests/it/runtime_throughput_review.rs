@@ -73,7 +73,7 @@ impl AgentProvider for ReviewProvider {
     fn without_mcp(&self, command: &mut CommandSpec) {
         command.option_args(["no-mcp"]);
     }
-    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
         bail!("the throughput review reviews no run")
     }
 }

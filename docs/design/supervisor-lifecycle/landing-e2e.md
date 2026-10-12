@@ -35,7 +35,7 @@ e2eはworkerが流さず、reviewがpassしたrun（`land`の答え・jobの`lan
 - **いつ**: 着地スロットを待つ段で、着地の前提（`[run.env]`のプログラム・landing branch・空き容量）がそろってから、reviewしたcommitにまだ通ったe2eが無ければ流す（`run_e2e::due`）。
   列に並んだleaseの無いrunは、leaseを取ってslotに入る。
   着地のrebaseの後と人の`integrate`では流さない。
-- **流し方**: 自動更新の関門（[Auto-update](auto-update.md)）と同じ`e2e_gate::run`を、runのworktreeでworkerのbuildのtargetで流す。
+- **流し方**: 自動更新の関門（[Auto-update](auto-update.md)）と同じ`e2e_gate::run`を、runのworktree（containerのrunでは着地用のworktreeで、gitのhookとdriverを止めるenvを足す。[Container runtime](../container-runtime.md#git)）でworkerのbuildのtargetで流す。
   main checkoutがdagqのsource（[Source repository](source-repository.md)）でなければ、runtimeの知るe2eが無いので流さずに着地へ進む。
   これは今の実装の制約で、決まった形（未実装）ではruntimeはe2eを知らず、`dagq.toml`が宣言したコマンドだけをreviewのpassの後に制御側がhostで流し、走ったことをeventに残して`doctor`・`status`のenforcementに出す（[ADR-t2257-1](../../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定4）。
 - **期間限定で外したケース**（[ADR-t1582-1](../../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)）は流れず`skipped`にも出ない（一覧は[testの制約](../../development/testing.md#e2e)）。

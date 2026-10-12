@@ -305,8 +305,10 @@ pub trait AgentProvider {
     /// as allowed, since the live worker session owns the worktree; the
     /// observer's job has no run.
     ///
-    /// A non-interactive agent in the run's worktree with settings of the
-    /// run directory and `prompt` as its only input, allowed what `access`
+    /// A non-interactive agent in `tree`, the run's worktree, or the
+    /// landing worktree of a run in a container (whose clone the control
+    /// side starts no program in, ADR-t2179-1 decision 1), with settings of
+    /// the run directory and `prompt` as its only input, allowed what `access`
     /// says (the review reads files only), whose reply
     /// ([`AgentProvider::job_reply`]) is the verdict JSON. It must not
     /// touch the worker session's idle marker. The runtime wires stdin,
@@ -315,6 +317,7 @@ pub trait AgentProvider {
     fn review_command(
         &self,
         run: &crate::domain::TaskRun,
+        tree: &Path,
         prompt: &str,
         access: crate::domain::headless_job::JobAccess,
     ) -> Result<CommandSpec>;
@@ -1551,6 +1554,81 @@ pub trait Repository {
     /// The tasks landed between two commits, oldest first, from their
     /// `Dagq-Task` trailers.
     fn landed_task_ids(&self, base: &str, head: &str) -> Result<Vec<TaskId>>;
+    /// Make the clone a run in a container works in (ADR-t2113-2 decisions 1
+    /// and 3, ADR-t2179-1): at the run's worktree path, sharing no object
+    /// file of this repository (no hard link, no alternates), with the run
+    /// branch checked out at the base commit, the ref `carried` names (an
+    /// earlier run's head kept as `refs/dagq/runs/<run id>`, whose work the
+    /// run carries over) under the same name, and
+    /// [`CLONE_MAIN_REF`](crate::domain::run_clone::CLONE_MAIN_REF) at the
+    /// base; no remote, no credential helper and no credential. The control
+    /// side's run branch is made at the base too. Git's output.
+    fn create_clone(&self, run: &TaskRun, carried: Option<&str>) -> Result<String> {
+        let _ = (run, carried);
+        anyhow::bail!("this repository cannot make a run's clone")
+    }
+    /// The facts of a run in a container ([`CloneFacts`]): its run
+    /// branch's bundle imported into the control side's run branch when it
+    /// is newer, and its state file read, both without following a
+    /// symlink and without any git in the clone (ADR-t2179-1 decisions 1
+    /// to 3 and 9). `Ok(Err(why))` is a bundle or state file that is
+    /// missing, not a regular file, or cannot be read or imported: the
+    /// session's to put right.
+    fn clone_facts(&self, run: &TaskRun) -> Result<std::result::Result<CloneFacts, String>> {
+        let _ = run;
+        anyhow::bail!("this repository cannot read a run's clone")
+    }
+    /// The landing worktree of a run in a container (ADR-t2179-1 decision
+    /// 5): the one already registered at its path, or a new one made there
+    /// with `commit` checked out detached. `Ok(Err(why))` refuses to make
+    /// it: something is at its path already, a directory between the
+    /// queue's directory and it is a symlink or no directory, or the
+    /// landing directory is not the control side's alone.
+    fn landing_worktree(
+        &self,
+        run: &TaskRun,
+        commit: &CommitSha,
+    ) -> Result<std::result::Result<PathBuf, String>> {
+        let _ = (run, commit);
+        anyhow::bail!("this repository cannot make a landing worktree")
+    }
+    /// Remove the landing worktree of a run in a container, when there is
+    /// one, without following a symlink.
+    fn remove_landing_worktree(&self, run: &TaskRun) -> Result<()> {
+        let _ = run;
+        anyhow::bail!("this repository keeps no landing worktree")
+    }
+    /// Write main's bundle (`main`, on top of the run's base commit) into
+    /// the directory of a run in a container, for its next turn to fetch
+    /// (ADR-t2179-1 decision 6), replacing whatever is at that path without
+    /// following it.
+    fn hand_main(&self, run: &TaskRun, main: &CommitSha) -> Result<()> {
+        let _ = (run, main);
+        anyhow::bail!("this repository cannot hand main to a run's clone")
+    }
+    /// Remove what a run in a container left (ADR-t2179-1 decision 7): its
+    /// clone `clone`, without git and without following a symlink, its
+    /// landing worktree, the control side's run branch `branch` and the
+    /// bundles and state file in its directory. What is already gone is
+    /// not an error.
+    fn remove_clone(&self, clone: &Path, branch: &str) -> Result<()> {
+        let _ = (clone, branch);
+        anyhow::bail!("this repository cannot remove a run's clone")
+    }
+    /// This repository with every git it runs guarded: no hook and no
+    /// driver the tracked content of a container run's commits could
+    /// choose runs (ADR-t2179-1 decision 8). `Err` when the guard cannot
+    /// be made to hold: nothing of such a run is to be handled then.
+    fn guarded(&self) -> Result<Box<dyn Repository + Send + Sync>> {
+        anyhow::bail!("this repository cannot guard its git")
+    }
+    /// The environment that carries the same guard to the git a process
+    /// started in `cwd` runs (the review's jobs and programs, the e2e in a
+    /// landing worktree).
+    fn guard_env(&self, cwd: &Path) -> Result<Vec<(String, String)>> {
+        let _ = cwd;
+        anyhow::bail!("this repository cannot guard its git")
+    }
     /// The commit of `<base>..<head>`'s first-parent history that landed
     /// run `run` (its `Dagq-Run` trailer), with its first parent; `None`
     /// when none did. A repository that cannot tell finds none.
@@ -1572,6 +1650,16 @@ pub trait Repository {
     /// Write the full diff `<base>...<head>` to a new file at `path`, as
     /// Git's raw bytes and never through memory.
     fn diff_to_file(&self, base: &str, head: &str, path: &Path) -> Result<()>;
+}
+
+/// What the control side knows of a run in a container
+/// ([`Repository::clone_facts`]): the head of its run branch as imported
+/// from its bundle (the run's base commit while it made none), and the
+/// state the container's executor wrote with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloneFacts {
+    pub head: CommitSha,
+    pub state: crate::domain::run_clone::RunState,
 }
 
 /// The size of a diff, as `git diff --numstat` counts it.

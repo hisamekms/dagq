@@ -119,6 +119,7 @@ fn e2e_settings(dir: &Path) -> dagq::application::install::E2eSettings {
         log: dir.join("e2e.log"),
         utc_offset_secs: 0,
         lock: None,
+        git_env: Vec::new(),
     }
 }
 

@@ -31,7 +31,7 @@ impl AgentProvider for ObserverProvider {
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
         command.env("MODEL", format!("{model} {effort}"));
     }
-    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
         bail!("the observer reviews no run")
     }
 }
@@ -991,7 +991,7 @@ impl AgentProvider for BreachRecorder {
     }
     fn without_mcp(&self, _: &mut CommandSpec) {}
     fn select_model(&self, _: &mut CommandSpec, _: &str, _: &str) {}
-    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
         bail!("the observer reviews no run")
     }
 }

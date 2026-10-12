@@ -11,6 +11,7 @@ use crate::application::review::{
     ReviewRange, SubagentSnapshot, review_range_at, snapshot_subagents,
 };
 use crate::application::review_programs::{ProgramSnapshot, snapshot_programs};
+use crate::application::run_git;
 use crate::domain::ActorContext;
 use crate::domain::AskConfidence;
 use crate::domain::EventKind;
@@ -442,12 +443,15 @@ impl Supervisor<'_> {
     ) -> Result<HeadlessJob> {
         let program = &state.snapshot.programs[index];
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
-        let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        // A container run's programs work in its landing worktree, with
+        // their git guarded (ADR-t2179-1 decisions 5 and 8).
+        let worktree = run_git::review_tree(&*self.repository, run)?;
         anyhow::ensure!(
             self.files.is_dir(&worktree),
             "the run's worktree {} is gone",
             worktree.display()
         );
+        let env = run_git::tree_env(&*self.repository, run, &worktree)?;
         let scratch = self.layout.review_programs_dir.join(run.id().as_str());
         let subject = JobSubject::review_program(run.id(), state.round, &program.program.name);
         let timeout = self.job_timeout(&subject);
@@ -456,7 +460,7 @@ impl Supervisor<'_> {
             self.spawner,
             self.programs,
             program,
-            &worktree,
+            (&worktree, &env),
             (&run_dir, &scratch),
             (run.id(), state.round),
             timeout,
@@ -1300,7 +1304,7 @@ impl Supervisor<'_> {
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
             fitted.text.as_bytes(),
         )?;
-        let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        let worktree = run_git::review_tree(&*self.repository, run)?;
         let mut agents = Vec::new();
         for (snapshot, agent) in subagents
             .iter()
@@ -1352,7 +1356,7 @@ impl Supervisor<'_> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         let stdout = run_dir.join(format!("{output}.out"));
         let stderr = run_dir.join(format!("{output}.err"));
-        let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        let worktree = run_git::review_tree(&*self.repository, run)?;
         // A worktree that is gone is the run's, not its provider's: its
         // spawn would read as a missing executable.
         anyhow::ensure!(
@@ -1361,8 +1365,10 @@ impl Supervisor<'_> {
             worktree.display()
         );
         // The repository's [run.env] reaches the review too (ADR-0023
-        // decision 3).
+        // decision 3), and the guard of a container run's landing worktree
+        // reaches the git its agents run (ADR-t2179-1 decision 8).
         let mut env = self.verifier.run_env(&run_dir)?;
+        env.extend(run_git::tree_env(&*self.repository, run, &worktree)?);
         // The review on either provider may not start the sccache server
         // (ADR-t2086-1).
         let look = self.sccache_look(crate::domain::sccache::CheckReason::BeforeReview, &run_dir);
@@ -1384,6 +1390,7 @@ impl Supervisor<'_> {
                 // role and allows it only reads of this queue.
                 ReviewJobInput::Whole { prompt, .. } => HeadlessProgram::Review {
                     run,
+                    tree: &worktree,
                     prompt,
                     access: REVIEW_ACCESS,
                 },
@@ -1396,7 +1403,7 @@ impl Supervisor<'_> {
                 .spawn(
                     ActorExecutionSpec::new(
                         ActorContext::review_job(run.id(), attempt),
-                        WorkspaceAccess::Read(worktree),
+                        WorkspaceAccess::Read(worktree.clone()),
                         ActorProgram::Headless {
                             program,
                             session_id,
@@ -1594,6 +1601,15 @@ impl Supervisor<'_> {
         };
         let task = self.queue.show(run.task_id())?.task;
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        // A clone reaches main only through its bundle (ADR-t2179-1
+        // decision 6).
+        if run.in_container() {
+            crate::application::run_git::hand_main(
+                &*self.repository,
+                run,
+                &self.repository.main_head()?,
+            )?;
+        }
         let findings_file = run_dir.join(format!("revise-{attempt}-findings.txt"));
         let message = revise_request(
             &task,
@@ -1713,9 +1729,8 @@ impl Supervisor<'_> {
                 return Ok(land(session));
             }
         };
-        let conflicts = match self
-            .repository
-            .merge_conflicts(main.as_str(), head.as_str())
+        let conflicts = match crate::application::run_git::for_run(&*self.repository, run)
+            .and_then(|repository| repository.merge_conflicts(main.as_str(), head.as_str()))
         {
             Ok(conflicts) => conflicts,
             Err(error) => {
@@ -1813,6 +1828,7 @@ impl Supervisor<'_> {
                     known_failures: self
                         .request_known_failures(run, &format!("conflict-{attempt}")),
                 };
+                crate::application::run_git::hand_main(&*self.repository, run, &main)?;
                 let message = resume_request(&task, run, &request, &landed)?
                     .with_language(self.verifier.language().as_ref());
                 self.write_reason_file(&request, &message)?;

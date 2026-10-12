@@ -125,6 +125,9 @@ pub enum HeadlessProgram<'a> {
     /// says.
     Review {
         run: &'a TaskRun,
+        /// The tree it reads: the run's worktree, or a container run's
+        /// landing worktree.
+        tree: &'a Path,
         prompt: &'a str,
         access: JobAccess,
     },
@@ -804,9 +807,10 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let mut command = match program {
                     HeadlessProgram::Review {
                         run,
+                        tree,
                         prompt,
                         access,
-                    } => provider.review_command(run, prompt, access)?,
+                    } => provider.review_command(run, tree, prompt, access)?,
                     HeadlessProgram::Job {
                         cwd,
                         prompt,
@@ -958,6 +962,7 @@ mod tests {
         fn review_command(
             &self,
             run: &TaskRun,
+            _: &Path,
             prompt: &str,
             access: JobAccess,
         ) -> Result<CommandSpec> {
@@ -1643,6 +1648,7 @@ mod tests {
                     ActorProgram::Headless {
                         program: HeadlessProgram::Review {
                             run: &run,
+                            tree: dir,
                             prompt: "review",
                             access: JobAccess::ReadFiles,
                         },
@@ -1835,7 +1841,13 @@ mod tests {
         fn relocated_executable(&self) -> Option<PathBuf> {
             self.found.clone()
         }
-        fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
+        fn review_command(
+            &self,
+            _: &TaskRun,
+            _: &Path,
+            _: &str,
+            _: JobAccess,
+        ) -> Result<CommandSpec> {
             unreachable!()
         }
         fn headless_command(&self, _: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
