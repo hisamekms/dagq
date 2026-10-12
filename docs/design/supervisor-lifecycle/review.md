@@ -223,9 +223,10 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 
 - 変えた挙動を説明する文書（task・`summary`が名指すもの、読んで見つけたもの）を差分と`summary`に照らして読む。
   文書の差分だけでは正しいとせず、文書を直さなかった理由も確かめる。
-- 両方向: 古い文書と変わった流れ・境界・不変条件・約束の書き漏れを`docs_drift`で指摘し、加えて差分が文書に入れたコードの書き写し（欄・flag・既定値・関数名・test名の列挙）と経緯も指摘する。
+- 両方向: 古い文書と変わった流れ・境界・不変条件・約束の書き漏れを`docs_drift`で指摘し、加えて差分が文書に入れたコードの書き写しと経緯も指摘する。
   名前が文書に無いことだけでは古いとしない。
-- このrepositoryでは、名前の確かめと書き写し・経緯はdesign-consistencyの[subagent](#reviewのsubagent)が、形式（1文1行・予算・1行の長さ・task番号）は`[review.programs]`のプログラムが見て、規則は[documents.md](../../development/documents.md#design)が持つ。
+- このrepositoryでは、名前の確かめと書き写し・経緯は全体のreviewが`REVIEW_DOCS_CHECK`と指示が名指す[documents.md](../../development/documents.md#design)で、形式（1文1行・予算・1行の長さ・task番号）は`[review.programs]`が見る。
+  未実装の変更の後は`.dagq/review/builtin-acceptance.md`がその規則を渡す。
 - `review.md`のTaskの節はcontextを持つので、plannerがcontextに書いた関連文書もreviewが読む（[`review`](review-command.md#review)）。
 
 ## 差し戻しの分類コード<a id="差し戻しの分類コード未実装"></a>
