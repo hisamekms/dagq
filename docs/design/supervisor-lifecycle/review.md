@@ -195,7 +195,6 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   書かないagentと全体のreviewのjobは`[roles.review]`に従う。
 - **結果のそろいの検査**: agentのjobの答えは、そのagentのちょうど1件の完了した判定でなければ読めない答えで（`domain::review_jobs::agent_result`）、全体のreviewのverdictはagentの結果を持てない（`agents`を持つverdictは`ReviewVerdict::parse`が読めない答えにする）。
 - **判定ごとの行き先**: 全体のreviewとagentごとの判定を着地・差し戻し・人の判断に直し、最も重いものを取る（`ReviewVerdict::route`、`domain::review_subagents::destination`）。
-  記録と問いでは全体のreviewの判定を`parent`と呼ぶ。
   差し戻しは判定ごとの理由をagentの名前を付けて並べた1回のreviseにし、人の判断なら問いに全体のreviewが軽かったことを載せる（`act_on_agents`）。
   記録した行き先（`review_finished`の`route`）があれば、着地はそれが`land`のときだけ（`concern::lets_land`）で、引き継いだsupervisorも全体のreviewのverdictだけでは進めずaskにする。
 - **誤り**: landing branchの`dagq.toml`が読めない、選ばれたagentの定義が無い、道具の宣言が誤り、範囲かreceiptが読めないときは、必須の検査が分からないので空にせず、起動せずにreviewの失敗にする。
@@ -223,7 +222,7 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 - 両方向: 古い文書と変わった流れ・境界・不変条件・約束の書き漏れを`docs_drift`で指摘し、加えて差分が文書に入れたコードの書き写し（欄・flag・既定値・関数名・test名の列挙）と経緯も指摘する。
   名前が文書に無いことだけでは古いとしない。
 - verdictの形と分類コードは変えない。
-- このrepositoryでは、探した名前の確かめと書き写し・経緯・予算の指摘をdesign-consistencyの[subagent](#reviewのsubagent)が受け持ち、規則は[documents.md](../../development/documents.md#design)が持つ。
+- このrepositoryでは、名前の確かめと書き写し・経緯はdesign-consistencyの[subagent](#reviewのsubagent)が、形式（1文1行・予算・1行の長さ・task番号）は`[review.programs]`のプログラムが見て、規則は[documents.md](../../development/documents.md#design)が持つ。
 - `review.md`のTaskの節はcontextを持つので、plannerがcontextに書いた関連文書もreviewが読む（[`review`](review-command.md#review)）。
 
 ## 差し戻しの分類コード<a id="差し戻しの分類コード未実装"></a>
