@@ -16,6 +16,8 @@ related:
   - adr-t1925-1
   - adr-t1487-1
   - design-supervisor-lifecycle-review-programs
+  - adr-t2268-1
+  - design-toolchain-profiles
 ---
 
 # Validation
@@ -56,6 +58,9 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
   登録済みのtaskの検証のコマンドは書き換えず、着地のたびにmain checkoutの設定から決め直すので、設定を外せば登録のコマンドに戻る。
   置き換えたコマンドの`verification_command`のeventと検証のlogの先頭に、元のコマンドが残る。
   hostの失敗のやり直しと不安定なtestの着地のやり直し（[`integrate`](integrate.md)）は、置き換えたコマンドにも同じく効く。
+- **失敗の読み方**: 置き換えたコマンドも登録のままのコマンドも、失敗の言語・道具に固有の分類と落ちたtestの名前とflakyのやり直しのenvは、repositoryが`dagq.toml`で宣言したtoolchainのprofileが読む（[Toolchain profiles](../toolchain-profiles.md)）。
+  容量の不足・signal・時間切れの終了コード・コマンド全体の上限はruntimeの共通の分類が宣言に依らず読むので、hostの失敗のやり直しはどのrepositoryでも効く。
+  宣言したprofileがどれも読まない出力は、共通の分類に当たらなければ`unknown`になり、不安定なtestの着地のやり直しは起きない。
 - **分担**: 置き換えと、着地の検証のコマンドに渡す材料（base commit、既に落ちているtestの一覧、CIの修正taskのrunか）はruntimeの汎用の仕組みである。
   何を置き換えるか、ITの選び方、対応表の取り方、閾値・共通のファイル・古さの上限の値は、repositoryの設定とscriptが持つ。
   runtimeはrepositoryのtestの構成と対応表の形を知らない。

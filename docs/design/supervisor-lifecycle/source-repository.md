@@ -37,7 +37,10 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 新しくdagqの開発でだけ要る機能を足すときは、この判定を使い、この表に行を足す。
 この判定に置くのはdagq自身の配布の事情（表の上の3行と、そのinstallと自動更新の前のe2eの関門）だけで、言語・道具の知識は置かない（[ADR-t2268-1](../../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定2）。
 言語・道具の知識は`dagq.toml`で宣言したtoolchainのprofile、projectの値は`dagq.toml`、hostの値は`host.toml`、言語に依らない知識（hostの分類の汎用の印、待ち・dagq・gitのコマンドの分類）はruntimeの共通の既定に置く。
-**実装状況**: profileの抽象と宣言は未実装で、表の4行目はこの判定で分け、下の「言語・道具の知識の今の場所」はcargoの前提でどのrepositoryでも働く。
+**実装状況**: profileのportと`[toolchains.<名前>]`の宣言はある（[Toolchain profiles](../toolchain-profiles.md)）。
+検証の失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenvは、宣言したprofileを通して働く。
+宣言の無いrepositoryではRustのprofileが暗黙に当たり、`doctor`と`status`が警告する（ADR-t2268-1決定9）。
+buildの出力の置き場と掃除・計測・CIの見張りの読み方・processの種類はまだprofileに移っておらず、表の4行目はこの判定で分け、下の「言語・道具の知識の今の場所」はcargoの前提でどのrepositoryでも働く。
 移行の間も、宣言の無いrepositoryは今のRustの振る舞いのままで、旧い分け方を外すのはこのrepositoryの`dagq.toml`に宣言と規則が入った後である（ADR-t2268-1決定9）。
 
 | 機能 | 決定 | dagqのソース | ソースでないrepository |
@@ -64,9 +67,8 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 決まった形では、道具の知識はRustのprofileの実装に移り、宣言したrepositoryでだけ働く（ADR-t2268-1決定1・2）。
 言語に依らない部分はruntimeの共通の既定に、このrepositoryに固有の部分は`dagq.toml`に置く（ADR-t2268-1決定2・4）。
 
-- 検証の失敗の分類と落ちたtest・flakyのtestの抜き出し: `domain::verify_failure`。
-  1つの関数に、runtimeに残す汎用の印（容量の不足・signal・時間切れの終了コード）、Rustのprofileに移すcargo・nextest・rustfmtの印、`dagq.toml`に移す`tests/common`の時間切れの行の印がある。
-- flakyのやり直しのenv: `application::integrate`の検証のやり直しと、受け継いだ値を落とす`infrastructure::adapters`の検証のコマンド。
+- 検証の失敗の分類と落ちたtest・flakyのtestの抜き出し、flakyのやり直しのenvと受け継いだ値を落とす扱いは、profileに移った（汎用の印は`domain::verify_failure`の共通の分類、cargo・nextest・rustfmtの印とenvはRustのprofileの`domain::toolchain::rust`。[Toolchain profiles](../toolchain-profiles.md)）。
+  残るのは`tests/common`の`within`の時間切れの行の印で、projectに固有の印として`domain::verify_failure`の共通の分類が宣言に依らず読み、`dagq.toml`のprojectの印の口ができたらそこへ移す。
 - buildの出力の置き場と掃除: landing recheckの`application::supervise::recheck`と自動更新の`application::update`。
   workerとintegrateのbuildの出力の置き場は`[run.env]`のprojectの値を`infrastructure::run_env`が読むだけで、runtimeに雛形は無い（決まった形ではprofileの推奨の案として出す。ADR-t2268-1決定1・7）。
 - CIの見張りの読み方: `domain::ci_watch`。

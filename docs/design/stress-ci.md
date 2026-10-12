@@ -46,7 +46,12 @@ script は選んだ test を `binary_id(<binary>) & test(=<name>)` の和の fil
 - 周回は既定で 20（`--count` / `STRESS_COUNT`）。`STRESS_DURATION`（例 `30m`）を置くと周回の代わりに時間の上限になる
 - nextest の `--test-threads` は既定で CPU 数の 2 倍（`STRESS_TEST_THREADS`）で、同じ filter の nextest を `STRESS_JOBS`（既定 2）本同時に流し、test どうしが CPU を取り合う負荷を作る。build は先に 1 回だけ行う
 - `--no-fail-fast` で全ての周回を流し切り、1 回でも落ちた test を `<STRESS_OUT>/failed-tests.txt`（1 行に `<binary> <test>`、既定の `STRESS_OUT` は `target/stress`）に書いて exit 1 にする。log は `<STRESS_OUT>/stress-<N>.log`
-- 1 回でも落ちた test は、log の結果の行の status が [Integrate](supervisor-lifecycle/integrate.md) の「nextestの失敗のstatusの集合」の (A)(B)(C) に当たる行（`FAIL`・`FAIL + LEAK`・`XFAIL`・`LEAK-FAIL`・`TIMEOUT`・`ABORT`・`SIG<name>`・`ABORT SIG <n>`、`TRY <n>` の後の `FAIL`・`FL+LK`・`XFAIL`・`LKFAIL`・`TMT`・`ABORT`・signal の名前・`SIG <n>`、`FLKY-FL n/m`・`FLAKY n/m`）の最後の 2 語で読む（task 1272。script の `failed_status`）。`.config/nextest.toml` の `retries = 1` の下で、1 回目に落ちて流し直しで通った test は `TRY 1 <短い形>` と `FLKY-FL n/m` の行しか出さないが、これが定時の stress が知らせたい不安定な test なので載せる。`LEAK`（子プロセスを残したが通った test）は載せない: nextest は通ったと数えて stress の終了コードを失敗にせず、載せると通った test で issue を開くことになる。leak で落ちた test は `FAIL + LEAK`・`LEAK-FAIL`・`FL+LK`・`LKFAIL` で載る（task 1272 より前は `LEAK` も載せていた）。`SLOW`・`TRY <n> SLOW`・`START` などの失敗でない行も載せない。集合は `src/domain/verify_failure.rs` と `.github/workflows/ci.yml` の Linux の job と同じで、正規表現は ci.yml と同じ文字列
+- 1 回でも落ちた test は、log の結果の行の status が Rust の toolchain の profile（`src/domain/toolchain/rust.rs` の doc comment）の nextest の失敗の status の集合の (A)(B)(C) に当たる行（`FAIL`・`FAIL + LEAK`・`XFAIL`・`LEAK-FAIL`・`TIMEOUT`・`ABORT`・`SIG<name>`・`ABORT SIG <n>`、`TRY <n>` の後の `FAIL`・`FL+LK`・`XFAIL`・`LKFAIL`・`TMT`・`ABORT`・signal の名前・`SIG <n>`、`FLKY-FL n/m`・`FLAKY n/m`）の最後の 2 語で読む（task 1272。script の `failed_status`）。
+  `.config/nextest.toml` の `retries = 1` の下で、1 回目に落ちて流し直しで通った test は `TRY 1 <短い形>` と `FLKY-FL n/m` の行しか出さないが、これが定時の stress が知らせたい不安定な test なので載せる。
+  `LEAK`（子プロセスを残したが通った test）は載せない: nextest は通ったと数えて stress の終了コードを失敗にせず、載せると通った test で issue を開くことになる。
+  leak で落ちた test は `FAIL + LEAK`・`LEAK-FAIL`・`FL+LK`・`LKFAIL` で載る（task 1272 より前は `LEAK` も載せていた）。
+  `SLOW`・`TRY <n> SLOW`・`START` などの失敗でない行も載せない。
+  集合は Rust の profile と `.github/workflows/ci.yml` の Linux の job と同じで、正規表現は ci.yml と同じ文字列
 
 ## 範囲
 

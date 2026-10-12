@@ -48,6 +48,7 @@ use crate::domain::{
     measure::{LoadSummary, LoadWindow},
     required_of,
     scope::{out_of_scope, scope_violation_reason},
+    toolchain::Toolchains,
     validation::{self, CheckedOut, E2eRequirement, Fact, Judgement, ReceiptFacts, ReceiptFile},
     verify_failure,
 };
@@ -1442,6 +1443,14 @@ fn land(
         verifier.landing_verification()?
     };
     let commands = landing_verification::plan(config.as_ref(), task.verification_commands());
+    // The profiles that read the commands' output (ADR-t2268-1), read like
+    // `[landing_verification]`: a declaration that cannot be resolved stops
+    // before the commands, as an unreadable dagq.toml does.
+    let toolchains = if commands.is_empty() {
+        Toolchains::undeclared()
+    } else {
+        verifier.toolchains()?
+    };
     let landing_env = if commands.iter().any(landing_verification::Planned::replaced) {
         landing_env(&*queue, verifier, files, task, run_dir, main)?
     } else {
@@ -1505,6 +1514,7 @@ fn land(
                 run,
                 worktree,
                 run_env: &run_env,
+                toolchains: &toolchains,
                 planned,
                 extra_env: if planned.replaced() {
                     &landing_env
@@ -1571,9 +1581,12 @@ fn land(
                 }
             }
             let failure = last.failure.as_ref().unwrap_or(&first_failure);
-            // Every failed test passed on nextest's retry: the landing is done
-            // once more instead of a resume, once per landing (task 1039).
+            // Every failed test passed on the tool's retry: the landing is
+            // done once more instead of a resume, once per landing (task
+            // 1039), with the environment of the profile that read it flaky
+            // (ADR-t2268-1 decision 6).
             if failure.class == verify_failure::FailureClass::Flaky && !flaky_retried {
+                let retry_env = toolchains.flaky_retry_env(failure.profile.unwrap_or_default());
                 let reason = format!(
                     "verification command {command:?} failed after the rebase onto {main} only on tests that passed when run again ({}); see {}. Verifying it once more instead of resuming the session",
                     last.flaky_tests.join(", "),
@@ -1589,7 +1602,11 @@ fn land(
                             "main": main,
                             "head": rebased,
                             "attempt": attempt,
-                            "flaky_result": "pass",
+                            "profile": failure.profile,
+                            "retry_env": retry_env
+                                .iter()
+                                .map(|(key, value)| (key.clone(), Value::from(value.as_str())))
+                                .collect::<serde_json::Map<String, Value>>(),
                             "command": command,
                             "exit_code": last.exit_code,
                             "failure": failure.to_json(),
@@ -1600,8 +1617,9 @@ fn land(
                         })),
                 )?;
                 flaky_retried = true;
-                run_env.retain(|(key, _)| key != "NEXTEST_FLAKY_RESULT");
-                run_env.push(("NEXTEST_FLAKY_RESULT".into(), "pass".into()));
+                // Over `[run.env]`'s value of the same variable.
+                run_env.retain(|(key, _)| retry_env.iter().all(|(added, _)| added != key));
+                run_env.extend(retry_env);
                 continue 'verify;
             }
             return Ok(verification_failed(
@@ -1787,6 +1805,8 @@ struct VerifyStep<'a> {
     run: &'a TaskRun,
     worktree: &'a Path,
     run_env: &'a [(String, String)],
+    /// The profiles that read the command's output.
+    toolchains: &'a Toolchains,
     /// The command to run, and the task's it runs in place of.
     planned: &'a landing_verification::Planned,
     /// What the command gets on top of `run_env`: [`landing_env`] for the
@@ -1803,7 +1823,7 @@ struct Checked {
     signal: Option<i32>,
     failure: Option<verify_failure::VerifyFailure>,
     failed_tests: Option<verify_failure::FailedTests>,
-    /// Those of the failed tests nextest ran again and saw pass (task 768).
+    /// Those of the failed tests the tool ran again and saw pass (task 768).
     flaky_tests: Vec<String>,
     log: PathBuf,
 }
@@ -1869,7 +1889,15 @@ impl VerifyStep<'_> {
                 );
             }
         }
-        let checked = judge_command(command, code, signal, timed_out, &output, log);
+        let checked = judge_command(
+            self.toolchains,
+            command,
+            code,
+            signal,
+            timed_out,
+            &output,
+            log,
+        );
         let exit_code = checked.exit_code;
         let mut payload = json!({
             "phase": "integration",
@@ -1905,9 +1933,11 @@ impl VerifyStep<'_> {
 /// killed at its limit, `timed_out`) and wrote `output` to `log` says: its
 /// exit (128 without a code), why it failed from its exit and its log (task
 /// 467) or its limit, the tests it names as failed when tests failed or ran
-/// out of time (task 515), and those nextest ran again and saw pass (task
-/// 768). A command that passed still names its FLAKY tests.
+/// out of time (task 515), and those the tool ran again and saw pass (task
+/// 768), each read by `toolchains`' profiles. A command that passed still
+/// names its flaky tests.
 fn judge_command(
+    toolchains: &Toolchains,
     command: &str,
     code: Option<i32>,
     signal: Option<i32>,
@@ -1918,7 +1948,8 @@ fn judge_command(
     let exit_code = code.unwrap_or(128);
     let failure = match timed_out {
         Some(timed_out) => Some(timed_out.failure()),
-        None => (exit_code != 0).then(|| verify_failure::classify(command, code, signal, output)),
+        None => (exit_code != 0)
+            .then(|| verify_failure::classify(toolchains, command, code, signal, output)),
     };
     let mut failed_tests = failure
         .as_ref()
@@ -1930,21 +1961,21 @@ fn judge_command(
                     | verify_failure::FailureClass::Flaky
             )
         })
-        .map(|_| verify_failure::failed_tests(output));
-    // A successful retry still records FLAKY tests, including nextest's
-    // summary-only output. Keep the same name limit as failed commands.
+        .map(|_| verify_failure::failed_tests(toolchains, output));
+    // A successful retry still records the flaky tests, including those of
+    // a summary alone. Keep the same name limit as failed commands.
     if failure.is_none() {
-        let mut names = verify_failure::flaky_tests(output);
+        let mut names = verify_failure::flaky_tests(toolchains, output);
         if !names.is_empty() {
             let omitted = names.len().saturating_sub(verify_failure::MAX_FAILED_TESTS);
             names.truncate(verify_failure::MAX_FAILED_TESTS);
             failed_tests = Some(verify_failure::FailedTests { names, omitted });
         }
     }
-    // The failed tests that passed on nextest's retry: the mark `stats`
+    // The failed tests that passed on the tool's retry: the mark `stats`
     // counts them flaky by (task 768).
     let flaky_tests = match &failed_tests {
-        Some(failed) => verify_failure::flaky_tests(output)
+        Some(failed) => verify_failure::flaky_tests(toolchains, output)
             .into_iter()
             .filter(|name| failed.names.contains(name))
             .collect(),
@@ -2016,6 +2047,7 @@ fn held(
         .unwrap_or(verify_failure::VerifyFailure {
             class: verify_failure::FailureClass::Unknown,
             evidence: String::new(),
+            profile: None,
         });
     let logs = first
         .map(|first| format!("{} and {}", first.log.display(), last.log.display()))
@@ -3834,6 +3866,7 @@ mod tests {
 
     fn checked(code: Option<i32>, signal: Option<i32>, output: &str) -> Checked {
         judge_command(
+            &Toolchains::undeclared(),
             "cargo test",
             code,
             signal,
@@ -3876,6 +3909,7 @@ mod tests {
         );
         // Killed at its limit: a timeout, whatever the log says.
         let timed_out = judge_command(
+            &Toolchains::undeclared(),
             "cargo test",
             None,
             Some(9),
@@ -3938,6 +3972,7 @@ mod tests {
     fn a_command_failing_on_the_host_again_holds_the_run_for_a_person() {
         let first = checked(None, Some(15), "");
         let last = judge_command(
+            &Toolchains::undeclared(),
             "cargo test",
             None,
             Some(15),

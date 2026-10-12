@@ -88,6 +88,10 @@ pub struct OneShot {
     /// How long one verification command of `integrate` may run in all
     /// ([`VERIFICATION_TIMEOUT`]; tests shorten it, task 639).
     pub verification_timeout: std::time::Duration,
+    /// The toolchain profiles a `[toolchains.<name>]` of `dagq.toml` may
+    /// name: the runtime's built-in ones
+    /// ([`crate::domain::toolchain::BUILTIN`]); tests register another.
+    pub profiles: &'static crate::domain::toolchain::ProfileRegistry,
 }
 
 /// `ask`: register an ask (see [`crate::application::ask::ask`]); the
@@ -231,6 +235,7 @@ impl OneShot {
             disk: None,
             free_space: free_disk_bytes,
             verification_timeout: VERIFICATION_TIMEOUT,
+            profiles: &crate::domain::toolchain::BUILTIN,
         }
     }
 

@@ -456,6 +456,7 @@ mod tests {
             log_path: "/r/recheck.log".into(),
             output_tail: "error[E0063]".into(),
             failure: crate::domain::verify_failure::classify(
+                &crate::domain::toolchain::Toolchains::undeclared(),
                 "cargo check",
                 Some(101),
                 None,
@@ -499,6 +500,7 @@ mod tests {
                 failure: VerifyFailure {
                     class,
                     evidence: "evidence".into(),
+                    profile: None,
                 },
             };
             assert_eq!(failure.is_environmental(), environmental, "{class:?}");

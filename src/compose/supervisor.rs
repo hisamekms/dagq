@@ -722,6 +722,7 @@ pub fn supervise_with_reviewer(
             db: db.clone(),
             user_config: options.user_config.clone(),
             verification_timeout: options.verification_timeout,
+            profiles: &crate::domain::toolchain::BUILTIN,
         }),
         // The queue broker, the Claude credential, the runs' relays, the
         // dagq machine and the image are the parts of the container runtime

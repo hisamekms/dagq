@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::stats::rfc3339_millis;
+use super::toolchain::Toolchains;
 use super::verify_failure::{FailedTests, failed_tests};
 
 /// What a record is, for the turns.
@@ -187,7 +188,11 @@ fn tool_result(part: &Value) -> Option<ToolResult> {
     let is_error = part["is_error"].as_bool() == Some(true);
     // Read whatever the exit: `cargo test … | tail` exits 0. Which results
     // count (a test command's) is the work breakdown's to say.
-    let failed_tests = text.map(failed_tests).unwrap_or_default();
+    // The worker's own commands are read as a repository that declares no
+    // profile is (ADR-t2268-1 decision 9), whatever its `dagq.toml` says.
+    let failed_tests = text
+        .map(|text| failed_tests(&Toolchains::undeclared(), text))
+        .unwrap_or_default();
     Some(ToolResult {
         tool_use_id: part["tool_use_id"].as_str()?.to_owned(),
         is_error,

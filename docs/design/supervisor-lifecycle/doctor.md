@@ -13,6 +13,8 @@ related:
   - design-supervisor-lifecycle-language
   - adr-0049
   - adr-t906-1
+  - adr-t2268-1
+  - design-toolchain-profiles
 ---
 
 # `doctor`
@@ -46,6 +48,14 @@ cmux workspaceの存在は確認しない（cmuxなしで動く）。IDを見て
 `runtimes`（既定の出力にも出す）は、`dagq.toml`が選んだ適用先（workerとintegrateのverification）ごとのruntimeとenforcementで、`actors`のworkerの行の`backend`もそれに従う（`health::add_runtimes`）。
 `dagq.toml`が読めなければ`runtimes`は`error`だけを持ち、`actors`はhostのまま出す。
 containerが使えるかはsupervisorのattentionが知らせ、doctorは問わない（[Container runtime](../container-runtime.md)）。
+
+## toolchainのprofile
+
+`toolchains`は、queueが束縛されたmain checkoutの`dagq.toml`が宣言したtoolchainのprofileと、それぞれが当たる範囲（`[toolchains.<name>]`、[Toolchain profiles](../toolchain-profiles.md)）を出す（`domain::toolchain::Toolchains::view`。欄の意味はそのdoc comment）。
+宣言が無ければ、Rustのprofileが暗黙に当たることと、宣言を足すよう促す警告を出す（[ADR-t2268-1](../../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定9）。
+組み込みに無いprofileの名前や読めない`dagq.toml`は`error`だけを持ち、着地はその間エラーで止まるので、ここで先に見つける。
+queueがcheckoutに束縛されていなければ欄を出さない。
+状態は変えない。
 
 ## CIの見張り（ADR-t1920-1）
 

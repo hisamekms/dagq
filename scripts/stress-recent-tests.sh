@@ -277,9 +277,10 @@ done
 #          FAIL [   0.010s] [2/20] (1/3) dagq::it runtime_abandon::name
 #   TRY 1 FL+LK [   0.010s] [2/20] (───) dagq::it runtime_abandon::name
 #   FLKY-FL 2/2 [   0.010s] [2/20] (1/3) dagq::it runtime_abandon::name
-# The statuses are the explicit set of docs/design/stress-ci.md, the same as
-# src/domain/verify_failure.rs and ci.yml's Linux job read: a test that failed
-# once and passed on its retry is the unstable test this job is for. LEAK (a
+# The statuses are the explicit set of the Rust profile's doc
+# (src/domain/toolchain/rust.rs), the same as ci.yml's Linux job reads: a
+# test that failed once and passed on its retry is the unstable test this
+# job is for. LEAK (a
 # test that left a process behind and still passed) is not in it: nextest
 # counts it as passed, and a leak that fails is FAIL + LEAK, LEAK-FAIL, FL+LK
 # or LKFAIL. The last two words are the binary id and the test name, also

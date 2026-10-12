@@ -47,6 +47,8 @@
 //! `[container.image]` names the project's Containerfile and the files it
 //! copies, on which the container runtime's image is built (ADR-t2257-1
 //! decision 2).
+//! `[toolchains.<name>]` declares a toolchain profile the repository uses
+//! and the paths it applies to (ADR-t2268-1, [`TOOLCHAINS_PREFIX`]).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -89,6 +91,7 @@ use crate::{
         slot_limits::SupervisorConfig,
         stall::StallConfig,
         stats::ConflictConfig,
+        toolchain::{ProfileRegistry, ToolchainDeclaration, Toolchains},
         worker_model::WorkerTrial,
     },
     infrastructure::kpi_config::KpiTables,
@@ -232,6 +235,37 @@ pub const EGRESS_REGISTRIES: &str = "registries";
 /// base (ADR-t2257-1 decision 2); its keys and their meaning are on
 /// [`ProjectImage`].
 const CONTAINER_IMAGE_TABLE: &str = "container.image";
+/// `[toolchains.<name>]`: a toolchain profile the repository uses
+/// (ADR-t2268-1 decision 3), one table per declaration, read in file
+/// order. `<name>` is the declaration's own name, kebab-case (lowercase
+/// letters and digits joined by `-`), bare or quoted, each once. Its keys:
+///
+/// - `profile` (a string, required): the profile, one of the runtime's
+///   built-in profiles by name ([`crate::domain::toolchain::BUILTIN`]:
+///   `rust`). A name the runtime does not build in is a mistake of the
+///   file, which the reader of the declarations
+///   ([`load_toolchains`]) and `doctor` report with its line.
+/// - `paths` (a one-line array of distinct repository-relative globs,
+///   optional): the paths the profile applies to; without it, the whole
+///   repository. An empty array, a blank or absolute glob, or a `.` /
+///   `..` / empty segment is a mistake of the file.
+///
+/// Without any table no profile is declared: until the repository
+/// declares one, the Rust profile reads the verification's output
+/// ([`crate::domain::toolchain::Toolchains::undeclared`]) and `doctor` warns.
+/// Every declared profile reads a verification command's output whatever
+/// its paths (the commands run over the whole repository); what the paths
+/// choose is on [`crate::domain::toolchain`]. Profiles are never inferred
+/// from the files of the repository. A binary older than the table refuses
+/// it, so a repository declares one only once the binary that runs its
+/// queue reads it.
+pub const TOOLCHAINS_PREFIX: &str = "toolchains.";
+/// What [`parse_config`] calls the current table while in a
+/// `[toolchains.*]`.
+const TOOLCHAINS_TABLE: &str = "toolchains";
+/// The keys of `[toolchains.<name>]` ([`TOOLCHAINS_PREFIX`]).
+const TOOLCHAIN_PROFILE: &str = "profile";
+const TOOLCHAIN_PATHS: &str = "paths";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
 const TABLES: [&str; 24] = [
@@ -365,6 +399,10 @@ pub struct Config {
     /// `[container.image]` (ADR-t2257-1 decision 2); `None` without the
     /// table, which runs the container runtime's base alone.
     pub container_image: Option<ProjectImage>,
+    /// `[toolchains.<name>]` in file order ([`TOOLCHAINS_PREFIX`]); empty
+    /// without any. The profiles they name are looked up when they are
+    /// resolved ([`load_toolchains`]).
+    pub toolchains: Vec<ToolchainDeclaration>,
 }
 
 /// Parse the whole file.
@@ -423,6 +461,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // The `[review.programs.<name>]` being read, finished at the next
     // table or the end of the file.
     let mut program_open: Option<ProgramTable> = None;
+    // The keys of the current `[toolchains.<name>]` read.
+    let mut toolchain_keys: Vec<String> = Vec::new();
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (index, raw) in text.lines().enumerate() {
         let number = index + 1;
@@ -446,6 +486,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             if let Some(open) = program_open.take() {
                 config.review_programs.push(open.finish()?);
             }
+            finish_toolchain(&config.toolchains)?;
             if kpi
                 .header(name)
                 .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?
@@ -542,6 +583,35 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 table = Some(REVIEW_PROGRAMS_TABLE);
                 continue;
             }
+            if name == TOOLCHAINS_TABLE || name.starts_with(TOOLCHAINS_PREFIX) {
+                let toolchain = name
+                    .strip_prefix(TOOLCHAINS_PREFIX)
+                    .map(|toolchain| parse_key(toolchain.trim()))
+                    .transpose()
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?
+                    .unwrap_or_default();
+                ensure!(
+                    !toolchain.is_empty(),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] names no toolchain; write [{TOOLCHAINS_PREFIX}<name>]"
+                );
+                ensure!(
+                    review_subagents::valid_agent_name(&toolchain),
+                    "{CONFIG_FILE_NAME}:{number}: toolchain {toolchain:?} of [{name}] is not kebab-case (lowercase letters and digits joined by -)"
+                );
+                ensure!(
+                    config.toolchains.iter().all(|t| t.name != toolchain),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
+                );
+                config.toolchains.push(ToolchainDeclaration {
+                    name: toolchain,
+                    profile: String::new(),
+                    paths: Vec::new(),
+                    line: number,
+                });
+                toolchain_keys.clear();
+                table = Some(TOOLCHAINS_TABLE);
+                continue;
+            }
             if let Some(name) = name.strip_prefix(EVAL_PROVIDERS_PREFIX) {
                 let provider: crate::domain::Provider = name.parse().map_err(|_| {
                     anyhow::anyhow!(
@@ -564,7 +634,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -604,6 +674,40 @@ pub fn parse_config(text: &str) -> Result<Config> {
             .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: expected KEY = value"))?;
         let key = key.trim();
         match table {
+            Some(TOOLCHAINS_TABLE) => {
+                let toolchain = config
+                    .toolchains
+                    .last_mut()
+                    .expect("a [toolchains.*] table names its toolchain");
+                ensure!(
+                    key == TOOLCHAIN_PROFILE || key == TOOLCHAIN_PATHS,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{TOOLCHAINS_PREFIX}{}]; the keys are {TOOLCHAIN_PROFILE} and {TOOLCHAIN_PATHS}",
+                    toolchain.name
+                );
+                ensure!(
+                    !toolchain_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                toolchain_keys.push(key.to_owned());
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                if key == TOOLCHAIN_PROFILE {
+                    toolchain.profile = parse_string(rest.trim()).with_context(with)?;
+                    ensure!(
+                        !toolchain.profile.trim().is_empty(),
+                        "{CONFIG_FILE_NAME}:{number}: {key} of [{TOOLCHAINS_PREFIX}{}] is blank",
+                        toolchain.name
+                    );
+                } else {
+                    let globs = parse_string_array(rest.trim()).with_context(with)?;
+                    ensure!(
+                        !globs.is_empty(),
+                        "{CONFIG_FILE_NAME}:{number}: {key} of [{TOOLCHAINS_PREFIX}{}] names no glob; leave it out for the whole repository",
+                        toolchain.name
+                    );
+                    validate_path_globs(&globs).with_context(with)?;
+                    toolchain.paths = dedup_globs(&globs);
+                }
+            }
             Some(REVIEW_PROGRAMS_TABLE) => program_open
                 .as_mut()
                 .expect("a [review.programs.*] table names its program")
@@ -1347,13 +1451,14 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
     if let Some(open) = program_open {
         config.review_programs.push(open.finish()?);
     }
+    finish_toolchain(&config.toolchains)?;
     if let Some(line) = subagent_open {
         bail!(
             "{CONFIG_FILE_NAME}:{line}: [{REVIEW_SUBAGENTS_PREFIX}{}] has no {REVIEW_SUBAGENT_PATHS}",
@@ -1403,6 +1508,21 @@ pub fn parse_config(text: &str) -> Result<Config> {
         );
     }
     Ok(config)
+}
+
+/// The last `[toolchains.<name>]` read, once its table ended: its
+/// `profile` is required (a blank one was refused as it was read).
+fn finish_toolchain(toolchains: &[ToolchainDeclaration]) -> Result<()> {
+    if let Some(last) = toolchains.last()
+        && last.profile.is_empty()
+    {
+        bail!(
+            "{CONFIG_FILE_NAME}:{}: [{TOOLCHAINS_PREFIX}{}] has no {TOOLCHAIN_PROFILE}",
+            last.line,
+            last.name
+        );
+    }
+    Ok(())
 }
 
 /// A `[review.programs.<name>]` as read so far: its header's line and
@@ -1804,6 +1924,23 @@ pub fn load_landing_verification(root: &Path) -> Result<Option<LandingVerificati
         .landing_verification)
 }
 
+/// The toolchain profiles the `dagq.toml` in `root` declares
+/// ([`TOOLCHAINS_PREFIX`]), resolved against `registry`: no file or no
+/// declaration is the Rust profile implied (ADR-t2268-1 decision 9), and
+/// a profile `registry` does not have is a mistake of the file.
+pub fn load_toolchains(root: &Path, registry: &ProfileRegistry) -> Result<Toolchains> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let declarations = match read_config(&path)? {
+        Some(text) => {
+            parse_config(&text)
+                .with_context(|| format!("parse {}", path.display()))?
+                .toolchains
+        }
+        None => Vec::new(),
+    };
+    Toolchains::resolve(registry, &declarations).map_err(anyhow::Error::msg)
+}
+
 /// `[areas]` of the `dagq.toml` in `root` (ADR-t980-1), `None` when there
 /// is no file or no `[areas]` table.
 pub fn load_area_map(root: &Path) -> Result<Option<AreaMap>> {
@@ -2203,6 +2340,9 @@ pub struct ShellVerifier {
     /// [`VERIFICATION_TIMEOUT`](super::adapters::VERIFICATION_TIMEOUT)
     /// but in tests.
     pub verification_timeout: std::time::Duration,
+    /// The profiles a `[toolchains.<name>]` may name:
+    /// [`crate::domain::toolchain::BUILTIN`] but in tests that add one.
+    pub profiles: &'static ProfileRegistry,
 }
 
 impl Verifier for ShellVerifier {
@@ -2251,6 +2391,9 @@ impl Verifier for ShellVerifier {
     }
     fn landing_verification(&self) -> Result<Option<LandingVerification>> {
         load_landing_verification(&self.checkout)
+    }
+    fn toolchains(&self) -> Result<Toolchains> {
+        load_toolchains(&self.checkout, self.profiles)
     }
     fn ci_watch_config(&self) -> Result<Option<CiWatchConfig>> {
         load_ci_watch(&self.checkout)
@@ -2315,6 +2458,117 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// `[toolchains.<name>]` declares a profile and the paths it applies
+    /// to, one table per declaration in file order; a mistake in one is
+    /// refused with its line, and a profile the registry does not have
+    /// when the declarations are resolved.
+    #[test]
+    fn parses_the_toolchains_tables() {
+        let config = parse_config(
+            "[toolchains.core]\nprofile = \"rust\"\npaths = [\"src/**\", \"Cargo.toml\", \"src/**\"]\n[toolchains.\"web-ui\"]\nprofile = 'typescript' # not built in\n[run.env]\nA = '1'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.toolchains,
+            [
+                ToolchainDeclaration {
+                    name: "core".into(),
+                    profile: "rust".into(),
+                    paths: vec!["src/**".into(), "Cargo.toml".into()],
+                    line: 1,
+                },
+                ToolchainDeclaration {
+                    name: "web-ui".into(),
+                    profile: "typescript".into(),
+                    paths: Vec::new(),
+                    line: 4,
+                },
+            ]
+        );
+        assert!(parse_config("").unwrap().toolchains.is_empty());
+        for (text, error) in [
+            (
+                "[toolchains]\nprofile = 'rust'\n",
+                "dagq.toml:1: [toolchains] names no toolchain",
+            ),
+            ("[toolchains.Core]\nprofile = 'rust'\n", "is not kebab-case"),
+            (
+                "[toolchains.a]\nprofile = 'rust'\n[toolchains.a]\nprofile = 'rust'\n",
+                "dagq.toml:3: [toolchains.a] is defined twice",
+            ),
+            (
+                "[toolchains.a]\npaths = ['src/**']\n",
+                "dagq.toml:1: [toolchains.a] has no profile",
+            ),
+            (
+                "[toolchains.a]\n[run.env]\nA = '1'\n",
+                "dagq.toml:1: [toolchains.a] has no profile",
+            ),
+            (
+                "[toolchains.a]\nprofile = ' '\n",
+                "dagq.toml:2: profile of [toolchains.a] is blank",
+            ),
+            (
+                "[toolchains.a]\nprofile = 'rust'\nprofile = 'rust'\n",
+                "dagq.toml:3: profile is defined twice",
+            ),
+            (
+                "[toolchains.a]\nprofile = 'rust'\nlanguage = 'rust'\n",
+                "unknown key language in [toolchains.a]",
+            ),
+            (
+                "[toolchains.a]\nprofile = 'rust'\npaths = []\n",
+                "paths of [toolchains.a] names no glob",
+            ),
+            (
+                "[toolchains.a]\nprofile = 'rust'\npaths = ['/abs/**']\n",
+                "dagq.toml:3: value of paths",
+            ),
+            (
+                "[toolchains.a]\nprofile = 'rust'\npaths = ['a/../b']\n",
+                "dagq.toml:3: value of paths",
+            ),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text:?}: {message}");
+        }
+        // The profile's name is checked against the registry once the
+        // declarations are resolved.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = &crate::domain::toolchain::BUILTIN;
+        assert_eq!(
+            load_toolchains(dir.path(), registry).unwrap().view()["implicit"],
+            "rust"
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[toolchains.web]\nprofile = 'typescript'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            format!("{:#}", load_toolchains(dir.path(), registry).err().unwrap()),
+            "dagq.toml:1: [toolchains.web]: unknown profile \"typescript\"; the profiles are rust"
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[toolchains.core]\nprofile = 'rust'\npaths = ['src/**']\n",
+        )
+        .unwrap();
+        let toolchains = ShellVerifier {
+            checkout: dir.path().to_path_buf(),
+            db: dir.path().join("q.db"),
+            user_config: None,
+            verification_timeout: Duration::from_secs(1),
+            profiles: registry,
+        }
+        .toolchains()
+        .unwrap();
+        assert_eq!(
+            toolchains.view()["declared"],
+            serde_json::json!([{"name": "core", "profile": "rust", "paths": ["src/**"]}])
+        );
     }
 
     /// `[areas]` maps each area's name, bare or quoted, to a one-line
@@ -2535,6 +2789,7 @@ mod tests {
             db: PathBuf::from("/nonexistent/queue.db"),
             user_config: None,
             verification_timeout: Duration::from_secs(1),
+            profiles: &crate::domain::toolchain::BUILTIN,
         };
         assert_eq!(
             verifier
@@ -2653,6 +2908,7 @@ mod tests {
             db: PathBuf::from("/nonexistent/queue.db"),
             user_config: None,
             verification_timeout: Duration::from_secs(1),
+            profiles: &crate::domain::toolchain::BUILTIN,
         };
         assert_eq!(
             verifier
@@ -3295,6 +3551,7 @@ LITERAL = 'no \n escapes # here'
             db: dir.path().join("q.db"),
             user_config: None,
             verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
+            profiles: &crate::domain::toolchain::BUILTIN,
         };
         assert!(verifier.worker_trial().unwrap().enabled);
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[worker.trial]\nx = 1\n").unwrap();
@@ -3771,6 +4028,7 @@ LITERAL = 'no \n escapes # here'
             db: dir.path().join("queue.db"),
             user_config: None,
             verification_timeout: Duration::from_secs(1),
+            profiles: &crate::domain::toolchain::BUILTIN,
         };
         assert_eq!(
             verifier.landing_verification().unwrap().unwrap().command,
@@ -4306,6 +4564,7 @@ LITERAL = 'no \n escapes # here'
             db: dir.path().join("queue.db"),
             user_config: None,
             verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
+            profiles: &crate::domain::toolchain::BUILTIN,
         };
         assert_eq!(
             verifier.recheck_config().unwrap().command.as_deref(),
@@ -4616,6 +4875,7 @@ LITERAL = 'no \n escapes # here'
             db: queue.path().join("queue.sqlite3"),
             user_config: None,
             verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
+            profiles: &crate::domain::toolchain::BUILTIN,
         };
         assert!(!verifier.run_env_programs(None).unwrap().config);
         fs::write(

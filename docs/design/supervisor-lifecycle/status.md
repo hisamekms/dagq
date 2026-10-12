@@ -23,6 +23,8 @@ related:
   - adr-t610-1
   - adr-t906-1
   - adr-t1591-1
+  - adr-t2268-1
+  - design-toolchain-profiles
 ---
 
 # `status`
@@ -76,7 +78,12 @@ guardrailが無ければ、引き継ぎの後に`DAGQ_ROLE`の無いterminalでi
 記録が無ければ判定しない。
 欄の意味と限界は[`dagq inbox`](up-down.md#dagq-inbox)。
 
-`--role planner`以外の`status`は、queue serviceの`queue_service`も返す（`application::queue_service::view`。`doctor`と`dagq service status`も同じ）: `state`（`running`・`stopped`・`unreachable`）・`socket`・`pid`・`build`・`api_version`・`min_api_version`・`build_matches`・`started_at`・`client_api_version`・`attention`（`queue_service_down`が立っているか）。socketに`hello`を1回打つだけで、serviceを起動も停止もしない（[Queue service](../queue-service.md#statusとdoctor)）。
+`--role planner`以外の`status`は、queue serviceの`queue_service`も返す（`application::queue_service::view`。`doctor`と`dagq service status`も同じで、欄は[Queue service](../queue-service.md#statusとdoctor)）。
+socketに`hello`を1回打つだけで、serviceを起動も停止もしない。
+
+## toolchainのprofile
+
+`toolchains`は、宣言したprofileと当たる範囲・宣言が無いときの暗黙のRustのprofileの警告・宣言の誤りを、[`doctor`](doctor.md#toolchainのprofile)と同じ表示で出す。
 
 ## CIの見張り（ADR-t1920-1）
 

@@ -74,7 +74,6 @@ tasks = 3
 
 [[doc]]
 path = "docs/design/stress-ci.md"
-line = 1347
 tasks = 2
 
 [[doc]]
@@ -204,7 +203,6 @@ tasks = 9
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/integrate-errors.md"
-line = 1188
 tasks = 5
 
 [[doc]]

@@ -1045,3 +1045,23 @@ task = 1489
 name = "runtime_claim_class::aging_keeps_to_each_priority_with_interrupts_inheritance_unblocks_and_the_limit"
 reason = "B 境界（SQLite・supervisor の配線）: 1 つの pass の 5 本の claim で、interrupt の規則の順、待っている high の task から継いだ効く優先度と unblocks、同じ優先度の中の aging、Spike の上限が supervisor の実際の claim の順と run_claimed の効く優先度・aged に表れることを、ready の時刻の差（1 秒の待ち）と実際の worker の session で確かめる。それぞれの判断は domain::claim_order と domain::slot_order の unit test"
 task = 1489
+
+[[test]]
+name = "runtime_toolchains::the_host_failures_are_retried_and_held_whatever_is_declared"
+reason = "境界: integrate の rebase・検証のコマンドの process・event の SQLite と main の dagq.toml の [toolchains] を読む配線で、宣言の有無に依らない host の失敗のやり直しと保留を 1 つの fixture で守る（分類の判断は domain::verify_failure の unit test）"
+task = 2269
+
+[[test]]
+name = "runtime_toolchains::an_output_only_another_profile_could_read_is_unknown"
+reason = "境界: dagq.toml の宣言から OneShot の登録を通って integrate の分類と needs_session の記録に届く配線を 1 case で守る（判断は unit test）"
+task = 2269
+
+[[test]]
+name = "runtime_toolchains::the_declared_profile_gives_its_retry_env"
+reason = "境界: 宣言した profile の flaky のやり直しの env が検証のコマンドの process に渡り、受け継いだ値が外れる配線を 1 case で守る"
+task = 2269
+
+[[test]]
+name = "runtime_toolchains::doctor_and_status_show_the_declared_profiles"
+reason = "境界: 束縛された main checkout の dagq.toml を doctor と status が SQLite の queue から読む配線を 1 case で守る（表示の判断は domain::toolchain の unit test）"
+task = 2269

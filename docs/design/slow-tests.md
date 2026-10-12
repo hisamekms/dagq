@@ -46,7 +46,10 @@ sh scripts/slow-tests.sh --self-test
 
 - `PASS [ 秒s] (i/N) <binary> <test>` の秒をその test の時間にする
 - 流し直して通った test は、最後の要約に出る `FLKY-FL 2/2 [ 秒s] ...`（古い nextest の `FLAKY`）の秒（通った回の時間）を使う。時間の表には `TRY n PASS`・`TRY n FAIL`・`FAIL`・`SLOW [> 60.000s]`・`SKIP` を入れない（落ちた test は時間に入らない）
-- 完走判定の終了本数には、成功と `TRY n PASS` に加え、`FAIL`・`FAIL + LEAK`・`XFAIL`・`LEAK-FAIL`・`TIMEOUT`・`ABORT`・`SIGSEGV` などの signal・`ABORT SIG n` と、retry の短い status（`TRY n FAIL`・`FL+LK`・`LKFAIL`・`TMT`・`SEGV`・`SIG n` など）を使う（`src/domain/verify_failure.rs` と CI の失敗 status と同じ集合）。`TRY n` の途中の `(───)` は終了として数えない。同じ log の同じ test は最後の結果で 1 本とし、Summary 後の再掲も重複させない。`SLOW`・`SKIP` は終了本数に入れない
+- 完走判定の終了本数には、成功と `TRY n PASS` に加え、`FAIL`・`FAIL + LEAK`・`XFAIL`・`LEAK-FAIL`・`TIMEOUT`・`ABORT`・`SIGSEGV` などの signal・`ABORT SIG n` と、retry の短い status（`TRY n FAIL`・`FL+LK`・`LKFAIL`・`TMT`・`SEGV`・`SIG n` など）を使う（Rust の toolchain の profile の `src/domain/toolchain/rust.rs` と CI の失敗 status と同じ集合）。
+  `TRY n` の途中の `(───)` は終了として数えない。
+  同じ log の同じ test は最後の結果で 1 本とし、Summary 後の再掲も重複させない。
+  `SLOW`・`SKIP` は終了本数に入れない
 - 色の制御コード（`CARGO_TERM_COLOR=always`）は取り除いてから読む。同じ log に同じ test が 2 回出たら後の方を使う
 - test の名前は nextest の `<binary id> <test 名>`（`dagq::it runtime_resume::...`、`dagq domain::...`）
 

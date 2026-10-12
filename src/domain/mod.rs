@@ -1047,6 +1047,7 @@ pub mod task;
 pub mod throughput_review;
 pub mod timeline;
 pub mod tokens;
+pub mod toolchain;
 pub mod transcript;
 pub mod turn;
 pub mod validation;

@@ -933,6 +933,9 @@ fn recheck_run(
     files.create_dir_all(dir)?;
     repository.checkout_scratch(&scratch, merged.as_str())?;
     let env = recheck_env(verifier.run_env(&target.run_dir)?, dir, look)?;
+    // The profiles the repository declares read the output (ADR-t2268-1),
+    // resolved before the command so a mistake in them does not cost it.
+    let toolchains = verifier.toolchains()?;
     let log = target
         .run_dir
         .join(format!("recheck-{}.log", &main.as_str()[..12]));
@@ -957,7 +960,7 @@ fn recheck_run(
         .unwrap_or_default();
     let failure = match timed_out {
         Some(timed_out) => timed_out.failure(),
-        None => verify_failure::classify(command, code, signal, &output),
+        None => verify_failure::classify(&toolchains, command, code, signal, &output),
     };
     Ok(Finding::Failed(RecheckFailure::CheckFailed {
         command: command.to_owned(),
@@ -1275,6 +1278,7 @@ mod tests {
             failure: verify_failure::VerifyFailure {
                 class,
                 evidence: String::new(),
+                profile: None,
             },
         };
         let (r1, r2, r3, r4) = (

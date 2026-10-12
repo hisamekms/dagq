@@ -123,7 +123,11 @@ fn only_flaky_tests_failing_lands_the_run_once_more_without_a_resume() {
     assert_eq!(retried.len(), 1, "{:?}", event_kinds(&detail));
     let retried = retried[0];
     assert_eq!(retried["code"], "verification_flaky");
-    assert_eq!(retried["flaky_result"], "pass");
+    assert_eq!(retried["profile"], "rust");
+    assert_eq!(
+        retried["retry_env"],
+        json!({"NEXTEST_FLAKY_RESULT": "pass"})
+    );
     assert_eq!(retried["index"], 2);
     assert_eq!(retried["attempt"], 1);
     assert_eq!(retried["failure"], first["failure"]);

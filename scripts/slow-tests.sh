@@ -113,7 +113,8 @@ function name_of(line,    rest, k) {
   sub(/ +$/, "", rest)
   return rest
 }
-# Match the terminal statuses used by verify_failure.rs and ci.yml (task 1272).
+# Match the terminal statuses used by the Rust profile
+# (src/domain/toolchain/rust.rs) and ci.yml (task 1272).
 function failed_status(status) {
   return status ~ /^(FAIL|FAIL \+ LEAK|XFAIL|LEAK-FAIL|TIMEOUT|ABORT|SIG(HUP|INT|QUIT|ILL|TRAP|ABRT|FPE|KILL|SEGV|PIPE|ALRM|TERM)|ABORT SIG [0-9]+|TRY [0-9]+ (FAIL|FL\+LK|XFAIL|LKFAIL|TMT|ABORT|HUP|INT|QUIT|ILL|TRAP|ABRT|FPE|KILL|SEGV|PIPE|ALRM|TERM|SIG [0-9]+))$/
 }

@@ -104,6 +104,7 @@ fn add_sccache_diagnostics(
         db: db.to_path_buf(),
         user_config: None,
         verification_timeout: VERIFICATION_TIMEOUT,
+        profiles: &crate::domain::toolchain::BUILTIN,
     });
     let server = crate::infrastructure::sccache::SystemSccache::new(
         db.parent().unwrap_or(Path::new(".")),
@@ -134,6 +135,7 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
         db: db.to_path_buf(),
         user_config: None,
         verification_timeout: VERIFICATION_TIMEOUT,
+        profiles: &crate::domain::toolchain::BUILTIN,
     }
     .run_env_programs(None)
 }
@@ -146,6 +148,24 @@ fn doctor_roles(queue: &SqliteQueue) -> Value {
         Ok(None) => Ok(Default::default()),
         Err(error) => Err(error),
     })
+}
+
+/// `doctor`'s and `status`'s `toolchains` (ADR-t2268-1): the profiles the
+/// `dagq.toml` of the bound main checkout declares, resolved against
+/// `profiles`, with the paths each applies to, or the Rust profile implied
+/// with a warning while it declares none, or `error` with the mistake;
+/// none for a queue bound to no checkout.
+fn bound_toolchains(
+    queue: &SqliteQueue,
+    profiles: &crate::domain::toolchain::ProfileRegistry,
+) -> Result<Option<Value>> {
+    let Some(checkout) = bound_checkout(queue)? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::domain::toolchain::view(
+        crate::infrastructure::run_env::load_toolchains(&checkout, profiles)
+            .map_err(|error| format!("{error:#}")),
+    )))
 }
 
 /// `runtime` of `[roles.worker]` and `[roles.verification]` of the
@@ -772,6 +792,9 @@ impl OneShot {
             &live_builds,
         )?;
         status["ci"] = crate::application::ci_watch::status(queue, ci_enabled)?;
+        if let Some(toolchains) = bound_toolchains(queue, self.profiles)? {
+            status["toolchains"] = toolchains;
+        }
         let sections = health::status_sections(role);
         if sections.language {
             status["language"] = serde_json::to_value(self.language_report(queue)?)?;
@@ -846,6 +869,9 @@ impl OneShot {
                 }
                 add_sccache_diagnostics(&queue, db, true, &mut report)?;
                 report["roles"] = doctor_roles(&queue);
+                if let Some(toolchains) = bound_toolchains(&queue, self.profiles)? {
+                    report["toolchains"] = toolchains;
+                }
                 health::add_runtimes(&mut report, &queue, &SystemProcesses, runtimes_of(&queue))?;
                 // The means the CI watch reads GitHub with (ADR-t1920-1).
                 if let Some(ci_watch) = doctor_ci_watch(&queue)? {

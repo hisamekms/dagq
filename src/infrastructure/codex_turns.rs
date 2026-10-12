@@ -34,6 +34,7 @@ use crate::domain::tokens::{
     ExecutionContext, ROLLOUT_MISSING, ROLLOUT_TURN_MISSING, ROLLOUT_UNREADABLE, RolloutUsage,
     TOKEN_USAGE_RECORD_MISSING, TokenSource, TokenUsage, TurnContext, UsageRecord,
 };
+use crate::domain::toolchain::Toolchains;
 use crate::domain::turn::{TurnCommand, TurnFailure, TurnResult, TurnSignal, shortened};
 use crate::domain::verify_failure::failed_tests;
 use crate::domain::worktime::SHELL_ITEM;
@@ -550,7 +551,9 @@ impl CodexTurnReader {
         command.status = item["status"].as_str().map(str::to_owned);
         command.failed_tests = item["aggregated_output"]
             .as_str()
-            .map(|output| failed_tests(output).names)
+            // As a repository that declares no profile (ADR-t2268-1
+            // decision 9), whatever its `dagq.toml` says.
+            .map(|output| failed_tests(&Toolchains::undeclared(), output).names)
             .unwrap_or_default();
     }
 

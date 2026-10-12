@@ -23,13 +23,15 @@ related:
   - adr-t2086-1
   - design-supervisor-lifecycle-worker-model
   - design-supervisor-lifecycle-actor-model
+  - adr-t2268-1
+  - design-toolchain-profiles
 ---
 
 # Run environment
 
 repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3。ADR-0040の決定3を引き継ぐ）が、runごとの環境変数になる。読み込みは`src/infrastructure/run_env.rs`の純粋関数（`parse_run_env`と`expand`、fileを読む`load_run_env`）で、ファイルが無ければ空。
 
-- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[exit]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[areas]`・`[tasks]`・`[goals]`・`[e2e]`・`[review.subagents.<agent>]`・`[review.programs.<name>]`・`[review.jobs]`（下の項）・`[headless]`（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）・`[provider_fallback]`・`[fresh_session]`（下の項）・`[ci_watch]`・`[landing_verification]`（下の項）・`[eval]`（と`[eval.providers.<provider>]`）・`[egress]`（[queueのbroker](../queue-broker.md)が`CONNECT`を通すpackage registry、意味は`run_env::EGRESS_REGISTRIES`のdoc comment）・`[container.image]`（下の項）・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、誤りでclaimや着地を止めないよう[Language](language.md)の読み手が検査する）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。
+- 書式はTOMLの部分集合: 表は`run_env::parse_config`が受け付けるもの（各表は下の項と各文書、一覧はその誤りの文）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、誤りでclaimや着地を止めないよう[Language](language.md)の読み手が検査する）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。
   `#`以降はcomment。
   ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
 - 外したresource brokerの`[broker]`と`[broker.package]`は中を問わず読み飛ばし、残したrepositoryを止めない（ほかの未知の表はエラー。[ADR-t2125-1](../../adr/2026-10-08-t2125-1-e2e-gate-checks-only-cmux-after-the-broker-removal.md)）。
@@ -131,6 +133,8 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[egress]`は`registries`だけを持ち、containerのrunが[queueのbroker](../queue-broker.md)を通って届くpackage registryのhostを挙げる（[ADR-t2257-1](../../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）。
   書式・意味・既定（空）は`run_env::EGRESS_REGISTRIES`のdoc commentが持ち、brokerは`CONNECT`のたびにmain checkoutから読む。
   旧バイナリは未知の表を拒み、`dagq.toml`を読めなくなって本番のqueueのrunがすべて止まるので、固定バイナリが`[egress]`を知るものに入れ替わってから足す。
+- `[toolchains.<name>]`は使うtoolchainのprofileと当てるpathsの宣言で、宣言したprofileはpathsに依らず`integrate`とlanding recheckの検証の出力の読み方に効く（書式と誤りの扱いは`run_env::TOOLCHAINS_PREFIX`のdoc comment、当て方は[Toolchain profiles](../toolchain-profiles.md)）。
+  旧バイナリは未知の表を拒むので、宣言は固定バイナリが読めるようになってから足す。
 
 ## sccacheのserver
 

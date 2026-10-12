@@ -432,6 +432,7 @@ impl OneShot {
             db: db.clone(),
             user_config: None,
             verification_timeout: self.verification_timeout,
+            profiles: self.profiles,
         };
         // The free disk space a landing's verification needs, as the
         // supervisor reads it (task 638): a `[disk]` that cannot be read

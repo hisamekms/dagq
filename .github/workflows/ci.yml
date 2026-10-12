@@ -372,9 +372,9 @@ jobs:
               echo "no nextest summary (the build or the setup failed; see the log)"
             else
               # The rows after the last "Summary [" line whose status is in
-              # the explicit set of docs/design/linux-ci.md (the same as
-              # src/domain/verify_failure.rs and scripts/stress-recent-tests.sh
-              # read), e.g.
+              # the explicit set of the Rust profile's doc
+              # (src/domain/toolchain/rust.rs; scripts/stress-recent-tests.sh
+              # reads the same), e.g.
               #   FLKY-FL 2/2 [   0.015s] (2/3) dagq::it module::name
               #    TRY 2 FL+LK [   0.015s] (3/3) dagq::it module::name
               #   ABORT SIG 64 [   0.015s] (3/3) dagq::it module::name

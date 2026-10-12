@@ -895,25 +895,30 @@ const VERIFICATION_STOP_POLL: Duration = Duration::from_millis(100);
 /// once it was killed: the descendants are reaped by `init` once they die.
 const VERIFICATION_GONE_WITHIN: Duration = Duration::from_secs(10);
 
-/// The variable that sets how nextest counts a test that passed on its
-/// retry. integrate passes it only for its flaky retry (task 1039).
-const NEXTEST_FLAKY_RESULT: &str = "NEXTEST_FLAKY_RESULT";
+/// The variables of the built-in profiles' flaky retries
+/// ([`crate::domain::toolchain::ToolchainProfile::flaky_retry_env`]),
+/// which a verification command takes only from the runtime.
+fn flaky_retry_vars() -> impl Iterator<Item = &'static str> {
+    crate::domain::toolchain::BUILTIN
+        .profiles()
+        .flat_map(|profile| profile.flaky_retry_env().iter().map(|(key, _)| *key))
+}
 
 /// `script` under `/bin/sh -c` in `cwd` with `env`. The first verification
-/// takes nextest's flaky result from `.config/nextest.toml`, so a value the
-/// process inherited (a supervisor or test started inside a flaky retry's
-/// verification) is not passed on unless `env` names one (task 1161). An
+/// runs without the flaky retry's environment, so a value of one of its
+/// variables the process inherited (a supervisor or test started inside a
+/// flaky retry's verification) is not passed on unless `env` names one
+/// (task 1161; why is on the profile that has the variable). An
 /// `env` that refuses the sccache server's start was looked at for it
 /// (ADR-t2086-1): its `RUSTC_WRAPPER` is the guard, or none when the server
 /// was not confirmed, never one the process inherited.
 fn verification_command(script: &str, cwd: &Path, env: &[(String, String)]) -> Command {
     use crate::domain::sccache::{ERROR_LOG_VAR, REFUSED_ERROR_LOG, WRAPPER_VAR};
     let mut command = Command::new("/bin/sh");
-    command
-        .arg("-c")
-        .arg(script)
-        .current_dir(cwd)
-        .env_remove(NEXTEST_FLAKY_RESULT);
+    command.arg("-c").arg(script).current_dir(cwd);
+    for key in flaky_retry_vars() {
+        command.env_remove(key);
+    }
     if env
         .iter()
         .any(|(key, value)| key == ERROR_LOG_VAR && value == REFUSED_ERROR_LOG)
@@ -4150,22 +4155,27 @@ mod tests {
         assert!(status.success());
     }
 
-    /// A verification command drops an inherited `NEXTEST_FLAKY_RESULT`
-    /// and gets the one the runtime passes (task 1161).
+    /// A verification command drops an inherited variable of a profile's
+    /// flaky retry and gets the one the runtime passes (task 1161).
     #[test]
-    fn a_verification_command_takes_its_flaky_result_only_from_the_runtime() {
-        let flaky_result = |env: &[(String, String)]| {
-            let command = verification_command("true", Path::new("/"), env);
-            command
-                .get_envs()
-                .find(|(key, _)| *key == NEXTEST_FLAKY_RESULT)
-                .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
-        };
-        assert_eq!(flaky_result(&[]), Some(None));
-        assert_eq!(
-            flaky_result(&[(NEXTEST_FLAKY_RESULT.to_owned(), "pass".to_owned())]),
-            Some(Some("pass".to_owned()))
-        );
+    fn a_verification_command_takes_its_flaky_retry_env_only_from_the_runtime() {
+        let vars: Vec<&str> = flaky_retry_vars().collect();
+        assert!(!vars.is_empty());
+        for var in vars {
+            let value = |env: &[(String, String)]| {
+                let command = verification_command("true", Path::new("/"), env);
+                command
+                    .get_envs()
+                    .find(|(key, _)| *key == var)
+                    .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+            };
+            assert_eq!(value(&[]), Some(None), "{var}");
+            assert_eq!(
+                value(&[(var.to_owned(), "pass".to_owned())]),
+                Some(Some("pass".to_owned())),
+                "{var}"
+            );
+        }
     }
 
     /// A verification command refused the sccache server's start drops an
