@@ -257,11 +257,14 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 
 ## コマンドの形と分類
 
-（ADR-t1662-3決定14〜19）
+（ADR-t1662-3決定14〜19、[ADR-t2268-1](../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定5）
 
 - `[telemetry] command_detail = "program" | "shape" | "redacted"`（既定`shape`）。
 - shapeは部分（パイプ・`&&`・`||`・`;`で分けたもの）ごとに`lead`（先頭の予約語）・`assigns`（代入の名前）・`program`・`args`（`{flag: 名前, value?: digest}`・`{sub: 語}`・`{word: digest}`・`{plus: digest}`・`{after_dashdash: 数}`）。digestはSHA-256(`"dagq-cmd-v1\0"` + 語)の先頭16桁のhex。
-- 分類は台帳を作るときに`[[telemetry.commands]]`を上から当てる。今のworktimeの分類（`domain::worktime`）をこのrepositoryの`dagq.toml`で表す例:
+- 分類は台帳を作るときに、`dagq.toml`の`[[telemetry.commands]]`・宣言したprofileの既定の規則・runtimeの共通の規則（待ち・dagq・git）の順の列を上から当てる。
+  `dagq doctor`が効く列を出どころつきで出す。
+- **実装状況**: どれも未実装で、分類は記録の時に`domain::worktime`が付ける（[Source repository](supervisor-lifecycle/source-repository.md#cargo専用の計測)）。
+- 今の分類を規則で表す例（1〜3つ目はこのrepositoryの`dagq.toml`で2つ目は今の順を保つ上書き、ほかはRustのprofile）:
 
 ```toml
 [[telemetry.commands]]
@@ -275,7 +278,6 @@ class = "llvm_cov"
 program = "cargo"
 sub = ["llvm-cov"]
 
-# cargo test --locked --test it（filterなし）
 [[telemetry.commands]]
 class = "full_test"
 group = "test"
@@ -286,7 +288,6 @@ none_of = ["--lib", "--bin", "--bins", "--doc", "--example", "--package", "-p", 
 takes_value = ["--test"]
 positional = "none"
 
-# cargo test --locked（targetもfilterもなし）
 [[telemetry.commands]]
 class = "full_test"
 group = "test"
@@ -295,34 +296,20 @@ sub = ["test"]
 none_of = ["--test", "--lib", "--bin", "--bins", "--doc", "--example", "--package", "-p", "-E"]
 positional = "none"
 
-# cargo test --locked --test plugin などは上に一致せずここで test
 [[telemetry.commands]]
 class = "test"
 program = "cargo"
 sub = ["test"]
-
-# cargo nextest run（targetもfilterもなし）
-[[telemetry.commands]]
-class = "full_test"
-group = "test"
-program = "cargo"
-sub = ["nextest", "run"]
-none_of = ["--test", "--lib", "--bin", "--bins", "--doc", "--example", "--package", "-p", "-E"]
-positional = "none"
-
-[[telemetry.commands]]
-class = "test"
-program = "cargo"
-sub = ["nextest"]
 ```
 
 `cargo test --locked --test it`は3つ目の規則で`full_test`、`cargo test --locked --test plugin`は`plugin`が`["it"]`に無いので3つ目と4つ目（`--test`が在る）に一致せず5つ目で`test`になる。
 `positional`が除くのは規則の`sub`が一致した語だけなので、`cargo test runtime`（`runtime`はサブコマンドの位置に平文で残る）は3つ目と4つ目に一致せず`test`になる。
 台帳は部分ごとの分類も持ち、`integrate`と重なる検証の数（`full_tests`・`llvm_cov_runs`）は部分の分類から数える（`cargo llvm-cov … && cargo test --locked`は両方に数える）。
-今の`domain::worktime`と分け方が違う形: `--test`に別々の値を並べたもの（`--test e2e --test it`は今はe2e、この規則では`flag_values`の「全ての値」に当たらず`test`）と、`nextest run --test it`の`full_test`（同じ形の規則を足せば表せる）。
+`cargo nextest`とbuild・clippy・fmtも同じ形の規則でRustのprofileに入る。
+今と分け方が違う形: `--test e2e --test it`（今はe2e、この規則では`test`）と`nextest run --test it`の`full_test`（規則を足せば表せる）。
 差は段2の並走比較で説明する。
-落ちたtestの名前とpathは設定で有効にし、test runnerの読み方のアダプタを選ぶ。
-雛形を配り、`dagq init`が提案する。
+落ちたtestの名前とpathは設定で有効にし、読み方は宣言したprofileのもの。
+profileの無い言語の雛形は同梱し、`dagq init`が案として出す。
 
 ## 段と後続のtask
 

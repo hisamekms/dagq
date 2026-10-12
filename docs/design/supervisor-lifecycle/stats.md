@@ -10,6 +10,7 @@ related:
   - design-execution-tokens
   - adr-t655-1
   - adr-t639-1
+  - adr-t2268-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-claim-defer
@@ -226,8 +227,9 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 
 ### cargo専用の計測
 
-- 入口: `CargoOnly`と`without_cargo_measures`、判定は`StatsSources::dagq_source`（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。
-- dagqの検証の形とhostの`rustc`を前提にした値は、queueのrepositoryがdagqのソースのときだけ出し、他では欄ごと出さない（0やnullにすると事実として読まれるため）。
+- 入口: `CargoOnly`と`without_cargo_measures`、判定は`StatsSources::dagq_source`（[Source repository](source-repository.md)）。
+- 今はdagqの検証の形とhostの`rustc`に依る値をdagqのソースでだけ出し、他では欄ごと出さない（0やnullは事実と読まれる）。
+- 決まった形では検証の形の数は`dagq.toml`とprofileの規則、`rustc`の値はRustのprofileの宣言で出す（ADR-t2268-1）。
 - domainの`stats::stats`を直接使うもの（KPIの窓、plan reviewの衝突の多いファイル、完了見込み）は隠さない。
 - 作業の内訳の分類（e2e・llvm-cov・test）は、記録の側が付けないので出力では隠さない。
 
