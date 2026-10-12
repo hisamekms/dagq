@@ -8,7 +8,7 @@
 //! queue, and every command while the service does not answer are refused
 //! with the reason (fail closed).
 
-use crate::queue_service::{Queue, events, queue, start};
+use crate::common::service::{Queue, events, queue, start};
 
 use std::{
     path::{Path, PathBuf},

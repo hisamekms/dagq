@@ -34,7 +34,6 @@ related:
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[`stats`](supervisor-lifecycle/stats.md)・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)・[hostの負荷](supervisor-lifecycle/host-metrics.md)が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
-> 「SSOTとビュー」の表に足すものの範囲は[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)が持つ。
 
 決めた理由はADR-t1662-1（計測のモデル）・ADR-t1662-2（ストアの抽象化）・ADR-t1662-3（実行する側と送る口とコマンドの分類）が持つ。ここはeventの欄・列とJSONの形・数値・関数の名前の予定を持つ。
 
@@ -45,15 +44,16 @@ related:
 
 | 論理ストア | 中身 | 区分 | 今のアダプタ |
 | --- | --- | --- | --- |
-| StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表（`tasks`・`goals`・`task_runs`・`asks`・`proposals`・`planners`・`run_leases`・`supervisors`ほか） |
+| StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表 |
 | EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
 | SessionStepStore | sessionのstep（turn・tool・コマンドのshape）。`(session_id, seq)`で重複を除き、抜けを残す。90日 | SSOT | 未実装（queue.dbの新しい表の予定） |
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | 未実装（queue.dbの新しい表の予定）。今はsupervisorが`host/metrics-YYYYMMDD.csv`に書くだけ |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows`（今はrunとtaskの行。作る係は未実装） |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`（取り込んだ値はEventStoreかSessionStepStoreに入る） |
-| 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`（`it-coverage-map.json`の1ファイル）、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`。着地の検証は下の「着地の検証の対応表のcache」から読む |
+| 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`。着地の検証は下の「着地の検証の対応表のcache」から読む |
 | agentのevalの記録 | evalの依頼・周・実行と費用・成績（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`で、周の状態と成績はこれだけから作り直す（`domain::agent_eval::record`）。queueのdirの`agent-evals/`は材料 |
+| queueのbrokerの記録 | 動いているbrokerが起動ごとに書き、probeとrelayが読む自分の記録（欄は`BrokerRecord`） | 材料 | `<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる） |
 | 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | `scripts/landing-it.sh`がGitHub Actionsのartifact `it-coverage-map`から取り、新しいrunが無ければ取り直さない。置き場はqueueの外の`${XDG_CACHE_HOME:-$HOME/.cache}/dagq/landing-it/<run id>/`で、消えてもartifactから取り直せる |
 
 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。

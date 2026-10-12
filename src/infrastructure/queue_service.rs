@@ -123,7 +123,7 @@ pub fn log_path(queue_dir: &Path) -> PathBuf {
     service_dir(queue_dir).join(LOG_FILE)
 }
 
-fn queue_dir_of(db: &Path) -> PathBuf {
+pub(crate) fn queue_dir_of(db: &Path) -> PathBuf {
     db.parent().unwrap_or(Path::new(".")).to_path_buf()
 }
 
@@ -134,7 +134,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -143,7 +143,7 @@ fn unix_now() -> i64 {
 }
 
 /// Make `dir` (and its parents) with mode 0700.
-fn private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("narrow {}", dir.display()))
@@ -151,7 +151,7 @@ fn private_dir(dir: &Path) -> Result<()> {
 
 /// Write `bytes` to `path` with mode 0600 through a temporary file and a
 /// rename, so a reader never sees half of it.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("a file needs a directory")?;
     let temporary = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
     let written = (|| -> std::io::Result<()> {
@@ -531,14 +531,15 @@ impl ServiceRecord {
     }
 }
 
-/// An exclusive `flock` on the service's lock file, held while it lives.
-struct Lock {
+/// An exclusive `flock` on the service's (or the queue broker's) lock
+/// file, held while it lives.
+pub(crate) struct Lock {
     _file: File,
 }
 
 impl Lock {
     /// Take the lock without waiting; `None` while another holds it.
-    fn try_take(
+    pub(crate) fn try_take(
         path: &Path,
         create: bool,
         operation: libc::c_int,
@@ -569,11 +570,13 @@ impl Lock {
 /// once, so two looks never take each other for a service; only the
 /// service takes it exclusive.
 fn lock_held(queue_dir: &Path) -> bool {
-    match Lock::try_take(
-        &service_dir(queue_dir).join(LOCK_FILE),
-        false,
-        libc::LOCK_SH,
-    ) {
+    lock_file_held(&service_dir(queue_dir).join(LOCK_FILE))
+}
+
+/// Whether a process holds the lock file at `path` now, looked at as
+/// [`lock_held`] looks.
+pub(crate) fn lock_file_held(path: &Path) -> bool {
+    match Lock::try_take(path, false, libc::LOCK_SH) {
         Ok(Some(_)) | Err(_) => false,
         Ok(None) => true,
     }
@@ -617,7 +620,7 @@ pub fn owner_from_env(env: impl Fn(&str) -> Option<String>) -> Option<u32> {
 /// Whether the service's owner is gone: never without one. A pid another
 /// user's process holds is there, and so is a zombie until its parent
 /// reaps it.
-fn owner_gone(owner: Option<u32>) -> bool {
+pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
     let Some(pid) = owner.and_then(|pid| libc::pid_t::try_from(pid).ok()) else {
         return false;
     };
@@ -996,7 +999,30 @@ pub fn probe(queue_dir: &Path) -> ServiceProbe {
     }
 }
 
-fn signal(pid: u32, signal: libc::c_int) {
+/// Start `command` as a process of the control side no starter has to
+/// reap: it leaves the starter's session, so a terminal's signals do not
+/// reach it, and runs as the child of a first child that exits at once.
+/// The exec's failure still comes back: the second child holds the
+/// spawn's pipe until it execs.
+pub(crate) fn spawn_detached(command: &mut Command) -> std::io::Result<()> {
+    // SAFETY: setsid(2), fork(2) and _exit(2) are async-signal-safe and
+    // touch no memory.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            match libc::fork() {
+                -1 => Err(std::io::Error::last_os_error()),
+                0 => Ok(()),
+                _ => libc::_exit(0),
+            }
+        });
+    }
+    command.spawn()?.wait().map(drop)
+}
+
+pub(crate) fn signal(pid: u32, signal: libc::c_int) {
     if let Ok(pid) = libc::pid_t::try_from(pid) {
         // SAFETY: a signal to a pid; an error (no such process) is fine.
         unsafe { libc::kill(pid, signal) };
@@ -1007,6 +1033,11 @@ fn signal(pid: u32, signal: libc::c_int) {
 /// from a record, not from the service's own answer, is signalled only
 /// then, never a process that took it later.
 fn serves(pid: u32, db: &Path) -> bool {
+    runs_for(pid, "service serve", db)
+}
+
+/// Whether `pid` runs a `dagq` command line holding `command` for `db` now.
+pub(crate) fn runs_for(pid: u32, command_words: &str, db: &Path) -> bool {
     let Ok(output) = crate::infrastructure::adapters::unpiped_output(Command::new("ps").args([
         "-o",
         "command=",
@@ -1017,7 +1048,7 @@ fn serves(pid: u32, db: &Path) -> bool {
     };
     let command = String::from_utf8_lossy(&output.stdout);
     output.status.success()
-        && command.contains("service serve")
+        && command.contains(command_words)
         && command.contains(&*db.to_string_lossy())
 }
 
@@ -1065,28 +1096,8 @@ impl QueueServiceControl for SystemQueueService {
         {
             command.env_remove(name);
         }
-        // SAFETY: setsid(2), fork(2) and _exit(2) are async-signal-safe and
-        // touch no memory. The service leaves the starter's session, so a
-        // terminal's signals do not reach it, and the first child exits at
-        // once, so the service is reparented and never left to reap.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                match libc::fork() {
-                    -1 => Err(std::io::Error::last_os_error()),
-                    0 => Ok(()),
-                    _ => libc::_exit(0),
-                }
-            });
-        }
-        // The exec's failure still comes back here: the second child holds
-        // the spawn's pipe until it execs.
-        let mut intermediate = command
-            .spawn()
+        spawn_detached(&mut command)
             .with_context(|| format!("start {}", self.executable.display()))?;
-        intermediate.wait()?;
         let deadline = Instant::now() + timeout;
         loop {
             // Any service of this build that answers will do: another

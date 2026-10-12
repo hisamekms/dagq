@@ -50,10 +50,11 @@ pub use execution::{
     session_in_background, session_in_background_as, session_in_background_as_with_processes,
 };
 pub use host::{
-    AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, QueueServiceControlPort,
-    QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down, inbox,
-    inbox_command, init_queue, install_restart_arguments, migrate_queue, queue_schema,
-    queue_service_start, queue_service_status, queue_service_stop, rebind, up,
+    AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, QueueBrokerControlPort, QueueBrokerOptions,
+    QueueServiceControlPort, QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob,
+    SccacheOptions, down, inbox, inbox_command, init_queue, install_restart_arguments,
+    migrate_queue, queue_schema, queue_service_start, queue_service_status, queue_service_stop,
+    rebind, up,
 };
 pub use observation::{
     CiWatchOptions, REPORTS_DIR, ci_failures, doctor, events, events_matching, graph_diagram,

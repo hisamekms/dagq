@@ -205,6 +205,31 @@ impl std::fmt::Debug for QueueServiceControlPort {
     }
 }
 
+/// How the supervisor keeps the queue's broker
+/// ([`SuperviseOptions::queue_broker`](super::SuperviseOptions::queue_broker)).
+#[derive(Debug, Clone)]
+pub struct QueueBrokerOptions {
+    /// The binary the broker runs: the supervisor's own.
+    pub executable: PathBuf,
+    pub interval: Duration,
+    pub start_timeout: Duration,
+    /// Starts, looks at and stops the broker instead of the system's
+    /// control of `executable`; tests set it.
+    pub control: Option<QueueBrokerControlPort>,
+}
+
+/// The control [`QueueBrokerOptions::control`] gives the supervisor.
+#[derive(Clone)]
+pub struct QueueBrokerControlPort(
+    pub Arc<dyn crate::application::queue_broker::QueueBrokerControl>,
+);
+
+impl std::fmt::Debug for QueueBrokerControlPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("QueueBrokerControlPort")
+    }
+}
+
 /// How the supervisor records the host's load (task 516).
 #[derive(Debug, Clone)]
 pub struct HostMetricsSettings {
@@ -909,6 +934,11 @@ impl OneShot {
                     crate::infrastructure::queue_service::SystemQueueService::new(db, executable),
                 )
             },
+            queue_broker: &|db, executable| {
+                Box::new(crate::infrastructure::queue_broker::SystemQueueBroker::new(
+                    db, executable,
+                ))
+            },
         }
     }
 }
@@ -1003,6 +1033,29 @@ pub(super) fn queue_service_port(
         ),
         interval: settings.interval,
         start_timeout: settings.start_timeout,
+    }
+}
+
+/// The control of the queue's broker: `settings`' control, else the
+/// system's control of its executable (of `dagq` without settings: one
+/// that is only looked at, never started).
+pub(super) fn queue_broker_control(
+    db: &Path,
+    settings: Option<&QueueBrokerOptions>,
+) -> Arc<dyn crate::application::queue_broker::QueueBrokerControl> {
+    match settings {
+        Some(QueueBrokerOptions {
+            control: Some(port),
+            ..
+        }) => port.0.clone(),
+        Some(settings) => Arc::new(crate::infrastructure::queue_broker::SystemQueueBroker::new(
+            db,
+            &settings.executable,
+        )),
+        None => Arc::new(crate::infrastructure::queue_broker::SystemQueueBroker::new(
+            db,
+            Path::new("dagq"),
+        )),
     }
 }
 

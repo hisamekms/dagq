@@ -516,6 +516,27 @@ pub fn attention(
             next: AttentionNext::QueueServiceStatus,
         });
     }
+    // So does the queue broker (ADR-t2114-1 decision 1), written the same
+    // way.
+    if let Some(event) =
+        queue.latest_queue_event(&crate::domain::queue_broker::QUEUE_BROKER_ATTENTION_KINDS)?
+        && crate::domain::queue_broker::attention_stands(Some(event.kind.as_str()))
+    {
+        let reason = event.payload.get("reason").and_then(Value::as_str);
+        let message = event.payload.get("message").and_then(Value::as_str);
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: reason.unwrap_or("down").into(),
+            kind: crate::domain::queue_broker::QUEUE_BROKER_DOWN.into(),
+            last_error: message.map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::QueueBrokerLog,
+        });
+    }
     // A proposal whose plan review failed, or whose planner did not answer
     // a revise, waits for a person outside any ask (ADR-0041 decisions 13,
     // 17); it is shown on the proposal's first task.

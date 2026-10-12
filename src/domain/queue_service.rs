@@ -164,20 +164,40 @@ impl UseCase {
     }
 }
 
-// Why the service refused or failed a request.
-string_enum!(ServiceErrorCode {
-    // The caller's API version is not one the service answers.
+string_enum!(
+    /// Why the service, or the queue broker in front of it, refused or
+    /// failed a request: the `code` of a [`ServiceError`], spelled as each
+    /// variant's text. A client reads a refusal of either by this code.
+    ServiceErrorCode {
+    /// `api_version_mismatch`: the caller's API version is not one the
+    /// service answers.
     ApiVersionMismatch => "api_version_mismatch",
-    // No token, or one the service did not issue, or one revoked or
-    // ended with its run.
+    /// `unauthenticated`: no token, one the service did not issue, or one
+    /// revoked or ended with its run. The queue broker refuses with it too:
+    /// a request with no run token or no run named, a token not issued or
+    /// revoked, a run ended, a token that is not a worker's run token, or
+    /// one of another run than the request names
+    /// ([`crate::domain::queue_broker::TokenRefusal`]).
     Unauthenticated => "unauthenticated",
-    // The policy refused the principal (recorded as
-    // `authorization_denied`).
+    /// `authorization_denied`: the policy refused the principal (recorded
+    /// as `authorization_denied`).
     AuthorizationDenied => "authorization_denied",
-    // The request could not be read.
+    /// `bad_request`: the request could not be read (the broker's too: a
+    /// request that is not HTTP it reads, or a body that is no request).
     BadRequest => "bad_request",
-    // The use case failed (a missing task, a bad option, ...).
+    /// `failed`: the use case failed (a missing task, a bad option, ...),
+    /// or the broker could not read a token or a run.
     Failed => "failed",
+    /// `forbidden_destination`, only the queue broker's
+    /// ([`crate::domain::queue_broker`]): the request goes to a destination
+    /// the broker does not pass (anything but the queue service now,
+    /// `api.anthropic.com` and the package registries included), recorded as
+    /// `queue_broker_denied`.
+    ForbiddenDestination => "forbidden_destination",
+    /// `unreachable`, only the queue broker's: the queue service did not
+    /// answer the request the broker passed on. The broker never opens the
+    /// queue instead.
+    Unreachable => "unreachable",
 });
 
 // The state of a queue's service as a look at it finds it: `running` (it

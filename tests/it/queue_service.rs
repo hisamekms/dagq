@@ -8,6 +8,8 @@
 //! its claims while it cannot.
 
 use crate::common;
+use crate::runtime_support::service::{Running, idle_queue, supervisor_token};
+use common::service::{call, events, queue, start, token};
 
 use std::{
     fs,
@@ -19,9 +21,9 @@ use std::{
 use common::cli::{invoke, ok};
 use common::lifecycle::{FakeLaunchd, FakeProcesses};
 use dagq::{
-    application::{EventStore, RunReads, TaskStore},
+    application::{EventStore, RunReads},
     domain::{
-        ActorContext, ClaimOutcome, TaskAction, TaskRun,
+        ActorContext,
         queue_service::{API_VERSION, Principal, ServiceErrorCode, ServiceRequest, UseCase},
     },
     infrastructure::{
@@ -32,83 +34,6 @@ use dagq::{
 use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// A queue with one task claimed as run `run`, and a stub cmux beside it.
-pub(crate) struct Queue {
-    _dir: tempfile::TempDir,
-    pub(crate) db: PathBuf,
-    pub(crate) cmux: PathBuf,
-    pub(crate) run: TaskRun,
-}
-
-impl Queue {
-    pub(crate) fn dir(&self) -> &Path {
-        self.db.parent().unwrap()
-    }
-}
-
-impl Drop for Queue {
-    /// No service outlives its test.
-    fn drop(&mut self) {
-        let _ = invoke(&self.db, &["service", "stop"]);
-    }
-}
-
-pub(crate) fn queue() -> Queue {
-    let (dir, mut queue) = common::queue::fixture();
-    let task = queue.add(common::queue::new_task("served")).unwrap();
-    queue
-        .transition(task.id(), TaskAction::BypassReview)
-        .unwrap();
-    let ClaimOutcome::Claimed { run } = queue.claim(&common::queue::base()).unwrap() else {
-        panic!("nothing claimed");
-    };
-    let cmux = dir.path().join("cmux-stub");
-    common::template::script(
-        &cmux,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/notifications\"\n",
-    );
-    Queue {
-        db: dir.path().join("queue.db"),
-        _dir: dir,
-        cmux,
-        run: *run,
-    }
-}
-
-pub(crate) fn start(queue: &Queue) -> Value {
-    ok(
-        &queue.db,
-        &["service", "start", "--cmux", queue.cmux.to_str().unwrap()],
-    )
-}
-
-pub(crate) fn token(queue: &Queue, principal: &Principal) -> String {
-    let issued = service::issue(queue.dir(), principal, 1).unwrap();
-    service::read_token(&issued.file).unwrap()
-}
-
-pub(crate) fn call(queue: &Queue, token: Option<&str>, use_case: UseCase, params: Value) -> Value {
-    let response = service::call(
-        &service::socket_path(queue.dir()),
-        &ServiceRequest {
-            api_version: API_VERSION,
-            token: token.map(str::to_owned),
-            use_case,
-            params,
-        },
-        TIMEOUT,
-    )
-    .unwrap();
-    serde_json::to_value(response).unwrap()
-}
-
-pub(crate) fn events(db: &Path, kind: &str) -> Vec<Value> {
-    ok(db, &["events", "--all", "--full", "--kind", kind])["events"]
-        .as_array()
-        .unwrap()
-        .clone()
-}
 
 #[test]
 fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
@@ -501,99 +426,6 @@ fn up_starts_the_service_and_down_stops_it() {
     // Nothing more is said of a service that does not run.
     let again = common::lifecycle::down(&fixture, &launchd, &processes, false, false);
     assert!(again.get("queue_service").is_none(), "{again}");
-}
-
-/// A supervisor of a queue, in its own thread until `stop`: with the
-/// fixture's ready task cancelled, it claims nothing and only keeps the
-/// service, every pass (`interval` zero).
-struct Running {
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    passes: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Running {
-    fn start(
-        db: &Path,
-        repo: &Path,
-        executable: &Path,
-        control: Option<std::sync::Arc<dyn dagq::application::queue_service::QueueServiceControl>>,
-    ) -> Self {
-        use crate::runtime_support::{TestWorkspace, VALID_AGENT, supervise_options};
-        let options = dagq::compose::SuperviseOptions {
-            queue_service: Some(dagq::compose::QueueServiceOptions {
-                executable: executable.to_path_buf(),
-                interval: Duration::ZERO,
-                start_timeout: TIMEOUT,
-                control: control.map(dagq::compose::QueueServiceControlPort),
-            }),
-            ..supervise_options(1, false)
-        };
-        let (stop, passes) = (options.stop.clone(), options.passes.clone());
-        let (db, repo) = (db.to_path_buf(), repo.to_path_buf());
-        let thread = std::thread::spawn(move || {
-            let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-            crate::runtime_support::supervise_with(&db, &repo, &backend, &options).unwrap();
-        });
-        Self {
-            stop,
-            passes,
-            thread: Some(thread),
-        }
-    }
-
-    /// Wait until `passes` more passes ran.
-    fn passes(&self, passes: u64) {
-        use std::sync::atomic::Ordering;
-        let until = self.passes.load(Ordering::SeqCst) + passes;
-        let _waiting = common::within(TIMEOUT * 3, format!("{passes} passes"));
-        while self.passes.load(Ordering::SeqCst) < until {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Ask it to drain, as `down` does, and wait for it to end.
-    fn drain(mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _waiting = common::within(TIMEOUT * 3, "the supervisor to drain");
-            thread.join().unwrap();
-        }
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-/// The fixture's queue with its ready task cancelled: a supervisor of it
-/// claims nothing.
-fn idle_queue() -> (crate::runtime_support::Fixture, PathBuf, PathBuf) {
-    let (fixture, repo, db) = crate::runtime_support::fixture();
-    for task in ok(&db, &["list"])["tasks"].as_array().unwrap() {
-        ok(&db, &["cancel", &task["id"].to_string()]);
-    }
-    (fixture, repo, db)
-}
-
-fn supervisor_token(db: &Path) -> String {
-    let _waiting = common::within(TIMEOUT * 3, "the supervisor to register");
-    loop {
-        if let Some(registration) = SqliteQueue::open(db)
-            .unwrap()
-            .supervisors()
-            .unwrap()
-            .first()
-        {
-            return registration.token.to_string();
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 fn request_stop(db: &Path, tokens: &[&str]) {

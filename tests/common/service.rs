@@ -16,7 +16,17 @@ use std::{
     sync::{LazyLock, Mutex, MutexGuard, PoisonError},
 };
 
-use crate::common::{Bounded, WithoutActor};
+use crate::common::{self, Bounded, WithoutActor};
+use common::cli::{invoke, ok};
+use dagq::application::TaskStore;
+use dagq::domain::queue_service::{API_VERSION, Principal, ServiceRequest, UseCase};
+use dagq::domain::{ClaimOutcome, TaskAction, TaskRun};
+use dagq::infrastructure::queue_service as service;
+use serde_json::Value;
+use std::time::Duration;
+
+/// How long a call of a test to its queue's service waits.
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The queues whose service a test started and has not stopped.
 static SERVED: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
@@ -132,4 +142,81 @@ impl Drop for Served {
     fn drop(&mut self) {
         unserve(&self.0);
     }
+}
+
+/// A queue with one task claimed as run `run`, and a stub cmux beside it.
+pub struct Queue {
+    _dir: tempfile::TempDir,
+    pub db: PathBuf,
+    pub cmux: PathBuf,
+    pub run: TaskRun,
+}
+
+impl Queue {
+    pub fn dir(&self) -> &Path {
+        self.db.parent().unwrap()
+    }
+}
+
+impl Drop for Queue {
+    /// No service outlives its test.
+    fn drop(&mut self) {
+        let _ = invoke(&self.db, &["service", "stop"]);
+    }
+}
+
+pub fn queue() -> Queue {
+    let (dir, mut queue) = common::queue::fixture();
+    let task = queue.add(common::queue::new_task("served")).unwrap();
+    queue
+        .transition(task.id(), TaskAction::BypassReview)
+        .unwrap();
+    let ClaimOutcome::Claimed { run } = queue.claim(&common::queue::base()).unwrap() else {
+        panic!("nothing claimed");
+    };
+    let cmux = dir.path().join("cmux-stub");
+    common::template::script(
+        &cmux,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/notifications\"\n",
+    );
+    Queue {
+        db: dir.path().join("queue.db"),
+        _dir: dir,
+        cmux,
+        run: *run,
+    }
+}
+
+pub fn start(queue: &Queue) -> Value {
+    ok(
+        &queue.db,
+        &["service", "start", "--cmux", queue.cmux.to_str().unwrap()],
+    )
+}
+
+pub fn token(queue: &Queue, principal: &Principal) -> String {
+    let issued = service::issue(queue.dir(), principal, 1).unwrap();
+    service::read_token(&issued.file).unwrap()
+}
+
+pub fn call(queue: &Queue, token: Option<&str>, use_case: UseCase, params: Value) -> Value {
+    let response = service::call(
+        &service::socket_path(queue.dir()),
+        &ServiceRequest {
+            api_version: API_VERSION,
+            token: token.map(str::to_owned),
+            use_case,
+            params,
+        },
+        TIMEOUT,
+    )
+    .unwrap();
+    serde_json::to_value(response).unwrap()
+}
+
+pub fn events(db: &Path, kind: &str) -> Vec<Value> {
+    ok(db, &["events", "--all", "--full", "--kind", kind])["events"]
+        .as_array()
+        .unwrap()
+        .clone()
 }

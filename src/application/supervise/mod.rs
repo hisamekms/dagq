@@ -140,6 +140,7 @@ mod plan_review;
 mod planner_turns;
 mod provider;
 mod push;
+mod queue_broker;
 mod queue_hold;
 mod queue_service;
 mod recheck;
@@ -180,6 +181,7 @@ pub use self::jobs::{
     HeadlessJob, JobEnds, JobFailed, JobPorts, JobSubject, PROGRAM_OUTPUT_TAIL, ProgramEnd,
     record_job, start_program_job, start_review_program,
 };
+pub use self::queue_broker::QueueBrokerPort;
 pub use self::queue_service::{
     QUEUE_SERVICE_INTERVAL, QUEUE_SERVICE_RESTART_WINDOW, QUEUE_SERVICE_RESTARTS,
     QUEUE_SERVICE_START_TIMEOUT, QueueServicePort,
@@ -524,6 +526,9 @@ pub struct Ports<'a> {
     /// Keeps the queue's service running (ADR-t1233-4 decision 2); `None`
     /// keeps none and holds nothing for it (a `--once` pass, the tests).
     pub queue_service: Option<QueueServicePort>,
+    /// Keeps the queue's broker running (ADR-t2114-1 decision 1); `None`
+    /// keeps none (a `--once` pass, the tests).
+    pub queue_broker: Option<QueueBrokerPort>,
     /// Runs the e2e of a run that needs it after its review (ADR-t1233-2);
     /// `None` when the repository has no e2e the runtime knows, and such a
     /// run lands without one (`not_configured`).
@@ -1595,6 +1600,8 @@ impl Supervisor<'_> {
             if result.is_ok() && options.stop.load(Ordering::SeqCst) {
                 // The queue service after the supervisor (ADR-t1233-4
                 // decision 1).
+                // The queue broker with it (ADR-t2114-1 decision 1), first.
+                self.on_host(|host, env| host.stop_queue_broker_after_down(env));
                 self.on_host(|host, env| host.stop_queue_service_after_down(env));
             }
         }
@@ -1841,6 +1848,9 @@ impl Supervisor<'_> {
             // queue's job starts.
             let working = !stopping && self.claim.claiming;
             self.on_host(|host, env| host.queue_service_pass(env, working));
+            // The queue broker likewise (ADR-t2114-1 decision 1); while it is
+            // down the container runtime cannot be used.
+            self.on_host(|host, env| host.queue_broker_pass(env, working));
             if self.claim.claiming && !stopping {
                 self.fill_slots(self.claim.parallel, options.sweep_interval)?;
                 self.sample_candidates(self.claim.parallel);

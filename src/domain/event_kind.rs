@@ -45,7 +45,7 @@
 //!   `report_written`, `throughput_review_*`, `candidates_sampled`, the
 //!   CI watch's `ci_*` and the record of main's history `main_*`.
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
-//!   `queue_service_*`, `sccache_*`, `inbox_*`, the cleanup's
+//!   `queue_service_*`, `queue_broker_*`, `sccache_*`, `inbox_*`, the cleanup's
 //!   `build_outputs_removed`, `build_cache_removed`, `scratchpad_removed`
 //!   and `run_tmp_removed`,
 //!   `backend_call_failed`, `headless_job_stopped` and
@@ -256,6 +256,12 @@ event_kinds! {
     PushFailed => "push_failed",
     PushFinished => "push_finished",
     PushSkipped => "push_skipped",
+    QueueBrokerDenied => "queue_broker_denied",
+    QueueBrokerDown => "queue_broker_down",
+    QueueBrokerRunning => "queue_broker_running",
+    QueueBrokerStarted => "queue_broker_started",
+    QueueBrokerStopRequested => "queue_broker_stop_requested",
+    QueueBrokerStopped => "queue_broker_stopped",
     QueueHoldApplied => "queue_hold_applied",
     QueueServiceDown => "queue_service_down",
     QueueServiceRunning => "queue_service_running",
@@ -658,6 +664,13 @@ impl EventKind {
                 | QueueServiceStopRequested
                 | QueueServiceStopped
                 | QueueServiceUnauthenticated
+                // The queue broker (ADR-t2114-1) is the queue's too.
+                | QueueBrokerDenied
+                | QueueBrokerDown
+                | QueueBrokerRunning
+                | QueueBrokerStarted
+                | QueueBrokerStopRequested
+                | QueueBrokerStopped
         )
     }
 }
@@ -1322,6 +1335,15 @@ mod tests {
             (EventKind::PushFailed, "push_failed"),
             (EventKind::PushFinished, "push_finished"),
             (EventKind::PushSkipped, "push_skipped"),
+            (EventKind::QueueBrokerDenied, "queue_broker_denied"),
+            (EventKind::QueueBrokerDown, "queue_broker_down"),
+            (EventKind::QueueBrokerRunning, "queue_broker_running"),
+            (EventKind::QueueBrokerStarted, "queue_broker_started"),
+            (
+                EventKind::QueueBrokerStopRequested,
+                "queue_broker_stop_requested",
+            ),
+            (EventKind::QueueBrokerStopped, "queue_broker_stopped"),
             (EventKind::QueueHoldApplied, "queue_hold_applied"),
             (EventKind::QueueServiceDown, "queue_service_down"),
             (EventKind::QueueServiceRunning, "queue_service_running"),

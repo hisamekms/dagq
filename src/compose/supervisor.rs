@@ -6,7 +6,10 @@
 
 use super::{
     execution::{self, RunE2eOptions, review_in},
-    host::{self, HostMetricsSettings, QueueServiceOptions, ReleaseIndexPort, SccacheOptions},
+    host::{
+        self, HostMetricsSettings, QueueBrokerOptions, QueueServiceOptions, ReleaseIndexPort,
+        SccacheOptions,
+    },
     observation::{self, CiWatchOptions},
     planning::PLANNER_TIMEOUT,
     provider_checks, worker_adapters,
@@ -256,6 +259,12 @@ pub struct SuperviseOptions {
     /// supervisor `up` starts gets it; `None` (a `--once` pass, the tests)
     /// keeps none and holds nothing for it.
     pub queue_service: Option<QueueServiceOptions>,
+    /// Keep the queue's broker running (ADR-t2114-1 decision 1): the
+    /// supervisor `up` starts gets it; `None` (a `--once` pass, the tests)
+    /// keeps none. The container runtime is looked at through the broker
+    /// either way: while it does not run, nothing set to the container
+    /// runs.
+    pub queue_broker: Option<QueueBrokerOptions>,
     /// Counts the supervisor loop's passes, one at the top of each; tests
     /// keep a clone and wait for passes past a threshold (task 1046).
     pub passes: Arc<AtomicU64>,
@@ -349,6 +358,7 @@ impl SuperviseOptions {
             codex_home: None,
             host_metrics: None,
             queue_service: None,
+            queue_broker: None,
             passes: Arc::new(AtomicU64::new(0)),
             sccache: None,
             ci_watch: None,
@@ -699,9 +709,12 @@ pub fn supervise_with_reviewer(
             user_config: options.user_config.clone(),
             verification_timeout: options.verification_timeout,
         }),
-        // No part of the container runtime is built yet (goal 38): a target
-        // set to it waits.
-        container: Arc::new(crate::infrastructure::container_runtime::UnbuiltContainer),
+        // No part of the container runtime but the queue broker is built yet
+        // (goal 38): a target set to it waits, and says why.
+        container: Arc::new(crate::application::queue_broker::BrokerGate {
+            broker: host::queue_broker_control(&db, options.queue_broker.as_ref()),
+            container: crate::infrastructure::container_runtime::UnbuiltContainer,
+        }),
         remote: Arc::new(repository.clone()),
         repository: Arc::new(repository),
         sessions,
@@ -765,6 +778,13 @@ pub fn supervise_with_reviewer(
             .queue_service
             .as_ref()
             .map(|settings| host::queue_service_port(&db, settings)),
+        queue_broker: options.queue_broker.as_ref().map(|settings| {
+            crate::application::supervise::QueueBrokerPort {
+                control: host::queue_broker_control(&db, Some(settings)),
+                interval: settings.interval,
+                start_timeout: settings.start_timeout,
+            }
+        }),
         run_e2e,
         sccache: options
             .sccache

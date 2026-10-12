@@ -24,6 +24,7 @@ tags:
 - [Authorization](authorization.md)
 - [Security](security.md)（信頼の区分・actorとcapability・host実行は助言的で隔離ではないこと・containerとqueue serviceへの道筋）
 - [Container runtime](container-runtime.md)（workerとintegrateのverificationをhostかcontainerで動かす適用先・使えないときのfail closedの境界・設定の読み込みと「使えるか」のportへの入口・後続の部品の置き場）
+- [Queue broker](queue-broker.md)（containerのrunの唯一の出口になるhostのプロセス。queue serviceの宛てへのrun tokenの検証と転送・拒否の記録・`up`・`down`・supervisorによる起動と停止）
 - [Queue service](queue-service.md)（hostで動きqueue DBを開くservice。unix socket・APIのversion・tokenによるprincipalとservice側の認可・ask・show・noteのユースケース・`up`・`down`・supervisorによる起動と停止・落ちたときのattention。goal 82）
 - [Supervisor lifecycle](supervisor-lifecycle.md)（目次。各節は[`supervisor-lifecycle/`](supervisor-lifecycle/)の下の別のファイルにある）
 - [Provider lifecycle](provider-lifecycle.md)

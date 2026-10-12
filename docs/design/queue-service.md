@@ -28,8 +28,8 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 
 今の段（段(2)・(3)）: serviceがあり、`hello`・`ask`・`show`・`note`と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（Codexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）のユースケースを答える。**worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。supervisor・session wrapperとhook・inbox・planner・人のCLIはDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
 
-名前: この文書の「broker」はqueueのbroker（段(4)、未実装）のこと。
-queueのbrokerはserviceと同じ`up` / `down` / execの引き継ぎで動くhostのプロセスで、宛先はservice・`api.anthropic.com`・`dagq.toml`のregistryに限る（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)ほか）。
+名前: この文書の「broker」はqueueのbroker（[Queue broker](queue-broker.md)）のこと。
+brokerはrun tokenを検証した要求をそのtokenのままserviceのsocketへ転送するので、serviceの認証と認可は変わらない。
 fs・process・git・packageを仲介するresource brokerは置かない（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）。
 
 ## 置き場所と形
@@ -171,7 +171,10 @@ serviceは`dagq --db <db> service serve`で、固定バイナリ（`up`かsuperv
 `service serve`と`service start`の`--cmux`は、登録済みのargvのために受け付けて無視する。
 
 - `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。このbuildのserviceが答えれば`reused`、居なければ`started`、別のbuildか答えないものが居れば止めて`replaced`。起動できなければ`up`はsupervisorを起動せずに止まる。結果は`up`の出力の`queue_service`（`outcome`・`service`・`replaced`）で、`started` / `replaced`はevent `queue_service_started`（`by: up`）に残す。`UpOptions::queue_service`がfalse（`up`の他の段のtest）なら何もしない
-- supervisor: `up`が起動したsupervisor（`--once`でないもの）は`QUEUE_SERVICE_INTERVAL`（10秒）ごとにserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`、`by: supervisor`、2回目からは`restart: true`、入れ替えなら`replaced`）。起動し直しは`QUEUE_SERVICE_RESTART_WINDOW`（600秒）に`QUEUE_SERVICE_RESTARTS`（3回）まで。別のbuildの入れ替えは数えず、入れ替えて動いたbuildはそれ以後そのまま受け入れる（`install`が新しいバイナリを置いた後でexecの前のsupervisorは、自分のbuildと違う新しいserviceを入れ替え続けない）。drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残し、次のプロセスがbuildの違いで入れ替える）
+- supervisor: `up`が起動したsupervisor（`--once`でないもの）は`QUEUE_SERVICE_INTERVAL`（10秒）ごとにserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`、`by: supervisor`、2回目からは`restart: true`、入れ替えなら`replaced`）。起動し直しは`QUEUE_SERVICE_RESTART_WINDOW`（600秒）に`QUEUE_SERVICE_RESTARTS`（3回）まで。
+  別のbuildの入れ替えは数えない。
+  制限: 起動の成功は自分のbuildの答えだけなので（`SystemQueueService::start`）、`install`が新しいバイナリを置いた後でexecの前のsupervisorの起動は失敗して`queue_service_down`を書き、次の見張りでまた入れ替える。
+  drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残し、次のプロセスがbuildの違いで入れ替える）
 - serviceが居ない間、supervisorは新しいclaimと、queueのjob（plan review・goal review・observer・スループットの見直し）の起動を控える。走っているrunとそのreview・復旧は止めない（ADR-t1233-4決定2）
 - `down`: supervisorが居なければ（`--force`の後、`--wait`のdrainの後も）serviceを止めて`queue_service_stopped`（`by: down`）に残し、出力の`queue_service`に`{"outcome": "stopped", "pid"}`を出す。drainを待たない`down`は、signalの前に`queue_service_stop_requested`（`supervisors`・`by: down`）を書いて`{"outcome": "left_to_the_drain"}`を出し、drainを終えた最後のsupervisorが止める（`queue_service_stopped`、`by: supervisor`）。serviceが動いていなければ`queue_service`の欄を出さない
 - `install`と`install --allow-breaking`: `install`のdrain（`down --wait`）の後の`up`が新しいバイナリで起動する。drainしない引き継ぎでは、新しいバイナリのsupervisorの最初の見張りが入れ替える
@@ -211,7 +214,7 @@ queueのevent（`EventKind::is_queue`）: `queue_service_started`（`by`（`up`�
 - runの終わりでのworkerのtokenのfileの片付け（serviceはrunの終わったtokenを断るので使えないが、fileは次のresumeの発行し直しか手の片付けまで残る）
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - `dagq ci failures`（`ci.read`。[CI watch](supervisor-lifecycle/ci-watch.md)）の読み取りのユースケース。clientのmodeでは`no_use_case`で断る
-- 段(4)〜(6): queueのbroker（決定はADR-t2114-1〜4）、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
+- 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
 
 ## CIの見張り（ADR-t1920-1）
 

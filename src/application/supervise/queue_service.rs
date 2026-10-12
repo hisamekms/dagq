@@ -4,10 +4,13 @@
 //! One that does not answer is started again, at most
 //! [`QUEUE_SERVICE_RESTARTS`] times in [`QUEUE_SERVICE_RESTART_WINDOW`],
 //! and one of another build (left by the binary before an `install` or an
-//! automatic update handed the supervisor over) is replaced, uncounted and
-//! once: the build that replacement runs is taken as it is after. Each
-//! start is `queue_service_started` (`by: supervisor`, `restart`,
-//! `replaced`).
+//! automatic update handed the supervisor over) is replaced, uncounted. A
+//! replacement that runs is taken as it is after, but a start succeeds
+//! only for a service of this supervisor's own build (the control's
+//! `start`): a supervisor whose executable an `install` replaced before it
+//! execs fails the start (`queue_service_down`) and replaces the service
+//! again at a later look. Each start is `queue_service_started` (`by:
+//! supervisor`, `restart`, `replaced`).
 //!
 //! While the service is down the supervisor claims no new run and starts
 //! no plan review, goal review, observer or throughput review: those would
@@ -61,10 +64,9 @@ pub(super) struct QueueServiceWatch {
     seen: bool,
     /// The starts in the window.
     starts: Vec<Instant>,
-    /// The build of the service this supervisor last started: one of
-    /// another build than its own is replaced once, not again (its
-    /// executable may already be the next binary an `install` put in
-    /// place before this process execs it).
+    /// The build of the service this supervisor last started, kept, not
+    /// replaced, at the next looks. With a control whose start succeeds
+    /// only for this supervisor's own build it is that build.
     accepted: Option<String>,
 }
 
@@ -181,48 +183,7 @@ impl HostOpsState {
         let Some(port) = self.queue_service_port.clone() else {
             return;
         };
-        let asked = match env
-            .queue
-            .latest_queue_event(&[QUEUE_SERVICE_STOP_REQUESTED])
-        {
-            Ok(latest) => latest.is_some_and(|event| {
-                event.payload["supervisors"]
-                    .as_array()
-                    .is_some_and(|tokens| {
-                        tokens
-                            .iter()
-                            .any(|token| token.as_str() == Some(env.token.as_str()))
-                    })
-            }),
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the queue service's stop request could not be read: {error:#}");
-                false
-            }
-        };
-        if !asked {
-            return;
-        }
-        let now = env.generators.clock.now();
-        let others = match env.queue.supervisors() {
-            Ok(registrations) => registrations
-                .into_iter()
-                .filter(|registration| {
-                    registration.token != *env.token
-                        && !heartbeat_stale(
-                            env.processes.alive(registration.pid),
-                            now - registration.heartbeat_at,
-                        )
-                })
-                .count(),
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the queue's supervisors could not be read: {error:#}");
-                return;
-            }
-        };
-        if others > 0 {
-            info!(
-                "{others} other supervisor(s) of the queue still run: the queue service is left to the last one"
-            );
+        if !self.last_supervisor_asked(env, QUEUE_SERVICE_STOP_REQUESTED) {
             return;
         }
         match port.control.stop(port.start_timeout) {
@@ -242,6 +203,55 @@ impl HostOpsState {
                 warn!(error = %format_args!("{error:#}"), "the queue service could not be stopped after the drain: {error:#}");
             }
         }
+    }
+
+    /// Whether `down` asked this supervisor, by the latest `requested`
+    /// event (`queue_service_stop_requested` or
+    /// `queue_broker_stop_requested`), to stop what it names at the end of
+    /// its drain, and no other supervisor of the queue runs.
+    pub(super) fn last_supervisor_asked(&mut self, env: &mut HostEnv<'_>, requested: &str) -> bool {
+        let asked = match env.queue.latest_queue_event(&[requested]) {
+            Ok(latest) => latest.is_some_and(|event| {
+                event.payload["supervisors"]
+                    .as_array()
+                    .is_some_and(|tokens| {
+                        tokens
+                            .iter()
+                            .any(|token| token.as_str() == Some(env.token.as_str()))
+                    })
+            }),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the stop request {requested} could not be read: {error:#}");
+                false
+            }
+        };
+        if !asked {
+            return false;
+        }
+        let now = env.generators.clock.now();
+        let others = match env.queue.supervisors() {
+            Ok(registrations) => registrations
+                .into_iter()
+                .filter(|registration| {
+                    registration.token != *env.token
+                        && !heartbeat_stale(
+                            env.processes.alive(registration.pid),
+                            now - registration.heartbeat_at,
+                        )
+                })
+                .count(),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the queue's supervisors could not be read: {error:#}");
+                return false;
+            }
+        };
+        if others > 0 {
+            info!(
+                "{others} other supervisor(s) of the queue still run: {requested} is left to the last one"
+            );
+            return false;
+        }
+        true
     }
 
     fn queue_service_attention_stands(&mut self, env: &mut HostEnv<'_>) -> bool {

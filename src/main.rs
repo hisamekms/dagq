@@ -1496,6 +1496,13 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// The queue broker: the host process a container's run reaches the queue service through,
+    /// on a port of 127.0.0.1, with its run token checked. `up` starts it before the
+    /// supervisor, the supervisor starts it again, and `down` stops it.
+    QueueBroker {
+        #[command(subcommand)]
+        command: QueueBrokerCommand,
+    },
     /// Bind the queue to the repository containing the working directory (or
     /// --repo) after the repository moved; the one command that changes the
     /// binding. Refused while a supervisor runs. Pass --db for a queue still
@@ -1778,6 +1785,13 @@ enum ServiceCommand {
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
+}
+
+#[derive(Subcommand, Clone)]
+enum QueueBrokerCommand {
+    /// Run the queue broker in the foreground until SIGINT or SIGTERM (what `up` and the
+    /// supervisor run in the background). A second one for the same queue is refused.
+    Serve,
 }
 
 #[derive(Subcommand, Clone)]
@@ -2176,6 +2190,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             command:
                 ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
         }
+        | Command::QueueBroker { .. }
         | Command::Plan { .. }
         | Command::Supervise { .. }
         | Command::Observe { history: false, .. }
@@ -2374,7 +2389,8 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         Command::Service {
             command:
                 ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
-        } => Operation::QueueService,
+        }
+        | Command::QueueBroker { .. } => Operation::QueueService,
         Command::Plan { .. } => Operation::Plan,
         Command::Supervise { .. } => Operation::Supervise,
         // Starting a job of the supervisor's timer, as `observe` (ADR-t996-1).
@@ -3259,6 +3275,24 @@ fn execute(cli: Cli) -> Result<Value> {
             ),
         };
     }
+    // The queue broker needs no queue state either (ADR-t2114-1).
+    if let Command::QueueBroker {
+        command: QueueBrokerCommand::Serve,
+    } = cli.command
+    {
+        return dagq::infrastructure::queue_broker::serve(
+            &dagq::infrastructure::queue_broker::BrokerServeOptions {
+                db: db.clone(),
+                generators: generators.clone(),
+                stop: install_stop_signal()?,
+                poll: Duration::from_millis(50),
+                owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
+                    env::var(name).ok()
+                }),
+                build: dagq::VERSION.to_owned(),
+            },
+        );
+    }
     // `watch` needs the live read-only file rather than a migrated snapshot.
     // `report` and `graph --out` write files but no queue state; `run log`
     // and `planner log` read a session's log, and `run screen` / `run send`
@@ -3344,7 +3378,8 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Doctor { .. }
         | Command::Ci { .. }
         | Command::Inbox { .. }
-        | Command::Service { .. } => {
+        | Command::Service { .. }
+        | Command::QueueBroker { .. } => {
             unreachable!()
         }
         // Answered above as reads.
@@ -3989,6 +4024,14 @@ fn execute(cli: Cli) -> Result<Value> {
                     start_timeout: dagq::application::supervise::QUEUE_SERVICE_START_TIMEOUT,
                     control: None,
                 }),
+                // And the queue broker (ADR-t2114-1 decision 1), from the same
+                // binary.
+                queue_broker: (!once).then(|| dagq::compose::QueueBrokerOptions {
+                    executable: env::current_exe().unwrap_or_else(|_| PathBuf::from("dagq")),
+                    interval: dagq::application::supervise::QUEUE_SERVICE_INTERVAL,
+                    start_timeout: dagq::application::supervise::QUEUE_SERVICE_START_TIMEOUT,
+                    control: None,
+                }),
                 ..SuperviseOptions::new(dagq::domain::slot_limits::DEFAULT_PARALLEL, once)
             };
             // Tests shorten the heartbeat and the pauses between passes
@@ -4059,6 +4102,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 handoff_timeout: Duration::from_secs(handoff_timeout),
                 auto_update,
                 queue_service: true,
+                queue_broker: true,
                 poll: Duration::from_millis(500),
             };
             one_shot.up(
@@ -4883,6 +4927,7 @@ mod tests {
             ("service start", &[]),
             ("service stop", &[]),
             ("service serve", &[]),
+            ("queue-broker serve", &[]),
             ("plan", &[]),
             ("supervise", &[]),
             ("throughput-review", &[]),

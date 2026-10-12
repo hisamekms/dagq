@@ -8,7 +8,7 @@
 //! worker and the jobs, the service refuses and records on its side.
 
 use crate::common;
-use crate::queue_service::{Queue, call, events, queue, start, token};
+use crate::common::service::{Queue, call, events, queue, start, token};
 
 use common::cli::{invoke_with, ok, submit_from};
 use dagq::{

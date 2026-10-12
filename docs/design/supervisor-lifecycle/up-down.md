@@ -109,7 +109,9 @@ signalの対象の登録が1件もなければ`{"outcome":"not_running","launch_
 agentがloadされているのにPIDが読めないときは誰にも送らない。
 既定は`{"outcome":"draining","pid":…,"pids":[…]}`で即返り、`--wait`はその登録が消えるかPIDが死ぬまで2秒ごとに待って`stopped`、`--force`はSIGKILLを送って登録行を消し`killed`（leaseは30秒でstaleになり、runは`doctor` / `recover`で扱う）。
 
-queueのbroker（未実装）はqueue serviceと同じ`up` / `down` / execの引き継ぎで起動・停止し、podmanでは動かさない（[ADR-t2114-1](../../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)）。
+queueのbroker（[Queue broker](../queue-broker.md#起動と停止)）はqueue serviceと同じ手順で起動・停止し、podmanでは動かさない（[ADR-t2114-1](../../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)）。
+`up`はserviceの後、supervisorより先にbrokerを起動し（生きていればreuse、buildが違えば入れ替え）、起動できなければsupervisorを起動せずに止まる。
+`down`はsupervisorの後、serviceより先にbrokerを止め、drainを待たないときは最後のsupervisorにdrainの終わりで止めさせる。
 
 `down`はcmuxのworkspaceを閉じない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3・6）。
 登録済みのin-cmuxのsupervisor（前のbinaryがそのmodeで登録したもの）が動いていたworkspaceは、結果の`supervisor_workspaces`に開いたまま残すと出して人に任せる。

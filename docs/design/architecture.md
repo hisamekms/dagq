@@ -75,7 +75,6 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
 - IDと値: `domain::ids`・`domain::error`・`domain::reason`・`domain::views`・`domain::input`。
 - build識別子: `src/build_id.rs`（`build_id`）で、`build.rs`と共有する。
   domainと同じ扱いで、domainとapplicationが参照してよい（L1・L3の例外）。
-  gitを呼ぶ`emit`・`compute`はbuild scriptの側（`src/lib.rs`のdoc comment）。
 - 時刻とID生成: `application::ports`の`Clock`（壁時計と単調時計）・`IdGenerator`、実装は`infrastructure::clock`。
 - eventの記録: `EventStore`の`record_runtime_event`・`record_queue_event`と種類の`domain::event_kind::EventKind`。
 - 人への問い合わせ: `asks`表と`AskStore`（`infrastructure::asks`）。
@@ -203,14 +202,14 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 **所有する状態**
 
 - table: `supervisors`・`queue_repository`・`schema_floor`・`binary_updates`・`headless_jobs`。
-- ファイル: queueのdirの`service/`・`logs/`・`update/`、launchdのplist、sccacheのserver。
+- ファイル: queueのdirの`service/`・`broker/`・`logs/`・`update/`、launchdのplist、sccacheのserver。
 
 **判断**（domain）: `disk`・`sccache`・`release_update`・`queue_service`・`host_metrics`ほか。
 
 **操作**
 
-- application: `application::lifecycle`（`up`・`down`）・`install`・`update`・`queue_service`・`sccache`・`actor_executor`・`execution`ほかと、`application::supervise`の同名のsubmoduleと`disk`・`cleanup`・`sweep`・`handoff`・`inbox_nudge`。
-- infrastructure: `launchd`・`binaries`・`queue_service`（`show`の整形はcomposeが注入）・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`の`SupervisorRegistry`、`runtime_store::run_log`の`InboxWatchLog`。
+- application: `application::lifecycle`（`up`・`down`）・`install`・`update`・`queue_service`・`queue_broker`・`sccache`・`actor_executor`・`execution`ほかと、`application::supervise`の同名のsubmoduleと`disk`・`cleanup`・`sweep`・`handoff`・`inbox_nudge`。
+- infrastructure: `launchd`・`binaries`・`queue_service`・`queue_broker`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`の`SupervisorRegistry`、`runtime_store::run_log`の`InboxWatchLog`。
 
 **公開するport**
 
@@ -218,7 +217,8 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - 空きdiskとsccacheの読み取り（`HostOpsState`）と`CleanupWatch::cleaning`・`defer`・`ensure_sccache`・`sccache_look`を実行と着地に公開する。
 - `HeadlessJobStore`（jobのprocessの台帳）を、jobを起動する各contextに公開する。
 - `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、actorの起動（`actor_executor`）を他のcontextに公開する。
-- `InboxWatchLog`・`AuditFiles`・CIの見張りのpreflight・`HostOpsQueue`・`LifecycleQueue`は内部。
+- brokerの生死は`BrokerGate`の`ContainerRuntime`で実行と着地に見せる。
+- `InboxWatchLog`・`AuditFiles`・CIの見張りのpreflight・`HostOpsQueue`・`LifecycleQueue`・`QueueBrokerControl`・`BrokerBackend`は内部。
 
 **許す依存の向き**
 

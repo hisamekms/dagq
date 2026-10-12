@@ -325,6 +325,10 @@ pub(super) struct HostOpsState {
     /// Whether the queue service ran at the last look, or no service is
     /// kept (ADR-t1233-4 decision 2): new claims and jobs wait for it.
     pub(super) service_up: bool,
+    /// Keeps the queue's broker; `None` keeps none.
+    pub(super) queue_broker_port: Option<super::QueueBrokerPort>,
+    /// What the supervisor knows of the queue's broker.
+    pub(super) queue_broker: super::queue_broker::QueueBrokerWatch,
     /// The automatic update's look at main (ADR-0045 decision 17).
     pub(super) update: update::UpdateWatch,
     /// Looks for a new release; `None` looks for none.
@@ -365,6 +369,8 @@ impl HostOpsState {
             queue_service_port: ports.queue_service.clone(),
             queue_service: queue_service::QueueServiceWatch::default(),
             service_up: true,
+            queue_broker_port: ports.queue_broker.clone(),
+            queue_broker: super::queue_broker::QueueBrokerWatch::default(),
             update: update::UpdateWatch::default(),
             release_port: ports.release.clone(),
             release: release::ReleaseWatch::default(),

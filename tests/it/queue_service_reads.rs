@@ -7,7 +7,7 @@
 //! whole queue as the measure tasks do; and what is no read use case
 //! (`watch`, a file to write, a program to run) is refused.
 
-use crate::queue_service::{Queue, call, queue, start, token};
+use crate::common::service::{Queue, call, queue, start, token};
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

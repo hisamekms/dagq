@@ -111,6 +111,8 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
             auto_update: false,
             // The queue service's start has its own tests (queue_service).
             queue_service: false,
+            // So has the queue broker's (queue_broker).
+            queue_broker: false,
             poll: Duration::from_millis(20),
         },
         _dir: dir,

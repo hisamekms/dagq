@@ -453,6 +453,7 @@ mod lost_lease;
 pub use lost_lease::*;
 pub mod planner_prompt_bytes;
 pub mod planner_turns;
+pub mod service;
 mod session_handles;
 
 /// A run's provider that starts no headless job.

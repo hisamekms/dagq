@@ -459,8 +459,16 @@ impl OneShot {
             queue: &mut queue,
             repository: &repository,
             verifier: &verifier,
-            // No part of the container runtime is built yet (goal 38).
-            container: &crate::infrastructure::container_runtime::UnbuiltContainer,
+            // No part of the container runtime but the queue broker is
+            // built yet (goal 38).
+            container: &crate::application::queue_broker::BrokerGate {
+                // Only looked at: `up` and the supervisor start it.
+                broker: Arc::new(crate::infrastructure::queue_broker::SystemQueueBroker::new(
+                    &db,
+                    Path::new("dagq"),
+                )),
+                container: crate::infrastructure::container_runtime::UnbuiltContainer,
+            },
             remote,
             files: &LocalRunFiles,
             common_dir: &common_dir,

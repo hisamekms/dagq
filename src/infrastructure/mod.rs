@@ -40,6 +40,7 @@ mod planning;
 pub mod process;
 mod proposals;
 pub mod push;
+pub mod queue_broker;
 pub mod queue_service;
 pub mod related;
 pub mod release_update;

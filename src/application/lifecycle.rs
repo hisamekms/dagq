@@ -298,7 +298,15 @@ pub struct Ports<'a> {
     /// service, started from `executable` (ADR-t1233-4 decision 1). The
     /// service calls no cmux (ADR-t1433-1).
     pub queue_service: &'a QueueServiceControls,
+    /// `queue_broker(db, executable)`: the control of the queue's broker,
+    /// started from `executable` (ADR-t2114-1 decision 1).
+    pub queue_broker: &'a QueueBrokerControls,
 }
+
+/// How `up` and `down` reach the queue's broker: see
+/// [`Ports::queue_broker`].
+pub type QueueBrokerControls =
+    dyn Fn(&Path, &Path) -> Box<dyn crate::application::queue_broker::QueueBrokerControl>;
 
 /// How `up` and `down` reach the queue's service: see
 /// [`Ports::queue_service`].
@@ -361,6 +369,10 @@ pub struct UpOptions {
     /// supervisor (ADR-t1233-4 decision 1); the command line's `up` does,
     /// a test of `up`'s other steps need not.
     pub queue_service: bool,
+    /// Start (or reuse, or replace) the queue's broker after the service
+    /// and before the supervisor (ADR-t2114-1 decision 1); the command
+    /// line's `up` does, a test of `up`'s other steps need not.
+    pub queue_broker: bool,
     pub poll: Duration,
 }
 
@@ -500,6 +512,18 @@ pub fn up(
     } else {
         None
     };
+    // The queue's broker too, of this binary's build (ADR-t2114-1
+    // decision 1): one that does not start stops `up`.
+    let queue_broker = if options.queue_broker {
+        let control = (ports.queue_broker)(&db, &environment.current_exe);
+        Some(
+            ensure_queue_broker(queue, &*control, "up").map_err(|error| {
+                anyhow::anyhow!("{error:#}; up stopped before it started or reused a supervisor")
+            })?,
+        )
+    } else {
+        None
+    };
     let up = Up {
         location,
         db: &db,
@@ -604,10 +628,31 @@ pub fn up(
     if let Some(queue_service) = queue_service {
         report["queue_service"] = queue_service;
     }
+    if let Some(queue_broker) = queue_broker {
+        report["queue_broker"] = queue_broker;
+    }
     match handoff_failure {
         None => Ok(report),
         Some(message) => Err(PartialHandoff { message, report }.into()),
     }
+}
+
+/// [`crate::application::queue_broker::ensure`] the queue's broker with
+/// `control`, recorded in `queue` as `queue_broker_started` (`by`) unless
+/// one of this build already answered.
+fn ensure_queue_broker(
+    queue: &(dyn LifecycleQueue + Send),
+    control: &dyn crate::application::queue_broker::QueueBrokerControl,
+    by: &str,
+) -> Result<Value> {
+    let report = crate::application::queue_broker::ensure(control, QUEUE_SERVICE_START_TIMEOUT)?;
+    if report["outcome"] != "reused" {
+        queue.record_queue_event(
+            crate::domain::EventKind::QueueBrokerStarted,
+            crate::application::queue_broker::started_payload(by, &report),
+        )?;
+    }
+    Ok(report)
 }
 
 /// What `up` says of the inbox it does not open (ADR-t2159-1 decision 3).
@@ -1924,6 +1969,11 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     let service = (ports.queue_service)(&location.db, Path::new("dagq"));
     let service_running =
         service.probe().state != crate::domain::queue_service::ServiceState::Stopped;
+    // So does the queue's broker (ADR-t2114-1 decision 1), by the same
+    // steps.
+    let broker = (ports.queue_broker)(&location.db, Path::new("dagq"));
+    let broker_running =
+        broker.probe().state != crate::domain::queue_service::ServiceState::Stopped;
     if !live.is_empty() && !options.force {
         let tokens: Vec<LeaseToken> = live.iter().map(|r| r.token.clone()).collect();
         if service_running
@@ -1933,6 +1983,14 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             )
         {
             tracing::warn!(error = %format_args!("{error:#}"), "the queue service's stop after the drain could not be asked for: {error:#}");
+        }
+        if broker_running
+            && let Err(error) = queue.record_queue_event(
+                crate::domain::EventKind::QueueBrokerStopRequested,
+                json!({"supervisors": tokens, "by": "down"}),
+            )
+        {
+            tracing::warn!(error = %format_args!("{error:#}"), "the queue broker's stop after the drain could not be asked for: {error:#}");
         }
     }
     // An agent whose supervisor never registered (a crash loop) is still
@@ -1964,6 +2022,36 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             Err(error) => Some(json!({"outcome": "failed", "error": format!("{error:#}")})),
         }
     };
+    let stop_broker = |drained: bool| -> Option<Value> {
+        if !broker_running {
+            return None;
+        }
+        if !drained {
+            return Some(json!({"outcome": "left_to_the_drain"}));
+        }
+        match broker.stop(QUEUE_SERVICE_START_TIMEOUT) {
+            Ok(Some(pid)) => {
+                if let Err(error) = queue.record_queue_event(
+                    crate::domain::EventKind::QueueBrokerStopped,
+                    json!({"pid": pid, "by": "down"}),
+                ) {
+                    tracing::warn!(error = %format_args!("{error:#}"), "the queue broker's stop could not be recorded: {error:#}");
+                }
+                Some(json!({"outcome": "stopped", "pid": pid}))
+            }
+            Ok(None) => Some(json!({"outcome": "not_running"})),
+            Err(error) => Some(json!({"outcome": "failed", "error": format!("{error:#}")})),
+        }
+    };
+    // The broker before the service it passes requests on to.
+    let stop_both = |report: &mut Value, drained: bool| {
+        if let Some(queue_broker) = stop_broker(drained) {
+            report["queue_broker"] = queue_broker;
+        }
+        if let Some(queue_service) = stop_service(drained) {
+            report["queue_service"] = queue_service;
+        }
+    };
     if live.is_empty() {
         if options.force {
             for registration in &dead {
@@ -1977,9 +2065,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "pruned_supervisors": pruned,
             "supervisor_workspaces": forget_supervisor_workspaces(queue, &registrations),
         });
-        if let Some(queue_service) = stop_service(true) {
-            report["queue_service"] = queue_service;
-        }
+        stop_both(&mut report, true);
         return Ok(report);
     }
     // launchd's bootout delivers the SIGTERM to the agent's own process; a
@@ -2013,9 +2099,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
             "pruned_supervisors": pruned,
             "supervisor_workspaces": forget_supervisor_workspaces(queue, &registrations),
         });
-        if let Some(queue_service) = stop_service(true) {
-            report["queue_service"] = queue_service;
-        }
+        stop_both(&mut report, true);
         return Ok(report);
     }
     if options.wait {
@@ -2043,9 +2127,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         if !pruned.is_empty() {
             report["pruned_supervisors"] = json!(pruned);
         }
-        if let Some(queue_service) = stop_service(true) {
-            report["queue_service"] = queue_service;
-        }
+        stop_both(&mut report, true);
         return Ok(report);
     }
     let mut report = json!({
@@ -2058,9 +2140,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     if !pruned.is_empty() {
         report["pruned_supervisors"] = json!(pruned);
     }
-    if let Some(queue_service) = stop_service(false) {
-        report["queue_service"] = queue_service;
-    }
+    stop_both(&mut report, false);
     Ok(report)
 }
 

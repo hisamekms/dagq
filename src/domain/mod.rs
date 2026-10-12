@@ -2,11 +2,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+// An enum of fixed text values. Doc comments (`///`) on the enum and on its
+// variants are kept on the type: say there what a value means.
 macro_rules! string_enum {
-    ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
+    ($(#[$meta:meta])* $name:ident { $($(#[$vmeta:meta])* $variant:ident => $value:literal),+ $(,)? }) => {
+        $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
         pub enum $name {
-            $(#[serde(rename = $value)] $variant),+
+            $($(#[$vmeta])* #[serde(rename = $value)] $variant),+
         }
 
         impl $name {
@@ -1005,6 +1008,7 @@ pub mod pre_claim;
 pub mod prediction;
 pub mod proposal;
 pub mod provider_switch;
+pub mod queue_broker;
 pub mod queue_hold;
 pub mod queue_service;
 pub mod reason;
@@ -2122,6 +2126,12 @@ pub enum AttentionNext {
     /// decision 3): a person reads `dagq service status` and the service's
     /// log, and runs `up` again. It ends once the service runs again.
     QueueServiceStatus,
+    /// The supervisor could not keep the queue broker running (it did not
+    /// start again within its limit, `queue_broker_down`, ADR-t2114-1
+    /// decision 1): a person reads the broker's log under the queue's
+    /// `broker/`, and runs `up` again. Meanwhile nothing set to the
+    /// container runs. It ends once the broker runs again.
+    QueueBrokerLog,
     /// The runtime's e2e of a run after its review could not run several
     /// times in a row (it could not start, a `[run.env]` that cannot be
     /// read, past its timeout: `run_e2e_finished` with `outcome: unavailable` and
@@ -2238,6 +2248,7 @@ impl fmt::Display for AttentionNext {
             Self::CheckObserver => f.write_str("check the failed observer"),
             Self::FixPush => f.write_str("fix the push command"),
             Self::QueueServiceStatus => f.write_str("dagq service status"),
+            Self::QueueBrokerLog => f.write_str("read the queue broker's log and run up"),
             Self::CheckE2e => f.write_str("check the e2e host"),
             Self::ExitSession => f.write_str("exit the session"),
             Self::StopLandingProcesses => f.write_str("stop the dead landing's processes"),
@@ -2291,6 +2302,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::OBSERVE_FINISHED,
     kpi::push::KPI_PUSH_ABANDONED,
     queue_service::QUEUE_SERVICE_DOWN,
+    queue_broker::QUEUE_BROKER_DOWN,
     "ask_opened",
     "ask_answered",
     "ask_delivery_failed",
@@ -2593,6 +2605,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         }
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
         (queue_service::QUEUE_SERVICE_DOWN, _) => Some(AttentionNext::QueueServiceStatus),
+        (queue_broker::QUEUE_BROKER_DOWN, _) => Some(AttentionNext::QueueBrokerLog),
         (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
             Some(AttentionNext::ExitSession)
         }
@@ -3800,6 +3813,13 @@ mod attention_tests {
                 Some(QueueServiceStatus),
             ),
             ("queue_service_running", json!({}), None),
+            (
+                "queue_broker_down",
+                json!({"reason": "start_failed"}),
+                Some(QueueBrokerLog),
+            ),
+            ("queue_broker_running", json!({}), None),
+            ("queue_broker_denied", json!({"run": "r1"}), None),
             ("broker_started", json!({"port": 1}), None),
             (
                 "push_finished",
@@ -4154,6 +4174,10 @@ mod attention_tests {
         assert_eq!(CheckObserver.to_string(), "check the failed observer");
         assert_eq!(FixPush.to_string(), "fix the push command");
         assert_eq!(QueueServiceStatus.to_string(), "dagq service status");
+        assert_eq!(
+            QueueBrokerLog.to_string(),
+            "read the queue broker's log and run up"
+        );
         assert_eq!(DecideDraft.to_string(), "request a plan for the draft");
         assert_eq!(DecideFinding.to_string(), "request a plan for the finding");
         assert_eq!(
