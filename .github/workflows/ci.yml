@@ -134,6 +134,11 @@ jobs:
           sh scripts/check-layer-deps.sh
           sh scripts/check-layer-deps.sh --self-test
 
+      - name: Context boundaries
+        run: |
+          sh scripts/check-context-boundaries.sh
+          sh scripts/check-context-boundaries.sh --self-test
+
       # The landing verification's choice of IT on its fixtures only; the
       # choice on a real diff needs the runtime's variables and the table.
       - name: Landing IT choice

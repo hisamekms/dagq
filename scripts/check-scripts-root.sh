@@ -35,7 +35,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-layer-deps check-frontmatter-dates check-design-docs check-design-sentences check-doc-links check-doc-frontmatter check-plugin-version"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-layer-deps check-context-boundaries check-frontmatter-dates check-design-docs check-design-sentences check-doc-links check-doc-frontmatter check-plugin-version"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -52,6 +52,10 @@ check-layer-deps compose_new_module_crosses_context
 check-layer-deps compose_super_glob
 check-layer-deps planning_reaches_loop_state
 check-layer-deps host_ops_reaches_loop_state
+check-context-boundaries context_unlisted_trait
+check-context-boundaries context_unlisted_store
+check-context-boundaries context_internal_port
+check-context-boundaries context_stale_allow_item
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-design-sentences design_doc_two_sentences_on_a_line
@@ -115,6 +119,23 @@ violate_host_ops_reaches_loop_state() {
   echo "fn zz_scripts_root(claim: &super::stages::ClaimState) -> usize { claim.slots.len() }" >>src/application/supervise/sweep.rs
 }
 
+violate_context_unlisted_trait() {
+  echo 'pub trait ZzScriptsRoot { fn zz(&self); }' >src/application/zz_scripts_root.rs
+}
+
+violate_context_unlisted_store() {
+  echo 'fn zz_scripts_root(c: &Conn) { c.execute("UPDATE tasks SET id = 1"); }' >src/infrastructure/zz_scripts_root.rs
+}
+
+violate_context_internal_port() {
+  echo 'fn zz_scripts_root(_: &dyn crate::application::RunRecovery) {}' >>src/application/supervise/report.rs
+}
+
+violate_context_stale_allow_item() {
+  mkdir -p .config
+  echo 'C5 | src/application/zz_scripts_root.rs | RunRecovery | 2286 | fixture' >>.config/context-boundaries-allow.txt
+}
+
 violate_frontmatter_date_comment() {
   printf -- '---\nupdated: 2026-10-07 # task 1899\n---\n\n# fixture\n' >docs/zz-scripts-root-fixture.md
 }
@@ -155,7 +176,7 @@ violate_plugin_version_mismatch() {
   sed 's/^\( *"version" *: *"\)[^"]*"/\1999.0.0-scripts-root"/' "$f" >"$f.zz" && mv "$f.zz" "$f"
 }
 
-unset LAYER_DEPS_ROOT LAYER_DEPS_ALLOW_FILE E2E_QUARANTINE_FILE GITHUB_REF_TYPE GITHUB_REF_NAME
+unset LAYER_DEPS_ROOT LAYER_DEPS_ALLOW_FILE CONTEXT_BOUNDARIES_ROOT CONTEXT_BOUNDARIES_LIST_FILE CONTEXT_BOUNDARIES_ALLOW_FILE E2E_QUARANTINE_FILE GITHUB_REF_TYPE GITHUB_REF_NAME
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 prep_fail() {

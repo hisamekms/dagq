@@ -1,0 +1,49 @@
+# The context violations scripts/check-context-boundaries.sh allows today.
+# The rules: docs/design/architecture.md, section "検査できる規則"; what
+# counts: the script's header. This header holds the format.
+#
+# One item per line, `rule | path | reference | task | reason`; lines that
+# start with `#` and blank lines are not read. rule is C1 (with X1) or C5;
+# path is a file from `src/`; reference is the reference as the script
+# prints it (`<table> in <fn>` for C1, the port for C5); task is one task ID
+# or several separated by `,`, or `none` when no task fixes it yet (the
+# reason then says it is unregistered); reason is not empty. The same
+# reference in the same file is one item. A violation with no item, an item
+# whose violation is gone (the task that fixes a violation removes its item
+# in the same change), a malformed line and a duplicate item all fail the
+# check.
+#
+# rule | path | reference | task | reason
+C1 | src/infrastructure/finding_planners.rs | findings in link_findings | 1621 | T6: planning's store writes observation's findings in SQL, not through infrastructure::findings
+C1 | src/infrastructure/finding_planners.rs | findings in apply_answer | 1621 | T6: planning's store writes observation's findings in SQL, not through infrastructure::findings
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in register | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in set_supervisor_mode | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in deregister_supervisor | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in prune_supervisor | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in accept_handoff | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in request_handoff | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in cancel_handoff | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in take_handoff | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in resume_registration | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in set_auto_update | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in set_max_load | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in set_supervisor_providers | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in refresh_registration | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | supervisors in write_slot_limits | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | queue_repository in bind_repository | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/coordination.rs | queue_repository in rebind_repository | none | unregistered: the store mixes execution's RunCoordination and host's SupervisorRegistry
+C1 | src/infrastructure/runtime_store/session_registry.rs | planners in end_planner | none | unregistered: SessionRegistry (execution) writes planning's planners; split the port
+C1 | src/infrastructure/sqlite.rs | schema_floor in apply_migrations | none | unregistered: planning's store writes host's schema_floor when it migrates the queue
+C5 | src/application/health/attention.rs | GoalReviewStore | 2233 | observation's attention reads planning's internal GoalReviewStore
+C5 | src/application/health/attention.rs | PlanReviewStore | 2233 | observation's attention reads planning's internal PlanReviewStore
+C5 | src/application/lifecycle.rs | RunRecovery | 2233 | host's lifecycle reads execution's internal RunRecovery
+C5 | src/application/lifecycle.rs | SessionRegistry | none | unregistered: host's LifecycleQueue takes execution's SessionRegistry, public to observation only
+C5 | src/application/health/report.rs | GoalReviewStore | none | unregistered: observation's status takes planning's internal GoalReviewStore
+C5 | src/application/health/report.rs | PlanReviewStore | none | unregistered: observation's status takes planning's internal PlanReviewStore
+C5 | src/application/recording.rs | WorkspaceBackend | none | unregistered: RecordingBackend wraps the whole of host's WorkspaceBackend
+C5 | src/application/supervise/cleanup.rs | Repository | none | unregistered: host's cleanup job takes execution's Repository, public to observation only
+C5 | src/application/supervise/plan_review.rs | Repository | none | unregistered: planning's conflict hotspots take execution's Repository, public to observation only
+C5 | src/compose/observation.rs | Verifier | none | unregistered: observation's composition reads execution's Verifier, public to host only
+C5 | src/infrastructure/runtime_store/mod.rs | InboxWatchLog | none | unregistered: execution's store names host's internal InboxWatchLog
+C5 | src/infrastructure/runtime_store/run_log.rs | InboxWatchLog | none | unregistered: execution's store implements host's internal InboxWatchLog
+C5 | src/infrastructure/runtime_store/run_log.rs | ObserverLog | none | unregistered: execution's store implements observation's internal ObserverLog
