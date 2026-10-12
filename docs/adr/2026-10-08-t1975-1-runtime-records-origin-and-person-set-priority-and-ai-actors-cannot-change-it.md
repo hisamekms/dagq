@@ -11,6 +11,8 @@ amends:
   - adr-t1971-1 decision 2
   - adr-t1971-1 decision 3
   - adr-t1971-1 decision 4
+amended_by:
+  - adr-t2373-1
 owners:
   - hisamekms
 tags:

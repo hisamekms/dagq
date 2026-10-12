@@ -1609,3 +1609,96 @@ fn correction_answer_attention_uses_the_recorded_delivery_decision() {
         );
     }
 }
+
+/// The planner's `out_of_scope` judgement in the store (ADR-t2373-1): a
+/// person's priority the follow_up took from its goal gives way to the new
+/// goal's in the judgement's transaction, recorded as `dropped_on_move`;
+/// a person's priority of the follow_up's own stays. The other cases are
+/// `domain::task`'s unit tests.
+#[test]
+fn an_out_of_scope_judgement_lets_go_of_a_persons_priority_the_follow_up_inherited() {
+    use dagq::domain::{ActorContext, ActorRole, Priority, plan_request::PriorityBy};
+    let (_dir, q) = fixture();
+    let mut q = q;
+    let persons = q
+        .add_goal(dagq::domain::NewGoal {
+            priority: Some(Priority::Interrupt),
+            ..new_goal("a person's")
+        })
+        .unwrap()
+        .id();
+    let follow_up = |q: &mut SqliteQueue, priority| {
+        let task = q
+            .add(dagq::domain::NewTask {
+                goal_id: Some(persons),
+                priority,
+                ..new_task("follow up")
+            })
+            .unwrap()
+            .id();
+        q.record_draft_origin(
+            task,
+            DraftOrigin::FollowUp,
+            &json!({"source_task_id": 1, "source_run_id": "r",
+                "source_goal_id": persons.as_i64(), "source_goal_state": "open",
+                "source_goal_provenance": "recorded"}),
+        )
+        .unwrap();
+        task
+    };
+    let inherited = follow_up(&mut q, None);
+    let own = follow_up(&mut q, Some(Priority::Urgent));
+    let mut q = q.with_actor(ActorContext::instance(ActorRole::Planner, 1));
+    let low = q
+        .add_goal(dagq::domain::NewGoal {
+            priority: Some(Priority::Low),
+            ..new_goal("the AI's")
+        })
+        .unwrap()
+        .id();
+    for task in [inherited, own] {
+        q.judge_follow_up(task, judgement(Class::OutOfScope, Some(low)), "planner")
+            .unwrap();
+    }
+    let state = |q: &mut SqliteQueue, task| {
+        let task = q.show(task).unwrap().task;
+        (
+            task.priority(),
+            task.own_priority(),
+            task.priority_by(),
+            task.goal_id(),
+        )
+    };
+    assert_eq!(
+        state(&mut q, inherited),
+        (Priority::Low, None, PriorityBy::Ai, Some(low))
+    );
+    assert_eq!(
+        state(&mut q, own),
+        (
+            Priority::Urgent,
+            Some(Priority::Urgent),
+            PriorityBy::Human,
+            Some(low)
+        )
+    );
+    let changed = |q: &mut SqliteQueue, task| -> Vec<serde_json::Value> {
+        q.show(task)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|e| e.kind.as_str() == "task_priority_changed")
+            .map(|e| e.payload)
+            .collect()
+    };
+    assert_eq!(
+        changed(&mut q, inherited),
+        [
+            json!({"from": "interrupt", "to": "low", "from_source": "goal",
+            "to_source": "goal", "from_by": "human", "to_by": "ai",
+            "dropped_on_move": true, "judgement": "out_of_scope",
+            "from_goal": persons, "to_goal": low})
+        ]
+    );
+    assert!(changed(&mut q, own).is_empty());
+}

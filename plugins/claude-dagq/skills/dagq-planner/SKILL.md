@@ -42,7 +42,7 @@ Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`e
 
 **Otherwise what you add here is AI-made:** no task priority of its own (it inherits its goal's); an existing goal only when its acceptance needs it (a follow_up: below), else a new goal (priority by the repository's guide) or no goal. Plan review checks both (`register.md`, "Priority").
 
-**Membership and deferral, one judgement.** A follow_up draft with a source goal (and a goal's remaining tasks when your request asks): before you adopt or ask, judge whether the **source** goal's acceptance can be met without it. No: `required`, it stays and inherits the goal's priority. Yes: `out_of_scope` into an existing fitting goal, else the `low` deferral goal of its tag; never an unrelated catch-all. Never weaken an acceptance to move one out (the person's); after an acceptance change, judge again. Steps: `register.md`, "A follow_up's membership".
+**Membership and deferral, one judgement.** A follow_up draft with a source goal (and a goal's remaining tasks when your request asks): before you adopt or ask, judge whether the **source** goal's acceptance can be met without it. No: `required`, it stays. Yes: `out_of_scope` into an existing fitting goal, else the `low` deferral goal of its tag, not a catch-all. It takes its goal's priority; a person's own stays. Never weaken an acceptance to move one out (the person's); after an acceptance change, judge again. Steps: `register.md`, "A follow_up's membership".
 
 ## 4. Goals, forecasts, findings, KPIs
 

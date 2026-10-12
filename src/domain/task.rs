@@ -449,13 +449,15 @@ impl Destination {
 }
 
 /// Who moves a task between goals, for what becomes of a person's priority
-/// it takes from its goal (ADR-t1975-1 decision 4): a person (the user,
-/// the inbox, a person's answer the runtime applies) or the AI (a planner,
-/// the runtime on its own).
+/// it takes from its goal (ADR-t1975-1 decision 4, ADR-t2373-1): a person
+/// (the user, the inbox, a person's answer the runtime applies), the AI (a
+/// planner, the runtime on its own), or the AI recording a follow_up's
+/// membership judgement as `out_of_scope` that moves it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MovedBy {
     Person,
     Ai,
+    AiJudgedOutOfScope,
 }
 
 impl MovedBy {
@@ -467,34 +469,70 @@ impl MovedBy {
             Self::Ai
         }
     }
+
+    /// Who `role` moves a follow_up as when it records the judgement that
+    /// the follow_up is out of its source goal's scope: the AI's move
+    /// becomes [`Self::AiJudgedOutOfScope`], a person's stays a person's.
+    pub const fn judged_out_of_scope(role: super::ActorRole) -> Self {
+        match Self::of(role) {
+            Self::Person => Self::Person,
+            _ => Self::AiJudgedOutOfScope,
+        }
+    }
 }
 
 /// The priority a move of `task` to `to` (none: out of any goal, which
 /// gives `normal`) by `by` keeps as the task's own and a person's
 /// (ADR-t1975-1 decision 4), none when the task takes its new goal's as it
-/// always did: a person's move, a task with a priority of its own (which no
-/// move changes), a task whose priority no person set, and a move to a
-/// goal whose priority is the same value set by a person, which keeps the
-/// same protection. A goal of the same value the AI set does not: the AI
-/// could then lower the goal, or move the task again.
+/// always did: a person's move, the AI's move recording a follow_up's
+/// `out_of_scope` judgement ([`persons_priority_dropped_on_move`]), a task
+/// with a priority of its own (which no move changes), a task whose
+/// priority no person set, and a move to a goal whose priority is the same
+/// value set by a person, which keeps the same protection. A goal of the
+/// same value the AI set does not: the AI could then lower the goal, or
+/// move the task again.
 pub fn priority_kept_on_move(
     task: &Task,
     to: Option<Destination>,
     by: MovedBy,
 ) -> Option<Priority> {
-    let inherits = by == MovedBy::Person
-        || task.own_priority.is_some()
+    (by == MovedBy::Ai)
+        .then(|| persons_priority_taken_from_goal(task, to))
+        .flatten()
+}
+
+/// The person's priority `task` took from its goal that a move to `to`
+/// (none: out of any goal) by `by` lets go of, as the task takes its new
+/// goal's (ADR-t2373-1 decisions 1 and 4): only the AI's move recording a
+/// follow_up's `out_of_scope` judgement does, the person's value being a
+/// requirement on its old goal's acceptance the judgement says the task
+/// is outside of. A priority of the task's own stays.
+pub fn persons_priority_dropped_on_move(
+    task: &Task,
+    to: Option<Destination>,
+    by: MovedBy,
+) -> Option<Priority> {
+    (by == MovedBy::AiJudgedOutOfScope)
+        .then(|| persons_priority_taken_from_goal(task, to))
+        .flatten()
+}
+
+/// The person's priority `task` takes from its goal, none when it has its
+/// own, no person set it, or `to` has the same value a person set.
+fn persons_priority_taken_from_goal(task: &Task, to: Option<Destination>) -> Option<Priority> {
+    let inherits_the_same = task.own_priority.is_some()
         || task.priority_by != PriorityBy::Human
         || to.is_some_and(|goal| {
             (goal.priority, goal.priority_by) == (task.priority, PriorityBy::Human)
         });
-    (!inherits).then_some(task.priority)
+    (!inherits_the_same).then_some(task.priority)
 }
 
 /// Move `task` to `to`, or out of any goal, as `by` moves it: a person's
 /// priority it took from its old goal stays its own as a person's when
 /// [`priority_kept_on_move`] says so, and otherwise it takes its new
-/// goal's. Whether the goal takes tasks is
+/// goal's (letting go of the person's,
+/// [`persons_priority_dropped_on_move`]). Whether the goal takes tasks is
 /// [`super::goal::check_accepts_tasks`], which the caller applies to the
 /// goal it reads.
 pub fn set_goal(mut task: Task, to: Option<Destination>, by: MovedBy) -> Result<Task, DomainError> {
@@ -869,6 +907,70 @@ mod tests {
         // Staying in the same goal changes nothing.
         let stays = set_goal(read(None, Some(persons)), Some(persons), MovedBy::Ai).unwrap();
         assert_eq!(stays.own_priority(), None);
+    }
+
+    /// ADR-t2373-1 decisions 1 to 3: the AI's move recording a follow_up's
+    /// `out_of_scope` judgement lets go of a person's priority the task
+    /// took from its goal and takes the new goal's (normal out of any
+    /// goal), keeps a person's priority of the task's own, and a person's
+    /// role moves it as a person always did.
+    #[test]
+    fn an_out_of_scope_move_takes_the_new_goals_priority_over_a_persons_it_inherited() {
+        use super::super::ActorRole;
+        use PriorityBy::{Ai, Human};
+        use PrioritySource as Src;
+        let persons = goal(1, Priority::Interrupt, Human);
+        let low = goal(2, Priority::Low, Ai);
+        let id = |n| Some(GoalId::new(n));
+        let judged = MovedBy::judged_out_of_scope(ActorRole::Planner);
+        assert_eq!(judged, MovedBy::AiJudgedOutOfScope);
+        for (to, taken) in [
+            (Some(low), (Priority::Low, Src::Goal, Ai, id(2))),
+            (None, (Priority::Normal, Src::Default, Ai, None)),
+        ] {
+            let task = read(None, Some(persons));
+            assert_eq!(priority_kept_on_move(&task, to, judged), None);
+            assert_eq!(
+                persons_priority_dropped_on_move(&task, to, judged),
+                Some(Priority::Interrupt),
+                "{to:?}"
+            );
+            let moved = set_goal(task, to, judged).unwrap();
+            assert_eq!(state(&moved), taken, "{to:?}");
+            assert_eq!(moved.own_priority(), None);
+        }
+        // A person's own priority stays.
+        let own = read(Some((Priority::Urgent, Human)), Some(persons));
+        assert_eq!(
+            persons_priority_dropped_on_move(&own, Some(low), judged),
+            None
+        );
+        let moved = set_goal(own, Some(low), judged).unwrap();
+        assert_eq!(state(&moved), (Priority::Urgent, Src::Task, Human, id(2)));
+        // A goal of the same value a person set: nothing is let go of.
+        let same = goal(3, Priority::Interrupt, Human);
+        let task = read(None, Some(persons));
+        assert_eq!(
+            persons_priority_dropped_on_move(&task, Some(same), judged),
+            None
+        );
+        // The AI's other moves keep it; a person's judgement moves as a
+        // person's, which drops nothing to record.
+        assert_eq!(
+            persons_priority_dropped_on_move(&task, Some(low), MovedBy::Ai),
+            None
+        );
+        assert_eq!(
+            priority_kept_on_move(&task, Some(low), MovedBy::Ai),
+            Some(Priority::Interrupt)
+        );
+        for role in [ActorRole::User, ActorRole::Inbox] {
+            let by = MovedBy::judged_out_of_scope(role);
+            assert_eq!(by, MovedBy::Person);
+            assert_eq!(persons_priority_dropped_on_move(&task, Some(low), by), None);
+            let moved = set_goal(task.clone(), Some(low), by).unwrap();
+            assert_eq!(state(&moved), (Priority::Low, Src::Goal, Ai, id(2)));
+        }
     }
 
     /// ADR-t1975-1 decision 4, in a row: the AI moves a task that takes a

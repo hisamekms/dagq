@@ -254,7 +254,15 @@ impl SqliteQueue {
             && !(judgement.classification == Class::Required && source_goal.is_closed())
             && destination != task_row.goal_id()
         {
-            let by = crate::domain::task::MovedBy::of(role.parse()?);
+            // An out_of_scope judgement lets the follow_up take its new
+            // goal's priority instead of a person's it took from its old
+            // goal (ADR-t2373-1 decision 1).
+            let role = role.parse()?;
+            let by = if judgement.classification == Class::OutOfScope {
+                crate::domain::task::MovedBy::judged_out_of_scope(role)
+            } else {
+                crate::domain::task::MovedBy::of(role)
+            };
             set_goal_in(
                 &tx,
                 task,

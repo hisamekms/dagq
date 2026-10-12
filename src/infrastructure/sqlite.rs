@@ -3087,7 +3087,10 @@ pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
 /// ([`task::set_goal`]): a person's priority it took from its old goal and
 /// an AI's move would carry off is kept as its own, recorded as
 /// `task_priority_changed` with `kept_on_move` before the move's
-/// `task_goal_changed` (ADR-t1975-1 decision 4).
+/// `task_goal_changed` (ADR-t1975-1 decision 4). A person's priority it
+/// took from its old goal that the AI's `out_of_scope` judgement lets go
+/// of is recorded the same way with `dropped_on_move`, the value it had
+/// and `from_by: human` (ADR-t2373-1 decision 4).
 pub(super) fn set_goal_in(
     conn: &Connection,
     task_id: TaskId,
@@ -3100,7 +3103,11 @@ pub(super) fn set_goal_in(
     let (from_priority, from_source) = (task.priority(), task.priority_source());
     let own = task.own_priority();
     let goal = goal_id.map(|id| read_goal(conn, id)).transpose()?;
-    let task = task::set_goal(task, goal.as_ref().map(task::Destination::of), by)?;
+    let to = goal.as_ref().map(task::Destination::of);
+    let dropped = (from != goal_id)
+        .then(|| task::persons_priority_dropped_on_move(&task, to, by))
+        .flatten();
+    let task = task::set_goal(task, to, by)?;
     if let Some(goal) = &goal {
         let goal_id = goal.id();
         goal::check_accepts_tasks(goal)?;
@@ -3135,6 +3142,18 @@ pub(super) fn set_goal_in(
                 "to_source": task.priority_source(), "kept_on_move": true,
                 "own": task.own_priority(),
                 "own_by": task.own_priority_by().map(PriorityBy::as_str)}),
+        )?;
+    }
+    if let Some(dropped) = dropped {
+        event(
+            conn,
+            task_id,
+            None,
+            EventKind::TaskPriorityChanged,
+            json!({"from": dropped, "to": task.priority(), "from_source": from_source,
+                "to_source": task.priority_source(), "from_by": PriorityBy::Human.as_str(),
+                "to_by": task.priority_by().as_str(), "dropped_on_move": true,
+                "judgement": "out_of_scope", "from_goal": from, "to_goal": task.goal_id()}),
         )?;
     }
     if from != task.goal_id() {

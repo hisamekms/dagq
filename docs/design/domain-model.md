@@ -146,6 +146,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
   runがclaimされた優先度は表示でなく`run_claimed`の記録で読む。
 - plan reviewはAI由来のtaskの個別の優先度を外す（人が置いた値と人間由来は残す。[Plan review](supervisor-lifecycle/plan-review.md)の6）。
 - 誰が置いたか（`PriorityBy`。`human`は人・inbox・依頼の値）は効く段（`PrioritySource`）と別の軸で、goal・taskの由来（`RecordedOrigin`）は作成時に1回だけ書く（`domain::plan_request`、ADR-t1975-1決定2・5）。
+- AIの移動は継いだ`human`の値を残し`out_of_scope`は外す（`task::set_goal`）。
 - 効く優先度（`application::effective_priority`）は自分を推移的に待つ`ready`のtaskの値も継ぐが、永久にclaimされないtaskからは継がない（[ADR-t791-1](../adr/2026-09-28-t791-1-effective-priority-ignores-tasks-waiting-on-abandoned-goals.md)）。
 - claimの順・`needs_session`の再開・復旧jobは効く優先度で1つの列に並ぶ（`domain::slot_order`、[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
   goal間のrankは作らない。
