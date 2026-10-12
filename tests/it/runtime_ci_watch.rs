@@ -392,6 +392,15 @@ fn the_watch_records_runs_files_one_finding_per_failure_set_and_keeps_the_list()
         )
         .unwrap();
     assert_eq!(dismissed.covered_by_task, Some(fix.id()));
+    // The task that covers it fixes it, as a run's prompt and review read
+    // the list (ADR-t1920-1 decision 5): another task's run is told so.
+    assert_eq!(
+        queue.ci_failure_fix_tasks().unwrap(),
+        std::collections::BTreeMap::from([(finding_id, vec![fix.id()])])
+    );
+    let other =
+        dagq::application::ci_watch::run_known_failures(&queue, None, TaskId::new(1)).unwrap();
+    assert_eq!(other["failures"][0]["fix_tasks"], json!([fix.id()]));
     drop(queue);
     let kept = runtime::ci_failures(&db, Some(fix.id())).unwrap();
     assert_eq!(kept["failures"], json!([]));
@@ -1129,4 +1138,54 @@ fn a_setting_that_no_longer_names_the_missing_job_ends_its_attention() {
     fs::write(repo.join("dagq.toml"), &setting).unwrap();
     assert_eq!(attention(&db).unwrap()["next"], "fix dagq.toml");
     backend.join();
+}
+
+/// ADR-t1920-1 decision 5 through the supervisor: with a test failing
+/// already, the worker's prompt of a claim and the whole review's prompt
+/// each carry it (its CI run, no task fixing it) with what to do, count
+/// the section in their `prompt_bytes`, and write the whole list to their
+/// own file in the run directory. The resume's request is
+/// `runtime_headless`'s; a run without failures carries none and writes no
+/// file (`runtime_review` and `runtime_resume`).
+#[test]
+fn a_claim_and_its_whole_review_carry_the_known_failures_and_write_the_list() {
+    let (_fixture, repo, db) = fixture();
+    let failing = "dagq::it a::fails";
+    record_known_failure(&db, &[failing]);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let run_dir = PathBuf::from(detail.runs[0].run_dir().unwrap());
+    let line = known_failure_line(failing);
+    let claim = fs::read_to_string(run_dir.join("prompt.txt")).unwrap();
+    assert!(claim.contains(&line), "{claim}");
+    assert!(claim.contains("do not fix it: name it in the receipt's summary"));
+    assert_known_failure_list(&run_dir.join("known-failures.json"), failing);
+    let launched = payloads(&detail, "wrapper_launched");
+    assert!(
+        launched[0]["prompt_bytes"]["sections"]["known_failures"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "{}",
+        launched[0]
+    );
+    let review = fs::read_to_string(run_dir.join("review-prompt-1.txt")).unwrap();
+    assert!(review.contains(&line), "{review}");
+    assert!(review.contains("Do not send the run back for a failure of a test of this list"));
+    assert_known_failure_list(&run_dir.join("review-1-known-failures.json"), failing);
+    let started = payloads(&detail, "review_started");
+    assert!(
+        started[0]["prompt_bytes"]["sections"]["known_failures"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "{}",
+        started[0]
+    );
 }

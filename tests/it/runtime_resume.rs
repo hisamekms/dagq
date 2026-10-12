@@ -419,6 +419,10 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
         text
     );
     assert!(!run_dir.join("terminal-resume-2.txt").exists());
+    // Nothing fails already on the landing branch's CI: no section, no
+    // list (ADR-t1920-1 decision 5).
+    assert!(!text.contains("fail already"), "{text}");
+    assert!(!run_dir.join("resume-1-known-failures.json").exists());
     // An exit request per session (the first and the two resumed); both
     // resume workspaces were closed.
     assert_exit_sent(&backend, &run, 3);

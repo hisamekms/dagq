@@ -6,7 +6,9 @@ use super::*;
 /// The bytes the whole run review prompt takes at most, the language's
 /// instruction included (task 1571, ADR-t1566-1 decision 4): in production
 /// it took 6,385 bytes at the median, 10,218 at p90 and 18,535 at most.
-pub const RUN_REVIEW_PROMPT_LIMIT: usize = 32_000;
+/// The section on the tests that fail already on the landing branch's CI
+/// (ADR-t1920-1 decision 5) adds its own [`KNOWN_FAILURES_LIMIT`].
+pub const RUN_REVIEW_PROMPT_LIMIT: usize = 32_000 + KNOWN_FAILURES_LIMIT;
 
 /// The bytes of the task's title and of its acceptance (1,544 at most in
 /// production) in the review prompt.
@@ -43,8 +45,16 @@ pub const AGENT_JOB_INSTRUCTIONS_BYTES: usize = 6_000;
 /// person. The title and the acceptance are held to their limits and
 /// the whole to [`RUN_REVIEW_PROMPT_LIMIT`]; what is cut says where in
 /// the worktree or the run directory the job reads it whole (task 1571,
-/// ADR-t1566-1 decision 3).
-pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> FittedPrompt {
+/// ADR-t1566-1 decision 3). `known_failures`, the tests that fail already
+/// on the landing branch's CI, is a section of this whole review's job
+/// only, which decides whether to send the run back (ADR-t1920-1 decision
+/// 5); an agent's job does not carry it.
+pub fn review_prompt(
+    task: &Task,
+    run: &TaskRun,
+    review_path: &str,
+    known_failures: Option<&KnownFailures>,
+) -> FittedPrompt {
     let mut fit = Fit::new(RUN_REVIEW_PROMPT_LIMIT);
     let material = format!("read it whole in the review material at {review_path}");
     let title = fit.text(
@@ -62,12 +72,17 @@ pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> FittedPro
         &format!("{material}, its section Acceptance"),
     );
     fit.section("acceptance", &acceptance);
+    let mut known = known_failures_section(&mut fit, known_failures, Reader::Review);
+    if !known.is_empty() {
+        known.push('\n');
+    }
     let text = format!(
         "You review run {run_id} of dagq task {task_id} ({title}) before it lands.\n\
          Read the review material at {review_path}: the task, its goal, the receipt, the commits and the full diff. Read the worktree if you need more. Do not change any file.\n\
          {rules}\n\
          {docs}\n\
          Acceptance criteria of the task:\n{acceptance}\n\n\
+         {known}\
          Decide one verdict:\n\
          - pass: the diff meets the acceptance criteria and the task's instructions and nothing needs fixing.\n\
          - revise: findings the worker can fix without a person's judgment: missing tests or evidence, findings of the repository's formatter, linter or other checks, a receipt that disagrees with the diff where fixing the diff settles it, or an obvious gap inside the instructed scope.\n\

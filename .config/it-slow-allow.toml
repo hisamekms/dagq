@@ -967,3 +967,27 @@ task = 2256
 name = "runtime_recheck::a_waiting_run_whose_check_fails_on_the_new_main_is_resumed"
 reason = "B 境界（Git・プロセス・SQLite・supervisor の配線）: 実際の scratch worktree で [recheck] command を流し、コードの分類の失敗で leaseの無い run を park_rechecked して resume することを実際の supervisor で確かめる。分類と skipped の判断は domain::recheck の unit test"
 task = 773
+
+# 11.6s
+[[test]]
+name = "runtime_headless::a_parked_run_is_resumed_with_a_turn_of_the_same_session"
+reason = "B 境界（プロセス・supervisor の配線）: e2e が落ちて park した run を同じ session の非対話の turn で resume し、その解決の依頼が既に落ちているテストの節を載せて一覧を run directory に書くことを、実際の supervisor と wrapper で確かめる。依頼の文面と上限は application::prompt の unit test"
+task = 1930
+
+# 6.0s
+[[test]]
+name = "runtime_provider_switch::a_claude_turn_at_its_usage_limit_moves_to_codex_and_lands"
+reason = "B 境界（プロセス・supervisor の配線）: Claude の turn が使用の上限で終わった run を Codex に切り替えて着地させる依頼を、実際の supervisor と wrapper で確かめる。依頼の文面と上限は application::prompt の unit test"
+task = 1930
+
+# 6.3s
+[[test]]
+name = "runtime_provider_switch::no_claude_waits_on_codex_limit_then_retries_codex_without_a_claude_hold"
+reason = "B 境界（プロセス・supervisor の配線）: --no-claude で Codex の上限を待って Codex でやり直す依頼を、実際の supervisor と wrapper で確かめる。依頼の文面と上限は application::prompt の unit test"
+task = 1930
+
+# 8.1s
+[[test]]
+name = "runtime_provider_switch::with_the_fallback_off_a_codex_limit_waits_and_retries_codex"
+reason = "B 境界（プロセス・supervisor の配線）: 切り替えを切った設定で Codex の上限を待ってやり直す依頼を、実際の supervisor と wrapper で確かめる。依頼の文面と上限は application::prompt の unit test"
+task = 1930

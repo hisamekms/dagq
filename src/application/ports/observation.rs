@@ -178,6 +178,10 @@ pub trait QueueRecords {
     /// The `ci_failure` findings `task` fixes (linked to its proposal, or
     /// dismissed as covered by it).
     fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<crate::domain::FindingId>>;
+    /// The tasks that fix each `ci_failure` finding, by its ID: those of
+    /// the proposal linked to it and the one it was dismissed as covered
+    /// by, canceled ones aside, in ID order.
+    fn ci_failure_fix_tasks(&self) -> Result<std::collections::BTreeMap<i64, Vec<TaskId>>>;
 }
 
 /// The ports of the queue 観測と分析's passes of the supervisor and their

@@ -975,7 +975,8 @@ mod tests {
             json!({"commit": SHA, "base": "base", "head": "head", "agents": []})
         );
         let prompt =
-            crate::application::prompt::review_prompt(&task(""), &run(), "/runs/r/review.md").text;
+            crate::application::prompt::review_prompt(&task(""), &run(), "/runs/r/review.md", None)
+                .text;
         assert!(!prompt.contains("subagent"), "{prompt}");
         let material = material(&task(""));
         assert!(!material.contains("subagent"), "{material}");

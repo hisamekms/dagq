@@ -252,6 +252,7 @@ fn goal_dependencies_share_the_predecessor_section_with_short_summaries() {
         &[],
         None,
         &[],
+        None,
     )
     .unwrap()
     .text;
@@ -264,7 +265,7 @@ fn goal_dependencies_share_the_predecessor_section_with_short_summaries() {
         )),
         "{text}"
     );
-    let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None, &[])
+    let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None, &[], None)
         .unwrap()
         .text;
     assert!(alone.contains("Predecessor tasks: none\n"));
@@ -283,7 +284,7 @@ fn the_worker_and_resume_prompts_leave_the_e2e_to_the_runtime() {
     let line = "E2E: do not run the e2e yourself.";
     let codex = run_on(Provider::Codex, WorkerMode::Headless);
     for worker in [&own_run, &codex] {
-        let text = prompt(&open, worker, None, &[], &[], &[], None, &e2e)
+        let text = prompt(&open, worker, None, &[], &[], &[], None, &e2e, None)
             .unwrap()
             .text;
         assert!(text.contains(line), "{text}");
@@ -297,12 +298,12 @@ fn the_worker_and_resume_prompts_leave_the_e2e_to_the_runtime() {
             assert!(!text.contains(gone), "{gone}: {text}");
         }
     }
-    let none = prompt(&open, &own_run, None, &[], &[], &[], None, &[])
+    let none = prompt(&open, &own_run, None, &[], &[], &[], None, &[], None)
         .unwrap()
         .text;
     assert!(!none.contains("E2E"), "{none}");
     let required = task_with_evidence(8, vec![EvidenceCheck::E2e]);
-    let text = prompt(&required, &own_run, None, &[], &[], &[], None, &[])
+    let text = prompt(&required, &own_run, None, &[], &[], &[], None, &[], None)
         .unwrap()
         .text;
     assert!(text.contains(line), "{text}");
@@ -314,6 +315,7 @@ fn the_worker_and_resume_prompts_leave_the_e2e_to_the_runtime() {
         reason: "the e2e failed: a; see /runs/r/e2e-1.log".into(),
         kind: ResumeKind::E2e,
         reason_file: None,
+        known_failures: None,
     };
     for worker in [&own_run, &codex] {
         let resumed = resume_request(&open, worker, &request, &[]).unwrap().text;
@@ -360,7 +362,7 @@ fn only_a_spike_prompt_asks_for_the_spike_result() {
     .unwrap();
     let worker = run_on(Provider::Claude, WorkerMode::Headless);
     let text = |task: &Task| {
-        prompt(task, &worker, None, &[], &[], &[], None, &[])
+        prompt(task, &worker, None, &[], &[], &[], None, &[], None)
             .unwrap()
             .text
     };
@@ -397,7 +399,7 @@ fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
         let mut texts = session_texts(&open, &worker);
         texts.extend(session_texts(&required, &worker));
         texts.push(
-            prompt(&open, &worker, None, &[], &[], &[], None, &e2e)
+            prompt(&open, &worker, None, &[], &[], &[], None, &e2e, None)
                 .unwrap()
                 .text,
         );
@@ -429,6 +431,7 @@ fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
             reason: "the e2e failed: a".into(),
             kind: ResumeKind::E2e,
             reason_file: None,
+            known_failures: None,
         };
         let resumed = resume_request(&open, &worker, &request, &[]).unwrap().text;
         for step in [
@@ -451,7 +454,7 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
     let own_run = run(7, RunStatus::Claimed, None);
     let checks = "the repository's instructions (AGENTS.md or CLAUDE.md) ask a worker to run";
 
-    let worker = prompt(&verified, &own_run, None, &[], &[], &[], None, &[])
+    let worker = prompt(&verified, &own_run, None, &[], &[], &[], None, &[], None)
         .unwrap()
         .text;
     assert!(worker.contains(
@@ -483,6 +486,7 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
         &[],
         Some(&inheritance),
         &[],
+        None,
     )
     .unwrap()
     .text;
@@ -503,6 +507,7 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
         &[],
         Some(&by_hand),
         &[],
+        None,
     )
     .unwrap()
     .text;
@@ -530,6 +535,7 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
             reason: "why".into(),
             kind,
             reason_file: None,
+            known_failures: None,
         };
         let text = resume_request(&verified, &own_run, &request, &[])
             .unwrap()
@@ -932,6 +938,7 @@ fn prompts_take_the_rules_from_the_repository_in_order() {
         &task(7, "work", TaskStatus::InProgress),
         &run(7, RunStatus::Succeeded, Some(SHA)),
         "/r/review.md",
+        None,
     )
     .text;
     let order = "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, ";
@@ -1504,7 +1511,7 @@ fn the_worker_template_holds_every_section_and_no_tasks_values() {
         let second = task(7, "second title", TaskStatus::InProgress);
         let run = run_on(provider, WorkerMode::Headless);
         let prompt_of = |task: &Task| {
-            prompt(task, &run, None, &[], &[], &[], None, &[])
+            prompt(task, &run, None, &[], &[], &[], None, &[], None)
                 .unwrap()
                 .text
         };
@@ -1549,7 +1556,7 @@ fn run_on(provider: Provider, mode: WorkerMode) -> TaskRun {
 /// nudge, an answer and a recovery job's instruction.
 fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
     let mut texts = vec![
-        prompt(task, run, None, &[], &[], &[], None, &[])
+        prompt(task, run, None, &[], &[], &[], None, &[], None)
             .unwrap()
             .text,
     ];
@@ -1570,6 +1577,7 @@ fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
             reason: "why".into(),
             kind,
             reason_file: None,
+            known_failures: None,
         };
         texts.push(resume_request(task, run, &request, &[]).unwrap().text);
     }
@@ -1734,7 +1742,13 @@ fn every_worker_text_that_writes_a_receipt_maps_the_acceptance_once() {
         assert!(text.len() <= 600, "{}", text.len());
         assert!(!text.contains("cargo") && !text.contains('`'), "{text}");
     }
-    let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r").text;
+    let review = review_prompt(
+        &task,
+        &run_on(Provider::Claude, WorkerMode::Headless),
+        "r",
+        None,
+    )
+    .text;
     assert!(!review.contains(ACCEPTANCE_MAP) && !review.contains(ACCEPTANCE_REMAP));
 }
 
@@ -1854,7 +1868,13 @@ fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
     ] {
         assert!(!DOCS_CHECK.contains(word), "{word}");
     }
-    let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r").text;
+    let review = review_prompt(
+        &task,
+        &run_on(Provider::Claude, WorkerMode::Headless),
+        "r",
+        None,
+    )
+    .text;
     assert!(!review.contains(DOCS_CHECK));
     assert!(!review.contains("the documents you checked against the diff"));
 }
@@ -1866,7 +1886,13 @@ fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
 #[test]
 fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-    let review = review_prompt(&task, &run_on(Provider::Codex, WorkerMode::Headless), "r").text;
+    let review = review_prompt(
+        &task,
+        &run_on(Provider::Codex, WorkerMode::Headless),
+        "r",
+        None,
+    )
+    .text;
     assert_eq!(review.matches(REVIEW_DOCS_CHECK).count(), 1, "{review}");
     assert!(review.contains(&format!(
             "Do not change any file.\n{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}\nAcceptance criteria of the task:"
@@ -1925,7 +1951,13 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
 #[test]
 fn the_review_prompt_names_the_repositorys_instructions() {
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-    let review = review_prompt(&task, &run_on(Provider::Claude, WorkerMode::Headless), "r").text;
+    let review = review_prompt(
+        &task,
+        &run_on(Provider::Claude, WorkerMode::Headless),
+        "r",
+        None,
+    )
+    .text;
     let material = "Read the worktree if you need more. Do not change any file.\n";
     assert!(
         review.contains(&format!("{material}{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}")),
@@ -2670,11 +2702,12 @@ fn prompt_describes_the_goal_the_context_and_its_company_and_keeps_one_shape_wit
         &[sibling],
         None,
         &[],
+        None,
     )
     .unwrap()
     .text;
     let alone_task = task(2, "alone", TaskStatus::InProgress);
-    let alone = prompt(&alone_task, &own_run, None, &[], &[], &[], None, &[])
+    let alone = prompt(&alone_task, &own_run, None, &[], &[], &[], None, &[], None)
         .unwrap()
         .text;
 
@@ -3026,6 +3059,7 @@ fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
         &task,
         &run_on(Provider::Claude, WorkerMode::Headless),
         "/runs/run/review.md",
+        None,
     );
     within(&fitted, RUN_REVIEW_PROMPT_LIMIT);
     let bytes = &fitted.bytes;
@@ -3047,6 +3081,7 @@ fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
         &task_with_evidence(7, Vec::new()),
         &run_on(Provider::Claude, WorkerMode::Headless),
         "r",
+        None,
     );
     assert!(
         small.bytes.omitted.is_empty() && small.bytes.over_limit.is_none(),
@@ -4582,6 +4617,7 @@ fn the_worker_prompt_stays_within_its_limits_with_the_largest_input() {
         &siblings,
         Some(&inherited),
         &[],
+        None,
     )
     .unwrap();
     let (text, bytes) = (&fitted.text, &fitted.bytes);
@@ -4669,6 +4705,7 @@ fn the_worker_prompt_takes_direct_predecessors_first_and_goal_tasks_newest_first
         &[],
         None,
         &[],
+        None,
     )
     .unwrap()
     .text;
@@ -4703,6 +4740,7 @@ fn within_its_limits_the_worker_prompt_is_unchanged() {
         &siblings,
         Some(&inherited),
         &[],
+        None,
     )
     .unwrap();
     let text = &fitted.text;
@@ -4834,6 +4872,7 @@ fn a_resolution_request_stays_within_its_limit_with_the_largest_input() {
                 reason: reason.clone(),
                 kind,
                 reason_file: Some(file.into()),
+                known_failures: None,
             };
             let fitted = resume_request(&task, &run, &request, &landed).unwrap();
             let text = &fitted.text;
@@ -4882,6 +4921,7 @@ fn a_resolution_request_stays_within_its_limit_with_the_largest_input() {
         reason,
         kind: ResumeKind::Triage,
         reason_file: None,
+        known_failures: None,
     };
     let run = run_on(Provider::Claude, WorkerMode::Headless);
     let text = resume_request(&task, &run, &request, &[]).unwrap().text;
@@ -4907,6 +4947,7 @@ fn within_its_limits_a_next_turn_message_carries_its_texts_whole() {
                 reason: reason.clone(),
                 kind,
                 reason_file: Some("/runs/run/resume-1-reason.txt".into()),
+                known_failures: None,
             };
             let fitted = resume_request(&task, &run, &request, &[]).unwrap();
             assert!(fitted.text.contains(&format!("\nReason: {reason}\n")));
@@ -5328,4 +5369,301 @@ fn a_handoff_with_the_largest_material_stays_within_its_limits() {
     let task_prompt = "p".repeat(WORKER_PROMPT_LIMIT);
     let first = crate::domain::turn::new_session_prompt(&task_prompt, &fitted.text);
     assert!(first.len() <= WORKER_PROMPT_LIMIT + HANDOFF_LIMIT);
+}
+
+/// The file the known failures' tests write the whole list to.
+const KNOWN_FILE: &str = "/runs/r/known-failures.json";
+
+/// The known failures of `ci failures --task` (ADR-t1920-1 decision 5):
+/// `others` each `(name, run_id, fix task)`, `fixing` the task's own.
+fn known(others: &[(&str, i64, Option<i64>)], fixing: &[&str]) -> KnownFailures {
+    let item = |name: &str, run: i64, fix: Option<i64>| {
+        json!({"name": name, "kind": "test",
+               "added": {"run_id": run, "attempt": 1, "sha": "s", "url": format!("https://ci/runs/{run}"), "at": "t"},
+               "finding_id": 4, "fix_tasks": fix.into_iter().collect::<Vec<_>>()})
+    };
+    let view = json!({
+        "failures": others.iter().map(|(name, run, fix)| item(name, *run, *fix)).collect::<Vec<_>>(),
+        "kept_for_task": fixing.iter().map(|name| item(name, 9, Some(9))).collect::<Vec<_>>(),
+    });
+    KnownFailures::from_view(&view, KNOWN_FILE).unwrap()
+}
+
+/// What the worker is told of the tests it does not fix.
+const DO_NOT_FIX: &str = "If a test of this list or of its file fails in your checks and your change does not cause it, do not fix it: name it in the receipt's summary, since the task that fixes it owns it.";
+
+/// What the whole review is told of the tests the run's task does not fix.
+const DO_NOT_SEND_BACK: &str = "Do not send the run back for a failure of a test of this list or of its file unless the diff causes it: the task that fixes it owns it.\n";
+
+/// The list keeps the CI run that failed last first, with each item's URL
+/// and fix tasks, and is no list when it holds nothing for the run.
+#[test]
+fn the_known_failures_are_read_newest_first_and_none_without_any() {
+    let list = known(&[("old", 1, Some(5)), ("new", 3, None)], &["own"]);
+    let names: Vec<&str> = list.others.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["new", "old"]);
+    assert_eq!(list.others[1].url.as_deref(), Some("https://ci/runs/1"));
+    assert_eq!(list.others[1].fix_tasks, [TaskId::new(5)]);
+    assert_eq!(list.fixing[0].name, "own");
+    assert_eq!(list.file, KNOWN_FILE);
+    let empty = json!({"enabled": false, "state": "unknown", "watch": "disabled", "failures": []});
+    assert_eq!(KnownFailures::from_view(&empty, KNOWN_FILE), None);
+}
+
+/// AC 1, 2: the claim's prompt and every resolution request carry the
+/// tests that fail already, with their CI run and fix task, and tell the
+/// worker not to fix one its change does not cause but to name it in the
+/// receipt; without a list there is no section.
+#[test]
+fn the_worker_prompt_and_its_requests_carry_the_known_failures_only_when_there_are_some() {
+    let task = task_with_evidence(7, Vec::new());
+    let own_run = run(7, RunStatus::Claimed, None);
+    let list = known(
+        &[
+            ("dagq::it a::fails", 3, Some(12)),
+            ("dagq::it b::fails", 2, None),
+        ],
+        &[],
+    );
+    let lines = [
+        "Tests that fail already on the landing branch's CI, each with the CI run that failed and the task that fixes it:\n",
+        "- dagq::it a::fails (CI run: https://ci/runs/3; fixed by task 12)\n",
+        "- dagq::it b::fails (CI run: https://ci/runs/2; no task fixes it yet)\n",
+        DO_NOT_FIX,
+    ];
+    let with = prompt(&task, &own_run, None, &[], &[], &[], None, &[], Some(&list)).unwrap();
+    for line in lines {
+        assert!(with.text.contains(line), "{line}: {}", with.text);
+    }
+    assert!(with.bytes.sections["known_failures"] > 0);
+    assert!(!with.bytes.omitted.contains_key("known_failures"));
+    assert!(!with.text.contains("This task fixes these tests"));
+    let without = prompt(&task, &own_run, None, &[], &[], &[], None, &[], None).unwrap();
+    assert!(!without.text.contains("fail already"), "{}", without.text);
+    assert!(!without.bytes.sections.contains_key("known_failures"));
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    for kind in RESUME_KINDS {
+        for list in [Some(list.clone()), None] {
+            let request = ResumeRequest {
+                main: CommitSha::try_from(SHA).unwrap(),
+                branch: "main".into(),
+                reason: "why".into(),
+                kind,
+                reason_file: None,
+                known_failures: list.clone(),
+            };
+            let text = resume_request(&task, &run, &request, &[]).unwrap().text;
+            for line in lines {
+                assert_eq!(
+                    text.contains(line.trim_end()),
+                    list.is_some(),
+                    "{kind:?}: {text}"
+                );
+            }
+        }
+    }
+}
+
+/// AC 2: a run of a task that fixes a CI failure is shown its tests as
+/// what it makes pass, without naming itself as their fixer, and the
+/// others as before.
+#[test]
+fn a_fix_tasks_run_is_shown_its_failing_tests_to_make_pass() {
+    let task = task_with_evidence(9, Vec::new());
+    let own_run = run(9, RunStatus::Claimed, None);
+    let list = known(&[("other", 2, Some(12))], &["dagq::it mine::fails"]);
+    let text = prompt(&task, &own_run, None, &[], &[], &[], None, &[], Some(&list))
+        .unwrap()
+        .text;
+    let fixing = "This task fixes these tests, which fail already on the landing branch's CI: make them pass:\n- dagq::it mine::fails (CI run: https://ci/runs/9)\n";
+    assert!(text.contains(fixing), "{text}");
+    assert!(text.contains("- other (CI run: https://ci/runs/2; fixed by task 12)\n"));
+    assert!(text.contains(DO_NOT_FIX));
+    // Only its own: no line on the tests others fix.
+    let only = known(&[], &["dagq::it mine::fails"]);
+    let text = prompt(&task, &own_run, None, &[], &[], &[], None, &[], Some(&only))
+        .unwrap()
+        .text;
+    assert!(text.contains(fixing), "{text}");
+    assert!(!text.contains(DO_NOT_FIX), "{text}");
+}
+
+/// AC 3: the whole review's prompt carries the list as material for its
+/// verdict, and an agent's job, which does not decide the send back,
+/// carries none.
+#[test]
+fn the_whole_review_carries_the_known_failures_and_an_agents_job_does_not() {
+    use crate::application::agent_job::{AgentJob, build};
+    use crate::domain::review_subagents::{AgentRole, AgentTools};
+    let task = task_with_evidence(9, Vec::new());
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let list = known(&[("other", 2, Some(12))], &["mine"]);
+    let review = review_prompt(&task, &run, "/runs/r/review.md", Some(&list));
+    for line in [
+        "This task fixes these tests, which fail already on the landing branch's CI: judge whether the diff makes them pass:\n- mine (CI run: https://ci/runs/9)\n",
+        "- other (CI run: https://ci/runs/2; fixed by task 12)\n",
+        DO_NOT_SEND_BACK,
+    ] {
+        assert!(review.text.contains(line), "{line}: {}", review.text);
+    }
+    assert!(review.bytes.sections["known_failures"] > 0);
+    within(&review, RUN_REVIEW_PROMPT_LIMIT);
+    let without = review_prompt(&task, &run, "/runs/r/review.md", None);
+    assert!(!without.text.contains("fail already"), "{}", without.text);
+    let definition = "---\ndescription: checks the design\ntools: [read]\n---\nCheck it.\n";
+    let tools = AgentTools::declared(AgentRole::Review, definition).unwrap();
+    let agent = build(&AgentJob {
+        agent: "design",
+        definition,
+        tools: &tools,
+        base: SHA,
+        head: SHA,
+        material: Path::new("/runs/r/review.md"),
+        cwd: Path::new("/runs/r/worktree"),
+        dir: Path::new("/runs/r/review-1-agents/design"),
+        language: None,
+    })
+    .unwrap();
+    assert!(!agent.prompt.text.contains("fail already"));
+    assert!(!agent.prompt.bytes.sections.contains_key("known_failures"));
+}
+
+/// AC 4, 5: with 1,000 known failures of 1 KB each (and the largest input
+/// of each prompt), the worker's prompt, every resolution request and the
+/// whole review's prompt stay within their whole limits, count the
+/// section's bytes and what it left out, and say how many it left out and
+/// that the run directory's file lists them all.
+#[test]
+fn a_thousand_known_failures_stay_within_each_prompts_limit_and_name_their_file() {
+    let names: Vec<String> = (0..1_000)
+        .map(|n| format!("{n:04} {}", "t".repeat(1_019)))
+        .collect();
+    let others: Vec<(&str, i64, Option<i64>)> = names
+        .iter()
+        .enumerate()
+        .map(|(n, name)| (name.as_str(), n as i64, Some(n as i64)))
+        .collect();
+    let list = known(&others, &[]);
+    let note = |left: usize| {
+        format!(
+            "({left} failing tests left out by this section's limit. To read them: {KNOWN_FILE} lists them all, with the tasks that fix each as fix_tasks.)\n"
+        )
+    };
+    let check = |fitted: &FittedPrompt, limit: usize| {
+        within(fitted, limit);
+        let bytes = &fitted.bytes;
+        assert!(
+            bytes.sections["known_failures"] <= KNOWN_FAILURES_LIMIT,
+            "{bytes:?}"
+        );
+        // Each kept item had its name cut; with those left out every
+        // item is counted once.
+        assert_eq!(bytes.omitted["known_failures"], 1_000, "{bytes:?}");
+        let kept = fitted.text.matches("(CI run: https://ci/runs/").count();
+        assert!(kept > 0 && kept <= KNOWN_FAILURES_COUNT, "{kept}");
+        assert!(fitted.text.contains(&note(1_000 - kept)), "{}", fitted.text);
+        // The CI run that failed last first.
+        assert!(fitted.text.contains("- 0999 "), "the newest is kept");
+        assert!(
+            fitted
+                .text
+                .contains(&format!("{KNOWN_FILE} holds it whole"))
+        );
+    };
+    let (task, goal, predecessors, goals, siblings, inherited) = worker_material(300, 400_000);
+    let own_run = run(9, RunStatus::Claimed, None);
+    let worker = prompt(
+        &task,
+        &own_run,
+        Some(&goal),
+        &predecessors,
+        &goals,
+        &siblings,
+        Some(&inherited),
+        &[],
+        Some(&list),
+    )
+    .unwrap();
+    check(&worker, WORKER_PROMPT_LIMIT);
+    let reason = "理".repeat(400_000);
+    let big = task_with_lists(
+        (0..10_000).map(|n| format!("src/{n}/")).collect(),
+        vec!["c".repeat(100_000)],
+    );
+    let landed: Vec<LandedTask> = (0..LANDED_TASK_LINES as i64 + 5)
+        .map(|n| LandedTask {
+            task_id: TaskId::new(i64::MAX - n),
+            title: "長".repeat(1_000),
+        })
+        .collect();
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    for kind in RESUME_KINDS {
+        let request = ResumeRequest {
+            main: CommitSha::try_from("2".repeat(40).as_str()).unwrap(),
+            branch: "b".repeat(256),
+            reason: reason.clone(),
+            kind,
+            reason_file: Some("/runs/r/resume-1-reason.txt".into()),
+            known_failures: Some(list.clone()),
+        };
+        let fitted = resume_request(&big, &run, &request, &landed).unwrap();
+        check(&fitted, RESUME_REQUEST_LIMIT);
+        let over = fitted.bytes.over_limit.clone().unwrap();
+        assert!(!over.contains("its middle was cut"), "{kind:?}: {over}");
+    }
+    let review = review_prompt(
+        &big_task(7, 100_000),
+        &run,
+        "/runs/r/review.md",
+        Some(&list),
+    );
+    check(&review, RUN_REVIEW_PROMPT_LIMIT);
+    let over = review.bytes.over_limit.clone().unwrap();
+    assert!(!over.contains("its middle was cut"), "{over}");
+}
+
+/// Review revise 2: when the task's own tests fill the section, the
+/// others' are all in the file only, and the worker and the whole review
+/// are still told how to treat them, with the count left out and the file.
+#[test]
+fn the_others_tests_left_out_whole_still_get_their_instruction() {
+    let own: Vec<String> = (0..KNOWN_FAILURES_COUNT)
+        .map(|n| format!("own {n}"))
+        .collect();
+    let own: Vec<&str> = own.iter().map(String::as_str).collect();
+    let list = known(&[("other a", 2, Some(12)), ("other b", 1, None)], &own);
+    let note = format!(
+        "(2 failing tests left out by this section's limit. To read them: {KNOWN_FILE} lists them all, with the tasks that fix each as fix_tasks.)\n"
+    );
+    let task = task_with_evidence(9, Vec::new());
+    let worker = prompt(
+        &task,
+        &run(9, RunStatus::Claimed, None),
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        Some(&list),
+    )
+    .unwrap();
+    let review = review_prompt(
+        &task,
+        &run_on(Provider::Claude, WorkerMode::Headless),
+        "/runs/r/review.md",
+        Some(&list),
+    );
+    for (fitted, instruction) in [(&worker, DO_NOT_FIX), (&review, DO_NOT_SEND_BACK)] {
+        let text = &fitted.text;
+        assert!(
+            text.contains("- own 19 (CI run: https://ci/runs/9)\n"),
+            "{text}"
+        );
+        assert!(!text.contains("- other a"), "{text}");
+        assert!(!text.contains("Tests that fail already"), "{text}");
+        assert!(text.contains(&note), "{text}");
+        assert!(text.contains(instruction.trim_end()), "{text}");
+        assert_eq!(fitted.bytes.omitted["known_failures"], 2);
+    }
 }

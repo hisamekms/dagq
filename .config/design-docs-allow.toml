@@ -119,7 +119,6 @@ tasks = 14
 [[doc]]
 path = "docs/design/supervisor-lifecycle/ci-watch.md"
 line = 1042
-tasks = 1
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/claim-defer.md"

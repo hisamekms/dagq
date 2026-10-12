@@ -137,4 +137,7 @@ impl QueueRecords for SqliteQueue {
     fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<crate::domain::FindingId>> {
         SqliteQueue::ci_failure_findings_of(self, task)
     }
+    fn ci_failure_fix_tasks(&self) -> Result<std::collections::BTreeMap<i64, Vec<TaskId>>> {
+        SqliteQueue::ci_failure_fix_tasks(self)
+    }
 }

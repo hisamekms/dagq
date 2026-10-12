@@ -297,6 +297,31 @@ pub fn known_failures<Q: RunLog + QueueRecords + ?Sized>(
     ))
 }
 
+/// The tests that fail already for a run of `task`, as its worker's
+/// prompt and its whole review read them (ADR-t1920-1 decision 5):
+/// [`known_failures`] of `task` on `[ci_watch]`'s branch, each item with
+/// `fix_tasks`, the tasks that fix its finding.
+pub fn run_known_failures<Q: RunLog + QueueRecords + ?Sized>(
+    queue: &Q,
+    config: Option<&CiWatchConfig>,
+    task: TaskId,
+) -> Result<Value> {
+    let branch = config.and_then(|config| config.branch.as_deref());
+    let mut view = known_failures(queue, config, branch, Some(task))?;
+    let fixes = queue.ci_failure_fix_tasks()?;
+    for key in ["failures", "kept_for_task"] {
+        for item in view[key].as_array_mut().into_iter().flatten() {
+            let tasks = item["finding_id"]
+                .as_i64()
+                .and_then(|finding| fixes.get(&finding))
+                .cloned()
+                .unwrap_or_default();
+            item["fix_tasks"] = json!(tasks);
+        }
+    }
+    Ok(view)
+}
+
 /// What `status` takes from `[ci_watch]` as read now (`read`): the jobs it
 /// names, so a `ci_jobs_missing` it no longer names is not an attention
 /// (ADR-t2034-1 decision 5), `None` when it could not be read (unknown,

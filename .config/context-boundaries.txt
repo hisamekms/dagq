@@ -314,6 +314,7 @@ method | QueueRecords | reports_written | all |
 method | QueueRecords | kpi_breaches_open | all |
 method | QueueRecords | ci_watch_events | all |
 method | QueueRecords | ci_failure_findings_of | all |
+method | QueueRecords | ci_failure_fix_tasks | all |
 method | NodeSampleStore | record_node_sample | host | the record of the host's load
 method | NodeSampleStore | import_node_samples | host | the import of the CSV files
 method | NodeSampleStore | imported_files | host | the import reads its marks
@@ -347,6 +348,7 @@ item | src/application/supervise/claim_defer.rs | DeferWatch | execution | plann
 item | src/application/supervise/background.rs | stop_swept_wrapper | execution | host | the stop of a wrapper, for the sweep
 item | src/application/supervise/recheck.rs | clear_target | execution | host | under recheck's lock, for the cleaning of free disk
 item | src/application/ci_watch.rs | known_failures | observation | execution | to the landing's verification
+item | src/application/ci_watch.rs | run_known_failures | observation | execution | to the worker's prompts and the run's whole review
 item | src/application/supervise/ci_watch.rs | CiWatchState | observation | execution | read held and unreadable only; supervise::ci_watch changes it
 item | src/domain/throughput_review.rs | UnusableFinish | observation | execution | supervise::provider holds it back once
 item | src/application/supervise/observer.rs | UnusableTimerJob | observation | execution | supervise::provider holds it back once

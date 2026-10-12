@@ -1549,7 +1549,11 @@ fn handoff_before_the_resume_request(unsent: Unsent) {
     let mut written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
     assert_eq!(written["phase"], "resume");
     assert_eq!(written["message_sent_at"], Value::Null, "{written}");
-    assert_eq!(written["message_bytes"]["limit"], 36_000, "{written}");
+    assert_eq!(
+        written["message_bytes"]["limit"],
+        dagq::application::prompt::RESUME_REQUEST_LIMIT,
+        "{written}"
+    );
     // A request written before the limits: the built one (whose start
     // the session reads its main from) and much more.
     let file = run_dir.join("resume-1.txt");
@@ -1636,10 +1640,18 @@ fn handoff_before_the_resume_request(unsent: Unsent) {
         assert_eq!(*bytes, written["message_bytes"], "{bytes}");
         assert_eq!(taken.prompt, written["message"].as_str().unwrap());
     } else {
-        assert_eq!(bytes["limit"], 36_000, "{bytes}");
+        assert_eq!(
+            bytes["limit"],
+            dagq::application::prompt::RESUME_REQUEST_LIMIT,
+            "{bytes}"
+        );
         assert_eq!(bytes["omitted"]["request"], 1, "{bytes}");
         assert_eq!(bytes["total"], taken.prompt.len(), "{bytes}");
-        assert!(taken.prompt.len() <= 36_000, "{}", taken.prompt.len());
+        assert!(
+            taken.prompt.len() <= dagq::application::prompt::RESUME_REQUEST_LIMIT,
+            "{}",
+            taken.prompt.len()
+        );
         let (kept, note) = taken.prompt.split_once("\n[… ").unwrap();
         assert!(old.starts_with(kept));
         assert_eq!(

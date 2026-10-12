@@ -8,6 +8,12 @@ use crate::domain::EventKind;
 use crate::domain::e2e_quarantine;
 use crate::domain::fresh_session::{self, NextSession};
 
+/// The file in a run's directory that holds the whole list of the tests
+/// that fail already on the landing branch's CI its worker's prompt was
+/// written with; a resolution request writes `<request>-known-failures.json`
+/// and the review `review-<attempt>-known-failures.json` beside it.
+pub(super) const KNOWN_FAILURES_FILE: &str = "known-failures.json";
+
 impl Supervisor<'_> {
     /// Start the validation of `run` on a thread (see [`spawn_validation`]).
     pub(super) fn validate(&self, run: TaskRun) -> thread::JoinHandle<Result<Validation>> {
@@ -27,6 +33,37 @@ impl Supervisor<'_> {
         self.verifier.e2e_paths().unwrap_or_else(|error| {
             warn!("[e2e] paths of dagq.toml could not be read; e2e is required by the task only: {error:#}");
             Vec::new()
+        })
+    }
+    /// The tests that fail already on the landing branch's CI for a run of
+    /// `task` (ADR-t1920-1 decision 5), written whole to `file` in its run
+    /// directory, where the worker and the whole review read what their
+    /// section leaves out; `None`, and no file, when the list holds none.
+    /// A list that cannot be read or written leaves the section out with a
+    /// warning: the claim, the request or the review goes on without it.
+    pub(super) fn known_failures(
+        &self,
+        task: crate::domain::TaskId,
+        file: &Path,
+    ) -> Option<crate::application::prompt::KnownFailures> {
+        let read = || -> Result<_> {
+            let config = self.verifier.ci_watch_config()?;
+            let view = crate::application::ci_watch::run_known_failures(
+                &*self.queue,
+                config.as_ref(),
+                task,
+            )?;
+            let known =
+                crate::application::prompt::KnownFailures::from_view(&view, &path_text(file)?);
+            if known.is_some() {
+                self.files
+                    .write(file, serde_json::to_string_pretty(&view)?.as_bytes())?;
+            }
+            Ok(known)
+        };
+        read().unwrap_or_else(|error| {
+            warn!(task_id = %task, "the tests that fail already on the landing branch's CI could not be read for task {task}; its prompt goes without them: {error:#}");
+            None
         })
     }
     /// The marks of `.config/e2e-quarantine.toml` in the landing branch's
@@ -98,8 +135,9 @@ impl Supervisor<'_> {
         Ok(None)
     }
     /// Write `run`'s prompt (`prompt.txt` in `run_dir`) for its task, as
-    /// its worker's route and provider take it; the branch it inherits, if
-    /// any, and what the prompt takes (ADR-t2072-1). Written again when the
+    /// its worker's route and provider take it, with the known failures in
+    /// [`KNOWN_FAILURES_FILE`]; the branch it inherits, if any, and what
+    /// the prompt takes (ADR-t2072-1). Written again when the
     /// run moves to the other provider (ADR-t813-2), whose worker is told
     /// otherwise.
     pub(super) fn write_prompt(
@@ -126,6 +164,7 @@ impl Supervisor<'_> {
         };
         let siblings = siblings_in_progress(task, self.queue.tasks_in_progress()?);
         let inherited = self.inheritance(run)?;
+        let known_failures = self.known_failures(task.id(), &run_dir.join(KNOWN_FAILURES_FILE));
         let fitted = prompt(
             task,
             run,
@@ -135,6 +174,7 @@ impl Supervisor<'_> {
             &siblings,
             inherited.as_ref(),
             &self.e2e_paths(),
+            known_failures.as_ref(),
         )?;
         let fitted = fitted.with_language(self.verifier.language().as_ref());
         self.files

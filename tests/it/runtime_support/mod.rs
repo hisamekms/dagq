@@ -1837,6 +1837,50 @@ fn awaiting_run_with_review_retry(retry: bool) -> (Fixture, PathBuf, PathBuf, Ta
     (dir, repo, db, run)
 }
 
+/// Record, as the CI watch would, a red run (ID 7) whose JUnit failed
+/// `tests`: the list the runs of the tasks are told about (ADR-t1920-1
+/// decision 5).
+pub fn record_known_failure(db: &Path, tests: &[&str]) {
+    SqliteQueue::open(db)
+        .unwrap()
+        .record_ci_check(dagq::domain::ci_watch::CiCheckRecord {
+            previous: None,
+            checked: json!({
+                "run_id": 7, "run_number": 7, "attempt": 1, "sha": "a".repeat(40),
+                "url": "https://github.com/owner/name/actions/runs/7",
+                "created_at": "2026-10-06T00:07:00Z", "conclusion": "failure",
+                "state": "red", "failed_tests": tests, "added": tests, "removed": [],
+            }),
+            turned_red: None,
+            turned_green: None,
+            finding: None,
+            resolve: Vec::new(),
+        })
+        .unwrap()
+        .unwrap();
+}
+
+/// The line a prompt carries for `name` of [`record_known_failure`]: its
+/// CI run and no task fixing it.
+pub fn known_failure_line(name: &str) -> String {
+    format!(
+        "- {name} (CI run: https://github.com/owner/name/actions/runs/7; no task fixes it yet)\n"
+    )
+}
+
+/// The file at `path` holds the whole list of [`record_known_failure`] of
+/// `name` as `ci failures --task` reads it, with the tasks that fix it.
+pub fn assert_known_failure_list(path: &Path, name: &str) {
+    let list: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(list["failures"][0]["name"], name, "{list}");
+    assert_eq!(
+        list["failures"][0]["added"]["url"],
+        "https://github.com/owner/name/actions/runs/7"
+    );
+    assert_eq!(list["failures"][0]["fix_tasks"], json!([]), "{list}");
+    assert_eq!(list["kept_for_task"], json!([]), "{list}");
+}
+
 /// Two tasks rewrite `change.txt`: the first lands, and a person's
 /// `integrate` of the second (its approval) conflicts and parks it as
 /// `needs_session`. Returns the parked run and the landed main.
@@ -2016,7 +2060,7 @@ pub fn provision_under(repo: &Path, db: &Path, token: &str) -> TaskRun {
     let task = queue.show(run.task_id()).unwrap().task;
     fs::write(
         run_dir.join("prompt.txt"),
-        runtime::prompt(&task, &run, None, &[], &[], &[], None, &[])
+        runtime::prompt(&task, &run, None, &[], &[], &[], None, &[], None)
             .unwrap()
             .text,
     )

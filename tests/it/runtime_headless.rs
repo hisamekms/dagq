@@ -329,10 +329,14 @@ esac"#,
 /// Acceptance (2): a run parked `needs_session` (the e2e the runtime ran
 /// after its review failed, ADR-t1233-2) is resumed in a workspace of its
 /// own whose wrapper takes the resolution request as a resume of the same
-/// session.
+/// session. With a test failing already on the landing branch's CI, the
+/// request carries it and writes the whole list beside it (ADR-t1920-1
+/// decision 5).
 #[test]
 fn a_parked_run_is_resumed_with_a_turn_of_the_same_session() {
     let (dir, repo, db, backend) = headless_fixture(&[EvidenceCheck::E2e]);
+    let failing = "dagq::it a::fails";
+    record_known_failure(&db, &[failing]);
     set_turns(
         dir.path(),
         r#"case "$MODE" in
@@ -377,9 +381,22 @@ esac"#,
     let requested = payloads(&detail, "turn_requested");
     assert_eq!(requested[0]["what"], "resolution request", "{requested:?}");
     let bytes = &requested[0]["prompt_bytes"];
-    assert_eq!(bytes["limit"], 36_000, "{bytes}");
+    assert_eq!(
+        bytes["limit"],
+        dagq::application::prompt::RESUME_REQUEST_LIMIT,
+        "{bytes}"
+    );
     assert!(bytes["sections"]["reason"].as_u64().unwrap() > 0, "{bytes}");
     assert!(bytes["sections"]["landed"].as_u64().unwrap() > 0, "{bytes}");
+    assert!(
+        bytes["sections"]["known_failures"].as_u64().unwrap() > 0,
+        "{bytes}"
+    );
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let request = fs::read_to_string(run_dir.join("resume-1.txt")).unwrap();
+    assert!(request.contains(&known_failure_line(failing)), "{request}");
+    assert!(request.contains("do not fix it: name it in the receipt's summary"));
+    assert_known_failure_list(&run_dir.join("resume-1-known-failures.json"), failing);
     assert!(event_kinds(&detail).contains(&"run_e2e_failed"));
     assert_eq!(
         payloads(&detail, "run_e2e_finished")[0]["outcome"],

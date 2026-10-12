@@ -138,6 +138,7 @@ impl Supervisor<'_> {
             reason: reason.unwrap_or_else(|| "(no reason recorded)".to_owned()),
             kind,
             reason_file: reason_file(&run, &format!("resume-{attempt}")),
+            known_failures: self.request_known_failures(&run, &format!("resume-{attempt}")),
         };
         match self.start_resume(&run, attempt, &request, run_env) {
             Ok(watch) => {
@@ -937,6 +938,23 @@ pub(super) fn reason_file(run: &TaskRun, request: &str) -> Option<String> {
             .to_string_lossy()
             .into_owned()
     })
+}
+
+impl Supervisor<'_> {
+    /// The known failures a resolution request named `request` carries for
+    /// `run`'s task ([`Supervisor::known_failures`]), its whole list in
+    /// `<request>-known-failures.json` of the run directory.
+    pub(super) fn request_known_failures(
+        &self,
+        run: &TaskRun,
+        request: &str,
+    ) -> Option<crate::application::prompt::KnownFailures> {
+        let dir = run.run_dir()?;
+        self.known_failures(
+            run.task_id(),
+            &Path::new(dir).join(format!("{request}-known-failures.json")),
+        )
+    }
 }
 
 /// The tasks landed on `main` since the run's base, oldest first, from the

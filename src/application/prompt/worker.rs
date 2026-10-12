@@ -455,7 +455,9 @@ pub const NEXT_TURN_NAME_BYTES: usize = 300;
 /// the request the failed turn did not get to and the notes of what was
 /// cut, with the language's room. The switch requests kept on the host on
 /// 2026-10-08 took 21,541 bytes at most, nearly all of it that request.
-pub const PROVIDER_TURN_LIMIT: usize = 42_000;
+/// It grows with [`RESUME_REQUEST_LIMIT`]'s section on the known failures
+/// ([`KNOWN_FAILURES_LIMIT`]), which the request it carries may hold.
+pub const PROVIDER_TURN_LIMIT: usize = 42_000 + KNOWN_FAILURES_LIMIT;
 
 /// The bytes of the request a failed turn did not get to, carried by the
 /// retry or switch request whatever it was (a first request, a retry or
@@ -511,9 +513,11 @@ pub struct HandoffMaterial<'a> {
 /// ([`HANDOFF_REVIEW_BYTES`]), the receipt's summary
 /// ([`HANDOFF_RECEIPT_BYTES`]), the request ([`HANDOFF_REQUEST_BYTES`]) and
 /// the notes of what was cut, with the language's room: the sections'
-/// limits take 78,000 bytes together. The new session's first turn is the
-/// task's prompt ([`WORKER_PROMPT_LIMIT`]) and this.
-pub const HANDOFF_LIMIT: usize = 82_000;
+/// limits take 78,000 bytes together, and the request's grows with the
+/// known failures' section of a resolution request
+/// ([`KNOWN_FAILURES_LIMIT`]). The new session's first turn is the task's
+/// prompt ([`WORKER_PROMPT_LIMIT`]) and this.
+pub const HANDOFF_LIMIT: usize = 82_000 + KNOWN_FAILURES_LIMIT;
 
 /// The bytes of the commits' lines, the newest kept: about 100 lines of
 /// `git log --oneline`. The rest is in the worktree's `git log`.
@@ -699,9 +703,11 @@ pub(crate) fn local_checks(verify: &str) -> String {
 /// sum of the sections' limits below (93,000 bytes), the fixed instructions
 /// (about 10,000) and the headings and notes of what was left out (about
 /// 4,000; the largest input of the unit test takes 103,869 bytes), with room
-/// for the language's instruction. A prompt at p99 is not cut as a whole; how much
-/// of each section is kept is said by its own limit.
-pub const WORKER_PROMPT_LIMIT: usize = 112_000;
+/// for the language's instruction, and the section on the tests that fail
+/// already on the landing branch's CI ([`KNOWN_FAILURES_LIMIT`]). A prompt
+/// at p99 is not cut as a whole; how much of each section is kept is said
+/// by its own limit.
+pub const WORKER_PROMPT_LIMIT: usize = 112_000 + KNOWN_FAILURES_LIMIT;
 
 /// The bytes of the task's own title, description, acceptance,
 /// verification commands and declared paths: required material, cut only
@@ -921,8 +927,9 @@ pub(super) fn predecessors_section(
 /// it reads at claim time, `predecessors` the task's direct dependencies,
 /// `goal_predecessors` the goals it depends on (in the Predecessor section)
 /// and `siblings` the other tasks executing at claim time
-/// (`siblings_in_progress`), and `inherited` the run a retry carries over,
-/// if any. The Goal, Context, Predecessor and Sibling sections are always
+/// (`siblings_in_progress`), `inherited` the run a retry carries over,
+/// if any, and `known_failures` the tests that fail already on the landing
+/// branch's CI, a section only when there are any (ADR-t1920-1 decision 5). The Goal, Context, Predecessor and Sibling sections are always
 /// present, `none` when empty, so the prompt keeps one shape whether or
 /// not a task has a goal, a context, dependencies or company.
 ///
@@ -946,6 +953,7 @@ pub fn prompt(
     siblings: &[Task],
     inherited: Option<&Inheritance>,
     e2e_paths: &[String],
+    known_failures: Option<&KnownFailures>,
 ) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let mut fit = Fit::new(WORKER_PROMPT_LIMIT);
@@ -1082,6 +1090,7 @@ pub fn prompt(
         fit.section("siblings", &text);
         text
     };
+    let known_failures = known_failures_section(&mut fit, known_failures, Reader::Worker);
     let route = Route::of(run);
     // Known up front, so the receipt carries it (ADR-0019 decision 5): what
     // this run's provider must back.
@@ -1131,7 +1140,7 @@ pub fn prompt(
          Task title: {title}\nDescription:\n{description}\nAcceptance criteria:\n{acceptance}\n\
          Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):\n{verification}\n\
          {local_checks}\n\
-         {evidence}{paths}{goal}{context}{predecessors}{siblings}{inherited}\
+         {evidence}{paths}{goal}{context}{predecessors}{siblings}{inherited}{known_failures}\
          Your assignment is this task only. Do not change what a sibling task owns; if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n\
          {acceptance_map}{docs_check}\
          Write a completion receipt to {receipt} using a temporary file in the same directory and atomic rename.\n\
@@ -1164,7 +1173,7 @@ pub fn prompt(
 /// The worker's prompt on `provider` before the task's values go in
 /// (goal 113): [`prompt`] of a placeholder task with every section in it (a
 /// goal, a predecessor, a goal it waited for, a sibling, a run it carries
-/// over, required evidence, paths and the e2e), each value a placeholder,
+/// over, required evidence, paths, the e2e and the known failures), each value a placeholder,
 /// followed by the same task with every section empty (and the run carried
 /// over by hand), so both branches of each section are in it. Its text is fixed by this binary, so its hash changes with the prompt's
 /// headings and sentences and never with a task's values.
@@ -1265,6 +1274,23 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         summary: value("summary"),
         by_hand: None,
     };
+    let failure = KnownFailure {
+        name: value("failing test"),
+        url: Some(value("ci url")),
+        fix_tasks: vec![TaskId::new(3)],
+    };
+    // A fix task's own failing test and another's, and one fixed by none.
+    let known = KnownFailures {
+        others: vec![
+            failure.clone(),
+            KnownFailure {
+                fix_tasks: Vec::new(),
+                ..failure.clone()
+            },
+        ],
+        fixing: vec![failure],
+        file: value("known failures file"),
+    };
     let full = prompt(
         &task,
         &run,
@@ -1274,6 +1300,7 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         std::slice::from_ref(&task),
         Some(&inherited),
         &[value("e2e path")],
+        Some(&known),
     )?
     .text;
     // The other branch of each section: `none`, and a run a person carried
@@ -1289,7 +1316,7 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         by_hand: Some((value("by"), value("reason"))),
         ..inherited
     };
-    let empty = prompt(&bare, &run, None, &[], &[], &[], Some(&by_hand), &[])?.text;
+    let empty = prompt(&bare, &run, None, &[], &[], &[], Some(&by_hand), &[], None)?.text;
     Ok(format!("{full}\n{empty}"))
 }
 

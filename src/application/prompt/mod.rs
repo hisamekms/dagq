@@ -38,12 +38,14 @@ use crate::domain::{
     stats::conflicts::ConflictHotspot,
 };
 
+mod known_failures;
 mod plan_review;
 mod planners;
 mod requests;
 mod run_review;
 mod worker;
 
+pub use known_failures::*;
 pub use plan_review::*;
 pub use planners::*;
 pub use requests::*;

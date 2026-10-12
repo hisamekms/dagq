@@ -97,4 +97,7 @@ impl QueueRecords for Records {
     fn ci_failure_findings_of(&self, _: TaskId) -> Result<Vec<crate::domain::FindingId>> {
         unimplemented!()
     }
+    fn ci_failure_fix_tasks(&self) -> Result<std::collections::BTreeMap<i64, Vec<TaskId>>> {
+        unimplemented!()
+    }
 }

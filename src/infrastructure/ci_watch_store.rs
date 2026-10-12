@@ -6,6 +6,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 use super::findings::{record_in, set_status_in};
 use super::sqlite::{SqliteQueue, event_row};
@@ -122,6 +123,30 @@ impl SqliteQueue {
                 r.get(0)
             })?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The tasks that fix each `ci_failure` finding: those of the
+    /// proposal linked to it and the one it was dismissed as covered by,
+    /// canceled ones aside (ADR-t1920-1 decision 5).
+    pub fn ci_failure_fix_tasks(&self) -> Result<BTreeMap<i64, Vec<TaskId>>> {
+        let mut fixes: BTreeMap<i64, Vec<TaskId>> = BTreeMap::new();
+        let rows = self
+            .conn
+            .prepare(
+                "SELECT f.id, t.id FROM findings f JOIN tasks t
+                   ON t.id=f.covered_by_task
+                   OR (f.proposal_id IS NOT NULL AND t.proposal_id=f.proposal_id)
+                 WHERE f.kind=?1 AND t.status!='canceled'
+                 ORDER BY f.id, t.id",
+            )?
+            .query_map(params![crate::domain::ci_watch::FINDING_KIND], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, TaskId>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (finding, task) in rows {
+            fixes.entry(finding).or_default().push(task);
+        }
+        Ok(fixes)
     }
 }
 

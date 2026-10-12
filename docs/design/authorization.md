@@ -266,4 +266,7 @@ queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、�
 
 ## CIの見張り（ADR-t1920-1）
 
-[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)。読むコマンド`dagq ci failures`のcapabilityは`ci.read`（`Capability::CiRead`）で、user・inbox・planner・observer・supervisorが持ち、worker・wrapper・integratorとjob（review・recovery・plan review・goal review・throughput review）には許さない（一覧はworkerにはpromptで渡す予定）。`DAGQ_COMMANDS`の`("ci failures", &[C::CiRead])`により、workerとjobのClaudeの`permissions.deny`に`Bash(dagq ci failures:*)`が入る。`finding dismiss --covered-by`は今の`finding.dismiss`のままで、表は変えない。
+[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)。
+読むコマンド`dagq ci failures`のcapabilityは`ci.read`（`Capability::CiRead`）で、user・inbox・planner・observer・supervisorが持ち、worker・wrapper・integratorとjob（review・recovery・plan review・goal review・throughput review）には許さない（一覧はworkerとrunの全体のreviewにはpromptとrun directoryのファイルで渡す）。
+`DAGQ_COMMANDS`の`("ci failures", &[C::CiRead])`により、workerとjobのClaudeの`permissions.deny`に`Bash(dagq ci failures:*)`が入る。
+`finding dismiss --covered-by`は今の`finding.dismiss`のままで、表は変えない。

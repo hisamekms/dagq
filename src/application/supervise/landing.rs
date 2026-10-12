@@ -1264,7 +1264,7 @@ impl Supervisor<'_> {
         review_range_at(&*self.repository, run, &receipt, main)
     }
     /// Write the review's material and its jobs' prompts, held to their
-    /// limits: the whole review's prompt and what it takes (task 1571),
+    /// limits: the whole review's prompt with the known failures and what it takes (task 1571),
     /// which `review_started` records, and each selected agent's job built
     /// from the definition the landing branch's snapshot returned
     /// ([`agent_job::build`], the eval's own assembly), its prompt in its
@@ -1286,7 +1286,14 @@ impl Supervisor<'_> {
             .to_owned();
         let task = self.queue.show(run.task_id())?.task;
         let language = self.verifier.language();
-        let fitted = review_prompt(&task, run, &path).with_language(language.as_ref());
+        // The whole review's job only: it decides whether to send the run
+        // back (ADR-t1920-1 decision 5).
+        let known_failures = self.known_failures(
+            task.id(),
+            &run_dir.join(format!("review-{attempt}-known-failures.json")),
+        );
+        let fitted = review_prompt(&task, run, &path, known_failures.as_ref())
+            .with_language(language.as_ref());
         self.files.write(
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
             fitted.text.as_bytes(),
@@ -1801,6 +1808,8 @@ impl Supervisor<'_> {
                     reason: why.clone(),
                     kind: ResumeKind::Precheck,
                     reason_file: super::resume::reason_file(run, &format!("conflict-{attempt}")),
+                    known_failures: self
+                        .request_known_failures(run, &format!("conflict-{attempt}")),
                 };
                 let message = resume_request(&task, run, &request, &landed)?
                     .with_language(self.verifier.language().as_ref());

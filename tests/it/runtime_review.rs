@@ -155,6 +155,19 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
         "{bytes}"
     );
     assert_eq!(bytes["omitted"], json!({}), "{bytes}");
+    // Nothing fails already on the landing branch's CI: neither the
+    // claim's prompt nor the review's carries the section or writes the
+    // list (ADR-t1920-1 decision 5).
+    assert!(bytes["sections"].get("known_failures").is_none(), "{bytes}");
+    for prompt in [
+        &prompts[0],
+        &fs::read_to_string(run_dir.join("prompt.txt")).unwrap(),
+    ] {
+        assert!(!prompt.contains("fail already"), "{prompt}");
+    }
+    for file in ["known-failures.json", "review-1-known-failures.json"] {
+        assert!(!run_dir.join(file).exists(), "{file}");
+    }
     assert!(!run_dir.join("terminal-final.txt").exists());
     // Nothing waits for anyone.
     assert!(run_attention_of(&runtime::status(&db).unwrap(), run.id()).is_none());

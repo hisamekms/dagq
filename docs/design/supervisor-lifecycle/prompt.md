@@ -116,6 +116,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 - 落とし穴: 兄弟taskの一覧はclaimの順で非対称になる（同じpassで後にclaimしたtaskだけが先のtaskを知る）。
   理由は`siblings_in_progress`のdoc comment。
 - 落とし穴: `tests/e2e.rs`のstubはpromptの1行目とreceiptのpathの行だけを読むので、節を足してもstubは変わらない。
+- 既に落ちているtestの節: 一覧があるときだけclaimのpromptとresumeの依頼に載せ、文面・選ぶ順・上限・読む経路は[CI watch](ci-watch.md#workerとreviewの材料)が持つ。
 - 言語の設定が解決できるときは、promptと依頼の末尾に言語の指示を足す（[Language](language.md#promptへの渡し方)）。
 
 ## 受け入れ条件の対応づけ
@@ -210,7 +211,6 @@ promptと固定の文字列には、dagqのrepositoryの規則（ADRの索引や
 ## headlessのjobのprompt
 
 supervisorが起動するheadlessのjobとruntimeのplannerのpromptの共通の方針で、[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)の決定に沿う。
-各jobの文書（[Headless job processes](headless-job-processes.md)、[Plan review](plan-review.md)、[Observer](observer.md)、[Goal review](goal-review.md)、[スループットの見直し](throughput-review.md)、[Review](review.md)、[復旧job](background-recovery-job.md)、[Session prompts](session-prompts.md)）はpromptの大きさと渡し方についてここを指す。
 workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2072-1-worker-prompts-and-next-turns-carry-decision-material-within-limits.md)で同じ方針に入り、渡し方（決定1）だけは今の`prompt.txt`と非対話のturnのままにする。
 
 - 渡し方（決定1）: 大きさに関係なくstdinで渡し、引数で渡さない。
@@ -235,12 +235,12 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 | observer | `queue_cli` | `src/application/observer/input.rs`（[Observer](observer.md#promptの入力の上限と選ぶ順)） | そのmoduleの`PROMPT_LIMIT` |
 | goal review | `read_files_and_queue_cli` | `goal_review_prompt` | `GOAL_REVIEW_*` |
 | スループットの見直し | `queue_cli` | `src/application/throughput_review.rs`の`review_prompt`（[スループットの見直し](throughput-review.md)） | そのmoduleの`PROMPT_LIMIT`・`PROMPT_INPUT_LIMIT` |
-| runの全体のreview | `read_files` | `prompt::run_review`の`review_prompt` | `RUN_REVIEW_*` |
+| runの全体のreview | `read_files` | `prompt::run_review`の`review_prompt` | `RUN_REVIEW_*`・`KNOWN_FAILURES_*` |
 | agentのjob（[下](#agentのjobの上限)） | `read_files`を定義の道具に狭める | `agent_job::build` | `AGENT_JOB_*` |
 | 復旧job | `read_files` | `recovery_prompt`（`RecoveryMaterial`） | `RECOVERY_*` |
 | runtimeのplanner | plannerのrole | `runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`・`request_planner_prompt` | `RUNTIME_PLANNER_*`・`DRAFT_*`・`FINDING_*`・`REQUEST_*`・`PLANNER_*` |
-| workerの初期prompt | worktreeのファイル・git・goalのdoc | `prompt::prompt`（[上](#workerのprompt)） | `WORKER_PROMPT_LIMIT`・`WORKER_*` |
-| workerの次のturnの文 | worktreeとrun directoryのファイル・git | `resume_request`・`revise_request`ほか、supervisorの`retry_text`・`switch_text`（[下](#次のturnの文の上限)） | `RESUME_*`・`REVISE_*`・`PROVIDER_*`・`UNDELIVERED_REQUEST_BYTES`・`NEXT_TURN_*`・`HANDOFF_*`（taskのpathsと検証は`WORKER_*`） |
+| workerの初期prompt | worktreeとrun directoryのファイル・git・goalのdoc | `prompt::prompt`（[上](#workerのprompt)） | `WORKER_PROMPT_LIMIT`・`WORKER_*`・`KNOWN_FAILURES_*` |
+| workerの次のturnの文 | worktreeとrun directoryのファイル・git | `resume_request`・`revise_request`ほか、supervisorの`retry_text`・`switch_text`（[下](#次のturnの文の上限)） | `RESUME_*`・`REVISE_*`・`PROVIDER_*`・`UNDELIVERED_REQUEST_BYTES`・`NEXT_TURN_*`・`HANDOFF_*`・`KNOWN_FAILURES_*`（taskのpathsと検証は`WORKER_*`） |
 
 ### plan reviewの上限
 

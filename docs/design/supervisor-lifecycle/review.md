@@ -64,11 +64,12 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   進行はstatusでなく`review_started`・`review_finished`などのeventで読む。
 - review jobは読むだけで、worktreeとrun dirのファイルを読み、verdictのJSONをstdoutに出す。
   worktreeは生きているworkerのsessionのものなので、jobは書く道具を持たない。
-  Claudeのreviewは予約のwakeupが`claude -p`の終了を妨げるので予約の道具を拒む（一覧と理由は`PRINT_MODE_DENIED_TOOLS`のdoc comment）。
+  Claudeのreviewは予約のwakeupが`claude -p`の終了を妨げるので予約の道具を拒む（`PRINT_MODE_DENIED_TOOLS`）。
 - 直すのはworkerのsessionで、supervisorは依頼を次のturnとしてrun dirの`turns/`に書くだけ（[非対話のworker](headless-worker.md#run-dirのturns)）。
 - 着地は`integrate`と同じ処理をsupervisorが別threadで走らせる（[integrate](integrate.md)）。
   review中のrun（supervisorのleaseがある）を人の`integrate`は拒む。
 - 資料`review.md`は[`review`](review-command.md#review)が、promptの組み立てと上限は[Prompt](prompt.md#headlessのjobのprompt)が持つ。
+  既に落ちているtestは全体のreviewだけが材料に持つ（[CI watch](ci-watch.md)）。
 - providerの一般の規則は[Agent provider lifecycle](../provider-lifecycle.md)と[Actor model](actor-model.md)が持つ。
 
 ### 不変条件
@@ -100,9 +101,9 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 
 ## reviewの流れ
 
-1. **開始**: `review.md`を書き、全体のreviewと選ばれたagentごとのjobのpromptを上限の中で組み立てて書いてから`review_started`を記録する。
+1. **開始**: `review.md`を書き、全体のreviewと選ばれたagentごとのjobのpromptを上限の中で書いてから`review_started`を記録する。
    資料かpromptを書けなければ、jobを起動せずに下の「reviewの失敗」にする。
-2. **headless実行**: 全体のreviewのjobは`AgentProvider::review_command`のport（権限の意図は`REVIEW_ACCESS`、[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で、agentのjobは下の「reviewのsubagent」の経路でworktreeで起動し、promptはstdinで渡す。
+2. **headless実行**: 全体のreviewのjobは`AgentProvider::review_command`のport（権限の意図は`REVIEW_ACCESS`、[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で、agentのjobは下の「reviewのsubagent」の経路でworktreeで起動する。
    Claudeのreviewは`--setting-sources ""`とsettingsの`autoMemoryEnabled: false`で、worktreeの`.claude/`・`.mcp.json`・`CLAUDE.md`・auto memoryとuserの設定を読まない（[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)）。
    そのためpromptが、worktreeのrootのinstructionsとそれが名指す文書を読んで判定するよう1文で求める（未実装の変更は[built-in](review-builtin.md)）。
    reviewのsettingsは`Stop` hookを持たない（生きているworkerのsessionのidle markerを書かないため）。
@@ -243,7 +244,7 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 
 ## testからのretryの差し替え
 
-`SuperviseOptions::retry_unreadable_review`は本番では常に有効で、CLI・`dagq.toml`・環境変数から変える経路は無い。
+`SuperviseOptions::retry_unreadable_review`は本番では常に有効で、変える経路は無い。
 testだけが無効にして、やり直しのjobを省いて最初の失敗から失敗の処理へ進められる（helperの使い分けは`tests/it/runtime_support`が持つ）。
 
 ## AIが決めるconcern<a id="aiが決めるconcern未実装"></a>

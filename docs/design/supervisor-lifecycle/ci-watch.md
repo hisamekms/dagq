@@ -20,9 +20,6 @@ related:
 
 # CI watch
 
-> [ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)の見張り・event・finding・一覧・`dagq ci failures`・`finding dismiss --covered-by`はtask 1921が実装した。
-> 着地の検証に一覧を渡すこと（goal 157の段3b）も実装済みで、workerのpromptとrunのreviewの材料に一覧を載せること（段5）だけが**予定（未実装）**である（下の「一覧の読み方」の「runtimeの中の読み手」と「修正taskのrun」に印を付けた）。
-
 設定（[Run environment](run-environment.md)の`[ci_watch]`）を書いたrepositoryで、supervisorが着地先のbranchへのpushのCIの結果をhostの`gh`で定期的に読み、queueのeventに記録し、赤になったら`ci_failure`のfindingを記録してruntimeのfindingのplanner（[Finding planners](finding-planners.md)）に修正taskを作らせ、既に落ちているtestの一覧（以下「一覧」）を持つ。CIの結果をqueueに届ける経路で、GitHubのissue（[CI failure issues](../ci-failure-issues.md)）とは別に動く。
 
 ## いつ確かめるか
@@ -163,14 +160,23 @@ jobsを読めない実行の`ci_check_failed`は上の「実行の扱い」（`a
 - **`status`**: 最上位の`ci`の欄に`{state, watch, failures: <件数>, checked_at, latest_run_url}`（どのroleの`status`にも出す）。見張りの記録が無ければnull。
 - **runtimeの中の読み手**（CLIと同じ`application::ci_watch::known_failures(queue, config, branch, task)`を使う）: 着地の検証は、`integrate`がtaskの検証のコマンドを着地の検証のコマンドに置き換えるとき（[Validation](validation.md#着地の検証)）、runのtaskについて読んだ一覧（上のCLIの`--task`の出力と同じ形）をrunのrun dirに書き、そのpathと修正taskのrunかを置き換えたコマンドのenvに足す（`application::integrate`の`landing_env`。envとファイルの名前と意味は`domain::landing_verification`のdoc comment）。
   どのtestを外すかの適用は`dagq.toml`の着地の検証のコマンドとrepositoryのscriptが受け持つ。
-  workerのprompt（claimとresume）とrunのreviewの材料（段5）に`failures`の名前と`added.url`を載せることは予定（未実装）。
+
+### workerとreviewの材料
+
+- 読み手: claimのprompt、resumeと衝突の依頼、runの全体のreviewのprompt。
+  agentのjobには載せない（差し戻しを決めるのは全体のreviewのため）。
+- 材料: supervisorが`--task`の一覧の各項目にそのfindingを直すtask（`fix_tasks`）を足し（`ci_watch::run_known_failures`）、項目があるときだけ全体をrun directoryのファイル（名前は`KNOWN_FAILURES_FILE`のdoc comment）に書いて節を載せる。
+  読めなければwarnを出して節を省く。
+- 文面: 項目はtest・CIのURL・修正taskで、workerには自分の変更が原因でなければ直さずreceiptの`summary`に書くよう、reviewにはそれを差し戻しの理由にしないよう言う。
+  修正taskのrunでは自分の項目を直す対象として先に示す。
+- 上限: 自分の項目を先に、ほかをCIで落ちた新しい順に件数とbyteの上限まで取り、省いた件数とファイルを書く（`known_failures_section`）。
+  各promptの全体の上限は節の上限（`KNOWN_FAILURES_LIMIT`、値と理由と上限のtestはdoc comment）の分だけ大きい。
 
 ## 修正taskのrun
 
 runのtaskが属するproposal（`tasks.proposal_id`）を`findings.proposal_id`に持つか、そのtaskを`covered_by_task`に持つ`kind = ci_failure`のfindingがあれば、そのrunは修正taskのrunで、そのfindingの項目を一覧から除いて渡す（他のfindingの項目は外す対象のまま）。
 taskに印や欄は足さない。
-この判定（`ci_failure_findings_of`）は`ci failures --task`と着地の検証（上の「runtimeの中の読み手」）が使い、着地の検証の一覧ではそのfindingの項目が`failures`から`kept_for_task`に移る。
-workerのpromptとreviewの材料に渡すこと（段5）は予定。
+この判定（`ci_failure_findings_of`）は`ci failures --task`・着地の検証・workerとreviewの材料（上）が使い、どれもそのfindingの項目が`failures`から`kept_for_task`に移る。
 
 ## 保存（findingsの列）
 

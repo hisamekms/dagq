@@ -305,7 +305,11 @@ esac"#
     assert_eq!(requested, [&json!("provider switch")]);
     // Its bytes, held to its limit (ADR-t2072-1).
     let bytes = &payloads(&detail, "turn_requested")[0]["prompt_bytes"];
-    assert_eq!(bytes["limit"], 42_000, "{bytes}");
+    assert_eq!(
+        bytes["limit"],
+        dagq::application::prompt::PROVIDER_TURN_LIMIT,
+        "{bytes}"
+    );
     assert!(
         bytes["sections"]["message"].as_u64().unwrap() > 0,
         "{bytes}"
@@ -727,7 +731,11 @@ esac"#
     assert_eq!(requested, [&json!("provider retry")]);
     // Its bytes, held to its limit (ADR-t2072-1).
     let bytes = &payloads(&detail, "turn_requested")[0]["prompt_bytes"];
-    assert_eq!(bytes["limit"], 42_000, "{bytes}");
+    assert_eq!(
+        bytes["limit"],
+        dagq::application::prompt::PROVIDER_TURN_LIMIT,
+        "{bytes}"
+    );
     assert!(bytes["total"].as_u64().unwrap() > 0, "{bytes}");
     assert_eq!(bytes["over_limit"], Value::Null, "{bytes}");
     let calls = stub_calls(&detail.runs[0]);
@@ -802,7 +810,11 @@ esac"#
     assert_eq!(requested, [&json!("provider retry")]);
     // Its bytes, held to its limit (ADR-t2072-1).
     let bytes = &payloads(&detail, "turn_requested")[0]["prompt_bytes"];
-    assert_eq!(bytes["limit"], 42_000, "{bytes}");
+    assert_eq!(
+        bytes["limit"],
+        dagq::application::prompt::PROVIDER_TURN_LIMIT,
+        "{bytes}"
+    );
     assert!(bytes["total"].as_u64().unwrap() > 0, "{bytes}");
     assert_eq!(bytes["over_limit"], Value::Null, "{bytes}");
     let calls = stub_calls(run);

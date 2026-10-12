@@ -15,6 +15,9 @@ pub(crate) struct ResumeRequest {
     /// to when the request cuts it (its `omitted` names `reason`); `None`
     /// when there is none, and a cut reason is said to be in no file.
     pub reason_file: Option<String>,
+    /// The tests that fail already on the landing branch's CI for the
+    /// run's task (ADR-t1920-1 decision 5); `None` when there are none.
+    pub known_failures: Option<KnownFailures>,
 }
 
 /// The bytes a resolution request (`resume_request`) takes at most, the
@@ -28,8 +31,10 @@ pub(crate) struct ResumeRequest {
 /// test takes 30,288 bytes), with the language's room. Of the 581 resolution and conflict requests kept on
 /// the host on 2026-10-08, most of whose length was the landed tasks'
 /// summaries the section no longer carries, the reason took 272 bytes at
-/// the median, 1,070 at p90, 3,338 at p99 and 4,370 at most.
-pub const RESUME_REQUEST_LIMIT: usize = 36_000;
+/// the median, 1,070 at p90, 3,338 at p99 and 4,370 at most. The section
+/// on the tests that fail already on the landing branch's CI adds its own
+/// [`KNOWN_FAILURES_LIMIT`].
+pub const RESUME_REQUEST_LIMIT: usize = 36_000 + KNOWN_FAILURES_LIMIT;
 
 /// The bytes of a resolution request's reason (a review's findings sent
 /// back, a triage's instruction, why integrate or the landing recheck
@@ -141,7 +146,8 @@ pub(super) fn landed_title(title: &str) -> std::borrow::Cow<'_, str> {
 /// [`RESUME_REASON_BYTES`] and points at `reason_file`; the task's paths and
 /// verification commands are the task's own and cut only past their
 /// limits, said in `over_limit`; the section on landed tasks keeps its own
-/// bounds; the steps are never cut.
+/// bounds, as the known failures' does ([`known_failures_section`]); the
+/// steps are never cut.
 pub(crate) fn resume_request(
     task: &Task,
     run: &TaskRun,
@@ -246,6 +252,10 @@ pub(crate) fn resume_request(
     );
     fit.section("landed", &landed.join("\n"));
     lines.extend(landed);
+    let known = known_failures_section(&mut fit, request.known_failures.as_ref(), Reader::Worker);
+    if !known.is_empty() {
+        lines.push(known.trim_end().to_owned());
+    }
     lines.push("Steps:".to_owned());
     let checks = local_checks(&verify);
     if request.kind == ResumeKind::EvidenceMissing {
