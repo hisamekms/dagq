@@ -32,7 +32,7 @@ related:
 計画管理・観測と分析・host運用は`contexts.rs`（登録は`handoff.rs`）にあり、そのpassだけが変える。
 実行と着地は`stages.rs`に工程ごとにあり、工程のsubmoduleとループが変える。
 runの工程の移りは`stages.rs`の移す操作だけを通り、移るたびに`run_phase_changed`を書く（[計測](../measurement.md#区間とタグ)）。
-slotの集まりは`SlotTable`だけが変え、残りは`Supervisor`が持つ（[Architecture](../architecture.md#supervisorの状態)）。
+slotの集まりは`SlotTable`だけが変え、残りは`Supervisor`が持つ（欄の所有するcontextは`Supervisor`のdoc comment、[Architecture](../architecture.md)のC3）。
 
 `dagq supervise [--parallel N] [--max-waiting N] [--runtime-planners N] [--once] [--log-dir DIR] [--observe-interval SECS] [--observe-daily BOOL]`はrepository内で実行する常駐ループ（通常は`up`がlaunchdで起動する）で、依存が解けたtaskを上限N（既定4）まで同時に実行する。人の答えだけを待つrunはslotから外れ、`--max-waiting`（既定4）までslotの外で待つ（[人の答えを待つrun](waiting.md)、[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)）。「active runが上限未満」「空いたslot」は、待ちと戻り待ちのrunを除いたslot（`used_slots()`）で数える。queueはcwdから解決し（[persistence](../persistence.md)のQueue location）、repositoryのcheckoutもcwdを使う。`--db PATH`と`--repo REPO`はそれぞれの明示override（[ADR-0053](../../adr/0053-queue-in-data-dir-run-paths-from-queue-and-rebind.md)）。
 

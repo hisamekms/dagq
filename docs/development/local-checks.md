@@ -39,7 +39,7 @@ cargo clippy --locked --all-targets -- -D warnings
 dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（`cargo llvm-cov nextest`を含む）も手元で流さない。taskのverifyに含まれていても同じ。workerが手元で流すのは次のとおり。
 
 - `sh scripts/cargo-brief.sh cargo fmt --all --check`と`sh scripts/cargo-brief.sh cargo clippy --locked --all-targets -- -D warnings`
-- `src/`を変えたら`sh scripts/check-layer-deps.sh`（レイヤーの禁止依存。規則と許可の一覧は[Architecture](../design/architecture.md)の「検査の範囲」）
+- `src/`を変えたら`sh scripts/check-layer-deps.sh`（レイヤーの禁止依存）と`sh scripts/check-context-boundaries.sh`（contextの境界と所有の一覧の食い違い）。CIも実行する。規則と一覧の置き場は[Architecture](../design/architecture.md)の「検査の範囲」
 - 変更に関係するtestだけの`cargo test`（次の「testの範囲」と「全体を比べるtest」）
 - taskのverifyのうちcoverageの関門（`cargo llvm-cov nextest`と旧い形の`cargo llvm-cov`）と全体の`cargo test --locked`以外（`cargo test --locked --test plugin`など）
 - 足した・変えたtestのstress（下の「stress」）

@@ -245,7 +245,7 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
 - queue全体の実行枠は無く、同時に動くrunの数は`supervise --parallel`が決める。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒み、循環はトランザクションの中の再帰CTEで見つける。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
-- 複数のcontextを1つのトランザクションで変えてよいものは[architecture](architecture.md)の一覧が持つ。
+- contextをまたぐトランザクションは`.config/context-boundaries.txt`のものだけ（[architecture](architecture.md)のX1）。
 - SQLiteのトランザクションの挙動は[公式仕様](https://www.sqlite.org/lang_transaction.html)に従う。
 
 ### CHECK制約を使わない

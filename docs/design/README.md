@@ -13,7 +13,7 @@ tags:
 ここは現在の実装を説明する。決定の理由は [ADR](../adr/README.md)、実装順は [plans](../plans/current.md) を参照する。
 
 - [Overview](overview.md)
-- [Architecture](architecture.md)（レイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸の境界。contextごとの所有する状態・判断・操作・公開するport・依存の向き、境界をまたぐtransactionの一覧、検査できる規則と今の違反。ADR-t1545-1）
+- [Architecture](architecture.md)（レイヤーとコンテキスト（計画管理・実行と着地・観測と分析・host運用）の2軸の境界。contextの目的、検査できる規則と検査の範囲。ADR-t1545-1）
 - [計測](measurement.md)（計測の作り直し。冒頭の「SSOTとビュー」が記録の論理ストアと材料の区分を持ち、計測の層のストアと共有の記録を足すtaskはそこに区分を書く。区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口・コマンドの形と分類。ADR-t1662-1〜3、一部だけ実装済みのdraft）
 - [taskとgoalとfindingの属性の記録](attribute-records.md)（stats・kpi・reportが状態の表から読む属性を状態の変更と同じtransactionでeventに書く項目ごとの元・記録より前のtaskとgoalとfindingと古いbinaryの書き込みを直す基準と照合・畳む関数）
 - [mainの履歴の記録](main-history.md)（supervisorが記録するmainのfirst-parentの履歴の流れ・commitの時刻と観測したheadと到達時刻の区別・到達点の間隔と猶予・取り込みの範囲・畳む関数と欠測の理由）

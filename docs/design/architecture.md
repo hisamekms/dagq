@@ -1,7 +1,7 @@
 ---
 id: design-architecture
 type: design
-title: レイヤーとコンテキストの境界（contextごとの所有・判断・操作・公開するport・依存の向き・境界をまたぐtransaction・検査できる規則・今の違反）
+title: レイヤーとコンテキストの境界（2つの軸・共有の部品・contextの目的・検査できる規則と検査の範囲）
 status: current
 created: 2026-10-04
 scope: system
@@ -28,7 +28,8 @@ related:
 runtime（src/）の責務を、レイヤーとコンテキスト（context）の2軸で分ける今の境界と、それを守る規則の正本。
 決めた理由は[ADR-t1545-1](../adr/2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md)（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)決定1をamends）が持つ。
 moduleの説明は[overview](overview.md)、集約は[Domain model](domain-model.md)、tableは[Persistence](persistence.md)、supervisorのループは[`supervise`](supervisor-lifecycle/supervise.md)が持つ。
-reviewのsubagentと検査のscriptは、この文書の規則のIDと一覧（下の「検査できる規則」「境界をまたぐtransaction」）を参照し、本文を写さない（ADR-t1545-1決定4）。
+reviewのsubagentと検査のscriptは、この文書の規則のID（下の「検査できる規則」）を参照し、本文を写さない（ADR-t1545-1決定4）。
+境界の記録（tableとstoreのmoduleのcontext・portの公開・境界をまたぐtransaction・今の違反）はこの文書に置かず、コードと、検査のscriptが読む`.config/`の一覧が持つ（[ADR-t2287-1](../adr/2026-10-12-t2287-1-context-boundary-records-in-code-and-config-lists.md)、下の「[検査の範囲](#検査の範囲)」）。
 
 ### 全体の流れ
 
@@ -54,12 +55,13 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
 - **レイヤー**（ADR-0013決定1）: `domain`・`application`・`infrastructure`・起動部分（`src/compose.rs`と`src/main.rs`）。
   依存は外から内へだけ向く（起動部分 → infrastructure → application → domain）。
 - **context**（ADR-t1545-1決定1）: 計画管理・実行と着地・観測と分析・host運用の4つと、どれにも属さない「[共有の部品](#共有の部品)」。
-- 1つのmoduleは1つのレイヤーと1つのcontextに属し、contextはこの文書の各節で決まる（決められないものは「[混在しているmodule](#混在しているmodule)」）。
+- 1つのmoduleは1つのレイヤーと、多くとも1つのcontextに属する。
+  contextはmoduleのpathか所有の一覧`.config/context-boundaries.txt`で決まり、決まらないmodule（ループ・起動部分・domainなど）はreviewが見る。
 
 ### 不変条件
 
 - domainはI/O・時計・乱数を持たず、applicationはそれらをportで受ける（L1〜L5）。
-- 各contextは自分の状態（table・file・eventの種類・`Supervisor`の欄）だけを書き、他のcontextの状態は公開したportと一覧のtransactionでだけ変える（C1・C5・X1）。
+- 各contextは自分の状態（table・file・eventの種類・`Supervisor`の欄）だけを書き、他のcontextの状態は公開したportと所有の一覧に名指したtransactionでだけ変える（C1・C5・X1）。
 - 観測と分析は読むだけ（C2）。
 
 ## 2つの軸
@@ -89,208 +91,18 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
 
 goal・task・proposalと、その検査と採否（plan review・goal review・runtimeのplanner・follow_upとfindingのproposal）。
 
-**所有する状態**
-
-- table: `tasks`・`goals`と依存、`proposals`・`plan_reviews`・`goal_reviews`・`planners`・draftと依頼の表、`follow_up_judgements`、検索の索引（`search_index`・`landed_commits`）。
-
-**判断**（domain）: `domain::task`・`goal`・`proposal`・`plan_review`・`goal_review`・`planner`・`follow_up`・`lint`・`prediction`・`search`ほか。
-
-**操作**
-
-- application: `application::commands::planning`・`commands::requests`、`application::planner`系、`queue_reads::planning`、`application::supervise`のplan review・goal review・各plannerのsubmodule。
-- infrastructure: `infrastructure::sqlite`（`TaskStore`の実装）と、上のtableと同じ名前のstoreのmodule（`proposals`・`plan_reviews`・`draft_planners`・`follow_up_membership`ほか）、`runtime_store::planning_records`。
-
-**公開するport**
-
-- `TaskStore`と`DraftPlannerStore`の`improvements`・`planner_findings`の読み取りを全てのcontextに公開する。
-- 上の表の読み取り`PlanningRecords`を全てのcontextに公開する。
-- `TaskStore::claim`（と`RunTransitions::claim_for_supervisor_in_order`）は実行と着地だけに公開し、T1として扱う。
-- `DraftPlannerStore::register_follow_ups`を実行と着地に公開する（T7）。
-- 引き継ぎのreviewの止めと打ち切り（`PlanningState`）とconflictのhotspotを実行と着地に公開する。
-- `PlanReviewStore`・`GoalReviewStore`・`PlanRequestStore`・`RequestStore`・残りの`DraftPlannerStore`と`TaskStore`の書き込みは内部。
-
-**許す依存の向き**
-
-- 実行と着地の状態（`task_runs`・`run_leases`・`run_processes`）を書かない。
-  runの結果は`RunReads`とeventで読む。
-  `ready --inherit`は実行と着地の`InheritStore`を呼ぶ（T10）。
-- 観測と分析の`findings`を書くのはfindingのproposalの採否（T6）だけ。
-
-**境界をまたぐtransaction**: T3・T5・T6・T7・T8・T9（書き手）、T1・T2・T4・T10（実行と着地が書く）。
-
 ## 実行と着地
 
 taskをrunにして動かし、検証し、mainへ着地させること（claim・run・session・review・integrate・resume・triageと復旧・e2e）。
 
-**所有する状態**
-
-- table: `task_runs`・`run_leases`・`run_processes`・`session_workspaces`。
-- ファイル: queueのdirの`runs/<run-id>/`（`RunFiles`）・`recheck/`・`agent-evals/`・`review-programs/`とrunのworktree。
-
-**判断**（domain）: `domain::run`を中心に、receipt・review・resume・復旧・claimの控え・slot・待ち・stall・e2e・着地の保留・backgroundのwrapperの各module。
-
-**操作**
-
-- application: `application::supervise`のループとslotと工程のsubmodule、`application::session`・`headless_session`・`integrate`・`review`・`recording`ほか。
-- infrastructure: `runtime_store`の`transitions`・`recovery`・`session_registry`・`run_log`と`coordination`の`RunCoordination`、`adapters`（`GitRepository`・`ClaudeCode`）・`claude`・`codex`・`run_files`・`process`・`background`ほか。
-
-**公開するport**
-
-- `RunReads`と`RunCoordination`の読み取りを全てのcontextに公開する。
-- `Verifier`の環境とprogramの読み取りをhost運用の診断に公開する。
-  検証コマンドの実行は内部。
-- `RunId`・`TaskRun`のview・型付きのeventを値として公開する。
-- 着地先のbranchの解決（`Repository::landing_branch`）を観測と分析のCIの見張りに公開する。
-  解決できなければ見張りは確かめず着地先の保留に任せる。
-- `Repository`のmainの履歴を読む読み取り専用の操作を観測と分析に公開する。
-- `application::inherit`の`InheritStore`・`CarriedBranches`を計画管理の`ready --inherit`に公開する（T10）。
-- `EvalStore`（`application::agent_eval`）を、`AgentEvals`を通してCLIとqueue serviceに公開する（書くのは依頼だけ）。
-- 計画管理に`JobDesk`と`DeferWatch`の見込みのファイルを、host運用のsweepにwrapperの停止を公開する。
-- recheckのlockの中で`recheck/target`を消す`recheck::clear_target`をhost運用の空き容量の掃除に公開する。
-- `RunTransitions`・`RunRecovery`・`EvalRounds`・`SessionRegistry`のworkerの部分・`RunCoordination`の残り・`ReviewProgramBackend`・`RecordingQueue`・`ContainerRuntime`・wrapperの`RuntimesFile`は内部。
-
-**許す依存の向き**
-
-- 計画管理のtaskを読むのは`TaskStore`の読み取りとT1だけ。
-  taskの状態を変えるのはT2（着地）・T4（triage）・T10（引き継ぎ）だけ。
-- follow_upsは`DraftPlannerStore::register_follow_ups`（T7）で渡し、`tasks`・`draft_origins`をSQLで書かない。
-- 観測と分析・host運用の状態を書かない（T11を除く）。
-
-**境界をまたぐtransaction**: T1・T2・T4・T10・T11（書き手）、T7（計画管理の公開する関数を呼ぶ）。
-
 ## 観測と分析
 
 起きたことを読み、数え、予測し、知らせること（events・watch・stats・KPI・forecast・印・observer・スループットの見直し・CIの見張り）。
-計測のportと台帳の係は[計測](measurement.md)が持つ（ADR-t1662-2決定6）。
-
-**所有する状態**
-
-- table: `findings`・`ledger_rows`（runtimeの制御は読まない）。
-- ファイル: queueのdirの日次のKPIのreportとKPIのpushの待ち。
-- event（runtimeの制御は読まない）: `live_alert_*`（[今の判定](measurement.md#今の判定の記録)）・`main_*`（mainのfirst-parentの[履歴](main-history.md)）・`attributes_baseline`・`finding_baseline`（[属性](attribute-records.md)の基準）。
-
-**判断**（domain）: `domain::stats`・`kpi`・`forecast`とその下、`live_alerts`・`marks`・`timeline`・`throughput_review`・`finding`・`ci_watch`ほか。
-
-**操作**
-
-- application: `application::stats`・`kpi`・`forecast`・`report`・`observer`・`watch`・`throughput_review`・`ci_watch`・`main_log`・`queue_reads::observation`（`status`も）ほかと、`application::supervise`の同名のsubmodule。
-- infrastructure: `findings`・`observer`・`throughput_review`・`runtime_store::queue_records`・`runtime_store::ledger`・`kpi_*`・`transcripts`・`ci_watch`・`ci_watch_store`ほか。
-
-**公開するport**
-
-- `QueueRecords`の読み取り（findingとreportとKPIの目標割れ、CIの見張りのeventと`ci_failure`のfinding）を全てのcontextに、`ci_watch::known_failures`を着地の検証に公開する。
-  書き込み（`record_*`）は内部。
-- findingのIDと`finding_*`のeventを値として公開する（計画管理のfindingのplannerが読む）。
-- CIの見張りの保留（`CiWatchState::held`・`unreadable`）を実行と着地に読み取りで公開し、変えるのは`supervise::ci_watch`だけ。
-- timerのjob（observer・スループットの見直し）の使えなかった終わりを型付きの値（`throughput_review::UnusableFinish`・`observer::UnusableTimerJob`）で実行と着地に公開する。
-  控えるのは実行と着地の`supervise::provider`で、同じ終わりを1回だけ控える（[Provider lifecycle](provider-lifecycle.md)）。
-- `watch`の`AskNotifier`を所有し、実装`application::watch::InboxNotifier`は実行と着地の`SessionRegistry::session_workspace`でinboxのworkspaceを読み、host運用の`WorkspaceBackend::notify`で送る。
-- KPIのpushの行き先（`reports`）をhost運用の`inbox_nudge`に公開する。
-- `ObserverLog`・`ObservationQueue`・`LedgerStore`は内部（台帳は`ledger::read`で読む）。
-
-**許す依存の向き**
-
-- 他のcontextの状態とeventを読むだけで、そのtableを書かず、操作（claim・遷移・answerの適用）を呼ばない（ADR-t1545-1決定2）。
-- 書くのは自分の種類のeventと`findings`・`ledger_rows`と、findingに紐づく`blocked`のask（共有の部品）だけ。
-
-**境界をまたぐtransaction**: 無い（T6はこのcontextの`findings`を計画管理が書くもの）。
+他のcontextの状態とeventを読むだけで書かず、計測のportと台帳の係は[計測](measurement.md)が持つ（ADR-t1662-2決定6）。
 
 ## host運用
 
 runtime自身をhostで動かし続けること（up・down・install・自動更新・queue service・compileの共有・diskの後始末・hostの計測・inbox）。
-
-**所有する状態**
-
-- table: `supervisors`・`queue_repository`・`schema_floor`・`binary_updates`・`headless_jobs`。
-- ファイル: queueのdirの`service/`・`broker/`・`logs/`・`update/`、launchdのplist、sccacheのserver。
-
-**判断**（domain）: `disk`・`sccache`・`release_update`・`queue_service`・`host_metrics`ほか。
-
-**操作**
-
-- application: `application::lifecycle`（`up`・`down`）・`install`・`update`・`queue_service`・`queue_broker`・`sccache`・`actor_executor`・`execution`ほかと、`application::supervise`の同名のsubmoduleと`disk`・`cleanup`・`sweep`・`handoff`・`inbox_nudge`。
-- infrastructure: `launchd`・`binaries`・`queue_service`・`queue_broker`・`sccache`・`schema`・`telemetry`ほかと、`runtime_store::coordination`の`SupervisorRegistry`、`runtime_store::run_log`の`InboxWatchLog`。
-
-**公開するport**
-
-- `SupervisorRegistry`を実行と着地のループに、その読み取りを全てのcontextに公開する。
-- 空きdiskとsccacheの読み取り（`HostOpsState`）と`CleanupWatch::cleaning`・`defer`・`ensure_sccache`・`sccache_look`を実行と着地に公開する。
-- `HeadlessJobStore`（jobのprocessの台帳）を、jobを起動する各contextに公開する。
-- `QueueOpener`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`InstalledPlugin`、actorの起動（`actor_executor`）を他のcontextに公開する。
-- brokerの生死は`BrokerGate`の`ContainerRuntime`で実行と着地に見せる。
-- `InboxWatchLog`・`AuditFiles`・CIの見張りのpreflight・`HostOpsQueue`・`LifecycleQueue`・`QueueBrokerControl`・`BrokerBackend`は内部。
-
-**許す依存の向き**
-
-- 他のcontextのuse caseを起動・停止してよいが、他のcontextの状態は公開したportで変える。
-
-**境界をまたぐtransaction**: T11（実行と着地が書く）。
-
-## portのmodule
-
-`src/application/ports/`のportは所有するcontextのmoduleに置く。
-
-| module | port |
-| --- | --- |
-| `planning`（計画管理） | `TaskStore`・`PlanRequestStore`・`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`・`PlanningRecords` |
-| `execution`（実行と着地） | `RunTransitions`・`RunRecovery`・`RunCoordination`・`EvalRounds`・`SessionRegistry`・`RunReads`・`RunLog`・`RunFiles`・`AgentProvider`・`TurnReader`・`Transcripts`・`AgentSignals`・`MainRemote`・`Repository`・`Verifier`・`ReviewProgramBackend`・`RecordingQueue`・`ContainerRuntime` |
-| `observation`（観測と分析） | `ObserverLog`・`MarkLog`・`QueueRecords`・`LedgerStore`・`ObservationQueue` |
-| `host`（host運用） | `QueueOpener`・`HostOpsQueue`・`InstalledPlugin`・`SessionWrappers`・`WorkspaceBackend`・`LaunchAgent`・`SccacheServer`・`ProcessControl`・`HeadlessJobStore`・`SupervisorRegistry`・`InboxWatchLog` |
-| `shared`（共有の部品） | `Clock`・`IdGenerator`・`Spawner`・`Spawned`・`AskStore`・`EventStore`・`StateStore`・`Queue` |
-
-`shared`は複数のcontextが同じ意味で使うportだけを持つ。
-`EventStore`・`StateStore`のportは`shared`、論理ストアは[計測](measurement.md#ssotとビュー)。
-`RunLog`は利用側を書き換えないために残す`RunReads`と`EventStore`の別名。
-
-## promptとhealthのmodule
-
-親が`pub use`で再公開し、間の依存はscriptで見ない。
-
-| module | context | 主な関数 |
-| --- | --- | --- |
-| `prompt::worker`・`requests`・`run_review` | 実行と着地 | `prompt`・`resume_request`・`recovery_prompt` |
-| `prompt::planners`・`plan_review` | 計画管理 | `inbox_prompt`・`plan_review_prompt` |
-| `health::runs` | 実行と着地 | `recover` |
-| `health::report`・`attention` | 観測と分析 | `status`・`attention` |
-| `health::host` | host運用 | `supervisors`・`roles` |
-
-## 混在しているmodule
-
-contextを1つに決められず、分ける先を持つもの。
-
-| module | 混ざっているcontext | 分ける先 |
-| --- | --- | --- |
-| `runtime_store::session_registry`（`SessionRegistry`） | 実行と着地の`session_workspaces`と、計画管理の`planners` | portの分割 |
-
-## `Supervisor`の状態
-
-計画管理・観測と分析・host運用の状態は`contexts`の`PlanningState`・`ObservationState`・`HostOpsState`が持ち、そのpassだけが変える。
-passは自分の状態と`PassEnv`（計画管理は`PlanningEnv`）と値を取り、ループは呼んで結果を適用するだけ。
-host運用の登録と引き継ぎは`handoff::Registration`が持ち、その操作とループが変える。
-実行と着地は`stages`の工程ごとの状態と`E2eWaits`が持ち、工程のsubmoduleとループが変える（slotの集まりは`SlotTable`の操作だけ）。
-`Supervisor`に残るのはslotの`Phase`の遷移・工程をまたぐ欄と、どのcontextも読むだけの接続・時計・adapter。
-
-## 境界をまたぐtransaction
-
-複数のcontextの状態を1つの`BEGIN IMMEDIATE`のtransactionで変えてよいのは、この一覧のものだけ（ADR-t1545-1決定3）。
-原子性を守るための例外で、[Persistence](persistence.md)のclaimとlease・着地の規則を弱めない。
-一覧に足す・外す変更は同じ変更でこの表を直す。
-
-| ID | transaction | 書き手 | 主に変える状態 | 理由 | コード |
-| --- | --- | --- | --- | --- | --- |
-| T1 | claim | 実行と着地 | `tasks`を`in_progress`に、`task_runs`と`run_leases`を作る | 持ち主の無いrunとrunの無い`in_progress`を作らない（ADR-0054） | `runtime_store::transitions`→`sqlite::claim_task` |
-| T2 | 着地の完了 | 実行と着地 | runを`integrated`、taskを`completed`に（triggerが検索の索引を書く） | mainへの着地とtaskの完了を食い違わせない | `runtime_store::transitions`の`finish_integration` |
-| T3 | plan reviewのverdictの適用 | 計画管理 | askを閉じ、`proposals`とその`tasks`の状態を揃える | proposalとそのtaskを1回で揃える | `infrastructure::plan_reviews`の`decide_plan` |
-| T4 | triageのanswerの適用 | 実行と着地 | askを閉じ、runとtaskの次の状態を決める | runの失敗の扱いとtaskの次の状態を1回で決める（ADR-0047決定40） | `runtime_store::recovery`の`decide_triage`→`sqlite::transition_task` |
-| T5 | goal reviewのverdictの適用 | 計画管理 | askを閉じ、goalを閉じるか足りないtaskを登録する | goalの判定と隙間のtaskを1回で揃える | `infrastructure::goal_reviews`の`decide_goal` |
-| T6 | findingのproposalの採否 | 計画管理 | proposalを作り`findings`を結び、採否を`findings`に戻す | 二重のproposalを作らず、採否をfindingに戻す | `infrastructure::finding_planners`の`submit_linking`・`settle_findings` |
-| T7 | follow_upsのdraftの登録 | 計画管理（実行と着地が呼ぶ） | runを読み、draftの`tasks`と`draft_origins`を書く | 着地したrunのfollow_upsを由来つきで1回だけdraftにする | `infrastructure::draft_planners`の`register_follow_ups`（T2とは別のtransaction） |
-| T8 | follow_upの所属の判断の記録 | 計画管理 | 判断の行・taskのgoalの移動・要るなら`correct_goal`のask | 判断と所属と人への問いを食い違わせない（ADR-t1504-2決定1・6・9） | `infrastructure::follow_up_membership`の`judge_follow_up` |
-| T9 | achievedの後の訂正のanswerの適用 | 計画管理 | askを閉じ、goalを開き直すかfollow_upを移す | 答えとgoal・所属・残った問いを1回で揃える（ADR-t1504-2決定9） | `infrastructure::follow_up_membership`の`decide_correction` |
-| T10 | 手での引き継ぎ | 実行と着地（`ready --inherit`が呼ぶ） | leaseを消しaskを閉じてtaskを`ready`に | 復旧jobと競合せず一度だけ引き継ぐ（ADR-t1962-1） | `runtime_store::recovery`の`inherit_by_hand` |
-| T11 | supervisorのheartbeat | 実行と着地 | `run_leases`・`supervisors`の`heartbeat_at` | 登録とleaseを揃える | `runtime_store::coordination`の`heartbeat` |
-
-所属の判断の流れは[所属の判断](follow-up-membership.md)が持つ。
 
 ## 検査できる規則
 
@@ -331,9 +143,9 @@ host運用の登録と引き継ぎは`handoff::Registration`が持ち、その�
 
 ### コンテキストの規則
 
-- **C1** あるcontextの`src/infrastructure`のstoreのmoduleは、自分のcontextのtable（各節の「所有する状態」）にだけ`INSERT`・`UPDATE`・`DELETE`を書く。
-  他のcontextのtableを書くのは「[境界をまたぐtransaction](#境界をまたぐtransaction)」の一覧のものだけ。
-  検査: review（portをcontextごとに分けた後にscript）。
+- **C1** あるcontextの`src/infrastructure`のstoreのmoduleは、自分のcontextのtable（所有の一覧の`table`の項目）と共有の部品のtableにだけ`INSERT`・`UPDATE`・`DELETE`を書く。
+  他のcontextのtableを書くのは、所有の一覧の`transaction`の項目の関数の中だけ。
+  検査: script（`scripts/check-context-boundaries.sh`）。
 - **C2** 観測と分析のコードは、他のcontextの状態を変えるportのmethod（`TaskStore`・`RunCoordination`・`SupervisorRegistry`・`DraftPlannerStore`の書き込み、`RunTransitions`・`RunRecovery`・`PlanReviewStore`・`GoalReviewStore`）を呼ばない。
   検査: review。
 - **C3** `application::supervise`のsubmoduleは、自分のcontextの`Supervisor`の欄か分けた状態だけを変える。
@@ -341,53 +153,47 @@ host運用の登録と引き継ぎは`handoff::Registration`が持ち、その�
   検査: 分けた状態のsubmoduleはscript、残りはreview。
 - **C4** 新しく足す・変えるuse caseは`Box<dyn Queue>`・`&mut dyn Queue`・全体の`QueueOpener`を取らず、要るportだけを取る（ADR-0013決定1の「portは原則applicationに定義する」のまま、幅を狭める）。
   検査: review（portを分けた後にscript）。
-- **C5** 他のcontextの公開していないport（各節の「公開するport」で内部としたもの）を使わない。
-  検査: review。
+- **C5** 他のcontextの公開していないport（所有の一覧で内部としたもの、一部公開のportは公開していないmethod）を使わない。
+  検査: portの名前の参照はscript（`scripts/check-context-boundaries.sh`）、一部公開のportのmethodの単位の参照とcontextの決まらないmoduleはreview。
 - **C6** 他のcontextのeventを読むときは、kindを`domain::event_kind`か所有するdomainのmoduleの定数で名指し、状態の判断に使うpayloadは文字列のkeyではなく型付きの復元の値で読む。
   古いeventの読み取りは保つ。
   検査: review。
-- **C7** 新しいportは、どのcontextが所有し、どのcontextに公開するかをこの文書の該当の節に足してから置く。
-  検査: review。
+- **C7** 新しいport・table・storeのmoduleとtransactionの関数は、pathから導けないもの（所有するcontextと公開先）を所有の一覧に足してから置く。
+  一覧はコードに無い項目を持たない。
+  検査: script（`scripts/check-context-boundaries.sh`）。
 - **C8** `src/application/ports/`のmoduleは自分と`shared`のportだけを、moduleのpath（`super::shared::Clock`）で名指す。
   例外は他のcontextを読む観測と分析、`Queue`・`StateStore`の`shared`、`RunLog`を組に名指す`host`。
   検査: script（例外の中身と`crate::application::X`を通す名指しはreview）。
 
 ### transactionの規則
 
-- **X1** 複数のcontextの状態を変える1つのtransactionは、上の一覧のIDを持つものだけ。
-  検査: review。
+- **X1** 複数のcontextの状態を変える1つのtransactionは、所有の一覧の`transaction`の項目にID・書き手・理由を持つものだけ。
+  一覧に足す・外す変更は同じ変更で一覧を直す。
+  検査: script（`scripts/check-context-boundaries.sh`、C1として）。
 - **X2** 境界の規則のためにtransactionを分けない。
-  一覧のtransactionの述語（`WHERE status IN (...)`・`renew_lease`・`BEGIN IMMEDIATE`）を外へ出さない（ADR-0013決定9）。
+  所有の一覧のtransactionの述語（`WHERE status IN (...)`・`renew_lease`・`BEGIN IMMEDIATE`）を外へ出さない（ADR-0013決定9）。
   検査: review。
-- **X3** 一覧のtransactionの中で、他のcontextの状態を変えるのは、そのcontextのinfrastructureが公開する関数（`infrastructure::sqlite::transition_task`など）を通す。
+- **X3** 所有の一覧のtransactionの中で、他のcontextの状態を変えるのは、そのcontextのinfrastructureが公開する関数（`infrastructure::sqlite::transition_task`など）を通す。
   SQLの文を書き写さない。
   検査: review。
 
 ### 検査の範囲
 
-- scriptは`scripts/check-layer-deps.sh`で、L1・L2・L3・L4・L6・L9とL7の時計、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
-  CIと`src/`を変えるtaskのverifyが流す。
-- 数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
-- SQLのtrigger（migrationが作る`search_*`）が書く`search_index`・`landed_commits`は、計画管理の検索の索引の書き込みで、C1の違反に数えない。
-- 許可の一覧は`.config/layer-deps-allow.txt`で、形式と落ちる条件は一覧の先頭のコメントが持つ。
-- 今ある違反は、理由と行き先のtaskを持つ許可の一覧にだけ置く（ADR-t1545-1決定4）。
-  違反を直す変更は、同じ変更で一覧の項目と「[今の違反と行き先](#今の違反と行き先)」の行を消す。
-- 「検査: review」の規則と、境界を変えた差分がこの文書と許可の一覧を直しているかは、reviewのsubagent `architecture-boundaries`（[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が見て、scriptの規則は見ない。
-
-## 今の違反と行き先
-
-scriptが検査する規則の行は、許可の一覧`.config/layer-deps-allow.txt`の項目と一致し、行き先のtaskは一覧の項目が持つ。
-reviewで見る規則の行は、行き先をこの表の言葉で書く。
-
-| 規則 | 場所 | 違反 | 行き先 |
-| --- | --- | --- | --- |
-| L5 | `src/application`の`Instant::now` | 判断が実時間を読む | 注入した`Clock::monotonic`へ。残りは計測の後に判断 |
-| C4 | `integrate`・`session`・`headless_session`・`session_log`・`screen`・`supervise`のループと工程（計画管理・sweep）・`planner`・`planner_request` | 全体の`Queue`を取る | portの分割 |
-| C4 | `recording`の`RecordingBackend` | 全体の`QueueOpener`を取る | 消す |
-| C5 | `SessionRegistry`が計画管理の`planners`を書く | 実行と着地のportに計画管理の状態が混ざる | portの分割 |
-| C5 | `health::attention` | 計画管理の内部の`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`を読む | portの分割 |
-| C5 | `lifecycle` | host運用が実行と着地の内部の`RunRecovery`を読む | portの分割 |
-| C6 | `supervise`の`resume`・`recheck`・`recovery`ほか | 判断に使うeventのpayloadを文字列のkeyで読む | 型付きの復元の値（`domain::run::payload`の形）へ |
-| X3・C1 | T1: `sqlite.rs`の`claim_task`（計画管理のstore）が`INSERT INTO task_runs`を書く | 計画管理のstoreが実行と着地の表をSQLで直接書く | 未登録（follow_up） |
-| X3・C1 | T2: `runtime_store/transitions.rs`の`finish_integration`が`UPDATE tasks SET status='completed'`を書く | 実行と着地のstoreが計画管理の表を`transition_task`を通さず書く | 未登録（follow_up） |
-| X3・C1 | T6: `src/infrastructure/finding_planners.rs`（`settle_findings`ほか）が`UPDATE findings`を書く | 計画管理のstoreが観測と分析の表を`infrastructure::findings`を通さず書く | 未登録（follow_up） |
+- `scripts/check-layer-deps.sh`は、L1・L2・L3・L4・L6・L9とL7の時計、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
+  数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
+  許可の一覧は`.config/layer-deps-allow.txt`。
+- `scripts/check-context-boundaries.sh`は、C1・C5・C7・X1を当てる。
+  所有の一覧`.config/context-boundaries.txt`は、pathから導けない所有（tableとstoreのmoduleと`src/application/`のmoduleのcontext、portとそのmethodの公開先、`ports/`の外のport、境界をまたぐtransactionの関数）を持つ。
+  scriptは一覧とコードを照合し、一覧に無いtable・port・storeのmoduleと、コードに無い一覧の項目で落ちる。
+  共有の部品のtableとportは、どのcontextが書いても使っても違反に数えない。
+  `src/application/ports/<context>.rs`のportの所有と、`ports/`・`queue_reads/`・`compose/`の`<context>.rs`のcontextは、scriptがpathから導く。
+  SQLは文字列の中を読み、migrationのtriggerが書く`search_index`・`landed_commits`は数えない。
+  許可の一覧は`.config/context-boundaries-allow.txt`。
+- 所有の一覧と2つの許可の一覧の書式と落ちる条件は各一覧の先頭のコメント、数え方の細目はscriptの先頭のコメントが持つ。
+- 今ある違反は、理由と行き先のtask（`.config/context-boundaries-allow.txt`では、行き先が未登録なら`none`と理由）を持つ許可の一覧にだけ置く（ADR-t1545-1決定4、ADR-t2287-1）。
+  許可の一覧に無い違反と、違反が消えた古い項目で落ちるので、違反を直す変更は同じ変更で許可の一覧の項目を消す。
+  reviewだけで見る規則の今の違反は文書に記録せず、行き先はqueueのtaskが持つ。
+- 2つのscriptは、CIと`src/`を変えるtaskのverifyが流す。
+  `scripts/check-context-boundaries.sh`は、runのreviewのプログラム（[プログラムのreview](supervisor-lifecycle/review-programs.md)、どのscriptを流すかは`dagq.toml`の`[review.programs]`）としてもLLMのagentより前に流れる。
+- 「検査: review」の規則と、scriptが見ない部分（C5の一部公開のportのmethodの単位の参照、contextの決まらないmodule、実行時に組み立てるSQLなど。全体はscriptの先頭のコメント）は、reviewのsubagent `architecture-boundaries`（[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が差分が足したものだけを見る。
+  scriptの規則と、一覧への記録の漏れは見ない。

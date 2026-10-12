@@ -1166,38 +1166,38 @@ acceptance の版 1。follow_up 由来の未完了 7 件、follow_up でない�
 - **task 1616**（ready・source goal: goal 100・depth 1）domain の test から crate::application::timestamp を無くす（stats.rs・stats/thresholds.rs・stats/conflicts.rs）
   - 分類: 範囲外で別 goal（out_of_scope）
   - 項目: (2) 今ある違反は理由と行き先の task を持つ許可の一覧にだけある
-  - 理由: goal 100 の (2) は違反が行き先 task 付きで許可の一覧にあることまでを求め、違反の解消は求めない。architecture.md の「今の違反と行き先」に L1 の行（行き先 task 1616）があり許可の一覧も行き先を持つので、実施しなくても (2) を満たす。
-  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[1]; event 78461; docs/design/architecture.md「今の違反と行き先」の L1 の行（task 1616）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/domain/stats.rs:2213・stats/thresholds.rs:830・stats/conflicts.rs:418 に crate::application::timestamp が残る（未実施）
+  - 理由: goal 100 の (2) は違反が行き先 task 付きで許可の一覧にあることまでを求め、違反の解消は求めない。architecture.md の当時の違反の表に L1 の行（行き先 task 1616）があり許可の一覧も行き先を持つので、実施しなくても (2) を満たす。
+  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[1]; event 78461; docs/design/architecture.md の当時の違反の表の L1 の行（task 1616）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/domain/stats.rs:2213・stats/thresholds.rs:830・stats/conflicts.rs:418 に crate::application::timestamp が残る（未実施）
   - 所属先の案: 今の goal 115 のまま（移動不要）
 - **task 1617**（ready・source goal: goal 100・depth 1）domain::landing_branch が anyhow を返すのを DomainError に直す
   - 分類: 範囲外で別 goal（out_of_scope）
   - 項目: (2) 今ある違反は理由と行き先の task を持つ許可の一覧にだけある
-  - 理由: 違反の解消は goal 100 の acceptance に無く、L2（landing_branch の anyhow）は行き先 task 1617 付きで「今の違反と行き先」と許可の一覧に載っているので (2) は満たせる。
-  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[2]; event 78463; docs/design/architecture.md「今の違反と行き先」の L2 の行（task 1617）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/domain/landing_branch.rs:82 に anyhow::Result が残る（未実施）
+  - 理由: 違反の解消は goal 100 の acceptance に無く、L2（landing_branch の anyhow）は行き先 task 1617 付きで architecture.md の当時の違反の表と許可の一覧に載っているので (2) は満たせる。
+  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[2]; event 78463; docs/design/architecture.md の当時の違反の表の L2 の行（task 1617）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/domain/landing_branch.rs:82 に anyhow::Result が残る（未実施）
   - 所属先の案: 今の goal 115 のまま（移動不要）
 - **task 1618**（ready・source goal: goal 100・depth 1）application の SystemTime::now（supervise/jobs.rs:220・headless_session.rs:531）を注入した Clock に替える
   - 分類: 範囲外で別 goal（out_of_scope）
   - 項目: (2) 今ある違反は理由と行き先の task を持つ許可の一覧にだけある / (4) revise・reopen・resume・stall の時間と観測に依る判断が…関数と unit test に移り
   - 理由: L4 の SystemTime::now（jobs.rs・headless_session.rs）は行き先 task 1618 付きで一覧にあり (2) を満たす。(4) の時間の判断の移動は revise・reopen・resume・stall が対象で、jobs.rs と headless_session.rs の壁時計は含まない。
-  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[3]; event 78465; docs/design/architecture.md「今の違反と行き先」の L4 の行（task 1618）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/application/supervise/jobs.rs:220・headless_session.rs:63,669 に SystemTime::now が残る（未実施）
+  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[3]; event 78465; docs/design/architecture.md の当時の違反の表の L4 の行（task 1618）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/application/supervise/jobs.rs:220・headless_session.rs:63,669 に SystemTime::now が残る（未実施）
   - 所属先の案: 今の goal 115 のまま（移動不要）
 - **task 1619**（ready・source goal: goal 100・depth 1）application::planner_handoff の test が使う infrastructure::run_files::LocalRunFiles を application::memory_files に替える
   - 分類: 範囲外で別 goal（out_of_scope）
   - 項目: (2) 今ある違反は理由と行き先の task を持つ許可の一覧にだけある
   - 理由: L3（planner_handoff の test の LocalRunFiles）は行き先 task 1619 付きで一覧にあり、違反の解消は goal 100 の acceptance に無い。
-  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[4]; event 78467; docs/design/architecture.md「今の違反と行き先」の L3 の行（task 1619）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/application/planner_handoff.rs:71 に LocalRunFiles が残る（未実施）
+  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[4]; event 78467; docs/design/architecture.md の当時の違反の表の L3 の行（task 1619）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/application/planner_handoff.rs:71 に LocalRunFiles が残る（未実施）
   - 所属先の案: 今の goal 115 のまま（移動不要）
 - **task 1620**（ready・source goal: goal 100・depth 1）infrastructure::queue_service の crate::view::task_detail への参照を無くし、application::prompt と application::health を context ごとに分ける
   - 分類: 範囲外で別 goal（out_of_scope）
   - 項目: (2) 今ある違反は理由と行き先の task を持つ許可の一覧にだけある
   - 理由: L6（queue_service の crate::view::task_detail）は行き先 task 1620 付きで一覧にあり、違反の解消は goal 100 の acceptance に無い。
-  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[5]; event 78469; docs/design/architecture.md「今の違反と行き先」の L6 の行（task 1620）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/infrastructure/queue_service.rs:850 に crate::view::task_detail が残る（未実施）
+  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[5]; event 78469; docs/design/architecture.md の当時の違反の表の L6 の行（task 1620）; goal 100 の event 90261（planner:976 の note、request 19 で人が承認）: 1615〜1620・1637・1621 は goal 100 の受け入れ条件に要らないとして goal 115 へ移した; grep: src/infrastructure/queue_service.rs:850 に crate::view::task_detail が残る（未実施）
   - 所属先の案: 今の goal 115 のまま（移動不要）
 - **task 1621**（ready・source goal: goal 100・depth 1）越境の transaction T1・T2・T6 の中で、他の context の表を直接の SQL ではなく所有する context の infrastructure の関数で書く
   - 分類: 範囲外で別 goal（out_of_scope）
   - 項目: (1) …境界をまたぐ transaction と、今の違反とその行き先の task を持ち / (4) submodule は自分の context の状態だけを変える
   - 理由: (1) は越境の transaction を設計文書に明記するまでで task 1545 が済ませた。(4) は impl Supervisor の submodule の共有状態の話で、infrastructure の SQL の書き込みの所有（T1・T2・T6）は含まないので、実施しなくても goal 100 の acceptance を満たす。
-  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[6]; event 78471; goal 100 の event 90261（1621 の判断の理由: (1) は 1545 で済み、(4) は SQL の書き込みの所有を含まない）; docs/design/architecture.md の X3（249 行）と「今の違反と行き先」の X3・C1 の行（未登録のまま、未実施）
+  - 証拠: receipt of run 00364554-d18c-4735-8a91-565a7f6fd240 (task 1545) follow_ups[6]; event 78471; goal 100 の event 90261（1621 の判断の理由: (1) は 1545 で済み、(4) は SQL の書き込みの所有を含まない）; docs/design/architecture.md の当時の X3（249 行）と違反の表の X3・C1 の行（未登録のまま、未実施）
   - 所属先の案: 今の goal 115 のまま（移動不要）
 - **task 1637**（ready・source goal: goal 100・depth 1）config: check-layer-deps.sh の字句の処理で、入れ子の /* */・複数行の #[cfg(test)]・test が必須の cfg（cfg(all(test, ...)) など）・inline mod の中の #[cfg(test)] mod を正しく扱い、本番のコードを数え落とさずに誤検出しないようにする
   - 分類: 範囲外で別 goal（out_of_scope）
