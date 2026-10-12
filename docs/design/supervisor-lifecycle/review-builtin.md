@@ -33,12 +33,13 @@ related:
 決定済みで、実装の着地まで今の節が正しい境界。
 
 - **規則の読み方**: 今の全体のreviewはworktreeのrootのinstructionsとそれが名指す文書をpromptの1文で読む（[Review](review.md#reviewの流れ)の2、ADR-t1470-1・ADR-t1570-1）。
-  決定後は、built-inのagent（全体のreviewを含む）はlanding branchのcommitの`.dagq/review/builtin-<名前>.md`だけをpjの規則として読み、無ければpjの規則なしで判断し、worktreeのinstructionsを読まない。
+  built-inのsecurity・testsのjobは既にlanding branchのcommitの`.dagq/review/builtin-<名前>.md`だけをpjの規則として読む（[Review](review.md#reviewのsubagent)）。
+  決定後は、全体のreviewも同じく読み、無ければpjの規則なしで判断し、worktreeのinstructionsを読まない。
   `.dagq/agents/`のpjのagentの規則の読み方と、起動の隔離（setting sourcesを空・`untrusted`・読み取りだけ）は変わらない。
-- **設定の無いrepository**: 今は全体のreviewのjob 1本だけになる（[Review](review.md#reviewのsubagent)の「設定の無いrepository」、[プログラムのreview](review-programs.md#段の流れ)の「選び方」）。
-  決定後は、既定で有効なbuilt-inのagentのjobとprogramも流れる。
-- **定義と中身の読む元**: 今はagentの定義とprogramの`script`を試行ごとにlanding branchのcommitから読む（[Review](review.md#reviewのsubagent)の「snapshot」、[プログラムのreview](review-programs.md#読む元流す場所env結果)の「snapshot」）。
-  決定後は、built-inの定義と中身だけはdagqのバイナリから取り、jobの開始の記録にbuilt-inの名前・dagqのbuild識別子・中身のhashを残す。
+- **設定の無いrepository**: 今は全体のreviewのjobと既定で有効なbuilt-inのagentのjobが流れ、programは流れない（[Review](review.md#reviewのsubagent)の「設定の無いrepository」、[プログラムのreview](review-programs.md#段の流れ)の「選び方」）。
+  決定後は、既定で有効なbuilt-inのprogramも流れる。
+- **定義と中身の読む元**: 今はprogramの`script`を試行ごとにlanding branchのcommitから読み、built-inのagentの定義だけはバイナリから取って記録を残す（[Review](review.md#reviewのsubagent)の「snapshot」、[プログラムのreview](review-programs.md#読む元流す場所env結果)の「snapshot」）。
+  決定後は、built-inのprogramの中身もdagqのバイナリから取り、jobの開始の記録にbuilt-inの名前・dagqのbuild識別子・中身のhashを残す。
   `dagq.toml`とpjの規則のfile、pjのagentとprogramは今どおりlanding branchのcommitから読む。
 - **built-inのagentのeval**: 今のevalは定義とケースを`.dagq/agents/<name>/`から読み、ケースの集合のdigestをケースのidとpatchの中身から作り、landing branchのcommitのprogramをケースのtreeに先に流す（[Agent eval](../agent-eval.md)の「定義とケースの置き場」「hold-outの1回の制限」「programのreviewの当て方」）。
   決定後は、built-inのうちsecurity・tests・docsだけを、dagqに同梱した定義とケースで測り、acceptance（全体のreview）は対象にしない。

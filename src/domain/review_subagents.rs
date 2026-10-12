@@ -3,7 +3,9 @@
 //! one of whose globs a path the reviewed commit changes matches. Which
 //! agents a review needs is decided here, without side effects; the
 //! supervisor reads the configuration and the definitions from the
-//! landing branch's committed tree.
+//! landing branch's committed tree. The built-in agents, whose
+//! definitions the binary carries, are selected with them
+//! ([`ReviewAgents::selectable`], `super::review_builtins`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -11,6 +13,7 @@ use serde_json::{Value, json};
 use super::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
+use super::review_builtins::{BuiltinSetting, EffectiveBuiltin};
 use super::scope::glob_matches;
 use super::{AskConfidence, ReviewDecision, review_reason};
 
@@ -45,6 +48,40 @@ pub struct ReviewSubagent {
     /// review that reads it from the landing branch does not pass
     /// (ADR-t1453-1 decision 4).
     pub provider: Option<super::Provider>,
+}
+
+/// The review's agents as one `dagq.toml` writes them: the project's
+/// `[review.subagents.<agent>]` in file order and the
+/// `[review.subagents."builtin:<name>"]` it has (ADR-t2259-1 decision 4).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewAgents {
+    pub agents: Vec<ReviewSubagent>,
+    pub builtins: Vec<BuiltinSetting>,
+}
+
+impl ReviewAgents {
+    /// Whether `dagq.toml` writes any table of the review's agents.
+    pub fn written(&self) -> bool {
+        !self.agents.is_empty() || !self.builtins.is_empty()
+    }
+
+    /// The agents a review selects from: the project's in file order,
+    /// then each enabled built-in in [`super::review_builtins::BuiltinAgent::ALL`]'s order with
+    /// its globs and provider over its defaults (ADR-t2259-1 decision 5).
+    pub fn selectable(&self) -> Vec<ReviewSubagent> {
+        let mut agents = self.agents.clone();
+        agents.extend(
+            EffectiveBuiltin::all(&self.builtins)
+                .into_iter()
+                .filter(|builtin| builtin.enabled)
+                .map(|builtin| ReviewSubagent {
+                    name: builtin.agent.name(),
+                    paths: builtin.paths,
+                    provider: builtin.provider,
+                }),
+        );
+        agents
+    }
 }
 
 /// An agent a review needs, with the changed paths that made it so, in

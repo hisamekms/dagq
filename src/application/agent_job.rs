@@ -12,8 +12,11 @@
 //! schema, the definition whole, the material's lines (the change's base
 //! and head commits and the material file, where the commits and the full
 //! diff are) and the language's instruction, each held to its limit of
-//! [`super::prompt`] (`AGENT_JOB_*`). The definition is never cut: one
-//! past its limit is an error ([`DefinitionOverLimit`]) and no job starts.
+//! [`super::prompt`] (`AGENT_JOB_*`). A built-in agent's job carries the
+//! project's rules for it after the definition (ADR-t2259-1 decision 6),
+//! and says nothing of instructions files to look for. The definition and
+//! the rules are never cut: together past the definition's limit they are
+//! an error ([`DefinitionOverLimit`]) and no job starts.
 //! What a case expects (its verdict, codes, split and id) is never in it.
 //! The job reads only the material file and the files of the tree it runs
 //! in, with the tools its definition declares; it is given no way to read
@@ -40,6 +43,9 @@ pub struct AgentJob<'a> {
     pub definition: &'a str,
     /// The tools its definition declares, or its role's default.
     pub tools: &'a AgentTools,
+    /// A built-in agent's project's rules as the landing branch's commit
+    /// has them; `None` without them and for a project's agent.
+    pub rules: Option<&'a str>,
     /// The change: `<base>...<head>`.
     pub base: &'a str,
     pub head: &'a str,
@@ -65,7 +71,7 @@ impl fmt::Display for DefinitionOverLimit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the definition takes {} bytes, past the agent job's limit of {}: it is never cut, so no job starts for it",
+            "the definition (with a built-in's project rules) takes {} bytes, past the agent job's limit of {}: it is never cut, so no job starts for it",
             self.bytes, self.limit
         )
     }
@@ -109,9 +115,15 @@ pub fn read_reply(reply: &str) -> Option<serde_json::Value> {
 /// ([`AGENT_JOB_DEFINITION_BYTES`]); the eval checks it before a round
 /// starts.
 pub fn check_definition(definition: &str) -> Result<(), DefinitionOverLimit> {
-    if definition.len() > AGENT_JOB_DEFINITION_BYTES {
+    check_definition_bytes(definition.len())
+}
+
+/// Whether `bytes` of a definition, with a built-in's project's rules, fit
+/// the agent job's prompt whole.
+fn check_definition_bytes(bytes: usize) -> Result<(), DefinitionOverLimit> {
+    if bytes > AGENT_JOB_DEFINITION_BYTES {
         return Err(DefinitionOverLimit {
-            bytes: definition.len(),
+            bytes,
             limit: AGENT_JOB_DEFINITION_BYTES,
         });
     }
@@ -119,9 +131,10 @@ pub fn check_definition(definition: &str) -> Result<(), DefinitionOverLimit> {
 }
 
 /// Build the agent job of `job`: its prompt held to its limits, and its
-/// launch. `Err` for a definition past [`AGENT_JOB_DEFINITION_BYTES`].
+/// launch. `Err` for a definition, with the project's rules, past
+/// [`AGENT_JOB_DEFINITION_BYTES`].
 pub fn build(job: &AgentJob<'_>) -> Result<BuiltAgentJob, DefinitionOverLimit> {
-    check_definition(job.definition)?;
+    check_definition_bytes(job.definition.len() + job.rules.map_or(0, str::len))?;
     let material_path = job.material.display().to_string();
     let read = format!("read the whole change in the material file {material_path}");
     let mut fit = Fit::new(AGENT_JOB_PROMPT_LIMIT);
@@ -139,6 +152,16 @@ pub fn build(job: &AgentJob<'_>) -> Result<BuiltAgentJob, DefinitionOverLimit> {
     );
     fit.section("material", &material);
     fit.section("definition", job.definition);
+    let rules = match job.rules {
+        Some(rules) => {
+            fit.section("rules", rules);
+            format!(
+                "The project's rules for `{agent}`, which apply with its definition:\n<project-rules>\n{rules}\n</project-rules>\n\n",
+                agent = job.agent,
+            )
+        }
+        None => String::new(),
+    };
     let instructions = fit.text(
         "instructions",
         &format!(
@@ -162,7 +185,7 @@ pub fn build(job: &AgentJob<'_>) -> Result<BuiltAgentJob, DefinitionOverLimit> {
         &read,
     );
     let text = format!(
-        "{instructions}\n{material}\nThe definition of `{agent}`:\n<definition>\n{definition}\n</definition>\n\n{answer}",
+        "{instructions}\n{material}\nThe definition of `{agent}`:\n<definition>\n{definition}\n</definition>\n\n{rules}{answer}",
         agent = job.agent,
         definition = job.definition,
     );
@@ -205,6 +228,7 @@ mod tests {
             agent: "adr-rules",
             definition,
             tools,
+            rules: None,
             base: "1111111111111111111111111111111111111111",
             head: "2222222222222222222222222222222222222222",
             material: &paths.material,
@@ -314,6 +338,56 @@ mod tests {
         ));
         assert!(prompt.text.contains("check the ADRs"));
         assert_eq!(sections_sum(&prompt.bytes), prompt.text.len());
+    }
+
+    /// A built-in's project's rules follow its definition whole, counted
+    /// as their own section and with the definition in its limit: the two
+    /// past it make no prompt (ADR-t2259-1 decision 6, ADR-t1869-1). No
+    /// instructions file is named for the job to look for.
+    #[test]
+    fn a_builtins_rules_follow_its_definition_within_the_definitions_limit() {
+        let tools = AgentRole::Review.default_tools();
+        let paths = paths();
+        let rules = "Payments go through pay/ only.";
+        let built = build(&AgentJob {
+            agent: "builtin:security",
+            rules: Some(rules),
+            ..job("Check what leaves.", &tools, &paths)
+        })
+        .unwrap();
+        let prompt = &built.prompt;
+        assert!(
+            prompt.text.contains(&format!(
+                "</definition>\n\nThe project's rules for `builtin:security`, which apply with its definition:\n<project-rules>\n{rules}\n</project-rules>\n"
+            )),
+            "{}",
+            prompt.text
+        );
+        assert_eq!(prompt.bytes.sections["rules"], rules.len());
+        assert_eq!(sections_sum(&prompt.bytes), prompt.text.len());
+        for word in ["AGENTS.md", "CLAUDE.md", "instructions file"] {
+            assert!(!prompt.text.contains(word), "{word} in {}", prompt.text);
+        }
+        let definition = "d".repeat(AGENT_JOB_DEFINITION_BYTES - 10);
+        let over = "r".repeat(11);
+        assert_eq!(
+            build(&AgentJob {
+                rules: Some(&over),
+                ..job(&definition, &tools, &paths)
+            })
+            .unwrap_err(),
+            DefinitionOverLimit {
+                bytes: AGENT_JOB_DEFINITION_BYTES + 1,
+                limit: AGENT_JOB_DEFINITION_BYTES,
+            }
+        );
+        assert!(
+            build(&AgentJob {
+                rules: Some(&over[1..]),
+                ..job(&definition, &tools, &paths)
+            })
+            .is_ok()
+        );
     }
 
     /// An agent job's reply is read bare or out of a fence, by the eval

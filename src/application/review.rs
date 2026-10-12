@@ -9,7 +9,8 @@ use std::path::Path;
 use super::{
     Repository, RunFiles, TaskStore, fenced, integrate::integrate_logs, or_none, path_text,
 };
-use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewSubagent};
+use crate::domain::review_builtins::{self, BuiltinAgent, EffectiveBuiltin};
+use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewAgents};
 use crate::domain::{CommitSha, Goal, Provider, Receipt, RunStatus, Task, TaskId, TaskRun};
 use sha2::{Digest, Sha256};
 
@@ -203,8 +204,48 @@ pub struct SnapshotAgent {
     pub digest: String,
     pub tools: AgentTools,
     /// The provider its `[review.subagents.<agent>]` names
-    /// ([`ReviewSubagent::provider`]).
+    /// ([`review_subagents::ReviewSubagent::provider`]).
     pub provider: Option<Provider>,
+    /// For a built-in agent, whose definition is the binary's
+    /// (`definition_path` is its name then), the project's rules for it
+    /// as the landing branch's commit has them, `None` without the file
+    /// (ADR-t2259-1 decision 6); `None` for a project's agent.
+    pub builtin: Option<BuiltinSnapshot>,
+}
+
+/// What a built-in agent's job is given beside the binary's definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinSnapshot {
+    pub rules: Option<ProjectRules>,
+}
+
+/// A project's rules file for a built-in agent, read from the landing
+/// branch's commit: its path, its text and the text's SHA-256.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRules {
+    pub path: String,
+    pub text: String,
+    pub digest: String,
+}
+
+impl SnapshotAgent {
+    /// What a built-in agent's `review_job_started` records of which
+    /// built-in judged (ADR-t2259-1 decision 9): its name, the build
+    /// identifier of this dagq, the SHA-256 of the definition, and the
+    /// rules file's path and SHA-256 (`null` without one); `None` for a
+    /// project's agent, whose definition's digest `review_started` has.
+    pub fn builtin_record(&self) -> Option<Value> {
+        let builtin = self.builtin.as_ref()?;
+        Some(json!({
+            "builtin": self.name,
+            "build": crate::VERSION,
+            "digest": self.digest,
+            "rules": builtin.rules.as_ref().map(|rules| json!({
+                "path": rules.path,
+                "digest": rules.digest,
+            })),
+        }))
+    }
 }
 
 /// The review's subagents read from the landing branch's commit `commit`
@@ -240,31 +281,28 @@ impl SubagentSnapshot {
 /// Read the review's subagents from the landing branch's committed tree,
 /// never from a worktree or the main checkout's files (ADR-t1453-1
 /// decision 4), and select those the paths `<base>...<head>` changes
-/// require (decision 3). `Ok(None)` when the landing branch has no
-/// `dagq.toml` or one without `[review.subagents.*]`: the review goes as
-/// before. `Err` when the file cannot be read or parsed, a selected
-/// agent's definition is not in the tree, or its tools' declaration is a
-/// mistake (ADR-t1728-2): the required checks are not known, so the
-/// review must not pass.
+/// require (decision 3). A landing branch without `dagq.toml` writes no
+/// agent, and the built-ins go by their defaults; a built-in's definition
+/// is the binary's, and its project's rules are read from the same commit
+/// (ADR-t2259-1 decisions 4 to 6). `Ok(None)` when no agent can be
+/// selected, or when `dagq.toml` writes no agent's table and none is
+/// selected: the review goes as before. `Err` when the file cannot be
+/// read or parsed, a selected agent's definition is not in the tree, or
+/// its tools' declaration is a mistake (ADR-t1728-2): the required checks
+/// are not known, so the review must not pass.
 /// `range` gives `<base>` and `<head>` for the landing branch's commit it
 /// is given ([`review_range_at`]), the one the configuration is read
-/// from, and is called only when agents are configured: the landing
-/// branch is read once per attempt.
+/// from, and is called only when some agent can be selected (an enabled
+/// built-in counts): the landing branch is read once per attempt.
 pub fn snapshot_subagents(
     repository: &dyn Repository,
-    parse: &dyn Fn(&str) -> Result<Vec<ReviewSubagent>>,
+    parse: &dyn Fn(&str) -> Result<ReviewAgents>,
     range: &dyn Fn(&CommitSha) -> Result<ReviewRange>,
 ) -> Result<Option<SubagentSnapshot>> {
     let main = repository.main_head()?;
     let commit = main.to_string();
-    let Some(text) = repository
-        .file_in(&commit, CONFIG_FILE)
-        .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
-    else {
-        return Ok(None);
-    };
-    let configured = parse(&text)
-        .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))?;
+    let written = landing_agents(repository, &commit, parse)?;
+    let configured = written.selectable();
     if configured.is_empty() {
         return Ok(None);
     }
@@ -274,8 +312,22 @@ pub fn snapshot_subagents(
         .merge_base(&range.base, &range.head)?
         .map_or_else(|| range.base.clone(), CommitSha::into_string);
     let changed = repository.changed_paths(&from, &range.head)?;
+    let selected = review_subagents::select(&configured, &changed);
+    if selected.is_empty() && !written.written() {
+        return Ok(None);
+    }
     let mut agents = Vec::new();
-    for selected in review_subagents::select(&configured, &changed) {
+    for selected in selected {
+        let provider = configured
+            .iter()
+            .find(|agent| agent.name == selected.name)
+            .and_then(|agent| agent.provider);
+        if let Some(builtin) = BuiltinAgent::named(&selected.name).ok().flatten() {
+            agents.push(builtin_snapshot(
+                repository, &commit, builtin, selected, provider,
+            )?);
+            continue;
+        }
         let (definition_path, definition) = review_subagents::find_definition(&selected.name, |path| {
             repository
                 .file_in(&commit, path)
@@ -294,10 +346,6 @@ pub fn snapshot_subagents(
                 selected.name
             )
         })?;
-        let provider = configured
-            .iter()
-            .find(|agent| agent.name == selected.name)
-            .and_then(|agent| agent.provider);
         agents.push(SnapshotAgent {
             provider,
             digest: format!("{:x}", Sha256::digest(definition.as_bytes())),
@@ -306,6 +354,7 @@ pub fn snapshot_subagents(
             matched: selected.matched,
             definition_path,
             definition,
+            builtin: None,
         });
     }
     Ok(Some(SubagentSnapshot {
@@ -315,31 +364,98 @@ pub fn snapshot_subagents(
     }))
 }
 
-/// `doctor`'s check of the agents the role sections of the landing
-/// branch's `dagq.toml` name (ADR-t1728-1): each agent with its section
-/// and the definition read ([`review_subagents::find_definition`], `null`
-/// without one), and `errors`, an agent without a definition, named in
-/// more than one role's section, or whose definition declares tools that
-/// are a mistake (ADR-t1728-2). `Ok(None)` without `dagq.toml` or without
-/// an agent named; `Err` when the file cannot be read or parsed. A review
-/// does not pass in either case meanwhile (ADR-t1453-1 decision 6).
-pub fn check_agents(
+/// The review's agents the landing branch's commit `commit` writes in its
+/// `dagq.toml`, none without the file.
+fn landing_agents(
     repository: &dyn Repository,
-    parse: &dyn Fn(&str) -> Result<Vec<ReviewSubagent>>,
-) -> Result<Option<Value>> {
-    let commit = repository.main_head()?.into_string();
+    commit: &str,
+    parse: &dyn Fn(&str) -> Result<ReviewAgents>,
+) -> Result<ReviewAgents> {
     let Some(text) = repository
-        .file_in(&commit, CONFIG_FILE)
+        .file_in(commit, CONFIG_FILE)
         .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
     else {
-        return Ok(None);
+        return Ok(ReviewAgents::default());
     };
-    let configured = parse(&text)
-        .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))?;
-    let named = review_subagents::named_for_review(&configured);
-    if named.is_empty() {
-        return Ok(None);
-    }
+    parse(&text)
+        .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))
+}
+
+/// The project's rules for `builtin` on the landing branch's commit
+/// `commit`, `None` without the file.
+fn project_rules(
+    repository: &dyn Repository,
+    commit: &str,
+    builtin: BuiltinAgent,
+) -> Result<Option<ProjectRules>> {
+    let path = review_builtins::rules_path(builtin);
+    Ok(repository
+        .file_in(commit, &path)
+        .with_context(|| format!("read {path} in the landing branch's commit {commit}"))?
+        .map(|text| ProjectRules {
+            digest: format!("{:x}", Sha256::digest(text.as_bytes())),
+            path,
+            text,
+        }))
+}
+
+/// The selected built-in agent `builtin`: the binary's definition, and the
+/// project's rules for it from the landing branch's commit `commit`.
+fn builtin_snapshot(
+    repository: &dyn Repository,
+    commit: &str,
+    builtin: BuiltinAgent,
+    selected: review_subagents::SelectedAgent,
+    provider: Option<Provider>,
+) -> Result<SnapshotAgent> {
+    let definition = builtin.definition().to_owned();
+    let tools = AgentTools::declared(AgentRole::Review, &definition).map_err(|why| {
+        anyhow::anyhow!(
+            "the built-in {}'s definition is a mistake: {why}",
+            selected.name
+        )
+    })?;
+    Ok(SnapshotAgent {
+        provider,
+        digest: format!("{:x}", Sha256::digest(definition.as_bytes())),
+        tools,
+        definition_path: selected.name.clone(),
+        name: selected.name,
+        matched: selected.matched,
+        definition,
+        builtin: Some(BuiltinSnapshot {
+            rules: project_rules(repository, commit, builtin)?,
+        }),
+    })
+}
+
+/// `doctor`'s check of the agents the role sections of the landing
+/// branch's `dagq.toml` name (ADR-t1728-1): `agents`, each project's agent
+/// with its section and the definition read
+/// ([`review_subagents::find_definition`], `null` without one);
+/// `builtins`, each built-in agent as `dagq.toml` makes it over its
+/// defaults with its rules file ([`EffectiveBuiltin::doctor_value`]); and
+/// `errors`, an agent without a definition, named in more than one role's
+/// section, or whose definition declares tools that are a mistake
+/// (ADR-t1728-2). A landing branch without `dagq.toml` has the built-ins
+/// by their defaults. `Err` when the file cannot be read or parsed (an
+/// unknown built-in's name and a key of the wrong type among them,
+/// ADR-t2259-1 decision 4). A review does not pass with either meanwhile
+/// (ADR-t1453-1 decision 6).
+pub fn check_agents(
+    repository: &dyn Repository,
+    parse: &dyn Fn(&str) -> Result<ReviewAgents>,
+) -> Result<Value> {
+    let commit = repository.main_head()?.into_string();
+    let written = landing_agents(repository, &commit, parse)?;
+    let named = review_subagents::named_for_review(&written.agents);
+    let builtins = EffectiveBuiltin::all(&written.builtins)
+        .iter()
+        .map(|builtin| {
+            let rules = project_rules(repository, &commit, builtin.agent)?;
+            Ok(builtin.doctor_value(rules.as_ref().map(|rules| rules.path.as_str())))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut agents = Vec::new();
     let mut defined = Vec::new();
     let mut declared = Vec::new();
@@ -365,9 +481,7 @@ pub fn check_agents(
     let mut errors =
         review_subagents::config_problems(&named, &|agent| defined.iter().any(|d| d == agent));
     errors.extend(declared);
-    Ok(Some(
-        json!({"commit": commit, "agents": agents, "errors": errors}),
-    ))
+    Ok(json!({"commit": commit, "agents": agents, "builtins": builtins, "errors": errors}))
 }
 
 /// Write `text` and then the full diff `<base>...<head>` as a fenced block to
@@ -757,22 +871,48 @@ mod tests {
     const CONFIG: &str = "the committed dagq.toml";
     const DEFINITION: &str = "---\ndescription: main's design checks\n---\nCheck the design.\n";
 
+    /// A committed `dagq.toml` that turns `builtin:security` off and
+    /// `builtin:tests` on, on `lib/**` only and on Codex.
+    const BUILTINS: &str = "the committed dagq.toml of the built-ins";
+
     /// `design` reviews `change.txt` and `docs/**`; `unused` matches
     /// nothing and has no definition. A config of `bad` does not parse;
     /// one without the table names no agent.
-    fn parse(text: &str) -> Result<Vec<ReviewSubagent>> {
-        let agent = |name: &str, paths: &[&str]| ReviewSubagent {
+    fn parse(text: &str) -> Result<ReviewAgents> {
+        let agent = |name: &str, paths: &[&str]| review_subagents::ReviewSubagent {
             name: name.to_owned(),
             provider: None,
             paths: paths.iter().map(|p| (*p).to_owned()).collect(),
         };
+        let setting =
+            |agent, enabled, paths: Option<&[&str]>, provider| review_builtins::BuiltinSetting {
+                agent,
+                enabled: Some(enabled),
+                paths: paths.map(|paths| paths.iter().map(|p| (*p).to_owned()).collect()),
+                provider,
+            };
         match text {
-            CONFIG => Ok(vec![
-                agent("design", &["change.txt", "docs/**"]),
-                agent("unused", &["nothing/**"]),
-            ]),
+            CONFIG => Ok(ReviewAgents {
+                agents: vec![
+                    agent("design", &["change.txt", "docs/**"]),
+                    agent("unused", &["nothing/**"]),
+                ],
+                builtins: Vec::new(),
+            }),
+            BUILTINS => Ok(ReviewAgents {
+                agents: Vec::new(),
+                builtins: vec![
+                    setting(BuiltinAgent::Security, false, None, None),
+                    setting(
+                        BuiltinAgent::Tests,
+                        true,
+                        Some(&["lib/**"]),
+                        Some(Provider::Codex),
+                    ),
+                ],
+            }),
             "bad" => anyhow::bail!("dagq.toml:1: [review.subagents.design] has no paths"),
-            _ => Ok(Vec::new()),
+            _ => Ok(ReviewAgents::default()),
         }
     }
 
@@ -834,9 +974,21 @@ mod tests {
         );
     }
 
+    /// `doctor`'s view of `builtins` by their defaults: security on,
+    /// tests off, on their default globs, without rules files.
+    fn default_builtins() -> Value {
+        json!(
+            EffectiveBuiltin::all(&[])
+                .iter()
+                .map(|builtin| builtin.doctor_value(None))
+                .collect::<Vec<_>>()
+        )
+    }
+
     /// `doctor`'s check of the landing branch's agents (ADR-t1728-1): each
     /// named agent with the definition read, and an agent without one as
-    /// an error; nothing to report without `dagq.toml` or agents.
+    /// an error; the built-ins by their defaults without `dagq.toml` or
+    /// agents.
     #[test]
     fn doctor_checks_that_every_named_agent_has_a_definition() {
         let check = |files: Vec<(&'static str, &'static str)>| {
@@ -848,8 +1000,12 @@ mod tests {
                 &parse,
             )
         };
-        assert_eq!(check(Vec::new()).unwrap(), None);
-        assert_eq!(check(vec![(CONFIG_FILE, "[run.env]")]).unwrap(), None);
+        let nothing =
+            json!({"commit": SHA, "agents": [], "builtins": default_builtins(), "errors": []});
+        assert_eq!(check(Vec::new()).unwrap(), nothing);
+        assert_eq!(check(vec![(CONFIG_FILE, "[run.env]")]).unwrap(), nothing);
+        assert_eq!(nothing["builtins"][0]["enabled"], json!(true));
+        assert_eq!(nothing["builtins"][1]["enabled"], json!(false));
         assert!(
             format!("{:#}", check(vec![(CONFIG_FILE, "bad")]).unwrap_err())
                 .contains("[review.subagents.design] has no paths")
@@ -860,12 +1016,30 @@ mod tests {
                 (".dagq/agents/design/AGENT.md", DEFINITION),
             ])
             .unwrap(),
-            Some(json!({"commit": SHA, "agents": [
+            json!({"commit": SHA, "agents": [
                 {"agent": "design", "section": "review.subagents", "definition": ".dagq/agents/design/AGENT.md"},
                 {"agent": "unused", "section": "review.subagents", "definition": null},
-            ], "errors": [
+            ], "builtins": default_builtins(), "errors": [
                 "[review.subagents.unused] names an agent without a definition: .dagq/agents/unused/AGENT.md is not committed",
-            ]}))
+            ]})
+        );
+        // The built-ins as dagq.toml writes them, with the rules file the
+        // landing branch has.
+        let builtins = check(vec![
+            (CONFIG_FILE, BUILTINS),
+            (".dagq/review/builtin-tests.md", "Our tests live in t/."),
+        ])
+        .unwrap();
+        assert_eq!(
+            builtins["builtins"],
+            json!([
+                {"agent": "builtin:security", "enabled": false, "enabled_by_default": true,
+                 "paths": BuiltinAgent::Security.default_paths(), "paths_written": false,
+                 "provider": null, "rules": null},
+                {"agent": "builtin:tests", "enabled": true, "enabled_by_default": false,
+                 "paths": ["lib/**"], "paths_written": true, "provider": "codex",
+                 "rules": ".dagq/review/builtin-tests.md"},
+            ])
         );
         // A file elsewhere, as in the directory before ADR-t1728-1, is no
         // definition.
@@ -874,7 +1048,6 @@ mod tests {
             (concat!(".dagq/review", "-agents/design.md"), DEFINITION),
             (".dagq/agents/unused.md", DEFINITION),
         ])
-        .unwrap()
         .unwrap();
         assert_eq!(elsewhere["agents"][0]["definition"], json!(null));
         assert_eq!(elsewhere["errors"].as_array().unwrap().len(), 2);
@@ -925,7 +1098,6 @@ mod tests {
             },
             &parse,
         )
-        .unwrap()
         .unwrap();
         assert_eq!(
             checked["errors"],
@@ -983,6 +1155,99 @@ mod tests {
         assert!(!prompt.contains("subagent"), "{prompt}");
         let material = material(&task(""));
         assert!(!material.contains("subagent"), "{material}");
+    }
+
+    /// Without `dagq.toml`, a change of code selects `builtin:security` on
+    /// its default globs, with the binary's definition and no rules file;
+    /// the landing branch's rules file is handed on with its digest, and
+    /// the job's record names the built-in, this build and both digests
+    /// (ADR-t2259-1 decisions 5, 6 and 9).
+    #[test]
+    fn a_change_of_code_selects_the_builtin_security_by_default() {
+        let found = snapshot(Vec::new(), &["app/main.py", "README.txt"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.agents.len(), 1, "{found:?}");
+        let security = &found.agents[0];
+        assert_eq!(security.name, "builtin:security");
+        assert_eq!(security.matched, ["app/main.py"]);
+        assert_eq!(security.definition, BuiltinAgent::Security.definition());
+        assert_eq!(security.definition_path, "builtin:security");
+        assert_eq!(security.builtin, Some(BuiltinSnapshot { rules: None }));
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(BuiltinAgent::Security.definition().as_bytes())
+        );
+        assert_eq!(
+            security.builtin_record(),
+            Some(
+                json!({"builtin": "builtin:security", "build": crate::VERSION,
+                        "digest": digest, "rules": null})
+            )
+        );
+        const RULES: &str = "Payments go through pay/ only.";
+        let ruled = snapshot(
+            vec![(".dagq/review/builtin-security.md", RULES)],
+            &["app/main.py"],
+        )
+        .unwrap()
+        .unwrap();
+        let rules_digest = format!("{:x}", Sha256::digest(RULES.as_bytes()));
+        assert_eq!(
+            ruled.agents[0].builtin_record().unwrap()["rules"],
+            json!({"path": ".dagq/review/builtin-security.md", "digest": rules_digest})
+        );
+        assert_eq!(
+            ruled.agents[0]
+                .builtin
+                .as_ref()
+                .unwrap()
+                .rules
+                .as_ref()
+                .unwrap()
+                .text,
+            RULES
+        );
+        // A project's agent carries no such record.
+        let project = snapshot(
+            vec![
+                (CONFIG_FILE, CONFIG),
+                (".dagq/agents/design/AGENT.md", DEFINITION),
+            ],
+            &["change.txt"],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(project.agents[0].builtin_record(), None);
+        // A change of no code selects nothing, as before.
+        assert!(snapshot(Vec::new(), &["README.txt"]).unwrap().is_none());
+    }
+
+    /// `paths` written replaces a built-in's default globs, not adds to
+    /// them, `enabled` turns each on or off, and its `provider` goes with
+    /// the agent its job starts as (ADR-t2259-1 decisions 4 and 5).
+    #[test]
+    fn a_builtins_written_paths_replace_its_defaults_and_its_provider_is_kept() {
+        let off = snapshot(vec![(CONFIG_FILE, BUILTINS)], &["app/main.py"])
+            .unwrap()
+            .unwrap();
+        assert!(off.agents.is_empty(), "{off:?}");
+        let tests = snapshot(vec![(CONFIG_FILE, BUILTINS)], &["lib/a.txt", "app/main.py"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            tests
+                .agents
+                .iter()
+                .map(|agent| (agent.name.as_str(), agent.matched.clone(), agent.provider))
+                .collect::<Vec<_>>(),
+            [(
+                "builtin:tests",
+                vec!["lib/a.txt".to_owned()],
+                Some(Provider::Codex)
+            )]
+        );
+        assert_eq!(tests.agents[0].definition, BuiltinAgent::Tests.definition());
     }
 
     /// The required checks cannot be known, so the review must not pass

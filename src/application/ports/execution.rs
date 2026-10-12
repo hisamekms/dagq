@@ -1775,15 +1775,17 @@ pub trait Verifier {
     fn e2e_paths(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
-    /// The review's subagents (`[review.subagents.<agent>]`, ADR-t1453-1
-    /// decision 1) of `text`, a whole `dagq.toml` as committed; `Err`
-    /// when it cannot be parsed. None by default.
+    /// The review's agents (`[review.subagents.<agent>]`, ADR-t1453-1
+    /// decision 1, and `[review.subagents."builtin:<name>"]`, ADR-t2259-1
+    /// decision 4) of `text`, a whole `dagq.toml` as committed; `Err`
+    /// when it cannot be parsed. None written by default, which leaves the
+    /// built-ins to their defaults.
     fn review_subagents_in(
         &self,
         text: &str,
-    ) -> Result<Vec<crate::domain::review_subagents::ReviewSubagent>> {
+    ) -> Result<crate::domain::review_subagents::ReviewAgents> {
         let _ = text;
-        Ok(Vec::new())
+        Ok(crate::domain::review_subagents::ReviewAgents::default())
     }
     /// The program reviews (`[review.programs.<name>]`, ADR-t1895-2) of
     /// `text`, a whole `dagq.toml` as committed; `Err` when it cannot be

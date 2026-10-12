@@ -136,7 +136,6 @@ tasks = 23
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/doctor.md"
-line = 1381
 tasks = 3
 
 [[doc]]

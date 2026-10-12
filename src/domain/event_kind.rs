@@ -959,7 +959,12 @@ pub const REVIEW_FINISHED: &str = EventKind::ReviewFinished.as_str();
 /// `switched_from` / `switch_reason` when it moved off one it could not
 /// use), its `session_id` when the runtime names it (Claude), its
 /// `output` (the stem of its `.out` and `.err` in the run directory) and
-/// `prompt_bytes`.
+/// `prompt_bytes`. The job of a built-in agent alone also has `builtin`,
+/// which built-in judged with what (ADR-t2259-1 decision 9): its name
+/// (`builtin`), the build identifier of the dagq that ran it (`build`),
+/// the SHA-256 of the binary's definition (`digest`), and `rules`, the
+/// project's rules file read from the landing branch's commit as `path`
+/// and SHA-256 `digest` (null without the file).
 pub const REVIEW_JOB_STARTED: &str = EventKind::ReviewJobStarted.as_str();
 /// One agent job of a run's review ended: the review `attempt`, its
 /// `agent` (null for the whole review), `again` (whether it was its one

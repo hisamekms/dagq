@@ -28,7 +28,8 @@ pub struct TestReviewer {
     /// Scripts of the agent jobs of runs' reviews (ADR-t1895-1), by the
     /// agent their prompt names, each run with `/bin/sh -c` in the
     /// worktree (an agent's last one repeats); an agent without them takes
-    /// `agent_jobs`'.
+    /// `agent_jobs`', and a built-in agent (`builtin:<name>`, which runs
+    /// by default on a change of code) without them passes.
     pub review_agents: Mutex<Vec<(String, Vec<String>)>>,
     /// Each agent job's launch as it started, the eval's and the reviews'.
     pub launches: Mutex<Vec<dagq::application::AgentJobLaunch>>,
@@ -164,9 +165,14 @@ impl AgentProvider for TestReviewer {
             .find(|(agent, _)| Some(agent) == named.as_ref())
             .map(|(_, scripts)| scripts);
         let mut eval = self.agent_jobs.lock().unwrap();
-        let scripts = match mine {
-            Some(scripts) => scripts,
-            None => &mut *eval,
+        let mut builtin_passes = Vec::new();
+        let scripts = match (mine, &named) {
+            (Some(scripts), _) => scripts,
+            (None, Some(agent)) if agent.starts_with("builtin:") => {
+                builtin_passes.push(agent_says(agent, "pass", &[]));
+                &mut builtin_passes
+            }
+            (None, _) => &mut *eval,
         };
         ensure!(!scripts.is_empty(), "the test reviewer runs no agent job");
         let script = if scripts.len() > 1 {

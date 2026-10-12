@@ -8,7 +8,7 @@ use crate::application::agent_job::{self, AgentJob};
 use crate::application::job_start_failure;
 use crate::application::prompt::{PromptBytes, REVIEW_ACCESS};
 use crate::application::review::{
-    ReviewRange, SubagentSnapshot, review_range_at, snapshot_subagents,
+    ReviewRange, SnapshotAgent, SubagentSnapshot, review_range_at, snapshot_subagents,
 };
 use crate::application::review_programs::{ProgramSnapshot, snapshot_programs};
 use crate::application::run_git;
@@ -652,21 +652,22 @@ impl Supervisor<'_> {
                 prompt_bytes,
                 session_id,
             },
+            builtin: None,
             again: false,
             state: ReviewJobState::Waiting(None),
             session: None,
         }];
         // An agent's provider as the landing branch's `dagq.toml` names it,
         // read with its paths (ADR-t1453-1 decision 4).
-        let provider_of = |agent: &str| {
+        let snapshot_of = |agent: &str| {
             subagents
                 .iter()
                 .flat_map(|snapshot| &snapshot.agents)
                 .find(|snapshot| snapshot.name == agent)
-                .and_then(|snapshot| snapshot.provider)
         };
         jobs.extend(prepared.agents.into_iter().map(|(agent, built)| ReviewJob {
-            provider: provider_of(&agent),
+            provider: snapshot_of(&agent).and_then(|snapshot| snapshot.provider),
+            builtin: snapshot_of(&agent).and_then(SnapshotAgent::builtin_record),
             id: ReviewJobId::Agent(agent),
             input: ReviewJobInput::Agent(built),
             again: false,
@@ -1087,18 +1088,24 @@ impl Supervisor<'_> {
                         job: started,
                         switchable,
                     };
+                    let mut payload = json!({
+                        "attempt": attempt,
+                        "agent": job.id.agent(),
+                        "again": job.again,
+                        "launch": launch.to_value(),
+                        "session_id": session_id,
+                        "output": output,
+                        "prompt_bytes": prompt_bytes,
+                    });
+                    // Which built-in, of which build, judged
+                    // (ADR-t2259-1 decision 9).
+                    if let Some(builtin) = &job.builtin {
+                        payload["builtin"] = builtin.clone();
+                    }
                     self.queue.record_runtime_event(
                         run.id(),
                         EventKind::ReviewJobStarted,
-                        json!({
-                            "attempt": attempt,
-                            "agent": job.id.agent(),
-                            "again": job.again,
-                            "launch": launch.to_value(),
-                            "session_id": session_id,
-                            "output": output,
-                            "prompt_bytes": prompt_bytes,
-                        }),
+                        payload,
                     )?;
                     info!(run_id = %run.id(), "run {} review {attempt}: {} started on {}", run.id(), job.id.describe(), launch.provider.as_str());
                     return Ok(());
@@ -1249,7 +1256,7 @@ impl Supervisor<'_> {
     }
     /// The agents' review's range from the landing branch's commit
     /// ([`snapshot_subagents`]); the range is the receipt's, read only when
-    /// agents are configured.
+    /// some agent can be selected (an enabled built-in counts).
     pub(super) fn review_subagents(&self, run: &TaskRun) -> Result<Option<SubagentSnapshot>> {
         snapshot_subagents(
             &*self.repository,
@@ -1320,6 +1327,11 @@ impl Supervisor<'_> {
                 agent: &agent.name,
                 definition: &agent.definition,
                 tools: &agent.tools,
+                rules: agent
+                    .builtin
+                    .as_ref()
+                    .and_then(|builtin| builtin.rules.as_ref())
+                    .map(|rules| rules.text.as_str()),
                 base: &snapshot.range.base,
                 head: &snapshot.range.head,
                 material: Path::new(&path),

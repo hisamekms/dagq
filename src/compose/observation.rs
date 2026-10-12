@@ -174,9 +174,15 @@ fn runtimes_of(queue: &SqliteQueue) -> Result<crate::domain::container_runtime::
 }
 
 /// `doctor`'s `agents`: see [`crate::application::review::check_agents`],
-/// read from the landing branch of the checkout `queue` is bound to; none
-/// for a queue bound to none or a landing branch without agents, and
-/// `error` when the checkout or the file cannot be read.
+/// read from the landing branch of the checkout `queue` is bound to: the
+/// project's agents (`agents`) and the built-in agents (`builtins`, each
+/// with whether it runs and does by default, its globs and whether
+/// `dagq.toml` wrote them, its provider and its rules file), and the
+/// mistakes (`errors`); none for a queue bound to none, and `error` alone
+/// when the checkout or `dagq.toml` cannot be read or parsed (an unknown
+/// `builtin:` name, a project's agent under that prefix, or an `enabled`
+/// that is no boolean among them), which also keeps every review from
+/// passing.
 fn doctor_agents(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
     let Some(checkout) = bound_main_checkout(queue)? else {
         return Ok(None);
@@ -185,13 +191,13 @@ fn doctor_agents(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
         .and_then(|checkout| GitRepository::inspect(&checkout))
         .and_then(|repository| {
             crate::application::review::check_agents(&repository, &|text| {
-                Ok(crate::infrastructure::run_env::parse_config(text)?.review_subagents)
+                Ok(crate::infrastructure::run_env::parse_config(text)?.review_agents())
             })
         });
-    Ok(match checked {
+    Ok(Some(match checked {
         Ok(value) => value,
-        Err(error) => Some(serde_json::json!({"error": format!("{error:#}")})),
-    })
+        Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+    }))
 }
 
 /// The landing branch and push of the repository the queue is bound to,

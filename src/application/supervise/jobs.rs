@@ -1342,6 +1342,11 @@ pub(super) struct ReviewJob {
     pub(super) provider: Option<Provider>,
     /// What starts it.
     pub(super) input: ReviewJobInput,
+    /// A built-in agent's record of which built-in judges
+    /// (`SnapshotAgent::builtin_record`), which each of its
+    /// `review_job_started` carries; `None` for the whole review's and a
+    /// project's agent.
+    pub(super) builtin: Option<serde_json::Value>,
     /// Whether it ran once more already, or starts as its run once more.
     pub(super) again: bool,
     pub(super) state: ReviewJobState,
@@ -1855,6 +1860,7 @@ mod tests {
                 prompt_bytes: crate::application::prompt::PromptBytes::default(),
                 session_id: None,
             },
+            builtin: None,
             again: false,
             state,
             session: None,

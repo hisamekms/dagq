@@ -460,8 +460,7 @@ fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
 
     let repository = GitRepository::inspect(&repo).unwrap();
     let range = |main: &CommitSha| review_range_at(&repository, &run, &receipt, main);
-    let parse =
-        |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_subagents);
+    let parse = |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_agents());
     let snapshot = snapshot_subagents(&repository, &parse, &range)
         .unwrap()
         .unwrap();
@@ -480,6 +479,7 @@ fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
         agent: &agent.name,
         definition: &agent.definition,
         tools: &agent.tools,
+        rules: None,
         base: &snapshot.range.base,
         head: &snapshot.range.head,
         material: &job_dir.join("review.md"),

@@ -86,8 +86,9 @@ use crate::{
         queue_broker::RegistryHost,
         recheck::RecheckConfig,
         resume::ResumeConfig,
+        review_builtins::{self, BuiltinAgent, BuiltinSetting},
         review_programs::{self, ReviewProgram},
-        review_subagents::{self, ReviewSubagent},
+        review_subagents::{self, ReviewAgents, ReviewSubagent},
         run_env::{RunEnvCheck, RunEnvProgram},
         scope::{dedup_globs, validate_path_globs},
         slot_limits::SupervisorConfig,
@@ -169,6 +170,14 @@ const REVIEW_SUBAGENT_PATHS: &str = "paths";
 /// The optional key of `[review.subagents.<agent>]`: the provider of the
 /// agent's job ([`ReviewSubagent::provider`]).
 const REVIEW_SUBAGENT_PROVIDER: &str = "provider";
+/// The optional key of `[review.subagents."builtin:<name>"]`: whether the
+/// built-in runs ([`BuiltinSetting::enabled`]).
+const REVIEW_SUBAGENT_ENABLED: &str = "enabled";
+/// What [`parse_config`] calls the current table while in a
+/// `[review.subagents."builtin:<name>"]`; its keys are `enabled` and the
+/// optional `paths` and `provider` (`enabled` only for
+/// [`review_builtins::ACCEPTANCE`]).
+const REVIEW_BUILTIN_TABLE: &str = "review.subagents.builtin";
 /// `[review.programs.<name>]`: a program review (ADR-t1895-2), one table
 /// per program; its keys are [`REVIEW_PROGRAM_KEYS`].
 const REVIEW_PROGRAMS_PREFIX: &str = "review.programs.";
@@ -426,6 +435,11 @@ pub struct Config {
     /// `[review.subagents.<agent>]` in file order (ADR-t1453-1 decision
     /// 1); empty without any.
     pub review_subagents: Vec<ReviewSubagent>,
+    /// `[review.subagents."builtin:<name>"]` of the built-in agents, in
+    /// file order (ADR-t2259-1 decision 4); empty without any, which
+    /// leaves each to its defaults. `builtin:acceptance` is checked and
+    /// not kept.
+    pub review_builtins: Vec<BuiltinSetting>,
     /// `[review.programs.<name>]` in file order (ADR-t1895-2); empty
     /// without any.
     pub review_programs: Vec<ReviewProgram>,
@@ -462,6 +476,17 @@ pub struct Config {
     /// `[verify_marks.<name>]` in file order ([`VERIFY_MARKS_PREFIX`]);
     /// empty without any.
     pub verify_marks: Vec<ProjectMark>,
+}
+
+impl Config {
+    /// The review's agents as this `dagq.toml` writes them: the
+    /// project's and the built-ins' tables.
+    pub fn review_agents(&self) -> ReviewAgents {
+        ReviewAgents {
+            agents: self.review_subagents.clone(),
+            builtins: self.review_builtins.clone(),
+        }
+    }
 }
 
 /// Parse the whole file.
@@ -517,6 +542,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut subagent_open: Option<usize> = None;
     // The keys of the current `[review.subagents.<agent>]` read.
     let mut subagent_keys: Vec<String> = Vec::new();
+    // Whether `[review.subagents."builtin:acceptance"]` was read, and
+    // whether it is the table being read (no setting of it is kept).
+    let mut acceptance_seen = false;
+    let mut in_acceptance = false;
     // The `[review.programs.<name>]` being read, finished at the next
     // table or the end of the file.
     let mut program_open: Option<ProgramTable> = None;
@@ -603,6 +632,36 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     !agent.is_empty(),
                     "{CONFIG_FILE_NAME}:{number}: [{name}] names no agent; write [{REVIEW_SUBAGENTS_PREFIX}<agent>]"
                 );
+                subagent_keys.clear();
+                if agent == review_builtins::ACCEPTANCE {
+                    ensure!(
+                        !acceptance_seen,
+                        "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
+                    );
+                    acceptance_seen = true;
+                    in_acceptance = true;
+                    table = Some(REVIEW_BUILTIN_TABLE);
+                    continue;
+                }
+                // A name of the built-ins' prefix is a built-in's, or a
+                // mistake: no project's agent takes it.
+                if let Some(builtin) = BuiltinAgent::named(&agent).map_err(|why| {
+                    anyhow::anyhow!("{CONFIG_FILE_NAME}:{number}: [{name}]: {why}")
+                })? {
+                    ensure!(
+                        config.review_builtins.iter().all(|b| b.agent != builtin),
+                        "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
+                    );
+                    config.review_builtins.push(BuiltinSetting {
+                        agent: builtin,
+                        enabled: None,
+                        paths: None,
+                        provider: None,
+                    });
+                    in_acceptance = false;
+                    table = Some(REVIEW_BUILTIN_TABLE);
+                    continue;
+                }
                 ensure!(
                     review_subagents::valid_agent_name(&agent),
                     "{CONFIG_FILE_NAME}:{number}: agent {agent:?} of [{name}] is not kebab-case (lowercase letters and digits joined by -)"
@@ -617,7 +676,6 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     provider: None,
                 });
                 subagent_open = Some(number);
-                subagent_keys.clear();
                 table = Some(REVIEW_SUBAGENTS_TABLE);
                 continue;
             }
@@ -808,6 +866,67 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 .as_mut()
                 .expect("a [review.programs.*] table names its program")
                 .entry(number, key, rest.trim())?,
+            Some(REVIEW_BUILTIN_TABLE) => {
+                let section = if in_acceptance {
+                    review_builtins::ACCEPTANCE.to_owned()
+                } else {
+                    config
+                        .review_builtins
+                        .last()
+                        .expect("a builtin table names its built-in")
+                        .agent
+                        .name()
+                };
+                ensure!(
+                    !subagent_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                subagent_keys.push(key.to_owned());
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                if in_acceptance {
+                    // The whole review always runs, on every change, where
+                    // `[roles.review]` sends it (ADR-t2259-1 decision 3).
+                    ensure!(
+                        key == REVIEW_SUBAGENT_ENABLED,
+                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_SUBAGENTS_PREFIX}\"{section}\"]; the whole review runs on every change on [roles.review]'s provider, so its only key is {REVIEW_SUBAGENT_ENABLED}"
+                    );
+                    ensure!(
+                        parse_bool(rest.trim()).with_context(with)?,
+                        "{CONFIG_FILE_NAME}:{number}: {section} cannot be turned off: the whole review is what a review's verdict stands on"
+                    );
+                    continue;
+                }
+                let builtin = config
+                    .review_builtins
+                    .last_mut()
+                    .expect("a builtin table names its built-in");
+                match key {
+                    REVIEW_SUBAGENT_ENABLED => {
+                        builtin.enabled = Some(parse_bool(rest.trim()).with_context(with)?);
+                    }
+                    REVIEW_SUBAGENT_PROVIDER => {
+                        builtin.provider = Some(
+                            parse_string(rest.trim())
+                                .with_context(with)?
+                                .parse::<crate::domain::Provider>()
+                                .map_err(|error| anyhow::anyhow!("{error}"))
+                                .with_context(with)?,
+                        );
+                    }
+                    REVIEW_SUBAGENT_PATHS => {
+                        let globs = parse_string_array(rest.trim()).with_context(with)?;
+                        ensure!(
+                            !globs.is_empty(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} of [{REVIEW_SUBAGENTS_PREFIX}\"{section}\"] names no glob; turn it off with {REVIEW_SUBAGENT_ENABLED} = false"
+                        );
+                        validate_path_globs(&globs).with_context(with)?;
+                        builtin.paths = Some(dedup_globs(&globs));
+                    }
+                    _ => bail!(
+                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_SUBAGENTS_PREFIX}\"{section}\"]; the keys are {REVIEW_SUBAGENT_ENABLED}, {REVIEW_SUBAGENT_PATHS} and {REVIEW_SUBAGENT_PROVIDER}"
+                    ),
+                }
+            }
             Some(REVIEW_SUBAGENTS_TABLE) => {
                 let agent = config
                     .review_subagents
@@ -2590,8 +2709,8 @@ impl Verifier for ShellVerifier {
     fn e2e_paths(&self) -> Result<Vec<String>> {
         load_e2e_paths(&self.checkout)
     }
-    fn review_subagents_in(&self, text: &str) -> Result<Vec<ReviewSubagent>> {
-        Ok(parse_config(text)?.review_subagents)
+    fn review_subagents_in(&self, text: &str) -> Result<ReviewAgents> {
+        Ok(parse_config(text)?.review_agents())
     }
     fn review_programs_in(&self, text: &str) -> Result<Vec<ReviewProgram>> {
         Ok(parse_config(text)?.review_programs)
@@ -3103,10 +3222,111 @@ mod tests {
             verifier
                 .review_subagents_in("[review.subagents.a]\npaths = [\"x\"]\n")
                 .unwrap()
+                .agents
                 .len(),
             1
         );
         assert!(verifier.review_subagents_in("[nope]\n").is_err());
+    }
+
+    /// `[review.subagents."builtin:<name>"]` sets a built-in agent's
+    /// `enabled`, `paths` and `provider`, each optional, beside the
+    /// project's agents (ADR-t2259-1 decision 4); `builtin:acceptance`
+    /// may only say `enabled = true` (decision 3). A name of the prefix
+    /// that is no built-in's (`builtin:docs` among them, ADR-t2389-1
+    /// decision 1), which a project's agent cannot take, and an `enabled`
+    /// that is no boolean are mistakes of the whole file, so a review that
+    /// reads it does not pass.
+    #[test]
+    fn parses_the_builtin_review_agents() {
+        let config = parse_config(
+            "[review.subagents.\"builtin:tests\"]\nenabled = true # on\n\
+             paths = [\"lib/**\", \"lib/**\"]\nprovider = \"codex\"\n\
+             [review.subagents.design]\npaths = [\"docs/**\"]\n\
+             [review.subagents.'builtin:security']\nenabled = false\n\
+             [review.subagents.\"builtin:acceptance\"]\nenabled = true\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.review_builtins,
+            [
+                BuiltinSetting {
+                    agent: BuiltinAgent::Tests,
+                    enabled: Some(true),
+                    paths: Some(vec!["lib/**".into()]),
+                    provider: Some(crate::domain::Provider::Codex),
+                },
+                BuiltinSetting {
+                    agent: BuiltinAgent::Security,
+                    enabled: Some(false),
+                    paths: None,
+                    provider: None,
+                },
+            ]
+        );
+        assert_eq!(
+            config
+                .review_agents()
+                .selectable()
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            ["design", "builtin:tests"]
+        );
+        // A table of only its header leaves the built-in to its defaults.
+        let header =
+            parse_config("[review.subagents.\"builtin:tests\"]\n[run.env]\nA = \"1\"\n").unwrap();
+        assert_eq!(header.review_builtins[0].enabled, None);
+        assert!(!parse_config("").unwrap().review_agents().written());
+        for (text, expected) in [
+            (
+                "[review.subagents.\"builtin:docs\"]\nenabled = true\n",
+                "dagq.toml:1: [review.subagents.\"builtin:docs\"]: builtin:docs is no built-in agent",
+            ),
+            (
+                "[review.subagents.\"builtin:my-checks\"]\npaths = [\"a\"]\n",
+                "names starting with builtin: are the built-ins', so a project's agent may not take one",
+            ),
+            (
+                "[review.subagents.\"builtin:tests\"]\nenabled = \"yes\"\n",
+                "dagq.toml:2: value of enabled: expected true or false",
+            ),
+            (
+                "[review.subagents.\"builtin:tests\"]\nenabled = true\nenabled = false\n",
+                "dagq.toml:3: enabled is defined twice",
+            ),
+            (
+                "[review.subagents.\"builtin:tests\"]\npaths = []\n",
+                "dagq.toml:2: paths of [review.subagents.\"builtin:tests\"] names no glob",
+            ),
+            (
+                "[review.subagents.\"builtin:tests\"]\nscript = \"a.sh\"\n",
+                "dagq.toml:2: unknown key script in [review.subagents.\"builtin:tests\"]; the keys are enabled, paths and provider",
+            ),
+            (
+                "[review.subagents.\"builtin:tests\"]\nprovider = \"gemini\"\n",
+                "dagq.toml:2: value of provider",
+            ),
+            (
+                "[review.subagents.\"builtin:tests\"]\n[review.subagents.\"builtin:tests\"]\n",
+                "dagq.toml:2: [review.subagents.\"builtin:tests\"] is defined twice",
+            ),
+            (
+                "[review.subagents.\"builtin:acceptance\"]\nenabled = false\n",
+                "dagq.toml:2: builtin:acceptance cannot be turned off",
+            ),
+            (
+                "[review.subagents.\"builtin:acceptance\"]\npaths = [\"a\"]\n",
+                "dagq.toml:2: unknown key paths in [review.subagents.\"builtin:acceptance\"]",
+            ),
+            (
+                "[review.subagents.\"builtin:acceptance\"]\nprovider = \"codex\"\n",
+                "dagq.toml:2: unknown key provider in [review.subagents.\"builtin:acceptance\"]",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
     }
 
     /// `[review.programs.<name>]` names a program review: a repository

@@ -5594,6 +5594,7 @@ fn the_whole_review_carries_the_known_failures_and_an_agents_job_does_not() {
         agent: "design",
         definition,
         tools: &tools,
+        rules: None,
         base: SHA,
         head: SHA,
         material: Path::new("/runs/r/review.md"),

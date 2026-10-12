@@ -1016,6 +1016,9 @@ impl Supervisor<'_> {
                 agent: &round.agent,
                 definition: &round.definition,
                 tools: &round.tools,
+                // The eval gives a built-in no project's rules
+                // (ADR-t2259-1 decision 10).
+                rules: None,
                 base: &tree.base,
                 head: &tree.head,
                 material: &tree.material,

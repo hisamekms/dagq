@@ -98,6 +98,7 @@ mod recovery_codex;
 mod related;
 mod request_planner;
 mod request_planner_spike;
+mod review_builtins;
 mod review_programs;
 mod review_subagents;
 mod runtime_actor_env;

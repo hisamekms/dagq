@@ -182,17 +182,19 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 
 [ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)と[ADR-t1895-1](../../adr/2026-10-06-t1895-1-review-stage-runs-agent-and-program-jobs-in-a-fixed-shape.md)の実装。
 変えたpathに応じて必須のagentを選び、全体のreviewのjobと並べて、agentごとに1本ずつの独立のjobとして動かす。
-設定・snapshot・設定の無いrepositoryの未実装の変更は[built-in](review-builtin.md)。
+agentはpjの`.dagq/agents/`のものとバイナリのbuilt-in（`domain::review_builtins`）で、同じ選び方とjobで動く。
 
 - **設定**: `dagq.toml`の`[review.subagents.<agent>] paths`と任意の`provider`（書式は[Run environment](run-environment.md)）と、定義のファイル（`domain::review_subagents::find_definition`、[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
-  設定の誤りは`dagq doctor`の`agents`（`application::review::check_agents`）が出す。
+  設定の誤りとbuilt-inの設定は`dagq doctor`の`agents`（`application::review::check_agents`）が出す。
 - **道具の宣言**: 定義のfrontmatterの`tools`はruntimeの道具の一覧から選び、役割の許可を超えれば誤りにする（`AgentTools`、[ADR-t1728-2](../../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)）。
   宣言はagentのjobの起動に当たり、宣言の無い定義は役割の既定の読み取りだけの道具になる。
 - **snapshot**: 必須のagentと定義は、試行ごとにlanding branchの今のcommitのtreeから読む（`snapshot_subagents`）。
   workerがrun branchで設定や定義を変えても、選ばれるagentは変わらない。
+  built-inの定義だけはバイナリから取り、pjの規則（`.dagq/review/builtin-<名前>.md`）は同じcommitから読む。
 - **選び方**: reviewする範囲の変えたpath（renameは旧と新の両方）を各agentのglobに照らし、当たったagentを設定の順に1回だけ選ぶ（`domain::review_subagents::select`）。
   範囲（基点は[review](review-command.md)）は試行ごとに1回決め、`review.md`も同じ範囲で書くので、mainが進んでも選んだ差分と資料は食い違わない。
 - **agentのjob**: snapshotが返した定義の本文をそのままpromptに持ち、定義のpathは書かず、1つのverdictを返させる（`application::agent_job::build`、evalと同じ組み立て）。
+  built-inのjobは定義の後にpjの規則を持ち、開始の記録にどのbuildと中身で判断したかを残す。
   起動は`AgentProvider::agent_job_command`で、道具の変換は宣言から（Claudeはjob自身の引数、Codexは今のreviewのread-onlyのsandboxとjobのpermission profileに足す設定）。
   agentのjobはqueueを読む道具を持たず、`[run.env]`とsccacheの扱いは全体のreviewのjobと同じである。
   providerの能力でjobを切り替えることはなく、Codexでもagentのjobを動かす。
@@ -204,7 +206,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   記録した行き先（`review_finished`の`route`）があれば、着地はそれが`land`のときだけ（`concern::lets_land`）で、引き継いだsupervisorも全体のreviewのverdictだけでは進めずaskにする。
 - **誤り**: landing branchの`dagq.toml`が読めない、選ばれたagentの定義が無い、道具の宣言が誤り、範囲かreceiptが読めないときは、必須の検査が分からないので空にせず、起動せずにreviewの失敗にする。
   `dagq.toml`は全体を解釈するので、`[review.subagents.*]`の外の誤りもreviewを失敗させる。
-- **設定の無いrepository**: `[review.subagents.*]`の無いrepositoryのreviewは全体のreviewのjob 1本で、agentに関わる欄・指示を持たない。
+- **設定の無いrepository**: 既定で有効なbuilt-inは選ばれ、どのagentも選ばれなければ全体のreviewのjob 1本で、agentに関わる欄・指示を持たない。
 
 ## プログラムのreview<a id="プログラムのreview"></a>
 
@@ -243,11 +245,6 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 - **人の答えからの補い**（決定4）: `approve_landing`の答えを適用するとき、最後のreviewがreviseかconcernなら、答えとそのコードを`review_outcome`に記録する（`domain::review_reason::answer_outcome`）。
   reviewの失敗のask、passの後の衝突のask、workerに返したreviseには記録しない。
   集計は[Stats](stats.md#差し戻しの分類コードごとの集計)が持つ。
-
-## testからのretryの差し替え
-
-`SuperviseOptions::retry_unreadable_review`は本番では常に有効で、変える経路は無い。
-testだけが無効にして、やり直しのjobを省いて最初の失敗から失敗の処理へ進められる（helperの使い分けは`tests/it/runtime_support`が持つ）。
 
 ## AIが決めるconcern<a id="aiが決めるconcern未実装"></a>
 

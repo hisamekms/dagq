@@ -55,7 +55,13 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   - `paths`があればmergeした木とmainの差分がどれかのglobに当たるrunにだけcommandを流し、無ければ全てのrunに流す（[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
   - globの規則と、受け付けないglob・配列でない値・重複のエラーは`[e2e] paths`と同じで、空の配列もエラーにする。
 
-- `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（文字列の配列。1つ以上。`--paths`・`[e2e] paths`と同じglobの規則で`domain::scope::validate_path_globs`が検査し、重複を除く）と、任意の`provider`（`ReviewSubagent::provider`、[Review](review.md#agentのjobのprovider)）を持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1、`Config::review_subagents`）。`<agent>`はkebab-case（`domain::review_subagents::valid_agent_name`）で、定義のファイル`.dagq/agents/<agent>/AGENT.md`のdirectoryの名前になる（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。agentの名前の無い`[review.subagents]`、kebab-caseでない名前、同じagentの表の重複、`paths`の無い表、keyの重複、知らないkeyはエラーにする。名指すagentの定義がlanding branchのcommitに無いことと、同じagentを複数の役割の節で名指すことは`dagq doctor`の`agents`の`errors`が出し、reviewは選ばれたagentの定義が無ければpassにしない（[Review](review.md#reviewのsubagent)の「設定」と「誤り」）。読むのはmain checkoutの作業ファイルではなく、reviewを始めるときのlanding branchのcommitのtreeの`dagq.toml`で、選び方とsnapshotは[Review](review.md#reviewのsubagent)。旧バイナリは知らない表とkey（`provider`）を含む`dagq.toml`全体を読めなくなるので、固定バイナリが対応してから足す。
+- `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（`--paths`・`[e2e] paths`と同じglobの規則の、1つ以上の文字列の配列）と任意の`provider`（[Review](review.md#agentのjobのprovider)）を持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1）。
+  - `<agent>`はkebab-caseで、定義のファイル`.dagq/agents/<agent>/AGENT.md`のdirectoryの名前になる（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
+  - `builtin:`で始まる名前はbuilt-inのagentの表で、任意の`enabled`・`paths`・`provider`を持ち、書いた`paths`は既定を置き換え、書かないものは既定に従う（意味と既定は`domain::review_builtins`、[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)）。
+  - 表とkeyの書き方の誤り（知らないbuilt-inの名前と真偽でない`enabled`を含む）は`dagq.toml`全体の誤りにする。
+  - 定義の無いagentと複数の役割の節が名指すagentは`dagq doctor`の`agents`の`errors`が出す（reviewでの扱いは[Review](review.md#reviewのsubagent)の「誤り」）。
+  - 読むのはreviewを始めるときのlanding branchのcommitの`dagq.toml`で、選び方とsnapshotは[Review](review.md#reviewのsubagent)。
+  - 旧バイナリは知らない表とkeyを含む`dagq.toml`全体を読めなくなるので、固定バイナリが対応してから足す。
 
 - `[disk]`はclaimと着地の検証の前に確かめる空き容量の閾値で、`sample_runs`（正の整数、既定20）、`claim_factor`（正の数、既定2）、`integrate_factor`（正の数、既定1.5）、`min_free_bytes`（正の整数、既定なし）を持つ（[空き容量を確かめる](disk-space.md)、ADR-0047の決定44。`load_disk_config`）。supervisorが起動時に読み、読めなければ既定値で動く。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[disk]`を知るものに入れ替えてから足す
 
