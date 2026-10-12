@@ -48,7 +48,7 @@ pub struct Settlement {
 }
 
 /// The grace of `row` after it ended.
-fn grace(row: &LedgerRow) -> i64 {
+pub(super) fn grace(row: &LedgerRow) -> i64 {
     let interactive = row
         .subject
         .as_ref()

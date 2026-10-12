@@ -58,6 +58,7 @@ slotの集まりは`SlotTable`だけが変え、残りは`Supervisor`が持つ�
    続けて`[fresh_session]`を読み直し、変わった閾値を新しいsessionの判定（`next_session`）に使う（[Run environment](run-environment.md)）。
    続けて`[ci_watch]`を読み直し、CIの確かめを受け取り・始め（下の「CIの見張り」）、間隔が過ぎていれば今の判定を記録する（[計測](../measurement.md#今の判定の記録)）。
    続けてmainの履歴の動いた分と到達点を記録する（[mainの履歴の記録](../main-history.md)。毎passではGitを読まない）。
+   続けて間隔が過ぎていれば、前の周回の後に届いた入力から台帳をjobのthreadで書く（[計測](../measurement.md#台帳を作る係)）。
 
 ループ（1秒ごと）: 各passの先頭で、待ちの終わったrunを新しい仕事より先にslotへ戻し（drain中も）、各tickの先頭で人の答えを待つrunを待ちに移す（[人の答えを待つrun](waiting.md)）。待ちのrunのslotは下の監視の代わりにsessionへ何も送らない見張りだけを受ける。workerのsessionはclaimでもresumeでも非対話で、supervisorは依頼をrun directoryに書き、workerの画面を読まず打ち込まない（対話のworkerのrunは廃止した。[非対話のworker](headless-worker.md)）。
 

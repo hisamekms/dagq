@@ -34,6 +34,9 @@ use crate::domain::{
 pub trait ObservationSources<Q: ?Sized> {
     fn status(&self, queue: &Q, role: Option<SessionRole>) -> Result<Value>;
     fn stats(&self, queue: &Q, query: &StatsQuery) -> Result<Value>;
+    /// `stats --ledger`: today's `stats` beside the ledger's
+    /// ([`crate::application::ledger_check`]).
+    fn ledger_check(&self, queue: &Q, query: &StatsQuery) -> Result<Value>;
     fn kpi(&self, queue: &Q, query: &KpiQuery) -> Result<Value>;
     fn forecast(&self, queue: &Q, query: &ForecastQuery) -> Result<Value>;
     /// The limit of the improvement proposals and the ones waiting
@@ -81,15 +84,17 @@ pub fn stats<Q: ?Sized>(
     sources: &(impl ObservationSources<Q> + ?Sized),
     read: &StatsRead,
 ) -> Result<Value> {
-    sources.stats(
-        queue,
-        &StatsQuery {
-            since: read.since,
-            until: read.until,
-            goal_id: read.goal.map(GoalId::new),
-            full: read.full,
-        },
-    )
+    let query = StatsQuery {
+        since: read.since,
+        until: read.until,
+        goal_id: read.goal.map(GoalId::new),
+        full: read.full,
+    };
+    if read.ledger {
+        sources.ledger_check(queue, &query)
+    } else {
+        sources.stats(queue, &query)
+    }
 }
 
 /// `kpi`.
@@ -240,6 +245,9 @@ mod tests {
             unimplemented!()
         }
         fn stats(&self, _: &Records, _: &StatsQuery) -> Result<Value> {
+            unimplemented!()
+        }
+        fn ledger_check(&self, _: &Records, _: &StatsQuery) -> Result<Value> {
             unimplemented!()
         }
         fn kpi(&self, _: &Records, _: &KpiQuery) -> Result<Value> {

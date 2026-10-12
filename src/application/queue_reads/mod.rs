@@ -176,6 +176,9 @@ pub struct StatsRead {
     pub goal: Option<i64>,
     #[serde(default)]
     pub full: bool,
+    /// Today's `stats` beside the ledger's (`--ledger`).
+    #[serde(default)]
+    pub ledger: bool,
 }
 
 /// `kpi`'s options.
@@ -737,11 +740,16 @@ impl QueueRead {
                 UseCase::Timeline,
                 json!({"run": read.run, "gap": read.gap, "full": read.full}),
             ),
-            Self::Stats(read) => (
-                UseCase::Stats,
-                json!({"since": cursor(&read.since), "until": cursor(&read.until),
-                       "goal": read.goal, "full": read.full}),
-            ),
+            Self::Stats(read) => {
+                let mut params = json!({"since": cursor(&read.since), "until": cursor(&read.until),
+                       "goal": read.goal, "full": read.full});
+                // Only when asked, so a service that does not know it still
+                // serves `stats`.
+                if read.ledger {
+                    params["ledger"] = json!(true);
+                }
+                (UseCase::Stats, params)
+            }
             Self::Kpi(read) => (
                 UseCase::Kpi,
                 json!({"period": read.period, "last": read.last, "at": cursor(&read.at),

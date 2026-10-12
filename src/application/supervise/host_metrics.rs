@@ -356,6 +356,10 @@ mod tests {
         fn node_samples(&self, _node: &str, _from: i64, _until: i64) -> Result<Vec<NodeSample>> {
             Ok(Vec::new())
         }
+
+        fn node_samples_after(&self, _after: i64) -> Result<Vec<NodeSample>> {
+            Ok(Vec::new())
+        }
     }
 
     /// The CSV files in memory, each its text: a sample is appended to its

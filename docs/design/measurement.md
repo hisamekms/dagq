@@ -31,7 +31,7 @@ related:
 
 # 計測
 
-> **一部だけ実装済み（2026-10-12）**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「共通の読み取り関数」は実装済みで、今の姿を書く。
+> **一部だけ実装済み（2026-10-13）**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」は実装済みで、今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[`stats`](supervisor-lifecycle/stats.md)・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
@@ -176,7 +176,7 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
   旧方式のrunを持つtaskは旧方式の行。
 - **session**（実装済み）: runを持たない対象のsessionとjobの1回（`domain::ledger::session`）。
 - **queue**（実装済み）: run・task・sessionに属さないqueue全体の区間か出来事の1つ（`domain::ledger::queue`）。
-- **node**（実装済み）: hostの欄の置き場で、NodeSampleStoreだけを読みnodeと時間の区切りごとにsampleのまま持ち、係が同じ保持で消す（予定。`domain::ledger::node`）。
+- **node**（実装済み）: hostの欄の置き場で、NodeSampleStoreだけを読みnodeと時間の区切りごとにsampleのまま持ち、係が同じ保持で消す（`domain::ledger::node`）。
 
 ## 畳む関数
 
@@ -193,14 +193,28 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
 
 ## 台帳を作る係
 
-- supervisorの周回が終わった後に動き（D7）、行が無い・`ledger_v`が古い・`inputs_through`より後に入力が届いた（dirty）対象を畳み直す。冪等。
-- 置き場は観測と分析のcontext（[Architecture](architecture.md)の「観測と分析」）。
-  `Supervisor`の本体に状態を足さない。
-- session・queue・nodeの行の終わり・dirty・`final`は`domain::ledger::settle`が決める（閉じた時刻か区間の終わりから猶予の後で、閉じていない行は確定しない）。
-  supervisorの一生の終わりで閉じた行は、畳んだときのそのsupervisorの最後のeventを入力の到達点に持ち、後の停止の記録でdirtyになって終わりを畳み直す。
-- `final`は、runが終わり（`push_pending`でない）、そのrunのtelemetry専用のtokenが失効し、supervisorの資源の最後の記録が済み、猶予が過ぎてから付ける。`final`の後もdirtyなら畳み直す。
-- 切り替え前のrun（`run_phase_changed`が無い）は区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く。
-- 台帳はruntimeの制御（claim・slot・resume・着地）に使わない。
+何を書くかは`domain::ledger::builder`が決め、`application::supervise::ledger`が書く。
+数値はそのmoduleの定数が持つ。
+
+- **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。
+  着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
+- **置き場**: 係の状態（入力ごとのカーソル・印・猶予を待つ行）は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
+- **印**: EventStoreのevent idとNodeSampleStoreの受けた順のidのカーソルから、前の周回の後に届いた入力を読み、そのrun・task・sessionとqueueの行・nodeの時間に印を付ける（全行を走査しない）。
+  `push_finished`は`push_pending`で書いたrunにも付ける。
+  processの始めはカーソルが0なので、切り替え前を含む全てに追いつく（backfill）。
+- **書く行**: 終わったrun・task（`push_pending`と旧方式を含み、途中のものは書かない）と、session・queue・nodeの行。
+  行が無い・`ledger_v`が古い・畳んだ入力が`inputs_through`を越えた（dirty）・確定した、のときだけ書き、同じ入力では書かない（冪等）。
+  1周回で書く数と見る数に上限があり、残りは次の周回。
+- **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。
+  session・queue・nodeの行は`domain::ledger::settle`が決める（閉じた時刻か区間の終わりから猶予の後で、閉じていない行は確定しない）。
+  supervisorの一生の終わりで閉じた行は、そのsupervisorの最後のeventを到達点に持ち、後の停止でdirtyになる。
+  確定の後もdirtyなら畳み直す。
+  telemetryのtokenの失効と資源の最後の記録の条件は、それを記録するtaskが足す（予定）。
+- **旧方式**: 切り替え前のrun（`run_phase_changed`が無い）とそのtaskは区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く。
+  storeは値と版を上書きせず、後の入力では記録だけを追う。
+- **保持**: nodeの行はhostの負荷と同じ日数で1日に1度消す。
+- **失敗**: 読めない・書けない周回は印を残して次に任せ、続く失敗の初めにwarnを1度出し、決まった回数続けば`ledger_build_failed`を1度記録する。
+  runとtaskの結果は変えない。
 
 ## 共通の読み取り関数
 
@@ -224,6 +238,15 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 - 属性とfinding: 基準のeventより前の窓は「基準より前」。
 - Executionのcontext: 記録が無い（欄の無い前の記録）と未計測（nullと理由）を分ける。
 - token: Executionの終わった時刻（対話は区切りの時刻）で日に振り分け、actor × provider × modelで足す（[Execution tokens](execution-tokens.md)）。
+
+## 並走の比較と照合
+
+段2の並走で使い、段3で今の値を台帳から作った後に消す読み取り（`stats --ledger`、`domain::ledger::compare`。欄と分類はdoc comment）。
+
+- runごとに、今の`work`・`wait_to_land`・`startup`・`land_phases`と台帳の同じ意味の値（`wait_to_land`は`run_integrated`まで、pushは別の欄）、差（秒）と理由の分類。
+- run・taskを持たない欄は、台帳の行が返すeventに今の`stats`の関数を当てた値と並べる。
+- hostの欄は、`stats`の窓とkpiの日ごとの期間ごとに、nodeの行のsampleの要約と今のCSVの要約を並べ、片方にだけあるsampleを理由で分ける。
+- 照合は、窓に終わった対象の数と台帳の行の数、行の無い・確定していない（`push_pending`は別）・dirtyの対象と、行ごとに照合の時点の入力の到達点まで畳んであるか（`up_to_date`）。
 
 ## runの比較の軸
 

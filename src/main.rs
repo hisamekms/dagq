@@ -1411,6 +1411,15 @@ enum Command {
         /// Every finished run instead of the latest 50 (or the next 50 past --since).
         #[arg(long)]
         full: bool,
+        /// Instead of the stats, the parallel run of the ledger (stage 2 of the measurement's
+        /// rebuild): per run today's work, wait_to_land, startup and land_phases beside the
+        /// ledger's (its push apart), each difference in seconds with its reasons; the fields of
+        /// no run (jobs, sessions, ...) beside those of the ledger's rows; the host's load of the
+        /// node rows beside today's CSV over the window and kpi's last 7 days; and what ended in
+        /// the window (from the start without --since) against the ledger's rows: missing, not
+        /// final, push_pending, dirty, and up_to_date per row.
+        #[arg(long)]
+        ledger: bool,
         /// Accepted and ignored: `workspace_mismatch` is judged by the runs' background wrappers,
         /// without cmux.
         #[arg(long, default_value = "cmux")]
@@ -2900,12 +2909,14 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             until,
             goal_id,
             full,
+            ledger,
             cmux: _,
         } => QueueRead::Stats(reads::StatsRead {
             since,
             until,
             goal: goal_id,
             full,
+            ledger,
         }),
         Command::Kpi {
             period,
@@ -4332,6 +4343,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 // The landing branch's CI when [ci_watch] is set
                 // (ADR-t1920-1); a one-shot pass does not watch it.
                 ci_watch: (!once).then(dagq::compose::CiWatchOptions::default),
+                // The ledger, built from what is recorded (docs/design/
+                // measurement.md "台帳を作る係"); a one-shot pass does not.
+                ledger: (!once).then(dagq::compose::LedgerOptions::default),
                 // A supervisor at work keeps the queue's service (ADR-t1233-4
                 // decision 2); a one-shot pass does not.
                 queue_service: (!once).then(|| dagq::compose::QueueServiceOptions {

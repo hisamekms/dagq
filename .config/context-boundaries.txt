@@ -157,6 +157,7 @@ module | src/application/prompt/run_review.rs | execution | recovery_prompt
 module | src/application/health/runs.rs | execution | recover
 module | src/application/stats.rs | observation |
 module | src/application/kpi.rs | observation |
+module | src/application/ledger_check.rs | observation |
 module | src/application/forecast.rs | observation |
 module | src/application/report.rs | observation |
 module | src/application/observer/ | observation |
@@ -171,6 +172,7 @@ module | src/application/supervise/ci_watch.rs | observation |
 module | src/application/supervise/main_log.rs | observation |
 module | src/application/supervise/forecast.rs | observation |
 module | src/application/supervise/live_alerts.rs | observation |
+module | src/application/supervise/ledger.rs | observation |
 module | src/application/supervise/observer.rs | observation |
 module | src/application/supervise/push.rs | observation |
 module | src/application/supervise/report.rs | observation |
@@ -232,6 +234,7 @@ port | ObserverLog | internal | - |
 port | ObservationQueue | internal | - |
 port | LedgerStore | internal | - | the ledger is read through ledger::read
 port | NodeSampleStore | partial | - | the measurement reads it; host records the host's load
+port | LedgerQueue | internal | - | what builds the ledger reads and writes
 port | MarkLog | internal | - |
 port | SupervisorRegistry | partial | - |
 port | HeadlessJobStore | public | planning,execution,observation | to each context that starts a job

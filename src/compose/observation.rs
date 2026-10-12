@@ -38,6 +38,37 @@ use crate::{
     },
 };
 
+/// How the supervisor builds the ledger ([`SuperviseOptions::ledger`](super::SuperviseOptions::ledger)).
+#[derive(Debug, Clone)]
+pub struct LedgerOptions {
+    /// The time between passes; tests shorten it.
+    pub interval: Duration,
+}
+
+impl Default for LedgerOptions {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(crate::domain::ledger::builder::INTERVAL_SECS),
+        }
+    }
+}
+
+/// The supervisor's builder of the ledger in the queue's stores (opened
+/// by `store`), with the node rows kept as the host's samples are
+/// (`retention_days`, none when they are not recorded).
+pub(super) fn ledger_port(
+    settings: &LedgerOptions,
+    retention_days: Option<u32>,
+    store: Arc<dyn crate::application::QueueOpener<dyn crate::application::LedgerQueue + Send>>,
+) -> crate::application::supervise::LedgerPort {
+    crate::application::supervise::LedgerPort {
+        interval: settings.interval,
+        retention_days,
+        utc_offset: clock::local_utc_offset,
+        store,
+    }
+}
+
 /// How the supervisor watches the CI ([`SuperviseOptions::ci_watch`](super::SuperviseOptions::ci_watch)).
 #[derive(Debug, Clone)]
 pub struct CiWatchOptions {
@@ -461,6 +492,9 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
     }
     fn stats(&self, queue: &SqliteQueue, query: &StatsQuery) -> Result<Value> {
         self.one_shot.stats_of(queue, self.db, query)
+    }
+    fn ledger_check(&self, queue: &SqliteQueue, query: &StatsQuery) -> Result<Value> {
+        self.one_shot.ledger_check_of(queue, self.db, query)
     }
     fn kpi(&self, queue: &SqliteQueue, query: &crate::domain::kpi::KpiQuery) -> Result<Value> {
         self.one_shot.kpi_of(queue, self.db, query)
@@ -960,6 +994,54 @@ impl OneShot {
     /// [`Self::stats`] on `queue`, the queue at `db` the caller already
     /// opened, so a command opens it once.
     pub fn stats_of(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
+        self.with_stats_sources(queue, db, |now, sources| {
+            Ok(serde_json::to_value(statistics::stats(
+                queue,
+                &SystemProcesses,
+                now,
+                query,
+                sources,
+            )?)?)
+        })
+    }
+
+    /// `stats --ledger` on `queue`, the queue at `db`: see
+    /// [`crate::application::ledger_check::ledger_check`], with `stats`'
+    /// sources and today's CSV files of the host's load under the queue's
+    /// `host/`.
+    pub fn ledger_check_of(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        query: &StatsQuery,
+    ) -> Result<Value> {
+        let host_dir = db
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(crate::domain::host_metrics::HOST_DIR);
+        let csv = |from, until| crate::infrastructure::host_metrics::read(&host_dir, from, until);
+        self.with_stats_sources(queue, db, |now, sources| {
+            Ok(serde_json::to_value(
+                crate::application::ledger_check::ledger_check(
+                    queue,
+                    &SystemProcesses,
+                    now,
+                    query,
+                    sources,
+                    &csv,
+                )?,
+            )?)
+        })
+    }
+
+    /// Run `read` with `stats`' sources of `queue` (at `db`) and these
+    /// generators' now.
+    fn with_stats_sources(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        read: impl FnOnce(i64, &StatsSources<'_>) -> Result<Value>,
+    ) -> Result<Value> {
         let now = self.generators.clock.now();
         let checkout = bound_checkout(queue)?;
         let config_file = || match &checkout {
@@ -994,13 +1076,7 @@ impl OneShot {
             utc_offset_secs: clock::local_utc_offset(now),
             dagq_source: checkout.as_deref().is_some_and(is_dagq_source),
         };
-        Ok(serde_json::to_value(statistics::stats(
-            queue,
-            &SystemProcesses,
-            now,
-            query,
-            &sources,
-        )?)?)
+        read(now, &sources)
     }
 
     /// `kpi` (ADR-0051 decision 9): see [`crate::domain::kpi::kpi`],

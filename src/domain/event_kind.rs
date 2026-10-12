@@ -41,6 +41,7 @@
 //! - observation and analysis: `observation`, `observe_*`, `finding_*`
 //!   (but `finding_planner_*`), `mark_*`, `forecast_recorded`, `kpi_*`,
 //!   `live_alert_*` (the record of `stats`' judgments of now),
+//!   `ledger_build_failed` (what builds the ledger could not write it),
 //!   `attributes_baseline` (the baseline of the attributes it folds),
 //!   `report_written`, `throughput_review_*`, `candidates_sampled`, the
 //!   CI watch's `ci_*` and the record of main's history `main_*`.
@@ -218,6 +219,7 @@ event_kinds! {
     LandingResumed => "landing_resumed",
     LeaseAcquired => "lease_acquired",
     LeaseReleased => "lease_released",
+    LedgerBuildFailed => "ledger_build_failed",
     LiveAlertBaseline => "live_alert_baseline",
     LiveAlertEnded => "live_alert_ended",
     LiveAlertInputChanged => "live_alert_input_changed",
@@ -646,6 +648,9 @@ impl EventKind {
                 | LiveAlertStarted
                 | LiveAlertEnded
                 | LiveAlertReached
+                // What builds the ledger could not write it for a while
+                // (docs/design/measurement.md "台帳を作る係").
+                | LedgerBuildFailed
                 // The mark of the baseline of the attributes the
                 // measurement folds (its tasks' and goals' are on them).
                 | AttributesBaseline
@@ -1359,6 +1364,7 @@ mod tests {
             (EventKind::LiveAlertReached, "live_alert_reached"),
             (EventKind::LiveAlertStarted, "live_alert_started"),
             (EventKind::LeaseAcquired, "lease_acquired"),
+            (EventKind::LedgerBuildFailed, "ledger_build_failed"),
             (EventKind::LeaseReleased, "lease_released"),
             (EventKind::MainCommitsRecorded, "main_commits_recorded"),
             (EventKind::MainObserved, "main_observed"),

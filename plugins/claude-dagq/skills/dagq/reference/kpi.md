@@ -40,6 +40,15 @@ Names start with `cross:`, then `axis=value` parts in alphabetical axis order, j
 - `"$DAGQ" marks [--since C] [--until C]` lists them by when they took effect: `id` (null for a derived one), `kind`, `at`, `label`, `retracted_by`, `detail` (a derived mark's `claim_event` is its ID for `--compare`).
 - `"$DAGQ" kpi --compare <mark id | claim event id | cursor> [--window 7]` compares the `--window` days before and after; `--compare A..B,C..D` two explicit windows. Read `split` (`separable: false`: marks too close together to tell apart; a mark that only records a supervisor's build — a start or handoff at the same `parallel` as the start before it, a stop, `derived:dagq_version` — is never part of a change, only a confounder, and its build is read in the `build=` strata; naming one compares at it alone, and a claim that derived a build with another attribute names the other attribute), `confounders` (other marks before, between and after the windows: name them when you report the result), `strata` (`before` / `after` per KPI and stratum, with the same verdicts) and `change_summary` / `area_summary` (per change / area, `lead_time`, `phase.*`, `land_phase.*`; pick them with `--change` / `--area`, otherwise every value in `strata`; `area_summary` only with `[areas]`).
 
+## Today's values beside the ledger: `stats --ledger`
+
+The supervisor writes a ledger of what ended (a row per run, task, session or job of no run, queue interval and node hour) a minute or so after it ends. While the measurement moves to it, `"$DAGQ" stats --ledger [--since C] [--until C] [--goal ID]` prints, instead of the stats:
+
+- `runs`: each run `stats` lists, its `work`, `wait_to_land`, `startup` and `land_phases.*` beside the ledger's (`wait_to_land` to `run_integrated` on both; the ledger's `push` apart), each with `diff` in seconds and `reasons`: `no_row`, `legacy` (a row written from today's values before the switch), `exit_held_ask` (today's `exit` held a wait for a person's answer the ledger counts as `ask`), `unattributed`, `boundary` (two seconds or less), `unexplained`.
+- `fields`: the fields of no run (`jobs`, `sessions`, `planner_routes`, `updates`, `landing_utilization`, `claim_holds`, ...) beside the same function over the ledger's rows, the values that differ and why (`rows_missing`, `rows_dirty`, `records`).
+- `host`: over `stats`' window and each of the last 7 local days, the host summary of the node rows beside the CSV files', the statistics that differ, and the samples only one side has: `csv_only` (a day the ledger has), `import_missing` (a day it lacks), `store_only`, `retention`.
+- `reconcile`: what ended in the window (from the start without `--since`) against the ledger's rows per kind (`ended`, `rows`, `missing`, `not_final`, `push_pending` apart, `dirty`) and per row `up_to_date` (folded up to the inputs recorded now).
+
 ## Raising throughput: the weekly review
 
 Any queue, once a week, in this order (`kpi --period week --last 4` for the numbers, `kpi --period day` for the days). Keep the time runs wait for a person (`ask_wait`, and `stats`' `waiting`) apart from their own time and show both.

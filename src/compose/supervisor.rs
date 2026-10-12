@@ -10,7 +10,7 @@ use super::{
         self, HostMetricsSettings, QueueBrokerOptions, QueueRelayOptions, QueueServiceOptions,
         ReleaseIndexPort, SccacheOptions,
     },
-    observation::{self, CiWatchOptions},
+    observation::{self, CiWatchOptions, LedgerOptions},
     planning::PLANNER_TIMEOUT,
     provider_checks, worker_adapters,
 };
@@ -281,6 +281,10 @@ pub struct SuperviseOptions {
     /// (ADR-t1920-1): the CLI's supervisor does but for `--once`; `None`
     /// (the tests unless they ask) watches nothing.
     pub ci_watch: Option<CiWatchOptions>,
+    /// Build the ledger (docs/design/measurement.md "台帳を作る係"): the
+    /// CLI's supervisor does but for `--once`; `None` (the tests unless
+    /// they ask) builds none.
+    pub ledger: Option<LedgerOptions>,
 }
 
 /// The processes [`SuperviseOptions::processes`](super::SuperviseOptions::processes) gives the supervisor.
@@ -368,6 +372,7 @@ impl SuperviseOptions {
             passes: Arc::new(AtomicU64::new(0)),
             sccache: None,
             ci_watch: None,
+            ledger: None,
         }
     }
 
@@ -703,6 +708,21 @@ pub fn supervise_with_reviewer(
             }),
         )
     });
+    let ledger = options.ledger.as_ref().map(|settings| {
+        observation::ledger_port(
+            settings,
+            options
+                .host_metrics
+                .as_ref()
+                .map(|metrics| metrics.retention_days),
+            Arc::new(SqlitePorts {
+                opener: opener(),
+                keep: |queue| -> Box<dyn crate::application::LedgerQueue + Send> {
+                    Box::new(queue)
+                },
+            }),
+        )
+    });
     let host_programs = crate::infrastructure::review_programs::HostPrograms::new(&main_checkout);
     let ports = Ports {
         queues: Arc::new(opener()),
@@ -826,6 +846,7 @@ pub fn supervise_with_reviewer(
             .as_ref()
             .map(|settings| host::sccache_port(&db, settings, runner)),
         ci_watch,
+        ledger,
         layout,
     };
     let settings = LoopSettings {

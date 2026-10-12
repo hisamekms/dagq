@@ -1580,3 +1580,58 @@ fn an_adopter_does_not_send_a_stalled_answer_already_requested() {
 fn an_adopter_sends_a_stalled_answer_not_yet_requested() {
     adopted_stalled_answer(false);
 }
+
+/// What builds the ledger is wired into the supervisor's passes and off
+/// the landing (docs/design/measurement.md "台帳を作る係"): while the
+/// ledger cannot be written, the run lands as it would and the supervisor
+/// reports no error; once it can, the next supervisor's pass writes the
+/// landed run's and its task's rows, and passes on the same inputs leave
+/// them as they are.
+#[test]
+fn the_supervisor_builds_the_ledger_off_the_landing_whatever_its_writes_do() {
+    use dagq::application::LedgerStore;
+    use dagq::domain::ledger::{LEDGER_V, LedgerKind};
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(dir.path(), FINISH);
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let refuse = "CREATE TRIGGER ledger_refused BEFORE INSERT ON ledger_rows
+                  BEGIN SELECT RAISE(ABORT, 'the ledger refuses'); END";
+    Connection::open(&db).unwrap().execute(refuse, []).unwrap();
+    let options = SuperviseOptions {
+        ledger: Some(runtime::LedgerOptions {
+            interval: Duration::ZERO,
+        }),
+        ..supervise_options(4, true)
+    };
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let detail = detail(&db);
+    assert_landed_run(&detail.runs[0], &repo, &base);
+    let queue = SqliteQueue::open(&db).unwrap();
+    assert!(queue.ledger_rows(LedgerKind::Run).unwrap().is_empty());
+
+    Connection::open(&db)
+        .unwrap()
+        .execute("DROP TRIGGER ledger_refused", [])
+        .unwrap();
+    let idle = TestReviewer::new(&[]);
+    supervise_reviewed_with(&db, &repo, &backend, &idle, &options);
+    let run = detail.runs[0].id().to_string();
+    let row = queue
+        .ledger_row(LedgerKind::Run, &run)
+        .unwrap()
+        .expect("the landed run's row");
+    assert_eq!(row.ledger_v, LEDGER_V);
+    assert!(row.ended_at.is_some(), "{row:?}");
+    assert!(
+        queue
+            .ledger_row(LedgerKind::Task, &TASK.to_string())
+            .unwrap()
+            .is_some()
+    );
+    let rows = queue.ledger_rows(LedgerKind::Run).unwrap();
+    supervise_reviewed_with(&db, &repo, &backend, &idle, &options);
+    assert_eq!(queue.ledger_rows(LedgerKind::Run).unwrap(), rows);
+}

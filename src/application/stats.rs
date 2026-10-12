@@ -118,6 +118,49 @@ pub fn stats(
     query: &StatsQuery,
     sources: &StatsSources<'_>,
 ) -> Result<Stats> {
+    let inputs = inputs(queue, processes, now, sources)?;
+    let mut stats = inputs.aggregate(&inputs.events, now, query);
+    finish(queue, &inputs.events, &mut stats, sources)?;
+    Ok(stats)
+}
+
+/// What [`stats`] aggregates beside the events: the tasks' goals, the
+/// slots now and the judgments of now with what they read.
+pub(crate) struct Inputs {
+    pub events: Vec<crate::domain::RunEvent>,
+    goals: HashMap<crate::domain::TaskId, Option<crate::domain::GoalId>>,
+    snapshot: SlotSnapshot,
+    live: LiveSnapshot,
+}
+
+impl Inputs {
+    /// `stats`' aggregate of `events` (the EventStore's, or those the
+    /// ledger's rows give back) with these inputs.
+    pub fn aggregate(
+        &self,
+        events: &[crate::domain::RunEvent],
+        now: i64,
+        query: &StatsQuery,
+    ) -> Stats {
+        aggregate(events, &self.goals, now, self.snapshot, query, &self.live)
+    }
+}
+
+/// [`stats`]' reads of the queue and of `sources` but the joins.
+pub(crate) fn inputs(
+    queue: &(
+         impl EventStore
+         + PlanningRecords
+         + RunCoordination
+         + SupervisorRegistry
+         + RunReads
+         + TaskStore
+         + ?Sized
+     ),
+    processes: &dyn ProcessControl,
+    now: i64,
+    sources: &StatsSources<'_>,
+) -> Result<Inputs> {
     let events = queue.all_events()?;
     let goals = queue.task_goals()?;
     let snapshot = slot_snapshot(queue, processes, now)?;
@@ -131,12 +174,27 @@ pub fn stats(
         draft_origins: queue.draft_origins()?,
         utc_offset_secs: sources.utc_offset_secs,
     };
-    let mut stats = aggregate(&events, &goals, now, snapshot, query, &live);
+    Ok(Inputs {
+        events,
+        goals,
+        snapshot,
+        live,
+    })
+}
+
+/// [`stats`]' joins of its aggregate `stats` of `events`: the titles,
+/// changes and areas of the runs, the cargo measures and the host's load.
+fn finish(
+    queue: &(impl PlanningRecords + ?Sized),
+    events: &[crate::domain::RunEvent],
+    stats: &mut Stats,
+    sources: &StatsSources<'_>,
+) -> Result<()> {
     let titles = queue.task_titles()?;
     for run in &mut stats.runs {
         run.title = titles.get(&run.task_id).cloned();
     }
-    with_changes(&mut stats, &queue.task_changes()?);
+    with_changes(stats, &queue.task_changes()?);
     // Only the listed runs' landings are read from Git.
     let listed: HashSet<&RunId> = stats.runs.iter().map(|run| &run.run_id).collect();
     let landings: Vec<crate::domain::RunEvent> = events
@@ -151,15 +209,15 @@ pub fn stats(
         .cloned()
         .collect();
     let areas = sources.areas.run_areas(&landings);
-    with_areas(&mut stats, areas.as_ref());
+    with_areas(stats, areas.as_ref());
     if !sources.dagq_source {
-        without_cargo_measures(&mut stats);
+        without_cargo_measures(stats);
     }
     if let Some(read) = sources.host_metrics {
         let (from, until) = stats.window_ms;
         stats.host = Some(read(from.div_euclid(1000), until.div_euclid(1000)));
     }
-    Ok(stats)
+    Ok(())
 }
 
 /// What the judgments of now read outside the queue: the run directories'

@@ -135,6 +135,7 @@ mod idle;
 mod inbox_nudge;
 mod jobs;
 mod landing;
+mod ledger;
 mod live_alerts;
 mod main_log;
 mod observer;
@@ -185,6 +186,7 @@ pub use self::jobs::{
     HeadlessJob, JobEnds, JobFailed, JobPorts, JobSubject, PROGRAM_OUTPUT_TAIL, ProgramEnd,
     record_job, start_program_job, start_review_program,
 };
+pub use self::ledger::{Built, FAILING_PASSES, LedgerPort, build_pass};
 pub use self::queue_broker::QueueBrokerPort;
 pub use self::queue_service::{
     QUEUE_SERVICE_INTERVAL, QUEUE_SERVICE_RESTART_WINDOW, QUEUE_SERVICE_RESTARTS,
@@ -551,6 +553,9 @@ pub struct Ports<'a> {
     /// Watches the landing branch's CI when `[ci_watch]` is set
     /// (ADR-t1920-1); `None` watches nothing.
     pub ci_watch: Option<CiWatchPort>,
+    /// Builds the ledger (docs/design/measurement.md "台帳を作る係");
+    /// `None` builds none.
+    pub ledger: Option<LedgerPort>,
     pub layout: Layout,
 }
 
@@ -1597,6 +1602,7 @@ impl Supervisor<'_> {
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
         self.host.host_metrics.finish();
+        self.on_observation(|observation, env| observation.ledger.finish(env));
         // The jobs the loop stopped last (a handoff stops them all), and
         // those a loop that failed leaves running: dropped only after this
         // last write, their ends would not be written.
@@ -1725,6 +1731,9 @@ impl Supervisor<'_> {
             // And main's history, recorded as it moves for the measurement,
             // draining and handing off too.
             self.on_observation(|observation, env| observation.main_log_pass(env));
+            // And the ledger, built off the loop from what was recorded,
+            // draining and handing off too; nothing here reads it back.
+            self.on_observation(|observation, env| observation.ledger_pass(env));
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             let landings: Vec<RunId> = self

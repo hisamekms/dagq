@@ -234,6 +234,9 @@ pub(super) struct ObservationState {
     pub(super) attributes_baseline: live_alerts::AttributesBaseline,
     /// The record of main's history.
     pub(super) main_log: main_log::MainLogWatch,
+    /// Builds the ledger; `None` builds none.
+    pub(super) ledger_port: Option<ledger::LedgerPort>,
+    pub(super) ledger: ledger::LedgerWatch,
 }
 
 impl ObservationState {
@@ -255,7 +258,14 @@ impl ObservationState {
             live_alerts: live_alerts::LiveAlertWatch::default(),
             attributes_baseline: live_alerts::AttributesBaseline::default(),
             main_log: main_log::MainLogWatch::default(),
+            ledger_port: ports.ledger.clone(),
+            ledger: ledger::LedgerWatch::default(),
         }
+    }
+
+    /// Build the ledger at its interval ([`ledger::LedgerWatch::pass`]).
+    pub(super) fn ledger_pass(&mut self, env: &mut ObservationEnv<'_>) {
+        self.ledger.pass(env, self.ledger_port.as_ref());
     }
 
     /// A job of the context runs that a handoff waits for: the KPI report,

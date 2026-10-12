@@ -159,6 +159,27 @@ mod stats {
         );
         assert_eq!(until["host"]["samples"], 2);
         assert_eq!(until["host"]["until"], now - 150);
+
+        // `--ledger`: the same window beside the ledger, which has no node
+        // row of the files' samples (none was imported into the store).
+        let ledger = ok(
+            &db,
+            &["stats", "--ledger", "--since", &format!("@{}", now - 300)],
+        );
+        let window = &ledger["host"][0];
+        assert_eq!(window["window"], "stats", "{ledger}");
+        assert_eq!(window["samples"]["import_missing"], 4, "{window}");
+        assert_eq!(window["samples"]["both"], 0);
+        assert_eq!(ledger["host"].as_array().unwrap().len(), 8);
+        assert_eq!(ledger["runs"], json!([]));
+        assert_eq!(ledger["reconcile"]["kinds"].as_array().unwrap().len(), 5);
+        assert!(
+            ledger["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["equal"] == true)
+        );
     }
 }
 

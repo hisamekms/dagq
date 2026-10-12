@@ -147,7 +147,17 @@ pub trait NodeSampleStore {
     /// The rows of `node` taken in `[from, until]` (unix seconds), in the
     /// order they were taken.
     fn node_samples(&self, node: &str, from: i64, until: i64) -> Result<Vec<NodeSample>>;
+    /// Every node's rows that came in after the row `after` (their id),
+    /// in the order they came in: the cursor of what builds the ledger.
+    fn node_samples_after(&self, after: i64) -> Result<Vec<NodeSample>>;
 }
+
+/// What builds the ledger reads and writes (docs/design/measurement.md
+/// "台帳を作る係"): the EventStore and the NodeSampleStore, its inputs, and
+/// the LedgerStore. Every store of the three is one.
+pub trait LedgerQueue: EventStore + LedgerStore + NodeSampleStore {}
+
+impl<T: EventStore + LedgerStore + NodeSampleStore + ?Sized> LedgerQueue for T {}
 
 /// What reports read and record of the queue as a whole: the findings,
 /// the written reports, KPI breaches, forecasts and the CI watch.

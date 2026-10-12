@@ -133,12 +133,30 @@ impl NodeSampleStore for SqliteQueue {
     }
 
     fn node_samples(&self, node: &str, from: i64, until: i64) -> Result<Vec<NodeSample>> {
+        self.read_node_samples(
+            "node_id=?1 AND unix BETWEEN ?2 AND ?3 ORDER BY unix",
+            params![node, from, until],
+        )
+    }
+
+    fn node_samples_after(&self, after: i64) -> Result<Vec<NodeSample>> {
+        self.read_node_samples("id > ?1 ORDER BY id", params![after])
+    }
+}
+
+impl SqliteQueue {
+    /// The rows of `node_samples` `filter` (a `WHERE` clause and its order)
+    /// keeps.
+    fn read_node_samples(
+        &self,
+        filter: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<NodeSample>> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT id,node_id,unix,local_day,source,{} FROM node_samples
-             WHERE node_id=?1 AND unix BETWEEN ?2 AND ?3 ORDER BY unix",
+            "SELECT id,node_id,unix,local_day,source,{} FROM node_samples WHERE {filter}",
             value_columns().join(",")
         ))?;
-        let rows = statement.query_map(params![node, from, until], |row| {
+        let rows = statement.query_map(params, |row| {
             let source: String = row.get(4)?;
             let mut sample = HostSample::new(row.get(2)?);
             for (index, column) in value_columns().iter().enumerate() {

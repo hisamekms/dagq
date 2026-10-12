@@ -15,6 +15,8 @@
 
 pub mod attributes;
 mod baseline;
+pub mod builder;
+pub mod compare;
 pub mod findings;
 pub mod fold;
 pub mod node;
@@ -23,6 +25,8 @@ pub mod queue;
 pub mod read;
 pub mod session;
 pub mod settle;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod window;
 
 pub use baseline::WindowEnd;
