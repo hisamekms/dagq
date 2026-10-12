@@ -10,6 +10,7 @@ tags:
 related:
   - adr-t2113-1
   - adr-t2113-3
+  - adr-t2173-1
   - adr-t728-1
   - adr-t1228-2
   - adr-t1533-1
@@ -154,10 +155,9 @@ inboxは全てのaskにanswerでき、`dagq-recover`の手作業（`integrate`�
 capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`StaticPolicy`）はbackendを替えても変えない。sandboxやserviceは、同じ模型の上に強制の点を足すだけで、模型を作り直さない（ADR-t728-1の決定6）。
 
 1. **container**: `dagq.toml`がworker（resumeを含む）とintegrateのverificationの適用先ごとにhostかcontainerを選ぶ（[Container runtime](container-runtime.md)）。
-   containerの部品はまだ無く、containerを選んだ適用先はclaim・resume・verificationを控えてattentionで知らせ、hostに黙って戻さない（fail closed、[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)決定4）。
-   `ExecutorBackend::Container`へactorを直接起動する経路は`ensure_implemented`がerrorにする。
-   reviewのprogramのjobもreviewのactorのbackendで流す場所を選び、containerならjobの起動の失敗にしてhostで流さない（[プログラムのreview](supervisor-lifecycle/review-programs.md)）。
-   containerはrunのworktreeとrun dirだけをmountし（例外はbrokerへのrunのunix socketと、compileのcache。[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)・[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。
+   containerを使えない適用先は控えてattentionで知らせ、hostに黙って戻さない（fail closed、[Container runtime](container-runtime.md#fail-closedの境界)）。
+   containerはrunのcloneとrun dirだけをmountし（例外はbrokerへのrunのunix socket、そのrunかverificationだけのbuildの出力のnamed volume、worker・resumeだけのqueueごとのworkerのcacheのnamed volume、verificationの保護されたcache。[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)・[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)・[ADR-t2173-1](../adr/2026-10-12-t2173-1-machine-mounts-only-run-and-clone-dirs-and-keeps-build-output-and-worker-cache-in-named-volumes.md)）、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。
+   machineはhostの`$HOME`をmountしない（[Container runtime](container-runtime.md#dagq専用のmachine)）。
    予約のcapability（filesystem・network・secret）はこのbackendが強制する。
    containerで動かすのは信頼しないコードを走らせるworker・resumeとintegrateのverificationだけで、読むだけのheadlessのjobの隔離はOSのsandboxにする（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)）。
    containerのrunにはhostのgitの共通dirをmountせず、runごとのcloneを渡す（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）

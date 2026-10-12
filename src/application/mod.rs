@@ -36,6 +36,7 @@ pub mod observer;
 pub mod planner;
 pub mod planner_handoff;
 pub mod planner_request;
+pub mod podman_machine;
 #[cfg(test)]
 pub(crate) mod port_fakes;
 mod ports;

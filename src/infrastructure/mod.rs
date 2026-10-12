@@ -37,6 +37,7 @@ mod plan_requests;
 mod plan_reviews;
 mod planners;
 mod planning;
+pub mod podman_machine;
 pub mod process;
 mod proposals;
 pub mod push;

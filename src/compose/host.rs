@@ -1054,6 +1054,23 @@ pub(super) fn queue_broker_control(
     }
 }
 
+/// The container runtime's parts behind the queue broker: the dagq
+/// podman machine as the queue at `db` uses it (only looked at: a
+/// container's start makes it run), then the parts not built yet.
+pub(super) fn container_parts(
+    db: &Path,
+) -> crate::application::podman_machine::MachineGate<
+    crate::infrastructure::container_runtime::UnbuiltContainer,
+> {
+    crate::application::podman_machine::MachineGate {
+        podman: Arc::new(crate::infrastructure::podman_machine::PodmanCli::default()),
+        required: crate::domain::podman_machine::MachineMounts::of_queue(
+            db.parent().unwrap_or(Path::new(".")),
+        ),
+        container: crate::infrastructure::container_runtime::UnbuiltContainer,
+    }
+}
+
 /// The sccache server's port of the supervisor (ADR-t1215-1): its start
 /// logged under the queue's directory, and the guard of a process it gives
 /// `[run.env]` the `dagq` its sessions run, `runner` (ADR-t2086-1).

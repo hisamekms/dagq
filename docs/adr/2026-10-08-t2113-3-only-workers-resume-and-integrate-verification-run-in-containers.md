@@ -12,6 +12,7 @@ amended_by:
   - adr-t2114-3
   - adr-t2114-4
   - adr-t2257-1
+  - adr-t2173-1
 owners:
   - hisamekms
 tags:

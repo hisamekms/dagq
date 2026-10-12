@@ -459,15 +459,22 @@ impl OneShot {
             queue: &mut queue,
             repository: &repository,
             verifier: &verifier,
-            // No part of the container runtime but the queue broker is
-            // built yet (goal 38).
+            // The queue broker and the dagq machine are the parts of the
+            // container runtime built yet (goal 38).
             container: &crate::application::queue_broker::BrokerGate {
                 // Only looked at: `up` and the supervisor start it.
                 broker: Arc::new(crate::infrastructure::queue_broker::SystemQueueBroker::new(
                     &db,
                     Path::new("dagq"),
                 )),
-                container: crate::infrastructure::container_runtime::UnbuiltContainer,
+                // Only looked at: a container's start makes it run.
+                container: crate::application::podman_machine::MachineGate {
+                    podman: Arc::new(crate::infrastructure::podman_machine::PodmanCli::default()),
+                    required: crate::domain::podman_machine::MachineMounts::of_queue(
+                        db.parent().unwrap_or(Path::new(".")),
+                    ),
+                    container: crate::infrastructure::container_runtime::UnbuiltContainer,
+                },
             },
             remote,
             files: &LocalRunFiles,

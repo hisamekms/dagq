@@ -1004,6 +1004,7 @@ pub mod plan_quality;
 pub mod plan_request;
 pub mod plan_review;
 pub mod planner;
+pub mod podman_machine;
 pub mod pre_claim;
 pub mod prediction;
 pub mod proposal;

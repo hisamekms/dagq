@@ -171,6 +171,7 @@ module | src/application/lifecycle.rs | host | up, down
 module | src/application/install.rs | host |
 module | src/application/update.rs | host |
 module | src/application/queue_service.rs | host |
+module | src/application/podman_machine.rs | host |
 module | src/application/queue_broker.rs | host |
 module | src/application/sccache.rs | host |
 module | src/application/sccache/ | host |
@@ -262,6 +263,9 @@ outer-port | src/application/queue_service.rs | ServiceBackend | host | internal
 outer-port | src/application/queue_service.rs | QueueServiceControl | host | internal | - |
 outer-port | src/application/queue_broker.rs | QueueBrokerControl | host | internal | - | how up, down and the supervisor start, look at and stop the broker
 outer-port | src/application/queue_broker.rs | BrokerBackend | host | internal | - | what the broker runs a request on
+outer-port | src/application/podman_machine.rs | PodmanMachine | host | internal | - | the podman commands on the dagq machine
+outer-port | src/application/podman_machine.rs | MachineUsers | host | internal | - | the host-wide lock and users of the dagq machine
+outer-port | src/application/podman_machine.rs | MachineVolumes | host | public | execution | the named volumes of a queue in the dagq machine; the cleanup at a run's end and the landing removes a run's build output
 outer-port | src/application/queue_service.rs | ServiceAccess | host | public | execution | not classified by architecture.md; the supervisor issues a token at the claim and the resume
 outer-port | src/application/ci_watch.rs | CiSource | observation | internal | - |
 outer-port | src/application/throughput_review.rs | ThroughputReviewSources | observation | internal | - |
@@ -354,6 +358,7 @@ item | src/domain/throughput_review.rs | UnusableFinish | observation | executio
 item | src/application/supervise/observer.rs | UnusableTimerJob | observation | execution | supervise::provider holds it back once
 item | src/application/supervise/report.rs | ReportPort | observation | host | where the KPI push goes, for inbox_nudge
 item | src/application/queue_broker.rs | BrokerGate | host | execution | whether the broker runs, through ContainerRuntime
+item | src/application/podman_machine.rs | MachineGate | host | execution | whether the dagq machine can be used, through ContainerRuntime
 item | src/application/supervise/contexts.rs | HostOpsState | host | execution | free disk and sccache, read
 item | src/application/supervise/cleanup.rs | CleanupWatch | host | execution | cleaning and defer
 item | src/application/supervise/sccache.rs | ensure_sccache | host | execution |

@@ -76,6 +76,7 @@ mod planner_headless;
 mod planner_headless_stats;
 mod planner_headless_turns;
 mod planner_slots;
+mod podman_machine;
 mod provider_executables;
 mod queue_broker;
 mod queue_dependencies;
