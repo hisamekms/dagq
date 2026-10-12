@@ -365,6 +365,46 @@ fn a_breaking_migration_waits_for_an_idle_queue() {
     assert!(again.applied.is_empty() && again.backup.is_none());
 }
 
+/// A queue that holds the replanning's operations refuses, once migrated,
+/// every binary that does not read them (ADR-t1521-2): its recorded floor is
+/// above the schema of such a binary, while this binary opens it as before.
+#[test]
+fn a_migrated_queue_with_the_replanning_refuses_binaries_before_it() {
+    let replanning = MIGRATIONS
+        .iter()
+        .position(|migration| migration.contains("CREATE TABLE replan_operations"))
+        .unwrap();
+    let with = i64::try_from(replanning).unwrap() + 1;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.db");
+    let raw = Connection::open(&path).unwrap();
+    for migration in &MIGRATIONS[..replanning + 1] {
+        raw.execute_batch(migration).unwrap();
+    }
+    raw.execute_batch(&format!(
+        "PRAGMA application_id = 1129599281; PRAGMA user_version = {with};
+         INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor});",
+        floor = floor_for(with),
+    ))
+    .unwrap();
+    // The replanning's own migration is compatible: a binary before it
+    // still opened the queue that has it.
+    assert!(floor_for(with) < with);
+    let report = SqliteQueue::migrate(&path, Some(&|_| false), 0).unwrap();
+    let floor: i64 = raw
+        .query_row("SELECT floor FROM schema_floor", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(floor, report.floor);
+    assert!(
+        floor > with - 1,
+        "floor {floor} lets a binary at {} in",
+        with - 1
+    );
+    let schema = SqliteQueue::schema(&path).unwrap();
+    assert!(schema.opens && schema.pending.is_empty());
+    SqliteQueue::open(&path).unwrap();
+}
+
 /// The rules the CHECKs of `tasks`, `asks` and `run_events` held on their
 /// json and NULL pairs (ADR-t876-1) hold for what the ports write, read
 /// back from the rows instead of left to the CHECK.

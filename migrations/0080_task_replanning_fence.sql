@@ -1,0 +1,13 @@
+-- dagq-schema: breaking
+-- The fence of the replanning of a run (ADR-t1521-2): a binary from before
+-- the replanning tables never reads replan_operations, so on the queue it
+-- would claim, resume and land a task the replanning protects. The
+-- replanning migration itself is compatible, so this one raises the floor
+-- past it and the queue then refuses every such binary at open, the fixed
+-- binary put back included. A binary that has the tables reads them in the
+-- same transaction as each step it guards (domain::task_replan), so it
+-- passes. The fence lives in the schema rather than in a check at start: a
+-- binary from before the replanning has no such check to run.
+--
+-- No statement: the breaking declaration alone moves the floor, and
+-- `migrate` applies it only on an idle queue.

@@ -30,7 +30,8 @@ Claude/Codexで同じ状態機械を使う。
 - 実装済み: 操作の永続（`src/infrastructure/replans.rs`）、状態と遷移・版・保留の判定（`src/domain/task_replan.rs`）、入口のCLI（人とinboxの`replan request`、workerの自分のrunだけの`replan propose`、読む`replans`）と権限、`status`・`doctor`・`list`・`show`での表示。
 - 保留の判定（`check_step`）は、操作が保留の柵より後の状態にある間、claimと候補・resume・復旧の回・revise・`ready`・`edit`・`cancel`・依存の変更・着地を、どのroleにも拒む。
   各経路はその工程のtransactionの中で同じ行を読む。
-- 未実装: 診断・保留と書き手の停止・snapshot・plannerのprompt・置換の適用・goal closeの判定・古いruntimeを止める非互換の柵。
+- 古いruntimeを止める柵: 済み（非互換のschema。floorが再計画の表を読まないバイナリを拒む）。
+- 未実装: 診断・保留と書き手の停止・snapshot・plannerのprompt・置換の適用・goal closeの判定。
   今はruntimeのどの経路も操作を進めないので、記録した操作は`candidate`のままで、runを止めない。
   適用（`applying`・`applied`）へはどの経路も動かせない。
 - 保留の正式な経路（runのslotを返して保留する）が無いあいだの、保護中のrunの暫定の扱い:

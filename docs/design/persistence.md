@@ -83,7 +83,6 @@ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（
 ## 表
 
 表ごとの役割と、列についてコードから読めない約束。
-列の型と既定値は`migrations/*.sql`が持つ。
 
 ```text
 tasks                  -- task 1つに1行。priorityのnullは所属goalの優先度を継ぐ。worker_modeのnullはproviderの既定（ADR-t1340-1）、
@@ -107,7 +106,7 @@ headless_jobs          -- headless jobのプロセスと出力。始めたsuperv
 planners               -- plannerのsession 1つに1行。workspace_idはruntimeのplannerならbackgroundのwrapperのhandle、人のplannerと古い行はcmux workspace。answer_wait_atは人の答えだけを待って終わる行（ADR-t1704-1）
 plan_requests          -- inboxが記録した計画の依頼。text / note / refsは記録の後に書き換えない（言い直しは新しい依頼）。spike_task_idはSpike起点の依頼（Spikeごとに1件）
 spike_cycles           -- 調査中の計画の周期
-replan_operations      -- runの再計画（ADR-t1521-2）。開いた操作はrunごとに1つ
+replan_operations      -- runの再計画（ADR-t1521-2）。開いた操作はrunごとに1つ。読まないバイナリはfloorが拒む
 plan_request_proposals -- 依頼から出たproposal
 draft_origins          -- runtimeやjobが作ったdraftの出どころと材料（JSON object）。1つのdraftに1回だけ書く
 draft_reopens          -- plan reviewがreopenしたtaskのproposalを取り下げたときの出どころ

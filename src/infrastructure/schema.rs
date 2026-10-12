@@ -330,6 +330,21 @@ mod tests {
     }
 
     #[test]
+    fn the_floor_refuses_every_binary_before_the_replanning() {
+        // A binary that does not know replan_operations would claim,
+        // resume and land a task its replanning protects (ADR-t1521-2), so
+        // the floor rises past the latest schema without the table. Found
+        // by what it creates so a renumbering on landing does not move it.
+        let replanning = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("CREATE TABLE replan_operations"))
+            .expect("the migration of the replanning");
+        let latest_without = replanning as i64;
+        assert!(floor_for(BINARY_SCHEMA) > latest_without);
+        assert!(recorded_floor(BINARY_SCHEMA).unwrap() > latest_without);
+    }
+
+    #[test]
     fn checks_naming_a_kind_are_found_and_are_never_compatible() {
         let sql = "-- dagq-schema: compatible
             CREATE TABLE a (kind TEXT NOT NULL CHECK (kind IN ('x', 'y')));
