@@ -33,8 +33,13 @@ use crate::domain::{
 /// request's planner waits for it to end (ADR-t1540-1). A Spike's request
 /// also waits while a planner of another Spike's request of the same goal
 /// is open: one replans the goal at a time, and the later reads how the
-/// earlier ended (ADR-t1487-1 decision 5).
+/// earlier ended (ADR-t1487-1 decision 5). A request recorded for a
+/// replanning operation waits until the operation holds a complete
+/// snapshot and is with the planner (ADR-t1521-2 decision 2).
 const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
+    AND (r.replan_operation_id IS NULL OR EXISTS(SELECT 1 FROM replan_operations o
+        WHERE o.id=r.replan_operation_id AND o.snapshot_id IS NOT NULL
+        AND o.status IN ('parked','planning','reviewing','awaiting_answer')))
     AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.request_id=r.id AND p.closed_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.request_id=r.id
         AND a.kind='planner_question' AND a.closed_at IS NULL)
@@ -388,6 +393,7 @@ fn request_row(r: &Row<'_>) -> rusqlite::Result<PlanRequest> {
         proposals: Vec::new(),
         planners: 0,
         spike_task: r.get("spike_task_id")?,
+        replan_operation: r.get("replan_operation_id")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })

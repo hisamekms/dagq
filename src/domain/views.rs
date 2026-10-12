@@ -174,6 +174,10 @@ pub struct TaskDetail {
     /// open and closed, oldest first, with the asking AI's recommendation
     /// and confidence (ADR-t451-1 decision 1).
     pub asks: Vec<Ask>,
+    /// The replanning operations on its runs (ADR-t1521-2), oldest first,
+    /// with where each is and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replans: Vec<crate::domain::task_replan::ReplanOperation>,
 }
 
 /// Where a draft the runtime or a job made came from (ADR-t807-1): its

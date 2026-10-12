@@ -66,6 +66,9 @@ table | planners | planning |
 table | plan_requests | planning |
 table | plan_request_proposals | planning |
 table | spike_cycles | planning | the investigations; the claim (T1) opens one
+table | replan_operations | planning | the replanning of a run; its guard is read by every step of the task
+table | replan_mappings | planning |
+table | replan_replacements | planning |
 table | draft_origins | planning |
 table | draft_reopens | planning |
 table | draft_revisits | planning |
@@ -97,6 +100,7 @@ store | src/infrastructure/plan_reviews.rs | planning |
 store | src/infrastructure/goal_reviews.rs | planning |
 store | src/infrastructure/plan_requests.rs | planning |
 store | src/infrastructure/investigations.rs | planning |
+store | src/infrastructure/replans.rs | planning |
 store | src/infrastructure/planners.rs | planning |
 store | src/infrastructure/draft_planners.rs | planning |
 store | src/infrastructure/finding_planners.rs | planning |
@@ -127,6 +131,7 @@ store | src/infrastructure/event_actor.rs | shared | EventStore
 # Modules of src/application/ whose context the path does not tell.
 module | src/application/commands/planning.rs | planning |
 module | src/application/commands/requests.rs | planning |
+module | src/application/commands/replans.rs | planning |
 module | src/application/planner.rs | planning |
 module | src/application/planner_handoff.rs | planning |
 module | src/application/planner_request.rs | planning |
@@ -253,6 +258,7 @@ outer-port | src/application/inherit.rs | InheritStore | execution | public | pl
 outer-port | src/application/inherit.rs | CarriedBranches | execution | public | planning | ready --inherit (T10)
 outer-port | src/application/agent_eval.rs | EvalStore | execution | public | host | through AgentEvals to the CLI and the queue service; they write requests only
 outer-port | src/application/commands/requests.rs | RequestStore | planning | internal | - |
+outer-port | src/application/commands/replans.rs | ReplanStore | planning | public | host | through Replans to the CLI and the queue service (a worker's proposal)
 outer-port | src/application/commands/planning.rs | PlanningStore | planning | internal | - |
 outer-port | src/application/commands/dialogue.rs | DialogueStore | shared | public | all | asks and notes
 outer-port | src/application/commands/mod.rs | DenialLog | shared | public | all | what a command refused

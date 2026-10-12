@@ -635,3 +635,48 @@ pub fn status_sections(role: Option<SessionRole>) -> StatusSections {
 pub fn for_role(role: Option<SessionRole>) -> bool {
     role.is_none_or(|role| role == crate::domain::ATTENTION_ROLE)
 }
+
+/// `status`'s and `doctor`'s `replans`: the open replanning operations
+/// (ADR-t1521-2), oldest first, each with its task's status now, where it
+/// is and why (its last move's reason, else its request's), how many
+/// guard their task, and the ones whose task ended while they stayed
+/// open (`problems`), which only the runtime's outcome closes.
+pub fn replans(
+    open: &[(
+        crate::domain::task_replan::ReplanOperation,
+        crate::domain::TaskStatus,
+    )],
+) -> Value {
+    let listed: Vec<Value> = open
+        .iter()
+        .map(|(op, task_status)| {
+            json!({
+                "id": op.id,
+                "task_id": op.task_id,
+                "task_status": task_status,
+                "run_id": op.run_id,
+                "origin": op.origin,
+                "status": op.status,
+                "guards": op.status.guards(),
+                "reason": truncate_reason(op.status_reason.as_deref().unwrap_or(&op.reason)),
+                "generation": op.generation,
+                "request_id": op.request_id,
+                "snapshot_id": op.snapshot_id,
+                "updated_at": op.updated_at,
+            })
+        })
+        .collect();
+    let problems: Vec<Value> = open
+        .iter()
+        .filter(|(_, task_status)| *task_status != crate::domain::TaskStatus::InProgress)
+        .map(|(op, task_status)| {
+            json!({"id": op.id, "task_id": op.task_id, "task_status": task_status,
+                   "problem": "task_not_in_progress"})
+        })
+        .collect();
+    json!({
+        "open": listed,
+        "guarding": open.iter().filter(|(op, _)| op.status.guards()).count(),
+        "problems": problems,
+    })
+}

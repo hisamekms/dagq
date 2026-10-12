@@ -107,6 +107,7 @@ headless_jobs          -- headless jobのプロセスと出力。始めたsuperv
 planners               -- plannerのsession 1つに1行。workspace_idはruntimeのplannerならbackgroundのwrapperのhandle、人のplannerと古い行はcmux workspace。answer_wait_atは人の答えだけを待って終わる行（ADR-t1704-1）
 plan_requests          -- inboxが記録した計画の依頼。text / note / refsは記録の後に書き換えない（言い直しは新しい依頼）。spike_task_idはSpike起点の依頼（Spikeごとに1件）
 spike_cycles           -- 調査中の計画の周期
+replan_operations      -- runの再計画（ADR-t1521-2）。開いた操作はrunごとに1つ
 plan_request_proposals -- 依頼から出たproposal
 draft_origins          -- runtimeやjobが作ったdraftの出どころと材料（JSON object）。1つのdraftに1回だけ書く
 draft_reopens          -- plan reviewがreopenしたtaskのproposalを取り下げたときの出どころ
@@ -178,7 +179,7 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 
 ### planning requests（`plan_requests.rs`）
 
-人がinboxに頼んだ計画の依頼と、依頼ごとに立てるruntimeのplanner（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、[inboxからの計画の依頼](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)、[domain-model](domain-model.md#planning-requests)）。
+人がinboxに頼んだ計画の依頼と、依頼ごとに立てるruntimeのplanner（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、[inboxからの計画の依頼](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)）。
 入口は`src/infrastructure/plan_requests.rs`（port `PlanRequestStore`と`RequestStore`）。
 
 - 依頼のeventはtask・goal・runに付かないqueueのeventで、payloadに`request_id`を持つ。
@@ -262,7 +263,7 @@ schemaが安定したと人が決めるまで、SQLiteのCHECK制約を使わな
   それ以外の列で規則の外の値を読むと、その読み込みはerrorで止まり（fail closed）、DBの行はその場で直さない。
 - 値を足すとき: kindの列への追加はmigrationを要さない。
   読む側がfail closedの列への追加は、古いバイナリが読めないので非互換の宣言のmigrationで下限を上げる（表は作り直さない）。
-- kindの規則（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)）: 書き込み口はkindを`EventKind`（`src/domain/event_kind.rs`）で受け、kindに結び付く規則は`check_ask_kind` / `check_event_target`（`src/domain/mod.rs`）が書く前に検査する。
+- kindの規則（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)）: 書き込み口はkindを`EventKind`で受け、kindに結び付く規則は`check_ask_kind` / `check_event_target`が書く前に検査する。
   queueのeventのkindは`EventKind::is_queue`にも足す。
 - 新しいmigrationにCHECKを書かないことは`scripts/check-migration-numbers.sh`と`schema.rs`の`kind_enumerations`が検査する。
 

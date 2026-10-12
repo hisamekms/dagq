@@ -571,7 +571,8 @@ impl QueueRead {
             | UseCase::FindingDismiss
             | UseCase::AgentEval
             | UseCase::AgentResults
-            | UseCase::AgentResult => return Ok(None),
+            | UseCase::AgentResult
+            | UseCase::ReplanPropose => return Ok(None),
         };
         read.check()?;
         Ok(Some(read))

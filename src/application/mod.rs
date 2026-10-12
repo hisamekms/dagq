@@ -161,8 +161,36 @@ pub struct TaskListItem {
     /// For a task canceled as a duplicate, the task it duplicates (ADR-0046 decision 5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duplicate_of: Option<TaskId>,
+    /// The open replanning operation on its run (ADR-t1521-2), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replan: Option<ListedReplan>,
     #[serde(flatten)]
     pub details: Option<TaskListDetails>,
+}
+
+/// An open replanning operation as `list` marks its task with: which,
+/// where it is, whether it holds the task from every ordinary step, and
+/// why it is there.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ListedReplan {
+    pub operation: crate::domain::ReplanId,
+    pub status: crate::domain::task_replan::ReplanStatus,
+    pub guards: bool,
+    pub reason: String,
+}
+
+impl ListedReplan {
+    pub fn of(op: &crate::domain::task_replan::ReplanOperation) -> Self {
+        Self {
+            operation: op.id,
+            status: op.status,
+            guards: op.status.guards(),
+            reason: op
+                .status_reason
+                .clone()
+                .unwrap_or_else(|| op.reason.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -221,8 +249,15 @@ impl TaskListItem {
             goal_dependencies,
             latest_run,
             duplicate_of,
+            replan: None,
             details,
         }
+    }
+
+    /// The item marked with the open replanning operation on its run.
+    pub fn with_replan(mut self, replan: Option<ListedReplan>) -> Self {
+        self.replan = replan;
+        self
     }
 }
 

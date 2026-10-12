@@ -544,6 +544,24 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    // ADR-t1521-1, ADR-t1521-2.
+    /// Ask to replan a long-running run (a person's request, or a worker's proposal on its own
+    /// run): the runtime diagnoses it and, only when it replans, parks the run at a safe boundary
+    /// and saves its work before a planner of the runtime's makes the replacement.
+    Replan {
+        #[command(subcommand)]
+        command: ReplanCommand,
+    },
+    /// List the replanning operations, oldest first: the open ones unless --all, or the one ID
+    /// names, each with the copy of its task's conditions, its diagnosis and its outcome.
+    /// Prints {"replans"}.
+    Replans {
+        /// Only this operation, whatever its status.
+        id: Option<i64>,
+        /// Include the ended ones.
+        #[arg(long)]
+        all: bool,
+    },
     // ADR-t1728-1.
     /// Ask for an eval of a review agent, which the supervisor runs, or read the rounds.
     Agent {
@@ -1743,6 +1761,36 @@ enum RequestCommand {
     },
 }
 
+#[derive(Subcommand, Clone)]
+enum ReplanCommand {
+    /// Ask the runtime to replan run RUN (only a person at a plain terminal and the inbox, at a
+    /// person's word): one operation per run, a request on a run that has one returns it. Its
+    /// planning request waits for the run's saved work. Prints {"operation", "created",
+    /// "request"}.
+    Request {
+        #[arg(long)]
+        run: String,
+        /// Why, in the person's words.
+        #[arg(long)]
+        reason: String,
+        /// An event it rests on; repeatable.
+        #[arg(long = "evidence")]
+        evidence: Vec<i64>,
+    },
+    /// Propose to replan your own run (a worker only, on its run): the runtime diagnoses it;
+    /// nothing stops or changes your run here. Prints {"operation", "created", "request"}.
+    Propose {
+        #[arg(long)]
+        run: String,
+        /// Why: which conditions are independent, what the review keeps finding.
+        #[arg(long)]
+        reason: String,
+        /// An event it rests on; repeatable.
+        #[arg(long = "evidence")]
+        evidence: Vec<i64>,
+    },
+}
+
 /// The splits of an agent's cases (`.dagq/agents/<agent>/evals/<split>.json`).
 const SPLITS: [&str; 3] = ["dev", "holdout", "production"];
 
@@ -2125,6 +2173,19 @@ const OBSERVER_DENIED: &str = "observer may not change queue state";
 /// The error of a command a headless job may not run.
 const REVIEWER_DENIED: &str = "reviewer may not change queue state";
 
+/// The request or proposal `replan request` and `replan propose` record.
+fn new_replan(
+    run: &str,
+    reason: String,
+    evidence: &[i64],
+) -> Result<dagq::domain::task_replan::NewReplan> {
+    Ok(dagq::domain::task_replan::NewReplan {
+        run: RunId::new(run)?,
+        reason,
+        evidence: evidence.iter().copied().map(EventId::new).collect(),
+    })
+}
+
 /// The words `request add` records for `option` (`--text` or `--note`), and
 /// `planner request` hands as `--text`: the value itself, stdin for `-`, or
 /// what `file` holds when read (ADR-t1394-1 decision 2 keeps the request as
@@ -2215,6 +2276,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Marks { .. }
         | Command::Findings { .. }
         | Command::Requests { .. }
+        | Command::Replans { .. }
         | Command::Search { .. }
         | Command::Related { .. }
         | Command::Proposal {
@@ -2346,6 +2408,11 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
                     planner: None,
                 },
             ),
+        },
+        // The task of the run is read from the queue.
+        Command::Replan { command } => match command {
+            ReplanCommand::Request { run, .. } => one(C::ReplanRequest, run_resource(run)),
+            ReplanCommand::Propose { run, .. } => one(C::ReplanPropose, run_resource(run)),
         },
         // The list of the tests that fail already (ADR-t1920-1): not for
         // a worker or a job, whose prompt carries it.
@@ -2591,6 +2658,9 @@ fn authorized_in_application(command: &Command) -> bool {
         // The planning requests (ADR-t1394-1), with the planner a decline
         // needs read from the queue.
         Command::Request { .. } => true,
+        // The replanning requests and proposals (ADR-t1521-2), with the
+        // task of the run read from the queue.
+        Command::Replan { .. } => true,
         // The eval's requests and reads (ADR-t1728-1), with the run a
         // worker's request is on and the round a read names.
         Command::Agent { .. } => true,
@@ -2979,6 +3049,18 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
             ),
             AgentCommand::Result { id } => (UseCase::AgentResult, json!({"id": id})),
         },
+        // A worker's proposal on its own run (ADR-t1521-2 decision 3).
+        Command::Replan {
+            command:
+                ReplanCommand::Propose {
+                    run,
+                    reason,
+                    evidence,
+                },
+        } => (
+            UseCase::ReplanPropose,
+            json!({"run": run, "reason": reason, "evidence": evidence}),
+        ),
         Command::Proposal {
             command: ProposalCommand::List { all },
         } => (UseCase::ProposalList, json!({"all": all})),
@@ -3955,6 +4037,29 @@ fn execute(cli: Cli) -> Result<Value> {
                 AgentCommand::Result { id } => evals.show(id)?,
             }
         }
+        Command::Replan { command } => {
+            let mut replans = dagq::application::commands::replans::Replans::new(
+                &mut queue,
+                &actor,
+                &StaticPolicy,
+            );
+            serde_json::to_value(match command {
+                ReplanCommand::Request {
+                    run,
+                    reason,
+                    evidence,
+                } => replans.request(&new_replan(&run, reason, &evidence)?)?,
+                ReplanCommand::Propose {
+                    run,
+                    reason,
+                    evidence,
+                } => replans.propose(&new_replan(&run, reason, &evidence)?)?,
+            })?
+        }
+        Command::Replans { id: Some(id), .. } => {
+            json!({"replans": [queue.replan_operation(dagq::domain::ReplanId::new(id))?]})
+        }
+        Command::Replans { id: None, all } => json!({"replans": queue.replan_operations(all)?}),
         Command::Requests { id: Some(id), .. } => {
             json!({"requests": [queue.plan_request(RequestId::new(id))?]})
         }
@@ -5114,6 +5219,11 @@ mod tests {
             ("agent results", &["--agent", "adr-rules"]),
             ("agent result", &["1"]),
             ("request decline", &["1", "--reason", "r"]),
+            ("replan request", &["--run", "r1", "--reason", "r"]),
+            (
+                "replan propose",
+                &["--run", "r1", "--reason", "r", "--evidence", "3"],
+            ),
             (
                 "ask",
                 &[
@@ -5345,6 +5455,7 @@ mod tests {
         "marks",
         "findings",
         "requests",
+        "replans",
         "search",
         "related",
         "candidates",

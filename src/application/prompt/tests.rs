@@ -697,6 +697,7 @@ fn proposal_task(task: Task, dependencies: Vec<TaskId>) -> TaskDetail {
         origin: None,
         follow_up_drafts: Vec::new(),
         revisit: None,
+        replans: Vec::new(),
         asks: Vec::new(),
     }
 }
@@ -4205,6 +4206,7 @@ fn request_planner_refs_count_each_reference_once() {
         proposals: Vec::new(),
         planners: 0,
         spike_task: None,
+        replan_operation: None,
         created_at: 0,
         updated_at: 0,
     };
@@ -4478,6 +4480,7 @@ fn a_request_planner_prompt_of_huge_references_stays_within_its_limits() {
         proposals: Vec::new(),
         planners: 0,
         spike_task: None,
+        replan_operation: None,
         created_at: 0,
         updated_at: 0,
     };

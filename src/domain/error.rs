@@ -2,8 +2,10 @@ use std::fmt;
 
 use super::{
     AskKind, AskReason, CheckStatus, FindingId, FindingStatus, GoalId, GoalVerdict, ProposalId,
-    ProposalStatus, ReceiptResult, RequestId, RunId, RunStatus, TaskAction, TaskId, TaskStatus,
+    ProposalStatus, ReceiptResult, ReplanId, RequestId, RunId, RunStatus, TaskAction, TaskId,
+    TaskStatus,
     plan_request::RequestStatus,
+    task_replan::{GuardedStep, ReplanStatus},
 };
 
 /// A business rejection by the domain: an invalid value, a transition the
@@ -280,6 +282,43 @@ pub enum DomainError {
         goal_id: GoalId,
         cycles: usize,
         max: usize,
+    },
+    /// A step of a task a replanning operation guards (ADR-t1521-2): only
+    /// the operation's own outcome, which the trusted runtime writes,
+    /// lets the task move on.
+    TaskReplanning {
+        task_id: TaskId,
+        operation: ReplanId,
+        status: ReplanStatus,
+        step: GuardedStep,
+    },
+    /// A replanning operation on a run its task no longer waits on.
+    RunNotReplannable {
+        run_id: RunId,
+        status: RunStatus,
+        task_status: TaskStatus,
+    },
+    /// A move of a replanning operation read under an older generation.
+    ReplanGenerationStale {
+        operation: ReplanId,
+        expected: i64,
+        actual: i64,
+    },
+    /// A move of a replanning operation its status does not allow.
+    ReplanMoveNotAllowed {
+        operation: ReplanId,
+        from: ReplanStatus,
+        to: ReplanStatus,
+    },
+    /// A replanning operation moved past the park without a snapshot.
+    ReplanNeedsSnapshot {
+        operation: ReplanId,
+        to: ReplanStatus,
+    },
+    /// A replanning operation moved into the replacement, whose atomic
+    /// apply this binary does not have.
+    ReplanApplyUnavailable {
+        operation: ReplanId,
     },
     /// A reference of a planning request is not `<kind>:<id>` of a kind it
     /// takes (ADR-t1394-1 decision 2).
@@ -758,6 +797,54 @@ impl fmt::Display for DomainError {
                 "a person set the priority of {holder} ({}): {} may not change it; only the user or the inbox, at a person's word, may (a doubt goes to a person)",
                 priority.as_str(),
                 role.as_str()
+            ),
+            Self::TaskReplanning {
+                task_id,
+                operation,
+                status,
+                step,
+            } => write!(
+                f,
+                "task {task_id} is being replanned (replan operation {operation} is {}): {} is refused until the runtime ends the operation (see dagq replans {operation})",
+                status.as_str(),
+                step.as_str()
+            ),
+            Self::RunNotReplannable {
+                run_id,
+                status,
+                task_status,
+            } => write!(
+                f,
+                "run {run_id} ({}) of a task {} is not the run its task waits on: only the latest run of an in_progress task that has not landed is replanned",
+                status.as_str(),
+                task_status.as_str()
+            ),
+            Self::ReplanGenerationStale {
+                operation,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "replan operation {operation} is at generation {actual}, not {expected}: read it again"
+            ),
+            Self::ReplanMoveNotAllowed {
+                operation,
+                from,
+                to,
+            } => write!(
+                f,
+                "replan operation {operation} does not move from {} to {}",
+                from.as_str(),
+                to.as_str()
+            ),
+            Self::ReplanNeedsSnapshot { operation, to } => write!(
+                f,
+                "replan operation {operation} moves to {} only with a complete snapshot",
+                to.as_str()
+            ),
+            Self::ReplanApplyUnavailable { operation } => write!(
+                f,
+                "replan operation {operation} cannot be applied: this binary has no atomic replacement yet"
             ),
             Self::RequestRefInvalid { value } => write!(
                 f,

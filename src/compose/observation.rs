@@ -795,6 +795,7 @@ impl OneShot {
         if let Some(toolchains) = bound_toolchains(queue, self.profiles)? {
             status["toolchains"] = toolchains;
         }
+        status["replans"] = health::replans(&queue.open_replans()?);
         let sections = health::status_sections(role);
         if sections.language {
             status["language"] = serde_json::to_value(self.language_report(queue)?)?;
@@ -869,6 +870,7 @@ impl OneShot {
                 }
                 add_sccache_diagnostics(&queue, db, true, &mut report)?;
                 report["roles"] = doctor_roles(&queue);
+                report["replans"] = health::replans(&queue.open_replans()?);
                 if let Some(toolchains) = bound_toolchains(&queue, self.profiles)? {
                     report["toolchains"] = toolchains;
                 }

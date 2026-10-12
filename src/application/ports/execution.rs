@@ -872,6 +872,12 @@ pub trait RunTransitions {
         common_dir: &str,
     ) -> Result<(Task, TaskRun)>;
     fn record_cleanup_failure(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()>;
+    /// The replanning operation that guards `task` now (ADR-t1521-2), if
+    /// any: no next step of its run starts while one does.
+    fn replan_guard(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Option<crate::domain::task_replan::ReplanGuard>>;
     fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
     fn cleanup_failed(
         &mut self,

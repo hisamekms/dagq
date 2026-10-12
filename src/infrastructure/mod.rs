@@ -49,6 +49,7 @@ pub mod queue_broker;
 pub mod queue_service;
 pub mod related;
 pub mod release_update;
+mod replans;
 pub mod report_config;
 pub mod review_programs;
 pub mod run_env;

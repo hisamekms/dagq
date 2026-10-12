@@ -64,6 +64,13 @@ string_enum!(Capability {
     // and 6).
     RequestRecord => "request.record",
     RequestDecline => "request.decline",
+    // The replanning of a run (ADR-t1521-1, ADR-t1521-2): a person's
+    // request, a worker's proposal on its own run, and the park and the
+    // replacement only the trusted runtime does.
+    ReplanRequest => "replan.request",
+    ReplanPropose => "replan.propose",
+    ReplanPark => "replan.park",
+    ReplanApply => "replan.apply",
     // A session's screen read and keys or an answer typed into it, by
     // its run or planner id (ADR-t1228-1 decisions 4 and 5).
     ScreenRead => "screen.read",
@@ -99,7 +106,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 58] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -134,6 +141,10 @@ impl Capability {
         Self::PlannerOpen,
         Self::RequestRecord,
         Self::RequestDecline,
+        Self::ReplanRequest,
+        Self::ReplanPropose,
+        Self::ReplanPark,
+        Self::ReplanApply,
         Self::ScreenRead,
         Self::ScreenSend,
         Self::PlannerRequest,
@@ -179,14 +190,17 @@ pub enum Resource {
     /// The queue as a whole: reads, and what names nothing smaller.
     Queue,
     Goal(GoalId),
+    /// A task and its status when known.
     Task {
         id: TaskId,
         status: Option<TaskStatus>,
     },
+    /// A run and its task when known.
     Run {
         id: RunId,
         task: Option<TaskId>,
     },
+    /// An ask and the run it is on when known.
     Ask {
         id: AskId,
         run: Option<RunId>,
@@ -375,7 +389,8 @@ impl Authorizer for StaticPolicy {
 use Capability as C;
 
 /// What a person at a plain terminal may do: everything but the jobs'
-/// submissions and the integrator's own landing and push.
+/// submissions, the integrator's own landing and push, and the park and
+/// the replacement of a replanning, which only the runtime does.
 const USER: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
@@ -408,6 +423,7 @@ const USER: &[Capability] = &[
     C::AskClose,
     C::PlannerOpen,
     C::RequestRecord,
+    C::ReplanRequest,
     C::ScreenRead,
     C::ScreenSend,
     C::PlannerRequest,
@@ -463,11 +479,13 @@ const PLANNER: &[Capability] = &[
 /// own run: the runtime's wrapper and hooks run in the worker's
 /// environment (task 734). Of the eval it asks for a dev round and reads
 /// the rounds of its run only (ADR-t1728-1 decision 6): it never runs an
-/// LLM's CLI itself.
+/// LLM's CLI itself. It proposes to replan its own run, and nothing more
+/// of a replanning (ADR-t1521-2 decision 3).
 const WORKER: &[Capability] = &[
     C::QueueRead,
     C::AskOpen,
     C::NoteWrite,
+    C::ReplanPropose,
     C::SessionRun,
     C::SessionRecord,
     C::EvalRequest,
@@ -499,7 +517,8 @@ const OBSERVER: &[Capability] = &[
 /// update checks, migrates and probes queues with the new binary as
 /// `install` does (task 734). It runs the eval's rounds that were asked
 /// for (`scheduler.supervise`) and reads them, and asks for none itself
-/// (ADR-t1728-1 decision 6).
+/// (ADR-t1728-1 decision 6). It alone parks a run to replan it and
+/// applies the replacement (ADR-t1521-2 decisions 1 and 5).
 const SUPERVISOR: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
@@ -525,6 +544,8 @@ const SUPERVISOR: &[Capability] = &[
     C::BinaryInstall,
     C::QueueAdmin,
     C::IntegrationRequest,
+    C::ReplanPark,
+    C::ReplanApply,
 ];
 
 /// The session wrapper: its session and the session record.
@@ -754,6 +775,43 @@ mod tests {
         ActorRole::GoalReviewJob,
         ActorRole::ThroughputReviewJob,
     ];
+
+    #[test]
+    fn a_person_requests_a_worker_proposes_on_its_run_and_only_the_runtime_parks_and_applies() {
+        let on = |id: &str| Resource::Run {
+            id: run(id),
+            task: Some(TaskId::new(1)),
+        };
+        for role_ in [ActorRole::User, ActorRole::Inbox] {
+            assert!(allowed(&role(role_), C::ReplanRequest, &on("r1")));
+            assert!(!allowed(&role(role_), C::ReplanPark, &on("r1")));
+            assert!(!allowed(&role(role_), C::ReplanApply, &on("r1")));
+        }
+        let worker = ActorContext::worker(&run("r1"), TaskId::new(1));
+        assert!(allowed(&worker, C::ReplanPropose, &on("r1")));
+        assert!(!allowed(&worker, C::ReplanPropose, &on("r2")));
+        assert!(!allowed(&worker, C::ReplanRequest, &on("r1")));
+        assert!(!allowed(&worker, C::ReplanPark, &on("r1")));
+        let supervisor = role(ActorRole::Supervisor);
+        assert!(allowed(&supervisor, C::ReplanPark, &on("r1")));
+        assert!(allowed(&supervisor, C::ReplanApply, &on("r1")));
+        assert!(!allowed(&supervisor, C::ReplanRequest, &on("r1")));
+        for role_ in ActorRole::ALL.into_iter().filter(|role_| {
+            !matches!(
+                role_,
+                ActorRole::User | ActorRole::Inbox | ActorRole::Worker | ActorRole::Supervisor
+            )
+        }) {
+            for capability in [
+                C::ReplanRequest,
+                C::ReplanPropose,
+                C::ReplanPark,
+                C::ReplanApply,
+            ] {
+                assert!(!allowed(&role(role_), capability, &on("r1")), "{role_:?}");
+            }
+        }
+    }
 
     #[test]
     fn capabilities_are_listed_once_and_named_uniquely() {

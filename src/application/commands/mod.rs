@@ -9,6 +9,7 @@
 pub mod dialogue;
 pub mod operations;
 pub mod planning;
+pub mod replans;
 pub mod requests;
 
 use anyhow::Result;

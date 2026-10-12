@@ -139,7 +139,43 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
     if let Some(deferral) = deferral {
         shown["claim_deferral"] = json!(deferral);
     }
+    if !detail.replans.is_empty() {
+        shown["replans"] = json!(replans(detail));
+    }
     shown
+}
+
+/// The replanning operations on the task's runs, oldest first: where each
+/// is and why, without the copy of the conditions (`show --full` and
+/// `replans` carry it), the reason cut to [`TEXT_LIMIT`].
+fn replans(detail: &TaskDetail) -> Vec<Value> {
+    detail
+        .replans
+        .iter()
+        .map(|op| {
+            let mut op = pick(
+                &object(op),
+                &[
+                    "id",
+                    "run_id",
+                    "origin",
+                    "status",
+                    "status_reason",
+                    "generation",
+                    "reason",
+                    "task_version",
+                    "diagnosis",
+                    "snapshot_id",
+                    "request_id",
+                    "proposal_id",
+                    "replaced_by",
+                    "closed_at",
+                ],
+            );
+            truncate_fields(&mut op, &["reason", "status_reason"]);
+            Value::Object(op)
+        })
+        .collect()
 }
 
 /// The latest [`DEFAULT_ASKS`] asks of the task, oldest first, with the
@@ -344,6 +380,7 @@ mod tests {
             origin: None,
             follow_up_drafts: Vec::new(),
             revisit: None,
+            replans: Vec::new(),
             asks: Vec::new(),
             runs: vec![run("a"), run("b")],
             events: (1..=12)
@@ -425,6 +462,7 @@ mod tests {
             origin: None,
             follow_up_drafts: Vec::new(),
             revisit: None,
+            replans: Vec::new(),
             asks: Vec::new(),
             runs: vec![run("a"), run("b")],
             events: vec![
@@ -458,6 +496,7 @@ mod tests {
             origin: None,
             follow_up_drafts: Vec::new(),
             revisit: None,
+            replans: Vec::new(),
             asks: Vec::new(),
             runs: vec![],
             events: vec![],
@@ -527,6 +566,7 @@ mod tests {
             origin: None,
             follow_up_drafts: Vec::new(),
             revisit: None,
+            replans: Vec::new(),
             runs: vec![run("b")],
             events: vec![],
             processes: vec![],
@@ -654,6 +694,7 @@ mod tests {
             origin: None,
             follow_up_drafts: Vec::new(),
             revisit: None,
+            replans: Vec::new(),
             asks: Vec::new(),
             runs: vec![],
             events,

@@ -149,6 +149,14 @@ pub struct PlanRequest {
     /// a person's words. Its planner replans from the Spike's result.
     #[serde(rename = "spike_task_id", skip_serializing_if = "Option::is_none")]
     pub spike_task: Option<TaskId>,
+    /// The replanning operation a person's request on a run was recorded
+    /// for (ADR-t1521-2 decision 3): its planner waits until the operation
+    /// holds a complete snapshot. `None` for any other request.
+    #[serde(
+        rename = "replan_operation_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub replan_operation: Option<super::ReplanId>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -584,6 +592,7 @@ mod tests {
             proposals: Vec::new(),
             planners: 0,
             spike_task: None,
+            replan_operation: None,
             created_at: 0,
             updated_at: 0,
         }

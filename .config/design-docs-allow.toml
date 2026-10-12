@@ -25,7 +25,6 @@ tasks = 2
 path = "docs/design/authorization.md"
 size = 49549
 line = 2281
-tasks = 29
 
 [[doc]]
 path = "docs/design/ci-failure-issues.md"
@@ -60,12 +59,6 @@ line = 4652
 path = "docs/design/queue-service.md"
 size = 35535
 line = 1502
-tasks = 16
-
-[[doc]]
-path = "docs/design/security.md"
-line = 1500
-tasks = 7
 
 [[doc]]
 path = "docs/design/slow-tests.md"

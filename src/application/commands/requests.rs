@@ -115,6 +115,7 @@ mod tests {
             proposals: Vec::new(),
             planners: 1,
             spike_task: None,
+            replan_operation: None,
             created_at: 0,
             updated_at: 0,
         }

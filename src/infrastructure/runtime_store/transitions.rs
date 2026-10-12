@@ -566,9 +566,15 @@ impl SqliteQueue {
             );
             bail!("run {id} is already integrating (see doctor if it is stuck)");
         }
-        let previous = stored_run(&tx, id)?
-            .with_context(|| format!("run {id} does not exist"))?
-            .status();
+        let stored = stored_run(&tx, id)?.with_context(|| format!("run {id} does not exist"))?;
+        // No landing of a task being replanned begins, whatever passed
+        // before (ADR-t1521-2 decision 1).
+        crate::infrastructure::replans::check_task_step(
+            &tx,
+            stored.task_id(),
+            crate::domain::task_replan::GuardedStep::Integrate,
+        )?;
+        let previous = stored.status();
         let run = apply(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -937,6 +943,12 @@ impl SqliteQueue {
 /// The [`RunTransitions`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl RunTransitions for SqliteQueue {
+    fn replan_guard(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Option<crate::domain::task_replan::ReplanGuard>> {
+        SqliteQueue::replan_guard(self, task)
+    }
     fn claim_for_supervisor(
         &mut self,
         base_commit: &CommitSha,

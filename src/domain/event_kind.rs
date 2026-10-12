@@ -17,7 +17,7 @@
 //! context's automatic repair, ADR-0047). The others by prefix:
 //!
 //! - planning: `task_*`, `dependency_*`, `goal_*`, `proposal_*`, `plan_*`,
-//!   `planner_*`, `draft_*`, `follow_up_*`, `request_*` and
+//!   `planner_*`, `draft_*`, `follow_up_*`, `request_*`, `replan_*` and
 //!   `finding_planner_*`.
 //! - execution and landing: `run_*` (but `run_tmp_removed`), `lease_*`,
 //!   `claim_*`, `worktree_*`, `workspace_*`, `wrapper_*`, `session_*`,
@@ -282,6 +282,8 @@ event_kinds! {
     RecoveryRequested => "recovery_requested",
     ReleaseCheckFailed => "release_check_failed",
     ReleaseChecked => "release_checked",
+    ReplanRequested => "replan_requested",
+    ReplanStatusChanged => "replan_status_changed",
     ReportWritten => "report_written",
     RequestDeclined => "request_declined",
     RequestPlannerExhausted => "request_planner_exhausted",
@@ -307,6 +309,7 @@ event_kinds! {
     ReviseReceiptRejected => "revise_receipt_rejected",
     ReviseRequested => "revise_requested",
     ReviseUnsent => "revise_unsent",
+    ReviseWithheld => "revise_withheld",
     RunAdopted => "run_adopted",
     WorkerModeConverted => "worker_mode_converted",
     RunClaimed => "run_claimed",
@@ -1384,6 +1387,8 @@ mod tests {
             (EventKind::RecoveryRequested, "recovery_requested"),
             (EventKind::ReleaseCheckFailed, "release_check_failed"),
             (EventKind::ReleaseChecked, "release_checked"),
+            (EventKind::ReplanRequested, "replan_requested"),
+            (EventKind::ReplanStatusChanged, "replan_status_changed"),
             (EventKind::ReportWritten, "report_written"),
             (EventKind::RequestDeclined, "request_declined"),
             (
@@ -1415,6 +1420,7 @@ mod tests {
             (EventKind::ReviseReceiptRejected, "revise_receipt_rejected"),
             (EventKind::ReviseRequested, "revise_requested"),
             (EventKind::ReviseUnsent, "revise_unsent"),
+            (EventKind::ReviseWithheld, "revise_withheld"),
             (EventKind::RunAdopted, "run_adopted"),
             (EventKind::WorkerModeConverted, "worker_mode_converted"),
             (EventKind::RunClaimed, "run_claimed"),

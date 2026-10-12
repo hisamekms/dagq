@@ -1083,3 +1083,15 @@ task = 1493
 name = "runtime_clone::nothing_a_worker_plants_in_its_clone_runs_on_the_control_side"
 reason = "B 境界（Git・プロセス）: workerがcloneのconfig・hooks・attributesに仕込んだプログラムが、実のgitでの取り込み・receiptの検証・着地用のworktreeでのreviewの起動・integrateの着地と片付け・headの読みのどれでも走らないことを、印のファイルで確かめる。上書きの組み立ては domain::run_clone の unit test"
 task = 2179
+
+# 10.1s to 12.1s (stress 5 under the host's load of other runs, task 1523)
+[[test]]
+name = "runtime_replanning::a_guarded_runs_revise_is_withheld_and_its_approved_landing_lets_another_land"
+reason = "B 境界（supervisor の配線・SQLite・Git）: 保護中の task の run の review の revise の verdict が送られず revise_withheld と approve_landing の ask になり、land の答えで承認されても着地を始めず、後に承認された別の run が実際の integrate で着地することを、実際の worker の session と review の job で確かめる。保護の判断は domain::task_replan の unit test"
+task = 1523
+
+# 5.9s to 8.0s (stress 5 under the host's load of other runs, task 1523)
+[[test]]
+name = "runtime_replanning::a_guarded_run_in_the_landing_slot_waits_for_the_outcome_and_then_lands"
+reason = "B 境界（supervisor の配線・SQLite）: review の pass の後に着地の slot に来た保護中の run が lease を持ったまま begin_integration を呼ばず runtime_error にもならず、操作が終わった後の pass で着地することを、実際の supervisor の loop で確かめる。保護の判断は domain::task_replan の unit test"
+task = 1523

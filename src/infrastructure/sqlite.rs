@@ -20,6 +20,7 @@
 //! per command (the supervisor's landing, draft planners) skip the check.
 use crate::domain::claim_facts;
 use crate::domain::event_kind::{self, EventKind};
+use crate::domain::task_replan::GuardedStep;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -38,7 +39,8 @@ use serde_json::json;
 use crate::{
     application::{
         Generators, GraphGoalDependency, GraphInput, GraphTask, IdGenerator, LatestRun,
-        StatusFilter, TaskListItem, TaskPage, TaskQuery, TaskStore, dependency_graph, timestamp,
+        ListedReplan, StatusFilter, TaskListItem, TaskPage, TaskQuery, TaskStore, dependency_graph,
+        timestamp,
     },
     domain::{
         ChangeSet, ClaimOutcome, CommitSha, DomainError, EventId, Goal, GoalDetail, GoalEdit,
@@ -80,9 +82,20 @@ macro_rules! select_tasks {
          FROM tasks t"
     };
 }
+/// The statuses of a replanning operation that guard its task
+/// ([`crate::domain::task_replan::ReplanStatus::guards`]), as a list of
+/// SQL strings: the ready query and the guard's read name the same ones.
+macro_rules! replan_guarding {
+    () => {
+        "'pause_requested','quiescing','snapshotting','parked','planning','reviewing',
+         'awaiting_answer','applying','blocked'"
+    };
+}
+pub(super) use replan_guarding;
 /// Ready tasks whose predecessors are completed, whose goal dependencies
 /// are all closed as achieved (ADR-0038), that own no unfinished run and
-/// whose goal, if any, is not a draft (ADR-0024 decision 5).
+/// whose goal, if any, is not a draft (ADR-0024 decision 5), and that no
+/// replanning operation guards (ADR-t1521-2).
 /// In ID order: the claim order (ADR-0040 decision 4) needs the whole
 /// dependency graph, so [`claim_order`] applies it, not SQL.
 const READY_QUERY: &str = concat!(
@@ -105,6 +118,12 @@ const READY_QUERY: &str = concat!(
         SELECT 1 FROM task_runs r WHERE r.task_id = t.id
           AND r.status IN ('claimed','starting','running','validating','awaiting_integration',
                            'integrating','needs_session')
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM replan_operations o WHERE o.task_id = t.id
+          AND o.status IN (",
+    replan_guarding!(),
+    ")
       )
     ORDER BY t.id"
 );
@@ -805,6 +824,8 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
+        super::replans::check_task_step(&tx, task_id, GuardedStep::Dependency)?;
+        super::replans::check_task_step(&tx, predecessor_id, GuardedStep::Dependency)?;
         task::check_dependencies_editable(&read_task(&tx, task_id)?)?;
         let changed = tx.execute(
             "DELETE FROM task_dependencies WHERE task_id=?1 AND predecessor_id=?2",
@@ -836,6 +857,7 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
+        super::replans::check_task_step(&tx, task_id, GuardedStep::Dependency)?;
         insert_goal_dependency(&tx, task_id, goal_id, &self.generators.clock.timestamp())?;
         tx.commit()?;
         Ok(())
@@ -851,6 +873,7 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
+        super::replans::check_task_step(&tx, task_id, GuardedStep::Dependency)?;
         task::check_dependencies_editable(&read_task(&tx, task_id)?)?;
         let changed = tx.execute(
             "DELETE FROM task_goal_dependencies WHERE task_id=?1 AND goal_id=?2",
@@ -882,6 +905,7 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
+        super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
         super::follow_up_membership::check_set_goal(&tx, task_id, goal_id)?;
         let by = task::MovedBy::of(actor_role(&tx)?);
         let result = set_goal_in(
@@ -907,6 +931,7 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
+        super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
         let task = read_task(&tx, task_id)?;
         let from = task.paths().to_vec();
         let task = task::set_paths(task, paths)?;
@@ -1065,6 +1090,9 @@ impl TaskStore for SqliteQueue {
                 } else {
                     None
                 };
+                let replan = super::replans::open_operation_of(&tx, task.id())?
+                    .as_ref()
+                    .map(ListedReplan::of);
                 Ok(TaskListItem::new(
                     task,
                     dependencies,
@@ -1072,7 +1100,8 @@ impl TaskStore for SqliteQueue {
                     latest_run,
                     duplicate_of,
                     query.full,
-                ))
+                )
+                .with_replan(replan))
             })
             .collect::<Result<_>>()?;
         Ok(TaskPage {
@@ -1108,6 +1137,7 @@ impl TaskStore for SqliteQueue {
         let origin = super::draft_planners::task_origin(&tx, task_id)?;
         let follow_up_drafts = super::draft_planners::follow_up_drafts(&tx, task_id)?;
         let revisit = super::draft_planners::read_revisit(&tx, task_id)?;
+        let replans = super::replans::operations_of(&tx, task_id)?;
         let asks = tx
             .prepare(
                 "SELECT * FROM asks WHERE task_id=?1
@@ -1130,6 +1160,7 @@ impl TaskStore for SqliteQueue {
             follow_up_drafts,
             revisit,
             asks,
+            replans,
         })
     }
 
@@ -1660,6 +1691,7 @@ impl TaskStore for SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
         let old = read_task(&tx, task_id)?;
         task::check_status_authorized(&old, authorized)?;
         // The event keeps the fields before the edit, which consumes the task.
@@ -2733,6 +2765,19 @@ fn apply_transition(
     now: &str,
     duplicate: Option<Duplicate>,
 ) -> Result<Task> {
+    // No status of a task a replanning operation guards changes but by
+    // the operation's own outcome (ADR-t1521-2 decision 5).
+    super::replans::check_task_step(
+        conn,
+        task_id,
+        match action {
+            TaskAction::Ready | TaskAction::BypassReview | TaskAction::Approve => {
+                GuardedStep::Ready
+            }
+            TaskAction::Cancel => GuardedStep::Cancel,
+            TaskAction::Draft | TaskAction::Submit | TaskAction::Reopen => GuardedStep::Edit,
+        },
+    )?;
     let task = read_task(conn, task_id)?;
     let from = task.status();
     if action == TaskAction::BypassReview {
@@ -2815,6 +2860,10 @@ pub(super) fn insert_dependency(
     now: &str,
 ) -> Result<()> {
     task::check_not_self(task_id, predecessor_id)?;
+    // Neither end of an edge of a task being replanned changes: its apply
+    // moves every successor's edge itself (ADR-t1521-2 decision 5).
+    super::replans::check_task_step(conn, task_id, GuardedStep::Dependency)?;
+    super::replans::check_task_step(conn, predecessor_id, GuardedStep::Dependency)?;
     task::check_dependencies_editable(&read_task(conn, task_id)?)?;
     read_task(conn, predecessor_id)?;
     // Through goals too: the predecessor may wait for a goal that waits

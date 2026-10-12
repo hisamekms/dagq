@@ -270,8 +270,8 @@ testだけが無効にして、やり直しのjobを省いて最初の失敗か�
   `send_back`の依頼を記録した後に`concern_decided`の前で止まったときは、引き継ぎが適用として補う（`backfill_sent_back_concern`）。
 - **prompt**: concernを機械的な修正でなく判断の要るfindingとし、推奨と確信度の付け方、人に残す基準（迷えば`low`）、runtimeが確かなものを適用することを書く（`application::prompt`のconcernの定数）。
 
-## taskの再計画（予定・未実装）
+## taskの再計画（一部実装）
 
 原因別診断で継続か再計画を選ぶ経路を足す。
 review・e2e・integrateの途中の保留は終了境界とgenerationの柵を守り、古いpassや`approve_landing`で置換先を着地させない。
-詳細は[taskの再計画](task-replanning.md)が持ち、今の挙動は上の各節のとおりで、この追加だけではrunを保留しない。
+詳細と、保護中のrunのreviseと着地の今の暫定の扱いは[taskの再計画](task-replanning.md#実装の状態)が持つ。

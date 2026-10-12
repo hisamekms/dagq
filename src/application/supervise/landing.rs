@@ -1586,6 +1586,23 @@ impl Supervisor<'_> {
         let ask = |why: String, verdict: ReviewVerdict, session| {
             landing_ask(Some(why), verdict, session, job, carries)
         };
+        // A run whose task is being replanned gets no revise (ADR-t1521-2
+        // decision 1): the verdict stays in the history and goes to the
+        // landing's ask, as one whose session could not revise it, so the
+        // run is not left without anyone to act on it; its landing waits
+        // for the operation's outcome whatever the answer.
+        let guard = self.queue.replan_guard(run.task_id())?;
+        if let Err(withheld) = crate::domain::task_replan::check_step(
+            guard.as_ref(),
+            crate::domain::task_replan::GuardedStep::Revise,
+        ) {
+            self.queue.record_runtime_event(
+                run.id(),
+                EventKind::ReviseWithheld,
+                json!({"guard": guard, "reasons": verdict.reasons}),
+            )?;
+            return Ok(ask(withheld.to_string(), verdict, session));
+        }
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
         let ReviseDecision::Request { attempt, round } = decide_revise(&history) else {
@@ -2078,6 +2095,11 @@ impl Supervisor<'_> {
             .runs_with_status(RunStatus::AwaitingIntegration)?
         {
             if self.queue.run_lease(run.id())?.is_some() {
+                continue;
+            }
+            // A run whose task is being replanned waits, queued, for the
+            // operation's outcome, and holds back no other landing.
+            if self.queue.replan_guard(run.task_id())?.is_some() {
                 continue;
             }
             if let Some(approval) =

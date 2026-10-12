@@ -47,7 +47,9 @@ use crate::domain::{
 
 /// The queue as one use case of the service reads and changes it, written
 /// as the principal's actor.
-pub trait ServiceQueue: DialogueStore + super::agent_eval::EvalStore {
+pub trait ServiceQueue:
+    DialogueStore + super::agent_eval::EvalStore + super::commands::replans::ReplanStore
+{
     /// Task `id` as `dagq show` prints it: the whole detail with `full`,
     /// else its view with the last `events` events.
     fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value>;
@@ -320,6 +322,16 @@ struct FindingStatusParams {
     covered_by: Option<i64>,
 }
 
+/// `replan_propose`'s params: those of `dagq replan propose`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplanProposeParams {
+    run: String,
+    reason: String,
+    #[serde(default)]
+    evidence: Vec<i64>,
+}
+
 /// `agent_eval`'s params: those of `dagq agent eval`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -516,6 +528,16 @@ fn run(
                 })?;
             Ok(serde_json::to_value(outcome)?)
         }
+        UseCase::ReplanPropose => {
+            let p: ReplanProposeParams = params(use_case, raw)?;
+            let recorded = super::commands::replans::Replans::new(&mut store, actor, &StaticPolicy)
+                .propose(&crate::domain::task_replan::NewReplan {
+                    run: RunId::new(p.run)?,
+                    reason: p.reason,
+                    evidence: p.evidence.into_iter().map(EventId::new).collect(),
+                })?;
+            Ok(serde_json::to_value(recorded)?)
+        }
         UseCase::FindingResolve | UseCase::FindingDismiss => {
             let p: FindingStatusParams = params(use_case, raw)?;
             let id = FindingId::new(p.id);
@@ -532,6 +554,35 @@ fn run(
 
 /// A [`ServiceQueue`] as the [`Dialogue`] commands' store.
 struct Store<'a>(&'a mut dyn ServiceQueue);
+
+impl super::commands::replans::ReplanStore for Store<'_> {
+    fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
+        self.0.run_task(run)
+    }
+    fn record_replan(
+        &mut self,
+        new: &crate::domain::task_replan::NewReplan,
+        origin: crate::domain::task_replan::ReplanOrigin,
+        by_role: &str,
+        by_id: &str,
+    ) -> Result<crate::domain::task_replan::ReplanRecorded> {
+        self.0.record_replan(new, origin, by_role, by_id)
+    }
+    fn replan_operation(
+        &self,
+        id: crate::domain::ReplanId,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        self.0.replan_operation(id)
+    }
+    fn move_replan(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+        step: &crate::domain::task_replan::ReplanMove,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        self.0.move_replan(id, generation, step)
+    }
+}
 
 impl DenialLog for Store<'_> {
     fn record_denial(&self, payload: Value) -> Result<()> {
@@ -814,6 +865,41 @@ mod tests {
         }
     }
 
+    /// A replanning request or proposal is kept in the log as its origin,
+    /// run and recorder; none is read back.
+    impl crate::application::commands::replans::ReplanStore for Queue {
+        fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
+            Ok((run.as_str() == "r1").then_some(TaskId::new(1)))
+        }
+        fn record_replan(
+            &mut self,
+            new: &crate::domain::task_replan::NewReplan,
+            origin: crate::domain::task_replan::ReplanOrigin,
+            by_role: &str,
+            _: &str,
+        ) -> Result<crate::domain::task_replan::ReplanRecorded> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(json!({"replan": origin.as_str(), "run": new.run, "by": by_role}));
+            Err(anyhow!("replan recorded"))
+        }
+        fn replan_operation(
+            &self,
+            _: crate::domain::ReplanId,
+        ) -> Result<crate::domain::task_replan::ReplanOperation> {
+            Err(anyhow!("no operation"))
+        }
+        fn move_replan(
+            &mut self,
+            _: crate::domain::ReplanId,
+            _: i64,
+            _: &crate::domain::task_replan::ReplanMove,
+        ) -> Result<crate::domain::task_replan::ReplanOperation> {
+            Err(anyhow!("no move"))
+        }
+    }
+
     impl ServiceQueue for Queue {
         fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value> {
             Ok(json!({"id": id, "full": full, "events": events}))
@@ -943,6 +1029,51 @@ mod tests {
             ended.log.lock().unwrap().pop().unwrap()["reason"],
             "run_ended"
         );
+    }
+
+    /// A worker proposes to replan its own run through the service, and
+    /// nothing on another run; a read role's job proposes nothing
+    /// (ADR-t1521-2 decision 3).
+    #[test]
+    fn a_worker_proposes_a_replanning_of_its_own_run_only() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let propose = |token, run: &str| {
+            service.handle(&request(
+                Some(token),
+                UseCase::ReplanPropose,
+                json!({"run": run, "reason": "two independent conditions", "evidence": [4]}),
+            ))
+        };
+        let own = propose("worker", "r1");
+        assert_eq!(code(&own), Some(ServiceErrorCode::Failed));
+        assert!(
+            own.error.unwrap().message.contains("replan recorded"),
+            "the store was reached"
+        );
+        assert_eq!(
+            backend.log.lock().unwrap().pop().unwrap(),
+            json!({"replan": "worker", "run": "r1", "by": "worker"})
+        );
+        for (token, run) in [("worker", "r2"), ("review", "r1"), ("observer", "r1")] {
+            let refused = propose(token, run);
+            assert_eq!(
+                code(&refused),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{token} on {run}"
+            );
+            let denial = backend.log.lock().unwrap().pop().unwrap();
+            assert_eq!(denial["capability"], "replan.propose", "{token} on {run}");
+        }
+        assert_eq!(
+            UseCase::of_command(&["replan", "propose", "--run", "r1"]),
+            Some(UseCase::ReplanPropose)
+        );
+        assert_eq!(UseCase::of_command(&["replan", "request"]), None);
     }
 
     /// The eval through the service (ADR-t1728-1 decision 6): a worker

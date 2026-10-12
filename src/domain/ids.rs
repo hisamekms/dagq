@@ -164,6 +164,29 @@ impl fmt::Display for RequestId {
     }
 }
 
+/// The ID of a replanning operation: the `replan_operations.id` rowid
+/// (ADR-t1521-2). A planning request made for it carries it
+/// (`plan_requests.replan_operation_id`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReplanId(i64);
+
+impl ReplanId {
+    pub const fn new(id: i64) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for ReplanId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// The ID of a planner session: the `planners.id` rowid (ADR-0041
 /// decisions 1, 6). Its directory carries it, and so does the workspace
 /// title of a person's planner opened before ADR-t1394-1 (a planner of the

@@ -3239,6 +3239,13 @@ impl Supervisor<'_> {
                 if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
                     return Ok(Step::Done(Box::new(parked)));
                 }
+                // A run whose task is being replanned does not land: it
+                // waits in its slot for the operation's outcome
+                // (ADR-t1521-2 decision 1), rather than failing.
+                if self.queue.replan_guard(current.task_id())?.is_some() {
+                    slot.landing_turn = true;
+                    return Ok(Step::Continue);
+                }
                 let run = match self.queue.begin_integration(
                     slot.run.id(),
                     &self.registration.token,

@@ -46,7 +46,15 @@ related:
 - `landing_queue`（着地待ち。`landing_queued`と、`passed` / `not_configured`の`run_e2e_finished`）、`e2e_waiting`（`run_e2e_waiting`）、`e2e`（`run_e2e_started`）、`e2e_retry_wait`（`outcome: unavailable`の`run_e2e_finished`。hostでの流し直し待ち）、`integrating`（`integration_started`）
 - `resume`（`resume_started`。resumeしたsessionのagentの`agent_started`では変わらない）、`recovery`（`triage_started`）
 
-工程を終えて次の工程のイベントがまだ無いもの（`review_finished`、`session_exited`、`revise_unsent`、`run_e2e_failed`、`triage_finished`など）、今のstatusに合わない工程（`running`の`review`など）、leaseの無いrunと、leaseがstaleか持ち主のpidが死んだrunの工程（着地の列で待つ`awaiting_integration`の`landing_queue`だけは残す。staleなleaseのrunも`slot`は待ちの状態に従い、待ちでなければ`used`のまま数える）は`null`で、工程を断定しない。このbinaryの知らないイベントは工程を動かさない。`since`はその工程を始めたイベントの時刻（unix秒。読めなければnull）、`elapsed_secs`は`checked_at`までの秒数。`slot`はsupervisorのslotの使い方で、`used`（leaseがあり待ちでない。`slots.used`に数える）、`landing_queue`（leaseがあり待ちでなく、`awaiting_integration`で`phase`が`landing_queue`。着地の順番を待つだけで、`slots.landing_queue`に数える。supervisorごとに`parallel`件を超える分は`slots.used`に数えるので、その数を超えて並ぶときは件数と一致しない。ADR-t1591-1）、`waiting`（人の答えを待ち、slotの外。`waiting.count`に数える）、`returning`（待ちが終わりslotへ戻るのを待つ。`waiting.count`と`waiting.returning`に数える）、`null`（leaseが無い）。待ちの判定は`waiting`（配列）と同じ`WaitState`、着地待ちの判定は`slots.landing_queue`と同じ`domain::run_progress::in_landing_queue`なので、各supervisorの`run_ids`のrunの`slot`を数えれば`slots.used`・`slots.landing_queue`・`waiting.count`・`waiting.returning`に一致する（着地待ちが`parallel`を超えないとき）。supervisorは着地待ちを、`AwaitingSlot`のrunを見て他のrunの着地中だったときにだけ印を付けて数える（`Slot::in_landing_queue`）ので、着地を控えているあいだ（空き容量の不足・`[run.env]`のprogramが無い・着地のbranchが解決しない。どれもclaimも控える）と要るe2eを始める前のpassでは、`status`の`slots.landing_queue`がsupervisorの数より多く出うる。待ちのrunもleaseを持ってそのsupervisorの`run_ids`に並ぶので、`runs`や`run_ids`の件数を`slots.used`と同じと読まない。進んでいる工程は`phase`、人待ちは`slot: waiting`（何を待つかは`waiting`の`asks`）、slotへの戻り待ちは`slot: returning`、着地の順番待ちは`slot: landing_queue`で読む。testは`tests/it/cli_status_runs.rs`（`status`と`doctor`の対象・`progress`・slotの照合・`recoverable`と`recover`の一致）、`tests/it/runtime_light_slots.rs`（着地待ちの`slots.landing_queue`と`slot: landing_queue`）と`src/domain/run_progress.rs`のunit test（工程の遷移、断定しない場合、着地待ちの判定）。
+工程を終えて次の工程のイベントがまだ無いもの（`review_finished`、`session_exited`、`revise_unsent`、`run_e2e_failed`、`triage_finished`など）、今のstatusに合わない工程（`running`の`review`など）、leaseの無いrunと、leaseがstaleか持ち主のpidが死んだrunの工程（着地の列で待つ`awaiting_integration`の`landing_queue`だけは残す。staleなleaseのrunも`slot`は待ちの状態に従い、待ちでなければ`used`のまま数える）は`null`で、工程を断定しない。
+このbinaryの知らないイベントは工程を動かさない。
+`since`はその工程を始めたイベントの時刻（unix秒。読めなければnull）、`elapsed_secs`は`checked_at`までの秒数。
+`slot`はsupervisorのslotの使い方で、`used`（leaseがあり待ちでない。`slots.used`に数える）、`landing_queue`（leaseがあり待ちでなく、`awaiting_integration`で`phase`が`landing_queue`。着地の順番を待つだけで、`slots.landing_queue`に数える。supervisorごとに`parallel`件を超える分は`slots.used`に数えるので、その数を超えて並ぶときは件数と一致しない。ADR-t1591-1）、`waiting`（人の答えを待ち、slotの外。`waiting.count`に数える）、`returning`（待ちが終わりslotへ戻るのを待つ。`waiting.count`と`waiting.returning`に数える）、`null`（leaseが無い）。
+待ちの判定は`waiting`（配列）と同じ`WaitState`、着地待ちの判定は`slots.landing_queue`と同じ`domain::run_progress::in_landing_queue`なので、各supervisorの`run_ids`のrunの`slot`を数えれば`slots.used`・`slots.landing_queue`・`waiting.count`・`waiting.returning`に一致する（着地待ちが`parallel`を超えないとき）。
+supervisorは着地待ちを、`AwaitingSlot`のrunを見て他のrunの着地中だったときにだけ印を付けて数える（`Slot::in_landing_queue`）ので、着地を控えているあいだ（空き容量の不足・`[run.env]`のprogramが無い・着地のbranchが解決しない。どれもclaimも控える）と要るe2eを始める前のpassでは、`status`の`slots.landing_queue`がsupervisorの数より多く出うる。
+待ちのrunもleaseを持ってそのsupervisorの`run_ids`に並ぶので、`runs`や`run_ids`の件数を`slots.used`と同じと読まない。
+進んでいる工程は`phase`、人待ちは`slot: waiting`（何を待つかは`waiting`の`asks`）、slotへの戻り待ちは`slot: returning`、着地の順番待ちは`slot: landing_queue`で読む。
+testは`cli_status_runs`・`runtime_light_slots`と`run_progress`のunit test。
 
 `landing_recheck`は最新のlanding recheck（着地の後の着地待ちのrunの確認）の`landing_recheck_finished`のpayloadに`at`を足したもの（まだ無ければnull。[Landing recheck](landing-recheck.md)、ADR-0068の決定6）。`status`は続けて`attention`と`cursor`を返す（ADR-0016）。`version`は打った`dagq`のbuild識別子である。
 `actors`はAI actorのroleごとの実行の場所と強制で、`doctor`も同じものを出す（値と決め方は[Roles](roles.md#実行のbackendとenforcement)、ADR-t813-3の決定7）。
@@ -80,6 +88,10 @@ guardrailが無ければ、引き継ぎの後に`DAGQ_ROLE`の無いterminalでi
 
 `--role planner`以外の`status`は、queue serviceの`queue_service`も返す（`application::queue_service::view`。`doctor`と`dagq service status`も同じで、欄は[Queue service](../queue-service.md#statusとdoctor)）。
 socketに`hello`を1回打つだけで、serviceを起動も停止もしない。
+
+## 再計画の操作
+
+`replans`は開いている再計画の操作の状態・理由・保護と、taskが`in_progress`でないのに開いたままのもの（`problems`）で、`doctor`も同じ（[taskの再計画](task-replanning.md#実装の状態)）。
 
 ## toolchainのprofile
 

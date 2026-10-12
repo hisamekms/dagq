@@ -26,7 +26,9 @@ related:
 
 hostで動き、queue DBを開いてユースケース単位のAPIを、service側で認可して提供するプロセス。決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側の分け方・serviceとAPIと認可・unix socket・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止の責任・落ちたときの知らせ方・tokenによるprincipalの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
 
-今の段（段(2)・(3)）: serviceがあり、`hello`・`ask`・`show`・`note`と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（Codexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）のユースケースを答える。**worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。supervisor・session wrapperとhook・inbox・planner・人のCLIはDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
+今の段（段(2)・(3)）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
+**worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
+supervisor・session wrapperとhook・inbox・planner・人のCLIはDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
 
 名前: この文書の「broker」はqueueのbroker（[Queue broker](queue-broker.md)）のこと。
 brokerはrun tokenを検証した要求をそのtokenのままserviceのsocketへ転送するので、serviceの認証と認可は変わらない。
@@ -83,7 +85,7 @@ serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`�
 | --- | --- | --- | --- |
 | `hello` | なし | `service`・`build`・`pid`・`api_version`・`min_api_version` | tokenを要らない（生存と版の確認だけ） |
 | `ask` | `dagq ask`と同じ: `kind`・`question`・`options`・`because`・`topics`・`task_id`・`run_id`・`finding_id` | `dagq ask`の出力 | `ask.open`（new ask）、`blocked`の`finding_id`つきは`finding.ask`。workerは自分のrunとtaskだけ、`worker_question`だけ。`asked_by`はprincipalのもの |
-| `show` | `id`・`full`（既定false）・`events`（既定5） | `dagq show`（`--full`）の出力 | `queue.read`（task）。goal 82では全roleがqueue全体を読める（ADR-t1233-5決定3） |
+| `show` | `id`・`full`（既定false）・`events`（既定5） | `dagq show`（`--full`）の出力 | `queue.read`（task）。全roleがqueue全体を読める（ADR-t1233-5決定3） |
 | `note` | `task`・`run`・`goal`のどれか1つと`text`・`kind` | `dagq note`の出力 | `note.write`。workerは自分のtaskとrunだけ。`by`はprincipalのもの |
 | `proposal_list` | `all`（既定false） | `dagq proposal list`（`--all`）の出力（`{"proposals": [...]}`） | `queue.read`（queue）。全role |
 | `proposal_show` | `id` | `dagq proposal show`の出力 | `queue.read`（queue）。全role。無いproposalは`failed` |
@@ -91,6 +93,7 @@ serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`�
 | `finding_resolve` | `id`・`reason` | `dagq finding resolve`の出力 | `finding.resolve`。今のpolicyで持つのはobserver・inbox・plannerで、workerとjobには無い。`by`はprincipalのもの |
 | `finding_dismiss` | `id`・`reason`・`covered_by`（任意。`--covered-by`のtask ID。下の「CIの見張り」） | `dagq finding dismiss`の出力 | `finding.dismiss`。observerには無い（ADR-t1222-1決定2）。今のpolicyでこれを持つのはinboxとplannerで、workerとjobには無い |
 | `agent_eval`・`agent_results`・`agent_result` | `dagq agent eval`・`results`・`result`のoption | そのコマンドの出力 | `eval.*`。[Agent eval](agent-eval.md) |
+| `replan_propose` | `run`・`reason`・`evidence` | `dagq replan propose`の出力 | `replan.propose`（run）。workerは自分のrunだけ |
 | 読み取り（`list`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`marks`・`search`・`related`・`findings`・`goal_show`など） | そのコマンドのoption | そのコマンドの出力 | `queue.read`（queue）。全role。[読み取りのユースケース](#読み取りのユースケース) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（`kind: blocked`と`finding_id`。capabilityは`finding.ask`）で送る。findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。そのため`observe_finished`の件数と、observer自身のeventを数えない判定（[Observer](supervisor-lifecycle/observer.md)の0、`SqliteQueue::events_besides`）は、CLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
@@ -122,7 +125,7 @@ queue全体の読み取り（ADR-t1233-5決定1〜3）。1つの読み取りの�
 | `goal_show` | `goal show ID` | `id`・`full` |
 | `lint` | `lint` | `tasks`・`proposals`（どちらかは要る） |
 | `observe_history` | `observe --history` | `limit`（`observer::HISTORY_LIMIT`） |
-| `observe_input` | `observe --input OBSERVATION` | `observation`（数字と`-`だけ）・`section`・`offset`（0）・`limit`（`observer::INPUT_PAGE`）。serviceのqueueの`observer/<observation>/input.json`を読む（[Observer](supervisor-lifecycle/observer.md#promptの入力の上限と選ぶ順)、task 1567） |
+| `observe_input` | `observe --input OBSERVATION` | `observation`（数字と`-`だけ）・`section`・`offset`（0）・`limit`（`observer::INPUT_PAGE`）。serviceのqueueの`observer/<observation>/input.json`を読む（[Observer](supervisor-lifecycle/observer.md#promptの入力の上限と選ぶ順)） |
 
 `show`・`proposal_list`・`proposal_show`は上の表。paramsは書き出すファイルも実行するprogramも受け取らず（`stats`と`planners`の`--cmux`、`graph`の`--out`）、読み取りでserviceは別のprogramを起動しない（cmuxも`graph --format svg`のd2も起動しない）。`domain::queue_service::UseCase::of_command`が、dagqのコマンドの引数（サブコマンドから）から行き先のユースケースを決める（`graph --out`・`ask close`・`--history`も`--input`も無い`observe`は`None`）。クライアントモードは、引数の文字列ではなく読んだコマンドから行き先を決める（[クライアントモード](#クライアントモード)の`client_request`。どちらも同じ行き先になる）。
 

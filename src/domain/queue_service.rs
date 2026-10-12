@@ -147,6 +147,9 @@ string_enum!(UseCase {
     AgentEval => "agent_eval",
     AgentResults => "agent_results",
     AgentResult => "agent_result",
+    // A worker's proposal to replan its own run, as `dagq replan
+    // propose` records it (ADR-t1521-2 decision 3).
+    ReplanPropose => "replan_propose",
 });
 
 impl UseCase {
@@ -198,6 +201,7 @@ impl UseCase {
             ("agent", Some("eval")) => Self::AgentEval,
             ("agent", Some("results")) => Self::AgentResults,
             ("agent", Some("result")) => Self::AgentResult,
+            ("replan", Some("propose")) => Self::ReplanPropose,
             _ => return None,
         })
     }

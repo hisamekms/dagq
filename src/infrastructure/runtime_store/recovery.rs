@@ -2,6 +2,7 @@
 //! ([`RunRecovery`]).
 
 use super::*;
+use crate::domain::task_replan::GuardedStep;
 use crate::domain::{EventKind, run_phase};
 
 impl SqliteQueue {
@@ -317,7 +318,8 @@ impl SqliteQueue {
     /// session's process rows, make `token` its supervisor and record
     /// `resume_started` (`attempt`, the number of every resume so far and
     /// this one, `counted`, `reason`, `main`). `Ok(None)` means another
-    /// process took it or it changed meanwhile.
+    /// process took it, it changed meanwhile, or a replanning operation
+    /// guards its task.
     pub fn begin_resume(
         &mut self,
         id: &RunId,
@@ -333,6 +335,9 @@ impl SqliteQueue {
         let Some(run) = stored_run(&tx, id)?.filter(|run| run::check_resumable(run).is_ok()) else {
             return Ok(None);
         };
+        if replanning(&tx, id, GuardedStep::Resume)? {
+            return Ok(None);
+        }
         let events = run_events_of(&tx, id)?;
         let resumes = ResumeCount::of(&events);
         if resumes.exhausted(config) {
@@ -397,7 +402,8 @@ impl SqliteQueue {
     /// `approved`, `status`). An approved run stays `needs_session` for the
     /// caller to land under the lease; an unapproved one becomes
     /// `validating`. No `resume_started` is recorded, so no attempt is used.
-    /// `Ok(None)` means another process took it or it changed meanwhile.
+    /// `Ok(None)` means another process took it, it changed meanwhile, or
+    /// a replanning operation guards its task.
     pub fn skip_resume(
         &mut self,
         id: &RunId,
@@ -411,6 +417,9 @@ impl SqliteQueue {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
         // No session starts: the earlier session's rows stay as they are.
+        if replanning(&tx, id, GuardedStep::Resume)? {
+            return Ok(None);
+        }
         let Some(previous) = lease_parked_run(&tx, id, token, now, false)? else {
             return Ok(None);
         };
@@ -529,7 +538,8 @@ impl SqliteQueue {
     /// latest run, lease it to `token` and record `lease_acquired`,
     /// `request` as `recovery_requested` when given, and `triage_started`
     /// (`attempt`, `status`, the session id of a Claude job and `launch`).
-    /// `Ok(None)` means another process took it or it changed.
+    /// `Ok(None)` means another process took it, it changed, or a
+    /// replanning operation guards its task.
     pub fn begin_triage(
         &mut self,
         id: &RunId,
@@ -555,6 +565,9 @@ impl SqliteQueue {
         let Some(run) = run else {
             return Ok(None);
         };
+        if replanning(&tx, id, GuardedStep::Recover)? {
+            return Ok(None);
+        }
         let events = run_events_of(&tx, id)?;
         match crate::domain::triage_state(&events) {
             crate::domain::TriageState::Pending => {}
@@ -1178,4 +1191,18 @@ impl RunRecovery for SqliteQueue {
     ) -> Result<Option<TaskRun>> {
         SqliteQueue::exhaust_resumes(self, id, exhaustion, reason, config)
     }
+}
+
+/// Whether a replanning operation guards the task of run `id`, so that
+/// `step` waits for the operation's outcome (ADR-t1521-2 decision 1): no
+/// resume nor recovery round of it starts.
+fn replanning(conn: &Connection, id: &RunId, step: GuardedStep) -> Result<bool> {
+    let task: Option<TaskId> = conn
+        .query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(task.is_some_and(|task| {
+        crate::infrastructure::replans::check_task_step(conn, task, step).is_err()
+    }))
 }

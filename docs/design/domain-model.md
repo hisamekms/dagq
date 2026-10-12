@@ -164,7 +164,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 ### claimと実行の順
 
 - `claim`だけが`ready → in_progress`へ動かし、同じトランザクションで`TaskRun::new`がrunを作る。
-- 候補は依存が全て`completed`、goal依存の先が全て`achieved`で閉じ、draftのgoalに属さないreadyのtask（storeの`READY_QUERY`）。
+- 候補は依存が全て`completed`、goal依存が全て`achieved`で閉じ、draftのgoalに属さず再計画中でないreadyのtask（`READY_QUERY`）。
 - 規則の順は`dependency_graph`の`candidates`（効く優先度 → 解放する数 → ID）、claimと表示は`claim_order`がagingを足す。
   stats・KPIの標本は控えを除かない。
   規則の順は`candidates --ignore-deferrals`で読む。

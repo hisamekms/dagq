@@ -35,7 +35,9 @@ dagqのセキュリティの模型の全体を1か所にまとめる。決定の
 | 信頼する制御側（`TrustedControlPlane`） | supervisor・wrapper・integrator | 決定的なRustのコード。AIを含まない |
 | 信頼しないAI actor（`UntrustedAgent`） | inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・observer | Claude（とCodex）のsession / job。出力はデータ |
 
-`TrustLevel`はroleだけから決まり（`src/domain/actor.rs`）、promptや名前から推し量らない。`DAGQ_ROLE`の未知の値は`unknown DAGQ_ROLE`で止まり、queueを開かない（fail closed）。`desk`（goal 48）と`update-job`は予約の名前で、まだ`ActorRole`に無い。
+`TrustLevel`はroleだけから決まり（`src/domain/actor.rs`）、promptや名前から推し量らない。
+`DAGQ_ROLE`の未知の値は`unknown DAGQ_ROLE`で止まり、queueを開かない（fail closed）。
+`desk`と`update-job`は予約の名前で、まだ`ActorRole`に無い。
 
 AI actorの出力は全てデータで、制御側が決定的に遷移へ写す:
 
@@ -52,22 +54,25 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 
 `src/domain/authorization.rs`の`StaticPolicy`（`grants(role)`とresourceの規則）の要約。明示して許したもの以外は全て拒む（default deny）。resourceの持ち主や状態が分からないときも拒む（fail closed）。列はcapabilityの群（名前は[Authorization](authorization.md#capability)）で、○は許す、△はresourceの規則つきで許す、—は拒む。
 
-| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`） | session | 運用（up・down・install・init・migrate・rebind・plan） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push |
+| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose`） | session | 運用（up・down・install・init・migrate・rebind・plan） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / — | ○ | ○ | ○ | ○ | — |
-| inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / — | ○ | ○ | ○ | ○ | — |
-| planner | ○ | △ draft・submitted・readyのtask（`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ | △ 自分のplannerだけ | ○ | — | — | — |
-| worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / — | △ 自分のrunだけ | — | — | — | — |
-| review-job | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | — |
-| recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | — |
-| plan-review-job・goal-review-job・throughput-review-job | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | — |
-| observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — / — | — | — | — | — | — |
-| supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / — | ○（recordは—） | ○ | ○ | ○ | — |
-| wrapper | 読み取り | — | — / — | — | — | — / — | — | — / — | ○ | — | — | — | — |
-| integrator | 読み取り | — | — / — | — | — | — / — | — | — / — | — | — | — | — | ○ |
+| user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○ | ○ | ○ | — |
+| inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○ | ○ | ○ | — |
+| planner | ○ | △ draft・submitted・readyのtask（`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — | △ 自分のplannerだけ | ○ | — | — | — |
+| worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / —・— / △ 自分のrunだけ | △ 自分のrunだけ | — | — | — | — |
+| review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — |
+| recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — |
+| plan-review-job・goal-review-job・throughput-review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — |
+| observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — / —・— / — | — | — | — | — | — |
+| supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / —（保留と置換は○） | ○（recordは—） | ○ | ○ | ○ | — |
+| wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | ○ | — | — | — | — |
+| integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | ○ |
 
 - review-jobとrecovery-jobの`review.submit` / `triage.submit`は自分のrunだけのcapabilityだが、CLIのコマンドは無く、verdictはsupervisorがデータとして読む。jobの環境には`DAGQ_RUN_ID`が無いので、今は持ち主が分からず拒まれる
-- observerの`queue.export`（`graph --out`・`report`）は—。`ci.read`（`ci failures`、[CI watch](supervisor-lifecycle/ci-watch.md)）はuser・inbox・planner・observer・supervisorが持つ。headlessのjob（review・recovery・plan review・goal review・throughput review、一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）・worker・wrapper・integratorは`watch`も`queue.export`も`ci.read`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`・`ci failures`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる（task 859）。読み取り（`queue.read`）は全roleが持つ
+- observerの`queue.export`（`graph --out`・`report`）は—。
+  `ci.read`（`ci failures`、[CI watch](supervisor-lifecycle/ci-watch.md)）はuser・inbox・planner・observer・supervisorが持つ。
+  headlessのjob（`ActorRole::is_headless_job`）・worker・wrapper・integratorは`watch`も`queue.export`も`ci.read`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`・`ci failures`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる。
+  読み取り（`queue.read`）は全roleが持つ
 - `judge-follow-up`（`follow_up.judge`）はuser・inbox・plannerだけが全状態のfollow_upに記録でき、worker・job・supervisorは拒む。所属変更はdraft/readyだけ。表のplannerのtask変更の例外はこの判断の記録だけである。
 - draftの再検討の時刻（`revisit`、[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）は計画の列の`task.write`に含める（許すroleと拒むroleが開始前のtaskの変更と同じなので、新しいcapabilityにしない）。user・inbox・plannerが付け・変え・外し、worker・observer・job・supervisorは拒む。plannerは`draft_planner_exhausted`のあるdraftに付けられない（人・inboxが付けたものだけがplannerの上限を越えて1回立つため）
 - user・inboxの計画権限には、最新runが終了し生きているrunの無い`in_progress` taskの`--verify` / `--no-verify`だけを直す`task.verify_edit`も含む（ADR-t883-1）。planner・worker・jobは持たない。
@@ -76,12 +81,19 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   AIのactorの所属の変更は拒まず、`set-goal`では移動先のgoalが同じ値の`human`でなければ移動の前の値を`human`の個別の優先度としてtaskに残し、follow_upの`out_of_scope`の判断の移動では継いだだけの値を残さない（ADR-t2373-1）。
   拒否と記録は[Authorization](authorization.md#policy)、移動の判断は`task::set_goal`が持つ。
 - plannerの行は[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定7のとおり、この段で運用の権限を変えていない（`dagq-planner` skillの「Where your authority ends」はこの行と一致させる。規則は[文書の規則](../development/documents.md)の「権限の表を写す文書」）
-- sessionの画面を読む・送る`screen.read`・`screen.send`（`run screen` / `run send`、`planner screen` / `planner send`。backgroundのsessionのlogを読む`run log` / `planner log`も`screen.read`。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。表のsessionの列のplannerの△とsupervisorの○はこれを含まない（plannerは自分のplannerのものも拒まれ、supervisorは自分の送信の経路を使う）。runには画面が無く、`run screen`は認可を通った後もどのrunにも理由とturnのlogのCLI（`run log RUN [--follow]`）を示して拒む（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)、task 1440）
-- 終わったrunの残ったworkspaceの片付けの`workspace.cleanup`（`run close-workspaces`）もuserとinboxだけが持ち、ほかのroleは`authorization_denied`で拒まれる。runtimeはrunのworkspaceを開かなくなったので、認可を通った後も理由を示して拒み（ADR-t1433-3の決定3、task 1440）、過去に作られて残ったrunのworkspaceは人が自分のterminalで閉じる。supervisorは終わったrunに残ったbackgroundのwrapperを自分の掃除で止め、このcapabilityを持たない
+- sessionの画面を読む・送る`screen.read`・`screen.send`（`run screen` / `run send`、`planner screen` / `planner send`。backgroundのsessionのlogを読む`run log` / `planner log`も`screen.read`。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。
+  表のsessionの列のplannerの△とsupervisorの○はこれを含まない（plannerは自分のplannerのものも拒まれ、supervisorは自分の送信の経路を使う）。
+  runには画面が無く、`run screen`は認可を通った後もどのrunにも理由とturnのlogのCLI（`run log RUN [--follow]`）を示して拒む（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）
+- 終わったrunの残ったworkspaceの片付けの`workspace.cleanup`（`run close-workspaces`）もuserとinboxだけが持ち、ほかのroleは`authorization_denied`で拒まれる。
+  runtimeはrunのworkspaceを開かなくなったので、認可を通った後も理由を示して拒み（ADR-t1433-3の決定3）、過去に作られて残ったrunのworkspaceは人が自分のterminalで閉じる。
+  supervisorは終わったrunに残ったbackgroundのwrapperを自分の掃除で止め、このcapabilityを持たない
 - 開いている非対話のruntimeのplannerへの続きの依頼の`planner.request`（`planner request`。[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）はuserとinboxだけが持つ。表のsessionの列はこれも含まない（plannerは自分のplannerへのものも拒まれる）。plannerを閉じるCLIは無い
 - 計画の依頼の`request.record`（`request add`）はuserとinboxだけが持ち（inboxの記録は人の言葉の代行、[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3）、`request.decline`（`request decline`）はplannerだけが、自分が立てられた依頼にだけ持つ（決定6）。
   依頼に紐づく`planner_question`（`ask --request`）も、plannerは自分が立てられた依頼にだけ開ける。
   拒否は`authorization_denied`に残る
+- 再計画（[再計画](supervisor-lifecycle/task-replanning.md)）の`replan.request`（`replan request`）はuserとinboxだけ、`replan.propose`（`replan propose`）は自分のrunのworkerだけが持つ。
+  runの保留と置換の`replan.park`・`replan.apply`はsupervisorだけが持つ。
+  plannerはどれも持たない
 - agentのevalの依頼（`agent eval`、[Agent eval](agent-eval.md)）は、devの`eval.request`をuser・inbox・plannerと自分のrunのworkerが、hold-outとproductionの`eval.request_held_out`をuser・inbox・plannerが、同じキーの再実行の`eval.rerun`をuserとinboxだけが持つ。
   結果を読む`eval.read`はuser・inbox・planner・observer・supervisorと自分のrunのworkerが持つ。
   supervisorは依頼を実行するだけで依頼のcapabilityを持たず、jobは何も持たない。
@@ -94,20 +106,32 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 
 状態を変える全てのCLIのコマンドは、parseではなくapplicationの層でmutationの前に`Authorizer`を通る（[Authorization](authorization.md#適用の範囲)）。
 
-- 計画系は`Planning`、対話と記録は`Dialogue`、runtimeの操作系は`Operation`（queueを開く・作る・移す前）。Codexのworkerの`dagq ask`は、クライアントモードでqueue serviceのユースケースとして送られ、serviceがworkerのprincipalで判定する（ADR-t1233-5決定5。[Queue service](queue-service.md#クライアントモード)）。supervisorはsandboxの外で動くので、workerが書くrun dirのfileを、supervisorと非対話のwrapperの`LocalRunFiles`とprocessの出力のopenが`O_NOFOLLOW`で開いた記述子に対する操作で扱い、workerの代わりにrunのdirの外を読み書きしない（全文の読みは64MiBまで、FIFOとlinkは読まない。詳細は[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)の「run dirのfile」）。拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、`{"error": "<role> may not <capability> (<reason>)", "denied": {...}}`を返す
+- 計画系は`Planning`、対話と記録は`Dialogue`、runtimeの操作系は`Operation`（queueを開く・作る・移す前）。
+  Codexのworkerの`dagq ask`は、クライアントモードでqueue serviceのユースケースとして送られ、serviceがworkerのprincipalで判定する（ADR-t1233-5決定5。[Queue service](queue-service.md#クライアントモード)）。
+  supervisorはsandboxの外で動くので、workerが書くrun dirのfileを、supervisorと非対話のwrapperの`LocalRunFiles`とprocessの出力のopenが`O_NOFOLLOW`で開いた記述子に対する操作で扱い、workerの代わりにrunのdirの外を読み書きしない（上限は`src/infrastructure/run_files.rs`、[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)の「run dirのfile」）。
+  拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、`{"error": "<role> may not <capability> (<reason>)", "denied": {...}}`を返す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
-- queue service（[Queue service](queue-service.md)）は、`ask`・`show`・`note`・findingと読み取りのユースケースを、tokenから決めたprincipalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（service側の判定。`DAGQ_ROLE`は使わない）。拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。worker（resumeを含む）・headlessのjob・observerのプロセスにはqueue DBのpathを渡さず、socketとtokenのfileを渡すので、その`dagq`はクライアントモードでserviceだけを使い、serviceのユースケースでないコマンドと`--db`は拒まれ、serviceに届かなくてもDBを開かない（goal 82の段(3)、[クライアントモード](queue-service.md#クライアントモード)）。閉じたのはCLIを通る経路で、同じユーザーのプロセスはDBのファイルもtokenのファイルも探して読めるので、host構成では助言的なまま（ADR-t1233-1のConsequences）
+- queue serviceは、[ユースケース](queue-service.md#ユースケース)（`replan_propose`を含む）を、tokenから決めたprincipalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（service側の判定。`DAGQ_ROLE`は使わない）。
+  拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。
+  worker（resumeを含む）・headlessのjob・observerの`dagq`はクライアントモードでserviceだけを使い、DBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
+  閉じたのはCLIを通る経路で、同じユーザーのプロセスはDBのファイルもtokenのファイルも探して読めるので、host構成では助言的なまま（ADR-t1233-1のConsequences）
 - 状態を変えないコマンド（読み取り・`watch`・`graph --out`・`report`）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny）。
   拒否は同じ`denied`のJSONを返し、queueがあれば拒まれた呼び出し元をactorにした`authorization_denied`に記録する（queueが無いときは記録せずに拒む）。
   通った読み取りはqueueに書かない
 - runtimeがClaudeの設定を書くactor（worker・planner・review job・inbox）の`permissions.deny`には、roleが持たないcommand（状態を変えるものと`watch`・`report`。`graph`は`--out`なしが読み取りなので除く）の`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
-- inboxとplannerの`permissions.deny`には`Bash(cmux:*)`も入れる（`execution::RAW_CMUX_DENIED`、[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。sessionへの操作（画面を読む・決めたキーと答えを送る・plannerへの続きの依頼。runのturnはlogを読む）は判定と記録を通る`run` / `planner`のCLIで行い、記録の残らない生のcmuxにふだん流れないようにする。plannerはruntimeが書くsettings（非対話のturnの`claude-headless-settings.json`と、対話のsessionの`claude-settings.json`）に、inboxは`up`が開くときにqueueのディレクトリに書く`claude-inbox-settings.json`（`permissions.deny`だけ。[`up` / `down`](supervisor-lifecycle/up-down.md)）に持つ。これは**guardrailであってenforcementではない**: denyはClaude Codeのtoolの呼び出しの綴りで照合する助言的な抑止で、絶対pathの`cmux`・scriptの中の呼び出し・別のshellからの実行を止めず、`up`が`reused`で使い続けるinboxと、workspaceで`claude`を打ち直したsessionには効かない（前者は`status` / `doctor`の`inbox_guardrail`が見せる）。hostの判定は助言的なまま（ADR-t728-1決定6）。workerとjobの`cmux`は拒まず、隔離（goal 38・goal 82）に任せる（決定7）。人自身のterminal（`DAGQ_ROLE`なし）はsettingsを持たず、ADR-t1228-1が人に残したcmuxの操作をそこで打つ
+- inboxとplannerの`permissions.deny`には`Bash(cmux:*)`も入れる（`execution::RAW_CMUX_DENIED`、[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。
+  sessionへの操作（画面を読む・決めたキーと答えを送る・plannerへの続きの依頼。runのturnはlogを読む）は判定と記録を通る`run` / `planner`のCLIで行い、記録の残らない生のcmuxにふだん流れないようにする。
+  plannerはruntimeが書くsettings（非対話のturnの`claude-headless-settings.json`と、対話のsessionの`claude-settings.json`）に、inboxは`up`が開くときにqueueのディレクトリに書く`claude-inbox-settings.json`（`permissions.deny`だけ。[`up` / `down`](supervisor-lifecycle/up-down.md)）に持つ。
+  これは**guardrailであってenforcementではない**: denyはClaude Codeのtoolの呼び出しの綴りで照合する助言的な抑止で、絶対pathの`cmux`・scriptの中の呼び出し・別のshellからの実行を止めず、`up`が`reused`で使い続けるinboxと、workspaceで`claude`を打ち直したsessionには効かない（前者は`status` / `doctor`の`inbox_guardrail`が見せる）。
+  hostの判定は助言的なまま（ADR-t728-1決定6）。
+  workerとjobの`cmux`は拒まず、隔離に任せる（決定7）。
+  人自身のterminal（`DAGQ_ROLE`なし）はsettingsを持たず、ADR-t1228-1が人に残したcmuxの操作をそこで打つ
 - Codexのinbox（goal 77）は、同じ趣旨（`cmux`で始まるコマンドを拒み、dagqのCLIを使わせる）をCodexの手段で持たせる（ADR-t1228-2決定6）。今のproviderの口（`AgentProvider::inbox_command`）でinboxを持つのはClaudeだけで（`up`は`--claude`でinboxを開く）、Codexはinboxを持たない（`inbox_command`は拒み、`inbox_settings`の既定は`None`。settingsを持たないproviderのinboxが入れば`inbox_opened`の`guardrail`は`false`で記録され、`inbox_guardrail`が見せる）。Codexのinboxを作るtaskが手段を持たせるか、手段が無ければこのguardrailが無いことをここに書き、skillの手順をCLIだけにすることで足りるとする
 
 roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説明する）:
 
-- worker: `integrate`・`answer`・`ask close`・`ready`・`cancel`・計画系の全て・`request add`・`request decline`・`recover`・`review`・`supervise`・`observe`・`plan`・`up`・`down`・`install`・`auto-update`・`init`・`migrate`・`rebind`・`finding`・`mark`、自分のrun以外への`ask`・`note`・`session`・`session-event`
-- planner: `ready`（`--bypass-review`・`--inherit`を含む）・`goal ready`・`goal review`・`request add`・他の依頼の`request decline`と`ask --request`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run log`・`run send`・`planner screen`・`planner log`・`planner send`・`planner request`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、draft以外と上限に達したdraftの`revisit`、他のplannerのproposalの取り下げ
+- worker: `integrate`・`answer`・`ask close`・`ready`・`cancel`・計画系の全て・`request add`・`request decline`・`replan request`・他のrunの`replan propose`・`recover`・`review`・`supervise`・`observe`・`plan`・`up`・`down`・`install`・`auto-update`・`init`・`migrate`・`rebind`・`finding`・`mark`、自分のrun以外への`ask`・`note`・`session`・`session-event`
+- planner: `ready`（`--bypass-review`・`--inherit`を含む）・`goal ready`・`goal review`・`request add`・`replan request`・`replan propose`・他の依頼の`request decline`と`ask --request`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run log`・`run send`・`planner screen`・`planner log`・`planner send`・`planner request`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、draft以外と上限に達したdraftの`revisit`、他のplannerのproposalの取り下げ
 - headlessのjob: 状態を変える全て（`reviewer may not change queue state`）
 - observer: `finding record`・`finding resolve`・findingに紐づく`blocked`のask以外の全て（`observer may not change queue state`）
 - inbox: 人（user）と同じで、拒まれるのは誰にも与えない着地の実行・pushと予約だけ
@@ -122,7 +146,7 @@ roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説�
 - DBの直接操作: queueのSQLiteファイルはこのユーザーが読み書きでき、CLIを通らずに状態とeventを書き換えられる
 - Gitとファイル: worktree・main checkout・`runs/`・固定バイナリを直接書き換えられ、pushの資格情報もこのユーザーのもの
 - プロセス: 他のactorのプロセスにsignalを送れる（`pkill`・`killall`を拒むのもguardrail）
-- 古いバイナリへの戻し: 判定は呼ばれたバイナリのpolicyで決まるので、固定バイナリを戻すと、未知の`DAGQ_ROLE`を拒まないバイナリへ戻すと、新しいバイナリが起動したjobのroleを制限しない窓ができる（[Authorization](authorization.md#固定バイナリを戻したときの窓)）
+- 古いバイナリへの戻し: 未知の`DAGQ_ROLE`を拒まないバイナリへ戻すと、新しいバイナリが起動したjobのroleを制限しない窓ができる（[Authorization](authorization.md#固定バイナリを戻したときの窓)）
 
 `status`と`doctor`は`actors`に、AI actorごとの`backend: host`・`enforcement: advisory`・`sandboxed: false`を出し、隔離していないことを実行時にも明示する（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。
 `dagq.toml`がworkerかintegrateのverificationをcontainerにしたときは、`runtimes`が適用先ごとのruntimeとenforcement（containerは`sandbox`）を出し、workerの行の`backend`もそれに従う（[Container runtime](container-runtime.md)）。
@@ -169,7 +193,7 @@ capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`Static
    containerで動かすのは信頼しないコードを走らせるworker・resumeとintegrateのverificationだけで、読むだけのheadlessのjobの隔離はOSのsandboxにする（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)）。
    containerのrunにはhostのgitの共通dirをmountせず、runごとのcloneを渡す（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）
 2. **queue service / broker**: DBの直接操作とenvの偽装を塞ぐには、AI actorがqueueのファイルに触れず、制御側のserviceにだけ依頼する形にする。
-   serviceと、workerとjobのdagqのクライアントモード（unix socket・APIのversion・tokenによるprincipalとservice側の判定・`ask`・`show`・`note`・findingと読み取り、claim・resume・jobの起動でのtokenの発行）はある（[Queue service](queue-service.md)、ADR-t1233-1・ADR-t1233-4・ADR-t1233-5）。
+   serviceと、workerとjobのdagqのクライアントモードはある（[Queue service](queue-service.md)、ADR-t1233-1・ADR-t1233-4・ADR-t1233-5）。
    host構成ではtokenのfileも同じユーザーが読めるので、助言的であることは変わらない（ADR-t1233-4決定5）。
    serviceは起動した制御側が発行した資格（actor idとrunに紐づくもの）でactorを識別し、`DAGQ_ROLE`を信用しない。
    判定は今と同じapplicationの境界（`Planning`・`Dialogue`・`Operation`・`Integrator`）で行い、wrapperとhookをworkerの環境から分けてwrapperのactorとして判定する

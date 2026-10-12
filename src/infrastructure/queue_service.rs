@@ -942,6 +942,35 @@ impl crate::application::agent_eval::EvalStore for ServiceSqlite {
     }
 }
 
+impl crate::application::commands::replans::ReplanStore for ServiceSqlite {
+    fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
+        crate::application::commands::replans::ReplanStore::run_task(&self.queue, run)
+    }
+    fn record_replan(
+        &mut self,
+        new: &crate::domain::task_replan::NewReplan,
+        origin: crate::domain::task_replan::ReplanOrigin,
+        by_role: &str,
+        by_id: &str,
+    ) -> Result<crate::domain::task_replan::ReplanRecorded> {
+        self.queue.record_replan(new, origin, by_role, by_id)
+    }
+    fn replan_operation(
+        &self,
+        id: crate::domain::ReplanId,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        self.queue.replan_operation(id)
+    }
+    fn move_replan(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+        step: &crate::domain::task_replan::ReplanMove,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        self.queue.move_replan(id, generation, step)
+    }
+}
+
 impl DialogueStore for ServiceSqlite {
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.queue.read_ask(id)

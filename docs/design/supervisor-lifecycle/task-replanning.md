@@ -1,7 +1,7 @@
 ---
 id: design-supervisor-lifecycle-task-replanning
 type: design
-title: 長期化した非対話taskの診断・保留・成果保存・置換（未実装）
+title: 長期化した非対話taskの診断・保留・成果保存・置換（一部実装）
 status: draft
 created: 2026-10-05
 scope: runtime
@@ -16,9 +16,28 @@ related:
   - design-supervisor-lifecycle-goal-review
 ---
 
-# 長期化した非対話taskの再計画（未実装）
+# 長期化した非対話taskの再計画（一部実装）
 
-**全節が予定の契約であり未実装。** [ADR-t1521-1](../../adr/2026-10-05-t1521-1-diagnose-before-replanning-and-preserve-acceptance.md)と[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)を実装する際の正本。現在のrevise・resume・requestは関連文書が持つ。この文書を追加しても#1405のrunを停止・編集しない。wrapperはtask 1440が統一するbackgroundの経路を前提にし、cmux workspaceのcloseで保留や復元を代用しない。Claude/Codexで同じ状態機械を使う。
+**下の「実装の状態」に挙げたもののほかは予定の契約であり未実装。**
+[ADR-t1521-1](../../adr/2026-10-05-t1521-1-diagnose-before-replanning-and-preserve-acceptance.md)と[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)を実装する際の正本。
+現在のrevise・resume・requestは関連文書が持つ。
+この文書を追加しても#1405のrunを停止・編集しない。
+wrapperはtask 1440が統一するbackgroundの経路を前提にし、cmux workspaceのcloseで保留や復元を代用しない。
+Claude/Codexで同じ状態機械を使う。
+
+## 実装の状態
+
+- 実装済み: 操作の永続（`src/infrastructure/replans.rs`）、状態と遷移・版・保留の判定（`src/domain/task_replan.rs`）、入口のCLI（人とinboxの`replan request`、workerの自分のrunだけの`replan propose`、読む`replans`）と権限、`status`・`doctor`・`list`・`show`での表示。
+- 保留の判定（`check_step`）は、操作が保留の柵より後の状態にある間、claimと候補・resume・復旧の回・revise・`ready`・`edit`・`cancel`・依存の変更・着地を、どのroleにも拒む。
+  各経路はその工程のtransactionの中で同じ行を読む。
+- 未実装: 診断・保留と書き手の停止・snapshot・plannerのprompt・置換の適用・goal closeの判定・古いruntimeを止める非互換の柵。
+  今はruntimeのどの経路も操作を進めないので、記録した操作は`candidate`のままで、runを止めない。
+  適用（`applying`・`applied`）へはどの経路も動かせない。
+- 保留の正式な経路（runのslotを返して保留する）が無いあいだの、保護中のrunの暫定の扱い:
+  reviewの`revise`は送らず、`revise_withheld`を記録してverdictを着地の`approve_landing`のaskに回す（runを誰も扱わないまま残さない）。
+  answerが何でも、着地は操作の結末まで始めない。
+  着地のslotに来たrunはslotを持ったままそこで待ち、承認の列と`integrate --next`は保護中のrunを飛ばして他のrunを着地させる。
+  保留を実装するtaskが、slotを返す保留に置き換える。
 
 ## 入口と診断
 

@@ -1046,6 +1046,7 @@ pub mod stall;
 pub mod stats;
 pub mod supervisor_life;
 pub mod task;
+pub mod task_replan;
 pub mod throughput_review;
 pub mod timeline;
 pub mod tokens;
@@ -1082,8 +1083,8 @@ pub use follow_up::{
 pub use goal::{Goal, StrandedDependency};
 pub use goal_tag::{GoalTag, TagSet};
 pub use ids::{
-    AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RequestId,
-    RunId, TaskId,
+    AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, ReplanId,
+    RequestId, RunId, TaskId,
 };
 pub use input::{GoalEdit, GoalRecord, NewGoal, NewTask, RunPlan, RunRecord, TaskEdit, TaskRecord};
 pub use lint::{LintCode, LintInput, LintNode, LintViolation};
