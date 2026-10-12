@@ -17,6 +17,7 @@ related:
   - design-domain-model
   - design-persistence
   - design-supervisor-lifecycle-supervise
+  - adr-t2391-1
 ---
 
 # レイヤーとコンテキストの境界
@@ -179,6 +180,8 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 ### 検査の範囲
 
+- 各規則の検査は、scriptとreviewのsubagent `architecture-boundaries`から、コンパイラ（crateの依存・可視性・型）・clippy・Rustのtest・全体のreviewへ移している途中で、規則ごとの移し先と退役の順は[ADR-t2391-1](../adr/2026-10-12-t2391-1-boundary-rules-to-compiler-clippy-and-rust-tests.md)が持つ。
+  下の記述と各規則の「検査」の行は今動いている検査で、移し先の着地ごとに直す。
 - `scripts/check-layer-deps.sh`は、L1・L2・L3・L4・L6・L9とL7の時計、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
   数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
   許可の一覧は`.config/layer-deps-allow.txt`。

@@ -11,6 +11,8 @@ amends:
   - adr-t1545-1 decision 3
   - adr-t1545-1 decision 4
   - adr-t1942-2 decision 4
+amended_by:
+  - adr-t2391-1
 owners:
   - hisamekms
 tags:

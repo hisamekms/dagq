@@ -10,6 +10,7 @@ amends:
   - adr-0013 decision 1
 amended_by:
   - adr-t2287-1
+  - adr-t2391-1
 owners:
   - hisamekms
 tags:
