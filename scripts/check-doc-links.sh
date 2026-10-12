@@ -22,16 +22,34 @@
 # optional title ("[t](a.md "title")") is dropped. Percent-encoded spaces
 # ("%20") are decoded.
 #
-# The one exception: the links of the ADRs (docs/adr/) to the removed
-# documents named here, which the ADRs keep since they are append-only
-# (docs/development/documents.md, section "ADR"), so those links are not
-# rewritten and are skipped here:
+# The one exception: the links of the ADRs (docs/adr/) to removed documents,
+# which the ADRs keep since they are append-only (docs/development/
+# documents.md, section "ADR"), so those links are not rewritten and are
+# skipped here:
 # - docs/journal/ and anything under it, removed after it was frozen
 #   (ADR-0008 links two journal entries);
-# - docs/design/broker.md (this exact path), removed with the resource broker
-#   (ADR-t2113-1).
+# - each path of the list of removed docs/design documents below
+#   ($removed_design), as resolved from the ADR's directory (an ADR writes
+#   "../design/<name>.md").
 # A link of any other document to them, and a link of an ADR to any other
-# missing path, fails like any other.
+# missing path, fails like any other; a link to a listed path that exists
+# resolves as usual.
+#
+# The list of removed docs/design documents is the one place of these paths.
+# A row is "path | successor | state": path from the repository root,
+# successor where the content went (a path, or words such as "the doc
+# comment by the definition"), and state one of two:
+# - migrating (no state written): the document is about to be removed or was
+#   just removed, and the rows still settle. The path may exist or not; only
+#   the exception of the ADRs' links holds. A plan adds the path of a
+#   document it is to remove as a migrating row, at the latest in the commit
+#   that removes the document, with its successor.
+# - final ("final"): the removal is settled and the document must not be
+#   made again at the path; its content goes to the successor. The path
+#   existing fails, naming the successor.
+# Only the last task of the goal that removed the document turns its row from
+# migrating to final. A final row without a successor, two rows of one path,
+# and a state other than empty or "final" are errors of the list and fail.
 #
 # The tree checked is the git work tree of the cwd (`git rev-parse
 # --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
@@ -40,9 +58,17 @@
 # Outside a git work tree it is the repository found from the script's own
 # location. Run it from the repository root (`sh scripts/check-doc-links.sh`).
 #
-# Exit 0 when every relative link resolves, 1 when any does not (each file,
-# line number and target go to stderr), 2 when docs/ is not found.
+# Exit 0 when every relative link resolves and the list holds, 1 when a link
+# does not resolve (each file, line number and target go to stderr) or the
+# list fails (each row and why), 2 when docs/ is not found.
 set -eu
+
+# The list of removed docs/design documents: "path | successor | state" (see
+# the header). Blank lines and lines starting with "#" are skipped.
+removed_design=$(cat <<'EOF'
+docs/design/broker.md | docs/adr/2026-10-08-t2113-1-remove-the-resource-broker.md | final
+EOF
+)
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
@@ -52,6 +78,31 @@ if [ ! -d docs ]; then
   exit 2
 fi
 
+# One message per error of the list, and one per final row whose path exists.
+list_bad=$(printf '%s\n' "$removed_design" | awk -F'|' '
+  function trim(v) { sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v); return v }
+  /^[ \t]*(#|$)/ { next }
+  {
+    row = trim($0)
+    p = trim($1); to = trim($2); st = trim($3)
+    if (NF > 3) { print "list: more than 3 fields: " row; next }
+    if (p !~ /^docs\/./) { print "list: path not under docs/: " row; next }
+    if (p ~ /\/\/|\/\.\.?\/|\/$/) { print "list: path not written plainly (no //, /./, /../ or trailing /): " row; next }
+    if (p in seen) print "list: two rows of " p
+    seen[p] = 1
+    if (st != "" && st != "final") { print "list: state is neither empty (migrating) nor final: " row; next }
+    if (st == "final" && to == "") { print "list: final row without a successor: " row; next }
+    if (st == "final") printf "%s\t%s\n", p, to
+  }
+' | while IFS='	' read -r p to; do
+  case $p in
+    (list:*) printf '%s\n' "$p" ;;
+    (*) [ ! -e "$p" ] || printf '%s: made again after its removal was made final; write it in %s\n' "$p" "$to" ;;
+  esac
+done)
+removed_paths=$(printf '%s\n' "$removed_design" | awk -F'|' '!/^[ \t]*(#|$)/ { p = $1; gsub(/^[ \t]+|[ \t]+$/, "", p); print p }')
+export removed_paths
+
 # One "file<TAB>line<TAB>target<TAB>path" per relative link, where path is
 # the target joined to the document's directory.
 links=$({
@@ -59,7 +110,24 @@ links=$({
   find . -maxdepth 1 -type f -name '*.md' | sed 's|^\./||'
 } | LC_ALL=C sort | while IFS= read -r f; do
   awk -v file="$f" '
-    BEGIN { dir = file; if (!sub(/\/[^\/]*$/, "", dir)) dir = "." }
+    # The path with "." and "x/.." taken out.
+    function norm(p,   n, a, s, i, k, out) {
+      n = split(p, a, "/")
+      k = 0
+      for (i = 1; i <= n; i++) {
+        if (a[i] == "" || a[i] == ".") continue
+        if (a[i] == ".." && k > 0 && s[k] != "..") { k--; continue }
+        s[++k] = a[i]
+      }
+      out = ""
+      for (i = 1; i <= k; i++) out = out (i > 1 ? "/" : "") s[i]
+      return out
+    }
+    BEGIN {
+      dir = file; if (!sub(/\/[^\/]*$/, "", dir)) dir = "."
+      n = split(ENVIRON["removed_paths"], r, "\n")
+      for (i = 1; i <= n; i++) if (r[i] != "") removed[r[i]] = 1
+    }
     {
       line = $0
       sub(/\r$/, "", line)
@@ -96,8 +164,11 @@ links=$({
         if (target ~ /^\//) path = "." target
         else path = dir "/" target
         # The ADRs are append-only, so their links to the removed
-        # docs/journal/ and docs/design/broker.md stay (see the header).
-        if (file ~ /^docs\/adr\// && (path ~ /^docs\/adr\/\.\.\/journal\// || path == "docs/adr/../design/broker.md")) continue
+        # docs/journal/ and the listed removed documents stay (see the header).
+        if (file ~ /^docs\/adr\//) {
+          np = norm(path)
+          if (np == "docs/journal" || np ~ /^docs\/journal\// || (np in removed)) continue
+        }
         printf "%s\t%d\t%s\t%s\n", file, FNR, target, path
       }
     }
@@ -109,8 +180,15 @@ bad=$(printf '%s\n' "$links" | while IFS='	' read -r f n target path; do
   [ -e "$path" ] || printf '%s:%s: %s\n' "$f" "$n" "$target"
 done)
 
+status=0
+if [ -n "$list_bad" ]; then
+  echo "check-doc-links: the list of removed docs/design documents fails:" >&2
+  printf '%s\n' "$list_bad" | sed 's/^/  /' >&2
+  status=1
+fi
 if [ -n "$bad" ]; then
   echo "check-doc-links: relative links must name a file or directory in the repository:" >&2
   printf '%s\n' "$bad" | sed 's/^/  /' >&2
-  exit 1
+  status=1
 fi
+exit "$status"

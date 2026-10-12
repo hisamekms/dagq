@@ -19,7 +19,13 @@
 #     tag to --release takes it out of the base so it exits 0;
 # (d) with the cwd outside any git work tree, a copied script falls back to
 #     its own location and exits 2 (nothing to check there). Skipped when
-#     ${TMPDIR} is itself inside a git work tree.
+#     ${TMPDIR} is itself inside a git work tree;
+# (e) the list of removed docs/design documents of check-doc-links.sh, with
+#     fixture rows put into a copy of the script: a migrating row passes
+#     whether its path exists or not, a final row fails when its path exists
+#     and names its successor, the ADRs' links to a listed path pass while
+#     other documents' links and the ADRs' links to an unlisted missing path
+#     fail, and a final row without a successor or two rows of one path fail.
 #
 # A task that adds a check script, or changes how one finds its root, adds the
 # script to $scripts and at least one case to $cases with its violate_<case>
@@ -283,6 +289,71 @@ else
     expect 2 "$s with the cwd outside a git work tree" "$outside" "$bin/$s.sh"
   done
 fi
+
+# (e) The list of removed docs/design documents of check-doc-links. Each run
+# copies check-doc-links.sh with the fixture rows (one per line in $1) put at
+# the head of its list, and runs the copy with the cwd in the clone.
+doclinks_with_rows() {
+  rows=$1 awk '{ print } /^removed_design=\$\(cat <<.EOF.$/ { print ENVIRON["rows"]; found = 1 } END { if (!found) exit 1 }' \
+    "$bin/check-doc-links.sh" >"$tmp/doc-links-rows.sh" || prep_fail "no list of removed documents in check-doc-links.sh"
+}
+# An ADR and a document that is not one, each linking the path $1 under
+# docs/design/.
+doclinks_adr_link() {
+  printf -- '---\nid: zz-scripts-root-adr\n---\n\n[fixture](../design/%s)\n' "$1" >"$clone/docs/adr/zz-scripts-root-adr.md"
+}
+doclinks_doc_link() {
+  printf -- '---\nid: zz-scripts-root-doc\n---\n\n[fixture](design/%s)\n' "$1" >"$clone/docs/zz-scripts-root-doc.md"
+}
+doclinks_make() {
+  printf -- '---\nid: zz-scripts-root-made\n---\n\n# fixture\n' >"$clone/docs/design/$1"
+}
+rows='docs/design/zz-migrating.md
+docs/design/zz-final.md | docs/development/documents.md | final'
+doclinks_with_rows "$rows"
+dl=$tmp/doc-links-rows.sh
+
+# (1) A migrating row whose document still exists, linked from an ADR and a
+# document.
+doclinks_make zz-migrating.md
+doclinks_adr_link zz-migrating.md
+doclinks_doc_link zz-migrating.md
+expect 0 "check-doc-links with a migrating row whose document exists" "$clone" "$dl"
+reset_clone
+# (2) A migrating row whose document is gone.
+doclinks_adr_link zz-migrating.md
+expect 0 "check-doc-links with an ADR's link to a migrating row's missing document" "$clone" "$dl"
+doclinks_doc_link zz-migrating.md
+expect 1 "check-doc-links with a document's link to a migrating row's missing document" "$clone" "$dl"
+reset_clone
+# (3) A final row whose document is gone.
+doclinks_adr_link zz-final.md
+expect 0 "check-doc-links with an ADR's link to a final row's missing document" "$clone" "$dl"
+doclinks_doc_link zz-final.md
+expect 1 "check-doc-links with a document's link to a final row's missing document" "$clone" "$dl"
+reset_clone
+# (4) A final row whose document is made again: the failure names the
+# successor.
+doclinks_make zz-final.md
+expect 1 "check-doc-links with a final row's document made again" "$clone" "$dl"
+if ! grep -q 'docs/design/zz-final.md.*docs/development/documents.md' "$tmp/out"; then
+  echo "$me: check-doc-links with a final row's document made again does not name the successor" >&2
+  sed 's/^/  /' "$tmp/out" >&2
+  fail=1
+fi
+reset_clone
+# (5) An ADR's link to a missing path the list does not have.
+doclinks_adr_link zz-unlisted.md
+expect 1 "check-doc-links with an ADR's link to an unlisted missing document" "$clone" "$dl"
+reset_clone
+# (6) Errors of the list.
+doclinks_with_rows 'docs/design/zz-final.md | | final'
+expect 1 "check-doc-links with a final row without a successor" "$clone" "$dl"
+doclinks_with_rows "$rows
+docs/design/zz-migrating.md | docs/plans/current.md"
+expect 1 "check-doc-links with two rows of one path" "$clone" "$dl"
+doclinks_with_rows 'docs/design/zz-final.md | docs/development/documents.md | done'
+expect 1 "check-doc-links with a state neither migrating nor final" "$clone" "$dl"
 
 if [ "$fail" -ne 0 ]; then
   exit 1
