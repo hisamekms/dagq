@@ -9,13 +9,16 @@
 //!
 //! What is decided here: the names and the mounts of the run's socket and
 //! relay ([`relay_run_args`], [`run_socket_mount`]), the environment that
-//! points a run's tools at the forwarder ([`container_env`]), and what the
-//! supervisor does after a look at a relay ([`relay_action`]).
+//! points a run's tools at the forwarder ([`container_env`]), whether the
+//! supervisor looks at a relay or closes it as its run is over
+//! ([`relay_fate`]), and what it does after a look at a relay
+//! ([`relay_action`]).
 //!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
 use serde::{Deserialize, Serialize};
 
+use super::RunStatus;
 use super::podman_machine::QueueKey;
 
 /// The port of `127.0.0.1` the forwarder inside a run's container listens
@@ -188,6 +191,56 @@ pub struct RelaySeen {
     pub reaches: Option<bool>,
 }
 
+/// What the queue says of the run a relay is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayRun {
+    /// The queue could not be read.
+    Unknown,
+    /// The queue has no such run.
+    Missing,
+    /// The run is there: its status, and whether it is the latest run of a
+    /// task in progress.
+    Found {
+        status: RunStatus,
+        task_in_progress: bool,
+    },
+}
+
+/// Whether the supervisor looks at a relay or closes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayFate {
+    /// Its run lives (or the queue could not say): [`relay_action`] judges
+    /// it.
+    Look,
+    /// Its run is over (its task is not in progress, a later run took its
+    /// place, it landed, or it is not in the queue): the relay is closed,
+    /// not started again, and counts for no start and no attention. A
+    /// relay whose close failed stays recorded and is closed at a later
+    /// look.
+    Close,
+}
+
+/// What to do with the relay of `run` before any look at it. The latest
+/// run of a task in progress lives whatever its status but `integrated`:
+/// a `failed` or `interrupted` one is resumed under the same ID after its
+/// triage.
+pub fn relay_fate(run: RelayRun) -> RelayFate {
+    match run {
+        RelayRun::Unknown => RelayFate::Look,
+        RelayRun::Missing => RelayFate::Close,
+        RelayRun::Found {
+            status,
+            task_in_progress,
+        } => {
+            if task_in_progress && status != RunStatus::Integrated {
+                RelayFate::Look
+            } else {
+                RelayFate::Close
+            }
+        }
+    }
+}
+
 /// What the supervisor does about one relay after a look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayAction {
@@ -331,6 +384,57 @@ mod tests {
                 "dagq relay forward --port {FORWARD_PORT} --socket /run/dagq-broker/broker.sock"
             )
         );
+    }
+
+    #[test]
+    fn a_relay_of_a_run_that_is_over_is_closed_and_a_living_one_is_looked_at() {
+        let found = |status, task_in_progress| RelayRun::Found {
+            status,
+            task_in_progress,
+        };
+        for status in [
+            RunStatus::Claimed,
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Validating,
+            RunStatus::AwaitingIntegration,
+            RunStatus::Integrating,
+            RunStatus::NeedsSession,
+            RunStatus::Succeeded,
+            // Resumed under the same ID after its triage.
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+        ] {
+            assert_eq!(
+                relay_fate(found(status, true)),
+                RelayFate::Look,
+                "{status:?}"
+            );
+        }
+        // Its task is over (completed, canceled) or has a later run, or it
+        // landed.
+        for status in [
+            RunStatus::Claimed,
+            RunStatus::Running,
+            RunStatus::NeedsSession,
+            RunStatus::Integrated,
+            RunStatus::Succeeded,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+        ] {
+            assert_eq!(
+                relay_fate(found(status, false)),
+                RelayFate::Close,
+                "{status:?}"
+            );
+        }
+        assert_eq!(
+            relay_fate(found(RunStatus::Integrated, true)),
+            RelayFate::Close
+        );
+        assert_eq!(relay_fate(RelayRun::Missing), RelayFate::Close);
+        // A queue that cannot be read closes nothing.
+        assert_eq!(relay_fate(RelayRun::Unknown), RelayFate::Look);
     }
 
     #[test]

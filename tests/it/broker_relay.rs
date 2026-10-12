@@ -221,12 +221,15 @@ fn each_run_gets_its_own_socket_and_relay_and_its_end_removes_them() {
 }
 
 /// The relays of a test's hands: what each look finds, whether a start
-/// works, with the starts of relays and of the machine counted.
+/// or a close works, with the starts of relays and of the machine and the
+/// closes counted. A relay closed is not found again.
 #[derive(Default)]
 struct FakeRelays {
     seen: Mutex<Vec<RelaySeen>>,
     starts_fail: bool,
+    closes_fail: AtomicBool,
     restarts: Mutex<Vec<(String, u16)>>,
+    closes: Mutex<Vec<String>>,
     machine_restarts: AtomicU32,
 }
 
@@ -234,8 +237,13 @@ impl RelayControl for FakeRelays {
     fn open(&self, _: &RelaySpec, _: u16) -> anyhow::Result<()> {
         unreachable!("the supervisor opens no relay")
     }
-    fn close(&self, _: &str) -> anyhow::Result<()> {
-        unreachable!("the supervisor closes no relay")
+    fn close(&self, run: &str) -> anyhow::Result<()> {
+        self.closes.lock().unwrap().push(run.to_owned());
+        if self.closes_fail.load(Ordering::SeqCst) {
+            anyhow::bail!("podman cannot remove the relay");
+        }
+        self.seen.lock().unwrap().retain(|relay| relay.run != run);
+        Ok(())
     }
     fn relays(&self) -> anyhow::Result<Vec<RelaySeen>> {
         Ok(self.seen.lock().unwrap().clone())
@@ -292,17 +300,52 @@ fn relay(run: &str, running: bool, target_port: Option<u16>, reaches: Option<boo
     }
 }
 
-/// Acceptance (3): a relay that is down is started again towards the
-/// broker's port; one that cannot be is the inbox's attention, told once,
-/// and the worker set to the container waits with the relay named as why;
-/// once every relay runs the attention ends. A relay that runs and does
-/// not reach the broker has the machine started again first.
-#[test]
-fn the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot() {
-    use crate::runtime_support::{
-        TestWorkspace, VALID_AGENT, fixture, git, supervise_options, supervise_with,
+/// A run of a new ready task claimed outside the supervisor, left in
+/// `status` with no lease and its task in `task`: a `needs_session` run of
+/// a task `in_progress` lives (nothing resumes it while the container
+/// runtime cannot be used); a run of a task `completed` or `canceled` is
+/// over.
+fn run_in(db: &Path, repo: &Path, status: &str, task: &str) -> String {
+    use crate::runtime_support::{SqliteQueue, add_ready_task, git_out};
+    use dagq::domain::{ClaimOutcome, CommitSha, LeaseToken};
+    let mut queue = SqliteQueue::open(db).unwrap();
+    add_ready_task(&mut queue, &format!("a run {status}"), &[]);
+    let base = CommitSha::try_from(git_out(repo, &["rev-parse", "main"]).as_str()).unwrap();
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor(&base, &LeaseToken::new("gone"))
+        .unwrap()
+    else {
+        panic!("nothing was claimed")
     };
-    let (_fixture, repo, db) = fixture();
+    let raw = rusqlite::Connection::open(db).unwrap();
+    raw.execute(
+        "UPDATE task_runs SET status=?2 WHERE id=?1",
+        rusqlite::params![run.id().as_str(), status],
+    )
+    .unwrap();
+    raw.execute(
+        "UPDATE tasks SET status=?2 WHERE id=(SELECT task_id FROM task_runs WHERE id=?1)",
+        rusqlite::params![run.id().as_str(), task],
+    )
+    .unwrap();
+    raw.execute(
+        "DELETE FROM run_leases WHERE run_id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    run.id().to_string()
+}
+
+/// The fixture's repository set to run its workers in containers, and the
+/// supervisor's options with `relays` and a running broker.
+fn container_fixture() -> (
+    crate::runtime_support::Fixture,
+    PathBuf,
+    PathBuf,
+    crate::runtime_support::TestWorkspace,
+) {
+    use crate::runtime_support::{TestWorkspace, VALID_AGENT, fixture, git};
+    let (fixture, repo, db) = fixture();
     fs::write(
         repo.join("dagq.toml"),
         "[roles.worker]\nruntime = \"container\"\n",
@@ -311,7 +354,11 @@ fn the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot() {
     git(&repo, &["add", "dagq.toml"]);
     git(&repo, &["commit", "-m", "runtimes"]);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let options = |relays: Arc<FakeRelays>| dagq::compose::SuperviseOptions {
+    (fixture, repo, db, backend)
+}
+
+fn relay_options(relays: Arc<FakeRelays>) -> dagq::compose::SuperviseOptions {
+    dagq::compose::SuperviseOptions {
         queue_broker: Some(dagq::compose::QueueBrokerOptions {
             executable: "/unused".into(),
             interval: Duration::ZERO,
@@ -324,11 +371,27 @@ fn the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot() {
             interval: Duration::ZERO,
             control: Some(dagq::compose::QueueRelayControlPort(relays)),
         }),
-        ..supervise_options(1, true)
-    };
+        ..crate::runtime_support::supervise_options(1, true)
+    }
+}
+
+/// Acceptance (3): a relay that is down is started again towards the
+/// broker's port; one that cannot be is the inbox's attention, told once,
+/// and the worker set to the container waits with the relay named as why;
+/// once every relay runs the attention ends. A relay that runs and does
+/// not reach the broker has the machine started again first. The relays
+/// are of runs that live.
+#[test]
+fn the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot() {
+    use crate::runtime_support::supervise_with;
+    let (_fixture, repo, db, backend) = container_fixture();
+    let options = relay_options;
+    let r9 = run_in(&db, &repo, "needs_session", "in_progress");
+    let r8 = run_in(&db, &repo, "needs_session", "in_progress");
+    let (r9, r8) = (r9.as_str(), r8.as_str());
 
     let failing = Arc::new(FakeRelays {
-        seen: Mutex::new(vec![relay("r9", false, None, None)]),
+        seen: Mutex::new(vec![relay(r9, false, None, None)]),
         starts_fail: true,
         ..FakeRelays::default()
     });
@@ -337,7 +400,7 @@ fn the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot() {
     }
     assert_eq!(
         *failing.restarts.lock().unwrap(),
-        [("r9".to_owned(), 4321), ("r9".to_owned(), 4321)]
+        [(r9.to_owned(), 4321), (r9.to_owned(), 4321)]
     );
     let down = events(&db, "queue_relay_down");
     assert_eq!(down.len(), 1, "{down:?}");
@@ -365,19 +428,16 @@ fn the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot() {
     // A relay that starts: it runs towards the broker, and at the next look
     // the attention ends.
     let starting = Arc::new(FakeRelays {
-        seen: Mutex::new(vec![relay("r9", true, Some(1111), Some(true))]),
+        seen: Mutex::new(vec![relay(r9, true, Some(1111), Some(true))]),
         ..FakeRelays::default()
     });
     for _ in 0..2 {
         supervise_with(&db, &repo, &backend, &options(starting.clone())).unwrap();
     }
-    assert_eq!(
-        *starting.restarts.lock().unwrap(),
-        [("r9".to_owned(), 4321)]
-    );
+    assert_eq!(*starting.restarts.lock().unwrap(), [(r9.to_owned(), 4321)]);
     let started = events(&db, "queue_relay_started");
     assert_eq!(started.len(), 1, "{started:?}");
-    assert_eq!(started[0]["payload"]["run"], "r9");
+    assert_eq!(started[0]["payload"]["run"], r9);
     assert_eq!(started[0]["payload"]["machine_restarted"], false);
     assert_eq!(events(&db, "queue_relay_running").len(), 1);
     assert!(
@@ -392,8 +452,8 @@ fn the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot() {
     // started again, then every relay.
     let cut = Arc::new(FakeRelays {
         seen: Mutex::new(vec![
-            relay("r9", true, Some(4321), Some(false)),
-            relay("r8", true, Some(4321), Some(true)),
+            relay(r9, true, Some(4321), Some(false)),
+            relay(r8, true, Some(4321), Some(true)),
         ]),
         ..FakeRelays::default()
     });
@@ -401,11 +461,105 @@ fn the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot() {
     assert_eq!(cut.machine_restarts.load(Ordering::SeqCst), 1);
     assert_eq!(
         *cut.restarts.lock().unwrap(),
-        [("r9".to_owned(), 4321), ("r8".to_owned(), 4321)]
+        [(r9.to_owned(), 4321), (r8.to_owned(), 4321)]
     );
     let started = events(&db, "queue_relay_started");
     assert_eq!(started.len(), 3, "{started:?}");
     assert_eq!(started[2]["payload"]["machine_restarted"], true);
+}
+
+/// Acceptance (2): the relays a run that is over left recorded (its task
+/// is over, or the queue has no such run), with their image gone so a start
+/// would fail, are closed and not started again: they make no
+/// `queue_relay_started` or `queue_relay_down` and count for no start, an
+/// attention left standing ends, and the container runtime is not held
+/// for the relays. A close that fails is tried again at the next look,
+/// while a living run's relay is still started again.
+#[test]
+fn the_supervisor_closes_the_relays_of_runs_that_are_over() {
+    use crate::runtime_support::supervise_with;
+    let (_fixture, repo, db, backend) = container_fixture();
+    let failed = run_in(&db, &repo, "failed", "canceled");
+    let succeeded = run_in(&db, &repo, "succeeded", "completed");
+    // A run that did not end whose task is over.
+    let canceled = run_in(&db, &repo, "needs_session", "canceled");
+    let over = [
+        failed.as_str(),
+        succeeded.as_str(),
+        canceled.as_str(),
+        "gone-run",
+    ];
+    // An attention left by a supervisor that started them again before.
+    crate::runtime_support::SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            dagq::domain::event_kind::EventKind::QueueRelayDown,
+            json!({"reason": "start_failed", "message": "the relay of run gone-run"}),
+        )
+        .unwrap();
+    let relays = Arc::new(FakeRelays {
+        seen: Mutex::new(
+            over.iter()
+                .map(|run| relay(run, false, None, None))
+                .collect(),
+        ),
+        starts_fail: true,
+        ..FakeRelays::default()
+    });
+    relays.closes_fail.store(true, Ordering::SeqCst);
+    supervise_with(&db, &repo, &backend, &relay_options(relays.clone())).unwrap();
+    // The close failed: each look tries it again, and the records stay.
+    let tried = relays.closes.lock().unwrap().clone();
+    assert!(
+        !tried.is_empty() && tried.len().is_multiple_of(4),
+        "{tried:?}"
+    );
+    assert!(tried.chunks(4).all(|look| look == over), "{tried:?}");
+    assert_eq!(relays.seen.lock().unwrap().len(), 4);
+    relays.closes_fail.store(false, Ordering::SeqCst);
+    supervise_with(&db, &repo, &backend, &relay_options(relays.clone())).unwrap();
+    assert_eq!(relays.closes.lock().unwrap()[tried.len()..], over);
+    assert!(relays.seen.lock().unwrap().is_empty());
+    // Closed, they are not looked at again.
+    supervise_with(&db, &repo, &backend, &relay_options(relays.clone())).unwrap();
+    assert_eq!(relays.closes.lock().unwrap().len(), tried.len() + 4);
+
+    assert!(relays.restarts.lock().unwrap().is_empty());
+    assert_eq!(relays.machine_restarts.load(Ordering::SeqCst), 0);
+    assert!(events(&db, "queue_relay_started").is_empty());
+    assert_eq!(events(&db, "queue_relay_down").len(), 1);
+    assert_eq!(events(&db, "queue_relay_running").len(), 1);
+    let status = ok(&db, &["status"]);
+    let attention = status["attention"].as_array().unwrap();
+    assert!(
+        !attention
+            .iter()
+            .any(|entry| entry["kind"] == "queue_relay_down"),
+        "{status}"
+    );
+    assert!(
+        !attention.iter().any(|entry| entry["last_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("relay to the queue broker"))),
+        "{status}"
+    );
+
+    // A living run's relay beside one that is over: the one is closed, the
+    // other started again, and only its start is counted.
+    let living = run_in(&db, &repo, "needs_session", "in_progress");
+    let mixed = Arc::new(FakeRelays {
+        seen: Mutex::new(vec![
+            relay(&failed, false, None, None),
+            relay(&living, false, None, None),
+        ]),
+        ..FakeRelays::default()
+    });
+    supervise_with(&db, &repo, &backend, &relay_options(mixed.clone())).unwrap();
+    assert_eq!(*mixed.closes.lock().unwrap(), [failed]);
+    assert_eq!(*mixed.restarts.lock().unwrap(), [(living.clone(), 4321)]);
+    let started = events(&db, "queue_relay_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["payload"]["run"], living.as_str());
 }
 
 /// `dagq` in client mode from a directory that is no repository, with

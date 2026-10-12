@@ -146,6 +146,7 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
   relayはvolumeの中にsocketを作り、mode 0600でrunのcontainerの非rootのuidに渡す。
   volumeをmountするのはrelayとそのrunのcontainerだけで、どちらも`:z`を付ける。
   開いたrelayは`<queue dir>/relay/`に記録するので、machineの停止で消えたrelayも見張りが見つける。
+  記録は`close`が成功するまで残る。
 - relay（`dagq relay serve`）: machineの中のcontainerで、socketへの接続をhostのbrokerのportへ双方向にそのまま流す。
   hostへはmachineのgvproxy（`host.containers.internal`）を通る。
   tokenを持たず、認証も宛ての判定もしない（brokerが行う）。
@@ -155,6 +156,8 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
 - DNSが無い: proxyのenvを見ない道具は名前を引けず外へ出られない。
   これは隔離の結果として扱い、要るものはhostのrunかqueue serviceのユースケースに回す。
 - 見張り: supervisor（`--once`でないもの）は、brokerが答える間、各relayのcontainerが動くか・brokerの今のportへ向くか・socket越しにbrokerのhealthに届くかを見る。
+  先に、記録のrunがqueueの上でもう生きていない（taskが進行中でない・後のrunに代わった・着地した・runが無い）relayは起動し直さず`close`で片付け、起動し直しの回数にもattentionの判定にも数えない（判断は`relay_fate`）。
+  `close`が失敗した記録は次の回にやり直す。
   落ちたかportの古いrelayは起動し直す。
   動くのに届かないrelayがあればgvproxyが落ちたとみて、machineをhost全体のlockの中で起動し直してから全てのrelayを起動し直す。
   回数の上限と窓はqueue serviceと同じ。

@@ -13,21 +13,33 @@
 //! ([`crate::application::broker_relay::RelayGate`]), so no new run is set
 //! to it.
 //!
+//! A relay whose run is over (its task is not in progress, a later run
+//! took its place, it landed, or the queue has no such run) is closed
+//! instead
+//! ([`crate::application::broker_relay::close`]): the control side keeps
+//! its record until a close succeeds, so a supervisor that went down or a
+//! close that failed at the run's end leaves it. It is not started again
+//! and counts for no start and no attention; a close that fails is tried
+//! again at the next look.
+//!
 //! A broker that does not answer is the broker's watch's
 //! ([`super::queue_broker`]): the relays are not looked at meanwhile. A
 //! draining or handing-off supervisor does not look.
 //!
-//! The judgement of each relay is [`relay_action`] in the domain, the
+//! The judgement of each relay is [`relay_fate`] and [`relay_action`] in
+//! the domain, the
 //! window's [`in_window`], given the monotonic time of the injected clock
 //! as values.
 //!
 //! [Container runtime]: ../../../docs/design/container-runtime.md
 
 use super::*;
-use crate::application::broker_relay::RelayControl;
+use crate::application::RunNotFound;
+use crate::application::broker_relay::{RelayControl, close};
 use crate::application::queue_broker::QueueBrokerControl;
 use crate::domain::broker_relay::{
-    QUEUE_RELAY_ATTENTION_KINDS, QUEUE_RELAY_DOWN, RelayAction, address_port, relay_action,
+    QUEUE_RELAY_ATTENTION_KINDS, QUEUE_RELAY_DOWN, RelayAction, RelayFate, RelayRun, RelaySeen,
+    address_port, relay_action, relay_fate,
 };
 use crate::domain::queue_broker::{in_window, look_due};
 use crate::domain::queue_service::ServiceState;
@@ -84,6 +96,7 @@ impl HostOpsState {
                 return;
             }
         };
+        let seen = self.close_relays_of_runs_over(env, port.relays.as_ref(), seen);
         let window = QUEUE_SERVICE_RESTART_WINDOW;
         self.broker_relay
             .starts
@@ -160,6 +173,38 @@ impl HostOpsState {
         }
     }
 
+    /// Close the relays in `seen` whose run is over, and give back the
+    /// others.
+    fn close_relays_of_runs_over(
+        &mut self,
+        env: &mut HostEnv<'_>,
+        relays: &dyn RelayControl,
+        seen: Vec<RelaySeen>,
+    ) -> Vec<RelaySeen> {
+        let in_progress = match env.queue.latest_runs_in_progress() {
+            Ok(runs) => Some(runs),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the runs of the relays could not be read: {error:#}");
+                None
+            }
+        };
+        seen.into_iter()
+            .filter(|relay| {
+                let run = relay_run(env, in_progress.as_deref(), &relay.run);
+                if relay_fate(run) == RelayFate::Look {
+                    return true;
+                }
+                match close(relays, &relay.run) {
+                    Ok(()) => info!(run = relay.run, "the relay of a run that is over is closed"),
+                    Err(error) => {
+                        warn!(run = relay.run, error = %format_args!("{error:#}"), "the relay of a run that is over could not be closed: {error:#}; tried again at the next look");
+                    }
+                }
+                false
+            })
+            .collect()
+    }
+
     fn broker_relay_attention_stands(&mut self, env: &mut HostEnv<'_>) -> bool {
         match env.queue.latest_queue_event(&QUEUE_RELAY_ATTENTION_KINDS) {
             Ok(latest) => latest.is_some_and(|event| event.kind == QUEUE_RELAY_DOWN),
@@ -186,6 +231,34 @@ impl HostOpsState {
         payload["supervisor"] = json!(env.token);
         if let Err(error) = env.queue.record_queue_event(kind, payload) {
             warn!(error = %format_args!("{error:#}"), "the relays' {kind} could not be recorded: {error:#}");
+        }
+    }
+}
+
+/// What the queue says of the run `run`, given the latest runs of the tasks
+/// in progress (`None` when they could not be read).
+fn relay_run(env: &mut HostEnv<'_>, in_progress: Option<&[TaskRun]>, run: &str) -> RelayRun {
+    let Some(in_progress) = in_progress else {
+        return RelayRun::Unknown;
+    };
+    if let Some(found) = in_progress.iter().find(|found| found.id().as_str() == run) {
+        return RelayRun::Found {
+            status: found.status(),
+            task_in_progress: true,
+        };
+    }
+    let Ok(id) = RunId::new(run) else {
+        return RelayRun::Missing;
+    };
+    match env.queue.run(&id) {
+        Ok(found) => RelayRun::Found {
+            status: found.status(),
+            task_in_progress: false,
+        },
+        Err(error) if error.downcast_ref::<RunNotFound>().is_some() => RelayRun::Missing,
+        Err(error) => {
+            warn!(run, error = %format_args!("{error:#}"), "the run of a relay could not be read: {error:#}");
+            RelayRun::Unknown
         }
     }
 }
