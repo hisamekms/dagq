@@ -1075,7 +1075,9 @@ pub(super) fn queue_broker_control(
 }
 
 /// The container runtime's parts behind the queue broker: the runs'
-/// relays as the supervisor recorded them on the queue at `db`, the dagq
+/// relays as the supervisor recorded them on the queue at `db`, the Claude
+/// credential the broker sends a worker's requests with (ADR-t2177-1
+/// decision 3), the dagq
 /// podman machine as that queue uses it (only looked at: a container's
 /// start makes it run), the image as `main_checkout` decides it (only
 /// looked at: a container's start builds it), then the parts not built
@@ -1086,9 +1088,11 @@ pub(super) fn container_parts(
     clock: Arc<dyn crate::application::Clock>,
     actor: Option<crate::domain::actor::ActorContext>,
 ) -> crate::application::broker_relay::RelayGate<
-    crate::application::podman_machine::MachineGate<
-        crate::application::container_image::ImageGate<
-            crate::infrastructure::container_runtime::UnbuiltContainer,
+    crate::infrastructure::claude_credential::ClaudeCredentialGate<
+        crate::application::podman_machine::MachineGate<
+            crate::application::container_image::ImageGate<
+                crate::infrastructure::container_runtime::UnbuiltContainer,
+            >,
         >,
     >,
 > {
@@ -1097,22 +1101,25 @@ pub(super) fn container_parts(
         records: Arc::new(crate::infrastructure::broker_relay::QueueRelayHealth {
             db: db.to_path_buf(),
         }),
-        container: crate::application::podman_machine::MachineGate {
-            podman: Arc::new(crate::infrastructure::podman_machine::PodmanCli::default()),
-            required: crate::domain::podman_machine::MachineMounts::of_queue(queue_dir),
-            container: crate::application::container_image::ImageGate {
-                specs: Arc::new(crate::infrastructure::container_image::CheckoutImages::new(
-                    main_checkout,
-                    queue_dir,
-                )),
-                records: Arc::new(crate::infrastructure::container_image::QueueImageRecords {
-                    db: db.to_path_buf(),
-                    actor,
-                }),
-                now: Arc::new(move || clock.now()),
-                container: crate::infrastructure::container_runtime::UnbuiltContainer,
+        container: crate::infrastructure::claude_credential::ClaudeCredentialGate::of_queue(
+            queue_dir,
+            crate::application::podman_machine::MachineGate {
+                podman: Arc::new(crate::infrastructure::podman_machine::PodmanCli::default()),
+                required: crate::domain::podman_machine::MachineMounts::of_queue(queue_dir),
+                container: crate::application::container_image::ImageGate {
+                    specs: Arc::new(crate::infrastructure::container_image::CheckoutImages::new(
+                        main_checkout,
+                        queue_dir,
+                    )),
+                    records: Arc::new(crate::infrastructure::container_image::QueueImageRecords {
+                        db: db.to_path_buf(),
+                        actor,
+                    }),
+                    now: Arc::new(move || clock.now()),
+                    container: crate::infrastructure::container_runtime::UnbuiltContainer,
+                },
             },
-        },
+        ),
     }
 }
 

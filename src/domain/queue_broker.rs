@@ -36,9 +36,20 @@
 //!   is `200` and then the tunnel's bytes, both ways; a refusal is
 //!   answered as below ([`judge_tunnel`] says which hosts are never
 //!   passed).
-//! - Any other request (a request for `api.anthropic.com`, any other
-//!   path or host) is refused `forbidden_destination` until a later
-//!   change adds that destination.
+//! - The Claude API's destination (ADR-t2177-1): any method on a path
+//!   under [`CLAUDE_PATH`] (Claude Code is given
+//!   `ANTHROPIC_BASE_URL=http://<broker>/anthropic`), the run token in
+//!   [`AUTHORIZATION_HEADER`] as `Bearer <token>` (Claude Code's
+//!   `ANTHROPIC_AUTH_TOKEN`), the run in [`RUN_HEADER`] (its
+//!   `ANTHROPIC_CUSTOM_HEADERS`), the body's length in `Content-Length` (up
+//!   to [`MAX_CLAUDE_BODY_BYTES`]). With a worker's run token of that run,
+//!   the request goes to [`CLAUDE_API_URL`] with the rest of the path, its
+//!   headers but those [`claude_headers`] drops, and the Claude credential
+//!   `host.toml` chooses ([`ClaudeCredentialKind`]) in place of the run
+//!   token; the answer is the API's status line, headers and body (an SSE
+//!   stream included) as they come, the connection closing at its end.
+//! - Any other request (a request that names `api.anthropic.com` as its
+//!   host, any other path or host) is refused `forbidden_destination`.
 //! - `GET` [`HEALTH_PATH`] answers the broker's build and pid without a
 //!   token: `up`, `down` and the supervisor look at the broker with it.
 //!
@@ -96,6 +107,16 @@ pub const REGISTRY_DEFAULT_PORT: u16 = 443;
 /// The Claude API's host: a destination of the runtime's own (ADR-t2114-2),
 /// never a tunnel's, whatever `dagq.toml` names.
 pub const CLAUDE_API_HOST: &str = "api.anthropic.com";
+/// The path the broker takes the Claude API's requests under: `<CLAUDE_PATH>/v1/messages`
+/// goes to `<CLAUDE_API_URL>/v1/messages` (ADR-t2177-1).
+pub const CLAUDE_PATH: &str = "/anthropic";
+/// Where the broker sends the Claude API's requests.
+pub const CLAUDE_API_URL: &str = "https://api.anthropic.com";
+/// The longest body of a Claude API request the broker reads: the API's own
+/// limit of a request.
+pub const MAX_CLAUDE_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// The header (case-insensitive) an API key goes in.
+pub const API_KEY_HEADER: &str = "x-api-key";
 /// The directory under [`BROKER_DIR`] that holds each verification token's
 /// run, under the hash of its value.
 pub const VERIFICATION_TOKENS_DIR: &str = "verification-tokens";
@@ -114,11 +135,14 @@ pub enum Destination {
     /// `CONNECT <host>:<port>`: a tunnel, passed only to a registry
     /// `dagq.toml` names ([`judge_tunnel`], ADR-t2257-1 decision 3).
     Tunnel { host: String, port: u16 },
+    /// A path under [`CLAUDE_PATH`]: the Claude API, at `path` (the rest of
+    /// the target, its query kept; `/` for the prefix alone).
+    ClaudeApi { path: String },
     /// Anything else, named by the host it asks for (a `CONNECT`'s
     /// authority without a port, an absolute URI's host, or the `Host`
     /// header) or else by its method and path (no user, password or query
-    /// is kept). None of them is passed yet: `api.anthropic.com` is a later
-    /// change's (ADR-t2114-1 decision 2).
+    /// is kept). None of them is passed: a request that names
+    /// `api.anthropic.com` itself is one (ADR-t2114-1 decision 2).
     Outside(String),
 }
 
@@ -134,6 +158,18 @@ impl Destination {
                 ("POST", QUEUE_PATH) => return Self::QueueService,
                 ("GET", HEALTH_PATH) => return Self::Health,
                 _ => {}
+            }
+            if method != "CONNECT"
+                && let Some(rest) = target.strip_prefix(CLAUDE_PATH)
+                && (rest.is_empty() || rest.starts_with(['/', '?']))
+            {
+                return Self::ClaudeApi {
+                    path: if rest.starts_with('/') {
+                        rest.to_owned()
+                    } else {
+                        format!("/{rest}")
+                    },
+                };
             }
         }
         if method == "CONNECT" {
@@ -173,6 +209,7 @@ impl Destination {
             Self::QueueService => "queue_service",
             Self::Health => "health",
             Self::Tunnel { host, .. } => host,
+            Self::ClaudeApi { .. } => CLAUDE_API_HOST,
             Self::Outside(name) => name,
         }
     }
@@ -473,6 +510,149 @@ pub fn judge_run_token(
         Some(status) if run_holds_token(status) => Ok(()),
         _ => Err(TokenRefusal::RunEnded),
     }
+}
+
+string_enum!(
+    /// Which Claude credential the broker puts in place of a run token: the
+    /// `kind` of `host.toml`'s `[claude_credential]`, chosen by a person for
+    /// the host, with no default (ADR-t2177-1 decisions 1 to 3). Only the
+    /// chosen one is read, and a failure never switches to the other.
+    ClaudeCredentialKind {
+    /// A long-lived token `claude setup-token` issued (a subscription's):
+    /// sent as the `Authorization` bearer. For one's own subscription used
+    /// by oneself.
+    SetupToken => "setup_token",
+    /// An API key a person issued in the Anthropic Console (paid by use):
+    /// sent in [`API_KEY_HEADER`], with no `Authorization`. Recommended for
+    /// an organization, a team, a shared host or work.
+    ApiKey => "api_key",
+});
+
+/// The Claude credential the broker sends with: its kind and its value,
+/// which `Debug` never shows.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClaudeCredential {
+    pub kind: ClaudeCredentialKind,
+    pub secret: String,
+}
+
+impl std::fmt::Debug for ClaudeCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeCredential")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What the broker and `doctor` tell a person who has chosen no Claude
+/// credential (ADR-t2177-1 decision 5).
+pub const CLAUDE_CREDENTIAL_GUIDANCE: &str = "choose the Claude credential of the queue broker in host.toml's \
+[claude_credential]: kind = \"setup_token\" (the long-lived token of `claude setup-token`; for your own \
+subscription used by you alone) or kind = \"api_key\" (an API key issued in the Anthropic Console, paid by \
+use; recommended for an organization, a team, a shared host or work), and file = the absolute path of a \
+file of mode 0600 that holds it, issued and put there by you";
+
+/// Why the broker has no Claude credential to send with: a container's
+/// worker cannot be used meanwhile (ADR-t2177-1 decision 3). No message
+/// names a credential's value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeCredentialProblem {
+    /// No `host.toml` chooses a `kind`.
+    NotSelected,
+    /// The `[claude_credential]` that chooses does not read: why.
+    Invalid(String),
+    /// The chosen kind's file is not there.
+    Missing(String),
+    /// The file is not a regular file of mode 0600 (no access for the group
+    /// or others): its path and mode.
+    NotPrivate { file: String, mode: u32 },
+    /// The file holds nothing.
+    Empty(String),
+    /// The file could not be read: why.
+    Unreadable(String),
+}
+
+impl ClaudeCredentialProblem {
+    /// The `reason` of the broker's refusal and of `doctor`.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::NotSelected => "not_selected",
+            Self::Invalid(_) => "invalid",
+            Self::Missing(_) => "missing",
+            Self::NotPrivate { .. } => "not_private",
+            Self::Empty(_) => "empty",
+            Self::Unreadable(_) => "unreadable",
+        }
+    }
+
+    /// What a person reads: the problem, and for [`Self::NotSelected`] the
+    /// guidance on which to choose.
+    pub fn message(&self) -> String {
+        match self {
+            Self::NotSelected => format!(
+                "no Claude credential is chosen for the queue broker: {CLAUDE_CREDENTIAL_GUIDANCE}"
+            ),
+            Self::Invalid(why) => format!("host.toml's [claude_credential] does not read: {why}"),
+            Self::Missing(file) => {
+                format!("the chosen Claude credential's file {file} is not there")
+            }
+            Self::NotPrivate { file, mode } => format!(
+                "the chosen Claude credential's file {file} is not a regular file of mode 0600 (mode {mode:04o}); \
+                 make it readable by its owner only"
+            ),
+            Self::Empty(file) => format!("the chosen Claude credential's file {file} is empty"),
+            Self::Unreadable(why) => format!("the chosen Claude credential cannot be read: {why}"),
+        }
+    }
+}
+
+/// Whether a credential file's `mode` (its permission bits) is 0600: read
+/// and written by its owner only (ADR-t2177-1 decision 3).
+pub fn credential_mode_private(mode: u32) -> bool {
+    mode & 0o7777 == 0o600
+}
+
+/// The headers a Claude API request goes on with: the client's but those
+/// of its own connection (hop-by-hop), its `Host` and length, the run token
+/// and the run, and any credential it sent (no run token leaves the
+/// broker); then `credential` as its kind sends it.
+pub fn claude_headers(
+    headers: &[(String, String)],
+    credential: &ClaudeCredential,
+) -> Vec<(String, String)> {
+    const DROPPED: [&str; 14] = [
+        "host",
+        "content-length",
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        PROXY_AUTHORIZATION_HEADER,
+        "transfer-encoding",
+        "te",
+        "trailer",
+        "upgrade",
+        "expect",
+        AUTHORIZATION_HEADER,
+        API_KEY_HEADER,
+        RUN_HEADER,
+    ];
+    let mut kept: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| {
+            !DROPPED
+                .iter()
+                .any(|dropped| name.trim().eq_ignore_ascii_case(dropped))
+        })
+        .cloned()
+        .collect();
+    kept.push(match credential.kind {
+        ClaudeCredentialKind::SetupToken => (
+            "Authorization".to_owned(),
+            format!("{BEARER}{}", credential.secret),
+        ),
+        ClaudeCredentialKind::ApiKey => (API_KEY_HEADER.to_owned(), credential.secret.clone()),
+    });
+    kept
 }
 
 /// A request the broker refuses on its own: the code a client reads and
@@ -968,5 +1148,135 @@ mod tests {
         assert!(attention_stands(Some(QUEUE_BROKER_DOWN)));
         assert!(!attention_stands(Some(QUEUE_BROKER_RUNNING)));
         assert!(!attention_stands(None));
+    }
+
+    #[test]
+    fn a_loopback_path_under_the_claude_prefix_goes_to_the_claude_api() {
+        for (method, target, path) in [
+            (
+                "POST",
+                "/anthropic/v1/messages?beta=true",
+                "/v1/messages?beta=true",
+            ),
+            ("GET", "/anthropic/v1/models", "/v1/models"),
+            ("POST", "/anthropic", "/"),
+            ("GET", "/anthropic?x=1", "/?x=1"),
+        ] {
+            for host in [None, Some("127.0.0.1:9"), Some("localhost")] {
+                let destination = Destination::of(method, target, host);
+                assert_eq!(
+                    destination,
+                    Destination::ClaudeApi {
+                        path: path.to_owned()
+                    },
+                    "{method} {target} {host:?}"
+                );
+                assert_eq!(destination.name(), CLAUDE_API_HOST);
+            }
+        }
+        // Not the prefix, another host, or a tunnel: not the Claude API.
+        for (method, target, host) in [
+            ("POST", "/anthropicx/v1/messages", None),
+            ("POST", "/anthropic/v1/messages", Some("api.anthropic.com")),
+            ("POST", "/v1/messages", None),
+            ("CONNECT", "/anthropic", None),
+        ] {
+            assert!(
+                !matches!(
+                    Destination::of(method, target, host),
+                    Destination::ClaudeApi { .. }
+                ),
+                "{method} {target} {host:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_chosen_credential_takes_the_run_token_s_place_and_nothing_else_of_the_run_goes_on() {
+        let headers: Vec<(String, String)> = [
+            ("Host", "127.0.0.1:9"),
+            ("Authorization", "Bearer run-token"),
+            ("X-Api-Key", "sent-by-the-client"),
+            ("x-dagq-run", "r1"),
+            ("Proxy-Authorization", "Basic xyz"),
+            ("Content-Length", "2"),
+            ("Connection", "keep-alive"),
+            ("Expect", "100-continue"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "a,b"),
+            ("Content-Type", "application/json"),
+            ("Accept", "text/event-stream"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .to_vec();
+        let kept = [
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "a,b"),
+            ("Content-Type", "application/json"),
+            ("Accept", "text/event-stream"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        let token = ClaudeCredential {
+            kind: ClaudeCredentialKind::SetupToken,
+            secret: "long-lived".into(),
+        };
+        let mut expected = kept.to_vec();
+        expected.push(("Authorization".into(), "Bearer long-lived".into()));
+        assert_eq!(claude_headers(&headers, &token), expected);
+        let key = ClaudeCredential {
+            kind: ClaudeCredentialKind::ApiKey,
+            secret: "sk-key".into(),
+        };
+        let mut expected = kept.to_vec();
+        expected.push(("x-api-key".into(), "sk-key".into()));
+        let sent = claude_headers(&headers, &key);
+        assert_eq!(sent, expected);
+        assert!(
+            !sent
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+                    || value.contains("run-token"))
+        );
+        // The value never shows in a debug print.
+        assert!(!format!("{key:?}").contains("sk-key"));
+    }
+
+    #[test]
+    fn a_credential_file_is_kept_to_its_owner_and_each_problem_says_so() {
+        assert!(credential_mode_private(0o600));
+        assert!(!credential_mode_private(0o400));
+        for mode in [0o640, 0o604, 0o644, 0o200, 0o000, 0o660] {
+            assert!(!credential_mode_private(mode), "{mode:o}");
+        }
+        assert_eq!(
+            "setup_token".parse::<ClaudeCredentialKind>().unwrap(),
+            ClaudeCredentialKind::SetupToken
+        );
+        assert_eq!(
+            "api_key".parse::<ClaudeCredentialKind>().unwrap(),
+            ClaudeCredentialKind::ApiKey
+        );
+        assert!("oauth".parse::<ClaudeCredentialKind>().is_err());
+        let not_selected = ClaudeCredentialProblem::NotSelected;
+        assert_eq!(not_selected.reason(), "not_selected");
+        assert!(not_selected.message().contains(CLAUDE_CREDENTIAL_GUIDANCE));
+        let open = ClaudeCredentialProblem::NotPrivate {
+            file: "/k".into(),
+            mode: 0o644,
+        };
+        assert_eq!(open.reason(), "not_private");
+        assert!(open.message().contains("0644"), "{}", open.message());
+        for (problem, reason) in [
+            (ClaudeCredentialProblem::Invalid("x".into()), "invalid"),
+            (ClaudeCredentialProblem::Missing("/k".into()), "missing"),
+            (ClaudeCredentialProblem::Empty("/k".into()), "empty"),
+            (
+                ClaudeCredentialProblem::Unreadable("x".into()),
+                "unreadable",
+            ),
+        ] {
+            assert_eq!(problem.reason(), reason);
+            assert!(!problem.message().is_empty());
+        }
     }
 }

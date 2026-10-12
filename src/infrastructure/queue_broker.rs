@@ -5,7 +5,9 @@
 //! it passes on to the queue service's unix socket ([`SystemBrokerBackend`]),
 //! the tunnels it opens to the registries of the `dagq.toml` in the main
 //! checkout the queue is bound to ([`SystemBrokerBackend::egress`],
-//! [`tunnel`]), the client a caller speaks to it with ([`exchange`],
+//! [`tunnel`]), the Claude API's requests it sends on with the credential
+//! `host.toml` chooses and whose answers it streams back as they come
+//! ([`forward_claude`], [`super::claude_credential`]), the client a caller speaks to it with ([`exchange`],
 //! [`call`], [`health`]), the tokens of `integrate`'s verifications
 //! ([`issue_verification`], [`revoke_verification`],
 //! [`SystemVerificationTokens`]) and the control `up`, `down` and the
@@ -43,14 +45,16 @@ use super::queue_service::{
     signal, socket_path, spawn_detached, unix_now, write_private,
 };
 use super::sqlite::SqliteQueue;
+use crate::application::queue_broker::ClaudeForward;
 use crate::application::queue_broker::{
     BrokerAnswer, BrokerBackend, BrokerProbe, BrokerRequest, QueueBroker, QueueBrokerControl,
     VerificationTokens,
 };
 use crate::application::{EventStore, Generators, RunNotFound, RunReads};
 use crate::domain::queue_broker::{
-    AUTHORIZATION_HEADER, BEARER, BROKER_DIR, Egress, HEALTH_PATH, LOCK_FILE, LOG_FILE,
-    MAX_BODY_BYTES, PROXY_AUTHORIZATION_HEADER, QUEUE_PATH, RUN_HEADER, STATE_FILE,
+    AUTHORIZATION_HEADER, BEARER, BROKER_DIR, CLAUDE_PATH, ClaudeCredential,
+    ClaudeCredentialProblem, Egress, HEALTH_PATH, LOCK_FILE, LOG_FILE, MAX_BODY_BYTES,
+    MAX_CLAUDE_BODY_BYTES, PROXY_AUTHORIZATION_HEADER, QUEUE_PATH, RUN_HEADER, STATE_FILE,
     VERIFICATION_CREDENTIALS_DIR, VERIFICATION_TOKENS_DIR, git_remote_host,
 };
 use crate::domain::queue_service::{MAX_ANSWER_BYTES, Principal, ServiceRequest, ServiceState};
@@ -75,6 +79,14 @@ const QUEUE_CHECK: Duration = Duration::from_secs(2);
 const MAX_LINE_BYTES: u64 = 8 * 1024;
 /// The most headers the broker reads of one request.
 const MAX_HEADERS: usize = 64;
+/// How long the broker waits to reach the Claude API.
+const CLAUDE_CONNECT_TIMEOUT_SECS: u64 = 15;
+/// The longest a Claude API request may take, its answer's stream
+/// included: past it the request is cut.
+const CLAUDE_MAX_TIME_SECS: u64 = 3600;
+/// The longest head (status line and headers) of the Claude API's answer
+/// the broker reads.
+const MAX_ANSWER_HEAD_BYTES: usize = 64 * 1024;
 
 /// `<queue dir>/broker`.
 pub fn broker_dir(queue_dir: &Path) -> PathBuf {
@@ -112,9 +124,11 @@ fn lock_held(queue_dir: &Path) -> bool {
 /// Read one HTTP/1.1 request from `reader`: the request line, the headers
 /// the broker reads ([`AUTHORIZATION_HEADER`],
 /// [`PROXY_AUTHORIZATION_HEADER`], [`RUN_HEADER`], `Host`,
-/// `Content-Length`) and a body of up to [`MAX_BODY_BYTES`], whose length
-/// `Content-Length` gives (a `Transfer-Encoding` is refused). A request
-/// that does not read comes back with what was read of it.
+/// `Content-Length`) with every header as it came, and a body of up to
+/// [`MAX_BODY_BYTES`] ([`MAX_CLAUDE_BODY_BYTES`] for a path under
+/// [`CLAUDE_PATH`]), whose length `Content-Length` gives (a
+/// `Transfer-Encoding` is refused). A request that does not read comes back
+/// with what was read of it.
 pub fn read_request(
     reader: &mut impl BufRead,
 ) -> Result<BrokerRequest, (Box<BrokerRequest>, anyhow::Error)> {
@@ -141,6 +155,16 @@ pub fn read_request(
     if !version.starts_with("HTTP/1.") {
         fail!(anyhow::anyhow!("not an HTTP/1 request"));
     }
+    // Only the Claude API's own paths (as `Destination::of` reads them)
+    // may carry its larger bodies.
+    let claude_path = target
+        .strip_prefix(CLAUDE_PATH)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?']));
+    let max_body = if claude_path {
+        MAX_CLAUDE_BODY_BYTES
+    } else {
+        MAX_BODY_BYTES
+    };
     let mut length = 0usize;
     for _ in 0..=MAX_HEADERS {
         let line = match read_line(reader) {
@@ -166,6 +190,9 @@ pub fn read_request(
             continue;
         };
         let value = value.trim().to_owned();
+        request
+            .headers
+            .push((name.trim().to_owned(), value.clone()));
         match name.trim().to_ascii_lowercase().as_str() {
             AUTHORIZATION_HEADER => request.authorization = Some(value),
             PROXY_AUTHORIZATION_HEADER => request.proxy_authorization = Some(value),
@@ -181,7 +208,7 @@ pub fn read_request(
                 });
             }
             "content-length" => match value.parse::<usize>() {
-                Ok(read) if read <= MAX_BODY_BYTES => length = read,
+                Ok(read) if read <= max_body => length = read,
                 Ok(_) => {
                     problem.get_or_insert_with(|| anyhow::anyhow!("the request is too long"));
                 }
@@ -463,6 +490,9 @@ pub struct SystemBrokerBackend {
     pub db: PathBuf,
     pub queue_dir: PathBuf,
     pub generators: Generators,
+    /// The host-wide `host.toml`, under the queue's
+    /// ([`super::claude_credential::load`]).
+    pub host_wide: Option<PathBuf>,
 }
 
 impl SystemBrokerBackend {
@@ -543,6 +573,10 @@ impl BrokerBackend for SystemBrokerBackend {
 
     fn verification_run(&self, token: &str) -> Result<Option<RunId>> {
         verification_run(&self.queue_dir, token)
+    }
+
+    fn claude_credential(&self) -> Result<ClaudeCredential, ClaudeCredentialProblem> {
+        super::claude_credential::read(&self.queue_dir, self.host_wide.as_deref())
     }
 }
 
@@ -693,6 +727,13 @@ pub struct BrokerServeOptions {
     /// binary's ([`crate::VERSION`]); a test's broker stands in for another
     /// binary's with another.
     pub build: String,
+    /// Where the Claude API's requests go:
+    /// [`crate::domain::queue_broker::CLAUDE_API_URL`]; a test's fake
+    /// upstream.
+    pub claude_api: String,
+    /// The host-wide `host.toml` the Claude credential is read from under
+    /// the queue's: [`super::kpi_config::host_wide_file`]; none in a test.
+    pub host_wide: Option<PathBuf>,
 }
 
 /// Run the queue's broker until `stop` is set, its queue goes or its owner
@@ -734,6 +775,7 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
         db: options.db.clone(),
         queue_dir: queue_dir.clone(),
         generators: options.generators.clone(),
+        host_wide: options.host_wide.clone(),
     });
     let mut served = 0u64;
     let mut checked = Instant::now();
@@ -755,8 +797,12 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
                 served += 1;
                 let backend = backend.clone();
                 let build = options.build.clone();
+                let claude = ClaudeUpstream {
+                    url: options.claude_api.clone(),
+                    scratch: dir.clone(),
+                };
                 thread::spawn(move || {
-                    if let Err(error) = answer(stream, &*backend, &build, pid) {
+                    if let Err(error) = answer(stream, &*backend, &build, pid, &claude) {
                         warn!("a queue broker connection failed: {error:#}");
                     }
                 });
@@ -778,7 +824,13 @@ pub fn serve(options: &BrokerServeOptions) -> Result<Value> {
 }
 
 /// Read one request from `stream`, answer it, and close.
-fn answer(stream: TcpStream, backend: &dyn BrokerBackend, build: &str, pid: u32) -> Result<()> {
+fn answer(
+    stream: TcpStream,
+    backend: &dyn BrokerBackend,
+    build: &str,
+    pid: u32,
+    claude: &ClaudeUpstream,
+) -> Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
@@ -803,11 +855,240 @@ fn answer(stream: TcpStream, backend: &dyn BrokerBackend, build: &str, pid: u32)
             (*read, answer)
         }
     };
-    match &answer.tunnel {
-        Some((host, port)) => tunnel(&stream, &reader, host, *port, |error| {
+    match (&answer.tunnel, &answer.claude) {
+        (Some((host, port)), _) => tunnel(&stream, &reader, host, *port, |error| {
             broker.tunnel_failed(&request, &error)
         }),
-        None => Ok(write_answer(&mut &stream, &answer)?),
+        (None, Some(forward)) => forward_claude(&stream, claude, forward, &request.body, |error| {
+            broker.claude_failed(&request, &error)
+        }),
+        (None, None) => Ok(write_answer(&mut &stream, &answer)?),
+    }
+}
+
+/// Where the broker sends the Claude API's requests, and the directory
+/// (the broker's, mode 0700) a request's body waits in while it is sent.
+#[derive(Debug, Clone)]
+pub struct ClaudeUpstream {
+    pub url: String,
+    pub scratch: PathBuf,
+}
+
+/// Send `forward` with `body` to the Claude API and write its answer to
+/// `stream` as it comes: the status line and headers (with `Connection:
+/// close` in place of the API's own connection's), then the body's bytes
+/// untouched (a chunked SSE stream stays chunked, each event passed on as
+/// it arrives), until the API ends it or `stream` goes. An API that is not
+/// reached, before any byte of its answer, is answered with `failed`'s
+/// refusal.
+///
+/// `curl` sends it (HTTP/1.1, no `~/.curlrc`, no redirect followed, the
+/// answer's encodings untouched): the request's headers, the credential
+/// among them, reach it on stdin as its config, never in its arguments,
+/// and the body from a file of mode 0600 in [`ClaudeUpstream::scratch`],
+/// removed once sent.
+pub fn forward_claude(
+    stream: &TcpStream,
+    upstream: &ClaudeUpstream,
+    forward: &ClaudeForward,
+    body: &[u8],
+    failed: impl FnOnce(anyhow::Error) -> BrokerAnswer,
+) -> Result<()> {
+    let body_file = upstream
+        .scratch
+        .join(format!("claude-{}.body", uuid::Uuid::new_v4().simple()));
+    struct Remove<'a>(&'a Path);
+    impl Drop for Remove<'_> {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(self.0);
+        }
+    }
+    let _remove = Remove(&body_file);
+    let config = (|| -> Result<String> {
+        if !body.is_empty() {
+            write_private(&body_file, body)?;
+        }
+        Ok(curl_config(
+            &format!("{}{}", upstream.url.trim_end_matches('/'), forward.path),
+            forward,
+            (!body.is_empty()).then_some(body_file.as_path()),
+        ))
+    })();
+    let sent = config.and_then(|config| {
+        let mut child = Command::new("curl")
+            // `-g`: a `[` or `{` of the path is no glob; a host's proxy's
+            // `CONNECT` answer is not written before the API's.
+            .args(["-q", "-sS", "-g", "--http1.1", "-i", "--raw", "-N"])
+            .arg("--suppress-connect-headers")
+            .args(["--noproxy", "localhost,127.0.0.1,::1"])
+            .args([
+                "--connect-timeout",
+                &CLAUDE_CONNECT_TIMEOUT_SECS.to_string(),
+            ])
+            .args(["--max-time", &CLAUDE_MAX_TIME_SECS.to_string()])
+            .args(["--config", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("start curl")?;
+        if let Some(mut stdin) = child.stdin.take()
+            && let Err(error) = stdin.write_all(config.as_bytes())
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::Error::new(error).context("give curl the request"));
+        }
+        Ok(child)
+    });
+    let mut child = match sent {
+        Ok(child) => child,
+        Err(error) => {
+            write_answer(&mut &*stream, &failed(error))?;
+            return Ok(());
+        }
+    };
+    let mut output = BufReader::new(child.stdout.take().context("curl's stdout")?);
+    let head = match read_answer_head(&mut output) {
+        Ok(Some(head)) => head,
+        // Nothing came (curl says why on stderr), or a head that does not
+        // read: what may follow it is not waited for.
+        outcome => {
+            if outcome.is_err() {
+                let _ = child.kill();
+            }
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            let status = child.wait()?;
+            let error = match outcome {
+                Err(error) => error,
+                _ => anyhow::anyhow!(
+                    "the Claude API was not reached (curl {status}): {}",
+                    stderr.trim()
+                ),
+            };
+            write_answer(&mut &*stream, &failed(error))?;
+            return Ok(());
+        }
+    };
+    let copied = (|| -> std::io::Result<()> {
+        (&*stream).write_all(&head)?;
+        let mut buffer = [0u8; 16 * 1024];
+        loop {
+            let read = match output.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(read) => read,
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            };
+            (&*stream).write_all(&buffer[..read])?;
+        }
+    })();
+    if copied.is_err() {
+        // The client went: stop sending for it.
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    let _ = stream.shutdown(Shutdown::Write);
+    Ok(())
+}
+
+/// curl's config for `forward` to `url`: the method, the URL, each header
+/// (an `Expect:` left empty, so no `100 Continue` comes first), and the
+/// body's file.
+fn curl_config(url: &str, forward: &ClaudeForward, body: Option<&Path>) -> String {
+    fn quoted(text: &str) -> String {
+        let mut out = String::from("\"");
+        for c in text.chars() {
+            match c {
+                '"' | '\\' => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                '\n' | '\r' => out.push(' '),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+    let mut config = format!(
+        "url = {}\nrequest = {}\nheader = \"Expect:\"\n",
+        quoted(url),
+        quoted(&forward.method)
+    );
+    for (name, value) in &forward.headers {
+        config.push_str(&format!(
+            "header = {}\n",
+            quoted(&format!("{name}: {value}"))
+        ));
+    }
+    if let Some(body) = body {
+        config.push_str(&format!(
+            "data-binary = {}\n",
+            quoted(&format!("@{}", body.display()))
+        ));
+    }
+    config
+}
+
+/// The head (status line and headers) of the answer `curl -i` writes,
+/// ready to pass on: a `1xx` head before the last is dropped, and the
+/// API's `Connection` and `Keep-Alive` give way to `Connection: close`
+/// (the broker's connection carries one request). `None` when nothing
+/// came.
+fn read_answer_head(output: &mut impl BufRead) -> Result<Option<Vec<u8>>> {
+    loop {
+        let mut lines: Vec<String> = Vec::new();
+        let mut read = 0usize;
+        loop {
+            let mut line = Vec::new();
+            let count = output
+                .take((MAX_ANSWER_HEAD_BYTES - read) as u64 + 1)
+                .read_until(b'\n', &mut line)?;
+            if count == 0 {
+                if lines.is_empty() {
+                    return Ok(None);
+                }
+                bail!("the Claude API's answer ends in its head");
+            }
+            read += count;
+            ensure!(
+                read <= MAX_ANSWER_HEAD_BYTES,
+                "the Claude API's answer has a head too long"
+            );
+            let line = String::from_utf8(line).context("the Claude API's answer is not UTF-8")?;
+            let line = line.trim_end_matches(['\r', '\n']).to_owned();
+            if line.is_empty() {
+                break;
+            }
+            lines.push(line);
+        }
+        let status = lines[0]
+            .split_whitespace()
+            .nth(1)
+            .and_then(|status| status.parse::<u16>().ok())
+            .with_context(|| {
+                format!("no HTTP status in the Claude API's answer: {:?}", lines[0])
+            })?;
+        if (100..200).contains(&status) {
+            continue;
+        }
+        let mut head = String::new();
+        for line in lines.iter().filter(|line| {
+            line.split_once(':').is_none_or(|(name, _)| {
+                !["connection", "keep-alive", "proxy-connection"]
+                    .iter()
+                    .any(|dropped| name.trim().eq_ignore_ascii_case(dropped))
+            })
+        }) {
+            head.push_str(line);
+            head.push_str("\r\n");
+        }
+        head.push_str("Connection: close\r\n\r\n");
+        return Ok(Some(head.into_bytes()));
     }
 }
 
@@ -1082,6 +1363,7 @@ mod tests {
                 status: 403,
                 body: b"{}".to_vec(),
                 tunnel: None,
+                claude: None,
             },
         )
         .unwrap();

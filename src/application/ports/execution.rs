@@ -1581,8 +1581,9 @@ pub struct DiffNumbers {
 }
 
 /// Whether the container runtime can run a target now (goal 38): the
-/// dagq machine, the image, the queue's broker, the relay and the
-/// long-lived token it needs, each a later task's part to answer for. A
+/// queue's broker, the Claude credential `host.toml` chooses for a
+/// worker's requests (a long-lived token or an API key, ADR-t2177-1), the
+/// dagq machine, the image and the relay, each answering for its part. A
 /// target set to the container that cannot be used waits, never on the
 /// host (ADR-t2113-1 decision 4).
 pub trait ContainerRuntime {

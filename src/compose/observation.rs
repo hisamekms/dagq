@@ -872,6 +872,12 @@ impl OneShot {
         // The host's `[update]`, with what was taken as its default
         // (ADR-t618-1 decision 3).
         report["release_update"] = serde_json::to_value(host_update(db))?;
+        // The Claude credential the queue broker sends a container's
+        // worker with, chosen in host.toml (ADR-t2177-1): never its value.
+        report["claude_credential"] = crate::infrastructure::claude_credential::report(
+            db.parent().unwrap_or(Path::new(".")),
+            crate::infrastructure::kpi_config::host_wide_file().as_deref(),
+        );
         // What `graph --format svg` draws with (ADR-0077 decision 4).
         report["d2"] = serde_json::to_value(crate::infrastructure::d2::Tools::on(
             std::env::var_os("PATH").as_deref(),

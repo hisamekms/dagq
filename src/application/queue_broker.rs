@@ -6,7 +6,10 @@
 //! of the run it names, and goes on to the service with that token, so
 //! the service acts as the run's principal; a `CONNECT` opens a tunnel
 //! only to a registry `dagq.toml` names, with a worker's run token or its
-//! verification's (ADR-t2257-1 decision 3); how `integrate` issues the
+//! verification's (ADR-t2257-1 decision 3); a request for the Claude API
+//! goes on only with a worker's run token of the run it names, with the
+//! Claude credential `host.toml` chooses in the token's place
+//! (ADR-t2177-1); how `integrate` issues the
 //! token of each verification and revokes it at its end
 //! ([`VerificationTokens`], [`VerificationToken`]); and how the container
 //! runtime cannot be used while the broker does not run ([`BrokerGate`]).
@@ -27,8 +30,9 @@ use crate::domain::RunId;
 use crate::domain::RunStatus;
 use crate::domain::container_runtime::{Availability, RuntimeTarget};
 use crate::domain::queue_broker::{
-    BEARER, Destination, Egress, Refusal, SERVICE_NAME, TokenRefusal, basic_credentials,
-    judge_run_token, judge_tunnel, judge_verification_token,
+    BEARER, ClaudeCredential, ClaudeCredentialProblem, Destination, Egress, Refusal, SERVICE_NAME,
+    TokenRefusal, basic_credentials, claude_headers, judge_run_token, judge_tunnel,
+    judge_verification_token,
 };
 use crate::domain::queue_service::{
     Principal, ServiceErrorCode, ServiceRequest, ServiceResponse, ServiceState,
@@ -133,6 +137,10 @@ pub trait BrokerBackend: Send + Sync {
     /// The run whose verification `token` was issued for; `None` for a
     /// token not issued for a verification, or revoked.
     fn verification_run(&self, token: &str) -> Result<Option<RunId>>;
+    /// The Claude credential `host.toml` chooses now, read for each request
+    /// so a person's change takes effect without a restart; why there is
+    /// none to send with. Only the chosen kind is read.
+    fn claude_credential(&self) -> Result<ClaudeCredential, ClaudeCredentialProblem>;
 }
 
 /// How `integrate` issues the token of a run's verification and revokes it
@@ -195,17 +203,49 @@ pub struct BrokerRequest {
     pub proxy_authorization: Option<String>,
     /// The run header ([`crate::domain::queue_broker::RUN_HEADER`]).
     pub run: Option<String>,
+    /// Every header as it came, in order: what a Claude API request goes
+    /// on with ([`claude_headers`]).
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
 /// The broker's answer: an HTTP status and the body, JSON; or a tunnel to
 /// open to a host and port, whose own answer is the broker's to write
-/// once it reaches them.
+/// once it reaches them; or a request to send on to the Claude API, whose
+/// answer is the API's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerAnswer {
     pub status: u16,
     pub body: Vec<u8>,
     pub tunnel: Option<(String, u16)>,
+    pub claude: Option<ClaudeForward>,
+}
+
+/// A request to send on to the Claude API with the request's body: its
+/// method, the path on the API and the headers, the credential among them
+/// (which `Debug` never shows).
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClaudeForward {
+    pub method: String,
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for ClaudeForward {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeForward")
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// The broker's use cases on a backend.
@@ -241,6 +281,7 @@ impl QueueBroker<'_> {
                     status: 200,
                     body,
                     tunnel: None,
+                    claude: None,
                 },
                 Err(refused) => {
                     self.refused(request, request.run.as_deref(), &destination, refused)
@@ -253,11 +294,71 @@ impl QueueBroker<'_> {
                         status: 200,
                         body: Vec::new(),
                         tunnel: Some((host.clone(), port)),
+                        claude: None,
                     },
                     Err(refused) => self.refused(request, run.as_deref(), &destination, refused),
                 }
             }
+            Destination::ClaudeApi { ref path } => match self.to_claude(request, path) {
+                Ok(forward) => BrokerAnswer {
+                    status: 200,
+                    body: Vec::new(),
+                    tunnel: None,
+                    claude: Some(forward),
+                },
+                Err(refused) => {
+                    self.refused(request, request.run.as_deref(), &destination, refused)
+                }
+            },
         }
+    }
+
+    /// Check the run token of a request for the Claude API (a worker's of
+    /// the run it names; never a verification's) and take the Claude
+    /// credential `host.toml` chooses: what to send on, or why not. A
+    /// credential there is none of is refused `unauthenticated`, so the
+    /// worker's turn stops at the login as at an expired one (ADR-t2114-2
+    /// decision 4).
+    fn to_claude(&self, request: &BrokerRequest, path: &str) -> Result<ClaudeForward, Refused> {
+        self.check_token(
+            request.authorization.as_deref().and_then(bearer),
+            request.run.as_deref(),
+            false,
+        )?;
+        let credential = self
+            .backend
+            .claude_credential()
+            .map_err(|problem| Refused {
+                refusal: Refusal {
+                    code: ServiceErrorCode::Unauthenticated,
+                    reason: format!("claude_credential_{}", problem.reason()),
+                },
+                token_run: None,
+                message: Some(problem.message()),
+            })?;
+        Ok(ClaudeForward {
+            method: request.method.clone(),
+            path: path.to_owned(),
+            headers: claude_headers(&request.headers, &credential),
+        })
+    }
+
+    /// Refuse a Claude API `request` passed whose API did not answer, with
+    /// `error`, as the service that does not answer is (`unreachable`).
+    pub fn claude_failed(&self, request: &BrokerRequest, error: &anyhow::Error) -> BrokerAnswer {
+        let destination =
+            Destination::of(&request.method, &request.target, request.host.as_deref());
+        self.refuse(
+            request,
+            request.run.as_deref(),
+            &destination,
+            None,
+            Refusal {
+                code: ServiceErrorCode::Unreachable,
+                reason: format!("{error:#}"),
+            },
+            None,
+        )
     }
 
     /// Refuse a tunnel `request` passed whose host did not answer, with
@@ -571,6 +672,7 @@ fn answer(status: u16, body: &Value) -> BrokerAnswer {
         status,
         body: serde_json::to_vec(body).unwrap_or_default(),
         tunnel: None,
+        claude: None,
     }
 }
 
@@ -604,6 +706,7 @@ mod tests {
 
     use super::*;
     use crate::domain::TaskId;
+    use crate::domain::queue_broker::ClaudeCredentialKind;
     use crate::domain::queue_service::{API_VERSION, UseCase};
 
     /// Run `r1` of task 1 in `status`, its worker's token `good`, a job's
@@ -614,6 +717,7 @@ mod tests {
         status: Option<RunStatus>,
         reachable: bool,
         egress: Option<Egress>,
+        credential: Result<ClaudeCredential, ClaudeCredentialProblem>,
         forwarded: Mutex<Vec<Value>>,
         denied: Mutex<Vec<Value>>,
     }
@@ -624,6 +728,7 @@ mod tests {
                 status,
                 reachable: true,
                 egress: Some(Egress::default()),
+                credential: Err(ClaudeCredentialProblem::NotSelected),
                 forwarded: Mutex::new(Vec::new()),
                 denied: Mutex::new(Vec::new()),
             }
@@ -667,6 +772,9 @@ mod tests {
         }
         fn verification_run(&self, token: &str) -> Result<Option<RunId>> {
             Ok((token == "verify").then(|| RunId::new("r1").unwrap()))
+        }
+        fn claude_credential(&self) -> Result<ClaudeCredential, ClaudeCredentialProblem> {
+            self.credential.clone()
         }
     }
 
@@ -718,6 +826,167 @@ mod tests {
         assert_eq!(forwarded[0]["use_case"], "show");
         assert_eq!(forwarded[0]["params"], json!({"id": 1}));
         assert!(backend.denied.lock().unwrap().is_empty());
+    }
+
+    fn claude_request(token: Option<&str>, run: Option<&str>) -> BrokerRequest {
+        let mut headers = vec![
+            ("Host".to_owned(), "127.0.0.1:1".to_owned()),
+            ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
+        ];
+        if let Some(token) = token {
+            headers.push(("Authorization".to_owned(), format!("Bearer {token}")));
+        }
+        if let Some(run) = run {
+            headers.push(("x-dagq-run".to_owned(), run.to_owned()));
+        }
+        BrokerRequest {
+            method: "POST".into(),
+            target: "/anthropic/v1/messages?beta=true".into(),
+            host: Some("127.0.0.1:1".into()),
+            authorization: token.map(|token| format!("Bearer {token}")),
+            run: run.map(str::to_owned),
+            headers,
+            body: b"{}".to_vec(),
+            ..BrokerRequest::default()
+        }
+    }
+
+    fn with_credential(status: Option<RunStatus>, kind: ClaudeCredentialKind) -> Backend {
+        Backend {
+            credential: Ok(ClaudeCredential {
+                kind,
+                secret: "the-secret".into(),
+            }),
+            ..Backend::new(status)
+        }
+    }
+
+    #[test]
+    fn a_claude_request_with_its_run_s_token_goes_on_with_the_chosen_credential_only() {
+        for (kind, header, value) in [
+            (
+                ClaudeCredentialKind::SetupToken,
+                "Authorization",
+                "Bearer the-secret",
+            ),
+            (ClaudeCredentialKind::ApiKey, "x-api-key", "the-secret"),
+        ] {
+            let backend = with_credential(Some(RunStatus::Running), kind);
+            let answer = QueueBroker {
+                backend: &backend,
+                build: "b1",
+                pid: 7,
+            }
+            .handle(&claude_request(Some("good"), Some("r1")));
+            let forward = answer.claude.expect("sent on");
+            assert_eq!(forward.method, "POST");
+            assert_eq!(forward.path, "/v1/messages?beta=true");
+            assert_eq!(
+                forward.headers,
+                vec![
+                    ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
+                    (header.to_owned(), value.to_owned()),
+                ]
+            );
+            assert!(!format!("{forward:?}").contains("the-secret"));
+            assert!(backend.denied.lock().unwrap().is_empty());
+            assert!(backend.forwarded.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_claude_request_without_its_run_s_live_token_or_a_credential_is_refused_and_recorded() {
+        use ClaudeCredentialKind::SetupToken;
+        for (backend, token, run, reason) in [
+            (
+                with_credential(Some(RunStatus::Running), SetupToken),
+                None,
+                Some("r1"),
+                "missing_token",
+            ),
+            (
+                with_credential(Some(RunStatus::Running), SetupToken),
+                Some("revoked"),
+                Some("r1"),
+                "unknown_token",
+            ),
+            (
+                with_credential(Some(RunStatus::Running), SetupToken),
+                Some("good"),
+                Some("r2"),
+                "other_run",
+            ),
+            (
+                with_credential(Some(RunStatus::Integrated), SetupToken),
+                Some("good"),
+                Some("r1"),
+                "run_ended",
+            ),
+            (
+                with_credential(Some(RunStatus::Running), SetupToken),
+                Some("verify"),
+                Some("r1"),
+                "verification_token",
+            ),
+            (
+                Backend::new(Some(RunStatus::Running)),
+                Some("good"),
+                Some("r1"),
+                "claude_credential_not_selected",
+            ),
+            (
+                Backend {
+                    credential: Err(ClaudeCredentialProblem::NotPrivate {
+                        file: "/k".into(),
+                        mode: 0o644,
+                    }),
+                    ..Backend::new(Some(RunStatus::Running))
+                },
+                Some("good"),
+                Some("r1"),
+                "claude_credential_not_private",
+            ),
+        ] {
+            let answer = QueueBroker {
+                backend: &backend,
+                build: "b1",
+                pid: 7,
+            }
+            .handle(&claude_request(token, run));
+            assert!(answer.claude.is_none(), "{reason}");
+            assert_eq!(answer.status, 401, "{reason}");
+            let body: Value = serde_json::from_slice(&answer.body).unwrap();
+            assert_eq!(body["error"]["code"], "unauthenticated");
+            assert!(!body.to_string().contains("the-secret"), "{body}");
+            if reason == "claude_credential_not_selected" {
+                assert!(
+                    body["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("api_key"),
+                    "{body}"
+                );
+            }
+            let denied = backend.denied.lock().unwrap();
+            assert_eq!(denied.len(), 1, "{reason}");
+            assert_eq!(denied[0]["reason"], reason);
+            assert_eq!(denied[0]["destination"], "api.anthropic.com");
+        }
+        // An API that does not answer is the broker's refusal.
+        let backend = with_credential(Some(RunStatus::Running), SetupToken);
+        let broker = QueueBroker {
+            backend: &backend,
+            build: "b1",
+            pid: 7,
+        };
+        let failed = broker.claude_failed(
+            &claude_request(Some("good"), Some("r1")),
+            &anyhow!("no route"),
+        );
+        assert_eq!(failed.status, 502);
+        let denied = backend.denied.lock().unwrap();
+        assert_eq!(denied[0]["code"], "unreachable");
+        assert_eq!(denied[0]["destination"], "api.anthropic.com");
     }
 
     #[test]

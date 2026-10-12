@@ -44,6 +44,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
 - 使えるかは`ContainerRuntime`のport（`application::ports`）に問う。
   supervisorと`integrate`は`application::queue_broker::BrokerGate`越しに問い、queueのbrokerが動いていなければそれを理由に使えないと答える（[Queue broker](queue-broker.md#見張りと知らせ)）。
   brokerの奥では`application::broker_relay::RelayGate`がrunのrelayの見張りの記録を見て、relayを動かし続けられない間は理由つきで使えないと答える（下の「brokerへの経路」）。
+  その奥では`infrastructure::claude_credential::ClaudeCredentialGate`が、workerの適用先について`host.toml`で人が選んだClaudeの資格情報（既定なし）を見て、未選択・欠け・0600でなければ選び方を添えて使えないと答える（[Queue broker](queue-broker.md#claudeの認証の差し替え)、[ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md)決定3）。
   その奥で`application::podman_machine::MachineGate`がdagq専用のmachineを見て、使えなければ理由つきで使えないと答える（下の「dagq専用のmachine」）。
   machineの奥では`application::container_image::ImageGate`がimageを見る（下の「image」）。
   その奥の、残りの部品が揃うまでの実装`infrastructure::container_runtime::UnbuiltContainer`は、常に理由つきで使えないと答える。
@@ -166,7 +167,5 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
 次の部品が揃ったら、それぞれが`ContainerRuntime`の答えを埋める。
 どれかが欠ければ使えないと答え、上の境界のまま控える。
 
-- hostのqueueのbrokerの`api.anthropic.com`の宛てと長期tokenの差し替え（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)・[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）。
-  brokerのプロセスとqueue service・`dagq.toml`が挙げるpackage registryの宛ては[Queue broker](queue-broker.md)。
 - runごとのcloneとbundleの取り込み（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）、containerの中のsccache（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
 - worker・resumeとverificationのcontainerの実行（`ExecutorBackend::Container`の実装）。

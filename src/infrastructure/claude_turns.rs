@@ -226,6 +226,17 @@ impl ClaudeTurnReader {
         if self.usage_limit.is_some() || status == Some(429) {
             return TurnFailure::UsageLimit;
         }
+        // An API key's balance that ran out (ADR-t2177-1): the API answers
+        // a 400 whose error names the credit balance, or a billing error.
+        // Read only from a result that names the API's error status, so a
+        // turn whose own text quotes these words is not taken for it.
+        let said = message.to_ascii_lowercase();
+        if status == Some(402)
+            || (status.is_some()
+                && (said.contains("credit balance is too low") || said.contains("billing_error")))
+        {
+            return TurnFailure::UsageLimit;
+        }
         match job_wall(&format!("{message}\n{stderr}")) {
             Some(Wall::Authentication) => return TurnFailure::Authentication,
             Some(Wall::UsageLimit) => return TurnFailure::UsageLimit,
@@ -661,6 +672,14 @@ mod tests {
         let result = reader.finish(Some(&exit(1)), "error: something broke\n");
         assert_eq!(result.failure, Some(TurnFailure::Other));
         assert_eq!(result.message.as_deref(), Some("error: something broke"));
+        // A turn that only quotes the words, with no API error, is not it.
+        let (mut reader, _) = read(&[
+            json!({"type": "result", "is_error": true, "result": "grep found billing_error in claude_turns.rs"}),
+        ]);
+        assert_eq!(
+            reader.finish(Some(&exit(1)), "").failure,
+            Some(TurnFailure::Other)
+        );
         // No result, a clean exit: still a failure, with the last text.
         let (mut reader, _) = read(&[
             json!({"type": "assistant", "message": {"model": "m", "content": [{"type": "text", "text": "halfway"}]}}),
@@ -684,6 +703,35 @@ mod tests {
                 .failure,
             Some(TurnFailure::Authentication)
         );
+        // An API key the API refuses, or whose balance ran out, as the
+        // queue broker passes the API's answer on (ADR-t2177-1).
+        let (mut reader, _) = read(&[
+            json!({"type": "result", "is_error": true, "api_error_status": 401, "result": "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}"}),
+        ]);
+        assert_eq!(
+            reader.finish(Some(&exit(1)), "").failure,
+            Some(TurnFailure::Authentication)
+        );
+        for (status, said) in [
+            (
+                400,
+                "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.\"}}",
+            ),
+            (402, "API Error: 402"),
+            (
+                400,
+                "API Error: 400 {\"error\":{\"type\":\"billing_error\"}}",
+            ),
+        ] {
+            let (mut reader, _) = read(&[
+                json!({"type": "result", "is_error": true, "api_error_status": status, "result": said}),
+            ]);
+            assert_eq!(
+                reader.finish(Some(&exit(1)), "").failure,
+                Some(TurnFailure::UsageLimit),
+                "{said}"
+            );
+        }
         // Failed errors of a result are joined.
         let (mut reader, _) = read(&[
             json!({"type": "result", "subtype": "error_max_turns", "is_error": true, "errors": ["Reached maximum number of turns (1)"]}),

@@ -723,9 +723,9 @@ pub fn supervise_with_reviewer(
             user_config: options.user_config.clone(),
             verification_timeout: options.verification_timeout,
         }),
-        // The queue broker, the runs' relays, the dagq machine and the image
-        // are the parts of the container runtime built yet (goal 38): a
-        // target set to it waits, and says why.
+        // The queue broker, the Claude credential, the runs' relays, the
+        // dagq machine and the image are the parts of the container runtime
+        // built yet (goal 38): a target set to it waits, and says why.
         container: Arc::new(crate::application::queue_broker::BrokerGate {
             broker: host::queue_broker_control(&db, options.queue_broker.as_ref()),
             container: host::container_parts(

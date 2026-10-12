@@ -55,6 +55,12 @@ A person can stop the workers' move to the other provider with `[provider_fallba
 
 Whether to turn it off is the person's call; do not edit `dagq.toml` to route around a wall.
 
+## A container worker's Claude credential
+
+A worker whose `[roles.worker]` runs in the container holds no Claude credential: its Claude Code sends its run token to the queue broker, which puts in its place the credential a person chose for the host in `host.toml`'s `[claude_credential]` (the queue's `host.toml`, else the host-wide one; never `dagq.toml`): `kind = "setup_token"` (the long-lived token of `claude setup-token`, sent as the bearer) or `kind = "api_key"` (an API key issued in the Anthropic Console, paid by use), and `file` = the absolute path of a mode-0600 file holding it. There is no default: until a kind is chosen and its file is there and private, the container worker is not claimed (`claim_deferred` with `container_unavailable`, and the container's attention says why). `doctor`'s `claude_credential` shows the kind, the file, whether it is present, its mode and the problem, never the value.
+
+Which to choose is the person's call, and the person issues the credential and puts it in the file; an agent never issues or reads it. Using one's own subscription alone, the long-lived token is an option (the client is the official Claude Code, but Anthropic's terms do not expressly cover a proxy sending it). For an organization, a team, a shared host or work, recommend an API key. The broker reads only the chosen kind and never switches to the other: a login refused, a usage limit or an API key's balance that ran out reaches the worker untouched and is the usual Claude login or usage-limit hold (above).
+
 ## A headless run by hand
 
 A headless run is a background process that runs only the session wrapper: there is no workspace, no agent screen, no dialog and no input box, so nothing is typed into it and no `answer_prompt` or `stuck_exit` ask opens for it. A `worker_question` is asked and answered as usual; the supervisor sends `answer to ask N: ...` as the next turn. A `stalled` ask (`turn_without_receipt`, `permission_denied`) is answered `wait`, `propose`, `stop` (the supervisor has the session exit; the run ends without a receipt and goes to its recovery job), or with an instruction text, which becomes the next turn. It offers no `intervene`: the turns are read before answering, and an `intervene` that still arrives closes the ask and opens a new one (`skills/dagq-recover/reference/stalled.md`).

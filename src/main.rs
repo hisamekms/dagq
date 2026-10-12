@@ -1484,6 +1484,10 @@ enum Command {
         print: Option<String>,
     },
     /// Report every unfinished run and supervisor, one line's worth each, without changing state.
+    /// Also reports the host's settings, among them the Claude credential host.toml chooses for
+    /// a container's worker (`claude_credential`: its kind, file, presence and mode, never its
+    /// value; with no kind chosen, which to choose: a long-lived token for one's own
+    /// subscription used alone, an API key for an organization, a team, a shared host or work).
     Doctor {
         /// Include each run's lease, processes, heartbeats and paths, and every supervisor field.
         #[arg(long)]
@@ -3379,6 +3383,8 @@ fn execute(cli: Cli) -> Result<Value> {
                     env::var(name).ok()
                 }),
                 build: dagq::VERSION.to_owned(),
+                claude_api: dagq::domain::queue_broker::CLAUDE_API_URL.to_owned(),
+                host_wide: dagq::infrastructure::kpi_config::host_wide_file(),
             },
         );
     }

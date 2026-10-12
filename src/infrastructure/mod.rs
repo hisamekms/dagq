@@ -8,6 +8,7 @@ pub mod broker_relay;
 pub mod ci_watch;
 mod ci_watch_store;
 pub mod claude;
+pub mod claude_credential;
 pub mod claude_turns;
 pub mod clock;
 pub mod codex;

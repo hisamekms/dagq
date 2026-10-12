@@ -224,6 +224,7 @@ ADR-t2114-2 決定5（前提として確かめる 3 つ）と決定6（だめな
   broker の直しが要るのは、素通しの SSE か分類が通らないときで、今回は当たらない。
 - 規約は「一部」で、長期 token が規約か動作の上で通らない場合の影響は、人が `host.toml` で API key を選ぶことに留まる（長期 token と API key の両方に対応して人が選ぶ方針。note 151554）。
 - 利用上限は未確認で、人が次のように決めた（note 152336）: 利用上限の応答は未確認のまま実装（task 2177 など ADR-t2114-2 決定1〜4）に進め、本番で初めて利用上限に当たったときに runtime が `TurnFailure::UsageLimit`（控え）に分類するかを確かめ、合わなければ直す。
+  この (a) の結果と人の決定は [ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md) 決定6 が出典として引き、長期 token と API key を `host.toml` で人が選ぶ形は同じ ADR の決定1〜3 が持つ。
 
 ### 満たさないときに人が決めること
 
@@ -468,7 +469,7 @@ build が (c) と同じ link の失敗で落ちたので、同時の書き込み
 
 | 項目 | 否の条件 | 人が決めること | 残す先 |
 | --- | --- | --- | --- |
-| (a) | 規約で許されない、または通常の応答・SSE・分類が broker の側の手当てで直せない | API key に替えるか（費用がサブスクリプションから従量に移ることの受け入れを含む）。利用上限が未確認のまま進むか | ADR-t2114-2 の amends か置き換え |
+| (a) | 規約で許されない、または通常の応答・SSE・分類が broker の側の手当てで直せない | API key に替えるか（費用がサブスクリプションから従量に移ることの受け入れを含む）。利用上限が未確認のまま進むか | ADR-t2114-2 の amends か置き換え（[ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md) が amends し、利用上限を未確認のまま進める人の決定を持つ） |
 | (b) | どちらの clone の作り方も目安を超える | 推奨の形のままにするか次善の形を採るか、目安を変えるか | ADR-t2113-2 の amends（次善を採るなら ADR-t2113-3 決定1 の amends も） |
 | (c) | host の中で通る組が無い、または通る最小が host を圧迫する | machine の大きさ・同時の container の数・container にする適用先の範囲 | ADR-t2257-1 決定6 の amends |
 | (d) | 同時の書き込みの error・build の失敗・上限が効かない | 種から複写する形か 1 つの server に寄せる形か | ADR-t2114-4 決定5 の amends |

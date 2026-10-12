@@ -84,6 +84,8 @@ fn old_broker_probe() {
         poll: Duration::from_millis(50),
         owner: service::owner_from_env(|name| std::env::var(name).ok()),
         build: OLD_BUILD.to_owned(),
+        claude_api: dagq::domain::queue_broker::CLAUDE_API_URL.to_owned(),
+        host_wide: None,
     })
     .unwrap();
 }
@@ -854,4 +856,377 @@ fn a_tunnel_opens_only_to_the_registries_of_the_main_checkout_s_dagq_toml() {
     let (status, _) = connect(&address, &target, &basic(&verification));
     assert_eq!(status, 401);
     last_denied("unknown_token", "127.0.0.1");
+}
+
+/// One request the fake Claude API took: its request line, headers and
+/// body.
+#[derive(Debug, Clone)]
+struct Taken {
+    line: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl Taken {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(own, _)| own.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// The SSE events the fake API streams, in order.
+const EVENTS: [&str; 3] = [
+    "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n\n",
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+];
+
+/// A fake Claude API on a port of 127.0.0.1 that keeps what it took. For
+/// `/v1/messages` it streams [`EVENTS`] chunked, the first before and the
+/// rest after `go` says so (a broker that held the answer back would never
+/// pass the first on); for `?case=auth`, `?case=limit` and `?case=credit`
+/// it answers the API's refusal of a login, of the usage limit and of an
+/// API key's balance.
+fn fake_claude_api() -> (u16, Arc<Mutex<Vec<Taken>>>, std::sync::mpsc::Sender<()>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let taken = Arc::new(Mutex::new(Vec::new()));
+    let (go, went) = std::sync::mpsc::channel::<()>();
+    let kept = taken.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut headers = Vec::new();
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                let header = header.trim_end().to_owned();
+                if header.is_empty() {
+                    break;
+                }
+                let (name, value) = header.split_once(':').unwrap();
+                headers.push((name.trim().to_owned(), value.trim().to_owned()));
+            }
+            let length = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map_or(0, |(_, value)| value.parse().unwrap());
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let line = line.trim_end().to_owned();
+            kept.lock().unwrap().push(Taken {
+                line: line.clone(),
+                headers,
+                body,
+            });
+            let refusal = |status: &str, kind: &str, message: &str| {
+                let body = format!(
+                    "{{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":\"{message}\"}}}}"
+                );
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nretry-after: 7\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let answer = if line.contains("case=auth") {
+                refusal(
+                    "401 Unauthorized",
+                    "authentication_error",
+                    "invalid x-api-key",
+                )
+            } else if line.contains("case=limit") {
+                refusal("429 Too Many Requests", "rate_limit_error", "rate limited")
+            } else if line.contains("case=credit") {
+                refusal(
+                    "400 Bad Request",
+                    "invalid_request_error",
+                    "Your credit balance is too low to access the Anthropic API.",
+                )
+            } else {
+                let chunk = |event: &str| format!("{:x}\r\n{event}\r\n", event.len());
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\nanthropic-ratelimit-unified-status: allowed\r\n\r\n{}",
+                            chunk(EVENTS[0])
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                stream.flush().unwrap();
+                if went.recv_timeout(TIMEOUT).is_err() {
+                    return;
+                }
+                format!("{}{}0\r\n\r\n", chunk(EVENTS[1]), chunk(EVENTS[2]))
+            };
+            stream.write_all(answer.as_bytes()).unwrap();
+        }
+    });
+    (port, taken, go)
+}
+
+/// Send a Claude API request to the broker at `address` as Claude Code in a
+/// container does (`ANTHROPIC_BASE_URL` the broker's `/anthropic`, the run
+/// token its `ANTHROPIC_AUTH_TOKEN`, the run in a custom header).
+fn claude_request(
+    address: &str,
+    path: &str,
+    token: Option<&str>,
+    run: &str,
+    body: &str,
+) -> std::net::TcpStream {
+    use std::io::Write;
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let authorization = token.map_or_else(String::new, |token| {
+        format!("Authorization: {BEARER}{token}\r\n")
+    });
+    write!(
+        stream,
+        "POST /anthropic{path} HTTP/1.1\r\nHost: {address}\r\n{authorization}{RUN_HEADER}: {run}\r\nx-api-key: from-the-client\r\nanthropic-version: 2023-06-01\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    stream
+}
+
+/// Read `stream` to its end: the status and the whole answer.
+fn answered(mut stream: std::net::TcpStream) -> (u16, String) {
+    use std::io::Read;
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let answer = String::from_utf8(answer).unwrap();
+    let status = answer
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .unwrap_or_else(|| panic!("no status: {answer}"));
+    (status, answer)
+}
+
+/// A Claude API request with its run's own live token goes on to the API
+/// with the credential `host.toml` chooses (the long-lived token as the
+/// bearer, or the API key in `x-api-key` with no `Authorization`) and none
+/// of the run's, and the API's answer comes back as it streams; the API's
+/// refusals of a login, of the limit and of a balance come back untouched,
+/// once, with the chosen kind only; a request without its run's live token,
+/// or while no usable credential is chosen, never reaches the API.
+#[test]
+fn the_broker_swaps_a_run_s_token_for_the_chosen_claude_credential_and_streams_the_answer() {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    let _test = common::test();
+    let queue = queue();
+    start(&queue);
+    let (port, taken, go) = fake_claude_api();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let serving = {
+        let options = broker::BrokerServeOptions {
+            db: queue.db.clone(),
+            generators: dagq::infrastructure::clock::system(),
+            stop: stop.clone(),
+            poll: Duration::from_millis(20),
+            owner: None,
+            build: "claude-test".to_owned(),
+            claude_api: format!("http://127.0.0.1:{port}"),
+            host_wide: None,
+        };
+        std::thread::spawn(move || broker::serve(&options).unwrap())
+    };
+    let address = {
+        let _waiting = common::within(TIMEOUT, "the queue broker to listen");
+        loop {
+            if let Some(record) = broker::BrokerRecord::read(queue.dir()) {
+                break record.address;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let run = queue.run.id().clone();
+    let own = token(&queue, &Principal::worker(&run, queue.run.task_id()));
+    let credentials = tempfile::tempdir().unwrap();
+    let choose = |kind: &str, secret: &str| {
+        let file = credentials.path().join(kind);
+        std::fs::write(&file, format!("{secret}\n")).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(
+            queue.dir().join("host.toml"),
+            format!(
+                "[claude_credential]\nkind = \"{kind}\"\nfile = \"{}\"\n",
+                file.display()
+            ),
+        )
+        .unwrap();
+    };
+    let body = r#"{"model":"m","stream":true,"messages":[]}"#;
+    let last = || taken.lock().unwrap().last().cloned().unwrap();
+    let taken_count = || taken.lock().unwrap().len();
+
+    for (kind, secret, sent, absent) in [
+        (
+            "setup_token",
+            "sk-ant-oat01-long-lived",
+            ("authorization", "Bearer sk-ant-oat01-long-lived"),
+            "x-api-key",
+        ),
+        (
+            "api_key",
+            "sk-ant-api03-key",
+            ("x-api-key", "sk-ant-api03-key"),
+            "authorization",
+        ),
+    ] {
+        choose(kind, secret);
+        let mut stream = claude_request(
+            &address,
+            "/v1/messages?beta=true",
+            Some(&own),
+            run.as_str(),
+            body,
+        );
+        // The first event comes through before the API sends the rest.
+        let mut seen = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while !String::from_utf8_lossy(&seen).contains(EVENTS[0]) {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0, "{}", String::from_utf8_lossy(&seen));
+            seen.extend_from_slice(&buffer[..read]);
+        }
+        go.send(()).unwrap();
+        stream.read_to_end(&mut seen).unwrap();
+        let answer = String::from_utf8(seen).unwrap();
+        let (head, streamed) = answer.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("Transfer-Encoding: chunked"), "{head}");
+        assert!(
+            head.contains("anthropic-ratelimit-unified-status: allowed"),
+            "{head}"
+        );
+        assert!(head.contains("Connection: close"), "{head}");
+        assert!(!head.contains("keep-alive"), "{head}");
+        let at = |event: &str| streamed.find(event).unwrap_or_else(|| panic!("{streamed}"));
+        assert!(at(EVENTS[0]) < at(EVENTS[1]) && at(EVENTS[1]) < at(EVENTS[2]));
+        assert!(streamed.ends_with("0\r\n\r\n"), "{streamed:?}");
+
+        let request = last();
+        assert_eq!(request.line, "POST /v1/messages?beta=true HTTP/1.1");
+        assert_eq!(request.header(sent.0), Some(sent.1), "{request:?}");
+        assert_eq!(request.header(absent), None, "{request:?}");
+        assert_eq!(request.header(RUN_HEADER), None);
+        assert_eq!(request.header("anthropic-version"), Some("2023-06-01"));
+        assert_eq!(request.body, body.as_bytes());
+        assert!(
+            !request
+                .headers
+                .iter()
+                .any(|(_, value)| value.contains(&own) || value == "from-the-client"),
+            "the run's token or the client's credential left the broker: {request:?}"
+        );
+
+        // The API's refusals come back untouched, sent once with the chosen
+        // kind only.
+        for (case, status, says) in [
+            ("auth", 401, "invalid x-api-key"),
+            ("limit", 429, "rate_limit_error"),
+            ("credit", 400, "credit balance is too low"),
+        ] {
+            let before = taken_count();
+            let (code, answer) = answered(claude_request(
+                &address,
+                &format!("/v1/messages?case={case}"),
+                Some(&own),
+                run.as_str(),
+                body,
+            ));
+            assert_eq!(code, status, "{answer}");
+            assert!(answer.contains(says), "{answer}");
+            assert!(answer.contains("retry-after: 7"), "{answer}");
+            assert_eq!(taken_count(), before + 1, "{case} was sent again");
+            assert_eq!(last().header(sent.0), Some(sent.1));
+            assert_eq!(last().header(absent), None);
+        }
+    }
+
+    // Without the run's own live token, never sent on.
+    let ghost = token(
+        &queue,
+        &Principal::worker(&RunId::new("ghost-run").unwrap(), TaskId::new(99)),
+    );
+    let gone = Principal::worker(&RunId::new("revoked-run").unwrap(), TaskId::new(98));
+    let revoked = token(&queue, &gone);
+    assert!(service::revoke(queue.dir(), &gone.actor_id).unwrap());
+    let before = taken_count();
+    for (bearer, reason) in [
+        (None, "missing_token"),
+        (Some(ghost.as_str()), "other_run"),
+        (Some(revoked.as_str()), "unknown_token"),
+    ] {
+        let (code, answer) = answered(claude_request(
+            &address,
+            "/v1/messages",
+            bearer,
+            run.as_str(),
+            body,
+        ));
+        assert_eq!(code, 401, "{answer}");
+        let record = denied(&queue.db).last().cloned().unwrap();
+        assert_eq!(record["reason"], reason);
+        assert_eq!(record["destination"], "api.anthropic.com");
+        assert_eq!(record["run"], run.as_str());
+    }
+    // No usable credential chosen: refused with what to choose, never sent
+    // with a kind of the broker's own.
+    std::fs::write(queue.dir().join("host.toml"), "[push]\ncommand = []\n").unwrap();
+    let (code, answer) = answered(claude_request(
+        &address,
+        "/v1/messages",
+        Some(&own),
+        run.as_str(),
+        body,
+    ));
+    assert_eq!(code, 401, "{answer}");
+    assert!(
+        answer.contains("setup_token") && answer.contains("api_key"),
+        "{answer}"
+    );
+    assert_eq!(
+        denied(&queue.db).last().unwrap()["reason"],
+        "claude_credential_not_selected"
+    );
+    choose("api_key", "sk-ant-api03-key");
+    std::fs::set_permissions(
+        credentials.path().join("api_key"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let (code, _) = answered(claude_request(
+        &address,
+        "/v1/messages",
+        Some(&own),
+        run.as_str(),
+        body,
+    ));
+    assert_eq!(code, 401);
+    assert_eq!(
+        denied(&queue.db).last().unwrap()["reason"],
+        "claude_credential_not_private"
+    );
+    assert_eq!(taken_count(), before, "a refused request reached the API");
+    for record in denied(&queue.db) {
+        let record = record.to_string();
+        assert!(
+            !record.contains(&own) && !record.contains("sk-ant-"),
+            "{record}"
+        );
+    }
+
+    stop.store(true, Ordering::SeqCst);
+    let _waiting = common::within(TIMEOUT, "the queue broker to stop once asked to");
+    serving.join().unwrap();
 }
