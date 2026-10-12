@@ -48,8 +48,11 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// down does while `state/no-connection` is there (a machine's start
 /// removes it unless `state/start-fails` is there), and hangs every
 /// `--connection dagq` command while `state/hang` is there until it is
-/// killed or its parent ends (a machine's start mends that too). A machine's
-/// stop takes its containers with it.
+/// killed or its parent ends (a machine's start mends that too), a
+/// `--connection dagq <verb>` while `state/hang-<verb>` is there and a
+/// `machine <verb>` while `state/hang-machine-<verb>` is, each hung one
+/// writing its pid to `state/hung`. A machine's stop takes its containers
+/// with it.
 fn fake_podman(state: &Path) -> PathBuf {
     fs::create_dir_all(state.join("containers")).unwrap();
     fs::create_dir_all(state.join("volumes")).unwrap();
@@ -58,6 +61,14 @@ fn fake_podman(state: &Path) -> PathBuf {
         r#"#!/bin/sh
 S={s}
 printf '%s\n' "$*" >> "$S/calls"
+hang() {{
+  echo $$ >> "$S/hung"
+  # Hangs until killed, and ends when the test that ran it goes.
+  while kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
+  exit 125
+}}
+[ "$1" = machine ] && [ -f "$S/hang-machine-$2" ] && hang
+[ "$1 $2" = "--connection dagq" ] && [ -f "$S/hang-$3" ] && hang
 case "$1 $2" in
 "machine list") printf '[{{"Name":"dagq","Running":true}}]' ;;
 "machine stop") rm -f "$S"/containers/* ;;
@@ -66,12 +77,7 @@ case "$1 $2" in
   rm -f "$S/no-connection" "$S/hang" ;;
 "system connection") printf '[{{"Name":"dagq","Default":true}}]' ;;
 "--connection dagq")
-  if [ -f "$S/hang" ]; then
-    echo $$ >> "$S/hung"
-    # Hangs until killed, and ends when the test that ran it goes.
-    while kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
-    exit 125
-  fi
+  [ -f "$S/hang" ] && hang
   [ -f "$S/no-connection" ] && {{ echo "Cannot connect to Podman" >&2; exit 125; }}
   shift 2
   case "$1" in
@@ -749,6 +755,158 @@ fn a_hung_podman_of_a_look_is_killed_and_the_supervisor_goes_on() {
             .collect::<Vec<_>>(),
         [RelayState::Running; 2]
     );
+}
+
+/// Every podman of `state` that hung has been killed: none still runs.
+fn hung_ones_killed(state: &Path) {
+    // A fake killed before it noted itself left no pid.
+    let hung = fs::read_to_string(state.join("hung")).unwrap_or_default();
+    for pid in hung.lines() {
+        let alive = Command::new("kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!alive.success(), "the hung podman {pid} still runs");
+    }
+}
+
+/// `act` fails within the test's timeout, as a podman command that did
+/// not end in time.
+fn fails_in_time(what: &str, act: impl FnOnce() -> anyhow::Result<()>) {
+    let began = std::time::Instant::now();
+    let error = act().expect_err(what);
+    assert!(began.elapsed() < TIMEOUT, "{what}: {:?}", began.elapsed());
+    assert!(
+        format!("{error:#}").contains("did not end within"),
+        "{what}: {error:#}"
+    );
+}
+
+/// The limit of a test's podman command that hangs: long enough for the
+/// fake's shell to note itself under load, short so the test is.
+const HUNG_LIMIT: Duration = Duration::from_millis(700);
+
+/// Hang each of `verbs` of `state`'s podman in turn (`hang-<verb>`), and
+/// have `act` fail in time on each.
+fn each_hung(state: &Path, verbs: &[&str], act: impl Fn() -> anyhow::Result<()>) {
+    for verb in verbs {
+        let hang = state.join(format!("hang-{verb}"));
+        fs::write(&hang, "").unwrap();
+        fails_in_time(verb, &act);
+        fs::remove_file(&hang).unwrap();
+    }
+    hung_ones_killed(state);
+}
+
+/// A podman of a relay's start again (`rm`, `volume create`, `run`) that
+/// hangs is killed at the relay's limit and the start fails, which the
+/// supervisor tells the inbox as `start_failed`.
+#[test]
+fn a_hung_podman_of_a_relay_s_start_is_killed_and_the_start_fails() {
+    let _test = common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("podman");
+    let relays = podman_relays(dir.path(), &state, TIMEOUT);
+    relays.open(&spec("r1"), 4321).unwrap();
+    let limited = PodmanRelays {
+        relay_timeout: HUNG_LIMIT,
+        ..relays.clone()
+    };
+    each_hung(&state, &["rm", "volume", "run"], || {
+        limited.restart("r1", 4321)
+    });
+    relays.restart("r1", 4321).unwrap();
+}
+
+/// A podman of the close of a relay (`rm`, `volume exists`) that hangs is
+/// killed at the relay's limit and the close fails, which the supervisor
+/// tries again at the next look; the record stays until a close succeeds.
+#[test]
+fn a_hung_podman_of_a_relay_s_close_is_killed_and_the_close_fails() {
+    let _test = common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("podman");
+    let relays = podman_relays(dir.path(), &state, TIMEOUT);
+    relays.open(&spec("r1"), 4321).unwrap();
+    let limited = PodmanRelays {
+        relay_timeout: HUNG_LIMIT,
+        ..relays.clone()
+    };
+    each_hung(&state, &["rm", "volume"], || limited.close("r1"));
+    assert_eq!(relays.relays().unwrap().len(), 1);
+    relays.close("r1").unwrap();
+    assert!(relays.relays().unwrap().is_empty());
+}
+
+/// A podman of the machine's start again from the watch (`machine list`,
+/// `stop`, `start`) that hangs is killed at the machine's limit, which is
+/// not the relay's, and the start again fails.
+#[test]
+fn a_hung_podman_of_the_machine_s_start_again_is_killed_and_it_fails() {
+    let _test = common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("podman");
+    let relays = PodmanRelays {
+        machine_timeout: HUNG_LIMIT,
+        ..podman_relays(dir.path(), &state, TIMEOUT)
+    };
+    assert_eq!(
+        relays.relay_timeout,
+        dagq::infrastructure::broker_relay::RELAY_TIMEOUT
+    );
+    assert!(
+        dagq::infrastructure::podman_machine::MACHINE_TIMEOUT
+            > dagq::infrastructure::broker_relay::RELAY_TIMEOUT
+    );
+    each_hung(
+        &state,
+        &["machine-list", "machine-stop", "machine-start"],
+        || relays.restart_machine(),
+    );
+    relays.restart_machine().unwrap();
+}
+
+/// When podman does not reach the machine and the machine's start again
+/// hangs, it is killed and the supervisor's pass goes on and tells the
+/// inbox with `queue_relay_down`, while nothing set to the container runs.
+#[test]
+fn a_hung_machine_start_again_is_the_inbox_s_attention() {
+    use crate::runtime_support::supervise_with;
+    let (_fixture, repo, db, backend) = container_fixture();
+    let living = run_in(&db, &repo, "needs_session", "in_progress");
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("podman");
+    let relays = Arc::new(PodmanRelays {
+        machine_timeout: Duration::from_secs(1),
+        ..podman_relays(dir.path(), &state, TIMEOUT)
+    });
+    relays.open(&spec(&living), 4321).unwrap();
+    fs::write(state.join("no-connection"), "").unwrap();
+    fs::write(state.join("hang-machine-start"), "").unwrap();
+    let passed = std::time::Instant::now();
+    supervise_with(&db, &repo, &backend, &relay_options(relays)).unwrap();
+    assert!(passed.elapsed() < TIMEOUT * 3, "{:?}", passed.elapsed());
+    hung_ones_killed(&state);
+    let down = events(&db, "queue_relay_down");
+    assert_eq!(down.len(), 1, "{down:?}");
+    assert_eq!(down[0]["payload"]["reason"], "start_failed");
+    let message = down[0]["payload"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("start the dagq machine again") && message.contains("did not end within"),
+        "{message}"
+    );
+    assert!(events(&db, "queue_relay_started").is_empty());
+    let status = ok(&db, &["status"]);
+    assert!(
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["kind"] == "queue_relay_down"),
+        "{status}"
+    );
+    assert!(backend.launched.lock().unwrap().is_empty());
 }
 
 /// `dagq` in client mode from a directory that is no repository, with

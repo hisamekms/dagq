@@ -31,10 +31,11 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
-use super::podman_machine::{PodmanCli, QueueMachine};
+use super::podman_machine::{MACHINE_TIMEOUT, PodmanCli, PodmanCliWithin, QueueMachine};
 use super::queue_service::{private_dir, queue_dir_of, write_private};
 use super::sqlite::SqliteQueue;
 use crate::application::broker_relay::{RelayControl, RelayRecords, down_message};
+use crate::application::podman_machine::Machine;
 use crate::domain::broker_relay::{
     RelaySeen, RelaySpec, RelayState, SOCKET_MODE, TARGET_LABEL, relay_run_args, socket_path,
 };
@@ -52,6 +53,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// is taken not to reach the machine, so a hung machine does not hold the
 /// supervisor's loop (a look makes about two commands per relay).
 pub const LOOK_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long each podman command of a relay's start or close may take
+/// (`rm --force`, `volume create`, `volume exists`, `volume rm` and the
+/// relay's `run --detach`): 60 s. Removing a running relay waits up to
+/// podman's stop timeout (10 s) before it kills the container, and the
+/// relay's container starts from an image already in the machine in a few
+/// seconds; a command still running then is killed and the start or the
+/// close fails, so a hung machine does not hold the supervisor's loop. The
+/// machine's start again has its own longer limit
+/// ([`super::podman_machine::MACHINE_TIMEOUT`]).
+pub const RELAY_TIMEOUT: Duration = Duration::from_secs(60);
 
 // --- Carrying bytes ------------------------------------------------------------
 
@@ -240,6 +251,12 @@ pub struct PodmanRelays {
     pub machine: QueueMachine,
     /// How long each podman command of a look may take ([`LOOK_TIMEOUT`]).
     pub look_timeout: Duration,
+    /// How long each podman command of a relay's start or close may take
+    /// ([`RELAY_TIMEOUT`]).
+    pub relay_timeout: Duration,
+    /// How long each podman command of the machine's start again may take
+    /// ([`MACHINE_TIMEOUT`]).
+    pub machine_timeout: Duration,
 }
 
 impl PodmanRelays {
@@ -254,6 +271,8 @@ impl PodmanRelays {
             podman,
             queue_dir,
             look_timeout: LOOK_TIMEOUT,
+            relay_timeout: RELAY_TIMEOUT,
+            machine_timeout: MACHINE_TIMEOUT,
         }
     }
 
@@ -304,7 +323,7 @@ impl PodmanRelays {
 
     /// `podman --connection dagq <args>` to success.
     fn run(&self, args: &[String]) -> Result<String> {
-        let output = self.podman.inside(args)?;
+        let output = self.within(args)?;
         if !output.status.success() {
             bail!(
                 "podman --connection dagq {} exited with {}: {}",
@@ -314,6 +333,20 @@ impl PodmanRelays {
             );
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// `podman --connection dagq <args>` within [`Self::relay_timeout`],
+    /// whatever its exit: an error when it did not end in time and was
+    /// killed.
+    fn within(&self, args: &[String]) -> Result<std::process::Output> {
+        match self.podman.inside_within(args, self.relay_timeout)? {
+            Some(output) => Ok(output),
+            None => bail!(
+                "podman --connection dagq {} did not end within {:?}: it was stopped",
+                args.join(" "),
+                self.relay_timeout
+            ),
+        }
     }
 
     /// Start the relay of `spec` towards `port`, in place of the one there.
@@ -440,9 +473,7 @@ impl RelayControl for PodmanRelays {
         let container = key.relay_container(run).map_err(anyhow::Error::msg)?;
         let volume = key.socket_volume(run).map_err(anyhow::Error::msg)?;
         self.run(&strings(&["rm", "--force", "--ignore", &container]))?;
-        let exists = self
-            .podman
-            .inside(&strings(&["volume", "exists", &volume]))?;
+        let exists = self.within(&strings(&["volume", "exists", &volume]))?;
         if exists.status.success() {
             self.run(&strings(&["volume", "rm", "--force", &volume]))?;
         }
@@ -498,7 +529,14 @@ impl RelayControl for PodmanRelays {
     }
 
     fn restart_machine(&self) -> Result<()> {
-        crate::application::podman_machine::restart(&self.machine.machine())
+        let podman = PodmanCliWithin {
+            podman: self.machine.podman.clone(),
+            limit: self.machine_timeout,
+        };
+        crate::application::podman_machine::restart(&Machine {
+            podman: &podman,
+            ..self.machine.machine()
+        })
     }
 }
 

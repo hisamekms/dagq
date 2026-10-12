@@ -65,22 +65,40 @@ impl PodmanCli {
             .with_context(|| format!("run {}", self.program.display()))
     }
 
-    /// `args` run to success; their stdout.
-    fn run(&self, args: &[&str]) -> Result<String> {
+    /// `args` given at most `limit` when there is one: an error when they
+    /// did not end in time and were killed.
+    fn output_by(&self, args: &[OsString], limit: Option<Duration>) -> Result<Output> {
+        let Some(limit) = limit else {
+            return self.output(args);
+        };
+        match self.output_within(args, limit)? {
+            Some(output) => Ok(output),
+            None => bail!(
+                "{} {} did not end within {limit:?}: it was stopped",
+                self.program.display(),
+                shown(args)
+            ),
+        }
+    }
+
+    /// `args` run to success, given at most `limit` when there is one;
+    /// their stdout.
+    fn run_by(&self, args: &[&str], limit: Option<Duration>) -> Result<String> {
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-        self.checked(&args)
+        self.checked_by(&args, limit)
     }
 
     fn checked(&self, args: &[OsString]) -> Result<String> {
-        let output = self.output(args)?;
+        self.checked_by(args, None)
+    }
+
+    fn checked_by(&self, args: &[OsString], limit: Option<Duration>) -> Result<String> {
+        let output = self.output_by(args, limit)?;
         if !output.status.success() {
             bail!(
                 "{} {} exited with {}: {}",
                 self.program.display(),
-                args.iter()
-                    .map(|arg| arg.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join(" "),
+                shown(args),
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
@@ -89,23 +107,32 @@ impl PodmanCli {
     }
 
     /// The connection that is the default now, if any.
-    fn default_connection(&self) -> Result<Option<String>> {
-        let text = self.run(&["system", "connection", "list", "--format", "json"])?;
+    fn default_connection(&self, limit: Option<Duration>) -> Result<Option<String>> {
+        let text = self.run_by(&["system", "connection", "list", "--format", "json"], limit)?;
         parse_default_connection(&text)
     }
 
     /// Run `act`, then set the default connection back to the one before
     /// it, if `act` changed it. A host with no default before may keep the
     /// dagq machine's connection as its default: Podman cannot unset it.
-    fn keeping_default(&self, act: impl FnOnce() -> Result<()>) -> Result<()> {
-        let before = self.default_connection()?;
+    fn keeping_default(
+        &self,
+        limit: Option<Duration>,
+        act: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let before = self.default_connection(limit)?;
         let acted = act();
-        if let Some(before) = before
-            && self.default_connection()?.as_deref() != Some(before.as_str())
-        {
-            self.run(&["system", "connection", "default", &before])?;
-        }
-        acted
+        let restore = || -> Result<()> {
+            if let Some(before) = before
+                && self.default_connection(limit)?.as_deref() != Some(before.as_str())
+            {
+                self.run_by(&["system", "connection", "default", &before], limit)?;
+            }
+            Ok(())
+        };
+        let restored = restore();
+        // What `act` failed with is told before a failure to set it back.
+        acted.and(restored)
     }
 
     /// `podman --connection dagq <args>` run to success, inside the dagq
@@ -116,24 +143,19 @@ impl PodmanCli {
         self.checked(&all)
     }
 
-    /// `podman --connection dagq <args>`: a command inside the dagq
-    /// machine, its output whatever its exit.
-    pub(crate) fn inside(&self, args: &[String]) -> Result<Output> {
-        let mut all: Vec<OsString> = ["--connection", MACHINE_NAME]
-            .iter()
-            .map(OsString::from)
-            .collect();
-        all.extend(args.iter().map(OsString::from));
-        self.output(&all)
-    }
-
     /// `podman --connection dagq <args>` given at most `limit`: its output
     /// whatever its exit, or `None` when it did not end in time and was
     /// killed (or its output was not all read by then). A podman whose
     /// machine hangs does not hold its caller.
     pub(crate) fn inside_within(&self, args: &[String], limit: Duration) -> Result<Option<Output>> {
+        self.output_within(&connection_args(args), limit)
+    }
+
+    /// `args` given at most `limit`: their output whatever their exit, or
+    /// `None` when they did not end in time and were killed (or their
+    /// output was not all read by then).
+    fn output_within(&self, args: &[OsString], limit: Duration) -> Result<Option<Output>> {
         let mut child = Command::new(&self.program)
-            .args(["--connection", MACHINE_NAME])
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -195,34 +217,126 @@ impl PodmanCli {
     }
 }
 
-impl PodmanMachine for PodmanCli {
-    fn machines(&self) -> Result<Vec<MachineEntry>> {
-        parse_machine_list(&self.run(&["machine", "list", "--format", "json"])?)
+impl PodmanCli {
+    fn machines_by(&self, limit: Option<Duration>) -> Result<Vec<MachineEntry>> {
+        parse_machine_list(&self.run_by(&["machine", "list", "--format", "json"], limit)?)
     }
 
-    fn mounts(&self) -> Result<Vec<PathBuf>> {
-        let inspect = self.run(&["machine", "inspect", MACHINE_NAME])?;
+    fn mounts_by(&self, limit: Option<Duration>) -> Result<Vec<PathBuf>> {
+        let inspect = self.run_by(&["machine", "inspect", MACHINE_NAME], limit)?;
         let file = config_file(&inspect)?;
         let text = fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
         parse_config_mounts(&text).with_context(|| format!("read {}", file.display()))
     }
 
-    fn init(&self, resources: &MachineResources, volumes: &[PathBuf]) -> Result<()> {
+    fn init_by(
+        &self,
+        resources: &MachineResources,
+        volumes: &[PathBuf],
+        limit: Option<Duration>,
+    ) -> Result<()> {
         // A volume's source must be there when the machine starts.
         for dir in volumes {
             fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         }
         let args = init_args(resources, volumes);
-        self.keeping_default(|| self.checked(&args).map(drop))
+        self.keeping_default(limit, || self.checked_by(&args, limit).map(drop))
+    }
+
+    fn start_by(&self, limit: Option<Duration>) -> Result<()> {
+        self.keeping_default(limit, || {
+            self.run_by(&["machine", "start", MACHINE_NAME], limit)
+                .map(drop)
+        })
+    }
+
+    fn stop_by(&self, limit: Option<Duration>) -> Result<()> {
+        self.run_by(&["machine", "stop", MACHINE_NAME], limit)
+            .map(drop)
+    }
+}
+
+impl PodmanMachine for PodmanCli {
+    fn machines(&self) -> Result<Vec<MachineEntry>> {
+        self.machines_by(None)
+    }
+
+    fn mounts(&self) -> Result<Vec<PathBuf>> {
+        self.mounts_by(None)
+    }
+
+    fn init(&self, resources: &MachineResources, volumes: &[PathBuf]) -> Result<()> {
+        self.init_by(resources, volumes, None)
     }
 
     fn start(&self) -> Result<()> {
-        self.keeping_default(|| self.run(&["machine", "start", MACHINE_NAME]).map(drop))
+        self.start_by(None)
     }
 
     fn stop(&self) -> Result<()> {
-        self.run(&["machine", "stop", MACHINE_NAME]).map(drop)
+        self.stop_by(None)
     }
+}
+
+/// How long each podman command of a machine's start again from the
+/// relays' watch may take ([`PodmanCliWithin`]): 5 min. A machine's start
+/// boots its VM and waits for its gvproxy and ssh, which takes tens of
+/// seconds when all is well and longer on a loaded host, and its stop
+/// waits for the VM to shut down; a relay's command
+/// ([`super::broker_relay::RELAY_TIMEOUT`]) ends far sooner, so the
+/// machine's is its own and longer. A command still running then is
+/// killed and the start again fails, so a machine that does not come back
+/// holds the supervisor's loop for at most this per command (the list, the
+/// stop, the start and the default connection's reads and set back).
+pub const MACHINE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The dagq machine's commands of `podman`, each given at most `limit`
+/// ([`MACHINE_TIMEOUT`]): one that does not end in time is killed and is
+/// an error.
+#[derive(Debug, Clone)]
+pub struct PodmanCliWithin {
+    pub podman: PodmanCli,
+    pub limit: Duration,
+}
+
+impl PodmanMachine for PodmanCliWithin {
+    fn machines(&self) -> Result<Vec<MachineEntry>> {
+        self.podman.machines_by(Some(self.limit))
+    }
+
+    fn mounts(&self) -> Result<Vec<PathBuf>> {
+        self.podman.mounts_by(Some(self.limit))
+    }
+
+    fn init(&self, resources: &MachineResources, volumes: &[PathBuf]) -> Result<()> {
+        self.podman.init_by(resources, volumes, Some(self.limit))
+    }
+
+    fn start(&self) -> Result<()> {
+        self.podman.start_by(Some(self.limit))
+    }
+
+    fn stop(&self) -> Result<()> {
+        self.podman.stop_by(Some(self.limit))
+    }
+}
+
+/// `--connection dagq` and `args`.
+fn connection_args(args: &[String]) -> Vec<OsString> {
+    let mut all: Vec<OsString> = ["--connection", MACHINE_NAME]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    all.extend(args.iter().map(OsString::from));
+    all
+}
+
+/// `args` as a command line in a message.
+fn shown(args: &[OsString]) -> String {
+    args.iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `podman machine init` of the dagq machine: its resources, and each of

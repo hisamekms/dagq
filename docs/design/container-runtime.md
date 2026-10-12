@@ -162,7 +162,8 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
   落ちたかportの古いrelayは起動し直す。
   動くのに届かないrelayがあるか、podmanがmachineに繋がらない（`--connection dagq`もgvproxyを通る）ときはgvproxyが落ちたとみて、machineをhost全体のlockの中で起動し直してから全てのrelayを起動し直す。
   relayを見るpodmanの呼び出しには時間の上限があり、超えたものは止めて繋がらないとして扱う。
-  起動し直しと片付けのpodmanの呼び出し（machineの停止と起動・relayの起動し直し・`close`）には上限が無い。
+  relayの起動（`open`と起動し直し）と`close`のpodmanの呼び出しにも時間の上限があり、見張りからのmachineの起動し直しのpodmanの呼び出しにはそれより長い別の上限がある。
+  超えたものは止めて起動し直しか`close`の失敗として扱う。
   回数の上限と窓はqueue serviceと同じ。
   起動し直せない・上限に達した・見られないときはinbox宛てのattention `queue_relay_down`を書き、全てのrelayが動けば消える。
   attentionが立つ間は`RelayGate`がcontainerを使えないと答え、新しいrunを控える（上の「fail closedの境界」）。
