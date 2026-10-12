@@ -82,6 +82,15 @@ pub fn rebase_in_progress(repository: &dyn Repository, run: &TaskRun) -> Result<
     }
 }
 
+/// Whether `error` says the guard does not hold
+/// ([`GuardDoesNotHold`](crate::domain::run_clone::GuardDoesNotHold)), not
+/// that git could not be run to read the configuration.
+pub fn guard_does_not_hold(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<crate::domain::run_clone::GuardDoesNotHold>())
+}
+
 /// `repository` as the git that handles `run`'s commits must be: guarded
 /// for a run in a container (ADR-t2179-1 decision 8), as it is for a run on
 /// the host. `Err` when the guard cannot be made to hold.

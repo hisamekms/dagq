@@ -41,6 +41,22 @@ impl ContainerRun {
 /// Claim `task` at main's head in `repo` and make its clone, as the
 /// supervisor provisions a run whose worker runs in the container.
 fn claim_in_container(db: &Path, repo: &Path, task: TaskId) -> ContainerRun {
+    let mut run = plan_in_container(db, repo, task);
+    let mut queue = SqliteQueue::open(db).unwrap();
+    queue
+        .workspace_created(run.run.id(), &run.token, "background:1:1")
+        .unwrap();
+    run.run = queue.run(run.run.id()).unwrap();
+    GitRepository::inspect(repo)
+        .unwrap()
+        .create_clone(&run.run, None)
+        .unwrap();
+    run
+}
+
+/// Claim `task` and plan its paths, as the supervisor does before it makes
+/// the clone: no clone yet, and no worker started.
+fn plan_in_container(db: &Path, repo: &Path, task: TaskId) -> ContainerRun {
     let mut queue = SqliteQueue::open(db).unwrap();
     let common_dir = GitRepository::inspect(repo).unwrap().common_dir;
     queue.bind_repository(common_dir.to_str().unwrap()).unwrap();
@@ -78,15 +94,8 @@ fn claim_in_container(db: &Path, repo: &Path, task: TaskId) -> ContainerRun {
             },
         )
         .unwrap();
-    queue
-        .workspace_created(run.id(), &token, "background:1:1")
-        .unwrap();
     let run = queue.run(run.id()).unwrap();
     assert!(run.in_container());
-    GitRepository::inspect(repo)
-        .unwrap()
-        .create_clone(&run, None)
-        .unwrap();
     ContainerRun {
         task,
         run,
@@ -1427,4 +1436,205 @@ fn a_container_runs_cleanup_follows_no_symlink_the_worker_planted() {
     run_git::remove(&repository, &run.run, &run.branch()).unwrap();
     let facts: Option<CloneFacts> = None;
     assert!(facts.is_none());
+}
+
+/// A clone whose making fails half way (a fetch of a ref the repository
+/// does not have) leaves nothing at its path, and the run's next
+/// provisioning makes it; a clone an earlier attempt left is removed and
+/// made again while no worker was started for the run, and kept as it is
+/// once one was.
+#[test]
+fn a_clone_left_half_made_is_removed_and_made_again_before_the_worker_starts() {
+    let (_fixture, repo, db) = fixture();
+    let run = plan_in_container(&db, &repo, TaskId::new(1));
+    let repository = GitRepository::inspect(&repo).unwrap();
+    let error = repository
+        .create_clone(&run.run, Some("refs/dagq/runs/missing"))
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("refs/dagq/runs/missing"),
+        "{error:#}"
+    );
+    assert!(
+        fs::symlink_metadata(&run.clone).is_err(),
+        "the half made clone is left"
+    );
+    repository.create_clone(&run.run, None).unwrap();
+    assert_eq!(in_clone(&run.clone, &["rev-parse", "HEAD"]), run.base);
+    // What an earlier attempt left, as a stopped supervisor leaves it.
+    fs::remove_dir_all(&run.clone).unwrap();
+    fs::create_dir_all(run.clone.join(".git")).unwrap();
+    fs::write(run.clone.join("left.txt"), "left\n").unwrap();
+    repository.create_clone(&run.run, None).unwrap();
+    assert!(!run.clone.join("left.txt").exists());
+    assert_eq!(in_clone(&run.clone, &["rev-parse", "HEAD"]), run.base);
+    assert_eq!(in_clone(&run.clone, &["status", "--porcelain"]), "");
+    // Once a worker was started on the clone, it is not the provisioning's
+    // to remove.
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .workspace_created(run.run.id(), &run.token, "background:1:1")
+        .unwrap();
+    let started = queue.run(run.run.id()).unwrap();
+    fs::write(run.clone.join("worker.txt"), "worker\n").unwrap();
+    let error = repository.create_clone(&started, None).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("is there already"),
+        "{error:#}"
+    );
+    assert!(run.clone.join("worker.txt").exists());
+}
+
+/// Where [`remove_unguarded_child_process`] reads what to remove.
+const REMOVE_UNGUARDED: &str = "DAGQ_TEST_REMOVE_UNGUARDED";
+
+/// The line [`remove_unguarded_child_process`] writes to the git log
+/// before it removes anything.
+const REMOVAL_STARTS: &str = "--- removal";
+
+/// Not a test of its own: the control side of
+/// [`what_needs_no_git_is_removed_when_the_guard_does_not_hold`], whose git
+/// is the test's, which logs every git it runs: it removes the run's
+/// landing worktree and then what the run left, and prints the results.
+#[test]
+fn remove_unguarded_child_process() {
+    let Ok(asked) = std::env::var(REMOVE_UNGUARDED) else {
+        return;
+    };
+    let [db, repo, run, log]: [&str; 4] = asked.split('\n').collect::<Vec<_>>().try_into().unwrap();
+    let run = SqliteQueue::open(Path::new(db))
+        .unwrap()
+        .run(&dagq::domain::RunId::new(run).unwrap())
+        .unwrap();
+    let repository = GitRepository::inspect(Path::new(repo)).unwrap();
+    let mut file = fs::OpenOptions::new().append(true).open(log).unwrap();
+    std::io::Write::write_all(&mut file, format!("{REMOVAL_STARTS}\n").as_bytes()).unwrap();
+    let landing = repository.remove_landing_worktree(&run);
+    let removed = run_git::remove(&repository, &run, run.branch().unwrap());
+    for (name, result) in [("landing", landing), ("remove", removed)] {
+        match result {
+            Ok(()) => println!("{name}: ok"),
+            Err(error) => println!("{name}: {error:#}"),
+        }
+    }
+}
+
+/// When the guard of the control side's git does not hold, the clone, the
+/// landing worktree's directory and the bundles and state file of the run's
+/// directory are still removed as files, following no symlink, while the
+/// run branch and the landing worktree's registration are left for a
+/// later cleanup with no git run on them unguarded, and the removal says
+/// so; once the guard holds, they go through the guarded git.
+#[test]
+fn what_needs_no_git_is_removed_when_the_guard_does_not_hold() {
+    let (fixture, repo, db) = fixture();
+    let dir = fixture.dir.path().to_path_buf();
+    let kept = dir.join("host-dir");
+    fs::create_dir(&kept).unwrap();
+    fs::write(kept.join("keep.txt"), "keep\n").unwrap();
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let head = commit(&run, &[("feature.txt", "x\n")], "feature");
+    turn_end(&run);
+    write_receipt(&run, &head);
+    validate(&db, &repo, &mut run);
+    let tree = start_in_tree(&repo, &run, None);
+    symlink(&kept, run.clone.join("into-host")).unwrap();
+    symlink(&kept, run.run_dir.join(run_clone::MAIN_BUNDLE_FILE)).unwrap();
+    // A git that reads the guarded configuration back without the guard's
+    // overrides, so that the guard does not hold, and logs every command
+    // with whether the guard's environment was given to it.
+    let bin = dir.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let log = dir.join("git.log");
+    fs::write(&log, "").unwrap();
+    let real = dagq::infrastructure::git_binary::git_executable().unwrap();
+    common::template::script(
+        &bin.join("git"),
+        format!(
+            "#!/bin/sh\necho \"${{GIT_CONFIG_COUNT:-unguarded}} $*\" >> {log}\n\
+             case \" $* \" in *' config --list -z '*) [ -n \"$GIT_CONFIG_COUNT\" ] && exit 0 ;; esac\n\
+             exec {real} \"$@\"\n",
+            log = common::shell_path(&log),
+            real = common::shell_path(&real),
+        ),
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "runtime_clone::remove_unguarded_child_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        // An inherited guard would hide an unguarded git from the log.
+        .env_remove("GIT_CONFIG_COUNT")
+        .env(
+            REMOVE_UNGUARDED,
+            format!(
+                "{}\n{}\n{}\n{}",
+                db.display(),
+                repo.display(),
+                run.run.id(),
+                log.display()
+            ),
+        )
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .bounded_output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result = |name: &str| -> String {
+        stdout
+            .lines()
+            .find_map(|line| line.split_once(&format!("{name}: ")).map(|(_, why)| why))
+            .unwrap_or_else(|| panic!("{stdout}{}", String::from_utf8_lossy(&output.stderr)))
+            .to_owned()
+    };
+    for name in ["landing", "remove"] {
+        let why = result(name);
+        assert!(why.contains("left for a later cleanup"), "{name}: {why}");
+        assert!(why.contains("does not hold"), "{name}: {why}");
+    }
+    assert!(result("remove").contains(&run.branch()));
+    // The files went, and nothing a symlink pointed at.
+    assert!(fs::symlink_metadata(&run.clone).is_err());
+    assert!(fs::symlink_metadata(&tree).is_err());
+    for name in [
+        run_clone::RUN_STATE_FILE,
+        run_clone::MAIN_BUNDLE_FILE,
+        run_clone::RUN_BUNDLE_FILE,
+    ] {
+        assert!(
+            fs::symlink_metadata(run.run_dir.join(name)).is_err(),
+            "{name}"
+        );
+    }
+    assert_eq!(fs::read_to_string(kept.join("keep.txt")).unwrap(), "keep\n");
+    // No git ran unguarded but the guard's own reading of the names.
+    let logged = fs::read_to_string(&log).unwrap();
+    let (_, removal) = logged.split_once(REMOVAL_STARTS).unwrap();
+    for line in removal.lines().filter(|line| !line.is_empty()) {
+        assert!(
+            !line.starts_with("unguarded") || line.contains("config --list --name-only"),
+            "git ran unguarded: {line}\n{logged}"
+        );
+        assert!(
+            !line.contains(" worktree ") && !line.contains(" branch "),
+            "git ran on what it leaves: {line}"
+        );
+    }
+    // The run branch and the registration are left ...
+    assert!(!git_out(&repo, &["branch", "--list", &run.branch()]).is_empty());
+    let registered = || {
+        git_out(&repo, &["worktree", "list", "--porcelain"])
+            .lines()
+            .any(|line| line.starts_with("worktree ") && line.ends_with(run.run.id().as_str()))
+    };
+    assert!(registered());
+    // ... until a cleanup with the guard in place removes them.
+    let repository = GitRepository::inspect(&repo).unwrap();
+    run_git::remove(&repository, &run.run, &run.branch()).unwrap();
+    assert!(git_out(&repo, &["branch", "--list", &run.branch()]).is_empty());
+    assert!(!registered());
 }

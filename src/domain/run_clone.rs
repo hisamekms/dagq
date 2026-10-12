@@ -201,6 +201,21 @@ const DRIVER_KEYS: [(&str, &str); 6] = [
 const PLAIN_EXTERNAL_DIFF: &str =
     "git diff --no-index --no-ext-diff --no-textconv -- \"$2\" \"$5\" || :";
 
+/// The control side's git configuration cannot be kept from running a hook
+/// or a driver (ADR-t2179-1 decision 8): what the configuration is, unlike
+/// a git that could not be run to read it, so it stays until a person sees
+/// to it.
+#[derive(Debug)]
+pub struct GuardDoesNotHold(pub String);
+
+impl std::fmt::Display for GuardDoesNotHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GuardDoesNotHold {}
+
 /// The configuration that keeps the control side's git from running a hook
 /// or a driver the tracked content of a container run's commit could
 /// choose (ADR-t2179-1 decision 8), for the configuration whose names are

@@ -183,7 +183,8 @@ impl Supervisor<'_> {
     }
     /// Plan paths, create the run directory and worktree, and start the
     /// session wrapper in the background (ADR-t1433-3). Any error leaves
-    /// what was created for inspection.
+    /// what was created for inspection, but a half made clone, which
+    /// [`Repository::create_clone`] removes.
     pub(super) fn provision(&mut self, claimed: &TaskRun) -> Result<SessionWatch> {
         let state_dir = &self.layout.runs_dir;
         let paths = RunPaths::new(state_dir, claimed.id());

@@ -122,9 +122,20 @@ pub fn check_receipt(
     // A run in a container is read from its bundle and state file, never
     // with git in its clone (ADR-t2179-1 decisions 1 to 4), once per
     // validation; a landing worktree an earlier validation's commit left
-    // goes first, as the landing is of the commit accepted now.
+    // goes first, as the landing is of the commit accepted now. Without a
+    // guard nothing of the run is handled, and the run fails for a person
+    // to see to the git configuration (ADR-t2179-1 decision 8).
     let mut clone: Option<CloneFacts> = None;
     if run.in_container() {
+        match super::run_git::for_run(repository, run) {
+            Err(error) if super::run_git::guard_does_not_hold(&error) => {
+                return Ok(Err(unguarded_rejection(facts, run, &error)));
+            }
+            // A git that could not read the configuration is the checks'
+            // failure, which the next validation tries again.
+            Err(error) => return Err(error),
+            Ok(_) => (),
+        }
         repository.remove_landing_worktree(run)?;
     }
     loop {
@@ -261,6 +272,26 @@ fn back_to_session(facts: ReceiptFacts<'_>, reason: String) -> Rejection {
         e2e_requirement: facts.e2e_requirement(),
         reason,
         code: ReasonCode::CommitMismatch,
+        commit: None,
+        receipt: facts.into_receipt(),
+        evidence_missing: Vec::new(),
+        spike_result_missing: Vec::new(),
+        scope_violation: Vec::new(),
+    }
+}
+
+/// The rejection of a container run whose commits the control side's git
+/// cannot be kept from running the hooks and drivers of (ADR-t2179-1
+/// decision 8): the run fails with `git_failed`, since nothing its session
+/// does would make the guard hold.
+fn unguarded_rejection(facts: ReceiptFacts<'_>, run: &TaskRun, error: &anyhow::Error) -> Rejection {
+    Rejection {
+        e2e_requirement: facts.e2e_requirement(),
+        reason: format!(
+            "run {} was not validated: {error:#}; see to the git configuration; no session is resumed",
+            run.id()
+        ),
+        code: ReasonCode::GitFailed,
         commit: None,
         receipt: facts.into_receipt(),
         evidence_missing: Vec::new(),
@@ -2828,6 +2859,9 @@ mod tests {
         changed: Vec<String>,
         tree: Vec<String>,
         contents: Vec<(String, String)>,
+        /// Whether reading the configuration for the guard fails, rather
+        /// than the guard not holding.
+        guard_unread: bool,
     }
 
     impl FakeRepository {
@@ -2842,11 +2876,20 @@ mod tests {
                 changed: vec!["src/lib.rs".to_owned()],
                 tree: Vec::new(),
                 contents: Vec::new(),
+                guard_unread: false,
             }
         }
     }
 
     impl Repository for FakeRepository {
+        fn guarded(&self) -> Result<Box<dyn Repository + Send + Sync>> {
+            if self.guard_unread {
+                anyhow::bail!("git config timed out");
+            }
+            Err(anyhow::Error::new(
+                crate::domain::run_clone::GuardDoesNotHold("core.hooksPath is unset".to_owned()),
+            ))
+        }
         fn is_dagq_source(&self) -> bool {
             self.dagq_source
         }
@@ -3079,6 +3122,42 @@ mod tests {
         }
         let host = run(Path::new(DIR));
         assert!(super::super::run_git::for_run(&repository, &host).is_ok());
+    }
+
+    /// A container run whose git cannot be guarded fails its validation
+    /// with `git_failed` before its landing worktree is removed or anything
+    /// of it is read: no error of the checks, and no session resumed.
+    #[test]
+    fn a_container_run_that_cannot_be_guarded_fails_its_validation() {
+        let files = MemoryFiles::default();
+        write_receipt(&files, Path::new("/q/clones/run"), "passed");
+        let container = run_on(
+            Path::new("/q/clones/run"),
+            RunStatus::Validating,
+            Provider::Claude,
+        );
+        let rejection = check_receipt(
+            &FakeRepository::sound(),
+            &files,
+            &task(&[]),
+            &container,
+            &[],
+        )
+        .unwrap()
+        .expect_err("an unguarded container run was accepted");
+        assert_eq!(rejection.code, ReasonCode::GitFailed);
+        assert!(
+            rejection.reason.contains("no session is resumed"),
+            "{}",
+            rejection.reason
+        );
+        assert!(rejection.evidence_missing.is_empty() && rejection.scope_violation.is_empty());
+        // A git that could not read the configuration is no verdict.
+        let unread = FakeRepository {
+            guard_unread: true,
+            ..FakeRepository::sound()
+        };
+        assert!(check_receipt(&unread, &files, &task(&[]), &container, &[]).is_err());
     }
 
     fn write_receipt(files: &MemoryFiles, dir: &Path, tests: &str) {

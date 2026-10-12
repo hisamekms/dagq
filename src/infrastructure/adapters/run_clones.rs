@@ -20,8 +20,9 @@ use std::{
 use super::*;
 use crate::application::CloneFacts;
 use crate::domain::run_clone::{
-    CLONE_MAIN_REF, MAIN_BUNDLE_FILE, RUN_BUNDLE_FILE, RUN_FILE_LIMIT, RUN_STATE_FILE, RunState,
-    bundle_head, guard_env, guard_holds, guard_overrides, is_clone_path, landing_of, run_dir_of,
+    CLONE_MAIN_REF, GuardDoesNotHold, MAIN_BUNDLE_FILE, RUN_BUNDLE_FILE, RUN_FILE_LIMIT,
+    RUN_STATE_FILE, RunState, bundle_head, guard_env, guard_holds, guard_overrides, is_clone_path,
+    landing_of, run_dir_of,
 };
 
 /// How long a fetch of a run's bundle or a bundle of main may take.
@@ -204,7 +205,7 @@ impl GitRepository {
                 .args(["config", "--list", "--name-only", "-z"]),
         )
         .with_context(|| format!("read the git configuration in {}", dir.display()))?;
-        guard_overrides(&names).map_err(|why| anyhow::anyhow!("{why}"))
+        guard_overrides(&names).map_err(|why| anyhow::Error::new(GuardDoesNotHold(why)))
     }
 
     /// Add to the guard the overrides `dir` needs and check that they hold
@@ -246,10 +247,10 @@ impl GitRepository {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         guard_holds(&effective, &overrides).map_err(|why| {
-            anyhow::anyhow!(
+            anyhow::Error::new(GuardDoesNotHold(format!(
                 "the hooks and drivers of the git configuration in {} cannot be turned off: {why}",
                 dir.display()
-            )
+            )))
         })
     }
 
@@ -263,21 +264,43 @@ impl GitRepository {
     /// See [`Repository::create_clone`]. The clone is made by the control
     /// side with git there while it holds only what the control side put
     /// in it, every command guarded; the base comes over `file://`, which
-    /// sends a pack rather than linking object files.
+    /// sends a pack rather than linking object files. A clone an earlier
+    /// attempt left is removed first while the queue records no worker
+    /// started for the run, and one this attempt leaves half made is
+    /// removed before its error returns, both as files.
     pub fn create_clone(&self, run: &TaskRun, carried: Option<&str>) -> Result<String> {
         let clone = Path::new(run.worktree_path().context("missing worktree")?);
         ensure!(run.in_container(), "run {} has no clone", run.id());
-        let branch = run.branch().context("missing branch")?;
-        let base = run.base_commit().as_str();
         let guarded = self.guarded_repository()?;
         if let Some(parent) = clone.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
-        ensure!(
-            entry(clone)?.is_none(),
-            "{} is there already",
-            clone.display()
-        );
+        if entry(clone)?.is_some() {
+            // What a worker has had is untrusted: whether it may go is read
+            // from the queue's record, never from the clone.
+            ensure!(
+                run.workspace_id().is_none(),
+                "{} is there already and run {}'s worker has been started on it",
+                clone.display(),
+                run.id()
+            );
+            remove_entry(clone)?;
+        }
+        let made = guarded.fill_clone(run, clone, carried);
+        if made.is_err()
+            && let Err(error) = remove_entry(clone)
+        {
+            tracing::warn!(error = %format_args!("{error:#}"), "the half made clone {} could not be removed: {error:#}", clone.display());
+        }
+        made
+    }
+
+    /// Make the clone at `clone` and the control side's run branch, with
+    /// this repository guarded.
+    fn fill_clone(&self, run: &TaskRun, clone: &Path, carried: Option<&str>) -> Result<String> {
+        let branch = run.branch().context("missing branch")?;
+        let base = run.base_commit().as_str();
+        let guarded = self;
         let mut log = output(
             guarded
                 .command()
@@ -489,36 +512,40 @@ impl GitRepository {
 
     /// See [`Repository::remove_landing_worktree`].
     pub fn remove_landing_worktree(&self, run: &TaskRun) -> Result<()> {
-        match run.landing_path() {
-            Some(path) => self.remove_landing_at(&path),
-            None => Ok(()),
-        }
+        let Some(path) = run.landing_path() else {
+            return Ok(());
+        };
+        let guarded = self.guarded_repository();
+        self.remove_landing_at(guarded.as_ref().ok(), &path)?;
+        let guarded = unguarded_left(guarded, &format!("the registration of {}", path.display()))?;
+        guarded.prune_worktrees()
     }
 
-    /// Remove the landing worktree at `path` (its registration, then what
-    /// is left there, without following a symlink).
-    fn remove_landing_at(&self, path: &Path) -> Result<()> {
-        let path = path.to_path_buf();
+    /// Remove the landing worktree at `path`: its registration first with
+    /// `guarded`, the guarded repository, when the guard holds, then what
+    /// is left there as files, without following a symlink (ADR-t2179-1
+    /// decisions 7 and 8). Pruning a registration left is the caller's.
+    fn remove_landing_at(&self, guarded: Option<&Self>, path: &Path) -> Result<()> {
         // Nothing is removed through a landing directory that is not one.
         if let Some(meta) = entry(path.parent().context("no landing directory")?)?
             && (meta.file_type().is_symlink() || !meta.is_dir())
         {
             bail!(
                 "{} is a symlink or no directory; nothing is removed through it",
-                path.parent().unwrap_or(&path).display()
+                path.parent().unwrap_or(path).display()
             );
         }
-        let guarded = self.guarded_repository()?;
-        let registered = guarded
-            .worktrees()?
-            .iter()
-            .any(|(listed, _)| same_path(listed, &path));
-        if registered {
-            let primary = guarded.primary_worktree()?;
-            let _ = output(&mut guarded.remove_worktree_command(&primary, &path));
+        if let Some(guarded) = guarded {
+            let registered = guarded
+                .worktrees()?
+                .iter()
+                .any(|(listed, _)| same_path(listed, path));
+            if registered {
+                let primary = guarded.primary_worktree()?;
+                let _ = output(&mut guarded.remove_worktree_command(&primary, path));
+            }
         }
-        remove_entry(&path)?;
-        guarded.prune_worktrees()
+        remove_entry(path)
     }
 
     /// See [`Repository::hand_main`].
@@ -554,14 +581,32 @@ impl GitRepository {
         let (Some(landing), Some(run_dir)) = (landing_of(clone), run_dir_of(clone)) else {
             bail!("{} is no run's clone", clone.display());
         };
-        self.remove_landing_at(&landing)?;
+        let guarded = self.guarded_repository();
+        self.remove_landing_at(guarded.as_ref().ok(), &landing)?;
         remove_entry(clone)?;
-        self.guarded_repository()?.delete_branch(branch)?;
         for name in [RUN_BUNDLE_FILE, RUN_STATE_FILE, MAIN_BUNDLE_FILE] {
             remove_entry(&run_dir.join(name))?;
         }
-        Ok(())
+        let guarded = unguarded_left(
+            guarded,
+            &format!(
+                "the run branch {branch} and the registration of {}",
+                landing.display()
+            ),
+        )?;
+        guarded.prune_worktrees()?;
+        guarded.delete_branch(branch)
     }
+}
+
+/// The guarded repository, or the error that says the guard does not hold
+/// and that `left`, which only the main repository's git removes, is left
+/// for a later cleanup: no git runs on it unguarded (ADR-t2179-1 decision
+/// 8).
+fn unguarded_left(guarded: Result<GitRepository>, left: &str) -> Result<GitRepository> {
+    guarded.with_context(|| {
+        format!("{left} is left for a later cleanup, since the guard of the control side's git does not hold")
+    })
 }
 
 #[cfg(test)]

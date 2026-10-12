@@ -72,4 +72,5 @@ runのsessionの停止（backgroundのwrapperのhandleの`stop_background`。停
 
 ## containerのrunのclone
 
-containerで動くrunのclone（[Container runtime](../container-runtime.md#git)）はworktreeと同じ契機で、gitを走らせずsymlinkを辿らずに消え、ビルド成果物の掃除は当てない（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定7、手順は`supervise::cleanup`の`clean_clone`）。
+containerで動くrunのclone（[Container runtime](../container-runtime.md#git)）はworktreeと同じ契機で、gitを走らせずsymlinkを辿らずに消え、ビルド成果物の掃除は当てない（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定7）。
+作りかけのcloneは、workerの起動をqueueが記録する前なら消し作り直す。

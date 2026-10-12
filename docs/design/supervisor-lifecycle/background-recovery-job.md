@@ -101,6 +101,9 @@ workerのrunはすべて非対話で（[ADR-t813-1](../../adr/2026-09-28-t813-1-
 
 containerで動くrunの後片付けは、worktreeのrunと同じ契機で、clone・制御側のrun branch・着地用のworktree・run dirのrun branchのbundleと状態のファイル・mainのbundleに及ぶ（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定7）。
 約束は2つで、cloneではgitを走らせず、workerが置いたsymlinkの先（hostのファイルとdir）を消さない。
+片付けはgitを使わない削除とmainのrepositoryのgitの手順に分かれる。
+clone・着地用のworktreeのdir・run dirのbundleと状態のファイルの削除はgitを使わずguardを要らないので、guard（決定8）が成り立たなくても行う。
+制御側のrun branchの削除と着地用のworktreeの登録の解除はguardを通したgitでだけ行い、guardが成り立たなければ飛ばして片付けの失敗として残し、guardが成り立った後の片付けのやり直しが消す。
 復旧jobとtriageがrunのheadと状態を読むのもcloneではなくbundleと状態のファイルからで、読めなければその旨を事実として渡す。
 片付ける物の列挙と手順は`supervise::cleanup`の`clean_clone`と`application::run_git::remove`のdoc commentが持つ。
 

@@ -46,6 +46,7 @@ containerで動くrunでは、3〜5の事実をcloneでgitを走らせずに得�
 3のbranchと5のstatusはrunの状態のファイル、3〜4と7のheadはrun branchのbundleを制御側のrun branchへ取り込んだcommitで、祖先・差分・pathsは今と同じく制御側のobjectsで判定する。
 bundleか状態のファイルが無い・壊れている・symlinkである・前提のcommitが無い、bundleにrun branch以外のrefがある、状態のファイルのHEADがbundleのheadと食い違うときは、`commit_mismatch`でsessionに返す。
 検証は前の着地用のworktreeを先に消し、着地は検証が受け入れたcommitで行う。
+制御側のgitのguard（決定8）が成り立たなければ、何も読まずに`git_failed`で拒み、runは`failed`になって復旧jobとtriageから人に届く（sessionには返さない）。
 
 結果は`validation_finished`イベント（`status`、`result_commit`、`reason`、receiptの内容、7で外れたときだけ`scope_violation`と`allowed_paths`、8で欠けたときだけ`evidence_missing`、e2eの要否が分かったときは`e2e_requirement`、`receipt_observed`からこの検証までのload averageの`load_avg_mean` / `load_avg_max`（task 197。[`supervise`](supervise.md)の7））と`task_runs.result_commit`/`last_error`に保存する。4以降で拒否した場合もcommitは確認済みなので`result_commit`を残す。成功しても`awaiting_integration`はTaskを`in_progress`のまま保持し、着地まで依存taskを解放しない。
 

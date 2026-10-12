@@ -1605,7 +1605,10 @@ pub trait Repository {
     /// run carries over) under the same name, and
     /// [`CLONE_MAIN_REF`](crate::domain::run_clone::CLONE_MAIN_REF) at the
     /// base; no remote, no credential helper and no credential. The control
-    /// side's run branch is made at the base too. Git's output.
+    /// side's run branch is made at the base too. Git's output. A clone
+    /// half made is removed before the error returns, and one an earlier
+    /// attempt left is removed and made again while the run records no
+    /// worker started (`workspace_id`), never judged by what is in it.
     fn create_clone(&self, run: &TaskRun, carried: Option<&str>) -> Result<String> {
         let _ = (run, carried);
         anyhow::bail!("this repository cannot make a run's clone")
@@ -1636,7 +1639,10 @@ pub trait Repository {
         anyhow::bail!("this repository cannot make a landing worktree")
     }
     /// Remove the landing worktree of a run in a container, when there is
-    /// one, without following a symlink.
+    /// one, without following a symlink. Its registration goes only with
+    /// the guarded git ([`Repository::guarded`]): when the guard does not
+    /// hold, the directory still goes and `Err` says the registration is
+    /// left.
     fn remove_landing_worktree(&self, run: &TaskRun) -> Result<()> {
         let _ = run;
         anyhow::bail!("this repository keeps no landing worktree")
@@ -1653,7 +1659,10 @@ pub trait Repository {
     /// clone `clone`, without git and without following a symlink, its
     /// landing worktree, the control side's run branch `branch` and the
     /// bundles and state file in its directory. What is already gone is
-    /// not an error.
+    /// not an error. The files go whether or not the guard holds
+    /// ([`Repository::guarded`]); the run branch and the landing
+    /// worktree's registration go only with the guarded git, and `Err`
+    /// says they are left when it does not hold.
     fn remove_clone(&self, clone: &Path, branch: &str) -> Result<()> {
         let _ = (clone, branch);
         anyhow::bail!("this repository cannot remove a run's clone")
