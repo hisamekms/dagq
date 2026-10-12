@@ -985,31 +985,26 @@ pub(super) fn release_port(
 }
 
 /// The host's load records' port of the supervisor (task 516): samples
-/// under the queue's `host/`, each with the space of the filesystem of the
-/// run worktrees and their builds, the one the disk checks read (task
-/// 1371): `runs/`, else the queue's dir.
+/// in the queue's NodeSampleStore (opened by `store`) and under the
+/// queue's `host/`, each with the space of the filesystem of the run
+/// worktrees and their builds, the one the disk checks read (task 1371):
+/// `runs/`, else the queue's dir.
 pub(super) fn host_metrics_port(
     db: &Path,
     settings: HostMetricsSettings,
+    store: Arc<dyn QueueOpener<dyn crate::application::NodeSampleStore + Send>>,
 ) -> crate::application::supervise::HostMetricsPort {
     let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
     let dir = queue_dir.join(crate::domain::host_metrics::HOST_DIR);
     let runs = runs_dir(db);
-    let interval = settings.interval;
+    let (take, disk) = (settings.sample, settings.disk);
     crate::application::supervise::HostMetricsPort {
-        interval,
-        record: Arc::new(move |now| {
-            let disk = (settings.disk)(&runs).or_else(|| (settings.disk)(&queue_dir));
-            let sample = (settings.sample)(now).with_disk(disk);
-            crate::infrastructure::host_metrics::record(
-                &dir,
-                &sample,
-                clock::local_utc_offset(now),
-                interval,
-                settings.retention_days,
-            )
-            .map(|recorded| recorded.removed)
-        }),
+        interval: settings.interval,
+        retention_days: settings.retention_days,
+        sample: Arc::new(move |now| take(now).with_disk(disk(&runs).or_else(|| disk(&queue_dir)))),
+        utc_offset: clock::local_utc_offset,
+        files: Arc::new(crate::infrastructure::host_metrics::HostMetricsDir(dir)),
+        store,
     }
 }
 

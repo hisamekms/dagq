@@ -6,6 +6,7 @@ use super::execution::{RunCoordination, RunLog};
 use super::host::SupervisorRegistry;
 use super::planning::{PlanningRecords, TaskStore};
 use super::shared::{AskStore, EventStore};
+use crate::domain::host_metrics::{HostSample, NodeSample, SampleSource};
 use crate::domain::ledger::{LedgerKind, LedgerRow};
 use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, TaskId};
 use anyhow::Result;
@@ -82,6 +83,49 @@ pub trait LedgerStore {
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
     /// Every row of `kind`, by key.
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>>;
+}
+
+/// The NodeSampleStore (ADR-t1662-2 decisions 1 and 5): the permanent
+/// record of each node's load, one row per node and unix second, the
+/// input the measurement reads in place of the host's CSV files. Only
+/// host運用's record of the host's load writes it
+/// ([`crate::domain::host_metrics`]); the measurement reads it.
+pub trait NodeSampleStore {
+    /// Record `sample` of `node` on its local day `day` from `source`
+    /// unless a row of `node` is at its second, or on the same `day` less
+    /// than `apart_secs` from it
+    /// ([`crate::domain::host_metrics::apart_secs`]: another supervisor of
+    /// the queue sampled); whether it was written.
+    fn record_node_sample(
+        &self,
+        node: &str,
+        day: i64,
+        sample: &HostSample,
+        source: SampleSource,
+        apart_secs: i64,
+    ) -> Result<bool>;
+    /// Add the samples of `node` read from the CSV `file` of the local day
+    /// `day` (`csv_import`) whose second has no row of `node` yet, however
+    /// near another row they are (a supervisor kept them), and mark the
+    /// file imported up to the `bytes` read, in one transaction. Returns
+    /// how many rows were added.
+    fn import_node_samples(
+        &self,
+        node: &str,
+        file: &str,
+        day: i64,
+        samples: &[HostSample],
+        bytes: u64,
+    ) -> Result<usize>;
+    /// The CSV files of `node` marked imported, each with the bytes read.
+    fn imported_files(&self, node: &str) -> Result<std::collections::BTreeMap<String, u64>>;
+    /// Remove the rows and the marks of the files of a local day before
+    /// `before_day`: the retention, by the day as the files go. Returns how
+    /// many rows were removed.
+    fn remove_node_samples(&self, before_day: i64) -> Result<usize>;
+    /// The rows of `node` taken in `[from, until]` (unix seconds), in the
+    /// order they were taken.
+    fn node_samples(&self, node: &str, from: i64, until: i64) -> Result<Vec<NodeSample>>;
 }
 
 /// What reports read and record of the queue as a whole: the findings,

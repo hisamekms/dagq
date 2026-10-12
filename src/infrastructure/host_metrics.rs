@@ -3,7 +3,8 @@
 //! getloadavg(3), the CPU and memory per kind of process from `ps`, and
 //! the memory, swap and pageouts from `vm_stat` and `sysctl` on macOS or
 //! from `/proc` on Linux. Each tool that fails or is missing leaves its
-//! columns empty; none fails the sample.
+//! columns empty; none fails the sample. The files are the copy a person
+//! reads of the samples the NodeSampleStore keeps.
 
 use std::{
     fs,
@@ -103,15 +104,19 @@ pub struct Recorded {
 }
 
 /// Append `sample` to its local day's file under `dir` (made when
-/// missing, with the header when new), unless the file's last row is less
-/// than half of `interval` old (another supervisor of the queue sampled),
-/// then remove the files past `retention_days`.
+/// missing, with the header when new) as `admitted` decides: `Some` is the
+/// NodeSampleStore's decision, which the files follow; `None` (the store
+/// could not decide) leaves out a sample less than
+/// [`host_metrics::apart_secs`] from the file's last row (another
+/// supervisor of the queue sampled). Then remove the files past
+/// `retention_days`.
 pub fn record(
     dir: &Path,
     sample: &HostSample,
     utc_offset_secs: i64,
     interval: Duration,
     retention_days: u32,
+    admitted: Option<bool>,
 ) -> Result<Recorded> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let today = host_metrics::local_day(sample.unix, utc_offset_secs);
@@ -123,17 +128,19 @@ pub fn record(
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
     let length = file.metadata()?.len();
-    let half = i64::try_from(interval.as_secs() / 2).unwrap_or(i64::MAX);
+    let half = host_metrics::apart_secs(interval);
     let (recent, needs_header) = if length == 0 {
-        (false, true)
+        (admitted == Some(false), true)
     } else {
         // The last row is in the file's tail.
         file.seek(SeekFrom::Start(length.saturating_sub(4096)))?;
         let mut tail = String::new();
         file.read_to_string(&mut tail)
             .with_context(|| format!("read {}", path.display()))?;
-        let recent =
-            host_metrics::last_unix(&tail).is_some_and(|last| (sample.unix - last).abs() < half);
+        let recent = admitted.map_or_else(
+            || host_metrics::last_unix(&tail).is_some_and(|last| (sample.unix - last).abs() < half),
+            |admitted| !admitted,
+        );
         // The header in force: the first line, unless another binary began
         // the file (task 1371). Only then is the file read whole, for the
         // last header in it, however far back it is.
@@ -198,17 +205,70 @@ pub fn read(dir: &Path, from: i64, until: i64) -> Result<Vec<HostSample>> {
         if host_metrics::file_day(&name)
             .is_some_and(|day| host_metrics::file_may_hold(day, from, until))
         {
-            let path = dir.join(&name);
-            let text =
-                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
             samples.extend(
-                host_metrics::parse_file(&text)
+                read_file(dir, &name)?
                     .into_iter()
                     .filter(|sample| (from..=until).contains(&sample.unix)),
             );
         }
     }
     Ok(samples)
+}
+
+/// The samples of one file under `dir`.
+pub fn read_file(dir: &Path, name: &str) -> Result<Vec<HostSample>> {
+    read_text(dir, name).map(|text| host_metrics::parse_file(&text))
+}
+
+fn read_text(dir: &Path, name: &str) -> Result<String> {
+    let path = dir.join(name);
+    fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
+}
+
+/// The files of the host's load under a directory (`<queue dir>/host`).
+#[derive(Debug, Clone)]
+pub struct HostMetricsDir(pub PathBuf);
+
+impl crate::application::HostMetricsFiles for HostMetricsDir {
+    fn record(
+        &self,
+        sample: &HostSample,
+        utc_offset_secs: i64,
+        interval: Duration,
+        retention_days: u32,
+        admitted: Option<bool>,
+    ) -> Result<Vec<PathBuf>> {
+        record(
+            &self.0,
+            sample,
+            utc_offset_secs,
+            interval,
+            retention_days,
+            admitted,
+        )
+        .map(|recorded| recorded.removed)
+    }
+
+    fn files(&self) -> Result<Vec<(String, u64)>> {
+        if !self.0.is_dir() {
+            return Ok(Vec::new());
+        }
+        file_names(&self.0)?
+            .into_iter()
+            .map(|name| {
+                let path = self.0.join(&name);
+                let bytes = fs::metadata(&path)
+                    .with_context(|| format!("read {}", path.display()))?
+                    .len();
+                Ok((name, bytes))
+            })
+            .collect()
+    }
+
+    fn read_file(&self, name: &str) -> Result<(Vec<HostSample>, u64)> {
+        let text = read_text(&self.0, name)?;
+        Ok((host_metrics::parse_file(&text), text.len() as u64))
+    }
 }
 
 /// The summary of the host's load over `[from, until]` from the files
@@ -248,17 +308,17 @@ mod tests {
             sample
         };
         let interval = Duration::from_secs(30);
-        let first = record(&host, &at(1_790_000_000, 1.0), 0, interval, 2).unwrap();
+        let first = record(&host, &at(1_790_000_000, 1.0), 0, interval, 2, None).unwrap();
         let path = host.join("metrics-20260921.csv");
         assert_eq!(first.written.as_deref(), Some(path.as_path()));
         // Another supervisor 10 s later writes nothing; 30 s later, a row.
         assert_eq!(
-            record(&host, &at(1_790_000_010, 2.0), 0, interval, 2)
+            record(&host, &at(1_790_000_010, 2.0), 0, interval, 2, None)
                 .unwrap()
                 .written,
             None
         );
-        record(&host, &at(1_790_000_030, 3.0), 0, interval, 2).unwrap();
+        record(&host, &at(1_790_000_030, 3.0), 0, interval, 2, None).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 3, "{text}");
         assert_eq!(text.lines().next(), Some(header().as_str()));
@@ -266,7 +326,7 @@ mod tests {
         // Past the retention, and a file that is no metrics file.
         fs::write(host.join("metrics-20260918.csv"), "old").unwrap();
         fs::write(host.join("notes.txt"), "mine").unwrap();
-        let later = record(&host, &at(1_790_000_060, 4.0), 0, interval, 2).unwrap();
+        let later = record(&host, &at(1_790_000_060, 4.0), 0, interval, 2, None).unwrap();
         assert_eq!(later.removed, vec![host.join("metrics-20260918.csv")]);
         assert!(host.join("notes.txt").exists());
 
@@ -279,13 +339,39 @@ mod tests {
         // A directory that cannot be read: the summary says why.
         let file = dir.path().join("file");
         fs::write(&file, "x").unwrap();
-        assert!(record(&file, &at(1, 1.0), 0, interval, 2).is_err());
+        assert!(record(&file, &at(1, 1.0), 0, interval, 2, None).is_err());
         let broken = host.join("metrics-20260921.csv");
         fs::remove_file(&broken).unwrap();
         fs::create_dir(&broken).unwrap();
         let failed = super::summary(&host, 1_790_000_000, 1_790_000_100);
         assert!(failed.error.is_some());
         assert_eq!(failed.samples, 0);
+    }
+
+    /// The store's decision overrides the file's last row: admitted, a
+    /// sample 10 s after the last row is appended; kept out, a sample far
+    /// from it is not, nor is a header written to a new day's file.
+    #[test]
+    fn the_stores_decision_overrides_the_last_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("host");
+        let interval = Duration::from_secs(30);
+        let at = |unix: i64| {
+            let mut sample = HostSample::new(unix);
+            sample.set("load1", Some(1.5));
+            sample
+        };
+        record(&host, &at(1_790_000_000), 0, interval, 0, None).unwrap();
+        let near = record(&host, &at(1_790_000_010), 0, interval, 0, Some(true)).unwrap();
+        assert!(near.written.is_some());
+        let far = record(&host, &at(1_790_000_100), 0, interval, 0, Some(false)).unwrap();
+        assert_eq!(far.written, None);
+        let next_day = record(&host, &at(1_790_086_400), 0, interval, 0, Some(false)).unwrap();
+        assert_eq!(next_day.written, None);
+        assert_eq!(
+            read(&host, 0, i64::MAX).unwrap(),
+            [at(1_790_000_000), at(1_790_000_010)]
+        );
     }
 
     /// A day's file an older binary began with fewer columns gets this
@@ -308,7 +394,15 @@ mod tests {
         // More rows than the tail read for the last row: the header stays
         // the one written first.
         for index in 1..=100 {
-            record(&host, &disk(1_790_000_000 + 30 * index), 0, interval, 0).unwrap();
+            record(
+                &host,
+                &disk(1_790_000_000 + 30 * index),
+                0,
+                interval,
+                0,
+                None,
+            )
+            .unwrap();
         }
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.len() > 4096, "{}", text.len());

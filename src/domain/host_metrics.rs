@@ -1,6 +1,7 @@
 //! The host's load the supervisor records continuously (task 516): one row
-//! per sample in `<queue dir>/host/metrics-YYYYMMDD.csv` (the host's local
-//! day), never an event (ADR-0040 decision 5). Here are the columns, the
+//! per sample in the NodeSampleStore (ADR-t1662-2 decision 5) and in
+//! `<queue dir>/host/metrics-YYYYMMDD.csv` (the host's local day, the copy
+//! a person reads), never an event. Here are the columns, the
 //! parsers of what the host's tools print (macOS's `vm_stat` and `sysctl
 //! vm.swapusage`, Linux's `/proc/meminfo` and `/proc/vmstat`, and `ps` on
 //! both), the files the retention removes, and the summary `stats` (and
@@ -153,15 +154,33 @@ impl HostSample {
             self.unix.to_string(),
         ];
         for column in &COLUMNS[2..] {
-            cells.push(self.values.get(column).map_or_else(String::new, |value| {
-                if value.fract() == 0.0 {
-                    format!("{value:.0}")
-                } else {
-                    format!("{value:.2}")
-                }
-            }));
+            cells.push(
+                self.values
+                    .get(column)
+                    .map_or_else(String::new, |value| cell(*value)),
+            );
         }
         cells.join(",")
+    }
+
+    /// The sample as a file keeps it: each value as its cell reads back
+    /// (two decimals), so the NodeSampleStore's rows summarize as the files
+    /// do.
+    pub fn as_written(&self) -> Self {
+        let mut written = Self::new(self.unix);
+        for (column, value) in &self.values {
+            written.set(column, Some(cell(*value).parse().unwrap_or(*value)));
+        }
+        written
+    }
+}
+
+/// A value's cell in a file: whole without decimals, else two decimals.
+fn cell(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
     }
 }
 
@@ -479,10 +498,9 @@ pub const fn local_day(unix: i64, utc_offset_secs: i64) -> i64 {
 /// latest (today included). A name that is no such file is kept; zero
 /// days removes nothing.
 pub fn expired(names: &[String], today: i64, retention_days: u32) -> Vec<&str> {
-    if retention_days == 0 {
+    let Some(oldest) = oldest_kept_day(today, retention_days) else {
         return Vec::new();
-    }
-    let oldest = today - i64::from(retention_days) + 1;
+    };
     names
         .iter()
         .filter(|name| file_day(name).is_some_and(|day| day < oldest))
@@ -494,6 +512,99 @@ pub fn expired(names: &[String], today: i64, retention_days: u32) -> Vec<&str> {
 /// seconds) whatever the host's offset was: a day of margin on each side.
 pub fn file_may_hold(day: i64, from: i64, until: i64) -> bool {
     day >= from.div_euclid(86_400) - 1 && day <= until.div_euclid(86_400) + 1
+}
+
+/// The node the supervisor's own samples are of in the NodeSampleStore
+/// (ADR-t1662-2 decision 5): the host it runs on, one per queue.
+pub const HOST_NODE: &str = "host";
+
+/// The columns of a sample's values: those of a file but `time` and
+/// `unix`, in order. The NodeSampleStore has a column of each name.
+pub fn value_columns() -> &'static [&'static str] {
+    &COLUMNS[2..]
+}
+
+/// Where a row of the NodeSampleStore came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleSource {
+    /// The supervisor sampled the node.
+    Sampled,
+    /// A row of a host's CSV file imported once.
+    CsvImport,
+}
+
+impl SampleSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sampled => "sampled",
+            Self::CsvImport => "csv_import",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "sampled" => Some(Self::Sampled),
+            "csv_import" => Some(Self::CsvImport),
+            _ => None,
+        }
+    }
+}
+
+/// A row of the NodeSampleStore, one per node and unix second.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeSample {
+    /// The order the row came in; never used again once the retention
+    /// removed the row, so a cursor past it holds.
+    pub id: i64,
+    /// The node sampled: [`HOST_NODE`] for the supervisor's host.
+    pub node_id: String,
+    /// The node's local day the sample is on, the day of the file it is
+    /// in (`metrics-YYYYMMDD.csv` for the host): the half-interval rule
+    /// ([`apart_secs`]) and the retention ([`oldest_kept_day`]) go by it as
+    /// by the files, whatever clock change made a day begin twice or end
+    /// after the next began.
+    pub local_day: i64,
+    pub source: SampleSource,
+    /// When it was taken and each column of the files but `time`, as the
+    /// files keep it ([`HostSample::as_written`]); a value the node could
+    /// not give is null in the store and missing here.
+    pub sample: HostSample,
+}
+
+/// How near (seconds, exclusive) a row already recorded keeps out a sample
+/// taken every `interval`, so two supervisors of a queue do not record
+/// each sample twice: half of it, and only a row of the sample's own local
+/// day, as each day's file holds its rows apart (a row of the day before
+/// does not keep out a sample of the next, however near). The files and
+/// the store (by [`NodeSample::local_day`]) both decide so.
+pub fn apart_secs(interval: std::time::Duration) -> i64 {
+    i64::try_from(interval.as_secs() / 2).unwrap_or(i64::MAX)
+}
+
+/// The oldest local day the retention keeps on the local day `today`: of
+/// the `retention_days` latest (today included), the days [`expired`]
+/// keeps the files of; the store keeps the rows of the same days.
+/// `None` (zero days) keeps every day.
+pub const fn oldest_kept_day(today: i64, retention_days: u32) -> Option<i64> {
+    if retention_days == 0 {
+        return None;
+    }
+    Some(today - retention_days as i64 + 1)
+}
+
+/// Of `names` (a directory's file names), the files the retention keeps
+/// on the local day `today`, with their day, oldest first: those an
+/// import of the files reads.
+pub fn retained_files(names: &[String], today: i64, retention_days: u32) -> Vec<(&str, i64)> {
+    let oldest = oldest_kept_day(today, retention_days);
+    let mut files: Vec<(&str, i64)> = names
+        .iter()
+        .filter_map(|name| Some((name.as_str(), file_day(name)?)))
+        .filter(|(_, day)| oldest.is_none_or(|oldest| *day >= oldest))
+        .collect();
+    files.sort_by_key(|(_, day)| *day);
+    files
 }
 
 /// The minimum, the mean, the median, the maximum and the p90 (the median
@@ -1044,5 +1155,68 @@ garbage line
         assert_eq!((one.covered_secs, one.total), (30, 30.0));
         let json = serde_json::to_value(summarize(&[], 0, 1)).unwrap();
         assert!(json["cpu_secs"].is_null());
+    }
+
+    /// The store keeps the local days the files keep: the oldest kept day
+    /// is the first day `expired` keeps; zero days keeps every day.
+    #[test]
+    fn the_retention_keeps_the_same_local_days_in_the_store_and_the_files() {
+        let today = local_day(1_790_000_000, 9 * 3600);
+        assert_eq!(oldest_kept_day(today, 2), Some(today - 1));
+        assert_eq!(oldest_kept_day(today, 0), None);
+        assert_eq!(apart_secs(std::time::Duration::from_secs(30)), 15);
+        let names: Vec<String> = [today - 2, today - 1, today]
+            .into_iter()
+            .map(file_name)
+            .chain(["notes.txt".to_owned()])
+            .collect();
+        let kept = retained_files(&names, today, 2);
+        assert_eq!(
+            kept,
+            vec![(names[1].as_str(), today - 1), (names[2].as_str(), today)]
+        );
+        assert_eq!(expired(&names, today, 2), vec![names[0].as_str()]);
+        assert_eq!(retained_files(&names, today, 0).len(), 3);
+        for source in [SampleSource::Sampled, SampleSource::CsvImport] {
+            assert_eq!(SampleSource::parse(source.as_str()), Some(source));
+        }
+        assert_eq!(SampleSource::parse("other"), None);
+    }
+
+    /// A sample as a file keeps it reads back from its row as it is, values
+    /// of more than two decimals included, and summarizes as the file's
+    /// rows do.
+    #[test]
+    fn a_sample_as_written_is_its_row_read_back() {
+        let at = |unix: i64, load: f64| {
+            let mut sample = HostSample::new(unix);
+            sample.set("load1", Some(load));
+            sample.set("cpu_total", Some(load * 100.0 + 0.0049));
+            sample.set("disk_free_bytes", Some(3_221_225_472.0));
+            sample.set("mem_used_mb", Some(8191.996));
+            sample
+        };
+        let samples = [at(0, 1.234), at(30, 1.234), at(60, 1.244), at(90, 1.0)];
+        let text = format!(
+            "{}\n{}\n",
+            header(),
+            samples
+                .iter()
+                .map(|sample| sample.row(0))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let written: Vec<HostSample> = samples.iter().map(HostSample::as_written).collect();
+        assert_eq!(parse_file(&text), written);
+        assert_eq!(written[0].values["load1"], 1.23);
+        assert_eq!(written[2].values["load1"], 1.24);
+        assert_eq!(written[0].values["mem_used_mb"], 8192.0);
+        assert_eq!(written[0].values["disk_free_bytes"], 3_221_225_472.0);
+        assert_eq!(written[0].as_written(), written[0]);
+        assert_eq!(
+            summarize(&written, 0, 90),
+            summarize(&parse_file(&text), 0, 90)
+        );
+        assert_ne!(summarize(&samples, 0, 90), summarize(&written, 0, 90));
     }
 }

@@ -34,6 +34,15 @@ fn settings(interval: Duration, sample: fn(i64) -> HostSample) -> Option<HostMet
     })
 }
 
+/// The rows of the queue's NodeSampleStore.
+fn stored(db: &Path) -> Vec<dagq::domain::host_metrics::NodeSample> {
+    use dagq::application::NodeSampleStore;
+    SqliteQueue::open(db)
+        .unwrap()
+        .node_samples(dagq::domain::host_metrics::HOST_NODE, 0, i64::MAX)
+        .unwrap()
+}
+
 fn host_dir(db: &Path) -> PathBuf {
     db.canonicalize().unwrap().parent().unwrap().join("host")
 }
@@ -106,6 +115,24 @@ fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
         assert_eq!(&cells[2..5], ["1.50", "2", ""], "{row}");
     }
     assert!(!host.join("metrics-20000101.csv").exists());
+    // The same samples are in the store and the files, one row per second
+    // in both: at an interval under a second the store keeps out a second
+    // it has, and the files follow its decision.
+    let stored = stored(&db);
+    assert_eq!(stored.len(), rows.len(), "{stored:?} {rows:?}");
+    let seconds: std::collections::BTreeSet<i64> = rows
+        .iter()
+        .map(|row| row.split(',').nth(1).unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|row| row.sample.unix)
+            .collect::<std::collections::BTreeSet<_>>(),
+        seconds,
+        "{stored:?}"
+    );
+    assert!(stored.iter().all(|row| row.sample.values["load1"] == 1.5));
     assert!(host.join("notes.txt").exists());
     // `stats` summarizes them.
     let stats = runtime::stats(&db, &Default::default()).unwrap();
@@ -175,4 +202,30 @@ fn a_failed_sample_stops_nothing() {
     assert_eq!(outcome["runs"][0]["task_id"], 2, "{outcome}");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(fs::read_to_string(&host).unwrap(), "in the way");
+}
+
+/// A store that opens but refuses every sample (the table's writes fail)
+/// stops no claim nor landing and leaves the files written: the run lands
+/// as without the recording, and the store has no row.
+#[test]
+fn a_store_that_refuses_the_samples_stops_nothing() {
+    let (_dir, repo, db) = fixture();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER node_samples_refused BEFORE INSERT ON node_samples
+             BEGIN SELECT RAISE(ABORT, 'node samples refused'); END;",
+        )
+        .unwrap();
+    let host = host_dir(&db);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = SuperviseOptions {
+        host_metrics: settings(Duration::from_millis(50), steady_host),
+        ..supervise_options(1, true)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(outcome["runs"][0]["task_id"], 1, "{outcome}");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(!rows(&host).is_empty());
+    assert!(stored(&db).is_empty());
 }

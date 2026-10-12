@@ -79,6 +79,8 @@ table | run_processes | execution |
 table | session_workspaces | execution |
 table | findings | observation |
 table | ledger_rows | observation | the runtime's control does not read it
+table | node_samples | observation | the NodeSampleStore; host writes it through the port, the runtime's control does not read it
+table | node_sample_imports | observation | the imported CSV files, written with node_samples in one transaction
 table | supervisors | host |
 table | queue_repository | host |
 table | schema_floor | host |
@@ -113,6 +115,7 @@ store | src/infrastructure/ci_watch_store.rs | observation |
 store | src/infrastructure/kpi_push.rs | observation |
 store | src/infrastructure/runtime_store/queue_records.rs | observation |
 store | src/infrastructure/runtime_store/ledger.rs | observation |
+store | src/infrastructure/runtime_store/node_samples.rs | observation | NodeSampleStore
 store | src/infrastructure/headless_jobs.rs | host |
 store | src/infrastructure/schema.rs | host |
 store | src/infrastructure/asks.rs | shared | AskStore
@@ -216,6 +219,7 @@ port | QueueRecords | partial | - |
 port | ObserverLog | internal | - |
 port | ObservationQueue | internal | - |
 port | LedgerStore | internal | - | the ledger is read through ledger::read
+port | NodeSampleStore | partial | - | the measurement reads it; host records the host's load
 port | MarkLog | internal | - |
 port | SupervisorRegistry | partial | - |
 port | HeadlessJobStore | public | planning,execution,observation | to each context that starts a job
@@ -226,6 +230,7 @@ port | ProcessControl | public | all |
 port | InstalledPlugin | public | all |
 port | InboxWatchLog | internal | - |
 port | HostOpsQueue | internal | - |
+port | HostMetricsFiles | internal | - | the CSV copy of the host's load
 port | SessionWrappers | public | planning,execution | not classified by architecture.md; public to the contexts that use it today
 port | WorkspaceBackend | partial | - |
 port | Clock | public | all |
@@ -309,6 +314,10 @@ method | QueueRecords | reports_written | all |
 method | QueueRecords | kpi_breaches_open | all |
 method | QueueRecords | ci_watch_events | all |
 method | QueueRecords | ci_failure_findings_of | all |
+method | NodeSampleStore | record_node_sample | host | the record of the host's load
+method | NodeSampleStore | import_node_samples | host | the import of the CSV files
+method | NodeSampleStore | imported_files | host | the import reads its marks
+method | NodeSampleStore | remove_node_samples | host | the retention
 method | SupervisorRegistry | supervisors | all | the reads
 method | SupervisorRegistry | handoff_request | all |
 method | SupervisorRegistry | repository_binding | all |

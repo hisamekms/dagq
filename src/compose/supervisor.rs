@@ -670,10 +670,6 @@ pub fn supervise_with_reviewer(
         options.release_index.as_ref(),
         options.release_current.clone(),
     );
-    let host_metrics = options
-        .host_metrics
-        .clone()
-        .map(|settings| host::host_metrics_port(&db, settings));
     let run_e2e = execution::run_e2e_port(&db, &main_checkout, &options.run_e2e, &layout.cmux);
     let ci_watch = options
         .ci_watch
@@ -688,6 +684,18 @@ pub fn supervise_with_reviewer(
             pid,
         )),
     };
+    let host_metrics = options.host_metrics.clone().map(|settings| {
+        host::host_metrics_port(
+            &db,
+            settings,
+            Arc::new(SqlitePorts {
+                opener: opener(),
+                keep: |queue| -> Box<dyn crate::application::NodeSampleStore + Send> {
+                    Box::new(queue)
+                },
+            }),
+        )
+    });
     let host_programs = crate::infrastructure::review_programs::HostPrograms::new(&main_checkout);
     let ports = Ports {
         queues: Arc::new(opener()),

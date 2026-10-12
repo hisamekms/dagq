@@ -369,7 +369,8 @@ live worker alert (stalled, idle_process)
 
 - [`stats`](supervisor-lifecycle/stats.md)（Claude sessionの区間のkindごとの開いている時間とtranscriptのturnから導く稼働時間の集計`sessions`を含む。[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)。runのsessionの作業の内訳`work_breakdown`（task 514）と、sessionのトークン数`tokens`（task 199）も）
 
-- [hostの負荷の連続の記録](supervisor-lifecycle/host-metrics.md)（supervisorがload average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageoutを`<queue dir>/host/metrics-YYYYMMDD.csv`に日ごとに書き、保持の日数を過ぎたファイルを消す。`stats`の`host`が窓の要約を出す。外部のsamplerを止める手順。task 516）
+- [hostの負荷の連続の記録](supervisor-lifecycle/host-metrics.md)（supervisorがload average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageout・ディスクの空きをqueue.dbのNodeSampleStoreと人が読む写しの`<queue dir>/host/metrics-YYYYMMDD.csv`に書き、保持の日数を過ぎた行とファイルを消す。`stats`の`host`が窓の要約を出す。外部のsamplerを止める手順）
+  保持の期間のCSVは一度だけNodeSampleStoreに取り込む。
 
 ### `mark` / `marks`
 

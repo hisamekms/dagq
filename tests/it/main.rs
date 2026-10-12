@@ -63,6 +63,7 @@ mod lifecycle_up;
 mod live_alerts;
 mod location;
 mod main_checkout;
+mod node_samples;
 mod observer_codex;
 mod plan_review;
 mod plan_review_codex;

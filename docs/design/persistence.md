@@ -118,6 +118,8 @@ findings               -- observerの検出。同じ問題の閉じていない�
 search_index           -- 全文検索の索引（FTS5）。triggerが保つ
 landed_commits         -- 着地したcommit。run_integratedのeventからtriggerが書く
 ledger_rows            -- 計測の台帳（ビュー）
+node_samples           -- nodeの負荷（NodeSampleStore）。保持の日数で消す
+node_sample_imports    -- 取り込み済みのCSV
 binary_updates         -- 使っていない（自動更新の経過はupdate_*のevent）
 ```
 
@@ -125,7 +127,7 @@ binary_updates         -- 使っていない（自動更新の経過はupdate_*�
 
 `tasks`・`goals`・`task_runs`の行はdomainの集約`Task` / `Goal` / `TaskRun`と行き来する（[domain-model](domain-model.md#集約-taskとgoal)、[集約: TaskRun](domain-model.md#集約-taskrun)）。
 
-- 入口: task・goal・依存・claim・一覧は`src/infrastructure/sqlite.rs`、runの遷移はportごとに`src/infrastructure/runtime_store/`（`transitions.rs`・`recovery.rs`・`coordination.rs`・`session_registry.rs`・`run_log.rs`・`queue_records.rs`）。
+- 入口: task・goal・依存・claim・一覧は`src/infrastructure/sqlite.rs`、runと計測はportごとの`runtime_store/`。
 - 読む: 行から`TaskRecord`などを組んで`restore`で復元し、復元が拒んだ行は変換エラーになる（既定値に読み替えない）。
 - 新しく作る: `next_id`がトランザクションの中で次のIDを決めてから集約を作るので、拒否で巻き戻ればIDも消費しない。
 - 変える: 読んだ集約をdomainのコマンドに渡し、返った値を書く。

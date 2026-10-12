@@ -6,6 +6,7 @@
 
 use super::execution::RunLog;
 use super::shared::{AskStore, Queue, StdinUnprepared};
+use crate::domain::host_metrics::HostSample;
 use crate::domain::{
     EventKind, GoalId, LeaseToken, ProposalId, RunId, SupervisorMode, SupervisorRegistration,
 };
@@ -13,6 +14,7 @@ use anyhow::Result;
 use std::{
     io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 /// Opens connections to the queue: the supervisor's own, and one for each
@@ -21,6 +23,34 @@ use std::{
 /// default, or the ports a use case takes.
 pub trait QueueOpener<P: ?Sized = dyn Queue + Send>: Send + Sync {
     fn open(&self) -> Result<Box<P>>;
+}
+
+/// The host's CSV files of its load (`<queue dir>/host/metrics-YYYYMMDD.csv`,
+/// [`crate::domain::host_metrics`]): the copy a person reads, written from
+/// the same sample as the NodeSampleStore's row.
+pub trait HostMetricsFiles: Send + Sync {
+    /// Append `sample` to its local day's file at `utc_offset_secs` as
+    /// `admitted` decides: `Some` is the NodeSampleStore's decision on the
+    /// sample, which the files follow so both keep the same samples;
+    /// `None` (the store could not be opened or written) leaves out a
+    /// sample less than [`crate::domain::host_metrics::apart_secs`] of
+    /// `interval` from the file's last row (another supervisor of the
+    /// queue sampled). Then remove the files past `retention_days`;
+    /// returns the files removed.
+    fn record(
+        &self,
+        sample: &HostSample,
+        utc_offset_secs: i64,
+        interval: Duration,
+        retention_days: u32,
+        admitted: Option<bool>,
+    ) -> Result<Vec<PathBuf>>;
+    /// The names of the files in the directory, each with its length in
+    /// bytes; none when it is missing.
+    fn files(&self) -> Result<Vec<(String, u64)>>;
+    /// The samples of the file `name`, each row read by the header above
+    /// it, rows without a unix second skipped, and the bytes read.
+    fn read_file(&self, name: &str) -> Result<(Vec<HostSample>, u64)>;
 }
 
 /// One command of an update of the installed dagq plugin and what it

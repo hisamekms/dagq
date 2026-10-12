@@ -63,6 +63,7 @@ mod attributes;
 mod coordination;
 mod eval_rounds;
 mod ledger;
+mod node_samples;
 mod planning_records;
 mod queue_records;
 mod recovery;
