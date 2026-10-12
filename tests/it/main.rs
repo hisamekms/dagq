@@ -50,6 +50,7 @@ mod inbox_watcher;
 mod installed_plugin;
 mod landing_branch;
 mod language;
+mod ledger_rows;
 mod lifecycle_cmux;
 mod lifecycle_down;
 mod lifecycle_handoff_stop;

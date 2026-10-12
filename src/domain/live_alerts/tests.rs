@@ -4,6 +4,17 @@ use crate::domain::{
     stats::{LiveSnapshot, StatsQuery, outlier_thresholds, stats},
 };
 
+/// The fold of `events` at `window_end` as the ledger's window gives it
+/// ([`crate::domain::ledger::window::LedgerWindow::judgments`]), which is
+/// the fold of the events themselves: every test here holds of the rows.
+fn fold(events: &[RunEvent], window_end: i64) -> FoldedJudgments {
+    let direct = super::fold(events, window_end);
+    let rows = crate::domain::ledger::window::through_ledger(events, Some(window_end));
+    let through = rows.judgments();
+    assert_eq!(through, direct);
+    through
+}
+
 /// A start of the records, in unix milliseconds.
 const T0: i64 = 1_790_000_000_000;
 const SEC: i64 = 1000;

@@ -106,7 +106,7 @@ pub struct GoalPredecessor {
     pub tasks: Vec<Predecessor>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunEvent {
     pub id: EventId,
     /// Absent only for goal-level events (`goal_created`, `goal_updated`, `goal_closed`).

@@ -440,6 +440,34 @@ pub fn descendants(all: &[ProcessInfo], root: u32) -> Vec<u32> {
     found
 }
 
+/// The headless job an event of no run is of, restored from its payload:
+/// a plan review's or a goal review's id, and for a job its supervisor
+/// stopped (`headless_job_stopped`) its kind and what it was of (its
+/// proposal or goal). An older event without one of them has none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobRef {
+    pub plan_review_id: Option<String>,
+    pub goal_review_id: Option<String>,
+    pub kind: Option<String>,
+    pub of: Option<String>,
+}
+
+impl JobRef {
+    pub fn of(payload: &serde_json::Value) -> Self {
+        let text = |key: &str| match payload.get(key)? {
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Null => None,
+            other => Some(other.to_string()),
+        };
+        Self {
+            plan_review_id: text("plan_review_id"),
+            goal_review_id: text("goal_review_id"),
+            kind: text("kind"),
+            of: text("proposal_id").or_else(|| text("goal_id")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

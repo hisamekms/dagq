@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::application::LedgerStore;
-use crate::domain::ledger::{InputsThrough, LedgerKind, LedgerRow, Measure, Totals};
+use crate::domain::ledger::{InputsThrough, LedgerKind, LedgerRow, Measure, Subject, Totals};
 use crate::domain::run_phase::{Blocker, Holds};
 
 const BLOCKERS: [(Blocker, &str); 7] = [
@@ -68,7 +68,18 @@ impl LedgerStore for SqliteQueue {
                 row.after_claim.as_ref().map(text).transpose()?.into(),
             ),
             ("detail", text(&row.detail)?.into()),
+            ("inputs_from", row.inputs_from.as_i64().into()),
+            ("records", text(&row.records)?.into()),
         ];
+        let subject = row.subject.as_ref();
+        columns.extend([
+            ("subject_kind", subject.map(|s| s.kind.clone()).into()),
+            ("subject_id", subject.map(|s| s.id.clone()).into()),
+            ("round", subject.and_then(|s| s.round).into()),
+            ("route", subject.and_then(|s| s.route.clone()).into()),
+            ("provider", subject.and_then(|s| s.provider.clone()).into()),
+            ("model", subject.and_then(|s| s.model.clone()).into()),
+        ]);
         for (blocker, column) in BLOCKERS {
             columns.push((column, millis(&totals.by_blocker, tag(blocker)).into()));
         }
@@ -77,23 +88,44 @@ impl LedgerStore for SqliteQueue {
         }
         let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
         let marks: Vec<String> = (1..=names.len()).map(|n| format!("?{n}")).collect();
+        // A legacy row's values (its legacy values, times, sums and
+        // attributes) are frozen; what it owns, how far it reaches and what
+        // its detail folds of its records (its sessions, jobs and
+        // Executions; a legacy row keeps nothing else there) are not, so
+        // that every event stays some row's records and their Executions
+        // are read.
         let updates: Vec<String> = names
             .iter()
             .filter(|name| !matches!(**name, "kind" | "key"))
-            .map(|name| format!("{name}=excluded.{name}"))
+            .map(|name| match *name {
+                "records" | "inputs_from" | "inputs_through" | "built_at" | "detail" => {
+                    format!("{name}=excluded.{name}")
+                }
+                _ => format!(
+                    "{name}=CASE WHEN ledger_rows.legacy = 1 THEN ledger_rows.{name} ELSE excluded.{name} END"
+                ),
+            })
             .collect();
-        // A legacy row is frozen: the conflict leaves it as it is.
-        let written = self.conn.execute(
+        let frozen: bool = self
+            .conn
+            .query_row(
+                "SELECT legacy FROM ledger_rows WHERE kind=?1 AND key=?2",
+                params![row.kind.as_str(), row.key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        self.conn.execute(
             &format!(
                 "INSERT INTO ledger_rows({}) VALUES ({})
-                 ON CONFLICT(kind, key) DO UPDATE SET {} WHERE ledger_rows.legacy = 0",
+                 ON CONFLICT(kind, key) DO UPDATE SET {}",
                 names.join(","),
                 marks.join(","),
                 updates.join(","),
             ),
             rusqlite::params_from_iter(columns.into_iter().map(|(_, value)| value)),
         )?;
-        Ok(written == 1)
+        Ok(!frozen)
     }
 
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
@@ -139,6 +171,22 @@ fn ledger_row(r: &Row) -> rusqlite::Result<Result<LedgerRow>> {
         json("detail")?,
     );
     let after_claim = optional("after_claim")?;
+    let inputs_from: i64 = r.get("inputs_from")?;
+    let records = json("records")?;
+    let subject_kind: Option<String> = r.get("subject_kind")?;
+    let subject = match subject_kind {
+        Some(kind) => Some(Subject {
+            kind,
+            id: r
+                .get::<_, Option<String>>("subject_id")?
+                .unwrap_or_default(),
+            round: r.get("round")?,
+            route: r.get("route")?,
+            provider: r.get("provider")?,
+            model: r.get("model")?,
+        }),
+        None => None,
+    };
     Ok((|| {
         Ok(LedgerRow {
             kind: LedgerKind::parse(&kind).ok_or_else(|| anyhow!("unknown ledger kind {kind}"))?,
@@ -160,6 +208,9 @@ fn ledger_row(r: &Row) -> rusqlite::Result<Result<LedgerRow>> {
                 .transpose()?,
             detail: serde_json::from_str(&detail)?,
             legacy: legacy.as_deref().map(serde_json::from_str).transpose()?,
+            inputs_from: EventId::new(inputs_from),
+            subject,
+            records: serde_json::from_str(&records)?,
         })
     })())
 }

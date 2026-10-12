@@ -598,7 +598,8 @@ fn legacy_events() -> Log {
 }
 
 /// A legacy row holds `stats`' own values for the run, frozen: it reads
-/// back under the same names, marked, and is never built again.
+/// back under the same names, marked; it is built again as the events go
+/// on only so that its records follow, its values kept by the store.
 #[test]
 fn a_run_before_the_switch_is_a_frozen_legacy_row_of_stats_values() {
     let log = legacy_events();
@@ -632,12 +633,14 @@ fn a_run_before_the_switch_is_a_frozen_legacy_row_of_stats_values() {
         serde_json::to_value(&stats.land_phases).unwrap()
     );
 
+    // Built again for a later event or a new fold, so that its records
+    // follow; the store keeps its values.
     let last = row.inputs_through.events;
     assert!(!rebuilds(Some(&row), last, None));
-    assert!(!rebuilds(Some(&row), EventId::new(last.as_i64() + 1), None));
+    assert!(rebuilds(Some(&row), EventId::new(last.as_i64() + 1), None));
     let mut old = row.clone();
     old.ledger_v = LEDGER_V - 1;
-    assert!(!rebuilds(Some(&old), last, None));
+    assert!(rebuilds(Some(&old), last, None));
 }
 
 #[test]

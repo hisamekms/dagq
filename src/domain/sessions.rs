@@ -121,6 +121,37 @@ pub fn queue_span_kind(kind: &str) -> Option<&'static str> {
 /// by when the job finished or was killed.
 pub const THROUGHPUT_REVIEW_OPEN_MS: i64 = super::throughput_review::RUNNING_MS;
 
+/// What an event says of the span or the runtime planner it is of,
+/// restored from its payload: the kind of span it opens, the span it is
+/// of (`opened_event_id`, a close's, turns' or cut's), the planner of the
+/// runtime's it names, the provider its launch names, the agent's session
+/// it names (a span's, or a job's start that a span of that session
+/// belongs to) and the model it records (a close's, or a job's end). An
+/// older event without one of them has none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpanRef {
+    pub kind: Option<String>,
+    pub opened_event_id: Option<EventId>,
+    pub planner_id: Option<i64>,
+    pub launch_provider: Option<String>,
+    pub session_id: Option<String>,
+    pub model: Option<String>,
+}
+
+impl SpanRef {
+    pub fn of(event: &super::RunEvent) -> Self {
+        let payload = &event.payload;
+        Self {
+            kind: payload["kind"].as_str().map(str::to_owned),
+            opened_event_id: payload["opened_event_id"].as_i64().map(EventId::new),
+            planner_id: payload["planner_id"].as_i64(),
+            launch_provider: payload["launch"]["provider"].as_str().map(str::to_owned),
+            session_id: payload["session_id"].as_str().map(str::to_owned),
+            model: payload["model"].as_str().map(str::to_owned),
+        }
+    }
+}
+
 /// A span that is open: its `session_opened` event and payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenSpan {

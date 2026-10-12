@@ -181,6 +181,33 @@ pub fn pre_claim_intervals(events: &[RunEvent], now_ms: i64) -> Vec<PreClaimInte
     rows
 }
 
+/// The supervisor and the class a `slots_full_*` names; none for another
+/// event, or one that names neither.
+pub fn slots_full_of(event: &RunEvent) -> Option<(String, SlotClass)> {
+    if event.kind != SLOTS_FULL_STARTED && event.kind != SLOTS_FULL_ENDED {
+        return None;
+    }
+    Some((
+        text(event, "supervisor")?.to_owned(),
+        text(event, "class").and_then(SlotClass::of)?,
+    ))
+}
+
+/// The holds on the landings of `events` (ascending id) as intervals in
+/// the shape of the waits before a claim, each with the event that ended
+/// it, by the same rule ([`claim_hold::hold_spans`]).
+pub fn landing_hold_intervals(events: &[RunEvent]) -> Vec<(PreClaimInterval, Option<EventId>)> {
+    claim_hold::hold_spans(claim_hold::LANDINGS, events)
+        .iter()
+        .map(|span| {
+            (
+                from_span(IntervalKind::ClaimHold, span),
+                span.end.as_ref().map(|end| end.event.id),
+            )
+        })
+        .collect()
+}
+
 fn from_span(kind: IntervalKind, span: &HoldSpan<'_>) -> PreClaimInterval {
     PreClaimInterval {
         id: span.start.id,

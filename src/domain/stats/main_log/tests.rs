@@ -5,6 +5,16 @@ use crate::domain::stats::conflicts::MainChange;
 
 const T: i64 = 1_800_000_000;
 
+/// The record of main as the ledger's window gives it
+/// ([`crate::domain::ledger::window::LedgerWindow::main_log`]), which is
+/// the fold of the events themselves: every test here holds of the rows.
+fn fold_main_log(events: &[RunEvent]) -> MainLog {
+    let direct = super::fold_main_log(events);
+    let through = crate::domain::ledger::window::through_ledger(events, None).main_log();
+    assert_eq!(through, direct);
+    through
+}
+
 fn event(id: i64, kind: &str, payload: Value, secs: i64) -> RunEvent {
     RunEvent {
         id: EventId::new(id),

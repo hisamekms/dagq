@@ -64,11 +64,16 @@ pub enum Folded {
 /// [`Folded::BeforeBaseline`]. A record without the values (a binary
 /// before the record) is passed over. Reads nothing but `events`.
 pub fn fold(events: &[RunEvent], window_end: Option<i64>) -> Folded {
+    fold_within(events, super::WindowEnd::secs(window_end))
+}
+
+/// [`fold`] for a window that ends at `end`: an event, a time or both.
+pub fn fold_within(events: &[RunEvent], end: super::WindowEnd) -> Folded {
     let is_mark =
         |event: &RunEvent| event.kind == event_kind::FINDING_BASELINE && values(event).is_none();
     let is_record =
         |event: &RunEvent| event.kind == event_kind::FINDING_BASELINE && values(event).is_some();
-    let Some(taken) = super::baseline::taken(events, window_end, is_mark, is_record) else {
+    let Some(taken) = super::baseline::taken(events, end, is_mark, is_record) else {
         return Folded::BeforeBaseline;
     };
     let mut findings = Findings::default();
@@ -81,6 +86,12 @@ pub fn fold(events: &[RunEvent], window_end: Option<i64>) -> Folded {
         }
     }
     Folded::Findings(findings)
+}
+
+/// The values a record of a finding holds, restored; none for a record
+/// without them (a binary before the record, a baseline's mark).
+pub fn values_of(event: &RunEvent) -> Option<FindingAttributes> {
+    values(event).and_then(restore)
 }
 
 fn values(event: &RunEvent) -> Option<&serde_json::Value> {

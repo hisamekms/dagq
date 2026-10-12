@@ -11,10 +11,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use dagq::application::LedgerStore;
 use dagq::application::{Clock, Generators, TaskStore};
 use dagq::domain::kpi::report::{DiagramSection, Report};
 use dagq::domain::kpi::{ConfigReport, Kpi, Period};
 use dagq::domain::ledger::findings::{self, Findings, Folded, fold};
+use dagq::domain::ledger::{build, window::WindowQuery};
 use dagq::domain::marks::utc_text;
 use dagq::domain::{
     AskKind, AskReason, ClaimOutcome, EventId, FindingAttributes, FindingId, FindingQuery,
@@ -146,12 +148,41 @@ fn report(findings: &[FindingAttributes]) -> Report {
     )
 }
 
+/// The findings as the ledger's window gives them: the queue's events
+/// folded into the ledger's rows, written and read back through the
+/// `LedgerStore`, and the window's fold of their records.
+fn through_ledger(queue: &SqliteQueue) -> Findings {
+    // Past every event the clock gives.
+    let now_ms = 4_102_444_800_000;
+    for row in build(
+        &queue.all_events().unwrap(),
+        now_ms,
+        "2030-01-01T00:00:00.000Z",
+    ) {
+        queue.write_ledger_row(&row).unwrap();
+    }
+    let window = queue
+        .ledger_window(&WindowQuery {
+            now_ms,
+            ..WindowQuery::default()
+        })
+        .unwrap();
+    match window.findings() {
+        Folded::Findings(findings) => findings,
+        Folded::BeforeBaseline => panic!("before the baseline"),
+    }
+}
+
 /// The fold gives every finding as its row holds it, and the report made
 /// of the folded unsettled findings (`findings_open` and every line) is
-/// the one made of what `findings` lists by default.
+/// the one made of what `findings` lists by default; the same through the
+/// ledger's rows.
 fn assert_folded_matches_state(queue: &SqliteQueue) {
     let folded = folded(queue);
     assert_eq!(folded.findings, rows(queue));
+    let ledger = through_ledger(queue);
+    assert_eq!(ledger, folded);
+    let from_ledger = report(&ledger.unsettled());
     let store: Vec<FindingAttributes> = queue
         .findings(&FindingQuery::default())
         .unwrap()
@@ -162,6 +193,8 @@ fn assert_folded_matches_state(queue: &SqliteQueue) {
     let from_records = report(&folded.unsettled());
     assert_eq!(from_records.findings_open, from_store.findings_open);
     assert_eq!(from_records.findings, from_store.findings);
+    assert_eq!(from_ledger.findings_open, from_store.findings_open);
+    assert_eq!(from_ledger.findings, from_store.findings);
 }
 
 /// The newest event of `kind` about `finding` carries the attributes its

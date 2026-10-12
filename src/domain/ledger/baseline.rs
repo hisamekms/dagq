@@ -2,25 +2,49 @@
 //! a baseline and, after them, the queue's mark that closes the group
 //! (docs/design/attribute-records.md "基準と照合").
 
-use super::super::RunEvent;
 use super::super::stats::timestamp_millis;
+use super::super::{EventId, RunEvent};
 
-/// Which of `events` (ascending id) a window that ends at `window_end`
-/// (unix seconds; none for every event) takes: a baseline's record
+/// Where a window of the records ends: at an event (`upto`, its id and
+/// those before), at a time (`ms`, unix milliseconds), at both, or at
+/// neither (every event).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowEnd {
+    pub upto: Option<EventId>,
+    pub ms: Option<i64>,
+}
+
+impl WindowEnd {
+    /// The end at `secs` (unix seconds), none for every event.
+    pub fn secs(secs: Option<i64>) -> Self {
+        Self {
+            upto: None,
+            ms: secs.map(|secs| secs * 1000),
+        }
+    }
+
+    /// Whether `event` is within the window.
+    pub fn holds(&self, event: &RunEvent) -> bool {
+        self.upto.is_none_or(|upto| event.id <= upto)
+            && self
+                .ms
+                .is_none_or(|end| timestamp_millis(&event.created_at).is_some_and(|at| at <= end))
+    }
+}
+
+/// Which of `events` (ascending id) a window that ends at `end` takes: a
+/// baseline's record
 /// (`is_record`) only with the mark that closes its group (`is_mark`),
 /// whatever the record's time, so a window never holds part of a group (a
 /// record with no mark after it stands alone); any other event when it is
 /// within the window. None when the window ends before the first mark.
 pub(super) fn taken(
     events: &[RunEvent],
-    window_end: Option<i64>,
+    end: WindowEnd,
     is_mark: impl Fn(&RunEvent) -> bool,
     is_record: impl Fn(&RunEvent) -> bool,
 ) -> Option<Vec<bool>> {
-    let end_ms = window_end.map(|end| end * 1000);
-    let within = |event: &RunEvent| {
-        end_ms.is_none_or(|end| timestamp_millis(&event.created_at).is_some_and(|at| at <= end))
-    };
+    let within = |event: &RunEvent| end.holds(event);
     if events
         .iter()
         .find(|event| is_mark(event))

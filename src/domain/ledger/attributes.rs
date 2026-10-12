@@ -116,12 +116,17 @@ pub const KINDS: &[&str] = &[
 /// records' times. A window that ends before the first mark is
 /// [`Folded::BeforeBaseline`]. Reads nothing but `events`.
 pub fn fold(events: &[RunEvent], window_end: Option<i64>) -> Folded {
+    fold_within(events, super::WindowEnd::secs(window_end))
+}
+
+/// [`fold`] for a window that ends at `end`: an event, a time or both.
+pub fn fold_within(events: &[RunEvent], end: super::WindowEnd) -> Folded {
     let is_mark = |event: &RunEvent| {
         event.kind == event_kind::ATTRIBUTES_BASELINE
             && event.task_id.is_none()
             && event.goal_id.is_none()
     };
-    let Some(taken) = super::baseline::taken(events, window_end, is_mark, is_baseline) else {
+    let Some(taken) = super::baseline::taken(events, end, is_mark, is_baseline) else {
         return Folded::BeforeBaseline;
     };
     let mut attributes = Attributes::default();

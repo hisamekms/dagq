@@ -7,7 +7,10 @@ use super::host::SupervisorRegistry;
 use super::planning::{PlanningRecords, TaskStore};
 use super::shared::{AskStore, EventStore};
 use crate::domain::host_metrics::{HostSample, NodeSample, SampleSource};
-use crate::domain::ledger::{LedgerKind, LedgerRow};
+use crate::domain::ledger::{
+    LedgerKind, LedgerRow,
+    window::{LedgerWindow, WindowQuery},
+};
 use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, TaskId};
 use anyhow::Result;
 
@@ -72,17 +75,29 @@ impl<T: EventStore + ?Sized> MarkLog for T {
 /// The ledger (ADR-t1662-1 decisions 10 to 13, ADR-t1662-2): one row per
 /// measured object of each [`LedgerKind`], a view folded from the
 /// [`EventStore`] by [`crate::domain::ledger`]. Readers go through this
-/// port and [`crate::domain::ledger::read::read`] only, and no decision of
-/// the runtime (claim, slot, resume, landing) reads it.
+/// port and [`crate::domain::ledger::read::read`] (one row) or
+/// [`Self::ledger_window`] (a window of every kind) only, and no decision
+/// of the runtime (claim, slot, resume, landing) reads it.
 pub trait LedgerStore {
     /// Write `row` in place of the row of the same kind and key, unless
-    /// that one is legacy (frozen once written); `false` then. Writing the
+    /// that one is legacy: its values stay as first written and only its
+    /// records and their range follow `row`; `false` then. Writing the
     /// same row again leaves one row.
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool>;
     /// The row of `kind` and `key`, if there is one.
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
     /// Every row of `kind`, by key.
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>>;
+    /// The window `query` asks of the rows of every kind
+    /// ([`crate::domain::ledger::window::select`]): the one entry the
+    /// statistics read the ledger by.
+    fn ledger_window(&self, query: &WindowQuery) -> Result<LedgerWindow> {
+        let mut rows = Vec::new();
+        for kind in LedgerKind::ALL {
+            rows.extend(self.ledger_rows(kind)?);
+        }
+        Ok(crate::domain::ledger::window::select(rows, query))
+    }
 }
 
 /// The NodeSampleStore (ADR-t1662-2 decisions 1 and 5): the permanent

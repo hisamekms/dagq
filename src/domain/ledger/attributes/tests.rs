@@ -4,6 +4,16 @@ use super::*;
 use crate::domain::marks::utc_text;
 use crate::domain::{EventId, GoalTag};
 
+/// The fold at `window_end` as the ledger's window gives it, which is the
+/// fold of the events themselves: every test here holds of the rows.
+fn fold(events: &[RunEvent], window_end: Option<i64>) -> Folded {
+    let direct = super::fold(events, window_end);
+    let window = crate::domain::ledger::window::through_ledger(events, window_end);
+    let through = window.attributes();
+    assert_eq!(through, direct);
+    through
+}
+
 const T0: i64 = 1_900_000_000;
 const RUN: &str = "11111111-1111-4111-8111-111111111111";
 

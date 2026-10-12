@@ -75,6 +75,23 @@ pub fn supervisor_life_end(events: &[RunEvent], token: &str, now_ms: i64) -> Opt
     (now_ms > last + silent_after).then_some(LifeEnd::Silent { at_ms: last })
 }
 
+/// The kinds of event of a supervisor's own life and settings.
+pub const KINDS: [&str; 7] = [
+    event_kind::EventKind::SupervisorStarted.as_str(),
+    event_kind::EventKind::SupervisorAlive.as_str(),
+    event_kind::EventKind::SupervisorStopped.as_str(),
+    event_kind::EventKind::SupervisorDraining.as_str(),
+    event_kind::EventKind::SupervisorHandedOff.as_str(),
+    event_kind::EventKind::SupervisorHeartbeatRetried.as_str(),
+    event_kind::EventKind::SupervisorConfigChanged.as_str(),
+];
+
+/// The supervisor an event names as its writer (its `supervisor`), if it
+/// names one.
+pub fn supervisor_of(event: &RunEvent) -> Option<&str> {
+    event.payload.get("supervisor").and_then(Value::as_str)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

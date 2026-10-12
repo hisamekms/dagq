@@ -257,6 +257,97 @@ pub fn executions(events: &[RunEvent]) -> Vec<Execution> {
     executions
 }
 
+impl Counts {
+    /// The counts as a `tokens` object records them, which [`Counts::of`]
+    /// reads back.
+    fn value(&self) -> Value {
+        let mut value = serde_json::json!({
+            "input": self.input,
+            "output": self.output,
+            "cache_read": self.cache_read,
+            "cache_creation": self.cache_creation,
+        });
+        if let Some(cost) = self.cost_usd {
+            value["cost_usd"] = serde_json::json!(cost);
+        }
+        value
+    }
+}
+
+impl Execution {
+    /// The Execution as the ledger's rows keep it, which [`Self::from_entry`]
+    /// reads back: its tokens (null: not counted) and per model, and its
+    /// context (null: its record has none, as before the context was
+    /// recorded; else each value, null with `context_reason` when not
+    /// measured).
+    pub fn entry(&self) -> Value {
+        let context = self.context.as_ref().map(|context| {
+            serde_json::json!({
+                "peak_context": context.peak,
+                "context_window": context.window,
+                "compactions": context.compactions,
+                "context_reason": context.reason,
+            })
+        });
+        serde_json::json!({
+            "at": self.at,
+            "actor": self.actor,
+            "provider": self.provider,
+            "route": self.route,
+            "run_id": self.run_id,
+            "task_id": self.task_id,
+            "goal_id": self.goal_id,
+            "tokens": self.tokens.as_ref().map(Counts::value),
+            "by_model": self
+                .by_model
+                .iter()
+                .map(|(model, counts)| {
+                    let mut value = counts.value();
+                    value["model"] = serde_json::json!(model);
+                    value
+                })
+                .collect::<Vec<_>>(),
+            "context": context,
+        })
+    }
+
+    /// The Execution an [`Self::entry`] keeps; `None` for one that is not.
+    pub fn from_entry(entry: &Value) -> Option<Self> {
+        let actor = entry["actor"].as_str()?;
+        let actor = crate::domain::sessions::KINDS
+            .into_iter()
+            .find(|kind| *kind == actor)?;
+        let route = match entry["route"].as_str() {
+            None => None,
+            Some(route) => Some(
+                [HEADLESS_ROUTE, INTERACTIVE]
+                    .into_iter()
+                    .find(|known| *known == route)?,
+            ),
+        };
+        let by_model = entry["by_model"]
+            .as_array()?
+            .iter()
+            .map(|value| Some((value["model"].as_str()?.to_owned(), Counts::of(value)?)))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            at: entry["at"].as_i64()?,
+            actor,
+            provider: entry["provider"].as_str()?.to_owned(),
+            route,
+            run_id: serde_json::from_value(entry["run_id"].clone()).ok()?,
+            task_id: serde_json::from_value(entry["task_id"].clone()).ok()?,
+            goal_id: serde_json::from_value(entry["goal_id"].clone()).ok()?,
+            tokens: Counts::of(&entry["tokens"]),
+            by_model,
+            context: entry
+                .get("context")
+                .filter(|context| context.is_object())
+                .and_then(RecordedContext::of),
+        })
+    }
+}
+
 /// The tokens of some Executions, summed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ExecutionTotals {

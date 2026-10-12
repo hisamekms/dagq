@@ -46,10 +46,6 @@ line = 1373
 tasks = 69
 
 [[doc]]
-path = "docs/design/measurement.md"
-tasks = 5
-
-[[doc]]
 path = "docs/design/overview.md"
 size = 30324
 line = 6880

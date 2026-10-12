@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{EventId, RunEvent, Summary, summary, timestamp_millis};
-use crate::domain::event_kind;
+use crate::domain::{event_kind, sessions::SpanRef};
 
 /// The kinds of job, in the order `stats` lists them.
 pub const JOB_KINDS: [&str; 6] = [
@@ -215,6 +215,139 @@ fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String
     }
 }
 
+/// One job as its start and its end recorded it, for the ledger's rows
+/// ([`crate::domain::ledger::session`]): the same pairing, provider, model,
+/// verdict and time as [`jobs`] counts, with no end while it runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobLife {
+    pub kind: &'static str,
+    /// What its start and end are matched by (a run, a plan review's id).
+    pub key: String,
+    pub started: Option<EventId>,
+    pub started_at: Option<i64>,
+    pub ended: Option<EventId>,
+    pub ended_at: Option<i64>,
+    pub provider: String,
+    pub model: String,
+    /// The `session_closed` its model was read from, if it was.
+    pub model_from: Option<EventId>,
+    pub mode: Option<String>,
+    pub failed: bool,
+    pub verdict: Option<String>,
+    pub secs: Option<i64>,
+}
+
+/// The model each session used, by its session id, and the
+/// `session_closed` that says it: what [`jobs`] reads a job's model from
+/// (its start's `session_id`), whenever it closed.
+pub fn session_models(events: &[RunEvent]) -> HashMap<String, (String, EventId)> {
+    events
+        .iter()
+        .filter(|event| event.kind == event_kind::SESSION_CLOSED)
+        .filter_map(|event| {
+            let close = SpanRef::of(event);
+            Some((close.session_id?, (close.model?, event.id)))
+        })
+        .collect()
+}
+
+/// The kind of job and the key an event starts or ends; `None` for one
+/// that does neither.
+pub fn job_of(event: &RunEvent) -> Option<(&'static str, String)> {
+    start_of(event).or_else(|| end_of(event).map(|(kind, key, _, _)| (kind, key)))
+}
+
+/// Whether `event` starts a job.
+pub fn starts_job(event: &RunEvent) -> bool {
+    start_of(event).is_some()
+}
+
+/// Every job of `events` (ascending id), started or not ended yet, in the
+/// order of its start (an end with no start in `events` after them).
+pub fn job_lives(events: &[RunEvent]) -> Vec<JobLife> {
+    job_lives_with(events, &session_models(events))
+}
+
+/// [`job_lives`] with the sessions' models read elsewhere ([`session_models`]
+/// of events beside `events`: a job's session may be another row's).
+pub fn job_lives_with(
+    events: &[RunEvent],
+    models: &HashMap<String, (String, EventId)>,
+) -> Vec<JobLife> {
+    let mut lives: Vec<JobLife> = Vec::new();
+    let mut open: HashMap<(&'static str, String), usize> = HashMap::new();
+    for event in events {
+        if let Some((kind, key)) = start_of(event) {
+            let start = SpanRef::of(event);
+            let model = start.session_id.as_ref().and_then(|id| models.get(id));
+            open.insert((kind, key.clone()), lives.len());
+            lives.push(JobLife {
+                kind,
+                key,
+                started: Some(event.id),
+                started_at: timestamp_millis(&event.created_at),
+                ended: None,
+                ended_at: None,
+                provider: start
+                    .launch_provider
+                    .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned()),
+                model: model
+                    .map_or(UNKNOWN, |(model, _)| model.as_str())
+                    .to_owned(),
+                model_from: model.map(|(_, close)| *close),
+                mode: None,
+                failed: false,
+                verdict: None,
+                secs: None,
+            });
+            continue;
+        }
+        let Some((kind, key, failed, verdict)) = end_of(event) else {
+            continue;
+        };
+        let at = match open.remove(&(kind, key.clone())) {
+            Some(at) => at,
+            None => {
+                lives.push(JobLife {
+                    kind,
+                    key: key.clone(),
+                    started: None,
+                    started_at: None,
+                    ended: None,
+                    ended_at: None,
+                    provider: DEFAULT_PROVIDER.to_owned(),
+                    model: UNKNOWN.to_owned(),
+                    model_from: None,
+                    mode: None,
+                    failed: false,
+                    verdict: None,
+                    secs: None,
+                });
+                lives.len() - 1
+            }
+        };
+        let life = &mut lives[at];
+        life.ended = Some(event.id);
+        life.ended_at = timestamp_millis(&event.created_at);
+        life.failed = failed;
+        life.verdict = verdict;
+        if life.model == UNKNOWN
+            && let Some(model) = SpanRef::of(event).model
+        {
+            life.model = model;
+        }
+        life.secs = event
+            .payload
+            .get("duration_secs")
+            .and_then(Value::as_i64)
+            .or_else(|| Some((life.ended_at? - life.started_at?) / 1000));
+        life.mode = (kind == "throughput_review")
+            .then(|| text(&event.payload, "mode"))
+            .flatten();
+    }
+    lives
+}
+
 /// The jobs whose end has `after < id <= upto` and which `counts` accepts,
 /// per kind; every kind is listed, with no job too.
 pub fn jobs(
@@ -224,16 +357,7 @@ pub fn jobs(
     counts: impl Fn(&RunEvent) -> bool,
 ) -> BTreeMap<&'static str, JobStats> {
     // The model each session used, read from its close whenever it was.
-    let models: HashMap<&str, &str> = events
-        .iter()
-        .filter(|event| event.kind == event_kind::SESSION_CLOSED)
-        .filter_map(|event| {
-            Some((
-                event.payload.get("session_id")?.as_str()?,
-                event.payload.get("model")?.as_str()?,
-            ))
-        })
-        .collect();
+    let models = session_models(events);
     let mut stats: BTreeMap<&'static str, JobStats> = JOB_KINDS
         .iter()
         .map(|kind| (*kind, JobStats::default()))
@@ -259,17 +383,19 @@ pub fn jobs(
         if event.id <= after || !counts(event) || (kind == "recovery" && start.is_none()) {
             continue;
         }
-        let launch = start.and_then(|start| start.payload.get("launch"));
-        let provider = launch
-            .and_then(|launch| launch.get("provider")?.as_str())
-            .unwrap_or(DEFAULT_PROVIDER)
-            .to_owned();
-        let model = start
-            .and_then(|start| models.get(start.payload.get("session_id")?.as_str()?))
-            .copied()
-            .or_else(|| event.payload.get("model")?.as_str())
-            .map_or(UNKNOWN, |model| model)
-            .to_owned();
+        let launched = start.map(SpanRef::of);
+        let provider = launched
+            .as_ref()
+            .and_then(|start| start.launch_provider.clone())
+            .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned());
+        let model = launched
+            .and_then(|start| {
+                models
+                    .get(&start.session_id?)
+                    .map(|(model, _)| model.clone())
+            })
+            .or_else(|| SpanRef::of(event).model)
+            .unwrap_or_else(|| UNKNOWN.to_owned());
         let secs = event
             .payload
             .get("duration_secs")

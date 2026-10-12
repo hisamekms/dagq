@@ -89,6 +89,44 @@ pub fn judge(events: &[RunEvent], now: i64, inputs: &LiveInputs) -> Judged {
     }
 }
 
+/// The kinds of the record of the judgments of now.
+pub const RECORD_KINDS: [&str; 5] = [
+    EventKind::LiveAlertBaseline.as_str(),
+    EventKind::LiveAlertInputChanged.as_str(),
+    EventKind::LiveAlertReached.as_str(),
+    EventKind::LiveAlertStarted.as_str(),
+    EventKind::LiveAlertEnded.as_str(),
+];
+
+/// One record of a stream as its payload holds it: the supervisor whose
+/// stream it is, the input version it carries and, for an alert's start
+/// or end, its key. `None` for an event that names no supervisor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamRecord {
+    pub supervisor: String,
+    pub version: Option<u64>,
+    pub alert: Option<AlertKey>,
+}
+
+impl StreamRecord {
+    pub fn of(event: &RunEvent) -> Option<Self> {
+        let payload = &event.payload;
+        let kind = event.kind.as_str();
+        let alert = [
+            EventKind::LiveAlertStarted.as_str(),
+            EventKind::LiveAlertEnded.as_str(),
+        ]
+        .contains(&kind)
+        .then(|| AlertKey::deserialize(payload).ok())
+        .flatten();
+        Some(Self {
+            supervisor: payload.get("supervisor")?.as_str()?.to_owned(),
+            version: payload.get("version").and_then(Value::as_u64),
+            alert,
+        })
+    }
+}
+
 /// What tells one alert from another: the judgment (`slots` or
 /// `running`), the alert's kind, the run it is about and its reason. Who
 /// leases the run is not part of it, so a lease that moves changes no key.
@@ -522,9 +560,24 @@ impl StreamFold {
 /// Reads nothing but `events`.
 pub fn fold(events: &[RunEvent], window_end: i64) -> FoldedJudgments {
     let end_ms = window_end * 1000;
+    fold_within(
+        events,
+        |event| timestamp_millis(&event.created_at).is_some_and(|at| at <= end_ms),
+        window_end,
+    )
+}
+
+/// [`fold`] of the events `within` the window (its end by an event, a
+/// time or both), judged at `window_end` (unix seconds).
+pub fn fold_within(
+    events: &[RunEvent],
+    within: impl Fn(&RunEvent) -> bool,
+    window_end: i64,
+) -> FoldedJudgments {
+    let end_ms = window_end * 1000;
     let upto: Vec<RunEvent> = events
         .iter()
-        .filter(|event| timestamp_millis(&event.created_at).is_some_and(|at| at <= end_ms))
+        .filter(|event| within(event))
         .cloned()
         .collect();
     let mut streams: BTreeMap<String, StreamFold> = BTreeMap::new();

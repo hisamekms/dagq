@@ -1,17 +1,29 @@
 //! The ledger (ADR-t1662-1 decisions 10, 13, 17 and 18, ADR-t1662-2,
-//! docs/design/measurement.md "台帳の形"): one row per run and per task,
-//! folded from the EventStore alone by [`fold`], kept by the
-//! `LedgerStore` and read by [`read`]. A view: a row is built again when
-//! [`LEDGER_V`] goes up or a later event arrives ([`rebuilds`]), except a
-//! legacy row (a run from before `run_phase_changed`, and a task with such
-//! a run), which keeps the values `stats` gave it once. Measurement only:
-//! no decision of the runtime reads it.
+//! docs/design/measurement.md "台帳の形"): one row per run and per task
+//! ([`fold`]), per session or job of no run ([`session`]) and per interval
+//! or event of the queue as a whole ([`queue`]), folded from the
+//! EventStore alone, each event into the one row [`owner`] gives it
+//! ([`build`]); kept by the `LedgerStore`, read one row by [`read`] and a
+//! window of rows by [`window`]. A view: a row is built again when
+//! [`LEDGER_V`] goes up or a later event arrives ([`rebuilds`]). A legacy
+//! row (a run from before `run_phase_changed`, and a task with such a run)
+//! is built again too, so that its records, their range and what its
+//! detail folds of them follow the events, but keeps the values `stats`
+//! gave it once: the store does not write over them. Measurement only: no
+//! decision of the runtime reads it.
 
 pub mod attributes;
 mod baseline;
 pub mod findings;
 pub mod fold;
+pub mod owner;
+pub mod queue;
 pub mod read;
+pub mod session;
+pub mod settle;
+pub mod window;
+
+pub use baseline::WindowEnd;
 
 use std::collections::BTreeMap;
 
@@ -26,8 +38,9 @@ use super::stats::{self, RunStats};
 use super::{EventId, RunEvent, TaskId, event_kind};
 
 /// The version of the fold: raised when what a row holds or how it is
-/// folded changes, so every row but a legacy one is built again.
-pub const LEDGER_V: u32 = 1;
+/// folded changes, so every row is built again (a legacy row's frozen
+/// values aside, which the store keeps).
+pub const LEDGER_V: u32 = 2;
 
 /// The kind of a row. The store keeps every kind in one table by this
 /// column, so a new kind is a new value.
@@ -36,23 +49,44 @@ pub const LEDGER_V: u32 = 1;
 pub enum LedgerKind {
     Run,
     Task,
+    /// A session or a job of no run ([`session`]).
+    Session,
+    /// An interval or an event of the queue as a whole ([`queue`]).
+    Queue,
 }
 
 impl LedgerKind {
+    /// Every kind, in the order a window lists them.
+    pub const ALL: [Self; 4] = [Self::Run, Self::Task, Self::Session, Self::Queue];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Run => "run",
             Self::Task => "task",
+            Self::Session => "session",
+            Self::Queue => "queue",
         }
     }
 
     pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "run" => Some(Self::Run),
-            "task" => Some(Self::Task),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|kind| kind.as_str() == text)
     }
+}
+
+/// What a session or queue row is of: for a session, the kind and id of
+/// its object (`runtime_planner` and the planner's id, `plan_review` and
+/// the plan review's, `inbox` and none), which of its sessions or jobs it
+/// is (`round`, from 1; 0 for its events outside any) and what it ran on;
+/// for a queue row, the kind of interval or event and what it is about
+/// (a supervisor, a finding, a run). Run and task rows have none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subject {
+    pub kind: String,
+    pub id: String,
+    pub round: Option<i64>,
+    pub route: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
 }
 
 /// How far into its inputs a row was folded: the last EventStore event
@@ -61,6 +95,20 @@ impl LedgerKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputsThrough {
     pub events: EventId,
+    /// For a row its supervisor's life ended (an interval or a stream with
+    /// no end of its own), the last event naming that supervisor the fold
+    /// read: a later one (its stop, or more of its life) may move the end
+    /// ([`settle::life_input`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<EventId>,
+}
+
+impl InputsThrough {
+    /// The last input the row was folded from, whichever kind.
+    pub fn last(&self) -> EventId {
+        self.supervisor
+            .map_or(self.events, |life| life.max(self.events))
+    }
 }
 
 /// The two measures of a set of intervals, in milliseconds: the time and
@@ -135,16 +183,28 @@ fn name(value: impl Serialize) -> String {
         .unwrap_or_default()
 }
 
-/// One row of the ledger.
+/// One row of the ledger: what every kind has (its key, the version of
+/// its fold, how far into its inputs it was folded, the marks of settled
+/// and legacy, its times and sums, its records) and what its kind adds
+/// (`detail`, `subject`). The columns of `ledger_rows` are its fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerRow {
+    /// `run`, `task`, `session` or `queue` (a node row is to come).
     pub kind: LedgerKind,
-    /// The run id or the task id.
+    /// What the row is of, one per kind: a run's id, a task's id, a
+    /// session's `<subject kind>/<subject id>/<session|job|events>/<round>`
+    /// ([`session`]), and a queue row's id of the event that starts it
+    /// ([`queue`]).
     pub key: String,
     pub task_id: Option<TaskId>,
+    /// The version of the fold that built it ([`LEDGER_V`]): a row of an
+    /// older one is built again ([`rebuilds`]), a legacy row aside.
     pub ledger_v: u32,
     /// When it was built (the queue's timestamp text).
     pub built_at: String,
+    /// The first EventStore event it was folded from; with
+    /// `inputs_through`, the range of ids a window matches it by.
+    pub inputs_from: EventId,
     pub inputs_through: InputsThrough,
     /// Marked settled by whoever builds the ledger; a fold never sets it.
     pub is_final: bool,
@@ -161,8 +221,18 @@ pub struct LedgerRow {
     /// What else the kind folds: a run's milestones and the run that
     /// closed its pending push, a task's ready time, runs and overlays.
     pub detail: Value,
-    /// A legacy row's frozen values (and its mark: `Some`).
+    /// A legacy row's frozen values (and its mark: `Some`): a run's
+    /// `stats` values under today's names (`work`, `validate`,
+    /// `wait_to_land`, `land_phases`, `startup`), a task's runs. Written
+    /// once; the store keeps them while the records follow the events.
     pub legacy: Option<Value>,
+    /// What a session or queue row is of.
+    pub subject: Option<Subject>,
+    /// The events the row owns ([`owner`]), ascending id: every event is
+    /// some one row's, so a window's rows give back the events today's
+    /// functions of `stats`, `kpi` and `report` read
+    /// ([`window::LedgerWindow::events`]).
+    pub records: Vec<RunEvent>,
 }
 
 impl LedgerRow {
@@ -177,8 +247,10 @@ impl LedgerRow {
             task_id,
             ledger_v: LEDGER_V,
             built_at: built_at.to_owned(),
+            inputs_from: EventId::new(0),
             inputs_through: InputsThrough {
                 events: EventId::new(0),
+                supervisor: None,
             },
             is_final: false,
             started_at: None,
@@ -190,7 +262,26 @@ impl LedgerRow {
             after_claim: None,
             detail: json!({}),
             legacy: None,
+            subject: None,
+            records: Vec::new(),
         }
+    }
+
+    /// Keep `records` as the events the row owns, its range of inputs
+    /// reaching over them too (from the first, unless the fold read an
+    /// earlier one).
+    fn own(&mut self, records: Vec<RunEvent>) {
+        if let Some(first) = records.first() {
+            self.inputs_from = if self.inputs_from == EventId::new(0) {
+                first.id
+            } else {
+                self.inputs_from.min(first.id)
+            };
+        }
+        if let Some(last) = records.last() {
+            self.inputs_through.events = self.inputs_through.events.max(last.id);
+        }
+        self.records = records;
     }
 }
 
@@ -199,7 +290,9 @@ impl LedgerRow {
 /// latest `push_finished` is `latest_push`: a missing row, one of an older
 /// [`LEDGER_V`] and one an event arrived after are, and so is one that
 /// ends unsettled in `push_pending` once a later push arrives (another
-/// run's push closes it); a legacy row never is.
+/// run's push closes it). A legacy row is built again by the same rules
+/// (it has no intervals, so no pending push): its records follow, its
+/// frozen values stay as the store keeps them.
 pub fn rebuilds(
     existing: Option<&LedgerRow>,
     last_event: EventId,
@@ -207,7 +300,6 @@ pub fn rebuilds(
 ) -> bool {
     match existing {
         None => true,
-        Some(row) if row.is_legacy() => false,
         Some(row) => {
             let through = row.inputs_through.events;
             let pending = row.ended_at.is_none()
@@ -239,6 +331,17 @@ pub fn run_row(
         Some(life) => fill_run(&mut row, life),
         None => fill_legacy_run(&mut row, events),
     }
+    let owned: Vec<RunEvent> = events
+        .iter()
+        .filter(|event| owner::owner(event) == owner::Owner::Run)
+        .filter(|event| event.run_id.as_ref().is_some_and(|id| id.as_str() == run))
+        .cloned()
+        .collect();
+    if let Value::Object(detail) = &mut row.detail {
+        detail.extend(session::run_sessions(&owned));
+    }
+    row.inputs_from = events.first().map_or(row.inputs_from, |first| first.id);
+    row.own(owned);
     row
 }
 
@@ -351,7 +454,68 @@ pub fn task_row(
             row.legacy = Some(json!({"runs": runs}));
         }
     }
+    let owned: Vec<RunEvent> = events
+        .iter()
+        .filter(|event| owner::owner(event) == owner::Owner::Task && event.task_id == Some(task))
+        .cloned()
+        .collect();
+    row.inputs_from = events.first().map_or(row.inputs_from, |first| first.id);
+    row.own(owned);
     row
+}
+
+/// Every row of `events` (the whole EventStore, ascending id) at `now_ms`,
+/// built at `built_at`: a run's and a task's ([`run_row`], [`task_row`]),
+/// the sessions' and jobs' of no run ([`session::session_rows`]) and the
+/// queue's ([`queue::queue_rows`]). Each event is the records of exactly
+/// one row ([`owner`]). What builds the ledger writes these, a legacy row
+/// too: the store keeps a legacy row's values as first written and takes
+/// its records, their range and its detail (its sessions, jobs and
+/// Executions) from the new one.
+pub fn build(events: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow> {
+    use std::collections::BTreeSet;
+    let pushes: Vec<RunEvent> = events
+        .iter()
+        .filter(|event| event.kind == event_kind::PUSH_FINISHED)
+        .cloned()
+        .collect();
+    let pre_claim = super::pre_claim::pre_claim_intervals(events, now_ms);
+    let mut runs: BTreeMap<String, Vec<RunEvent>> = BTreeMap::new();
+    let mut tasks: BTreeMap<TaskId, Vec<RunEvent>> = BTreeMap::new();
+    let (mut sessions, mut queue) = (Vec::new(), Vec::new());
+    for event in events {
+        if let Some(run) = &event.run_id {
+            runs.entry(run.as_str().to_owned())
+                .or_default()
+                .push(event.clone());
+        }
+        if let Some(task) = event.task_id {
+            tasks.entry(task).or_default().push(event.clone());
+        }
+        match owner::owner(event) {
+            owner::Owner::Session => sessions.push(event.clone()),
+            owner::Owner::Queue => queue.push(event.clone()),
+            owner::Owner::Run | owner::Owner::Task => {}
+        }
+    }
+    let with_rows: BTreeSet<TaskId> = events
+        .iter()
+        .filter(|event| owner::owner(event) == owner::Owner::Task || event.run_id.is_some())
+        .filter_map(|event| event.task_id)
+        .collect();
+    let mut rows: Vec<LedgerRow> = runs
+        .iter()
+        .map(|(run, events)| run_row(run, events, &pushes, now_ms, built_at))
+        .collect();
+    rows.extend(
+        tasks
+            .iter()
+            .filter(|(task, _)| with_rows.contains(task))
+            .map(|(task, events)| task_row(*task, events, &pushes, &pre_claim, now_ms, built_at)),
+    );
+    rows.extend(session::session_rows(&sessions, built_at));
+    rows.extend(queue::queue_rows(&queue, events, now_ms, built_at));
+    rows
 }
 
 fn fill_task(row: &mut LedgerRow, life: TaskLife) {

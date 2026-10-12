@@ -4,7 +4,10 @@
 use crate::common;
 use crate::runtime_support;
 
+use dagq::application::LedgerStore;
 use dagq::application::stats::{LiveSources, StatsSources, live_inputs, stats};
+use dagq::domain::ledger::{build, window::WindowQuery};
+use dagq::domain::stats::Cursor;
 use dagq::domain::{
     EventKind, LeaseToken,
     live_alerts::{LiveRecorder, Observation, ObservationState, fold, judge},
@@ -226,6 +229,22 @@ fn the_folded_streams_give_what_stats_lists_on_the_queue() {
     // Past the idle threshold, with nothing recorded since.
     let end = unix_second_now() + 5;
     let folded = fold(&queue.all_events().unwrap(), end);
+    // The same through the ledger's rows written and read back.
+    for row in build(
+        &queue.all_events().unwrap(),
+        end * 1000,
+        "2030-01-01T00:00:00.000Z",
+    ) {
+        queue.write_ledger_row(&row).unwrap();
+    }
+    let window = queue
+        .ledger_window(&WindowQuery {
+            until: Some(Cursor::Time(end * 1000)),
+            now_ms: end * 1000,
+            ..WindowQuery::default()
+        })
+        .unwrap();
+    assert_eq!(window.judgments(), folded);
     assert!(
         matches!(&folded.running_alerts.state, ObservationState::Observed { supervisor, .. } if supervisor == "a"),
         "{:?}",

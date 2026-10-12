@@ -41,6 +41,7 @@ related:
 `dagq stats`がqueueの記録（run_events）からrunの時間・着地の内訳・閾値を超えたもの・期間の集計を導いて返す仕組みの概念と地図。
 出力の欄・既定値・閾値の意味は`src/domain/stats.rs`と`src/domain/stats/`の定義のそばのdoc commentが持ち、決定の理由はリンクしたADRが持つ。
 同じ集計を期間ごとの窓で読む指標は[kpi](kpi.md)、記録を書く側は[provider-lifecycle](../provider-lifecycle.md)と各工程の文書が持つ。
+台帳から作る形は[計測](../measurement.md#共通の読み取り関数)、欄の元は`ledger::window`が持つ。
 
 ## 目的
 
@@ -72,7 +73,6 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 ## 責務と境界
 
 - domain（`src/domain/stats.rs`と、集計ごとのmoduleを置く`src/domain/stats/`）が全ての数え方を持ち、I/Oを持たない。
-  この地図は集計のmoduleを名前だけで指す。
   入力はeventの全件、task→goalの対応、今の時刻、supervisorの空きslotの観測（`SlotSnapshot`）、走っているrunの観測（`LiveSnapshot`）。
 - application（`src/application/stats.rs`）はqueueと外の情報源（`StatsSources`）を読んで渡すだけで、判断を足さない。
 - `stats`は何も書かない。
@@ -308,7 +308,6 @@ graphの依存とclaimの順 ───────┼─▶ forecast（simulatio
 ## 分類コードごとの集計（未実装）
 
 [ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)のcancelの理由の集計は、まだ実装していない（[Domain model](../domain-model.md#cancelの理由の分類コード未実装)）。
-ADR-t947-1・t947-2・t947-3の分はこの文書の各節にある。
 
 - 予定の形: 理由ごとの件数・actor・cancelまでの秒と、cancelまでに使ったrun・plan review・plannerの数。
 - 分類コードの集計に共通の約束: 窓の中のeventだけから数え、コードの無い過去の記録は書き換えずに`unlabeled`（cancelは`unrecorded`）として数え、一覧に無い値はその値の行として出す。
