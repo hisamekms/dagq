@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 /// version), Codex's (of `codex --version` of `--codex`, when the
 /// supervisor runs Codex workers; left out otherwise, ADR-t813-2 decision
 /// 7) and the host's `rustc` (`release` and `host` of `rustc -vV`, run in
-/// the main checkout so its toolchain file applies; asked only in dagq's
+/// the main checkout with a 10-second limit so its toolchain file applies;
+/// asked only in dagq's
 /// source repository (ADR-t614-1), and left out when not asked or it
 /// cannot be run).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -65,7 +66,11 @@ impl HostVersions {
 /// claim spaced from the one before it (ADR-t1479-1) adds the spacing in
 /// effect (`claim_spacing`, seconds) and how long the claim waited for it
 /// (`claim_spacing_wait_secs`, 0 when it did not wait); a claim without a
-/// spacing in effect has neither.
+/// spacing in effect has neither. The claim writes them beside the
+/// transition (`from`, `to`, the provider asked for and the one the run
+/// starts on, the worker mode and the task's execution class) and adds
+/// `provider_version`, the version among the host's of the provider the
+/// run starts on (ADR-t813-2 decision 7).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ClaimAttributes {
     pub dagq_version: String,

@@ -275,17 +275,37 @@ pub struct Deferral {
     pub expired: bool,
 }
 
+/// The key of a claim order's deferral record (`claim_deferred` or
+/// `claim_deferral_ended` of a `claim_order::ORDER_DEFERRALS` reason) that
+/// carries the task's expired hotspot deferral (since when, unix seconds):
+/// that record hides the expiry from [`deferrals_in_place`] otherwise.
+pub const HOT_EXPIRED_SINCE: &str = "hot_expired_since";
+
 /// The deferrals in place from each task's latest [`DEFERRAL_KINDS`]
 /// event: an open `claim_deferred`, or a deferral that expired and whose
-/// task was not claimed since. What a supervisor starts from, so the limit
-/// holds across restarts.
+/// task was not claimed since, also when a claim order's record that
+/// carries it ([`HOT_EXPIRED_SINCE`]) came after. What a supervisor starts
+/// from, so the limit holds across restarts.
 pub fn deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, Deferral> {
     latest
         .iter()
-        // A deferral for the worker is kept apart (`worker_deferrals_in_place`).
-        .filter(|event| text(event, "reason").is_none_or(|reason| reason == HOT_FILES))
         .filter_map(|event| {
             let task = event.task_id?;
+            let reason = text(event, "reason");
+            if reason.is_some_and(|reason| super::claim_order::ORDER_DEFERRALS.contains(&reason)) {
+                let since = event.payload.get(HOT_EXPIRED_SINCE)?.as_i64()?;
+                return Some((
+                    task,
+                    Deferral {
+                        since,
+                        expired: true,
+                    },
+                ));
+            }
+            // A deferral for the worker is kept apart (`worker_deferrals_in_place`).
+            if reason.is_some_and(|reason| reason != HOT_FILES) {
+                return None;
+            }
             let since = || timestamp_millis(&event.created_at).map(|ms| ms / 1000);
             match event.kind.as_str() {
                 CLAIM_DEFERRED => Some((
@@ -420,7 +440,11 @@ pub fn worker_deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, (String
             let reason = text(event, "reason")?;
             // The wait for a build is kept apart too
             // ([`super::build_wait::deferrals_in_place`]).
-            if reason == HOT_FILES || reason == super::build_wait::NOT_IN_BUILD {
+            // So are the claim order's ([`super::claim_order::class_deferrals_in_place`]).
+            if reason == HOT_FILES
+                || reason == super::build_wait::NOT_IN_BUILD
+                || super::claim_order::ORDER_DEFERRALS.contains(&reason)
+            {
                 return None;
             }
             let since = timestamp_millis(&event.created_at)? / 1000;
@@ -1480,5 +1504,49 @@ mod tests {
             worker_step(None, &mut in_place, task, 160, &token),
             WorkerStep::Open
         );
+    }
+
+    /// An expired hotspot deferral hidden behind a later claim order's
+    /// record is read back from what that record carries; one that carries
+    /// nothing restores no deferral.
+    #[test]
+    fn an_expiry_behind_an_order_s_record_is_read_back() {
+        let event = |task: i64, kind: &str, payload: Value| RunEvent {
+            id: EventId::new(task),
+            task_id: Some(TaskId::new(task)),
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: "2026-10-12 10:00:00".to_owned(),
+            actor: None,
+        };
+        let latest = [
+            event(
+                1,
+                CLAIM_DEFERRED,
+                json!({"reason": super::super::claim_order::LIGHT_ROOM, HOT_EXPIRED_SINCE: 100}),
+            ),
+            event(
+                2,
+                CLAIM_DEFERRAL_ENDED,
+                json!({"reason": super::super::claim_order::SPIKE_LIMIT, "why": "cleared", HOT_EXPIRED_SINCE: 200}),
+            ),
+            event(
+                3,
+                CLAIM_DEFERRED,
+                json!({"reason": super::super::claim_order::LIGHT_ROOM}),
+            ),
+        ];
+        let in_place = deferrals_in_place(&latest);
+        assert_eq!(
+            in_place.get(&TaskId::new(1)),
+            Some(&Deferral {
+                since: 100,
+                expired: true
+            })
+        );
+        assert_eq!(in_place[&TaskId::new(2)].since, 200);
+        assert!(!in_place.contains_key(&TaskId::new(3)));
     }
 }

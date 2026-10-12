@@ -11,6 +11,7 @@ amends:
   - adr-t1639-1 decision 8
 amended_by:
   - adr-t1992-1
+  - adr-t1489-1
 owners:
   - hisamekms
 tags:

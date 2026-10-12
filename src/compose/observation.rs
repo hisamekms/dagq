@@ -410,6 +410,15 @@ impl crate::application::queue_reads::PlanningSources<SqliteQueue> for HostReads
     fn claim_holds(&self, queue: &SqliteQueue) -> Result<Vec<Value>> {
         health::claim_holds(queue, &SystemProcesses, queue.generators().clock.as_ref())
     }
+    fn class_aging(
+        &self,
+        queue: &SqliteQueue,
+    ) -> Result<crate::application::claim_view::AgingInputs> {
+        crate::compose::class_aging_inputs(queue)
+    }
+    fn clock<'q>(&self, queue: &'q SqliteQueue) -> &'q dyn crate::application::Clock {
+        queue.generators().clock.as_ref()
+    }
     fn render_svg(&self, source: &str) -> Result<String> {
         render_svg(source)
     }

@@ -274,11 +274,11 @@ open なtaskとgoalの完了の時刻を、今の計画がそのまま流れた�
 
 ```text
 history（着地したrunの標本） ─┐
-graphの依存とclaimの順 ───────┼─▶ forecast（simulation）─▶ dagq forecast（記録しない）
+graphの依存と規則の順 ────────┼─▶ forecast（simulation）─▶ dagq forecast（記録しない）
 走っているrunの段と経過 ──────┘                        └─▶ snapshot（forecast_recorded）─▶ score（完了の時点で答え合わせ）─▶ kpi
 ```
 
-- 入口: `domain::forecast`（`forecast`・`history`・`in_flight`・`snapshot`・`score`）、入力の組み立ては`application::forecast`、snapshotの周回は`application::supervise::forecast`。
+- 入口: `domain::forecast`、入力の組み立ては`application::forecast`、snapshotの周回は`application::supervise::forecast`。
   答え合わせは[kpi](kpi.md#完了見込みの答え合わせ)、observerのfindingは[Observer](observer.md#完了見込みの誤差)。
 - 1つの標本は着地した1つのrunで、work・validate・wait_to_landを同じrunから一緒に引く。
   resumeと着地の延期はその区間に含まれるので、別の確率として足さない。
@@ -360,6 +360,7 @@ worker以外のheadlessのjobを種類・provider・実際のmodelごとに数�
 | 重複としてのcancel | `duplicate_cancels` | ADR-0063決定5 |
 | 着地の後の待ちrunの再確認 | `landing_rechecks` | [Landing recheck](landing-recheck.md) |
 | reviewの後に人を待った着地の衝突 | `landing_waits` | 着地が窓にあるrunを数え、待ちと衝突は着地より前の全てのeventから読む |
+| 区分別のclaim待ち | `claim_waits` | ready→claim |
 | 人の答えを待ってslotを空けたrun | `domain::waiting::WaitingStats` | 待ちの合計は、塞いでいたら失われたslotの時間。[人の答えを待つrun](waiting.md)、[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)決定13 |
 | workerの経路ごとの健全性 | `routes` | 経路はそのeventの時点のrunの経路。[kpi](kpi.md#期間の健全性)と日次・週次のレポートが読む |
 | runtimeのplannerの経路ごとの様子 | `planner_routes` | ADR-t1394-2決定4 |

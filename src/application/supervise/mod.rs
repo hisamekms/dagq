@@ -2084,7 +2084,7 @@ impl Supervisor<'_> {
                 // Neither provider can take a worker: the candidates are
                 // deferred for it too (ADR-t813-2 decision 6).
                 if self.routes().is_empty() {
-                    self.claimable(&graph)?;
+                    self.claimable(&graph, None)?;
                 }
             } else {
                 // Read once per pass, so turning the trial on or off takes
@@ -2102,15 +2102,25 @@ impl Supervisor<'_> {
                 });
                 // Only while there is room for a claim, as the claim loop
                 // reads the candidates only then.
-                if self.claim_room(parallel) != ClaimRoom::None {
-                    for id in self.claimable(&graph)? {
-                        let priority = self.line_priority(&effective, id)?;
-                        line.push(SlotCandidate {
-                            kind: SlotKind::Claim,
-                            priority,
-                            item: LineItem::Claim,
-                        });
+                let room = self.claim_room(parallel);
+                if room != ClaimRoom::None {
+                    let light = self.light_tasks(room)?;
+                    let claimable = self.claimable(&graph, light.as_ref())?;
+                    // Each claim at its own effective priority: aging lends
+                    // none another's (ADR-t1489-1).
+                    let mut own = HashMap::new();
+                    for &id in &claimable.order {
+                        own.insert(id, self.line_priority(&effective, id)?);
                     }
+                    line.extend(
+                        crate::domain::slot_order::claims(&claimable.order, &own)
+                            .into_iter()
+                            .map(|claim| SlotCandidate {
+                                kind: claim.kind,
+                                priority: claim.priority,
+                                item: LineItem::Claim,
+                            }),
+                    );
                 }
             }
         }
@@ -2153,6 +2163,22 @@ impl Supervisor<'_> {
     fn claim_room(&self, parallel: usize) -> ClaimRoom {
         self.claim.room(parallel)
     }
+    /// The candidates the light room takes when `room` is that room (the
+    /// light changes that declare their paths, ADR-t1591-1); `None` when
+    /// any candidate may be claimed.
+    fn light_tasks(&mut self, room: ClaimRoom) -> Result<Option<HashSet<TaskId>>> {
+        if room != ClaimRoom::LightOnly {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.queue
+                .candidates()?
+                .into_iter()
+                .filter(|task| self.claim.light_changes.admits(task.change(), task.paths()))
+                .map(|task| task.id())
+                .collect(),
+        ))
+    }
     /// The effective priority of `task_id` in the line of the fill pass
     /// (ADR-t1850-1): the graph's, else (a task the graph read before it
     /// does not hold) its own.
@@ -2187,11 +2213,17 @@ impl Supervisor<'_> {
                 return Ok(ClaimStep::Stop);
             }
             // Highest effective priority, then most-releasing, then lowest
-            // ID (ADR-0040 decision 4); `candidates` and `graph` show the
-            // same order, so it is not recorded.
-            // Less the candidates deferred on a conflict hotspot (ADR-0069).
+            // ID (ADR-0040 decision 4), with the aging across the execution
+            // classes within each priority (ADR-t1489-1); `candidates` and
+            // `graph` show the same
+            // order from the deferrals recorded, so it is not recorded.
+            // Less the candidates deferred on a conflict hotspot (ADR-0069)
+            // or held by a class limit.
             let graph = dependency_graph(self.queue.graph_input()?, None);
-            let mut order = self.claimable(&graph)?;
+            // In the light room, only the light tasks, whatever the priority
+            // of the others; the aging compares only them.
+            let light = self.light_tasks(room)?;
+            let claimable = self.claimable(&graph, light.as_ref())?;
             // The candidates of a lower priority wait for the resumes and
             // recovery jobs before them in the line (ADR-t1850-1).
             let effective: HashMap<TaskId, Priority> = graph
@@ -2199,19 +2231,8 @@ impl Supervisor<'_> {
                 .iter()
                 .map(|node| (node.id, node.effective_priority))
                 .collect();
+            let mut order = claimable.order.clone();
             order.retain(|id| effective.get(id).is_some_and(|priority| *priority >= floor));
-            // In the light room, only the light tasks, in the same order,
-            // whatever the priority of the others.
-            if room == ClaimRoom::LightOnly {
-                let light: HashSet<TaskId> = self
-                    .queue
-                    .candidates()?
-                    .into_iter()
-                    .filter(|task| self.claim.light_changes.admits(task.change(), task.paths()))
-                    .map(|task| task.id())
-                    .collect();
-                order.retain(|id| light.contains(id));
-            }
             if order.is_empty() {
                 return Ok(ClaimStep::Next);
             }
@@ -2286,13 +2307,14 @@ impl Supervisor<'_> {
                 .clone();
             // The line as the claim takes it, with each candidate's
             // priority as the order compared it (ADR-t1662-1 decision 6).
-            let by_task = crate::domain::claim_facts::candidate_facts(&order, |id| {
-                graph
-                    .tasks
-                    .iter()
-                    .find(|node| node.id == id)
-                    .map(|node| (node.priority, node.priority_source, node.effective_priority))
-            });
+            let by_task =
+                crate::domain::claim_facts::candidate_facts(&order, &claimable.aged, |id| {
+                    graph
+                        .tasks
+                        .iter()
+                        .find(|node| node.id == id)
+                        .map(|node| (node.priority, node.priority_source, node.effective_priority))
+                });
             let attributes = ClaimAttributes {
                 spacing,
                 light_room: (room == ClaimRoom::LightOnly).then_some(true),
@@ -2301,10 +2323,11 @@ impl Supervisor<'_> {
                 by_task,
                 ..self.claim_attributes(parallel, host)
             };
-            let run = match self.queue.claim_for_supervisor_in_order(
+            let run = match self.queue.claim_for_supervisor_holding(
                 &base,
                 &self.registration.token,
                 &order,
+                &claimable.held,
                 Some(&serde_json::to_value(&attributes)?),
                 &pass.trial,
                 &self.routes(),

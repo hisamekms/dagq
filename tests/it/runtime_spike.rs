@@ -46,20 +46,6 @@ fn class_fixture(class: ExecutionClass) -> (Fixture, PathBuf, PathBuf) {
     (dir, repo, db)
 }
 
-/// A receipt function for scripts: `receipt_spike COMMIT VERDICT` claims
-/// success with a complete `spike_result` of `VERDICT`, or none when
-/// `VERDICT` is empty.
-const RECEIPT_SPIKE: &str = r#"receipt_spike() {
-  if [ -n "$2" ]; then
-    result=',"spike_result":{"verdict":"'"$2"'","grounds":"measured twice","evidence":"notes.txt","conditions":{"commit":"'"$1"'","tools":"sh","provider":"claude headless worker","environment":"test host"},"spent":"5 minutes of 60"}'
-  else
-    result=''
-  fi
-  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"ran"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs the e2e"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"summary":"done"%s}' "$RUN_ID" "$1" "$result" > "$RECEIPT.tmp"
-  mv "$RECEIPT.tmp" "$RECEIPT"
-}
-"#;
-
 /// A Spike's receipt without its result parks the run as `needs_session`
 /// with the code `spike_result_missing`; the resume asks for it, and the
 /// rewritten receipt with a `does_not_hold` verdict (a result, not a gap)

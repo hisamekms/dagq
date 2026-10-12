@@ -108,6 +108,7 @@ mod runtime_candidates;
 mod runtime_ci_watch;
 mod runtime_claim;
 mod runtime_claim_build;
+mod runtime_claim_class;
 mod runtime_claim_defer;
 mod runtime_claim_hold;
 mod runtime_claim_spacing;

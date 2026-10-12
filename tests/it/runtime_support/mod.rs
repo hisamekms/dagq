@@ -1494,6 +1494,20 @@ pub fn event_kinds(detail: &dagq::domain::TaskDetail) -> Vec<&str> {
 /// workspace closed, or the fixture ended).
 pub const HOLD: &str = "await_file \"$EXIT.held\"";
 
+/// A receipt function for scripts: `receipt_spike COMMIT VERDICT` claims
+/// success with a complete `spike_result` of `VERDICT`, or none when
+/// `VERDICT` is empty.
+pub const RECEIPT_SPIKE: &str = r#"receipt_spike() {
+  if [ -n "$2" ]; then
+    result=',"spike_result":{"verdict":"'"$2"'","grounds":"measured twice","evidence":"notes.txt","conditions":{"commit":"'"$1"'","tools":"sh","provider":"claude headless worker","environment":"test host"},"spent":"5 minutes of 60"}'
+  else
+    result=''
+  fi
+  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"ran"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs the e2e"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"summary":"done"%s}' "$RUN_ID" "$1" "$result" > "$RECEIPT.tmp"
+  mv "$RECEIPT.tmp" "$RECEIPT"
+}
+"#;
+
 /// Fake agent whose turn works (no receipt) until the test writes
 /// `$EXIT.go`, then commits and writes its receipt like `VALID_AGENT`.
 pub const GATED_AGENT: &str =

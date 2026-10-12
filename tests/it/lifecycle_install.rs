@@ -586,6 +586,11 @@ fn slot_limits(source: SettingSource, max_waiting: usize) -> SlotLimits {
         },
         runtime_planners: Setting { value: 3, source },
         claim_spacing: Setting { value: 180, source },
+        max_spikes: dagq::domain::slot_limits::OptionalSetting::from_file(None),
+        class_aging: Setting {
+            value: 3600,
+            source: SettingSource::Default,
+        },
     }
 }
 

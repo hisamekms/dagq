@@ -207,7 +207,7 @@ port | Verifier | partial | - |
 port | Repository | partial | - |
 port | RunCoordination | partial | - |
 port | SessionRegistry | partial | - |
-port | RunTransitions | internal | - | its claim_for_supervisor_in_order is T1
+port | RunTransitions | internal | - | its claim_for_supervisor_holding is T1
 port | RunRecovery | internal | - |
 port | EvalRounds | internal | - |
 port | ReviewProgramBackend | internal | - |
@@ -378,7 +378,7 @@ item | src/application/supervise/sccache.rs | sccache_look | host | execution |
 
 # Transactions across contexts (ADR-t1545-1 decision 3).
 transaction | T1 | execution | src/infrastructure/sqlite.rs | claim_task | claim: no run without its owner, no in_progress without its run (ADR-0054); runtime_store::transitions calls it
-transaction | T1 | execution | src/infrastructure/runtime_store/transitions.rs | claim_for_supervisor_in_order | claim, the supervisor's side
+transaction | T1 | execution | src/infrastructure/runtime_store/transitions.rs | claim_for_supervisor_holding | claim, the supervisor's side
 transaction | T2 | execution | src/infrastructure/runtime_store/transitions.rs | finish_integration | the landing on main and the task's completion agree
 transaction | T3 | planning | src/infrastructure/plan_reviews.rs | decide_plan | a proposal and its tasks in one step
 transaction | T4 | execution | src/infrastructure/runtime_store/recovery.rs | decide_triage | a run's failure and its task's next state in one step (ADR-0047 decision 40)

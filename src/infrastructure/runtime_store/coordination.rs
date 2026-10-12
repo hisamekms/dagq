@@ -730,9 +730,11 @@ fn write_slot_limits(
     // and a caller of the library may open no planner of the runtime's.
     let runtime_planners = u32::try_from(limits.runtime_planners.value)?;
     let claim_spacing = u32::try_from(limits.claim_spacing.value)?;
+    let max_spikes = limits.max_spikes.value.map(u32::try_from).transpose()?;
+    let class_aging = u32::try_from(limits.class_aging.value)?;
     ensure!(
         conn.execute(
-            "UPDATE supervisors SET parallel=?2, parallel_source=?3, max_waiting=?4, max_waiting_source=?5, runtime_planners=?6, runtime_planners_source=?7, claim_spacing=?8, claim_spacing_source=?9 WHERE token=?1",
+            "UPDATE supervisors SET parallel=?2, parallel_source=?3, max_waiting=?4, max_waiting_source=?5, runtime_planners=?6, runtime_planners_source=?7, claim_spacing=?8, claim_spacing_source=?9, max_spikes=?10, max_spikes_source=?11, class_aging=?12, class_aging_source=?13 WHERE token=?1",
             params![
                 token,
                 parallel,
@@ -742,7 +744,11 @@ fn write_slot_limits(
                 runtime_planners,
                 limits.runtime_planners.source.as_str(),
                 claim_spacing,
-                limits.claim_spacing.source.as_str()
+                limits.claim_spacing.source.as_str(),
+                max_spikes,
+                limits.max_spikes.source.as_str(),
+                class_aging,
+                limits.class_aging.source.as_str()
             ],
         )? == 1,
         "supervisor {token} is no longer registered"
@@ -941,7 +947,7 @@ mod tests {
     /// value.
     #[test]
     fn a_parallel_below_1_is_not_written() {
-        use crate::domain::slot_limits::{Setting, SettingSource, SlotLimits};
+        use crate::domain::slot_limits::{OptionalSetting, Setting, SettingSource, SlotLimits};
         let dir = tempfile::tempdir().unwrap();
         let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let token = LeaseToken::new("me");
@@ -960,6 +966,8 @@ mod tests {
                     max_waiting: setting(2),
                     runtime_planners: setting(1),
                     claim_spacing: setting(180),
+                    max_spikes: OptionalSetting::from_file(None),
+                    class_aging: setting(3600),
                 },
             )
             .unwrap_err();
@@ -976,7 +984,7 @@ mod tests {
     /// sees it without them.
     #[test]
     fn a_registration_with_limits_has_them_from_its_first_read() {
-        use crate::domain::slot_limits::{Setting, SettingSource, SlotLimits};
+        use crate::domain::slot_limits::{OptionalSetting, Setting, SettingSource, SlotLimits};
         let dir = tempfile::tempdir().unwrap();
         let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let setting = |value, source| Setting { value, source };
@@ -985,6 +993,8 @@ mod tests {
             max_waiting: setting(2, SettingSource::File),
             runtime_planners: setting(5, SettingSource::File),
             claim_spacing: setting(180, SettingSource::Default),
+            max_spikes: OptionalSetting::from_file(None),
+            class_aging: setting(3600, SettingSource::Default),
         };
         let returned = queue
             .register_supervisor_with_limits(&LeaseToken::new("me"), 1, limits, "0.0.1")
@@ -1017,7 +1027,7 @@ mod tests {
     /// `--max-load` on its own; NULL reads as none (ADR-t1479-1).
     #[test]
     fn the_claim_spacing_and_max_load_are_written_on_the_registration() {
-        use crate::domain::slot_limits::{Setting, SettingSource, SlotLimits};
+        use crate::domain::slot_limits::{OptionalSetting, Setting, SettingSource, SlotLimits};
         let dir = tempfile::tempdir().unwrap();
         let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let token = LeaseToken::new("me");
@@ -1034,6 +1044,8 @@ mod tests {
                     max_waiting: setting(2, SettingSource::Default),
                     runtime_planners: setting(1, SettingSource::Default),
                     claim_spacing: setting(60, SettingSource::File),
+                    max_spikes: OptionalSetting::from_file(None),
+                    class_aging: setting(3600, SettingSource::Default),
                 },
             )
             .unwrap();

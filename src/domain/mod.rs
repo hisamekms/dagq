@@ -909,9 +909,11 @@ pub fn base_priority(own: Option<Priority>, goal: Option<Priority>) -> (Priority
     }
 }
 
-/// Where a task stands in the claim order (ADR-0040 decision 4); the
-/// smaller rank is claimed first. The one ordering `candidates`, `graph`
-/// and the supervisor's claims share.
+/// Where a task stands in the claim rule's order (ADR-0040 decision 4);
+/// the smaller rank comes first. The rule `candidates`, `graph` and the
+/// supervisor's claims share; the claims and the order shown add the
+/// aging across the execution classes within one effective priority
+/// ([`claim_order::arrange`], ADR-t1489-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ClaimRank {
     /// Highest effective priority first.
@@ -965,6 +967,7 @@ pub mod ci_watch;
 pub mod claim_defer;
 pub mod claim_facts;
 pub mod claim_hold;
+pub mod claim_order;
 pub mod claim_spacing;
 pub mod concern;
 pub mod container_image;
@@ -4575,6 +4578,10 @@ mod attention_tests {
             runtime_planners_source: None,
             claim_spacing: None,
             claim_spacing_source: None,
+            max_spikes: None,
+            max_spikes_source: None,
+            class_aging: None,
+            class_aging_source: None,
             max_load: None,
             providers: None,
             binary_version: None,

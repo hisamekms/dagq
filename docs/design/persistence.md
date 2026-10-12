@@ -97,7 +97,7 @@ run_leases             -- 実行中のrunの所有者（supervisorかintegrate�
 run_processes          -- runのwrapperとagentのPID。(run, role)ごとに1回だけ登録
 queue_repository       -- queueを束縛するGit common directory（1行）
 schema_floor           -- 受け入れるバイナリのschemaの下限（1行。ADR-0045）
-supervisors            -- 常駐superviseの登録。runを持たないsupervisorもstatus / doctorに見せる。providers以降の列のnullはその列を知らない古いbinaryの登録
+supervisors            -- 常駐superviseの登録（run無しでもstatus・doctorに出す）。providers以降のnullは旧binaryの登録（max_spikesは出どころ有りなら無制限）
 session_workspaces     -- upが開いた常駐sessionのworkspace（role主キー）
 goals                  -- goal 1つに1行。acceptance_versionはacceptanceの文が変わったときだけtriggerが増やす（ADR-t1504-2）。priorityは個別の指定の無いtaskが継ぎ、tagsはgoalのラベル（ADR-t1639-1）。origin* / priority_byはtasksと同じ
 proposals              -- plan reviewに出したgoalとtaskの束。memberは表を持たず、tasks / goalsのproposal_idが今の所属を指す

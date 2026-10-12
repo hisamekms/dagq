@@ -48,6 +48,11 @@ pub trait TaskStore {
     /// The unfinished tasks with their direct predecessors and the IDs of
     /// `candidates`, read in one snapshot.
     fn graph_input(&self) -> Result<GraphInput>;
+    /// When each of `tasks` became claimable (`claim_facts::claimable_since`), in
+    /// Unix milliseconds; a task with no time read is left out. The aging
+    /// of the claim order measures the waits from it (ADR-t1487-2
+    /// decision 2).
+    fn ready_at(&self, tasks: &[TaskId]) -> Result<HashMap<TaskId, i64>>;
     /// Reserve one run atomically, without a lease. Does not start a process or validate Git objects.
     fn claim(&mut self, base_commit: &CommitSha) -> Result<ClaimOutcome>;
     /// Direct predecessors of a task, each with the run that landed it, in ID order.

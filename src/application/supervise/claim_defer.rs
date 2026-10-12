@@ -14,7 +14,11 @@
 //! the judgement is [`crate::domain::build_wait`]). A worker set to a
 //! container that cannot be used, or that would run on a provider the
 //! container does not reach, is passed over like one this supervisor cannot
-//! run (goal 38, [`Supervisor::container_deferral`]).
+//! run (goal 38, [`Supervisor::container_deferral`]). Of the candidates
+//! left, the class limits pass over the Spikes while `[supervisor]
+//! max_spikes` of them hold a slot, and the aging across the execution
+//! classes arranges the rest (ADR-t1487-2, ADR-t1489-1; the judgement is
+//! [`crate::domain::claim_order`]).
 use crate::domain::EventKind;
 use std::collections::{HashMap, HashSet};
 
@@ -24,12 +28,13 @@ use tracing::{info, warn};
 use super::{Queue, Repository, Supervisor};
 use crate::application::DependencyGraph;
 use crate::domain::{
-    Priority, RunId, TaskId, build_wait,
+    ExecutionClass, Priority, RunId, TaskId, build_wait,
     claim_defer::{
         self, DEFERRAL_KINDS, Decision, Deferral, InFlight, RELATED_TASKS, WorkerStep,
         deferrals_in_place, expected_files, failed_without_commit, owner_waiting_since,
         worker_deferral_ended, worker_deferrals_in_place, worker_step,
     },
+    claim_order::{self, ClassLimits, class_deferrals_in_place, class_deferred},
     container_runtime::{CONTAINER_UNAVAILABLE, Runtime},
     provider_switch::route_of,
     stats::{
@@ -38,6 +43,18 @@ use crate::domain::{
     },
     worker::{FALLBACK_OFF, PROVIDER_UNAVAILABLE, Worker, unavailable},
 };
+
+/// The candidates a claim may take, in its order, and those aging moved
+/// ahead within their effective priority. Each stands in the line of the
+/// fill pass at its own effective priority (ADR-t1489-1).
+pub(super) struct Claimable {
+    pub(super) order: Vec<TaskId>,
+    pub(super) aged: Vec<TaskId>,
+    /// The classes a class limit holds: the claim takes no task of them,
+    /// not one it reads after this order was made, nor when it falls back
+    /// to the claim order.
+    pub(super) held: Vec<ExecutionClass>,
+}
 
 /// How long the hotspots (and the expected files of the tasks) are reused.
 const HOT_REFRESH_SECS: i64 = 600;
@@ -70,6 +87,10 @@ pub(super) struct DeferWatch {
     /// The waits for a build that contains the dependencies' landings
     /// (ADR-t1632-1), since when; `None` until read from the queue.
     build_deferrals: Option<HashMap<TaskId, i64>>,
+    /// The claim order's deferrals (a class limit, ADR-t1487-2, or the
+    /// light room, ADR-t1591-1), with their reason and since when; `None`
+    /// until read from the queue.
+    class_deferrals: Option<HashMap<TaskId, (String, i64)>>,
     /// Whether this process's build contains each landed commit, as read:
     /// the build is the process's own, so the answer holds until a handoff
     /// starts another process with another build.
@@ -237,12 +258,22 @@ impl Supervisor<'_> {
         Ok(())
     }
 
-    /// The candidates of `graph` this pass may claim, in its order: those
-    /// whose worker this supervisor cannot run (ADR-t813-2) or its runtime
-    /// cannot run (goal 38), and those whose
-    /// files meet a run in flight on a hotspot are passed over (ADR-0069),
-    /// and the start and end of each deferral are recorded on its task.
-    pub(super) fn claimable(&mut self, graph: &DependencyGraph) -> Result<Vec<TaskId>> {
+    /// The candidates of `graph` this pass may claim, in the order a claim
+    /// takes them: those whose worker this supervisor cannot run
+    /// (ADR-t813-2) or its runtime cannot run (goal 38), those whose files
+    /// meet a run in flight on a hotspot (ADR-0069) and those a class limit
+    /// holds are passed over, and the start and end of each deferral are
+    /// recorded on its task; the rest are in the graph's order with the
+    /// aging within each effective priority (ADR-t1489-1). With `light`
+    /// (the room the landing queue leaves, ADR-t1591-1), only those tasks
+    /// are arranged and returned, and the others are deferred for the
+    /// light room: they never hold the aging back, and `candidates` leaves
+    /// them out as the claim does.
+    pub(super) fn claimable(
+        &mut self,
+        graph: &DependencyGraph,
+        light: Option<&HashSet<TaskId>>,
+    ) -> Result<Claimable> {
         let now = self.generators.clock.now();
         let max_secs = self.claim.conflicts.config.defer_max_secs;
         let (hot, in_flight) = self.hot_in_flight(now)?;
@@ -257,6 +288,7 @@ impl Supervisor<'_> {
         let latest = if self.claim.defer.deferrals.is_none()
             || self.claim.defer.worker_deferrals.is_none()
             || self.claim.defer.build_deferrals.is_none()
+            || self.claim.defer.class_deferrals.is_none()
         {
             self.queue.latest_task_events(&DEFERRAL_KINDS)?
         } else {
@@ -273,6 +305,10 @@ impl Supervisor<'_> {
         let mut build_deferrals = match self.claim.defer.build_deferrals.take() {
             Some(deferrals) => deferrals,
             None => build_wait::deferrals_in_place(&latest),
+        };
+        let mut class_deferrals = match self.claim.defer.class_deferrals.take() {
+            Some(deferrals) => deferrals,
+            None => class_deferrals_in_place(&latest),
         };
         // The tasks that wait for the build and the landings they wait for
         // (ADR-t1632-1); none is read unless one declares it.
@@ -431,6 +467,110 @@ impl Supervisor<'_> {
             false
         });
         self.claim.defer.deferrals = Some(deferrals);
+        // The class limits and the aging, over the candidates left.
+        let limits = ClassLimits {
+            max_spikes: self.claim.limits.max_spikes.value,
+            running_spikes: self.running_spikes(graph)?,
+        };
+        let ready_at = if order.is_empty() {
+            HashMap::new()
+        } else {
+            self.queue.ready_at(&order)?
+        };
+        let lined: Vec<claim_order::Candidate> = order
+            .iter()
+            .map(|id| {
+                let node = graph.tasks.iter().find(|node| node.id == *id);
+                claim_order::Candidate {
+                    id: *id,
+                    class: node.map(|node| node.execution_class).unwrap_or_default(),
+                    priority: node.map_or(Priority::Normal, |node| node.effective_priority),
+                    ready_at_ms: ready_at.get(id).copied(),
+                }
+            })
+            .collect();
+        let now_ms = crate::application::unix_millis(self.generators.clock.system_time());
+        let arranged = claim_order::arrange(
+            &lined,
+            &HashSet::new(),
+            limits,
+            now_ms,
+            self.claim.limits.class_aging.value,
+        );
+        // In the light room the claim arranges only what the room takes
+        // (ADR-t1487-2 decision 3(b) before (c)); the others no class limit
+        // holds are deferred for it, recorded like the class limits, so
+        // `candidates` leaves out what the claim leaves out.
+        let limited: HashSet<TaskId> = arranged.limited.iter().map(|(id, _)| *id).collect();
+        let out: Vec<TaskId> = match light {
+            Some(light) => order
+                .iter()
+                .copied()
+                .filter(|id| !light.contains(id) && !limited.contains(id))
+                .collect(),
+            None => Vec::new(),
+        };
+        let deferred_now: Vec<(TaskId, &str)> = arranged
+            .limited
+            .iter()
+            .copied()
+            .chain(out.iter().map(|id| (*id, claim_order::LIGHT_ROOM)))
+            .collect();
+        let reasons: HashMap<TaskId, &str> = deferred_now.iter().copied().collect();
+        let passed: HashSet<TaskId> = order.iter().copied().collect();
+        // A task that passed the hotspots may do so on an expired deferral:
+        // the order's records carry it, as the latest record a restart
+        // reads back (`claim_defer::deferrals_in_place`).
+        let expired: HashMap<TaskId, i64> = self
+            .claim
+            .defer
+            .deferrals
+            .iter()
+            .flatten()
+            .filter(|(_, deferral)| deferral.expired)
+            .map(|(id, deferral)| (*id, deferral.since))
+            .collect();
+        let carrying = |id: &TaskId, (kind, mut payload): (EventKind, serde_json::Value)| {
+            if let Some(since) = expired.get(id) {
+                payload[claim_defer::HOT_EXPIRED_SINCE] = serde_json::json!(since);
+            }
+            (kind, payload)
+        };
+        class_deferrals.retain(|id, (why, since)| {
+            if reasons.get(id) == Some(&why.as_str()) {
+                return true;
+            }
+            // Deferred for another reason this pass: its record supersedes
+            // this one.
+            if candidates.contains(id) && !passed.contains(id) {
+                return false;
+            }
+            let ended = if candidates.contains(id) {
+                "cleared"
+            } else {
+                "not_candidate"
+            };
+            events.push((
+                *id,
+                carrying(
+                    id,
+                    worker_deferral_ended(why, ended, *since, now, &self.registration.token),
+                ),
+            ));
+            false
+        });
+        for (id, reason) in &deferred_now {
+            if !class_deferrals.contains_key(id) {
+                let event = if *reason == claim_order::LIGHT_ROOM {
+                    claim_order::light_room_deferred(&self.registration.token)
+                } else {
+                    class_deferred(reason, limits, &self.registration.token)
+                };
+                events.push((*id, carrying(id, event)));
+                class_deferrals.insert(*id, ((*reason).to_owned(), now));
+            }
+        }
+        self.claim.defer.class_deferrals = Some(class_deferrals);
         for (id, (kind, payload)) in events {
             match kind {
                 EventKind::ClaimDeferred => warn!(
@@ -446,7 +586,45 @@ impl Supervisor<'_> {
             }
             self.queue.record_task_event(id, kind, payload)?;
         }
-        Ok(order)
+        let held = limits.held();
+        let arranged = if light.is_some() {
+            let out: HashSet<TaskId> = out.into_iter().collect();
+            claim_order::arrange(
+                &lined,
+                &out,
+                limits,
+                now_ms,
+                self.claim.limits.class_aging.value,
+            )
+        } else {
+            arranged
+        };
+        Ok(Claimable {
+            order: arranged.order,
+            aged: arranged.aged,
+            held,
+        })
+    }
+
+    /// The Spikes holding a slot now: a run waiting outside the slots is
+    /// not counted (ADR-t1487-2 decision 1).
+    fn running_spikes(&mut self, graph: &DependencyGraph) -> Result<usize> {
+        let tasks: Vec<TaskId> = self
+            .claim
+            .slots
+            .iter()
+            .filter(|slot| !slot.out_of_slot())
+            .map(|slot| slot.run.task_id())
+            .collect();
+        let mut spikes = 0;
+        for task in tasks {
+            let class = match graph.tasks.iter().find(|node| node.id == task) {
+                Some(node) => node.execution_class,
+                None => self.queue.show(task)?.task.execution_class(),
+            };
+            spikes += usize::from(class.is_spike());
+        }
+        Ok(spikes)
     }
 
     /// The landings of `task`'s dependencies this supervisor's build lacks

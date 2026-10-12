@@ -261,6 +261,24 @@ pub fn task_changes(queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeS
     }
 }
 
+/// What the threshold of the aging `candidates` and `graph` show is
+/// chosen from ([`crate::application::claim_view::class_aging_secs`]):
+/// the read of `[supervisor]` of the `dagq.toml` of the main checkout
+/// `queue` is bound to, as it came (`None` without a checkout), and each
+/// registration's value, oldest first.
+pub fn class_aging_inputs(
+    queue: &SqliteQueue,
+) -> Result<crate::application::claim_view::AgingInputs> {
+    let file = bound_checkout(queue)?
+        .map(|checkout| crate::infrastructure::run_env::load_supervisor_config(&checkout));
+    let registered = queue
+        .supervisors()?
+        .iter()
+        .map(|registration| registration.class_aging)
+        .collect();
+    Ok(crate::application::claim_view::AgingInputs { file, registered })
+}
+
 /// The `[goals] tags` of the `dagq.toml` of the main checkout `queue` is
 /// bound to (ADR-t1639-1 decision 6), which `goal add`, `goal edit`,
 /// `submit` and `lint` hold the goals to; none for a queue bound to no

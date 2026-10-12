@@ -1,7 +1,9 @@
 //! Completion forecasts (ADR-0070 decisions 1 and 2): when the open tasks
 //! and goals are likely to finish if the plan flows as it is now, as the p50
 //! and p90 of a simulation. The simulation puts the claimable tasks into the
-//! free slots in claim order ([`ClaimRank`]), draws each run's `work`,
+//! free slots in the claim rule's order ([`ClaimRank`]; it models neither
+//! the aging across the execution classes nor the Spike limit of
+//! `claim_order`, nor the claim deferrals), draws each run's `work`,
 //! `validate` and `wait_to_land` together from one landed run of the task's
 //! change (ADR-t980-1; the whole distribution when the change has fewer
 //! than `min_samples`),
@@ -72,7 +74,7 @@ pub struct ForecastTask {
     pub goal_id: Option<GoalId>,
     /// The change it declares (ADR-t980-1), whose landed runs it draws from.
     pub change: Option<TaskChange>,
-    /// Where it stands in the claim order now.
+    /// Where it stands in the claim rule's order now.
     pub rank: ClaimRank,
     /// The unfinished tasks it waits for. One that is not forecast (a draft
     /// or submitted task) never finishes here, so neither does this one.
@@ -377,7 +379,7 @@ fn percentiles(now: i64, ends: &[Option<i64>], unfinished: &'static str) -> Perc
 struct Simulation<'a> {
     input: &'a ForecastInput<'a>,
     pools: &'a [&'a [&'a Sample]],
-    /// Task indexes in claim order.
+    /// Task indexes in the claim rule's order.
     order: Vec<usize>,
     /// Per task: the indexes of the tasks it waits for, and of the goals;
     /// `None` when it waits for one the forecast leaves out.

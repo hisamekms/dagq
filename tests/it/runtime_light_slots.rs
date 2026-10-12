@@ -3,14 +3,43 @@
 //! and only for one (ADR-t1591-1).
 use crate::runtime_support;
 
-use dagq::domain::{LeaseToken, Priority, change::TaskChange};
+use dagq::domain::{ExecutionClass, LeaseToken, Priority, change::TaskChange};
 use runtime_support::*;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 /// Each worker writes a file of its own, so the runs never conflict.
 const OWN_FILE_AGENT: &str = "printf 'by %s\\n' \"$RUN_ID\" > \"file-$RUN_ID.txt\" && git add -A && git commit -q -m work; receipt \"$(git rev-parse HEAD)\"";
 
 fn add_task(db: &Path, title: &str, change: &str, paths: &[&str], priority: Priority) -> TaskId {
+    let task = add_draft(
+        db,
+        title,
+        change,
+        paths,
+        priority,
+        ExecutionClass::Implementation,
+    );
+    ready(db, task);
+    task
+}
+
+fn ready(db: &Path, task: TaskId) {
+    SqliteQueue::open(db)
+        .unwrap()
+        .transition(task, TaskAction::BypassReview)
+        .unwrap();
+}
+
+/// A draft task of `class`: its ID comes now, its wait starts when it is
+/// made ready.
+fn add_draft(
+    db: &Path,
+    title: &str,
+    change: &str,
+    paths: &[&str],
+    priority: Priority,
+    execution_class: ExecutionClass,
+) -> TaskId {
     let mut queue = SqliteQueue::open(db).unwrap();
     let task = queue
         .add(NewTask {
@@ -29,11 +58,8 @@ fn add_task(db: &Path, title: &str, change: &str, paths: &[&str], priority: Prio
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
-            execution_class: Default::default(),
+            execution_class,
         })
-        .unwrap();
-    queue
-        .transition(task.id(), TaskAction::BypassReview)
         .unwrap();
     task.id()
 }
@@ -323,6 +349,152 @@ fn a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it() {
         "{heavy_claims:?}"
     );
     assert_eq!(claims(&db).len(), 4);
+    let outcome = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+}
+
+/// The load average [`changing`] reads, as `f64` bits.
+static LOAD: AtomicU64 = AtomicU64::new(0);
+
+fn changing() -> Option<f64> {
+    Some(f64::from_bits(LOAD.load(Ordering::SeqCst)))
+}
+
+fn set_load(value: f64) {
+    LOAD.store(value.to_bits(), Ordering::SeqCst);
+}
+
+/// [`OWN_FILE_AGENT`] that writes a Spike's result too.
+fn own_file_spike_agent() -> String {
+    format!(
+        "{RECEIPT_SPIKE}printf 'by %s\\n' \"$RUN_ID\" > \"file-$RUN_ID.txt\" && git add -A && git commit -q -m work; receipt_spike \"$(git rev-parse HEAD)\" holds"
+    )
+}
+
+/// In the room the landing queue leaves, the aging compares only the light
+/// tasks (ADR-t1487-2 decision 3, ADR-t1489-1), and `candidates` shows the
+/// same order: a heavy implementation that waited longest is deferred for
+/// the light room, so the light Spikes past `class_aging` go before a
+/// fresh light implementation of the same priority. The claim records
+/// that the first Spike aged, and `candidates` then shows the second one
+/// first, aged, with the heavy task in `deferred` as `light_room`.
+#[test]
+fn in_the_light_room_the_aging_compares_the_light_tasks_as_candidates_show() {
+    let (_dir, repo, db, blocker) = awaiting_run();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let main = git_out(&repo, &["rev-parse", "main"]);
+    queue
+        .begin_integration(blocker.id(), &LeaseToken::new("by-hand"), &sha(&main))
+        .unwrap();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[tasks]\nchanges = [\"feature\", \"docs\"]\n[supervisor]\nlight_changes = [\"docs\"]\nclass_aging = 1\n",
+    )
+    .unwrap();
+    let first = add_task(&db, "first", "feature", &["file-*"], Priority::Normal);
+    set_load(1.0);
+
+    let backend = Arc::new(TestWorkspace::new(&db, false, &own_file_spike_agent()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stop: stop.clone(),
+        max_load: Some(16.0),
+        load_average: changing,
+        claim_spacing: Some(0),
+        ..supervise_options(1, false)
+    };
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    wait_until(&db, Duration::from_secs(120), |_| {
+        landing_queued(&db, first)
+    });
+    // The claims wait while the tasks line up.
+    set_load(40.0);
+    await_passes(&passes, SOME_PASSES);
+    let heavy = add_task(&db, "heavy", "feature", &["src/**"], Priority::Normal);
+    let fresh = add_draft(
+        &db,
+        "light implementation",
+        "docs",
+        &["file-*"],
+        Priority::Normal,
+        ExecutionClass::Implementation,
+    );
+    let spikes: Vec<TaskId> = (0..2)
+        .map(|index| {
+            let spike = add_draft(
+                &db,
+                &format!("light spike {index}"),
+                "docs",
+                &["file-*"],
+                Priority::Normal,
+                ExecutionClass::Spike,
+            );
+            ready(&db, spike);
+            spike
+        })
+        .collect();
+    thread::sleep(Duration::from_millis(1100));
+    ready(&db, fresh);
+    set_load(1.0);
+    // The fixture's run of task 1, then `first`, then the light room's.
+    wait_until(&db, Duration::from_secs(60), |_| claims(&db).len() == 3);
+    let claimed = claims(&db);
+    assert_eq!(claimed[2].0, spikes[0], "{claimed:?}");
+    assert_eq!(claimed[2].1["light_room"], true, "{claimed:?}");
+    assert_eq!(claimed[2].1["aged"], true, "{claimed:?}");
+
+    let view = crate::common::cli::ok(&db, &["candidates"]);
+    let ids: Vec<i64> = view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [spikes[1].as_i64(), fresh.as_i64()], "{view}");
+    assert_eq!(view["aged"], json!([spikes[1].as_i64()]), "{view}");
+    let deferred: Vec<(i64, String)> = view["deferred"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            (
+                d["task_id"].as_i64().unwrap(),
+                d["reason"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        deferred,
+        [(heavy.as_i64(), "light_room".to_owned())],
+        "{view}"
+    );
+
+    stop.store(true, Ordering::SeqCst);
+    queue
+        .abort_integration(
+            blocker.id(),
+            &LeaseToken::new("by-hand"),
+            "awaiting_integration",
+            "given back",
+            &dagq::domain::Reason::new(ReasonCode::Other),
+        )
+        .unwrap();
     let outcome = joined(supervisor, "the supervisor to drain").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");

@@ -39,6 +39,23 @@ impl SqliteQueue {
         trial: &WorkerTrial,
         routes: &[WorkerRoute],
     ) -> Result<ClaimOutcome> {
+        self.claim_for_supervisor_holding(base_commit, token, order, &[], attributes, trial, routes)
+    }
+
+    /// [`Self::claim_for_supervisor_in_order`] that never claims a task of a
+    /// class in `held` (those a class limit holds, ADR-t1487-2), not when it
+    /// falls back to the claim order either.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_for_supervisor_holding(
+        &mut self,
+        base_commit: &CommitSha,
+        token: &LeaseToken,
+        order: &[TaskId],
+        held: &[crate::domain::ExecutionClass],
+        attributes: Option<&Value>,
+        trial: &WorkerTrial,
+        routes: &[WorkerRoute],
+    ) -> Result<ClaimOutcome> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -51,6 +68,7 @@ impl SqliteQueue {
             at,
             base_commit,
             order,
+            held,
             attributes,
             trial,
             routes,
@@ -989,20 +1007,22 @@ impl RunTransitions for SqliteQueue {
     ) -> Result<TaskRun> {
         SqliteQueue::cleanup_failed(self, id, token, message, reason)
     }
-    fn claim_for_supervisor_in_order(
+    fn claim_for_supervisor_holding(
         &mut self,
         base_commit: &CommitSha,
         token: &LeaseToken,
         order: &[TaskId],
+        held: &[crate::domain::ExecutionClass],
         attributes: Option<&Value>,
         trial: &WorkerTrial,
         routes: &[WorkerRoute],
     ) -> Result<ClaimOutcome> {
-        SqliteQueue::claim_for_supervisor_in_order(
+        SqliteQueue::claim_for_supervisor_holding(
             self,
             base_commit,
             token,
             order,
+            held,
             attributes,
             trial,
             routes,

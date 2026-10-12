@@ -4,9 +4,13 @@
 //! their task, highest first. On the same priority a resume comes first,
 //! then a recovery job, then a claim; within a kind the order stays the one
 //! the kind already had (resumes oldest first, recovery jobs in the order
-//! the queue lists the runs, claims by [`super::ClaimRank`]).
+//! the queue lists the runs, claims by [`super::ClaimRank`] with the aging
+//! across the execution classes, which reorders only within one effective
+//! priority: every claim stands at its own ([`claims`], ADR-t1489-1).
 
-use super::Priority;
+use std::collections::HashMap;
+
+use super::{Priority, TaskId};
 
 /// What a candidate starts in a slot. The order of the variants is the
 /// order on the same effective priority.
@@ -27,6 +31,26 @@ pub struct SlotCandidate<T> {
     pub kind: SlotKind,
     pub priority: Priority,
     pub item: T,
+}
+
+/// The claims of `order` (the claim's order, aging included) as candidates
+/// of the line, each at its own effective priority from `effective`; a
+/// task it has none of is left out. Aging lends no task another one's
+/// priority (ADR-t1850-1 decisions 1 and 6, ADR-t1489-1).
+pub fn claims(
+    order: &[TaskId],
+    effective: &HashMap<TaskId, Priority>,
+) -> Vec<SlotCandidate<TaskId>> {
+    order
+        .iter()
+        .filter_map(|id| {
+            Some(SlotCandidate {
+                kind: SlotKind::Claim,
+                priority: *effective.get(id)?,
+                item: *id,
+            })
+        })
+        .collect()
 }
 
 /// `candidates` in the order they get a slot: effective priority, highest
@@ -97,5 +121,58 @@ mod tests {
     #[test]
     fn no_candidate_gives_no_order() {
         assert!(order(Vec::new()).is_empty());
+    }
+
+    /// A claim aging moved ahead competes at its own effective priority: a
+    /// low Spike first among the low claims stays behind a normal resume
+    /// and recovery job, and a normal one behind a normal resume.
+    #[test]
+    fn an_aged_claim_competes_with_resumes_at_its_own_priority() {
+        use crate::domain::ExecutionClass;
+        use crate::domain::claim_order::{Candidate, ClassLimits, arrange};
+        let candidate = |id: i64, class, priority, waited_min: i64| Candidate {
+            id: TaskId::new(id),
+            class,
+            priority,
+            ready_at_ms: Some(100 * 60_000 - waited_min * 60_000),
+        };
+        let lined = [
+            candidate(1, ExecutionClass::Implementation, Priority::High, 1),
+            candidate(2, ExecutionClass::Implementation, Priority::Low, 1),
+            candidate(3, ExecutionClass::Spike, Priority::Low, 60),
+            candidate(4, ExecutionClass::Implementation, Priority::Normal, 1),
+            candidate(5, ExecutionClass::Spike, Priority::Normal, 60),
+        ];
+        // The rule's order: by priority, then ID here.
+        let ruled = [&lined[0], &lined[3], &lined[4], &lined[1], &lined[2]].map(|c| *c);
+        let arranged = arrange(
+            &ruled,
+            &Default::default(),
+            ClassLimits::default(),
+            100 * 60_000,
+            600,
+        );
+        assert_eq!(
+            arranged.aged,
+            [TaskId::new(5), TaskId::new(3)],
+            "each Spike moved within its priority"
+        );
+        let effective: HashMap<TaskId, Priority> =
+            lined.iter().map(|c| (c.id, c.priority)).collect();
+        let mut line: Vec<SlotCandidate<u32>> = claims(&arranged.order, &effective)
+            .into_iter()
+            .map(|claim| SlotCandidate {
+                kind: claim.kind,
+                priority: claim.priority,
+                item: u32::try_from(claim.item.as_i64()).unwrap(),
+            })
+            .collect();
+        line.push(candidate_of(SlotKind::Resume, Priority::Normal, 10));
+        line.push(candidate_of(SlotKind::Recovery, Priority::Normal, 11));
+        assert_eq!(order(line), [1, 10, 11, 5, 4, 3, 2]);
+    }
+
+    fn candidate_of(kind: SlotKind, priority: Priority, item: u32) -> SlotCandidate<u32> {
+        candidate(kind, priority, item)
     }
 }

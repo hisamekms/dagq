@@ -1230,6 +1230,14 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     let planners = parse_positive(rest.trim(), "number").with_context(with)?;
                     config.supervisor.runtime_planners =
                         Some(u16::try_from(planners).with_context(with)?.into());
+                } else if key == "max_spikes" {
+                    let limit = parse_positive(rest.trim(), "number").with_context(with)?;
+                    config.supervisor.max_spikes =
+                        Some(u16::try_from(limit).with_context(with)?.into());
+                } else if key == "class_aging" {
+                    let secs = parse_positive(rest.trim(), "number").with_context(with)?;
+                    let secs = u32::try_from(secs).with_context(with)?;
+                    config.supervisor.class_aging = Some(usize::try_from(secs)?);
                 } else if key == "claim_spacing" {
                     let secs = parse_whole(rest.trim()).with_context(with)?;
                     let secs = u32::try_from(secs).with_context(with)?;
@@ -4118,6 +4126,8 @@ LITERAL = 'no \n escapes # here'
                 runtime_planners: Some(2),
                 claim_spacing: Some(120),
                 light_changes: None,
+                max_spikes: None,
+                class_aging: None,
             }
         );
         assert_eq!(
@@ -4137,13 +4147,35 @@ LITERAL = 'no \n escapes # here'
                 runtime_planners: None,
                 claim_spacing: None,
                 light_changes: None,
+                max_spikes: None,
+                class_aging: None,
             }
         );
         assert_eq!(
             parse_config("").unwrap().supervisor,
             SupervisorConfig::default()
         );
+        // The class limits (ADR-t1487-2).
+        let classes = parse_config("[supervisor]\nmax_spikes = 1\nclass_aging = 1800\n")
+            .unwrap()
+            .supervisor;
+        assert_eq!(
+            (classes.max_spikes, classes.class_aging),
+            (Some(1), Some(1800))
+        );
         for (text, message) in [
+            (
+                "[supervisor]\nmax_spikes = 0\n",
+                "dagq.toml:2: value of max_spikes",
+            ),
+            (
+                "[supervisor]\nclass_aging = 0\n",
+                "must be a positive number",
+            ),
+            (
+                "[supervisor]\nclass_aging = 5000000000\n",
+                "value of class_aging",
+            ),
             ("[supervisor]\nparallel = 0\n", "must be a positive number"),
             ("[supervisor]\nparallel = -1\n", "must be a positive number"),
             ("[supervisor]\nparallel = 70000\n", "value of parallel"),
@@ -4183,7 +4215,7 @@ LITERAL = 'no \n escapes # here'
             ),
             (
                 "[supervisor]\nslots = 2\n",
-                "unknown key slots in [supervisor]; the keys are parallel, max_waiting, runtime_planners, claim_spacing, light_changes",
+                "unknown key slots in [supervisor]; the keys are parallel, max_waiting, runtime_planners, claim_spacing, light_changes, max_spikes, class_aging",
             ),
             (
                 "[supervisor]\nclaim_spacing = -1\n",
@@ -4228,6 +4260,8 @@ LITERAL = 'no \n escapes # here'
                 runtime_planners: None,
                 claim_spacing: None,
                 light_changes: None,
+                max_spikes: None,
+                class_aging: None,
             })
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();

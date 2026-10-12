@@ -315,6 +315,20 @@ pub struct SupervisorRegistration {
     pub claim_spacing: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_spacing_source: Option<super::slot_limits::SettingSource>,
+    /// The Spikes that may hold its slots at once (ADR-t1487-2), `None`
+    /// for no limit, and where that comes from; the source is `None` for a
+    /// supervisor of an older binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_spikes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_spikes_source: Option<super::slot_limits::SettingSource>,
+    /// The seconds after which a candidate goes ahead of the other
+    /// execution class's (ADR-t1487-2) and where they come from; `None`
+    /// for a supervisor of an older binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_aging: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_aging_source: Option<super::slot_limits::SettingSource>,
     /// Its `--max-load` (task 327); `None` when its load hold is off, or
     /// for a supervisor of an older binary.
     #[serde(default, skip_serializing_if = "Option::is_none")]

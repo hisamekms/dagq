@@ -14,10 +14,14 @@ use super::{
     CandidatesRead, GoalListRead, GoalShowRead, GraphRead, LintRead, ListRead, RelatedRead,
     SearchRead,
 };
-use crate::application::claim_view::{Deferrals, claim_view, open_deferrals};
-use crate::application::{
-    PlanningRecords, RunLog, StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph,
+use crate::application::claim_view::{
+    AgingInputs, ClaimAging, Deferrals, claim_view, class_aging_secs, open_deferrals,
 };
+use crate::application::{
+    Clock, DependencyGraph, PlanningRecords, RunLog, StatusFilter, TaskQuery, TaskStore,
+    claim_candidates, dependency_graph,
+};
+use crate::domain::claim_order;
 use crate::domain::search::{self, SearchQuery};
 use crate::domain::{
     ChangeSet, GoalDetail, GoalId, Proposal, ProposalId, TagSet, TaskId, TaskStatus,
@@ -37,6 +41,11 @@ pub trait PlanningSources<Q: ?Sized> {
     /// What holds the claims now as the supervisors recorded it
     /// (`candidates`' `held`, ADR-t1992-1).
     fn claim_holds(&self, queue: &Q) -> Result<Vec<Value>>;
+    /// What the threshold of the aging across the execution classes is
+    /// chosen from (`[supervisor] class_aging`, ADR-t1487-2).
+    fn class_aging(&self, queue: &Q) -> Result<AgingInputs>;
+    /// The clock the waits of the aging are measured by.
+    fn clock<'q>(&self, queue: &'q Q) -> &'q dyn Clock;
     /// The SVG the host's d2 draws from `source`.
     fn render_svg(&self, source: &str) -> Result<String>;
     /// What the command line prints as is (`graph --format d2|svg`).
@@ -56,8 +65,9 @@ pub fn list(queue: &(impl TaskStore + ?Sized), read: &ListRead) -> Result<Value>
     })?)?)
 }
 
-/// `candidates`: the rule's order with the deferred tasks apart (or kept
-/// with `ignore_deferrals`) and what holds the claims.
+/// `candidates`: the order a claim takes them with the deferred tasks
+/// apart (the rule's order with them kept, `ignore_deferrals`) and what
+/// holds the claims.
 pub fn candidates<Q: TaskStore + RunLog + ?Sized>(
     queue: &Q,
     sources: &(impl PlanningSources<Q> + ?Sized),
@@ -69,17 +79,62 @@ pub fn candidates<Q: TaskStore + RunLog + ?Sized>(
     } else {
         Deferrals::Excluded
     };
+    // The rule's order shows no aging: nothing to read for it.
+    let aging = match deferrals {
+        Deferrals::Excluded => claim_aging(queue, sources, &graph)?,
+        Deferrals::Ignored => ClaimAging::default(),
+    };
     let view = claim_view(
         claim_candidates(queue.candidates()?, &graph),
         |candidate| candidate.task.id(),
         open_deferrals(queue)?,
         deferrals,
+        &aging,
     );
-    Ok(json!({
+    let mut value = json!({
         "candidates": view.candidates,
         "deferred": view.deferred,
         "held": sources.claim_holds(queue)?,
-    }))
+    });
+    if !view.aged.is_empty() {
+        value["aged"] = serde_json::to_value(view.aged)?;
+    }
+    Ok(value)
+}
+
+/// What the aging of the shown order compares ([`ClaimAging`]): the
+/// candidates of `graph`, the queue's whole graph, with their class,
+/// effective priority and the time each became claimable.
+fn claim_aging<Q: TaskStore + ?Sized>(
+    queue: &Q,
+    sources: &(impl PlanningSources<Q> + ?Sized),
+    graph: &DependencyGraph,
+) -> Result<ClaimAging> {
+    let ready_at = if graph.candidates.is_empty() {
+        Default::default()
+    } else {
+        queue.ready_at(&graph.candidates)?
+    };
+    let inputs = sources.class_aging(queue)?;
+    let secs = class_aging_secs(inputs.file.as_ref(), &inputs.registered);
+    let now_ms = crate::application::unix_millis(sources.clock(queue).system_time());
+    Ok(ClaimAging {
+        candidates: graph
+            .candidates
+            .iter()
+            .filter_map(|id| {
+                let node = graph.tasks.iter().find(|node| node.id == *id)?;
+                Some(claim_order::Candidate {
+                    id: *id,
+                    class: node.execution_class,
+                    priority: node.effective_priority,
+                    ready_at_ms: ready_at.get(id).copied(),
+                })
+            })
+            .collect(),
+        secs,
+        now_ms,
+    })
 }
 
 /// `graph`: the dependency graph as JSON, or its near-term diagram as d2
@@ -92,16 +147,23 @@ pub fn graph<Q: TaskStore + RunLog + ?Sized>(
     let goal = read.goal.map(GoalId::new);
     Ok(match read.format.as_str() {
         "json" => {
-            let mut graph = dependency_graph(queue.graph_input()?, goal);
+            let input = queue.graph_input()?;
+            // The aging compares the queue's candidates, whatever the goal.
+            let aging = claim_aging(queue, sources, &dependency_graph(input.clone(), None))?;
+            let mut graph = dependency_graph(input, goal);
             let view = claim_view(
                 std::mem::take(&mut graph.candidates),
                 |id| *id,
                 open_deferrals(queue)?,
                 Deferrals::Excluded,
+                &aging,
             );
             let mut value = serde_json::to_value(graph)?;
             value["candidates"] = serde_json::to_value(view.candidates)?;
             value["deferred"] = serde_json::to_value(view.deferred)?;
+            if !view.aged.is_empty() {
+                value["aged"] = serde_json::to_value(view.aged)?;
+            }
             value
         }
         format => {

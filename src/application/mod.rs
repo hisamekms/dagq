@@ -375,9 +375,11 @@ pub struct GraphNode {
 pub struct DependencyGraph {
     /// Unfinished tasks in ID order.
     pub tasks: Vec<GraphNode>,
-    /// Claimable tasks in the order the supervisor claims them
-    /// ([`ClaimRank`]): highest effective priority first, then most
-    /// `unblocks`, then ascending ID.
+    /// Claimable tasks in the claim rule's order ([`ClaimRank`]): highest
+    /// effective priority first, then most `unblocks`, then ascending ID.
+    /// The supervisor's claims and the order `candidates` shows add the
+    /// aging across the execution classes to it
+    /// ([`crate::domain::claim_order::arrange`]); this order does not.
     pub candidates: Vec<TaskId>,
     /// The chain from the task with the most `unblocks` (lowest ID on a tie),
     /// each step to the directly blocked task with the most `unblocks`

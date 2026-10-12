@@ -1096,6 +1096,10 @@ fn gone_registration() -> dagq::domain::SupervisorRegistration {
         runtime_planners_source: None,
         claim_spacing: None,
         claim_spacing_source: None,
+        max_spikes: None,
+        max_spikes_source: None,
+        class_aging: None,
+        class_aging_source: None,
         max_load: None,
         providers: None,
     }

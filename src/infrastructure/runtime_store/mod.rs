@@ -319,6 +319,10 @@ fn supervisor_row(r: &Row<'_>) -> rusqlite::Result<SupervisorRegistration> {
         runtime_planners_source: source(r, "runtime_planners_source")?,
         claim_spacing: r.get("claim_spacing")?,
         claim_spacing_source: source(r, "claim_spacing_source")?,
+        max_spikes: r.get("max_spikes")?,
+        max_spikes_source: source(r, "max_spikes_source")?,
+        class_aging: r.get("class_aging")?,
+        class_aging_source: source(r, "class_aging_source")?,
         max_load: r.get("max_load")?,
         // Unreadable JSON (another binary's shape) reads as none.
         providers: r

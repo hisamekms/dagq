@@ -1187,6 +1187,20 @@ impl TaskStore for SqliteQueue {
         read_graph_input(&tx)
     }
 
+    fn ready_at(&self, tasks: &[TaskId]) -> Result<std::collections::HashMap<TaskId, i64>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut times = std::collections::HashMap::new();
+        for task in tasks {
+            if let Some(at) = task_ready_at(&tx, *task)?
+                .as_deref()
+                .and_then(crate::domain::stats::timestamp_millis)
+            {
+                times.insert(*task, at);
+            }
+        }
+        Ok(times)
+    }
+
     fn claim(&mut self, base_commit: &CommitSha) -> Result<ClaimOutcome> {
         let tx = self
             .conn
@@ -1197,6 +1211,7 @@ impl TaskStore for SqliteQueue {
             self.generators.ids.as_ref(),
             self.generators.clock.system_time(),
             base_commit,
+            &[],
             &[],
             None,
             &WorkerTrial::default(),
@@ -2285,12 +2300,17 @@ pub(super) fn claim_task(
     at: SystemTime,
     base_commit: &CommitSha,
     order: &[TaskId],
+    held: &[crate::domain::ExecutionClass],
     attributes: Option<&serde_json::Value>,
     trial: &WorkerTrial,
     routes: &[WorkerRoute],
 ) -> Result<ClaimOutcome> {
     let mut ready = ready_tasks(tx)?;
     ready.retain(|task| provider_switch::route_of(routes, task.worker()).is_some());
+    // The classes a class limit holds (ADR-t1487-2): no task of them is
+    // claimed here, not one read after the supervisor made its order, nor
+    // by the fallback below.
+    ready.retain(|task| !held.contains(&task.execution_class()));
     if ready.is_empty() {
         return Ok(ClaimOutcome::NoReadyTask);
     }
@@ -2396,7 +2416,8 @@ pub(super) fn claim_task(
         )?;
     }
     event(tx, task.id(), Some(run.id()), EventKind::RunClaimed, {
-        let mut payload = json!({"from": "ready", "to": task.status(), "provider": run.actual_provider(), "requested_provider": run.requested_provider(), "worker_mode": run.worker_mode()});
+        // The claimed task's execution class (ADR-t1487-2 decision 4).
+        let mut payload = json!({"from": "ready", "to": task.status(), "provider": run.actual_provider(), "requested_provider": run.requested_provider(), "worker_mode": run.worker_mode(), "execution_class": task.execution_class()});
         if let (Some(payload), Some(serde_json::Value::Object(attributes))) =
             (payload.as_object_mut(), attributes)
         {
@@ -2443,46 +2464,57 @@ pub(super) fn claim_task(
     Ok(ClaimOutcome::Claimed { run: Box::new(run) })
 }
 
-/// When `task` became claimable ([`claim_facts::ready_at`]): its latest
-/// move to `ready` (its creation when it never moved there), the
-/// completions of the tasks it depends on and the closes of the goals it
-/// depends on.
+/// When `task` became claimable ([`claim_facts::claimable_since`], which
+/// judges it): the events that move it in and out of the candidates, read
+/// here in one query.
 fn task_ready_at(conn: &Connection, task: TaskId) -> Result<Option<String>> {
-    let own: Option<String> = conn.query_row(
-        "SELECT COALESCE(
-             (SELECT MAX(created_at) FROM run_events WHERE task_id=?1 AND kind=?2
-                AND json_extract(payload,'$.to')='ready'),
-             (SELECT MIN(created_at) FROM run_events WHERE task_id=?1 AND kind=?3))",
-        params![
-            task,
-            event_kind::TASK_STATUS_CHANGED,
-            EventKind::TaskCreated.as_str()
-        ],
-        |row| row.get(0),
-    )?;
-    let mut prerequisites: Vec<String> = conn
-        .prepare(
-            "SELECT MAX(e.created_at) FROM task_dependencies d
-               JOIN run_events e ON e.task_id = d.predecessor_id
-              WHERE d.task_id=?1 AND e.kind=?2 AND json_extract(e.payload,'$.to')='completed'
-              GROUP BY d.predecessor_id",
-        )?
-        .query_map(params![task, event_kind::TASK_STATUS_CHANGED], |row| {
-            row.get(0)
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    prerequisites.extend(
-        conn.prepare(
-            "SELECT g.closed_at FROM task_goal_dependencies d JOIN goals g ON g.id = d.goal_id
-              WHERE d.task_id=?1 AND g.closed_at IS NOT NULL",
-        )?
-        .query_map([task], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?,
-    );
-    Ok(
-        claim_facts::ready_at(own.as_deref(), prerequisites.iter().map(String::as_str))
-            .map(str::to_owned),
-    )
+    let own = [
+        EventKind::TaskCreated,
+        EventKind::TaskStatusChanged,
+        EventKind::RunClaimed,
+        EventKind::DependencyAdded,
+        EventKind::DependencyRemoved,
+        EventKind::GoalDependencyAdded,
+        EventKind::GoalDependencyRemoved,
+        EventKind::TaskGoalChanged,
+    ]
+    .map(|kind| format!("'{}'", kind.as_str()))
+    .join(",");
+    let goals = [
+        EventKind::GoalCreated,
+        EventKind::GoalStatusChanged,
+        EventKind::GoalClosed,
+        EventKind::GoalReopened,
+    ]
+    .map(|kind| format!("'{}'", kind.as_str()))
+    .join(",");
+    let events = conn
+        .prepare(&format!(
+            "SELECT * FROM run_events WHERE task_id=?1 AND kind IN ({own})
+             UNION
+             SELECT * FROM run_events WHERE kind='{status}' AND task_id IN (
+               SELECT json_extract(payload,'$.predecessor_id') FROM run_events
+                WHERE task_id=?1 AND kind IN ('{added}','{removed}'))
+             UNION
+             SELECT * FROM run_events WHERE task_id IS NULL AND kind IN ({goals}) AND goal_id IN (
+               SELECT json_extract(payload,'$.goal_id') FROM run_events
+                WHERE task_id=?1 AND kind IN ('{goal_added}','{goal_removed}','{created}')
+               UNION SELECT json_extract(payload,'$.from') FROM run_events
+                WHERE task_id=?1 AND kind='{moved}'
+               UNION SELECT json_extract(payload,'$.to') FROM run_events
+                WHERE task_id=?1 AND kind='{moved}')
+             ORDER BY id",
+            status = EventKind::TaskStatusChanged.as_str(),
+            added = EventKind::DependencyAdded.as_str(),
+            removed = EventKind::DependencyRemoved.as_str(),
+            goal_added = EventKind::GoalDependencyAdded.as_str(),
+            goal_removed = EventKind::GoalDependencyRemoved.as_str(),
+            created = EventKind::TaskCreated.as_str(),
+            moved = EventKind::TaskGoalChanged.as_str(),
+        ))?
+        .query_map([task], event_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(claim_facts::claimable_since(task, &events))
 }
 
 /// What the trial chooses a claim's worker session from: every

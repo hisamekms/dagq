@@ -4,15 +4,18 @@
 //! candidates and the priority it was claimed at ([`CandidateFacts`], which
 //! the supervisor passes for every candidate under [`BY_TASK`] and the
 //! claim keeps the claimed task's of, [`settle`]), when the task became
-//! claimable ([`ready_at`]), and the claim's attributes as an open set of
-//! keys and values ([`attributes`]).
+//! claimable ([`claimable_since`]), and the claim's attributes as an open set of
+//! keys and values ([`attributes`]). The claim also records the claimed
+//! task's `execution_class` and, in the facts, whether the aging across
+//! the execution classes moved it ahead within its effective priority
+//! (`aged`, ADR-t1489-1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use super::{Priority, PrioritySource, TaskId, stats::timestamp_millis};
+use super::{Priority, PrioritySource, RunEvent, TaskId, stats::timestamp_millis};
 
 /// The key of the claim's attributes holding each candidate's
 /// [`CandidateFacts`], by task ID, until the claim knows its task
@@ -20,22 +23,28 @@ use super::{Priority, PrioritySource, TaskId, stats::timestamp_millis};
 pub const BY_TASK: &str = "candidates_by_task";
 
 /// What the claim knew of one candidate when it lined them up: its place
-/// in the line (`candidate_rank`, from 1) and its priority as the claim
+/// in the line (`candidate_rank`, from 1), its priority as the claim
 /// order compared it (`effective_priority`), from its base (`priority`,
-/// [`super::base_priority`]) and where that came from.
+/// [`super::base_priority`]) and where that came from, and whether the
+/// aging across the execution classes moved it ahead within its effective
+/// priority (`aged`,
+/// ADR-t1487-2 decision 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CandidateFacts {
     pub candidate_rank: usize,
     pub priority: Priority,
     pub priority_source: PrioritySource,
     pub effective_priority: Priority,
+    pub aged: bool,
 }
 
 /// The facts of each task of `order` (the candidates of a claim, in the
-/// order it takes them), with their priorities from `priorities` (base,
-/// source, effective); a task it has none of is left out.
+/// order it takes them, `aged` those aging moved ahead), with their
+/// priorities from `priorities` (base, source, effective); a task it has
+/// none of is left out.
 pub fn candidate_facts(
     order: &[TaskId],
+    aged: &[TaskId],
     priorities: impl Fn(TaskId) -> Option<(Priority, PrioritySource, Priority)>,
 ) -> BTreeMap<String, CandidateFacts> {
     order
@@ -50,6 +59,7 @@ pub fn candidate_facts(
                     priority,
                     priority_source,
                     effective_priority,
+                    aged: aged.contains(task),
                 },
             ))
         })
@@ -68,21 +78,188 @@ pub fn settle(attributes: &mut Map<String, Value>, task: TaskId) {
     }
 }
 
-/// When a task became claimable: the latest of its own move to `ready`
-/// (`own`), the completions of the tasks it depends on and the closes of
-/// the goals it depends on (`prerequisites`). Times are the events'
-/// `created_at`; one that cannot be read is skipped. The submit of a
-/// draft goal and the end of the task's earlier run are not among them, so
-/// a task that waited on one of those reads as ready earlier.
-pub fn ready_at<'t>(
-    own: Option<&'t str>,
-    prerequisites: impl IntoIterator<Item = &'t str>,
-) -> Option<&'t str> {
-    own.into_iter()
-        .chain(prerequisites)
-        .filter_map(|text| Some((timestamp_millis(text)?, text)))
-        .max_by_key(|(at, _)| *at)
-        .map(|(_, text)| text)
+/// When `task` last became claimable (ADR-t1487-2 decision 2), replayed
+/// from the events that move it in and out of the candidates, in the
+/// order of their IDs: its own creation, status changes, claims (a claim
+/// moves it to `in_progress` with no status change of its own),
+/// dependencies and goal dependencies added and removed, and goal
+/// changes; the status
+/// changes of the tasks it depends on; and the creation, opening from
+/// draft, closes and reopenings of the goals it depends on or belongs to.
+/// It is a candidate while it is `ready`, every task it depends on is
+/// `completed`, every goal it depends on is closed as achieved, and its
+/// own goal is not a draft (`READY_QUERY`). The `created_at` of the event
+/// that last made it one, whatever came after; `None` when none did. A
+/// dependency met before it was added, or removed after it was met, moves
+/// nothing; one removed while unmet returns the task at the removal.
+pub fn claimable_since(task: TaskId, events: &[RunEvent]) -> Option<String> {
+    use super::event_kind::EventKind as K;
+    use super::{GoalId, GoalStatus, GoalVerdict, TaskStatus};
+    use crate::domain::run::payload::restore;
+    let mut sorted: Vec<&RunEvent> = events.iter().collect();
+    sorted.sort_by_key(|event| event.id);
+    let mut ready = false;
+    let mut goal: Option<GoalId> = None;
+    let mut dependencies: BTreeSet<TaskId> = BTreeSet::new();
+    let mut completed: BTreeSet<TaskId> = BTreeSet::new();
+    let mut goal_dependencies: BTreeSet<GoalId> = BTreeSet::new();
+    let mut achieved: BTreeSet<GoalId> = BTreeSet::new();
+    let mut drafts: BTreeSet<GoalId> = BTreeSet::new();
+    let mut candidate = false;
+    let mut since = None;
+    for event in sorted {
+        let kind = event.kind.as_str();
+        let payload = &event.payload;
+        if event.task_id == Some(task) {
+            if kind == K::TaskCreated.as_str() {
+                let created: restored::TaskCreated = restore(payload);
+                ready = created.status == Some(TaskStatus::Ready);
+                goal = created.goal_id;
+            } else if kind == K::TaskStatusChanged.as_str() {
+                let changed: restored::TaskStatusChanged = restore(payload);
+                ready = changed.to == Some(TaskStatus::Ready);
+            } else if kind == K::RunClaimed.as_str() {
+                ready = false;
+            } else if kind == K::DependencyAdded.as_str() {
+                let added: restored::DependencyChanged = restore(payload);
+                dependencies.extend(added.predecessor_id);
+            } else if kind == K::DependencyRemoved.as_str() {
+                let removed: restored::DependencyChanged = restore(payload);
+                if let Some(id) = removed.predecessor_id {
+                    dependencies.remove(&id);
+                }
+            } else if kind == K::GoalDependencyAdded.as_str() {
+                let added: restored::GoalDependencyChanged = restore(payload);
+                goal_dependencies.extend(added.goal_id);
+            } else if kind == K::GoalDependencyRemoved.as_str() {
+                let removed: restored::GoalDependencyChanged = restore(payload);
+                if let Some(id) = removed.goal_id {
+                    goal_dependencies.remove(&id);
+                }
+            } else if kind == K::TaskGoalChanged.as_str() {
+                let moved: restored::TaskGoalChanged = restore(payload);
+                goal = moved.to;
+            }
+        } else if let Some(other) = event.task_id {
+            if kind == K::TaskStatusChanged.as_str() {
+                let changed: restored::TaskStatusChanged = restore(payload);
+                if changed.to == Some(TaskStatus::Completed) {
+                    completed.insert(other);
+                } else {
+                    completed.remove(&other);
+                }
+            }
+        } else if let Some(goal_id) = event.goal_id {
+            if kind == K::GoalCreated.as_str() {
+                let created: restored::GoalCreated = restore(payload);
+                if created.goal.and_then(|goal| goal.status) == Some(GoalStatus::Draft) {
+                    drafts.insert(goal_id);
+                }
+            } else if kind == K::GoalStatusChanged.as_str() {
+                let changed: restored::GoalStatusChanged = restore(payload);
+                if changed.to == Some(GoalStatus::Draft) {
+                    drafts.insert(goal_id);
+                } else {
+                    drafts.remove(&goal_id);
+                }
+            } else if kind == K::GoalClosed.as_str() {
+                let closed: restored::GoalClosed = restore(payload);
+                if closed.verdict == Some(GoalVerdict::Achieved) {
+                    achieved.insert(goal_id);
+                } else {
+                    achieved.remove(&goal_id);
+                }
+            } else if kind == K::GoalReopened.as_str() {
+                // Reopened open, whatever it was before it closed.
+                achieved.remove(&goal_id);
+                drafts.remove(&goal_id);
+            }
+        }
+        let now = ready
+            && dependencies.is_subset(&completed)
+            && goal_dependencies.is_subset(&achieved)
+            && goal.is_none_or(|goal| !drafts.contains(&goal));
+        if now && !candidate && timestamp_millis(&event.created_at).is_some() {
+            since = Some(event.created_at.clone());
+        }
+        candidate = now;
+    }
+    since
+}
+
+/// The payloads [`claimable_since`] reads, restored as typed values with
+/// `run::payload::restore`: each type names the keys it reads once, and a
+/// missing key, `null` or a value of another type (an older or broken
+/// writer) reads as absent, so no recorded event is refused.
+mod restored {
+    use serde::Deserialize;
+
+    use crate::domain::run::payload::typed;
+    use crate::domain::{GoalId, GoalStatus, GoalVerdict, TaskId, TaskStatus};
+
+    /// `task_created`.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct TaskCreated {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) status: Option<TaskStatus>,
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) goal_id: Option<GoalId>,
+    }
+
+    /// `task_status_changed`.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct TaskStatusChanged {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) to: Option<TaskStatus>,
+    }
+
+    /// `dependency_added` and `dependency_removed`.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct DependencyChanged {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) predecessor_id: Option<TaskId>,
+    }
+
+    /// `goal_dependency_added` and `goal_dependency_removed`.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct GoalDependencyChanged {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) goal_id: Option<GoalId>,
+    }
+
+    /// `task_goal_changed`: the goal it moved to, absent out of any goal.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct TaskGoalChanged {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) to: Option<GoalId>,
+    }
+
+    /// `goal_created`: the goal as its JSON shows it.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct GoalCreated {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) goal: Option<GoalRecord>,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct GoalRecord {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) status: Option<GoalStatus>,
+    }
+
+    /// `goal_status_changed`.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct GoalStatusChanged {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) to: Option<GoalStatus>,
+    }
+
+    /// `goal_closed`.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct GoalClosed {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) verdict: Option<GoalVerdict>,
+    }
 }
 
 /// The key of `run_claimed` that holds [`attributes`].
@@ -161,7 +338,7 @@ mod tests {
     #[test]
     fn the_candidates_carry_their_rank_and_priorities_and_the_claim_keeps_its_own() {
         let order = [TaskId::new(7), TaskId::new(3), TaskId::new(9)];
-        let facts = candidate_facts(&order, |task| {
+        let facts = candidate_facts(&order, &[TaskId::new(3)], |task| {
             (task != TaskId::new(9)).then_some((
                 Priority::Normal,
                 if task == TaskId::new(3) {
@@ -187,6 +364,7 @@ mod tests {
                 "priority": "normal",
                 "priority_source": "goal",
                 "effective_priority": "high",
+                "aged": true,
             })
         );
         // A task claimed from outside the line gets no facts.
@@ -194,13 +372,267 @@ mod tests {
         assert_eq!(Value::Object(attributes), json!({"candidates": 3}));
     }
 
+    /// Events for [`claimable_since`]: each with its ID, on `task` (or a
+    /// goal when `task` is 0), at minute `minute`.
+    fn at(
+        id: i64,
+        task: i64,
+        goal: Option<i64>,
+        kind: &str,
+        payload: Value,
+        minute: i64,
+    ) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: (task != 0).then(|| TaskId::new(task)),
+            goal_id: goal.map(crate::domain::GoalId::new),
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: format!("2026-10-01T10:{minute:02}:00.000Z"),
+            actor: None,
+        }
+    }
+
+    const T: i64 = 7;
+
+    fn created(id: i64, status: &str, goal: Option<i64>, minute: i64) -> RunEvent {
+        at(
+            id,
+            T,
+            None,
+            "task_created",
+            json!({"status": status, "goal_id": goal}),
+            minute,
+        )
+    }
+
+    fn status(id: i64, task: i64, to: &str, minute: i64) -> RunEvent {
+        at(
+            id,
+            task,
+            None,
+            "task_status_changed",
+            json!({"to": to}),
+            minute,
+        )
+    }
+
+    fn own(id: i64, kind: &str, payload: Value, minute: i64) -> RunEvent {
+        at(id, T, None, kind, payload, minute)
+    }
+
+    fn goal(id: i64, goal: i64, kind: &str, payload: Value, minute: i64) -> RunEvent {
+        at(id, 0, Some(goal), kind, payload, minute)
+    }
+
+    fn since(events: &[RunEvent]) -> Option<String> {
+        claimable_since(TaskId::new(T), events)
+    }
+
+    fn minute(minute: i64) -> Option<String> {
+        Some(format!("2026-10-01T10:{minute:02}:00.000Z"))
+    }
+
+    /// What an older or broken writer left reads as absent, never as a
+    /// refusal: an unknown status, a value of another type, a payload that
+    /// is no object.
     #[test]
-    fn a_task_is_ready_at_the_latest_of_its_own_and_its_prerequisites() {
-        let own = "2026-10-01T00:05:00.000Z";
-        let done = "2026-10-01T00:09:00.000Z";
-        assert_eq!(ready_at(Some(own), [done, "nonsense"]), Some(done));
-        assert_eq!(ready_at(Some(done), [own]), Some(done));
-        assert_eq!(ready_at(None, []), None);
+    fn an_unreadable_payload_reads_as_absent() {
+        assert_eq!(since(&[created(1, "someday", None, 0)]), None);
+        let events = [
+            created(1, "draft", None, 0),
+            at(2, T, None, "task_status_changed", json!({"to": 7}), 5),
+            at(3, T, None, "task_status_changed", json!("ready"), 6),
+        ];
+        assert_eq!(since(&events), None);
+        // A predecessor named by a string is no dependency to wait for.
+        let events = [
+            created(1, "ready", None, 0),
+            own(2, "dependency_added", json!({"predecessor_id": "8"}), 1),
+        ];
+        assert_eq!(since(&events), minute(0));
+    }
+
+    #[test]
+    fn a_task_is_claimable_from_its_move_to_ready_or_its_creation_ready() {
+        assert_eq!(since(&[created(1, "draft", None, 0)]), None);
+        assert_eq!(
+            since(&[created(1, "draft", None, 0), status(2, T, "ready", 5)]),
+            minute(5)
+        );
+        assert_eq!(since(&[created(1, "ready", None, 3)]), minute(3));
+        // Claimed (the claim records no status change of its own), then
+        // back to ready after a failed run: claimable again from then.
+        let events = [
+            created(1, "draft", None, 0),
+            status(2, T, "ready", 5),
+            own(
+                3,
+                "run_claimed",
+                json!({"from": "ready", "to": "in_progress"}),
+                6,
+            ),
+            status(4, T, "ready", 9),
+        ];
+        assert_eq!(since(&events), minute(9));
+        // Claimed now: the last time it became one stands.
+        assert_eq!(since(&events[..3]), minute(5));
+    }
+
+    #[test]
+    fn a_task_dependency_holds_it_until_completed_and_its_edits_count_only_when_they_move_it() {
+        let base = [
+            created(1, "draft", None, 0),
+            own(2, "dependency_added", json!({"predecessor_id": 8}), 0),
+            status(3, T, "ready", 1),
+        ];
+        assert_eq!(since(&base), None);
+        let mut met = base.to_vec();
+        met.push(status(4, 8, "completed", 20));
+        assert_eq!(since(&met), minute(20));
+        // Removed after it was met: the completion stands.
+        let mut removed = met.clone();
+        removed.push(own(
+            5,
+            "dependency_removed",
+            json!({"predecessor_id": 8}),
+            30,
+        ));
+        assert_eq!(since(&removed), minute(20));
+        // Removed while unmet: claimable from the removal.
+        let mut unmet = base.to_vec();
+        unmet.push(own(
+            4,
+            "dependency_removed",
+            json!({"predecessor_id": 8}),
+            25,
+        ));
+        assert_eq!(since(&unmet), minute(25));
+        // Added after it was met, kept or removed: nothing moves.
+        let late = [
+            created(1, "draft", None, 0),
+            status(2, T, "ready", 0),
+            status(3, 8, "completed", 10),
+            own(4, "dependency_added", json!({"predecessor_id": 8}), 20),
+        ];
+        assert_eq!(since(&late), minute(0));
+        let mut late_removed = late.to_vec();
+        late_removed.push(own(
+            5,
+            "dependency_removed",
+            json!({"predecessor_id": 8}),
+            30,
+        ));
+        assert_eq!(since(&late_removed), minute(0));
+        // A predecessor reopened takes it out; completed again, back.
+        let mut reopened = met.clone();
+        reopened.push(status(5, 8, "ready", 40));
+        reopened.push(status(6, 8, "completed", 50));
+        assert_eq!(since(&reopened), minute(50));
+    }
+
+    #[test]
+    fn a_goal_dependency_holds_it_until_closed_as_achieved() {
+        let base = [
+            created(1, "draft", None, 0),
+            own(2, "goal_dependency_added", json!({"goal_id": 4}), 0),
+            status(3, T, "ready", 1),
+        ];
+        assert_eq!(since(&base), None);
+        let mut achieved = base.to_vec();
+        achieved.push(goal(
+            4,
+            4,
+            "goal_closed",
+            json!({"verdict": "achieved"}),
+            20,
+        ));
+        assert_eq!(since(&achieved), minute(20));
+        let mut removed = achieved.clone();
+        removed.push(own(5, "goal_dependency_removed", json!({"goal_id": 4}), 30));
+        assert_eq!(since(&removed), minute(20));
+        // Abandoned never releases it; removed then, claimable from then.
+        let mut abandoned = base.to_vec();
+        abandoned.push(goal(
+            4,
+            4,
+            "goal_closed",
+            json!({"verdict": "abandoned"}),
+            20,
+        ));
+        assert_eq!(since(&abandoned), None);
+        abandoned.push(own(5, "goal_dependency_removed", json!({"goal_id": 4}), 30));
+        assert_eq!(since(&abandoned), minute(30));
+        // Reopened takes it out; achieved again, back.
+        achieved.push(goal(5, 4, "goal_reopened", json!({}), 40));
+        assert_eq!(since(&achieved), minute(20));
+        achieved.push(goal(
+            6,
+            4,
+            "goal_closed",
+            json!({"verdict": "achieved"}),
+            50,
+        ));
+        assert_eq!(since(&achieved), minute(50));
+        // Added after it was achieved: nothing moves.
+        let late = [
+            created(1, "ready", None, 0),
+            goal(2, 4, "goal_closed", json!({"verdict": "achieved"}), 10),
+            own(3, "goal_dependency_added", json!({"goal_id": 4}), 20),
+            own(4, "goal_dependency_removed", json!({"goal_id": 4}), 30),
+        ];
+        assert_eq!(since(&late), minute(0));
+    }
+
+    #[test]
+    fn a_draft_goal_holds_its_tasks_until_it_opens_or_they_move_out() {
+        let draft = goal(
+            1,
+            3,
+            "goal_created",
+            json!({"goal": {"status": "draft"}}),
+            0,
+        );
+        let open_goal = goal(2, 5, "goal_created", json!({"goal": {"status": "open"}}), 0);
+        let base = [
+            draft.clone(),
+            open_goal.clone(),
+            created(3, "draft", Some(3), 0),
+            status(4, T, "ready", 1),
+        ];
+        assert_eq!(since(&base), None);
+        let mut opened = base.to_vec();
+        opened.push(goal(
+            5,
+            3,
+            "goal_status_changed",
+            json!({"from": "draft", "to": "open"}),
+            20,
+        ));
+        assert_eq!(since(&opened), minute(20));
+        // Moved on to another open goal later: the opening stands.
+        opened.push(own(6, "task_goal_changed", json!({"from": 3, "to": 5}), 30));
+        assert_eq!(since(&opened), minute(20));
+        // Moved out of the draft goal: claimable from the move.
+        let mut moved = base.to_vec();
+        moved.push(own(5, "task_goal_changed", json!({"from": 3, "to": 5}), 25));
+        assert_eq!(since(&moved), minute(25));
+        // A candidate moved into a goal opened before: nothing moves.
+        let into_opened = [
+            draft,
+            open_goal,
+            created(3, "ready", None, 0),
+            goal(
+                4,
+                3,
+                "goal_status_changed",
+                json!({"from": "draft", "to": "open"}),
+                10,
+            ),
+            own(5, "task_goal_changed", json!({"from": null, "to": 3}), 20),
+        ];
+        assert_eq!(since(&into_opened), minute(0));
     }
 
     /// Every attribute takes the value of its field of `run_claimed`, as

@@ -10,6 +10,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const HOT: &str = "docs/hot.md";
 
 fn add_task(queue: &mut SqliteQueue, title: &str, paths: &[&str], priority: Priority) -> TaskId {
+    add_class_task(queue, title, paths, priority, Default::default())
+}
+
+fn add_class_task(
+    queue: &mut SqliteQueue,
+    title: &str,
+    paths: &[&str],
+    priority: Priority,
+    execution_class: dagq::domain::ExecutionClass,
+) -> TaskId {
     let task = queue
         .add(NewTask {
             title: title.into(),
@@ -32,7 +42,7 @@ fn add_task(queue: &mut SqliteQueue, title: &str, paths: &[&str], priority: Prio
             provider: None,
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
-            execution_class: Default::default(),
+            execution_class,
         })
         .unwrap();
     queue
@@ -216,6 +226,41 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     assert_eq!(stats["claim_deferrals"]["by_end"]["expired"]["count"], 1);
     assert_eq!(stats["claim_deferrals"]["deferred"], json!([]));
+}
+
+/// A Spike whose declared paths meet a run in flight on a hotspot is
+/// deferred like any task (ADR-t1487-2 decision 3): its execution class
+/// passes no hotspot, and the class step only sees what the hotspot left.
+#[test]
+fn a_spike_meeting_a_run_on_a_hotspot_is_deferred_too() {
+    let (_dir, repo, db) = hot_fixture();
+    let (hot, spike) = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        let hot = add_task(&mut queue, "edits the hot file", &[HOT], Priority::Normal);
+        let spike = add_class_task(
+            &mut queue,
+            "measures on the hot file",
+            &[HOT],
+            Priority::Normal,
+            dagq::domain::ExecutionClass::Spike,
+        );
+        (hot, spike)
+    };
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome = supervise_with(&db, &repo, &backend, &options(3600)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(runs_of(&db, hot), 1);
+    assert_eq!(
+        runs_of(&db, spike),
+        0,
+        "the Spike meeting the hot run waits"
+    );
+    let deferred = events(&db, "claim_deferred");
+    assert_eq!(deferred.len(), 1, "{deferred:?}");
+    assert_eq!(deferred[0].0, Some(spike));
+    assert_eq!(deferred[0].1["reason"], "hot_files");
+    assert_eq!(deferred[0].1["runs"][0]["task_id"], json!(hot));
 }
 
 /// A run in the way that only waits for a person's answer (an open

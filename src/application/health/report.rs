@@ -332,6 +332,9 @@ pub(super) fn slots_and_waits(
                 if let Some(spacing) = claim_spacing(registration, last_claim.as_ref(), now) {
                     value["claim_spacing"] = spacing;
                 }
+                if let Some(classes) = claim_classes(registration) {
+                    value["claim_classes"] = classes;
+                }
                 for (key, hold) in &holds {
                     if let Some(event) = hold.as_ref().filter(|event| {
                         event.payload.get("supervisor").and_then(Value::as_str)
@@ -354,6 +357,21 @@ pub(super) fn slots_and_waits(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((supervisors, waiting))
+}
+
+/// A supervisor's settings of the execution classes' claims in `status`
+/// (ADR-t1487-2): `max_spikes` (null for no limit) and `class_aging` (in
+/// seconds), each with its `*_source` (`dagq.toml` or `default`). `None`
+/// for a registration of an older binary, which records none.
+pub(super) fn claim_classes(registration: &SupervisorRegistration) -> Option<Value> {
+    registration.class_aging_source.map(|source| {
+        json!({
+            "max_spikes": registration.max_spikes,
+            "max_spikes_source": registration.max_spikes_source,
+            "class_aging": registration.class_aging,
+            "class_aging_source": source,
+        })
+    })
 }
 
 /// A supervisor's `claim_spacing` in `status` (ADR-t1479-1): the seconds

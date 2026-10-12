@@ -13,6 +13,8 @@ related:
   - adr-t1632-1
   - adr-t813-2
   - adr-t1857-1
+  - adr-t1487-2
+  - adr-t1489-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-claim-hold
@@ -59,9 +61,14 @@ hotspotが無いか、進行中のrunがどのhotspotも触らなければ、候
 - 猶予を過ぎた人だけを待つrunと自分のcommitを持たないfailedのrunを除くと重ならなくなったtask（邪魔なrunが全てそれ）は、`defer_max_secs`を待たずに`claim_deferral_ended`を書いてclaimする。`why`は、邪魔なrunが全て自分のcommitを持たないfailedのrunなら`no_commit`、猶予を過ぎた人だけを待つrunが混じれば`owner_waiting`（`domain::claim_defer::left_out`）。控えていなかったtaskは何も書かずにclaimする。そのrunがまた動き出して重なれば、新しく控える（始まりと上限はその`claim_deferred`から）
 - 控えていたtaskが候補から外れたら（他のsupervisorがclaimした、cancel、依存が戻った）`claim_deferral_ended`（`why: not_candidate`）を書く
 
-控えたtaskを除いた順で`claim_for_supervisor_in_order`がclaimする。1件claimするたびに進行中のrunを読み直すので、同じpassでclaimしたrunとの重なりも見る。他にclaimできるtaskが無くslotが空いていても控えたまま待つ（直列にする）。上限は上の`defer_max_secs`。
+控えたtaskを除いた順で`claim_for_supervisor_holding`がclaimする。
+1件claimするたびに進行中のrunを読み直すので、同じpassでclaimしたrunとの重なりも見る。
+他にclaimできるtaskが無くslotが空いていても控えたまま待つ（直列にする）。
+上限は上の`defer_max_secs`。
 
-supervisorは控えの状態（taskごとの始まりと上限を過ぎたか）を持ち、起動して最初の判定で、taskごとの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`（`latest_task_events`）から組み立て直す。最新が`claim_deferred`なら控えの途中、`claim_deferral_ended`の`why: expired`なら上限を過ぎた控え、それ以外は控えていない。supervisorが入れ替わっても上限は最初の`claim_deferred`から数える。
+supervisorは控えの状態（taskごとの始まりと上限を過ぎたか）を持ち、起動して最初の判定で、taskごとの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`（`latest_task_events`）から組み立て直す（`deferrals_in_place`）。
+最新がhotspotの`claim_deferred`なら控えの途中、`claim_deferral_ended`の`why: expired`か、期限切れの控えを持つ順の記録（[実行区分の上限とaging](#実行区分の上限とaging)の上限と軽い枠の記録）なら上限を過ぎた控え、それ以外は控えていない。
+supervisorが入れ替わっても上限は最初の`claim_deferred`から数える。
 
 ## workerを動かせないtask
 
@@ -79,8 +86,10 @@ hotspotの判定より先に、`Queue::candidates`のtaskの`worker`にこのpas
   控えの途中で理由が変われば、前の控えを終えて新しい理由で記録し直す（`domain::claim_defer::worker_step`）。
 - 上限は無く、hotspotの控えと違って`defer_max_secs`で期限切れにならない。
   そのworkerを動かせるようになったsupervisor（表にそのworkerが入り、runtimeがcontainerならそれが使えて経路のproviderに届く）が`claim_deferral_ended`を書いてclaimし、候補から外れたtaskの控えも終える（終わり方の値は`worker_deferral_ended`のdoc comment）
-- 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`worker_deferrals_in_place`）。hotspotの控え（`deferrals_in_place`）は`reason`が`hot_files`のもの（`reason`の無い古いeventを含む）だけを読む
-- 同じpassで`claim_for_supervisor_in_order`にも経路の一覧を渡し、順に無いtaskを取る後戻りでも経路の無いworkerのtaskは取らない。経路がもう一方のproviderなら、runはそのproviderの非対話で始まり、`provider_switched`（`phase: start`）を記録する
+- 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`worker_deferrals_in_place`）。
+  hotspotの控え（`deferrals_in_place`）は`reason`が`hot_files`のもの（`reason`の無い古いeventを含む）と、期限切れの控えを持つ順の記録を読む
+- 同じpassで`claim_for_supervisor_holding`にも経路の一覧を渡し、順に無いtaskを取る後戻りでも経路の無いworkerのtaskは取らない。
+  経路がもう一方のproviderなら、runはそのproviderの非対話で始まり、`provider_switched`（`phase: start`）を記録する
 
 ## 依存先の着地を含むbuildを待つtask
 
@@ -92,9 +101,32 @@ supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[
 - 理由は`not_in_build`。最初に飛ばしたときだけ`claim_deferred`（`build_wait::deferred`）を書く
 - 上限は無く、hotspotの控えと違って`defer_max_secs`で期限切れにならない。自動更新はruntimeのpath（`RUNTIME_PATHS`）を変える着地でだけbuildする（[Auto-update](auto-update.md)の「きっかけ」）ので、依存先の着地がruntimeのpathを変えなければ、その着地を含むbuildは後でruntimeを変える別の着地のbuildが引き継ぐまで来ず、それまで待つ。含むbuildのsupervisorは`claim_deferral_ended`（`why: cleared`）を書いてclaimする。宣言を外したtask（`edit --no-wait-for-build`。draft / submittedに戻してから）も、候補に戻ったときに控えの途中なら`cleared`で終える。候補から外れたtaskは`why: not_candidate`で終える
 - **見直し**: 含むかの答えは着地commitごとにprocessの中でcacheする（`DeferWatch::in_build`）。build識別子はprocessの間変わらず、変わるのは自動更新（[Auto-update](auto-update.md)）や`install`の引き継ぎ（[Handoff](handoff.md)）でexecした新しいprocessだけなので、cacheは`supervisor_handed_off`の後に空から始まり、その最初のpassで全ての待ちを新しいbuildで判定し直す。`update_installed`が固定バイナリを入れ替えても、引き継がなかったsupervisor（`up --auto-update`でない、引き継ぎに失敗した）のbuildは変わらず、待ちも変わらない
-- **claimの後戻り**: `claim_for_supervisor_in_order`は、渡した順のtaskがどれもreadyでなくなった（他のsupervisorがclaimした、cancel）ときにclaimの順へ後戻りするが、そこでは`wait_for_build`のtaskを取らない（取れるtaskが他に無ければ`NoReadyTask`。`claim_task`）。そのtaskは判定したsupervisorが順に名指したときだけclaimされる。順を渡さない`TaskStore::claim`も同じで取らない。hotspotで控えたtaskは後戻りで取られうる（従来どおり）
+- **claimの後戻り**: `claim_for_supervisor_holding`は、渡した順のtaskがどれもreadyでなくなった（他のsupervisorがclaimした、cancel）ときにclaimの順へ後戻りするが、そこでは`wait_for_build`のtaskを取らない（取れるtaskが他に無ければ`NoReadyTask`。`claim_task`）。
+  そのtaskは判定したsupervisorが順に名指したときだけclaimされる。
+  順を渡さない`TaskStore::claim`も同じで取らない。
+  hotspotで控えたtaskは後戻りで取られうる
 - **重なり**（1つの候補の待ちの始まり・続き・終わりと他の控えとの重なりは純粋関数`build_wait::decide`、候補から外れた待ちの`not_candidate`は`build_wait::left`）: taskの最新の控えのeventが今の控えを表すように、workerの控えを`cleared`で終えたtaskがまだbuildを待てば、buildの`claim_deferred`を書き直す。hotspotで控えている途中（期限切れでない）のtaskがbuildを待ち始めたら、hotspotの控えはbuildの`claim_deferred`に置き換わり（`stats`の`superseded`）、buildが含んだ後に重なりが残ればhotspotの判定が新しく控える
 - 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`build_wait::deferrals_in_place`）。`worker_deferrals_in_place`はこの理由を読まない
+
+## 実行区分の上限とaging
+
+Spikeは実装とworkerの総枠（`parallel`）を共有し、枠を予約しない（[ADR-t1487-2](../../adr/2026-10-04-t1487-2-spikes-share-the-worker-slots-under-a-cap-with-cross-class-aging.md)、agingは[ADR-t1489-1](../../adr/2026-10-11-t1489-1-class-aging-reorders-only-within-one-effective-priority.md)）。
+判定は純粋関数`domain::claim_order::arrange`で、supervisorの側は`claimable`が上の控え（worker・build・hotspot）を通った候補にだけ当てる。
+
+- **Spikeの上限**: `[supervisor] max_spikes`（[Run environment](run-environment.md)の`[supervisor]`）の数のSpikeのrunがslotを持つあいだ、Spikeの候補を全て順から外し、空いた枠は次の実装の候補が取る。
+  人の答えを待ってslotの外にいるrunは数えず、interruptも上限を越えない。
+  設定が無ければ上限は無い。
+  走っているrunは止めず、slotの外から戻るSpikeで一時的に超えても新しいSpikeをclaimしないだけ。
+  着地待ちが空けた軽い枠のclaimにも同じに効く。
+- **上限の記録**: 上限で外したtaskは、他の控えと同じく`claim_deferred`で始まりと終わりを記録する（理由の値と記録の形は`claim_order::class_deferred`と`class_deferrals_in_place`）。
+  hotspotの控えが期限切れのまま順の記録（上限か軽い枠の`claim_deferred`）を受けたtaskは、その記録が期限切れの控えの始まりを持ち、引き継ぎの後も期限を数え直さない（`claim_defer::HOT_EXPIRED_SINCE`）。
+- **claimの後戻り**: 上限に達している区分は、claimの`held`に渡り、supervisorが順を作った後にreadyになったtaskも、規則の順への後戻りも、その区分を取らない。
+- **aging**: 残りの候補を規則の順（効く優先度 → 解放数 → ID）に並べ、効く優先度ごとに、claimできる候補になった時刻（`TaskStore::ready_at`）からの待ちが`[supervisor] class_aging`秒を超えてもう一方より長い区分の候補を、その優先度の中で先に出す。
+  優先度を越えず、区分の中の順とinterruptの順は変えず、候補が1つの区分だけの優先度は規則の順のまま。
+  控えや上限で除かれた候補は前に出さず、着地待ちが空けた軽い枠ではその枠で取れない候補を除いてから当てる。
+  その枠で取れない候補はその間`light_room`の控えとして記録し、`candidates`と`graph`も記録から同じ候補を除く（`claim_order::light_room_deferred`）。
+- claimは再開・復旧jobとの列（`slot_order`）とclaimのloopの優先度の下限で、各自の効く優先度で比べる。
+  `run_claimed`の区分とagingの記録は`domain::claim_facts`が持つ。
 
 ## 記録
 
@@ -103,7 +135,8 @@ supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[
   hotspotの控えは重なったhotspotと進行中のrunと上限を持つ（欄は`domain::claim_defer::decide`のdoc comment）。
   workerを動かせないtaskの`claim_deferred`は、控えの始まりと理由が変わったときに書き、その理由と経路のworkerを持つ（欄は`domain::claim_defer::worker_deferred`のdoc comment）。
   `provider_fallback_off`の`message`は、頼んだproviderが今使えず`[provider_fallback] workers`がfalseなのでもう一方のproviderで始めず、そのproviderが使えるようになるまでclaimしないと言う。
-  buildを待つtaskの`claim_deferred`は、そのsupervisorのbuildと、それが含まない依存先の着地を持つ（欄は`domain::build_wait::deferred`のdoc comment）
+  buildを待つtaskの`claim_deferred`は、そのsupervisorのbuildと、それが含まない依存先の着地を持つ（欄は`domain::build_wait::deferred`のdoc comment）。
+  Spikeの上限と軽い枠の`claim_deferred`は上の節（[実行区分の上限とaging](#実行区分の上限とaging)）
 - `claim_deferral_ended`（taskのevent）: 控えの終わりで、どう終わったかを持つ（欄は`worker_deferral_ended`・`build_wait::ended`などのdoc comment）。
   logにinfoで出る。
   人だけを待つrun・commitの無いrun・期限で終わるのはhotspotの控えだけで、workerの控えは理由が変わったときにも終わり、新しい理由の`claim_deferred`が続く（`worker_step`）
@@ -116,7 +149,11 @@ supervisorは、`wait_for_build`を宣言したtask（`add --wait-for-build`。[
 - `show`: 既定の（圧縮した）出力は、今控えているtaskなら同じ形を`claim_deferral`に出す（控えていなければこのキーは無い。`view::task_detail`）。`show --full`は`TaskDetail`をそのまま出すのでこのキーを持たず、控えはeventsの`claim_deferred` / `claim_deferral_ended`で読む。`wait_for_build`を宣言したtaskはtaskの`wait_for_build: true`でも分かる
 - `candidates`と`graph`: 同じ記録を`application::claim_view`で読み、開いている控えのtaskを`candidates`から除いて`deferred`に出す（[ADR-t1992-1](../../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。
   CLIは控えを判定し直さず（`decide`・hotspotの計算・providerの経路を走らせない）、記録を閉じたり足したりもしない。
+  残りはsupervisorと同じ`claim_order::arrange`に、開いている控え（`spike_limit`を含む）を除外の集合として渡してagingを当て（上限は判定しない）、前に出たtaskを`aged`に出す。
+  閾値の選び方は`claim_view::class_aging_secs`が持つ。
+  先頭はgoalで絞ってもqueue全体の候補で決め、`--ignore-deferrals`は規則の順でagingを当てない。
   `held`はclaimを止める条件を順に混ぜずに出す（`application::health::claim_holds`）: 生きたsupervisorが居なければ`no_supervisor`、生きたsupervisor（か名の無いもの）の最新の記録が保留を示す`claim_held`・`run_env_program_missing`、生きたsupervisorごとに自分の最新の記録が保留を示す`ci_watch_held`・`landing_branch_unresolved`、待っているclaim spacing。
   CLIはこれらの条件も判定し直さず、supervisorが記録しない条件は出さない。
   控えが閉じるのはsupervisorが次に判定したときだけで、`fill_slots`はslotが無いpassとclaimを止めているpass（両方のproviderが使えないpassを除く）では判定せず、hotspotの入力もcacheするので、その間は前の判定の控えが開いたまま出る（遅れの上限は無い）。
 - `stats`: `claim_deferrals`に、windowの中で始まった控えの`count`と`secs`、終わり方ごとの`by_end`（`claim_deferral_ended`の`why`のどれでも、claimで終わったもの・まだ終わっていないもの・同じtaskの次の`claim_deferred`で置き換わったものも、`domain::claim_defer::deferral_spans`）、hotspotごとの控えた回数`by_file`、今の控え`deferred`を出す。控えは次の`claim_deferral_ended`かそのtaskの`run_claimed`で終わり、まだ終わっていない控えはwindowの終わりまでを数える。空きslotがあり控えているtaskがあれば、alert `claim_deferred`（`value`は控えているtaskの数）を`idle_slots`の代わりに出す（[`stats`](stats.md)）
+  `claim_waits`は窓の中のclaimを実行区分ごとに、readyになってからclaimまでの秒（`run_claimed`の`ready_at`から。区分を持たない古いclaimは実装）で数える（`domain::stats::claim_waits`）

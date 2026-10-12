@@ -991,3 +991,57 @@ task = 1930
 name = "runtime_provider_switch::with_the_fallback_off_a_codex_limit_waits_and_retries_codex"
 reason = "B 境界（プロセス・supervisor の配線）: 切り替えを切った設定で Codex の上限を待ってやり直す依頼を、実際の supervisor と wrapper で確かめる。依頼の文面と上限は application::prompt の unit test"
 task = 1930
+
+# 7.4s (stress 5 under the host's load, task 1489)
+[[test]]
+name = "runtime_claim_class::the_spike_limit_defers_a_spike_and_gives_its_slot_to_an_implementation"
+reason = "B 境界（SQLite・supervisor の配線）: 総枠 3 の supervisor が max_spikes を dagq.toml から読み、2 本目の Spike の claim_deferred（spike_limit）を記録して枠を実装に渡し、candidates・status・stats がその記録を読むことを実際の worker の session で確かめる。上限と順の判断は domain::claim_order の unit test"
+task = 1489
+
+# 5.7s (stress 5 under the host's load, task 1489)
+[[test]]
+name = "runtime_claim_class::without_the_limit_spikes_may_take_every_slot"
+reason = "B 境界（supervisor の配線）: max_spikes の無い dagq.toml で 1 つの pass が 3 本の Spike で全ての slot を埋めることを、run_claimed の slots で確かめる。判断は domain::claim_order の unit test"
+task = 1489
+
+# 6.3s (stress 5 under the host's load, task 1489)
+[[test]]
+name = "runtime_claim_class::the_aging_puts_a_spike_ahead_as_candidates_show_and_the_claim_records"
+reason = "B 境界（SQLite・supervisor の配線・CLI）: class_aging を dagq.toml から読んだ supervisor の claim と、同じ時点の candidates・graph の順と aged が一致し、run_claimed が aged を持つことを、ready の時刻の差（1 秒の待ち）で確かめる。aging の判断は domain::claim_order の unit test"
+task = 1489
+
+# 5.5s (stress 5 under the host's load, task 1489)
+[[test]]
+name = "runtime_claim_class::spikes_that_keep_arriving_do_not_starve_an_implementation"
+reason = "B 境界（SQLite・supervisor の配線）: 同じ優先度で規則の順の前に Spike が並んでいても、閾値を超えてより長く待った実装を supervisor が claim することを、ready の時刻の差（2 回の 1 秒の待ち）で確かめる。aging の判断は domain::claim_order の unit test"
+task = 1489
+
+# 5.9s (stress 5, task 1489)
+[[test]]
+name = "runtime_claim_defer::a_spike_meeting_a_run_on_a_hotspot_is_deferred_too"
+reason = "B 境界（Git・SQLite・supervisor の配線）: 衝突の多いファイル（git の履歴と conflict_hotspots の alert）で進行中の run と重なる Spike を、supervisor が実行区分に依らず hot_files で控えることを、実際の worker の session で確かめる。控えと aging の判断は domain::claim_defer と domain::claim_order の unit test"
+task = 1489
+
+# 10.2s (stress 5 with nine others at once, task 1489)
+[[test]]
+name = "runtime_claim_class::with_the_limit_and_no_spike_implementations_take_every_slot"
+reason = "B 境界（supervisor の配線）: max_spikes = 1 を dagq.toml から読んだ supervisor が、Spike の候補が無ければ枠を予約せず 1 つの pass で 3 本の実装に全ての slot を渡すことを、run_claimed の slots で確かめる。上限の判断は domain::claim_order の unit test"
+task = 1489
+
+# 7.9s (stress 5 with eleven others at once, task 1489)
+[[test]]
+name = "runtime_claim_class::a_spike_past_the_threshold_is_claimed_within_the_limit"
+reason = "B 境界（SQLite・supervisor の配線・CLI）: max_spikes と class_aging を dagq.toml から読んだ supervisor が、閾値を超えた Spike を上限の内で実装より先に claim し、2 本目を spike_limit で控えてその枠を実装に渡し、candidates がその記録を出すことを、ready の時刻の差（1 秒の待ち）と実際の worker の session で確かめる。上限と aging の判断は domain::claim_order の unit test"
+task = 1489
+
+# 12.1s (stress 5 with eleven others at once, task 1489)
+[[test]]
+name = "runtime_light_slots::in_the_light_room_the_aging_compares_the_light_tasks_as_candidates_show"
+reason = "B 境界（SQLite・Git・supervisor の配線・CLI）: 着地待ちが空けた軽い枠で supervisor が軽い候補だけに aging を当て、取れない候補を light_room で記録し、candidates がその記録から claim と同じ順と aged を出すことを、着地の順番を待つ run・load の保留・ready の時刻の差で確かめる。aging の判断は domain::claim_order、表示の入力は application::claim_view の unit test"
+task = 1489
+
+# 11.2s (stress 5 with twelve others at once; 5.4 s alone, task 1489)
+[[test]]
+name = "runtime_claim_class::aging_keeps_to_each_priority_with_interrupts_inheritance_unblocks_and_the_limit"
+reason = "B 境界（SQLite・supervisor の配線）: 1 つの pass の 5 本の claim で、interrupt の規則の順、待っている high の task から継いだ効く優先度と unblocks、同じ優先度の中の aging、Spike の上限が supervisor の実際の claim の順と run_claimed の効く優先度・aged に表れることを、ready の時刻の差（1 秒の待ち）と実際の worker の session で確かめる。それぞれの判断は domain::claim_order と domain::slot_order の unit test"
+task = 1489

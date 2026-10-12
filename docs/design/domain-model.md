@@ -165,9 +165,9 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 - `claim`だけが`ready → in_progress`へ動かし、同じトランザクションで`TaskRun::new`がrunを作る。
 - 候補は依存が全て`completed`、goal依存の先が全て`achieved`で閉じ、draftのgoalに属さないreadyのtask（storeの`READY_QUERY`）。
-- 順は1つの関数が決める: `dependency_graph`の`candidates`（効く優先度 → 解放する数 → ID）。
-  `fill_slots`の`queue.candidates()`とstats・KPIの標本は控えを除かない。
-  順は記録せず`candidates --ignore-deferrals`で読む。
+- 規則の順は`dependency_graph`の`candidates`（効く優先度 → 解放する数 → ID）、claimと表示は`claim_order`がagingを足す。
+  stats・KPIの標本は控えを除かない。
+  規則の順は`candidates --ignore-deferrals`で読む。
 - CLIの`candidates`と`graph`の`candidates`は共有の`claim_view`で、supervisorが最後に記録したclaimの控えを除き`deferred`に理由・ファイル・原因のrunと出す（[ADR-t1992-1](../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。
   CLIは記録を読むだけで、claimを止める条件と生きたsupervisorの不在は`candidates`だけの`held`に出す。
 - `wait_for_build`のtaskは、判定したsupervisorが順に名指したときだけclaimされ、順を渡さないclaimは取らない（[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。

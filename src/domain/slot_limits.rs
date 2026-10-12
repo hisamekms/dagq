@@ -3,13 +3,18 @@
 //! decision 7) and how many planners its runtime opens at once
 //! (`runtime_planners`, ADR-0041 decision 12, task 941), how long it
 //! spaces new claims while the load hold is on (`claim_spacing`,
-//! ADR-t1479-1), and where each value comes from (task 698): the flag (`supervise --parallel` /
-//! `--max-waiting` / `--runtime-planners`), else `[supervisor]` of the
-//! main checkout's `dagq.toml`, else the default.
+//! ADR-t1479-1), how many of its slots Spikes may hold (`max_spikes`) and
+//! how long a candidate waits before it goes ahead of the other execution
+//! class's (`class_aging`, ADR-t1487-2), and where each value comes from
+//! (task 698): the flag (`supervise --parallel` / `--max-waiting` /
+//! `--runtime-planners`), else `[supervisor]` of the main checkout's
+//! `dagq.toml`, else the default. `max_spikes` and `class_aging` have no
+//! flag, and `max_spikes` no default: without it no class is limited.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::claim_order::DEFAULT_CLASS_AGING_SECS;
 use super::claim_spacing::DEFAULT_CLAIM_SPACING_SECS;
 use super::light_slots::LightChanges;
 use super::waiting::DEFAULT_MAX_WAITING;
@@ -70,16 +75,24 @@ pub struct SupervisorConfig {
     /// The changes claimed in the room the landing queue leaves
     /// (ADR-t1591-1); none claims nothing there. It has no flag.
     pub light_changes: Option<LightChanges>,
+    /// At least 1: the Spikes that may hold a slot at once (ADR-t1487-2
+    /// decision 1). It has no flag.
+    pub max_spikes: Option<usize>,
+    /// Seconds, at least 1: the wait after which a candidate goes ahead of
+    /// the other class's (ADR-t1487-2 decision 2). It has no flag.
+    pub class_aging: Option<usize>,
 }
 
 impl SupervisorConfig {
     /// The keys `[supervisor]` may set.
-    pub const KEYS: [&'static str; 5] = [
+    pub const KEYS: [&'static str; 7] = [
         "parallel",
         "max_waiting",
         "runtime_planners",
         "claim_spacing",
         "light_changes",
+        "max_spikes",
+        "class_aging",
     ];
 
     /// `light_changes`, empty when not set.
@@ -135,14 +148,38 @@ impl Setting {
     }
 }
 
-/// `parallel`, `max_waiting`, `runtime_planners` and `claim_spacing` (in
-/// seconds) in use.
+/// A value in use that may be unset, and where it comes from: `None`
+/// from the default is no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OptionalSetting {
+    pub value: Option<usize>,
+    pub source: SettingSource,
+}
+
+impl OptionalSetting {
+    /// The file's value, else none from the default.
+    pub fn from_file(file: Option<usize>) -> Self {
+        Self {
+            value: file,
+            source: if file.is_some() {
+                SettingSource::File
+            } else {
+                SettingSource::Default
+            },
+        }
+    }
+}
+
+/// `parallel`, `max_waiting`, `runtime_planners`, `claim_spacing` (in
+/// seconds), `max_spikes` and `class_aging` (in seconds) in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SlotLimits {
     pub parallel: Setting,
     pub max_waiting: Setting,
     pub runtime_planners: Setting,
     pub claim_spacing: Setting,
+    pub max_spikes: OptionalSetting,
+    pub class_aging: Setting,
 }
 
 impl SlotLimits {
@@ -162,6 +199,8 @@ impl SlotLimits {
                 file.claim_spacing,
                 DEFAULT_CLAIM_SPACING_SECS,
             ),
+            max_spikes: OptionalSetting::from_file(file.max_spikes),
+            class_aging: Setting::resolve(None, file.class_aging, DEFAULT_CLASS_AGING_SECS),
         }
     }
 
@@ -175,6 +214,10 @@ impl SlotLimits {
             "runtime_planners_source": self.runtime_planners.source,
             "claim_spacing": self.claim_spacing.value,
             "claim_spacing_source": self.claim_spacing.source,
+            "max_spikes": self.max_spikes.value,
+            "max_spikes_source": self.max_spikes.source,
+            "class_aging": self.class_aging.value,
+            "class_aging_source": self.class_aging.source,
         })
     }
 }
@@ -214,6 +257,8 @@ mod tests {
             runtime_planners: Some(2),
             claim_spacing: Some(60),
             light_changes: None,
+            max_spikes: Some(1),
+            class_aging: Some(900),
         };
         let all = SlotFlags {
             parallel: Some(2),
@@ -273,6 +318,14 @@ mod tests {
             (limits.claim_spacing.value, limits.claim_spacing.source),
             (60, SettingSource::File)
         );
+        assert_eq!(
+            (limits.max_spikes.value, limits.max_spikes.source),
+            (Some(1), SettingSource::File)
+        );
+        assert_eq!(
+            (limits.class_aging.value, limits.class_aging.source),
+            (900, SettingSource::File)
+        );
 
         let limits = SlotLimits::resolve(SlotFlags::default(), &SupervisorConfig::default());
         assert_eq!(
@@ -293,6 +346,15 @@ mod tests {
         assert_eq!(
             (limits.claim_spacing.value, limits.claim_spacing.source),
             (180, SettingSource::Default)
+        );
+        // No table: no Spike limit, and the runtime's aging threshold.
+        assert_eq!(
+            (limits.max_spikes.value, limits.max_spikes.source),
+            (None, SettingSource::Default)
+        );
+        assert_eq!(
+            (limits.class_aging.value, limits.class_aging.source),
+            (DEFAULT_CLASS_AGING_SECS, SettingSource::Default)
         );
         assert!(!SlotFlags::default().complete());
     }
@@ -322,6 +384,8 @@ mod tests {
                 runtime_planners: Some(2),
                 claim_spacing: Some(0),
                 light_changes: None,
+                max_spikes: Some(1),
+                class_aging: None,
             },
         );
         let payload = supervisor_config_change((from, &none), (to, &none)).unwrap();
@@ -337,6 +401,10 @@ mod tests {
         assert_eq!(payload["to"]["claim_spacing"], json!(0));
         assert_eq!(payload["to"]["claim_spacing_source"], json!("dagq.toml"));
         assert_eq!(payload["to"]["light_changes"], json!([]));
+        assert_eq!(payload["from"]["max_spikes"], Value::Null);
+        assert_eq!(payload["to"]["max_spikes"], json!(1));
+        assert_eq!(payload["to"]["max_spikes_source"], json!("dagq.toml"));
+        assert_eq!(payload["to"]["class_aging_source"], json!("default"));
         // Only `light_changes` changed: reported all the same.
         let docs = LightChanges::new(
             vec!["docs".parse().unwrap()],
@@ -377,6 +445,10 @@ mod registration_tests {
                 runtime_planners_source: None,
                 claim_spacing: None,
                 claim_spacing_source: None,
+                max_spikes: None,
+                max_spikes_source: None,
+                class_aging: None,
+                class_aging_source: None,
                 max_load: None,
                 providers: None,
             };

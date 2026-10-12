@@ -18,6 +18,7 @@ pub mod ask_seen;
 pub mod asks;
 pub mod auto_repairs;
 pub mod cargo;
+pub mod claim_waits;
 pub mod conflicts;
 pub mod context;
 pub mod drafts;
@@ -545,6 +546,10 @@ pub struct Stats {
     /// whether they waited for a person or a recover after their review,
     /// and how many of each conflicted on the way (goal 39, task 1312).
     pub landing_waits: landing_waits::LandingWaits,
+    /// The claims in the same window as `backend_failures`, per execution
+    /// class of the task claimed: the seconds from when it became
+    /// claimable to the claim (ADR-t1487-2).
+    pub claim_waits: BTreeMap<&'static str, asks::Spread>,
     /// Those runs per version of `dagq`, Claude Code and `rustc` they
     /// were claimed with (task 197).
     pub versions: Versions,
@@ -1051,6 +1056,7 @@ pub fn stats(
     let review_reasons = review_reasons::review_reasons(events, window_start, window_last, counts);
     let landing_rechecks = landing_rechecks(events, window_start, window_last, counts);
     let landing_waits = landing_waits::landing_waits(events, window_start, window_last, counts);
+    let claim_waits = claim_waits::claim_waits(events, window_start, window_last, counts);
     // The window ends now unless it stops at an earlier event.
     let window_end = match events.iter().find(|event| event.id == window_last) {
         Some(event) if until.is_some() || window_last < latest_event => {
@@ -1281,6 +1287,7 @@ pub fn stats(
         conflict_hotspots,
         landing_rechecks,
         landing_waits,
+        claim_waits,
         versions,
         load_bands,
         trial_groups,
