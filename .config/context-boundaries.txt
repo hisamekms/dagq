@@ -172,6 +172,7 @@ module | src/application/install.rs | host |
 module | src/application/update.rs | host |
 module | src/application/queue_service.rs | host |
 module | src/application/podman_machine.rs | host |
+module | src/application/container_image.rs | host |
 module | src/application/queue_broker.rs | host |
 module | src/application/sccache.rs | host |
 module | src/application/sccache/ | host |
@@ -267,6 +268,9 @@ outer-port | src/application/podman_machine.rs | PodmanMachine | host | internal
 outer-port | src/application/podman_machine.rs | MachineUsers | host | internal | - | the host-wide lock and users of the dagq machine
 outer-port | src/application/podman_machine.rs | MachineVolumes | host | public | execution | the named volumes of a queue in the dagq machine; the cleanup at a run's end and the landing removes a run's build output
 outer-port | src/application/queue_broker.rs | VerificationTokens | host | public | execution | how integrate issues and revokes the token of each verification
+outer-port | src/application/container_image.rs | ImageSpecs | host | internal | - | the images of a queue as its main checkout decides them
+outer-port | src/application/container_image.rs | ImageBuilder | host | internal | - | the podman commands on the images in the dagq machine
+outer-port | src/application/container_image.rs | ImageRecords | host | internal | - | the queue's records of the container image
 outer-port | src/application/queue_service.rs | ServiceAccess | host | public | execution | not classified by architecture.md; the supervisor issues a token at the claim and the resume
 outer-port | src/application/ci_watch.rs | CiSource | observation | internal | - |
 outer-port | src/application/throughput_review.rs | ThroughputReviewSources | observation | internal | - |
@@ -361,6 +365,7 @@ item | src/application/supervise/report.rs | ReportPort | observation | host | w
 item | src/application/queue_broker.rs | BrokerGate | host | execution | whether the broker runs, through ContainerRuntime
 item | src/application/podman_machine.rs | MachineGate | host | execution | whether the dagq machine can be used, through ContainerRuntime
 item | src/application/queue_broker.rs | VerificationToken | host | execution | the token of one verification, revoked at its end
+item | src/application/container_image.rs | ImageGate | host | execution | whether the container image can be had, through ContainerRuntime
 item | src/application/supervise/contexts.rs | HostOpsState | host | execution | free disk and sccache, read
 item | src/application/supervise/cleanup.rs | CleanupWatch | host | execution | cleaning and defer
 item | src/application/supervise/sccache.rs | ensure_sccache | host | execution |

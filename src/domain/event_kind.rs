@@ -45,7 +45,7 @@
 //!   `report_written`, `throughput_review_*`, `candidates_sampled`, the
 //!   CI watch's `ci_*` and the record of main's history `main_*`.
 //! - host operation: `supervisor_*`, `update_*`, `release_check*`,
-//!   `queue_service_*`, `queue_broker_*`, `sccache_*`, `inbox_*`, the cleanup's
+//!   `queue_service_*`, `queue_broker_*`, `container_image_*`, `sccache_*`, `inbox_*`, the cleanup's
 //!   `build_outputs_removed`, `build_cache_removed`, `scratchpad_removed`
 //!   and `run_tmp_removed`,
 //!   `backend_call_failed`, `headless_job_stopped` and
@@ -126,6 +126,8 @@ event_kinds! {
     ConflictReceiptRejected => "conflict_receipt_rejected",
     ConflictResolved => "conflict_resolved",
     ConflictsConfigChanged => "conflicts_config_changed",
+    ContainerImageBuilt => "container_image_built",
+    ContainerImageFailed => "container_image_failed",
     ContainerRuntimeAvailable => "container_runtime_available",
     ContainerRuntimeUnavailable => "container_runtime_unavailable",
     DependencyAdded => "dependency_added",
@@ -473,6 +475,10 @@ impl EventKind {
                 // used (goal 38, ADR-t2113-1 decision 4).
                 | ContainerRuntimeUnavailable
                 | ContainerRuntimeAvailable
+                // The container image built or not had (ADR-t2257-1
+                // decision 2).
+                | ContainerImageBuilt
+                | ContainerImageFailed
                 // The supervisor's watch of the landing branch's CI
                 // (ADR-t1920-1).
                 | CiChecked
@@ -1184,6 +1190,8 @@ mod tests {
                 EventKind::ConflictsConfigChanged,
                 "conflicts_config_changed",
             ),
+            (EventKind::ContainerImageBuilt, "container_image_built"),
+            (EventKind::ContainerImageFailed, "container_image_failed"),
             (
                 EventKind::ContainerRuntimeAvailable,
                 "container_runtime_available",

@@ -717,12 +717,20 @@ pub fn supervise_with_reviewer(
             user_config: options.user_config.clone(),
             verification_timeout: options.verification_timeout,
         }),
-        // The queue broker and the dagq machine are the parts of the
-        // container runtime built yet (goal 38): a target set to it waits,
-        // and says why.
+        // The queue broker, the dagq machine and the image are the parts
+        // of the container runtime built yet (goal 38): a target set to it
+        // waits, and says why.
         container: Arc::new(crate::application::queue_broker::BrokerGate {
             broker: host::queue_broker_control(&db, options.queue_broker.as_ref()),
-            container: host::container_parts(&db),
+            container: host::container_parts(
+                &db,
+                &main_checkout,
+                generators.clock.clone(),
+                Some(crate::domain::actor::ActorContext::instance(
+                    crate::domain::actor::ActorRole::Supervisor,
+                    pid,
+                )),
+            ),
         }),
         verification_tokens: Arc::new(
             crate::infrastructure::queue_broker::SystemVerificationTokens { db: db.clone() },

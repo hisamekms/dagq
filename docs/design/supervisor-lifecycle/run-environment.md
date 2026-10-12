@@ -29,7 +29,7 @@ related:
 
 repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3。ADR-0040の決定3を引き継ぐ）が、runごとの環境変数になる。読み込みは`src/infrastructure/run_env.rs`の純粋関数（`parse_run_env`と`expand`、fileを読む`load_run_env`）で、ファイルが無ければ空。
 
-- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[exit]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[areas]`・`[tasks]`・`[goals]`・`[e2e]`・`[review.subagents.<agent>]`・`[review.programs.<name>]`・`[review.jobs]`（下の項）・`[headless]`（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）・`[provider_fallback]`・`[fresh_session]`（下の項）・`[ci_watch]`・`[landing_verification]`（下の項）・`[egress]`（[queueのbroker](../queue-broker.md)が`CONNECT`を通すpackage registry、意味は`run_env::EGRESS_REGISTRIES`のdoc comment）・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、誤りでclaimや着地を止めないよう[Language](language.md)の読み手が検査する）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。
+- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[exit]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[areas]`・`[tasks]`・`[goals]`・`[e2e]`・`[review.subagents.<agent>]`・`[review.programs.<name>]`・`[review.jobs]`（下の項）・`[headless]`（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）・`[provider_fallback]`・`[fresh_session]`（下の項）・`[ci_watch]`・`[landing_verification]`（下の項）・`[eval]`（と`[eval.providers.<provider>]`）・`[egress]`（[queueのbroker](../queue-broker.md)が`CONNECT`を通すpackage registry、意味は`run_env::EGRESS_REGISTRIES`のdoc comment）・`[container.image]`（下の項）・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、誤りでclaimや着地を止めないよう[Language](language.md)の読み手が検査する）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。
   `#`以降はcomment。
   ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
 - 外したresource brokerの`[broker]`と`[broker.package]`は中を問わず読み飛ばし、残したrepositoryを止めない（ほかの未知の表はエラー。[ADR-t2125-1](../../adr/2026-10-08-t2125-1-e2e-gate-checks-only-cmux-after-the-broker-removal.md)）。
@@ -94,6 +94,8 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   この repositoryの節の一覧と経緯は[Actor model](actor-model.md#役割とrolesrole)。
   旧バイナリは表ごと拒み、その役割をCodexで動かす実装を持たないバイナリはCodexを拒むので、各節は固定バイナリがその役割の実装の着地commitを含むことを切り替えのverifyの関門で確かめてから足す。
 - workerとintegrateのverificationを動かす場所の設定は、綴りと値を`RuntimeConfig`のdoc commentが、読み込みの入口と流れを[Container runtime](../container-runtime.md)が持つ。
+- `[container.image]`はcontainerのimageに足すprojectのContainerfileと入力のファイルを名指し、keyの綴りと意味は`ProjectImage`のdoc commentが、buildと読む場所は[Container runtime](../container-runtime.md#image)が持つ。
+  旧バイナリは表ごと拒むので、足すのは固定バイナリがそれを読めるようになってからにする。
 
 - `[language]`はAIが人に向けて書く文の言語（`tag`、BCP 47の言語タグ、既定は無しで指示しない）を持ち、利用者ごとの`config.toml`の同じ表より優先する（[Language](language.md)、[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
 

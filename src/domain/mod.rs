@@ -966,6 +966,7 @@ pub mod claim_facts;
 pub mod claim_hold;
 pub mod claim_spacing;
 pub mod concern;
+pub mod container_image;
 pub mod container_runtime;
 pub mod disk;
 pub mod e2e_quarantine;

@@ -37,6 +37,7 @@ mod cli_stats;
 mod cli_status_runs;
 mod cli_tasks;
 mod cli_version;
+mod container_image;
 mod draft_bundles;
 mod draft_revisit;
 mod finding_planner;

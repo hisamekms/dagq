@@ -44,6 +44,9 @@
 //! review reads it from the landing branch's commit.
 //! `[egress] registries` names the package registries the queue broker
 //! opens a tunnel to (ADR-t2257-1 decision 3, [`EGRESS_TABLE`]).
+//! `[container.image]` names the project's Containerfile and the files it
+//! copies, on which the container runtime's image is built (ADR-t2257-1
+//! decision 2).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -65,6 +68,7 @@ use crate::{
         areas::AreaMap,
         background_wrapper::HeadlessWrapper,
         ci_watch::{CiWatchConfig, DEFAULT_INTERVAL_SECS, MIN_INTERVAL_SECS},
+        container_image::{ProjectImage, repository_path_problem},
         container_runtime::{RUNTIME_KEY, Runtime, RuntimeConfig, RuntimeTarget, refuse_container},
         disk::DiskConfig,
         exit::ExitConfig,
@@ -224,7 +228,13 @@ pub const EGRESS_TABLE: &str = "egress";
 /// older than this key refuses the unknown table `[egress]`, so a
 /// repository adds it only once the binary that runs its queue reads it.
 pub const EGRESS_REGISTRIES: &str = "registries";
-const TABLES: [&str; 23] = [
+/// `[container.image]`: the project's image on the container runtime's
+/// base (ADR-t2257-1 decision 2); its keys and their meaning are on
+/// [`ProjectImage`].
+const CONTAINER_IMAGE_TABLE: &str = "container.image";
+const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
+const CONTAINER_IMAGE_INPUTS: &str = "inputs";
+const TABLES: [&str; 24] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -248,6 +258,7 @@ const TABLES: [&str; 23] = [
     LANDING_VERIFICATION_TABLE,
     EVAL_TABLE,
     EGRESS_TABLE,
+    CONTAINER_IMAGE_TABLE,
 ];
 /// The keys of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -351,6 +362,9 @@ pub struct Config {
     pub eval: EvalConfig,
     /// `[egress] registries` ([`EGRESS_REGISTRIES`]); empty without it.
     pub egress_registries: Vec<RegistryHost>,
+    /// `[container.image]` (ADR-t2257-1 decision 2); `None` without the
+    /// table, which runs the container runtime's base alone.
+    pub container_image: Option<ProjectImage>,
 }
 
 /// Parse the whole file.
@@ -378,6 +392,11 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // `[landing_verification]`'s header line and its keys as read; both
     // are required, which is checked once the file is read whole.
     let mut landing: Option<(usize, Option<Vec<String>>, Option<String>)> = None;
+    // `[container.image]`'s header line and its keys as read; its
+    // `containerfile` is required, which is checked once the file is read
+    // whole.
+    let mut container_image: Option<(usize, ProjectImage)> = None;
+    let mut container_image_keys: Vec<String> = Vec::new();
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     // `[roles.worker]` or `[roles.verification]` being read in place of a
@@ -545,7 +564,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -571,6 +590,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             if *known == LANDING_VERIFICATION_TABLE {
                 landing = Some((number, None, None));
+            }
+            if *known == CONTAINER_IMAGE_TABLE {
+                container_image = Some((number, ProjectImage::default()));
             }
             continue;
         }
@@ -712,6 +734,37 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 let globs = parse_string_array(rest.trim()).with_context(with)?;
                 validate_path_globs(&globs).with_context(with)?;
                 config.e2e_paths = dedup_globs(&globs);
+            }
+            Some(CONTAINER_IMAGE_TABLE) => {
+                ensure!(
+                    key == CONTAINER_IMAGE_CONTAINERFILE || key == CONTAINER_IMAGE_INPUTS,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{CONTAINER_IMAGE_TABLE}]; the keys are {CONTAINER_IMAGE_CONTAINERFILE} and {CONTAINER_IMAGE_INPUTS}"
+                );
+                ensure!(
+                    !container_image_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                container_image_keys.push(key.to_owned());
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let image = &mut container_image
+                    .as_mut()
+                    .expect("[container.image] was opened")
+                    .1;
+                if key == CONTAINER_IMAGE_CONTAINERFILE {
+                    let path = parse_string(rest.trim()).with_context(with)?;
+                    if let Some(problem) = repository_path_problem(&path) {
+                        bail!("{}: {problem}", with());
+                    }
+                    image.containerfile = path;
+                } else {
+                    let paths = parse_string_array(rest.trim()).with_context(with)?;
+                    for path in &paths {
+                        if let Some(problem) = repository_path_problem(path) {
+                            bail!("{}: {problem}", with());
+                        }
+                    }
+                    image.inputs = paths;
+                }
             }
             Some(KPI_TABLE) => kpi
                 .entry(key, rest.trim())
@@ -1286,7 +1339,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -1305,6 +1358,13 @@ pub fn parse_config(text: &str) -> Result<Config> {
             "{CONFIG_FILE_NAME}:{line}: [{CI_WATCH_TABLE}] has no workflow"
         );
         config.ci_watch = Some(watch);
+    }
+    if let Some((line, image)) = container_image {
+        ensure!(
+            !image.containerfile.is_empty(),
+            "{CONFIG_FILE_NAME}:{line}: [{CONTAINER_IMAGE_TABLE}] has no {CONTAINER_IMAGE_CONTAINERFILE}"
+        );
+        config.container_image = Some(image);
     }
     if let Some((line, replaces, command)) = landing {
         let missing = |key: &str| {
@@ -1836,6 +1896,19 @@ pub fn load_runtimes(root: &Path) -> Result<RuntimeConfig> {
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
         .runtimes)
+}
+
+/// `[container.image]` of the `dagq.toml` in `root`, the main checkout
+/// (ADR-t2257-1 decision 2); no file or no table is `None`, the base
+/// alone.
+pub fn load_project_image(root: &Path) -> Result<Option<ProjectImage>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .container_image)
 }
 
 /// The runtimes of the main checkout a queue is bound to (goal 38), read
@@ -2865,6 +2938,49 @@ LITERAL = 'no \n escapes # here'
                 ("LITERAL", "no \\n escapes # here"),
             ])
         );
+    }
+
+    /// `[container.image]` names the project's Containerfile and its
+    /// inputs, repository paths only; without it the base runs alone.
+    #[test]
+    fn the_container_image_names_a_containerfile_and_its_inputs_in_the_repository() {
+        assert_eq!(parse_config("").unwrap().container_image, None);
+        let config = parse_config(
+            "[container.image]\ncontainerfile = \".dagq/container/Containerfile\" # dogfooding\ninputs = [\"rust-toolchain.toml\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.container_image,
+            Some(ProjectImage {
+                containerfile: ".dagq/container/Containerfile".into(),
+                inputs: vec!["rust-toolchain.toml".into()],
+            })
+        );
+        let alone = parse_config("[container.image]\ncontainerfile = 'Containerfile'\n").unwrap();
+        assert_eq!(alone.container_image.unwrap().inputs, Vec::<String>::new());
+        for (text, error) in [
+            ("[container.image]\ninputs = []\n", "has no containerfile"),
+            (
+                "[container.image]\ncontainerfile = '/etc/Containerfile'\n",
+                "not a relative repository path",
+            ),
+            (
+                "[container.image]\ncontainerfile = 'C'\ninputs = ['../secret']\n",
+                "inside the repository",
+            ),
+            (
+                "[container.image]\ncontainerfile = 'C'\ncontainerfile = 'D'\n",
+                "defined twice",
+            ),
+            ("[container.image]\ntag = 'x'\n", "unknown key tag"),
+            (
+                "[container.image]\ncontainerfile = 'C'\n[container.image]\n",
+                "defined twice",
+            ),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text}: {message}");
+        }
     }
 
     /// `runtime` of `[roles.worker]` and `[roles.verification]` picks the
@@ -4118,7 +4234,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image] and [kpi]"
             ),
             "{error}"
         );

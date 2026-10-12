@@ -44,6 +44,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
 - 使えるかは`ContainerRuntime`のport（`application::ports`）に問う。
   supervisorと`integrate`は`application::queue_broker::BrokerGate`越しに問い、queueのbrokerが動いていなければそれを理由に使えないと答える（[Queue broker](queue-broker.md#見張りと知らせ)）。
   brokerの奥では`application::podman_machine::MachineGate`がdagq専用のmachineを見て、使えなければ理由つきで使えないと答える（下の「dagq専用のmachine」）。
+  machineの奥では`application::container_image::ImageGate`がimageを見る（下の「image」）。
   その奥の、残りの部品が揃うまでの実装`infrastructure::container_runtime::UnbuiltContainer`は、常に理由つきで使えないと答える。
 - worker: 各候補のclaimを控え、理由を`claim_deferred`に残す（[claimを控える](supervisor-lifecycle/claim-defer.md#workerを動かせないtask)）。
   resumeの候補からも外す（`Supervisor::container_deferral`）。
@@ -104,12 +105,41 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
 - 使えるかの答え: `MachineGate`はlockを取らずmachineを変えずに見るだけで、無いか止まっているmachineは使えるとする（containerの起動の前の`ensure`が動かす）。
 - 実物のpodmanで流すtestは`#[ignore]`で、関門に数えない。
 
+## image
+
+containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すprojectのContainerfileの2段である（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定2）。
+判断は`domain::container_image`、use caseは`application::container_image`、podmanのコマンド・mainのcheckoutの読み取り・queueの記録は`infrastructure::container_image`が持つ。
+
+- base: Containerfileは`src/infrastructure/container_image/base.Containerfile`に置き、binaryに埋め込む。
+  Claude Code・Linuxのdagqのclient・非rootのuserだけを持ち、言語の道具を残さない。
+  Claude Codeの版はruntimeが固定し（`CLAUDE_CODE_VERSION`）、新しい版はdagqの版と一緒に来る。
+- client: installしたdagqと同じ版を、dagqのsourceからdagq専用のmachineの中でbuildし、baseに残さないstageで作ってbinaryだけを移す。
+  releaseはcrates.ioのsource、開発版はbuild識別子が名指すcommitをdagqのrepositoryからcloneして取り、作ったclientの`--version`がinstallしたdagqのbuild識別子と同じでなければbuildを落とす（`client_source`）。
+  dagqのrepositoryにpushされていないcommitは取れず、baseのbuildが落ちる。
+  hostにdagqのcheckoutは要らない。
+  未commitの変更を含むbuildとcommitを知らないbuildは同じ版のsourceが無いので、入手できないとしてcontainerを使えないと答える。
+- project: `dagq.toml`の`[container.image]`（綴りと意味は`ProjectImage`のdoc comment）が名指すContainerfileは、baseをbuildのARG（`DAGQ_BASE_IMAGE`）で受けてFROMにする。
+  名指さなければbaseだけで動く。
+  Containerfileと入力のファイルは制御側のmainのcheckoutから読み、runのcloneからは読まないので、着地前のworkerの変更でimageは変わらない。
+  このrepositoryのものは`.dagq/container/Containerfile`である。
+- tag: baseはruntimeのbuild識別子・Claude Codeの版・baseのContainerfile、projectはbaseのreference・Containerfileと入力のpathと中身から決まり、どれかが変われば新しいimageになる。
+  projectのimageの名前はqueueを含み、あるqueueの片付けは別のqueueのprojectのimageに届かない。
+  baseはhostの全てのqueueが共有し、新しいbaseを作ったqueueが他のbaseを消す（使われているものはpodmanが残す）。
+- buildと片付け: `prepare`は、containerの実行（後続の部品）がmachineを動かしてから、containerの起動の前に呼ぶ。
+  その実行が揃うまで本番でimageを作る経路は無く、`ImageGate`は見るだけである。
+  無いimageを作り（baseが無ければprojectもその上に作り直す）、baseと同じqueueの古いtagを消す。
+  containerが使うimageはpodmanが消させないので次の機会に残す。
+  buildのcontextはimageのファイルだけを置いた新しいdirで、buildの引数は版とsourceだけなので、秘密情報とhostのpathはimageに入らない。
+- 失敗: clientを入手できない、名指したファイルがmainのcheckoutに無い、buildが落ちたときは`container_image_failed`をqueueに記録する。
+  `ImageGate`はそのimageの失敗から`FAILURE_HOLD_SECS`の間、理由つきで使えないと答え、時間が過ぎるか入力が変われば試し直させる。
+  作ったときは`container_image_built`を記録する。
+- 実物のpodmanで流すtestは`#[ignore]`で、関門に数えない。
+
 ## 後続の部品の置き場
 
 次の部品が揃ったら、それぞれが`ContainerRuntime`の答えを埋める。
 どれかが欠ければ使えないと答え、上の境界のまま控える。
 
-- container image（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)決定6、[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定2）。
 - hostのqueueのbrokerの`api.anthropic.com`の宛てと長期tokenの差し替え（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)・[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）。
   brokerのプロセスとqueue service・`dagq.toml`が挙げるpackage registryの宛ては[Queue broker](queue-broker.md)。
 - VMの中のrelayとrunごとのunix socket（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)）。

@@ -1056,18 +1056,35 @@ pub(super) fn queue_broker_control(
 
 /// The container runtime's parts behind the queue broker: the dagq
 /// podman machine as the queue at `db` uses it (only looked at: a
-/// container's start makes it run), then the parts not built yet.
+/// container's start makes it run), the image as `main_checkout` decides
+/// it (only looked at: a container's start builds it), then the parts not
+/// built yet.
 pub(super) fn container_parts(
     db: &Path,
+    main_checkout: &Path,
+    clock: Arc<dyn crate::application::Clock>,
+    actor: Option<crate::domain::actor::ActorContext>,
 ) -> crate::application::podman_machine::MachineGate<
-    crate::infrastructure::container_runtime::UnbuiltContainer,
+    crate::application::container_image::ImageGate<
+        crate::infrastructure::container_runtime::UnbuiltContainer,
+    >,
 > {
+    let queue_dir = db.parent().unwrap_or(Path::new("."));
     crate::application::podman_machine::MachineGate {
         podman: Arc::new(crate::infrastructure::podman_machine::PodmanCli::default()),
-        required: crate::domain::podman_machine::MachineMounts::of_queue(
-            db.parent().unwrap_or(Path::new(".")),
-        ),
-        container: crate::infrastructure::container_runtime::UnbuiltContainer,
+        required: crate::domain::podman_machine::MachineMounts::of_queue(queue_dir),
+        container: crate::application::container_image::ImageGate {
+            specs: Arc::new(crate::infrastructure::container_image::CheckoutImages::new(
+                main_checkout,
+                queue_dir,
+            )),
+            records: Arc::new(crate::infrastructure::container_image::QueueImageRecords {
+                db: db.to_path_buf(),
+                actor,
+            }),
+            now: Arc::new(move || clock.now()),
+            container: crate::infrastructure::container_runtime::UnbuiltContainer,
+        },
     }
 }
 

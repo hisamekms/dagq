@@ -14,6 +14,7 @@ pub mod ask;
 pub mod ci_watch;
 pub mod claim_view;
 pub mod commands;
+pub mod container_image;
 pub mod diagram;
 pub mod e2e_verdict;
 pub mod execution;

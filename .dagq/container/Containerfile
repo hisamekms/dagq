@@ -1,0 +1,44 @@
+# This repository's project image on dagq's container base (ADR-t2257-1
+# decision 2): the Rust toolchain and components of rust-toolchain.toml,
+# cargo-nextest (sh scripts/landing-it.sh runs it) and sccache. dagq builds
+# it from the main checkout with this file and the inputs dagq.toml names
+# (rust-toolchain.toml) as its only context, and gives the base as
+# DAGQ_BASE_IMAGE.
+ARG DAGQ_BASE_IMAGE
+FROM ${DAGQ_BASE_IMAGE}
+
+ARG NEXTEST_VERSION=0.9.146
+ARG SCCACHE_VERSION=0.18.0
+
+USER root
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+COPY rust-toolchain.toml /usr/local/share/dagq-toolchain/rust-toolchain.toml
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends build-essential curl pkg-config; \
+    rm -rf /var/lib/apt/lists/*; \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none; \
+    cd /usr/local/share/dagq-toolchain; \
+    rustup toolchain install; \
+    rustup default "$(rustup show active-toolchain | cut -d' ' -f1)"; \
+    case "$(uname -m)" in \
+        x86_64) nextest=linux; arch=x86_64 ;; \
+        aarch64) nextest=linux-arm; arch=aarch64 ;; \
+        *) echo "no cargo-nextest and sccache for $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -LsSf "https://get.nexte.st/${NEXTEST_VERSION}/${nextest}" \
+        | tar zxf - -C "$CARGO_HOME/bin"; \
+    curl --proto '=https' --tlsv1.2 -LsSf \
+        "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${arch}-unknown-linux-musl.tar.gz" \
+        | tar zxf - -C /usr/local/bin --strip-components=1 "sccache-v${SCCACHE_VERSION}-${arch}-unknown-linux-musl/sccache"; \
+    chmod -R a+rX "$RUSTUP_HOME" "$CARGO_HOME"; \
+    cargo nextest --version; \
+    sccache --version
+# The toolchain stays where it was installed, read-only; cargo writes its
+# registry and git checkouts under the user's own CARGO_HOME (the run may
+# point it at the worker's cache).
+ENV CARGO_HOME=/home/dagq/.cargo
+USER dagq

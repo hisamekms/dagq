@@ -105,6 +105,14 @@ impl PodmanCli {
         acted
     }
 
+    /// `podman --connection dagq <args>` run to success, inside the dagq
+    /// machine; its stdout.
+    pub(super) fn on_machine(&self, args: &[OsString]) -> Result<String> {
+        let mut all: Vec<OsString> = vec!["--connection".into(), MACHINE_NAME.into()];
+        all.extend(args.iter().cloned());
+        self.checked(&all)
+    }
+
     /// `podman --connection dagq volume <args>`.
     fn volume(&self, args: &[&str]) -> Result<Output> {
         let mut all: Vec<OsString> = ["--connection", MACHINE_NAME, "volume"]
