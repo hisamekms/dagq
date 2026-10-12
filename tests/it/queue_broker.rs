@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::cli::ok;
-use common::lifecycle::{FakeLaunchd, FakeProcesses};
+use common::lifecycle::{FakeLaunchd, FakeProcesses, git};
 use dagq::application::EventStore;
 use dagq::application::queue_broker::{BrokerProbe, QueueBrokerControl};
 use dagq::domain::queue_broker::{BEARER, HEALTH_PATH, RUN_HEADER};
@@ -613,4 +613,245 @@ fn after_a_handoff_the_new_supervisor_replaces_the_broker_of_the_binary_before()
     assert_eq!(stopped.len(), 1, "{stopped:?}");
     assert_eq!(stopped[0]["payload"]["by"], "supervisor");
     assert!(events(&db, "queue_broker_down").is_empty());
+}
+
+/// The standard base64 of `text`, as a package manager writes a proxy
+/// URL's credentials.
+fn base64(text: &str) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in text.as_bytes().chunks(3) {
+        let bits = chunk.iter().enumerate().fold(0u32, |bits, (i, byte)| {
+            bits | u32::from(*byte) << (16 - 8 * i)
+        });
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(bits >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// A host on 127.0.0.1 that echoes what each connection sends, standing in
+/// for a registry: no test reaches outside the host.
+fn echo_host() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut &stream, &mut &stream);
+            });
+        }
+    });
+    port
+}
+
+/// Send `CONNECT target` to the broker at `address` with `credentials` in
+/// `Proxy-Authorization`: the status, and the tunnel when it opened or
+/// else the refusal.
+fn connect(
+    address: &str,
+    target: &str,
+    credentials: &str,
+) -> (u16, Result<std::net::TcpStream, ServiceResponse>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    write!(
+        stream,
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: {credentials}\r\n\r\n"
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let status: u16 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let mut length = 0;
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        if line.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap();
+        }
+    }
+    if status == 200 {
+        assert!(reader.buffer().is_empty());
+        return (status, Ok(stream));
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    (status, Err(response(&body)))
+}
+
+/// What goes into the tunnel comes back from the echoing host.
+fn echoes(mut tunnel: std::net::TcpStream) {
+    use std::io::{Read, Write};
+    tunnel.write_all(b"ping").unwrap();
+    let mut back = [0; 4];
+    tunnel.read_exact(&mut back).unwrap();
+    assert_eq!(&back, b"ping");
+}
+
+/// A `CONNECT` opens a tunnel only to a registry the `dagq.toml` of the
+/// main checkout the queue is bound to names, with the run's worker token
+/// or its verification's: none without the setting, none for a host a
+/// run's clone names, none for the host of an upstream git remote. A
+/// verification's token reaches neither the queue service nor the Claude
+/// API, and no longer opens a tunnel once revoked. Every refusal is
+/// recorded with its run and host, and no token's value.
+#[test]
+fn a_tunnel_opens_only_to_the_registries_of_the_main_checkout_s_dagq_toml() {
+    let _test = common::test();
+    let queue = queue();
+    let control =
+        SystemQueueBroker::new(&queue.db, &common::service::owned_executable(queue.dir()));
+    let _stop = Stop(control.clone());
+    let address = {
+        let _waiting = common::within(TIMEOUT * 2, "the queue broker to start");
+        control.start(TIMEOUT).unwrap().address.unwrap()
+    };
+    let run = queue.run.id().clone();
+    let own = token(&queue, &Principal::worker(&run, queue.run.task_id()));
+    let verification =
+        service::read_token(&broker::issue_verification(queue.dir(), &run, 1).unwrap()).unwrap();
+    let basic = |token: &str| format!("Basic {}", base64(&format!("{run}:{token}")));
+    let registry = echo_host();
+    let elsewhere = echo_host();
+    let last_denied =
+        |reason: &str, host: &str| {
+            let records = denied(&queue.db);
+            let last = records.last().unwrap().clone();
+            assert_eq!(
+                (&last["reason"], &last["destination"], &last["run"]),
+                (&json!(reason), &json!(host), &json!(run.as_str())),
+                "{last}"
+            );
+            assert!(!records.iter().any(|event| event.to_string().contains(&own)
+                || event.to_string().contains(&verification)));
+        };
+
+    // No setting (the queue is bound to no repository): every CONNECT is
+    // refused.
+    let target = format!("127.0.0.1:{registry}");
+    let (status, refused) = connect(&address, &target, &basic(&own));
+    assert_eq!(status, 403);
+    assert_eq!(
+        refused.unwrap_err().error.unwrap().code,
+        ServiceErrorCode::ForbiddenDestination
+    );
+    last_denied("not_allowed", "127.0.0.1");
+
+    // The main checkout names the registry and the upstream's host; a
+    // run's clone names another host.
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("main");
+    std::fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-q", "--template=", "-b", "main"]);
+    git(&main, &["config", "user.name", "test"]);
+    git(&main, &["config", "user.email", "test@example.invalid"]);
+    git(
+        &main,
+        &["remote", "add", "origin", "git@upstream.example:o/r.git"],
+    );
+    std::fs::write(
+        main.join("dagq.toml"),
+        format!("[egress]\n# the echoing registry\nregistries = [\"127.0.0.1:{registry}\", \"upstream.example\"]\n"),
+    )
+    .unwrap();
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-q", "-m", "seed"]);
+    let clone = dir.path().join("clone");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "run",
+            clone.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(
+        clone.join("dagq.toml"),
+        format!("[egress]\nregistries = [\"127.0.0.1:{elsewhere}\"]\n"),
+    )
+    .unwrap();
+    let common_dir = dagq::infrastructure::adapters::git_common_dir(&main).unwrap();
+    SqliteQueue::open(&queue.db)
+        .unwrap()
+        .bind_repository(common_dir.to_str().unwrap())
+        .unwrap();
+
+    // The run's token and its verification's open the tunnel, in a proxy
+    // URL's credentials.
+    for credentials in [basic(&own), basic(&verification)] {
+        let (status, tunnel) = connect(&address, &target, &credentials);
+        assert_eq!(status, 200);
+        echoes(tunnel.unwrap());
+    }
+    // Not the host the clone names, nor the upstream's, which says why.
+    let (status, _) = connect(&address, &format!("127.0.0.1:{elsewhere}"), &basic(&own));
+    assert_eq!(status, 403);
+    last_denied("not_allowed", "127.0.0.1");
+    let (status, refused) = connect(&address, "upstream.example:443", &basic(&own));
+    assert_eq!(status, 403);
+    let message = refused.unwrap_err().error.unwrap().message;
+    assert!(message.contains("upstream git remote"), "{message}");
+    last_denied("upstream_git_host", "upstream.example");
+    // A token of no run's opens none.
+    let (status, _) = connect(&address, &target, &basic(&"0".repeat(64)));
+    assert_eq!(status, 401);
+    last_denied("unknown_token", "127.0.0.1");
+
+    // A verification's token reaches neither the queue service nor the
+    // Claude API.
+    let show = request(UseCase::Show, json!({"id": queue.run.task_id().as_i64()}));
+    let (status, body) = broker::call(
+        &address,
+        Some(&verification),
+        Some(run.as_str()),
+        &show,
+        TIMEOUT,
+    )
+    .unwrap();
+    assert_eq!(status, 401);
+    assert_eq!(
+        response(&body).error.unwrap().code,
+        ServiceErrorCode::Unauthenticated
+    );
+    last_denied("verification_token", "queue_service");
+    let (status, _) = connect(&address, "api.anthropic.com:443", &basic(&verification));
+    assert_eq!(status, 403);
+    last_denied("builtin_destination", "api.anthropic.com");
+    let (status, _) = broker::exchange(
+        &address,
+        &format!(
+            "POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nAuthorization: {BEARER}{verification}\r\n{RUN_HEADER}: {run}"
+        ),
+        b"{}",
+        TIMEOUT,
+    )
+    .unwrap();
+    assert_eq!(status, 403);
+    last_denied("not_allowed", "api.anthropic.com");
+
+    // Revoked at the verification's end, it opens no tunnel.
+    assert!(broker::revoke_verification(queue.dir(), &run).unwrap());
+    assert_eq!(
+        broker::verification_run(queue.dir(), &verification).unwrap(),
+        None
+    );
+    let (status, _) = connect(&address, &target, &basic(&verification));
+    assert_eq!(status, 401);
+    last_denied("unknown_token", "127.0.0.1");
 }

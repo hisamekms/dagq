@@ -42,6 +42,8 @@
 //! once. `[review.programs.<name>]` names a program
 //! review, what it runs and the globs that require it (ADR-t1895-2); the
 //! review reads it from the landing branch's commit.
+//! `[egress] registries` names the package registries the queue broker
+//! opens a tunnel to (ADR-t2257-1 decision 3, [`EGRESS_TABLE`]).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -73,6 +75,7 @@ use crate::{
         landing_verification::{self, LandingVerification},
         light_slots::LightChanges,
         provider_switch::ProviderFallback,
+        queue_broker::RegistryHost,
         recheck::RecheckConfig,
         resume::ResumeConfig,
         review_programs::{self, ReviewProgram},
@@ -202,7 +205,26 @@ const EVAL_PROVIDERS_PREFIX: &str = "eval.providers.";
 /// What [`parse_config`] calls the current table while in a
 /// `[eval.providers.*]`.
 const EVAL_PROVIDER_TABLE: &str = "eval.providers";
-const TABLES: [&str; 22] = [
+/// `[egress]`: `registries` ([`EGRESS_REGISTRIES`]), the package
+/// registries a run in a container reaches through the queue broker
+/// (ADR-t2257-1 decision 3).
+pub const EGRESS_TABLE: &str = "egress";
+/// The one key of `[egress]`: a one-line array of the hosts of the package
+/// registries the queue broker passes a `CONNECT` to, each `"<host>"`
+/// (port 443) or `"<host>:<port>"`
+/// ([`crate::domain::queue_broker::RegistryHost`]), with why each is
+/// needed in a comment above it. The default, without the table or the
+/// key, is none: no registry is reached, and the runtime adds none of its
+/// own. The broker reads it from the `dagq.toml` of the main checkout the
+/// queue is bound to, each time a `CONNECT` comes, never from a run's
+/// clone. A host of the repository's upstream git remotes (by the name in
+/// their `url` and `pushurl`) is refused even when named here; so is
+/// `api.anthropic.com`. Names are matched exactly: another name or an
+/// address of the same forge is not recognized, so name none. A binary
+/// older than this key refuses the unknown table `[egress]`, so a
+/// repository adds it only once the binary that runs its queue reads it.
+pub const EGRESS_REGISTRIES: &str = "registries";
+const TABLES: [&str; 23] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -225,6 +247,7 @@ const TABLES: [&str; 22] = [
     CI_WATCH_TABLE,
     LANDING_VERIFICATION_TABLE,
     EVAL_TABLE,
+    EGRESS_TABLE,
 ];
 /// The keys of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -326,6 +349,8 @@ pub struct Config {
     /// `[eval]` and `[eval.providers.<provider>]` (ADR-t1728-1), each key's
     /// default where unset.
     pub eval: EvalConfig,
+    /// `[egress] registries` ([`EGRESS_REGISTRIES`]); empty without it.
+    pub egress_registries: Vec<RegistryHost>,
 }
 
 /// Parse the whole file.
@@ -369,6 +394,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut kpi = KpiTables::default();
     let mut areas: Option<Vec<(String, Vec<String>)>> = None;
     let mut e2e_paths_seen: Option<usize> = None;
+    let mut egress_seen = false;
     let mut recheck_paths_seen = false;
     // The line of the `[review.subagents.<agent>]` header whose `paths`
     // is not read yet.
@@ -519,7 +545,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -648,6 +674,29 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         .map_err(anyhow::Error::msg)
                         .with_context(with)?,
                 );
+            }
+            Some(EGRESS_TABLE) => {
+                ensure!(
+                    key == EGRESS_REGISTRIES,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{EGRESS_TABLE}]; the key is {EGRESS_REGISTRIES}"
+                );
+                ensure!(
+                    !egress_seen,
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                egress_seen = true;
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let mut registries: Vec<RegistryHost> = Vec::new();
+                for entry in parse_string_array(rest.trim()).with_context(with)? {
+                    let registry: RegistryHost = entry
+                        .parse()
+                        .map_err(anyhow::Error::msg)
+                        .with_context(with)?;
+                    if !registries.contains(&registry) {
+                        registries.push(registry);
+                    }
+                }
+                config.egress_registries = registries;
             }
             Some(E2E_TABLE) => {
                 ensure!(
@@ -1741,6 +1790,18 @@ pub fn load_e2e_paths(root: &Path) -> Result<Vec<String>> {
         .e2e_paths)
 }
 
+/// `[egress] registries` of the `dagq.toml` in `root`
+/// ([`EGRESS_REGISTRIES`]); no file, no table or no key is none.
+pub fn load_egress_registries(root: &Path) -> Result<Vec<RegistryHost>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .egress_registries)
+}
+
 /// `[headless] wrapper` of the `dagq.toml` in `root` as written: `None`
 /// for no file, no table or no key.
 pub fn load_headless_wrapper_setting(root: &Path) -> Result<Option<HeadlessWrapper>> {
@@ -2566,6 +2627,78 @@ mod tests {
         assert_eq!(load_e2e_paths(dir.path()).unwrap(), ["tests/e2e.rs"]);
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[e2e]\npaths = 1\n").unwrap();
         assert!(load_e2e_paths(dir.path()).is_err());
+    }
+
+    /// `[egress] registries` names the package registries the queue
+    /// broker opens a tunnel to (ADR-t2257-1 decision 3): none by default,
+    /// and a mistake in it is refused with its line.
+    #[test]
+    fn parses_the_registries_of_the_egress_table() {
+        let config = parse_config(
+            "[egress]\n# the index\nregistries = [\"Crates.io\", 'index.crates.io:8443', \"crates.io:443\"] # why\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .egress_registries
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["crates.io", "index.crates.io:8443"]
+        );
+        assert!(
+            parse_config("[egress]\n")
+                .unwrap()
+                .egress_registries
+                .is_empty()
+        );
+        assert!(parse_config("").unwrap().egress_registries.is_empty());
+        for (text, expected) in [
+            (
+                "[egress]\nhosts = [\"a\"]\n",
+                "dagq.toml:2: unknown key hosts",
+            ),
+            (
+                "[egress]\nregistries = [\"a\"]\nregistries = [\"b\"]\n",
+                "dagq.toml:3: registries is defined twice",
+            ),
+            (
+                "[egress]\nregistries = \"crates.io\"\n",
+                "dagq.toml:2: value of registries",
+            ),
+            (
+                "[egress]\nregistries = [\"https://crates.io\"]\n",
+                "not a host",
+            ),
+            (
+                "[egress]\nregistries = [\"*.crates.io\"]\n",
+                "dagq.toml:2: value of registries",
+            ),
+            (
+                "[egress]\n[egress]\n",
+                "dagq.toml:2: [egress] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_egress_registries(dir.path()).unwrap().is_empty());
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[egress]\nregistries = [\"crates.io\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_egress_registries(dir.path()).unwrap()[0].to_string(),
+            "crates.io"
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[egress]\nregistries = 1\n",
+        )
+        .unwrap();
+        assert!(load_egress_registries(dir.path()).is_err());
     }
 
     /// `[headless] wrapper` chooses where a headless session's wrapper
@@ -3985,7 +4118,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress] and [kpi]"
             ),
             "{error}"
         );

@@ -127,7 +127,7 @@ pub(crate) fn queue_dir_of(db: &Path) -> PathBuf {
     db.parent().unwrap_or(Path::new(".")).to_path_buf()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

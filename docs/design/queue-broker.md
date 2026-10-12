@@ -15,6 +15,7 @@ related:
   - adr-t1233-4
   - adr-t2113-1
   - adr-t2257-1
+  - adr-t2113-2
   - design-queue-service
   - design-container-runtime
   - design-security
@@ -26,7 +27,8 @@ containerで動くrunが外へ出る唯一の出口になる、hostのプロセ�
 queueごとに1つで、podmanでは動かさず、固定バイナリだけで動く（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)決定1）。
 fs・process・git・packageを仲介する撤去済みのresource broker（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）とは別物で、名前もコードも共有しない。
 
-今の宛先はqueue serviceだけで、`api.anthropic.com`（[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）と`dagq.toml`が挙げるpackage registry（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）は後続の変更が足し、それまで拒む。
+今の宛先はqueue serviceと、`dagq.toml`が挙げるpackage registryへの`CONNECT`（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）である。
+`api.anthropic.com`（[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）は後続の変更が足し、それまで拒む。
 containerからbrokerまでの経路（VMの中のrelayとrunごとのunix socket）は[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)が決め、brokerは`127.0.0.1`のTCPのportで受ける。
 
 ## 入口
@@ -34,7 +36,8 @@ containerからbrokerまでの経路（VMの中のrelayとrunごとのunix socke
 - 要求と応答の形（method・path・run tokenとrunのheader・bodyの`ServiceRequest`・応答の`ServiceResponse`・拒否のcodeとHTTPのstatus）は`domain::queue_broker`のmodule docと定数が持つ。
   拒否のcodeの綴りと意味は`domain::queue_service::ServiceErrorCode`のdoc commentが持つ。
   clientはこの型と定数に従い、ここに書き写さない。
-- 1つの要求の判断（宛先・run tokenの検証・serviceへの転送・拒否の記録）は`application::queue_broker::QueueBroker::handle`、tokenの判定は`domain::queue_broker::judge_run_token`。
+- 1つの要求の判断（宛先・run tokenの検証・serviceへの転送・tunnelを開くか・拒否の記録）は`application::queue_broker::QueueBroker::handle`、tokenの判定は`domain::queue_broker::judge_run_token`と`judge_verification_token`、tunnelの宛ての判定は`judge_tunnel`。
+- registryのallowlistの設定の綴り・置き場・意味・既定は`infrastructure::run_env::EGRESS_REGISTRIES`のdoc comment、1つのhostの書き方は`domain::queue_broker::RegistryHost`が持つ。
 - brokerのプロセスがHTTPを読み書きしてserviceのsocketへ転送するところと、`up`・`down`・supervisorが起動・停止・生死を見る口は`infrastructure::queue_broker`のmodule docから辿る。
   clientの要求の送り方はそのmoduleの送る側の関数が、上の形のまま持つ。
 - 置き場は`<queue dir>/broker/`（mode 0700）で、記録・lock・logのファイル名は`domain::queue_broker`の定数が持つ。
@@ -43,12 +46,19 @@ containerからbrokerまでの経路（VMの中のrelayとrunごとのunix socke
 
 ## 不変条件
 
-- 宛先: queue serviceの決まったpathへの、loopbackのhostを名指す（か`Host`の無い）要求だけを通す。
-  それ以外（`CONNECT`・別のpath・同じpathでも別のhostを名指すもの）は`forbidden_destination`で拒む（`domain::queue_broker::Destination::of`）。
+- 宛先: queue serviceの決まったpathへの、loopbackのhostを名指す（か`Host`の無い）要求と、registryのallowlistのhostとportへの`CONNECT`だけを通す。
+  それ以外（allowlistの外への`CONNECT`・別のpath・同じpathでも別のhostを名指すもの）は`forbidden_destination`で拒む（`domain::queue_broker::Destination::of`）。
   宛先は要求が名指すhost（`CONNECT`の宛先・絶対URIのhost・`Host`の値）か、無ければmethodとpathで記録する。
-- tokenの検証: 通すのは、制御側がworker（resumeを含む）のrunに発行したrun token（[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)決定4のtoken）で、要求が名指すrunのものだけ。
+- registryのallowlist: runtimeが組み込みで持つ宛先はqueue serviceと`api.anthropic.com`だけで、registryのhostはコードに持たず`dagq.toml`だけが与える（既定は空で、どの`CONNECT`も通らない）。
+  brokerは`CONNECT`のたびに、queueが結びついたrepositoryのmain checkoutの`dagq.toml`から読み、runのcloneからは読まない（着地前のworkerの変更でallowlistを変えさせない）。
+  上流のgitのremoteのhost（main checkoutのremoteのURLから求める）は書いても拒み、理由を答えとeventに出す（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)決定3）。
+  `api.anthropic.com`は書いても`CONNECT`では通さない。
+  通した`CONNECT`はtunnelになり、byteを両向きに写す（`infrastructure::queue_broker::tunnel`）。
+- tokenの検証: queue serviceへの要求で通すのは、制御側がworker（resumeを含む）のrunに発行したrun token（[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)決定4のtoken）で、要求が名指すrunのものだけ。
   tokenが無い・発行していないか失効した・jobのtokenかrunを持たない・別のrunの・runが終わったかqueueに無い要求は`unauthenticated`で拒む。
   tokenはqueue serviceと同じ記録（`queue_service::lookup`）で引き、runの状態はqueueを読む。
+  `CONNECT`はそれに加えて、そのrunのverificationのtoken（下の節）も通す。
+  package managerはtokenをproxyのURLから送るので、`CONNECT`のrunとtokenはproxyの認証からも受ける（headerの形は`domain::queue_broker`のmodule doc）。
 - principal: 通した要求はbodyのtokenの欄を検証したrun tokenで埋めてserviceのunix socketへ送るので、serviceはそのrunのprincipalで認可して書く。
   brokerはqueueのユースケースを自分で答えず、serviceに届かなければ`unreachable`で返し、DBを開いて代わりに答えない。
 - 素通し: serviceの答えは長さで切らず、書かれたとおりに返す。
@@ -58,6 +68,16 @@ containerからbrokerまでの経路（VMの中のrelayとrunごとのunix socke
   actorはbroker自身（制御側の一部）で、tokenの値と、要求の中身を引くserdeの文言はevent・log・errorにも答えにも書かない。
 - 1つのqueueに1つ: 生きている間lockを持ち、2つ目の`queue-broker serve`は止まる。
   見る側はlockとhealthのpathへの問い合わせで、生死とbuildを判定する（queue serviceと同じ形）。
+
+## verificationのtoken
+
+- `integrate`は検証コマンドを流すverificationごとに、制御側としてそのrunのverificationのtokenを発行し、verificationの終わりで（通っても落ちても）失効させる（ADR-t2114-1決定2、`application::queue_broker::VerificationToken`）。
+- 落とし穴: 失効は`integrate`のプロセスの中でだけ行うので、verificationの途中で`integrate`かsupervisorが殺されるとtokenのファイルが残る。
+  brokerはそのrunの次の発行か、runがtokenを持たない状態になるまで、そのtokenの`CONNECT`を通し続ける（残ったtokenの片付けはまだ無い）。
+- principalはそのrunのverificationで、queue serviceのtokenとは別の置き場（`<queue dir>/broker/`の下、`infrastructure::queue_broker::issue_verification`）に持つので、serviceはこのtokenを受けない。
+- brokerはこのtokenでregistryのallowlistへの`CONNECT`だけを通し、queue serviceへの要求は`unauthenticated`、`api.anthropic.com`への要求は`forbidden_destination`で拒む。
+  runが終わったtokenも拒む。
+- hostで流すverificationはこのtokenを使わず、containerのverificationの実行がtokenのfileを受け取る。
 
 ## 起動と停止
 
@@ -83,7 +103,7 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
 
 ## まだ無いもの
 
-- `dagq.toml`が挙げるpackage registryの`CONNECT`のallowlistと、`api.anthropic.com`への資格情報の差し替え（ADR-t2114-1決定2、ADR-t2257-1決定3、ADR-t2114-2）。
-- integrateのverificationのtoken（届く宛てはregistryのallowlistだけ）。
+- `api.anthropic.com`への資格情報の差し替え（ADR-t2114-1決定2、ADR-t2114-2）。
+- containerのverificationへのtokenのfileの受け渡し。
 - `status`・`doctor`でのbrokerの見せ方と、人の手での起動・停止のコマンド。
 - 拒否の記録の量の上限。

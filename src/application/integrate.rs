@@ -255,6 +255,11 @@ pub struct Integration<'a> {
     /// `sccache_wrapper_removed` (`by` `integrate`). `None` looks at
     /// nothing and gives `[run.env]` as it is.
     pub sccache: Option<&'a dyn super::SccacheServer>,
+    /// The tokens of the verifications (ADR-t2114-1 decision 2): one is
+    /// issued for each verification of a run's commands and revoked at its
+    /// end, its principal the run's verification, reaching through the
+    /// queue broker only the registries `dagq.toml` names.
+    pub verification_tokens: &'a dyn super::queue_broker::VerificationTokens,
 }
 
 /// The free disk space integrate checks before it retries a verification
@@ -680,6 +685,7 @@ fn land_integrating(
             ctx.files,
             ctx.retry_disk.as_ref(),
             ctx.sccache,
+            ctx.verification_tokens,
             ctx.clock,
             &task,
             run,
@@ -1205,6 +1211,7 @@ fn land(
     files: &dyn RunFiles,
     retry_disk: Option<&RetryDisk<'_>>,
     sccache: Option<&dyn super::SccacheServer>,
+    verification_tokens: &dyn super::queue_broker::VerificationTokens,
     clock: &dyn Clock,
     task: &Task,
     run: &TaskRun,
@@ -1469,6 +1476,17 @@ fn land(
         }
         env
     };
+    // The verification's token, revoked when it goes at the verification's
+    // end, however it ends (ADR-t2114-1 decision 2). A run on the host does
+    // not use it: the container's verification is handed its file.
+    let verification_token = if commands.is_empty() {
+        None
+    } else {
+        Some(super::queue_broker::VerificationToken::issue(
+            verification_tokens,
+            run.id(),
+        )?)
+    };
     // The landing's verification, done once more when only flaky tests
     // failed (task 768, ADR-t768-1): a new attempt of every command on the
     // same rebased head, in the slot it holds (main does not move meanwhile).
@@ -1592,6 +1610,7 @@ fn land(
         }
         break;
     }
+    drop(verification_token);
     // One commit on main with the rebased tree; the run's own history stays
     // reachable under refs/dagq/runs/<run-id>.
     let paragraphs = commit_message(task, run, &receipt);

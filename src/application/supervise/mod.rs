@@ -445,6 +445,8 @@ pub struct Ports<'a> {
     /// Whether the container runtime can run what `dagq.toml` sets to it
     /// (goal 38): asked every pass for each such target.
     pub container: Arc<dyn crate::application::ContainerRuntime + Send + Sync>,
+    /// The tokens of the landings' verifications (ADR-t2114-1 decision 2).
+    pub verification_tokens: Arc<dyn crate::application::queue_broker::VerificationTokens>,
     /// The session wrappers of the runs and the runtime's planners, which
     /// the supervisor starts, stops and checks without cmux (ADR-t1433-1).
     pub sessions: &'a dyn SessionWrappers,
@@ -954,6 +956,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         remote: ports.remote.clone(),
         verifier: ports.verifier.clone(),
         container: ports.container.clone(),
+        verification_tokens: ports.verification_tokens.clone(),
         sessions: &sessions,
         reviewer: ports.reviewer,
         codex_jobs: ports.codex_jobs,
@@ -1106,6 +1109,9 @@ struct Supervisor<'a> {
     verifier: Arc<dyn Verifier + Send + Sync>,
     /// Whether the container runtime can be used ([`Ports::container`]).
     container: Arc<dyn crate::application::ContainerRuntime + Send + Sync>,
+    /// The tokens of the landings' verifications
+    /// ([`Ports::verification_tokens`]).
+    verification_tokens: Arc<dyn crate::application::queue_broker::VerificationTokens>,
     sessions: &'a dyn SessionWrappers,
     /// Starts the headless review of accepted runs (ADR-0027).
     reviewer: &'a dyn AgentProvider,

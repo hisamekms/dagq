@@ -724,6 +724,9 @@ pub fn supervise_with_reviewer(
             broker: host::queue_broker_control(&db, options.queue_broker.as_ref()),
             container: host::container_parts(&db),
         }),
+        verification_tokens: Arc::new(
+            crate::infrastructure::queue_broker::SystemVerificationTokens { db: db.clone() },
+        ),
         remote: Arc::new(repository.clone()),
         repository: Arc::new(repository),
         sessions,

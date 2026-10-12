@@ -190,9 +190,9 @@ string_enum!(
     Failed => "failed",
     /// `forbidden_destination`, only the queue broker's
     /// ([`crate::domain::queue_broker`]): the request goes to a destination
-    /// the broker does not pass (anything but the queue service now,
-    /// `api.anthropic.com` and the package registries included), recorded as
-    /// `queue_broker_denied`.
+    /// the broker does not pass (anything but the queue service and the
+    /// package registries `dagq.toml` names, `api.anthropic.com` included
+    /// now), recorded as `queue_broker_denied`.
     ForbiddenDestination => "forbidden_destination",
     /// `unreachable`, only the queue broker's: the queue service did not
     /// answer the request the broker passed on. The broker never opens the

@@ -95,6 +95,7 @@ impl Supervisor<'_> {
         let remote = self.remote.clone();
         let verifier = self.verifier.clone();
         let container = self.container.clone();
+        let verification_tokens = self.verification_tokens.clone();
         let processes = self.processes.clone();
         let files = self.files.clone();
         let pid = self.layout.pid;
@@ -141,6 +142,7 @@ impl Supervisor<'_> {
                     sccache: sccache.as_ref().map(|SccachePort(server)| {
                         &**server as &dyn crate::application::SccacheServer
                     }),
+                    verification_tokens: &*verification_tokens,
                 },
                 &request,
             )

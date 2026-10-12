@@ -110,8 +110,8 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
 どれかが欠ければ使えないと答え、上の境界のまま控える。
 
 - container image（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)決定6、[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定2）。
-- hostのqueueのbrokerの`api.anthropic.com`と`dagq.toml`が挙げるpackage registryの宛てと長期tokenの差し替え（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)・[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)・[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）。
-  brokerのプロセスとqueue serviceの宛ては[Queue broker](queue-broker.md)。
+- hostのqueueのbrokerの`api.anthropic.com`の宛てと長期tokenの差し替え（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)・[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）。
+  brokerのプロセスとqueue service・`dagq.toml`が挙げるpackage registryの宛ては[Queue broker](queue-broker.md)。
 - VMの中のrelayとrunごとのunix socket（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)）。
 - runごとのcloneとbundleの取り込み（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）、containerの中のsccache（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
 - worker・resumeとverificationのcontainerの実行（`ExecutorBackend::Container`の実装）。

@@ -566,6 +566,62 @@ fn review_writes_a_non_utf8_diff_as_raw_bytes() {
     assert!(run_dir.join("review.md").is_file());
 }
 
+/// `integrate` issues a token for the run's verification while its
+/// commands run (ADR-t2114-1 decision 2) and revokes it at the end of the
+/// verification, whether it passes or fails: the token a command read
+/// then is no verification's afterwards. What the token reaches through
+/// the queue broker is `queue_broker::a_tunnel_opens_only_to_the_registries_of_the_main_checkout_s_dagq_toml`'s.
+#[test]
+fn a_verification_s_token_lives_only_while_its_commands_run() {
+    use dagq::infrastructure::queue_broker as broker;
+    let (dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let queue_dir = db.parent().unwrap().to_owned();
+    let credentials = broker::broker_dir(&queue_dir)
+        .join(dagq::domain::queue_broker::VERIFICATION_CREDENTIALS_DIR);
+    let read = |out: &Path| format!("cat {}/* > {}", shell_path(&credentials), shell_path(out));
+    let passed = dir.path().join("passed-token");
+    let failed = dir.path().join("failed-token");
+    let passing = add_file_task(
+        &mut queue,
+        &backend,
+        "pass",
+        "p.txt",
+        "p",
+        &[&read(&passed)],
+    );
+    let failing = add_file_task(
+        &mut queue,
+        &backend,
+        "fail",
+        "f.txt",
+        "f",
+        &[&format!("{} && false", read(&failed))],
+    );
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let runs: Vec<_> = [passing, failing]
+        .map(|task| queue.show(task).unwrap().runs[0].id().clone())
+        .into();
+    assert_eq!(
+        integrate(&db, passing.as_i64(), &repo).unwrap()["outcome"],
+        "integrated"
+    );
+    assert_eq!(
+        integrate(&db, failing.as_i64(), &repo).unwrap()["outcome"],
+        "needs_session"
+    );
+    for (out, run) in [(&passed, &runs[0]), (&failed, &runs[1])] {
+        let token = fs::read_to_string(out).unwrap();
+        assert_eq!(token.len(), 64, "{token}");
+        assert_eq!(broker::verification_run(&queue_dir, &token).unwrap(), None);
+        assert!(!broker::revoke_verification(&queue_dir, run).unwrap());
+    }
+    assert_eq!(fs::read_dir(&credentials).unwrap().count(), 0);
+}
+
 #[test]
 fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     let (dir, repo, db, run) = awaiting_run();

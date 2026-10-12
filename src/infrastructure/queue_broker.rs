@@ -3,16 +3,21 @@
 //! HTTP/1.1 requests read and answered here ([`read_request`],
 //! [`write_answer`]) and decided by [`QueueBroker::handle`], the requests
 //! it passes on to the queue service's unix socket ([`SystemBrokerBackend`]),
-//! the client a caller speaks to it with ([`exchange`], [`call`],
-//! [`health`]) and the control `up`, `down` and the supervisor start, look
-//! at and stop it with ([`SystemQueueBroker`], whose look is [`probe`]).
+//! the tunnels it opens to the registries of the `dagq.toml` in the main
+//! checkout the queue is bound to ([`SystemBrokerBackend::egress`],
+//! [`tunnel`]), the client a caller speaks to it with ([`exchange`],
+//! [`call`], [`health`]), the tokens of `integrate`'s verifications
+//! ([`issue_verification`], [`revoke_verification`],
+//! [`SystemVerificationTokens`]) and the control `up`, `down` and the
+//! supervisor start, look at and stop it with ([`SystemQueueBroker`],
+//! whose look is [`probe`]).
 //!
 //! Everything lives in `<queue dir>/broker/` (mode 0700): `state.json`
 //! (what the running broker recorded of itself, its address among it),
-//! `lock` (held with `flock` while one runs, as the queue service's), and
-//! `broker.log`. The broker reads the queue service's tokens (it is the
-//! control side) and writes no token's value to a log, an event or an
-//! error.
+//! `lock` (held with `flock` while one runs, as the queue service's),
+//! `broker.log`, and the verifications' tokens. The broker reads the queue
+//! service's tokens (it is the control side) and writes no token's value
+//! to a log, an event or an error.
 //!
 //! [Queue broker]: ../../docs/design/queue-broker.md
 
@@ -34,17 +39,19 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use super::queue_service::{
-    Lock, lock_file_held, lookup, owner_gone, private_dir, queue_dir_of, runs_for, signal,
-    socket_path, spawn_detached, unix_now, write_private,
+    Lock, lock_file_held, lookup, owner_gone, private_dir, queue_dir_of, runs_for, sha256_hex,
+    signal, socket_path, spawn_detached, unix_now, write_private,
 };
 use super::sqlite::SqliteQueue;
 use crate::application::queue_broker::{
     BrokerAnswer, BrokerBackend, BrokerProbe, BrokerRequest, QueueBroker, QueueBrokerControl,
+    VerificationTokens,
 };
 use crate::application::{EventStore, Generators, RunNotFound, RunReads};
 use crate::domain::queue_broker::{
-    AUTHORIZATION_HEADER, BEARER, BROKER_DIR, HEALTH_PATH, LOCK_FILE, LOG_FILE, MAX_BODY_BYTES,
-    QUEUE_PATH, RUN_HEADER, STATE_FILE,
+    AUTHORIZATION_HEADER, BEARER, BROKER_DIR, Egress, HEALTH_PATH, LOCK_FILE, LOG_FILE,
+    MAX_BODY_BYTES, PROXY_AUTHORIZATION_HEADER, QUEUE_PATH, RUN_HEADER, STATE_FILE,
+    VERIFICATION_CREDENTIALS_DIR, VERIFICATION_TOKENS_DIR, git_remote_host,
 };
 use crate::domain::queue_service::{Principal, ServiceRequest, ServiceState};
 use crate::domain::{ActorContext, ActorRole, EventKind, RunId, RunStatus};
@@ -56,6 +63,12 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the broker waits for the queue service's answer: as long as a
 /// client-mode `dagq` waits for it.
 const SERVICE_TIMEOUT: Duration = super::queue_service::CLIENT_TIMEOUT;
+/// How long the broker waits to reach a tunnel's host.
+const TUNNEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a tunnel stays open with no byte either way.
+const TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How often a tunnel's quiet way looks whether the tunnel is idle.
+const TUNNEL_POLL: Duration = Duration::from_secs(5);
 /// How often the broker looks whether its queue is still there.
 const QUEUE_CHECK: Duration = Duration::from_secs(2);
 /// The longest request line or header line the broker reads.
@@ -97,7 +110,8 @@ fn lock_held(queue_dir: &Path) -> bool {
 // --- HTTP ----------------------------------------------------------------------
 
 /// Read one HTTP/1.1 request from `reader`: the request line, the headers
-/// the broker reads ([`AUTHORIZATION_HEADER`], [`RUN_HEADER`], `Host`,
+/// the broker reads ([`AUTHORIZATION_HEADER`],
+/// [`PROXY_AUTHORIZATION_HEADER`], [`RUN_HEADER`], `Host`,
 /// `Content-Length`) and a body of up to [`MAX_BODY_BYTES`], whose length
 /// `Content-Length` gives (a `Transfer-Encoding` is refused). A request
 /// that does not read comes back with what was read of it.
@@ -154,6 +168,7 @@ pub fn read_request(
         let value = value.trim().to_owned();
         match name.trim().to_ascii_lowercase().as_str() {
             AUTHORIZATION_HEADER => request.authorization = Some(value),
+            PROXY_AUTHORIZATION_HEADER => request.proxy_authorization = Some(value),
             RUN_HEADER => request.run = Some(value),
             "host" => request.host = Some(value),
             // A chunked or otherwise encoded body is not read: a request
@@ -220,6 +235,100 @@ pub fn write_answer(writer: &mut impl Write, answer: &BrokerAnswer) -> std::io::
     )?;
     writer.write_all(&answer.body)?;
     writer.flush()
+}
+
+/// Open the tunnel `stream`'s `CONNECT` was passed to `host`:`port`: reach
+/// the host, answer `200`, and copy the bytes both ways (those `reader`
+/// read past the request first) until either side closes or stays idle
+/// for [`TUNNEL_IDLE_TIMEOUT`]. A host that is not reached is answered
+/// with `failed`'s refusal.
+pub fn tunnel(
+    stream: &TcpStream,
+    reader: &BufReader<TcpStream>,
+    host: &str,
+    port: u16,
+    failed: impl FnOnce(anyhow::Error) -> BrokerAnswer,
+) -> Result<()> {
+    let upstream = match connect_to(host, port) {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            write_answer(&mut &*stream, &failed(error))?;
+            return Ok(());
+        }
+    };
+    // Each read wakes up now and then to look whether the other way is
+    // still busy: a long download sends nothing the other way.
+    for side in [stream, &upstream] {
+        side.set_read_timeout(Some(TUNNEL_POLL))?;
+        side.set_write_timeout(Some(TUNNEL_IDLE_TIMEOUT))?;
+    }
+    (&*stream).write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+    (&upstream).write_all(reader.buffer())?;
+    let opened = Instant::now();
+    let last = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (client, server) = (stream.try_clone()?, upstream.try_clone()?);
+    let up = {
+        let last = last.clone();
+        thread::spawn(move || splice(client, server, opened, &last))
+    };
+    splice(upstream, stream.try_clone()?, opened, &last);
+    let _ = up.join();
+    Ok(())
+}
+
+/// Reach `host`:`port` at the first of its addresses that answers.
+fn connect_to(host: &str, port: u16) -> Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+    let mut last = None;
+    for address in (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("resolve {host}"))?
+    {
+        match TcpStream::connect_timeout(&address, TUNNEL_CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(match last {
+        Some(error) => anyhow::Error::new(error).context(format!("reach {host}:{port}")),
+        None => anyhow::anyhow!("{host} has no address"),
+    })
+}
+
+/// Copy `from` to `to` until `from` ends or fails, or neither way of the
+/// tunnel moved a byte for [`TUNNEL_IDLE_TIMEOUT`] (`last`: the time of
+/// the last byte either way, in milliseconds since `opened`), then end
+/// `to`'s writes.
+fn splice(
+    mut from: TcpStream,
+    to: TcpStream,
+    opened: Instant,
+    last: &std::sync::atomic::AtomicU64,
+) {
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        match from.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                if (&to).write_all(&buffer[..read]).is_err() {
+                    break;
+                }
+                last.store(opened.elapsed().as_millis() as u64, Ordering::SeqCst);
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                let idle = opened
+                    .elapsed()
+                    .saturating_sub(Duration::from_millis(last.load(Ordering::SeqCst)));
+                if idle >= TUNNEL_IDLE_TIMEOUT {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    let _ = to.shutdown(Shutdown::Write);
+    let _ = from.shutdown(Shutdown::Read);
 }
 
 // --- The client ------------------------------------------------------------------
@@ -372,6 +481,161 @@ impl BrokerBackend for SystemBrokerBackend {
         EventStore::record_queue_event(&self.queue()?, EventKind::QueueBrokerDenied, payload)
             .map(drop)
     }
+
+    /// Read again for each tunnel, so a landing that changes the
+    /// registries takes effect without a restart: the `dagq.toml` of the
+    /// main checkout of the repository the queue is bound to, and the hosts
+    /// of its remotes. A queue bound to none reaches no registry.
+    fn egress(&self) -> Result<Egress> {
+        let Some(common_dir) = self.queue()?.repository_binding()? else {
+            return Ok(Egress::default());
+        };
+        let checkout = super::adapters::main_checkout_of(Path::new(&common_dir))?;
+        let registries = super::run_env::load_egress_registries(&checkout)?;
+        let upstream_git_hosts = if registries.is_empty() {
+            Vec::new()
+        } else {
+            remote_hosts(&checkout)?
+        };
+        Ok(Egress {
+            registries,
+            upstream_git_hosts,
+        })
+    }
+
+    fn verification_run(&self, token: &str) -> Result<Option<RunId>> {
+        verification_run(&self.queue_dir, token)
+    }
+}
+
+/// The hosts the remotes of the repository at `checkout` fetch from and
+/// push to (each `remote.<name>.url` and `pushurl`).
+fn remote_hosts(checkout: &Path) -> Result<Vec<String>> {
+    let output = Command::new(super::git_binary::git_executable()?)
+        .arg("-C")
+        .arg(checkout)
+        .args(["config", "--get-regexp", r"^remote\..*\.(push)?url$"])
+        .stdin(Stdio::null())
+        .output()
+        .context("read the repository's remotes")?;
+    // `git config --get-regexp` exits with 1 when nothing matches.
+    ensure!(
+        output.status.success() || output.status.code() == Some(1),
+        "git config could not read the remotes of {}: {}",
+        checkout.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut hosts: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(host) = line
+            .split_once(' ')
+            .and_then(|(_, url)| git_remote_host(url))
+            && !hosts.contains(&host)
+        {
+            hosts.push(host);
+        }
+    }
+    Ok(hosts)
+}
+
+// --- The tokens of the verifications ---------------------------------------------
+
+/// What a verification token's record holds: its run and when it was
+/// issued.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VerificationRecord {
+    run: RunId,
+    issued_at: i64,
+}
+
+fn verification_credential_path(queue_dir: &Path, run: &RunId) -> PathBuf {
+    broker_dir(queue_dir)
+        .join(VERIFICATION_CREDENTIALS_DIR)
+        .join(sha256_hex(run.as_str().as_bytes()))
+}
+
+fn verification_record_path(queue_dir: &Path, token: &str) -> PathBuf {
+    broker_dir(queue_dir)
+        .join(VERIFICATION_TOKENS_DIR)
+        .join(format!("{}.json", sha256_hex(token.as_bytes())))
+}
+
+/// Issue the token of `run`'s verification, revoking the one it held: 32
+/// random bytes in hex, its value in the broker's
+/// [`VERIFICATION_CREDENTIALS_DIR`], its run in [`VERIFICATION_TOKENS_DIR`]
+/// under the value's hash, apart from the queue service's tokens. The file
+/// its value is in. Only the control side (`integrate`) calls this.
+pub fn issue_verification(queue_dir: &Path, run: &RunId, now: i64) -> Result<PathBuf> {
+    revoke_verification(queue_dir, run)?;
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("draw a token's random bytes: {error}"))?;
+    let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    private_dir(&broker_dir(queue_dir))?;
+    for dir in [VERIFICATION_TOKENS_DIR, VERIFICATION_CREDENTIALS_DIR] {
+        private_dir(&broker_dir(queue_dir).join(dir))?;
+    }
+    // The value first: one whose value is written can always be revoked.
+    let file = verification_credential_path(queue_dir, run);
+    write_private(&file, token.as_bytes())?;
+    write_private(
+        &verification_record_path(queue_dir, &token),
+        &serde_json::to_vec(&VerificationRecord {
+            run: run.clone(),
+            issued_at: now,
+        })?,
+    )?;
+    Ok(file)
+}
+
+/// Revoke the token of `run`'s verification; whether there was one.
+pub fn revoke_verification(queue_dir: &Path, run: &RunId) -> Result<bool> {
+    let file = verification_credential_path(queue_dir, run);
+    let token = match fs::read_to_string(&file) {
+        Ok(token) => token,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
+    };
+    match fs::remove_file(verification_record_path(queue_dir, token.trim())) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("remove a verification token's record"),
+    }
+    fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))?;
+    Ok(true)
+}
+
+/// The run whose verification `token` was issued for; `None` for one never
+/// issued or revoked.
+pub fn verification_run(queue_dir: &Path, token: &str) -> Result<Option<RunId>> {
+    // A hex value of the issued length only: no other text names a file.
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let bytes = match fs::read(verification_record_path(queue_dir, token)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read a verification token's record"),
+    };
+    let record: VerificationRecord =
+        serde_json::from_slice(&bytes).context("a verification token's record")?;
+    Ok(Some(record.run))
+}
+
+/// The tokens of the verifications of the queue at `db`, on this host.
+#[derive(Debug, Clone)]
+pub struct SystemVerificationTokens {
+    pub db: PathBuf,
+}
+
+impl VerificationTokens for SystemVerificationTokens {
+    fn issue(&self, run: &RunId) -> Result<PathBuf> {
+        issue_verification(&queue_dir_of(&self.db), run, unix_now())
+    }
+
+    fn revoke(&self, run: &RunId) -> Result<bool> {
+        revoke_verification(&queue_dir_of(&self.db), run)
+    }
 }
 
 /// How `dagq queue-broker serve` runs.
@@ -491,12 +755,22 @@ fn answer(stream: TcpStream, backend: &dyn BrokerBackend, build: &str, pid: u32)
     if reader.fill_buf()?.is_empty() {
         return Ok(());
     }
-    let answer = match read_request(&mut reader) {
-        Ok(request) => broker.handle(&request),
-        Err((read, error)) => broker.malformed(&read, &format!("{error:#}")),
+    let (request, answer) = match read_request(&mut reader) {
+        Ok(request) => {
+            let answer = broker.handle(&request);
+            (request, answer)
+        }
+        Err((read, error)) => {
+            let answer = broker.malformed(&read, &format!("{error:#}"));
+            (*read, answer)
+        }
     };
-    write_answer(&mut &stream, &answer)?;
-    Ok(())
+    match &answer.tunnel {
+        Some((host, port)) => tunnel(&stream, &reader, host, *port, |error| {
+            broker.tunnel_failed(&request, &error)
+        }),
+        None => Ok(write_answer(&mut &stream, &answer)?),
+    }
 }
 
 // --- The control `up`, `down` and the supervisor use -------------------------
@@ -769,6 +1043,7 @@ mod tests {
             &BrokerAnswer {
                 status: 403,
                 body: b"{}".to_vec(),
+                tunnel: None,
             },
         )
         .unwrap();

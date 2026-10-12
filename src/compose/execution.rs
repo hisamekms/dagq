@@ -490,6 +490,9 @@ impl OneShot {
                 free: &read_free,
             }),
             sccache: Some(&sccache),
+            verification_tokens: &crate::infrastructure::queue_broker::SystemVerificationTokens {
+                db: db.clone(),
+            },
         };
         let integrator = Integrator::of_process(std::process::id());
         let Some(request) = integrator.approve(&mut integration, &requester, target, repo)? else {

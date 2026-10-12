@@ -4,13 +4,18 @@
 //! [`ensure`]); what it does with one request ([`QueueBroker::handle`]):
 //! a request for the queue service passes only with a worker's run token
 //! of the run it names, and goes on to the service with that token, so
-//! the service acts as the run's principal; and how the container runtime
-//! cannot be used while the broker does not run ([`BrokerGate`]).
+//! the service acts as the run's principal; a `CONNECT` opens a tunnel
+//! only to a registry `dagq.toml` names, with a worker's run token or its
+//! verification's (ADR-t2257-1 decision 3); how `integrate` issues the
+//! token of each verification and revokes it at its end
+//! ([`VerificationTokens`], [`VerificationToken`]); and how the container
+//! runtime cannot be used while the broker does not run ([`BrokerGate`]).
 //!
 //! The protocol's shapes are [`crate::domain::queue_broker`]'s.
 //!
 //! [Queue broker]: ../../docs/design/queue-broker.md
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +27,8 @@ use crate::domain::RunId;
 use crate::domain::RunStatus;
 use crate::domain::container_runtime::{Availability, RuntimeTarget};
 use crate::domain::queue_broker::{
-    BEARER, Destination, Refusal, SERVICE_NAME, TokenRefusal, judge_run_token,
+    BEARER, Destination, Egress, Refusal, SERVICE_NAME, TokenRefusal, basic_credentials,
+    judge_run_token, judge_tunnel, judge_verification_token,
 };
 use crate::domain::queue_service::{
     Principal, ServiceErrorCode, ServiceRequest, ServiceResponse, ServiceState,
@@ -120,6 +126,57 @@ pub trait BrokerBackend: Send + Sync {
     fn forward(&self, line: &[u8]) -> Result<Vec<u8>>;
     /// Record a refused request (`queue_broker_denied`).
     fn record_denied(&self, payload: Value) -> Result<()>;
+    /// Where a tunnel may go now: the registries of the `dagq.toml` in the
+    /// main checkout the queue is bound to, never a run's clone's, and the
+    /// hosts of that repository's git remotes.
+    fn egress(&self) -> Result<Egress>;
+    /// The run whose verification `token` was issued for; `None` for a
+    /// token not issued for a verification, or revoked.
+    fn verification_run(&self, token: &str) -> Result<Option<RunId>>;
+}
+
+/// How `integrate` issues the token of a run's verification and revokes it
+/// (ADR-t2114-1 decision 2): the control side's only.
+pub trait VerificationTokens: Send + Sync {
+    /// Issue the token of `run`'s verification, revoking one it held: the
+    /// file its value is in, for the verification to be handed the path
+    /// of (never the value).
+    fn issue(&self, run: &RunId) -> Result<PathBuf>;
+    /// Revoke the token of `run`'s verification; whether there was one.
+    fn revoke(&self, run: &RunId) -> Result<bool>;
+}
+
+/// The token of one verification of a run: issued by [`Self::issue`] and
+/// revoked when this goes, at the verification's end however it ends.
+pub struct VerificationToken<'a> {
+    tokens: &'a dyn VerificationTokens,
+    run: RunId,
+    /// The file the token's value is in.
+    pub file: PathBuf,
+}
+
+impl<'a> VerificationToken<'a> {
+    pub fn issue(tokens: &'a dyn VerificationTokens, run: &RunId) -> Result<Self> {
+        let file = tokens
+            .issue(run)
+            .with_context(|| format!("issue the token of run {run}'s verification"))?;
+        Ok(Self {
+            tokens,
+            run: run.clone(),
+            file,
+        })
+    }
+}
+
+impl Drop for VerificationToken<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.tokens.revoke(&self.run) {
+            warn!(
+                "could not revoke the token of run {}'s verification: {error:#}",
+                self.run
+            );
+        }
+    }
 }
 
 /// One HTTP request as the broker read it.
@@ -133,16 +190,22 @@ pub struct BrokerRequest {
     pub host: Option<String>,
     /// The `Authorization` header.
     pub authorization: Option<String>,
+    /// The `Proxy-Authorization` header
+    /// ([`crate::domain::queue_broker::PROXY_AUTHORIZATION_HEADER`]).
+    pub proxy_authorization: Option<String>,
     /// The run header ([`crate::domain::queue_broker::RUN_HEADER`]).
     pub run: Option<String>,
     pub body: Vec<u8>,
 }
 
-/// The broker's answer: an HTTP status and the body, JSON.
+/// The broker's answer: an HTTP status and the body, JSON; or a tunnel to
+/// open to a host and port, whose own answer is the broker's to write
+/// once it reaches them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerAnswer {
     pub status: u16,
     pub body: Vec<u8>,
+    pub tunnel: Option<(String, u16)>,
 }
 
 /// The broker's use cases on a backend.
@@ -165,24 +228,86 @@ impl QueueBroker<'_> {
                 200,
                 &json!({"service": SERVICE_NAME, "build": self.build, "pid": self.pid}),
             ),
-            Destination::Outside(_) => {
-                self.refuse(request, &destination, None, Refusal::destination(), None)
-            }
+            Destination::Outside(_) => self.refuse(
+                request,
+                request.run.as_deref(),
+                &destination,
+                None,
+                Refusal::destination(),
+                None,
+            ),
             Destination::QueueService => match self.pass_on(request) {
-                Ok(body) => BrokerAnswer { status: 200, body },
-                Err(Refused {
-                    refusal,
-                    token_run,
-                    message,
-                }) => self.refuse(
-                    request,
-                    &destination,
-                    token_run,
-                    refusal,
-                    message.as_deref(),
-                ),
+                Ok(body) => BrokerAnswer {
+                    status: 200,
+                    body,
+                    tunnel: None,
+                },
+                Err(refused) => {
+                    self.refused(request, request.run.as_deref(), &destination, refused)
+                }
             },
+            Destination::Tunnel { ref host, port } => {
+                let (token, run) = tunnel_credentials(request);
+                match self.open_tunnel(host, port, token.as_deref(), run.as_deref()) {
+                    Ok(()) => BrokerAnswer {
+                        status: 200,
+                        body: Vec::new(),
+                        tunnel: Some((host.clone(), port)),
+                    },
+                    Err(refused) => self.refused(request, run.as_deref(), &destination, refused),
+                }
+            }
         }
+    }
+
+    /// Refuse a tunnel `request` passed whose host did not answer, with
+    /// `error`, as the service that does not answer is (`unreachable`).
+    pub fn tunnel_failed(&self, request: &BrokerRequest, error: &anyhow::Error) -> BrokerAnswer {
+        let destination =
+            Destination::of(&request.method, &request.target, request.host.as_deref());
+        let (_, run) = tunnel_credentials(request);
+        self.refuse(
+            request,
+            run.as_deref(),
+            &destination,
+            None,
+            Refusal {
+                code: ServiceErrorCode::Unreachable,
+                reason: format!("{error:#}"),
+            },
+            None,
+        )
+    }
+
+    /// Whether a tunnel to `host`:`port` opens for `run` with `token`: the
+    /// registries of `dagq.toml` name it, and the token is the run's own
+    /// worker's or its verification's.
+    fn open_tunnel(
+        &self,
+        host: &str,
+        port: u16,
+        token: Option<&str>,
+        run: Option<&str>,
+    ) -> Result<(), Refused> {
+        let egress = self.backend.egress().map_err(|error| Refused {
+            refusal: Refusal {
+                code: ServiceErrorCode::ForbiddenDestination,
+                reason: "egress_unreadable".to_owned(),
+            },
+            token_run: None,
+            message: Some(format!(
+                "the registries of dagq.toml in the main checkout could not be read, so no tunnel opens: {error:#}"
+            )),
+        })?;
+        judge_tunnel(&egress, host, port).map_err(|refusal| Refused {
+            refusal: Refusal {
+                code: ServiceErrorCode::ForbiddenDestination,
+                reason: refusal.as_str().to_owned(),
+            },
+            token_run: None,
+            message: Some(refusal.message(host, port)),
+        })?;
+        self.check_token(token, run, true).map(drop)
     }
 
     /// Refuse a request that did not read as HTTP, with `message`, recorded
@@ -197,49 +322,84 @@ impl QueueBroker<'_> {
         } else {
             Destination::of(&read.method, &read.target, read.host.as_deref())
         };
-        self.refuse(read, &destination, None, refusal, Some(message))
+        self.refuse(
+            read,
+            read.run.as_deref(),
+            &destination,
+            None,
+            refusal,
+            Some(message),
+        )
+    }
+
+    /// Check `token` for `run`: a worker's run token of that run, or, where
+    /// `verification` allows it, the token of that run's verification. The
+    /// token that passed, or why not with the token's run when it differs.
+    fn check_token<'t>(
+        &self,
+        token: Option<&'t str>,
+        run: Option<&str>,
+        verification: bool,
+    ) -> Result<&'t str, Refused> {
+        let token_refused = |refusal: TokenRefusal| Refused::from(Refusal::token(refusal));
+        let token = token
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| token_refused(TokenRefusal::MissingToken))?;
+        let run = run
+            .filter(|run| !run.is_empty())
+            .ok_or_else(|| token_refused(TokenRefusal::MissingRun))?;
+        let status_of = |own: &RunId| {
+            self.backend.run_status(own).map_err(|error| {
+                Refused::from(failed(format!(
+                    "the token's run could not be read: {error:#}"
+                )))
+            })
+        };
+        let with_token_run = |own: Option<&RunId>, refusal: TokenRefusal| Refused {
+            token_run: own
+                .cloned()
+                .filter(|own| refusal == TokenRefusal::OtherRun && own.as_str() != run),
+            ..Refused::from(Refusal::token(refusal))
+        };
+        let unreadable =
+            |error: anyhow::Error| failed(format!("the token could not be read: {error:#}"));
+        let principal = match self.backend.principal(token) {
+            Ok(Some(principal)) => principal,
+            Ok(None) => {
+                let Some(own) = self
+                    .backend
+                    .verification_run(token)
+                    .map_err(|error| Refused::from(unreadable(error)))?
+                else {
+                    return Err(token_refused(TokenRefusal::UnknownToken));
+                };
+                if !verification {
+                    return Err(token_refused(TokenRefusal::VerificationToken));
+                }
+                let status = status_of(&own)?;
+                judge_verification_token(&own, run, status)
+                    .map_err(|refusal| with_token_run(Some(&own), refusal))?;
+                return Ok(token);
+            }
+            Err(error) => return Err(unreadable(error).into()),
+        };
+        let status = match principal.run_id.as_ref() {
+            Some(own) => status_of(own)?,
+            None => None,
+        };
+        judge_run_token(&principal, run, status)
+            .map_err(|refusal| with_token_run(principal.run_id.as_ref(), refusal))?;
+        Ok(token)
     }
 
     /// Check the run token and pass the request on with it: the service's
     /// answer, or why not with the token's run when it differs.
     fn pass_on(&self, request: &BrokerRequest) -> Result<Vec<u8>, Refused> {
-        let token_refused = |refusal: TokenRefusal| Refused::from(Refusal::token(refusal));
-        let token = request
-            .authorization
-            .as_deref()
-            .and_then(|value| bearer(value))
-            .filter(|token| !token.is_empty())
-            .ok_or_else(|| token_refused(TokenRefusal::MissingToken))?;
-        let run = request
-            .run
-            .as_deref()
-            .filter(|run| !run.is_empty())
-            .ok_or_else(|| token_refused(TokenRefusal::MissingRun))?;
-        let principal = match self.backend.principal(token) {
-            Ok(Some(principal)) => principal,
-            Ok(None) => return Err(token_refused(TokenRefusal::UnknownToken)),
-            Err(error) => {
-                return Err(failed(format!("the token could not be read: {error:#}")).into());
-            }
-        };
-        let status = match principal.run_id.as_ref() {
-            Some(own) => self.backend.run_status(own).map_err(|error| {
-                Refused::from(failed(format!(
-                    "the token's run could not be read: {error:#}"
-                )))
-            })?,
-            None => None,
-        };
-        judge_run_token(&principal, run, status).map_err(|refusal| {
-            let token_run = principal
-                .run_id
-                .clone()
-                .filter(|own| refusal == TokenRefusal::OtherRun && own.as_str() != run);
-            Refused {
-                token_run,
-                ..Refused::from(Refusal::token(refusal))
-            }
-        })?;
+        let token = self.check_token(
+            request.authorization.as_deref().and_then(bearer),
+            request.run.as_deref(),
+            false,
+        )?;
         let mut service_request: ServiceRequest =
             serde_json::from_slice(&request.body).map_err(|error| Refused {
                 // Neither the record nor the answer carries serde's text: it
@@ -265,16 +425,39 @@ impl QueueBroker<'_> {
         })
     }
 
+    fn refused(
+        &self,
+        request: &BrokerRequest,
+        run: Option<&str>,
+        destination: &Destination,
+        refused: Refused,
+    ) -> BrokerAnswer {
+        let Refused {
+            refusal,
+            token_run,
+            message,
+        } = refused;
+        self.refuse(
+            request,
+            run,
+            destination,
+            token_run,
+            refusal,
+            message.as_deref(),
+        )
+    }
+
     fn refuse(
         &self,
         request: &BrokerRequest,
+        run: Option<&str>,
         destination: &Destination,
         token_run: Option<RunId>,
         refusal: Refusal,
         message: Option<&str>,
     ) -> BrokerAnswer {
         let mut payload = json!({
-            "run": request.run,
+            "run": run,
             "destination": destination.name(),
             "method": request.method,
             "reason": refusal.reason,
@@ -295,6 +478,11 @@ impl QueueBroker<'_> {
                     "the queue broker does not pass requests to {}",
                     destination.name()
                 ),
+                ServiceErrorCode::Unauthenticated
+                    if refusal.reason == TokenRefusal::VerificationToken.as_str() =>
+                {
+                    "a verification's token reaches only the registries dagq.toml names, never the queue service".to_owned()
+                }
                 ServiceErrorCode::Unauthenticated => format!(
                     "the queue broker takes only the run token of the run the request names ({})",
                     refusal.reason
@@ -354,6 +542,21 @@ fn failed(reason: String) -> Refusal {
     }
 }
 
+/// The token and the run of a tunnel's request: of its
+/// `Proxy-Authorization` (`Basic` `<run>:<token>`, or `Bearer` with the run
+/// header), else of its `Authorization` and run header.
+fn tunnel_credentials(request: &BrokerRequest) -> (Option<String>, Option<String>) {
+    let proxy = request.proxy_authorization.as_deref();
+    if let Some((run, token)) = proxy.and_then(basic_credentials) {
+        return (Some(token), Some(run));
+    }
+    let token = proxy
+        .or(request.authorization.as_deref())
+        .and_then(bearer)
+        .map(str::to_owned);
+    (token, request.run.clone())
+}
+
 /// The token of an `Authorization` header's value, its scheme matched
 /// without case.
 fn bearer(value: &str) -> Option<&str> {
@@ -367,6 +570,7 @@ fn answer(status: u16, body: &Value) -> BrokerAnswer {
     BrokerAnswer {
         status,
         body: serde_json::to_vec(body).unwrap_or_default(),
+        tunnel: None,
     }
 }
 
@@ -403,10 +607,13 @@ mod tests {
     use crate::domain::queue_service::{API_VERSION, UseCase};
 
     /// Run `r1` of task 1 in `status`, its worker's token `good`, a job's
-    /// token on it `job`; what was forwarded and recorded is kept.
+    /// token on it `job`, its verification's token `verify`; the egress
+    /// tunnels may go to (`None`: it cannot be read); what was forwarded
+    /// and recorded is kept.
     struct Backend {
         status: Option<RunStatus>,
         reachable: bool,
+        egress: Option<Egress>,
         forwarded: Mutex<Vec<Value>>,
         denied: Mutex<Vec<Value>>,
     }
@@ -416,6 +623,7 @@ mod tests {
             Self {
                 status,
                 reachable: true,
+                egress: Some(Egress::default()),
                 forwarded: Mutex::new(Vec::new()),
                 denied: Mutex::new(Vec::new()),
             }
@@ -452,6 +660,14 @@ mod tests {
             self.denied.lock().unwrap().push(payload);
             Ok(())
         }
+        fn egress(&self) -> Result<Egress> {
+            self.egress
+                .clone()
+                .ok_or_else(|| anyhow!("no main checkout"))
+        }
+        fn verification_run(&self, token: &str) -> Result<Option<RunId>> {
+            Ok((token == "verify").then(|| RunId::new("r1").unwrap()))
+        }
     }
 
     fn body() -> Vec<u8> {
@@ -472,6 +688,7 @@ mod tests {
             authorization: token.map(|token| format!("Bearer {token}")),
             run: run.map(str::to_owned),
             body: body(),
+            ..BrokerRequest::default()
         }
     }
 
@@ -567,6 +784,7 @@ mod tests {
         let backend = Backend::new(Some(RunStatus::Running));
         for (method, target, host, named) in [
             ("CONNECT", "crates.io:443", None, "crates.io"),
+            ("CONNECT", "crates.io", None, "crates.io"),
             (
                 "POST",
                 "/v1/messages",
@@ -581,7 +799,7 @@ mod tests {
                 host: host.map(str::to_owned),
                 authorization: Some("Bearer good".into()),
                 run: Some("r1".into()),
-                body: Vec::new(),
+                ..BrokerRequest::default()
             };
             let (status, body) = handle(&backend, &request);
             assert_eq!(status, 403);
@@ -593,6 +811,243 @@ mod tests {
             assert_eq!(last["method"], method);
         }
         assert!(backend.forwarded.lock().unwrap().is_empty());
+    }
+
+    fn connect(target: &str, proxy: Option<&str>) -> BrokerRequest {
+        BrokerRequest {
+            method: "CONNECT".into(),
+            target: target.into(),
+            host: Some(target.into()),
+            proxy_authorization: proxy.map(str::to_owned),
+            ..BrokerRequest::default()
+        }
+    }
+
+    fn egress(registries: &[&str], upstream: &[&str]) -> Egress {
+        Egress {
+            registries: registries.iter().map(|r| r.parse().unwrap()).collect(),
+            upstream_git_hosts: upstream.iter().map(|h| (*h).to_owned()).collect(),
+        }
+    }
+
+    /// base64 of `r1:good`, `r1:verify`, `r1:job`, `r1:nope`.
+    const BASIC_GOOD: &str = "Basic cjE6Z29vZA==";
+    const BASIC_VERIFY: &str = "Basic cjE6dmVyaWZ5";
+    const BASIC_JOB: &str = "Basic cjE6am9i";
+    const BASIC_NOPE: &str = "Basic cjE6bm9wZQ==";
+
+    #[test]
+    fn a_tunnel_opens_only_to_a_registry_dagq_toml_names_with_the_run_s_token() {
+        let backend = Backend {
+            egress: Some(egress(&["crates.io", "github.com"], &["github.com"])),
+            ..Backend::new(Some(RunStatus::Running))
+        };
+        let broker = QueueBroker {
+            backend: &backend,
+            build: "b1",
+            pid: 7,
+        };
+        // A worker's run token and its verification's, in a proxy URL's
+        // credentials or as a bearer with the run header.
+        for request in [
+            connect("crates.io:443", Some(BASIC_GOOD)),
+            connect("Crates.IO:443", Some(BASIC_VERIFY)),
+            BrokerRequest {
+                authorization: Some("Bearer good".into()),
+                run: Some("r1".into()),
+                ..connect("crates.io:443", None)
+            },
+            BrokerRequest {
+                run: Some("r1".into()),
+                ..connect("crates.io:443", Some("Bearer verify"))
+            },
+        ] {
+            let answer = broker.handle(&request);
+            assert_eq!(
+                (answer.status, answer.tunnel),
+                (200, Some(("crates.io".to_owned(), 443))),
+                "{request:?}"
+            );
+        }
+        assert!(backend.denied.lock().unwrap().is_empty());
+        // Any other host, port or token is refused and recorded with the
+        // run and the host; the answer says why, and names no token.
+        for (request, status, reason, host) in [
+            (
+                connect("example.com:443", Some(BASIC_GOOD)),
+                403,
+                "not_allowed",
+                "example.com",
+            ),
+            (
+                connect("crates.io:80", Some(BASIC_GOOD)),
+                403,
+                "not_allowed",
+                "crates.io",
+            ),
+            (
+                connect("github.com:443", Some(BASIC_GOOD)),
+                403,
+                "upstream_git_host",
+                "github.com",
+            ),
+            (
+                connect("api.anthropic.com:443", Some(BASIC_VERIFY)),
+                403,
+                "builtin_destination",
+                "api.anthropic.com",
+            ),
+            (
+                connect("crates.io:443", Some(BASIC_JOB)),
+                401,
+                "not_a_run_token",
+                "crates.io",
+            ),
+            (
+                connect("crates.io:443", Some(BASIC_NOPE)),
+                401,
+                "unknown_token",
+                "crates.io",
+            ),
+        ] {
+            let answer = broker.handle(&request);
+            assert_eq!((answer.status, &answer.tunnel), (status, &None), "{reason}");
+            let body: Value = serde_json::from_slice(&answer.body).unwrap();
+            assert!(!body.to_string().contains("verify"), "{body}");
+            let denied = backend.denied.lock().unwrap();
+            let last = denied.last().unwrap();
+            assert_eq!(
+                (&last["reason"], &last["destination"], &last["run"]),
+                (&json!(reason), &json!(host), &json!("r1")),
+            );
+            if reason == "upstream_git_host" {
+                let message = body["error"]["message"].as_str().unwrap();
+                assert!(message.contains("upstream git remote"), "{message}");
+            }
+        }
+        // A token without a run, and one of a run that ended.
+        let answer = broker.handle(&connect("crates.io:443", Some("Bearer good")));
+        assert_eq!(answer.status, 401);
+        let ended = Backend {
+            egress: Some(egress(&["crates.io"], &[])),
+            ..Backend::new(Some(RunStatus::Integrated))
+        };
+        for token in [BASIC_GOOD, BASIC_VERIFY] {
+            let answer = QueueBroker {
+                backend: &ended,
+                build: "b1",
+                pid: 7,
+            }
+            .handle(&connect("crates.io:443", Some(token)));
+            assert_eq!(answer.status, 401);
+            assert_eq!(
+                ended.denied.lock().unwrap().last().unwrap()["reason"],
+                "run_ended"
+            );
+        }
+        // A tunnel whose host does not answer is the broker's
+        // `unreachable`, recorded with its run.
+        let answer = broker.tunnel_failed(
+            &connect("crates.io:443", Some(BASIC_GOOD)),
+            &anyhow!("connection refused"),
+        );
+        assert_eq!(answer.status, 502);
+        let denied = backend.denied.lock().unwrap();
+        assert_eq!(
+            (
+                &denied.last().unwrap()["code"],
+                &denied.last().unwrap()["run"]
+            ),
+            (&json!("unreachable"), &json!("r1"))
+        );
+    }
+
+    #[test]
+    fn no_tunnel_opens_without_registries_or_when_they_cannot_be_read() {
+        for (egress, reason) in [
+            (Some(Egress::default()), "not_allowed"),
+            (None, "egress_unreadable"),
+        ] {
+            let backend = Backend {
+                egress,
+                ..Backend::new(Some(RunStatus::Running))
+            };
+            let (status, body) = handle(&backend, &connect("crates.io:443", Some(BASIC_GOOD)));
+            assert_eq!(
+                (status, &body["error"]["code"]),
+                (403, &json!("forbidden_destination"))
+            );
+            let denied = backend.denied.lock().unwrap();
+            assert_eq!(
+                (
+                    &denied[0]["reason"],
+                    &denied[0]["destination"],
+                    &denied[0]["run"]
+                ),
+                (&json!(reason), &json!("crates.io"), &json!("r1"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_verification_s_token_never_reaches_the_queue_service() {
+        let backend = Backend::new(Some(RunStatus::Integrating));
+        let (status, body) = handle(&backend, &queue_request(Some("verify"), Some("r1")));
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (401, &json!("unauthenticated"))
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("only the registries"),
+            "{body}"
+        );
+        assert!(backend.forwarded.lock().unwrap().is_empty());
+        assert_eq!(
+            backend.denied.lock().unwrap()[0]["reason"],
+            "verification_token"
+        );
+    }
+
+    struct Tokens {
+        issued: Mutex<Vec<String>>,
+        revoked: Mutex<Vec<String>>,
+        fail_revoke: bool,
+    }
+
+    impl VerificationTokens for Tokens {
+        fn issue(&self, run: &RunId) -> Result<PathBuf> {
+            self.issued.lock().unwrap().push(run.to_string());
+            Ok(PathBuf::from(format!("/tokens/{run}")))
+        }
+        fn revoke(&self, run: &RunId) -> Result<bool> {
+            self.revoked.lock().unwrap().push(run.to_string());
+            if self.fail_revoke {
+                return Err(anyhow!("gone"));
+            }
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn a_verification_s_token_is_revoked_when_the_verification_ends() {
+        for fail_revoke in [false, true] {
+            let tokens = Tokens {
+                issued: Mutex::new(Vec::new()),
+                revoked: Mutex::new(Vec::new()),
+                fail_revoke,
+            };
+            let run = RunId::new("r1").unwrap();
+            {
+                let token = VerificationToken::issue(&tokens, &run).unwrap();
+                assert_eq!(token.file, PathBuf::from("/tokens/r1"));
+                assert_eq!(*tokens.issued.lock().unwrap(), ["r1"]);
+                assert!(tokens.revoked.lock().unwrap().is_empty());
+            }
+            assert_eq!(*tokens.revoked.lock().unwrap(), ["r1"]);
+        }
     }
 
     #[test]

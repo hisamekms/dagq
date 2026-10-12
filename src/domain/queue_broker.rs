@@ -24,14 +24,32 @@
 //!   `forbidden_destination`, `bad_request`, `unreachable`), read as the
 //!   service's refusals are; its HTTP status is [`Refusal::status`]. Only
 //!   a status of 200 is the service's answer.
-//! - Any other request (a `CONNECT` to a package registry, a request for
-//!   `api.anthropic.com`, any other path or host) is refused
-//!   `forbidden_destination` until a later change adds that destination.
+//! - A package registry's destination: `CONNECT <host>:<port>` to a host
+//!   and port the registries of `dagq.toml` name ([`RegistryHost`], read
+//!   from the main checkout the queue is bound to, never from a run's
+//!   clone; none by default), with the run and its token in
+//!   [`PROXY_AUTHORIZATION_HEADER`] as a package manager sends them from
+//!   the proxy URL `http://<run>:<token>@<broker>` (`Basic`, the run the
+//!   user and the token the password; or `Bearer <token>` with the run in
+//!   [`RUN_HEADER`]). The token is a worker's run token or the token of
+//!   that run's verification ([`judge_verification_token`]). The answer
+//!   is `200` and then the tunnel's bytes, both ways; a refusal is
+//!   answered as below ([`judge_tunnel`] says which hosts are never
+//!   passed).
+//! - Any other request (a request for `api.anthropic.com`, any other
+//!   path or host) is refused `forbidden_destination` until a later
+//!   change adds that destination.
 //! - `GET` [`HEALTH_PATH`] answers the broker's build and pid without a
 //!   token: `up`, `down` and the supervisor look at the broker with it.
 //!
 //! Every refusal is the queue event [`QUEUE_BROKER_DENIED`] with the run
 //! and the destination; no token's value is in a record or an error.
+//!
+//! The token of a verification is issued by the control side for each of
+//! `integrate`'s verifications and revoked at its end; its value is in
+//! [`VERIFICATION_CREDENTIALS_DIR`] and its run in
+//! [`VERIFICATION_TOKENS_DIR`], under [`BROKER_DIR`], apart from the queue
+//! service's tokens, so the service never takes it.
 //!
 //! [Queue broker]: ../../docs/design/queue-broker.md
 
@@ -40,7 +58,7 @@ use std::time::Duration;
 use super::queue_service::{ServiceErrorCode, ServiceState, run_holds_token};
 use serde::{Deserialize, Serialize};
 
-use super::{ActorRole, DomainError, RunStatus};
+use super::{ActorRole, DomainError, RunId, RunStatus};
 use crate::domain::queue_service::Principal;
 
 /// The broker's directory under the queue's directory.
@@ -67,6 +85,24 @@ pub const RUN_HEADER: &str = "x-dagq-run";
 pub const MAX_BODY_BYTES: usize = super::queue_service::MAX_REQUEST_BYTES;
 /// What `GET` [`HEALTH_PATH`] names as the service.
 pub const SERVICE_NAME: &str = "dagq-queue-broker";
+/// The header (case-insensitive) that carries a `CONNECT`'s run and token:
+/// `Basic` ([`BASIC`]) with the base64 of `<run>:<token>`, or [`BEARER`]
+/// with the run in [`RUN_HEADER`].
+pub const PROXY_AUTHORIZATION_HEADER: &str = "proxy-authorization";
+/// The scheme of the run and token in [`PROXY_AUTHORIZATION_HEADER`].
+pub const BASIC: &str = "Basic ";
+/// The port of a registry `dagq.toml` names without one: HTTPS's.
+pub const REGISTRY_DEFAULT_PORT: u16 = 443;
+/// The Claude API's host: a destination of the runtime's own (ADR-t2114-2),
+/// never a tunnel's, whatever `dagq.toml` names.
+pub const CLAUDE_API_HOST: &str = "api.anthropic.com";
+/// The directory under [`BROKER_DIR`] that holds each verification token's
+/// run, under the hash of its value.
+pub const VERIFICATION_TOKENS_DIR: &str = "verification-tokens";
+/// The directory under [`BROKER_DIR`] that holds each verification token's
+/// value, under the hash of its run, for the control side to hand its
+/// path to the verification and to revoke it.
+pub const VERIFICATION_CREDENTIALS_DIR: &str = "verification-credentials";
 
 /// Where a request goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,12 +111,14 @@ pub enum Destination {
     QueueService,
     /// `GET` [`HEALTH_PATH`]: the broker's own look.
     Health,
+    /// `CONNECT <host>:<port>`: a tunnel, passed only to a registry
+    /// `dagq.toml` names ([`judge_tunnel`], ADR-t2257-1 decision 3).
+    Tunnel { host: String, port: u16 },
     /// Anything else, named by the host it asks for (a `CONNECT`'s
-    /// authority, an absolute URI's host, or the `Host` header) or else
-    /// by its method and path (no user, password or query is kept). None
-    /// of them is passed yet: `api.anthropic.com` and the package
-    /// registries `dagq.toml` names are a later change's (ADR-t2114-1
-    /// decision 2, ADR-t2257-1 decision 3).
+    /// authority without a port, an absolute URI's host, or the `Host`
+    /// header) or else by its method and path (no user, password or query
+    /// is kept). None of them is passed yet: `api.anthropic.com` is a later
+    /// change's (ADR-t2114-1 decision 2).
     Outside(String),
 }
 
@@ -99,7 +137,21 @@ impl Destination {
             }
         }
         if method == "CONNECT" {
-            return Self::Outside(host_of(target).to_owned());
+            let authority = target
+                .rsplit_once('@')
+                .map_or(target, |(_, authority)| authority);
+            let host = host_of(authority);
+            return match authority
+                .strip_prefix(host)
+                .and_then(|rest| rest.strip_prefix(':'))
+                .and_then(|port| port.parse::<u16>().ok())
+            {
+                Some(port) if !host.is_empty() => Self::Tunnel {
+                    host: host.to_ascii_lowercase(),
+                    port,
+                },
+                _ => Self::Outside(host.to_owned()),
+            };
         }
         let absolute = target
             .split_once("://")
@@ -120,6 +172,7 @@ impl Destination {
         match self {
             Self::QueueService => "queue_service",
             Self::Health => "health",
+            Self::Tunnel { host, .. } => host,
             Self::Outside(name) => name,
         }
     }
@@ -170,7 +223,231 @@ string_enum!(
     OtherRun => "other_run",
     /// The token's run has ended, or the queue does not hold it.
     RunEnded => "run_ended",
+    /// The token is a verification's: it reaches the registries of
+    /// `dagq.toml` only, never the queue service.
+    VerificationToken => "verification_token",
 });
+
+/// Whether the token of `token_run`'s verification may open a tunnel for
+/// `run`, the token's run being in `status` (`None` when the queue does
+/// not hold it): only for that run, while the run holds its tokens. Its
+/// revocation at the verification's end ends it before that.
+pub fn judge_verification_token(
+    token_run: &RunId,
+    run: &str,
+    status: Option<RunStatus>,
+) -> Result<(), TokenRefusal> {
+    if token_run.as_str() != run {
+        return Err(TokenRefusal::OtherRun);
+    }
+    match status {
+        Some(status) if run_holds_token(status) => Ok(()),
+        _ => Err(TokenRefusal::RunEnded),
+    }
+}
+
+/// The run and the token of a [`PROXY_AUTHORIZATION_HEADER`]'s `Basic`
+/// value (the base64 of `<run>:<token>`), its scheme matched without case;
+/// `None` for another scheme or a value that does not read.
+pub fn basic_credentials(value: &str) -> Option<(String, String)> {
+    let scheme = value.get(..BASIC.len())?;
+    if !scheme.eq_ignore_ascii_case(BASIC) {
+        return None;
+    }
+    let decoded = String::from_utf8(decode_base64(value[BASIC.len()..].trim())?).ok()?;
+    let (run, token) = decoded.split_once(':')?;
+    Some((run.to_owned(), token.to_owned()))
+}
+
+/// The bytes of standard base64 (padding optional); `None` for any other
+/// character.
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let mut bits = 0u32;
+    let mut count = 0;
+    let mut out = Vec::new();
+    for byte in text.trim_end_matches('=').bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+            bits &= (1 << count) - 1;
+        }
+    }
+    Some(out)
+}
+
+/// A package registry's host the queue broker passes a `CONNECT` to: one
+/// entry of the registries of `dagq.toml`, written `<host>` (HTTPS's port,
+/// [`REGISTRY_DEFAULT_PORT`]) or `<host>:<port>`. The host is a DNS name or
+/// an IPv4 address (letters, digits, `-` and `.`), matched without case;
+/// no scheme, path, user or wildcard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryHost {
+    pub host: String,
+    pub port: u16,
+}
+
+impl std::str::FromStr for RegistryHost {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let (host, port) = match text.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (text, None),
+        };
+        let valid = port.is_none_or(|port| port.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+            && !host.is_empty()
+            && host.len() <= 253
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            });
+        if !valid {
+            return Err(format!(
+                "{text:?} is not a host or <host>:<port> (letters, digits, '-' and '.'; no scheme, path or wildcard)"
+            ));
+        }
+        let port = match port {
+            Some(port) => port
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .ok_or_else(|| format!("{text:?} names no port 1 to 65535 after its ':'"))?,
+            None => REGISTRY_DEFAULT_PORT,
+        };
+        Ok(Self {
+            host: host.to_ascii_lowercase(),
+            port,
+        })
+    }
+}
+
+impl std::fmt::Display for RegistryHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.port == REGISTRY_DEFAULT_PORT {
+            f.write_str(&self.host)
+        } else {
+            write!(f, "{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// Where a tunnel may go: the registries `dagq.toml` names in the main
+/// checkout the queue is bound to (none for a queue bound to none), and the
+/// hosts of that repository's git remotes (the upstream a run's clone
+/// came from).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Egress {
+    pub registries: Vec<RegistryHost>,
+    pub upstream_git_hosts: Vec<String>,
+}
+
+string_enum!(
+    /// Why a `CONNECT` was refused: the `reason` of `queue_broker_denied`,
+    /// spelled as each variant's text; the client reads
+    /// `forbidden_destination`.
+    TunnelRefusal {
+    /// The registries of `dagq.toml` do not name the host and port (none
+    /// are named by default).
+    NotAllowed => "not_allowed",
+    /// The registries name the host of an upstream git remote, which is
+    /// never passed: a run has no way to push (ADR-t2113-2 decision 3).
+    UpstreamGitHost => "upstream_git_host",
+    /// The host is a destination of the runtime's own
+    /// ([`CLAUDE_API_HOST`]), never a tunnel's.
+    BuiltinDestination => "builtin_destination",
+});
+
+impl TunnelRefusal {
+    /// What the answer says of the refusal of a tunnel to `host`:`port`.
+    pub fn message(self, host: &str, port: u16) -> String {
+        match self {
+            Self::NotAllowed => format!(
+                "the registries of dagq.toml's [egress] in the main checkout do not name {host}:{port}"
+            ),
+            Self::UpstreamGitHost => format!(
+                "dagq.toml's [egress] registries name {host}, the host of an upstream git remote of the repository; the queue broker never passes it, so a run has no way to push"
+            ),
+            Self::BuiltinDestination => format!(
+                "{host} is a destination of the runtime's own and is never a tunnel's, whatever dagq.toml's [egress] registries name"
+            ),
+        }
+    }
+}
+
+/// Whether a tunnel to `host`:`port` may open on `egress`: only to a
+/// registry it names that is neither an upstream git remote's host nor
+/// the Claude API's.
+pub fn judge_tunnel(egress: &Egress, host: &str, port: u16) -> Result<(), TunnelRefusal> {
+    let host = host.to_ascii_lowercase();
+    if host == CLAUDE_API_HOST {
+        return Err(TunnelRefusal::BuiltinDestination);
+    }
+    let named = egress
+        .registries
+        .iter()
+        .any(|registry| registry.host == host && registry.port == port);
+    if egress
+        .upstream_git_hosts
+        .iter()
+        .any(|upstream| upstream.eq_ignore_ascii_case(&host))
+    {
+        return Err(if named {
+            TunnelRefusal::UpstreamGitHost
+        } else {
+            TunnelRefusal::NotAllowed
+        });
+    }
+    if named {
+        Ok(())
+    } else {
+        Err(TunnelRefusal::NotAllowed)
+    }
+}
+
+/// The host a git remote's `url` names: of `scheme://[user@]host[:port]/...`
+/// or of the scp-like `[user@]host:path`; `None` for a local path or a
+/// `file://` URL.
+pub fn git_remote_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let authority = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            if scheme.eq_ignore_ascii_case("file") {
+                return None;
+            }
+            rest.split('/').next().unwrap_or(rest)
+        }
+        None => {
+            let (before, _) = url.split_once(':')?;
+            // A path with a ':' after a '/' is a local path, not scp-like.
+            if before.contains('/') {
+                return None;
+            }
+            before
+        }
+    };
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map_or(rest, |(inside, _)| inside),
+        None => strip_port(authority),
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
 
 /// Whether `principal`, the one the request's token was issued for, may
 /// send a request for `run` through the broker, its run being in `status`
@@ -302,11 +579,13 @@ pub fn watch_step(
 }
 
 /// The broker refused a request: a queue event, written by the broker on
-/// the DB, with the `run` the request named (null without one), the
-/// `destination` ([`Destination::name`]), the `method`, the `reason` (a
-/// [`TokenRefusal`], `not_allowed`, `bad_body`, `malformed`, or the error of
-/// a service that did not answer or a token that could not be read) and
-/// the `code`; and `token_run`, the token's run, when that is another.
+/// the DB, with the `run` the request named (null without one; a
+/// `CONNECT`'s from its proxy credentials), the `destination`
+/// ([`Destination::name`]), the `method`, the `reason` (a [`TokenRefusal`],
+/// a [`TunnelRefusal`], `egress_unreadable` (the registries could not be
+/// read), `bad_body`, `malformed`, or the error of a service or a tunnel's
+/// host that did not answer or of a token that could not be read) and the
+/// `code`; and `token_run`, the token's run, when that is another.
 pub const QUEUE_BROKER_DENIED: &str =
     crate::domain::event_kind::EventKind::QueueBrokerDenied.as_str();
 /// The supervisor could not keep the broker running: the inbox's attention
@@ -373,9 +652,27 @@ mod tests {
                 Destination::Health
             );
         }
+        // A `CONNECT` with a port is a tunnel, its host without case and
+        // without a user and password.
+        for (target, host, port) in [
+            ("crates.io:443", "crates.io", 443),
+            ("Static.Crates.IO:8443", "static.crates.io", 8443),
+            ("user:secret@crates.io:443", "crates.io", 443),
+            ("127.0.0.1:9", "127.0.0.1", 9),
+        ] {
+            let destination = Destination::of("CONNECT", target, Some("ignored"));
+            assert_eq!(
+                destination,
+                Destination::Tunnel {
+                    host: host.to_owned(),
+                    port
+                }
+            );
+            assert_eq!(destination.name(), host);
+        }
         for (method, target, host, named) in [
-            ("CONNECT", "crates.io:443", None, "crates.io"),
-            ("CONNECT", "static.crates.io:443", None, "static.crates.io"),
+            ("CONNECT", "crates.io", None, "crates.io"),
+            ("CONNECT", "crates.io:https", None, "crates.io:https"),
             (
                 "POST",
                 "/v1/messages",
@@ -405,7 +702,7 @@ mod tests {
                 None,
                 "example.com",
             ),
-            ("CONNECT", "user:secret@crates.io:443", None, "crates.io"),
+            ("CONNECT", "user:secret@crates.io", None, "crates.io"),
             ("GET", "/other?key=secret#frag", None, "GET /other"),
         ] {
             let destination = Destination::of(method, target, host);
@@ -454,6 +751,144 @@ mod tests {
                 judge_run_token(&principal, "r1", Some(RunStatus::Running)),
                 Err(TokenRefusal::NotARunToken)
             );
+        }
+    }
+
+    #[test]
+    fn a_tunnel_passes_only_to_a_registry_dagq_toml_names() {
+        let registries: Vec<RegistryHost> = ["crates.io", "index.crates.io:8443", "github.com"]
+            .iter()
+            .map(|entry| entry.parse().unwrap())
+            .collect();
+        // None named, by default: every tunnel is refused.
+        assert_eq!(
+            judge_tunnel(&Egress::default(), "crates.io", 443),
+            Err(TunnelRefusal::NotAllowed)
+        );
+        let egress = Egress {
+            registries,
+            upstream_git_hosts: vec!["github.com".into(), "gitlab.example".into()],
+        };
+        assert_eq!(judge_tunnel(&egress, "crates.io", 443), Ok(()));
+        assert_eq!(judge_tunnel(&egress, "Crates.IO", 443), Ok(()));
+        assert_eq!(judge_tunnel(&egress, "index.crates.io", 8443), Ok(()));
+        for (host, port) in [
+            ("crates.io", 80),
+            ("index.crates.io", 443),
+            ("static.crates.io", 443),
+            ("example.com", 443),
+            ("gitlab.example", 443),
+        ] {
+            assert_eq!(
+                judge_tunnel(&egress, host, port),
+                Err(TunnelRefusal::NotAllowed),
+                "{host}:{port}"
+            );
+        }
+        // An upstream git remote's host named in dagq.toml is refused, and
+        // the answer says why.
+        let refusal = judge_tunnel(&egress, "github.com", 443).unwrap_err();
+        assert_eq!(refusal, TunnelRefusal::UpstreamGitHost);
+        assert_eq!(refusal.as_str(), "upstream_git_host");
+        let message = refusal.message("github.com", 443);
+        assert!(message.contains("upstream git remote"), "{message}");
+        assert!(message.contains("push"), "{message}");
+        // The Claude API's host is never a tunnel's, even when named.
+        let anthropic = Egress {
+            registries: vec![CLAUDE_API_HOST.parse().unwrap()],
+            upstream_git_hosts: Vec::new(),
+        };
+        assert_eq!(
+            judge_tunnel(&anthropic, CLAUDE_API_HOST, 443),
+            Err(TunnelRefusal::BuiltinDestination)
+        );
+        assert!(TunnelRefusal::NotAllowed.message("x", 1).contains("x:1"));
+    }
+
+    #[test]
+    fn a_registry_is_a_host_with_an_optional_port() {
+        assert_eq!(
+            "Crates.io".parse::<RegistryHost>(),
+            Ok(RegistryHost {
+                host: "crates.io".into(),
+                port: 443
+            })
+        );
+        let local: RegistryHost = "127.0.0.1:8080".parse().unwrap();
+        assert_eq!((local.host.as_str(), local.port), ("127.0.0.1", 8080));
+        assert_eq!(local.to_string(), "127.0.0.1:8080");
+        assert_eq!(
+            "crates.io:443".parse::<RegistryHost>().unwrap().to_string(),
+            "crates.io"
+        );
+        for bad in [
+            "",
+            "https://crates.io",
+            "crates.io/api",
+            "*.crates.io",
+            "crates.io:0",
+            "crates.io:x",
+            "user@crates.io",
+            "-a.io",
+            "a..io",
+        ] {
+            assert!(bad.parse::<RegistryHost>().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_host_of_a_git_remote_is_read_from_each_form_of_its_url() {
+        for (url, host) in [
+            ("git@github.com:o/r.git", Some("github.com")),
+            ("https://GitHub.com/o/r.git", Some("github.com")),
+            (
+                "https://user:pw@gitlab.example:8443/o/r",
+                Some("gitlab.example"),
+            ),
+            ("ssh://git@git.example:2222/o/r.git", Some("git.example")),
+            ("git://[::1]:9418/r", Some("::1")),
+            ("host.example:r.git", Some("host.example")),
+            ("/srv/git/r.git", None),
+            ("./a:b", None),
+            ("file:///srv/git/r.git", None),
+            ("r.git", None),
+        ] {
+            assert_eq!(git_remote_host(url).as_deref(), host, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_verification_token_holds_for_its_own_live_run_only() {
+        let run = RunId::new("r1").unwrap();
+        assert_eq!(
+            judge_verification_token(&run, "r1", Some(RunStatus::Integrating)),
+            Ok(())
+        );
+        assert_eq!(
+            judge_verification_token(&run, "r2", Some(RunStatus::Integrating)),
+            Err(TokenRefusal::OtherRun)
+        );
+        for ended in [Some(RunStatus::Integrated), Some(RunStatus::Failed), None] {
+            assert_eq!(
+                judge_verification_token(&run, "r1", ended),
+                Err(TokenRefusal::RunEnded)
+            );
+        }
+    }
+
+    #[test]
+    fn basic_credentials_carry_the_run_and_the_token() {
+        // base64 of "r1:tok:en" and of "r1" (no ':').
+        assert_eq!(
+            basic_credentials("basic cjE6dG9rOmVu"),
+            Some(("r1".into(), "tok:en".into()))
+        );
+        assert_eq!(
+            basic_credentials("Basic cjE6dA=="),
+            Some(("r1".into(), "t".into()))
+        );
+        for value in ["Basic cjE=", "Bearer cjE6dA==", "Basic !!", "Bas"] {
+            assert_eq!(basic_credentials(value), None, "{value}");
         }
     }
 
