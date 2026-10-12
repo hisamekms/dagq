@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Count the docs metrics of goal 159 (tasks 1946, 1966 and 2289) for a period [since, until).
+"""Count the docs metrics of goals 159 and 194 (tasks 1946, 1966, 2289 and 2356) for a period [since, until).
 
 Read-only: it reads main's Git history, a `dagq stats --since` JSON file,
 Claude Code's transcripts and `dagq events --full` JSON files, and prints JSON
@@ -170,6 +170,21 @@ DRIFT_KINDS = (
                "still names", "still lists", "does not record", "doesn't record", "missing", "not updated")),
 )
 DRIFT_OTHER = "other"
+# M7: the kinds read (2026-10-13: review_started and run_integrated from
+# src/application/supervise/, review_finished as for M6 with `verdict` and,
+# when review agents ran, `route` whose `destination` is send_back, ask or
+# land (src/domain/review_subagents.rs)).
+REVIEW_STARTED = "review_started"
+RUN_INTEGRATED = "run_integrated"
+SEND_BACK = "send_back"
+# A path a reason names that makes it a docs reason: one under docs/, a .md
+# under plugins/, the root AGENTS.md or README.md. It starts a word: not after
+# a letter, digit, `_`, `.`, `-` or `/` (so not src/docs/ nor a/README.md);
+# a leading ./ is allowed. The letters are ASCII: Japanese text may touch a
+# path.
+DOC_PATH = re.compile(r"(?<![A-Za-z0-9_./-])(?:\./)?(?:docs/[A-Za-z0-9_./-]+"
+                      r"|plugins/[A-Za-z0-9_./-]*\.md(?![A-Za-z0-9_])|AGENTS\.md(?![A-Za-z0-9_])"
+                      r"|README\.md(?![A-Za-z0-9_]))")
 DATE_LINE = re.compile(r"(updated|last_verified|created):")
 LIST_LINE = re.compile(r"\s*([-*] |\d+\. )")
 
@@ -802,6 +817,125 @@ def m6(paths, since, until):
     }
 
 
+# --- M7 -------------------------------------------------------------------
+
+
+def names_doc(text):
+    """Whether a reason's text names a docs path (DOC_PATH)."""
+    return isinstance(text, str) and DOC_PATH.search(text) is not None
+
+
+def doc_reasons(payload):
+    """For each reason of a review_finished, whether it is a docs reason, and
+    the shape of its `reason_codes`: missing (no list), shorter or longer than
+    `reasons`, and how many of its items for a reason are no list."""
+    reasons = payload.get("reasons")
+    reasons = reasons if isinstance(reasons, list) else []
+    codes = payload.get("reason_codes")
+    shape = {"missing": not isinstance(codes, list), "short": False, "long": False, "not_list": 0}
+    if not isinstance(codes, list):
+        codes = []
+    else:
+        shape["short"] = len(codes) < len(reasons)
+        shape["long"] = len(codes) > len(reasons)
+    docs = []
+    for index, text in enumerate(reasons):
+        item = codes[index] if index < len(codes) else None
+        if index < len(codes) and not isinstance(item, list):
+            shape["not_list"] += 1
+        docs.append((isinstance(item, list) and DOCS_DRIFT in item) or names_doc(text))
+    return docs, shape
+
+
+def send_back(payload):
+    """`send_back` by the route, `revise` by the verdict without one, or None."""
+    route = payload.get("route")
+    if isinstance(route, dict):
+        return "route" if route.get("destination") == SEND_BACK else None
+    return "verdict" if payload.get("verdict") == "revise" else None
+
+
+def waits(values, cut):
+    return {"count": len(values), "cut": cut, "sum_secs": round(sum(values), 3),
+            "sum_hours": round(sum(values) / 3600, 1), "median_secs": median(values)}
+
+
+def m7(paths, stats_path, since, until):
+    days = (until - since).total_seconds() / 86400
+    reviews, started, landings = [], defaultdict(list), 0
+    for event in load_events(paths):
+        at = event.get("created_at")
+        if not isinstance(at, str) or not since <= parse_time(at) < until:
+            continue
+        key = (parse_time(at), event["id"])
+        if event.get("kind") == REVIEW_KIND:
+            reviews.append((key, event))
+        elif event.get("kind") == REVIEW_STARTED and event.get("run_id") is not None:
+            started[event.get("run_id")].append(key)
+        elif event.get("kind") == RUN_INTEGRATED:
+            landings += 1
+    runs = {event.get("run_id") for _, event in reviews if event.get("run_id") is not None}
+    counts = {"all": 0, "docs_any": 0, "docs_only": 0}
+    by = {"route": 0, "verdict": 0}
+    concern, no_reasons = 0, 0
+    shapes = {"codes_missing": 0, "codes_short": 0, "codes_long": 0, "code_items_not_list": 0}
+    durations = {name: [] for name in counts}
+    cut = {name: 0 for name in counts}
+    for key, event in reviews:
+        payload = event.get("payload") or {}
+        how = send_back(payload)
+        if how is None:
+            concern += payload.get("verdict") == "concern" and not isinstance(payload.get("route"), dict)
+            continue
+        by[how] += 1
+        docs, shape = doc_reasons(payload)
+        shapes["codes_missing"] += shape["missing"]
+        shapes["codes_short"] += shape["short"]
+        shapes["codes_long"] += shape["long"]
+        shapes["code_items_not_list"] += shape["not_list"]
+        no_reasons += not docs
+        groups = ["all"] + (["docs_any"] if any(docs) else []) + (["docs_only"] if docs and all(docs) else [])
+        run = event.get("run_id")
+        later = [k for k in started.get(run, []) if k > key] if run is not None else []
+        for name in groups:
+            counts[name] += 1
+            if later:
+                durations[name].append((min(later)[0] - key[0]).total_seconds())
+            else:
+                cut[name] += 1
+    work = None
+    if stats_path:
+        with open(stats_path) as f:
+            stats = json.load(f)
+        values = [r["work"] for r in stats.get("runs") or [] if isinstance(r, dict)
+                  and isinstance(r.get("work"), (int, float))]
+        work = {"field": "runs[].work", "runs": len(values), "median_secs": median(values)}
+    review_count = len(reviews)
+    wait = {name: waits(durations[name], cut[name]) for name in counts}
+    per_day = lambda n: round(n / days, 2)
+    return {
+        "days": round(days, 2),
+        "reviews": {"events": review_count, "runs": len(runs)},
+        "send_backs": {**counts, "by_route": by["route"], "by_verdict": by["verdict"],
+                       "without_reasons": no_reasons},
+        "concern_without_route": concern,
+        "reason_codes": shapes,
+        "waits": wait,
+        "landings": landings,
+        "worker_work": work,
+        "per_review": {"send_backs": ratio(counts["all"], review_count),
+                       "docs_any": ratio(counts["docs_any"], review_count),
+                       "docs_only": ratio(counts["docs_only"], review_count)},
+        "per_landing": {"reviews": ratio(review_count, landings),
+                        "wait_hours": ratio(wait["all"]["sum_secs"] / 3600, landings),
+                        "docs_any_wait_hours": ratio(wait["docs_any"]["sum_secs"] / 3600, landings),
+                        "docs_only_wait_hours": ratio(wait["docs_only"]["sum_secs"] / 3600, landings)},
+        "per_day": {"reviews": per_day(review_count), "send_backs": per_day(counts["all"]),
+                    "docs_any": per_day(counts["docs_any"]), "docs_only": per_day(counts["docs_only"]),
+                    "wait_hours": per_day(wait["all"]["sum_secs"] / 3600), "landings": per_day(landings)},
+    }
+
+
 # --- output ---------------------------------------------------------------
 
 
@@ -879,6 +1013,34 @@ def markdown(out):
             + table(["kind", "events", "share"],
                     [[name, k["events"], k["share"]] for name, k in m["kinds"].items()]
                     + [["total", p["events"], None]]))
+    if out.get("m7"):
+        m = out["m7"]
+        s, w, c = m["send_backs"], m["waits"], m["reason_codes"]
+        work = m["worker_work"] or {}
+        parts.append("## M7 run reviews, send-backs and their waits\n\n" + table(
+            ["days", "reviews", "runs", "send-backs", "with docs", "docs only", "by route", "by verdict",
+             "without reasons", "concern without route", "landings", "worker work runs", "work median secs"],
+            [[m["days"], m["reviews"]["events"], m["reviews"]["runs"], s["all"], s["docs_any"], s["docs_only"],
+              s["by_route"], s["by_verdict"], s["without_reasons"], m["concern_without_route"], m["landings"],
+              work.get("runs"), work.get("median_secs")]])
+            + "\n\nWaits from a send-back to its run's next review_started (cut ones left out)\n\n"
+            + table(["send-backs", "waits", "cut", "hours", "median secs", "hours per landing"],
+                    [[name, w[name]["count"], w[name]["cut"], w[name]["sum_hours"], w[name]["median_secs"],
+                      m["per_landing"][key]]
+                     for name, key in (("all", "wait_hours"), ("docs_any", "docs_any_wait_hours"),
+                                       ("docs_only", "docs_only_wait_hours"))])
+            + "\n\nPer review, per landing and per day\n\n"
+            + table(["send-backs per review", "with docs per review", "docs only per review",
+                     "reviews per landing", "reviews per day", "send-backs per day", "with docs per day",
+                     "docs only per day",
+                     "wait hours per day", "landings per day"],
+                    [[m["per_review"]["send_backs"], m["per_review"]["docs_any"], m["per_review"]["docs_only"],
+                      m["per_landing"]["reviews"], m["per_day"]["reviews"], m["per_day"]["send_backs"],
+                      m["per_day"]["docs_any"], m["per_day"]["docs_only"], m["per_day"]["wait_hours"],
+                      m["per_day"]["landings"]]])
+            + "\n\nreason_codes of the send-backs\n\n"
+            + table(["missing", "shorter than reasons", "longer than reasons", "items not a list"],
+                    [[c["codes_missing"], c["codes_short"], c["codes_long"], c["code_items_not_list"]]]))
     return "\n\n".join(parts) + "\n"
 
 
@@ -897,8 +1059,12 @@ def main():
     parser.add_argument("--review-events", nargs="+", action="extend", default=[],
                         help="files with the JSON of `dagq events --full --kind review_finished` (M6); "
                              "an event id in several files counts once")
-    parser.add_argument("--metrics", default="m1,m2,m3,m4,m5,m6",
-                        help="comma-separated metrics; M3, M4, M5 and M6 also need their input")
+    parser.add_argument("--run-events", nargs="+", action="extend", default=[],
+                        help="files with the JSON of `dagq events --full --kind review_finished --kind "
+                             "review_started --kind run_integrated` (M7, with --stats for the worker time); "
+                             "an event id in several files counts once")
+    parser.add_argument("--metrics", default="m1,m2,m3,m4,m5,m6,m7",
+                        help="comma-separated metrics; M3, M4, M5, M6 and M7 also need their input")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     args = parser.parse_args()
     if args.input:
@@ -912,7 +1078,7 @@ def main():
         sys.exit("docs-metrics: --since must be before --until")
     wanted = set(args.metrics.split(","))
     out = {"since": iso(since), "until": iso(until), "ref": args.ref,
-           "m1": None, "m2": None, "m3": None, "m4": None, "m5": None, "m6": None}
+           "m1": None, "m2": None, "m3": None, "m4": None, "m5": None, "m6": None, "m7": None}
     if "m1" in wanted:
         out["m1"] = m1(args.repo, args.ref, since, until)
     if "m2" in wanted:
@@ -925,6 +1091,8 @@ def main():
         out["m5"] = m5(args.repo, args.events, since, until)
     if "m6" in wanted and args.review_events:
         out["m6"] = m6(args.review_events, since, until)
+    if "m7" in wanted and args.run_events:
+        out["m7"] = m7(args.run_events, args.stats, since, until)
     if args.format == "json":
         json.dump(out, sys.stdout, indent=2, ensure_ascii=False)
         print()

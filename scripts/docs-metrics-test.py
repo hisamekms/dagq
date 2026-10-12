@@ -20,6 +20,14 @@ event per kind, a text matching the budget and architecture.md kinds,
 docs_drift on the second reason, missing reason_codes, docs_drift only past the
 primary code, an event id in both files, the period's two ends and a run with
 several events.
+M7 reads review_finished, review_started and run_integrated events written as
+two files, in the payload judge_review records (`reasons` texts and
+`reason_codes` by the same index), and a stats JSON: a send-back by route and
+one by verdict, a route to ask on a revise, a concern without a route, docs
+reasons by a code alone and by a named path alone, missing, shorter and longer
+`reason_codes` and an item that is no list, send-backs mixing docs and other
+reasons and one without reasons, waits ended by the next review_started and
+cut at the period's end, an event id in both files and the period's two ends.
 """
 
 import importlib.util
@@ -370,6 +378,144 @@ def check_m6(base):
     return files
 
 
+def check_m7(base):
+    missing = object()
+
+    def finished(id, run, at, verdict, reasons, codes=missing, route=None):
+        payload = {"verdict": verdict, "reasons": reasons, "primary_code": None, "summary": "s",
+                   "attempt": 1, "reason_category": None}
+        if codes is not missing:
+            payload["reason_codes"] = codes
+        if route is not None:
+            payload["route"] = {"destination": route, "parent": verdict, "parent_lighter": False, "agents": []}
+        return {"id": id, "run_id": run, "kind": "review_finished", "created_at": at, "payload": payload}
+
+    def plain(id, kind, run, at):
+        return {"id": id, "run_id": run, "kind": kind, "created_at": at, "payload": {"attempt": 1}}
+
+    rs, ri, dd = "review_started", "run_integrated", "docs_drift"
+    first = [
+        plain(1, rs, "r1", "2026-10-01T00:00:00.000Z"),  # on the period's start
+        finished(2, "r1", "2026-10-01T01:00:00.000Z", "revise", ["Fails a test."], [["test_gap"]]),
+        plain(3, rs, "r1", "2026-10-01T02:00:00.000Z"),  # #2 waits 3600
+        finished(4, "r1", "2026-10-01T03:00:00.000Z", "pass", [], []),
+        plain(5, ri, "r1", "2026-10-01T04:00:00.000Z"),
+        # By route though a concern; docs_drift by the code alone and a path alone: docs only.
+        finished(6, "r2", "2026-10-01T01:00:00.000Z", "concern",
+                 ["The flag list is stale.", "`docs/design/queue.md` still names X."],
+                 [[dd], ["acceptance_gap"]], route="send_back"),
+        plain(7, rs, "r2", "2026-10-01T01:30:00.000Z"),  # #6 waits 1800
+        # A revise the route sends to ask: no send-back.
+        finished(8, "r2", "2026-10-01T02:00:00.000Z", "revise", ["docs/x.md"], [[dd]], route="ask"),
+        # No reason_codes: AGENTS.md by its text, with a src/ reason; no next review: cut.
+        finished(9, "r3", "2026-10-01T05:00:00.000Z", "revise", ["Update AGENTS.md.", "Fix src/x.rs."]),
+        # Fewer codes than reasons: the plugin .md by its text, two others.
+        finished(10, "r4", "2026-10-01T06:00:00.000Z", "revise",
+                 ["See plugins/claude-dagq/skills/dagq/SKILL.md.", "Wrong.", "Also wrong."], [["acceptance_gap"]]),
+        plain(11, rs, "r4", "2026-10-01T07:00:00.000Z"),  # #10 waits 3600
+        # More codes than reasons: the extra docs_drift is no reason; docs only by the code.
+        finished(12, "r5", "2026-10-01T08:00:00.000Z", "revise", ["Rename x."], [[dd], [dd]]),
+        plain(13, rs, "r5", "2026-10-01T10:00:00.000Z"),  # #12 waits 7200
+    ]
+    second = [
+        finished(2, "r1", "2026-10-01T01:00:00.000Z", "revise", ["Fails a test."], [["test_gap"]]),  # same id
+        # An item that is no list: README.md by its text; src/docs/ names no docs path.
+        finished(14, "r6", "2026-10-01T09:00:00.000Z", "revise", ["README.md is stale.", "src/docs/x is wrong."],
+                 [dd, ["test_gap"]]),
+        plain(15, rs, "r6", "2026-10-03T00:00:00.000Z"),  # on the period's end: #14 is cut
+        finished(16, "r7", "2026-10-01T10:00:00.000Z", "concern", ["Unsure."], [["other"]]),
+        finished(17, "r8", "2026-10-01T11:00:00.000Z", "revise", [], []),  # no reasons
+        plain(18, rs, "r8", "2026-10-01T11:00:00.500Z"),  # #17 waits 0.5
+        finished(19, "r9", "2026-09-30T23:59:59.999Z", "revise", ["docs/a.md"], [[dd]]),  # before the period
+        plain(20, ri, "r9", "2026-10-03T00:00:00.000Z"),  # on the period's end
+        plain(21, ri, "r5", "2026-10-02T23:59:59.999Z"),
+        plain(22, rs, "r3", "2026-09-30T23:00:00.000Z"),  # before the period and #9
+        {"id": 23, "run_id": "r1", "kind": "run_started", "created_at": "2026-10-01T00:00:00.000Z", "payload": {}},
+    ]
+    files = []
+    for n, events in enumerate((first, second)):
+        files.append(os.path.join(base, f"events-run-{n}.json"))
+        with open(files[-1], "w") as f:
+            json.dump({"cursor": 99, "events": events} if n == 0 else events, f)
+    stats = os.path.join(base, "stats-m7.json")
+    with open(stats, "w") as f:
+        json.dump({"runs": [{"run_id": "a", "work": 100}, {"run_id": "b", "work": 300},
+                            {"run_id": "c", "work": None}, {"run_id": "d", "work": 200}, {"run_id": "e"}]}, f)
+    out = run("--since", "2026-10-01", "--until", "2026-10-03", "--metrics", "m7", "--run-events", *files,
+              "--stats", stats)
+    if not out:
+        return None
+    m = out["m7"]
+    check("m7 not m3", out["m3"], None)
+    check("m7 reviews", (m["days"], m["reviews"]), (2.0, {"events": 10, "runs": 8}))
+    check("m7 send-backs", m["send_backs"], {"all": 7, "docs_any": 5, "docs_only": 2, "by_route": 1,
+                                             "by_verdict": 6, "without_reasons": 1})
+    check("m7 concern without route", m["concern_without_route"], 1)
+    check("m7 reason_codes", m["reason_codes"],
+          {"codes_missing": 1, "codes_short": 1, "codes_long": 1, "code_items_not_list": 1})
+    check("m7 waits", m["waits"], {
+        "all": {"count": 5, "cut": 2, "sum_secs": 16200.5, "sum_hours": 4.5, "median_secs": 3600.0},
+        "docs_any": {"count": 3, "cut": 2, "sum_secs": 12600.0, "sum_hours": 3.5, "median_secs": 3600.0},
+        "docs_only": {"count": 2, "cut": 0, "sum_secs": 9000.0, "sum_hours": 2.5, "median_secs": 4500.0},
+    })
+    check("m7 landings", m["landings"], 2)
+    check("m7 worker work", m["worker_work"], {"field": "runs[].work", "runs": 3, "median_secs": 200})
+    check("m7 per review", m["per_review"], {"send_backs": 0.7, "docs_any": 0.5, "docs_only": 0.2})
+    check("m7 per landing", m["per_landing"],
+          {"reviews": 5.0, "wait_hours": 2.2501, "docs_any_wait_hours": 1.75, "docs_only_wait_hours": 1.25})
+    check("m7 per day", m["per_day"], {"reviews": 5.0, "send_backs": 3.5, "docs_any": 2.5, "docs_only": 1.0,
+                                       "wait_hours": 2.25, "landings": 1.0})
+    out = run("--since", "2026-10-01", "--until", "2026-10-03", "--metrics", "m7", "--run-events", *files)
+    if out:
+        check("m7 without stats", out["m7"]["worker_work"], None)
+    out = run("--since", "2026-10-01", "--until", "2026-10-03", "--metrics", "m7")
+    if out:
+        check("m7 without run events", out["m7"], None)
+    # The start is inclusive and the end exclusive: from #6 on, #2 and #5 are out.
+    out = run("--since", "2026-10-01T01:00:00.001Z", "--until", "2026-10-01T05:00:00Z", "--metrics", "m7",
+              "--run-events", *files)
+    if out:
+        check("m7 short period", (out["m7"]["reviews"]["events"], out["m7"]["send_backs"]["all"],
+                                  out["m7"]["landings"]), (2, 0, 1))
+    # Events without a run_id: the send-back's wait does not end at another's review_started.
+    lone = os.path.join(base, "events-run-lone.json")
+    with open(lone, "w") as f:
+        json.dump([{**finished(30, None, "2026-10-04T01:00:00.000Z", "revise", ["x"], [["test_gap"]])},
+                   {"id": 31, "kind": rs, "created_at": "2026-10-04T02:00:00.000Z", "payload": {}}], f)
+    out = run("--since", "2026-10-04", "--until", "2026-10-05", "--metrics", "m7", "--run-events", lone)
+    if out:
+        check("m7 without run_id", (out["m7"]["reviews"], out["m7"]["waits"]["all"]["cut"]),
+              ({"events": 1, "runs": 0}, 1))
+    return files
+
+
+def check_m7_rules():
+    spec = importlib.util.spec_from_file_location("docs_metrics", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    names = module.names_doc
+    for text, want in (("`docs/design/x.md` is stale", True), ("see ./docs/a.md", True),
+                       ("src/docs/a.md", False), ("docs/ alone", False), ("plugins/a/b.txt", False),
+                       ("plugins/x/SKILL.md.", True), ("AGENTS.mdx", False), ("AGENTS.md", True),
+                       ("foo/README.md", False), ("README.md の節", True), ("AGENTS.mdを更新", True),
+                       ("設計はdocs/design/x.mdに", True), ("plugins/a/SKILL.mdの節", True), (None, False)):
+        check(f"names_doc {text!r}", names(text), want)
+    docs = module.doc_reasons
+    check("doc_reasons codes alone", docs({"reasons": ["x", "y"], "reason_codes": [["docs_drift"], []]}),
+          ([True, False], {"missing": False, "short": False, "long": False, "not_list": 0}))
+    check("doc_reasons not a list", docs({"reasons": ["docs/a", "y"], "reason_codes": "docs_drift"}),
+          ([True, False], {"missing": True, "short": False, "long": False, "not_list": 0}))
+    check("doc_reasons no reasons", docs({"reason_codes": [["docs_drift"]]}),
+          ([], {"missing": False, "short": False, "long": True, "not_list": 0}))
+    check("doc_reasons item not a list", docs({"reasons": ["x"], "reason_codes": [None]}),
+          ([False], {"missing": False, "short": False, "long": False, "not_list": 1}))
+    send = module.send_back
+    check("send_back route wins", (send({"verdict": "revise", "route": {"destination": "land"}}),
+                                   send({"verdict": "pass", "route": {"destination": "send_back"}}),
+                                   send({"verdict": "revise"}), send({"verdict": "concern"})),
+          (None, "route", "verdict", None))
+
+
 def check_drift_rules():
     spec = importlib.util.spec_from_file_location("docs_metrics", SCRIPT)
     module = importlib.util.module_from_spec(spec)
@@ -414,6 +560,12 @@ def main():
         events = check_m5(base, m5_repo) or []
         check_drift_rules()
         reviews = check_m6(base) or []
+        check_m7_rules()
+        run_events = check_m7(base) or []
+        m7 = subprocess.run([sys.executable, SCRIPT, "--since", "2026-10-01", "--until", "2026-10-03",
+                             "--metrics", "m7", "--run-events", *run_events], capture_output=True, text=True)
+        check("markdown has M7", "## M7" in m7.stdout and "| docs_only | 2 | 0 | 2.5 | 4500 | 1.25 |" in m7.stdout,
+              True)
         m6 = subprocess.run([sys.executable, SCRIPT, "--since", "2026-10-01", "--until", "2026-10-03",
                              "--metrics", "m6", "--review-events", *reviews], capture_output=True, text=True)
         check("markdown has M6", "## M6" in m6.stdout and "| budget | 2 | 0.2222 |" in m6.stdout, True)

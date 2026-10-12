@@ -31,6 +31,7 @@ tags:
 - [cmux を inbox だけが使う形の前後の、着地の関門の test 段・e2e の本数と時間・cmux の fake を使う it の数](cmux-inbox-only.md)（goal 92、task 1444）
 - [tests/it の全 1,192 本の分類（境界・判断・代表あり・goal 92 で消える）と、it でないと担保できない test の見積もり](it-reduction.md)（goal 118、task 1706）
 - [docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）の定義と基準値](docs-slim.md)（goal 159、task 1946・1966）
+- [design 文書の削減（A・C）の前後比較に使う run の review の差し戻しの指標（M7）の定義と、比べる区間・参考の値・想定効果](docs-reduction.md)（goal 194）
 - [過去の着地の差分に IT の対応表を当てた、絞った IT の時間と見逃しの測定と、全部流す閾値・共通のファイル・表の古さの上限](landing-it-selection.md)（goal 157、task 1924）
 - [上限を入れた後の本番のobserverのpromptのbyte数と節ごとの大きさ、上限を見直すかの結論](observer-prompt-size.md)（task 1575）
 - [broker の image の build のキャッシュの前後の、着地前の e2e と関門の e2e の時間・broker の e2e の完了順・e2e の待ちの測定と、broker の e2e を差分で絞る案の判断](broker-e2e-image-cache.md)（goal 93、task 1452）
