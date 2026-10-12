@@ -105,7 +105,8 @@ plan_reviews           -- plan review job 1つに1行。未完了は1行まで�
 goal_reviews           -- goal review job 1つに1行。未完了は1行まで（indexでなくBEGIN IMMEDIATEの中の検査）
 headless_jobs          -- headless jobのプロセスと出力。始めたsupervisorが消えた後に別のsupervisorが止め、Executionを数えるため
 planners               -- plannerのsession 1つに1行。workspace_idはruntimeのplannerならbackgroundのwrapperのhandle、人のplannerと古い行はcmux workspace。answer_wait_atは人の答えだけを待って終わる行（ADR-t1704-1）
-plan_requests          -- inboxが記録した計画の依頼。text / note / refsは記録の後に書き換えない（言い直しは新しい依頼）
+plan_requests          -- inboxが記録した計画の依頼。text / note / refsは記録の後に書き換えない（言い直しは新しい依頼）。spike_task_idはSpike起点の依頼（Spikeごとに1件）
+spike_cycles           -- 調査中の計画の周期
 plan_request_proposals -- 依頼から出たproposal
 draft_origins          -- runtimeやjobが作ったdraftの出どころと材料（JSON object）。1つのdraftに1回だけ書く
 draft_reopens          -- plan reviewがreopenしたtaskのproposalを取り下げたときの出どころ
@@ -168,11 +169,11 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 - receiptのfollow_upsの登録は1つのreceiptを1トランザクションで書き、途中で失敗すれば全部を巻き戻す。
 - 対象（`planner_drafts`）は、閉じていないplannerも未closeの質問も依頼の参照も無く、使い切っていないdraftをID順に返す。
   同じ束の鍵を持つdraftは、その束のplannerが閉じるまで待つ。
-- 立てる（`open_draft_planner`）は、対象であることをトランザクションの中で再検査してから行を作るので、2つのsupervisorが同じdraftに立てない。
-- 結末: plannerを閉じたトランザクションの中で、束のdraftごとに今のtaskの状態から結末を決めて書く（`settle_bundle`）。
-- 人の答え待ちの印（`planner_answer_wait`）はaskが未回答か配送に失敗したときだけ書き、印の付いた行は回答の行き先とdraft・finding・依頼の上限の数から外れる（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)）。
-- 回答の行き先（`planner_answer_route`）は、生きているplanner・新しいplanner・人・閉じるのどれかで、`answer`も同じ判定で`runtime_delivers`を書く。
-  依頼のplannerが作り由来もproposalも持たないdraftの回答は、依頼の回答の経路に乗せる（`request_of_draft`。作成のeventのactorで依頼を引く、[ADR-t2015-1](../adr/2026-10-07-t2015-1-answers-about-a-request-planners-draft-go-the-requests-way.md)）。
+- 立てるのは、対象であることをトランザクションの中で再検査してから行を作るので、2つのsupervisorが同じdraftに立てない。
+- 結末: plannerを閉じたトランザクションの中で、束のdraftごとに今のtaskの状態から結末を決めて書く。
+- 人の答え待ちの印はaskが未回答か配送に失敗したときだけ書き、印の付いた行は回答の行き先とdraft・finding・依頼の上限の数から外れる（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)）。
+- 回答の行き先は、生きているplanner・新しいplanner・人・閉じるのどれかで、`answer`も同じ判定で`runtime_delivers`を書く。
+  依頼のplannerが作り由来もproposalも持たないdraftの回答は、依頼の回答の経路に乗せる（作成のeventのactorで依頼を引く、[ADR-t2015-1](../adr/2026-10-07-t2015-1-answers-about-a-request-planners-draft-go-the-requests-way.md)）。
 - runtimeのplannerがfollow-upをsubmitできる深さの上限は[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)で、`proposals::submit`の中の`check_adoptions`が拒む。
 
 ### planning requests（`plan_requests.rs`）

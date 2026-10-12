@@ -16,12 +16,12 @@ use super::{
 };
 use crate::application::{PlanRequestStore, PlannerAnswerRoute, RequestPlannerStart};
 use crate::domain::{
-    Ask, AskId, EventId, PlannerId, PlannerOrigin, PlannerSession, Priority, ProposalId, RequestId,
-    RunEvent, Submission,
+    Ask, AskId, EventId, GoalId, PlannerId, PlannerOrigin, PlannerSession, Priority, ProposalId,
+    RequestId, RunEvent, Submission, TaskId,
     plan_request::{
         NewPlanRequest, NextRequestPlanner, PlanRequest, ProposalLink, RequestAnswerRoute,
-        RequestStatus, check_decline, next_request_planner, proposal_link, request_answer_route,
-        stale_decliner,
+        RequestStatus, SPIKE_REQUESTED_BY, check_decline, next_request_planner, proposal_link,
+        request_answer_route, spike_request_refs, spike_request_text, stale_decliner,
     },
 };
 
@@ -30,7 +30,10 @@ use crate::domain::{
 /// draft its planner left (ADR-t2015-1, as `request_of_draft` tells one)
 /// nobody closed, and no draft it names (`task:N`) taken by an open planner of
 /// the runtime's for drafts, such as one its revisit time opened: the
-/// request's planner waits for it to end (ADR-t1540-1).
+/// request's planner waits for it to end (ADR-t1540-1). A Spike's request
+/// also waits while a planner of another Spike's request of the same goal
+/// is open: one replans the goal at a time, and the later reads how the
+/// earlier ended (ADR-t1487-1 decision 5).
 const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
     AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.request_id=r.id AND p.closed_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.request_id=r.id
@@ -45,6 +48,10 @@ const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
         AND NOT EXISTS(SELECT 1 FROM draft_reopens d WHERE d.task_id=t.id
             AND json_extract(d.material,'$.proposal_id')=t.proposal_id)
         AND NOT EXISTS(SELECT 1 FROM proposals x WHERE x.id=t.proposal_id AND x.status!='canceled'))
+    AND NOT EXISTS(SELECT 1 FROM plan_requests o JOIN tasks ot ON ot.id=o.spike_task_id
+        JOIN tasks rt ON rt.id=r.spike_task_id AND rt.goal_id=ot.goal_id
+        JOIN planners p ON p.request_id=o.id AND p.closed_at IS NULL
+        WHERE o.id!=r.id)
     AND NOT EXISTS(SELECT 1 FROM json_each(r.refs) j JOIN planners p ON p.closed_at IS NULL
         AND p.origin='runtime' AND (p.draft_task_id=json_extract(j.value,'$.id')
              OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id
@@ -148,6 +155,7 @@ impl SqliteQueue {
                 "planner_id": planner,
                 "reason": reason,
                 "by": by,
+                "spike_task_id": current.spike_task,
             }),
         )?;
         let declined = read_request(&tx, request)?;
@@ -259,6 +267,80 @@ impl PlanRequestStore for SqliteQueue {
     }
 }
 
+/// Record, inside the caller's write transaction, the request of the
+/// Spike `task` that completed (ADR-t1487-1 decision 5): `open`, by the
+/// runtime, referring to the Spike and its goal, with `request_recorded`
+/// (`spike_task_id`). One request per Spike: the insert takes place only
+/// when the Spike has none, which the caller's write transaction keeps
+/// true, so a second call records nothing. `None` when it recorded nothing: the
+/// request is there already, or the task is not a completed Spike.
+pub(super) fn record_spike_request(
+    conn: &Connection,
+    task: TaskId,
+    now: i64,
+) -> Result<Option<RequestId>> {
+    let row: Option<(String, Option<GoalId>)> = conn
+        .query_row(
+            "SELECT title, goal_id FROM tasks WHERE id=?1 AND execution_class='spike'
+             AND status='completed'",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((title, goal)) = row else {
+        return Ok(None);
+    };
+    let refs = spike_request_refs(task, goal);
+    let inserted = conn.execute(
+        "INSERT INTO plan_requests(text, refs, requested_by, requested_by_id, status,
+           created_at, updated_at, spike_task_id) SELECT ?1, ?2, ?3, ?3, 'open', ?4, ?4, ?5
+         WHERE NOT EXISTS(SELECT 1 FROM plan_requests WHERE spike_task_id=?5)",
+        params![
+            spike_request_text(task, &title, goal),
+            serde_json::to_string(&refs)?,
+            SPIKE_REQUESTED_BY,
+            now,
+            task
+        ],
+    )?;
+    if inserted == 0 {
+        return Ok(None);
+    }
+    let id = RequestId::new(conn.last_insert_rowid());
+    record_queue_event_in(
+        conn,
+        EventKind::RequestRecorded,
+        &json!({
+            "request_id": id,
+            "refs": refs,
+            "priority": null,
+            "requested_by": SPIKE_REQUESTED_BY,
+            "spike_task_id": task,
+        }),
+    )?;
+    Ok(Some(id))
+}
+
+/// Record the request of each completed Spike that has none, inside the
+/// caller's write transaction (ADR-t1487-1 decision 5): what a landing of
+/// an older binary, a completion by hand or a failed transaction left
+/// out. The requests recorded, oldest Spike first.
+pub(super) fn record_missing_spike_requests(conn: &Connection, now: i64) -> Result<Vec<RequestId>> {
+    let missing: Vec<TaskId> = conn
+        .prepare(
+            "SELECT t.id FROM tasks t WHERE t.execution_class='spike' AND t.status='completed'
+             AND NOT EXISTS(SELECT 1 FROM plan_requests r WHERE r.spike_task_id=t.id)
+             ORDER BY t.id",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut recorded = Vec::new();
+    for task in missing {
+        recorded.extend(record_spike_request(conn, task, now)?);
+    }
+    Ok(recorded)
+}
+
 /// The request `id` with its proposals and the number of its planners; a
 /// missing one is an error.
 pub(super) fn read_request(conn: &Connection, id: RequestId) -> Result<PlanRequest> {
@@ -305,6 +387,7 @@ fn request_row(r: &Row<'_>) -> rusqlite::Result<PlanRequest> {
         status_reason: r.get("status_reason")?,
         proposals: Vec::new(),
         planners: 0,
+        spike_task: r.get("spike_task_id")?,
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
     })
@@ -496,6 +579,7 @@ fn link_request(
         params![request, proposal, now],
     )?;
     if link == ProposalLink::Propose {
+        let spike_task = read_request(conn, request)?.spike_task;
         set_status(
             conn,
             request,
@@ -510,6 +594,7 @@ fn link_request(
                 "request_id": request,
                 "proposal_id": proposal,
                 "planner_id": planner,
+                "spike_task_id": spike_task,
             }),
         )?;
     }

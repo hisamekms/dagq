@@ -65,6 +65,7 @@ table | goal_reviews | planning |
 table | planners | planning |
 table | plan_requests | planning |
 table | plan_request_proposals | planning |
+table | spike_cycles | planning | the investigations; the claim (T1) opens one
 table | draft_origins | planning |
 table | draft_reopens | planning |
 table | draft_revisits | planning |
@@ -95,6 +96,7 @@ store | src/infrastructure/proposals.rs | planning |
 store | src/infrastructure/plan_reviews.rs | planning |
 store | src/infrastructure/goal_reviews.rs | planning |
 store | src/infrastructure/plan_requests.rs | planning |
+store | src/infrastructure/investigations.rs | planning |
 store | src/infrastructure/planners.rs | planning |
 store | src/infrastructure/draft_planners.rs | planning |
 store | src/infrastructure/finding_planners.rs | planning |
@@ -302,6 +304,7 @@ method | TaskStore | proposals | all |
 method | TaskStore | lint_input | all |
 method | TaskStore | notes | all |
 method | TaskStore | claim | execution | T1
+method | TaskStore | investigations | execution | the claim's investigation limit (ADR-t1487-1)
 method | DraftPlannerStore | improvements | all |
 method | DraftPlannerStore | planner_findings | all |
 method | DraftPlannerStore | register_follow_ups | execution | T7

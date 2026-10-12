@@ -881,16 +881,18 @@ pub trait RunTransitions {
     /// that is still claimable, with `attributes` (an object) in its
     /// `run_claimed`, and the worker session `trial` chooses for the task
     /// there (ADR-0079 decisions 3 and 4). Only a task whose worker is one
-    /// of `workers` is claimed (ADR-t813-2), and never one of a class in
-    /// `held` (those a class limit holds, ADR-t1487-2), whether it was in
-    /// `order` or not, and not when the claim falls back to the claim order.
+    /// of `workers` is claimed (ADR-t813-2), and never one `held` holds (a
+    /// class a class limit holds, ADR-t1487-2; a Spike that would open an
+    /// investigation past the limit, judged again in the claim's
+    /// transaction, ADR-t1487-1 decision 7), whether it was in `order` or
+    /// not, and not when the claim falls back to the claim order.
     #[allow(clippy::too_many_arguments)]
     fn claim_for_supervisor_holding(
         &mut self,
         base_commit: &CommitSha,
         token: &LeaseToken,
         order: &[TaskId],
-        held: &[crate::domain::ExecutionClass],
+        held: &crate::domain::claim_order::ClaimHolds,
         attributes: Option<&serde_json::Value>,
         trial: &crate::domain::worker_model::WorkerTrial,
         routes: &[crate::domain::provider_switch::WorkerRoute],

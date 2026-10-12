@@ -621,7 +621,10 @@ fn the_claim_never_takes_a_held_class_not_one_read_after_the_order() {
                 &base,
                 &LeaseToken::new("t"),
                 &[gone],
-                held,
+                &dagq::domain::claim_order::ClaimHolds {
+                    classes: held.to_vec(),
+                    ..Default::default()
+                },
                 None,
                 &Default::default(),
                 &WorkerRoute::direct(&Worker::ALL),

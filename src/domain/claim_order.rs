@@ -13,7 +13,9 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    EventKind, ExecutionClass, LeaseToken, Priority, RunEvent, TaskId, claim_defer::CLAIM_DEFERRED,
+    EventKind, ExecutionClass, LeaseToken, Priority, RunEvent, TaskId,
+    claim_defer::CLAIM_DEFERRED,
+    investigation::{INVESTIGATION_LIMIT, InvestigationLimit, investigation_message},
     stats::timestamp_millis,
 };
 
@@ -37,9 +39,21 @@ pub const CLASS_LIMITS: [&str; 1] = [SPIKE_LIMIT];
 /// out as the claim does.
 pub const LIGHT_ROOM: &str = "light_room";
 
-/// The reasons the claim order's step records (the class limits and the
-/// light room): a deferral of one is the order's, not a worker's.
-pub const ORDER_DEFERRALS: [&str; 2] = [SPIKE_LIMIT, LIGHT_ROOM];
+/// The reasons the claim order's step records (the class limits, the
+/// investigation limit and the light room): a deferral of one is the
+/// order's, not a worker's.
+pub const ORDER_DEFERRALS: [&str; 3] = [SPIKE_LIMIT, INVESTIGATION_LIMIT, LIGHT_ROOM];
+
+/// What a claim's transaction holds whatever task it reads, not only those
+/// of the supervisor's order, nor when it falls back to the claim order:
+/// the classes a class limit holds, and the Spikes that would open an
+/// investigation past `[supervisor] max_investigations` (ADR-t1487-1
+/// decision 7), judged again in the transaction from the queue as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaimHolds {
+    pub classes: Vec<ExecutionClass>,
+    pub investigations: InvestigationLimit,
+}
 
 /// A claimable task as the order compares it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +226,26 @@ pub fn class_deferred(reason: &str, limits: ClassLimits, token: &LeaseToken) -> 
                 "{} Spikes hold a slot, the limit of [supervisor] max_spikes: not claimed until one leaves its slot",
                 limits.running_spikes
             ),
+            "supervisor": token,
+        }),
+    )
+}
+
+/// The `claim_deferred` of a Spike the investigation limit holds
+/// ([`INVESTIGATION_LIMIT`]): `counted` investigations open against `max`.
+/// It lasts until one ends, or the task leaves the candidates.
+pub fn investigation_deferred(
+    counted: usize,
+    max: usize,
+    token: &LeaseToken,
+) -> (EventKind, Value) {
+    (
+        EventKind::ClaimDeferred,
+        json!({
+            "reason": INVESTIGATION_LIMIT,
+            "limit": max,
+            "running": counted,
+            "message": investigation_message(counted, max),
             "supervisor": token,
         }),
     )

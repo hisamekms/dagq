@@ -29,6 +29,7 @@ mod goal_reviews;
 mod headless_jobs;
 pub mod host_metrics;
 pub mod inbox_watchers;
+mod investigations;
 pub mod kpi_config;
 mod kpi_push;
 pub mod language;

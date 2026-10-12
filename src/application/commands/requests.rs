@@ -114,6 +114,7 @@ mod tests {
             status_reason: None,
             proposals: Vec::new(),
             planners: 1,
+            spike_task: None,
             created_at: 0,
             updated_at: 0,
         }

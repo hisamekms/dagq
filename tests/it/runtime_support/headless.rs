@@ -263,6 +263,20 @@ pub fn launch_background(
         log: log.to_owned(),
     });
     let words: Vec<&str> = command.split(' ').map(|w| w.trim_matches('\'')).collect();
+    // A planner of the runtime's (one a Spike's request opens, ADR-t1487-1)
+    // is parked: its process lives and starts no wrapper, and the test
+    // plays it through the queue.
+    if !words.contains(&"--run") {
+        let stand = Stand::start_with(
+            backend
+                .wrapper_processes
+                .as_deref()
+                .unwrap_or(&SystemProcesses),
+        )?;
+        let handle = stand.handle.clone();
+        backend.stands.lock().unwrap().push((handle.clone(), stand));
+        return Ok(handle);
+    }
     let after = |flag: &str| {
         words
             .iter()

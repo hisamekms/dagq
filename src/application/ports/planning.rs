@@ -53,6 +53,12 @@ pub trait TaskStore {
     /// of the claim order measures the waits from it (ADR-t1487-2
     /// decision 2).
     fn ready_at(&self, tasks: &[TaskId]) -> Result<HashMap<TaskId, i64>>;
+    /// The open investigations (ADR-t1487-1 decision 7), after recording
+    /// the missing request of each completed Spike and closing the
+    /// investigations that ended, in one write transaction: what the
+    /// claim's investigation limit counts, as the claim's transaction
+    /// counts it again.
+    fn investigations(&mut self) -> Result<crate::domain::investigation::Investigations>;
     /// Reserve one run atomically, without a lease. Does not start a process or validate Git objects.
     fn claim(&mut self, base_commit: &CommitSha) -> Result<ClaimOutcome>;
     /// Direct predecessors of a task, each with the run that landed it, in ID order.

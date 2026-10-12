@@ -144,8 +144,33 @@ pub struct PlanRequest {
     /// [`MAX_REQUEST_PLANNERS`]: one asked to exit because only a person's
     /// answer was left does not (ADR-t1704-1 decision 5).
     pub planners: usize,
+    /// The Spike whose completion the runtime recorded the request for
+    /// (ADR-t1487-1 decision 5), the one request of that Spike; `None` for
+    /// a person's words. Its planner replans from the Spike's result.
+    #[serde(rename = "spike_task_id", skip_serializing_if = "Option::is_none")]
+    pub spike_task: Option<TaskId>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// The role a Spike's request is recorded by: the runtime, not a person.
+pub const SPIKE_REQUESTED_BY: &str = "runtime";
+
+/// The words of the request the runtime records when the Spike `task`
+/// (titled `title`, of `goal`) completed (ADR-t1487-1 decision 5): no
+/// person's, so they say only what to replan from.
+pub fn spike_request_text(task: TaskId, title: &str, goal: Option<GoalId>) -> String {
+    let of = goal.map_or_else(String::new, |goal| format!(" of goal {goal}"));
+    format!(
+        "Spike task {task}{of} completed ({title}): replan from its result. Decide one of: go on to the implementation, a further Spike with its question and limit, an alternative, a smaller scope, or stop."
+    )
+}
+
+/// The references of a Spike's request: the Spike, and its goal.
+pub fn spike_request_refs(task: TaskId, goal: Option<GoalId>) -> Vec<RequestRef> {
+    std::iter::once(RequestRef::Task(task))
+        .chain(goal.map(RequestRef::Goal))
+        .collect()
 }
 
 /// Decline `request` with `reason` (ADR-t1394-1 decision 6): only an
@@ -510,6 +535,39 @@ pub fn task_priority_at_creation(
 
 #[cfg(test)]
 mod tests {
+
+    /// A Spike's request: the runtime's words naming the Spike, its goal
+    /// and the five ways on; its references the Spike and its goal. Its
+    /// proposal and decline are no attention, its exhaustion is.
+    #[test]
+    fn a_spike_s_request_names_the_spike_and_its_goal() {
+        let text = spike_request_text(TaskId::new(4), "does it hold", Some(GoalId::new(2)));
+        assert!(
+            text.starts_with("Spike task 4 of goal 2 completed (does it hold)"),
+            "{text}"
+        );
+        assert!(text.contains("a further Spike"), "{text}");
+        assert!(!spike_request_text(TaskId::new(4), "t", None).contains("of goal"));
+        assert_eq!(
+            spike_request_refs(TaskId::new(4), Some(GoalId::new(2))),
+            [
+                RequestRef::Task(TaskId::new(4)),
+                RequestRef::Goal(GoalId::new(2))
+            ]
+        );
+        assert_eq!(
+            spike_request_refs(TaskId::new(4), None),
+            [RequestRef::Task(TaskId::new(4))]
+        );
+        let of_spike = serde_json::json!({"request_id": 1, "spike_task_id": 4});
+        let of_person = serde_json::json!({"request_id": 1, "spike_task_id": null});
+        use super::super::{event_attention, event_kind};
+        for kind in [event_kind::REQUEST_PROPOSED, event_kind::REQUEST_DECLINED] {
+            assert_eq!(event_attention(kind, &of_spike), None, "{kind}");
+            assert!(event_attention(kind, &of_person).is_some(), "{kind}");
+        }
+        assert!(event_attention(event_kind::REQUEST_PLANNER_EXHAUSTED, &of_spike).is_some());
+    }
     use super::*;
 
     fn request(status: RequestStatus) -> PlanRequest {
@@ -525,6 +583,7 @@ mod tests {
             status_reason: None,
             proposals: Vec::new(),
             planners: 0,
+            spike_task: None,
             created_at: 0,
             updated_at: 0,
         }

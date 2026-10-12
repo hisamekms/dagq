@@ -21,7 +21,8 @@ use crate::{
         planner::{PlannerView, open_draft_planner, planner_dir},
         planner_handoff::hand_request_to_planner,
         prompt::{
-            FittedPrompt, RequestPlannerMaterial, RequestRefMaterial, request_planner_prompt,
+            FittedPrompt, RequestPlannerMaterial, RequestRefMaterial, SpikeResultMaterial,
+            request_planner_prompt,
         },
     },
     domain::{
@@ -148,12 +149,19 @@ impl PlanningState {
     }
 
     /// Open a planner for each request waiting for one, the oldest first,
-    /// while the runtime's planners are below the limit.
+    /// while the runtime's planners are below the limit. Each pass first
+    /// records the request of each completed Spike that has none, and
+    /// closes the investigations that ended (ADR-t1487-1 decisions 5 and
+    /// 7), whether or not a planner can open: the landing records a
+    /// Spike's request in its own transaction, and this catches what a
+    /// landing of an older binary, a completion by hand or a failed
+    /// transaction left out.
     pub(super) fn open_request_planners(
         &mut self,
         env: &mut PlanningEnv<'_>,
         runtime_open: &mut usize,
     ) -> Result<()> {
+        env.queue.investigations()?;
         for request in env.queue.planner_requests()? {
             if *runtime_open >= env.runtime_planners {
                 break;
@@ -234,10 +242,37 @@ impl PlanningState {
             }));
         }
         let mut goals = Vec::new();
+        let mut other_spikes = Vec::new();
         for goal in goal_ids {
             // A goal the request names but the queue does not have is
             // left out; its reference says so.
             if let Ok(detail) = env.queue.show_goal(goal) {
+                // A Spike's planner reads the goal's other Spikes' results
+                // too (ADR-t1487-1 decision 5).
+                if let Some(spike) = request.spike_task {
+                    for task in detail.tasks.iter().filter(|task| task.id != spike) {
+                        let shown = env.queue.show(task.id)?;
+                        if !shown.task.execution_class().is_spike() {
+                            continue;
+                        }
+                        let result = shown
+                            .events
+                            .iter()
+                            .rev()
+                            .find(|event| event.kind == event_kind::INTEGRATION_RECEIPT)
+                            .and_then(|event| {
+                                event.payload["receipt"]
+                                    .get(crate::domain::execution_class::SPIKE_RESULT_FIELD)
+                                    .cloned()
+                            });
+                        other_spikes.push(SpikeResultMaterial {
+                            task: task.id,
+                            title: task.title.clone(),
+                            status: task.status,
+                            result,
+                        });
+                    }
+                }
                 goals.push((detail.goal, detail.closed, detail.tasks));
             }
         }
@@ -258,6 +293,7 @@ impl PlanningState {
             asks: &asks,
             answer,
             handover: handover.as_ref(),
+            other_spikes: &other_spikes,
         })
     }
 

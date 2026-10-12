@@ -39,19 +39,28 @@ impl SqliteQueue {
         trial: &WorkerTrial,
         routes: &[WorkerRoute],
     ) -> Result<ClaimOutcome> {
-        self.claim_for_supervisor_holding(base_commit, token, order, &[], attributes, trial, routes)
+        self.claim_for_supervisor_holding(
+            base_commit,
+            token,
+            order,
+            &crate::domain::claim_order::ClaimHolds::default(),
+            attributes,
+            trial,
+            routes,
+        )
     }
 
-    /// [`Self::claim_for_supervisor_in_order`] that never claims a task of a
-    /// class in `held` (those a class limit holds, ADR-t1487-2), not when it
-    /// falls back to the claim order either.
+    /// [`Self::claim_for_supervisor_in_order`] that never claims a task
+    /// `held` holds (a class a class limit holds, ADR-t1487-2; a Spike past
+    /// the investigation limit, ADR-t1487-1), not when it falls back to the
+    /// claim order either.
     #[allow(clippy::too_many_arguments)]
     pub fn claim_for_supervisor_holding(
         &mut self,
         base_commit: &CommitSha,
         token: &LeaseToken,
         order: &[TaskId],
-        held: &[crate::domain::ExecutionClass],
+        held: &crate::domain::claim_order::ClaimHolds,
         attributes: Option<&Value>,
         trial: &WorkerTrial,
         routes: &[WorkerRoute],
@@ -785,6 +794,13 @@ impl SqliteQueue {
             EventKind::TaskStatusChanged,
             json!({"from": "in_progress", "to": "completed"}),
         )?;
+        // A Spike's completion leaves its replanning request in the same
+        // transaction (ADR-t1487-1 decision 5).
+        crate::infrastructure::plan_requests::record_spike_request(
+            &tx,
+            run.task_id(),
+            unix_seconds(at),
+        )?;
         let task = read_task(&tx, run.task_id())?;
         tx.commit()?;
         Ok((task, run))
@@ -1012,7 +1028,7 @@ impl RunTransitions for SqliteQueue {
         base_commit: &CommitSha,
         token: &LeaseToken,
         order: &[TaskId],
-        held: &[crate::domain::ExecutionClass],
+        held: &crate::domain::claim_order::ClaimHolds,
         attributes: Option<&Value>,
         trial: &WorkerTrial,
         routes: &[WorkerRoute],

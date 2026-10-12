@@ -1065,3 +1065,15 @@ task = 2269
 name = "runtime_toolchains::doctor_and_status_show_the_declared_profiles"
 reason = "境界: 束縛された main checkout の dagq.toml を doctor と status が SQLite の queue から読む配線を 1 case で守る（表示の判断は domain::toolchain の unit test）"
 task = 2269
+
+# 5.3s to 10.7s (stress 5 with six others at once, task 1493)
+[[test]]
+name = "runtime_spike_replan::a_spike_s_landing_records_one_request_whatever_the_verdict_and_passes_add_none"
+reason = "B 境界（Git・SQLite・supervisor の配線）: 3 本の Spike を実際の worker の session で走らせ integrate で着地させ、着地のトランザクションが依頼を記録すること（task の completed の次の event）と、2 つの接続の照合の pass が依頼を二重にも欠けにもしないことを確かめる。依頼の言葉・参照・attention の判断は domain::plan_request の unit test"
+task = 1493
+
+# 10.9s to 18.5s (stress 5 with six others at once, task 1493)
+[[test]]
+name = "runtime_spike_replan::the_investigation_limit_holds_a_new_goal_s_spike_until_an_investigation_ends"
+reason = "B 境界（SQLite・supervisor の配線・CLI）: max_spikes と max_investigations を dagq.toml から読んだ supervisor が、Spike の上限と調査中の計画の上限の控えを claim_deferred に記録して枠を実装に渡し、candidates・graph がその記録を出し、着地と依頼の却下で調査が終わった pass に控えた Spike を claim することを、実際の worker の session と integrate で確かめる。上限の判断は domain::investigation と domain::claim_order の unit test"
+task = 1493

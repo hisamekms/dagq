@@ -1383,6 +1383,74 @@ pub struct RequestPlannerMaterial<'a> {
     /// What the planner that asked it left as it ended for the answer
     /// alone (ADR-t1704-1 decision 3).
     pub handover: Option<&'a PlannerHandover>,
+    /// For a Spike's request (ADR-t1487-1 decision 5), the results of the
+    /// other Spikes of its goal; empty for a person's request.
+    pub other_spikes: &'a [SpikeResultMaterial],
+}
+
+/// A Spike of the goal of a Spike's request, as its planner's prompt shows
+/// it: its status and the `spike_result` of its last landed receipt.
+#[derive(Debug, Clone)]
+pub struct SpikeResultMaterial {
+    pub task: TaskId,
+    pub title: String,
+    pub status: crate::domain::TaskStatus,
+    pub result: Option<Value>,
+}
+
+/// The bytes of the section on the other Spikes of a Spike request's goal.
+pub const REQUEST_SPIKES_BYTES: usize = 12_000;
+
+/// What a planner of a Spike's request decides and how (ADR-t1487-1
+/// decisions 5, 6 and 8): one of the five ways on from the result, after
+/// checking that the evidence's conditions still hold.
+fn spike_replan_steps(id: crate::domain::RequestId, spike: TaskId) -> String {
+    format!(
+        "\n## What to do\n\n\
+         Follow the dagq-planner skill of the dagq plugin, its Basic policy above all: {DECIDE_YOURSELF} Read the repository's AGENTS.md (or CLAUDE.md) first, and the documents it names for what you plan. {rules}\n\
+         First check that the evidence's conditions in task {spike}'s spike_result still hold: what changed on main since the commit it examined (`git log --oneline <conditions.commit>..main` and `git diff --stat <conditions.commit> main`, on the paths the question is about), and whether the tools the repository uses now are those of conditions.tools (`<tool> --version`, the toolchain files). Where they no longer hold, say so where you record the decision and weigh a further Spike rather than trusting the result. A holds, does_not_hold and unresolved verdict are all results to plan from. Read the results of the goal's other Spikes above too: plan the goal as a whole, never one Spike's answer alone.\n\
+         The follow_ups of the Spike's receipt are registered as drafts by the runtime and planned by their own planners: do not plan them again here, and plan around them.\n\
+         Then decide exactly one of these, and record why in each goal's or task's `--context` (beginning with `from request {id}`, the Spike task {spike}):\n\
+         1. Go on to the implementation: add its tasks (`dagq add --goal GOAL ...`), check them with `dagq lint`, and submit them with `dagq submit ...`; plan review checks them before they become ready. Never make an implementation ready only by depending on a Spike's completion.\n\
+         2. A further Spike: add it with `--execution-class spike`, in a goal (make one with `dagq goal add --draft ...` or name an open one when the Spike had none), with its question, what its answer changes in the plan, how to investigate, its limit (time, attempts), where the evidence goes and what each verdict leads to, and submit it. Do not extend or chain Spikes only because the verdict is unresolved: say what the further one settles that this one could not. When submit refuses it for the goal's limit of Spike cycles, leave it a draft and ask as below (`--because scope`): a person decides another.\n\
+         3. An alternative, or 4. a smaller scope: plan it as in 1, and say in the context what the result ruled out.\n\
+         5. Stop: when nothing should be planned on (the premise does not hold and there is no alternative worth it), run `dagq request decline {id} --reason '<why, from the result>'`.\n\
+         Ask only when you cannot decide it yourself: (a) it needs a person's judgement, `scope` (the plan's intent, an acceptance, a contradiction with a goal's constraints or a decision the repository records, another Spike past the goal's limit) or `discard` (whether to throw work away), that the queue, the repository and a person's precedents cannot settle; or (b) your confidence in the decision is low. Run `dagq ask --request {id} --kind planner_question --because scope --recommend <plan|decline> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option plan --option decline`, report briefly and stop; {BEFORE_YOU_STOP_AT_A_QUESTION} The answer arrives as `answer to ask <id>: ...`: follow it.\n\
+         When you are done, report the outcome in one or two sentences and stop; the runtime ends this session, and you do not wait for any run. Do not work on anything but this request. Never open the queue database directly; use the dagq CLI only.\n",
+        rules = repository_rules(RUNTIME_PLANNER_ASK),
+    )
+}
+
+/// The section on the other Spikes of a Spike request's goal, held to
+/// [`REQUEST_SPIKES_BYTES`].
+fn other_spikes_section(fit: &mut Fit, spikes: &[SpikeResultMaterial]) -> Result<String> {
+    if spikes.is_empty() {
+        return Ok(String::new());
+    }
+    let mut section = "\n## The goal's other Spikes\n".to_owned();
+    for spike in spikes {
+        section.push_str(&format!(
+            "\n### Task {tid} ({status}): {title}\n\n",
+            tid = spike.task,
+            status = spike.status.as_str(),
+            title = short_title(&spike.title),
+        ));
+        match &spike.result {
+            Some(result) => {
+                section.push_str(&fenced("json", &serde_json::to_string_pretty(result)?))
+            }
+            None => section.push_str("No result landed yet.\n"),
+        }
+    }
+    let section = fit.text(
+        "spikes",
+        &section,
+        REQUEST_SPIKES_BYTES,
+        Keep::Start,
+        "read each with `dagq events --full --task ID --kind integration_receipt`",
+    );
+    fit.section("spikes", &section);
+    Ok(section)
 }
 
 /// The initial prompt of a planner the runtime opens for a planning
@@ -1399,14 +1467,24 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
     let mut fit = Fit::new(REQUEST_PLANNER_PROMPT_LIMIT);
     let request = material.request;
     let id = request.id;
-    let mut out = format!(
-        "You are a planner the dagq runtime opened for planning request {id} of the queue at {db}; no person watches this session. A person asked the inbox for a plan, and the inbox recorded the request for you (planner {attempt} of at most {max} the runtime opens for it).\n",
-        db = crate::application::path_text(material.db)?,
-        attempt = material.attempt,
-        max = crate::domain::plan_request::MAX_REQUEST_PLANNERS,
-    );
+    let db = crate::application::path_text(material.db)?;
+    let attempt = material.attempt;
+    let max = crate::domain::plan_request::MAX_REQUEST_PLANNERS;
+    let mut out = match request.spike_task {
+        Some(spike) => format!(
+            "You are a planner the dagq runtime opened for planning request {id} of the queue at {db}; no person watches this session. Spike task {spike} completed, and the runtime recorded this request to replan from its result; no person asked (planner {attempt} of at most {max} the runtime opens for it).\n"
+        ),
+        None => format!(
+            "You are a planner the dagq runtime opened for planning request {id} of the queue at {db}; no person watches this session. A person asked the inbox for a plan, and the inbox recorded the request for you (planner {attempt} of at most {max} the runtime opens for it).\n"
+        ),
+    };
+    let whose = if request.spike_task.is_some() {
+        "the runtime's words, recorded when the Spike completed"
+    } else {
+        "the person's own words"
+    };
     out.push_str(&format!(
-        "\n## Request {id}\n\n{handed} Those are the person's own words (recorded by the {by} at {at}, Unix seconds).\n",
+        "\n## Request {id}\n\n{handed} Those are {whose} (recorded by the {by} at {at}, Unix seconds).\n",
         handed = material.handed,
         by = request.requested_by,
         at = request.created_at,
@@ -1487,11 +1565,15 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
         })
         .collect();
     out.push_str(&planner_goals(&mut fit, goals));
+    out.push_str(&other_spikes_section(&mut fit, material.other_spikes)?);
     if !material.asks.is_empty() {
         out.push_str("\n## Earlier questions about it\n\n");
         out.push_str(&planner_asks(&mut fit, material.asks, false));
     }
-    out.push_str(&format!(
+    if let Some(spike) = request.spike_task {
+        out.push_str(&spike_replan_steps(id, spike));
+    } else {
+        out.push_str(&format!(
         "\n## What to do\n\n\
          Follow the dagq-planner skill of the dagq plugin, its Basic policy above all: {DECIDE_YOURSELF} Read the repository's AGENTS.md (or CLAUDE.md) first, and the documents it names for what you plan. {rules} Before you plan, look for tasks that already cover the request or code that already does it (`dagq search '<words>'`, `dagq related ID` for a task, `dagq show ID`, `dagq goal list`, the source). {RECORD_READING}\n\
          Then do exactly one of these:\n\
@@ -1501,6 +1583,7 @@ pub fn request_planner_prompt(material: &RequestPlannerMaterial<'_>) -> Result<F
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this request. Never open the queue database directly; use the dagq CLI only.\n",
         rules = repository_rules(RUNTIME_PLANNER_ASK),
     ));
+    }
     if let Some(answer) = material.answer {
         let (question, text) = planner_answer(&mut fit, answer);
         let carried = match answer.task_id.filter(|_| answer.request_id.is_none()) {
@@ -1637,6 +1720,12 @@ pub(super) fn push_receipt(out: &mut String, receipt: Option<&Value>) -> Result<
                 "json",
                 &serde_json::to_string_pretty(&receipt["follow_ups"])?,
             ));
+            // A Spike's result: its verdict, grounds, evidence and the
+            // conditions it was taken under (ADR-t1487-1 decision 3).
+            if let Some(result) = receipt.get(crate::domain::execution_class::SPIKE_RESULT_FIELD) {
+                out.push_str("\nIts spike_result:\n\n");
+                out.push_str(&fenced("json", &serde_json::to_string_pretty(result)?));
+            }
         }
         None => out.push_str("\nNo landed receipt.\n"),
     }

@@ -968,6 +968,7 @@ mod tests {
                     claim_spacing: setting(180),
                     max_spikes: OptionalSetting::from_file(None),
                     class_aging: setting(3600),
+                    max_investigations: OptionalSetting::from_file(None),
                 },
             )
             .unwrap_err();
@@ -995,6 +996,7 @@ mod tests {
             claim_spacing: setting(180, SettingSource::Default),
             max_spikes: OptionalSetting::from_file(None),
             class_aging: setting(3600, SettingSource::Default),
+            max_investigations: OptionalSetting::from_file(None),
         };
         let returned = queue
             .register_supervisor_with_limits(&LeaseToken::new("me"), 1, limits, "0.0.1")
@@ -1046,6 +1048,7 @@ mod tests {
                     claim_spacing: setting(60, SettingSource::File),
                     max_spikes: OptionalSetting::from_file(None),
                     class_aging: setting(3600, SettingSource::Default),
+                    max_investigations: OptionalSetting::from_file(None),
                 },
             )
             .unwrap();

@@ -284,6 +284,17 @@ pub fn class_aging_inputs(
     Ok(crate::application::claim_view::AgingInputs { file, registered })
 }
 
+/// The `[goals] max_spike_cycles` of the `dagq.toml` of the main checkout
+/// `queue` is bound to (ADR-t1487-1 decision 8), which `submit` holds a
+/// planner of the runtime's to; none for a queue bound to no checkout or
+/// without it.
+pub fn max_spike_cycles(queue: &SqliteQueue) -> Result<Option<usize>> {
+    match bound_checkout(queue)? {
+        Some(checkout) => crate::infrastructure::run_env::load_max_spike_cycles(&checkout),
+        None => Ok(None),
+    }
+}
+
 /// The `[goals] tags` of the `dagq.toml` of the main checkout `queue` is
 /// bound to (ADR-t1639-1 decision 6), which `goal add`, `goal edit`,
 /// `submit` and `lint` hold the goals to; none for a queue bound to no

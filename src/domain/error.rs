@@ -272,6 +272,15 @@ pub enum DomainError {
         request_id: RequestId,
         status: RequestStatus,
     },
+    /// A planner of the runtime's submits a Spike of a goal that had as
+    /// many investigations as `[goals] max_spike_cycles` (ADR-t1487-1
+    /// decision 8): a person decides another.
+    SpikeCycleLimit {
+        task_id: TaskId,
+        goal_id: GoalId,
+        cycles: usize,
+        max: usize,
+    },
     /// A reference of a planning request is not `<kind>:<id>` of a kind it
     /// takes (ADR-t1394-1 decision 2).
     RequestRefInvalid {
@@ -714,6 +723,15 @@ impl fmt::Display for DomainError {
                 f,
                 "only a planner_question about nothing else (no task, run or finding) may name a planning request, not {}",
                 kind.as_str()
+            ),
+            Self::SpikeCycleLimit {
+                task_id,
+                goal_id,
+                cycles,
+                max,
+            } => write!(
+                f,
+                "task {task_id} is a Spike of goal {goal_id}, which had {cycles} investigations, the limit of [goals] max_spike_cycles ({max}): another Spike changes the scope, which a person decides; leave it a draft and ask a planner_question with what it would settle, and a person submits it if they agree"
             ),
             Self::RequestNotOpen { request_id, status } => write!(
                 f,

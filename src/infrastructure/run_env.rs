@@ -139,8 +139,9 @@ const TASKS_CHANGES: &str = "changes";
 /// `[goals]`: `tags`, the repository's set of goal tags (ADR-t1639-1
 /// decision 6).
 const GOALS_TABLE: &str = "goals";
-/// The one key of `[goals]`.
+/// The keys of `[goals]`.
 const GOALS_TAGS: &str = "tags";
+const GOALS_SPIKE_CYCLES: &str = "max_spike_cycles";
 /// `[e2e]`: `paths`, the globs whose change requires `e2e` of a run
 /// (ADR-t963-1 decision 2).
 const E2E_TABLE: &str = "e2e";
@@ -365,6 +366,10 @@ pub struct Config {
     pub changes: Option<ChangeSet>,
     /// `[goals] tags` (ADR-t1639-1 decision 6); `None` without it.
     pub goal_tags: Option<TagSet>,
+    /// `[goals] max_spike_cycles`, at least 1: the investigations a goal
+    /// may have before a planner of the runtime's may submit no further
+    /// Spike of it (ADR-t1487-1 decision 8); `None` without it.
+    pub max_spike_cycles: Option<usize>,
     /// `[e2e] paths` (ADR-t963-1 decision 2); empty without it.
     pub e2e_paths: Vec<String>,
     /// `[review.subagents.<agent>]` in file order (ADR-t1453-1 decision
@@ -779,10 +784,19 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         .with_context(with)?,
                 );
             }
+            Some(GOALS_TABLE) if key == GOALS_SPIKE_CYCLES => {
+                ensure!(
+                    config.max_spike_cycles.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let limit = parse_positive(rest.trim(), "number").with_context(with)?;
+                config.max_spike_cycles = Some(u16::try_from(limit).with_context(with)?.into());
+            }
             Some(GOALS_TABLE) => {
                 ensure!(
                     key == GOALS_TAGS,
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{GOALS_TABLE}]; the key is {GOALS_TAGS}"
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{GOALS_TABLE}]; the keys are {GOALS_TAGS}, {GOALS_SPIKE_CYCLES}"
                 );
                 ensure!(
                     config.goal_tags.is_none(),
@@ -1337,6 +1351,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 } else if key == "max_spikes" {
                     let limit = parse_positive(rest.trim(), "number").with_context(with)?;
                     config.supervisor.max_spikes =
+                        Some(u16::try_from(limit).with_context(with)?.into());
+                } else if key == "max_investigations" {
+                    let limit = parse_positive(rest.trim(), "number").with_context(with)?;
+                    config.supervisor.max_investigations =
                         Some(u16::try_from(limit).with_context(with)?.into());
                 } else if key == "class_aging" {
                     let secs = parse_positive(rest.trim(), "number").with_context(with)?;
@@ -1981,6 +1999,18 @@ pub fn load_goal_tags(root: &Path) -> Result<Option<TagSet>> {
         }
         None => None,
     })
+}
+
+/// `[goals] max_spike_cycles` of the `dagq.toml` in `root` (ADR-t1487-1
+/// decision 8); no file, no table or no key is none.
+pub fn load_max_spike_cycles(root: &Path) -> Result<Option<usize>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .max_spike_cycles)
 }
 
 /// `[e2e] paths` of the `dagq.toml` in `root` (ADR-t963-1 decision 2);
@@ -4386,6 +4416,7 @@ LITERAL = 'no \n escapes # here'
                 light_changes: None,
                 max_spikes: None,
                 class_aging: None,
+                max_investigations: None,
             }
         );
         assert_eq!(
@@ -4407,6 +4438,7 @@ LITERAL = 'no \n escapes # here'
                 light_changes: None,
                 max_spikes: None,
                 class_aging: None,
+                max_investigations: None,
             }
         );
         assert_eq!(
@@ -4520,6 +4552,7 @@ LITERAL = 'no \n escapes # here'
                 light_changes: None,
                 max_spikes: None,
                 class_aging: None,
+                max_investigations: None,
             })
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();

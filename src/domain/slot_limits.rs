@@ -81,11 +81,16 @@ pub struct SupervisorConfig {
     /// Seconds, at least 1: the wait after which a candidate goes ahead of
     /// the other class's (ADR-t1487-2 decision 2). It has no flag.
     pub class_aging: Option<usize>,
+    /// At least 1: the investigations open at once before a Spike that
+    /// opens another is deferred (ADR-t1487-1 decision 7,
+    /// [`super::investigation`]). It has no flag and no default: without it
+    /// nothing is held.
+    pub max_investigations: Option<usize>,
 }
 
 impl SupervisorConfig {
     /// The keys `[supervisor]` may set.
-    pub const KEYS: [&'static str; 7] = [
+    pub const KEYS: [&'static str; 8] = [
         "parallel",
         "max_waiting",
         "runtime_planners",
@@ -93,6 +98,7 @@ impl SupervisorConfig {
         "light_changes",
         "max_spikes",
         "class_aging",
+        "max_investigations",
     ];
 
     /// `light_changes`, empty when not set.
@@ -180,6 +186,7 @@ pub struct SlotLimits {
     pub claim_spacing: Setting,
     pub max_spikes: OptionalSetting,
     pub class_aging: Setting,
+    pub max_investigations: OptionalSetting,
 }
 
 impl SlotLimits {
@@ -201,6 +208,7 @@ impl SlotLimits {
             ),
             max_spikes: OptionalSetting::from_file(file.max_spikes),
             class_aging: Setting::resolve(None, file.class_aging, DEFAULT_CLASS_AGING_SECS),
+            max_investigations: OptionalSetting::from_file(file.max_investigations),
         }
     }
 
@@ -218,6 +226,8 @@ impl SlotLimits {
             "max_spikes_source": self.max_spikes.source,
             "class_aging": self.class_aging.value,
             "class_aging_source": self.class_aging.source,
+            "max_investigations": self.max_investigations.value,
+            "max_investigations_source": self.max_investigations.source,
         })
     }
 }
@@ -259,6 +269,7 @@ mod tests {
             light_changes: None,
             max_spikes: Some(1),
             class_aging: Some(900),
+            max_investigations: None,
         };
         let all = SlotFlags {
             parallel: Some(2),
@@ -386,6 +397,7 @@ mod tests {
                 light_changes: None,
                 max_spikes: Some(1),
                 class_aging: None,
+                max_investigations: None,
             },
         );
         let payload = supervisor_config_change((from, &none), (to, &none)).unwrap();

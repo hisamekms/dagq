@@ -129,6 +129,9 @@ pub struct SqliteQueue {
     /// ADR-t1639-1 decision 6) that `goal add`, `goal edit`, `submit` and
     /// `lint` hold the goals to; none accepts any tag and a goal without one.
     pub(super) goal_tags: Option<TagSet>,
+    /// `[goals] max_spike_cycles` (ADR-t1487-1 decision 8), which `submit`
+    /// holds a planner of the runtime's to; none limits nothing.
+    pub(super) max_spike_cycles: Option<usize>,
 }
 
 impl SqliteQueue {
@@ -245,6 +248,7 @@ impl SqliteQueue {
             actors,
             changes: queue.changes.clone(),
             goal_tags: queue.goal_tags.clone(),
+            max_spike_cycles: queue.max_spike_cycles,
         };
         copy.apply(state.version, None)?;
         Ok((schema, ReadOnlyQueue::Readable(copy)))
@@ -366,6 +370,12 @@ impl SqliteQueue {
 
     /// The queue holding the goals to the repository's set of tags
     /// (ADR-t1639-1 decision 6); `None` holds them to none.
+    /// With `[goals] max_spike_cycles` (ADR-t1487-1 decision 8).
+    pub fn with_max_spike_cycles(mut self, max: Option<usize>) -> Self {
+        self.max_spike_cycles = max;
+        self
+    }
+
     pub fn with_goal_tags(mut self, tags: Option<TagSet>) -> Self {
         self.goal_tags = tags;
         self
@@ -426,6 +436,7 @@ impl SqliteQueue {
             actors,
             changes: None,
             goal_tags: None,
+            max_spike_cycles: None,
         })
     }
 
@@ -1187,6 +1198,15 @@ impl TaskStore for SqliteQueue {
         read_graph_input(&tx)
     }
 
+    fn investigations(&mut self) -> Result<crate::domain::investigation::Investigations> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let investigations = super::investigations::refresh(&tx, self.generators.clock.now())?;
+        tx.commit()?;
+        Ok(investigations)
+    }
+
     fn ready_at(&self, tasks: &[TaskId]) -> Result<std::collections::HashMap<TaskId, i64>> {
         let tx = self.conn.unchecked_transaction()?;
         let mut times = std::collections::HashMap::new();
@@ -1212,7 +1232,7 @@ impl TaskStore for SqliteQueue {
             self.generators.clock.system_time(),
             base_commit,
             &[],
-            &[],
+            &crate::domain::claim_order::ClaimHolds::default(),
             None,
             &WorkerTrial::default(),
             // What every binary runs (ADR-t813-2); a supervisor claims
@@ -2300,7 +2320,7 @@ pub(super) fn claim_task(
     at: SystemTime,
     base_commit: &CommitSha,
     order: &[TaskId],
-    held: &[crate::domain::ExecutionClass],
+    held: &crate::domain::claim_order::ClaimHolds,
     attributes: Option<&serde_json::Value>,
     trial: &WorkerTrial,
     routes: &[WorkerRoute],
@@ -2310,7 +2330,31 @@ pub(super) fn claim_task(
     // The classes a class limit holds (ADR-t1487-2): no task of them is
     // claimed here, not one read after the supervisor made its order, nor
     // by the fallback below.
-    ready.retain(|task| !held.contains(&task.execution_class()));
+    ready.retain(|task| !held.classes.contains(&task.execution_class()));
+    // Nor a Spike that would open an investigation past the limit
+    // (ADR-t1487-1 decision 7), judged on the queue as it is now.
+    let now_secs = crate::application::unix_seconds(at);
+    // The cycles are settled for every claim (a Spike's opens one); the
+    // investigations are read only when a limit holds them.
+    let investigations = if held.investigations.max.is_some()
+        && ready.iter().any(|task| task.execution_class().is_spike())
+    {
+        super::investigations::refresh(tx, now_secs)?
+    } else {
+        super::investigations::settle(tx, now_secs)?;
+        crate::domain::investigation::Investigations::default()
+    };
+    ready.retain(|task| {
+        investigations
+            .limit(
+                task.id(),
+                task.execution_class(),
+                task.goal_id(),
+                held.investigations,
+                now_secs,
+            )
+            .is_none()
+    });
     if ready.is_empty() {
         return Ok(ClaimOutcome::NoReadyTask);
     }
@@ -2446,6 +2490,17 @@ pub(super) fn claim_task(
             }
             if inherited {
                 payload.insert("escalation_inherited".to_owned(), json!(true));
+            }
+            // A Spike's claim opens its investigation unless it is open
+            // (ADR-t1487-1 decision 7).
+            if super::investigations::open_cycle(
+                tx,
+                task.id(),
+                task.execution_class(),
+                task.goal_id(),
+                now_secs,
+            )? {
+                payload.insert("investigation_opened".to_owned(), json!(true));
             }
             if let Some(ready_at) = task_ready_at(tx, task.id())? {
                 payload.insert("ready_at".to_owned(), json!(ready_at));

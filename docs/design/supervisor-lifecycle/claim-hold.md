@@ -18,6 +18,7 @@ related:
   - design-supervisor-lifecycle-disk-space
   - design-supervisor-lifecycle-queue-hold
   - design-supervisor-lifecycle-run-environment
+  - adr-t1487-1
 ---
 
 # claimを控える（load average）
@@ -70,6 +71,18 @@ reviewとe2eを終えて着地の順番を待つだけのrun（着地待ち）�
 - **設定**: `dagq.toml`の`[supervisor] light_changes`（[Run environment](run-environment.md)の`[supervisor]`）。各passで読み直し、変わったら`supervisor_config_changed`の`from` / `to`の`light_changes`に記録する。flagは無く、全てのflagを与えたsupervisorも読む。
 - **見え方**: `status`のsupervisorの`slots.landing_queue`とrunの`progress.slot: landing_queue`（[`status`](status.md)）。`stats`の`idle_slots`の空きと`kpi`の`slot_usage`は軽い枠を数えない（着地待ちを含めて数える今のまま）。
 - test: `src/domain/light_slots.rs`のunit test（`light_changes`の検査・`admits`・`claim_room`・戻り待ちとresumeが通常の枠を待つこと・`gated`がloadの控えと間隔を軽い枠にも当てること）、`tests/it/runtime_light_slots.rs`（`light_changes = ["docs"]`・`parallel` 1で、着地待ちのrunが枠を埋めたとき`--paths`を宣言したdocsのtaskはclaimされ、interruptのfeatureと`--paths`の無いdocsのtaskはclaimされない。`a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it`は、着地待ちが枠を埋めるあいだ`needs_session`のrunをresumeせずに軽いtaskだけをclaimし、枠が空くとinterruptのtaskのclaimより先にresumeすること）。
+
+## 調査中の計画の上限
+
+Spikeがclaimされたgoal（goalの無いSpikeはそれ自体）は、未完了のSpikeか`open`のSpike起点の依頼が残るあいだ調査中の計画で、`[supervisor] max_investigations`がその同時の数を絞る（[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定7、設定は[Run environment](run-environment.md)の`[supervisor]`）。
+数え方・猶予・判定の順・控えの理由と欄は定義のそばのdoc comment（`domain::investigation`、`domain::claim_order`、`application::claim_view`）が持つ。
+コードから読めない約束は次のとおり。
+
+- 控えるのは新しい調査を始めるSpikeのclaimだけで、submitは拒まず、plannerの枠も使わない（待つのはreadyのSpikeで、plannerは結果を待たずに終わる）。
+- Spikeの上限（`max_spikes`）が先に効き、両方が効くあいだの控えはSpikeの上限の理由で、Spikeの上限が外れたら調査中の計画の上限の理由に替わる。
+- どちらの上限で控えても、空いた枠は実装のtaskが取る。
+- claimのトランザクションがqueueの今の姿で数え直すので、別のsupervisorのclaimや順の外のtaskでも上限を超えない。
+- 控えは`claim_deferred`として記録し、`candidates`と`graph`は記録から同じ候補を除くので、表示と実際のclaimが一致する。
 
 ## 記録
 

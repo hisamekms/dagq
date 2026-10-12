@@ -12,9 +12,9 @@ use serde_json::json;
 
 use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
-    Ask, ChangeSet, DomainError, GoalStatus, PlannerOwner, Proposal, ProposalId, ProposalRecord,
-    ProposalStatus, Submission, TagSet, TaskAction, TaskId, TaskStatus,
-    follow_up::reopened_material, goal, proposal,
+    Ask, ChangeSet, DomainError, GoalStatus, PlannerOrigin, PlannerOwner, Proposal, ProposalId,
+    ProposalRecord, ProposalStatus, Submission, TagSet, TaskAction, TaskId, TaskStatus,
+    follow_up::reopened_material, goal, investigation, proposal,
 };
 
 /// Submit `submission` inside the caller's write transaction: its tasks
@@ -24,12 +24,16 @@ use crate::domain::{
 /// (`goal_submitted` for a goal). With the repository's set of changes,
 /// every task that moves must declare one of them (ADR-t980-1); with its
 /// set of goal tags, every draft goal submitted, or of a task that moves,
-/// must have one and only tags of the set (ADR-t1639-1 decision 6).
+/// must have one and only tags of the set (ADR-t1639-1 decision 6). With
+/// `[goals] max_spike_cycles`, a planner of the runtime's submits no Spike
+/// of a goal that had as many investigations (ADR-t1487-1 decision 8): a
+/// person decides another, by their answer and their own submit.
 pub(super) fn submit(
     conn: &Connection,
     submission: Submission,
     changes: Option<&ChangeSet>,
     goal_tags: Option<&TagSet>,
+    max_spike_cycles: Option<usize>,
     now: &str,
 ) -> Result<Proposal> {
     submission.validate()?;
@@ -128,6 +132,19 @@ pub(super) fn submit(
             let goal = read_goal(conn, goal_id)?;
             if goal.is_draft() {
                 goal_tags.check_declared(goal_id, goal.tags())?;
+            }
+        }
+    }
+    if submission.owner.origin == PlannerOrigin::Runtime && max_spike_cycles.is_some() {
+        for &task_id in &tasks {
+            let task = super::sqlite::read_task(conn, task_id)?;
+            if let (true, Some(goal_id)) = (task.execution_class().is_spike(), task.goal_id()) {
+                investigation::check_spike_cycles(
+                    task_id,
+                    goal_id,
+                    super::investigations::goal_cycles(conn, goal_id)?,
+                    max_spike_cycles,
+                )?;
             }
         }
     }

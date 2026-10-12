@@ -645,7 +645,11 @@ enum Command {
     /// supervisor last recorded as deferred (`candidates`); the deferred ones apart with the
     /// recorded reason, files, runs and since (`deferred`), and what holds every claim now as the
     /// supervisors recorded it, or `no_supervisor` (`held`). The deferrals are the supervisor's
-    /// last judgment, kept while it does not judge again (full slots, a hold). Does not claim.
+    /// last judgment, kept while it does not judge again (full slots, a hold), the class and
+    /// investigation limits' among them: a Spike held while Spikes fill `[supervisor]
+    /// max_spikes` shows `spike_limit`, and one that would open an investigation past
+    /// `max_investigations` shows `investigation_limit` once the Spike limit lets Spikes go.
+    /// Does not claim.
     Candidates {
         /// Keep the deferred tasks in `candidates`: the claim rule's order alone.
         #[arg(long)]
@@ -658,7 +662,8 @@ enum Command {
     /// blocks directly (including those waiting for its open goal) and how many it releases
     /// transitively (`unblocks`), its `priority` and the `effective_priority` it inherits from the
     /// ready tasks waiting for it; `candidates` in claim order less the deferred tasks (as
-    /// `candidates` shows them), `deferred` and the `critical` chain. With `--format d2` or `svg`,
+    /// `candidates` shows them, the class and investigation limits' deferrals included),
+    /// `deferred` and the `critical` chain. With `--format d2` or `svg`,
     /// the near-term dependency diagram instead: the d2 source, or the SVG the host's `d2
     /// --layout=tala` draws from it.
     Graph {
@@ -3437,6 +3442,12 @@ fn execute(cli: Cli) -> Result<Value> {
     ) {
         let tags = dagq::compose::goal_tags(&queue)?;
         queue = queue.with_goal_tags(tags);
+    }
+    // A goal's limit of Spike cycles holds a planner of the runtime's
+    // submit (ADR-t1487-1 decision 8).
+    if matches!(cli.command, Command::Submit { .. }) {
+        let max = dagq::compose::max_spike_cycles(&queue)?;
+        queue = queue.with_max_spike_cycles(max);
     }
     // The planning commands run as the caller through the application,
     // which authorizes each before it changes the queue (task 732).

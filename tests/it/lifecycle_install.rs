@@ -591,6 +591,7 @@ fn slot_limits(source: SettingSource, max_waiting: usize) -> SlotLimits {
             value: 3600,
             source: SettingSource::Default,
         },
+        max_investigations: dagq::domain::slot_limits::OptionalSetting::from_file(None),
     }
 }
 

@@ -4156,6 +4156,7 @@ fn request_planner_refs_count_each_reference_once() {
         status_reason: None,
         proposals: Vec::new(),
         planners: 0,
+        spike_task: None,
         created_at: 0,
         updated_at: 0,
     };
@@ -4198,6 +4199,7 @@ fn request_planner_refs_count_each_reference_once() {
             asks: &[],
             answer: None,
             handover: None,
+            other_spikes: &[],
         })
         .unwrap();
         let shown = (1..=refs.len())
@@ -4427,6 +4429,7 @@ fn a_request_planner_prompt_of_huge_references_stays_within_its_limits() {
         status_reason: None,
         proposals: Vec::new(),
         planners: 0,
+        spike_task: None,
         created_at: 0,
         updated_at: 0,
     };
@@ -4464,6 +4467,7 @@ fn a_request_planner_prompt_of_huge_references_stays_within_its_limits() {
         asks: &asks,
         answer: Some(&answer),
         handover: Some(&handover),
+        other_spikes: &[],
     })
     .unwrap();
     within(&fitted, REQUEST_PLANNER_PROMPT_LIMIT);

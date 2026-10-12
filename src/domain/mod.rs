@@ -993,6 +993,7 @@ pub mod ids;
 pub mod inherit_by_hand;
 mod input;
 pub mod instructions;
+pub mod investigation;
 pub mod kpi;
 pub mod landing_branch;
 pub mod landing_hold;
@@ -2555,6 +2556,14 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
             .map(|goal| AttentionNext::DecideFollowUps {
                 goal_id: GoalId::new(goal),
             }),
+        // A Spike's request has nobody who asked (ADR-t1487-1): its
+        // proposal and its decline are told to the inbox by their events
+        // alone; only its running out of planners is a person's.
+        (event_kind::REQUEST_PROPOSED | event_kind::REQUEST_DECLINED, _)
+            if payload.get("spike_task_id").is_some_and(|id| !id.is_null()) =>
+        {
+            None
+        }
         (event_kind::REQUEST_PROPOSED, _) => Some(AttentionNext::ReportRequest),
         (event_kind::REQUEST_DECLINED | event_kind::REQUEST_PLANNER_EXHAUSTED, _) => {
             Some(AttentionNext::RephraseRequest)

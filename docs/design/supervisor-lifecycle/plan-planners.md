@@ -118,6 +118,27 @@ goal 92で[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-rou
 9. **test**: 配線は`tests/it/request_planner.rs`（plan reviewのtestのbackendとstubのplan review。代表は`a_request_the_inbox_records_gets_one_planner_whose_submission_proposes_it`で、優先度を付けた依頼のgoalとtaskの人の出どころと由来が取り下げと別のplannerの出し直しの後も変わらないことも確かめる）、非対話の依頼のplannerは`tests/it/planner_headless.rs`・`planner_headless_turns.rs`、入力の経路は`tests/it/cli_request_words.rs`。
    規則と判定は`domain::plan_request`・`application::commands::requests`・`domain::authorization`・`application::planner_handoff`のunit testが確かめる。
 
+### Spikeの再計画の依頼<a id="spikeの再計画の依頼"></a>
+
+[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)の決定5・6・8。
+Spikeの区分のtaskが`completed`になると、runtimeが起点のSpikeを持つ依頼を記録し、上の3〜8の経路でruntimeのplannerが結果から再計画する。
+記録と照合は`plan_requests::record_spike_request`と`record_missing_spike_requests`、promptは`request_planner_prompt`のSpikeの分岐が持つ。
+
+- **記録**: 着地の`completed`への遷移と同じトランザクションで、Spikeごとに1件だけ`requested_by: runtime`で記録する。
+  各passの`open_request_planners`の前に、依頼の無い`completed`のSpikeを照合して補う（古いバイナリの着地・トランザクションの失敗）。
+  どちらもSpikeに依頼が無いときだけ書くので、再起動・execの引き継ぎ・2つのsupervisor・重複配送で欠けも二重もない。
+  `canceled`のSpikeには作らない。
+- **立てる**: 上の3と同じ`runtime_planners`の枠で立ち、workerの枠を使わず、workerも待たない。
+  同じgoalのSpike起点の依頼は、そのgoalの別の依頼のplannerが開いているあいだ待つ（goalを並行して再計画しない）。
+- **prompt**: 人の言葉の代わりに、Spikeの着地したreceiptの`spike_result`と`follow_ups`、goalの他のSpikeの結果を載せる。
+  証拠の条件（対象のcommitとmainの差、toolの版）を確かめる手順と、実装へ進む・上限付きの追加のSpike・代替案・範囲の縮小・中止（`request decline`）の5つの結末を載せる。
+  receiptの`follow_ups`は今までどおりdraftになってそのplannerが手当てするので、依頼のplannerは同じ手当てを二重に計画しない。
+- **知らせ**: 頼んだ人が居ないので、Spike起点の`request_proposed`と`request_declined`（payloadに`spike_task_id`）はattentionにせず、`request_planner_exhausted`だけをattentionにする。
+- **周期の上限**: `[goals] max_spike_cycles`（[Run environment](run-environment.md)）に達したgoalのSpikeは、runtimeのplannerのsubmitが拒み、plannerはdraftのまま`planner_question`で人に上げ、人のsubmitが通す。
+  周期は、goalが調査中の計画（[claimを控える](claim-hold.md#調査中の計画の上限)）になってから終わるまでを1回と数える。
+  runtimeは未解決を理由にSpikeを延長も連鎖もしない。
+- **test**: `tests/it/runtime_spike_replan.rs`（着地のトランザクションと照合、調査中の計画の上限、周期の上限）と`tests/it/request_planner_spike.rs`（枠とgoalごとの1つ、prompt）。
+
 ## 予定: inboxからの依頼と非対話のplanner<a id="予定-inboxからの依頼と非対話のplanner"></a>
 
 [ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)（goal 87）の予定のうち、**まだ実装していない**もの（依頼の記録から結末までは上の[inboxからの計画の依頼](#inboxからの計画の依頼)、非対話のplannerは上の[runtimeのplannerの経路](#runtimeのplannerの経路)）。綴りと数値は実装のtaskが決める仮のもので、実装したらこの節を今の姿に書き直し、上の節の人のplannerの記述を消す（廃止前から開いている人のplannerは下の1のとおり行を閉じた扱いにする）。runtimeのplannerはgoal 92の[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)で非対話とbackgroundだけになるので、この節もその形で書く。

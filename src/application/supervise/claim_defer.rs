@@ -18,7 +18,10 @@
 //! left, the class limits pass over the Spikes while `[supervisor]
 //! max_spikes` of them hold a slot, and the aging across the execution
 //! classes arranges the rest (ADR-t1487-2, ADR-t1489-1; the judgement is
-//! [`crate::domain::claim_order`]).
+//! [`crate::domain::claim_order`]). While the Spike limit lets Spikes go,
+//! a Spike that would open an investigation past `[supervisor]
+//! max_investigations` is passed over with its own reason (ADR-t1487-1
+//! decision 7, [`crate::domain::investigation`]).
 use crate::domain::EventKind;
 use std::collections::{HashMap, HashSet};
 
@@ -34,8 +37,12 @@ use crate::domain::{
         deferrals_in_place, expected_files, failed_without_commit, owner_waiting_since,
         worker_deferral_ended, worker_deferrals_in_place, worker_step,
     },
-    claim_order::{self, ClassLimits, class_deferrals_in_place, class_deferred},
+    claim_order::{
+        self, ClaimHolds, ClassLimits, class_deferrals_in_place, class_deferred,
+        investigation_deferred,
+    },
     container_runtime::{CONTAINER_UNAVAILABLE, Runtime},
+    investigation::{INVESTIGATION_LIMIT, InvestigationLimit, Investigations},
     provider_switch::route_of,
     stats::{
         ConflictConfig, ConflictConfigReport,
@@ -50,10 +57,11 @@ use crate::domain::{
 pub(super) struct Claimable {
     pub(super) order: Vec<TaskId>,
     pub(super) aged: Vec<TaskId>,
-    /// The classes a class limit holds: the claim takes no task of them,
-    /// not one it reads after this order was made, nor when it falls back
-    /// to the claim order.
-    pub(super) held: Vec<ExecutionClass>,
+    /// What the claim holds whatever task it reads: the classes a class
+    /// limit holds, and the investigation limit it judges again in its
+    /// transaction, so neither a task read after this order was made nor
+    /// the fallback to the claim order passes them.
+    pub(super) held: ClaimHolds,
 }
 
 /// How long the hotspots (and the expected files of the tasks) are reused.
@@ -490,13 +498,52 @@ impl Supervisor<'_> {
             })
             .collect();
         let now_ms = crate::application::unix_millis(self.generators.clock.system_time());
-        let arranged = claim_order::arrange(
+        // The investigation limit (ADR-t1487-1 decision 7), after the Spike
+        // limit: while the Spike limit holds every Spike, its reason is
+        // theirs; else a Spike that would open an investigation past the
+        // limit is held with its own. The claim's transaction judges it
+        // again on the queue as it is then (`ClaimHolds`).
+        let investigation = InvestigationLimit {
+            max: self.claim.limits.max_investigations.value,
+            grace_secs: self.claim.conflicts.config.waiting_owner_grace_secs,
+        };
+        let investigations = if investigation.max.is_some()
+            && limits.limit(ExecutionClass::Spike).is_none()
+            && lined.iter().any(|candidate| candidate.class.is_spike())
+        {
+            self.queue.investigations()?
+        } else {
+            Investigations::default()
+        };
+        let investigation_held: HashSet<TaskId> = lined
+            .iter()
+            .filter(|candidate| candidate.class.is_spike())
+            .filter(|candidate| {
+                let goal = graph
+                    .tasks
+                    .iter()
+                    .find(|node| node.id == candidate.id)
+                    .and_then(|node| node.goal_id);
+                investigations
+                    .limit(candidate.id, candidate.class, goal, investigation, now)
+                    .is_some()
+            })
+            .map(|candidate| candidate.id)
+            .collect();
+        let mut arranged = claim_order::arrange(
             &lined,
-            &HashSet::new(),
+            &investigation_held,
             limits,
             now_ms,
             self.claim.limits.class_aging.value,
         );
+        arranged.limited.extend(
+            order
+                .iter()
+                .filter(|id| investigation_held.contains(id))
+                .map(|id| (*id, INVESTIGATION_LIMIT)),
+        );
+        let investigations_counted = investigations.counted(now, investigation.grace_secs);
         // In the light room the claim arranges only what the room takes
         // (ADR-t1487-2 decision 3(b) before (c)); the others no class limit
         // holds are deferred for it, recorded like the class limits, so
@@ -563,6 +610,12 @@ impl Supervisor<'_> {
             if !class_deferrals.contains_key(id) {
                 let event = if *reason == claim_order::LIGHT_ROOM {
                     claim_order::light_room_deferred(&self.registration.token)
+                } else if *reason == INVESTIGATION_LIMIT {
+                    investigation_deferred(
+                        investigations_counted,
+                        investigation.max.unwrap_or_default(),
+                        &self.registration.token,
+                    )
                 } else {
                     class_deferred(reason, limits, &self.registration.token)
                 };
@@ -586,9 +639,12 @@ impl Supervisor<'_> {
             }
             self.queue.record_task_event(id, kind, payload)?;
         }
-        let held = limits.held();
+        let held = ClaimHolds {
+            classes: limits.held(),
+            investigations: investigation,
+        };
         let arranged = if light.is_some() {
-            let out: HashSet<TaskId> = out.into_iter().collect();
+            let out: HashSet<TaskId> = out.into_iter().chain(investigation_held).collect();
             claim_order::arrange(
                 &lined,
                 &out,

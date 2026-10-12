@@ -4,8 +4,13 @@
 //! tasks apart in `deferred`; the rest arranged by the aging across the
 //! execution classes as the supervisor's claim arranges them
 //! ([`claim_order::arrange`], ADR-t1489-1), those it moved ahead in
-//! `aged`. A deferral for a class limit is one of the records: the limit
-//! is not judged here either.
+//! `aged`. A deferral for a class limit (`spike_limit`) or for the
+//! investigation limit (`investigation_limit`, ADR-t1487-1 decision 7) is
+//! one of the records: neither limit is judged here. The supervisor records
+//! a Spike under the Spike limit's reason while that limit holds every
+//! Spike, and under the investigation limit's once it lets Spikes go, so a
+//! Spike shows the reason that holds it now; either way it is out of the
+//! shown order as it is out of the claim.
 //!
 //! The deferrals are read, not judged: each task's open `claim_deferred`
 //! as the supervisor's `claimable` last recorded it (the same record as
