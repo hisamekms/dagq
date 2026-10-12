@@ -148,6 +148,8 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   旧バイナリは未知の表を拒み、`dagq.toml`を読めなくなって本番のqueueのrunがすべて止まるので、固定バイナリが`[egress]`を知るものに入れ替わってから足す。
 - `[toolchains.<name>]`は使うtoolchainのprofileと当てるpathsの宣言で、宣言したprofileはpathsに依らず`integrate`とlanding recheckの検証の出力の読み方に効く（書式と誤りの扱いは`run_env::TOOLCHAINS_PREFIX`のdoc comment、当て方は[Toolchain profiles](../toolchain-profiles.md)）。
   旧バイナリは未知の表を拒むので、宣言は固定バイナリが読めるようになってから足す。
+- `[verify_marks.<name>]`は検証の出力のprojectに固有の印で、既存の分類に印を足し、宣言したprofileに依らず`integrate`とlanding recheckに効く（書式は`run_env::VERIFY_MARKS_PREFIX`のdoc comment）。
+  旧バイナリが拒むので、足す時期は`[toolchains.<name>]`と同じ。
 
 ## sccacheのserver
 

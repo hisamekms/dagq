@@ -46,8 +46,9 @@ buildの出力とcacheの置き場と掃除・CIの見張りの読み方・計�
   hostの原因を先に見て、流し直しで通ったtestを時間切れより先に見る、という約束は`classify`のdoc commentにある。
 - 「落ちたtestが全て流し直しで通った」の判定（`flaky`）は共通の分類が行い、profileは落ちたtestと通ったtestの名前と、それを示す行だけを返す。
 - 分類したprofileの名前は`VerifyFailure::profile`に残り、flakyのやり直しはそのprofileのenvだけを足す。
-- projectに固有の印（このrepositoryの`tests/common`の`within`の時間切れの行）はprofileに置かない。
-  今は共通の分類が宣言に依らず読み、`dagq.toml`のprojectの印の口ができたらそこへ移す（ADR-t2268-1決定2）。
+- projectに固有の印（このrepositoryの`tests/common`の`within`の時間切れの行など）はprofileにも共通の分類にも置かず、`dagq.toml`の`[verify_marks.<name>]`が宣言する（`domain::verify_marks`、ADR-t2268-1決定2）。
+  印が当てられる分類は型で閉じ（`MarkClass`はprofileと同じ`ToolHostClass`と`ToolCodeClass`）、分類の集合を広げない。
+  当てる段はprofileの印と同じで、各段の順は`classify`のdoc commentが持つ。
 
 ## 宣言が効く範囲と当て方
 
@@ -58,6 +59,7 @@ buildの出力とcacheの置き場と掃除・CIの見張りの読み方・計�
   pathsはpathに結びつくもの（buildの出力とcacheの置き場、推奨の案）のためにあり、今は`doctor`と`status`に当たる範囲として出るだけである。
 - 宣言したprofileがどれも読まない出力は、共通の印に当たらなければ`unknown`で、落ちたtestの名前は無く、flakyのやり直しのenvも足さない。
 - 宣言が無いrepositoryでは、移行の間だけRustのprofileが暗黙に当たり（`Toolchains::undeclared`）、`doctor`と`status`が警告する（ADR-t2268-1決定9）。
+  profileもprojectの印も宣言しない間は、`within`の行の印も同じく暗黙に当たり（`verify_marks::implied_within`）、どちらかを宣言すると宣言したものだけが効く。
   `Cargo.toml`などからprofileを推測して有効にすることはしない。
 - 読むのはqueueが束縛されたmain checkoutの作業ファイルの`dagq.toml`で、`integrate`とlanding recheckが検証のたびに読む。
   workerのtranscriptとCodexのturnの計測は、まだ宣言を読まず暗黙のRustのprofileで落ちたtestの名前を読む。

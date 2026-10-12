@@ -305,6 +305,8 @@ fn nextest_line(line: &str) -> Option<(NextestStatus, &str)> {
 mod tests {
     //! The Rust profile with the runtime's own marks, as a repository that
     //! declares none reads a verification's output (ADR-t2268-1 decision 9).
+    //! `tests/common`'s `within` line in these logs is read by the mark
+    //! implied with it ([`crate::domain::verify_marks`]), not the profile.
     use crate::domain::toolchain::Toolchains;
     use crate::domain::verify_failure::{
         EVIDENCE_CHARS, FailedTests, FailureClass, MAX_FAILED_TESTS, VerifyFailure,

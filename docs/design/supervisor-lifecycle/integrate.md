@@ -53,8 +53,10 @@ related:
    `attempt`はrun directoryにある`integrate-*-verify-*.log`の最大の試行番号+1（無ければ1）で、同じrunの2回目の`integrate`が1回目のlogを上書きしない。
    非0で終わったコマンドは、終了コード・signal・logから失敗を分類し（`domain::verify_failure::classify`）、`verification_command`のpayloadに`signal`（signalで終わったときの番号、無ければnull）と`failure`（`{class, evidence}`。成功したコマンドはnull）を書く。
    `class`の印には3つの出どころがある: 言語に依らない印（容量の不足のerrorとerrno、signalと128+signalの終了コード、時間切れの終了コード124、下のコマンド全体の上限）はruntimeの共通の分類（`domain::verify_failure`）が宣言に依らず読み、言語・道具に固有の印（build・lint・format・coverageの失敗、testの失敗・時間切れ・kill、流し直しで通ったtest）はrepositoryが`dagq.toml`で宣言したtoolchainのprofileが読む（[Toolchain profiles](../toolchain-profiles.md)。Rustのprofileの印の一覧は`domain::toolchain::rust`のdoc comment）。
-   このrepositoryに固有の印（`tests/common`の`within`の`test <name> timed out: … did not happen within …`の行）は、`dagq.toml`のprojectの印の口に移るまで共通の分類が宣言に依らず読み、`timeout`にする（hostの分類なので、ほかのprofileだけを宣言したrepositoryでもやり直しと保留に回る）。
-   宣言の無いrepositoryではRustのprofileが暗黙に当たり、宣言したprofileがどれも読まない出力は、共通の印に当たらなければ`unknown`（logの最後の空でない行。空なら終了コード）になる。
+   projectに固有の印（このrepositoryの`tests/common`の`within`の時間切れの行など）は、repositoryが`dagq.toml`の`[verify_marks.<name>]`で宣言し、既存の分類に印を足すだけで分類を増やさない（`domain::verify_marks`。書式と各欄は`run_env::VERIFY_MARKS_PREFIX`のdoc comment）。
+   当てる順はprofileの印と同じ段で、hostの分類の印は共通の容量・signalの印とprofileのflakyの後、時間切れの終了コード124の前、コードの分類の印は124の後でprofileのコードの印の前である（`classify`のdoc comment）。
+   宣言の無いrepositoryではRustのprofileが暗黙に当たり、profileも印も宣言しない間は`within`の行の印も暗黙に当たる（移行の間だけ。ADR-t2268-1決定9）。
+   宣言したprofileがどれも読まない出力は、共通の印に当たらなければ`unknown`（logの最後の空でない行。空なら終了コード）になる。
    印を当てる順（`classify`のdoc comment）は2つの約束を保つ: hostの原因を先に見る（ディスク満杯やkillが後に残すbuildやtestのエラーに引きずられないため）、流し直しで通ったtestを時間切れより先に見る（1回目に時間切れやkillになり流し直しで通ったtestも不安定なtestとして扱うため）。
    コマンド全体の上限（`VERIFICATION_TIMEOUT`、30分。`ShellVerifier::verification_timeout`、testは`OneShot::verification_timeout`で縮める）を過ぎたコマンドは、止めてから着地処理のエラーにせず、`timeout`（`evidence`は`the command ran past its <秒> s limit and was killed`、`exit_code`は128、`signal`は9）の失敗として同じく記録する（verifierは`domain::verify_failure::CommandTimedOut`のerrorを返し、integrateがそれを見分ける）。
    検証コマンドは自分のprocess group（`process_group(0)`）で起動し、上限を過ぎるとgroup全体（`/bin/sh`と、それが起動した`cargo`・nextest・testなどの子孫）と、子孫が移った別のprocess group（cargo-nextestはtestを1件ずつ自分のgroupで流す。止める前と猶予のあいだに子孫を`ps`で辿って`getpgid`で見つける）にSIGTERMを送る。
@@ -64,7 +66,7 @@ related:
    `evidence`は当たった行（ANSIの色を除き300文字まで）。
    logはUTF-8として不正なbyteを置き換えて読む（killやディスク満杯で途中で切れたlogでも印を拾うため）。
    分類による扱いは下の「hostの失敗のやり直し」。
-   `class`が`test_failure`・`timeout`・`flaky`なら、logから落ちたtestの名前を読み（`domain::verify_failure::failed_tests`。宣言したprofileが落ちたと読むtestと、`tests/common`の`within`の`test <name> timed out: …`の行のtestを、重ねず出た順に20件まで）、`verification_command`のpayloadに`failed_tests`（名前の配列。名前の無い失敗は空の配列）と`failed_tests_omitted`（20件を超えた数）を書く。
+   `class`が`test_failure`・`timeout`・`flaky`なら、logから落ちたtestの名前を読み（`domain::verify_failure::failed_tests`。宣言したprofileが落ちたと読むtestと、projectの印の行が名指すtestを、重ねず出た順に20件まで）、`verification_command`のpayloadに`failed_tests`（名前の配列。名前の無い失敗は空の配列）と`failed_tests_omitted`（20件を超えた数）を書く。
    それ以外の失敗と成功したコマンドはどちらもnull。
    あわせて`flaky_tests`に、落ちたtestのうち、宣言したprofileが道具の流し直しで通ったと読むもの（`domain::verify_failure::flaky_tests`）を書く（`flaky`でない失敗でも、同じコマンドの中の不安定なtestには付く。無ければ空の配列）。
    コードの分類（`flaky`・`build_error`・`lint`・`test_failure`・`format`・`coverage_below`・`unknown`）で非0なら`needs_session`で（`flaky`は下の着地のやり直しを先に1回使う）、`integration_deferred`のpayloadにも同じ`signal`・`failure`・`failed_tests`・`failed_tests_omitted`・`flaky_tests`を書き、`last_error`に`(<class>: <evidence>)`を足す。

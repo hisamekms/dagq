@@ -49,6 +49,8 @@
 //! decision 2).
 //! `[toolchains.<name>]` declares a toolchain profile the repository uses
 //! and the paths it applies to (ADR-t2268-1, [`TOOLCHAINS_PREFIX`]).
+//! `[verify_marks.<name>]` declares a mark of the project's own on its
+//! verification's output (ADR-t2268-1 decision 2, [`VERIFY_MARKS_PREFIX`]).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -92,6 +94,7 @@ use crate::{
         stall::StallConfig,
         stats::ConflictConfig,
         toolchain::{ProfileRegistry, ToolchainDeclaration, Toolchains},
+        verify_marks::{LinePattern, MarkClass, ProjectMark},
         worker_model::WorkerTrial,
     },
     infrastructure::kpi_config::KpiTables,
@@ -267,6 +270,54 @@ const TOOLCHAINS_TABLE: &str = "toolchains";
 /// The keys of `[toolchains.<name>]` ([`TOOLCHAINS_PREFIX`]).
 const TOOLCHAIN_PROFILE: &str = "profile";
 const TOOLCHAIN_PATHS: &str = "paths";
+/// `[verify_marks.<name>]`: a mark of the project's own on its
+/// verification's output (ADR-t2268-1 decision 2), a line its own tools
+/// or test helpers print that puts a failure down to one of the runtime's
+/// classes and may name the test that failed; one table per mark, read in
+/// file order. `<name>` is the mark's own name, kebab-case, bare or
+/// quoted, each once. Its keys, both required:
+///
+/// - `class` (a string): the class the line gives, one the runtime has
+///   and a mark may name: `killed` or `timeout` (the host's: integrate
+///   tries the command once more instead of resuming the worker), or
+///   `build_error`, `lint`, `test_failure`, `format` or `coverage_below`
+///   (the code's). `disk_full`, `flaky` and `unknown` take no mark, and
+///   any other name is a mistake of the file: a mark adds lines to a
+///   class, never a class (ADR-t639-1 decision 5).
+/// - `line` (a string): the shape of the whole line, without the spaces
+///   around it: `*` stands for any text (none too), `{test}` (at most
+///   once, never next to `*`) for the name of the
+///   test that failed, and the rest is the line's text. A shape without
+///   text of its own, or with `{test}` twice or beside `*`, is a mistake
+///   of the file. The text in `{test}`'s place names a test when it is
+///   letters, digits, `_` and `:`; else the line still gives the class
+///   and names none.
+///
+/// For `tests/common`'s `within` in this repository:
+///
+/// ```toml
+/// [verify_marks.within]
+/// class = "timeout"
+/// line = "test {test} timed out: *did not happen within*"
+/// ```
+///
+/// The marks are read whatever profiles are declared, in the order
+/// [`crate::domain::verify_failure::classify`] keeps for a profile's
+/// marks: those of the host's classes after the runtime's full disk and
+/// signal and the flaky tests, by their first line against a profile's
+/// test out of time, and before the exit 124; those of the code's before
+/// the profiles' code failures. While the file declares neither a mark
+/// nor a `[toolchains.<name>]`, `within`'s line above is read as if it were
+/// declared (ADR-t2268-1 decision 9); one of either ends that. A binary
+/// older than the table refuses it, so a repository declares one only
+/// once the binary that runs its queue reads it.
+pub const VERIFY_MARKS_PREFIX: &str = "verify_marks.";
+/// What [`parse_config`] calls the current table while in a
+/// `[verify_marks.*]`.
+const VERIFY_MARKS_TABLE: &str = "verify_marks";
+/// The keys of `[verify_marks.<name>]` ([`VERIFY_MARKS_PREFIX`]).
+const VERIFY_MARK_CLASS: &str = "class";
+const VERIFY_MARK_LINE: &str = "line";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
 const TABLES: [&str; 24] = [
@@ -408,6 +459,9 @@ pub struct Config {
     /// without any. The profiles they name are looked up when they are
     /// resolved ([`load_toolchains`]).
     pub toolchains: Vec<ToolchainDeclaration>,
+    /// `[verify_marks.<name>]` in file order ([`VERIFY_MARKS_PREFIX`]);
+    /// empty without any.
+    pub verify_marks: Vec<ProjectMark>,
 }
 
 /// Parse the whole file.
@@ -468,6 +522,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut program_open: Option<ProgramTable> = None;
     // The keys of the current `[toolchains.<name>]` read.
     let mut toolchain_keys: Vec<String> = Vec::new();
+    // The `[verify_marks.<name>]` being read, finished at the next table
+    // or the end of the file.
+    let mut mark_open: Option<MarkTable> = None;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (index, raw) in text.lines().enumerate() {
         let number = index + 1;
@@ -492,6 +549,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.review_programs.push(open.finish()?);
             }
             finish_toolchain(&config.toolchains)?;
+            if let Some(open) = mark_open.take() {
+                config.verify_marks.push(open.finish()?);
+            }
             if kpi
                 .header(name)
                 .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?
@@ -617,6 +677,33 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 table = Some(TOOLCHAINS_TABLE);
                 continue;
             }
+            if name == VERIFY_MARKS_TABLE || name.starts_with(VERIFY_MARKS_PREFIX) {
+                let mark = name
+                    .strip_prefix(VERIFY_MARKS_PREFIX)
+                    .map(|mark| parse_key(mark.trim()))
+                    .transpose()
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?
+                    .unwrap_or_default();
+                ensure!(
+                    !mark.is_empty(),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] names no mark; write [{VERIFY_MARKS_PREFIX}<name>]"
+                );
+                ensure!(
+                    review_subagents::valid_agent_name(&mark),
+                    "{CONFIG_FILE_NAME}:{number}: mark {mark:?} of [{name}] is not kebab-case (lowercase letters and digits joined by -)"
+                );
+                ensure!(
+                    config.verify_marks.iter().all(|m| m.name != mark),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
+                );
+                mark_open = Some(MarkTable {
+                    line: number,
+                    name: mark,
+                    ..MarkTable::default()
+                });
+                table = Some(VERIFY_MARKS_TABLE);
+                continue;
+            }
             if let Some(name) = name.strip_prefix(EVAL_PROVIDERS_PREFIX) {
                 let provider: crate::domain::Provider = name.parse().map_err(|_| {
                     anyhow::anyhow!(
@@ -639,7 +726,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -679,6 +766,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
             .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: expected KEY = value"))?;
         let key = key.trim();
         match table {
+            Some(VERIFY_MARKS_TABLE) => mark_open
+                .as_mut()
+                .expect("a [verify_marks.*] table names its mark")
+                .entry(number, key, rest.trim())?,
             Some(TOOLCHAINS_TABLE) => {
                 let toolchain = config
                     .toolchains
@@ -1469,7 +1560,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -1477,6 +1568,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
         config.review_programs.push(open.finish()?);
     }
     finish_toolchain(&config.toolchains)?;
+    if let Some(open) = mark_open {
+        config.verify_marks.push(open.finish()?);
+    }
     if let Some(line) = subagent_open {
         bail!(
             "{CONFIG_FILE_NAME}:{line}: [{REVIEW_SUBAGENTS_PREFIX}{}] has no {REVIEW_SUBAGENT_PATHS}",
@@ -1541,6 +1635,68 @@ fn finish_toolchain(toolchains: &[ToolchainDeclaration]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// A `[verify_marks.<name>]` as read so far: its header's line, its name
+/// and each key's value, checked whole by [`Self::finish`].
+#[derive(Default)]
+struct MarkTable {
+    line: usize,
+    name: String,
+    class: Option<MarkClass>,
+    pattern: Option<LinePattern>,
+}
+
+impl MarkTable {
+    fn entry(&mut self, number: usize, key: &str, value: &str) -> Result<()> {
+        let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+        let defined = match key {
+            VERIFY_MARK_CLASS => self.class.is_some(),
+            VERIFY_MARK_LINE => self.pattern.is_some(),
+            _ => bail!(
+                "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{VERIFY_MARKS_PREFIX}{}]; the keys are {VERIFY_MARK_CLASS} and {VERIFY_MARK_LINE}",
+                self.name
+            ),
+        };
+        ensure!(
+            !defined,
+            "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+        );
+        let value = parse_string(value).with_context(with)?;
+        if key == VERIFY_MARK_CLASS {
+            self.class = Some(
+                MarkClass::parse(&value)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(with)?,
+            );
+        } else {
+            self.pattern = Some(
+                LinePattern::parse(&value)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(with)?,
+            );
+        }
+        Ok(())
+    }
+
+    /// The mark, once its table ended: both keys are required.
+    fn finish(self) -> Result<ProjectMark> {
+        let missing = |key| {
+            anyhow::anyhow!(
+                "{CONFIG_FILE_NAME}:{}: [{VERIFY_MARKS_PREFIX}{}] has no {key}",
+                self.line,
+                self.name
+            )
+        };
+        Ok(ProjectMark {
+            class: self.class.ok_or_else(|| missing(VERIFY_MARK_CLASS))?,
+            line: self
+                .pattern
+                .clone()
+                .ok_or_else(|| missing(VERIFY_MARK_LINE))?,
+            name: self.name,
+        })
+    }
 }
 
 /// A `[review.programs.<name>]` as read so far: its header's line and
@@ -1943,20 +2099,23 @@ pub fn load_landing_verification(root: &Path) -> Result<Option<LandingVerificati
 }
 
 /// The toolchain profiles the `dagq.toml` in `root` declares
-/// ([`TOOLCHAINS_PREFIX`]), resolved against `registry`: no file or no
+/// ([`TOOLCHAINS_PREFIX`]), resolved against `registry`, with the
+/// project's own marks it declares ([`VERIFY_MARKS_PREFIX`]): no file or no
 /// declaration is the Rust profile implied (ADR-t2268-1 decision 9), and
 /// a profile `registry` does not have is a mistake of the file.
 pub fn load_toolchains(root: &Path, registry: &ProfileRegistry) -> Result<Toolchains> {
     let path = root.join(CONFIG_FILE_NAME);
-    let declarations = match read_config(&path)? {
+    let (declarations, marks) = match read_config(&path)? {
         Some(text) => {
-            parse_config(&text)
-                .with_context(|| format!("parse {}", path.display()))?
-                .toolchains
+            let config =
+                parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
+            (config.toolchains, config.verify_marks)
         }
-        None => Vec::new(),
+        None => (Vec::new(), Vec::new()),
     };
-    Toolchains::resolve(registry, &declarations).map_err(anyhow::Error::msg)
+    Ok(Toolchains::resolve(registry, &declarations)
+        .map_err(anyhow::Error::msg)?
+        .with_marks(marks))
 }
 
 /// `[areas]` of the `dagq.toml` in `root` (ADR-t980-1), `None` when there
@@ -2599,6 +2758,125 @@ mod tests {
             toolchains.view()["declared"],
             serde_json::json!([{"name": "core", "profile": "rust", "paths": ["src/**"]}])
         );
+    }
+
+    /// `[verify_marks.<name>]` declares a class the runtime has and the
+    /// shape of the line; a class it does not have, a malformed shape or a
+    /// missing key is refused with its line, and the marks reach the
+    /// classification through the toolchains read with them.
+    #[test]
+    fn parses_the_verify_marks_tables() {
+        let config = parse_config(
+            "[verify_marks.within]\nclass = \"timeout\"\nline = \"test {test} timed out: *did not happen within*\" # tests/common\n[verify_marks.\"bad-build\"]\nline = 'BAD BUILD*'\nclass = 'build_error'\n[run.env]\nA = '1'\n",
+        )
+        .unwrap();
+        let shown: Vec<_> = config
+            .verify_marks
+            .iter()
+            .map(|mark| (mark.name.as_str(), mark.class.as_str(), mark.line.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "within",
+                    "timeout",
+                    "test {test} timed out: *did not happen within*"
+                ),
+                ("bad-build", "build_error", "BAD BUILD*"),
+            ]
+        );
+        assert!(parse_config("").unwrap().verify_marks.is_empty());
+        for (text, error) in [
+            (
+                "[verify_marks]\nclass = 'timeout'\n",
+                "dagq.toml:1: [verify_marks] names no mark",
+            ),
+            (
+                "[verify_marks.Within]\nclass = 'timeout'\n",
+                "is not kebab-case",
+            ),
+            (
+                "[verify_marks.a]\nclass = 'timeout'\nline = 'x'\n[verify_marks.a]\n",
+                "dagq.toml:4: [verify_marks.a] is defined twice",
+            ),
+            (
+                "[verify_marks.a]\nline = 'x'\n",
+                "dagq.toml:1: [verify_marks.a] has no class",
+            ),
+            (
+                "[verify_marks.a]\nclass = 'timeout'\n[run.env]\nA = '1'\n",
+                "dagq.toml:1: [verify_marks.a] has no line",
+            ),
+            (
+                "[verify_marks.a]\nclass = 'slow'\n",
+                "dagq.toml:2: value of class: unknown class \"slow\"; a mark names one of killed, timeout, build_error, lint, test_failure, format, coverage_below",
+            ),
+            (
+                "[verify_marks.a]\nclass = 'disk_full'\n",
+                "unknown class \"disk_full\"",
+            ),
+            (
+                "[verify_marks.a]\nclass = 'flaky'\n",
+                "unknown class \"flaky\"",
+            ),
+            (
+                "[verify_marks.a]\nline = '{test}*'\n",
+                "dagq.toml:2: value of line",
+            ),
+            (
+                "[verify_marks.a]\nline = 'a {test} b {test}'\n",
+                "dagq.toml:2: value of line",
+            ),
+            (
+                "[verify_marks.a]\nclass = 'lint'\nclass = 'lint'\n",
+                "dagq.toml:3: class is defined twice",
+            ),
+            (
+                "[verify_marks.a]\nclass = 'lint'\npattern = 'x'\n",
+                "unknown key pattern in [verify_marks.a]; the keys are class and line",
+            ),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text:?}: {message}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let registry = &crate::domain::toolchain::BUILTIN;
+        let within = "test a::b timed out: x did not happen within 1s\n";
+        let class = |toolchains: &Toolchains| {
+            crate::domain::verify_failure::classify(toolchains, "check", Some(101), None, within)
+                .class
+                .as_str()
+        };
+        // Neither declared: the implied mark reads the line.
+        assert_eq!(
+            class(&load_toolchains(dir.path(), registry).unwrap()),
+            "timeout"
+        );
+        // A profile declared without the mark: the line is not read.
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[toolchains.core]\nprofile = 'rust'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            class(&load_toolchains(dir.path(), registry).unwrap()),
+            "unknown"
+        );
+        // The mark declared, with or without a profile.
+        for toml in ["[toolchains.core]\nprofile = 'rust'\n", ""] {
+            fs::write(
+                dir.path().join(CONFIG_FILE_NAME),
+                format!("{toml}[verify_marks.within]\nclass = 'timeout'\nline = 'test {{test}} timed out: *did not happen within*'\n"),
+            )
+            .unwrap();
+            let toolchains = load_toolchains(dir.path(), registry).unwrap();
+            assert_eq!(class(&toolchains), "timeout", "{toml:?}");
+            assert_eq!(
+                toolchains.view()["marks"],
+                serde_json::json!([{"name": "within", "class": "timeout", "line": "test {test} timed out: *did not happen within*"}])
+            );
+        }
     }
 
     /// `[areas]` maps each area's name, bare or quoted, to a one-line

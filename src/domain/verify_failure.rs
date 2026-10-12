@@ -10,8 +10,9 @@
 //! conventional exit 124 of `timeout(1)`, and the limit of the whole
 //! command ([`CommandTimedOut`]). The marks of a language's tools and the
 //! tests they name are the declared profiles'
-//! ([`crate::domain::toolchain`]); an output none of them reads is
-//! `unknown` unless the runtime's marks say otherwise.
+//! ([`crate::domain::toolchain`]), and those of the project's own tools
+//! the marks it declares ([`crate::domain::verify_marks`]); an output none
+//! of them reads is `unknown` unless the runtime's marks say otherwise.
 //!
 //! How a class is handled is [`FailureClass::is_environmental`]'s:
 //! integrate retries a command that failed on the host once instead of
@@ -21,7 +22,10 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::toolchain::{ToolHostClass, Toolchains};
+use super::{
+    toolchain::{ToolHostClass, Toolchains},
+    verify_marks::MarkClass,
+};
 
 /// What a failed verification command is put down to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -140,12 +144,14 @@ pub const EVIDENCE_CHARS: usize = 300;
 /// Classify the failure of `command` that exited with `exit_code` (`None`
 /// when a signal ended it) or `signal`, from its `log`, with the runtime's
 /// marks and those of `toolchains`' profiles, each declared one in turn
-/// at each step (ADR-t2268-1 decision 6). The steps are tried in order:
+/// at each step (ADR-t2268-1 decision 6), and the project's own marks
+/// where a profile's of the same class are. The steps are tried in order:
 /// what the host did first, since a full disk or a kill also leaves build
 /// and test errors behind; the tests that passed on their retry before a
 /// test out of time, so a test that ran out of time once and passed is
-/// flaky as any other; the exit 124 after the tools' own timeouts; the
-/// code's classes last.
+/// flaky as any other; the exit 124 after the tools' and the project's
+/// own timeouts and kills; the code's classes last, the project's marks
+/// before the profiles'.
 pub fn classify(
     toolchains: &Toolchains,
     command: &str,
@@ -196,21 +202,34 @@ pub fn classify(
             return found(FailureClass::Flaky, lines[at], Some(profile.name()));
         }
     }
-    // A tool's kill first; a tool's timeout and the project's own
-    // timeout line by the first line either is on.
-    let within = lines.iter().position(|line| within_timeout(line).is_some());
+    // A tool's kill first; a tool's timeout and a project's host mark by
+    // the first line either is on.
+    let project_host = lines.iter().enumerate().find_map(|(at, line)| {
+        toolchains.marks().iter().find_map(|mark| match mark.class {
+            MarkClass::Host(class) if mark.is_on(line) => Some((class, at)),
+            _ => None,
+        })
+    });
     for profile in toolchains.profiles() {
         match profile.test_host_line(&lines) {
-            Some((ToolHostClass::Timeout, at)) if within.is_some_and(|w| w < at) => break,
+            Some((ToolHostClass::Timeout, at)) if project_host.is_some_and(|(_, p)| p < at) => {}
             Some((class, at)) => return found(class.into(), lines[at], Some(profile.name())),
             None => {}
         }
     }
-    if let Some(at) = within {
-        return found(FailureClass::Timeout, lines[at], None);
+    if let Some((class, at)) = project_host {
+        return found(class.into(), lines[at], None);
     }
     if exit_code == Some(124) {
         return found(FailureClass::Timeout, "exit 124 (timeout)", None);
+    }
+    if let Some((class, at)) = lines.iter().enumerate().find_map(|(at, line)| {
+        toolchains.marks().iter().find_map(|mark| match mark.class {
+            MarkClass::Code(class) if mark.is_on(line) => Some((class, at)),
+            _ => None,
+        })
+    }) {
+        return found(class.into(), lines[at], None);
     }
     for profile in toolchains.profiles() {
         if let Some((class, evidence)) = profile.code_failure(command, &lines) {
@@ -251,15 +270,22 @@ impl FailedTests {
 }
 
 /// The tests `log` names as failed, by `toolchains`' profiles and by the
-/// timeout line of the repository's own test helper ([`within_timeout`]),
-/// in the order of the lines that name them. A failure that names no test
-/// gives none, and so does an output no profile reads.
+/// project's own marks that name a test, in the order of the lines that
+/// name them. A failure that names no test gives none, and so does an
+/// output nothing declared reads.
 pub fn failed_tests(toolchains: &Toolchains, log: &str) -> FailedTests {
     let text = strip_ansi(log);
+    let marked = text.lines().enumerate().flat_map(|(index, line)| {
+        toolchains
+            .marks()
+            .iter()
+            .find_map(|mark| mark.test_on(line.trim()))
+            .map(|name| (index, name))
+    });
     let mut found: Vec<(usize, String)> = toolchains
         .profiles()
         .flat_map(|profile| profile.failed_tests(&text))
-        .chain(within_tests(&text))
+        .chain(marked)
         .collect();
     // Stable: a line two profiles name keeps the first's.
     found.sort_by_key(|(index, _)| *index);
@@ -289,47 +315,6 @@ pub fn flaky_tests(toolchains: &Toolchains, log: &str) -> Vec<String> {
         }
     }
     names
-}
-
-/// The test of the timeout line of this repository's own test helper
-/// (`tests/common`'s `within`: `test <name> timed out: … did not happen
-/// within …`, starting its own line). It is a project's mark, not a
-/// language's: the runtime reads it whatever the repository declares
-/// until it moves to the project's own marks in `dagq.toml`
-/// (ADR-t2268-1 decision 2).
-fn within_timeout(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("test ")?;
-    rest.contains("did not happen within")
-        .then(|| rest.split_once(" timed out: "))
-        .flatten()
-        .map(|(name, _)| name)
-}
-
-/// The tests of the project's own timeout lines ([`within_timeout`]) with
-/// their lines, but those of the indented list under a `failures:` line,
-/// which names tests rather than says why they failed.
-fn within_tests(text: &str) -> Vec<(usize, String)> {
-    let mut found = Vec::new();
-    let mut in_list = false;
-    for (index, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if in_list {
-            if !line.is_empty() && raw.starts_with([' ', '\t']) {
-                continue;
-            }
-            in_list = false;
-        }
-        if raw.trim_end() == "failures:" {
-            in_list = true;
-            continue;
-        }
-        found.extend(
-            within_timeout(line)
-                .and_then(test_name)
-                .map(|name| (index, name)),
-        );
-    }
-    found
 }
 
 /// `text` when it looks like a test's name: letters, digits, `_` and `:`
@@ -388,7 +373,10 @@ fn strip_ansi(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::toolchain::{BUILTIN, ToolchainDeclaration, fake};
+    use crate::domain::{
+        toolchain::{BUILTIN, ToolchainDeclaration, fake},
+        verify_marks::{LinePattern, ProjectMark},
+    };
 
     #[test]
     fn the_host_classes_are_environmental_and_the_code_classes_are_not() {
@@ -596,21 +584,130 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_projects_timeout_line_is_read_whatever_is_declared() {
-        let log = "test runtime_x::waits timed out: the run to land did not happen within 20s\n";
-        for (declared, toolchains) in every_declaration() {
-            let failure = classify(&toolchains, "check", Some(101), None, log);
-            assert_eq!(failure.class, FailureClass::Timeout, "{declared}");
-            assert_eq!(failed_tests(&toolchains, log).names, ["runtime_x::waits"]);
-        }
-        // The quoted text of an assertion is not a mark.
-        let quoted = "stderr: \"test a::b timed out: x did not happen within 1s\"\n";
-        assert!(failed_tests(&fake::only_fake(), quoted).is_empty());
+    const WITHIN: &str =
+        "test runtime_x::waits timed out: the run to land did not happen within 20s\n";
+
+    /// `marks` as `[verify_marks.<name>]` would declare them.
+    fn marks(marks: &[(&str, &str, &str)]) -> Vec<ProjectMark> {
+        marks
+            .iter()
+            .map(|(name, class, line)| ProjectMark {
+                name: (*name).to_owned(),
+                class: MarkClass::parse(class).unwrap(),
+                line: LinePattern::parse(line).unwrap(),
+            })
+            .collect()
+    }
+
+    fn within_declared() -> Vec<ProjectMark> {
+        marks(&[(
+            "within",
+            "timeout",
+            "test {test} timed out: *did not happen within*",
+        )])
     }
 
     #[test]
-    fn the_first_timeout_line_is_the_evidence_and_a_listed_test_is_no_mark() {
+    fn the_projects_timeout_line_is_read_where_it_is_declared_or_implied() {
+        let [(_, undeclared), (_, rust), (_, fake)] = every_declaration();
+        for (declared, toolchains) in [
+            ("implied", undeclared.clone()),
+            (
+                "undeclared with the mark",
+                undeclared.with_marks(within_declared()),
+            ),
+            (
+                "rust with the mark",
+                rust.clone().with_marks(within_declared()),
+            ),
+            (
+                "fake with the mark",
+                fake.clone().with_marks(within_declared()),
+            ),
+        ] {
+            let failure = classify(&toolchains, "check", Some(101), None, WITHIN);
+            assert_eq!(failure.class, FailureClass::Timeout, "{declared}");
+            assert_eq!(failure.profile, None, "{declared}");
+            assert!(failure.class.is_environmental());
+            assert_eq!(
+                failed_tests(&toolchains, WITHIN).names,
+                ["runtime_x::waits"],
+                "{declared}"
+            );
+        }
+        // A declared profile without the mark does not read the line.
+        for (declared, toolchains) in [("rust", rust), ("fake", fake)] {
+            assert_eq!(
+                classify(&toolchains, "check", Some(101), None, WITHIN).class,
+                FailureClass::Unknown,
+                "{declared}"
+            );
+            assert!(failed_tests(&toolchains, WITHIN).is_empty(), "{declared}");
+        }
+        // Another mark declared ends the implied one.
+        let other = Toolchains::undeclared().with_marks(marks(&[("hung", "killed", "HUNG*")]));
+        assert_eq!(
+            classify(&other, "check", Some(101), None, WITHIN).class,
+            FailureClass::Unknown
+        );
+        // The quoted text of an assertion is not a mark.
+        let quoted = "stderr: \"test a::b timed out: x did not happen within 1s\"\n";
+        assert!(failed_tests(&Toolchains::undeclared(), quoted).is_empty());
+    }
+
+    #[test]
+    fn the_projects_marks_come_after_the_hosts_and_before_the_exit_124() {
+        let toolchains = fake::only_fake().with_marks(marks(&[
+            ("stuck", "killed", "watchdog killed {test}"),
+            ("lost", "timeout", "lost {test} after*"),
+            ("bad", "test_failure", "BAD {test}"),
+        ]));
+        let class = |exit, log: &str| classify(&toolchains, "check", exit, None, log);
+        // The runtime's full disk and signal first.
+        assert_eq!(
+            class(Some(1), "watchdog killed a::b\nENOSPC\n").class,
+            FailureClass::DiskFull
+        );
+        assert_eq!(
+            class(Some(137), "watchdog killed a::b\n").evidence,
+            "exit 137 (signal 9, SIGKILL)"
+        );
+        // A profile's flaky tests before a host mark.
+        assert_eq!(
+            class(Some(1), "BROKEN a::b\nlost a::b after 3s\nWOBBLY a::b\n").class,
+            FailureClass::Flaky
+        );
+        // A host mark before the exit 124, and a profile's timeout by the
+        // first line.
+        let failure = class(Some(124), "watchdog killed a::b\n");
+        assert_eq!(
+            (failure.class, failure.profile, failure.evidence.as_str()),
+            (FailureClass::Killed, None, "watchdog killed a::b")
+        );
+        assert_eq!(
+            class(Some(1), "lost a::b after 3s\nHUNG c::d\n").evidence,
+            "lost a::b after 3s"
+        );
+        assert_eq!(
+            class(Some(1), "HUNG c::d\nlost a::b after 3s\n").profile,
+            Some("fake")
+        );
+        // A code mark after the exit 124, and before a profile's code
+        // failure.
+        assert_eq!(class(Some(124), "BAD a::b\n").class, FailureClass::Timeout);
+        let failure = class(Some(1), "NO BUILD\nBAD a::b\n");
+        assert_eq!(
+            (failure.class, failure.profile),
+            (FailureClass::TestFailure, None)
+        );
+        assert_eq!(
+            failed_tests(&toolchains, "BROKEN x::y\nBAD a::b\nwatchdog killed c::d\n").names,
+            ["x::y", "a::b", "c::d"]
+        );
+    }
+
+    #[test]
+    fn the_first_timeout_line_is_the_evidence() {
         let toolchains = Toolchains::undeclared();
         let log = "        FAIL [ 1.0s] dagq::it it::a\n\
     test it::a timed out: x did not happen within 30s\n\
@@ -626,9 +723,6 @@ test it::a timed out: x did not happen within 30s\n";
         let failure = classify(&toolchains, "check", Some(100), None, log);
         assert_eq!(failure.evidence, "TIMEOUT [ 60.0s] dagq::it it::b");
         assert_eq!(failure.profile, Some("rust"));
-        // Under `failures:`, an indented line names a test, not a timeout.
-        let listed = "failures:\n    test x::y timed out: z did not happen within 1s\n";
-        assert!(failed_tests(&fake::only_fake(), listed).is_empty());
     }
 
     #[test]

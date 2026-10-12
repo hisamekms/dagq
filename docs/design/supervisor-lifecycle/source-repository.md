@@ -68,7 +68,8 @@ buildの出力の置き場と掃除・計測・CIの見張りの読み方・proc
 言語に依らない部分はruntimeの共通の既定に、このrepositoryに固有の部分は`dagq.toml`に置く（ADR-t2268-1決定2・4）。
 
 - 検証の失敗の分類と落ちたtest・flakyのtestの抜き出し、flakyのやり直しのenvと受け継いだ値を落とす扱いは、profileに移った（汎用の印は`domain::verify_failure`の共通の分類、cargo・nextest・rustfmtの印とenvはRustのprofileの`domain::toolchain::rust`。[Toolchain profiles](../toolchain-profiles.md)）。
-  残るのは`tests/common`の`within`の時間切れの行の印で、projectに固有の印として`domain::verify_failure`の共通の分類が宣言に依らず読み、`dagq.toml`のprojectの印の口ができたらそこへ移す。
+  `tests/common`の`within`の時間切れの行はprojectに固有の印で、共通の分類にもRustのprofileにも置かず、`dagq.toml`の`[verify_marks.<name>]`で宣言する（`domain::verify_marks`）。
+  このrepositoryの`dagq.toml`が宣言するまでは、profileも印も宣言しないrepositoryの暗黙の扱いとして当たり、Rustのprofileの暗黙の扱いと一緒に外れる。
 - buildの出力の置き場と掃除: landing recheckの`application::supervise::recheck`と自動更新の`application::update`。
   workerとintegrateのbuildの出力の置き場は`[run.env]`のprojectの値を`infrastructure::run_env`が読むだけで、runtimeに雛形は無い（決まった形ではprofileの推奨の案として出す。ADR-t2268-1決定1・7）。
 - CIの見張りの読み方: `domain::ci_watch`。

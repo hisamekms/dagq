@@ -53,6 +53,7 @@ containerが使えるかはsupervisorのattentionが知らせ、doctorは問わ�
 
 `toolchains`は、queueが束縛されたmain checkoutの`dagq.toml`が宣言したtoolchainのprofileと、それぞれが当たる範囲（`[toolchains.<name>]`、[Toolchain profiles](../toolchain-profiles.md)）を出す（`domain::toolchain::Toolchains::view`。欄の意味はそのdoc comment）。
 宣言が無ければ、Rustのprofileが暗黙に当たることと、宣言を足すよう促す警告を出す（[ADR-t2268-1](../../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定9）。
+同じ欄の`marks`は検証の出力を読むprojectの印（`[verify_marks.<name>]`）で、暗黙に当たる印には`implicit`が付く。
 組み込みに無いprofileの名前や読めない`dagq.toml`は`error`だけを持ち、着地はその間エラーで止まるので、ここで先に見つける。
 queueがcheckoutに束縛されていなければ欄を出さない。
 状態は変えない。

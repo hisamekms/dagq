@@ -92,6 +92,13 @@ fn declare(repo: &Path, toml: &str) {
 
 const MADE_UP_ONLY: &str = "[toolchains.tool]\nprofile = \"made-up\"\npaths = [\"tool/**\"]\n";
 
+/// `tests/common`'s `within` line as a mark of the project's own.
+const WITHIN_MARK: &str = "[verify_marks.within]\nclass = \"timeout\"\nline = \"test {test} timed out: *did not happen within*\"\n";
+
+/// A command that fails with `within`'s line.
+const WITHIN: &str =
+    "echo 'test it_x::waits timed out: the run to land did not happen within 20s'; exit 101";
+
 fn set_commands(db: &Path, commands: Value) {
     Connection::open(db)
         .unwrap()
@@ -112,23 +119,31 @@ fn integrate_with(one_shot: &runtime::OneShot, db: &Path, repo: &Path) -> Value 
         .unwrap()
 }
 
-/// On one repository, first without a declaration and then declaring only
-/// the made-up profile: a command that exits 124, 128 + a signal, or fails
-/// on a full disk is retried once and held for a person when it fails so
-/// again (ADR-t639-1 decisions 1 to 4).
+/// On one repository, first without a declaration, then declaring only
+/// `within`'s mark, then the made-up profile and the mark: a command that
+/// exits 124, 128 + a signal, or fails on a full disk is retried once and
+/// held for a person when it fails so again (ADR-t639-1 decisions 1 to 4);
+/// so is one that prints `within`'s line, implied or declared, which names
+/// its test.
 #[test]
 fn the_host_failures_are_retried_and_held_whatever_is_declared() {
     let (_dir, db, repo) = awaiting();
     let one_shot = with_made_up();
-    for declared in [None, Some(MADE_UP_ONLY)] {
+    let host = [
+        ("echo boom; exit 124", "timeout"),
+        ("exit 137", "killed"),
+        ("echo 'write: No space left on device'; exit 1", "disk_full"),
+    ];
+    let made_up_and_mark = format!("{MADE_UP_ONLY}{WITHIN_MARK}");
+    for (declared, commands) in [
+        (None, &host[..]),
+        (Some(WITHIN_MARK), &[][..]),
+        (Some(made_up_and_mark.as_str()), &host[..]),
+    ] {
         if let Some(toml) = declared {
             declare(&repo, toml);
         }
-        for (command, class) in [
-            ("echo boom; exit 124", "timeout"),
-            ("exit 137", "killed"),
-            ("echo 'write: No space left on device'; exit 1", "disk_full"),
-        ] {
+        for &(command, class) in commands.iter().chain([&(WITHIN, "timeout")]) {
             set_commands(&db, json!([command]));
             let outcome = integrate_with(&one_shot, &db, &repo);
             assert_eq!(
@@ -144,12 +159,19 @@ fn the_host_failures_are_retried_and_held_whatever_is_declared() {
             assert_eq!(held["first_failure"]["class"], class, "{declared:?}");
             assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
             assert!(payloads(&detail, "resume_started").is_empty());
+            if command == WITHIN {
+                let verifications = integration_verifications(&detail);
+                for verification in &verifications[verifications.len() - 2..] {
+                    assert_eq!(verification["failed_tests"], json!(["it_x::waits"]));
+                }
+            }
         }
     }
 }
 
-/// A repository that declares only the made-up profile: cargo's marks mean
-/// nothing there (`unknown`, no tests named).
+/// A repository that declares only the made-up profile: cargo's marks and
+/// `within`'s line, which it does not declare as a mark, mean nothing
+/// there (`unknown`, no tests named).
 #[test]
 fn an_output_only_another_profile_could_read_is_unknown() {
     let (_dir, db, repo) = awaiting();
@@ -158,7 +180,7 @@ fn an_output_only_another_profile_could_read_is_unknown() {
     set_commands(
         &db,
         json!([
-            "echo 'error[E0425]: cannot find value `x`'; echo 'test a::b ... FAILED'; exit 101"
+            "echo 'error[E0425]: cannot find value `x`'; echo 'test a::b ... FAILED'; echo 'test a::b timed out: x did not happen within 1s'; exit 101"
         ]),
     );
     let outcome = integrate_with(&one_shot, &db, &repo);
@@ -200,7 +222,8 @@ fn the_declared_profile_gives_its_retry_env() {
     assert_eq!(retried[0]["retry_env"], json!({"MADE_FLAKY": "accept"}));
 }
 
-/// `doctor` and `status` show the declared profiles and their paths, and
+/// `doctor` and `status` show the declared profiles and their paths and the
+/// project's marks, and
 /// `doctor` a profile the binary does not build in as an error (the
 /// undeclared view is the unit tests' of `domain::toolchain`).
 #[test]
@@ -208,7 +231,7 @@ fn doctor_and_status_show_the_declared_profiles() {
     let (_dir, db, repo) = awaiting();
     declare(
         &repo,
-        &format!("{MADE_UP_ONLY}[toolchains.core]\nprofile = \"rust\"\n"),
+        &format!("{MADE_UP_ONLY}[toolchains.core]\nprofile = \"rust\"\n{WITHIN_MARK}"),
     );
     let declared = json!({
         "declared": [
@@ -217,6 +240,11 @@ fn doctor_and_status_show_the_declared_profiles() {
         ],
         "implicit": null,
         "warning": null,
+        "marks": [{
+            "name": "within",
+            "class": "timeout",
+            "line": "test {test} timed out: *did not happen within*",
+        }],
     });
     let one_shot = with_made_up();
     assert_eq!(

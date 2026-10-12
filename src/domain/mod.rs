@@ -1054,6 +1054,7 @@ pub mod transcript;
 pub mod turn;
 pub mod validation;
 pub mod verify_failure;
+pub mod verify_marks;
 mod views;
 pub mod waiting;
 pub mod worker;

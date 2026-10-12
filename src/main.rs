@@ -1493,6 +1493,10 @@ enum Command {
     /// a container's worker (`claude_credential`: its kind, file, presence and mode, never its
     /// value; with no kind chosen, which to choose: a long-lived token for one's own
     /// subscription used alone, an API key for an organization, a team, a shared host or work).
+    /// `toolchains` shows the toolchain profiles dagq.toml declares and the paths each applies
+    /// to, and `marks` the project's own marks on the verification's output
+    /// ([verify_marks.<name>]: its name, the class a line of its shape gives, and the shape,
+    /// with `implicit` on the one read while dagq.toml declares neither a profile nor a mark).
     Doctor {
         /// Include each run's lease, processes, heartbeats and paths, and every supervisor field.
         #[arg(long)]

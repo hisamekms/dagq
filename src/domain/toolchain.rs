@@ -16,7 +16,10 @@
 //! line in [`BUILTIN`].
 use serde_json::{Value, json};
 
-use super::verify_failure::FailureClass;
+use super::{
+    verify_failure::FailureClass,
+    verify_marks::{self, ProjectMark},
+};
 
 pub mod rust;
 
@@ -175,16 +178,26 @@ struct Declared {
 
 /// The profiles that read a repository's output: those its `dagq.toml`
 /// declares, in the order declared, or, while it declares none, the Rust
-/// profile implied (ADR-t2268-1 decision 9).
+/// profile implied (ADR-t2268-1 decision 9); and the project's own marks
+/// ([`verify_marks`]).
 #[derive(Clone)]
 pub struct Toolchains {
     declared: Vec<Declared>,
     implicit: bool,
+    marks: Vec<ProjectMark>,
+    /// Whether `marks` is the one implied ([`verify_marks::implied_within`]):
+    /// while the repository declares neither a profile nor a mark, the
+    /// timeout line of this repository's own test helper is read as the
+    /// Rust profile is, so this repository's classes do not change before
+    /// its `dagq.toml` declares the mark. A declared profile or mark ends
+    /// it.
+    implicit_marks: bool,
 }
 
 impl Toolchains {
-    /// A repository that declares none: the Rust profile, implied while the
-    /// runtime moves to declarations (ADR-t2268-1 decision 9).
+    /// A repository that declares none: the Rust profile and this
+    /// repository's timeout line, implied while the runtime moves to
+    /// declarations (ADR-t2268-1 decision 9).
     pub fn undeclared() -> Self {
         Self {
             declared: vec![Declared {
@@ -193,7 +206,24 @@ impl Toolchains {
                 paths: Vec::new(),
             }],
             implicit: true,
+            marks: vec![verify_marks::implied_within()],
+            implicit_marks: true,
         }
+    }
+
+    /// With the project's own `marks` as declared, in the order declared:
+    /// none keeps the marks as they are.
+    pub fn with_marks(mut self, marks: Vec<ProjectMark>) -> Self {
+        if !marks.is_empty() {
+            self.marks = marks;
+            self.implicit_marks = false;
+        }
+        self
+    }
+
+    /// The project's own marks, in the order declared.
+    pub fn marks(&self) -> &[ProjectMark] {
+        &self.marks
     }
 
     /// `declarations` resolved against `registry`; none is
@@ -228,6 +258,8 @@ impl Toolchains {
         Ok(Self {
             declared,
             implicit: false,
+            marks: Vec::new(),
+            implicit_marks: false,
         })
     }
 
@@ -256,7 +288,11 @@ impl Toolchains {
 
     /// What `doctor` and `status` show: each declaration with its profile
     /// and the paths it applies to (`**` for the whole repository), the
-    /// profile implied while none is declared, and a warning then.
+    /// profile implied while none is declared, and a warning then; and
+    /// `marks`, the project's own marks the output is read with, each with
+    /// its `name`, the `class` it gives and the shape of its `line`, and
+    /// `implicit: true` on the one implied while the repository declares
+    /// neither a profile nor a mark.
     pub fn view(&self) -> Value {
         let declared: Vec<Value> = if self.implicit {
             Vec::new()
@@ -280,6 +316,17 @@ impl Toolchains {
             "declared": declared,
             "implicit": self.implicit.then(|| rust::RUST.name()),
             "warning": self.implicit.then_some(UNDECLARED_WARNING),
+            "marks": self.marks.iter().map(|mark| {
+                let mut shown = json!({
+                    "name": mark.name,
+                    "class": mark.class.as_str(),
+                    "line": mark.line.as_str(),
+                });
+                if self.implicit_marks {
+                    shown["implicit"] = json!(true);
+                }
+                shown
+            }).collect::<Vec<_>>(),
         })
     }
 }
@@ -325,8 +372,29 @@ mod tests {
         );
         assert_eq!(
             toolchains.view(),
-            json!({"declared": [], "implicit": "rust", "warning": UNDECLARED_WARNING})
+            json!({
+                "declared": [],
+                "implicit": "rust",
+                "warning": UNDECLARED_WARNING,
+                "marks": [{
+                    "name": "within",
+                    "class": "timeout",
+                    "line": "test {test} timed out: *did not happen within*",
+                    "implicit": true,
+                }],
+            })
         );
+        // A declared mark ends the implied one and is shown as declared.
+        let marked = toolchains.with_marks(vec![verify_marks::ProjectMark {
+            name: "hung".to_owned(),
+            class: verify_marks::MarkClass::parse("killed").unwrap(),
+            line: verify_marks::LinePattern::parse("HUNG {test} now").unwrap(),
+        }]);
+        assert_eq!(
+            marked.view()["marks"],
+            json!([{"name": "hung", "class": "killed", "line": "HUNG {test} now"}])
+        );
+        assert_eq!(marked.view()["implicit"], "rust");
     }
 
     #[test]
@@ -349,6 +417,7 @@ mod tests {
                 ],
                 "implicit": null,
                 "warning": null,
+                "marks": [],
             })
         );
     }
