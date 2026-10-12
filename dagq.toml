@@ -340,6 +340,12 @@ paths = ["tests/**"]
 script = "scripts/check-migration-numbers.sh"
 paths = ["migrations/**", "build.rs"]
 
+# contextの境界の規則と、所有の一覧とコードの食い違い（規則のIDと一覧の置き場はdocs/design/architecture.mdの「検査の範囲」）。
+# 許可の一覧に無い新しい違反をarchitecture-boundariesのLLMを起動する前に返し、agentを意味の判断に絞るため。最大約1.4秒。
+[review.programs.check-context-boundaries]
+script = "scripts/check-context-boundaries.sh"
+paths = ["src/**", ".config/context-boundaries.txt", ".config/context-boundaries-allow.txt"]
+
 # docs/の.mdのfrontmatterの日付の行の形。最大約2.7秒。
 [review.programs.check-frontmatter-dates]
 script = "scripts/check-frontmatter-dates.sh"
