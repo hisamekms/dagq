@@ -324,17 +324,11 @@ name = "runtime_evidence::the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_
 reason = "B 境界（守る境界）: supervisor wiring that reads [e2e] paths of the main checkout's dagq.toml and the git diff into validation_finished; the judgement is in domain::validation unit tests"
 task = 1718
 
-# 5.087s, class R
-[[test]]
-name = "runtime_handoff::a_handoff_during_a_resume_goes_on_watching_the_resumed_session"
-reason = "R 移し替えの予定（代表がある、goal 119 か 120）: handoff.json carryover; covered by continuation test"
-task = 1707
-
 # 5.338s, class D
 [[test]]
 name = "runtime_handoff::a_handoff_without_its_state_during_a_resume_still_watches_the_session"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: rebuild resume from events"
-task = 1707
+reason = "B 境界（復旧と adopt・supervisor の配線）: 依頼を送った後に handoff.json の無い引き継ぎで、同じ token の lease のまま生きている resume の session をイベントから組み立てて監視を続け、依頼を送り直さない。組み立て直すかの判断は handoff_slots の takeover の unit test、resume の組み立てと resume_adopted は adopt.rs で goal 100 の 1558 が移す"
+task = 1719
 
 # 5.577s, class B
 [[test]]
@@ -342,17 +336,11 @@ name = "runtime_handoff::a_supervisor_that_stops_during_a_resume_leaves_the_sess
 reason = "B 境界（守る境界）: adoption after stale lease, other token"
 task = 1707
 
-# 6.254s, class D
-[[test]]
-name = "runtime_handoff::canceling_a_handoff_during_a_landing_resumes_claims_without_exec"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: withdrawn request → resume claims"
-task = 1707
-
 # 6.869s, class R
 [[test]]
 name = "runtime_handoff::review_verdicts::reviews_that_ended_before_the_exec_are_applied_not_run_again"
-reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same review/handoff boundary"
-task = 1707
+reason = "B 境界（プロセス・supervisor の配線）: execの直前に終わったplan review / goal reviewのjobのprocessをprepare_handoffが刈り取ってverdictを適用し、次のプロセスでやり直さない。jobの終わりはtickの間（5秒）に置く"
+task = 1719
 
 # 6.162s, class B
 [[test]]
@@ -561,8 +549,8 @@ task = 1707
 # 13.259s, class R
 [[test]]
 name = "runtime_waiting_stages::a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer"
-reason = "R 移し替えの予定（代表がある、goal 119 か 120）: same wait wiring; clock/slot decisions (13s)"
-task = 1707
+reason = "B 境界（supervisor の配線）: resumeの質問でslotの外に待ち、resumeの時計が止まったまま上限を越えて保ち、slotに戻って答えを打ちexitまで進む。時計の止め方と戻し方はresume.rsの判断で、goal 100の1557が移す。上限とslotの数え方はdomain::waitingのunit test"
+task = 1719
 
 # 11.141s, class B
 [[test]]
@@ -573,8 +561,8 @@ task = 1707
 # 15.070s, class D
 [[test]]
 name = "runtime_waiting_stages::a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: limit -> deferred decision (15s)"
-task = 1707
+reason = "B 境界（supervisor の配線）: 待ちの上限でslotに残ったresumeの質問のあいだresumeの時計が止まり、slotから答えを打って着地する。slotの中で時計を止める判断はresume.rsで、goal 100の1557が移す。上限で控える判断はdomain::waiting::wait_moveのunit test"
+task = 1719
 
 # 5.179s, class B
 [[test]]

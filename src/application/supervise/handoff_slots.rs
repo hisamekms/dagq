@@ -29,6 +29,88 @@ impl Phase {
     }
 }
 
+/// What the process that took a registration over after an exec does
+/// with a run leased to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Takeover {
+    /// Rebuilt from its `handoff.json`.
+    Snapshot(handoff::SnapshotKind),
+    /// A `needs_session` run without one whose resumed session lives on:
+    /// its resume is rebuilt from its events, as an adopter does (task
+    /// 640), and goes on watched.
+    AdoptResume,
+    /// A run before its review: rebuilt the way an adopted run's is
+    /// (ADR-0039).
+    Session,
+    /// A run waiting for its review, which runs again.
+    Review,
+    /// Nothing to take over: its lease is given back, so the supervisor's
+    /// resume or triage (or `recover`) picks it up.
+    GiveBack,
+}
+
+impl Takeover {
+    /// Whether the run's resumed session goes on watched instead of being
+    /// resumed again, recorded as `resume_adopted` (ADR-0047 decision 24).
+    pub(super) const fn resume_adopted(self) -> bool {
+        matches!(
+            self,
+            Self::Snapshot(handoff::SnapshotKind::Resume) | Self::AdoptResume
+        )
+    }
+}
+
+/// Whether the takeover of a run in `status` with `snapshot` reads whether
+/// its resumed session lives: only a `needs_session` run without
+/// `handoff.json` (which could not be written, or is gone) can go on.
+pub(super) fn reads_resumed_session(
+    status: RunStatus,
+    snapshot: Option<handoff::SnapshotKind>,
+) -> bool {
+    snapshot.is_none() && status == RunStatus::NeedsSession
+}
+
+/// [`Takeover`] of a run in `status` with `snapshot`, `resume_lives`
+/// whether its resumed session lives on (read only when
+/// [`reads_resumed_session`]).
+pub(super) fn takeover(
+    status: RunStatus,
+    snapshot: Option<handoff::SnapshotKind>,
+    resume_lives: bool,
+) -> Takeover {
+    match (status, snapshot) {
+        (_, Some(kind)) => Takeover::Snapshot(kind),
+        (RunStatus::NeedsSession, None) if resume_lives => Takeover::AdoptResume,
+        (
+            RunStatus::Claimed | RunStatus::Starting | RunStatus::Running | RunStatus::Validating,
+            None,
+        ) => Takeover::Session,
+        (RunStatus::AwaitingIntegration, None) => Takeover::Review,
+        _ => Takeover::GiveBack,
+    }
+}
+
+/// `supervisor_handed_off`'s payload for a run in `status` that the
+/// process `pid` of `token`, running `version`, took over from
+/// `previous_version`, with the `state` its `handoff.json` held.
+pub(super) fn handed_off(
+    token: &crate::domain::LeaseToken,
+    pid: u32,
+    previous_version: Option<&str>,
+    version: &str,
+    status: RunStatus,
+    state: Option<handoff::SnapshotKind>,
+) -> Value {
+    json!({
+        "supervisor": token,
+        "pid": pid,
+        "previous_version": previous_version,
+        "version": version,
+        "status": status.as_str(),
+        "state": state.map(handoff::SnapshotKind::as_str),
+    })
+}
+
 impl Supervisor<'_> {
     /// The last step before the exec: stop the observer and every headless
     /// job (their runs start them again) but a plan or goal review that
@@ -131,28 +213,22 @@ impl Supervisor<'_> {
         self.on_planning(|planning, env| planning.interrupt_for_handoff(env))?;
         for run in self.queue.runs_leased_by(&self.registration.token)? {
             let snapshot = handoff::take_snapshot(&*self.files, &self.registration.token, &run);
+            let kind = snapshot.as_ref().map(handoff::Snapshot::kind);
             self.queue.record_runtime_event(
                 run.id(),
                 EventKind::SupervisorHandedOff,
-                json!({
-                    "supervisor": self.registration.token,
-                    "pid": self.layout.pid,
-                    "previous_version": previous_version,
-                    "version": self.layout.version,
-                    "status": run.status().as_str(),
-                    "state": snapshot.as_ref().map(|s| match s {
-                        handoff::Snapshot::Resume { .. } => "resume",
-                        handoff::Snapshot::Exit { .. } => "exit",
-                    }),
-                }),
+                handed_off(
+                    &self.registration.token,
+                    self.layout.pid,
+                    previous_version,
+                    &self.layout.version,
+                    run.status(),
+                    kind,
+                ),
             )?;
-            // A resume whose `handoff.json` could not be written (or is
-            // gone) is rebuilt from its events while its session lives on,
-            // as an adopter does (task 640).
             // A lookup that fails gives this run's lease back rather than
             // stopping the takeover of the others.
-            let adopted_resume = snapshot.is_none()
-                && run.status() == RunStatus::NeedsSession
+            let resume_lives = reads_resumed_session(run.status(), kind)
                 && {
                     let adoptable = self.queue.processes(run.id()).and_then(|processes| {
                         let wrapper = processes.into_iter().find(|p| p.role == "wrapper");
@@ -163,23 +239,14 @@ impl Supervisor<'_> {
                     false
                 })
                 };
-            let resumed =
-                adopted_resume || matches!(snapshot, Some(handoff::Snapshot::Resume { .. }));
-            let phase = match (run.status(), snapshot) {
+            let takeover = takeover(run.status(), kind, resume_lives);
+            let phase = match (takeover, snapshot) {
                 (_, Some(snapshot)) => self.rebuild_from(&run, snapshot),
-                (RunStatus::NeedsSession, None) if adopted_resume => {
-                    self.adopt_resume(&run).map(Phase::Resume)
-                }
-                (
-                    RunStatus::Claimed
-                    | RunStatus::Starting
-                    | RunStatus::Running
-                    | RunStatus::Validating,
-                    None,
-                ) => self.resume(&run),
-                (RunStatus::AwaitingIntegration, None) => self.adopt_review(&run),
-                (status, None) => {
-                    info!(run_id = %run.id(), "run {} ({}) has nothing to take over after the handoff; its lease is given back", run.id(), status.as_str());
+                (Takeover::AdoptResume, None) => self.adopt_resume(&run).map(Phase::Resume),
+                (Takeover::Session, None) => self.resume(&run),
+                (Takeover::Review, None) => self.adopt_review(&run),
+                (Takeover::Snapshot(_) | Takeover::GiveBack, None) => {
+                    info!(run_id = %run.id(), "run {} ({}) has nothing to take over after the handoff; its lease is given back", run.id(), run.status().as_str());
                     self.queue
                         .release_lease(run.id(), &self.registration.token)?;
                     continue;
@@ -190,7 +257,7 @@ impl Supervisor<'_> {
                     info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} taken over after the handoff ({})", run.id(), run.task_id(), run.status().as_str());
                     // A resumed session goes on watched instead of being
                     // resumed again (ADR-0047 decision 24).
-                    if let (true, Phase::Resume(watch)) = (resumed, &phase) {
+                    if let (true, Phase::Resume(watch)) = (takeover.resume_adopted(), &phase) {
                         self.note_resume_adopted(&run, watch, Some(previous_version));
                     }
                     let mut slot = Slot::new(run, phase);
@@ -260,5 +327,112 @@ impl Supervisor<'_> {
                 Phase::Exiting(watch)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::LeaseToken;
+    use handoff::SnapshotKind;
+
+    /// After the exec, a run with its `handoff.json` is rebuilt from it; a
+    /// `needs_session` run without one goes on watching its resumed session
+    /// only while that session lives; a run before its review is rebuilt as
+    /// an adopted one, one waiting for its review is reviewed again, and
+    /// any other (a run resting, one whose resumed session ended) gives its
+    /// lease back. A resume rebuilt either way is `resume_adopted`.
+    #[test]
+    fn a_run_taken_over_after_a_handoff_is_rebuilt_or_gives_its_lease_back() {
+        for status in [RunStatus::NeedsSession, RunStatus::Failed] {
+            for kind in [SnapshotKind::Resume, SnapshotKind::Exit] {
+                assert!(!reads_resumed_session(status, Some(kind)));
+                assert_eq!(
+                    takeover(status, Some(kind), false),
+                    Takeover::Snapshot(kind)
+                );
+            }
+        }
+        assert!(reads_resumed_session(RunStatus::NeedsSession, None));
+        assert!(!reads_resumed_session(RunStatus::Running, None));
+        assert_eq!(
+            takeover(RunStatus::NeedsSession, None, true),
+            Takeover::AdoptResume
+        );
+        assert_eq!(
+            takeover(RunStatus::NeedsSession, None, false),
+            Takeover::GiveBack
+        );
+        for status in [
+            RunStatus::Claimed,
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Validating,
+        ] {
+            assert_eq!(takeover(status, None, false), Takeover::Session);
+        }
+        assert_eq!(
+            takeover(RunStatus::AwaitingIntegration, None, false),
+            Takeover::Review
+        );
+        for status in [
+            RunStatus::Succeeded,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+            RunStatus::Integrated,
+        ] {
+            assert_eq!(takeover(status, None, false), Takeover::GiveBack);
+        }
+        assert!(Takeover::AdoptResume.resume_adopted());
+        assert!(Takeover::Snapshot(SnapshotKind::Resume).resume_adopted());
+        for other in [
+            Takeover::Snapshot(SnapshotKind::Exit),
+            Takeover::Session,
+            Takeover::Review,
+            Takeover::GiveBack,
+        ] {
+            assert!(!other.resume_adopted());
+        }
+    }
+
+    /// `supervisor_handed_off` names the run's status and the state its
+    /// `handoff.json` held, `null` without one.
+    #[test]
+    fn the_handed_off_event_names_the_status_and_the_state_taken_over() {
+        let token = LeaseToken::new("t");
+        assert_eq!(
+            handed_off(
+                &token,
+                7,
+                Some("0.1.0"),
+                "0.2.0",
+                RunStatus::NeedsSession,
+                None
+            ),
+            json!({"supervisor": "t", "pid": 7, "previous_version": "0.1.0", "version": "0.2.0",
+                   "status": "needs_session", "state": null})
+        );
+        let resume = handed_off(
+            &token,
+            7,
+            None,
+            "0.2.0",
+            RunStatus::NeedsSession,
+            Some(SnapshotKind::Resume),
+        );
+        assert_eq!(resume["state"], "resume");
+        assert_eq!(resume["previous_version"], Value::Null);
+        let exit = handed_off(
+            &token,
+            7,
+            None,
+            "0.2.0",
+            RunStatus::Failed,
+            Some(SnapshotKind::Exit),
+        );
+        assert_eq!(
+            (&exit["status"], &exit["state"]),
+            (&json!("failed"), &json!("exit"))
+        );
     }
 }

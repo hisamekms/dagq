@@ -121,57 +121,6 @@ fn taking_a_handoff_requires_the_same_token_and_binary_and_beats_cancellation() 
     assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
 }
 
-/// A supervisor already draining a landing sees a withdrawn request on its
-/// next pass. It keeps its registration and can claim the next task.
-#[test]
-fn canceling_a_handoff_during_a_landing_resumes_claims_without_exec() {
-    let (_dir, repo, db) = fixture();
-    let release = db.with_extension("release");
-    // The fixture's directory has an apostrophe (`queue's data`): quoted
-    // whole, or the shell fails at once and the landing ends early.
-    let verification = json!([crate::common::await_path(&release)]);
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
-            [verification.to_string()],
-        )
-        .unwrap();
-    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "ready to land")]);
-    // Two slots: the landing holds one until the release, and the task
-    // added after the cancellation is claimed in the other.
-    let options = supervise_options(2, false);
-    let passes = options.passes.clone();
-    let stop = options.stop.clone();
-    let supervisor = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
-    };
-    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
-        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"integration_started")
-    });
-    let token = only_registration(&db).token;
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
-    await_passes_landing(&passes, &mut queue);
-    assert_eq!(
-        queue.handoff_request(&token).unwrap().as_deref(),
-        Some("/next/dagq")
-    );
-    assert!(queue.cancel_handoff(&token, "/next/dagq").unwrap());
-    await_passes_landing(&passes, &mut queue);
-    assert_eq!(only_registration(&db).token, token);
-    add_ready_task(&mut queue, "after cancellation", &[]);
-    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
-        !queue.show(TaskId::new(2)).unwrap().runs.is_empty()
-    });
-    std::fs::write(&release, "go").unwrap();
-    stop.store(true, Ordering::SeqCst);
-    let outcome = joined(supervisor, "supervisor after the handoff was canceled");
-    assert_ne!(outcome["outcome"], "handoff", "{outcome}");
-}
-
 /// A supervisor draining a landing for a handoff, with a second slot free
 /// for a claim. Returns the thread, the release file, its pass counter and
 /// its token once it has read the request for `/next/dagq`.
@@ -236,39 +185,6 @@ fn a_handoff_replaced_while_draining_execs_the_new_binary_without_a_claim() {
     assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
     std::fs::write(&release, "go").unwrap();
     execs_the_replacement_without_a_claim(&db, supervisor);
-}
-
-/// Task 1286: a request replaced just before the supervisor takes it (the
-/// take finds another binary) is read again: the supervisor goes on
-/// draining and execs the replacement on its next pass, with no claim.
-#[test]
-fn a_handoff_replaced_at_the_take_execs_the_new_binary_without_a_claim() {
-    let (_dir, repo, db) = fixture();
-    // The take of `/next/dagq` meets the replacement: the trigger swaps the
-    // binary and skips the take's own update, so the take changes no row.
-    Connection::open(&db)
-        .unwrap()
-        .execute_batch(
-            "CREATE TRIGGER replace_at_take BEFORE UPDATE OF handoff_accepted ON supervisors
-             WHEN NEW.handoff_accepted = 0 AND OLD.handoff_binary = '/next/dagq'
-             BEGIN
-                 UPDATE supervisors SET handoff_binary = '/replacement/dagq'
-                 WHERE token = OLD.token;
-                 SELECT RAISE(IGNORE);
-             END;",
-        )
-        .unwrap();
-    let (supervisor, release, _passes, token) = draining_for_a_handoff(&db, &repo);
-    std::fs::write(&release, "go").unwrap();
-    execs_the_replacement_without_a_claim(&db, supervisor);
-    // The replacement was taken: no request is left.
-    assert_eq!(
-        SqliteQueue::open(&db)
-            .unwrap()
-            .handoff_request(&LeaseToken::new(token))
-            .unwrap(),
-        None
-    );
 }
 
 /// Task 1277: a supervisor asked to hand off while a landing holds it, and
@@ -372,32 +288,6 @@ was not handed off to /next/dagq",
         queue.show(TaskId::new(1)).unwrap().task.status(),
         TaskStatus::Completed
     );
-}
-
-/// [`await_passes`] of [`SOME_PASSES`] while task 1's landing must still
-/// be in progress, failing at once with the run's reason when it is not: a
-/// landing that ended (its verification failed on a broken quote, task
-/// 1335) leaves no slot the handoff waits for, so the supervisor takes the
-/// request and execs, and the passes stop.
-fn await_passes_landing(passes: &AtomicU64, queue: &mut SqliteQueue) {
-    let from = passes.load(Ordering::SeqCst);
-    let target = from + SOME_PASSES + 1;
-    let started = Instant::now();
-    while passes.load(Ordering::SeqCst) < target {
-        let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-        assert_eq!(
-            run.status(),
-            RunStatus::Integrating,
-            "the landing the test holds ended: {:?}",
-            run.last_error()
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(60),
-            "the supervisor made {} of the {SOME_PASSES} passes waited for in 60 seconds",
-            passes.load(Ordering::SeqCst).saturating_sub(from + 1)
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
 }
 
 /// The supervisor the exec'd binary runs: the same token, continued.
@@ -530,65 +420,6 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
         marks
             .iter()
             .all(|(_, payload)| payload["supervisor"] == json!(token))
-    );
-}
-
-/// A handoff while a resumed session resolves a conflict carries the
-/// resume over in `handoff.json`: the next process goes on watching that
-/// session instead of resuming the run again, and records it as
-/// `auto_repaired` (`repair: resume_adopted`, ADR-0047 decision 24).
-#[test]
-fn a_handoff_during_a_resume_goes_on_watching_the_resumed_session() {
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
-    let (run, _) = parked_conflict(&repo, &db, &backend);
-    backend.resume_script_for(
-        2,
-        "await_message; await_file \"$EXIT.go\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
-    );
-    let (outcome, token) = hand_off_when(&db, &repo, &backend, |queue| {
-        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_started")
-    });
-    assert_eq!(outcome["handed_over"], 1, "{outcome}");
-    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
-    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
-    assert_eq!(written["phase"], "resume");
-
-    let next = {
-        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
-        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
-    };
-    wait_until(&db, Duration::from_secs(30), |_| !snapshot.exists());
-    fs::write(
-        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-        "",
-    )
-    .unwrap();
-    let outcome = joined(next, "the supervisor after the handoff").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = SqliteQueue::open(&db)
-        .unwrap()
-        .show(TaskId::new(2))
-        .unwrap();
-    assert_eq!(detail.task.status(), TaskStatus::Completed);
-    let kinds = event_kinds(&detail);
-    assert_eq!(kinds.iter().filter(|k| **k == "resume_started").count(), 1);
-    let adopted: Vec<&Value> = payloads(&detail, "auto_repaired")
-        .into_iter()
-        .filter(|p| p["repair"] == "resume_adopted")
-        .collect();
-    assert_eq!(adopted.len(), 1, "{kinds:?}");
-    assert_eq!(adopted[0]["layer"], "runtime");
-    assert_eq!(adopted[0]["conditions"]["handoff"], true);
-    assert_eq!(adopted[0]["conditions"]["attempt"], 1);
-    assert_eq!(adopted[0]["detail"]["version"], VERSION);
-    // The conflict-only resume was not counted, and that too is a repair.
-    assert!(
-        payloads(&detail, "auto_repaired")
-            .iter()
-            .any(|p| p["repair"] == "conflict_resume_uncounted"),
-        "{kinds:?}"
     );
 }
 
@@ -1668,7 +1499,34 @@ fn handoff_before_the_resume_request(unsent: Unsent) {
         .filter(|p| p["repair"] == "resume_adopted")
         .collect();
     assert_eq!(adopted.len(), 1, "{kinds:?}");
+    assert_eq!(adopted[0]["layer"], "runtime");
     assert_eq!(adopted[0]["conditions"]["handoff"], true);
+    assert_eq!(adopted[0]["conditions"]["attempt"], 1);
+    assert_eq!(adopted[0]["detail"]["version"], VERSION);
+    assert!(
+        adopted[0]["detail"]
+            .as_object()
+            .unwrap()
+            .contains_key("previous_version"),
+        "{:?}",
+        adopted[0]
+    );
+    assert!(!kinds.contains(&"run_adopted"), "{kinds:?}");
+    // The run the next process took over without `handoff.json` was
+    // rebuilt from its events under the same token.
+    let handed = payloads(&detail, "supervisor_handed_off");
+    assert_eq!(handed.len(), 1, "{kinds:?}");
+    assert_eq!(handed[0]["status"], "needs_session");
+    let state = if unsent == Unsent::Adopted {
+        Value::Null
+    } else {
+        json!("resume")
+    };
+    assert_eq!(handed[0]["state"], state);
+    assert_eq!(
+        payloads(&detail, "resume_finished")[0]["outcome"],
+        "resolved"
+    );
 }
 
 /// Point the live wrapper row of `run_id` at the process `stand_in`: the

@@ -1742,24 +1742,24 @@ impl Supervisor<'_> {
             let mut handoff_withdrawn = false;
             if let Some(binary) = self.registration.handoff.clone() {
                 let requested = self.queue.handoff_request(&self.registration.token)?;
-                match handoff::handoff_change(&binary, requested) {
+                let reread = handoff::reread(&binary, requested, stopping);
+                match &reread.change {
                     handoff::HandoffChange::Same => {}
                     handoff::HandoffChange::Replaced(now) => {
-                        self.registration.replace_handoff(&binary, now);
+                        self.registration.replace_handoff(&binary, now.clone());
                     }
                     handoff::HandoffChange::Withdrawn => {
                         info!(
                             "supervisor {} handoff to {binary} was withdrawn; resuming normal work",
                             self.registration.token
                         );
-                        self.registration.handoff = None;
                         handoff_withdrawn = true;
-                        // The cleanup goes back to normal with the claims;
-                        // a stop keeps it ending (task 1427).
-                        if !stopping {
-                            self.resume_cleanup();
-                        }
                     }
+                }
+                self.registration.handoff = reread.handoff;
+                // The cleanup goes back to normal with the claims.
+                if reread.resume_cleanup {
+                    self.resume_cleanup();
                 }
             }
             self.registration.draining = handoff::drains(
@@ -1818,9 +1818,10 @@ impl Supervisor<'_> {
                         // Not taken: withdrawn, or replaced by another
                         // binary, which the next pass execs (task 1286).
                         let requested = self.queue.handoff_request(&self.registration.token)?;
-                        match handoff::handoff_change(&binary, requested) {
+                        let reread = handoff::reread(&binary, requested, stopping);
+                        match &reread.change {
                             handoff::HandoffChange::Replaced(now) => {
-                                self.registration.replace_handoff(&binary, now);
+                                self.registration.replace_handoff(&binary, now.clone());
                             }
                             // The same binary asked again meanwhile: taken
                             // on the next pass.
@@ -1830,10 +1831,16 @@ impl Supervisor<'_> {
                                     "supervisor {} handoff to {binary} was withdrawn before exec; resuming normal work",
                                     self.registration.token
                                 );
-                                self.registration.handoff = None;
-                                self.registration.draining = !self.claim.claiming;
-                                self.resume_cleanup();
                             }
+                        }
+                        self.registration.handoff = reread.handoff;
+                        self.registration.draining = handoff::drains(
+                            stopping,
+                            self.claim.claiming,
+                            self.registration.handoff.is_some(),
+                        );
+                        if reread.resume_cleanup {
+                            self.resume_cleanup();
                         }
                     }
                     if self.registration.handoff.is_some() {

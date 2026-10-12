@@ -28,5 +28,5 @@ related:
 - **待ち**: 人の答えを待つrun（[人の答えを待つrun](waiting.md)）のslotは組み立て直せるので、引き継ぎはそれを待たない。次のプロセスはslotを組み立て直した後、runのイベントから待ちと戻り待ちを戻す（`run_waiting_started`を記録し直さず、上限を超えていても待ちのまま。[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定11）。
 - 走っているrunのwrapperはclaim時の`runner`（前のbinaryのコピー）で動き続ける。互換の範囲のschemaならそのまま動く。
 - **run の review job と復旧 job**: `tick(true)`は組み立て直せるslotを進めないので、run の review job（`Review`）と復旧job（`Recovery`）は、引き継ぎを待つあいだに終わってもverdictを回収されず、`prepare_handoff`で止められて次のプロセスでやり直す（reviewはleaseを保ってreviewし直し、復旧jobはleaseを返して取り直す）。plan review / goal reviewと違い、verdictの適用がslotを着地や`/exit`へ進めて引き継ぎの待ちを延ばしうるため、task 1425では変えていない。
-- **test**: 作業中・検証で落ちたあと・resume中・着地待ちのrunの引き継ぎ、停止要求とdrainとの重なり、要求の置き換えと取り消し、引き継ぎを待つあいだに終わったplan reviewのverdictは、in-processのsupervisorで`tests/it/runtime_handoff.rs`と`tests/it/runtime_cleanup.rs`が確かめる。
+- **test**: 作業中・検証で落ちたあと・resume中・着地待ちのrunの引き継ぎ、停止要求とdrainとの重なり、要求の置き換えと取り消し、引き継ぎを待つあいだに終わったplan reviewのverdictは、in-processのsupervisorで`tests/it/runtime_handoff.rs`と`tests/it/runtime_cleanup.rs`が確かめ、要求の読み直しとexecの後のrunごとの組み立て直しの判断はunit testが確かめる。
   停止中のsupervisorが`stopping`で失敗することは`tests/it/lifecycle_handoff_stop.rs`と`tests/it/lifecycle_install.rs`、実プロセスの`supervise`が同じpidとtokenでexecして続くことは`tests/it/cli_version.rs`、workerの作業中の`install`と`--rollback`の引き継ぎとそのrunの着地は`tests/e2e.rs`が確かめる。

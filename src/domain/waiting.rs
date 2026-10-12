@@ -274,6 +274,89 @@ pub fn deferred_asks(events: &[RunEvent]) -> Vec<AskId> {
         .collect()
 }
 
+/// What a run in a slot that would wait for a person does on this pass
+/// (decision 7), with `waiting` in its event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitMove {
+    /// It leaves its slot and waits: `run_waiting_started`, `waiting`
+    /// counting it.
+    Start { waiting: usize },
+    /// The waits are at their limit: it stays counted in its slot and
+    /// records `run_waiting_deferred`, `waiting` being the runs out of the
+    /// slots.
+    Defer { waiting: usize },
+    /// Nothing: no waits at all (a limit of 0), or its ask was deferred
+    /// already and the waits are still at their limit.
+    Stay,
+}
+
+/// [`WaitMove`] of one run with `limit` the `--max-waiting`, `waiting` the
+/// runs out of the slots now (the waits and the returning runs, which
+/// [`WaitCount::count`] counts) and `deferred` whether its ask recorded
+/// `run_waiting_deferred` already (once per ask).
+pub const fn wait_move(limit: usize, waiting: usize, deferred: bool) -> WaitMove {
+    if limit == 0 {
+        WaitMove::Stay
+    } else if waiting < limit {
+        WaitMove::Start {
+            waiting: waiting + 1,
+        }
+    } else if deferred {
+        WaitMove::Stay
+    } else {
+        WaitMove::Defer { waiting }
+    }
+}
+
+/// What becomes of a wait rebuilt from a run's events after an adoption
+/// or a handoff (decision 11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitRestore {
+    /// The run is out of the slots as before: waiting, or waiting to go
+    /// back.
+    Keep,
+    /// The run is in its slot: `run_slot_regained`, after a
+    /// `run_waiting_ended` with `phase_changed` when `end` (the wait
+    /// lasted).
+    Regain { end: bool },
+}
+
+/// [`WaitRestore`] of a rebuilt wait: `phase_waits` whether the run's
+/// rebuilt phase is one it may wait in, `as_waiting` whether it may be
+/// out of the slots as a wait (always after a handoff, under the limit
+/// after an adoption), `ended` whether the wait ended (a returning run
+/// keeps waiting for its slot whatever the limit).
+pub const fn restore_wait(phase_waits: bool, as_waiting: bool, ended: bool) -> WaitRestore {
+    if phase_waits && (as_waiting || ended) {
+        WaitRestore::Keep
+    } else {
+        WaitRestore::Regain { end: !ended }
+    }
+}
+
+/// Whether a run taken over by an adoption is adopted as a wait, needing
+/// no free slot (decision 11): its events show a wait that lasts
+/// (`state`), and the waits (`waiting`) are under `limit`.
+pub fn adopts_as_waiting(limit: usize, waiting: usize, state: Option<&WaitState>) -> bool {
+    room_for_a_wait(limit, waiting) && state.is_some_and(|s| s.ended.is_none())
+}
+
+/// Whether one more run may wait with `waiting` runs out of the slots and
+/// `limit` the `--max-waiting` (0: no waits).
+pub const fn room_for_a_wait(limit: usize, waiting: usize) -> bool {
+    limit > 0 && waiting < limit
+}
+
+/// `run_slot_regained`'s payload for a run back in a slot at unix second
+/// `now`, whose wait ended at `ended_at` (`None`: just now), with `used`
+/// slots in use with it out of `parallel`.
+pub fn slot_regained(now: i64, ended_at: Option<i64>, used: usize, parallel: usize) -> Value {
+    serde_json::json!({
+        "slot_wait_secs": now - ended_at.unwrap_or(now),
+        "over_parallel": used > parallel,
+    })
+}
+
 fn ask_of(payload: &Value) -> Option<(AskId, String)> {
     Some((
         AskId::new(payload["ask_id"].as_i64()?),
@@ -564,6 +647,88 @@ mod tests {
         );
         assert_eq!(count.count(), 3);
         assert_eq!(WaitCount::default().count(), 0);
+    }
+
+    /// `--max-waiting` bounds the waits: with a limit of one, the first
+    /// run that asks waits, the second stays in its slot and is deferred
+    /// once per ask, and waits once the first is back in a slot. A
+    /// returning run counts like a waiting one, and a limit of 0 starts and
+    /// defers nothing.
+    #[test]
+    fn the_waits_stay_within_their_limit_and_a_deferral_is_recorded_once() {
+        // Two runs ask on the same pass: the first starts the one wait.
+        assert_eq!(wait_move(1, 0, false), WaitMove::Start { waiting: 1 });
+        assert_eq!(wait_move(1, 1, false), WaitMove::Defer { waiting: 1 });
+        // The next passes, the limit still reached: deferred once.
+        assert_eq!(wait_move(1, 1, true), WaitMove::Stay);
+        // The first wait ended and its run is back: the deferred one waits.
+        assert_eq!(wait_move(1, 0, true), WaitMove::Start { waiting: 1 });
+        // A run whose answer came is returning and counts toward the limit
+        // until its slot is regained.
+        let returning = WaitCount::of([true]);
+        assert_eq!(
+            wait_move(1, returning.count(), false),
+            WaitMove::Defer { waiting: 1 }
+        );
+        assert_eq!(wait_move(4, 2, false), WaitMove::Start { waiting: 3 });
+        // No waits without a limit: the runs keep their slots, and no
+        // deferral is recorded.
+        for waiting in [0, 1] {
+            for deferred in [false, true] {
+                assert_eq!(wait_move(0, waiting, deferred), WaitMove::Stay);
+            }
+        }
+    }
+
+    /// A wait rebuilt after a handoff is kept whatever the limit; after an
+    /// adoption only under it, or once ended (returning). Kept nowhere in
+    /// a phase that does not wait: a lasting wait ends there first.
+    #[test]
+    fn a_rebuilt_wait_is_kept_or_ends_back_in_its_slot() {
+        assert_eq!(restore_wait(true, true, false), WaitRestore::Keep);
+        assert_eq!(restore_wait(true, true, true), WaitRestore::Keep);
+        assert_eq!(restore_wait(true, false, true), WaitRestore::Keep);
+        assert_eq!(
+            restore_wait(true, false, false),
+            WaitRestore::Regain { end: true }
+        );
+        assert_eq!(
+            restore_wait(false, true, false),
+            WaitRestore::Regain { end: true }
+        );
+        assert_eq!(
+            restore_wait(false, true, true),
+            WaitRestore::Regain { end: false }
+        );
+        let lasting = WaitState::of(&[started(1, 7, "worker_question")]).unwrap();
+        let ended = WaitState {
+            ended: Some((0, WaitCause::Answered)),
+            ..lasting.clone()
+        };
+        assert!(adopts_as_waiting(4, 0, Some(&lasting)));
+        assert!(adopts_as_waiting(1, 0, Some(&lasting)));
+        assert!(!adopts_as_waiting(1, 1, Some(&lasting)));
+        assert!(!adopts_as_waiting(0, 0, Some(&lasting)));
+        assert!(!adopts_as_waiting(4, 0, Some(&ended)));
+        assert!(!adopts_as_waiting(4, 0, None));
+        assert!(room_for_a_wait(1, 0));
+        assert!(!room_for_a_wait(1, 1));
+        assert!(!room_for_a_wait(0, 0));
+    }
+
+    /// A run back in its slot records how long it waited for one since its
+    /// wait ended, and whether it went over `--parallel` (one that returns
+    /// at once does).
+    #[test]
+    fn a_regained_slot_records_its_wait_and_whether_it_is_over_parallel() {
+        assert_eq!(
+            slot_regained(110, Some(100), 1, 1),
+            json!({"slot_wait_secs": 10, "over_parallel": false})
+        );
+        assert_eq!(
+            slot_regained(110, None, 2, 1),
+            json!({"slot_wait_secs": 0, "over_parallel": true})
+        );
     }
 
     #[test]

@@ -418,6 +418,15 @@ fn status_lists_the_held_and_the_latest_runs_with_their_phase_and_slot() {
         .collect();
     assert_eq!(waiting.len(), 2);
     assert!(waiting.contains(&runs.id("revise")) && waiting.contains(&runs.id("resume")));
+    // The resume's wait ended on its answer: it waits to go back.
+    let returning = status["waiting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wait| wait["run_id"] == runs.id("resume"))
+        .unwrap();
+    assert_eq!(returning["state"], "returning", "{returning}");
+    assert_eq!(returning["cause"], "answered", "{returning}");
 
     // The attention and the role's narrowing are as before: the inbox's,
     // none of it the planner's.

@@ -12,7 +12,7 @@
 //!
 //! This module holds host運用's side: the registration of this process and
 //! the state of its handoff and stop ([`Registration`]), with the decision
-//! on a handoff request read again ([`handoff_change`]). The slots are
+//! on a handoff request read again ([`reread`]). The slots are
 //! 実行と着地's: the loop snapshots them before the exec and rebuilds them
 //! after it (`handoff_slots`).
 
@@ -69,6 +69,36 @@ pub(super) fn handoff_change(binary: &str, requested: Option<String>) -> Handoff
         Some(now) if now == binary => HandoffChange::Same,
         Some(now) => HandoffChange::Replaced(now),
         None => HandoffChange::Withdrawn,
+    }
+}
+
+/// What a pass does with the handoff to `binary` it drains for, given the
+/// request read again (`requested`) and whether it drains for a stop too
+/// (`stopping`): the handoff it drains for now, whether the request was
+/// withdrawn (normal work resumes on this pass, without reading a new
+/// request), and whether the cleanup goes back to normal (not while a stop
+/// keeps it ending, task 1427). The same read follows a take that changed
+/// no row: the request was withdrawn or replaced meanwhile, or the same
+/// binary was asked again, which the next pass takes (task 1286).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Reread {
+    pub(super) change: HandoffChange,
+    pub(super) handoff: Option<String>,
+    pub(super) resume_cleanup: bool,
+}
+
+/// [`Reread`] of the handoff to `binary`.
+pub(super) fn reread(binary: &str, requested: Option<String>, stopping: bool) -> Reread {
+    let change = handoff_change(binary, requested);
+    let (handoff, resume_cleanup) = match &change {
+        HandoffChange::Same => (Some(binary.to_owned()), false),
+        HandoffChange::Replaced(now) => (Some(now.clone()), false),
+        HandoffChange::Withdrawn => (None, !stopping),
+    };
+    Reread {
+        change,
+        handoff,
+        resume_cleanup,
     }
 }
 
@@ -206,6 +236,32 @@ pub(super) enum Snapshot {
     },
 }
 
+/// Which [`Snapshot`] a run directory's `handoff.json` held, as
+/// `supervisor_handed_off`'s `state` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SnapshotKind {
+    Resume,
+    Exit,
+}
+
+impl SnapshotKind {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Resume => "resume",
+            Self::Exit => "exit",
+        }
+    }
+}
+
+impl Snapshot {
+    pub(super) const fn kind(&self) -> SnapshotKind {
+        match self {
+            Self::Resume { .. } => SnapshotKind::Resume,
+            Self::Exit { .. } => SnapshotKind::Exit,
+        }
+    }
+}
+
 pub(super) fn seconds(time: SystemTime) -> f64 {
     time.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -270,6 +326,41 @@ mod tests {
         assert!(drains(true, true, false));
         assert!(drains(false, false, false));
         assert!(drains(false, true, true));
+    }
+
+    /// A request withdrawn while the supervisor drains for a landing
+    /// returns it to claims on the same pass, with the cleanup back to
+    /// normal unless a stop keeps it ending; one replaced, at a pass or at
+    /// a take that changed no row, goes on draining for the new binary
+    /// without a claim between; the same binary asked again keeps the
+    /// drain for the next pass's take.
+    #[test]
+    fn a_request_read_again_resumes_claims_or_drains_for_the_binary_asked() {
+        let withdrawn = reread("/next/dagq", None, false);
+        assert_eq!(withdrawn.change, HandoffChange::Withdrawn);
+        assert_eq!(withdrawn.handoff, None);
+        assert!(withdrawn.resume_cleanup);
+        assert!(!drains(false, true, withdrawn.handoff.is_some()));
+        // Claiming stopped by a provisioning failure still drains.
+        assert!(drains(false, false, withdrawn.handoff.is_some()));
+        let stopping = reread("/next/dagq", None, true);
+        assert_eq!(stopping.handoff, None);
+        assert!(!stopping.resume_cleanup);
+        assert!(drains(true, true, stopping.handoff.is_some()));
+
+        let replaced = reread("/next/dagq", Some("/replacement/dagq".to_owned()), false);
+        assert_eq!(
+            replaced.change,
+            HandoffChange::Replaced("/replacement/dagq".to_owned())
+        );
+        assert_eq!(replaced.handoff.as_deref(), Some("/replacement/dagq"));
+        assert!(!replaced.resume_cleanup);
+        assert!(drains(false, true, replaced.handoff.is_some()));
+
+        let same = reread("/next/dagq", Some("/next/dagq".to_owned()), false);
+        assert_eq!(same.change, HandoffChange::Same);
+        assert_eq!(same.handoff.as_deref(), Some("/next/dagq"));
+        assert!(!same.resume_cleanup);
     }
 
     #[test]

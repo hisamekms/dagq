@@ -97,7 +97,9 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 
 ## test
 
-`tests/it/runtime_headless_reopen.rs` は wrapper の開き直し、`runtime_waiting` と `runtime_waiting_stages` は非対話の質問・slot・上限・adopt の待ちを確かめる。対話だけの画面と終了待ちの test は撤去した。`domain::waiting` と stats の unit test は過去を含む待ちの記録と集計を確かめる。
+`tests/it/runtime_headless_reopen.rs` は wrapper の開き直し、`runtime_waiting` と `runtime_waiting_stages` は supervisor の配線（slot の外での待ち、引き継ぎと adopt をまたぐ待ち、wrapper の心拍）を代表の case で確かめる。
+対話だけの画面と終了待ちの test は撤去した。
+待ちの上限・控え・組み立て直しと slot への戻りの判断、および過去を含む待ちの記録と集計は `domain::waiting` と stats の unit test が確かめる。
 
 ## taskのholdの待ち（予定・未実装）
 
