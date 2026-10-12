@@ -88,6 +88,12 @@ pub trait LedgerStore {
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
     /// Every row of `kind`, by key.
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>>;
+    /// The retention of the node rows, by the same local day as
+    /// [`NodeSampleStore::remove_node_samples`]: drop from each the samples
+    /// of a day before `before_day` and remove a row left with none
+    /// ([`crate::domain::ledger::node::retained`]), in one transaction.
+    /// Returns how many rows were removed.
+    fn remove_node_rows(&self, before_day: i64) -> Result<usize>;
     /// The window `query` asks of the rows of every kind
     /// ([`crate::domain::ledger::window::select`]): the one entry the
     /// statistics read the ledger by.

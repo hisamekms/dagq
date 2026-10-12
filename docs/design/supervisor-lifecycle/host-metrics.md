@@ -49,6 +49,7 @@ eventにはしない（連続の値でrun_eventsを膨らませない）。
   ストアに書けなかった間にファイルだけに入った行は、次のprocessの取り込みでストアに入る（ファイルに書けなかった行はファイルに戻らない）。
   行の中身はmigrationと`domain::host_metrics::NodeSample`のdoc commentが持つ
 - **保持**: ストアの行は、ファイルと同じ日数と数え方で、行の持つlocalの日が保持の期間より前なら取った時刻によらず消すので、時計の切り替えがあってもファイルと同じ行が残る。
+  台帳のnodeの行も同じ日でsampleを落とす関数はあり、それを当てる台帳を作る係は予定（[計測](../measurement.md#台帳の形)）。
   0なら消さない
 - **CSVの取り込み**: processの最初のjob（失敗したら次のjobでも）が、そのsampleを書く前に、保持の期間にある`metrics-YYYYMMDD.csv`の行をファイルの読み手と同じ読み方でストアに足す。
   取り込みはファイルの各行を1回だけ足す（間隔によらず全ての行を足し、同じ秒の行があれば足さない）ので、何度走っても行は増えず、取り込み済みのファイルに後から足された行（日をまたいで遅れて終わったjob、前の日に戻った時計、ストアに書けなかったsupervisor）も次のprocessの取り込みで足される。
@@ -94,7 +95,8 @@ task 1371（goal 86）。2026-10-01〜02の夜に空き容量が数時間おき�
 - **CPU秒**（`cpu_secs`、goal 72、task 992）: 各行の`cpu_total`（と`cpu_<kind>`） ÷ 100 × その行が代表する秒の合計。行は前の行からの秒を代表し、窓の最初の行は典型の間隔（窓の中の行の最も短い間隔、つまり記録した間隔。1行なら既定の30秒。窓の始まりより前は数えない）を代表する。代表する秒は典型の間隔の2倍（`max_gap_secs`）を上限にし、記録の途切れを次の行の負荷で埋めない。`{covered_secs, max_gap_secs, total, by_kind}`で、`cpu_total`のある行が無ければnull。`kpi`の`cpu_per_landing`がこれを着地数で割る
 - `infrastructure::host_metrics::summary(dir, from, until)`（`domain::host_metrics::summarize`）が任意の区間の要約を返す。[`kpi`](kpi.md#hostの負荷)はこれを各期間・`--since` / `--until`の窓・`--compare`の前後の窓ごとに読み、`host`として並べる（task 872。日次・週次のレポートのJSONにも載る）。`host`は参考の値で目標の判定・breach・push・observerのfindingには使わない。そこから`cpu_per_landing`と`load_per_core`をKPIにする（[`kpi`](kpi.md)、task 992）
 - 今の`stats`・`kpi`・レポートはCSVを読む。
-  NodeSampleStoreから読む切り替えは[計測](../measurement.md)の段の後続が行う
+  NodeSampleStoreのsampleを台帳のnodeの行に畳む関数と、その行だけから同じ要約を作る共通の読み取り関数はあり、行を書く台帳を作る係は予定（[計測](../measurement.md#台帳の形)）。
+  読み手の切り替えは[計測](../measurement.md)の段の後続が行う
 - 人はCSVをそのまま読める（1日30秒ごとで約2,900行）
 
 ## 外部のsamplerを止める手順

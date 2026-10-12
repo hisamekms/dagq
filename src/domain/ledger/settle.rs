@@ -1,8 +1,9 @@
-//! Whether a session or queue row has ended, is dirty and may be marked
-//! settled (`final`), for what builds the ledger (docs/design/measurement.md
-//! "台帳を作る係"). A session ends when it closes (a job at its end); a
-//! queue interval at its end event, or the end of its supervisor's life;
-//! a queue event ends as it happens. A row is settled only once it has
+//! Whether a session, queue or node row has ended, is dirty and may be
+//! marked settled (`final`), for what builds the ledger
+//! (docs/design/measurement.md "台帳を作る係"). A session ends when it
+//! closes (a job at its end); a queue interval at its end event, or the
+//! end of its supervisor's life; a queue event ends as it happens; a node
+//! row when its hour has passed. A row is settled only once it has
 //! ended and its grace has passed with no later input folded: the records
 //! a closed session may still get (an interactive session's cut at its
 //! close comes up to a week later, [`TOKEN_CUT_CLOSED_WINDOW_MS`]) and the
@@ -73,6 +74,29 @@ pub fn settlement(row: &LedgerRow, last_input: EventId, now_ms: i64) -> Settleme
         && row
             .ended_at
             .is_some_and(|end| ended && now_ms - end >= grace(row));
+    Settlement {
+        ended,
+        dirty,
+        settles,
+    }
+}
+
+/// The settlement of the node row `row` at `now_ms`, the largest
+/// NodeSampleStore id of its node's samples in its bucket being
+/// `last_sample` (none when the store has none left): ended once its
+/// hour has passed; dirty when of an older [`LEDGER_V`] or a sample came
+/// in after what it folded (taken late, or imported from a CSV file after
+/// its hour ended); settled once ended, past [`SETTLE_GRACE_MS`] after its
+/// hour, and not dirty. A settled row a later sample reaches is dirty
+/// again.
+pub fn node_settlement(row: &LedgerRow, last_sample: Option<i64>, now_ms: i64) -> Settlement {
+    let ended = row.kind == LedgerKind::Node && row.ended_at.is_some_and(|end| now_ms >= end);
+    let dirty = row.ledger_v != LEDGER_V || last_sample > row.inputs_through.node_samples;
+    let settles = !dirty
+        && ended
+        && row
+            .ended_at
+            .is_some_and(|end| now_ms - end >= SETTLE_GRACE_MS);
     Settlement {
         ended,
         dirty,

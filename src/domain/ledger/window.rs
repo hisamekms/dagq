@@ -14,13 +14,15 @@
 //! [`attributes::Folded::BeforeBaseline`],
 //! [`findings::Folded::BeforeBaseline`], and an Execution's context of
 //! none (not recorded) apart from one with `context_reason` (not
-//! measured). A node row (the host's load) is a fifth kind the same entry
-//! is to take ([`LedgerKind::ALL`]).
+//! measured). A node row (the host's load over an hour) is taken by its
+//! times alone, whatever the filters, as `stats` reads the host's load
+//! over the window's times ([`LedgerWindow::host`]).
 //!
 //! # Where each value comes from
 //!
 //! The rows' kinds are `run` and `task` ([`super::fold`]), `session`
-//! ([`super::session`]) and `queue` ([`super::queue`]); "records" is the
+//! ([`super::session`]), `queue` ([`super::queue`]) and `node`
+//! ([`super::node`], whose items its doc lists); "records" is the
 //! events a row owns ([`super::owner`]), which [`LedgerWindow::events`]
 //! gives back for today's functions. The time each is recorded, and what
 //! is missing when, follow measurement.md "欠測と集約の契約": the judgments
@@ -72,8 +74,8 @@
 //! | `TaskStore::graph_input` (`report::diagram`: priorities and who set them, goals' priorities, goal dependencies and verdicts, candidates) | the attribute records ([`attributes`]) | in the transaction of the change; a baseline for what had none | `基準より前` before the baseline | task rows' records; queue event rows of a goal's ([`LedgerWindow::attributes`]) |
 //! | `TaskStore::list_goals` (`report::diagram`'s goal titles) | the attribute records ([`attributes`]) | in the transaction of the change; a baseline for what had none | `基準より前` before the baseline | queue event rows of a goal's |
 //! | `SupervisorRegistry::supervisors` (`kpi`'s heartbeats) | `supervisor_alive`, `supervisor_started`, `supervisor_stopped` | every 300 s, at a start and a stop | a supervisor past its evidence of life is ended ([`crate::domain::supervisor_life`]) | queue rows of `supervisor_*` (an interval's end or an event) |
-//! | `StatsSources::host_metrics` (`infrastructure::host_metrics::summary`) | the host's samples (NodeSampleStore) | the host's sampling | the host's own | node rows (a fifth kind, to come) |
-//! | `kpi`'s `HostReader`, `ReportSetup::host_metrics` (`infrastructure::host_metrics::summary`) | the host's samples (NodeSampleStore) | the host's sampling | the host's own | node rows (a fifth kind, to come) |
+//! | `StatsSources::host_metrics` (`infrastructure::host_metrics::summary` of the host's CSV files) | the host's samples (NodeSampleStore) | the host's sampling, each `--host-metrics-interval`; a CSV row the store lacks at the next import | no sample in the window's seconds: a summary of none; past `--host-metrics-retention-days` the store and the node rows keep none | node rows of `host`: `detail.samples` ([`super::node`]), the window's seconds ([`LedgerWindow::host`]) |
+//! | `kpi`'s `HostReader`, `ReportSetup::host_metrics` (`infrastructure::host_metrics::summary` of the host's CSV files) | the host's samples (NodeSampleStore) | the host's sampling, each `--host-metrics-interval`; a CSV row the store lacks at the next import | no sample in the period's seconds: a summary of none; past `--host-metrics-retention-days` the store and the node rows keep none | node rows of `host`: `detail.samples` ([`super::node`]), each period's seconds after its start to its end ([`LedgerWindow::host_between`]) |
 //! | `StatsSources::config_file` (`[stall]` of `dagq.toml`) | a setting, not an observation | read with each call | — | none; the `[stall]` a supervisor used is `stall_config_loaded`, a queue event row |
 //! | `StatsSources::conflicts_file` (`[conflicts]`) | a setting, not an observation | read with each call | — | none: the reader takes it beside the window |
 //! | `AreaReader::map` (`[areas]`) | a setting, not an observation | read with each call | — | [`WindowQuery::areas`] |
@@ -101,7 +103,7 @@
 //! | `claim_holds`, `landing_holds`, `claim_deferrals` | queue `claim_hold`, `landing_hold`, `claim_deferral` rows | started in the window; the one open at its end |
 //! | `updates` | queue event rows of `update_*` | the cursors' window |
 //! | `landing_utilization` | queue `landing_slot` rows and run rows' records (the waits) | overlapping the window |
-//! | `host` | node rows | the window's times |
+//! | `host` (`samples`, `first`, `last`, `metrics`: each column's `min`, `mean`, `median`, `max`, `p90`; `cpu_secs`: `covered_secs`, `max_gap_secs`, `total`, `by_kind`) | node rows of `host`: their `detail.samples` summarized whole by [`crate::domain::host_metrics::summarize`] ([`super::node::host_summary`]); today `infrastructure::host_metrics::summary` of the CSV files | the window's seconds, from `--since`'s time (else its first event's) to its end, both inclusive ([`LedgerWindow::host`]) |
 //! | `next_cursor`, `window_ms` | the window ([`LedgerWindow`]) | — |
 //!
 //! ## `kpi`
@@ -121,7 +123,10 @@
 //! | `job.count.*`, `job.failed_rate.*`, `job.secs.*`, `job.verdict.*` | session rows of jobs and run rows' `jobs` |
 //! | `tokens`, `tokens_per_landing` (their `details.tokens`, `token_coverage`) | each period's [`LedgerWindow::execution_tokens`]: every run and session row's Executions, summed by the rule of the tokens' aggregation (each one's end, actor × provider × model), the records' start the queue's |
 //! | `supervisors` (their lives and heartbeats) | queue rows of `supervisor_*` |
-//! | `host`, `cpu_per_landing`, `load_per_core`, `health.disk` | node rows |
+//! | `host` (as `stats`' `host`) | node rows of `host`: `detail.samples` summarized whole ([`super::node::host_summary`]) over each period's seconds after its start to its end, so two periods never share a sample, and over each `--compare` window's the same way ([`LedgerWindow::host_between`]); today `kpi`'s `HostReader` over `infrastructure::host_metrics::summary` |
+//! | `cpu_per_landing`, `cpu_per_landing.<kind>` | the period's `host`: `cpu_secs.total` and `cpu_secs.by_kind` (each sample's `cpu_total` and `cpu_<kind>` for the seconds since the one before, the first for the shortest gap but never before the period, a gap up to `max_gap_secs`) over the run rows' landings |
+//! | `load_per_core` | the period's `host`: `metrics.load1` (`median`, `p90`, `max` of the samples' `load1`) over `kpi::Host::cores` |
+//! | `health.disk` | the period's `host`: `metrics.disk_free_bytes` and `metrics.disk_free_pct` (`min`, `median` of the samples') ([`crate::domain::host_metrics::DiskFree::of`]) |
 //! | `health.routes`, `health.planner_routes` | as `worker_routes` and `planner_routes` |
 //!
 //! ## `report`
@@ -132,18 +137,19 @@
 //! | `kpi` | as `kpi` above |
 //! | `findings_open`, `findings` (every field of a line, larger impact first) | queue `finding` rows' values ([`LedgerWindow::findings`], [`findings::Findings::unsettled`]) |
 //! | `diagram` | task rows' attributes and queue event rows of the goals' (titles, priorities, dependencies, verdicts, candidates) |
-//! | `host` | node rows |
+//! | `host` (each period's `host`, `cpu_per_landing`, `load_per_core` and `health.disk` in the JSON; the HTML's section of the host's CPU per landing and load over the cores) | as `kpi` above: node rows of `host`, each period's seconds ([`LedgerWindow::host_between`]); today `ReportSetup::host_metrics` over `infrastructure::host_metrics::summary` |
 
 use std::collections::{BTreeSet, HashMap};
 
 use super::{
-    LedgerKind, LedgerRow, WindowEnd, attributes, findings,
+    LedgerKind, LedgerRow, WindowEnd, attributes, findings, node,
     read::{LedgerValues, read},
     session::row_executions,
 };
 use crate::domain::{
     EventId, GoalId, RunEvent, TaskChange, TaskId,
     areas::{AreaMap, run_areas},
+    host_metrics::HostSummary,
     live_alerts::{self, FoldedJudgments},
     stats::{
         Cursor, History,
@@ -184,6 +190,10 @@ pub struct LedgerWindow {
     pub end: WindowEnd,
     /// Whether `--since` is an event: the window starts after it by id.
     since_event: bool,
+    /// Where the host's load is read from (unix milliseconds), as `stats`
+    /// reads it: `--since`'s time, else the first event of the window,
+    /// else its end.
+    host_from_ms: i64,
     /// The rows in the window the filters chose, by their first input.
     pub rows: Vec<LedgerRow>,
     /// Every row's records, the window and the filters aside: what the
@@ -251,6 +261,15 @@ pub fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
         upto: Some(upto),
         ms: (!matches!(query.until, Some(Cursor::Event(_)))).then_some(end_ms),
     };
+    let host_from_ms = start_ms
+        .or_else(|| {
+            all.iter()
+                .filter(|event| event.id > after && event.id <= upto)
+                .filter_map(|event| timestamp_millis(&event.created_at))
+                .min()
+        })
+        .unwrap_or(end_ms)
+        .min(end_ms);
     let mut window = LedgerWindow {
         after,
         upto,
@@ -258,6 +277,7 @@ pub fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
         end_ms,
         end,
         since_event: matches!(query.since, Some(Cursor::Event(_))),
+        host_from_ms,
         rows: Vec::new(),
         records: all,
         filters: Filters::default(),
@@ -389,6 +409,10 @@ impl Filters {
     }
 
     fn keeps(&self, row: &LedgerRow) -> bool {
+        // The host's load is the queue's, whatever is filtered.
+        if row.kind == LedgerKind::Node {
+            return true;
+        }
         if let Some(goal) = self.goal_id
             && !self.goals_of(row).contains(&goal)
         {
@@ -424,7 +448,16 @@ impl LedgerWindow {
     /// inputs only), or ended after the start's time (at it too for a time
     /// `--since`; an event `--since` leaves out what ended at its time,
     /// which is that event's or before it).
+    /// A node row falls in by its hour alone: it may hold a sample of the
+    /// seconds the host's load is read over ([`Self::host`]).
     fn overlaps(&self, row: &LedgerRow) -> bool {
+        if row.kind == LedgerKind::Node {
+            let (from, until) = self.host_secs();
+            return row
+                .started_at
+                .zip(row.ended_at)
+                .is_some_and(|(start, end)| node::covers(start, end, from, until));
+        }
         let begun = row.inputs_from <= self.upto;
         let input_after = row.inputs_through.events > self.after;
         let open = row.ended_at.is_none() && !row.is_legacy();
@@ -466,6 +499,33 @@ impl LedgerWindow {
     /// The window's end in unix seconds.
     pub const fn end_secs(&self) -> i64 {
         self.end_ms.div_euclid(1000)
+    }
+
+    /// The unix seconds the host's load is read over, both inclusive.
+    const fn host_secs(&self) -> (i64, i64) {
+        (self.host_from_ms.div_euclid(1000), self.end_secs())
+    }
+
+    /// The host's load over the window as `stats`' `host`: the samples of
+    /// its node rows from `--since`'s time (else its first event's) to its
+    /// end, summarized as `infrastructure::host_metrics::summary`
+    /// summarizes the same samples.
+    pub fn host(&self) -> HostSummary {
+        let (from, until) = self.host_secs();
+        node::host_summary(self.of(LedgerKind::Node), from, until)
+    }
+
+    /// The host's load over a span of the window as `kpi`'s periods (and
+    /// their `--compare` windows) read it: the seconds after `start_ms` up
+    /// to `end_ms` (`kpi::HostReader::between`), so that two adjacent
+    /// spans never share a sample. Only the window's node rows are read: a
+    /// span outside it reads none.
+    pub fn host_between(&self, start_ms: i64, end_ms: i64) -> HostSummary {
+        node::host_summary(
+            self.of(LedgerKind::Node),
+            start_ms.div_euclid(1000) + 1,
+            end_ms.div_euclid(1000),
+        )
     }
 
     /// The judgments of now at the window's end (`alerts`' slots,

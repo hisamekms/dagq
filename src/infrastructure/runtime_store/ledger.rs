@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::application::LedgerStore;
-use crate::domain::ledger::{InputsThrough, LedgerKind, LedgerRow, Measure, Subject, Totals};
+use crate::domain::ledger::{InputsThrough, LedgerKind, LedgerRow, Measure, Subject, Totals, node};
 use crate::domain::run_phase::{Blocker, Holds};
 
 const BLOCKERS: [(Blocker, &str); 7] = [
@@ -145,6 +145,31 @@ impl LedgerStore for SqliteQueue {
             .prepare("SELECT * FROM ledger_rows WHERE kind=?1 ORDER BY key")?;
         let rows = statement.query_map([kind.as_str()], ledger_row)?;
         rows.map(|row| row?).collect()
+    }
+
+    fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let rows = self.ledger_rows(LedgerKind::Node)?;
+        let mut removed = 0;
+        for row in rows {
+            match node::retained(&row, before_day) {
+                None => {
+                    removed += tx.execute(
+                        "DELETE FROM ledger_rows WHERE kind=?1 AND key=?2",
+                        params![LedgerKind::Node.as_str(), row.key],
+                    )?;
+                }
+                Some(kept) if kept != row => {
+                    tx.execute(
+                        "UPDATE ledger_rows SET detail=?3 WHERE kind=?1 AND key=?2",
+                        params![LedgerKind::Node.as_str(), row.key, text(&kept.detail)?],
+                    )?;
+                }
+                Some(_) => {}
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 }
 

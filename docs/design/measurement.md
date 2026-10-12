@@ -30,7 +30,7 @@ related:
 
 # 計測
 
-> **一部だけ実装済み（2026-10-12）**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queueの台帳と「畳む関数」・「共通の読み取り関数」は実装済みで、今の姿を書く。
+> **一部だけ実装済み（2026-10-12）**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「共通の読み取り関数」は実装済みで、今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[`stats`](supervisor-lifecycle/stats.md)・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
@@ -48,7 +48,7 @@ related:
 | EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
 | SessionStepStore | sessionのstep（turn・tool・コマンドのshape）。`(session_id, seq)`で重複を除き、抜けを残す。90日 | SSOT | 未実装（queue.dbの新しい表の予定） |
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | queue.dbの`node_samples`（hostのCSVは写しで、保持の期間の分を一度取り込む。[hostの負荷](supervisor-lifecycle/host-metrics.md)） |
-| LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows`（nodeの行と作る係は未実装） |
+| LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows` |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`。着地の検証は下の「着地の検証の対応表のcache」から読む |
@@ -159,7 +159,6 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
 
 台帳は対象ごとに1行（ADR-t1662-1決定10）。
 区切りの値は列、フローで形が変わるものはJSON。
-行は`domain::ledger::LedgerRow`、表は`ledger_rows`（列の意味はmigrationのコメント）。
 全ての行は、種類の中で対象を1つに決める鍵・畳み方の版・畳んだ入力の到達点・確定の印・旧方式の印を持つ（項目と意味は`LedgerRow`のdoc commentとmigrationのコメント）。
 
 - **作り直し**: 版が上がった行と、到達点より後に入力が届いた行は畳み直す（`ledger::rebuilds`、確定の印の後と旧方式の行も同じ）。
@@ -174,8 +173,7 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
   旧方式のrunを持つtaskは旧方式の行。
 - **session**（実装済み）: runを持たない対象のsessionとjobの1回（`domain::ledger::session`）。
 - **queue**（実装済み）: run・task・sessionに属さないqueue全体の区間か出来事の1つ（`domain::ledger::queue`）。
-- **node**（予定）: nodeの資源の時系列を時間の区切りで畳んだもの。
-  hostの欄の置き場。
+- **node**（実装済み）: hostの欄の置き場で、NodeSampleStoreだけを読みnodeと時間の区切りごとにsampleのまま持ち、係が同じ保持で消す（予定。`domain::ledger::node`）。
 
 ## 畳む関数
 
@@ -195,7 +193,7 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
 - supervisorの周回が終わった後に動き（D7）、行が無い・`ledger_v`が古い・`inputs_through`より後に入力が届いた（dirty）対象を畳み直す。冪等。
 - 置き場は観測と分析のcontext（[Architecture](architecture.md)の「観測と分析」）。
   `Supervisor`の本体に状態を足さない。
-- sessionとqueueの行の終わり・dirty・`final`は`domain::ledger::settle`が決める（閉じた時刻か区間の終わりから猶予の後で、閉じていない行は確定しない）。
+- session・queue・nodeの行の終わり・dirty・`final`は`domain::ledger::settle`が決める（閉じた時刻か区間の終わりから猶予の後で、閉じていない行は確定しない）。
   supervisorの一生の終わりで閉じた行は、畳んだときのそのsupervisorの最後のeventを入力の到達点に持ち、後の停止の記録でdirtyになって終わりを畳み直す。
 - `final`は、runが終わり（`push_pending`でない）、そのrunのtelemetry専用のtokenが失効し、supervisorの資源の最後の記録が済み、猶予が過ぎてから付ける。`final`の後もdirtyなら畳み直す。
 - 切り替え前のrun（`run_phase_changed`が無い）は区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く。
@@ -205,7 +203,7 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
 
 stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時刻かevent idの境界で、窓の終わりまで数える）とgoal・change・areaの絞り込みで選んで返す1つの関数（`domain::ledger::window`、`LedgerStore::ledger_window`）だけから作る。
 行は入力のevent idの範囲と時刻の範囲で窓に当て（event idの境界は時刻で越えない）、旧方式の行は`legacy`から同じ名前と形の値を返す（`domain::ledger::read::read`）。
-絞り込みはtask・goal・runの行を選び、窓に状態を持ち込む畳み（属性・finding・mainの履歴・今の判定）は全ての行の記録を窓の終わりで畳む。
+絞り込みはtask・goal・runの行を選び（nodeの行は時刻だけで当てる）、窓に状態を持ち込む畳み（属性・finding・mainの履歴・今の判定）は全ての行の記録を窓の終わりで畳む。
 段3の統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない（D1）。
 欄・指標・節と今のuse caseの入力ごとの元の行は、同じmoduleのdoc commentの表が持つ。
 

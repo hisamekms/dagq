@@ -257,7 +257,11 @@ fn every_event_is_the_records_of_one_row() {
         },
     );
     assert_eq!(window.events(), log.events);
-    for kind in LedgerKind::ALL {
+    // A node row is folded of the NodeSampleStore, not of the events.
+    for kind in LedgerKind::ALL
+        .into_iter()
+        .filter(|kind| *kind != LedgerKind::Node)
+    {
         assert!(window.of(kind).next().is_some(), "{kind:?}");
     }
 }
