@@ -22,7 +22,7 @@ pub use dagq::{
     application::{
         AgentProvider, Clock, CommandSpec, Exit, Generators, IdGenerator, MainRemote,
         SessionWrappers, Spawned, Spawner, Streams, SupervisorEnvironment, TaskStore,
-        WorkspaceTags, dependency_graph,
+        dependency_graph,
     },
     domain::{
         AskId, AskKind, CommitSha, EventId, EvidenceCheck, GoalEdit, GoalId, MAX_RESUME_ATTEMPTS,
@@ -32,7 +32,7 @@ pub use dagq::{
         search::{SearchKind, SearchQuery, SearchRef},
     },
     infrastructure::{
-        adapters::{GitRepository, shell_join, workspace_handle},
+        adapters::{GitRepository, shell_join},
         asks::AskQuery,
         clock::{self, SystemClock},
         location::QueueLocation,

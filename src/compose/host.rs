@@ -19,21 +19,19 @@ use std::{
 use crate::{
     application::{
         AgentProvider, CommandSpec, HostOpsQueue, LaunchAgent, ProcessControl, QueueOpener, RunLog,
-        WorkspaceBackend,
         install::{self as installation, Binaries, InstallOptions},
         lifecycle::{
             self, DownOptions, InboxAgent, InboxOptions, InboxPorts, LifecycleQueue,
             Ports as LifecyclePorts, QueuePaths, RepositoryPaths, UpEnvironment, UpOptions,
         },
         rebind::{self as rebinding, Rebind, RebindTarget},
-        recording::RecordingBackend,
         update,
     },
     domain::SupervisorRegistration,
     infrastructure::{
         adapters::{
-            ClaudeCode, ClaudePlugin, Cmux, GitRepository, SystemProcesses,
-            claude_trusts_repository, load_average, path_text,
+            ClaudeCode, ClaudePlugin, GitRepository, SystemProcesses, claude_trusts_repository,
+            path_text,
         },
         binaries::LocalBinaries,
         clock,
@@ -111,25 +109,17 @@ fn restart_arguments(
 }
 
 /// Starts a supervisor an update's job found gone with the binary in
-/// place, as [`update::restart`] decides: cmux closes the workspace of one
-/// registered in the retired in-cmux mode and `binary` runs its `up`.
+/// place, as [`update::restart`] decides: `binary` runs the `up` of one
+/// registered in the retired in-cmux mode.
 fn restarter<'a>(
     db: &'a Path,
-    cmux: &'a Path,
     binary: &'a Path,
     arguments: &'a [String],
 ) -> impl Fn(&SupervisorRegistration) -> Result<Value> + 'a {
     move |registration: &SupervisorRegistration| -> Result<Value> {
-        let cmux = Cmux {
-            executable: cmux.to_path_buf(),
-        };
-        update::restart(
-            registration,
-            &path_text(db)?,
-            arguments,
-            &|workspace| cmux.close(workspace),
-            &|up| LocalBinaries.run(binary, up),
-        )
+        update::restart(registration, &path_text(db)?, arguments, &|up| {
+            LocalBinaries.run(binary, up)
+        })
     }
 }
 
@@ -284,24 +274,6 @@ pub struct ReleaseIndexPort(pub Arc<dyn crate::application::release_update::Rele
 impl std::fmt::Debug for ReleaseIndexPort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ReleaseIndexPort")
-    }
-}
-
-/// The runtime's own constructor of the cmux wrapper `up`, `down` and the
-/// tests use: failures are recorded in the queue at `db`, and `token` is
-/// the supervisor whose slots are reported (`None` reports all of them).
-impl<'a> RecordingBackend<'a> {
-    pub fn new(inner: &'a dyn WorkspaceBackend, db: PathBuf, token: Option<LeaseToken>) -> Self {
-        Self::over(
-            inner,
-            Arc::new(SqliteOpener {
-                db,
-                generators: clock::system(),
-                actor: None,
-            }),
-            token,
-            load_average,
-        )
     }
 }
 
@@ -669,11 +641,9 @@ impl OneShot {
     /// supervisors heartbeat on under it for `watch_timeout` and, when they
     /// do not, put the old binary back, start them again and ask the inbox
     /// (see [`update::install_watched`], ADR-0073 decisions 13 and 14).
-    /// `executable` is the cmux the `up` that starts one again is given.
     pub fn install(
         &self,
         location: &QueueLocation,
-        executable: &Path,
         launchd: &dyn LaunchAgent,
         options: &InstallOptions,
         watch_timeout: Duration,
@@ -685,7 +655,7 @@ impl OneShot {
             .db
             .canonicalize()
             .unwrap_or_else(|_| location.db.clone());
-        let restart = restarter(&db, executable, &options.target, &options.restart);
+        let restart = restarter(&db, &options.target, &options.restart);
         let down = || {
             self.down(
                 location,
@@ -733,7 +703,7 @@ impl OneShot {
             &job.codex,
             job.plugin_dir.as_deref(),
         )?;
-        let restart = restarter(&db, &job.cmux, &job.target, &restart_arguments);
+        let restart = restarter(&db, &job.target, &restart_arguments);
         let paths = update::UpdatePaths::under(&location.queue_dir);
         let e2e = installation::E2eSettings {
             command: job.e2e_command.clone(),
@@ -801,7 +771,7 @@ impl OneShot {
             &job.codex,
             job.plugin_dir.as_deref(),
         )?;
-        let restart = restarter(&db, &job.cmux, &job.target, &restart_arguments);
+        let restart = restarter(&db, &job.target, &restart_arguments);
         // Where the supervisor started it: its sessions' repository.
         let plugin = job.plugin_dir.is_none().then(|| ClaudePlugin {
             executable: job.claude.clone(),
@@ -848,7 +818,6 @@ impl OneShot {
     pub fn install_release(
         &self,
         location: &QueueLocation,
-        executable: &Path,
         launchd: &dyn LaunchAgent,
         index: &dyn crate::application::release_update::ReleaseIndex,
         cargo: &Path,
@@ -880,7 +849,6 @@ impl OneShot {
             .with_context(|| format!("install release {version}"))?;
         let mut report = self.install(
             location,
-            executable,
             launchd,
             &InstallOptions {
                 source: installation::Source::Binary(binary),

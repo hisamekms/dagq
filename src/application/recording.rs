@@ -1,16 +1,16 @@
 //! Every failed call of the host's sessions on record (task 109):
-//! [`RecordingBackend`] wraps a [`WorkspaceBackend`] (cmux) and
-//! [`RecordingSessions`] a [`SessionWrappers`] (the background wrappers),
-//! and both write `backend_call_failed` with the load the call failed
-//! under. A call that timed out is made again after a
-//! backoff when making it again is safe (task 326).
+//! [`RecordingSessions`] wraps a [`SessionWrappers`] (the background
+//! wrappers) and writes `backend_call_failed` with the load the call failed
+//! under. A call that timed out is made again after a backoff when making
+//! it again is safe (task 326). The `backend_call_failed` an earlier binary
+//! recorded of cmux's calls reads as these do.
 
 use crate::domain::LeaseToken;
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc, thread, time::Duration};
+use std::{sync::Arc, thread, time::Duration};
 
-use super::{QueueOpener, RecordingQueue, SessionWrappers, WorkspaceBackend, WorkspaceTags};
+use super::{QueueOpener, RecordingQueue, SessionWrappers};
 use crate::domain::background_wrapper::{StopRoute, WrapperStop};
 use crate::domain::{EventKind, Reason, ReasonCode, RunId};
 
@@ -69,8 +69,8 @@ pub fn backend_failure_payload(
     })
 }
 
-/// A failed backend call, handed back by [`RecordingBackend`] so that
-/// whoever records the error later can tell a cmux failure from others
+/// A failed backend call, handed back by [`RecordingSessions`] so that
+/// whoever records the error later can tell a session's failure from others
 /// ([`reason_of_error`]). It prints exactly as the error it wraps, with or
 /// without `{:#}`, and its sources are that error's.
 #[derive(Debug)]
@@ -111,7 +111,7 @@ impl std::error::Error for BackendFailure {
 }
 
 /// The reason code of an error a run step failed with: that of a failed
-/// cmux call anywhere in its chain, else `fallback`.
+/// session wrapper call anywhere in its chain, else `fallback`.
 pub fn reason_of_error(error: &anyhow::Error, fallback: ReasonCode) -> Reason {
     error
         .chain()
@@ -154,26 +154,14 @@ struct Limits {
     backoff: Duration,
 }
 
-/// Where [`RecordingBackend`] and [`RecordingSessions`] record a failed
-/// call: through its own connection `queues` opens for each, as the ports
-/// recording reaches, with the slots of `token` (`None` reports every lease
-/// and supervisor) and the 1-minute load average (`None` where it cannot be
-/// read).
+/// Where [`RecordingSessions`] records a failed call: through its own
+/// connection `queues` opens for each, as the ports recording reaches, with
+/// the slots of `token` (`None` reports every lease and supervisor) and the
+/// 1-minute load average (`None` where it cannot be read).
 struct Recorder {
     queues: Arc<dyn QueueOpener<dyn RecordingQueue + Send>>,
     token: Option<LeaseToken>,
     load_average: fn() -> Option<f64>,
-}
-
-/// The connections of the whole queue an opener gives, as the ports
-/// recording reaches: what [`RecordingBackend`], which is given the whole
-/// queue, records through.
-struct AsRecordingQueue(Arc<dyn QueueOpener>);
-
-impl QueueOpener<dyn RecordingQueue + Send> for AsRecordingQueue {
-    fn open(&self) -> Result<Box<dyn RecordingQueue + Send>> {
-        Ok(self.0.open()?)
-    }
 }
 
 impl Recorder {
@@ -288,121 +276,17 @@ impl Recorder {
     }
 }
 
-/// A [`WorkspaceBackend`] that records every failed or timed-out call as
-/// `backend_call_failed` before handing the error back unchanged, so the
-/// queue keeps how often cmux fails and under what load (task 109). The
-/// record is made here, in the application layer, and not in the cmux
-/// adapter (ADR-0013). A call on a workspace a run recorded is recorded on
-/// that run; one that belongs to no run (`up`'s workspaces, the queue's
-/// group, `down`'s close) without one. `token` is the supervisor whose
-/// slots are reported; `None` (`up`, `down`) reports every lease and
-/// supervisor. A record that cannot be written is dropped: it must never
-/// hide the backend's error.
-pub struct RecordingBackend<'a> {
-    inner: &'a dyn WorkspaceBackend,
-    recorder: Recorder,
-}
-
-impl<'a> RecordingBackend<'a> {
-    /// `inner`, recording its failures through a connection `queues`
-    /// opens for each.
-    pub fn over(
-        inner: &'a dyn WorkspaceBackend,
-        queues: Arc<dyn QueueOpener>,
-        token: Option<LeaseToken>,
-        load_average: fn() -> Option<f64>,
-    ) -> Self {
-        Self {
-            inner,
-            recorder: Recorder {
-                queues: Arc::new(AsRecordingQueue(queues)),
-                token,
-                load_average,
-            },
-        }
-    }
-
-    fn limits(&self) -> Limits {
-        Limits {
-            timeout: self.inner.call_timeout(),
-            attempts: self.inner.call_attempts(),
-            backoff: self.inner.retry_backoff(),
-        }
-    }
-
-    fn recorded<T>(&self, op: &str, workspace_id: Option<&str>, result: Result<T>) -> Result<T> {
-        self.recorder
-            .recorded(self.limits(), op, workspace_id, None, result)
-    }
-
-    fn retried<T>(
-        &self,
-        op: &str,
-        workspace_id: &str,
-        call: impl FnMut() -> Result<T>,
-    ) -> Result<T> {
-        self.recorder.retried(self.limits(), op, workspace_id, call)
-    }
-}
-
-impl WorkspaceBackend for RecordingBackend<'_> {
-    fn preflight(&self) -> Result<()> {
-        self.inner.preflight()
-    }
-    fn close(&self, workspace_id: &str) -> Result<()> {
-        let result = self.inner.close(workspace_id);
-        self.recorded("close", Some(workspace_id), result)
-    }
-    fn set_color(&self, workspace_id: &str, color: &str) -> Result<()> {
-        let result = self.inner.set_color(workspace_id, color);
-        self.recorded("set_color", Some(workspace_id), result)
-    }
-    fn set_status(&self, workspace_id: &str, key: &str, value: &str, icon: &str) -> Result<()> {
-        let result = self.inner.set_status(workspace_id, key, value, icon);
-        self.recorded("set_status", Some(workspace_id), result)
-    }
-    fn pin(&self, workspace_id: &str) -> Result<()> {
-        let result = self.inner.pin(workspace_id);
-        self.recorded("pin", Some(workspace_id), result)
-    }
-    fn exists(&self, workspace_id: &str) -> Result<bool> {
-        self.retried("exists", workspace_id, || self.inner.exists(workspace_id))
-    }
-    fn create_named(
-        &self,
-        name: &str,
-        cwd: &Path,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        let result = self.inner.create_named(name, cwd, command, tags);
-        self.recorded("create_named", None, result)
-    }
-    fn ensure_group(&self, external_id: &str, name: &str) -> Result<String> {
-        let result = self.inner.ensure_group(external_id, name);
-        self.recorded("ensure_group", None, result)
-    }
-    fn notify(&self, title: &str, body: &str, workspace: Option<&str>) -> Result<()> {
-        let result = self.inner.notify(title, body, workspace);
-        self.recorded("notify", workspace, result)
-    }
-    fn call_timeout(&self) -> Duration {
-        self.inner.call_timeout()
-    }
-    fn call_attempts(&self) -> u32 {
-        self.inner.call_attempts()
-    }
-    fn retry_backoff(&self) -> Duration {
-        self.inner.retry_backoff()
-    }
-}
-
 /// The [`SessionWrappers`] of the supervisor and the runtime's planners,
 /// recording every failed or timed-out call as `backend_call_failed` (on
 /// the run whose session it is, or the run a start's environment names) and
 /// every stop that tells how it ended as `wrapper_stopped`, before handing
-/// back what the port returned, as [`RecordingBackend`] does for cmux.
-/// `token` is the supervisor whose slots are reported.
+/// back what the port returned. The record is made here, in the
+/// application layer, and not in the adapter (ADR-0013); one that cannot
+/// be written is dropped, never hiding the port's error. `token` is the
+/// supervisor whose slots are reported. A failure's `op` names the call:
+/// `launch_background` (a run's wrapper started), `close` (a wrapper or
+/// the turn it left stopped) and `exists` (its liveness, the one call made
+/// again after a timeout).
 pub struct RecordingSessions<'a> {
     inner: &'a dyn SessionWrappers,
     recorder: Recorder,
@@ -567,12 +451,12 @@ impl SessionWrappers for RecordingSessions<'_> {
 mod tests {
     use super::*;
     use anyhow::{Context, anyhow, bail};
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A cmux and a port of background wrappers whose first `failures`
-    /// calls fail with `error`, counting every call it gets. Only `exists`,
-    /// `close` and the start of a wrapper (which it refuses) are made
-    /// through it.
+    /// A port of background wrappers whose first `failures` calls fail
+    /// with `error`, counting every call it gets. Only `exists`, the stop
+    /// and the start of a wrapper (which it refuses) are made through it.
     struct Backend {
         error: &'static str,
         failures: AtomicUsize,
@@ -604,40 +488,6 @@ mod tests {
         }
     }
 
-    impl WorkspaceBackend for Backend {
-        fn preflight(&self) -> Result<()> {
-            unimplemented!()
-        }
-        fn close(&self, _: &str) -> Result<()> {
-            self.call()
-        }
-        fn set_color(&self, _: &str, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn set_status(&self, _: &str, _: &str, _: &str, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn pin(&self, _: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn exists(&self, _: &str) -> Result<bool> {
-            self.call().map(|()| true)
-        }
-        fn create_named(&self, _: &str, _: &Path, _: &str, _: &WorkspaceTags) -> Result<String> {
-            unimplemented!()
-        }
-        fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
-            unimplemented!()
-        }
-        fn notify(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
-            unimplemented!()
-        }
-        /// No sleep between attempts in a unit test.
-        fn retry_backoff(&self) -> Duration {
-            Duration::ZERO
-        }
-    }
-
     impl SessionWrappers for Backend {
         fn launch_background(
             &self,
@@ -649,7 +499,7 @@ mod tests {
             bail!("this test starts no background wrapper")
         }
         fn stop_background(&self, _: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
-            unimplemented!()
+            self.call().map(|()| None)
         }
         fn exists(&self, _: &str) -> Result<bool> {
             self.call().map(|()| true)
@@ -660,7 +510,7 @@ mod tests {
         }
     }
 
-    /// No queue: the failures [`RecordingBackend`] records are dropped, so
+    /// No queue: the failures [`RecordingSessions`] records are dropped, so
     /// that only what it hands back and how often it calls are checked.
     struct NoQueue;
 
@@ -670,8 +520,8 @@ mod tests {
         }
     }
 
-    fn recording(backend: &Backend) -> RecordingBackend<'_> {
-        RecordingBackend::over(backend, Arc::new(NoQueue), None, || None)
+    fn recording(backend: &Backend) -> RecordingSessions<'_> {
+        RecordingSessions::over(backend, Arc::new(NoQueue), None, || None)
     }
 
     /// The [`BackendFailure`] `error` wraps.
@@ -688,7 +538,7 @@ mod tests {
     /// that task 1437 deleted.
     #[test]
     fn an_effect_free_call_that_timed_out_is_made_again_until_its_attempts_run_out() {
-        const TIMEOUT: &str = "cmux list-workspaces failed: Command timed out";
+        const TIMEOUT: &str = "wrapper liveness check failed: Command timed out";
         let backend = Backend::failing(TIMEOUT, 2);
         assert!(recording(&backend).exists("ws").unwrap());
         assert_eq!(backend.calls(), 3);
@@ -712,8 +562,8 @@ mod tests {
         );
     }
 
-    /// `close` is made once, timed out or not, and its failure is handed
-    /// back with its code and op, which `cleanup_failed` carries
+    /// A stop (`close`) is made once, timed out or not, and its failure is
+    /// handed back with its code and op, which `cleanup_failed` carries
     /// ([`reason_of_error`]); a close that timed out may have taken effect.
     /// Moved from the interactive
     /// `failed_backend_calls_are_recorded_with_the_load_and_counted_by_stats`
@@ -721,15 +571,19 @@ mod tests {
     #[test]
     fn a_failed_close_is_made_once_and_handed_back_with_its_code_and_op() {
         let backend = Backend::failing("injected workspace close failure", 1);
-        let error = recording(&backend).close("ws").unwrap_err();
+        let error = recording(&backend)
+            .stop_background("ws", StopRoute::Close)
+            .unwrap_err();
         assert_eq!(backend.calls(), 1);
         assert_eq!(format!("{error:#}"), "injected workspace close failure");
         let reason = reason_of_error(&error, ReasonCode::Other);
         assert_eq!(reason.code, ReasonCode::BackendFailed);
         assert_eq!(reason.detail["op"], "close");
 
-        let backend = Backend::failing("cmux close-workspace failed: Command timed out", 1);
-        let error = recording(&backend).close("ws").unwrap_err();
+        let backend = Backend::failing("wrapper stop failed: Command timed out", 1);
+        let error = recording(&backend)
+            .stop_background("ws", StopRoute::Close)
+            .unwrap_err();
         assert_eq!(backend.calls(), 1);
         assert_eq!(
             reason_of_error(&error, ReasonCode::Other).code,

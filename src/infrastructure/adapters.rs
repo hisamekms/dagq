@@ -5,7 +5,7 @@ use crate::{
     application::{
         AgentJobLaunch, AgentProvider, CommandSpec, FileStamp, LandingBranchStamp, MainRemote,
         PlannerCommand, PluginState, ProcessControl, Repository, SessionWrappers, TurnReader,
-        TurnTarget, WorkspaceBackend, WorkspaceTags, execution::permission_deny,
+        TurnTarget, execution::permission_deny,
     },
     domain::{
         ActorRole, CommitSha, TaskId, TaskRun,
@@ -32,10 +32,7 @@ use std::{
 };
 
 pub use crate::application::{
-    naming::{
-        ask_notification_title, inbox_workspace_name, shell_join, shell_quote,
-        workspace_description, workspace_group_name,
-    },
+    naming::{shell_join, shell_quote},
     path_text,
 };
 use crate::domain::background_wrapper::{BackgroundHandle, StopRoute, WrapperStop};
@@ -527,7 +524,7 @@ fn signal(pid: u32, signal: libc::c_int) -> Result<()> {
     Ok(())
 }
 
-/// How long [`output`] lets a command run, and so each cmux call.
+/// How long [`output`] lets a command run.
 pub const OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The 1-minute load average (getloadavg(3)); `None` when it is unavailable.
@@ -2940,18 +2937,6 @@ impl MainRemote for GitRepository {
     }
 }
 
-pub struct Cmux {
-    pub executable: PathBuf,
-}
-
-fn expect_pong(reply: &str) -> Result<()> {
-    ensure!(
-        reply.trim() == "PONG",
-        "unexpected cmux ping response: {reply}"
-    );
-    Ok(())
-}
-
 /// The background wrappers of this host (ADR-t1404-1), which
 /// [`BackgroundSessions`] serves its calls with.
 fn background_wrappers() -> super::background::BackgroundWrappers<'static> {
@@ -2960,100 +2945,11 @@ fn background_wrappers() -> super::background::BackgroundWrappers<'static> {
     }
 }
 
-impl WorkspaceBackend for Cmux {
-    fn preflight(&self) -> Result<()> {
-        expect_pong(&output(Command::new(&self.executable).arg("ping"))?)
-    }
-
-    fn call_timeout(&self) -> Duration {
-        OUTPUT_TIMEOUT
-    }
-
-    /// cmux refuses to close a pinned workspace ("protected", cmux
-    /// 0.64.25), so the pin goes first. An unpin that fails (the
-    /// workspace is already gone, say) does not stop the close, whose own
-    /// error is the one reported.
-    fn close(&self, workspace_id: &str) -> Result<()> {
-        let _ = self.workspace_action(workspace_id, &["unpin"]);
-        let raw = output(
-            Command::new(&self.executable)
-                .args(["workspace", "close"])
-                .arg(workspace_id),
-        )?;
-        workspace_handle(&raw).context("cmux did not confirm the workspace close")?;
-        Ok(())
-    }
-
-    fn set_color(&self, workspace_id: &str, color: &str) -> Result<()> {
-        self.workspace_action(workspace_id, &["set-color", "--color", color])
-    }
-
-    fn set_status(&self, workspace_id: &str, key: &str, value: &str, icon: &str) -> Result<()> {
-        output(Command::new(&self.executable).args([
-            "set-status",
-            key,
-            value,
-            "--icon",
-            icon,
-            "--workspace",
-            workspace_id,
-        ]))?;
-        Ok(())
-    }
-
-    fn pin(&self, workspace_id: &str) -> Result<()> {
-        self.workspace_action(workspace_id, &["pin"])
-    }
-
-    fn exists(&self, workspace_id: &str) -> Result<bool> {
-        Ok(workspace_listed(&self.workspace_listing()?, workspace_id))
-    }
-
-    fn create_named(
-        &self,
-        name: &str,
-        cwd: &Path,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        let raw = self.create_workspace(name, cwd, command, tags)?;
-        self.identify_created(workspace_handle(&raw)?)
-    }
-
-    fn ensure_group(&self, external_id: &str, name: &str) -> Result<String> {
-        let reply = output(Command::new(&self.executable).args([
-            "--json",
-            "--id-format",
-            "uuids",
-            "workspace-group",
-            "create",
-            "--name",
-            name,
-            "--external-id",
-            external_id,
-        ]))?;
-        let reply: Value =
-            serde_json::from_str(&reply).context("decode cmux workspace-group create")?;
-        Ok(created_group_id(&reply)?.to_owned())
-    }
-
-    fn notify(&self, title: &str, body: &str, workspace: Option<&str>) -> Result<()> {
-        let mut command = Command::new(&self.executable);
-        command.args(["notify", "--title", title, "--body", body]);
-        if let Some(workspace) = workspace {
-            command.args(["--workspace", workspace]);
-        }
-        output(&mut command)?;
-        Ok(())
-    }
-}
-
 /// The session wrappers of the supervisor, the runtime's planners and the
 /// reads that judge a planner (`planners`, `planner request`): this host's
-/// background wrappers (ADR-t1404-1), and no cmux (ADR-t1433-1 decision 1).
+/// background wrappers (ADR-t1404-1), and no cmux (ADR-t2159-1 decision 1).
 /// A session ID that is not a [`BackgroundHandle`] (a workspace an older
-/// binary opened) is not open and cannot be stopped. Only `up` / `down` and
-/// the inbox's session use [`Cmux`].
+/// binary opened) is not open and cannot be stopped.
 pub struct BackgroundSessions;
 
 impl SessionWrappers for BackgroundSessions {
@@ -3081,116 +2977,6 @@ impl SessionWrappers for BackgroundSessions {
     fn call_timeout(&self) -> Duration {
         OUTPUT_TIMEOUT
     }
-}
-
-impl Cmux {
-    /// Every window's `cmux --json --id-format uuids workspace list`, merged
-    /// into one listing. Without `--window` cmux lists only the caller's
-    /// window, so a workspace a person moved to another window would look
-    /// closed and `up` would open a second one.
-    fn workspace_listing(&self) -> Result<Value> {
-        let windows = output(Command::new(&self.executable).args([
-            "--json",
-            "--id-format",
-            "uuids",
-            "list-windows",
-        ]))?;
-        let windows: Value = serde_json::from_str(&windows).context("decode cmux list-windows")?;
-        merged_workspace_listing(&windows, |window| {
-            let listing = output(Command::new(&self.executable).args([
-                "--json",
-                "--id-format",
-                "uuids",
-                "workspace",
-                "list",
-                "--window",
-                window,
-            ]))?;
-            serde_json::from_str(&listing).context("decode cmux workspace list")
-        })
-    }
-
-    /// `cmux workspace-action --action <action> [flags…] --workspace <id>`.
-    fn workspace_action(&self, workspace_id: &str, action: &[&str]) -> Result<()> {
-        output(
-            Command::new(&self.executable)
-                .args(["workspace-action", "--action"])
-                .args(action)
-                .args(["--workspace", workspace_id]),
-        )?;
-        Ok(())
-    }
-
-    /// `cmux workspace create`; the raw reply carries the `OK workspace:N` handle.
-    fn create_workspace(
-        &self,
-        name: &str,
-        cwd: &Path,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String> {
-        let mut create = Command::new(&self.executable);
-        create.args(workspace_create_arguments(name, command, tags));
-        output(create.arg("--cwd").arg(cwd))
-    }
-
-    /// Resolve the handle of a workspace this process just created to its
-    /// UUID. A workspace cmux created but did not identify would be left
-    /// open with nothing to find it by (its caller records no UUID), so it
-    /// is closed by its handle; the error says whether that close failed
-    /// too.
-    fn identify_created(&self, handle: &str) -> Result<String> {
-        self.identify(handle).map_err(|error| match self.close(handle) {
-            Ok(()) => error.context(format!(
-                "cmux created workspace {handle} but did not identify it; it was closed"
-            )),
-            Err(close) => error.context(format!(
-                "cmux created workspace {handle} but did not identify it, and closing it failed: {close:#}"
-            )),
-        })
-    }
-
-    /// Resolve a numeric handle to the workspace's stable UUID.
-    fn identify(&self, handle: &str) -> Result<String> {
-        let identity = output(
-            Command::new(&self.executable)
-                .args(["--json", "--id-format", "uuids", "identify", "--workspace"])
-                .arg(handle),
-        )?;
-        let identity: Value =
-            serde_json::from_str(&identity).context("decode cmux workspace identity")?;
-        let id = identity
-            .pointer("/caller/workspace_id")
-            .and_then(Value::as_str)
-            .context("cmux did not return the requested workspace UUID")?;
-        uuid::Uuid::parse_str(id).context("invalid cmux workspace UUID")?;
-        Ok(id.into())
-    }
-}
-
-/// `workspace create` and its flags but `--cwd` (a path, added by the
-/// caller): the title, the description, one `--env KEY=VALUE` per variable
-/// and the group from `tags`, and the command, opened without focus.
-pub fn workspace_create_arguments(name: &str, command: &str, tags: &WorkspaceTags) -> Vec<String> {
-    let mut arguments: Vec<String> = ["workspace", "create", "--name", name]
-        .map(str::to_owned)
-        .into();
-    if let Some(description) = &tags.description {
-        arguments.extend(["--description".into(), description.clone()]);
-    }
-    for (key, value) in &tags.env {
-        arguments.extend(["--env".into(), format!("{key}={value}")]);
-    }
-    if let Some(group) = &tags.group {
-        arguments.extend(["--group".into(), group.clone()]);
-    }
-    arguments.extend([
-        "--command".into(),
-        command.into(),
-        "--focus".into(),
-        "false".into(),
-    ]);
-    arguments
 }
 
 /// One `workspace list`-shaped listing of the workspaces of every window in
@@ -3221,48 +3007,6 @@ pub fn merged_workspace_listing(
         );
     }
     Ok(serde_json::json!({ "workspaces": workspaces }))
-}
-
-/// Whether a `cmux --json --id-format uuids workspace list` reply lists the
-/// workspace `id` (UUIDs compared without regard to case).
-pub fn workspace_listed(listing: &Value, id: &str) -> bool {
-    listing
-        .get("workspaces")
-        .and_then(Value::as_array)
-        .is_some_and(|workspaces| {
-            workspaces.iter().any(|workspace| {
-                workspace
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|listed| listed.eq_ignore_ascii_case(id))
-            })
-        })
-}
-
-/// The group's UUID in a `cmux --json --id-format uuids workspace-group
-/// create` reply, which is the same whether the call created the group or
-/// found it by its external ID.
-pub fn created_group_id(reply: &Value) -> Result<&str> {
-    reply
-        .pointer("/group/id")
-        .and_then(Value::as_str)
-        .context("cmux did not return the workspace group's ID")
-}
-
-pub fn workspace_handle(raw: &str) -> Result<&str> {
-    let handle = raw
-        .lines()
-        .find_map(|line| line.strip_prefix("OK "))
-        .with_context(|| format!("unrecognized cmux workspace response: {}", raw.trim()))?
-        .trim();
-    let suffix = handle
-        .strip_prefix("workspace:")
-        .context("unexpected cmux workspace handle")?;
-    ensure!(
-        !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()),
-        "invalid cmux workspace handle"
-    );
-    Ok(handle)
 }
 
 /// The entries of `claude plugin list --json` (an array of `{"id":
@@ -4037,7 +3781,7 @@ pub const PRINT_MODE_DENIED_TOOLS: [&str; 2] = ["ScheduleWakeup", "CronCreate"];
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Provider, RunId, RunStatus, SessionRole};
+    use crate::domain::{Provider, RunId, RunStatus};
 
     #[test]
     fn worktree_remove_and_repair_commands_fix_the_message_locale() {
@@ -5915,133 +5659,6 @@ mod tests {
         }
     }
 
-    /// One cmux serves several repositories, so every workspace name
-    /// carries the repository (the basename of its root) (ADR-0028).
-    #[test]
-    fn workspace_names_carry_the_repository() {
-        // A root with no basename falls back to the path itself.
-        assert_eq!(inbox_workspace_name(Path::new("/")), "[/]inbox");
-        assert_eq!(
-            inbox_workspace_name(Path::new("/home/u/ghq/dagq")),
-            "[dagq]inbox"
-        );
-        assert_eq!(
-            inbox_workspace_name(Path::new("/tmp/my repo/")),
-            "[my repo]inbox"
-        );
-    }
-
-    /// Every workspace of a queue says what it is in one line; the run and
-    /// the task appear only where the workspace has them (ADR-0026).
-    #[test]
-    fn workspace_descriptions_are_one_machine_readable_line() {
-        assert_eq!(
-            workspace_description(
-                SessionRole::Worker,
-                "77067154921b9014",
-                Some(&RunId::new("0d8e3f1a-7c1b-4e35-9a11-3f6d2c9b8e47").unwrap()),
-                Some(TaskId::new(15))
-            ),
-            "dagq role=worker queue=77067154921b9014 run=0d8e3f1a-7c1b-4e35-9a11-3f6d2c9b8e47 task=15"
-        );
-        assert_eq!(
-            workspace_description(SessionRole::Inbox, "abc", None, None),
-            "dagq role=inbox queue=abc"
-        );
-        assert_eq!(
-            workspace_description(SessionRole::Supervisor, "abc", None, None),
-            "dagq role=supervisor queue=abc"
-        );
-        assert_eq!(
-            workspace_group_name(Path::new("/home/u/ghq/dagq")),
-            "[dagq]"
-        );
-        assert_eq!(workspace_group_name(Path::new("/")), "[/]");
-    }
-
-    /// A workspace is found by its UUID, never its title, and cmux may
-    /// print the UUID in either case.
-    #[test]
-    fn workspace_listed_matches_the_id_only() {
-        let listing = serde_json::json!({
-            "window_id": "W",
-            "workspaces": [
-                {"id": "4AC63CB7-3BE1-40A1-BCC4-CA0461685F01", "title": "[dagq]inbox"},
-                {"title": "no id"}
-            ]
-        });
-        assert!(workspace_listed(
-            &listing,
-            "4AC63CB7-3BE1-40A1-BCC4-CA0461685F01"
-        ));
-        assert!(workspace_listed(
-            &listing,
-            "4ac63cb7-3be1-40a1-bcc4-ca0461685f01"
-        ));
-        assert!(!workspace_listed(&listing, "[dagq]inbox"));
-        assert!(!workspace_listed(&serde_json::json!({}), "x"));
-    }
-
-    #[test]
-    fn created_group_id_reads_the_group_uuid() {
-        let reply = serde_json::json!({
-            "created": false,
-            "group": {"id": "F5FCC58F-D44B-4CA0-871F-D4C6AED704D6", "external_id": "abc"}
-        });
-        assert_eq!(
-            created_group_id(&reply).unwrap(),
-            "F5FCC58F-D44B-4CA0-871F-D4C6AED704D6"
-        );
-        assert!(created_group_id(&serde_json::json!({"created": true})).is_err());
-    }
-
-    /// `ensure_group` asks for the group by its external ID and `exists`
-    /// reads the UUID listing of every window, both through the real argv.
-    #[cfg(unix)]
-    #[test]
-    fn ensure_group_and_exists_call_cmux() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("args.log");
-        let executable = dir.path().join("cmux");
-        fs::write(
-            &executable,
-            format!(
-                r#"#!/bin/sh
-printf '%s ' "$@" >> '{log}'; printf '\n' >> '{log}'
-case "$4" in
-  workspace-group) echo '{{"created":true,"group":{{"id":"G-1"}}}}' ;;
-  list-windows) echo '[{{"id":"A"}},{{"id":"B"}}]' ;;
-  workspace)
-    case "$7" in
-      A) echo '{{"window_id":"A","workspaces":[{{"id":"W-0"}}]}}' ;;
-      B) echo '{{"window_id":"B","workspaces":[{{"id":"W-1"}}]}}' ;;
-      *) echo 'Error: unavailable: TabManager not available' >&2; exit 1 ;;
-    esac ;;
-esac
-"#,
-                log = log.display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let cmux = Cmux { executable };
-        assert_eq!(cmux.ensure_group("abc", "[dagq]").unwrap(), "G-1");
-        assert!(cmux.exists("W-0").unwrap());
-        assert!(cmux.exists("w-1").unwrap(), "a workspace of another window");
-        assert!(!cmux.exists("W-2").unwrap());
-        let calls = fs::read_to_string(&log).unwrap();
-        assert!(
-            calls.contains(
-                "--json --id-format uuids workspace-group create --name [dagq] --external-id abc"
-            ),
-            "{calls}"
-        );
-        assert!(calls.contains("--json --id-format uuids list-windows"));
-        assert!(calls.contains("--json --id-format uuids workspace list --window A"));
-        assert!(calls.contains("--json --id-format uuids workspace list --window B"));
-    }
-
     /// The windows' listings are concatenated; a window that cannot be
     /// listed, or a reply of the wrong shape, fails the whole listing.
     #[test]
@@ -6055,7 +5672,6 @@ esac
             merged,
             serde_json::json!({"workspaces": [{"id": "A-1"}, {"id": "B-1"}]})
         );
-        assert!(workspace_listed(&merged, "b-1"));
         assert_eq!(
             merged_workspace_listing(&serde_json::json!([]), |_| unreachable!()).unwrap(),
             serde_json::json!({"workspaces": []})
@@ -6069,126 +5685,6 @@ esac
         assert!(merged_workspace_listing(&serde_json::json!({}), |_| unreachable!()).is_err());
         assert!(merged_workspace_listing(&serde_json::json!([{}]), |_| unreachable!()).is_err());
         assert!(merged_workspace_listing(&windows, |_| Ok(serde_json::json!({}))).is_err());
-    }
-
-    /// `create_named` passes the name and the tags (description, env,
-    /// group) to `cmux workspace create` and returns the UUID `identify`
-    /// resolves. A run opens no workspace (ADR-t1433-3); the inbox does.
-    #[cfg(unix)]
-    #[test]
-    fn create_named_names_the_workspace_and_tags_it() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("args.log");
-        let executable = dir.path().join("cmux");
-        fs::write(
-            &executable,
-            format!(
-                r#"#!/bin/sh
-for arg in "$@"; do printf '%s\n' "$arg" >> '{log}'; done
-printf -- '--\n' >> '{log}'
-case "$1" in
-  workspace) echo "OK workspace:7" ;;
-  --json) echo '{{"caller":{{"workspace_id":"4AC63CB7-3BE1-40A1-BCC4-CA0461685F01"}}}}' ;;
-esac
-"#,
-                log = log.display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let cmux = Cmux { executable };
-        let tags = WorkspaceTags {
-            env: vec![
-                ("DAGQ_ROLE".into(), "inbox".into()),
-                ("DAGQ_QUEUE".into(), "/q/queue.db".into()),
-            ],
-            description: Some("dagq role=inbox queue=abc".into()),
-            group: Some("G-1".into()),
-        };
-        let id = cmux
-            .create_named("[dagq]inbox", dir.path(), "true", &tags)
-            .unwrap();
-        assert_eq!(id, "4AC63CB7-3BE1-40A1-BCC4-CA0461685F01");
-        let calls = fs::read_to_string(&log).unwrap();
-        let create: Vec<&str> = calls.split("--\n").next().unwrap().lines().collect();
-        assert_eq!(
-            create,
-            [
-                "workspace",
-                "create",
-                "--name",
-                "[dagq]inbox",
-                "--description",
-                "dagq role=inbox queue=abc",
-                "--env",
-                "DAGQ_ROLE=inbox",
-                "--env",
-                "DAGQ_QUEUE=/q/queue.db",
-                "--group",
-                "G-1",
-                "--command",
-                "true",
-                "--focus",
-                "false",
-                "--cwd",
-                &dir.path().display().to_string(),
-            ]
-        );
-        assert!(calls.contains("identify\n--workspace\nworkspace:7\n"));
-    }
-
-    /// Task 344: a workspace cmux created but did not identify is closed
-    /// by its handle, and the error says so; when the close fails too, the
-    /// error carries both.
-    #[cfg(unix)]
-    #[test]
-    fn a_created_workspace_cmux_does_not_identify_is_closed() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("args.log");
-        let script = |close: &str| {
-            format!(
-                r#"#!/bin/sh
-printf '%s\n' "$*" >> '{log}'
-case "$1 $2" in
-  "workspace create") echo "OK workspace:9" ;;
-  "workspace close") {close} ;;
-  "--json --id-format") echo 'identify broke' >&2; exit 1 ;;
-esac
-"#,
-                log = log.display()
-            )
-        };
-        let executable = dir.path().join("cmux");
-        fs::write(&executable, script(r#"echo "OK workspace:9""#)).unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let cmux = Cmux {
-            executable: executable.clone(),
-        };
-        let tags = WorkspaceTags::default();
-        let error = cmux
-            .create_named("[dagq]planner#1", dir.path(), "true", &tags)
-            .unwrap_err();
-        let text = format!("{error:#}");
-        assert!(
-            text.contains(
-                "cmux created workspace workspace:9 but did not identify it; it was closed"
-            ),
-            "{text}"
-        );
-        assert!(text.contains("identify broke"), "{text}");
-        let calls = fs::read_to_string(&log).unwrap();
-        assert!(calls.contains("workspace close workspace:9\n"), "{calls}");
-
-        fs::write(&executable, script("echo 'no such workspace' >&2; exit 1")).unwrap();
-        let error = cmux
-            .create_named("[dagq]planner#2", dir.path(), "true", &tags)
-            .unwrap_err();
-        let text = format!("{error:#}");
-        assert!(text.contains("and closing it failed"), "{text}");
-        assert!(text.contains("no such workspace"), "{text}");
-        assert!(text.contains("identify broke"), "{text}");
     }
 
     #[test]

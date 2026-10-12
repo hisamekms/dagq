@@ -7,6 +7,7 @@ use serde_json::Value;
 #[test]
 fn ask_answer_asks_and_close_through_the_cli() {
     let (_dir, db) = queue();
+    push_stub(&db);
     ok(&db, &["add", "first"]);
     let cursor = ok(&db, &["status"])["cursor"].as_i64().unwrap();
     let asked = ok(
@@ -28,9 +29,9 @@ fn ask_answer_asks_and_close_through_the_cli() {
         ],
     );
     assert_eq!(asked["created"], true);
-    // `ask` notifies nobody: the inbox's watch does (ADR-t1433-1 decision
-    // 2). No inbox is recorded, so it names no workspace, and a `--db`
-    // queue is named after the working directory.
+    // `ask` notifies nobody: the inbox's watch does, through `[push]`
+    // (ADR-t2159-1 decision 4), with the count of the new asks and nothing
+    // of them. A `--db` queue is named after the working directory.
     assert_eq!(asked.get("notified"), None);
     assert_eq!(notifications(&db), "");
     let cursor_text = cursor.to_string();
@@ -48,10 +49,15 @@ fn ask_answer_asks_and_close_through_the_cli() {
     );
     let repo = std::env::current_dir().unwrap();
     let repo = repo.file_name().unwrap().to_string_lossy();
+    let sent = pushed(&db);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["kind"], "ask_opened");
+    assert_eq!(sent[0]["new_asks"], 1);
     assert_eq!(
-        notifications(&db),
-        format!("notify\n--title\n[{repo}] ask #1 decide\n--body\nWhich ADR number?\ntask 1\n")
+        sent[0]["title"],
+        format!("{repo}: 1 new ask(s) for the inbox")
     );
+    assert!(!notifications(&db).contains("Which ADR"), "{sent:?}");
     assert_eq!(asked["kind"], "decide");
     assert_eq!(asked["reason_category"], "recovery_failed");
     assert_eq!(asked["task_id"], 1);
@@ -75,7 +81,7 @@ fn ask_answer_asks_and_close_through_the_cli() {
         ],
     );
     assert_eq!(again["created"], false);
-    assert_eq!(notifications(&db).matches("notify\n").count(), 1);
+    assert_eq!(pushed(&db).len(), 1);
     assert_eq!(again["id"], id);
     assert_eq!(again["question"], "Which ADR number?");
     // Missing target, unknown kind, unknown task and a blank question fail.
@@ -183,7 +189,7 @@ fn ask_answer_asks_and_close_through_the_cli() {
         .status
         .success()
     );
-    assert_eq!(notifications(&db).matches("notify\n").count(), 1);
+    assert_eq!(pushed(&db).len(), 1);
 
     let status = ok(&db, &["status", "--role", "inbox"]);
     assert_eq!(status["asks"][0]["id"], id);
@@ -349,8 +355,8 @@ fn ask_answer_asks_and_close_through_the_cli() {
         serde_json::json!([])
     );
     // Neither asks, answers nor closes notify anyone: the two notifications
-    // are the inbox watches' above, one for each ask they returned.
-    assert_eq!(notifications(&db).matches("notify\n").count(), 2);
+    // are the inbox watches' above, one for each watch that returned an ask.
+    assert_eq!(pushed(&db).len(), 2);
     // `--cmux` is accepted and ignored.
     let unsent = ok(
         &db,
@@ -502,6 +508,7 @@ fn notes_are_observations_read_by_notes_show_and_goal_show() {
 #[test]
 fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
     let (_dir, db) = queue();
+    push_stub(&db);
     ok(&db, &["goal", "add", "open goal"]);
     ok(&db, &["add", "existing", "--goal", "1"]);
     let denied = |args: &[&str]| {
@@ -648,25 +655,16 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
     );
     assert_eq!(idle["task_id"], Value::Null);
     assert_eq!(idle["created"], true);
-    // The inbox's watch notifies the blocked ask on no task with its
-    // question alone.
+    // The inbox's watch notifies both asks, the blocked one on no task
+    // too, in one message without their questions.
     ok(
         &db,
         &["watch", "--role", "inbox", "--after", "0", "--timeout", "1"],
     );
-    assert!(
-        notifications(&db).ends_with(&format!(
-            "--title\n[{}] ask #{} blocked\n--body\nslots idle\n",
-            std::env::current_dir()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_string_lossy(),
-            idle["id"]
-        )),
-        "{}",
-        notifications(&db)
-    );
+    let sent = pushed(&db);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["new_asks"], 2);
+    assert!(!notifications(&db).contains("slots idle"), "{sent:?}");
     let again = ok_as(
         "observer",
         &db,
@@ -688,7 +686,7 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
         (again["id"].clone(), again["created"].clone()),
         (idle["id"].clone(), Value::Bool(false))
     );
-    assert_eq!(notifications(&db).matches("notify\n").count(), 2);
+    assert_eq!(pushed(&db).len(), 1);
     let inbox = ok(&db, &["status", "--role", "inbox"]);
     assert!(
         inbox["attention"]
@@ -1179,6 +1177,5 @@ fn plan_is_refused_with_the_way_to_ask_the_inbox_and_opens_nothing() {
         ok(&db, &["planners", "--all"]),
         serde_json::json!({"planners": []})
     );
-    assert_eq!(notifications(&db), "");
     assert_eq!(ok(&db, &["events", "--all"]), before);
 }

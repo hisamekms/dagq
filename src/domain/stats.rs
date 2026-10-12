@@ -392,9 +392,15 @@ pub struct Alert {
     pub ask_id: Option<String>,
 }
 
-/// The `backend_call_failed` events in the window: how often cmux failed or
-/// timed out, for which calls, and under what load. A window where nothing
-/// failed has a zero count and null maxima.
+/// The `backend_call_failed` events in the window: how often the session
+/// wrappers' calls (cmux's in past records) failed or timed out, for which
+/// calls, and under what load. A window where nothing failed has a zero
+/// count and null maxima. Any `op` is counted as it is, so the ops an
+/// earlier binary recorded of cmux (the inbox's `create_named`, the
+/// group's `ensure_group`, `notify`, the run's `create` /
+/// `create_resume`, and the screen and keystrokes' `capture`,
+/// `send_text`, `send_enter`, `send_key` and `send_exit`) read as the
+/// session wrappers' `launch_background`, `close` and `exists` do.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct BackendFailures {
     pub count: i64,

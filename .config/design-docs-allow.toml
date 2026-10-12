@@ -235,11 +235,6 @@ line = 1512
 tasks = 3
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/naming.md"
-line = 1424
-tasks = 6
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/needs-session.md"
 line = 3353
 tasks = 15

@@ -246,8 +246,8 @@ inboxと、廃止の前に人が開いたplannerは対象外。
   起動の直後に起動時刻を読めなければ起動の失敗で、`backend_call_failed`に残る（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)決定9の読み替え）。
 - **handleと記録**: 識別は`BackgroundHandle`（pidと起動時刻）で、runはこれをworkspaceのIDの代わりに記録し、続けて`wrapper_launched`を記録する。
   記録できなければwrapperを止めてエラーにする。
-  workspaceのIDを読む処理はhandleをそのまま使い、cmuxのadapterがhandleの呼び出しをprocessの操作に振り分ける（画面と入力は拒む）。
-  sessionが開いているかは`run_session_open`がprocessで判じ、cmuxに聞かない。
+  workspaceのIDを読む処理はhandleをそのまま使い、handleの起動・停止・生死は`SessionWrappers`（実装は`BackgroundSessions`）がprocessの操作として行う。
+  sessionが開いているかは`run_session_open`がprocessで判じる。
   ADR-t1433-3より前にworkspaceで開いたsessionのIDは開いていないとみなし、閉じない（人が自分のterminalで閉じる）。
 - **wrapperの入口と登録**: `--background`の入口は端末を確かめず、自分で新しいsessionとprocess groupを持つ（`compose::wrapper_entry`）。
   wrapperは自分の起動が記録されるのを待ってから登録する（`launched_as`）。

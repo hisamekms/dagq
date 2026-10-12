@@ -1945,14 +1945,11 @@ migrate and start it again with the new binary; or `skip` to leave it. The build
 pub enum Restart {
     /// Its LaunchAgent starts the binary in place again.
     Launchd,
-    /// One an earlier binary registered in the retired in-cmux mode: close
-    /// its workspace, when one is recorded, and run the binary in place
-    /// with `arguments`, a plain `up` that starts it under launchd
-    /// (ADR-t1433-4).
-    Up {
-        close: Option<String>,
-        arguments: Vec<String>,
-    },
+    /// One an earlier binary registered in the retired in-cmux mode: run
+    /// the binary in place with `arguments`, a plain `up` that starts it
+    /// under launchd (ADR-t1433-4). Its workspace is left to a person
+    /// (ADR-t2159-1 decision 6).
+    Up { arguments: Vec<String> },
 }
 
 /// The restart of `registration` on the queue at `db`, with the job's own
@@ -1975,10 +1972,7 @@ pub fn restart_of(
             }
             up.extend(registration.flag_arguments());
             up.extend(arguments.iter().cloned());
-            Ok(Restart::Up {
-                close: registration.workspace_id.clone(),
-                arguments: up,
-            })
+            Ok(Restart::Up { arguments: up })
         }
         None => bail!(
             "it was started by hand rather than by `up`, so it is not started again; start it the same way"
@@ -1988,15 +1982,13 @@ pub fn restart_of(
 
 /// Starts a supervisor an update's job found gone with the binary in
 /// place, as [`restart_of`] decides: launchd's is left to its agent;
-/// an in-cmux one has its recorded workspace closed by `close` (a failure
-/// to close is ignored, the `up` goes on) and is started by `run_up`,
-/// which runs the binary in place with the arguments of its `up` and
-/// returns that `up`'s report. What was done, for `bring_back`'s report.
+/// an in-cmux one is started by `run_up`, which runs the binary in place
+/// with the arguments of its `up` and returns that `up`'s report. What was
+/// done, for `bring_back`'s report.
 pub fn restart(
     registration: &SupervisorRegistration,
     db: &str,
     arguments: &[String],
-    close: &dyn Fn(&str) -> Result<()>,
     run_up: &dyn Fn(&[String]) -> Result<Value>,
 ) -> Result<Value> {
     match restart_of(registration, db, arguments)? {
@@ -2004,13 +1996,7 @@ pub fn restart(
             "by": "launchd",
             "note": "its LaunchAgent starts the binary in place again",
         })),
-        Restart::Up {
-            close: workspace,
-            arguments,
-        } => {
-            if let Some(id) = workspace {
-                let _ = close(&id);
-            }
+        Restart::Up { arguments } => {
             let started = run_up(&arguments)?;
             Ok(json!({"by": "up", "up": started["supervisor"]}))
         }
@@ -2388,8 +2374,8 @@ mod tests {
     }
 
     /// The update jobs' bring_back starts a gone supervisor an earlier
-    /// binary registered in the retired in-cmux mode by closing its
-    /// workspace and running the replaced binary's plain `up`, which starts
+    /// binary registered in the retired in-cmux mode by running the
+    /// replaced binary's plain `up`, which starts
     /// it under launchd (ADR-t1433-4): never `up --in-cmux`, with
     /// `--auto-update` only when it had it, and with the flags it took from
     /// its registration and the job's own. A launchd one is left to its
@@ -2417,7 +2403,6 @@ mod tests {
                 )
                 .unwrap(),
                 Restart::Up {
-                    close: Some("WS-SUPERVISOR".into()),
                     arguments: up(flag),
                 }
             );
@@ -2438,18 +2423,13 @@ mod tests {
         );
     }
 
-    /// A gone in-cmux supervisor's restart closes its workspace, goes on
-    /// when that fails, and reports the `up`'s supervisor; a launchd one
-    /// is left to its agent without closing or running anything.
+    /// A gone in-cmux supervisor's restart runs the `up` and reports its
+    /// supervisor, closing no workspace (ADR-t2159-1 decision 6); a
+    /// launchd one is left to its agent without running anything.
     #[test]
-    fn a_restart_closes_the_workspace_ignoring_its_failure_and_reports_the_up() {
+    fn a_restart_runs_the_up_and_reports_it() {
         use std::cell::RefCell;
-        let closed = RefCell::new(Vec::new());
         let ran = RefCell::new(Vec::new());
-        let close = |id: &str| -> Result<()> {
-            closed.borrow_mut().push(id.to_owned());
-            bail!("cmux refused")
-        };
         let run_up = |arguments: &[String]| -> Result<Value> {
             ran.borrow_mut().push(arguments.to_vec());
             Ok(json!({"supervisor": {"outcome": "started"}}))
@@ -2458,22 +2438,19 @@ mod tests {
             &gone_registration(Some(SupervisorMode::InCmux), false),
             "/q/queue.db",
             &[],
-            &close,
             &run_up,
         )
         .unwrap();
         assert_eq!(report, json!({"by": "up", "up": {"outcome": "started"}}));
-        assert_eq!(*closed.borrow(), ["WS-SUPERVISOR"]);
         assert_eq!(ran.borrow().len(), 1);
         let report = restart(
             &gone_registration(Some(SupervisorMode::Launchd), true),
             "/q/queue.db",
             &[],
-            &close,
             &run_up,
         )
         .unwrap();
         assert_eq!(report["by"], "launchd");
-        assert_eq!((closed.borrow().len(), ran.borrow().len()), (1, 1));
+        assert_eq!(ran.borrow().len(), 1);
     }
 }

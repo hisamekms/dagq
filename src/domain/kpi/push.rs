@@ -93,6 +93,9 @@ pub enum PushKind {
     /// No `watch --role inbox` ran while asks waited for the inbox
     /// (ADR-t1433-5 decision 1 (3)): sent once per absence.
     InboxWatch,
+    /// New asks the inbox's `watch --role inbox` returned (ADR-t2159-1
+    /// decision 4): sent once per watch that returned them.
+    AskOpened,
 }
 
 impl PushKind {
@@ -102,6 +105,7 @@ impl PushKind {
             Self::Weekly => "weekly",
             Self::Breach => "breach",
             Self::InboxWatch => "inbox_watch",
+            Self::AskOpened => "ask_opened",
         }
     }
 }
@@ -305,6 +309,29 @@ pub fn inbox_watch_message(
             ),
             "open_asks": open,
             "waiting_asks": waiting,
+            "report_html": Value::Null,
+            "report_json": Value::Null,
+        }),
+        report_html: None,
+        report_json: None,
+    }
+}
+
+/// The message that `count` new asks opened for the inbox, the last by the
+/// event `through`, as one `watch --role inbox` returned them (ADR-t2159-1
+/// decision 4). Only the title and the count go out: no ask's content.
+pub fn ask_opened_message(name: &str, queue: &str, through: i64, count: usize) -> PushMessage {
+    let period = format!("through event {through}");
+    PushMessage {
+        kind: PushKind::AskOpened,
+        period: period.clone(),
+        body: json!({
+            "kind": PushKind::AskOpened,
+            "queue": queue,
+            "period": period,
+            "title": format!("{name}: {count} new ask(s) for the inbox"),
+            "text": format!("{count} new ask(s) wait for an answer in the inbox."),
+            "new_asks": count,
             "report_html": Value::Null,
             "report_json": Value::Null,
         }),

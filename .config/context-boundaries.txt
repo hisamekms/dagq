@@ -243,7 +243,6 @@ port | InboxWatchLog | internal | - |
 port | HostOpsQueue | internal | - |
 port | HostMetricsFiles | internal | - | the CSV copy of the host's load
 port | SessionWrappers | public | planning,execution | not classified by architecture.md; public to the contexts that use it today
-port | WorkspaceBackend | partial | - |
 port | Clock | public | all |
 port | IdGenerator | public | all |
 port | Spawner | public | all |
@@ -262,7 +261,7 @@ outer-port | src/application/commands/replans.rs | ReplanStore | planning | publ
 outer-port | src/application/commands/planning.rs | PlanningStore | planning | internal | - |
 outer-port | src/application/commands/dialogue.rs | DialogueStore | shared | public | all | asks and notes
 outer-port | src/application/commands/mod.rs | DenialLog | shared | public | all | what a command refused
-outer-port | src/application/watch.rs | AskNotifier | observation | internal | - | implemented by InboxNotifier
+outer-port | src/application/watch.rs | AskNotifier | observation | internal | - | implemented by PushNotifier
 outer-port | src/application/watch.rs | WatchRecord | observation | internal | - |
 outer-port | src/application/lifecycle.rs | LifecycleQueue | host | internal | - |
 outer-port | src/application/actor_executor.rs | ActorExecutor | host | public | all | the start of an actor
@@ -330,7 +329,7 @@ method | RunCoordination | run_leases | all |
 method | RunCoordination | run_lease | all |
 method | RunCoordination | processes | all |
 method | RunCoordination | backend_slots | all |
-method | SessionRegistry | session_workspace | observation | InboxNotifier reads the inbox's workspace
+method | SessionRegistry | silent_planners | observation | attention reads the planners that went silent
 method | QueueRecords | findings | all | the reads; record_* are internal
 method | QueueRecords | reports_written | all |
 method | QueueRecords | kpi_breaches_open | all |
@@ -359,7 +358,6 @@ method | SupervisorRegistry | rebind_repository | execution |
 method | SupervisorRegistry | bind_repository | execution |
 method | SupervisorRegistry | assert_repository | execution |
 method | SupervisorRegistry | set_supervisor_mode | execution |
-method | WorkspaceBackend | notify | observation | InboxNotifier sends through it
 
 # Values and functions lent to other contexts.
 item | src/application/supervise/contexts.rs | PlanningState | planning | execution | the stop and the end of a carried-over review

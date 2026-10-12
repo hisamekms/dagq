@@ -114,9 +114,9 @@ impl ReasonCode {
         }
     }
 
-    /// A failed cmux call, by its error text: the adapter's deadline
-    /// (`did not finish within`) and cmux's own `Command timed out` are
-    /// timeouts.
+    /// A failed backend call (a session wrapper's, or cmux's in a past
+    /// record), by its error text: the adapter's deadline (`did not finish
+    /// within`) and a `Command timed out` are timeouts.
     pub fn of_backend_error(error: &str) -> Self {
         let error = error.to_ascii_lowercase();
         if error.contains("timed out") || error.contains("did not finish within") {

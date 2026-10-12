@@ -38,7 +38,7 @@ reviewのsubagentと検査のscriptは、この文書の規則のID（下の「�
 起動部分（src/main.rs → src/compose.rs）: adapterを作り、use caseに注入する
    │
    ▼
-infrastructure（src/infrastructure/）: portの実装（SQLite・Git・cmux・agent・process・file）
+infrastructure（src/infrastructure/）: portの実装（SQLite・Git・agent・process・file）
    │ implements
    ▼
 application（src/application/）: use caseとport（trait）。時刻・I/Oはportを通す

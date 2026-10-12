@@ -5,7 +5,7 @@
 //! - [`application`]: the use cases and the ports (traits) they reach the
 //!   outside through.
 //! - [`infrastructure`]: the adapters that implement the ports (SQLite,
-//!   Git, cmux, Claude Code, launchd, processes, files, clock and IDs).
+//!   Git, Claude Code, launchd, processes, files, clock and IDs).
 //! - [`compose`]: the composition root, which builds the adapters and
 //!   injects them into the use cases; `main` resolves the queue location,
 //!   parses the CLI and prints what it returns.

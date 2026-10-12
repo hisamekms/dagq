@@ -194,7 +194,7 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 | 1 情報源は`status` / `watch` / `doctor`、`watch --after <cursor>` | 有効 | — | `--role`はADR-0022 決定1が足した | [events-watch](../design/supervisor-lifecycle/events-watch.md)・[doctor](../design/supervisor-lifecycle/doctor.md) |
 | 2 run_eventsのkind名は公開契約、attentionの判定はdomain、attentionの一覧 | 有効（一部上書き） | ADR-0040 決定2、ADR-0041 決定3・17 | `awaiting_integration`はreview job、`failed`はtriage jobに回り、attentionにならない。一覧はADR-0022・0025・0041が足した | [domain-model](../design/domain-model.md)・[status](../design/supervisor-lifecycle/status.md) |
 | 3 runtimeはmaintainerのterminalに打ち込まない | 上書き | ADR-0041 決定1・12・13 | maintainerは無い。plannerにはrevise・answerを送る | [plan-planners](../design/supervisor-lifecycle/plan-planners.md)・[session-send](../design/supervisor-lifecycle/session-send.md) |
-| 4 attentionのたびにmaintainer workspaceへ`cmux notify` | 上書き | ADR-0022 決定5 | `ask_opened`のときだけinbox宛て | [cmux-notify](../design/supervisor-lifecycle/cmux-notify.md) |
+| 4 attentionのたびにmaintainer workspaceへ`cmux notify` | 上書き | ADR-0022 決定5 | `ask_opened`のときだけinbox宛て | [ask-push](../design/supervisor-lifecycle/ask-push.md) |
 | 5 `integrate`は自動で呼ばれない、着地の承認はユーザーに残す | 上書き | ADR-0022 決定3、ADR-0040 決定2 | review jobのpassでsupervisorが着地させる | [review](../design/supervisor-lifecycle/review.md)・[integrate](../design/supervisor-lifecycle/integrate.md) |
 | 6 既定は圧縮、`--full`でopt-in | 有効 | — | | [status](../design/supervisor-lifecycle/status.md)・[review-command](../design/supervisor-lifecycle/review-command.md) |
 | 7 `review ID`が`review.md`を書く | 有効 | — | review jobの入力（ADR-0040 決定2） | [review-command](../design/supervisor-lifecycle/review-command.md) |
@@ -263,7 +263,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 | 2 workerは`worker_question`で聞いて止まり、answerはruntimeが送る | 有効 | — | | [worker-question-answer](../design/supervisor-lifecycle/worker-question-answer.md) |
 | 3 着地は疑義のあるときだけ人に聞く。maintainerが`integrate`を呼ぶ | 上書き | ADR-0040 決定2 | 疑義の観点は有効。判断はreview job、concernの`approve_landing`のanswerはsupervisorが適用する | [review](../design/supervisor-lifecycle/review.md) |
 | 4 `up`がinboxとplannerを開く、各役割の定義 | 上書き | ADR-0041 決定1・6 | `up`はinboxだけ（とsupervisor）。inboxの定義は有効 | [roles](../design/supervisor-lifecycle/roles.md)・[up-down](../design/supervisor-lifecycle/up-down.md)・[plan-planners](../design/supervisor-lifecycle/plan-planners.md) |
-| 5 `cmux notify`は`ask_opened`のときだけinbox宛て | 有効 | — | ADR-0043 決定3が参照する | [cmux-notify](../design/supervisor-lifecycle/cmux-notify.md) |
+| 5 `cmux notify`は`ask_opened`のときだけinbox宛て | 有効 | — | ADR-0043 決定3が参照する | [ask-push](../design/supervisor-lifecycle/ask-push.md) |
 
 ### ADR-0023・ADR-0024
 

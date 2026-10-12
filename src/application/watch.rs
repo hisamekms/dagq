@@ -10,18 +10,19 @@ pub use crate::application::health::compact_event;
 use crate::{
     application::health::{for_role, pulses, supervisors},
     application::{
-        AskStore, Clock, EventStore, ProcessControl, RunCoordination, RunLog, SessionRegistry,
-        SupervisorRegistry, WorkspaceBackend,
+        Clock, EventStore, ProcessControl, RunCoordination, RunLog, SupervisorRegistry,
+        push::{self, PushOutcome, PushRequest, PushTarget},
     },
     domain::{
         ATTENTION_KINDS, EventFilter, EventId, RunEvent, RunId, SessionRole, UPDATE_EVENT_KINDS,
         event_attention,
         event_kind::ASK_OPENED,
+        kpi::push::{PushConfig, ask_opened_message},
         timeline::{self, Gap},
         wakes_inbox,
     },
 };
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail, ensure};
 use serde_json::{Value, json};
 use std::{
     thread,
@@ -295,10 +296,11 @@ pub struct WatchOptions {
 /// inbox has a watcher (ADR-t906-1, ADR-t1433-5 decision 1 (1)): `record`,
 /// started by the caller, whose heartbeat is renewed at every read of the
 /// queue and whose end is written when it returns. A record that cannot be
-/// written does not stop the watch. It also tells the person of each
-/// `ask_opened` it returns, once, through `notifier` (ADR-t1433-1 decision
-/// 2): the watch runs in the inbox's session, so the notification needs
-/// nothing of the supervisor's. One that fails is only warned of.
+/// written does not stop the watch. It also tells the person of the
+/// `ask_opened` it returns, once, through `notifier` (ADR-t2159-1 decision
+/// 4): the watch runs in the inbox's session, so the notification needs
+/// nothing of the supervisor's. One that fails stops nothing; the output's
+/// `ask_push` says how it went ([`notify_opened`]).
 pub fn watch(
     queue: &(impl RunLog + RunCoordination + SupervisorRegistry),
     clock: &dyn Clock,
@@ -350,86 +352,124 @@ pub fn watch(
             if let Some(record) = record.as_deref_mut() {
                 let _ = record.end(now);
             }
-            if woken || changed {
-                notify_opened(options.role, &opened, notifier);
-            }
-            return Ok(json!({
+            let pushed = if woken || changed {
+                notify_opened(options.role, &opened, notifier)
+            } else {
+                None
+            };
+            let mut value = json!({
                 "events": events,
                 "supervisors_changed": changed,
                 "supervisors": supervisors(&registrations, &queue.run_leases()?, now, control),
                 "cursor": cursor,
-            }));
+            });
+            if let Some(pushed) = pushed {
+                value["ask_push"] = pushed;
+            }
+            return Ok(value);
         }
         thread::sleep(remaining.map_or(options.interval, |r| options.interval.min(r)));
     }
 }
 
-/// How the inbox's watch tells the person of a new ask (ADR-t1433-1
-/// decision 2): a notification aimed at the inbox, never keystrokes. The
-/// implementation is the inbox's port, the cmux of the inbox's session.
+/// How the inbox's watch tells the person of new asks (ADR-t2159-1
+/// decision 4): a message out of the host, never keystrokes nor a wake of
+/// a session.
 pub trait AskNotifier {
-    /// Tell the person of the ask that `opened` (an `ask_opened`) opened.
-    fn notify(&self, opened: &RunEvent) -> Result<()>;
+    /// Tell the person that `opened`, the `ask_opened` one watch returns
+    /// (never empty), opened that many asks.
+    fn notify(&self, opened: &[RunEvent]) -> Result<()>;
 }
 
-/// Tell the person of each of `opened`, the `ask_opened` a watch returns,
-/// once and only for the inbox: a watch of another role, or none, tells
-/// nobody. A failed notification is warned of and stops nothing.
+/// Tell the person of `opened`, the `ask_opened` a watch returns, in one
+/// notification and only for the inbox: a watch of another role, one with
+/// no notifier (no `[push]`) or one that returns no new ask tells nobody,
+/// and the next watch reads past these asks. What was done, for the
+/// output's `ask_push`: `asks` and `sent`, with the `error` of one that
+/// failed, which is also warned of and stops nothing; `None` when nothing
+/// was tried.
 fn notify_opened(
     role: Option<SessionRole>,
     opened: &[RunEvent],
     notifier: Option<&dyn AskNotifier>,
-) {
-    let Some(notifier) = notifier.filter(|_| role == Some(SessionRole::Inbox)) else {
-        return;
+) -> Option<Value> {
+    let notifier = notifier.filter(|_| role == Some(SessionRole::Inbox))?;
+    if opened.is_empty() {
+        return None;
+    }
+    Some(match notifier.notify(opened) {
+        Ok(()) => json!({"asks": opened.len(), "sent": true}),
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "the person could not be told of {} new ask(s): {error:#}", opened.len());
+            json!({"asks": opened.len(), "sent": false, "error": format!("{error:#}")})
+        }
+    })
+}
+
+/// What a [`PushNotifier`] says when the host's `[push]` could not be
+/// read: the reading's own error is not shown, since its text may quote
+/// the command's arguments.
+pub const PUSH_UNREADABLE: &str = "host.toml's [push] could not be read or is not valid";
+
+/// The notifier of new asks a watch of `role` has (ADR-t2159-1 decision
+/// 4): only the inbox's, and only when `load` (the host's `[push]` as it
+/// reads now, read only for the inbox) finds one, sending through
+/// `run_push` about `target` (made only then). A `[push]` that cannot be
+/// read still makes one, whose notifications fail with
+/// [`PUSH_UNREADABLE`], so the watch goes on and its output says why.
+pub fn push_notifier(
+    role: Option<SessionRole>,
+    load: impl FnOnce() -> Result<Option<PushConfig>>,
+    target: impl FnOnce() -> PushTarget,
+    run_push: fn(&PushRequest) -> PushOutcome,
+) -> Option<PushNotifier> {
+    if role != Some(SessionRole::Inbox) {
+        return None;
+    }
+    let config = match load() {
+        Ok(None) => return None,
+        Ok(Some(config)) => Ok(config),
+        Err(_) => Err(PUSH_UNREADABLE.to_owned()),
     };
-    for event in opened {
-        if let Err(error) = notifier.notify(event) {
-            tracing::warn!(error = %format_args!("{error:#}"), "the person could not be notified of ask {}: {error:#}", event.payload["ask_id"]);
-        }
+    Some(PushNotifier {
+        config,
+        target: target(),
+        run_push,
+    })
+}
+
+/// The inbox's [`AskNotifier`] (ADR-t2159-1 decision 4): one message of
+/// kind `ask_opened` ([`ask_opened_message`]) through the host's `[push]`
+/// command, with the title and the count of the asks and nothing of their
+/// content. [`push_notifier`] makes it.
+pub struct PushNotifier {
+    /// The host's `[push]`, or why it could not be read (then every
+    /// notification fails with that).
+    pub config: std::result::Result<PushConfig, String>,
+    /// The queue's name and database the message is about.
+    pub target: PushTarget,
+    /// Runs the push command once.
+    pub run_push: fn(&PushRequest) -> PushOutcome,
+}
+
+impl AskNotifier for PushNotifier {
+    fn notify(&self, opened: &[RunEvent]) -> Result<()> {
+        let config = self
+            .config
+            .as_ref()
+            .map_err(|error| anyhow!("[push] could not be read: {error}"))?;
+        let through = opened.last().map_or(0, |event| event.id.as_i64());
+        let message =
+            ask_opened_message(&self.target.name, &self.target.queue, through, opened.len());
+        let outcome = (self.run_push)(&push::request(config, &self.target, &message));
+        ensure!(
+            outcome.success,
+            "the push command failed on the ask_opened message: {}",
+            push::failure_reason(config, &outcome)
+        );
+        Ok(())
     }
 }
-
-/// The inbox's [`AskNotifier`] (ADR-t1433-1 decision 2): one notification
-/// of the ask as the queue holds it, aimed at the inbox's workspace `up`
-/// recorded (at none when there is none), sent through `backend`, the cmux
-/// of the inbox's session. `checkout` names the repository in the title.
-pub struct InboxNotifier<'a, Q> {
-    pub queue: &'a Q,
-    pub backend: &'a dyn WorkspaceBackend,
-    pub checkout: std::path::PathBuf,
-}
-
-impl<Q: AskStore + SessionRegistry> AskNotifier for InboxNotifier<'_, Q> {
-    fn notify(&self, opened: &RunEvent) -> Result<()> {
-        let Some(id) = opened.payload["ask_id"].as_i64() else {
-            bail!("ask_opened names no ask");
-        };
-        let ask = self.queue.read_ask(crate::domain::AskId::new(id))?;
-        let (title, body) = ask_notice(&self.checkout, &ask);
-        let inbox = self.queue.session_workspace(SessionRole::Inbox)?;
-        self.backend.notify(&title, &body, inbox.as_deref())
-    }
-}
-
-/// The title and body of the notification of `ask` (ADR-0022 decision 5):
-/// `[<repo>] ask #<id> <kind>`, and its question cut at
-/// [`NOTIFY_QUESTION_CHARS`] with its task and run.
-pub fn ask_notice(repo_root: &std::path::Path, ask: &crate::domain::Ask) -> (String, String) {
-    let mut body = super::health::truncate(&ask.question, NOTIFY_QUESTION_CHARS)
-        .unwrap_or_else(|| ask.question.clone());
-    // An observer's blocked ask may belong to no task (and then no run).
-    if let Some(task_id) = ask.task_id {
-        body.push_str(&format!("\ntask {task_id}"));
-        if let Some(run_id) = &ask.run_id {
-            body.push_str(&format!(" run {run_id}"));
-        }
-    }
-    (super::naming::ask_notification_title(repo_root, ask), body)
-}
-
-/// Characters of an ask's question the notification keeps before `…`.
-const NOTIFY_QUESTION_CHARS: usize = 200;
 
 /// The record a `watch --role inbox` keeps of itself (ADR-t906-1).
 pub trait WatchRecord {
@@ -601,26 +641,29 @@ mod tests {
         assert!(!read.woken);
     }
 
-    /// A notifier that records the asks it was told of, failing on `fail`.
-    struct Told(std::sync::Mutex<Vec<i64>>, Option<i64>);
+    /// A notifier that records each notification's asks, failing when
+    /// `fail`.
+    struct Told(std::sync::Mutex<Vec<Vec<i64>>>, bool);
 
     impl AskNotifier for Told {
-        fn notify(&self, opened: &RunEvent) -> Result<()> {
-            let id = opened.payload["ask_id"].as_i64().unwrap();
-            self.0.lock().unwrap().push(id);
-            if self.1 == Some(id) {
-                bail!("cmux is gone");
-            }
+        fn notify(&self, opened: &[RunEvent]) -> Result<()> {
+            let ids = opened
+                .iter()
+                .map(|event| event.payload["ask_id"].as_i64().unwrap())
+                .collect();
+            self.0.lock().unwrap().push(ids);
+            ensure!(!self.1, "the push command failed");
             Ok(())
         }
     }
 
-    /// The inbox's watch tells the person of each `ask_opened` it returns,
-    /// once, and of nothing else (ADR-t1433-1 decision 2); one that fails
-    /// does not stop the others; a watch of another role, or none, tells
+    /// The inbox's watch tells the person of the `ask_opened` it returns in
+    /// one notification, and of nothing else (ADR-t2159-1 decision 4); one
+    /// that fails is reported in `ask_push` and stops nothing; a watch of
+    /// another role, or none, or without a notifier (no `[push]`), tells
     /// nobody; and a read past an ask does not keep it for the next watch.
     #[test]
-    fn the_inbox_watch_notifies_each_ask_opened_it_returns_once() {
+    fn the_inbox_watch_notifies_the_new_asks_it_returns_once() {
         let events = Events(vec![
             event(1, "ask_opened", json!({"ask_id": 7, "kind": "decide"})),
             event(2, "triage_failed", json!({})),
@@ -634,21 +677,28 @@ mod tests {
             Some(SessionRole::Inbox),
         )
         .unwrap();
-        let ids = |opened: &[RunEvent]| -> Vec<i64> {
-            opened
-                .iter()
-                .map(|event| event.payload["ask_id"].as_i64().unwrap())
-                .collect()
-        };
-        assert_eq!(ids(&read.opened), [7, 8]);
-        let told = Told(Default::default(), Some(7));
-        notify_opened(Some(SessionRole::Inbox), &read.opened, Some(&told));
-        assert_eq!(*told.0.lock().unwrap(), [7, 8]);
-        let other = Told(Default::default(), None);
-        notify_opened(Some(SessionRole::Planner), &read.opened, Some(&other));
-        notify_opened(None, &read.opened, Some(&other));
+        let told = Told(Default::default(), false);
+        assert_eq!(
+            notify_opened(Some(SessionRole::Inbox), &read.opened, Some(&told)),
+            Some(json!({"asks": 2, "sent": true}))
+        );
+        assert_eq!(*told.0.lock().unwrap(), [vec![7, 8]]);
+        let failing = Told(Default::default(), true);
+        assert_eq!(
+            notify_opened(Some(SessionRole::Inbox), &read.opened, Some(&failing)),
+            Some(json!({"asks": 2, "sent": false, "error": "the push command failed"}))
+        );
+        let other = Told(Default::default(), false);
+        assert_eq!(
+            notify_opened(Some(SessionRole::Planner), &read.opened, Some(&other)),
+            None
+        );
+        assert_eq!(notify_opened(None, &read.opened, Some(&other)), None);
         assert!(other.0.lock().unwrap().is_empty());
-        notify_opened(Some(SessionRole::Inbox), &read.opened, None);
+        assert_eq!(
+            notify_opened(Some(SessionRole::Inbox), &read.opened, None),
+            None
+        );
         let past = read_events(
             &events,
             &query(3, 10, false),
@@ -657,24 +707,154 @@ mod tests {
         )
         .unwrap();
         assert!(past.opened.is_empty());
+        assert_eq!(
+            notify_opened(Some(SessionRole::Inbox), &past.opened, Some(&other)),
+            None
+        );
+        assert!(other.0.lock().unwrap().is_empty());
     }
 
+    /// The command's run of the last [`PushNotifier`] notification.
+    static PUSHED: std::sync::Mutex<Option<PushRequest>> = std::sync::Mutex::new(None);
+
+    fn pushed_ok(request: &PushRequest) -> PushOutcome {
+        *PUSHED.lock().unwrap() = Some(request.clone());
+        PushOutcome {
+            success: true,
+            ..PushOutcome::default()
+        }
+    }
+
+    fn pushed_failing(_: &PushRequest) -> PushOutcome {
+        PushOutcome {
+            exit_code: Some(4),
+            stderr: "posting to https://hooks.example/secret failed".into(),
+            ..PushOutcome::default()
+        }
+    }
+
+    /// [`PushNotifier`] hands `[push]`'s command one `ask_opened` message
+    /// with the count and the queue, and nothing of the asks (their ids
+    /// are not in it either); a command that fails, or a `[push]` that
+    /// could not be read, fails the notification with why, the command's
+    /// arguments masked.
     #[test]
-    fn an_ask_notice_names_the_repository_and_cuts_the_question() {
-        use crate::domain::{Ask, AskKind};
-        let mut ask: Ask = serde_json::from_value(json!({
-            "id": 4, "kind": AskKind::Blocked, "task_id": null, "run_id": null,
-            "question": "slots idle", "options": [], "answer": null, "asked_by": "observer",
-            "reason_category": "scope", "created_at": 0, "answered_at": null, "closed_at": null
-        }))
+    fn the_push_notifier_sends_one_ask_opened_message_without_the_asks() {
+        let target = PushTarget {
+            name: "dagq".into(),
+            queue: "/q/queue.db".into(),
+        };
+        let command = vec![
+            "/bin/push".to_owned(),
+            "https://hooks.example/secret".to_owned(),
+        ];
+        let opened = [
+            event(
+                5,
+                "ask_opened",
+                json!({"ask_id": 70, "question": "secret?"}),
+            ),
+            event(
+                9,
+                "ask_opened",
+                json!({"ask_id": 80, "question": "secret?"}),
+            ),
+        ];
+        let notifier = PushNotifier {
+            config: Ok(PushConfig::new(command.clone())),
+            target: target.clone(),
+            run_push: pushed_ok,
+        };
+        notifier.notify(&opened).unwrap();
+        let request = PUSHED.lock().unwrap().take().unwrap();
+        assert_eq!(request.command, command);
+        assert!(
+            request
+                .env
+                .contains(&("DAGQ_PUSH_KIND".to_owned(), "ask_opened".to_owned()))
+        );
+        let body: Value = serde_json::from_slice(&request.stdin).unwrap();
+        assert_eq!(body["kind"], "ask_opened");
+        assert_eq!(body["new_asks"], 2);
+        assert_eq!(body["queue"], "/q/queue.db");
+        assert_eq!(body["period"], "through event 9");
+        let text = String::from_utf8(request.stdin).unwrap();
+        assert!(!text.contains("secret") && !text.contains("70"), "{text}");
+
+        let failing = PushNotifier {
+            run_push: pushed_failing,
+            ..notifier
+        };
+        let error = format!("{:#}", failing.notify(&opened).unwrap_err());
+        assert!(error.contains("exit code 4"), "{error}");
+        assert!(!error.contains("hooks.example"), "{error}");
+        let unreadable = PushNotifier {
+            config: Err("bad host.toml".into()),
+            target,
+            run_push: pushed_ok,
+        };
+        let error = format!("{:#}", unreadable.notify(&opened).unwrap_err());
+        assert!(error.contains("bad host.toml"), "{error}");
+        assert!(PUSHED.lock().unwrap().is_none());
+    }
+
+    /// Only the inbox's watch has a notifier, and only with a `[push]`:
+    /// another role's or none reads no `[push]`, a missing one makes none
+    /// (and names no target), and one that cannot be read makes one that
+    /// fails without the reading's error, which may quote the command.
+    #[test]
+    fn only_the_inbox_with_a_push_has_a_notifier() {
+        use std::cell::Cell;
+        let loads = Cell::new(0);
+        let targets = Cell::new(0);
+        let target = || {
+            targets.set(targets.get() + 1);
+            PushTarget {
+                name: "dagq".into(),
+                queue: "/q/queue.db".into(),
+            }
+        };
+        let config = || PushConfig::new(vec!["/bin/push".to_owned()]);
+        for role in [None, Some(SessionRole::Planner)] {
+            let made = push_notifier(
+                role,
+                || {
+                    loads.set(loads.get() + 1);
+                    Ok(Some(config()))
+                },
+                target,
+                pushed_ok,
+            );
+            assert!(made.is_none());
+        }
+        assert_eq!((loads.get(), targets.get()), (0, 0));
+
+        let none = push_notifier(Some(SessionRole::Inbox), || Ok(None), target, pushed_ok);
+        assert!(none.is_none());
+        assert_eq!(targets.get(), 0);
+
+        let made = push_notifier(
+            Some(SessionRole::Inbox),
+            || Ok(Some(config())),
+            target,
+            pushed_ok,
+        )
         .unwrap();
-        let (title, body) = ask_notice(std::path::Path::new("/src/dagq"), &ask);
-        assert_eq!(title, "[dagq] ask #4 blocked");
-        assert_eq!(body, "slots idle");
-        ask.task_id = Some(crate::domain::TaskId::new(1));
-        ask.question = "長".repeat(250);
-        let (_, body) = ask_notice(std::path::Path::new("/src/dagq"), &ask);
-        assert_eq!(body, format!("{}…\ntask 1", "長".repeat(200)));
+        assert_eq!(made.config, Ok(config()));
+        assert_eq!(made.target.queue, "/q/queue.db");
+
+        let unreadable = push_notifier(
+            Some(SessionRole::Inbox),
+            || {
+                Err(anyhow!(
+                    "bad [push]: command = [\"https://hooks.example/secret\"]"
+                ))
+            },
+            target,
+            pushed_ok,
+        )
+        .unwrap();
+        assert_eq!(unreadable.config, Err(PUSH_UNREADABLE.to_owned()));
     }
 
     #[test]

@@ -480,8 +480,8 @@ pub struct Ports<'a> {
     pub review_material:
         &'a dyn Fn(TaskId, Option<&crate::application::review::ReviewRange>) -> Result<Value>,
     /// The log of this start, given the registration's `started_at`.
-    /// The 1-minute load average recorded with a failed cmux call, at a
-    /// claim and over each interval of a run.
+    /// The 1-minute load average recorded with a failed session wrapper
+    /// call, at a claim and over each interval of a run.
     pub load_average: fn() -> Option<f64>,
     /// The free bytes of the file system of a path (task 377).
     pub free_space: fn(&Path) -> Option<u64>,

@@ -451,12 +451,6 @@ impl RunCoordination for SessionRecords {
 
 #[allow(unused_variables)]
 impl SessionRegistry for SessionRecords {
-    fn session_workspace(&self, role: SessionRole) -> Result<Option<String>> {
-        unreachable!("session_workspace is not what the test reaches")
-    }
-    fn register_session_workspace(&self, role: SessionRole, workspace_id: &str) -> Result<()> {
-        unreachable!("register_session_workspace is not what the test reaches")
-    }
     fn remove_session_workspace(&self, role: SessionRole) -> Result<bool> {
         unreachable!("remove_session_workspace is not what the test reaches")
     }

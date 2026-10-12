@@ -12,13 +12,12 @@
 //!
 //! [`HostActorExecutor`] is the only backend: it starts the actor as a
 //! process of this user on this host, through the [`AgentProvider`] (Claude
-//! Code), the background session wrappers ([`SessionWrappers`]) and the
-//! inbox's cmux [`WorkspaceBackend`]. On a host the spec is advisory
-//! (ADR-t728-1 decision 6): the capabilities, the workspace access and the
-//! limits are recorded and checked for consistency, but nothing isolates the
-//! process, which can reach whatever this user can. A sandboxed backend
-//! (goal 38) would enforce the same spec. Nothing here names such a
-//! backend's details.
+//! Code) and the background session wrappers ([`SessionWrappers`]). On a
+//! host the spec is advisory (ADR-t728-1 decision 6): the capabilities, the
+//! workspace access and the limits are recorded and checked for
+//! consistency, but nothing isolates the process, which can reach whatever
+//! this user can. A sandboxed backend (goal 38) would enforce the same
+//! spec. Nothing here names such a backend's details.
 //!
 //! What starts outside the executor is not an AI actor: the supervisor
 //! (under launchd), the session wrappers (which then start their
@@ -881,7 +880,7 @@ pub fn command_line(command: &CommandSpec) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::{Exit, WorkspaceTags};
+    use crate::application::Exit;
     use crate::domain::{CommitSha, NewTask, Task, task};
     use std::sync::Mutex;
 
@@ -915,10 +914,13 @@ mod tests {
         TaskRun::new(RunId::new(id).unwrap(), &claimed, &base, "t0".into()).unwrap()
     }
 
+    /// A background wrapper the fake launched: where, its command and env.
+    type Launched = (String, String, Vec<(String, String)>);
+
     /// Records what it was asked to make and start.
     #[derive(Default)]
     struct Fake {
-        workspaces: Mutex<Vec<(String, String, WorkspaceTags)>>,
+        workspaces: Mutex<Vec<Launched>>,
         spawned: Mutex<Vec<CommandSpec>>,
         /// The actors a token was issued for, in order.
         issued: Mutex<Vec<String>>,
@@ -1057,10 +1059,7 @@ mod tests {
             self.workspaces.lock().unwrap().push((
                 format!("background {} {}", cwd.display(), log.display()),
                 command.to_owned(),
-                WorkspaceTags {
-                    env: env.to_vec(),
-                    ..WorkspaceTags::default()
-                },
+                env.to_vec(),
             ));
             Ok("background:7:start".into())
         }
@@ -1440,10 +1439,10 @@ mod tests {
         assert_eq!(made.len(), 2);
         assert_eq!(made[0].0, "background /w /r/session.log");
         assert_eq!(made[1].0, "background /w /r/session-resume-1.log");
-        for (_, command, tags) in made.iter() {
+        for (_, command, env) in made.iter() {
             assert_eq!(command, "wrapper --background");
             assert_eq!(
-                tags.env,
+                *env,
                 pairs(&[
                     ("DAGQ_ROLE", "worker"),
                     ("DAGQ_ACTOR_ID", "worker:r1"),
@@ -1483,7 +1482,7 @@ mod tests {
         assert_eq!(made[0].0, "background /repo /q/planners/4/session.log");
         assert_eq!(made[0].1, "planner-session --headless --background");
         assert_eq!(
-            made[0].2.env,
+            made[0].2,
             pairs(&[
                 ("DAGQ_ROLE", "planner"),
                 ("DAGQ_QUEUE", "/q/queue.db"),

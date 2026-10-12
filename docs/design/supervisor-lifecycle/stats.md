@@ -135,7 +135,7 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 - `long_background`は観測だけで、復旧jobを起動しない。
   経過は、その処理が途切れずにmarkerに載り続けた最初の時刻から測る（markerは上書きされ開始時刻を持たないので、hookが追記するlogから読む。`domain::stall::IDLE_LOG`と`background_first_seen`）。
   logが無いときはmarkerのmtimeからの下限になる。
-- `workspace_mismatch`はcmuxに聞かず、runの最後のsessionのbackgroundのwrapperをpidと記録した起動時刻で見る（pidを別のprocessが継げば死んでいる。[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定2・10、[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
+- `workspace_mismatch`はrunの最後のsessionのbackgroundのwrapperをpidと記録した起動時刻で見る（pidを別のprocessが継げば死んでいる。[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定2・10）。
   heartbeatの古さは生死に使わない（[wrapperが黙ったsession](silent-wrapper.md)の側）。
   古いバイナリのworkspaceのsessionは判定せず、`workspace_check`が数を出す。
 - slotのalert・running alert・`workspace_check`の入力はsupervisorが記録し、eventだけから畳める（[計測](../measurement.md#今の判定の記録)）。
@@ -356,7 +356,7 @@ worker以外のheadlessのjobを種類・provider・実際のmodelごとに数�
 | 知りたいこと | コードの入口 | 約束と文書 |
 | --- | --- | --- |
 | eventの分類コードの件数 | `reason_codes` | 同じ失敗を2回数えない。[domain-model](../domain-model.md#理由の分類コードcode) |
-| cmuxの呼び出しの失敗 | `backend_failures` | retryした試行と使い切った失敗の和が件数で、alertは件数で判定する |
+| session wrapperの呼び出しの失敗（過去はcmuxも） | `backend_failures` | retryした試行と使い切った失敗の和が件数で、alertは件数で判定する |
 | 重複としてのcancel | `duplicate_cancels` | ADR-0063決定5 |
 | 着地の後の待ちrunの再確認 | `landing_rechecks` | [Landing recheck](landing-recheck.md) |
 | reviewの後に人を待った着地の衝突 | `landing_waits` | 着地が窓にあるrunを数え、待ちと衝突は着地より前の全てのeventから読む |

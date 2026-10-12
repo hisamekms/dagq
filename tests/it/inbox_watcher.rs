@@ -50,11 +50,14 @@ fn spawn_watch(db: &Path, timeout: &str) -> Child {
     spawn_watch_with(db, &["--timeout", timeout], Stdio::null())
 }
 
-/// `watch --role inbox --interval 1` with `extra` in the background.
+/// `watch --role inbox --interval 1` with `extra` in the background. Its
+/// `XDG_CONFIG_HOME` is beside the queue, as [`invoke_with`]'s, so the asks
+/// it returns never reach the `[push]` of the person running the tests.
 fn spawn_watch_with(db: &Path, extra: &[&str], stdout: Stdio) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     common::WithoutActor::without_actor_env(&mut command);
     command
+        .env("XDG_CONFIG_HOME", db.parent().unwrap().join("config"))
         .arg("--db")
         .arg(db)
         .args(["watch", "--role", "inbox", "--interval", "1"])

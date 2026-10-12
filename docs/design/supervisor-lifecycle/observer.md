@@ -44,7 +44,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 - **出力の扱い**: findingは人とplannerが`findings`で影響の大きい順に読み、手当てしないと決めたものを`finding dismiss ID --reason`にする。proposalを求める印の付いたfindingには、supervisorがruntimeのplannerを立ててproposalを作らせる（[Finding planners (supervisor)](finding-planners.md)）。findingに紐づけた`blocked`のaskには、runtimeが`propose`と`dismiss`のoptionを足し、人のその答えをfindingに適用する。`blocked`のaskは`status --role inbox`に`ask_opened`として出る。導入前にobserverが書いたnoteとdraft goalは記録として残り、draft goalは、inboxがそのgoalを参照にした計画の依頼を記録して依頼のplannerが扱うか、人が`DAGQ_ROLE`の無い自分のterminalで扱う（人が開くplannerは[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)決定8で廃止した）。
 
 - **cmux**: observerはcmuxを呼ばない（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
-  `stats`の`workspace_mismatch`はrunのbackgroundのwrapperの生死で決まり（[Stats](stats.md)）、agentがloginの切れや利用上限で止まったときのholdのask（`application::ask::hold`）はinboxの`watch`が`ask_opened`で人に知らせる（[人への通知](cmux-notify.md)）。
+  `stats`の`workspace_mismatch`はrunのbackgroundのwrapperの生死で決まり（[Stats](stats.md)）、agentがloginの切れや利用上限で止まったときのholdのask（`application::ask::hold`）はinboxの`watch`が`ask_opened`で人に知らせる（[人への通知](ask-push.md)）。
   `observe --cmux`は、古いバイナリのsupervisorが渡すargvのために受け付けて無視する。
 
 ## Codexで動かす

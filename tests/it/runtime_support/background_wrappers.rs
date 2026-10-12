@@ -60,8 +60,8 @@ impl BackgroundWrappers {
     }
 
     /// Start `command` as a process of its own in `cwd`, with `env` over
-    /// this process's environment less its dagq and cmux variables (as the
-    /// cmux adapter starts it) and its output in `log`; its handle is its
+    /// this process's environment less its dagq and cmux variables (as
+    /// `BackgroundSessions` starts it) and its output in `log`; its handle is its
     /// pid and start.
     pub fn launch(
         &self,

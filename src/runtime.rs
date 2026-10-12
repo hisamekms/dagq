@@ -12,9 +12,7 @@ pub use crate::application::{
         worker_question_topics_line,
     },
     rebind::REBIND_LOG,
-    recording::{
-        BACKEND_ERROR_CHARS, RecordingBackend, RecordingSessions, backend_failure_payload,
-    },
+    recording::{BACKEND_ERROR_CHARS, RecordingSessions, backend_failure_payload},
     supervise::{RunError, SUPERVISOR_HANDED_OFF},
 };
 pub use crate::compose::{

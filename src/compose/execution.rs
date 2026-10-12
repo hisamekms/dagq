@@ -68,8 +68,9 @@ pub struct RunE2eOptions {
     pub lock: Option<PathBuf>,
 }
 
-/// The runtime's own constructor of the recording of the session wrappers,
-/// as [`RecordingBackend::new`](crate::application::recording::RecordingBackend::new) is of cmux's.
+/// The runtime's own constructor of the recording of the session wrappers:
+/// failures are recorded in the queue at `db`, and `token` is the
+/// supervisor whose slots are reported (`None` reports all of them).
 impl<'a> RecordingSessions<'a> {
     pub fn new(inner: &'a dyn SessionWrappers, db: PathBuf, token: Option<LeaseToken>) -> Self {
         Self::over(

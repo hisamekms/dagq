@@ -90,9 +90,8 @@ enum Command {
         /// Seconds the supervisor may take to come back under the new binary.
         #[arg(long, default_value_t = 1800)]
         handoff_timeout: u64,
-        /// cmux executable: closes the workspace of a supervisor registered in the retired in-cmux
-        /// mode when the drain or the restart after a failed watch stops it, and the `up` that
-        /// starts it again (under launchd) is given it.
+        /// cmux executable, passed on to the e2e gate and to the `up` that starts a supervisor
+        /// registered in the retired in-cmux mode again (under launchd); no workspace is closed.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         /// Claude Code executable the restarted supervisor uses after a drain, or after a failed
@@ -1386,11 +1385,10 @@ enum Command {
         /// which come back with the next events that wake it; planner never.
         #[arg(long, value_parser = ROLES)]
         role: Option<String>,
-        // ADR-t1433-1.
-        /// cmux executable the inbox's watch tells the person of each new ask through (`cmux
-        /// notify`); a bare name is resolved on PATH, and one not found tells nobody.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        /// Accepted and ignored: the inbox's watch tells of a new ask through the host's `[push]`
+        /// (ADR-t2159-1 decision 4), and an older inbox's command line may still pass it.
+        #[arg(long, hide = true)]
+        cmux: Option<PathBuf>,
     },
     /// Per-run times in seconds (work, validate, wait_to_land, startup) and counts, per-goal and
     /// overall count/total/median, and alerts over thresholds, derived from run events. The latest
@@ -3373,7 +3371,6 @@ fn execute(cli: Cli) -> Result<Value> {
         if let Some(release) = release {
             return one_shot.install_release(
                 &location,
-                &cmux,
                 &Launchctl { uid: current_uid() },
                 &dagq::infrastructure::release_update::CurlIndex::default(),
                 &executable(&cargo).unwrap_or(cargo),
@@ -3384,7 +3381,6 @@ fn execute(cli: Cli) -> Result<Value> {
         }
         return one_shot.install(
             &location,
-            &cmux,
             &Launchctl { uid: current_uid() },
             &options,
             Duration::from_secs(watch_timeout),
@@ -4128,7 +4124,7 @@ fn execute(cli: Cli) -> Result<Value> {
             until_attention,
             interval,
             role: r,
-            cmux,
+            cmux: _,
         } => dagq::compose::watch_in(
             &db,
             &queue,
@@ -4139,7 +4135,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 interval: Duration::from_secs(interval),
                 role: parse_role(r)?,
             },
-            Some(&cmux),
+            true,
         )?,
         Command::Supervise {
             no_claude,

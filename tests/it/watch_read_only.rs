@@ -148,7 +148,7 @@ fn cli_and_library_watch_use_read_only_connections_on_the_live_queue() {
                 role,
             };
             let _waiting = common::within(common::STEP_LIMIT, "writable watch refusal");
-            let error = compose::watch_in(&db, &writer, &options, None).unwrap_err();
+            let error = compose::watch_in(&db, &writer, &options, false).unwrap_err();
             assert!(
                 error
                     .to_string()

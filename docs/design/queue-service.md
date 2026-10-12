@@ -98,7 +98,7 @@ serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`�
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（`kind: blocked`と`finding_id`。capabilityは`finding.ask`）で送る。findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。そのため`observe_finished`の件数と、observer自身のeventを数えない判定（[Observer](supervisor-lifecycle/observer.md)の0、`SqliteQueue::events_besides`）は、CLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
 
-`ask`は誰にも知らせず、inboxの`watch`が人に知らせる（[人への通知](supervisor-lifecycle/cmux-notify.md)）。
+`ask`は誰にも知らせず、inboxの`watch`が人に知らせる（[人への通知](supervisor-lifecycle/ask-push.md)）。
 
 ## 読み取りのユースケース
 

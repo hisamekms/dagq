@@ -1,6 +1,7 @@
-//! The traits the use cases reach the queue, Git, the agent, cmux, the
-//! service manager, processes, time and IDs through. The infrastructure
-//! implements them and the entry points inject the implementations.
+//! The traits the use cases reach the queue, Git, the agent, the session
+//! wrappers, the service manager, processes, time and IDs through. The
+//! infrastructure implements them and the entry points inject the
+//! implementations.
 //!
 //! Each port is in the module of the context that owns it, with the types
 //! of its arguments and results, and the ports every context uses are in

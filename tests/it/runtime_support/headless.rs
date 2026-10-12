@@ -244,7 +244,7 @@ pub struct Launch {
 /// carries that process's pid and start, which the wrapper registers with
 /// and the supervisor checks (ADR-t1404-1 decision 2), so each session has
 /// a handle of its own. The backend lists it until it is closed, as it
-/// lists a workspace (the cmux adapter asks the process instead), and
+/// lists a workspace (`BackgroundSessions` asks the process instead), and
 /// sends it no signal. Each session the supervisor starts (with an
 /// environment) has the worker's environment without the queue's path,
 /// and the database path's apostrophe quoted in its command.

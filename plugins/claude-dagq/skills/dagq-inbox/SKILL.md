@@ -7,7 +7,7 @@ description: Be a dagq queue's inbox: start from status --role inbox, wait for i
 
 Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill (`"$DAGQ" --resolve`). Never open or edit the queue database; go through the CLI only.
 
-Roles: the **supervisor** lands runs and runs the headless jobs (review, plan review, goal review, the **recovery job**); a **worker** is one run's session; a **planner** the runtime opens writes goals and tasks (`dagq-planner`); the **observer** is a periodic job. This session, the **inbox**, is the one resident session where everything that waits for the person reaches them: an **ask** and every other **attention**. Your watch notifies each new ask (`cmux notify`).
+Roles: the **supervisor** lands runs and runs the headless jobs (review, plan review, goal review, the **recovery job**); a **worker** is one run's session; a **planner** the runtime opens writes goals and tasks (`dagq-planner`); the **observer** is a periodic job. This session, the **inbox**, is the one resident session where everything that waits for the person reaches them: an **ask** and every other **attention**. Your watch tells the person of new asks through the host's `[push]`, when it has one.
 
 Only what needs a person comes here. The runtime fixes known cases itself (`auto_repaired`: a resume, a stale receipt), and the recovery job what it can of the rest (failed runs, stalled turns, idle processes). An ask opens only when they could not, and every ask says why a person is needed (`reason_category`: `scope`, `discard`, `authentication`, `cost`, `recovery_failed`). Do none of their work by hand.
 

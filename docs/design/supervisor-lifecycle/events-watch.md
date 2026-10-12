@@ -32,7 +32,21 @@ supervisorがclaimを止めている記録（`claim_held`・`ci_watch_held`・`l
 
 task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足した。`--full`は各イベントを`id`、`kind`、`task_id`、`goal_id`、`run_id`（無ければnull）、`payload`（切り詰めない）、`created_at`の全フィールドで返す。task 730から、書いたactorを`actor`（`role`・`id`と、headless jobのverdictを適用したeventでは`requested_by`。[Roles](roles.md)のeventのactor）に足し、actorを記録する前の行には`actor`の欄が無い。絞り込みは`--run RUN`、`--task ID`、`--goal ID`（goalのイベントと、そのgoalのtaskとrunのイベント）、`--kind KIND`（繰り返し可）、`--since` / `--until`（UTCの`YYYY-MM-DD`（その日の0時）か`YYYY-MM-DDTHH:MM:SS[.fff][Z]`。桁と範囲を検査し、合わない値はerror。`since <= created_at < until`）で、どれも組み合わせられ、`--after` / `--limit` / cursorの意味は変わらない。`--kind`を渡すと既定のattentionだけの絞り込みは外れ、そのkindをattentionかどうかに関わらず返す。`--kind`も`--all`も無いときは、`--run` / `--task` / `--goal` / 時刻の絞り込みもattentionのイベントの中で効く（全kindを読むには`--all`を付ける）。条件は`EventFilter`（`src/domain/views.rs`）で、`SqliteQueue::events_between`が1つのSQLで絞る。
 
-`dagq watch [--after <id>] [--timeout SECS（既定600） | --until-attention] [--interval SECS（既定2）] [--role <inbox|planner>]`はqueueをinterval秒ごとに読み、idより後にattentionイベントが1件以上あるか、登録済みsupervisorの健全性（tokenの集合と各`pid`・`alive`・`stale`、`domain::SupervisorPulse`）がwatch開始時のsnapshotと変わるまでblockする。返り値は`{events, supervisors_changed, supervisors, cursor}`で、`supervisors`は`status`と同じ形。timeoutでは`events`が空、`supervisors_changed: false`、`cursor`は渡したままで、exit codeは0。`--after`を省くと開始時の最新idから待つ。`--until-attention`（task 943）はdeadlineを持たず、attentionイベントかsupervisorの健全性の変化が来るまで読み続け、来たときだけ同じ形の`{events, supervisors_changed, supervisors, cursor}`を出してexit 0で終わる（空のtimeoutで返らないのでcursorの引き継ぎも要らない）。`--timeout`とは同時に付けられない（clapの`conflicts_with`で非0）。`--role`を問わず使える。inboxはこれをbackgroundで1本回し、shellのループを書かない（dagq-inbox skillの`reference/watch.md`）。queueを開けない・読めないなど途中のerrorは再試行せず、stderrのerror JSONと非0で終わる（errorを握りつぶしてloopを続けない。張り直すsessionの空回りを防ぐ）。`watch`は`SqliteQueue::open_watch`でqueueのファイルを`SQLITE_OPEN_READ_ONLY`で直接開き、その接続での書き込みはreadonlyのerrorになる。CLIとlibraryの入口が使う`compose::watch_in`はSQLiteの`is_readonly`を検査し、書き込み可能な接続をpollと生存記録の前に拒む。古いschemaのメモリ複製は待機中の追加を読めないので使わず、バイナリより古いschemaでは`dagq migrate`を促すerrorで待たずに終了する（[読み取り専用のopen](../persistence.md)）。待機中に別の接続が足したattentionは次のpollで読める。`watch`はqueueを読むだけで何も書かず（`--role inbox`は下の生存の記録をqueueの外のファイルに書く）、`integrate`を呼ばない。
+`dagq watch [--after <id>] [--timeout SECS（既定600） | --until-attention] [--interval SECS（既定2）] [--role <inbox|planner>]`はqueueをinterval秒ごとに読み、idより後にattentionイベントが1件以上あるか、登録済みsupervisorの健全性（tokenの集合と各`pid`・`alive`・`stale`、`domain::SupervisorPulse`）がwatch開始時のsnapshotと変わるまでblockする。
+返り値は`{events, supervisors_changed, supervisors, cursor}`で、`supervisors`は`status`と同じ形。
+`--role inbox`のwatchが新しいaskの通知を`[push]`で送ろうとしたときだけ、どうなったかを`ask_push`に足す（[人へのaskの通知](ask-push.md)）。
+timeoutでは`events`が空、`supervisors_changed: false`、`cursor`は渡したままで、exit codeは0。
+`--after`を省くと開始時の最新idから待つ。
+`--until-attention`（task 943）はdeadlineを持たず、attentionイベントかsupervisorの健全性の変化が来るまで読み続け、来たときだけ同じ形の`{events, supervisors_changed, supervisors, cursor}`を出してexit 0で終わる（空のtimeoutで返らないのでcursorの引き継ぎも要らない）。
+`--timeout`とは同時に付けられない（clapの`conflicts_with`で非0）。
+`--role`を問わず使える。
+inboxはこれをbackgroundで1本回し、shellのループを書かない（dagq-inbox skillの`reference/watch.md`）。
+queueを開けない・読めないなど途中のerrorは再試行せず、stderrのerror JSONと非0で終わる（errorを握りつぶしてloopを続けない。張り直すsessionの空回りを防ぐ）。
+`watch`は`SqliteQueue::open_watch`でqueueのファイルを`SQLITE_OPEN_READ_ONLY`で直接開き、その接続での書き込みはreadonlyのerrorになる。
+CLIとlibraryの入口が使う`compose::watch_in`はSQLiteの`is_readonly`を検査し、書き込み可能な接続をpollと生存記録の前に拒む。
+古いschemaのメモリ複製は待機中の追加を読めないので使わず、バイナリより古いschemaでは`dagq migrate`を促すerrorで待たずに終了する（[読み取り専用のopen](../persistence.md)）。
+待機中に別の接続が足したattentionは次のpollで読める。
+`watch`はqueueを読むだけで何も書かず（`--role inbox`は下の生存の記録をqueueの外のファイルに書く）、`integrate`を呼ばない。
 
 `--role`を渡すと、そのroleに宛てたattentionイベント（`domain::ATTENTION_ROLE`、`status --role`と同じ）だけで起き、supervisorの健全性の変化で起きるのも同じrole（`inbox`）だけ（plannerは`events`が常に空で`supervisors_changed`が常にfalse）。inboxは`watch --role inbox`で`ask_opened`、`ask_answered`、ADR-0016のattention、supervisorの停止を受ける（ADR-0044の決定6）。cursorはrun_eventsのidのままで、askの登録と回答も`ask_opened` / `ask_answered`としてrun_eventsに書かれるのでcursorに乗る（roleの違うwatchが同じcursorを使ってよい）。`events`には`--role`は無い。
 
@@ -42,7 +56,7 @@ task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足�
 
 ADR-t906-1は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)に置き換えられ、この節の記録と判定（決定1の(1)）とhook（(2)）はそれが引き継ぐ。
 watcherが居ないときの後ろ盾は、supervisorの`inbox_nudged`のeventと`host.toml`の`[push]`で、supervisorはinboxに打ち込まない（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）。
-`watch --role inbox`は、返す`ask_opened`ごとに1回、inboxの`cmux notify`で人に知らせる（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定2、[人への通知](cmux-notify.md#人への通知cmux-notify)）。
+`watch --role inbox`は、`ask_opened`を返すとき、`host.toml`に`[push]`があればそれで1回だけ人に知らせ、無ければ知らせない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定4、[人へのaskの通知](ask-push.md)）。
 
 `watch --role inbox`は実行中、自分の記録を queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`inbox-watchers/<開始のミリ秒>-<pid>.json`に書く（`src/infrastructure/inbox_watchers.rs`）。queue DBには書かず、`watch`はqueueを読むだけのまま。記録は`{pid, started_at, heartbeat_at, ended_at, timeout_secs, interval_secs}`（時刻はunix秒。`timeout_secs`は`--until-attention`のwatchでは`null`で、`--until-attention`より前の記録は数値を持ち、欄が無い記録も`null`として読む）で、開始時に書き、queueを読むたび（`--interval`ごと。読みが無くても同じ間隔でloopが回る）に`heartbeat_at`を更新し、返るときに`ended_at`を書く（errorで抜けたときもdropで書く）。書き込みは一時ファイルとrenameで、書けなくてもwatchは止まらない（tracingのwarnだけ）。ファイル名が開始時刻とpidを持つので、pidが再利用されても別の記録になり、各watchは自分のファイルだけを書き換える。複数のwatchが同時に走ってよい。開始時に、最後に見えた時刻が7日（`PRUNE_AFTER_SECS`）より前の記録を消す。`--role inbox`以外のwatchは記録を書かない。
 

@@ -5,9 +5,10 @@ use super::*;
 use crate::domain::EventKind;
 
 impl SqliteQueue {
-    /// Record the cmux workspace `up` opened for `role`, replacing any
-    /// earlier one: the UUID is how `up` finds it again, never its title
-    /// (ADR-0026).
+    /// Record a workspace for `role`, replacing any earlier one, as an
+    /// earlier binary's `up` recorded the cmux workspace it opened
+    /// (ADR-0026); this binary records none, and tests make such a record
+    /// with it.
     pub fn register_session_workspace(&self, role: SessionRole, workspace_id: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO session_workspaces(role,workspace_id,created_at) VALUES (?1,?2,?3)
@@ -18,7 +19,7 @@ impl SqliteQueue {
         Ok(())
     }
 
-    /// The workspace last recorded for `role`, whether or not cmux still has it.
+    /// The workspace last recorded for `role`.
     pub fn session_workspace(&self, role: SessionRole) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -127,12 +128,6 @@ impl SqliteQueue {
 /// The [`SessionRegistry`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl SessionRegistry for SqliteQueue {
-    fn session_workspace(&self, role: SessionRole) -> Result<Option<String>> {
-        SqliteQueue::session_workspace(self, role)
-    }
-    fn register_session_workspace(&self, role: SessionRole, workspace_id: &str) -> Result<()> {
-        SqliteQueue::register_session_workspace(self, role, workspace_id)
-    }
     fn remove_session_workspace(&self, role: SessionRole) -> Result<bool> {
         SqliteQueue::remove_session_workspace(self, role)
     }

@@ -123,10 +123,10 @@ fn watch_role(
 }
 
 /// No ask notifies anyone where it is opened (ADR-t1433-1 decision 2): the
-/// supervisor's own ask and one through `ask` call no cmux, whether the
-/// inbox's workspace is recorded or not, and a repeated ask returns the
-/// open one. The inbox's `watch` tells the person of each `ask_opened`
-/// (tests/it/inbox_watch_notify.rs).
+/// supervisor's own ask and one through `ask` report no notification, even
+/// with the inbox's workspace an earlier binary recorded, and a repeated
+/// ask returns the open one. The inbox's `watch` tells the person of the
+/// new asks through `[push]` (tests/it/inbox_watch_push.rs).
 #[test]
 fn an_ask_notifies_nobody_where_it_is_opened() {
     use dagq::domain::{AskKind, NewAsk, SessionRole};

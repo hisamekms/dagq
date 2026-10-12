@@ -10,6 +10,7 @@ related:
   - design-supervisor-lifecycle-kpi
   - design-supervisor-lifecycle-report
   - design-supervisor-lifecycle-observer
+  - design-supervisor-lifecycle-ask-push
   - adr-0051
 ---
 
@@ -22,7 +23,11 @@ related:
 
 ## 設定（host.tomlの`[push]`）
 
-- 置き場所は`<queue dir>/host.toml`と、hostの全queueに効く`$XDG_CONFIG_HOME/dagq/host.toml`（無ければ`~/.config/dagq/host.toml`）。どちらもrepositoryの外で、commitされる`dagq.toml`には置かない。supervisorは自分のprocessの`XDG_CONFIG_HOME`で読み、launchd modeでは`up`を打ったshellの`XDG_CONFIG_HOME`がplistから渡る（[up / down](up-down.md)のplist）。両方に`[push]`があれば、queueのファイルの`[push]`が表ごと優先する（キーごとには混ぜない）。queueのファイルの`command = []`は、host全体の`[push]`をそのqueueだけ切る。
+- 置き場所は`<queue dir>/host.toml`と、hostの全queueに効く`$XDG_CONFIG_HOME/dagq/host.toml`（無ければ`~/.config/dagq/host.toml`）。
+  どちらもrepositoryの外で、commitされる`dagq.toml`には置かない。
+  読むprocess（supervisorとinboxのwatch）は自分の`XDG_CONFIG_HOME`で読み、launchd modeのsupervisorには`up`を打ったshellの`XDG_CONFIG_HOME`がplistから渡る（[up / down](up-down.md)のplist）。
+  両方に`[push]`があれば、queueのファイルの`[push]`が表ごと優先する（キーごとには混ぜない）。
+  queueのファイルの`command = []`は、host全体の`[push]`をそのqueueだけ切る。
 - 書式（`infrastructure::push::parse_host_push`。1行の文字列の配列と、下のキーだけを受け付け、知らないキーは拒む）:
 
   ```toml
@@ -35,7 +40,11 @@ related:
   ```
 
 - `[push]`が無いか`command`が空なら、runtimeはコマンドを呼ばず、pushのeventも記録しない（レポートと目標割れのeventは書く）。設定はレポートを書くたびに読み直す。読めない`[push]`は`warn`のlogを出してその日のpushをしないだけで、レポートと目標割れの記録は止めない。
-- 読むのは`supervise --report-daily`のsupervisorだけ（`compose`の`ReportPort::push_config`）。`dagq report`と`dagq kpi`は`[push]`を読まない。ライブラリの`SuperviseOptions::host_config`はhost全体のファイルの場所を、`push_retry`は再試行の間隔を変える（testが使う）。
+- 読むのは`supervise --report-daily`のsupervisor（`compose`の`ReportPort::push_config`）とinboxの`watch --role inbox`だけで、どれも使うときに読み直す。
+  supervisorはレポートを書くときと、watcherの居ないinboxへの知らせを出すと決めたとき（drainの間も。[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）に読む。
+  watchは始めるときに読む（[人へのaskの通知](ask-push.md)）。
+  `dagq report`と`dagq kpi`は`[push]`を読まない。
+  ライブラリの`SuperviseOptions::host_config`はhost全体のファイルの場所を、`push_retry`は再試行の間隔を変える（testが使う）。
 
 ## 目標割れの記録
 
@@ -50,7 +59,11 @@ related:
 
 ## 送るもの（stdin）
 
-stdinは1つのJSONオブジェクト（UTF-8、最後に改行）。受け取るコマンドはJSONを読んでも、`title`と`text`だけを使ってもよい。環境変数は`DAGQ_PUSH_KIND`（messageの種類で、`kind`と同じ値。定義は`domain::kpi::push::PushKind`）、`DAGQ_QUEUE`（queueのDBのpath）、`DAGQ_REPORT_HTML`・`DAGQ_REPORT_JSON`（まとめのレポートのpath。即時通知では空）。supervisorの環境変数はそのまま継ぐ。ADR-0051の決定22が挙げる`resolved`の種類は、解消を即時には送らない（決定23）ので使わない。
+stdinは1つのJSONオブジェクト（UTF-8、最後に改行）。
+受け取るコマンドはJSONを読んでも、`title`と`text`だけを使ってもよい。
+環境変数は`DAGQ_PUSH_KIND`（messageの種類で、`kind`と同じ値。定義は`domain::kpi::push::PushKind`）、`DAGQ_QUEUE`（queueのDBのpath）、`DAGQ_REPORT_HTML`・`DAGQ_REPORT_JSON`（まとめのレポートのpath。即時通知では空）。
+送るprocessの環境変数をそのまま継ぐ（`ask_opened`はinboxのsessionのwatch、ほかはsupervisor）。
+ADR-0051の決定22が挙げる`resolved`の種類は、解消を即時には送らない（決定23）ので使わない。
 
 - **目標割れの即時通知**（`breach`、`domain::kpi::push::breach_message`）: そのjobで記録した`pushed: true`の`kpi_breach_started`ごとに1通。`kind`・`queue`・`period`（最後に判定できた期間）・`title`（`<repositoryの名前> target breach: <KPI> (<層>)`。固定の文字列は英語。task 625）・`text`（値・stat・目標・続いた期間の数・始まり）・`breaches`（1件: `kpi`・`stratum`・`stat`・`value`・`min`・`max`・`periods`・`since`）・`resolved`（空）・`report_html` / `report_json`（null）。
 - **日次・週次のまとめ**（`daily` / `weekly`、`summary_message`）: そのjobで書いたレポートのうち最新の日と最新の週の分だけ1通ずつ（起動時に遡って書いた古い日の分は送らない）。`title`（`<名前> <期間>: landings N, breaches M`）、`text`（着地の数と`lead_time`・`phase.work`・`first_pass_rate`・`revise_rate`・`asks_per_landing`の`all`の層の値、目標割れ、1期間の外れ（`missed`）、そのjobで記録した同じ周期の解消、open なaskの数、レポートのpath）、`breaches`（そのレポートの目標のうち`breach`のもの全部。即時通知を上限で送らなかった分もここに載る）、`missed`、`resolved`、`open_asks`、`report_html` / `report_json`。値の単位はレポートのHTMLと同じ（秒は`1h 02m`、割合は`%`）。
@@ -58,6 +71,10 @@ stdinは1つのJSONオブジェクト（UTF-8、最後に改行）。受け取�
 - **inboxの見張りの通知**（`inbox_watch`、`inbox_watch_message`）: inboxのwatchが居ないままaskがinboxを待つと、`supervise::inbox_nudge`が同じ`ReportPort::push_config`で`[push]`を読み、その不在ごとに1通を返し、ループがこの文書の待ちに入れる。
   送り方・再試行・記録は下の「実行・再試行・失敗」と同じで、`daily`・`breach`はこのmessageを止めない。
   いつ送るかと`inbox_nudged`の記録は[通知経路](notification-route.md)が持つ。
+- **新しいaskの通知**（`ask_opened`）: inboxの`watch --role inbox`が`ask_opened`を返すとき、そのwatchのprocessが同じ`[push]`で1通を送る。
+  新しいaskの件数を伝えるだけで、askの中身は載せない。
+  送り方・再試行しないこと・失敗の残し方は[人へのaskの通知](ask-push.md)が持つ。
+  supervisorの列には入らず、`kpi_push_*`のeventも記録しない。
 - レポートを記録した後で目標割れの判定かメッセージづくりが失敗したら、`warn`のlogを出してその回のpushをしない（jobは失敗にせず、レポートは書き直さない）。
 
 ## 実行・再試行・失敗
@@ -74,7 +91,7 @@ stdinは1つのJSONオブジェクト（UTF-8、最後に改行）。受け取�
 
 runtimeはどちらにも依存しない。スクリプトはrepositoryの外（例: `~/.local/bin`）に置き、実行権限を付け、host.tomlの`command`に絶対pathで書く。`jq`と`curl`を使う。
 
-ntfy（topicはスクリプトか、supervisorの環境変数に置く）:
+ntfy（topicはスクリプトか、commandを起動するprocessの環境変数に置く）:
 
 ```sh
 #!/bin/sh
@@ -91,7 +108,8 @@ printf '%s' "$json" | jq -r .text |
 command = ["/Users/me/.local/bin/dagq-push-ntfy"]
 ```
 
-`DAGQ_NTFY_TOPIC`はsupervisorを起動する環境（`up`を打つshell）に置くか、スクリプトに直接書く。
+`DAGQ_NTFY_TOPIC`はスクリプトに直接書くか、supervisorを起動する環境（`up`を打つshell）とinboxを開く環境（`dagq inbox`を打つshell）の両方に置く。
+supervisorの環境だけに置くと、inboxのwatchが送る`ask_opened`には届かない。
 
 Slack の Incoming Webhook（URLはrepositoryの外のファイルから読む）:
 

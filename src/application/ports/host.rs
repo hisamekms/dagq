@@ -1,6 +1,6 @@
 //! The ports of host運用 (docs/design/architecture.md, section
 //! "host運用"): the connections to the queue, the service manager,
-//! the session wrappers and cmux, sccache, processes, the installed plugin,
+//! the session wrappers, sccache, processes, the installed plugin,
 //! the headless jobs, and the supervisors' registrations and the repository
 //! binding.
 
@@ -126,30 +126,16 @@ pub struct SupervisorEnvironment {
     pub config_home: Option<String>,
 }
 
-/// What a workspace carries besides its title and command (ADR-0026).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorkspaceTags {
-    /// Environment every shell of the workspace inherits: `DAGQ_ROLE` and
-    /// `DAGQ_QUEUE`, which the workspace keeps however its session is
-    /// started again.
-    pub env: Vec<(String, String)>,
-    /// One machine-readable line for people; never read back.
-    pub description: Option<String>,
-    /// The queue's workspace group, when it could be made.
-    pub group: Option<String>,
-}
-
 /// The session wrappers of the headless runs and the runtime's planners,
 /// started without a workspace as background processes of this host
 /// (ADR-t1404-1): the port of the supervisor, the runtime's planners and
 /// the reads that judge a planner (`planners`, `planner request`), which
-/// call no cmux (ADR-t1433-1 decision 1; the inbox's workspace is
-/// [`WorkspaceBackend`]'s). A wrapper is named by the handle its start
-/// returned, the pid and start time of its process (ADR-t1404-1 decision
-/// 2), recorded where a run or a planner records its session; any other
-/// session ID (a workspace an older binary opened) names no wrapper. Beside
-/// the start, the stop and the liveness, it carries the limits of one call
-/// and the waits the supervisor gives a wrapper. Implemented by
+/// call no cmux (ADR-t2159-1 decision 1). A wrapper is named by the handle
+/// its start returned, the pid and start time of its process (ADR-t1404-1
+/// decision 2), recorded where a run or a planner records its session; any
+/// other session ID (a workspace an older binary opened) names no wrapper.
+/// Beside the start, the stop and the liveness, it carries the limits of
+/// one call and the waits the supervisor gives a wrapper. Implemented by
 /// `infrastructure::adapters::BackgroundSessions` over `BackgroundWrappers`;
 /// [`crate::application::recording::RecordingSessions`] records its failures
 /// and stops (`wrapper_stopped`).
@@ -214,70 +200,6 @@ pub trait SessionWrappers {
     /// without going idle before the supervisor asks it to exit.
     fn resume_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(3600)
-    }
-}
-
-/// The inbox's cmux workspace, which the inbox and `up` / `down` own
-/// (docs/design/architecture.md, "host運用"; ADR-t1433-1 decision 1): `up`
-/// opens, looks up, marks and closes the workspaces it keeps, and the
-/// inbox's `watch --role inbox` notifies a person. The session wrappers of
-/// the runs and the runtime's planners are [`SessionWrappers`]', which call
-/// no cmux. Implemented by `infrastructure::adapters::Cmux`, which calls
-/// cmux's CLI; [`crate::application::recording::RecordingBackend`] records
-/// its failures.
-pub trait WorkspaceBackend {
-    fn preflight(&self) -> Result<()>;
-    /// Close the workspace; the worktree and branch are not touched. A
-    /// pinned workspace is unpinned first, since cmux refuses to close one
-    /// (ADR-0031); every close dagq makes goes through here.
-    fn close(&self, workspace_id: &str) -> Result<()>;
-    /// Give the workspace a sidebar color: a cmux color name or `#RRGGBB`.
-    fn set_color(&self, workspace_id: &str, color: &str) -> Result<()>;
-    /// Show the status pill `key` with `value` and `icon` on the
-    /// workspace's sidebar entry, replacing the pill under the same key.
-    fn set_status(&self, workspace_id: &str, key: &str, value: &str, icon: &str) -> Result<()>;
-    /// Pin the workspace in the sidebar; pinning a pinned one is a no-op.
-    fn pin(&self, workspace_id: &str) -> Result<()>;
-    /// Whether the workspace with this stable ID is still open. Workspaces
-    /// are found by the ID the queue recorded, never by their title, which
-    /// people may rename (ADR-0026).
-    fn exists(&self, workspace_id: &str) -> Result<bool>;
-    /// Open a workspace that is not tied to a run (the inbox's session) and
-    /// return its stable ID. A run's session has no workspace: its wrapper
-    /// starts in the background ([`SessionWrappers::launch_background`],
-    /// ADR-t1433-3).
-    fn create_named(
-        &self,
-        name: &str,
-        cwd: &std::path::Path,
-        command: &str,
-        tags: &WorkspaceTags,
-    ) -> Result<String>;
-    /// The handle of the workspace group whose external ID is
-    /// `external_id`, created under `name` when there is none yet; asking
-    /// again returns the same group.
-    fn ensure_group(&self, external_id: &str, name: &str) -> Result<String>;
-    /// Tell a person that something waits for them: a notification, never
-    /// keystrokes into a terminal. `workspace` is the workspace it belongs
-    /// to; `None` sends it without one. Only the inbox's `watch --role
-    /// inbox` sends one, for each new ask it returns, aimed at the inbox
-    /// (ADR-0022 decision 5, ADR-t1433-1 decision 2); the supervisor, the
-    /// queue service and the observer send none.
-    fn notify(&self, title: &str, body: &str, workspace: Option<&str>) -> Result<()>;
-    /// How long one call may run before the backend gives it up as failed;
-    /// recorded with every `backend_call_failed`.
-    fn call_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(30)
-    }
-    /// How many times in all a call that timed out is made when making it
-    /// again is safe (a read; task 326).
-    fn call_attempts(&self) -> u32 {
-        3
-    }
-    /// The backoff before the first retry of a call that timed out,
-    /// doubled before each next one.
-    fn retry_backoff(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(2)
     }
 }
 

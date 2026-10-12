@@ -19,7 +19,12 @@ related:
 
 対話 worker の prompt_waiting / answer_prompt / stuck_exit / send_unconfirmed / intervene は廃止した処理の過去の記録を読むために残る。以下の該当する集計・attention・既存 ask の扱いは過去の記録の互換を含む。新しい worker の監視は turn を使う（task 1437、[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。
 
-ADR-0016で次を決めた。`status`のattentionとcursor、`events --after`、`watch`は実装済み（[`status`](status.md#status)、[`events` / `watch`](events-watch.md#events--watch)）。`review`は実装済み（下記「`review`」）。`cmux notify`は[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)で送る条件と宛先が改められ、[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)決定2で、inboxの`watch --role inbox`が`ask_opened`を見て送る形になった（[人への通知](cmux-notify.md#人への通知cmux-notify)）。圧縮出力と`--full`はtask 59、短い初期promptとpluginの`SessionStart` hookはtask 65で実装済み。ADR-0016の受け手だった常駐sessionはADR-0024で退役し、受け手はinboxになった（task 100）。
+ADR-0016で次を決めた。
+`status`のattentionとcursor、`events --after`、`watch`は実装済み（[`status`](status.md#status)、[`events` / `watch`](events-watch.md#events--watch)）。
+`review`は実装済み（下記「`review`」）。
+人へのaskの通知は、inboxの`watch --role inbox`が`ask_opened`を見て`host.toml`の`[push]`で送る（[人へのaskの通知](ask-push.md)）。
+圧縮出力と`--full`はtask 59、短い初期promptとpluginの`SessionStart` hookはtask 65で実装済み。
+ADR-0016の受け手だった常駐sessionはADR-0024で退役し、受け手はinboxになった（task 100）。
 
 - inboxとplannerは状態を持たない使い捨てのsessionで、compaction・`/clear`・再起動からの起き直しは`status`の1コマンドで行う。`status`はsupervisorの健全性、未完了run、attention、次のcursorを上限のある大きさで返す。
 - `watch --after <cursor>`はcursorより後のattentionイベントかsupervisor健全性の変化までblockし、attentionと新しいcursorを返して終わる。`--role inbox`では、知らせるだけの`update_installed`と規則に当たった毎時の`throughput_review_reported`は単独では起こさず、次に起きたときの`events`にまとめて載る（[ADR-t1418-1](../../adr/2026-10-03-t1418-1-quiet-notices-do-not-wake-the-inbox-watch.md)、[`events` / `watch`](events-watch.md#events--watch)）。inboxはこれをbackgroundで走らせて終了で起きる。`doctor`は診断専用で、pollingには使わない。

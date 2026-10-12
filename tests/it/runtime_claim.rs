@@ -654,7 +654,7 @@ fn a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervis
 }
 
 #[test]
-fn shell_arguments_round_trip_without_expansion_and_cmux_handles_are_strict() {
+fn shell_arguments_round_trip_without_expansion() {
     let value = "a'b $HOME $(echo injected) `echo injected`\nmore";
     let result = Command::new("/bin/sh")
         .arg("-c")
@@ -663,9 +663,6 @@ fn shell_arguments_round_trip_without_expansion_and_cmux_handles_are_strict() {
         .unwrap();
     assert!(result.status.success());
     assert_eq!(String::from_utf8(result.stdout).unwrap(), value);
-    assert_eq!(workspace_handle("OK workspace:7\n").unwrap(), "workspace:7");
-    assert!(workspace_handle("OK workspace:7; touch file").is_err());
-    assert!(workspace_handle("OK surface:7").is_err());
 }
 
 #[test]

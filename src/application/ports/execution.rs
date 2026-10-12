@@ -1175,14 +1175,10 @@ pub trait RunCoordination {
     fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)>;
 }
 
-/// The sessions around runs: the workspaces `up` opened, the planner
-/// sessions and the Claude session spans the hooks and transcripts report.
+/// The sessions around runs: the workspaces an earlier binary's `up`
+/// recorded, the planner sessions and the Claude session spans the hooks
+/// and transcripts report.
 pub trait SessionRegistry {
-    /// The workspace `up` recorded for `role`.
-    fn session_workspace(&self, role: SessionRole) -> Result<Option<String>>;
-    /// Record the cmux workspace `up` opened for `role`, replacing any
-    /// earlier one (ADR-0026).
-    fn register_session_workspace(&self, role: SessionRole, workspace_id: &str) -> Result<()>;
     /// Forget the workspace of `role`; `false` when none was recorded.
     fn remove_session_workspace(&self, role: SessionRole) -> Result<bool>;
     /// Forget the workspaces recorded for a role `up` no longer opens (all

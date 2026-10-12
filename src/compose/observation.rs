@@ -27,8 +27,7 @@ use crate::{
     domain::{RunId, SessionRole, TaskId, stats::StatsQuery},
     infrastructure::{
         adapters::{
-            ClaudeCode, Cmux, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT, executable,
-            is_dagq_source,
+            ClaudeCode, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT, is_dagq_source,
         },
         clock,
         codex::Codex,
@@ -673,18 +672,22 @@ pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) 
 /// `watch` on the queue at `db` ([`crate::application::watch::watch`]); a
 /// `watch --role inbox` keeps its record in a file under the queue's
 /// directory, never in the queue (ADR-t906-1). It notifies nobody: only
-/// the command line's watch in the inbox's session runs cmux.
+/// the command line's watch in the inbox's session pushes.
 pub fn watch(db: &Path, options: &crate::application::watch::WatchOptions) -> Result<Value> {
-    watch_in(db, &open_queue_watch(db)?, options, None)
+    watch_in(db, &open_queue_watch(db)?, options, false)
 }
 
 /// `watch` using the live read-only queue already opened by the CLI.
-/// Callers must use [`open_queue_watch`], never a migrated snapshot.
+/// Callers must use [`open_queue_watch`], never a migrated snapshot. With
+/// `push`, the watch is given the host's `[push]` as it reads now, the
+/// queue's `host.toml` over the host-wide one, and the push command;
+/// [`crate::application::watch::push_notifier`] decides whether it tells
+/// the person of the new asks (ADR-t2159-1 decision 4).
 pub fn watch_in(
     db: &Path,
     queue: &SqliteQueue,
     options: &crate::application::watch::WatchOptions,
-    cmux: Option<&Path>,
+    push: bool,
 ) -> Result<Value> {
     use crate::infrastructure::inbox_watchers;
     ensure!(
@@ -712,30 +715,21 @@ pub fn watch_in(
             .ok()
         })
         .flatten();
-    // The inbox's watch tells the person of a new ask through the cmux of
-    // the inbox's session (ADR-t1433-1 decision 2); a cmux not found tells
-    // nobody, and the watch goes on.
-    let inbox_cmux = (options.role == Some(SessionRole::Inbox))
-        .then(|| cmux.and_then(|cmux| executable(cmux).ok()))
-        .flatten()
-        .map(|executable| Cmux { executable });
-    let notifier = inbox_cmux
-        .as_ref()
-        .map(|cmux| crate::application::watch::InboxNotifier {
-            queue,
-            backend: cmux,
-            // A queue bound to no repository is named after the working
-            // directory, as the other commands name it.
-            checkout: crate::infrastructure::adapters::naming_checkout(
-                queue
-                    .repository_binding()
-                    .ok()
-                    .flatten()
-                    .map(PathBuf::from)
-                    .as_deref(),
-                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            ),
-        });
+    let notifier = push
+        .then(|| {
+            crate::application::watch::push_notifier(
+                options.role,
+                || {
+                    crate::infrastructure::push::load_host_push(
+                        db.parent().unwrap_or(Path::new(".")),
+                        crate::infrastructure::kpi_config::host_wide_file().as_deref(),
+                    )
+                },
+                || push_target(db, queue),
+                crate::infrastructure::push::run_push,
+            )
+        })
+        .flatten();
     crate::application::watch::watch(
         queue,
         clock.as_ref(),
@@ -748,6 +742,25 @@ pub fn watch_in(
             .map(|notifier| notifier as &dyn crate::application::watch::AskNotifier),
         options,
     )
+}
+
+/// The queue at `db` as the inbox's ask notification names it: after its
+/// repository, or the working directory for a queue bound to none, as the
+/// other commands name it.
+fn push_target(db: &Path, queue: &SqliteQueue) -> crate::application::push::PushTarget {
+    let checkout = crate::infrastructure::adapters::naming_checkout(
+        queue
+            .repository_binding()
+            .ok()
+            .flatten()
+            .map(PathBuf::from)
+            .as_deref(),
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    );
+    crate::application::push::PushTarget {
+        name: crate::application::naming::repository_name(&checkout),
+        queue: db.display().to_string(),
+    }
 }
 
 impl OneShot {

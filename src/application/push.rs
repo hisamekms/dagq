@@ -203,6 +203,35 @@ pub fn request(push: &PushConfig, target: &PushTarget, message: &PushMessage) ->
     }
 }
 
+/// How a run of `push`'s command failed: timed out, the error that kept
+/// it from running, or its exit code or signal.
+fn failed_how(push: &PushConfig, outcome: &PushOutcome) -> String {
+    if outcome.timed_out {
+        format!("timed out after {}s", push.timeout_secs)
+    } else if let Some(error) = &outcome.error {
+        error.clone()
+    } else {
+        match (outcome.exit_code, outcome.signal) {
+            (Some(code), _) => format!("exit code {code}"),
+            (None, Some(signal)) => format!("signal {signal}"),
+            (None, None) => "failed".to_owned(),
+        }
+    }
+}
+
+/// Why a run of `push`'s command failed, for a person: how it failed and
+/// the tail of its stderr with the command's arguments masked
+/// ([`push::stderr_tail`]).
+pub fn failure_reason(push: &PushConfig, outcome: &PushOutcome) -> String {
+    let how = failed_how(push, outcome);
+    let stderr = push::stderr_tail(&outcome.stderr, &push.command);
+    if stderr.trim().is_empty() {
+        how
+    } else {
+        format!("{how}: {}", stderr.trim())
+    }
+}
+
 /// Record how the `attempt`-th run of `message` went: `kpi_push_sent`, or
 /// `kpi_push_failed` with what of the failure may be kept (no argument of
 /// the command, no part of the message), and once the last attempt failed
@@ -240,17 +269,7 @@ pub fn record_attempt(
         }),
     )?;
     if !again {
-        let why = if outcome.timed_out {
-            format!("timed out after {}s", push.timeout_secs)
-        } else if let Some(error) = &outcome.error {
-            error.clone()
-        } else {
-            match (outcome.exit_code, outcome.signal) {
-                (Some(code), _) => format!("exit code {code}"),
-                (None, Some(signal)) => format!("signal {signal}"),
-                (None, None) => "failed".to_owned(),
-            }
-        };
+        let why = failed_how(push, outcome);
         queue.record_kpi_push_abandoned(json!({
             "push_kind": kind,
             "period": message.period,

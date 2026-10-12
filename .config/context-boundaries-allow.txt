@@ -40,7 +40,6 @@ C5 | src/application/lifecycle.rs | RunRecovery | 2233 | host's lifecycle reads 
 C5 | src/application/lifecycle.rs | SessionRegistry | none | unregistered: host's LifecycleQueue takes execution's SessionRegistry, public to observation only
 C5 | src/application/health/report.rs | GoalReviewStore | none | unregistered: observation's status takes planning's internal GoalReviewStore
 C5 | src/application/health/report.rs | PlanReviewStore | none | unregistered: observation's status takes planning's internal PlanReviewStore
-C5 | src/application/recording.rs | WorkspaceBackend | none | unregistered: RecordingBackend wraps the whole of host's WorkspaceBackend
 C5 | src/application/supervise/cleanup.rs | Repository | none | unregistered: host's cleanup job takes execution's Repository, public to observation only
 C5 | src/application/supervise/plan_review.rs | Repository | none | unregistered: planning's conflict hotspots take execution's Repository, public to observation only
 C5 | src/compose/observation.rs | Verifier | none | unregistered: observation's composition reads execution's Verifier, public to host only

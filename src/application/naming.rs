@@ -1,13 +1,10 @@
-//! How the runtime names and quotes what it hands to cmux and the shell:
-//! the startup command of a session, the description and group of a
-//! workspace, and the title of an ask's notification. Pure text; the cmux
-//! adapter re-exports these under its own path.
+//! How the runtime names and quotes what it hands to the shell: the
+//! startup command of a session and the repository's name. Pure text; the
+//! adapters re-export these under their own path.
 
 use std::path::Path;
 
-use crate::domain::{Ask, RunId, SessionRole, TaskId};
-
-/// Shell boundaries are cmux's terminal startup command and Claude's hook command.
+/// Shell boundaries are a session's startup command and Claude's hook command.
 /// Quote every argument independently, including paths containing apostrophes.
 pub fn shell_join(args: &[String]) -> String {
     args.iter()
@@ -18,54 +15,6 @@ pub fn shell_join(args: &[String]) -> String {
 
 pub fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\"'\"'"))
-}
-
-/// `dagq role=<role> queue=<queue hash>[ run=<run-id>][ task=<id>]`: the one
-/// machine-readable description line every workspace of a queue carries,
-/// for people reading `cmux workspace list`. The runtime finds a workspace
-/// by its stable ID, never by this line (ADR-0026); only `stats` reads it
-/// back, to tell which open worker workspaces belong to the queue
-/// (`workspace_mismatch`, ADR-0043 decision 5).
-pub fn workspace_description(
-    role: SessionRole,
-    queue_hash: &str,
-    run: Option<&RunId>,
-    task: Option<TaskId>,
-) -> String {
-    let mut description = format!("dagq role={} queue={queue_hash}", role.as_str());
-    if let Some(run) = run {
-        description.push_str(&format!(" run={run}"));
-    }
-    if let Some(task) = task {
-        description.push_str(&format!(" task={task}"));
-    }
-    description
-}
-
-/// `[<repo>]`: the name of the workspace group a queue's workspaces join.
-pub fn workspace_group_name(repo_root: &Path) -> String {
-    format!("[{}]", repository_name(repo_root))
-}
-
-/// `[<repo>] ask #<id> <kind>`: the title of the notification `ask` sends
-/// the inbox for a new ask (ADR-0022 decision 5).
-pub fn ask_notification_title(repo_root: &Path, ask: &Ask) -> String {
-    format!(
-        "[{}] ask #{} {}",
-        repository_name(repo_root),
-        ask.id,
-        ask.kind.as_str()
-    )
-}
-
-/// `[<repo>]inbox`: the session where a person answers the queue's asks,
-/// which `up` opens.
-pub fn inbox_workspace_name(repo_root: &Path) -> String {
-    role_workspace_name(repo_root, SessionRole::Inbox)
-}
-
-fn role_workspace_name(repo_root: &Path, role: SessionRole) -> String {
-    format!("[{}]{}", repository_name(repo_root), role.as_str())
 }
 
 /// The repository's directory name, or the whole path when it has none.

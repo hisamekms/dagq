@@ -215,3 +215,16 @@ fn the_inbox_watch_message_carries_only_the_counts() {
     );
     assert_eq!(message.report_html, None);
 }
+
+#[test]
+fn the_ask_opened_message_carries_only_the_title_and_the_count() {
+    let message = ask_opened_message("dagq", "/q/queue.db", 42, 2);
+    assert_eq!(message.kind, PushKind::AskOpened);
+    assert_eq!(message.kind.as_str(), "ask_opened");
+    assert_eq!(message.period, "through event 42");
+    assert_eq!(message.body["kind"], "ask_opened");
+    assert_eq!(message.body["new_asks"], 2);
+    assert_eq!(message.body["title"], "dagq: 2 new ask(s) for the inbox");
+    assert_eq!(message.body["queue"], "/q/queue.db");
+    assert_eq!(message.report_html, None);
+}

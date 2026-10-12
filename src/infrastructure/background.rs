@@ -1,6 +1,7 @@
 //! Headless session wrappers started as background processes instead of in
-//! cmux workspaces (ADR-t1404-1): the [`Cmux`](super::adapters::Cmux)
-//! backend hands every call on a [`BackgroundHandle`] here. A wrapper is
+//! cmux workspaces (ADR-t1404-1): the session wrappers'
+//! [`BackgroundSessions`](super::adapters::BackgroundSessions) hand every
+//! call on a [`BackgroundHandle`] here. A wrapper is
 //! started detached from the supervisor (a shell in a session of its own
 //! starts it in the background and exits, so its parent becomes init), is
 //! known by its pid and the start the system recorded for it, and is
