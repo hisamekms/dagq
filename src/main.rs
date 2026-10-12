@@ -1811,11 +1811,61 @@ enum AgentCommand {
         /// Only these cases of the split, by id (comma-separated or repeated).
         #[arg(long, value_delimiter = ',')]
         cases: Vec<String>,
+        /// A production set of the queue's side (`agent cases`), by its id: run whole as
+        /// production in place of the repository's production.json. Never with --cases (a set
+        /// is run whole, and a part of it would be a key of its own).
+        #[arg(long)]
+        set: Option<i64>,
         /// Run a holdout or production set again on the same definition: a person's only, or
         /// the inbox's at a person's word.
         #[arg(long)]
         rerun: bool,
     },
+    /// Ask for a production set of the agent's cases: the supervisor makes one case of each
+    /// production review in the period that selected the agent, has a job of another provider
+    /// label each by the rules alone, asks a person about the labels that disagree with the
+    /// production verdict, and keeps the set on the queue's side for `agent eval --set`. A
+    /// person's, the inbox's or a planner's. Prints the set's id.
+    Cases {
+        /// The agent: `.dagq/agents/<agent>/`.
+        agent: String,
+        /// The reviews started at or after this instant: a UTC date (`2026-10-05`, its
+        /// midnight) or an RFC 3339 time (`2026-10-05T12:00:00Z`, `...+09:00`).
+        #[arg(long)]
+        since: Option<String>,
+        /// The reviews started before this instant, written as `--since` is.
+        #[arg(long)]
+        until: Option<String>,
+    },
+    /// Decide the label of a case of a production set, which clears its dispute: a person's,
+    /// the inbox's at a person's word, or a planner's.
+    Decide {
+        /// The set's id.
+        set: i64,
+        /// The case's id in the set.
+        case: String,
+        /// violation or clean.
+        #[arg(long)]
+        verdict: String,
+        /// The rule codes a violation breaks (comma-separated or repeated).
+        #[arg(long, value_delimiter = ',')]
+        codes: Vec<String>,
+        /// Why the label is right.
+        #[arg(long)]
+        reason: String,
+    },
+    /// List the production sets, newest first, with their status, digest and disputed cases.
+    /// Prints {"sets"}.
+    Sets {
+        /// Only this agent's.
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// One production set whole: its request, the reviews left out, each case's label and
+    /// its cases as `agent eval --set` runs them.
+    Set { id: i64 },
     /// List the rounds of the eval, newest first, with their status and scores (a worker's
     /// own run's only). Prints {"evals"}.
     Results {
@@ -2388,14 +2438,21 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         ),
         Command::Mark { .. } => queue(C::MarkWrite),
         Command::Agent { command } => match command {
-            AgentCommand::Eval { split, rerun, .. } => {
-                dagq::domain::authorization::eval_request_needs(split != "dev", *rerun)
-                    .into_iter()
-                    .map(|capability| (capability, Resource::AgentEval { run: None }))
-                    .collect()
-            }
-            AgentCommand::Results { .. } | AgentCommand::Result { .. } => {
-                one(C::EvalRead, Resource::AgentEval { run: None })
+            AgentCommand::Eval {
+                split, rerun, set, ..
+            } => dagq::domain::authorization::eval_request_needs(
+                split != "dev" || set.is_some(),
+                *rerun,
+            )
+            .into_iter()
+            .map(|capability| (capability, Resource::AgentEval { run: None }))
+            .collect(),
+            AgentCommand::Results { .. }
+            | AgentCommand::Result { .. }
+            | AgentCommand::Sets { .. }
+            | AgentCommand::Set { .. } => one(C::EvalRead, Resource::AgentEval { run: None }),
+            AgentCommand::Cases { .. } | AgentCommand::Decide { .. } => {
+                one(C::EvalCases, Resource::AgentEval { run: None })
             }
         },
         Command::Request { command } => match command {
@@ -3036,12 +3093,40 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
                 split,
                 k,
                 cases,
+                set,
                 rerun,
+            } => {
+                if set.is_some() && !cases.is_empty() {
+                    bail!(dagq::application::agent_eval::SET_WITH_CASES);
+                }
+                let mut params = json!({"agent": agent, "split": split, "k": k,
+                       "cases": (!cases.is_empty()).then_some(cases), "rerun": rerun});
+                // Only when given: a service of an older build refuses a
+                // field it does not know (ADR-t451-1 decision 1).
+                if let Some(set) = set {
+                    params["set"] = json!(set);
+                }
+                (UseCase::AgentEval, params)
+            }
+            AgentCommand::Cases {
+                agent,
+                since,
+                until,
             } => (
-                UseCase::AgentEval,
-                json!({"agent": agent, "split": split, "k": k,
-                       "cases": (!cases.is_empty()).then_some(cases), "rerun": rerun}),
+                UseCase::AgentCases,
+                json!({"agent": agent, "since": since, "until": until}),
             ),
+            AgentCommand::Decide {
+                set,
+                case,
+                verdict,
+                codes,
+                reason,
+            } => (
+                UseCase::AgentDecide,
+                json!({"set": set, "case": case, "verdict": verdict, "codes": codes, "reason": reason}),
+            ),
+            AgentCommand::Sets { .. } | AgentCommand::Set { .. } => return Ok(None),
             AgentCommand::Results { agent, limit } => (
                 UseCase::AgentResults,
                 json!({"agent": agent, "limit": limit}),
@@ -4015,22 +4100,40 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Agent { command } => {
             let evals =
                 dagq::application::agent_eval::AgentEvals::new(&queue, &actor, &StaticPolicy);
+            let sets =
+                dagq::application::agent_cases::AgentCaseSets::new(&queue, &actor, &StaticPolicy);
             match command {
                 AgentCommand::Eval {
                     agent,
                     split,
                     k,
                     cases,
+                    set,
                     rerun,
                 } => evals.request(&dagq::application::agent_eval::EvalRequest {
                     agent,
                     split: split_named(&split)?,
                     k,
                     cases: (!cases.is_empty()).then_some(cases),
+                    set,
                     rerun,
                 })?,
                 AgentCommand::Results { agent, limit } => evals.list(agent.as_deref(), limit)?,
                 AgentCommand::Result { id } => evals.show(id)?,
+                AgentCommand::Cases {
+                    agent,
+                    since,
+                    until,
+                } => sets.request(&agent, since, until)?,
+                AgentCommand::Decide {
+                    set,
+                    case,
+                    verdict,
+                    codes,
+                    reason,
+                } => sets.decide(set, &case, &verdict, codes, &reason)?,
+                AgentCommand::Sets { agent, limit } => sets.list(agent.as_deref(), limit)?,
+                AgentCommand::Set { id } => sets.show(id)?,
             }
         }
         Command::Replan { command } => {
@@ -5214,6 +5317,14 @@ mod tests {
             ),
             ("agent results", &["--agent", "adr-rules"]),
             ("agent result", &["1"]),
+            ("agent eval", &["adr-rules", "--set", "3"]),
+            ("agent cases", &["adr-rules", "--since", "2026-10-05"]),
+            (
+                "agent decide",
+                &["3", "prod-r1-a1", "--verdict", "clean", "--reason", "r"],
+            ),
+            ("agent sets", &[]),
+            ("agent set", &["3"]),
             ("request decline", &["1", "--reason", "r"]),
             ("replan request", &["--run", "r1", "--reason", "r"]),
             (

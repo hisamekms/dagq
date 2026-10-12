@@ -25,7 +25,9 @@ pub const REVIEW_PROGRAM: &str = "review_program";
 /// `headless_jobs.kind` of an agent job of the eval of an agent
 /// (ADR-t1728-1 decision 5): the same job as a run's review's agent job,
 /// told apart from it; its `label` is `<agent>:<eval id>:<case>:<run>` and
-/// its `attempt` the run of the case, from 0.
+/// its `attempt` the run of the case, from 0. A job that labels a case of a
+/// production set (ADR-t1728-1 (g)) is one too, its eval id `cases-<set id>`
+/// and its run 0.
 pub const AGENT_EVAL: &str = "agent_eval";
 /// `headless_jobs.kind` of a program job of a case of the eval of an agent
 /// (ADR-t1728-1 (i)), run before the case's agent job as a run's review's

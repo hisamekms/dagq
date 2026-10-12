@@ -150,6 +150,7 @@ module | src/application/review.rs | execution |
 module | src/application/recording.rs | execution |
 module | src/application/inherit.rs | execution |
 module | src/application/agent_eval.rs | execution |
+module | src/application/agent_cases.rs | execution |
 module | src/application/prompt/worker.rs | execution | prompt
 module | src/application/prompt/requests.rs | execution | resume_request
 module | src/application/prompt/run_review.rs | execution | recovery_prompt
@@ -256,6 +257,7 @@ port | Queue | public | all |
 outer-port | src/application/inherit.rs | InheritStore | execution | public | planning | ready --inherit (T10)
 outer-port | src/application/inherit.rs | CarriedBranches | execution | public | planning | ready --inherit (T10)
 outer-port | src/application/agent_eval.rs | EvalStore | execution | public | host | through AgentEvals to the CLI and the queue service; they write requests only
+outer-port | src/application/agent_cases.rs | CaseSetStore | execution | public | host | through AgentCaseSets to the CLI and the queue service; they write requests and a person's decisions only
 outer-port | src/application/commands/requests.rs | RequestStore | planning | internal | - |
 outer-port | src/application/commands/replans.rs | ReplanStore | planning | public | host | through Replans to the CLI and the queue service (a worker's proposal)
 outer-port | src/application/commands/planning.rs | PlanningStore | planning | internal | - |

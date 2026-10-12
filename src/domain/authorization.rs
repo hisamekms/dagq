@@ -86,6 +86,9 @@ string_enum!(Capability {
     EvalRequestHeldOut => "eval.request_held_out",
     EvalRerun => "eval.rerun",
     EvalRead => "eval.read",
+    // A production set of an agent's cases (ADR-t1728-1 (g)): asking for
+    // one, which the supervisor makes, and deciding a case's label.
+    EvalCases => "eval.cases",
     // Scheduler transitions and the service.
     Supervise => "scheduler.supervise",
     RunRecover => "run.recover",
@@ -106,7 +109,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 58] = [
+    pub const ALL: [Self; 59] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -152,6 +155,7 @@ impl Capability {
         Self::EvalRequestHeldOut,
         Self::EvalRerun,
         Self::EvalRead,
+        Self::EvalCases,
         Self::Supervise,
         Self::RunRecover,
         Self::WorkspaceCleanup,
@@ -431,6 +435,7 @@ const USER: &[Capability] = &[
     C::EvalRequestHeldOut,
     C::EvalRerun,
     C::EvalRead,
+    C::EvalCases,
     C::Supervise,
     C::RunRecover,
     C::WorkspaceCleanup,
@@ -444,7 +449,7 @@ const USER: &[Capability] = &[
 /// before they start, its proposals, notes, marks, resolving and dismissing
 /// findings, its
 /// questions, the eval's rounds of any split (never `--rerun`, ADR-t1728-1
-/// decision 7) and, at a person's word, `up` / `down` / `install`. No run,
+/// decision 7), the production sets and their labels and, at a person's word, `up` / `down` / `install`. No run,
 /// no landing, no `ready`, no answer.
 const PLANNER: &[Capability] = &[
     C::QueueRead,
@@ -470,6 +475,7 @@ const PLANNER: &[Capability] = &[
     C::EvalRequest,
     C::EvalRequestHeldOut,
     C::EvalRead,
+    C::EvalCases,
     C::ServiceLifecycle,
     C::BinaryInstall,
     C::QueueAdmin,
@@ -1448,6 +1454,38 @@ mod tests {
             own.record(),
             serde_json::json!({"kind": "agent_eval", "run": "r1"})
         );
+    }
+
+    /// A production set of an agent's cases (ADR-t1728-1 (g)): the user,
+    /// the inbox and a planner ask for one and decide its labels; a worker
+    /// (on its own run too), the supervisor, which makes the sets it is
+    /// asked for, and the jobs do not.
+    #[test]
+    fn only_the_user_the_inbox_and_a_planner_ask_for_a_production_set() {
+        let unrun = Resource::AgentEval { run: None };
+        for role_ in ActorRole::ALL {
+            let asks = matches!(
+                role_,
+                ActorRole::User | ActorRole::Inbox | ActorRole::Planner
+            );
+            assert_eq!(
+                allowed(&role(role_), C::EvalCases, &unrun),
+                asks,
+                "{role_:?}"
+            );
+        }
+        let worker = ActorContext::worker(&run("r1"), TaskId::new(1));
+        let own = Resource::AgentEval {
+            run: Some(run("r1")),
+        };
+        let error = StaticPolicy
+            .authorize(&worker, C::EvalCases, &own)
+            .unwrap_err();
+        assert_eq!(error.reason, DenyReason::NotGranted);
+        let error = StaticPolicy
+            .authorize(&role(ActorRole::Supervisor), C::EvalCases, &unrun)
+            .unwrap_err();
+        assert_eq!(error.reason, DenyReason::NotGranted);
     }
 
     #[test]

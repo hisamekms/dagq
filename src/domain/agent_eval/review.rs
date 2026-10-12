@@ -43,7 +43,7 @@ impl Judgement {
         }
     }
 
-    fn parse(name: &str) -> Option<Judgement> {
+    pub fn parse(name: &str) -> Option<Judgement> {
         [Judgement::Violation, Judgement::Clean]
             .into_iter()
             .find(|judgement| judgement.as_str() == name)

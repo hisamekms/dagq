@@ -94,7 +94,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 - 再計画（[再計画](supervisor-lifecycle/task-replanning.md)）の`replan.request`（`replan request`）はuserとinboxだけ、`replan.propose`（`replan propose`）は自分のrunのworkerだけが持つ。
   runの保留と置換の`replan.park`・`replan.apply`はsupervisorだけが持つ。
   plannerはどれも持たない
-- agentのevalの依頼（`agent eval`、[Agent eval](agent-eval.md)）は、devの`eval.request`をuser・inbox・plannerと自分のrunのworkerが、hold-outとproductionの`eval.request_held_out`をuser・inbox・plannerが、同じキーの再実行の`eval.rerun`をuserとinboxだけが持つ。
+- agentのevalの依頼（`agent eval`、[Agent eval](agent-eval.md)）は、devの`eval.request`をuser・inbox・plannerと自分のrunのworkerが、hold-outとproductionの`eval.request_held_out`とproductionの集合の依頼と決定（`agent cases`・`decide`）の`eval.cases`をuser・inbox・plannerが、同じキーの再実行の`eval.rerun`をuserとinboxだけが持つ。
   結果を読む`eval.read`はuser・inbox・planner・observer・supervisorと自分のrunのworkerが持つ。
   supervisorは依頼を実行するだけで依頼のcapabilityを持たず、jobは何も持たない。
   workerはLLMのCLIを打たず、evalのjobはsupervisorだけが起動する。

@@ -32,7 +32,7 @@ reviewのagentが正しく判定しているかを、規則コードごとの陽
 workerもjobもLLMのCLIを直接打たない。
 1周の中のケースごとの1回は、本番のrunのreviewのagentのjobと同じ起動経路で、測るagentの1本のjobだけを起動する。
 
-> **一部は予定**: 「採用の判定」「productionのケースと見張り」の節はまだ実装していない予定で、名前と数値は実装が決める。
+> **一部は予定**: 「採用の判定」と「productionのケースと見張り」の見張りはまだ実装していない予定で、名前と数値は実装が決める。
 > ほかの節は今の姿で、欄・flag・既定値の意味は定義のそばのdoc commentが持つ。
 
 決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、定義を切らない例外は[ADR-t1869-1](../adr/2026-10-09-t1869-1-agent-jobs-carry-the-whole-definition-and-do-not-start-over-the-limit.md)、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。
@@ -127,7 +127,14 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - 依頼の認可と実行を分ける: devはworker（自分のrunの分）・人・inbox・planner、hold-outとproductionは人・inbox・planner、同じキーの再実行は人とinboxだけができる。
   読み取りはworkerには自分のrunの分だけを見せる。
   capabilityの表は[Authorization](authorization.md)が持ち、要るcapabilityは`domain::authorization::eval_request_needs`が決める。
-- ケースのラベルの変更と`disputed`の解除はコマンドを持たず、人とinbox・plannerがtaskで行う。
+- queue側のproductionの集合は`--set`で全体だけを選ぶ（`EvalRequest::set`）。
+  `--cases`（splitのケースの部分集合）とは別の入力で、同時の指定はCLIと`AgentEvals`の両方が理由つきで拒む。
+  集合を選ぶ依頼はproductionの周で`cases`を持たず、周のケースの集合のdigestは選んだ集合の全体のもの（作り直しで飛ばしたケースがあればその残り）になる。
+  hold-outの1回の制限は集合ごとに効き、2回目は人の`--rerun`だけで流せる。
+  周は開始の時の集合（ラベルと人の決定）で採点し、引き取ったsupervisorも同じ時点までのeventで集合を読み直す（`record::Started::set_through`）ので、開始の後の人の決定は引き継ぎの有無に依らずその周を変えず、次の周から効く。
+- productionの集合の作成の依頼（`agent cases`）と人の決定（`agent decide`）は人・inbox・plannerの`eval.cases`で、workerとsupervisorは`authorization_denied`になる。
+  supervisorは依頼された集合を作るだけで、自分では依頼しない。
+- repositoryの一覧のケースのラベルの変更と`disputed`の解除はコマンドを持たず、人とinbox・plannerがtaskで行う。
 
 ## 記録と成績の作り直し
 
@@ -174,9 +181,36 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 
 ## productionのケースと見張り
 
-- `dagq agent cases production <agent>`は、`review_started`・`review_finished`のeventとrunの差分（`git diff <base>...<head>`）から、そのagentが選ばれたreviewをケースにする。ラベルは改善する側（Claude）と別のprovider（今はCodex）のjobが規則の本文だけで付け、本番の判定と食い違うものは`disputed`にして人に回す（inboxのask）。
-- 作った集合はqueue側に置き、hold-outとして1回流した後、repositoryの`production.json`に足すのはtaskで行う。
-- 見張り: supervisorは、採用した定義（landing branchの定義のdigest）ごとに、前回の見張り（`agent_eval_watch_due`）の後に`new_reviews`件の本番のreviewがたまったか`interval_days`が過ぎたら、`agent_eval_watch_due`のfindingを記録するだけで、自分では依頼しない。
+本番のreviewからケースの集合を作り、queue側に置いてhold-outとして流す。
+入口は依頼と読み取りが`application::agent_cases`の`AgentCaseSets`、作るのが`application::supervise::agent_cases`、eventから集合を畳むのが`domain::agent_eval::production`（eventの種類と欄はそのdoc comment）。
+
+- 1集合ずつ、runのslotの外で、古い依頼から作る。
+  集合を作るsupervisorは1つで、取るのも居なくなった持ち主から引き取るのも1つの書き込みのtransaction（`EvalRounds::take_case_set`、`agent_cases_taken`）。
+  ほかのsupervisorは持ち主が生きている間その集合に触らないので、2つが同じケースにjobを起動したりtreeを共有したりしない。
+  引き取ったsupervisorは、前の持ち主のjobが引き継ぎで止められた後、ラベルの無いケースを付け直す。
+- 準備: landing branchのcommitの定義とケースの一覧から、規則コード・`k`・規則の文書のpathと、規則コードごとの規則の場所の対応を決め（`production::frame`）、期間の`review_started`（`subagents`がそのagentを選んだもの）と同じrunとattemptの`review_finished`（そのagentの判定）から、`<base>...<head>`の差分を内容のhashで集合のpatchに書く。
+  baseかheadのcommitがrepositoryのどのrefからも辿れないreviewは、objectが残っていても（branchを消した後、GCの前）理由つきで飛ばす（`Repository::reachable_commit`）。
+  差分が読めないreviewも理由つきで飛ばし、1つのreviewが集合と後の依頼を止めない。
+  reviewが多すぎる依頼は作らず理由を記録し、人・inbox・plannerが期間を狭めて依頼し直す（上限は`application::supervise::agent_cases`のmodule doc）。
+- ラベル: ケースごとに、`[roles.review]`と別のprovider（reviewがClaudeならCodex）のagentのjobを1本起動する。
+  起動経路はevalのagentのjobと同じ（`agent_job::build`・`AgentProvider::agent_job_command`、`headless_jobs`の`agent_eval`）で、ケースのtreeからは全てのagentの定義とevalのケースを消す。
+  jobの「定義」は規則の文書のpathと、規則コードごとの規則の場所だけ（`production::label_definition`）で、定義の検査項目の文は渡さない。
+  規則の文書の本文は規則コードを持たないことがあるので、コードと場所の対応が無いとjobはどの違反にどのコードを付けるか決められない。
+  コードと場所の対応はケースを作る側がケースの一覧に書き（`CaseFile::rules`）、一覧の対応は改善する定義から作らない。
+  一覧に無いコードだけ、定義の行のうちそのコードを名指す行のlinkの先（文書と節）を使い、定義の検査項目の文は使わない。
+  対応はlanding branchのcommitから読むが、jobが読む規則の本文はケースのtree（reviewのbaseにその差分を当てたもの）の文書で、landing branchの文書ではない。
+  このため本文はそのreviewの時の規則で、差分が規則の文書を変えていれば変えた後の本文になる。
+  本番の判定はラベルにしない（その日の定義が出したもの）。
+  providerが使えない間はjobを起動せず待ち、壁で止まったjobはproviderを控えてそのケースをやり直す。
+- 組み立て: 全てのケースのラベルのjobが終わったら（判定の無いjobと起動できなかったjobはラベルの無いケースとして理由を記録する）、ラベルの付いたケースだけで集合のファイルを作り、digestを`agent_cases_built`に記録する。
+  ラベルの無いケースと作り直せないケースは集合に入れず、`agent_cases_built`に理由を残す。
+  ラベルと本番の判定が食い違うケースは`disputed`の候補で、1つの`decide`のask（最初の候補のreviewのtaskに付く）が人の決定（`agent decide`）を求める。
+  決定はラベルになり`disputed`を外す。
+- 集合のファイル（queueのdirの`agent-cases/<set id>/`の`cases.json`と`patches/`）はeventとgitから作り直せるビューで（`application::agent_cases::view`）、`agent eval --set`の周はこれを作り直してから読む。
+  作り直しは、まずbaseかheadがrefから辿れないケースを、patchのファイルが残っていても理由つきで飛ばす（ケースのtreeはbaseから作り、ビューはファイルの有無で変わらない）。
+  残りのケースは内容のhashが合うpatchのファイルを使い、無ければ差分から書き直し、読めない・内容が変わった・UTF-8の文でない差分のケースは理由つきで飛ばす。
+- 集合をhold-outとして1回流した後、repositoryの`production.json`に足すのはtaskで行う。
+- 見張り（予定）: supervisorは、採用した定義（landing branchの定義のdigest）ごとに、前回の見張り（`agent_eval_watch_due`）の後に`new_reviews`件の本番のreviewがたまったか`interval_days`が過ぎたら、`agent_eval_watch_due`のfindingを記録するだけで、自分では依頼しない。
 
 ## 道具の宣言
 

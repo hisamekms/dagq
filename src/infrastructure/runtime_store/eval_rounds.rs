@@ -2,11 +2,13 @@
 //! ADR-t1728-1 decision 9): the start of a round and its take-up are each
 //! one write transaction over the queue's `agent_eval_*` events, so of two
 //! supervisors on one queue only one starts a round, and a running round
-//! changes hands only from an owner that is gone.
+//! changes hands only from an owner that is gone. A production set of an
+//! agent's cases is taken the same way (`agent_cases_taken`).
 
 use super::run_log::queue_event;
 use super::*;
 use crate::application::EvalRounds;
+use crate::domain::agent_eval::production::{self, Take};
 use crate::domain::agent_eval::round::owner_gone;
 
 /// The queue's events of the eval of round `?1` of the kinds `?2` (a JSON
@@ -134,6 +136,69 @@ impl SqliteQueue {
     }
 }
 
+/// The queue's events of production set `?1` of the kinds `?2`.
+const OF_SET: &str = "kind IN (SELECT value FROM json_each(?2))
+     AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+     AND json_extract(payload,'$.set_id') = ?1";
+
+impl SqliteQueue {
+    /// [`EvalRounds::take_case_set`].
+    pub fn take_case_set(
+        &self,
+        set_id: i64,
+        token: &str,
+        alive: &dyn Fn(u32) -> bool,
+    ) -> Result<bool> {
+        let kind = EventKind::AgentCasesTaken;
+        crate::domain::check_event_target(kind, None, None)?;
+        let now = self.generators.clock.now();
+        let payload = json!({"set_id": set_id, "supervisor": token});
+        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let settled: bool = tx.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM run_events WHERE {OF_SET})"),
+            params![
+                set_id,
+                kinds(&[EventKind::AgentCasesBuilt, EventKind::AgentCasesRefused])?
+            ],
+            |r| r.get(0),
+        )?;
+        let owner: Option<Option<String>> = tx
+            .query_row(
+                &format!(
+                    "SELECT json_extract(payload,'$.supervisor') FROM run_events
+                     WHERE {OF_SET} ORDER BY id DESC LIMIT 1"
+                ),
+                params![set_id, kinds(&[kind])?],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let owner = owner.flatten();
+        let registration: Option<(Option<i64>, u32)> = match &owner {
+            Some(owner) => tx
+                .query_row(
+                    "SELECT heartbeat_at, pid FROM supervisors WHERE token = ?1",
+                    [owner],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?,
+            None => None,
+        };
+        let registration = registration
+            .and_then(|(heartbeat, pid)| heartbeat.map(|heartbeat| (heartbeat, alive(pid))));
+        let from = match production::take(settled, owner.as_deref(), token, registration, now) {
+            Take::Settled | Take::Leave => return Ok(false),
+            Take::Keep => return Ok(true),
+            Take::Take { from } => from,
+        };
+        let mut payload = payload;
+        payload["from"] = json!(from);
+        queue_event(&tx, kind, &payload)?;
+        tx.commit()?;
+        Ok(true)
+    }
+}
+
 impl EvalRounds for SqliteQueue {
     fn settle_eval_round(
         &self,
@@ -150,6 +215,9 @@ impl EvalRounds for SqliteQueue {
         alive: &dyn Fn(u32) -> bool,
     ) -> Result<bool> {
         SqliteQueue::take_up_eval_round(self, eval_id, token, alive)
+    }
+    fn take_case_set(&self, set_id: i64, token: &str, alive: &dyn Fn(u32) -> bool) -> Result<bool> {
+        SqliteQueue::take_case_set(self, set_id, token, alive)
     }
 }
 

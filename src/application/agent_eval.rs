@@ -47,10 +47,30 @@ pub struct EvalRequest {
     pub k: Option<u32>,
     /// `--cases`: the ids of the split's cases to run; none runs them all.
     pub cases: Option<Vec<String>>,
+    /// `--set`: a production set of the queue's side (the id of its
+    /// request, `agent cases`), run whole as production; never with
+    /// `cases`, which picks a part of a split of the repository's lists.
+    pub set: Option<i64>,
     /// `--rerun`: run a held-out set whose key ran already (a person's, or
     /// the inbox's at a person's word).
     pub rerun: bool,
 }
+
+impl EvalRequest {
+    /// The split the round runs: production for a set of the queue's side,
+    /// else `--split`.
+    pub fn split(&self) -> Split {
+        if self.set.is_some() {
+            Split::Production
+        } else {
+            self.split
+        }
+    }
+}
+
+/// Why `--set` and `--cases` are refused together: a set is run whole, and
+/// a part of it would be a key of its own.
+pub const SET_WITH_CASES: &str = "--set runs a production set whole and takes no --cases: name the set alone, or a split's cases without --set";
 
 /// The eval's commands of one actor on one store.
 pub struct AgentEvals<'a> {
@@ -98,16 +118,24 @@ impl<'a> AgentEvals<'a> {
         if request.cases.as_ref().is_some_and(Vec::is_empty) {
             bail!("--cases names no case");
         }
+        if request.set.is_some() && request.cases.is_some() {
+            bail!(SET_WITH_CASES);
+        }
+        if request.set.is_some() && request.split == Split::Holdout {
+            bail!("--set runs a production set: it takes no --split holdout");
+        }
+        let split = request.split();
         let resource = self.own();
-        for need in eval_request_needs(held_out(request.split), request.rerun) {
+        for need in eval_request_needs(held_out(split), request.rerun) {
             self.gate.authorize(self.store, need, &resource)?;
         }
         let actor = self.actor();
         let recorded = Request {
             agent: request.agent.clone(),
-            split: request.split,
+            split,
             k: request.k,
             cases: request.cases.clone(),
+            set: request.set,
             rerun: request.rerun,
             requested_by: actor.role().as_str().to_owned(),
             requested_by_id: actor.actor_id().to_owned(),
@@ -121,6 +149,7 @@ impl<'a> AgentEvals<'a> {
             "eval_id": id,
             "agent": recorded.agent,
             "split": recorded.split.as_str(),
+            "set": recorded.set,
             "status": "waiting",
         }))
     }
@@ -190,6 +219,7 @@ fn summary(round: &Round) -> Value {
         "eval_id": round.id,
         "agent": request.agent,
         "split": request.split.as_str(),
+        "set": request.set,
         "status": status(round),
         "requested_by": request.requested_by,
         "run_id": request.run_id,
@@ -406,6 +436,7 @@ mod tests {
                     split: Split::Dev,
                     k: None,
                     cases: None,
+                    set: None,
                     rerun: false,
                     requested_by: "user".into(),
                     requested_by_id: "user".into(),
@@ -451,6 +482,84 @@ mod tests {
             json!({"agent": "demo", "status": "completed", "verdict": verdict,
                     "reasons": [{"text": text, "codes": codes}], "summary": "s"}),
         )
+    }
+
+    /// A store of the eval's events in memory.
+    #[derive(Default)]
+    struct Store {
+        events: std::sync::Mutex<Vec<Value>>,
+    }
+
+    impl DenialLog for Store {
+        fn record_denial(&self, _: Value) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl EvalStore for Store {
+        fn record_eval_event(&self, _: EventKind, payload: Value) -> Result<EventId> {
+            let mut events = self.events.lock().unwrap();
+            events.push(payload);
+            Ok(EventId::new(i64::try_from(events.len()).unwrap()))
+        }
+        fn eval_events(&self) -> Result<Vec<RunEvent>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn eval(split: Split, cases: Option<Vec<String>>, set: Option<i64>) -> EvalRequest {
+        EvalRequest {
+            agent: "adr-rules".into(),
+            split,
+            k: None,
+            cases,
+            set,
+            rerun: false,
+        }
+    }
+
+    /// A production set of the queue's side is chosen whole by `--set`,
+    /// apart from `--cases`: the two together are refused with why, the
+    /// set's request is a production round with no cases, held out as
+    /// production is, and a split's `--cases` goes on as it did.
+    #[test]
+    fn a_set_is_run_whole_and_never_with_cases() {
+        use crate::domain::StaticPolicy;
+        use crate::domain::actor::ActorRole;
+        let store = Store::default();
+        let user = ActorContext::instance(ActorRole::User, "1");
+        let evals = AgentEvals::new(&store, &user, &StaticPolicy);
+        let error = evals
+            .request(&eval(Split::Dev, Some(vec!["a".into()]), Some(3)))
+            .unwrap_err();
+        assert_eq!(error.to_string(), SET_WITH_CASES);
+        assert!(evals.request(&eval(Split::Holdout, None, Some(3))).is_err());
+        assert!(store.events.lock().unwrap().is_empty());
+        let asked = evals.request(&eval(Split::Dev, None, Some(3))).unwrap();
+        assert_eq!(asked["split"], "production");
+        assert_eq!(asked["set"], 3);
+        let recorded = Request::read(&store.events.lock().unwrap()[0]).unwrap();
+        assert_eq!(recorded.cases, None);
+        assert_eq!(recorded.set, Some(3));
+        assert_eq!(recorded.split, Split::Production);
+        // A part of a split is still `--cases`, without a set.
+        evals
+            .request(&eval(Split::Holdout, Some(vec!["a".into()]), None))
+            .unwrap();
+        let recorded = Request::read(&store.events.lock().unwrap()[1]).unwrap();
+        assert_eq!(recorded.set, None);
+        assert_eq!(recorded.cases, Some(vec!["a".to_owned()]));
+        // A worker's set is a production round, which it may not ask for.
+        let worker = ActorContext::worker(
+            &crate::domain::RunId::new("r1").unwrap(),
+            crate::domain::TaskId::new(1),
+        );
+        let evals = AgentEvals::new(&store, &worker, &StaticPolicy);
+        let error = evals.request(&eval(Split::Dev, None, Some(3))).unwrap_err();
+        assert!(
+            error.to_string().contains("eval.request_held_out"),
+            "{error:#}"
+        );
     }
 
     /// The scores of a complete round: the four values against the

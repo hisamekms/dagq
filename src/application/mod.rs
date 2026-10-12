@@ -7,6 +7,7 @@
 //! the dependency view of `list` and `graph` stay here.
 
 pub mod actor_executor;
+pub mod agent_cases;
 pub mod agent_eval;
 pub mod agent_job;
 pub mod areas;

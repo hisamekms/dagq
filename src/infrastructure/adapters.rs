@@ -1732,6 +1732,29 @@ impl GitRepository {
         })
     }
 
+    /// Whether `commit` is in the repository and some ref reaches it
+    /// (`for-each-ref --contains`): a commit whose branch was deleted is
+    /// not, even while its object is kept until a garbage collection.
+    pub fn reachable_commit(&self, commit: &str) -> Result<bool> {
+        if !self.has_commit(commit)? {
+            return Ok(false);
+        }
+        let (status, stdout, stderr) = capture(
+            Command::new(&self.git).arg("-C").arg(&self.root).args([
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                "--contains",
+                commit,
+            ]),
+            Duration::from_secs(60),
+        )?;
+        if !status.success() {
+            bail!("git for-each-ref --contains {commit} failed ({status}): {stderr}");
+        }
+        Ok(!stdout.trim().is_empty())
+    }
+
     /// Whether the object store has the commit `commit`.
     pub fn has_commit(&self, commit: &str) -> Result<bool> {
         let (status, _, stderr) = capture(
@@ -2625,6 +2648,9 @@ impl Repository for GitRepository {
     }
     fn has_commit(&self, commit: &str) -> Result<bool> {
         GitRepository::has_commit(self, commit)
+    }
+    fn reachable_commit(&self, commit: &str) -> Result<bool> {
+        GitRepository::reachable_commit(self, commit)
     }
     fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
         GitRepository::on_first_parent_line(self, commit, head)

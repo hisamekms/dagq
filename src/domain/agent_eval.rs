@@ -11,6 +11,7 @@ use std::fmt;
 use serde_json::{Map, Value};
 
 pub mod leak;
+pub mod production;
 pub mod programs;
 pub mod record;
 pub mod review;
@@ -200,7 +201,8 @@ impl Case {
 }
 
 /// One file of `evals/`: `agent`, `role`, `codes`, `k` and `cases`, each
-/// required; the split is the file's name, not a field.
+/// required, and `rules`, which may be left out; the split is the file's
+/// name, not a field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaseFile {
     /// The directory's `<name>`; another name is a problem.
@@ -211,6 +213,13 @@ pub struct CaseFile {
     pub codes: Vec<String>,
     /// The runs of each case in a round, 1 or more.
     pub k: u32,
+    /// `rules`: where each code's rule is in the rules' documents (a
+    /// document, its section and the item), by code, as the side that makes
+    /// the cases writes it, never the agent's definition. The job that
+    /// labels a production case is told it, since the documents need not
+    /// name the codes ([`production::Frame`]). Each key is one of `codes`;
+    /// a code may be left out.
+    pub rules: BTreeMap<String, String>,
     pub cases: Vec<Case>,
 }
 
@@ -383,10 +392,35 @@ pub fn read_case_file(
         }
         role
     });
-    let (Some(role), Some(codes), Some(k), Some(cases)) = (role, codes, k, cases) else {
+    let rules = match object.get("rules") {
+        None | Some(Value::Null) => Some(BTreeMap::new()),
+        Some(value) => value.as_object().and_then(|rules| {
+            rules
+                .iter()
+                .map(|(code, place)| Some((code.clone(), place.as_str()?.to_owned())))
+                .collect::<Option<BTreeMap<_, _>>>()
+        }),
+    };
+    if rules.is_none() {
+        problems.push(file_problem(ProblemKind::WrongType {
+            field: "rules".to_owned(),
+            expected: "an object of strings by code",
+        }));
+    }
+    let (Some(role), Some(codes), Some(k), Some(cases), Some(rules)) =
+        (role, codes, k, cases, rules)
+    else {
         return Err(problems);
     };
     let code_set: BTreeSet<String> = codes.iter().cloned().collect();
+    let unknown: Vec<String> = rules
+        .keys()
+        .filter(|code| !code_set.contains(*code))
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        problems.push(file_problem(ProblemKind::UnknownCodes(unknown)));
+    }
     let mut seen = BTreeSet::new();
     let mut read = Vec::new();
     for (index, value) in cases.iter().enumerate() {
@@ -414,6 +448,7 @@ pub fn read_case_file(
             split,
             codes,
             k,
+            rules,
             cases: read,
         })
     } else {
@@ -782,6 +817,42 @@ mod tests {
             BTreeSet::from(["A-152".to_owned()])
         );
         assert!(b.review().unwrap().expected.near_miss);
+    }
+
+    /// `rules` says where each code's rule is: optional, an object of
+    /// strings, its keys among `codes`.
+    #[test]
+    fn a_lists_rules_name_where_its_codes_are() {
+        let with = |rules: Value| {
+            let mut list: Value =
+                serde_json::from_str(&list(vec![case("gen-a", "generated", PATCH, violation())]))
+                    .unwrap();
+            list["rules"] = rules;
+            read_case_file("adr-rules", "dev.json", &list.to_string(), &patches())
+        };
+        let file = with(serde_json::json!({"A-150": "documents.md「ADR」1つ目の箇条"})).unwrap();
+        assert_eq!(
+            file.rules,
+            BTreeMap::from([(
+                "A-150".to_owned(),
+                "documents.md「ADR」1つ目の箇条".to_owned()
+            )])
+        );
+        assert!(with(Value::Null).unwrap().rules.is_empty());
+        assert_eq!(
+            kinds(with(serde_json::json!({"X-1": "elsewhere"}))),
+            [(None, ProblemKind::UnknownCodes(vec!["X-1".to_owned()]))]
+        );
+        assert_eq!(
+            kinds(with(serde_json::json!(["A-150"]))),
+            [(
+                None,
+                ProblemKind::WrongType {
+                    field: "rules".to_owned(),
+                    expected: "an object of strings by code"
+                }
+            )]
+        );
     }
 
     #[test]

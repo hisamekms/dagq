@@ -109,6 +109,7 @@ use contexts::{
 };
 
 mod adopt;
+mod agent_cases;
 mod agent_eval;
 mod background;
 mod broker_relay;
@@ -418,6 +419,9 @@ pub struct Layout {
     /// `agent-evals/` of the queue: one directory per round of the eval of
     /// an agent (ADR-t1728-1).
     pub agent_evals_dir: PathBuf,
+    /// `agent-cases/` of the queue: one directory per production set of an
+    /// agent's cases (ADR-t1728-1 (g)).
+    pub agent_cases_dir: PathBuf,
     /// `review-programs/` of the queue: one directory per run, where the
     /// program reviews of its review write the scripts they run, outside
     /// what its worker can write (ADR-t1895-2 decision 2).
@@ -992,6 +996,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         stall: settings.stall,
         wrapper_setting_warned: false,
         agent_eval: None,
+        agent_cases: None,
         job_ends: JobEnds::default(),
         jobs_swept: false,
         queue_hold: None,
@@ -1167,6 +1172,9 @@ struct Supervisor<'a> {
     /// The round of the eval of an agent this process runs (ADR-t1728-1
     /// decision 9): one at a time, queue-wide, outside the run slots.
     agent_eval: Option<agent_eval::EvalRound>,
+    /// The production set of an agent's cases this process labels
+    /// (ADR-t1728-1 (g)): one at a time, queue-wide, outside the run slots.
+    agent_cases: Option<agent_cases::CaseLabeling>,
     /// The ends of this process's headless jobs still to be written: the
     /// outcomes of their `headless_jobs` rows (task 443), and the jobs
     /// abandoned, written as `headless_job_stopped` with their Execution.
@@ -1632,6 +1640,7 @@ impl Supervisor<'_> {
     fn abandon_jobs(&mut self) {
         self.planning.abandon_jobs();
         self.abandon_agent_eval();
+        self.abandon_agent_cases();
         self.claim.slots.abandon_jobs();
     }
     fn drive(&mut self, options: &LoopSettings) -> Result<Value> {
@@ -1863,6 +1872,7 @@ impl Supervisor<'_> {
                             planning.goal_review_pass(env, false);
                         });
                         self.agent_eval_pass(false);
+                        self.agent_cases_pass(false);
                         self.tick(true);
                         thread::sleep(options.tick);
                         continue;
@@ -1951,6 +1961,8 @@ impl Supervisor<'_> {
             // The eval's rounds (ADR-t1728-1 decision 9): outside the run
             // slots, one at a time, started only by a supervisor at work.
             progressed |= self.agent_eval_pass(starting);
+            // The production sets asked for (ADR-t1728-1 (g)), the same way.
+            progressed |= self.agent_cases_pass(starting);
             if self.claim.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space (with the rest of one another job
@@ -1968,6 +1980,7 @@ impl Supervisor<'_> {
                     || self.host.release.running()
                     || self.planning.busy()
                     || self.agent_eval_busy()
+                    || self.agent_cases_busy()
                     || self.landing.rechecks.running()
                     || self.host.cleanup.for_disk()
                     || self.host.cleanup.deferred()

@@ -8,6 +8,13 @@
     "A-144",
     "A-145"
   ],
+  "rules": {
+    "A-139": "docs/development/migrations.md「足し方」の1つ目の箇条",
+    "A-140": "docs/development/migrations.md「足し方」の2つ目の箇条",
+    "A-141": "docs/development/migrations.md「番号」の1文目",
+    "A-144": "docs/development/migrations.md「リリース済みは不変」の1つ目の箇条の1文目と2つ目の箇条",
+    "A-145": "docs/development/migrations.md「リリース済みは不変」の1つ目の箇条の2文目"
+  },
   "k": 3,
   "cases": [
     {

@@ -80,6 +80,13 @@ macro_rules! event_kinds {
 }
 
 event_kinds! {
+    AgentCasesBuilt => "agent_cases_built",
+    AgentCasesDecided => "agent_cases_decided",
+    AgentCasesLabeled => "agent_cases_labeled",
+    AgentCasesPrepared => "agent_cases_prepared",
+    AgentCasesRefused => "agent_cases_refused",
+    AgentCasesRequested => "agent_cases_requested",
+    AgentCasesTaken => "agent_cases_taken",
     AgentEvalCaseChecked => "agent_eval_case_checked",
     AgentEvalFinished => "agent_eval_finished",
     AgentEvalRefused => "agent_eval_refused",
@@ -450,6 +457,15 @@ impl EventKind {
                 | AgentEvalRunFinished
                 | AgentEvalCaseChecked
                 | AgentEvalFinished
+                // The production cases of an agent (ADR-t1728-1 (g)): the
+                // requests, labels, sets and decisions, by `set_id`.
+                | AgentCasesRequested
+                | AgentCasesRefused
+                | AgentCasesPrepared
+                | AgentCasesLabeled
+                | AgentCasesBuilt
+                | AgentCasesDecided
+                | AgentCasesTaken
                 // A command the authorizer refused (ADR-t728-1 decision 5).
                 | AuthorizationDenied
                 | ObserveStarted
@@ -1174,6 +1190,13 @@ mod tests {
     #[test]
     fn each_kind_writes_the_text_it_always_wrote() {
         let table = [
+            (EventKind::AgentCasesBuilt, "agent_cases_built"),
+            (EventKind::AgentCasesDecided, "agent_cases_decided"),
+            (EventKind::AgentCasesLabeled, "agent_cases_labeled"),
+            (EventKind::AgentCasesPrepared, "agent_cases_prepared"),
+            (EventKind::AgentCasesRefused, "agent_cases_refused"),
+            (EventKind::AgentCasesRequested, "agent_cases_requested"),
+            (EventKind::AgentCasesTaken, "agent_cases_taken"),
             (EventKind::AgentEvalCaseChecked, "agent_eval_case_checked"),
             (EventKind::AgentEvalFinished, "agent_eval_finished"),
             (EventKind::AgentEvalRefused, "agent_eval_refused"),

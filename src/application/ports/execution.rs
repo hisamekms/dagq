@@ -186,7 +186,7 @@ pub struct AgentJobLaunch {
 /// owner, the supervisor whose token its latest `agent_eval_started` or
 /// `agent_eval_taken_up` names. Each change is one write transaction, so
 /// two supervisors on one queue (ADR-0054 decision 3) never both start or
-/// take up a round. Internal to execution and landing: only the
+/// take up a round, nor both make a production set. Internal to execution and landing: only the
 /// supervisor's rounds use it.
 pub trait EvalRounds {
     /// Record `kind`, `agent_eval_started` (its `payload` names the owner
@@ -211,6 +211,14 @@ pub trait EvalRounds {
         token: &str,
         alive: &dyn Fn(u32) -> bool,
     ) -> Result<bool>;
+    /// Make `token` the owner of production set `set_id`
+    /// (`agent_cases_taken`), the one supervisor that prepares, labels and
+    /// builds it (ADR-t1728-1 (g)), while it is neither built nor refused:
+    /// a set nobody took is taken, `token`'s own is kept (`true`, nothing
+    /// recorded), and another's only from an owner that is gone
+    /// ([`crate::domain::agent_eval::production::take`]); `false`
+    /// otherwise.
+    fn take_case_set(&self, set_id: i64, token: &str, alive: &dyn Fn(u32) -> bool) -> Result<bool>;
 }
 
 /// Provider-specific CLI construction is kept outside supervisor orchestration.
@@ -1459,6 +1467,12 @@ pub trait Repository {
     }
     /// Whether the repository has the commit `commit`.
     fn has_commit(&self, commit: &str) -> Result<bool> {
+        let _ = commit;
+        anyhow::bail!("this repository keeps no history")
+    }
+    /// Whether the repository has `commit` and some ref reaches it; a
+    /// commit only its kept object holds (its branch deleted) is not.
+    fn reachable_commit(&self, commit: &str) -> Result<bool> {
         let _ = commit;
         anyhow::bail!("this repository keeps no history")
     }

@@ -51,6 +51,10 @@ pub struct Request {
     /// `--cases`: the ids of the cases to run, in the split's list; none
     /// runs every case of it.
     pub cases: Option<Vec<String>>,
+    /// `--set`: the production set of the queue's side the round runs
+    /// whole (its id, [`super::production`]), in place of the
+    /// repository's `production.json`; `cases` is then `None`.
+    pub set: Option<i64>,
     /// `--rerun`: run a held-out set whose key ran already.
     pub rerun: bool,
     /// The requester's role and actor id.
@@ -70,6 +74,7 @@ impl Request {
             "split": self.split.as_str(),
             "k": self.k,
             "cases": self.cases,
+            "set": self.set,
             "rerun": self.rerun,
             "requested_by": self.requested_by,
             "requested_by_id": self.requested_by_id,
@@ -92,6 +97,7 @@ impl Request {
                     .map(str::to_owned)
                     .collect()
             }),
+            set: payload["set"].as_i64(),
             rerun: payload["rerun"].as_bool().unwrap_or(false),
             requested_by: text("requested_by").unwrap_or_default(),
             requested_by_id: text("requested_by_id").unwrap_or_default(),
@@ -117,6 +123,12 @@ pub struct Started {
     pub max_cost_usd: f64,
     pub concurrency: usize,
     pub threshold: f64,
+    /// For a round of a production set of the queue's side (`--set`), the
+    /// id of the queue's event its set was read up to when it started: a
+    /// supervisor that takes the round up reads the set's labels and
+    /// decisions up to the same event, so the round is scored on the
+    /// expectations it started with. `None` for any other round.
+    pub set_through: Option<i64>,
 }
 
 impl Started {
@@ -141,6 +153,7 @@ impl Started {
             max_cost_usd: payload["max_cost_usd"].as_f64()?,
             concurrency: usize::try_from(payload["concurrency"].as_u64()?).ok()?,
             threshold: payload["threshold"].as_f64()?,
+            set_through: payload["set_through"].as_i64(),
         })
     }
 
@@ -426,6 +439,7 @@ mod tests {
             split,
             k: None,
             cases: None,
+            set: None,
             rerun: false,
             requested_by: "user".into(),
             requested_by_id: "user".into(),
@@ -624,6 +638,17 @@ mod tests {
         assert_eq!(rounds[0].left(), vec![("b".to_owned(), 0)]);
     }
 
+    /// A round of a production set keeps the event its set was read up to,
+    /// which a supervisor that takes it up reads the set at again; any
+    /// other round has none.
+    #[test]
+    fn a_set_rounds_start_keeps_where_its_set_was_read() {
+        let mut payload = started(1, "claude", "d");
+        assert_eq!(Started::read(&payload).unwrap().set_through, None);
+        payload["set_through"] = json!(42);
+        assert_eq!(Started::read(&payload).unwrap().set_through, Some(42));
+    }
+
     #[test]
     fn a_request_reads_back_as_recorded() {
         let request = Request {
@@ -631,6 +656,7 @@ mod tests {
             split: Split::Dev,
             k: Some(2),
             cases: Some(vec!["a".into(), "b".into()]),
+            set: None,
             rerun: false,
             requested_by: "worker".into(),
             requested_by_id: "worker:r1".into(),

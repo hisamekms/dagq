@@ -39,6 +39,7 @@ task 443。supervisorが起動するheadlessのjob（runのreview、終わった
   古い行と古いバイナリが書く行はnullで、そのExecutionは未計測になる。
 - agentのevalのjob（[Agent eval](../agent-eval.md)）は`agent`のjobで、runのreviewの段のagentのjobと同じ時間の上限とやり直しで動き、`kind`を`agent_eval`にしてrunのreviewのjobと取り違えない。
   runを持たず、`label`がagent・周・ケース・回を示す（`headless_job::AGENT_EVAL`のdoc comment）。
+  productionのケースの集合のラベルのjob（[Agent eval](../agent-eval.md#productionのケースと見張り)）もこの経路と`kind`で動く（`label`の形は同じdoc comment）。
   その前にケースに流すprogramは`program`のjobで、`kind`を`agent_eval_program`にし、runのreviewのprogramのjobと同じ時間の上限で動く。
 - jobの時間の上限（`Supervisor::job_timeout`）: runのreviewの段のjobは種類ごとの`[review.jobs]`の値（[Run environment](run-environment.md)）、無ければ`agent`はjobを動かすproviderの`AgentProvider::review_timeout`、`program`はreviewerのそれ。
   ほかのjob（復旧job・plan review・goal review）は`[review.jobs]`を読まず、reviewerの`review_timeout`。

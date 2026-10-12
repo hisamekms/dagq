@@ -197,6 +197,15 @@ pub fn agent_evals_dir(db: &Path) -> PathBuf {
         .join(AGENT_EVALS_DIR_NAME)
 }
 
+/// `agent-cases/` next to the database: one directory per production set
+/// of an agent's cases, with its case list and patches, a view made again
+/// from the queue's events and Git (ADR-t1728-1 (g)).
+pub fn agent_cases_dir(db: &Path) -> PathBuf {
+    QueueLocation::explicit(db)
+        .queue_dir
+        .join(crate::domain::agent_eval::production::SETS_DIR)
+}
+
 /// `review-programs/` next to the database: one directory per run, where
 /// the program reviews of its review write the scripts they run from the
 /// landing branch's commit, outside what the run's worker can write

@@ -92,7 +92,7 @@ serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`�
 | `finding_record` | `dagq finding record`と同じ: `kind`・対象を1つ（`task`・`run`・`goal`か`queue: true`）・`subject`（既定は空）・`summary`・`detail`・`impact`・`evidence`（eventのidの配列）・`propose` | `dagq finding record`の出力（findingと`created`・`changed`） | `finding.record`（対象）。tokenを発行するAI actorのうち今のpolicyで持つのはobserverとinboxで、plannerとworkerとjobには無い。同じ種類・対象・subjectのopenかproposedのfindingへの合流（新しい根拠で回数と根拠を足し、新しいものが無ければ何も書かない）と根拠の検査は、CLIと同じ`record_finding`の1つのtransaction。`by`はprincipalのもの |
 | `finding_resolve` | `id`・`reason` | `dagq finding resolve`の出力 | `finding.resolve`。今のpolicyで持つのはobserver・inbox・plannerで、workerとjobには無い。`by`はprincipalのもの |
 | `finding_dismiss` | `id`・`reason`・`covered_by`（任意。`--covered-by`のtask ID。下の「CIの見張り」） | `dagq finding dismiss`の出力 | `finding.dismiss`。observerには無い（ADR-t1222-1決定2）。今のpolicyでこれを持つのはinboxとplannerで、workerとjobには無い |
-| `agent_eval`・`agent_results`・`agent_result` | `dagq agent eval`・`results`・`result`のoption | そのコマンドの出力 | `eval.*`。[Agent eval](agent-eval.md) |
+| `agent_`の`eval`・`results`・`result`・`cases`・`decide` | `dagq agent`の同名のoption | そのコマンドの出力 | `eval.*`。[Agent eval](agent-eval.md) |
 | `replan_propose` | `run`・`reason`・`evidence` | `dagq replan propose`の出力 | `replan.propose`（run）。workerは自分のrunだけ |
 | 読み取り（`list`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`marks`・`search`・`related`・`findings`・`goal_show`など） | そのコマンドのoption | そのコマンドの出力 | `queue.read`（queue）。全role。[読み取りのユースケース](#読み取りのユースケース) |
 

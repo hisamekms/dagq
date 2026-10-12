@@ -48,7 +48,10 @@ use crate::domain::{
 /// The queue as one use case of the service reads and changes it, written
 /// as the principal's actor.
 pub trait ServiceQueue:
-    DialogueStore + super::agent_eval::EvalStore + super::commands::replans::ReplanStore
+    DialogueStore
+    + super::agent_eval::EvalStore
+    + super::commands::replans::ReplanStore
+    + super::agent_cases::CaseSetStore
 {
     /// Task `id` as `dagq show` prints it: the whole detail with `full`,
     /// else its view with the last `events` events.
@@ -344,7 +347,32 @@ struct AgentEvalParams {
     #[serde(default)]
     cases: Option<Vec<String>>,
     #[serde(default)]
+    set: Option<i64>,
+    #[serde(default)]
     rerun: bool,
+}
+
+/// `agent_cases`' params: those of `dagq agent cases`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentCasesParams {
+    agent: String,
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+}
+
+/// `agent_decide`'s params: those of `dagq agent decide`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentDecideParams {
+    set: i64,
+    case: String,
+    verdict: String,
+    #[serde(default)]
+    codes: Vec<String>,
+    reason: String,
 }
 
 /// `agent_results`' params: those of `dagq agent results`.
@@ -425,9 +453,20 @@ fn run(
                     split,
                     k: p.k,
                     cases: p.cases,
+                    set: p.set,
                     rerun: p.rerun,
                 },
             )
+        }
+        UseCase::AgentCases => {
+            let p: AgentCasesParams = params(use_case, raw)?;
+            super::agent_cases::AgentCaseSets::new(&*store.0, actor, &StaticPolicy)
+                .request(&p.agent, p.since, p.until)
+        }
+        UseCase::AgentDecide => {
+            let p: AgentDecideParams = params(use_case, raw)?;
+            super::agent_cases::AgentCaseSets::new(&*store.0, actor, &StaticPolicy)
+                .decide(p.set, &p.case, &p.verdict, p.codes, &p.reason)
         }
         UseCase::AgentResults => {
             let p: AgentResultsParams = params(use_case, raw)?;
@@ -900,6 +939,17 @@ mod tests {
         }
     }
 
+    impl crate::application::agent_cases::CaseSetStore for Queue {
+        fn record_cases_event(&self, kind: EventKind, payload: Value) -> Result<EventId> {
+            let mut log = self.log.lock().unwrap();
+            log.push(json!({"cases_event": kind.as_str(), "payload": payload}));
+            Ok(EventId::new(i64::try_from(log.len()).unwrap()))
+        }
+        fn cases_events(&self) -> Result<Vec<RunEvent>> {
+            Ok(Vec::new())
+        }
+    }
+
     impl ServiceQueue for Queue {
         fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value> {
             Ok(json!({"id": id, "full": full, "events": events}))
@@ -1103,6 +1153,7 @@ mod tests {
         for params in [
             json!({"agent": "adr-rules", "split": "holdout"}),
             json!({"agent": "adr-rules", "split": "production"}),
+            json!({"agent": "adr-rules", "set": 7}),
             json!({"agent": "adr-rules", "rerun": true}),
         ] {
             let response =
@@ -1116,6 +1167,28 @@ mod tests {
             assert_eq!(denial["event"], "authorization_denied", "{params}");
             assert_eq!(denial["resource"]["kind"], "agent_eval");
         }
+        // A production set is never a worker's to ask for or decide
+        // (ADR-t1728-1 (g)).
+        for (use_case, params) in [
+            (UseCase::AgentCases, json!({"agent": "adr-rules"})),
+            (
+                UseCase::AgentDecide,
+                json!({"set": 1, "case": "c", "verdict": "clean", "reason": "r"}),
+            ),
+        ] {
+            let response = service.handle(&request(Some("worker"), use_case, params));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{use_case:?}"
+            );
+            let denial = backend.log.lock().unwrap().pop().unwrap();
+            assert_eq!(denial["event"], "authorization_denied");
+        }
+        assert_eq!(
+            UseCase::of_command(&["agent", "cases", "adr-rules"]),
+            Some(UseCase::AgentCases)
+        );
         let response = service.handle(&request(
             Some("worker"),
             UseCase::AgentResults,

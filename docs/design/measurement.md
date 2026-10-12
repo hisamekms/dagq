@@ -26,6 +26,7 @@ related:
   - design-supervisor-lifecycle-kpi
   - design-supervisor-lifecycle-report
   - design-supervisor-lifecycle-host-metrics
+  - design-measurement-commands
 ---
 
 # 計測
@@ -52,7 +53,8 @@ related:
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`。着地の検証は下の「着地の検証の対応表のcache」から読む |
-| agentのevalの記録 | evalの依頼・周・実行と費用・成績（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`で、周の状態と成績はこれだけから作り直す（`domain::agent_eval::record`）。queueのdirの`agent-evals/`は材料 |
+| agentのevalの記録 | evalの依頼・周・実行と費用・成績、productionのケースの集合の依頼・準備・ラベル・組み立てとdigest・disputedの人の決定（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`と`agent_cases_*`で、周と集合の状態はこれだけから作り直す（`domain::agent_eval::record`・`production`）。queueのdirの`agent-evals/`とラベルのjobの出力（`agent-cases/<set id>/labels/`）は材料 |
+| productionの集合のファイル | 集合のケースの一覧とpatch | ビュー | queueのdirの`agent-cases/<set id>/`の`cases.json`と`patches/`。`agent_cases_*`とgitの`<base>...<head>`の差分から作り直し（`application::agent_cases::view`）、commitが辿れないケースは理由つきで飛ばす |
 | queueのbrokerの記録 | 動いているbrokerが起動ごとに書き、probeとrelayの見張りが読む自分の記録（欄は`BrokerRecord`） | 材料 | `<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる） |
 | runのrelayの記録 | 開いたrunのrelay（containerを起動し直す材料。欄は`RelaySpec`）で、relayの見張りが読む | 材料 | `<queue dir>/relay/<run>.json`（寿命はrunのrelayを開いてから閉じるまで） |
 | run branchのbundle | containerのrunのrun branch 1本 | 材料 | run dir。executorが書き制御側が取り込む。cloneから作り直せる |
@@ -247,59 +249,7 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 
 ## コマンドの形と分類
 
-（ADR-t1662-3決定14〜19、[ADR-t2268-1](../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定5）
-
-- `[telemetry] command_detail = "program" | "shape" | "redacted"`（既定`shape`）。
-- shapeは部分（パイプ・`&&`・`||`・`;`で分けたもの）ごとに`lead`（先頭の予約語）・`assigns`（代入の名前）・`program`・`args`（`{flag: 名前, value?: digest}`・`{sub: 語}`・`{word: digest}`・`{plus: digest}`・`{after_dashdash: 数}`）。digestはSHA-256(`"dagq-cmd-v1\0"` + 語)の先頭16桁のhex。
-- 分類は台帳を作るときに、`dagq.toml`の`[[telemetry.commands]]`・宣言したprofileの既定の規則・runtimeの共通の規則（待ち・dagq・git）の順の列を上から当てる。
-  `dagq doctor`が効く列を出どころつきで出す。
-- **実装状況**: どれも未実装で、分類は記録の時に`domain::worktime`が付ける（[Source repository](supervisor-lifecycle/source-repository.md#cargo専用の計測)）。
-- 今の分類を規則で表す例（1〜3つ目はこのrepositoryの`dagq.toml`で2つ目は今の順を保つ上書き、ほかはRustのprofile）:
-
-```toml
-[[telemetry.commands]]
-class = "e2e"
-program = "cargo"
-flag_values = { "--test" = ["e2e"] }
-takes_value = ["--test"]
-
-[[telemetry.commands]]
-class = "llvm_cov"
-program = "cargo"
-sub = ["llvm-cov"]
-
-[[telemetry.commands]]
-class = "full_test"
-group = "test"
-program = "cargo"
-sub = ["test"]
-flag_values = { "--test" = ["it"] }
-none_of = ["--lib", "--bin", "--bins", "--doc", "--example", "--package", "-p", "-E"]
-takes_value = ["--test"]
-positional = "none"
-
-[[telemetry.commands]]
-class = "full_test"
-group = "test"
-program = "cargo"
-sub = ["test"]
-none_of = ["--test", "--lib", "--bin", "--bins", "--doc", "--example", "--package", "-p", "-E"]
-positional = "none"
-
-[[telemetry.commands]]
-class = "test"
-program = "cargo"
-sub = ["test"]
-```
-
-`cargo test --locked --test it`は3つ目の規則で`full_test`、`cargo test --locked --test plugin`は`plugin`が`["it"]`に無いので3つ目と4つ目（`--test`が在る）に一致せず5つ目で`test`になる。
-`positional`が除くのは規則の`sub`が一致した語だけなので、`cargo test runtime`（`runtime`はサブコマンドの位置に平文で残る）は3つ目と4つ目に一致せず`test`になる。
-台帳は部分ごとの分類も持ち、`integrate`と重なる検証の数（`full_tests`・`llvm_cov_runs`）は部分の分類から数える（`cargo llvm-cov … && cargo test --locked`は両方に数える）。
-`cargo nextest`とbuild・clippy・fmtも同じ形の規則でRustのprofileに入る。
-今と分け方が違う形: `--test e2e --test it`（今はe2e、この規則では`test`）と`nextest run --test it`の`full_test`（規則を足せば表せる）。
-差は段2の並走比較で説明する。
-落ちたtestの名前とpathは設定で有効にし、読み方は宣言したprofileのもの。
-profileの無い言語の雛形は同梱し、`dagq init`が案として出す。
+sessionのstepのコマンドの形（shape）と、台帳を作るときの分類の予定は[計測のコマンドの形と分類](measurement-commands.md)が持つ。
 
 ## 段と後続のtask
 

@@ -5,7 +5,9 @@
 //! A round runs outside the run slots, one per queue at once (the round
 //! that started and has not finished, read from the eval's events), the
 //! landing's dev before the oldest request. It reads the agent's
-//! definition and cases from the landing branch's commit, and for each run
+//! definition and cases from the landing branch's commit (a production set
+//! of the queue's side, `--set`, from that set's view, made again from its
+//! events and Git: [`crate::application::agent_cases::view`]), and for each run
 //! of a case starts one agent job ([`crate::application::agent_job`]) on
 //! `[roles.review]`'s provider through the headless jobs' one way
 //! ([`super::jobs`]): recorded in `headless_jobs` as `agent_eval`, under
@@ -152,6 +154,9 @@ struct Snapshot {
     list_k: u32,
     cases: Vec<Case>,
     patches: BTreeMap<String, String>,
+    /// For a production set of the queue's side, the id of the queue's
+    /// event its set was read up to (`agent_eval_started`'s `set_through`).
+    set_through: Option<i64>,
 }
 
 fn refusal(reason: RefusalReason, detail: String) -> Refusal {
@@ -278,7 +283,7 @@ impl Supervisor<'_> {
 
     /// Why `provider` takes no new run now
     /// ([`crate::domain::agent_eval::round::provider_wait`]).
-    fn eval_wait(&self, provider: Provider) -> Option<ProviderWait> {
+    pub(super) fn eval_wait(&self, provider: Provider) -> Option<ProviderWait> {
         provider_wait(
             provider,
             self.provider_held(provider).is_some(),
@@ -345,12 +350,13 @@ impl Supervisor<'_> {
     }
 
     /// Read the agent's definition and its `split` cases (those of
-    /// `selected`, when given) from `commit`'s tree; a refusal when they
-    /// are not there or do not read.
+    /// `selected`, when given) from `commit`'s tree, or, for a production
+    /// set of the queue's side (`set`), its cases and patches from the
+    /// set's view ([`crate::application::agent_cases::view`]); a refusal
+    /// when they are not there or do not read.
     fn eval_snapshot(
         &self,
-        agent: &str,
-        split: Split,
+        (agent, split, set, set_through): (&str, Split, Option<i64>, Option<i64>),
         commit: &str,
         selected: Option<&[String]>,
     ) -> Result<std::result::Result<Snapshot, Refusal>> {
@@ -372,6 +378,9 @@ impl Supervisor<'_> {
                 )));
             }
         };
+        if let Some(set) = set {
+            return self.set_snapshot(agent, (set, set_through), (definition, tools), selected);
+        }
         let evals = format!("{DEFINITION_DIR}/{agent}/{EVALS_DIR}");
         let mut files = Vec::new();
         for path in repository.paths_in(commit, &evals)? {
@@ -410,31 +419,11 @@ impl Supervisor<'_> {
                 format!("no {evals}/{}", split.file_name()),
             )));
         };
-        let cases: Vec<Case> = match selected {
-            Some(ids) => {
-                if let Some(missing) = ids
-                    .iter()
-                    .find(|id| !list.cases.iter().any(|case| &case.id == *id))
-                {
-                    return Ok(Err(refusal(
-                        RefusalReason::CasesInvalid,
-                        format!("no case {missing} in {evals}/{}", split.file_name()),
-                    )));
-                }
-                list.cases
-                    .iter()
-                    .filter(|case| ids.contains(&case.id))
-                    .cloned()
-                    .collect()
-            }
-            None => list.cases.clone(),
+        let where_ = format!("{evals}/{}", split.file_name());
+        let cases = match selected_cases(&list.cases, selected, &where_) {
+            Ok(cases) => cases,
+            Err(refused) => return Ok(Err(refused)),
         };
-        if cases.is_empty() {
-            return Ok(Err(refusal(
-                RefusalReason::CasesInvalid,
-                format!("{evals}/{} has no case to run", split.file_name()),
-            )));
-        }
         let mut texts = BTreeMap::new();
         for case in &cases {
             let path = format!("{PATCH_DIR}/{}.{PATCH_EXTENSION}", case.patch);
@@ -452,6 +441,80 @@ impl Supervisor<'_> {
             list_k: list.k,
             cases,
             patches: texts,
+            set_through: None,
+        }))
+    }
+
+    /// The snapshot of production set `set` of the queue's side for
+    /// `agent`, its definition and tools read already: the set's cases and
+    /// patches from its view, made again from its events and Git where its
+    /// files are gone; a refusal for a set that is not `agent`'s or not
+    /// built, or whose list does not read.
+    fn set_snapshot(
+        &self,
+        agent: &str,
+        (set, through): (i64, Option<i64>),
+        (definition, tools): (String, AgentTools),
+        selected: Option<&[String]>,
+    ) -> Result<std::result::Result<Snapshot, Refusal>> {
+        // Its labels and a person's decisions as of the round's start: a
+        // round taken up reads them up to the same event, so a decision
+        // made since changes neither its expectations nor its disputes.
+        let (sets, set_through) = self.case_sets_through(through)?;
+        let Some(found) = sets.iter().find(|found| found.id == set) else {
+            return Ok(Err(refusal(
+                RefusalReason::CasesInvalid,
+                format!("no production set {set}"),
+            )));
+        };
+        if found.request.agent != agent || found.built.is_none() {
+            return Ok(Err(refusal(
+                RefusalReason::CasesInvalid,
+                format!(
+                    "production set {set} is {}'s and {}, not a built set of {agent}",
+                    found.request.agent,
+                    found.status()
+                ),
+            )));
+        }
+        let dir = crate::application::agent_cases::set_dir(&self.layout.agent_cases_dir, set);
+        let made =
+            crate::application::agent_cases::view(found, &*self.repository, &*self.files, &dir)?;
+        for (case, why) in &made.left_out {
+            warn!("agent eval of set {set}: case {case} is left out: {why}");
+        }
+        let hashes: BTreeSet<String> = made.patches.keys().cloned().collect();
+        let where_ = format!("production set {set}");
+        let list = match crate::domain::agent_eval::read_case_file(
+            agent,
+            Split::Production.file_name(),
+            &made.list.to_string(),
+            &hashes,
+        ) {
+            Ok(list) => list,
+            Err(problems) => {
+                let said: Vec<String> = problems.iter().take(5).map(ToString::to_string).collect();
+                return Ok(Err(refusal(
+                    RefusalReason::CasesInvalid,
+                    format!(
+                        "{} problem(s) in {where_}: {}",
+                        problems.len(),
+                        said.join("; ")
+                    ),
+                )));
+            }
+        };
+        let cases = match selected_cases(&list.cases, selected, &where_) {
+            Ok(cases) => cases,
+            Err(refused) => return Ok(Err(refused)),
+        };
+        Ok(Ok(Snapshot {
+            definition,
+            tools,
+            list_k: list.k,
+            cases,
+            patches: made.patches,
+            set_through: Some(set_through),
         }))
     }
 
@@ -473,8 +536,7 @@ impl Supervisor<'_> {
         let config = self.verifier.eval_config()?;
         let commit = self.repository.main_head()?.into_string();
         let snapshot = match self.eval_snapshot(
-            &request.agent,
-            request.split,
+            (&request.agent, request.split, request.set, None),
             &commit,
             request.cases.as_deref(),
         )? {
@@ -548,6 +610,8 @@ impl Supervisor<'_> {
                 "concurrency": config.concurrency,
                 "threshold": config.threshold,
                 "requested_by": request.requested_by,
+                "set": request.set,
+                "set_through": snapshot.set_through,
                 "rerun": request.rerun,
             }),
         )?;
@@ -632,8 +696,12 @@ impl Supervisor<'_> {
             .context("the round read back")?;
         let request = &round.request;
         let snapshot = self.eval_snapshot(
-            &request.agent,
-            request.split,
+            (
+                &request.agent,
+                request.split,
+                request.set,
+                started.set_through,
+            ),
             &started.definition_commit,
             Some(
                 &started
@@ -1279,4 +1347,39 @@ impl Supervisor<'_> {
         self.remove_case_trees(round.id, round.cases.len());
         Ok(true)
     }
+}
+
+/// The cases of `all` a round runs: those of `selected` when given (each
+/// must be there), else all; a refusal naming `place` when one is missing
+/// or none is left.
+fn selected_cases(
+    all: &[Case],
+    selected: Option<&[String]>,
+    place: &str,
+) -> std::result::Result<Vec<Case>, Refusal> {
+    let cases: Vec<Case> = match selected {
+        Some(ids) => {
+            if let Some(missing) = ids
+                .iter()
+                .find(|id| !all.iter().any(|case| &case.id == *id))
+            {
+                return Err(refusal(
+                    RefusalReason::CasesInvalid,
+                    format!("no case {missing} in {place}"),
+                ));
+            }
+            all.iter()
+                .filter(|case| ids.contains(&case.id))
+                .cloned()
+                .collect()
+        }
+        None => all.to_vec(),
+    };
+    if cases.is_empty() {
+        return Err(refusal(
+            RefusalReason::CasesInvalid,
+            format!("{place} has no case to run"),
+        ));
+    }
+    Ok(cases)
 }

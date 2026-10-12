@@ -12,6 +12,17 @@
     "A-162",
     "A-163"
   ],
+  "rules": {
+    "A-150": "docs/development/documents.md「ADR」の1つ目と2つ目の箇条",
+    "A-152": "docs/development/documents.md「ADR」の6つ目の箇条の、置き換えか`amends`かの選び方",
+    "A-155": "docs/development/documents.md「frontmatter」",
+    "A-156": "docs/development/documents.md「ADRのID」の1つ目の箇条",
+    "A-159": "docs/development/documents.md「ADRのID」の2つ目の箇条",
+    "A-160": "docs/development/documents.md「ADRのID」の3つ目の箇条",
+    "A-161": "docs/development/documents.md「ADRのID」の4つ目の箇条",
+    "A-162": "docs/development/documents.md「ADR」の5つ目の箇条",
+    "A-163": "docs/development/documents.md「ADR」の6つ目の箇条の`amends`の手順と、docs/development/task-registration.md「ADRを書くtask」の2つ目の箇条"
+  },
   "k": 3,
   "cases": [
     {

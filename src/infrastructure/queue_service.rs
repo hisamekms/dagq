@@ -971,6 +971,23 @@ impl crate::application::commands::replans::ReplanStore for ServiceSqlite {
     }
 }
 
+impl crate::application::agent_cases::CaseSetStore for ServiceSqlite {
+    fn record_cases_event(
+        &self,
+        kind: EventKind,
+        payload: Value,
+    ) -> Result<crate::domain::EventId> {
+        crate::application::agent_cases::CaseSetStore::record_cases_event(
+            &self.queue,
+            kind,
+            payload,
+        )
+    }
+    fn cases_events(&self) -> Result<Vec<RunEvent>> {
+        crate::application::agent_cases::CaseSetStore::cases_events(&self.queue)
+    }
+}
+
 impl DialogueStore for ServiceSqlite {
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.queue.read_ask(id)

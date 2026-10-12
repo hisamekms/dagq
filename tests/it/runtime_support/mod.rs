@@ -4,6 +4,7 @@
 
 use crate::common;
 use dagq::infrastructure::git_binary::git_executable;
+pub mod agent_eval;
 pub mod background_wrappers;
 pub mod headless;
 mod reviewer;

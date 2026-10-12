@@ -150,6 +150,12 @@ string_enum!(UseCase {
     // A worker's proposal to replan its own run, as `dagq replan
     // propose` records it (ADR-t1521-2 decision 3).
     ReplanPropose => "replan_propose",
+    // A production set of an agent's cases (ADR-t1728-1 (g)): a request,
+    // which the supervisor makes, and a decision on a case's label, as
+    // `dagq agent cases` and `dagq agent decide` record them; a person's,
+    // the inbox's or a planner's, so a worker's is refused and recorded.
+    AgentCases => "agent_cases",
+    AgentDecide => "agent_decide",
 });
 
 impl UseCase {
@@ -202,6 +208,8 @@ impl UseCase {
             ("agent", Some("results")) => Self::AgentResults,
             ("agent", Some("result")) => Self::AgentResult,
             ("replan", Some("propose")) => Self::ReplanPropose,
+            ("agent", Some("cases")) => Self::AgentCases,
+            ("agent", Some("decide")) => Self::AgentDecide,
             _ => return None,
         })
     }
