@@ -7,7 +7,7 @@ tools: [read, grep, glob]
 
 - A-139: migrationは`migrations/NNNN_<name>.sql`を置くだけで足す。一覧は`build.rs`が作るので`src/infrastructure/schema.rs`は編集しない
 - A-140: testは最新のschemaの番号を数字で書かず、`SqliteQueue::SCHEMA_VERSION`と`MIGRATIONS`から組み立てる
-- A-141: 番号はmainの次の空きにする
+- A-141: 番号はmainの次の空きにする（`migrations/`の中の番号の重複と欠番はプログラムのreview（`check-migration-numbers.sh`）が見る）
 - A-144: リリース済み（`check-migration-numbers.sh`が比べる最新の`v<X.Y.Z>`のtagにある）migrationは、名前も中身も変えない・消さない
 - A-145: リリース済みのschemaを直すときは、次の番号のmigrationを足す
 
