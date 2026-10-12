@@ -104,6 +104,13 @@ pub struct Validation {
     /// when validation stopped before it could tell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub e2e_requirement: Option<E2eRequirement>,
+    /// The receipt says the base already met the acceptance (ADR-t1818-1)
+    /// and validation found it sound: the run stays `validating` and makes
+    /// no landing; the runtime verifies the claim on main.
+    /// Recorded with `accepted: true`, `status: validating` and no
+    /// `result_commit`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub already_satisfied: bool,
     /// The load average from `receipt_observed` to this validation (task
     /// 197): the supervisor's samples, filled in when it records the result.
     #[serde(flatten)]
@@ -128,7 +135,7 @@ pub enum ReceiptFile {
     Missing,
     /// The file does not parse.
     Invalid(DomainError),
-    Parsed(Receipt),
+    Parsed(Box<Receipt>),
 }
 
 impl ReceiptFile {
@@ -136,7 +143,7 @@ impl ReceiptFile {
     pub fn of(text: Option<&str>) -> Self {
         match text.map(Receipt::parse) {
             None => Self::Missing,
-            Some(Ok(receipt)) => Self::Parsed(receipt),
+            Some(Ok(receipt)) => Self::Parsed(Box::new(receipt)),
             Some(Err(error)) => Self::Invalid(error),
         }
     }
@@ -266,7 +273,7 @@ impl<'a> ReceiptFacts<'a> {
     /// The parsed receipt, to hand on with the verdict.
     pub fn into_receipt(self) -> Option<Receipt> {
         match self.receipt {
-            Some(ReceiptFile::Parsed(receipt)) => Some(receipt),
+            Some(ReceiptFile::Parsed(receipt)) => Some(*receipt),
             _ => None,
         }
     }
@@ -296,6 +303,10 @@ pub enum Judgement {
     Need(Fact),
     /// The receipt names this commit, the clean head of the run branch.
     Accept(CommitSha),
+    /// The receipt says the base already met the acceptance, names the
+    /// clean head of the run branch, and that head is the base: no commit
+    /// was made (ADR-t1818-1 decision 1).
+    AlreadySatisfied(CommitSha),
     Reject(Rejection),
 }
 
@@ -376,6 +387,9 @@ pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
             None,
         );
     }
+    if receipt.already_satisfied() {
+        return already_satisfied(facts, receipt, head);
+    }
     if head == facts.base {
         return reject(
             ReasonCode::CommitMismatch,
@@ -439,6 +453,46 @@ pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
         });
     }
     Judgement::Accept(head.clone())
+}
+
+/// The rest of [`judge`] for an `already_satisfied` receipt that names
+/// `head`: the head must be the base (the claim is that no change is
+/// needed), the worktree clean and the required evidence there. No diff is
+/// read: there is none to hold to the task's paths.
+fn already_satisfied(facts: &ReceiptFacts<'_>, receipt: &Receipt, head: &CommitSha) -> Judgement {
+    if head != facts.base {
+        return reject(
+            ReasonCode::CommitMismatch,
+            format!(
+                "an already_satisfied receipt makes no commit, but {head} is on top of base {}",
+                facts.base
+            ),
+            None,
+        );
+    }
+    let Some(status) = &facts.status else {
+        return Judgement::Need(Fact::Status);
+    };
+    if !status.trim().is_empty() {
+        return reject(
+            ReasonCode::WorktreeDirty,
+            format!("worktree is not clean:\n{}", status.trim_end()),
+            None,
+        );
+    }
+    let missing = receipt.missing_evidence(facts.required);
+    if !missing.is_empty() {
+        let (code, reason) = missing_reason(&missing, &[]);
+        return Judgement::Reject(Rejection {
+            reason,
+            code,
+            commit: None,
+            evidence_missing: missing,
+            spike_result_missing: Vec::new(),
+            scope_violation: Vec::new(),
+        });
+    }
+    Judgement::AlreadySatisfied(head.clone())
 }
 
 /// The code and the reason of a park for what the receipt lacks: the
@@ -694,6 +748,67 @@ mod tests {
         );
     }
 
+    /// An `already_satisfied` receipt naming the base: what would be a
+    /// `commit_mismatch` for a `succeeded` one is the claim itself. It is
+    /// held to a clean worktree and the required evidence but no diff;
+    /// without its base checks, or with a commit made, it is refused.
+    #[test]
+    fn an_already_satisfied_receipt_on_the_base_is_no_commit_mismatch() {
+        let satisfied = |base_checks: serde_json::Value| {
+            let mut receipt: serde_json::Value =
+                serde_json::from_str(&receipt_text("r1", "already_satisfied", "not_applicable"))
+                    .unwrap();
+            receipt["commit"] = serde_json::json!(BASE);
+            receipt["base_checks"] = base_checks;
+            receipt.to_string()
+        };
+        let checks =
+            serde_json::json!([{"command": "cargo test --locked --lib x", "result": "3 passed"}]);
+        let world = World {
+            receipt: Some(satisfied(checks.clone())),
+            head: sha(BASE),
+            ..sound()
+        };
+        let paths = ["src/**".to_owned()];
+        let (asked, verdict) = run(&world, &[EvidenceCheck::Tests], &paths);
+        assert_eq!(
+            asked,
+            [Fact::Receipt, Fact::CheckedOut, Fact::Head, Fact::Status]
+        );
+        assert_eq!(verdict, Judgement::AlreadySatisfied(sha(BASE)));
+
+        let unbacked = World {
+            receipt: Some(satisfied(serde_json::json!([]))),
+            ..world
+        };
+        let (asked, verdict) = run(&unbacked, &[], &[]);
+        assert_eq!(asked, [Fact::Receipt]);
+        assert_eq!(rejection(verdict).code, ReasonCode::ReceiptInvalid);
+
+        let committed = World {
+            receipt: Some(satisfied(checks.clone()).replace(BASE, HEAD)),
+            ..sound()
+        };
+        let rejection_of = rejection(run(&committed, &[], &[]).1);
+        assert_eq!(rejection_of.code, ReasonCode::CommitMismatch);
+        assert!(
+            rejection_of.reason.contains("makes no commit"),
+            "{}",
+            rejection_of.reason
+        );
+
+        let dirty = World {
+            receipt: Some(satisfied(checks)),
+            head: sha(BASE),
+            status: " M src/lib.rs".into(),
+            ..sound()
+        };
+        assert_eq!(
+            rejection(run(&dirty, &[], &[]).1).code,
+            ReasonCode::WorktreeDirty
+        );
+    }
+
     #[test]
     fn no_new_commit_is_rejected_with_the_commit_before_the_ancestry() {
         let mut text = receipt_text("r1", "succeeded", "passed");
@@ -866,6 +981,7 @@ mod tests {
                 scope_violation,
                 allowed_paths: Vec::new(),
                 e2e_requirement: None,
+                already_satisfied: false,
                 load: LoadSummary::default(),
             };
         assert!(!validation(Vec::new(), Vec::new()).resumable());

@@ -2649,6 +2649,40 @@ pub(super) fn transition_task(
     apply_transition(conn, task_id, action, now, None)
 }
 
+/// Complete the task of `run` inside the caller's transaction:
+/// `in_progress` → `completed`, recorded as `task_status_changed` on the
+/// run, with a completed Spike's replanning request (`now_secs`). The
+/// planning side's write of the task, which the run's end calls rather
+/// than writing `tasks` itself: its landing (T2 of
+/// `.config/context-boundaries.txt`) or the close of a verified
+/// `already_satisfied` claim without one (T12, ADR-t1818-1 decision 5).
+pub(super) fn complete_task(
+    conn: &Connection,
+    task_id: TaskId,
+    run: &RunId,
+    now: &str,
+    now_secs: i64,
+) -> Result<Task> {
+    ensure!(
+        conn.execute(
+            "UPDATE tasks SET status='completed', updated_at=?2 WHERE id=?1 AND status='in_progress'",
+            params![task_id, now],
+        )? == 1,
+        "task {task_id} is not in progress"
+    );
+    event(
+        conn,
+        task_id,
+        Some(run),
+        EventKind::TaskStatusChanged,
+        json!({"from": TaskStatus::InProgress, "to": TaskStatus::Completed}),
+    )?;
+    // A Spike's completion leaves its replanning request in the same
+    // transaction (ADR-t1487-1 decision 5).
+    super::plan_requests::record_spike_request(conn, task_id, now_secs)?;
+    read_task(conn, task_id)
+}
+
 /// Cancel `task_id` as a duplicate of `duplicate_of` inside the caller's
 /// transaction (ADR-0046 decision 5), recording `duplicate_of` in the
 /// payload of its `task_status_changed`: what `cancel --duplicate-of` does,

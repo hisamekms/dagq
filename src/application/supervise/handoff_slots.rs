@@ -12,14 +12,19 @@ use crate::domain::EventKind;
 
 impl Phase {
     /// Whether the next process can rebuild this phase from the queue and
-    /// the run files: everything but a validation, an e2e (ADR-t1233-2) or a
+    /// the run files: everything but a validation, the verification of an
+    /// `already_satisfied` claim (ADR-t1818-1), an e2e (ADR-t1233-2) or a
     /// landing in progress (and a run waiting for the landing slot, which
     /// starts one), which a handoff waits for. A headless review or triage is rebuildable because
     /// it is stopped and started again.
     pub(super) fn rebuildable(&self) -> bool {
         !matches!(
             self,
-            Phase::Validating(..) | Phase::AwaitingSlot | Phase::E2e(_) | Phase::Landing(_)
+            Phase::Validating(..)
+                | Phase::Satisfied(_)
+                | Phase::AwaitingSlot
+                | Phase::E2e(_)
+                | Phase::Landing(_)
         )
     }
 }

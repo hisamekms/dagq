@@ -398,3 +398,6 @@ transaction | T8 | planning | src/infrastructure/follow_up_membership.rs | judge
 transaction | T9 | planning | src/infrastructure/follow_up_membership.rs | decide_correction | the answer, the goal, the membership and the open questions agree (ADR-t1504-2 decision 9)
 transaction | T10 | execution | src/infrastructure/runtime_store/recovery.rs | inherit_by_hand | a person's carry-over, once and not racing the recovery job (ADR-t1962-1)
 transaction | T11 | execution | src/infrastructure/runtime_store/coordination.rs | heartbeat | the registration and the leases agree
+transaction | T2 | execution | src/infrastructure/sqlite.rs | complete_task | planning's function T2 and T12 complete the task through
+transaction | T12 | execution | src/infrastructure/runtime_store/transitions.rs | close_satisfied | a verified already_satisfied claim's run closes without a commit and its task completes in one step (ADR-t1818-1)
+transaction | T12 | execution | src/infrastructure/runtime_store/transitions.rs | decide_satisfied | a person's retry or cancel fails the run and moves its task in one step (ADR-t1818-1)

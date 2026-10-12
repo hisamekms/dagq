@@ -1801,6 +1801,29 @@ fn every_worker_text_that_writes_a_receipt_maps_the_acceptance_once() {
     assert!(!review.contains(ACCEPTANCE_MAP) && !review.contains(ACCEPTANCE_REMAP));
 }
 
+/// ADR-t1818-1 decision 1: every worker's prompt says once, after the
+/// receipt's checks, how to report a base that already meets the
+/// acceptance, and asks for no gate a worker does not run itself: the
+/// runtime runs the whole verification on main.
+#[test]
+fn every_worker_prompt_says_how_to_report_a_base_already_satisfied() {
+    let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+    for provider in [Provider::Claude, Provider::Codex] {
+        let run = run_on(provider, WorkerMode::Headless);
+        let first = &session_texts(&task, &run)[0];
+        assert_eq!(first.matches(ALREADY_SATISFIED).count(), 1, "{first}");
+        assert!(
+            first.contains(&format!(
+                "a reason when not_applicable.\n{ALREADY_SATISFIED}follow_ups is optional"
+            )),
+            "{first}"
+        );
+        assert!(first.contains("\"result\":\"succeeded, failed or already_satisfied\""));
+    }
+    assert!(ALREADY_SATISFIED.contains("base_checks"));
+    assert!(!ALREADY_SATISFIED.contains("cargo") && !ALREADY_SATISFIED.contains('`'));
+}
+
 /// Task 1508 (ADR-t1504-2 decision 11): every worker's prompt shows a
 /// follow_up's membership proposal in the receipt's example and says
 /// once how to write it, as a proposal and not a judgement; every

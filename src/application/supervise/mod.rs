@@ -152,6 +152,7 @@ mod report;
 mod request_planner;
 mod resume;
 mod revise;
+mod satisfied;
 mod sccache;
 mod session;
 mod slot_limits;
@@ -1279,6 +1280,10 @@ enum Phase {
     /// The recovery job of a `failed` or `interrupted` run (ADR-0047
     /// decision 39), under a lease of its own.
     Recovery(EndedRecovery),
+    /// The verification of an `already_satisfied` claim on a snapshot of
+    /// main, off the loop (ADR-t1818-1); the run stays `validating` and
+    /// keeps its lease and slot until it ends.
+    Satisfied(satisfied::SatisfiedWatch),
 }
 
 impl Phase {
@@ -1290,6 +1295,7 @@ impl Phase {
         match self {
             Phase::Session(_) => Recorded::Worker,
             Phase::Validating(..) => Recorded::Validating,
+            Phase::Satisfied(_) => Recorded::Verifying,
             Phase::ReviewPrograms(_) | Phase::Review(_) => Recorded::Review,
             Phase::ReviewHeld { .. } => Recorded::ReviewHeld,
             Phase::Revise(_) => Recorded::Revise,
@@ -1382,6 +1388,8 @@ enum AfterExit {
     /// Give the lease back: a run parked for evidence (its workspace is
     /// closed) or a failed one (its workspace is kept for inspection).
     Rest { close: bool },
+    /// Verify the run's `already_satisfied` claim on main (ADR-t1818-1).
+    Satisfied,
 }
 
 enum Step {
@@ -1999,6 +2007,12 @@ impl Supervisor<'_> {
         // Whatever the slots: a `land` answer only queues the run, which
         // lands below, before new claims, once there is room (task 949).
         self.apply_landing_answers()?;
+        // An answer to an `already_satisfied` claim's ask; a close that
+        // verifies the claim again takes a free slot (ADR-t1818-1).
+        self.apply_satisfied_answers(parallel)?;
+        // A claim a held container kept from its verification starts it
+        // once the verification may run.
+        self.start_awaiting_claims(parallel)?;
         // Like a landing answer before: an error (an `integrate` that took
         // the integration slot since the check, a main that did not
         // resolve) is noted, and the run stays queued for a later pass.
@@ -3430,6 +3444,9 @@ impl Supervisor<'_> {
                             Phase::Exiting(ExitWatch::new(session, AfterExit::Land))
                         }
                         AfterValidation::Review => self.start_review(&run, session)?,
+                        AfterValidation::Satisfied => {
+                            Phase::Exiting(ExitWatch::new(session, AfterExit::Satisfied))
+                        }
                         AfterValidation::Rest { close } => {
                             Phase::Exiting(ExitWatch::new(session, AfterExit::Rest { close }))
                         }
@@ -3678,7 +3695,37 @@ impl Supervisor<'_> {
                             .release_lease(run.id(), &self.registration.token)?;
                         Ok(Step::Done(Box::new(run)))
                     }
+                    AfterExit::Satisfied => match self.start_satisfied(&run)? {
+                        Some(phase) => {
+                            slot.run = run;
+                            slot.transition(
+                                phase,
+                                EventKind::RunSatisfiedSnapshot.as_str(),
+                                &*self.queue,
+                            );
+                            Ok(Step::Continue)
+                        }
+                        None => {
+                            self.queue
+                                .release_lease(run.id(), &self.registration.token)?;
+                            Ok(Step::Done(Box::new(run)))
+                        }
+                    },
                 }
+            }
+            Phase::Satisfied(watch) => {
+                if !watch.handle.as_ref().is_some_and(|h| h.is_finished()) {
+                    return Ok(Step::Continue);
+                }
+                let outcome = watch
+                    .handle
+                    .take()
+                    .context("verification already joined")?
+                    .join()
+                    .map_err(|_| anyhow!("the verification thread panicked"))?;
+                let run = self.queue.run(slot.run.id())?;
+                let run = self.satisfied_verified(&run, watch, outcome)?;
+                Ok(Step::Done(Box::new(run)))
             }
         }
     }
@@ -3804,7 +3851,8 @@ fn spawn_validation(
         Ok(match checked {
             Ok(accepted) => Validation {
                 accepted: true,
-                result_commit: Some(accepted.commit),
+                // An `already_satisfied` claim has no commit to land.
+                result_commit: (!accepted.already_satisfied).then_some(accepted.commit),
                 reason: None,
                 code: None,
                 receipt: serde_json::to_value(accepted.receipt)?,
@@ -3813,6 +3861,7 @@ fn spawn_validation(
                 scope_violation: Vec::new(),
                 allowed_paths: Vec::new(),
                 e2e_requirement: Some(accepted.e2e_requirement),
+                already_satisfied: accepted.already_satisfied,
                 load: LoadSummary::default(),
             },
             Err(rejection) => {
@@ -3836,6 +3885,7 @@ fn spawn_validation(
                     },
                     scope_violation: rejection.scope_violation,
                     e2e_requirement: rejection.e2e_requirement,
+                    already_satisfied: false,
                     load: LoadSummary::default(),
                 }
             }

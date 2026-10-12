@@ -85,7 +85,9 @@ pub const BACKEND_FAILURES: i64 = 2;
 
 /// Where a window of `stats` starts or ends: an event id (a previous
 /// `next_cursor`) or a time, which stands for the latest event recorded at
-/// or before it.
+/// or before it. Written as digits for an event id, `@` and unix
+/// seconds for a time, or an RFC 3339 time; bare digits are always an event
+/// id, so unix seconds take the `@`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cursor {
     Event(EventId),
@@ -221,8 +223,9 @@ pub struct RunStats {
     pub run_id: RunId,
     pub task_id: TaskId,
     pub goal_id: Option<GoalId>,
-    /// `integrated`, `failed` or `interrupted` for a finished run; the last
-    /// status recorded for one still in flight.
+    /// `integrated`, `already_satisfied` (closed without a landing on a
+    /// verified claim, ADR-t1818-1), `failed` or `interrupted` for a
+    /// finished run; the last status recorded for one still in flight.
     pub status: Option<String>,
     /// The event that finished the run; `--since` compares against it.
     pub finished_event_id: Option<EventId>,
@@ -311,6 +314,10 @@ pub struct Summary {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Intervals {
     pub runs: usize,
+    /// Those of `runs` whose task closed `completed` without a commit on a
+    /// verified `already_satisfied` claim (ADR-t1818-1 decision 6): not
+    /// landings, and none of the landing intervals.
+    pub already_satisfied: usize,
     pub work: Summary,
     pub validate: Summary,
     pub wait_to_land: Summary,
@@ -1956,6 +1963,10 @@ fn e2e_of(payload: &Value) -> Option<String> {
 fn intervals(runs: &[&RunStats]) -> Intervals {
     Intervals {
         runs: runs.len(),
+        already_satisfied: runs
+            .iter()
+            .filter(|r| r.status.as_deref() == Some(ALREADY_SATISFIED))
+            .count(),
         work: summary(runs.iter().map(|r| r.work)),
         validate: summary(runs.iter().map(|r| r.validate)),
         wait_to_land: summary(runs.iter().map(|r| r.wait_to_land)),
@@ -1986,6 +1997,10 @@ struct Track {
     land: Option<LandClock>,
     measure: measures::MeasureTrack,
 }
+
+/// The `status` of a run [`RunStats`] counts as closed on a verified
+/// `already_satisfied` claim rather than landed.
+pub const ALREADY_SATISFIED: &str = "already_satisfied";
 
 fn payload_status(payload: &Value) -> Option<&str> {
     payload.get("status").and_then(Value::as_str)
@@ -2101,6 +2116,10 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     .get("verdict")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+            }
+            super::event_kind::RUN_SATISFIED_CLOSED => {
+                run.status = Some(ALREADY_SATISFIED.to_owned());
+                run.finished_event_id.get_or_insert(event.id);
             }
             "run_integrated" => {
                 run.wait_to_land = seconds_between(track.validated, at);
@@ -3155,6 +3174,63 @@ mod tests {
             assert!(parse(bad).is_err(), "{bad}");
         }
         assert!(parse("x").unwrap_err().contains("RFC 3339"));
+    }
+
+    /// A task closed on a verified `already_satisfied` claim (ADR-t1818-1
+    /// decision 6) finishes its run as `already_satisfied`: counted apart
+    /// from the landings, with no landing interval, while a landed run
+    /// stays `integrated`.
+    #[test]
+    fn a_claim_closed_without_a_landing_is_counted_apart_from_the_landings() {
+        let events = [
+            run_event(1, R1, "run_claimed", json!({}), T),
+            run_event(
+                2,
+                R1,
+                "validation_finished",
+                json!({"status": "awaiting_integration"}),
+                T + 50,
+            ),
+            run_event(3, R1, "run_integrated", json!({}), T + 100),
+            run_event(4, R2, "run_claimed", json!({}), T + 150),
+            run_event(
+                5,
+                R2,
+                "validation_finished",
+                json!({"status": "validating", "already_satisfied": true}),
+                T + 200,
+            ),
+            run_event(
+                6,
+                R2,
+                "run_satisfied_verified",
+                json!({"head": "a", "passed": true}),
+                T + 250,
+            ),
+            run_event(
+                7,
+                R2,
+                "run_satisfied_closed",
+                json!({"head": "a", "ask_id": 1}),
+                T + 300,
+            ),
+        ];
+        let stats = stats(
+            &events,
+            &HashMap::new(),
+            T + 1000,
+            SlotSnapshot::default(),
+            &StatsQuery::default(),
+            &LiveSnapshot::default(),
+        );
+        let status: Vec<_> = stats.runs.iter().map(|run| run.status.as_deref()).collect();
+        assert_eq!(status, [Some("integrated"), Some(ALREADY_SATISFIED)]);
+        assert_eq!(stats.overall.runs, 2);
+        assert_eq!(stats.overall.already_satisfied, 1);
+        assert_eq!(stats.runs[1].landed_at, None);
+        assert_eq!(stats.runs[1].wait_to_land, None);
+        assert_eq!(stats.overall.wait_to_land.count, 1);
+        assert_eq!(stats.runs[1].finished_event_id, Some(EventId::new(7)));
     }
 
     /// `--since` and `--until` take a time as the latest event recorded

@@ -624,6 +624,10 @@ pub enum AfterValidation {
     Land,
     /// An accepted run is reviewed by the headless review.
     Review,
+    /// A run whose `already_satisfied` claim validation found sound stays
+    /// `validating`: its session exits and the runtime verifies the claim
+    /// on main (ADR-t1818-1).
+    Satisfied,
     /// Anything else rests; `close` gives up the session's workspace (a run
     /// parked for a session, since a resume opens one of its own, or one
     /// that waits for a person's answer), otherwise it stays for inspection.
@@ -645,6 +649,7 @@ pub fn after_validation(
             AfterValidation::Rest { close: true }
         }
         RunStatus::AwaitingIntegration => AfterValidation::Review,
+        RunStatus::Validating => AfterValidation::Satisfied,
         RunStatus::NeedsSession => AfterValidation::Rest { close: true },
         _ => AfterValidation::Rest { close: false },
     }
@@ -1068,6 +1073,10 @@ mod tests {
         assert_eq!(
             after_validation(Failed, false, false),
             AfterValidation::Rest { close: false }
+        );
+        assert_eq!(
+            after_validation(Validating, false, false),
+            AfterValidation::Satisfied
         );
     }
 

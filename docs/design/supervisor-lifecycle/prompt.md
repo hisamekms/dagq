@@ -113,8 +113,6 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 - 記録: claimのprovisionが`PromptBytes`（言語の指示を含む）を、workerの最初のturnを始める`wrapper_launched`の`prompt_bytes`に記録する。
   providerの切り替えで書き直した`prompt.txt`は記録しない。
 - 新しいsession（ADR-t2080-1）の最初のturnは`prompt.txt`と引き継ぎのprompt（`handoff_text`）で、wrapperがつなぐ（`domain::turn::new_session_prompt`）。
-- 落とし穴: 兄弟taskの一覧はclaimの順で非対称になる（同じpassで後にclaimしたtaskだけが先のtaskを知る）。
-  理由は`siblings_in_progress`のdoc comment。
 - 落とし穴: `tests/e2e.rs`のstubはpromptの1行目とreceiptのpathの行だけを読むので、節を足してもstubは変わらない。
 - 既に落ちているtestの節: 一覧があるときだけclaimのpromptとresumeの依頼に載せ、文面・選ぶ順・上限・読む経路は[CI watch](ci-watch.md#workerとreviewの材料)が持つ。
 - 言語の設定が解決できるときは、promptと依頼の末尾に言語の指示を足す（[Language](language.md#promptへの渡し方)）。
@@ -123,6 +121,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 
 - workerのpromptはreceiptの書き方の直前に`ACCEPTANCE_MAP`を置く（[ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
   各項目を満たすものへ対応づけ、満たせない項目を`follow_ups`に回して`succeeded`にしない。
+- baseが満たすときは`ALREADY_SATISFIED`が書き方を言い、verify全体を求めない（[receipt](receipt-and-session-exit.md#baseがすでに満たすときalready_satisfied)）。
 - resumeとreviseの依頼はreceiptを書き直す手順に`ACCEPTANCE_REMAP`と`FOLLOW_UP_PROPOSAL_AGAIN`を足す。
 - どのproviderのworkerも同じ文で、対応づけにも文書の照合にも検査のコマンドやtestの実行は求めない。
 - Codexのworkerの自分のdiffの見直しはこの対応づけの手順に寄せ、受け入れ条件との照合を2度言わない（下の[subagent review](#subagent-review)）。

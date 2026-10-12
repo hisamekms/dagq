@@ -106,6 +106,7 @@ pub fn waits_for_owner(kind: &AskKind) -> bool {
         kind,
         AskKind::WorkerQuestion
             | AskKind::ApproveLanding
+            | AskKind::ApproveClose
             | AskKind::StuckExit
             | AskKind::AnswerPrompt
             | AskKind::Stalled

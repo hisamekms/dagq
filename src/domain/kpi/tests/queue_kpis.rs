@@ -111,6 +111,122 @@ fn derives_the_queue_kpis_of_a_window() {
     assert_eq!(measure(before, "landings", ALL).value, Some(0.0));
 }
 
+/// A run closed on a verified `already_satisfied` claim (ADR-t1818-1)
+/// holds its slot while its verification runs, none while it rests on its
+/// `approve_close` ask, one again while the verification runs again for
+/// the answer, and none after its `run_satisfied_closed`, which carries no
+/// status; it is no landing.
+#[test]
+fn a_closed_claim_holds_its_slot_only_while_it_verifies_and_is_no_landing() {
+    let mut queue = Queue::default();
+    start(&mut queue, 2, MONDAY);
+    let run = "00000001-0000-4000-8000-000000000001";
+    queue.goals.insert(TaskId::new(1), None);
+    let mut push =
+        |kind: &str, payload: Value, secs: i64| queue.push(Some(1), Some(run), kind, payload, secs);
+    push(
+        "run_claimed",
+        json!({"parallel": 2, "slots": 1}),
+        MONDAY + HOUR,
+    );
+    push(
+        "run_satisfied_snapshot",
+        json!({"head": "a"}),
+        MONDAY + HOUR,
+    );
+    push(
+        "run_satisfied_verified",
+        json!({"head": "a", "passed": true}),
+        MONDAY + 90 * 60,
+    );
+    push(
+        "run_satisfied_snapshot",
+        json!({"head": "b", "ask_id": 1}),
+        MONDAY + 3 * HOUR,
+    );
+    push(
+        "run_satisfied_verified",
+        json!({"head": "b", "passed": true, "ask_id": 1}),
+        MONDAY + 210 * 60,
+    );
+    push(
+        "run_satisfied_closed",
+        json!({"head": "b", "ask_id": 1, "answer": "close"}),
+        MONDAY + 210 * 60,
+    );
+    queue.queue_event(
+        marks::SUPERVISOR_STOPPED,
+        json!({"supervisor": "s"}),
+        MONDAY + 4 * HOUR,
+    );
+    let query = KpiQuery {
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY, &KpiConfig::default(), &query);
+    let day = result.periods.last().unwrap();
+    // Two half hours of one run in four hours of two slots.
+    assert_eq!(measure(day, "slot_usage", ALL).value, Some(0.125));
+    assert_eq!(measure(day, "landings", ALL).value, Some(0.0));
+    assert_eq!(day.window.details["already_satisfied"], json!(1));
+}
+
+#[test]
+fn a_claim_held_for_its_container_holds_no_slot_until_its_verification_starts() {
+    let mut queue = Queue::default();
+    start(&mut queue, 2, MONDAY);
+    let run = "00000001-0000-4000-8000-000000000001";
+    queue.goals.insert(TaskId::new(1), None);
+    let mut push =
+        |kind: &str, payload: Value, secs: i64| queue.push(Some(1), Some(run), kind, payload, secs);
+    push(
+        "run_claimed",
+        json!({"parallel": 2, "slots": 1}),
+        MONDAY + HOUR,
+    );
+    // Accepted while its verification's container cannot be used: the
+    // claim gives its slot back and rests until the verification starts.
+    push(
+        "validation_finished",
+        json!({"status": "validating", "already_satisfied": true}),
+        MONDAY + 90 * 60,
+    );
+    push(
+        "lease_released",
+        json!({"reason": "finished"}),
+        MONDAY + 90 * 60,
+    );
+    push(
+        "run_satisfied_snapshot",
+        json!({"head": "a"}),
+        MONDAY + 3 * HOUR,
+    );
+    push(
+        "run_satisfied_verified",
+        json!({"head": "a", "passed": true, "ask_id": 1}),
+        MONDAY + 210 * 60,
+    );
+    push(
+        "run_satisfied_closed",
+        json!({"head": "a", "ask_id": 1, "answer": "close"}),
+        MONDAY + 225 * 60,
+    );
+    queue.queue_event(
+        marks::SUPERVISOR_STOPPED,
+        json!({"supervisor": "s"}),
+        MONDAY + 4 * HOUR,
+    );
+    let query = KpiQuery {
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY, &KpiConfig::default(), &query);
+    let day = result.periods.last().unwrap();
+    // The worker's half hour and the verification's, not the wait for the
+    // container nor the answer, in four hours of two slots.
+    assert_eq!(measure(day, "slot_usage", ALL).value, Some(0.125));
+}
+
 /// The slot usage of Monday with one run holding a slot for two hours
 /// under a supervisor of two slots started at midnight, once `alive`
 /// wrote its end (or left it out).

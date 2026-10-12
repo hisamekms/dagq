@@ -86,6 +86,20 @@ pub fn recover_takes(status: RunStatus, leased: bool) -> bool {
     ) || (status == RunStatus::AwaitingIntegration && leased)
 }
 
+/// Refuse the recovery of a run [`crate::domain::satisfied::blocks_recovery`]
+/// keeps from it: one resting on the `approve_close` ask of its
+/// `already_satisfied` claim (ADR-t1818-1), which the answer moves and
+/// `recover` would strand.
+pub fn block_resting_claim(health: &mut RunHealth, run: &TaskRun, events: &[RunEvent]) {
+    if crate::domain::satisfied::blocks_recovery(run.status(), health.lease.is_some(), events) {
+        health.blockers.push(
+            "it waits for the answer to the approve_close ask of its already_satisfied claim"
+                .to_owned(),
+        );
+        health.recoverable = false;
+    }
+}
+
 /// The health of `run` at `now`: a status `recover` does not take, a live
 /// process of the run, a fresh lease or a live lease holder blocks its
 /// recovery.
@@ -233,7 +247,8 @@ pub fn recover(
     let now = clock.now();
     let lease = lease.map(|l| lease_health(&l, now, control));
     let processes = queue.processes(run.id())?;
-    let health = run_health(&run, &processes, lease, now, control, files);
+    let mut health = run_health(&run, &processes, lease, now, control, files);
+    block_resting_claim(&mut health, &run, &queue.run_events(run.id())?);
     ensure!(
         health.recoverable,
         "refusing to recover run {id}: {}",

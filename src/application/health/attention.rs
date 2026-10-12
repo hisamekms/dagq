@@ -219,6 +219,13 @@ pub fn attention(
             continue;
         }
         let events = queue.run_events(run.id())?;
+        // A claim of `already_satisfied` at rest waits in its
+        // `approve_close` ask likewise, or, before its verification, for
+        // the container its verification is set to, which is the queue's
+        // attention (ADR-t1818-1).
+        if crate::domain::satisfied::blocks_recovery(run.status(), leased, &events) {
+            continue;
+        }
         // A run a `land` answer approved, or one recovered from a landing
         // it may land again, waits for the supervisor to land it (tasks 949
         // and 1118), not for a person's `integrate`; one recovered from a
@@ -908,6 +915,20 @@ pub fn attention(
                 .is_some_and(|answer| LandingAnswer::parse(answer).is_some())
         {
             // The supervisor lands, sends back or cancels the run itself.
+            (
+                "answered",
+                event_kind::ASK_ANSWERED,
+                AttentionNext::ApplyingAnswer { ask_id: ask.id },
+            )
+        } else if ask.kind == AskKind::ApproveClose
+            && let Some(run_id) = ask.run_id.as_ref()
+            && queue.run(run_id)?.status() == RunStatus::Validating
+            && ask.answer.as_deref().is_some_and(|answer| {
+                crate::domain::satisfied::SatisfiedAnswer::parse(answer).is_some()
+            })
+        {
+            // The supervisor closes, retries or cancels the claim itself
+            // (ADR-t1818-1).
             (
                 "answered",
                 event_kind::ASK_ANSWERED,

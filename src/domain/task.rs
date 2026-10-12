@@ -14,7 +14,8 @@ use super::{
 };
 
 /// What moves a task between statuses by hand or by plan review; only a
-/// claim marks it in progress and only a landing completes it.
+/// claim marks it in progress, and only its run completes it: a landing, or
+/// a verified `already_satisfied` claim closed without one (ADR-t1818-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskAction {
     /// A retry: an in-progress task whose runs all failed or were
@@ -707,7 +708,8 @@ pub fn check_dependencies_editable(task: &Task) -> Result<(), DomainError> {
 }
 
 /// `creates_cycle` is whether `predecessor_id` already depends on `task_id`,
-/// directly or not; the store finds it over the whole dependency graph,
+/// directly or not; the store finds it with one recursive query over the
+/// whole dependency graph,
 /// where a task also waits for the goals it depends on and a goal for its
 /// tasks (ADR-0038).
 pub fn check_acyclic(

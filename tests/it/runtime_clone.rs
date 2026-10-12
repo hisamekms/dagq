@@ -239,6 +239,7 @@ fn validate(db: &Path, repo: &Path, run: &mut ContainerRun) -> CommitSha {
                 scope_violation: Vec::new(),
                 allowed_paths: Vec::new(),
                 e2e_requirement: None,
+                already_satisfied: false,
                 load: Default::default(),
             },
         )
@@ -1366,6 +1367,7 @@ fn a_host_runs_landing_of_the_same_commit_runs_the_tracked_hooks() {
                 scope_violation: Vec::new(),
                 allowed_paths: Vec::new(),
                 e2e_requirement: None,
+                already_satisfied: false,
                 load: Default::default(),
             },
         )

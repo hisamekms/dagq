@@ -248,6 +248,10 @@ known_ask_kinds!(AskKind {
     // version, one open at a time; the supervisor applies its answer, one
     // of [`APPROVE_RELEASE_OPTIONS`].
     ApproveRelease => "approve_release",
+    // A run whose worker reported `already_satisfied` (ADR-t1818-1): about
+    // its run, on the main head the runtime verified it on. The supervisor
+    // applies its answer, one of [`satisfied::CLOSE_OPTIONS`].
+    ApproveClose => "approve_close",
 });
 
 impl AskKind {
@@ -269,12 +273,13 @@ impl AskKind {
 
     /// An ask whose answer approves or refuses what a person decides
     /// (ADR-t728-3 decision 3): a landing, a failed run's fate, a plan, a
-    /// goal, an update. A later goal may hold their answers to a person;
+    /// goal, an update, the close of an `already_satisfied` claim. A later goal may hold their answers to a person;
     /// this stage records them ([`answer_approves`]).
     pub fn is_approval(&self) -> bool {
         matches!(
             self,
             Self::ApproveLanding
+                | Self::ApproveClose
                 | Self::Decide
                 | Self::ApprovePlan
                 | Self::ApproveGoal
@@ -814,9 +819,13 @@ pub fn triage_state(events: &[RunEvent]) -> TriageState {
     }
 }
 
+// `already_satisfied`: the base already met the task's acceptance and the
+// worker made no commit (ADR-t1818-1 decision 1); the runtime verifies the
+// claim on main and closes the task without a landing.
 string_enum!(ReceiptResult {
     Succeeded => "succeeded",
     Failed => "failed",
+    AlreadySatisfied => "already_satisfied",
 });
 
 string_enum!(CheckStatus {
@@ -1035,6 +1044,7 @@ pub mod run_e2e;
 pub mod run_env;
 pub mod run_phase;
 pub mod run_progress;
+pub mod satisfied;
 pub mod sccache;
 pub mod scope;
 pub mod search;
@@ -1095,7 +1105,7 @@ pub use plan_review::{
 pub use planner::{IdleProbe, PlannerHandover, PlannerProbe, PlannerSession};
 pub use proposal::{PlannerOwner, Proposal, ProposalRecord, Submission};
 pub use reason::{Reason, ReasonCode};
-pub use receipt::{Receipt, ReceiptCheck, evidence_missing_reason, required_of};
+pub use receipt::{BaseCheck, Receipt, ReceiptCheck, evidence_missing_reason, required_of};
 pub use run::{
     AfterValidation, ConflictDecision, Park, ParkCause, RecoveredLanding, ResumedSession,
     ReviseDecision, RunHistory, TaskRun, after_validation, decide_conflict, decide_revise,
@@ -3129,6 +3139,7 @@ mod attention_tests {
             (AskKind::UpdateFailed, true, false),
             (AskKind::ApproveUpdate, true, false),
             (AskKind::ApproveRelease, true, false),
+            (AskKind::ApproveClose, true, false),
             (AskKind::Other("later_kind".into()), false, false),
         ];
         let offered = [PROPOSE_OPTION, DISMISS_OPTION, "wait"];

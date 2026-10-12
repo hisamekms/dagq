@@ -86,3 +86,15 @@ idleはwrapperのidle markerだけで判じる。
 - 上限（時間・回数）はagentへの指示で、runtimeは強制しない（止めるのは既存のturnとrunの上限だけ）。
 - 欠けの扱いは要求evidenceと同じで、[Validation](validation.md)の9のとおり`needs_session`にしてresumeが書き足させる。
 - receiptは書いたまま`validation_finished`と`integration_receipt`に残るので、結果を読む側はそこから読む。
+
+## baseがすでに満たすとき（already_satisfied）
+
+[ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)決定1のとおり、workerはbaseが受け入れ条件をすでに満たし差分が要らないとき、commitせずにreceiptの`result`を`already_satisfied`にする。
+
+- **根拠を必須にする**: 主張はbaseで行った確かめを根拠として`base_checks`に持ち、根拠の無い主張は受け付けずrunを`failed`にする。
+  主張はcommitしないことと一体で、commitしたrunの主張は受け付けない。
+  欄の形と受理の検査は`Receipt`と`BaseCheck`のdoc commentが持つ。
+- **根拠の範囲**: workerが書くのは[local-checks](../../development/local-checks.md)の「workerの手元の検証」で許された確かめだけ。
+  receiptの検査はコマンドの中身を判じないので、coverageの関門や全体の`cargo test`が無いことを理由に拒まない。
+  taskのverification_commandsの全体はruntimeがsnapshotで流す（[Validation](validation.md)の「already_satisfiedの検証」）。
+- **workerへの見せ方**: workerのpromptの`ALREADY_SATISFIED`（`src/application/prompt/`）がreceiptの規則の後に1段落で言う（[prompt](prompt.md)の「受け入れ条件の対応づけ」）。

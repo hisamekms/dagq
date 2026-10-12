@@ -166,19 +166,34 @@ impl SqliteQueue {
         self.lease_awaiting(id, token, "e2e")
     }
 
+    /// Lease a `validating` run nobody holds to `token` to verify its
+    /// `already_satisfied` claim again (ADR-t1818-1 decision 3), recorded
+    /// with `reason: already_satisfied`.
+    pub fn lease_satisfied(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
+        self.lease_unheld(id, token, "already_satisfied", RunStatus::Validating)
+    }
+
     fn lease_awaiting(
         &mut self,
         id: &RunId,
         token: &LeaseToken,
         reason: &str,
     ) -> Result<Option<TaskRun>> {
+        self.lease_unheld(id, token, reason, RunStatus::AwaitingIntegration)
+    }
+
+    fn lease_unheld(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        status: RunStatus,
+    ) -> Result<Option<TaskRun>> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
-        let Some(run) = stored_run(&tx, id)?
-            .filter(|run| run.status() == crate::domain::RunStatus::AwaitingIntegration)
-        else {
+        let Some(run) = stored_run(&tx, id)?.filter(|run| run.status() == status) else {
             return Ok(None);
         };
         let lease = tx
@@ -1116,6 +1131,9 @@ impl RunRecovery for SqliteQueue {
     }
     fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
         SqliteQueue::lease_for_e2e(self, id, token)
+    }
+    fn lease_satisfied(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
+        SqliteQueue::lease_satisfied(self, id, token)
     }
     fn runs_to_triage(&self) -> Result<Vec<TaskRun>> {
         SqliteQueue::runs_to_triage(self)

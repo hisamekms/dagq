@@ -772,6 +772,7 @@ fn wrapper_registration_is_one_shot_and_rejects_other_owners() {
         scope_violation: Vec::new(),
         allowed_paths: Vec::new(),
         e2e_requirement: None,
+        already_satisfied: false,
         load: Default::default(),
     };
     assert!(
@@ -882,6 +883,7 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
                 scope_violation: Vec::new(),
                 allowed_paths: Vec::new(),
                 e2e_requirement: None,
+                already_satisfied: false,
                 load: Default::default(),
             },
         )

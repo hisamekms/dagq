@@ -195,6 +195,15 @@ impl WaitState {
         Some(state)
     }
 
+    /// Whether a run with these `events` (ascending) holds a slot as the
+    /// supervisor counts it: not while it waits for a person outside the
+    /// slots, in a wait (decision 13) or resting on the `approve_close` ask
+    /// of its `already_satisfied` claim (ADR-t1818-1). A verification run
+    /// again for an answer holds one again.
+    pub fn holds_a_slot(events: &[RunEvent]) -> bool {
+        Self::of(events).is_none() && !super::satisfied::rests(events)
+    }
+
     /// The asks as `status` shows them.
     pub fn asks_json(&self) -> Value {
         Value::Array(
@@ -455,6 +464,44 @@ mod tests {
             created_at: at.into(),
             actor: None,
         }
+    }
+
+    /// A claim of `already_satisfied` holds its slot while its
+    /// verification runs, none while it rests on its `approve_close` ask,
+    /// and one again while the verification runs again for an answer.
+    #[test]
+    fn a_claim_resting_on_its_ask_holds_no_slot() {
+        let run = "11111111-1111-4111-8111-111111111111";
+        let at = "2026-10-12T00:00:00.000Z";
+        let mut events = vec![event(1, run, "run_claimed", json!({}), at)];
+        assert!(WaitState::holds_a_slot(&events));
+        events.push(event(
+            2,
+            run,
+            "run_satisfied_snapshot",
+            json!({"head": "a"}),
+            at,
+        ));
+        assert!(WaitState::holds_a_slot(&events));
+        events.push(event(
+            3,
+            run,
+            "run_satisfied_verified",
+            json!({"head": "a", "passed": true}),
+            at,
+        ));
+        assert!(!WaitState::holds_a_slot(&events));
+        events.push(event(
+            4,
+            run,
+            "run_satisfied_snapshot",
+            json!({"head": "b", "ask_id": 9}),
+            at,
+        ));
+        assert!(WaitState::holds_a_slot(&events));
+        // A wait of ADR-0071 holds none either.
+        let waiting = [started(1, 7, "worker_question")];
+        assert!(!WaitState::holds_a_slot(&waiting));
     }
 
     fn started(id: i64, ask: i64, kind: &str) -> RunEvent {

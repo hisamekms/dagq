@@ -29,7 +29,8 @@ pub use payload::{
 pub use recorded::{
     NewRunEvent, Recorded, end_session, finish_validation, record_e2e_park,
     record_exhausted_resumes, record_gone_session_park, record_landing_decision, record_live_park,
-    record_recheck_park, resume_finished, unfinished_change,
+    record_recheck_park, record_satisfied_close, record_satisfied_decision, resume_finished,
+    unfinished_change,
 };
 
 /// A run of a task. `Serialize` is the JSON the CLI prints; there is no
@@ -454,6 +455,30 @@ pub fn reject(
     Ok(run)
 }
 
+/// `validating` → `succeeded`: an `already_satisfied` claim verified on
+/// main closes the task without a commit (ADR-t1818-1 decision 5); the run
+/// keeps no `result_commit`.
+pub fn close_satisfied(mut run: TaskRun) -> Result<TaskRun, DomainError> {
+    require_status(&run, &[RunStatus::Validating], "close as already satisfied")?;
+    run.status = RunStatus::Succeeded;
+    run.result_commit = None;
+    Ok(run)
+}
+
+/// `validating` → `failed`: a person's `retry` or `cancel` answer to the
+/// `approve_close` ask of an `already_satisfied` claim, with `reason` as
+/// `last_error`.
+pub fn decide_satisfied(mut run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
+    require_status(
+        &run,
+        &[RunStatus::Validating],
+        "decide the already_satisfied claim of",
+    )?;
+    run.status = RunStatus::Failed;
+    run.last_error = Some(reason);
+    Ok(run)
+}
+
 /// `awaiting_integration` → `validating`: the live session rewrote its
 /// receipt for a `revise` verdict (ADR-0027 decision 2).
 pub fn restart_validation(mut run: TaskRun) -> Result<TaskRun, DomainError> {
@@ -806,13 +831,20 @@ pub fn record_close_failure(mut run: TaskRun, message: String) -> Result<TaskRun
     Ok(run)
 }
 
+/// A run at rest with its session's workspace open: awaiting
+/// integration, parked for a session, or validating an `already_satisfied`
+/// claim whose session exits before the claim is verified (ADR-t1818-1).
 fn require_open_workspace_at_rest(
     run: &TaskRun,
     operation: &'static str,
 ) -> Result<(), DomainError> {
     require_status(
         run,
-        &[RunStatus::AwaitingIntegration, RunStatus::NeedsSession],
+        &[
+            RunStatus::AwaitingIntegration,
+            RunStatus::NeedsSession,
+            RunStatus::Validating,
+        ],
         operation,
     )?;
     require(run.workspace_closed_at.is_none(), || {

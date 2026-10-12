@@ -220,7 +220,8 @@ fn slot_snapshot(
         .map(|registration| i64::from(registration.parallel))
         .sum();
     // A run that waits for a person, or waits to go back to its slot,
-    // holds no slot (ADR-0071 decision 13). Every other run a registered
+    // holds no slot (ADR-0071 decision 13), nor does a claim of
+    // `already_satisfied` resting on its ask (ADR-t1818-1). Every other run a registered
     // supervisor leases holds its slot as the supervisor counts it, landing,
     // in review or resumed alike; an unfinished run under no such lease holds
     // one unless it is landed under a token no supervisor registered (a
@@ -244,7 +245,7 @@ fn slot_snapshot(
     holding.extend(supervisor_leases);
     let mut executing: i64 = 0;
     for run in &holding {
-        if crate::domain::waiting::WaitState::of(&queue.run_events(run)?).is_none() {
+        if crate::domain::waiting::WaitState::holds_a_slot(&queue.run_events(run)?) {
             executing += 1;
         }
     }

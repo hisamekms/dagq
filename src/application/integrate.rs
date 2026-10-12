@@ -47,6 +47,7 @@ use crate::domain::{
     landing_verification,
     measure::{LoadSummary, LoadWindow},
     required_of,
+    satisfied::{SnapshotFailure, SnapshotVerification},
     scope::{out_of_scope, scope_violation_reason},
     toolchain::Toolchains,
     validation::{self, CheckedOut, E2eRequirement, Fact, Judgement, ReceiptFacts, ReceiptFile},
@@ -77,12 +78,15 @@ pub struct Rejection {
 }
 
 /// A receipt validation accepted: the receipt, the commit it names and
-/// whether `e2e` was required of it (ADR-t963-1 decision 2).
+/// whether `e2e` was required of it (ADR-t963-1 decision 2). An
+/// `already_satisfied` claim (ADR-t1818-1) names the base as its commit
+/// and lands nothing.
 #[derive(Debug)]
 pub struct Accepted {
     pub receipt: Receipt,
     pub commit: CommitSha,
     pub e2e_requirement: E2eRequirement,
+    pub already_satisfied: bool,
 }
 
 /// Cross-check the agent's receipt against Git: the receipt names the
@@ -135,6 +139,18 @@ pub fn check_receipt(
                     receipt,
                     commit,
                     e2e_requirement,
+                    already_satisfied: false,
+                }));
+            }
+            // No diff: only the task can require the e2e.
+            Judgement::AlreadySatisfied(commit) => {
+                let e2e_requirement = E2eRequirement::of(facts.task_e2e, &[], &[]);
+                let receipt = facts.into_receipt().context("accepted without a receipt")?;
+                return Ok(Ok(Accepted {
+                    receipt,
+                    commit,
+                    e2e_requirement,
+                    already_satisfied: true,
                 }));
             }
             Judgement::Reject(rejection) => {
@@ -253,6 +269,83 @@ fn back_to_session(facts: ReceiptFacts<'_>, reason: String) -> Rejection {
     }
 }
 
+/// Run the task's verification commands, every one as registered (a
+/// coverage gate included, ADR-t1818-1 decision 2), on `head`, the snapshot
+/// of main an `already_satisfied` claim is verified on. They run in a
+/// scratch worktree of the run's directory with `head` checked out
+/// detached, so the run's own worktree keeps the base its receipt names,
+/// with the run's `[run.env]`; nothing is rebased, committed or pushed. The
+/// first command that fails ends it, its log kept in the run's directory.
+/// `Err` is a verification that could not run at all.
+pub fn verify_snapshot(
+    repository: &dyn Repository,
+    verifier: &dyn Verifier,
+    files: &dyn RunFiles,
+    task: &Task,
+    run: &TaskRun,
+    head: &CommitSha,
+) -> Result<SnapshotVerification> {
+    let commands = task.verification_commands();
+    let mut verification = SnapshotVerification {
+        head: head.clone(),
+        commands: commands.len(),
+        failure: None,
+    };
+    if commands.is_empty() {
+        return Ok(verification);
+    }
+    let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+    // Set to the container, which does not run a verification yet, the
+    // commands do not run on the host instead (ADR-t2113-1 decision 4).
+    if verifier.runtimes()?.verification != crate::domain::container_runtime::Runtime::Host {
+        bail!(
+            "dagq.toml sets the verification's runtime to the container, which cannot run it; no verification command runs on the host instead"
+        );
+    }
+    if let Some(message) = verifier.run_env_programs(Some(run_dir))?.missing_message() {
+        bail!("{message}");
+    }
+    let env = verifier.run_env(run_dir)?;
+    let scratch = satisfied_scratch(run_dir);
+    // The scratch worktree goes whatever the commands did.
+    let mut ran = || -> Result<Option<SnapshotFailure>> {
+        repository.checkout_scratch(&scratch, head.as_str())?;
+        for (index, command) in commands.iter().enumerate() {
+            let log = run_dir.join(format!(
+                "satisfied-{}-{}.log",
+                &head.as_str()[..12],
+                index + 1
+            ));
+            let exit = verifier.run_to_log(command, &scratch, &env, &log)?;
+            if !exit.success {
+                // The commands after it do not run.
+                verification.commands = index + 1;
+                let output = files.read_to_string(&log).unwrap_or_default();
+                return Ok(Some(SnapshotFailure {
+                    command: command.clone(),
+                    exit_code: exit.code.unwrap_or(128),
+                    log_path: path_text(&log)?,
+                    output_tail: tail(&output, 2000).to_owned(),
+                }));
+            }
+        }
+        Ok(None)
+    };
+    let ran = ran();
+    if let Err(error) = repository.remove_case_tree(&scratch) {
+        warn!(run_id = %run.id(), "run {}: the scratch worktree {} could not be removed: {error:#}", run.id(), scratch.display());
+    }
+    verification.failure = ran?;
+    Ok(verification)
+}
+
+/// The scratch worktree of `run_dir` [`verify_snapshot`] checks a snapshot
+/// out in; what an earlier verification left working in it is stopped
+/// before it is used again.
+pub fn satisfied_scratch(run_dir: &Path) -> PathBuf {
+    run_dir.join("satisfied")
+}
+
 /// What the receipt `integrate` reads before landing lacks: the code, the
 /// reason and the payload of the park, with the missing checks in `checks`
 /// and, for a Spike, the fields of its result in `spike_result`
@@ -278,6 +371,26 @@ fn landing_gaps(
         payload["spike_result"] = json!(spike_missing);
     }
     Some((code, reason, payload))
+}
+
+/// Why the receipt `integrate` reads before landing fails the run instead
+/// of landing it, `None` for a `succeeded` one: the session reported the
+/// run `failed`, or `already_satisfied` (ADR-t1818-1), which has no commit
+/// to land. Validation keeps a claim of the first session `validating` and
+/// off this path; one a resumed session wrote here goes to the run's
+/// recovery like a failed run.
+fn receipt_ends_landing(receipt: &Receipt) -> Option<String> {
+    match receipt.result() {
+        ReceiptResult::Succeeded => None,
+        ReceiptResult::Failed => Some(format!(
+            "session reported the run as failed: {}",
+            receipt.summary()
+        )),
+        ReceiptResult::AlreadySatisfied => Some(format!(
+            "session reported already_satisfied, which has no commit to land: {}",
+            receipt.summary()
+        )),
+    }
 }
 
 /// Which run `integrate` lands.
@@ -1395,9 +1508,9 @@ fn land(
         }
         Err(error) => return Err(error).context("read receipt"),
     };
-    if receipt.result() == ReceiptResult::Failed {
+    if let Some(reason) = receipt_ends_landing(&receipt) {
         return Ok(Verdict::ReceiptFailed {
-            reason: format!("session reported the run as failed: {}", receipt.summary()),
+            reason,
             receipt: serde_json::to_value(&receipt)?,
         });
     }
@@ -2516,7 +2629,8 @@ pub fn integrate_verify_log(run_dir: &Path, attempt: u32, index: usize) -> PathB
 
 /// Where integrate's attempt `attempt` writes the log of the retry of its
 /// `index`th verification command (task 639), next to the first run's:
-/// `integrate-<attempt>-verify-<index>-retry.log`.
+/// `integrate-<attempt>-verify-<index>-retry.log`. [`integrate_logs`] and
+/// [`next_integrate_attempt`] read it as a log of the same attempt.
 pub fn integrate_retry_log(run_dir: &Path, attempt: u32, index: usize) -> PathBuf {
     run_dir.join(format!("integrate-{attempt}-verify-{index}-retry.log"))
 }
@@ -2735,6 +2849,16 @@ mod tests {
     impl Repository for FakeRepository {
         fn is_dagq_source(&self) -> bool {
             self.dagq_source
+        }
+        fn checkout_scratch(&self, _: &Path, commit: &str) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(format!("checkout_scratch {commit}"));
+            Ok(())
+        }
+        fn remove_case_tree(&self, _: &Path) -> Result<()> {
+            self.calls.borrow_mut().push("remove_case_tree".to_owned());
+            Ok(())
         }
         fn main_head(&self) -> Result<CommitSha> {
             Ok(sha(BASE))
@@ -2972,6 +3096,158 @@ mod tests {
             .unwrap();
     }
 
+    /// A verifier whose commands exit as `passes` says, one per command in
+    /// order, and records each command it ran.
+    struct ScriptedVerifier {
+        passes: Vec<bool>,
+        ran: RefCell<Vec<String>>,
+        /// `[roles.verification]` sets the container.
+        container: bool,
+    }
+
+    impl Verifier for ScriptedVerifier {
+        fn runtimes(&self) -> Result<crate::domain::container_runtime::RuntimeConfig> {
+            use crate::domain::container_runtime::Runtime;
+            Ok(crate::domain::container_runtime::RuntimeConfig {
+                worker: Runtime::Host,
+                verification: if self.container {
+                    Runtime::Container
+                } else {
+                    Runtime::Host
+                },
+            })
+        }
+        fn run_env(&self, _: &Path) -> Result<Vec<(String, String)>> {
+            Ok(Vec::new())
+        }
+        fn run_env_programs(
+            &self,
+            _: Option<&Path>,
+        ) -> Result<crate::domain::run_env::RunEnvCheck> {
+            Ok(Default::default())
+        }
+        fn run_env_table(&self) -> Result<Option<Vec<(String, String)>>> {
+            unreachable!("the snapshot's verification reads the run's environment only")
+        }
+        fn run_env_salt(&self) -> Result<String> {
+            unreachable!("the snapshot's verification reads the run's environment only")
+        }
+        fn run_to_log(
+            &self,
+            command: &str,
+            _: &Path,
+            _: &[(String, String)],
+            _: &Path,
+        ) -> Result<super::super::Exit> {
+            let mut ran = self.ran.borrow_mut();
+            let success = self.passes[ran.len()];
+            ran.push(command.to_owned());
+            Ok(super::super::Exit {
+                success,
+                code: Some(if success { 0 } else { 1 }),
+                signal: None,
+                description: String::new(),
+            })
+        }
+    }
+
+    /// The snapshot's verification runs the task's commands in order in the
+    /// scratch worktree of the head and removes it after; the first that
+    /// fails ends it, and `commands` counts those that ran, not those
+    /// registered.
+    #[test]
+    fn a_snapshot_verification_stops_at_its_first_failure_and_counts_what_ran() {
+        let mut record = task_record(&[], &[]);
+        record.verification_commands = vec!["first".into(), "second".into(), "third".into()];
+        let task = Task::restore(record).unwrap();
+        let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
+        let run = run(dir);
+        let verify = |passes: Vec<bool>| {
+            let repository = FakeRepository::sound();
+            let verifier = ScriptedVerifier {
+                passes,
+                ran: RefCell::new(Vec::new()),
+                container: false,
+            };
+            let verification =
+                verify_snapshot(&repository, &verifier, &files, &task, &run, &sha(HEAD)).unwrap();
+            (
+                verification,
+                verifier.ran.into_inner(),
+                repository.calls.into_inner(),
+            )
+        };
+        let (failed, ran, calls) = verify(vec![false, true, true]);
+        assert_eq!(failed.commands, 1);
+        assert_eq!(ran, ["first"]);
+        let failure = failed.failure.unwrap();
+        assert_eq!((failure.command.as_str(), failure.exit_code), ("first", 1));
+        assert_eq!(
+            calls,
+            [
+                format!("checkout_scratch {HEAD}"),
+                "remove_case_tree".to_owned()
+            ]
+        );
+        let (second, ran, _) = verify(vec![true, false, true]);
+        assert_eq!((second.commands, ran.len()), (2, 2));
+        let (passed, ran, _) = verify(vec![true, true, true]);
+        assert_eq!((passed.commands, passed.failure, ran.len()), (3, None, 3));
+    }
+
+    /// With the verification set to the container, the snapshot's
+    /// verification refuses before anything: no worktree is checked out
+    /// and no command runs on the host (ADR-t2113-1 decision 4).
+    #[test]
+    fn a_snapshot_verification_set_to_the_container_runs_nothing_on_the_host() {
+        let mut record = task_record(&[], &[]);
+        record.verification_commands = vec!["first".into()];
+        let task = Task::restore(record).unwrap();
+        let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
+        let repository = FakeRepository::sound();
+        let verifier = ScriptedVerifier {
+            passes: vec![true],
+            ran: RefCell::new(Vec::new()),
+            container: true,
+        };
+        let error = verify_snapshot(&repository, &verifier, &files, &task, &run(dir), &sha(HEAD))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("runtime to the container"), "{error}");
+        assert!(verifier.ran.into_inner().is_empty());
+        assert!(repository.calls.into_inner().is_empty());
+    }
+
+    /// A receipt `integrate` reads lands only when it is `succeeded`: a
+    /// `failed` or an `already_satisfied` one fails the run, saying which.
+    #[test]
+    fn only_a_succeeded_receipt_reaches_the_landing() {
+        let of = |result: &str| {
+            Receipt::parse(
+                &json!({
+                    "run_id": "r",
+                    "result": result,
+                    "commit": "0".repeat(40),
+                    "tests": {"status": "passed", "evidence_or_reason": "ran"},
+                    "e2e": {"status": "not_applicable", "evidence_or_reason": "none"},
+                    "subagent_review": {"status": "passed", "evidence_or_reason": "ok"},
+                    "summary": "s",
+                })
+                .to_string(),
+            )
+            .unwrap()
+        };
+        assert_eq!(receipt_ends_landing(&of("succeeded")), None);
+        assert_eq!(
+            receipt_ends_landing(&of("failed")).as_deref(),
+            Some("session reported the run as failed: s")
+        );
+        assert_eq!(
+            receipt_ends_landing(&of("already_satisfied")).as_deref(),
+            Some("session reported already_satisfied, which has no commit to land: s")
+        );
+    }
+
     #[test]
     fn a_sound_receipt_is_accepted_through_the_repository_port() {
         let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
@@ -2981,10 +3257,12 @@ mod tests {
             receipt,
             commit,
             e2e_requirement,
+            already_satisfied,
         } = check_receipt(&repository, &files, &task(&[]), &run(dir), &[])
             .unwrap()
             .unwrap_or_else(|rejection| panic!("{}", rejection.reason));
         assert!(!e2e_requirement.required);
+        assert!(!already_satisfied);
         assert_eq!(commit, sha(HEAD));
         assert_eq!(
             repository.calls.borrow().as_slice(),

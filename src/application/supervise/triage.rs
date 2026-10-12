@@ -37,6 +37,17 @@ impl Supervisor<'_> {
             }
             let processes = self.queue.processes(run.id())?;
             let lease = match self.queue.run_lease(run.id())? {
+                // A claim of `already_satisfied` rests unleased between its
+                // steps with its session ended (ADR-t1818-1): the
+                // supervisor or the answer moves it, not a recovery.
+                None if crate::domain::satisfied::blocks_recovery(
+                    run.status(),
+                    false,
+                    &self.queue.run_events(run.id())?,
+                ) =>
+                {
+                    continue;
+                }
                 None => None,
                 Some(lease) => {
                     let wrapper = processes.iter().find(|p| p.role == "wrapper");

@@ -558,13 +558,10 @@ pub fn doctor(
                 .iter()
                 .find(|l| l.run_id == *run.id())
                 .map(|l| lease_health(l, now, control));
-            let progress = Progress::of(
-                run.status(),
-                progress_lease(lease.as_ref()),
-                &queue.run_events(run.id())?,
-                now,
-            );
+            let events = queue.run_events(run.id())?;
+            let progress = Progress::of(run.status(), progress_lease(lease.as_ref()), &events, now);
             let mut health = run_health(&run, &processes, lease, now, control, files);
+            super::runs::block_resting_claim(&mut health, &run, &events);
             health.progress = Some(progress);
             Ok(health)
         })

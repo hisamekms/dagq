@@ -61,6 +61,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
   supervisorはtaskの検証のコマンドの有無を見ず、全ての着地を待たせる。
   `integrate`自身も検証のコマンドの前に確かめ（`integrate::container_refusal`）、どのコマンドもhostで流さずにrunを元のstatusへ戻す。
   containerが使えると答えても、verificationのcontainerの実行がまだ無いので同じく拒む。
+  `already_satisfied`の主張のmainのsnapshotの検証も同じく始めずに待ち（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）、`integrate::verify_snapshot`自身も検証のコマンドの前に拒む。
 - 知らせ: supervisorと、拒んだ`integrate`が、答えがqueueの最新の記録と違うとき（待つ適用先か理由が変わったときを含む、`ContainerCheck::transition`）に`container_runtime_unavailable` / `container_runtime_available`を記録し、前者はinbox宛てのattentionになる。
   supervisorを通さない`integrate`だけでもinboxに届く。
   人は部品が揃うのを待つか、runtimeをhostに戻すtaskを頼む。

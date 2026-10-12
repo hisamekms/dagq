@@ -956,6 +956,28 @@ pub trait RunTransitions {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun>;
+    /// Close the task of a validating run whose `already_satisfied` claim
+    /// was verified (ADR-t1818-1): the run `succeeded` without a commit,
+    /// recorded as `run_satisfied_closed` with `payload`, the task
+    /// `completed`; `token` is the lease it gives back, `None` for a run
+    /// nobody leases.
+    fn close_satisfied(
+        &mut self,
+        id: &RunId,
+        token: Option<&LeaseToken>,
+        payload: serde_json::Value,
+    ) -> Result<(Task, TaskRun)>;
+    /// Apply a `retry` or `cancel` answer to the `approve_close` ask of a
+    /// validating run nobody leases: it becomes `failed` with `reason`,
+    /// recorded as `run_satisfied_decided` with `payload`, and its task
+    /// takes `action` in the same transaction.
+    fn decide_satisfied(
+        &mut self,
+        id: &RunId,
+        reason: &str,
+        payload: serde_json::Value,
+        action: crate::domain::TaskAction,
+    ) -> Result<TaskRun>;
     /// Park a running run leased to `token` whose live session a recovery
     /// job's `resume` sends back to a session of its own (task 442): it
     /// becomes `needs_session` with `reason`, recorded as
@@ -1038,6 +1060,11 @@ pub trait RunRecovery {
     /// [`Self::lease_for_review`] for the e2e a run queued to land runs
     /// first (ADR-t1233-2).
     fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>>;
+    /// Lease a `validating` run nobody holds to `token` to verify its
+    /// `already_satisfied` claim again for an answer to close it
+    /// (ADR-t1818-1 decision 3); `None` when another process took it or it
+    /// changed meanwhile.
+    fn lease_satisfied(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>>;
     /// Recover an orphaned run whose `checked_processes` registered
     /// processes the caller found dead.
     fn recover_run(

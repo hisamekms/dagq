@@ -72,6 +72,7 @@ claimed ──▶ starting ──▶ running ──▶ validating ──accept�
                                 failed / needs_session ◀──────────┴─────────────────────── needs_session ──▶（resume）
 claimed〜validating ──interrupt──▶ interrupted、integrating ──interrupt──▶ awaiting_integration
 failed / interrupted ──復旧jobのresume──▶ needs_session ──resumeを使い切る──▶ failed
+validating（already_satisfied）──close──▶ succeeded（commitなし）、──retry / cancel──▶ failed
 ```
 
 goalはtaskの束が解く上位の課題で、draft → openの状態と、それと独立な1回のclose（verdict）を持つ。
@@ -95,8 +96,8 @@ proposalはplannerがplan reviewに出すtaskとgoalの束で、submitted → ac
 - taskは高々1つのgoalに属し、閉じたgoalに属するtaskは増えない。
 - goalの`closed_at`と`verdict`は同時にnullか同時に非nullで、verdictを消すのは人の`reopen`だけで、そのときも`goal_closed`のeventは残る。
 - `in_progress`はclaimしたtaskだけが持ち、終端（`completed`・`canceled`）のtaskは変わらない。
-- taskが`completed`になるのは、その`integrated`のrunを`integrate`がmainへ着地させたときだけ。
-  receiptの自己申告だけでは成功せず、base commitの上のcommit、clean worktree、rebase後に1回だけ流す検証コマンドの成功が要る（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)決定1）。
+- taskが`completed`になるのは、`integrate`によるrunの着地と、`already_satisfied`の主張を閉じたときだけ。
+  receiptの自己申告だけでは成功せず、着地はbase commitの上のcommit・clean worktree・rebase後に1回だけ流す検証コマンドの成功（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)決定1）、閉じるのはsnapshotの検証と人の答え。
 - mainはtaskごとに1つのsquash commitの直線で、`integrated`のrunはtaskごとに1件、`integrating`のrunはqueueごとに1件。
 - 1 runの失敗・中断・復旧は他のrunの状態・lease・process・資源を変えない。
 - agentの異常終了だけでtaskを自動で再実行しない（次の一手は復旧jobのverdictか人が決める）。
@@ -132,10 +133,8 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 - 遷移の判断: `TaskStatus::transition`（`TaskAction`ごとに許す元のstatus）。
 - `submitted → ready`はplan reviewの経路（`proposal::accept`）だけが行い、bypassの無い`ready`はdraftとsubmittedを拒む。
   人の`ready --bypass-review`は`review_bypassed`を記録して飛ばす。
-- `Ready`は失敗・中断したrunだけを持つ`in_progress`のtaskの再試行で、中身が変わらないのでplan reviewを通さない。
 - 中身の編集（`edit`）はdraftとsubmittedだけで、readyのtaskはsubmittedに戻してから直す（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定9・14）。
   例外として、最新のrunが終わり生きているrunの無い`in_progress`のtaskのverifyだけはuserとinboxが変えられる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。
-- 循環の検出はstoreの再帰CTEが3種の辺を合わせて行い、domainはその結果を受けて拒む（`task::check_acyclic`ほか）。
 - 走っているrunは`prompt.txt`の写しのままで、編集は次のclaimから効く。
 - 重複のcancel（`cancel --duplicate-of`）の重複先は`canceled`でないtaskに限り、記録が連鎖も循環もしない（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)決定5）。
 
@@ -272,7 +271,8 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
   applicationの`integrate::check_receipt`は求められた事実だけをrun filesとGitから集めて渡し直す。
 - 判定の順と拒否の理由のコードは`judge`と`Fact`のdoc commentが持つ。
 - 拒否のうち`needs_session`は要求evidenceかSpikeの結果の欠けかscopeの違反（`Validation::resumable()`）。
-- 検証コマンドはvalidatingでは流さず、`integrate`がrebase後に1回だけ流す（[Validation](supervisor-lifecycle/validation.md)）。
+- `already_satisfied`の受理は着地せず`validating`に残し、mainのsnapshotで検証する。
+- 着地の検証コマンドはvalidatingでは流さず、`integrate`がrebase後に1回だけ流す（[Validation](supervisor-lifecycle/validation.md)）。
 
 ### runの履歴（`RunHistory`）
 

@@ -101,6 +101,7 @@ mod review_programs;
 mod review_subagents;
 mod runtime_actor_env;
 mod runtime_adopt;
+mod runtime_already_satisfied;
 mod runtime_ask;
 mod runtime_background;
 mod runtime_background_process;

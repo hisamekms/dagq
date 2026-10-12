@@ -30,14 +30,16 @@ pub enum Blocker {
     Human,
     /// dagq's own steps and the intervals it watches at.
     Runtime,
-    /// A service outside: the remote, a provider's API.
+    /// A service outside: GitHub, the remote, a provider's API.
     External,
-    /// The run's environment: its provisioning, a failure, short resources.
+    /// The run's environment: its provisioning, a failure, short resources
+    /// (ADR-t1662-3 decision 5).
     Infra,
 }
 
 /// The slot the run holds meanwhile, as the supervisor counts its slots
-/// (ADR-t1591-1: a run waiting only for its landing turn holds none).
+/// (ADR-t1591-1: a run waiting only for its landing turn holds none): a
+/// worker slot, the landing slot, or none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Holds {
@@ -110,6 +112,16 @@ pub enum Phase {
     /// The run waits outside the slots for a person's answer (ADR-0062),
     /// a `worker_question` among them.
     Waiting,
+    /// The task's verification runs on a snapshot of main for the run's
+    /// `already_satisfied` claim (ADR-t1818-1), in its slot.
+    Verifying,
+    /// The claim rests out of the slots for the answer to its
+    /// `approve_close` ask.
+    ClaimAnswer,
+    /// The claim rests out of the slots, no answer awaited, until its
+    /// verification may run: a slot free and the container the
+    /// verification is set to usable, as a landing waits for both.
+    ClaimHeld,
     /// Its wait ended, and it waits to go back to a slot.
     Returning,
     /// A run to land waits in its slot to be decided: its e2e, the holds
@@ -156,6 +168,9 @@ impl Phase {
             Self::Resume => "resume",
             Self::Recovery => "recovery",
             Self::Waiting => "waiting",
+            Self::Verifying => "verifying",
+            Self::ClaimAnswer => "claim_answer",
+            Self::ClaimHeld => "claim_held",
             Self::Returning => "returning",
             Self::AwaitingSlot => "awaiting_slot",
             Self::AwaitingE2e => "awaiting_e2e",
@@ -181,8 +196,13 @@ impl Phase {
             }
             Self::Validating | Self::Exiting => (B::Runtime, H::WorkerSlot),
             Self::ReviewHeld => (B::External, H::WorkerSlot),
-            Self::Waiting | Self::LandingAnswer | Self::PushPending => (B::Human, H::None),
-            Self::Returning | Self::LandingQueue | Self::NeedsSession => (B::Queue, H::None),
+            Self::Waiting | Self::LandingAnswer | Self::ClaimAnswer | Self::PushPending => {
+                (B::Human, H::None)
+            }
+            Self::Verifying => (B::Compute, H::WorkerSlot),
+            Self::Returning | Self::LandingQueue | Self::NeedsSession | Self::ClaimHeld => {
+                (B::Queue, H::None)
+            }
             Self::AwaitingSlot | Self::AwaitingE2e => (B::Queue, H::WorkerSlot),
             Self::E2e => (B::Compute, H::WorkerSlot),
             Self::Landing => (B::Compute, H::LandingSlot),
@@ -211,6 +231,27 @@ impl Phase {
             | RunStatus::Integrating
             | RunStatus::Integrated => None,
         }
+    }
+}
+
+impl Phase {
+    /// The phase of a run no slot holds, by its status and its `events`:
+    /// [`Self::at_rest`], except that a `validating` run whose
+    /// `already_satisfied` claim rests ([`super::satisfied::rests`]) waits
+    /// for the answer to its ask ([`super::satisfied::answer_awaited`]), or
+    /// else for a slot or the container its verification is set to.
+    pub fn resting(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+        if status == RunStatus::Validating && super::satisfied::rests(events) {
+            return Some(if super::satisfied::answer_awaited(events) {
+                Self::ClaimAnswer
+            } else {
+                Self::ClaimHeld
+            });
+        }
+        Self::at_rest(
+            status,
+            RunHistory::from_events(events).queued_approval().is_some(),
+        )
     }
 }
 
@@ -377,7 +418,7 @@ pub fn last_recorded(events: &[RunEvent]) -> Option<Recorded> {
 mod tests {
     use super::*;
 
-    const ALL: [Phase; 22] = [
+    const ALL: [Phase; 25] = [
         Phase::Provisioning,
         Phase::Worker,
         Phase::Validating,
@@ -388,6 +429,9 @@ mod tests {
         Phase::Resume,
         Phase::Recovery,
         Phase::Waiting,
+        Phase::Verifying,
+        Phase::ClaimAnswer,
+        Phase::ClaimHeld,
         Phase::Returning,
         Phase::AwaitingSlot,
         Phase::AwaitingE2e,
@@ -421,6 +465,9 @@ mod tests {
             (Phase::AwaitingSlot, tags(B::Queue, H::WorkerSlot)),
             (Phase::LandingAnswer, tags(B::Human, H::None)),
             (Phase::Waiting, tags(B::Human, H::None)),
+            (Phase::Verifying, tags(B::Compute, H::WorkerSlot)),
+            (Phase::ClaimAnswer, tags(B::Human, H::None)),
+            (Phase::ClaimHeld, tags(B::Queue, H::None)),
             (Phase::PushPending, tags(B::Human, H::None)),
             (
                 Phase::Push { in_slot: true },
@@ -528,6 +575,56 @@ mod tests {
         assert_eq!(after(RunStatus::NeedsSession), Some(Phase::NeedsSession));
         assert_eq!(after(RunStatus::Failed), Some(Phase::Ended));
         assert_eq!(after(RunStatus::Integrated), None);
+    }
+
+    /// An `already_satisfied` claim at rest (ADR-t1818-1): accepted with no
+    /// ask, it waits for its verification to run; verified, for the answer
+    /// to its ask; answered, for its verification to run again. A snapshot
+    /// is a verification running, the slot's to record, and a run in
+    /// another status rests by it.
+    #[test]
+    fn a_resting_claim_waits_for_its_answer_or_its_verification() {
+        let accepted = event(
+            1,
+            event_kind::VALIDATION_FINISHED,
+            json!({"status": "validating", "already_satisfied": true}),
+        );
+        let snapshot = event(2, event_kind::RUN_SATISFIED_SNAPSHOT, json!({"head": "a"}));
+        let verified = event(
+            3,
+            event_kind::RUN_SATISFIED_VERIFIED,
+            json!({"passed": true}),
+        );
+        let asked = event(
+            4,
+            event_kind::ASK_OPENED,
+            json!({"ask_id": 9, "kind": "approve_close"}),
+        );
+        let answered = event(5, event_kind::ASK_ANSWERED, json!({"ask_id": 9}));
+        let resting = |events: &[&RunEvent]| {
+            let events: Vec<RunEvent> = events.iter().map(|e| (*e).clone()).collect();
+            Phase::resting(RunStatus::Validating, &events)
+        };
+        assert_eq!(resting(&[&accepted]), Some(Phase::ClaimHeld));
+        assert_eq!(resting(&[&accepted, &snapshot]), None);
+        assert_eq!(
+            resting(&[&accepted, &snapshot, &verified, &asked]),
+            Some(Phase::ClaimAnswer)
+        );
+        assert_eq!(
+            resting(&[&accepted, &snapshot, &verified, &asked, &answered]),
+            Some(Phase::ClaimHeld)
+        );
+        let validated = event(
+            1,
+            event_kind::VALIDATION_FINISHED,
+            json!({"status": "validating"}),
+        );
+        assert_eq!(Phase::resting(RunStatus::Validating, &[validated]), None);
+        assert_eq!(
+            Phase::resting(RunStatus::Succeeded, &[accepted.clone(), verified.clone()]),
+            Some(Phase::Ended)
+        );
     }
 
     fn recovered(id: i64, previous: RunStatus) -> RunEvent {

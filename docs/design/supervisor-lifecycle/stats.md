@@ -92,8 +92,7 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 
 ## 読み方の約束と落とし穴
 
-- cursorは数字ならevent id、`@`付きならunix秒、RFC 3339ならその時刻以前に記録された最後のevent（`Cursor`）。
-  数字だけのものはevent idなので、unix秒には`@`を付ける。
+- cursorの書き方は`Cursor`のdoc commentが持つ。
 - `--since next_cursor`で続きのpageを読むと、期間の集計は同じ窓を重ねて数える。
   pageごとの期間の集計は足し合わせず、1回の読みの値を窓の全体の値として読む（`Stats`のdoc comment）。
 - `--goal`で絞ると、taskを持たないevent（observerの観察、taskの無いask、plannerのturn、自動更新など）は0か数えない。
@@ -109,6 +108,7 @@ runのpage:  --since < finished_event_id ≤ --until の終わったrun（既定
 | goal・全体・change・area・e2eの群 | `GoalStats`・`Intervals`、`with_changes`・`with_areas`・`e2e_groups` |
 | claimの属性（版・負荷・provider・model・試しの群） | `RunStats`の欄、`measures` |
 
+- `already_satisfied`で閉じたrun（[Validation](validation.md#already_satisfiedの検証)）は着地に数えず、群の`already_satisfied`で別に数える。
 - changeはtaskが宣言した変更の種類、areaは着地したcommitの差分を`dagq.toml`の`[areas]`に通した変更の対象（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)、[kpi](kpi.md#area)）。
   areaは保存せず読むたびにgitから求め、1つのrunを持つ全てのareaに数える。
 - e2eの群は、validatingがe2eを求めたかとその出どころでrunを分け、差分でe2eを狭めた前後を比べる（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定2）。

@@ -345,6 +345,93 @@ impl SqliteQueue {
         Ok(run.relocated(&self.runs_dir))
     }
 
+    /// Close the task of a validating run whose `already_satisfied` claim
+    /// was verified (ADR-t1818-1 decision 5): the run becomes `succeeded`
+    /// without a commit, recorded as `run_satisfied_closed` with `payload`,
+    /// and the task `completed`, so its dependents may be claimed. `token`
+    /// is the lease the run holds after a verification run again for the
+    /// answer, released here; `None` closes a run nobody leases.
+    pub fn close_satisfied(
+        &mut self,
+        id: &RunId,
+        token: Option<&LeaseToken>,
+        payload: serde_json::Value,
+    ) -> Result<(Task, TaskRun)> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let at = self.generators.clock.system_time();
+        match token {
+            Some(token) => renew_lease(&tx, id, token, unix_seconds(at))?,
+            None => ensure!(!run_leased(&tx, id)?, "run {id} is leased"),
+        }
+        let run = apply_recorded(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            None,
+            || format!("run {id} is not validating"),
+            |run| run::record_satisfied_close(run, payload),
+        )?
+        .relocated(&self.runs_dir);
+        if let Some(token) = token {
+            tx.execute(
+                "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
+                params![id, token],
+            )?;
+            run_event(
+                &tx,
+                id,
+                EventKind::LeaseReleased,
+                json!({"reason": EventKind::RunSatisfiedClosed.as_str()}),
+            )?;
+        }
+        let task = crate::infrastructure::sqlite::complete_task(
+            &tx,
+            run.task_id(),
+            id,
+            &timestamp(at),
+            unix_seconds(at),
+        )?;
+        tx.commit()?;
+        Ok((task, run))
+    }
+
+    /// Apply a `retry` or `cancel` answer to the `approve_close` ask of a
+    /// validating run nobody leases (ADR-t1818-1): it becomes `failed` with
+    /// `reason` as `last_error`, recorded as `run_satisfied_decided` with
+    /// `payload`, and its task takes `action` (back to `ready`, or
+    /// canceled) in the same transaction, so that no failed run is left
+    /// for a recovery job on a task a person already decided.
+    pub fn decide_satisfied(
+        &mut self,
+        id: &RunId,
+        reason: &str,
+        payload: serde_json::Value,
+        action: TaskAction,
+    ) -> Result<TaskRun> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure!(!run_leased(&tx, id)?, "run {id} is leased");
+        let run = apply_recorded(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            None,
+            || format!("run {id} is not validating"),
+            |run| run::record_satisfied_decision(run, reason, payload),
+        )?;
+        crate::infrastructure::sqlite::transition_task(
+            &tx,
+            run.task_id(),
+            action,
+            &self.generators.clock.timestamp(),
+        )?;
+        tx.commit()?;
+        Ok(run.relocated(&self.runs_dir))
+    }
+
     /// Park a running run leased to `token` whose live session a recovery
     /// job's `resume` sends back to a session of its own (task 442): it
     /// becomes `needs_session` with `reason` as `last_error`, recorded as
@@ -759,15 +846,6 @@ impl SqliteQueue {
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
             params![id, token],
         )?;
-        ensure!(
-            tx.execute(
-                "UPDATE tasks SET status='completed', updated_at=?2
-                 WHERE id=?1 AND status='in_progress'",
-                params![run.task_id(), timestamp(at)]
-            )? == 1,
-            "task {} is not in progress",
-            run.task_id()
-        );
         let mut payload = serde_json::to_value(landing)?;
         payload["result_commit"] = json!(landing.commit);
         payload["git_common_dir"] = json!(common_dir);
@@ -793,21 +871,15 @@ impl SqliteQueue {
             EventKind::LeaseReleased,
             json!({"reason": "integrated"}),
         )?;
-        event(
-            &tx,
-            run.task_id(),
-            Some(id),
-            EventKind::TaskStatusChanged,
-            json!({"from": "in_progress", "to": "completed"}),
-        )?;
         // A Spike's completion leaves its replanning request in the same
-        // transaction (ADR-t1487-1 decision 5).
-        crate::infrastructure::plan_requests::record_spike_request(
+        // transaction (ADR-t1487-1 decision 5), through complete_task.
+        let task = crate::infrastructure::sqlite::complete_task(
             &tx,
             run.task_id(),
+            id,
+            &timestamp(at),
             unix_seconds(at),
         )?;
-        let task = read_task(&tx, run.task_id())?;
         tx.commit()?;
         Ok((task, run))
     }
@@ -1119,6 +1191,23 @@ impl RunTransitions for SqliteQueue {
     ) -> Result<TaskRun> {
         SqliteQueue::decide_landing(self, id, status, reason, payload)
     }
+    fn close_satisfied(
+        &mut self,
+        id: &RunId,
+        token: Option<&LeaseToken>,
+        payload: serde_json::Value,
+    ) -> Result<(Task, TaskRun)> {
+        SqliteQueue::close_satisfied(self, id, token, payload)
+    }
+    fn decide_satisfied(
+        &mut self,
+        id: &RunId,
+        reason: &str,
+        payload: serde_json::Value,
+        action: TaskAction,
+    ) -> Result<TaskRun> {
+        SqliteQueue::decide_satisfied(self, id, reason, payload, action)
+    }
     fn park_live(
         &mut self,
         id: &RunId,
@@ -1173,6 +1262,15 @@ fn abandon_payload(message: &str, lease_released: bool, session: Option<&Value>)
         payload["session"] = session.clone();
     }
     payload
+}
+
+/// Whether run `id` has a lease row, stale or not.
+fn run_leased(tx: &rusqlite::Transaction<'_>, id: &RunId) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1)",
+        [id],
+        |r| r.get(0),
+    )?)
 }
 
 #[cfg(test)]

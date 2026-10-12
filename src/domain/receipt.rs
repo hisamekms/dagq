@@ -41,6 +41,34 @@ pub struct Receipt {
     /// run of a Spike ([`super::execution_class::missing_spike_result`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     spike_result: Option<Value>,
+    /// What an `already_satisfied` receipt ran on the base to show that
+    /// the acceptance already holds (ADR-t1818-1 decision 1), as the JSON
+    /// array `base_checks` of `{"command", "result"}`; required, and read,
+    /// only with that result. [`Self::check_requiring`] refuses such a
+    /// receipt as `receipt_invalid` ([`DomainError::BaseChecksMissing`])
+    /// unless it holds at least one check and each names a non-blank
+    /// command and result. Its commit must be the base: validation reads a
+    /// commit made on top of it as `commit_mismatch`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    base_checks: Vec<BaseCheck>,
+}
+
+/// One check an `already_satisfied` receipt ran on the base: the command
+/// as run and what it gave. Any command the worker may run counts; the
+/// runtime runs the task's whole verification on main itself, so no
+/// command (a coverage gate, the whole test suite) is required here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseCheck {
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub result: String,
+}
+
+impl BaseCheck {
+    fn backed(&self) -> bool {
+        !self.command.trim().is_empty() && !self.result.trim().is_empty()
+    }
 }
 
 /// One of the receipt's `tests`, `e2e` and `subagent_review` claims.
@@ -66,6 +94,8 @@ struct ReceiptFile {
     follow_ups: Option<Value>,
     #[serde(default)]
     spike_result: Option<Value>,
+    #[serde(default)]
+    base_checks: Vec<BaseCheck>,
 }
 
 #[derive(Deserialize)]
@@ -117,6 +147,7 @@ impl Receipt {
             summary: file.summary,
             follow_ups: file.follow_ups,
             spike_result: file.spike_result,
+            base_checks: file.base_checks,
         })
     }
 
@@ -162,6 +193,16 @@ impl Receipt {
         self.spike_result.as_ref()
     }
 
+    /// Whether the worker claims the base already met the acceptance
+    /// (ADR-t1818-1).
+    pub fn already_satisfied(&self) -> bool {
+        self.result == ReceiptResult::AlreadySatisfied
+    }
+
+    pub fn base_checks(&self) -> &[BaseCheck] {
+        &self.base_checks
+    }
+
     pub fn into_follow_ups(self) -> Option<Value> {
         self.follow_ups
     }
@@ -186,7 +227,7 @@ impl Receipt {
                 run_id: run_id.clone(),
             }
         })?;
-        require(self.result == ReceiptResult::Succeeded, || {
+        require(self.result != ReceiptResult::Failed, || {
             DomainError::AgentReportedResult {
                 result: self.result,
                 summary: self.summary.clone(),
@@ -215,6 +256,11 @@ impl Receipt {
                 }
             })?;
         }
+        require(
+            !self.already_satisfied()
+                || (!self.base_checks.is_empty() && self.base_checks.iter().all(BaseCheck::backed)),
+            || DomainError::BaseChecksMissing,
+        )?;
         CommitSha::parse(self.commit.as_str(), "receipt commit")?;
         require(
             self.follow_ups.as_ref().is_none_or(|f| f.is_array()),
@@ -382,6 +428,46 @@ mod tests {
             assert!(parsed.check(&run()).is_ok(), "{follow_ups}");
             assert_eq!(parsed.follow_ups(), Some(&follow_ups));
         }
+    }
+
+    /// An `already_satisfied` receipt needs its checks on the base, each
+    /// with a command and a result; which commands they are is not judged
+    /// (no coverage gate or whole test suite is asked for).
+    #[test]
+    fn an_already_satisfied_receipt_needs_its_base_checks() {
+        let with = |base_checks: Value| {
+            let mut file = serde_json::to_value(receipt(
+                ("not_applicable", "the runtime runs it"),
+                ("passed", "reviewed"),
+            ))
+            .unwrap();
+            file["result"] = serde_json::json!("already_satisfied");
+            file["base_checks"] = base_checks;
+            Receipt::parse(&file.to_string()).unwrap()
+        };
+        let backed = with(serde_json::json!([
+            {"command": "cargo test --locked --lib domain::stats", "result": "12 passed"},
+            {"command": "cargo clippy --locked --all-targets -- -D warnings", "result": "no warnings"},
+        ]));
+        assert!(backed.already_satisfied());
+        assert_eq!(backed.base_checks().len(), 2);
+        assert!(backed.check(&run()).is_ok());
+        for unbacked in [
+            serde_json::json!([]),
+            serde_json::json!([{"command": "cargo test", "result": " "}]),
+            serde_json::json!([{"result": "passed"}]),
+        ] {
+            let error = with(unbacked.clone()).check(&run()).unwrap_err();
+            assert_eq!(error, DomainError::BaseChecksMissing, "{unbacked}");
+            assert_eq!(
+                super::super::ReasonCode::of_receipt_error(&error),
+                super::super::ReasonCode::ReceiptInvalid
+            );
+        }
+        // A succeeded receipt reads no base checks.
+        let succeeded = receipt(("not_applicable", "no surface"), ("passed", "reviewed"));
+        assert!(!succeeded.already_satisfied());
+        assert!(succeeded.check(&run()).is_ok());
     }
 
     #[test]

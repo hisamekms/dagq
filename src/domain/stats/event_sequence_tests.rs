@@ -616,7 +616,7 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
     assert_eq!(
         goal_reports,
         json!([
-            {"goal_id": 7, "runs": 2,
+            {"goal_id": 7, "runs": 2, "already_satisfied": 0,
              "work": {"count": 2, "total": 3000, "median": 1500},
              "validate": {"count": 2, "total": 180, "median": 90},
              "wait_to_land": {"count": 2, "total": 1440, "median": 720},
@@ -628,7 +628,7 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
              "tokens": {"runs": 0, "input": {"count": 0, "total": 0, "median": null}, "output": {"count": 0, "total": 0, "median": null}, "cache_read": {"count": 0, "total": 0, "median": null},
                         "cache_creation": {"count": 0, "total": 0, "median": null}, "total": {"count": 0, "total": 0, "median": null},
                         "cost_usd": {"count": 0, "total": null, "median": null}}},
-            {"goal_id": null, "runs": 2,
+            {"goal_id": null, "runs": 2, "already_satisfied": 0,
              "work": {"count": 1, "total": 300, "median": 300},
              "validate": {"count": 1, "total": 60, "median": 60},
              "wait_to_land": {"count": 0, "total": 0, "median": null},

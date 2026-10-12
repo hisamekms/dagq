@@ -325,6 +325,10 @@ event_kinds! {
     RunPhaseChanged => "run_phase_changed",
     RunPlanned => "run_planned",
     RunRecovered => "run_recovered",
+    RunSatisfiedClosed => "run_satisfied_closed",
+    RunSatisfiedDecided => "run_satisfied_decided",
+    RunSatisfiedSnapshot => "run_satisfied_snapshot",
+    RunSatisfiedVerified => "run_satisfied_verified",
     RunSlotRegained => "run_slot_regained",
     RunTmpRemoved => "run_tmp_removed",
     RunUnfinishedChanged => "run_unfinished_changed",
@@ -1018,6 +1022,25 @@ pub const RUN_INTEGRATED: &str = EventKind::RunIntegrated.as_str();
 pub const RUN_PHASE_CHANGED: &str = EventKind::RunPhaseChanged.as_str();
 pub const RUN_PLANNED: &str = EventKind::RunPlanned.as_str();
 pub const RUN_RECOVERED: &str = EventKind::RunRecovered.as_str();
+/// A task closed `completed` without a commit on a verified
+/// `already_satisfied` claim (ADR-t1818-1 decision 5): no landing. `head`
+/// is the main head it was verified on, `verified_event` that
+/// verification's `run_satisfied_verified`, `ask_id` and `answer` the
+/// person's close, and `rechecked` whether the verification ran again for
+/// that answer because main had moved
+/// ([`super::satisfied::closed_payload`]). It carries no `status`, so
+/// `stats` counts the run apart from the landed and the failed.
+pub const RUN_SATISFIED_CLOSED: &str = EventKind::RunSatisfiedClosed.as_str();
+/// The main head (`head`) an `already_satisfied` claim's verification runs
+/// on, taken before it runs; `ask_id` names the answer to close it runs
+/// again for ([`super::satisfied::snapshot_payload`]).
+pub const RUN_SATISFIED_SNAPSHOT: &str = EventKind::RunSatisfiedSnapshot.as_str();
+/// How that verification ended, with the same `head`: `passed`, how many
+/// of the task's verification `commands` ran, the failing `command` with
+/// its `exit_code`, `log_path` and `output_tail`, and the `ask_id` of the
+/// answer it ran again for ([`super::satisfied::SnapshotVerification::payload`]).
+/// The latest one is what an answer to close is compared with.
+pub const RUN_SATISFIED_VERIFIED: &str = EventKind::RunSatisfiedVerified.as_str();
 /// The supervisor removed the temporary files directory (`TMPDIR`) the
 /// runtime gave an ended run whose task is over (`paths`, `bytes`, `by`,
 /// `reason`, as `scratchpad_removed`; task 1290).
@@ -1436,6 +1459,10 @@ mod tests {
             (EventKind::RunPhaseChanged, "run_phase_changed"),
             (EventKind::RunPlanned, "run_planned"),
             (EventKind::RunRecovered, "run_recovered"),
+            (EventKind::RunSatisfiedClosed, "run_satisfied_closed"),
+            (EventKind::RunSatisfiedDecided, "run_satisfied_decided"),
+            (EventKind::RunSatisfiedSnapshot, "run_satisfied_snapshot"),
+            (EventKind::RunSatisfiedVerified, "run_satisfied_verified"),
             (EventKind::RunSlotRegained, "run_slot_regained"),
             (EventKind::RunTmpRemoved, "run_tmp_removed"),
             (EventKind::RunUnfinishedChanged, "run_unfinished_changed"),

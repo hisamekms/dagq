@@ -338,6 +338,13 @@ pub(super) fn headless_provider_line(provider: Provider) -> &'static str {
 /// no new command: the mapping reads the diff and the receipt.
 pub const ACCEPTANCE_MAP: &str = "Before the receipt, map each acceptance criterion to what meets it (a changed file, a test's name, the receipt's evidence, a document's section or a command that measures it) and fix on the spot any criterion nothing meets yet. Do not write succeeded with a criterion you cannot meet moved into follow_ups: when meeting it needs a person's decision (the acceptance or the scope changes), ask a worker_question with --because scope; when it needs work outside the task, write a failed receipt saying why. In summary, give each criterion's mapping in a short phrase.\n";
 
+/// The receipt of a worker whose base already meets every criterion
+/// (ADR-t1818-1 decision 1): `already_satisfied`, no commit, and the checks
+/// run on the base as its grounds. Those are only the checks a worker may
+/// run; the runtime runs the task's whole verification on main, so the
+/// worker runs no gate the repository leaves to the landing.
+pub const ALREADY_SATISFIED: &str = "When the base already meets every acceptance criterion and no change is needed, commit nothing and write the receipt with result already_satisfied, the base commit as commit, and base_checks: an array of {\"command\",\"result\"}, each a check you ran on the base that shows a criterion holds, with the mapping in summary. Run for it only the checks the repository's instructions let a worker run: the runtime runs the task's verification commands, a coverage gate and the whole test suite included, on main itself before the task can close.\n";
+
 /// The worker's check of the documents (ADR-t1428-1), right after
 /// [`ACCEPTANCE_MAP`] and part of the same step: the documents that
 /// describe the changed behavior, named by the task or not, are read
@@ -1144,8 +1151,9 @@ pub fn prompt(
          Your assignment is this task only. Do not change what a sibling task owns; if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n\
          {acceptance_map}{docs_check}\
          Write a completion receipt to {receipt} using a temporary file in the same directory and atomic rename.\n\
-         Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded or failed\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\",\"membership_proposal\":{{\"classification\":\"required, out_of_scope or undecided\",\"acceptance_items\":[\"...\"],\"reason\":\"...\"}}}}]}}\n\
+         Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded, failed or already_satisfied\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\",\"membership_proposal\":{{\"classification\":\"required, out_of_scope or undecided\",\"acceptance_items\":[\"...\"],\"reason\":\"...\"}}}}]}}\n\
          Each of tests, e2e and subagent_review needs evidence when passed and a reason when not_applicable.\n\
+         {already_satisfied}\
          follow_ups is optional: an array of work you found outside this task, each with a title, a description and a category, for the planner to decide on; omit it when there is none. {categories}\n\
          {follow_up_proposal}\
          You may write this receipt outside the worktree. Keep the worktree clean after committing.\n\
@@ -1161,6 +1169,7 @@ pub fn prompt(
         review = review_line(route),
         acceptance_map = ACCEPTANCE_MAP,
         docs_check = DOCS_CHECK,
+        already_satisfied = ALREADY_SATISFIED,
         local_checks = local_checks("above"),
         categories = follow_up_categories_line(),
         follow_up_proposal = FOLLOW_UP_PROPOSAL,

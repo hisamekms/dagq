@@ -161,6 +161,11 @@ const NOT_APPLYING: &[&str] = &[
     "run_waiting_ended",
     "run_waiting_deferred",
     "run_slot_regained",
+    // The verification an answer to close an `already_satisfied` claim runs
+    // again (ADR-t1818-1): the answer is applied when the claim closes, or
+    // when the ask closes after the verification failed, not when it starts.
+    crate::domain::event_kind::RUN_SATISFIED_SNAPSHOT,
+    crate::domain::event_kind::RUN_SATISFIED_VERIFIED,
 ];
 
 /// The asks of one `reason_category` in a window.
@@ -542,6 +547,68 @@ mod tests {
         // Answered before the window: only its later application counts.
         let late = human_waits(&events, EventId::new(4), EventId::new(7), |_| true);
         assert_eq!(late, (vec![500], vec![90]));
+    }
+
+    /// An answer to close an `already_satisfied` claim is applied when the
+    /// claim closes, not when the verification it runs again starts or
+    /// ends; one whose verification failed is applied when its ask closes.
+    #[test]
+    fn a_close_answer_is_applied_at_the_close_not_at_its_verification() {
+        let at = |id: i64, kind: &str, payload: Value, secs: i64| RunEvent {
+            created_at: crate::domain::marks::utc_text(secs * 1000),
+            ..event(id, Some(1), kind, payload)
+        };
+        let events = [
+            at(
+                1,
+                "ask_opened",
+                json!({"ask_id": 1, "kind": "approve_close"}),
+                0,
+            ),
+            at(2, "ask_answered", json!({"ask_id": 1}), 60),
+            at(
+                3,
+                "run_satisfied_snapshot",
+                json!({"head": "b", "ask_id": 1}),
+                70,
+            ),
+            at(
+                4,
+                "run_satisfied_verified",
+                json!({"head": "b", "passed": true, "ask_id": 1}),
+                400,
+            ),
+            at(
+                5,
+                "run_satisfied_closed",
+                json!({"head": "b", "ask_id": 1}),
+                401,
+            ),
+            at(
+                6,
+                "ask_opened",
+                json!({"ask_id": 2, "kind": "approve_close"}),
+                0,
+            ),
+            at(7, "ask_answered", json!({"ask_id": 2}), 100),
+            at(
+                8,
+                "run_satisfied_snapshot",
+                json!({"head": "c", "ask_id": 2}),
+                110,
+            ),
+            at(
+                9,
+                "run_satisfied_verified",
+                json!({"head": "c", "passed": false, "ask_id": 2}),
+                500,
+            ),
+            at(10, "ask_closed", json!({"ask_id": 2}), 501),
+        ];
+        let (_, to_apply) = human_waits(&events, EventId::new(0), EventId::new(10), |_| true);
+        assert_eq!(to_apply, [401, 501]);
+        let (_, during) = human_waits(&events, EventId::new(0), EventId::new(4), |_| true);
+        assert!(during.is_empty(), "{during:?}");
     }
 
     /// Opened asks count by kind and asker, answered ones by answerer and

@@ -25,11 +25,15 @@ related:
 `validating`のrunに対して、supervisorがセッションと同じleaseの下で、runごとのthreadで次を順に確認する。sessionは開いたまま（[Receipt and session exit](receipt-and-session-exit.md#receipt-and-session-exit)の1）のことも、終了済みのこともある。最初に外れた項目が`failed`の理由（`last_error`）になり、以降は確認しない。
 
 1. receiptが存在し、`Receipt`として解釈できる。
-2. `run_id`が一致し、`result`が`succeeded`である。`tests`/`e2e`/`subagent_review`は`failed`でなく、`passed`には証跡、`not_applicable`には理由が空でなく書かれている。`commit`は完全なSHAである。
+2. `run_id`が一致し、`result`が`succeeded`か`already_satisfied`である（`already_satisfied`は`base_checks`も要る。[Receipt and session exit](receipt-and-session-exit.md#baseがすでに満たすときalready_satisfied)）。
+   `tests`/`e2e`/`subagent_review`は`failed`でなく、`passed`には証跡、`not_applicable`には理由が空でなく書かれている。
+   `commit`は完全なSHAである。
 3. worktreeのHEADがrun branch `dagq/<run-id>`を指し、そのcommitがreceiptの`commit`と一致する。
 4. commitがbase commitと異なり（commitなしを拒む）、base commitの子孫である。
+   `already_satisfied`では逆にcommitがbase commitであることを求め、5と8だけを見て7を読まずに下の「already_satisfiedの検証」へ進む。
 5. `git status --porcelain --untracked-files=all`が空である。untracked fileもdirtyとみなす。
 6. （欠番）taskの`verification_commands`はここでは実行しない。同じcommitに対する実行は`integrate`のrebase後の1回だけ（[ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定1。[`integrate`](integrate.md#integrate)のステップ5）なので、validatingの所要時間はreceiptとGitの照合だけで、`verification_command`イベントも`<run-dir>/verify-N.log`も作らない。検証コマンドで壊れるcommitもここでは`awaiting_integration`になり、`integrate`で`needs_session`になって自動resumeされる。
+   `already_satisfied`のrunは着地しないので、検証は下の「already_satisfiedの検証」がmainのsnapshotで流す。
 7. **宣言パス**（[ADR-0029](../../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）: taskの`paths`（`add --paths`）が空でなければ、run branchが今のmainから分かれた点（`GitRepository::merge_base`で`refs/heads/<branch>`とreceiptの`commit`のmerge-base。rebaseしていなければbase commit、resumeしたsessionがrebaseしていればそのmain）からreceiptの`commit`までに変わったパス（他のtaskがmainに着地したパスは数えない。`GitRepository::changed_paths`: `git diff --name-only -z --no-renames`。renameは両側、削除も含む）のうち、どのglobにも合わないもの（`domain::scope::out_of_scope`）を探す。1–5をすべて通ったrunだけをここで見る。見つかればrunを`failed`ではなく`needs_session`にし、`last_error`を`changed paths outside the task's --paths: <paths>`にして、`validation_finished`（`status: needs_session`、`scope_violation`に外れたパスの配列、`allowed_paths`にtaskのglob）の後に`scope_violation`イベント（`paths`、`allowed`、`reason`。`status`は持たない）を記録する。8より先に見るので、両方が欠けていれば先にこちらを直させ、resume後の再validationで8を見る。後の扱い（終了の依頼、close、自動resume）は8と同じで、resumeの依頼は宣言外のパスをrun branchから外す文面になる。`paths`の無いtaskでは7は何もしない。
 8. **要求evidence**（ADR-0019の決定5）: taskの`required_evidence`（`add --evidence`）のうちworkerが裏付けるcheck（`domain::required_of`。`e2e`は含めない。Codexのworkerは`subagent_review`も含めない）の各checkについて、receiptのそのcheckの`status`が`passed`で`evidence_or_reason`が空白でないこと（`Receipt::missing_evidence`）。`e2e`はruntimeがreviewのpassの後に流すので（下の[runtimeが流すe2e](#runtimeが流すe2e)）、receiptには求めず、要否だけを決めて記録する。1–5をすべて通ったrunだけをここで見るので、receiptやGitの不整合は従来どおり`failed`になる。要求されたcheckに限り、2の「`failed`でない」と「evidence_or_reasonが空でない」はここに回す（`Receipt::check_requiring`）ので、`failed`・`not_applicable`・空のevidenceはどれも`failed`ではなくここで欠落になる。要求されていないcheckの`failed`は従来どおり2で`failed`になる。欠けていればrunを`failed`ではなく`needs_session`にし、`last_error`を`evidence missing: tests`（複数は`, `区切り、要求の順）にして、`validation_finished`（`status: needs_session`、`evidence_missing`に欠けたcheckの配列）の後に`evidence_missing`イベント（`checks`、`reason`、runがe2eを要るときは`e2e_requirement`。`status`は持たない: `stats`が`validation_finished`の`needs_session`で1回数えるため）を記録する。runのsessionには終了を依頼し、終わったらbackgroundのwrapperの残りを止める（resumeは自分のwrapperをbackgroundで起動する。runはworkspaceを開かない。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。supervisorはこのrunを[`needs_session`](needs-session.md#needs_session)の手順で自動resumeし、不足しているcheckの実行とreceiptの書き直しを依頼する。要求の無いtaskでは8は何もしない。
 9. **Spikeの結果**（[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定3）: 実行区分が`spike`のtaskのrunだけ、receiptの`spike_result`がそろっていること（[Receipt and session exit](receipt-and-session-exit.md#spikeの結果)）。
@@ -49,7 +53,37 @@ bundleか状態のファイルが無い・壊れている・symlinkである・�
 
 reviewの段の順は、先頭の[プログラムのreview](review-programs.md)、その後のagentのreview、passの後の[着地の前のe2e](landing-e2e.md)である。
 プログラムのreviewはtestを含まない速い形式の検査で、validatingと同じくtaskのverifyのコマンドを流さない。
-testを含む検証は下の着地の検証（`integrate`のrebase後の1回）だけで、プログラムのreviewとは二重にしない。
+着地するrunのtestを含む検証は下の着地の検証（`integrate`のrebase後の1回）だけで、プログラムのreviewとは二重にしない。
+着地しない`already_satisfied`のrunは、下の「already_satisfiedの検証」でmainのsnapshotに流す。
+
+## already_satisfiedの検証
+
+[ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)の、workerが「baseがすでに受け入れ条件を満たす」と書いたrunの経路。
+verifyが通れば人のaskに上げ、人の答えで閉じる。
+
+- **validating**: 受理してもrunは`awaiting_integration`にせず`validating`のまま残し、`result_commit`を持たない（`AfterValidation::Satisfied`）。
+  sessionに終了を依頼してworkspaceを閉じる。
+- **snapshot**: 検証の時点のmainのheadを1つ決めて`run_satisfied_snapshot`に残し、そのheadでtaskの`verification_commands`を登録のまま全部流す（`integrate::verify_snapshot`）。
+  coverageの関門も流し、[着地の検証](#着地の検証)の置き換えはしない。
+  流す場所はrun directoryのscratch worktreeで、runのworktreeはreceiptの名指すbaseのままにする。
+  rebase・commit・push・e2eは無い。
+  結果は同じheadとともに`run_satisfied_verified`に残す（欄の意味は`event_kind`のdoc comment）。
+  流す間はslotとleaseを持ち、handoffはこれを待つ。
+  verificationのruntimeがcontainerで使えない間は、hostで流さずに検証を始めず、runは受理のまま休み、使えるようになった後のpassが始める（[container runtime](../container-runtime.md#fail-closedの境界)、`satisfied::awaits_verification`）。
+- **ask**: verifyの後に`approve_close`のask（理由は`scope`）を開き、questionにsnapshotのheadを載せ、leaseを外してrunを`validating`のまま休ませる。
+  verifyが落ちていればoptionsから`close`を外し、questionに落ちたことを書く。
+  休む間は開いたask（検証の前ならcontainerの知らせ）がattentionで、supervisorの死んだrunの回収も、人の`recover`と`doctor`も、このrunを取らない（`satisfied::blocks_recovery`、[recover](recover.md)）。
+- **答えの適用**（`apply_satisfied_answers`、passごと）: `retry`はrunを`failed`にしてtaskを`ready`に、`cancel`はrunを`failed`にしてtaskを`canceled`にする。
+  `close`は今のmainのheadを最後の`run_satisfied_verified`と比べる（`satisfied::close_step`）。
+  同じheadで通っていれば、runを`succeeded`（commitなし）、taskを`completed`にし、依存するtaskがclaimの候補になる（`run_satisfied_closed`）。
+  進んでいれば古い結果では閉じず、空いたslotでrunをleaseし直して新しいheadをsnapshotにverifyを1回流し直す。
+  通ればその間にmainがさらに進んでも閉じ、落ちれば閉じずに答えたaskを閉じて、落ちたことを書いたaskを開き直す。
+  人の答えは受け入れ条件の意味の判断なので、通った流し直しの後に聞き直さない。
+- **再起動**: snapshotと結果はeventから読むので、askの後にsupervisorが替わっても、答えの前にmainが進んでも同じ比較になる。
+  流し直しの途中で死んだrunは、adopterの再validationが開いたaskを見て休ませ、次のpassの答えの適用がもう一度流し直す。
+  検証のコマンドは自分のprocess groupで動き、supervisorが死んでも残りうる。
+  そこでscratch worktreeを使い直す前に、そこで動く前の検証のprocessを止め（`auto_repaired`の`satisfied_verification_stopped`）、止まらないか一覧が読めなければ検証せず、askに落ちたことを書く。
+- **集計**: 閉じたrunは着地（`run_integrated`）に数えず、`stats`の`already_satisfied`で別に数える（[stats](stats.md)）。
 
 ## 着地の検証
 

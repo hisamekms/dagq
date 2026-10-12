@@ -298,9 +298,9 @@ impl PhaseTrack {
 }
 
 /// Record the phase a run is in that no slot holds (or whose slot is let
-/// go), from its status: `attempt` is its slot's, `None` the one last
-/// recorded. Nothing is recorded for a run on its way or landed
-/// ([`run_phase::Phase::at_rest`]), nor when it repeats the last record.
+/// go), from its status and events: `attempt` is its slot's, `None` the
+/// one last recorded. Nothing is recorded for a run on its way or landed
+/// ([`run_phase::Phase::resting`]), nor when it repeats the last record.
 pub(super) fn record_rest<L: PhaseLog + ?Sized>(
     log: &L,
     run: &TaskRun,
@@ -308,8 +308,7 @@ pub(super) fn record_rest<L: PhaseLog + ?Sized>(
     cause: &str,
 ) {
     let recorded = log.phase_events(run.id()).and_then(|events| {
-        let queued = RunHistory::from_events(&events).queued_approval().is_some();
-        let Some(phase) = run_phase::Phase::at_rest(run.status(), queued) else {
+        let Some(phase) = run_phase::Phase::resting(run.status(), &events) else {
             return Ok(());
         };
         let last = run_phase::last_recorded(&events);

@@ -334,8 +334,9 @@ pub struct Overlay {
 }
 
 /// A task's life folded: from `task_created` to its end (`completed` at
-/// the end of its landed run's push, or `canceled`), or to `now_ms` while
-/// it is not settled.
+/// the end of its landed run's push, or when it completed with no landed
+/// run, as a closed `already_satisfied` claim does; or `canceled`), or to
+/// `now_ms` while it is not settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskLife {
     pub start: i64,

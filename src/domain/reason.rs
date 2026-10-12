@@ -368,6 +368,7 @@ mod tests {
                 status: CheckStatus::Passed,
             },
             DomainError::FollowUpsNotArray,
+            DomainError::BaseChecksMissing,
         ] {
             assert_eq!(
                 ReasonCode::of_receipt_error(&error),

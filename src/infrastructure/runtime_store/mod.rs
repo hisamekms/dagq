@@ -246,7 +246,7 @@ impl Refusals<'_> {
 
 /// Why a workspace close of a run is not recorded.
 fn not_at_rest() -> String {
-    "run is not awaiting integration or a session with an open workspace under this supervisor"
+    "run is not awaiting integration, a session or an already_satisfied claim with an open workspace under this supervisor"
         .to_owned()
 }
 

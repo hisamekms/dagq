@@ -1084,6 +1084,13 @@ name = "runtime_clone::nothing_a_worker_plants_in_its_clone_runs_on_the_control_
 reason = "B 境界（Git・プロセス）: workerがcloneのconfig・hooks・attributesに仕込んだプログラムが、実のgitでの取り込み・receiptの検証・着地用のworktreeでのreviewの起動・integrateの着地と片付け・headの読みのどれでも走らないことを、印のファイルで確かめる。上書きの組み立ては domain::run_clone の unit test"
 task = 2179
 
+# 5.0〜5.9s (stress 5 under the host's load of other runs, task 1820; the
+# body changed only by a field of a Validation literal)
+[[test]]
+name = "runtime_clone::a_host_runs_landing_of_the_same_commit_runs_the_tracked_hooks"
+reason = "B 境界（Git・プロセス）: hostのrunから着地した同じcommitがtrackedのhooksを今までどおり走らせることを、実のgitと印のファイルで確かめる。上のtestがhookの無さで通っているのではないことの対照"
+task = 1820
+
 # 10.1s to 12.1s (stress 5 under the host's load of other runs, task 1523)
 [[test]]
 name = "runtime_replanning::a_guarded_runs_revise_is_withheld_and_its_approved_landing_lets_another_land"
@@ -1095,3 +1102,39 @@ task = 1523
 name = "runtime_replanning::a_guarded_run_in_the_landing_slot_waits_for_the_outcome_and_then_lands"
 reason = "B 境界（supervisor の配線・SQLite）: review の pass の後に着地の slot に来た保護中の run が lease を持ったまま begin_integration を呼ばず runtime_error にもならず、操作が終わった後の pass で着地することを、実際の supervisor の loop で確かめる。保護の判断は domain::task_replan の unit test"
 task = 1523
+
+# 9.317s (stress max), class B
+[[test]]
+name = "runtime_already_satisfied::a_verified_claim_is_closed_without_a_commit_by_the_answer"
+reason = "B 境界（守る境界）: supervisor wiring and Git: snapshot verify in a scratch worktree, the approve_close ask, the close on SQLite and the dependent's claim and landing; the close decision is satisfied::tests"
+task = 1820
+
+# 11.025s (stress max), class B
+[[test]]
+name = "runtime_already_satisfied::a_close_answered_after_main_moved_verifies_the_new_head_first"
+reason = "B 境界（守る境界）: supervisor wiring: the answer applied by a running supervisor while another run holds a slot, main moved in Git, verified again in a free slot; the decision is satisfied::tests"
+task = 1820
+
+# 8.760s (stress max), class B
+[[test]]
+name = "runtime_already_satisfied::after_a_restart_a_close_verifies_main_again_and_a_failure_does_not_close"
+reason = "B 境界（守る境界）: restart: a new supervisor reads the snapshot from SQLite events, verifies the moved Git main, a failed verify reopens the ask instead of closing, and retry and cancel move the task on SQLite (the answer mapping is satisfied::tests)"
+task = 1820
+
+# 9.196s (stress max), class B
+[[test]]
+name = "runtime_already_satisfied::a_verification_set_to_a_held_container_runs_nothing_on_the_host"
+reason = "B 境界（守る境界）: supervisor wiring with dagq.toml's [roles.verification] runtime in Git: nothing runs on the host while the container is held, the claim rests unleased on SQLite (recover refused, the queue's attention), and both the first verification and the one an answer runs again start once the host is back; the hold decision is satisfied::tests and integrate::tests"
+task = 1820
+
+# 8.216s (stress max), class B
+[[test]]
+name = "runtime_already_satisfied::a_verification_a_dead_supervisor_left_running_is_stopped_before_the_next"
+reason = "B 境界（守る境界）: real processes: a process left in the scratch worktree is listed and stopped by pid before the worktree is checked out again (one elsewhere left alone), recorded on SQLite; which processes are the run's is domain::recovery::run_processes"
+task = 1820
+
+# 9.903s (stress max under load 22; 3.4-4.4s otherwise), class B
+[[test]]
+name = "runtime_already_satisfied::a_claim_without_its_base_checks_is_an_invalid_receipt"
+reason = "B 境界（守る境界）: supervisor wiring: a real worker turn's receipt without base_checks is refused by the supervisor's validation on SQLite (run failed, receipt_invalid, nothing verified); the refusal itself is receipt::tests and validation::tests"
+task = 1820

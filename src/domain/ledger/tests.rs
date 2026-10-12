@@ -5,7 +5,7 @@ use super::read::read;
 use super::*;
 use crate::domain::marks::utc_text;
 use crate::domain::pre_claim::{IntervalKind, SlotClass};
-use crate::domain::run_phase::{Attempt, AttemptKind, Phase, PhaseChange};
+use crate::domain::run_phase::{Attempt, AttemptKind, Holds, Phase, PhaseChange};
 use crate::domain::{RunId, stats};
 
 const T0: i64 = 1_900_000_000;
@@ -360,6 +360,45 @@ fn an_approve_landing_ask_is_a_persons_wait() {
             .unwrap()],
         3000
     );
+}
+
+/// An `already_satisfied` claim (ADR-t1818-1) holds a worker slot only
+/// while its verification runs: not while it waits for the container of its
+/// verification, for the answer to its ask, or, answered, for a slot to
+/// verify main again; its close ends the run.
+#[test]
+fn a_claim_holds_a_slot_only_while_its_verification_runs() {
+    let mut log = Log::default();
+    worked(&mut log)
+        .first(660, Phase::ClaimHeld)
+        .first(1660, Phase::Verifying)
+        .first(1960, Phase::ClaimAnswer)
+        .first(4960, Phase::ClaimHeld)
+        .first(5060, Phase::Verifying)
+        .phase(5260, Phase::Ended, Attempt::FIRST, "run_satisfied_closed");
+    let life = log.fold(9000);
+    assert_covers(&life, 9000);
+    assert_eq!(
+        (life.end, life.outcome.as_deref()),
+        (Some(ms(5260)), Some("run_satisfied_closed"))
+    );
+    let mut by_phase: BTreeMap<&str, (i64, i64)> = BTreeMap::new();
+    for interval in &life.intervals {
+        let held = if interval.holds.is_some_and(|holds| holds != Holds::None) {
+            interval.millis()
+        } else {
+            0
+        };
+        let entry = by_phase.entry(interval.phase.as_str()).or_default();
+        *entry = (entry.0 + interval.millis(), entry.1 + held);
+    }
+    assert_eq!(by_phase["verifying"], (500_000, 500_000));
+    assert_eq!(by_phase["claim_held"], (1_100_000, 0));
+    assert_eq!(by_phase["claim_answer"], (3_000_000, 0));
+    let totals = Totals::of(&life.intervals);
+    assert_eq!(totals.by_blocker["human"].duration_ms, 3_000_000);
+    assert_eq!(totals.by_blocker["queue"].duration_ms, 1_100_000);
+    assert_eq!(totals.by_blocker["compute"].duration_ms, 500_000);
 }
 
 /// A conflict at the landing sends the run back to its session, and the

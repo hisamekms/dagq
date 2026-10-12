@@ -94,7 +94,13 @@ pub fn end_session(
 /// status, since `validation_finished` already reports the park and
 /// `stats` counts it once.
 pub fn finish_validation(run: TaskRun, validation: &Validation) -> Result<Recorded, DomainError> {
+    // An `already_satisfied` claim stays `validating` with no commit while
+    // the runtime verifies it on main (ADR-t1818-1).
     let run = match (validation.accepted, validation.result_commit.clone()) {
+        _ if validation.already_satisfied => {
+            super::require_status(&run, &[RunStatus::Validating], "claim already satisfied")?;
+            run
+        }
         (true, Some(commit)) => super::accept(run, commit)?,
         (true, None) => {
             return Err(DomainError::InvalidCommit {
@@ -151,6 +157,33 @@ pub fn finish_validation(run: TaskRun, validation: &Validation) -> Result<Record
         events.push(NewRunEvent::new(EventKind::EvidenceMissing, payload));
     }
     Ok((run, events))
+}
+
+/// [`super::close_satisfied`], recorded as `run_satisfied_closed` with the
+/// caller's `payload` ([`crate::domain::satisfied::closed_payload`]); it
+/// carries no `status`, so that `stats` counts the run apart from the
+/// landed and the failed ones.
+pub fn record_satisfied_close(run: TaskRun, payload: Value) -> Result<Recorded, DomainError> {
+    let run = super::close_satisfied(run)?;
+    Ok((
+        run,
+        vec![NewRunEvent::new(EventKind::RunSatisfiedClosed, payload)],
+    ))
+}
+
+/// [`super::decide_satisfied`], recorded as `run_satisfied_decided` with
+/// the caller's `payload`, the new status and the reason.
+pub fn record_satisfied_decision(
+    run: TaskRun,
+    reason: &str,
+    payload: Value,
+) -> Result<Recorded, DomainError> {
+    let run = super::decide_satisfied(run, reason.to_owned())?;
+    let payload = with_status_and_reason(payload, &run, reason);
+    Ok((
+        run,
+        vec![NewRunEvent::new(EventKind::RunSatisfiedDecided, payload)],
+    ))
 }
 
 /// [`decide_landing`], recorded as `landing_decided` with the caller's
@@ -407,6 +440,7 @@ mod tests {
             },
             scope_violation,
             e2e_requirement: None,
+            already_satisfied: false,
             load: LoadSummary::default(),
         }
     }
@@ -454,6 +488,35 @@ mod tests {
         assert_eq!(kinds(&events), [event_kind::VALIDATION_FINISHED]);
         assert_eq!(events[0].payload["status"], "awaiting_integration");
         assert_eq!(events[0].payload["accepted"], true);
+    }
+
+    /// An `already_satisfied` claim keeps the run `validating` without a
+    /// commit; closing it makes the run `succeeded` with no commit and an
+    /// event without a status, and a person's retry or cancel fails it.
+    #[test]
+    fn an_already_satisfied_claim_waits_validating_and_closes_without_a_commit() {
+        let mut claim = validation(true, vec![], vec![]);
+        claim.result_commit = None;
+        claim.already_satisfied = true;
+        let (run_, events) = finish_validation(run(RunStatus::Validating), &claim).unwrap();
+        assert_eq!(run_.status(), RunStatus::Validating);
+        assert_eq!(run_.result_commit(), None);
+        assert_eq!(kinds(&events), [event_kind::VALIDATION_FINISHED]);
+        assert_eq!(events[0].payload["status"], "validating");
+        assert_eq!(events[0].payload["already_satisfied"], true);
+
+        let (closed, events) = record_satisfied_close(run_.clone(), json!({"head": SHA})).unwrap();
+        assert_eq!(closed.status(), RunStatus::Succeeded);
+        assert_eq!(closed.result_commit(), None);
+        assert_eq!(kinds(&events), [event_kind::RUN_SATISFIED_CLOSED]);
+        assert_eq!(events[0].payload.get("status"), None);
+        assert!(record_satisfied_close(closed, json!({})).is_err());
+
+        let (failed, events) =
+            record_satisfied_decision(run_, "canceled by ask 3", json!({"ask_id": 3})).unwrap();
+        assert_eq!(failed.status(), RunStatus::Failed);
+        assert_eq!(failed.last_error(), Some("canceled by ask 3"));
+        assert_eq!(events[0].payload["status"], "failed");
     }
 
     #[test]

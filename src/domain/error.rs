@@ -179,6 +179,9 @@ pub enum DomainError {
         field: &'static str,
     },
     FollowUpsNotArray,
+    /// An `already_satisfied` receipt without `base_checks`, or with one
+    /// that names no command or no result (ADR-t1818-1 decision 1).
+    BaseChecksMissing,
     /// The run has no run directory yet.
     MissingRunDirectory,
     /// `goal ready` on a goal that is not a draft.
@@ -645,6 +648,9 @@ impl fmt::Display for DomainError {
                 "{field}: must be a full 40- or 64-character hexadecimal Git object ID"
             ),
             Self::FollowUpsNotArray => f.write_str("receipt follow_ups must be an array"),
+            Self::BaseChecksMissing => f.write_str(
+                "an already_satisfied receipt must name in base_checks each check run on the base, with its command and result",
+            ),
             Self::MissingRunDirectory => f.write_str("missing run directory"),
             Self::TaskNotClaimable { task_id, status } => {
                 write!(f, "task {task_id} is {}, not ready", status.as_str())

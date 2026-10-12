@@ -36,7 +36,15 @@ related:
    スロットを取ったら、まず**着地済みか**を確かめる: runの`base_commit`..main headのfirst-parentの履歴に、trailer `Dagq-Run: <run id>`を持つcommitがあれば、前の着地がmainを進めた後、完了を記録する前に止まった（supervisorの死など）ので、rebase・検証・commitをせずにそのcommitを着地commitとして`auto_repaired`を記録し、7〜10（完了・後始末・push・follow_upsの登録）へ進む。
    同じrunを二重に着地させない。
 2. **worktreeの前処理**: worktreeが存在し、run branch `dagq/<run-id>`をcheckoutしていること。worktreeのpathはqueueの今の`runs/`から解決したもので、queueディレクトリを移した後でも見つかる。repository側の管理情報が旧pathを指したままだと後始末の`worktree remove`が失敗するので、主working treeで`git worktree repair <worktree>`を実行する（移していなければno-op。[ADR-0017](../../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。途中のrebase（`rebase-merge` / `rebase-apply`）が残っていれば`git rebase --abort`する（`integration_rebase_aborted`）。
-3. **receiptの検査**: `<run-dir>/receipt.json`がparseでき、`result`が`succeeded`で（`failed`ならrunを`failed`にして終わる。下記）、`Receipt::check`を通り、`commit`がworktreeの現在のHEADに一致する。ただし、このrunの前の着地のrebaseと振り直し（`integration_rebased`と`migration_renumbered`の`head_before` → `head_after`を古い順にたどる）がreceiptの`commit`から今のHEADへ至るなら、前の着地がrebaseの後に止まって残したheadなので一致とみなす（`RunHistory::landing_rewrote`）。衝突なしのrunではHEAD = `result_commit`なので検証済みのreceiptがそのまま通る。`needs_session`から戻るrunでは、セッションが新しいheadでreceiptを書き直したことの検出になる。worktreeはcleanであること。`Receipt::check`の後、taskの`required_evidence`かSpikeの結果が欠けていれば（validationの8・9と同じ判定。resumeしたsessionが欠けたまま書き直した場合）着地せず`needs_session`にし、`integration_deferred`のpayloadに欠けたもの（`checks`と`spike_result`）を書く。これらを通った時点で、読んだreceiptを`integration_receipt`イベント（`main`、receiptの`commit`、`receipt`にJSON全体。`follow_ups`を含む）に記録する。HEAD不一致・衝突・再検証の失敗で着地しなかった場合も記録は残り、`integrate`を繰り返せばその回数だけ並ぶ。`validation_finished`は検証時のreceiptしか持たないので、セッションが書き直したreceiptの`commit`、evidence、`summary`、`follow_ups`をDBが持つのはこのイベントだけ。
+3. **receiptの検査**: `<run-dir>/receipt.json`がparseでき、`result`が`succeeded`で（`failed`か`already_satisfied`ならrunを`failed`にして終わる。下記と[Validation](validation.md#already_satisfiedの検証)）、`Receipt::check`を通り、`commit`がworktreeの現在のHEADに一致する。
+   ただし、このrunの前の着地のrebaseと振り直し（`integration_rebased`と`migration_renumbered`の`head_before` → `head_after`を古い順にたどる）がreceiptの`commit`から今のHEADへ至るなら、前の着地がrebaseの後に止まって残したheadなので一致とみなす（`RunHistory::landing_rewrote`）。
+   衝突なしのrunではHEAD = `result_commit`なので検証済みのreceiptがそのまま通る。
+   `needs_session`から戻るrunでは、セッションが新しいheadでreceiptを書き直したことの検出になる。
+   worktreeはcleanであること。
+   `Receipt::check`の後、taskの`required_evidence`かSpikeの結果が欠けていれば（validationの8・9と同じ判定。resumeしたsessionが欠けたまま書き直した場合）着地せず`needs_session`にし、`integration_deferred`のpayloadに欠けたもの（`checks`と`spike_result`）を書く。
+   これらを通った時点で、読んだreceiptを`integration_receipt`イベント（`main`、receiptの`commit`、`receipt`にJSON全体。`follow_ups`を含む）に記録する。
+   HEAD不一致・衝突・再検証の失敗で着地しなかった場合も記録は残り、`integrate`を繰り返せばその回数だけ並ぶ。
+   `validation_finished`は検証時のreceiptしか持たないので、セッションが書き直したreceiptの`commit`、evidence、`summary`、`follow_ups`をDBが持つのはこのイベントだけ。
 4. **rebase**: `git rebase --no-autostash --no-verify <main head>`（main headは着地開始時に読んだ`refs/heads/<branch>`）。すでにmainの上にあればno-op。衝突したら`git diff --name-only --diff-filter=U`とGitの出力を取り、`rebase --abort`でworktreeを検証済みheadに戻して`needs_session`にする。成功したら`integration_rebased`（`head_before`、`head_after`）を記録する。
 5. **再検証と検証コマンド**: rebase後のHEADがmain headと異なり（同じなら「commitが残らない」として`needs_session`。変更が不要ならセッションが`failed` receiptを書く）、main headの子孫であること。
    `git status --porcelain --untracked-files=all`が空であること。
@@ -92,7 +100,7 @@ related:
 
 **hostの失敗のやり直し**（[ADR-t639-1](../../adr/2026-09-27-t639-1-retry-verification-failures-of-the-host-once.md)）: 検証コマンドの失敗の`class`が`disk_full`・`killed`・`timeout`なら、コードではなくhostの原因として、workerのsessionをresumeせず、同じ試行（同じ`attempt`）の中でそのコマンドを1回だけやり直す。
 
-- やり直しのlogは`<run-dir>/integrate-<attempt>-verify-N-retry.log`で、最初の失敗のlogを上書きしない（`application::integrate::integrate_retry_log`。`integrate_logs`と`next_integrate_attempt`はこの名前も同じ試行のlogとして読む）
+- やり直しのlogは`<run-dir>/integrate-<attempt>-verify-N-retry.log`で、最初の失敗のlogを上書きしない（`application::integrate::integrate_retry_log`）
 - やり直しも`verification_command`として記録し、payloadに`retry: true`と`retry_of`（`{failure, log_path}`。やり直した最初の失敗の`failure`とlog）を足す（最初の実行の`verification_command`はこの2つを持たない）。`failed_tests`・`failed_tests_omitted`はやり直しにも同じ規則で付く
 - `disk_full`なら、やり直す前に空き容量を着地の閾値（[空き容量](disk-space.md)の`DiskConfig::needs`の着地の側。`Integration::retry_disk`。supervisorは`[disk]`と`free_space`、人の`integrate`は`OneShot`の`disk`と`free_space`をそのときに読む）で確かめ、足りなければやり直さずに下のholdにする（payloadの`retried: false`、`disk`に`{free_bytes, needed_bytes, largest_build_bytes}`）。閾値が決まらない・空きが読めないときは確かめずにやり直す
 - やり直しが通れば次のコマンドへ進み、全部通れば着地する

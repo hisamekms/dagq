@@ -17,6 +17,7 @@ use crate::domain::{
     host_metrics::{HostSummary, PROCESS_KINDS},
     marks::{self, Mark},
     plan_quality::plan_quality,
+    satisfied,
     stats::{
         self, Cursor, LiveSnapshot, RunStats, SlotSnapshot, StatsQuery,
         ask_seen::seen_waits,
@@ -75,8 +76,14 @@ pub struct WindowKpis {
     pub token_coverage: Coverage,
 }
 
-/// A run's hold on a slot: from its claim to its end, without the waits
-/// for a person outside the slots (ADR-0062).
+/// A run's hold on a slot (`slot_usage`): from its claim to its end, and
+/// without the spans it holds none. Its end is the first of its landing
+/// (`run_integrated`), its closed `already_satisfied` claim
+/// (`run_satisfied_closed`, which carries no `status`) and a `status` of
+/// `succeeded`, `failed` or `interrupted`. The spans out of the slots are
+/// its waits for a person (`run_waiting_started` to `run_slot_regained`,
+/// ADR-0062) and its claim's rests ([`satisfied::rests_after`]: from its
+/// acceptance or a verification's end to the next snapshot, ADR-t1818-1).
 struct Occupancy {
     task_id: TaskId,
     spans: Vec<(i64, i64)>,
@@ -118,6 +125,17 @@ pub(super) struct Context<'a> {
     forecast: Scoring,
     /// The host's load read for a window (task 872).
     pub host: Option<super::HostReader<'a>>,
+}
+
+/// Ends `run_id`'s open span out of the slots, if any, `at`.
+fn end_wait(waits: &mut HashMap<RunId, Vec<(i64, Option<i64>)>>, run_id: &RunId, at: Option<i64>) {
+    if let Some(wait) = waits
+        .get_mut(run_id)
+        .and_then(|waits| waits.last_mut())
+        .filter(|wait| wait.1.is_none())
+    {
+        wait.1 = at;
+    }
 }
 
 fn event_ms(event: &RunEvent) -> Option<i64> {
@@ -272,19 +290,28 @@ impl<'a> Context<'a> {
                         waits.entry(run_id.clone()).or_default().push((at, None));
                     }
                 }
-                RUN_SLOT_REGAINED => {
-                    if let Some(wait) = waits
-                        .get_mut(run_id)
-                        .and_then(|waits| waits.last_mut())
-                        .filter(|wait| wait.1.is_none())
-                    {
-                        wait.1 = at;
-                    }
-                }
+                RUN_SLOT_REGAINED => end_wait(&mut waits, run_id, at),
                 _ => {}
             }
+            // A claim of `already_satisfied` rests out of the slots, as a
+            // wait does, from its acceptance or a verification's end to the
+            // snapshot the next verification starts on (ADR-t1818-1).
+            match satisfied::rests_after(event) {
+                Some(true) => {
+                    let runs = waits.entry(run_id.clone()).or_default();
+                    if let Some(at) = at
+                        && runs.last().is_none_or(|wait| wait.1.is_some())
+                    {
+                        runs.push((at, None));
+                    }
+                }
+                Some(false) => end_wait(&mut waits, run_id, at),
+                None => {}
+            }
+            // A run's end ([`Occupancy`]).
             let status = event.payload.get("status").and_then(Value::as_str);
             if (event.kind == "run_integrated"
+                || event.kind == crate::domain::event_kind::RUN_SATISFIED_CLOSED
                 || matches!(status, Some("succeeded" | "failed" | "interrupted")))
                 && let Some(at) = at
             {
@@ -1104,6 +1131,12 @@ impl<'a> Context<'a> {
             .collect();
         details.insert("land_phase_tail_share", serde_json::json!(share));
         details.insert("resume_outcomes", json(&stats.overall.resume_outcomes));
+        // Tasks closed on a verified `already_satisfied` claim: no landing,
+        // so not in `landings` (ADR-t1818-1 decision 6).
+        details.insert(
+            "already_satisfied",
+            serde_json::json!(stats.overall.already_satisfied),
+        );
         details.insert(
             "asks_by_reason_category",
             json(&stats.asks.opened.by_reason_category),
@@ -1426,6 +1459,9 @@ impl<'a> Context<'a> {
                 attempted.len(),
             ),
         ));
+        // The attempts that ran the verification commands: an attempt that
+        // stopped before them (an empty rebase, a dirty worktree) recorded
+        // no `verification_command` and is not one.
         let verified: usize = runs
             .iter()
             .map(|run| {
