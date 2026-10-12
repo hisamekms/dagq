@@ -113,6 +113,17 @@ impl PodmanCli {
         self.checked(&all)
     }
 
+    /// `podman --connection dagq <args>`: a command inside the dagq
+    /// machine, its output whatever its exit.
+    pub(crate) fn inside(&self, args: &[String]) -> Result<Output> {
+        let mut all: Vec<OsString> = ["--connection", MACHINE_NAME]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        all.extend(args.iter().map(OsString::from));
+        self.output(&all)
+    }
+
     /// `podman --connection dagq volume <args>`.
     fn volume(&self, args: &[&str]) -> Result<Output> {
         let mut all: Vec<OsString> = ["--connection", MACHINE_NAME, "volume"]

@@ -43,7 +43,8 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
 
 - 使えるかは`ContainerRuntime`のport（`application::ports`）に問う。
   supervisorと`integrate`は`application::queue_broker::BrokerGate`越しに問い、queueのbrokerが動いていなければそれを理由に使えないと答える（[Queue broker](queue-broker.md#見張りと知らせ)）。
-  brokerの奥では`application::podman_machine::MachineGate`がdagq専用のmachineを見て、使えなければ理由つきで使えないと答える（下の「dagq専用のmachine」）。
+  brokerの奥では`application::broker_relay::RelayGate`がrunのrelayの見張りの記録を見て、relayを動かし続けられない間は理由つきで使えないと答える（下の「brokerへの経路」）。
+  その奥で`application::podman_machine::MachineGate`がdagq専用のmachineを見て、使えなければ理由つきで使えないと答える（下の「dagq専用のmachine」）。
   machineの奥では`application::container_image::ImageGate`がimageを見る（下の「image」）。
   その奥の、残りの部品が揃うまでの実装`infrastructure::container_runtime::UnbuiltContainer`は、常に理由つきで使えないと答える。
 - worker: 各候補のclaimを控え、理由を`claim_deferred`に残す（[claimを控える](supervisor-lifecycle/claim-defer.md#workerを動かせないtask)）。
@@ -135,6 +136,31 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
   作ったときは`container_image_built`を記録する。
 - 実物のpodmanで流すtestは`#[ignore]`で、関門に数えない。
 
+## brokerへの経路
+
+runのcontainerは`--network none`で、外への経路はhostのqueueのbrokerへの1本だけにする（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)決定1〜4）。
+判断は`domain::broker_relay`、use caseと門は`application::broker_relay`、relay・転送のprocessとpodmanのコマンドは`infrastructure::broker_relay`、見張りは`supervise::broker_relay`が持つ。
+
+- runのsocket: runのcontainerを起動する前に`application::broker_relay::open`が、machineの中にrunごとのnamed volumeを作ってそのrunのrelayを起動し、runの終わりに`close`がrelayとvolumeを消す（呼ぶのはcontainerの実行の実装）。
+  relayはvolumeの中にsocketを作り、mode 0600でrunのcontainerの非rootのuidに渡す。
+  volumeをmountするのはrelayとそのrunのcontainerだけで、どちらも`:z`を付ける。
+  開いたrelayは`<queue dir>/relay/`に記録するので、machineの停止で消えたrelayも見張りが見つける。
+- relay（`dagq relay serve`）: machineの中のcontainerで、socketへの接続をhostのbrokerのportへ双方向にそのまま流す。
+  hostへはmachineのgvproxy（`host.containers.internal`）を通る。
+  tokenを持たず、認証も宛ての判定もしない（brokerが行う）。
+- 転送（`dagq relay forward`）: runのcontainerの中で`127.0.0.1`の決まったportを受け、socketへ流す。
+  containerのenv（`container_env`）がdagqのクライアントモードの宛て・Claude Codeの`ANTHROPIC_BASE_URL`・標準のproxyのenvをこのportに向け、道具に固有の設定を持たない（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）。
+  クライアントモードの宛ては[Queue service](queue-service.md#クライアントモード)。
+- DNSが無い: proxyのenvを見ない道具は名前を引けず外へ出られない。
+  これは隔離の結果として扱い、要るものはhostのrunかqueue serviceのユースケースに回す。
+- 見張り: supervisor（`--once`でないもの）は、brokerが答える間、各relayのcontainerが動くか・brokerの今のportへ向くか・socket越しにbrokerのhealthに届くかを見る。
+  落ちたかportの古いrelayは起動し直す。
+  動くのに届かないrelayがあればgvproxyが落ちたとみて、machineをhost全体のlockの中で起動し直してから全てのrelayを起動し直す。
+  回数の上限と窓はqueue serviceと同じ。
+  起動し直せない・上限に達した・見られないときはinbox宛てのattention `queue_relay_down`を書き、全てのrelayが動けば消える。
+  attentionが立つ間は`RelayGate`がcontainerを使えないと答え、新しいrunを控える（上の「fail closedの境界」）。
+- 実物のmachineで流すtestは`#[ignore]`で、関門に数えない。
+
 ## 後続の部品の置き場
 
 次の部品が揃ったら、それぞれが`ContainerRuntime`の答えを埋める。
@@ -142,6 +168,5 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
 
 - hostのqueueのbrokerの`api.anthropic.com`の宛てと長期tokenの差し替え（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)・[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）。
   brokerのプロセスとqueue service・`dagq.toml`が挙げるpackage registryの宛ては[Queue broker](queue-broker.md)。
-- VMの中のrelayとrunごとのunix socket（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)）。
 - runごとのcloneとbundleの取り込み（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)）、containerの中のsccache（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
 - worker・resumeとverificationのcontainerの実行（`ExecutorBackend::Container`の実装）。

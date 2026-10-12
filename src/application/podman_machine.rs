@@ -131,6 +131,23 @@ pub fn release(machine: &Machine<'_>, user: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Stop the dagq machine and start it again, under the host-wide lock:
+/// what mends its gvproxy when a relay in it runs and does not reach the
+/// host (ADR-t2114-3 decision 4). The users stay counted; a machine that
+/// does not run is only started.
+pub fn restart(machine: &Machine<'_>) -> Result<()> {
+    let _held = machine.users.lock()?;
+    let running = machine
+        .podman
+        .machines()?
+        .iter()
+        .any(|entry| entry.name == MACHINE_NAME && entry.running);
+    if running {
+        machine.podman.stop()?;
+    }
+    machine.podman.start()
+}
+
 fn start(podman: &dyn PodmanMachine) -> Result<(), String> {
     podman
         .start()
@@ -306,6 +323,19 @@ mod tests {
         host.set_running(false);
         assert_eq!(ensure(&machine(&host), "r3"), Ok(Prepare::Start));
         assert_eq!(host.calls()[4..], ["lock", "start"]);
+    }
+
+    #[test]
+    fn a_restart_stops_and_starts_a_running_machine_under_the_lock_and_keeps_its_users() {
+        let host = Host::with(&[(MACHINE_NAME, true)]);
+        host.users.lock().unwrap().push("r1".into());
+        restart(&machine(&host)).unwrap();
+        assert_eq!(host.calls(), ["lock", "stop", "start"]);
+        assert_eq!(*host.users.lock().unwrap(), ["r1"]);
+        // A stopped machine is only started.
+        host.set_running(false);
+        restart(&machine(&host)).unwrap();
+        assert_eq!(host.calls()[3..], ["lock", "start"]);
     }
 
     #[test]

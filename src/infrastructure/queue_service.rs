@@ -45,9 +45,9 @@ use crate::application::queue_service::{
 };
 use crate::application::{EventStore, Exit, Generators, RunNotFound, RunReads, Spawned, TaskStore};
 use crate::domain::queue_service::{
-    API_VERSION, LOCK_FILE, LOG_FILE, MAX_REQUEST_BYTES, OWNER_PID_ENV, Principal, SERVICE_DIR,
-    SOCKET_FILE, STATE_FILE, ServiceErrorCode, ServiceRequest, ServiceResponse, ServiceState,
-    UseCase,
+    API_VERSION, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OWNER_PID_ENV,
+    Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, ServiceErrorCode, ServiceRequest,
+    ServiceResponse, ServiceState, UseCase,
 };
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, EventKind, Finding, FindingId, FindingOutcome,
@@ -381,7 +381,7 @@ pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Resul
     stream.shutdown(std::net::Shutdown::Write).ok();
     let mut answer = Vec::new();
     stream
-        .take(MAX_REQUEST_BYTES as u64 * 16)
+        .take(MAX_ANSWER_BYTES as u64)
         .read_to_end(&mut answer)
         .context("read the queue service's answer")?;
     serde_json::from_slice(&answer).context("the queue service's answer does not read")
@@ -414,10 +414,14 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Why a client-mode `dagq` did not get its answer: the service's own code
 /// (`authorization_denied`, `unauthenticated`, `bad_request`, `failed`,
-/// `api_version_mismatch`) or the client's (`unreachable`: no service
-/// answers on the socket; `no_credential`: the token's file does not
+/// `api_version_mismatch`), the queue broker's in front of it
+/// (`unauthenticated`, `forbidden_destination`, `bad_request`,
+/// `unreachable`), or the client's (`unreachable`: nothing answers on the
+/// socket or at the broker; `no_credential`: the token's file does not
 /// read; `no_use_case`: the command is none of the service's;
-/// `queue_named`: the command names a queue to open).
+/// `queue_named`: the command names a queue to open; `client_misconfigured`:
+/// the environment names both a socket and a broker, a broker URL that
+/// does not read, or, with a broker, a run that holds a control character).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientFailure {
     pub code: String,
@@ -441,34 +445,86 @@ impl ClientFailure {
     }
 }
 
-/// Where a client-mode `dagq` sends its commands (ADR-t1233-1 decision 7):
-/// the socket and the token's file the control side put in its
-/// environment ([`SOCKET_ENV`](crate::domain::queue_service::SOCKET_ENV),
-/// [`CREDENTIAL_FILE_ENV`](crate::domain::queue_service::CREDENTIAL_FILE_ENV)).
+/// Where a client-mode `dagq` sends its requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientRoute {
+    /// The queue service's unix socket on the host
+    /// ([`SOCKET_ENV`](crate::domain::queue_service::SOCKET_ENV)): a
+    /// worker's or a job's on the host.
+    Socket(PathBuf),
+    /// The queue broker at `address` (`<host>:<port>`,
+    /// [`URL_ENV`](crate::domain::queue_service::URL_ENV)), for `run`
+    /// ([`RUN_ID_ENV`](crate::domain::actor::RUN_ID_ENV)): a run's in its
+    /// container, through the forwarder and the relay.
+    Broker {
+        address: String,
+        run: Option<String>,
+    },
+}
+
+/// Where a client-mode `dagq` sends its commands (ADR-t1233-1 decision 7,
+/// ADR-t2114-3 decision 3): the route and the token's file the control
+/// side put in its environment
+/// ([`CREDENTIAL_FILE_ENV`](crate::domain::queue_service::CREDENTIAL_FILE_ENV)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Client {
-    pub socket: PathBuf,
-    /// `None` when the environment names none: the service then refuses
-    /// the call as `unauthenticated`.
+    pub route: ClientRoute,
+    /// `None` when the environment names none: the service (or the broker)
+    /// then refuses the call as `unauthenticated`.
     pub credential: Option<PathBuf>,
 }
 
 impl Client {
-    /// The client `env` names: `None` without a socket, when `dagq` opens
-    /// the queue itself.
-    pub fn from_env(env: impl Fn(&str) -> Option<String>) -> Option<Self> {
-        use crate::domain::queue_service::{CREDENTIAL_FILE_ENV, SOCKET_ENV};
+    /// The client `env` names: `Ok(None)` with neither a socket nor a
+    /// broker, when `dagq` opens the queue itself; a `client_misconfigured`
+    /// failure with both, with a broker URL that does not read, or with a
+    /// broker and a run that holds a control character (it would go in a
+    /// header), when `dagq` refuses every command and opens no queue (fail
+    /// closed).
+    pub fn from_env(env: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, ClientFailure> {
+        use crate::domain::actor::RUN_ID_ENV;
+        use crate::domain::queue_service::{
+            CREDENTIAL_FILE_ENV, SOCKET_ENV, URL_ENV, broker_address,
+        };
         let named = |name: &str| env(name).filter(|value| !value.trim().is_empty());
-        Some(Self {
-            socket: PathBuf::from(named(SOCKET_ENV)?),
+        let route = match (named(SOCKET_ENV), named(URL_ENV)) {
+            (None, None) => return Ok(None),
+            (Some(_), Some(_)) => {
+                return Err(ClientFailure::new(
+                    "client_misconfigured",
+                    format!(
+                        "both {SOCKET_ENV} and {URL_ENV} are set, and a client-mode dagq does not \
+                         choose between them: it runs no command and opens no queue"
+                    ),
+                ));
+            }
+            (Some(socket), None) => ClientRoute::Socket(PathBuf::from(socket)),
+            (None, Some(url)) => ClientRoute::Broker {
+                address: broker_address(&url)
+                    .map_err(|why| ClientFailure::new("client_misconfigured", why))?,
+                // The run goes in a header: a value with a control
+                // character is no run.
+                run: match named(RUN_ID_ENV) {
+                    Some(run) if run.chars().any(char::is_control) => {
+                        return Err(ClientFailure::new(
+                            "client_misconfigured",
+                            format!("{RUN_ID_ENV} holds a control character"),
+                        ));
+                    }
+                    run => run,
+                },
+            },
+        };
+        Ok(Some(Self {
+            route,
             credential: named(CREDENTIAL_FILE_ENV).map(PathBuf::from),
-        })
+        }))
     }
 
     /// `use_case` with `params` done by the service as the principal of
-    /// the token: its result, or a [`ClientFailure`]. A service that does
-    /// not answer is a failure; the client never opens the queue instead
-    /// (fail closed).
+    /// the token: its result, or a [`ClientFailure`]. A service (or a
+    /// broker) that does not answer is a failure; the client never opens
+    /// the queue instead (fail closed).
     pub fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
         let token = match &self.credential {
             Some(file) => Some(
@@ -477,21 +533,46 @@ impl Client {
             ),
             None => None,
         };
-        let request = ServiceRequest {
-            api_version: API_VERSION,
-            token,
-            use_case,
-            params,
-        };
-        let response = call(&self.socket, &request, CLIENT_TIMEOUT).map_err(|error| {
+        let unreachable = |error: anyhow::Error, said: &str| {
             ClientFailure::new(
                 "unreachable",
-                format!(
-                    "{error:#}; a client-mode dagq does not open the queue itself \
-                     (dagq service status, from the control side, says why)"
-                ),
+                format!("{error:#}; a client-mode dagq does not open the queue itself ({said})"),
             )
-        })?;
+        };
+        let response = match &self.route {
+            ClientRoute::Socket(socket) => {
+                let request = ServiceRequest {
+                    api_version: API_VERSION,
+                    token,
+                    use_case,
+                    params,
+                };
+                call(socket, &request, CLIENT_TIMEOUT).map_err(|error| {
+                    unreachable(
+                        error,
+                        "dagq service status, from the control side, says why",
+                    )
+                })?
+            }
+            ClientRoute::Broker { address, run } => {
+                // The token goes as the `Bearer` only: the broker puts the
+                // one it checked in the request it passes on.
+                let request = ServiceRequest {
+                    api_version: API_VERSION,
+                    token: None,
+                    use_case,
+                    params,
+                };
+                call_broker(address, token.as_deref(), run.as_deref(), &request).map_err(
+                    |error| {
+                        unreachable(
+                            error,
+                            "the queue broker's state on the control side says why",
+                        )
+                    },
+                )?
+            }
+        };
         if let Some(error) = response.error {
             return Err(ClientFailure::new(error.code.as_str(), error.message).into());
         }
@@ -510,6 +591,20 @@ impl Client {
             _ => Err(ClientFailure::new("failed", "the queue service answered nothing").into()),
         }
     }
+}
+
+/// `request` through the broker at `address` in the shape
+/// [`crate::domain::queue_broker`] gives: the service's answer, or the
+/// broker's refusal, which has the same shape whatever its HTTP status.
+fn call_broker(
+    address: &str,
+    token: Option<&str>,
+    run: Option<&str>,
+    request: &ServiceRequest,
+) -> Result<ServiceResponse> {
+    let (status, body) = super::queue_broker::call(address, token, run, request, CLIENT_TIMEOUT)?;
+    serde_json::from_slice(&body)
+        .with_context(|| format!("the queue broker's answer (status {status}) does not read"))
 }
 
 // --- The service's record of itself ----------------------------------------
@@ -1178,6 +1273,170 @@ impl QueueServiceControl for SystemQueueService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[test]
+    fn the_environment_names_a_socket_a_broker_or_neither_and_both_is_refused() {
+        use crate::domain::queue_service::{CREDENTIAL_FILE_ENV, SOCKET_ENV, URL_ENV};
+        // Neither: dagq opens the queue itself, as before.
+        assert_eq!(Client::from_env(env_of(&[])), Ok(None));
+        assert_eq!(
+            Client::from_env(env_of(&[(SOCKET_ENV, " "), (URL_ENV, "")])),
+            Ok(None)
+        );
+        assert_eq!(
+            Client::from_env(env_of(&[
+                (SOCKET_ENV, "/q.sock"),
+                (CREDENTIAL_FILE_ENV, "/c")
+            ])),
+            Ok(Some(Client {
+                route: ClientRoute::Socket(PathBuf::from("/q.sock")),
+                credential: Some(PathBuf::from("/c")),
+            }))
+        );
+        assert_eq!(
+            Client::from_env(env_of(&[
+                (URL_ENV, "http://127.0.0.1:47310"),
+                (CREDENTIAL_FILE_ENV, "/c"),
+                ("DAGQ_RUN_ID", "r1"),
+            ])),
+            Ok(Some(Client {
+                route: ClientRoute::Broker {
+                    address: "127.0.0.1:47310".to_owned(),
+                    run: Some("r1".to_owned()),
+                },
+                credential: Some(PathBuf::from("/c")),
+            }))
+        );
+        let both = Client::from_env(env_of(&[
+            (SOCKET_ENV, "/q.sock"),
+            (URL_ENV, "http://127.0.0.1:1"),
+        ]))
+        .unwrap_err();
+        assert_eq!(both.code, "client_misconfigured");
+        assert!(
+            both.message.contains(SOCKET_ENV) && both.message.contains(URL_ENV),
+            "{both}"
+        );
+        let bad = Client::from_env(env_of(&[(URL_ENV, "https://example.com")])).unwrap_err();
+        assert_eq!(bad.code, "client_misconfigured");
+        let injected = Client::from_env(env_of(&[
+            (URL_ENV, "http://127.0.0.1:1"),
+            ("DAGQ_RUN_ID", "r1\r\nX: y"),
+        ]))
+        .unwrap_err();
+        assert_eq!(injected.code, "client_misconfigured");
+    }
+
+    /// A broker on a port of this process that answers one request with
+    /// `status` and `body`, and hands back what it read.
+    fn one_shot_broker(status: u16, body: Vec<u8>) -> (String, thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let request = super::super::queue_broker::read_request(&mut reader).unwrap();
+            // The client may stop reading early (an answer past its
+            // limit): what is left unwritten does not matter.
+            let mut writer = &stream;
+            let _ = write!(
+                writer,
+                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = writer.write_all(&body);
+            format!(
+                "{} {} auth={:?} run={:?} body={}",
+                request.method,
+                request.target,
+                request.authorization,
+                request.run,
+                String::from_utf8_lossy(&request.body)
+            )
+        });
+        (address, handle)
+    }
+
+    #[test]
+    fn a_broker_client_sends_the_broker_s_request_and_reads_its_answer_and_refusals() {
+        let dir = tempfile::tempdir().unwrap();
+        let credential = dir.path().join("token");
+        fs::write(&credential, "secret-token\n").unwrap();
+        let client = |address: &str| Client {
+            route: ClientRoute::Broker {
+                address: address.to_owned(),
+                run: Some("r1".to_owned()),
+            },
+            credential: Some(credential.clone()),
+        };
+        let answer = serde_json::to_vec(&ServiceResponse::success(json!({"id": 3}))).unwrap();
+        let (address, broker) = one_shot_broker(200, answer);
+        let result = client(&address)
+            .call(UseCase::Show, json!({"id": 3}))
+            .unwrap();
+        assert_eq!(result, json!({"id": 3}));
+        let seen = broker.join().unwrap();
+        assert!(
+            seen.starts_with("POST /queue auth=Some(\"Bearer secret-token\") run=Some(\"r1\")"),
+            "{seen}"
+        );
+        // The body is the service's request; the token is only the Bearer.
+        let body: ServiceRequest =
+            serde_json::from_str(seen.split_once("body=").unwrap().1).unwrap();
+        assert_eq!(body.use_case, UseCase::Show);
+        assert_eq!(body.token, None);
+        assert_eq!(body.params, json!({"id": 3}));
+
+        // The broker's refusal is read as the service's, by its code.
+        let refusal = serde_json::to_vec(&ServiceResponse::failure(
+            ServiceErrorCode::Unauthenticated,
+            "no run token",
+        ))
+        .unwrap();
+        let (address, broker) = one_shot_broker(401, refusal);
+        let error = client(&address)
+            .call(UseCase::Show, json!({"id": 3}))
+            .unwrap_err();
+        broker.join().unwrap();
+        let failure = error.downcast_ref::<ClientFailure>().unwrap();
+        assert_eq!(failure.code, "unauthenticated");
+
+        // An answer past the limit, and no broker, are `unreachable`.
+        let (address, broker) = one_shot_broker(200, vec![b' '; MAX_ANSWER_BYTES + 1]);
+        let error = client(&address)
+            .call(UseCase::Show, json!({"id": 3}))
+            .unwrap_err();
+        broker.join().unwrap();
+        let failure = error.downcast_ref::<ClientFailure>().unwrap();
+        assert_eq!(failure.code, "unreachable", "{failure}");
+        assert!(failure.message.contains("longer than"), "{failure}");
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = closed.local_addr().unwrap().to_string();
+        drop(closed);
+        let error = client(&address)
+            .call(UseCase::Show, json!({"id": 3}))
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ClientFailure>().unwrap().code,
+            "unreachable"
+        );
+    }
 
     #[test]
     fn a_token_names_its_principal_until_it_is_revoked_or_issued_again() {

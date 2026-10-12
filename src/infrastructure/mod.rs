@@ -4,6 +4,7 @@ mod agent_evals;
 pub mod asks;
 pub mod background;
 pub mod binaries;
+pub mod broker_relay;
 pub mod ci_watch;
 mod ci_watch_store;
 pub mod claude;

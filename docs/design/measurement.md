@@ -53,7 +53,8 @@ related:
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`。着地の検証は下の「着地の検証の対応表のcache」から読む |
 | agentのevalの記録 | evalの依頼・周・実行と費用・成績（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`で、周の状態と成績はこれだけから作り直す（`domain::agent_eval::record`）。queueのdirの`agent-evals/`は材料 |
-| queueのbrokerの記録 | 動いているbrokerが起動ごとに書き、probeとrelayが読む自分の記録（欄は`BrokerRecord`） | 材料 | `<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる） |
+| queueのbrokerの記録 | 動いているbrokerが起動ごとに書き、probeとrelayの見張りが読む自分の記録（欄は`BrokerRecord`） | 材料 | `<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる） |
+| runのrelayの記録 | 開いたrunのrelay（containerを起動し直す材料。欄は`RelaySpec`）で、relayの見張りが読む | 材料 | `<queue dir>/relay/<run>.json`（寿命はrunのrelayを開いてから閉じるまで） |
 | 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | `scripts/landing-it.sh`がGitHub Actionsのartifact `it-coverage-map`から取り、新しいrunが無ければ取り直さない。置き場はqueueの外の`${XDG_CACHE_HOME:-$HOME/.cache}/dagq/landing-it/<run id>/`で、消えてもartifactから取り直せる |
 
 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。

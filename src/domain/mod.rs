@@ -958,6 +958,7 @@ pub mod agent_eval;
 pub mod areas;
 pub mod authorization;
 pub mod background_wrapper;
+pub mod broker_relay;
 pub mod build_wait;
 pub mod change;
 pub mod ci_watch;
@@ -2134,6 +2135,13 @@ pub enum AttentionNext {
     /// `broker/`, and runs `up` again. Meanwhile nothing set to the
     /// container runs. It ends once the broker runs again.
     QueueBrokerLog,
+    /// The supervisor could not keep the relay of a run's container
+    /// running (`queue_relay_down`, ADR-t2114-3 decision 4): a person looks
+    /// at the dagq podman machine (`podman machine list`, the relay
+    /// containers of the queue in it) and starts it again. Meanwhile
+    /// nothing set to the container runs. It ends once every relay runs
+    /// again.
+    QueueRelayMachine,
     /// The runtime's e2e of a run after its review could not run several
     /// times in a row (it could not start, a `[run.env]` that cannot be
     /// read, past its timeout: `run_e2e_finished` with `outcome: unavailable` and
@@ -2251,6 +2259,7 @@ impl fmt::Display for AttentionNext {
             Self::FixPush => f.write_str("fix the push command"),
             Self::QueueServiceStatus => f.write_str("dagq service status"),
             Self::QueueBrokerLog => f.write_str("read the queue broker's log and run up"),
+            Self::QueueRelayMachine => f.write_str("look at the dagq podman machine's relays"),
             Self::CheckE2e => f.write_str("check the e2e host"),
             Self::ExitSession => f.write_str("exit the session"),
             Self::StopLandingProcesses => f.write_str("stop the dead landing's processes"),
@@ -2305,6 +2314,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     kpi::push::KPI_PUSH_ABANDONED,
     queue_service::QUEUE_SERVICE_DOWN,
     queue_broker::QUEUE_BROKER_DOWN,
+    broker_relay::QUEUE_RELAY_DOWN,
     "ask_opened",
     "ask_answered",
     "ask_delivery_failed",
@@ -2608,6 +2618,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
         (queue_service::QUEUE_SERVICE_DOWN, _) => Some(AttentionNext::QueueServiceStatus),
         (queue_broker::QUEUE_BROKER_DOWN, _) => Some(AttentionNext::QueueBrokerLog),
+        (broker_relay::QUEUE_RELAY_DOWN, _) => Some(AttentionNext::QueueRelayMachine),
         (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
             Some(AttentionNext::ExitSession)
         }
@@ -3822,6 +3833,13 @@ mod attention_tests {
             ),
             ("queue_broker_running", json!({}), None),
             ("queue_broker_denied", json!({"run": "r1"}), None),
+            (
+                "queue_relay_down",
+                json!({"reason": "start_failed"}),
+                Some(QueueRelayMachine),
+            ),
+            ("queue_relay_running", json!({}), None),
+            ("queue_relay_started", json!({"run": "r1"}), None),
             ("broker_started", json!({"port": 1}), None),
             (
                 "push_finished",
@@ -4179,6 +4197,10 @@ mod attention_tests {
         assert_eq!(
             QueueBrokerLog.to_string(),
             "read the queue broker's log and run up"
+        );
+        assert_eq!(
+            QueueRelayMachine.to_string(),
+            "look at the dagq podman machine's relays"
         );
         assert_eq!(DecideDraft.to_string(), "request a plan for the draft");
         assert_eq!(DecideFinding.to_string(), "request a plan for the finding");

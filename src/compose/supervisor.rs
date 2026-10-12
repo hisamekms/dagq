@@ -7,8 +7,8 @@
 use super::{
     execution::{self, RunE2eOptions, review_in},
     host::{
-        self, HostMetricsSettings, QueueBrokerOptions, QueueServiceOptions, ReleaseIndexPort,
-        SccacheOptions,
+        self, HostMetricsSettings, QueueBrokerOptions, QueueRelayOptions, QueueServiceOptions,
+        ReleaseIndexPort, SccacheOptions,
     },
     observation::{self, CiWatchOptions},
     planning::PLANNER_TIMEOUT,
@@ -265,6 +265,11 @@ pub struct SuperviseOptions {
     /// either way: while it does not run, nothing set to the container
     /// runs.
     pub queue_broker: Option<QueueBrokerOptions>,
+    /// Keep the relays of the runs' containers running (ADR-t2114-3
+    /// decision 4): the supervisor `up` starts gets it; `None` (a `--once`
+    /// pass, the tests) keeps none. The container runtime is looked at
+    /// through the relays' record either way.
+    pub broker_relay: Option<QueueRelayOptions>,
     /// Counts the supervisor loop's passes, one at the top of each; tests
     /// keep a clone and wait for passes past a threshold (task 1046).
     pub passes: Arc<AtomicU64>,
@@ -359,6 +364,7 @@ impl SuperviseOptions {
             host_metrics: None,
             queue_service: None,
             queue_broker: None,
+            broker_relay: None,
             passes: Arc::new(AtomicU64::new(0)),
             sccache: None,
             ci_watch: None,
@@ -717,9 +723,9 @@ pub fn supervise_with_reviewer(
             user_config: options.user_config.clone(),
             verification_timeout: options.verification_timeout,
         }),
-        // The queue broker, the dagq machine and the image are the parts
-        // of the container runtime built yet (goal 38): a target set to it
-        // waits, and says why.
+        // The queue broker, the runs' relays, the dagq machine and the image
+        // are the parts of the container runtime built yet (goal 38): a
+        // target set to it waits, and says why.
         container: Arc::new(crate::application::queue_broker::BrokerGate {
             broker: host::queue_broker_control(&db, options.queue_broker.as_ref()),
             container: host::container_parts(
@@ -804,6 +810,13 @@ pub fn supervise_with_reviewer(
                 interval: settings.interval,
                 start_timeout: settings.start_timeout,
             }
+        }),
+        broker_relay: options.broker_relay.as_ref().map(|settings| {
+            host::broker_relay_port(
+                &db,
+                settings,
+                host::queue_broker_control(&db, options.queue_broker.as_ref()),
+            )
         }),
         run_e2e,
         sccache: options

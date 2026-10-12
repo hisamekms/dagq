@@ -217,6 +217,19 @@ impl QueueKey {
     pub fn worker_cache_volume(&self) -> String {
         format!("dagq-{}-cache", self.0)
     }
+
+    /// The named volume that holds the unix socket of the run `run`
+    /// (ADR-t2114-3 decision 2): its relay binds the socket in it, and only
+    /// the run's container mounts it beside the relay.
+    pub fn socket_volume(&self, run: &str) -> Result<String, String> {
+        volume_part(run).map(|run| format!("dagq-{}-socket-{run}", self.0))
+    }
+
+    /// The container of the relay of the run `run` (ADR-t2114-3 decision
+    /// 2).
+    pub fn relay_container(&self, run: &str) -> Result<String, String> {
+        volume_part(run).map(|run| format!("dagq-{}-relay-{run}", self.0))
+    }
 }
 
 fn volume_part(part: &str) -> Result<&str, String> {

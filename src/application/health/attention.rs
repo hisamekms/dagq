@@ -537,6 +537,26 @@ pub fn attention(
             next: AttentionNext::QueueBrokerLog,
         });
     }
+    // And the relays of the runs' containers (ADR-t2114-3 decision 4).
+    if let Some(event) =
+        queue.latest_queue_event(&crate::domain::broker_relay::QUEUE_RELAY_ATTENTION_KINDS)?
+        && crate::domain::broker_relay::attention_stands(Some(event.kind.as_str()))
+    {
+        let reason = event.payload.get("reason").and_then(Value::as_str);
+        let message = event.payload.get("message").and_then(Value::as_str);
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: reason.unwrap_or("down").into(),
+            kind: crate::domain::broker_relay::QUEUE_RELAY_DOWN.into(),
+            last_error: message.map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::QueueRelayMachine,
+        });
+    }
     // A proposal whose plan review failed, or whose planner did not answer
     // a revise, waits for a person outside any ask (ADR-0041 decisions 13,
     // 17); it is shown on the proposal's first task.

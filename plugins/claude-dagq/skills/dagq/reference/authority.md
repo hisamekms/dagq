@@ -10,16 +10,17 @@ Take a refusal as the answer: never retry it under another `DAGQ_ROLE`, without 
 
 ## Client mode: a worker's and a job's dagq
 
-The runtime gives the worker (and its resume), the review, recovery, plan review, goal review and throughput review jobs and the observer the queue service's socket (`DAGQ_SERVICE_SOCKET`) and a token's file (`DAGQ_SERVICE_CREDENTIAL_FILE`), never the queue's path. Their `dagq` then opens no queue: it sends each command to the service, which checks it against the same policy for the token's principal (the run's worker, the job), whatever `DAGQ_ROLE` says. A refusal exits 1 and prints `{"error": "<message>", "queue_service": {"code": "<code>"}}`:
+The runtime gives the worker (and its resume), the review, recovery, plan review, goal review and throughput review jobs and the observer the queue service's socket (`DAGQ_SERVICE_SOCKET`; in a run's container, the queue broker's URL `DAGQ_SERVICE_URL` instead) and a token's file (`DAGQ_SERVICE_CREDENTIAL_FILE`), never the queue's path. Their `dagq` then opens no queue: it sends each command to the service, which checks it against the same policy for the token's principal (the run's worker, the job), whatever `DAGQ_ROLE` says. A refusal exits 1 and prints `{"error": "<message>", "queue_service": {"code": "<code>"}}`:
 
 - `no_use_case`: the command is none of the service's use cases (`init`, `add`, `edit`, `submit`, `ready`, `cancel`, `goal add`, `integrate`, `answer`, `ask close`, `mark`, `recover`, `review`, `up`, `watch`, `report`, `doctor`, `ci failures`, ...). Refused by the client; nothing is recorded.
 - `queue_named`: the command names a queue (`--db`). Refused by the client; nothing is recorded. Never add `--db` to reach the queue.
 - `authorization_denied`: the service refused it for your principal (a `note` or `ask` outside your run and task, a finding write that is not your role's); the message is `<role> may not <capability> (<reason>)`, and it is recorded as `authorization_denied` with you as its actor.
 - `unauthenticated`: no token, one never issued or revoked, or its run has ended; recorded as `queue_service_unauthenticated`. `no_credential`: the token's file does not read; nothing is recorded.
-- `unreachable`: no service answers on the socket; nothing is recorded, and the client does not open the queue instead. Do not work around it: wait and try again later, or write it in the receipt.
+- `unreachable`: no service answers on the socket (or no broker at the URL); nothing is recorded, and the client does not open the queue instead. Do not work around it: wait and try again later, or write it in the receipt.
+- `client_misconfigured`: the environment names both a socket and a URL, a URL that does not read, or (with a URL) a `DAGQ_RUN_ID` that holds a control character; nothing is sent. Write it in the receipt.
 - `bad_request`, `failed`, `api_version_mismatch`: the params do not read, the use case failed (a missing task, ...), or the service speaks another API version.
 
-`locate` (the launcher's `--resolve`) answers `client_mode: true` with the socket and no `db`. Reads (`show`, `list`, `events`, `stats`, `kpi`, ...) print what the command line prints.
+`locate` (the launcher's `--resolve`) answers `client_mode: true` with the `socket` (in a run's container, the queue broker's address as `broker` instead) and no `db`. Reads (`show`, `list`, `events`, `stats`, `kpi`, ...) print what the command line prints.
 
 ## What each role is refused
 

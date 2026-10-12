@@ -111,6 +111,7 @@ use contexts::{
 mod adopt;
 mod agent_eval;
 mod background;
+mod broker_relay;
 mod ci_watch;
 mod claim_defer;
 mod cleanup;
@@ -168,6 +169,7 @@ use self::background::{WorkspaceCloser, close_ended_landing_asks, close_open_wor
 pub(crate) use self::background::{
     left_planner_turn, left_turn, stop_left_turn, stop_run_session, stop_session,
 };
+pub use self::broker_relay::QueueRelayPort;
 pub use self::ci_watch::{CiSourceMaker, CiWatchFile, CiWatchPort};
 pub use self::claim_defer::read_conflicts_at_start;
 pub(crate) use self::deliver::{Input, Submission};
@@ -531,6 +533,9 @@ pub struct Ports<'a> {
     /// Keeps the queue's broker running (ADR-t2114-1 decision 1); `None`
     /// keeps none (a `--once` pass, the tests).
     pub queue_broker: Option<QueueBrokerPort>,
+    /// Keeps the relays of the runs' containers running (ADR-t2114-3
+    /// decision 4); `None` keeps none (a `--once` pass, the tests).
+    pub broker_relay: Option<QueueRelayPort>,
     /// Runs the e2e of a run that needs it after its review (ADR-t1233-2);
     /// `None` when the repository has no e2e the runtime knows, and such a
     /// run lands without one (`not_configured`).
@@ -1857,6 +1862,8 @@ impl Supervisor<'_> {
             // The queue broker likewise (ADR-t2114-1 decision 1); while it is
             // down the container runtime cannot be used.
             self.on_host(|host, env| host.queue_broker_pass(env, working));
+            // And the runs' relays to it (ADR-t2114-3 decision 4).
+            self.on_host(|host, env| host.broker_relay_pass(env, working));
             if self.claim.claiming && !stopping {
                 self.fill_slots(self.claim.parallel, options.sweep_interval)?;
                 self.sample_candidates(self.claim.parallel);

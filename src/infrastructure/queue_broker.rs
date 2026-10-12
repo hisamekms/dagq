@@ -53,7 +53,7 @@ use crate::domain::queue_broker::{
     MAX_BODY_BYTES, PROXY_AUTHORIZATION_HEADER, QUEUE_PATH, RUN_HEADER, STATE_FILE,
     VERIFICATION_CREDENTIALS_DIR, VERIFICATION_TOKENS_DIR, git_remote_host,
 };
-use crate::domain::queue_service::{Principal, ServiceRequest, ServiceState};
+use crate::domain::queue_service::{MAX_ANSWER_BYTES, Principal, ServiceRequest, ServiceState};
 use crate::domain::{ActorContext, ActorRole, EventKind, RunId, RunStatus};
 
 /// How long a look waits for the broker's health.
@@ -343,10 +343,20 @@ pub fn exchange(
     body: &[u8],
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>)> {
-    let mut stream = TcpStream::connect(address)
+    let stream = TcpStream::connect(address)
         .with_context(|| format!("the queue broker at {address} is unreachable"))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
+    exchange_on(stream, head, body)
+}
+
+/// [`exchange`] on a connection already made: the broker's port, or a
+/// run's socket a relay passes on to it.
+pub fn exchange_on(
+    mut stream: impl Read + Write,
+    head: &str,
+    body: &[u8],
+) -> Result<(u16, Vec<u8>)> {
     write!(
         stream,
         "{head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -373,11 +383,20 @@ pub fn exchange(
             length = value.trim().parse::<u64>().ok();
         }
     }
+    // A client reads no more than a client of the service's socket does.
+    let limit = MAX_ANSWER_BYTES as u64;
+    ensure!(
+        length.is_none_or(|length| length <= limit),
+        "the queue broker's answer is longer than {limit} bytes"
+    );
     let mut answer = Vec::new();
-    match length {
-        Some(length) => reader.take(length).read_to_end(&mut answer)?,
-        None => reader.read_to_end(&mut answer)?,
-    };
+    reader
+        .take(length.unwrap_or(limit + 1))
+        .read_to_end(&mut answer)?;
+    ensure!(
+        answer.len() as u64 <= limit,
+        "the queue broker's answer is longer than {limit} bytes"
+    );
     Ok((status, answer))
 }
 
@@ -410,11 +429,30 @@ pub fn health(address: &str, timeout: Duration) -> Result<Value> {
         &[],
         timeout,
     )?;
+    health_answer(status, &body)
+}
+
+/// The broker's health through the unix socket at `socket`, which a relay
+/// passes on to it: whether the run's whole path to the broker holds.
+pub fn health_through(socket: &Path, timeout: Duration) -> Result<Value> {
+    let stream = UnixStream::connect(socket)
+        .with_context(|| format!("the relay's socket {} is unreachable", socket.display()))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let (status, body) = exchange_on(
+        stream,
+        &format!("GET {HEALTH_PATH} HTTP/1.1\r\nHost: 127.0.0.1"),
+        &[],
+    )?;
+    health_answer(status, &body)
+}
+
+fn health_answer(status: u16, body: &[u8]) -> Result<Value> {
     ensure!(
         status == 200,
         "the queue broker answered its health with {status}"
     );
-    serde_json::from_slice(&body).context("the queue broker's health does not read")
+    serde_json::from_slice(body).context("the queue broker's health does not read")
 }
 
 // --- The broker -----------------------------------------------------------------

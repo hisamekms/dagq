@@ -61,6 +61,7 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 - `stop the dead landing's processes` (`landing_release_stuck`): the person stops its pids.
 - `dagq service status` (`queue_service_down`): `service start` on the person's word.
 - `read the queue broker's log and run up` (`queue_broker_down`): `up` on the person's word.
+- `look at the dagq podman machine's relays` (`queue_relay_down`): the person.
 - `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` (`dagq-recover` section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`.
 - `recover run`, `exit the session`: `dagq-recover`.

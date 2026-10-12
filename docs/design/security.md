@@ -165,7 +165,7 @@ capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`Static
    [queueのbroker](queue-broker.md)の宛ては今queue serviceとregistry。
    決まった形は、queue serviceと同じ`up` / `down` / execの引き継ぎで動くhostのプロセスで、宛先をqueue service・`api.anthropic.com`と、`dagq.toml`が挙げるpackage registryのhostに限り、allowlistの外を拒む（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)・[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
    containerにClaudeの資格情報を置かず、brokerがrun tokenを検証してhostの長期tokenに差し替える（[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）。
-   workerのcontainerは`--network none`で、VMの中のrelayからmountしたrunごとのunix socketだけでbrokerに届く（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)）。
+   workerのcontainerは`--network none`で、VMの中のrelayからmountしたrunごとのunix socketだけでbrokerに届き、relayはtokenも宛ての判定も持たない（[Container runtime](container-runtime.md#brokerへの経路)）。
 3. **Integratorの分離**: pushの資格情報をIntegratorのプロセスだけに持たせ、supervisorとAI actorから外す
 4. **人しか出せない承認（I6）**: 承認の経路（別のterminal、署名、人の端末からの確認など）を決めてから、`answer_approval`のaskのanswerを人だけに限る
 

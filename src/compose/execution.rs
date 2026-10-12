@@ -459,39 +459,47 @@ impl OneShot {
             queue: &mut queue,
             repository: &repository,
             verifier: &verifier,
-            // The queue broker, the dagq machine and the image are the
-            // parts of the container runtime built yet (goal 38).
+            // The queue broker, the runs' relays, the dagq machine and the
+            // image are the parts of the container runtime built yet (goal 38).
             container: &crate::application::queue_broker::BrokerGate {
                 // Only looked at: `up` and the supervisor start it.
                 broker: Arc::new(crate::infrastructure::queue_broker::SystemQueueBroker::new(
                     &db,
                     Path::new("dagq"),
                 )),
-                // Only looked at: a container's start makes it run.
-                container: crate::application::podman_machine::MachineGate {
-                    podman: Arc::new(crate::infrastructure::podman_machine::PodmanCli::default()),
-                    required: crate::domain::podman_machine::MachineMounts::of_queue(
-                        db.parent().unwrap_or(Path::new(".")),
-                    ),
-                    // Only looked at: a container's start builds it.
-                    container: crate::application::container_image::ImageGate {
-                        specs: Arc::new(
-                            crate::infrastructure::container_image::CheckoutImages::new(
-                                &main_checkout,
-                                db.parent().unwrap_or(Path::new(".")),
+                // The supervisor's record of the relays.
+                container: crate::application::broker_relay::RelayGate {
+                    records: Arc::new(crate::infrastructure::broker_relay::QueueRelayHealth {
+                        db: db.clone(),
+                    }),
+                    // Only looked at: a container's start makes it run.
+                    container: crate::application::podman_machine::MachineGate {
+                        podman: Arc::new(
+                            crate::infrastructure::podman_machine::PodmanCli::default(),
+                        ),
+                        required: crate::domain::podman_machine::MachineMounts::of_queue(
+                            db.parent().unwrap_or(Path::new(".")),
+                        ),
+                        // Only looked at: a container's start builds it.
+                        container: crate::application::container_image::ImageGate {
+                            specs: Arc::new(
+                                crate::infrastructure::container_image::CheckoutImages::new(
+                                    &main_checkout,
+                                    db.parent().unwrap_or(Path::new(".")),
+                                ),
                             ),
-                        ),
-                        records: Arc::new(
-                            crate::infrastructure::container_image::QueueImageRecords {
-                                db: db.clone(),
-                                actor: Some(requester.clone()),
+                            records: Arc::new(
+                                crate::infrastructure::container_image::QueueImageRecords {
+                                    db: db.clone(),
+                                    actor: Some(requester.clone()),
+                                },
+                            ),
+                            now: {
+                                let clock = self.generators.clock.clone();
+                                Arc::new(move || clock.now())
                             },
-                        ),
-                        now: {
-                            let clock = self.generators.clock.clone();
-                            Arc::new(move || clock.now())
+                            container: crate::infrastructure::container_runtime::UnbuiltContainer,
                         },
-                        container: crate::infrastructure::container_runtime::UnbuiltContainer,
                     },
                 },
             },

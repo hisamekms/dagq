@@ -29,7 +29,7 @@ fs・process・git・packageを仲介する撤去済みのresource broker（[ADR
 
 今の宛先はqueue serviceと、`dagq.toml`が挙げるpackage registryへの`CONNECT`（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）である。
 `api.anthropic.com`（[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)）は後続の変更が足し、それまで拒む。
-containerからbrokerまでの経路（VMの中のrelayとrunごとのunix socket）は[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)が決め、brokerは`127.0.0.1`のTCPのportで受ける。
+containerからbrokerまでの経路（containerの中の転送・runごとのunix socket・VMの中のrelay）は[Container runtime](container-runtime.md#brokerへの経路)が持ち、brokerは`127.0.0.1`のTCPのportで受ける。
 
 ## 入口
 
@@ -40,9 +40,10 @@ containerからbrokerまでの経路（VMの中のrelayとrunごとのunix socke
 - registryのallowlistの設定の綴り・置き場・意味・既定は`infrastructure::run_env::EGRESS_REGISTRIES`のdoc comment、1つのhostの書き方は`domain::queue_broker::RegistryHost`が持つ。
 - brokerのプロセスがHTTPを読み書きしてserviceのsocketへ転送するところと、`up`・`down`・supervisorが起動・停止・生死を見る口は`infrastructure::queue_broker`のmodule docから辿る。
   clientの要求の送り方はそのmoduleの送る側の関数が、上の形のまま持つ。
+  containerの中のクライアントモードのdagqもこの形で送る（[Queue service](queue-service.md#クライアントモード)）。
 - 置き場は`<queue dir>/broker/`（mode 0700）で、記録・lock・logのファイル名は`domain::queue_broker`の定数が持つ。
   portは起動のたびに空いているものを取り、記録（`BrokerRecord`）に残す。
-  relayはこの記録からportを読む（記録の区分と寿命は[計測](measurement.md#ssotとビュー)の表）。
+  supervisorはこの記録のportへrelayを向け、brokerが別のportで起動し直せばrelayを起動し直す（記録の区分と寿命は[計測](measurement.md#ssotとビュー)の表）。
 
 ## 不変条件
 

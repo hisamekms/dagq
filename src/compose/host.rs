@@ -230,6 +230,26 @@ impl std::fmt::Debug for QueueBrokerControlPort {
     }
 }
 
+/// How the supervisor keeps the relays of the runs' containers
+/// ([`SuperviseOptions::broker_relay`](super::SuperviseOptions::broker_relay)).
+#[derive(Debug, Clone)]
+pub struct QueueRelayOptions {
+    pub interval: Duration,
+    /// Looks at and starts the relays instead of podman's in the dagq
+    /// machine; tests set it.
+    pub control: Option<QueueRelayControlPort>,
+}
+
+/// The control [`QueueRelayOptions::control`] gives the supervisor.
+#[derive(Clone)]
+pub struct QueueRelayControlPort(pub Arc<dyn crate::application::broker_relay::RelayControl>);
+
+impl std::fmt::Debug for QueueRelayControlPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("QueueRelayControlPort")
+    }
+}
+
 /// How the supervisor records the host's load (task 516).
 #[derive(Debug, Clone)]
 pub struct HostMetricsSettings {
@@ -1054,37 +1074,67 @@ pub(super) fn queue_broker_control(
     }
 }
 
-/// The container runtime's parts behind the queue broker: the dagq
-/// podman machine as the queue at `db` uses it (only looked at: a
-/// container's start makes it run), the image as `main_checkout` decides
-/// it (only looked at: a container's start builds it), then the parts not
-/// built yet.
+/// The container runtime's parts behind the queue broker: the runs'
+/// relays as the supervisor recorded them on the queue at `db`, the dagq
+/// podman machine as that queue uses it (only looked at: a container's
+/// start makes it run), the image as `main_checkout` decides it (only
+/// looked at: a container's start builds it), then the parts not built
+/// yet.
 pub(super) fn container_parts(
     db: &Path,
     main_checkout: &Path,
     clock: Arc<dyn crate::application::Clock>,
     actor: Option<crate::domain::actor::ActorContext>,
-) -> crate::application::podman_machine::MachineGate<
-    crate::application::container_image::ImageGate<
-        crate::infrastructure::container_runtime::UnbuiltContainer,
+) -> crate::application::broker_relay::RelayGate<
+    crate::application::podman_machine::MachineGate<
+        crate::application::container_image::ImageGate<
+            crate::infrastructure::container_runtime::UnbuiltContainer,
+        >,
     >,
 > {
     let queue_dir = db.parent().unwrap_or(Path::new("."));
-    crate::application::podman_machine::MachineGate {
-        podman: Arc::new(crate::infrastructure::podman_machine::PodmanCli::default()),
-        required: crate::domain::podman_machine::MachineMounts::of_queue(queue_dir),
-        container: crate::application::container_image::ImageGate {
-            specs: Arc::new(crate::infrastructure::container_image::CheckoutImages::new(
-                main_checkout,
-                queue_dir,
-            )),
-            records: Arc::new(crate::infrastructure::container_image::QueueImageRecords {
-                db: db.to_path_buf(),
-                actor,
-            }),
-            now: Arc::new(move || clock.now()),
-            container: crate::infrastructure::container_runtime::UnbuiltContainer,
+    crate::application::broker_relay::RelayGate {
+        records: Arc::new(crate::infrastructure::broker_relay::QueueRelayHealth {
+            db: db.to_path_buf(),
+        }),
+        container: crate::application::podman_machine::MachineGate {
+            podman: Arc::new(crate::infrastructure::podman_machine::PodmanCli::default()),
+            required: crate::domain::podman_machine::MachineMounts::of_queue(queue_dir),
+            container: crate::application::container_image::ImageGate {
+                specs: Arc::new(crate::infrastructure::container_image::CheckoutImages::new(
+                    main_checkout,
+                    queue_dir,
+                )),
+                records: Arc::new(crate::infrastructure::container_image::QueueImageRecords {
+                    db: db.to_path_buf(),
+                    actor,
+                }),
+                now: Arc::new(move || clock.now()),
+                container: crate::infrastructure::container_runtime::UnbuiltContainer,
+            },
         },
+    }
+}
+
+/// The relays of the runs' containers as the supervisor keeps them:
+/// `settings`' control, else podman's in the dagq machine for the queue at
+/// `db`, towards the queue's broker `broker`.
+pub(super) fn broker_relay_port(
+    db: &Path,
+    settings: &QueueRelayOptions,
+    broker: Arc<dyn crate::application::queue_broker::QueueBrokerControl>,
+) -> crate::application::supervise::QueueRelayPort {
+    crate::application::supervise::QueueRelayPort {
+        relays: match &settings.control {
+            Some(port) => port.0.clone(),
+            None => Arc::new(crate::infrastructure::broker_relay::PodmanRelays::of_queue(
+                crate::infrastructure::podman_machine::PodmanCli::default(),
+                db,
+                crate::infrastructure::kpi_config::host_wide_file().as_deref(),
+            )),
+        },
+        broker,
+        interval: settings.interval,
     }
 }
 

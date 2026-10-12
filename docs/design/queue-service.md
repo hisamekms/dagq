@@ -70,7 +70,9 @@ serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`�
   - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`のコマンド）が起動のとき（`ActorProgram::Headless`）に発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
 - 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。加えてserviceは、principalがrunを名指すtokenを、そのrunの状態が`integrated`・`succeeded`・`failed`・`interrupted`のとき、またはqueueに無いときに断る（runの終わりで失効。`run_holds_token`。workerのtokenのfileはresumeの発行し直しまで残るが、使えない）
 - 断り: tokenが無い（`missing_token`）・発行していない値か失効した（`unknown_token`）・runが終わった（`run_ended`）要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（`use_case`・`reason`。tokenの値は書かない）に残す。actorはservice自身（role `supervisor`、id `queue-service:<pid>`。制御側の一部）
-- 呼び出し元に渡すenvは`DAGQ_SERVICE_SOCKET`（socketのpath）と`DAGQ_SERVICE_CREDENTIAL_FILE`（tokenのfileのpath。`domain::queue_service::CLIENT_ENV`）。名前に`TOKEN`を含めないのは、Codexが名前に`KEY`・`SECRET`・`TOKEN`を含む変数を、それが起動するコマンドに渡さないため
+- hostの呼び出し元に渡すenvは`DAGQ_SERVICE_SOCKET`（socketのpath）と`DAGQ_SERVICE_CREDENTIAL_FILE`（tokenのfileのpath）。
+  containerのrunにはsocketの代わりに`DAGQ_SERVICE_URL`を渡す（[クライアントモード](#クライアントモード)、`domain::queue_service::CLIENT_ENV`）。
+  名前に`TOKEN`を含めないのは、Codexが名前に`KEY`・`SECRET`・`TOKEN`を含む変数を、それが起動するコマンドに渡さないため
 - host構成では同じユーザーのプロセスが他のrunのtokenのfileもDBも読めるので、tokenは誤りを止めて記録を正しくするためのもので、security boundaryではない（ADR-t1233-4決定5、[Security](security.md#host実行は助言的advisory)）
 
 ## ユースケース
@@ -137,7 +139,7 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 | review job・復旧job（`ReadFiles`） | `prompt::review_prompt`・`prompt::recovery_prompt` | なし（Bashを持たず、dagqを打たない） |
 | runtimeが立てるplanner | `RECORD_READING` | `events --full`・`timeline RUN`（plannerは今もDBを直接開く） |
 | worker | runtimeのprompt（`WORKER_READING`） | `ask`（書き込み）。`list`・`show`は作業の初めに打たないよう言う（権限の範囲ではない。ADR-t1233-5決定3） |
-| worker（`measure`のtask） | [taskの登録](../development/task-registration.md)の「change」の`measure`、measureのtaskのdescription（commit 2ae2c673のtask、task 1205・1114・1034・1026・601・1200） | `stats --full`・`events --full`・`timeline RUN`・`kpi`（`--compare`・`--area`・`--change`・`--by`）・`marks`・`forecast` |
+| worker（`measure`のtask） | [taskの登録](../development/task-registration.md)の「change」の`measure`、measureのtaskのdescription | `stats --full`・`events --full`・`timeline RUN`・`kpi`（`--compare`・`--area`・`--change`・`--by`）・`marks`・`forecast` |
 | worker・job | dagq skillの`SKILL.md`と`reference/`（`inspect.md`・`kpi.md`・`register.md`・`scope.md`・`provider.md`・`goal-close.md`・`observer.md`） | `list`・`show`・`graph`・`candidates`・`status`・`asks`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`notes`・`marks`・`findings`・`search`・`related`・`proposal list`・`proposal show`・`goal list`・`goal show`・`lint`・`observe --history`・`observe --input` |
 
 ユースケースの無いコマンド（クライアントモードではserviceに届かない）:
@@ -148,12 +150,20 @@ promptとskillが打たせるdagqのコマンドと、行き先のユースケ�
 
 ## クライアントモード
 
-ADR-t1233-1決定7、ADR-t1233-5決定1・2・5。`dagq`（`src/main.rs`の`execute`）は、環境に`DAGQ_SERVICE_SOCKET`があれば、`DAGQ_ROLE`もqueueの解決（cwdや`--db`）も読まずにクライアントモードで動く（`infrastructure::queue_service::Client`）。
+ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
+`dagq`（`src/main.rs`の`execute`）は、環境が宛てを名指せば、`DAGQ_ROLE`もqueueの解決（cwdや`--db`）も読まずにクライアントモードで動く（`infrastructure::queue_service::Client`）。
 
+- 宛ての種類（`ClientRoute`）: hostのworkerとjobは`DAGQ_SERVICE_SOCKET`のserviceのsocketへ、containerのrunは`DAGQ_SERVICE_URL`のqueueのbroker（containerの中の転送、[Container runtime](container-runtime.md#brokerへの経路)）へ[Queue broker](queue-broker.md#入口)の要求の形で送る。
+  envの意味は`domain::queue_service`の定数のdoc comment
+- 両方があれば設定の誤りとして全てのコマンドを断り、どちらも無ければqueueを自分で開く
 - コマンドを引数のとおりに読んで（clapの検査はそのまま）、ユースケースとparamsに写す（`client_request`）。読み取りはCLIの読み取りと同じ`QueueRead`（`queue_read`）を`QueueRead::request`でparamsにし、`QueueRead::parse`がそれを同じ読み取りに読み戻す（cursorと`--compare`は`Cursor::text`・`CompareSpec::text`で読み戻せる文字列にする）。`show`・`note`・`ask`・`proposal list|show`・`finding record|resolve|dismiss`は上の表のparamsにする。`ask`と`stats`の`--cmux`は送らない（どちらもcmuxを使わない）。`finding record`の対象の無いものは`queue: true`
-- tokenは`DAGQ_SERVICE_CREDENTIAL_FILE`のfileから読み、要求ごとに送る。答えの`result`をCLIと同じに出す（`graph --format d2`の本文もそのまま）。答えを待つのは`CLIENT_TIMEOUT`（300秒）まで
-- 断り（終了コード1、stderrの`{"error": <message>, "queue_service": {"code": <code>}}`）: serviceの`authorization_denied`・`unauthenticated`・`bad_request`・`failed`・`api_version_mismatch`（答えの版がこのbinaryの版を含まないときもこれ）と、クライアントの`unreachable`（socketに答えるserviceが無い）・`no_credential`（tokenのfileが読めない）・`no_use_case`（serviceのユースケースでないコマンド）・`queue_named`（`--db`でqueueを名指した）。どの断りでもDBを開くことに戻らない（fail closed）
-- `no_use_case`になるもの: 計画系（`add`・`edit`・`submit`・`ready`・`goal add`など）・`answer`・`ask close`・`mark`・runtimeの操作（`up`・`integrate`・`review`・`recover`・`observe`（`--history`・`--input`を除く）・`session`など）・`watch`・`report`・`graph --out`・`doctor`・`service`・`init`・`migrate`。段(2)が残した`doctor`（hostとDBのファイルの診断）はこれで断る。`locate`はserviceに送らずに、DBのpathを出さずに答える: `{"client_mode": true, "socket": <socket>, "db": null, "db_exists": null, "note"}`（pluginの`--resolve`が最初に打ち、dagq skillは`db_exists: false`のときだけ`init`を言うので、workerとjobが`init`を試みない。task 1236で決めた）
+- tokenは`DAGQ_SERVICE_CREDENTIAL_FILE`のfileから読み、要求ごとに送る。
+  答えの`result`をCLIと同じに出す（`graph --format d2`の本文もそのまま）。
+  答えを待つ時間と読む長さの上限はどちらの宛ても同じ
+- 断り（終了コード1、stderrの`{"error": <message>, "queue_service": {"code": <code>}}`）: serviceとbrokerの断りもクライアントの断りもこの形で、codeの意味は`ClientFailure`のdoc comment。
+  どの断りでもDBを開くことに戻らない（fail closed）
+- `no_use_case`になるのはserviceのユースケースでない全てのコマンド。
+  `locate`はserviceに送らずに、DBのpathを出さずに答える: `{"client_mode": true, "socket": <socket>, "db": null, "db_exists": null, "note"}`（brokerの宛てでは`socket`の代わりに`broker`）（pluginの`--resolve`が最初に打ち、dagq skillは`db_exists: false`のときだけ`init`を言うので、workerとjobが`init`を試みない）
 - workerとjobのpromptとskillのコマンド（`dagq ask`・`dagq show`など）は変えない。observerとスループットの見直しのpromptは、`dagq --db <db>`ではなく`dagq`を名指す（promptはagentの引数なので、DBのpathを含めない）
 - session wrapper（`session`）とhook（`session-event`）は制御側で、`--db`でDBを開く。runのsession wrapperの環境にはserviceの変数を入れないので、wrapperはクライアントモードにならない（agentを起動するときに足す）
 - 確かめるtest: `tests/it/queue_service_client.rs`（CLIのクライアントモード、roleの判定がservice側であること、断り）、`tests/it/runtime_client_mode.rs`（worker・resume・review job・recovery jobのプロセスの環境と引数にDBのpathが無いこと）、`tests/it/runtime_codex_ask.rs`と`tests/it/goal_review_codex.rs`（stubのCodexのworkerとjobからの到達）、observer・スループットの見直し・plan reviewのjobのtest

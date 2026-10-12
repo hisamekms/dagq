@@ -329,6 +329,10 @@ pub(super) struct HostOpsState {
     pub(super) queue_broker_port: Option<super::QueueBrokerPort>,
     /// What the supervisor knows of the queue's broker.
     pub(super) queue_broker: super::queue_broker::QueueBrokerWatch,
+    /// Keeps the runs' relays; `None` keeps none.
+    pub(super) broker_relay_port: Option<super::QueueRelayPort>,
+    /// What the supervisor knows of the runs' relays.
+    pub(super) broker_relay: super::broker_relay::QueueRelayWatch,
     /// The automatic update's look at main (ADR-0045 decision 17).
     pub(super) update: update::UpdateWatch,
     /// Looks for a new release; `None` looks for none.
@@ -371,6 +375,8 @@ impl HostOpsState {
             service_up: true,
             queue_broker_port: ports.queue_broker.clone(),
             queue_broker: super::queue_broker::QueueBrokerWatch::default(),
+            broker_relay_port: ports.broker_relay.clone(),
+            broker_relay: super::broker_relay::QueueRelayWatch::default(),
             update: update::UpdateWatch::default(),
             release_port: ports.release.clone(),
             release: release::ReleaseWatch::default(),

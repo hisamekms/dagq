@@ -48,10 +48,49 @@ pub const CREDENTIAL_FILE_ENV: &str = "DAGQ_SERVICE_CREDENTIAL_FILE";
 /// `process::exit`, a SIGKILL) and with its queue's directory left behind
 /// (task 1352). Nothing in production sets it.
 pub const OWNER_PID_ENV: &str = "DAGQ_SERVICE_OWNER_PID";
+/// The variable that names the queue broker a client-mode `dagq` in a
+/// run's container sends its commands to instead of a socket
+/// (ADR-t2114-3 decision 3): `http://<host>:<port>`, the forwarder's
+/// `127.0.0.1` port inside the container
+/// ([`crate::domain::broker_relay::FORWARD_PORT`]), with no path but `/`.
+/// With it, `dagq` opens no queue and sends each command as the broker's
+/// request ([`crate::domain::queue_broker`]): the token of
+/// [`CREDENTIAL_FILE_ENV`]'s file as the `Bearer`, and the run of
+/// [`crate::domain::actor::RUN_ID_ENV`] as the run header. A `dagq` given
+/// both it and [`SOCKET_ENV`] refuses every command and opens no queue
+/// (fail closed).
+pub const URL_ENV: &str = "DAGQ_SERVICE_URL";
 /// The variables of a client-mode `dagq`.
-pub const CLIENT_ENV: [&str; 2] = [SOCKET_ENV, CREDENTIAL_FILE_ENV];
+pub const CLIENT_ENV: [&str; 3] = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV];
 /// The longest request line the service reads.
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
+/// The longest answer a client-mode `dagq` reads, by the socket or through
+/// the broker: a longer one does not read, and is refused as one the
+/// service did not give.
+pub const MAX_ANSWER_BYTES: usize = MAX_REQUEST_BYTES * 16;
+
+/// The `<host>:<port>` the broker's URL `url` ([`URL_ENV`]) names, or why
+/// it names none: only `http://`, a host and a port, and no path but `/`
+/// (no user, query or fragment).
+pub fn broker_address(url: &str) -> Result<String, String> {
+    let why = |what: &str| format!("{URL_ENV}={url:?} {what}: give http://<host>:<port>");
+    let rest = url
+        .trim()
+        .strip_prefix("http://")
+        .ok_or_else(|| why("is not an http URL"))?;
+    let authority = rest.strip_suffix('/').unwrap_or(rest);
+    if authority.contains(['/', '?', '#', '@']) {
+        return Err(why("names more than a host and a port"));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port))
+            if !host.is_empty() && !port.is_empty() && port.parse::<u16>().is_ok() =>
+        {
+            Ok(authority.to_owned())
+        }
+        _ => Err(why("names no host and port")),
+    }
+}
 
 // The use cases of the API.
 string_enum!(UseCase {
@@ -427,6 +466,32 @@ mod tests {
                 .unwrap(),
             success
         );
+    }
+
+    #[test]
+    fn a_broker_url_names_only_a_host_and_a_port() {
+        for (url, address) in [
+            ("http://127.0.0.1:47310", "127.0.0.1:47310"),
+            ("http://127.0.0.1:47310/", "127.0.0.1:47310"),
+            (" http://localhost:1 ", "localhost:1"),
+        ] {
+            assert_eq!(broker_address(url).as_deref(), Ok(address), "{url}");
+        }
+        for url in [
+            "",
+            "127.0.0.1:1",
+            "https://127.0.0.1:1",
+            "http://127.0.0.1",
+            "http://127.0.0.1:",
+            "http://:1",
+            "http://127.0.0.1:99999",
+            "http://127.0.0.1:1/queue",
+            "http://u@127.0.0.1:1",
+            "http://127.0.0.1:1?x",
+        ] {
+            let refused = broker_address(url).unwrap_err();
+            assert!(refused.contains(URL_ENV), "{refused}");
+        }
     }
 
     #[test]

@@ -1503,6 +1503,12 @@ enum Command {
         #[command(subcommand)]
         command: QueueBrokerCommand,
     },
+    /// The path of a run's container to the queue broker: the relay in the dagq podman machine
+    /// and the forwarder in the container. Neither opens a queue.
+    Relay {
+        #[command(subcommand)]
+        command: RelayCommand,
+    },
     /// Bind the queue to the repository containing the working directory (or
     /// --repo) after the repository moved; the one command that changes the
     /// binding. Refused while a supervisor runs. Pass --db for a queue still
@@ -1784,6 +1790,37 @@ enum ServiceCommand {
         /// Accepted from registered command lines and ignored: the service calls no cmux.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum RelayCommand {
+    /// The relay of a run in the dagq podman machine: bind the run's unix socket (mode 0600,
+    /// given to --owner) and pass each connection to --target as it is, both ways, until SIGINT
+    /// or SIGTERM. It holds no token and judges nothing: the queue broker does.
+    Serve {
+        #[arg(long)]
+        socket: PathBuf,
+        /// The queue broker's `<host>:<port>`.
+        #[arg(long)]
+        target: String,
+        /// The uid the socket is given to: the run's container's user.
+        #[arg(long)]
+        owner: Option<u32>,
+    },
+    /// The forwarder in a run's container: listen on 127.0.0.1:--port and pass each connection
+    /// to the run's unix socket as it is, both ways, until SIGINT or SIGTERM.
+    Forward {
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        port: u16,
+    },
+    /// The queue broker's health through the run's unix socket: whether the relay and the
+    /// machine's path to the host reach it.
+    Probe {
+        #[arg(long)]
+        socket: PathBuf,
     },
 }
 
@@ -2142,6 +2179,9 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
     let one = |capability, resource| vec![(capability, resource)];
     let queue = |capability| vec![(capability, Resource::Queue)];
     match command {
+        // Run before any actor is read (`execute`): it opens no queue and
+        // carries bytes only (ADR-t2114-3).
+        Command::Relay { .. } => Vec::new(),
         Command::Locate
         | Command::List { .. }
         | Command::Show { .. }
@@ -2990,8 +3030,8 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
         return Err(ClientFailure::new(
             "queue_named",
             format!(
-                "--db {} names a queue to open, and a client-mode dagq (DAGQ_SERVICE_SOCKET is \
-                 set) opens none: run the command without it",
+                "--db {} names a queue to open, and a client-mode dagq (DAGQ_SERVICE_SOCKET or \
+                 DAGQ_SERVICE_URL is set) opens none: run the command without it",
                 db.display()
             ),
         )
@@ -3000,33 +3040,82 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
     // `locate` says where the commands go, without the queue's path: the
     // plugin's `--resolve` runs it first.
     if matches!(cli.command, Command::Locate) {
-        return Ok(json!({
-            "client_mode": true,
-            "socket": client.socket,
-            "db": null,
-            "db_exists": null,
-            "note": "dagq runs in client mode: its commands go to the queue service at the \
-                     socket, and it opens no queue",
-        }));
+        use dagq::infrastructure::queue_service::ClientRoute;
+        return Ok(match &client.route {
+            ClientRoute::Socket(socket) => json!({
+                "client_mode": true,
+                "socket": socket,
+                "db": null,
+                "db_exists": null,
+                "note": "dagq runs in client mode: its commands go to the queue service at the \
+                         socket, and it opens no queue",
+            }),
+            ClientRoute::Broker { address, .. } => json!({
+                "client_mode": true,
+                "broker": address,
+                "db": null,
+                "db_exists": null,
+                "note": "dagq runs in client mode: its commands go to the queue service through \
+                         the queue broker, and it opens no queue",
+            }),
+        });
     }
     let Some((use_case, params)) = client_request(&cli.command)? else {
         return Err(ClientFailure::new(
             "no_use_case",
             "this command is not one of the queue service's use cases, and a client-mode dagq \
-             (DAGQ_SERVICE_SOCKET is set) opens no queue to run it (docs/design/queue-service.md \
-             lists the use cases)",
+             (DAGQ_SERVICE_SOCKET or DAGQ_SERVICE_URL is set) opens no queue to run it \
+             (docs/design/queue-service.md lists the use cases)",
         )
         .into());
     };
     client.call(use_case, params)
 }
 
+/// Run the relay or the forwarder of a run's path to the queue broker, or
+/// look through it (ADR-t2114-3 decisions 2 and 3).
+fn relay(command: &RelayCommand) -> Result<Value> {
+    use dagq::infrastructure::broker_relay;
+    match command {
+        RelayCommand::Serve {
+            socket,
+            target,
+            owner,
+        } => broker_relay::serve_relay(&broker_relay::RelayOptions {
+            socket: socket.clone(),
+            target: target.clone(),
+            owner: *owner,
+            stop: install_stop_signal()?,
+            poll: Duration::from_millis(50),
+        }),
+        RelayCommand::Forward { socket, port } => {
+            broker_relay::serve_forward(&broker_relay::ForwardOptions {
+                port: *port,
+                socket: socket.clone(),
+                stop: install_stop_signal()?,
+                poll: Duration::from_millis(50),
+            })
+        }
+        RelayCommand::Probe { socket } => dagq::infrastructure::queue_broker::health_through(
+            socket,
+            dagq::infrastructure::queue_broker::PROBE_TIMEOUT,
+        ),
+    }
+}
+
 fn execute(cli: Cli) -> Result<Value> {
+    // The relay and the forwarder of a run's container carry bytes and open
+    // no queue (ADR-t2114-3): they run whatever the environment names,
+    // the forwarder in a container whose `dagq` is in client mode.
+    if let Command::Relay { command } = &cli.command {
+        return relay(command);
+    }
     // A worker's or a job's `dagq` goes to the queue service, which
     // authorizes it for the principal of its token: neither `DAGQ_ROLE`
-    // nor the queue's path is read (goal 82's stage (3)).
+    // nor the queue's path is read (goal 82's stage (3)). An environment
+    // that names both a socket and a broker runs nothing (fail closed).
     if let Some(client) =
-        dagq::infrastructure::queue_service::Client::from_env(|name| env::var(name).ok())
+        dagq::infrastructure::queue_service::Client::from_env(|name| env::var(name).ok())?
     {
         return client_mode(&client, &cli);
     }
@@ -3379,7 +3468,8 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Ci { .. }
         | Command::Inbox { .. }
         | Command::Service { .. }
-        | Command::QueueBroker { .. } => {
+        | Command::QueueBroker { .. }
+        | Command::Relay { .. } => {
             unreachable!()
         }
         // Answered above as reads.
@@ -4030,6 +4120,12 @@ fn execute(cli: Cli) -> Result<Value> {
                     executable: env::current_exe().unwrap_or_else(|_| PathBuf::from("dagq")),
                     interval: dagq::application::supervise::QUEUE_SERVICE_INTERVAL,
                     start_timeout: dagq::application::supervise::QUEUE_SERVICE_START_TIMEOUT,
+                    control: None,
+                }),
+                // And the relays of the runs' containers to the broker
+                // (ADR-t2114-3 decision 4).
+                broker_relay: (!once).then(|| dagq::compose::QueueRelayOptions {
+                    interval: dagq::application::supervise::QUEUE_SERVICE_INTERVAL,
                     control: None,
                 }),
                 ..SuperviseOptions::new(dagq::domain::slot_limits::DEFAULT_PARALLEL, once)
@@ -5207,9 +5303,11 @@ mod tests {
     }
 
     /// The subcommands `DAGQ_COMMANDS` leaves out, each for a reason: the
-    /// ones that only read, and the ones with a form that reads, which a
-    /// rule on the name would deny as well (the CLI refuses the other
-    /// form). A subcommand on neither list fails
+    /// ones that only read; the ones with a form that reads, which a rule
+    /// on the name would deny as well (the CLI refuses the other form); and
+    /// the ones that open no queue and only carry bytes to the queue
+    /// broker, which checks what passes (`relay`). A subcommand on neither
+    /// list fails
     /// [`every_subcommand_is_denied_or_left_out_on_purpose`].
     const LEFT_OUT_COMMANDS: &[&str] = &[
         // Read the queue.
@@ -5242,6 +5340,11 @@ mod tests {
         // `--input`.
         "graph",
         "observe",
+        // Carry bytes between a run's container and the queue broker, and
+        // open no queue: the broker checks what passes (ADR-t2114-3).
+        "relay serve",
+        "relay forward",
+        "relay probe",
     ];
 
     /// Every subcommand clap knows, nested ones by their path (`goal

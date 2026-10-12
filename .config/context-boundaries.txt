@@ -174,6 +174,7 @@ module | src/application/queue_service.rs | host |
 module | src/application/podman_machine.rs | host |
 module | src/application/container_image.rs | host |
 module | src/application/queue_broker.rs | host |
+module | src/application/broker_relay.rs | host |
 module | src/application/sccache.rs | host |
 module | src/application/sccache/ | host |
 module | src/application/actor_executor.rs | host |
@@ -185,6 +186,7 @@ module | src/application/supervise/disk.rs | host |
 module | src/application/supervise/host_metrics.rs | host |
 module | src/application/supervise/queue_service.rs | host |
 module | src/application/supervise/queue_broker.rs | host |
+module | src/application/supervise/broker_relay.rs | host |
 module | src/application/supervise/release.rs | host |
 module | src/application/supervise/sccache.rs | host |
 module | src/application/supervise/update.rs | host |
@@ -271,6 +273,8 @@ outer-port | src/application/queue_broker.rs | VerificationTokens | host | publi
 outer-port | src/application/container_image.rs | ImageSpecs | host | internal | - | the images of a queue as its main checkout decides them
 outer-port | src/application/container_image.rs | ImageBuilder | host | internal | - | the podman commands on the images in the dagq machine
 outer-port | src/application/container_image.rs | ImageRecords | host | internal | - | the queue's records of the container image
+outer-port | src/application/broker_relay.rs | RelayControl | host | public | execution | the relays of the runs' containers in the dagq machine; a run's container opens its relay before it starts and closes it at its end
+outer-port | src/application/broker_relay.rs | RelayRecords | host | internal | - | the supervisor's record of the relays, read by the gate
 outer-port | src/application/queue_service.rs | ServiceAccess | host | public | execution | not classified by architecture.md; the supervisor issues a token at the claim and the resume
 outer-port | src/application/ci_watch.rs | CiSource | observation | internal | - |
 outer-port | src/application/throughput_review.rs | ThroughputReviewSources | observation | internal | - |
@@ -366,6 +370,7 @@ item | src/application/queue_broker.rs | BrokerGate | host | execution | whether
 item | src/application/podman_machine.rs | MachineGate | host | execution | whether the dagq machine can be used, through ContainerRuntime
 item | src/application/queue_broker.rs | VerificationToken | host | execution | the token of one verification, revoked at its end
 item | src/application/container_image.rs | ImageGate | host | execution | whether the container image can be had, through ContainerRuntime
+item | src/application/broker_relay.rs | RelayGate | host | execution | whether the runs' relays are kept, through ContainerRuntime
 item | src/application/supervise/contexts.rs | HostOpsState | host | execution | free disk and sccache, read
 item | src/application/supervise/cleanup.rs | CleanupWatch | host | execution | cleaning and defer
 item | src/application/supervise/sccache.rs | ensure_sccache | host | execution |
