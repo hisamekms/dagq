@@ -299,7 +299,7 @@ paths = ["src/**"]
 # 挙げるのはCIがmainで流す形式の検査で、scripts/check-scripts-root.shの一覧に入り（landing branchのscriptを一時の場所に写し、
 # cwdをrunのworktreeにして流す約束を満たす）、cargo・nextestを実行せず、3回の測定の最大が10秒以下で今のmainでexit 0になるものだけ。
 # build・testを流すもの（ADR-t1895-2決定1）、10秒を超えるもの、今のmainで落ちるもの（関係ないrunまで差し戻す）は挙げない。
-# 引数はCIと同じにし（CIが--baseを渡すcheck-design-docsだけはscriptの既定の基点を使う）、--self-testは挙げない。
+# 引数はCIと同じにし（CIが--baseを渡すcheck-design-docsとcheck-design-sentencesはscriptの既定の基点を使う）、--self-testは挙げない。
 # 秒は2026-10-12に他のrunと並んだhostで3回測った最大で、順はその小さいものから。
 # 入れなかった候補: check-layer-deps（cargoは実行しないが、3回の最大が約35秒で10秒を超える（同じ測定で挙げたものの最大の約4倍）。src/**の差分はintegrateのverifyとCIが見る）。
 
@@ -322,6 +322,13 @@ paths = ["AGENTS.md"]
 [review.programs.check-doc-frontmatter]
 script = "scripts/check-doc-frontmatter.sh"
 paths = ["docs/**"]
+
+# docs/designの文書の差分が足した・変えた行の1文1行（docs/development/documents.mdのdesignの「形と予算」）。
+# design-consistencyのLLMが見ていた1文1行の差し戻しをagentを起動する前に安く返し、直すcommitが新しい違反を足す連鎖を止めるため。
+# 既存の行は検査しないので既存の文書の違反では落ちない。基点は既定（HEADとmainのmerge base）。最大約0.4秒。
+[review.programs.check-design-sentences]
+script = "scripts/check-design-sentences.sh"
+paths = ["docs/design/**"]
 
 # tests/の.rsの行数の上限。最大約0.7秒。
 [review.programs.check-test-file-lines]

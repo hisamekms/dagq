@@ -114,6 +114,21 @@ jobs:
           fi
           sh scripts/check-design-docs.sh --self-test
 
+      # One sentence to a line in the lines the change adds to the documents
+      # under docs/design (scripts/check-design-sentences.sh,
+      # docs/development/documents.md, section "design"). The base is taken
+      # as for the budgets above.
+      - name: Design docs sentences
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE" ] && printf '%s' "$BASE" | grep -q '[^0]' && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            sh scripts/check-design-sentences.sh --base "$BASE"
+          else
+            sh scripts/check-design-sentences.sh
+          fi
+          sh scripts/check-design-sentences.sh --self-test
+
       - name: Layer dependencies
         run: |
           sh scripts/check-layer-deps.sh
