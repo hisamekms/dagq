@@ -30,7 +30,9 @@
 #   - a `partial` port has at least one `method` item and a `method` item
 #     names a `partial` port;
 #   - every file of src/infrastructure/ whose strings write SQL is in a
-#     `store` item, and every table written is in a `table` item.
+#     `store` item, and every table written is in a `table` item;
+#   - every table the migrations leave after the last one (see
+#     surviving_tables) is in a `table` item, written by the code or not.
 # C1 and X1: SQL in a string of a store module that writes (INSERT [OR ...]
 # INTO, REPLACE INTO, DELETE FROM, and UPDATE [OR ...] with its table, an
 # alias with AS or without, INDEXED BY or NOT INDEXED, and SET; read into
@@ -130,6 +132,74 @@ test_files() {
     }' || true
 }
 
+# surviving_tables prints, separated by spaces, the tables the migrations
+# under migrations/ leave after the last one: read in the order of their
+# paths (the numbers) and in any case, with the comments (`--` and `/* */`)
+# and the values in single quotes dropped, a quoted name ("t", `t`, [t]) one
+# token whose inside is no SQL, and a name after a schema (main.t) the name,
+# CREATE [VIRTUAL] TABLE [IF NOT EXISTS] adds a table, DROP TABLE [IF
+# EXISTS] removes it and ALTER TABLE x RENAME TO y moves it to the new name,
+# so a table rebuilt under a temporary name or dropped is not left.
+surviving_tables() {
+  find migrations -type f -name '*.sql' 2>/dev/null | LC_ALL=C sort |
+    while read -r f; do cat "$f"; echo; done | LC_ALL=C awk '
+    BEGIN {
+      q = sprintf("%c", 39)
+      # The end of what state st (1 a block comment, 2 a value, 3 to 5 a
+      # quoted name) reads, doubled quotes inside.
+      close_re[1] = "\\*/"
+      close_re[2] = "^([^" q "]|" q q ")*" q
+      close_re[3] = "^([^\"]|\"\")*\""
+      close_re[4] = "^([^`]|``)*`"
+      close_re[5] = "^[^]]*]"
+      open_re = "--|/\\*|[" q "\"`[]"
+    }
+    # name_token prints the quoted name n as one token, "n" with every
+    # character but a letter, a digit and _ made _, so no SQL is read in it.
+    function name_token(n) { gsub(/[^a-z0-9_]/, "_", n); return " \"" n "\" " }
+    {
+      l = tolower($0)
+      while (l != "") {
+        if (st == 1) {
+          if (!match(l, close_re[1])) { l = ""; break }
+          l = substr(l, RSTART + RLENGTH); sql = sql " "; st = 0
+        } else if (st >= 2) {
+          if (!match(l, close_re[st])) { if (st > 2) qbuf = qbuf l "\n"; l = ""; break }
+          if (st > 2) { sql = sql name_token(qbuf substr(l, 1, RLENGTH - 1)); qbuf = "" }
+          else sql = sql " "
+          l = substr(l, RLENGTH + 1); st = 0
+        } else {
+          if (!match(l, open_re)) { sql = sql l; l = ""; break }
+          sql = sql substr(l, 1, RSTART - 1) " "; o = substr(l, RSTART, RLENGTH)
+          l = substr(l, RSTART + RLENGTH)
+          if (o == "--") l = ""
+          else if (o == "/*") st = 1
+          else st = index(q "\"`[", o) + 1
+        }
+      }
+      sql = sql "\n"
+    }
+    END {
+      w = "[ \t\r\n]+"; w0 = "[ \t\r\n]*"
+      name = "([a-z_][a-z0-9_]*|\"[a-z0-9_]*\")"
+      name = name "(" w0 "\\." w0 name ")?"
+      re = "(create" w "(virtual" w ")?table" w "(if" w "not" w "exists" w ")?|drop" w "table" w "(if" w "exists" w ")?)" name "|alter" w "table" w name w "rename" w "to" w name
+      while (match(sql, re)) {
+        s = substr(sql, RSTART, RLENGTH); before = substr(sql, RSTART - 1, 1)
+        sql = substr(sql, RSTART + RLENGTH)
+        # The end of a word or a quoted name (xcreate table) is no statement.
+        if (before ~ /[a-z0-9_"]/) continue
+        gsub(w0 "\\." w0, ".", s)
+        n = split(s, a, w)
+        for (i = 1; i <= n; i++) { sub(/^.*\./, "", a[i]); gsub(/"/, "", a[i]) }
+        if (a[1] == "create") keep[a[n]] = 1
+        else if (a[1] == "drop") delete keep[a[n]]
+        else if (a[3] in keep) { delete keep[a[3]]; keep[a[n]] = 1 }
+      }
+      for (t in keep) if (t != "") printf "%s ", t
+    }' || true
+}
+
 # check_tree checks the tree in the current directory against list $1 and
 # allow list $2.
 check_tree() {
@@ -151,14 +221,15 @@ check_tree() {
   tests=""
   # shellcheck disable=SC2086
   if [ -n "$files" ]; then tests=$(test_files $files); fi
-  tables=""
+  tables="" kept=""
   if [ -d migrations ]; then
     tables=$(find migrations -type f -name '*.sql' -exec cat {} + 2>/dev/null |
       grep -oE 'CREATE[[:space:]]+(VIRTUAL[[:space:]]+)?TABLE[[:space:]]+(IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+)?[a-z_][a-z0-9_]*' |
       awk '{ print $NF }' | LC_ALL=C sort -u | tr '\n' ' ') || true
+    kept=$(surviving_tables)
   fi
   # shellcheck disable=SC2086
-  CB_TESTS=$tests CB_TABLES=$tables LC_ALL=C awk -v me="$me" -v list="$list" -v allow="$allow" \
+  CB_TESTS=$tests CB_TABLES=$tables CB_KEPT=$kept LC_ALL=C awk -v me="$me" -v list="$list" -v allow="$allow" \
     -v show_list="${list#"$repo"/}" -v show_allow="${allow#"$repo"/}" '
 function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
 function err(msg) { bad = 1; print me ": " msg | "sort -u 1>&2" }
@@ -300,6 +371,8 @@ BEGIN {
   for (i = 1; i <= n; i++) ctxs[a[i]] = 1
   n = split(ENVIRON["CB_TABLES"], a, " ")
   for (i = 1; i <= n; i++) created[a[i]] = 1
+  n = split(ENVIRON["CB_KEPT"], a, " ")
+  for (i = 1; i <= n; i++) kept[a[i]] = 1
   n = split(ENVIRON["CB_TESTS"], a, "\n")
   for (i = 1; i <= n; i++) if (a[i] != "") testpath[a[i]] = 1
   read_list()
@@ -590,6 +663,7 @@ END {
     if (pvis[a[1]] == "partial" && (a[1] in pfile) && ((pfile[a[1]] SUBSEP a[1]) in tdef) && !((pfile[a[1]] SUBSEP a[1] SUBSEP tdef[pfile[a[1]] SUBSEP a[1]] SUBSEP a[2]) in tmeth)) err(show_list ":" mline[k] ": C7: the trait " a[1] " declares no method " a[2])
   }
   for (t in towner) if (!(t in created)) err(show_list ":" tline[t] ": C7: no migration creates the table " t)
+  for (t in kept) if (!(t in towner)) err("migrations: C7: the table " t " the migrations leave is in no table item of " show_list)
   for (k in place) {
     ok = 0
     for (f in seen) if (covers(k, f)) { ok = 1; break }
@@ -927,6 +1001,53 @@ EOF2
   base table_gone
   echo 'table | ghosts | planning |' >>"$tmp/table_gone/list.txt"
   expect 1 "C7: a table of the list no migration creates" "$tmp/table_gone" "list.txt:20: C7: no migration creates the table ghosts"
+
+  base table_dropped_item
+  grep -v '^table | asks |' "$tmp/table_dropped_item/list.txt" >"$tmp/list" && mv "$tmp/list" "$tmp/table_dropped_item/list.txt"
+  expect 1 "C7: a table the migrations leave, its item gone from the list" "$tmp/table_dropped_item" "migrations: C7: the table asks the migrations leave is in no table item"
+
+  base table_new_unwritten
+  echo 'CREATE TABLE IF NOT EXISTS ghosts (id INTEGER);' >"$tmp/table_new_unwritten/migrations/0002_ghosts.sql"
+  expect 1 "C7: a new table of a migration no code writes, not in the list" "$tmp/table_new_unwritten" "migrations: C7: the table ghosts the migrations leave is in no table item"
+
+  base table_renamed_new
+  echo 'ALTER TABLE asks RENAME TO questions;' >"$tmp/table_renamed_new/migrations/0002_rename.sql"
+  expect 1 "C7: a table renamed to a name not in the list" "$tmp/table_renamed_new" "migrations: C7: the table questions the migrations leave is in no table item"
+
+  base table_hidden_drop
+  cat >"$tmp/table_hidden_drop/migrations/0002_ghosts.sql" <<'EOF2'
+CREATE TABLE ghosts (id INTEGER); /* DROP TABLE ghosts; */
+CREATE TABLE spirits (body TEXT DEFAULT '--'); INSERT INTO spirits VALUES ('DROP TABLE spirits', 'it''s');
+CREATE TABLE "shades" (id INTEGER);
+CREATE TABLE haunts (id INTEGER, "DROP TABLE haunts" TEXT, [drop table haunts] TEXT);
+CREATE TABLE main.wraiths (id INTEGER);
+EOF2
+  expect 1 "C7: a DROP TABLE in a comment or a value drops nothing" "$tmp/table_hidden_drop" "migrations: C7: the table ghosts the migrations leave is in no table item"
+  expect 1 "C7: a table after a comment marker inside a value is left" "$tmp/table_hidden_drop" "migrations: C7: the table spirits the migrations leave is in no table item"
+  expect 1 "C7: a quoted table name is left" "$tmp/table_hidden_drop" "migrations: C7: the table shades the migrations leave is in no table item"
+  expect 1 "C7: a DROP TABLE in a quoted name drops nothing" "$tmp/table_hidden_drop" "migrations: C7: the table haunts the migrations leave is in no table item"
+  expect 1 "C7: a table after a schema is left by its name" "$tmp/table_hidden_drop" "migrations: C7: the table wraiths the migrations leave is in no table item"
+
+  base table_temporary
+  cat >"$tmp/table_temporary/migrations/0002_rebuild.sql" <<'EOF2'
+-- CREATE TABLE commented (id INTEGER) is in a comment.
+/* CREATE TABLE blocked (id INTEGER);
+   in a block comment */
+INSERT INTO asks (id) VALUES ('CREATE TABLE valued (id INTEGER)');
+CREATE TABLE asks_v2 (id INTEGER, body TEXT);
+INSERT INTO asks_v2 (id) SELECT id FROM asks;
+DROP TABLE asks;
+ALTER TABLE asks_v2 RENAME TO asks;
+ALTER TABLE asks RENAME COLUMN body TO text;
+CREATE TABLE "Rooms" (id INTEGER, "create table phantoms" TEXT);
+ALTER TABLE main."rooms" RENAME TO [halls];
+DROP TABLE IF EXISTS main . halls;
+create table scratch (id integer); SELECT 1 AS xcreate table_v2;
+CREATE TABLE leases (id INTEGER);
+EOF2
+  echo 'DROP TABLE IF EXISTS scratch;
+DROP TABLE leases;' >"$tmp/table_temporary/migrations/0010_drop.sql"
+  expect 0 "C7: tables rebuilt under a temporary name, renamed or dropped are not left" "$tmp/table_temporary"
 
   base transaction_gone
   sed 's/| claim_task | fixture/| claim_gone | fixture/' "$tmp/transaction_gone/list.txt" >"$tmp/list" && mv "$tmp/list" "$tmp/transaction_gone/list.txt"

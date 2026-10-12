@@ -13,7 +13,9 @@
 # unless it is a reason.
 #
 #   table | <table> | <context> | <note>
-#       The owner of a table some migration creates (CREATE TABLE).
+#       The owner of a table some migration creates (CREATE TABLE). Every
+#       table the migrations leave after the last one (not dropped nor
+#       renamed away) must have one.
 #   store | <path> | <context> | <note>
 #       The context of a store module of src/infrastructure/: a file, or a
 #       directory ending in `/` for every file under it (the longest path
