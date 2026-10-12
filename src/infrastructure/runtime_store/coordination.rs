@@ -709,7 +709,7 @@ impl SqliteQueue {
 
 /// Host運用's write of a heartbeat on `token`'s registration, which the
 /// heartbeat of the leases calls inside its transaction (T11 of
-/// docs/design/architecture.md): whether the registration was there.
+/// .config/context-boundaries.txt): whether the registration was there.
 fn refresh_registration(conn: &rusqlite::Connection, token: &LeaseToken, now: i64) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE supervisors SET heartbeat_at=?2 WHERE token=?1",

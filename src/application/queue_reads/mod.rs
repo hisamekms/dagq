@@ -14,7 +14,8 @@
 //! `locate` and `doctor` are no read use case.
 //!
 //! [`answer`] only hands a read to the module of the context whose
-//! operation it is (docs/design/architecture.md): [`planning`] (`list`,
+//! operation it is (the `queue_reads/<context>.rs` paths of
+//! docs/design/architecture.md, section "検査の範囲"): [`planning`] (`list`,
 //! `candidates`, `graph`, `goal`, `lint`, `search`, `related`),
 //! [`observation`] (`status`, `events`, `timeline`, `stats`, `kpi`,
 //! `forecast`, `notes`, `marks`, `findings`, `observe`) and [`shared`]
@@ -804,8 +805,7 @@ impl<Q: ?Sized, T: PlanningSources<Q> + ObservationSources<Q> + ?Sized> QueueRea
 
 /// The JSON a read of the queue gives, the same for the command line and
 /// the queue service (ADR-t1233-5 decision 1). This only hands each read
-/// to the module of the context whose operation it is
-/// (docs/design/architecture.md): the module turns its options into the
+/// to the module of the context whose operation it is: the module turns its options into the
 /// queries of the ports it takes, and what the host has to compose comes
 /// from `sources`.
 pub fn answer<Q, S>(queue: &mut Q, sources: &S, read: &QueueRead) -> Result<Value>

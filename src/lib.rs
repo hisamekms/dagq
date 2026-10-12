@@ -16,9 +16,10 @@
 //!
 //! Across the layers, each module also belongs to one context (planning,
 //! execution and landing, observation and analysis, host operation) or to
-//! the shared parts every context may use; the contexts, what each owns
-//! and exposes, and the rules (L1 to L8, C1 to C7, X1 to X3) are in
-//! docs/design/architecture.md (ADR-t1545-1). Of [`build_id`], the
+//! the shared parts every context may use; the contexts and the rules (L1
+//! to L9, C1 to C8, X1 to X3) are in docs/design/architecture.md
+//! (ADR-t1545-1), and what each context owns and exposes that the module
+//! paths do not tell is in .config/context-boundaries.txt. Of [`build_id`], the
 //! contexts use only the rule of the identifier and the commit it names,
 //! which do no I/O; its `emit` and `compute` call Git and belong to the
 //! build script.

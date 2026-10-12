@@ -1,5 +1,5 @@
 //! The ports every context uses (docs/design/architecture.md, section
-//! "portのmodule"): the clock and the IDs, the start of a process, the
+//! "共有の部品"): the clock and the IDs, the start of a process, the
 //! asks, the logical stores [`EventStore`] and [`StateStore`]
 //! (ADR-t1662-2), and [`Queue`], the whole queue as one connection, which
 //! names the store ports of every context.

@@ -1,5 +1,5 @@
 //! The ports of 実行と着地 (docs/design/architecture.md, section
-//! "portのmodule"): the runs and their transitions, recovery, leases and
+//! "実行と着地"): the runs and their transitions, recovery, leases and
 //! sessions, the run log, the agent and its turns, the run's files, Git
 //! and the verification.
 
@@ -1108,10 +1108,12 @@ pub trait RunRecovery {
 /// backend's slots. The supervisors' registrations are host運用's
 /// [`SupervisorRegistry`](super::host::SupervisorRegistry), except that
 /// [`heartbeat`](Self::heartbeat) refreshes the registration with the
-/// leases in one write (T11 of docs/design/architecture.md). Its reads
-/// (`run_leases`, `run_lease`, `processes`) are published to every context;
-/// the rest is 実行と着地's own (a handoff gives its slots' leases back in
-/// 実行と着地's `supervise::handoff_slots`).
+/// leases in one write (transaction T11 of .config/context-boundaries.txt).
+/// Its reads (`holds_lease`, `run_leases`, `run_lease`, `processes`,
+/// `backend_slots`) are published to every context (the `method` items of
+/// the same list); the rest is 実行と着地's
+/// own (a handoff gives its slots' leases back in 実行と着地's
+/// `supervise::handoff_slots`).
 pub trait RunCoordination {
     /// Refresh every lease `token` holds; how many there were.
     fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize>;
@@ -1317,7 +1319,7 @@ pub trait RunReads {
 
 /// The runs and the events together: a name for [`RunReads`] and the
 /// [`EventStore`], kept so the use cases that took the run log need not be
-/// rewritten at once (docs/design/architecture.md, section "portのmodule").
+/// rewritten at once.
 /// It adds no method; a use case that reads only events takes
 /// [`EventStore`], and one that reads only runs takes [`RunReads`].
 pub trait RunLog: RunReads + EventStore {}

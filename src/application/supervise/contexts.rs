@@ -1,7 +1,7 @@
 //! The state of the supervisor's 計画管理, 観測と分析 and host運用
-//! contexts, apart from the loop's (docs/design/architecture.md,
-//! "`Supervisor`の状態"). Each context's submodules change only their own
-//! state: their passes take it with a [`PassEnv`] (計画管理's with a
+//! contexts, apart from the loop's (rule C3 of docs/design/architecture.md;
+//! which context owns each field is on `Supervisor`). Each context's
+//! submodules change only their own state: their passes take it with a [`PassEnv`] (計画管理's with a
 //! [`PlanningEnv`]) and the values the loop reads for them (the clock,
 //! whether it drains or hands off, the runs its slots hold), and the loop
 //! calls them and applies what they return.

@@ -1,5 +1,5 @@
-//! The observation and analysis context's reads of the queue (its
-//! operations in docs/design/architecture.md): `status`, `events`,
+//! The observation and analysis context's reads of the queue (観測と分析
+//! in docs/design/architecture.md): `status`, `events`,
 //! `timeline`, `stats`, `kpi`, `forecast`, `notes`, `marks`, `findings` and
 //! `observe --history|--input`.
 //!

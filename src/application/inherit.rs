@@ -6,7 +6,7 @@
 //! Execution and landing owns this module. It publishes [`InheritStore`]
 //! and [`CarriedBranches`] to planning management's `ready --inherit`, which
 //! authorizes the command and leaves the retry to them
-//! (`docs/design/architecture.md`, T10).
+//! (`.config/context-boundaries.txt`, transaction T10).
 
 use std::path::Path;
 

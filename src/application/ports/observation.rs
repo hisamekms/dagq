@@ -1,5 +1,5 @@
 //! The ports of 観測と分析 (docs/design/architecture.md, section
-//! "portのmodule"): the reads of the queue's records, the observer's log
+//! "観測と分析"): the reads of the queue's records, the observer's log
 //! and the marks, over the [`EventStore`] in [`super::shared`].
 
 use super::execution::{RunCoordination, RunLog};
@@ -87,9 +87,9 @@ pub trait LedgerStore {
 /// What reports read and record of the queue as a whole: the findings,
 /// the written reports, KPI breaches, forecasts and the CI watch.
 ///
-/// Owned by the observation and analysis context
-/// (docs/design/architecture.md): its reads are open to every context and
-/// its `record_*` writes are its own.
+/// Owned by the observation and analysis context: its reads are open to
+/// every context and its `record_*` writes are its own
+/// (.config/context-boundaries.txt).
 pub trait QueueRecords {
     /// The findings `query` lists, larger impact first (`findings`), for
     /// the KPI report's open findings.

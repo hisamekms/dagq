@@ -1063,10 +1063,10 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
 /// A listing of this user's processes with the wall time it was taken.
 type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 
-/// The supervisor's loop, with each context's state apart
-/// (docs/design/architecture.md, "`Supervisor`の状態"). Which context owns
-/// each field, so that a submodule changes only its own context's state and
-/// reads or calls the others (rule C3):
+/// The supervisor's loop, with each context's state apart. Which context
+/// owns each field, so that a submodule changes only its own context's
+/// state and reads or calls the others (rule C3 of
+/// docs/design/architecture.md):
 ///
 /// - shared: `queue`, `queues`, `generators`, `layout`, `processes` and
 ///   `utc_offset`, the connection, clocks and places every context reads,

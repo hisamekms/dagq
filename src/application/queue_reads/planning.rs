@@ -1,4 +1,4 @@
-//! The planning context's reads of the queue (its operations in
+//! The planning context's reads of the queue (計画管理 in
 //! docs/design/architecture.md): `list`, `candidates`, `graph`,
 //! `goal list`, `goal show`, `lint`, `search` and `related`.
 //!

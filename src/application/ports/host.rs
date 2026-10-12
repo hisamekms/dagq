@@ -1,5 +1,5 @@
 //! The ports of host運用 (docs/design/architecture.md, section
-//! "portのmodule"): the connections to the queue, the service manager,
+//! "host運用"): the connections to the queue, the service manager,
 //! the session wrappers and cmux, sccache, processes, the installed plugin,
 //! the headless jobs, and the supervisors' registrations and the repository
 //! binding.
@@ -436,8 +436,8 @@ pub trait HeadlessJobStore {
 /// without one, which host運用's `supervise::inbox_nudge` writes: queue
 /// events (on no task, goal or run) whose comparison and write share one
 /// write transaction, so a second supervisor and the process after an exec
-/// make neither twice. Internal to host運用 (docs/design/architecture.md,
-/// "host運用").
+/// make neither twice. Internal to host運用
+/// (.config/context-boundaries.txt).
 pub trait InboxWatchLog {
     /// Record `inbox_nudged` with `payload` unless one with the same
     /// `absent_since` and `attempt` is recorded (ADR-t1433-5 decision 1
@@ -460,8 +460,8 @@ pub trait InboxWatchLog {
 /// The supervisors' registrations, their handoffs and settings, and the
 /// repository the queue is bound to: the coordination state of host運用
 /// (ADR-0032's second kind). Its reads (`supervisors`, `handoff_request`,
-/// `repository_binding`, `assert_repository`) are published to every
-/// context and the rest to 実行と着地's loop (docs/design/architecture.md).
+/// `repository_binding`) are published to every context and the rest to
+/// 実行と着地's loop (the `method` items of .config/context-boundaries.txt).
 pub trait SupervisorRegistry {
     /// Register a supervisor with its slot limits and their sources in one
     /// write, so `status` and a reader of the registration never see it

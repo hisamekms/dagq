@@ -1,5 +1,5 @@
 //! The ports of 計画管理 (docs/design/architecture.md, section
-//! "portのmodule"): tasks and goals, the planners' drafts and requests,
+//! "計画管理"): tasks and goals, the planners' drafts and requests,
 //! and the plan and goal reviews.
 
 use crate::application::{GraphInput, TaskPage, TaskQuery};
@@ -779,7 +779,7 @@ pub trait GoalReviewStore {
 /// `draft_origins` and the search index with `landed_commits`): the
 /// related tasks and their landed commits, the search, and the lookups
 /// `stats`, `kpi` and `forecast` join runs with. A pure read, open to
-/// every context (docs/design/architecture.md, section "計画管理").
+/// every context (.config/context-boundaries.txt).
 pub trait PlanningRecords {
     /// The commits that landed the `limit` completed tasks most related to
     /// `task` (`dagq related`, ADR-0046), for the files it is expected to

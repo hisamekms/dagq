@@ -1,6 +1,7 @@
 //! The state of 実行と着地 on the supervisor, by the stage that owns it
-//! (docs/design/architecture.md, "`Supervisor`の状態"): the slot
-//! assignment ([`ClaimState`], with the slots in a [`SlotTable`]), the
+//! (rule C3 of docs/design/architecture.md; which context owns each field
+//! is on `Supervisor`): the slot assignment ([`ClaimState`], with the slots
+//! in a [`SlotTable`]), the
 //! landing and its review ([`LandingState`]), the resume ([`ResumeState`]),
 //! the triage and recovery ([`TriageState`]) and the providers
 //! ([`ProviderState`]); the e2e's is [`super::e2e::E2eWaits`]. Each stage's
