@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-04
 updated: 2026-10-04
 accepted_on: 2026-10-04
+amended_by:
+  - adr-t2259-1
 owners:
   - hisamekms
 tags:

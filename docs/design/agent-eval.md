@@ -7,6 +7,8 @@ created: 2026-10-06
 scope: runtime
 related:
   - adr-t1728-1
+  - adr-t2259-1
+  - design-supervisor-lifecycle-review-builtin
   - adr-t1728-2
   - adr-t1453-1
   - adr-t1895-1
@@ -210,6 +212,8 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - 使わないもの: 全体のreviewのjob。
 
 ## programのreviewの当て方
+
+built-inのagentのevalはpjのprogramを当てない（決定済み・未実装、[built-inのreview](supervisor-lifecycle/review-builtin.md)）。
 
 - evalは各ケースに本番のreviewと同じ段を当てる（判断は`domain::agent_eval::programs`）。
   周の定義とケースを読むlanding branchのcommitから、programの一覧とscriptを読み（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[プログラムのreview](supervisor-lifecycle/review-programs.md)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、ここに写さない）、pathがケースの差分に当たるものを、ケースのtreeをcwdに設定の順に流す。

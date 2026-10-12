@@ -9,6 +9,8 @@ accepted_on: 2026-10-06
 amends:
   - adr-t1453-1 decision 5
   - adr-t1453-1 decision 8
+amended_by:
+  - adr-t2259-1
 owners:
   - hisamekms
 tags:
