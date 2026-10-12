@@ -207,12 +207,22 @@ ADR-t2114-2 決定5（前提として確かめる 3 つ）と決定6（だめな
 
 | 確認 | 日付 | Claude Code の版 | status | 最長の secs | max_gap_secs | upstream_complete / message_stop | 読めた印（stream-signs の行） | 今のコードの分類 | 手当て（--add-beta など） | 合否 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 規約 |  |  |  |  |  |  |  |  |  |  |
-| 通常の応答 |  |  |  |  |  |  |  |  |  |  |
-| 長い SSE |  |  |  |  |  |  |  |  |  |  |
-| 無効な token |  |  |  |  |  |  |  |  |  |  |
-| 利用上限 |  |  |  |  |  |  |  |  |  |  |
-| token がファイルに無い |  |  |  |  |  |  |  |  |  |  |
+| 規約 | 2026-10-11 | - | - | - | - | - | - | - | - | 一部（人の判断: 個人利用なら適合しそう、broker による代理は明示的に保証されない。note 151554） |
+| 通常の応答 | 2026-10-11 | 2.1.296 | 200（had_authorization true） | 1.857 | 0.666 | true / 1 | result success・is_error false | - | なし | 合（note 152330） |
+| 長い SSE | 2026-10-11 | 2.1.296 | 200（had_authorization true） | 70.883（3000 は 53.744 で 60 秒に届かず、4000 で流し直した） | 0.524 | true / 1 | result success・is_error false、出力は 1〜4000 が欠けずに揃う | - | なし | 合（note 152330） |
+| 無効な token | 2026-10-11 | 2.1.296 | 401（error_body: `authentication_error`「OAuth access token is invalid.」） | 0.273 | - | - | assistant の error `authentication_failed`・result is_error true・api_error_status 401（401 は 1 回で、やり直しは起きなかった） | `ClaudeTurnReader` が `TurnFailure::Authentication`（api_error_status 401 でも同じ） | なし | 合（note 152330） |
+| 利用上限 | 2026-10-11 | 2.1.296 | 上限に当たらず | - | - | - | 応答の header `anthropic-ratelimit-unified-*`（5h・7d の使用率・status allowed・overage rejected）が転送を素通しした。rate_limit_event の行は出なかった | 未確認（上限の応答を出せなかった） | - | 未確認（note 152330） |
+| token がファイルに無い | 2026-10-11 | - | - | - | - | - | 転送を止めたとき `files under ... holding the token: 0` | - | - | 合（note 152330） |
+
+環境は macOS 14.7.4 arm64・空の `CLAUDE_CONFIG_DIR`・転送は `--add-beta` なし（note 152330）。
+値は 1 回の実測の読み取りで、手順 2〜7 は人が流し、log と出力の読み取りは inbox が行った。
+
+結果の当てはめ:
+
+- 通常の応答・長い SSE・認証切れの分類は通り、broker の側の手当て（応答の素通しの直し・`--add-beta` などの header）は要らなかった。
+  broker の直しが要るのは、素通しの SSE か分類が通らないときで、今回は当たらない。
+- 規約は「一部」で、長期 token が規約か動作の上で通らない場合の影響は、人が `host.toml` で API key を選ぶことに留まる（長期 token と API key の両方に対応して人が選ぶ方針。note 151554）。
+- 利用上限は未確認で、人が次のように決めた（note 152336）: 利用上限の応答は未確認のまま実装（task 2177 など ADR-t2114-2 決定1〜4）に進め、本番で初めて利用上限に当たったときに runtime が `TurnFailure::UsageLimit`（控え）に分類するかを確かめ、合わなければ直す。
 
 ### 満たさないときに人が決めること
 
@@ -268,17 +278,27 @@ sh "$S/clone-cost.sh" "$REPO" "$SPIKE/b-big" 2048 | tee "$SPIKE/b-2048.csv"
 
 | 作り方 | 同時の本数 | 全体の時間（秒、中央値） | 1 本の disk（KiB） | うち .git（KiB） | 合否 |
 | --- | --- | --- | --- | --- | --- |
-| path・--no-hardlinks | 1 |  |  |  |  |
-| path・--no-hardlinks | 2 |  |  |  |  |
-| path・--no-hardlinks | 4 |  |  |  |  |
-| file:// の URL | 1 |  |  |  |  |
-| file:// の URL | 2 |  |  |  |  |
-| file:// の URL | 4 |  |  |  |  |
+| path・--no-hardlinks | 1 | 9.345 | 296092 | 260544 | 合 |
+| path・--no-hardlinks | 2 | 11.136 | 296092 | 260544 | 合 |
+| path・--no-hardlinks | 4 | 13.464 | 296092 | 260544 | 合 |
+| file:// の URL | 1 | 1.587 | 約 55100 | 約 19560 | 合 |
+| file:// の URL | 2 | 2.004 | 約 55100 | 約 19560 | 合 |
+| file:// の URL | 4 | 2.811 | 55108 | 19560 | 合 |
 
 | run branch の変更 | bundle の大きさ（byte） | 作成（秒） | 取り込み（秒） | 合否 |
 | --- | --- | --- | --- | --- |
-| 256 KiB |  |  |  |  |
-| 2048 KiB |  |  |  |  |
+| 256 KiB | 199162（中央値） | 0.063 | 0.092 | 合 |
+| 2048 KiB | 1589153 | 0.134 | 0.102 | 合 |
+
+出典は note 151589（2026-10-11、inbox が流した）。
+環境は macOS 14.7.4 arm64・git 2.39.3・load 5.12〜8.02（worker 3 本が動いていた）、`REPO` の `count-objects` は loose 26334 個 219.73 MiB・in-pack 47100・packs 23・size-pack 34.14 MiB・garbage 0。
+値は 1 回の Spike の読み取りで、256 KiB は手順の 3 周の中央値、2048 KiB は 1 周。
+各周は script のとおり作り方ごとに同時 1・2・4 本を順に流し、作り方を交互にしていない。
+
+合否は合（両方の作り方が目安を満たす）。
+推奨は `file://` の URL で、時間と disk が path・`--no-hardlinks` の約 1/5（.git は約 1/13）。
+path の clone は `REPO` の loose の object をそのまま複写するので、host の gc の具合で費用が大きく変わる。
+前提を満たしたので、(b) の ADR は書かない（ADR-t2113-2 決定4 の次善の形は採らない）。
 
 ### 満たさないときに人が決めること
 
@@ -346,12 +366,21 @@ test が落ちたら `$SPIKE/m/logs/<label>-test.log` から落ちた test の�
 
 | 組（CPU / メモリ） | 段 | 時間（秒） | exit | oom_killed | kernel_oom | peak_mem | 落ちた test と失敗の文 | 合否（合 / 否 / 未確認） |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 4 / 8 GiB | build |  |  |  |  |  |  |  |
-| 4 / 8 GiB | test |  |  |  |  |  |  |  |
-| 4 / 6 GiB | build |  |  |  |  |  |  |  |
-| 4 / 6 GiB | test |  |  |  |  |  |  |  |
-| 2 / 4 GiB | build |  |  |  |  |  |  |  |
-| 2 / 4 GiB | test |  |  |  |  |  |  |  |
+| 4 / 8 GiB | build | 16.3 | 101 | false | 0 | 900.1M | build script の link が「ld: cannot find .../build_script_build-*.rcgu.o」 | 未確認 |
+| 4 / 8 GiB | test | - | 101 | - | - | - | build が落ちたので意味が無い | 未確認 |
+| 4 / 6 GiB | build | 17.0 | 101 | false | 0 | 1.18G | 同じ link の失敗 | 未確認 |
+| 4 / 6 GiB | test | - | 101 | - | - | - | build が落ちたので意味が無い | 未確認 |
+| 2 / 4 GiB | build | 23.8 | 101 | false | 0 | 557.2M | 同じ link の失敗 | 未確認 |
+| 2 / 4 GiB | test | - | 101 | - | - | - | build が落ちたので意味が無い | 未確認 |
+
+上の行は 2026-10-11 の 1 回目（note 152044。podman 6.1.2（applehv）・image `rust:1.98.1`・load 4〜19）で、最小の資源は未確認のまま決めていない。
+資源ではなく、手順書の script の不具合 2 つで測れなかった。
+
+- `container-build.sh` の `prepare` が `CARGO_HOME` を作業の dir にするので、image の rustup の proxy が rustup を見つけられずに落ちる（1 回目は写した script で `cargo/bin` を複写して流した）。
+- build の出力（`CARGO_TARGET_DIR`）を machine に virtiofs で mount した host の dir に置くと、link が「cannot find ... .rcgu.o」で落ちる。
+  4 / 8 GiB で build の出力を machine の中の podman の named volume に置くと、build は 343 秒で通った（test は流していない）。
+
+測り直しは、task 2279 が直した手順で人か inbox が流し、結果の取り込み（通る最小の資源）は task 2280 が持つ。
 
 ### 満たさないときに人が決めること
 
@@ -412,14 +441,11 @@ grep -i -l 'error' "$SPIKE"/m/logs/sccache-*.server.log
 
 | 本数 | round | container | 時間（秒） | exit | requests | hits | misses | cache_errors | read_errors | write_errors | cache の大きさ（KiB） | 当たり率 | 合否 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2 | cold |  |  |  |  |  |  |  |  |  |  |  |  |
-| 2 | warm |  |  |  |  |  |  |  |  |  |  |  |  |
-| 3 | cold |  |  |  |  |  |  |  |  |  |  |  |  |
-| 3 | warm |  |  |  |  |  |  |  |  |  |  |  |  |
-| 4 | cold |  |  |  |  |  |  |  |  |  |  |  |  |
-| 4 | warm |  |  |  |  |  |  |  |  |  |  |  |  |
-| 4 | limit1 |  |  |  |  |  |  |  |  |  |  |  |  |
-| 4 | limit2 |  |  |  |  |  |  |  |  |  |  |  |  |
+| 2〜4 | cold・warm・limit1・limit2 | 全部 | - | 26 の build のうち 25 が 101（4 本の warm の 2 本目だけ 0） | - | - | - | 0 | 0 | 0 | 54204 → 116132（limit の 300M でも追い出しは起きず） | warm で 2 本は 1.0、3・4 本は 0.79〜1.0（build が途中で落ちたので材料にならない） | 未確認 |
+
+上の行は 2026-10-11 の 1 回目（note 152045。machine 4 CPU / 8 GiB・sccache 0.18.0）で、server の log に error は無かった。
+build が (c) と同じ link の失敗で落ちたので、同時の書き込みで壊れないことも、上限が効くことも確かめられていない。
+測り直しは task 2279 が直した手順で人か inbox が流し、結果の取り込みと (d) の ADR（ADR-t2114-4 決定5）は task 2280 が持つ。
 
 ### 満たさないときに人が決めること
 
