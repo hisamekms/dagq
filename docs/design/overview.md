@@ -91,29 +91,15 @@ CLI / Claude plugin / Codex plugin
        Git worktree
 ```
 
-テストは3層に分ける。
-`tests/it/queue_*.rs`（機能のまとまりごとのファイルで、共通のhelperは`tests/common/queue.rs`）・`tests/it/cli_*.rs`（コマンドのまとまりごとのファイルで、共通のhelperは`tests/common/cli.rs`）・`tests/it/location.rs`はSQLiteキュー、CLI、cwdからのqueue解決を、`tests/it/runtime_*.rs`（機能ごとのファイルで、共通のfixtureは`tests/it/runtime_support/`）はproviderとworkspaceをテストダブルに差し替えたsupervisor/wrapperを（workerのwrapperはworkspaceを作らないbackgroundの経路だけで動く。task 1439・task 1440）、`tests/it/lifecycle_*.rs`（`up`・`down`・`dagq inbox`・入れ替え・planner・`install`のまとまりごとのファイルで、共通のfixtureとfakeは`tests/common/lifecycle.rs`）はlaunchd・signalをfakeに差し替えた`up` / `down`を、cmuxなしで検証する（行カバレッジ80%の対象）。
-これらは`tests/e2e.rs`と`tests/plugin.rs`を除いて1つのtest binary `it`（`tests/it/main.rs`がファイルごとに`mod`を並べ、`tests/common`を`#[path]`で読む）にまとめ、tests/commonのcompileとlinkを1回にする（[ADR-0078](../adr/0078-one-integration-test-binary.md)。`Cargo.toml`は`autotests = false`で`[[test]]`は`it`・`e2e`・`plugin`の3本）。
-`tests/e2e.rs`は実バイナリ・実Git・実cmuxで、使い捨てrepositoryをcwdにして（`XDG_DATA_HOME`は一時dir）`init → add → ready → supervise --once → integrate`（squash着地、worktree削除）を1件と、2件同時（`--parallel 2`、依存taskは着地後の2回目のpassで新しいmainから、`integrate --next`のFIFO、同じファイルを書いた2件目の`needs_session`とテストがセッション役で解消してからの着地）で通し、Claudeの代わりに、workerの非対話のturn（`claude -p --output-format stream-json`）としてpromptからreceipt pathを読み取って変更・commit・receipt提出を行い、turnのstreamを出すstubスクリプト（`tests/e2e/stub.rs`）を`--claude`に渡す。
-workerのsessionのidle markerはturnの終わりにwrapperが書き、終了の依頼はrun dirの`turns/exit`で届く（task 1437、[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。
-runtimeのplannerの対話のworkspace・画面・`/exit`を実cmuxで確かめたplannerのe2eは、stubのplannerの経路とともにtask 1441で削除した（非対話のplannerは`tests/it/planner_headless*.rs`が実バイナリと実のbackgroundのwrapperで確かめる）。
-runのsessionはbackgroundのhandleで、wrapperが終わること、`wrapper_launched`のlogが`session.log`であること、supervise passの後にqueueのcmux workspace groupが無いことを確かめ、失敗したtestが残したwrapperは`WrapperGuard`が止める（task 1440）。
-cmuxが必要なので`#[ignore]`で、`cargo test --locked --test e2e -- --ignored`で実行する。
-task 1440まではcmuxがrunのworkspaceで起動した`runner`が`LLVM_PROFILE_FILE`を継承せずworktreeに`.profraw`を書いてclean判定を落としたため、e2eは`cargo llvm-cov -- --include-ignored`に含めない（runがbackgroundのwrapperで動く今、llvm-covの下で通るかは確かめていない。`up`のe2eのinboxは今もcmuxが起動する）。
-カバレッジは通常のテストだけで測る。
-e2eの後片付け（workspace・workspace groupのguard、`TempDir`）はDrop頼みで、testのプロセスがSIGTERM / SIGKILLで終わると走らないので、各testのfixtureは始める前に前のe2eの残骸をsweepする。
-e2eの上限の無い待ち（`dagq`・cmux・gitの子プロセス、threadのjoin）は`tests/common`の`within`（`bounded_output`）で包み、fixtureはtest全体の上限（`SUPERVISE_TIMEOUT`などのdeadlineより長い30分）を持つ。
-時間切れのexitはDropを飛ばすので、fixtureのworkspace groupの削除とtestが起動したsupervisorのkillは`common::on_timeout`にも登録し、時間切れを見たmonitorが新しい順にそれぞれ上限（60秒）付きで実行してからexit 101にする（task 440。登録はguardのDropで外れる）。
-fixtureは一時dirの`e2e-owner`にflockを取って持ち続け（ロック済みのfileをrenameで置くので、ロック前のownerが見えることはない）、sweepはlockを取れたdir（ownerのプロセスが死んでいる）と、`e2e-owner`が無くfixtureの形（`claude-stub`と`data/`）で1時間以上古いdirだけを対象にする。
-lockを持ったまま、そのdirにある実行ファイル（runnerの複製）、`/bin/sh <dir>/claude-stub`、`--db`か`--claude`にdirの中を渡された`dagq`（一時queueのsupervisor）のプロセス（`ps`はargvの区切りを失うので、この形だけを見て、promptの中の語では選ばない）をSIGTERM（3秒後にSIGKILL）で止め、そのqueue hashをexternal IDに持つworkspace groupを`--close-workspaces`で消し、`DAGQ_QUEUE`がdirを指すworkspace（`up`が開いたinbox。runはworkspaceを開かないので、runの`[run.env]`の`E2E_SHARED`では探さない。task 1440）を閉じ、dirを消す。
-dirがもう無いe2eの残りも閉じる: `DAGQ_QUEUE`が`$TMPDIR`直下の存在しない`.tmp*`の中を指すworkspace（pin済みも）をunpinして閉じ、その`DAGQ_QUEUE`のqueue hashのgroupも消す（guardから漏れたworkspaceは、dirが消えた後はこの形でしか見つからない）。
-workspaceは`list-windows`で全windowを列挙し、windowごとの`workspace list --window`をまとめた一覧（runtimeの`merged_workspace_listing`と同じ）から探すので、別のwindowへ移されたものも閉じる。
-一覧が取れなければ何も閉じずにstderrに理由を出す。
-並行する別のe2eのdirはownerがlockを持っているので触らず、本番queueのworkspaceとgroupは条件に当たらない（本番の`DAGQ_QUEUE`はdata homeの下）。
-片付けたものは`e2e sweep:`で始まるstderrの行に残る。
-testは`up`などworkspaceを開くコマンドの出力を受け取ると、assertより前に、出力が名指すworkspaceのIDをすべてguardに積む（JSONでなければ出力の中のUUIDを積む）。
-guard・一覧・sweepは`tests/e2e/cleanup.rs`（`tests/e2e.rs`が`#[path]`で読む）にある。
-runのworkspaceのsweepを確かめたe2e（`the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gone`、[ADR-t1582-1](../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)で外していたもの）は、それだけが使うhelper（`DAGQ_E2E_WINDOWS`など）とともにtask 1440で削除した（fixtureの始めのsweepはそのまま動く）。
+テストは3層に分ける（置き場所・書き方・時間の規則は[testの制約](../development/testing.md)）。
+判断は`src/`の副作用のない関数の`#[cfg(test)]`のunit testが確かめる。
+SQLiteのキュー・CLI・cwdからのqueueの解決（`tests/it/queue_*.rs`・`cli_*.rs`・`location.rs`）、providerをテストダブルに差し替えたsupervisorとwrapper（`tests/it/runtime_*.rs`）、launchdとsignalをfakeに差し替えた`up` / `down`・`dagq inbox`・入れ替え・`install`（`tests/it/lifecycle_*.rs`）の境界は、1つのtest binary `it`（`tests/it/main.rs`。[ADR-0078](../adr/0078-one-integration-test-binary.md)）が確かめ、unit testと合わせて行カバレッジ80%の対象になる。
+`tests/e2e.rs`（と`tests/e2e/`）は実バイナリ・実Git・実launchdで、使い捨てのrepositoryに`init`から`supervise`と`integrate`のsquash着地までのハッピーパスと境界を通す。
+Claudeの代わりに、workerの非対話のturnとしてpromptどおりに変更・commit・receiptを書くstub（`tests/e2e/stub.rs`）をproviderにする。
+e2eは実プロセスを要るので`#[ignore]`にして`cargo test --locked --test e2e -- --ignored`で流し、カバレッジに含めない。
+e2eの待ちは`tests/common`の`within`で上限を持ち、時間切れのexitはDropを飛ばすので、testが起動したsupervisorの後始末は`common::on_timeout`にも登録する。
+testのプロセスがsignalで終わって残ったfixtureのdirは、次のe2eのfixtureが始める前にsweepする（`tests/e2e/cleanup.rs`）。
+sweepはownerのlockを取れたdirだけを対象にするので、並行するe2eのdirには触らない。
 
 タスクは`draft | submitted | ready | in_progress | completed | canceled`を持つ。`submitted`はplan review待ちで（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定8）、plannerが`submit`でproposalにして出す。`ready`にするのはplan reviewの経路と、人の`ready --bypass-review`と、失敗したrunの再試行だけ。`ready`で依存先がすべて`completed`のタスクだけがschedulerの起動候補になる。詳細な実行状態はTaskRunに保存する。
 

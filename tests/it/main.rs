@@ -41,6 +41,7 @@ mod cli_version;
 mod container_image;
 mod draft_bundles;
 mod draft_revisit;
+mod e2e_gate;
 mod finding_planner;
 mod finding_records;
 mod goal_review;

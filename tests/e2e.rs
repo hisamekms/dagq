@@ -4,8 +4,7 @@
 //! Claude is replaced by a stub script whose worker turns do what the
 //! prompt asks: change, commit, write the receipt; a later turn of the
 //! session takes a person's answer or the supervisor's resolution request as
-//! its prompt and resolves the conflict. None needs cmux (ADR-t2159-1
-//! decision 7): `up` opens no inbox. All are ignored by default: `cargo
+//! its prompt and resolves the conflict. All are ignored by default: `cargo
 //! test --locked --test e2e -- --ignored --nocapture`, which the e2e gates
 //! run whole.
 //!
@@ -44,7 +43,7 @@ const VERSION: &str = dagq::VERSION;
 /// How long a test waits for a supervisor to take a run through a pass
 /// (claim, workspace, session, receipt, review, exit request, landing). A pass
 /// took 26 to 90 s at load average 20 to 40 in the auto-update's e2e gate
-/// (2026-09-29 and 30, task 1008), and a `/exit` cmux lost takes the
+/// (2026-09-29 and 30, task 1008), and a lost `/exit` takes the
 /// supervisor's 120 s exit-request timeout and a retry on top of that: the
 /// step limit covers both, so a wait fails only when the pass stops.
 const SUPERVISE_TIMEOUT: Duration = common::STEP_LIMIT;
@@ -240,11 +239,9 @@ fn reader(mut source: impl Read + Send + 'static) -> thread::JoinHandle<String> 
     })
 }
 
-/// The directory name of every fixture's disposable repository. The runtime
-/// names a queue's workspace group and titles after the repository's
-/// directory (`[dagq-e2e]`, `[dagq-e2e]worker#…`), so a group an e2e leaves
-/// in cmux says where it came from (task 710; the manual smoke's
-/// repositories are named in docs/design/manual-smoke.md).
+/// The directory name of every fixture's disposable repository, so what an
+/// e2e leaves says where it came from (the manual smoke's repositories are
+/// named in docs/design/manual-smoke.md).
 const E2E_REPO_NAME: &str = "dagq-e2e";
 
 /// Disposable repository, queue and stub agent, all outside this repository.
@@ -264,7 +261,7 @@ struct Fixture {
     _test: Waiting,
 }
 
-/// A fixture without cmux: the runtime calls none (ADR-t1433-1).
+/// A fixture whose repository's default branch is `main`.
 fn fixture() -> Fixture {
     fixture_on("main", &[])
 }
@@ -419,10 +416,9 @@ pub(crate) fn wait_until_wrapper_gone(id: &str) {
 }
 
 /// Stops, when the test ends, the background wrappers of the runs it saw
-/// that still run: a run opens no workspace for [`WorkspaceGuard`] to
-/// close (ADR-t1433-3). Each recorded wrapper is also stopped when a wait
-/// times out and the test binary exits without unwinding (the hook of
-/// [`common::on_timeout`], as for the supervisor child and the group).
+/// that still run (ADR-t1433-3). Each recorded wrapper is also stopped
+/// when a wait times out and the test binary exits without unwinding (the
+/// hook of [`common::on_timeout`], as for the supervisor child).
 #[derive(Default)]
 pub(crate) struct WrapperGuard(std::sync::Mutex<Vec<(String, Cleanup)>>);
 
@@ -588,7 +584,7 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
 
 #[test]
 #[ignore = "an e2e; run with --ignored"]
-fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
+fn happy_path_runs_a_stub_agent_in_the_background_and_lands_on_main() {
     let fixture = fixture();
     let Fixture {
         repo,
@@ -1329,7 +1325,7 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
 
 /// The supervisor is killed while the stub worker is running (the task 15
 /// incident: a binary update or a `kill` took the resident supervisor with
-/// it). The wrapper keeps heartbeating in its cmux workspace and the stub
+/// it). The wrapper keeps heartbeating in the background and the stub
 /// writes its receipt regardless. The next `supervise --once` adopts the
 /// run from the dead supervisor's stale lease (ADR-0012), requests the
 /// session's exit once, validates it, and `integrate` lands it: nothing is redone.
@@ -1618,8 +1614,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 /// `up` bootstraps the supervisor as a LaunchAgent of the real launchd and
-/// opens no inbox, calling no cmux (ADR-t2159-1 decision 3): `--cmux` names
-/// none that runs; `status` lists the supervisor through its registration;
+/// opens no inbox (ADR-t2159-1 decision 3); `status` lists the supervisor through its registration;
 /// `down --wait` unloads the agent and returns once the supervisor has
 /// drained and deregistered. Without launchd (a host other than macOS) `up`
 /// fails and so does the test: it is never passed without its body.
@@ -1644,15 +1639,11 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
         label: label.clone(),
         plist: plist.clone(),
     };
-    let no_cmux = fixture._dir.path().join("no-cmux");
 
     let up_args = [
         "up",
         "--parallel",
         "2",
-        // Accepted for older command lines; nothing runs it.
-        "--cmux",
-        no_cmux.to_str().unwrap(),
         "--claude",
         stub.to_str().unwrap(),
         // The load of a busy host would hold every claim (task 680).
@@ -1767,8 +1758,8 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
 
 /// `install` hands a supervisor over to the new binary while its worker
 /// still works (ADR-0045 decision 10): the supervisor process execs the
-/// installed file under its own pid and token, the session in its cmux
-/// workspace is not touched, and the continued supervisor watches the run
+/// installed file under its own pid and token, the worker's session is not
+/// touched, and the continued supervisor watches the run
 /// through its receipt, review, exit request and landing on main. `--rollback`
 /// hands it over again to the binary the install kept.
 #[test]
@@ -1938,8 +1929,8 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     );
 }
 
-/// `supervise --auto-update` (ADR-0045 decision 17) with a real cmux worker
-/// at work: a commit that changes the runtime lands on main, the supervisor's
+/// `supervise --auto-update` (ADR-0045 decision 17) with a worker at
+/// work: a commit that changes the runtime lands on main, the supervisor's
 /// job builds it in the queue's own checkout (a stub build copies the
 /// binary under test), puts it in place and hands the supervisor over under
 /// its pid and token, and the worker's run goes on and lands.

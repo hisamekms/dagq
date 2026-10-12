@@ -112,7 +112,6 @@ fn e2e_settings(dir: &Path) -> dagq::application::install::E2eSettings {
     dagq::application::install::E2eSettings {
         command: None,
         timeout: Duration::from_secs(1800),
-        cmux: Some("/opt/cmux".into()),
         run_env_root: None,
         queue_dir: None,
         scratch: dir.join("e2e"),
@@ -366,26 +365,6 @@ fn install_of_a_checkout_replaces_nothing_unless_its_e2e_passes() {
     let report = install_with(&fixture, &skipped, &processes, &no_down, &options).unwrap();
     assert_eq!(report["e2e"]["status"], "skipped", "{report}");
     assert!(skipped.calls().iter().all(|c| !c.starts_with("e2e")));
-
-    // Passed without the cmux tests (ADR-t2105-1): installed, and the
-    // report names them and why.
-    let without_cmux = FakeBinaries::new(&[], true);
-    *without_cmux.e2e.lock().unwrap() = Some(E2eOutcome {
-        skipped: Some(dagq::application::install::E2eSkip::cmux(
-            "`cmux ping` failed: Access denied",
-        )),
-        ..e2e_passed(30)
-    });
-    let report = install_with(&fixture, &without_cmux, &processes, &no_down, &checkout()).unwrap();
-    assert_eq!(report["e2e"]["status"], "passed", "{report}");
-    assert_eq!(
-        report["e2e"]["skipped"],
-        json!({
-            "tests": dagq::application::install::CMUX_E2E,
-            "reason": "cmux did not answer: `cmux ping` failed: Access denied",
-        }),
-        "{report}"
-    );
 
     // Rerun by name (ADR-t1165-1): a flaky and a quarantined test are
     // installed and named; one failing the rerun under no mark is not.
@@ -1343,49 +1322,6 @@ fn the_update_job_passes_flaky_and_quarantined_e2e_and_fails_the_rest() {
         (e2e["passed"].as_i64(), e2e["failed"].as_i64()),
         (Some(1), Some(4)),
         "{stats}"
-    );
-}
-
-/// A build whose e2e passed with the cmux tests not run (cmux did not
-/// answer, ADR-t2105-1) is installed, and the tests and the reason are
-/// named on `update_e2e_passed` and `update_installed` (its `message` too,
-/// which the inbox passes on): the swap does not pass them silently.
-#[test]
-fn the_update_job_names_the_e2e_it_did_not_run_for_want_of_cmux() {
-    let fixture = fixture();
-    let queue = auto_supervisor(&fixture);
-    let processes = FakeProcesses::default();
-    let restarted = Mutex::new(Vec::new());
-    let dir = fixture._dir.path();
-    let target = dir.join("bin").join("dagq");
-    fs::create_dir_all(target.parent().unwrap()).unwrap();
-    fs::write(&target, "old build").unwrap();
-    use dagq::application::install::{CMUX_E2E, E2eSkip};
-    let skipped = E2eSkip::cmux("`cmux ping` failed: Access denied");
-    let binaries = UpdateBinaries::new(dir, false, &[]).with_e2e(Ok(E2eOutcome {
-        skipped: Some(skipped),
-        ..e2e_passed(150)
-    }));
-    let report = thread::scope(|scope| {
-        scope.spawn(|| take_and_heartbeat(&fixture, &processes, true));
-        run_update_job(&fixture, &binaries, &processes, &restarted)
-    });
-    assert_eq!(report["outcome"], "installed", "{report}");
-    let expected = json!({
-        "tests": CMUX_E2E,
-        "reason": "cmux did not answer: `cmux ping` failed: Access denied",
-    });
-    assert_eq!(report["e2e_skipped"], expected, "{report}");
-    let events = queue.update_events(10).unwrap();
-    let event = |kind: &str| events.iter().find(|u| u.kind == kind).unwrap().clone();
-    assert_eq!(event("update_e2e_passed").payload["skipped"], expected);
-    let installed = event("update_installed");
-    assert_eq!(installed.payload["e2e_skipped"], expected);
-    let message = installed.payload["message"].as_str().unwrap();
-    assert!(
-        message.contains(&format!("the e2e did not run {}", CMUX_E2E.join(", ")))
-            && message.contains("because cmux did not answer"),
-        "{message}"
     );
 }
 

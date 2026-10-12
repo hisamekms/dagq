@@ -20,8 +20,6 @@
 //!   [`RunE2ePort::retry`] ([`run_e2e::RETRY_SECS`]), and from the
 //!   [`run_e2e::UNAVAILABLE_ATTENTION`]th in a row the inbox is told
 //!   (`attention: true`, `check the e2e host`).
-//! - When cmux does not answer, the e2e that need it are not run and the
-//!   rest decide (ADR-t2105-1); the tests not run and why are on the `run_e2e_finished` (`skipped`).
 //! - The repository has no e2e the runtime knows: `run_e2e_finished`
 //!   (`outcome: not_configured`) and the run lands without it.
 //!
@@ -41,7 +39,7 @@ pub type RunE2e = Arc<dyn Fn(&Path, &E2eSettings) -> Result<E2eOutcome> + Send +
 /// How the supervisor runs the e2e of a run.
 #[derive(Clone)]
 pub struct RunE2ePort {
-    /// The e2e's settings: its command, timeout, cmux, `[run.env]`,
+    /// The e2e's settings: its command, timeout, `[run.env]`,
     /// scratch directory and the host's lock. The log is the run's
     /// and the time zone the supervisor's, set for each e2e.
     pub settings: E2eSettings,
@@ -396,9 +394,8 @@ impl Supervisor<'_> {
     }
 }
 
-/// The `run_e2e_finished` of an e2e that ran: `base` with how it went, and
-/// the tests it did not run and why (`skipped`), so a run does not land
-/// past them silently (ADR-t1162-1, ADR-t2105-1).
+/// The `run_e2e_finished` of an e2e that ran: `base` with how it went
+/// (ADR-t1162-1).
 fn ran_payload(base: Value, outcome: &E2eOutcome) -> Value {
     let mut payload = base;
     payload["secs"] = json!(outcome.secs);
@@ -406,38 +403,35 @@ fn ran_payload(base: Value, outcome: &E2eOutcome) -> Value {
     payload["timed_out"] = json!(outcome.timed_out);
     payload["failed_tests"] = json!(outcome.failed_tests);
     payload["cleanup"] = outcome.cleanup.clone();
-    if let Some(skipped) = &outcome.skipped {
-        payload["skipped"] = skipped.to_json();
-    }
     payload
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::install::E2eSkip;
 
-    /// The tests an e2e did not run for want of cmux are named with why on
-    /// the run's `run_e2e_finished`; one that ran them all names none.
+    /// The run's `run_e2e_finished` says how its e2e went; it names no
+    /// test left out, as the gate runs them all (ADR-t2159-1 decision 7).
     #[test]
-    fn the_e2e_event_names_the_tests_not_run() {
-        let skipped = E2eSkip::cmux("`cmux ping` failed: Access denied");
+    fn the_e2e_event_says_how_it_went() {
         let outcome = E2eOutcome {
             passed: true,
             secs: 90,
-            cleanup: json!({"removed": false}),
-            skipped: Some(skipped.clone()),
+            lock_wait_secs: 3,
+            failed_tests: vec!["e2e::a".to_owned()],
+            cleanup: json!({"removed": true}),
             ..Default::default()
         };
-        let payload = ran_payload(json!({"attempt": 1}), &outcome);
-        assert_eq!(payload["attempt"], 1);
-        assert_eq!(payload["secs"], 90);
-        assert_eq!(payload["cleanup"], json!({"removed": false}));
-        assert_eq!(payload["skipped"], skipped.to_json());
-        let all = E2eOutcome {
-            skipped: None,
-            ..outcome
-        };
-        assert!(ran_payload(json!({}), &all).get("skipped").is_none());
+        assert_eq!(
+            ran_payload(json!({"attempt": 1}), &outcome),
+            json!({
+                "attempt": 1,
+                "secs": 90,
+                "lock_wait_secs": 3,
+                "timed_out": false,
+                "failed_tests": ["e2e::a"],
+                "cleanup": {"removed": true},
+            })
+        );
     }
 }

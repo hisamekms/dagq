@@ -6,8 +6,7 @@
 /// follows its prompt: work in the cwd worktree, commit, publish the receipt
 /// by atomic rename and print the turn's stream; the session wrapper writes
 /// the idle marker when the turn ends. No e2e case opens a planner: the
-/// runtime's planners run headless (ADR-t1433-2), and the case that drove
-/// an interactive one in cmux went with task 1441.
+/// runtime's planners run headless (ADR-t1433-2).
 pub(crate) const STUB: &str = concat!(
     r#"#!/bin/sh
 set -eu

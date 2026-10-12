@@ -120,15 +120,10 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
 
 ## runtimeが流すe2e
 
-実cmuxを要るe2eは無く、e2eの本文はcmuxを使わない（`up`はinboxを開かない。[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7、[testの制約](../../development/testing.md#e2e)）。
-切り分け: cmuxの要らないe2eは、cmuxの無いhostでも名前で絞って手で流せる（`cargo test --locked --test e2e -- --ignored --exact <名前>`）。
-関門（自動更新と`install`の関門。[Auto-update](auto-update.md)の「e2eの関門」。[着地の前のe2e](landing-e2e.md)）は、e2eの前に`cmux ping`を打ち、cmuxが答えれば全部のe2eを流す。
-答えないとき（cmuxが無い、socketが拒む）だけ、実cmuxを要るe2e（`application::install::CMUX_E2E`の`--skip`のfilter）を流さず、残りで判定する（[ADR-t2105-1](../../adr/2026-10-08-t2105-1-e2e-gate-skips-cmux-e2e-only-when-cmux-does-not-answer.md)）。
-流さなかったtestと理由は`E2eSkip`で関門の結果とeventに残り、`update_installed`の知らせでinboxに届く。
-関門が確かめるのはcmuxだけで、podmanの無さで流さないe2eは無い（[ADR-t2125-1](../../adr/2026-10-08-t2125-1-e2e-gate-checks-only-cmux-after-the-broker-removal.md)）。
-cmuxが答えないことは`unavailable`の理由にならない。
-そのときの後始末（`e2e_gate::clean_up_without_cmux`）はcmuxを呼ばず、関門のdirectoryをqueueのhashとともに残し、次にcmuxが答える関門がそのgroupとworkspaceを閉じて消す。
-launchdの`up` / `down`のe2eは、cmuxが答える関門で追加の環境変数なしに本文まで流れ、使い捨てのHOMEとLaunchAgentのlabelで動き、launchdを使えないhostでは落ちる（黙ってskipもpassもしない。[`up` / `down`](up-down.md)）。
+e2eはcmuxを使わず、全部がcmuxの無いhostで流れる（`up`はinboxを開かない。[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7、[testの制約](../../development/testing.md#e2e)）。
+関門（自動更新と`install`の関門。[Auto-update](auto-update.md)の「e2eの関門」。[着地の前のe2e](landing-e2e.md)）は全部のe2eを流して判定し、hostの道具の有無で流さないe2eを持たない（ADR-t2159-1決定7）。
+関門の後始末は、`ps`で列挙したprocessのうちe2eの`TMPDIR`の中を指すものを止めてそのdirectoryを消すだけで、cmuxを呼ばない。
+launchdの`up` / `down`のe2eは追加の環境変数なしに本文まで流れ、使い捨てのHOMEとLaunchAgentのlabelで動き、launchdを使えないhostでは落ちる（黙ってskipもpassもしない。[`up` / `down`](up-down.md)）。
 
 [ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2・3が決めたe2eの要否を、validatingが決めて記録する。e2eを流すのはworkerではなく、reviewのpassの後にruntimeがhostで流す工程で（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)。流し方は[着地の前のe2e](landing-e2e.md)）、workerのreceiptは`e2e`を裏付けない（`domain::required_of`が`e2e`を落とす）。そこで落ちたe2e（上限の内に終わり、流し直しても印で通らない）だけがrunを`needs_session`に戻し、上限切れや始められないe2eは変更のせいとせずruntimeが流し直す。
 
@@ -138,7 +133,7 @@ launchdの`up` / `down`のe2eは、cmuxが答える関門で追加の環境変�
 - **resume**: resumeが書き直したreceiptの解決の判定（`ResumeWatch::required_evidence`、衝突だけのresumeを飛ばす`resolved_head`）も`e2e`を含めない（`resume_required`）。解決したresumeは、`integrate`が呼ばれていないrunならもう一度validatingを通り、そこで差分から要否を決め直す。`integration_approved`のあるrun（着地のresume）はvalidatingを通らずに着地へ進み、前のvalidatingの要否で、着地の前のe2eを新しいcommitに流す。
 - **integrateの検査**: `integrate`のreceiptの検査（[`integrate`](integrate.md)）も`required_of`のcheckだけを見て、`e2e`を求めない。e2eは`integrate`では流さない（ADR-t963-1決定4）。人が`dagq integrate`で手で着地させるrunにはruntimeのe2eが流れないので、e2eを要るrunを手で着地させる前は、run dirの`e2e-*.log`と`run_e2e_finished`を確かめる。
 - **workerに知らせる**: workerのprompt（[Prompt](prompt.md)）は、runがe2eを要りうるとき（taskが`e2e`を要るか、`[e2e] paths`がある）に、e2eを自分で流さないこと、要るならruntimeがreviewのpassの後にhostで流し、落ちればsessionに戻すこと、receiptの`e2e`は理由つきの`not_applicable`にすることを1行で書く（`prompt::e2e_line`）。e2eのコマンド・`[e2e] paths`の一覧・関門の印・Codexのworkerの除外は載せない（ADR-t963-1決定5の除外はADR-t1233-2決定6でなくなった）。`Required evidence:`の行にも`e2e`は出ない。
-- **この repository で置く範囲**（task 966が、固定バイナリがtask 965を含むのを確かめてから`dagq.toml`の`[e2e] paths`に理由のコメントつきで書いた）: adapter（`src/infrastructure/adapters.rs`）、process（`src/infrastructure/process.rs`・`src/infrastructure/sessions.rs`）、launchd（`src/infrastructure/launchd.rs`）、lifecycle（`src/application/lifecycle.rs`・`src/application/supervise/handoff.rs`・`handoff_slots.rs`）、integrate（`src/application/integrate.rs`）、install（`src/application/install.rs`・`src/infrastructure/binaries.rs`）、update（`src/application/update.rs`・`src/application/supervise/update.rs`・`src/infrastructure/e2e_gate.rs`）、actorの起動（`src/application/actor_executor.rs`・`src/application/session.rs`・`src/application/headless_session.rs`・`src/infrastructure/claude.rs`・`src/infrastructure/codex.rs`）と、e2eそのもの（`tests/e2e.rs`と`tests/e2e/`の下）。
+- **この repository で置く範囲**: `dagq.toml`の`[e2e] paths`が、実プロセス・launchd・Gitとの境目（外の道具のadapter、process、launchd、lifecycleと引き継ぎ、integrate、install、updateとe2eの関門、actorの起動）とe2eそのものを、理由のコメントつきで持つ。
   `src/application/supervise/`の判断の部分は含めない（ADR-t963-1決定3）。
 - **test**: `src/domain/validation.rs`の`a_diff_touching_the_e2e_paths_needs_the_e2e_but_no_evidence`・`a_diff_outside_the_e2e_paths_lands_without_e2e`・`a_task_that_requires_e2e_keeps_it_whatever_the_diff`・`without_e2e_paths_the_diff_requires_nothing`、`src/application/integrate.rs`の`check_receipt_records_the_e2e_a_diff_touching_the_e2e_paths_needs`、`tests/it/runtime_evidence.rs`の`the_e2e_a_run_needs_is_recorded_and_its_receipt_backs_none`。
 

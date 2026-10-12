@@ -46,18 +46,16 @@ use crate::{
 
 /// How the supervisor runs the e2e of a run after its review (ADR-t1233-2):
 /// in dagq's source `cargo test --locked --test e2e -- --ignored` in the
-/// run's worktree, with the cmux the supervisor uses, the `[run.env]` of
-/// the main checkout, the host's e2e lock and [`installation::E2E_TIMEOUT`]. Elsewhere there is none unless
-/// `command` gives one.
+/// run's worktree, with the `[run.env]` of the main checkout, the host's
+/// e2e lock and [`installation::E2E_TIMEOUT`]. Elsewhere there is none
+/// unless `command` gives one.
 #[derive(Debug, Clone, Default)]
 pub struct RunE2eOptions {
     /// A shell command in place of the e2e (tests): it runs in any
-    /// repository, with no cmux to ping unless `cmux` names one.
+    /// repository.
     pub command: Option<String>,
     /// How long it may run; `None` is [`installation::E2E_TIMEOUT`].
     pub timeout: Option<Duration>,
-    /// The cmux it pings and cleans up after, in place of the supervisor's.
-    pub cmux: Option<PathBuf>,
     /// How long a run waits before its e2e that could not run is tried
     /// again; `None` is [`crate::domain::run_e2e::RETRY_SECS`] (tests
     /// shorten it).
@@ -563,14 +561,12 @@ impl OneShot {
 
 /// The e2e the supervisor runs of a run after its review (ADR-t1233-2):
 /// in dagq's source `checkout`, or anywhere `options` gives a command in
-/// its place, with the cmux the supervisor uses (`cmux`) unless `options`
-/// names one, the `[run.env]` of `checkout` and the host's e2e lock of
-/// the queue at `db`; none elsewhere.
+/// its place, with the `[run.env]` of `checkout` and the host's e2e lock
+/// of the queue at `db`; none elsewhere.
 pub(super) fn run_e2e_port(
     db: &Path,
     checkout: &Path,
     options: &RunE2eOptions,
-    cmux: &Path,
 ) -> Option<crate::application::supervise::RunE2ePort> {
     let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
     let command = options.command.clone();
@@ -582,10 +578,6 @@ pub(super) fn run_e2e_port(
         settings: installation::E2eSettings {
             command,
             timeout: options.timeout.unwrap_or(installation::E2E_TIMEOUT),
-            cmux: options
-                .cmux
-                .clone()
-                .or_else(|| (!stub).then(|| cmux.to_path_buf())),
             run_env_root: Some(checkout.to_path_buf()),
             queue_dir: Some(queue_dir.clone()),
             scratch: queue_dir.join("e2e"),

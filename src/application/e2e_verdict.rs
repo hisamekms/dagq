@@ -33,8 +33,16 @@ pub struct E2eVerdict {
     pub quarantined: Vec<String>,
     /// Why it did not pass, for an error and a question.
     pub failure: Option<String>,
-    /// What the gate's events and `install`'s report add: `flaky`,
-    /// `quarantined`, and `rerun` and `quarantine` when there are any.
+    /// What the gate's events (`update_e2e_passed`, and `update_failed` of
+    /// `stage: e2e`, ADR-t1165-1 decision 4) and `install`'s report add:
+    /// `flaky` and `quarantined` (as above; `quarantined` also when the gate
+    /// fails); `rerun` when the failed tests were rerun (`tests`, `failed`,
+    /// `timed_out`, `secs`, `log` the rerun's log, `cleanup`, and `error`
+    /// when it could not start); `quarantine` when the marks' file is
+    /// there (`file`, `marks`, `ignored` with each mark that did not hold
+    /// by `name`, `reason` (`expired` / `over_limit` / `failed_in_a_row`)
+    /// and `detail`, and `error` when it could not be read or holds too
+    /// many marks).
     pub fields: Value,
 }
 
@@ -169,7 +177,6 @@ mod tests {
         E2eSettings {
             command: None,
             timeout: Duration::from_secs(1800),
-            cmux: None,
             run_env_root: None,
             queue_dir: None,
             scratch: "/q/e2e".into(),

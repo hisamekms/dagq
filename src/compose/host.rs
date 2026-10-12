@@ -708,7 +708,6 @@ impl OneShot {
         let e2e = installation::E2eSettings {
             command: job.e2e_command.clone(),
             timeout: job.e2e_timeout,
-            cmux: Some(job.cmux.clone()),
             // The runtime reads `[run.env]` from the main checkout's
             // `dagq.toml`, as for a run.
             run_env_root: Some(job.repository.clone()),

@@ -19,7 +19,10 @@ related:
 
 # Manual smoke of the paths that include real Claude and Codex
 
-実 Claude Code と実 Codex CLI を含む経路は自動 test にしない（[testの制約](../development/testing.md)の「手動スモーク」）。`tests/e2e.rs` のハッピーパスは stub を provider にするので、実 Claude の起動・ダイアログ・resume と、異常系の組み合わせはこの手順で人（または人に頼まれた session）が確かめる。runtime の振る舞いを大きく変えたとき、Claude Code か cmux の版を上げたときに流す。結果は task の receipt の `summary`（または `note`）に、版・シナリオごとの結果・見つけた問題を残す。
+実 Claude Code と実 Codex CLI を含む経路は自動 test にしない（[testの制約](../development/testing.md)の「手動スモーク」）。
+`tests/e2e.rs` のハッピーパスは stub を provider にするので、実 Claude の起動・ダイアログ・resume と、異常系の組み合わせはこの手順で人（または人に頼まれた session）が確かめる。
+runtime の振る舞いを大きく変えたとき、Claude Code の版を上げたときに流す。
+結果は task の receipt の `summary`（または `note`）に、版・シナリオごとの結果・見つけた問題を残す。
 
 手順は 7 つある。
 
@@ -37,24 +40,35 @@ related:
 
 本番 queue と固定バイナリ `~/.local/bin/dagq` を汚さないため、すべてを scratch directory に閉じる。
 
-このスモークは人か inbox が行う。ただしこの文書の `cmux` のコマンド（`cmux workspace close`・`cmux workspace-group delete`・`send-key` など）は、人が `DAGQ_ROLE` の無い自分の terminal で打つ。inbox の settings は `Bash(cmux:*)` を拒み、使い捨ての queue の workspace は本番 queue の ID で指せないので dagq の CLI にも移していない（[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md) 決定 1、[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。worker が使い捨ての queue を操作できない理由と、worker が代わりにすることは[運用の開発文書](../development/operations.md)の「workerがhostと実queueでできないこと」、そう決めた経緯は[運用の規則の経緯](../plans/operation-rules-history.md)が持つ。
+このスモークは人か inbox が行う。
+worker が使い捨ての queue を操作できない理由と、worker が代わりにすることは[運用の開発文書](../development/operations.md)の「workerがhostと実queueでできないこと」、そう決めた経緯は[運用の規則の経緯](../plans/operation-rules-history.md)が持つ。
 
 - **バイナリ**: 確かめたい commit で `cargo build --locked` したものを scratch にコピーして使う（本番 queue と開発中のバイナリの境界は AGENTS.md の「本番 queue と開発環境の境界」）。
-- **repository**: `git init` した使い捨て repository。ディレクトリ名は `dagq-smoke` にする（task 710）。`up` は queue の cmux の workspace group を `[<repository のディレクトリ名>]`（例 `[dagq-smoke]`）、workspace の title を `[<ディレクトリ名>]inbox` などと名付けるので、残った group がどのスモークのものか名前で分かる（run は workspace を開かない。task 1440）（`tests/e2e.rs` の fixture は `dagq-e2e` で、group は `[dagq-e2e]`）。`repo` のような汎用の名前にしない。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
+- **repository**: `git init` した使い捨て repository。
+  ディレクトリ名は `dagq-smoke` にする。
+  残ったものがどのスモークのものか名前で分かるよう、`repo` のような汎用の名前にしない（`tests/e2e.rs` の fixture は `dagq-e2e`）。
+  `seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。
+  scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
 - **queue**: 全コマンドを `XDG_DATA_HOME=<scratch>/xdg` で、repository を cwd にして打つ（queue は `<scratch>/xdg/dagq/<hash>/queue.db` に解決される）。これを 1 行の wrapper script（例 `tq`）にしておく。
-- **supervisor**: 専用の cmux workspace で `supervise --parallel 2 --claude <agent>` を起動し、`--log-dir` か `tee` で log を残す。`up` は使わない（inbox / planner の workspace と launchd agent を作るため）。`--once` は付けない。
+- **supervisor**: 専用の terminal で `supervise --parallel 2 --claude <agent>` を起動し、`--log-dir` か `tee` で log を残す。
+  `up` は使わない（launchd agent を作るため）。
+  `--once` は付けない。
 - **folder trust**: 実 Claude を使う前に、使い捨て repository の root で一度 `claude` を起動して trust dialog を承認する。worktree で dialog が出るかは親 repository の root が信頼済みかで決まる（[provider-lifecycle](provider-lifecycle.md#trust-prompt)）。承認しないと、最初の承認より前に起動した対話の session がすべて dialog で止まる（worker の run は task 1437 から非対話で、この dialog に当たらない）。
 
 #### scratch の worker が打つ `dagq` の環境
 
 task 1236 から worker の `dagq` はクライアントモードで動く（[Queue service](queue-service.md#クライアントモード)）。worker の agent には queue の path（`DAGQ_QUEUE`）は渡らず、scratch の supervisor が渡す queue service の socket（`DAGQ_SERVICE_SOCKET`）と worker の token の file（`DAGQ_SERVICE_CREDENTIAL_FILE`）だけが渡るので、worker の `dagq` は `XDG_DATA_HOME` にも cwd にも依らず、その supervisor の queue の service に届く。`--once` でない `supervise` は queue の service を起動して見張る（無ければ `tq service start`）。worker の `dagq` に scratch のバイナリを使わせるには、下の `PATH` が要る（クライアントモードを持たない古いバイナリは cwd から既定の queue を開こうとする）。
 
-人か inbox が `dagq-smoke` に立てる worker には、使い捨て repository の main checkout の `dagq.toml` の `[run.env]` で `XDG_DATA_HOME` と、scratch の bin を先頭にした `PATH` を渡せる。これはコードで確認した渡し方であり、実 cmux・Claude Code の shell まで含む確認は下の手順で行う。supervisor を起動する terminal の env だけには頼らない。
+人か inbox が `dagq-smoke` に立てる worker には、使い捨て repository の main checkout の `dagq.toml` の `[run.env]` で `XDG_DATA_HOME` と、scratch の bin を先頭にした `PATH` を渡せる。
+これはコードで確認した渡し方であり、実 Claude Code の shell まで含む確認は下の手順で行う。
+supervisor を起動する terminal の env だけには頼らない。
 
 コードの根拠（2026-09-30）:
 
 - `src/infrastructure/run_env.rs` の `parse_run_env` / `parse_config` は両変数を受け付ける。`load_run_env` / `expand` は `${DAGQ_QUEUE_DIR}` と `${DAGQ_RUN_DIR}` だけを展開する。`$PATH`・`${PATH}`・`$HOME`・`~` は展開されないので、PATH は先頭に足す部分も既存の部分も、展開済みの絶対パスで書く。
-- 同 file の `ShellVerifier::run_env` が main checkout の設定を読み、`src/application/supervise/session.rs` の `Supervisor::provision` がそれを渡す。`src/application/actor_executor.rs` の `HostActorExecutor::spawn`（`RunSession`）は `actor_env` の後に `run_env` を足し、`SessionWrappers::launch_background`（`src/infrastructure/background.rs`）は supervisor の環境から `CMUX_*`・`DAGQ_*` を除いた上に各値を足して、session wrapper を `/bin/sh -c` で background の process として起動する（task 1440。cmux の workspace とログインシェルは通らない）。この経路で `XDG_DATA_HOME` や `PATH` を後から上書きする処理は無い。PATH の値を丸ごと指定できるので scratch の bin を先頭にできる。agent の起動までの実際の値は実機で確認する。
+- main checkout の `[run.env]` は worker の session wrapper の環境まで渡り、その後に `XDG_DATA_HOME` や `PATH` を上書きする処理は無いので、PATH の値を丸ごと指定して scratch の bin を先頭にできる（入口は `ShellVerifier::run_env` と `BackgroundWrappers::launch`）。
+  wrapper はログインシェルを通らずに background で起動し、supervisor の環境のうち terminal の pane と dagq の変数は渡さない（`BackgroundWrappers::launch` の doc comment）。
+  agent の起動までの実際の値は実機で確認する。
 - `actor_env` は `DAGQ_ROLE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID` と、inbox・planner には `DAGQ_QUEUE` を設定する（worker の session wrapper と agent には設定しない。agent には session wrapper が queue service の socket と token の file を足す。task 1236）。`[run.env]` は `DAGQ_` で始まる key を拒むため、これらを上書きできない。`DAGQ_QUEUE` が渡ることと CLI の DB の解決は別で、`src/main.rs` の `execute` は `QueueLocation::resolve(cli.db.as_deref(), &cwd)` を呼ぶ。`src/infrastructure/location.rs` の `QueueLocation::resolve` / `data_home` は `--db` があればそれ、無ければ cwd の Git common directory と `XDG_DATA_HOME`（無ければ `~/.local/share`）から解決する。`DAGQ_QUEUE` だけでは通常の CLI の DB の指定にならない。
 
 人か inbox が行う設定と確認:
@@ -74,13 +88,15 @@ task 1236 から worker の `dagq` はクライアントモードで動く（[Qu
 ### stub と実 Claude の使い分け
 
 - **stub**（`tests/e2e/stub.rs` の `STUB` を拡張した shell script）で runtime の状態遷移を見るシナリオ（2〜5）を流す。token を使わず、時間を制御できる。拡張の例: title の `[break]` で `seed.txt` を消して commit し検証を壊す、`[hang]` で commit も receipt も書かずに待つ、`delay=N` で N 秒待ってから commit する。
-- **実 Claude**（`--claude` に実体の path）で、Claude 自身の終了と resume が絡むシナリオ（1、6）を流す。cmux の terminal の PATH では session ごとの shim が先に解決されるので、`--claude ~/.local/bin/claude` のように実体を渡す（理由は plugin の `dagq-recover` skill の `reference/up-down.md` の「up」）。
+- **実 Claude**（`--claude` に実体の path）で、Claude 自身の終了と resume が絡むシナリオ（1、6）を流す。
+  terminal によっては PATH で pane ごとの shim が先に解決されるので、`--claude ~/.local/bin/claude` のように実体を渡す（理由は plugin の `dagq-recover` skill の `reference/up-down.md` の「up」）。
 - stub は headless の review / triage（`claude -p`）にも使われる。`tests/e2e.rs` の stub は本文に `E2E-REVIEW-PASS` を含む task の review だけを pass にし、それ以外は失敗するので、stub のシナリオでは review が `review by hand`、triage が失敗の attention になるのが期待どおり。review と triage の verdict まで見たいシナリオは実 Claude で流す。検証は `integrate` の 1 回だけなので、review で止まった run は検証まで進まない。stub で着地まで流すシナリオ（2〜5）は task の description に `E2E-REVIEW-PASS` を入れて review を pass させるか、`review by hand` になった run に人が `integrate ID` を打つ。
 - e2e: worker（stub も実 Claude も実 Codex も）は e2e を流さず、receipt の `e2e` は理由つきの `not_applicable` になる。e2e が要る run（`validation_finished` の `e2e_requirement.required` が true）には、review の pass の後、着地の前に supervisor が host で e2e を流す（[着地の前のe2e](supervisor-lifecycle/landing-e2e.md)）。使い捨て repository は dagq のソースでないので runtime の知る e2e が無く、要る run は `run_e2e_finished`（`outcome: not_configured`）を記録して着地へ進む。`dagq.toml` を置かない使い捨て repository では `[e2e] paths` が無く、`--evidence e2e` を付けない task は e2e が要らない。この工程そのもの（host での実行・1 本ずつの lock・落ちたときの `needs_session` と resume・流せないときの流し直しと `check the e2e host`）は `tests/it/runtime_e2e.rs` が stub のコマンドで確かめる。本番の固定バイナリの入れ替えの前には、自動更新と `install` の関門が全部の e2e を流す（[Auto-update](supervisor-lifecycle/auto-update.md)・[install](supervisor-lifecycle/install.md)）。
 
 ### シナリオ
 
-各シナリオで、`show ID`・`status`・`doctor` の出力、run のイベント列、保持されたリソース（`git worktree list`、run branch、run dir、cmux workspace）を記録する。runtime の振る舞いの正は [supervisor-lifecycle](supervisor-lifecycle.md) で、下の「確認点」はそれと食い違えば食い違いを問題として記録する。
+各シナリオで、`show ID`・`status`・`doctor` の出力、run のイベント列、保持されたリソース（`git worktree list`、run branch、run dir）を記録する。
+runtime の振る舞いの正は [supervisor-lifecycle](supervisor-lifecycle.md) で、下の「確認点」はそれと食い違えば食い違いを問題として記録する。
 
 | # | 起こすこと | agent | 確認点 |
 | --- | --- | --- | --- |
@@ -96,12 +112,9 @@ task 1236 から worker の `dagq` はクライアントモードで動く（[Qu
 - 二重起動が無い（同じ task に同時に 2 本の未完了 run が無い）。
 - 成果が失われていない（commit した run の branch か `refs/dagq/runs/<run-id>` が残る）。
 - `doctor` の `unfinished_runs` と `run_leases` が空になり、`pgrep` で Claude・stub・wrapper が残っていない。
-- 作った cmux workspace（supervisor のもの。run は workspace を開かない）を、人が `DAGQ_ROLE` の無い terminal で `cmux workspace close <uuid>` で閉じる。
-- 使い捨て queue の workspace group が残っていれば（`up` を使ったスモークか、task 1440 より前のバイナリ）、人が `DAGQ_ROLE` の無い terminal で `cmux workspace-group delete <group> --close-workspaces` で消す（`<group>` は `cmux --json workspace-group list` で name が `[<repository のディレクトリ名>]`、external ID が queue hash（queue の DB のあるディレクトリの名前）の group の id）。cmux は group を作るときに anchor の workspace を一緒に作るので、inbox や supervisor の workspace を閉じるだけでは anchor が残って group が消えない。
 
 ### 観測済みの環境依存
 
-- **workspace はコマンド終了後も残る**（cmux 0.64.25 (106)、2026-09-22）。`cmux workspace create --command` はコマンドをログインシェルに打ち込む形で起動し、wrapper が終わってもシェルと workspace は残る（`--command true` / `sleep 1` の probe で 5 秒以上残った）。同じ版の別の環境では 1〜2 秒後に workspace が自動で閉じたことがあり、cmux の設定に依存するとみられる。task 1440 から run は workspace を開かないので、これは人が開いた workspace と inbox にだけ当たる（[Cleanup and recovery](supervisor-lifecycle/cleanup-and-recovery.md#cleanup-and-recovery)）。
 - **wrapper が SIGKILL で死ぬと** `run_processes.exited_at` は wrapper 行も agent 行も null のまま残る。`doctor` は PID の生死で補うので判定は変わらない。
 - **未確認のまま残っているもの**: 検証コマンドの 30 分 timeout、`main` を進めた後の DB 更新失敗（[ADR-0008](../adr/0008-merge-queue-squash-landing.md) の既知の限界）。`exit_request_timed_out` の実機は、task 1437 で worker の `/exit` とともに撤去したので確かめない。
 
@@ -124,14 +137,15 @@ run の session の作業の内訳（task 514。[provider-lifecycle](provider-li
 
 ### 手順
 
-1. [隔離](#隔離)のとおり scratch に使い捨て repository（`cargo init --lib` の crate に、15 秒 sleep する `#[test]` を 1 本足して commit。background の `cargo test` に時間がかかるようにする）、bare の `origin`、`XDG_DATA_HOME=<scratch>/xdg` と scratch のバイナリで打つ wrapper（`tq`）を用意し、trust dialog を承認しておく。wrapper は `env -u DAGQ_ROLE -u DAGQ_QUEUE -u DAGQ_ACTOR_ID -u DAGQ_RUN_ID -u DAGQ_TASK_ID` を付ける（inbox や planner の session の terminal は本番 queue の `DAGQ_ROLE`（`inbox` / `planner`）と `DAGQ_QUEUE` を workspace の env に持つので、そのまま打つと scratch の queue の操作がその role の権限と記録で扱われる。人が scratch の queue を自分（`user`）として操作するために外すもので、worker の拒否を迂回するためのものではない。このスモークを worker は行わない（[隔離](#隔離)））。
+1. [隔離](#隔離)のとおり scratch に使い捨て repository（`cargo init --lib` の crate に、15 秒 sleep する `#[test]` を 1 本足して commit。background の `cargo test` に時間がかかるようにする）、bare の `origin`、`XDG_DATA_HOME=<scratch>/xdg` と scratch のバイナリで打つ wrapper（`tq`）を用意し、trust dialog を承認しておく。
+   wrapper は `env -u DAGQ_ROLE -u DAGQ_QUEUE -u DAGQ_ACTOR_ID -u DAGQ_RUN_ID -u DAGQ_TASK_ID` を付ける（inbox や planner の session の terminal は本番 queue の `DAGQ_ROLE`（`inbox` / `planner`）と `DAGQ_QUEUE` を session の env に持つので、そのまま打つと scratch の queue の操作がその role の権限と記録で扱われる。人が scratch の queue を自分（`user`）として操作するために外すもので、worker の拒否を迂回するためのものではない。このスモークを worker は行わない（[隔離](#隔離)））。
 2. `tq add` で task を 1 件登録し（`--verify 'cargo test'`、`--change feature`）、`tq ready ID --bypass-review`。description で worker に順番どおり次をさせる: (a) `cargo build`、`cargo test`、`cargo test --test does_not_exist`（失敗する）をそれぞれ `run_in_background: true` で起動して完了の通知を待つ、(b) Agent tool を `run_in_background: true` で起動して完了の通知を待つ、(c) foreground で 15 秒以上かかるコマンド（`cargo test --release`）を実行する、(d) foreground で `cargo fmt && cargo test`、(e) commit と receipt。`sleep N && ...` は Claude Code の harness が `Blocked: sleep N followed by: ...` で拒むので使わない。
 
    worker は非対話の turn で動くので（task 1437）、人は worker に打てない。以前の手順で人が worker の pty に Ctrl-B を届けて foreground のコマンドを background に移したこと（transcript の `backgroundedByUser: true`。下の 2026-09-28 の結果の「不一致・注意」の Ctrl-B）は、このスモークでは起こせない。background のコマンドと subagent は同じ turn の中で完了を待たせる（turn の終わりに残ったものは止められる。[非対話のworker](supervisor-lifecycle/headless-worker.md#wrapperがturnを止めるとき)）。経過は `tq run log RUN --follow` で読み、worker の ask には `tq answer` で答える。
-3. 専用の cmux workspace で `tq supervise --parallel 1 --claude <実体の path> --log-dir ... --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。
+3. 専用の terminal で `tq supervise --parallel 1 --claude <実体の path> --log-dir ... --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。
 4. run が閉じたら次を集める: `tq events --all --full --run RUN`（`session_closed` の `work` と `session_exited` の `work_breakdown`）、run dir の `worktime.jsonl`、`tq stats --full`（`runs[].work_breakdown` と `overall.work_breakdown`）、`tq timeline RUN`（`commands`）、session の transcript（`~/.claude/projects/<cwd を符号化した名前>/<session_id>.jsonl`。worker の session_id は run ID と同じ）。
 5. transcript の中では tool-use-id で `tool_use`（開始）と `tool_result` / 完了通知を結び、`tool_use` の開始時刻・category・コマンドで `worktime.jsonl` の行と対応づける。`worktime.jsonl` と `session_exited.work_breakdown.heavy` の `start` / `end`・`background`・`finished`・`failed` を transcript と比べ、`exit_code`・`status` は `worktime.jsonl` で比べる。`src/domain/worktime.rs` の `Command::line` と `Breakdown::payload` の出力には tool-use-id が無く、event の `heavy` には `exit_code`・`status` も無い。`secs` の合計が区間の長さ（`session_opened` から `session_closed`）と一致すること、`stats` と `timeline` が `session_closed.work` と同じ値を出すことも見る。
-6. [故障経路のスモーク](#シナリオ)の後始末と同じく supervisor を止め、残っていれば workspace group を消す。
+6. [故障経路のスモーク](#シナリオ)の後始末と同じく supervisor を止める。
 
 ### 結果（2026-09-28、Claude Code 2.1.283、cmux 0.64.25 (106)、dagq 0.4.0-dev+bdb0259）
 
@@ -180,7 +194,8 @@ background のコマンドの summary は `Background command "<Bash tool の de
    - どちらの description にも「最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打って turn を終え、答えを受けてから作業する」を足し、answer の turn（同じ session か thread の resume）も通す。Codex の worker の sandbox の中の `dagq ask` は queue を開かず、クライアントモードで queue service に送られ、service が worker の principal で判定してその場で ask を開く（task 1236。[Queue service](queue-service.md#クライアントモード)。turn には queue service の socket と token の file が渡る）。実 Codex の workspace-write の sandbox の中から service の socket に届くことは stub の test では確かめられないので、ここで確かめる。Codex の worker が打つ `dagq` は task 1236 を含むバイナリにする（それより前のバイナリはクライアントモードを持たない）: description に scratch のバイナリの path を書くか、`[run.env]` で scratch のバイナリを先にした `PATH` を渡す。クライアントモードの `dagq` は queue の場所を解決しないので `XDG_DATA_HOME` は要らない（scratch の queue の service は、その queue の `up` か `dagq service start` が起動したものを使う）。
    - worker が `dagq` を打つ task のために、使い捨て repository の `dagq.toml` の `[run.env]` に `XDG_DATA_HOME = "<scratch>/xdg"` を置く（[作業の内訳のスモーク](#作業の内訳のスモーク)の注の「worker の `dagq`」）。
    - `tq ready ID --bypass-review` を add が返した ID だけに打つ。
-4. 専用の cmux workspace で `tq supervise --parallel 2 --claude ~/.local/bin/claude --codex ~/.local/bin/codex --log-dir <scratch>/logs --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。`tq status` の `supervisors[].providers` で claude と codex がどちらも `found: true`、codex の `modes` が `["headless"]` であることを見る。
+4. 専用の terminal で `tq supervise --parallel 2 --claude ~/.local/bin/claude --codex ~/.local/bin/codex --log-dir <scratch>/logs --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。
+   `tq status` の `supervisors[].providers` で claude と codex がどちらも `found: true`、codex の `modes` が `["headless"]` であることを見る。
 5. 両方の task の `worker_question` に `tq answer <id> --text 'yes'` と答える。
 6. 両方の run が着地したら次を集めて確かめる。
    - `tq show ID`: task `completed`、run `integrated`、run の `requested_provider` と `actual_provider` が task の provider のまま（切り替えが無い）、`worker_mode: headless`。
@@ -191,7 +206,7 @@ background のコマンドの summary は `Background command "<Bash tool の de
    - `tq stats --full` の `runs[]` の `provider`・`actual_provider`・`route`・`turns`（`by_provider`）。`tq kpi --by provider` と `--by route` に 2 本が分かれて出る。
    - `origin/main` に task ごとに 1 commit。
 7. 余力があれば切り替えも見る: supervisor を止め、`--codex <scratch>/no-such-codex` で起動し直して Codex の task をもう 1 件流すと、非対話の Claude で始まり（`provider_switched`、`phase: start`、`reason: executable_missing`）着地する。
-8. [故障経路のスモーク](#シナリオ)の後始末と同じく supervisor を止め、`doctor` の `unfinished_runs` が空で、run の pid の Claude・Codex が残っていないことを見て、残っていれば workspace group を消す。
+8. [故障経路のスモーク](#シナリオ)の後始末と同じく supervisor を止め、`doctor` の `unfinished_runs` が空で、run の pid の Claude・Codex が残っていないことを見る。
 
 ### 結果（2026-09-29、task 820 の run cdcc8000）
 
@@ -467,7 +482,7 @@ env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<scratch>/cfg-empty \
    - `tq stats --full` の `jobs.goal_review.by_provider.codex` と `by_model.<model>` に 1 件。
    - `~/.codex/config.toml` の更新時刻が変わっていない。
 6. 余力があれば切り替えも見る: supervisor を止め、`--codex <scratch>/no-such-codex` で起動し直し、goal に task を足して着地させると、次の goal review が Claude で動き、`goal_review_started` の `launch` に `switched_from: codex`・`switch_reason: executable_missing` がある。
-7. [故障経路のスモーク](#シナリオ)の後始末と同じく supervisor を止め、残っていれば workspace group を消す。
+7. [故障経路のスモーク](#シナリオ)の後始末と同じく supervisor を止める。
 
 ### 結果
 
@@ -546,7 +561,7 @@ file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を�
    ```
 
    queue service 向けの置き換え前の `review_command` 単体は、上の profile の 5 つの `-c` の代わりに `--sandbox read-only` を持つが、worktree の `untrusted` の `-c` は同じである。実 Codex が使えない権限環境では `review_failed` と `approve_landing` ask を確認し、権限を直して別 task で再試験する。
-4. supervisor の終了と、試験用 group が残っていればその削除を確認する。group は人が `DAGQ_ROLE` の無い terminal で `cmux workspace-group delete <group> --close-workspaces` で anchor ごと消す。
+4. supervisor の終了を確認する。
 
 2026-10-01 の結果: 別 queue で実 Codex 0.159.2 の worker と review を実行し、task 2 の review が `pass`、run `ca586e69-4833-43c2-a269-f7d90fa2152f` が `908060719bbc3f599cbb061fe1e130827472595e` として main に着地・push した。最初の task 1 は実行側のホスト権限制約で Codex review の app-server 初期化が拒まれ、`review_failed` と ask になった。権限付きでの再試験は成功し、試験用の cmux group は削除した。
 
@@ -564,16 +579,20 @@ dagq のソースでない repository で使えること（goal 52）は、stub 
 2. 使い捨て repository `dagq-smoke` を `git init -b master` で作り、`seed.txt` と `migrations/0001_x.sql`（中身は何でもよい）だけを commit する。`Cargo.toml`・`AGENTS.md`・`CLAUDE.md`・`dagq.toml` は置かず、`origin` も足さない。`git branch --list main` が空であることを見る。
 3. plugin を公式の手順で入れる: `claude plugin marketplace add hisamekms/dagq` と `claude plugin install claude-dagq@dagq --scope local`（使い捨て repository の中で打ち、その repository だけに入れる。user の scope の plugin を置き換えない）。`claude plugin list` に `claude-dagq@dagq` が入れた scope で出て、plugin の version がバイナリの version と major.minor で一致することを見る（食い違えば launcher が `{"warning": ...}` を stderr に出す。README の update の節）。
 4. repository の root で `claude` を一度起動して folder trust を承認し、`tq init` と `tq doctor` を打つ。`doctor` の `repository` が `branch: master`・`branch_source: master`・`remote: origin`・`remote_exists: false`・`push: true` で `error` が無いことを見る。
-5. cmux の terminal で `tq up --claude ~/.local/bin/claude`（`--plugin-dir` も `--auto-update` も付けない。ソースでない repository の `--auto-update` は拒まれる）を打つ。supervisor が LaunchAgent で起動し、`[dagq-smoke]inbox` が開き、出力の `repository` が 4 と同じで、preflight が installed の plugin を見つけて通ることを見る。
-6. inbox に「`smoke.txt` に 1 行足す task を 1 件、`--verify 'test -f seed.txt'` で」と頼み、inbox が計画の依頼を記録する（inbox を通さないなら `tq request add --text '...'`。`tq plan` は拒まれる）。supervisor が依頼に runtime の planner を立て、planner が AGENTS.md の無い repository で verify・paths・evidence を決めて `submit` し、plan review が pass して task が ready になり、supervisor が claim することを見る（plan review が concern なら inbox の `approve_plan` に `ready` と答える）。
+5. 自分の terminal で `tq up --claude ~/.local/bin/claude`（`--plugin-dir` も `--auto-update` も付けない。ソースでない repository の `--auto-update` は拒まれる）を打つ。
+   supervisor が LaunchAgent で起動し、inbox は開かずに `dagq inbox` の案内が出て、出力の `repository` が 4 と同じで、preflight が installed の plugin を見つけて通ることを見る。
+6. 別の terminal で repository の中から `tq inbox` を打って inbox を開き、inbox に「`smoke.txt` に 1 行足す task を 1 件、`--verify 'test -f seed.txt'` で」と頼み、inbox が計画の依頼を記録する（inbox を通さないなら `tq request add --text '...'`。`tq plan` は拒まれる）。
+   supervisor が依頼に runtime の planner を立て、planner が AGENTS.md の無い repository で verify・paths・evidence を決めて `submit` し、plan review が pass して task が ready になり、supervisor が claim することを見る（plan review が concern なら inbox の `approve_plan` に `ready` と答える）。
 7. run が着地したら確かめる。
    - `tq show ID`: task `completed`、run `integrated`。
    - `master` に 1 つの squash commit が乗り、checkout が追従して clean。`main` の branch は作られていない。
    - `tq events --run RUN --full`: `push_skipped`（`remote: origin`・`branch: master`・`reason: the repository has no remote origin`）があり、`push_failed` の attention が inbox に出ていない。`migration_renumbered` と `migration_number_taken` が無い。
    - `tq stats` と `tq kpi` が止まらずに出て、cargo 専用の計測（`work_breakdown` の `llvm_cov` など、`kpi --by toolchain`）が無い。
    - worker・review・plan review の prompt（run dir と proposal の dir）に、dagq の repository に固有の規則（cargo・llvm-cov・e2e の推奨、ADR の番号、`AGENTS.md` を名指すこと）が載っていない。`[e2e] paths` が無く task が `e2e` を要らないので、worker の prompt に e2e の行（「E2E: do not run the e2e」）が無く、run に `run_e2e_*` の event が無い。
-8. [故障経路のスモーク](#シナリオ)の後始末と同じく `tq down --wait` で supervisor を止め、人が `DAGQ_ROLE` の無い terminal で inbox と planner の workspace を閉じ（inbox は unpin してから）、`cmux workspace-group delete '[dagq-smoke]' --close-workspaces` で group を消す。`claude plugin uninstall claude-dagq@dagq --scope local` で入れた plugin を外す。
+8. [故障経路のスモーク](#シナリオ)の後始末と同じく `tq down --wait` で supervisor を止め、inbox の terminal を閉じる。
+   `claude plugin uninstall claude-dagq@dagq --scope local` で入れた plugin を外す。
 
 ### 結果
 
-まだ行っていない（task 629 は worker として動き、使い捨ての queue を作れず、plugin も入れられないため。receipt の `follow_ups`（`ops`）で人か inbox に任せた）。流したら、この節に版（dagq・plugin・Claude Code・cmux）と確認点の結果を足す。
+まだ行っていない（worker は使い捨ての queue を作れず、plugin も入れられないので、人か inbox が行う）。
+流したら、この節に版（dagq・plugin・Claude Code）と確認点の結果を足す。

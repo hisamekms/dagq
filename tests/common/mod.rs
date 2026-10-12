@@ -10,8 +10,7 @@
 //! since the stuck thread cannot be stopped from outside.
 //!
 //! Exiting that way skips every `Drop`, so what a guard would clean up
-//! outside the process (the e2e tests' cmux workspace group, a supervisor
-//! they started) is registered with [`on_timeout`] too: the monitor runs
+//! outside the process (a supervisor the e2e tests started) is registered with [`on_timeout`] too: the monitor runs
 //! those hooks, each within its own limit, before it exits (task 440).
 #![allow(dead_code)]
 

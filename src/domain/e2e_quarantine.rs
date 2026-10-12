@@ -4,7 +4,7 @@
 //!
 //! ```toml
 //! [[test]]
-//! name = "happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main"
+//! name = "happy_path_runs_a_stub_agent_in_the_background_and_lands_on_main"
 //! reason = "format example: why the test is flaky and how often it failed"
 //! task = 1234       # example only; use the task that fixes the test
 //! until = 2026-10-15   # or "2026-10-15"; the mark holds through that day

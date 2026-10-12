@@ -32,7 +32,7 @@ AGENTS.mdの「本番 queue と開発環境の境界」と「開始時の短い�
 
 ## 使い捨てのqueue
 
-- 使い捨てのrepositoryのディレクトリ名（人かinboxが手で作るものは`dagq-smoke`、e2eのfixtureは`dagq-e2e`）と、確かめる手順と、スモークの後にworkspace groupを`cmux workspace-group delete <group> --close-workspaces`でanchorごと消す手順（inboxはcmuxを拒まれるので、人が`DAGQ_ROLE`の無いterminalで打つ。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)決定1）は[manual-smoke](../design/manual-smoke.md)が持つ。workerが使い捨てのqueueを操作できない理由は次の節。
+- 使い捨てのrepositoryのディレクトリ名（人かinboxが手で作るものは`dagq-smoke`、e2eのfixtureは`dagq-e2e`）と、確かめる手順は[manual-smoke](../design/manual-smoke.md)が持つ。workerが使い捨てのqueueを操作できない理由は次の節。
 
 ## workerがhostと実queueでできないこと
 

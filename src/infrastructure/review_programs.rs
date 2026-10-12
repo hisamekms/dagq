@@ -224,10 +224,9 @@ mod tests {
     }
 
     /// A program job is given no credential (ADR-t1895-2 decision 6): not
-    /// cmux's socket password or any `CMUX_*`, which the e2e gate is given,
-    /// nor what reaches the queue service or a broker, though the
-    /// supervisor has them; only the narrowed names, from an emptied
-    /// environment, in the run's worktree.
+    /// cmux's socket password or any `CMUX_*`, nor what reaches the queue
+    /// service or a broker, though the supervisor has them; only the
+    /// narrowed names, from an emptied environment, in the run's worktree.
     #[test]
     fn a_program_job_is_given_no_credential_and_no_cmux_or_queue() {
         let scratch = tempfile::tempdir().unwrap();

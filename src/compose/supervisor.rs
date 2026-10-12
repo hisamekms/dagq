@@ -676,7 +676,7 @@ pub fn supervise_with_reviewer(
         options.release_index.as_ref(),
         options.release_current.clone(),
     );
-    let run_e2e = execution::run_e2e_port(&db, &main_checkout, &options.run_e2e, &layout.cmux);
+    let run_e2e = execution::run_e2e_port(&db, &main_checkout, &options.run_e2e);
     let ci_watch = options
         .ci_watch
         .as_ref()

@@ -37,8 +37,8 @@ use super::{
     codex_turns::CodexTurnReader,
 };
 
-/// Codex CLI (`codex`, resolved to its executable by [`executable`]:
-/// cmux's shim would add hooks and trust flags of its own).
+/// Codex CLI (`codex`, resolved to its executable by [`executable`]: a
+/// terminal's shim would add hooks and trust flags of its own).
 #[derive(Debug, Clone)]
 pub struct Codex {
     pub executable: PathBuf,
@@ -74,29 +74,30 @@ impl Codex {
     }
 }
 
-/// The directories of cmux's per-surface shims (`$TMPDIR/cmux-cli-shims/
-/// <surface>/codex`), which a cmux terminal puts first on PATH: the shim
-/// adds cmux's hooks with `--dangerously-bypass-hook-trust`, and goes with
-/// its surface.
-const CMUX_SHIMS: &str = "cmux-cli-shims";
+/// The directory of the per-pane shims a terminal puts first on PATH in
+/// front of the agents' CLIs (cmux's `$TMPDIR/cmux-cli-shims/<surface>/
+/// codex`, left in a person's environment though dagq calls no cmux): a
+/// shim adds the terminal's hooks with `--dangerously-bypass-hook-trust`
+/// and goes with its pane, so a bare name is never resolved to one.
+const TERMINAL_SHIMS: &str = "cmux-cli-shims";
 
 /// The name Codex is found again by (ADR-t2079-1).
 pub const CODEX_NAME: &str = "codex";
 
 /// `path` resolved to the Codex executable (ADR-t813-3 decision 6,
-/// ADR-t2079-1): a bare name is looked for on `search` (PATH) past cmux's
-/// shims, a path is taken as it is, and a symbolic link is kept, as
+/// ADR-t2079-1): a bare name is looked for on `search` (PATH) past a
+/// terminal's shims ([`TERMINAL_SHIMS`]), a path is taken as it is, and a symbolic link is kept, as
 /// [`provider_executable_on`] does for every provider.
 pub fn executable_on(path: &Path, search: &std::ffi::OsStr) -> Result<PathBuf> {
     provider_executable_on(path, search, |dir| {
-        dir.to_string_lossy().contains(CMUX_SHIMS)
+        dir.to_string_lossy().contains(TERMINAL_SHIMS)
     })
     .map_err(|error| {
         if path.components().count() > 1 || path.is_absolute() {
             error
         } else {
             anyhow::anyhow!(
-                "{} was not found on PATH (outside cmux's shims)",
+                "{} was not found on PATH (outside a terminal's shims)",
                 path.display()
             )
         }
@@ -724,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_is_resolved_past_cmux_shims() {
+    fn codex_is_resolved_past_a_terminals_shims() {
         let dir = tempfile::tempdir().unwrap();
         let shim = dir.path().join("cmux-cli-shims/s1");
         let bin = dir.path().join("bin");
@@ -739,7 +740,7 @@ mod tests {
         let only_shim = std::env::join_paths([&shim]).unwrap();
         let error = executable_on(Path::new("codex"), &only_shim).unwrap_err();
         assert!(
-            format!("{error:#}").contains("outside cmux's shims"),
+            format!("{error:#}").contains("outside a terminal's shims"),
             "{error:#}"
         );
         // A path is taken as it is.
@@ -753,7 +754,7 @@ mod tests {
     }
 
     /// ADR-t2079-1: Codex is started by its link, found on PATH or given,
-    /// never by the version it points at, past cmux's shims as before.
+    /// never by the version it points at, past a terminal's shims as before.
     #[test]
     fn a_linked_codex_is_kept_as_its_link() {
         let dir = tempfile::tempdir().unwrap();

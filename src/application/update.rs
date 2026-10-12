@@ -553,7 +553,6 @@ pub fn run(
         watch_timeout: options.watch_timeout,
         poll: options.poll,
         pid: options.pid,
-        e2e_skipped: Default::default(),
     };
     let paths = &options.paths;
     // Held until the job ends: the binary put in place is built in `target`.
@@ -647,13 +646,6 @@ fn e2e_gate(
         "cleanup": outcome.cleanup,
     });
     extend(&mut passed, &verdict.fields);
-    // The tests it did not run for want of cmux go on to the
-    // `update_installed` too, so the swap does not pass them silently
-    // (ADR-t2105-1).
-    if let Some(skipped) = &outcome.skipped {
-        passed["skipped"] = skipped.to_json();
-        job.e2e_skipped.replace(Some(skipped.clone()));
-    }
     job.subject
         .record(&*queue, EventKind::UpdateE2ePassed, passed)?;
     Ok(None)
@@ -729,7 +721,6 @@ pub fn run_release(
         watch_timeout: options.watch_timeout,
         poll: options.poll,
         pid: options.pid,
-        e2e_skipped: Default::default(),
     };
     let step = plugin.map_or(PluginStep::Skipped, PluginStep::Update);
     if options.plugin_only {
@@ -840,14 +831,6 @@ fn plugin_only(
     if let Some(message) = message {
         payload["message"] = json!(message);
     }
-    if let Some(skipped) = &*job.e2e_skipped.borrow() {
-        payload["e2e_skipped"] = skipped.to_json();
-        let sentence = skipped.sentence();
-        payload["message"] = json!(match payload["message"].as_str() {
-            Some(message) => format!("{message}; {sentence}"),
-            None => sentence,
-        });
-    }
     job.subject
         .record(&*queue, EventKind::UpdateInstalled, payload.clone())?;
     let mut value = payload;
@@ -941,15 +924,17 @@ struct Job<'a> {
     watch_timeout: Duration,
     poll: Duration,
     pid: u32,
-    /// The e2e tests the gate did not run (ADR-t1162-1), which
-    /// `update_installed` names.
-    e2e_skipped: std::cell::RefCell<Option<install::E2eSkip>>,
 }
 
 /// Check `binary` (its `update_built` recorded), leave it to a person when
 /// it brings a breaking migration, else install it as `install` does, watch
 /// the supervisors take it and put the old binary back when none does; once
 /// it is in place and taken, do the `plugin` step.
+///
+/// Its `update_installed` carries the `version` put in place, the
+/// `previous_version`, the migrations applied (`migrated`), each
+/// supervisor's handoff (`supervisors`), the job's `log`, and the plugin
+/// step's `plugin` and `message` when there is one.
 fn put_in_place(
     ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
     queue: &mut (impl AskStore + SupervisorRegistry + RunLog + ?Sized),
@@ -1035,14 +1020,6 @@ fn put_in_place(
     }
     if let Some(message) = message {
         payload["message"] = json!(message);
-    }
-    if let Some(skipped) = &*job.e2e_skipped.borrow() {
-        payload["e2e_skipped"] = skipped.to_json();
-        let sentence = skipped.sentence();
-        payload["message"] = json!(match payload["message"].as_str() {
-            Some(message) => format!("{message}; {sentence}"),
-            None => sentence,
-        });
     }
     job.subject
         .record(&*queue, EventKind::UpdateInstalled, payload.clone())?;
@@ -1406,7 +1383,6 @@ pub fn install_watched(
         watch_timeout,
         poll: options.poll,
         pid: std::process::id(),
-        e2e_skipped: Default::default(),
     };
     match settle(
         ports,
@@ -1756,6 +1732,15 @@ fn job_log(job: &Job) -> String {
 
 /// Record `update_failed` and open the `update_failed` ask with what
 /// failed and what became of the binary and the supervisor.
+///
+/// The event carries the job's `pid`, the `stage` that failed (`build`,
+/// `e2e`, `check`, `install`, `handoff`, `watch`, or a release's `plugin`),
+/// the `error`, the job's `log`, the ask's `ask_id`, and the `details` of
+/// the stage: whether the binary was put back (`restored`) or kept
+/// (`kept`), the supervisor brought back (`supervisor`) or each
+/// supervisor's (`supervisors`: `token`, `pid`, `now` its registration
+/// when watched, `error` and the `supervisor` brought back), and the
+/// gate's fields for `e2e`.
 fn failed(
     queue: &mut (impl AskStore + RunLog + ?Sized),
     job: &Job,

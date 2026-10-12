@@ -89,7 +89,7 @@ pub trait Binaries {
     }
     /// Run the e2e of `checkout` (ADR-t963-1 decision 1) with
     /// `CARGO_TARGET_DIR` set to `target_dir` when given, and clean up what
-    /// it left in cmux and on disk; how it went. An error is an e2e that
+    /// it left on disk; how it went. An error is an e2e that
     /// could not start (an unreadable `[run.env]`, the e2e lock).
     fn e2e(
         &self,
@@ -116,11 +116,6 @@ pub struct E2eSettings {
     pub command: Option<String>,
     /// How long it may run; past it the e2e is stopped and failed.
     pub timeout: Duration,
-    /// The cmux the e2e drives (`DAGQ_E2E_CMUX`): pinged before it starts,
-    /// and the groups the e2e left in it are deleted after. When it does
-    /// not answer, the tests that need it ([`CMUX_E2E`]) are not run and
-    /// its cleanup is left to a later gate (ADR-t2105-1).
-    pub cmux: Option<PathBuf>,
     /// The directory whose `dagq.toml` `[run.env]` the e2e runs with,
     /// expanded with `queue_dir`; `None` passes none.
     pub run_env_root: Option<PathBuf>,
@@ -167,47 +162,6 @@ impl E2eSettings {
     }
 }
 
-/// The `--skip` filters of the e2e tests not run when cmux does not answer
-/// `ping` (ADR-t2105-1). No e2e takes the running cmux any more: `up` opens
-/// no inbox (ADR-t2159-1 decisions 3 and 7), so the one named here runs
-/// without it too.
-pub const CMUX_E2E: &[&str] =
-    &["up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it"];
-
-/// The e2e tests the gate did not run, and why: those that need cmux when
-/// it does not answer (ADR-t2105-1).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct E2eSkip {
-    /// The `--skip` filters of the tests not run.
-    pub tests: Vec<String>,
-    /// Why (`cmux did not answer: ...`).
-    pub reason: String,
-}
-
-impl E2eSkip {
-    /// The cmux tests ([`CMUX_E2E`]), not run because cmux did not answer
-    /// `ping` for `error`.
-    pub fn cmux(error: &str) -> Self {
-        Self {
-            tests: CMUX_E2E.iter().map(|test| (*test).to_owned()).collect(),
-            reason: format!("cmux did not answer: {error}"),
-        }
-    }
-
-    pub fn to_json(&self) -> Value {
-        json!({"tests": self.tests, "reason": self.reason})
-    }
-
-    /// A sentence for a person: which tests were not run and why.
-    pub fn sentence(&self) -> String {
-        format!(
-            "the e2e did not run {} because {}",
-            self.tests.join(", "),
-            self.reason
-        )
-    }
-}
-
 /// How the gate's e2e went.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct E2eOutcome {
@@ -217,10 +171,8 @@ pub struct E2eOutcome {
     /// The tests its output names as failed.
     pub failed_tests: Vec<String>,
     pub secs: u64,
-    /// What was cleaned up after it (groups, processes, the directory).
+    /// What was cleaned up after it (processes, the directory).
     pub cleanup: Value,
-    /// The tests not run because cmux did not answer (ADR-t2105-1).
-    pub skipped: Option<E2eSkip>,
     /// The rerun of the failed tests by name (ADR-t1165-1); `None` when the
     /// e2e passed, ran past its timeout or named no failed test.
     pub rerun: Option<E2eRerun>,
@@ -269,14 +221,11 @@ impl E2eOutcome {
         format!("{what}; see {}", settings.log.display())
     }
 
-    /// The `e2e` of a report: `passed` with its time, and the tests it did
-    /// not run (`skipped`) when there are any.
+    /// The `e2e` of a report: `passed` with its time and log. The gate's
+    /// fields (`flaky`, `quarantined`, and `rerun` and `quarantine` when
+    /// there are any) are added beside them as on the update's events.
     pub fn report(&self, settings: &E2eSettings) -> Value {
-        let mut report = json!({"status": "passed", "secs": self.secs, "log": settings.log});
-        if let Some(skipped) = &self.skipped {
-            report["skipped"] = skipped.to_json();
-        }
-        report
+        json!({"status": "passed", "secs": self.secs, "log": settings.log})
     }
 }
 
@@ -286,10 +235,12 @@ impl E2eOutcome {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum E2eGate {
-    /// The source has none (not dagq's source, or a built binary).
+    /// The source has none (not dagq's source, or a built binary): the
+    /// report's `e2e` is `{"status": "not_applicable"}`.
     NotApplicable,
-    /// A person skipped it (`--skip-e2e`).
+    /// A person skipped it (`--skip-e2e`): `{"status": "skipped"}`.
     Skip,
+    /// Run it; the report's `e2e` is [`E2eOutcome::report`]'s.
     Run(E2eSettings),
 }
 
@@ -361,7 +312,8 @@ pub struct InstallOptions {
     pub allow_breaking: bool,
     /// Arguments of the `up` that starts the supervisor again after such a
     /// drain, beside `--db` and `--parallel` (taken from the drained
-    /// supervisor): `--cmux`, `--claude`, `--plugin-dir`. The `up` starts
+    /// supervisor): the agents' executables, `--plugin-dir` and the flags
+    /// older command lines carry. The `up` starts
     /// it under launchd whatever mode the drained one had (ADR-t1433-4).
     pub restart: Vec<String>,
     pub handoff_timeout: Duration,
@@ -886,6 +838,22 @@ mod tests {
     use crate::domain::{LeaseToken, SupervisorMode};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    /// Every queue of the host takes the one e2e lock in dagq's data
+    /// directory, the parent of the queue's directory (ADR-t1233-2
+    /// decision 4); a queue directory with no parent takes none.
+    #[test]
+    fn the_e2e_lock_is_the_data_directorys_for_every_queue() {
+        assert_eq!(
+            e2e_lock_path(Path::new("/data/dagq/abc")),
+            Some(PathBuf::from("/data/dagq/e2e.lock"))
+        );
+        assert_eq!(
+            e2e_lock_path(Path::new("/data/dagq/def")),
+            e2e_lock_path(Path::new("/data/dagq/abc"))
+        );
+        assert_eq!(e2e_lock_path(Path::new("/")), None);
+    }
+
     /// The clock at `secs` after the epoch.
     struct At(i64);
 
@@ -967,53 +935,6 @@ mod tests {
             .map(|registration| registration.token.as_str())
             .collect();
         assert_eq!(tokens, ["at-timeout"]);
-    }
-
-    /// The cmux skip names its tests and why, with the tool it waited for
-    /// (ADR-t2105-1).
-    #[test]
-    fn the_skipped_e2e_name_their_tests_and_why() {
-        let cmux = E2eSkip::cmux("`cmux ping` failed: Access denied");
-        assert_eq!(cmux.tests, CMUX_E2E);
-        assert_eq!(
-            cmux.to_json(),
-            json!({
-                "tests": CMUX_E2E,
-                "reason": "cmux did not answer: `cmux ping` failed: Access denied",
-            })
-        );
-        assert_eq!(
-            cmux.sentence(),
-            format!(
-                "the e2e did not run {} because cmux did not answer: `cmux ping` failed: Access \
-denied",
-                CMUX_E2E.join(", ")
-            )
-        );
-    }
-
-    /// An e2e that took the running cmux (`fixture_with_cmux()`) would have
-    /// to be among the filters skipped when cmux does not answer, so the
-    /// gate never ran one that would fail for want of it (ADR-t2105-1). None
-    /// takes it now (ADR-t2159-1 decision 7).
-    #[test]
-    fn no_e2e_takes_the_running_cmux_outside_the_cmux_e2e() {
-        let source = include_str!("../../tests/e2e.rs");
-        let mut taking = Vec::new();
-        let mut current = None;
-        for line in source.lines() {
-            if let Some(rest) = line.strip_prefix("fn ") {
-                current = rest.split('(').next();
-            } else if line.contains("fixture_with_cmux()") && !line.trim_start().starts_with("//") {
-                taking.extend(current);
-            }
-        }
-        for test in taking {
-            assert!(
-                CMUX_E2E.iter().any(|filter| test.contains(filter)),
-                "{test} takes the running cmux but is not in CMUX_E2E"
-            );
-        }
     }
 
     #[test]

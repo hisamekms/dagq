@@ -31,6 +31,13 @@ const TERM_GRACE: Duration = Duration::from_secs(3);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(50);
 
+/// The prefixes of the variables a terminal sets to name the pane and
+/// socket of the shell that started this process (cmux's `CMUX_*`): a
+/// wrapper started from a supervisor run by hand in such a pane is in no
+/// pane, and an agent given them would send its hooks and notifications
+/// to the person's.
+const TERMINAL_PANE_PREFIXES: &[&str] = &["CMUX_"];
+
 /// Starts, finds and stops background wrappers through `processes`.
 pub struct BackgroundWrappers<'a> {
     pub processes: &'a dyn ProcessControl,
@@ -40,8 +47,8 @@ impl BackgroundWrappers<'_> {
     /// Start the shell command `command` (one simple command, which the
     /// shell execs, so that the pid it reports is the command's) in `cwd`
     /// detached from this process, with `env` over this process's
-    /// environment but cmux's (`CMUX_*`, which names the workspace of
-    /// whoever started the supervisor) and dagq's own (`DAGQ_*`, which
+    /// environment but a terminal pane's ([`TERMINAL_PANE_PREFIXES`]) and
+    /// dagq's own (`DAGQ_*`, which
     /// `env` sets for the session as a workspace's `--env` would), its
     /// stdin `/dev/null` and its output in `log`; the handle of the
     /// process. The log is in the run directory, which the worker writes:
@@ -64,10 +71,12 @@ impl BackgroundWrappers<'_> {
         let mut shell = Command::new("/bin/sh");
         shell.arg("-c").arg(script).current_dir(cwd);
         for (key, _) in std::env::vars_os() {
-            if key
-                .to_str()
-                .is_some_and(|key| key.starts_with("CMUX_") || key.starts_with("DAGQ_"))
-            {
+            if key.to_str().is_some_and(|key| {
+                TERMINAL_PANE_PREFIXES
+                    .iter()
+                    .chain(&["DAGQ_"])
+                    .any(|prefix| key.starts_with(prefix))
+            }) {
                 shell.env_remove(key);
             }
         }
@@ -319,7 +328,7 @@ mod tests {
     }
 
     /// A wrapper is started detached, with the environment it is given and
-    /// none of cmux's, in its directory, its output in its log; it is told
+    /// none of a terminal pane's, in its directory, its output in its log; it is told
     /// by its handle, and SIGTERM stops one that takes it.
     #[test]
     fn a_detached_process_is_started_found_and_stopped() {

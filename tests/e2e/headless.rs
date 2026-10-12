@@ -1,8 +1,8 @@
 //! End-to-end happy paths of the Codex worker's headless turns (`codex
-//! exec`, ADR-t813-1 and ADR-t813-3) through the session wrapper in a real
-//! cmux workspace to the landing. A Claude worker's turn (`claude -p`) is
-//! the stub of every other e2e test, and its happy path is
-//! `happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main`.
+//! exec`, ADR-t813-1 and ADR-t813-3) through the session wrapper in the
+//! background to the landing. A Claude worker's turn (`claude -p`) is the
+//! stub of every other e2e test, and its happy path is
+//! `happy_path_runs_a_stub_agent_in_the_background_and_lands_on_main`.
 use super::*;
 
 /// Stand-in for Codex CLI's headless turns (ADR-t813-1, ADR-t813-3). It
@@ -64,12 +64,12 @@ printf '{"type":"turn.completed","usage":{"input_tokens":13,"cached_input_tokens
 
 /// A task for the Codex worker (`--provider codex`, headless) runs its turn
 /// as `codex exec --json` with the sandbox of ADR-t813-3 under the session
-/// wrapper in a real cmux workspace: the thread Codex names is recorded on
+/// wrapper in the background: the thread Codex names is recorded on
 /// the run, the turn's usage too, and the run is validated, reviewed and
 /// landed.
 #[test]
 #[ignore = "an e2e; run with --ignored"]
-fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
+fn a_codex_worker_runs_its_turn_in_the_background_and_lands_on_main() {
     let fixture = fixture();
     let Fixture {
         repo,
@@ -185,12 +185,12 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
     crate::wait_until_wrapper_gone(&pass.sessions[0].1);
 }
 
-/// The production CLI flag through real cmux: no Claude executable is
+/// The production CLI flag (`--no-claude`): no Claude executable is
 /// present, a Claude task runs on Codex, and its lease is released so a
 /// person's integration can land the receipt.
 #[test]
 #[ignore = "an e2e; run with --ignored"]
-fn no_claude_runs_codex_through_cmux_and_allows_manual_landing() {
+fn no_claude_runs_codex_in_the_background_and_allows_manual_landing() {
     let fixture = fixture();
     let Fixture { env, stub, .. } = &fixture;
     let codex = stub.with_file_name("codex-stub");

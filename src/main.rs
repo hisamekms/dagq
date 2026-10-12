@@ -726,7 +726,8 @@ enum Command {
         once: bool,
         // ADR-t1433-1.
         /// cmux executable, accepted from registered command lines: the supervisor calls no
-        /// cmux; only the e2e it runs before a landing and the update's job ping it.
+        /// cmux; it goes on only to the update's job, for a supervisor registered in the retired
+        /// in-cmux mode.
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         /// Claude Code executable; a bare name is resolved on PATH.
@@ -980,7 +981,7 @@ enum Command {
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
         /// Codex CLI executable, for `[roles.observer]`'s `provider = "codex"`; a bare name is
-        /// resolved on PATH outside cmux's shims.
+        /// resolved on PATH outside a terminal's shims.
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
         /// Accepted from registered command lines and ignored: the observer calls no cmux.
@@ -1042,7 +1043,7 @@ enum Command {
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
         /// Codex CLI executable, for `[roles.throughput_review]`'s `provider = "codex"`; a bare
-        /// name is resolved on PATH outside cmux's shims.
+        /// name is resolved on PATH outside a terminal's shims.
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
         /// What the job starts with, as the supervisor routed it (an actor launch as JSON);
@@ -3339,7 +3340,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 E2eGate::Run(E2eSettings {
                     command: e2e_command,
                     timeout: Duration::from_secs(e2e_timeout),
-                    cmux: Some(cmux.clone()),
                     run_env_root: Some(checkout.clone()),
                     queue_dir: Some(location.queue_dir.clone()),
                     scratch: dagq::application::update::UpdatePaths::under(&location.queue_dir).e2e,
@@ -4174,8 +4174,8 @@ fn execute(cli: Cli) -> Result<Value> {
             use dagq::compose::SuperviseOptions;
             use dagq::infrastructure::adapters::executable;
             // The supervisor calls no cmux (ADR-t1433-1): `--cmux` is
-            // accepted, need not resolve, and goes on only to the e2e and
-            // the update's job, which ping it as their gate's precondition.
+            // accepted, need not resolve, and goes on only to the update's
+            // job, for a supervisor registered in the retired in-cmux mode.
             let cmux = executable(&cmux).unwrap_or(cmux);
             let mut options = SuperviseOptions {
                 no_claude,

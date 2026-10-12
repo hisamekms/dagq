@@ -1,7 +1,6 @@
 //! What the e2e tests leave on disk, and how it is cleaned up again: the
 //! owner lock of a fixture's directory, and the sweep that cleans up after
-//! earlier e2e processes that died before their `TempDir` could drop. No
-//! e2e opens anything in cmux (ADR-t2159-1 decision 7).
+//! earlier e2e processes that died before their `TempDir` could drop.
 use super::pid_alive;
 use crate::common::Bounded;
 use std::{

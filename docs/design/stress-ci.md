@@ -37,7 +37,8 @@ worker の stress の項と同じ選び方にする。範囲の diff（`git diff
 | `src/**`（`src/main.rs` を除く） | `dagq`（lib） | `<module のパス>::tests::<name>`（`src/domain/exit.rs` なら `domain::exit::tests::<name>`） |
 | `src/main.rs` | `dagq::bin/dagq` | `tests::<name>` など |
 
-`tests/e2e.rs`（と `tests/e2e/`）と `tests/plugin.rs` は対象外（e2e は cmux を要り `#[ignore]`、plugin は文書を読む test）。`tests/common` と `tests/it/runtime_support` の helper の変更は、それを使う test を選ばない（helper に `#[test]` は無い）。
+`tests/e2e.rs`（と `tests/e2e/`）と `tests/plugin.rs` は対象外（e2e は実 launchd と実プロセスを要り `#[ignore]`、plugin は文書を読む test）。
+`tests/common` と `tests/it/runtime_support` の helper の変更は、それを使う test を選ばない（helper に `#[test]` は無い）。
 
 script は選んだ test を `binary_id(<binary>) & test(=<name>)` の和の filter にし、build の後に `cargo nextest list` で名前が解決できるかを確かめる。解決できない名前（parser の読み違いや、checkout に無い test）は warning に出し、1 つも解決できなければ流さずに exit 0 にする。対象が無い範囲も流さずにそう出して exit 0。
 
