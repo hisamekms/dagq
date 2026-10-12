@@ -36,7 +36,7 @@ use super::queue_service::{private_dir, queue_dir_of, write_private};
 use super::sqlite::SqliteQueue;
 use crate::application::broker_relay::{RelayControl, RelayRecords, down_message};
 use crate::domain::broker_relay::{
-    RelaySeen, RelaySpec, SOCKET_MODE, TARGET_LABEL, relay_run_args, socket_path,
+    RelaySeen, RelaySpec, RelayState, SOCKET_MODE, TARGET_LABEL, relay_run_args, socket_path,
 };
 use crate::domain::podman_machine::QueueKey;
 
@@ -44,6 +44,14 @@ use crate::domain::podman_machine::QueueKey;
 pub const RELAY_DIR: &str = "relay";
 /// How long a connection to the broker or the run's socket may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long each podman command of a look at a relay may take: 20 s. An
+/// inspect answers in well under a second through a working connection,
+/// and the probe in the relay's container waits at most
+/// [`super::queue_broker::PROBE_TIMEOUT`] (2 s) for the broker beside
+/// podman's own exec; a command still running then is killed and podman
+/// is taken not to reach the machine, so a hung machine does not hold the
+/// supervisor's loop (a look makes about two commands per relay).
+pub const LOOK_TIMEOUT: Duration = Duration::from_secs(20);
 
 // --- Carrying bytes ------------------------------------------------------------
 
@@ -230,6 +238,8 @@ pub struct PodmanRelays {
     pub queue_dir: PathBuf,
     /// The machine as this queue uses it: started again under its lock.
     pub machine: QueueMachine,
+    /// How long each podman command of a look may take ([`LOOK_TIMEOUT`]).
+    pub look_timeout: Duration,
 }
 
 impl PodmanRelays {
@@ -243,6 +253,7 @@ impl PodmanRelays {
             machine: QueueMachine::new(podman.clone(), &data_root, &queue_dir, host_wide),
             podman,
             queue_dir,
+            look_timeout: LOOK_TIMEOUT,
         }
     }
 
@@ -327,38 +338,75 @@ impl PodmanRelays {
             .map(drop)
     }
 
+    /// A podman command of a look within [`Self::look_timeout`]; `None`
+    /// when it could not be run or did not end in time.
+    fn look_output(&self, args: &[String]) -> Option<std::process::Output> {
+        match self.podman.inside_within(args, self.look_timeout) {
+            Ok(Some(output)) => Some(output),
+            Ok(None) => {
+                warn!(
+                    "podman --connection dagq {} did not end within {:?}: it was stopped",
+                    args.join(" "),
+                    self.look_timeout
+                );
+                None
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "podman could not be run: {error:#}");
+                None
+            }
+        }
+    }
+
     /// Whether the relay `container` runs, and the broker's port it was
-    /// started towards; a container that is not there does not run.
-    fn look(&self, container: &str) -> (bool, Option<u16>) {
+    /// started towards. A failed inspect is told apart by `container
+    /// exists`: a container that is not there does not run, and anything
+    /// else (podman's connection through gvproxy fails, or it does not
+    /// answer in time) is podman not reaching the machine.
+    fn look(&self, container: &str) -> (RelayState, Option<u16>) {
         let format =
             format!("{{{{.State.Running}}}} {{{{index .Config.Labels \"{TARGET_LABEL}\"}}}}");
-        match self.podman.inside(&strings(&[
+        let Some(output) = self.look_output(&strings(&[
             "container",
             "inspect",
             "--format",
             &format,
             container,
-        ])) {
-            Ok(output) if output.status.success() => {
-                parse_inspect(&String::from_utf8_lossy(&output.stdout))
-            }
-            _ => (false, None),
+        ])) else {
+            return (RelayState::PodmanUnreachable, None);
+        };
+        if output.status.success() {
+            let (running, port) = parse_inspect(&String::from_utf8_lossy(&output.stdout));
+            let state = if running {
+                RelayState::Running
+            } else {
+                RelayState::Stopped
+            };
+            return (state, port);
+        }
+        // `container exists` exits 1 for a container that is not there and
+        // 125 for an error.
+        match self
+            .look_output(&strings(&["container", "exists", container]))
+            .and_then(|output| output.status.code())
+        {
+            Some(1) => (RelayState::Stopped, None),
+            _ => (RelayState::PodmanUnreachable, None),
         }
     }
 
     /// Whether a request through the relay's socket reaches the broker's
     /// health, asked inside the relay's container as the socket's owner
     /// `uid`: the relay's root holds no capability to open another's 0600
-    /// socket.
-    fn reaches(&self, container: &str, uid: u32) -> bool {
+    /// socket. `None` when podman did not answer in time.
+    fn reaches(&self, container: &str, uid: u32) -> Option<bool> {
         let uid = uid.to_string();
         let mut args = strings(&[
             "exec", "--user", &uid, container, "dagq", "relay", "probe", "--socket",
         ]);
         args.push(socket_path());
-        self.podman
-            .inside(&args)
-            .is_ok_and(|output| output.status.success())
+        self.look_output(&args)
+            .map(|output| output.status.success())
     }
 }
 
@@ -411,16 +459,31 @@ impl RelayControl for PodmanRelays {
             return Ok(Vec::new());
         }
         let key = self.key()?;
+        // Once podman does not reach the machine, the rest are not asked:
+        // each would wait as long again.
+        let mut unreachable = false;
         specs
             .into_iter()
             .map(|spec| {
                 let container = key.relay_container(&spec.run).map_err(anyhow::Error::msg)?;
-                let (running, target_port) = self.look(&container);
+                let (mut state, target_port) = if unreachable {
+                    (RelayState::PodmanUnreachable, None)
+                } else {
+                    self.look(&container)
+                };
+                let mut reaches = None;
+                if state == RelayState::Running {
+                    reaches = self.reaches(&container, spec.uid);
+                    if reaches.is_none() {
+                        state = RelayState::PodmanUnreachable;
+                    }
+                }
+                unreachable = state == RelayState::PodmanUnreachable;
                 Ok(RelaySeen {
-                    reaches: running.then(|| self.reaches(&container, spec.uid)),
                     run: spec.run,
-                    running,
+                    state,
                     target_port,
+                    reaches,
                 })
             })
             .collect()

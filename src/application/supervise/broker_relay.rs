@@ -3,8 +3,10 @@
 //! supervisor at work looks at each relay the queue keeps open while the
 //! queue broker answers. A relay that does not run, or passes to a port
 //! the broker left, is started again towards the broker's port; one that
-//! runs and does not reach the broker (the machine's gvproxy) has the dagq
-//! machine started again under its host-wide lock, and then every relay.
+//! runs and does not reach the broker, or a look whose podman does not
+//! reach the machine (both are the machine's gvproxy), has the dagq
+//! machine started again under its host-wide lock first, and then every
+//! relay.
 //! At most [`QUEUE_SERVICE_RESTARTS`] such starts in
 //! [`QUEUE_SERVICE_RESTART_WINDOW`] are made, each `queue_relay_started`.
 //! A look or a start that fails, or the limit reached, is the queue's
@@ -138,7 +140,7 @@ impl HostOpsState {
         self.broker_relay.starts.push(now);
         if machine {
             warn!(
-                "a relay runs and does not reach the queue broker: the dagq machine is started again"
+                "a relay does not reach the queue broker, or podman does not reach the dagq machine: the machine is started again"
             );
             if let Err(error) = port.relays.restart_machine() {
                 warn!(error = %format_args!("{error:#}"), "the dagq machine could not be started again: {error:#}");

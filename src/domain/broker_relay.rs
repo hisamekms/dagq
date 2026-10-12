@@ -178,16 +178,28 @@ pub fn container_env() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// How a look found a relay's container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayState {
+    /// It runs.
+    Running,
+    /// It is not there or does not run.
+    Stopped,
+    /// Podman could not reach the dagq machine (its connection goes
+    /// through gvproxy), or did not answer in time: whether the relay runs
+    /// is not known.
+    PodmanUnreachable,
+}
+
 /// A look at a run's relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelaySeen {
     pub run: String,
-    /// Its container runs.
-    pub running: bool,
+    pub state: RelayState,
     /// The broker's port it passes to ([`TARGET_LABEL`]).
     pub target_port: Option<u16>,
     /// A request through its socket reached the broker's health; `None`
-    /// when not looked at (it does not run).
+    /// when not looked at (it does not run, or podman did not answer).
     pub reaches: Option<bool>,
 }
 
@@ -250,15 +262,18 @@ pub enum RelayAction {
     /// again towards the broker's port.
     Restart,
     /// It runs towards the broker's port and does not reach it, while the
-    /// broker answers on the host: the machine's gvproxy is taken to be
-    /// down, and the machine is started again (ADR-t2114-3 decision 4).
+    /// broker answers on the host, or podman cannot reach the machine at
+    /// all: the machine's gvproxy is taken to be down, and the machine is
+    /// started again before the relays (ADR-t2114-3 decision 4).
     RestartMachine,
 }
 
 /// What to do about the relay `seen`, the broker listening on `port` and
 /// answering.
 pub fn relay_action(seen: &RelaySeen, port: u16) -> RelayAction {
-    if !seen.running || seen.target_port != Some(port) {
+    if seen.state == RelayState::PodmanUnreachable {
+        RelayAction::RestartMachine
+    } else if seen.state == RelayState::Stopped || seen.target_port != Some(port) {
         RelayAction::Restart
     } else if seen.reaches == Some(false) {
         RelayAction::RestartMachine
@@ -439,9 +454,13 @@ mod tests {
 
     #[test]
     fn a_relay_is_kept_started_again_or_the_machine_is_started_again() {
-        let seen = |running, target_port, reaches| RelaySeen {
+        let seen = |running: bool, target_port, reaches| RelaySeen {
             run: "r1".to_owned(),
-            running,
+            state: if running {
+                RelayState::Running
+            } else {
+                RelayState::Stopped
+            },
             target_port,
             reaches,
         };
@@ -470,6 +489,15 @@ mod tests {
             relay_action(&seen(true, Some(9), Some(false)), 9),
             RelayAction::RestartMachine
         );
+        // Podman does not reach the machine: whatever else was seen, the
+        // machine is started again.
+        for target_port in [None, Some(9), Some(8)] {
+            let unreachable = RelaySeen {
+                state: RelayState::PodmanUnreachable,
+                ..seen(false, target_port, None)
+            };
+            assert_eq!(relay_action(&unreachable, 9), RelayAction::RestartMachine);
+        }
         assert_eq!(address_port("127.0.0.1:4321"), Some(4321));
         assert_eq!(address_port("127.0.0.1"), None);
         assert!(attention_stands(Some(QUEUE_RELAY_DOWN)));

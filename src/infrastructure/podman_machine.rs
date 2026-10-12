@@ -21,9 +21,12 @@
 use std::any::Any;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -122,6 +125,63 @@ impl PodmanCli {
             .collect();
         all.extend(args.iter().map(OsString::from));
         self.output(&all)
+    }
+
+    /// `podman --connection dagq <args>` given at most `limit`: its output
+    /// whatever its exit, or `None` when it did not end in time and was
+    /// killed (or its output was not all read by then). A podman whose
+    /// machine hangs does not hold its caller.
+    pub(crate) fn inside_within(&self, args: &[String], limit: Duration) -> Result<Option<Output>> {
+        let mut child = Command::new(&self.program)
+            .args(["--connection", MACHINE_NAME])
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("run {}", self.program.display()))?;
+        // The pipes are read on their own threads, so a podman that writes
+        // much does not block on them while it is waited for; what they
+        // read is waited for until the same deadline, so a process podman
+        // left behind holding them does not hold the caller either.
+        let read = |pipe: Option<Box<dyn Read + Send>>| {
+            let (sent, received) = std::sync::mpsc::channel();
+            thread::spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_end(&mut bytes);
+                }
+                let _ = sent.send(bytes);
+            });
+            received
+        };
+        let stdout = read(child.stdout.take().map(|pipe| Box::new(pipe) as _));
+        let stderr = read(child.stderr.take().map(|pipe| Box::new(pipe) as _));
+        let deadline = Instant::now() + limit;
+        let status = loop {
+            let ended = child.try_wait();
+            if let Ok(Some(status)) = ended {
+                break status;
+            }
+            if ended.is_err() || Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                ended.with_context(|| format!("wait for {}", self.program.display()))?;
+                return Ok(None);
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let collect = |received: std::sync::mpsc::Receiver<Vec<u8>>| {
+            received.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        };
+        match (collect(stdout), collect(stderr)) {
+            (Ok(stdout), Ok(stderr)) => Ok(Some(Output {
+                status,
+                stdout,
+                stderr,
+            })),
+            _ => Ok(None),
+        }
     }
 
     /// `podman --connection dagq volume <args>`.

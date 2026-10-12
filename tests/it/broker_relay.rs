@@ -24,13 +24,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use dagq::application::broker_relay::RelayControl;
+use dagq::application::ContainerRuntime;
+use dagq::application::broker_relay::{RelayControl, RelayGate};
 use dagq::application::queue_broker::{BrokerProbe, QueueBrokerControl};
-use dagq::domain::broker_relay::{RelaySeen, RelaySpec, forward_command};
+use dagq::domain::broker_relay::{RelaySeen, RelaySpec, RelayState, forward_command};
+use dagq::domain::container_runtime::{Availability, RuntimeTarget};
 use dagq::domain::queue_service::{
     CREDENTIAL_FILE_ENV, Principal, SOCKET_ENV, ServiceState, URL_ENV,
 };
-use dagq::infrastructure::broker_relay::{PodmanRelays, forward_on};
+use dagq::infrastructure::broker_relay::{PodmanRelays, QueueRelayHealth, forward_on};
 use dagq::infrastructure::podman_machine::PodmanCli;
 use dagq::infrastructure::queue_broker::{self as broker, SystemQueueBroker};
 use dagq::infrastructure::queue_service as service;
@@ -40,9 +42,14 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A `podman` that keeps the containers and volumes of the dagq machine
 /// in `state`, writes each command line to `state/calls`, fails a relay's
-/// `run` while `state/fail-run` is there, and answers a relay's probe as
-/// unreachable while `state/unreachable` is there. A machine's stop takes
-/// its containers with it.
+/// `run` while `state/fail-run` is there, answers a relay's probe as
+/// unreachable while `state/unreachable` is there, fails every
+/// `--connection dagq` command as a connection through a gvproxy that is
+/// down does while `state/no-connection` is there (a machine's start
+/// removes it unless `state/start-fails` is there), and hangs every
+/// `--connection dagq` command while `state/hang` is there until it is
+/// killed or its parent ends (a machine's start mends that too). A machine's
+/// stop takes its containers with it.
 fn fake_podman(state: &Path) -> PathBuf {
     fs::create_dir_all(state.join("containers")).unwrap();
     fs::create_dir_all(state.join("volumes")).unwrap();
@@ -54,9 +61,18 @@ printf '%s\n' "$*" >> "$S/calls"
 case "$1 $2" in
 "machine list") printf '[{{"Name":"dagq","Running":true}}]' ;;
 "machine stop") rm -f "$S"/containers/* ;;
-"machine start") ;;
+"machine start")
+  [ -f "$S/start-fails" ] && {{ echo "cannot start" >&2; exit 125; }}
+  rm -f "$S/no-connection" "$S/hang" ;;
 "system connection") printf '[{{"Name":"dagq","Default":true}}]' ;;
 "--connection dagq")
+  if [ -f "$S/hang" ]; then
+    echo $$ >> "$S/hung"
+    # Hangs until killed, and ends when the test that ran it goes.
+    while kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
+    exit 125
+  fi
+  [ -f "$S/no-connection" ] && {{ echo "Cannot connect to Podman" >&2; exit 125; }}
   shift 2
   case "$1" in
   rm) rm -f "$S/containers/$4" ;;
@@ -81,6 +97,7 @@ case "$1 $2" in
     echo "true $port" > "$S/containers/$name" ;;
   container)
     eval "name=\${{$#}}"
+    if [ "$2" = exists ]; then [ -f "$S/containers/$name" ] || exit 1; exit 0; fi
     [ -f "$S/containers/$name" ] || exit 125
     cat "$S/containers/$name" ;;
   exec) [ "$2 $3" = "--user 10001" ] || exit 126; [ -f "$S/unreachable" ] && exit 1; exit 0 ;;
@@ -172,7 +189,7 @@ fn each_run_gets_its_own_socket_and_relay_and_its_end_removes_them() {
         seen,
         ["r1", "r2"].map(|run| RelaySeen {
             run: run.to_owned(),
-            running: true,
+            state: RelayState::Running,
             target_port: Some(4321),
             reaches: Some(true),
         })
@@ -214,7 +231,7 @@ fn each_run_gets_its_own_socket_and_relay_and_its_end_removes_them() {
             && tail.iter().any(|call| call == "machine start dagq"),
         "{tail:?}"
     );
-    assert!(!relays.relays().unwrap()[0].running);
+    assert_eq!(relays.relays().unwrap()[0].state, RelayState::Stopped);
     relays.restart("r2", 5555).unwrap();
     assert_eq!(relays.relays().unwrap()[0].target_port, Some(5555));
     assert!(relays.open(&spec("../x"), 1).is_err());
@@ -255,7 +272,7 @@ impl RelayControl for FakeRelays {
         }
         for relay in self.seen.lock().unwrap().iter_mut() {
             if relay.run == run {
-                relay.running = true;
+                relay.state = RelayState::Running;
                 relay.target_port = Some(port);
                 relay.reaches = Some(true);
             }
@@ -294,7 +311,11 @@ impl QueueBrokerControl for RunningBroker {
 fn relay(run: &str, running: bool, target_port: Option<u16>, reaches: Option<bool>) -> RelaySeen {
     RelaySeen {
         run: run.to_owned(),
-        running,
+        state: if running {
+            RelayState::Running
+        } else {
+            RelayState::Stopped
+        },
         target_port,
         reaches,
     }
@@ -357,7 +378,7 @@ fn container_fixture() -> (
     (fixture, repo, db, backend)
 }
 
-fn relay_options(relays: Arc<FakeRelays>) -> dagq::compose::SuperviseOptions {
+fn relay_options(relays: Arc<dyn RelayControl>) -> dagq::compose::SuperviseOptions {
     dagq::compose::SuperviseOptions {
         queue_broker: Some(dagq::compose::QueueBrokerOptions {
             executable: "/unused".into(),
@@ -560,6 +581,174 @@ fn the_supervisor_closes_the_relays_of_runs_that_are_over() {
     let started = events(&db, "queue_relay_started");
     assert_eq!(started.len(), 1, "{started:?}");
     assert_eq!(started[0]["payload"]["run"], living.as_str());
+}
+
+/// The relays of a queue of the test's in `dir` through the fake podman
+/// of `state`, each look's command given `look_timeout`.
+fn podman_relays(dir: &Path, state: &Path, look_timeout: Duration) -> PodmanRelays {
+    let queue_dir = dir.join("data").join("dagq").join(QUEUE);
+    fs::create_dir_all(&queue_dir).unwrap();
+    let db = queue_dir.join("queue.db");
+    fs::write(&db, "").unwrap();
+    PodmanRelays {
+        look_timeout,
+        ..PodmanRelays::of_queue(
+            PodmanCli {
+                program: fake_podman(state),
+            },
+            &db,
+            None,
+        )
+    }
+}
+
+/// The index of the first call of `state`'s podman that starts with
+/// `prefix`.
+fn first_call(state: &Path, prefix: &str) -> usize {
+    calls(state)
+        .iter()
+        .position(|call| call.starts_with(prefix))
+        .unwrap_or_else(|| panic!("no {prefix}: {:?}", calls(state)))
+}
+
+/// When podman cannot reach the machine (its
+/// gvproxy is down), a look reads the relays as unreachable, not as not
+/// running, and the supervisor starts the machine again before any relay;
+/// when the machine cannot be started either, the inbox's attention stands
+/// and the container runtime cannot be used.
+#[test]
+fn podman_that_cannot_reach_the_machine_has_the_machine_started_again_before_the_relays() {
+    use crate::runtime_support::supervise_with;
+    let (_fixture, repo, db, backend) = container_fixture();
+    // Runs that live: the watch closes the relays of runs that are over.
+    let r1 = run_in(&db, &repo, "needs_session", "in_progress");
+    let r2 = run_in(&db, &repo, "needs_session", "in_progress");
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("podman");
+    let relays = Arc::new(podman_relays(dir.path(), &state, TIMEOUT));
+    relays.open(&spec(&r1), 4321).unwrap();
+    relays.open(&spec(&r2), 4321).unwrap();
+    fs::write(state.join("no-connection"), "").unwrap();
+    assert_eq!(
+        relays
+            .relays()
+            .unwrap()
+            .iter()
+            .map(|relay| relay.state)
+            .collect::<Vec<_>>(),
+        [RelayState::PodmanUnreachable; 2]
+    );
+
+    let options = relay_options(relays.clone());
+    let before = calls(&state).len();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    let start = first_call(&state, "machine start dagq");
+    assert!(start >= before, "{:?}", calls(&state));
+    let relay_runs: Vec<usize> = calls(&state)
+        .iter()
+        .enumerate()
+        .skip(before)
+        .filter(|(_, call)| call.starts_with("--connection dagq run "))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(relay_runs.len(), 2, "{:?}", calls(&state));
+    assert!(relay_runs.iter().all(|index| *index > start));
+    let started = events(&db, "queue_relay_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert!(
+        started
+            .iter()
+            .all(|event| event["payload"]["machine_restarted"] == true),
+        "{started:?}"
+    );
+    assert!(events(&db, "queue_relay_down").is_empty());
+
+    // The machine cannot be started again either: the attention stands
+    // and the worker set to the container waits.
+    fs::write(state.join("no-connection"), "").unwrap();
+    fs::write(state.join("start-fails"), "").unwrap();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    let down = events(&db, "queue_relay_down");
+    assert_eq!(down.len(), 1, "{down:?}");
+    assert_eq!(down[0]["payload"]["reason"], "start_failed");
+    let gate = RelayGate {
+        records: Arc::new(QueueRelayHealth { db: db.clone() }),
+        container: Usable,
+    };
+    match gate.availability(RuntimeTarget::Worker) {
+        Availability::Unavailable(why) => assert!(
+            why.contains("relay to the queue broker could not be kept running"),
+            "{why}"
+        ),
+        Availability::Available => panic!("the container runtime is usable"),
+    }
+    assert!(backend.launched.lock().unwrap().is_empty());
+    assert_eq!(events(&db, "queue_relay_started").len(), 2);
+}
+
+/// A container runtime that is usable but for the relays' gate.
+struct Usable;
+
+impl ContainerRuntime for Usable {
+    fn availability(&self, _: RuntimeTarget) -> Availability {
+        Availability::Available
+    }
+}
+
+/// A podman of a look that hangs is killed
+/// at the look's limit and read as not reaching the machine, the rest of
+/// the relays are not asked, and the supervisor's pass goes on to start
+/// the machine and the relays again.
+#[test]
+fn a_hung_podman_of_a_look_is_killed_and_the_supervisor_goes_on() {
+    use crate::runtime_support::supervise_with;
+    let (_fixture, repo, db, backend) = container_fixture();
+    // Runs that live: the watch closes the relays of runs that are over.
+    let r1 = run_in(&db, &repo, "needs_session", "in_progress");
+    let r2 = run_in(&db, &repo, "needs_session", "in_progress");
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("podman");
+    // Long enough for the fake's shell to note itself under load.
+    let limit = Duration::from_secs(1);
+    let relays = Arc::new(podman_relays(dir.path(), &state, limit));
+    relays.open(&spec(&r1), 4321).unwrap();
+    relays.open(&spec(&r2), 4321).unwrap();
+    fs::write(state.join("hang"), "").unwrap();
+    let before = calls(&state).len();
+    let looked = std::time::Instant::now();
+    let seen = relays.relays().unwrap();
+    assert!(looked.elapsed() < TIMEOUT, "{:?}", looked.elapsed());
+    assert_eq!(
+        seen.iter().map(|relay| relay.state).collect::<Vec<_>>(),
+        [RelayState::PodmanUnreachable; 2]
+    );
+    // One hung command, killed: the second relay was not asked.
+    assert_eq!(calls(&state).len(), before + 1, "{:?}", calls(&state));
+    let hung = fs::read_to_string(state.join("hung")).unwrap();
+    assert_eq!(hung.lines().count(), 1, "{hung}");
+    let alive = Command::new("kill")
+        .args(["-0", hung.trim()])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!alive.success(), "the hung podman {hung} still runs");
+
+    let options = relay_options(relays.clone());
+    let passed = std::time::Instant::now();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(passed.elapsed() < TIMEOUT * 3, "{:?}", passed.elapsed());
+    let started = events(&db, "queue_relay_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[0]["payload"]["machine_restarted"], true);
+    assert_eq!(
+        relays
+            .relays()
+            .unwrap()
+            .iter()
+            .map(|relay| relay.state)
+            .collect::<Vec<_>>(),
+        [RelayState::Running; 2]
+    );
 }
 
 /// `dagq` in client mode from a directory that is no repository, with
@@ -768,7 +957,7 @@ fn a_relay_in_the_real_machine_reaches_the_host_s_broker() {
         seen,
         [RelaySeen {
             run: "realrun".to_owned(),
-            running: true,
+            state: RelayState::Running,
             target_port: Some(port),
             reaches: Some(true),
         }]
