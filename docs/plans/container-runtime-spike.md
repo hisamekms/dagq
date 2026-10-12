@@ -94,7 +94,8 @@ container-runtime-spike (a) Claude の長期 token の代理
   Spike の結果として残るのはこれだけなので、作業の dir を消す前に、記録の表の行・合否・判断に使った材料の要点（(a) の `error_body` と `stream-signs.py` の行、(c) の落ちた test と失敗の文、(d) の server の error の行）を note に写す。
 - ビュー: この文書の記録の表。
   goal 38 の結果の取り込みの task が note から写すもので、note から何度でも作り直せる。
-- 材料: 作業の dir（`$SPIKE`）の下の CSV（`b-*.csv`・`c.csv`・`d.csv`）・転送の log（`a-*.log`）・Claude Code の出力（`a-*.jsonl`）・container の build と test の log・メモリの標本・sccache の stats と server の log・clone と `target`。
+- 材料: 作業の dir（`$SPIKE`）の下の CSV（`b-*.csv`・`c.csv`・`d.csv`）・転送の log（`a-*.log`）・Claude Code の出力（`a-*.jsonl`）・container の build と test の log・メモリの標本・sccache の stats と server の log・clone。
+  (c)・(d) の build の出力と sccache の cache は machine の中の named volume にあり、build の出力は script の終わりに、cache は `machine.sh down` で消える。
   commit せず、後片付けで消え、消えた後は note に写したものしか残らない。
 - 道具: [container-runtime-spike/](container-runtime-spike/) の script は commit してあり、git から何度でも取り出せる。
 - 測り直せる範囲: (b)〜(d) は同じ手順でいつでも流し直せるが、host の load・repository の大きさ・道具の版で値は変わるので、前の値と同じにはならない（比べるときは note の環境の行を合わせる）。
@@ -311,6 +312,7 @@ path の clone は `REPO` の loose の object をそのまま複写するので
 ### 目的
 
 worker・resume と integrate の verification の build と test が通る、dagq 専用の machine の最小の CPU とメモリを測る（resource broker の値の CPU 1・メモリ 1 GiB では通らない見込み）。
+測るのは dagq の Rust の build で、結果はこの repository の dogfooding の host の `host.toml` の推奨値と worker の cache の形の判断の材料にし、runtime の既定や言語の前提にはしない（ADR-t2257-1 決定6）。
 
 ### 結果が決める ADR の決定
 
@@ -321,13 +323,18 @@ ADR-t2257-1 決定6（ADR-t2113-1 決定6 を amends）。測った通る最小�
 - 人か inbox が流す。
   podman（host にあるもの）を使い、Spike の machine `dagq-spike` を作る。
   machine は `$HOME` を mount せず、作業の dir（`$SPIKE/m`）だけを mount する（`machine.sh up` が mount を確かめ、ほかの mount があれば止まる）。
-- container は rust-toolchain.toml の channel の `rust:<channel>` の image（unit test が使う git を含む）で、toolchain（rust-toolchain.toml の component と target）・crate・`target` は作業の dir の下に置く。
+- container は rust-toolchain.toml の channel の `rust:<channel>` の image（unit test が使う git を含む）で、toolchain（rust-toolchain.toml の component と target）と crate は作業の dir の下に置く。
+  `CARGO_HOME` を作業の dir にすると image の rustup の proxy（`/usr/local/cargo/bin`）が `CARGO_HOME` の `bin` に rustup を探して見つけられないので、`prepare` は rustup を動かす前に image の `/usr/local/cargo/bin` を作業の dir の `cargo-home` に複写する（既にあれば複写しない）。
+- build の出力（`CARGO_TARGET_DIR`）は作業の dir（virtiofs の mount）に置かず、machine の中の podman の named volume `dagq-spike-target-<label>` に置く（host の mount の上では build script の link が「cannot find ... .rcgu.o」で落ちる）。
+  `run` は組ごとに volume を消して作り直してから build し（cache なしの build）、終わりに消す。
+  log・メモリの標本・CSV は作業の dir に書き、host から読む。
   準備（`prepare`）だけが network を使い、build と test は `--network none`・読み取り専用の root filesystem・capability の削除・特権の昇格の禁止・pids の上限で流す。
   `/tmp` は test が script を置いて実行できるよう exec の tmpfs にする。
   非 root の uid と container の memory・cpu の上限は付けない（この項目は machine の大きさを測り、container の上限は実装が決める）。
 - `rustup toolchain install` は引数なしで rust-toolchain.toml の toolchain を入れる（rustup 1.28 以降）。
   image の rustup がそれより古ければ、`prepare` の失敗を記録し、channel を名指して入れ直す。
 - 後片付け: (d) も流すなら machine を残し、流さないなら `sh "$S/machine.sh" down`。
+  `down` は machine を消す前に Spike の named volume（`dagq-spike-*`）を消し、volume は machine の disk とともにも消えるので残らない。
 
 ### 手順
 
@@ -344,7 +351,7 @@ sh "$S/machine.sh" set 2 4096
 sh "$S/container-build.sh" run "$SPIKE/m" c2m4 2 | tee -a "$SPIKE/c.csv"
 ```
 
-build は `--all-targets`、unit test は `--lib --bins` で、組ごとに `target` を消してから流す（cache なしの build）。
+build は `--all-targets`、unit test は `--lib --bins` で、組ごとに build の出力の named volume を作り直してから流す（cache なしの build）。
 test が落ちたら `$SPIKE/m/logs/<label>-test.log` から落ちた test の名前と失敗の文を記録する。
 落ちた test を合否から外さない（Linux の CI は失敗を通さず、macOS に固有の test は cfg で分ける。[Linux CI](../design/linux-ci.md)）。
 どの組でも同じく落ちることは資源以外の原因の手がかりにはなるが、それだけで OS に固有とも準備の不足とも決めない。
@@ -380,7 +387,8 @@ test が落ちたら `$SPIKE/m/logs/<label>-test.log` から落ちた test の�
 - build の出力（`CARGO_TARGET_DIR`）を machine に virtiofs で mount した host の dir に置くと、link が「cannot find ... .rcgu.o」で落ちる。
   4 / 8 GiB で build の出力を machine の中の podman の named volume に置くと、build は 343 秒で通った（test は流していない）。
 
-測り直しは、task 2279 が直した手順で人か inbox が流し、結果の取り込み（通る最小の資源）は task 2280 が持つ。
+2 つはこの文書の手順と script で直した（rustup の複写と、build の出力の named volume）。
+測り直しはこの手順で人か inbox が流し、結果の取り込み（通る最小の資源）は task 2280 が持つ。
 
 ### 満たさないときに人が決めること
 
@@ -401,9 +409,12 @@ ADR-t2114-4 決定5（同時の書き込みと大きさの上限に耐えない�
 - 人か inbox が流す。
   (c) の machine と `prepare` の後に流す（`prepare` が container で使う sccache を、(c) の手順のコマンドで渡した host と同じ版で、local の disk cache だけの feature で作業の dir に入れる）。
 - machine は 4 CPU / 8 GiB 以上にし、container ごとの `CARGO_BUILD_JOBS` は 2 本なら 2、3・4 本なら 1 にする。
-- 各 container は `--network none` で、自分の loopback に自分の server を build の前に起動し（ADR-t2114-4 決定1・2）、`SCCACHE_DIR` に同じ dir を mount する。
-  server の error の log は作業の dir の下のファイルに書く。
-- 後片付け: `sh "$S/machine.sh" down` と `rm -rf "$SPIKE"`。
+- 各 container は `--network none` で、自分の loopback に自分の server を build の前に起動し（ADR-t2114-4 決定1・2）、`SCCACHE_DIR` に machine の中の 1 つの共有の named volume `dagq-spike-sccache` を mount する（worker の cache を machine の中の queue ごとの named volume に置く形に揃える）。
+  cache は round を跨いで残し、`cold` の round だけが volume を作り直して空にする。
+- build の出力は container ごとの named volume `dagq-spike-target-sccache-<i>` に置き、round ごとに作り直し（cache なしの build）、終わりに消す（(c) と同じく host の mount の上では link が落ちる）。
+- cache の大きさは machine の中で volume を `du` で読み、CSV の `cache_kib` に出す。
+  server の error の log・stats・build の log は作業の dir の下のファイルに書き、host から読む。
+- 後片付け: `sh "$S/machine.sh" down`（Spike の named volume も消える）と `rm -rf "$SPIKE"`。
 
 ### 手順
 
@@ -415,7 +426,7 @@ sh "$S/sccache-concurrency.sh" "$SPIKE/m" 3 cold 10G 1 | tee -a "$SPIKE/d.csv"
 sh "$S/sccache-concurrency.sh" "$SPIKE/m" 3 warm 10G 1 | tee -a "$SPIKE/d.csv"
 sh "$S/sccache-concurrency.sh" "$SPIKE/m" 4 cold 10G 1 | tee -a "$SPIKE/d.csv"
 sh "$S/sccache-concurrency.sh" "$SPIKE/m" 4 warm 10G 1 | tee -a "$SPIKE/d.csv"
-du -sk "$SPIKE/m/sccache"
+podman machine ssh dagq-spike "du -sk '$(podman --connection dagq-spike volume inspect --format '{{.Mountpoint}}' dagq-spike-sccache)'"
 ```
 
 続けて、上限を warm の後の cache の大きさの半分ほど（例 `300M`）にして 2 回流し、追い出しと当たりを見る。
@@ -434,7 +445,7 @@ grep -i -l 'error' "$SPIKE"/m/logs/sccache-*.server.log
 - どの round でも build の `exit` が 0。
 - `cache_errors`・`read_errors`・`write_errors` が 0 で、server の error の log に cache の読み書きの error が無い。
 - warm の round で、container ごとの当たり率（hits / (hits + misses)）が 0.9 以上。
-- limit の round で、終わった後の cache の dir の大きさが上限の 1.2 倍以下で、build が通る。
+- limit の round で、終わった後の cache の volume の大きさ（`cache_kib`）が上限の 1.2 倍以下で、build が通る。
   上限を大きく超え続けるときは、server ごとに大きさを数えて互いの書き込みを数えていない現れとして記録する。
 
 ### 記録の表
@@ -445,7 +456,8 @@ grep -i -l 'error' "$SPIKE"/m/logs/sccache-*.server.log
 
 上の行は 2026-10-11 の 1 回目（note 152045。machine 4 CPU / 8 GiB・sccache 0.18.0）で、server の log に error は無かった。
 build が (c) と同じ link の失敗で落ちたので、同時の書き込みで壊れないことも、上限が効くことも確かめられていない。
-測り直しは task 2279 が直した手順で人か inbox が流し、結果の取り込みと (d) の ADR（ADR-t2114-4 決定5）は task 2280 が持つ。
+この置き場はこの文書の手順と script で直した（cache と build の出力を machine の中の named volume に置く）。
+測り直しはこの手順で人か inbox が流し、結果の取り込みと (d) の ADR（ADR-t2114-4 決定5）は task 2280 が持つ。
 
 ### 満たさないときに人が決めること
 

@@ -14,6 +14,10 @@
 #   sh machine.sh up WORKDIR CPUS MEMORY_MIB   # init and start
 #   sh machine.sh set CPUS MEMORY_MIB          # stop, resize, start
 #   sh machine.sh down                         # stop and remove
+#
+# The spike's named volumes (dagq-spike-*: the build outputs and the sccache
+# cache) are on the machine's disk; down removes them while the machine runs
+# and then removes the machine with its disk, so none is left.
 set -eu
 name=dagq-spike
 
@@ -103,6 +107,10 @@ case ${1:-} in
   down)
     before=$(persons_default)
     if exists; then
+      if podman machine list --format '{{.Name}} {{.Running}}' | sed 's/\* / /' | grep -qx "$name true"; then
+        podman --connection "$name" volume ls --format '{{.Name}}' | grep '^dagq-spike-' |
+          while read -r volume; do podman --connection "$name" volume rm -f "$volume" > /dev/null; done || true
+      fi
       podman machine stop "$name" || true
       podman machine rm -f "$name"
     fi
@@ -110,7 +118,7 @@ case ${1:-} in
     echo "default connection: $before -> $(default_connection)" >&2
     ;;
   *)
-    sed -n '2,16p' "$0" >&2
+    sed -n '2,20p' "$0" >&2
     exit 2
     ;;
 esac
