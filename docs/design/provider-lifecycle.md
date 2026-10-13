@@ -320,7 +320,6 @@ Claude Codeの起動直後に出うるダイアログと扱い:
 - folder trust: 上の[Trust prompt](#trust-prompt)のとおり`up`のpreflightで止める。
 - auto modeの初回案内（Teach auto mode）: run sessionの設定の`autoMode.environment: ["$defaults"]`で出なくなる（`stop_hook_settings`のdoc comment）。
 - LSP pluginの推奨: settingsでもflagでも抑止できず、30秒で閉じるので何もしない。
-- 抑止したダイアログは画面の兆候を見る`prompt_waiting`の検知に当たらない（[prompt-waiting](supervisor-lifecycle/prompt-waiting.md)）。
 
 ## Claude を使わない運転
 

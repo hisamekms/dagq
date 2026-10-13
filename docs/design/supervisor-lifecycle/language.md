@@ -10,7 +10,6 @@ related:
   - design-supervisor-lifecycle-run-environment
   - design-supervisor-lifecycle-doctor
   - design-supervisor-lifecycle-prompt
-  - design-supervisor-lifecycle-session-prompts
   - design-plugin-integration
   - adr-t616-1
   - adr-t616-2
@@ -83,7 +82,11 @@ supervisorは`Verifier::language`（`ShellVerifier`がmain checkoutの`dagq.toml
 Language: write everything you address to people in the language with BCP 47 tag `ja` — your replies in this conversation, ask questions and option descriptions, task and goal titles and descriptions, context, notes, findings, verdict reasons, and receipt summaries and follow_ups (the landing commit message is built from the task title and the receipt summary). Keep code, identifiers, CLI flags, ask option values and quoted runtime output as they are.
 ```
 
-inboxとplannerの初期promptは5行以内（[Session prompts](session-prompts.md)）だが、この1行は数えない。compactionと`/clear`で初期promptが失われるので、inboxとplannerについては`status --role inbox|planner`の出力に`language`（`tag`・`source`・`user_config`・`instruction`、誤りなら`error`。未設定なら`tag`と`instruction`はnull）を足し、pluginの`SessionStart` hook（`session-start.sh`、[plugin-integration](../plugin-integration.md#起き直しhookadr-0016)）が出す起き直しの出力に同じ指示が入るようにする。hookは先頭の1行で「statusの`language.instruction`があればそれに従って人に向けて書く」と指し、その後のstatusのJSONが指示の文面を持つ（shで JSONから文面を抜き出さない）。pluginのskill（`dagq`・`dagq-planner`・`dagq-inbox`・`dagq-recover`）には「promptか起き直しの出力に言語の指示があれば、その範囲の文をその言語で書く。無ければ会話とrepositoryの規則に従う」と書く（範囲と置き場所は`dagq` skillのsection 5「Language」が持ち、ほかの3つはそこを指す1文を持つ）。workerには起き直しのhookが無い（`session-start.sh`はinboxとplannerだけを扱う）ので、workerは初期promptと、resume・差し戻しの依頼文に載る指示に頼る。
+inboxとplannerの初期promptは5行以内だが、この1行は数えない。
+compactionと`/clear`で初期promptが失われるので、inboxとplannerについては`status --role inbox|planner`の出力に`language`（`tag`・`source`・`user_config`・`instruction`、誤りなら`error`。未設定なら`tag`と`instruction`はnull）を足し、pluginの`SessionStart` hook（`session-start.sh`、[plugin-integration](../plugin-integration.md#起き直しhookadr-0016)）が出す起き直しの出力に同じ指示が入るようにする。
+hookは先頭の1行で「statusの`language.instruction`があればそれに従って人に向けて書く」と指し、その後のstatusのJSONが指示の文面を持つ（shで JSONから文面を抜き出さない）。
+pluginのskill（`dagq`・`dagq-planner`・`dagq-inbox`・`dagq-recover`）には「promptか起き直しの出力に言語の指示があれば、その範囲の文をその言語で書く。無ければ会話とrepositoryの規則に従う」と書く（範囲と置き場所は`dagq` skillのsection 5「Language」が持ち、ほかの3つはそこを指す1文を持つ）。
+workerには起き直しのhookが無い（`session-start.sh`はinboxとplannerだけを扱う）ので、workerは初期promptと、resume・差し戻しの依頼文に載る指示に頼る。
 
 ## `up`と`doctor`
 

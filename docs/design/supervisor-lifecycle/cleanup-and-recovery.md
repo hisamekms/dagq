@@ -18,6 +18,26 @@ sessionの終了はsupervisorが行う。runのsession wrapperはworkspaceなし
 
 containerで動くrunでworktreeとbranchに当たるのは、clone・制御側のrun branch・着地用のworktree・run dirのbundleと状態のファイルで、片付けはcloneでgitを走らせずsymlinkを辿らない（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定7、[生きているsessionの復旧job](background-recovery-job.md)の「後片付けの境界と約束」）。
 
-`failed`・`interrupted`のrunにまだ動いているwrapperがあれば、triageの後にsupervisorが止める（[Triage](triage.md#triage-supervisor)）。人が`ready` / cancelした後のrunや着地したrunに残ったwrapperは、次の掃除（[Run workspaces](run-workspaces.md)）が止める。ADR-t1433-3より前にworkspaceで開いたrunのsession（`workspace_id`がbackgroundのhandleでないもの）は、supervisorは閉じず、cmuxにも聞かない。
+`failed`・`interrupted`のrunにまだ動いているwrapperがあれば、triageの後にsupervisorが止める（[Triage](triage.md#triage-supervisor)）。
+人が`ready` / cancelした後のrunや着地したrunに残ったwrapperは、次の掃除（下の「終わったrunの掃除」）が止める。
+ADR-t1433-3より前にworkspaceで開いたrunのsession（`workspace_id`がbackgroundのhandleでないもの）は、supervisorは閉じず、cmuxにも聞かない。
 
-supervisorの後始末（上のreview後・triage後の停止、[Run workspaces](run-workspaces.md)の掃除）はsupervisorが動いている間だけ働く。runtimeはrunのworkspaceを開かないので、`dagq run close-workspaces`は認可の後に理由を示して拒む（ADR-t1433-3の決定3）。過去に作られて残ったrunのworkspaceは、人が自分のterminalで閉じる。goal 54の片付け（plannerの行と`runner`）はこれと重ならない。
+supervisorの後始末（上のreview後・triage後の停止、終わったrunの掃除）はsupervisorが動いている間だけ働く。
+runtimeはrunのworkspaceを開かないので、`dagq run close-workspaces`は認可の後に理由を示して拒む（ADR-t1433-3の決定3）。
+過去に作られて残ったrunのworkspaceは、人が自分のterminalで閉じる。
+goal 54の片付け（plannerの行と`runner`）はこれと重ならない。
+
+## runのsessionの記録<a id="runのsessionの記録"></a>
+
+- runが開いたsessionは、最初のsession・resumeごとのsession・開き直しのどれもrun_eventsに残り、止めたかはsessionごとに判じる（`domain::run::run_workspaces`）。
+  `task_runs.workspace_closed_at`は最初のsessionの分だけを表す。
+- reviseは生きているsessionに送るので、新しいsessionを開かない。
+
+## 終わったrunの掃除<a id="終わったrunの掃除"></a>
+
+- supervisorのfill passは間隔を置いて、終わったrunのうち生きたsupervisorのleaseが無く、slotに居らず、triageの対象でないrunのsessionを集め、まだ動いているwrapperだけを止める（`sweep_ended_sessions`）。
+- staleなleaseは無いものとして扱う。
+  runを終わった状態にしてからleaseを放すまでにsupervisorが死ぬと、leaseが残ってwrapperが永久に拾われなくなるため。
+- 正は記録ではなくwrapperのprocessで、動いていないsessionには何も書かないので、同じrunを何度掃除しても記録は増えない。
+- 止められなければ`cleanup_failed`を残して次の掃除で止め直し、DBのerrorでもループは止めない。
+- worktreeとbranchは同じ回の[Run worktrees](run-worktrees.md)の掃除が扱い、run dirは消さない。

@@ -140,9 +140,9 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 | 2 cold startは`up`、supervisorはLaunchAgent、`up`がmaintainer workspaceを作る、`CMUX_TASKQ_ROLE` / `QUEUE` | 上書き | ADR-0011 決定1（socket password前提）、ADR-0041 決定6（`up`はsupervisorとinboxだけ）、ADR-0015（環境変数名）、ADR-0026 決定2（`--env`） | launchd常駐と`up`の1コマンドは有効 | [up-down](../design/supervisor-lifecycle/up-down.md) |
 | 3 `down`（bootout・drain、`--wait`、`--force`）、maintainer workspaceは閉じない | 有効（読み替え） | — | `down`はinboxとplannerを閉じない（AGENTS.md） | [up-down](../design/supervisor-lifecycle/up-down.md) |
 | 4 `up`はPIDの死んだ`supervisors`登録を消す（`up`だけの例外） | 有効 | — | ADR-0045 決定16も生きているが黙った登録はpruneしないとしており整合 | [up-down](../design/supervisor-lifecycle/up-down.md) |
-| 5 workspace名 `taskq <repo> maintainer` / `taskq <repo> <task-id> <run-id>` | 上書き | ADR-0011 決定3、ADR-0015、ADR-0018 決定1、ADR-0021 決定1、ADR-0028 決定1 | 今は`[<repo>]<role>` | [naming](../design/supervisor-lifecycle/naming.md) |
+| 5 workspace名 `taskq <repo> maintainer` / `taskq <repo> <task-id> <run-id>` | 上書き | ADR-0011 決定3、ADR-0015、ADR-0018 決定1、ADR-0021 決定1、ADR-0028 決定1 | 今は`[<repo>]<role>` | naming |
 | 6 supervisorのlogを起動ごとに`<queue dir>/logs/supervisor-<started_at>.log`へ | 失効 | ADRなし（task 194、proposedの[ADR-0033](../adr/0033-one-tracing-pipeline-with-local-json-lines-and-optional-otlp.md)の実装） | 今は`logs/<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`（[supervisor-lifecycle](../design/supervisor-lifecycle.md)）。queue dirの`logs/`に置くことと`locate`のlog dirは有効。下の「ADRの外で変わった実装」 | [logs](../design/supervisor-lifecycle/logs.md) |
-| 7 maintainerの初期promptはruntime生成、CLIの使い方はskill `taskq-maintain`、AGENTS.mdはrepository固有の注意だけ | 上書き | ADR-0041 決定1、ADR-0015（skill名）、ADR-0016 決定8、ADR-0022 | 初期promptは`inbox_prompt` / `planner_prompt`。「使い方はskill、AGENTS.mdは固有の注意」は有効 | [session-prompts](../design/supervisor-lifecycle/session-prompts.md)・[plugin-integration](../design/plugin-integration.md) |
+| 7 maintainerの初期promptはruntime生成、CLIの使い方はskill `taskq-maintain`、AGENTS.mdはrepository固有の注意だけ | 上書き | ADR-0041 決定1、ADR-0015（skill名）、ADR-0016 決定8、ADR-0022 | 初期promptは`inbox_prompt` / `planner_prompt`。「使い方はskill、AGENTS.mdは固有の注意」は有効 | session-prompts・[plugin-integration](../design/plugin-integration.md) |
 | 末尾 taskへの分割（T2・T3） | 記録 | — | 完了 | designに無い（一度きりの記録・制約、または文書運用の規則） |
 
 ### ADR-0011 cmuxのsocket passwordとup --in-cmux
@@ -151,7 +151,7 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 | --- | --- | --- | --- | --- |
 | 1 launchd modeはsocket passwordを前提にし、`up`が`CMUX_*`を除いた`cmux ping`でpreflightする | 有効 | — | AGENTS.mdの起動と停止 | [up-down](../design/supervisor-lifecycle/up-down.md) |
 | 2 `up --in-cmux`のfallback、`down`はSIGINTでdrainしworkspaceを閉じる、modeを登録に記録する。maintainer workspaceの作成はlaunchdと同じ | 有効（一部上書き） | ADR-0041 決定6、ADR-0015（`cmux-taskq supervise`） | maintainer workspaceは作らない。自動再起動が無いことは有効 | [up-down](../design/supervisor-lifecycle/up-down.md) |
-| 3 supervisorのworkspace名 `taskq <repo> supervisor` | 上書き | ADR-0015、ADR-0021 決定1、ADR-0028 決定1 | `[<repo>]supervisor` | [naming](../design/supervisor-lifecycle/naming.md) |
+| 3 supervisorのworkspace名 `taskq <repo> supervisor` | 上書き | ADR-0015、ADR-0021 決定1、ADR-0028 決定1 | `[<repo>]supervisor` | naming |
 
 ### ADR-0012
 
@@ -176,8 +176,8 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 1 対応表（crate、repository、archive、plugin、marketplace、launcher、環境変数、データディレクトリ、launchd label、branch、ref、trailer） | 有効 | — | | [plugin-integration](../design/plugin-integration.md)・[persistence](../design/persistence.md)・[naming](../design/supervisor-lifecycle/naming.md)・[integrate](../design/supervisor-lifecycle/integrate.md)。改名の全項目の対応表はdesignに無い |
-| 1 対応表のcmux workspace名の行 | 上書き | ADR-0018 決定1、ADR-0021 決定1、ADR-0028 決定1 | | [naming](../design/supervisor-lifecycle/naming.md) |
+| 1 対応表（crate、repository、archive、plugin、marketplace、launcher、環境変数、データディレクトリ、launchd label、branch、ref、trailer） | 有効 | — | | [plugin-integration](../design/plugin-integration.md)・[persistence](../design/persistence.md)・naming・[integrate](../design/supervisor-lifecycle/integrate.md)。改名の全項目の対応表はdesignに無い |
+| 1 対応表のcmux workspace名の行 | 上書き | ADR-0018 決定1、ADR-0021 決定1、ADR-0028 決定1 | | naming |
 | 1 対応表のskillの行（`dagq-maintain`） | 上書き | ADR-0016 決定8、ADR-0022、ADR-0041 決定1 | 今のskillは`dagq` / `dagq-inbox` / `dagq-planner` / `dagq-recover` | [plugin-integration](../design/plugin-integration.md) |
 | 1 対応表のversionの行（0.2.0） | 記録 | — | versionの付け方はADR-0045 決定1 | [build-identifier](../design/supervisor-lifecycle/build-identifier.md) |
 | 2 文言の置き換え | 有効 | — | | [overview](../design/overview.md)・[plugin-integration](../design/plugin-integration.md) |
@@ -190,15 +190,15 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 原則 maintainerは使い捨て、runtimeは起き直しに要る情報を上限のある大きさで返す | 有効（読み替え） | ADR-0041 決定1 | 対象はinboxとplanner | [notification-route](../design/supervisor-lifecycle/notification-route.md)・[session-prompts](../design/supervisor-lifecycle/session-prompts.md) |
+| 原則 maintainerは使い捨て、runtimeは起き直しに要る情報を上限のある大きさで返す | 有効（読み替え） | ADR-0041 決定1 | 対象はinboxとplanner | notification-route・session-prompts |
 | 1 情報源は`status` / `watch` / `doctor`、`watch --after <cursor>` | 有効 | — | `--role`はADR-0022 決定1が足した | [events-watch](../design/supervisor-lifecycle/events-watch.md)・[doctor](../design/supervisor-lifecycle/doctor.md) |
 | 2 run_eventsのkind名は公開契約、attentionの判定はdomain、attentionの一覧 | 有効（一部上書き） | ADR-0040 決定2、ADR-0041 決定3・17 | `awaiting_integration`はreview job、`failed`はtriage jobに回り、attentionにならない。一覧はADR-0022・0025・0041が足した | [domain-model](../design/domain-model.md)・[status](../design/supervisor-lifecycle/status.md) |
-| 3 runtimeはmaintainerのterminalに打ち込まない | 上書き | ADR-0041 決定1・12・13 | maintainerは無い。plannerにはrevise・answerを送る | [plan-planners](../design/supervisor-lifecycle/plan-planners.md)・[session-send](../design/supervisor-lifecycle/session-send.md) |
+| 3 runtimeはmaintainerのterminalに打ち込まない | 上書き | ADR-0041 決定1・12・13 | maintainerは無い。plannerにはrevise・answerを送る | [plan-planners](../design/supervisor-lifecycle/plan-planners.md)・session-send |
 | 4 attentionのたびにmaintainer workspaceへ`cmux notify` | 上書き | ADR-0022 決定5 | `ask_opened`のときだけinbox宛て | [ask-push](../design/supervisor-lifecycle/ask-push.md) |
 | 5 `integrate`は自動で呼ばれない、着地の承認はユーザーに残す | 上書き | ADR-0022 決定3、ADR-0040 決定2 | review jobのpassでsupervisorが着地させる | [review](../design/supervisor-lifecycle/review.md)・[integrate](../design/supervisor-lifecycle/integrate.md) |
 | 6 既定は圧縮、`--full`でopt-in | 有効 | — | | [status](../design/supervisor-lifecycle/status.md)・[review-command](../design/supervisor-lifecycle/review-command.md) |
 | 7 `review ID`が`review.md`を書く | 有効 | — | review jobの入力（ADR-0040 決定2） | [review-command](../design/supervisor-lifecycle/review-command.md) |
-| 8 SessionStart hookは`DAGQ_ROLE=maintainer`のときだけ`status`、`dagq-maintain`の分割、`maintainer_prompt`の縮約 | 上書き | ADR-0041 決定1・6 | hookは`status --role <role>`（inbox / planner）。skillはinbox / planner / recoverに分かれた | [plugin-integration](../design/plugin-integration.md)・[session-prompts](../design/supervisor-lifecycle/session-prompts.md) |
+| 8 SessionStart hookは`DAGQ_ROLE=maintainer`のときだけ`status`、`dagq-maintain`の分割、`maintainer_prompt`の縮約 | 上書き | ADR-0041 決定1・6 | hookは`status --role <role>`（inbox / planner）。skillはinbox / planner / recoverに分かれた | [plugin-integration](../design/plugin-integration.md)・session-prompts |
 
 ### ADR-0017 runのpathをqueueディレクトリから解決する
 
@@ -215,10 +215,10 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 1 `[<repo>]dagq#<task-id> <task title>` | 上書き | ADR-0028 決定1 | `[<repo>]worker#<task-id> - <task title>` | [naming](../design/supervisor-lifecycle/naming.md) |
-| 2 run IDを`--description "run <run-id>"`に置く | 上書き | ADR-0026 決定3 | `dagq role=… queue=… run=… task=…` | [naming](../design/supervisor-lifecycle/naming.md) |
-| 3 maintainer / supervisor / resumeの名前は変えない | 上書き | ADR-0021 決定1・2、ADR-0028 決定1・2 | | [naming](../design/supervisor-lifecycle/naming.md) |
-| 4 `WorkspaceBackend::create`がtaskを受け取り、名前はadapterの純粋関数 | 有効 | — | | [naming](../design/supervisor-lifecycle/naming.md)・[overview](../design/overview.md) |
+| 1 `[<repo>]dagq#<task-id> <task title>` | 上書き | ADR-0028 決定1 | `[<repo>]worker#<task-id> - <task title>` | naming |
+| 2 run IDを`--description "run <run-id>"`に置く | 上書き | ADR-0026 決定3 | `dagq role=… queue=… run=… task=…` | naming |
+| 3 maintainer / supervisor / resumeの名前は変えない | 上書き | ADR-0021 決定1・2、ADR-0028 決定1・2 | | naming |
+| 4 `WorkspaceBackend::create`がtaskを受け取り、名前はadapterの純粋関数 | 有効 | — | | naming・[overview](../design/overview.md) |
 
 ### ADR-0019 maintainerの定型作業をruntimeに移す
 
@@ -230,7 +230,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 | 3 `integrate`が着地後にpushする、`push_failed`はattention | 有効 | — | 再試行は人（inboxが知らせる） | [integrate](../design/supervisor-lifecycle/integrate.md) |
 | 4 `integrate`が`follow_ups`をdraftに登録する、`ready`にするかcancelするかは人の判断 | 有効（一部上書き） | ADR-0041 決定16・8 | 登録の形はADR-0041 決定16がそのまま引き継ぐ。採否はruntimeが立てるplannerが決め、`ready`にするのはplan reviewだけ | [integrate](../design/supervisor-lifecycle/integrate.md)・[draft-planners](../design/supervisor-lifecycle/draft-planners.md) |
 | 5 taskの要求evidence、`evidence_missing`で`needs_session` | 有効 | — | | [validation](../design/supervisor-lifecycle/validation.md) |
-| 6 prompt待ちを検知し`prompt_waiting`を記録、応答は人かmaintainer | 有効（一部上書き） | ADR-0041 決定17 | `answer_prompt`のaskでinboxが人に渡す（task 100） | [prompt-waiting](../design/supervisor-lifecycle/prompt-waiting.md) |
+| 6 prompt待ちを検知し`prompt_waiting`を記録、応答は人かmaintainer | 有効（一部上書き） | ADR-0041 決定17 | `answer_prompt`のaskでinboxが人に渡す（task 100） | prompt-waiting |
 
 ### ADR-0020 rebind
 
@@ -244,10 +244,10 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 1 `[<repo>]dagq maintainer` / `[<repo>]dagq supervisor` | 上書き | ADR-0028 決定1、ADR-0041 決定1 | | [naming](../design/supervisor-lifecycle/naming.md) |
-| 2 resume workspaceの名前 `[<repo>]dagq resume <run ID>` | 上書き | ADR-0028 決定2 | | [naming](../design/supervisor-lifecycle/naming.md) |
-| 3 旧名を探す互換の検索は持たない | 有効 | — | ADR-0028 決定4も同じ（識別はUUIDなので互換が要らない） | [naming](../design/supervisor-lifecycle/naming.md) |
-| 前提 `up`はtitleの完全一致で探す | 上書き | ADR-0026 決定1 | | [naming](../design/supervisor-lifecycle/naming.md) |
+| 1 `[<repo>]dagq maintainer` / `[<repo>]dagq supervisor` | 上書き | ADR-0028 決定1、ADR-0041 決定1 | | naming |
+| 2 resume workspaceの名前 `[<repo>]dagq resume <run ID>` | 上書き | ADR-0028 決定2 | | naming |
+| 3 旧名を探す互換の検索は持たない | 有効 | — | ADR-0028 決定4も同じ（識別はUUIDなので互換が要らない） | naming |
+| 前提 `up`はtitleの完全一致で探す | 上書き | ADR-0026 決定1 | | naming |
 | 切替手順 | 失効 | — | 一度きり | designに無い（一度きりの記録・制約、または文書運用の規則） |
 
 生きている決定は3だけで、ADR-0028 決定4が同じことを言う。下の「deprecated候補」の境界例。
@@ -256,11 +256,11 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 原則 runtimeはどのsessionにも打ち込まない、例外はworkerへのanswer | 上書き | ADR-0041 決定12・13 | plannerにもrevise・answerを送る。worker宛てにはresume・revise・rebaseの依頼（ADR-0019、ADR-0027）も送る | [session-send](../design/supervisor-lifecycle/session-send.md)・[plan-planners](../design/supervisor-lifecycle/plan-planners.md) |
+| 原則 runtimeはどのsessionにも打ち込まない、例外はworkerへのanswer | 上書き | ADR-0041 決定12・13 | plannerにもrevise・answerを送る。worker宛てにはresume・revise・rebaseの依頼（ADR-0019、ADR-0027）も送る | session-send・[plan-planners](../design/supervisor-lifecycle/plan-planners.md) |
 | 1 `asks`表、`ask` / `answer` / `asks`、一意性、`ask_opened` / `ask_answered` | 有効 | — | | [ask](../design/supervisor-lifecycle/ask.md) |
 | 1 `kind`は4つ | 上書き | ADR-0041 決定4・11・13、ADR-0043 決定3 | `blocked`・`approve_plan`・`planner_question`・`stalled`が足された | [ask](../design/supervisor-lifecycle/ask.md) |
 | 1 `watch --role maintainer`、`ask_answered`はmaintainer向け | 上書き | ADR-0041 決定6 | `--role maintainer`は無い。`ask_answered`はinbox | [events-watch](../design/supervisor-lifecycle/events-watch.md)・[status](../design/supervisor-lifecycle/status.md) |
-| 2 workerは`worker_question`で聞いて止まり、answerはruntimeが送る | 有効 | — | | [worker-question-answer](../design/supervisor-lifecycle/worker-question-answer.md) |
+| 2 workerは`worker_question`で聞いて止まり、answerはruntimeが送る | 有効 | — | | worker-question-answer |
 | 3 着地は疑義のあるときだけ人に聞く。maintainerが`integrate`を呼ぶ | 上書き | ADR-0040 決定2 | 疑義の観点は有効。判断はreview job、concernの`approve_landing`のanswerはsupervisorが適用する | [review](../design/supervisor-lifecycle/review.md) |
 | 4 `up`がinboxとplannerを開く、各役割の定義 | 上書き | ADR-0041 決定1・6 | `up`はinboxだけ（とsupervisor）。inboxの定義は有効 | [roles](../design/supervisor-lifecycle/roles.md)・[up-down](../design/supervisor-lifecycle/up-down.md)・[plan-planners](../design/supervisor-lifecycle/plan-planners.md) |
 | 5 `cmux notify`は`ask_opened`のときだけinbox宛て | 有効 | — | ADR-0043 決定3が参照する | [ask-push](../design/supervisor-lifecycle/ask-push.md) |
@@ -282,12 +282,12 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 1 識別の正はqueue DB、`session_workspaces`の行（`maintainer` / `supervisor`、後で`planner` / `inbox`） | 有効（一部上書き） | ADR-0041 決定1・6 | `maintainer`と`planner`の行は`up`が忘れる。plannerはオンデマンドで開く | [naming](../design/supervisor-lifecycle/naming.md) |
-| 2 roleとqueueを`--env`で渡す、`SessionRole`は`maintainer`を含む5値 | 有効（一部上書き） | ADR-0041 決定1・2 | `maintainer`は無く、jobの`observer` / `reviewer`がある | [roles](../design/supervisor-lifecycle/roles.md)・[naming](../design/supervisor-lifecycle/naming.md) |
-| 3 descriptionは機械可読の1行 | 有効 | — | | [naming](../design/supervisor-lifecycle/naming.md) |
-| 4 queueごとのworkspace group | 有効 | — | | [naming](../design/supervisor-lifecycle/naming.md) |
-| 5 queue hash | 有効 | — | | [naming](../design/supervisor-lifecycle/naming.md) |
-| 6 titleの文字列は変えない | 失効 | ADR-0028 決定1 | | [naming](../design/supervisor-lifecycle/naming.md) |
+| 1 識別の正はqueue DB、`session_workspaces`の行（`maintainer` / `supervisor`、後で`planner` / `inbox`） | 有効（一部上書き） | ADR-0041 決定1・6 | `maintainer`と`planner`の行は`up`が忘れる。plannerはオンデマンドで開く | naming |
+| 2 roleとqueueを`--env`で渡す、`SessionRole`は`maintainer`を含む5値 | 有効（一部上書き） | ADR-0041 決定1・2 | `maintainer`は無く、jobの`observer` / `reviewer`がある | [roles](../design/supervisor-lifecycle/roles.md)・naming |
+| 3 descriptionは機械可読の1行 | 有効 | — | | naming |
+| 4 queueごとのworkspace group | 有効 | — | | naming |
+| 5 queue hash | 有効 | — | | naming |
+| 6 titleの文字列は変えない | 失効 | ADR-0028 決定1 | | naming |
 | 切替手順 | 失効 | — | 一度きり | designに無い（一度きりの記録・制約、または文書運用の規則） |
 
 ### ADR-0027 workerのsessionをreviewの後まで残し、revise、merge-treeの事前判定
@@ -305,12 +305,12 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 1 supervisor / worker / inboxのtitle | 有効 | — | | [naming](../design/supervisor-lifecycle/naming.md) |
+| 1 supervisor / worker / inboxのtitle | 有効 | — | | naming |
 | 1 maintainerのtitle | 上書き | ADR-0041 決定1 | 役割が無い | [roles](../design/supervisor-lifecycle/roles.md) |
-| 1 plannerのtitle `[<repo>]planner` | 上書き | ADR-0041 決定6 | `[<repo>]planner#<planner-id>`（overview） | [naming](../design/supervisor-lifecycle/naming.md) |
-| 2 resumeのworkspaceもworkerと同じtitle、description `run <run-id> resume` | 有効（読み替え） | — | 開くのはruntime（自動resume）。「当面はmaintainerが開き」は失効 | [naming](../design/supervisor-lifecycle/naming.md)・[needs-session](../design/supervisor-lifecycle/needs-session.md) |
+| 1 plannerのtitle `[<repo>]planner` | 上書き | ADR-0041 決定6 | `[<repo>]planner#<planner-id>`（overview） | naming |
+| 2 resumeのworkspaceもworkerと同じtitle、description `run <run-id> resume` | 有効（読み替え） | — | 開くのはruntime（自動resume）。「当面はmaintainerが開き」は失効 | naming・[needs-session](../design/supervisor-lifecycle/needs-session.md) |
 | 3 `DAGQ_ROLE`の値、`MAINTAINER_ROLE`などの定数 | 上書き | ADR-0041 決定1・2 | `maintainer`は無い | [roles](../design/supervisor-lifecycle/roles.md) |
-| 4 旧名との互換は持たない | 有効 | — | | [naming](../design/supervisor-lifecycle/naming.md) |
+| 4 旧名との互換は持たない | 有効 | — | | naming |
 
 ### ADR-0029 taskが変更してよいパスを宣言する
 
@@ -338,7 +338,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 | 1〜4 `up`がinboxに色・pill・ピンを当て、毎回当て直す | 有効 | — | | [up-down](../design/supervisor-lifecycle/up-down.md) |
 | 1〜4 `up`がplannerに色・pill・ピンを当てる | 上書き | ADR-0041 決定6 | `up`はplannerを開かない。plannerの色とpillは`plan`が当て、ピンは付けない（[supervisor-lifecycle](../design/supervisor-lifecycle.md)、task 277） | [plan-planners](../design/supervisor-lifecycle/plan-planners.md) |
 | 5 失敗はwarning | 有効 | — | | [up-down](../design/supervisor-lifecycle/up-down.md)・[plan-planners](../design/supervisor-lifecycle/plan-planners.md) |
-| 6 閉じる前にunpin | 有効 | — | | [naming](../design/supervisor-lifecycle/naming.md) |
+| 6 閉じる前にunpin | 有効 | — | | naming |
 
 ## 統合ADRの組（過去の記録）
 
@@ -356,7 +356,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 棚卸しでは、後継が無く丸ごと無効なADRは0001〜0034には無かった。生きている決定や上書きした後継があることは、統合や廃止の理由にはしない。
 
-境界例は**ADR-0021**。決定1・2と前提はADR-0028・0026に上書きされ、生きている決定3（互換の検索を持たない）はADR-0028決定4と同じ内容。後継のある決定を含むため、自動的に`deprecated`にしない。現状は表と[Naming](../design/supervisor-lifecycle/naming.md)を入口に残す。廃止の要否はplannerが人と決める候補であり、この文書ではstatusを変更しない。人の判断を要する互換方針そのものを変える場合だけ、小さな`ADR-t<ID>-<N>`で対象決定をamendsする候補にする。
+境界例は**ADR-0021**。決定1・2と前提はADR-0028・0026に上書きされ、生きている決定3（互換の検索を持たない）はADR-0028決定4と同じ内容。後継のある決定を含むため、自動的に`deprecated`にしない。現状は表とNamingを入口に残す。廃止の要否はplannerが人と決める候補であり、この文書ではstatusを変更しない。人の判断を要する互換方針そのものを変える場合だけ、小さな`ADR-t<ID>-<N>`で対象決定をamendsする候補にする。
 
 ## ADRの外で変わった実装
 
@@ -366,7 +366,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 | --- | --- |
 | supervisorなどのlog（ADR-0010決定6、task 194） | [Logs](../design/supervisor-lifecycle/logs.md)はJSON Linesのファイル名・書式を記載済み。細部の差分が残ればこのdesignを直す候補にする。ADR-0033がproposedであることだけを理由にacceptや新ADRを求めない。ログの収集・外部送信など人の判断が要る方針を変えるなら、その範囲だけをplannerが人と決め、小さなamendsの候補にする。 |
 | exit要求のtimeout（旧ADR-0019決定2、task 104） | 後継ADR-0047決定25・40、[Receipt and session exit](../design/supervisor-lifecycle/receipt-and-session-exit.md)・[Background recovery job](../design/supervisor-lifecycle/background-recovery-job.md)を読む。復旧jobの後にaskへ渡す方針は記録済み。生きているrunの復旧job自体が失敗した場合も[ADR-t609-1](../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)が決定40をamendsしている。残る実装・記述の差分はdesignに実装状況を書く候補で、新しい決定の候補ではない。 |
-| resumeの上限とprompt待ち（旧ADR-0019決定1・6、task 100） | 後継ADR-0047決定24・29・40、[Needs session](../design/supervisor-lifecycle/needs-session.md)・[Prompt waiting](../design/supervisor-lifecycle/prompt-waiting.md)・[Triage](../design/supervisor-lifecycle/triage.md)を読む。復旧job・人へのaskの境界は後継ADRが持つ。回数・askの形などの細部の差分はdesignを直す候補とし、旧記述を統合ADRへ書き直さない。 |
+| resumeの上限とprompt待ち（旧ADR-0019決定1・6、task 100） | 後継ADR-0047決定24・29・40、[Needs session](../design/supervisor-lifecycle/needs-session.md)・Prompt waiting・[Triage](../design/supervisor-lifecycle/triage.md)を読む。復旧job・人へのaskの境界は後継ADRが持つ。回数・askの形などの細部の差分はdesignを直す候補とし、旧記述を統合ADRへ書き直さない。 |
 
 別の判断候補は、ADR-0009箇条5のgoal所属の編集範囲。「readyのtaskは編集しない」がgoal所属に及ぶかという当時の疑問は、[Domain model](../design/domain-model.md)と後継ADR-0047決定9で現在の扱いを確かめる。既存の決定で解けるならdesignの記述を合わせるだけにし、未決の境界を変える必要が残る場合だけ、人と決めて対象決定を小さなADRでamendsする候補にする。
 

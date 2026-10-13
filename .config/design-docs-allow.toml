@@ -149,10 +149,6 @@ line = 2824
 tasks = 12
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/first-commit.md"
-tasks = 1
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/goal-review.md"
 line = 3988
 tasks = 18
@@ -175,11 +171,6 @@ tasks = 7
 path = "docs/design/supervisor-lifecycle/idle-without-receipt.md"
 line = 1480
 tasks = 8
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/implementation-status.md"
-line = 6265
-tasks = 33
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/install.md"
@@ -207,7 +198,6 @@ tasks = 5
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/language.md"
-line = 1396
 tasks = 5
 
 [[doc]]
@@ -219,10 +209,6 @@ tasks = 2
 path = "docs/design/supervisor-lifecycle/needs-session.md"
 line = 3353
 tasks = 15
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/notification-route.md"
-tasks = 7
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/observer.md"
@@ -241,10 +227,6 @@ path = "docs/design/supervisor-lifecycle/plan-review.md"
 size = 68947
 line = 9809
 tasks = 46
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/prompt-waiting.md"
-tasks = 3
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/push.md"
@@ -290,24 +272,9 @@ line = 3131
 tasks = 2
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/run-workspaces.md"
-line = 2563
-tasks = 7
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/run-worktrees.md"
 line = 2575
 tasks = 27
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/session-prompts.md"
-line = 2227
-tasks = 6
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/session-send.md"
-line = 1086
-tasks = 10
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/session-wrapper.md"
@@ -315,16 +282,11 @@ line = 1193
 tasks = 5
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/silent-wrapper.md"
-tasks = 3
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/source-repository.md"
 line = 1174
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/stall-thresholds.md"
-line = 1384
 tasks = 13
 
 [[doc]]
@@ -367,15 +329,6 @@ tasks = 14
 path = "docs/design/supervisor-lifecycle/worker-model.md"
 line = 1345
 tasks = 5
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/worker-question-answer.md"
-line = 1337
-tasks = 5
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/worktree-read-only-git.md"
-tasks = 2
 
 [[doc]]
 path = "docs/design/test-fixtures.md"

@@ -247,7 +247,7 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 
 ## AIが決めるconcern<a id="aiが決めるconcern未実装"></a>
 
-[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)決定3（ADR-0027決定1・2のamends）。
+[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)決定3。
 
 - **verdictの欄**: concernのverdictは推奨（`land` / `send_back`）・確信度・人が要る理由（`scope` / `discard`）を持ち、passとreviseでは捨てる（`ReviewVerdict`）。
   `scope`は着地させると受け入れ条件・ADR・goalの決定からの外れを受け入れるもの、`discard`は成果を捨てる判断。

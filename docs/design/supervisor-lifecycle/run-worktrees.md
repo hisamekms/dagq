@@ -11,7 +11,11 @@ related:
 
 # Run worktrees
 
-終わったrunのworktreeが占めるディスクを、supervisorが自動で空ける（task 376。goal 34のconstraintsの人の決定（2026-09-25）。2026-09-25に、消されずに残ったrunの`target/`（1 runあたり0.6〜3.4GB、合計20GB超）で空きが尽き、integrateの検証が`No space left on device`で落ちた）。対象は、slotに居ないrunのうち、生きているsupervisorのleaseが無く`integrated`・`succeeded`・`failed`・`interrupted`で終わったもの（staleなleaseは無いものとして扱う。[Run workspaces](run-workspaces.md#run-workspaces)の掃除と同じ。task 396）と、leaseが無くtaskが`completed` / `canceled`になったもの（runの状態を問わない）（`ended_run_worktrees`）。worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のcheckoutとその祖先には触れない。消したものはもう無いので、何度見てもよい。ただし片付けるものが何も残っていないrunは、同じsupervisorのプロセスの次の掃除からは候補にしない（下の「片付け終わったrun」）。
+終わったrunのworktreeが占めるディスクを、supervisorが自動で空ける（task 376。goal 34のconstraintsの人の決定（2026-09-25）。2026-09-25に、消されずに残ったrunの`target/`（1 runあたり0.6〜3.4GB、合計20GB超）で空きが尽き、integrateの検証が`No space left on device`で落ちた）。
+対象は、slotに居ないrunのうち、生きているsupervisorのleaseが無く`integrated`・`succeeded`・`failed`・`interrupted`で終わったもの（staleなleaseは無いものとして扱う。[掃除](cleanup-and-recovery.md#終わったrunの掃除)と同じ。task 396）と、leaseが無くtaskが`completed` / `canceled`になったもの（runの状態を問わない）（`ended_run_worktrees`）。
+worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のcheckoutとその祖先には触れない。
+消したものはもう無いので、何度見てもよい。
+ただし片付けるものが何も残っていないrunは、同じsupervisorのプロセスの次の掃除からは候補にしない（下の「片付け終わったrun」）。
 
 - **taskが`completed` / `canceled`**: worktreeとbranchを消す（`git worktree remove --force`、branchがあれば`git branch -D`）。`worktree_removed`（`path`、`branch`、`bytes`、`by: supervisor`、`reason`: `task_completed` / `task_canceled`）を記録する。前のrunのworktreeも、着地した（`integrate`がworktreeを消せなかった）runのものも同じ。run_dirとその記録、着地したcommitの`refs/dagq/runs/<run-id>`は残す
   - 消す前に（`git worktree remove`の前、下の`.git`の壊れたdirを消す前とも）、worktreeがそのrun自身の`<runs>/<run-id>/worktree`（`--repo`のcheckoutとその祖先でない）なら、実行ファイルのpathがその下にあるプロセスを止める（SIGTERM、復旧jobの`stop_processes`と同じ3秒の猶予の後に残ればSIGKILL）。止めたものは`worktree_removed`の`stopped_processes`（`pid`、`executable`、SIGKILLまで要ったかの`killed`）に残す。一覧を取れなければ止めずに消し、その理由を`processes_unlisted`に残す（task 1590。2026-10-03に、coverageの関門のtestが取り残した計装済みの`dagq`（ppid 1）が、worktreeを消した後に終わって`LLVM_PROFILE_FILE`の`target/llvm-cov-target/*.profraw`を書き出し、`.git`もsourceも無いworktreeのdirを5件作り直していた）。止めるかは実行ファイルだけで決め、cwdだけがworktreeの中のプロセス、実行ファイルを読めないプロセス、supervisor自身とその祖先、pid 0と1は止めない（副作用の無い`domain::disk::worktree_executables`と`own_ended_worktree`）。taskが終わっていないrun（ビルド成果物だけを消す）とleaseのあるrun（候補にならない）のプロセスには触らない。プロセスの一覧（`ps`の1回と、pidごとの実行ファイルの読み取り。macOSは`proc_pidpath`、それ以外は`/proc/<pid>/exe`）はworktreeを実際に消すときにだけ取り、片付けるもののない掃除や候補ごとには取らない
@@ -68,7 +72,10 @@ related:
 
 消す契機は、supervisorのslotが終わったとき（`integrated`・`failed`・`interrupted`）、triageが終わったとき、triageの`decide` askとlandingの`approve_landing` askのanswer（`cancel`を含む）を適用したとき（そのtaskのrunだけ）と、上の掃除と同じ回（`sweep_ended_runs`。終わったrunに残ったbackgroundのwrapperを止めるのと同じ回で、全runを見直す）。手での`integrate`は着地したrunのworktreeを自分で消し、手での`recover`・人の`ready` / `cancel`・supervisorの外で終わったrunは次の掃除が拾う。失敗は`cleanup_failed`（`path`、`message`、`by: supervisor`）にして残りを続け、次の掃除で再び試す（supervisorのプロセスごとにworktreeあたり1回だけ記録する）。
 
-runのsessionの停止（backgroundのwrapperのhandleの`stop_background`。停止ごとに`wrapper_stopped`も記録する。cmuxを呼ばない。[Run workspaces](run-workspaces.md#run-workspaces)）の成否は`task_runs.workspace_closed_at`で表す。nullは「止めたことを確かめていない」で、停止の失敗だけでなく、wrapperを止めた後にDBへ書けなかった場合も含む。停止の失敗は`cleanup_failed`イベントと`last_error`に残るが、run状態は変えない。止めていないsessionをcleaned扱いにせず、再試行は`doctor`/`recover`で扱う。
+runのsessionの停止（backgroundのwrapperのhandleの`stop_background`。停止ごとに`wrapper_stopped`も記録する。cmuxを呼ばない。[後始末](cleanup-and-recovery.md)）の成否は`task_runs.workspace_closed_at`で表す。
+nullは「止めたことを確かめていない」で、停止の失敗だけでなく、wrapperを止めた後にDBへ書けなかった場合も含む。
+停止の失敗は`cleanup_failed`イベントと`last_error`に残るが、run状態は変えない。
+止めていないsessionをcleaned扱いにせず、再試行は`doctor`/`recover`で扱う。
 
 ## containerのrunのclone
 

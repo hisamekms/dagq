@@ -42,6 +42,30 @@ idleはwrapperのidle markerだけで判じる。
   plannerではreviseと`planner_question`のanswerの依頼の前に`record_supervisor_input`が印を書く。
 - **workerのsession**<a id="workerのsession"></a>: `Supervisor::session_idle` は wrapper の idle marker だけを読む。
 
+## 黙ったwrapper<a id="黙ったwrapper"></a>
+
+- wrapperのheartbeatが古くても、wrapperが生きていればsessionは生きていて、supervisorはkillしない（判定は`wrapper_pulse`）。
+  生きていれば沈黙ごとに1回`wrapper_heartbeat_expired`を記録して終了の依頼のfileを書き、heartbeatが戻れば印を消す。
+- 終了を記録した後なら次のpollで終了を扱い、終了の記録の無いまま居なくなっていれば失ったsessionとして復旧する。
+- 生きているかは記録したhandleのpidと起動時刻で判じ、heartbeatの古さは生死に使わない（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）。
+- wrapperは終了の記録を一時的な失敗で失わないよう再試行し、その合計の待ちはsupervisorが黙ったとみなすまでの時間に収める（`application::session`の`record_exit`）。
+- 落とし穴: wrapperのheartbeatとrun_eventsの`created_at`は実時計で書かれ、supervisorは注入した`Clock`と比べる。
+  wrapperの居る`supervise`のtestで固定時刻の`Clock`を使うと生死を誤るので、固定するのはwrapperの居ない経路だけにする。
+  receiptやidle markerのmtimeと比べる時刻も、ファイルの時刻と揃うよう実時計から読む。
+
+## workerへの答えの配送<a id="workerへの答えの配送"></a>
+
+[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)決定2。
+runtimeがworkerのsessionに渡すのは終了の依頼・resumeの解消の依頼・reviseの依頼と`worker_question`の答えだけで、どれも次のturnの依頼としてrun dirの`turns/`に書く。
+
+- 答えはturnの間（最後に始まったturnの終わりをidle markerが示すとき）に送り、そのときはmarkerとaskの時刻を比べない。
+  turnの後に開くask（queue serviceより前に起動したCodexのturnのask）があり、markerがaskより古くなりうるため。
+- 依頼を書けたら`ask_delivered`とaskのcloseを同じtransactionで記録する。
+  書けなければ`ask_delivery_failed`だけを記録してaskを閉じず、再送しない（inboxのattentionになる）。
+  書いてからcloseまでの間にsupervisorが死んだときだけ、引き継いだsupervisorが同じ答えをもう一度送りうる。
+- runtimeが届けるrunへの答え（`domain::session_takes_answers`）はattentionにせず、届ける者の居ない答えは`send the answer of ask <id> to the worker and close it`のattentionになる。
+- 配送の前に閉じた`worker_question`の答えは送らず、閉じたことを1回だけ伝える（[receiptの無いidleの検知](idle-without-receipt.md)）。
+
 ## follow_upsの分類コード<a id="follow_upsの分類コード未実装"></a>
 
 [ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定（task 954で実装）。一覧はtask 951の分析（[follow-up-kinds](../../plans/follow-up-kinds.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種類の問題の名前を揃えた。

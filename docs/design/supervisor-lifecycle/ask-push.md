@@ -32,7 +32,21 @@ supervisor・queue service・observerは知らせず、askを開く経路（`ask
 - 認証とコストのaskを1件にまとめるとき（ADR-0047決定42）、runが加わるだけでは`ask_opened`が無いので知らせない。
 - runの遷移・`answer`・`ask close`は知らせない（[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)決定5）。
   inboxはattentionを`watch`で受ける。
+  `watch`はqueueを読むだけで、`integrate`などの操作を呼ばない。
 
 通知は人への知らせで、inboxのClaudeのsessionを起こさない（sessionはwatchの返りで起きる）。
-watchが張られていないあいだは通知も出ないので、その後ろ盾は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)の層が持つ: watcherの記録（[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが待つときのsupervisorの`inbox_nudged`と`[push]`（[inboxへの知らせ](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）。
+watchが張られていないあいだは通知も出ないので、その後ろ盾は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)の層が持つ: watcherの記録（[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが待つときのsupervisorの`inbox_nudged`と`[push]`（下の「supervisorによるinboxへの知らせ」）。
 supervisorはinboxの画面を読まず、どのterminalにも打ち込まない。
+
+## supervisorによるinboxへの知らせ<a id="supervisorによるinboxへの知らせ"></a>
+
+[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)決定1の(3)。
+入口は`application::supervise::inbox_nudge`（閾値とeventのpayloadはそのdoc comment）で、supervisorは毎pass、drainの間も行う（drainはaskの答えを待つため）。
+
+- inboxのwatcherが`absent`（`application::inbox_watcher::judge_with`）で、inbox宛てのopenなaskが閾値より長く待つときだけ知らせる。
+  待ちは、askを開いた時刻とwatcherを最後に見た時刻の遅い方から数え、watcherが見ていたあいだは数えない。
+- 知らせはwatcherが居ない区間（`last_seen_at`で識別する）ごとに1回で、居ないことと待つaskの件数だけを伝え、askとattentionの中身は送らない。
+- 知らせる前に`inbox_nudged`を1つのwrite transactionで書き（`claim_inbox_nudge`）、書けたsupervisorだけが知らせるので、複数のsupervisorもexecの後のprocessも二度知らせない。
+- `[push]`があればKPIのpushと同じcommandにmessageを1つ渡し、送り方と記録はKPIの[push](push.md)と同じで、`daily`・`breach`の設定はこのmessageを止めない。
+  無いか読めなければeventだけを残す。
+  messageは待ちに入れるだけなので、送る前にsupervisorがexecか停止で終われば送られず、同じ区間には二度入れない。

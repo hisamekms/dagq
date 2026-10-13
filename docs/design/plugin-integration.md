@@ -142,7 +142,11 @@ plugins/claude-dagq/
 
 各`SKILL.md`は手順だけを書き8 KB以下に収め（`tests/plugin.rs`が確かめる）、出力フィールドや状態の一覧は各skillの`reference/`に置いて本文から「必要な時に読む」と指す。skillは呼ぶたびに読み込まれcompaction後にも読み直されるので、読み込み単位を小さくする。descriptionはtriggerが重ならないように書き分ける: `dagq`は登録と参照、`dagq-planner`はruntimeが立てるplanner session（`DAGQ_ROLE=planner`）の依頼の計画・登録・draftの判断・goal close、`dagq-inbox`はinbox session（`DAGQ_ROLE=inbox`）のaskとattentionの中継と人が頼んだ計画の依頼（`request add`）、`dagq-recover`は人が手で行うこと（`recover run` / `triage by hand` / `review by hand` / `review and integrate` / `push main` / `restart supervisor`、回答済みの`stalled`のaskの実行と過去の`stuck_exit` / `answer_prompt`のaskの読み方、`up` / `down`）。
 
-ADR-0010は、常駐sessionが使うCLIの手順（起動・監視・レビュー・着地・停止）をskillに集め、AGENTS.mdにはrepository固有の注意だけを残すことを決めた。`taskq-run`を廃してその内容を常駐session用のskillへ移し、ADR-0016の(6)(7)(8)でそれを3本に分け、[ADR-0022](../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)で`dagq-inbox`と`dagq-planner`を足した。ADR-0024の決定1、6とConsequencesで常駐sessionの役割そのものを退役させ（[overview](overview.md#用語集)の「退役した役割」）、その3本のskillを消した: レビューと着地はsupervisorのreview job（ADR-0027）、失敗runはtriage jobが行い、残る手順（`review_failed`のときの手での`integrate`、supervisorが居ないときの`recover`、`up` / `down` / バイナリ更新、runのsessionのturnの読み方（`run log`））は`dagq-recover`に移し、inboxが人の指示でそれを実行する。`up`の手順は`dagq-recover`のsection 5を指す（`up`はplannerを開かず、plannerはruntimeだけが立てる。ADR-t1394-1）。inbox / plannerの初期promptはruntimeが生成し（[supervisor-lifecycle](supervisor-lifecycle/session-prompts.md#session-prompts)）、それぞれ`dagq-inbox` / `dagq-planner` skillを指す。
+ADR-0010は、常駐sessionが使うCLIの手順（起動・監視・レビュー・着地・停止）をskillに集め、AGENTS.mdにはrepository固有の注意だけを残すことを決めた。
+`taskq-run`を廃してその内容を常駐session用のskillへ移し、ADR-0016の(6)(7)(8)でそれを3本に分け、[ADR-0022](../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)で`dagq-inbox`と`dagq-planner`を足した。
+ADR-0024の決定1、6とConsequencesで常駐sessionの役割そのものを退役させ（[overview](overview.md#用語集)の「退役した役割」）、その3本のskillを消した: レビューと着地はsupervisorのreview job（ADR-0027）、失敗runはtriage jobが行い、残る手順（`review_failed`のときの手での`integrate`、supervisorが居ないときの`recover`、`up` / `down` / バイナリ更新、runのsessionのturnの読み方（`run log`））は`dagq-recover`に移し、inboxが人の指示でそれを実行する。
+`up`の手順は`dagq-recover`のsection 5を指す（`up`はplannerを開かず、plannerはruntimeだけが立てる。ADR-t1394-1）。
+inbox / plannerの初期promptはruntimeが生成し（[Prompt](supervisor-lifecycle/prompt.md)）、それぞれ`dagq-inbox` / `dagq-planner` skillを指す。
 
 ### 起き直しhook（ADR-0016）
 
@@ -157,7 +161,7 @@ inbox（唯一の常駐session）とplanner（proposalごとのオンデマン�
 
 ### watchを張らせるStop hook（ADR-t906-1）
 
-inboxのClaude sessionを起こすのは`watch --role inbox`の終了だけで、supervisorはinboxに打ち込まず（watcherが居ないときは`inbox_nudged`と`[push]`。[通知経路](supervisor-lifecycle/notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)、[ADR-t1433-5](../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)）、watchの`[push]`の通知はsessionを起こさない。
+inboxのClaude sessionを起こすのは`watch --role inbox`の終了だけで、supervisorはinboxに打ち込まず（watcherが居ないときは`inbox_nudged`と`[push]`。[inboxへの知らせ](supervisor-lifecycle/ask-push.md#supervisorによるinboxへの知らせ)、[ADR-t1433-5](../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)）、watchの`[push]`の通知はsessionを起こさない。
 `/clear`・compaction・再起動の後にwatchを張り直さずにturnを終えると、その後に開いたaskは人に届かない（2026-09-28に約3時間）。
 Stop hookがそのturnの終わりを止める。
 

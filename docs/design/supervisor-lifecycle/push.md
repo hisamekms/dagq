@@ -42,7 +42,7 @@ runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookの
 
 - `[push]`が無いか`command`が空なら、runtimeはコマンドを呼ばず、pushのeventも記録しない（レポートと目標割れのeventは書く）。設定はレポートを書くたびに読み直す。読めない`[push]`は`warn`のlogを出してその日のpushをしないだけで、レポートと目標割れの記録は止めない。
 - 読むのは`supervise --report-daily`のsupervisor（`compose`の`ReportPort::push_config`）とinboxの`watch --role inbox`だけで、どれも使うときに読み直す。
-  supervisorはレポートを書くときと、watcherの居ないinboxへの知らせを出すと決めたとき（drainの間も。[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）に読む。
+  supervisorはレポートを書くときと、watcherの居ないinboxへの知らせを出すと決めたとき（drainの間も。[inboxへの知らせ](ask-push.md#supervisorによるinboxへの知らせ)）に読む。
   watchは始めるときに読む（[人へのaskの通知](ask-push.md)）。
   `dagq report`と`dagq kpi`は`[push]`を読まない。
   ライブラリの`SuperviseOptions::host_config`はhost全体のファイルの場所を、`push_retry`は再試行の間隔を変える（testが使う）。
@@ -72,7 +72,7 @@ ADR-0051の決定22が挙げる`resolved`の種類は、解消を即時には送
 - 1つのjobの中では即時通知、日次、週次の順に送る。
 - **inboxの見張りの通知**（`inbox_watch`、`inbox_watch_message`）: inboxのwatchが居ないままaskがinboxを待つと、`supervise::inbox_nudge`が同じ`ReportPort::push_config`で`[push]`を読み、その不在ごとに1通を返し、ループがこの文書の待ちに入れる。
   送り方・再試行・記録は下の「実行・再試行・失敗」と同じで、`daily`・`breach`はこのmessageを止めない。
-  いつ送るかと`inbox_nudged`の記録は[通知経路](notification-route.md)が持つ。
+  いつ送るかと`inbox_nudged`の記録は[inboxへの知らせ](ask-push.md#supervisorによるinboxへの知らせ)が持つ。
 - **新しいaskの通知**（`ask_opened`）: inboxの`watch --role inbox`が`ask_opened`を返すとき、そのwatchのprocessが同じ`[push]`で1通を送る。
   新しいaskの件数を伝えるだけで、askの中身は載せない。
   送り方・再試行しないこと・失敗の残し方は[人へのaskの通知](ask-push.md)が持つ。

@@ -78,7 +78,7 @@ supervisor
   wrapperは`turn_finished`の記録の後に書き、wrapperを失ったturnのmarkerだけはsupervisorが書く（下の「待ちの最中に失ったsessionの開き直し」）。
 - wrapperは識別の組（pidと起動時刻）で名指し、起動時刻が合わないpidにsignalを送らない。
 - run dirはworkerが書けるので、runtimeはrun dirの中のlinkを辿らず、通常のfileだけを上限付きで読む。
-- 黙っただけのwrapperはkillしない（[wrapperが黙ったsession](silent-wrapper.md)）。
+- 黙っただけのwrapperはkillしない（[黙ったwrapper](receipt-and-session-exit.md#黙ったwrapper)）。
 
 ## 入口の地図
 
@@ -181,7 +181,7 @@ run dirのI/Oの約束と落とし穴:
 
 - 成功（receiptかaskが残った）: wrapperは次の依頼を待つ。
   supervisorはreceiptがあれば[validating](receipt-and-session-exit.md)へ、`worker_question`が開いていれば答えを待つ（slotを空け、ADR-0071の読み替え）。
-  答えは次のturnの依頼になる（[workerの質問への回答の送信](worker-question-answer.md)）。
+  答えは次のturnの依頼になる（[workerへの答えの配送](receipt-and-session-exit.md#workerへの答えの配送)）。
 - Codexのworkerの`dagq ask`はsandboxの中からqueue serviceに送られ、その場で開く（[Queue service](../queue-service.md#クライアントモード)）。
 - receiptもaskも無いturnの終わり: 待たずに決まった文で促し、上限を使い切れば復旧jobの`stalled`にする（`StallWatch::observe_turn`、ADR-0047決定30の読み替え）。
   拒否が続いたturnは促さずに`stalled`にする。
@@ -256,7 +256,7 @@ inboxと、廃止の前に人が開いたplannerは対象外。
   agentのenvの組み立ては[session wrapper](session-wrapper.md)が持つ。
 - **識別と生死**: 生きているとは、handleのpidが記録した起動時刻のまま居ること（`Supervisor::wrapper_lives`）。
   adopt・引き継ぎ（[Handoff](handoff.md)）・開き直しは記録したhandleで行うので、supervisorが止まってもwrapperとturnは動き続ける。
-  heartbeatの古さは生死に使わない（沈黙は[Silent wrapper](silent-wrapper.md)の判定）。
+  heartbeatの古さは生死に使わない（[黙ったwrapper](receipt-and-session-exit.md#黙ったwrapper)）。
   `stats`の`workspace_mismatch`もcmuxを呼ばずこの生死だけで判じ、終わりを記録せずに居なくなったwrapperを`run_without_wrapper`として出す（[Stats](commands.md)）。
 - **停止**: runtimeはまず終了の依頼で終わらせ、残っていればhandleの`stop_background`で止める（ADR-t1404-1決定3）。
   wrapperにSIGTERMを送り、猶予の後にgroupと控えた子孫にSIGKILLを送る（`BackgroundWrappers::stop`）。
@@ -314,6 +314,6 @@ runtimeのplannerは経路の選択なしに非対話で立ち、この文書の
   wrapperが殺されて残ったturnは、plannerの最後の`turn_started`から止める（ADR-t1404-1決定3・8）。
 - **区間と集計**: 最初の`turn_started`が区間を開き、plannerの閉じが閉じる（[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。
   経路ごとの集計は[stats](commands.md)と[kpi](commands.md)、workerの経路の集計はrunの無い`turn_finished`を数えない。
-- **CLI**（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）: `planner screen`は画面を読まずに`turns/`の場所を返し、`planner send`は拒む（[Session send](session-send.md#人とinboxの画面の読み取りと送信)）。
+- **CLI**（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）: `planner screen`は画面を読まずに`turns/`の場所を返し、`planner send`は拒む（[Authorization](../authorization.md)）。
   続きの依頼は次のturnの依頼として置く（[`plan` / `planners`](plan-planners.md#続きの依頼と非対話のplannerのcli)）。
 - **test**: 人の答え待ちでの終了と、answerで立つplannerの最初のturnは本物のwrapperで`planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer`と`a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines`。

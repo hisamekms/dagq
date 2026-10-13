@@ -75,6 +75,18 @@ docs/design/supervisor-lifecycle/stats.md | docs/design/supervisor-lifecycle/com
 docs/design/supervisor-lifecycle/marks.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::marks |
 docs/design/supervisor-lifecycle/report.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::kpi::report and application::report |
 docs/design/supervisor-lifecycle/timeline.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::timeline |
+docs/design/supervisor-lifecycle/prompt-waiting.md | docs/adr/2026-10-03-t1433-2-abolish-the-interactive-route.md |
+docs/design/supervisor-lifecycle/session-send.md | docs/design/authorization.md |
+docs/design/supervisor-lifecycle/implementation-status.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md |
+docs/design/supervisor-lifecycle/notification-route.md | docs/design/supervisor-lifecycle/ask-push.md |
+docs/design/supervisor-lifecycle/cmux-notify.md | docs/design/supervisor-lifecycle/ask-push.md |
+docs/design/supervisor-lifecycle/naming.md | docs/design/supervisor-lifecycle/headless-worker.md |
+docs/design/supervisor-lifecycle/run-workspaces.md | docs/design/supervisor-lifecycle/cleanup-and-recovery.md |
+docs/design/supervisor-lifecycle/session-prompts.md | docs/design/supervisor-lifecycle/roles.md |
+docs/design/supervisor-lifecycle/worker-question-answer.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md |
+docs/design/supervisor-lifecycle/silent-wrapper.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md |
+docs/design/supervisor-lifecycle/first-commit.md | the doc comment of watch_first_commit in src/application/supervise/session.rs |
+docs/design/supervisor-lifecycle/worktree-read-only-git.md | the doc comments of GitRepository in src/infrastructure/adapters.rs |
 EOF
 )
 

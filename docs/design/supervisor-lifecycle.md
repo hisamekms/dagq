@@ -117,10 +117,6 @@ live worker alert (stalled, idle_process)
 
 各節は`supervisor-lifecycle/`の下の別のファイルにある。下の見出しは各ファイルへの目次で、以前この文書の中にあった節へのリンク（見出しのanchor）もここに届く。
 
-## Implementation status
-
-- [Implementation status](supervisor-lifecycle/implementation-status.md)
-
 ## Roles
 
 - [Roles](supervisor-lifecycle/roles.md)
@@ -140,18 +136,6 @@ live worker alert (stalled, idle_process)
 ### Logs
 
 - [Logs](supervisor-lifecycle/logs.md)
-
-### Naming
-
-- [Naming](supervisor-lifecycle/naming.md)
-
-### Session prompts
-
-- [Session prompts](supervisor-lifecycle/session-prompts.md)
-
-### 人への通知経路（ADR-0016で決定、ADR-0022とADR-0024で改めた）
-
-- [人への通知経路（ADR-0016で決定、ADR-0022とADR-0024で改めた）](supervisor-lifecycle/notification-route.md)
 
 ## `supervise`
 
@@ -247,14 +231,6 @@ live worker alert (stalled, idle_process)
 
 - [Receipt and session exit](supervisor-lifecycle/receipt-and-session-exit.md)
 
-### wrapperが黙ったsession
-
-- [wrapperが黙ったsession](supervisor-lifecycle/silent-wrapper.md)
-
-### ダイアログ待ちの検知（廃止）
-
-- [ダイアログ待ちの検知](supervisor-lifecycle/prompt-waiting.md)（task 1437で廃止。過去の記録の読み方）
-
 ### receiptの無いidleの検知
 
 - [receiptの無いidleの検知](supervisor-lifecycle/idle-without-receipt.md)
@@ -262,22 +238,6 @@ live worker alert (stalled, idle_process)
 ### 生きているsessionの復旧job
 
 - [生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md)（stalled、非対話の idle_process）
-
-### workerの質問への回答の送信
-
-- [workerの質問への回答の送信](supervisor-lifecycle/worker-question-answer.md)
-
-### sessionへの送信と確認
-
-- [sessionへの送信と確認](supervisor-lifecycle/session-send.md)
-
-### 最初のcommitの観測
-
-- [最初のcommitの観測](supervisor-lifecycle/first-commit.md)
-
-### worktreeへの読み取り専用のgit
-
-- [worktreeへの読み取り専用のgit](supervisor-lifecycle/worktree-read-only-git.md)
 
 ## Validation
 
@@ -329,10 +289,6 @@ live worker alert (stalled, idle_process)
 ## Cleanup and recovery
 
 - [Cleanup and recovery](supervisor-lifecycle/cleanup-and-recovery.md)
-
-### Run workspaces
-
-- [Run workspaces](supervisor-lifecycle/run-workspaces.md)
 
 ### Run worktrees
 
