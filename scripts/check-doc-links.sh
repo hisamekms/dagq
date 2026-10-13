@@ -92,6 +92,16 @@ docs/design/stress-ci.md | docs/development/testing.md and the headers of .githu
 docs/design/linux-ci.md | docs/development/testing.md and the comments of .github/workflows/ci.yml |
 docs/design/ci-failure-issues.md | docs/development/testing.md and the header of .github/workflows/ci-failure.yml |
 docs/design/test-fixtures.md | docs/development/testing.md and the doc comment of tests/common/template.rs |
+docs/design/supervisor-lifecycle/status.md | docs/design/supervisor-lifecycle/commands.md |
+docs/design/supervisor-lifecycle/events-watch.md | docs/design/supervisor-lifecycle/commands.md |
+docs/design/supervisor-lifecycle/doctor.md | docs/design/supervisor-lifecycle/commands.md |
+docs/design/supervisor-lifecycle/logs.md | docs/design/supervisor-lifecycle/commands.md |
+docs/design/supervisor-lifecycle/review-command.md | docs/design/supervisor-lifecycle/commands.md |
+docs/design/supervisor-lifecycle/recover.md | docs/design/supervisor-lifecycle/commands.md |
+docs/design/supervisor-lifecycle/rebind.md | docs/design/supervisor-lifecycle/commands.md |
+docs/design/supervisor-lifecycle/dependency-diagram.md | docs/design/supervisor-lifecycle/commands.md |
+docs/design/supervisor-lifecycle/conflict-thresholds.md | the doc comments by the definitions |
+docs/design/supervisor-lifecycle/stall-thresholds.md | the doc comments by the definitions |
 EOF
 )
 
