@@ -91,6 +91,7 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
 ## 計画管理
 
 goal・task・proposalと、その検査と採否（plan review・goal review・runtimeのplanner・follow_upとfindingのproposal）。
+taskの再計画の保護とhold（`task_holds`、`domain::task_hold`）も計画管理が持ち、実行と着地はclaim・resume・復旧jobの開始と結果の適用の確定の中で同じ判定（`task_replan::check_step`）を読むだけで書かない。
 
 ## 実行と着地
 

@@ -5,8 +5,8 @@
 //! Opening one is one write transaction that inserts it only when its run
 //! has none open, so two requests on one run (two supervisors, a person
 //! and a worker at once) open one. The guard every ordinary step of a task
-//! asks ([`check_task_step`]) reads the same rows inside the step's own
-//! transaction.
+//! asks ([`check_task_step`]) reads the same rows, and the task's hold,
+//! inside the step's own transaction.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::json;
@@ -301,11 +301,15 @@ pub(super) fn guard_of(conn: &Connection, task: TaskId) -> Result<Option<ReplanG
         }))
 }
 
-/// Refuse `step` of `task` while an operation guards it
-/// ([`task_replan::check_step`]), read on `conn` inside the step's own
-/// transaction.
+/// Refuse `step` of `task` while an operation or a hold guards it
+/// ([`task_replan::check_step`]), both read on `conn` inside the step's
+/// own transaction.
 pub(super) fn check_task_step(conn: &Connection, task: TaskId, step: GuardedStep) -> Result<()> {
-    task_replan::check_step(guard_of(conn, task)?.as_ref(), step)?;
+    let guards = task_replan::TaskGuards {
+        replan: guard_of(conn, task)?,
+        hold: super::task_holds::guard_of(conn, task)?,
+    };
+    task_replan::check_step(&guards, step)?;
     Ok(())
 }
 

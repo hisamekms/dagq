@@ -11,14 +11,18 @@
 //! ordinary step that would move the task or its run on is refused by the
 //! one judgment [`check_step`], whichever role asks: the claim and the
 //! candidates, a resume, a recovery round, a revise, `ready`, `edit`,
-//! `cancel`, a change of its dependencies and a landing.
+//! `cancel`, a change of its dependencies and a landing. The same judgment
+//! takes the task's hold ([`super::task_hold`]) as its other guard: either
+//! refuses the steps it reaches, and neither's end lifts the other.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
     DomainError, EventId, GoalId, ProposalId, ReplanId, RequestId, RunId, RunStatus, TaskId,
-    TaskStatus, error::require,
+    TaskStatus,
+    error::require,
+    task_hold::{self, HoldGuard},
 };
 
 // Where an operation came from: a person's (or the inbox's) request, a
@@ -170,15 +174,40 @@ pub struct ReplanGuard {
     pub status: ReplanStatus,
 }
 
-/// Refuse `step` of a task `guard` guards: the one judgment every entry
-/// that moves a task or its run on asks, for every role. Only the
-/// operation's own outcome (written by the trusted runtime) ends it.
-pub fn check_step(guard: Option<&ReplanGuard>, step: GuardedStep) -> Result<(), DomainError> {
-    match guard {
-        Some(guard) if guard.status.guards() => Err(DomainError::TaskReplanning {
+/// What guards a task's steps now: the replanning operation and the hold
+/// open on it, each `None` when there is none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TaskGuards {
+    pub replan: Option<ReplanGuard>,
+    pub hold: Option<HoldGuard>,
+}
+
+impl TaskGuards {
+    /// Only the replanning operation `replan`, for a step no hold reaches.
+    pub const fn replan(replan: Option<ReplanGuard>) -> Self {
+        Self { replan, hold: None }
+    }
+}
+
+/// Refuse `step` of a task `guards` guard: the one judgment every entry
+/// that moves a task or its run on asks, for every role. A replanning
+/// operation refuses every step until its own outcome (written by the
+/// trusted runtime) ends it; a hold refuses the steps
+/// [`task_hold::holds_step`] names until a person releases it. Each is
+/// checked whatever the other says, so ending one leaves the other.
+pub fn check_step(guards: &TaskGuards, step: GuardedStep) -> Result<(), DomainError> {
+    if let Some(guard) = guards.replan.filter(|guard| guard.status.guards()) {
+        return Err(DomainError::TaskReplanning {
             task_id: guard.task,
             operation: guard.operation,
             status: guard.status,
+            step,
+        });
+    }
+    match guards.hold {
+        Some(hold) if task_hold::holds_step(step) => Err(DomainError::TaskHeld {
+            task_id: hold.task,
+            hold: hold.hold,
             step,
         }),
         _ => Ok(()),
@@ -547,7 +576,7 @@ mod tests {
                 GuardedStep::Dependency,
                 GuardedStep::Integrate,
             ] {
-                let checked = check_step(Some(&guard), step);
+                let checked = check_step(&TaskGuards::replan(Some(guard)), step);
                 assert_eq!(checked.is_err(), status.guards(), "{status:?} {step:?}");
                 if let Err(error) = checked {
                     let text = error.to_string();
@@ -558,7 +587,63 @@ mod tests {
                 }
             }
         }
-        assert!(check_step(None, GuardedStep::Claim).is_ok());
+        assert!(check_step(&TaskGuards::default(), GuardedStep::Claim).is_ok());
+    }
+
+    #[test]
+    fn a_hold_and_a_replanning_guard_the_task_each_whatever_the_other_says() {
+        let task = TaskId::new(7);
+        let hold = HoldGuard {
+            task,
+            hold: crate::domain::HoldId::new(2),
+        };
+        let parked = ReplanGuard {
+            task,
+            operation: ReplanId::new(3),
+            status: ReplanStatus::Parked,
+        };
+        let ended = ReplanGuard {
+            status: ReplanStatus::ContinuingAfterPark,
+            ..parked
+        };
+        let held = |replan| TaskGuards {
+            replan,
+            hold: Some(hold),
+        };
+        for step in [
+            GuardedStep::Claim,
+            GuardedStep::Resume,
+            GuardedStep::Recover,
+        ] {
+            // Both: the replanning names itself first.
+            assert!(matches!(
+                check_step(&held(Some(parked)), step),
+                Err(DomainError::TaskReplanning { .. })
+            ));
+            // The replanning ended: the hold still refuses.
+            assert_eq!(
+                check_step(&held(Some(ended)), step),
+                Err(DomainError::TaskHeld {
+                    task_id: task,
+                    hold: hold.hold,
+                    step
+                })
+            );
+            // The hold released: the replanning still refuses.
+            assert!(check_step(&TaskGuards::replan(Some(parked)), step).is_err());
+            assert!(check_step(&TaskGuards::replan(Some(ended)), step).is_ok());
+        }
+        // A hold changes no plan: the steps it does not reach go.
+        for step in [
+            GuardedStep::Ready,
+            GuardedStep::Edit,
+            GuardedStep::Cancel,
+            GuardedStep::Dependency,
+            GuardedStep::Revise,
+            GuardedStep::Integrate,
+        ] {
+            assert!(check_step(&held(None), step).is_ok(), "{step:?}");
+        }
     }
 
     #[test]

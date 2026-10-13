@@ -341,6 +341,14 @@ impl Supervisor<'_> {
                     str::to_owned,
                 );
             let reason = format!("{reason} (a person chose {answer} in ask {})", ask.id);
+            // A held task's answer is kept, its ask left open, and applied
+            // or discarded once the hold is released (ADR-t1879-1).
+            if self
+                .queue
+                .keep_triage_answer(run.id(), ask.id, &answer, &reason)?
+            {
+                continue;
+            }
             match self.queue.decide_triage(run.id(), ask.id, &answer, &reason) {
                 Ok(decided) => {
                     info!(run_id = %decided.id(), task_id = %decided.task_id(), ask_id = %ask.id, "run {} of task {}: {answer} as ask {} answered; the run is {}", decided.id(), decided.task_id(), ask.id, decided.status().as_str());
@@ -383,6 +391,14 @@ impl Supervisor<'_> {
                     .run_lease(run.id())?
                     .is_some_and(|lease| !self.lease_stale(&lease, now))
             {
+                continue;
+            }
+            // No recovery job of a held task (ADR-t1879-1).
+            if self.held_out(
+                run.task_id(),
+                Some(run.id()),
+                crate::domain::task_replan::GuardedStep::Recover,
+            )? {
                 continue;
             }
             due_runs.push(run);

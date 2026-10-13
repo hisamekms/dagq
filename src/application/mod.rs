@@ -166,6 +166,9 @@ pub struct TaskListItem {
     /// The open replanning operation on its run (ADR-t1521-2), if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replan: Option<ListedReplan>,
+    /// Its open hold (ADR-t1879-1), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold: Option<ListedHold>,
     #[serde(flatten)]
     pub details: Option<TaskListDetails>,
 }
@@ -191,6 +194,29 @@ impl ListedReplan {
                 .status_reason
                 .clone()
                 .unwrap_or_else(|| op.reason.clone()),
+        }
+    }
+}
+
+/// An open hold as `list` marks its task with: which, where it stands,
+/// why, until when and by whom.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ListedHold {
+    pub hold: crate::domain::HoldId,
+    pub state: crate::domain::task_hold::HoldState,
+    pub reason: String,
+    pub until: Option<i64>,
+    pub by: String,
+}
+
+impl ListedHold {
+    pub fn of(hold: &crate::domain::task_hold::TaskHold) -> Self {
+        Self {
+            hold: hold.id,
+            state: hold.state(),
+            reason: hold.reason.clone(),
+            until: hold.until,
+            by: hold.by_role.clone(),
         }
     }
 }
@@ -252,6 +278,7 @@ impl TaskListItem {
             latest_run,
             duplicate_of,
             replan: None,
+            hold: None,
             details,
         }
     }
@@ -259,6 +286,12 @@ impl TaskListItem {
     /// The item marked with the open replanning operation on its run.
     pub fn with_replan(mut self, replan: Option<ListedReplan>) -> Self {
         self.replan = replan;
+        self
+    }
+
+    /// The item marked with its open hold.
+    pub fn with_hold(mut self, hold: Option<ListedHold>) -> Self {
+        self.hold = hold;
         self
     }
 }

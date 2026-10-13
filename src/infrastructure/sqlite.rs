@@ -38,7 +38,7 @@ use serde_json::json;
 
 use crate::{
     application::{
-        Generators, GraphGoalDependency, GraphInput, GraphTask, IdGenerator, LatestRun,
+        Generators, GraphGoalDependency, GraphInput, GraphTask, IdGenerator, LatestRun, ListedHold,
         ListedReplan, StatusFilter, TaskListItem, TaskPage, TaskQuery, TaskStore, dependency_graph,
         timestamp,
     },
@@ -92,15 +92,15 @@ macro_rules! replan_guarding {
     };
 }
 pub(super) use replan_guarding;
-/// Ready tasks whose predecessors are completed, whose goal dependencies
-/// are all closed as achieved (ADR-0038), that own no unfinished run and
-/// whose goal, if any, is not a draft (ADR-0024 decision 5), and that no
-/// replanning operation guards (ADR-t1521-2).
-/// In ID order: the claim order (ADR-0040 decision 4) needs the whole
-/// dependency graph, so [`claim_order`] applies it, not SQL.
-const READY_QUERY: &str = concat!(
-    select_tasks!(),
-    "
+/// The conditions of a claimable task `t` but its hold: `ready`, its
+/// predecessors completed, its goal dependencies all closed as achieved
+/// (ADR-0038), no unfinished run of it, its goal, if any, not a draft
+/// (ADR-0024 decision 5), and no replanning operation guarding it
+/// (ADR-t1521-2).
+macro_rules! ready_conditions {
+    () => {
+        concat!(
+            "
     WHERE t.status = 'ready'
       AND NOT EXISTS (
         SELECT 1 FROM goals g WHERE g.id = t.goal_id AND g.status = 'draft'
@@ -122,10 +122,32 @@ const READY_QUERY: &str = concat!(
       AND NOT EXISTS (
         SELECT 1 FROM replan_operations o WHERE o.task_id = t.id
           AND o.status IN (",
-    replan_guarding!(),
-    ")
+            replan_guarding!(),
+            ")
+      )"
+        )
+    };
+}
+/// The ready tasks ([`ready_conditions`]) that no open hold keeps
+/// (ADR-t1879-1).
+/// In ID order: the claim order (ADR-0040 decision 4) needs the whole
+/// dependency graph, so [`claim_order`] applies it, not SQL.
+const READY_QUERY: &str = concat!(
+    select_tasks!(),
+    ready_conditions!(),
+    "
+      AND NOT EXISTS (
+        SELECT 1 FROM task_holds h WHERE h.task_id = t.id AND h.released_at IS NULL
       )
     ORDER BY t.id"
+);
+/// The tasks that would be ready but for their open hold, each with the
+/// hold's ID, in ID order.
+const HELD_READY_QUERY: &str = concat!(
+    "SELECT t.id, h.id FROM tasks t
+     JOIN task_holds h ON h.task_id = t.id AND h.released_at IS NULL",
+    ready_conditions!(),
+    " ORDER BY t.id"
 );
 
 pub struct SqliteQueue {
@@ -1093,6 +1115,9 @@ impl TaskStore for SqliteQueue {
                 let replan = super::replans::open_operation_of(&tx, task.id())?
                     .as_ref()
                     .map(ListedReplan::of);
+                let hold = super::task_holds::open_hold_of(&tx, task.id())?
+                    .as_ref()
+                    .map(ListedHold::of);
                 Ok(TaskListItem::new(
                     task,
                     dependencies,
@@ -1101,7 +1126,8 @@ impl TaskStore for SqliteQueue {
                     duplicate_of,
                     query.full,
                 )
-                .with_replan(replan))
+                .with_replan(replan)
+                .with_hold(hold))
             })
             .collect::<Result<_>>()?;
         Ok(TaskPage {
@@ -1138,6 +1164,7 @@ impl TaskStore for SqliteQueue {
         let follow_up_drafts = super::draft_planners::follow_up_drafts(&tx, task_id)?;
         let revisit = super::draft_planners::read_revisit(&tx, task_id)?;
         let replans = super::replans::operations_of(&tx, task_id)?;
+        let hold = super::task_holds::open_hold_of(&tx, task_id)?;
         let asks = tx
             .prepare(
                 "SELECT * FROM asks WHERE task_id=?1
@@ -1161,6 +1188,7 @@ impl TaskStore for SqliteQueue {
             revisit,
             asks,
             replans,
+            hold,
         })
     }
 
@@ -2188,6 +2216,20 @@ pub(super) fn goal_event(
     )
 }
 
+/// The tasks that would be claimable but for their open hold, each with
+/// the guard of its hold, in ID order.
+pub(super) fn held_claims(conn: &Connection) -> Result<Vec<crate::domain::task_hold::HoldGuard>> {
+    Ok(conn
+        .prepare(HELD_READY_QUERY)?
+        .query_map([], |r| {
+            Ok(crate::domain::task_hold::HoldGuard {
+                task: r.get(0)?,
+                hold: r.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 /// The claimable tasks, in ID order.
 fn ready_tasks(conn: &Connection) -> Result<Vec<Task>> {
     Ok(conn
@@ -3076,6 +3118,9 @@ pub(super) fn event(
     )
 }
 
+/// Column `name` read as the domain's enum `T`: a stored value that is not
+/// one of `T`'s is a conversion error of `rusqlite` with
+/// [`DomainError::UnknownValue`] as its cause, never a default.
 pub(super) fn enum_col<T: FromStr<Err = DomainError>>(
     row: &Row<'_>,
     name: &str,

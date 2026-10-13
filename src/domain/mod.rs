@@ -800,11 +800,23 @@ pub fn triage_state(events: &[RunEvent]) -> TriageState {
             e.kind.as_str(),
             "resume_started" | "triage_finished" | "triage_failed"
         ) || (e.kind == "triage_decided" && e.payload["action"] == RECOVER_AGAIN)
+            || (e.kind == event_kind::HOLD_RESULT_DISCARDED
+                && e.payload[task_hold::SUPERSEDED] != true)
             // A triage that failed while a login or usage limit held the
             // queue, started again once it is fixed (task 437).
             || (e.kind == event_kind::JOB_RESTARTED && e.payload["job"] == "triage")
     });
     match last {
+        // A round whose verdict a hold kept applied nothing, and a kept
+        // result discarded at the release leaves the run as if none came
+        // (ADR-t1879-1): its next round is due.
+        Some(e)
+            if (e.kind == "triage_finished" && e.payload["action"] == task_hold::HELD_ACTION)
+                || (e.kind == event_kind::HOLD_RESULT_DISCARDED
+                    && e.payload[task_hold::SUPERSEDED] != true) =>
+        {
+            TriageState::Pending
+        }
         Some(e) if e.kind == "triage_finished" && e.payload["action"] == "wait" => {
             TriageState::Waiting {
                 until: e.payload["recheck_at"].as_i64().unwrap_or(0),
@@ -1057,6 +1069,7 @@ pub mod stall;
 pub mod stats;
 pub mod supervisor_life;
 pub mod task;
+pub mod task_hold;
 pub mod task_replan;
 pub mod throughput_review;
 pub mod timeline;
@@ -1094,8 +1107,8 @@ pub use follow_up::{
 pub use goal::{Goal, StrandedDependency};
 pub use goal_tag::{GoalTag, TagSet};
 pub use ids::{
-    AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, ReplanId,
-    RequestId, RunId, TaskId,
+    AskId, CommitSha, EventId, FindingId, GoalId, HoldId, LeaseToken, PlannerId, ProposalId,
+    ReplanId, RequestId, RunId, TaskId,
 };
 pub use input::{GoalEdit, GoalRecord, NewGoal, NewTask, RunPlan, RunRecord, TaskEdit, TaskRecord};
 pub use lint::{LintCode, LintInput, LintNode, LintViolation};

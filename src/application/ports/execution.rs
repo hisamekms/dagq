@@ -801,6 +801,53 @@ impl TriageAction {
             Self::Ask { .. } => "ask",
         }
     }
+
+    /// Whether it moves the run or its task on: what a hold keeps instead
+    /// of applying (ADR-t1879-1 decision 6). `Wait` and `Ask` leave both
+    /// where they are.
+    pub const fn moves_on(&self) -> bool {
+        matches!(
+            self,
+            Self::Retry | Self::RetryInherit { .. } | Self::Resume { .. }
+        )
+    }
+
+    /// The action as a hold keeps it (`hold_result_kept`'s `action`).
+    pub fn to_kept(&self) -> serde_json::Value {
+        let mut kept = serde_json::json!({"action": self.as_str()});
+        match self {
+            Self::RetryInherit { branch, head } => {
+                kept["branch"] = serde_json::json!(branch);
+                kept["head"] = serde_json::json!(head);
+            }
+            Self::Resume { instruction } => kept["instruction"] = serde_json::json!(instruction),
+            Self::Wait { recheck_at } => kept["recheck_at"] = serde_json::json!(recheck_at),
+            Self::Ask { ask_id } => kept["ask_id"] = serde_json::json!(ask_id),
+            Self::Retry => {}
+        }
+        kept
+    }
+
+    /// The action [`Self::to_kept`] kept; `None` for one it did not write.
+    pub fn from_kept(kept: &serde_json::Value) -> Option<Self> {
+        Some(match kept["action"].as_str()? {
+            "retry" => Self::Retry,
+            crate::domain::resume::RETRY_INHERIT => Self::RetryInherit {
+                branch: kept["branch"].as_str().map(str::to_owned),
+                head: serde_json::from_value(kept["head"].clone()).ok()?,
+            },
+            "resume" => Self::Resume {
+                instruction: kept["instruction"].as_str()?.to_owned(),
+            },
+            "wait" => Self::Wait {
+                recheck_at: kept["recheck_at"].as_i64()?,
+            },
+            "ask" => Self::Ask {
+                ask_id: serde_json::from_value(kept["ask_id"].clone()).ok()?,
+            },
+            _ => return None,
+        })
+    }
 }
 
 /// `asked_by` of the triage's `decide` asks: the supervisor that triaged.
@@ -1150,6 +1197,57 @@ pub trait RunRecovery {
         reason: &str,
         config: crate::domain::resume::ResumeConfig,
     ) -> Result<Option<TaskRun>>;
+    /// The guard the open hold of `task` puts on its steps
+    /// (ADR-t1879-1), if any.
+    fn hold_guard(&self, task: TaskId) -> Result<Option<crate::domain::task_hold::HoldGuard>>;
+    /// The tasks a claim would take but for their open hold, each with
+    /// the hold.
+    fn held_claims(&self) -> Result<Vec<crate::domain::task_hold::HoldGuard>>;
+    /// Record that `supervisor` left `step` of a held task (of its run
+    /// `run` when it has one) out of a pass (`hold_deferred`), once per
+    /// hold and step; whether it was recorded now.
+    fn note_hold_deferred(
+        &mut self,
+        hold: crate::domain::task_hold::HoldGuard,
+        run: Option<&RunId>,
+        step: crate::domain::task_replan::GuardedStep,
+        supervisor: &LeaseToken,
+    ) -> Result<bool>;
+    /// Keep a person's `answer` to the recovery job's ask `ask_id` of run
+    /// `id` (with the `reason` its application would record) instead of
+    /// applying it while the run's task is held: `hold_result_kept`, once
+    /// per ask, in the transaction that reads the hold. `false` when the
+    /// task is not held, for the caller to apply it.
+    fn keep_triage_answer(
+        &mut self,
+        id: &RunId,
+        ask_id: AskId,
+        answer: &str,
+        reason: &str,
+    ) -> Result<bool>;
+    /// Keep a recovery job's `verdict` on the live session of run `id`
+    /// instead of applying it while the run's task is held; `false` when
+    /// the task is not held.
+    fn keep_live_verdict(&mut self, id: &RunId, verdict: serde_json::Value) -> Result<bool>;
+    /// The results a hold kept whose hold is released, not applied nor
+    /// discarded yet, oldest first.
+    fn released_kept_results(&self) -> Result<Vec<EventId>>;
+    /// Apply the kept result `kept` by the path that would have applied
+    /// it, or discard it as stale ([`crate::domain::task_hold::disposition`]),
+    /// in one transaction that reads the hold, the task and the run.
+    fn settle_kept_result(&mut self, kept: EventId) -> Result<KeptOutcome>;
+}
+
+/// What became of a result a hold kept, once [`RunRecovery::settle_kept_result`]
+/// read it.
+#[derive(Debug, Clone)]
+pub enum KeptOutcome {
+    /// Its task is held again, or it was settled already: nothing changed.
+    Untouched,
+    /// Applied; the run as it is now.
+    Applied(Box<TaskRun>),
+    /// Discarded, for this reason.
+    Discarded(crate::domain::task_hold::DiscardReason),
 }
 
 /// The state runs coordinate through (ADR-0032's second kind): run leases

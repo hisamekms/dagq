@@ -698,6 +698,7 @@ fn proposal_task(task: Task, dependencies: Vec<TaskId>) -> TaskDetail {
         follow_up_drafts: Vec::new(),
         revisit: None,
         replans: Vec::new(),
+        hold: None,
         asks: Vec::new(),
     }
 }

@@ -31,6 +31,12 @@ related:
 workerのrunは全て非対話（turnごとに別のprocess）で、この文書はその経路だけを扱う。
 過去に記録された対話のrunの記録は、holdの判定でも他の記録と同じに読むだけで、対話の経路を足さない。
 
+## 済んだ予定
+
+- holdの表と`task_held` / `task_released`、`hold` / `release`のCLIと権限、`show` / `list`の表示、readyのtaskのclaim・`needs_session`のresume・止まったrunの復旧jobの開始の止め方（「開始の直前の再検査」）、列の外の結果と回答の適用の止め方と解除の後の適用か破棄（「列の外の結果と回答の適用」。生きているsessionへのverdictは解除の後に捨てる）、再計画の保留と共有する判定は済んだ。
+  今の姿は[claimを控える](../design/supervisor-lifecycle/claim-hold.md#taskのhold)・[triage](../design/supervisor-lifecycle/triage.md#taskのhold)・[needs_session](../design/supervisor-lifecycle/needs-session.md#taskのhold)が持つ。
+  走っている工程の後の待ちを実装するまで、holdは確定と同時に`held`で、`settling`は起きない。
+
 ## 目的と境界
 
 - 環境・認証・外のサービスの都合でtaskを待たせる間、supervisorがそのtaskを拾わないことを保証する。

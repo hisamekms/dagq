@@ -70,3 +70,10 @@ decideのaskの答えに無い引き継ぎを、人の判断として直接打�
 - **読み取り**: verdictはCodexの最終の`agent_message`のtext（`AgentProvider::job_reply`）から今の`RecoveryVerdict`として読む。threadとmodelは`AgentProvider::job_session`（`thread.started`のthreadと、rolloutの`turn_context`のmodel。読めなければ`model_unknown`）で、`triage_finished` / `triage_failed`と`recovery_finished`に書き、ラウンドの区間の`session_closed`もそれを取る。
 - **失敗**: 非0終了・timeout・読めないverdictは、Claudeのjobと同じ8の失敗（`triage_failed`のattention）にし、Claudeに回さない。providerが使えずに失敗したjob（ログイン・使用量の上限・agentが起動しない。`JobFailure::switch_reason`）は、役割がproviderを書いていれば（ADR-t1063-1の決定4）そのproviderを控え（`provider_held`。Claudeの壁はqueueのhold askにも加わる）、`triage_failed`に`provider_unusable`を書く。この`triage_failed`は人のものではない: `domain::triage_state`はこれを`Pending`と読み（`event_attention`もattentionにしない）、次のpassで同じrunの次のラウンドが行き先のproviderで始まる（控えの間はもう一方。`launch`の`switched_from`・`switch_reason`。`jobs = false`なら控えの間は始めず、解けた後に同じproviderで）。そのラウンドは新しい`recovery_requested`を持つのでalertの3回に数える。`--no-claude`で残るproviderが無ければ、次のラウンドは上の行き先のとおりjobを起動せずに理由付きの8の失敗（attention）になる。queueのhold askに加わるのはClaudeのjobの壁だけ（[Queue hold](queue-hold.md)）。時間の上限ではjobとCodexが走らせた子孫（別のprocess groupのものも）をpidで止める（`HeadlessJob::stop`、task 1085・1115）。
 - **test**: `tests/it/recovery_codex.rs`（読み取りだけの起動とverdictの適用・記録・`stats` / `kpi`のproviderごとの集計、終わったrunの取らない操作（`stop_processes`）がaskになること、失敗とtimeoutが`triage_failed`になりtimeoutで子孫が止まること、ログインで失敗したCodexのjobが控えられて次のラウンドがClaudeで始まり着地すること、`jobs = false`で利用上限で止まったCodexのjobの次のラウンドがClaudeで始まらず控えが解けた後にCodexで始まること、`--no-claude`でCodexで起動しClaudeに回さず、ログインで失敗した後のラウンドが理由付きで人に渡ること。`confidence: low`は生きているrunのtest）と、`supervise::recovery`のunit test（終わりの記録）と`domain::actor_model`のunit test（`jobs`のon / offと役割のproviderごとの行き先）。検査そのもの（`plan_ended`・`check_live`・`Escalation`）はClaudeのjobと共有で、そのtestがproviderに依らず確かめる。
+
+## taskのhold
+
+holdの開いたtaskの止まったrunには復旧jobを起動せず、`begin_triage`の確定の中でもholdを確かめ直す。
+holdの前に起動したjobのverdict（`finish_triage`の確定の中か`apply_live`の適用の直前で読む）と`decide`の回答は、taskを進めず`hold_result_kept`に残し、ラウンドは`action: held`で終わる。
+解除の後の最初のpassが、版が変わっていなければ適用し、変わっていれば捨てて次のラウンドを待たせる（生きているsessionへのverdictは捨てる）。
+詳細は[taskのhold](../../plans/task-hold.md)が持つ。

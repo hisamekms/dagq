@@ -77,6 +77,15 @@ impl Supervisor<'_> {
             {
                 continue;
             }
+            // A held task's run is neither resumed nor given up
+            // (ADR-t1879-1).
+            if self.held_out(
+                run.task_id(),
+                Some(run.id()),
+                crate::domain::task_replan::GuardedStep::Resume,
+            )? {
+                continue;
+            }
             // Out of attempts: the run is retried with its branch carried
             // over, or a person decides, whether or not a slot is free.
             if candidate.resumes.exhausted(self.resume.config) {

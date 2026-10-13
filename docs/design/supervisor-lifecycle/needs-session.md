@@ -69,3 +69,10 @@ resumeのwrapperを起動するのはsupervisorだけ。`status`のattentionは�
 - 解消依頼と終了依頼は file に書く。対話の打鍵・ダイアログ応答・exit_retried の再試行は廃止した。過去の記録と handoff の欄は読める。
 
 引き継がないもの: wrapperが終了を記録したか死んでいるrunは、今までどおり`resume_run`がstaleなleaseを置き換えて（`lease_acquired`の`previous_token`）次の試行を始める。試行の`workspace_created`が無い（wrapperを起動してhandleを記録する前にsupervisorが死んだ）runは監視する手段が無いので引き継がず、sessionが終わるまで次の試行を止める（人が wrapper の生存を確認する）。`resume_request_sent`を記録しないバイナリが始めたresumeを引き継ぐと、依頼を送ったかが分からないので、次の turn の依頼としてもう一度書く。依頼を書いてから`resume_request_sent`を記録するまでの間にsupervisorが死んだときも同じく2回目が送られる。
+
+## taskのhold
+
+holdの開いたtaskの`needs_session`のrunはresumeせず、使い切ったresumeの後始末（`exhaust_resumes`）もしない。
+再開の候補の列から外して`hold_deferred`に残し、`begin_resume`・`skip_resume`・`exhaust_resumes`の確定の中でもholdを確かめ直す。
+解除は印を外すだけで、次のpassが今のresumeの経路で続ける。
+解除のときにproviderを変えて成果を引き継ぐ新しいrunにすることは予定で、[taskのhold](../../plans/task-hold.md)の「解除の分岐」が持つ。

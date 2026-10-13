@@ -543,6 +543,25 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    // ADR-t1879-1.
+    /// Hold a task so that the runtime claims it, resumes its run or starts a recovery job of
+    /// it no more until a person releases it (only a person at a plain terminal and the
+    /// inbox). TARGET is a task ID, or a run ID for its task. The task keeps its status; a
+    /// turn of a run already going is not stopped. Prints {"hold", "state"}.
+    Hold {
+        target: String,
+        /// Why, in the person's words.
+        #[arg(long)]
+        reason: String,
+        /// When to remind a person of the hold (`@<unix seconds>` or an RFC 3339 time); passing
+        /// it releases nothing.
+        #[arg(long)]
+        until: Option<dagq::domain::stats::Cursor>,
+    },
+    /// Release the hold of a task (TARGET: a task ID, or a run ID for its task): the runtime
+    /// takes the task by its own paths again from its next pass. Prints {"hold",
+    /// "continuation"}.
+    Release { target: String },
     // ADR-t1521-1, ADR-t1521-2.
     /// Ask to replan a long-running run (a person's request, or a worker's proposal on its own
     /// run): the runtime diagnoses it and, only when it replans, parks the run at a safe boundary
@@ -2235,6 +2254,35 @@ const OBSERVER_DENIED: &str = "observer may not change queue state";
 /// The error of a command a headless job may not run.
 const REVIEWER_DENIED: &str = "reviewer may not change queue state";
 
+/// What `hold` and `release` name: digits are a task, anything else a run.
+fn hold_target(target: &str) -> Result<dagq::domain::task_hold::HoldTarget> {
+    use dagq::domain::task_hold::HoldTarget;
+    let target = target.trim();
+    Ok(match target.parse::<i64>() {
+        Ok(id) => HoldTarget::Task(TaskId::new(id)),
+        Err(_) => HoldTarget::Run(RunId::new(target)?),
+    })
+}
+
+fn hold_target_resource(target: &str) -> Resource {
+    match target.trim().parse::<i64>() {
+        Ok(id) => task_resource(id),
+        Err(_) => run_resource(target.trim()),
+    }
+}
+
+/// `hold --until` in unix seconds: a time, never an event id.
+fn hold_until(until: Option<dagq::domain::stats::Cursor>) -> Result<Option<i64>> {
+    use dagq::domain::stats::Cursor;
+    match until {
+        None => Ok(None),
+        Some(Cursor::Time(millis)) => Ok(Some(millis.div_euclid(1000))),
+        Some(Cursor::Event(_)) => {
+            bail!("--until takes a time (`@<unix seconds>` or RFC 3339), not an event id")
+        }
+    }
+}
+
 /// The request or proposal `replan request` and `replan propose` record.
 fn new_replan(
     run: &str,
@@ -2478,6 +2526,10 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
                 },
             ),
         },
+        // The task of a run named is read from the queue.
+        Command::Hold { target, .. } | Command::Release { target } => {
+            one(C::TaskHold, hold_target_resource(target))
+        }
         // The task of the run is read from the queue.
         Command::Replan { command } => match command {
             ReplanCommand::Request { run, .. } => one(C::ReplanRequest, run_resource(run)),
@@ -2730,6 +2782,9 @@ fn authorized_in_application(command: &Command) -> bool {
         // The replanning requests and proposals (ADR-t1521-2), with the
         // task of the run read from the queue.
         Command::Replan { .. } => true,
+        // The hold of a task and its release (ADR-t1879-1), with the task
+        // of a run named read from the queue.
+        Command::Hold { .. } | Command::Release { .. } => true,
         // The eval's requests and reads (ADR-t1728-1), with the run a
         // worker's request is on and the round a read names.
         Command::Agent { .. } => true,
@@ -4170,6 +4225,24 @@ fn execute(cli: Cli) -> Result<Value> {
                 } => replans.propose(&new_replan(&run, reason, &evidence)?)?,
             })?
         }
+        Command::Hold {
+            target,
+            reason,
+            until,
+        } => {
+            let mut holds =
+                dagq::application::commands::holds::Holds::new(&mut queue, &actor, &StaticPolicy);
+            serde_json::to_value(holds.hold(
+                &hold_target(&target)?,
+                &reason,
+                hold_until(until)?,
+            )?)?
+        }
+        Command::Release { target } => {
+            let mut holds =
+                dagq::application::commands::holds::Holds::new(&mut queue, &actor, &StaticPolicy);
+            serde_json::to_value(holds.release(&hold_target(&target)?)?)?
+        }
         Command::Replans { id: Some(id), .. } => {
             json!({"replans": [queue.replan_operation(dagq::domain::ReplanId::new(id))?]})
         }
@@ -5379,6 +5452,8 @@ mod tests {
             ),
             ("ask close", &["1"]),
             ("answer", &["1", "--text", "yes"]),
+            ("hold", &["7", "--reason", "r"]),
+            ("release", &["7"]),
         ];
         for (command, needs) in DAGQ_COMMANDS {
             let forms: Vec<_> = samples.iter().filter(|(of, _)| of == command).collect();

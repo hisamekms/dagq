@@ -162,7 +162,7 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 ### claimと実行の順
 
 - `claim`だけが`ready → in_progress`へ動かし、同じトランザクションで`TaskRun::new`がrunを作る。
-- 候補は依存が全て`completed`、goal依存が全て`achieved`で閉じ、draftのgoalに属さず再計画中でないreadyのtask（`READY_QUERY`）。
+- 候補は依存が全て`completed`、goal依存が全て`achieved`で閉じ、draftのgoalに属さず再計画中でもholdでもないreadyのtask（`READY_QUERY`）。
 - 規則の順は`dependency_graph`の`candidates`（効く優先度 → 解放する数 → ID）、claimと表示は`claim_order`がagingを足す。
   stats・KPIの標本は控えを除かない。
   規則の順は`candidates --ignore-deferrals`で読む。
@@ -188,6 +188,13 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 - runtimeは知らせるだけで、待っているtaskを自動で保留にしない。
   依存を外すか、cancelするか、取り直すかは計画の判断で、決まった規則では選べないため。
 - 同じ待ちの集合は重ねて知らせず、鎖になっているときは根のtaskだけを知らせる。
+
+### taskのhold
+
+- holdはdraftと別の印で、taskのstatusを変えず、plan reviewを通った扱いを失わせない（ADR-t1879-1）。
+- ready・submitted・in_progressのtaskだけが受け、draft・editでは外れず、終端で効きを失う。
+- claim・resume・復旧jobの開始は、再計画の保護と同じ`task_replan::check_step`が拒み、片方の解除はもう片方を外さない。
+- 走っているrunをturnの境界で止めることと解除の続け方は予定（[taskのhold](../plans/task-hold.md)）。
 
 ### attentionと読む口
 
@@ -280,8 +287,6 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 - 入口は`src/domain/error.rs`の`DomainError`で、業務上の拒否だけをvariantにし、汎用の`Other`を持たない。
 - `Display`の文はCLIが`{"error": ...}`に出し、runtimeが`last_error`に書く文そのもので、文はdomainの単体testが固定する。
-- I/Oをする層は境界で`?`により`anyhow::Error`へ変える。
-- DBの文字列が既知のenumの値でなければ、`enum_col`が`UnknownValue`を`rusqlite`の変換エラーの原因として包む。
 
 ## Draft planners
 

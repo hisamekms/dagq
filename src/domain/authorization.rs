@@ -71,6 +71,9 @@ string_enum!(Capability {
     ReplanPropose => "replan.propose",
     ReplanPark => "replan.park",
     ReplanApply => "replan.apply",
+    // The hold of a task and its release (ADR-t1879-1 decision 3): a
+    // person's and the inbox's only.
+    TaskHold => "task.hold",
     // A session's screen read and keys or an answer typed into it, by
     // its run or planner id (ADR-t1228-1 decisions 4 and 5).
     ScreenRead => "screen.read",
@@ -109,7 +112,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 60] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -148,6 +151,7 @@ impl Capability {
         Self::ReplanPropose,
         Self::ReplanPark,
         Self::ReplanApply,
+        Self::TaskHold,
         Self::ScreenRead,
         Self::ScreenSend,
         Self::PlannerRequest,
@@ -394,7 +398,8 @@ use Capability as C;
 
 /// What a person at a plain terminal may do: everything but the jobs'
 /// submissions, the integrator's own landing and push, and the park and
-/// the replacement of a replanning, which only the runtime does.
+/// the replacement of a replanning, which only the runtime does. It alone
+/// (with the inbox) holds and releases a task.
 const USER: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
@@ -428,6 +433,7 @@ const USER: &[Capability] = &[
     C::PlannerOpen,
     C::RequestRecord,
     C::ReplanRequest,
+    C::TaskHold,
     C::ScreenRead,
     C::ScreenSend,
     C::PlannerRequest,
@@ -817,6 +823,20 @@ mod tests {
                 assert!(!allowed(&role(role_), capability, &on("r1")), "{role_:?}");
             }
         }
+    }
+
+    #[test]
+    fn only_a_person_and_the_inbox_hold_and_release_a_task() {
+        let task = Resource::task(TaskId::new(1));
+        for role_ in ActorRole::ALL {
+            assert_eq!(
+                allowed(&role(role_), C::TaskHold, &task),
+                matches!(role_, ActorRole::User | ActorRole::Inbox),
+                "{role_:?}"
+            );
+        }
+        let worker = ActorContext::worker(&run("r1"), TaskId::new(1));
+        assert!(!allowed(&worker, C::TaskHold, &task));
     }
 
     #[test]

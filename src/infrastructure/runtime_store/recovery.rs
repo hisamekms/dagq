@@ -2,6 +2,10 @@
 //! ([`RunRecovery`]).
 
 use super::*;
+use crate::application::KeptOutcome;
+use crate::domain::task_hold::{
+    self, DiscardReason, Disposition, HoldGuard, KeptSource, ProgressVersion,
+};
 use crate::domain::task_replan::GuardedStep;
 use crate::domain::{EventKind, run_phase};
 
@@ -636,7 +640,9 @@ impl SqliteQueue {
     /// after it, then each of `also`, in one transaction: `Retry` makes the
     /// task `ready`, `RetryInherit` too with the branch to carry over,
     /// `Resume` the run `needs_session`, `Wait` and `Ask` change nothing.
-    /// The lease stays for the workspace's close.
+    /// An action that moves on a task its hold guards (ADR-t1879-1
+    /// decision 6), read in the same transaction, is kept instead
+    /// ([`keep_held_verdict`]). The lease stays for the workspace's close.
     pub fn finish_triage(
         &mut self,
         id: &RunId,
@@ -664,61 +670,38 @@ impl SqliteQueue {
             "run {id} is {}; only failed or interrupted runs are triaged",
             run.status().as_str()
         );
-        match action {
-            TriageAction::Retry => {
-                crate::infrastructure::sqlite::transition_task(
-                    &tx,
-                    run.task_id(),
-                    TaskAction::Ready,
-                    &self.generators.clock.timestamp(),
-                )?;
+        let held = if action.moves_on() {
+            crate::infrastructure::task_holds::guard_of(&tx, run.task_id())?
+        } else {
+            None
+        };
+        if let Some(hold) = held {
+            keep_held_verdict(&tx, &run, hold, action, payload, also)?;
+        } else {
+            apply_triage_action(
+                &tx,
+                refusals(&self.runs_dir, &self.generators),
+                &run,
+                action,
+                &mut payload,
+            )?;
+            let result = tx.query_row(
+                "SELECT * FROM task_runs WHERE id=?1",
+                [id],
+                run_row(&self.runs_dir),
+            )?;
+            payload["action"] = json!(action.as_str());
+            payload["status"] = json!(result.status().as_str());
+            run_event(&tx, id, EventKind::TriageFinished, payload)?;
+            for (kind, payload) in also {
+                run_event(&tx, id, kind, payload)?;
             }
-            TriageAction::RetryInherit { branch, head } => {
-                // Once per task, checked again where no other supervisor
-                // can retry it.
-                let task_events: Vec<RunEvent> = tx
-                    .prepare("SELECT * FROM run_events WHERE task_id=?1 ORDER BY id")?
-                    .query_map([run.task_id()], event_row)?
-                    .collect::<rusqlite::Result<_>>()?;
-                ensure!(
-                    !task_events.iter().any(resume::uses_automatic_inherit),
-                    "task {} was retried with a branch carried over already",
-                    run.task_id()
-                );
-                crate::infrastructure::sqlite::transition_task(
-                    &tx,
-                    run.task_id(),
-                    TaskAction::Ready,
-                    &self.generators.clock.timestamp(),
-                )?;
-                payload["inherit"] = json!({"branch": branch, "head": head});
-            }
-            TriageAction::Wait { recheck_at } => payload["recheck_at"] = json!(recheck_at),
-            TriageAction::Resume { instruction } => {
-                apply(
-                    &tx,
-                    refusals(&self.runs_dir, &self.generators),
-                    id,
-                    None,
-                    || format!("run {id} changed"),
-                    |run| run::resume_after_triage(run, instruction.clone()),
-                )?;
-                payload["instruction"] = json!(instruction);
-                payload["code"] = json!(ReasonCode::TriageResume);
-            }
-            TriageAction::Ask { ask_id } => payload["ask_id"] = json!(ask_id),
         }
         let result = tx.query_row(
             "SELECT * FROM task_runs WHERE id=?1",
             [id],
             run_row(&self.runs_dir),
         )?;
-        payload["action"] = json!(action.as_str());
-        payload["status"] = json!(result.status().as_str());
-        run_event(&tx, id, EventKind::TriageFinished, payload)?;
-        for (kind, payload) in also {
-            run_event(&tx, id, kind, payload)?;
-        }
         tx.commit()?;
         Ok(result)
     }
@@ -760,6 +743,10 @@ impl SqliteQueue {
         let Some(run) = run else {
             return Ok(None);
         };
+        // Neither failed nor retried while its task is held (ADR-t1879-1).
+        if crate::infrastructure::task_holds::guard_of(&tx, run.task_id())?.is_some() {
+            return Ok(None);
+        }
         let events = run_events_of(&tx, id)?;
         let resumes = ResumeCount::of(&events);
         let leased = tx
@@ -816,11 +803,8 @@ impl SqliteQueue {
 
     /// Apply the answer of a triage's `decide` ask to its `failed` or
     /// `interrupted` run that nobody leases and that is still its task's
-    /// latest run, and close the ask, in one transaction (an ask closed
-    /// meanwhile, by another supervisor or a person, is refused): `retry` makes the task `ready`, `resume` the run
-    /// `needs_session` with `reason` as `last_error`, `cancel` cancels the
-    /// task. Recorded as `triage_decided` (`ask_id`, `answer`, `reason`,
-    /// `status`).
+    /// latest run, and close the ask, in one transaction
+    /// ([`decide_triage_in`]).
     pub fn decide_triage(
         &mut self,
         id: &RunId,
@@ -831,112 +815,255 @@ impl SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let now = self.generators.clock.now();
-        let lease = tx
-            .query_row(
-                "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-                [id],
-                lease_row,
-            )
-            .optional()?;
-        ensure!(
-            lease.is_none_or(|lease| lease_is_stale(&lease, now)),
-            "run {id} is leased"
-        );
-        // The stale lease goes, so its holder cannot renew it and write
-        // after this decision (ADR-0039 decision 7).
-        tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
-        let run = tx.query_row(
-            "SELECT * FROM task_runs WHERE id=?1",
-            [id],
-            run_row(&self.runs_dir),
+        let result = decide_triage_in(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            ask_id,
+            answer,
+            reason,
         )?;
-        ensure!(
-            run::check_triageable(&run).is_ok(),
-            "run {id} is {}, not failed or interrupted",
-            run.status().as_str()
-        );
-        let latest: RunId = tx.query_row(
-            "SELECT id FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-            [run.task_id()],
-            |r| r.get(0),
-        )?;
-        ensure!(
-            latest == *id,
-            "run {id} is no longer the latest run of task {}",
-            run.task_id()
-        );
-        let pending: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM asks WHERE id=?1 AND run_id=?2
-             AND answered_at IS NOT NULL AND closed_at IS NULL)",
-            params![ask_id, id],
-            |r| r.get(0),
-        )?;
-        ensure!(
-            pending,
-            "ask {ask_id} is not an answered, unclosed ask of run {id}"
-        );
-        match answer {
-            "retry" => {
-                crate::infrastructure::sqlite::transition_task(
-                    &tx,
-                    run.task_id(),
-                    TaskAction::Ready,
-                    &self.generators.clock.timestamp(),
-                )?;
-            }
-            "resume" => {
-                apply(
-                    &tx,
-                    refusals(&self.runs_dir, &self.generators),
-                    id,
-                    None,
-                    || format!("run {id} changed"),
-                    |run| run::resume_after_triage(run, reason.to_owned()),
-                )?;
-            }
-            "cancel" => {
-                crate::infrastructure::sqlite::transition_task(
-                    &tx,
-                    run.task_id(),
-                    TaskAction::Cancel,
-                    &self.generators.clock.timestamp(),
-                )?;
-            }
-            // Another option the ask offered is the recovery job's own: it
-            // goes back to the job, whose next round reads the answer
-            // (ADR-0047 decision 40). Nothing moves here.
-            other => {
-                let options: String =
-                    tx.query_row("SELECT options FROM asks WHERE id=?1", [ask_id], |r| {
-                        r.get(0)
-                    })?;
-                let options: Vec<String> = serde_json::from_str(&options)?;
-                ensure!(
-                    options.iter().any(|option| option == other),
-                    "{other:?} is not an answer the recovery applies"
-                );
-            }
-        }
-        tx.execute(
-            "UPDATE asks SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
-            params![ask_id, now],
-        )?;
-        let result = tx.query_row(
-            "SELECT * FROM task_runs WHERE id=?1",
-            [id],
-            run_row(&self.runs_dir),
-        )?;
-        let mut payload = json!({"ask_id": ask_id, "answer": answer, "reason": reason, "status": result.status().as_str()});
-        if answer == "resume" {
-            payload["code"] = json!(ReasonCode::TriageResume);
-        }
-        if !matches!(answer, "retry" | "resume" | "cancel") {
-            payload["action"] = json!(crate::domain::RECOVER_AGAIN);
-        }
-        run_event(&tx, id, EventKind::TriageDecided, payload)?;
         tx.commit()?;
         Ok(result)
+    }
+
+    /// The guard the open hold of `task` puts on its steps, if any.
+    pub fn hold_guard(&self, task: TaskId) -> Result<Option<HoldGuard>> {
+        crate::infrastructure::task_holds::guard_of(&self.conn, task)
+    }
+
+    /// The tasks a claim would take but for their open hold.
+    pub fn held_claims(&self) -> Result<Vec<HoldGuard>> {
+        crate::infrastructure::sqlite::held_claims(&self.conn)
+    }
+
+    /// Record `hold_deferred` once per hold and step (see
+    /// [`RunRecovery::note_hold_deferred`]).
+    pub fn note_hold_deferred(
+        &mut self,
+        hold: HoldGuard,
+        run: Option<&RunId>,
+        step: GuardedStep,
+        supervisor: &LeaseToken,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let noted: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2
+               AND json_extract(payload,'$.hold_id')=?3 AND json_extract(payload,'$.step')=?4)",
+            params![
+                hold.task,
+                event_kind::HOLD_DEFERRED,
+                hold.hold,
+                step.as_str()
+            ],
+            |r| r.get(0),
+        )?;
+        if noted {
+            return Ok(false);
+        }
+        crate::infrastructure::sqlite::event(
+            &tx,
+            hold.task,
+            run,
+            EventKind::HoldDeferred,
+            json!({"hold_id": hold.hold, "step": step, "supervisor": supervisor}),
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Keep a person's answer to a triage ask while its task is held (see
+    /// [`RunRecovery::keep_triage_answer`]).
+    pub fn keep_triage_answer(
+        &mut self,
+        id: &RunId,
+        ask_id: AskId,
+        answer: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = task_of(&tx, id)?;
+        let Some(hold) = crate::infrastructure::task_holds::guard_of(&tx, task)? else {
+            return Ok(false);
+        };
+        let kept: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_events e WHERE e.run_id=?1 AND e.kind=?2
+               AND json_extract(e.payload,'$.ask_id')=?3
+               AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
+                 AND s.kind IN (?4,?5) AND json_extract(s.payload,'$.kept_id')=e.id))",
+            params![
+                id,
+                event_kind::HOLD_RESULT_KEPT,
+                ask_id,
+                event_kind::HOLD_RESULT_APPLIED,
+                event_kind::HOLD_RESULT_DISCARDED
+            ],
+            |r| r.get(0),
+        )?;
+        if !kept {
+            let version = crate::infrastructure::task_holds::progress_version(&tx, task, id)?;
+            run_event(
+                &tx,
+                id,
+                EventKind::HoldResultKept,
+                json!({"source": KeptSource::TriageAnswer, "hold_id": hold.hold,
+                       "ask_id": ask_id, "answer": answer, "reason": reason,
+                       "version": version}),
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Keep a recovery job's verdict on a live session while its task is
+    /// held (see [`RunRecovery::keep_live_verdict`]).
+    pub fn keep_live_verdict(&mut self, id: &RunId, verdict: serde_json::Value) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = task_of(&tx, id)?;
+        let Some(hold) = crate::infrastructure::task_holds::guard_of(&tx, task)? else {
+            return Ok(false);
+        };
+        let version = crate::infrastructure::task_holds::progress_version(&tx, task, id)?;
+        run_event(
+            &tx,
+            id,
+            EventKind::HoldResultKept,
+            json!({"source": KeptSource::LiveVerdict, "hold_id": hold.hold,
+                   "verdict": verdict, "version": version}),
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The kept results whose hold is released and that are not settled.
+    pub fn released_kept_results(&self) -> Result<Vec<EventId>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT e.id FROM run_events e WHERE e.kind=?1
+                   AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
+                     AND s.kind IN (?2,?3) AND json_extract(s.payload,'$.kept_id')=e.id)
+                   AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=e.task_id
+                     AND h.released_at IS NULL)
+                 ORDER BY e.id",
+            )?
+            .query_map(
+                params![
+                    event_kind::HOLD_RESULT_KEPT,
+                    event_kind::HOLD_RESULT_APPLIED,
+                    event_kind::HOLD_RESULT_DISCARDED
+                ],
+                |r| r.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Apply or discard the kept result `kept` once its hold is released
+    /// (ADR-t1879-1 decision 6), in one transaction that reads the hold,
+    /// the task and the run: unchanged since it was kept, it is applied by
+    /// the path that would have applied it (its preconditions checked
+    /// again) and recorded as `hold_result_applied`; otherwise, or when
+    /// that path refuses it now, it is discarded as `hold_result_discarded`
+    /// with the reason, a kept answer's ask closed. A discarded result
+    /// leaves the run as if none came: its next recovery round is due.
+    pub fn settle_kept_result(&mut self, kept: EventId) -> Result<KeptOutcome> {
+        let mut tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(event) = tx
+            .query_row(
+                "SELECT * FROM run_events WHERE id=?1 AND kind=?2",
+                params![kept, event_kind::HOLD_RESULT_KEPT],
+                crate::infrastructure::sqlite::event_row,
+            )
+            .optional()?
+        else {
+            return Ok(KeptOutcome::Untouched);
+        };
+        let (Some(task), Some(run_id)) = (event.task_id, event.run_id.clone()) else {
+            return Ok(KeptOutcome::Untouched);
+        };
+        let settled: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND kind IN (?2,?3)
+               AND json_extract(payload,'$.kept_id')=?4)",
+            params![
+                run_id,
+                event_kind::HOLD_RESULT_APPLIED,
+                event_kind::HOLD_RESULT_DISCARDED,
+                kept
+            ],
+            |r| r.get(0),
+        )?;
+        if settled || crate::infrastructure::task_holds::guard_of(&tx, task)?.is_some() {
+            return Ok(KeptOutcome::Untouched);
+        }
+        let source: KeptSource = event.payload["source"]
+            .as_str()
+            .unwrap_or_default()
+            .parse()?;
+        let version: ProgressVersion = serde_json::from_value(event.payload["version"].clone())?;
+        let now = crate::infrastructure::task_holds::progress_version(&tx, task, &run_id)?;
+        let refusals = refusals(&self.runs_dir, &self.generators);
+        let (outcome, error) = match task_hold::disposition(source, &version, &now) {
+            Disposition::Discard(reason) => (KeptOutcome::Discarded(reason), None),
+            Disposition::Apply => {
+                let savepoint = tx.savepoint()?;
+                match apply_kept(&savepoint, refusals, &run_id, kept, source, &event.payload) {
+                    Ok(run) => {
+                        savepoint.commit()?;
+                        (KeptOutcome::Applied(Box::new(run)), None)
+                    }
+                    Err(error) => (
+                        KeptOutcome::Discarded(DiscardReason::Refused),
+                        Some(format!("{error:#}")),
+                    ),
+                }
+            }
+        };
+        match &outcome {
+            KeptOutcome::Discarded(reason) => {
+                if source == KeptSource::TriageAnswer {
+                    tx.execute(
+                        "UPDATE asks SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
+                        params![
+                            event.payload["ask_id"].as_i64(),
+                            self.generators.clock.now()
+                        ],
+                    )?;
+                }
+                // A round or a decision after the kept result (applied
+                // in the window before this pass read the release) stays
+                // the run's last word.
+                let superseded: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND id>?2
+                       AND kind IN ('triage_started','triage_finished','triage_decided',
+                                    'triage_failed','resume_started'))",
+                    params![run_id, kept],
+                    |r| r.get(0),
+                )?;
+                run_event(
+                    &tx,
+                    &run_id,
+                    EventKind::HoldResultDiscarded,
+                    json!({"kept_id": kept, "source": source, "reason": reason, "error": error,
+                           task_hold::SUPERSEDED: superseded}),
+                )?;
+            }
+            _ => run_event(
+                &tx,
+                &run_id,
+                EventKind::HoldResultApplied,
+                json!({"kept_id": kept, "source": source}),
+            )?,
+        }
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// A person's retry that carries the task's latest run over
@@ -1209,11 +1336,326 @@ impl RunRecovery for SqliteQueue {
     ) -> Result<Option<TaskRun>> {
         SqliteQueue::exhaust_resumes(self, id, exhaustion, reason, config)
     }
+    fn hold_guard(&self, task: TaskId) -> Result<Option<HoldGuard>> {
+        SqliteQueue::hold_guard(self, task)
+    }
+    fn held_claims(&self) -> Result<Vec<HoldGuard>> {
+        SqliteQueue::held_claims(self)
+    }
+    fn note_hold_deferred(
+        &mut self,
+        hold: HoldGuard,
+        run: Option<&RunId>,
+        step: GuardedStep,
+        supervisor: &LeaseToken,
+    ) -> Result<bool> {
+        SqliteQueue::note_hold_deferred(self, hold, run, step, supervisor)
+    }
+    fn keep_triage_answer(
+        &mut self,
+        id: &RunId,
+        ask_id: AskId,
+        answer: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        SqliteQueue::keep_triage_answer(self, id, ask_id, answer, reason)
+    }
+    fn keep_live_verdict(&mut self, id: &RunId, verdict: serde_json::Value) -> Result<bool> {
+        SqliteQueue::keep_live_verdict(self, id, verdict)
+    }
+    fn released_kept_results(&self) -> Result<Vec<EventId>> {
+        SqliteQueue::released_kept_results(self)
+    }
+    fn settle_kept_result(&mut self, kept: EventId) -> Result<KeptOutcome> {
+        SqliteQueue::settle_kept_result(self, kept)
+    }
 }
 
-/// Whether a replanning operation guards the task of run `id`, so that
-/// `step` waits for the operation's outcome (ADR-t1521-2 decision 1): no
-/// resume nor recovery round of it starts.
+/// The task of run `id`.
+fn task_of(conn: &Connection, id: &RunId) -> Result<TaskId> {
+    Ok(
+        conn.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
+/// Move `run` and its task on as a recovery round's `action` says,
+/// adding to the round's `payload` what the action records.
+fn apply_triage_action(
+    conn: &Connection,
+    refusals: Refusals<'_>,
+    run: &TaskRun,
+    action: &TriageAction,
+    payload: &mut serde_json::Value,
+) -> Result<()> {
+    let id = run.id();
+    let now = refusals.generators.clock.timestamp();
+    match action {
+        TriageAction::Retry => {
+            crate::infrastructure::sqlite::transition_task(
+                conn,
+                run.task_id(),
+                TaskAction::Ready,
+                &now,
+            )?;
+        }
+        TriageAction::RetryInherit { branch, head } => {
+            // Once per task, checked again where no other supervisor
+            // can retry it.
+            let task_events: Vec<RunEvent> = conn
+                .prepare("SELECT * FROM run_events WHERE task_id=?1 ORDER BY id")?
+                .query_map([run.task_id()], event_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            ensure!(
+                !task_events.iter().any(resume::uses_automatic_inherit),
+                "task {} was retried with a branch carried over already",
+                run.task_id()
+            );
+            crate::infrastructure::sqlite::transition_task(
+                conn,
+                run.task_id(),
+                TaskAction::Ready,
+                &now,
+            )?;
+            payload["inherit"] = json!({"branch": branch, "head": head});
+        }
+        TriageAction::Wait { recheck_at } => payload["recheck_at"] = json!(recheck_at),
+        TriageAction::Resume { instruction } => {
+            apply(
+                conn,
+                refusals,
+                id,
+                None,
+                || format!("run {id} changed"),
+                |run| run::resume_after_triage(run, instruction.clone()),
+            )?;
+            payload["instruction"] = json!(instruction);
+            payload["code"] = json!(ReasonCode::TriageResume);
+        }
+        TriageAction::Ask { ask_id } => payload["ask_id"] = json!(ask_id),
+    }
+    Ok(())
+}
+
+/// Keep, instead of applying, a recovery round's `action` on `run` whose
+/// task `hold` guards (ADR-t1879-1 decision 6): record `triage_finished`
+/// with action `held` (so the run's next round is due once the hold is
+/// released, [`crate::domain::triage_state`]) and what the round would
+/// have done, `also` without its repairs and with `recovery_finished`
+/// saying nothing was applied, then `hold_result_kept` with the action
+/// and the version of the task and the run as they are kept.
+fn keep_held_verdict(
+    conn: &Connection,
+    run: &TaskRun,
+    hold: HoldGuard,
+    action: &TriageAction,
+    mut payload: serde_json::Value,
+    also: Vec<(EventKind, serde_json::Value)>,
+) -> Result<()> {
+    let id = run.id();
+    payload["action"] = json!(task_hold::HELD_ACTION);
+    payload["kept_action"] = json!(action.as_str());
+    payload["hold_id"] = json!(hold.hold);
+    payload["status"] = json!(run.status().as_str());
+    run_event(conn, id, EventKind::TriageFinished, payload)?;
+    for (kind, mut payload) in also {
+        if kind == EventKind::AutoRepaired {
+            continue;
+        }
+        if kind == EventKind::RecoveryFinished {
+            payload["applied"] = json!([]);
+            payload["held"] = json!(true);
+            payload["hold_id"] = json!(hold.hold);
+        }
+        run_event(conn, id, kind, payload)?;
+    }
+    let version = crate::infrastructure::task_holds::progress_version(conn, run.task_id(), id)?;
+    run_event(
+        conn,
+        id,
+        EventKind::HoldResultKept,
+        json!({"source": KeptSource::RecoveryVerdict, "hold_id": hold.hold,
+               "action": action.to_kept(), "version": version}),
+    )
+}
+
+/// Apply the result `kept` (from `source`, with `payload`) to run `id` by
+/// the path that would have applied it: a recovery verdict as the round's
+/// action on a run nobody leases that is still its task's latest, a
+/// person's answer as [`decide_triage_in`].
+fn apply_kept(
+    conn: &Connection,
+    refusals: Refusals<'_>,
+    id: &RunId,
+    kept: EventId,
+    source: KeptSource,
+    payload: &serde_json::Value,
+) -> Result<TaskRun> {
+    match source {
+        KeptSource::RecoveryVerdict => {
+            let action = TriageAction::from_kept(&payload["action"])
+                .context("the kept verdict names no action this binary applies")?;
+            let run = unleased_latest_triageable(conn, refusals.generators.clock.now(), id)?;
+            let mut finished = json!({"by": "runtime", "kept_id": kept,
+                "reason": "the recovery job's verdict kept while the task was held"});
+            apply_triage_action(conn, refusals, &run, &action, &mut finished)?;
+            let result = conn.query_row(
+                "SELECT * FROM task_runs WHERE id=?1",
+                [id],
+                run_row(refusals.runs_dir),
+            )?;
+            finished["action"] = json!(action.as_str());
+            finished["status"] = json!(result.status().as_str());
+            run_event(conn, id, EventKind::TriageFinished, finished)?;
+            Ok(result)
+        }
+        KeptSource::TriageAnswer => {
+            let ask_id: AskId = serde_json::from_value(payload["ask_id"].clone())?;
+            decide_triage_in(
+                conn,
+                refusals,
+                id,
+                ask_id,
+                payload["answer"].as_str().unwrap_or_default(),
+                payload["reason"].as_str().unwrap_or_default(),
+            )
+        }
+        KeptSource::LiveVerdict => bail!("a verdict on a live session is not applied later"),
+    }
+}
+
+/// Run `id`, `failed` or `interrupted`, its task's latest run, with no
+/// lease but a stale one, which goes (so its holder cannot renew it and
+/// write after this, ADR-0039 decision 7).
+fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result<TaskRun> {
+    let lease = conn
+        .query_row(
+            "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+            [id],
+            lease_row,
+        )
+        .optional()?;
+    ensure!(
+        lease.is_none_or(|lease| lease_is_stale(&lease, now)),
+        "run {id} is leased"
+    );
+    conn.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+    let run = stored_run(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
+    ensure!(
+        run::check_triageable(&run).is_ok(),
+        "run {id} is {}, not failed or interrupted",
+        run.status().as_str()
+    );
+    let latest: RunId = conn.query_row(
+        "SELECT id FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+        [run.task_id()],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        latest == *id,
+        "run {id} is no longer the latest run of task {}",
+        run.task_id()
+    );
+    Ok(run)
+}
+
+/// Apply the answer of a triage's `decide` ask to its `failed` or
+/// `interrupted` run that nobody leases and that is still its task's
+/// latest run, and close the ask, inside the caller's transaction (an
+/// ask closed meanwhile, by another supervisor or a person, is refused,
+/// and so is a run whose task is held, ADR-t1879-1): `retry` makes the
+/// task `ready`, `resume` the run `needs_session` with `reason` as
+/// `last_error`, `cancel` cancels the task. Recorded as `triage_decided`
+/// (`ask_id`, `answer`, `reason`, `status`).
+fn decide_triage_in(
+    conn: &Connection,
+    refusals: Refusals<'_>,
+    id: &RunId,
+    ask_id: AskId,
+    answer: &str,
+    reason: &str,
+) -> Result<TaskRun> {
+    let now = refusals.generators.clock.now();
+    let run = unleased_latest_triageable(conn, now, id)?;
+    crate::infrastructure::task_holds::check_not_held(conn, run.task_id(), GuardedStep::Recover)?;
+    let pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM asks WHERE id=?1 AND run_id=?2
+         AND answered_at IS NOT NULL AND closed_at IS NULL)",
+        params![ask_id, id],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        pending,
+        "ask {ask_id} is not an answered, unclosed ask of run {id}"
+    );
+    let timestamp = refusals.generators.clock.timestamp();
+    match answer {
+        "retry" => {
+            crate::infrastructure::sqlite::transition_task(
+                conn,
+                run.task_id(),
+                TaskAction::Ready,
+                &timestamp,
+            )?;
+        }
+        "resume" => {
+            apply(
+                conn,
+                refusals,
+                id,
+                None,
+                || format!("run {id} changed"),
+                |run| run::resume_after_triage(run, reason.to_owned()),
+            )?;
+        }
+        "cancel" => {
+            crate::infrastructure::sqlite::transition_task(
+                conn,
+                run.task_id(),
+                TaskAction::Cancel,
+                &timestamp,
+            )?;
+        }
+        // Another option the ask offered is the recovery job's own: it
+        // goes back to the job, whose next round reads the answer
+        // (ADR-0047 decision 40). Nothing moves here.
+        other => {
+            let options: String =
+                conn.query_row("SELECT options FROM asks WHERE id=?1", [ask_id], |r| {
+                    r.get(0)
+                })?;
+            let options: Vec<String> = serde_json::from_str(&options)?;
+            ensure!(
+                options.iter().any(|option| option == other),
+                "{other:?} is not an answer the recovery applies"
+            );
+        }
+    }
+    conn.execute(
+        "UPDATE asks SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
+        params![ask_id, now],
+    )?;
+    let result = conn.query_row(
+        "SELECT * FROM task_runs WHERE id=?1",
+        [id],
+        run_row(refusals.runs_dir),
+    )?;
+    let mut payload = json!({"ask_id": ask_id, "answer": answer, "reason": reason, "status": result.status().as_str()});
+    if answer == "resume" {
+        payload["code"] = json!(ReasonCode::TriageResume);
+    }
+    if !matches!(answer, "retry" | "resume" | "cancel") {
+        payload["action"] = json!(crate::domain::RECOVER_AGAIN);
+    }
+    run_event(conn, id, EventKind::TriageDecided, payload)?;
+    Ok(result)
+}
+
+/// Whether a replanning operation or a hold guards the task of run `id`,
+/// so that `step` waits for the operation's outcome (ADR-t1521-2,
+/// decision 1) or the hold's release (ADR-t1879-1): no resume nor
+/// recovery round of it starts.
 fn replanning(conn: &Connection, id: &RunId, step: GuardedStep) -> Result<bool> {
     let task: Option<TaskId> = conn
         .query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {

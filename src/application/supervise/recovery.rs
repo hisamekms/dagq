@@ -1421,6 +1421,36 @@ fn apply_live_verdict(
     if !verdict.applies() {
         return Ok(Err(Escalation::Verdict(verdict)));
     }
+    // A held task's run is not repaired: the verdict is kept, and its
+    // round ends having applied nothing (ADR-t1879-1). The hold is read
+    // just before the repairs, which type into and stop the processes of
+    // a live session no transaction holds.
+    if sv.queue.keep_live_verdict(
+        run.id(),
+        json!({"verdict": verdict.verdict, "confidence": verdict.confidence,
+               "diagnosis": verdict.diagnosis,
+               "actions": verdict.actions.iter().map(RecoveryAction::name).collect::<Vec<_>>(),
+               "alert": job.alert, "attempt": job.attempt}),
+    )? {
+        let mut finished = json!({
+            "alert": job.alert,
+            "reason": job.reason,
+            "attempt": job.attempt,
+            "verdict": verdict.verdict,
+            "confidence": verdict.confidence,
+            "diagnosis": verdict.diagnosis,
+            "applied": [],
+            "held": true,
+            "escalated": false,
+            "marker_at_ms": job.marker.map(millis),
+            "duration_secs": duration_secs,
+        });
+        end.record(&mut finished);
+        sv.queue
+            .record_runtime_event(run.id(), EventKind::RecoveryFinished, finished)?;
+        info!(run_id = %run.id(), "run {}: recovery job {} of {} answered repair, but its task is held; the verdict is kept", run.id(), job.attempt, job.alert.as_str());
+        return Ok(Ok(Applied::default()));
+    }
     if let Err(why) = check_live(sv, run, live, &verdict.actions) {
         warn!(run_id = %run.id(), "run {}: recovery job {} of {} answered repair, but {why}; asking the inbox", run.id(), job.attempt, job.alert.as_str());
         return Ok(Err(Escalation::Refused(verdict, why)));

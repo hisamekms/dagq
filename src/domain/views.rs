@@ -178,6 +178,9 @@ pub struct TaskDetail {
     /// with where each is and why.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub replans: Vec<crate::domain::task_replan::ReplanOperation>,
+    /// Its open hold (ADR-t1879-1), if any: why, until when and by whom.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold: Option<crate::domain::task_hold::TaskHold>,
 }
 
 /// Where a draft the runtime or a job made came from (ADR-t807-1): its

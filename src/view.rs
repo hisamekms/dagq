@@ -142,6 +142,11 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
     if !detail.replans.is_empty() {
         shown["replans"] = json!(replans(detail));
     }
+    if let Some(hold) = &detail.hold {
+        let mut hold = object(hold);
+        truncate_fields(&mut hold, &["reason"]);
+        shown["hold"] = Value::Object(hold);
+    }
     shown
 }
 
@@ -381,6 +386,7 @@ mod tests {
             follow_up_drafts: Vec::new(),
             revisit: None,
             replans: Vec::new(),
+            hold: None,
             asks: Vec::new(),
             runs: vec![run("a"), run("b")],
             events: (1..=12)
@@ -463,6 +469,7 @@ mod tests {
             follow_up_drafts: Vec::new(),
             revisit: None,
             replans: Vec::new(),
+            hold: None,
             asks: Vec::new(),
             runs: vec![run("a"), run("b")],
             events: vec![
@@ -497,6 +504,7 @@ mod tests {
             follow_up_drafts: Vec::new(),
             revisit: None,
             replans: Vec::new(),
+            hold: None,
             asks: Vec::new(),
             runs: vec![],
             events: vec![],
@@ -567,6 +575,7 @@ mod tests {
             follow_up_drafts: Vec::new(),
             revisit: None,
             replans: Vec::new(),
+            hold: None,
             runs: vec![run("b")],
             events: vec![],
             processes: vec![],
@@ -695,6 +704,7 @@ mod tests {
             follow_up_drafts: Vec::new(),
             revisit: None,
             replans: Vec::new(),
+            hold: None,
             asks: Vec::new(),
             runs: vec![],
             events,

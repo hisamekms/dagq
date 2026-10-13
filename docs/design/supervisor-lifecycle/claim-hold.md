@@ -105,3 +105,12 @@ supervisorのlogにも`claim_held`はwarn、`claim_resumed`はinfoで出る。
   着地の検証の控えは同じ形の`landing_holds`。
   控えている間に空きslotがあれば、`idle_slots`の代わりにalert `claim_held`（`value`は空きslotの数）を出すので、控えによる空きと依存の詰まりによる空きを区別できる（[`stats`](commands.md)）
 - observerは`stats --since <cursor>`を入力に読むので、`claim_holds`とalert `claim_held`もそのまま載る
+
+## taskのhold
+
+taskを1つずつ待たせるhold（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)、`dagq hold` / `dagq release`）は、この控えと別の層で重なる。
+holdの開いたtaskは、fill passの1つの列（resume・復旧job・claim）に入る前に外れ、外したことをtaskの`hold_deferred`にholdと工程（`claim` / `resume` / `recover`）ごとに1回残す（`supervise::task_hold`）。
+readyのtaskはready queryがholdを除くので、`candidates`にも出ない。
+列を作った後にかかったholdも、claimの確定・`begin_resume`・`skip_resume`・`exhaust_resumes`・`begin_triage`がそれぞれのトランザクションの中でholdを読み直すので、その開始は起きない。
+queue全体の控えではないので`claim_held` / `claim_resumed`を書かず、`stats`の`claim_holds`にも数えない。
+走っているrunのturnにholdが効くこと、`status`とattentionへの表示、解除の続け方の選択は予定で、[taskのhold](../../plans/task-hold.md)が持つ。

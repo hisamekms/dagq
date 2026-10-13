@@ -1632,7 +1632,7 @@ impl Supervisor<'_> {
         // for the operation's outcome whatever the answer.
         let guard = self.queue.replan_guard(run.task_id())?;
         if let Err(withheld) = crate::domain::task_replan::check_step(
-            guard.as_ref(),
+            &crate::domain::task_replan::TaskGuards::replan(guard),
             crate::domain::task_replan::GuardedStep::Revise,
         ) {
             self.queue.record_runtime_event(

@@ -65,6 +65,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | | `planner.open` | `plan` |
 | | `request.record` / `request.decline` | `request add` / `request decline`（計画の依頼。ADR-t1394-1の決定3・6、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)） |
 | | `replan.*` | `replan request` `replan propose` / runtimeの保留と置換（[再計画](../plans/task-replanning.md)） |
+| | `task.hold` | `hold` `release` |
 | | `screen.read` / `screen.send` | `run screen` `planner screen` `run log` `planner log` / `run send` `planner send`（sessionの画面を読む・送る。workerのrunには画面が無く、`run screen`はどのrunにも理由とturnのlogのCLI（`run log`）を示して拒み（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、`run send`はどのrunにも拒む。backgroundのsessionのlogを読む（ADR-t1404-1決定6）。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)） |
 | | `planner.request` | `planner request`（開いている非対話のruntimeのplannerへの続きの依頼を次のturnとして置く。[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#続きの依頼と非対話のplannerのcli)）。plannerを閉じるCLIは無い |
 | eval | `eval.request` / `eval.request_held_out` / `eval.rerun` / `eval.read` / `eval.cases` | `agent eval`（dev / holdout・production / `--rerun`） / 読み取り / `agent cases` `agent decide`（[Agent eval](agent-eval.md)） |
@@ -171,8 +172,10 @@ CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、
 | `request add` | `request.record` | queue。userとinboxだけが持つ（inboxの記録は人の言葉の代行で、`requested_by`とeventのactorが`inbox`）。planner・worker・observer・全てのjob・supervisor・wrapper・integratorは拒む |
 | `request decline ID` | `request.decline` | `Request`（id、その依頼の閉じていないruntimeのplanner）。capabilityを持たないroleは依頼を読む前に拒み、plannerはその依頼のplanner自身でなければ`not on this resource`で拒む |
 | `replan request` / `replan propose` | `replan.request` / `replan.propose` | `Run`（storeが読むtask）。`Replans`が判定し、proposeは自分のrunだけ |
+| `hold` / `release` | `task.hold` | `Task`か`Run`（storeが読むtask）。`Holds`が判定 |
 
-`asked_by`・noteとfindingの`by`・markの`by`は、呼び出し元が渡した値ではなく`Dialogue`がactorから入れる（roleの名前、userは`human`。綴りは今までどおり）。answerはuserとinboxだけで（[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)の決定4）、worker・headlessのjob・observer・planner・supervisor・wrapper・integratorは`ask.answer`を、worker・headlessのjob・observer・planner・wrapper・integratorは`ask.close`を持たない（supervisorは閉じられる）。
+`asked_by`・noteとfindingの`by`・markの`by`は、呼び出し元が渡した値ではなく`Dialogue`がactorから入れる（roleの名前、userは`human`）。
+answerはuserとinboxだけで（[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)の決定4）、worker・headlessのjob・observer・planner・supervisor・wrapper・integratorは`ask.answer`を、worker・headlessのjob・observer・planner・wrapper・integratorは`ask.close`を持たない（supervisorは閉じられる）。
 
 #### answerの権限の出どころと承認の分類
 

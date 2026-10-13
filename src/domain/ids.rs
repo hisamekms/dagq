@@ -187,6 +187,27 @@ impl fmt::Display for ReplanId {
     }
 }
 
+/// The ID of a task's hold: the `task_holds.id` rowid (ADR-t1879-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HoldId(i64);
+
+impl HoldId {
+    pub const fn new(id: i64) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for HoldId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// The ID of a planner session: the `planners.id` rowid (ADR-0041
 /// decisions 1, 6). Its directory carries it, and so does the workspace
 /// title of a person's planner opened before ADR-t1394-1 (a planner of the

@@ -7,6 +7,7 @@
 //! [`crate::domain::AuthorizationError`]. The CLI parses and prints only.
 
 pub mod dialogue;
+pub mod holds;
 pub mod operations;
 pub mod planning;
 pub mod replans;

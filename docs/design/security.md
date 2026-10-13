@@ -74,7 +74,9 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   headlessのjob（`ActorRole::is_headless_job`）・worker・wrapper・integratorは`watch`も`queue.export`も`ci.read`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`・`ci failures`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる。
   読み取り（`queue.read`）は全roleが持つ
 - `judge-follow-up`（`follow_up.judge`）はuser・inbox・plannerだけが全状態のfollow_upに記録でき、worker・job・supervisorは拒む。所属変更はdraft/readyだけ。表のplannerのtask変更の例外はこの判断の記録だけである。
-- draftの再検討の時刻（`revisit`、[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）は計画の列の`task.write`に含める（許すroleと拒むroleが開始前のtaskの変更と同じなので、新しいcapabilityにしない）。user・inbox・plannerが付け・変え・外し、worker・observer・job・supervisorは拒む。plannerは`draft_planner_exhausted`のあるdraftに付けられない（人・inboxが付けたものだけがplannerの上限を越えて1回立つため）
+- draftの再検討の時刻（`revisit`、[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）は計画の列の`task.write`に含める。
+  user・inbox・plannerが付け・変え・外し、worker・observer・job・supervisorは拒む。
+  plannerは`draft_planner_exhausted`のあるdraftに付けられない（人・inboxが付けたものだけがplannerの上限を越えて1回立つため）
 - user・inboxの計画権限には、最新runが終了し生きているrunの無い`in_progress` taskの`--verify` / `--no-verify`だけを直す`task.verify_edit`も含む（ADR-t883-1）。planner・worker・jobは持たない。
 - 人の出どころの優先度（`priority_by: human`）はuserとinboxだけが変え、planner・supervisor（plan reviewのverdictの適用とruntimeの自動の修正）・jobは計画の列の権限があっても変えられない（[ADR-t1975-1](../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)の決定2〜4）。
   `set-priority`と`goal edit`の変更、依頼の値と違う優先度の`goal add`・`add`は拒んで`authorization_denied`（`a person's priority`）に残し、plan reviewの`lower_priority`は適用せず記録する。
@@ -93,7 +95,8 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   拒否は`authorization_denied`に残る
 - 再計画（[再計画](../plans/task-replanning.md)）の`replan.request`（`replan request`）はuserとinboxだけ、`replan.propose`（`replan propose`）は自分のrunのworkerだけが持つ。
   runの保留と置換の`replan.park`・`replan.apply`はsupervisorだけが持つ。
-  plannerはどれも持たない
+  plannerはどれも持たない。
+  holdの`task.hold`（`hold` / `release`）もuserとinboxだけ
 - agentのevalの依頼（`agent eval`、[Agent eval](agent-eval.md)）は、devの`eval.request`をuser・inbox・plannerと自分のrunのworkerが、hold-outとproductionの`eval.request_held_out`とproductionの集合の依頼と決定（`agent cases`・`decide`）の`eval.cases`をuser・inbox・plannerが、同じキーの再実行の`eval.rerun`をuserとinboxだけが持つ。
   結果を読む`eval.read`はuser・inbox・planner・observer・supervisorと自分のrunのworkerが持つ。
   supervisorは依頼を実行するだけで依頼のcapabilityを持たず、jobは何も持たない。
@@ -126,12 +129,14 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   hostの判定は助言的なまま（ADR-t728-1決定6）。
   workerとjobの`cmux`は拒まず、隔離に任せる（決定7）。
   人自身のterminal（`DAGQ_ROLE`なし）はsettingsを持たず、ADR-t1228-1が人に残したcmuxの操作をそこで打つ
-- Codexのinbox（goal 77）は、同じ趣旨（`cmux`で始まるコマンドを拒み、dagqのCLIを使わせる）をCodexの手段で持たせる（ADR-t1228-2決定6）。今のproviderの口（`AgentProvider::inbox_command`）でinboxを持つのはClaudeだけで（`up`は`--claude`でinboxを開く）、Codexはinboxを持たない（`inbox_command`は拒み、`inbox_settings`の既定は`None`。settingsを持たないproviderのinboxが入れば`inbox_opened`の`guardrail`は`false`で記録され、`inbox_guardrail`が見せる）。Codexのinboxを作るtaskが手段を持たせるか、手段が無ければこのguardrailが無いことをここに書き、skillの手順をCLIだけにすることで足りるとする
+- Codexのinboxは、同じ趣旨（`cmux`で始まるコマンドを拒み、dagqのCLIを使わせる）をCodexの手段で持たせる（ADR-t1228-2決定6）。
+  今のproviderの口（`AgentProvider::inbox_command`）でinboxを持つのはClaudeだけで（`up`は`--claude`でinboxを開く）、Codexはinboxを持たない（`inbox_command`は拒み、`inbox_settings`の既定は`None`。settingsを持たないproviderのinboxが入れば`inbox_opened`の`guardrail`は`false`で記録され、`inbox_guardrail`が見せる）。
+  Codexのinboxを作るtaskが手段を持たせるか、手段が無ければこのguardrailが無いことをここに書き、skillの手順をCLIだけにすることで足りるとする
 
 roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説明する）:
 
-- worker: `integrate`・`answer`・`ask close`・`ready`・`cancel`・計画系の全て・`request add`・`request decline`・`replan request`・他のrunの`replan propose`・`recover`・`review`・`supervise`・`observe`・`plan`・`up`・`down`・`install`・`auto-update`・`init`・`migrate`・`rebind`・`finding`・`mark`、自分のrun以外への`ask`・`note`・`session`・`session-event`
-- planner: `ready`（`--bypass-review`・`--inherit`を含む）・`goal ready`・`goal review`・`request add`・`replan request`・`replan propose`・他の依頼の`request decline`と`ask --request`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run log`・`run send`・`planner screen`・`planner log`・`planner send`・`planner request`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、draft以外と上限に達したdraftの`revisit`、他のplannerのproposalの取り下げ
+- worker: `integrate`・`answer`・`ask close`・`ready`・`cancel`・計画系の全て・`request add`・`request decline`・`replan request`・他のrunの`replan propose`・`hold`・`release`・`recover`・`review`・`supervise`・`observe`・`plan`・`up`・`down`・`install`・`auto-update`・`init`・`migrate`・`rebind`・`finding`・`mark`、自分のrun以外への`ask`・`note`・`session`・`session-event`
+- planner: `ready`（`--bypass-review`・`--inherit`を含む）・`goal ready`・`goal review`・`request add`・`replan request`・`replan propose`・`hold`・`release`・他の依頼の`request decline`と`ask --request`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run log`・`run send`・`planner screen`・`planner log`・`planner send`・`planner request`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、draft以外と上限に達したdraftの`revisit`、他のplannerのproposalの取り下げ
 - headlessのjob: 状態を変える全て（`reviewer may not change queue state`）
 - observer: `finding record`・`finding resolve`・findingに紐づく`blocked`のask以外の全て（`observer may not change queue state`）
 - inbox: 人（user）と同じで、拒まれるのは誰にも与えない着地の実行・pushと予約だけ

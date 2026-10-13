@@ -63,6 +63,7 @@ mod sessions;
 pub mod sql_ids;
 pub mod sqlite;
 mod stranded;
+mod task_holds;
 pub mod telemetry;
 pub mod throughput_review;
 pub mod transcripts;

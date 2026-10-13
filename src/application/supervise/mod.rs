@@ -163,6 +163,7 @@ mod stale;
 mod stall;
 mod stall_recovery;
 mod sweep;
+mod task_hold;
 mod throughput_review;
 mod triage;
 mod update;
@@ -2053,6 +2054,9 @@ impl Supervisor<'_> {
         if let Err(error) = self.review_recovered_runs(parallel) {
             warn!(error = %format_args!("{error:#}"), "a run recovered from its landing could not start its review: {error:#}");
         }
+        // Before the answers and the recovery jobs: a result a hold kept
+        // is applied or discarded once the hold is released (ADR-t1879-1).
+        self.settle_kept_results()?;
         self.apply_triage_answers()?;
         // A slot the runs freed since the last pass ends the wait for one
         // before anything takes it again (ADR-t1662-1 decision 6).
@@ -2147,6 +2151,9 @@ impl Supervisor<'_> {
                 // reads the candidates only then.
                 let room = self.claim_room(parallel);
                 if room != ClaimRoom::None {
+                    // A held task is no candidate (the ready query leaves
+                    // it out); its record says why (ADR-t1879-1).
+                    self.note_held_claims()?;
                     let light = self.light_tasks(room)?;
                     let claimable = self.claimable(&graph, light.as_ref())?;
                     // Each claim at its own effective priority: aging lends

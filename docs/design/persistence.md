@@ -107,6 +107,7 @@ planners               -- plannerのsession 1つに1行。workspace_idはruntime
 plan_requests          -- inboxが記録した計画の依頼。text / note / refsは記録の後に書き換えない（言い直しは新しい依頼）。spike_task_idはSpike起点の依頼（Spikeごとに1件）
 spike_cycles           -- 調査中の計画の周期
 replan_operations      -- runの再計画（ADR-t1521-2）。開いた操作はrunごとに1つ。読まないバイナリはfloorが拒む
+task_holds             -- taskのhold（ADR-t1879-1）。開いた行はtaskごとに1つ（BEGIN IMMEDIATEの中の検査）
 plan_request_proposals -- 依頼から出たproposal
 draft_origins          -- runtimeやjobが作ったdraftの出どころと材料（JSON object）。1つのdraftに1回だけ書く
 draft_reopens          -- plan reviewがreopenしたtaskのproposalを取り下げたときの出どころ
@@ -139,7 +140,6 @@ binary_updates         -- 使っていない（自動更新の経過はupdate_*�
   storeが足すのは自分の表から読むもの（resumeの作業の内訳とtoken）とleaseの解放だけ。
 - runのdomainの拒否は、トランザクションが巻き戻ってeventに残せないので、run directoryの`refusals.log`に1行で残す（`runtime_store::REFUSALS_LOG`）。
 - 循環は、task依存・goal依存・goalの所属taskを合わせた辺の上の再帰CTE（`waits_for`）で見つけるので、goalを経る循環も拒む。
-- claimの順は依存グラフ全体で決めるのでSQLで決めず、`claim_task`が同じトランザクションで`dependency_graph`の順に並べる。
 - note（人とplannerのメモ）は表を持たず、`run_events`のkind `observation`として書く。
 
 ## asks
@@ -245,11 +245,10 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
   ロックの待ちは最大5秒で、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#supervise)）。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
-- queue全体の実行枠は無く、同時に動くrunの数は`supervise --parallel`が決める。
+  holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒み、循環はトランザクションの中の再帰CTEで見つける。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
 - contextをまたぐトランザクションは`.config/context-boundaries.txt`のものだけ（[architecture](architecture.md)のX1）。
-- SQLiteのトランザクションの挙動は[公式仕様](https://www.sqlite.org/lang_transaction.html)に従う。
 
 ### CHECK制約を使わない
 

@@ -1,9 +1,9 @@
 use std::fmt;
 
 use super::{
-    AskKind, AskReason, CheckStatus, FindingId, FindingStatus, GoalId, GoalVerdict, ProposalId,
-    ProposalStatus, ReceiptResult, ReplanId, RequestId, RunId, RunStatus, TaskAction, TaskId,
-    TaskStatus,
+    AskKind, AskReason, CheckStatus, FindingId, FindingStatus, GoalId, GoalVerdict, HoldId,
+    ProposalId, ProposalStatus, ReceiptResult, ReplanId, RequestId, RunId, RunStatus, TaskAction,
+    TaskId, TaskStatus,
     plan_request::RequestStatus,
     task_replan::{GuardedStep, ReplanStatus},
 };
@@ -294,6 +294,33 @@ pub enum DomainError {
         operation: ReplanId,
         status: ReplanStatus,
         step: GuardedStep,
+    },
+    /// A step of a task its open hold refuses (ADR-t1879-1).
+    TaskHeld {
+        task_id: TaskId,
+        hold: HoldId,
+        step: GuardedStep,
+    },
+    /// A hold with a blank reason.
+    HoldReasonEmpty,
+    /// A hold of a task in a status that takes none.
+    TaskNotHoldable {
+        task_id: TaskId,
+        status: TaskStatus,
+    },
+    /// A hold of a task that has one open.
+    TaskAlreadyHeld {
+        task_id: TaskId,
+        hold: HoldId,
+    },
+    /// A release of a task that has no open hold.
+    TaskNotHeld {
+        task_id: TaskId,
+    },
+    /// A release while what was going when the task was held still goes.
+    HoldNotSettled {
+        task_id: TaskId,
+        hold: HoldId,
     },
     /// A replanning operation on a run its task no longer waits on.
     RunNotReplannable {
@@ -814,6 +841,30 @@ impl fmt::Display for DomainError {
                 "task {task_id} is being replanned (replan operation {operation} is {}): {} is refused until the runtime ends the operation (see dagq replans {operation})",
                 status.as_str(),
                 step.as_str()
+            ),
+            Self::TaskHeld {
+                task_id,
+                hold,
+                step,
+            } => write!(
+                f,
+                "task {task_id} is held (hold {hold}): {} is refused until a person releases it (dagq release {task_id})",
+                step.as_str()
+            ),
+            Self::HoldReasonEmpty => write!(f, "a hold needs a reason (--reason)"),
+            Self::TaskNotHoldable { task_id, status } => write!(
+                f,
+                "task {task_id} is {}: only a ready, submitted or in_progress task is held",
+                status.as_str()
+            ),
+            Self::TaskAlreadyHeld { task_id, hold } => write!(
+                f,
+                "task {task_id} is held already (hold {hold}): release it and hold it again to change the reason"
+            ),
+            Self::TaskNotHeld { task_id } => write!(f, "task {task_id} has no open hold"),
+            Self::HoldNotSettled { task_id, hold } => write!(
+                f,
+                "hold_not_settled: task {task_id}'s hold {hold} is still settling (a step that was going when it was held still goes); release it once it waits"
             ),
             Self::RunNotReplannable {
                 run_id,

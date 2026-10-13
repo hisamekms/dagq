@@ -182,6 +182,10 @@ event_kinds! {
     HeadlessJobStopped => "headless_job_stopped",
     HoldAnswerApplied => "hold_answer_applied",
     HoldContinueSent => "hold_continue_sent",
+    HoldDeferred => "hold_deferred",
+    HoldResultApplied => "hold_result_applied",
+    HoldResultDiscarded => "hold_result_discarded",
+    HoldResultKept => "hold_result_kept",
     IdleInferred => "idle_inferred",
     InboxNudgeFailed => "inbox_nudge_failed",
     InboxNudged => "inbox_nudged",
@@ -389,8 +393,10 @@ event_kinds! {
     TaskCreated => "task_created",
     TaskEdited => "task_edited",
     TaskGoalChanged => "task_goal_changed",
+    TaskHeld => "task_held",
     TaskPathsChanged => "task_paths_changed",
     TaskPriorityChanged => "task_priority_changed",
+    TaskReleased => "task_released",
     TaskReopened => "task_reopened",
     TaskStatusChanged => "task_status_changed",
     TaskSubmitted => "task_submitted",
@@ -841,6 +847,20 @@ pub const GOAL_UPDATED: &str = EventKind::GoalUpdated.as_str();
 pub const HEADLESS_JOB_STOPPED: &str = EventKind::HeadlessJobStopped.as_str();
 pub const HOLD_ANSWER_APPLIED: &str = EventKind::HoldAnswerApplied.as_str();
 pub const HOLD_CONTINUE_SENT: &str = EventKind::HoldContinueSent.as_str();
+/// A supervisor's pass left out a step of a held task (ADR-t1879-1):
+/// `hold_id`, `step` (`claim`, `resume` or `recover`) and `supervisor`;
+/// once per hold and step.
+pub const HOLD_DEFERRED: &str = EventKind::HoldDeferred.as_str();
+/// A result a hold kept instead of applying (ADR-t1879-1): `source`
+/// ([`super::task_hold::KeptSource`]), `hold_id`, the verdict's `action`
+/// or the answer's `ask_id` and `answer`, and `version`
+/// ([`super::task_hold::ProgressVersion`]) as it was kept.
+pub const HOLD_RESULT_KEPT: &str = EventKind::HoldResultKept.as_str();
+/// A kept result applied after its hold's release: `kept_id`, `source`.
+pub const HOLD_RESULT_APPLIED: &str = EventKind::HoldResultApplied.as_str();
+/// A kept result discarded after its hold's release: `kept_id`, `source`,
+/// `reason` ([`super::task_hold::DiscardReason`]).
+pub const HOLD_RESULT_DISCARDED: &str = EventKind::HoldResultDiscarded.as_str();
 /// A session without a fresh idle marker whose screen was inferred idle
 /// (ADR-t803-1), once per span.
 pub const IDLE_INFERRED: &str = EventKind::IdleInferred.as_str();
@@ -1121,6 +1141,16 @@ pub const TASK_GOAL_CHANGED: &str = EventKind::TaskGoalChanged.as_str();
 pub const TASK_PATHS_CHANGED: &str = EventKind::TaskPathsChanged.as_str();
 pub const TASK_PRIORITY_CHANGED: &str = EventKind::TaskPriorityChanged.as_str();
 pub const TASK_REOPENED: &str = EventKind::TaskReopened.as_str();
+/// A task held (ADR-t1879-1): `hold_id`, `reason`, `until`, `requested`
+/// (`task` or `run`, what the command named), the task's latest `run_id`
+/// and `run_status` then, and `state` (`settling` or `held`). Written with
+/// the hold's row in one transaction.
+pub const TASK_HELD: &str = EventKind::TaskHeld.as_str();
+/// A task's hold released: `hold_id`, `continuation` (`claim` for a task
+/// with no run that waits, `continue` for one whose run goes on its
+/// way), `held_secs` and `settled_secs`. Written with the release of the
+/// row in one transaction.
+pub const TASK_RELEASED: &str = EventKind::TaskReleased.as_str();
 pub const TASK_STATUS_CHANGED: &str = EventKind::TaskStatusChanged.as_str();
 /// A supervisor's slots of one class (`heavy` or `light`) all full
 /// (`supervisor`, `class`, `running`, `slots`), recorded by that supervisor
@@ -1314,6 +1344,10 @@ mod tests {
             (EventKind::HeadlessJobStopped, "headless_job_stopped"),
             (EventKind::HoldAnswerApplied, "hold_answer_applied"),
             (EventKind::HoldContinueSent, "hold_continue_sent"),
+            (EventKind::HoldDeferred, "hold_deferred"),
+            (EventKind::HoldResultApplied, "hold_result_applied"),
+            (EventKind::HoldResultDiscarded, "hold_result_discarded"),
+            (EventKind::HoldResultKept, "hold_result_kept"),
             (EventKind::IdleInferred, "idle_inferred"),
             (EventKind::InboxNudgeFailed, "inbox_nudge_failed"),
             (EventKind::InboxNudged, "inbox_nudged"),
@@ -1562,9 +1596,11 @@ mod tests {
             (EventKind::SupervisorStopped, "supervisor_stopped"),
             (EventKind::TaskCreated, "task_created"),
             (EventKind::TaskEdited, "task_edited"),
+            (EventKind::TaskHeld, "task_held"),
             (EventKind::TaskGoalChanged, "task_goal_changed"),
             (EventKind::TaskPathsChanged, "task_paths_changed"),
             (EventKind::TaskPriorityChanged, "task_priority_changed"),
+            (EventKind::TaskReleased, "task_released"),
             (EventKind::TaskReopened, "task_reopened"),
             (EventKind::TaskStatusChanged, "task_status_changed"),
             (EventKind::TaskSubmitted, "task_submitted"),
