@@ -261,9 +261,9 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
   適用した`send_back`の後でsessionが直さなかったときのaskは、reviseでなく適用したconcernとして聞く（`Fix::Revise`の`concern`）。
 - **記録**: concernごとに1回、適用でもaskでも`concern_decided`を記録し、jobが動かなかったreviewは記録しない。
   適用した`send_back`が後からaskに至ったときは`concern_decided`を書き直さず、`concern_send_back_escalated`を足して同じattemptで結ぶ。
-- **sessionの終了の依頼とclose**（ADR-0027決定1のamends）: `land`はpassと同じく着地の直前、askはaskを作る前、`send_back`はsessionを開いたまま。
 - **引き継ぎ**: concernの後で止まったrunは、adoptした側がverdictから決め直す（`adopted_concern`）。
   `send_back`の依頼を記録した後に`concern_decided`の前で止まったときは、引き継ぎが適用として補う（`backfill_sent_back_concern`）。
+- **agentの判定**: agentも同じ規則で進み、セキュリティのagentの出し分けは[ADR-t1906-1](../../adr/2026-10-14-t1906-1-security-review-agent-findings-follow-the-concern-rules.md)が持つ。
 - **prompt**: concernを機械的な修正でなく判断の要るfindingとし、推奨と確信度の付け方、人に残す基準（迷えば`low`）、runtimeが確かなものを適用することを書く（`application::prompt`のconcernの定数）。
 
 ## 再計画の操作が保護するrun

@@ -298,6 +298,10 @@ paths = ["**"]
 [review.subagents.plugin-generic]
 paths = ["plugins/**"]
 
+# 変更箇所のセキュリティを全ての差分で見る。指摘の行き先は既存のreviseとconcernの規則（ADR-t1906-1）。
+[review.subagents.security]
+paths = ["**"]
+
 [review.subagents.architecture-boundaries]
 paths = ["src/**"]
 

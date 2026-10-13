@@ -2,7 +2,7 @@
 
 差分を判定するときに当てる、このrepositoryの規則の要点。
 各項の出典のpathは参照で、規則はこの文書の文が持つ。
-細かい規則の検査は`.dagq/agents/`のpjのagent（receipt-evidence・test-rules・migration-rules・adr-rules・config-rules・architecture-boundaries・plugin-generic）が持つので、ここではそれを写さず、差分と受け入れ条件の判定に要る要点だけを持つ。
+細かい規則の検査は`.dagq/agents/`のpjのagent（receipt-evidence・test-rules・migration-rules・adr-rules・config-rules・architecture-boundaries・plugin-generic・security）が持つので、ここではそれを写さず、差分と受け入れ条件の判定に要る要点だけを持つ。
 
 ## 受け入れ条件の対応づけと根拠
 
