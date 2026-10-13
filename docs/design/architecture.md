@@ -29,7 +29,7 @@ related:
 runtime（src/）の責務を、レイヤーとコンテキスト（context）の2軸で分ける今の境界と、それを守る規則の正本。
 決めた理由は[ADR-t1545-1](../adr/2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md)（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)決定1をamends）が持つ。
 moduleの説明は[overview](overview.md)、集約は[Domain model](domain-model.md)、tableは[Persistence](persistence.md)、supervisorのループは[`supervise`](supervisor-lifecycle/supervise.md)が持つ。
-reviewのsubagentと検査のscriptは、この文書の規則のID（下の「検査できる規則」）を参照し、本文を写さない（ADR-t1545-1決定4）。
+全体のreviewのpjの規則と検査のscriptは、この文書の規則のID（下の「検査できる規則」）を参照し、本文を写さない（ADR-t1545-1決定4）。
 境界の記録（tableとstoreのmoduleのcontext・portの公開・境界をまたぐtransaction・今の違反）はこの文書に置かず、コードと、検査のscriptが読む`.config/`の一覧が持つ（[ADR-t2287-1](../adr/2026-10-12-t2287-1-context-boundary-records-in-code-and-config-lists.md)、下の「[検査の範囲](#検査の範囲)」）。
 
 ### 全体の流れ
@@ -109,7 +109,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 規則のIDは変えない。
 規則を変えるときはIDを足すか、古いIDを「廃止」と書いて残す。
-各規則の「検査」は、script（機械）で見るかreviewで見るかを書く。
+各規則の「検査」は、script（機械）で見るか全体のreviewで見るかを書く。
 
 ### レイヤーの規則
 
@@ -129,15 +129,15 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - **L5** `src/application`の状態の判断（遷移・回数と上限・送るか・待つか）は、時刻を`Clock`か値の引数で受け、判断の中で時計を読まない（[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）。
   待ちの判断は、今の時刻と観測を引数に取り次の操作を値で返す副作用のない関数にし、境界の時刻（ちょうど閾値・その1 ms前）をunit testで確かめる。
   時計を読んで結果をportで実行するのは呼ぶ側の薄い処理にする（例: `supervise::session`・`reopen`の待ちの判断）。
-  検査: review（残る`Instant::now`が多いので、減るまでscriptに入れない）。
+  検査: 全体のreview（残る`Instant::now`が多いので、減るまでscriptに入れない）。
 - **L6** `src/infrastructure`のコードは`crate::compose`とレイヤーの外のmoduleを参照しない。
   検査: script。
 - **L7** 起動部分（`src/compose.rs`とその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。
-  検査: 時刻の読み取りはscript、残りはreview。
+  検査: 時刻の読み取りはscript、残りは全体のreview。
 - **L8** レイヤーの外のmodule（`view`）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。
   `build.rs`と共有する`build_id`・`migration_numbers`はレイヤーの外のmoduleに数えず、共有の部品としてL1・L3が名指す例外の範囲で参照してよい。
   新しいmoduleをレイヤーの外に足さない。
-  検査: script（L1・L3・L6として）とreview。
+  検査: script（L1・L3・L6として）と全体のreview。
 - **L9** `src/compose/`の`supervisor`（ループ）以外のmodule（contextごと）は互いと`supervisor`を参照せず、`use super::*`も書かない。
   共有の配線は`src/compose.rs`に置き、外からは`crate::compose`の再公開だけを参照する。
   検査: script。
@@ -148,23 +148,23 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   他のcontextのtableを書くのは、所有の一覧の`transaction`の項目の関数の中だけ。
   検査: script（`scripts/check-context-boundaries.sh`）。
 - **C2** 観測と分析のコードは、他のcontextの状態を変えるportのmethod（`TaskStore`・`RunCoordination`・`SupervisorRegistry`・`DraftPlannerStore`の書き込み、`RunTransitions`・`RunRecovery`・`PlanReviewStore`・`GoalReviewStore`）を呼ばない。
-  検査: review。
+  検査: 全体のreview。
 - **C3** `application::supervise`のsubmoduleは、自分のcontextの`Supervisor`の欄か分けた状態だけを変える。
   他のcontextの欄は読むか、そのcontextの関数を呼ぶ。
-  検査: 分けた状態のsubmoduleはscript、残りはreview。
+  検査: 分けた状態のsubmoduleはscript、残りは全体のreview。
 - **C4** 新しく足す・変えるuse caseは`Box<dyn Queue>`・`&mut dyn Queue`・全体の`QueueOpener`を取らず、要るportだけを取る（ADR-0013決定1の「portは原則applicationに定義する」のまま、幅を狭める）。
-  検査: review（portを分けた後にscript）。
+  検査: 全体のreview（portを分けた後にscript）。
 - **C5** 他のcontextの公開していないport（所有の一覧で内部としたもの、一部公開のportは公開していないmethod）を使わない。
-  検査: portの名前の参照はscript（`scripts/check-context-boundaries.sh`）、一部公開のportのmethodの単位の参照とcontextの決まらないmoduleはreview。
+  検査: portの名前の参照はscript（`scripts/check-context-boundaries.sh`）、一部公開のportのmethodの単位の参照とcontextの決まらないmoduleは全体のreview。
 - **C6** 他のcontextのeventを読むときは、kindを`domain::event_kind`か所有するdomainのmoduleの定数で名指し、状態の判断に使うpayloadは文字列のkeyではなく型付きの復元の値で読む。
   古いeventの読み取りは保つ。
-  検査: review。
+  検査: 全体のreview。
 - **C7** 新しいport・table・storeのmoduleとtransactionの関数は、pathから導けないもの（所有するcontextと公開先）を所有の一覧に足してから置く。
   一覧はコードに無い項目を持たない。
   検査: script（`scripts/check-context-boundaries.sh`）。
 - **C8** `src/application/ports/`のmoduleは自分と`shared`のportだけを、moduleのpath（`super::shared::Clock`）で名指す。
   例外は他のcontextを読む観測と分析、`Queue`・`StateStore`の`shared`、`RunLog`を組に名指す`host`。
-  検査: script（例外の中身と`crate::application::X`を通す名指しはreview）。
+  検査: script（例外の中身と`crate::application::X`を通す名指しは全体のreview）。
 
 ### transactionの規則
 
@@ -173,14 +173,14 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   検査: script（`scripts/check-context-boundaries.sh`、C1として）。
 - **X2** 境界の規則のためにtransactionを分けない。
   所有の一覧のtransactionの述語（`WHERE status IN (...)`・`renew_lease`・`BEGIN IMMEDIATE`）を外へ出さない（ADR-0013決定9）。
-  検査: review。
+  検査: 全体のreview。
 - **X3** 所有の一覧のtransactionの中で、他のcontextの状態を変えるのは、そのcontextのinfrastructureが公開する関数（`infrastructure::sqlite::transition_task`など）を通す。
   SQLの文を書き写さない。
-  検査: review。
+  検査: 全体のreview。
 
 ### 検査の範囲
 
-- 各規則の検査は、scriptとreviewのsubagent `architecture-boundaries`から、コンパイラ（crateの依存・可視性・型）・clippy・Rustのtest・全体のreviewへ移している途中で、規則ごとの移し先と退役の順は[ADR-t2391-1](../adr/2026-10-12-t2391-1-boundary-rules-to-compiler-clippy-and-rust-tests.md)が持つ。
+- 各規則の検査は、scriptから、コンパイラ（crateの依存・可視性・型）・clippy・Rustのtest・全体のreviewへ移している途中で、規則ごとの移し先と退役の順は[ADR-t2391-1](../adr/2026-10-12-t2391-1-boundary-rules-to-compiler-clippy-and-rust-tests.md)が持つ。
   下の記述と各規則の「検査」の行は今動いている検査で、移し先の着地ごとに直す。
 - `scripts/check-layer-deps.sh`は、L1・L2・L3・L4・L6・L9とL7の時計、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
   数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
@@ -198,5 +198,5 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   reviewだけで見る規則の今の違反は文書に記録せず、行き先はqueueのtaskが持つ。
 - 2つのscriptは、CIと`src/`を変えるtaskのverifyが流す。
   `scripts/check-context-boundaries.sh`は、runのreviewのプログラム（[プログラムのreview](supervisor-lifecycle/review-programs.md)、どのscriptを流すかは`dagq.toml`の`[review.programs]`）としてもLLMのagentより前に流れる。
-- 「検査: review」の規則と、scriptが見ない部分（C5の一部公開のportのmethodの単位の参照、contextの決まらないmodule、実行時に組み立てるSQLなど。全体はscriptの先頭のコメント）は、reviewのsubagent `architecture-boundaries`（[Review](supervisor-lifecycle/review.md#reviewのsubagent)）が差分が足したものだけを見る。
+- 「検査」が全体のreviewを名指す部分と、scriptが見ない部分（C5の一部公開のportのmethodの単位の参照、contextの決まらないmodule、実行時に組み立てるSQLなど。全体はscriptの先頭のコメント）は、全体のreview（[Review](supervisor-lifecycle/review.md#reviewの流れ)）が、規則のIDを名指すこのrepositoryのpjの規則`.dagq/review/builtin-acceptance.md`に従って、差分が足したものだけを見る。
   scriptの規則と、一覧への記録の漏れは見ない。

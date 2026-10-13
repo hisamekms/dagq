@@ -2,7 +2,7 @@
 
 差分を判定するときに当てる、このrepositoryの規則の要点。
 各項の出典のpathは参照で、規則はこの文書の文が持つ。
-細かい規則の検査は`.dagq/agents/`のpjのagent（receipt-evidence・test-rules・migration-rules・adr-rules・config-rules・architecture-boundaries・plugin-generic・security）が持つので、ここではそれを写さず、差分と受け入れ条件の判定に要る要点だけを持つ。
+細かい規則の検査は`.dagq/agents/`のpjのagent（receipt-evidence・test-rules・migration-rules・adr-rules・config-rules・plugin-generic・security）が持つので、ここではそれを写さず、差分と受け入れ条件の判定に要る要点だけを持つ。
 
 ## 受け入れ条件の対応づけと根拠
 
@@ -37,6 +37,14 @@
 
 - 足し方・番号・リリース済みの不変の検査は`.dagq/agents/migration-rules`が持つ。
 - migrationを足す差分は、変えた表・列の今の姿を`docs/design/persistence.md`の該当の箇所で直している（列の一覧の書き写しと、migrationごとの経緯は足さない）。
+
+## runtimeの境界の規則
+
+出典: `docs/design/architecture.md`の「検査できる規則」「検査の範囲」、ADR-t2391-1の決定1・5。
+
+- `src/`の差分が足したものに、architecture.mdの各規則の「検査」が全体のreviewを名指す部分を当てる。今それに当たるのはL5、L7の判断とeventのpayloadの組み立て、L8、C2、C3の残り、C4（portの分割の後はuse caseの切り方）、C5のscriptが見ない部分、C6、C8の例外の中身と`crate::application::X`を通す名指し、X2、X3。
+- 規則の本文はarchitecture.mdの各IDの項が持ち、ここでは写さない。指摘には規則のIDを添える。
+- scriptが見る部分と、所有の一覧への記録の漏れは指摘しない。
 
 ## 文書の置き場と役割
 
