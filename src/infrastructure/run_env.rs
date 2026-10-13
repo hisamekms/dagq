@@ -3278,6 +3278,18 @@ mod tests {
             parse_config("[review.subagents.\"builtin:tests\"]\n[run.env]\nA = \"1\"\n").unwrap();
         assert_eq!(header.review_builtins[0].enabled, None);
         assert!(!parse_config("").unwrap().review_agents().written());
+        // The whole review's table with `enabled = true` alone, or with
+        // nothing, reads as no table: the review goes as without one.
+        for whole in [
+            "[review.subagents.\"builtin:acceptance\"]\nenabled = true\n",
+            "[review.subagents.\"builtin:acceptance\"]\n",
+        ] {
+            assert_eq!(
+                parse_config(whole).unwrap().review_agents(),
+                parse_config("").unwrap().review_agents(),
+                "{whole}"
+            );
+        }
         for (text, expected) in [
             (
                 "[review.subagents.\"builtin:docs\"]\nenabled = true\n",

@@ -38,22 +38,47 @@ pub const AGENT_JOB_MATERIAL_BYTES: usize = 2_000;
 /// within [`AGENT_JOB_PROMPT_LIMIT`].
 pub const AGENT_JOB_INSTRUCTIONS_BYTES: usize = 6_000;
 
+/// The bytes of the project's rules for the whole review
+/// ([`AcceptanceRules`]) in its prompt: cut past this, saying where the
+/// whole file is. Counted into [`RUN_REVIEW_PROMPT_LIMIT`], whose room
+/// they fit in beside the title and the acceptance at their limits.
+pub const RUN_REVIEW_RULES_BYTES: usize = 12_000;
+
+/// The project's rules for the whole review, `builtin:acceptance`
+/// (ADR-t2259-1 decisions 3 and 6): the file
+/// [`crate::domain::review_builtins::acceptance_rules_path`] as the landing branch's
+/// commit has it, never the worktree's or the run branch's.
+#[derive(Debug, Clone, Copy)]
+pub struct AcceptanceRules<'a> {
+    /// Its path in the repository.
+    pub path: &'a str,
+    /// The landing branch's commit it was read from.
+    pub commit: &'a str,
+    pub text: &'a str,
+    /// Where the job reads the whole text when the prompt cuts it.
+    pub whole_at: &'a str,
+}
+
 /// What the headless reviewer is asked (ADR-0023 decision 2, ADR-0027
 /// decision 2 as ADR-t451-1 decision 3 amends it): where the material is,
-/// the task's acceptance, the verdict schema, where `revise` ends and
-/// `concern` begins, and how a concern is judged and when it reaches a
-/// person. The title and the acceptance are held to their limits and
-/// the whole to [`RUN_REVIEW_PROMPT_LIMIT`]; what is cut says where in
-/// the worktree or the run directory the job reads it whole (task 1571,
-/// ADR-t1566-1 decision 3). `known_failures`, the tests that fail already
-/// on the landing branch's CI, is a section of this whole review's job
-/// only, which decides whether to send the run back (ADR-t1920-1 decision
-/// 5); an agent's job does not carry it.
+/// the project's rules for the whole review when the landing branch has
+/// them, the task's acceptance, the verdict schema, where `revise` ends
+/// and `concern` begins, and how a concern is judged and when it reaches
+/// a person. It names no instructions file of the worktree to read: the
+/// project's rules are `rules` only (ADR-t2259-1 decision 6). The title,
+/// the rules and the acceptance are held to their limits and the whole to
+/// [`RUN_REVIEW_PROMPT_LIMIT`]; what is cut says where in the worktree or
+/// the run directory the job reads it whole (task 1571, ADR-t1566-1
+/// decision 3). `known_failures`, the tests that fail already on the
+/// landing branch's CI, is a section of this whole review's job only,
+/// which decides whether to send the run back (ADR-t1920-1 decision 5);
+/// an agent's job does not carry it.
 pub fn review_prompt(
     task: &Task,
     run: &TaskRun,
     review_path: &str,
     known_failures: Option<&KnownFailures>,
+    rules: Option<AcceptanceRules<'_>>,
 ) -> FittedPrompt {
     let mut fit = Fit::new(RUN_REVIEW_PROMPT_LIMIT);
     let material = format!("read it whole in the review material at {review_path}");
@@ -65,6 +90,21 @@ pub fn review_prompt(
         &material,
     );
     fit.section("title", &title);
+    let rules = rules.map_or_else(String::new, |rules| {
+        let text = fit.required(
+            "rules",
+            rules.text.trim_end(),
+            RUN_REVIEW_RULES_BYTES,
+            &format!("read it whole at {}", rules.whole_at),
+        );
+        let section = format!(
+            "{REVIEW_RULES_HEADER} ({path} on the landing branch's commit {commit}):\n{text}\n",
+            path = rules.path,
+            commit = rules.commit,
+        );
+        fit.section("rules", &section);
+        section
+    });
     let acceptance = fit.required(
         "acceptance",
         or_none(task.acceptance()),
@@ -78,29 +118,74 @@ pub fn review_prompt(
     }
     let text = format!(
         "You review run {run_id} of dagq task {task_id} ({title}) before it lands.\n\
-         Read the review material at {review_path}: the task, its goal, the receipt, the commits and the full diff. Read the worktree if you need more. Do not change any file.\n\
-         {rules}\n\
+         Read the review material at {review_path}: {material_says}\
+         {rules}\
          {docs}\n\
-         Acceptance criteria of the task:\n{acceptance}\n\n\
+         {acceptance_header}{acceptance}\n\n\
          {known}\
-         Decide one verdict:\n\
-         - pass: the diff meets the acceptance criteria and the task's instructions and nothing needs fixing.\n\
-         - revise: findings the worker can fix without a person's judgment: missing tests or evidence, findings of the repository's formatter, linter or other checks, a receipt that disagrees with the diff where fixing the diff settles it, or an obvious gap inside the instructed scope.\n\
-         - concern: findings that call for a judgment rather than a mechanical fix: a mismatch with the acceptance criteria, changes the task did not ask for, or a finding that involves a judgment call. A concern does not by itself go to a person: you judge it below, recommending land or send_back with your confidence, and the runtime applies a sure judgment that needs no person (high, reason_category null) itself; only the rest (low, scope, discard) reaches a person.\n\n\
+         {verdicts}\
          {concern}\
          {codes}\
-         Answer with one JSON object and nothing else, matching this schema:\n\
-         {{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string]}}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null}}\n\
-         reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise).\n",
+         {answer}",
         run_id = run.id(),
         task_id = task.id(),
+        material_says = REVIEW_MATERIAL,
+        acceptance_header = REVIEW_ACCEPTANCE_HEADER,
         docs = REVIEW_DOCS_CHECK,
+        verdicts = REVIEW_VERDICTS,
         concern = CONCERN_RECOMMENDATION,
         codes = reason_codes_section(review_reason::REVIEW_CODES),
-        rules = REVIEW_RULES,
+        answer = REVIEW_ANSWER,
     );
     fit.finish(text)
 }
+
+/// The SHA-256 of the whole review's fixed sentences: what the material
+/// holds, the rules' header, the check of the documents, the acceptance's
+/// header, the verdicts, the concern's recommendation, the reason codes and
+/// the answer's schema, each after its length. With the build identifier
+/// and the rules file's digest, `review_job_started` records which
+/// `builtin:acceptance` judged (ADR-t2259-1 decision 9).
+pub fn acceptance_digest() -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in [
+        REVIEW_MATERIAL,
+        REVIEW_RULES_HEADER,
+        REVIEW_DOCS_CHECK,
+        REVIEW_ACCEPTANCE_HEADER,
+        REVIEW_VERDICTS,
+        CONCERN_RECOMMENDATION,
+        &reason_codes_section(review_reason::REVIEW_CODES),
+        REVIEW_ANSWER,
+    ] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// What the whole review's material holds, and what the job may not do.
+pub(super) const REVIEW_MATERIAL: &str = "the task, its goal, the receipt, the commits and the full diff. Read the worktree if you need more. Do not change any file.\n";
+
+/// What precedes the task's acceptance in the whole review's prompt.
+pub(super) const REVIEW_ACCEPTANCE_HEADER: &str = "Acceptance criteria of the task:\n";
+
+/// What precedes the project's rules in the whole review's prompt.
+pub(super) const REVIEW_RULES_HEADER: &str =
+    "The project's rules for this review, judge the diff by them as well";
+
+/// The whole review's verdicts and where `revise` ends and `concern`
+/// begins.
+pub(super) const REVIEW_VERDICTS: &str = "Decide one verdict:\n\
+- pass: the diff meets the acceptance criteria and the task's instructions and nothing needs fixing.\n\
+- revise: findings the worker can fix without a person's judgment: missing tests or evidence, findings of the repository's formatter, linter or other checks, a receipt that disagrees with the diff where fixing the diff settles it, or an obvious gap inside the instructed scope.\n\
+- concern: findings that call for a judgment rather than a mechanical fix: a mismatch with the acceptance criteria, changes the task did not ask for, or a finding that involves a judgment call. A concern does not by itself go to a person: you judge it below, recommending land or send_back with your confidence, and the runtime applies a sure judgment that needs no person (high, reason_category null) itself; only the rest (low, scope, discard) reaches a person.\n\n";
+
+/// The whole review's answer: one JSON object of this schema.
+pub(super) const REVIEW_ANSWER: &str = "Answer with one JSON object and nothing else, matching this schema:\n\
+{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null}\n\
+reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise).\n";
 
 /// How a review checks the documents on the changed behavior
 /// (ADR-t1428-1 decision 5, ADR-t1942-2 decision 4): against the diff and
@@ -109,11 +194,6 @@ pub fn review_prompt(
 /// that copies the code or carries history. A name missing from a document
 /// alone is not drift. The verdict's shape and the codes stay as they are.
 pub const REVIEW_DOCS_CHECK: &str = "Read the documents on the behavior the diff changes (named by the task's description or context or by the summary, or found as you read) against the diff and the summary. A document's diff alone does not show the change is right; check the summary's reason for leaving a document as it is like any other claim. Report as docs_drift a stale document, or a changed flow, boundary, invariant or promise it misses, whether or not the task named it; a name missing from a document alone is not stale. Also report text the diff adds to a document when that text copies the code (lists of fields, flags, defaults, function or test names) or carries history (task numbers, what was before).\n";
-
-/// Where the review finds the repository's rules: its instructions in the
-/// worktree, which a Claude review that loads no setting sources no longer
-/// gets as its memory (ADR-t1470-1 decision 2).
-pub(super) const REVIEW_RULES: &str = "The repository's rules are in its instructions at the root of the worktree (AGENTS.md and CLAUDE.md, whichever it has) and the documents they name: read the instructions, and of what they name the rules that bear on this change, and judge the diff by them.";
 
 /// How a review recommends what to do with its `concern`, and which
 /// judgements it leaves to a person (ADR-t451-1 decisions 1 and 3).

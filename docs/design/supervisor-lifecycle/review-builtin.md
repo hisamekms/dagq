@@ -1,30 +1,32 @@
 ---
 id: design-supervisor-lifecycle-review-builtin
 type: design
-title: built-inのreview（未実装）
+title: built-inのreview（一部実装）
 status: draft
 created: 2026-10-12
 scope: runtime
 related:
   - adr-t2259-1
+  - adr-t2389-1
   - design-supervisor-lifecycle-review
   - design-supervisor-lifecycle-review-programs
   - design-supervisor-lifecycle-run-environment
   - design-agent-eval
 ---
 
-# built-inのreview（未実装）
+# built-inのreview（一部実装）
 
-**全節が決定済みの予定で、まだ実装していない。**
-決定は[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)が持つ。
-今の挙動は[Review](review.md)と[プログラムのreview](review-programs.md)の今の節のとおりで、この文書を足しただけではどのreviewも変わらない。
+**全体のreviewの`builtin:acceptance`とbuilt-inのagent（security・tests）は実装済みで、[Review](review.md)の今の節が持つ。**
+残りは決定済みの予定で、まだ実装していない。
+決定は[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)と、それを直した[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)が持つ。
+未実装の部分の今の挙動は[Review](review.md)と[プログラムのreview](review-programs.md)の今の節のとおりである。
 実装したら、各文書の今の節をこの形に直し、名前・欄・既定値の意味は定義のそばのdoc commentに置き、この文書には流れ・境界だけを残すか消す。
 
 ## 何が変わるか
 
 - dagqのバイナリがbuilt-inのagentとprogramを持ち、`dagq.toml`の`builtin:<名前>`のtableで有効・無効と範囲を設定する。
   書かないrepositoryでも既定で有効なbuilt-inが流れる。
-- 全体のreviewのjobはbuilt-inのacceptanceになり、常に走る。
+- 全体のreviewのjobはbuilt-inのacceptanceになり、常に走る（実装済み）。
   無効にできず、範囲とproviderも設定できない（全ての差分で走り、providerは`[roles.review]`が決める）。
 - pjが中身を変えたいときはbuilt-inを無効にして自分のagentかprogramを作り、同じ名前で上書きしない。
 
@@ -32,24 +34,21 @@ related:
 
 決定済みで、実装の着地まで今の節が正しい境界。
 
-- **規則の読み方**: 今の全体のreviewはworktreeのrootのinstructionsとそれが名指す文書をpromptの1文で読む（[Review](review.md#reviewの流れ)の2、ADR-t1470-1・ADR-t1570-1）。
-  built-inのsecurity・testsのjobは既にlanding branchのcommitの`.dagq/review/builtin-<名前>.md`だけをpjの規則として読む（[Review](review.md#reviewのsubagent)）。
-  決定後は、全体のreviewも同じく読み、無ければpjの規則なしで判断し、worktreeのinstructionsを読まない。
-  `.dagq/agents/`のpjのagentの規則の読み方と、起動の隔離（setting sourcesを空・`untrusted`・読み取りだけ）は変わらない。
 - **設定の無いrepository**: 今は全体のreviewのjobと既定で有効なbuilt-inのagentのjobが流れ、programは流れない（[Review](review.md#reviewのsubagent)の「設定の無いrepository」、[プログラムのreview](review-programs.md#段の流れ)の「選び方」）。
   決定後は、既定で有効なbuilt-inのprogramも流れる。
 - **定義と中身の読む元**: 今はprogramの`script`を試行ごとにlanding branchのcommitから読み、built-inのagentの定義だけはバイナリから取って記録を残す（[Review](review.md#reviewのsubagent)の「snapshot」、[プログラムのreview](review-programs.md#読む元流す場所env結果)の「snapshot」）。
   決定後は、built-inのprogramの中身もdagqのバイナリから取り、jobの開始の記録にbuilt-inの名前・dagqのbuild識別子・中身のhashを残す。
   `dagq.toml`とpjの規則のfile、pjのagentとprogramは今どおりlanding branchのcommitから読む。
 - **built-inのagentのeval**: 今のevalは定義とケースを`.dagq/agents/<name>/`から読み、ケースの集合のdigestをケースのidとpatchの中身から作り、landing branchのcommitのprogramをケースのtreeに先に流す（[Agent eval](../agent-eval.md)の「定義とケースの置き場」「hold-outの1回の制限」「programのreviewの当て方」）。
-  決定後は、built-inのうちsecurity・tests・docsだけを、dagqに同梱した定義とケースで測り、acceptance（全体のreview）は対象にしない。
+  決定後は、built-inのうちsecurity・testsだけを、dagqに同梱した定義とケースで測り、acceptance（全体のreview）は対象にしない。
   同梱のケースは小さなbaselineとpatchを持ち、evalは周ごとに対象のrepositoryと独立の一時のGit repositoryにbaselineをbase、patchを当てたcommitをheadとして作り、対象のrepositoryの履歴・ref・worktreeを読まず変えない。
   同梱のケースの集合のdigestはbaselineとpatchの中身から作る。
   built-inのevalには、pjの規則のfile（`.dagq/review/builtin-<名前>.md`）もpjのprogramも当てない。
   productionのケースは本番のrunのcommitをbaseにするので、今どおり対象のrepositoryのGitから読む。
   pjのagentのevalは今の節のまま変わらない。
-- **文書の照合**: 今は全体のreviewのpromptが文書の照合の段落を持つ（[Review](review.md#文書の照合)）。
-  決定後は、変えた挙動に対する文書の古さ・欠けの照合はbuilt-inのdocsが持ち、コードの書き写しと経緯の指摘はruntimeに置かずpjのagentが持つ。
+- **文書の照合**: 今は全体のreviewのpromptの`REVIEW_DOCS_CHECK`が、変えた挙動に対する文書の古さ・欠けと、コードの書き写し・経緯の指摘を持つ（[Review](review.md#文書の照合)）。
+  決定後も文書の照合は全体のreviewだけが持ち、`builtin:docs`は同梱しない。
+  コードの書き写しと経緯の指摘はruntimeに置かず、pjの規則（このrepositoryでは`.dagq/review/builtin-acceptance.md`）が持つ。
 
 ## 生成
 

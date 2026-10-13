@@ -388,7 +388,42 @@ fn project_rules(
     commit: &str,
     builtin: BuiltinAgent,
 ) -> Result<Option<ProjectRules>> {
-    let path = review_builtins::rules_path(builtin);
+    rules_at(repository, commit, review_builtins::rules_path(builtin))
+}
+
+/// The project's rules for the whole review, `builtin:acceptance`, on the
+/// landing branch's commit `commit` (ADR-t2259-1 decision 6), `None`
+/// without the file: never a worktree's or the run branch's file, and no
+/// instructions file in their place.
+pub fn acceptance_rules(repository: &dyn Repository, commit: &str) -> Result<Option<ProjectRules>> {
+    rules_at(repository, commit, review_builtins::acceptance_rules_path())
+}
+
+/// What the whole review's `review_job_started` records of which
+/// `builtin:acceptance` judged (ADR-t2259-1 decision 9), in a built-in
+/// agent's shape ([`SnapshotAgent::builtin_record`]): its name, the build
+/// identifier of this dagq, the SHA-256 of its prompt's fixed sentences
+/// ([`crate::application::prompt::acceptance_digest`]), and the rules
+/// file's path and SHA-256 (`null` without one).
+pub fn acceptance_record(rules: Option<&ProjectRules>) -> Value {
+    json!({
+        "builtin": review_builtins::ACCEPTANCE,
+        "build": crate::VERSION,
+        "digest": crate::application::prompt::acceptance_digest(),
+        "rules": rules.map(|rules| json!({
+            "path": rules.path,
+            "digest": rules.digest,
+        })),
+    })
+}
+
+/// The file `path` on the landing branch's commit `commit` as a project's
+/// rules, `None` without it.
+fn rules_at(
+    repository: &dyn Repository,
+    commit: &str,
+    path: String,
+) -> Result<Option<ProjectRules>> {
     Ok(repository
         .file_in(commit, &path)
         .with_context(|| format!("read {path} in the landing branch's commit {commit}"))?
@@ -433,9 +468,13 @@ fn builtin_snapshot(
 /// branch's `dagq.toml` name (ADR-t1728-1): `agents`, each project's agent
 /// with its section and the definition read
 /// ([`review_subagents::find_definition`], `null` without one);
-/// `builtins`, each built-in agent as `dagq.toml` makes it over its
-/// defaults with its rules file ([`EffectiveBuiltin::doctor_value`]); and
-/// `errors`, an agent without a definition, named in more than one role's
+/// `builtins`, the whole review `builtin:acceptance` first (always on, on
+/// every change: `paths` and `provider` `null`, its provider is
+/// `[roles.review]`'s) and then each built-in agent as `dagq.toml` makes
+/// it over its defaults, each with its rules file
+/// ([`EffectiveBuiltin::doctor_value`]); `without_rules`, the names of
+/// the enabled built-ins whose rules file the landing branch's commit does
+/// not have, which judge without the project's rules; and `errors`, an agent without a definition, named in more than one role's
 /// section, or whose definition declares tools that are a mistake
 /// (ADR-t1728-2). A landing branch without `dagq.toml` has the built-ins
 /// by their defaults. `Err` when the file cannot be read or parsed (an
@@ -449,13 +488,27 @@ pub fn check_agents(
     let commit = repository.main_head()?.into_string();
     let written = landing_agents(repository, &commit, parse)?;
     let named = review_subagents::named_for_review(&written.agents);
-    let builtins = EffectiveBuiltin::all(&written.builtins)
-        .iter()
-        .map(|builtin| {
-            let rules = project_rules(repository, &commit, builtin.agent)?;
-            Ok(builtin.doctor_value(rules.as_ref().map(|rules| rules.path.as_str())))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let acceptance = acceptance_rules(repository, &commit)?;
+    let mut without_rules = Vec::new();
+    if acceptance.is_none() {
+        without_rules.push(review_builtins::ACCEPTANCE.to_owned());
+    }
+    let mut builtins = vec![json!({
+        "agent": review_builtins::ACCEPTANCE,
+        "enabled": true,
+        "enabled_by_default": true,
+        "paths": null,
+        "paths_written": false,
+        "provider": null,
+        "rules": acceptance.map(|rules| rules.path),
+    })];
+    for builtin in EffectiveBuiltin::all(&written.builtins) {
+        let rules = project_rules(repository, &commit, builtin.agent)?;
+        if builtin.enabled && rules.is_none() {
+            without_rules.push(builtin.agent.name());
+        }
+        builtins.push(builtin.doctor_value(rules.as_ref().map(|rules| rules.path.as_str())));
+    }
     let mut agents = Vec::new();
     let mut defined = Vec::new();
     let mut declared = Vec::new();
@@ -481,7 +534,13 @@ pub fn check_agents(
     let mut errors =
         review_subagents::config_problems(&named, &|agent| defined.iter().any(|d| d == agent));
     errors.extend(declared);
-    Ok(json!({"commit": commit, "agents": agents, "builtins": builtins, "errors": errors}))
+    Ok(json!({
+        "commit": commit,
+        "agents": agents,
+        "builtins": builtins,
+        "without_rules": without_rules,
+        "errors": errors,
+    }))
 }
 
 /// Write `text` and then the full diff `<base>...<head>` as a fenced block to
@@ -974,13 +1033,23 @@ mod tests {
         );
     }
 
-    /// `doctor`'s view of `builtins` by their defaults: security on,
-    /// tests off, on their default globs, without rules files.
+    /// `doctor`'s view of the whole review without its rules file.
+    fn acceptance_builtin(rules: Option<&str>) -> Value {
+        json!({"agent": "builtin:acceptance", "enabled": true, "enabled_by_default": true,
+               "paths": null, "paths_written": false, "provider": null, "rules": rules})
+    }
+
+    /// `doctor`'s view of `builtins` by their defaults: the whole review,
+    /// then security on and tests off, on their default globs, without
+    /// rules files.
     fn default_builtins() -> Value {
         json!(
-            EffectiveBuiltin::all(&[])
-                .iter()
-                .map(|builtin| builtin.doctor_value(None))
+            std::iter::once(acceptance_builtin(None))
+                .chain(
+                    EffectiveBuiltin::all(&[])
+                        .iter()
+                        .map(|builtin| builtin.doctor_value(None))
+                )
                 .collect::<Vec<_>>()
         )
     }
@@ -1000,12 +1069,12 @@ mod tests {
                 &parse,
             )
         };
-        let nothing =
-            json!({"commit": SHA, "agents": [], "builtins": default_builtins(), "errors": []});
+        let nothing = json!({"commit": SHA, "agents": [], "builtins": default_builtins(),
+            "without_rules": ["builtin:acceptance", "builtin:security"], "errors": []});
         assert_eq!(check(Vec::new()).unwrap(), nothing);
         assert_eq!(check(vec![(CONFIG_FILE, "[run.env]")]).unwrap(), nothing);
-        assert_eq!(nothing["builtins"][0]["enabled"], json!(true));
-        assert_eq!(nothing["builtins"][1]["enabled"], json!(false));
+        assert_eq!(nothing["builtins"][1]["enabled"], json!(true));
+        assert_eq!(nothing["builtins"][2]["enabled"], json!(false));
         assert!(
             format!("{:#}", check(vec![(CONFIG_FILE, "bad")]).unwrap_err())
                 .contains("[review.subagents.design] has no paths")
@@ -1019,20 +1088,30 @@ mod tests {
             json!({"commit": SHA, "agents": [
                 {"agent": "design", "section": "review.subagents", "definition": ".dagq/agents/design/AGENT.md"},
                 {"agent": "unused", "section": "review.subagents", "definition": null},
-            ], "builtins": default_builtins(), "errors": [
+            ], "builtins": default_builtins(),
+            "without_rules": ["builtin:acceptance", "builtin:security"], "errors": [
                 "[review.subagents.unused] names an agent without a definition: .dagq/agents/unused/AGENT.md is not committed",
             ]})
         );
-        // The built-ins as dagq.toml writes them, with the rules file the
-        // landing branch has.
+        // The built-ins as dagq.toml writes them, with the rules files the
+        // landing branch has: only an enabled built-in without one is
+        // named as judging without the project's rules.
         let builtins = check(vec![
             (CONFIG_FILE, BUILTINS),
             (".dagq/review/builtin-tests.md", "Our tests live in t/."),
+            (".dagq/review/builtin-acceptance.md", "Check the changelog."),
         ])
         .unwrap();
+        assert_eq!(builtins["without_rules"], json!([]));
+        let tests_without = check(vec![(CONFIG_FILE, BUILTINS)]).unwrap();
+        assert_eq!(
+            tests_without["without_rules"],
+            json!(["builtin:acceptance", "builtin:tests"])
+        );
         assert_eq!(
             builtins["builtins"],
             json!([
+                acceptance_builtin(Some(".dagq/review/builtin-acceptance.md")),
                 {"agent": "builtin:security", "enabled": false, "enabled_by_default": true,
                  "paths": BuiltinAgent::Security.default_paths(), "paths_written": false,
                  "provider": null, "rules": null},
@@ -1051,6 +1130,44 @@ mod tests {
         .unwrap();
         assert_eq!(elsewhere["agents"][0]["definition"], json!(null));
         assert_eq!(elsewhere["errors"].as_array().unwrap().len(), 2);
+    }
+
+    /// The whole review's rules are the landing branch's file only
+    /// (ADR-t2259-1 decision 6), and its record names builtin:acceptance,
+    /// this build, its fixed sentences' digest and the rules' digest, or
+    /// none without the file (decision 9).
+    #[test]
+    fn the_whole_reviews_rules_and_record_come_from_the_landing_branch() {
+        const RULES: &str = "Check the changelog.\n";
+        let repository = |files| Committed {
+            files,
+            ..Committed::default()
+        };
+        let without = acceptance_rules(
+            &repository(vec![("AGENTS.md", "Read me."), ("CLAUDE.md", "Me too.")]),
+            SHA,
+        )
+        .unwrap();
+        assert_eq!(without, None);
+        let digest = crate::application::prompt::acceptance_digest();
+        assert_eq!(
+            acceptance_record(None),
+            json!({"builtin": "builtin:acceptance", "build": crate::VERSION,
+                   "digest": digest, "rules": null})
+        );
+        let with = acceptance_rules(
+            &repository(vec![(".dagq/review/builtin-acceptance.md", RULES)]),
+            SHA,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(with.text, RULES);
+        let rules_digest = format!("{:x}", Sha256::digest(RULES.as_bytes()));
+        assert_eq!(
+            acceptance_record(Some(&with)),
+            json!({"builtin": "builtin:acceptance", "build": crate::VERSION, "digest": digest,
+                   "rules": {"path": ".dagq/review/builtin-acceptance.md", "digest": rules_digest}})
+        );
     }
 
     /// The definition's tools (ADR-t1728-2): a declaration from the
@@ -1149,9 +1266,14 @@ mod tests {
             none.event_value(),
             json!({"commit": SHA, "base": "base", "head": "head", "agents": []})
         );
-        let prompt =
-            crate::application::prompt::review_prompt(&task(""), &run(), "/runs/r/review.md", None)
-                .text;
+        let prompt = crate::application::prompt::review_prompt(
+            &task(""),
+            &run(),
+            "/runs/r/review.md",
+            None,
+            None,
+        )
+        .text;
         assert!(!prompt.contains("subagent"), "{prompt}");
         let material = material(&task(""));
         assert!(!material.contains("subagent"), "{material}");

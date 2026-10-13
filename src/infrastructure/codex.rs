@@ -254,8 +254,9 @@ pub fn trust_config(worktree: &Path) -> Result<String> {
 /// found before the main checkout's, and `untrusted` loads neither; the
 /// read-only sandbox, the job's permission profile and its commands run
 /// as before, and no approval is waited for. Codex then no longer reads
-/// the worktree's `AGENTS.md` by itself; the review's prompt names it
-/// (ADR-t1470-1 decision 2).
+/// the worktree's `AGENTS.md` by itself; the project's rules reach the
+/// whole review only in its prompt, from the landing branch's
+/// `.dagq/review/builtin-acceptance.md` (ADR-t2259-1 decision 6).
 pub fn distrust_config(worktree: &Path) -> Result<String> {
     project_trust(worktree, "untrusted")
 }

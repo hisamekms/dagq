@@ -3256,8 +3256,9 @@ impl AgentProvider for ClaudeCode {
     /// `.claude/settings.local.json`, `.claude/agents`, `.claude/skills`,
     /// `.mcp.json` and `CLAUDE.md`, which the worker may change, and the
     /// user's settings do not shape the review (ADR-t1470-1 decision 1);
-    /// the prompt names the repository's instructions to read instead
-    /// (decision 2). The prompt is its standard input, as a headless job's
+    /// the project's rules reach the whole review only in its prompt, from
+    /// the landing branch's `.dagq/review/builtin-acceptance.md`
+    /// (ADR-t2259-1 decision 6). The prompt is its standard input, as a headless job's
     /// ([`AgentProvider::headless_command`], task 1560).
     fn review_command(
         &self,

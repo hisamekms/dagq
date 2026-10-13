@@ -6,9 +6,10 @@ use super::jobs::{ReviewAnswer, ReviewJob, ReviewJobInput, ReviewJobState};
 use super::*;
 use crate::application::agent_job::{self, AgentJob};
 use crate::application::job_start_failure;
-use crate::application::prompt::{PromptBytes, REVIEW_ACCESS};
+use crate::application::prompt::{AcceptanceRules, PromptBytes, REVIEW_ACCESS};
 use crate::application::review::{
-    ReviewRange, SnapshotAgent, SubagentSnapshot, review_range_at, snapshot_subagents,
+    ReviewRange, SnapshotAgent, SubagentSnapshot, acceptance_record, acceptance_rules,
+    review_range_at, snapshot_subagents,
 };
 use crate::application::review_programs::{ProgramSnapshot, snapshot_programs};
 use crate::application::run_git;
@@ -652,7 +653,7 @@ impl Supervisor<'_> {
                 prompt_bytes,
                 session_id,
             },
-            builtin: None,
+            builtin: Some(prepared.acceptance),
             again: false,
             state: ReviewJobState::Waiting(None),
             session: None,
@@ -1305,8 +1306,33 @@ impl Supervisor<'_> {
             task.id(),
             &run_dir.join(format!("review-{attempt}-known-failures.json")),
         );
-        let fitted = review_prompt(&task, run, &path, known_failures.as_ref())
-            .with_language(language.as_ref());
+        // The project's rules for the whole review, builtin:acceptance,
+        // from the landing branch's commit the agents were read from
+        // (ADR-t2259-1 decision 6): written whole beside the prompt, which
+        // may cut them.
+        let commit = match subagents {
+            Some(snapshot) => snapshot.commit.clone(),
+            None => self.repository.main_head()?.into_string(),
+        };
+        let rules = acceptance_rules(&*self.repository, &commit)?;
+        let whole_at = run_dir.join(format!("review-{attempt}-builtin-acceptance.md"));
+        if let Some(rules) = &rules {
+            self.files.write(&whole_at, rules.text.as_bytes())?;
+        }
+        let whole_at = whole_at.display().to_string();
+        let fitted = review_prompt(
+            &task,
+            run,
+            &path,
+            known_failures.as_ref(),
+            rules.as_ref().map(|rules| AcceptanceRules {
+                path: &rules.path,
+                commit: &commit,
+                text: &rules.text,
+                whole_at: &whole_at,
+            }),
+        )
+        .with_language(language.as_ref());
         self.files.write(
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
             fitted.text.as_bytes(),
@@ -1346,6 +1372,7 @@ impl Supervisor<'_> {
         }
         Ok(PreparedReview {
             whole: (fitted.text, fitted.bytes),
+            acceptance: acceptance_record(rules.as_ref()),
             agents,
         })
     }
@@ -2503,6 +2530,9 @@ pub(super) fn agent_providers(subagents: Option<&SubagentSnapshot>) -> Vec<Provi
 /// job by the agent's name, in their configured order.
 pub(super) struct PreparedReview {
     pub(super) whole: (String, PromptBytes),
+    /// What the whole review's `review_job_started` records of which
+    /// `builtin:acceptance` judged ([`acceptance_record`]).
+    pub(super) acceptance: serde_json::Value,
     pub(super) agents: Vec<(String, agent_job::BuiltAgentJob)>,
 }
 

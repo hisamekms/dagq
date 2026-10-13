@@ -206,14 +206,17 @@ fn runtimes_of(queue: &SqliteQueue) -> Result<crate::domain::container_runtime::
 
 /// `doctor`'s `agents`: see [`crate::application::review::check_agents`],
 /// read from the landing branch of the checkout `queue` is bound to: the
-/// project's agents (`agents`) and the built-in agents (`builtins`, each
-/// with whether it runs and does by default, its globs and whether
-/// `dagq.toml` wrote them, its provider and its rules file), and the
-/// mistakes (`errors`); none for a queue bound to none, and `error` alone
-/// when the checkout or `dagq.toml` cannot be read or parsed (an unknown
-/// `builtin:` name, a project's agent under that prefix, or an `enabled`
-/// that is no boolean among them), which also keeps every review from
-/// passing.
+/// project's agents (`agents`), the built-ins (`builtins`: the whole
+/// review `builtin:acceptance` first, then each built-in agent, each with
+/// whether it runs and does by default, its globs and whether `dagq.toml`
+/// wrote them, its provider and its rules file), the enabled built-ins
+/// that judge without the project's rules because the landing branch has
+/// no rules file for them (`without_rules`), and the mistakes (`errors`);
+/// none for a queue bound to none, and `error` alone when the checkout or
+/// `dagq.toml` cannot be read or parsed (an unknown `builtin:` name, a
+/// project's agent under that prefix, an `enabled` that is no boolean, or
+/// `builtin:acceptance` turned off or given `paths` or `provider` among
+/// them), which also keeps every review from passing.
 fn doctor_agents(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
     let Some(checkout) = bound_main_checkout(queue)? else {
         return Ok(None);

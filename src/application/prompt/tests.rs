@@ -988,6 +988,7 @@ fn prompts_take_the_rules_from_the_repository_in_order() {
         &run(7, RunStatus::Succeeded, Some(SHA)),
         "/r/review.md",
         None,
+        None,
     )
     .text;
     let order = "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, ";
@@ -1796,6 +1797,7 @@ fn every_worker_text_that_writes_a_receipt_maps_the_acceptance_once() {
         &run_on(Provider::Claude, WorkerMode::Headless),
         "r",
         None,
+        None,
     )
     .text;
     assert!(!review.contains(ACCEPTANCE_MAP) && !review.contains(ACCEPTANCE_REMAP));
@@ -1945,6 +1947,7 @@ fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
         &run_on(Provider::Claude, WorkerMode::Headless),
         "r",
         None,
+        None,
     )
     .text;
     assert!(!review.contains(DOCS_CHECK));
@@ -1963,12 +1966,13 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
         &run_on(Provider::Codex, WorkerMode::Headless),
         "r",
         None,
+        None,
     )
     .text;
     assert_eq!(review.matches(REVIEW_DOCS_CHECK).count(), 1, "{review}");
     assert!(review.contains(&format!(
-            "Do not change any file.\n{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}\nAcceptance criteria of the task:"
-        )));
+        "Do not change any file.\n{REVIEW_DOCS_CHECK}\nAcceptance criteria of the task:"
+    )));
     for part in [
         "named by the task's description or context or by the summary",
         "A document's diff alone does not show the change is right",
@@ -2015,28 +2019,76 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
     assert!(!reason_codes_section(review_reason::REVIEW_CODES).contains(REVIEW_DOCS_CHECK));
 }
 
-/// ADR-t1470-1 decision 2: a Claude review loads no setting sources,
-/// so the worktree's CLAUDE.md is not its memory; the review prompt
-/// names the repository's instructions to read instead, right after
-/// the material and before the check of the documents (task 1429),
-/// and says nothing else of a provider's settings.
+/// The whole review is builtin:acceptance (ADR-t2259-1 decisions 3 and
+/// 6): its prompt names no instructions file of the worktree to read, and
+/// the project's rules are the landing branch's file only, right after the
+/// material and before the check of the documents; without the file the
+/// prompt has no rules of the project. Rules past their limit are cut,
+/// saying so and where the whole file is, within the prompt's limit.
 #[test]
-fn the_review_prompt_names_the_repositorys_instructions() {
+fn the_review_prompt_takes_the_projects_rules_from_the_landing_branch_only() {
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-    let review = review_prompt(
-        &task,
-        &run_on(Provider::Claude, WorkerMode::Headless),
-        "r",
-        None,
-    )
-    .text;
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let without = review_prompt(&task, &run, "r", None, None).text;
     let material = "Read the worktree if you need more. Do not change any file.\n";
     assert!(
-        review.contains(&format!("{material}{REVIEW_RULES}\n{REVIEW_DOCS_CHECK}")),
-        "{review}"
+        without.contains(&format!("{material}{REVIEW_DOCS_CHECK}")),
+        "{without}"
     );
-    assert!(REVIEW_RULES.contains("AGENTS.md and CLAUDE.md"));
-    assert!(!REVIEW_RULES.contains(".claude") && !REVIEW_RULES.contains('`'));
+    let rules = AcceptanceRules {
+        path: ".dagq/review/builtin-acceptance.md",
+        commit: "abc123",
+        text: "Check the changelog.\n",
+        whole_at: "/runs/r/review-1-builtin-acceptance.md",
+    };
+    let with = review_prompt(&task, &run, "r", None, Some(rules)).text;
+    assert!(
+        with.contains(&format!(
+            "{material}{REVIEW_RULES_HEADER} (.dagq/review/builtin-acceptance.md on the landing branch's commit abc123):\nCheck the changelog.\n{REVIEW_DOCS_CHECK}"
+        )),
+        "{with}"
+    );
+    for prompt in [&without, &with] {
+        for word in ["AGENTS.md", "CLAUDE.md", "instructions at the root"] {
+            assert!(!prompt.contains(word), "{word}: {prompt}");
+        }
+        assert!(
+            !prompt.contains("The repository's rules are in"),
+            "{prompt}"
+        );
+    }
+    assert!(!without.contains(REVIEW_RULES_HEADER));
+    // Rules past their limit are cut, said, and named where they are whole.
+    let long = "rule. ".repeat(RUN_REVIEW_RULES_BYTES);
+    let cut = review_prompt(
+        &task,
+        &run,
+        "r",
+        None,
+        Some(AcceptanceRules {
+            text: &long,
+            ..rules
+        }),
+    );
+    within(&cut, RUN_REVIEW_PROMPT_LIMIT);
+    assert!(
+        cut.text
+            .contains("read it whole at /runs/r/review-1-builtin-acceptance.md]"),
+        "{}",
+        cut.text
+    );
+    assert_eq!(cut.bytes.omitted.get("rules"), Some(&1));
+    assert!(
+        cut.bytes
+            .over_limit
+            .as_deref()
+            .unwrap()
+            .starts_with("rules: ")
+    );
+    assert!(cut.bytes.sections["rules"] <= RUN_REVIEW_RULES_BYTES + 200);
+    // The fixed sentences' digest does not depend on the task or the rules.
+    assert_eq!(acceptance_digest(), acceptance_digest());
+    assert_eq!(acceptance_digest().len(), 64);
 }
 
 /// Task 978: a task that needs a path outside its declared paths ends
@@ -3132,6 +3184,7 @@ fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
         &run_on(Provider::Claude, WorkerMode::Headless),
         "/runs/run/review.md",
         None,
+        None,
     );
     within(&fitted, RUN_REVIEW_PROMPT_LIMIT);
     let bytes = &fitted.bytes;
@@ -3153,6 +3206,7 @@ fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
         &task_with_evidence(7, Vec::new()),
         &run_on(Provider::Claude, WorkerMode::Headless),
         "r",
+        None,
         None,
     );
     assert!(
@@ -5576,7 +5630,7 @@ fn the_whole_review_carries_the_known_failures_and_an_agents_job_does_not() {
     let task = task_with_evidence(9, Vec::new());
     let run = run_on(Provider::Claude, WorkerMode::Headless);
     let list = known(&[("other", 2, Some(12))], &["mine"]);
-    let review = review_prompt(&task, &run, "/runs/r/review.md", Some(&list));
+    let review = review_prompt(&task, &run, "/runs/r/review.md", Some(&list), None);
     for line in [
         "This task fixes these tests, which fail already on the landing branch's CI: judge whether the diff makes them pass:\n- mine (CI run: https://ci/runs/9)\n",
         "- other (CI run: https://ci/runs/2; fixed by task 12)\n",
@@ -5586,7 +5640,7 @@ fn the_whole_review_carries_the_known_failures_and_an_agents_job_does_not() {
     }
     assert!(review.bytes.sections["known_failures"] > 0);
     within(&review, RUN_REVIEW_PROMPT_LIMIT);
-    let without = review_prompt(&task, &run, "/runs/r/review.md", None);
+    let without = review_prompt(&task, &run, "/runs/r/review.md", None, None);
     assert!(!without.text.contains("fail already"), "{}", without.text);
     let definition = "---\ndescription: checks the design\ntools: [read]\n---\nCheck it.\n";
     let tools = AgentTools::declared(AgentRole::Review, definition).unwrap();
@@ -5695,6 +5749,7 @@ fn a_thousand_known_failures_stay_within_each_prompts_limit_and_name_their_file(
         &run,
         "/runs/r/review.md",
         Some(&list),
+        None,
     );
     check(&review, RUN_REVIEW_PROMPT_LIMIT);
     let over = review.bytes.over_limit.clone().unwrap();
@@ -5732,6 +5787,7 @@ fn the_others_tests_left_out_whole_still_get_their_instruction() {
         &run_on(Provider::Claude, WorkerMode::Headless),
         "/runs/r/review.md",
         Some(&list),
+        None,
     );
     for (fitted, instruction) in [(&worker, DO_NOT_FIX), (&review, DO_NOT_SEND_BACK)] {
         let text = &fitted.text;

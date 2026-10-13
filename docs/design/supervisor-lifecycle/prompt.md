@@ -203,8 +203,8 @@ promptと固定の文字列には、dagqのrepositoryの規則（ADRの索引や
   runtimeが立てるplannerのaskは`RUNTIME_PLANNER_ASK`で、材料で決めきれず人の判断に当たるか確信度が低いときだけ`planner_question`にする（ADR-t451-1決定5）。
 - plan review: repositoryの指示とそれが名指す文書を当てはめさせ、AGENTS.mdが無ければ同じ順で判断し、決まらなければ`concern`にする。
   このrepositoryではAGENTS.mdの「plan review」の節から[taskの登録](../../development/task-registration.md)の「plan reviewが当てはめる規則」へ辿る。
-- review: `REVIEW_RULES`がproviderに依らずworktreeのrootの指示とそれが名指す文書で差分を判定させ、資料の行の後、`REVIEW_DOCS_CHECK`の前に置く。
-  Claudeのreviewは`--setting-sources ""`で起動して`CLAUDE.md`をmemoryとして読まないので、promptで名指す（[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)決定2）。
+- review: 全体のreviewのpromptはworktreeの指示を名指さず、landing branchのcommitの`.dagq/review/builtin-acceptance.md`があればその中身をpjの規則として資料の行の後、`REVIEW_DOCS_CHECK`の前に置く（[Review](review.md#reviewの流れ)の2、[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)決定6）。
+  規則はpromptの上限に数え、超えた分は切って全文の場所を書く。
 - follow_up・goal gap・findingのdraftの`context`の見出しは英語の固定の文で、言語の設定に従わない（[Language](language.md#日本語が残っていた固定の文字列)）。
 
 ## headlessのjobのprompt

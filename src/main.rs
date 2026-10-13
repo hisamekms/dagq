@@ -1523,6 +1523,10 @@ enum Command {
     /// to, and `marks` the project's own marks on the verification's output
     /// ([verify_marks.<name>]: its name, the class a line of its shape gives, and the shape,
     /// with `implicit` on the one read while dagq.toml declares neither a profile nor a mark).
+    /// `agents` shows the review's agents read from the landing branch; its `builtins` start with
+    /// builtin:acceptance, the whole review, and `without_rules` names the enabled built-ins
+    /// that judge without the project's rules, the landing branch having no
+    /// .dagq/review/builtin-<name>.md for them.
     Doctor {
         /// Include each run's lease, processes, heartbeats and paths, and every supervisor field.
         #[arg(long)]

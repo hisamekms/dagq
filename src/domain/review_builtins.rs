@@ -22,7 +22,9 @@ pub const PREFIX: &str = "builtin:";
 /// The whole review's job (ADR-t2259-1 decision 3): always run, on every
 /// change, on `[roles.review]`'s provider. Its table may say only
 /// `enabled = true`; `enabled = false`, `paths` and `provider` are
-/// mistakes. It is no agent job of [`BuiltinAgent`].
+/// mistakes. It is no agent job of [`BuiltinAgent`]: its prompt is the
+/// runtime's, and the project's rules for it are
+/// [`acceptance_rules_path`].
 pub const ACCEPTANCE: &str = "builtin:acceptance";
 
 /// Where a project's rules for the built-ins are, relative to the
@@ -146,6 +148,12 @@ impl BuiltinAgent {
 /// `.dagq/review/builtin-<short>.md`.
 pub fn rules_path(agent: BuiltinAgent) -> String {
     format!("{RULES_DIR}/builtin-{}.md", agent.short())
+}
+
+/// The repository-relative path of the project's rules for
+/// [`ACCEPTANCE`], the whole review: `.dagq/review/builtin-acceptance.md`.
+pub fn acceptance_rules_path() -> String {
+    format!("{RULES_DIR}/builtin-acceptance.md")
 }
 
 /// One `[review.subagents."builtin:<name>"]` as written: each key `None`
@@ -290,6 +298,10 @@ mod tests {
         assert_eq!(
             rules_path(BuiltinAgent::Tests),
             ".dagq/review/builtin-tests.md"
+        );
+        assert_eq!(
+            acceptance_rules_path(),
+            ".dagq/review/builtin-acceptance.md"
         );
     }
 

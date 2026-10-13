@@ -1342,10 +1342,10 @@ pub(super) struct ReviewJob {
     pub(super) provider: Option<Provider>,
     /// What starts it.
     pub(super) input: ReviewJobInput,
-    /// A built-in agent's record of which built-in judges
-    /// (`SnapshotAgent::builtin_record`), which each of its
-    /// `review_job_started` carries; `None` for the whole review's and a
-    /// project's agent.
+    /// A built-in's record of which built-in judges: the whole review's,
+    /// `builtin:acceptance` (`review::acceptance_record`), and a built-in
+    /// agent's (`SnapshotAgent::builtin_record`), which each of its
+    /// `review_job_started` carries; `None` for a project's agent.
     pub(super) builtin: Option<serde_json::Value>,
     /// Whether it ran once more already, or starts as its run once more.
     pub(super) again: bool,

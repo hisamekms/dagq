@@ -58,7 +58,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（`--paths`・`[e2e] paths`と同じglobの規則の、1つ以上の文字列の配列）と任意の`provider`（[Review](review.md#agentのjobのprovider)）を持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1）。
   - `<agent>`はkebab-caseで、定義のファイル`.dagq/agents/<agent>/AGENT.md`のdirectoryの名前になる（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
   - `builtin:`で始まる名前はbuilt-inのagentの表で、任意の`enabled`・`paths`・`provider`を持ち、書いた`paths`は既定を置き換え、書かないものは既定に従う（意味と既定は`domain::review_builtins`、[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)）。
-  - 表とkeyの書き方の誤り（知らないbuilt-inの名前と真偽でない`enabled`を含む）は`dagq.toml`全体の誤りにする。
+  - 書き方の誤り（知らないbuilt-inの名前・真偽でない`enabled`・`builtin:acceptance`の`enabled = false`と`paths`・`provider`）は`dagq.toml`全体の誤り。
   - 定義の無いagentと複数の役割の節が名指すagentは`dagq doctor`の`agents`の`errors`が出す（reviewでの扱いは[Review](review.md#reviewのsubagent)の「誤り」）。
   - 読むのはreviewを始めるときのlanding branchのcommitの`dagq.toml`で、選び方とsnapshotは[Review](review.md#reviewのsubagent)。
   - 旧バイナリは知らない表とkeyを含む`dagq.toml`全体を読めなくなるので、固定バイナリが対応してから足す。

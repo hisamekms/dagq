@@ -104,7 +104,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    資料かpromptを書けなければ、jobを起動せずに下の「reviewの失敗」にする。
 2. **headless実行**: 全体のreviewのjobは`AgentProvider::review_command`のport（権限の意図は`REVIEW_ACCESS`、[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で、agentのjobは下の「reviewのsubagent」の経路でworktreeで起動する。
    Claudeのreviewは`--setting-sources ""`とsettingsの`autoMemoryEnabled: false`で、worktreeの`.claude/`・`.mcp.json`・`CLAUDE.md`・auto memoryとuserの設定を読まない（[ADR-t1470-1](../../adr/2026-10-03-t1470-1-all-claude-run-reviews-load-no-setting-sources.md)）。
-   そのためpromptが、worktreeのrootのinstructionsとそれが名指す文書を読んで判定するよう1文で求める（未実装の変更は[built-in](review-builtin.md)）。
+   全体のreviewのpromptはinstructionsを読ませず、pjの規則はlanding branchの`.dagq/review/builtin-acceptance.md`だけで、無ければ規則なしで照合する（ADR-t2259-1決定6）。
    reviewのsettingsは`Stop` hookを持たない（生きているworkerのsessionのidle markerを書かないため）。
    containerのrunは着地用のworktreeで動く（[Container runtime](../container-runtime.md#git)）。
    どのjobもreviewの段のjobの共通の経路（[Headless job processes](headless-job-processes.md#記録)）を`agent`の種類（`JobKind::Agent`）として通り、起動の記録・timeoutの停止・引き継ぎは`program`の種類のjobと同じである。
@@ -182,6 +182,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 [ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)と[ADR-t1895-1](../../adr/2026-10-06-t1895-1-review-stage-runs-agent-and-program-jobs-in-a-fixed-shape.md)の実装。
 変えたpathに応じて必須のagentを選び、全体のreviewのjobと並べて、agentごとに1本ずつの独立のjobとして動かす。
 agentはpjの`.dagq/agents/`のものとバイナリのbuilt-in（`domain::review_builtins`）で、同じ選び方とjobで動く。
+全体のreviewのjobは`builtin:acceptance`で、開始にbuilt-inのagentと同じ形で版を残す（決定3・9）。
 
 - **設定**: `dagq.toml`の`[review.subagents.<agent>] paths`と任意の`provider`（書式は[Run environment](run-environment.md)）と、定義のファイル（`domain::review_subagents::find_definition`、[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
   設定の誤りとbuilt-inの設定は`dagq doctor`の`agents`（`application::review::check_agents`）が出す。
@@ -226,8 +227,7 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
   文書の差分だけでは正しいとせず、文書を直さなかった理由も確かめる。
 - 両方向: 古い文書と変わった流れ・境界・不変条件・約束の書き漏れを`docs_drift`で指摘し、加えて差分が文書に入れたコードの書き写しと経緯も指摘する。
   名前が文書に無いことだけでは古いとしない。
-- このrepositoryでは、名前の確かめと書き写し・経緯は全体のreviewが`REVIEW_DOCS_CHECK`と指示が名指す[documents.md](../../development/documents.md#design)で、形式（1文1行・予算・1行の長さ・task番号）は`[review.programs]`が見る。
-  未実装の変更の後は`.dagq/review/builtin-acceptance.md`がその規則を渡す。
+- このrepositoryでは、名前の確かめと書き写し・経緯は全体のreviewが`REVIEW_DOCS_CHECK`と`.dagq/review/builtin-acceptance.md`の規則で、形式（1文1行・予算・1行の長さ・task番号）は`[review.programs]`が見る。
 - `review.md`のTaskの節はcontextを持つので、plannerがcontextに書いた関連文書もreviewが読む（[`review`](review-command.md#review)）。
 
 ## 差し戻しの分類コード<a id="差し戻しの分類コード未実装"></a>
