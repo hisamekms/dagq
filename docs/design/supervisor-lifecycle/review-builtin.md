@@ -47,7 +47,7 @@ related:
   productionのケースは本番のrunのcommitをbaseにするので、今どおり対象のrepositoryのGitから読む。
   pjのagentのevalは今の節のまま変わらない。
 - **文書の照合**: 今は全体のreviewのpromptの`REVIEW_DOCS_CHECK`が、変えた挙動に対する文書の古さ・欠けと、コードの書き写し・経緯の指摘を持つ（[Review](review.md#文書の照合)）。
-  決定後も文書の照合は全体のreviewだけが持ち、`builtin:docs`は同梱しない。
+  決定後も変えた挙動に対する文書の古さ・欠けの照合は全体のreview（`builtin:acceptance`）だけが持ち、`builtin:docs`は同梱しない（[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)）。
   コードの書き写しと経緯の指摘はruntimeに置かず、pjの規則（このrepositoryでは`.dagq/review/builtin-acceptance.md`）が持つ。
 
 ## 生成
