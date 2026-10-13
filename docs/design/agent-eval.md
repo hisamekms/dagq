@@ -258,4 +258,4 @@ built-inのagentのevalはpjのprogramを当てない（決定済み・未実装
 - 1本でも0以外で終わったケースは、残りのprogramとagentを起動せず、agentの成績の分母から外し、`agent_eval_finished`の`program_stopped`に数とケースのidと落ちたprogramを記録する。
 - programの起動の失敗（reviewのactorのbackendがcontainerのときを含む）か時間切れのケースがあれば、新しい実行を起動せず、周を`incomplete`（`program_failed`）で閉じ、`passed`を`false`にする。
 - ケースごとのprogramの結果は`agent_eval_case_checked`に記録し、周を引き取ったsupervisorは止まったケースのagentを起動しない。
-- programが受け持った規則コードをagentの`expected`から外す整理は、定義を移す後続のtaskが行う。
+- programが受け持つ規則コードはagentの定義から外すか狭め、ケースの`expected`は書き換えない（programが止めたケースは分母から外れ、ラベルの変更は人・inbox・plannerに限る。[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)の決定6・13）。

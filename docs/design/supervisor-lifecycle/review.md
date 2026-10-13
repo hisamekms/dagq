@@ -264,7 +264,7 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 - **引き継ぎ**: concernの後で止まったrunは、adoptした側がverdictから決め直す（`adopted_concern`）。
   `send_back`の依頼を記録した後に`concern_decided`の前で止まったときは、引き継ぎが適用として補う（`backfill_sent_back_concern`）。
 - **agentの判定**: agentも同じ規則で進み、セキュリティのagentの出し分けは[ADR-t1906-1](../../adr/2026-10-14-t1906-1-security-review-agent-findings-follow-the-concern-rules.md)が持つ。
-- **prompt**: concernを機械的な修正でなく判断の要るfindingとし、推奨と確信度の付け方、人に残す基準（迷えば`low`）、runtimeが確かなものを適用することを書く（`application::prompt`のconcernの定数）。
+- **prompt**: concernを機械的な修正でなく判断の要るfindingとし、推奨と確信度の付け方、人に残す基準（迷えば`low`）、runtimeが確かなものを適用することを書く。
 
 ## 再計画の操作が保護するrun
 
