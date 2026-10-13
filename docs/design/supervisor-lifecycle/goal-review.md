@@ -6,7 +6,6 @@ status: current
 created: 2026-09-27
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-replanning
   - adr-t1504-2
   - design-follow-up-membership
   - adr-t1566-1
@@ -57,7 +56,3 @@ execの[引き継ぎ](handoff.md)を待つあいだに終わったjobと、`prep
    走っている依存taskの停止と過去のeventの書き換えはどの答えでもしない。
 
 判断（起動するgoalの選び方・失敗の後の待ち・gapsの連続の数え方と上限・answerの適用の可否と閉じ方・rearmできるgoal）は`src/domain/goal_review.rs`のunit test、providerの行き先とjobの失敗の控えとroleの表は`src/application/supervise/goal_review.rs`のunit test。integration testは`tests/it/goal_review.rs`（plan reviewのstub providerがverdictを出す。achieved・gapsのdraft・storeが数えた4回目のgapsのaskと`gaps`のanswer・askのanswer（`keep_open` / `abandoned` / 適用しないoption）と閉じたgoalのanswer・失敗と`goal review ID`・起動の記録と区間・引き継ぎ。achievedと失敗のeventの`prompt_bytes`がjobに渡したpromptと合うこと）、promptの上限は`src/application/prompt/`の`a_goal_review_prompt_of_many_large_tasks_stays_within_its_limits`と`src/main.rs`の`the_goal_review_job_and_the_planners_may_run_each_read_their_prompts_name`、`tests/it/goal_review_codex.rs`（spikeのJSONLとrolloutを書くstubの`codex`。Codexで動いてverdict・thread・modelを読み適用する、認証の失敗からClaudeへ、Claudeの利用上限からCodexへ移りCodexも利用上限なら待つ、時間切れで別のprocess groupのcommandも止める）と、`src/domain/goal_review.rs`・`src/application/supervise/goal_review.rs`のunit test。follow_upの所属の判断と閉じる条件（out_of_scopeだけが残るgoalの起動とclose、未判定・undecided・要再確認・goalの外のrequiredの拒否、reviewの間の登録・訂正・acceptanceの変更で`finish_goal_review`も`goal close`も閉じないこと、それらの後に条件がそろい直しても入力の変わったreviewのverdictを使わないこと、`failed`のreviewが判断やacceptanceの変更だけで取り直されること）と、9のachievedの後の訂正（out_of_scopeの訂正はaskを開かないこと、requiredの訂正で閉じた状態・verdict・前の判断が残り解放済みのtaskとrunを載せたaskが開き、走っているtaskを止めず、askが開いている間は所属を変えないこと、3つのanswerの適用と適用しないanswer、requiredの確かめ直しは問わないこと、`reopen`がほかの`correct_goal`と残った`approve_goal`のaskを閉じ、移せないfollow_upを残すこと、権限の無いactorの訂正の拒否）は`tests/it/follow_up_membership.rs`（supervisorによる`reopen`の適用は`tests/it/goal_review.rs`の`the_supervisor_applies_a_reopen_answer_to_a_correction`）と`src/domain/follow_up.rs`・`src/domain/goal.rs`のunit test。runtimeの他のtestが使う`TestReviewer`（`tests/it/runtime_support`）はgoal reviewを起動させず失敗にするので、goalのtaskを着地させるtestではgoalは開いたまま残る。
-
-## taskの再計画による置換元（予定・未実装）
-
-[taskの再計画](task-replanning.md#goal-reviewとgoal-close予定未実装)は、置換元の`replaced`を再置換先も辿った全ての葉が`completed`か`canceled`になったときだけ終了条件上の解決済みとして扱う予定の契約を持つ。置換元はcompletedの件数に加えず、子の着地と元条件の対応をgoal reviewの入力に載せる。起動・achievedの適用・`approve_goal`のanswer・`goal close --verdict achieved`は同じ系統の再検査を行い、fingerprintには置換関係と条件対応の版も含める。既存のfollow-upの所属判断などは維持する。ADR-t1521-2決定5がADR-0047決定8・43をamendsするもので、現行の2・4・5の実装はまだこの置換を扱わない。

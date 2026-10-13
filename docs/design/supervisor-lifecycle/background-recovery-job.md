@@ -6,7 +6,6 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-hold
   - adr-t1566-1
   - design-supervisor-lifecycle-prompt
   - design-supervisor-lifecycle
@@ -39,7 +38,6 @@ job に渡した idle の部分木は、進むか `wait` の再確認の時刻�
 
 `recovery_requested` に alert・attempt・evidence・reason と事実と、job の provider・model・effort の `launch`（job には見せない）を記録し、run dir に prompt と stdout / stderr を書く。job は読み取りだけの `DAGQ_ROLE=recovery-job` で、`launch` の provider で起動する（`[roles.recovery] provider = "codex"` なら Codex。下の「Codexで動かす」）。prompt は task・現在の検証・編集の履歴・最後の turn の要約・run のプロセス一覧・worktree の HEAD と receipt の commit・git status と差分を含む。alert の事実の直後に supervisor の固定バイナリの節を持つ（task 1633、`prompt::binary_sections`。資料は `recovery::binary_facts_of` が読み、`prompt::binary_facts` が `BinaryFacts` に組み立てる）: (a) 今の build 識別子とその commit（`Binary of the supervisor (the fixed binary the runtime runs) now: <version> (commit <sha>)`。commit を名乗らないリリースか `unknown` の build はそう書く。節 `binary`、`RECOVERY_BINARY_BYTES` 500 byte）、(c) task の依存先ごとに、最新の `run_integrated` の着地 commit と今の build がそれを含むか（`Repository::is_ancestor`）の JSON の 1 行 `{"held": true | false | null, "landed": <commit> | null, "task": <id>, "why": <言えない理由>}`（`why` は `held` が null のときだけ: 着地していない、build が commit を名乗らない、git の失敗。節 `dependencies`、`RECOVERY_DEPENDENCIES_BYTES` 3,000・1 件 `RECOVERY_DEPENDENCY_BYTES` 400 byte。今の build が含まないか言えないものを ID の昇順で先に、続けて含むものを選ぶ）、(b) run の claim（run の最初の event）より後の固定バイナリの入れ替え: queue の `update_installed`（plugin だけのものは除く）と run の `supervisor_handed_off` を、`event_id`・`kind`・`at`・`previous_version`・`version`（`update_installed` は `commit` も）の JSON の 1 行ずつ古い順に（節 `replacements`。新しい順に `RECOVERY_REPLACEMENTS` 10 件・`RECOVERY_REPLACEMENTS_BYTES` 3,000・1 件 `RECOVERY_REPLACEMENT_BYTES` 400 byte まで選ぶ）。省いたものは件数と ID と、run directory の `recovery-<alert>-<attempt>.binary.json`（`start_job` が prompt と一緒に書く `BinaryFacts` の全体）を読む方法として書く。`retry` / `retry_inherit` を許す job（終わった run の job）には、固定バイナリが依存先の着地を含まないことで落ちた run は、今の build がそれを含めば人に聞かずに `retry`（自分の commit のある run は `retry_inherit`）を `confidence: high` で選んでよく（`TRIAGE_RETRY_FAILURES` の規則で runtime が retry を適用しないときは escalate で retry を推奨する）、含まなければ `wait` か escalate にすることを書く（`RECOVERY_BINARY_RULE`）。prompt は全体の `RECOVERY_PROMPT_LIMIT`（96,000 byte、言語の指示を含む）と節ごとの上限を持ち（task 1571。値と理由は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)）、切ったものは run directory と worktree のファイル（claim 時の task は `prompt.txt`、turn の全文は `turns/turn-NNNNNN.jsonl`、終わった run の receipt・検証の log・`terminal-final.txt`、`git status` は worktree）を名指し、ファイルに無いもの（alert の事実・プロセスの一覧・過去の verdict）は読めないと書く。prompt を書いたら `recovery_prompt_written`（`alert`・`attempt`・`prompt_bytes`。plan review と同じ形）を run に記録する（生きている session の job も終わった run の job も `start_job` で）。capture した画面は使わない。`failed` の prompt は triage が組み立てる。
 
-
 ## 適用
 
 high confidence の repair の全操作について前提を確認してから適用し、操作を `auto_repaired`、結果を `recovery_finished`（Codex の job なら thread と model も）に残す。1つでも崩れれば操作せず escalation する。
@@ -50,7 +48,6 @@ high confidence の repair の全操作について前提を確認してから�
 - `wait`: alert と reason ごとに再確認を保留する（上限 `MAX_RECHECK_SECS`）。別の alert の job はこの保留を消さない。
 
 `answer_known_dialog`・`close_and_proceed` は worker に適用しない。過去の verdict に書かれていても拒む。
-
 
 ## escalate
 
@@ -106,10 +103,3 @@ clone・着地用のworktreeのdir・run dirのbundleと状態のファイルの
 制御側のrun branchの削除と着地用のworktreeの登録の解除はguardを通したgitでだけ行い、guardが成り立たなければ飛ばして片付けの失敗として残し、guardが成り立った後の片付けのやり直しが消す。
 復旧jobとtriageがrunのheadと状態を読むのもcloneではなくbundleと状態のファイルからで、読めなければその旨を事実として渡す。
 片付ける物の列挙と手順は`supervise::cleanup`の`clean_clone`と`application::run_git::remove`のdoc commentが持つ。
-
-## taskのhold（予定・未実装）
-
-holdの開いたtaskの生きているrunには、holdの待ちに入った後は新しいalertのjobを起動しない（holdの待ちはstall・idleの検知の対象にしない）。
-holdの前に起動したjobのverdictは、hold中は適用せず記録として残し、解除の後に版が変わっていなければ適用し、変わっていれば捨てる。
-決定は[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)、詳細は[taskのhold](task-hold.md)の「列の外の結果と回答の適用」が持つ。
-現行の挙動は上の各節のとおり。

@@ -6,7 +6,6 @@ status: current
 created: 2026-09-27
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-hold
   - adr-t1394-1
   - adr-t1533-1
   - adr-t728-1
@@ -65,7 +64,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | 人との対話 | `ask.answer` / `ask.close` | `answer` / `ask close` |
 | | `planner.open` | `plan` |
 | | `request.record` / `request.decline` | `request add` / `request decline`（計画の依頼。ADR-t1394-1の決定3・6、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)） |
-| | `replan.*` | `replan request` `replan propose` / runtimeの保留と置換（[再計画](supervisor-lifecycle/task-replanning.md)） |
+| | `replan.*` | `replan request` `replan propose` / runtimeの保留と置換（[再計画](../plans/task-replanning.md)） |
 | | `screen.read` / `screen.send` | `run screen` `planner screen` `run log` `planner log` / `run send` `planner send`（sessionの画面を読む・送る。workerのrunには画面が無く、`run screen`はどのrunにも理由とturnのlogのCLI（`run log`）を示して拒み（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、`run send`はどのrunにも拒む。backgroundのsessionのlogを読む（ADR-t1404-1決定6）。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)、[sessionへの送信と確認](supervisor-lifecycle/session-send.md#人とinboxの画面の読み取りと送信)） |
 | | `planner.request` | `planner request`（開いている非対話のruntimeのplannerへの続きの依頼を次のturnとして置く。[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)、[`plan` / `planners`](supervisor-lifecycle/plan-planners.md#続きの依頼と非対話のplannerのcli)）。plannerを閉じるCLIは無い |
 | eval | `eval.request` / `eval.request_held_out` / `eval.rerun` / `eval.read` / `eval.cases` | `agent eval`（dev / holdout・production / `--rerun`） / 読み取り / `agent cases` `agent decide`（[Agent eval](agent-eval.md)） |
@@ -117,12 +116,6 @@ migrationより前に出したproposalは`NULL`で、plannerは取り下げら�
 askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisorはCLIが開けるどのkindも、workerは`worker_question`、plannerは`planner_question`だけを開ける。observerの`ask --kind blocked --finding`は`ask.open`ではなく`finding.ask`で、finding（`Resource::Finding`）に対して判定する。kindがroleに合わなければ理由`not of this kind`で拒む。
 
 `AuthorizationError`はroleと拒んだcapabilityと理由（`not granted`・`reserved`・`not on this resource`・`not of this kind`）だけを出し、actor id（session idを含みうる）やresourceのid・本文を出さない。
-
-## 予定: taskのhold
-
-taskのholdと解除（ADR-t1879-1、[taskのhold](supervisor-lifecycle/task-hold.md)）は、まだ実装していない。
-userとinboxだけに与えるcapabilityを1つ足し、ほかのroleは拒む。
-実装が、上の表・[Security](security.md)・pluginの権限の表を直す。
 
 ## 適用の範囲
 

@@ -6,7 +6,6 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-replanning
   - adr-t1985-1
   - adr-t1704-1
   - adr-t1566-1
@@ -117,7 +116,3 @@ goal reviewの仕組み（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-jo
 - **記録**: `concern`のverdictを適用したとき、`plan_review_finished`の後に`plan_concern_decided`（proposalのanchorのtaskに付け、`proposal_id`、`plan_review_id`、`recommendation`、`confidence`、`reason_category`、`applied`（runtimeが適用したか）、`decision`（適用した`pass` / `revise`、askならnull）、`escalated_because`、`ask_id`）を記録する。検査中の編集で捨てたverdictと失敗したjobには記録しない。`stats`の`recommendations.decided_without_ask`は`applied: true`のものを`approve_plan`に数える（[Stats](stats.md)）。
 - **prompt**: plan reviewのpromptは`concern`に推奨と確信度を付けさせ、`high`は記録（queue・repositoryの文書と決定・答えられたask）で決まるとき、`low`は決まらないか迷うとき、`scope` / `discard`の付け方と、何が人に残るかを示す。
 - **test**: `tests/it/plan_review_concern.rs`が、`high`の`ready`がactionsを含めてpassとして適用され（人が作ったtaskなので優先度は保たれ）`decided_without_ask`に数えられることと、上限まで差し戻したproposalの`send_back`と`revise`が人に渡り`plan_concern_decided`と`overridden`に理由が残ることを確かめる。判定の順と、`high`の`send_back`のreviseと上限の`revise_limit`、`low`・`scope`・`discard`（`cancel`）・今の形のaskの`escalated_because`と推奨と文面、許されないactionの`high`の`ready`がpassと同じく検査されることは`domain::plan_review`と`application::supervise::plan_review`の単体test、数え方は`domain::stats::recommendations`の単体test。
-
-## taskの再計画（予定・未実装）
-
-置換proposalは元条件の対応表、保存成果、全後続依存、goalと権限ある削除/破棄の判断を検査する。passやhighのready推奨でも子をこの段でreadyにせず、trusted runtimeがversion/leaseを再検査して一括適用する。 詳細は[taskの再計画](task-replanning.md)が持つ。現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。

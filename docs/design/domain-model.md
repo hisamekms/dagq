@@ -6,7 +6,6 @@ status: current
 created: 2026-09-21
 scope: domain
 related:
-  - adr-t1879-1
   - adr-t1704-1
   - adr-t1811-1
   - adr-t1639-1
@@ -189,12 +188,6 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 - runtimeは知らせるだけで、待っているtaskを自動で保留にしない。
   依存を外すか、cancelするか、取り直すかは計画の判断で、決まった規則では選べないため。
 - 同じ待ちの集合は重ねて知らせず、鎖になっているときは根のtaskだけを知らせる。
-
-### 予定: taskのhold
-
-- holdはdraftと別の印で、taskのstatusを変えず、plan reviewを通った扱いを失わせない（ADR-t1879-1、まだ実装していない）。
-- 印はdraft・editでは外れず、終端で効きを失う。
-  状態ごとの効果・解除・権限は[taskのhold](supervisor-lifecycle/task-hold.md)が持つ。
 
 ### attentionと読む口
 

@@ -91,7 +91,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 - 計画の依頼の`request.record`（`request add`）はuserとinboxだけが持ち（inboxの記録は人の言葉の代行、[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3）、`request.decline`（`request decline`）はplannerだけが、自分が立てられた依頼にだけ持つ（決定6）。
   依頼に紐づく`planner_question`（`ask --request`）も、plannerは自分が立てられた依頼にだけ開ける。
   拒否は`authorization_denied`に残る
-- 再計画（[再計画](supervisor-lifecycle/task-replanning.md)）の`replan.request`（`replan request`）はuserとinboxだけ、`replan.propose`（`replan propose`）は自分のrunのworkerだけが持つ。
+- 再計画（[再計画](../plans/task-replanning.md)）の`replan.request`（`replan request`）はuserとinboxだけ、`replan.propose`（`replan propose`）は自分のrunのworkerだけが持つ。
   runの保留と置換の`replan.park`・`replan.apply`はsupervisorだけが持つ。
   plannerはどれも持たない
 - agentのevalの依頼（`agent eval`、[Agent eval](agent-eval.md)）は、devの`eval.request`をuser・inbox・plannerと自分のrunのworkerが、hold-outとproductionの`eval.request_held_out`とproductionの集合の依頼と決定（`agent cases`・`decide`）の`eval.cases`をuser・inbox・plannerが、同じキーの再実行の`eval.rerun`をuserとinboxだけが持つ。

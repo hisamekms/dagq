@@ -6,7 +6,6 @@ status: draft
 created: 2026-10-04
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-hold
   - adr-t1662-1
   - adr-t1662-2
   - adr-t1662-3
@@ -90,8 +89,6 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 
 工程ごとの中身とタグは`domain::run_phase::Phase`の定義と`Phase::tags()`が持つ。
 
-予定・未実装: taskのholdで走っていた工程が終わり待ちに入った後の工程`held`（human・none）。
-
 ### 終端
 
 `run_integrated`の後は工程`push`（`run_integrated`と同じtransactionで記録）で、pushの結果の記録と同じ所で、`push_finished`（`already_delivered`を含む）か`push_skipped`なら`ended`（`cause`は`pushed`・`push_skipped`）を、`push_failed`なら`push_pending`（`blocker: human`）を記録する。
@@ -120,8 +117,6 @@ claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重�
 - **`run_claimed`の欄**: claimはtaskがreadyになった時刻と、claimの判断で並べた候補の中の位置と優先度を書く（`domain::claim_facts`）。
   supervisorは候補ごとの値をclaimに渡し、claimは取ったtaskの値だけを残す。
 - **`blocked_by`**: 着地の順番だけを待つ間の`run_phase_changed`（工程`landing_queue`）は、そのとき着地slotを握っていたrunを`blocked_by`に持ち、握るrunが変われば記録し直す。
-- 予定・未実装: readyのtaskのhold（[taskのhold](supervisor-lifecycle/task-hold.md)）は、`task_held`から`task_released`までをtaskの区間に重ねて読む。
-  runを持つtaskでは、holdをかけた時刻ではなく、走っていた工程が終わって待ちに入った時刻（工程`held`）から解除までを分析から除く。
 
 ### supervisorの一生
 

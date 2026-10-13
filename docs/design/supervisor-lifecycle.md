@@ -6,8 +6,6 @@ status: current
 created: 2026-09-21
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-replanning
-  - design-supervisor-lifecycle-task-hold
   - design-supervisor-lifecycle-throughput-review
   - design-supervisor-lifecycle-host-metrics
   - design-supervisor-lifecycle-actor-model
@@ -244,14 +242,6 @@ live worker alert (stalled, idle_process)
 
 - [`session` wrapper](supervisor-lifecycle/session-wrapper.md)
 - [非対話のworker](supervisor-lifecycle/headless-worker.md)（1 turnを1回の`claude -p`にする経路、`turns/`の依頼、turnの記録と停止、促しと復旧job）
-
-## Task replanning（予定・未実装）
-
-- [長期化した非対話taskの診断・保留・成果保存・置換](supervisor-lifecycle/task-replanning.md)
-
-## Task hold（予定・未実装）
-
-- [taskのhold（保留）と解除](supervisor-lifecycle/task-hold.md)
 
 ## Receipt and session exit
 

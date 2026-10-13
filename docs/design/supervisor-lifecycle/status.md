@@ -7,7 +7,6 @@ created: 2026-09-26
 scope: runtime
 related:
   - adr-t1487-2
-  - design-supervisor-lifecycle-task-hold
   - adr-t1228-2
   - adr-t2159-1
   - design-supervisor-lifecycle
@@ -30,7 +29,6 @@ related:
 # `status`
 
 > **予定**: inboxのwatcherの記録と表示（ADR-t906-1決定1の(1)）は、ADR-t906-1を置き換えた[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)が引き継ぐ。runはworkspaceを開かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
-> taskのholdの`task_holds`とattentionは[taskのhold](task-hold.md)が持つ（未実装）。
 
 `mode`の`in_cmux`は、廃止（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）前に登録されたsupervisorにだけ出る。
 
@@ -110,7 +108,7 @@ socketに`hello`を1回打つだけで、serviceを起動も停止もしない�
 
 ## 再計画の操作
 
-`replans`は開いている再計画の操作の状態・理由・保護と、taskが`in_progress`でないのに開いたままのもの（`problems`）で、`doctor`も同じ（[taskの再計画](task-replanning.md#実装の状態)）。
+`replans`は開いている再計画の操作の状態・理由・保護と、taskが`in_progress`でないのに開いたままのもの（`problems`）で、`doctor`も同じ（意味は`domain::task_replan`のdoc comment）。
 
 ## toolchainのprofile
 

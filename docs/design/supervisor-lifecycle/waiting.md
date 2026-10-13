@@ -6,7 +6,6 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-hold
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-status
@@ -44,7 +43,6 @@ related:
   7. `stalled`を持つrunで、idle markerかreceiptが基準の時刻より新しければ`session_moved`で終える。
 - **終わり**（`end_wait`）: `run_waiting_ended`（`ask_id`、`ask_kind`、`cause`、`waited_secs`）を記録し、持っていたaskを`consumed`に足す。`answered`と`session_exited`は戻り待ちになり、それ以外（`session_moved` / `queue_hold` / `wrapper_silent` / `phase_changed`。過去の記録の`dialog_cleared`も）はその場でslotに戻す（`run_slot_regained`の`over_parallel`は戻った後のslotの数が`--parallel`を超えたか）。
 - **戻す**（`return_waiting_runs`）: `drive`のループの毎回、引き継ぎの判定と`fill_slots`より前に（claimを止めていても、drain中も）、戻り待ちのrunを終わった順に、`used_slots()`が`--parallel`未満のあいだslotへ戻し、`run_slot_regained`（`slot_wait_secs`、`over_parallel`）を記録する。戻ったrunは今のphaseのとおり進む（`worker_question`なら答えを次のturnの依頼として届ける）。
-
 
 ## 差し戻しと解消依頼の段（`Revise` / `Resume`）
 
@@ -100,10 +98,3 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 `tests/it/runtime_headless_reopen.rs` は wrapper の開き直し、`runtime_waiting` と `runtime_waiting_stages` は supervisor の配線（slot の外での待ち、引き継ぎと adopt をまたぐ待ち、wrapper の心拍）を代表の case で確かめる。
 対話だけの画面と終了待ちの test は撤去した。
 待ちの上限・控え・組み立て直しと slot への戻りの判断、および過去を含む待ちの記録と集計は `domain::waiting` と stats の unit test が確かめる。
-
-## taskのholdの待ち（予定・未実装）
-
-holdの開いたtaskのrunは、走っていた工程が終わると、次の工程を始めずにslotの外の待ち（工程`held`）に入る。
-待ちに入る前にwrapperの終了を確かめ、人の答えの待ちと同じくworkerの枠を放すが、`--max-waiting`と`waiting.count`には数えず（processを持たない）、答えが来ても次のturnに届けない。
-holdの待ちはstall・idleの検知と段の計時の対象にせず、解除で止めていた工程から戻る。
-決定は[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)、詳細は[taskのhold](task-hold.md)の「状態ごとの効果」と「安全な待ちと解除の順序」が持つ。

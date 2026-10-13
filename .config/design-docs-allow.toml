@@ -160,7 +160,6 @@ tasks = 1
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/goal-review.md"
-size = 31482
 line = 3988
 tasks = 18
 
@@ -359,10 +358,6 @@ line = 8523
 path = "docs/design/supervisor-lifecycle/supervise.md"
 size = 42997
 line = 5419
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/task-replanning.md"
-tasks = 3
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/throughput-review.md"

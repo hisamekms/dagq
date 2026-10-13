@@ -6,7 +6,6 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-hold
   - design-supervisor-lifecycle
   - adr-0054
   - adr-0047
@@ -24,8 +23,3 @@ related:
 
 同じtransactionで、そのrunのcloseされていない`stalled`のaskを閉じ、結末の無い受領の無いidleの検知に`stall_resolved`（`outcome: run_ended`）を1回ずつ記録する（[receiptの無いidleの検知](idle-without-receipt.md)の「閉じる」、task 379）。他のrun、そのlease・process、`run_processes`、worktree、branch、workspace、run directoryは触らない。Taskは`in_progress`のまま残る。`recover`はTaskを`ready`に戻さない: 復旧と再実行は別の判断であり、`failed`で止まったrunと同じく、supervisorの復旧jobが`interrupted`のrunの次の一手（retry / retry_inherit / resume / waitか、inboxの`decide`のask）を決める（[Triage (supervisor)](triage.md#triage-supervisor)）。supervisorは、leaseが無くprocessの止まったrunをこの手順で自分でrecoverする（`run_recovered`に`by: "supervisor"`）。人が`recover`を打つのは、supervisorが居ないとき（または死んだsupervisorのstaleなleaseが残っているとき）だけ。再試行を人が決めるなら`ready ID`（編集するなら`draft ID`）で行い、動いているsupervisor（または次のsupervisor）が新しいTaskRunと新しいworktreeを作る。
 runの独自のcommitを次のrunに引き継ぐ再試行は`ready ID --inherit`で行う（[Triage](triage.md#人の手での引き継ぎ)）。
-
-## taskのhold（予定・未実装）
-
-`recover`の拒否と手順はholdで変わらず、holdを外さない。
-holdの開いたtaskのrunを`recover`で`interrupted`にしても、supervisorは復旧jobを起動せず、解除の後に続け方を決める（[taskのhold](task-hold.md)の「解除の分岐」）。

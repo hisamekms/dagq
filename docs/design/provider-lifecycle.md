@@ -6,7 +6,6 @@ status: current
 created: 2026-09-21
 scope: provider
 related:
-  - design-supervisor-lifecycle-task-hold
   - adr-t1857-1
   - adr-t1486-1
   - design-execution-tokens
@@ -233,7 +232,6 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - Claudeのsettingsの`permissions.deny`は名前やパターンでsignalを送るコマンドを拒む（`SIGNAL_BY_NAME_DENIED`）。
   拒めるのはコマンドの先頭だけなので、pidで止める規則をpromptでも伝える。
 - `subagent_review`を要るtaskをCodexで動かしたときは、要るevidenceから外し、receiptの`not_applicable`を理由つきで受ける（`domain::required_of`）。
-- 予定: holdの解除でproviderを変えると、成果を引き継ぐ新しいrunにする（[taskのhold](supervisor-lifecycle/task-hold.md)）。
 
 ### Codexの非対話のworker
 

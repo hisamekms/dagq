@@ -1,10 +1,9 @@
 ---
-id: design-supervisor-lifecycle-task-hold
-type: design
+id: plan-task-hold
+type: plan
 title: taskのhold（保留）と解除（未実装）
-status: draft
+status: active
 created: 2026-10-07
-scope: runtime
 related:
   - adr-t1879-1
   - adr-t1521-2
@@ -13,7 +12,7 @@ related:
   - adr-t1662-1
   - adr-t1662-2
   - design-supervisor-lifecycle
-  - design-supervisor-lifecycle-task-replanning
+  - plan-task-replanning
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-queue-hold
   - design-supervisor-lifecycle-waiting
@@ -25,7 +24,7 @@ related:
 # taskのhold（保留）と解除（未実装）
 
 **全節が予定の契約で、まだ実装していない。**
-決定は[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)が持ち、この文書は実装の正本になる。
+決定は[ADR-t1879-1](../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)が持ち、この文書は実装の正本になる。
 今の挙動は関係する各文書の今の節のとおりで、この文書を足しただけではどのtaskも待たない。
 実装したら、ここに書いたflag・eventの欄・既定値の意味は定義のそばのdoc commentへ移し、この文書には流れ・境界・入口だけを残す。
 
@@ -40,15 +39,15 @@ workerのrunは全て非対話（turnごとに別のprocess）で、この文書
 - runを名指したholdは、そのrunのtaskのholdとして記録し、名指したrunのIDは記録の材料に残すだけにする。
 - draft・cancel・`recover`・`run send`・`set-priority`・`edit`の意味と拒否は変えない。
   holdの印はこれらの操作で外れず、taskが終端（`completed`・`canceled`）になると効きを失う（解除とは数えない）。
-- 走っている工程は止めない（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定4、非preemption）。
+- 走っている工程は止めない（[ADR-0049](../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定4、非preemption）。
 - queue全体・provider・areaの範囲のholdは作らない。
-  queue全体の控えは[claimを控える](claim-hold.md)と[認証と利用上限のaskの待ち](queue-hold.md)が持ち、taskのholdはそれと独立に重なる。
+  queue全体の控えは[claimを控える](../design/supervisor-lifecycle/claim-hold.md)と[認証と利用上限のaskの待ち](../design/supervisor-lifecycle/queue-hold.md)が持ち、taskのholdはそれと独立に重なる。
 
 ## 印と確定
 
 - 状態はqueue.dbの新しい表（互換のmigrationで足す）に、taskごとに高々1つの開いたholdとして持つ。
   持つのは理由・期限・かけたactor・かけた時刻・名指したrun・安全な待ちに入った時刻・解除の時刻と解除の選択。
-- holdをかける操作は、表の行と`task_held`のeventを1つのtransaction（`BEGIN IMMEDIATE`）で書く（[ADR-t1662-2](../../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定3）。
+- holdをかける操作は、表の行と`task_held`のeventを1つのtransaction（`BEGIN IMMEDIATE`）で書く（[ADR-t1662-2](../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)決定3）。
   同じtransactionでtaskとそのrunのstatus・走っている工程を読み、`settling`か`held`かを決める。
   同じtaskに開いたholdがあれば、理由を書き足さずに拒む（理由を変えたいときは解除してかけ直す）。
 - 終端のtaskへのholdは拒む。
@@ -61,7 +60,7 @@ workerのrunは全て非対話（turnごとに別のprocess）で、この文書
 | --- | --- | --- |
 | ready（runが無い） | claimの候補から外す | holdをかけた確定と同時 |
 | `in_progress`で、runのturn・validation・review・e2eが走っている | 走っている工程を終わりまで行かせ、その後の工程を始めない | 走っていた工程が終わり、次の工程を始めずに待ちへ移した確定 |
-| `in_progress`で、runが人の答えを待っている（[待ち](waiting.md)） | 答えが来ても次のturnに届けない。人の答えの待ちを終え（`--max-waiting`と`waiting.count`から外す）、holdの待ちに移す | wrapperの終了を確かめた確定 |
+| `in_progress`で、runが人の答えを待っている（[待ち](../design/supervisor-lifecycle/waiting.md)） | 答えが来ても次のturnに届けない。人の答えの待ちを終え（`--max-waiting`と`waiting.count`から外す）、holdの待ちに移す | wrapperの終了を確かめた確定 |
 | `in_progress`で、runが着地の順番を待っている（`awaiting_integration`） | 着地を始めない | holdをかけた確定と同時 |
 | `in_progress`で、runが着地の途中（`integrating`） | 着地を止めない | 着地が`needs_session`か`awaiting_integration`に戻ったとき（着地したらtaskが終わりholdは効きを失う） |
 | `in_progress`で、runが止まっている（`failed`・`interrupted`） | 復旧jobを起動しない | 復旧jobが走っていなければ確定と同時、走っていればその終わり |
@@ -74,7 +73,7 @@ workerのrunは全て非対話（turnごとに別のprocess）で、この文書
   終了を確かめるまでは`settling`のままで、確かめられなければ今の終了の時間切れの経路（pidで止める）に従う。
   待ちの間はrunのprocessが無く、書き手が居ない。
 - 待ちに入ったrunはworkerの枠（`used_slots()`）を放す。
-  [人の答えを待つrun](waiting.md)と同じくslotの外に置くが、`--max-waiting`と`waiting.count`には数えない（processを持たないので、上限の根拠のメモリを使わない）。
+  [人の答えを待つrun](../design/supervisor-lifecycle/waiting.md)と同じくslotの外に置くが、`--max-waiting`と`waiting.count`には数えない（processを持たないので、上限の根拠のメモリを使わない）。
 - 待ちの間もsessionとworktreeを残す。
   sessionはproviderの会話のIDで、解除で同じsessionから続けるときは今のresumeと同じく新しいwrapperで開き直す。
   worktreeは未commitの差分ごと残し、終わったrunの掃除（`sweep_ended_runs`）はholdの開いたtaskのrunに触れない。
@@ -86,7 +85,7 @@ workerのrunは全て非対話（turnごとに別のprocess）で、この文書
 
 ## 開始の直前の再検査
 
-- fill passが集めた候補（[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)の1つの列）は、holdの開いたtaskを列に入れない。
+- fill passが集めた候補（[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)の1つの列）は、holdの開いたtaskを列に入れない。
 - それに加えて、候補を集めた後にholdがかかることがあるので、`fill_slots`が列の先頭から開始の処理を呼ぶ箇所（claim・`needs_session`のresume・復旧jobの開始）で、開始の確定のtransactionの中でholdを確かめ直し、開いていれば始めずに列の次へ進む。
   claimの確定（`ready → in_progress`）、resumeの`resume_started`、復旧jobの`triage_started`は、それぞれのtransactionで開いたholdが無いことを条件にする。
 - 列の外で始まる進行（回答を次のturnとして届ける`deliver_answers`、reviewの後の差し戻しの送信、着地の開始`begin_integration`、人の答えを待つrunのslotへの戻り、待ちの最中に失ったsessionの開き直し`reopen::reopen_lost_session`）も、始める確定の中でholdを確かめる。
@@ -150,7 +149,7 @@ holdは2段で進む: holdを確定した後、走っている工程が終わる
 
 ## 再計画の保留との共通の柵
 
-- turnの境界で次の工程を止める柵は、[taskの再計画](task-replanning.md)の安全な保留（[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定1）と1つにする。
+- turnの境界で次の工程を止める柵は、[taskの再計画](task-replanning.md)の安全な保留（[ADR-t1521-2](../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定1）と1つにする。
   柵は「次の工程を始めてよいか」を1つの判定で返し、保留の理由（再計画・hold）を並べて持つ。
 - 先に実装された側の柵を使い、後の側はそこに理由を足す。
   holdは再計画のgenerationとsnapshotを使わず、計画を変えないので、plannerを起動しない。
@@ -173,7 +172,7 @@ taskのevent（runを持てば`run_id`も付ける）。
 
 - `task_held`: holdを確定した。
   payloadは`reason`・`until`・`requested`（名指したものがtaskかrunか）・そのときのrunのIDとstatus・`state`（`settling`か`held`）。
-- `run_phase_changed`（工程`held`、`blocker: human`、`holds: none`）: runが安全な待ちに入った（[計測](../measurement.md)）。
+- `run_phase_changed`（工程`held`、`blocker: human`、`holds: none`）: runが安全な待ちに入った（[計測](../design/measurement.md)）。
   runの無いreadyのtaskは`task_held`の`state: held`が同じ時刻を表す。
 - `task_hold_settled`: 計測の段1（`run_phase_changed`）より前に実装するときだけ、runが安全な待ちに入った時刻を表す（下の「計測とtimeline」）。
   段1の後は工程`held`の`run_phase_changed`に置き換える。
@@ -197,7 +196,7 @@ taskのevent（runを持てば`run_id`も付ける）。
 
 - `hold`と`release`はuserとinboxだけ（予定のcapability `task.hold`）。
   planner・worker・job・observer・supervisor・wrapperは`authorization_denied`で拒む。
-- 実装の変更は同じ変更で[Authorization](../authorization.md)の表、[Security](../security.md)の「actor × capability」、pluginの権限の表を直す（[文書の規則](../../development/documents.md)の「権限の表を写す文書」）。
+- 実装の変更は同じ変更で[Authorization](../design/authorization.md)の表、[Security](../design/security.md)の「actor × capability」、pluginの権限の表を直す（[文書の規則](../development/documents.md)の「権限の表を写す文書」）。
 
 ## 計測とtimeline
 
@@ -206,8 +205,8 @@ taskのevent（runを持てば`run_id`も付ける）。
 - 計測の段1（`run_phase_changed`）より前に実装するなら、待ちに入った時刻は表と`task_hold_settled`のeventに書き、段1で工程`held`に移す。
 - 分析から除くのは、待ちに入った時刻から解除（`task_released`）までの区間（工程`held`、`blocker: human`、`holds: none`）。
   解除の後は、再開・claimの工程に移る。
-- readyのtask（claimの前）のholdは、`task_held`から`task_released`までをtaskの区間に重ねて読む（[計測](../measurement.md)の「claimの前」）。
-- [timeline](timeline.md)は、待ちに入ってから解除までの空白に理由`held`を付ける。
+- readyのtask（claimの前）のholdは、`task_held`から`task_released`までをtaskの区間に重ねて読む（[計測](../design/measurement.md)の「claimの前」）。
+- timelineは、待ちに入ってから解除までの空白に理由`held`を付ける。
   `no_supervisor`の次、`waiting_ask`より前に判定する。
 
 ## 実装の入口（予定）

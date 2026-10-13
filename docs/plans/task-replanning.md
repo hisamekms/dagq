@@ -1,12 +1,11 @@
 ---
-id: design-supervisor-lifecycle-task-replanning
-type: design
+id: plan-task-replanning
+type: plan
 title: 長期化した非対話taskの診断・保留・成果保存・置換（一部実装）
-status: draft
+status: active
 created: 2026-10-05
-scope: runtime
 related:
-  - design-supervisor-lifecycle-task-hold
+  - plan-task-hold
   - adr-t1521-1
   - adr-t1521-2
   - adr-t1487-1
@@ -19,7 +18,7 @@ related:
 # 長期化した非対話taskの再計画（一部実装）
 
 **下の「実装の状態」に挙げたもののほかは予定の契約であり未実装。**
-[ADR-t1521-1](../../adr/2026-10-05-t1521-1-diagnose-before-replanning-and-preserve-acceptance.md)と[ADR-t1521-2](../../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)を実装する際の正本。
+[ADR-t1521-1](../adr/2026-10-05-t1521-1-diagnose-before-replanning-and-preserve-acceptance.md)と[ADR-t1521-2](../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)を実装する際の正本。
 現在のrevise・resume・requestは関連文書が持つ。
 この文書を追加しても#1405のrunを停止・編集しない。
 wrapperはtask 1440が統一するbackgroundの経路を前提にし、cmux workspaceのcloseで保留や復元を代用しない。
@@ -86,7 +85,7 @@ Claude/Codexで同じ状態機械を使う。
 
 遅延receiptは受け取ったbytesと時刻・旧generation・拒否理由を診断材料として保存する。pauseの柵より前に受理しても、その後のvalidation/review/landingが柵を再検査する。柵より後のreceiptやworker終了はcompletedへの遷移を起こさない。applied後の旧workerの終了もreplacedをfailed/completedに変えない。書き手不在の後にHEADや保存対象が変わったらsnapshotは無効で、封鎖したまま原因を調べる。
 
-この柵は保留の理由を複数持てるようにし、[taskのhold](task-hold.md)（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)決定7）もここに理由を1つ足す。
+この柵は保留の理由を複数持てるようにし、[taskのhold](task-hold.md)（[ADR-t1879-1](../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)決定7）もここに理由を1つ足す。
 holdが共有するのは、次の工程（turn・回答の配送・revise・resume・着地など）を始める前の「次の工程を始めてよいか」の判定だけで、上の2のturnの上限や緊急停止でのprocessの停止、3のjobの停止、receiptの受理の柵は再計画だけのもので、holdは引き継がない（holdは走っている工程を止めない）。
 
 ## snapshotと保存の順
@@ -129,7 +128,7 @@ snapshotの完全性を再確認した後、BEGIN IMMEDIATEの中で次を全部
 
 ADR-t1521-2決定5は、ADR-0047決定43のgoal reviewの起動・achieved適用と、決定8の`goal close --verdict achieved`の拒否条件を改める。所属taskの`completed` / `canceled`に加えて、`replaced`の置換元は**置換先を再帰的に辿った全ての葉が`completed`か`canceled`になった場合だけ**終了条件上の解決済みとして扱う。未終端の葉、再計画で保留中の子が残れば起動もachievedでのcloseも待つ。置換先が空・欠落・循環している記録は解決済みとせず、復旧へ渡す。置換元のstatusは`replaced`のままで、`completed`へ変えず、goal reviewの「completedが1件以上」の件数に加えない。実際の子など所属taskのcompletedだけを数える。cancelされた子も含む終了条件の充足はgoal acceptanceの達成証明ではない。後続のclaimは上の契約どおり必要な子全てのcompletedを要求し、この終了条件を依存充足には使わない。
 
-goal reviewの入力には元条件の対応表、置換の系統とsnapshot参照、子の着地commit・receipt・検証/review/e2eの根拠、cancelや権限ある削除/破棄の理由を載せる。元runの未着地snapshotを達成証拠にせず、元goalのacceptanceを子の成果で照合する。足りなければ通常のgaps/askへ進む。既存のdraft・未完task・open ask・follow-up所属判断・acceptance版などの起動/close条件は維持する（[Goal review](goal-review.md)）。
+goal reviewの入力には元条件の対応表、置換の系統とsnapshot参照、子の着地commit・receipt・検証/review/e2eの根拠、cancelや権限ある削除/破棄の理由を載せる。元runの未着地snapshotを達成証拠にせず、元goalのacceptanceを子の成果で照合する。足りなければ通常のgaps/askへ進む。既存のdraft・未完task・open ask・follow-up所属判断・acceptance版などの起動/close条件は維持する（[Goal review](../design/supervisor-lifecycle/goal-review.md)）。
 
 fingerprintには既存の入力に加えて、置換元と再置換先のID・status・version、置換relation/元条件対応のversionを含める。goal reviewのachieved、`approve_goal`のachieved answer、人/inboxによる`goal close --verdict achieved`は、同じtransaction内で置換の系統・全葉の終了・条件対応・所属と既存のclose条件を再検査する。reviewのverdictは起動時のfingerprintとも一致させ、起動後の再置換・子の復帰・条件変更なら適用せず取り直す。再起動でも同じ永続記録を読む。実装責務(a)(c)はこの共通判定、入力/fingerprintとclose経路の配線を含み、再置換が終わるまで待つこと、全子が終われば起動/closeできること、未達をcompletedにしないこと、cancelで達成を捏造しないこと、並行した置換で古いachievedを適用しないことをunit/integrationで検証する。
 

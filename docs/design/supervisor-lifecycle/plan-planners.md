@@ -6,7 +6,6 @@ status: current
 created: 2026-09-26
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-replanning
   - adr-t1704-1
   - adr-t1582-1
   - design-supervisor-lifecycle
@@ -150,10 +149,8 @@ Spikeの区分のtaskが`completed`になると、runtimeが起点のSpikeを持
 3. `status`のinbox向けの欄（仮: `requests`）に、plannerを待っている`open`の依頼を出す（`--no-claude`の間に待っている依頼を人に見せるため。ADR-t1394-1のConsequences）。今は`dagq requests`で読む。
 4. 開いているruntimeのplannerへの続きの依頼のCLI（`planner request`）は実装した（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)、上の[続きの依頼と非対話のplannerのCLI](#続きの依頼と非対話のplannerのcli)）。宛先は生きている非対話のplannerだけで、対話のplannerには拒む。
 
-## taskの再計画（一部実装）
+## taskの再計画の依頼
 
 長期化した未達runの置換依頼も既存の永続requestとruntime plannerを使う。
 人の`replan request`は再計画の操作に結んだ依頼（`plan_requests.replan_operation_id`）を記録し、立てる対象（3）はその操作が完全なsnapshotを持ってplannerの段に入るまでその依頼を外す（`plan_requests.rs`の`TARGETS`）。
-予定: snapshotと診断をpromptに載せ、同じgoalのSpike再計画と直列化する。
-proposedは適用済みを意味せず、適用・継続・撤回の結末をoperationで追う。
-詳細は[taskの再計画](task-replanning.md)が持つ。
+残りの予定は[taskの再計画](../../plans/task-replanning.md)が持つ。

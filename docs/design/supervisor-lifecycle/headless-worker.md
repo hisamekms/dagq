@@ -6,7 +6,6 @@ status: current
 created: 2026-09-28
 scope: runtime
 related:
-  - design-supervisor-lifecycle-task-replanning
   - adr-t1594-1
   - adr-t1433-2
   - adr-t1433-1
@@ -318,11 +317,3 @@ runtimeのplannerは経路の選択なしに非対話で立ち、この文書の
 - **CLI**（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）: `planner screen`は画面を読まずに`turns/`の場所を返し、`planner send`は拒む（[Session send](session-send.md#人とinboxの画面の読み取りと送信)）。
   続きの依頼は次のturnの依頼として置く（[`plan` / `planners`](plan-planners.md#続きの依頼と非対話のplannerのcli)）。
 - **test**: 人の答え待ちでの終了と、answerで立つplannerの最初のturnは本物のwrapperで`planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer`と`a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines`。
-
-## taskの再計画（予定・未実装）
-
-再計画による保留は次turnの配送を封鎖し、background wrapperと書き手の終了を確認してsnapshotを保存する。
-遅れたreceiptと旧generationの終了は通常のvalidation/着地へ進めない。
-Claude/Codexは同じ停止・復元の契約を使う。
-詳細は[taskの再計画](task-replanning.md)が持つ。
-現行の挙動は上の各節のとおりで、この追加だけではrunを保留しない。

@@ -8,7 +8,6 @@ scope: runtime
 related:
   - adr-t1942-2
   - adr-t1728-2
-  - design-supervisor-lifecycle-task-replanning
   - adr-t1570-1
   - adr-t1566-1
   - design-supervisor-lifecycle-prompt
@@ -267,8 +266,8 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
   `send_back`の依頼を記録した後に`concern_decided`の前で止まったときは、引き継ぎが適用として補う（`backfill_sent_back_concern`）。
 - **prompt**: concernを機械的な修正でなく判断の要るfindingとし、推奨と確信度の付け方、人に残す基準（迷えば`low`）、runtimeが確かなものを適用することを書く（`application::prompt`のconcernの定数）。
 
-## taskの再計画（一部実装）
+## 再計画の操作が保護するrun
 
-原因別診断で継続か再計画を選ぶ経路を足す。
-review・e2e・integrateの途中の保留は終了境界とgenerationの柵を守り、古いpassや`approve_landing`で置換先を着地させない。
-詳細と、保護中のrunのreviseと着地の今の暫定の扱いは[taskの再計画](task-replanning.md#実装の状態)が持つ。
+保護中のrunには`revise`を送らず（`revise_withheld`）、verdictを`approve_landing`のaskに回し、着地は操作の結末まで始めない。
+着地のslotではslotを持ったまま待ち、承認の列と`integrate --next`はそのrunを飛ばす。
+予定は[taskの再計画](../../plans/task-replanning.md)が持つ。

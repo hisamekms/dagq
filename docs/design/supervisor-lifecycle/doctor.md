@@ -45,7 +45,7 @@ doctorも、supervisorとqueue serviceもcmuxを呼ばない（[ADR-t1433-1](../
 - `queue_service`（既定の出力にも出す）: queue serviceの状態。`status`の`queue_service`と同じ（`state`・`socket`・`pid`・`build`・`api_version`・`min_api_version`・`build_matches`・`started_at`・`client_api_version`・`attention`。queueが読めなければ`attention`はnull）。queueのディレクトリのファイルとsocketだけを見るので、queueの状態に関わらず出す（[Queue service](../queue-service.md#statusとdoctor)）。
 - `replans`（既定の出力にも出す）: 開いているrunの再計画の操作と、それぞれの状態・理由・taskを保護しているか、保護している数、taskが`in_progress`でないのに開いたままの操作（`problems`）。
   [`status`](status.md#再計画の操作)の`replans`と同じで、読めるqueueのときだけ出す。
-  操作と保護の意味は[taskの再計画](task-replanning.md#実装の状態)。
+  操作と保護の意味は`domain::task_replan`のdoc commentが持つ。
 - `schema`: `migrate --check`と同じqueueのschemaの状態（`schema_version`、`binary_schema_version`、`floor`、`migrate`が適用する`pending`とその`compatible`、このバイナリがそのまま開けるかの`opens`）。既定の出力にも含める。`migrate`が要るqueueでも、floorがこのバイナリを拒むqueueでも報告する（ADR-0045の決定5）。前者のrunとsupervisorはread-onlyのコピーを`migrate`した上で読む。後者は`supervisors`と`runs`を省き、拒む理由を`error`に書く。どちらでもrepositoryの束縛は先に検査する（`SqliteQueue::inspect_read_only`がschemaの状態と、読めるqueueか、floorが拒むときは束縛だけを読む接続と拒む理由を、1つの接続から返す）。
 
 cmux workspaceの存在は確認しない（cmuxなしで動く）。IDを見てユーザーが`cmux workspace list`で確認する。
