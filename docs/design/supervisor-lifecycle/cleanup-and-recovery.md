@@ -8,7 +8,6 @@ scope: runtime
 related:
   - design-supervisor-lifecycle
   - adr-0054
-  - design-manual-smoke
   - adr-t1228-1
   - adr-t1433-3
 ---

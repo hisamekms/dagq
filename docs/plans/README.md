@@ -46,6 +46,7 @@ tags:
 - [task の cancel の理由の分類と、ラベルの定義案](cancel-reasons.md)（goal 64、task 952）
 - [スパイク：Claude（claude -p）と Codex（codex exec）の非対話の worker の測定](headless-worker-spike.md)（goal 57、task 812）
 - [本番の queue での Claude の非対話の worker と対話の worker の比較と、既定を切り替えるかの推奨](headless-worker-measurement.md)（goal 57、task 821）
+- [実ClaudeとCodexを含む経路の手動スモークの結果（2026-09-22〜10-05）](manual-smoke-results.md)（手順は[development/manual-smoke.md](../development/manual-smoke.md)）
 - [非対話の worker の ask と待ちをゼロベースの形へ移す時期を判断する計測の項目・基準値・条件の案](zero-based-headless-readiness.md)（goal 86、task 1369）
 - [非対話の worker の workspace のコスト（cmux の呼び出しの失敗・残った workspace・startup・待ちの間の workspace）の基準値と、background の wrapper に切り替えた後の評価のコマンドと戻す基準の案](headless-background-evaluation.md)（goal 89、task 1407）
 - [runtime の planner の対話の期間の基準値と、非対話に切り替えた後の評価のコマンドと、対話に戻す基準の案](headless-planner-evaluation.md)（goal 87、task 1401）

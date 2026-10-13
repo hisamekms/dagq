@@ -69,6 +69,7 @@ removed_design=$(cat <<'EOF'
 docs/design/broker.md | docs/adr/2026-10-08-t2113-1-remove-the-resource-broker.md | final
 docs/design/supervisor-lifecycle/task-hold.md | docs/plans/task-hold.md |
 docs/design/supervisor-lifecycle/task-replanning.md | docs/plans/task-replanning.md |
+docs/design/manual-smoke.md | docs/development/manual-smoke.md (the procedures) and docs/plans/manual-smoke-results.md (the dated results) |
 EOF
 )
 

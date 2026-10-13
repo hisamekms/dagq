@@ -29,7 +29,7 @@ depends_on:
 
 最初の到達点を、Claude Codeから登録したタスクをcmux workspaceとGit worktreeで実行し、成果をレビューしてmainへ取り込むドッグフーディングとする。まずdagq自身の小さな改善に使い、その後にCodex対応と配布を進める。
 
-2026-09-22時点でステップ1の実機検証、ステップ2のRust/SQLiteキュー、ステップ3の1件を実行するsupervisor、ステップ4のreceipt検証・workspace終了・`integrate`・`doctor`/`recover`、ステップ5〜7のrepositoryごとのqueue・並列実行・merge queue、ステップ8のClaude Code pluginを実装し、ステップ4の実機の異常系確認を[故障経路のスモーク](../design/manual-smoke.md#故障経路のスモーク)で終えた。利用可能なCLIは[README](../../README.md)に記載する。
+2026-09-22時点でステップ1の実機検証、ステップ2のRust/SQLiteキュー、ステップ3の1件を実行するsupervisor、ステップ4のreceipt検証・workspace終了・`integrate`・`doctor`/`recover`、ステップ5〜7のrepositoryごとのqueue・並列実行・merge queue、ステップ8のClaude Code pluginを実装し、ステップ4の実機の異常系確認を[故障経路のスモーク](../development/manual-smoke.md#故障経路のスモーク)で終えた。利用可能なCLIは[README](../../README.md)に記載する。
 
 同日、運用方針を次のように改めた。1 repositoryに1 queueをユーザーDIRに置く（ステップ5）。依存が解けたtaskは上限まで並列に実行する（ステップ6）。統合はruntimeのmerge queueが行い、最新mainへrebase・再検証のうえ1 task = 1 commitにsquashしてmainに直線の履歴を積む（ステップ7）。maintainer（常駐のClaude Code session。呼称は[ADR-0010](../adr/0010-maintainer-and-resident-supervisor.md)で統一した）が完了確認・レビュー・`integrate`の呼び出し・衝突時のセッションへの指示を行う。maintainerの操作は最初は`read-screen`起点でよく、CLIコマンド単位で切っておき、順次runtimeへ移す。ADRは各ステップの実装taskで追加する。
 
@@ -84,7 +84,7 @@ Rustプロジェクト、migration、Task/TaskRun、依存関係、イベント�
 
 ### 4. 成功判定・統合待ち・障害時の扱いを完成させる
 
-状態: 完了（2026-09-22）。receiptの検証、受理後のworkspace終了、receipt受領後の終了要求、`integrate`、`doctor`/`recover`、e2eのハッピーパスを実装した（[supervisor-lifecycle](../design/supervisor-lifecycle.md)）。当初の「手動mergeを確認する`integrate`」はステップ7で置き換えた。実機の異常系は[故障経路のスモーク](../design/manual-smoke.md#故障経路のスモーク)で、使い捨てrepositoryの`supervise --parallel 2`（cmux 0.64.25、Claude Code 2.1.278）に対してClaude異常終了、supervisor再起動（`doctor`→`recover`→`ready`）、検証コマンド失敗、cleanup失敗、並列中の1 runの異常とrecover、merge queueの衝突の`needs_session`からの`claude --resume`による解消を確認し、二重起動と成果の喪失がないことを記録した。そこで挙げた改善候補（非0終了時の`last_error`、active runのない常駐supervisorの可視化、信頼確認の自動化、resume中の`integrate`、失敗runのworkspaceの後始末）は後続タスクで扱う。
+状態: 完了（2026-09-22）。receiptの検証、受理後のworkspace終了、receipt受領後の終了要求、`integrate`、`doctor`/`recover`、e2eのハッピーパスを実装した（[supervisor-lifecycle](../design/supervisor-lifecycle.md)）。当初の「手動mergeを確認する`integrate`」はステップ7で置き換えた。実機の異常系は[故障経路のスモーク](../development/manual-smoke.md#故障経路のスモーク)で、使い捨てrepositoryの`supervise --parallel 2`（cmux 0.64.25、Claude Code 2.1.278）に対してClaude異常終了、supervisor再起動（`doctor`→`recover`→`ready`）、検証コマンド失敗、cleanup失敗、並列中の1 runの異常とrecover、merge queueの衝突の`needs_session`からの`claude --resume`による解消を確認し、二重起動と成果の喪失がないことを記録した。そこで挙げた改善候補（非0終了時の`last_error`、active runのない常駐supervisorの可視化、信頼確認の自動化、resume中の`integrate`、失敗runのworkspaceの後始末）は後続タスクで扱う。
 
 receiptにはrun ID、結果、commit SHA、実施したunit test/E2E/subagent reviewの結果と証跡を記録する。適用対象外の検証には理由を要求し、taskの受け入れ条件に照らして扱う。
 
@@ -133,7 +133,7 @@ receiptにはrun ID、結果、commit SHA、実施したunit test/E2E/subagent r
 
 ### 9. dagq自身でドッグフーディングする
 
-状態: 完了（2026-09-22）。固定バイナリ `18800cd` と常駐 `supervise --parallel 4` で、独立task（手順は[独立task 1件の完走](../design/manual-smoke.md#独立-task-1-件の完走)）、AGENTS.mdの運用置き換え、依存task（A・C並列、BはAの着地commitから）、agent killからの再試行を6 task・7 runで通し、6件を `integrate` で着地させた。DBの手修正なし。Claude Codeからの登録・実行・着地・復旧はmaintainer sessionがpluginと同じCLIで行い、ステップ8も完了とする。
+状態: 完了（2026-09-22）。固定バイナリ `18800cd` と常駐 `supervise --parallel 4` で、独立task（手順は[独立task 1件の完走](../development/manual-smoke.md#独立-task-1-件の完走)）、AGENTS.mdの運用置き換え、依存task（A・C並列、BはAの着地commitから）、agent killからの再試行を6 task・7 runで通し、6件を `integrate` で着地させた。DBの手修正なし。Claude Codeからの登録・実行・着地・復旧はmaintainer sessionがpluginと同じCLIで行い、ステップ8も完了とする。
 
 ローカルに固定したビルド済みバイナリを使い、実行中のruntimeを作業成果で置き換えない。maintainerは常駐のClaude Code sessionで、`read-screen`で完了を確認し、差分をレビューして`integrate`を呼び、`needs_session`のrunにはresumeで指示する。
 

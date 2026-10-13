@@ -112,4 +112,4 @@ testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通�
 
 ## 手動スモーク
 
-実Claudeを含む経路は自動化せず、手動スモーク（[manual-smoke](../design/manual-smoke.md)）で確認する。
+実Claudeを含む経路は自動化せず、手動スモーク（[manual-smoke](manual-smoke.md)。過去の結果は[manual-smoke-results](../plans/manual-smoke-results.md)）で確認する。

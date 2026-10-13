@@ -39,12 +39,6 @@ path = "docs/design/linux-ci.md"
 tasks = 6
 
 [[doc]]
-path = "docs/design/manual-smoke.md"
-size = 109427
-line = 1373
-tasks = 69
-
-[[doc]]
 path = "docs/design/overview.md"
 size = 30324
 line = 6880

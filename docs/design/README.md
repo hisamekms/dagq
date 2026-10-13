@@ -33,7 +33,6 @@ tags:
 - [Executionのトークン数](execution-tokens.md)（非対話のturnとheadlessのjobの1回ごとのトークン数の記録の形・providerごとの数える元・今の穴）
 - [Provider executables](provider-executables.md)（providerを起動するpathをsymlinkのまま持つこと、pathが無いときの名前での解決し直し）
 - [Plugin integration](plugin-integration.md)
-- [Manual smoke](manual-smoke.md)
 - [Stress CI](stress-ci.md)（mainで直近に足した・変えたtestをGitHub Actionsの定時実行で繰り返し、落ちたらflaky-testのissueで知らせる）
 - [CI failure issues](ci-failure-issues.md)（mainへのpushのCI（ci.yml）が落ちたらci-failureのissueを開くか追記し、次に通ったら閉じる。workflow全体の結論で決め、continue-on-errorのjobの失敗だけでは開かない）
 - [Slow tests](slow-tests.md)（nextestの出力から遅いtestの上位と1秒・5秒・30秒を超えた本数と合計とtest binaryごとの本数と合計を出すscripts/slow-tests.sh。CIのjob summaryにも出す。差分で足した・変えたtests/itのtestの時間の関門scripts/check-it-test-time.shと許可の一覧.config/it-slow-allow.toml）

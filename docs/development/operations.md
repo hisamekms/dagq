@@ -32,7 +32,7 @@ AGENTS.mdの「本番 queue と開発環境の境界」と「開始時の短い�
 
 ## 使い捨てのqueue
 
-- 使い捨てのrepositoryのディレクトリ名（人かinboxが手で作るものは`dagq-smoke`、e2eのfixtureは`dagq-e2e`）と、確かめる手順は[manual-smoke](../design/manual-smoke.md)が持つ。workerが使い捨てのqueueを操作できない理由は次の節。
+- 使い捨てのrepositoryのディレクトリ名（人かinboxが手で作るものは`dagq-smoke`、e2eのfixtureは`dagq-e2e`）と、確かめる手順は[manual-smoke](manual-smoke.md)が持つ。workerが使い捨てのqueueを操作できない理由は次の節。
 
 ## workerがhostと実queueでできないこと
 
