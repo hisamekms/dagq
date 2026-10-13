@@ -18,25 +18,13 @@
 # `sh scripts/check-design-docs.sh --print-allow` on the tree of 2026-10-07.
 
 [[doc]]
-path = "docs/design/README.md"
-tasks = 2
-
-[[doc]]
 path = "docs/design/authorization.md"
 size = 49549
 line = 2281
 
 [[doc]]
-path = "docs/design/ci-failure-issues.md"
-tasks = 3
-
-[[doc]]
 path = "docs/design/follow-up-membership.md"
 tasks = 1
-
-[[doc]]
-path = "docs/design/linux-ci.md"
-tasks = 6
 
 [[doc]]
 path = "docs/design/overview.md"
@@ -53,15 +41,6 @@ line = 4652
 path = "docs/design/queue-service.md"
 size = 35535
 line = 1502
-
-[[doc]]
-path = "docs/design/slow-tests.md"
-line = 1123
-tasks = 3
-
-[[doc]]
-path = "docs/design/stress-ci.md"
-tasks = 2
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle.md"
@@ -329,7 +308,3 @@ tasks = 14
 path = "docs/design/supervisor-lifecycle/worker-model.md"
 line = 1345
 tasks = 5
-
-[[doc]]
-path = "docs/design/test-fixtures.md"
-tasks = 4

@@ -87,6 +87,11 @@ docs/design/supervisor-lifecycle/worker-question-answer.md | docs/design/supervi
 docs/design/supervisor-lifecycle/silent-wrapper.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md |
 docs/design/supervisor-lifecycle/first-commit.md | the doc comment of watch_first_commit in src/application/supervise/session.rs |
 docs/design/supervisor-lifecycle/worktree-read-only-git.md | the doc comments of GitRepository in src/infrastructure/adapters.rs |
+docs/design/slow-tests.md | docs/development/testing.md and the headers of scripts/slow-tests.sh and scripts/check-it-test-time.sh |
+docs/design/stress-ci.md | docs/development/testing.md and the headers of .github/workflows/stress.yml and scripts/stress-recent-tests.sh |
+docs/design/linux-ci.md | docs/development/testing.md and the comments of .github/workflows/ci.yml |
+docs/design/ci-failure-issues.md | docs/development/testing.md and the header of .github/workflows/ci-failure.yml |
+docs/design/test-fixtures.md | docs/development/testing.md and the doc comment of tests/common/template.rs |
 EOF
 )
 

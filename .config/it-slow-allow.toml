@@ -2,8 +2,8 @@
 # `sh scripts/check-it-test-time.sh` fails when a test of dagq::it that the
 # diff added or changed took longer than the threshold in the nextest output
 # and has no item here. The threshold, the format and the naming rule are in
-# docs/design/slow-tests.md, section "itのtestの時間の関門", and the rule on
-# which reasons may put a test here in docs/development/testing.md, section
+# the header of scripts/check-it-test-time.sh, and the rule on which reasons
+# may put a test here in docs/development/testing.md, section
 # "判断と境界のtest". The script reads this file (CI and the worker run it).
 #
 # Each item is one [[test]] with all three keys:

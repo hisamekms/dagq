@@ -16,7 +16,7 @@ jq -r '.periods[-2] as $p | ["landings","slot_usage","landing_utilization","load
 
 ## `dagq::it` の本数と時間（goal 118）
 
-前日（JST）の本番の関門の log の test の本数と時間の合計を、前の 7 日の各日と並べる。log は `<runs_dir>/*/integrate-*-verify-*.log` のうち `Summary` を含むもの（test 段の log）で、日は log の最終更新の JST の日付。`runs_dir` は固定バイナリの `~/.local/bin/dagq locate` の JSON の値から取る（`dagq --resolve` は plugin の wrapper の機能で、固定バイナリには無い）。`runs_dir` が無い（client mode の session）と読めないので、inbox か人が流す。repository の root で打つ（`scripts/slow-tests.sh` の表の読み方は [Slow tests](../../../../docs/design/slow-tests.md)）。1 分ほどかかる。zsh では `$logs` が語に分かれないので、`sh` に渡して流す。
+前日（JST）の本番の関門の log の test の本数と時間の合計を、前の 7 日の各日と並べる。log は `<runs_dir>/*/integrate-*-verify-*.log` のうち `Summary` を含むもの（test 段の log）で、日は log の最終更新の JST の日付。`runs_dir` は固定バイナリの `~/.local/bin/dagq locate` の JSON の値から取る（`dagq --resolve` は plugin の wrapper の機能で、固定バイナリには無い）。`runs_dir` が無い（client mode の session）と読めないので、inbox か人が流す。repository の root で打つ（`scripts/slow-tests.sh` の表の読み方はその冒頭のコメント）。1 分ほどかかる。zsh では `$logs` が語に分かれないので、`sh` に渡して流す。
 
 ```sh
 sh -s <<'SH'

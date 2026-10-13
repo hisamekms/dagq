@@ -31,6 +31,22 @@
 # line), 2 on a usage or setup error.
 set -eu
 
+# How the tests are chosen and how a failure is read:
+# A line counts when the diff adds or changes it between a #[test] and the
+# fn's closing brace (a hunk that only removes lines counts the lines around
+# it); braces are counted with strings, char literals and comments left out.
+# A change to a helper (tests/common, tests/it/runtime_support) chooses no
+# test. The chosen names are resolved with cargo nextest list after the
+# build: a name that does not resolve is a warning, and with none resolved
+# nothing runs (exit 0).
+# A test failed when any line of the logs has a failed status of the Rust
+# profile's explicit set (src/domain/toolchain/rust.rs), the same set and
+# regular expression as the Linux job of .github/workflows/ci.yml; FLKY-FL (it
+# failed and passed on a retry) is listed, since it is what the scheduled
+# stress is for, and LEAK, SLOW and START are not.
+# GitHub Actions runs it once a day from .github/workflows/stress.yml. On the
+# host it raises the load: keep the count short where a dagq queue runs.
+
 base=${STRESS_BASE:-}
 since=${STRESS_SINCE:-}
 head=${STRESS_HEAD:-HEAD}

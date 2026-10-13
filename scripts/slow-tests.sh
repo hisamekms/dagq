@@ -29,6 +29,20 @@
 #
 # Exit status: 0 with the summary (also when no test was timed), 2 on a usage
 # error or an unreadable log.
+#
+# Output: a first line with how many logs had finished tests and how many of
+# them were kept, a line with the failed tests left out of the times (one per
+# test and kept log), then the tables: the range table (every timed test, and
+# those over 1, 5 and 30 seconds, with their count, total and share of the
+# whole total), the slowest tests, and, last, the table per test binary
+# ("### test binary ごと", longest total first). A total is the sum of the
+# tests' times, not the wall time: the integrate test stage takes roughly the
+# total divided by NEXTEST_TEST_THREADS. A test's median over several logs is
+# taken over the logs it appears in, so a test renamed or added in the period
+# shows as another test; to compare two periods, pass each period's logs the
+# same way and note the host's load average. The throughput review's daily
+# report reads the dagq::it and dagq rows of the binary table
+# (.claude/skills/throughput-review/reference/daily.md).
 set -eu
 
 top=20

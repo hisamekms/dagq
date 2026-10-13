@@ -3,7 +3,22 @@ name: Stress recent tests
 # Repeats the #[test] functions main added or changed since the last
 # successful run (or in the last 24 hours) many times under load, and opens
 # or updates a flaky-test issue per test that fails (ADR-t920-1 decision 2).
-# How it works: docs/design/stress-ci.md.
+# It finds the rare flaky tests that the worker's short local stress
+# (docs/development/local-checks.md, section "stress") lets through, after
+# they land, with neither the host's load nor the queue's slots; a planner
+# registers the fix from the issue (docs/development/testing.md, section
+# "CI"). scripts/stress-recent-tests.sh chooses and repeats the tests; its
+# header has how.
+#
+# The range starts at, in this order: the base input; the commit of this
+# workflow's last successful run on main, when main still has it; the since
+# window (24 hours ago on the schedule). A failed run does not move that start,
+# so a failed test stays in the range, and its issue gets a comment, every day
+# until it is fixed. When the stress step fails, the logs go to the
+# stress-logs artifact, and each line of failed-tests.txt opens the issue
+# "flaky test: <binary> <test>" or comments on the open one, with the run, the
+# commit and a command to reproduce. A failure with no test named (the build,
+# the setup) opens no issue. The workflow writes nothing but issues.
 on:
   schedule:
     # Once a day, 18:00 UTC (03:00 JST).

@@ -1,7 +1,7 @@
 ---
 id: development-testing
 type: development
-title: このrepositoryのtestの制約（coverageと着地の検証・test binary・置き場所・書き方・macOSに固有のtest・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
+title: このrepositoryのtestの制約（coverageと着地の検証・test binary・置き場所・書き方・macOSに固有のtest・CI・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
 status: current
 created: 2026-10-03
 owners:
@@ -14,11 +14,11 @@ related:
   - adr-t1582-1
   - adr-t1410-1
   - adr-t1707-1
-  - design-slow-tests
   - development-local-checks
   - development-task-registration
   - development-migrations
-  - design-linux-ci
+  - adr-t920-1
+  - adr-t1920-1
   - plan-local-checks-history
 ---
 
@@ -52,11 +52,21 @@ testは`src/lib.rs`のunit testと`tests/it`・`tests/e2e.rs`・`tests/plugin.rs
 
 ## macOSに固有のtest
 
-testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通さない）の両方で通す（goal 83、[Linux build and test job in CI](../design/linux-ci.md)）。
+testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通さない）の両方で通す（下の「CI」）。
 
 - まず移植できる形に書く: `ps`・`lsof`・`sed`の出力と引数の違い、`/private/tmp`などのpath、inodeの再利用、時刻の精度（Linuxの`ps`のCPU時間は秒単位、Gitは秒単位で比べることがある）に頼らない。stat dataを変えるならmtimeを秒単位で動かす（`File::set_modified`）。
-- macOSにしか無い機能（launchd・実物のcmuxなど）を使うtestだけを`#[cfg(target_os = "macos")]`で分け、直前のコメントに理由（何がmacOSにしか無いか）を書き、[Linux build and test job in CI](../design/linux-ci.md)の「macOSに固有として分けたtest」に足す。Linuxで消すのはtestだけで、runtimeの機能は消さない（Linuxで使えない機能は分かるerrorにし、それを`#[cfg(not(target_os = "macos"))]`のtestで確かめる）。
-- worker（macOS）はLinuxのtestを流せないので、Linuxの結果は着地後のmainのCIの`linux`のjobのsummaryで読む。
+- macOSにしか無い機能（launchd・実物のcmuxなど）を使うtestだけを`#[cfg(target_os = "macos")]`で分け、直前のコメントに理由（何がmacOSにしか無いか）を書く。分けたtestの一覧は持たず、`#[cfg(target_os = "macos")]`の付いたtestとその直前のコメントが一覧になる。Linuxで消すのはtestだけで、runtimeの機能は消さない（Linuxで使えない機能は分かるerrorにし、それを`#[cfg(not(target_os = "macos"))]`のtestで確かめる）。
+- worker（macOS）はLinuxのtestを流せないので、Linuxの結果は着地後のmainのCIの`linux`のjobのsummaryで読む。Linuxで新しく落ちたtestは、summaryから読んで移植できる形に直すか、上のとおりmacOSに固有として分ける。
+
+## CI
+
+jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`ci-failure.yml`の冒頭とjob・stepのコメントが持ち、ここは開発の規則だけを持つ。
+
+- `ci.yml`はmainへのpushとpull requestで流れ、全部のtestを流してcoverageを見る最後の関門になる（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)）。docsだけの差分ではRustのjob（`checks`と`linux`）を飛ばし、docと`scripts/`の検査のjobは常に流す（[ADR-t2034-1](../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）。Rustのjobを飛ばした実行は緑と読まない。
+- mainへのpushの`ci.yml`がworkflow全体で落ちたら、`ci-failure.yml`がlabel `ci-failure`のissueを開くか追記し、次に通ったら閉じる。jobの`continue-on-error`の失敗だけでは開かない。
+- `stress.yml`は1日1回、mainで直近に足した・変えたtestを多い周回と高い並列度で繰り返し、落ちたtestごとにlabel `flaky-test`のissueを開くか追記する。workerの手元の[stress](local-checks.md)が止めきれない稀な不安定さを着地の後に見つけるためで、hostの負荷もqueueのslotも使わない（[ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md)決定2）。
+- issueから直すtaskを登録するのはplanner。ただし`dagq.toml`に`[ci_watch]`を書いたrepositoryでは、supervisorの見張りが同じmainの失敗を`ci_failure`のfindingにして修正taskを作るので、plannerとinboxは`ci-failure`のissueからtaskを登録しない（見張りが止まっている間も。[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定8、[CI watch](../design/supervisor-lifecycle/ci-watch.md)）。issueは人に届く知らせとして残る。
+- integration testのfixtureのtemplate（`tests/common/template.rs`）は`CARGO_TARGET_TMPDIR`（`target`の`tmp`）に作られる。CIで`target/`をcacheするjobは、cacheの復元の直後と保存の前にそのdirを消す（cacheの後始末がファイルだけを消して中身の無いtemplateを残し、testを落とすため）。jobを足すときも同じstepを置く。
 
 ## 判断と境界のtest
 
@@ -66,9 +76,10 @@ testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通�
 - `tests/it`はSQLite・Git・プロセス・supervisorの配線・復旧とadopt・cmuxの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
 - e2eは実バイナリ・実Git・実launchdのハッピーパスと境界だけにする（流し方は下の「e2e」）。
 - integration testを減らすときは、確かめていた中身をunit testか残すintegration testに対応づけ、行き先の無いまま消さない。
-- 時間の関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）: baseからの差分で足した・本文を変えた`tests/it`のtestの1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。閾値・許可の一覧の置き場所と書式・testの名前の求め方・scriptの引数は[Slow tests](../design/slow-tests.md)の「itのtestの時間の関門」が持つ。
+- 時間の関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）: baseからの差分で足した・本文を変えた`tests/it`のtestの1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。閾値・許可の一覧（`.config/it-slow-allow.toml`）の書式・testの名前の求め方・scriptの引数は`scripts/check-it-test-time.sh`の冒頭のコメントが持つ。
   - 超えたら、まずtestを直す（判断をunit testへ移す、caseごとにfixtureとsupervisorを起動し直さない）。直さずに許可の一覧に項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか。cmuxは挙げず、inboxへのcmuxの送り出しはsupervisorの配線として書く）を書ける、(b) 移し替えの予定があり、その行き先のtaskかgoalを書ける。判断のcaseを並べただけのtestは(a)に当たらない。項目には足したtaskのIDを書く。
-  - 項目のtestを直すか移すtaskは、同じ変更で自分の項目を外すか理由を直す。
+  - 項目のtestを直すか移すtaskは、同じ変更で自分の項目を外すか理由を直す。testを消すか名前を変えるtaskは、消えた名前の項目を同じ変更で外す（残すと、後で同じ名前のtestを足したときに関門を素通りする。scriptはHEADに無い項目を警告するだけで落とさない）。
+  - 閾値は本番の関門の`dagq::it`の1本の平均の数倍に置く。CIのrunnerと本番の関門は並列度が違い同じtestの秒が違うので、CIで落ちたtestが本番の関門のlogの秒では閾値の内なら、その秒を添えて直すか項目を足すかをplannerが決める。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「itのtestの時間の関門」）、runのreviewのtestの規則の検査、CIのpushとpull_request（mainへのpushで落ちればci-failureのissue）。`integrate`の検証には足さない。
   - helperやfixtureだけの変更は対象にならず（それを使うtestが遅くなっても捕まえない）、CIのrunnerと本番の関門では秒が違う。
 

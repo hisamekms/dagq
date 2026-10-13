@@ -6,8 +6,20 @@ name: CI failure issue
 # workflow, so a job with continue-on-error does not open the issue by itself
 # (the linux job has none since task 1238). A success run with a skipped job
 # (the Rust jobs skipped on a docs-only change, ADR-t2034-1) changes nothing,
-# like a cancelled one.
-# How it works: docs/design/ci-failure-issues.md.
+# like a cancelled one. A planner registers the fix from the issue, unless
+# dagq.toml has [ci_watch], whose findings do it (docs/development/testing.md,
+# section "CI"); the issue stays either way as the notice a person reads.
+#
+# Why workflow_run and not a job in ci.yml that needs every job: the
+# conclusion of workflow_run is the one GitHub gave the workflow, so it does
+# not hang on how needs.<job>.result shows a continue-on-error job, and a new
+# job in ci.yml needs no change here. The runs may complete in another order
+# than they started, so a newer push run on main that already concluded
+# success or failure decides instead of the run that started this one (see
+# the step). With the concurrency group's one pending run, a newer run's
+# report may be cancelled and an older one decides for it; the same failure
+# may then be commented on twice. This workflow takes effect from the default
+# branch only.
 on:
   workflow_run:
     # The name: of ci.yml.

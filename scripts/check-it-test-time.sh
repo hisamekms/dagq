@@ -3,9 +3,9 @@
 # integration test binary (dagq::it) that the diff from a base commit added or
 # changed, and that took longer than the threshold in the given cargo nextest
 # output, fails the check unless the allow list names it with a reason. The
-# threshold, the allow list's place and format, the naming rule and the CI
-# step are in docs/design/slow-tests.md, section "itのtestの時間の関門"; this
-# script only applies them.
+# threshold, the allow list's format and the naming rule are below, after
+# the exit status; the rule on which reasons may put a test on the list is
+# in docs/development/testing.md, section "判断と境界のtest".
 #
 # Usage: sh scripts/check-it-test-time.sh --base REV [--threshold SECS]
 #                                         [--allow FILE] [LOG...]
@@ -46,6 +46,28 @@
 # an unreadable log or allow list, a malformed allow list or a git error. A
 # target the log does not time, or an allow-list item absent from HEAD, is
 # only warned about.
+#
+# CI runs the gate in the macOS job of .github/workflows/ci.yml (step "IT
+# test time gate"), and a worker on the tests it changed (docs/development/
+# local-checks.md, section "itのtestの時間の関門").
+#
+# A removed line counts only when the lines on both sides of it lie in the
+# test, so removing a helper right after a test does not make the test a
+# target. A log line is read only when its binary is dagq::it.
+#
+# The threshold (default 5 seconds) is a few times the production gate's mean
+# time of one dagq::it test; a time equal to it is not over it.
+#
+# The allow list (default .config/it-slow-allow.toml) is TOML items of the
+# form
+#   [[test]]
+#   name = "<the full name>"
+#   reason = "<the boundary it keeps, or the move it waits for and its task or goal>"
+#   task = <the ID of the task that added the item>
+# with all three keys. An item missing a key, with a key it does not know or
+# one key twice, or two items of one name make the list unreadable (exit 2).
+# An item whose full name has no #[test] in tests/it at HEAD is warned about
+# by name, without changing the exit status.
 set -eu
 
 me=check-it-test-time

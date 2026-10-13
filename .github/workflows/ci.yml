@@ -2,7 +2,7 @@ name: CI
 
 # A push run on main that fails opens or updates the ci-failure issue, and a
 # later one that passes closes it (ci-failure.yml, which keys on this
-# workflow's name; docs/design/ci-failure-issues.md).
+# workflow's name; the rules in docs/development/testing.md, section "CI").
 on:
   push:
     branches: [main]
@@ -17,8 +17,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Whether the change is docs only (ADR-t2034-1, docs/design/linux-ci.md,
-  # section "docsだけの差分"): every path of git diff --name-only from the
+  # Whether the change is docs only (ADR-t2034-1): every path of git diff --name-only from the
   # base to this run's commit is under docs/ or a *.md at the root. The base
   # is the pull request's base or the commit before the push. Without a base
   # (none, all zeros, or not in the history: the first push of a new branch,
@@ -249,7 +248,7 @@ jobs:
           retention-days: 30
 
       # The slowest tests and the counts over 1, 5 and 30 seconds, in the job
-      # summary (scripts/slow-tests.sh, docs/design/slow-tests.md). It runs
+      # summary (scripts/slow-tests.sh; its header says how to read it). It runs
       # after a failed test step too, and its own failure never fails CI.
       - name: Slow tests
         if: ${{ !cancelled() }}
@@ -264,7 +263,7 @@ jobs:
       # The time gate of the tests in tests/it (ADR-t1707-1): a test the diff
       # from the base added or changed that took longer than the threshold
       # fails the job unless .config/it-slow-allow.toml names it
-      # (scripts/check-it-test-time.sh, docs/design/slow-tests.md). The base
+      # (scripts/check-it-test-time.sh, whose header has the format). The base
       # is the commit before the push or the pull request's base; a push
       # without one (the first push of a new branch) skips the gate. It reads
       # the same nextest output and runs after a failed test step too.
@@ -292,11 +291,11 @@ jobs:
         if: always()
         run: rm -rf target/tmp target/llvm-cov-target/tmp
 
-  # Linux (ubuntu): cargo build and the whole test suite (goal 83,
-  # docs/design/linux-ci.md). A Linux failure fails the workflow like a macOS
-  # one; the tests that only hold on macOS are split out with
-  # #[cfg(target_os = "macos")] and listed in that document, and the names of
-  # the failed tests go to the job summary. Coverage, fmt and clippy stay in
+  # Linux (ubuntu): cargo build and the whole test suite. A Linux failure
+  # fails the workflow like a macOS one; the tests that only hold on macOS are
+  # split out with #[cfg(target_os = "macos")] and a comment on why
+  # (docs/development/testing.md, section "macOSに固有のtest"), and the names
+  # of the failed tests go to the job summary. Coverage, fmt and clippy stay in
   # the macOS job above, the scripts' checks in the docs job.
   # Skipped on a docs-only change with the same if as the checks job.
   linux:

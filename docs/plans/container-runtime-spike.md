@@ -354,7 +354,7 @@ sh "$S/container-build.sh" run "$SPIKE/m" c2m4 2 | tee -a "$SPIKE/c.csv"
 
 build は `--all-targets`、unit test は `--lib --bins` で、組ごとに build の出力の named volume を作り直してから流す（cache なしの build）。
 test が落ちたら `$SPIKE/m/logs/<label>-test.log` から落ちた test の名前と失敗の文を記録する。
-落ちた test を合否から外さない（Linux の CI は失敗を通さず、macOS に固有の test は cfg で分ける。[Linux CI](../design/linux-ci.md)）。
+落ちた test を合否から外さない（Linux の CI は失敗を通さず、macOS に固有の test は cfg で分ける。`docs/design/linux-ci.md`）。
 どの組でも同じく落ちることは資源以外の原因の手がかりにはなるが、それだけで OS に固有とも準備の不足とも決めない。
 
 ### 合否の基準

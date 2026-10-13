@@ -15,12 +15,12 @@ related:
   - design-supervisor-lifecycle-run-environment
   - design-supervisor-lifecycle-finding-planners
   - design-supervisor-lifecycle-build-identifier
-  - design-ci-failure-issues
 ---
 
 # CI watch
 
-設定（[Run environment](run-environment.md)の`[ci_watch]`）を書いたrepositoryで、supervisorが着地先のbranchへのpushのCIの結果をhostの`gh`で定期的に読み、queueのeventに記録し、赤になったら`ci_failure`のfindingを記録してruntimeのfindingのplanner（[Finding planners](finding-planners.md)）に修正taskを作らせ、既に落ちているtestの一覧（以下「一覧」）を持つ。CIの結果をqueueに届ける経路で、GitHubのissue（[CI failure issues](../ci-failure-issues.md)）とは別に動く。
+設定（[Run environment](run-environment.md)の`[ci_watch]`）を書いたrepositoryで、supervisorが着地先のbranchへのpushのCIの結果をhostの`gh`で定期的に読み、queueのeventに記録し、赤になったら`ci_failure`のfindingを記録してruntimeのfindingのplanner（[Finding planners](finding-planners.md)）に修正taskを作らせ、既に落ちているtestの一覧（以下「一覧」）を持つ。
+CIの結果をqueueに届ける経路で、GitHubのissue（`.github/workflows/ci-failure.yml`）とは別に動く。
 
 ## いつ確かめるか
 
@@ -41,7 +41,8 @@ related:
    ただし見張りが最初に記録した実行より前に作られた実行は読まない。
    見張りの最初の確かめ（queueに`ci_checked`が無い）は最新の1件だけを処理し、過去を遡らない。
    supervisorが長く止まっていて、返った50件（`RUN_LIST_LIMIT`）の最も古いものより前に未処理の実行が残る（50件が返り、最も古いものが記録した実行のうち最後に作られたものより後に作られている）ときは、遡らずに返った分だけを処理し、最初の`ci_checked`に`gap: true`を書く（`range`の`from`はqueueに記録した最後の緑のまま）。
-3. **落ちたjobとstep**: 赤の実行ごとに`gh run view <id> --repo R --json jobs`の`conclusion`が`failure`・`timed_out`・`cancelled`・`startup_failure`のjobとそのstep（同じconclusionのstep）。読めなければwarnを出してjobなしで続ける（1つの実行で見張りが止まらない）（[CI failure issues](../ci-failure-issues.md)の本文と同じ読み方）。
+3. **落ちたjobとstep**: 赤の実行ごとに`gh run view <id> --repo R --json jobs`の`conclusion`が`failure`・`timed_out`・`cancelled`・`startup_failure`のjobとそのstep（同じconclusionのstep）。
+   読めなければwarnを出してjobなしで続ける（1つの実行で見張りが止まらない）（`ci-failure.yml`のissueの本文と同じ読み方）。
 4. **JUnit**: `junit_artifacts`があれば、成否の決まった実行ごとに`gh run download <id> --repo R --pattern <glob> --dir <queue dir>/ci-watch/<id>/<globの番号>`（globごとに1回、重なるglobがぶつからないようglobごとのdir。落とせないglobはwarnを出して残りを読む）で落とし、その下の`*.xml`を全部読む（`domain::ci_watch::parse_junit`）。読み終えたらdirを消す。成果物が無い・落とせない・XMLが読めないときはその実行のtestの成否を「分からない」とし（`junit: missing`）、jobとstepだけを使う。`junit_artifacts`が空なら落とさない（`junit: not_configured`）。
 
 ## 実行の扱い
@@ -203,6 +204,6 @@ eventの種類にはmigrationが要らないが（上の「eventの種類と欄�
 
 ## 既存の仕組みとの関係
 
-- [CI failure issues](../ci-failure-issues.md)のissueは残る（ADR-t1920-1決定8）。
+- `ci-failure.yml`のissueは残る（ADR-t1920-1決定8）。
 - 自動更新（[Auto-update](auto-update.md)）は一覧もCIの結果も見ない。
 - observerはstatsではなくeventとfindingで読む（`ci_check_failed`と`ci_failure`のfindingの滞留）。
