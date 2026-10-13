@@ -130,7 +130,8 @@ related:
   logの`attempt`はやり直しにも新しい番号を使う
 - 成功した`verification_command`にもFLAKYの名前を`failed_tests`と`flaky_tests`に残す（同じ20件の上限と`failed_tests_omitted`）。`exit_code: 0`・`failure: null`とFLAKYの名前、その後の`run_integrated`で、FLAKYを記録して着地したことが読める。1回目とやり直しで別のtestがFLAKYでも両方をstatsに数える
 - やり直しが`test_failure`・`build_error`などで落ちたら、従来どおり`verification_failed`の`needs_session`にする。hostの分類は上のhostの失敗のやり直しに従う。1回目からflaky以外のコードの失敗なら直ちに`needs_session`にする
-- `integration_retried`はattentionにしない（人の判断は要らない）。inboxとobserverは`dagq events --kind integration_retried`と、[`stats`](stats.md)の`verification_failures`の`flaky`の行（`retried`・`retry_passed`・`retry_failed`）、`failed_tests`の`flaky`の数と`flaky_candidates`で読む
+- `integration_retried`はattentionにしない（人の判断は要らない）。
+  inboxとobserverは`dagq events --kind integration_retried`と、[`stats`](commands.md)の`verification_failures`の`flaky`の行（`retried`・`retry_passed`・`retry_failed`）、`failed_tests`の`flaky`の数と`flaky_candidates`で読む
 
 結果は`IntegrationOutcome`: `{"outcome":"integrated","task":…,"run":…,"verification_skipped":…,"push":{"outcome":"pushed"|"skipped"|"failed","remote":…,"branch":…,"error":…,"reason":…},"follow_ups":[{"task_id":…,"title":…}]}`（`verification_skipped`はステップ5が検証コマンドを常に実行するので常に`false`で、出力の形を保つために残す。`run_integrated`イベントのpayloadにも同じ項目が入る。`push`はステップ9の結果で、`error`は`failed`のときだけ文字列（ほかは`null`）、`reason`は`skipped`のときだけ入る。`follow_ups`はステップ10でこの呼び出しが登録したtaskの`[{"task_id","title"}]`で、無ければ空配列）、`{"outcome":"needs_session","run":…,"main":…,"reason":…}`、`{"outcome":"failed","run":…,"reason":…}`、`{"outcome":"held","run":…,"main":…,"reason":…}`（上の「hostの失敗のやり直し」のhold）、`--next`で対象がなければ`{"outcome":"no_run_awaiting"}`。
 

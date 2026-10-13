@@ -77,7 +77,7 @@ dagq up --claude ~/.local/bin/claude --codex ~/.local/bin/codex --plugin-dir <�
 
 ## KPIの読み方と印
 
-KPI・印・レポートの使い方（設定・運用・hostを変えたときの印の打ち方と`kpi --compare`、runtimeが自分で印にするもの）はpluginの`dagq`の`reference/kpi.md`、仕組みは[kpi](../design/supervisor-lifecycle/kpi.md)・[marks](../design/supervisor-lifecycle/marks.md)・[report](../design/supervisor-lifecycle/report.md)が持つ。このrepositoryの作業時間の前後比較は`kpi --compare`を`--area runtime`（か`--change <値>`）で読み、`all`で読まない（層で読む汎用の理由はpluginの`dagq`の`reference/kpi.md`の「Raising throughput: the weekly review」。changeの値は[taskの登録](task-registration.md)の「change」）。
+KPI・印・レポートの使い方（設定・運用・hostを変えたときの印の打ち方と`kpi --compare`、runtimeが自分で印にするもの）はpluginの`dagq`の`reference/kpi.md`、仕組みは[計測のコマンド](../design/supervisor-lifecycle/commands.md)が持つ。このrepositoryの作業時間の前後比較は`kpi --compare`を`--area runtime`（か`--change <値>`）で読み、`all`で読まない（層で読む汎用の理由はpluginの`dagq`の`reference/kpi.md`の「Raising throughput: the weekly review」。changeの値は[taskの登録](task-registration.md)の「change」）。
 
 ## secretと外部送信
 

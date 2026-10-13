@@ -138,14 +138,19 @@ pub struct ThresholdStats {
     pub outcomes: BTreeMap<String, i64>,
     pub detected_after_secs: Durations,
     pub resolved_after_secs: Durations,
-    /// A person stepped in before any detection (a suspected miss).
+    /// A person stepped in before any detection (a suspected miss),
+    /// counted as a suspicion without being checked: the events do not
+    /// keep the idle marker's history that would tell.
     pub preempted: Preempted,
     /// Per value of the setting the detections were made with
     /// (`unrecorded` when the event does not carry it), so that the
     /// outcomes before and after a change can be told apart.
     pub by_threshold_secs: BTreeMap<String, Outcomes>,
     /// The running alerts judged by it now (`idle_without_receipt`,
-    /// `long_background`, `idle_process`).
+    /// `long_background`, `idle_process`). Always 0 for
+    /// `idle_process_secs`: the processes' CPU time it is judged on is
+    /// kept only in the supervisor's memory, so no running alert of it is
+    /// judged here.
     pub running_alerts: i64,
 }
 
@@ -740,7 +745,8 @@ fn waits_for_a_person(events: &[&RunEvent], start: i64) -> bool {
 /// Aggregate the detections and preemptions `counts` accepts (the
 /// window and the goal) per threshold; `running` are the running alerts
 /// judged now and `config` the thresholds in force. Every setting has an
-/// entry.
+/// entry, with no detection too. A detection counts when it was made in
+/// the window; how it ended is read from the events past the window too.
 pub fn thresholds(
     detections: &[Detection],
     preemptions: &[Preemption],

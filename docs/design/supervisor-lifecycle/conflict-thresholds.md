@@ -16,7 +16,9 @@ related:
 
 # Conflict thresholds
 
-`dagq.toml`の`[conflicts]`（goal 31）が、`stats`の`conflict_hotspot`のalert（[`stats`](stats.md#stats)の`conflict_hotspots`）の閾値を持つ。読み込みは`[stall]`と同じ`src/infrastructure/run_env.rs`（`parse_config`と、fileを読む`load_conflict_config`）で、型と既定値は`src/domain/stats/conflicts.rs`の`ConflictConfig`。書式は`[stall]`と同じ（正の整数、`_`の桁区切りと`#`以降のcommentを許し、未知のkey・0以下・重複はエラー）。
+`dagq.toml`の`[conflicts]`（goal 31）が、`stats`の`conflict_hotspot`のalert（[`stats`](commands.md)の`conflict_hotspots`）の閾値を持つ。
+読み込みは`[stall]`と同じ`src/infrastructure/run_env.rs`（`parse_config`と、fileを読む`load_conflict_config`）で、型と既定値は`src/domain/stats/conflicts.rs`の`ConflictConfig`。
+書式は`[stall]`と同じ（正の整数、`_`の桁区切りと`#`以降のcommentを許し、未知のkey・0以下・重複はエラー）。
 
 | 設定名 | 既定値 | 意味 |
 | --- | --- | --- |

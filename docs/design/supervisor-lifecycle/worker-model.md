@@ -8,8 +8,7 @@ scope: runtime
 related:
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-run-environment
-  - design-supervisor-lifecycle-stats
-  - design-supervisor-lifecycle-kpi
+  - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-plan-review
   - adr-0079
   - design-supervisor-lifecycle-actor-model
@@ -17,7 +16,9 @@ related:
 
 # Worker model
 
-workerのsessionのmodelとeffortの選び方と記録（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定3・4・5、task 576・578）。予測の記録は[plan review](plan-review.md)の6、読み方は[stats](stats.md#workerのmodelと試しの群)と[kpi](kpi.md#kpiと層)の`--by group`、段上げの件数は[stats](stats.md#workerのsessionの段上げ)の`escalations`。worker以外のアクター（決定7の(b)(c)）は[Actor model](actor-model.md)。
+workerのsessionのmodelとeffortの選び方と記録（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定3・4・5、task 576・578）。
+予測の記録は[plan review](plan-review.md)の6、読み方は[stats](commands.md)と[kpi](commands.md)の`--by group`、段上げの件数は[stats](commands.md)の`escalations`。
+worker以外のアクター（決定7の(b)(c)）は[Actor model](actor-model.md)。
 
 ## 既定: Opus 5.5・effort mediumを明示して渡す
 
@@ -44,8 +45,11 @@ Codexのworkerは段のClaudeのmodelを使わず（`-m`を渡さずCodexの既�
 - `model`はnull、段のmodelは`ladder_model`、`group`はnull、`model_unknown`に理由（`worker_model::CODEX_MODEL_UNKNOWN`: Codexは自分のmodelで動き、各turnの`turn_finished`が使ったmodelを記録する）。`effort`は段のeffort
 - 段上げの`escalated_from`も`{model: null, ladder_model, effort}`、切り替えられなかったreviseの`escalation_skipped`も同じ形（`WorkerSession::named_on`）
 - 読み戻し（`WorkerSession::current` / `of_run`）は`model`が無ければ`ladder_model`を段として読むので、段上げとtaskへの引き継ぎはClaudeのrunと同じに働く（効くのはeffortだけ）
-- Codexが実際に使ったmodelは、turnごとに`turn_finished`の`model`（読めなければnullで、理由を`model_unknown`）に残る（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。`stats`・`kpi`のrunの`model`はCodexで始まったrunではこの最初のturnのmodel（[stats](stats.md)）
-- Codexで動くclaimは試しに入らない: `choose`を呼ばず、群も百分位も持たず、交互の順番も取らない（群を持ったtaskでもそのrunは群null）。Claudeでclaimして群を持ったrunが途中でCodexへ移ったとき（ADR-t813-2のフォールバック）は、claimの群は記録に残るが、`stats`・`kpi`はCodexで作業したrunとして試しの集計（`trial_groups`、`group=`）とClaudeの層から外す（[stats](stats.md)）。taskの群は変わらないので、そのtaskの後のClaudeのrunは同じ群で起動する
+- Codexが実際に使ったmodelは、turnごとに`turn_finished`の`model`（読めなければnullで、理由を`model_unknown`）に残る（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。
+  `stats`・`kpi`のrunの`model`はCodexで始まったrunではこの最初のturnのmodel（[stats](commands.md)）
+- Codexで動くclaimは試しに入らない: `choose`を呼ばず、群も百分位も持たず、交互の順番も取らない（群を持ったtaskでもそのrunは群null）。
+  Claudeでclaimして群を持ったrunが途中でCodexへ移ったとき（ADR-t813-2のフォールバック）は、claimの群は記録に残るが、`stats`・`kpi`はCodexで作業したrunとして試しの集計（`trial_groups`、`group=`）とClaudeの層から外す（[stats](commands.md)）。
+  taskの群は変わらないので、そのtaskの後のClaudeのrunは同じ群で起動する
 
 段上げしたeventは`escalated_from`（前の`{model, effort}`）と`escalation_reason`（`verification_failed` / `sent_back` / `revise`）も持つ（`WorkerSession::fields_raised`）。切り替えられなかった`revise_requested`は`escalated_from`を持たず、`escalation_skipped`（`{model, effort, reason, why}`: 上げるはずだった値、`revise`、切り替えられなかった理由）を持つ。retryのclaimで段を引き継いだ`run_claimed`は`escalation_inherited: true`を持つ。
 
@@ -85,7 +89,9 @@ window = 60      # 既定 60（domain::prediction::PREDICTION_WINDOW）
 
 ## 判定
 
-群ごとの比較は`stats`の`trial_groups`（[stats](stats.md#workerのmodelと試しの群)）と、`kpi --by group`（`model` / `effort` / `nature`も。runの最初の`run_claimed`の値で層別する。[kpi](kpi.md#kpiと層)）のrunの層で読む。判定（1群45件前後、taskに由来する手戻りの率の差（treatment − control）が+5ポイント以内か、途中で止める目安）は人とplannerが行い、runtimeは自動で止めたり全面適用したりしない（ADR-0079の決定6）。止めるのは`enabled = false`に戻すこと。
+群ごとの比較は`stats`の`trial_groups`（[stats](commands.md)）と、`kpi --by group`（`model` / `effort` / `nature`も。runの最初の`run_claimed`の値で層別する。[kpi](commands.md)）のrunの層で読む。
+判定（1群45件前後、taskに由来する手戻りの率の差（treatment − control）が+5ポイント以内か、途中で止める目安）は人とplannerが行い、runtimeは自動で止めたり全面適用したりしない（ADR-0079の決定6）。
+止めるのは`enabled = false`に戻すこと。
 
 ## テスト
 

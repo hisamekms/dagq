@@ -10,7 +10,7 @@ related:
   - design-supervisor-lifecycle-integrate
   - design-supervisor-lifecycle-install
   - design-supervisor-lifecycle-auto-update
-  - design-supervisor-lifecycle-stats
+  - design-supervisor-lifecycle-commands
   - design-persistence
   - adr-t614-1
   - adr-t614-2
@@ -48,7 +48,7 @@ buildの出力の置き場と掃除・計測・CIの見張りの読み方・proc
 | `integrate`のmigrationの番号の振り直し（[integrate](integrate.md)の5） | ADR-0067決定3 | 今までどおり（`migration_renumbered`、振り直せなければ`migration_number_taken`の`needs_session`） | 番号を見ない。振り直さず、`migration_number_taken`にもしない。`migrations/`の変更は他のファイルと同じに扱う |
 | `--from`なしの`dagq install`（main checkoutからの`cargo build --release --locked`。[install](install.md)の1） | ADR-0073決定14 | 今までどおり | buildせずにerror。`cargo install dagq`で入れ替えるか、`--from`でバイナリかcheckoutを指すよう案内する。`--from`付きと`--rollback`は判定に関係なく動く |
 | `up --auto-update`のsource build（[Auto-update](auto-update.md)） | ADR-0073決定17 | 今までどおり | `up`はerrorで止め、supervisorを起動も引き継ぎもしない。自動更新の設定を持つsupervisorもbuildに進まない。外部のprojectの更新は[Release update](release-update.md)（ADR-t618-1） |
-| `stats`・KPI・worktimeのcargo専用の計測（[stats](stats.md#cargo専用の計測)） | ADR-t614-1決定2(d)（ADR-t1662-3・ADR-t2268-1がamends） | 今までどおり | 記録も出力もしない（下の一覧）。決まった形ではこの判定から外す（下の「cargo専用の計測」） |
+| `stats`・KPI・worktimeのcargo専用の計測（[stats](commands.md)） | ADR-t614-1決定2(d)（ADR-t1662-3・ADR-t2268-1がamends） | 今までどおり | 記録も出力もしない（下の一覧）。決まった形ではこの判定から外す（下の「cargo専用の計測」） |
 
 ### cargo専用の計測
 
@@ -58,7 +58,9 @@ buildの出力の置き場と掃除・計測・CIの見張りの読み方・proc
 
 - worktime（`src/domain/worktime.rs`）: commandの分類のうち`e2e`（`--test e2e`）・`llvm_cov`・`test`（`cargo test`と`cargo nextest`）の判定と、`full_tests`（全体の`cargo test`。filterの無い`--test it`も含む）・`llvm_cov_runs`・`verification_repeats`（integrateと重なるllvm-cov・全体のtest・e2e）の数。ソースでなければ、区間を閉じるときにこの3つの分類を付けず（そのコマンドは他の規則に落ちる）、3つの数を`work`に書かない（落ちたtestの名前も、testを流す分類のコマンドが無いので読まない）。判定は区間を閉じるたびに`infrastructure::sessions::dagq_source`が、queueの束縛（`queue_repository`）からmain checkoutを求めて行う（書き込みトランザクションの中で閉じる区間は、transcriptと同じく`read_before`がトランザクションの前に判定しておく）。束縛の無いqueueはソースでない。
 - `stats`の`work_breakdown`の`verification_repeats`・`runs_with_repeats`・`test_with_llvm_cov`（`src/domain/stats/work.rs`）: ソースでなければ`runs`と全ての群で欄ごと出さない（`domain::stats::without_cargo_measures`）。
-- claimの属性の`rustc_release`・`rustc_host`（`run_claimed`）: ソースでなければsupervisorは`rustc -vV`を実行せず、欄ごと書かない（`Ports::host_versions`のcheckoutを`None`にする）。`stats`の`runs`の`rustc_release`・`rustc_host`と`versions.rustc`はソースでなければ欄ごと出さない。[`kpi`](kpi.md)の`toolchain=`の層はソースでなければ`--by toolchain`でも出さない。
+- claimの属性の`rustc_release`・`rustc_host`（`run_claimed`）: ソースでなければsupervisorは`rustc -vV`を実行せず、欄ごと書かない（`Ports::host_versions`のcheckoutを`None`にする）。
+  `stats`の`runs`の`rustc_release`・`rustc_host`と`versions.rustc`はソースでなければ欄ごと出さない。
+  [`kpi`](commands.md)の`toolchain=`の層はソースでなければ`--by toolchain`でも出さない。
 - 出力の判定は`stats`・`kpi`・日次のレポート・observerの入力を出すたびに`compose`がmain checkoutの`Cargo.toml`で行う（`stats`は`StatsSources::dagq_source`、KPIは`application::kpi::Host::dagq_source`）。
 
 ### 言語・道具の知識の今の場所

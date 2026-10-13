@@ -47,7 +47,8 @@ impl std::str::FromStr for Stat {
     }
 }
 
-/// One `[kpi.targets."<kpi>"]` table.
+/// One `[kpi.targets."<kpi>"]` table. It bounds `all`, a `change=` or an
+/// `area=` stratum only: never one of a `--by` axis nor a `cross:` one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
     pub kpi: String,

@@ -48,7 +48,7 @@ slotの集まりは`SlotTable`だけが変え、残りは`Supervisor`が持つ�
    ループの各passでは、環境の検査に続けてsccacheの監視と再起動を行う。
    監視と待ちの入口は`application::supervise::sccache`、serverをsandboxの外で持つ分担と観測の限界は[Run environment](run-environment.md#sccacheのserver)が持つ。
    続けてmain checkoutの`[run.env]`の正規化したhashがqueueの最新の`run_env_changed`と違えば`run_env_changed`を記録する（`Verifier::run_env_table`、hashの鍵はqueueのsaltの`Verifier::run_env_salt`。
-   [変更の印](marks.md)、ADR-0051の決定10・11）。
+   [変更の印](commands.md)、ADR-0051の決定10・11）。
    続けてmain checkoutの`[conflicts]`を読み直し、使用中と違う同じ値を2 pass続けて読んだときだけ以後の判定に使い、hotspotのcacheを捨てて`conflicts_config_changed`を記録する。
    表の削除も2回の読みで既定値を適用し、欠落・parseエラーでは使用中の値を保って変更候補を捨てる。
    起動時は即時に適用し、最初の読み直しが起動時と同じ値を読み、それがqueueの最新の`conflicts_config_changed`の`to`と違えば`source: start`で1回記録する。
@@ -84,7 +84,11 @@ slotの集まりは`SlotTable`だけが変え、残りは`Supervisor`が持つ�
     手の`claim`（supervisorの無いclaim）の`run_claimed`はこれらを持たない。
     `integrate`で依存が解けたtaskは次のループで、先行taskを含む`main`から始まる。
     `run_claimed`は候補の中の位置・優先度・readyの時刻・属性の組も持ち、fill passは始めと終わりにslotの埋まりの変化を`slots_full_*`に書く（[計測](../measurement.md)の「claimの前」）。
-   **candidatesの標本**（ADR-0051の決定3）: claimを止めておらず停止要求も無いpassでは、このfill pass（claimを控えたpassも含む）の後に、`dependency_graph`の`candidates`の数（`candidates`。`graph`の`candidates`と同じ規則で、衝突の多いファイルで控えた候補も数える）、`--parallel`から使っているslotを引いた数（`free_slots`）、`ready`のtaskの数（`ready`）を数え、このプロセスが前に記録した標本と1つでも違えば`candidates_sampled`をqueueのeventとして1件記録する。同じ値の間は書かない。前の標本はプロセスのメモリにだけ持つので、起動とexecの引き継ぎの直後の最初のpassは値が変わっていなくても1件記録する。読み書きの失敗はlogに出すだけで、次のpassでやり直す。`kpi`の`candidates`がこれを読む（[`kpi`](kpi.md)）。
+   **candidatesの標本**（ADR-0051の決定3）: claimを止めておらず停止要求も無いpassでは、このfill pass（claimを控えたpassも含む）の後に、`dependency_graph`の`candidates`の数（`candidates`。`graph`の`candidates`と同じ規則で、衝突の多いファイルで控えた候補も数える）、`--parallel`から使っているslotを引いた数（`free_slots`）、`ready`のtaskの数（`ready`）を数え、このプロセスが前に記録した標本と1つでも違えば`candidates_sampled`をqueueのeventとして1件記録する。
+   同じ値の間は書かない。
+   前の標本はプロセスのメモリにだけ持つので、起動とexecの引き継ぎの直後の最初のpassは値が変わっていなくても1件記録する。
+   読み書きの失敗はlogに出すだけで、次のpassでやり直す。
+   `kpi`の`candidates`がこれを読む（[`kpi`](commands.md)）。
 6. **provision**: run管理領域（DBと同じdirの`runs/<run-id>/`）のpath、branch `dagq/<run-id>`、worktree（`runs/<run-id>/worktree`）、receipt、logのpathを`run_planned`として先にDBへ保存し、ディレクトリ、`prompt.txt`、runtimeバイナリのスナップショット`runner`、worktreeを作り、session wrapper（`<runner> --db ... session --run ... --lease <token> --claude ... --background`）をworktreeをcwdにして、workspaceなしのsupervisorから切り離したbackgroundのprocessとして起動する（`ActorProgram::RunSession`が`SessionWrappers::launch_background`を呼ぶ。envは`DAGQ_ROLE=worker`・`DAGQ_ACTOR_ID=worker:<run-id>`・`DAGQ_RUN_ID=<run-id>`・`DAGQ_TASK_ID=<id>`と`[run.env]`、出力はrun dirの`session.log`。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)、[非対話のworker](headless-worker.md)）。返ったhandle（`background:<pid>:<start>`）を`workspace_created`として`task_runs.workspace_id`に保存し、`wrapper_launched`を記録する。cmuxのworkspaceは作らない。`dagq.toml`の`[headless] wrapper`はworkerには効かず、`"workspace"`ならsupervisorはprocessごとに1回、無視したことを警告する。wrapperの環境にqueue DBのpathは無く、起動の前にworkerのqueue serviceのtokenを発行し、wrapperがagentの起動でそのfileとserviceのsocketを渡す（goal 82の段(3)、[Queue service](../queue-service.md#クライアントモード)）。wrapperにはDBのpathを`--db`で明示的に渡す。provisioningの失敗は環境要因とみなし、そのrunをabandon（下記）した上で以後のclaimを止め、active runをdrainしてから非0で終了する。`prompt.txt`の内容は下記[Prompt](prompt.md#workerのprompt)。
 7. **監視**: 各tickの先頭で、そのrunのlease行がまだ自分のtokenであることを確認する。
    なければ（別のsupervisorが引き継いだ、または`recover`された）そのrunをslotから外し、DBには何も書かず結果の`errors`に載せる。

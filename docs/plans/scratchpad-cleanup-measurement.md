@@ -36,7 +36,7 @@ task 1100 の掃除は本番で動いた。最初の掃除で 569 ディレク�
 - 前: `[2026-09-28T23:15:29.442Z, 2026-09-29T15:06:32.221Z)`
 - 後: `[2026-09-29T15:06:32.221Z, 2026-09-30T06:57:35Z)`
 
-`events` は `--since` 以上・`--until` 未満。`stats` は since より後・until 以下だが、境界に控えの event は無く、この集計の件数は変わらない。stats の秒は窓の中で始まった控えの継続時間で、任意の稼働時間を窓で切って足したものではない（[stats](../design/supervisor-lifecycle/stats.md)）。
+`events` は `--since` 以上・`--until` 未満。`stats` は since より後・until 以下だが、境界に控えの event は無く、この集計の件数は変わらない。stats の秒は窓の中で始まった控えの継続時間で、任意の稼働時間を窓で切って足したものではない（[stats](../design/supervisor-lifecycle/commands.md)）。
 
 ## 1. 残存容量と分類
 

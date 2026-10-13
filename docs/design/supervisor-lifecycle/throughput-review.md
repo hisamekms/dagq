@@ -14,8 +14,7 @@ related:
   - adr-0047
   - adr-0051
   - design-supervisor-lifecycle-observer
-  - design-supervisor-lifecycle-report
-  - design-supervisor-lifecycle-kpi
+  - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-events-watch
   - design-supervisor-lifecycle-actor-model
   - adr-t1063-1
@@ -50,7 +49,9 @@ related:
 本体は`application::throughput_review::review`で、`compose::throughput_review`がDBをcanonicalizeしてqueueを開き、`stats`・KPI・bound checkout・findingの記録（`ThroughputReviewSources`）と、見直しのdirのファイル・`[roles.throughput_review]`・hostの時間帯とprocess id・agentのprocess（`ThroughputReviewHost`、`infrastructure::throughput_review::LocalThroughputReview`）を注入する。`--launch`の無いCLIの起動は`compose::throughput_review_launch`が`[roles.throughput_review]`を読む（task 1615がレイヤーの外の`src/throughput_review.rs`から移した）。
 
 1. 期間を`--at`（無ければqueueの時計の今）と`--utc-offset`（無ければhostの時間帯）で決め、着地を読む。毎時は判定する（`--dry-run`はpromptを返す）
-2. 入力（`input.json`）: `period`、`landings`（期間の合計、前の同じ長さの期間の合計、毎時は判定と同じ26時間・日次は24時間の`by_hour`・週次は7日の`by_day`、期間の`run_integrated`の最大200件）、`hourly`（毎時の判定）、`health`（workerの経路ごとの健全性とdiskの空きの最小値と中央値。`kpi`の最後の期間（日次は見直す日、週次は週、毎時はその時を含む日のここまで）の`health`（[kpi](kpi.md#期間の健全性)、task 1371）に、その期間の`label`を`period`として足したもの。`kpi`が読めなければその`error`）、`kpi`（毎時は日の2期間、日次は日の8期間、週次は週の5期間。`at`は期間の終わりの直前）、`stats`（毎時は直前6時間、日次・週次は期間）、`claim_deferred`（`stats`と同じ範囲の`claim_deferred`の`reason`ごとの件数）、`asks`（同じ範囲で開いたaskの`kind`ごとの件数と、今開いているaskの`kind`ごとの件数）、`timelines`（期間に着地したrunのうち最初のeventから着地までが長い3件の`timeline`、gapは300秒以上）。読めない部分は`{"error": ...}`。promptにはこの全体ではなく、下の「promptの入力」の要約だけを載せる
+2. 入力（`input.json`）: `period`、`landings`（期間の合計、前の同じ長さの期間の合計、毎時は判定と同じ26時間・日次は24時間の`by_hour`・週次は7日の`by_day`、期間の`run_integrated`の最大200件）、`hourly`（毎時の判定）、`health`（workerの経路ごとの健全性とdiskの空きの最小値と中央値。`kpi`の最後の期間（日次は見直す日、週次は週、毎時はその時を含む日のここまで）の`health`（[kpi](commands.md)、task 1371）に、その期間の`label`を`period`として足したもの。`kpi`が読めなければその`error`）、`kpi`（毎時は日の2期間、日次は日の8期間、週次は週の5期間。`at`は期間の終わりの直前）、`stats`（毎時は直前6時間、日次・週次は期間）、`claim_deferred`（`stats`と同じ範囲の`claim_deferred`の`reason`ごとの件数）、`asks`（同じ範囲で開いたaskの`kind`ごとの件数と、今開いているaskの`kind`ごとの件数）、`timelines`（期間に着地したrunのうち最初のeventから着地までが長い3件の`timeline`、gapは300秒以上）。
+   読めない部分は`{"error": ...}`。
+   promptにはこの全体ではなく、下の「promptの入力」の要約だけを載せる
 3. `<queue dir>/reports/reviews/<mode>-<period>/`（あれば`-1`…を付ける）を作り、`prompt.md`・`input.json`（入力の全体）を書き、`throughput_review_started`（`mode`・`period`・`reasons`・`dir`・`session_id`（Claudeはruntimeが渡すid、Codexはnull）・`launch`。`launch`は`provider`を含む。[Actor model](actor-model.md)。promptのbyte数（下の「promptの入力」のbyte数の記録））を記録する
 4. agentは`--launch`（supervisorが行き先として渡したもの。無ければ`[roles.throughput_review]`）の`provider`（既定のClaude、または下の「Codexで動かす」のCodex）で、actor executorの`HeadlessProgram::Job`（権限の意図`ACCESS`は`queue_cli`で、Claude Codeは`--allowedTools Bash(dagq:*)`に、Codexは読み取りだけのsandbox（queue serviceのjobのprofile）に訳す。MCPを読まない。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で`DAGQ_ROLE=throughput-review-job`・`DAGQ_ACTOR_ID=throughput-review-job:<mode>:<period>`として起動し、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`。結果はproviderの`job_reply`が`output.out`だけから取り出した返答から読み、stderrは混ぜない）。時間の上限は`--timeout`（既定1800秒）で、過ぎたら子孫ごとkillする。model / effortは`dagq.toml`の`[roles.throughput_review]`（無ければproviderの既定。もう一方のproviderに切り替えたときはその既定）
 5. 成功したら`output.out`に`job_reply`を当てた返答を`parse_output`で読む: `## Conclusion`の見出しの下の行（無ければ先頭の行）を最大5行（`MAX_CONCLUSION_LINES`）の結論にし、`next_move`でfenceしたJSON（`summary`・`detail`・`why`）を次の一手として外した残りを全文として`review.md`に、結論・次の一手・読めなかった理由（`next_move_error`）・findingのIDを`review.json`に書く
@@ -64,7 +65,9 @@ related:
 
 ## sessionの区間（task 1086）
 
-jobのsessionは、他のheadlessのjob（review・triage・plan review・goal review・observer）と同じく区間（`session_opened` / `session_closed`、[Actor model](actor-model.md)・[stats](stats.md)）を持つ。区間はobserverと同じqueueのevent（task・goal・runを持たない）で、kindは`throughput_review`（`domain::sessions::THROUGHPUT_REVIEW`）。queueのeventの区間はjobごとのkindで探し（`domain::sessions::queue_span_kind`）、observerのeventはobserverの区間だけを、見直しのeventは見直しの区間だけを開け閉めする（observerの扱いは変えていない）。
+jobのsessionは、他のheadlessのjob（review・triage・plan review・goal review・observer）と同じく区間（`session_opened` / `session_closed`、[Actor model](actor-model.md)・[stats](commands.md)）を持つ。
+区間はobserverと同じqueueのevent（task・goal・runを持たない）で、kindは`throughput_review`（`domain::sessions::THROUGHPUT_REVIEW`）。
+queueのeventの区間はjobごとのkindで探し（`domain::sessions::queue_span_kind`）、observerのeventはobserverの区間だけを、見直しのeventは見直しの区間だけを開け閉めする（observerの扱いは変えていない）。
 
 - 開く: `throughput_review_started`が開く。payloadは`kind`・`session_id`（runtimeがjobに渡したもの。Codexはnull）・`cwd`（見直しのdir。Claude Codeのtranscriptはこのcwdとsession idで探す）・`attempt`（null）・`launch`・`mode`・`period`
 - 閉じる（`job_finished`）: `session_id`か`dir`（区間の`cwd`）の一致する`throughput_review_finished`が閉じる。Codexの見直しは開くときsession idを持たないので`dir`で閉じ、`session_closed`に終わりのeventの`session_id`（thread）・`model`・`model_unknown`を写す（task 1220）。Claudeの見直しは閉じるときtranscriptの実際のmodel / effort・turn・active time・tokensが他のjobと同じ経路（task 579、`read_before`で書き込みの前に読む）で`session_closed`に入る

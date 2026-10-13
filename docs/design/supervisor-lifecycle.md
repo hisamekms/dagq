@@ -10,7 +10,7 @@ related:
   - design-supervisor-lifecycle-host-metrics
   - design-supervisor-lifecycle-actor-model
   - design-supervisor-lifecycle-goal-review
-  - design-supervisor-lifecycle-report
+  - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-dependency-diagram
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-claim-defer
@@ -350,32 +350,15 @@ live worker alert (stalled, idle_process)
 
 - [`events` / `watch`](supervisor-lifecycle/events-watch.md)
 
-### `timeline`
-
-- [`timeline`](supervisor-lifecycle/timeline.md)
-
 ### `ask` / `answer` / `asks`
 
 - [`ask` / `answer` / `asks`](supervisor-lifecycle/ask.md)
 
-### `stats`
+### `stats` / `kpi` / `mark` / `marks` / `report` / `timeline`
 
-- [`stats`](supervisor-lifecycle/stats.md)（Claude sessionの区間のkindごとの開いている時間とtranscriptのturnから導く稼働時間の集計`sessions`を含む。[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)。runのsessionの作業の内訳`work_breakdown`（task 514）と、sessionのトークン数`tokens`（task 199）も）
-
+- [計測のコマンド](supervisor-lifecycle/commands.md)（記録から値を導くコマンドをまたぐ約束と、各コマンドのコードの入口）
 - [hostの負荷の連続の記録](supervisor-lifecycle/host-metrics.md)（supervisorがload average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageout・ディスクの空きをqueue.dbのNodeSampleStoreと人が読む写しの`<queue dir>/host/metrics-YYYYMMDD.csv`に書き、保持の日数を過ぎた行とファイルを消す。`stats`の`host`が窓の要約を出す。外部のsamplerを止める手順）
   保持の期間のCSVは一度だけNodeSampleStoreに取り込む。
-
-### `mark` / `marks`
-
-- [変更の印（`mark` / `marks`）](supervisor-lifecycle/marks.md)
-
-### `kpi`
-
-- [`kpi`](supervisor-lifecycle/kpi.md)（KPIを日・ISO週・taskが宣言したchange・着地の差分から求めるarea・claimの属性で集計し、前の期間と目標と比べ、変更の印の前後を比べる。[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)の決定1〜9・14〜19）
-
-### `report`
-
-- [KPIのレポート（`report`）](supervisor-lifecycle/report.md)（supervisorが日次でKPIのレポートをHTMLとJSONで`<queue dir>/reports/`に書き、`dagq report`で手でも書く。当面の依存図をinline SVGで載せる。ADR-0051の決定20・21、ADR-0077の決定7）
 - [KPIのpush](supervisor-lifecycle/push.md)（レポートの後に目標割れの始まりと解消を記録し、host.tomlの`[push]`のコマンドのstdinに日次・週次のまとめと目標割れの即時通知を渡す。失敗の再試行とinboxのattention。ADR-0051の決定18・22・23）
 
 ### `graph --format d2|svg`

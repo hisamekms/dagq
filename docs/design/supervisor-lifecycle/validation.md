@@ -84,7 +84,7 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   流し直しの途中で死んだrunは、adopterの再validationが開いたaskを見て休ませ、次のpassの答えの適用がもう一度流し直す。
   検証のコマンドは自分のprocess groupで動き、supervisorが死んでも残りうる。
   そこでscratch worktreeを使い直す前に、そこで動く前の検証のprocessを止め（`auto_repaired`の`satisfied_verification_stopped`）、止まらないか一覧が読めなければ検証せず、askに落ちたことを書く。
-- **集計**: 閉じたrunは着地（`run_integrated`）に数えず、`stats`の`already_satisfied`で別に数える（[stats](stats.md)）。
+- **集計**: 閉じたrunは着地（`run_integrated`）に数えず、`stats`の`already_satisfied`で別に数える（[stats](commands.md)）。
 
 ## 着地の検証
 
@@ -130,7 +130,11 @@ launchdの`up` / `down`のe2eは追加の環境変数なしに本文まで流れ
 
 - **設定**: main checkoutの`dagq.toml`の`[e2e]`の`paths`（globの配列。書式は[Run environment](run-environment.md)）。無ければ空で、差分からは何も求めない（taskの`--evidence e2e`だけで決まる）。supervisorはvalidatingを始めるたびとworkerのpromptを作るたびに読み直す（`Verifier::e2e_paths`）。読めなければ警告を出して空として扱う。
 - **判定**（`domain::validation::E2eRequirement`、`ReceiptFacts::e2e_requirement`）: taskの`required_evidence`に`e2e`があれば（`ReceiptFacts::with_task_e2e`）`source: task`で要る。差分は見ない（`paths`の無いtaskは7の差分も読まない）。無く、`[e2e] paths`があれば、7と同じ差分（merge-baseからreceiptの`commit`まで、`GitRepository::changed_paths`）を読み、どれかのglobに合うpathがあれば`source: paths`で要る。無ければ要らない。receiptの`e2e`は、どの場合も要らないcheckとして2で検査する（`failed`か空の理由なら`failed`）。workerは`not_applicable`と理由（runtimeが流す）を書く。
-- **記録**: `validation_finished`に`e2e_requirement`（`{required, source?, paths?}`。`source`は`task` / `paths`、`paths`は`source: paths`のとき合った差分のpath。要らないときは`{"required": false}`）を載せる。差分を読む前に外れた（1–5で拒んだ）runで、差分が要否を決めるときは載せない。`evidence_missing`にも、要るときは同じ`e2e_requirement`を載せる。着地の前のe2eは最後の`validation_finished`のこれを読む（`domain::run_e2e::due`）。`stats`もこれで`runs[].e2e`と`e2e`の群を作る（[stats](stats.md)）。
+- **記録**: `validation_finished`に`e2e_requirement`（`{required, source?, paths?}`。`source`は`task` / `paths`、`paths`は`source: paths`のとき合った差分のpath。要らないときは`{"required": false}`）を載せる。
+  差分を読む前に外れた（1–5で拒んだ）runで、差分が要否を決めるときは載せない。
+  `evidence_missing`にも、要るときは同じ`e2e_requirement`を載せる。
+  着地の前のe2eは最後の`validation_finished`のこれを読む（`domain::run_e2e::due`）。
+  `stats`もこれで`runs[].e2e`と`e2e`の群を作る（[stats](commands.md)）。
 - **resume**: resumeが書き直したreceiptの解決の判定（`ResumeWatch::required_evidence`、衝突だけのresumeを飛ばす`resolved_head`）も`e2e`を含めない（`resume_required`）。解決したresumeは、`integrate`が呼ばれていないrunならもう一度validatingを通り、そこで差分から要否を決め直す。`integration_approved`のあるrun（着地のresume）はvalidatingを通らずに着地へ進み、前のvalidatingの要否で、着地の前のe2eを新しいcommitに流す。
 - **integrateの検査**: `integrate`のreceiptの検査（[`integrate`](integrate.md)）も`required_of`のcheckだけを見て、`e2e`を求めない。e2eは`integrate`では流さない（ADR-t963-1決定4）。人が`dagq integrate`で手で着地させるrunにはruntimeのe2eが流れないので、e2eを要るrunを手で着地させる前は、run dirの`e2e-*.log`と`run_e2e_finished`を確かめる。
 - **workerに知らせる**: workerのprompt（[Prompt](prompt.md)）は、runがe2eを要りうるとき（taskが`e2e`を要るか、`[e2e] paths`がある）に、e2eを自分で流さないこと、要るならruntimeがreviewのpassの後にhostで流し、落ちればsessionに戻すこと、receiptの`e2e`は理由つきの`not_applicable`にすることを1行で書く（`prompt::e2e_line`）。e2eのコマンド・`[e2e] paths`の一覧・関門の印・Codexのworkerの除外は載せない（ADR-t963-1決定5の除外はADR-t1233-2決定6でなくなった）。`Required evidence:`の行にも`e2e`は出ない。

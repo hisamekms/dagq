@@ -7,8 +7,7 @@ created: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
-  - design-supervisor-lifecycle-kpi
-  - design-supervisor-lifecycle-report
+  - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-observer
   - design-supervisor-lifecycle-ask-push
   - adr-0051
@@ -16,7 +15,9 @@ related:
 
 # KPIのpush（目標割れの記録とホストのコマンドへの通知）
 
-[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定18（目標割れの始まりと解消のevent）・22・23の実装（task 432）。supervisorが日次の[レポート](report.md)を書いた後に、目標割れの始まりと解消をqueueのeventに記録し、ホストの設定に書いたコマンドがあれば、日次・週次のまとめと目標割れの即時通知をそのコマンドのstdinに渡す。runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookのURLやtoken）はrepositoryにもeventにも入らない。
+[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定18（目標割れの始まりと解消のevent）・22・23の実装（task 432）。
+supervisorが日次の[レポート](commands.md)を書いた後に、目標割れの始まりと解消をqueueのeventに記録し、ホストの設定に書いたコマンドがあれば、日次・週次のまとめと目標割れの即時通知をそのコマンドのstdinに渡す。
+runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookのURLやtoken）はrepositoryにもeventにも入らない。
 
 ここのpushはホストのコマンドへの通知で、着地したbranchのGitのpushではない。着地したbranchのpushは`Integrator`だけが行う（[`integrate`](integrate.md)の9、[Authorization](../authorization.md#着地とpushintegrator)、ADR-t728-2）。Gitのpushが失敗しても、remoteのbranchが着地commitをすでに含むと確認できたときは`push_finished`（payloadの`already_delivered: true`）として扱う。この規則はホストのコマンドへのKPI通知には適用しない。
 着地したrunの工程の`push`・`push_pending`（`run_phase_changed`）もGitのpushのもので、[`integrate`](integrate.md)の9が持つ。
@@ -48,7 +49,8 @@ related:
 
 ## 目標割れの記録
 
-- supervisorのレポートのjob（[レポート](report.md)のsupervisorの日次）が、`write_due`の後に`application::push::check_breaches`で、今の時点の日と週の`kpi`（`--last 2`相当）の目標の判定（[kpi](kpi.md#目標targets)）を読む。目標が1つも無く、開いた目標割れも無ければ何もしない。
+- supervisorのレポートのjob（[レポート](commands.md)のsupervisorの日次）が、`write_due`の後に`application::push::check_breaches`で、今の時点の日と週の`kpi`（`--last 2`相当）の目標の判定（[kpi](commands.md)）を読む。
+  目標が1つも無く、開いた目標割れも無ければ何もしない。
 - 状態が`breach`の目標（KPIと層）は`kpi_breach_started`を、開いた目標割れのうち今の判定が`ok`か`missed`のもの（判定できる期間が目標を満たした）は`kpi_breach_resolved`（`reason: met`）を、目標の設定から消えたものは`kpi_breach_resolved`（`reason: target_removed`）を記録する。`not_judged`の間は開いたまま。どれもtaskの無いqueueのevent。
   - `kpi_breach_started`のpayload: `period`（`day` / `week`）・`kpi`・`stratum`・`stat`・`min`・`max`・`source`・`since`（目標割れの始まりの期間）・`streak`・`label`と`value`（最後に判定できた期間とその値）・`pushed`（即時通知を送るか）・`day`（`pushed`を数えたhostのlocal day）。
   - `kpi_breach_resolved`のpayload: `period`・`kpi`・`stratum`・`label`（最後に判定できた期間。`ok`なら目標を満たした期間、`missed`なら連続が切れた後にまた外れた期間）・`reason`。

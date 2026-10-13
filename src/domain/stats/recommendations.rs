@@ -32,7 +32,10 @@ pub struct Recommendations {
 
 /// What the observations of a window did with the findings they wrote
 /// (ADR-t451-1 decision 2): left as findings only, their reading being
-/// to wait or leave it, or raised to a person as `blocked` asks.
+/// to wait or leave it, or raised to a person as `blocked` asks. The
+/// observations are the queue's, of no task, so with `--goal`
+/// `findings_without_ask` is 0 and cannot be compared with
+/// `blocked_asks`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ObserverReadings {
     /// The sum of `observe_finished`'s `findings_without_ask`.

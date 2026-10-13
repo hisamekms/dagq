@@ -1,7 +1,9 @@
 //! The work breakdown of `stats` (task 514): what a run's own sessions
 //! (worker, resume, revise) spent their time on, from the `work` their
 //! `session_closed` recorded ([`crate::domain::worktime`]), per run and,
-//! as totals, medians and shares, per goal, kind and overall.
+//! as totals, medians and shares, per goal, kind and overall. No
+//! transcript is read here. A span that recorded no breakdown is not
+//! counted, so a value over spans that include one is a lower bound.
 
 use std::collections::BTreeMap;
 

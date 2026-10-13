@@ -14,8 +14,7 @@ related:
   - adr-t1233-1
   - design-provider-lifecycle
   - design-supervisor-lifecycle-headless-worker
-  - design-supervisor-lifecycle-stats
-  - design-supervisor-lifecycle-kpi
+  - design-supervisor-lifecycle-commands
 ---
 
 # Executionのトークン数
@@ -188,7 +187,7 @@ hookが閉じた区間では`session_closed`は`tokens`を持たず（`active_un
 ## statsとkpiでの集約
 
 `stats`の期間の集計と`kpi`は、Executionと対話のsessionの区切りの記録を同じ関数（`domain::stats::executions`）で窓に集める（ADR-t1486-1決定1・3）。
-taskとrunへの集約は区間の`tokens`で行い（[stats](supervisor-lifecycle/stats.md#トークン数)）、日とactorには分けない。
+taskとrunへの集約は区間の`tokens`で行い（`domain::stats::tokens`）、日とactorには分けない。
 
 - 窓に入れるのは窓の中で終わったExecutionと、区切りの時刻が窓の中の区切りで、eventを書いた時刻ではない。
   日をまたいで開いた区間は区切りごとの日に入り、閉じた日にまとめない。

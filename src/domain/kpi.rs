@@ -158,12 +158,13 @@ pub enum Axis {
     /// (< 1) or `full`.
     Slot,
     /// The load average at the claim over the host's cores: `low` (< 1),
-    /// `mid` (< 2), `high` (< 4) or `extreme`.
+    /// `mid` (< 2), `high` (< 4) or `extreme`. The claim records no cores:
+    /// they are the host's when the KPIs are read.
     Load,
     /// `rustc`'s release and host: cargo-only (ADR-t614-1), no stratum
     /// outside dagq's source.
     Toolchain,
-    /// Claude Code's version.
+    /// Claude Code's version; `none` for a run that worked on Codex.
     Claude,
     /// The provider (`claude` / `codex`) that did the run's work in the
     /// end: the last one it moved to, else the claim's (ADR-t813-2
@@ -176,11 +177,16 @@ pub enum Axis {
     Codex,
     /// The worker model trial's group at the run's first claim (ADR-0079
     /// decisions 2 and 6): `control` / `treatment`, `none` outside the
-    /// trial, `unknown` for a claim that recorded no worker session.
+    /// trial, `unknown` for a claim that recorded no worker session. Like
+    /// the model and the effort, a resume or revise that raised the session
+    /// does not move it.
     Group,
-    /// The worker's model at the run's first claim.
+    /// The worker's model at the run's first claim; for a run that worked
+    /// on Codex, the model its Codex turns used. Not the plan review's
+    /// `model=` of the `plan.*` KPIs.
     Model,
-    /// The worker's effort at the run's first claim.
+    /// The worker's effort at the run's first claim. Not the plan review's
+    /// `effort=` of the `plan.*` KPIs.
     Effort,
     /// The `nature` of the task's last weight prediction before the run
     /// started; `unknown` without one.
@@ -321,7 +327,9 @@ pub struct KpiQuery {
     pub compare: Option<CompareSpec>,
     /// Each side of a comparison across a mark, in days.
     pub window_days: i64,
-    /// Only the runs, asks and findings of this goal's tasks.
+    /// Only the runs, asks and findings of this goal's tasks. The slots
+    /// `slot_usage` divides by and the CPU `cpu_per_landing` counts stay
+    /// the whole queue's and host's.
     pub goal_id: Option<GoalId>,
 }
 
@@ -382,7 +390,9 @@ pub struct KpiInput<'a> {
     pub draft_origins: &'a HashMap<TaskId, DraftOrigin>,
     /// Unix seconds.
     pub now: i64,
-    /// The host's time zone, seconds east of UTC.
+    /// The host's time zone, seconds east of UTC. The offset of now is used
+    /// for every period, so a period across a daylight saving change is an
+    /// hour off.
     pub utc_offset_secs: i64,
     /// The host's logical cores, for the `load` axis.
     pub cores: Option<usize>,
@@ -586,8 +596,12 @@ pub fn direction(kpi: &str) -> Option<Direction> {
 /// How one KPI of one stratum moved from `before` to `after`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Change {
+    /// The [`Measure::primary`] before: the previous period's, or the
+    /// window before a mark.
     pub previous: Option<f64>,
+    /// The value after less the one before.
     pub delta: Option<f64>,
+    /// The value after over the one before; null when that is 0.
     pub ratio: Option<f64>,
     /// For a day: the median of the 7 days before it.
     #[serde(skip_serializing_if = "Option::is_none")]

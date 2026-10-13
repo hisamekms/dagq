@@ -165,7 +165,7 @@ reviewの側は[Review](review.md#文書の照合)が持つ（`REVIEW_DOCS_CHECK
 claimのたびに、supervisorはworkerが読む指示の内容のhashを3つ求め、runのproviderの値を`run_claimed`に別々のキーで記録する。
 値は内容だけから決まり、commitのIDや時刻を含まない。
 求められないものは`unknown`にし、claimは止めない。
-読み方は[kpi](kpi.md#workerが読んだ指示の版)が持つ。
+`kpi`の軸にはまだ無く、台帳を読むようになったら読む（予定）。
 
 - promptの雛形: taskとrunの値の代わりにplaceholderを入れたworkerのpromptで、providerごとに1つある（`worker_template`）。
   節の見出しと定型の文とproviderで変わる行が対象で、定型の文を変えるとhashが変わり、taskの値では変わらない。

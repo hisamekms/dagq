@@ -9,7 +9,7 @@ related:
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-status
-  - design-supervisor-lifecycle-stats
+  - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-handoff
   - design-supervisor-lifecycle-review
   - design-supervisor-lifecycle-needs-session
@@ -51,7 +51,10 @@ ADR-0071の決定15〜18。
 - **計時の再開**: slot の外では timeout を止め、戻った時点で restart_clocks を呼ぶ。回答と続行の依頼を file に書いた時刻を新しい起点にする。stale receipt の書き直しは元の依頼の時刻で比較する。対話 worker の入力欄待ちの時計は廃止した。
 - **`worker_question`のidle**（決定16）: `ReviseWatch`（task 238）と同じく、`ResumeWatch`もcloseされていない`worker_question`があるあいだは、idleでも段を終えず、`resume_timeout`も数えず、古いreceiptの書き直しも頼まない（`has_unclosed_worker_question`の判定がそれらより前にある）。ただし`ReviseWatch`は、依頼より後に書き直したreceiptの後のidleだけは質問のcloseを待たずに判定する（task 583、ADR-t583-1）。上限でslotに居るとき（`run_waiting_deferred`）と`--max-waiting 0`でも同じ。答えを送ったときはその時刻を、手で配送されてaskがcloseされたとき（closeの秒が最後の入力の秒より後）はcloseの時刻を最後の入力（`live.input_at`）にし、段の計時をそこから数え直す。以後のidleはそれより新しいmarkerだけを数える。
 - **Resume の配送**: ResumeWatch の live は SessionWatch を持つ。解消依頼から終了の依頼まで deliver_answers を回し、回答は次の turn に書く。request_exit は exit_requested を記録して終了の依頼を書く。session_takes_answers は resume 中で終了要求前の needs_session も配送対象にする。ダイアログの監視・入力欄待ち・exit_typed の判断は廃止した。
-- **phase**: `run_waiting_started`の`phase`と`status`の`waiting[].phase`は`revise` / `resume`。`status`はrunの今のstatus（`awaiting_integration` / `needs_session`）。`stats`の`waiting`は`ask_kind`ごとに数え、phaseでは分けない（決定18）。workerの経路（`interactive` / `headless`）では`by_route`で分ける（task 1370、[`stats`](stats.md)）。
+- **phase**: `run_waiting_started`の`phase`と`status`の`waiting[].phase`は`revise` / `resume`。
+  `status`はrunの今のstatus（`awaiting_integration` / `needs_session`）。
+  `stats`の`waiting`は`ask_kind`ごとに数え、phaseでは分けない（決定18）。
+  workerの経路（`interactive` / `headless`）では`by_route`で分ける（task 1370、[`stats`](commands.md)）。
 - **引き継ぎとadopt**: `Revise`はadoptと引き継ぎのどちらでもイベント（`review_anchor`）から組み立て、`Resume`は引き継ぎの`handoff.json`から、それが無ければadoptと同じくイベントから組み立てる（task 356・640）。どちらも組み立てた後の`restore_waiting`で待ちを戻す。
 
 ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`でwrapperが黙った。slotで終了を依頼する）と`phase_changed`（引き継ぎやadoptで待てないphaseに組み立て直した、またはadoptで上限を超えた）を足している。`lease_lost`と`run_ended`は書かない（leaseを失ったプロセスは書かない。adoptした側がイベントから同じ待ちを続けるので、書くとその待ちを消してしまう）。代わりに`WaitState::of`は、`run_waiting_started`の後に`lease_acquired` / `lease_released` / `run_recovered` / `runtime_error`があれば待ちは無いとみなす（待ちを持っていたsupervisorがrunを失った。adoptと引き継ぎはこれらを書かない）。
@@ -91,7 +94,8 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 ## 登録と見せ方
 
 - `supervise --max-waiting N`（0で待ちを使わない。明示が無ければ`dagq.toml`の`[supervisor] max_waiting`、それも無ければ4。[Run environment](run-environment.md)の`[supervisor]`、task 698）と`up --max-waiting N`（明示されたときだけ`supervise`の引数に足す）。supervisorは登録（と引き継ぎの取り戻し、`[supervisor]`の読み直しで変わったとき）に`supervisors.max_waiting`（schema v37、互換の列。[persistence](../persistence.md)）と出どころの`max_waiting_source`を書く。
-- `status`の各登録に`slots: {used, landing_queue, parallel, source}`（`landing_queue`は着地の順番待ち）と`waiting: {count, returning, limit, source}`（`source`は値の出どころ）（`count`は待ちと戻り待ちの合計で`--max-waiting`が数えるものと同じ、`returning`はその内訳の戻り待ち。数え方は`src/domain/waiting.rs`の`WaitCount`の1つで、supervisorの`waiting_runs()`と`status`の両方が使う）、全体に`waiting`の配列（[`status`](status.md)）。`stats`に`waiting`（[`stats`](stats.md)。窓はrunのpageではなく求めた窓の全体で、経路ごとの`by_route`を持つ。task 1370）。
+- `status`の各登録に`slots: {used, landing_queue, parallel, source}`（`landing_queue`は着地の順番待ち）と`waiting: {count, returning, limit, source}`（`source`は値の出どころ）（`count`は待ちと戻り待ちの合計で`--max-waiting`が数えるものと同じ、`returning`はその内訳の戻り待ち。数え方は`src/domain/waiting.rs`の`WaitCount`の1つで、supervisorの`waiting_runs()`と`status`の両方が使う）、全体に`waiting`の配列（[`status`](status.md)）。
+  `stats`に`waiting`（[`stats`](commands.md)。窓はrunのpageではなく求めた窓の全体で、経路ごとの`by_route`を持つ。task 1370）。
 
 ## test
 

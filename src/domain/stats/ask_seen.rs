@@ -4,7 +4,11 @@
 //! watcher's state is the latest `inbox_watcher_absent` /
 //! `inbox_watcher_returned` before the ask's `ask_opened`; an ask opened
 //! before either was recorded is no sample, as the watchers' own records
-//! do not last.
+//! do not last. Every ask counts, answered or closed. The supervisor
+//! records the watcher's changes once a pass: an ask opened after the
+//! watcher left but before its absence was recorded counts 0 seconds, and
+//! a change while no supervisor runs is recorded at its next pass. Only
+//! `kpi` reads it: the watcher is the inbox's, whatever the ask's kind.
 use super::{EventId, RunEvent, TaskId, timestamp_millis};
 use crate::domain::event_kind::{ASK_OPENED, INBOX_WATCHER_ABSENT, INBOX_WATCHER_RETURNED};
 

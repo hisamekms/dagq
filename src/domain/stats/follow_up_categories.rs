@@ -84,7 +84,8 @@ fn ratio(numerator: i64, denominator: i64) -> Option<f64> {
 /// Count the follow_up drafts (the tasks a `follow_up_registered` names)
 /// with `after < id <= upto` whose task `counts` accepts, by category; the
 /// backlog is the drafts still `draft` at `upto`, aged to `end` (unix
-/// milliseconds).
+/// milliseconds). A category nothing happened to in the window is not
+/// listed.
 pub fn follow_up_categories(
     events: &[RunEvent],
     after: EventId,

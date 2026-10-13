@@ -179,8 +179,9 @@ pub fn rework(event: &RunEvent) -> bool {
 /// the events whose task `counts` accepts. Plan reviews count in the window
 /// they finished in; a proposal counts in the window its first task became
 /// `ready` in, with the strata of the last plan review that started before
-/// that (a proposal readied without one is `unknown` but in `all`), and its
-/// tasks' fates so far.
+/// that (a proposal readied without one is in `all` only), and its
+/// tasks' fates so far: not cut at the window's end, so a recent window's
+/// counts can still grow.
 pub fn plan_quality(
     events: &[RunEvent],
     after: EventId,

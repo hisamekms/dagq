@@ -3,6 +3,46 @@
 //! thresholds it crossed. Everything is derived from `run_events`; this
 //! module is a pure function of the events, the task → goal map and a
 //! snapshot of the supervisors' free slots.
+//!
+//! It finds where the runs spend their time, what holds them and which
+//! thresholds they cross by one rule from the record every time, with no
+//! table of its own (ADR-0040 decision 5); it gives the running alerts and
+//! what each `[stall]` threshold detected in the same output, so that the
+//! observer, plan review, a person and the KPIs read the same values
+//! (ADR-0043 decisions 5 and 6); and it groups the runs by what they were
+//! claimed with (versions, load, provider, model, the trial's groups), so
+//! that a change can be compared before and after.
+//!
+//! The flow: the CLI (or the observer) → `compose::OneShot::stats_of`,
+//! which reads the time once → [`crate::application::stats::stats`],
+//! which reads the queue, the run directories, the wrappers' processes,
+//! main's history and `<queue dir>/host/` and passes them on without a
+//! judgement of its own → [`stats`] here, which holds every rule of the
+//! counting and does no I/O → [`with_changes`], [`with_areas`] and
+//! [`without_cargo_measures`] → JSON. The KPI windows, the forecast and
+//! plan review's conflict hotspots call [`stats`] directly, so they read
+//! the same rules. Where each field comes from in the ledger is
+//! [`crate::domain::ledger::window`]'s.
+//!
+//! One read has four ranges: the page of runs (`--since` <
+//! `finished_event_id` ≤ `--until`, [`DEFAULT_RUNS`] of them without
+//! `--full`), which `runs`, the groups made of them and `next_cursor`
+//! follow ([`Stats`]); the window of events every other period aggregate
+//! counts; that window in time, never past now, for `host` and
+//! `landing_utilization` ([`Stats::window_ms`]); and now, for
+//! `running_alerts`, the slot alert and the holds and deferrals in
+//! progress.
+//!
+//! Invariants: no table or event of its own, so every value can be
+//! derived again from the record at any time (a new aggregate records
+//! what it needs and derives it again); a field once output is only ever
+//! added to, never changed, as the observer, the KPIs, the report and plan
+//! review's prompt read the fields; the same events, time and
+//! observations give the same output; an old event without the record an
+//! aggregate reads is not rewritten but counted as null, `unknown` or
+//! `unlabeled`. Most period aggregates count what happened in the window
+//! and read how it ended from the events past it too; each aggregate's
+//! doc says which.
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -380,6 +420,14 @@ pub struct AreaStats {
 /// is listed, the first of `claim_held`, `claim_deferred` and `idle_slots`
 /// that holds: free slots while claims are held, or while tasks are
 /// deferred for any reason, are that hold's and not idle ones.
+///
+/// The runs' alerts look at the runs still in flight besides the page's.
+/// An `awaiting_integration` is timed from the first time the run went
+/// `awaiting_integration`, which a failed landing sending it back there
+/// does not move. A `task_failed` counts the `failed` of every run of the
+/// task, whatever the page, and is listed once the task's latest failed
+/// run is on the page or in flight. An `ask_unanswered` leaves out the
+/// asks that are over (`open_asks`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Alert {
     pub kind: &'static str,

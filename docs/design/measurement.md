@@ -18,12 +18,9 @@ related:
   - design-architecture
   - design-persistence
   - design-queue-service
-  - design-supervisor-lifecycle-stats
+  - design-supervisor-lifecycle-commands
   - design-main-history
   - design-supervisor-lifecycle-first-commit
-  - design-supervisor-lifecycle-timeline
-  - design-supervisor-lifecycle-kpi
-  - design-supervisor-lifecycle-report
   - design-supervisor-lifecycle-host-metrics
   - design-measurement-commands
 ---
@@ -32,7 +29,7 @@ related:
 
 > **一部だけ実装済み（2026-10-13）**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」は実装済みで、今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
-> 今動いている計測は[`stats`](supervisor-lifecycle/stats.md)・[最初のcommitの観測](supervisor-lifecycle/first-commit.md)・[`timeline`](supervisor-lifecycle/timeline.md)・[`kpi`](supervisor-lifecycle/kpi.md)・[レポート](supervisor-lifecycle/report.md)が持ち、この文書はそれらを変えない。
+> 今動いている計測は[計測のコマンド](supervisor-lifecycle/commands.md)（`stats`・`timeline`・`kpi`・`report`）と[最初のcommitの観測](supervisor-lifecycle/first-commit.md)が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
 
 決めた理由はADR-t1662-1（計測のモデル）・ADR-t1662-2（ストアの抽象化）・ADR-t1662-3（実行する側と送る口とコマンドの分類）が持つ。ここはeventの欄・列とJSONの形・数値・関数の名前の予定を持つ。

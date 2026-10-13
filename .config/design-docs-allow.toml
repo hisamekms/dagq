@@ -196,12 +196,6 @@ size = 42841
 line = 11174
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/kpi.md"
-size = 56938
-line = 4573
-tasks = 40
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/landing-branch.md"
 line = 1388
 tasks = 8
@@ -220,11 +214,6 @@ tasks = 5
 path = "docs/design/supervisor-lifecycle/logs.md"
 line = 3447
 tasks = 2
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/marks.md"
-line = 1512
-tasks = 3
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/needs-session.md"
@@ -284,11 +273,6 @@ path = "docs/design/supervisor-lifecycle/release-update.md"
 size = 31600
 line = 1661
 tasks = 2
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/report.md"
-line = 4104
-tasks = 9
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/review-command.md"
@@ -358,11 +342,6 @@ path = "docs/design/supervisor-lifecycle/throughput-review.md"
 size = 39731
 line = 3093
 tasks = 29
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/timeline.md"
-line = 1311
-tasks = 6
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/triage.md"

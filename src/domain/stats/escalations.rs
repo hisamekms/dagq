@@ -1,7 +1,8 @@
 //! The raises of worker sessions after failures the task caused (ADR-0079
 //! decision 5), over the runs of the page: how many resumes and revises
 //! raised a session, why and by which step, and whether each raised
-//! resume resolved the run in that one attempt.
+//! resume resolved the run in that one attempt. A step a retry's claim
+//! took over is no raise here; it shows in `kpi --by effort`.
 
 use std::collections::BTreeMap;
 

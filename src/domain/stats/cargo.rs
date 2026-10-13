@@ -5,7 +5,9 @@
 //! an `unknown` would read as a fact about that project. The decision is
 //! made each time `stats` is shown; the callers of
 //! [`super::stats`] itself (the KPI windows, plan review's conflict
-//! hotspots, the forecast) see every measure.
+//! hotspots, the forecast) see every measure. The work breakdown's
+//! categories (`e2e`, `llvm_cov`, the tests) are not hidden: the records
+//! do not mark them as cargo's.
 
 use serde::{Serialize, Serializer};
 

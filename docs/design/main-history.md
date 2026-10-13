@@ -7,7 +7,7 @@ created: 2026-10-09
 scope: runtime
 related:
   - design-measurement
-  - design-supervisor-lifecycle-stats
+  - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-supervise
   - adr-t1662-1
   - adr-t1662-2
@@ -15,7 +15,7 @@ related:
 
 # mainの履歴の記録
 
-`conflict_hotspots`の着地件数と改名・削除、areaの変えたfile（[stats](supervisor-lifecycle/stats.md)）を統計がGitを読まずに作れるよう、supervisorの周回がmainのfirst-parentの履歴を`main_*`のeventとしてEventStore（[計測](measurement.md)の「SSOTとビュー」）に記録する。
+`conflict_hotspots`の着地件数と改名・削除、areaの変えたfile（[stats](supervisor-lifecycle/commands.md)）を統計がGitを読まずに作れるよう、supervisorの周回がmainのfirst-parentの履歴を`main_*`のeventとしてEventStore（[計測](measurement.md)の「SSOTとビュー」）に記録する。
 何を書くかは`application::main_log::records`が決め、周回からは観測と分析の`supervise::main_log`が呼ぶ。
 runtimeの制御はこの記録を読まない。
 

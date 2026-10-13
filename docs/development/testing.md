@@ -108,7 +108,7 @@ testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通�
 - 印を付けるのは、直すtaskのIDと期限を持ちplan reviewを通ったtaskだけ。inboxやplannerが手で付けない。
 - 印の付いたtestを直すtaskは、同じ変更で自分の印を外す。
 - 印を変えるtaskのverifyには`sh scripts/check-e2e-quarantine.sh`を付ける（[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
-- 印で通した回数とflakyの回数は`stats`の関門のtestごとの数え方（[stats](../design/supervisor-lifecycle/stats.md)）で見て、直すtaskの優先と印の期限を決める。
+- 印で通した回数とflakyの回数は`stats`の関門のtestごとの数え方（[stats](../design/supervisor-lifecycle/commands.md)）で見て、直すtaskの優先と印の期限を決める。
 
 ## 手動スモーク
 

@@ -3,7 +3,9 @@
 //! and the thresholds crossed from, and what the running alerts (ADR-0043
 //! decision 5) read outside the queue: the run directories' markers and
 //! the processes of the runs' background wrappers (no cmux, ADR-t1433-1);
-//! and main's Git history for `conflict_hotspots`.
+//! and main's Git history for `conflict_hotspots`. Main's history and the
+//! areas are read from Git, not yet from the record of it the supervisor
+//! keeps ([`crate::domain::stats::main_log`]).
 
 use std::{
     collections::{HashMap, HashSet},

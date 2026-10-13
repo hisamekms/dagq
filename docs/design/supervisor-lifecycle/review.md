@@ -243,7 +243,7 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
   `adr_conflict`・`acceptance_conflict`・`acceptance_infeasible`は、workerが条件を満たすと別の決まりや事実に反すると書いているときで、単に届いていなければ`acceptance_unmet`。
 - **人の答えからの補い**（決定4）: `approve_landing`の答えを適用するとき、最後のreviewがreviseかconcernなら、答えとそのコードを`review_outcome`に記録する（`domain::review_reason::answer_outcome`）。
   reviewの失敗のask、passの後の衝突のask、workerに返したreviseには記録しない。
-  集計は[Stats](stats.md#差し戻しの分類コードごとの集計)が持つ。
+  集計は`domain::stats::review_reasons`が持つ。
 
 ## AIが決めるconcern<a id="aiが決めるconcern未実装"></a>
 

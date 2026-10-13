@@ -349,7 +349,11 @@ pub fn job_lives_with(
 }
 
 /// The jobs whose end has `after < id <= upto` and which `counts` accepts,
-/// per kind; every kind is listed, with no job too.
+/// per kind; every kind is listed, with no job too. An end pairs with the
+/// latest start of its key before it. An end that started no agent
+/// (`end_of` gives none) and a recovery end with no start (a round that
+/// had used up its jobs) are no jobs, so the recovery jobs here can be
+/// fewer than those of `auto_repairs`.
 pub fn jobs(
     events: &[RunEvent],
     after: EventId,

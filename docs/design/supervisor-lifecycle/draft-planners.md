@@ -61,7 +61,8 @@ related:
 
 - **plannerへの材料**: 2の対象のdraftをplannerに渡すとき、出どころの`material`の`category`（[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード)）を、promptのdraftごとの節に`Category (the worker's; keep it as it is, ...): <コード>: <定義>`の行で載せる（一覧に無い値と`unlabeled`はその旨を添える。`follow_up_category_line`）。plannerは種類を書き換えない（判断に合わせて種類が寄らないように。ADR-t947-3の代替案）。
 - **判断との突き合わせ**: 8の束のdraftごとの結末と、plannerがそのdraftについて開いた`planner_question`とその答えを、draftの`category`で並べる。不採用（`canceled`）の理由は[cancelの理由の分類コード](../domain-model.md#cancelの理由の分類コード未実装)（ADR-t947-4）で読む。
-- **集計**: [Stats](stats.md#follow_upの種類ごとの集計)の`follow_up_categories`。draftの種類は`follow_up_registered`の`category`から引き、結末は`draft_planner_settled`の`outcome`（窓の中の最後のもの）、`draft_planner_exhausted`、draftの`planner_question`の`ask_opened`と`ask_answered`の`option`、draftからの`task_status_changed`（`duplicate_of`の有無で重複を分ける）から数える。
+- **集計**: [Stats](commands.md)の`follow_up_categories`。
+  draftの種類は`follow_up_registered`の`category`から引き、結末は`draft_planner_settled`の`outcome`（窓の中の最後のもの）、`draft_planner_exhausted`、draftの`planner_question`の`ask_opened`と`ask_answered`の`option`、draftからの`task_status_changed`（`duplicate_of`の有無で重複を分ける）から数える。
 
 ## 推奨が出せればplannerが決める（ADR-t451-1）<a id="推奨が出せればplannerが決める未実装"></a>
 

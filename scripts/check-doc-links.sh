@@ -70,6 +70,11 @@ docs/design/broker.md | docs/adr/2026-10-08-t2113-1-remove-the-resource-broker.m
 docs/design/supervisor-lifecycle/task-hold.md | docs/plans/task-hold.md |
 docs/design/supervisor-lifecycle/task-replanning.md | docs/plans/task-replanning.md |
 docs/design/manual-smoke.md | docs/development/manual-smoke.md (the procedures) and docs/plans/manual-smoke-results.md (the dated results) |
+docs/design/supervisor-lifecycle/kpi.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::kpi |
+docs/design/supervisor-lifecycle/stats.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::stats |
+docs/design/supervisor-lifecycle/marks.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::marks |
+docs/design/supervisor-lifecycle/report.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::kpi::report and application::report |
+docs/design/supervisor-lifecycle/timeline.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::timeline |
 EOF
 )
 

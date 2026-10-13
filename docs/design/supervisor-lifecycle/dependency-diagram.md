@@ -9,13 +9,15 @@ related:
   - design-supervisor-lifecycle
   - design-domain-model
   - design-supervisor-lifecycle-doctor
-  - design-supervisor-lifecycle-report
+  - design-supervisor-lifecycle-commands
   - adr-0077
 ---
 
 # 当面の依存図（`graph --format d2|svg`）
 
-[ADR-0077](../../adr/0077-near-term-dependency-graph-with-d2-tala.md)の決定1〜5・7の単体の出し方の実装（task 533）。`dagq graph`の結果（[Domain model](../domain-model.md)の`graph`）から当面のtaskを選び、座標を固定したd2のソースを組み立て、SVGはhostの`d2 --layout=tala`で描く。日次・週次レポートへの埋め込み（決定7の後半、task 534）は[report](report.md#当面の依存図)に書く（同じ`near_term`と`render_svg`を使う）。
+[ADR-0077](../../adr/0077-near-term-dependency-graph-with-d2-tala.md)の決定1〜5・7の単体の出し方の実装（task 533）。
+`dagq graph`の結果（[Domain model](../domain-model.md)の`graph`）から当面のtaskを選び、座標を固定したd2のソースを組み立て、SVGはhostの`d2 --layout=tala`で描く。
+日次・週次レポートへの埋め込み（決定7の後半、task 534）は`application::report`のdoc commentが持つ（同じ`near_term`と`render_svg`を使う）。
 
 ## コマンド
 

@@ -206,7 +206,7 @@ Claudeもtranscriptは読めるが、区間の数え方をproviderで分けな�
 
 - 入口: `domain::tokens::span_models`、非対話のruntimeのplannerは`domain::turn::turns_model`。
 - 既定で起動したjobの`launch`はmodelもeffortも持たないので、実際の値はここで読む値になる（[Actor model](supervisor-lifecycle/actor-model.md)）。
-- 読み口は[stats](supervisor-lifecycle/stats.md#claude-session)。
+- 読み口は[stats](supervisor-lifecycle/commands.md)。
 
 ## workerのproviderと経路
 
@@ -289,7 +289,7 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
   `--no-claude`は止めない。
   設定の読み直しと書式は[Run environment](supervisor-lifecycle/run-environment.md)。
 - timer jobの使えない終わりの読み取りは観測と分析の側（`supervise::observer`）が値にし、控えは実行と着地の側（`supervise::provider`）が行う（[Architecture](architecture.md)）。
-- 記録と集計（`provider_switched`・`stats`の`provider_switches`・`kpi`の`provider=`）は[stats](supervisor-lifecycle/stats.md)と[kpi](supervisor-lifecycle/kpi.md)。
+- 記録と集計（`provider_switched`・`stats`の`provider_switches`・`kpi`の`provider=`）は[stats](supervisor-lifecycle/commands.md)と[kpi](supervisor-lifecycle/commands.md)。
   集計のproviderは切り替えの後のactualで数える。
 
 ## 大きなcontextからの新しいsession

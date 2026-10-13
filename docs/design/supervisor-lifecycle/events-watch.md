@@ -69,7 +69,16 @@ watcherが居ないときの後ろ盾は、supervisorの`inbox_nudged`のevent�
 
 ### watcherの変わり目の記録
 
-記録のファイルは7日で消え、`kpi`はrun_eventsだけから導くので、supervisorがwatcherの状態の変わり目をqueueのeventに残す（task 1021。`src/application/supervise/inbox_nudge.rs`の`record_watcher_change`）。supervisorは毎pass（drain中も）、知らせ（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）と同じ`judge_with`の判定で、`alive`なら`inbox_watcher_returned`、`absent`なら`inbox_watcher_absent`をqueueのevent（task・goal・runを持たない）として`record_inbox_watcher_change`で書く。この2つのkindのうち最新のeventが同じkindなら書かずに`false`を返す（1つのwrite transaction。`claim_inbox_nudge`と同じ排他）ので、watcherが居続ける・居ないままのpassでは書かず、同じqueueの複数のsupervisorとexecの引き継ぎの後のprocessも同じ変わり目を二度書かない。最新のeventの`at`より古い判定（遅れて書こうとしたsupervisorの、別のsupervisorより前の判定）も書かない。どちらも記録の無いqueueでは、最初のpassの判定をそのまま書く（`inbox_watcher_returned`は最初の`alive`も表す）。payloadは`{at（判定のunix秒）, watching, last_seen_at, absent_secs}`（判定の値。`absent_secs`は`absent`のときだけ数値）。書けなくてもwarnを出すだけで、次のpassで書き直す。どちらもattentionではない。`watch`と`status`はqueue DBを読み取り専用のまま。`kpi`の`ask_seen_wait`（[kpi](kpi.md)）がこれを読む。
+記録のファイルは7日で消え、`kpi`はrun_eventsだけから導くので、supervisorがwatcherの状態の変わり目をqueueのeventに残す（task 1021。`src/application/supervise/inbox_nudge.rs`の`record_watcher_change`）。
+supervisorは毎pass（drain中も）、知らせ（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t1433-5)）と同じ`judge_with`の判定で、`alive`なら`inbox_watcher_returned`、`absent`なら`inbox_watcher_absent`をqueueのevent（task・goal・runを持たない）として`record_inbox_watcher_change`で書く。
+この2つのkindのうち最新のeventが同じkindなら書かずに`false`を返す（1つのwrite transaction。`claim_inbox_nudge`と同じ排他）ので、watcherが居続ける・居ないままのpassでは書かず、同じqueueの複数のsupervisorとexecの引き継ぎの後のprocessも同じ変わり目を二度書かない。
+最新のeventの`at`より古い判定（遅れて書こうとしたsupervisorの、別のsupervisorより前の判定）も書かない。
+どちらも記録の無いqueueでは、最初のpassの判定をそのまま書く（`inbox_watcher_returned`は最初の`alive`も表す）。
+payloadは`{at（判定のunix秒）, watching, last_seen_at, absent_secs}`（判定の値。`absent_secs`は`absent`のときだけ数値）。
+書けなくてもwarnを出すだけで、次のpassで書き直す。
+どちらもattentionではない。
+`watch`と`status`はqueue DBを読み取り専用のまま。
+`kpi`の`ask_seen_wait`（[kpi](commands.md)）がこれを読む。
 
 ## CIの見張り（ADR-t1920-1）
 

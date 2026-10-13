@@ -79,7 +79,7 @@ reference/（参考資料。比べる値を裏づけるのには使わず、comp
 
 ### 各値の求め方
 
-どれも [stats](../design/supervisor-lifecycle/stats.md) と [Review](../design/supervisor-lifecycle/review.md) の定義を normalized/ の event に当てて compute が求め、stats の出力は読まない。秒はミリ秒の差を 1000 で割った切り捨て（stats と同じ）。run の event は id の順に読む。
+どれも `domain::stats` と [Review](../design/supervisor-lifecycle/review.md) の定義を normalized/ の event に当てて compute が求め、stats の出力は読まない。秒はミリ秒の差を 1000 で割った切り捨て（stats と同じ）。run の event は id の順に読む。
 
 | 値 | 求め方 |
 |---|---|
@@ -100,7 +100,7 @@ reference/（参考資料。比べる値を裏づけるのには使わず、comp
 | actual_provider | C より前の最後の `provider_switched` の `to`、無ければ最初の `run_claimed` の `provider` |
 | review の provider | 最初の `review_started` の `launch.provider`。run の中で provider の違う review があれば `review_providers` に並べる（どの区間も 0 run） |
 | 状態 | `landed`（`run_integrated` がある）、`ended`（着地せず、C より前に最後に記録された payload の `status` が `failed` / `interrupted`。resume で取り戻された途中の `failed` は数えない）、`review 中`（どちらでもなく、最後の verdict が revise か concern でその後に review が無い）、`未着地`（それ以外） |
-| kpi の first_pass | 参考。着地した run のうち、task の run が 1 つで、その run に `resume_started`・`revise_requested`・`integration_deferred` が無いもの（[kpi](../design/supervisor-lifecycle/kpi.md) の `first_pass_rate`）÷ 着地した run。初回通過率は review の最初の verdict だけを見るので、resume や着地の延期、同じ task の前の run があっても最初の verdict が pass なら数え、逆に kpi は review の無い run も数える（この表では reviewed run に限った） |
+| kpi の first_pass | 参考。着地した run のうち、task の run が 1 つで、その run に `resume_started`・`revise_requested`・`integration_deferred` が無いもの（`domain::kpi` の `first_pass_rate`）÷ 着地した run。初回通過率は review の最初の verdict だけを見るので、resume や着地の延期、同じ task の前の run があっても最初の verdict が pass なら数え、逆に kpi は review の無い run も数える（この表では reviewed run に限った） |
 | 中央値・p90 | 中央値は偶数個なら中央 2 つの平均の切り捨て、p90 は nearest-rank（昇順で ceil(0.9×n) 番目）。stats と同じ。『未着地』『未取得』『未完』の run はその値の中央値と p90 から除き、『review 中』の run は review の中央値と p90 から除く。どれも件数を列に出す |
 
 ### 層

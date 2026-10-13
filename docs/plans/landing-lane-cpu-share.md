@@ -58,7 +58,7 @@ task 961の測定（goal 65）。goal 65は、着地の処理を`--parallel`のs
 | 期間 | 2026-09-29 11:45〜2026-10-02 11:45 JST（72時間。UTCで`2026-09-29T02:45:00Z`〜`2026-10-02T02:45:00Z`） |
 | 着地の処理 | `integration_started`から、同じrunの次の`run_integrated`か`integration_deferred`まで。158回あり、142回が着地し、16回は控えた（`verification_failed` 8回、`rebase_conflict` 6回、`commit_mismatch` 2回） |
 | llvm-covの検証 | `verification_command`（`phase: integration`）のうち、commandにllvm-covを含むもの124回（exitが0のもの104回）。区間はeventの時刻から`duration_secs`を引いた時刻からeventの時刻まで。`load_avg_mean` / `load_avg_max`はこのeventの値 |
-| workerの重いコマンド | `session_closed`の`work.heavy`（分類`build` / `test` / `e2e` / `chain` / `llvm_cov`。[stats の作業の内訳](../design/supervisor-lifecycle/stats.md#作業の内訳)）。1,309本（`test` 716・`build` 322・`chain` 145・`e2e` 125・`llvm_cov` 1）。着地しているrun自身のものは除いた |
+| workerの重いコマンド | `session_closed`の`work.heavy`（分類`build` / `test` / `e2e` / `chain` / `llvm_cov`。stats の作業の内訳（`domain::stats::work`））。1,309本（`test` 716・`build` 322・`chain` 145・`e2e` 125・`llvm_cov` 1）。着地しているrun自身のものは除いた |
 | hostのe2e | `run_e2e_started`から`run_e2e_finished`まで（[ADR-t1233-2](../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)）。期間中は15回で、どれも2026-10-02で、どれも通った。中央値は204秒 |
 | 参考: 自動更新 | `update_started`から`update_installed`などまで。76回、中央値394秒。buildと全部のe2eの関門をhostで流すので、別の列に出した |
 | 記録の欠け | Codexの非対話のworkerの区間（151区間）は`work`を記録しないので、重いコマンドが分からない。これらは「Codexのsessionが開いていた」割合として別に出した |
@@ -70,7 +70,7 @@ task 961の測定（goal 65）。goal 65は、着地の処理を`--parallel`のs
 - `dagq stats --since 2026-09-29T02:45:00Z --until 2026-10-02T02:45:00Z`: `landing_utilization`と`claim_holds`を読んだ。
 - `dagq status`: 試作の間の本番のclaimと着地の控えを確かめた。
 
-`timeline`のcommandsは、同じ`session_closed`の`work.heavy`から導かれる（[timeline](../design/supervisor-lifecycle/timeline.md)）。そのため、eventから直接集計した。
+`timeline`のcommandsは、同じ`session_closed`の`work.heavy`から導かれる（`domain::timeline`）。そのため、eventから直接集計した。
 
 ### 1.2 試作（(2)）
 

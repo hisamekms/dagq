@@ -2,7 +2,9 @@
 //! group: over the runs of the page claimed in a group, how fast they were
 //! and how often their task caused rework. The judgement (about 45 runs a
 //! group, the treatment's rework rate at most 5 points above the
-//! control's) is left to a person and the planner.
+//! control's) is left to a person and the planner. As only the page's
+//! runs count, judge the trial on `stats --full` or a `--since` from when
+//! it began, and read its course in `kpi --by group`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

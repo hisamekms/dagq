@@ -316,6 +316,9 @@ fn listed(files: &dyn RunFiles, root: &Path) -> Result<Vec<(ReportFile, Vec<Path
 }
 
 /// Remove the reports the retention does not keep; returns their files.
+/// Only `daily/` and `weekly/` are read, and a file there not named as a
+/// report is left alone but for a stale temporary file; the throughput
+/// reviews' `reviews/` beside them is never touched.
 fn prune(
     files: &dyn RunFiles,
     root: &Path,

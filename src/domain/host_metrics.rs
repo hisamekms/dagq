@@ -646,7 +646,10 @@ impl Summary {
     }
 }
 
-/// The summary of the host's load over a window (`stats`'s `host`).
+/// The summary of the host's load over a window (`stats`'s `host`): the
+/// host's, so `--goal` does not narrow it. A pair of samples whose
+/// cumulative count went back (a reboot) gives no rate. Files that cannot
+/// be read give no sample and the `error`, and `stats` does not fail.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HostSummary {
     /// The window, unix seconds.

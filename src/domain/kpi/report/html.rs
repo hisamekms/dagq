@@ -281,7 +281,7 @@ fn trend(page: &mut String, periods: &[PeriodKpis]) {
 }
 
 /// A bar per period, scaled to the largest value, with a triangle above
-/// each period that has a mark.
+/// each period that has a mark; a partial period's bar is lighter.
 fn spark(name: &str, periods: &[PeriodKpis], values: &[Option<f64>]) -> String {
     const STEP: usize = 14;
     const BAR: usize = 10;

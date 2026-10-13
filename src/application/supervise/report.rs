@@ -6,7 +6,10 @@
 //! supervisors do not write it again. It takes no run slot and uses no
 //! LLM; the loop does not wait for it but like the observer, before it
 //! ends. A failure is logged and tried again after [`RETRY`]; it stops no
-//! claim nor landing. After the reports the same job records the targets'
+//! claim nor landing. Only a supervisor still claiming starts the job; one
+//! draining, stopping or waiting for a handoff only reaps the job running.
+//! A job an exec cuts short leaves the reports it did not record to the
+//! next process. After the reports the same job records the targets'
 //! breaches that started and ended and makes the messages of the host's
 //! push command (ADR-0051 decisions 18 and 23), which [`super::push`]
 //! sends.

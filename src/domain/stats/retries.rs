@@ -37,7 +37,11 @@ const PARKING: [&str; 8] = [
 /// The reason of a deferral or resume whose event carries no code.
 pub const UNKNOWN: &str = "unknown";
 
-/// A landing on main after which this run's landing was deferred.
+/// A landing on main after which this run's landing was deferred. The
+/// landings are looked up among every event, so a landing outside the
+/// window is named too; the run's own landing and a main that moved
+/// outside the runtime (no `run_integrated` recorded its commit) are
+/// never named.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BrokenBy {
     pub task_id: TaskId,
@@ -119,7 +123,8 @@ pub struct Retries {
     /// command they had passed, in order, one per landing and none that
     /// `broken_by` names.
     pub rebased_onto: Vec<RebasedOnto>,
-    /// How many other runs this run's landing broke.
+    /// How many other runs this run's landing broke: those whose
+    /// `broken_by` names it, not those that have it only in `rebased_onto`.
     pub broke_runs: i64,
     pub resume_attempts: Vec<ResumeAttempt>,
     /// The revises that raised the live session, or tried to.

@@ -304,6 +304,15 @@ pub fn breakdown<'a>(runs: impl Iterator<Item = (&'a LandPhases, i64)>) -> LandB
 
 /// A run's wait to land as its events go by, from its first
 /// `validation_finished` (unix milliseconds throughout).
+///
+/// An event whose `status` is `needs_session` moves the run to `resume`
+/// before any other rule. An ask moves it to `ask`, and once every open
+/// ask is answered it goes back to the phase before; as closing an ask
+/// writes no event, an event of another phase in between forgets the
+/// asks still open. An `approve_landing` answer the runtime applies moves
+/// the run to `landing_queue`; one the inbox reads keeps it in `ask`. A
+/// run that has not landed yet is broken down only for the `phase` of its
+/// `awaiting_integration` alert.
 #[derive(Debug, Clone)]
 pub struct LandClock {
     phase: usize,

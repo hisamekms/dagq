@@ -11,7 +11,7 @@ related:
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-status
-  - design-supervisor-lifecycle-stats
+  - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-observer
   - design-supervisor-lifecycle-backend-call-failures
   - design-supervisor-lifecycle-disk-space
@@ -99,5 +99,9 @@ supervisorのlogにも`claim_held`はwarn、`claim_resumed`はinfoで出る。
 ## `status`と`stats`
 
 - `status`: 最新の`claim_held` / `claim_resumed`が`claim_held`なら、その`supervisor`の登録の項目に`claim_hold`（`claim_held`のpayloadと`since`（記録の時刻））を付ける（[`status`](status.md)）。着地の検証の控えは同じ形の`landing_hold`
-- `stats`: `claim_holds`に、windowの中で始まった控えの`count`と`secs`（合計秒）、理由ごとの`by_reason: {<reason>: {count, secs}}`、今の控え`held`（`{reason, supervisor, since, value, threshold}`、無ければnull）を出す。控えは次の`claim_held` / `claim_resumed`か、同じsupervisorの`supervisor_stopped`で終わり、まだ終わっていない控えとwindowの後に終わった控えはwindowの終わりまでを数える。`--goal`では件数を数えない（taskを持たないため）が、`held`は出す。着地の検証の控えは同じ形の`landing_holds`。控えている間に空きslotがあれば、`idle_slots`の代わりにalert `claim_held`（`value`は空きslotの数）を出すので、控えによる空きと依存の詰まりによる空きを区別できる（[`stats`](stats.md)）
+- `stats`: `claim_holds`に、windowの中で始まった控えの`count`と`secs`（合計秒）、理由ごとの`by_reason: {<reason>: {count, secs}}`、今の控え`held`（`{reason, supervisor, since, value, threshold}`、無ければnull）を出す。
+  控えは次の`claim_held` / `claim_resumed`か、同じsupervisorの`supervisor_stopped`で終わり、まだ終わっていない控えとwindowの後に終わった控えはwindowの終わりまでを数える。
+  `--goal`では件数を数えない（taskを持たないため）が、`held`は出す。
+  着地の検証の控えは同じ形の`landing_holds`。
+  控えている間に空きslotがあれば、`idle_slots`の代わりにalert `claim_held`（`value`は空きslotの数）を出すので、控えによる空きと依存の詰まりによる空きを区別できる（[`stats`](commands.md)）
 - observerは`stats --since <cursor>`を入力に読むので、`claim_holds`とalert `claim_held`もそのまま載る

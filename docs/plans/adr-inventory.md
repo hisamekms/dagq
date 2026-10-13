@@ -267,7 +267,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 ### ADR-0023・ADR-0024
 
-置き換え済み（0023 → ADR-0040 → ADR-0049、0024 → ADR-0041 → ADR-0044 → ADR-0047）。0023の今の姿は[validation](../design/supervisor-lifecycle/validation.md)・[review](../design/supervisor-lifecycle/review.md)・[run-environment](../design/supervisor-lifecycle/run-environment.md)・[dependency-diagram](../design/supervisor-lifecycle/dependency-diagram.md)・[stats](../design/supervisor-lifecycle/stats.md)、0024は[roles](../design/supervisor-lifecycle/roles.md)・[triage](../design/supervisor-lifecycle/triage.md)・[observer](../design/supervisor-lifecycle/observer.md)・[plan-planners](../design/supervisor-lifecycle/plan-planners.md)。
+置き換え済み（0023 → ADR-0040 → ADR-0049、0024 → ADR-0041 → ADR-0044 → ADR-0047）。0023の今の姿は[validation](../design/supervisor-lifecycle/validation.md)・[review](../design/supervisor-lifecycle/review.md)・[run-environment](../design/supervisor-lifecycle/run-environment.md)・[dependency-diagram](../design/supervisor-lifecycle/dependency-diagram.md)・[stats](../design/supervisor-lifecycle/commands.md)、0024は[roles](../design/supervisor-lifecycle/roles.md)・[triage](../design/supervisor-lifecycle/triage.md)・[observer](../design/supervisor-lifecycle/observer.md)・[plan-planners](../design/supervisor-lifecycle/plan-planners.md)。
 
 ### ADR-0025 leaseの無い未完了runを`recover run`のattentionにする
 

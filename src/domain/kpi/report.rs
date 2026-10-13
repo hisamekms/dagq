@@ -132,12 +132,14 @@ pub struct Report {
     pub report: ReportHeader,
     #[serde(flatten)]
     pub kpi: Kpi,
-    /// The findings still `open` or `proposed`.
+    /// The findings still `open` or `proposed`. Like [`Self::findings`],
+    /// as they stood when the report was made, not in its period, also for
+    /// a period written afterwards.
     pub findings_open: usize,
     /// The first [`FINDINGS_LISTED`] of them, larger impact first.
     pub findings: Vec<FindingLine>,
     /// The near-term dependency diagram as the queue stood when the report
-    /// was generated.
+    /// was generated, also for a period written afterwards.
     pub diagram: DiagramSection,
 }
 

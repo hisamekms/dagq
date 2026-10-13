@@ -168,7 +168,9 @@ Stop hookがそのturnの終わりを止める。
 
 ### sessionの区間hook（ADR-0048）
 
-runtimeがheadlessで起動しないinbox・planner（廃止前に人が`dagq plan`で開いたものと、古いruntimeがworkspaceで立てたもの）のClaude sessionの区間（kind・session_id・開始・終了）は、pluginのhookが記録する（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定6）。区間の書き方と推定の終了は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)、集計は[stats](supervisor-lifecycle/stats.md#claude-session)。runtimeのplanner（全て非対話）の区間はturnから記録する（[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4）ので、そのturnの`claude -p`がこのhookを走らせても、`record_hook`はplannerの行の`route`が`headless`なら何も書かず`skipped: headless_planner`を返し、hookの開いている区間に`route: headless`の区間を含めない。
+runtimeがheadlessで起動しないinbox・planner（廃止前に人が`dagq plan`で開いたものと、古いruntimeがworkspaceで立てたもの）のClaude sessionの区間（kind・session_id・開始・終了）は、pluginのhookが記録する（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定6）。
+区間の書き方と推定の終了は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)、集計は[stats](supervisor-lifecycle/commands.md)。
+runtimeのplanner（全て非対話）の区間はturnから記録する（[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4）ので、そのturnの`claude -p`がこのhookを走らせても、`record_hook`はplannerの行の`route`が`headless`なら何も書かず`skipped: headless_planner`を返し、hookの開いている区間に`route: headless`の区間を含めない。
 
 - `hooks/hooks.json`は`SessionStart`にmatcherの無い2つ目のグループ（`startup` / `resume` / `clear` / `compact`の全部）で`${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh open`を、`SessionEnd`（matcherなし）で`session-event.sh close`を呼ぶ。起き直しの`session-start.sh`のグループと出力はそのまま。
 - `session-event.sh`は`DAGQ_ROLE`が`inbox` / `planner`で`DAGQ_QUEUE`があるときだけ、hookのstdin（`session_id`・`transcript_path`・`cwd`・`source` / `reason`）をそのまま`bin/dagq session-event open|close`（隠しコマンド）に渡す。`DAGQ_DB`が無ければ`DAGQ_QUEUE`を`DAGQ_DB`にする。それ以外のsession（workerを含む。workerの区間はruntimeが書く）では何もしない。

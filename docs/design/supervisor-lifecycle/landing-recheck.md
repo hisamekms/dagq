@@ -78,7 +78,8 @@ targetの中身は、空き容量のための掃除だけがrecheckの走って�
 - recheckが終わるたびに、mainを動かした着地のrun（着地のrunの無いmainの動きなら確かめた最初のrun）に`landing_recheck_finished`（`main`、`landed_run_id`、`landed_task_id`、`command`、`checked`、`clean`、`conflicts`、`check_failed`、`errors`、`resumed`、`held`、`failed_runs`（`run_id`・`code`・`action`）、`duration_secs`、`supervisor`）を記録する。
   hostの失敗はコードの失敗とは別に数え、resumeにもheldにも数えない（`supervise::recheck`の`Tally`）。
 - [`status`](status.md)は最新の`landing_recheck_finished`のpayloadを`landing_recheck`（`at`付き。まだ無ければnull）として出す。
-- [`stats`](stats.md)の`landing_rechecks`は、`backend_failures`と同じ窓の`rechecks`、`runs_checked`、`conflicts`、`check_failures`、`resumed`と、findingごとの`runs`（`task_id`、`run_id`、`code`、`action`、`landed_task_id`）。`repeat`は新しいfindingに数えず、`resumed`には数える。
+- [`stats`](commands.md)の`landing_rechecks`は、`backend_failures`と同じ窓の`rechecks`、`runs_checked`、`conflicts`、`check_failures`、`resumed`と、findingごとの`runs`（`task_id`、`run_id`、`code`、`action`、`landed_task_id`）。
+  `repeat`は新しいfindingに数えず、`resumed`には数える。
   hostの失敗も同じく、コードの失敗にもresumeにも数えず別に数える（`domain::stats::LandingRechecks`）。
-- [`stats`](stats.md)の`landing_waits`は、着地したrunをreviewの後に人かrecoverを待ったかで分け、群ごとにこのrecheckが着地の前に見つけた衝突と着地のrebaseの衝突のrunを数える（goal 39、task 1312）。
+- [`stats`](commands.md)の`landing_waits`は、着地したrunをreviewの後に人かrecoverを待ったかで分け、群ごとにこのrecheckが着地の前に見つけた衝突と着地のrebaseの衝突のrunを数える（goal 39、task 1312）。
 - `landing_recheck_failed`はcode（ADR-0034）を持つので、`needs_session`のrunの`last_error_code`にも出る。[Conflict thresholds](conflict-thresholds.md)の`conflict_hotspots`はこのイベントを数えない（着地のrebaseとpassの時のprecheckの衝突だけ）。

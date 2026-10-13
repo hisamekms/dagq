@@ -20,7 +20,7 @@ related:
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-conflict-thresholds
   - design-supervisor-lifecycle-status
-  - design-supervisor-lifecycle-stats
+  - design-supervisor-lifecycle-commands
 ---
 
 # claimを控える（衝突の多いファイル）
@@ -155,5 +155,7 @@ Spikeは実装とworkerの総枠（`parallel`）を共有し、枠を予約し�
   `held`はclaimを止める条件を順に混ぜずに出す（`application::health::claim_holds`）: 生きたsupervisorが居なければ`no_supervisor`、生きたsupervisor（か名の無いもの）の最新の記録が保留を示す`claim_held`・`run_env_program_missing`、生きたsupervisorごとに自分の最新の記録が保留を示す`ci_watch_held`・`landing_branch_unresolved`、待っているclaim spacing。
   CLIはこれらの条件も判定し直さず、supervisorが記録しない条件は出さない。
   控えが閉じるのはsupervisorが次に判定したときだけで、`fill_slots`はslotが無いpassとclaimを止めているpass（両方のproviderが使えないpassを除く）では判定せず、hotspotの入力もcacheするので、その間は前の判定の控えが開いたまま出る（遅れの上限は無い）。
-- `stats`: `claim_deferrals`に、windowの中で始まった控えの`count`と`secs`、終わり方ごとの`by_end`（`claim_deferral_ended`の`why`のどれでも、claimで終わったもの・まだ終わっていないもの・同じtaskの次の`claim_deferred`で置き換わったものも、`domain::claim_defer::deferral_spans`）、hotspotごとの控えた回数`by_file`、今の控え`deferred`を出す。控えは次の`claim_deferral_ended`かそのtaskの`run_claimed`で終わり、まだ終わっていない控えはwindowの終わりまでを数える。空きslotがあり控えているtaskがあれば、alert `claim_deferred`（`value`は控えているtaskの数）を`idle_slots`の代わりに出す（[`stats`](stats.md)）
+- `stats`: `claim_deferrals`に、windowの中で始まった控えの`count`と`secs`、終わり方ごとの`by_end`（`claim_deferral_ended`の`why`のどれでも、claimで終わったもの・まだ終わっていないもの・同じtaskの次の`claim_deferred`で置き換わったものも、`domain::claim_defer::deferral_spans`）、hotspotごとの控えた回数`by_file`、今の控え`deferred`を出す。
+  控えは次の`claim_deferral_ended`かそのtaskの`run_claimed`で終わり、まだ終わっていない控えはwindowの終わりまでを数える。
+  空きslotがあり控えているtaskがあれば、alert `claim_deferred`（`value`は控えているtaskの数）を`idle_slots`の代わりに出す（[`stats`](commands.md)）
   `claim_waits`は窓の中のclaimを実行区分ごとに、readyになってからclaimまでの秒（`run_claimed`の`ready_at`から。区分を持たない古いclaimは実装）で数える（`domain::stats::claim_waits`）

@@ -7,15 +7,13 @@ created: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
-  - design-supervisor-lifecycle-stats
+  - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-supervise
-  - design-supervisor-lifecycle-kpi
   - adr-0049
   - adr-t1662-2
   - design-measurement
   - design-persistence
   - design-supervisor-lifecycle-disk-space
-  - design-supervisor-lifecycle-report
   - design-supervisor-lifecycle-throughput-review
 ---
 
@@ -24,7 +22,7 @@ related:
 supervisorが動いているあいだ、hostの負荷（load average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageoutと、runのworktreeのファイルシステムの空き）を決まった間隔で取り、1回のsampleをqueue.dbのNodeSampleStore（`node_samples`）と、queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`host/metrics-YYYYMMDD.csv`の両方に書く。
 NodeSampleStoreが恒久の記録で、CSVは同じsampleから書く人が読む写し（[ADR-t1662-2](../../adr/2026-10-04-t1662-2-measurement-stores-ssot-and-views.md)の決定5・7、[計測](../measurement.md#ssotとビュー)）。
 eventにはしない（連続の値でrun_eventsを膨らませない）。
-区間ごとのloadの平均・最大はrunのeventに載せる（[`stats`](stats.md#版と負荷と検証コマンド)）ので、ここは連続の記録だけを持つ。
+区間ごとのloadの平均・最大はrunのeventに載せる（[`stats`](commands.md)）ので、ここは連続の記録だけを持つ。
 
 ## 記録
 
@@ -90,10 +88,15 @@ task 1371（goal 86）。2026-10-01〜02の夜に空き容量が数時間おき�
 
 ## 読み口
 
-- [`stats`](stats.md#hostの負荷)の`host`が窓の要約（列ごとの最小・平均・中央値・最大・p90と、CPU秒の`cpu_secs`）を出す。`disk_free_bytes`・`disk_free_pct`の`min`と`median`が窓の空きの最小値と中央値
-- [`kpi`](kpi.md#期間の健全性)の各期間の`health.disk`（`domain::host_metrics::DiskFree`）が、その期間の空きの最小値と中央値（bytesと%）を出す。日次・週次のレポートとスループットの見直しの入力もこれを読む
+- [`stats`](commands.md)の`host`が窓の要約（列ごとの最小・平均・中央値・最大・p90と、CPU秒の`cpu_secs`）を出す。
+  `disk_free_bytes`・`disk_free_pct`の`min`と`median`が窓の空きの最小値と中央値
+- [`kpi`](commands.md)の各期間の`health.disk`（`domain::host_metrics::DiskFree`）が、その期間の空きの最小値と中央値（bytesと%）を出す。
+  日次・週次のレポートとスループットの見直しの入力もこれを読む
 - **CPU秒**（`cpu_secs`、goal 72、task 992）: 各行の`cpu_total`（と`cpu_<kind>`） ÷ 100 × その行が代表する秒の合計。行は前の行からの秒を代表し、窓の最初の行は典型の間隔（窓の中の行の最も短い間隔、つまり記録した間隔。1行なら既定の30秒。窓の始まりより前は数えない）を代表する。代表する秒は典型の間隔の2倍（`max_gap_secs`）を上限にし、記録の途切れを次の行の負荷で埋めない。`{covered_secs, max_gap_secs, total, by_kind}`で、`cpu_total`のある行が無ければnull。`kpi`の`cpu_per_landing`がこれを着地数で割る
-- `infrastructure::host_metrics::summary(dir, from, until)`（`domain::host_metrics::summarize`）が任意の区間の要約を返す。[`kpi`](kpi.md#hostの負荷)はこれを各期間・`--since` / `--until`の窓・`--compare`の前後の窓ごとに読み、`host`として並べる（task 872。日次・週次のレポートのJSONにも載る）。`host`は参考の値で目標の判定・breach・push・observerのfindingには使わない。そこから`cpu_per_landing`と`load_per_core`をKPIにする（[`kpi`](kpi.md)、task 992）
+- `infrastructure::host_metrics::summary(dir, from, until)`（`domain::host_metrics::summarize`）が任意の区間の要約を返す。
+  [`kpi`](commands.md)はこれを各期間・`--since` / `--until`の窓・`--compare`の前後の窓ごとに読み、`host`として並べる（task 872。日次・週次のレポートのJSONにも載る）。
+  `host`は参考の値で目標の判定・breach・push・observerのfindingには使わない。
+  そこから`cpu_per_landing`と`load_per_core`をKPIにする（[`kpi`](commands.md)、task 992）
 - 今の`stats`・`kpi`・レポートはCSVを読む。
   NodeSampleStoreのsampleは台帳を作る係がnodeの行に畳み、共通の読み取り関数がその行だけから同じ要約を作る。
   今のCSVの要約との並走の比較は`stats --ledger`（[計測](../measurement.md#並走の比較と照合)）。

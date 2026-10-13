@@ -109,7 +109,8 @@ fn mark_ms(mark: &Mark) -> i64 {
 /// Whether each of `marks` (time order) is routine (ADR-t1381-1): a
 /// supervisor's start with the same `parallel` as the start before it, a
 /// supervisor's stop, or a derived build. Such a mark only records the
-/// build, which the `build=` strata read, so it groups with no other.
+/// build, which the `build=` strata read, so it groups with no other. The
+/// first start, and a start that recorded no `parallel`, are not routine.
 fn routine(marks: &[&Mark]) -> Vec<bool> {
     let mut parallel: Option<&serde_json::Value> = None;
     marks

@@ -81,6 +81,11 @@ impl Span {
 
 /// The spans of `events` (ascending id). A `session_closed` naming no
 /// `session_opened`, and a span whose time does not parse, are left out.
+/// A span is a `session_opened` and the first `session_closed` naming it;
+/// no transcript is read here. A span the plugin's hook closed (of a
+/// kind of [`HOOK_KINDS`]) takes its measurements from the final
+/// `session_turns` the supervisor's intake records after the close
+/// (ADR-t655-1 decision 4); until then its active time is unavailable.
 pub fn spans(events: &[RunEvent]) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
     let mut index: HashMap<EventId, usize> = HashMap::new();
@@ -272,7 +277,9 @@ pub struct SessionWindow {
     pub upto: EventId,
 }
 
-/// The sessions of the window, per kind; every kind is listed.
+/// The sessions of the window, per kind; every kind is listed. The kinds
+/// of no run (the inbox, the planner, the runtime's planner) appear here
+/// only, not in the runs' rows and groups.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Sessions {
     pub window: SessionWindow,

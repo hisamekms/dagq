@@ -1356,7 +1356,7 @@ enum Command {
     },
     /// A run's events oldest first and the gaps between them of at least --gap seconds, each
     /// with the reason the events show (idle, waiting_ask, background, after_receipt,
-    /// waiting_integration, integrating, no_supervisor, unknown). Reads only.
+    /// waiting_integration, integrating, e2e, waiting_e2e, no_supervisor, unknown). Reads only.
     Timeline {
         run: String,
         /// The shortest gap reported, in seconds.

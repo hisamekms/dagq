@@ -9,6 +9,10 @@
 //! than `min_samples`),
 //! and repeats that `trials` times with a seeded generator, so the same input
 //! always gives the same forecast. New tasks (inflow) are never added.
+//! A run's resumes and landing deferrals are inside the intervals drawn,
+//! so they are not added as chances of their own; as the inflow and the
+//! retries of failed runs are left out (`LEFT_OUT`), the forecast leans
+//! early.
 //! Nothing here reads or writes the queue; [`history`] derives the samples
 //! from the run events.
 

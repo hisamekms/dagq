@@ -183,7 +183,9 @@ pub struct LandingUtilization {
 }
 
 /// The use of the slot from `from` to `to` (unix ms) by the attempts and
-/// waits of the tasks `counts` keeps.
+/// waits of the tasks `counts` keeps (`--goal`'s), while the next start
+/// that ends an attempt is read from every run's. `stats` calls it over
+/// its window in time, the KPIs over each of their periods.
 pub fn landing_utilization(
     events: &[RunEvent],
     from: i64,

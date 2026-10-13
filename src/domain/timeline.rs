@@ -23,7 +23,10 @@
 //!   `after_receipt` once the phase's receipt is observed (or the revise or
 //!   conflict is answered), `idle` otherwise (`confirmed` when an idle
 //!   marker or a stall nudge was recorded in the phase; without one the
-//!   events cannot tell idle from working).
+//!   events cannot tell idle from working). `session_idle_observed` is
+//!   recorded only after the receipt, so before it only a `stall_nudged`
+//!   shows `background`, and a long gap before the receipt without a nudge
+//!   is an `idle` with `confirmed: false`.
 //! - `waiting_integration`: the session has exited after an accepted
 //!   validation, and the run waits for its landing.
 //! - `after_receipt`: a receipt was observed, and the run waits for its
@@ -283,7 +286,10 @@ pub fn gaps(events: &[RunEvent], min_secs: i64, now_ms: Option<i64>) -> Vec<Gap>
     found
 }
 
-/// A heavy command a run's session ran, as `timeline` lists it.
+/// A heavy command a run's session ran, as `timeline` lists it: its
+/// category only, not the command line (the run directory's
+/// `worktime.jsonl` has that). A span whose breakdown was not recorded (no
+/// transcript read, a Codex span with `work_unavailable`) gives no row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HeavyCommand {
     /// The span's kind: `worker`, `resume` or `revise`.

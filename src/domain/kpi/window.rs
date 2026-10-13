@@ -539,7 +539,8 @@ impl<'a> Context<'a> {
     /// process) and `load_per_core` of the host's load over a window
     /// (goal 72): the CPU seconds the records stand for over the landings,
     /// and `load1` over the logical cores. Null without records (or
-    /// landings, or cores).
+    /// landings, or cores). `landings` are the `all` stratum's, of the goal
+    /// with `--goal`, while the CPU is always the whole host's.
     fn host_kpis(
         &self,
         host: &HostSummary,
@@ -607,7 +608,8 @@ impl<'a> Context<'a> {
     }
 
     /// The KPIs of the window after `start` up to `end` (unix ms), the
-    /// runs split by `axes`.
+    /// runs split by `axes`. `asks_per_landing` is split by the change of
+    /// an ask's task but not by area, as an ask has no landed commit.
     pub fn window(&self, start: i64, end: i64, axes: &[Axis]) -> WindowKpis {
         let events = self.events;
         let after = Cursor::Time(start).event_id(events);
@@ -903,7 +905,10 @@ impl<'a> Context<'a> {
         // The headless jobs other than the worker's (goal 73), as `stats`'
         // `jobs` counts them: per kind, over all of them and per provider
         // and model (and the throughput review's per mode), so that the
-        // providers' jobs compare side by side.
+        // providers' jobs compare side by side. These strata are listed
+        // whatever `--by` says, apart from the runs' `--by provider` /
+        // `--by model` by the KPI's name; a job has no task's change or
+        // area, so no `change=` / `area=`.
         for (kind, jobs) in &stats.jobs {
             let groups = std::iter::once((ALL.to_owned(), &jobs.all))
                 .chain(
@@ -970,7 +975,7 @@ impl<'a> Context<'a> {
 
         // The quality of the plans (ADR-0079 decision 7): split by the
         // judging plan review session's model and effort and by the
-        // proposal's features.
+        // proposal's features, whatever `--by` says, and by no run's axis.
         for (stratum, quality) in plan_quality(events, after, upto, |t| self.counts(t)) {
             put(
                 "plan.revise_rate",
@@ -1274,6 +1279,9 @@ impl<'a> Context<'a> {
     /// the p50 gave, by `method`, and by the change marks between the
     /// snapshot and the finish (`marks=0` is the method's own error). The
     /// counts of the rows left out and of the marks go to the details.
+    /// Every stratum is listed whatever `--by` says, and `all` even without
+    /// a sample; `change=` is of the tasks only. With `--goal`, the samples
+    /// are that goal's own and its tasks'.
     fn forecast_kpis(
         &self,
         start: i64,
@@ -1369,6 +1377,13 @@ impl<'a> Context<'a> {
     }
 
     /// The KPIs a run carries, over `runs` (all finished in the window).
+    /// `first_pass_rate` is over the tasks the landed runs completed: those
+    /// with one run and no resume, revise or deferred `integrate`.
+    /// `revise_rate` is over the landed runs, `conflict_rate` over the runs
+    /// that tried `integrate`, and `verification_failed_rate` over their
+    /// attempts that ran a verification command (a `verification_failed`
+    /// deferral follows only such an attempt); `resumes_per_run` and
+    /// `failed_rate` (`failed` or `interrupted`) are over every run.
     fn run_kpis(&self, runs: &[&RunStats]) -> Vec<(String, Measure)> {
         let landed: Vec<&RunStats> = runs
             .iter()
@@ -1521,7 +1536,11 @@ impl<'a> Context<'a> {
     /// window (decision 3), and how many runs held one; null without a
     /// supervisor's start in it. A run's hold counts only while a
     /// supervisor was alive, so the runs before the starts were recorded
-    /// (and a run whose end was never recorded) do not count.
+    /// (and a run whose end was never recorded) do not count. A run waiting
+    /// only for its turn to land still holds its slot, and so does a run
+    /// claimed into a slot the landing wait freed (ADR-t1591-1), so the
+    /// share can pass 1. With supervisors side by side, each start ends the
+    /// life before it, so the capacity reads too small.
     fn slot_usage(&self, start: i64, end: i64) -> (Option<f64>, usize) {
         let capacity: i64 = self
             .supervisors

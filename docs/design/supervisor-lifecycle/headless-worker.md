@@ -257,7 +257,7 @@ inboxと、廃止の前に人が開いたplannerは対象外。
 - **識別と生死**: 生きているとは、handleのpidが記録した起動時刻のまま居ること（`Supervisor::wrapper_lives`）。
   adopt・引き継ぎ（[Handoff](handoff.md)）・開き直しは記録したhandleで行うので、supervisorが止まってもwrapperとturnは動き続ける。
   heartbeatの古さは生死に使わない（沈黙は[Silent wrapper](silent-wrapper.md)の判定）。
-  `stats`の`workspace_mismatch`もcmuxを呼ばずこの生死だけで判じ、終わりを記録せずに居なくなったwrapperを`run_without_wrapper`として出す（[Stats](stats.md)）。
+  `stats`の`workspace_mismatch`もcmuxを呼ばずこの生死だけで判じ、終わりを記録せずに居なくなったwrapperを`run_without_wrapper`として出す（[Stats](commands.md)）。
 - **停止**: runtimeはまず終了の依頼で終わらせ、残っていればhandleの`stop_background`で止める（ADR-t1404-1決定3）。
   wrapperにSIGTERMを送り、猶予の後にgroupと控えた子孫にSIGKILLを送る（`BackgroundWrappers::stop`）。
   wrapperが先に死んで残したturnは子孫として見つからないので、最後の`turn_started`の記録から止める（`stopping_left_turns`）。
@@ -313,7 +313,7 @@ runtimeのplannerは経路の選択なしに非対話で立ち、この文書の
   掃除はhandleをprocessの識別で判じ、生きているwrapperの行はheartbeatが遅れても閉じない。
   wrapperが殺されて残ったturnは、plannerの最後の`turn_started`から止める（ADR-t1404-1決定3・8）。
 - **区間と集計**: 最初の`turn_started`が区間を開き、plannerの閉じが閉じる（[provider-lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。
-  経路ごとの集計は[stats](stats.md)と[kpi](kpi.md)、workerの経路の集計はrunの無い`turn_finished`を数えない。
+  経路ごとの集計は[stats](commands.md)と[kpi](commands.md)、workerの経路の集計はrunの無い`turn_finished`を数えない。
 - **CLI**（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）: `planner screen`は画面を読まずに`turns/`の場所を返し、`planner send`は拒む（[Session send](session-send.md#人とinboxの画面の読み取りと送信)）。
   続きの依頼は次のturnの依頼として置く（[`plan` / `planners`](plan-planners.md#続きの依頼と非対話のplannerのcli)）。
 - **test**: 人の答え待ちでの終了と、answerで立つplannerの最初のturnは本物のwrapperで`planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer`と`a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines`。

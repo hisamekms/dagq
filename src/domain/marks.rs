@@ -8,8 +8,8 @@
 //!   planner's `dagq mark` and its retraction;
 //! - **derived marks** write nothing: they are read off the attributes
 //!   `run_claimed` carries (task 197), where a claim's value differs from
-//!   the previous claim's (the build identifier, Claude Code's version,
-//!   `parallel`, and the host's Rust toolchain).
+//!   the previous claim's (the build identifier, Claude Code's and Codex's
+//!   versions, `parallel`, and the host's Rust toolchain).
 //!
 //! Marks only split periods; they change no run and raise no attention.
 
@@ -26,11 +26,16 @@ use super::{
 
 /// A supervisor started, or took over its registration by a handoff
 /// (ADR-0045 decision 10): its build identifier, `parallel`, `mode` and
-/// whether it updates itself.
+/// whether it updates itself. Recorded on every start, the same build and
+/// `parallel` too: the supervisor's span `slot_usage` divides by starts
+/// here (ADR-0051 decision 3), and whether anything changed is for the
+/// derived marks to say.
 pub const SUPERVISOR_STARTED: &str =
     crate::domain::event_kind::EventKind::SupervisorStarted.as_str();
 /// A supervisor stopped and removed its registration, or a later prune
-/// recorded its stop at the last heartbeat.
+/// recorded its stop at the last heartbeat. A process that execs for a
+/// handoff records none: the next process's `supervisor_started` with
+/// `handoff: true` stands for it.
 pub const SUPERVISOR_STOPPED: &str =
     crate::domain::event_kind::EventKind::SupervisorStopped.as_str();
 /// The normalized `[run.env]` of the main checkout's `dagq.toml` hashes
@@ -73,7 +78,8 @@ pub struct RunEnvDigest {
 }
 
 /// [`RunEnvDigest`] of `[run.env]` as written (values unexpanded), keyed
-/// with `salt`.
+/// with `salt`. Reordering the table or its comments, and the other
+/// tables of `dagq.toml`, do not change it.
 pub fn run_env_digest(table: &[(String, String)], salt: &str) -> RunEnvDigest {
     let entries: BTreeMap<&str, &str> = table
         .iter()
@@ -365,7 +371,9 @@ fn recorded_label(event: &RunEvent) -> String {
 
 /// The attributes of `run_claimed` a derived mark is read off, and the
 /// key of the same value on `supervisor_started` (a start that already
-/// marks the change).
+/// marks the change). The toolchain changes outside dagq (the host's
+/// `mise`), so only a claim can tell when; a repository other than dagq's
+/// own source records no `rustc` on its claims and gets no toolchain mark.
 const DERIVED: [(&str, Option<&str>); 5] = [
     ("dagq_version", Some("dagq_version")),
     ("claude_version", None),
