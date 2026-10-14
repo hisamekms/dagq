@@ -42,8 +42,12 @@
 # - migrating (no state written): the document is about to be removed or was
 #   just removed, and the rows still settle. The path may exist or not; only
 #   the exception of the ADRs' links holds. A plan adds the path of a
-#   document it is to remove as a migrating row, at the latest in the commit
-#   that removes the document, with its successor.
+#   document it is to remove as a migrating row, with its successor, in a
+#   task that lands on main before the task that removes the document, and
+#   the removing task depends on it: the program review of a run copies this
+#   script from the landing branch (main), so a row added in the removing
+#   commit does not hold in that review, and the ADRs' links to the removed
+#   document fail there.
 # - final ("final"): the removal is settled and the document must not be
 #   made again at the path; its content goes to the successor. The path
 #   existing fails, naming the successor.
