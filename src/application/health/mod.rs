@@ -144,6 +144,168 @@ mod tests {
         }
     }
 
+    /// Every pid below 100 is alive.
+    struct Low;
+
+    impl ProcessControl for Low {
+        fn alive(&self, pid: u32) -> bool {
+            pid < 100
+        }
+        fn terminate(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn interrupt(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn kill(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn started(token: &str, pid: u32, started_at: i64, now: i64) -> SupervisorRegistration {
+        SupervisorRegistration {
+            started_at,
+            ..registration(token, pid, now)
+        }
+    }
+
+    fn agent(
+        label: &str,
+        loaded: bool,
+        pid: Option<u32>,
+    ) -> crate::application::lifecycle::QueueAgent {
+        crate::application::lifecycle::QueueAgent {
+            label: label.into(),
+            plist: std::path::PathBuf::from(format!("/a/{label}.plist")),
+            state: crate::application::AgentState { loaded, pid },
+        }
+    }
+
+    /// Two live supervisors that are no handoff's pair are a duplicate,
+    /// with each one's token, pid and mode and the fix; the pair of a
+    /// handoff (the same pid registered again since) is one supervisor, and
+    /// a dead or silent registration does not count.
+    #[test]
+    fn two_live_supervisors_but_not_a_handoff_s_pair_are_a_duplicate() {
+        let now = 1_000;
+        let mut by_hand = started("b", 2, 20, now);
+        by_hand.mode = None;
+        let found = duplicate_supervisors(&[started("a", 1, 10, now), by_hand], &[], now, &Low)
+            .expect("two supervisors");
+        assert_eq!(found.severity, "warning");
+        let seen: Vec<_> = found
+            .supervisors
+            .iter()
+            .map(|s| (s.token.as_str(), s.pid, s.mode))
+            .collect();
+        assert_eq!(
+            seen,
+            [("a", 1, Some(SupervisorMode::Launchd)), ("b", 2, None)]
+        );
+        assert!(found.fix[0].contains("dagq down --wait"), "{:?}", found.fix);
+        assert!(found.agents.is_empty());
+
+        // A handoff's pair: the successor the exec made under the same pid.
+        let pair = [started("a", 1, 10, now), started("a2", 1, 40, now)];
+        assert_eq!(duplicate_supervisors(&pair, &[], now, &Low), None);
+        // Made in the same second, one of them stands for both.
+        let same_second = [started("x", 1, 10, now), started("y", 1, 10, now)];
+        assert_eq!(duplicate_supervisors(&same_second, &[], now, &Low), None);
+        // A pair beside another supervisor is two.
+        let three = [pair[0].clone(), pair[1].clone(), started("c", 3, 50, now)];
+        let found = duplicate_supervisors(&three, &[], now, &Low).unwrap();
+        let tokens: Vec<_> = found.supervisors.iter().map(|s| s.token.as_str()).collect();
+        assert_eq!(tokens, ["a2", "c"]);
+
+        // A dead pid and a silent heartbeat are reported as stale instead.
+        let dead = [started("a", 1, 10, now), started("d", 200, 20, now)];
+        assert_eq!(duplicate_supervisors(&dead, &[], now, &Low), None);
+        let silent = [
+            started("a", 1, 10, now),
+            SupervisorRegistration {
+                heartbeat_at: now - HEARTBEAT_TIMEOUT_SECS - 1,
+                ..started("s", 2, 20, now)
+            },
+        ];
+        assert_eq!(duplicate_supervisors(&silent, &[], now, &Low), None);
+    }
+
+    /// Two of the queue's agents loaded are a duplicate, naming each label
+    /// with its bootout, even with one supervisor registered; one loaded
+    /// and one only defined are not.
+    #[test]
+    fn two_loaded_agents_of_the_queue_are_a_duplicate() {
+        let now = 1_000;
+        let one = [started("a", 1, 10, now)];
+        let agents = [
+            agent("com.dagq.q", true, Some(1)),
+            agent("com.dagq.h", true, None),
+        ];
+        let found = duplicate_supervisors(&one, &agents, now, &Low).expect("two agents");
+        let labels: Vec<_> = found.agents.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, ["com.dagq.q", "com.dagq.h"]);
+        assert_eq!(found.agents[0].pid, Some(1));
+        assert!(
+            found
+                .fix
+                .iter()
+                .any(|fix| fix.contains("launchctl bootout \"gui/$(id -u)/\"'com.dagq.h'")),
+            "{:?}",
+            found.fix
+        );
+        let unloaded = [
+            agent("com.dagq.q", true, Some(1)),
+            agent("com.dagq.h", false, None),
+        ];
+        assert_eq!(duplicate_supervisors(&one, &unloaded, now, &Low), None);
+    }
+
+    /// The fix quotes a label and a plist path for the shell: a `Label`
+    /// with a `;` or a quote stays one argument of `launchctl bootout`.
+    #[test]
+    fn the_fix_quotes_each_label_and_plist_for_the_shell() {
+        let now = 1_000;
+        let agents = [
+            agent("com.dagq.q", true, Some(1)),
+            agent("com.dagq.x;id 'y'", true, None),
+        ];
+        let found = duplicate_supervisors(&[], &agents, now, &Low).unwrap();
+        let fix = found.fix.iter().find(|fix| fix.contains("x;id")).unwrap();
+        assert!(
+            fix.contains(r#"`launchctl bootout "gui/$(id -u)/"'com.dagq.x;id '"'"'y'"'"''`"#),
+            "{fix}"
+        );
+        assert!(
+            fix.contains(r#"`rm '/a/com.dagq.x;id '"'"'y'"'"'.plist'`"#),
+            "{fix}"
+        );
+    }
+
+    /// `status` adds the duplicate to its attention for the inbox, and
+    /// both add `duplicate_supervisors`, null when there is none.
+    #[test]
+    fn a_duplicate_is_added_to_the_report_and_to_the_attention() {
+        let now = 1_000;
+        let two = [started("a", 1, 10, now), started("b", 2, 20, now)];
+        let mut report = json!({"attention": []});
+        add_duplicate_supervisors(&mut report, &two, &[], now, &Low, true).unwrap();
+        assert_eq!(report["duplicate_supervisors"]["severity"], "warning");
+        let entry = &report["attention"][0];
+        assert_eq!(entry["kind"], SUPERVISOR_DUPLICATE);
+        assert_eq!(entry["next"], json!(AttentionNext::RestartSupervisor));
+        let text = entry["last_error"].as_str().unwrap();
+        assert!(text.contains("pids 1, 2"), "{text}");
+        let mut doctor = json!({});
+        add_duplicate_supervisors(&mut doctor, &two, &[], now, &Low, false).unwrap();
+        assert!(doctor.get("attention").is_none());
+        let mut none = json!({"attention": []});
+        add_duplicate_supervisors(&mut none, &two[..1], &[], now, &Low, true).unwrap();
+        assert_eq!(
+            none,
+            json!({"attention": [], "duplicate_supervisors": null})
+        );
+    }
+
     #[test]
     fn supervisors_join_leases_by_token_and_take_liveness_from_the_port() {
         let now = 1_000;

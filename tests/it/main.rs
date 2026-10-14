@@ -22,6 +22,7 @@ mod cli_authorization;
 mod cli_candidates;
 mod cli_changes;
 mod cli_dialogue;
+mod cli_duplicate_supervisors;
 mod cli_forecast;
 mod cli_goals;
 mod cli_graph;

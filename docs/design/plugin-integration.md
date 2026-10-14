@@ -206,6 +206,7 @@ skillはすべて`${CLAUDE_PLUGIN_ROOT}/bin/dagq`を呼ぶ。launcherはバイ�
   `up`はplannerを開かず、plannerはruntimeが立てる（人が開く`dagq plan`は廃止し、inboxへの計画の依頼の案内を付けて拒む。ADR-t1394-1）。
   inboxのsession（workspaceの`--env`の`DAGQ_ROLE`）の中から呼ぶとinboxは`skipped`になり、これはerrorではない。
   `restart supervisor`（`supervisor_stopped` / `supervisor_stale`）はinboxの`watch`が拾って人に知らせ、人の指示で`up`を叩き直す（死んだ登録をpruneして起動し直す）。
+  同じ`restart supervisor`の`supervisor_duplicate`（同じqueueに二重のsupervisorかLaunchAgent）は、`up`だけでは同じbuildのsupervisorをreuseして直らないので、人の指示で`down --wait`の後に`up`を叩く（判定は[supervisor-lifecycle](supervisor-lifecycle/up-down.md#up--down)の3、手順は`dagq-recover`の`reference/up-down.md`）。
   停止は`dagq down [--wait] [--force]`で、`--force`は実行中のrunを捨てるので人の明示の指示が要る。
   supervisorのlogは`locate`の`log_dir`にある。
   `supervise`・`integrate`・`observe`・session wrapperがprocessごとに`<process>-<UTC time>-<pid>.jsonl`（1行1レコードのJSON Lines。`jq`で`fields.run_id`などで絞れる）を書き、launchdのstdout / stderrは`launchd.log`に溜まる。

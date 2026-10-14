@@ -21,7 +21,7 @@ use std::{
 
 use crate::{
     application::{
-        AgentProvider, Verifier, health,
+        AgentProvider, Verifier, health, lifecycle,
         stats::{self as statistics, StatsSources},
     },
     domain::{RunId, SessionRole, TaskId, stats::StatsQuery},
@@ -121,6 +121,40 @@ pub fn status_for(db: &Path, role: Option<SessionRole>) -> Result<Value> {
 /// `doctor` on the system clock: see [`OneShot::doctor`].
 pub fn doctor(db: &Path, full: bool) -> Result<Value> {
     OneShot::system().doctor(db, full, None)
+}
+
+/// The LaunchAgents of the queue at `location`, its own and any other
+/// label's whose `--db` is its database, with what `launchd` has under
+/// each ([`lifecycle::queue_agents`]).
+pub fn queue_agents(
+    location: &crate::infrastructure::location::QueueLocation,
+    launchd: &dyn crate::application::LaunchAgent,
+) -> Result<Vec<lifecycle::QueueAgent>> {
+    lifecycle::queue_agents(
+        launchd,
+        &LocalRunFiles,
+        &location.label,
+        &location.launch_agent,
+        &location.db,
+    )
+}
+
+/// [`queue_agents`] of the queue at `db` under this user's launchd. One
+/// that cannot be read is logged and counts as none: `doctor` and
+/// `status` go on judging the registrations.
+fn launchd_queue_agents(db: &Path) -> Vec<lifecycle::QueueAgent> {
+    let launchd = crate::infrastructure::launchd::Launchctl {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        uid: unsafe { libc::getuid() },
+    };
+    queue_agents(
+        &crate::infrastructure::location::QueueLocation::explicit(db),
+        &launchd,
+    )
+    .unwrap_or_else(|error| {
+        tracing::warn!(error = %format_args!("{error:#}"), "the queue's LaunchAgents could not be read: {error:#}");
+        Vec::new()
+    })
 }
 
 fn add_sccache_diagnostics(
@@ -824,6 +858,19 @@ impl OneShot {
         queue: &SqliteQueue,
         role: Option<SessionRole>,
     ) -> Result<Value> {
+        self.status_with_agents(db, queue, role, || launchd_queue_agents(db))
+    }
+
+    /// [`Self::status_of`] judging what `agents` gives as the queue's
+    /// LaunchAgents ([`queue_agents`]) for `duplicate_supervisors`
+    /// ([`health::duplicate_supervisors`]); tests give a fake launchd's.
+    pub fn status_with_agents(
+        &self,
+        db: &Path,
+        queue: &SqliteQueue,
+        role: Option<SessionRole>,
+        agents: impl FnOnce() -> Vec<lifecycle::QueueAgent>,
+    ) -> Result<Value> {
         // A bound repository whose main checkout is not found reads as
         // unknown.
         let ci_watch = match bound_main_checkout(queue) {
@@ -838,6 +885,14 @@ impl OneShot {
             &*self.generators.clock,
             role,
             ci_named_jobs,
+        )?;
+        health::add_duplicate_supervisors(
+            &mut status,
+            &queue.supervisors()?,
+            &agents(),
+            self.generators.clock.now(),
+            &SystemProcesses,
+            health::for_role(role),
         )?;
         add_sccache_diagnostics(queue, db, false, &mut status)?;
         health::add_runtimes(&mut status, queue, &SystemProcesses, runtimes_of(queue))?;
@@ -897,6 +952,20 @@ impl OneShot {
     /// `error` says why. `common_dir`, when given, is the repository the
     /// queue must be bound to, checked either way.
     pub fn doctor(&self, db: &Path, full: bool, common_dir: Option<&str>) -> Result<Value> {
+        self.doctor_with_agents(db, full, common_dir, || launchd_queue_agents(db))
+    }
+
+    /// [`Self::doctor`] judging what `agents` gives as the queue's
+    /// LaunchAgents ([`queue_agents`]) for `duplicate_supervisors`
+    /// ([`health::duplicate_supervisors`]), read only for a queue that
+    /// opens; tests give a fake launchd's.
+    pub fn doctor_with_agents(
+        &self,
+        db: &Path,
+        full: bool,
+        common_dir: Option<&str>,
+        agents: impl FnOnce() -> Vec<lifecycle::QueueAgent>,
+    ) -> Result<Value> {
         let (schema, queue) = SqliteQueue::inspect_read_only(db)?;
         let mut service_view = None;
         let mut report = match queue {
@@ -920,6 +989,15 @@ impl OneShot {
                     &*self.generators.clock,
                     full,
                     run_env,
+                )?;
+                // Two supervisors serving the queue at once.
+                health::add_duplicate_supervisors(
+                    &mut report,
+                    &queue.supervisors()?,
+                    &agents(),
+                    self.generators.clock.now(),
+                    &SystemProcesses,
+                    false,
                 )?;
                 if let Some(repository) = doctor_repository(&queue)? {
                     report["repository"] = repository;

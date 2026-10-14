@@ -156,6 +156,181 @@ pub fn supervisors(
     entries.into_iter().map(|(_, health)| health).collect()
 }
 
+/// Two or more supervisors serving the queue at once, as `doctor` and
+/// `status` report it (`duplicate_supervisors`). A task is not run twice:
+/// the queue makes each claim alone (ADR-0054 decisions 3 and 5). But
+/// `parallel` bounds each supervisor's own runs, so the queue runs up to
+/// the sum of their slots, and the host carries that load. It is a
+/// `warning`: nothing stops until a person stops the extra one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DuplicateSupervisors {
+    pub severity: &'static str,
+    /// The live supervisors ([`duplicate_supervisors`] counts them), a
+    /// handoff's pair as its successor alone.
+    pub supervisors: Vec<DuplicateSupervisor>,
+    /// The queue's LaunchAgents launchd has loaded, under any label.
+    pub agents: Vec<LoadedAgent>,
+    /// What a person does: `down --wait`, which unloads the queue's agents
+    /// of every label and stops every registered supervisor, then `up`
+    /// (`up` alone reuses a supervisor of its own build); with two agents
+    /// loaded, the `launchctl bootout` of each label and the removal of its
+    /// plist in case one stays after `down`, each label and path quoted for
+    /// the shell, since a plist's `Label` may hold any character.
+    pub fix: Vec<String>,
+}
+
+/// One supervisor of [`DuplicateSupervisors`]: its registration's token,
+/// pid, `mode` (null for one started by hand) and build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DuplicateSupervisor {
+    pub token: LeaseToken,
+    pub pid: u32,
+    pub mode: Option<SupervisorMode>,
+    pub binary_version: Option<String>,
+    pub started_at: i64,
+}
+
+/// One loaded agent of [`DuplicateSupervisors`]: its label, plist and the
+/// pid launchd runs under it (null when unknown).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LoadedAgent {
+    pub label: String,
+    pub plist: std::path::PathBuf,
+    pub pid: Option<u32>,
+}
+
+/// Whether the queue has two supervisors at once, the same judgement for
+/// `doctor` and `status`: (a) two or more live registrations (the pid
+/// alive and the heartbeat fresh; a silent one is reported as stale
+/// already) that are not one handoff's pair, or (b) two or more of the
+/// queue's LaunchAgents loaded (`agents`, from
+/// [`queue_agents`](crate::application::lifecycle::queue_agents): its own
+/// label and any other whose `--db` is its database), each of which
+/// launchd keeps a supervisor alive for. A handoff's pair is the row of
+/// the supervisor that took it and the row its exec made again under the
+/// same pid ([`registered_again`](crate::application::lifecycle::registered_again),
+/// the successor `up` waits for): one process for a moment, not two, so
+/// it is counted once and does not warn. `None` when neither holds.
+pub fn duplicate_supervisors(
+    registrations: &[SupervisorRegistration],
+    agents: &[crate::application::lifecycle::QueueAgent],
+    now: i64,
+    control: &dyn ProcessControl,
+) -> Option<DuplicateSupervisors> {
+    use crate::application::lifecycle::registered_again;
+    let live: Vec<&SupervisorRegistration> = registrations
+        .iter()
+        .filter(|r| !heartbeat_stale(control.alive(r.pid), now - r.heartbeat_at))
+        .collect();
+    // A row another live row of its pid took over from is that one.
+    let supervisors: Vec<DuplicateSupervisor> = live
+        .iter()
+        .filter(|r| {
+            !live.iter().any(|other| {
+                other.token != r.token
+                    && registered_again(other, r.pid, r.started_at)
+                    && (other.started_at, other.token.as_str()) > (r.started_at, r.token.as_str())
+            })
+        })
+        .map(|r| DuplicateSupervisor {
+            token: r.token.clone(),
+            pid: r.pid,
+            mode: r.mode,
+            binary_version: r.binary_version.clone(),
+            started_at: r.started_at,
+        })
+        .collect();
+    let agents: Vec<LoadedAgent> = agents
+        .iter()
+        .filter(|agent| agent.state.loaded)
+        .map(|agent| LoadedAgent {
+            label: agent.label.clone(),
+            plist: agent.plist.clone(),
+            pid: agent.state.pid,
+        })
+        .collect();
+    if supervisors.len() < 2 && agents.len() < 2 {
+        return None;
+    }
+    let mut fix = vec![
+        "`dagq down --wait` stops every supervisor of the queue and unloads its agents of \
+         every label, then `dagq up` starts one"
+            .to_owned(),
+    ];
+    if agents.len() >= 2 {
+        fix.extend(agents.iter().map(|agent| {
+            let quote = crate::application::naming::shell_quote;
+            format!(
+                "if {} stays loaded after `down`: `launchctl bootout \"gui/$(id -u)/\"{}` and \
+                 `rm {}`",
+                agent.label,
+                quote(&agent.label),
+                quote(&agent.plist.to_string_lossy())
+            )
+        }));
+    }
+    Some(DuplicateSupervisors {
+        severity: "warning",
+        supervisors,
+        agents,
+        fix,
+    })
+}
+
+impl DuplicateSupervisors {
+    /// `status`'s attention for the inbox: `supervisor_duplicate`, which a
+    /// person settles as a stopped supervisor (`restart supervisor`), with
+    /// the pids, the labels and the fix in `last_error`.
+    pub fn attention(&self) -> Attention {
+        let pids: Vec<String> = self.supervisors.iter().map(|s| s.pid.to_string()).collect();
+        let labels: Vec<&str> = self.agents.iter().map(|a| a.label.as_str()).collect();
+        Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "duplicate".into(),
+            kind: SUPERVISOR_DUPLICATE.into(),
+            last_error: Some(format!(
+                "{} supervisors live (pids {}), {} agents loaded ({}): {}",
+                self.supervisors.len(),
+                pids.join(", "),
+                self.agents.len(),
+                labels.join(", "),
+                self.fix.join("; ")
+            )),
+            last_error_code: None,
+            next: AttentionNext::RestartSupervisor,
+        }
+    }
+}
+
+/// The attention kind of [`DuplicateSupervisors::attention`].
+pub const SUPERVISOR_DUPLICATE: &str = "supervisor_duplicate";
+
+/// Add `duplicate_supervisors` ([`duplicate_supervisors`], null when there
+/// is none) to `report`, and with `attention` its entry to the report's
+/// `attention` (`status` for the inbox).
+pub fn add_duplicate_supervisors(
+    report: &mut Value,
+    registrations: &[SupervisorRegistration],
+    agents: &[crate::application::lifecycle::QueueAgent],
+    now: i64,
+    control: &dyn ProcessControl,
+    attention: bool,
+) -> Result<()> {
+    let found = duplicate_supervisors(registrations, agents, now, control);
+    if attention
+        && let Some(found) = &found
+        && let Some(entries) = report["attention"].as_array_mut()
+    {
+        entries.push(serde_json::to_value(found.attention())?);
+    }
+    report["duplicate_supervisors"] = serde_json::to_value(found)?;
+    Ok(())
+}
+
 /// The health of every registered supervisor, in registration order.
 pub fn pulses(
     registrations: &[SupervisorRegistration],

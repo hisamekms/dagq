@@ -48,7 +48,7 @@ Before showing an ask whose kind, options or effect is unclear, read `reference/
 
 ## 4. Report the other attention, act only on the person's word
 
-Report each in a short list (task, status, `next`, gist of `last_error`); act with `dagq-recover` on the person's word. `(runtime)` needs nothing. Each `next` in full: `reference/status.md`.
+Report each in a list (task, status, `next`, gist of `last_error`); act with `dagq-recover` on the person's word. `(runtime)` needs nothing. Each `next` in full: `reference/status.md`.
 
 - `read the answer of ask <id> and close it` (`ask_answered`), `send the answer of ask <id> to the worker and close it`, `plan task <N> with the answer: …`: carry it out (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md`), then `"$DAGQ" ask close <id>`.
 - `triage by hand` (`triage_failed`), `recover by hand` (`recovery_failed`): `dagq-recover` section 4.
@@ -62,7 +62,7 @@ Report each in a short list (task, status, `next`, gist of `last_error`); act wi
 - `dagq service status` (`queue_service_down`): `service start` on the person's word.
 - `read the queue broker's log and run up` (`queue_broker_down`): `up` on the person's word.
 - `look at the dagq podman machine's relays` (`queue_relay_down`): the person.
-- `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` (`dagq-recover` section 5).
+- `restart supervisor`: `up` (`supervisor_duplicate`: `down --wait` first; `dagq-recover` section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`.
 - `recover run`, `exit the session`: `dagq-recover`.
 

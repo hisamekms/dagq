@@ -73,6 +73,8 @@ launchdの無いhostでは`up`がlaunchctlを起動する前に「launchd mode n
        判定はsignalもuninstallも何もする前に行うので、止まったときの状態は`up`を打つ前と同じ（PIDの死んだ登録のprune（2）だけは済んでいる）。
        入れ替えるsupervisorがleaseを持つrunが無ければそのまま入れ替えるが、`--no-wait`のときはdrainの待ちにも上限（`startup_timeout`、既定30秒）が付く: runが無くても止まらないsupervisorはありうる（loopがgitなどでhangしていてもheartbeat threadは別なので登録は新しいまま、判定とsignalの間にrunがclaimされることもある）ため、上限を超えたら残っているtokenとpidを挙げたerrorで止める（停止は既に頼んであり、agentも外れているので、`status`から消えたら`up`を打ち直す）。
    - **入れ替えの対象はliveな登録だけ**: PIDが生きていてheartbeatの止まった「生きているが黙っている」supervisorは、従来どおりreuseもpruneもkillもしないので、それが古いbinaryでも入れ替えられず、`up`はその隣に新しいversionのsupervisorを立てる。`status`がstaleとして報告するので、人が`down --force`で止めてから`up`をやり直す（[ADR-0014](../../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)のConsequences。[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定16が引き継ぐ）。
+   - **二重のsupervisorの警告**: 同じqueueに引き継ぎの組でないliveな登録が2つ以上あるか、queueのLaunchAgent（自分のlabelと、`--db`が同じDBの別のlabel）が2つ以上loadされていれば、`doctor`と`status`が同じ判定（`health::duplicate_supervisors`）でwarningを出し、`status`はinboxのattentionにも載せる。
+     引き継ぎの元の登録とexecが同じpidで作り直した後継の登録は1つのsupervisorと数えて知らせない（意味と直し方は判定のdoc comment）。
    - **drainがPIDの死で終わったとき**: 登録が消えるのではなくPIDが死んで待ちが終わることがある（launchdの`ExitTimeOut`によるSIGKILL、heartbeat失敗であえて行を残す経路）。その登録行は`down --force`と同じようにここで消す。
    - plist: `~/Library/LaunchAgents/com.dagq.<queue hash>.plist`。
      repositoryのqueueのqueue hashは、repositoryから解いても、`--db`でそのDB（`repository`ファイルが隣にある`queue.db`）を指してもqueueのディレクトリ名なので、`up` / `down` / `install`はどちらで打っても同じagentを扱う。

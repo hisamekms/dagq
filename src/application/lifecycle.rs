@@ -955,6 +955,52 @@ fn stray_agents<'a>(
         .collect()
 }
 
+/// A LaunchAgent of the queue, its own or one under another label that
+/// keeps a supervisor of its database ([`stray_agents`]), with what launchd
+/// has under it now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueAgent {
+    pub label: String,
+    pub plist: PathBuf,
+    pub state: AgentState,
+}
+
+/// The queue's agents defined beside its own (`label` at `plist`, which
+/// serves `db`), each with what launchd has under it, changing nothing:
+/// `doctor` and `status` count the loaded ones
+/// ([`super::health::duplicate_supervisors`]). An agent whose definition
+/// is not there is not looked at, so a queue that never had one asks
+/// launchd nothing.
+pub fn queue_agents(
+    launchd: &dyn LaunchAgent,
+    files: &dyn RunFiles,
+    label: &str,
+    plist: &Path,
+    db: &Path,
+) -> Result<Vec<QueueAgent>> {
+    let Some(dir) = plist.parent() else {
+        return Ok(Vec::new());
+    };
+    let defined = launchd.defined(dir)?;
+    let canonical = |path: &Path| {
+        files
+            .canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let strays = stray_agents(&defined, label, db, &canonical);
+    defined
+        .iter()
+        .filter(|agent| agent.label == label || strays.contains(agent))
+        .map(|agent| {
+            Ok(QueueAgent {
+                label: agent.label.clone(),
+                plist: agent.plist.clone(),
+                state: launchd.state(&agent.label)?,
+            })
+        })
+        .collect()
+}
+
 /// [`stray_agents`] of the queue among the agents defined beside its own.
 fn find_stray_agents(
     launchd: &dyn LaunchAgent,
@@ -1653,12 +1699,25 @@ pub(crate) fn successor<'a>(
             registrations
                 .iter()
                 .filter(|r| {
-                    r.pid == pid
+                    registered_again(r, pid, asked_at)
                         && r.binary_version.as_deref() == Some(version)
-                        && r.started_at >= asked_at
                 })
                 .max_by_key(|r| r.started_at)
         })
+}
+
+/// Whether `registration` is one the supervisor at `pid` made again since
+/// `since`, as a handoff's successor is: the exec keeps the pid, and a row
+/// of that pid started before is a stale one of a reused pid. [`successor`]
+/// adds the build it hands off to; `doctor` and `status` take the two rows
+/// of such a pair for one supervisor
+/// ([`super::health::duplicate_supervisors`]).
+pub(crate) fn registered_again(
+    registration: &SupervisorRegistration,
+    pid: u32,
+    since: i64,
+) -> bool {
+    registration.pid == pid && registration.started_at >= since
 }
 
 /// One look at `registration`'s handoff: the token it serves under once it

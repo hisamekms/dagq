@@ -56,6 +56,10 @@ The supervisor calls no cmux and needs no socket password: `up` checks cmux (`cm
 
 A supervisor started in the retired in-cmux mode (`status` shows its `mode` as `in_cmux` and its `workspace_id`) keeps working: a new binary still hands it over (it stays in its `[<repo>]supervisor` workspace and calls no cmux), and `down` stops it (below). Nothing restarts it if it stops, and nothing new is started in that mode. Move it to launchd once, on the person's word or as the inbox: `down --wait`, then `up` without `--in-cmux`, keeping the flags you always give (for example `--auto-update`).
 
+### Two supervisors of one queue
+
+`status` attention `supervisor_duplicate` (`restart supervisor`) and `duplicate_supervisors` in `status` and `doctor` (a `warning`): two live supervisors serve the queue that are not one handoff's pair, or two of its LaunchAgents are loaded. Each claims up to its own `parallel`, so the queue runs up to the sum. `up` alone does not fix it: it reuses a supervisor of its own build. On the person's word run `down --wait`, which stops every registered supervisor and unloads the queue's agents of every label, then `up`. If an agent is still loaded after that, run the `launchctl bootout` the `fix` names for its label and remove its plist. A handoff's two rows under one pid are not a duplicate and are not reported.
+
 ### Open the inbox again (the guardrail)
 
 `status` (also `status --role inbox`) and `doctor` show `inbox_guardrail` for the inbox `up` recorded: `{"workspace_id", "guardrail": true, "settings"}` when `up` opened it with the settings above (its `inbox_opened` event says so); `{"guardrail": false, "reason", "next"}` when it did not (`opened_without_guardrail`) or nothing records how it was opened (`no_record`: opened before the guardrail existed); `guardrail: null` when no inbox is recorded. A session in which `claude` was typed again is not seen: it has no settings whatever this says. To give the inbox the guardrail, open it again, on the person's word:
