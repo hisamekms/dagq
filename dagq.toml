@@ -289,6 +289,11 @@ paths = ["src/infrastructure/adapters.rs", "src/infrastructure/process.rs", "src
 # Review の検査項目と参照先は .dagq/agents/<agent>/AGENT.md（ADR-t1453-1、置き場は ADR-t1728-1）。
 # 固定バイナリが task 1455 を含むことを着手時に確認し、着地の verify でも検査する。
 # 文書の照合は全体の review だけが持ち、このrepositoryの規則は .dagq/review/builtin-acceptance.md に置く（ADR-t2389-1）。
+# built-in の agent とプログラム（ADR-t2259-1 決定12）: builtin:tests は test-rules が docs/development/testing.md の規則で見るので重ねず無効にする。
+# builtin:security・builtin:secrets は既定の on と paths のまま表を書かない。汎用の判断は built-in に任せ、dagq の secret の規則は config-rules が見るため。
+# builtin:acceptance も既定のまま書かない。文書の照合は builtin:acceptance が上の規則で持ち、別の agent の job を持たない（builtin:docs は同梱されず、書けば誤り）。
+[review.subagents."builtin:tests"]
+enabled = false
 
 [review.subagents.test-rules]
 paths = ["tests/**", "src/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml"]
