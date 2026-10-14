@@ -454,8 +454,14 @@ pub trait AgentProvider {
         let _ = (cwd, name);
         false
     }
-    /// The reader of a headless turn's output, one per turn.
-    fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
+    /// The reader of a headless turn's output, one per turn: a command's
+    /// output that names failed tests is read with `toolchains`, the
+    /// profiles the repository declares.
+    fn turn_reader(
+        &self,
+        toolchains: &crate::domain::toolchain::Toolchains,
+    ) -> Result<Box<dyn TurnReader>> {
+        let _ = toolchains;
         anyhow::bail!("this provider has no headless worker")
     }
     /// The permission mode a headless turn must say it started in; one
@@ -503,9 +509,12 @@ pub struct TranscriptSource {
 /// that cannot be read (missing, of a format this build does not know, of
 /// another session) is `Err`, and nothing is recorded from it.
 pub trait Transcripts {
+    /// The transcript of `source`, the tests its tool results name as
+    /// failed read with `toolchains`, the profiles the repository declares.
     fn read(
         &self,
         source: &TranscriptSource,
+        toolchains: &crate::domain::toolchain::Toolchains,
     ) -> std::result::Result<
         crate::domain::transcript::Transcript,
         crate::domain::transcript::Unreadable,

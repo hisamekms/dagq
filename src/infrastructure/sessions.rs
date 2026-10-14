@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use tracing::{debug, info};
 
 use super::{
+    run_env,
     sqlite::{event_row, json_col},
     transcripts::ClaudeTranscripts,
 };
@@ -38,6 +39,7 @@ use crate::{
         },
         stats::rfc3339_millis,
         tokens::{self, ModelUse, SpanTokens, TokenUsage},
+        toolchain::Toolchains,
         transcript::{
             TRANSCRIPT_NOT_CLAUDE, TRANSCRIPT_NOT_READ_BEFORE, Transcript, TranscriptRecord, Turn,
             Turns, Unreadable, millis_text, span_turns, turns,
@@ -484,12 +486,13 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
     // span fails.
     let mut guard = ReadBefore { spans: Vec::new() };
     let mut source = None;
+    let mut toolchains = None;
     for (span, reason, sent) in spans {
         if guard.spans.contains(&span.opened_event_id) {
             continue;
         }
         guard.spans.push(span.opened_event_id);
-        let transcript = read(conn, &span);
+        let transcript = read(conn, &span, &mut toolchains);
         // A run session's close with its transcript records its work
         // breakdown, whose rules depend on the repository (ADR-t614-1).
         // A Codex worker's breakdown is made from its turns' commands.
@@ -613,7 +616,7 @@ fn transcript_for_close(conn: &Connection, span: &OpenSpan) -> Result<ReadTransc
             .position(|(read, _)| read == span)
             .map(|at| read.swap_remove(at).1)
     });
-    taken.unwrap_or_else(|| read(conn, span).map(ReadTranscript::new))
+    taken.unwrap_or_else(|| read(conn, span, &mut None).map(ReadTranscript::new))
 }
 
 /// Write the spans the event `event_id` (of `kind`, with `payload`, just
@@ -1517,9 +1520,38 @@ fn judge_dagq_source(conn: &Connection) -> Result<bool> {
     }
 }
 
+/// The profiles the worker's commands in the transcripts read now are read
+/// with: those of the repository the queue is bound to
+/// ([`run_env::measured_toolchains`]). Never fails: a binding that cannot
+/// be read reads with no profile, as an unreadable `dagq.toml` does.
+fn measured_toolchains(conn: &Connection) -> Toolchains {
+    let bound: rusqlite::Result<Option<String>> = conn
+        .query_row(
+            "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional();
+    match bound {
+        Ok(None) => run_env::measured_toolchains(None),
+        Ok(Some(dir)) => match super::adapters::main_checkout_of(std::path::Path::new(&dir)) {
+            Ok(checkout) => run_env::measured_toolchains(Some(Ok(&checkout))),
+            Err(error) => run_env::measured_toolchains(Some(Err(&format!("{dir}: {error:#}")))),
+        },
+        Err(error) => run_env::measured_toolchains(Some(Err(&format!(
+            "the queue's repository not read: {error}"
+        )))),
+    }
+}
+
 /// The transcript of `span`, never read while `conn` holds a write
-/// transaction (task 543).
-pub(super) fn read(conn: &Connection, span: &OpenSpan) -> Result<Transcript, Unreadable> {
+/// transaction (task 543). Its tool results are read with `toolchains`,
+/// found ([`measured_toolchains`]) the first time a transcript is read.
+pub(super) fn read(
+    conn: &Connection,
+    span: &OpenSpan,
+    toolchains: &mut Option<Toolchains>,
+) -> Result<Transcript, Unreadable> {
     if !conn.is_autocommit() {
         return Err(Unreadable {
             code: TRANSCRIPT_NOT_READ_BEFORE,
@@ -1542,11 +1574,15 @@ pub(super) fn read(conn: &Connection, span: &OpenSpan) -> Result<Transcript, Unr
     #[cfg(test)]
     tests::READS.with(|reads| reads.set(reads.get() + 1));
     let text = |key: &str| span.payload[key].as_str().map(str::to_owned);
-    ClaudeTranscripts::from_env().read(&TranscriptSource {
-        session_id: text("session_id"),
-        cwd: text("cwd"),
-        transcript_path: text("transcript_path"),
-    })
+    let toolchains = toolchains.get_or_insert_with(|| measured_toolchains(conn));
+    ClaudeTranscripts::from_env().read(
+        &TranscriptSource {
+            session_id: text("session_id"),
+            cwd: text("cwd"),
+            transcript_path: text("transcript_path"),
+        },
+        toolchains,
+    )
 }
 
 /// Say in the log why the active time of `span` is not recorded.
@@ -1760,9 +1796,10 @@ pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
         info!("closed hook spans not taken in now: {error:#}");
         0
     });
+    let mut toolchains = None;
     for span in open {
         // A headless span's turns are its run's (ADR-t813-2 decision 7).
-        let read = (!span.headless()).then(|| read(conn, &span));
+        let read = (!span.headless()).then(|| read(conn, &span, &mut toolchains));
         let transcript = match read {
             None => None,
             Some(Ok(transcript)) => Some(transcript),
@@ -5409,6 +5446,7 @@ pub(super) mod tests {
             .map(|line| line.to_string())
             .join("\n"),
             RUN,
+            &crate::domain::toolchain::Toolchains::undeclared(),
         )
         .unwrap();
         let want = |start: i64, end: i64, cut: i64, verification: &[&str]| Want {

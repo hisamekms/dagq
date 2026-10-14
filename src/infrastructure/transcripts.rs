@@ -12,8 +12,11 @@ use tracing::debug;
 
 use crate::{
     application::{TranscriptSource, Transcripts},
-    domain::transcript::{
-        SESSION_UNKNOWN, TRANSCRIPT_MISSING, TRANSCRIPT_UNPARSABLE, Transcript, Unreadable,
+    domain::{
+        toolchain::Toolchains,
+        transcript::{
+            SESSION_UNKNOWN, TRANSCRIPT_MISSING, TRANSCRIPT_UNPARSABLE, Transcript, Unreadable,
+        },
     },
 };
 
@@ -101,7 +104,11 @@ pub fn encode_cwd(cwd: &str) -> String {
 }
 
 impl Transcripts for ClaudeTranscripts {
-    fn read(&self, source: &TranscriptSource) -> Result<Transcript, Unreadable> {
+    fn read(
+        &self,
+        source: &TranscriptSource,
+        toolchains: &Toolchains,
+    ) -> Result<Transcript, Unreadable> {
         let Some(session_id) = source.session_id.as_deref() else {
             return Err(Unreadable {
                 code: SESSION_UNKNOWN,
@@ -128,10 +135,11 @@ impl Transcripts for ClaudeTranscripts {
                 detail: format!("{} is not UTF-8", path.display()),
             });
         };
-        let transcript = Transcript::parse(&text, session_id).map_err(|mut error| {
-            error.detail = format!("{}: {}", path.display(), error.detail);
-            error
-        })?;
+        let transcript =
+            Transcript::parse(&text, session_id, toolchains).map_err(|mut error| {
+                error.detail = format!("{}: {}", path.display(), error.detail);
+                error
+            })?;
         if transcript.skipped > 0 {
             debug!(
                 "transcript {}: {} line(s) that are not JSON skipped",
@@ -166,20 +174,37 @@ mod tests {
             transcript_path: None,
         };
         assert_eq!(
-            transcripts.read(&source).unwrap_err().code,
+            transcripts
+                .read(&source, &Toolchains::undeclared())
+                .unwrap_err()
+                .code,
             TRANSCRIPT_MISSING
         );
 
         let project = dir.path().join("projects").join("-work-tree-x");
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join(format!("{SESSION}.jsonl")), record(SESSION)).unwrap();
-        assert_eq!(transcripts.read(&source).unwrap().records.len(), 1);
+        assert_eq!(
+            transcripts
+                .read(&source, &Toolchains::undeclared())
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
         // Another cwd: found in whatever project holds the session.
         let elsewhere = TranscriptSource {
             cwd: Some("/private/work/tree.x".into()),
             ..source.clone()
         };
-        assert_eq!(transcripts.read(&elsewhere).unwrap().records.len(), 1);
+        assert_eq!(
+            transcripts
+                .read(&elsewhere, &Toolchains::undeclared())
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
 
         let path = dir.path().join("given.jsonl");
         fs::write(&path, record("44444444-4444-4444-8444-444444444444")).unwrap();
@@ -187,27 +212,54 @@ mod tests {
             transcript_path: Some(path.display().to_string()),
             ..source.clone()
         };
-        assert_eq!(transcripts.read(&given).unwrap_err().code, SESSION_MISMATCH);
+        assert_eq!(
+            transcripts
+                .read(&given, &Toolchains::undeclared())
+                .unwrap_err()
+                .code,
+            SESSION_MISMATCH
+        );
         fs::write(&path, "{\"unknown\":1}\n").unwrap();
         assert_eq!(
-            transcripts.read(&given).unwrap_err().code,
+            transcripts
+                .read(&given, &Toolchains::undeclared())
+                .unwrap_err()
+                .code,
             TRANSCRIPT_UNSUPPORTED
         );
         fs::write(&path, [0xff, 0xfe]).unwrap();
         assert_eq!(
-            transcripts.read(&given).unwrap_err().code,
+            transcripts
+                .read(&given, &Toolchains::undeclared())
+                .unwrap_err()
+                .code,
             TRANSCRIPT_UNPARSABLE
         );
         fs::write(&path, format!("{}\nnot json\n", record(SESSION))).unwrap();
-        assert_eq!(transcripts.read(&given).unwrap().skipped, 1);
+        assert_eq!(
+            transcripts
+                .read(&given, &Toolchains::undeclared())
+                .unwrap()
+                .skipped,
+            1
+        );
 
         let unknown = TranscriptSource::default();
         assert_eq!(
-            transcripts.read(&unknown).unwrap_err().code,
+            transcripts
+                .read(&unknown, &Toolchains::undeclared())
+                .unwrap_err()
+                .code,
             SESSION_UNKNOWN
         );
         let nowhere = ClaudeTranscripts::new(None);
-        assert_eq!(nowhere.read(&source).unwrap_err().code, TRANSCRIPT_MISSING);
+        assert_eq!(
+            nowhere
+                .read(&source, &Toolchains::undeclared())
+                .unwrap_err()
+                .code,
+            TRANSCRIPT_MISSING
+        );
     }
 
     #[test]

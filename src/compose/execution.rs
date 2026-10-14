@@ -368,10 +368,31 @@ fn run_session_as(
         dagq: dagq.map(Path::to_path_buf),
     };
     // Read again before each turn (goal 38).
-    let checkout = crate::compose::bound_checkout(&queue);
+    let bound_main = crate::compose::bound_main_checkout(&queue);
+    let checkout = match &bound_main {
+        Ok(found) => Ok(found
+            .as_ref()
+            .and_then(|found| found.as_ref().ok())
+            .cloned()),
+        Err(error) => Err(anyhow::anyhow!("{error:#}")),
+    };
     let machine_containers =
         crate::compose::run_containers(db, checkout.as_ref().ok().cloned().flatten());
     let containers = containers.unwrap_or(&machine_containers);
+    // The tests a turn's commands name as failed are read with the
+    // profiles of the same `dagq.toml`, read again before each turn.
+    let main_checkout = match bound_main {
+        Ok(None) => None,
+        Ok(Some(Ok(checkout))) => Some(Ok(checkout)),
+        Ok(Some(Err(error))) | Err(error) => Some(Err(format!("{error:#}"))),
+    };
+    let toolchains = move || {
+        crate::infrastructure::run_env::measured_toolchains(
+            main_checkout
+                .as_ref()
+                .map(|checkout| checkout.as_deref().map_err(String::as_str)),
+        )
+    };
     let bound = crate::infrastructure::run_env::BoundRuntimes::new(checkout);
     let runtimes = move || bound.read();
     wrapper::run_session(
@@ -390,6 +411,7 @@ fn run_session_as(
                 .map(|target| (target, &looker as &dyn crate::application::SccacheServer)),
             clock: &crate::infrastructure::clock::SystemClock,
             runtimes: &runtimes,
+            toolchains: &toolchains,
             containers,
         },
         id,

@@ -103,7 +103,9 @@ struct Cut {
 /// under a write lock. `None` when an open span's transcript cannot be read
 /// now.
 fn prepare(conn: &Connection, span: OpenSpan, start: i64, at: i64, last: bool) -> Option<Cut> {
-    let totals = match read(conn, &span) {
+    // Its tokens name no test: no profile is looked for.
+    let none = &mut Some(crate::domain::toolchain::Toolchains::none());
+    let totals = match read(conn, &span, none) {
         Ok(transcript) => match SpanTotals::of(&transcript.records, start, at) {
             // Its totals run from its start, so this would recur hourly:
             // only its close records why.
@@ -445,7 +447,13 @@ mod tests {
         assert_eq!(recorded[2].payload["at"], "2026-10-02T01:00:00.000Z");
         assert_eq!(io(&recorded[2].payload), (1, 1));
         let text = std::fs::read_to_string(dir.path().join("s.jsonl")).unwrap();
-        let records = Transcript::parse(&text, "s").unwrap().records;
+        let records = Transcript::parse(
+            &text,
+            "s",
+            &crate::domain::toolchain::Toolchains::undeclared(),
+        )
+        .unwrap()
+        .records;
         let whole = span_usage(
             &records,
             start,

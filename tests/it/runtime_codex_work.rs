@@ -125,3 +125,38 @@ printf '{{"type":"item.completed","item":{{"id":"t1","type":"mcp_tool_call","ser
     assert_eq!(commands[0]["category"], "build");
     assert_eq!(commands[0]["session"], "worker");
 }
+
+/// In a repository whose `dagq.toml` declares no toolchain profile, the
+/// tests a Codex command's output names as failed are read as the
+/// resolution of no declaration reads them, and its worker span's work
+/// keeps them.
+#[test]
+fn a_codex_commands_failed_tests_are_read_with_the_repositorys_resolution() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"printf '{{"type":"item.completed","item":{{"id":"c1","type":"command_execution","command":"cargo test --locked","exit_code":101,"aggregated_output":"FAIL [   0.1s] dagq::it a::b\\ntest result: FAILED. 0 passed; 1 failed\\n","status":"failed"}}}}\n'
+{FINISH}"#
+        ),
+    );
+    let backend = Arc::new(backend);
+    let supervisor = supervise_thread(
+        &db,
+        &repo,
+        backend.clone(),
+        &codex,
+        &[verdict("pass", &[], "meets the acceptance")],
+    );
+    let outcome = finished(&backend, supervisor);
+    assert_eq!(
+        outcome["runs"].as_array().unwrap().last().unwrap()["status"],
+        "integrated",
+        "{outcome}"
+    );
+    let detail = detail(&db);
+    let run_dir = Path::new(detail.runs[0].run_dir().unwrap());
+    let file = fs::read_to_string(run_dir.join("turns/turn-000001.commands.jsonl")).unwrap();
+    let item: Value = serde_json::from_str(file.lines().next().unwrap()).unwrap();
+    assert_eq!(item["failed_tests"], json!(["a::b"]), "{file}");
+}

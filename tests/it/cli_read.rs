@@ -1203,3 +1203,76 @@ esac
             .all(|line| line == "--show-stats --stats-format json idle=0")
     );
 }
+
+/// A run's session closes with its work breakdown read from its transcript
+/// even when the bound repository's `dagq.toml` cannot be read: the test
+/// command keeps its time and names no failed test, since no profile reads
+/// its output.
+#[test]
+fn a_session_closes_with_its_work_when_dagq_toml_cannot_be_read() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let run = run_with_events(
+        &db,
+        &[("agent_started", json!({"session_id": "s"}), "00:00:05")],
+    );
+    bind(&db, dir.path(), "dagq");
+    // A directory where the file should be: reading it fails.
+    std::fs::create_dir(dir.path().join("repo-dagq/dagq.toml")).unwrap();
+    let project = dir.path().join("claude/projects/elsewhere");
+    std::fs::create_dir_all(&project).unwrap();
+    let line = |kind: &str, at: &str, content: Value| {
+        json!({"type": kind, "timestamp": format!("2026-09-24T{at}.000Z"),
+               "sessionId": "s", "version": "2.1.283", "message": {"content": content}})
+        .to_string()
+    };
+    let lines = [
+        line("user", "00:00:10", json!("go")),
+        line(
+            "assistant",
+            "00:00:20",
+            json!([{"type": "tool_use", "id": "a", "name": "Bash",
+                    "input": {"command": "cargo test --locked"}}]),
+        ),
+        line(
+            "user",
+            "00:01:00",
+            json!([{"type": "tool_result", "tool_use_id": "a", "is_error": true,
+                    "content": "Exit code 101\nFAIL [   0.1s] dagq::it a::b\ntest result: FAILED. 0 passed; 1 failed"}]),
+        ),
+        line("assistant", "00:01:05", json!([{"type": "text"}])),
+    ];
+    std::fs::write(project.join("s.jsonl"), lines.join("\n")).unwrap();
+    let config = dir.path().join("claude");
+    // Its supervisor is gone, so the run is recovered by hand, which
+    // closes its session.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute("DELETE FROM run_leases", [])
+        .unwrap();
+    let output = invoke_with(
+        &[
+            ("DAGQ_ROLE", "inbox"),
+            ("CLAUDE_CONFIG_DIR", config.to_str().unwrap()),
+        ],
+        &db,
+        &["recover", &run],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let payload: String = conn
+        .query_row(
+            "SELECT payload FROM run_events WHERE kind='session_closed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let work = serde_json::from_str::<Value>(&payload).unwrap()["work"].clone();
+    assert_eq!(work["secs"]["test"], 40, "{payload}");
+    assert_eq!(work.get("failed_tests"), None, "{payload}");
+}

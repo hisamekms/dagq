@@ -1405,9 +1405,13 @@ mod tests {
     }
 
     fn records(lines: &[String]) -> Vec<TranscriptRecord> {
-        Transcript::parse(&lines.join("\n"), SESSION)
-            .unwrap()
-            .records
+        Transcript::parse(
+            &lines.join("\n"),
+            SESSION,
+            &crate::domain::toolchain::Toolchains::undeclared(),
+        )
+        .unwrap()
+        .records
     }
 
     /// The records of one message count once, with its largest counts; a

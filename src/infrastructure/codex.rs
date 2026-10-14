@@ -531,8 +531,14 @@ impl AgentProvider for Codex {
         command.arg(prompt).new_session();
         Ok(command)
     }
-    fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
-        Ok(Box::new(CodexTurnReader::reading(self.sessions_dir())))
+    fn turn_reader(
+        &self,
+        toolchains: &crate::domain::toolchain::Toolchains,
+    ) -> Result<Box<dyn TurnReader>> {
+        Ok(Box::new(CodexTurnReader::reading(
+            self.sessions_dir(),
+            toolchains.clone(),
+        )))
     }
     /// `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd>`
     /// in `cwd` with the prompt as its standard input, never an argument
@@ -664,7 +670,12 @@ fn read_job(
     stderr: &str,
     since: Option<i64>,
 ) -> crate::domain::turn::TurnResult {
-    let mut reader = CodexTurnReader::reading_since(sessions, since);
+    // A job's commands are no worker's work: no failed test is read.
+    let mut reader = CodexTurnReader::reading_since(
+        sessions,
+        since,
+        crate::domain::toolchain::Toolchains::none(),
+    );
     for line in stdout.lines() {
         reader.line(line);
     }
@@ -1367,7 +1378,11 @@ mod tests {
             assert!(!args(command).contains(&distrust), "{:?}", args(command));
         }
         assert!(codex.turn_session_from_output());
-        assert!(codex.turn_reader().is_ok());
+        assert!(
+            codex
+                .turn_reader(&crate::domain::toolchain::Toolchains::undeclared())
+                .is_ok()
+        );
         assert!(Codex::new("/nonexistent/codex".into()).preflight().is_err());
         // Its rollouts are under its home's `sessions`.
         let at = Codex {

@@ -135,6 +135,11 @@ pub(super) struct Turns<'a> {
     /// the host, a run started on the host before the change too, and so is
     /// a turn whose read fails (goal 38). `None` for a planner.
     pub(super) runtimes: Option<&'a RuntimesFile>,
+    /// Reads the profiles the main checkout's `dagq.toml` declares, before
+    /// each turn of a run, which the turn's output is read with for the
+    /// tests its commands name as failed. `None` for a planner, whose
+    /// commands' output reads no test.
+    pub(super) toolchains: Option<&'a ToolchainsFile>,
     /// The containers a run's turns run in when it works in a clone
     /// (goal 38): each turn of such a run is started in its container and
     /// the container removed at the turn's end. `None` runs no turn in a
@@ -144,6 +149,10 @@ pub(super) struct Turns<'a> {
 
 /// Reads the runtimes of the main checkout's `dagq.toml` (goal 38).
 pub type RuntimesFile = dyn Fn() -> Result<crate::domain::container_runtime::RuntimeConfig>;
+
+/// Reads the profiles the main checkout's `dagq.toml` declares, never
+/// failing: what cannot be read reads with no profile.
+pub type ToolchainsFile = dyn Fn() -> crate::domain::toolchain::Toolchains;
 
 /// The session of the provider a run is on, as its events since its
 /// worker's session last started anew say: since it moved to that provider
@@ -791,7 +800,10 @@ impl<'a> Turns<'a> {
         let stdout = output_path(run_dir, turn, "jsonl");
         let stderr = output_path(run_dir, turn, "err");
         let agent = self.agent(on.provider)?;
-        let mut reader = agent.turn_reader()?;
+        let toolchains = self
+            .toolchains
+            .map_or_else(crate::domain::toolchain::Toolchains::none, |read| read());
+        let mut reader = agent.turn_reader(&toolchains)?;
         let cwd = self.cwd()?;
         let (without_env, with_env) = self.sccache_turn(run_dir, turn);
         let session = match resume {

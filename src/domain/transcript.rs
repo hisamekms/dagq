@@ -95,8 +95,9 @@ pub struct Notification {
 impl TranscriptRecord {
     /// The record of one parsed JSONL line, `None` when it lacks what a
     /// turn needs (`type`, a parseable `timestamp`, `sessionId`), as the
-    /// session's other bookkeeping lines do.
-    pub fn from_line(line: &Value) -> Option<(Self, String)> {
+    /// session's other bookkeeping lines do. The tests its tool results
+    /// name as failed are read with `toolchains`.
+    pub fn from_line(line: &Value, toolchains: &Toolchains) -> Option<(Self, String)> {
         let kind = line.get("type")?.as_str()?;
         let at = rfc3339_millis(line.get("timestamp")?.as_str()?)?;
         let session_id = line.get("sessionId")?.as_str()?.to_owned();
@@ -124,7 +125,10 @@ impl TranscriptRecord {
             Vec::new()
         };
         let tool_results = if kind == "user" {
-            parts.iter().filter_map(tool_result).collect()
+            parts
+                .iter()
+                .filter_map(|part| tool_result(part, toolchains))
+                .collect()
         } else {
             Vec::new()
         };
@@ -175,7 +179,7 @@ fn tool_use(part: &Value) -> Option<ToolUse> {
     })
 }
 
-fn tool_result(part: &Value) -> Option<ToolResult> {
+fn tool_result(part: &Value, toolchains: &Toolchains) -> Option<ToolResult> {
     (part["type"] == "tool_result").then_some(())?;
     let text = match &part["content"] {
         Value::String(text) => Some(text.as_str()),
@@ -188,10 +192,10 @@ fn tool_result(part: &Value) -> Option<ToolResult> {
     let is_error = part["is_error"].as_bool() == Some(true);
     // Read whatever the exit: `cargo test … | tail` exits 0. Which results
     // count (a test command's) is the work breakdown's to say.
-    // The worker's own commands are read as a repository that declares no
-    // profile is (ADR-t2268-1 decision 9), whatever its `dagq.toml` says.
+    // The worker's commands are read with the profiles the repository
+    // declares, as its landing's verification is (ADR-t2268-1).
     let failed_tests = text
-        .map(|text| failed_tests(&Toolchains::undeclared(), text))
+        .map(|text| failed_tests(toolchains, text))
         .unwrap_or_default();
     Some(ToolResult {
         tool_use_id: part["tool_use_id"].as_str()?.to_owned(),
@@ -272,8 +276,14 @@ impl Transcript {
     /// Parse the JSONL `text` of the transcript of `session_id`. Lines that
     /// are not JSON are skipped; lines without the fields a turn needs are
     /// left out. Unreadable when no line is JSON, none has those fields, or
-    /// they name another session.
-    pub fn parse(text: &str, session_id: &str) -> Result<Self, Unreadable> {
+    /// they name another session. The tests the tool results name as
+    /// failed are read with `toolchains`, the profiles the repository
+    /// declares.
+    pub fn parse(
+        text: &str,
+        session_id: &str,
+        toolchains: &Toolchains,
+    ) -> Result<Self, Unreadable> {
         let mut transcript = Self::default();
         let mut parsed = 0;
         let mut version = None;
@@ -283,7 +293,7 @@ impl Transcript {
                 continue;
             };
             parsed += 1;
-            let Some((record, id)) = TranscriptRecord::from_line(&value) else {
+            let Some((record, id)) = TranscriptRecord::from_line(&value, toolchains) else {
                 continue;
             };
             if record.version.is_some() {
@@ -502,7 +512,7 @@ mod tests {
     }
 
     fn parse(lines: &[String]) -> Result<Transcript, Unreadable> {
-        Transcript::parse(&lines.join("\n"), SESSION)
+        Transcript::parse(&lines.join("\n"), SESSION, &Toolchains::undeclared())
     }
 
     /// Several turns, one with tools and a subagent in it: each runs from
@@ -596,18 +606,29 @@ mod tests {
 
     #[test]
     fn unreadable_transcripts_say_why() {
-        let unparsable = Transcript::parse("not json\n{also not", SESSION).unwrap_err();
-        assert_eq!(unparsable.code, TRANSCRIPT_UNPARSABLE);
-        let unsupported =
-            Transcript::parse(r#"{"kind":"user","time":"2026-01-01T00:00:00Z"}"#, SESSION)
+        let unparsable =
+            Transcript::parse("not json\n{also not", SESSION, &Toolchains::undeclared())
                 .unwrap_err();
+        assert_eq!(unparsable.code, TRANSCRIPT_UNPARSABLE);
+        let unsupported = Transcript::parse(
+            r#"{"kind":"user","time":"2026-01-01T00:00:00Z"}"#,
+            SESSION,
+            &Toolchains::undeclared(),
+        )
+        .unwrap_err();
         assert_eq!(unsupported.code, TRANSCRIPT_UNSUPPORTED);
-        let other =
-            Transcript::parse(&input(0, "hi"), "22222222-2222-4222-8222-222222222222").unwrap_err();
+        let other = Transcript::parse(
+            &input(0, "hi"),
+            "22222222-2222-4222-8222-222222222222",
+            &Toolchains::undeclared(),
+        )
+        .unwrap_err();
         assert_eq!(other.code, SESSION_MISMATCH);
         assert_eq!(other.version.as_deref(), Some("2.1.283"));
         assert_eq!(
-            Transcript::parse("", SESSION).unwrap_err().code,
+            Transcript::parse("", SESSION, &Toolchains::undeclared())
+                .unwrap_err()
+                .code,
             TRANSCRIPT_UNPARSABLE
         );
     }
@@ -730,5 +751,48 @@ mod tests {
             millis_text(rfc3339_millis("2024-02-29T23:59:59.001Z").unwrap()),
             "2024-02-29T23:59:59.001Z"
         );
+    }
+
+    /// The tests a tool result names as failed are read with the profiles
+    /// given: a repository that declares only another profile reads none
+    /// of Rust's lines and its own profile's names, and one that declares
+    /// Rust reads them as a repository that declares nothing does.
+    #[test]
+    fn failed_tests_are_read_with_the_declared_profiles() {
+        let output = "FAIL [   0.1s] dagq::it a::b\ntest result: FAILED. 0 passed; 1 failed\nBROKEN made::up";
+        let lines = [line(
+            "user",
+            0,
+            json!({"message": {"content": [
+                {"type": "tool_result", "tool_use_id": "a", "is_error": true,
+                 "content": output},
+            ]}}),
+        )];
+        let names = |toolchains: &Toolchains| {
+            Transcript::parse(&lines.join("\n"), SESSION, toolchains)
+                .unwrap()
+                .records[0]
+                .tool_results[0]
+                .failed_tests
+                .names
+                .clone()
+        };
+        let rust = Toolchains::resolve(
+            &crate::domain::toolchain::BUILTIN,
+            &[crate::domain::toolchain::ToolchainDeclaration {
+                name: "rust".into(),
+                profile: "rust".into(),
+                paths: Vec::new(),
+                line: 1,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            names(&crate::domain::toolchain::fake::only_fake()),
+            ["made::up"]
+        );
+        assert_eq!(names(&rust), ["a::b"]);
+        assert_eq!(names(&Toolchains::undeclared()), ["a::b"]);
+        assert!(names(&Toolchains::none()).is_empty());
     }
 }

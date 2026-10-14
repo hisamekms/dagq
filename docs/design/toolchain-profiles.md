@@ -62,7 +62,8 @@ buildの出力とcacheの置き場と掃除・CIの見張りの読み方・計�
   profileもprojectの印も宣言しない間は、`within`の行の印も同じく暗黙に当たり（`verify_marks::implied_within`）、どちらかを宣言すると宣言したものだけが効く。
   `Cargo.toml`などからprofileを推測して有効にすることはしない。
 - 読むのはqueueが束縛されたmain checkoutの作業ファイルの`dagq.toml`で、`integrate`とlanding recheckが検証のたびに読む。
-  workerのtranscriptとCodexのturnの計測は、まだ宣言を読まず暗黙のRustのprofileで落ちたtestの名前を読む。
+  workerのtranscriptとCodexのturnの計測も同じ解決で、workerが流したコマンドの出力から落ちたtestの名前を読む（`run_env::measured_toolchains`）。
+  計測は検証と違って止めず、`dagq.toml`が読めない・誤りのときはどのprofileでも読まず、sessionは落ちたtestの名前なしで記録する。
 - 組み込みに無いprofileの名前は設定の誤りで、`integrate`は検証の前に着地処理のエラーにし、`doctor`と`status`は`toolchains`に`error`を出す（`domain::toolchain::Toolchains::view`）。
 - 旧いバイナリは`[toolchains.<name>]`を知らない表として拒むので、repositoryが宣言を足すのは固定バイナリが読めるようになってからにする（[Run environment](supervisor-lifecycle/run-environment.md)）。
 

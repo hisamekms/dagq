@@ -2370,6 +2370,28 @@ pub fn load_toolchains(root: &Path, registry: &ProfileRegistry) -> Result<Toolch
         .with_marks(marks))
 }
 
+/// The profiles the runtime reads a worker's commands' output with for its
+/// measures (the tests its Claude transcript and its Codex turns name as
+/// failed): the `dagq.toml` of `checkout`, the main checkout of the
+/// repository the queue is bound to (`None`: bound to none; `Err`: not
+/// found, why), read as the landing's verification reads it
+/// ([`load_toolchains`] on the built-in profiles) and taken by
+/// [`Toolchains::for_measures`]; why one cannot be read is logged.
+pub fn measured_toolchains(checkout: Option<Result<&Path, &str>>) -> Toolchains {
+    let loaded = checkout.map(|checkout| {
+        checkout
+            .map_err(|why| anyhow::anyhow!("no main checkout: {why}"))
+            .and_then(|checkout| load_toolchains(checkout, &crate::domain::toolchain::BUILTIN))
+            .inspect_err(|error| {
+                tracing::info!(
+                    error = %format_args!("{error:#}"),
+                    "the failed tests of the worker's commands not read: {error:#}"
+                );
+            })
+    });
+    Toolchains::for_measures(loaded)
+}
+
 /// `[areas]` of the `dagq.toml` in `root` (ADR-t980-1), `None` when there
 /// is no file or no `[areas]` table.
 pub fn load_area_map(root: &Path) -> Result<Option<AreaMap>> {

@@ -194,7 +194,37 @@ pub struct Toolchains {
     implicit_marks: bool,
 }
 
+impl std::fmt::Debug for Toolchains {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Toolchains")
+            .field(
+                "profiles",
+                &self
+                    .profiles()
+                    .map(|profile| profile.name())
+                    .collect::<Vec<_>>(),
+            )
+            .field("implicit", &self.implicit)
+            .field("marks", &self.marks.len())
+            .finish()
+    }
+}
+
 impl Toolchains {
+    /// No profile and no mark: an output read with it names no test and
+    /// is classed by none. What reads with the repository's declaration
+    /// and cannot know it (its `dagq.toml` cannot be read or has a
+    /// mistake) reads with this rather than guess a profile
+    /// (ADR-t2257-1 decision 1).
+    pub fn none() -> Self {
+        Self {
+            declared: Vec::new(),
+            implicit: false,
+            marks: Vec::new(),
+            implicit_marks: false,
+        }
+    }
+
     /// A repository that declares none: the Rust profile and this
     /// repository's timeout line, implied while the runtime moves to
     /// declarations (ADR-t2268-1 decision 9).
@@ -208,6 +238,21 @@ impl Toolchains {
             implicit: true,
             marks: vec![verify_marks::implied_within()],
             implicit_marks: true,
+        }
+    }
+
+    /// The profiles the runtime's measures read a worker's commands' output
+    /// with (the tests they name as failed), from `resolved`, the
+    /// repository's declaration as its landing resolves it: `None`, a
+    /// queue bound to no repository, is one that declares none; `Err`, a
+    /// main checkout that is not found or a `dagq.toml` that cannot be read
+    /// or has a mistake, reads with [`Self::none`], so the measures do not
+    /// stop and read with no profile the repository may not use.
+    pub fn for_measures<E>(resolved: Option<Result<Self, E>>) -> Self {
+        match resolved {
+            None => Self::resolve(&BUILTIN, &[]).unwrap_or_else(|_| Self::none()),
+            Some(Ok(toolchains)) => toolchains,
+            Some(Err(_)) => Self::none(),
         }
     }
 
@@ -434,6 +479,42 @@ mod tests {
             "dagq.toml:3: [toolchains.web]: unknown profile \"typescript\"; the profiles are rust"
         );
         assert_eq!(view(Err(error.clone())), json!({"error": error}));
+    }
+
+    /// The measures read with what the declaration resolved to: a queue
+    /// bound to no repository as one that declares none, and a declaration
+    /// that cannot be read or resolved (an unreadable file, a mistake of
+    /// the file, a main checkout not found) with no profile.
+    #[test]
+    fn the_measures_read_with_the_resolution_or_with_none() {
+        let names = |toolchains: Toolchains| {
+            toolchains
+                .profiles()
+                .map(|profile| profile.name())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Toolchains::for_measures::<String>(None)), ["rust"]);
+        assert_eq!(
+            Toolchains::for_measures::<String>(None).view()["implicit"],
+            "rust"
+        );
+        let declared = Toolchains::resolve(&BUILTIN, &[declaration("core", "rust", &[])]).unwrap();
+        assert_eq!(
+            names(Toolchains::for_measures::<String>(Some(Ok(declared)))),
+            ["rust"]
+        );
+        assert_eq!(
+            names(Toolchains::for_measures::<String>(Some(Ok(
+                fake::only_fake()
+            )))),
+            ["fake"]
+        );
+        let unresolved = Toolchains::resolve(&BUILTIN, &[declaration("web", "typescript", &[])]);
+        let none = Toolchains::for_measures(Some(unresolved));
+        assert!(names(none.clone()).is_empty());
+        assert!(none.marks().is_empty());
+        let unreadable = Toolchains::for_measures(Some(Err("dagq.toml: Is a directory")));
+        assert!(names(unreadable).is_empty());
     }
 
     #[test]

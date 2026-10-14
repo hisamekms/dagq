@@ -886,8 +886,11 @@ impl AgentProvider for HeadlessProvider {
     ) -> Result<CommandSpec> {
         self.agent.turn_command(target, prompt, session)
     }
-    fn turn_reader(&self) -> Result<Box<dyn dagq::application::TurnReader>> {
-        self.agent.turn_reader()
+    fn turn_reader(
+        &self,
+        toolchains: &dagq::domain::toolchain::Toolchains,
+    ) -> Result<Box<dyn dagq::application::TurnReader>> {
+        self.agent.turn_reader(toolchains)
     }
     fn turn_permission_mode(&self) -> Option<&'static str> {
         self.agent.turn_permission_mode()

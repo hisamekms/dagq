@@ -84,6 +84,10 @@ pub struct CodexTurnReader {
     at: Option<i64>,
     /// The commands and tools the turn ran, in the order they started.
     commands: Vec<TurnCommand>,
+    /// The profiles a command's output is read with for the tests it names
+    /// as failed: those the repository declares. `None` (a reader made by
+    /// default) reads none.
+    toolchains: Option<Toolchains>,
 }
 
 /// The items of a turn that run something whose time the work breakdown
@@ -429,21 +433,27 @@ pub fn rollout_usage(
 impl CodexTurnReader {
     /// A reader that looks for the model in the rollouts under `sessions`
     /// (`None`: Codex's home is not known, and no model is read), in the
-    /// `turn_context` of the turn that starts now.
-    pub fn reading(sessions: Option<PathBuf>) -> Self {
+    /// `turn_context` of the turn that starts now, and reads the tests a
+    /// command's output names as failed with `toolchains`.
+    pub fn reading(sessions: Option<PathBuf>, toolchains: Toolchains) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|since| i64::try_from(since.as_millis()).ok());
-        Self::reading_since(sessions, now)
+        Self::reading_since(sessions, now, toolchains)
     }
 
     /// [`Self::reading`] for a turn that started at `since` (unix
     /// milliseconds; `None`: any `turn_context`).
-    pub fn reading_since(sessions: Option<PathBuf>, since: Option<i64>) -> Self {
+    pub fn reading_since(
+        sessions: Option<PathBuf>,
+        since: Option<i64>,
+        toolchains: Toolchains,
+    ) -> Self {
         Self {
             sessions,
             since,
+            toolchains: Some(toolchains),
             ..Self::default()
         }
     }
@@ -551,9 +561,10 @@ impl CodexTurnReader {
         command.status = item["status"].as_str().map(str::to_owned);
         command.failed_tests = item["aggregated_output"]
             .as_str()
-            // As a repository that declares no profile (ADR-t2268-1
-            // decision 9), whatever its `dagq.toml` says.
-            .map(|output| failed_tests(&Toolchains::undeclared(), output).names)
+            // With the profiles the repository declares, as its landing's
+            // verification is read (ADR-t2268-1).
+            .zip(self.toolchains.as_ref())
+            .map(|(output, toolchains)| failed_tests(toolchains, output).names)
             .unwrap_or_default();
     }
 
@@ -1034,7 +1045,11 @@ mod tests {
             Ok("gpt-6-nova")
         );
         let (mut reader, _) = {
-            let mut reader = CodexTurnReader::reading_since(Some(sessions.clone()), None);
+            let mut reader = CodexTurnReader::reading_since(
+                Some(sessions.clone()),
+                None,
+                Toolchains::undeclared(),
+            );
             let signals =
                 reader.line(&json!({"type": "thread.started", "thread_id": "th-1"}).to_string());
             (reader, signals)
@@ -1053,7 +1068,8 @@ mod tests {
                 .unwrap_err()
                 .contains("no rollout of thread th-3")
         );
-        let mut reader = CodexTurnReader::reading_since(Some(sessions.clone()), None);
+        let mut reader =
+            CodexTurnReader::reading_since(Some(sessions.clone()), None, Toolchains::undeclared());
         let result = reader.finish(None, "");
         assert_eq!(result.model, None);
         assert_eq!(
@@ -1077,7 +1093,7 @@ mod tests {
                 .contains("no model for this turn")
         );
         // A reader made now takes none of these old ones.
-        let mut reader = CodexTurnReader::reading(Some(sessions.clone()));
+        let mut reader = CodexTurnReader::reading(Some(sessions.clone()), Toolchains::undeclared());
         reader.line(&json!({"type": "thread.started", "thread_id": "th-1"}).to_string());
         assert!(
             reader
@@ -1086,7 +1102,7 @@ mod tests {
                 .unwrap()
                 .contains("for this turn")
         );
-        let mut reader = CodexTurnReader::reading(None);
+        let mut reader = CodexTurnReader::reading(None, Toolchains::undeclared());
         reader.line(&json!({"type": "thread.started", "thread_id": "th-1"}).to_string());
         assert!(
             reader
@@ -1170,8 +1186,11 @@ mod tests {
             &[("t2", "2020-01-01T02:00:06.000Z", &[("r9", 1_000)])],
         );
         let line = |value: Value| value.to_string();
-        let mut reader =
-            CodexTurnReader::reading_since(Some(sessions.clone()), at("2020-01-01T02:00:00.000Z"));
+        let mut reader = CodexTurnReader::reading_since(
+            Some(sessions.clone()),
+            at("2020-01-01T02:00:00.000Z"),
+            Toolchains::undeclared(),
+        );
         reader.line(&line(
             json!({"type": "thread.started", "thread_id": "root"}),
         ));
@@ -1220,7 +1239,11 @@ mod tests {
         let path = sessions.join("2026/10/08/rollout-2026-10-08T01-00-00-th.jsonl");
         let line = |value: Value| value.to_string();
         let execution = |since: Option<i64>| {
-            let mut reader = CodexTurnReader::reading_since(Some(sessions.clone()), since);
+            let mut reader = CodexTurnReader::reading_since(
+                Some(sessions.clone()),
+                since,
+                Toolchains::undeclared(),
+            );
             reader.line(&line(json!({"type": "thread.started", "thread_id": "th"})));
             reader.finish(Some(&exit(0)), "").rollout.unwrap()
         };
@@ -1297,8 +1320,11 @@ mod tests {
         );
         let line = |value: Value| value.to_string();
         let read = |sessions: Option<PathBuf>, thread: &str, completed: bool| {
-            let mut reader =
-                CodexTurnReader::reading_since(sessions, at("2020-01-01T05:00:00.000Z"));
+            let mut reader = CodexTurnReader::reading_since(
+                sessions,
+                at("2020-01-01T05:00:00.000Z"),
+                Toolchains::undeclared(),
+            );
             reader.line(&line(
                 json!({"type": "thread.started", "thread_id": thread}),
             ));
@@ -1382,7 +1408,11 @@ mod tests {
         };
         let (one, two) = ("2020-01-01T01:00:00.000Z", "2020-01-01T03:00:00.000Z");
         let read = |since: &str| {
-            let mut reader = CodexTurnReader::reading_since(Some(sessions.clone()), at(since));
+            let mut reader = CodexTurnReader::reading_since(
+                Some(sessions.clone()),
+                at(since),
+                Toolchains::undeclared(),
+            );
             reader.line(&json!({"type": "thread.started", "thread_id": "root"}).to_string());
             reader.finish(Some(&exit(0)), "")
         };
@@ -1456,8 +1486,11 @@ mod tests {
                 record("q1", "2020-01-01T05:00:00.000Z", "r9"),
             ],
         );
-        let mut reader =
-            CodexTurnReader::reading_since(Some(sessions.clone()), at("2020-01-01T05:00:00.000Z"));
+        let mut reader = CodexTurnReader::reading_since(
+            Some(sessions.clone()),
+            at("2020-01-01T05:00:00.000Z"),
+            Toolchains::undeclared(),
+        );
         reader.line(&json!({"type": "thread.started", "thread_id": "quiet"}).to_string());
         assert_eq!(
             reader.finish(Some(&exit(0)), "").context,
@@ -1471,7 +1504,7 @@ mod tests {
     /// tests a command's output names as failed are kept with it.
     #[test]
     fn a_turns_commands_carry_when_their_lines_were_read() {
-        let mut reader = CodexTurnReader::default();
+        let mut reader = CodexTurnReader::reading_since(None, None, Toolchains::undeclared());
         let at = |reader: &mut CodexTurnReader, millis: i64, line: Value| {
             reader.stamp(millis);
             reader.line(&line.to_string());
@@ -1545,5 +1578,40 @@ mod tests {
             unstamped.finish(None, "").commands.unwrap()[0].started,
             None
         );
+    }
+
+    /// A command's output is read with the profiles given: a repository
+    /// that declares only another profile reads none of Rust's lines and
+    /// its own profile's names, and one that declares Rust reads them as a
+    /// repository that declares nothing does.
+    #[test]
+    fn a_commands_failed_tests_are_read_with_the_declared_profiles() {
+        let names = |toolchains: Toolchains| {
+            let mut reader = CodexTurnReader::reading_since(None, None, toolchains);
+            reader.line(&json!({"type": "item.completed", "item": {"id": "c1", "type": "command_execution",
+                "command": "test", "exit_code": 1, "status": "failed",
+                "aggregated_output": "FAIL [   0.1s] dagq::it a::b\ntest result: FAILED. 0 passed; 1 failed\nBROKEN made::up\n"}})
+                .to_string());
+            reader.finish(None, "").commands.unwrap()[0]
+                .failed_tests
+                .clone()
+        };
+        let rust = Toolchains::resolve(
+            &crate::domain::toolchain::BUILTIN,
+            &[crate::domain::toolchain::ToolchainDeclaration {
+                name: "rust".into(),
+                profile: "rust".into(),
+                paths: Vec::new(),
+                line: 1,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            names(crate::domain::toolchain::fake::only_fake()),
+            ["made::up"]
+        );
+        assert_eq!(names(rust), ["a::b"]);
+        assert_eq!(names(Toolchains::undeclared()), ["a::b"]);
+        assert!(names(Toolchains::none()).is_empty());
     }
 }

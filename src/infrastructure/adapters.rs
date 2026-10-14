@@ -3424,7 +3424,9 @@ impl AgentProvider for ClaudeCode {
         command.arg("--").arg(prompt).new_session();
         Ok(command)
     }
-    fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
+    /// Claude's failed tests are read from its transcript, not its turn's
+    /// output.
+    fn turn_reader(&self, _: &crate::domain::toolchain::Toolchains) -> Result<Box<dyn TurnReader>> {
         Ok(Box::new(ClaudeTurnReader::default()))
     }
     /// Its transcript under `$CLAUDE_CONFIG_DIR` (or `~/.claude`): Claude
