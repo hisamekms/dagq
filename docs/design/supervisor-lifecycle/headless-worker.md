@@ -121,7 +121,7 @@ supervisor
 - 依頼の番号は取られたものと捨てたものを含めて数え、使い回さない。
 - 前のsessionが取らずに終わった依頼は、新しいsessionの前に`prepare_turns`が捨てる。
   新しいsessionはsupervisorが今書く依頼から始まる。
-- `limits.json`は[Stall thresholds](stall-thresholds.md)の値で、wrapperがturnのたびに読む。
+- `limits.json`は`[stall]`の値（`domain::stall::StallConfig`）で、wrapperがturnのたびに読む。
 - runtimeのplannerのwrapperは、壁（ログイン切れ・利用上限・起動の失敗）で終わったturnの後は`provider retry`を先に取り、待っていた依頼をその後に取る（`request_to_take`）。
   workerのwrapperは順番を変えない。
 - turnの設定（`claude-headless-settings.json`）は`turn_command`がturnのたびに書く。
@@ -168,7 +168,7 @@ run dirのI/Oの約束と落とし穴:
 
 - 止める条件は、出力の途絶え（heartbeatのあるproviderだけ）、時間の上限、頼んだpermission modeで始まらない、providerが使えない、終了の依頼の5つ。
   出力から読む条件は`observed_stop`、時間と終了の依頼は`stop_decision`が決める。
-  閾値は[Stall thresholds](stall-thresholds.md)。
+  閾値は`[stall]`（`domain::stall::StallConfig`）。
 - 頼んだmodeで始まらないのを止めるのは、modelによっては黙って別のmodeになるため（ADR-t813-1決定8）。
 - 止め方は`headless_session.rs`の`stop_turn`が持つ。
   ClaudeもCodexもtoolのコマンドを別のprocess groupで走らせるので、groupへのsignalだけでは届かず、子孫をgroupを止める前にpidで集めて止める。

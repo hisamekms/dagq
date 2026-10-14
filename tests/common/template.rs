@@ -15,7 +15,26 @@
 //! A template is complete only when it holds [`COMPLETE`], written last:
 //! CI's rust-cache deletes every file under the target's temporary
 //! directory but keeps the directories, and an empty template judged by its
-//! directory alone broke main's CI from 2026-09-29 (docs/design/test-fixtures.md).
+//! directory alone broke main's CI from 2026-09-29.
+//!
+//! The pitfalls of the templates:
+//! - A directory is not a template. The cache's cleanup left an empty
+//!   `.git/` or a directory without `stub`, which failed later as a
+//!   `hard_link` NotFound or git's "not a git repository", far from the
+//!   cause. Judge by the mark ([`made`]), never by `exists()`.
+//! - A bad cache stays: rust-cache does not save when its key hits, so a
+//!   job that fails on an empty template does not overwrite it, and every
+//!   run with the same key restores it again. Making a template right
+//!   whatever the cache holds is this module's part; keeping the target's
+//!   temporary directory out of the cache is the CI workflow's.
+//! - The templates live inside the checkout (`target/tmp`), so a git that
+//!   searches above a directory finds this repository and passes a broken
+//!   template: [`git_repository`] checks the directory itself, right after
+//!   making the repository template and again on each copy.
+//! - A test that breaks templates does it under its own root
+//!   ([`with_root`]), never the shared one other processes are reading.
+//! - A change of how a template is made, other than the migrations and the
+//!   seed, raises [`FORMAT`], so an old template is not taken by its name.
 
 use dagq::infrastructure::git_binary::git_executable;
 use std::{

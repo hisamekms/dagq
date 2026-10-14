@@ -415,9 +415,13 @@ pub fn parse_run_env(text: &str) -> Result<Vec<(String, String)>> {
 pub struct Config {
     /// `[run.env]` as written, in file order, values unexpanded.
     pub run_env: Vec<(String, String)>,
-    /// `[stall]`, the defaults for the keys it does not set.
+    /// `[stall]`, the defaults for the keys it does not set. Each value is
+    /// a positive integer of seconds, which may have `_` between digits and
+    /// a `#` comment after it; an unknown key, a value that is not a
+    /// positive integer or a key set twice is an error.
     pub stall: StallConfig,
-    /// `[conflicts]`, the defaults for the keys it does not set.
+    /// `[conflicts]`, the defaults for the keys it does not set: positive
+    /// integers under the same rules as `[stall]`.
     pub conflicts: ConflictConfig,
     /// `[recheck]`: no command checks the merge only, no paths runs the
     /// command on every run.

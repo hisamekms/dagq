@@ -190,13 +190,10 @@ live worker alert (stalled, idle_process)
 - [Worker model](supervisor-lifecycle/worker-model.md)（workerのmodel / effortの明示と記録、`[worker.trial]`の限定の試し、taskに由来する失敗の後の段上げ）
 - [Actor model](supervisor-lifecycle/actor-model.md)（worker以外のアクターの`[roles.<role>]`、差し戻しで開き直すplannerの段上げ、`launch`の記録）
 
-### Stall thresholds
+### 閾値（`[stall]`・`[conflicts]`）
 
-- [Stall thresholds](supervisor-lifecycle/stall-thresholds.md)
-
-### Conflict thresholds
-
-- [Conflict thresholds](supervisor-lifecycle/conflict-thresholds.md)
+- 値と意味は定義のそばのdoc comment（`domain::stall::StallConfig`、`domain::stats::conflicts::ConflictConfig`）が持つ。
+- supervisorは`[stall]`を起動時に1回だけ読み、`[conflicts]`はpassごとに読み直す。
 
 ### Landing recheck
 

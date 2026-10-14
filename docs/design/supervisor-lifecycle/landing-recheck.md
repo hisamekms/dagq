@@ -82,4 +82,5 @@ targetの中身は、空き容量のための掃除だけがrecheckの走って�
   `repeat`は新しいfindingに数えず、`resumed`には数える。
   hostの失敗も同じく、コードの失敗にもresumeにも数えず別に数える（`domain::stats::LandingRechecks`）。
 - [`stats`](commands.md)の`landing_waits`は、着地したrunをreviewの後に人かrecoverを待ったかで分け、群ごとにこのrecheckが着地の前に見つけた衝突と着地のrebaseの衝突のrunを数える（goal 39、task 1312）。
-- `landing_recheck_failed`はcode（ADR-0034）を持つので、`needs_session`のrunの`last_error_code`にも出る。[Conflict thresholds](conflict-thresholds.md)の`conflict_hotspots`はこのイベントを数えない（着地のrebaseとpassの時のprecheckの衝突だけ）。
+- `landing_recheck_failed`はcode（ADR-0034）を持つので、`needs_session`のrunの`last_error_code`にも出る。
+  `stats`の`conflict_hotspots`はこのイベントを数えない（着地のrebaseとpassの時のprecheckの衝突だけ）。

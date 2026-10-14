@@ -241,7 +241,7 @@ fn reader(mut source: impl Read + Send + 'static) -> thread::JoinHandle<String> 
 
 /// The directory name of every fixture's disposable repository, so what an
 /// e2e leaves says where it came from (the manual smoke's repositories are
-/// named in docs/design/manual-smoke.md).
+/// named in docs/development/manual-smoke.md).
 const E2E_REPO_NAME: &str = "dagq-e2e";
 
 /// Disposable repository, queue and stub agent, all outside this repository.

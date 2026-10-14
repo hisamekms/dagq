@@ -6,7 +6,8 @@
 //!
 //! launchd is macOS's: on another host nothing can be loaded, so `down`
 //! finds no agent and `up` fails saying launchd mode needs macOS, rather
-//! than with `launchctl` not found (goal 83, docs/design/linux-ci.md).
+//! than with `launchctl` not found (goal 83, docs/development/testing.md
+//! "CI").
 use anyhow::{Context, Result, ensure};
 use std::{
     fs,

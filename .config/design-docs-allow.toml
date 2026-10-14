@@ -95,10 +95,6 @@ path = "docs/design/supervisor-lifecycle/cleanup-and-recovery.md"
 line = 1782
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/conflict-thresholds.md"
-line = 1565
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/disk-space.md"
 line = 3087
 tasks = 23
@@ -232,10 +228,6 @@ tasks = 5
 [[doc]]
 path = "docs/design/supervisor-lifecycle/source-repository.md"
 line = 1174
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/stall-thresholds.md"
-tasks = 13
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/supervise.md"

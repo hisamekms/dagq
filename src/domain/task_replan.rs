@@ -33,7 +33,7 @@ string_enum!(ReplanOrigin {
     Runtime => "runtime",
 });
 
-// Where an operation is (docs/design/supervisor-lifecycle/task-replanning.md,
+// Where an operation is (docs/plans/task-replanning.md,
 // "永続状態と所有権"). `candidate` and `diagnosing` leave the run going;
 // `continuing`, `applied`, `continuing_after_park` and `withdrawn` end the
 // operation; every other one guards the task.

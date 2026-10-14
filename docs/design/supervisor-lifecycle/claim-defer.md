@@ -18,7 +18,6 @@ related:
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-claim-hold
-  - design-supervisor-lifecycle-conflict-thresholds
   - design-supervisor-lifecycle-commands
 ---
 
@@ -28,7 +27,9 @@ related:
 
 ## 判定の入力
 
-- **hotspot**: `stats`の`conflict_hotspots`（既定のwindow）で`alert`のファイル（mainから消えたものを除き、名前が変わったものは今の名前）。閾値は`dagq.toml`の`[conflicts]`（[Conflict thresholds](conflict-thresholds.md)）。plan reviewのpromptと同じ計算（`plan_review::conflict_hotspot_files`）で、10分ごとと、`[conflicts]`の値が変わったとき（[読み直し](conflict-thresholds.md#読み直し)）に読み直す
+- **hotspot**: `stats`の`conflict_hotspots`（既定のwindow）で`alert`のファイル（mainから消えたものを除き、名前が変わったものは今の名前）。
+  閾値は`dagq.toml`の`[conflicts]`（`domain::stats::conflicts::ConflictConfig`）。
+  plan reviewのpromptと同じ計算（`plan_review::conflict_hotspot_files`）で、10分ごとと、`[conflicts]`の値が変わったとき（`Supervisor::reread_conflicts`）に読み直す
 - **予想するファイル**（`domain::claim_defer::expected_files`）: taskの`--paths`のうちワイルドカード（`*`・`**`・`?`）を含まない具体的なパス（globは範囲の宣言で予想ではないので外す。[ADR-t1981-1](../../adr/2026-10-07-t1981-1-expected-files-leave-out-path-globs.md)、ADR-0080の決定1をamends）。具体的なパスが残らなければ（`--paths`が無いときと同じく）`dagq related`で最も似た`completed`のtask 3件の`landed_commits`の各commitが変えたファイル（`git diff --name-only <commit>^ <commit>`）。taskごとにhotspotと同じ間隔でcacheする
 - **進行中のrun**（`InFlight`）: `latest_runs_in_progress`（`in_progress`のtaskの最新のrun。着地待ち・`needs_session`を含む）ごとに、base commitからhead（`result_commit`、無ければbranch）までの差分のファイルと、そのtaskの予想するファイル、人だけを待つならその始まり（`owner_waiting_since`。下の「人だけを待つrun」）、自分のcommitを持たないfailedのrunか（`no_commit`。下の「自分のcommitを持たないfailedのrun」）。60秒ごとか、claimの直後に読み直す
 
@@ -41,7 +42,8 @@ related:
 
 待ちの始まりは、待ちならその`run_waiting_started`の時刻、leaseが無いならrunの最後の`lease_acquired` / `lease_released`の時刻で、どちらもそのaskのうち最も古いものの`created_at`より前にはしない（leaseのeventが無ければaskの時刻）。
 
-始まりから`[conflicts]`の`waiting_owner_grace_secs`（既定600秒。[Conflict thresholds](conflict-thresholds.md)）を過ぎたrunは、判定のたびに進行中のrunから除く（`domain::claim_defer::counted`。猶予の経過はcacheの60秒に依らずpassの時刻で判定し、askへの答えや待ちの終わりの反映は進行中のrunの読み直しまで遅れうる）。新しく控えるときも、控えを続けるかの判定でも同じに数え、待ちが終わって動き出したrunは読み直しの後にまた数える
+始まりから`[conflicts]`の`waiting_owner_grace_secs`（既定600秒）を過ぎたrunは、判定のたびに進行中のrunから除く（`domain::claim_defer::counted`。猶予の経過はcacheの60秒に依らずpassの時刻で判定し、askへの答えや待ちの終わりの反映は進行中のrunの読み直しまで遅れうる）。
+新しく控えるときも、控えを続けるかの判定でも同じに数え、待ちが終わって動き出したrunは読み直しの後にまた数える
 
 ### 自分のcommitを持たないfailedのrun
 

@@ -1657,7 +1657,8 @@ pub fn judge_running_alerts(
         // decisions 2 and 10): one that is gone (dead, or its pid another
         // process's now) without recording that its session ended. Its
         // heartbeat's age is not looked at: a wrapper that only went quiet
-        // is the silent wrapper's (silent-wrapper.md).
+        // is the silent wrapper's (section "黙ったwrapper" of
+        // docs/design/supervisor-lifecycle/receipt-and-session-exit.md).
         if background
             && phase.is_some()
             && run.background_alive == Some(false)

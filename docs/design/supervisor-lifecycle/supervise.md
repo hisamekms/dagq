@@ -57,7 +57,7 @@ slotの集まりは`SlotTable`だけが変え、残りは`Supervisor`が持つ�
    続けてmain checkoutの`[conflicts]`を読み直し、使用中と違う同じ値を2 pass続けて読んだときだけ以後の判定に使い、hotspotのcacheを捨てて`conflicts_config_changed`を記録する。
    表の削除も2回の読みで既定値を適用し、欠落・parseエラーでは使用中の値を保って変更候補を捨てる。
    起動時は即時に適用し、最初の読み直しが起動時と同じ値を読み、それがqueueの最新の`conflicts_config_changed`の`to`と違えば`source: start`で1回記録する。
-   `SuperviseOptions.conflicts`の上書き時は読み直さない（[Conflict thresholds](conflict-thresholds.md#読み直し)、ADR-0080・ADR-t774-1・ADR-t775-1）。
+   `SuperviseOptions.conflicts`の上書き時は読み直さない（`Supervisor::reread_conflicts`、ADR-0080・ADR-t774-1・ADR-t775-1）。
    続けて`[supervisor]`を読み直し（flagで明示した値はそのまま）、値が変われば以後のclaimと待ちとruntimeのplannerを立てる判定に使い、登録に書いて`supervisor_config_changed`を記録する（[Run environment](run-environment.md)の`[supervisor]`）。
    続けて`[provider_fallback]`を読み直し、`workers`が変われば以後のclaimの経路とturnの壁の判定に、`jobs`が変われば以後のheadlessのjobの行き先と失敗の後の扱いに使う（[Run environment](run-environment.md)の`[provider_fallback]`、[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。
    続けて`[fresh_session]`を読み直し、変わった閾値を新しいsessionの判定（`next_session`）に使う（[Run environment](run-environment.md)）。

@@ -179,7 +179,9 @@ impl Supervisor<'_> {
     /// values keeps those in use, warned of once per error; so does a
     /// missing file, which may only be a checkout rewriting it. A first
     /// read of the values started with records them when the latest change
-    /// on the queue moved elsewhere (ADR-t775-1).
+    /// on the queue moved elsewhere (ADR-t775-1). A key removed from the
+    /// table reads as its default, so a half-written file left for two
+    /// passes is applied: write the file elsewhere and rename it over.
     pub(super) fn reread_conflicts(&mut self) -> Result<()> {
         let Some(read) = self.claim.conflicts_file.clone() else {
             return Ok(());

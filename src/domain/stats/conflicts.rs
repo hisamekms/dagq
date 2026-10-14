@@ -11,6 +11,14 @@
 //!
 //! A rebase conflict of a run whose precheck already recorded the same
 //! file against the same main is the same conflict and is counted once.
+//! A conflict the landing recheck finds (`landing_recheck_failed`) is not
+//! counted here; `stats`' `landing_rechecks` counts it.
+//!
+//! `stats` judges by `[conflicts]` of the main checkout's `dagq.toml`, else
+//! by the defaults. The supervisor judges the same alert with the values it
+//! started with and reads again each pass (ADR-0080, ADR-t774-1,
+//! ADR-t775-1): for the claims it defers on the alerted files (ADR-0069),
+//! and for the alert in the plan review's prompt.
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::Serialize;
@@ -29,13 +37,19 @@ pub const DEFAULT_HOTSPOT_RATIO_PERCENT: i64 = 20;
 /// table of `dagq.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ConflictConfig {
+    /// The least number of conflicts in the window for a file to be an
+    /// alert (ADR-0069 decision 3).
     pub hotspot_conflicts: i64,
+    /// The least share, in percent, of the landings that changed a file
+    /// that conflicted in it, for an alert; a file must meet both
+    /// thresholds (ADR-0069 decision 3).
     pub hotspot_ratio_percent: i64,
     /// How long a claim deferred on the alerted files lasts at most
     /// (ADR-0069).
     pub defer_max_secs: i64,
     /// How long a run in flight that only waits for a person's answer
-    /// still holds the claims back (ADR-t1484-1).
+    /// still holds the claims back, counted from the start of its wait
+    /// (ADR-t1484-1).
     pub waiting_owner_grace_secs: i64,
 }
 

@@ -3,6 +3,16 @@
 //! of seconds, with the defaults a person chose (2026-09-25). A test may
 //! set a threshold below a second ([`StallConfig::with_millis`]); the
 //! checks compare each as a [`Duration`] ([`StallConfig::threshold`]).
+//!
+//! The supervisor reads `[stall]` of the main checkout's `dagq.toml` once
+//! at start (the defaults without the file; an invalid table stops the
+//! start) and records the values as [`STALL_CONFIG_LOADED`]: a change
+//! takes `down --wait` and `up`. `stats` judges by the latest such event,
+//! else by the file, else by the defaults (ADR-0047 decision 33). With the
+//! interactive route gone (ADR-t1433-2) only the thresholds of a headless
+//! turn and of an idle process watch anything; the keys of the screen, of
+//! a sent text's confirmation and of background work are still read and
+//! checked, and serve only `stats` and the records.
 use std::{collections::HashMap, time::Duration};
 
 use serde::{Deserialize, Serialize};
@@ -10,23 +20,20 @@ use serde_json::Value;
 
 use super::RunEvent;
 
-/// Receipt-less idle before the nudge, and again before the `stalled` ask.
+/// The default of [`StallConfig::idle_without_receipt_secs`].
 pub const DEFAULT_IDLE_WITHOUT_RECEIPT_SECS: i64 = 20 * 60;
-/// How long a sent text may wait to be taken up, and again after the Enter.
+/// The default of [`StallConfig::send_confirm_secs`].
 pub const DEFAULT_SEND_CONFIRM_SECS: i64 = 60;
-/// Background work running this long is a `long_background` alert.
+/// The default of [`StallConfig::background_alert_secs`].
 pub const DEFAULT_BACKGROUND_ALERT_SECS: i64 = 30 * 60;
-/// A process of the run that makes no progress this long is an
-/// `idle_process` alert (task 469).
+/// The default of [`StallConfig::idle_process_secs`].
 pub const DEFAULT_IDLE_PROCESS_SECS: i64 = 30 * 60;
-/// How long a session without a fresh idle marker must look idle on its
-/// screen before it is taken for idle (ADR-t803-1).
+/// The default of [`StallConfig::screen_idle_secs`] (ADR-t803-1).
 pub const DEFAULT_SCREEN_IDLE_SECS: i64 = 2 * 60;
-/// A headless worker's turn with no line of output this long is stopped
-/// (ADR-t813-1 decision 9): Claude's stream has a heartbeat every 30 s
-/// while a tool runs.
+/// The default of [`StallConfig::turn_silence_secs`] (ADR-t813-1 decision
+/// 9): Claude's stream has a heartbeat every 30 s while a tool runs.
 pub const DEFAULT_TURN_SILENCE_SECS: i64 = 15 * 60;
-/// A headless worker's turn running this long is stopped.
+/// The default of [`StallConfig::turn_limit_secs`].
 pub const DEFAULT_TURN_LIMIT_SECS: i64 = 4 * 60 * 60;
 
 /// The event the supervisor records with the values it loaded at start.
@@ -43,12 +50,31 @@ pub struct BackgroundTask {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct StallConfig {
+    /// The threshold of `stats`' `idle_without_receipt`, and the
+    /// `threshold_secs` the nudge's events record: a headless turn that
+    /// ends without a receipt is nudged at once.
     pub idle_without_receipt_secs: i64,
+    /// Read and recorded in `stall_config_loaded` and `stats`'
+    /// `stall_thresholds`, but used for no sending: it was the wait for an
+    /// interactive session to take up a sent text (ADR-0043 decisions 2
+    /// and 3).
     pub send_confirm_secs: i64,
+    /// The threshold of `stats`' `long_background`, which judges past
+    /// records; the supervisor uses it only to record `threshold_secs`.
     pub background_alert_secs: i64,
+    /// How long a process of the run may live using almost no CPU time
+    /// before the supervisor starts the `idle_process` recovery job, and
+    /// the threshold of `idle_process_secs` in `stats`' `stall_thresholds`.
     pub idle_process_secs: i64,
+    /// Read and checked, but no session's screen is read, so it is used
+    /// for nothing and `stats`' `stall_thresholds` has no item for it.
     pub screen_idle_secs: i64,
+    /// How long a headless worker's turn may go without a line of output
+    /// before its wrapper stops the turn (only for a provider with a
+    /// heartbeat); passed to the wrapper in `turns/limits.json`.
     pub turn_silence_secs: i64,
+    /// How long one turn of a headless worker may run before its wrapper
+    /// stops it; passed like [`Self::turn_silence_secs`].
     pub turn_limit_secs: i64,
     /// The thresholds a test set below a second (task 1045), which the
     /// checks use in place of the seconds; `[stall]` never sets them.
