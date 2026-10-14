@@ -19,7 +19,7 @@ use dagq::{
 use rusqlite::Connection;
 use serde_json::json;
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     thread,
     time::Duration,
 };
@@ -515,4 +515,104 @@ fn down_force_kills_after_the_unload_and_drops_the_registration() {
     assert_eq!(processes.killed.lock().unwrap().as_slice(), &[pid]);
     assert!(queue.supervisors().unwrap().is_empty());
     assert!(!*launchd.loaded.lock().unwrap());
+}
+
+/// `down` unloads the queue's agents under another label (their `--db`
+/// is its database) beside its own and removes their plists, reports
+/// them, sends neither agent's supervisor a second SIGTERM, and `--wait`
+/// waits for both to drain. An agent of another queue is left alone. When
+/// a stray agent's pid is unknown, nothing but in-cmux is signalled (the
+/// choice is the unit test
+/// `the_pids_bootout_signalled_are_every_agent_s_unless_one_is_unknown`).
+#[test]
+fn down_unloads_the_queue_s_agent_of_another_label_and_waits_for_its_supervisor() {
+    let fixture = fixture();
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let (own, stray_pid) = (4_000_001, 4_000_002);
+    queue
+        .register_supervisor(&LeaseToken::new("own"), own, 4, VERSION)
+        .unwrap();
+    queue
+        .register_supervisor(&LeaseToken::new("stray"), stray_pid, 4, VERSION)
+        .unwrap();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    launchd.load(Some(own));
+    let stray = launchd.define_other(
+        &fixture,
+        "com.dagq.stray",
+        &fixture.location.db,
+        true,
+        Some(stray_pid),
+    );
+    let elsewhere = launchd.define_other(
+        &fixture,
+        "com.dagq.elsewhere",
+        &fixture.location.db.with_file_name("other.db"),
+        true,
+        Some(4_000_003),
+    );
+    let processes = FakeProcesses::default();
+    let db = fixture.location.db.clone();
+    let returned = AtomicBool::new(false);
+    let report = {
+        let _waiting = common::within(
+            common::STEP_LIMIT,
+            "down --wait to return once both the own and the stray agent's supervisors deregistered",
+        );
+        thread::scope(|scope| {
+            let drain = scope.spawn(|| {
+                wait_until(&processes, stray_pid, || {
+                    launchd.uninstalls.lock().unwrap().len() == 2
+                });
+                let queue = SqliteQueue::open(&db).unwrap();
+                queue
+                    .deregister_supervisor(&LeaseToken::new("own"))
+                    .unwrap();
+                thread::sleep(Duration::from_millis(200));
+                // Whether `down` had returned while the stray agent's
+                // supervisor was still registered.
+                let early = returned.load(Ordering::SeqCst);
+                queue
+                    .deregister_supervisor(&LeaseToken::new("stray"))
+                    .unwrap();
+                early
+            });
+            let report = down(&fixture, &launchd, &processes, true, false);
+            returned.store(true, Ordering::SeqCst);
+            assert!(
+                !drain.join().unwrap(),
+                "down --wait returned before the stray agent's supervisor deregistered"
+            );
+            report
+        })
+    };
+    assert_eq!(
+        report,
+        json!({"outcome": "stopped", "pid": own, "pids": [own, stray_pid],
+               "launch_agent_unloaded": true, "supervisor_workspaces": [],
+               "stray_agents": [{"label": "com.dagq.stray", "plist": stray,
+                                 "loaded": true, "pid": stray_pid}]})
+    );
+    assert!(queue.supervisors().unwrap().is_empty());
+    assert!(processes.terminated.lock().unwrap().is_empty());
+    assert!(!stray.exists());
+    assert!(elsewhere.exists());
+    assert!(launchd.others.lock().unwrap()["com.dagq.elsewhere"].loaded);
+
+    // A stray loaded with its pid unknown: a supervisor started by hand
+    // is not signalled either, while an in-cmux one still is.
+    queue
+        .register_supervisor(&LeaseToken::new("by-hand"), 4_000_004, 4, VERSION)
+        .unwrap();
+    in_cmux_supervisor(&mut queue, "cmux", 4_000_005, "ws-1");
+    launchd.load(Some(own));
+    let stray = launchd.define_other(&fixture, "com.dagq.stray", &fixture.location.db, true, None);
+    let report = down(&fixture, &launchd, &processes, false, false);
+    assert_eq!(report["outcome"], "draining", "{report}");
+    assert_eq!(
+        report["stray_agents"],
+        json!([{"label": "com.dagq.stray", "plist": stray, "loaded": true, "pid": null}])
+    );
+    assert!(processes.terminated.lock().unwrap().is_empty());
+    assert_eq!(*processes.interrupted.lock().unwrap(), [4_000_005]);
 }

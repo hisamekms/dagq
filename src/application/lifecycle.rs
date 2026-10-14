@@ -27,9 +27,9 @@
 //! files through [`Ports`]; the entry points in [`crate::compose`] build
 //! the adapters.
 use super::{
-    AgentProvider, CONFIG_HOME_ENV, Clock, CommandSpec, LaunchAgent, ProcessControl, QueueOpener,
-    RunCoordination, RunFiles, RunLog, RunRecovery, SessionRegistry, SupervisorEnvironment,
-    SupervisorRegistry,
+    AgentProvider, AgentState, CONFIG_HOME_ENV, Clock, CommandSpec, DefinedAgent, LaunchAgent,
+    ProcessControl, QueueOpener, RunCoordination, RunFiles, RunLog, RunRecovery, SessionRegistry,
+    SupervisorEnvironment, SupervisorRegistry,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, WorkspaceAccess,
     },
@@ -533,6 +533,7 @@ pub fn up(
         queue,
         launchd,
         processes,
+        files: ports.files,
         clock: ports.clock,
         environment,
         options,
@@ -540,6 +541,8 @@ pub fn up(
 
     let mut pruned = Vec::new();
     let mut live = Vec::new();
+    // Every registration whose process lives, heartbeating or not.
+    let mut alive = Vec::new();
     // Registrations that survive this pass are not the supervisor `up` is
     // about to start, so the wait below must not mistake one for it.
     let mut existing = HashSet::new();
@@ -566,11 +569,15 @@ pub fn up(
             "the live supervisor has a different --no-claude policy; drain it with down --wait before up"
         );
         existing.insert(registration.token.clone());
+        alive.push(registration.clone());
         if fresh(&registration, processes, now) {
             live.push(registration);
         }
         // Alive but silent: not ours to kill; it shows up as stale in doctor.
     }
+    // The queue's agents under another label are unloaded before one is
+    // started or reused, and the supervisors they kept are not reused.
+    let stray_agents = remove_stray_agents_for_up(&up, &alive, &mut live)?;
 
     // A supervisor of another build is not ours to reuse: it would keep
     // serving this queue with the code the operator has just replaced, and
@@ -632,6 +639,9 @@ pub fn up(
     }
     if let Some(queue_broker) = queue_broker {
         report["queue_broker"] = queue_broker;
+    }
+    if !stray_agents.is_empty() {
+        report["stray_agents"] = stray_reports(&stray_agents);
     }
     match handoff_failure {
         None => Ok(report),
@@ -709,6 +719,7 @@ struct Up<'a, Q: ?Sized> {
     queue: &'a Q,
     launchd: &'a dyn LaunchAgent,
     processes: &'a dyn ProcessControl,
+    files: &'a dyn RunFiles,
     clock: &'a dyn Clock,
     environment: &'a UpEnvironment,
     options: &'a UpOptions,
@@ -741,6 +752,10 @@ pub fn session_actor(role: SessionRole) -> ActorContext {
 /// old-binary one in that state is left running beside the new supervisor
 /// and reported `stale`; stopping it stays a person's call
 /// (ADR-0014's Consequences).
+///
+/// The supervisors of the queue's agents of another label are gone before
+/// this ([`remove_stray_agents_for_up`]), so only the own agent's bootout
+/// decides who is signalled here.
 fn replace_supervisors(
     up: &Up<impl LifecycleQueue + ?Sized>,
     live: &[SupervisorRegistration],
@@ -753,32 +768,13 @@ fn replace_supervisors(
         options,
         ..
     } = *up;
-    // The version reported as replaced is an outdated one, not merely the
-    // first: a mixed set is drained whole, but naming a version that
-    // matched would read as if nothing had been out of date.
-    let previous_version = live
-        .iter()
-        .find(|registration| registration.binary_version.as_deref() != Some(VERSION))
-        .and_then(|registration| registration.binary_version.clone());
-    if options.no_wait {
-        // Read before anything is signalled, so a refusal leaves the old
-        // supervisor serving the queue exactly as it was. What the drain
-        // waits for is what the replaced supervisors lease: a run keeps its
-        // lease through the review, a revise, the e2e and the landing
-        // (ADR-0054 decision 6), and a resume or a recovery round takes it
-        // again, so `active_runs` alone would miss most of it.
-        let mut held = Vec::new();
-        for registration in live {
-            held.extend(
-                queue
-                    .runs_leased_by(&registration.token)?
-                    .into_iter()
-                    .map(|run| (run.id().to_string(), run.status())),
-            );
-        }
-        if let Some(refusal) = no_wait_refusal(previous_version.as_deref(), &held) {
-            bail!(refusal);
-        }
+    let previous_version = previous_version(live);
+    // Read before anything is signalled, so a refusal leaves the old
+    // supervisor serving the queue exactly as it was.
+    if options.no_wait
+        && let Some(refusal) = replacement_refusal(queue, live)?
+    {
+        bail!(refusal);
     }
     let replaced: Vec<Value> = live
         .iter()
@@ -793,15 +789,50 @@ fn replace_supervisors(
         })
         .collect();
     let agent = launchd.uninstall(&location.label, &location.launch_agent)?;
+    let signalled = signalled_by_bootout([&agent]);
     for registration in live {
         if registration.mode == Some(SupervisorMode::InCmux) {
             processes.interrupt(registration.pid)?;
-        } else if (!agent.loaded || agent.pid.is_some()) && Some(registration.pid) != agent.pid {
+        } else if terminates(signalled.as_ref(), registration.pid) {
             // A second SIGTERM would end a draining supervisor at once, so
             // the one bootout delivered is never repeated here.
             processes.terminate(registration.pid)?;
         }
     }
+    drain_supervisors(up, live)?;
+    let left = forget_supervisor_workspaces(queue, live);
+    // Whatever survived the drain (an alive-but-silent supervisor `up`
+    // neither reuses nor kills) belongs to another process, not to the one
+    // started below.
+    let existing: HashSet<LeaseToken> = queue
+        .supervisors()?
+        .into_iter()
+        .map(|registration| registration.token)
+        .collect();
+    let mut started = start_under_launchd(up, &existing)?;
+    let object = started
+        .as_object_mut()
+        .expect("a started supervisor is a JSON object");
+    object.insert("outcome".into(), json!("restarted"));
+    object.insert("previous_version".into(), json!(previous_version));
+    object.insert("replaced".into(), json!(replaced));
+    object.insert("supervisor_workspaces".into(), json!(left));
+    Ok(started)
+}
+
+/// Wait until every one of `draining`, already asked to stop, has
+/// deregistered or its process died, and prune the rows of those that died
+/// with them.
+fn drain_supervisors(
+    up: &Up<impl LifecycleQueue + ?Sized>,
+    draining: &[SupervisorRegistration],
+) -> Result<()> {
+    let Up {
+        queue,
+        processes,
+        options,
+        ..
+    } = *up;
     // `--no-wait` promised not to sit through a drain. The runs were the
     // reason a drain is long, and there were none, but a supervisor can
     // still fail to stop (a loop wedged on a hung cmux or git call keeps
@@ -816,7 +847,7 @@ fn replace_supervisors(
             .supervisors()?
             .into_iter()
             .filter(|registration| {
-                live.iter().any(|l| l.token == registration.token)
+                draining.iter().any(|l| l.token == registration.token)
                     && processes.alive(registration.pid)
             })
             .map(|registration| format!("{} (pid {})", registration.token, registration.pid))
@@ -845,29 +876,265 @@ once `status` shows it gone",
         .into_iter()
         .map(|registration| registration.token)
         .collect();
-    for registration in live {
+    for registration in draining {
         if surviving.contains(&registration.token) {
             prune_supervisor(queue, registration)?;
         }
     }
-    let left = forget_supervisor_workspaces(queue, live);
-    // Whatever survived the drain (an alive-but-silent supervisor `up`
-    // neither reuses nor kills) belongs to another process, not to the one
-    // started below.
-    let existing: HashSet<LeaseToken> = queue
-        .supervisors()?
+    Ok(())
+}
+
+/// The runs `registrations` lease, id and status: what a drain of them
+/// waits for, and so what `--no-wait` refuses it for. A run keeps its lease
+/// through the review, a revise, the e2e and the landing (ADR-0054
+/// decision 6), and a resume or a recovery round takes it again, so
+/// `active_runs` alone would miss most of it.
+fn leased_runs(
+    queue: &(impl LifecycleQueue + ?Sized),
+    registrations: &[SupervisorRegistration],
+) -> Result<Vec<(String, RunStatus)>> {
+    let mut held = Vec::new();
+    for registration in registrations {
+        held.extend(
+            queue
+                .runs_leased_by(&registration.token)?
+                .into_iter()
+                .map(|run| (run.id().to_string(), run.status())),
+        );
+    }
+    Ok(held)
+}
+
+/// A LaunchAgent of the queue under another label than its own, which
+/// `up` or `down` unloaded and whose definition it removed, with what
+/// launchd had under it then.
+struct StrayAgent {
+    agent: DefinedAgent,
+    state: AgentState,
+}
+
+/// The stray agents as `up` and `down` report them (`stray_agents`): each
+/// agent's `label` and `plist`, and whether launchd had it `loaded` and
+/// its process's `pid` (null when unknown) when it was unloaded.
+fn stray_reports(strays: &[StrayAgent]) -> Value {
+    strays
+        .iter()
+        .map(|stray| {
+            json!({
+                "label": stray.agent.label,
+                "plist": stray.agent.plist,
+                "loaded": stray.state.loaded,
+                "pid": stray.state.pid,
+            })
+        })
+        .collect()
+}
+
+/// The agents of `defined` that keep a supervisor of the queue at `db`
+/// under another label than `label`: their `--db` is that database once
+/// both are made canonical by `canonical`. A queue reached once from its
+/// repository and once by a `--db` that hashed differently could have
+/// got two, each restarting its own supervisor; an agent of another
+/// queue is not one.
+fn stray_agents<'a>(
+    defined: &'a [DefinedAgent],
+    label: &str,
+    db: &Path,
+    canonical: &dyn Fn(&Path) -> PathBuf,
+) -> Vec<&'a DefinedAgent> {
+    let db = canonical(db);
+    defined
+        .iter()
+        .filter(|agent| {
+            agent.label != label
+                && agent
+                    .db
+                    .as_deref()
+                    .is_some_and(|other| canonical(other) == db)
+        })
+        .collect()
+}
+
+/// [`stray_agents`] of the queue among the agents defined beside its own.
+fn find_stray_agents(
+    launchd: &dyn LaunchAgent,
+    files: &dyn RunFiles,
+    location: &QueuePaths,
+) -> Result<Vec<DefinedAgent>> {
+    let Some(dir) = location.launch_agent.parent() else {
+        return Ok(Vec::new());
+    };
+    let defined = launchd.defined(dir)?;
+    let canonical = |path: &Path| {
+        files
+            .canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    Ok(
+        stray_agents(&defined, &location.label, &location.db, &canonical)
+            .into_iter()
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Unload each of `agents` and remove its definition, the way `down`
+/// unloads the queue's own: its bootout delivers SIGTERM to its process,
+/// and `KeepAlive` no longer restarts it.
+fn remove_stray_agents(
+    launchd: &dyn LaunchAgent,
+    agents: Vec<DefinedAgent>,
+) -> Result<Vec<StrayAgent>> {
+    agents
         .into_iter()
-        .map(|registration| registration.token)
+        .map(|agent| {
+            let state = launchd.uninstall(&agent.label, &agent.plist)?;
+            Ok(StrayAgent { agent, state })
+        })
+        .collect()
+}
+
+/// The pids launchd's bootout of `agents` delivered SIGTERM to, which `down`
+/// and `up`'s replacement do not signal again: a second SIGTERM would end a
+/// draining supervisor at once. `None` when one of them was loaded with its
+/// pid unknown: then which supervisor it signalled cannot be told, and
+/// nothing but an in-cmux supervisor is signalled.
+fn signalled_by_bootout<'a>(
+    agents: impl IntoIterator<Item = &'a AgentState>,
+) -> Option<HashSet<u32>> {
+    let mut pids = HashSet::new();
+    for agent in agents {
+        match (agent.loaded, agent.pid) {
+            (true, None) => return None,
+            (_, Some(pid)) => {
+                pids.insert(pid);
+            }
+            (false, None) => (),
+        }
+    }
+    Some(pids)
+}
+
+/// Whether `down` or `up`'s replacement sends a supervisor not in the
+/// in-cmux mode, at `pid`, the SIGTERM itself ([`signalled_by_bootout`]).
+fn terminates(signalled: Option<&HashSet<u32>>, pid: u32) -> bool {
+    signalled.is_some_and(|signalled| !signalled.contains(&pid))
+}
+
+/// Which of `alive` (the registrations whose process lives, whether its
+/// heartbeat is fresh or not) the queue's agents of another label kept,
+/// given what launchd had under them (`strays`) and under the queue's own
+/// label (`current`): their bootout makes them drain, so `up` reuses none
+/// of them and waits for each to go, a silent one too. They are the
+/// registrations of the stray agents' known pids, whatever their mode, and,
+/// when a loaded one's pid is unknown, also every launchd supervisor but
+/// the own agent's process, since any of them may be its.
+fn stray_supervisors(
+    alive: &[SupervisorRegistration],
+    strays: &[AgentState],
+    current: &AgentState,
+) -> HashSet<LeaseToken> {
+    let unknown = strays
+        .iter()
+        .any(|agent| agent.loaded && agent.pid.is_none());
+    alive
+        .iter()
+        .filter(|registration| {
+            strays
+                .iter()
+                .any(|agent| agent.pid == Some(registration.pid))
+                || unknown
+                    && registration.mode == Some(SupervisorMode::Launchd)
+                    && Some(registration.pid) != current.pid
+        })
+        .map(|registration| registration.token.clone())
+        .collect()
+}
+
+/// Unload the queue's agents of another label ([`stray_agents`]) before
+/// `up` starts or reuses one of its own, and wait for the supervisors they
+/// kept among `alive` ([`stray_supervisors`]) to drain, as
+/// [`replace_supervisors`] waits: those leave `live`, the fresh ones `up`
+/// would otherwise reuse. With `--no-wait`, `up` refuses before anything
+/// is unloaded when one of them leases a run, or when the supervisors left
+/// would be replaced ([`replaces`]) and lease one: the replacement's
+/// refusal, too, comes before any signal and uninstall.
+fn remove_stray_agents_for_up(
+    up: &Up<impl LifecycleQueue + ?Sized>,
+    alive: &[SupervisorRegistration],
+    live: &mut Vec<SupervisorRegistration>,
+) -> Result<Vec<StrayAgent>> {
+    let found = find_stray_agents(up.launchd, up.files, up.location)?;
+    if found.is_empty() {
+        return Ok(Vec::new());
+    }
+    let states = found
+        .iter()
+        .map(|agent| up.launchd.state(&agent.label))
+        .collect::<Result<Vec<_>>>()?;
+    let current = up.launchd.state(&up.location.label)?;
+    let stray = stray_supervisors(alive, &states, &current);
+    let draining: Vec<SupervisorRegistration> = alive
+        .iter()
+        .filter(|registration| stray.contains(&registration.token))
+        .cloned()
         .collect();
-    let mut started = start_under_launchd(up, &existing)?;
-    let object = started
-        .as_object_mut()
-        .expect("a started supervisor is a JSON object");
-    object.insert("outcome".into(), json!("restarted"));
-    object.insert("previous_version".into(), json!(previous_version));
-    object.insert("replaced".into(), json!(replaced));
-    object.insert("supervisor_workspaces".into(), json!(left));
-    Ok(started)
+    if up.options.no_wait {
+        let held = leased_runs(up.queue, &draining)?;
+        let labels: Vec<&str> = found.iter().map(|agent| agent.label.as_str()).collect();
+        if let Some(refusal) = refusal(
+            &format!(
+                "unload the queue's LaunchAgent(s) of another label ({})",
+                labels.join(", ")
+            ),
+            &held,
+        ) {
+            bail!(refusal);
+        }
+        let kept: Vec<SupervisorRegistration> = live
+            .iter()
+            .filter(|registration| !stray.contains(&registration.token))
+            .cloned()
+            .collect();
+        if replaces(up, &kept)
+            && let Some(refusal) = replacement_refusal(up.queue, &kept)?
+        {
+            bail!(refusal);
+        }
+    }
+    live.retain(|registration| !stray.contains(&registration.token));
+    let removed = remove_stray_agents(up.launchd, found)?;
+    drain_supervisors(up, &draining)?;
+    Ok(removed)
+}
+
+/// Whether `up` drains `live` and starts one in their place
+/// ([`replace_supervisors`]) rather than reusing them or handing them over.
+fn replaces(up: &Up<impl LifecycleQueue + ?Sized>, live: &[SupervisorRegistration]) -> bool {
+    live.iter()
+        .any(|registration| registration.binary_version.as_deref() != Some(VERSION))
+        && !takes_handoff(up, up.files, live)
+}
+
+/// The version reported as replaced: an outdated one, not merely the
+/// first, since a mixed set is drained whole, but naming a version that
+/// matched would read as if nothing had been out of date.
+fn previous_version(live: &[SupervisorRegistration]) -> Option<String> {
+    live.iter()
+        .find(|registration| registration.binary_version.as_deref() != Some(VERSION))
+        .and_then(|registration| registration.binary_version.clone())
+}
+
+/// `up --no-wait`'s refusal to replace `live`: what the drain waits for is
+/// what the replaced supervisors lease ([`leased_runs`]).
+fn replacement_refusal(
+    queue: &(impl LifecycleQueue + ?Sized),
+    live: &[SupervisorRegistration],
+) -> Result<Option<String>> {
+    Ok(no_wait_refusal(
+        previous_version(live).as_deref(),
+        &leased_runs(queue, live)?,
+    ))
 }
 
 /// Why `up --no-wait` refuses to drain the supervisors it replaces: the
@@ -877,14 +1144,25 @@ once `status` shows it gone",
 /// leases (a supervisor `up` does not replace, a `dagq integrate` by hand)
 /// is not waited for by the drain, so it does not refuse it either.
 fn no_wait_refusal(previous_version: Option<&str>, held: &[(String, RunStatus)]) -> Option<String> {
+    refusal(
+        &format!(
+            "replace the supervisor of version {} with {VERSION}",
+            previous_version.unwrap_or("(unrecorded)")
+        ),
+        held,
+    )
+}
+
+/// Why `up --no-wait` refuses to `what` (a drain): the runs the drained
+/// supervisors still lease (`held`); `None` when they lease none.
+fn refusal(what: &str, held: &[(String, RunStatus)]) -> Option<String> {
     if held.is_empty() {
         return None;
     }
     Some(format!(
-        "refusing to replace the supervisor of version {} with {VERSION} without waiting: {} \
+        "refusing to {what} without waiting: {} \
 run(s) are still in flight on the supervisors being replaced ({}); run `up` without --no-wait \
 to drain them, or wait for them to finish",
-        previous_version.unwrap_or("(unrecorded)"),
         held.len(),
         held.iter()
             .map(|(id, status)| format!("{id} {}", status.as_str()))
@@ -968,10 +1246,7 @@ not go on with the binary they had: `down --force` and `up` start them with this
         (Some(_), _) => "partially_handed_off",
     };
     let first = &handed[0];
-    let previous_version = live
-        .iter()
-        .find(|registration| registration.binary_version.as_deref() != Some(VERSION))
-        .and_then(|registration| registration.binary_version.clone());
+    let previous_version = previous_version(live);
     let report = json!({
         "outcome": outcome,
         "handoff": true,
@@ -1933,7 +2208,10 @@ pub struct DownOptions {
 /// process; a supervisor started by hand gets the SIGTERM from here, and an
 /// `in_cmux` one an earlier binary registered (ADR-t1433-4 decision 3)
 /// gets a SIGINT, the signal its terminal would send. The runtime drains
-/// on either.
+/// on either. The queue's agents under another label than its own (whose
+/// `--db` is its database) are unloaded and their definitions removed
+/// too, reported as `stray_agents`, and their supervisors are waited for
+/// like the rest.
 ///
 /// `down` closes no cmux workspace (ADR-t2159-1 decision 3): the one an
 /// `in_cmux` supervisor runs in is reported `left_open` for a person to
@@ -1999,6 +2277,12 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     // unloaded, or it would keep restarting.
     let agent = launchd.uninstall(&location.label, &location.launch_agent)?;
     let unloaded = agent.loaded;
+    // So are the queue's agents of another label, whose supervisors are
+    // among `live` and drain like the own agent's.
+    let strays = remove_stray_agents(launchd, find_stray_agents(launchd, ports.files, location)?)?;
+    let signalled = signalled_by_bootout(
+        std::iter::once(&agent).chain(strays.iter().map(|stray| &stray.state)),
+    );
     // After the drain the service is stopped; while the supervisors drain
     // it is left to the last of them. Nothing is said of a service that
     // did not run.
@@ -2047,6 +2331,9 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     };
     // The broker before the service it passes requests on to.
     let stop_both = |report: &mut Value, drained: bool| {
+        if !strays.is_empty() {
+            report["stray_agents"] = stray_reports(&strays);
+        }
         if let Some(queue_broker) = stop_broker(drained) {
             report["queue_broker"] = queue_broker;
         }
@@ -2070,14 +2357,14 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         stop_both(&mut report, true);
         return Ok(report);
     }
-    // launchd's bootout delivers the SIGTERM to the agent's own process; a
+    // launchd's bootout delivers the SIGTERM to each agent's own process; a
     // supervisor started by hand gets it from here. A second SIGTERM would
-    // end a draining supervisor at once, so when the agent is loaded but
-    // its pid is unknown nothing is signalled.
+    // end a draining supervisor at once, so when an agent is loaded but
+    // its pid is unknown nothing is signalled ([`signalled_by_bootout`]).
     for registration in &live {
         if registration.mode == Some(SupervisorMode::InCmux) {
             processes.interrupt(registration.pid)?;
-        } else if (!agent.loaded || agent.pid.is_some()) && Some(registration.pid) != agent.pid {
+        } else if terminates(signalled.as_ref(), registration.pid) {
             processes.terminate(registration.pid)?;
         }
     }
@@ -2337,6 +2624,123 @@ mod tests {
             providers: None,
             binary_version: Some(VERSION.into()),
         }
+    }
+
+    /// A stray agent is a dagq agent of another label whose `--db` is the
+    /// queue's database however it is spelled; the queue's own agent, one
+    /// of another queue and one with no `--db` are not.
+    #[test]
+    fn stray_agents_are_the_queue_s_agents_under_another_label() {
+        let agent = |label: &str, db: Option<&str>| DefinedAgent {
+            label: label.into(),
+            plist: PathBuf::from(format!("/home/u/Library/LaunchAgents/{label}.plist")),
+            db: db.map(PathBuf::from),
+        };
+        let defined = [
+            agent("com.dagq.own", Some("/data/q/queue.db")),
+            agent("com.dagq.path", Some("/link/q/queue.db")),
+            agent("com.dagq.same", Some("/data/q/queue.db")),
+            agent("com.dagq.other", Some("/data/r/queue.db")),
+            agent("com.dagq.nodb", None),
+        ];
+        let canonical =
+            |path: &Path| PathBuf::from(path.to_str().unwrap().replace("/link/", "/data/"));
+        let labels: Vec<&str> = stray_agents(
+            &defined,
+            "com.dagq.own",
+            Path::new("/link/q/queue.db"),
+            &canonical,
+        )
+        .into_iter()
+        .map(|agent| agent.label.as_str())
+        .collect();
+        assert_eq!(labels, ["com.dagq.path", "com.dagq.same"]);
+    }
+
+    /// The pids no one SIGTERMs again are every unloaded agent's; one
+    /// loaded with its pid unknown leaves nothing to signal.
+    #[test]
+    fn the_pids_bootout_signalled_are_every_agent_s_unless_one_is_unknown() {
+        let state = |loaded: bool, pid: Option<u32>| AgentState { loaded, pid };
+        let own = state(true, Some(10));
+        let strays = [state(true, Some(20)), state(false, None)];
+        let signalled = signalled_by_bootout(std::iter::once(&own).chain(&strays));
+        assert_eq!(signalled, Some(HashSet::from([10, 20])));
+        assert!(!terminates(signalled.as_ref(), 10));
+        assert!(!terminates(signalled.as_ref(), 20));
+        assert!(terminates(signalled.as_ref(), 30));
+        // Nothing loaded: every supervisor gets the SIGTERM from here.
+        let none = signalled_by_bootout(&[state(false, None)]);
+        assert_eq!(none, Some(HashSet::new()));
+        assert!(terminates(none.as_ref(), 10));
+        // A stray loaded with its pid unknown, or the own agent so.
+        for agents in [
+            [own, state(true, None)],
+            [state(true, None), state(true, Some(20))],
+        ] {
+            let unknown = signalled_by_bootout(&agents);
+            assert_eq!(unknown, None);
+            assert!(!terminates(unknown.as_ref(), 30));
+        }
+    }
+
+    /// `up` reuses no supervisor of a stray agent and waits for each: the
+    /// registration of each known pid, and, when a loaded one's pid is
+    /// unknown, also every launchd one whose process lives but the own
+    /// agent's process.
+    #[test]
+    fn up_reuses_no_supervisor_a_stray_agent_kept() {
+        let launchd = |token: &str, pid: u32| SupervisorRegistration {
+            mode: Some(SupervisorMode::Launchd),
+            ..registration(token, pid, 0)
+        };
+        // The heartbeat is not looked at: a silent supervisor of a stray agent
+        // is drained and waited for as well.
+        let alive = [
+            launchd("own", 10),
+            SupervisorRegistration {
+                heartbeat_at: -1_000_000,
+                ..launchd("stray", 20)
+            },
+            launchd("other", 30),
+            registration("by-hand", 40, 0),
+        ];
+        let state = |loaded: bool, pid: Option<u32>| AgentState { loaded, pid };
+        let tokens = |set: HashSet<LeaseToken>| {
+            let mut tokens: Vec<String> = set.into_iter().map(|t| t.to_string()).collect();
+            tokens.sort();
+            tokens
+        };
+        let own = state(true, Some(10));
+        assert_eq!(
+            tokens(stray_supervisors(&alive, &[state(true, Some(20))], &own)),
+            ["stray"]
+        );
+        // An agent that was not loaded kept none.
+        assert!(stray_supervisors(&alive, &[state(false, None)], &own).is_empty());
+        assert_eq!(
+            tokens(stray_supervisors(&alive, &[state(true, None)], &own)),
+            ["other", "stray"]
+        );
+        assert_eq!(
+            tokens(stray_supervisors(
+                &alive,
+                &[state(true, None)],
+                &state(false, None)
+            )),
+            ["other", "own", "stray"]
+        );
+        // A stray of a known pid and another of an unknown one: the known
+        // pid's registration is kept whatever its mode, beside every
+        // launchd one the unknown stray may have.
+        assert_eq!(
+            tokens(stray_supervisors(
+                &alive,
+                &[state(true, Some(40)), state(true, None)],
+                &own
+            )),
+            ["by-hand", "other", "stray"]
+        );
     }
 
     /// The supervisor `up` started is the first fresh registration it had

@@ -19,9 +19,10 @@ use std::{
 };
 
 use super::adapters::capture;
+use super::location::LAUNCH_AGENT_PREFIX;
 #[cfg(test)]
 use crate::application::SupervisorEnvironment;
-use crate::application::{AgentState, LaunchAgent};
+use crate::application::{AgentState, DefinedAgent, LaunchAgent};
 
 pub use crate::application::lifecycle::{EXIT_TIMEOUT_SECS, LaunchAgentSpec};
 
@@ -123,6 +124,87 @@ impl Launchctl {
     }
 }
 
+/// The dagq agents defined in `dir`: every `com.dagq.*.plist` there whose
+/// `Label` is the file's name without `.plist`, with the `--db` of its
+/// `ProgramArguments`. A file that cannot be read is skipped: it names no
+/// queue this can tell. So is one whose `Label` is another, or missing:
+/// its bootout would stop whatever service that label names, not a dagq
+/// agent.
+pub fn defined_agents(dir: &Path) -> Result<Vec<DefinedAgent>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", dir.display())),
+    };
+    let mut agents = Vec::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("read {}", dir.display()))?
+            .path();
+        let Some(stem) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".plist"))
+            .filter(|stem| stem.starts_with(&format!("{LAUNCH_AGENT_PREFIX}.")))
+        else {
+            continue;
+        };
+        let Ok(plist) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if plist_strings(&plist, "Label").first().map(String::as_str) != Some(stem) {
+            continue;
+        }
+        let arguments = plist_strings(&plist, "ProgramArguments");
+        let db = arguments
+            .iter()
+            .position(|argument| argument == "--db")
+            .and_then(|at| arguments.get(at + 1))
+            .map(std::path::PathBuf::from);
+        agents.push(DefinedAgent {
+            label: stem.to_owned(),
+            plist: path,
+            db,
+        });
+    }
+    agents.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(agents)
+}
+
+/// The `<string>`s of `key`'s value in a plist: the one of a string, or
+/// every one of an array. Empty when the key is not there.
+fn plist_strings(plist: &str, key: &str) -> Vec<String> {
+    let Some(start) = plist.find(&format!("<key>{key}</key>")) else {
+        return Vec::new();
+    };
+    let rest = plist[start..]
+        .split_once("</key>")
+        .map_or("", |(_, rest)| rest);
+    let value = match rest.trim_start() {
+        array if array.starts_with("<array>") => array
+            .split_once("</array>")
+            .map_or(array, |(array, _)| array),
+        string if string.starts_with("<string>") => string
+            .split_once("</string>")
+            .map_or(string, |(string, _)| string),
+        _ => return Vec::new(),
+    };
+    value
+        .split("<string>")
+        .skip(1)
+        .map(|item| unescape(item.split("</string>").next().unwrap_or(item)))
+        .collect()
+}
+
+/// The text of a plist's escaped string.
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
 /// The `pid = N` line of `launchctl print`.
 pub fn print_pid(listing: &str) -> Option<u32> {
     listing
@@ -180,6 +262,14 @@ impl LaunchAgent for Launchctl {
             Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
         }
         Ok(state)
+    }
+
+    fn state(&self, label: &str) -> Result<AgentState> {
+        Launchctl::state(self, label)
+    }
+
+    fn defined(&self, dir: &Path) -> Result<Vec<DefinedAgent>> {
+        defined_agents(dir)
     }
 }
 
@@ -292,6 +382,81 @@ mod tests {
             "{error:#}"
         );
         assert!(!path.exists());
+    }
+
+    /// The agents `up` wrote are read back with their label and the
+    /// queue their `--db` names, escaped as the plist has it; files that
+    /// are not dagq's agents, and dagq-named files whose `Label` is not
+    /// their name, are not.
+    #[test]
+    fn defined_agents_reads_the_label_and_db_of_each_dagq_plist() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("LaunchAgents");
+        assert!(defined_agents(&agents).unwrap().is_empty());
+        fs::create_dir(&agents).unwrap();
+        let spec = |label: &str, db: &str| LaunchAgentSpec {
+            label: label.into(),
+            plist: agents.join(format!("{label}.plist")),
+            program_arguments: vec![
+                "/bin/dagq".into(),
+                "--db".into(),
+                db.into(),
+                "supervise".into(),
+            ],
+            working_directory: "/repo".into(),
+            environment: SupervisorEnvironment {
+                path: "/usr/bin".into(),
+                config_home: None,
+            },
+            log: "/data/q/logs/launchd.log".into(),
+        };
+        for spec in [
+            spec("com.dagq.b", "/data/q & co/queue.db"),
+            spec("com.dagq.a", "/data/q/queue.db"),
+        ] {
+            fs::write(&spec.plist, spec.xml()).unwrap();
+        }
+        fs::write(
+            agents.join("com.dagq.nodb.plist"),
+            "<plist><dict><key>Label</key><string>com.dagq.nodb</string><key>ProgramArguments</key><array><string>/bin/dagq</string></array></dict></plist>",
+        )
+        .unwrap();
+        // A dagq file name whose Label names another service, or none, is
+        // not an agent `up` or `down` may boot out.
+        let mut disguised = spec("com.apple.other", "/data/q/queue.db");
+        disguised.plist = agents.join("com.dagq.disguised.plist");
+        fs::write(&disguised.plist, disguised.xml()).unwrap();
+        fs::write(
+            agents.join("com.dagq.unlabelled.plist"),
+            "<plist><dict><key>ProgramArguments</key><array><string>/bin/dagq</string><string>--db</string><string>/data/q/queue.db</string></array></dict></plist>",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("com.other.x.plist"),
+            spec("com.other.x", "/q").xml(),
+        )
+        .unwrap();
+        fs::write(agents.join("com.dagq.a.plist.bak"), "").unwrap();
+        assert_eq!(
+            defined_agents(&agents).unwrap(),
+            [
+                DefinedAgent {
+                    label: "com.dagq.a".into(),
+                    plist: agents.join("com.dagq.a.plist"),
+                    db: Some("/data/q/queue.db".into()),
+                },
+                DefinedAgent {
+                    label: "com.dagq.b".into(),
+                    plist: agents.join("com.dagq.b.plist"),
+                    db: Some("/data/q & co/queue.db".into()),
+                },
+                DefinedAgent {
+                    label: "com.dagq.nodb".into(),
+                    plist: agents.join("com.dagq.nodb.plist"),
+                    db: None,
+                },
+            ]
+        );
     }
 
     #[test]

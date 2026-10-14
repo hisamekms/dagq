@@ -61,6 +61,7 @@ mod lifecycle_handoff_stop;
 mod lifecycle_inbox;
 mod lifecycle_install;
 mod lifecycle_install_asks;
+mod lifecycle_install_drain;
 mod lifecycle_install_watch;
 mod lifecycle_plan;
 mod lifecycle_replace;

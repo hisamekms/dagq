@@ -3,7 +3,9 @@
 //! hash identifies the repository's Git common directory. Runs, worktrees and
 //! their logs live next to the database in `runs/`, the supervisor's logs in
 //! `logs/`, and the LaunchAgent that keeps the supervisor resident is named
-//! after the queue under `~/Library/LaunchAgents`.
+//! after the queue under `~/Library/LaunchAgents`: its label is
+//! `com.dagq.<queue hash>` ([`QueueLocation::hash`]), the same whether the
+//! queue was resolved from the repository or reached by `--db`.
 use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -32,7 +34,7 @@ pub const REVIEW_PROGRAMS_DIR_NAME: &str = "review-programs";
 /// Process logs (`<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`, see
 /// [`super::telemetry`]), `launchd.log` and `rebind.jsonl`.
 pub const LOGS_DIR_NAME: &str = "logs";
-/// LaunchAgent labels are `com.dagq.<queue hash>`.
+/// LaunchAgent labels are `com.dagq.<queue hash>` ([`QueueLocation::label`]).
 pub const LAUNCH_AGENT_PREFIX: &str = "com.dagq";
 /// Human-readable pointer back from a hashed queue directory to its repository.
 pub const REPOSITORY_FILE_NAME: &str = "repository";
@@ -53,7 +55,12 @@ pub struct QueueLocation {
     pub queue_dir: PathBuf,
     pub runs_dir: PathBuf,
     pub log_dir: PathBuf,
-    /// launchd label of the queue's supervisor agent.
+    /// launchd label of the queue's supervisor agent:
+    /// `com.dagq.<queue hash>`. A repository queue's is named after its
+    /// directory however it was reached, so `up`, `down` and `install` given
+    /// its database by `--db` load and unload the very agent `up` from the
+    /// repository did; any other `--db` queue's is named after the hash of
+    /// its canonical path.
     pub label: String,
     /// The agent's plist, whether or not `up` has written it yet.
     pub launch_agent: PathBuf,
@@ -76,7 +83,8 @@ impl QueueLocation {
         }
     }
 
-    /// An explicit queue file is identified by the hash of its own path.
+    /// An explicit queue file is identified by the hash of its own path,
+    /// unless it is a repository queue's database ([`Self::hash`]).
     pub fn explicit(db: &Path) -> Self {
         Self::explicit_in(db, &home_dir())
     }
@@ -86,7 +94,9 @@ impl QueueLocation {
         // `up` and `down` must agree on the label however the path was
         // spelled, so the hash is of the canonical path (of the directory
         // plus the file name when the file does not exist yet).
-        let label = format!("{LAUNCH_AGENT_PREFIX}.{}", repository_hash(&canonical(db)));
+        let hash = repository_queue_name(db, &queue_dir)
+            .unwrap_or_else(|| repository_hash(&canonical(db)));
+        let label = format!("{LAUNCH_AGENT_PREFIX}.{hash}");
         Self {
             runs_dir: queue_dir.join(RUNS_DIR_NAME),
             log_dir: queue_dir.join(LOGS_DIR_NAME),
@@ -121,19 +131,19 @@ impl QueueLocation {
         }
     }
 
-    /// The queue hash that names the queue's workspace group and appears in
-    /// its workspaces' descriptions (ADR-0026). A repository queue's
-    /// directory is named after it, and so it stays when the same queue is
-    /// reached by `--db` (as `up` starts `supervise`): a `queue.db` beside
-    /// the `repository` file `prepare` writes is such a queue. Any other
-    /// `--db` queue is identified by the hash its label carries.
+    /// The queue hash that names the queue's LaunchAgent ([`Self::label`])
+    /// and its workspace group, and appears in its workspaces' descriptions
+    /// (ADR-0026). A repository queue's directory is named after it, and so
+    /// it stays when the same queue is reached by `--db` (as `up` starts
+    /// `supervise`, and as `install` drains and starts it again): a
+    /// `queue.db` beside the `repository` file `prepare` writes is such a
+    /// queue. Any other `--db` queue is identified by the hash of its
+    /// canonical path, which its label carries.
     pub fn hash(&self) -> String {
         if self.source == QueueSource::DbFlag
-            && self.db.file_name() == Some(DB_FILE_NAME.as_ref())
-            && self.queue_dir.join(REPOSITORY_FILE_NAME).is_file()
-            && let Some(name) = canonical(&self.queue_dir).file_name()
+            && let Some(name) = repository_queue_name(&self.db, &self.queue_dir)
         {
-            return name.to_string_lossy().into_owned();
+            return name;
         }
         self.label
             .strip_prefix(LAUNCH_AGENT_PREFIX)
@@ -158,6 +168,20 @@ impl QueueLocation {
         }
         Ok(())
     }
+}
+
+/// The name of the repository queue's directory `queue_dir` when `db` is
+/// its database: a `queue.db` beside the `repository` file `prepare`
+/// writes. `None` for any other file.
+fn repository_queue_name(db: &Path, queue_dir: &Path) -> Option<String> {
+    if db.file_name() != Some(DB_FILE_NAME.as_ref())
+        || !queue_dir.join(REPOSITORY_FILE_NAME).is_file()
+    {
+        return None;
+    }
+    canonical(queue_dir)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// Runs of the queue at `db` live in `runs/` next to it.
@@ -413,6 +437,48 @@ mod tests {
         assert_eq!(
             other.hash(),
             repository_hash(&canonical(&repository.queue_dir.join("other.db")))
+        );
+    }
+
+    /// `up`, `down` and `install` given a repository queue's database by
+    /// `--db` name the agent `up` from the repository named; a `--db`
+    /// queue without the `repository` file keeps the hash of its path.
+    #[test]
+    fn a_repository_queue_reached_by_db_has_the_repository_s_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Path::new("/home/u");
+        let repository =
+            QueueLocation::for_repository_in(Path::new("/repo/.git"), dir.path(), home);
+        let hash = repository_hash(Path::new("/repo/.git"));
+        let path_hash = |db: &Path| format!("com.dagq.{}", repository_hash(&canonical(db)));
+        assert_eq!(
+            QueueLocation::explicit_in(&repository.db, home).label,
+            path_hash(&repository.db)
+        );
+        repository.prepare().unwrap();
+        let by_db = QueueLocation::explicit_in(&repository.db, home);
+        assert_eq!(by_db.label, format!("com.dagq.{hash}"));
+        assert_eq!(by_db.label, repository.label);
+        assert_eq!(by_db.launch_agent, repository.launch_agent);
+        assert_eq!(by_db.hash(), hash);
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&repository.queue_dir, &link).unwrap();
+        assert_eq!(
+            QueueLocation::explicit_in(&link.join(DB_FILE_NAME), home).label,
+            repository.label
+        );
+        // Another file in that directory, or a `queue.db` with no
+        // `repository` beside it, is a queue of its own.
+        let other = repository.queue_dir.join("other.db");
+        assert_eq!(
+            QueueLocation::explicit_in(&other, home).label,
+            path_hash(&other)
+        );
+        let bare = dir.path().join("bare").join(DB_FILE_NAME);
+        fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        assert_eq!(
+            QueueLocation::explicit_in(&bare, home).label,
+            path_hash(&bare)
         );
     }
 

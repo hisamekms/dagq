@@ -1150,3 +1150,282 @@ fn up_registers_the_supervisor_with_the_provider_links_not_their_versions() {
     assert!(!contents.contains("versions/"), "{contents}");
     assert!(!contents.contains("releases/"), "{contents}");
 }
+
+/// Register a live launchd supervisor of this build as `token` at `pid`.
+fn launchd_supervisor(queue: &mut SqliteQueue, token: &str, pid: u32) {
+    queue
+        .register_supervisor(&LeaseToken::new(token), pid, 2, VERSION)
+        .unwrap();
+    queue
+        .set_supervisor_mode(
+            &LeaseToken::new(token),
+            dagq::domain::SupervisorMode::Launchd,
+            None,
+        )
+        .unwrap();
+}
+
+/// Claim a run for the supervisor `token`, which then leases it.
+fn claim_a_run(fixture: &Fixture, queue: &mut SqliteQueue, token: &str) {
+    let task = queue
+        .add(NewTask {
+            title: "held".into(),
+            description: String::new(),
+            acceptance: String::new(),
+            verification_commands: vec![],
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            dependencies: vec![],
+            goal_dependencies: Vec::new(),
+            goal_id: None,
+            context: String::new(),
+            provider: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
+            wait_for_build: false,
+            execution_class: Default::default(),
+        })
+        .unwrap();
+    queue
+        .transition(task.id(), TaskAction::BypassReview)
+        .unwrap();
+    let repository = GitRepository::inspect(&fixture.repo).unwrap();
+    queue
+        .claim_for_supervisor(&repository.main_head().unwrap(), &LeaseToken::new(token))
+        .unwrap();
+}
+
+/// Once `label` has been unloaded, deregister `token` the way its
+/// supervisor does at the end of the drain the bootout started, a while
+/// later, and return how many agents had been installed just before.
+fn drain_on_unload(
+    fixture: &Fixture,
+    launchd: &FakeLaunchd,
+    processes: &FakeProcesses,
+    label: &str,
+    token: &str,
+    pid: u32,
+) -> usize {
+    wait_until(processes, pid, || {
+        launchd
+            .uninstalls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(unloaded, _)| unloaded == label)
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let installed = launchd.installs.lock().unwrap().len();
+    SqliteQueue::open(&fixture.location.db)
+        .unwrap()
+        .deregister_supervisor(&LeaseToken::new(token))
+        .unwrap();
+    installed
+}
+
+/// An agent of this queue under another label (its `--db` names the
+/// queue's database, however spelled) is unloaded and its plist removed
+/// before `up` starts one; its supervisor, draining from the bootout, is
+/// not reused nor signalled again, and `up` starts the queue's own agent
+/// only once it is gone. An agent of another queue is not touched. The
+/// choices are the unit tests `stray_agents_are_the_queue_s_agents_under_another_label`
+/// and `up_reuses_no_supervisor_a_stray_agent_kept`.
+#[test]
+fn up_unloads_the_queue_s_agent_of_another_label_and_waits_for_its_supervisor() {
+    let fixture = fixture();
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let stray_pid = 4_000_002;
+    launchd_supervisor(&mut queue, "stray", stray_pid);
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let dir = fixture.location.db.parent().unwrap();
+    let spelled = dir
+        .join("..")
+        .join(dir.file_name().unwrap())
+        .join("queue.db");
+    let stray = launchd.define_other(&fixture, "com.dagq.stray", &spelled, true, Some(stray_pid));
+    let elsewhere = launchd.define_other(
+        &fixture,
+        "com.dagq.elsewhere",
+        &dir.join("other.db"),
+        true,
+        Some(4_000_003),
+    );
+    let processes = FakeProcesses::default();
+
+    let (report, installed) = {
+        let _waiting = common::within(
+            common::STEP_LIMIT,
+            "up to return once the stray agent's supervisor deregistered, and its thread to join",
+        );
+        std::thread::scope(|scope| {
+            let drain = scope.spawn(|| {
+                drain_on_unload(
+                    &fixture,
+                    &launchd,
+                    &processes,
+                    "com.dagq.stray",
+                    "stray",
+                    stray_pid,
+                )
+            });
+            let report = up(&fixture, &launchd, &processes);
+            (report, drain.join().unwrap())
+        })
+    };
+    assert_eq!(installed, 0, "the own agent was loaded before the drain");
+    assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
+    assert_ne!(report["supervisor"]["token"], "stray");
+    assert_eq!(
+        report["stray_agents"],
+        json!([{"label": "com.dagq.stray", "plist": stray, "loaded": true, "pid": stray_pid}])
+    );
+    assert!(!stray.exists());
+    assert!(elsewhere.exists());
+    assert!(launchd.others.lock().unwrap()["com.dagq.elsewhere"].loaded);
+    assert!(
+        !launchd
+            .uninstalls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(label, _)| label == "com.dagq.elsewhere")
+    );
+    assert!(processes.terminated.lock().unwrap().is_empty());
+    assert_eq!(
+        launchd.installs.lock().unwrap()[0].0,
+        fixture.location.label
+    );
+}
+
+/// With `--no-wait`, a supervisor of a stray agent that leases a run
+/// refuses `up` before anything is unloaded, even one whose heartbeat is
+/// stale (alive but silent, not one `up` would reuse). With none leased,
+/// a stray loaded with its pid unknown makes every launchd supervisor
+/// whose process lives but the own agent's one to drain rather than
+/// reuse, and `up` waits for the silent one to go.
+#[test]
+fn up_no_wait_refuses_a_stray_agent_s_leased_run_and_drains_an_unknown_one() {
+    let mut fixture = fixture();
+    fixture.options.no_wait = true;
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let stray_pid = 4_000_002;
+    launchd_supervisor(&mut queue, "stray", stray_pid);
+    claim_a_run(&fixture, &mut queue, "stray");
+    // Silent: its process lives (the fake lists no process, so its pid is
+    // not taken for another's) but its heartbeat is long past.
+    Connection::open(&fixture.location.db)
+        .unwrap()
+        .execute(
+            "UPDATE supervisors SET heartbeat_at=1700000000 WHERE token='stray'",
+            [],
+        )
+        .unwrap();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let stray = launchd.define_other(
+        &fixture,
+        "com.dagq.stray",
+        &fixture.location.db,
+        true,
+        Some(stray_pid),
+    );
+    let processes = FakeProcesses::default();
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
+    assert!(error.contains("com.dagq.stray"), "{error}");
+    assert!(error.contains("1 run(s) are still in flight"), "{error}");
+    assert!(launchd.uninstalls.lock().unwrap().is_empty());
+    assert!(launchd.installs.lock().unwrap().is_empty());
+    assert!(stray.exists());
+
+    // Its run released, a stray whose pid is unknown: the own agent's
+    // supervisor is reused, every other launchd one is drained.
+    Connection::open(&fixture.location.db)
+        .unwrap()
+        .execute("UPDATE run_leases SET token='gone'", [])
+        .unwrap();
+    let own_pid = 4_000_001;
+    launchd_supervisor(&mut queue, "own", own_pid);
+    launchd.load(Some(own_pid));
+    launchd.define_other(&fixture, "com.dagq.stray", &fixture.location.db, true, None);
+    let report = {
+        let _waiting = common::within(
+            common::STEP_LIMIT,
+            "up --no-wait to return once the unknown stray's supervisor deregistered",
+        );
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                drain_on_unload(
+                    &fixture,
+                    &launchd,
+                    &processes,
+                    "com.dagq.stray",
+                    "stray",
+                    stray_pid,
+                )
+            });
+            up(&fixture, &launchd, &processes)
+        })
+    };
+    assert_eq!(report["supervisor"]["outcome"], "reused", "{report}");
+    assert_eq!(report["supervisor"]["token"], "own");
+    assert_eq!(
+        report["stray_agents"],
+        json!([{"label": "com.dagq.stray", "plist": stray, "loaded": true, "pid": null}])
+    );
+    let remaining: Vec<String> = queue
+        .supervisors()
+        .unwrap()
+        .into_iter()
+        .map(|registration| registration.token.to_string())
+        .collect();
+    assert_eq!(remaining, ["own"]);
+    assert!(processes.terminated.lock().unwrap().is_empty());
+}
+
+/// With `--no-wait`, a supervisor left after the stray agent's that `up`
+/// would replace (another build, no handoff) and that leases a run
+/// refuses `up` before the stray agent or the own one is unloaded, even
+/// though the stray agent's supervisor leases none: the replacement's
+/// refusal comes before any signal and uninstall.
+#[test]
+fn up_no_wait_refuses_the_replacement_before_unloading_a_stray_agent() {
+    let mut fixture = fixture();
+    fixture.options.no_wait = true;
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let (own_pid, stray_pid) = (4_000_001, 4_000_002);
+    launchd_supervisor(&mut queue, "stray", stray_pid);
+    queue
+        .register_supervisor(&LeaseToken::new("old"), own_pid, 2, "0.0.1")
+        .unwrap();
+    queue
+        .set_supervisor_mode(
+            &LeaseToken::new("old"),
+            dagq::domain::SupervisorMode::Launchd,
+            None,
+        )
+        .unwrap();
+    claim_a_run(&fixture, &mut queue, "old");
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    launchd.load(Some(own_pid));
+    let stray = launchd.define_other(
+        &fixture,
+        "com.dagq.stray",
+        &fixture.location.db,
+        true,
+        Some(stray_pid),
+    );
+    let processes = FakeProcesses::default();
+    let error = format!("{:#}", try_up(&fixture, &launchd, &processes).unwrap_err());
+    assert!(
+        error.contains("0.0.1") && error.contains(VERSION),
+        "{error}"
+    );
+    assert!(error.contains("1 run(s) are still in flight"), "{error}");
+    assert!(launchd.uninstalls.lock().unwrap().is_empty());
+    assert!(launchd.installs.lock().unwrap().is_empty());
+    assert!(stray.exists());
+    assert!(launchd.others.lock().unwrap()["com.dagq.stray"].loaded);
+    assert!(*launchd.loaded.lock().unwrap());
+    assert!(processes.terminated.lock().unwrap().is_empty());
+    assert_eq!(queue.supervisors().unwrap().len(), 2);
+}

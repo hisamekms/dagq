@@ -211,6 +211,16 @@ pub struct AgentState {
     pub pid: Option<u32>,
 }
 
+/// A dagq agent's definition found among the user's agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinedAgent {
+    pub label: String,
+    pub plist: std::path::PathBuf,
+    /// The queue its supervisor serves: the `--db` of its program's
+    /// arguments, as written; `None` when it has none.
+    pub db: Option<std::path::PathBuf>,
+}
+
 /// The service manager that keeps the supervisor resident (launchd on
 /// macOS). `up` writes the agent's definition and loads it; `down` unloads
 /// it, which is what makes the supervisor stop without being restarted.
@@ -222,6 +232,11 @@ pub trait LaunchAgent {
     /// Unload the agent without waiting for its process (which drains) and
     /// remove its definition so it does not come back at the next login.
     fn uninstall(&self, label: &str, path: &std::path::Path) -> Result<AgentState>;
+    /// What the service manager has under `label` now, changing nothing.
+    fn state(&self, label: &str) -> Result<AgentState>;
+    /// The dagq agents (`com.dagq.*.plist`) defined in `dir`, the
+    /// directory of the queue's own agent; none when it does not exist.
+    fn defined(&self, dir: &std::path::Path) -> Result<Vec<DefinedAgent>>;
 }
 
 /// The sccache server of a `[run.env]` whose `RUSTC_WRAPPER` is sccache

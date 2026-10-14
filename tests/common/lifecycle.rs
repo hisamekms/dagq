@@ -8,7 +8,7 @@ use dagq::infrastructure::git_binary::git_executable;
 use anyhow::{Result, bail};
 use dagq::{
     VERSION,
-    application::{AgentState, LaunchAgent, ProcessControl},
+    application::{AgentState, DefinedAgent, LaunchAgent, ProcessControl},
     domain::{SupervisorMode, recovery::ProcessInfo},
     infrastructure::{location::QueueLocation, sqlite::SqliteQueue},
     lifecycle::{self, DownOptions, UpEnvironment, UpOptions},
@@ -140,6 +140,10 @@ pub struct FakeLaunchd {
     pub agent_pid: Mutex<Option<u32>>,
     pub installs: Mutex<Vec<(String, PathBuf, String)>>,
     pub uninstalls: Mutex<Vec<(String, PathBuf)>>,
+    /// Agents under other labels than the queue's own, as
+    /// [`FakeLaunchd::define_other`] put them: what `launchctl print`
+    /// shows of each until its uninstall.
+    pub others: Mutex<HashMap<String, AgentState>>,
 }
 
 impl FakeLaunchd {
@@ -152,11 +156,54 @@ impl FakeLaunchd {
             agent_pid: Mutex::new(None),
             installs: Mutex::new(Vec::new()),
             uninstalls: Mutex::new(Vec::new()),
+            others: Mutex::new(HashMap::new()),
         }
     }
     pub fn load(&self, pid: Option<u32>) {
         *self.loaded.lock().unwrap() = true;
         *self.agent_pid.lock().unwrap() = pid;
+    }
+    /// Write the definition of an agent `label` beside `fixture`'s own
+    /// whose supervisor serves `db`, loaded (with its `pid` when known)
+    /// when `loaded`; its uninstall removes the definition.
+    pub fn define_other(
+        &self,
+        fixture: &Fixture,
+        label: &str,
+        db: &Path,
+        loaded: bool,
+        pid: Option<u32>,
+    ) -> PathBuf {
+        let plist = fixture
+            .location
+            .launch_agent
+            .with_file_name(format!("{label}.plist"));
+        let spec = dagq::infrastructure::launchd::LaunchAgentSpec {
+            label: label.into(),
+            plist: plist.clone(),
+            program_arguments: vec![
+                "/opt/bin/dagq".into(),
+                "--db".into(),
+                db.to_str().unwrap().into(),
+                "supervise".into(),
+            ],
+            working_directory: fixture.repo.to_str().unwrap().into(),
+            environment: dagq::application::SupervisorEnvironment {
+                path: "/usr/bin".into(),
+                config_home: None,
+            },
+            log: "/dev/null".into(),
+        };
+        fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        fs::write(&plist, spec.xml()).unwrap();
+        self.others.lock().unwrap().insert(
+            label.into(),
+            AgentState {
+                loaded,
+                pid: pid.filter(|_| loaded),
+            },
+        );
+        plist
     }
 }
 
@@ -188,12 +235,34 @@ impl LaunchAgent for FakeLaunchd {
             .lock()
             .unwrap()
             .push((label.into(), path.into()));
+        if let Some(other) = self.others.lock().unwrap().get_mut(label) {
+            let _ = fs::remove_file(path);
+            let state = *other;
+            *other = AgentState {
+                loaded: false,
+                pid: None,
+            };
+            return Ok(state);
+        }
         let loaded = std::mem::replace(&mut *self.loaded.lock().unwrap(), false);
         let pid = self.agent_pid.lock().unwrap().take();
         Ok(AgentState {
             loaded,
             pid: if loaded { pid } else { None },
         })
+    }
+    fn state(&self, label: &str) -> Result<AgentState> {
+        if let Some(other) = self.others.lock().unwrap().get(label) {
+            return Ok(*other);
+        }
+        let loaded = *self.loaded.lock().unwrap();
+        Ok(AgentState {
+            loaded,
+            pid: (*self.agent_pid.lock().unwrap()).filter(|_| loaded),
+        })
+    }
+    fn defined(&self, dir: &Path) -> Result<Vec<DefinedAgent>> {
+        dagq::infrastructure::launchd::defined_agents(dir)
     }
 }
 

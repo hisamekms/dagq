@@ -17,6 +17,7 @@
 pub mod actor;
 pub mod attributes;
 pub mod cli;
+pub mod install;
 pub mod lifecycle;
 pub mod queue;
 pub mod service;
